@@ -10,8 +10,9 @@
  *   tool-call id the `execute` call's id).
  * - `plugins` — the `claudeui-xeng` DIRECTORY plugin (caller identity + the
  *   readiness RPC; `resources/opencode/claudeui-xeng/`).
- * - `agents.<name>.permissions` — a typed seam for S6 (ADR-093 §3); nothing
- *   fills it yet, and an empty overlay emits no `agents` key at all.
+ * - `agents.<name>.permissions` — the mode-less agent overlay (ADR-093 §3,
+ *   `permission-v2.ts` `agentPermissionOverlay`); an empty overlay emits no
+ *   `agents` key at all.
  *
  * Not emitted any more: `experimental.continue_loop_on_deny` (2.x continues a
  * turn after a reject-with-message natively, ADR-093 §3) and `autoupdate`
@@ -29,9 +30,9 @@ import type { OpencodeMcpEntry, OpencodeMcpRemoteEntry } from './claude-mcp-brid
 export { HOSTED_MCP_SERVER }
 
 /**
- * S6 seam: per-agent permission rules, injected as
- * `agents.<name>.permissions`. Rule compilation (ADR-022/085 on the v2 rule
- * shape) is S6's; until then the manager's provider returns `{}`.
+ * Per-agent permission rules, injected as `agents.<name>.permissions`
+ * (ADR-093 §3). The manager's default provider is `permission-v2.ts`
+ * `agentPermissionOverlay`.
  */
 export type AgentPermissionOverlay = Readonly<Record<string, Permission_Ruleset>>
 

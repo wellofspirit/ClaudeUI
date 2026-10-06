@@ -162,3 +162,73 @@ export function evaluateOpencodeAsk(
   }
   return verdict
 }
+
+// ── opencode 2.x (`{action, resource, effect}`, ADR-093 §3) ──────────────────
+
+/** A 2.x rule (structurally `Permission_Rule`). */
+interface V2RuleShape {
+  readonly action: string
+  readonly resource: string
+  readonly effect: OpencodeAction
+}
+
+/**
+ * 2.x `Permission.evaluate`'s match (`core/src/permission.ts`): the LAST rule
+ * whose `action` and `resource` globs both match, or `undefined`.
+ */
+export function lastMatchingV2Rule<R extends V2RuleShape>(
+  action: string,
+  resource: string,
+  rules: readonly R[],
+  platform: NodeJS.Platform = process.platform
+): R | undefined {
+  for (let i = rules.length - 1; i >= 0; i--) {
+    const rule = rules[i]
+    if (
+      wildcardMatch(action, rule.action, platform) &&
+      wildcardMatch(resource, rule.resource, platform)
+    ) {
+      return rule
+    }
+  }
+  return undefined
+}
+
+/**
+ * 2.x's verdict for one call over a ruleset (`permission.ts`
+ * `evaluateInput`, without the saved-allow table): every resource is
+ * evaluated (none → `['*']`); any `deny` → `deny`; any `ask` or unmatched
+ * resource (2.x's default) → `ask`; else `allow`.
+ */
+export function evaluateV2Call(
+  rules: readonly V2RuleShape[],
+  action: string,
+  resources: readonly string[] | undefined,
+  platform: NodeJS.Platform = process.platform
+): OpencodeAction {
+  const list = resources && resources.length > 0 ? resources : ['*']
+  const effects = list.map(
+    (resource) => lastMatchingV2Rule(action, resource, rules, platform)?.effect ?? 'ask'
+  )
+  if (effects.includes('deny')) return 'deny'
+  return effects.includes('ask') ? 'ask' : 'allow'
+}
+
+/**
+ * 2.x `whollyDisabled` (`core/src/tool.ts`): is a tool whose permission id is
+ * `action` hidden from the model? The last rule whose action glob matches
+ * decides: hidden iff it is `resource:"*"` + `deny`. (`edit`, `write` and
+ * `patch` all use the id `edit`; MCP tools `<server>_<tool>`.)
+ */
+export function v2ToolHidden(
+  rules: readonly V2RuleShape[],
+  action: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  for (let i = rules.length - 1; i >= 0; i--) {
+    const rule = rules[i]
+    if (wildcardMatch(action, rule.action, platform))
+      return rule.resource === '*' && rule.effect === 'deny'
+  }
+  return false
+}

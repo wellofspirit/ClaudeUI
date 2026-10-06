@@ -330,6 +330,16 @@ describe('suggestOpencodeAllowRule (reverse: opencode approval → Claude sugges
   it('unmapped category → null (no suggestion)', () => {
     expect(suggestOpencodeAllowRule('doom_loop', ['*'])).toBeNull()
   })
+  it('2.x action ids (`shell`, `subagent`) map back like `bash`/`task` (ADR-093 §3)', () => {
+    expect(suggestOpencodeAllowRule('shell', ['echo hi'])?.rules).toEqual([
+      { toolName: 'Bash', ruleContent: 'echo hi' }
+    ])
+    expect(suggestOpencodeAllowRule('subagent', ['explore'])?.rules).toEqual([
+      { toolName: 'Task', ruleContent: 'explore' }
+    ])
+    // …and the suggestion round-trips through the 2.x compiler's `shell` prefix form.
+    expect(translateSpecifierPatterns('shell', 'git diff:*')).toEqual(['git diff*'])
+  })
 })
 
 describe('suggestionRuleToClaudeString + suggestionDestinationToScope', () => {

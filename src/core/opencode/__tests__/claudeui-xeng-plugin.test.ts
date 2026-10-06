@@ -46,6 +46,9 @@ async function load(tools: string[] = []): Promise<{
       },
       list: async () => tools.map((id) => ({ id }))
     },
+    // Exercised in claudeui-xeng-permission.test.ts.
+    permission: { hook: async () => ({ dispose: async () => {} }) },
+    mcp: { transform: async () => ({ dispose: async () => {} }) },
     rpc: {
       register: async (
         definition: RpcDefinition,
@@ -132,7 +135,7 @@ describe('claudeui-xeng plugin (opencode 2.x directory plugin)', () => {
       'claudeui_create_mockup'
     ])
     expect(rpc.definition.id).toBe('claudeui-xeng')
-    expect(Object.keys(rpc.definition.methods)).toEqual(['tools'])
+    expect(Object.keys(rpc.definition.methods)).toEqual(['tools', 'guard'])
     expect(rpc.definition.events).toEqual({})
     await expect(rpc.handlers.tools({})).resolves.toEqual({
       tools: ['claudeui_create_mockup', 'claudeui_dispatch_agent', 'claudeui_show_mockup']

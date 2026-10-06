@@ -2,14 +2,20 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { EventEmitter } from 'node:events'
 import type { ChildProcess } from 'node:child_process'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { OpencodeServerManager, locatePluginDir } from '../OpencodeServerManager'
+import {
+  OpencodeServerManager,
+  OpencodePermissionGuardError,
+  locatePluginDir
+} from '../OpencodeServerManager'
 import type {
   HostedToolsReadiness,
   ServerConnection,
   SpawnResult,
   SpawnServerFn,
+  WaitGuardFn,
   WaitReadyFn
 } from '../OpencodeServerManager'
+import { waitForPermissionGuard } from '../opencode-server-readiness'
 import type { McpHttpHost } from '../mcp-http-host'
 import type { OpencodeConfigInput } from '../opencode-server-config'
 import { logger } from '../../services/logger'
@@ -99,6 +105,7 @@ function makeRig(
     delayMs?: number
     spawnFn?: SpawnServerFn
     waitReadyFn?: WaitReadyFn
+    waitGuardFn?: WaitGuardFn
     locateBinaryFn?: () => string
   } = {}
 ): Rig {
@@ -117,6 +124,7 @@ function makeRig(
         waits.push({ baseUrl: endpoint.baseUrl, directory, pluginExpected })
         return READY
       }),
+    waitGuardFn: opts.waitGuardFn ?? (async () => ({ state: 'active', elapsedMs: 0 })),
     endServerFn: (child) => child.kill(),
     serverCwd: '/server-home'
   })
@@ -800,3 +808,55 @@ describe('locatePluginDir', () => {
 
 // Typed seam check: a ServerConnection carries what S3's client needs.
 export type _S3Seam = Pick<ServerConnection, 'baseUrl' | 'authHeader' | 'directory' | 'startedAt'>
+
+describe('ADR-093 §3 (S6) — fail closed without the plugin permission guard', () => {
+  /** The real guard probe against a server whose RPC answers `status` (never `active`). */
+  const silentGuard =
+    (status = 404): WaitGuardFn =>
+    (_endpoint, _directory, pluginExpected) =>
+      waitForPermissionGuard(
+        { pluginExpected, timeoutMs: 30, pollMs: 5 },
+        { request: async () => ({ status, body: null }) }
+      )
+
+  it('no plugin in the build: a turn acquire throws, the server is ended, a turn-less acquire still works', async () => {
+    const { manager, configs, calls } = makeRig({ waitGuardFn: silentGuard() })
+    configs.set('/p', { pluginDir: null })
+    const err = await manager.acquire('/p').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(OpencodePermissionGuardError)
+    expect((err as Error).message).toMatch(/not found in this ClaudeUI build/)
+    expect(calls[0].child.killed).toBe(true)
+    // Session lists, auth and usage reads run no turn: they may still use a server.
+    const listing = await manager.acquire('/p', { waitForHostedTools: false })
+    expect(listing.hostedTools).toEqual({ state: 'skipped' })
+    manager.dispose()
+  })
+
+  it('plugin injected but its guard RPC never answers: throws even though tool readiness fell back to mcp-status', async () => {
+    const { manager } = makeRig({
+      waitReadyFn: async () => ({ state: 'ready', signal: 'mcp-status', elapsedMs: 1 }),
+      waitGuardFn: silentGuard(404)
+    })
+    await expect(manager.acquire('/p')).rejects.toThrow(/did not confirm its permission hook/)
+    manager.dispose()
+  })
+
+  it('a failed probe is not memoized: the next acquire probes again and can succeed', async () => {
+    let answer: 'missing' | 'active' = 'missing'
+    const probes: string[] = []
+    const { manager } = makeRig({
+      waitGuardFn: async (_e, directory) => {
+        probes.push(directory)
+        return answer === 'active'
+          ? { state: 'active', elapsedMs: 0 }
+          : { state: 'missing', reason: 'x', elapsedMs: 0 }
+      }
+    })
+    await expect(manager.acquire('/p')).rejects.toBeInstanceOf(OpencodePermissionGuardError)
+    answer = 'active'
+    await expect(manager.acquire('/p')).resolves.toMatchObject({ directory: '/p' })
+    await manager.acquire('/p')
+    expect(probes).toEqual(['/p', '/p']) // the active result is memoized
+    manager.dispose()
+  })
+})

@@ -8,6 +8,7 @@ import {
   modelListIsAuthoritative,
   READINESS_SENTINEL_TOOL,
   waitForHostedTools,
+  waitForPermissionGuard,
   type ReadinessDeps,
   type ReadinessResponse
 } from '../opencode-server-readiness'
@@ -148,5 +149,53 @@ describe('modelListIsAuthoritative (S7 seam)', () => {
     expect(
       modelListIsAuthoritative({ count: 0, startedAt: 1000, now: 1000 + MODEL_CATALOG_WARMUP_MS })
     ).toBe(true)
+  })
+})
+
+describe('waitForPermissionGuard (ADR-093 §3, S6: no heuristic fallback)', () => {
+  const guardDeps = (answers: ({ status: number; body: unknown } | Error)[]) => {
+    let i = 0
+    let t = 0
+    const paths: string[] = []
+    return {
+      paths,
+      deps: {
+        request: async (_m: 'GET' | 'POST', path: string) => {
+          paths.push(path)
+          const answer = answers[Math.min(i++, answers.length - 1)]
+          if (answer instanceof Error) throw answer
+          return answer
+        },
+        now: () => t,
+        sleep: async (ms: number) => {
+          t += ms
+        }
+      }
+    }
+  }
+
+  it('active once the plugin confirms both hooks', async () => {
+    const { deps, paths } = guardDeps([
+      new Error('ECONNREFUSED'),
+      { status: 200, body: { output: { permissionHook: true, mcpDirect: false } } },
+      { status: 200, body: { output: { permissionHook: true, mcpDirect: true } } }
+    ])
+    const guard = await waitForPermissionGuard({ pluginExpected: true }, deps)
+    expect(guard.state).toBe('active')
+    expect(paths.every((p) => p === '/api/rpc/claudeui-xeng/guard')).toBe(true)
+  })
+
+  it('missing at once when no plugin was injected (never asks the MCP status)', async () => {
+    const { deps, paths } = guardDeps([{ status: 200, body: {} }])
+    const guard = await waitForPermissionGuard({ pluginExpected: false }, deps)
+    expect(guard).toMatchObject({ state: 'missing' })
+    expect(paths).toEqual([])
+  })
+
+  it('missing after the bounded wait when the RPC never answers (a plugin that failed to load)', async () => {
+    const { deps } = guardDeps([{ status: 404, body: { error: 'no such rpc' } }])
+    const guard = await waitForPermissionGuard({ pluginExpected: true, timeoutMs: 500 }, deps)
+    expect(guard).toMatchObject({ state: 'missing' })
+    if (guard.state === 'missing') expect(guard.reason).toMatch(/404/)
   })
 })

@@ -133,6 +133,91 @@ Proposed: **GO**, on the conditions in §8.
 - A `resource:"*"` + `deny` rule hides the tool from the model. The `opencodeWireRuleset`
   "whole-category deny goes last" transform must be re-verified against that rule.
 
+**As built (S6, 2026-10-06).** `permission-keys.ts` is the key table (Claude tool → 2.x action →
+how 2.x spells the resource); `permission-v2.ts` compiles and composes; `subagent-permissions.ts`
+gains the child ruleset. Facts at 2.0.24 that drove it: `PATCH {permissions}` REPLACES (1.x
+appended); a child copies the parent's WHOLE session ruleset, after its own agent's rules; a deny
+answers with `permission.rejected` "Permission denied: <action>" and no rule dump; the deny check
+runs before the project's SAVED "always" allows are appended, so a saved allow outranks any
+session `ask` but never a `deny`; Code Mode's `execute` runtime has an ungated `fetch`.
+
+- The session ruleset only tightens: mode gates (catch-all asks) → the user's compiled rules (auto:
+  no allows except the `additionalDirectories` `external_directory` allows, which are the user's
+  configured workspace; plan: no edit/shell/subagent allows) → plan enforcement → `{execute,*,deny}` →
+  `claudeui_dispatch_agent` ask, whole-category denies moved last. No `{*: allow}` baseline (each
+  agent has one natively), so a subagent's own narrowing holds for every action the session does not
+  name. Consequences: `external_directory` keeps 2.x's default `ask` (opencode's own data/tmp/config
+  dirs allowed; `additionalDirectories` compile to `<dir>/*` allows), and the user's own opencode
+  config applies to the categories ClaudeUI does not gate.
+- Wholly-denied decisions: a user deny on a whole tool → hidden (Claude Code parity); a narrow user
+  deny → a server-side deny per call, tool visible (no longer an ask: no dump to avoid, and only a
+  deny resists the saved table); mode gates never hide; plan mode hides `edit`/`write`/`patch` and
+  denies the `general` subagent server-side (shell stays an ask for the host's read-only check);
+  `execute` hidden in every mode; throwaway sessions `{*,*,deny}`.
+- Paths (`permission-paths.ts`; review fix 2026-10-06): 2.x asks with the path relative to the
+  session dir for any file in the session dir OR its git worktree (`../secrets/k` from a sub-dir
+  session), absolute otherwise. Deny and ask rules therefore compile CONSERVATIVELY to every form
+  the resolver can produce: the absolute form; `../`-relative forms against the session dir and each
+  ancestor whose subtree the rule's literal prefix lies in (the worktree root is one of them; a form
+  above the worktree only matches the same file); the glob part alone when the session dir lies
+  inside the rule's glob (`//**/prod.yaml`); every `**/` also as zero directories (`**/x` → `x`);
+  and a settings-relative `/x` resolved against the session dir and the worktree root (the merged
+  rule set no longer knows its settings file; pi's loader also leaves `/x` unresolved, so there was
+  nothing shared to reuse). Allows stay precise (absolute, plus relative only literally under the
+  session dir; `/x` verbatim): an allow that misses costs an ask, never a grant. `~/`, `//abs`,
+  `C:\x` and `./x` are normalized as before. Contract: a session in `<repo>/pkg` with
+  `deny Edit(//<repo>/secrets/**)` cannot edit `../secrets/x`.
+- Children: `childSessionRuleset(parentRules, agent.permissions)` = the parent's rules, then the
+  child agent's own deny rules that still hold at the end of its ruleset (narrow ones included —
+  `shell "git push*": deny` survives the parent's `shell` ask and a user allow; a deny the agent's
+  own later allows carve is left out), then a whole-category deny for each action the parent opens
+  and the agent wholly denies. The host PATCHes it on `session.created{parentID}`, on every parent
+  re-apply (the child's copy is a snapshot) and on `session.agent.selected` (a resumed child can
+  switch agent); `evaluateChildCall(agentRules, action, resource)` is the host's backstop for an
+  ask that comes before the PATCH or that the agent carves itself. Live: the first request is built before the PATCH lands, the call after it (blocked).
+  Static spawn asks and the `subagent:<name>` backstop are not needed in 2.x.
+- Overlay (`agents.<name>.permissions`, the manager's default provider): `plan` denies `general`,
+  which keeps it out of plan mode's subagent list.
+- **Saved "always" allows are ignored (owner decision 2026-10-06).** The `claudeui-xeng` plugin's
+  `permission.evaluate` hook (it runs after opencode's deny check, with the effect opencode computed
+  from configured rules plus saved rows; its `effect` wins) re-reads the session (`ctx.session.get`)
+  and its agent (`ctx.agent.get`; else the session's, else the default agent) by the hook's session
+  id, evaluates `agent ++ session` rules with opencode's matcher, and keeps the STRICTER effect. It
+  only tightens (allow → ask/deny; never back), leaves a deny untouched, and answers `ask` when it
+  cannot read the rules. Saved rows therefore cannot answer a default-mode gate, the auto-mode judge's
+  asks or plan-mode shell. Only the opencode process ClaudeUI spawns loads the plugin: the user's
+  own opencode keeps honouring its saved rows, and ClaudeUI never deletes them.
+- **The user's own MCP servers are direct (owner decision 2026-10-06).** A config overlay cannot set
+  `codemode:false` on them: a later config document REPLACES the whole `mcp.servers.<name>` entry
+  (`config/plugin/mcp.ts`), so the overlay would have to copy the entry, secrets included. The plugin
+  instead registers an `mcp.transform` (the mechanism of opencode's own `mcp-codemode-defaults`)
+  that sets `codemode:false` on every resolved server, in place, reading no names, headers or env.
+  Their tools are offered as `<server>_<tool>` and go through ClaudeUI's approvals and `mcp__` rules;
+  `execute` stays hidden. The transform runs after opencode's config transform (registration order),
+  verified live with a server defined only in the user's global config.
+- **The plugin is required (fail closed; review fix).** The plugin answers a `guard` RPC
+  (`POST /api/rpc/claudeui-xeng/guard` → `{permissionHook, mcpDirect}`, set once both hooks are
+  registered). Every turn-running `acquire` probes it per (server, directory) alongside tool
+  readiness and throws `OpencodePermissionGuardError` (lease released, a server with no other lease
+  ended) when the plugin is missing from the build or does not confirm both hooks within 10 s — a
+  clear error, never a silent downgrade. Only an `active` answer is cached. The `mcp-status` fallback
+  still gates TOOL readiness but never stands in for the guard. Turn-less acquires (session lists,
+  auth, usage reads) skip it; detached throwaway servers run `{*,*,deny}`, which saved rows cannot
+  answer.
+- **MCP allows never land on a built-in (review fix).** A tool-level MCP allow whose action is a 2.x
+  built-in (`mcp__external__directory` → `external_directory`) is refused like a server-level one;
+  its deny/ask is kept (they only tighten). Sanitizer collisions between servers (`a.b` / `a_b`)
+  share an action, as in 2.x itself.
+- **Auto mode gates every MCP tool (review fix).** 2.x names an MCP tool's action
+  `<server>_<tool>` (`tool/mcp.ts`), so auto mode carries a catch-all `{*_*, *, ask}`: a server
+  unknown when the rules were sent (a late connect, or the user's own config made direct by the
+  plugin) is judged too. After it: `claudeui_*` allowed (hosted tools; the dispatch ask comes later),
+  `external_directory` ask, and the agent's allows for opencode's own data/tmp/config directories,
+  which the host passes in (`opencodeOwnDirAllows(Agent_Info.permissions)`) — without them those
+  reads ask the judge. The `opencode_*` built-ins with `_` are Code Mode tools, unreachable while
+  `execute` is hidden. Residual: under `explore` the catch-all overlaps its own `external_directory`
+  ask, so an MCP call there asks (judged) instead of being hidden.
+
 ### 4. Caller identity (amends ADR-033)
 
 - Primary signal: the dispatcher reads the caller session from the MCP request
@@ -273,6 +358,42 @@ idempotent within a session. The event feed has no replay: it yields `connected`
 `reconnected:true` before any event of a new subscription, and the consumer re-reads messages,
 permissions, forms, inbox and active sessions. The server's 15 s heartbeat keeps the 45 s stall
 watchdog quiet on idle sessions. The 1.x client survives as `OpencodeV1Client` until S10.
+
+**As built (S4, 2026-10-06).** Each chat gets one `OpencodeEventMapper` (`v2-event-mapper.ts`),
+which maps the feed to the engine-neutral stream. Cold history (`v2-history.ts`) shares its content
+helpers, and recorded 2.0.24 sequences plus contract cases hold it equal to what streamed live.
+
+- **Content.** One assistant message per step. Blocks come in started order, and an empty text or
+  thinking block is never placed. Text and thinking stream as item open/delta/seal.
+- **Tool results.** Each call gets one result, with diffs and images.
+- **Children.** A child links by `tool.progress.metadata.sessionID`; events it sends before that
+  are held and replayed. Each step is attributed to the call that started it, so a child resumed
+  by a later call keeps its earlier runs under the earlier call. Cold history splits the child's
+  rows by call start the same way.
+- **Notifications.** Each subagent call gets exactly one terminal notification, in either order of
+  child end and background return.
+- **Turn ends (ADR-090).**
+  - A user stop is `stopped/user`.
+  - A messageless reject is `stopped/denied` and a messageless form cancel is
+    `stopped/form-cancelled`. In both, the declined call fails `aborted` and then
+    `interrupted{shutdown}` follows. A reject or cancel that carries a message does not change how
+    the turn ends.
+  - Every card of an ended execution is retracted, because an interrupt drops pending asks without
+    publishing `permission.replied`.
+  - Because `shutdown` keeps the execution claim, opencode resumes such a turn on its next start.
+    Every reject and form cancel therefore carries a message.
+- **Usage.** The rule matches Claude's status line, which folds in subagent usage. It counts the
+  session's and its children's steps, each compaction's request, and the session's remainder
+  against its cumulative (title generation). The live path reports the remainder as
+  `overhead-usage`; the cold path computes it from `GET /api/session/:id`.
+- **Shell output.** 2.x pushes no shell output. `tool.progress` carries only the `shellID`.
+  `ShellOutputPoller` pages `/api/shell/{id}/output` from the tail, sleeping between reads. It
+  re-reads the bytes of a character cut at a page end, because the server decodes each page on
+  its own. It stops when the shell exits.
+- **Reconnect.** `reconcileAfterReconnect` reads `active` first, then messages, permissions, forms
+  and the inbox for every followed session. It applies them idempotently by message, call,
+  request, inbox and idle-row id.
+- **Todo panel.** It has no 2.x source and stays hidden.
 
 ### 8. Conditions on the GO
 

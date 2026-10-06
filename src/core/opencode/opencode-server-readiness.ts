@@ -21,6 +21,8 @@
  *    never answers), `claudeui` connected + a settle margin over the 100 ms
  *    debounce. A heuristic, logged as such.
  * A `claudeui` status of failed / needs_auth / disabled ends the wait at once.
+ * The status fallback only ever stands in for TOOL readiness, never for the
+ * plugin's permission hook ({@link waitForPermissionGuard}).
  * The wait is bounded and never throws: on a timeout the caller logs it and
  * proceeds (the turn just may lack the hosted tools, as before S2).
  *
@@ -150,6 +152,61 @@ export async function waitForHostedTools(
       `, ${HOSTED_MCP_SERVER} ${status?.status ?? 'absent'}`
     if (elapsedMs >= timeoutMs) return { state: 'timeout', last, elapsedMs }
     await sleep(pollMs)
+  }
+}
+
+// ── The permission guard (ADR-093 §3, S6) ───────────────────────────────────
+
+export const GUARD_TIMEOUT_MS = 10_000
+
+export type PermissionGuard =
+  /** The plugin answered: its `permission.evaluate` and MCP hooks are registered. */
+  | { state: 'active'; elapsedMs: number }
+  /** No plugin, or it never confirmed both hooks: ClaudeUI must not run sessions here. */
+  | { state: 'missing'; reason: string; elapsedMs: number }
+
+/**
+ * "Is ClaudeUI's permission hook active for this directory?" — the plugin's
+ * `guard` RPC (`POST /api/rpc/claudeui-xeng/guard`) must answer
+ * `{permissionHook: true, mcpDirect: true}`. Unlike {@link waitForHostedTools}
+ * there is no heuristic fallback: the MCP status says nothing about hooks, and
+ * without the hook the user's saved "always" rows answer ClaudeUI's asks. A
+ * missing plugin answers `missing` at once; a silent or partial one after the
+ * bounded wait. Never throws.
+ */
+export async function waitForPermissionGuard(
+  options: { pluginExpected: boolean; timeoutMs?: number; pollMs?: number },
+  deps: ReadinessDeps
+): Promise<PermissionGuard> {
+  const now = deps.now ?? Date.now
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
+  const start = now()
+  if (!options.pluginExpected)
+    return {
+      state: 'missing',
+      reason: 'the claudeui-xeng plugin was not found in this ClaudeUI build',
+      elapsedMs: 0
+    }
+  const timeoutMs = options.timeoutMs ?? GUARD_TIMEOUT_MS
+  let last = 'no answer'
+  for (;;) {
+    const response = await settle(
+      deps.request('POST', `/api/rpc/${PLUGIN_RPC_ID}/guard`, { input: {} })
+    )
+    const elapsedMs = now() - start
+    const output = (response?.body as { output?: Record<string, unknown> } | null)?.output
+    if (response?.status === 200 && output?.permissionHook === true && output?.mcpDirect === true)
+      return { state: 'active', elapsedMs }
+    last = response
+      ? `guard RPC ${response.status} ${JSON.stringify(output ?? response.body).slice(0, 200)}`
+      : 'guard RPC unreachable'
+    if (elapsedMs >= timeoutMs)
+      return {
+        state: 'missing',
+        reason: `the claudeui-xeng plugin did not confirm its permission hook (${last})`,
+        elapsedMs
+      }
+    await sleep(options.pollMs ?? READINESS_POLL_MS * 2)
   }
 }
 

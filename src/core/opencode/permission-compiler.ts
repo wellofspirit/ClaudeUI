@@ -136,7 +136,8 @@ export function translateSpecifierPatterns(
   specifier: string | undefined
 ): string[] {
   if (!specifier) return ['*']
-  if (category === 'bash') {
+  // `shell` is the 2.x id of the same tool (ADR-093 §3, `permission-v2.ts`).
+  if (category === 'bash' || category === 'shell') {
     const prefix = specifier.match(/^(.+):\*$/)
     return [prefix ? `${prefix[1]}*` : specifier]
   }
@@ -235,7 +236,7 @@ export function isOpencodeBuiltinPermissionKey(key: string): boolean {
  * → tool level, the server being everything up to the next `__` (Claude's own
  * left-to-right reading). `null` when it is not an MCP rule or names no server.
  */
-function parseMcpRuleTool(tool: string): { server: string; tool?: string } | null {
+export function parseMcpRuleTool(tool: string): { server: string; tool?: string } | null {
   if (!tool.startsWith('mcp__')) return null
   const rest = tool.slice('mcp__'.length)
   const sep = rest.indexOf('__')
@@ -439,8 +440,14 @@ export function withoutMutatingAllowRules(
 
 // ── Reverse direction: opencode approval → Claude "always allow" suggestion ────
 
-/** Inverse of TOOL_TO_CATEGORY (first/canonical Claude tool per opencode category). */
+/**
+ * Inverse of TOOL_TO_CATEGORY (first/canonical Claude tool per opencode category).
+ * `shell` and `subagent` are the 2.x ids of `bash` and `task` (ADR-093 §3), so a
+ * 2.x `permission.asked` action maps back the same way.
+ */
 const CATEGORY_TO_TOOL: Record<string, string> = {
+  shell: 'Bash',
+  subagent: 'Task',
   read: 'Read',
   glob: 'Glob',
   grep: 'Grep',

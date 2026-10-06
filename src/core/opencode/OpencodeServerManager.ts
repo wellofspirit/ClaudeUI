@@ -22,13 +22,40 @@ import {
   type SpawnResult,
   type SpawnServerFn
 } from './opencode-server-spawn'
-import { waitForHostedTools, type HostedToolsReadiness } from './opencode-server-readiness'
+import {
+  waitForHostedTools,
+  waitForPermissionGuard,
+  type HostedToolsReadiness,
+  type PermissionGuard,
+  type ReadinessDeps
+} from './opencode-server-readiness'
+import { agentPermissionOverlay } from './permission-v2'
 import { harnessAvailable, harnessUnavailableMessage, resolveHarness } from '../harness/resolve'
 import { toLaunch, type HarnessLaunch } from '../harness/launch'
 import { logger } from '../services/logger'
 
 export type { SpawnResult, SpawnServerFn }
-export type { HostedToolsReadiness }
+export type { HostedToolsReadiness, PermissionGuard }
+
+/**
+ * Thrown by `acquire` when the server's `claudeui-xeng` plugin is not loaded
+ * and answering (ADR-093 §3, S6). Without its `permission.evaluate` hook the
+ * user's saved "always" approvals from their own opencode would answer
+ * ClaudeUI's permission asks, so ClaudeUI refuses to run sessions there.
+ */
+export class OpencodePermissionGuardError extends Error {
+  constructor(
+    readonly directory: string,
+    readonly reason: string
+  ) {
+    super(
+      `ClaudeUI will not run opencode sessions in ${directory}: its safety plugin is not active (${reason}). ` +
+        'Without it, "always allow" approvals saved by your own opencode would answer ClaudeUI\'s permission prompts. ' +
+        'Reinstall or update ClaudeUI; the opencode log has the plugin load error.'
+    )
+    this.name = 'OpencodePermissionGuardError'
+  }
+}
 
 /**
  * opencode 2.x server lifecycle (ADR-093 §2, amends ADR-019).
@@ -93,6 +120,8 @@ interface ServerHandle {
   exitListeners: Set<() => void>
   /** Hosted-tools readiness per directory (each directory is its own MCP location). */
   readiness: Map<string, Promise<HostedToolsReadiness>>
+  /** The plugin's permission guard per directory (only `active` results are kept). */
+  guards: Map<string, Promise<PermissionGuard>>
 }
 
 /** Where readiness and the cwd resolver send their requests. */
@@ -106,6 +135,12 @@ export type WaitReadyFn = (
   directory: string,
   pluginExpected: boolean
 ) => Promise<HostedToolsReadiness>
+
+export type WaitGuardFn = (
+  endpoint: Endpoint,
+  directory: string,
+  pluginExpected: boolean
+) => Promise<PermissionGuard>
 
 /**
  * How to spawn opencode next, from the harness resolver
@@ -128,9 +163,9 @@ function locateLaunch(): HarnessLaunch {
  * under `resources/` via electron-builder's `asarUnpack: resources/**`, so the
  * packaged path swaps `app.asar` → `app.asar.unpacked` in place — a real
  * directory on disk, which is what opencode needs.
- * Null (never throws) when absent: opencode still starts; caller identity then
- * rests on `_meta` alone (no live-streaming call id) and readiness falls back
- * to the MCP status signal.
+ * Null (never throws) when absent: opencode still starts (session lists and
+ * other turn-less reads work), but `acquire` for a turn refuses the server
+ * (`OpencodePermissionGuardError`) — the plugin carries the permission hook.
  */
 export function locatePluginDir(appPath: string = getAppPath()): string | null {
   const rel = ['resources', 'opencode', 'claudeui-xeng']
@@ -162,33 +197,39 @@ async function fetchSessionDirectory(
   }
 }
 
-/** The real readiness wait: HTTP against the server, scoped to `directory`. */
-const defaultWaitReady: WaitReadyFn = (endpoint, directory, pluginExpected) =>
-  waitForHostedTools(
-    { pluginExpected },
-    {
-      request: async (method, path, body) => {
-        const response = await fetch(endpoint.baseUrl + path, {
-          method,
-          headers: {
-            authorization: endpoint.authHeader,
-            'x-opencode-directory': encodeURIComponent(directory),
-            ...(body !== undefined ? { 'content-type': 'application/json' } : {})
-          },
-          body: body !== undefined ? JSON.stringify(body) : undefined,
-          signal: AbortSignal.timeout(5_000)
-        })
-        const text = await response.text()
-        let parsed: unknown = text
-        try {
-          parsed = text ? JSON.parse(text) : undefined
-        } catch {
-          // keep the text
-        }
-        return { status: response.status, body: parsed }
+/** HTTP against the server, scoped to `directory` (readiness and the guard). */
+function readinessDeps(endpoint: Endpoint, directory: string): ReadinessDeps {
+  return {
+    request: async (method, path, body) => {
+      const response = await fetch(endpoint.baseUrl + path, {
+        method,
+        headers: {
+          authorization: endpoint.authHeader,
+          'x-opencode-directory': encodeURIComponent(directory),
+          ...(body !== undefined ? { 'content-type': 'application/json' } : {})
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(5_000)
+      })
+      const text = await response.text()
+      let parsed: unknown = text
+      try {
+        parsed = text ? JSON.parse(text) : undefined
+      } catch {
+        // keep the text
       }
+      return { status: response.status, body: parsed }
     }
-  )
+  }
+}
+
+/** The real readiness wait. */
+const defaultWaitReady: WaitReadyFn = (endpoint, directory, pluginExpected) =>
+  waitForHostedTools({ pluginExpected }, readinessDeps(endpoint, directory))
+
+/** The real guard probe (the plugin's `guard` RPC). */
+const defaultWaitGuard: WaitGuardFn = (endpoint, directory, pluginExpected) =>
+  waitForPermissionGuard({ pluginExpected }, readinessDeps(endpoint, directory))
 
 export interface OpencodeServerManagerOptions {
   /**
@@ -212,6 +253,8 @@ export interface OpencodeServerManagerOptions {
   configInputFn?: (cwd: string) => OpencodeConfigInput
   /** Override the hosted-tools readiness wait (tests use a fake). */
   waitReadyFn?: WaitReadyFn
+  /** Override the plugin permission-guard probe (tests use a fake). */
+  waitGuardFn?: WaitGuardFn
   /** Override how a server is ended (default: stdin EOF, then tree kill). */
   endServerFn?: (child: ChildProcess) => void
   /** The servers' process cwd (requests carry their own directory). Default: home. */
@@ -247,6 +290,7 @@ export class OpencodeServerManager {
   private readonly startMcpHostFn: (createServer: () => McpServer) => Promise<McpHttpHost>
   private readonly configInputFn: (cwd: string) => OpencodeConfigInput
   private readonly waitReadyFn: WaitReadyFn
+  private readonly waitGuardFn: WaitGuardFn
   private readonly endServerFn: (child: ChildProcess) => void
   private readonly serverCwd: string
   /**
@@ -257,11 +301,14 @@ export class OpencodeServerManager {
    */
   private callerSessionLookup: CallerSessionLookup = () => undefined
   private dispatchAgentFn: DispatchAgentFn | undefined
-  /** S6 seam: `agents.<name>.permissions` per cwd. Nothing is injected until S6. */
+  /**
+   * `agents.<name>.permissions` per cwd (ADR-093 §3). Default: the mode-less
+   * overlay (`permission-v2.ts` `agentPermissionOverlay`).
+   */
   private agentPermissionsFn: (
     cwd: string,
     mcpServers: readonly string[]
-  ) => AgentPermissionOverlay = () => ({})
+  ) => AgentPermissionOverlay = () => agentPermissionOverlay()
 
   constructor(opts: OpencodeServerManagerOptions = {}) {
     this.spawnFn = opts.spawnFn ?? ((launch, options) => spawnStdioServer(launch, options))
@@ -269,6 +316,7 @@ export class OpencodeServerManager {
     this.startMcpHostFn = opts.startMcpHostFn ?? startMcpHttpHost
     this.configInputFn = opts.configInputFn ?? ((cwd) => this.defaultConfigInput(cwd))
     this.waitReadyFn = opts.waitReadyFn ?? defaultWaitReady
+    this.waitGuardFn = opts.waitGuardFn ?? defaultWaitGuard
     this.endServerFn = opts.endServerFn ?? ((child) => void endStdioServer(child))
     this.serverCwd = opts.serverCwd ?? homedir()
   }
@@ -284,9 +332,9 @@ export class OpencodeServerManager {
   }
 
   /**
-   * S6 seam (ADR-093 §3): per-agent permission rules injected as
-   * `agents.<name>.permissions`. A changed answer changes the config identity,
-   * so it reaches new leases on a new server.
+   * Per-agent permission rules injected as `agents.<name>.permissions`
+   * (ADR-093 §3; replaces the default overlay). A changed answer changes the
+   * config identity, so it reaches new leases on a new server.
    */
   setAgentPermissionProvider(
     fn: (cwd: string, mcpServers: readonly string[]) => AgentPermissionOverlay
@@ -428,7 +476,8 @@ export class OpencodeServerManager {
       refCount: 0,
       cwdRefs: new Map(),
       exitListeners: new Set(),
-      readiness: new Map()
+      readiness: new Map(),
+      guards: new Map()
     }
 
     if (this.disposed) {
@@ -460,6 +509,34 @@ export class OpencodeServerManager {
       handle.readiness.set(directory, ready)
     }
     return ready
+  }
+
+  /**
+   * The plugin's permission guard for one directory: memoized only while
+   * `active`; a `missing` answer is dropped so the next acquire probes again.
+   */
+  private guardFor(handle: ServerHandle, directory: string): Promise<PermissionGuard> {
+    let guard = handle.guards.get(directory)
+    if (!guard) {
+      guard = this.waitGuardFn(handle, directory, handle.pluginExpected)
+        .catch((err): PermissionGuard => ({
+          state: 'missing',
+          reason: `guard probe threw: ${err instanceof Error ? err.message : String(err)}`,
+          elapsedMs: 0
+        }))
+        .then((result) => {
+          if (result.state !== 'active') {
+            handle.guards.delete(directory)
+            logger.error(
+              'OpencodeServerManager',
+              `claudeui-xeng permission guard NOT active on ${handle.baseUrl} for ${directory}: ${result.reason} — refusing sessions there`
+            )
+          }
+          return result
+        })
+      handle.guards.set(directory, guard)
+    }
+    return guard
   }
 
   private logReadiness(
@@ -516,6 +593,11 @@ export class OpencodeServerManager {
    * `waitForHostedTools: false` skips the wait (`hostedTools: skipped`) for a
    * caller that runs no turn — session lists, auth, usage reads — so it never
    * pays for MCP start-up it does not use.
+   *
+   * Every other (turn-running) acquire also requires the plugin's permission
+   * guard to be active for the directory, and throws
+   * {@link OpencodePermissionGuardError} otherwise (fail closed; the lease is
+   * released). The hosted-tools status fallback never stands in for it.
    */
   async acquire(
     cwd: string,
@@ -527,10 +609,16 @@ export class OpencodeServerManager {
     const handle = await this.resolveHandle(key, input)
     handle.refCount++
     handle.cwdRefs.set(directory, (handle.cwdRefs.get(directory) ?? 0) + 1)
-    const hostedTools: HostedToolsReadiness =
-      options.waitForHostedTools === false
-        ? { state: 'skipped' }
-        : await this.readinessFor(handle, directory)
+    const turn = options.waitForHostedTools !== false
+    const [hostedTools, guard] = await Promise.all([
+      turn ? this.readinessFor(handle, directory) : ({ state: 'skipped' } as const),
+      turn ? this.guardFor(handle, directory) : null
+    ])
+    if (guard && guard.state !== 'active') {
+      // Release (and end it when this was its only lease): never hand it out.
+      this.releaseHandle(handle, directory)
+      throw new OpencodePermissionGuardError(directory, guard.reason)
+    }
     if (this.handles.get(key) !== handle) {
       // It died (or was recycled) while we waited: hand out nothing dead.
       handle.refCount--

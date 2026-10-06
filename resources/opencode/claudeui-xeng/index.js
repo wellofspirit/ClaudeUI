@@ -17,9 +17,115 @@
 //    `claudeui-xeng.tools` RPC (POST /api/rpc/claudeui-xeng/tools, per
 //    location) lists the registered `claudeui_*` tools, so ClaudeUI can wait
 //    until a first turn would actually be offered them.
+// 3. Saved "always" allows do not answer ClaudeUI's asks (ADR-093 §3). opencode
+//    appends the project's SAVED allows (`/api/permission/saved`, shared with
+//    the user's own opencode through the data dir) after the configured rules,
+//    so a saved row outranks any `ask` (core/src/permission.ts
+//    `evaluateInput`). The `permission.evaluate` hook gets the effect opencode
+//    computed and its `effect` wins: this plugin re-evaluates the CONFIGURED
+//    rules only (the agent's rules, then the session's — what ClaudeUI
+//    PATCHed), read from opencode itself by session id, and keeps the
+//    STRICTER of the two. It only ever tightens: allow → ask/deny, never back.
+//    opencode runs the hook only when its own deny check found no deny.
+// 4. MCP servers from the user's own opencode config are declared directly
+//    (`codemode: false`), not behind Code Mode's `execute`, which ClaudeUI
+//    hides (its runtime has an ungated `fetch`). A config overlay cannot do it:
+//    a later config document REPLACES a whole `mcp.servers.<name>` entry
+//    (core/src/config/plugin/mcp.ts), so it would need the entry's secrets.
+//    The MCP transform (as opencode's own mcp-codemode-defaults plugin does)
+//    edits the resolved entry in place and never reads its headers or env.
+//
+// Only the opencode process ClaudeUI spawns loads this plugin; the user's own
+// opencode keeps its own behaviour.
 
 const HOSTED_PREFIX = 'claudeui_'
 const DISPATCH_TOOL = 'claudeui_dispatch_agent'
+
+/** opencode's `Wildcard.match` (core/src/util/wildcard.ts), verbatim in behaviour. */
+export function wildcardMatch(input, pattern, platform = process.platform) {
+  const normalized = String(input).replaceAll('\\', '/')
+  let escaped = String(pattern)
+    .replaceAll('\\', '/')
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.')
+  if (escaped.endsWith(' .*')) escaped = escaped.slice(0, -3) + '( .*)?'
+  return new RegExp('^' + escaped + '$', platform === 'win32' ? 'si' : 's').test(normalized)
+}
+
+const STRICTNESS = { allow: 0, ask: 1, deny: 2 }
+
+/** The stricter of two effects; anything unknown counts as `ask`. */
+export function stricter(a, b) {
+  const rank = (effect) => STRICTNESS[effect] ?? STRICTNESS.ask
+  return rank(b) > rank(a) ? (b in STRICTNESS ? b : 'ask') : a in STRICTNESS ? a : 'ask'
+}
+
+/**
+ * opencode's verdict over CONFIGURED rules alone (`permission.ts`
+ * `evaluateInput` without the saved allows): last match wins, no match = ask;
+ * any resource denied → deny, any asked → ask, else allow.
+ */
+export function evaluateConfigured(rules, action, resources, platform = process.platform) {
+  const list = Array.isArray(resources) && resources.length > 0 ? resources : ['*']
+  let verdict = 'allow'
+  for (const resource of list) {
+    let effect = 'ask'
+    for (let i = rules.length - 1; i >= 0; i--) {
+      const rule = rules[i]
+      if (
+        rule &&
+        wildcardMatch(action, rule.action, platform) &&
+        wildcardMatch(resource, rule.resource, platform)
+      ) {
+        effect = rule.effect
+        break
+      }
+    }
+    if (effect === 'deny') return 'deny'
+    if (effect !== 'allow') verdict = 'ask'
+  }
+  return verdict
+}
+
+/** opencode's rules for an agent it cannot resolve (`permission.ts` `missingAgentPermissions`). */
+const MISSING_AGENT = [{ action: '*', resource: '*', effect: 'deny' }]
+
+const unwrap = (response) =>
+  response && typeof response === 'object' && 'data' in response ? response.data : response
+
+/**
+ * The configured ruleset of a permission check: the agent's rules (the event's
+ * agent, else the session's, else opencode's default agent — `Agent.list`
+ * puts it first), then the session's. Read from opencode by id — never from
+ * anything the model wrote.
+ */
+async function configuredRules(ctx, event) {
+  const session = unwrap(await ctx.session.get({ sessionID: event.sessionID }))
+  const agentID = event.agent ?? session?.agent
+  const agent = agentID
+    ? unwrap(await ctx.agent.get({ agentID }))
+    : (unwrap(await ctx.agent.list({})) ?? [])[0]
+  const agentRules = Array.isArray(agent?.permissions) ? agent.permissions : MISSING_AGENT
+  const sessionRules = Array.isArray(session?.permissions) ? session.permissions : []
+  return [...agentRules, ...sessionRules]
+}
+
+/**
+ * The `permission.evaluate` hook: keep the stricter of opencode's effect and
+ * the configured-rules verdict. A failure to read the rules answers `ask`
+ * (fail toward the human), still never looser than opencode's own effect.
+ */
+export async function tightenToConfigured(ctx, event) {
+  if (!event || event.effect === 'deny') return
+  let verdict
+  try {
+    verdict = evaluateConfigured(await configuredRules(ctx, event), event.action, event.resources)
+  } catch {
+    verdict = 'ask'
+  }
+  event.effect = stricter(event.effect, verdict)
+}
 
 export default {
   id: 'claudeui-xeng',
@@ -33,6 +139,17 @@ export default {
         ...(event.id ? { __xeng_call_id: event.id } : {})
       }
     })
+    // What the `guard` RPC reports: ClaudeUI refuses to run sessions on a
+    // server where these are not both registered (OpencodeServerManager).
+    const guard = { permissionHook: false, mcpDirect: false }
+    await ctx.permission.hook('evaluate', (event) => tightenToConfigured(ctx, event))
+    guard.permissionHook = true
+    await ctx.mcp.transform((editor) => {
+      for (const [, server] of editor.list()) {
+        if (server && typeof server === 'object') server.codemode = false
+      }
+    })
+    guard.mcpDirect = true
     await ctx.rpc.register(
       {
         id: 'claudeui-xeng',
@@ -44,6 +161,17 @@ export default {
               properties: { tools: { type: 'array', items: { type: 'string' } } },
               required: ['tools']
             }
+          },
+          guard: {
+            input: { type: 'object' },
+            output: {
+              type: 'object',
+              properties: {
+                permissionHook: { type: 'boolean' },
+                mcpDirect: { type: 'boolean' }
+              },
+              required: ['permissionHook', 'mcpDirect']
+            }
           }
         },
         events: {}
@@ -54,7 +182,8 @@ export default {
             .map((tool) => tool.id)
             .filter((id) => typeof id === 'string' && id.startsWith(HOSTED_PREFIX))
             .sort()
-        })
+        }),
+        guard: async () => ({ ...guard })
       }
     )
   }

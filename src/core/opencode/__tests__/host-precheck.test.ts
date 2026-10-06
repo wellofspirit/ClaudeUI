@@ -346,6 +346,13 @@ describe('ADR-085 S3b — hostPrecheck plan-mode rungs', () => {
       expect(planModeRefusesAsk({ toolName: 'edit' }, undefined)).toBe(true)
       expect(planModeRefusesAsk({ toolName: 'task', patterns: ['general'] }, undefined)).toBe(true)
       expect(planModeRefusesAsk({ toolName: 'task', patterns: ['explore'] }, undefined)).toBe(false)
+      // 2.x names the tool `subagent` (ADR-093 §3).
+      expect(planModeRefusesAsk({ toolName: 'subagent', patterns: ['general'] }, undefined)).toBe(
+        true
+      )
+      expect(planModeRefusesAsk({ toolName: 'subagent', patterns: ['explore'] }, undefined)).toBe(
+        false
+      )
       expect(planModeRefusesAsk({ toolName: 'bash' }, undefined)).toBe(true)
       expect(planModeRefusesAsk({ toolName: 'bash' }, 'git commit -m x')).toBe(true)
       expect(planModeRefusesAsk({ toolName: 'bash' }, 'git status')).toBe(false)

@@ -80,6 +80,7 @@ describe('opencode serve --stdio spawn (default spawn path)', () => {
       startMcpHostFn: async () => fakeMcpHost(),
       configInputFn: () => ({ bridgedMcp: {}, pluginDir: '/res/opencode/claudeui-xeng' }),
       waitReadyFn: async () => ({ state: 'ready', signal: 'registry', elapsedMs: 0 }),
+      waitGuardFn: async () => ({ state: 'active', elapsedMs: 0 }),
       serverCwd: '/server-home'
     })
     const conn = await manager.acquire('/some/project')
@@ -159,7 +160,8 @@ describe('opencode serve --stdio spawn (default spawn path)', () => {
       locateBinaryFn: () => '/fake/opencode',
       startMcpHostFn: async () => fakeMcpHost(),
       configInputFn: () => ({}),
-      waitReadyFn: async () => ({ state: 'ready', signal: 'registry', elapsedMs: 0 })
+      waitReadyFn: async () => ({ state: 'ready', signal: 'registry', elapsedMs: 0 }),
+      waitGuardFn: async () => ({ state: 'active', elapsedMs: 0 })
     })
     await manager.acquire('/p')
     const child = spawnMock.mock.results[0].value as unknown as { stdin: PassThrough }
