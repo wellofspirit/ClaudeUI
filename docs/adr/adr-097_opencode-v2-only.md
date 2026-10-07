@@ -174,6 +174,13 @@ session `ask` but never a `deny`; Code Mode's `execute` runtime has an ungated `
   session dir; `/x` verbatim): an allow that misses costs an ask, never a grant. `~/`, `//abs`,
   `C:\x` and `./x` are normalized as before. Contract: a session in `<repo>/pkg` with
   `deny Edit(//<repo>/secrets/**)` cannot edit `../secrets/x`.
+- Windows absolute rules (Windows pass 2026-10-07, §8.2): Claude Code spells an absolute Windows
+  rule `//c/rest` (cli.js `ht` writes `C:/x` that way; `GSt` reads it back as drive `C:`). On win32
+  `//c/rest`, `//c` and `//C:/rest` compile to the drive form `C:/rest` (opencode
+  `permission-paths.ts`, pi `permission-engine.ts`); keeping the leading slash (`/c/rest`) matched
+  nothing 2.x asks with, so the deny was inert. POSIX `//c/x` stays `/c/x`. A caller restriction
+  (§4) names a Windows path by its bare drive form `D:/x`, never `/D:/x` (a single-slash,
+  settings-relative rule); cli.js, opencode and pi all read `X:/…` as absolute.
 - Children: `childSessionRuleset(parentRules, agent.permissions)` = the parent's rules, then the
   child agent's own deny rules that still hold at the end of its ruleset (narrow ones included —
   `shell "git push*": deny` survives the parent's `shell` ask and a user allow; a deny the agent's
