@@ -104,7 +104,9 @@ export function SheetFrame({
     <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
       <div
         style={{
+          // eslint-disable-next-line no-restricted-syntax -- divides by uiFontScale
           width: `min(1040px, calc(92vw / ${uiFontScale}))`,
+          // eslint-disable-next-line no-restricted-syntax -- divides by uiFontScale
           height: `min(700px, calc(88vh / ${uiFontScale}))`
         }}
         className="relative flex justify-end pt-[52px] overflow-hidden rounded-xl"

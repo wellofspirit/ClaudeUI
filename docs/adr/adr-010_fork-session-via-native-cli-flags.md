@@ -1,6 +1,6 @@
 # ADR-010: Fork ("branch off") sessions via cli.js's native `--resume-session-at` + `--fork-session`
 
-**Status:** Accepted
+**Status:** Accepted (amended 2026-10-06: a Claude fork seeds its history from disk, see "Amendment" below)
 **Date:** 2026-06-05
 
 ## Context
@@ -124,3 +124,30 @@ Renderer:
 - **Restrict the button to user messages** (where `ChatMessage.id` already is
   the line uuid). Rejected on UX grounds: a branch ending on an unanswered user
   prompt is semantically odd; assistant turn-ends are the natural fork points.
+
+## Amendment (2026-10-06): a Claude fork seeds from the disk loader, not the in-memory slice
+
+The branch used to be seeded with a slice of the source's in-memory `messages` only. Its
+`taskNotifications` stayed empty, and the fill that would have supplied them on `session:created`
+(`loadResumedTranscript`) is fill-only, so it refused a session that already had messages. Once the
+first send made the fork live, every background agent with a launch result and no terminal event read
+"running" (a real fork showed 17 of 18). The host's canonical copy was right all along; only the
+originating renderer was not.
+
+`forkFromMessage` now seeds a Claude fork from `loadSessionHistory(source, projectKey, anchorUuid)`:
+messages, task notifications and the status line, truncated at the anchor exactly as cli.js truncates.
+An agent whose completion arrived after the anchor gets the loader's neutral `unfinished` entry, and an
+agent still running in the source at fork time cannot read "running" forever in the fork. It runs before
+anything spawns, so it cannot race live events. When the loader cannot be used (the source is not in the
+directory listing, or the read fails), and for the other engines, the in-memory slice stays and the
+source's notifications for agents spawned inside the slice are copied with it.
+
+The anchor itself also moves (`findForkAnchorUuid`, same date). After the tool-cycle balancing, it
+extends past agent completions cli.js delivered right after the chosen turn: a `<task-notification>`
+user line, or a `queued_command` attachment carrying one. Bookkeeping lines and `isMeta` handback notes
+are passed over. The walk stops at the next assistant line, real prompt, tool_result or steer. An agent's
+notification routinely lands after the reply to its handback. Cut before it, cli.js's resume scan
+(2.1.290, `aSr`) finds the agent launched but never delivered and reaps it as `failed: "… didn't finish
+before the previous session ended"` on the fork's first send. A branch that ends on the delivery has the
+same shape as a resumed session whose transcript ends in one. `--resume-session-at` resolves an
+attachment line's uuid (probed on 2.1.290).

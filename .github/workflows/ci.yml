@@ -85,6 +85,25 @@ jobs:
 
       - uses: ./.github/actions/setup-workspace
 
-      # unit + unit-node + component + e2e + git, split by file across shards.
-      - name: Tests (unit + component + e2e + git)
+      # The `browser` vitest project (Layer 2b layout tests) drives real headless
+      # Chromium, which `bun install` does not fetch and the runner image does not
+      # ship. Here, not in setup-workspace: only this job runs tests. The headless
+      # shell is all a headless run uses; the browser build is tied to the
+      # playwright version, so that keys the cache. The apt packages `--with-deps`
+      # adds are not cached, so the install always runs (no download on a hit).
+      - name: Read playwright version
+        id: playwright-version
+        run: echo "version=$(node -p "require('./node_modules/playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Chromium for the browser tests
+        run: bunx playwright install --with-deps --only-shell chromium
+
+      # unit + unit-node + component + e2e + browser + git, split by file across shards.
+      - name: Tests (unit + component + e2e + browser + git)
         run: bun run test:ci --shard=${{ matrix.shard }}/3

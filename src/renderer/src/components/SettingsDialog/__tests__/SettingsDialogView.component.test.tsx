@@ -593,7 +593,8 @@ describe('the page pane', () => {
       'endpoint',
       'model-mapping',
       'sandbox',
-      'proxy'
+      'proxy',
+      'agent-colours'
     ])
   })
 })
@@ -647,6 +648,7 @@ describe('engine segments', () => {
     // direction, so it is read before any per-target rule (ADR-033, 2026-09-18).
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
       'dispatchMaxConcurrent',
+      'dispatchTileColour',
       'piDispatch',
       'piDispatchLimits'
     ])
@@ -679,6 +681,7 @@ describe('engine segments', () => {
     // …and the Limits card renders the engine the segment above it is on.
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
       'dispatchMaxConcurrent',
+      'dispatchTileColour',
       'opencodeDispatch',
       'opencodeDispatchLimits'
     ])
@@ -688,6 +691,7 @@ describe('engine segments', () => {
     renderView({ activePage: 'dispatch', engineByGroup: { 'dispatch/into': 'claude' as EngineId } })
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
       'dispatchMaxConcurrent',
+      'dispatchTileColour',
       'claudeDispatch',
       'claudeDispatchLimits'
     ])
@@ -700,6 +704,7 @@ describe('engine segments', () => {
     })
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
       'dispatchMaxConcurrent',
+      'dispatchTileColour',
       'claudeDispatch',
       'claudeDispatchLimits'
     ])
@@ -1100,6 +1105,7 @@ describe('a harness that does not run (ADR-082 §8)', () => {
     // The selected pi is not selectable: the first that is shows, both cards.
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
       'dispatchMaxConcurrent',
+      'dispatchTileColour',
       'claudeDispatch',
       'claudeDispatchLimits'
     ])
@@ -1122,7 +1128,8 @@ describe('a harness that does not run (ADR-082 §8)', () => {
     harnesses(['opencode', 'pi', 'codex'])
     renderView({ activePage: 'dispatch' })
     await settle()
-    // No caller for Claude, no other target: nothing to configure but the slots.
-    expect(groupIds()).toEqual(['concurrency'])
+    // No caller for Claude, no other target: nothing to configure but the slots
+    // and the X tile's colour (both app-level, neither about a target).
+    expect(groupIds()).toEqual(['concurrency', 'tile'])
   })
 })

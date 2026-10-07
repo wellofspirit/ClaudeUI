@@ -33,6 +33,7 @@ import { notInstalledTitle, type EngineRuns } from './harness-view'
 import { UsageHubSettings } from './UsageHubSettings'
 import { HarnessesInstalled, HarnessesPageActions } from './HarnessesInstalled'
 import { HarnessUpdateSettings } from './HarnessUpdateSettings'
+import { AgentColoursSection, DispatchTileColourSection } from './AgentColours'
 
 export type { SettingsPageId, SettingsTarget } from './settings-target'
 
@@ -276,6 +277,37 @@ const HARNESS_UPDATES: SettingItem = {
     'harness harnesses update updates install automatically ask me check now new version latest tested upstream',
   render: () => <HarnessUpdateSettings />
 }
+/**
+ * ADR-094: one engine's agent types and their tile colours. Page-local, one item
+ * per engine page: the types come from the host (`config:list-agent-types`), the
+ * overrides are ClaudeUI's own `agentTypeColors` setting.
+ */
+function agentColoursItem(engine: EngineId): SettingItem {
+  return {
+    key: `${engine}AgentColours`,
+    label: 'Agent colours',
+    keywords:
+      'agent colours colors tile letter palette subagent type roster card swatch override auto',
+    render: (s, u) => <AgentColoursSection engine={engine} settings={s} update={u} />
+  }
+}
+const CLAUDE_AGENT_COLOURS = agentColoursItem('claude')
+const OPENCODE_AGENT_COLOURS = agentColoursItem('opencode')
+const PI_AGENT_COLOURS = agentColoursItem('pi')
+const CODEX_AGENT_COLOURS = agentColoursItem('codex')
+
+/**
+ * ADR-094: the cross-engine dispatch tile's one colour. It belongs to no engine
+ * (it marks work handed to ANOTHER harness), so it lives on the dispatch page,
+ * beside the other app-level dispatch setting.
+ */
+const DISPATCH_TILE_COLOUR: SettingItem = {
+  key: 'dispatchTileColour',
+  label: 'Cross-engine dispatch (X)',
+  keywords: 'dispatch tile colour color x agent palette cross engine',
+  render: (s, u) => <DispatchTileColourSection settings={s} update={u} />
+}
+
 export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   SANDBOX_CROSS_LINK,
   OTHER_ENGINE_PERMISSIONS,
@@ -283,7 +315,12 @@ export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   CODEX_ACCOUNT,
   USAGE_HUB,
   HARNESSES_INSTALLED,
-  HARNESS_UPDATES
+  HARNESS_UPDATES,
+  CLAUDE_AGENT_COLOURS,
+  OPENCODE_AGENT_COLOURS,
+  PI_AGENT_COLOURS,
+  CODEX_AGENT_COLOURS,
+  DISPATCH_TILE_COLOUR
 ]
 
 // ── Icons (14px, stroke 1.8 — the rail size on the boards) ───────────
@@ -404,6 +441,14 @@ const engineFile = (engine: EngineId): string => `engines/${engine}.json`
  * `cross-engine-dispatcher.ts`), so each row is the full complement minus
  * itself: the dispatcher refuses same-engine work outright.
  */
+/**
+ * The note under every Agent colours card. No applies-later badge and no storage
+ * tag: the colours are ClaudeUI's own settings, and a tile re-reads them on the
+ * spot.
+ */
+const AGENT_COLOURS_NOTE =
+  'One palette for every harness. Auto follows the agent file\u2019s own colour where it has one, else a colour picked from the name.'
+
 const DISPATCH_CALLERS: Record<EngineId, string> = {
   // Codex became a real dispatch TARGET with ADR-033 slice H; only the settings
   // pane was missing, which is what "unsupported" used to describe.
@@ -636,6 +681,14 @@ export const PAGES: SettingsPage[] = [
         items: itemsOf('dispatch-concurrency')
       },
       {
+        // App-level too: the X tile on a dispatched agent is one colour, whatever
+        // harness it left from or went to (ADR-094). Its own card, like the cap.
+        id: 'tile',
+        label: 'Dispatch tile',
+        note: 'The tile marks an agent handed to another harness. Hover it for where it went.',
+        items: [DISPATCH_TILE_COLOUR]
+      },
+      {
         id: 'into',
         label: 'Dispatch into',
         storage: engineFile,
@@ -804,6 +857,12 @@ export const PAGES: SettingsPage[] = [
         note: 'Applies to new Claude sessions.',
         storage: 'engines/claude.json',
         items: itemsOf('proxy')
+      },
+      {
+        id: 'agent-colours',
+        label: 'Agent colours',
+        note: AGENT_COLOURS_NOTE,
+        items: [CLAUDE_AGENT_COLOURS]
       }
     ]
   },
@@ -875,6 +934,12 @@ export const PAGES: SettingsPage[] = [
         label: 'Agents',
         storage: 'agents/*.md',
         items: itemsOf('opencode-agents')
+      },
+      {
+        id: 'agent-colours',
+        label: 'Agent colours',
+        note: AGENT_COLOURS_NOTE,
+        items: [OPENCODE_AGENT_COLOURS]
       },
       {
         id: 'raw',
@@ -950,6 +1015,12 @@ export const PAGES: SettingsPage[] = [
         note: 'Applies to newly started pi sessions.',
         storage: 'settings.json',
         items: itemsOf('pi-config-network')
+      },
+      {
+        id: 'agent-colours',
+        label: 'Agent colours',
+        note: AGENT_COLOURS_NOTE,
+        items: [PI_AGENT_COLOURS]
       },
       {
         id: 'raw',
@@ -1029,6 +1100,12 @@ export const PAGES: SettingsPage[] = [
         note: CODEX_NEXT_SESSION,
         storage: CODEX_FILE,
         items: itemsOf('codex-config-agents')
+      },
+      {
+        id: 'agent-colours',
+        label: 'Agent colours',
+        note: `${AGENT_COLOURS_NOTE} Codex cards show no tile today: its spawn items carry no role (ADR-094).`,
+        items: [CODEX_AGENT_COLOURS]
       },
       {
         id: 'mcp',

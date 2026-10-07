@@ -111,6 +111,8 @@ import {
 } from '../opencode/opencode-agents'
 import type { OpencodeAgentInput } from '../opencode/opencode-agents'
 import { generateAgent } from '../opencode/agent-generate'
+import { listAgentTypes } from '../services/agent-type-catalog'
+import { ENGINE_META } from '../../shared/engine-meta'
 import { refreshPrices } from '../services/opencode-pricing'
 import { socks5Connect } from '../services/socks-bridge'
 import { assertSafeIdSegment } from '../services/path-containment'
@@ -123,6 +125,7 @@ import {
 } from '../../shared/judge-guidance'
 import type {
   EngineConfig,
+  EngineId,
   VendorConfig,
   SharedAutoModeConfig,
   OpencodeConfigSettings,
@@ -670,6 +673,20 @@ export function configCommands(
       capability: 'config',
       kind: 'query',
       handler: safeHandler(async (cwd?: string) => listAgents(cwd))
+    },
+    // The agent types an engine can spawn, with their native colours (ADR-094):
+    // read-only, and engine-neutral, so it is not an `opencode-agents:*` verb.
+    {
+      channel: 'config:list-agent-types',
+      capability: 'config',
+      kind: 'query',
+      handler: safeHandler(async (engine: string, cwd?: string) => {
+        // The engine table's own keys: a new engine is accepted the moment it has a meta.
+        if (typeof engine !== 'string' || !Object.hasOwn(ENGINE_META, engine)) {
+          throw new Error(`Unknown engine: ${engine}`)
+        }
+        return listAgentTypes(engine as EngineId, typeof cwd === 'string' && cwd ? cwd : undefined)
+      })
     },
     {
       channel: 'opencode-agents:read',
