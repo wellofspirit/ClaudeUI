@@ -15,6 +15,7 @@
     "operations": 141
   },
   "files": {
-    "openapi.ts": "18222145b6d9aac7efcae296a2f340e4c453c70ba2fa48520dccfd6a0a722f62"
+    "openapi.ts": "18222145b6d9aac7efcae296a2f340e4c453c70ba2fa48520dccfd6a0a722f62",
+    "src/shared/opencode-config-schema.json": "c83fb16b1d0ba48be0db8b98fd7adb90f2f8035bd58a6a4871e82663b9db7890"
   }
 }

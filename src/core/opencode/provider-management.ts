@@ -81,7 +81,7 @@ export async function removeOpencodeProvider(id: string, kind: ProviderRemoveKin
       disabled: native.disabledProviders?.includes(id),
       isFree: FREE_OPENCODE_VENDOR_IDS.has(id),
       // ClaudeUI's own record answers (no server): Remove deletes only its rows.
-      hasCredential: opencodeCredentialStore.recordedKeyIntegrations().has(id),
+      hasCredential: opencodeCredentialStore.recordedRemovableIntegrations().has(id),
       declaredInOurFile: Object.hasOwn(native.providers ?? {}, id),
       declaredElsewhereGlobal: readDeclaredProviderIds().includes(id)
     })

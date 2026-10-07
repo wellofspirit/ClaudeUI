@@ -25,6 +25,7 @@ vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
     acquire: mockAcquire,
     releaseIfCurrent: mockReleaseIfCurrent,
     recycleAll: mockRecycleAll,
+    setServerStartedHook: vi.fn(),
     isBinaryAvailable: () => true
   }
 }))
@@ -232,10 +233,28 @@ describe('OAuth on opencode’s integration flow', () => {
     }
   })
 
-  it('code mode: connect with the method id by index, complete with the pasted code, release', async () => {
-    client.call.mockImplementation(async (op: string) => {
+  it('code mode: connect with the method id by index and a one-off label, complete with the pasted code, adopt the row, release', async () => {
+    table.seed({
+      id: 'cred_user_gh',
+      integrationID: 'github-copilot',
+      label: 'mine',
+      value: { type: 'key', key: 'gh-user' }
+    })
+    let label = ''
+    client.call.mockImplementation(async (op: string, init: { body?: { label?: string } }) => {
       if (op === 'integration.get') return { data: integrations[5] }
-      if (op === 'integration.oauth.connect') return attempt('code')
+      if (op === 'integration.oauth.connect') {
+        label = init.body?.label ?? ''
+        return attempt('code')
+      }
+      // opencode stores the attempt's row: ITS id, the attempt's label.
+      if (op === 'integration.oauth.complete')
+        table.seed({
+          id: 'ghc_opencode_chosen',
+          integrationID: 'github-copilot',
+          label,
+          value: { type: 'oauth', methodID: 'device', refresh: 'r', access: 'a', expires: 1 }
+        })
       return undefined
     })
     const started = await provider.oauthAuthorize('github-copilot', 0, {
@@ -248,7 +267,11 @@ describe('OAuth on opencode’s integration flow', () => {
     })
     expect(client.call).toHaveBeenCalledWith('integration.oauth.connect', {
       params: { integrationID: 'github-copilot' },
-      body: { methodID: 'device', answer: { deploymentType: 'github.com' } }
+      body: {
+        methodID: 'device',
+        label: expect.stringMatching(/^claudeui:signin:[0-9a-f]{16}$/),
+        answer: { deploymentType: 'github.com' }
+      }
     })
     // The attempt lives in that server: still held.
     expect(mockReleaseIfCurrent).not.toHaveBeenCalled()
@@ -258,6 +281,11 @@ describe('OAuth on opencode’s integration flow', () => {
       body: { code: 'CODE-1' }
     })
     expect(mockReleaseIfCurrent).toHaveBeenCalledTimes(1)
+    // The sign-in started from ClaudeUI is ClaudeUI's: Remove takes it and
+    // gives the slot back to the user's row.
+    expect(await provider.listRemovableVendorIds()).toEqual(new Set(['github-copilot']))
+    await provider.removeVendorAuth('github-copilot')
+    expect(table.rows().map((row) => [row.id, row.active])).toEqual([['cred_user_gh', true]])
   })
 
   it('auto mode: polls the attempt until it completes', async () => {
@@ -274,7 +302,10 @@ describe('OAuth on opencode’s integration flow', () => {
       await provider.oauthAuthorize('openai', 1)
       expect(client.call).toHaveBeenCalledWith('integration.oauth.connect', {
         params: { integrationID: 'openai' },
-        body: { methodID: 'chatgpt-browser' }
+        body: {
+          methodID: 'chatgpt-browser',
+          label: expect.stringMatching(/^claudeui:signin:/)
+        }
       })
       const done = provider.oauthCallback('openai', 1)
       await vi.advanceTimersByTimeAsync(OAUTH_POLL_MS * 3)

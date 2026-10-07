@@ -76,7 +76,10 @@ vi.mock('../../../core/opencode/model-discovery', () => ({
 }))
 
 vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
-  opencodeServerManager: { isBinaryAvailable: vi.fn(() => false) }
+  opencodeServerManager: {
+    setServerStartedHook: () => {},
+    isBinaryAvailable: vi.fn(() => false)
+  }
 }))
 
 vi.mock('../../../core/pi/model-discovery', () => ({
@@ -1828,6 +1831,7 @@ const S1B_SWEEP_CHANNELS = [
   'config:read-pi-native-raw',
   'config:save-engine-config',
   'config:save-opencode-settings',
+  'config:set-opencode-tool-disabled',
   'config:save-slash-commands',
   'config:save-vendor-config',
   'config:write-pi-native-text',

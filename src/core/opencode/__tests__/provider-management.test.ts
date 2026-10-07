@@ -46,7 +46,7 @@ vi.mock('../model-discovery', () => ({ invalidateOpencodeModelCache: () => inval
 // ClaudeUI's slot record; `credentials` names those integrations here.
 vi.mock('../opencode-credentials', () => ({
   opencodeCredentialStore: {
-    recordedKeyIntegrations: () => new Set(Object.keys(credentials))
+    recordedRemovableIntegrations: () => new Set(Object.keys(credentials))
   }
 }))
 vi.mock('../../services/ui-config', () => ({

@@ -47,6 +47,7 @@ vi.mock('../../../core/sdk', async (importOriginal) => {
 
 vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
+    setServerStartedHook: () => {},
     isBinaryAvailable: (): boolean => binaryAvailable.value
   }
 }))

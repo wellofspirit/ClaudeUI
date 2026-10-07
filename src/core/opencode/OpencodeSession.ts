@@ -311,6 +311,8 @@ export class OpencodeSession extends BaseSession {
   /** Drives the `'disconnected'` status (the renderer's only signal to clear `sdkActive`). */
   private disconnected = false
   private unsubscribeServerExit: (() => void) | null = null
+  /** ClaudeUI changed opencode's config (S8): the agent list is re-read. */
+  private unsubscribeConfigChanged: (() => void) | null = null
 
   // ── Cost and context (history base + this process) ─────────────────────────
   private costBase: OpencodeCostInputs[] = []
@@ -846,6 +848,11 @@ export class OpencodeSession extends BaseSession {
           () => this.markDisconnected('opencode server exited', { serverGone: true }),
           c
         )
+        this.unsubscribeConfigChanged?.()
+        this.unsubscribeConfigChanged =
+          opencodeServerManager.onConfigChanged?.(() => {
+            this.agentList = null
+          }) ?? null
       })().finally(() => {
         this.connectingPromise = null
       })
@@ -1419,6 +1426,8 @@ export class OpencodeSession extends BaseSession {
     }
     this.unsubscribeServerExit?.()
     this.unsubscribeServerExit = null
+    this.unsubscribeConfigChanged?.()
+    this.unsubscribeConfigChanged = null
     const conn = this.conn
     const client = this.client
     this.conn = null
@@ -1453,6 +1462,8 @@ export class OpencodeSession extends BaseSession {
     crossEngineDispatcher.disposeFor(this.routingId)
     this.unsubscribeServerExit?.()
     this.unsubscribeServerExit = null
+    this.unsubscribeConfigChanged?.()
+    this.unsubscribeConfigChanged = null
     const conn = this.conn
     const client = this.client
     this.conn = null

@@ -31,6 +31,9 @@ vi.mock('../../core/opencode/opencode-config', () => ({
 }))
 
 import { OpencodeClient } from '../../core/opencode/OpencodeClient'
+import { OpencodeServerManager } from '../../core/opencode/OpencodeServerManager'
+import { endStdioServer, spawnStdioServer } from '../../core/opencode/opencode-server-spawn'
+import { installCopyCleanupHook } from '../../core/opencode/opencode-credentials'
 import {
   CHATGPT_EXPIRY_PADDING_MS,
   OpencodeCredentialStore,
@@ -47,9 +50,12 @@ import {
   describeV2,
   fixtureConfig,
   installPlugin,
+  isolatedEnv,
   nonce,
   SANDBOX_AVAILABLE,
+  sandboxProfile,
   useRig,
+  V2_BIN,
   type Rig
 } from './harness/host'
 
@@ -67,7 +73,8 @@ function storeOn(rig: () => Rig) {
         list: () => c.listCredentials(),
         create: (input) => c.createCredential(input),
         remove: (id) => c.removeCredential(id),
-        activate: (id) => c.activateCredential(id)
+        activate: (id) => c.activateCredential(id),
+        relabel: (id, label) => c.updateCredentialLabel(id, label)
       },
       release: () => {}
     }
@@ -334,6 +341,248 @@ describeChatgpt(
       await feed.waitFor('credential.switched', { after: from })
       expect((await activeRow(rig(), 'openai'))?.id).toBe('cred_imported_openai')
       await api.ok('credential.remove', { params: { credentialID: 'cred_imported_openai' } })
+    })
+  }
+)
+
+// ── (p) proven copies deleted at first contact; (s) ClaudeUI-started sign-ins ──
+
+describeChatgpt(
+  'opencode 2.x contract (S7 follow-up): proven copies and ClaudeUI-started sign-ins (hermetic)',
+  () => {
+    const rig = useRig('s7-owner', { sandbox: true })
+    const VAULT_REFRESH = 'rt-vault-current-fake'
+
+    it('(p) a proven copy is deleted through the credential routes before any location resolves it; unrelated rows untouched; no refresh attempt', async () => {
+      const { api } = rig()
+      const now = Math.floor(Date.now() / 1000)
+      // The copy opencode's migration imported from 1.x auth.json: ACTIVE,
+      // expired, carrying the vault's refresh token.
+      await api.ok('credential.create', {
+        body: {
+          id: 'cred_imported_openai',
+          integrationID: 'openai',
+          label: 'imported',
+          value: {
+            type: 'oauth',
+            methodID: 'chatgpt-browser',
+            refresh: VAULT_REFRESH,
+            access: fakeJwt('acct-1', 'old', now - 3600),
+            expires: Date.now() - 3_600_000,
+            metadata: { accountID: 'acct-1' }
+          }
+        }
+      })
+      // Unrelated user rows: a ChatGPT sign-in of the user's own (another
+      // refresh token, unexpired, inactive), an OpenAI key (inactive) and an
+      // OpenRouter key.
+      await api.ok('credential.create', {
+        body: {
+          id: 'cred_users_own_chatgpt',
+          integrationID: 'openai',
+          label: 'my chatgpt',
+          activate: false,
+          value: {
+            type: 'oauth',
+            methodID: 'chatgpt-browser',
+            refresh: 'rt-users-own-fake',
+            access: fakeJwt('acct-9', 'own', now + 86_400),
+            expires: Date.now() + 86_400_000,
+            metadata: { accountID: 'acct-9' }
+          }
+        }
+      })
+      await api.ok('credential.create', {
+        body: {
+          id: 'cred_user_openai_key',
+          integrationID: 'openai',
+          label: 'mine',
+          activate: false,
+          value: { type: 'key', key: 'sk-user-openai' }
+        }
+      })
+      await api.ok('credential.create', {
+        body: {
+          id: 'cred_user_openrouter',
+          integrationID: 'openrouter',
+          label: 'mine',
+          value: { type: 'key', key: 'sk-user-or' }
+        }
+      })
+      // A fresh process on that data dir, as at ClaudeUI's start.
+      await rig().restart()
+      const before = rig().proxy.attempts.length
+      // What the server-started hook runs, before the server is handed to anyone.
+      const store = storeOn(rig)
+      store.configure({ isClaudeuiToken: (refresh) => refresh === VAULT_REFRESH })
+      const c = new OpencodeClient({
+        baseUrl: rig().server.url,
+        authHeader: `Basic ${Buffer.from(`opencode:${rig().server.password}`).toString('base64')}`,
+        directory: rig().cwd
+      })
+      expect(
+        await store.deleteProvenCopies(
+          {
+            list: () => c.listCredentials(),
+            create: (input) => c.createCredential(input),
+            remove: (id) => c.removeCredential(id),
+            activate: (id) => c.activateCredential(id)
+          },
+          'first contact'
+        )
+      ).toBe(1)
+      // Now a location activates (catalogs, sessions): nothing left to refresh.
+      await rig().api.ok('integration.list')
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      const rows = (await rig().api.ok('credential.list')).data.map((row) => [row.id, row.label])
+      expect(rows.map(([id]) => id).sort()).toEqual([
+        'cred_user_openai_key',
+        'cred_user_openrouter',
+        'cred_users_own_chatgpt'
+      ])
+      expect(rows).toContainEqual(['cred_user_openrouter', 'mine'])
+      expect(rig().proxy.attempts.slice(before)).toEqual([])
+    })
+
+    it('(s) a key sign-in started from ClaudeUI: its opencode-id row is found by the attempt label (not a concurrent one), and removed like ClaudeUI’s own', async () => {
+      const { api } = rig()
+      const store = storeOn(rig)
+      // Its own starting point (independent of the other cases): the user's
+      // OpenAI key, active.
+      await api.ok('credential.create', {
+        body: {
+          id: 'cred_user_signin_case',
+          integrationID: 'openai',
+          label: 'mine (s)',
+          value: { type: 'key', key: 'sk-user-s' }
+        }
+      })
+      const signin = await store.prepareSignin('openai')
+      expect(signin.previousActive).toBe('cred_user_signin_case')
+      // The connect routes need the location's integrations registered (the
+      // activation barrier) — as in the app, where the provider screen lists them first.
+      await api.ok('integration.list')
+      // ClaudeUI's sign-in, through opencode's own connect flow (opencode picks the id).
+      await api.ok('integration.connect.key', {
+        params: { integrationID: 'openai' },
+        body: { key: 'sk-claudeui-signin', label: signin.label }
+      })
+      // The user's own opencode signs in right after, before ClaudeUI looks:
+      // the NEWEST (and now active) row is theirs, so only the label finds ours.
+      await api.ok('integration.connect.key', {
+        params: { integrationID: 'openai' },
+        body: { key: 'sk-concurrent', label: 'theirs' }
+      })
+      const adopted = await store.adoptSignin('openai', signin.label, signin.previousActive)
+      expect(adopted).toBeTruthy()
+      expect(adopted).not.toMatch(/^cred_claudeui_/)
+      const listed = (await api.ok('credential.list')).data
+      expect(listed.find((row) => row.id === adopted)).toMatchObject({
+        label: `ClaudeUI sign-in · ${signin.label.slice('claudeui:signin:'.length)}`,
+        value: { type: 'key', key: 'sk-claudeui-signin' }
+      })
+      expect(listed.find((row) => row.label === 'theirs')?.active).toBe(true)
+      expect(await store.removeSlot('openai', 'signin', 'remove openai')).toBe(true)
+      const after = (await api.ok('credential.list')).data.filter(
+        (row) => row.integrationID === 'openai'
+      )
+      // Only ClaudeUI's row went; the user's later sign-in keeps the slot.
+      expect(after.some((row) => row.id === adopted)).toBe(false)
+      expect(after.some((row) => row.id === 'cred_user_signin_case')).toBe(true)
+      expect(after.find((row) => row.active)?.label).toBe('theirs')
+      expect(rig().proxy.attempts).toEqual([])
+    })
+  }
+)
+
+// ── (r) the real first-contact hook on a production server manager ──────────
+
+describeChatgpt(
+  'opencode 2.x contract (S7 follow-up): the production server manager deletes a proven copy at first contact (hermetic)',
+  () => {
+    const rig = useRig('s7-hook', { sandbox: true })
+    const VAULT_REFRESH = 'rt-vault-hook-fake'
+    let manager: OpencodeServerManager | undefined
+    const ends: Promise<unknown>[] = []
+    afterAll(async () => {
+      manager?.dispose()
+      await Promise.all(ends)
+    })
+
+    it('(r) a server started by the production manager — no manual cleanup call — never resolves the copy', async () => {
+      const { api, home, proxy } = rig()
+      const now = Math.floor(Date.now() / 1000)
+      await api.ok('credential.create', {
+        body: {
+          id: 'cred_imported_hook',
+          integrationID: 'openai',
+          label: 'imported',
+          value: {
+            type: 'oauth',
+            methodID: 'chatgpt-browser',
+            refresh: VAULT_REFRESH,
+            access: fakeJwt('acct-1', 'old', now - 3600),
+            expires: Date.now() - 3_600_000,
+            metadata: { accountID: 'acct-1' }
+          }
+        }
+      })
+      await api.ok('credential.create', {
+        body: {
+          id: 'cred_users_own_hook',
+          integrationID: 'openai',
+          label: 'my chatgpt',
+          activate: false,
+          value: {
+            type: 'oauth',
+            methodID: 'chatgpt-browser',
+            refresh: 'rt-users-own-hook-fake',
+            access: fakeJwt('acct-9', 'own', now + 86_400),
+            expires: Date.now() + 86_400_000,
+            metadata: { accountID: 'acct-9' }
+          }
+        }
+      })
+      // Stop the rig's server: only the production manager's runs on the data dir.
+      rig().feed.close()
+      await rig().server.stop()
+      const before = proxy.attempts.length
+      const env = isolatedEnv(home, proxy)
+      manager = new OpencodeServerManager({
+        locateBinaryFn: () => ({
+          command: '/usr/bin/sandbox-exec',
+          args: ['-f', sandboxProfile(home), V2_BIN]
+        }),
+        spawnFn: (launch, options) => spawnStdioServer(launch, options, { env }),
+        configInputFn: () => ({ bridgedMcp: {}, pluginDir: null }),
+        endServerFn: (child) => {
+          ends.push(endStdioServer(child))
+        },
+        serverCwd: home.workspace('server-cwd')
+      })
+      const store = new OpencodeCredentialStore({
+        connect: async () => {
+          throw new Error('not used')
+        },
+        memory: memorySlotMemory(),
+        isClaudeuiToken: (refresh) => refresh === VAULT_REFRESH
+      })
+      // The production wiring, default credential API over the server's endpoint.
+      installCopyCleanupHook(manager, store)
+      const conn = await manager.acquire(rig().cwd, { waitForHostedTools: false })
+      const client = new OpencodeClient(conn)
+      // A location activates (catalogs): the copy would be resolved now.
+      await client.integrations()
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      const ids = (await client.listCredentials()).map((row) => row.id)
+      expect(ids).not.toContain('cred_imported_hook')
+      expect(ids).toContain('cred_users_own_hook')
+      expect(proxy.attempts.slice(before)).toEqual([])
+      manager.releaseIfCurrent(rig().cwd, conn)
+      // The rig expects its own server for teardown.
+      await rig()
+        .restart()
+        .catch(() => undefined)
     })
   }
 )

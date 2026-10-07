@@ -302,7 +302,7 @@ interface ProviderOwnership {
 
 async function readProviderOwnership(): Promise<ProviderOwnership> {
   // ClaudeUI's own record (no server): only its key rows are removable.
-  const removableIds = opencodeCredentialStore.recordedKeyIntegrations()
+  const removableIds = opencodeCredentialStore.recordedRemovableIntegrations()
   let ourFileProviderIds = new Set<string>()
   let allGlobalDeclaredIds = new Set<string>()
   let otherGlobalConfigPath = ''

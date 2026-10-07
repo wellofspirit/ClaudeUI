@@ -709,6 +709,8 @@ export interface OpencodeAgentSummary {
   overridden?: boolean
   disabled?: boolean
   hidden?: boolean
+  /** opencode 2.x: the agent's OWN permission rules, in file order. */
+  rules?: { action: string; resource: string; effect: 'allow' | 'ask' | 'deny' }[]
 }
 
 export interface OpencodeAgentDetail extends OpencodeAgentSummary {
@@ -717,9 +719,15 @@ export interface OpencodeAgentDetail extends OpencodeAgentSummary {
   temperature?: number
   topP?: number
   steps?: number
+  /** opencode 2.x: the agent model's VARIANT (`model: p/m#<variant>`). */
   reasoningEffort?: string
   restrict: boolean
+  /** One effect per opencode 2.x action (shell, edit, read, …). */
   permission?: Record<string, 'allow' | 'ask' | 'deny'>
+  /** Permission rules the grid cannot show; a save keeps them. */
+  extraRules?: number
+  /** The file is in the opencode 1.x shape; saving moves it to the 2.x shape. */
+  legacy?: boolean
 }
 
 export interface OpencodeAgentInput {
@@ -737,6 +745,8 @@ export interface OpencodeAgentInput {
   hidden?: boolean
   disable?: boolean
   permission?: Record<string, 'allow' | 'ask' | 'deny'>
+  /** The agent this save replaces (a rename or a scope move): its unmodelled fields carry over. */
+  previous?: { name: string; scope: OpencodeAgentScope }
 }
 
 /**
@@ -953,6 +963,12 @@ export interface EngineConfig {
   codexConfig?: CodexEngineConfig
   /** Claude session defaults (ADR-074 §8). Lives in engines/claude.json. */
   claudeConfig?: ClaudeEngineConfig
+  /**
+   * opencode only (ADR-093 S8): the built-in tools whose top-level
+   * `{action,*,deny}` rule ClaudeUI's Tools switch wrote — the only rules the
+   * switch ever removes again.
+   */
+  opencodeToolSwitches?: string[]
 }
 
 /**
@@ -1840,11 +1856,17 @@ interface SessionAPI {
   /** Load opencode's engine-native config from opencode's own global config file. */
   loadOpencodeSettings(): Promise<OpencodeConfigSettings>
   /** Save opencode's engine-native config to opencode's own global config file. */
-  saveOpencodeSettings(settings: OpencodeConfigSettings): Promise<void>
+  /** `base`: the snapshot the caller edited — only its changes relative to it are written. */
+  saveOpencodeSettings(
+    settings: OpencodeConfigSettings,
+    base?: OpencodeConfigSettings
+  ): Promise<void>
   /** Read opencode's config file verbatim (no projection) for the schema-driven editor. */
   readOpencodeNativeRaw(): Promise<OpencodeNativeRaw>
   /** Apply leaf patches to opencode's config file, preserving comments + siblings. */
   patchOpencodeNative(patches: RawConfigPatch[]): Promise<void>
+  /** Switch an opencode 2.x built-in tool off (top-level `{action,*,deny}`) or back on. */
+  setOpencodeToolDisabled(action: string, disabled: boolean): Promise<void>
   /** Read pi's global settings.json verbatim for the curated pi Configuration panes. */
   readPiNativeRaw(): Promise<PiNativeRaw>
   /** Apply leaf patches to pi's global settings.json, preserving siblings + formatting. */

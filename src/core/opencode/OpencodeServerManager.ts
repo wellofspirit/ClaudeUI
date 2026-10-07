@@ -33,6 +33,7 @@ import { agentPermissionOverlay } from './permission-v2'
 import { harnessAvailable, harnessUnavailableMessage, resolveHarness } from '../harness/resolve'
 import { toLaunch, type HarnessLaunch } from '../harness/launch'
 import { logger } from '../services/logger'
+import { OpencodeClient } from './OpencodeClient'
 
 export type { SpawnResult, SpawnServerFn }
 export type { HostedToolsReadiness, PermissionGuard }
@@ -130,10 +131,43 @@ interface ServerHandle {
   readiness: Map<string, Promise<HostedToolsReadiness>>
   /** The plugin's permission guard per directory (only `active` results are kept). */
   guards: Map<string, Promise<PermissionGuard>>
+  /**
+   * The first-contact hook (proven-copy cleanup) succeeded on this server. Until
+   * it has, the server serves credential-route leases only: anything else could
+   * activate a location, and so resolve (and refresh) a copy (S7 review 1).
+   */
+  cleaned: boolean
+  /** The hook run in flight or last settled. */
+  cleanupRun?: { promise: Promise<boolean>; settled: boolean; startedAt: number }
+  /** One `ensureCleaned` at a time per server. */
+  ensuring?: Promise<void>
+}
+
+/** Bound on one first-contact hook run: a stuck hook never blocks a server start. */
+export const SERVER_STARTED_HOOK_TIMEOUT_MS = 5_000
+/** Back-off between the retries an acquire makes when the cleanup failed. */
+export const CLEANUP_RETRY_DELAYS_MS: readonly number[] = [500, 1_500]
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Thrown by `acquire` (and `acquireDetached`) when ClaudeUI could not check a
+ * server's credentials for copies of its own ChatGPT sign-in: such a server
+ * is not used for anything that activates a location (fail closed).
+ */
+export class OpencodeCredentialCleanupError extends Error {
+  constructor(readonly baseUrl: string) {
+    super(
+      'ClaudeUI could not check opencode’s saved credentials for a copy of its own ChatGPT sign-in, ' +
+        'so it will not open opencode sessions on that server yet (opencode could refresh the copy and ' +
+        'sign ClaudeUI out). This is usually a busy opencode database — try again in a moment.'
+    )
+    this.name = 'OpencodeCredentialCleanupError'
+  }
 }
 
 /** Where readiness and the cwd resolver send their requests. */
-interface Endpoint {
+export interface Endpoint {
   baseUrl: string
   authHeader: string
 }
@@ -267,6 +301,34 @@ export interface OpencodeServerManagerOptions {
   endServerFn?: (child: ChildProcess) => void
   /** The servers' process cwd (requests carry their own directory). Default: home. */
   serverCwd?: string
+  /** Override the config-reload calls (`session.active`, `location.reload`) — tests use a fake. */
+  configReloadOpsFn?: (endpoint: Endpoint, directory: string) => ConfigReloadOps
+}
+
+/** What `reloadConfig` asks one server. */
+export interface ConfigReloadOps {
+  /** How many sessions run an execution on the server (`GET /api/session/active`). */
+  activeExecutions(): Promise<number>
+  /** `POST /api/location/reload`. */
+  reloadLocations(): Promise<void>
+}
+
+/** What one `reloadConfig` did. */
+export interface ConfigReloadReport {
+  /** Servers whose locations were rebuilt. */
+  reloaded: number
+  /** Servers left to opencode's own config watcher because an execution was running. */
+  busy: number
+  /** Servers the reload failed on (logged). */
+  failed: number
+}
+
+function defaultConfigReloadOps(endpoint: Endpoint, directory: string): ConfigReloadOps {
+  const client = new OpencodeClient({ ...endpoint, directory })
+  return {
+    activeExecutions: async () => Object.keys(await client.activeSessions()).length,
+    reloadLocations: () => client.reloadLocation()
+  }
 }
 
 /**
@@ -301,6 +363,9 @@ export class OpencodeServerManager {
   private readonly waitGuardFn: WaitGuardFn
   private readonly endServerFn: (child: ChildProcess) => void
   private readonly serverCwd: string
+  private readonly configReloadOpsFn: (endpoint: Endpoint, directory: string) => ConfigReloadOps
+  /** Told after ClaudeUI changed opencode's config files (sessions drop their agent lists). */
+  private readonly configListeners = new Set<() => void>()
   /**
    * Cross-engine dispatch (ADR-033 M2) dependencies, threaded in from OUTSIDE
    * this module (core-services.ts, at boot) — importing `sessionManager` or
@@ -309,6 +374,7 @@ export class OpencodeServerManager {
    */
   private callerSessionLookup: CallerSessionLookup = () => undefined
   private dispatchAgentFn: DispatchAgentFn | undefined
+  private serverStartedHook: ((endpoint: Endpoint) => Promise<void>) | undefined
   /**
    * `agents.<name>.permissions` per cwd (ADR-093 §3). Default: the mode-less
    * overlay (`permission-v2.ts` `agentPermissionOverlay`).
@@ -327,6 +393,7 @@ export class OpencodeServerManager {
     this.waitGuardFn = opts.waitGuardFn ?? defaultWaitGuard
     this.endServerFn = opts.endServerFn ?? ((child) => void endStdioServer(child))
     this.serverCwd = opts.serverCwd ?? homedir()
+    this.configReloadOpsFn = opts.configReloadOpsFn ?? defaultConfigReloadOps
   }
 
   /** Wire the caller-session lookup used by the hosted `dispatch_agent` (ADR-033 M2). */
@@ -485,7 +552,8 @@ export class OpencodeServerManager {
       cwdRefs: new Map(),
       exitListeners: new Set(),
       readiness: new Map(),
-      guards: new Map()
+      guards: new Map(),
+      cleaned: !this.serverStartedHook
     }
 
     if (this.disposed) {
@@ -497,7 +565,96 @@ export class OpencodeServerManager {
       'OpencodeServerManager',
       `opencode server ${handle.baseUrl} started (config ${key}${handle.pluginExpected ? '' : ', claudeui-xeng plugin NOT found'})`
     )
+    // First contact: runs before the server is handed to anyone. A failed or
+    // stuck run leaves it uncleaned — credential-route leases only, until a
+    // retry (on the next acquire that needs more) succeeds.
+    if (!handle.cleaned) {
+      const ok = await this.boundedCleanup(handle)
+      if (!ok)
+        logger.warn(
+          'OpencodeServerManager',
+          `first-contact cleanup on ${handle.baseUrl} did not finish — no location requests until it does`
+        )
+    }
     return handle
+  }
+
+  /**
+   * The first-contact hook (S7 follow-up, ADR-093 §5): the credential store's
+   * proven-copy cleanup. 2.0.24 resolves (and so may refresh) the active OAuth
+   * credential only when a location activates its plugins; the credential
+   * routes do not activate one, so a hook using only them runs ahead of every
+   * resolution. One run, bounded by {@link SERVER_STARTED_HOOK_TIMEOUT_MS};
+   * resolves whether it succeeded (a run that outlives the bound may still
+   * succeed later and mark the server).
+   */
+  private boundedCleanup(handle: ServerHandle): Promise<boolean> {
+    const hook = this.serverStartedHook
+    if (!hook) {
+      handle.cleaned = true
+      return Promise.resolve(true)
+    }
+    let run = handle.cleanupRun
+    // A run past its bound is presumed stuck: start another (the deletions are
+    // idempotent — removing a removed id is a no-op).
+    if (!run || run.settled || Date.now() - run.startedAt >= SERVER_STARTED_HOOK_TIMEOUT_MS) {
+      const entry: { promise: Promise<boolean>; settled: boolean; startedAt: number } = {
+        promise: Promise.resolve(false),
+        settled: false,
+        startedAt: Date.now()
+      }
+      entry.promise = (async () => {
+        await hook({ baseUrl: handle.baseUrl, authHeader: handle.authHeader })
+        return true
+      })()
+        .catch((err: unknown) => {
+          logger.warn(
+            'OpencodeServerManager',
+            `first-contact cleanup failed: ${err instanceof Error ? err.name : 'error'}`
+          )
+          return false
+        })
+        .then((ok) => {
+          entry.settled = true
+          // Any run that succeeds cleans the server (a late one included).
+          if (ok) handle.cleaned = true
+          return ok
+        })
+      handle.cleanupRun = entry
+      run = entry
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    return Promise.race([
+      run.promise,
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), SERVER_STARTED_HOOK_TIMEOUT_MS)
+      })
+    ]).finally(() => clearTimeout(timer))
+  }
+
+  /**
+   * Make sure the first-contact cleanup succeeded on `handle` before it serves
+   * anything that can activate a location: retries with back-off
+   * ({@link CLEANUP_RETRY_DELAYS_MS}), then fails closed with
+   * {@link OpencodeCredentialCleanupError}. A later acquire tries again.
+   */
+  private ensureCleaned(handle: ServerHandle): Promise<void> {
+    if (handle.cleaned) return Promise.resolve()
+    handle.ensuring ??= (async () => {
+      for (let attempt = 0; attempt <= CLEANUP_RETRY_DELAYS_MS.length; attempt++) {
+        if (attempt > 0) await sleep(CLEANUP_RETRY_DELAYS_MS[attempt - 1])
+        if (handle.cleaned || (await this.boundedCleanup(handle))) return
+      }
+      throw new OpencodeCredentialCleanupError(handle.baseUrl)
+    })().finally(() => {
+      handle.ensuring = undefined
+    })
+    return handle.ensuring
+  }
+
+  /** Wire the first-contact hook (the credential store's copy cleanup, at boot). */
+  setServerStartedHook(hook: ((endpoint: Endpoint) => Promise<void>) | null): void {
+    this.serverStartedHook = hook ?? undefined
   }
 
   /** Hosted-tools readiness for one directory of one server, waited once (memoized). */
@@ -609,7 +766,16 @@ export class OpencodeServerManager {
    */
   async acquire(
     cwd: string,
-    options: { waitForHostedTools?: boolean; lingerMs?: number } = {}
+    options: {
+      waitForHostedTools?: boolean
+      lingerMs?: number
+      /**
+       * The lease only uses `/api/credential` routes, which never activate a
+       * location — the one kind served by a server whose first-contact cleanup
+       * has not succeeded (S7 review 1).
+       */
+      credentialRoutesOnly?: boolean
+    } = {}
   ): Promise<ServerConnection> {
     const directory = resolvePath(cwd)
     const input = this.configInputFn(directory)
@@ -621,6 +787,15 @@ export class OpencodeServerManager {
     }
     handle.refCount++
     handle.cwdRefs.set(directory, (handle.cwdRefs.get(directory) ?? 0) + 1)
+    if (!options.credentialRoutesOnly) {
+      try {
+        await this.ensureCleaned(handle)
+      } catch (err) {
+        // Release (and end it when this was its only lease): never hand it out.
+        this.releaseHandle(handle, directory)
+        throw err
+      }
+    }
     const turn = options.waitForHostedTools !== false
     const [hostedTools, guard] = await Promise.all([
       turn ? this.readinessFor(handle, directory) : ({ state: 'skipped' } as const),
@@ -654,6 +829,76 @@ export class OpencodeServerManager {
   }
 
   /**
+   * Subscribe to "ClaudeUI changed opencode's config": fired by every
+   * `reloadConfig`, reloaded or not (opencode's own watcher applies the files
+   * either way), so per-connection caches (a session's agent list) re-read.
+   */
+  onConfigChanged(cb: () => void): () => void {
+    this.configListeners.add(cb)
+    return () => {
+      this.configListeners.delete(cb)
+    }
+  }
+
+  /**
+   * After ClaudeUI wrote opencode's config (ADR-093 S8): rebuild every pooled
+   * server's locations with `POST /api/location/reload`, then re-run each held
+   * directory's hosted-tools readiness (the reload reconnects MCP) and drop its
+   * permission-guard memo (the plugin registers again).
+   *
+   * A server with a running execution is NOT reloaded: a reload cancels pending
+   * permission asks and forms ("Interaction cancelled because the location shut
+   * down" — the tool fails, the turn goes on without the user's answer).
+   * opencode's own config watcher applies the written files there anyway
+   * (config documents, agent and provider definitions, ~0.5 s); the reload is
+   * what makes the change deterministic where nothing is in flight. Residual: an
+   * execution that starts between the check and the reload (well under a
+   * second) can lose an ask the same way. Detached servers are short-lived and
+   * left alone. Never throws.
+   */
+  async reloadConfig(): Promise<ConfigReloadReport> {
+    const report: ConfigReloadReport = { reloaded: 0, busy: 0, failed: 0 }
+    for (const handle of [...this.handles.values()]) {
+      const directories = [...handle.cwdRefs.keys()]
+      const ops = this.configReloadOpsFn(handle, directories[0] ?? this.serverCwd)
+      try {
+        // A reload activates locations: never on a server not cleaned yet (S7).
+        await this.ensureCleaned(handle)
+        const running = await ops.activeExecutions()
+        if (running > 0) {
+          report.busy++
+          logger.info(
+            'OpencodeServerManager',
+            `config changed: ${handle.baseUrl} not reloaded (${running} running execution(s)); opencode's config watcher applies it`
+          )
+          continue
+        }
+        await ops.reloadLocations()
+        report.reloaded++
+        for (const directory of directories) {
+          handle.readiness.delete(directory)
+          handle.guards.delete(directory)
+        }
+        await Promise.all(directories.map((directory) => this.readinessFor(handle, directory)))
+      } catch (err) {
+        report.failed++
+        logger.warn(
+          'OpencodeServerManager',
+          `config reload on ${handle.baseUrl} failed: ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+    }
+    for (const cb of [...this.configListeners]) {
+      try {
+        cb()
+      } catch (err) {
+        logger.warn('OpencodeServerManager', `config listener threw: ${String(err)}`)
+      }
+    }
+    return report
+  }
+
+  /**
    * A server for `cwd` of its OWN — never the pooled one, never shared — that
    * lives until its `release()`. For reads that must answer from the opencode
    * ClaudeUI runs NOW (model discovery). Spawned from the resolver's current
@@ -663,6 +908,13 @@ export class OpencodeServerManager {
     const directory = resolvePath(cwd)
     const input = this.configInputFn(directory)
     const handle = await this.startServer(configIdentity(input), input)
+    try {
+      await this.ensureCleaned(handle)
+    } catch (err) {
+      this.endServerFn(handle.process)
+      handle.mcpHost.close().catch(() => {})
+      throw err
+    }
     this.detached.add(handle)
     handle.process.on('exit', () => {
       if (this.detached.delete(handle)) handle.mcpHost.close().catch(() => {})

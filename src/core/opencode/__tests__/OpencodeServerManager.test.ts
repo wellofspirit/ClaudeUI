@@ -5,10 +5,14 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import {
   OpencodeServerManager,
   OpencodePermissionGuardError,
+  SERVER_STARTED_HOOK_TIMEOUT_MS,
+  CLEANUP_RETRY_DELAYS_MS,
+  OpencodeCredentialCleanupError,
   locatePluginDir
 } from '../OpencodeServerManager'
 import type {
   HostedToolsReadiness,
+  OpencodeServerManagerOptions,
   ServerConnection,
   SpawnResult,
   SpawnServerFn,
@@ -107,6 +111,7 @@ function makeRig(
     waitReadyFn?: WaitReadyFn
     waitGuardFn?: WaitGuardFn
     locateBinaryFn?: () => string
+    configReloadOpsFn?: OpencodeServerManagerOptions['configReloadOpsFn']
   } = {}
 ): Rig {
   const { spawnFn, calls } = makeSpawnFn(opts.delayMs)
@@ -126,7 +131,8 @@ function makeRig(
       }),
     waitGuardFn: opts.waitGuardFn ?? (async () => ({ state: 'active', elapsedMs: 0 })),
     endServerFn: (child) => child.kill(),
-    serverCwd: '/server-home'
+    serverCwd: '/server-home',
+    configReloadOpsFn: opts.configReloadOpsFn
   })
   return { manager, calls, hosts, waits, configs }
 }
@@ -599,6 +605,90 @@ describe('OpencodeServerManager (2.x) — hosted-tools readiness', () => {
   })
 })
 
+describe('OpencodeServerManager (2.x) — config reload (S8)', () => {
+  function reloadRig(active: number[]) {
+    const reloads: string[] = []
+    const asked: string[] = []
+    let call = 0
+    const rig = makeRig({
+      configReloadOpsFn: (endpoint, directory) => ({
+        activeExecutions: async () => {
+          asked.push(`${endpoint.baseUrl} ${directory}`)
+          return active[call++] ?? 0
+        },
+        reloadLocations: async () => {
+          reloads.push(endpoint.baseUrl)
+        }
+      })
+    })
+    return { ...rig, reloads, asked }
+  }
+
+  it('reloads an idle server, re-waits every held directory and re-probes the guard', async () => {
+    const waitGuard = vi.fn(async () => ({ state: 'active' as const, elapsedMs: 0 }))
+    const reloads: string[] = []
+    const { manager, waits } = makeRig({
+      waitGuardFn: waitGuard,
+      configReloadOpsFn: (endpoint) => ({
+        activeExecutions: async () => 0,
+        reloadLocations: async () => {
+          reloads.push(endpoint.baseUrl)
+        }
+      })
+    })
+    await manager.acquire('/a')
+    await manager.acquire('/b')
+    const changed = vi.fn()
+    manager.onConfigChanged(changed)
+    waits.length = 0
+    await expect(manager.reloadConfig()).resolves.toEqual({ reloaded: 1, busy: 0, failed: 0 })
+    expect(reloads).toHaveLength(1)
+    expect(waits.map((w) => w.directory).sort()).toEqual(['/a', '/b'])
+    expect(changed).toHaveBeenCalledTimes(1)
+    await manager.acquire('/a')
+    expect(waitGuard).toHaveBeenCalledTimes(3) // /a, /b, then /a again after the reload
+  })
+
+  it('never reloads a server with a running execution (a reload cancels pending asks), but still notifies', async () => {
+    vi.spyOn(logger, 'info').mockImplementation(() => {})
+    const { manager, reloads, waits } = reloadRig([2])
+    await manager.acquire('/a')
+    const changed = vi.fn()
+    manager.onConfigChanged(changed)
+    waits.length = 0
+    await expect(manager.reloadConfig()).resolves.toEqual({ reloaded: 0, busy: 1, failed: 0 })
+    expect(reloads).toHaveLength(0)
+    expect(waits).toHaveLength(0)
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('a failing server is reported, never thrown, and the others still reload', async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    let n = 0
+    const { manager, configs } = makeRig({
+      configReloadOpsFn: () => ({
+        activeExecutions: async () => {
+          if (n++ === 0) throw new Error('boom')
+          return 0
+        },
+        reloadLocations: async () => {}
+      })
+    })
+    configs.set('/b', { pluginDir: '/other' })
+    await manager.acquire('/a')
+    await manager.acquire('/b')
+    await expect(manager.reloadConfig()).resolves.toEqual({ reloaded: 1, busy: 0, failed: 1 })
+  })
+
+  it('an unsubscribed listener is not told', async () => {
+    const { manager } = reloadRig([])
+    const cb = vi.fn()
+    manager.onConfigChanged(cb)()
+    await manager.reloadConfig()
+    expect(cb).not.toHaveBeenCalled()
+  })
+})
+
 describe('OpencodeServerManager (2.x) — exit fan-out', () => {
   it('subscribeExit fires on an unexpected exit; the handle is dropped and its MCP host closed', async () => {
     vi.spyOn(logger, 'warn').mockImplementation(() => {})
@@ -672,6 +762,121 @@ describe('OpencodeServerManager (2.x) — exit fan-out', () => {
   it('subscribeExit with nothing live returns a no-op unsubscribe', () => {
     const { manager } = makeRig()
     expect(() => manager.subscribeExit('/nope', () => {})()).not.toThrow()
+  })
+})
+
+describe('OpencodeServerManager (2.x) — first-contact hook (S7 follow-up)', () => {
+  it('runs on every new server BEFORE any readiness request or lease, once per server', async () => {
+    const order: string[] = []
+    const { manager } = makeRig({
+      waitReadyFn: async () => {
+        order.push('readiness')
+        return READY
+      }
+    })
+    manager.setServerStartedHook(async (endpoint) => {
+      order.push(`hook ${endpoint.baseUrl}`)
+    })
+    const a = await manager.acquire('/a')
+    order.push('leased')
+    await manager.acquire('/a')
+    expect(order).toEqual([`hook ${a.baseUrl}`, 'readiness', 'leased'])
+  })
+
+  it('a failing hook: no location request (readiness) until a retry succeeds', async () => {
+    vi.useFakeTimers()
+    try {
+      const order: string[] = []
+      const { manager, waits } = makeRig()
+      let runs = 0
+      manager.setServerStartedHook(async () => {
+        runs++
+        order.push(`hook ${runs}`)
+        if (runs < 2) throw new Error('SQLITE_BUSY')
+      })
+      const leased = manager.acquire('/a')
+      await vi.advanceTimersByTimeAsync(CLEANUP_RETRY_DELAYS_MS[0])
+      await expect(leased).resolves.toMatchObject({ directory: '/a' })
+      expect(runs).toBe(2)
+      expect(waits).toHaveLength(1) // readiness only after the successful retry
+      // Cleaned now: the next acquire runs no hook.
+      await manager.acquire('/a')
+      expect(runs).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a stuck hook keeps the server uncleaned past its bound; the acquire waits for the retry', async () => {
+    vi.useFakeTimers()
+    try {
+      const { manager, waits } = makeRig()
+      let release!: () => void
+      let runs = 0
+      manager.setServerStartedHook(() => {
+        runs++
+        return runs === 1 ? new Promise<void>(() => {}) : new Promise<void>((r) => (release = r))
+      })
+      const leased = manager.acquire('/a', { waitForHostedTools: false })
+      await vi.advanceTimersByTimeAsync(
+        SERVER_STARTED_HOOK_TIMEOUT_MS * 2 + CLEANUP_RETRY_DELAYS_MS[0]
+      )
+      expect(waits).toHaveLength(0)
+      let resolved = false
+      void leased.then(() => (resolved = true))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(resolved).toBe(false)
+      release()
+      await vi.advanceTimersByTimeAsync(0)
+      await expect(leased).resolves.toMatchObject({ directory: '/a' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('persistent failure fails CLOSED with a clear error; credential-route leases still work; a later acquire retries', async () => {
+    vi.useFakeTimers()
+    try {
+      const { manager, calls, waits } = makeRig()
+      let broken = true
+      manager.setServerStartedHook(async () => {
+        if (broken) throw new Error('SQLITE_BUSY')
+      })
+      const reads = await manager.acquire('/p', {
+        waitForHostedTools: false,
+        credentialRoutesOnly: true
+      })
+      expect(reads.baseUrl).toBe(calls[0] && reads.baseUrl)
+      const turn = manager.acquire('/a')
+      const caught = turn.catch((err: unknown) => err)
+      await vi.advanceTimersByTimeAsync(
+        CLEANUP_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0) + SERVER_STARTED_HOOK_TIMEOUT_MS
+      )
+      expect(await caught).toBeInstanceOf(OpencodeCredentialCleanupError)
+      expect(waits).toHaveLength(0)
+      expect(calls[0].child.killed).toBe(false) // the credential lease still holds it
+      broken = false
+      await expect(manager.acquire('/a')).resolves.toMatchObject({ directory: '/a' })
+      expect(waits).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a detached server that cannot be cleaned is ended, never handed out', async () => {
+    vi.useFakeTimers()
+    try {
+      const { manager, calls } = makeRig()
+      manager.setServerStartedHook(async () => {
+        throw new Error('no')
+      })
+      const detached = manager.acquireDetached('/d').catch((err: unknown) => err)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(await detached).toBeInstanceOf(OpencodeCredentialCleanupError)
+      expect(calls[0].child.killed).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

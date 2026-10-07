@@ -33,6 +33,7 @@ import type { Integration_Info, Integration_Method } from '../opencode/protocol-
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
 import { logger } from '../services/logger'
+import { logSafeError } from '../services/redact-secrets'
 import { removalCaller } from './removal-caller'
 import type { VendorAuthMap, VendorAuthOption, AccountRef, AuthState } from '../../shared/types'
 import { nativeAccountKey, type AccountIdentity } from '../../shared/account-key'
@@ -78,6 +79,8 @@ interface OauthHold {
   mode: 'auto' | 'code'
   expires: number
   released: boolean
+  /** The attempt's one-off label and the row active before it (provenance, S7 follow-up). */
+  signin: { label: string; previousActive?: string }
 }
 
 export class OpencodeAuthProvider implements EngineAuthProvider {
@@ -183,7 +186,7 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
   /** Vendors where ClaudeUI holds an API-key row it can remove (`cred_claudeui_*`). */
   async listRemovableVendorIds(): Promise<Set<string>> {
     // ClaudeUI's own record: no server needed.
-    return opencodeCredentialStore.recordedKeyIntegrations()
+    return opencodeCredentialStore.recordedRemovableIntegrations()
   }
 
   async oauthAuthorize(
@@ -192,6 +195,9 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
     inputs?: Record<string, string>
   ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }> {
     await this.cancelVendorOauth()
+    // The row this sign-in creates is ClaudeUI's (owner decision 2026-10-07):
+    // found afterwards by the attempt's one-off label, race-free.
+    const signin = await opencodeCredentialStore.prepareSignin(vendorId)
     const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, NO_TURN)
     const client = new OpencodeClient(conn)
     try {
@@ -206,6 +212,7 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
           params: { integrationID: vendorId },
           body: {
             methodID: chosen.id,
+            label: signin.label,
             ...(inputs && Object.keys(inputs).length > 0 ? { answer: inputs } : {})
           }
         })
@@ -218,7 +225,8 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
         attemptID: attempt.attemptID,
         mode: attempt.mode,
         expires: Number.isFinite(expires) ? expires : Date.now() + 10 * 60_000,
-        released: false
+        released: false,
+        signin
       }
       return { url: attempt.url, method: attempt.mode, instructions: attempt.instructions }
     } catch (err) {
@@ -229,8 +237,9 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
 
   /**
    * Finish the attempt `oauthAuthorize` started: submit the pasted code, or
-   * wait for the browser/device flow to complete. The row opencode stores is
-   * opencode's own sign-in.
+   * wait for the browser/device flow to complete. The row opencode stores
+   * (opencode's id) is recorded as ClaudeUI's: removed with the provider, and
+   * the slot given back to the row active before it.
    */
   async oauthCallback(vendorId: string, _method: number, code?: string): Promise<boolean> {
     const hold = this.oauthHold
@@ -249,6 +258,14 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
           await sleep(OAUTH_POLL_MS)
         }
       }
+      await opencodeCredentialStore
+        .adoptSignin(vendorId, hold.signin.label, hold.signin.previousActive)
+        .catch((err: unknown) =>
+          logger.warn(
+            'OpencodeAuth',
+            `recording the ${vendorId} sign-in failed: ${logSafeError(err)}`
+          )
+        )
       this.invalidateCache()
       invalidateOpencodeModelCache()
       await opencodeCredentialStore.snapshot().catch(() => null)
@@ -278,10 +295,21 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
    */
   async removeVendorAuth(vendorId: string): Promise<void> {
     // A removal always leaves a trace: the vendor and the call site, never the key.
+    const context = `remove ${vendorId} (${removalCaller()})`
+    await opencodeCredentialStore.removeSlot(vendorId, 'key', context)
+    // A sign-in the user started from ClaudeUI is ClaudeUI's too (by provenance).
+    await opencodeCredentialStore.removeSlot(vendorId, 'signin', context)
+  }
+
+  /**
+   * Remove ClaudeUI's API key only (a shared provider's route) — a sign-in the
+   * user started from ClaudeUI's provider screen is not that route's to take.
+   */
+  async removeVendorKey(vendorId: string): Promise<void> {
     await opencodeCredentialStore.removeSlot(
       vendorId,
       'key',
-      `remove ${vendorId} (${removalCaller()})`
+      `remove ${vendorId} key (${removalCaller()})`
     )
   }
 

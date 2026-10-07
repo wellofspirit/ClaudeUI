@@ -98,6 +98,11 @@ export function fakeCredentialTable(): FakeCredentialTable {
       maybeFail('activate')
       const row = rows.find((candidate) => candidate.entry.id === id)
       if (row) setActive(row.entry.integrationID, id)
+    },
+    relabel: async (id, label) => {
+      calls.push(`relabel ${id}`)
+      const row = rows.find((candidate) => candidate.entry.id === id)
+      if (row) row.entry = { ...row.entry, label }
     }
   }
   return {

@@ -37,6 +37,7 @@
  * keys); `readActiveKey` is the one method that returns a secret (MAIN process,
  * for ADR-074 §6 adoption). Nothing here logs a value.
  */
+import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -63,14 +64,55 @@ export const CHATGPT_METHOD_ID = 'chatgpt-browser'
 /** How far past the token's real expiry the vended `expires` lies (owner decision, §5). */
 export const CHATGPT_EXPIRY_PADDING_MS = 24 * 60 * 60 * 1000
 
-export type CredentialKind = 'key' | 'oauth'
+/**
+ * A slot's kind: ClaudeUI's own API key or ChatGPT row (`cred_claudeui_*`),
+ * or `signin` — rows opencode created with ids of its own for a sign-in the
+ * user started from ClaudeUI (ids recorded, provenance-based).
+ */
+export type CredentialKind = 'key' | 'oauth' | 'signin'
 
-/** The four operations ClaudeUI needs (`OpencodeClient` supplies them). */
+/** The operations ClaudeUI needs (`OpencodeClient` supplies them). */
 export interface CredentialApi {
   list(): Promise<readonly Credential_Entry[]>
   create(input: Credential_CreateInput): Promise<Credential_Entry>
   remove(id: string): Promise<void>
   activate(id: string): Promise<void>
+  /** Labels only (opencode ignores a value in a PATCH). Optional: a sign-in keeps its label without it. */
+  relabel?(id: string, label: string): Promise<void>
+}
+
+/** The label a ClaudeUI-started sign-in row carries once adopted. */
+export const SIGNIN_LABEL = 'ClaudeUI sign-in'
+/** How long an attempt's label waits for a row a late-completing flow creates. */
+export const SIGNIN_PENDING_TTL_MS = 60 * 60 * 1000
+
+/** The label an adopted sign-in row keeps: readable, and still carrying the attempt's id. */
+export function adoptedSigninLabel(hex: string): string {
+  return `${SIGNIN_LABEL} · ${hex}`
+}
+
+/**
+ * A sign-in label ClaudeUI generated (S7 review 3/4). `id` once a row was
+ * adopted; pending until then (expires after {@link SIGNIN_PENDING_TTL_MS}).
+ * Kept apart from the slot records, so a quarantined slot file does not lose
+ * them: they are what a rebuild recovers sign-in rows from — never a label
+ * alone, only one ClaudeUI remembers generating.
+ */
+export interface SigninLabel {
+  readonly integrationID: string
+  readonly hex: string
+  readonly at: number
+  readonly previousActive?: string
+  readonly id?: string
+}
+/** The one-off label a sign-in attempt is started with, so its row is found race-free. */
+export const SIGNIN_LABEL_PREFIX = 'claudeui:signin:'
+
+/** The last proven-copy cleanup (ids only, never a value). */
+export interface CopyCleanupRecord {
+  readonly at: number
+  readonly count: number
+  readonly ids: readonly string[]
 }
 
 export interface CredentialLease {
@@ -84,6 +126,8 @@ export interface SlotRecord {
   previousActive?: string
   /** A removal that could not run (opencode not installed) and waits for it. */
   pendingRemoval?: true
+  /** `signin` slots: the opencode-chosen ids of rows a ClaudeUI-started sign-in created. */
+  ids?: string[]
 }
 
 export type SlotRecords = Record<string, SlotRecord>
@@ -97,6 +141,12 @@ export interface SlotMemory {
    * store rebuilds the records from the live `cred_claudeui_*` rows.
    */
   takeRebuild?(): boolean
+  /** The last proven-copy cleanup (absent: none recorded yet). */
+  readCleanup?(): CopyCleanupRecord | undefined
+  writeCleanup?(record: CopyCleanupRecord): void
+  /** The sign-in labels ClaudeUI generated (pending and adopted). */
+  readSigninLabels?(): SigninLabel[]
+  writeSigninLabels?(labels: readonly SigninLabel[]): void
 }
 
 /** Decides whether a refresh token is one ClaudeUI manages (the vault's, or a 1.x copy it fed). */
@@ -206,7 +256,11 @@ function kindOf(value: Credential_Value): CredentialKind {
   return value.type === 'oauth' ? 'oauth' : 'key'
 }
 
-function inSlot(row: Credential_Entry, integrationID: string, kind: CredentialKind): boolean {
+function inSlot(
+  row: Credential_Entry,
+  integrationID: string,
+  kind: Exclude<CredentialKind, 'signin'>
+): boolean {
   return (
     isClaudeuiCredentialId(row.id) &&
     row.integrationID === integrationID &&
@@ -243,7 +297,11 @@ function identityOf(row: Credential_Entry | undefined, integrationID: string): A
 }
 
 /** Reduce a credential list to what ClaudeUI may keep in memory: types, ownership, identities. */
-export function snapshotOf(rows: readonly Credential_Entry[], at: number): CredentialSnapshot {
+export function snapshotOf(
+  rows: readonly Credential_Entry[],
+  at: number,
+  owned: (id: string) => boolean = isClaudeuiCredentialId
+): CredentialSnapshot {
   const byIntegration = new Map<string, Credential_Entry[]>()
   for (const row of rows) {
     const list = byIntegration.get(row.integrationID) ?? []
@@ -255,7 +313,7 @@ export function snapshotOf(rows: readonly Credential_Entry[], at: number): Crede
     const active = list.find((row) => row.active)
     integrations.set(integrationID, {
       ...(active ? { activeType: active.value.type === 'oauth' ? 'oauth' : 'api' } : {}),
-      activeOwned: !!active && isClaudeuiCredentialId(active.id),
+      activeOwned: !!active && owned(active.id),
       ownKey: list.some((row) => inSlot(row, integrationID, 'key')),
       ownOauth: list.some((row) => inSlot(row, integrationID, 'oauth')),
       identity: identityOf(active, integrationID)
@@ -286,10 +344,20 @@ export function removableVendors(snapshot: CredentialSnapshot | null): Set<strin
 /** In-memory slot records (tests; production wires the file). */
 export function memorySlotMemory(initial: SlotRecords = {}): SlotMemory {
   let records: SlotRecords = structuredClone(initial)
+  let cleanup: CopyCleanupRecord | undefined
+  let labels: SigninLabel[] = []
   return {
     read: () => structuredClone(records),
     write: (next) => {
       records = structuredClone(next)
+    },
+    readCleanup: () => cleanup,
+    writeCleanup: (record) => {
+      cleanup = structuredClone(record)
+    },
+    readSigninLabels: () => structuredClone(labels),
+    writeSigninLabels: (next) => {
+      labels = structuredClone([...next])
     }
   }
 }
@@ -305,6 +373,7 @@ function defaultSlotPath(): string {
  */
 export function fileSlotMemory(filePath?: string): SlotMemory {
   const file = (): string => filePath ?? defaultSlotPath()
+  const signinFile = (): string => file().replace(/\.json$/, '') + '.signins.json'
   let rebuild = false
   /** Move a corrupt file aside (never lose it, never block a vend on it). */
   const quarantine = (reason: string): void => {
@@ -320,27 +389,56 @@ export function fileSlotMemory(filePath?: string): SlotMemory {
       `${file()} was unreadable (${reason}) — moved to ${aside}; rebuilding from opencode's cred_claudeui_* rows`
     )
   }
+  /** The whole file: `{slots, copyCleanup?}`; {} when absent or quarantined. */
+  const load = (): { slots: SlotRecords; copyCleanup?: CopyCleanupRecord } => {
+    let raw: string
+    try {
+      raw = fs.readFileSync(file(), 'utf8')
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT')
+        logger.warn('OpencodeCredentials', `unreadable ${file()}: ${errText(err)}`)
+      return { slots: {} }
+    }
+    try {
+      const parsed = JSON.parse(raw) as { slots?: unknown; copyCleanup?: CopyCleanupRecord } | null
+      const slots = parsed?.slots
+      if (slots && typeof slots === 'object' && !Array.isArray(slots))
+        return {
+          slots: slots as SlotRecords,
+          ...(parsed?.copyCleanup ? { copyCleanup: parsed.copyCleanup } : {})
+        }
+      quarantine('no slots object')
+    } catch {
+      quarantine('not JSON')
+    }
+    return { slots: {} }
+  }
   return {
-    read: () => {
-      let raw: string
-      try {
-        raw = fs.readFileSync(file(), 'utf8')
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT')
-          logger.warn('OpencodeCredentials', `unreadable ${file()}: ${errText(err)}`)
-        return {}
-      }
-      try {
-        const parsed: unknown = JSON.parse(raw)
-        const slots = (parsed as { slots?: unknown } | null)?.slots
-        if (slots && typeof slots === 'object' && !Array.isArray(slots)) return slots as SlotRecords
-        quarantine('no slots object')
-      } catch {
-        quarantine('not JSON')
-      }
-      return {}
+    read: () => load().slots,
+    write: (records) => {
+      const { copyCleanup } = load()
+      writeJsonAtomic(
+        file(),
+        { slots: records, ...(copyCleanup ? { copyCleanup } : {}) },
+        {
+          indent: 2
+        }
+      )
     },
-    write: (records) => writeJsonAtomic(file(), { slots: records }, { indent: 2 }),
+    readCleanup: () => load().copyCleanup,
+    // A sibling file: survives a quarantine of the slot file (S7 review 4).
+    readSigninLabels: () => {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(signinFile(), 'utf8')) as { labels?: unknown }
+        return Array.isArray(parsed?.labels) ? (parsed.labels as SigninLabel[]) : []
+      } catch {
+        return []
+      }
+    },
+    writeSigninLabels: (labels) =>
+      writeJsonAtomic(signinFile(), { labels: [...labels] }, { indent: 2 }),
+    writeCleanup: (record) =>
+      writeJsonAtomic(file(), { slots: load().slots, copyCleanup: record }, { indent: 2 }),
     takeRebuild: () => {
       const due = rebuild
       rebuild = false
@@ -362,6 +460,8 @@ export class OpencodeCredentialStore {
   private vended: VendedChatgpt | null = null
   private readonly listeners = new Set<() => void>()
   private isClaudeuiToken: ClaudeuiTokenCheck | undefined
+  /** Whether this process ran the proven-copy cleanup through its own lease yet. */
+  private copiesCleaned = false
 
   constructor(deps: OpencodeCredentialStoreDeps) {
     this.connect = deps.connect
@@ -392,13 +492,211 @@ export class OpencodeCredentialStore {
       })
   }
 
-  /** Integrations where ClaudeUI's record holds an API-key slot (no server). */
-  recordedKeyIntegrations(): Set<string> {
+  /**
+   * Integrations where ClaudeUI's record holds something Remove deletes — its
+   * API key, or a sign-in started from ClaudeUI (no server).
+   */
+  recordedRemovableIntegrations(): Set<string> {
     return new Set(
       this.recordedSlots()
-        .filter((slot) => slot.kind === 'key')
+        .filter((slot) => slot.kind === 'key' || slot.kind === 'signin')
         .map((slot) => slot.integrationID)
     )
+  }
+
+  /** Whether the copy recogniser is wired (the first-contact hook refuses to run without it). */
+  recognisesCopies(): boolean {
+    return !!this.isClaudeuiToken
+  }
+
+  /** Every id ClaudeUI owns by provenance (ClaudeUI-started sign-ins). */
+  private signinIds(): Set<string> {
+    const ids = new Set<string>()
+    for (const [key, record] of Object.entries(this.memory.read()))
+      if (key.endsWith(':signin')) for (const id of record.ids ?? []) ids.add(id)
+    return ids
+  }
+
+  /** A row ClaudeUI owns: a `cred_claudeui_*` id, or a recorded ClaudeUI-started sign-in. */
+  private ownedBy(): (id: string) => boolean {
+    const signins = this.signinIds()
+    return (id) => isClaudeuiCredentialId(id) || signins.has(id)
+  }
+
+  /** The rows of one of ClaudeUI's slots. */
+  private slotRows(
+    rows: readonly Credential_Entry[],
+    integrationID: string,
+    kind: CredentialKind
+  ): Credential_Entry[] {
+    if (kind !== 'signin') return rows.filter((row) => inSlot(row, integrationID, kind))
+    const ids = new Set(this.memory.read()[slotKey(integrationID, 'signin')]?.ids ?? [])
+    return rows.filter((row) => row.integrationID === integrationID && ids.has(row.id))
+  }
+
+  // ── Sign-ins started from ClaudeUI (provenance ownership) ─────────────────
+
+  /**
+   * Before a sign-in the user starts from ClaudeUI: a one-off label for the
+   * attempt (opencode stores an attempt's label on the row it creates, so the
+   * row is found by it, race-free against the user's own opencode), and the
+   * row active before it — the one to give the slot back to.
+   */
+  async prepareSignin(integrationID: string): Promise<{ label: string; previousActive?: string }> {
+    const hex = randomBytes(8).toString('hex')
+    const label = `${SIGNIN_LABEL_PREFIX}${hex}`
+    let previousActive: string | undefined
+    if (this.available())
+      previousActive = await this.exclusive(async (api) => {
+        const owned = this.ownedBy()
+        const active = (await api.list()).find(
+          (row) => row.integrationID === integrationID && row.active
+        )
+        return active && !owned(active.id) ? active.id : undefined
+      })
+    // Remembered BEFORE the flow starts: a row it creates later — even after
+    // the hold expired — is adopted by this exact label (S7 review 3).
+    this.writeLabels([
+      ...this.readLabels(),
+      { integrationID, hex, at: this.now(), ...(previousActive ? { previousActive } : {}) }
+    ])
+    return { label, ...(previousActive ? { previousActive } : {}) }
+  }
+
+  /**
+   * After the sign-in completed: the row carrying the attempt's label is
+   * ClaudeUI's (recorded by id; relabelled `ClaudeUI sign-in · <hex>`, so it
+   * still carries the attempt's id). Nothing else is claimed. Resolves the
+   * adopted id, or null when no such row exists (yet: a pending label is
+   * adopted by a later operation).
+   */
+  async adoptSignin(
+    integrationID: string,
+    label: string,
+    previousActive?: string
+  ): Promise<string | null> {
+    const id = await this.exclusive(async (api) => {
+      const hex = label.startsWith(SIGNIN_LABEL_PREFIX)
+        ? label.slice(SIGNIN_LABEL_PREFIX.length)
+        : ''
+      const known = this.readLabels().find(
+        (entry) => entry.integrationID === integrationID && entry.hex === hex
+      )
+      return this.adoptRow(api, await api.list(), {
+        integrationID,
+        hex,
+        at: known?.at ?? this.now(),
+        ...((previousActive ?? known?.previousActive)
+          ? { previousActive: previousActive ?? known?.previousActive }
+          : {})
+      })
+    })
+    if (id) this.notify()
+    return id
+  }
+
+  private readLabels(): SigninLabel[] {
+    return this.memory.readSigninLabels?.() ?? []
+  }
+
+  private writeLabels(labels: readonly SigninLabel[]): void {
+    this.memory.writeSigninLabels?.(labels)
+  }
+
+  /** Adopt the row of one generated label (by its exact raw or adopted label), if there is one. */
+  private async adoptRow(
+    api: CredentialApi,
+    rows: readonly Credential_Entry[],
+    entry: SigninLabel
+  ): Promise<string | null> {
+    if (!entry.hex) return null
+    const row = rows.find(
+      (candidate) =>
+        candidate.integrationID === entry.integrationID &&
+        (candidate.label === `${SIGNIN_LABEL_PREFIX}${entry.hex}` ||
+          candidate.label === adoptedSigninLabel(entry.hex))
+    )
+    if (!row) return null
+    this.updateRecord(slotKey(entry.integrationID, 'signin'), (record) => ({
+      ...(record?.previousActive
+        ? { previousActive: record.previousActive }
+        : entry.previousActive
+          ? { previousActive: entry.previousActive }
+          : {}),
+      ...(record?.pendingRemoval ? { pendingRemoval: true as const } : {}),
+      ids: [...new Set([...(record?.ids ?? []), row.id])]
+    }))
+    this.writeLabels(
+      this.readLabels()
+        .filter(
+          (known) => !(known.integrationID === entry.integrationID && known.hex === entry.hex)
+        )
+        .concat({ ...entry, id: row.id })
+    )
+    if (row.label !== adoptedSigninLabel(entry.hex))
+      await api
+        .relabel?.(row.id, adoptedSigninLabel(entry.hex))
+        .catch((err: unknown) =>
+          logger.warn('OpencodeCredentials', `relabel ${row.id} failed: ${errText(err)}`)
+        )
+    logger.info('OpencodeCredentials', `${row.id}: a sign-in started from ClaudeUI — ClaudeUI's`)
+    return row.id
+  }
+
+  /**
+   * Every operation: adopt rows that late-completing flows created for a
+   * pending label, and expire labels that waited too long (S7 review 3).
+   */
+  private async adoptPendingSignins(api: CredentialApi): Promise<void> {
+    const labels = this.readLabels()
+    const pending = labels.filter((entry) => !entry.id)
+    if (pending.length === 0) return
+    const fresh = pending.filter((entry) => this.now() - entry.at <= SIGNIN_PENDING_TTL_MS)
+    if (fresh.length !== pending.length)
+      this.writeLabels(labels.filter((entry) => entry.id || fresh.includes(entry)))
+    if (fresh.length === 0) return
+    const rows = await api.list()
+    let adopted = false
+    for (const entry of fresh) if (await this.adoptRow(api, rows, entry)) adopted = true
+    if (adopted) this.notify()
+  }
+
+  // ── Proven copies of ClaudeUI's own sign-in ──────────────────────────────
+
+  /**
+   * Delete every row that is PROVEN to be a copy of ClaudeUI's own ChatGPT
+   * sign-in: not ClaudeUI's, and carrying a refresh token ClaudeUI manages
+   * (the vault's, or one it fed the 1.x `auth.json`). An unproven row is never
+   * touched. Logged by id and reason only; the run is recorded (time, count,
+   * ids). Runs on `api` directly: the server-started hook calls it before the
+   * server is handed to anyone.
+   */
+  async deleteProvenCopies(api: CredentialApi, context: string): Promise<number> {
+    const check = this.isClaudeuiToken
+    if (!check) return 0
+    const rows = await api.list()
+    const copies: Credential_Entry[] = []
+    for (const row of rows) if (await this.isCopy(row, check)) copies.push(row)
+    // Inactive first: deleting an active one promotes another, maybe a copy.
+    for (const row of copies.sort((a, b) => Number(a.active) - Number(b.active))) {
+      await api.remove(row.id)
+      logger.info(
+        'OpencodeCredentials',
+        `${context}: deleted ${row.id} — a copy of ClaudeUI's own ChatGPT sign-in (its refresh token is ClaudeUI's)`
+      )
+    }
+    if (copies.length > 0) {
+      // Only a run that deleted something is recorded: an empty run (every
+      // server start) must not overwrite what was deleted (S7 review 2).
+      this.memory.writeCleanup?.({
+        at: this.now(),
+        count: copies.length,
+        ids: copies.map((r) => r.id)
+      })
+      this.cached = snapshotOf(await api.list(), this.now(), this.ownedBy())
+      this.notify()
+    }
+    return copies.length
   }
 
   /**
@@ -409,7 +707,7 @@ export class OpencodeCredentialStore {
     if (!this.available()) return new Map()
     return this.exclusive(async (api) => {
       const rows = await api.list()
-      this.cached = snapshotOf(rows, this.now())
+      this.cached = snapshotOf(rows, this.now(), this.ownedBy())
       const keys = new Map<string, string>()
       for (const row of rows)
         if (row.active && row.value.type === 'key' && row.value.key)
@@ -431,7 +729,7 @@ export class OpencodeCredentialStore {
     row: Credential_Entry | undefined,
     check: ClaudeuiTokenCheck | undefined
   ): Promise<boolean> {
-    const refresh = row && !isClaudeuiCredentialId(row.id) ? refreshable(row) : null
+    const refresh = row && !this.ownedBy()(row.id) ? refreshable(row) : null
     return !!refresh && !!check && (await check(refresh))
   }
 
@@ -455,7 +753,7 @@ export class OpencodeCredentialStore {
   async snapshot(): Promise<CredentialSnapshot | null> {
     if (!this.available()) return this.cached
     return this.exclusive(async (api) => {
-      this.cached = snapshotOf(await api.list(), this.now())
+      this.cached = snapshotOf(await api.list(), this.now(), this.ownedBy())
       return this.cached
     })
   }
@@ -608,6 +906,22 @@ export class OpencodeCredentialStore {
       const lease = await this.connect()
       try {
         if (this.memory.takeRebuild?.()) await this.rebuildRecords(lease.api)
+        // The first operation of the process deletes proven copies BEFORE it
+        // vends or removes anything (each new server also runs it at first
+        // contact — `deleteProvenCopies` via the server manager's hook).
+        if (!this.copiesCleaned && this.isClaudeuiToken) {
+          // Recorded as done only once it succeeded: a failed run retries on
+          // the next operation (S7 review 1).
+          try {
+            await this.deleteProvenCopies(lease.api, 'first contact')
+            this.copiesCleaned = true
+          } catch (err) {
+            logger.warn('OpencodeCredentials', `proven-copy cleanup failed: ${errText(err)}`)
+          }
+        }
+        await this.adoptPendingSignins(lease.api).catch((err: unknown) =>
+          logger.warn('OpencodeCredentials', `adopting late sign-ins failed: ${errText(err)}`)
+        )
         await this.applyPending(lease.api)
         return await op(lease.api)
       } finally {
@@ -621,10 +935,34 @@ export class OpencodeCredentialStore {
   /** After a corrupt record file: every slot holding a `cred_claudeui_*` row is ClaudeUI's again. */
   private async rebuildRecords(api: CredentialApi): Promise<void> {
     const records = this.memory.read()
-    for (const row of await api.list()) {
+    const rows = await api.list()
+    for (const row of rows) {
       if (!isClaudeuiCredentialId(row.id)) continue
       const key = slotKey(row.integrationID, kindOf(row.value))
       records[key] ??= {}
+    }
+    // Sign-in rows: only from labels ClaudeUI remembers generating (their
+    // sibling file survives the quarantine) — by the adopted id, or by the
+    // exact label carrying the attempt's id. A label alone proves nothing;
+    // without the ledger the rows stay the user's (fail safe).
+    for (const entry of this.readLabels()) {
+      const row = rows.find(
+        (candidate) =>
+          candidate.integrationID === entry.integrationID &&
+          (candidate.id === entry.id ||
+            candidate.label === `${SIGNIN_LABEL_PREFIX}${entry.hex}` ||
+            candidate.label === adoptedSigninLabel(entry.hex))
+      )
+      if (!row) continue
+      const key = slotKey(entry.integrationID, 'signin')
+      const record = records[key] ?? {}
+      records[key] = {
+        ...record,
+        ...(!record.previousActive && entry.previousActive
+          ? { previousActive: entry.previousActive }
+          : {}),
+        ids: [...new Set([...(record.ids ?? []), row.id])]
+      }
     }
     this.memory.write(records)
   }
@@ -664,10 +1002,10 @@ export class OpencodeCredentialStore {
       )
     const changed = await this.exclusive(async (api) => {
       const rows = await api.list()
-      const slot = rows.filter((row) => inSlot(row, integrationID, kind))
+      const slot = this.slotRows(rows, integrationID, kind)
       if (spec.stale?.(slot)) return false
       const active = rows.find((row) => row.integrationID === integrationID && row.active)
-      if (active && !isClaudeuiCredentialId(active.id))
+      if (active && !this.ownedBy()(active.id))
         await this.rememberDisplaced(key, active, slot, this.tokenCheck(spec.isClaudeuiToken))
 
       let changed = false
@@ -692,7 +1030,7 @@ export class OpencodeCredentialStore {
         await api.remove(stale.id)
         changed = true
       }
-      this.cached = snapshotOf(changed ? await api.list() : rows, this.now())
+      this.cached = snapshotOf(changed ? await api.list() : rows, this.now(), this.ownedBy())
       return changed
     }, record)
     if (changed) this.notify()
@@ -739,10 +1077,10 @@ export class OpencodeCredentialStore {
     const key = slotKey(integrationID, kind)
     const record = this.memory.read()[key]
     const rows = await api.list()
-    const slot = rows.filter((row) => inSlot(row, integrationID, kind))
+    const slot = this.slotRows(rows, integrationID, kind)
     if (slot.length === 0) {
       this.updateRecord(key, () => null)
-      this.cached = snapshotOf(rows, this.now())
+      this.cached = snapshotOf(rows, this.now(), this.ownedBy())
       return false
     }
     const unsafe = (row: Credential_Entry | undefined): Promise<boolean> =>
@@ -753,7 +1091,7 @@ export class OpencodeCredentialStore {
         (row) => row.integrationID === integrationID && !slot.includes(row)
       )
       let restore = record?.previousActive
-        ? others.find((row) => row.id === record.previousActive && !isClaudeuiCredentialId(row.id))
+        ? others.find((row) => row.id === record.previousActive && !this.ownedBy()(row.id))
         : undefined
       if (restore && (await unsafe(restore))) {
         logger.warn(
@@ -779,10 +1117,11 @@ export class OpencodeCredentialStore {
               `${context}: keeping ClaudeUI's ${key} credential — removing it would activate ${promoted!.id}, a copy of ClaudeUI's own ChatGPT sign-in that opencode would refresh`
             )
             // Kept and still recorded (no longer pending): a later removal retries.
-            this.updateRecord(key, (current) =>
-              current?.previousActive ? { previousActive: current.previousActive } : {}
-            )
-            this.cached = snapshotOf(rows, this.now())
+            this.updateRecord(key, (current) => ({
+              ...(current?.previousActive ? { previousActive: current.previousActive } : {}),
+              ...(current?.ids ? { ids: current.ids } : {})
+            }))
+            this.cached = snapshotOf(rows, this.now(), this.ownedBy())
             return false
           }
           logger.warn(
@@ -801,7 +1140,12 @@ export class OpencodeCredentialStore {
       `${context}: removed ClaudeUI's ${key} credential (${slot.length} row(s))`
     )
     this.updateRecord(key, () => null)
-    this.cached = snapshotOf(await api.list(), this.now())
+    if (kind === 'signin') {
+      // Their labels are done with; pending ones (a flow still out) stay.
+      const removed = new Set(slot.map((row) => row.id))
+      this.writeLabels(this.readLabels().filter((entry) => !entry.id || !removed.has(entry.id)))
+    }
+    this.cached = snapshotOf(await api.list(), this.now(), this.ownedBy())
     return true
   }
 }

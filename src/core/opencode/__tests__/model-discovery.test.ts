@@ -30,7 +30,10 @@ vi.mock('../../services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/fake/persisted'
 }))
 vi.mock('../OpencodeServerManager', () => ({
-  opencodeServerManager: { isBinaryAvailable: () => true }
+  opencodeServerManager: {
+    setServerStartedHook: vi.fn(),
+    isBinaryAvailable: () => true
+  }
 }))
 vi.mock('../../services/logger', () => ({
   logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() }

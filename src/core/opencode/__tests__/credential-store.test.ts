@@ -14,8 +14,10 @@ import {
   chatgptRealExpiry,
   credentialStem,
   isClaudeuiCredentialId,
+  adoptedSigninLabel,
   fileSlotMemory,
   memorySlotMemory,
+  SIGNIN_PENDING_TTL_MS,
   type SlotMemory
 } from '../credential-store'
 import { fakeChatgptJwt, fakeCredentialTable } from './fixtures/fake-credential-table'
@@ -403,19 +405,21 @@ describe('a lost record', () => {
 
 // ── Review fixes (S7 review) ─────────────────────────────────────────────────
 
+// Since 2026-10-07 proven copies are deleted at first contact; the guard stays
+// as defence in depth for a copy that appears LATER (seeded after the store's
+// first operation here).
 describe('H1: no removal ever promotes a copy of ClaudeUI’s sign-in', () => {
   const vaultToken = (refresh: string) => refresh === 'rt-vault'
-  const withCopy = () => {
-    const h = setup({ isClaudeuiToken: vaultToken })
-    h.table.seed(userOauth('cred_imported', 'rt-vault'))
-    return h
-  }
+  const withCopy = () => setup({ isClaudeuiToken: vaultToken })
+  const copyLater = (table: ReturnType<typeof fakeCredentialTable>) =>
+    table.seed(userOauth('cred_imported', 'rt-vault', false))
 
   it.each(['removeDisabledCopies', 'harnessArrived', 'start', 'quit', 'route off'])(
     '%s: ClaudeUI’s padded row stays active (and recorded); the copy stays inactive',
     async (context) => {
       const { table, store, memory } = withCopy()
       await store.vendChatgpt({ access: fakeChatgptJwt('acct-1', EXP), expires: NOW })
+      copyLater(table)
       expect(await store.removeSlot('openai', 'oauth', context)).toBe(false)
       expect(table.active('openai')?.id).toBe('cred_claudeui_acct-1_v1')
       expect(memory.read()['openai:oauth']).toEqual({})
@@ -426,8 +430,8 @@ describe('H1: no removal ever promotes a copy of ClaudeUI’s sign-in', () => {
   it('a removal that waited for opencode keeps ClaudeUI’s row too', async () => {
     let installed = true
     const h = setup({ isClaudeuiToken: vaultToken, available: () => installed })
-    h.table.seed(userOauth('cred_imported', 'rt-vault'))
     await h.store.vendChatgpt({ access: fakeChatgptJwt('acct-1', EXP), expires: NOW })
+    copyLater(h.table)
     installed = false
     await h.store.removeSlot('openai', 'oauth', 'harnessArrived')
     installed = true
@@ -438,6 +442,7 @@ describe('H1: no removal ever promotes a copy of ClaudeUI’s sign-in', () => {
   it('the vault being emptied (disconnect, last account) removes ClaudeUI’s row anyway', async () => {
     const { table, store } = withCopy()
     await store.vendChatgpt({ access: fakeChatgptJwt('acct-1', EXP), expires: NOW })
+    copyLater(table)
     expect(
       await store.removeSlot('openai', 'oauth', 'disconnect', undefined, {
         vaultEmptying: true
@@ -449,6 +454,7 @@ describe('H1: no removal ever promotes a copy of ClaudeUI’s sign-in', () => {
   it('a genuine user row newer than the copy is what opencode promotes: the removal goes ahead', async () => {
     const { table, store } = withCopy()
     await store.vendChatgpt({ access: fakeChatgptJwt('acct-1', EXP), expires: NOW })
+    copyLater(table)
     table.seed(userKey('cred_user_newer', 'openai', 'sk-user', false))
     expect(await store.removeSlot('openai', 'oauth', 'route off')).toBe(true)
     expect(table.active('openai')?.id).toBe('cred_user_newer')
@@ -458,7 +464,8 @@ describe('H1: no removal ever promotes a copy of ClaudeUI’s sign-in', () => {
 describe('M1: copy recognition lives in the store — the key path cannot bypass it', () => {
   it('an openai key vended over the copy never remembers it, and removing the key keeps ClaudeUI’s row', async () => {
     const { table, store, memory } = setup({ isClaudeuiToken: (r) => r === 'rt-vault' })
-    table.seed(userOauth('cred_imported', 'rt-vault'))
+    await store.vendKey('anthropic', 'k') // the process's first operation (and cleanup)
+    table.seed(userOauth('cred_imported', 'rt-vault')) // a copy that appears later, active
     await store.vendKey('openai', 'sk-ours')
     expect(memory.read()['openai:key']).toEqual({})
     // No per-call check given: the store's own applies.
@@ -516,7 +523,7 @@ describe('M3b: Remove-ability is answered from ClaudeUI’s record (no server)',
     installed = false
     await store.removeSlot('anthropic', 'key', 'route off')
     const opened = table.leases.opened
-    expect([...store.recordedKeyIntegrations()]).toEqual(['openrouter'])
+    expect([...store.recordedRemovableIntegrations()]).toEqual(['openrouter'])
     expect(table.leases.opened).toBe(opened)
   })
 })
@@ -553,5 +560,233 @@ describe('L5: a token an error body echoes never reaches the log', () => {
     } finally {
       warn.mockRestore()
     }
+  })
+})
+
+// ── Owner decisions 2026-10-07: proven copies deleted; ClaudeUI-started sign-ins are ClaudeUI's ──
+
+describe('proven copies of ClaudeUI’s sign-in are deleted', () => {
+  const proven = new Set(['rt-vault', 'rt-fed-1x'])
+  const check = (refresh: string) => proven.has(refresh)
+
+  it('deletes copies matching the vault or the 1.x history; keeps unproven, owned and key rows; records the run', async () => {
+    const { table, store, memory } = setup({ isClaudeuiToken: check })
+    table.seed(userOauth('cred_copy_vault', 'rt-vault', false))
+    table.seed(userOauth('cred_copy_history', 'rt-fed-1x'))
+    table.seed(userOauth('cred_users_own', 'rt-users-own', false))
+    table.seed(userKey('cred_user_key', 'openai', 'sk-user', false))
+    const count = await store.deleteProvenCopies(table.api, 'first contact')
+    expect(count).toBe(2)
+    expect(
+      table
+        .rows()
+        .map((row) => row.id)
+        .sort()
+    ).toEqual(['cred_user_key', 'cred_users_own'])
+    // Inactive first, the active one last.
+    expect(table.calls.filter((c) => c.startsWith('remove'))).toEqual([
+      'remove cred_copy_vault',
+      'remove cred_copy_history'
+    ])
+    expect(memory.readCleanup?.()).toEqual({
+      at: NOW,
+      count: 2,
+      ids: ['cred_copy_vault', 'cred_copy_history']
+    })
+  })
+
+  it('never deletes without a recogniser, and logs ids — never a token', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    try {
+      const none = setup()
+      none.table.seed(userOauth('cred_copy', 'rt-vault'))
+      expect(await none.store.deleteProvenCopies(none.table.api, 'x')).toBe(0)
+      expect(none.table.rows()).toHaveLength(1)
+
+      const { table, store } = setup({ isClaudeuiToken: check })
+      table.seed(userOauth('cred_copy', 'rt-vault'))
+      await store.deleteProvenCopies(table.api, 'first contact')
+      const logged = JSON.stringify(info.mock.calls)
+      expect(logged).toContain('cred_copy')
+      expect(logged).not.toContain('rt-vault')
+      expect(logged).not.toContain('fake-user-access')
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  it('the first operation of the process deletes them BEFORE it vends', async () => {
+    const { table, store } = setup({ isClaudeuiToken: check })
+    table.seed(userOauth('cred_copy', 'rt-vault'))
+    await store.vendChatgpt({ access: fakeChatgptJwt('acct-1', EXP), expires: NOW })
+    const writes = table.calls.filter((c) => !c.startsWith('list'))
+    expect(writes).toEqual(['remove cred_copy', 'create cred_claudeui_acct-1_v1'])
+    // Only once per process through its own lease (servers run it at first contact).
+    table.seed(userOauth('cred_copy_later', 'rt-vault', false))
+    await store.vendKey('openrouter', 'k')
+    expect(table.rows().map((row) => row.id)).toContain('cred_copy_later')
+  })
+})
+
+describe('a sign-in started from ClaudeUI is ClaudeUI’s', () => {
+  it('captures exactly the row carrying the attempt’s label, relabels it, and removes it like its own (restoring the previous row first)', async () => {
+    const { table, store } = setup()
+    table.seed(userKey('cred_user_before', 'github-copilot', 'tok-user'))
+    const signin = await store.prepareSignin('github-copilot')
+    expect(signin.label).toMatch(/^claudeui:signin:[0-9a-f]{16}$/)
+    expect(signin.previousActive).toBe('cred_user_before')
+    // The user's own opencode signs in meanwhile (another label).
+    table.seed({
+      ...userKey('cred_user_concurrent', 'github-copilot', 'tok-other'),
+      label: 'GitHub'
+    })
+    // opencode completes ClaudeUI's attempt: its row, its id, the attempt's label.
+    table.seed({
+      ...userKey('ghc_opencode_id_1', 'github-copilot', 'tok-ours'),
+      label: signin.label
+    })
+    expect(await store.adoptSignin('github-copilot', signin.label, signin.previousActive)).toBe(
+      'ghc_opencode_id_1'
+    )
+    // Still carries the attempt's id (a rebuild recovers it by that).
+    expect(table.rows().find((row) => row.id === 'ghc_opencode_id_1')?.label).toBe(
+      `ClaudeUI sign-in · ${signin.label.slice('claudeui:signin:'.length)}`
+    )
+    expect([...store.recordedRemovableIntegrations()]).toEqual(['github-copilot'])
+
+    table.calls.length = 0
+    expect(await store.removeSlot('github-copilot', 'signin', 'remove github-copilot')).toBe(true)
+    expect(table.calls.filter((c) => !c.startsWith('list'))).toEqual([
+      'activate cred_user_before',
+      'remove ghc_opencode_id_1'
+    ])
+    expect(
+      table
+        .rows()
+        .map((row) => row.id)
+        .sort()
+    ).toEqual(['cred_user_before', 'cred_user_concurrent'])
+    expect(store.recordedRemovableIntegrations().size).toBe(0)
+  })
+
+  it('claims nothing when no row carries the label, and a ClaudeUI sign-in is never taken for a copy', async () => {
+    const { table, store } = setup({ isClaudeuiToken: (r) => r === 'rt-shared' })
+    const signin = await store.prepareSignin('openai')
+    table.seed({ ...userOauth('oc_unrelated', 'rt-x'), label: 'mine' })
+    expect(await store.adoptSignin('openai', signin.label)).toBeNull()
+    table.seed({ ...userOauth('oc_ours', 'rt-shared'), label: signin.label })
+    expect(await store.adoptSignin('openai', signin.label)).toBe('oc_ours')
+    expect(await store.deleteProvenCopies(table.api, 'first contact')).toBe(0)
+    expect(
+      table
+        .rows()
+        .map((row) => row.id)
+        .sort()
+    ).toEqual(['oc_ours', 'oc_unrelated'])
+  })
+})
+
+// ── S7 review (s7b) ───────────────────────────────────────────────────────────
+
+describe('s7b-1: a FAILED process-first cleanup is not recorded as done', () => {
+  it('retries on the next operation and deletes the copy then', async () => {
+    const { table, store } = setup({ isClaudeuiToken: (r) => r === 'rt-vault' })
+    table.seed(userOauth('cred_copy', 'rt-vault', false))
+    const list = table.api.list
+    let failOnce = true
+    table.api.list = async () => {
+      if (failOnce) {
+        failOnce = false
+        throw new Error('SQLITE_BUSY')
+      }
+      return list()
+    }
+    await store.vendKey('openrouter', 'k1')
+    expect(table.rows().map((row) => row.id)).toContain('cred_copy')
+    await store.vendKey('openrouter', 'k2')
+    expect(table.rows().map((row) => row.id)).not.toContain('cred_copy')
+  })
+})
+
+describe('s7b-2: an empty run never overwrites what a run deleted', () => {
+  it('keeps the last deletion record', async () => {
+    const { table, store, memory } = setup({ isClaudeuiToken: (r) => r === 'rt-vault' })
+    table.seed(userOauth('cred_copy', 'rt-vault'))
+    await store.deleteProvenCopies(table.api, 'first contact')
+    await store.deleteProvenCopies(table.api, 'first contact')
+    expect(memory.readCleanup?.()).toEqual({ at: NOW, count: 1, ids: ['cred_copy'] })
+  })
+})
+
+describe('s7b-3: a sign-in that completes after its hold is adopted later', () => {
+  it('a pending label is adopted by the next operation; an expired one never', async () => {
+    let now = NOW
+    const table = fakeCredentialTable()
+    const store = new OpencodeCredentialStore({
+      connect: table.connect,
+      memory: memorySlotMemory(),
+      now: () => now
+    })
+    const late = await store.prepareSignin('github-copilot')
+    const stale = await store.prepareSignin('anthropic')
+    // The hold gave up; opencode completes both attempts afterwards.
+    table.seed({ ...userKey('ghc_late', 'github-copilot', 'tok'), label: late.label })
+    now += SIGNIN_PENDING_TTL_MS / 2
+    await store.vendKey('openrouter', 'k') // any later operation
+    expect([...store.recordedRemovableIntegrations()].sort()).toEqual([
+      'github-copilot',
+      'openrouter'
+    ])
+    expect(table.rows().find((row) => row.id === 'ghc_late')?.label).toBe(
+      adoptedSigninLabel(late.label.slice('claudeui:signin:'.length))
+    )
+    now += SIGNIN_PENDING_TTL_MS
+    table.seed({ ...userKey('ant_too_late', 'anthropic', 'tok'), label: stale.label })
+    await store.vendKey('openrouter', 'k2')
+    expect(store.recordedRemovableIntegrations().has('anthropic')).toBe(false)
+  })
+})
+
+describe('s7b-4: sign-in ownership survives a quarantined slot file — only from remembered ids', () => {
+  it('a rebuild recovers adopted and pending sign-ins from the label ledger; a look-alike label is not claimed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'slots-'))
+    const file = join(dir, 'opencode-credential-slots.json')
+    try {
+      const table = fakeCredentialTable()
+      const memory = fileSlotMemory(file)
+      const store = new OpencodeCredentialStore({ connect: table.connect, memory, now: () => NOW })
+      const signin = await store.prepareSignin('github-copilot')
+      table.seed({ ...userKey('ghc_ours', 'github-copilot', 'tok'), label: signin.label })
+      await store.adoptSignin('github-copilot', signin.label)
+      // A row whose label merely LOOKS like ClaudeUI's (an id ClaudeUI never generated).
+      table.seed({
+        ...userKey('ghc_lookalike', 'github-copilot', 'tok2', false),
+        label: adoptedSigninLabel('0123456789abcdef')
+      })
+      writeFileSync(file, '{ corrupt')
+      const fresh = new OpencodeCredentialStore({
+        connect: table.connect,
+        memory: fileSlotMemory(file),
+        now: () => NOW
+      })
+      await fresh.vendKey('openrouter', 'k')
+      expect(fresh.recordedRemovableIntegrations().has('github-copilot')).toBe(true)
+      await fresh.removeSlot('github-copilot', 'signin', 'remove')
+      expect(table.rows().map((row) => row.id)).toContain('ghc_lookalike')
+      expect(table.rows().map((row) => row.id)).not.toContain('ghc_ours')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('with the ledger gone too, sign-in rows fail safe as user rows', async () => {
+    const table = fakeCredentialTable()
+    const store = new OpencodeCredentialStore({
+      connect: table.connect,
+      memory: memorySlotMemory()
+    })
+    table.seed({ ...userKey('ghc_x', 'github-copilot', 'tok'), label: adoptedSigninLabel('aaaa') })
+    await store.vendKey('openrouter', 'k')
+    expect(store.recordedRemovableIntegrations().has('github-copilot')).toBe(false)
   })
 })

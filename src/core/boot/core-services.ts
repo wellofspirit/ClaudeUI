@@ -48,6 +48,8 @@ import { terminalService } from '../services/terminal-service'
 import { vscodeWebService, type VscodeWebService } from '../services/vscode-web-service'
 import { hostConnection } from '../ipc/command-registry'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
+import { onOpencodeConfigWritten } from '../opencode/opencode-config'
+import { scheduleOpencodeConfigReload } from '../opencode/opencode-config-reload'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
 import { armCodexRulesSync, syncCodexRulesFile } from '../codex/rules-sync'
 import { followCodexActiveAccount } from '../codex/codex-account-switch'
@@ -201,6 +203,9 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     }
   })
   opencodeServerManager.setDispatchAgent((req, ctx) => crossEngineDispatcher.dispatch(req, ctx))
+  // ClaudeUI's opencode config writes (settings, raw editor, providers, tools,
+  // agent files) reload the running servers' locations (ADR-093 S8).
+  onOpencodeConfigWritten((reason) => void scheduleOpencodeConfigReload(reason))
 
   // The host's own post-session wiring — see the module header for why this is
   // one ordered hook rather than several options.

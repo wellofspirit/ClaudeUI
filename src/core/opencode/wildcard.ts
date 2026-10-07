@@ -1,4 +1,5 @@
 import type { OpencodeAction, OpencodePermissionRule } from './permission-compiler'
+import { wildcardMatch as sharedWildcardMatch } from '../../shared/opencode-wildcard'
 
 /**
  * Host-side port of opencode's permission matcher, used by the ask-rule
@@ -21,34 +22,16 @@ import type { OpencodeAction, OpencodePermissionRule } from './permission-compil
  */
 
 /**
- * opencode's `Wildcard.match`: an anchored regex over the pattern.
- *
- * - both sides normalise `\` → `/` (so Windows paths match POSIX patterns)
- * - regex metacharacters are escaped, then `*` → `.*` and `?` → `.`
- * - a pattern ending in `" *"` also matches the bare prefix (`"ls *"` matches
- *   both `ls` and `ls -la`)
- * - dotall always; case-insensitive on win32 only
- *
- * `platform` is injectable purely so the win32 branch is testable off-Windows.
+ * opencode's `Wildcard.match` (`shared/opencode-wildcard.ts`, which the
+ * renderer uses too and so takes the platform explicitly) on THIS process's
+ * platform by default.
  */
 export function wildcardMatch(
   str: string,
   pattern: string,
   platform: NodeJS.Platform = process.platform
 ): boolean {
-  if (str) str = str.replaceAll('\\', '/')
-  if (pattern) pattern = pattern.replaceAll('\\', '/')
-  let escaped = pattern
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&') // escape special regex chars
-    .replace(/\*/g, '.*') // * becomes .*
-    .replace(/\?/g, '.') // ? becomes .
-
-  // Pattern ending in " *" makes the trailing part optional, so "ls *" matches
-  // both "ls" and "ls -la".
-  if (escaped.endsWith(' .*')) escaped = escaped.slice(0, -3) + '( .*)?'
-
-  const flags = platform === 'win32' ? 'si' : 's'
-  return new RegExp('^' + escaped + '$', flags).test(str)
+  return sharedWildcardMatch(str, pattern, platform)
 }
 
 /**

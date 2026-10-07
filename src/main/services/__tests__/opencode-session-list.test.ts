@@ -35,7 +35,11 @@ const {
 }))
 
 vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
-  opencodeServerManager: { acquire: mockAcquire, release: mockRelease }
+  opencodeServerManager: {
+    setServerStartedHook: vi.fn(),
+    acquire: mockAcquire,
+    release: mockRelease
+  }
 }))
 // One 2.x client answers both (history → listMessages, delete → deleteSession).
 vi.mock('../../../core/opencode/OpencodeClient', () => ({ OpencodeClient: MockOpencodeClient }))

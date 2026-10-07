@@ -17,11 +17,13 @@ import {
   locateSource,
   PIN,
   pinnedReader,
+  renderConfigSchema,
   renderProtocol,
   schemaToTs
 } from '../../../../scripts/generate-opencode-protocol.mjs'
 import { harnessManifest } from '../../harness/manifests'
 import provenance from '../protocol-v2/provenance.json'
+import configSchema from '../../../shared/opencode-config-schema.json'
 import reviewed from '../protocol-v2/events.reviewed.json'
 import { EVENT_DURABILITY, eventSessionID, isOpencodeEvent } from '../protocol-v2/events'
 
@@ -32,6 +34,28 @@ const sha256 = (text: string) => createHash('sha256').update(text).digest('hex')
 describe('committed output', () => {
   it('is exactly the file provenance names (no hand edits, no partial regeneration)', () => {
     expect(sha256(read('openapi.ts'))).toBe(provenance.files['openapi.ts'])
+    const schemaText = readFileSync(
+      join(__dirname, '..', '..', '..', 'shared', 'opencode-config-schema.json'),
+      'utf8'
+    )
+    expect(sha256(schemaText)).toBe(provenance.files['src/shared/opencode-config-schema.json'])
+  })
+
+  it('ships the raw editor schema rooted at Config.InfoEncoded, every $ref resolvable', () => {
+    expect(configSchema.$ref).toBe('#/$defs/Config.InfoEncoded')
+    const defs = configSchema.$defs as Record<string, unknown>
+    const refs = JSON.stringify(configSchema).match(/"\$ref":"[^"]+"/g) ?? []
+    for (const ref of refs) {
+      const target = /#\/\$defs\/([^"]+)/.exec(ref)?.[1]
+      expect(target && target in defs, ref).toBe(true)
+    }
+    // 2.x keys only: none of the 1.x top-level keys the writers stopped emitting.
+    const keys = Object.keys(
+      (defs['Config.InfoEncoded'] as { properties: Record<string, unknown> }).properties
+    )
+    expect(keys).toEqual(expect.arrayContaining(['agents', 'providers', 'permissions', 'plugins']))
+    for (const legacy of ['agent', 'provider', 'permission', 'small_model', 'disabled_providers'])
+      expect(keys).not.toContain(legacy)
   })
 
   it('was generated, and its event closure reviewed, at the script’s pin', () => {
@@ -57,9 +81,40 @@ describe('committed output', () => {
     }
   })()
   it.skipIf(!source)('regenerates byte-identically from the pinned checkout', () => {
-    const { generated, provenance: text } = build(pinnedReader(source!))
+    const { generated, provenance: text, configSchema: schema } = build(pinnedReader(source!))
     expect(generated).toBe(read('openapi.ts'))
     expect(text).toBe(read('provenance.json'))
+    expect(JSON.parse(schema)).toEqual(configSchema)
+  })
+})
+
+describe('renderConfigSchema', () => {
+  const pin = { tag: 'vX', commit: 'c', specSha256: 's' }
+  it('closes over reachable components only, with refs rebased onto $defs', () => {
+    const spec = {
+      components: {
+        schemas: {
+          'Config.InfoEncoded': {
+            type: 'object',
+            properties: { a: { $ref: '#/components/schemas/A' } }
+          },
+          A: { anyOf: [{ $ref: '#/components/schemas/B' }, { type: 'null' }] },
+          B: { type: 'string' },
+          Unused: { type: 'number' }
+        }
+      }
+    }
+    const doc = JSON.parse(renderConfigSchema(spec, pin))
+    expect(Object.keys(doc.$defs)).toEqual(['A', 'B', 'Config.InfoEncoded'])
+    expect(doc.$defs.A.anyOf[0]).toEqual({ $ref: '#/$defs/B' })
+    expect(renderConfigSchema(spec, pin)).toBe(renderConfigSchema(spec, pin))
+  })
+
+  it('fails closed on a ref it cannot rebase', () => {
+    const spec = {
+      components: { schemas: { 'Config.InfoEncoded': { $ref: 'https://x/y.json' } } }
+    }
+    expect(() => renderConfigSchema(spec, pin)).toThrow('unsupported $ref')
   })
 })
 

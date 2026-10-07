@@ -354,6 +354,44 @@ since quit restores their credential), sees a later expiry than the real one.
   start, on a disabled route, on an arrival, for a pending removal. Only emptying the vault
   (disconnect, last account removed) deletes it anyway and logs the fallback; the contract shows
   opencode then tries to refresh the copy at once.
+- **Proven copies are deleted (owner decision 2026-10-07, option a).** Every non-ClaudeUI row
+  PROVEN to be a copy of ClaudeUI's sign-in (its refresh token is the vault's or in the 1.x
+  fed-token history — the store's recogniser) is deleted: on every new server, through the
+  server manager's first-contact hook (`installCopyCleanupHook` → `setServerStartedHook`, wired
+  unconditionally at import of `opencode-credentials.ts`); and by the first store operation of
+  each ClaudeUI process, before it vends (marked done only when it succeeded). Unproven rows are
+  never touched. Each deletion is logged by id and reason; the slot file records the last run
+  that deleted something (`copyCleanup: {at, count, ids}`; empty runs do not overwrite it). The
+  H1/M1 guard stays for a copy that appears later. Probed on 2.0.24 (recording proxy): opencode
+  resolves — and so may refresh — the active OAuth credential only when a LOCATION activates its
+  plugins (the openai plugin's `load()`, `integration.ts` `connection.resolve`), never at server
+  boot and never on a `/api/credential` route, even one carrying `x-opencode-directory`. The hook
+  uses only those routes. **Fail closed (review s7b):** a server whose cleanup failed or timed
+  out (5 s per run) is "uncleaned" and serves only leases that ask for credential routes
+  (`acquire({credentialRoutesOnly})`, the credential store's); every other acquire (turns,
+  discovery, auth reads, a config reload, a detached server) first retries the cleanup with
+  back-off (0.5 s, 1.5 s; a stuck run is replaced) and, if it still fails, throws
+  `OpencodeCredentialCleanupError` (a later acquire retries). The hook refuses to run without the
+  recogniser, so a server never counts as clean before the vault is wired. So no ClaudeUI server
+  makes a location request before the cleanup succeeded. Residual: a 2.x process that is not
+  ClaudeUI's (the user's own opencode, the 2026-10-06 leak) can still resolve and refresh an
+  expired active copy before ClaudeUI first connects.
+- **Sign-ins started from ClaudeUI are ClaudeUI's (owner decision 2026-10-07).** An OAuth sign-in
+  the user starts from ClaudeUI's opencode provider screen runs on opencode's connect flow with a
+  one-off label (`claudeui:signin:<16 hex>`); opencode stores an attempt's label on the row it
+  creates (`integration.ts` `createCredential`), so the row with that label — and only it — is
+  recorded by its opencode-chosen id (slot kind `signin`, with the row active before it) and
+  relabelled `ClaudeUI sign-in · <hex>` (it keeps the attempt's id). Race-free against the
+  user's own concurrent opencode (a before/after diff of the list is not: their sign-in could land
+  in the same window, as the contract shows). Every generated label is kept in a sibling ledger
+  (`opencode-credential-slots.signins.json`, ids only) from BEFORE the flow starts: a row a
+  flow creates after its hold expired is adopted by its exact label on a later store operation;
+  a pending label expires after 1 h. A quarantined slot file is rebuilt from that ledger (by the
+  remembered id, or the exact label carrying a remembered hex) — never from a label alone; with
+  the ledger gone too, such rows fail safe as the user's. Such rows are owned like
+  `cred_claudeui_*` for removal and active-slot remember/restore, and never taken for a copy; the
+  provider screen's Remove takes them (`removeVendorAuth`), a shared provider's route removal does
+  not (`removeVendorKey`). API keys stay ClaudeUI's own `cred_claudeui_*` rows (no connect flow).
 - **ChatGPT.** `refresh:""`, `methodID:"chatgpt-browser"`, `metadata.accountID` (JWT claim when
   the vault has none; refused without one), `expires` = JWT `exp` + 24 h. The process keeps the
   token's REAL expiry (`vendedChatgpt`). CredentialSync: opencode is no longer watched, read at
@@ -383,9 +421,8 @@ since quit restores their credential), sees a later expiry than the real one.
   `listVendorCredentialIds` = active row types; Remove (provider manager, shared-provider removals)
   deletes ClaudeUI's key rows only; OAuth sign-ins run on opencode's integration flows
   (`integration.oauth.connect`, `.complete`, `.status`, `.cancel`), held on the server the
-  attempt lives in — the row it creates is opencode's, so ClaudeUI cannot remove it later (owner
-  decision pending). No `auth.json` read or write
-  (`auth-store.ts` deleted), no `recycleAll()` caller. ADR-074 §6 adoption reads opencode's ACTIVE
+  attempt lives in; the row it creates is recorded as ClaudeUI's (above). No `auth.json` read
+  or write (`auth-store.ts` deleted), no `recycleAll()` caller. ADR-074 §6 adoption reads opencode's ACTIVE
   key rows in ONE credential list per pass (`batchedApiKeyReader`, 5 s memo dropped on any
   ClaudeUI change; `NativeApiKeyReader` may answer asynchronously). Read-only leases (credential,
   catalog, auth reads) leave the pooled server idle for `READ_LINGER_MS` (60 s) after the last
@@ -416,6 +453,67 @@ since quit restores their credential), sees a later expiry than the real one.
   `GET /api/session?directory=…&parentID=null`. A DB created fresh by 2.x has only `session_v2`.
 - The first `/api/model` after a server boot can be empty (cold location; full at +1.5 s), so
   discovery must not negative-cache it (ADR-092).
+
+**As built (S8, 2026-10-07): config on 2.x keys** (amends ADR-028/029/031; the user's file stays
+theirs, ClaudeUI still writes only through its editors).
+
+- **Write 2.x keys only; read both shapes.** 2.x normalizes a 1.x file in memory
+  (`config/normalize.ts`), and keeps a 2.x map entry WHOLE over a 1.x entry of the same id
+  (`conflict` diagnostic, the 1.x fields dropped). So an entry ClaudeUI edits moves WHOLE to its 2.x
+  key in the form 2.x reads it (`shared/opencode-config-v1.ts`, a port of upstream's
+  `ConfigMigrateV1`, EXACT: a move changes nothing 2.x runs on; review F4); entries nobody edits
+  stay 1.x and are SHOWN as 2.x reads them; the moved entry's comments are gathered above it; an
+  emptied 1.x map stays `{}`. A 1.x `mode.<name>` replaces `agent.<name>` as in 2.x. Same for a markdown agent (any non-2.x front-matter key makes 2.x
+  decode the WHOLE file as 1.x and send unknown keys to the request body), `attachment` → `media`,
+  `snapshot` → `snapshots`, 1.x `compaction`/`experimental.mcp_timeout`/`plugin`/`skills{}` leaves.
+  A SET of a path the generated 2.x schema lacks is refused; deleting a 1.x leaf is allowed. Proven
+  live: the moved file logs no normalization diagnostic.
+- **Key mapping.** `small_model` → `agents.title.model`; `disabled_providers`/`enabled_providers` →
+  `experimental.policies` `provider.use` rules (last match wins; a re-enabled id a wildcard still
+  denies gets a literal allow; `enabled_providers: []` = deny all, shown as an empty allowlist); `provider.<id>` → `providers.<id>` (`npm` → `package: aisdk:<npm>`,
+  `options` → `settings`/`headers`/`body`, `api` → `settings.baseURL`); model `tool_call`/`modalities`
+  → `capabilities.tools/input/output`; the inert 1.x `attachment`/`reasoning`/`temperature` are
+  dropped on a move (as 2.x drops them) and written as `capabilities.input` / `variants: []` only when
+  the user edits that field (`reasoning:false` never overwrites a non-empty `variants`); `interleaved` →
+  `compatibility`, `cost` → list with tiers, `status: deprecated` → `disabled`; agent `prompt` →
+  `system`/body, `temperature`/`top_p`/`options`/unknown → `request.body`, `permission`/`tools` →
+  `permissions` rules (bash→shell, task→subagent, write/patch→edit), `disable` → `disabled`,
+  `maxSteps` → `steps`; built-in tool switches → top-level `{action,*,deny}` in `permissions`
+  (own writer). "Off" is upstream's `whollyDisabled` (the last rule matching the action is a `*`
+  deny); ON removes only the rule ClaudeUI's switch wrote (recorded in `engines/opencode.json`),
+  never a user rule, and never adds an allow. Top-level rules precede a config agent's own rules,
+  so the pane names the agents whose own rules still offer the tool.
+- **Agents (ADR-029).** Markdown files stay the storage, written in 2.x front matter. The grid NEVER
+  reorders rules (2.x is last-match-wins; review F1): an action's last `{action,"*"}` rule is edited
+  in place; a new ask/deny is inserted right after the last catch-all already deciding that action
+  (so narrower rules after it still win); `allow` with no rule adds none; a save with no change
+  leaves the list byte-identical (property-tested; proven live on the 1.x "allow all but bash"
+  shape). Unmodelled fields (`request.headers`, other body keys) carry over; a rename/scope move
+  carries ONE file and deletes only that one. A built-in override with no prompt is written as
+  `agents.<name>` in the scope's config file, since a markdown agent always sets `system` to its
+  (empty) body. Reasoning effort = model variant (`model: p/m#effort`, needs a model). Invalid
+  values 2.x would silently drop the whole agent for (non-`p/m` model, non-hex colour, steps ≤ 0)
+  are refused.
+- **Not expressible any more (shown in the UI, not offered):** the per-model temperature flag, a
+  `reasoning: true` flag (a reasoning model is one with no `variants`), `compaction.prune`/
+  `tail_turns`, `logLevel`, `experimental.batch_tool`, `continue_loop_on_deny`; theme-name agent
+  colours.
+- **Raw editor.** `src/shared/opencode-config-schema.json` is generated from the pinned
+  `Config.InfoEncoded` by `generate-opencode-protocol.mjs` (provenance + `check-opencode-protocol`
+  cover drift); validation covers the touched top-level keys only. An `mcp.timeout` edit moves the
+  1.x `experimental.mcp_timeout` into whichever of catalog/execution is unset.
+- **Writes are conflict-aware and atomic.** A settings pane sends the snapshot it edited
+  (`saveOpencodeSettings(settings, base)`): only its changes relative to that snapshot land on the
+  file as it is now (`rebaseFields`), so a provider or veto added meanwhile survives. Every write is
+  temp file + rename (mode kept, symlinks followed). Shared modules never read `process` (they run
+  in the renderer and the web client); the platform is passed in.
+- **Reload.** Every ClaudeUI write notifies `onOpencodeConfigWritten`; the boot seam debounces
+  `OpencodeServerManager.reloadConfig()`: per pooled server, `POST /api/location/reload` then
+  hosted-tools readiness per held directory (guard memo dropped), model cache invalidated, sessions
+  drop their agent list. **A server with a running execution is NOT reloaded** — a reload cancels
+  pending asks/forms ("Interaction cancelled because the location shut down"; proven live) —
+  opencode's own config watcher applies config documents and agent files there (~0.5 s, proven
+  live). Residual: an execution starting inside the check→reload window can lose an ask.
 
 ### 7. Wire layer
 

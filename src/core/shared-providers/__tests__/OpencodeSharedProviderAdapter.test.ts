@@ -417,6 +417,34 @@ describe('OpencodeSharedProviderAdapter — model capabilities (ADR-074 slice 10
     ]
   }
 
+  it('re-syncs a reasoning model as opencode 2.x reads it back (no variants list) without a write', () => {
+    // 2.x has no "reasons" flag: a reasoning model is written with no `variants`,
+    // which the reader reports as unknown (ADR-093 S8).
+    const asRead = {
+      name: 'Local API',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: 'http://localhost/v1',
+      models: [
+        {
+          id: 'base',
+          name: 'Base',
+          attachment: true,
+          toolCall: true,
+          inputModalities: ['text', 'image'],
+          limit: { context: 262144, output: 32768 }
+        },
+        { id: 'native-mapped', ...CAPS }
+      ]
+    }
+    const { adapter, writeConfig } = setup({ providers: { 'local-api': asRead } })
+    adapter.applyDefinitionRoute({
+      definition: described,
+      previouslyManaged: true,
+      previousDefinition: described
+    })
+    expect(writeConfig).not.toHaveBeenCalled()
+  })
+
   it('declares what each model can do and how large it is', () => {
     const { adapter, writeConfig } = setup()
     adapter.applyDefinitionRoute({ definition: described })

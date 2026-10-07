@@ -34,6 +34,8 @@ vi.mock('../../core/opencode/OpencodeServerManager', async (importOriginal) => (
     {},
     {
       get: (_target, key: string) => {
+        // Installed at import (the credential module), before the test's manager exists.
+        if (key === 'setServerStartedHook' && !holder.manager) return () => {}
         const value = holder.manager?.[key]
         return typeof value === 'function' ? value.bind(holder.manager) : value
       }

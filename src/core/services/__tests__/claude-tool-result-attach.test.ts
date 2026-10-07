@@ -37,7 +37,10 @@ vi.mock('../../sdk', async (importOriginal) => {
 })
 
 vi.mock('../../opencode/OpencodeServerManager', () => ({
-  opencodeServerManager: { isBinaryAvailable: (): boolean => false }
+  opencodeServerManager: {
+    setServerStartedHook: () => {},
+    isBinaryAvailable: (): boolean => false
+  }
 }))
 vi.mock('../cross-engine-dispatcher', () => ({
   crossEngineDispatcher: { dispatch: vi.fn(), resolveApproval: vi.fn(), disposeFor: vi.fn() },

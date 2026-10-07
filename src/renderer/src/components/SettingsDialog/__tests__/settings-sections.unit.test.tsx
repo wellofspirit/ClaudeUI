@@ -26,7 +26,7 @@ import {
   CONFIG_HIDDEN_KEYS,
   type SettingItem
 } from '../settings-sections'
-import opencodeConfigSchema from '../../../../../shared/opencode-config-schema.1.18.29.json'
+import opencodeConfigSchema from '../../../../../shared/opencode-config-schema.json'
 
 /** The six positional arguments every item body takes (`ctx` is optional). */
 function renderWithMocks(item: SettingItem): React.JSX.Element {
@@ -41,7 +41,12 @@ function renderWithMocks(item: SettingItem): React.JSX.Element {
 }
 
 describe('opencode raw-config key partition', () => {
-  const configProps = Object.keys(opencodeConfigSchema.$defs.Config.properties)
+  // The generated opencode 2.x schema (ADR-093 S8): rooted at Config.InfoEncoded.
+  const configProps = Object.keys(
+    opencodeConfigSchema.$defs[
+      opencodeConfigSchema.$ref.replace('#/$defs/', '') as 'Config.InfoEncoded'
+    ].properties
+  )
 
   it('every pointer key exists in the vendored schema (catches typos)', () => {
     for (const key of Object.keys(CONFIG_POINTER_KEYS)) {
@@ -80,12 +85,13 @@ describe('opencode raw-config key partition', () => {
       (k) => !(k in CONFIG_POINTER_KEYS) && !CONFIG_HIDDEN_KEYS.has(k)
     )
     expect(editable.toSorted()).toEqual([
-      'command',
+      'commands',
       'enterprise',
-      'mode',
-      'reference',
       'references',
-      'username'
+      'username',
+      'warming',
+      'websearch',
+      'worktree'
     ])
   })
 })

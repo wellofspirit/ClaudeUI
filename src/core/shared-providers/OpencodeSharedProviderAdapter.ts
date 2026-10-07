@@ -30,6 +30,8 @@ export interface OpencodeSharedProviderAuthTarget {
   /** The ChatGPT vend (CredentialSync's path); absent, an OAuth vend is refused. */
   vendChatgpt?(credential: CodexCredentialInput): Promise<void>
   removeVendorAuth(vendorId: string): Promise<void>
+  /** ClaudeUI's API key only (sign-ins started from the provider screen stay); absent → removeVendorAuth. */
+  removeVendorKey?(vendorId: string): Promise<void>
   listVendorCredentialIds?(): Promise<Record<string, 'api' | 'oauth'>>
 }
 
@@ -196,7 +198,9 @@ export class OpencodeSharedProviderAdapter {
    * is (ADR-082 §8, S7d's "at once" as far as opencode allows).
    */
   async removeCredential(definition: SharedProviderDefinition, _running = true): Promise<void> {
-    await this.authTarget.removeVendorAuth(opencodeProviderId(definition))
+    const vendorId = opencodeProviderId(definition)
+    if (this.authTarget.removeVendorKey) await this.authTarget.removeVendorKey(vendorId)
+    else await this.authTarget.removeVendorAuth(vendorId)
   }
 
   hasDefinition(definition: SharedProviderDefinition): boolean {
@@ -262,10 +266,14 @@ function npmForProtocol(protocol: NonNullable<SharedProviderDefinition['protocol
 
 /**
  * One declared model as opencode's config needs it (ADR-074 slice 10): what it
- * can do and how large it is, which opencode otherwise reads as "nothing" for a
- * model only a config declares (`reasoning`/`attachment` false, `limit` 0). The
- * same defaults pi's projection applies to an absent fact — except the limits,
- * where 0 is opencode's own "unknown". Key order matches the config reader's.
+ * can do and how large it is. The same defaults pi's projection applies to an
+ * absent fact — except the limits, where 0 is opencode's own "unknown". Key
+ * order matches the config reader's.
+ *
+ * opencode 2.x (ADR-093 S8): `reasoning: false` is written as `variants: []`
+ * (no reasoning variants); `true` as NO `variants` (opencode generates effort
+ * variants from the package), which the reader reports as unknown — see
+ * `mergeCapabilities`.
  */
 function compileModel(model: SharedProviderModel): OpencodeProviderModelSettings[] {
   const override = model.harnessOverrides?.opencode
@@ -334,6 +342,9 @@ function mergeCapabilities(
       for (const key of CAPABILITY_KEYS) {
         const own = file[key] === undefined || sameJson(file[key], wrote.get(model.id)?.[key])
         const value = own ? model[key] : file[key]
+        // 2.x has no "reasons" flag: a reasoning model is one with no `variants`
+        // list, which reads back as unknown. Matching it keeps a sync a no-op.
+        if (key === 'reasoning' && value === true && file.reasoning === undefined) continue
         if (value !== undefined) Object.assign(merged, { [key]: value })
       }
       return merged

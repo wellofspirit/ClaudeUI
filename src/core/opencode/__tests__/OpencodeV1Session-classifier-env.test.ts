@@ -51,6 +51,7 @@ const {
 
 vi.mock('../OpencodeServerManager', () => ({
   opencodeServerManager: {
+    setServerStartedHook: vi.fn(),
     acquire: vi.fn(),
     release: vi.fn(),
     releaseIfCurrent: vi.fn(),

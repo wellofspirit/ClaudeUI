@@ -93,7 +93,7 @@ import {
   PiResourcesSection
 } from './PiConfigPanes'
 import { diffToPatches } from '../../../../shared/opencode-config-diff'
-import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.29.json'
+import opencodeConfigSchema from '../../../../shared/opencode-config-schema.json'
 
 // ── Section definitions ──────────────────────────────────────────────
 //
@@ -1208,7 +1208,8 @@ function OpencodeModelsSection(): React.JSX.Element {
     // Never the allowlist loaded at mount: the Manage sheet on this same page may
     // have curated since, and `models:set-provider-allowlist` is its only writer.
     const { modelAllowlist: _stale, ...settings } = next
-    window.api.saveOpencodeSettings(settings).catch(() => {})
+    // `cfg` is the snapshot this pane edited: only its change is written (F11).
+    window.api.saveOpencodeSettings(settings, cfg).catch(() => {})
     // Mirror the default-model choice into the store so new/reopened opencode
     // sessions pick it up immediately, and refresh the picker model list.
     // The RAW value, not the constant — an empty string is what tells the store
@@ -1296,54 +1297,46 @@ function OpencodeModelsSection(): React.JSX.Element {
 // ── opencode raw-config (schema-driven) editing ─────────────────────
 
 const OPENCODE_SCHEMA_DEFS = (opencodeConfigSchema as { $defs: SchemaDefs }).$defs
-const OPENCODE_CONFIG_NODE = OPENCODE_SCHEMA_DEFS.Config as SchemaNode
+/** The root of the generated opencode 2.x schema (`Config.InfoEncoded`, ADR-093 S8). */
+const OPENCODE_CONFIG_NODE = OPENCODE_SCHEMA_DEFS[
+  opencodeConfigSchema.$ref.replace('#/$defs/', '')
+] as SchemaNode
 
 /**
- * Top-level Config keys owned by a DEDICATED UI (rendered as read-only pointers in
- * the raw editor, never editable there). `provider` is patch-writable via the
- * per-model capability editor, but curated as a whole under Custom providers.
- * The bulk of them are the curated Configuration panes (OpencodeConfigPanes.tsx);
- * each label here must match that pane's Section label so the pointer is a
- * usable direction and not just a "not here".
+ * Top-level opencode 2.x Config keys owned by a DEDICATED UI (rendered as
+ * read-only pointers in the raw editor, never editable there). `providers` is
+ * patch-writable via the per-model capability editor, but curated as a whole
+ * under Custom providers. The bulk of them are the curated Configuration panes
+ * (OpencodeConfigPanes.tsx); each label here must match that pane's Section
+ * label so the pointer is a usable direction and not just a "not here".
  *
  * Exported for the guard test: a key MISSPELLED here silently stays editable in
  * the raw editor while its curated pane also writes it — two writers, one key.
  */
 export const CONFIG_POINTER_KEYS: Record<string, string> = {
   model: 'Models',
-  small_model: 'Models',
-  disabled_providers: 'Providers',
-  enabled_providers: 'Providers',
-  provider: 'Custom providers',
-  agent: 'Agents',
-  mcp: 'injected at spawn',
-  permission: 'Autonomy mode',
+  agents: 'Agents',
+  providers: 'Custom providers',
+  permissions: 'Tools & integrations',
+  mcp: 'Diagnostics',
   compaction: 'Session behavior',
-  subagent_depth: 'Session behavior',
-  snapshot: 'Session behavior',
+  snapshots: 'Session behavior',
+  experimental: 'Session behavior',
   tool_output: 'Tool output',
-  attachment: 'Image attachments',
+  media: 'Image attachments',
   instructions: 'Workspace',
   default_agent: 'Workspace',
   shell: 'Workspace',
   watcher: 'Workspace',
-  tools: 'Tools & integrations',
   formatter: 'Tools & integrations',
   lsp: 'Tools & integrations',
-  plugin: 'Tools & integrations',
+  plugins: 'Tools & integrations',
   skills: 'Tools & integrations',
-  logLevel: 'Diagnostics',
-  experimental: 'Diagnostics',
-  autoupdate: 'Managed keys',
+  update: 'Managed keys',
   share: 'Managed keys'
 }
-/**
- * Keys rendered NOWHERE — not editable, not even as a pointer. `$schema` is not
- * user config; `server.*` is overridden by the CLI flags OpencodeServerManager
- * spawns with; `layout` and `autoshare` are deprecated upstream. Listing them as
- * pointers would only imply a UI that owns them.
- */
-export const CONFIG_HIDDEN_KEYS = new Set(['$schema', 'layout', 'autoshare', 'server'])
+/** Keys rendered NOWHERE — not editable, not even as a pointer. `$schema` is not user config. */
+export const CONFIG_HIDDEN_KEYS = new Set(['$schema'])
 /** Config keys the raw editor never renders as editable fields. */
 const CONFIG_EXCLUDED_KEYS = new Set([...CONFIG_HIDDEN_KEYS, ...Object.keys(CONFIG_POINTER_KEYS)])
 
@@ -1351,8 +1344,8 @@ const CONFIG_EXCLUDED_KEYS = new Set([...CONFIG_HIDDEN_KEYS, ...Object.keys(CONF
  * "Raw config (opencode.json)" — schema-driven editor over the top-level
  * opencode Config, EXCLUDING keys owned by dedicated UIs (rendered as pointers)
  * and CONFIG_HIDDEN_KEYS (rendered nowhere). What's left is the long tail no
- * curated pane covers: command, enterprise, mode, reference, references,
- * username. Loads the raw config on mount, accumulates edits locally, and on
+ * curated pane covers: commands, enterprise, references, username, warming,
+ * websearch, worktree. Loads the raw config on mount, accumulates edits locally, and on
  * Save computes a deep diff → leaf patches → patchOpencodeNative. ajv errors
  * surface inline.
  *

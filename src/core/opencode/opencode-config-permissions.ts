@@ -45,8 +45,7 @@ import { jsoncParseSafe, safeRead } from './opencode-jsonc-io'
 import {
   builtinAgent,
   listAgents,
-  readAgent,
-  type OpencodeAgentDetail,
+  readAgentFrontmatter,
   type OpencodeAgentMode
 } from './opencode-agents'
 import type { OpencodeAction } from './permission-compiler'
@@ -179,21 +178,22 @@ export function scanOpencodeConfig(cwd: string): OpencodeConfigScan & { unreadab
   const mdNames = [...mdScopes.keys()]
   const applyMd = (scope: 'global' | 'project'): void => {
     for (const name of mdNames) {
-      let detail: OpencodeAgentDetail | null
+      let raw: ReturnType<typeof readAgentFrontmatter>
       try {
-        detail = readAgent(name, scope, cwd)
+        raw = readAgentFrontmatter(name, scope, cwd)
       } catch {
         unreadable.add(name)
         continue
       }
-      if (!detail || detail.scope !== scope) continue // no file for it in this scope
+      if (!raw) continue // no file for it in this scope
+      const data = raw.data
       mergeAgent(name, {
         // The md's mode falls back to the built-in / `all` when the file names
         // none, so a config `mode` it does not restate can be overridden here
         // (over-inclusion only: at worst an extra ask on an agent no task uses).
-        mode: detail.mode,
-        disable: detail.disabled ? true : undefined,
-        permission: withToolsPermission(detail.permission, detail.tools)
+        mode: isMode(data.mode) ? data.mode : (builtinAgent(name)?.mode ?? 'all'),
+        disable: data.disable === true ? true : undefined,
+        permission: withToolsPermission(data.permission, data.tools)
       })
     }
   }
