@@ -102,13 +102,15 @@ import {
   VOICE_NO_AUDIO_MESSAGE,
   VOICE_NO_SPEECH_MESSAGE,
   VOICE_READY_TIMEOUT_MESSAGE,
-  pcm16Level
+  pcm16LevelLe
 } from '../../../core/services/voice-stream-client'
-import type { VoiceState } from '../../../shared/types'
+import type { VoiceNoticeTone, VoiceState } from '../../../shared/types'
 
 /** A push-fed client that records every emission, tagged with the live routing id. */
 class RecordingClient extends VoiceStreamClient {
   emitted: Array<[string, string, unknown]> = []
+  /** Per `voice:error`, in order: the tone it was emitted with (undefined = the default). */
+  tones: Array<VoiceNoticeTone | undefined> = []
   sourceStarts = 0
 
   constructor(
@@ -136,8 +138,9 @@ class RecordingClient extends VoiceStreamClient {
   protected emitTranscript(text: string, isFinal: boolean): void {
     this.emitted.push(['voice:transcript', this.getRoutingId(), { text, isFinal }])
   }
-  protected emitError(message: string): void {
+  protected emitError(message: string, tone?: VoiceNoticeTone): void {
     this.emitted.push(['voice:error', this.getRoutingId(), message])
+    this.tones.push(tone)
   }
 
   states(): unknown[] {
@@ -508,12 +511,12 @@ describe('VoiceStreamClient — outcome messages (S2 item 5)', () => {
     return client
   }
 
-  it('digital silence for ≥ 2 s → "No audio detected from microphone…"', async () => {
+  it('digital silence for ≥ 2 s → "No audio from microphone…"', async () => {
     const client = await finish([pcm(1000, 0), pcm(1000, 0)])
     expect(errors(client)).toEqual([VOICE_NO_AUDIO_MESSAGE])
   })
 
-  it('signal but no transcript for ≥ 2 s → "No speech detected."', async () => {
+  it('signal but no transcript for ≥ 2 s → "No speech detected"', async () => {
     const client = await finish([pcm(1000, 0), pcm(1000, 1500)])
     expect(errors(client)).toEqual([VOICE_NO_SPEECH_MESSAGE])
   })
@@ -580,10 +583,40 @@ describe('VoiceStreamClient — outcome messages (S2 item 5)', () => {
     expect(errors(client)).toEqual([])
   })
 
-  it('pcm16Level: silence is 0, quiet speech approaches 1', () => {
-    expect(pcm16Level(pcm(10, 0))).toBe(0)
-    expect(pcm16Level(pcm(10, 2000))).toBeCloseTo(1)
-    expect(pcm16Level(pcm(10, 20))).toBeCloseTo(0.1)
-    expect(pcm16Level(Buffer.alloc(0))).toBe(0)
+  // S3a item 1: the notice pill's colour rides the wire — never inferred from
+  // the wording in the renderer. Only "No speech detected" is an outcome.
+  it('"No speech detected" is an `info` outcome', async () => {
+    const client = await finish([pcm(1000, 0), pcm(1000, 1500)])
+    expect(client.tones).toEqual(['info'])
+  })
+
+  it('"No audio" is `warn` — something to fix, not an outcome', async () => {
+    const client = await finish([pcm(1000, 0), pcm(1000, 0)])
+    expect(errors(client)).toEqual([VOICE_NO_AUDIO_MESSAGE])
+    expect(client.tones.map((t) => t ?? 'warn')).toEqual(['warn'])
+  })
+
+  it('errors are `warn` (the default)', async () => {
+    vi.useFakeTimers()
+    const client = await connected()
+    line({ type: 'error', message: 'Deepgram refused the key' })
+    const second = await connected()
+    vi.advanceTimersByTime(READY_TIMEOUT_MS)
+    expect([...client.tones, ...second.tones].map((t) => t ?? 'warn')).toEqual(['warn', 'warn'])
+  })
+
+  it('pins the notice wording (S3a item 4 — the approved voice UI)', () => {
+    expect(VOICE_NO_SPEECH_MESSAGE).toBe('No speech detected')
+    expect(VOICE_NO_AUDIO_MESSAGE).toBe(
+      'No audio from microphone — check the input device and microphone access'
+    )
+    expect(VOICE_READY_TIMEOUT_MESSAGE).toBe('Voice transcription didn’t start — try again')
+  })
+
+  it('pcm16LevelLe: silence is 0, quiet speech approaches 1', () => {
+    expect(pcm16LevelLe(pcm(10, 0))).toBe(0)
+    expect(pcm16LevelLe(pcm(10, 2000))).toBeCloseTo(1)
+    expect(pcm16LevelLe(pcm(10, 20))).toBeCloseTo(0.1)
+    expect(pcm16LevelLe(Buffer.alloc(0))).toBe(0)
   })
 })

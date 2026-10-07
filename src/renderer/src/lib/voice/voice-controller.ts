@@ -30,7 +30,20 @@
  * before the microphone has even opened (a permission prompt) still cancels.
  */
 
-import { BrowserVoiceCapture, type CaptureEnv } from './browser-voice-capture'
+import {
+  BrowserVoiceCapture,
+  micDeniedMessage,
+  type CaptureEnv,
+  type CaptureSilence
+} from './browser-voice-capture'
+import { resolveRekeyed } from '../../stores/replica'
+
+/**
+ * How long after a stop completes this client still owns that session's voice
+ * messages: main's finalize timeout (8 s) plus the voice server's own 5 s safety,
+ * with margin — the "No speech detected" outcome arrives at the very end of it.
+ */
+export const VOICE_OWNERSHIP_WINDOW_MS = 15_000
 
 /** The main-process side of a capture. */
 export interface VoiceTransport {
@@ -51,6 +64,26 @@ export interface VoiceController {
    * was said still finalizes. Returns the unsubscribe.
    */
   onFault(listener: (message: string) => void): () => void
+  /**
+   * The live microphone's level (0..1) per ~150 ms block while capturing — the
+   * mic's level ring. Returns the unsubscribe.
+   */
+  onLevel(listener: (level: number) => void): () => void
+  /**
+   * The live microphone went digitally silent for 1.5 s, or came back (see
+   * {@link CaptureSilence}). Returns the unsubscribe.
+   */
+  onSilence(listener: (silence: CaptureSilence) => void): () => void
+  /**
+   * Did THIS client capture for `routingId` — a capture live now, or one whose
+   * stop completed within {@link VOICE_OWNERSHIP_WINDOW_MS}? Rekeys followed.
+   *
+   * The desktop's `voice:error` is a REPLICATED channel (channels.ts records the
+   * anomaly), so every client watching a session hears it. Only the client that
+   * held the microphone may show it — another client's pill would read as a
+   * fault in ITS microphone.
+   */
+  ownsRecentCapture(routingId: string): boolean
 }
 
 interface StartRun {
@@ -59,16 +92,56 @@ interface StartRun {
   cancelled: boolean
 }
 
+/** Subscribe-and-fan-out, for the controller's listener kinds. */
+function listeners<T>(): {
+  add(listener: (value: T) => void): () => void
+  emit(value: T): void
+} {
+  const set = new Set<(value: T) => void>()
+  return {
+    add(listener) {
+      set.add(listener)
+      return () => set.delete(listener)
+    },
+    emit(value) {
+      for (const listener of [...set]) listener(value)
+    }
+  }
+}
+
 export function createVoiceController(
   transport: VoiceTransport,
-  options: { env?: CaptureEnv } = {}
+  options: {
+    env?: CaptureEnv
+    deniedMessage?: string
+    /** Where a pre-rekey id went (`stores/replica`'s `resolveRekeyed`). Test seam. */
+    resolveId?: (routingId: string) => string
+  } = {}
 ): VoiceController {
+  const resolveId = options.resolveId ?? resolveRekeyed
+  /**
+   * Sessions this client captured for → until when it owns their voice messages
+   * (`Infinity` while a press is in flight). Pruned on every write and read.
+   */
+  const owned = new Map<string, number>()
+  const prune = (): void => {
+    const now = Date.now()
+    for (const [id, until] of owned) if (until <= now) owned.delete(id)
+  }
+  const claim = (routingId: string, until: number): void => {
+    prune()
+    const live = resolveId(routingId)
+    for (const id of [...owned.keys()]) if (resolveId(id) === live) owned.delete(id)
+    owned.set(live, until)
+  }
   // The session the live capture is bound to. Audio is routed by the CAPTURE'S
   // owner in main, not by this id; it rides along for the transport's shape.
   let boundRoutingId = ''
   let inflight: StartRun | null = null
   let stopping: Promise<void> | null = null
-  const faultListeners = new Set<(message: string) => void>()
+  const faults = listeners<string>()
+  const levels = listeners<number>()
+  const silences = listeners<CaptureSilence>()
 
   // One microphone per client, matching main's one-capture-per-owner rule
   // (core/services/voice-relay.ts). Constructed eagerly and cheaply — it touches
@@ -76,8 +149,11 @@ export function createVoiceController(
   const capture = new BrowserVoiceCapture({
     sendAudio: (dataB64) => transport.audio(boundRoutingId, dataB64),
     env: options.env,
+    deniedMessage: options.deniedMessage,
+    onLevel: (level) => levels.emit(level),
+    onSilence: (silence) => silences.emit(silence),
     onFault: (fault) => {
-      for (const listener of [...faultListeners]) listener(fault.message)
+      faults.emit(fault.message)
       // Unplugged: nothing more will come, so end the capture the normal way —
       // what was said before the cable came out still finalizes.
       if (fault.ended) void controller.stop(boundRoutingId).catch(() => {})
@@ -96,6 +172,9 @@ export function createVoiceController(
       // re-press queues behind the drain instead of being swallowed.
       if ((inflight && !inflight.cancelled) || capture.isActive()) return
       boundRoutingId = routingId
+      // Owned from the press — a refusal or a server error before `ready` is
+      // this client's to show, too.
+      claim(routingId, Infinity)
       const run: StartRun = { promise: Promise.resolve(), cancelled: false }
       run.promise = (async () => {
         // A previous release still draining goes first: its transport stop must
@@ -141,7 +220,17 @@ export function createVoiceController(
         await capture.stop()
         // Always told, even if the capture was never armed: main may be holding a
         // stream open, and finalization is what flushes the last transcript back.
-        await transport.stop(routingId)
+        try {
+          await transport.stop(routingId)
+        } finally {
+          // The outcome ("No speech detected") and late errors arrive after this;
+          // they are still ours for the window — unless a newer press on the SAME
+          // session (a re-press during this drain) already re-claimed it as live.
+          const newerPress = inflight !== null && inflight !== run && !inflight.cancelled
+          const reclaimed =
+            (newerPress || capture.isActive()) && resolveId(boundRoutingId) === resolveId(routingId)
+          if (!reclaimed) claim(routingId, Date.now() + VOICE_OWNERSHIP_WINDOW_MS)
+        }
       })()
       stopping = stop
       try {
@@ -155,9 +244,15 @@ export function createVoiceController(
       return (inflight !== null && !inflight.cancelled) || capture.isActive()
     },
 
-    onFault(listener) {
-      faultListeners.add(listener)
-      return () => faultListeners.delete(listener)
+    onFault: (listener) => faults.add(listener),
+    onLevel: (listener) => levels.add(listener),
+    onSilence: (listener) => silences.add(listener),
+
+    ownsRecentCapture(routingId) {
+      prune()
+      const live = resolveId(routingId)
+      for (const id of owned.keys()) if (resolveId(id) === live) return true
+      return false
     }
   }
   return controller
@@ -172,11 +267,14 @@ let shared: VoiceController | null = null
  */
 export function voiceController(): VoiceController {
   if (!shared) {
-    shared = createVoiceController({
-      start: (routingId, language) => window.api.voiceStart(routingId, language),
-      audio: (routingId, dataB64) => window.api.voiceAudio(routingId, dataB64),
-      stop: (routingId) => window.api.voiceStop(routingId)
-    })
+    shared = createVoiceController(
+      {
+        start: (routingId, language) => window.api.voiceStart(routingId, language),
+        audio: (routingId, dataB64) => window.api.voiceAudio(routingId, dataB64),
+        stop: (routingId) => window.api.voiceStop(routingId)
+      },
+      { deniedMessage: micDeniedMessage(window.api?.platform) }
+    )
   }
   return shared
 }

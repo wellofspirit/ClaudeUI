@@ -10,8 +10,20 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { createVoiceController, type VoiceTransport } from '../voice-controller'
-import { MIC_MUTE_GRACE_MS, type CaptureEnv } from '../browser-voice-capture'
+import {
+  createVoiceController,
+  VOICE_OWNERSHIP_WINDOW_MS,
+  type VoiceTransport
+} from '../voice-controller'
+import {
+  MIC_DENIED_MACOS_MESSAGE,
+  MIC_DISCONNECTED_MESSAGE,
+  MIC_MUTED_MESSAGE,
+  MIC_MUTE_GRACE_MS,
+  SILENCE_WARNING_MS,
+  type CaptureEnv,
+  type CaptureSilence
+} from '../browser-voice-capture'
 
 // ---------------------------------------------------------------------------
 // Doubles
@@ -161,7 +173,7 @@ describe('voice controller — start', () => {
       })
     })
 
-    await expect(controller.start('rid-1', 'en')).rejects.toThrow(/Microphone access was denied/)
+    await expect(controller.start('rid-1', 'en')).rejects.toThrow(/^Microphone access denied/)
     expect(transport.start).not.toHaveBeenCalled()
   })
 
@@ -321,7 +333,7 @@ describe('voice controller — microphone faults (S2 item 9)', () => {
     liveTracks[0].dispatchEvent(new Event('ended'))
     await vi.waitFor(() => expect(transport.stop).toHaveBeenCalledWith('rid-1'))
 
-    expect(faults).toEqual(['The microphone was disconnected.'])
+    expect(faults).toEqual([MIC_DISCONNECTED_MESSAGE])
     expect(controller.isActive()).toBe(false)
   })
 
@@ -338,7 +350,7 @@ describe('voice controller — microphone faults (S2 item 9)', () => {
       Object.assign(track, { muted: true })
       track.dispatchEvent(new Event('mute'))
       vi.advanceTimersByTime(MIC_MUTE_GRACE_MS)
-      expect(faults).toEqual(['The microphone was muted by the system.'])
+      expect(faults).toEqual([MIC_MUTED_MESSAGE])
       expect(transport.stop).not.toHaveBeenCalled()
       expect(controller.isActive()).toBe(true)
 
@@ -352,5 +364,101 @@ describe('voice controller — microphone faults (S2 item 9)', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('voice controller — level and silence (S3a items 5–6)', () => {
+  it("relays the capture's per-block level to subscribers until they unsubscribe", async () => {
+    const controller = createVoiceController(makeTransport(), { env: makeEnv() })
+    const levels: number[] = []
+    const off = controller.onLevel((level) => levels.push(level))
+    await controller.start('rid-1', 'en')
+
+    pushBlock()
+    expect(levels).toHaveLength(1)
+    expect(levels[0]).toBeGreaterThan(0)
+
+    off()
+    pushBlock()
+    expect(levels).toHaveLength(1)
+  })
+
+  it('relays the live silence warning, and its clearing', async () => {
+    const controller = createVoiceController(makeTransport(), { env: makeEnv() })
+    const silences: CaptureSilence[] = []
+    controller.onSilence((silence) => silences.push(silence))
+    await controller.start('rid-1', 'en')
+
+    workletPort?.onmessage?.({ data: new Float32Array((SILENCE_WARNING_MS * 16000) / 1000) })
+    pushBlock()
+    expect(silences.map((s) => s.silent)).toEqual([true, false])
+  })
+
+  it('words a denied microphone for its client', async () => {
+    const controller = createVoiceController(makeTransport(), {
+      env: makeEnv(async () => {
+        throw Object.assign(new Error('denied'), { name: 'NotAllowedError' })
+      }),
+      deniedMessage: MIC_DENIED_MACOS_MESSAGE
+    })
+    await expect(controller.start('rid-1', 'en')).rejects.toThrow(MIC_DENIED_MACOS_MESSAGE)
+  })
+})
+
+// Review item 1: the desktop's `voice:error` is replicated, so every client
+// watching a session hears it. Only the client that held the microphone shows it:
+// from its press until VOICE_OWNERSHIP_WINDOW_MS after its stop completed.
+describe('voice controller — owns a recent capture', () => {
+  it('owns nothing it never captured for', () => {
+    const controller = createVoiceController(makeTransport(), { env: makeEnv() })
+    expect(controller.ownsRecentCapture('rid-1')).toBe(false)
+  })
+
+  it('owns the session from the press, through the stop, until the window closes', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const controller = createVoiceController(makeTransport(), { env: makeEnv() })
+      const starting = controller.start('rid-1', 'en')
+      expect(controller.ownsRecentCapture('rid-1')).toBe(true)
+      await starting
+      expect(controller.ownsRecentCapture('rid-1')).toBe(true)
+      expect(controller.ownsRecentCapture('rid-other')).toBe(false)
+
+      // Held for minutes: still ours — the window only starts at the stop.
+      vi.setSystemTime(Date.now() + 10 * 60_000)
+      expect(controller.ownsRecentCapture('rid-1')).toBe(true)
+
+      await controller.stop('rid-1')
+      vi.setSystemTime(Date.now() + VOICE_OWNERSHIP_WINDOW_MS - 1)
+      expect(controller.ownsRecentCapture('rid-1')).toBe(true)
+      vi.setSystemTime(Date.now() + 1)
+      expect(controller.ownsRecentCapture('rid-1')).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a refused start is still owned — its error is this client’s to show', async () => {
+    const controller = createVoiceController(makeTransport(), {
+      env: makeEnv(async () => {
+        throw Object.assign(new Error('denied'), { name: 'NotAllowedError' })
+      })
+    })
+    await expect(controller.start('rid-1', 'en')).rejects.toThrow()
+    expect(controller.ownsRecentCapture('rid-1')).toBe(true)
+  })
+
+  it('follows a rekey: a capture under the old id owns the new one', async () => {
+    const rekeys = new Map<string, string>()
+    const controller = createVoiceController(makeTransport(), {
+      env: makeEnv(),
+      resolveId: (id) => rekeys.get(id) ?? id
+    })
+    await controller.start('pending-1', 'en')
+    rekeys.set('pending-1', 'sdk-1')
+    expect(controller.ownsRecentCapture('sdk-1')).toBe(true)
+    await controller.stop('sdk-1')
+    expect(controller.ownsRecentCapture('pending-1')).toBe(true)
+    expect(controller.ownsRecentCapture('sdk-1')).toBe(true)
   })
 })

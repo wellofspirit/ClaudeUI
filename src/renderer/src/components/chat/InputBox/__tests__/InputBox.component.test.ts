@@ -27,6 +27,11 @@ import type { InputBoxViewProps } from '../View'
 import type { ModelInfo, QueuedItem } from '../../../../../../shared/types'
 import { InputBox } from '../InputBox'
 import {
+  resetVoiceNoticesForTests,
+  useVoiceNoticeStore,
+  voiceNoticeFor
+} from '../../../../lib/voice/voice-notice'
+import {
   resolveCodexCapabilities,
   type EffortLevel
 } from '../../../../../../shared/model-capabilities'
@@ -88,6 +93,9 @@ vi.mock('../../../../hooks/useIsMobile', () => ({
 // `voice:start-recording` / `voice:stop-recording` invokes recorded below. The
 // controller's own capture-vs-transport order is voice-controller.unit.test.ts's.
 const voiceFaults = vi.hoisted(() => new Set<(message: string) => void>())
+const voiceSilences = vi.hoisted(
+  () => new Set<(silence: { silent: boolean; trackLabel: string | null }) => void>()
+)
 vi.mock('../../../../lib/voice/voice-controller', () => ({
   voiceController: () => ({
     start: (routingId: string, language: string) => window.api.voiceStart(routingId, language),
@@ -96,6 +104,11 @@ vi.mock('../../../../lib/voice/voice-controller', () => ({
     onFault: (listener: (message: string) => void) => {
       voiceFaults.add(listener)
       return () => voiceFaults.delete(listener)
+    },
+    onLevel: () => () => {},
+    onSilence: (listener: (silence: { silent: boolean; trackLabel: string | null }) => void) => {
+      voiceSilences.add(listener)
+      return () => voiceSilences.delete(listener)
     }
   })
 }))
@@ -1567,9 +1580,10 @@ describe('InputBox FC — rendered', () => {
     expect(viewProps.selectedModel.engineId).toBe('opencode')
   })
 
-  // S2 item 6: a start/stop the renderer saw fail lands where a server-side
-  // `voice:error` does (it used to reach only `logRelay`, i.e. the console).
-  describe('voice failures are visible', () => {
+  // S2 item 6 made every voice failure visible; S3a moved them off the session's
+  // error stack. A start/stop the renderer saw fail, a microphone fault and the
+  // live silence warning all land in the mic's notice pill — never `addError`.
+  describe('voice messages are notices, never session errors', () => {
     function liveSession(): void {
       useSessionStore.setState((state) => ({
         sessions: {
@@ -1579,12 +1593,17 @@ describe('InputBox FC — rendered', () => {
       }))
       mirrorStoreIntoReplica()
     }
+    const notice = (): ReturnType<typeof voiceNoticeFor> =>
+      voiceNoticeFor(useVoiceNoticeStore.getState().notices, FC_ROUTE)
+    const errors = (): string[] => useSessionStore.getState().sessions[FC_ROUTE].errors
 
-    it('a refused start is added to the session errors (and still logged)', async () => {
+    beforeEach(() => resetVoiceNoticesForTests())
+
+    it('a refused start is a warn notice (and still logged), not a session error', async () => {
       liveSession()
       app.bridge.ipcMain.handle('voice:start-recording', () => ({
         ok: false,
-        error: 'Microphone access was denied. Allow it for this site and try again.'
+        error: 'Microphone access denied — allow it for this site'
       }))
       renderFC()
 
@@ -1592,12 +1611,15 @@ describe('InputBox FC — rendered', () => {
         await viewProps.onVoiceStart()
       })
 
-      expect(useSessionStore.getState().sessions[FC_ROUTE].errors.at(-1)).toBe(
-        'Microphone access was denied. Allow it for this site and try again.'
-      )
+      expect(notice()).toMatchObject({
+        text: 'Microphone access denied — allow it for this site',
+        tone: 'warn'
+      })
+      expect(viewProps.voiceNotice).toMatchObject({ text: notice()!.text })
+      expect(errors()).toEqual([])
     })
 
-    it('a failed stop is added to the session errors too', async () => {
+    it('a failed stop is a warn notice too', async () => {
       app.bridge.ipcMain.handle('voice:stop-recording', () => ({
         ok: false,
         error: 'stop went wrong'
@@ -1608,20 +1630,95 @@ describe('InputBox FC — rendered', () => {
         await viewProps.onVoiceStop()
       })
 
-      expect(useSessionStore.getState().sessions[FC_ROUTE].errors.at(-1)).toBe('stop went wrong')
+      expect(notice()).toMatchObject({ text: 'stop went wrong', tone: 'warn' })
+      expect(errors()).toEqual([])
     })
 
-    it('a microphone fault reaches the active session errors (S2 item 9)', async () => {
+    it('a microphone fault is a warn notice for the active session', async () => {
       renderFC()
       expect(voiceFaults.size).toBe(1)
 
       act(() => {
-        for (const listener of voiceFaults) listener('The microphone was disconnected.')
+        for (const listener of voiceFaults) listener('Microphone disconnected — kept what you said')
       })
 
-      expect(useSessionStore.getState().sessions[FC_ROUTE].errors.at(-1)).toBe(
-        'The microphone was disconnected.'
-      )
+      expect(notice()).toMatchObject({
+        text: 'Microphone disconnected — kept what you said',
+        tone: 'warn'
+      })
+      expect(errors()).toEqual([])
+    })
+
+    it('the live silence warning names the track, and is taken down when sound returns', () => {
+      renderFC()
+      expect(voiceSilences.size).toBe(1)
+
+      act(() => {
+        for (const listener of voiceSilences)
+          listener({ silent: true, trackLabel: 'MacBook Pro Microphone' })
+      })
+      expect(notice()).toMatchObject({
+        text: 'No signal from MacBook Pro Microphone — lid closed or muted?',
+        tone: 'warn'
+      })
+
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: false, trackLabel: null })
+      })
+      expect(notice()).toBeNull()
+      expect(errors()).toEqual([])
+    })
+
+    it('a rekey mid-silence: the warning is still taken down when sound returns', () => {
+      // A first press spawns cli.js, which rekeys the brand-new session while
+      // the microphone is open; InputBox resubscribes under the new id.
+      renderFC()
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: true, trackLabel: null })
+      })
+      expect(notice()).not.toBeNull()
+
+      act(() => seed.rekey(FC_ROUTE, 'sdk-voice-1'))
+      expect(useSessionStore.getState().activeSessionId).toBe('sdk-voice-1')
+      expect(voiceSilences.size).toBe(1)
+      expect(voiceNoticeFor(useVoiceNoticeStore.getState().notices, 'sdk-voice-1')).toMatchObject({
+        text: expect.stringMatching(/^No signal from/)
+      })
+
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: false, trackLabel: null })
+      })
+      expect(voiceNoticeFor(useVoiceNoticeStore.getState().notices, 'sdk-voice-1')).toBeNull()
+    })
+
+    it('a cleared silence warning never removes a NEWER notice that replaced it', () => {
+      renderFC()
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: true, trackLabel: null })
+      })
+      act(() => {
+        for (const listener of voiceFaults) listener('The microphone was muted by the system')
+      })
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: false, trackLabel: null })
+      })
+      expect(notice()).toMatchObject({ text: 'The microphone was muted by the system' })
+    })
+
+    it('the push-to-talk is HELD from press to release — the pill stays while it is', async () => {
+      liveSession()
+      renderFC()
+      expect(viewProps.voiceHeld).toBe(false)
+
+      await act(async () => {
+        await viewProps.onVoiceStart()
+      })
+      expect(viewProps.voiceHeld).toBe(true)
+
+      await act(async () => {
+        await viewProps.onVoiceStop()
+      })
+      expect(viewProps.voiceHeld).toBe(false)
     })
   })
 

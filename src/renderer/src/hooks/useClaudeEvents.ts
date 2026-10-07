@@ -32,6 +32,8 @@ import { onSyncEvent, markSyncReady } from '../../../core/shared/sync/client-reg
 import { useSessionStore } from '../stores/session-store'
 import { onReplicaApplied, seedWatchedSession, getReplicaState } from '../stores/replica'
 import { loadResumedTranscript } from '../lib/session-history-load'
+import { showVoiceNotice } from '../lib/voice/voice-notice'
+import { voiceController } from '../lib/voice/voice-controller'
 import type { SessionStatus, TaskNotification, SlashCommandInfo } from '../../../shared/types'
 
 /** Send a system notification if the session is not currently focused */
@@ -385,8 +387,17 @@ export function useClaudeEvents(): void {
             /* Same posture as above — a failed read keeps the last good answer. */
           })
       }),
-      onSyncEvent('voice:error', (routingId, error) => {
-        useSessionStore.getState().addError(routingId, error)
+      // Every voice message — failure or outcome — is the mic's notice pill, never
+      // the session's error stack. Main sends the tone; absent (an older
+      // emitter) is `warn`.
+      //
+      // The desktop's `voice:error` is REPLICATED, so every client watching the
+      // session hears it. Only the client whose microphone it was shows it — on
+      // anyone else's mic it would read as a fault in THEIR microphone — so a
+      // message for a session this client did not just capture for is dropped.
+      onSyncEvent('voice:error', (routingId, error, tone) => {
+        if (!voiceController().ownsRecentCapture(routingId)) return
+        showVoiceNotice(routingId, error, tone === 'info' ? 'info' : 'warn')
       }),
 
       // -------------------------------------------------------------------

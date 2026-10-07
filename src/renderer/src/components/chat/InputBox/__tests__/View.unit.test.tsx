@@ -10,9 +10,9 @@
  *   - that the EffortPicker is hidden entirely when the model has no effort support
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createRef } from 'react'
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { act, render, screen, fireEvent, within } from '@testing-library/react'
 
 /**
  * Open a picker dropdown by clicking its trigger and return a `within(dropdown)`
@@ -28,7 +28,13 @@ function openPickerDropdown(triggerTitle: string) {
   if (!dropdown) throw new Error(`Dropdown not found after opening "${triggerTitle}"`)
   return within(dropdown as HTMLElement)
 }
-import { InputBoxView, type InputBoxViewProps, type ModelDisplay } from '../View'
+import {
+  InputBoxView,
+  VOICE_NOTICE_FADE_MS,
+  VOICE_NOTICE_LINGER_MS,
+  type InputBoxViewProps,
+  type ModelDisplay
+} from '../View'
 import { bootstrapPermissionMode, useSessionStore } from '../../../../stores/session-store'
 
 const baseModel: ModelDisplay = {
@@ -441,6 +447,232 @@ describe('VoiceButton — hold-to-talk on touch (phase 5 S3)', () => {
     const { button, onVoiceStop } = renderVoice({ voiceState: 'recording' })
     fireEvent.mouseLeave(button)
     expect(onVoiceStop).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The voice notice pill (S3a item 3) — one message above the mic, and the fade
+// rule from the approved UI: held → stays; released (or arriving while not
+// held) → fades and is removed 5 s later; hover holds; leaving restarts.
+// ---------------------------------------------------------------------------
+
+describe('voice notice pill — the fade rule (S3a)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  const INFO = { id: 1, text: 'No speech detected', tone: 'info' as const }
+  const WARN = {
+    id: 2,
+    text: 'Microphone disconnected — kept what you said',
+    tone: 'warn' as const
+  }
+
+  function renderPill(overrides: Partial<InputBoxViewProps> = {}) {
+    const onVoiceNoticeExpire = vi.fn()
+    const props = makeProps({
+      voiceEnabled: true,
+      voiceNotice: INFO,
+      voiceHeld: false,
+      onVoiceNoticeExpire,
+      ...overrides
+    })
+    const view = render(<InputBoxView {...props} />)
+    const rerender = (more: Partial<InputBoxViewProps>): void =>
+      view.rerender(<InputBoxView {...props} {...more} />)
+    return { onVoiceNoticeExpire, rerender }
+  }
+  const pill = (): HTMLElement => screen.getByTestId('InputBox.voiceNotice')
+  const advance = (ms: number): void => {
+    act(() => {
+      vi.advanceTimersByTime(ms)
+    })
+  }
+
+  it('renders the text with its tone, as a status the screen reader announces', () => {
+    renderPill({ voiceNotice: WARN })
+    expect(pill()).toHaveTextContent(WARN.text)
+    expect(pill()).toHaveAttribute('data-tone', 'warn')
+    expect(pill()).toHaveAttribute('role', 'status')
+  })
+
+  it('renders nothing without a notice, or with the mic hidden', () => {
+    renderPill({ voiceNotice: null })
+    expect(screen.queryByTestId('InputBox.voiceNotice')).toBeNull()
+  })
+
+  it('stays as long as the push-to-talk is HELD', () => {
+    const { onVoiceNoticeExpire } = renderPill({ voiceNotice: WARN, voiceHeld: true })
+    advance(VOICE_NOTICE_LINGER_MS * 4)
+    expect(onVoiceNoticeExpire).not.toHaveBeenCalled()
+    expect(pill()).not.toHaveAttribute('data-fading')
+  })
+
+  it('once released: fades over the last stretch and is removed 5 s after the release', () => {
+    const { onVoiceNoticeExpire, rerender } = renderPill({ voiceNotice: WARN, voiceHeld: true })
+    advance(10_000)
+    rerender({ voiceNotice: WARN, voiceHeld: false })
+
+    advance(VOICE_NOTICE_LINGER_MS - VOICE_NOTICE_FADE_MS - 1)
+    expect(pill()).not.toHaveAttribute('data-fading')
+    advance(1)
+    expect(pill()).toHaveAttribute('data-fading', 'true')
+    expect(pill().className).toContain('opacity-0')
+    expect(onVoiceNoticeExpire).not.toHaveBeenCalled()
+
+    advance(VOICE_NOTICE_FADE_MS)
+    expect(onVoiceNoticeExpire).toHaveBeenCalledWith(WARN.id)
+  })
+
+  it('a notice that ARRIVES after the release is removed 5 s after it appears', () => {
+    const { onVoiceNoticeExpire, rerender } = renderPill({ voiceNotice: null })
+    advance(3000) // released long ago
+    rerender({ voiceNotice: INFO })
+    advance(VOICE_NOTICE_LINGER_MS - 1)
+    expect(onVoiceNoticeExpire).not.toHaveBeenCalled()
+    advance(1)
+    expect(onVoiceNoticeExpire).toHaveBeenCalledWith(INFO.id)
+  })
+
+  it('a newer notice replacing the old one restarts the 5 s', () => {
+    const { onVoiceNoticeExpire, rerender } = renderPill({ voiceNotice: INFO })
+    advance(4000)
+    rerender({ voiceNotice: WARN })
+    advance(4000)
+    expect(onVoiceNoticeExpire).not.toHaveBeenCalled()
+    advance(1000)
+    expect(onVoiceNoticeExpire).toHaveBeenCalledTimes(1)
+    expect(onVoiceNoticeExpire).toHaveBeenCalledWith(WARN.id)
+  })
+
+  it('hover holds it — even mid-fade — and leaving restarts the full 5 s', () => {
+    const { onVoiceNoticeExpire } = renderPill({ voiceNotice: INFO })
+    advance(VOICE_NOTICE_LINGER_MS - VOICE_NOTICE_FADE_MS + 100)
+    expect(pill()).toHaveAttribute('data-fading', 'true')
+
+    fireEvent.mouseEnter(pill())
+    expect(pill()).not.toHaveAttribute('data-fading')
+    advance(VOICE_NOTICE_LINGER_MS * 3)
+    expect(onVoiceNoticeExpire).not.toHaveBeenCalled()
+
+    fireEvent.mouseLeave(pill())
+    advance(VOICE_NOTICE_LINGER_MS - 1)
+    expect(onVoiceNoticeExpire).not.toHaveBeenCalled()
+    advance(1)
+    expect(onVoiceNoticeExpire).toHaveBeenCalledWith(INFO.id)
+  })
+
+  it('pressing again while it lingers holds it again', () => {
+    const { onVoiceNoticeExpire, rerender } = renderPill({ voiceNotice: INFO })
+    advance(3000)
+    rerender({ voiceNotice: INFO, voiceHeld: true })
+    advance(VOICE_NOTICE_LINGER_MS * 2)
+    expect(onVoiceNoticeExpire).not.toHaveBeenCalled()
+  })
+
+  it('reduced motion: no fade or entrance animation, the same timing', () => {
+    renderPill()
+    // The motion-reduce variants keep it fully visible until it is removed.
+    expect(pill().className).toContain('motion-reduce:transition-none')
+    expect(pill().className).toContain('motion-safe:animate-[fade-in_0.15s_ease-out]')
+    expect(pill().className).not.toContain(' animate-fade-in')
+    advance(VOICE_NOTICE_LINGER_MS - VOICE_NOTICE_FADE_MS)
+    expect(pill().className).toContain('motion-reduce:opacity-100')
+  })
+})
+
+describe('voice notice pill — alignment over the mic', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('re-measures when the input box resizes, not only the window', () => {
+    const observers: Array<() => void> = []
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(private readonly callback: () => void) {
+          observers.push(() => this.callback())
+        }
+        observe(): void {}
+        disconnect(): void {}
+      }
+    )
+    render(
+      <InputBoxView
+        {...makeProps({
+          voiceEnabled: true,
+          voiceNotice: { id: 1, text: 'No speech detected', tone: 'info' }
+        })}
+      />
+    )
+    const pill = screen.getByTestId('InputBox.voiceNotice')
+    const box = pill.parentElement!
+    const mic = screen.getByTestId('InputBox.voice')
+    expect(observers).toHaveLength(1)
+
+    const rect = (r: Partial<DOMRect>) => () => ({ ...new DOMRect(), ...r }) as DOMRect
+    box.getBoundingClientRect = rect({ left: 0, right: 500, width: 500 })
+    mic.getBoundingClientRect = rect({ right: 440 })
+    act(() => observers[0]())
+
+    expect(pill.style.right).toBe('60px')
+    expect(pill.style.maxWidth).toBe('440px')
+  })
+})
+
+describe('mic states and the level ring (S3a item 5)', () => {
+  function renderMic(overrides: Partial<InputBoxViewProps> = {}) {
+    const listeners = new Set<(level: number) => void>()
+    const subscribeVoiceLevel = vi.fn((listener: (level: number) => void) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    })
+    const props = makeProps({ voiceEnabled: true, subscribeVoiceLevel, ...overrides })
+    const view = render(<InputBoxView {...props} />)
+    return {
+      listeners,
+      subscribeVoiceLevel,
+      rerender: (more: Partial<InputBoxViewProps>) =>
+        view.rerender(<InputBoxView {...props} {...more} />)
+    }
+  }
+  const mic = (): HTMLElement => screen.getByTestId('InputBox.voice')
+
+  it('shows the ring only while recording, and subscribes only then', () => {
+    const { subscribeVoiceLevel, listeners, rerender } = renderMic({ voiceState: 'connecting' })
+    expect(screen.queryByTestId('InputBox.voiceLevel')).toBeNull()
+    expect(subscribeVoiceLevel).not.toHaveBeenCalled()
+
+    rerender({ voiceState: 'recording' })
+    expect(screen.getByTestId('InputBox.voiceLevel')).toBeInTheDocument()
+    expect(listeners.size).toBe(1)
+
+    rerender({ voiceState: 'processing' })
+    expect(screen.queryByTestId('InputBox.voiceLevel')).toBeNull()
+    expect(listeners.size).toBe(0)
+  })
+
+  it('scales the ring with the level, without a React render per block', async () => {
+    const { listeners } = renderMic({ voiceState: 'recording' })
+    const ring = screen.getByTestId('InputBox.voiceLevel')
+    for (const listener of listeners) {
+      listener(0.2)
+      listener(1)
+    }
+    // rAF-throttled: one write per frame, carrying the newest level.
+    await vi.waitFor(() => expect(ring.style.transform).toBe('scale(1.45)'))
+  })
+
+  it('a silent microphone dims the mic and drops the ring', () => {
+    const { listeners } = renderMic({ voiceState: 'recording', voiceSilent: true })
+    expect(screen.queryByTestId('InputBox.voiceLevel')).toBeNull()
+    expect(listeners.size).toBe(0)
+    expect(mic()).toHaveAttribute('data-silent', 'true')
+  })
+
+  it('stamps the state, and a busy (processing) mic is not faded like a disabled one', () => {
+    renderMic({ voiceState: 'processing' })
+    expect(mic()).toHaveAttribute('data-state', 'processing')
+    expect(mic()).toBeDisabled()
+    expect(mic().className).not.toContain('opacity-15')
   })
 })
 

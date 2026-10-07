@@ -24,14 +24,22 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   BrowserVoiceCapture,
+  MIC_DENIED_DESKTOP_MESSAGE,
+  MIC_DENIED_MACOS_MESSAGE,
+  MIC_DENIED_WEB_MESSAGE,
+  MIC_DENIED_WINDOWS_MESSAGE,
   MIC_DISCONNECTED_MESSAGE,
   MIC_MUTED_MESSAGE,
   MIC_MUTE_GRACE_MS,
   VOICE_WORKLET_URL,
+  SILENCE_WARNING_MS,
   WORKLET_FLUSH_TIMEOUT_MS,
   captureUnsupportedReason,
+  micDeniedMessage,
+  noSignalMessage,
   type CaptureEnv,
-  type CaptureFault
+  type CaptureFault,
+  type CaptureSilence
 } from '../browser-voice-capture'
 
 // ---------------------------------------------------------------------------
@@ -122,12 +130,14 @@ class FakeAudioWorkletNode extends FakeAudioNode {
 }
 
 /** A MediaStreamTrack double: stoppable, and an EventTarget for `ended`/`mute`. */
-type FakeTrack = EventTarget & { stop: ReturnType<typeof vi.fn> }
+type FakeTrack = EventTarget & { stop: ReturnType<typeof vi.fn>; label: string }
 
 let tracks: FakeTrack[] = []
+/** What the next fake track calls itself (a real one: "MacBook Pro Microphone"). */
+let trackLabel = ''
 
 function makeStream(): MediaStream {
-  const track = Object.assign(new EventTarget(), { stop: vi.fn() }) as FakeTrack
+  const track = Object.assign(new EventTarget(), { stop: vi.fn(), label: trackLabel }) as FakeTrack
   tracks.push(track)
   return { getTracks: () => [track] } as unknown as MediaStream
 }
@@ -158,6 +168,7 @@ beforeEach(() => {
   tracks = []
   workletAnswers = true
   workletTailSamples = 0
+  trackLabel = ''
 })
 
 // ---------------------------------------------------------------------------
@@ -165,20 +176,22 @@ beforeEach(() => {
 describe('captureUnsupportedReason', () => {
   it('names the secure-context requirement first — it is the one an owner can act on', () => {
     const reason = captureUnsupportedReason(makeEnv({ isSecureContext: false }))
-    expect(reason).toMatch(/secure \(HTTPS\)/)
+    expect(reason).toBe(
+      'Voice input needs a secure (HTTPS) connection — use the tailnet or tunnel address'
+    )
   })
 
   it('reports a browser with no microphone API', () => {
-    expect(captureUnsupportedReason(makeEnv({ mediaDevices: undefined }))).toMatch(/microphone API/)
+    expect(captureUnsupportedReason(makeEnv({ mediaDevices: undefined }))).toBe(
+      'This browser has no microphone API — try a current browser'
+    )
   })
 
   it('reports a browser with no AudioWorklet', () => {
-    expect(captureUnsupportedReason(makeEnv({ AudioWorkletNodeCtor: undefined }))).toMatch(
-      /AudioWorklet/
-    )
-    expect(captureUnsupportedReason(makeEnv({ AudioContextCtor: undefined }))).toMatch(
-      /AudioWorklet/
-    )
+    const noWorklet =
+      'This browser can’t run voice capture (no AudioWorklet) — try a current browser'
+    expect(captureUnsupportedReason(makeEnv({ AudioWorkletNodeCtor: undefined }))).toBe(noWorklet)
+    expect(captureUnsupportedReason(makeEnv({ AudioContextCtor: undefined }))).toBe(noWorklet)
   })
 
   it('passes a secure context with the full API', () => {
@@ -242,14 +255,33 @@ describe('BrowserVoiceCapture', () => {
     })
     const capture = new BrowserVoiceCapture({ sendAudio: vi.fn(), env })
 
-    await expect(capture.start()).rejects.toThrow(/Microphone access was denied/)
+    await expect(capture.start()).rejects.toThrow(MIC_DENIED_WEB_MESSAGE)
     expect(capture.isActive()).toBe(false)
+  })
+
+  it('words a denied permission for the client it happened on (S3a item 4)', async () => {
+    const denied = Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' })
+    const capture = new BrowserVoiceCapture({
+      sendAudio: vi.fn(),
+      env: makeEnv({}, async () => {
+        throw denied
+      }),
+      deniedMessage: micDeniedMessage('darwin')
+    })
+    await expect(capture.start()).rejects.toThrow(
+      'Microphone access denied — allow ClaudeUI in System Settings › Privacy › Microphone'
+    )
+    expect(micDeniedMessage('web')).toBe('Microphone access denied — allow it for this site')
+    expect(micDeniedMessage('darwin')).toBe(MIC_DENIED_MACOS_MESSAGE)
+    expect(micDeniedMessage('win32')).toBe(MIC_DENIED_WINDOWS_MESSAGE)
+    expect(micDeniedMessage('linux')).toBe(MIC_DENIED_DESKTOP_MESSAGE)
+    expect(micDeniedMessage(undefined)).toBe(MIC_DENIED_DESKTOP_MESSAGE)
   })
 
   it('distinguishes a missing device and a busy one', async () => {
     for (const [name, pattern] of [
-      ['NotFoundError', /No microphone was found/],
-      ['NotReadableError', /in use by another application/]
+      ['NotFoundError', 'No microphone found — connect one and try again'],
+      ['NotReadableError', 'Microphone in use by another app — close it and try again']
     ] as const) {
       const capture = new BrowserVoiceCapture({
         sendAudio: vi.fn(),
@@ -257,7 +289,7 @@ describe('BrowserVoiceCapture', () => {
           throw Object.assign(new Error('nope'), { name })
         })
       })
-      await expect(capture.start()).rejects.toThrow(pattern)
+      await expect(capture.start()).rejects.toThrow(new Error(pattern))
     }
   })
 
@@ -677,6 +709,145 @@ describe('BrowserVoiceCapture — the worklet tail (S2 item 10)', () => {
       expect(workletNodes[0].disconnect).toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
+    }
+  })
+})
+
+// S3a items 5–6: what the capture reads OUT of the audio — a level per block for
+// the mic's ring, and the live digital-silence warning. Blocks are fed at 16 kHz
+// (the fake context honours the requested rate), so samples in = samples out.
+describe('BrowserVoiceCapture — level and live silence (S3a)', () => {
+  const SILENCE_SAMPLES = (SILENCE_WARNING_MS * 16000) / 1000
+
+  async function capturing(): Promise<{
+    levels: number[]
+    silences: CaptureSilence[]
+    capture: BrowserVoiceCapture
+  }> {
+    const levels: number[] = []
+    const silences: CaptureSilence[] = []
+    const capture = new BrowserVoiceCapture({
+      sendAudio: vi.fn(),
+      env: makeEnv(),
+      onLevel: (level) => levels.push(level),
+      onSilence: (silence) => silences.push(silence)
+    })
+    await capture.start()
+    return { levels, silences, capture }
+  }
+
+  it("reports each block's level with the shared formula — silence 0, quiet speech ~1", async () => {
+    const { levels } = await capturing()
+    pushBlock(1600, 0)
+    pushBlock(1600, 2000 / 32767) // rms 2000 — full scale
+    pushBlock(1600, 20 / 32767) // rms 20 — 0.1
+    expect(levels[0]).toBe(0)
+    expect(levels[1]).toBeCloseTo(1, 3)
+    expect(levels[2]).toBeCloseTo(0.1, 2)
+  })
+
+  it('settles the ring to 0 on release, and reports nothing after', async () => {
+    const { levels, capture } = await capturing()
+    pushBlock(1600, 0.5)
+    await capture.halt()
+    pushBlock(1600, 0.5)
+    expect(levels).toEqual([expect.any(Number), 0])
+    expect(levels[0]).toBeGreaterThan(0)
+  })
+
+  it(`warns once ${SILENCE_WARNING_MS} ms of digital silence have been heard, naming the track`, async () => {
+    trackLabel = 'MacBook Pro Microphone'
+    const { silences } = await capturing()
+    pushBlock(SILENCE_SAMPLES - 1, 0)
+    expect(silences).toEqual([])
+    pushBlock(1, 0)
+    expect(silences).toEqual([{ silent: true, trackLabel: 'MacBook Pro Microphone' }])
+    // Still silent: no second warning.
+    pushBlock(4800, 0)
+    expect(silences).toHaveLength(1)
+  })
+
+  it('clears the warning as soon as a block has signal — once', async () => {
+    const { silences } = await capturing()
+    pushBlock(SILENCE_SAMPLES, 0)
+    pushBlock(160, 0.01)
+    pushBlock(160, 0.01)
+    expect(silences.map((s) => s.silent)).toEqual([true, false])
+  })
+
+  it('signal resets the count — silence must be CONTINUOUS', async () => {
+    const { silences } = await capturing()
+    pushBlock(SILENCE_SAMPLES - 1600, 0)
+    pushBlock(160, 0.01)
+    pushBlock(SILENCE_SAMPLES - 1600, 0)
+    expect(silences).toEqual([])
+  })
+
+  it('one LSB of dither or rounding still counts as digital silence (RMS ≤ 1)', async () => {
+    const { silences } = await capturing()
+    pushBlock(SILENCE_SAMPLES, 1 / 32767)
+    expect(silences.map((s) => s.silent)).toEqual([true])
+  })
+
+  it('a quiet room is not digital silence — a real noise floor (RMS ~8) never warns', async () => {
+    const { silences } = await capturing()
+    pushBlock(SILENCE_SAMPLES * 2, 8 / 32767)
+    expect(silences).toEqual([])
+  })
+
+  it('no track label → "the microphone"', async () => {
+    const { silences } = await capturing()
+    pushBlock(SILENCE_SAMPLES, 0)
+    expect(silences).toEqual([{ silent: true, trackLabel: null }])
+    expect(noSignalMessage(null)).toBe('No signal from the microphone — lid closed or muted?')
+    expect(noSignalMessage('AirPods Pro')).toBe('No signal from AirPods Pro — lid closed or muted?')
+  })
+
+  it('a new capture starts its silence count afresh', async () => {
+    const { silences, capture } = await capturing()
+    pushBlock(SILENCE_SAMPLES - 1600, 0)
+    await capture.stop()
+    await capture.start()
+    pushBlock(SILENCE_SAMPLES - 1600, 0)
+    expect(silences).toEqual([])
+  })
+})
+
+describe('the notice wording (S3a item 4 — the approved voice UI)', () => {
+  it('pins the capture-side messages', () => {
+    expect(MIC_DISCONNECTED_MESSAGE).toBe('Microphone disconnected — kept what you said')
+    expect(MIC_MUTED_MESSAGE).toBe('The microphone was muted by the system')
+    expect(MIC_DENIED_MACOS_MESSAGE).toBe(
+      'Microphone access denied — allow ClaudeUI in System Settings › Privacy › Microphone'
+    )
+    expect(MIC_DENIED_WEB_MESSAGE).toBe('Microphone access denied — allow it for this site')
+  })
+
+  it('an unexplained failure keeps its detail, in the same shape', async () => {
+    const capture = new BrowserVoiceCapture({
+      sendAudio: vi.fn(),
+      env: makeEnv({}, async () => {
+        throw new Error('device exploded.')
+      })
+    })
+    await expect(capture.start()).rejects.toThrow(
+      new Error('Voice capture failed — device exploded')
+    )
+  })
+
+  it('no capture message ends in a full stop (pill style)', () => {
+    for (const message of [
+      MIC_DISCONNECTED_MESSAGE,
+      MIC_MUTED_MESSAGE,
+      MIC_DENIED_MACOS_MESSAGE,
+      MIC_DENIED_WINDOWS_MESSAGE,
+      MIC_DENIED_DESKTOP_MESSAGE,
+      MIC_DENIED_WEB_MESSAGE,
+      captureUnsupportedReason(makeEnv({ isSecureContext: false })),
+      captureUnsupportedReason(makeEnv({ mediaDevices: undefined })),
+      captureUnsupportedReason(makeEnv({ AudioWorkletNodeCtor: undefined }))
+    ]) {
+      expect(message).not.toMatch(/\.$/)
     }
   })
 })

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef } from 'react'
 import type {
   FileAttachment,
   StatusLineData,
@@ -26,6 +26,7 @@ import {
 import { MobileConfigSheet } from './MobileConfigSheet'
 import { formatCostOrUnknown } from '../../../utils/cost'
 import { AgentTab } from '../../agents/AgentTab'
+import type { VoiceNotice } from '../../../lib/voice/voice-notice'
 
 export type { ModelDisplay }
 
@@ -142,6 +143,16 @@ export interface InputBoxViewProps {
   sandboxEnabled: boolean
   voiceEnabled: boolean
   voiceState: VoiceState
+  /** The push-to-talk is held (Tab or the mic) — the notice pill stays while it is. */
+  voiceHeld?: boolean
+  /** The live microphone is digitally silent while recording — the mic dims. */
+  voiceSilent?: boolean
+  /** The one voice message to show above the mic, or null. */
+  voiceNotice?: VoiceNotice | null
+  /** The notice's linger ran out: remove notice `id` (and nothing newer). */
+  onVoiceNoticeExpire?: (id: number) => void
+  /** Subscribe to the live microphone level (0..1) for the recording mic's ring. */
+  subscribeVoiceLevel?: (listener: (level: number) => void) => () => void
   statusLine: StatusLineData | null
 
   // Callbacks
@@ -289,16 +300,149 @@ function AttachMenu({
   )
 }
 
+/** How long a released notice lingers, its fade included (Approved UI). */
+export const VOICE_NOTICE_LINGER_MS = 5000
+/** The fade-out at the end of the linger. */
+export const VOICE_NOTICE_FADE_MS = 400
+/** How much the level ring grows at full level (scale 1 → 1 + this). */
+const VOICE_RING_GROWTH = 0.45
+
+/**
+ * The one voice message, as a pill above the mic with its tail pointing at it:
+ * grey for an outcome, amber for an error or something to fix (`data-tone`).
+ *
+ * The fade rule: while the push-to-talk is HELD the notice stays. Once released
+ * — or for a notice that arrives while not held — it lingers
+ * {@link VOICE_NOTICE_LINGER_MS}, fading out over the last
+ * {@link VOICE_NOTICE_FADE_MS}, and is then removed. Hovering holds it; leaving
+ * restarts the linger. A replacement (new `id`) restarts it too. Reduced motion:
+ * no fade or entrance, the same timing.
+ *
+ * Mounted only while there is a notice, so the hover state never outlives one.
+ * It lives on the input box (above its top edge, where it covers nothing being
+ * typed) and is aligned to the mic by measurement — the mic's distance from the
+ * box's right edge depends on the controls beside it — re-measured whenever the
+ * window or the box resizes.
+ */
+function VoiceNoticePill({
+  notice,
+  held,
+  onExpire,
+  micRef
+}: {
+  notice: VoiceNotice
+  held: boolean
+  onExpire?: (id: number) => void
+  micRef: React.RefObject<HTMLButtonElement | null>
+}): React.JSX.Element {
+  const pillRef = useRef<HTMLDivElement>(null)
+  const [hovered, setHovered] = useState(false)
+  const [fading, setFading] = useState(false)
+  const [place, setPlace] = useState<{ right: number; maxWidth: number } | null>(null)
+  const onExpireRef = useRef(onExpire)
+  onExpireRef.current = onExpire
+  const { id, text, tone } = notice
+
+  useEffect(() => {
+    setFading(false)
+    if (held || hovered) return
+    const fade = setTimeout(() => setFading(true), VOICE_NOTICE_LINGER_MS - VOICE_NOTICE_FADE_MS)
+    const expire = setTimeout(() => onExpireRef.current?.(id), VOICE_NOTICE_LINGER_MS)
+    return () => {
+      clearTimeout(fade)
+      clearTimeout(expire)
+    }
+  }, [id, held, hovered])
+
+  // The box is the pill's own parent — read through the pill's ref, which is
+  // attached before this layout effect runs (a parent's ref is not yet, when
+  // both mount in one commit). The mic is a later sibling subtree, so a commit
+  // that mounts both gets one more measurement on the next frame.
+  useLayoutEffect(() => {
+    const box = pillRef.current?.parentElement ?? null
+    const measure = (): void => {
+      const boxRect = box?.getBoundingClientRect()
+      const micRect = micRef.current?.getBoundingClientRect()
+      if (!boxRect || !micRect || boxRect.width === 0) return
+      setPlace({
+        right: Math.max(0, boxRect.right - micRect.right),
+        maxWidth: micRect.right - boxRect.left
+      })
+    }
+    measure()
+    const frame = requestAnimationFrame(measure)
+    window.addEventListener('resize', measure)
+    // The box resizes without the window doing so — a control appearing beside
+    // the mic, a sidebar opening — and the tail must stay over the mic.
+    const observer =
+      box && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null
+    if (box) observer?.observe(box)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('resize', measure)
+      observer?.disconnect()
+    }
+  }, [micRef])
+
+  const toneClass =
+    tone === 'info' ? 'text-text-secondary border-border-bright' : 'text-warning border-warning/40'
+  return (
+    <div
+      ref={pillRef}
+      data-testid="InputBox.voiceNotice"
+      data-tone={tone}
+      data-fading={fading || undefined}
+      role="status"
+      aria-live="polite"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        transitionDuration: `${VOICE_NOTICE_FADE_MS}ms`,
+        ...(place ? { right: place.right, maxWidth: place.maxWidth } : {})
+      }}
+      // The entrance is `motion-safe:` rather than `animate-fade-in` +
+      // `motion-reduce:animate-none`: main.css's `.animate-fade-in` is unlayered,
+      // so it would beat any layered Tailwind override.
+      className={`absolute bottom-full right-0 mb-2 z-30 w-max motion-safe:animate-[fade-in_0.15s_ease-out] transition-opacity ease-out motion-reduce:transition-none ${
+        fading ? 'opacity-0 motion-reduce:opacity-100' : 'opacity-100'
+      }`}
+    >
+      <div
+        className={`flex items-center gap-2 rounded-[14px] border bg-bg-tertiary px-3 py-1 text-[12px] leading-[18px] shadow-lg shadow-black/30 ${toneClass}`}
+      >
+        <span
+          aria-hidden
+          className={`w-1.5 h-1.5 shrink-0 rounded-full ${tone === 'info' ? 'bg-text-muted' : 'bg-warning'}`}
+        />
+        <span>{text}</span>
+      </div>
+      {/* The tail, centred over the mic (a 28 px button: 14 px in from its right edge). */}
+      <div
+        aria-hidden
+        className={`absolute right-[9px] -bottom-[5px] w-2.5 h-2.5 rotate-45 border-r border-b bg-bg-tertiary ${
+          tone === 'info' ? 'border-border-bright' : 'border-warning/40'
+        }`}
+      />
+    </div>
+  )
+}
+
 function VoiceButton({
   voiceEnabled,
   voiceState,
+  voiceSilent,
   isDisabled,
+  buttonRef,
+  subscribeLevel,
   onVoiceStart,
   onVoiceStop
 }: {
   voiceEnabled: boolean
   voiceState: VoiceState
+  voiceSilent: boolean
   isDisabled: boolean
+  buttonRef: React.RefObject<HTMLButtonElement | null>
+  subscribeLevel?: (listener: (level: number) => void) => () => void
   onVoiceStart: () => void
   onVoiceStop: () => void
 }): React.JSX.Element | null {
@@ -323,7 +467,6 @@ function VoiceButton({
    * changes on every parent render (InputBox does not memoize), and re-binding a
    * DOM listener per keystroke to call the same function is pure churn.
    */
-  const buttonRef = useRef<HTMLButtonElement>(null)
   const startRef = useRef(onVoiceStart)
   startRef.current = onVoiceStart
 
@@ -337,15 +480,45 @@ function VoiceButton({
     el.addEventListener('touchstart', handleTouchStart, { passive: false })
     return () => el.removeEventListener('touchstart', handleTouchStart)
     // Bound once per mounted button; `voiceEnabled: false` unmounts it entirely.
-  }, [voiceEnabled])
+  }, [voiceEnabled, buttonRef])
+
+  /**
+   * The level ring follows the microphone WITHOUT a React render per block: the
+   * newest level is written straight to the ring's transform, at most once per
+   * animation frame (blocks arrive every ~150 ms; frames far more often, so the
+   * throttle only matters for a burst — the drained pre-arm queue).
+   */
+  const ringRef = useRef<HTMLSpanElement>(null)
+  const showRing = voiceState === 'recording' && !voiceSilent
+  useEffect(() => {
+    if (!showRing || !subscribeLevel) return
+    let frame = 0
+    let latest = 0
+    const off = subscribeLevel((level) => {
+      latest = level
+      if (frame) return
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        const ring = ringRef.current
+        if (ring) ring.style.transform = `scale(${1 + Math.min(1, latest) * VOICE_RING_GROWTH})`
+      })
+    })
+    return () => {
+      off()
+      if (frame) cancelAnimationFrame(frame)
+    }
+  }, [showRing, subscribeLevel])
 
   // AFTER the hooks — a conditional return above them would break the rules of
   // hooks the moment the voice setting is toggled at runtime.
   if (!voiceEnabled) return null
 
+  const live = voiceState === 'recording' || voiceState === 'connecting'
   return (
     <button
       data-testid="InputBox.voice"
+      data-state={voiceState}
+      data-silent={voiceSilent || undefined}
       ref={buttonRef}
       onMouseDown={(e) => {
         e.preventDefault()
@@ -356,8 +529,7 @@ function VoiceButton({
         // Primary button still down: the press is being abandoned, even if it is
         // still spawning the session and the state has not left idle yet — a
         // release elsewhere would never reach this button's mouseup.
-        if (voiceState === 'recording' || voiceState === 'connecting' || (e.buttons & 1) === 1)
-          onVoiceStop()
+        if (live || (e.buttons & 1) === 1) onVoiceStop()
       }}
       // The release half stays on React's synthetic events: only `touchstart` is
       // passive, and only the start needs to preventDefault.
@@ -368,15 +540,50 @@ function VoiceButton({
       onTouchCancel={onVoiceStop}
       disabled={isDisabled || voiceState === 'processing'}
       title="Hold to record"
-      className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors cursor-pointer disabled:cursor-default disabled:opacity-15 ${
-        voiceState === 'recording' || voiceState === 'connecting'
-          ? 'text-danger bg-danger/15 animate-pulse'
-          : voiceState === 'processing'
-            ? 'text-warning bg-warning/10'
-            : 'text-text-muted hover:text-text-secondary hover:bg-bg-hover'
+      // Connecting: the mic is already open (nothing said is lost) — a pulse.
+      // Recording: a filled disc with the level ring around it, dimmed while the
+      // microphone is digitally silent. Processing: a spinner while the last
+      // words come back. Not faded when merely busy — only when unavailable.
+      className={`relative w-7 h-7 flex items-center justify-center rounded-lg transition-colors cursor-pointer disabled:cursor-default ${
+        isDisabled ? 'opacity-15' : ''
+      } ${
+        voiceState === 'recording'
+          ? voiceSilent
+            ? 'text-white/70'
+            : 'text-white'
+          : voiceState === 'connecting'
+            ? 'text-accent animate-pulse motion-reduce:animate-none'
+            : voiceState === 'processing'
+              ? 'text-accent'
+              : 'text-text-muted hover:text-text-secondary hover:bg-bg-hover'
       }`}
     >
+      {voiceState === 'recording' && (
+        <>
+          {showRing && (
+            <span
+              data-testid="InputBox.voiceLevel"
+              ref={ringRef}
+              aria-hidden
+              className="absolute inset-0 rounded-full bg-danger/30 pointer-events-none transition-transform duration-75 motion-reduce:transition-none"
+            />
+          )}
+          <span
+            aria-hidden
+            className={`absolute inset-0.5 rounded-full pointer-events-none ${
+              voiceSilent ? 'bg-danger/45' : 'bg-danger'
+            }`}
+          />
+        </>
+      )}
+      {voiceState === 'processing' && (
+        <span
+          aria-hidden
+          className="absolute inset-0 rounded-full border-2 border-accent/30 border-t-accent pointer-events-none animate-spin motion-reduce:animate-none"
+        />
+      )}
       <svg
+        className="relative"
         width="14"
         height="14"
         viewBox="0 0 24 24"
@@ -502,6 +709,9 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
     onFileMentionConfirm
   } = props
 
+  // The mic, for the voice notice pill to align itself by.
+  const micRef = useRef<HTMLButtonElement>(null)
+
   // Close any open dropdown on outside click — sub-components manage their own
   // open state, but this handles clicks outside the entire input box
   const [, setTick] = useState(0)
@@ -560,6 +770,16 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
               same edge, so neither can collide with the other and neither costs
               the composer any height (ADR-073). Self-hides when nothing runs. */}
           <AgentTab />
+
+          {/* The voice notice — one pill above the mic, its tail pointing down at it. */}
+          {props.voiceEnabled && props.voiceNotice && (
+            <VoiceNoticePill
+              notice={props.voiceNotice}
+              held={props.voiceHeld ?? false}
+              onExpire={props.onVoiceNoticeExpire}
+              micRef={micRef}
+            />
+          )}
 
           {/* Slash command autocomplete */}
           {slashMenuOpen && filteredSlashCommands.length > 0 && (
@@ -735,7 +955,10 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
               <VoiceButton
                 voiceEnabled={props.voiceEnabled}
                 voiceState={props.voiceState}
+                voiceSilent={props.voiceSilent ?? false}
                 isDisabled={isDisabled}
+                buttonRef={micRef}
+                subscribeLevel={props.subscribeVoiceLevel}
                 onVoiceStart={props.onVoiceStart}
                 onVoiceStop={props.onVoiceStop}
               />

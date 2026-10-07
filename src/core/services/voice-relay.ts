@@ -63,7 +63,7 @@ import { VOICE_UNSUPPORTED, voiceRefusal } from './voice-gate'
 import type { SessionManager } from './session-manager'
 import type { HostWindowHandle } from '../host'
 import type { StreamEventFrame } from '../shared/sync/stream'
-import type { VoiceState } from '../../shared/types'
+import type { VoiceNoticeTone, VoiceState } from '../../shared/types'
 
 const LOG_SOURCE = 'VoiceRelay'
 
@@ -86,7 +86,11 @@ export const MAX_VOICE_FRAME_BYTES = 32 * 1024
 export interface VoiceDelivery {
   state(routingId: string, state: VoiceState): void
   transcript(routingId: string, text: string, isFinal: boolean): void
-  error(routingId: string, message: string): void
+  /**
+   * A voice message for the notice pill. The tone ALWAYS rides the wire as the
+   * channel's third argument, so the renderer never infers it from the wording.
+   */
+  error(routingId: string, message: string, tone: VoiceNoticeTone): void
 }
 
 export interface VoiceOwner {
@@ -102,9 +106,9 @@ export interface VoiceOwner {
  * transcripts go back to, as PASS-THROUGH lane frames carrying the channel and
  * args verbatim, so the web client dispatches them into the very same
  * per-channel listeners the desktop path feeds — `session-store`'s `voiceState`
- * / `voiceInterimTranscript`, and `addError` for a failure. The transport moved;
- * the meaning did not, and there is no second interpretation of a transcript to
- * drift.
+ * / `voiceInterimTranscript`, and the mic's notice pill for a message (with its
+ * tone). The transport moved; the meaning did not, and there is no second
+ * interpretation of a transcript to drift.
  *
  * Its failures are TARGETED too, and therefore never touch the `voice:error`
  * ring entry the desktop raises. See the NOTE in `shared/sync/channels.ts`.
@@ -121,7 +125,7 @@ export function remoteVoiceOwner(connectionId: string): VoiceOwner {
       state: (routingId, state) => deliver('voice:state', [routingId, state]),
       transcript: (routingId, text, isFinal) =>
         deliver('voice:transcript', [routingId, { text, isFinal }]),
-      error: (routingId, message) => deliver('voice:error', [routingId, message])
+      error: (routingId, message, tone) => deliver('voice:error', [routingId, message, tone])
     }
   }
 }
@@ -169,7 +173,7 @@ export function desktopVoiceOwner(win: HostWindowHandle): VoiceOwner {
       state: (routingId, state) => host.send('voice:state', [routingId, state]),
       transcript: (routingId, text, isFinal) =>
         host.send('voice:transcript', [routingId, { text, isFinal }]),
-      error: (routingId, message) => emitEvent('voice:error', [routingId, message])
+      error: (routingId, message, tone) => emitEvent('voice:error', [routingId, message, tone])
     }
   }
 }
@@ -235,8 +239,8 @@ class RelayVoiceClient extends VoiceStreamClient {
     this.owner.delivery.transcript(this.getRoutingId(), text, isFinal)
   }
 
-  protected emitError(message: string): void {
-    this.owner.delivery.error(this.getRoutingId(), message)
+  protected emitError(message: string, tone: VoiceNoticeTone = 'warn'): void {
+    this.owner.delivery.error(this.getRoutingId(), message, tone)
   }
 }
 

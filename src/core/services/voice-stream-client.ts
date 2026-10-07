@@ -51,7 +51,8 @@
 import * as net from 'net'
 import * as readline from 'readline'
 import { logger } from './logger'
-import type { VoiceState } from '../../shared/types'
+import { pcm16Level } from '../../shared/audio/pcm16'
+import type { VoiceNoticeTone, VoiceState } from '../../shared/types'
 
 /** How long a connected voice socket may wait for the server's `ready`. */
 export const READY_TIMEOUT_MS = 10_000
@@ -67,26 +68,22 @@ export const OUTCOME_MIN_AUDIO_MS = 2_000
 /** 16 kHz i16LE mono — the voice server's wire format. */
 const PCM_BYTES_PER_MS = 32
 
-export const VOICE_READY_TIMEOUT_MESSAGE = "Voice transcription didn't start. Try again."
+// Worded for the renderer's notice pill above the mic: short, no trailing full
+// stop, the fix after an em dash.
+export const VOICE_READY_TIMEOUT_MESSAGE = 'Voice transcription didn’t start — try again'
 export const VOICE_NO_AUDIO_MESSAGE =
-  'No audio detected from microphone. Check the selected input device and microphone access.'
-export const VOICE_NO_SPEECH_MESSAGE = 'No speech detected.'
+  'No audio from microphone — check the input device and microphone access'
+export const VOICE_NO_SPEECH_MESSAGE = 'No speech detected'
 
 /**
- * One chunk's level, as cli.js's `/voice` computes it: RMS over i16LE samples,
- * scaled so 2000 (quiet speech) is full scale, square-rooted for perception.
- * Digital silence — a closed laptop lid's built-in mic — is exactly 0.
+ * One relayed chunk's level — `shared/audio/pcm16.ts`'s {@link pcm16Level}, the
+ * same formula the renderer's capture uses for its level ring, over the chunk's
+ * i16LE bytes. Read with an explicit byte order, never by aliasing the buffer.
  */
-export function pcm16Level(chunk: Buffer): number {
-  const samples = chunk.length >> 1
-  if (samples === 0) return 0
-  let sum = 0
-  for (let i = 0; i + 1 < chunk.length; i += 2) {
-    const v = chunk.readInt16LE(i)
-    sum += v * v
-  }
-  const rms = Math.sqrt(sum / samples)
-  return Math.sqrt(Math.min(rms / 2000, 1))
+export function pcm16LevelLe(chunk: Buffer): number {
+  const samples = new Int16Array(chunk.length >> 1)
+  for (let i = 0; i < samples.length; i++) samples[i] = chunk.readInt16LE(i * 2)
+  return pcm16Level(samples)
 }
 
 /** Above this a chunk counts as signal (cli.js: `hadAudioSignal`). */
@@ -165,8 +162,13 @@ export abstract class VoiceStreamClient {
   /** Deliver one interim/final transcript. */
   protected abstract emitTranscript(text: string, isFinal: boolean): void
 
-  /** Deliver a failure. Never carries audio, only a reason. */
-  protected abstract emitError(message: string): void
+  /**
+   * Deliver a voice message — a failure, or the outcome of a capture that
+   * produced nothing. Never carries audio, only a reason. `tone` is how the
+   * notice pill reads it: `info` for an outcome ("No speech detected"), `warn`
+   * (the default) for an error or something to fix.
+   */
+  protected abstract emitError(message: string, tone?: VoiceNoticeTone): void
 
   // -- Lifecycle ---------------------------------------------------------------
 
@@ -336,7 +338,7 @@ export abstract class VoiceStreamClient {
     if (this.state !== 'recording' && this.state !== 'connecting') return
     if (this.stopRequested) return
     this.relayedBytes += chunk.length
-    if (!this.hadSignal && pcm16Level(chunk) > SIGNAL_LEVEL) this.hadSignal = true
+    if (!this.hadSignal && pcm16LevelLe(chunk) > SIGNAL_LEVEL) this.hadSignal = true
     if (this.streamReady && this.conn) {
       this.sendToServer({ type: 'audio', data: chunk.toString('base64') })
     } else {
@@ -429,7 +431,7 @@ export abstract class VoiceStreamClient {
       case 'closed': {
         // A stop that finalized normally — the only end an outcome message is for.
         const outcome = this.state === 'processing' ? this.outcomeMessage() : null
-        if (outcome) this.emitError(outcome)
+        if (outcome) this.emitError(outcome.message, outcome.tone)
         this.cleanup()
         break
       }
@@ -454,10 +456,14 @@ export abstract class VoiceStreamClient {
    * cli.js's own `/voice`: only for a capture long enough to be a real attempt,
    * only with no non-empty transcript, and never when an error already spoke.
    */
-  private outcomeMessage(): string | null {
+  private outcomeMessage(): { message: string; tone: VoiceNoticeTone } | null {
     if (this.outcomeSaid || this.hadTranscript) return null
     if (this.relayedBytes < OUTCOME_MIN_AUDIO_MS * PCM_BYTES_PER_MS) return null
-    return this.hadSignal ? VOICE_NO_SPEECH_MESSAGE : VOICE_NO_AUDIO_MESSAGE
+    // Heard sound but no words is an OUTCOME (grey). Heard nothing at all is
+    // something to fix — the wrong input device, a closed lid (amber).
+    return this.hadSignal
+      ? { message: VOICE_NO_SPEECH_MESSAGE, tone: 'info' }
+      : { message: VOICE_NO_AUDIO_MESSAGE, tone: 'warn' }
   }
 
   private clearReadyTimer(): void {

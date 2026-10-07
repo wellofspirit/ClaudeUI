@@ -28,7 +28,10 @@ import {
   VOICE_SAMPLE_RATE,
   downsampleToPcm16,
   initialDownsampleState,
+  DIGITAL_SILENCE_RMS,
+  pcm16Rms,
   pcm16ToBytesLe,
+  rmsToLevel,
   type DownsampleState
 } from '../../../../shared/audio/pcm16'
 // `no-inline`: the worklet is small enough that Vite would otherwise inline it
@@ -91,13 +94,9 @@ export function detectCaptureEnv(): CaptureEnv {
  * given for enrollment, not a new one.
  */
 export function captureUnsupportedReason(env: CaptureEnv): string | null {
-  if (!env.isSecureContext) {
-    return 'Voice input needs a secure (HTTPS) connection — use the tailnet or tunnel address.'
-  }
-  if (!env.mediaDevices?.getUserMedia) return 'This browser does not expose a microphone API.'
-  if (!env.AudioContextCtor || !env.AudioWorkletNodeCtor) {
-    return 'This browser does not support AudioWorklet, which voice capture needs.'
-  }
+  if (!env.isSecureContext) return VOICE_INSECURE_MESSAGE
+  if (!env.mediaDevices?.getUserMedia) return VOICE_NO_MIC_API_MESSAGE
+  if (!env.AudioContextCtor || !env.AudioWorkletNodeCtor) return VOICE_NO_WORKLET_MESSAGE
   return null
 }
 
@@ -122,14 +121,61 @@ export const WORKLET_FLUSH_TIMEOUT_MS = 100
 /** What the worklet answers a `flush` with, after posting its partial batch. */
 const WORKLET_FLUSHED = 'flushed'
 
-export const MIC_DISCONNECTED_MESSAGE = 'The microphone was disconnected.'
-export const MIC_MUTED_MESSAGE = 'The microphone was muted by the system.'
+// Worded for the notice pill above the mic: short, no trailing full stop, the
+// fix after an em dash.
+export const MIC_DISCONNECTED_MESSAGE = 'Microphone disconnected — kept what you said'
+export const MIC_MUTED_MESSAGE = 'The microphone was muted by the system'
+export const MIC_DENIED_WEB_MESSAGE = 'Microphone access denied — allow it for this site'
+export const MIC_DENIED_MACOS_MESSAGE =
+  'Microphone access denied — allow ClaudeUI in System Settings › Privacy › Microphone'
+export const MIC_DENIED_WINDOWS_MESSAGE =
+  'Microphone access denied — allow ClaudeUI in Settings › Privacy & security › Microphone'
+export const MIC_DENIED_DESKTOP_MESSAGE =
+  'Microphone access denied — allow ClaudeUI to use the microphone'
+export const MIC_NOT_FOUND_MESSAGE = 'No microphone found — connect one and try again'
+export const MIC_BUSY_MESSAGE = 'Microphone in use by another app — close it and try again'
+export const VOICE_INSECURE_MESSAGE =
+  'Voice input needs a secure (HTTPS) connection — use the tailnet or tunnel address'
+export const VOICE_NO_MIC_API_MESSAGE = 'This browser has no microphone API — try a current browser'
+export const VOICE_NO_WORKLET_MESSAGE =
+  'This browser can’t run voice capture (no AudioWorklet) — try a current browser'
+/** A capture failure nothing more specific explains. */
+export function captureFailedMessage(detail: string): string {
+  return `Voice capture failed — ${detail.replace(/\.$/, '')}`
+}
+
+/**
+ * What a denied microphone tells the speaker to do, for the client it happened
+ * on (`window.api.platform`: `web` for the remote client, else the desktop's OS).
+ * The web answer is a site permission; the desktop's is the OS privacy pane.
+ */
+export function micDeniedMessage(platform: string | undefined): string {
+  if (platform === 'web') return MIC_DENIED_WEB_MESSAGE
+  if (platform === 'darwin') return MIC_DENIED_MACOS_MESSAGE
+  if (platform === 'win32') return MIC_DENIED_WINDOWS_MESSAGE
+  return MIC_DENIED_DESKTOP_MESSAGE
+}
+
+/**
+ * How long a capture must hear DIGITAL silence — every block at or below
+ * `DIGITAL_SILENCE_RMS` (one LSB) — before the live warning. Measured in audio,
+ * not wall-clock, so a stalled worklet (no blocks at all) is not mistaken for a
+ * silent microphone.
+ */
+export const SILENCE_WARNING_MS = 1500
+const SILENCE_WARNING_SAMPLES = (SILENCE_WARNING_MS * VOICE_SAMPLE_RATE) / 1000
+
+/** The live warning for a microphone that is producing nothing at all. */
+export function noSignalMessage(trackLabel: string | null | undefined): string {
+  const name = trackLabel?.trim() || 'the microphone'
+  return `No signal from ${name} — lid closed or muted?`
+}
 
 /**
  * How long a track must STAY muted before it is reported. Browsers fire brief
  * mute/unmute pairs on their own — a macOS Bluetooth headset switching between
  * its A2DP and HFP profiles, an Android audio-focus blip — and each one would
- * otherwise put an error on the session for a microphone that is fine.
+ * otherwise raise a warning above the mic for a microphone that is fine.
  */
 export const MIC_MUTE_GRACE_MS = 1000
 
@@ -139,9 +185,30 @@ export interface CaptureFault {
   ended: boolean
 }
 
+export interface CaptureSilence {
+  /** True once {@link SILENCE_WARNING_MS} of digital silence; false when a block has signal. */
+  silent: boolean
+  /** The live track's label ("MacBook Pro Microphone"), or null when the browser hides it. */
+  trackLabel: string | null
+}
+
 export interface BrowserVoiceCaptureOptions {
   /** Ship one base64 PCM batch upstream (the transport's `voiceAudio`). */
   sendAudio: (dataB64: string) => void
+  /**
+   * Each block's level while capturing (0..1, `shared/audio/pcm16.ts`'s
+   * `pcm16Level`) — the mic's level ring. Called per ~150 ms block; a
+   * final 0 when the capture halts.
+   */
+  onLevel?: (level: number) => void
+  /**
+   * The microphone went digitally silent while capturing ({@link SILENCE_WARNING_MS}
+   * of blocks at or below one LSB RMS — a closed lid's built-in mic), or came back. Edge-triggered:
+   * one `silent: true`, then one `silent: false` when a block has signal.
+   */
+  onSilence?: (silence: CaptureSilence) => void
+  /** The denied-permission wording for this client ({@link micDeniedMessage}). */
+  deniedMessage?: string
   /**
    * Something happened to the microphone mid-capture that the speaker should
    * hear about — it was unplugged (`ended`) or the OS muted it. The capture does
@@ -155,6 +222,9 @@ export interface BrowserVoiceCaptureOptions {
 export class BrowserVoiceCapture {
   private readonly sendAudio: (dataB64: string) => void
   private readonly onFault?: (fault: CaptureFault) => void
+  private readonly onLevel?: (level: number) => void
+  private readonly onSilence?: (silence: CaptureSilence) => void
+  private readonly deniedMessage: string
   private readonly env: CaptureEnv
 
   private state: CaptureState = 'idle'
@@ -169,6 +239,9 @@ export class BrowserVoiceCapture {
   private worklet: AudioWorkletNode | null = null
   private sink: GainNode | null = null
   private resampler: DownsampleState | null = null
+  /** Consecutive digitally-silent 16 kHz samples, and whether the warning is up. */
+  private silentSamples = 0
+  private silent = false
   /** Resolves the halt's wait for the worklet's tail. */
   private onFlushed: (() => void) | null = null
   private untrack: (() => void) | null = null
@@ -176,6 +249,9 @@ export class BrowserVoiceCapture {
   constructor(options: BrowserVoiceCaptureOptions) {
     this.sendAudio = options.sendAudio
     this.onFault = options.onFault
+    this.onLevel = options.onLevel
+    this.onSilence = options.onSilence
+    this.deniedMessage = options.deniedMessage ?? MIC_DENIED_WEB_MESSAGE
     this.env = options.env ?? detectCaptureEnv()
   }
 
@@ -205,6 +281,8 @@ export class BrowserVoiceCapture {
     this.state = 'starting'
     this.armed = false
     this.pending = []
+    this.silentSamples = 0
+    this.silent = false
 
     try {
       // ASSIGNED BEFORE THE STATE CHECK, and every bail below releases rather
@@ -279,7 +357,7 @@ export class BrowserVoiceCapture {
     } catch (err) {
       await this.release()
       this.discard()
-      throw new Error(describeCaptureFailure(err))
+      throw new Error(describeCaptureFailure(err, this.deniedMessage))
     }
   }
 
@@ -316,6 +394,8 @@ export class BrowserVoiceCapture {
       return
     }
     this.state = 'halting'
+    // The ring settles the moment the speaker lets go, not a round trip later.
+    this.onLevel?.(0)
     this.halting = (async () => {
       // The microphone goes off NOW — the recording indicator with it. The
       // worklet's partial batch is already in the worklet, so the tail can be
@@ -476,6 +556,30 @@ export class BrowserVoiceCapture {
     }
   }
 
+  /** Feed the level ring, and raise / clear the live silence warning. */
+  private observeLevel(rms: number, sampleCount: number): void {
+    this.onLevel?.(rmsToLevel(rms))
+    if (rms <= DIGITAL_SILENCE_RMS) {
+      this.silentSamples += sampleCount
+      if (!this.silent && this.silentSamples >= SILENCE_WARNING_SAMPLES) {
+        this.silent = true
+        this.onSilence?.({ silent: true, trackLabel: this.trackLabel() })
+      }
+      return
+    }
+    this.silentSamples = 0
+    if (this.silent) {
+      this.silent = false
+      this.onSilence?.({ silent: false, trackLabel: this.trackLabel() })
+    }
+  }
+
+  /** The live microphone's name, as the browser reports it (empty without permission). */
+  private trackLabel(): string | null {
+    const label = this.stream?.getTracks()[0]?.label
+    return label ? label : null
+  }
+
   private makeContext(): AudioContext {
     const Ctor = this.env.AudioContextCtor!
     try {
@@ -492,6 +596,10 @@ export class BrowserVoiceCapture {
     const { samples, state } = downsampleToPcm16(block, sampleRate, this.resampler)
     this.resampler = state
     if (samples.length === 0) return
+    // Read out of the samples, never stored or sent anywhere: a level is all the
+    // UI gets of the audio. Only while capturing — the tail after a release is
+    // not the speaker's live microphone any more.
+    if (this.state === 'capturing') this.observeLevel(pcm16Rms(samples), samples.length)
     const dataB64 = bytesToBase64(pcm16ToBytesLe(samples))
 
     if (this.armed) {
@@ -511,19 +619,12 @@ export class BrowserVoiceCapture {
  * site permission was denied once and the browser now refuses silently, which is
  * not something a generic "capture failed" would ever let someone diagnose.
  */
-function describeCaptureFailure(err: unknown): string {
+function describeCaptureFailure(err: unknown, deniedMessage: string): string {
   const name = (err as { name?: string } | null)?.name
-  if (name === 'NotAllowedError' || name === 'SecurityError') {
-    return 'Microphone access was denied. Allow it for this site and try again.'
-  }
-  if (name === 'NotFoundError' || name === 'OverconstrainedError') {
-    return 'No microphone was found on this device.'
-  }
-  if (name === 'NotReadableError') {
-    return 'The microphone is in use by another application.'
-  }
-  const message = err instanceof Error ? err.message : String(err)
-  return `Voice capture failed: ${message}`
+  if (name === 'NotAllowedError' || name === 'SecurityError') return deniedMessage
+  if (name === 'NotFoundError' || name === 'OverconstrainedError') return MIC_NOT_FOUND_MESSAGE
+  if (name === 'NotReadableError') return MIC_BUSY_MESSAGE
+  return captureFailedMessage(err instanceof Error ? err.message : String(err))
 }
 
 /**

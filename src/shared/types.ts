@@ -3191,6 +3191,14 @@ export interface VoiceTranscript {
 export type VoiceState = 'idle' | 'connecting' | 'recording' | 'processing'
 
 /**
+ * How a voice message reads in the notice pill above the mic: `info` (grey) is
+ * an outcome — "No speech detected"; `warn` (amber) is an error or something to
+ * fix. Sent by main with each `voice:error` so the renderer never has to guess
+ * from the wording (ADR-070); a message without one is `warn`.
+ */
+export type VoiceNoticeTone = 'info' | 'warn'
+
+/**
  * The voice TRANSPORT. Capture is the renderer's (`renderer/src/lib/voice/`, one
  * implementation for the desktop window and the web client); these only bind its
  * pushed audio to a session's transcription server in the main process.

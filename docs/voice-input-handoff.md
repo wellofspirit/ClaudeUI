@@ -54,7 +54,7 @@ UISettings — a phone and the Mac have different microphones.
 | # | Slice | Status |
 |---|---|---|
 | S1 | Renderer-owned capture for desktop + web (behavior-preserving move) | committed a814b15b (gates green; real-app boot + worklet asset + mic button verified) |
-| S2 | Lifecycle robustness: never drop a short press, ready timeout, error-before-ready, stale port, outcome messages, visible errors, `resume()`, track ended/mute, worklet tail flush | todo |
+| S2 (4949d471) | Lifecycle robustness: never drop a short press, ready timeout, error-before-ready, stale port, outcome messages, visible errors, `resume()`, track ended/mute, worklet tail flush | todo |
 | S3 | Device selection: system default + preferred device, `devicechange` hot-swap, level meter, live digital-silence warning, Settings UI | todo |
 | S4 | Phone/car: tap-to-talk mode with silence auto-stop, touch hardening, no keyboard pop, capture diagnostics (track label/settings/level stats → logRelay, never audio) | todo |
 | — | Other-engine STT (Codex realtime w/ API key, BYO-key provider, on-device) | open — needs Daniel |
@@ -301,3 +301,64 @@ Run on the real Mac, with the dev build of this branch:
    said before still transcribes.
 5. Phone (tailnet HTTPS), short press on a cold session → transcript; with Android Auto connected →
    note what happens (S4 adds diagnostics to the log).
+
+## Approved UI (Daniel, 2026-10-07) — binding for S3/S4
+
+Mockups (gitignored store `.claude/ui/mockups/`): `2f6cef47` input-bar states + notice pills,
+`9ba790b8` Settings › Voice input (picker, test meter, mode), `1b412724` phone (chat + settings).
+
+- Voice messages NEVER go to the session error stack (`addError`/`FloatingError`) — errors included.
+  Every voice message is ONE pill anchored above the mic button: grey = outcome, amber = error or
+  something to fix. A newer notice replaces the older.
+- Fade rule: while the push-to-talk is HELD (Tab key or mic button), a notice stays. Once it is
+  RELEASED, the notice fades out (animated) within 5 s. A notice that arrives after the release
+  (e.g. "No speech detected", an error at finalize) shows and fades out 5 s after it appears.
+  Tap mode: "released" = the capture ending (tap or auto-stop). Hover holds it.
+- Main sends a tone with each voice message (no renderer string-matching — ADR-070).
+
+## S3a kickoff spec — notice pills, level ring, live silence warning
+
+Base: `4949d471` (S2). Standing constraints unchanged (worktree only; no commit/add/branch/stash/
+`bun install`; no real mic or voice API; `bunx electron-vite build`; don't touch `patch/`).
+UI is BINDING to mockup `2f6cef47` (rows 1–10; open it at `.claude/ui/mockups/2f6cef47/index.html`
+in the main checkout — read-only) and the "Approved UI" section above.
+
+1. **Tone on the wire.** `voice:error` gains an optional third arg `tone: 'info' | 'warn'` (absent =
+   `'warn'`, so older emitters stay valid). `VoiceStreamClient.emitError(message, tone?)`; outcome
+   "No speech detected" is `info`, everything else `warn`. Thread it through `VoiceDelivery.error`,
+   both owners, `shared/sync/channels.ts` docs, and the web client's lane-frame path.
+2. **Voice notices leave the error stack.** New renderer-local store (e.g.
+   `renderer/src/lib/voice/voice-notice.ts`, zustand like the rest): one notice per routing id
+   `{ id, text, tone }`; `show()` replaces. `useClaudeEvents`' `voice:error` → notice (not
+   `addError`); InputBox start/stop failures and mic faults → notice (`warn`). Nothing voice-related
+   calls `addError` any more. Not replicated, not persisted.
+3. **Pill component** anchored above the mic button in `InputBox/View.tsx`, matching the mockup
+   (dot + text, pointer tail toward the mic, grey/amber tokens from the existing theme, no new
+   colours if the theme has equivalents). `data-testid="InputBox.voiceNotice"` with a `data-tone`
+   attribute. Fade rule: while push-to-talk is HELD (Tab or mic button; tap mode is S4) the notice
+   stays; once released it fades out (CSS opacity transition) and is removed within 5 s of the
+   release. A notice that arrives while NOT held is removed 5 s after it appears. Hover holds it;
+   leaving restarts the 5 s. Respect `prefers-reduced-motion` (no animation, same timing).
+4. **Wording** (mockup): "Microphone disconnected — kept what you said"; "Microphone access denied —
+   allow ClaudeUI in System Settings › Privacy › Microphone" on the desktop window, "…— allow it for
+   this site" on the web client; "No speech detected"; "No audio from microphone — check the input
+   device and microphone access"; "Voice transcription didn't start — try again"; "The microphone
+   was muted by the system" stays. Keep the constants exported and tests updated.
+5. **Level ring.** `BrowserVoiceCapture` gains `onLevel(level)` per block (same formula as main's
+   `pcm16Level`, computed on the int16 samples it already produces — share the function via
+   `shared/audio/` rather than duplicating it). Controller exposes a level subscription; the
+   recording mic renders a ring whose scale follows the level (rAF-throttled, no React re-render per
+   block if avoidable). `data-testid="InputBox.voiceLevel"`.
+6. **Live silence warning.** While capturing, ≥ 1.5 s of digital silence (every block level exactly
+   0) → amber notice "No signal from <track label> — lid closed or muted?" (label from the live
+   track; fall back to "the microphone"). It stays while silent and is removed as soon as a block
+   has signal. Distinct from main's after-the-fact "No audio" outcome; when the live warning fired,
+   suppress main's duplicate outcome for that capture if it is cheap to do so cleanly — otherwise
+   let the newer notice replace it (acceptable).
+
+Tests: notice store (replace, per-session), fade rule with fake timers (held vs released, arrival
+after release, hover hold/restart), tone threading main→renderer for both owners, level + silence
+detection on the capture with fake blocks, InputBox: no `addError` for voice. Guard tests must fail
+at `4949d471` where applicable. Gates as before. Report as before.
+
+Suggested commit: `feat(voice): quiet notice pill above the mic, live level ring and silence warning`

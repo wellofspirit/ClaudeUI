@@ -580,7 +580,7 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     cls: 'replicated',
     ring: true,
     canonical: false,
-    why: 'One emitter since desktop capture moved into the renderer: the desktop owner in voice-relay.ts, through the funnel (ClaudeSession no longer raises it). Rings, so it reaches every subscriber; no snapshot field. Remote captures stay OFF this channel (targeted lane frames instead, phase 5 S3); narrowing it to host-local is the ring-membership change rule 1 forbids.'
+    why: 'One emitter since desktop capture moved into the renderer: the desktop owner in voice-relay.ts, through the funnel (ClaudeSession no longer raises it). Args `[routingId, message, tone?]` — every voice message for the mic notice pill, outcomes included; `tone` is `info` | `warn` (absent = `warn`). Rings, so it reaches every subscriber; no snapshot field. Remote captures stay OFF this channel (targeted lane frames with the same args instead, phase 5 S3); narrowing it to host-local is the ring-membership change rule 1 forbids.'
   },
   'terminal:data': {
     cls: 'host-local',

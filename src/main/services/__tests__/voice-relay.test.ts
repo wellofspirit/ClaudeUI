@@ -65,6 +65,10 @@ import {
   desktopVoiceOwnerKey,
   MAX_VOICE_FRAME_BYTES
 } from '../../../core/services/voice-relay'
+import {
+  VOICE_NO_AUDIO_MESSAGE,
+  VOICE_NO_SPEECH_MESSAGE
+} from '../../../core/services/voice-stream-client'
 import type { SessionManager } from '../../../core/services/session-manager'
 import type { HostWindowHandle } from '../../../core/host'
 
@@ -184,6 +188,16 @@ function framesFor(connectionId: string, channel: string): unknown[][] {
   return deliveries
     .filter((d) => d.connectionId === connectionId && d.channel === channel)
     .map((d) => d.args)
+}
+
+/**
+ * One second of 16 kHz i16LE PCM at a constant sample value, base64 — a frame
+ * under the size cap. Two of them are a capture long enough for an outcome.
+ */
+function secondOfPcm(value: number): string {
+  const chunk = Buffer.alloc(32_000)
+  for (let i = 0; i < chunk.length; i += 2) chunk.writeInt16LE(value, i)
+  return chunk.toString('base64')
 }
 
 function waitFor(predicate: () => boolean): Promise<void> {
@@ -436,6 +450,33 @@ describe('remote voice capture', () => {
     // A second socket to the engine — the first was torn down, not orphaned.
     expect(voiceServer.connections).toBe(2)
     expect(remoteVoice.isCapturing(CONNECTION_ID)).toBe(true)
+  })
+
+  it('carries the TONE as the third arg — an error is `warn`', async () => {
+    await startCapture()
+    voiceServer.push({ type: 'ready' })
+    voiceServer.push({ type: 'error', message: 'Deepgram hiccup' })
+    await waitFor(() => framesFor(CONNECTION_ID, 'voice:error').length === 1)
+    expect(framesFor(CONNECTION_ID, 'voice:error')).toEqual([
+      [ROUTING_ID, 'Deepgram hiccup', 'warn']
+    ])
+  })
+
+  it('carries the TONE as the third arg — "No speech detected" is an `info` outcome', async () => {
+    await startCapture()
+    voiceServer.push({ type: 'ready' })
+    await waitFor(() => framesFor(CONNECTION_ID, 'voice:state').some((a) => a[1] === 'recording'))
+    remoteVoice.feed(CONNECTION_ID, secondOfPcm(1500))
+    remoteVoice.feed(CONNECTION_ID, secondOfPcm(1500))
+    await waitFor(() => voiceServer.received.filter((m) => m.type === 'audio').length === 2)
+    await remoteVoice.stop(CONNECTION_ID)
+    await waitFor(() => voiceServer.received.some((m) => m.type === 'voice_stop'))
+    voiceServer.push({ type: 'closed' })
+
+    await waitFor(() => framesFor(CONNECTION_ID, 'voice:error').length === 1)
+    expect(framesFor(CONNECTION_ID, 'voice:error')).toEqual([
+      [ROUTING_ID, VOICE_NO_SPEECH_MESSAGE, 'info']
+    ])
   })
 
   it('`voice:stop` finalizes through the engine and returns to idle', async () => {
@@ -696,9 +737,47 @@ describe('voice relay — the desktop owner', () => {
     voiceServer.push({ type: 'error', message: 'Deepgram said no' })
     await waitFor(() => emitted.length === 1)
 
-    expect(emitted).toEqual([{ channel: 'voice:error', args: [ROUTING_ID, 'Deepgram said no'] }])
+    expect(emitted).toEqual([
+      { channel: 'voice:error', args: [ROUTING_ID, 'Deepgram said no', 'warn'] }
+    ])
     expect(sentOn(owner, 'voice:error')).toEqual([])
     expect(deliveries).toEqual([])
+  })
+
+  it('carries the TONE through the funnel too — no audio at all is a `warn` outcome', async () => {
+    const owner = makeWindow(7)
+    await startDesktop(owner)
+    voiceServer.push({ type: 'ready' })
+    await waitFor(() => sentOn(owner, 'voice:state').some((a) => a[1] === 'recording'))
+    voiceRelay.feed(DESKTOP_KEY, secondOfPcm(0))
+    voiceRelay.feed(DESKTOP_KEY, secondOfPcm(0))
+    await waitFor(() => voiceServer.received.filter((m) => m.type === 'audio').length === 2)
+    await voiceRelay.stop(DESKTOP_KEY)
+    await waitFor(() => voiceServer.received.some((m) => m.type === 'voice_stop'))
+    voiceServer.push({ type: 'closed' })
+
+    await waitFor(() => emitted.length === 1)
+    expect(emitted).toEqual([
+      { channel: 'voice:error', args: [ROUTING_ID, VOICE_NO_AUDIO_MESSAGE, 'warn'] }
+    ])
+  })
+
+  it('carries the TONE through the funnel too — "No speech detected" is `info`', async () => {
+    const owner = makeWindow(7)
+    await startDesktop(owner)
+    voiceServer.push({ type: 'ready' })
+    await waitFor(() => sentOn(owner, 'voice:state').some((a) => a[1] === 'recording'))
+    voiceRelay.feed(DESKTOP_KEY, secondOfPcm(1500))
+    voiceRelay.feed(DESKTOP_KEY, secondOfPcm(1500))
+    await waitFor(() => voiceServer.received.filter((m) => m.type === 'audio').length === 2)
+    await voiceRelay.stop(DESKTOP_KEY)
+    await waitFor(() => voiceServer.received.some((m) => m.type === 'voice_stop'))
+    voiceServer.push({ type: 'closed' })
+
+    await waitFor(() => emitted.length === 1)
+    expect(emitted).toEqual([
+      { channel: 'voice:error', args: [ROUTING_ID, VOICE_NO_SPEECH_MESSAGE, 'info'] }
+    ])
   })
 
   it('tolerates a window destroyed mid-capture — no send, no throw', async () => {

@@ -54,6 +54,7 @@ import type {
   ToolReviewBlock,
   FileDiff,
   UISessionConfig,
+  VoiceNoticeTone,
   WatchUpdate
 } from '../../../shared/types'
 import type { HarnessId, HarnessInstallProgress } from '../../../shared/harness-types'
@@ -403,12 +404,17 @@ export interface SyncEventMap {
   // Anomaly, recorded not fixed
   // -------------------------------------------------------------------------
   /**
-   * `voice:error` is host-local in nature but ONE of its two emitters is
-   * `BaseSession.send`, so it rings and reaches every subscriber. Kept in this map
-   * for the sync path; the desktop's `window.api.onVoiceError` is gone with the
-   * per-channel preload surface, so BOTH emitters land here.
+   * `voice:error` is host-local in nature but was once raised through
+   * `BaseSession.send`, so it rings and reaches every subscriber (channels.ts
+   * records the anomaly). Kept in this map for the sync path; the desktop's
+   * `window.api.onVoiceError` is gone with the per-channel preload surface.
+   *
+   * Despite the name it carries every voice MESSAGE for the mic's notice pill,
+   * outcomes included; `tone` says how it reads (`info` grey, `warn` amber).
+   * Optional on the wire so an older emitter's two-argument frame stays valid —
+   * absent means `warn`.
    */
-  'voice:error': (routingId: string, error: string) => void
+  'voice:error': (routingId: string, error: string, tone?: VoiceNoticeTone) => void
 }
 
 /** Every channel a client may subscribe to through the sync transport. */
