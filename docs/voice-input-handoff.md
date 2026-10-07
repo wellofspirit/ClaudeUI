@@ -415,3 +415,10 @@ at `d11bc206`. Gates as before.
 Suggested commit: `feat(voice): choose a microphone, follow device changes mid-press, test it in Settings`
 
 S4 carry-over: the Settings microphone dropdown menu overflows the dialog's right edge by ~20 px.
+
+## Decisions recorded (Daniel, 2026-10-07)
+
+- ADR-098 written (capture in the renderer, per-device mic choice, notice pill, voice bound to
+  Claude sessions, fakes-only testing). ADR numbers 093–097 are taken on other branches.
+- Loose native addons are no longer extracted or shipped (`build:` commit after a1bd280f).
+- Other-engine speech-to-text: parked by Daniel — don't pursue for now.

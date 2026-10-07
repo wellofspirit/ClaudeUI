@@ -311,6 +311,9 @@ After arc 2 ships, the installer, the release zips and the Linux server tarball 
 `vendor/opencode-cli`, `vendor/pi-cli` and `vendor/codex-cli`. `postinstall` and CI fetch into the
 same managed store, so development and integration tests exercise the download path. Claude Code
 stays bundled, and so does `audio-capture.node`, which voice loads from `claude-cli/vendor`.
+_(Amended 2026-10-07 by [ADR-098](adr-098_voice-capture-in-the-renderer.md): voice captures in the
+renderer, so the loose `audio-capture.node` is no longer extracted or shipped; cli.js loads its
+addons from inside the Bun binary.)_
 
 Upgrading from a bundled release (owner, 2026-09-30): on the first launch without the bundled
 engines, ClaudeUI shows one sheet listing the harnesses this profile has used, with one Install
