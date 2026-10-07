@@ -11,6 +11,11 @@
  * preceded it: only the vault's tokens are ClaudeUI's.
  *
  * It decides REMOVALS only: feeding and adoption never read it.
+ *
+ * opencode 2.x (ADR-093 §5) keeps no file and is no longer recorded here:
+ * ClaudeUI's rows there are known by id. Its 1.x history is still READ, to
+ * recognise the copy of ClaudeUI's sign-in opencode's migration imported from
+ * `auth.json` (never restored as the user's credential).
  */
 import * as fs from 'node:fs'
 import * as os from 'node:os'

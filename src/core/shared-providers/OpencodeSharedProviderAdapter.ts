@@ -16,21 +16,20 @@ import type {
 
 /**
  * The writers and removers invalidate opencode's model cache themselves, and
- * only when the stored credential actually changed — so the adapter adds no
+ * only when a credential actually changed — so the adapter adds no
  * invalidation of its own after a vend or a removal: re-vending an unchanged
  * key, or removing one that is not there, at boot must not kill the model probe
  * in flight (`OpencodeAuthProvider.setVendorApiKey` / `removeVendorAuth`).
+ *
+ * opencode 2.x (ADR-093 §5): a key is ClaudeUI's own `cred_claudeui_*` row, a
+ * removal deletes only those rows (and, while opencode is not installed, waits
+ * for it in ClaudeUI's own record — there is no file to edit).
  */
 export interface OpencodeSharedProviderAuthTarget {
   setVendorApiKey(vendorId: string, key: string): Promise<void>
-  feedOauthCredential(vendorId: string, credential: CodexCredentialInput): Promise<void>
+  /** The ChatGPT vend (CredentialSync's path); absent, an OAuth vend is refused. */
+  vendChatgpt?(credential: CodexCredentialInput): Promise<void>
   removeVendorAuth(vendorId: string): Promise<void>
-  /**
-   * Delete a vendor's entry from auth.json as a file edit, without opencode's
-   * server — used while opencode does not run (`OpencodeAuthProvider`).
-   * Absent, a removal always takes the server path.
-   */
-  removeVendorAuthDirect?(vendorId: string): Promise<void>
   listVendorCredentialIds?(): Promise<Record<string, 'api' | 'oauth'>>
 }
 
@@ -185,19 +184,19 @@ export class OpencodeSharedProviderAdapter {
       throw new Error('Custom providers require API-key credentials')
     }
     if (!definition.routes.opencode.enabled) return
-    await this.authTarget.feedOauthCredential(opencodeProviderId(definition), credential)
+    if (opencodeProviderId(definition) !== 'openai' || !this.authTarget.vendChatgpt)
+      throw new Error('opencode takes OAuth credentials for ChatGPT only')
+    await this.authTarget.vendChatgpt(credential)
   }
 
   /**
-   * Take this definition's key out of opencode's auth store: through its server
-   * while opencode runs (which recycles the live processes), as a direct file
-   * edit while it does not (ADR-082 §8, S7d) — no process to spawn or recycle.
+   * Take ClaudeUI's key for this definition out of opencode (its
+   * `cred_claudeui_*` rows, ADR-093 §5). Whether opencode runs no longer picks
+   * a path: while it is not installed the removal is recorded and runs when it
+   * is (ADR-082 §8, S7d's "at once" as far as opencode allows).
    */
-  async removeCredential(definition: SharedProviderDefinition, running = true): Promise<void> {
-    const vendorId = opencodeProviderId(definition)
-    if (!running && this.authTarget.removeVendorAuthDirect)
-      await this.authTarget.removeVendorAuthDirect(vendorId)
-    else await this.authTarget.removeVendorAuth(vendorId)
+  async removeCredential(definition: SharedProviderDefinition, _running = true): Promise<void> {
+    await this.authTarget.removeVendorAuth(opencodeProviderId(definition))
   }
 
   hasDefinition(definition: SharedProviderDefinition): boolean {

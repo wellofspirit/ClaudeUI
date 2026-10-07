@@ -92,6 +92,12 @@ export interface ServerConnection {
   startedAt: number
   /** Whether the hosted tools were registered for `directory` when this lease was handed out. */
   hostedTools: HostedToolsReadiness
+  /**
+   * Asked for at acquire: when THIS lease is the last one released (by
+   * `releaseIfCurrent`), the server stays up idle this long for the next read
+   * instead of ending at once (S7, ADR-093 §5).
+   */
+  lingerMs?: number
 }
 
 /** A server of the caller's own (`acquireDetached`): `release()` ends it, once. */
@@ -102,6 +108,8 @@ export interface DetachedServer extends ServerConnection {
 interface ServerHandle {
   /** `configIdentity` of what this server was injected with. */
   key: string
+  /** The idle end armed by a lingering last release; cleared by the next acquire. */
+  idleTimer?: ReturnType<typeof setTimeout>
   baseUrl: string
   password: string
   authHeader: string
@@ -601,12 +609,16 @@ export class OpencodeServerManager {
    */
   async acquire(
     cwd: string,
-    options: { waitForHostedTools?: boolean } = {}
+    options: { waitForHostedTools?: boolean; lingerMs?: number } = {}
   ): Promise<ServerConnection> {
     const directory = resolvePath(cwd)
     const input = this.configInputFn(directory)
     const key = configIdentity(input)
     const handle = await this.resolveHandle(key, input)
+    if (handle.idleTimer) {
+      clearTimeout(handle.idleTimer)
+      handle.idleTimer = undefined
+    }
     handle.refCount++
     handle.cwdRefs.set(directory, (handle.cwdRefs.get(directory) ?? 0) + 1)
     const turn = options.waitForHostedTools !== false
@@ -625,7 +637,8 @@ export class OpencodeServerManager {
       this.decrementCwd(handle, directory)
       throw new Error(`opencode server ${handle.baseUrl} went away while starting`)
     }
-    return this.connectionOf(handle, directory, hostedTools)
+    const conn = this.connectionOf(handle, directory, hostedTools)
+    return options.lingerMs ? { ...conn, lingerMs: options.lingerMs } : conn
   }
 
   /**
@@ -701,7 +714,7 @@ export class OpencodeServerManager {
     if (!handle) return
     const directory = resolvePath(cwd)
     if ((handle.cwdRefs.get(directory) ?? 0) <= 0) return
-    this.releaseHandle(handle, directory)
+    this.releaseHandle(handle, directory, conn.lingerMs)
   }
 
   private decrementCwd(handle: ServerHandle, directory: string): void {
@@ -710,10 +723,29 @@ export class OpencodeServerManager {
     else handle.cwdRefs.delete(directory)
   }
 
-  private releaseHandle(handle: ServerHandle, directory: string): void {
+  private releaseHandle(handle: ServerHandle, directory: string, lingerMs = 0): void {
     handle.refCount--
     this.decrementCwd(handle, directory)
     if (handle.refCount > 0) return
+    if (lingerMs > 0 && this.handles.get(handle.key) === handle && !this.disposed) {
+      // Idle, not ended: the next read within the window reuses it (S7).
+      if (handle.idleTimer) clearTimeout(handle.idleTimer)
+      handle.idleTimer = setTimeout(() => {
+        handle.idleTimer = undefined
+        if (handle.refCount === 0) this.endHandle(handle)
+      }, lingerMs)
+      handle.idleTimer.unref?.()
+      return
+    }
+    this.endHandle(handle)
+  }
+
+  /** End a released server. */
+  private endHandle(handle: ServerHandle): void {
+    if (handle.idleTimer) {
+      clearTimeout(handle.idleTimer)
+      handle.idleTimer = undefined
+    }
     // Drop the handle BEFORE ending it: the exit handler is identity-gated, so
     // this is what marks the end as deliberate and suppresses the fan-out.
     if (this.handles.get(handle.key) === handle) this.handles.delete(handle.key)
@@ -747,6 +779,7 @@ export class OpencodeServerManager {
    */
   recycleAll(): void {
     for (const [key, handle] of [...this.handles]) {
+      if (handle.idleTimer) clearTimeout(handle.idleTimer)
       this.handles.delete(key)
       this.fanOutExit(handle)
       this.endServerFn(handle.process)
@@ -762,6 +795,7 @@ export class OpencodeServerManager {
   dispose(): void {
     this.disposed = true
     for (const handle of this.handles.values()) {
+      if (handle.idleTimer) clearTimeout(handle.idleTimer)
       handle.exitListeners.clear()
       this.endServerFn(handle.process)
       handle.mcpHost.close().catch(() => {})

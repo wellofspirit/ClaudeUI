@@ -7,7 +7,8 @@ import {
   Menu,
   clipboard,
   crashReporter,
-  dialog
+  dialog,
+  powerMonitor
 } from 'electron'
 import { codexHostRegistry } from '../core/codex/CodexHost'
 import { join } from 'path'
@@ -710,6 +711,12 @@ app.whenReady().then(() => {
   // of it needs a window; `createWindow()` below only attaches to it.
   core = bootCore({ remoteAccessDisabled })
 
+  // System resume / unlock (ADR-093 §5 rule 2): refresh timers may have slept
+  // through their deadline, and opencode's ChatGPT row must have time left
+  // before the next turn. Best-effort; never throws.
+  powerMonitor.on('resume', () => void credentialSync.onSystemResume())
+  powerMonitor.on('unlock-screen', () => void credentialSync.onSystemResume())
+
   // Before-quit: give the renderer (if there is one) a chance to prompt about
   // active worktrees, then tear the services down. Process-lifetime — it moved
   // out of `createWindow` in 4d, because a windowless run still has services to
@@ -752,6 +759,10 @@ app.whenReady().then(() => {
       opencodeServerManager.dispose()
     },
     quit: () => app.quit(),
+    // opencode 2.x shares its credential table with the user's own opencode:
+    // hand the ChatGPT slot back to their credential while a server can still
+    // run (ADR-093 §5). Bounded; a crash skips it and the next start re-asserts.
+    prepareQuit: () => credentialSync.prepareQuit(),
     // The first before-quit pass asks the renderer about active worktrees and waits.
     // Windowless there is nobody to ask — and no UI decision to make — so collapse
     // the wait instead of stalling a headless shutdown for the full fallback.

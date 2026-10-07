@@ -9,12 +9,12 @@ import {
   discoverOpencodeProviderCatalog
 } from '../opencode/model-discovery'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
-import { resolveOpencodeAuthJsonPath } from '../opencode/auth-store'
+import { opencodeCredentialStore } from '../opencode/opencode-credentials'
 import { PI_API_KEY_VENDOR_IDS } from '../auth/pi-vendor-ids'
 import { discoverPiModels } from '../pi/model-discovery'
 import { harnessWritable } from '../harness/resolve'
 import { deliveredKeyFingerprints } from './delivered-keys'
-import { authJsonApiKeyReader } from './native-api-keys'
+import { authJsonApiKeyReader, batchedApiKeyReader } from './native-api-keys'
 import { OpencodeSharedProviderAdapter } from './OpencodeSharedProviderAdapter'
 import { PiSharedProviderAdapter } from './PiSharedProviderAdapter'
 import { SharedProviderRepository } from './SharedProviderRepository'
@@ -32,6 +32,11 @@ export async function getChatgptModels(): Promise<SharedProviderModel[]> {
   return aggregateChatgptModels(piGroups, opencodeGroups)
 }
 
+// opencode 2.x keys: one credential list per pass (one server), dropped when
+// ClaudeUI changes a credential.
+const opencodeKeyReader = batchedApiKeyReader(() => opencodeCredentialStore.readActiveKeys())
+opencodeCredentialStore.onChange(() => opencodeKeyReader.invalidate())
+
 // Composition stays outside adapters and CredentialSync to avoid auth-provider import cycles.
 export const sharedProviderService = new SharedProviderService({
   repository: new SharedProviderRepository(),
@@ -45,12 +50,13 @@ export const sharedProviderService = new SharedProviderService({
   // user's.
   harnessRuns: harnessWritable,
   deliveredKeys: deliveredKeyFingerprints(),
-  // ADR-074 §6 adoption: plain API-key entries in each engine's own auth.json
-  // (`api` on opencode, `api_key` on pi). opencode's catalog costs a server
-  // spawn, so the service asks for it only once a vendor holds a key in both.
+  // ADR-074 §6 adoption: plain API keys each engine holds — pi's `api_key`
+  // entries in its auth.json, opencode 2.x's ACTIVE key rows (ADR-093 §5).
+  // opencode's catalog costs a server spawn, so the service asks for it only
+  // once a vendor holds a key in both.
   nativeKeys: {
     pi: authJsonApiKeyReader(() => piAuthProvider.authFilePath(), 'api_key'),
-    opencode: authJsonApiKeyReader(resolveOpencodeAuthJsonPath, 'api'),
+    opencode: opencodeKeyReader,
     loadCatalogs: async (options) => ({
       pi: new Set(PI_API_KEY_VENDOR_IDS),
       opencode: new Map(

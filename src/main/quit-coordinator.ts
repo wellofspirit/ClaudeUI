@@ -26,12 +26,24 @@ export interface QuitCoordinatorDeps {
   quit: () => void
   /** Fallback timeout (ms) before force-quitting if the renderer never responds. Default 5000. */
   fallbackMs?: number
+  /**
+   * Async work that needs the services ALIVE and must finish before the real
+   * quit (ADR-093 §5: giving opencode's ChatGPT slot back to the user's own
+   * credential needs an opencode server). Runs once, after the quit is
+   * confirmed and before `quit()`, bounded by `prepareTimeoutMs`; a failure
+   * never stops the quit.
+   */
+  prepareQuit?: () => Promise<void>
+  /** Bound on `prepareQuit` (ms). Default 4000. */
+  prepareTimeoutMs?: number
 }
 
 export class QuitCoordinator {
   private confirmed = false
   private toreDown = false
   private timer: ReturnType<typeof setTimeout> | null = null
+  private preparing = false
+  private prepared = false
   private readonly fallbackMs: number
 
   constructor(private readonly deps: QuitCoordinatorDeps) {
@@ -44,6 +56,12 @@ export class QuitCoordinator {
    * @param preventQuit invoked to veto this quit pass (i.e. `event.preventDefault()`).
    */
   handleBeforeQuit(preventQuit: () => void): void {
+    // A second quit while `prepareQuit` still runs (Cmd+Q again) must not tear
+    // the services down under it: veto it; the prepare's own bound quits.
+    if (this.preparing && !this.prepared) {
+      preventQuit()
+      return
+    }
     if (this.confirmed) {
       // Real quit — tear down once, then let Electron proceed (no preventDefault).
       this.teardown()
@@ -59,7 +77,7 @@ export class QuitCoordinator {
   confirm(): void {
     this.clearTimer()
     this.confirmed = true
-    this.deps.quit()
+    this.proceed()
   }
 
   /**
@@ -81,8 +99,29 @@ export class QuitCoordinator {
     this.timer = setTimeout(() => {
       this.timer = null
       this.confirmed = true
-      this.deps.quit()
+      this.proceed()
     }, this.fallbackMs)
+  }
+
+  /** Run `prepareQuit` (once, bounded), then quit. */
+  private proceed(): void {
+    const prepare = this.deps.prepareQuit
+    if (!prepare) {
+      this.deps.quit()
+      return
+    }
+    if (this.preparing) return
+    this.preparing = true
+    let bound: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<void>((done) => {
+      bound = setTimeout(done, this.deps.prepareTimeoutMs ?? 4000)
+    })
+    const prepared = (async () => prepare())().catch(() => undefined)
+    void Promise.race([prepared, timeout]).finally(() => {
+      clearTimeout(bound)
+      this.prepared = true
+      this.deps.quit()
+    })
   }
 
   private clearTimer(): void {

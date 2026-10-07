@@ -8,8 +8,9 @@
  *
  * SAFETY: `node:os`.homedir is mocked to a temp directory, so the REAL AuthVault
  * (and the marker it keeps) runs with real storage semantics and never touches
- * the real `~/.claude/ui`. The engine stores are in-memory maps, never `~/.pi`
- * or a real opencode data dir; no refresh runs (an injected fake refuses) and
+ * the real `~/.claude/ui`. pi's store is an in-memory map, never `~/.pi`;
+ * opencode 2.x is the real credential store over an in-memory credential
+ * table (ADR-093 §5: ClaudeUI's rows are known by id), never a real opencode; no refresh runs (an injected fake refuses) and
  * every login flow is a fake. Every token string is an obvious fake.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -42,6 +43,7 @@ import {
   fedTokenHistory,
   memoryFedTokenHistory
 } from '../../../../core/auth/vault/fed-token-history'
+import { storeBackedOpencode } from './fixtures/fake-opencode-target'
 
 type Engine = 'pi' | 'opencode'
 
@@ -132,7 +134,7 @@ function setup(
     })
   })
   const pi = engineStore('pi')
-  const opencode = engineStore('opencode')
+  const opencode = storeBackedOpencode(() => running.opencode)
   /** A fresh CredentialSync over the same vault file and engine stores: an app restart. */
   const boot = (): CredentialSync => {
     const sync = new CredentialSync({
@@ -157,13 +159,14 @@ describe('a ChatGPT disconnect takes out only what ClaudeUI put in (S7e)', () =>
     const h = setup()
     await h.vault.upsertAccount(CHATGPT_PROVIDER_ID, cred('fake-ours', 'ws-a'))
     h.pi.holds('fake-ours')
-    h.opencode.holds('fake-own-opencode-login')
+    h.opencode.holdsOwn('fake-own-opencode-login')
 
     await h.boot().disconnectChatgpt()
 
     expect(h.pi.remove).toHaveBeenCalledWith(PI_CODEX_VENDOR_ID)
     expect(h.pi.held()).toBeUndefined()
-    expect(h.opencode.remove).not.toHaveBeenCalled()
+    // opencode 2.x: nothing of ClaudeUI's was there; the user's row is untouched.
+    expect(h.opencode.table.calls.filter((call) => call.includes('cred_user'))).toEqual([])
     expect(h.opencode.held()).toBe('fake-own-opencode-login')
     await expect(h.vault.listAccounts(CHATGPT_PROVIDER_ID)).resolves.toEqual([])
   })
@@ -172,12 +175,13 @@ describe('a ChatGPT disconnect takes out only what ClaudeUI put in (S7e)', () =>
     const h = setup()
     await h.vault.upsertAccount(CHATGPT_PROVIDER_ID, cred('fake-ours', 'ws-a'))
     h.pi.holds('fake-ours')
-    h.opencode.holds('fake-ours')
+    await h.opencode.holdsOurs('fake-ours')
 
     await h.boot().disconnectChatgpt()
 
     expect(h.pi.held()).toBeUndefined()
     expect(h.opencode.held()).toBeUndefined()
+    expect(h.opencode.ours()).toEqual([])
   })
 
   it('an engine holding a NON-active account’s token holds ClaudeUI’s copy too', async () => {
@@ -187,7 +191,7 @@ describe('a ChatGPT disconnect takes out only what ClaudeUI put in (S7e)', () =>
     await expect(h.vault.getActiveAccountId(CHATGPT_PROVIDER_ID)).resolves.toBe(a.id)
     // pi was fed account B while it was active; opencode holds the active A.
     h.pi.holds('fake-rb')
-    h.opencode.holds('fake-ra')
+    await h.opencode.holdsOurs('fake-ra')
 
     await h.boot().disconnectChatgpt()
 
@@ -195,21 +199,24 @@ describe('a ChatGPT disconnect takes out only what ClaudeUI put in (S7e)', () =>
     expect(h.opencode.held()).toBeUndefined()
   })
 
-  it('a harness that does not run: ClaudeUI’s copy goes as a file edit, a direct sign-in stays', async () => {
+  it('opencode not installed: ClaudeUI’s rows go once it can run (2.x has no file to edit); a direct sign-in stays', async () => {
     const h = setup({ running: { pi: true, opencode: false } })
     await h.vault.upsertAccount(CHATGPT_PROVIDER_ID, cred('fake-ours', 'ws-a'))
-    h.opencode.holds('fake-ours')
+    await h.opencode.holdsOurs('fake-ours')
     await h.boot().disconnectChatgpt()
-    expect(h.opencode.remove).not.toHaveBeenCalled()
-    expect(h.opencode.removeDirect).toHaveBeenCalledWith(OPENCODE_CODEX_VENDOR_ID)
+    // Recorded, waiting for opencode: no server could be started.
+    expect(h.opencode.ours()).toEqual(['cred_claudeui_acct-test_v1'])
+    h.running.opencode = true
+    await h.opencode.store.flushPending()
+    expect(h.opencode.ours()).toEqual([])
     expect(h.opencode.held()).toBeUndefined()
 
     const other = setup({ running: { pi: true, opencode: false } })
     await other.vault.upsertAccount(CHATGPT_PROVIDER_ID, cred('fake-ours', 'ws-a'))
-    other.opencode.holds('fake-own-opencode-login')
+    other.opencode.holdsOwn('fake-own-opencode-login')
     await other.boot().disconnectChatgpt()
-    expect(other.opencode.remove).not.toHaveBeenCalled()
-    expect(other.opencode.removeDirect).not.toHaveBeenCalled()
+    other.running.opencode = true
+    await other.opencode.store.flushPending()
     expect(other.opencode.held()).toBe('fake-own-opencode-login')
   })
 })
@@ -219,7 +226,7 @@ describe('removing the last account is the same disconnect (S7e)', () => {
     const h = setup()
     const only = await h.vault.upsertAccount(CHATGPT_PROVIDER_ID, cred('fake-ours', 'ws-a'))
     h.pi.holds('fake-own-pi-login')
-    h.opencode.holds('fake-ours')
+    await h.opencode.holdsOurs('fake-ours')
 
     await h.boot().removeAccount(only.id)
 
@@ -262,7 +269,7 @@ describe('no silent sign-in after a disconnect (S7e)', () => {
     const h = setup()
     await h.vault.upsertAccount(CHATGPT_PROVIDER_ID, cred('fake-ours', 'ws-a'))
     h.pi.holds('fake-ours')
-    h.opencode.holds('fake-own-opencode-login')
+    h.opencode.holdsOwn('fake-own-opencode-login')
     await h.boot().disconnectChatgpt()
     await expect(h.vault.isDisconnected(CHATGPT_PROVIDER_ID)).resolves.toBe(true)
 
@@ -370,7 +377,7 @@ describe('no silent sign-in after a disconnect (S7e)', () => {
     const pi = engineStore('pi')
     pi.holds('fake-own-pi-login')
     const sync = new CredentialSync({ vault })
-    sync.configure({ pi: pi.target, opencode: engineStore('opencode').target })
+    sync.configure({ pi: pi.target, opencode: storeBackedOpencode().target })
     await sync.start()
     expect(save).not.toHaveBeenCalled()
     sync.stop()
@@ -431,7 +438,8 @@ describe('a stale copy ClaudeUI put in is still ClaudeUI’s (S7e, fed-token his
     await sync.refreshNow() // the vault rotates; pi, not running, is not fed
     await expect(h.vault.load()).resolves.toMatchObject({ refresh: 'fake-ours-rotated' })
     expect(h.pi.held()).toBe('fake-ours')
-    expect(h.opencode.held()).toBe('fake-ours-rotated')
+    // opencode was vended the rotated access token (2.x keeps no refresh token).
+    expect(h.opencode.store.vendedChatgpt()?.access).toBe('fake-access-rotated')
 
     await sync.disconnectChatgpt()
 

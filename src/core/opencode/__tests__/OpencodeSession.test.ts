@@ -152,6 +152,8 @@ import { childSessionRuleset } from '../subagent-permissions'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 import type { OpencodeMapperOutput } from '../v2-event-mapper'
 import { convertOpencodeHistory } from '../v2-history'
+import { setOpencodeAuthHooks } from '../opencode-auth-hooks'
+import { discoverOpencodeModels } from '../model-discovery'
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -1658,5 +1660,66 @@ describe('recorded sequences: what the session emits folds to the cold history',
       )
     )
     expect(live).toEqual(cold)
+  })
+})
+
+// ─── ChatGPT credentials (ADR-093 §5, S7) ─────────────────────────────────────
+
+describe('the ChatGPT credential gate and recovery', () => {
+  afterEach(() => setOpencodeAuthHooks(null))
+
+  it('a turn the gate holds is never sent: an auth notice, the status leaves running, queued items wait', async () => {
+    const beforeTurn = vi.fn(async () => 'ChatGPT sign-in could not be refreshed')
+    setOpencodeAuthHooks({ beforeTurn, authFailed: vi.fn() })
+    session = makeSession()
+    h.feed.push(connected())
+    const run = session.run('hello')
+    session.enqueuePrompt('queued meanwhile')
+    await run
+    await flush()
+    expect(beforeTurn).toHaveBeenCalledWith('openai')
+    expect(h.client.prompt).not.toHaveBeenCalled()
+    const auth = sent.filter(([channel]) => channel === 'session:auth-required')
+    expect(auth).toHaveLength(1)
+    expect(JSON.stringify(auth[0])).toContain('ChatGPT sign-in could not be refreshed')
+    expect(session.status.state).toBe('idle')
+  })
+
+  it('a turn the gate lets go is posted as before', async () => {
+    const beforeTurn = vi.fn(async () => null)
+    setOpencodeAuthHooks({ beforeTurn, authFailed: vi.fn() })
+    session = makeSession()
+    await startTurn('go')
+    expect(beforeTurn).toHaveBeenCalledWith('openai')
+    expect(h.client.prompt.mock.calls.map(([, body]) => body.text)).toEqual(['go'])
+  })
+
+  it('a turn that fails provider.auth asks the vault to refresh and rotate', async () => {
+    const authFailed = vi.fn()
+    setOpencodeAuthHooks({ beforeTurn: async () => null, authFailed })
+    session = makeSession()
+    await startTurn()
+    h.feed.push(
+      event('session.execution.started', { sessionID: SID }),
+      event('session.execution.failed', {
+        sessionID: SID,
+        error: { type: 'provider.auth', message: 'Request failed: 401' }
+      })
+    )
+    await flush()
+    expect(authFailed).toHaveBeenCalledWith('openai')
+    expect(sent.some(([channel]) => channel === 'session:auth-required')).toBe(true)
+  })
+
+  it('eager connect discovers on ClaudeUI’s global server, never on the session’s (no project config leak)', async () => {
+    const discover = vi.mocked(discoverOpencodeModels)
+    discover.mockClear()
+    h.client.forDirectory = vi.fn()
+    session = makeSession()
+    void session.run(null)
+    await flush()
+    expect(discover).toHaveBeenCalledTimes(1)
+    expect(discover.mock.calls[0]).toEqual([])
+    expect(h.client.forDirectory).not.toHaveBeenCalled()
   })
 })

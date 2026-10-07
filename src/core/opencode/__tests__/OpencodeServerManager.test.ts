@@ -675,6 +675,41 @@ describe('OpencodeServerManager (2.x) — exit fan-out', () => {
   })
 })
 
+describe('OpencodeServerManager (2.x) — idle linger after a read-only lease (S7)', () => {
+  it('a lingering last release keeps the server for the next read; it ends once the window passes', async () => {
+    vi.useFakeTimers()
+    try {
+      const { manager, calls } = makeRig()
+      const read = await manager.acquire('/a', { waitForHostedTools: false, lingerMs: 60_000 })
+      manager.releaseIfCurrent('/a', read)
+      expect(calls[0].child.killed).toBe(false)
+      const again = await manager.acquire('/a', { waitForHostedTools: false, lingerMs: 60_000 })
+      expect(again.baseUrl).toBe(read.baseUrl) // reused, no second spawn
+      expect(calls).toHaveLength(1)
+      manager.releaseIfCurrent('/a', again)
+      await vi.advanceTimersByTimeAsync(59_999)
+      expect(calls[0].child.killed).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(calls[0].child.killed).toBe(true)
+      expect(manager.activeCount).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a lease without linger still ends the server at its last release; dispose ends a lingering one', async () => {
+    const { manager, calls } = makeRig()
+    const turn = await manager.acquire('/a')
+    manager.releaseIfCurrent('/a', turn)
+    expect(calls[0].child.killed).toBe(true)
+    const read = await manager.acquire('/a', { waitForHostedTools: false, lingerMs: 60_000 })
+    manager.releaseIfCurrent('/a', read)
+    expect(calls[1].child.killed).toBe(false)
+    manager.dispose()
+    expect(calls[1].child.killed).toBe(true)
+  })
+})
+
 describe('OpencodeServerManager (2.x) — recycleAll / dispose / detached / start turns', () => {
   it('recycleAll ends every server, fans out, and the next acquire starts fresh', async () => {
     const { manager, calls, configs } = makeRig()

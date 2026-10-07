@@ -1,96 +1,101 @@
 /**
- * OpencodeAuthProvider — EngineAuthProvider implementation for the 'opencode' engine.
+ * OpencodeAuthProvider — EngineAuthProvider for the 'opencode' engine, on
+ * opencode 2.x (ADR-093 §5).
  *
- * probe() merges:
- *   - GET /config/providers  → configured vendors (authState:'authenticated')
- *   - GET /provider/auth     → the auth-option catalog (unconfigured = 'unauthenticated')
+ * 2.x keeps credentials in its database behind `/api/credential`, and the data
+ * dir is shared with the user's own opencode. Every write here goes through
+ * {@link opencodeCredentialStore}, which owns exactly ClaudeUI's
+ * `cred_claudeui_*` rows: an API key is vended as the next generation and made
+ * active, a removal deletes ClaudeUI's rows only and gives the slot back to
+ * the user's previously active credential. Nothing is written to `auth.json`,
+ * and nothing is recycled: 2.x applies a credential change to the next request.
  *
- * Auth operations run against a transient server (acquire/release PERSISTED_SESSIONS_DIR)
- * exactly like model-discovery does — auth is global to opencode, not per-session.
- *
- * After any mutation (setVendorApiKey / oauthCallback / removeVendorAuth), the model
- * discovery cache is invalidated so newly-authed vendors appear in the model picker.
+ * probe() merges `GET /api/integration` (every integration with its methods
+ * and connections), `GET /api/provider` (the usable ones) and the credential
+ * snapshot (which row each integration uses, never its value). OAuth sign-ins
+ * run on opencode's own integration flows (`/api/integration/{id}/connect/oauth`):
+ * the row they create is opencode's, not ClaudeUI's.
  *
  * Degrades to {} on any failure — opencode is optional.
  */
 
-import fs from 'fs'
+import { opencodeServerManager, type ServerConnection } from '../opencode/OpencodeServerManager'
+import { READ_LINGER_MS } from '../opencode/read-linger'
+import { OpencodeClient } from '../opencode/OpencodeClient'
+import { opencodeCredentialStore } from '../opencode/opencode-credentials'
 import {
-  resolveOpencodeAuthJsonPath,
-  readOpencodeCredentialTypes,
-  opencodeAuthEntryEquals
-} from '../opencode/auth-store'
-import { opencodeServerManager } from '../opencode/OpencodeServerManager'
-// TODO(S7): still the 1.x auth surface (`/provider/auth`, `PUT /auth/{id}`,
-// `/provider/{id}/oauth/*`, the `auth.json` writer). 2.x: `OpencodeClient`
-// `integrations()`, `createCredential`/`removeCredential`/`activateCredential`
-// with `cred_claudeui_*` generations, `integration.oauth.*` (ADR-093 §5).
-import { OpencodeV1Client } from '../opencode/OpencodeV1Client'
+  CHATGPT_INTEGRATION_ID,
+  credentialTypes,
+  type ClaudeuiTokenCheck,
+  type VendedChatgpt
+} from '../opencode/credential-store'
+import type { Integration_Info, Integration_Method } from '../opencode/protocol-v2/openapi'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
-import { readJsonFileForWrite, writeJsonAtomic } from '../services/write-json-atomic'
 import { logger } from '../services/logger'
 import { removalCaller } from './removal-caller'
 import type { VendorAuthMap, VendorAuthOption, AccountRef, AuthState } from '../../shared/types'
-import type { AccountIdentity } from '../../shared/account-key'
-import { AuthFileIdentityCache } from './account-identity'
+import { nativeAccountKey, type AccountIdentity } from '../../shared/account-key'
 import type { EngineAuthProvider } from './EngineAuthProvider'
 import { FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
-import { deepEqual } from '../../shared/opencode-config-diff'
-import type { CodexCredentialInput, CodexEntrySnapshot } from './vault/CredentialSync'
-
-// Path resolution + the credential-type read live in opencode/auth-store.ts so
-// model-discovery can consult them for row-action availability without importing
-// this module (which would cycle: this file imports invalidateOpencodeModelCache).
-
-/**
- * opencode's ChatGPT provider — the one vendor whose oauth entry names a
- * subscription. Same literal as `CredentialSync.OPENCODE_CODEX_VENDOR_ID`,
- * restated here because this file must not import that module at runtime (see
- * the CredentialSync feed-target section below for why).
- */
-const OPENCODE_CHATGPT_VENDOR_ID = 'openai'
+import type { CodexCredentialInput } from './vault/CredentialSync'
 
 /** Auth calls run no turn: never wait for the hosted MCP tools (S2 readiness). */
-const NO_TURN = { waitForHostedTools: false } as const
+const NO_TURN = { waitForHostedTools: false, lingerMs: READ_LINGER_MS } as const
+
+/** How often an `auto` OAuth attempt (loopback / device code) is polled. */
+export const OAUTH_POLL_MS = 1000
+
+/** The methods ClaudeUI's sign-in UI offers, in opencode's order (the `method` index). */
+function offeredMethods(integration: Integration_Info): Integration_Method[] {
+  return integration.methods.filter((method) => method.type === 'oauth' || method.type === 'key')
+}
+
+function authOption(method: Integration_Method): VendorAuthOption {
+  if (method.type === 'oauth') {
+    const prompts = (method.form ?? [])
+      .filter((field) => !(field as { hidden?: boolean }).hidden)
+      .map((field) => {
+        const f = field as { key: string; title?: string; options?: unknown[]; type?: string }
+        return { type: f.options ? 'select' : 'text', key: f.key, message: f.title ?? f.key }
+      })
+    return { type: 'oauth', label: method.label, ...(prompts.length > 0 ? { prompts } : {}) }
+  }
+  return { type: 'api', label: (method.type === 'key' && method.label) || 'API key' }
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+interface OauthHold {
+  conn: ServerConnection
+  client: OpencodeClient
+  vendorId: string
+  attemptID: string
+  mode: 'auto' | 'code'
+  expires: number
+  released: boolean
+}
 
 export class OpencodeAuthProvider implements EngineAuthProvider {
-  /**
-   * Cached probe result. Warmed on the first probe() call and refreshed after
-   * any mutation. Parallel to ClaudeAuthProvider.cachedAuthSource.
-   */
+  /** Cached probe result, dropped on every credential change ClaudeUI makes. */
   private cachedVendorMap: VendorAuthMap | null = null
 
   /**
-   * Server ref held open across an OAuth flow (authorize → callback).
-   *
-   * Why: the loopback HTTP listener (e.g. localhost:1455) and the in-memory
-   * PKCE verifier/state live INSIDE the opencode server process that handled
-   * `oauth/authorize`. If we acquire+release per call, releasing after authorize
-   * drops the last ref and KILLS that process — so the subsequent `oauth/callback`
-   * spawns a fresh server with no pending flow and fails immediately with
-   * `ProviderAuthOauthMissing`. Holding one extra ref keeps the authorize-time
-   * server alive until the callback settles (or the flow is cancelled).
-   *
-   * `released` guards against double-release (idempotent teardown).
+   * The server an OAuth attempt lives in, held from authorize to callback: the
+   * attempt (PKCE state, a loopback listener) is in THAT process.
    */
-  private oauthHold: { released: boolean } | null = null
+  private oauthHold: OauthHold | null = null
 
-  /**
-   * ADR-071 §3 account identity, off opencode's own auth.json. Separate from
-   * `cachedVendorMap` on purpose: that one caches an HTTP probe and is dropped
-   * on every mutation, this one tracks the FILE, so a sign-in change made in a
-   * terminal is picked up without a probe.
-   */
-  private readonly identityCache = new AuthFileIdentityCache(
-    'opencode',
-    resolveOpencodeAuthJsonPath,
-    OPENCODE_CHATGPT_VENDOR_ID
-  )
+  constructor() {
+    // The model catalogs subscribe on their own (model-discovery.ts).
+    opencodeCredentialStore.onChange(() => this.invalidateCache())
+  }
 
-  // -------------------------------------------------------------------------
-  // EngineAuthProvider interface
-  // -------------------------------------------------------------------------
+  // ── EngineAuthProvider ───────────────────────────────────────────────────────
 
   async probe(): Promise<VendorAuthMap> {
     if (this.cachedVendorMap) return this.cachedVendorMap
@@ -99,164 +104,86 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
     return result
   }
 
-  /**
-   * Fetch and merge /config/providers + /provider/auth into a VendorAuthMap.
-   * Returns {} on any failure (opencode optional).
-   */
+  /** One read of integrations + usable providers + credential snapshot; {} on failure. */
   private async fetchVendorMap(): Promise<VendorAuthMap> {
     try {
-      const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, NO_TURN)
-      const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
-      try {
-        const [configResp, authCatalog, credentialTypes] = await Promise.all([
-          client.getConfigProviders().catch(() => ({ providers: [] })),
-          client.getProviderAuth().catch(() => ({}) as Record<string, unknown[]>),
-          // One read of opencode's own auth.json for the whole probe — the
-          // stored credential is what a vendor is actually BILLED under (see
-          // billingType below). Missing/unparseable file → {}.
-          readOpencodeCredentialTypes()
-        ])
-
-        const map: VendorAuthMap = {}
-
-        // Mark configured providers as authenticated
-        const configuredIds = new Set<string>()
-        for (const p of configResp.providers ?? []) {
-          configuredIds.add(p.id)
+      const [{ integrations, providers }, snapshot] = await Promise.all([
+        this.withClient(async (client) => ({
+          integrations: await client.integrations(),
+          providers: await client.providers()
+        })),
+        opencodeCredentialStore.snapshot().catch(() => opencodeCredentialStore.cachedSnapshot())
+      ])
+      const usable = new Map(providers.map((p) => [p.id, p.integrationID ?? p.id]))
+      const map: VendorAuthMap = {}
+      const entry = (vendorId: string, integration: Integration_Info | undefined) => {
+        const isFree = FREE_OPENCODE_VENDOR_IDS.has(vendorId)
+        const integrationID = usable.get(vendorId) ?? vendorId
+        const configured = usable.has(vendorId) || (integration?.connections.length ?? 0) > 0
+        const state = snapshot?.integrations.get(integrationID)
+        const authState: AuthState = isFree || configured ? 'authenticated' : 'unauthenticated'
+        let billingType: 'subscription' | 'apiKey' | 'free' | 'unknown'
+        if (isFree) billingType = 'free'
+        else if (state?.activeType)
+          billingType = state.activeType === 'oauth' ? 'subscription' : 'apiKey'
+        else if (!configured) billingType = 'unknown'
+        else {
+          // Configured without a stored row (an env key, a config key): the
+          // methods it offers are the only hint left.
+          const methods = integration?.methods ?? []
+          const oauth = methods.some((m) => m.type === 'oauth')
+          const key = methods.some((m) => m.type === 'key' || m.type === 'env')
+          billingType = oauth && !key ? 'subscription' : 'apiKey'
         }
-
-        // Build the map from the auth catalog (the complete vendor set)
-        for (const [vendorId, options] of Object.entries(authCatalog)) {
-          const isConfigured = configuredIds.has(vendorId)
-          const isFree = FREE_OPENCODE_VENDOR_IDS.has(vendorId)
-
-          let authState: AuthState
-          if (isFree || isConfigured) {
-            authState = 'authenticated'
-          } else {
-            authState = 'unauthenticated'
-          }
-
-          // billingType:
-          // - free vendors (opencode/zen): 'free'
-          // - a STORED credential decides: 'oauth' → subscription, 'api' → apiKey
-          // - no stored credential, unconfigured: 'unknown'
-          // - no stored credential, configured (a key from the environment or
-          //   from opencode.json): inferred from the auth options offered
-          //
-          // The stored credential comes first because the options a vendor
-          // OFFERS cannot tell the two apart where it matters: `openai` offers
-          // both oauth and api, so a ChatGPT subscription used to read as
-          // 'apiKey' and its turns were priced as real spend (ADR-071 §2).
-          let billingType: 'subscription' | 'apiKey' | 'free' | 'unknown'
-          if (isFree) {
-            billingType = 'free'
-          } else if (credentialTypes[vendorId]) {
-            billingType = credentialTypes[vendorId] === 'oauth' ? 'subscription' : 'apiKey'
-          } else if (!isConfigured) {
-            billingType = 'unknown'
-          } else {
-            // Check what type of auth options the vendor has to infer billing
-            const opts = options as Array<{ type: string }>
-            const hasOauth = opts.some((o) => o.type === 'oauth')
-            const hasApi = opts.some((o) => o.type === 'api')
-            if (hasOauth && !hasApi) {
-              billingType = 'subscription'
-            } else {
-              billingType = 'apiKey'
-            }
-          }
-
-          map[vendorId] = { authState, billingType }
-        }
-
-        // Add any configured providers not in the auth catalog (e.g. custom).
-        // A stored credential still decides the billing type — same rule as
-        // above, so a custom gateway with an API key is not read as 'unknown'.
-        for (const p of configResp.providers ?? []) {
-          if (!map[p.id]) {
-            const stored = credentialTypes[p.id]
-            map[p.id] = {
-              authState: 'authenticated',
-              billingType: stored ? (stored === 'oauth' ? 'subscription' : 'apiKey') : 'unknown'
-            }
-          }
-        }
-
-        return map
-      } finally {
-        opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
+        map[vendorId] = { authState, billingType }
       }
+      for (const integration of integrations) entry(integration.id, integration)
+      for (const providerId of usable.keys()) if (!map[providerId]) entry(providerId, undefined)
+      return map
     } catch (err) {
-      logger.warn(
-        'OpencodeAuth',
-        `probe() failed (opencode optional): ${err instanceof Error ? err.message : String(err)}`
-      )
+      logger.warn('OpencodeAuth', `probe() failed (opencode optional): ${errText(err)}`)
       return {}
     }
   }
-
-  // -------------------------------------------------------------------------
-  // Per-vendor auth methods (EngineAuthProvider extension — Phase 5c)
-  // -------------------------------------------------------------------------
 
   async listVendorAuthOptions(): Promise<Record<string, VendorAuthOption[]>> {
     try {
-      const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, NO_TURN)
-      const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
-      try {
-        const catalog = await client.getProviderAuth()
-        // Cast the raw AuthOption[] to VendorAuthOption[] (shapes are compatible)
-        return catalog as unknown as Record<string, VendorAuthOption[]>
-      } finally {
-        opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
+      const integrations = await this.withClient((client) => client.integrations())
+      const out: Record<string, VendorAuthOption[]> = {}
+      for (const integration of integrations) {
+        const options = offeredMethods(integration).map(authOption)
+        if (options.length > 0) out[integration.id] = options
       }
+      return out
     } catch (err) {
-      logger.warn(
-        'OpencodeAuth',
-        `listVendorAuthOptions() failed: ${err instanceof Error ? err.message : String(err)}`
-      )
+      logger.warn('OpencodeAuth', `listVendorAuthOptions() failed: ${errText(err)}`)
       return {}
     }
   }
 
+  /**
+   * Vend `key` as ClaudeUI's `cred_claudeui_<vendor>_v<n>` and make it active.
+   * The same key already vended writes nothing (the shared-provider sync
+   * re-vends every key at boot).
+   */
   async setVendorApiKey(vendorId: string, key: string): Promise<void> {
-    // The same key already stored: nothing to write, so no server to start, no
-    // cache to drop and no pool to recycle. The shared-provider sync re-vends
-    // every key at each boot, and the invalidation alone killed the model probe
-    // in flight. `{ type: 'api', key }` is the entry opencode's own `Auth.set`
-    // stores for this PUT — it replaces the entry wholesale.
-    if (await opencodeAuthEntryEquals(vendorId, { type: 'api', key })) return
-    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, NO_TURN)
-    const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
-    let mutated = false
-    try {
-      await client.setAuth(vendorId, { type: 'api', key })
-      this.invalidateCache()
-      invalidateOpencodeModelCache()
-      mutated = true
-    } finally {
-      opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
-      // Only on success, and only after our own ref is gone (recycleAll kills
-      // regardless of refcount — releasing first keeps the bookkeeping honest).
-      if (mutated) opencodeServerManager.recycleAll()
-    }
+    await opencodeCredentialStore.vendKey(vendorId, key)
   }
 
   /**
-   * Which vendor ids currently have stored credentials — a READ-ONLY peek at
-   * opencode's own auth.json (no server spawn; cheap file read).
-   *
-   * Why not probe()/config-providers: opencode has no endpoint to read stored
-   * credentials (only PUT/DELETE /auth/{id}), and GET /config/providers reports
-   * a custom provider as "configured" the moment it's declared in opencode.json —
-   * with or without a key — so the auth store file is the only truthful source.
-   *
-   * Returns ONLY `{ vendorId: 'api' | 'oauth' }` — never key/token material.
-   * Missing or unparseable file → {} (opencode optional).
+   * Which vendors have an active credential, and of what type — the row
+   * opencode uses, ClaudeUI's or the user's. Never key material.
    */
   async listVendorCredentialIds(): Promise<Record<string, 'api' | 'oauth'>> {
-    return readOpencodeCredentialTypes()
+    return credentialTypes(
+      await opencodeCredentialStore.snapshot().catch(() => opencodeCredentialStore.cachedSnapshot())
+    )
+  }
+
+  /** Vendors where ClaudeUI holds an API-key row it can remove (`cred_claudeui_*`). */
+  async listRemovableVendorIds(): Promise<Set<string>> {
+    // ClaudeUI's own record: no server needed.
+    return opencodeCredentialStore.recordedKeyIntegrations()
   }
 
   async oauthAuthorize(
@@ -264,214 +191,139 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
     method: number,
     inputs?: Record<string, string>
   ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }> {
-    // Drop any stale hold from an abandoned prior flow, then acquire a ref we
-    // intentionally do NOT release here — oauthCallback / cancelVendorOauth owns
-    // its teardown. This keeps the authorize-time server (loopback + PKCE state)
-    // alive until the flow completes.
-    this.releaseOauthHold()
+    await this.cancelVendorOauth()
     const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, NO_TURN)
-    this.oauthHold = { released: false }
-    const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
+    const client = new OpencodeClient(conn)
     try {
-      return await client.oauthAuthorize(vendorId, method, inputs)
+      const integration = (
+        await client.call('integration.get', { params: { integrationID: vendorId } })
+      ).data
+      const chosen = offeredMethods(integration)[method]
+      if (!chosen || chosen.type !== 'oauth')
+        throw new Error(`opencode offers no OAuth method #${method} for ${vendorId}`)
+      const attempt = (
+        await client.call('integration.oauth.connect', {
+          params: { integrationID: vendorId },
+          body: {
+            methodID: chosen.id,
+            ...(inputs && Object.keys(inputs).length > 0 ? { answer: inputs } : {})
+          }
+        })
+      ).data
+      const expires = Number(attempt.time.expires)
+      this.oauthHold = {
+        conn,
+        client,
+        vendorId,
+        attemptID: attempt.attemptID,
+        mode: attempt.mode,
+        expires: Number.isFinite(expires) ? expires : Date.now() + 10 * 60_000,
+        released: false
+      }
+      return { url: attempt.url, method: attempt.mode, instructions: attempt.instructions }
     } catch (err) {
-      // authorize failed → no callback will come; release immediately.
-      this.releaseOauthHold()
+      opencodeServerManager.releaseIfCurrent(PERSISTED_SESSIONS_DIR, conn)
       throw err
     }
   }
 
-  async oauthCallback(vendorId: string, method: number, code?: string): Promise<boolean> {
-    // acquire() returns the SAME server the oauthAuthorize hold is keeping alive
-    // (same PERSISTED_SESSIONS_DIR key), so the callback runs against the process
-    // that owns the loopback + PKCE state. With no active hold (stale/duplicate
-    // call) this spawns a fresh server with no pending flow — it fails with
-    // ProviderAuthOauthMissing, the correct outcome for an orphan callback.
-    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, NO_TURN)
-    const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
-    let mutated = false
+  /**
+   * Finish the attempt `oauthAuthorize` started: submit the pasted code, or
+   * wait for the browser/device flow to complete. The row opencode stores is
+   * opencode's own sign-in.
+   */
+  async oauthCallback(vendorId: string, _method: number, code?: string): Promise<boolean> {
+    const hold = this.oauthHold
+    if (!hold || hold.vendorId !== vendorId) return false
     try {
-      const result = await client.oauthCallback(vendorId, method, code)
+      const params = { integrationID: vendorId, attemptID: hold.attemptID }
+      if (code !== undefined && code !== '') {
+        await hold.client.call('integration.oauth.complete', { params, body: { code } })
+      } else {
+        for (;;) {
+          if (hold.released) return false
+          const status = (await hold.client.call('integration.oauth.status', { params })).data
+          if (status.status === 'complete') break
+          if (status.status === 'failed') throw new Error(status.message)
+          if (status.status === 'expired' || Date.now() > hold.expires) return false
+          await sleep(OAUTH_POLL_MS)
+        }
+      }
       this.invalidateCache()
       invalidateOpencodeModelCache()
-      // `false` means the flow did not complete — auth.json is unchanged, so
-      // there is nothing stale to recycle for.
-      mutated = result
-      return result
+      await opencodeCredentialStore.snapshot().catch(() => null)
+      return true
     } finally {
-      // Release this call's ref, then the authorize-time hold (flow is over).
-      opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
       this.releaseOauthHold()
-      if (mutated) opencodeServerManager.recycleAll()
     }
   }
 
-  /**
-   * Abandon an in-flight OAuth flow: release the held server ref. If this drops
-   * the last ref the process is killed, which makes any pending oauthCallback
-   * long-poll reject (connection reset) instead of hanging forever.
-   */
+  /** Abandon an in-flight OAuth attempt and release the server it lives in. */
   async cancelVendorOauth(): Promise<void> {
+    const hold = this.oauthHold
+    if (!hold || hold.released) return
+    await hold.client
+      .call('integration.oauth.cancel', {
+        params: { integrationID: hold.vendorId, attemptID: hold.attemptID }
+      })
+      .catch(() => {})
     this.releaseOauthHold()
   }
 
+  /**
+   * Remove ClaudeUI's API key for this vendor (its `cred_claudeui_*` rows) and
+   * give the slot back to the user's previously active credential. A sign-in
+   * made in opencode (also one made through its OAuth flow here) is opencode's
+   * and stays. Without opencode installed, the removal waits for it.
+   */
   async removeVendorAuth(vendorId: string): Promise<void> {
-    // No entry to remove: no server to start, no cache to drop, no pool to
-    // recycle, and no removal to log. The shared-provider sync removes the key
-    // of every provider whose opencode route is off at each boot, mostly where
-    // there never was one. An unreadable file is not "absent" — it takes the
-    // server path as before.
-    if (await opencodeAuthEntryEquals(vendorId, undefined)) return
-    // See PiAuthProvider.removeVendorAuth: a removal always leaves a trace.
-    logger.info('OpencodeAuth', `removing ${vendorId} from auth.json (${removalCaller()})`)
-    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, NO_TURN)
-    const client = new OpencodeV1Client(conn.baseUrl, conn.authHeader)
-    let mutated = false
-    try {
-      await client.removeAuth(vendorId)
-      this.invalidateCache()
-      invalidateOpencodeModelCache()
-      mutated = true
-    } finally {
-      opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
-      if (mutated) opencodeServerManager.recycleAll()
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // CredentialSync feed target (M6b) — implements vault/CredentialSync.ts's
-  // structural `CodexFeedTarget` interface (type-only import above; no
-  // runtime dependency on CredentialSync.ts, which is what would otherwise
-  // cycle back through PiAuthProvider.ts → CredentialSync.ts).
-  //
-  // Writes DIRECTLY to auth.json (fs RMW), bypassing the `PUT /auth/{id}`
-  // HTTP path every other mutation in this file uses. Why: that path only
-  // exists inside a spawned opencode server process (see oauthAuthorize's own
-  // comment on why the server must be held open across authorize→callback);
-  // spawning one just to relay a file write is unnecessary — opencode reads
-  // auth.json natively off disk on its OWN process start, so a direct file
-  // write is both simpler and correct for what this feed needs.
-  //
-  // LIVE-SERVER STALENESS: opencode builds its provider map ONCE per process
-  // and never watches auth.json, so any server already running when a
-  // credential changes keeps its stale map until it restarts. There is no
-  // "reload auth.json" signal to send — only a process recycle. The two
-  // mutation paths in this file deliberately differ:
-  //
-  //   - USER-INITIATED mutations (setVendorApiKey / oauthCallback /
-  //     removeVendorAuth) call opencodeServerManager.recycleAll() on success.
-  //     The user just asked for the change, and attached sessions self-heal
-  //     (exit fan-out → markDisconnected → next prompt re-acquires a fresh
-  //     server), so tearing the pool down is the right trade there.
-  //
-  //   - THIS FEED does NOT recycle. It fires on CredentialSync's background
-  //     refresh timer, at moments the user never chose; killing whatever
-  //     sessions happen to be mid-turn is worse than the edge it would fix.
-  //     The timer keeps the ON-DISK copy valid well before actual expiry, so
-  //     any FRESH server start always finds a good credential. The one case
-  //     left is a live server mid-session using a credential this feed just
-  //     rotated out from under it — it can 401 until its next restart.
-  //     Accepted, not solved here.
-  // -------------------------------------------------------------------------
-
-  /** opencode's auth.json absolute path — CredentialSync derives its fs.watch dir + filename filter from this. */
-  authFilePath(): string {
-    return resolveOpencodeAuthJsonPath()
-  }
-
-  /** RMW-merge a Codex OAuth credential into auth.json. Preserves every other vendor entry AND any unknown field already on this vendor's own entry. Persists `accountId` when known (unlike pi, which doesn't). */
-  async feedOauthCredential(vendorId: string, cred: CodexCredentialInput): Promise<void> {
-    const filePath = resolveOpencodeAuthJsonPath()
-
-    // Read-modify-write. readJsonFileForWrite returns {} for a MISSING file but
-    // THROWS (after a one-time backup) on a corrupt-but-present file, so this
-    // feed never overwrites a partially-written auth.json and deletes every
-    // other vendor's credential (H18/R2). The write is atomic (temp + rename),
-    // which prevents that mid-write truncation in the first place (R1).
-    const file = readJsonFileForWrite(filePath)
-
-    const existing = file[vendorId]
-    const entry: Record<string, unknown> = {
-      ...(existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {}),
-      type: 'oauth',
-      refresh: cred.refresh,
-      access: cred.access,
-      expires: cred.expires
-    }
-    if (cred.accountId) entry.accountId = cred.accountId
-    // Re-fed at every boot (and on every resync): the same credential is no
-    // change, and invalidating the model cache for it killed the probe in flight.
-    // Compared with the file as read just now, never a remembered copy: opencode
-    // rewrites this entry itself when it refreshes, and that is a difference.
-    if (deepEqual(entry, existing)) return
-    file[vendorId] = entry
-
-    writeJsonAtomic(filePath, file, { indent: 2 })
-
-    this.invalidateCache()
-    invalidateOpencodeModelCache()
-  }
-
-  /**
-   * Delete one vendor's entry from auth.json DIRECTLY, without opencode's
-   * server — for while opencode does not run (ADR-082 §8, "As built (S7d)"),
-   * when there is no process whose in-memory provider map could go stale, and
-   * starting one just to relay a file edit is what the feed above avoids too.
-   * While opencode runs, removals keep the server path (`removeVendorAuth`),
-   * which recycles the live processes.
-   *
-   * The feed's read-modify-write discipline: an unreadable or non-object file
-   * is refused (backed up once, then this throws) rather than overwritten;
-   * every other vendor entry and every unknown field survive; an absent file
-   * or entry writes nothing and creates nothing.
-   */
-  async removeVendorAuthDirect(vendorId: string): Promise<void> {
-    const filePath = resolveOpencodeAuthJsonPath()
-    const file = readJsonFileForWrite(filePath)
-    if (!(vendorId in file)) return
-    // A removal destroys a credential ClaudeUI cannot restore: always leave a
-    // trace, the vendor id and the call site, never the key.
-    logger.info(
-      'OpencodeAuth',
-      `removing ${vendorId} from auth.json directly, opencode not running (${removalCaller()})`
+    // A removal always leaves a trace: the vendor and the call site, never the key.
+    await opencodeCredentialStore.removeSlot(
+      vendorId,
+      'key',
+      `remove ${vendorId} (${removalCaller()})`
     )
-    delete file[vendorId]
-    writeJsonAtomic(filePath, file, { indent: 2 })
-    this.invalidateCache()
-    invalidateOpencodeModelCache()
   }
 
-  /** Read this vendor's current OAuth entry — used by CredentialSync's fs-watch resync to detect an engine-initiated rotation. Null if absent, non-oauth, or malformed. */
-  async readOauthEntry(vendorId: string): Promise<CodexEntrySnapshot | null> {
-    try {
-      const raw = await fs.promises.readFile(resolveOpencodeAuthJsonPath(), 'utf-8')
-      const parsed: unknown = JSON.parse(raw)
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
-      const entry = (parsed as Record<string, unknown>)[vendorId]
-      if (!entry || typeof entry !== 'object') return null
-      const e = entry as Record<string, unknown>
-      if (e.type !== 'oauth') return null
-      if (
-        typeof e.access !== 'string' ||
-        typeof e.refresh !== 'string' ||
-        typeof e.expires !== 'number'
-      )
-        return null
-      const accountId = typeof e.accountId === 'string' ? e.accountId : undefined
-      return { access: e.access, refresh: e.refresh, expires: e.expires, accountId }
-    } catch {
-      return null
-    }
+  // ── CredentialSync's ChatGPT target (structural `OpencodeChatgptTarget`) ─────
+
+  /** Vend the active ChatGPT account: access-only, padded expiry, rotate-by-replace (§5). */
+  async vendChatgpt(
+    cred: CodexCredentialInput,
+    isClaudeuiToken?: ClaudeuiTokenCheck
+  ): Promise<void> {
+    await opencodeCredentialStore.vendChatgpt(
+      { access: cred.access, expires: cred.expires, accountId: cred.accountId },
+      isClaudeuiToken
+    )
   }
 
-  // -------------------------------------------------------------------------
-  // Helpers for OpencodeSession.status.account
-  // -------------------------------------------------------------------------
+  /** Remove ClaudeUI's ChatGPT rows and give the `openai` slot back (§5). */
+  async removeChatgpt(
+    context: string,
+    isClaudeuiToken?: ClaudeuiTokenCheck,
+    options: { vaultEmptying?: boolean } = {}
+  ): Promise<boolean> {
+    // The vault being emptied is an explicit disconnect: look even without
+    // ClaudeUI's record (it may have been lost), and let ClaudeUI's row go even
+    // if opencode then falls back to a copy. Every other removal keeps it then.
+    return opencodeCredentialStore.removeSlot(
+      CHATGPT_INTEGRATION_ID,
+      'oauth',
+      context,
+      isClaudeuiToken,
+      { force: options.vaultEmptying === true, vaultEmptying: options.vaultEmptying === true }
+    )
+  }
 
-  /**
-   * Build an AccountRef for the given vendor from the cached probe.
-   * Returns null if the probe hasn't run yet or the vendor isn't found.
-   */
+  /** What this process last vended (real expiry) — the pre-turn gate's input. */
+  vendedChatgpt(): VendedChatgpt | null {
+    return opencodeCredentialStore.vendedChatgpt()
+  }
+
+  // ── Session helpers ───────────────────────────────────────────────────────────
+
+  /** An AccountRef for the vendor from the cached probe; null before the first probe. */
   buildAccountRef(vendorId: string): AccountRef | null {
     const entry = this.cachedVendorMap?.[vendorId]
     if (!entry) return null
@@ -485,39 +337,47 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
   }
 
   /**
-   * Which ACCOUNT this vendor's turns run under (ADR-071 §3) — the key that
-   * identifies the same subscription on every machine, plus a display label.
-   *
-   * Returns nothing else: no token, no key, no claim dump. Synchronous because
-   * a usage row is written from a synchronous path. An unreadable auth.json
-   * gives `opencode:<vendor>:native`, which is the honest answer, not an error.
+   * Which ACCOUNT this vendor's turns run under (ADR-071 §3): the identity of
+   * the integration's active row as last read (identities only are cached),
+   * else `opencode:<vendor>:native`. Synchronous: usage rows are written from
+   * synchronous paths.
    */
   accountIdentity(vendorId: string): AccountIdentity {
-    return this.identityCache.identity(vendorId)
+    return (
+      opencodeCredentialStore.cachedSnapshot()?.integrations.get(vendorId)?.identity ?? {
+        accountKey: nativeAccountKey('opencode', vendorId),
+        accountLabel: vendorId
+      }
+    )
   }
 
-  /** Warm the probe cache eagerly (call at app start or on first opencode use). */
+  /** Warm the probe cache (session start). */
   async warmCache(): Promise<void> {
-    if (!this.cachedVendorMap) {
-      this.cachedVendorMap = await this.fetchVendorMap()
-    }
+    if (!this.cachedVendorMap) this.cachedVendorMap = await this.fetchVendorMap()
   }
 
-  // -------------------------------------------------------------------------
-  // Private
-  // -------------------------------------------------------------------------
+  // ── Private ─────────────────────────────────────────────────────────────────
 
   private invalidateCache(): void {
     this.cachedVendorMap = null
   }
 
-  /** Release the OAuth-flow server hold exactly once (idempotent). */
-  private releaseOauthHold(): void {
-    if (this.oauthHold && !this.oauthHold.released) {
-      this.oauthHold.released = true
-      opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
+  private async withClient<T>(read: (client: OpencodeClient) => Promise<T>): Promise<T> {
+    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, NO_TURN)
+    try {
+      return await read(new OpencodeClient(conn))
+    } finally {
+      opencodeServerManager.releaseIfCurrent(PERSISTED_SESSIONS_DIR, conn)
     }
-    this.oauthHold = null
+  }
+
+  private releaseOauthHold(): void {
+    const hold = this.oauthHold
+    if (hold && !hold.released) {
+      hold.released = true
+      opencodeServerManager.releaseIfCurrent(PERSISTED_SESSIONS_DIR, hold.conn)
+    }
+    if (this.oauthHold === hold) this.oauthHold = null
   }
 }
 

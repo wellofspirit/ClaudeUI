@@ -98,6 +98,7 @@ import { opencodeCostInputs, resolveOpencodeCosts, type OpencodeCostInputs } fro
 import { opencodeV2HistorySeed, type OpencodeHistoryTokens } from './history-status-line'
 import { logger } from '../services/logger'
 import { authErrorTranscriptMessage } from '../services/api-error'
+import { opencodeAuthHooks } from './opencode-auth-hooks'
 import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import { BashStreamGate } from './bash-stream-gate'
 import { discoverOpencodeSkills } from './command-skill-discovery'
@@ -407,6 +408,8 @@ export class OpencodeSession extends BaseSession {
   private replayInFlight: Promise<void> | null = null
   private replayedSessionId: string | null = null
   private resumeSessionId: string | undefined
+  /** The last turn was held before sending for a ChatGPT sign-in (ADR-093 §5). */
+  private authHeld = false
 
   constructor(
     routingId: string,
@@ -538,9 +541,20 @@ export class OpencodeSession extends BaseSession {
 
     this.endUserStop()
     this.isProcessing = true
+    this.authHeld = false
     this.sendStatus()
 
-    const establishing = this.establishSession()
+    // ADR-093 §5 rule 2: a ChatGPT turn goes only on a token with time left.
+    // Inside the establishing window, so a prompt queued meanwhile waits for
+    // the answer (and is never posted ahead of this turn's prompt).
+    const gate: { notice: string | null } = { notice: null }
+    const establishing = this.establishSession().then(async () => {
+      if (!this.client || this._cancelled || !this.openSessionId) return
+      gate.notice = await opencodeAuthHooks()
+        .beforeTurn(this.modelRef().providerID)
+        .catch(() => null)
+      if (gate.notice !== null) this.authHeld = true
+    })
     this.establishingPromise = establishing
     try {
       await establishing
@@ -549,6 +563,10 @@ export class OpencodeSession extends BaseSession {
         if (!this.conn) this.disconnected = true
         this.sendStatus()
         this.resetInactivityTimer()
+        return
+      }
+      if (gate.notice !== null) {
+        this.holdForAuth(gate.notice)
         return
       }
       this.startTimeMs = Date.now()
@@ -562,8 +580,9 @@ export class OpencodeSession extends BaseSession {
       this.resetInactivityTimer()
     } finally {
       this.establishingPromise = null
-      // Items queued during the connect window go to the inbox now.
-      void this.flushQueuedItems()
+      // Items queued during the connect window go to the inbox now — not
+      // while the turn is held for a ChatGPT sign-in: they would start one.
+      if (!this.authHeld) void this.flushQueuedItems()
     }
   }
 
@@ -865,6 +884,9 @@ export class OpencodeSession extends BaseSession {
         // (a claim kept by a shutdown) and its pending asks show without a prompt.
         if (this.openSessionId && !this._cancelled) await this.ensureFeed()
       }
+      // On ClaudeUI's own (global) server, never this session's: project
+      // config must not leak into the global catalog. With the same config it
+      // is this very server (one per config, S2), and it lingers after reads.
       await discoverOpencodeModels().catch(() => [])
       const nextCaps = this.resolveCapsForModel()
       if (
@@ -1107,11 +1129,26 @@ export class OpencodeSession extends BaseSession {
         // status leaves `running` (the reducer captures the retry while running).
         const providerId = opencodeAuthRequiredProviderId(o.vendorId)
         this.send('session:auth-required', { providerId, message: o.message })
+        // §5 rule 3: refresh and rotate now (the vault decides whether it is ours).
+        opencodeAuthHooks().authFailed(o.vendorId)
         this.rememberAndSend(authErrorTranscriptMessage(uuid(), o.message, providerId))
         this.endTurn(o.durationMs, o.sessionId)
         return
       }
     }
+  }
+
+  /**
+   * A turn held before it was sent (§5 rule 2): the same auth notice a failed
+   * turn gives, BEFORE the status leaves running, and nothing is posted.
+   */
+  private holdForAuth(message: string): void {
+    const providerId = opencodeAuthRequiredProviderId(this.modelRef().providerID)
+    this.send('session:auth-required', { providerId, message })
+    this.rememberAndSend(authErrorTranscriptMessage(uuid(), message, providerId))
+    this.isProcessing = false
+    this.sendStatus()
+    this.resetInactivityTimer()
   }
 
   private itemKey(target: ItemStreamTarget): string {
@@ -1215,6 +1252,8 @@ export class OpencodeSession extends BaseSession {
 
   private async postQueuedItem(item: QueuedItem): Promise<void> {
     if (this.establishingPromise) await this.establishingPromise.catch(() => {})
+    // Held for a ChatGPT sign-in (§5 rule 2): it stays queued for the next prompt.
+    if (this.authHeld) return
     if (item.state !== 'queued' || this.queue.isForwarded(item)) return
     if (!this.client || !this.openSessionId) return // the next connect flushes it
     const inboxID = newInboxId()

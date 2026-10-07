@@ -55,6 +55,10 @@ import { scanCodexLineage } from '../codex/history'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { fedTokenHistory } from '../auth/vault/fed-token-history'
+import { opencodeCredentialStore } from '../opencode/opencode-credentials'
+import { fileSlotMemory } from '../opencode/credential-store'
+import { setOpencodeAuthHooks } from '../opencode/opencode-auth-hooks'
+import { OPENCODE_CODEX_VENDOR_ID } from '../auth/vault/CredentialSync'
 import { usageHubClient } from '../services/usage-hub/client'
 import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
 import { emitEvent } from '../services/sync-host'
@@ -269,6 +273,24 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     // out a stale copy of its own too (ADR-082 §8, S7e). The file, here, for
     // both hosts; the class defaults to memory so its tests touch no home.
     fedTokens: fedTokenHistory()
+  })
+
+  // opencode 2.x credentials (ADR-093 §5). ClaudeUI's record of the slots it
+  // holds in opencode's credential table — the file, here, for both hosts (the
+  // store defaults to memory so its tests touch no home). Then the session's
+  // two meeting points with the vault: the pre-turn gate and the recovery
+  // after a `provider.auth` turn, for opencode's ChatGPT integration only.
+  opencodeCredentialStore.configure({
+    memory: fileSlotMemory(),
+    // Copy recognition lives in the store, so no vend or removal bypasses it.
+    isClaudeuiToken: (refresh) => credentialSync.isClaudeuiRefreshToken(refresh)
+  })
+  setOpencodeAuthHooks({
+    beforeTurn: async (providerID) =>
+      providerID === OPENCODE_CODEX_VENDOR_ID ? credentialSync.opencodeTurnGate() : null,
+    authFailed: (providerID) => {
+      if (providerID === OPENCODE_CODEX_VENDOR_ID) void credentialSync.opencodeAuthFailed()
+    }
   })
 
   // THE USAGE HUB (ADR-072 §7), after the credential wiring and not before it.

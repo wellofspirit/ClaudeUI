@@ -2,7 +2,8 @@
  * Localhost model provider for the opencode 2.x contract suite: an
  * OpenAI-compatible `chat.completions` streamer, scripted by markers in the
  * last user message, plus a Responses-API answer under `/upstream/…` for
- * ChatGPT requests the redirect plugin rewrites. In-process; records every
+ * ChatGPT requests the redirect plugin rewrites (401 for a bearer ending in
+ * `.fake-expired`). In-process; records every
  * request so tests can assert what the MODEL saw.
  *
  * Markers (last user text):
@@ -191,6 +192,14 @@ export async function startFixtureProvider(
           authorization,
           account: typeof account === 'string' ? account : null
         })
+        // A bearer tagged `.fake-expired` is what chatgpt.com answers a really
+        // expired token with (S7: the padded row never refreshes, so the
+        // rejection is the signal).
+        if (authorization?.endsWith('.fake-expired')) {
+          res.writeHead(401, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: { message: 'token expired', code: 'token_expired' } }))
+          return
+        }
         respondResponsesApi(res)
         return
       }

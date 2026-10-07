@@ -6,8 +6,9 @@
  * harness gets it once it arrives.
  *
  * SAFETY: no refresh runs here (every credential is far from expiry and the
- * refresher is an injected fake), the vault is in memory, and the feed targets
- * are spies over a temp directory — never `~/.pi` or a real opencode data dir.
+ * refresher is an injected fake), the vault is in memory, pi's feed target is
+ * a spy over a temp directory — never `~/.pi` — and opencode 2.x is the real
+ * credential store over an in-memory credential table, never a real opencode.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -22,6 +23,7 @@ import {
   type VaultLike
 } from '../../../../core/auth/vault/CredentialSync'
 import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
+import { storeBackedOpencode } from './fixtures/fake-opencode-target'
 
 type Engine = 'pi' | 'opencode'
 
@@ -51,29 +53,25 @@ function setup(vaultCred: VaultCredential | null, running: Record<Engine, boolea
     },
     cancelLogin: () => {}
   }
-  /** A store per engine, so what a removal took out is really gone for the next read. */
-  const target = (engine: Engine) => {
+  /** pi's store, so what a removal took out is really gone for the next read. */
+  const piTarget = () => {
     const store = new Map<string, CodexEntrySnapshot>()
     const feed = vi.fn(async (vendorId: string, input: CodexEntrySnapshot) => {
       store.set(vendorId, input)
     })
     const read = vi.fn(async (vendorId: string) => store.get(vendorId) ?? null)
-    /** The server path (opencode) or pi's file edit. */
     const remove = vi.fn(async (vendorId: string) => void store.delete(vendorId))
-    /** opencode's direct file edit, for while it does not run. */
-    const removeDirect = vi.fn(async (vendorId: string) => void store.delete(vendorId))
     // An EXISTING directory, so a watcher would really be armed.
     const t: CodexFeedTarget = {
-      authFilePath: () => join(dir, `${engine}-auth.json`),
+      authFilePath: () => join(dir, 'pi-auth.json'),
       feedOauthCredential: feed,
       readOauthEntry: read,
-      removeVendorAuth: remove,
-      ...(engine === 'opencode' ? { removeVendorAuthDirect: removeDirect } : {})
+      removeVendorAuth: remove
     }
-    return { t, store, feed, read, remove, removeDirect }
+    return { t, store, feed, read, remove }
   }
-  const pi = target('pi')
-  const opencode = target('opencode')
+  const pi = piTarget()
+  const opencode = storeBackedOpencode(() => running.opencode)
   const sync = new CredentialSync({
     vault,
     refreshAccessToken: async () => {
@@ -81,7 +79,7 @@ function setup(vaultCred: VaultCredential | null, running: Record<Engine, boolea
     },
     harnessRuns: (engine) => running[engine]
   })
-  sync.configure({ pi: pi.t, opencode: opencode.t })
+  sync.configure({ pi: pi.t, opencode: opencode.target })
   const watching = (engine: Engine): boolean =>
     (sync as unknown as { watchers: Map<Engine, unknown> }).watchers.has(engine)
   return { sync, state, pi, opencode, running, watching }
@@ -95,8 +93,10 @@ describe('the ChatGPT feed and a harness that does not run (ADR-082 §8, S7d)', 
     expect(h.pi.feed).not.toHaveBeenCalled()
     expect(h.pi.read).not.toHaveBeenCalled()
     expect(h.opencode.feed).toHaveBeenCalledWith(OPENCODE_CODEX_VENDOR_ID, expect.anything())
+    expect(h.opencode.held()).toBe('access-r1')
     expect(h.watching('pi')).toBe(false)
-    expect(h.watching('opencode')).toBe(true)
+    // opencode 2.x has no auth file to watch (ADR-093 §5).
+    expect(h.watching('opencode')).toBe(false)
     h.sync.stop()
   })
 
@@ -136,33 +136,36 @@ describe('the ChatGPT feed and a harness that does not run (ADR-082 §8, S7d)', 
     h.sync.stop()
   })
 
-  it('a disconnect takes both copies out at once: opencode’s as a file edit while it does not run', async () => {
+  it('a disconnect takes pi’s copy out at once and records opencode’s, which goes when opencode can run', async () => {
     const h = setup(cred('r1'), { pi: false, opencode: false })
     h.pi.store.set(PI_CODEX_VENDOR_ID, cred('r1'))
-    h.opencode.store.set(OPENCODE_CODEX_VENDOR_ID, cred('r1'))
+    await h.opencode.holdsOurs('r1')
 
     await h.sync.disconnectChatgpt()
 
     // pi's auth.json is a file edit whether or not pi runs.
     expect(h.pi.remove).toHaveBeenCalledWith(PI_CODEX_VENDOR_ID)
-    // opencode's server path is not taken while it does not run.
-    expect(h.opencode.remove).not.toHaveBeenCalled()
-    expect(h.opencode.removeDirect).toHaveBeenCalledWith(OPENCODE_CODEX_VENDOR_ID)
-    expect(h.opencode.store.size).toBe(0)
     expect(h.pi.store.size).toBe(0)
+    // opencode 2.x: no server without opencode — the removal waits in
+    // ClaudeUI's record, and runs before the next operation once it can.
+    expect(h.opencode.remove).toHaveBeenCalledWith(OPENCODE_CODEX_VENDOR_ID)
+    expect(h.opencode.ours()).toHaveLength(1)
+    h.running.opencode = true
+    await h.sync.harnessArrived('opencode')
+    expect(h.opencode.ours()).toEqual([])
   })
 
-  it('opencode running: the disconnect takes its server path', async () => {
+  it('opencode running: the disconnect removes ClaudeUI’s rows at once', async () => {
     const h = setup(cred('r1'), { pi: true, opencode: true })
-    h.opencode.store.set(OPENCODE_CODEX_VENDOR_ID, cred('r1'))
+    await h.opencode.holdsOurs('r1')
     await h.sync.disconnectChatgpt()
     expect(h.opencode.remove).toHaveBeenCalledWith(OPENCODE_CODEX_VENDOR_ID)
-    expect(h.opencode.removeDirect).not.toHaveBeenCalled()
+    expect(h.opencode.ours()).toEqual([])
   })
 
   it('a copy disconnected while opencode did not run is gone: nothing adopts it back', async () => {
     const h = setup(cred('r1'), { pi: false, opencode: false })
-    h.opencode.store.set(OPENCODE_CODEX_VENDOR_ID, cred('r1'))
+    await h.opencode.holdsOurs('r1')
     await h.sync.disconnectChatgpt()
 
     // A restart with opencode installed: the vault is empty, so reconcile would
@@ -170,6 +173,7 @@ describe('the ChatGPT feed and a harness that does not run (ADR-082 §8, S7d)', 
     h.running.opencode = true
     await h.sync.start()
     expect(h.state.current).toBeNull()
+    expect(h.opencode.ours()).toEqual([])
     h.sync.stop()
   })
 })

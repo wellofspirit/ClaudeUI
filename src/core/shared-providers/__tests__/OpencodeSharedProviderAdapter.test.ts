@@ -68,7 +68,7 @@ function setup(current: NativeOpencodeFields = {}, modelAllowlist: Record<string
   const invalidateModelCache = vi.fn()
   const authTarget: OpencodeSharedProviderAuthTarget = {
     setVendorApiKey: vi.fn(async () => {}),
-    feedOauthCredential: vi.fn(async () => {}),
+    vendChatgpt: vi.fn(async () => {}),
     removeVendorAuth: vi.fn(async () => {})
   }
   return {
@@ -261,7 +261,7 @@ describe('OpencodeSharedProviderAdapter', () => {
 
     await adapter.vendOauthCredential(chatgpt, { access: 'a', refresh: 'r', expires: 1 })
     await adapter.removeCredential(chatgpt)
-    expect(authTarget.feedOauthCredential).toHaveBeenCalledWith('openai', {
+    expect(authTarget.vendChatgpt).toHaveBeenCalledWith({
       access: 'a',
       refresh: 'r',
       expires: 1
@@ -280,7 +280,7 @@ describe('OpencodeSharedProviderAdapter', () => {
       adapter.vendOauthCredential(definition, { access: 'a', refresh: 'r', expires: 1 })
     ).rejects.toThrow(/API-key/)
     expect(authTarget.setVendorApiKey).not.toHaveBeenCalled()
-    expect(authTarget.feedOauthCredential).not.toHaveBeenCalled()
+    expect(authTarget.vendChatgpt).not.toHaveBeenCalled()
     expect(invalidateModelCache).not.toHaveBeenCalled()
   })
 
@@ -354,7 +354,7 @@ describe('OpencodeSharedProviderAdapter', () => {
         writeConfig: vi.fn(),
         authTarget: {
           setVendorApiKey: vi.fn(async () => {}),
-          feedOauthCredential: vi.fn(async () => {}),
+          vendChatgpt: vi.fn(async () => {}),
           removeVendorAuth: vi.fn(async () => {})
         },
         invalidateModelCache: vi.fn(),

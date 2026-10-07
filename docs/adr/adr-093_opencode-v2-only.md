@@ -322,6 +322,85 @@ since quit restores their credential), sees a later expiry than the real one.
 - `GET /api/credential` returns secrets to the password holder only. The password is scrubbed from
   the engine's tools.
 
+**As built (S7, 2026-10-07).**
+
+- **One owner of ClaudeUI's rows.** `OpencodeCredentialStore` (`core/opencode/credential-store.ts`,
+  singleton in `opencode-credentials.ts` on the pooled server for ClaudeUI's own directory, a lease
+  per operation, operations serialized) is the only writer. A slot is (integration, value type):
+  keys `cred_claudeui_<integration>_v<n>` (label `claudeui:key`), ChatGPT
+  `cred_claudeui_<account>_v<n>` (label `claudeui:chatgpt`, stems lowercased to `[a-z0-9-]`). A vend
+  lists, re-activates a matching row or POSTs the next generation `activate:true`, THEN deletes
+  every other generation of the slot — so any vend (boot included) also prunes what a crash between
+  POST and DELETE left. Nothing else is ever deleted, rotated or relabelled.
+- **ClaudeUI's record** (`~/.claude/ui/opencode-credential-slots.json`, ids and flags only, 0600,
+  wired at the boot seam; memory in tests): each slot ClaudeUI may hold, written before the POST,
+  with the non-ClaudeUI row it displaced (`previousActive`). Removal re-activates that row FIRST
+  (opencode's delete-of-active promotes the newest row), but only when ClaudeUI held the slot (a
+  user sign-in that took it later stays active); a later user sign-in is logged and re-taken by
+  the next vend, which then remembers it. A removal of a slot never recorded starts no server
+  (the boot sweeps); an explicit disconnect looks anyway (`force`). With opencode not installed a
+  removal is recorded (`pendingRemoval`) and runs before the next store operation once it is —
+  ADR-082 S7d's "at once" as far as opencode allows; there is no file to edit any more. A corrupt
+  record file is moved aside (`.corrupt-<ms>`), logged, and rebuilt from the live
+  `cred_claudeui_*` rows; it never blocks a vend. Whether ClaudeUI holds a removable key is
+  answered from this record (no server). A ChatGPT vend older than the slot's row of the same
+  account (a gate's re-vend queued behind a refresh) is skipped.
+- **The imported copy of ClaudeUI's 1.x sign-in.** A non-ClaudeUI OAuth row whose refresh token
+  is the vault's or one ClaudeUI fed the 1.x `auth.json` (the fed-token history, now only READ for
+  opencode). Recognition lives IN the store (`isClaudeuiToken`, wired at the boot seam), so every
+  vend and removal — keys included — applies it: such a row is never remembered or restored, and
+  NO removal promotes it (review H1): when the row opencode would activate after the DELETE is a
+  copy, ClaudeUI's padded, never-refreshed row stays active and recorded instead — on quit, at
+  start, on a disabled route, on an arrival, for a pending removal. Only emptying the vault
+  (disconnect, last account removed) deletes it anyway and logs the fallback; the contract shows
+  opencode then tries to refresh the copy at once.
+- **ChatGPT.** `refresh:""`, `methodID:"chatgpt-browser"`, `metadata.accountID` (JWT claim when
+  the vault has none; refused without one), `expires` = JWT `exp` + 24 h. The process keeps the
+  token's REAL expiry (`vendedChatgpt`). CredentialSync: opencode is no longer watched, read at
+  start or adopted from, and records no fed tokens; `start` vends the active account (no
+  credential → removes ClaudeUI's rows); an expired token is never vended (the refresh that
+  follows vends). One expiry drives every opencode decision: the earlier of the JWT `exp` and the
+  vault's (`tokenExpiry`). `opencodeTurnGate` (wired through `opencode-auth-hooks.ts`, called
+  inside the session's establishing window so a queued item cannot overtake the turn) passes
+  with more than 15 min left, else refreshes (≤15 min left) or re-vends; a needs-sign-in account is not
+  refreshed; a token still expired after a failed refresh marks needs-sign-in; otherwise the turn
+  is held with `session:auth-required` and the reason, and nothing is posted, queued items
+  included. `provider.auth` on an `openai` turn → `opencodeAuthFailed` → immediate refresh +
+  rotate (60 s cooldown; not while in back-off or needing a sign-in). `powerMonitor`
+  resume/unlock → re-schedule healthy accounts from the wall clock (back-off and needs-sign-in
+  kept) + the gate. Graceful quit → `QuitCoordinator.prepareQuit` (bounded 4 s, before teardown;
+  a second quit meanwhile is vetoed): timers stop and nothing re-vends, then the slot is given
+  back (activate the user's row, delete inactive generations, the active one last — a cut leaves
+  a consistent state the next start finishes). Errors on every credential path are logged
+  redacted (`redact-secrets.ts`: bearers, JWTs, keys, secret JSON fields, long opaque runs;
+  capped).
+  Contract: an expired bearer that chatgpt.com rejects (401) surfaces as
+  `session.execution.failed {type:"provider.auth"}`, and a rotation recovers without a restart;
+  with padding off, a token inside opencode's 5-min window makes opencode CONNECT
+  auth.openai.com (refused) and the turn fail — with padding, zero attempts.
+- **OpencodeAuthProvider** reads `/api/integration` + `/api/provider` + the credential snapshot
+  (types, ownership and ADR-071 identities of each integration's ACTIVE row, never a value);
+  `listVendorCredentialIds` = active row types; Remove (provider manager, shared-provider removals)
+  deletes ClaudeUI's key rows only; OAuth sign-ins run on opencode's integration flows
+  (`integration.oauth.connect`, `.complete`, `.status`, `.cancel`), held on the server the
+  attempt lives in — the row it creates is opencode's, so ClaudeUI cannot remove it later (owner
+  decision pending). No `auth.json` read or write
+  (`auth-store.ts` deleted), no `recycleAll()` caller. ADR-074 §6 adoption reads opencode's ACTIVE
+  key rows in ONE credential list per pass (`batchedApiKeyReader`, 5 s memo dropped on any
+  ClaudeUI change; `NativeApiKeyReader` may answer asynchronously). Read-only leases (credential,
+  catalog, auth reads) leave the pooled server idle for `READ_LINGER_MS` (60 s) after the last
+  one, so a burst of reads starts one server.
+- **Discovery** (`model-discovery.ts`): one probe of `/api/integration` + `/api/provider` +
+  `/api/model`, always on ClaudeUI's own (global) server — eager connect too, so a project's
+  config never reaches the global catalog (with the same config it is the session's own server
+  anyway, one per config); an empty model list is re-read every 300 ms until
+  `modelListIsAuthoritative` (contract: a location the barrier did not warm answers 0 first), and
+  a warm, authoritative empty answer is kept 30 s (`EMPTY_CATALOG_TTL_MS`), never a cold one. Variants are the reasoning variants; free =
+  zen gateway with every cost tier zero (ChatGPT mode's `cost:[]` is not free); vision from
+  `capabilities.input`. The "add provider" catalog is the integration list; model counts exist for
+  usable providers only. The judge route accepts 2.x's
+  `@opencode/ai/providers/openai-compatible`.
+
 ### 6. Data dir (owner decision: shared)
 
 - ClaudeUI spawns 2.x on the user's default data dir: shared DB and sessions, as in 1.x. Config stays

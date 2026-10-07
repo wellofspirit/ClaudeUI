@@ -40,6 +40,20 @@
  * account and to no other. A `VaultLike` with no account methods is driven
  * exactly as before — one credential, one timer.
  *
+ * OPENCODE 2.x (ADR-093 §5). opencode no longer reads a file: ClaudeUI vends
+ * the active account into its credential table as an access-token-only row it
+ * owns by id (`OpencodeChatgptTarget`, the credential store behind it). There
+ * is nothing to adopt back (opencode cannot refresh a token without its
+ * refresh half) and nothing to watch, so opencode has no watcher, no
+ * reconcile-on-start read and no fed-token history of its own any more; the
+ * 1.x history is still READ, to recognise the copy of ClaudeUI's sign-in that
+ * opencode's migration imported from `auth.json`. In their place: a vend at
+ * start (prunes generations a crash left, re-asserts the active slot), the
+ * pre-turn gate ({@link CredentialSync.opencodeTurnGate}), the recovery after a
+ * `provider.auth` turn ({@link CredentialSync.opencodeAuthFailed}), a resync on
+ * system resume, and the slot handed back on quit
+ * ({@link CredentialSync.prepareQuit}).
+ *
  * HARD SAFETY NOTE (same as AuthVault.ts / codex-oauth.ts): no test may let
  * `refreshAccessToken` reach the real auth.openai.com — every scheduler test
  * injects a fake `refreshAccessToken`; every watcher test uses fake
@@ -50,8 +64,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { logger } from '../../services/logger'
 import { authVault, CHATGPT_PROVIDER_ID, type VaultAccount } from './AuthVault'
+import { redactSecrets } from '../../services/redact-secrets'
 import {
   buildVaultCredential,
+  parseJwtClaims,
   refreshAccessToken as defaultRefreshAccessToken,
   type TokenResponse,
   type VaultCredential
@@ -67,8 +83,15 @@ import type { AccountIdentity } from '../../../shared/account-key'
 
 /** pi's auth.json key for the Codex credential (PiAuthProvider.ts's PI_SUBSCRIPTION_VENDOR_IDS). */
 export const PI_CODEX_VENDOR_ID = 'openai-codex'
-/** opencode's auth.json key for the Codex credential — its ChatGPT-plugin provider id (recon-verified; NOT 'openai-codex'). */
+/** opencode's integration for the ChatGPT credential — its openai provider id (NOT 'openai-codex'). */
 export const OPENCODE_CODEX_VENDOR_ID = 'openai'
+
+/**
+ * After a `provider.auth` turn, how long before another one may trigger a
+ * refresh-and-rotate: a token the issuer keeps rejecting must not turn every
+ * failed turn into a token request.
+ */
+export const OPENCODE_AUTH_RECOVERY_COOLDOWN_MS = 60 * 1000
 
 /**
  * How long BEFORE `expires` the vault refreshes. The engines themselves only
@@ -157,8 +180,9 @@ export interface CodexEntrySnapshot {
 }
 
 /**
- * One engine's half of the feed-forward / resync loop. PiAuthProvider and
- * OpencodeAuthProvider each implement this (structurally — no import here).
+ * A file-backed engine's half of the feed-forward / resync loop — pi's
+ * (PiAuthProvider implements it structurally; no import here). opencode 2.x
+ * has no file: see {@link OpencodeChatgptTarget}.
  */
 export interface CodexFeedTarget {
   /** Absolute path to this engine's OWN auth-store file — used to derive the fs.watch dir + filename filter. */
@@ -171,10 +195,38 @@ export interface CodexFeedTarget {
   removeVendorAuth(vendorId: string): Promise<void>
   /**
    * The same removal as a direct file edit, for while the harness does not run
-   * (ADR-082 §8, S7d) — opencode's, whose `removeVendorAuth` goes through its
-   * server. Absent (pi, whose removal is a file edit already), `removeVendorAuth`.
+   * (ADR-082 §8, S7d). Absent (pi, whose removal is a file edit already),
+   * `removeVendorAuth`.
    */
   removeVendorAuthDirect?(vendorId: string): Promise<void>
+}
+
+/**
+ * opencode 2.x's half of the feed (ADR-093 §5) — `OpencodeAuthProvider`
+ * implements it structurally over the credential store. `isClaudeuiToken`
+ * recognises a refresh token ClaudeUI manages (the vault's, or one it fed the
+ * 1.x `auth.json`): such a row of the user's is a copy of ClaudeUI's sign-in,
+ * never remembered as theirs and never restored.
+ */
+export interface OpencodeChatgptTarget {
+  /** Vend the ACTIVE account (access-only, padded expiry, rotate-by-replace, active). */
+  vendChatgpt(
+    cred: CodexCredentialInput,
+    isClaudeuiToken: (refresh: string) => Promise<boolean>
+  ): Promise<void>
+  /**
+   * Remove ClaudeUI's ChatGPT rows and give the slot back; false when none were
+   * removed. `vaultEmptying` (disconnect, last account): ClaudeUI's row goes
+   * even when opencode then falls back to a copy of its sign-in; otherwise the
+   * store keeps it rather than let a copy become active.
+   */
+  removeChatgpt(
+    context: string,
+    isClaudeuiToken: (refresh: string) => Promise<boolean>,
+    options?: { vaultEmptying?: boolean }
+  ): Promise<boolean>
+  /** What this process last vended: the token and its REAL expiry. */
+  vendedChatgpt(): { access: string; realExpires: number } | null
 }
 
 export interface CodexEnabledRoutes {
@@ -290,8 +342,28 @@ function feedInput(cred: VaultCredential): CodexCredentialInput {
   }
 }
 
-function errMessage(err: unknown): string {
+function rawMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * An error for a LOG line: redacted and capped — a token endpoint's or
+ * opencode's error body may echo a token (classification reads the raw one).
+ */
+function errMessage(err: unknown): string {
+  return redactSecrets(rawMessage(err))
+}
+
+/**
+ * ONE expiry for every opencode decision (ADR-093 §5): the earlier of the
+ * access token's own `exp` and the vault's expiry for it — so the gate never
+ * finds a token "not fresh" that it would also not refresh.
+ */
+export function tokenExpiry(cred: { access: string; expires: number }): number {
+  const exp = (parseJwtClaims(cred.access) as { exp?: unknown } | undefined)?.exp
+  return typeof exp === 'number' && Number.isFinite(exp) && exp > 0
+    ? Math.min(exp * 1000, cred.expires)
+    : cred.expires
 }
 
 /**
@@ -314,7 +386,7 @@ function errMessage(err: unknown): string {
  * Exported for direct unit testing of the classification matrix.
  */
 export function isRefreshRevoked(err: unknown): boolean {
-  const message = errMessage(err)
+  const message = rawMessage(err)
   if (/invalid_grant/i.test(message)) return true
   const match = /failed:\s*(\d{3})/.exec(message)
   if (!match) return false
@@ -332,7 +404,11 @@ export class CredentialSync {
   private lifecycleGeneration = 0
 
   private piTarget: CodexFeedTarget | undefined
-  private opencodeTarget: CodexFeedTarget | undefined
+  private opencodeTarget: OpencodeChatgptTarget | undefined
+  /** When the last `provider.auth` recovery ran (cooldown). */
+  private lastAuthRecovery = Number.NEGATIVE_INFINITY
+  /** Set by prepareQuit: nothing re-vends while the slot is handed back. */
+  private quitting = false
 
   // -- scheduler state, PER ACCOUNT (ADR-068 §2) --
   private readonly runtimes = new Map<string, AccountRuntime>()
@@ -384,7 +460,7 @@ export class CredentialSync {
    */
   configure(targets: {
     pi?: CodexFeedTarget
-    opencode?: CodexFeedTarget
+    opencode?: OpencodeChatgptTarget
     getEnabledRoutes?: () => CodexEnabledRoutes
     onActiveAccountChanged?: () => void | Promise<void>
     onCredentialStored?: (accountId: string | undefined) => void
@@ -485,6 +561,13 @@ export class CredentialSync {
         `start: failed to remove one or more disabled credential copies: ${errMessage(err)}`
       )
     }
+    // opencode at start (ADR-093 §5 rule 4): a vend prunes every generation of
+    // ClaudeUI's a crash left and re-asserts the active slot; with no
+    // credential, whatever ClaudeUI left there goes.
+    if (this.isCurrent(generation)) {
+      if (cred && this.routes().opencode) await this.vendOpencode(feedInput(cred))
+      else if (!cred) await this.removeOpencode('start').catch(() => false)
+    }
     if (!cred || !this.isCurrent(generation)) return // empty vault + no engine credential — clean no-op
     await this.scheduleAll(cred)
     if (!this.isCurrent(generation)) return
@@ -578,11 +661,12 @@ export class CredentialSync {
     // legacy-vault recovery still reads it — it may be the only copy left.
     const reads = (engine: EngineKey): boolean =>
       includeDisabled || (routes[engine] && this.harnessRuns(engine))
+    // pi only: opencode 2.x holds ClaudeUI's access-only row (nothing to adopt)
+    // or the user's own sign-ins (never adopted — no sign-in import, §5).
     const snapshots = await Promise.all(
-      (['pi', 'opencode'] as const).map(async (engine) => {
+      (['pi'] as const).map(async (engine) => {
         if (!reads(engine)) return null
-        const { target, vendorId } = this.slot(engine)
-        const snap = await this.safeReadEntry(engine, target, vendorId)
+        const snap = await this.safeReadEntry(engine, this.piTarget, PI_CODEX_VENDOR_ID)
         return snap ? { ...snap, engine } : null
       })
     )
@@ -977,6 +1061,149 @@ export class CredentialSync {
   }
 
   // -------------------------------------------------------------------------
+  // opencode 2.x lifecycle (ADR-093 §5)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Whether opencode holds the active account's CURRENT token with more than
+   * {@link REFRESH_MARGIN_MS} left on its REAL expiry (the vended row's
+   * `expires` is padded; this reads what was vended, never the row).
+   */
+  private opencodeFresh(cred: VaultCredential): boolean {
+    const vended = this.opencodeTarget?.vendedChatgpt()
+    return (
+      !!vended &&
+      vended.access === cred.access &&
+      tokenExpiry(cred) - REFRESH_MARGIN_MS > this.now()
+    )
+  }
+
+  /** opencode is a route this class vends to now. */
+  private vendsOpencode(): boolean {
+    return (
+      !this.quitting &&
+      !!this.opencodeTarget &&
+      this.routes().opencode &&
+      this.harnessRuns('opencode')
+    )
+  }
+
+  /** The account is in a refresh back-off (retry or give-up) or needs a sign-in. */
+  private refreshHeld(key: string): boolean {
+    const runtime = this.runtimes.get(key)
+    return !!runtime && (runtime.needsReauth || runtime.giveUpCount > 0 || !!runtime.retryTimer)
+  }
+
+  /** Whether a refresh token is ClaudeUI's (the credential store's copy check, wired at boot). */
+  isClaudeuiRefreshToken(refresh: string): Promise<boolean> {
+    return this.claudeuiTokenCheck()(refresh)
+  }
+
+  /**
+   * The gate before an opencode turn on ChatGPT (§5 rule 2): opencode's row
+   * must hold the active account's token with more than 15 min left. If it
+   * does not, refresh (when the vault's token is due) or re-vend, first.
+   * Resolves `null` when the turn may go, else the notice to hold it with
+   * (offline, or the sign-in needs redoing). No ChatGPT credential in the
+   * vault: nothing of ClaudeUI's to check, the turn goes.
+   */
+  async opencodeTurnGate(): Promise<string | null> {
+    if (!this.vendsOpencode()) return null
+    const key = await this.readActiveKey()
+    let cred = await this.loadForKey(key)
+    if (!cred || this.opencodeFresh(cred)) return null
+    const signIn =
+      'Your ChatGPT sign-in has expired. Sign in to ChatGPT again in Settings, then resend your message.'
+    // A dead refresh token gets no further request (L3).
+    if (this.runtime(key).needsReauth) return signIn
+    // One expiry decides both "fresh?" and "refresh?" (M2).
+    if (tokenExpiry(cred) - REFRESH_MARGIN_MS <= this.now()) {
+      await this.runRefresh(key)
+      cred = await this.loadForKey(key)
+    } else {
+      await this.vendOpencode(feedInput(cred))
+    }
+    if (cred && this.opencodeFresh(cred)) return null
+    // Still expired after the refresh: never vended (L7) — a sign-in is due.
+    if (cred && tokenExpiry(cred) <= this.now()) {
+      this.runtime(key).needsReauth = true
+      logger.warn(
+        'CredentialSync',
+        'ChatGPT token expired and could not be refreshed — needs sign-in'
+      )
+    }
+    if (this.runtime(key).needsReauth) return signIn
+    return "ClaudeUI couldn't refresh your ChatGPT sign-in (are you offline?), so the message was not sent. Try again in a moment."
+  }
+
+  /**
+   * An opencode turn on ChatGPT failed `provider.auth` (§5 rule 3): refresh
+   * the active account now and rotate opencode's row, whatever its expiry says
+   * (a rejected token is the one fact that counts). Once per
+   * {@link OPENCODE_AUTH_RECOVERY_COOLDOWN_MS}; never throws.
+   */
+  async opencodeAuthFailed(): Promise<void> {
+    if (!this.vendsOpencode()) return
+    if (this.refreshHeld(await this.readActiveKey())) return
+    if (this.now() - this.lastAuthRecovery < OPENCODE_AUTH_RECOVERY_COOLDOWN_MS) return
+    this.lastAuthRecovery = this.now()
+    try {
+      const key = await this.readActiveKey()
+      if (!(await this.loadForKey(key))) return
+      logger.info('CredentialSync', 'opencode turn failed provider.auth — refreshing and rotating')
+      await this.runRefresh(key)
+    } catch (err) {
+      logger.warn('CredentialSync', `opencode auth recovery failed: ${errMessage(err)}`)
+    }
+  }
+
+  /**
+   * System resume or unlock (§5 rule 2): timers may have slept through their
+   * deadline, so every account is re-scheduled from the wall clock (a due one
+   * refreshes now) and opencode's row is brought up to date. Never throws.
+   */
+  async onSystemResume(): Promise<void> {
+    if (this.quitting) return
+    try {
+      // An account in back-off or needing a sign-in keeps its schedule (L3).
+      const resync = (key: string, cred: VaultCredential): void => {
+        if (!this.refreshHeld(key)) this.scheduleRefresh(key, cred)
+      }
+      if (this.supportsAccounts()) {
+        const accounts = await this.accounts()
+        for (const account of accounts) resync(account.id, account.credential)
+        if (accounts.length === 0) {
+          const cred = await this.vault.load()
+          if (cred) resync(LEGACY_ACCOUNT_KEY, cred)
+        }
+      } else {
+        const cred = await this.vault.load()
+        if (cred) resync(LEGACY_ACCOUNT_KEY, cred)
+      }
+      if (!this.refreshHeld(await this.readActiveKey())) await this.opencodeTurnGate()
+    } catch (err) {
+      logger.warn('CredentialSync', `onSystemResume failed: ${errMessage(err)}`)
+    }
+  }
+
+  /**
+   * Graceful quit (§5): give opencode's `openai` slot back to the user's own
+   * credential, so their opencode does not run on a token nobody refreshes.
+   * A crash skips this; the next start re-asserts ClaudeUI's row. Never throws.
+   */
+  async prepareQuit(): Promise<void> {
+    // From here nothing re-vends: no refresh timer, no gate, no recovery (L4).
+    this.quitting = true
+    this.stop()
+    if (!this.opencodeTarget || !this.harnessRuns('opencode')) return
+    try {
+      await this.removeOpencode('quit')
+    } catch {
+      // logged by removeOpencode
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // 1. Feed-forward
   // -------------------------------------------------------------------------
 
@@ -985,7 +1212,7 @@ export class CredentialSync {
     const input = feedInput(cred)
     const [pi, opencode] = await Promise.all([
       this.feedOne('pi', this.piTarget, PI_CODEX_VENDOR_ID, input),
-      this.feedOne('opencode', this.opencodeTarget, OPENCODE_CODEX_VENDOR_ID, input)
+      this.vendOpencode(input)
     ])
     logger.info('CredentialSync', `feedAll: pi=${pi} opencode=${opencode}`)
     return { pi, opencode }
@@ -1044,6 +1271,80 @@ export class CredentialSync {
   }
 
   /**
+   * Vend `cred` into opencode 2.x (ADR-093 §5): rotate-by-replace, made the
+   * active `openai` row. Skipped like a feed (route off, harness not running,
+   * no target); a failure is logged and leaves `false`.
+   */
+  private async vendOpencode(cred: CodexCredentialInput): Promise<boolean> {
+    if (this.quitting) return false
+    // An expired token is never vended (L7): the refresh that follows vends.
+    if (tokenExpiry(cred) <= this.now()) {
+      logger.info(
+        'CredentialSync',
+        'feedAll: the ChatGPT token has expired — not vended to opencode'
+      )
+      return false
+    }
+    if (!this.routes().opencode) {
+      logger.info('CredentialSync', 'feedAll: opencode route disabled — skipping')
+      return false
+    }
+    if (!this.harnessRuns('opencode')) {
+      logger.info('CredentialSync', 'feedAll: opencode not installed — skipping')
+      return false
+    }
+    const target = this.opencodeTarget
+    if (!target) {
+      logger.warn('CredentialSync', 'feedAll: no opencode target configured — skipping')
+      return false
+    }
+    try {
+      await target.vendChatgpt(cred, this.claudeuiTokenCheck())
+      return true
+    } catch (err) {
+      logger.warn('CredentialSync', `feedAll: opencode vend failed: ${errMessage(err)}`)
+      return false
+    }
+  }
+
+  /**
+   * Take ClaudeUI's ChatGPT rows out of opencode and give the slot back to the
+   * user's previously active credential. Ownership is the row id, so this runs
+   * whatever opencode holds; `managed` is the vault's tokens as read before a
+   * disconnect empties it.
+   */
+  private async removeOpencode(
+    context: string,
+    managed?: ReadonlySet<string>,
+    options: { vaultEmptying?: boolean } = {}
+  ): Promise<boolean> {
+    const target = this.opencodeTarget
+    if (!target) return false
+    try {
+      return await target.removeChatgpt(context, this.claudeuiTokenCheck(managed), options)
+    } catch (err) {
+      logger.warn(
+        'CredentialSync',
+        `${context}: removing opencode's ChatGPT credential failed: ${errMessage(err)}`
+      )
+      throw err
+    }
+  }
+
+  /**
+   * Whether a refresh token is ClaudeUI's: one of the vault's (as `managed`,
+   * or read now) or one it fed opencode's 1.x `auth.json` (the fed-token
+   * history, read only).
+   */
+  private claudeuiTokenCheck(managed?: ReadonlySet<string>): (refresh: string) => Promise<boolean> {
+    let tokens: Promise<ReadonlySet<string>> | null = null
+    return async (refresh) => {
+      tokens ??= managed ? Promise.resolve(managed) : this.managedRefreshTokens()
+      return (await tokens).has(refresh) || this.heldFed('opencode', refresh)
+    }
+  }
+
+  /**
    * Pre-write freshness compare (M-AT1). `feedOauthCredential` overwrites the
    * engine's entry unconditionally, so an engine that rotated its own token
    * after our last read gets its NEWER refresh token destroyed by the feed —
@@ -1094,6 +1395,18 @@ export class CredentialSync {
    */
   async harnessArrived(engine: EngineKey): Promise<void> {
     if (!this.harnessRuns(engine)) return
+    if (engine === 'opencode') {
+      try {
+        const cred = await this.vault.load()
+        if (cred && this.routes().opencode) {
+          const delivered = await this.vendOpencode(feedInput(cred))
+          logger.info('CredentialSync', `harnessArrived: opencode vended=${delivered}`)
+        } else await this.removeOpencode('harnessArrived')
+      } catch (err) {
+        logger.warn('CredentialSync', `harnessArrived(opencode) failed: ${errMessage(err)}`)
+      }
+      return
+    }
     const { target, vendorId } = this.slot(engine)
     try {
       const cred = await this.vault.load()
@@ -1325,8 +1638,8 @@ export class CredentialSync {
 
   private startWatchers(): void {
     const routes = this.routes()
+    // opencode 2.x has no file to watch (ADR-093 §5).
     if (routes.pi) this.startWatcher('pi', this.piTarget)
-    if (routes.opencode) this.startWatcher('opencode', this.opencodeTarget)
   }
 
   /**
@@ -1609,6 +1922,14 @@ export class CredentialSync {
     engine: EngineKey,
     managed: ReadonlySet<string>
   ): Promise<void> {
+    // opencode 2.x: ClaudeUI's rows are known by id, running or not (a
+    // removal while it is not installed waits for it in ClaudeUI's record).
+    if (engine === 'opencode') {
+      await this.removeOpencode(context, managed, {
+        vaultEmptying: context === 'disconnect' || context === 'removeAccount'
+      })
+      return
+    }
     const { target, vendorId } = this.slot(engine)
     if (!target) return
     let entry: CodexEntrySnapshot | null
@@ -1689,11 +2010,14 @@ export class CredentialSync {
     await this.vault.setDisconnected?.(CHATGPT_PROVIDER_ID, disconnected)
   }
 
-  /** One engine's feed target and the vendor id its auth store keys ChatGPT under. */
+  /**
+   * The file-backed feed target and the vendor id its auth store keys ChatGPT
+   * under — pi's; opencode 2.x has none (its rows go through `opencodeTarget`).
+   */
   private slot(engine: EngineKey): { target: CodexFeedTarget | undefined; vendorId: string } {
     return engine === 'pi'
       ? { target: this.piTarget, vendorId: PI_CODEX_VENDOR_ID }
-      : { target: this.opencodeTarget, vendorId: OPENCODE_CODEX_VENDOR_ID }
+      : { target: undefined, vendorId: OPENCODE_CODEX_VENDOR_ID }
   }
 
   private isCurrent(generation: number): boolean {

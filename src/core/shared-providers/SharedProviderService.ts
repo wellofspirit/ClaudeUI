@@ -1011,7 +1011,7 @@ export class SharedProviderService {
     if (!reader) return false
     const stored = await this.deps.vault.loadCredential(definition.id)
     if (stored?.type !== 'api_key') return false
-    return reader.readApiKey(routeNativeId(definition, route)) === stored.key
+    return (await reader.readApiKey(routeNativeId(definition, route))) === stored.key
   }
 
   /**
@@ -1022,7 +1022,7 @@ export class SharedProviderService {
    */
   private async holdsOurKey(definition: SharedProviderDefinition, route: Route): Promise<boolean> {
     const vendorId = routeNativeId(definition, route)
-    const held = this.deps.nativeKeys?.[route].readApiKey(vendorId)
+    const held = await this.deps.nativeKeys?.[route].readApiKey(vendorId)
     if (!held) return false
     if (this.deliveredKeys.matches(route, vendorId, held)) return true
     return this.holdsVaultKey(definition, route)
@@ -1212,7 +1212,7 @@ export class SharedProviderService {
   ): Promise<NativeKeyCandidate[]> {
     const native = this.deps.nativeKeys
     if (!native) return []
-    const plain = this.listPlainApiKeyVendorIds()
+    const plain = await this.listPlainApiKeyVendorIds()
     const inPi = new Set(plain.pi)
     const shared = plain.opencode.filter(
       (id) => inPi.has(id) && isProviderId(id) && !this.claimsVendor(id)
@@ -1223,8 +1223,8 @@ export class SharedProviderService {
     const out: NativeKeyCandidate[] = []
     for (const id of shared) {
       if (!catalogs.pi.has(id) || !catalogs.opencode.has(id)) continue
-      const pi = native.pi.readApiKey(id)
-      const opencode = native.opencode.readApiKey(id)
+      const pi = await native.pi.readApiKey(id)
+      const opencode = await native.opencode.readApiKey(id)
       if (!pi || !opencode) continue
       out.push(
         pi === opencode
@@ -1239,13 +1239,14 @@ export class SharedProviderService {
    * The vendor ids each engine holds a PLAIN API key for — exactly what
    * {@link adoptNativeKey} can adopt from that engine. Ids only; no key leaves.
    */
-  listPlainApiKeyVendorIds(): Record<Route, string[]> {
+  async listPlainApiKeyVendorIds(): Promise<Record<Route, string[]>> {
     const native = this.deps.nativeKeys
     if (!native) return { pi: [], opencode: [] }
-    return {
-      pi: native.pi.listApiKeyVendorIds(),
-      opencode: native.opencode.listApiKeyVendorIds()
-    }
+    const [pi, opencode] = await Promise.all([
+      native.pi.listApiKeyVendorIds(),
+      native.opencode.listApiKeyVendorIds()
+    ])
+    return { pi, opencode }
   }
 
   /**
@@ -1297,8 +1298,8 @@ export class SharedProviderService {
       if (!native) throw new Error('Native key adoption is unavailable')
       if (this.claimsVendor(id)) throw new Error(`Provider "${id}" is already shared`)
       const keys: Record<Route, string | null> = {
-        pi: native.pi.readApiKey(id),
-        opencode: native.opencode.readApiKey(id)
+        pi: await native.pi.readApiKey(id),
+        opencode: await native.opencode.readApiKey(id)
       }
       let key: string
       if (keep) {
