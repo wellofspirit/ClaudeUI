@@ -1,6 +1,6 @@
 # ADR-073: An agent is a `task_id`, a run is a `tool_use_id` — and the roster that reads them
 
-**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended 2026-10-01 by §8: an opencode run's terminal status comes from its `task` part, and a `session.error` is never terminal. Amended 2026-10-06 by §9: the overlay is bounded by the composer, not the viewport, and a roster narrower than 480px lays its rows out on two lines, and the type badge becomes a letter tile ([ADR-094](adr-094_agent-type-colour-coding.md)). Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
+**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended 2026-10-01 by §8: an opencode run's terminal status comes from its `task` part, and a `session.error` is never terminal. Amended 2026-10-06 by §9: the overlay is bounded by the composer, not the viewport, and a roster narrower than 480px lays its rows out on two lines, and the type badge becomes a letter tile ([ADR-094](adr-094_agent-type-colour-coding.md)). Amended 2026-10-07 by §10: the list is one tree with the background shells nested under the agent that launched them, and every row is one line at every width (superseding §9's two shapes and the separate shells section). Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
 **Amends:** [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) — `activeTasks` is no longer keyed only by the spawning tool call, and the `taskId → toolUseId` mapping is no longer evicted on a terminal notification.
 **Relates to:** [ADR-027](adr-027_test-data-attributes.md) (the `data-testid` tiers the new surfaces carry), [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch cards share the `task` ToolView), [ADR-035](adr-035_pi-engine-backend.md) / [ADR-036](adr-036_unified-auth-vault.md) (pi subagents), [ADR-070](adr-070_one-auth-surface.md) (the measured top-bar tiers this adds a control to), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5/§4.6 (the wire shapes, amended by the probe below)
 
@@ -115,6 +115,8 @@ One `useAgentRoster()` selector, one row component, three placements:
   in two sections: **Agents** and **Background shells**. It keeps its scope: a background Bash is
   lost to scrolling for the same reason and already has `local_bash` lifecycle events.
   _Amended by §7:_ a shell is listed only while it runs, and agents are listed at every depth.
+  _(Superseded by §10: the two sections are one tree, with each shell nested under the agent that
+  launched it.)_
 
 The pill is **never dropped** by the tier system, for the same reason `GitChangesPill` is not: it is
 a panel's only entry point. It therefore has no `⋯` row — the bar's rule is that a menu row is the
@@ -274,7 +276,8 @@ owner's rulings of 2026-09-29:
 - **Each section folds.** "Agents" and "Background shells" always carry a heading, even alone,
   because the heading is the fold control; it keeps the row count when folded. The filter and the
   folds stay local component state, for the reason the filter already was: they are a way of
-  looking, not a preference.
+  looking, not a preference. _(Superseded by §10: there are no sections, so nothing folds; the
+  filter stays local state.)_
 - **The roster scrolls on its own** (`TaskDetailPanel.roster`). Alone it fills the panel; with
   entries open it is capped at 40% of the panel so they stay in view. Its header is sticky, and a
   row that becomes selected scrolls into view, since the cap can otherwise push the row just
@@ -309,8 +312,8 @@ Top-level rows keep transcript order. There is no per-parent fold.
 
 **Context ancestors.** Under the Running filter, a finished ancestor of a running (or open) row is
 kept, dimmed (`data-context="true"`), so an indented row never floats without its parent. The whole
-chain is kept. A context row is not counted as running, not counted in the section's number, and
-offers no Stop, but still opens on click.
+chain is kept. A context row is not counted as running, not counted in the section's number _(§10: the header's
+running count)_, and offers no Stop, but still opens on click.
 
 **Dot and number.** The pill and the composer tab show a dot and a bare number, no noun. While
 anything runs the number is the running count: running agents at every depth plus running shells, so
@@ -330,7 +333,9 @@ listed when `activeTasks[id]` exists, its `taskType` is `local_bash` and its `is
 registers every subagent Bash as backgrounded. S0 showed otherwise: a foreground Bash registers
 `false` at every depth, and only `run_in_background` or a later move flips it, so the flag alone means
 "running in the background", including a nested command a timeout moves. Rows are flat, in a section
-that renders only while it has rows and that the Running filter does not touch. The one exception
+that renders only while it has rows and that the Running filter does not touch _(superseded by §10: shells
+are rows in the one tree, nested under their launching agent, and the Running filter keeps them because
+they are running)_. The one exception
 follows §6: a finished shell whose entry is open stays listed until the entry is put away. It is
 recognized the way the panel recognizes a background Bash (a terminal event, plus
 `run_in_background` or the moved-to-background result). A reopened session lists no shells. Only
@@ -427,6 +432,9 @@ the reason was only visible when the subagent produced nothing.
 
 ### 9. The roster on a narrow screen (amendment, 2026-10-06)
 
+_Superseded by §10 (2026-10-07): the two-shape rule and the 480px split below are gone. The zoom-trap
+fix and the Task card paragraphs still stand; the tool-name rule stays but moves from 400px to 360px._
+
 On the owner's phone (Samsung S25 Ultra, Edge, 412 x 728 CSS px, `uiFontScale` 1.1) the overlay hung 15px
 off the left edge, each row lost its description, and Stop was clipped. Two causes, both layout, neither
 visible to jsdom. The rule that came out of the first is [ADR-093](adr-093_zoom-trap-no-viewport-units.md).
@@ -493,6 +501,91 @@ is `(412 - 8 - 7) / chatFontScale - 42` CSS px: 355, 319, 276 and 223px at chat 
 test uses the zoom and the container chain of the surface it tests. The browser layout tests (`docs/testing-strategy.md`,
 Layer 2b) assert readability, not just containment: the roster at uiFontScale 1, 1.1, 1.25 and 1.5, the card
 at the same four values of chatFontScale.
+
+### 10. One tree, one line (amendment, 2026-10-07)
+
+Two rulings of the owner's, from mockup `9d76c8c0` (variant U3 and its detail view). They supersede §9's
+two-shape rule and the 2026-09-21 ruling that background shells get a section of their own.
+
+**One tree.** The list has no sections and no headings. A background shell sits under the agent whose
+transcript holds its Bash call, one level deeper than that agent, with the same tree guide. The owner is
+already known: `findTaskBlocks` returns `ownerToolUseId`, the key of the bucket that holds the call (null for
+the main transcript), and `listShells` carries it. `useAgentRoster` derives `rows`, one depth-first list
+mixing both kinds, in the existing final `useMemo`; `agents`, `shells` and every count are unchanged, so the
+pill, the tab and the tooltip read what they read before (`totalCount` still counts agents only, and `shells`
+still holds depth-0 rows).
+
+Placement is deterministic: within one parent, the parent's child agents come first, each followed by its own
+subtree, then that parent's shells in `listShells` order. Shells launched by the main session come after all
+top-level agents, at depth 0, and so does a shell whose owner is not an agent row in the tree (defensive).
+`settleOrphans` is untouched: it is about agents, and a shell is never settled because it is listed only
+while it has a lifecycle record or a notification.
+
+A shell can outlive the agent that launched it, which is the case the tree has to survive. Under Running,
+`keepRunning` works over the unified list, so a running shell under a finished agent keeps that agent, and
+its ancestors, as dimmed context rows. The shell stays reachable and a row never floats without its parent.
+The header counts running rows only, and context rows are not counted.
+
+**The label.** An agent's label is its `name` when the spawn call gave one (or it is a dispatch, whose label
+is a real identity), recorded as `hasExplicitName` on the row. The engines' task views already fill `name`
+with the type when the call named no one (Claude `name ?? subagent_type`, opencode's `agent`, pi), so "explicit"
+means a name that differs from the type. One exception, scoped to Codex on purpose: a v1 spawn names no one
+and has no type, only its model (its normalizer's description is the placeholder "Agent"), and that model is what
+those rows have always been listed under, so it counts as explicit and is the label. On any other engine a
+`model` is an override on an anonymous agent and the description labels the row. Otherwise the `name` is only a type or model fallback ("Explore",
+"general-purpose") that many rows share, so the label is the description, in `text-text-secondary`. A shell's label is its whole command, monospace, secondary. The label is `truncate`,
+floors at 4.5rem and has no maximum width. `agentRowLabel` is the one place these rules live; the shell
+entry's "launched by" line uses it (the panel works the label out once, from the roster it already holds, and
+passes it to the entry).
+
+**The description line is gone.** It was a static summary written at spawn time, and what it said did not
+change while the row ran. It is the label's `title` tooltip now (a shell's tooltip is its command).
+
+**One line at every width.** §9 split rows at 480px because a 60-140px text type badge made one line
+unreadable in the 420px overlay. [ADR-094](adr-094_agent-type-colour-coding.md) replaced that badge with a
+16px tile, and with the description line gone the reason for two lines is gone too. The order, left to
+right: tree guide, status dot, a 16px type column, label, resumed chip, spacer, Stop (running rows only),
+metrics. The type column is 16px on every row so labels align: the tile for a typed agent, an empty span for
+the default type, a `$` glyph (`AgentRow.shellGlyph`, "Background shell") for a shell. The resumed chip is
+always `↻N`; the long `resumed ×N` form is dropped.
+
+**Stop is inline, before the metrics, and red.** A reserved Stop column would cost every finished row
+about 42px for nothing, and most rows are finished under All. Inline, the metrics stay flush right on every
+row, and a row loses width only while it runs. Stop is styled like the entry's own Stop (`bg-danger/10
+text-danger`), not the grey outline §9 used. The cost is that Stop has no fixed x: the spacer pushes it right
+up against the metrics, so its x moves with the width of the metrics (a row without a tool name or tokens puts
+it further right), a column of Stops cannot be run down by eye, and it is next to the click target that opens
+the entry. It is 16px tall, the row's line height, so a running row is no taller than a finished one. It still stops propagation, and the condition for showing it is unchanged (running, not context, depth 0
+or a lifecycle record).
+
+**Shrink priority** when the line is too narrow: the status dot, the type column, the resumed chip and Stop
+never shrink; the metrics shrink first, to a 3rem floor; the label last, to 4.5rem, or 3rem under 300px of roster
+width. The 300px rule exists because the deepest row (a resumed chip and Stop, at the phone's maximum
+`uiFontScale` of 1.5, where the roster is about 256px) overflowed by about 8px at the 4.5rem floor and the metrics
+spilled into the row's padding. The current tool name in the metrics moves from §9's 400px to **360px**: under 360px of roster width (the
+container's, never the viewport's) the metrics drop it. With the description line gone a row has the room, and
+400 was wrong for the common case: the side panel opens at 400px wide and its border leaves the roster 399px, so
+the tool name was hidden in the default desktop panel. The row must not overflow at any roster width of 240px
+or more; the browser layout test checks 240, 280, 350, 380, 420, 460 and 600px, and the phone widths at every
+font scale, and that every row has the same height whether or not it is running.
+
+**A running shell has a live clock.** Nothing reports elapsed time for a shell, so its row counts from the
+`startedAt` of its lifecycle record, ticking once a second only while that row is a running shell with a
+start (`useTicker`, `taskElapsedLabel`, the Task card's own clock, which now floors to whole seconds: a
+running clock read "60s" at 59.6 s before). Agents keep the elapsed figure from their
+progress, as before.
+
+**The shell entry shows the whole command.** The panel's `BashBackgroundEntry` header used
+`command.slice(0, 60)`, truncated again by CSS, and the full command appeared nowhere. The header now holds
+the whole command and CSS truncates it. The body opens with a command block (`BashBackgroundEntry.command`):
+the full command, wrapped and selectable, with a meta line (`.commandMeta`) under it: "launched by" the agent
+when the call is in an agent's bucket (a button, `.owner`, that opens that agent's entry), the Bash call's
+own `description` if it gave one, and a Copy button (`.copy`, "Copied" for 1.5 s).
+
+**Why.** The 480px split was set for a text badge the tile replaced. The description was a static spawn-time
+summary that cost a line per row in a list that is mostly read at a glance. Metrics at one x down the
+column are what make a list of clocks and token counts scannable. A shell can outlive its agent, so one
+list needs the context-row rule rather than two lists.
 
 ## Consequences
 
