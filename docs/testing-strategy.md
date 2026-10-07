@@ -205,6 +205,10 @@ Prove a guard: revert the production fix and watch the test fail before you trus
 
 Check at every scale in the profile plus 1.25, and revert the fix to prove the assertion fails.
 
+**The pinned font:** the app's UI font is the system stack (`-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', …`), so a geometry assertion used to measure whatever the host had: Noto/Helvetica on Linux CI, SF Pro on the macOS release runner, neither of them the reference phone's Roboto. The same TaskCard header test passed on Linux and failed on macOS. `browser.setup.ts` now loads Roboto (`@fontsource/roboto`, dev-only, the weights the components use) and makes it the UI font for every browser test, and waits for it to load before any test measures. A layout result is therefore the same on every OS and matches the profile's device. The monospace font (JetBrains Mono) is already bundled by the app and unaffected.
+
+**Where they run:** once, in CI (`ci.yml`, Linux, inside `test:ci`). The release workflows run `test:ci:no-browser`: with the font pinned, another OS adds no signal, only a Chromium download.
+
 **File naming:** `*.browser.test.tsx`, under `src/**/__tests__/`. The `unit` project excludes them.
 
 **Speed:** about 7 s for the project, most of it starting Chromium. It runs in `bun run test` and `test:ci`.
