@@ -110,6 +110,8 @@ export interface SpawnDeps {
   readonly spawn?: typeof realSpawn
   readonly env?: NodeJS.ProcessEnv
   readonly listenTimeoutMs?: number
+  /** Tree-kills the child on a failed start (default {@link killProcessTree}; tests inject a spy). */
+  readonly kill?: (child: ChildProcess) => void
 }
 
 /**
@@ -124,6 +126,7 @@ export function spawnStdioServer(
 ): Promise<SpawnResult> {
   const spawn = deps.spawn ?? realSpawn
   const timeoutMs = deps.listenTimeoutMs ?? LISTEN_TIMEOUT_MS
+  const kill = deps.kill ?? killProcessTree
   return new Promise((resolve, reject) => {
     const spec = withLaunch(
       launch,
@@ -152,7 +155,7 @@ export function spawnStdioServer(
       if (settled) return
       settled = true
       clearTimeout(timer)
-      killProcessTree(child)
+      kill(child)
       reject(new Error(message + stderrTail()))
     }
     const timer = setTimeout(

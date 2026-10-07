@@ -146,34 +146,50 @@ describe('spawnStdioServer', () => {
   it('an exit before the url rejects with the stderr tail', async () => {
     const child = fakeChild()
     const { spawn } = fakeSpawn(child)
-    const started = spawnStdioServer(nativeLaunch('/bin/opencode'), OPTIONS, { spawn, env: {} })
+    // A spy, never the real `killProcessTree`: on Windows that runs
+    // `taskkill /pid 4242 /T /F` against whatever owns the fake child's pid.
+    const kill = vi.fn()
+    const started = spawnStdioServer(nativeLaunch('/bin/opencode'), OPTIONS, {
+      spawn,
+      env: {},
+      kill
+    })
     feed(child.stderr, 'Error: config parse failed\n')
     await new Promise((r) => setImmediate(r))
     child.emitExit(1)
     await expect(started).rejects.toThrow(/exited before printing its URL.*config parse failed/s)
+    expect(kill).toHaveBeenCalledWith(child)
   })
 
   it('times out, kills what it started, and rejects', async () => {
     vi.useFakeTimers()
     const child = fakeChild()
     const { spawn } = fakeSpawn(child)
+    const kill = vi.fn()
     const started = spawnStdioServer(nativeLaunch('/bin/opencode'), OPTIONS, {
       spawn,
       env: {},
-      listenTimeoutMs: 1000
+      listenTimeoutMs: 1000,
+      kill
     })
     const assertion = expect(started).rejects.toThrow(/printed no URL within 1000 ms/)
     await vi.advanceTimersByTimeAsync(1000)
     await assertion
-    expect(child.kill).toHaveBeenCalled()
+    expect(kill).toHaveBeenCalledWith(child)
   })
 
   it('a spawn error rejects', async () => {
     const child = fakeChild()
     const { spawn } = fakeSpawn(child)
-    const started = spawnStdioServer(nativeLaunch('/bin/opencode'), OPTIONS, { spawn, env: {} })
+    const kill = vi.fn()
+    const started = spawnStdioServer(nativeLaunch('/bin/opencode'), OPTIONS, {
+      spawn,
+      env: {},
+      kill
+    })
     child.emit('error', new Error('ENOENT'))
     await expect(started).rejects.toThrow(/Failed to spawn opencode: ENOENT/)
+    expect(kill).toHaveBeenCalledWith(child)
   })
 })
 
