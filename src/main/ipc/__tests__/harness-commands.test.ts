@@ -81,6 +81,13 @@ import { fakeHarnessInstall, writeHarnessPayload } from '../../../test/helpers/f
 
 const EXE = process.platform === 'win32' ? '.exe' : ''
 const OPENCODE = harnessManifest('opencode')
+/** Newer than the tested opencode, within [floor, ceiling): untested. */
+const OC_NEWER = OPENCODE.tested.replace(/\d+$/, (patch) => String(Number(patch) + 16))
+/** A whole minor ahead, still below the ceiling. */
+const OC_NEXT_MINOR = OPENCODE.tested.replace(
+  /^(\d+)\.(\d+)\..*$/,
+  (_m, major, minor) => `${major}.${Number(minor) + 9}.0`
+)
 const CODEX = harnessManifest('codex')
 const CLAUDE = harnessManifest('claude')
 
@@ -286,9 +293,9 @@ describe('harness:state', () => {
       versionJson: { version: CLAUDE.tested }
     })
     fakeHarnessInstall(store, 'opencode', OPENCODE.tested)
-    fakeHarnessInstall(store, 'opencode', '1.18.40', { record: { verified: 'publisher' } })
+    fakeHarnessInstall(store, 'opencode', OC_NEWER, { record: { verified: 'publisher' } })
     fs.writeFileSync(path.join(store, 'opencode', OPENCODE.tested, 'last-used'), '')
-    writeSelections({ opencode: { source: 'system', version: '1.18.40' } })
+    writeSelections({ opencode: { source: 'system', version: OC_NEWER } })
     // Detection called this `tested`; this build's floor says it is too old.
     const stale = nativeInstall('opencode', '1.0.0', { verdict: 'tested' })
     const unsupported = nativeInstall('opencode', OPENCODE.tested, {
@@ -312,7 +319,7 @@ describe('harness:state', () => {
       floor: OPENCODE.floor,
       ceiling: OPENCODE.ceiling
     })
-    expect(opencode.selection).toEqual({ source: 'system', version: '1.18.40' })
+    expect(opencode.selection).toEqual({ source: 'system', version: OC_NEWER })
     expect(opencode.system.detectedAt).toBe('2026-09-30T00:00:00.000Z')
     expect(opencode.system.installs.map((i) => [i.version, i.verdict])).toEqual([
       ['1.0.0', 'too-old'],
@@ -332,7 +339,7 @@ describe('harness:state', () => {
       reason: 'No usable System opencode found: a version-manager shim'
     })
     expect(opencode.managed).toEqual([
-      expect.objectContaining({ version: '1.18.40', verified: 'publisher' }),
+      expect.objectContaining({ version: OC_NEWER, verified: 'publisher' }),
       expect.objectContaining({ version: OPENCODE.tested, verified: 'reviewed' })
     ])
     expect(opencode.managed[0].lastUsed).toBeUndefined()
@@ -466,20 +473,20 @@ describe('harness:set-selection', () => {
     try {
       const entry = await call(registryOf(), 'harness:set-selection', {
         id: 'opencode',
-        selection: { source: 'managed', version: '1.18.40' }
+        selection: { source: 'managed', version: OC_NEWER }
       })
       expect(loadHarnessesConfig().selections?.opencode).toEqual({
         source: 'managed',
-        version: '1.18.40'
+        version: OC_NEWER
       })
       expect(changed).toEqual(['opencode'])
       expect(entry).toMatchObject({
         id: 'opencode',
-        selection: { source: 'managed', version: '1.18.40' },
+        selection: { source: 'managed', version: OC_NEWER },
         resolved: {
           source: 'managed',
           path: null,
-          reason: 'opencode 1.18.40 is not installed'
+          reason: `opencode ${OC_NEWER} is not installed`
         }
       })
     } finally {
@@ -614,15 +621,15 @@ describe('harness:detect and harness:versions', () => {
   it('answers upstream versions, and that Claude Code has none', async () => {
     const registry = registryOf(
       commands({
-        latestVersion: async () => '1.18.40',
-        availableVersions: async () => ['1.18.40', OPENCODE.tested]
+        latestVersion: async () => OC_NEWER,
+        availableVersions: async () => [OC_NEWER, OPENCODE.tested]
       })
     )
     await expect(call(registry, 'harness:versions', { id: 'opencode' })).resolves.toEqual({
       status: 'ok',
       id: 'opencode',
-      latest: '1.18.40',
-      available: ['1.18.40', OPENCODE.tested]
+      latest: OC_NEWER,
+      available: [OC_NEWER, OPENCODE.tested]
     })
     await expect(call(registry, 'harness:versions', { id: 'claude' })).resolves.toMatchObject({
       status: 'unsupported',
@@ -707,7 +714,7 @@ describe('updates', () => {
       opencode: { source: 'managed', version: 'latest' },
       pi: { source: 'managed', version: harnessManifest('pi').tested }
     })
-    const newer = '1.99.0'
+    const newer = OC_NEXT_MINOR
     const install = vi.fn(async (id: HarnessId, version: string): Promise<HarnessInstallResult> => {
       fakeHarnessInstall(store, id, version)
       return { status: 'installed', id, version, verified: 'publisher' }
@@ -990,7 +997,7 @@ describe('no result carries an `ok` key (the transports read it as their envelop
             lastRunAt: '2026-09-30T00:00:00.000Z',
             results: [
               { id: 'pi', from: '0.87.1', to: '0.87.4', status: 'failed', reason: 'x' },
-              { id: 'opencode', from: '1.18.32', to: '1.18.40', status: 'installed' }
+              { id: 'opencode', from: '1.18.32', to: OC_NEWER, status: 'installed' }
             ]
           }
         })

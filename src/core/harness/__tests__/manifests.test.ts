@@ -37,13 +37,20 @@ describe('harness manifests', () => {
     expect(harnessManifest('claude').platforms).toEqual({})
   })
 
+  it('pins opencode to the 2.x line: floor = tested, ceiling 3.0.0 (ADR-097 §1)', () => {
+    const { tested, floor, ceiling } = harnessManifest('opencode')
+    expect(tested).toMatch(/^2\.\d+\.\d+$/)
+    expect(floor).toBe(tested)
+    expect(ceiling).toBe('3.0.0')
+  })
+
   it('names a reviewed opencode package for exactly the hosts the installer can select', () => {
     const packages: Record<string, string> = {
-      'win32-x64': 'opencode-windows-x64',
-      'darwin-arm64': 'opencode-darwin-arm64',
-      'darwin-x64': 'opencode-darwin-x64',
-      'linux-x64': 'opencode-linux-x64',
-      'linux-arm64': 'opencode-linux-arm64'
+      'win32-x64': '@opencode/cli-windows-x64',
+      'darwin-arm64': '@opencode/cli-darwin-arm64',
+      'darwin-x64': '@opencode/cli-darwin-x64',
+      'linux-x64': '@opencode/cli-linux-x64',
+      'linux-arm64': '@opencode/cli-linux-arm64'
     }
     const platforms = harnessManifest('opencode').platforms
     expect(Object.keys(platforms).sort()).toEqual(Object.keys(packages).sort())

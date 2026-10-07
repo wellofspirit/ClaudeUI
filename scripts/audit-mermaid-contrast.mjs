@@ -12,8 +12,7 @@
  *
  * Nothing about that class of bug is visible from reading the palette: the
  * offending colour never appears in our config. It has to be measured on the
- * rendered SVG. Hence this script — same posture as `probe-opencode-caps.mjs`:
- * **re-run it on every mermaid version bump** (the vendored version is pinned by
+ * rendered SVG. Hence this script: **re-run it on every mermaid version bump** (the vendored version is pinned by
  * `package.json#mermaid`), and after every edit to `mermaid-themes.ts`. A bump
  * can change a derivation, a default, or a diagram's DOM structure, and the only
  * honest answer is a fresh measurement.

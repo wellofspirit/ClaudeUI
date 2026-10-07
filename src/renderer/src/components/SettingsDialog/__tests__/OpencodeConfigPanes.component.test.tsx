@@ -7,14 +7,14 @@
  *   1. Absent-default toggles: absent reads as the default; leaving the default
  *      writes the value; returning to it DELETES the key.
  *   2. Numbers commit on blur and on Enter; an emptied field deletes the key.
- *   3. `tools` chips patch one leaf each and never touch unknown `tools` keys
- *      (MCP globs live there too).
+ *   3. The built-in tool chips go through their own writer (top-level
+ *      `permissions`, opencode 2.x), never a raw patch.
  *   4. The `formatter`/`lsp` boolean|object union: an object value still reads
  *      as ON; OFF writes false; ON deletes.
- *   5. `experimental.*` is patched as a LEAF — a whole-object write would erase
- *      the sibling keys ClaudeUI itself injects.
+ *   5. 2.x keys only (ADR-097 S8): a 1.x key 2.x still reads shows as the value
+ *      and moves to its 2.x key in the same write; `mcp` is patched as leaves.
  *   6. `default_agent` offers only agents opencode would accept as a default.
- *   7. The Managed pane is static: three FORCED rows, no IPC.
+ *   7. The Managed pane is static: FORCED rows, no IPC.
  *   8. No pane asks whether opencode is installed: the file is ClaudeUI's own
  *      read, and the page cannot be opened while it is not (ADR-082 §8).
  *   9. A rejected patch surfaces inline instead of being swallowed.
@@ -47,6 +47,10 @@ const readOpencodeNativeRaw = vi.fn(async () => ({
   path: '/home/u/.config/opencode/opencode.json'
 }))
 const listOpencodeAgents = vi.fn(async (): Promise<OpencodeAgentSummary[]> => [])
+const toolSwitches: [string, boolean][] = []
+const setOpencodeToolDisabled = vi.fn(async (action: string, disabled: boolean) => {
+  toolSwitches.push([action, disabled])
+})
 
 function installApiStub(overrides: Record<string, unknown> = {}): void {
   ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
@@ -54,6 +58,7 @@ function installApiStub(overrides: Record<string, unknown> = {}): void {
     readOpencodeNativeRaw,
     patchOpencodeNative,
     listOpencodeAgents,
+    setOpencodeToolDisabled,
     ...overrides
   }
 }
@@ -120,6 +125,8 @@ describe('opencode Configuration panes', () => {
     patchOpencodeNative.mockClear()
     readOpencodeNativeRaw.mockClear()
     listOpencodeAgents.mockClear()
+    setOpencodeToolDisabled.mockClear()
+    toolSwitches.length = 0
     installApiStub()
   })
 
@@ -131,12 +138,16 @@ describe('opencode Configuration panes', () => {
     it('reads ON when the key is absent and its default is on', async () => {
       await renderPane(<OpencodeSessionBehaviorSection />)
       expect(toggleFor('compaction.auto').getAttribute('aria-pressed')).toBe('true')
-      expect(toggleFor('snapshot').getAttribute('aria-pressed')).toBe('true')
+      expect(toggleFor('snapshots').getAttribute('aria-pressed')).toBe('true')
     })
 
     it('reads OFF when the key is absent and its default is off', async () => {
-      await renderPane(<OpencodeSessionBehaviorSection />)
-      expect(toggleFor('compaction.prune').getAttribute('aria-pressed')).toBe('false')
+      await renderPane(<OpencodeAttachmentsSection />)
+      // media.image.auto_resize defaults ON; flip the reading through the 1.x key.
+      cleanup()
+      currentConfig = { attachment: { image: { auto_resize: false } } }
+      await renderPane(<OpencodeAttachmentsSection />)
+      expect(toggleFor('media.image.auto_resize').getAttribute('aria-pressed')).toBe('false')
     })
 
     it('turning OFF a default-on key writes false at its leaf path', async () => {
@@ -159,35 +170,55 @@ describe('opencode Configuration panes', () => {
       expect('value' in patch).toBe(false)
     })
 
-    it('turning a default-off key ON writes true; turning it back off deletes', async () => {
+    it('a 1.x key 2.x also reads shows as the value, and a commit moves it (one write)', async () => {
+      currentConfig = { snapshot: false }
       await renderPane(<OpencodeSessionBehaviorSection />)
+      expect(toggleFor('snapshots').getAttribute('aria-pressed')).toBe('false')
       await act(async () => {
-        fireEvent.click(toggleFor('compaction.prune'))
+        fireEvent.click(toggleFor('snapshots'))
       })
-      expect(onlyPatch()).toEqual({ path: ['compaction', 'prune'], value: true })
-
-      cleanup()
-      captured = []
-      currentConfig = { compaction: { prune: true } }
-      await renderPane(<OpencodeSessionBehaviorSection />)
-      await act(async () => {
-        fireEvent.click(toggleFor('compaction.prune'))
-      })
-      const patch = onlyPatch()
-      expect(patch.path).toEqual(['compaction', 'prune'])
-      expect('value' in patch).toBe(false)
+      // Back to the default: the 2.x key is already absent, so only the 1.x one goes.
+      expect(captured).toHaveLength(1)
+      expect(captured[0]).toEqual([{ path: ['snapshot'] }])
     })
 
     it('an explicit value equal to the default still deletes on the next toggle back', async () => {
-      // `snapshot: true` written by hand: the toggle reads ON, turning it OFF
-      // writes false — the file keeps only a real override either way.
-      currentConfig = { snapshot: true }
+      currentConfig = { snapshots: true }
       await renderPane(<OpencodeSessionBehaviorSection />)
-      expect(toggleFor('snapshot').getAttribute('aria-pressed')).toBe('true')
+      expect(toggleFor('snapshots').getAttribute('aria-pressed')).toBe('true')
       await act(async () => {
-        fireEvent.click(toggleFor('snapshot'))
+        fireEvent.click(toggleFor('snapshots'))
       })
-      expect(onlyPatch()).toEqual({ path: ['snapshot'], value: false })
+      expect(onlyPatch()).toEqual({ path: ['snapshots'], value: false })
+    })
+
+    it('has no rows for the 1.x compaction keys 2.x dropped (prune, tail_turns)', async () => {
+      await renderPane(<OpencodeSessionBehaviorSection />)
+      const ids = screen
+        .getAllByTestId('OpencodeConfigPane.row')
+        .map((n) => n.getAttribute('data-id'))
+      expect(ids).toEqual([
+        'compaction.auto',
+        'compaction.keep.tokens',
+        'compaction.buffer',
+        'experimental.subagent_depth',
+        'snapshots'
+      ])
+    })
+
+    it('a 1.x compaction number commits to its 2.x leaf and deletes the 1.x one', async () => {
+      currentConfig = { compaction: { reserved: 4000 } }
+      await renderPane(<OpencodeSessionBehaviorSection />)
+      const input = numberFor('compaction.buffer')
+      expect(input.value).toBe('4000')
+      await act(async () => {
+        fireEvent.change(input, { target: { value: '5000' } })
+        fireEvent.blur(input)
+      })
+      expect(captured[0]).toEqual([
+        { path: ['compaction', 'buffer'], value: 5000 },
+        { path: ['compaction', 'reserved'] }
+      ])
     })
   })
 
@@ -198,8 +229,8 @@ describe('opencode Configuration panes', () => {
       // The old form appended the key to the end of the helper sentence at 10px
       // muted/60 — 1.6:1 on the dark theme, and unreadable next to the prose.
       await renderPane(<OpencodeSessionBehaviorSection />)
-      const row = rowFor('compaction.preserve_recent_tokens')
-      const key = within(row).getByText('compaction.preserve_recent_tokens')
+      const row = rowFor('compaction.keep.tokens')
+      const key = within(row).getByText('compaction.keep.tokens')
       expect(key.className).toContain('font-mono')
       expect(key.className).toContain('text-text-muted')
       // …and the number carries its unit, so the placeholder is free to say
@@ -232,11 +263,11 @@ describe('opencode Configuration panes', () => {
     it('a toggle is unmarked while its key is absent, marked once it is written', async () => {
       await renderPane(<OpencodeSessionBehaviorSection />)
       const reset = (): Element | null =>
-        toggleFor('snapshot').querySelector('[data-testid="OpencodeConfigPane.toggle.reset"]')
+        toggleFor('snapshots').querySelector('[data-testid="OpencodeConfigPane.toggle.reset"]')
       expect(reset()).toBeNull()
 
       cleanup()
-      currentConfig = { snapshot: true }
+      currentConfig = { snapshots: true }
       await renderPane(<OpencodeSessionBehaviorSection />)
       expect(reset()).toBeTruthy()
     })
@@ -244,19 +275,20 @@ describe('opencode Configuration panes', () => {
     it('resetting the image dimensions deletes BOTH keys in one write', async () => {
       // Two `patch` calls in the same tick would be two concurrent
       // read-modify-write cycles over the same file — one of them would lose.
-      currentConfig = { attachment: { image: { max_width: 1200, max_height: 900 } } }
+      currentConfig = { media: { image: { max_width: 1200, max_height: 900 } } }
       await renderPane(<OpencodeAttachmentsSection />)
       await act(async () => {
         fireEvent.click(
-          rowFor('attachment.image.max_width').querySelector(
+          rowFor('media.image.max_width').querySelector(
             '[data-testid="OpencodeConfigPane.row.reset"]'
           )!
         )
       })
       expect(captured).toHaveLength(1)
+      // (the 1.x `attachment` twins are absent here, so they are no part of it)
       expect(captured[0].map((p) => p.path)).toEqual([
-        ['attachment', 'image', 'max_width'],
-        ['attachment', 'image', 'max_height']
+        ['media', 'image', 'max_width'],
+        ['media', 'image', 'max_height']
       ])
       expect(captured[0].every((p) => !('value' in p))).toBe(true)
     })
@@ -310,7 +342,7 @@ describe('opencode Configuration panes', () => {
 
     it('an absent number renders empty with the opencode default as placeholder', async () => {
       await renderPane(<OpencodeAttachmentsSection />)
-      const input = numberFor('attachment.image.max_base64_bytes')
+      const input = numberFor('media.image.max_base64_bytes')
       expect(input.value).toBe('')
       expect(input.placeholder).toBe('5242880')
     })
@@ -318,12 +350,12 @@ describe('opencode Configuration panes', () => {
     it('the width/height pair patches each dimension separately', async () => {
       await renderPane(<OpencodeAttachmentsSection />)
       await act(async () => {
-        const w = numberFor('attachment.image.max_width')
+        const w = numberFor('media.image.max_width')
         fireEvent.change(w, { target: { value: '1200' } })
         fireEvent.blur(w)
       })
       expect(onlyPatch()).toEqual({
-        path: ['attachment', 'image', 'max_width'],
+        path: ['media', 'image', 'max_width'],
         value: 1200
       })
     })
@@ -331,80 +363,102 @@ describe('opencode Configuration panes', () => {
 
   // ── 3. tools chips ─────────────────────────────────────────────────
 
-  describe('tools chips', () => {
-    it('renders exactly the 14 built-in tool ids', async () => {
+  describe('built-in tool chips (top-level permissions)', () => {
+    it('renders the 2.x built-in tool actions', async () => {
       await renderPane(<OpencodeToolsSection />)
       const ids = screen
         .getAllByTestId('OpencodeConfigPane.chip')
         .map((n) => n.getAttribute('data-id'))
       expect(ids).toEqual([
-        'bash',
+        'shell',
         'read',
         'glob',
         'grep',
         'edit',
-        'write',
-        'task',
         'webfetch',
         'websearch',
-        'todowrite',
+        'subagent',
         'skill',
-        'apply_patch',
-        'question',
-        'lsp'
+        'question'
       ])
     })
 
-    it('an absent key reads ON; clicking it writes tools.<id> = false', async () => {
+    it('a tool with no deny reads ON; clicking it switches it off through its own writer', async () => {
       await renderPane(<OpencodeToolsSection />)
       expect(chipFor('websearch').getAttribute('aria-pressed')).toBe('true')
       await act(async () => {
         fireEvent.click(chipFor('websearch'))
       })
-      expect(onlyPatch()).toEqual({ path: ['tools', 'websearch'], value: false })
+      expect(toolSwitches).toEqual([['websearch', true]])
+      expect(patchOpencodeNative).not.toHaveBeenCalled()
     })
 
-    it('a false key reads OFF; clicking it DELETES tools.<id>', async () => {
-      currentConfig = { tools: { websearch: false } }
+    it('a `{action,*,deny}` rule (or a 1.x tools:false) reads OFF; clicking switches it back on', async () => {
+      currentConfig = {
+        tools: { bash: false },
+        permissions: [{ action: 'websearch', resource: '*', effect: 'deny' }]
+      }
       await renderPane(<OpencodeToolsSection />)
       expect(chipFor('websearch').getAttribute('aria-pressed')).toBe('false')
+      expect(chipFor('shell').getAttribute('aria-pressed')).toBe('false')
       await act(async () => {
         fireEvent.click(chipFor('websearch'))
       })
-      const patch = onlyPatch()
-      expect(patch.path).toEqual(['tools', 'websearch'])
-      expect('value' in patch).toBe(false)
+      expect(toolSwitches).toEqual([['websearch', false]])
     })
 
-    it('an explicit true also reads ON and turning it off overwrites to false', async () => {
-      currentConfig = { tools: { lsp: true } }
+    it('"off" is upstream whollyDisabled: a later narrower allow keeps the tool ON (F3)', async () => {
+      currentConfig = {
+        permissions: [
+          { action: 'shell', resource: '*', effect: 'deny' },
+          { action: 'shell', resource: 'git *', effect: 'allow' }
+        ]
+      }
       await renderPane(<OpencodeToolsSection />)
-      expect(chipFor('lsp').getAttribute('aria-pressed')).toBe('true')
-      await act(async () => {
-        fireEvent.click(chipFor('lsp'))
-      })
-      expect(onlyPatch()).toEqual({ path: ['tools', 'lsp'], value: false })
+      expect(chipFor('shell').getAttribute('aria-pressed')).toBe('true')
     })
 
-    it('unknown tools keys (MCP globs) are neither rendered nor patched', async () => {
-      currentConfig = { tools: { 'claudeui_*': false, 'someserver*': true, bash: false } }
-      await renderPane(<OpencodeToolsSection />)
-
-      const ids = screen
-        .getAllByTestId('OpencodeConfigPane.chip')
-        .map((n) => n.getAttribute('data-id'))
-      expect(ids).not.toContain('claudeui_*')
-      expect(ids).not.toContain('someserver*')
-
-      await act(async () => {
-        fireEvent.click(chipFor('bash'))
+    it('names the agents whose own rules still offer a switched-off tool (F3)', async () => {
+      currentConfig = {
+        permissions: [{ action: 'shell', resource: '*', effect: 'deny' }],
+        agent: { rev: { permission: { '*': 'allow' } } }
+      }
+      installApiStub({
+        listOpencodeAgents: vi.fn(async () => [
+          {
+            name: 'md-agent',
+            kind: 'custom',
+            mode: 'all',
+            scope: 'global',
+            rules: [{ action: 'shell', resource: 'git *', effect: 'allow' }]
+          },
+          { name: 'strict', kind: 'custom', mode: 'all', scope: 'global' }
+        ])
       })
-      // One LEAF patch for bash only — the unknown keys are structurally
-      // untouched because we never write the `tools` object as a whole.
-      const patch = onlyPatch()
-      expect(patch.path).toEqual(['tools', 'bash'])
-      expect(patch.path[0]).toBe('tools')
-      expect(patch.path).toHaveLength(2)
+      await renderPane(<OpencodeToolsSection />)
+      const row = rowFor('permissions')
+      expect(row.textContent).toContain('Still offered by: shell: rev, md-agent')
+      expect(row.textContent).not.toContain('every agent')
+    })
+
+    it("a refused switch (the user's own rule) shows the reason inline", async () => {
+      currentConfig = { permissions: [{ action: 'read', resource: '*', effect: 'deny' }] }
+      installApiStub({
+        setOpencodeToolDisabled: vi.fn(async () => {
+          throw new Error('read is switched off by your own permission rules')
+        })
+      })
+      await renderPane(<OpencodeToolsSection />)
+      await act(async () => {
+        fireEvent.click(chipFor('read'))
+      })
+      await waitFor(() => expect(rowFor('permissions').textContent).toContain('your own'))
+    })
+
+    it('a narrow rule does not switch a tool off', async () => {
+      currentConfig = { permissions: [{ action: 'shell', resource: 'rm *', effect: 'deny' }] }
+      await renderPane(<OpencodeToolsSection />)
+      expect(chipFor('shell').getAttribute('aria-pressed')).toBe('true')
     })
   })
 
@@ -475,45 +529,38 @@ describe('opencode Configuration panes', () => {
 
   // ── 5. experimental.* stays a leaf ─────────────────────────────────
 
-  describe('experimental keys', () => {
-    it('mcp_timeout patches ["experimental","mcp_timeout"], never the whole object', async () => {
-      currentConfig = { experimental: { continue_loop_on_deny: true, openTelemetry: true } }
+  describe('MCP timeouts (Diagnostics)', () => {
+    it('writes mcp.timeout leaves, never the whole mcp object (ClaudeUI injects servers)', async () => {
       await renderPane(<OpencodeDiagnosticsSection />)
-      const input = numberFor('experimental.mcp_timeout')
+      const input = numberFor('mcp.timeout.execution')
       await act(async () => {
         fireEvent.change(input, { target: { value: '30000' } })
         fireEvent.blur(input)
       })
-      const patch = onlyPatch()
-      expect(patch.path).toEqual(['experimental', 'mcp_timeout'])
-      expect(patch.value).toBe(30000)
-      // Not a whole-object write: a 1-segment path would replace the siblings.
-      expect(patch.path).not.toEqual(['experimental'])
+      expect(onlyPatch()).toEqual({ path: ['mcp', 'timeout', 'execution'], value: 30000 })
     })
 
-    it('batch_tool patches its own leaf too', async () => {
+    it('reads the 1.x experimental.mcp_timeout and moves it on commit', async () => {
+      currentConfig = { experimental: { mcp_timeout: 9000, batch_tool: true } }
       await renderPane(<OpencodeDiagnosticsSection />)
+      const input = numberFor('mcp.timeout.execution')
+      expect(input.value).toBe('9000')
       await act(async () => {
-        fireEvent.click(toggleFor('experimental.batch_tool'))
+        fireEvent.change(input, { target: { value: '10000' } })
+        fireEvent.blur(input)
       })
-      expect(onlyPatch()).toEqual({ path: ['experimental', 'batch_tool'], value: true })
+      expect(captured[0]).toEqual([
+        { path: ['mcp', 'timeout', 'execution'], value: 10000 },
+        { path: ['experimental', 'mcp_timeout'] }
+      ])
     })
 
-    it('logLevel deletes on the empty choice and writes the chosen level otherwise', async () => {
+    it('has no log-level or batch-tool rows (opencode 2.x has neither key)', async () => {
       await renderPane(<OpencodeDiagnosticsSection />)
-      const select = screen
-        .getAllByTestId('OpencodeConfigPane.select')
-        .find((n) => n.getAttribute('data-id') === 'logLevel')!
-      await act(async () => {
-        fireEvent.click(select.querySelector('[data-testid$=".trigger"]')!)
-      })
-      const debug = screen
-        .getAllByTestId('OpencodeConfigPane.select.option')
-        .find((n) => n.getAttribute('data-id') === 'DEBUG')!
-      await act(async () => {
-        fireEvent.click(debug)
-      })
-      expect(onlyPatch()).toEqual({ path: ['logLevel'], value: 'DEBUG' })
+      const ids = screen
+        .getAllByTestId('OpencodeConfigPane.row')
+        .map((n) => n.getAttribute('data-id'))
+      expect(ids).toEqual(['mcp.timeout.execution', 'mcp.timeout.catalog', 'mcp.timeout.startup'])
     })
   })
 
@@ -624,32 +671,40 @@ describe('opencode Configuration panes', () => {
       expect(onlyPatch()).toEqual({ path: ['watcher', 'ignore'], value: ['**/dist/**'] })
     })
 
-    it('plugin tuple entries are preserved, not dropped, when the list is edited', async () => {
-      // `plugin` accepts `string | [string, options]`. The list control only
-      // speaks strings — the tuples must survive an edit anyway.
-      currentConfig = { plugin: ['plain-plugin', ['tuple-plugin', { opt: 1 }]] }
+    it('plugins: the 1.x list moves into the 2.x one on an edit (tuples become entries)', async () => {
+      currentConfig = { plugin: ['plain-plugin', ['tuple-plugin', { opt: 1 }]], plugins: ['two'] }
       await renderPane(<OpencodeToolsSection />)
-      const row = listRow('plugin')
+      const row = listRow('plugins')
+      const chips = row.querySelectorAll('[data-testid="OpencodeConfigPane.list.item"]')
+      expect(Array.from(chips).map((c) => c.getAttribute('data-id'))).toEqual([
+        'plain-plugin',
+        'two'
+      ])
       const input = row.querySelector<HTMLInputElement>(
         '[data-testid="OpencodeConfigPane.list.input"]'
       )!
-      // Only the string entry is offered as a chip.
-      const chips = row.querySelectorAll('[data-testid="OpencodeConfigPane.list.item"]')
-      expect(Array.from(chips).map((c) => c.getAttribute('data-id'))).toEqual(['plain-plugin'])
-
       await act(async () => {
         fireEvent.change(input, { target: { value: 'new-plugin' } })
         fireEvent.keyDown(input, { key: 'Enter' })
       })
-      expect(onlyPatch()).toEqual({
-        path: ['plugin'],
-        value: ['plain-plugin', 'new-plugin', ['tuple-plugin', { opt: 1 }]]
-      })
+      expect(captured[0]).toEqual([
+        {
+          path: ['plugins'],
+          value: [
+            'plain-plugin',
+            'two',
+            'new-plugin',
+            { package: 'tuple-plugin', options: { opt: 1 } }
+          ]
+        },
+        { path: ['plugin'] }
+      ])
     })
 
-    it('skills.paths is a nested leaf', async () => {
+    it('skills is a 2.x list; the 1.x {paths, urls} object reads as one', async () => {
+      currentConfig = { skills: { paths: ['/a'], urls: ['https://b'] } }
       await renderPane(<OpencodeToolsSection />)
-      const row = listRow('skills.paths')
+      const row = listRow('skills')
       const input = row.querySelector<HTMLInputElement>(
         '[data-testid="OpencodeConfigPane.list.input"]'
       )!
@@ -657,7 +712,7 @@ describe('opencode Configuration panes', () => {
         fireEvent.change(input, { target: { value: '/opt/skills' } })
         fireEvent.keyDown(input, { key: 'Enter' })
       })
-      expect(onlyPatch()).toEqual({ path: ['skills', 'paths'], value: ['/opt/skills'] })
+      expect(onlyPatch()).toEqual({ path: ['skills'], value: ['/a', 'https://b', '/opt/skills'] })
     })
   })
 
@@ -697,46 +752,32 @@ describe('opencode Configuration panes', () => {
   // ── 7. Managed pane is static ──────────────────────────────────────
 
   describe('Managed keys pane', () => {
-    it('renders the three forced rows and issues no IPC', async () => {
+    it('renders the forced rows and issues no IPC', async () => {
       await renderPane(<OpencodeManagedKeysSection />)
       const ids = screen
         .getAllByTestId('OpencodeConfigPane.managedRow')
         .map((n) => n.getAttribute('data-id'))
-      expect(ids).toEqual(['autoupdate', 'share', 'experimental.continue_loop_on_deny'])
+      expect(ids).toEqual(['update', 'share'])
       expect(readOpencodeNativeRaw).not.toHaveBeenCalled()
       expect(patchOpencodeNative).not.toHaveBeenCalled()
     })
 
-    it('badges autoupdate/share as forced off and continue_loop_on_deny as forced on', async () => {
+    it('badges update/share as forced off, a switch the user cannot move', async () => {
       await renderPane(<OpencodeManagedKeysSection />)
-      // The badge is the row primitive's `locked` state now (ADR-065), so it is
-      // namespaced under the ROW's testid and scoped by the row, rather than
-      // carrying a data-id of its own.
       const badge = (id: string): string =>
         managedRow(id)
           .querySelector('[data-testid="OpencodeConfigPane.managedRow.locked"]')!
           .textContent!.trim()
-      expect(badge('autoupdate')).toBe('Forced off')
+      expect(badge('update')).toBe('Forced off')
       expect(badge('share')).toBe('Forced off')
-      expect(badge('experimental.continue_loop_on_deny')).toBe('Forced on')
-    })
-
-    it('shows each forced value as a switch the user cannot move', async () => {
-      await renderPane(<OpencodeManagedKeysSection />)
-      // Shown, not hidden: a value ClaudeUI pins is more honest visible.
       expect((managedRow('share') as HTMLButtonElement).disabled).toBe(true)
-      expect(
-        managedRow('experimental.continue_loop_on_deny').querySelector(
-          '[data-testid="ToggleSwitch"]'
-        )!.className
-      ).toContain('bg-accent')
     })
 
     it('points at the keys that live on other pages, as one explanatory row', async () => {
       await renderPane(<OpencodeManagedKeysSection />)
       const row = screen.getByTestId('OpencodeConfigPane.elsewhere')
-      expect(row.textContent).toContain('small_model')
-      expect(row.textContent).toContain('autoshare')
+      expect(row.textContent).toContain('agents.title')
+      expect(row.textContent).toContain('providers')
     })
   })
 
@@ -756,11 +797,15 @@ describe('opencode Configuration panes', () => {
       [
         'OpencodeAttachmentsSection',
         <OpencodeAttachmentsSection key="c" />,
-        'attachment.image.max_width'
+        'media.image.max_width'
       ],
       ['OpencodeWorkspaceSection', <OpencodeWorkspaceSection key="d" />, 'instructions'],
-      ['OpencodeToolsSection', <OpencodeToolsSection key="e" />, 'tools'],
-      ['OpencodeDiagnosticsSection', <OpencodeDiagnosticsSection key="f" />, 'logLevel']
+      ['OpencodeToolsSection', <OpencodeToolsSection key="e" />, 'permissions'],
+      [
+        'OpencodeDiagnosticsSection',
+        <OpencodeDiagnosticsSection key="f" />,
+        'mcp.timeout.execution'
+      ]
     ]
 
     it.each(panes)(
@@ -782,17 +827,17 @@ describe('opencode Configuration panes', () => {
     it('shows a rejected patch inline under its row', async () => {
       installApiStub({
         patchOpencodeNative: vi.fn(async () => {
-          throw new Error('opencode config would be invalid: /snapshot must be boolean')
+          throw new Error('opencode config would be invalid: /snapshots must be boolean')
         })
       })
       await renderPane(<OpencodeSessionBehaviorSection />)
       await act(async () => {
-        fireEvent.click(toggleFor('snapshot'))
+        fireEvent.click(toggleFor('snapshots'))
       })
       await waitFor(() => {
         const err = screen
           .getAllByTestId('OpencodeConfigPane.error')
-          .find((n) => n.getAttribute('data-id') === 'snapshot')
+          .find((n) => n.getAttribute('data-id') === 'snapshots')
         expect(err?.textContent).toContain('must be boolean')
       })
     })
@@ -801,7 +846,7 @@ describe('opencode Configuration panes', () => {
       await renderPane(<OpencodeSessionBehaviorSection />)
       const readsBefore = readOpencodeNativeRaw.mock.calls.length
       await act(async () => {
-        fireEvent.click(toggleFor('snapshot'))
+        fireEvent.click(toggleFor('snapshots'))
       })
       await waitFor(() => {
         expect(readOpencodeNativeRaw.mock.calls.length).toBeGreaterThan(readsBefore)

@@ -755,7 +755,7 @@ export function registerRemoteHandlers(
     channel: 'session:list-opencode',
     capability: 'fs-read',
     kind: 'query',
-    handler: async () => listOpencodeSessionsGlobal()
+    handler: async () => listOpencodeSessionsGlobal({ interaction: true })
   })
   handleRemote({
     channel: 'session:load-opencode-history',

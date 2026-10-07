@@ -1062,9 +1062,10 @@ export function resolveClaudeCapabilities(
  * does NOT mean opencode exposes Claude's `.mcp.json` server-config UI — that
  * dialog (McpDialog) is scoped to engineId==='claude' in TopBar.tsx, so this flip
  * only enables our hosted tools, not the Claude MCP config surface.
- * queue+steer:true (Phase 8c) — opencode coalesces a mid-turn prompt into the
- * running loop (no server-side holdable queue), so send-while-busy = post-immediately
- * = steer. dequeue is a no-op (can't un-send once coalesced). voice deferred.
+ * queue+steer:true — opencode 2.x's native inbox (ADR-097 §9): a prompt sent
+ * while busy is posted at once under a ClaudeUI id as a `steer` (folded in at the
+ * next step boundary, ADR-053 §1) and stays cancellable until delivered, so
+ * take-back is a real dequeue. voice deferred.
  * subagents:true (Phase 8d) — opencode's `task` tool spawns child sessions whose
  * transcripts stream on the shared SSE; the event-mapper routes them to
  * session:subagent-* events keyed by the parent task part's callID.

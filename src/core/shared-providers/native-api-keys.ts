@@ -17,10 +17,14 @@
 import * as fs from 'node:fs'
 
 export interface NativeApiKeyReader {
-  /** Vendor ids holding a plain API-key entry. [] when the file is absent or unreadable. */
-  listApiKeyVendorIds(): string[]
-  /** That vendor's raw key, or null when it has no plain API-key entry. MAIN PROCESS ONLY. */
-  readApiKey(vendorId: string): string | null
+  /** Vendor ids holding a plain API-key entry. [] when the store is absent or unreadable. */
+  listApiKeyVendorIds(): string[] | Promise<string[]>
+  /**
+   * That vendor's raw key, or null when it has no plain API-key entry. MAIN
+   * PROCESS ONLY. pi's is a file read; opencode 2.x's is the integration's
+   * ACTIVE key row, read over its credential API (ADR-097 §5).
+   */
+  readApiKey(vendorId: string): string | null | Promise<string | null>
 }
 
 /** A reader over one engine's `auth.json`, re-read on every call (a cheap local file). */
@@ -57,4 +61,35 @@ export function authJsonApiKeyReader(
  */
 export function keyHint(key: string): string {
   return key.length > 8 ? `…${key.slice(-4)}` : '…'
+}
+
+/** How long one list of an engine's keys serves a pass (ADR-074 §6 adoption, registry). */
+export const KEY_PASS_TTL_MS = 5_000
+
+/**
+ * A reader over a key store that answers ALL keys in one read (opencode 2.x's
+ * credential list): a pass over many vendors reads it ONCE, not once per
+ * vendor — and so starts at most one server. The memo lasts
+ * {@link KEY_PASS_TTL_MS} and is dropped by `invalidate` (a credential
+ * ClaudeUI changed), so a pass never sees a key from before its own write.
+ */
+export function batchedApiKeyReader(
+  readAll: () => Promise<ReadonlyMap<string, string>>,
+  now: () => number = () => Date.now()
+): NativeApiKeyReader & { invalidate(): void } {
+  let memo: { at: number; keys: Promise<ReadonlyMap<string, string>> } | null = null
+  const keys = (): Promise<ReadonlyMap<string, string>> => {
+    if (!memo || now() - memo.at > KEY_PASS_TTL_MS) {
+      const read = readAll().catch(() => new Map<string, string>())
+      memo = { at: now(), keys: read }
+    }
+    return memo.keys
+  }
+  return {
+    listApiKeyVendorIds: async () => [...(await keys()).keys()],
+    readApiKey: async (vendorId) => (await keys()).get(vendorId) ?? null,
+    invalidate: () => {
+      memo = null
+    }
+  }
 }

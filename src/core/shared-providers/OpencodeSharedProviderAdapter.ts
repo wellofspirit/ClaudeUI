@@ -16,21 +16,22 @@ import type {
 
 /**
  * The writers and removers invalidate opencode's model cache themselves, and
- * only when the stored credential actually changed — so the adapter adds no
+ * only when a credential actually changed — so the adapter adds no
  * invalidation of its own after a vend or a removal: re-vending an unchanged
  * key, or removing one that is not there, at boot must not kill the model probe
  * in flight (`OpencodeAuthProvider.setVendorApiKey` / `removeVendorAuth`).
+ *
+ * opencode 2.x (ADR-097 §5): a key is ClaudeUI's own `cred_claudeui_*` row, a
+ * removal deletes only those rows (and, while opencode is not installed, waits
+ * for it in ClaudeUI's own record — there is no file to edit).
  */
 export interface OpencodeSharedProviderAuthTarget {
   setVendorApiKey(vendorId: string, key: string): Promise<void>
-  feedOauthCredential(vendorId: string, credential: CodexCredentialInput): Promise<void>
+  /** The ChatGPT vend (CredentialSync's path); absent, an OAuth vend is refused. */
+  vendChatgpt?(credential: CodexCredentialInput): Promise<void>
   removeVendorAuth(vendorId: string): Promise<void>
-  /**
-   * Delete a vendor's entry from auth.json as a file edit, without opencode's
-   * server — used while opencode does not run (`OpencodeAuthProvider`).
-   * Absent, a removal always takes the server path.
-   */
-  removeVendorAuthDirect?(vendorId: string): Promise<void>
+  /** ClaudeUI's API key only (sign-ins started from the provider screen stay); absent → removeVendorAuth. */
+  removeVendorKey?(vendorId: string): Promise<void>
   listVendorCredentialIds?(): Promise<Record<string, 'api' | 'oauth'>>
 }
 
@@ -185,18 +186,20 @@ export class OpencodeSharedProviderAdapter {
       throw new Error('Custom providers require API-key credentials')
     }
     if (!definition.routes.opencode.enabled) return
-    await this.authTarget.feedOauthCredential(opencodeProviderId(definition), credential)
+    if (opencodeProviderId(definition) !== 'openai' || !this.authTarget.vendChatgpt)
+      throw new Error('opencode takes OAuth credentials for ChatGPT only')
+    await this.authTarget.vendChatgpt(credential)
   }
 
   /**
-   * Take this definition's key out of opencode's auth store: through its server
-   * while opencode runs (which recycles the live processes), as a direct file
-   * edit while it does not (ADR-082 §8, S7d) — no process to spawn or recycle.
+   * Take ClaudeUI's key for this definition out of opencode (its
+   * `cred_claudeui_*` rows, ADR-097 §5). Whether opencode runs no longer picks
+   * a path: while it is not installed the removal is recorded and runs when it
+   * is (ADR-082 §8, S7d's "at once" as far as opencode allows).
    */
-  async removeCredential(definition: SharedProviderDefinition, running = true): Promise<void> {
+  async removeCredential(definition: SharedProviderDefinition, _running = true): Promise<void> {
     const vendorId = opencodeProviderId(definition)
-    if (!running && this.authTarget.removeVendorAuthDirect)
-      await this.authTarget.removeVendorAuthDirect(vendorId)
+    if (this.authTarget.removeVendorKey) await this.authTarget.removeVendorKey(vendorId)
     else await this.authTarget.removeVendorAuth(vendorId)
   }
 
@@ -263,10 +266,14 @@ function npmForProtocol(protocol: NonNullable<SharedProviderDefinition['protocol
 
 /**
  * One declared model as opencode's config needs it (ADR-074 slice 10): what it
- * can do and how large it is, which opencode otherwise reads as "nothing" for a
- * model only a config declares (`reasoning`/`attachment` false, `limit` 0). The
- * same defaults pi's projection applies to an absent fact — except the limits,
- * where 0 is opencode's own "unknown". Key order matches the config reader's.
+ * can do and how large it is. The same defaults pi's projection applies to an
+ * absent fact — except the limits, where 0 is opencode's own "unknown". Key
+ * order matches the config reader's.
+ *
+ * opencode 2.x (ADR-097 S8): `reasoning: false` is written as `variants: []`
+ * (no reasoning variants); `true` as NO `variants` (opencode generates effort
+ * variants from the package), which the reader reports as unknown — see
+ * `mergeCapabilities`.
  */
 function compileModel(model: SharedProviderModel): OpencodeProviderModelSettings[] {
   const override = model.harnessOverrides?.opencode
@@ -309,11 +316,20 @@ function sameIdentity(
 }
 
 /**
- * `compiled`, with each model's capability leaves three-way merged against what
- * the file holds: ClaudeUI's new value where the file has none or still has
- * the value ClaudeUI wrote last (`previous`), the file's where someone edited it
- * since. A refresh therefore updates the details nobody touched, and a hand
- * edit in opencode's model editor survives every sync.
+ * `compiled`, with each model's capability leaves merged against what the file
+ * holds, so that an AUTOMATIC sync (every boot re-applies every definition)
+ * writes only what ClaudeUI's definition actually changed (S10b B1):
+ *
+ *  - a leaf the definition CHANGED since the last apply (`previous`) takes the
+ *    new value — unless someone edited it in the file since (it no longer
+ *    holds what ClaudeUI wrote), whose edit wins;
+ *  - a leaf the definition did NOT change keeps the file's value, in the 2.x
+ *    reading of the file. A 1.x entry ClaudeUI wrote under 1.x reads through
+ *    upstream's exact migration, where 1.x `reasoning`/`attachment` are inert
+ *    (unknown, F4): they are NOT re-asserted, so a boot never moves the entry
+ *    or adds a `variants: []` nobody asked for;
+ *  - a model whose file entry declares no capability at all (a block written
+ *    before ADR-074 slice 10) is seeded with the compiled values.
  */
 function mergeCapabilities(
   existing: OpencodeProviderSettings | undefined,
@@ -332,9 +348,16 @@ function mergeCapabilities(
         id: model.id,
         ...(model.name ? { name: model.name } : {})
       }
+      const last = wrote.get(model.id)
+      const declaresNothing = CAPABILITY_KEYS.every((key) => file[key] === undefined)
       for (const key of CAPABILITY_KEYS) {
-        const own = file[key] === undefined || sameJson(file[key], wrote.get(model.id)?.[key])
+        const changed = !sameJson(model[key], last?.[key])
+        const untouched = file[key] === undefined || sameJson(file[key], last?.[key])
+        const own = declaresNothing || (changed && untouched)
         const value = own ? model[key] : file[key]
+        // 2.x has no "reasons" flag: a reasoning model is one with no `variants`
+        // list, which reads back as unknown. Matching it keeps a sync a no-op.
+        if (key === 'reasoning' && value === true && file.reasoning === undefined) continue
         if (value !== undefined) Object.assign(merged, { [key]: value })
       }
       return merged

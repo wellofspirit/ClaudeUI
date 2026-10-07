@@ -91,7 +91,11 @@ const OPENROUTER_ATTRIBUTION: Readonly<Record<string, string>> = {
   'X-Title': 'ClaudeUI'
 }
 /** The AI SDK package / pi api that means "an OpenAI-compatible chat endpoint". */
-const OPENCODE_COMPATIBLE_NPM = '@ai-sdk/openai-compatible'
+/** opencode's OpenAI-compatible adapter: 2.x's package, and the 1.x AI SDK one a config may still name. */
+const OPENCODE_COMPATIBLE_NPM: ReadonlySet<string> = new Set([
+  '@opencode/ai/providers/openai-compatible',
+  '@ai-sdk/openai-compatible'
+])
 const PI_COMPATIBLE_API = 'openai-completions'
 
 const PROVIDERS_PAGE = 'Settings › Models & providers'
@@ -527,7 +531,7 @@ async function catalogEntry(ctx: RouteContext): Promise<CatalogEntry | null> {
     const found = (await ctx.deps.opencodeCatalog(ctx.provider)).find((m) => m.id === ctx.model)
     if (!found) return null
     return {
-      compatible: found.apiNpm === OPENCODE_COMPATIBLE_NPM,
+      compatible: found.apiNpm !== undefined && OPENCODE_COMPATIBLE_NPM.has(found.apiNpm),
       api: found.apiNpm,
       baseUrl: found.apiUrl,
       facts: modelFacts(found.reasoning, found.maxTokens)

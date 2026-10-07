@@ -188,6 +188,7 @@ vi.mock('../../core/shared-providers', () => ({
 }))
 vi.mock('../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
+    setServerStartedHook: () => {},
     isBinaryAvailable: vi.fn(() => false),
     setCallerSessionLookup: vi.fn(),
     setDispatchAgent: vi.fn(),

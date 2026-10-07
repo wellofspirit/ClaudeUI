@@ -1262,13 +1262,19 @@ describe('purity', () => {
     expect(src).not.toMatch(/node:fs|node:child_process|from 'fs'|child_process|process\.env/)
   })
 
-  it('its imports are pure too (wildcard.ts has only type imports)', () => {
+  it('its imports are pure too (wildcard.ts: type imports + the shared matcher leaf)', () => {
     const lexical = read('shell-lexical.ts')
     expect(importsOf(lexical)).toEqual([])
     expect(lexical).not.toMatch(/process\.env|node:/)
     const wildcard = read('../opencode/wildcard.ts')
-    expect(importsOf(wildcard).every((i) => i.startsWith('type '))).toBe(true)
+    expect(
+      importsOf(wildcard).filter((i) => !i.startsWith('type ')),
+      'wildcard.ts may import only the shared matcher (ADR-097 S8 moved it to shared/)'
+    ).toEqual(['../../shared/opencode-wildcard'])
     expect(wildcard).not.toMatch(/process\.env|node:/)
+    const matcher = read('../../shared/opencode-wildcard.ts')
+    expect(importsOf(matcher)).toEqual([])
+    expect(matcher).not.toMatch(/process\.env|node:/)
     // The strict lexer is a leaf; ADR-085's rule matcher imports only it (no cycle back here).
     const strictLexer = read('shell-strict-lexer.ts')
     expect(importsOf(strictLexer)).toEqual([])

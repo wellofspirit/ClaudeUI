@@ -489,11 +489,15 @@ const api: ClaudeAPI = {
   saveEngineConfig: (engineId: string, config: import('../shared/types').EngineConfig) =>
     ipcRenderer.invoke('config:save-engine-config', engineId, config),
   loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
-  saveOpencodeSettings: (settings: import('../shared/types').OpencodeConfigSettings) =>
-    unwrap('config:save-opencode-settings', settings),
+  saveOpencodeSettings: (
+    settings: import('../shared/types').OpencodeConfigSettings,
+    base?: import('../shared/types').OpencodeConfigSettings
+  ) => unwrap('config:save-opencode-settings', settings, base),
   readOpencodeNativeRaw: () => unwrap('config:read-opencode-native-raw'),
   patchOpencodeNative: (patches: import('../shared/types').RawConfigPatch[]) =>
     unwrap('config:patch-opencode-native', patches),
+  setOpencodeToolDisabled: (action: string, disabled: boolean) =>
+    unwrap('config:set-opencode-tool-disabled', action, disabled),
   readPiNativeRaw: () => unwrap('config:read-pi-native-raw'),
   patchPiNative: (patches: import('../shared/types').RawConfigPatch[]) =>
     unwrap('config:patch-pi-native', patches),

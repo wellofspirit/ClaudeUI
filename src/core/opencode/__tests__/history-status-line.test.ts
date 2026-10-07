@@ -28,7 +28,10 @@ vi.mock('../../auth/OpencodeAuthProvider', () => ({
 }))
 
 import { lastOpencodeModel, opencodeHistoryStatusLine } from '../history-status-line'
-import type { StoredMessage } from '../protocol/types'
+import type { Session_Message_Info } from '../protocol-v2/openapi'
+
+type Assistant = Extract<Session_Message_Info, { type: 'assistant' }>
+type Tokens = NonNullable<Assistant['tokens']>
 
 const SONNET = { providerID: 'anthropic', modelID: 'claude-sonnet-4-6' }
 
@@ -36,42 +39,67 @@ const SONNET = { providerID: 'anthropic', modelID: 'claude-sonnet-4-6' }
 const COST_A = 0.011475 // 1k in, 500 out, 100 cache write, 2k cache read
 const COST_B = 0.0285 // 2k in, 1k out + 500 reasoning (billed as output)
 
-function userMessage(id: string, createdMs: number): StoredMessage {
-  return { info: { id, role: 'user', time: { created: createdMs } }, parts: [] }
+function userMessage(id: string, createdMs: number): Session_Message_Info {
+  return { id, type: 'user', text: 'go', time: { created: createdMs } }
+}
+
+function tokens(t: Partial<Tokens> & { cache?: Partial<Tokens['cache']> }): Tokens {
+  return {
+    input: t.input ?? 0,
+    output: t.output ?? 0,
+    reasoning: t.reasoning ?? 0,
+    cache: { read: t.cache?.read ?? 0, write: t.cache?.write ?? 0 }
+  }
 }
 
 function assistantMessage(
   id: string,
-  overrides: Partial<StoredMessage['info']> = {}
-): StoredMessage {
+  overrides: {
+    modelID?: string
+    cost?: number
+    tokens?: Tokens
+    created?: number
+    completed?: number
+  } = {}
+): Session_Message_Info {
+  const created = overrides.created ?? 0
   return {
-    info: {
-      id,
-      role: 'assistant',
-      // opencode zeroes its own rates for an OAuth-authenticated provider, so
-      // a subscription turn arrives claiming it cost nothing.
-      cost: 0,
-      modelID: SONNET.modelID,
-      providerID: SONNET.providerID,
-      ...overrides
-    },
-    parts: []
+    id,
+    type: 'assistant',
+    agent: 'build',
+    model: { providerID: SONNET.providerID, id: overrides.modelID ?? SONNET.modelID },
+    content: [],
+    // opencode zeroes its own rates for an OAuth-authenticated provider, so
+    // a subscription turn arrives claiming it cost nothing.
+    cost: overrides.cost ?? 0,
+    ...(overrides.tokens ? { tokens: overrides.tokens } : {}),
+    time: { created, completed: overrides.completed ?? created }
   }
 }
 
+function idle(id: string, createdMs: number): Session_Message_Info {
+  return { id, type: 'idle', outcome: 'succeeded', time: { created: createdMs } }
+}
+
 /** A realistic two-turn subscription history. */
-function twoTurnHistory(): StoredMessage[] {
+function twoTurnHistory(models: { a1?: string; a2?: string } = {}): Session_Message_Info[] {
   return [
     userMessage('u1', 1_000),
     assistantMessage('a1', {
-      tokens: { input: 1000, output: 500, cache: { read: 2000, write: 100 } },
-      time: { created: 1_100, completed: 2_000 }
+      modelID: models.a1,
+      tokens: tokens({ input: 1000, output: 500, cache: { read: 2000, write: 100 } }),
+      created: 1_100,
+      completed: 2_000
     }),
+    idle('i1', 2_000),
     userMessage('u2', 5_000),
     assistantMessage('a2', {
-      tokens: { input: 2000, output: 1000, reasoning: 500, cache: { read: 0, write: 0 } },
-      time: { created: 5_100, completed: 7_000 }
-    })
+      modelID: models.a2,
+      tokens: tokens({ input: 2000, output: 1000, reasoning: 500 }),
+      created: 5_100,
+      completed: 7_000
+    }),
+    idle('i2', 7_000)
   ]
 }
 
@@ -95,10 +123,7 @@ describe('opencodeHistoryStatusLine — a subscription history', () => {
   })
 
   it('breaks the cost down per model, and the rows add up to the headline', () => {
-    const history = twoTurnHistory()
-    history[3].info.modelID = 'claude-opus-4-8'
-
-    const line = opencodeHistoryStatusLine(history, SONNET)
+    const line = opencodeHistoryStatusLine(twoTurnHistory({ a2: 'claude-opus-4-8' }), SONNET)
     const byModel = new Map((line.modelCosts ?? []).map((m) => [m.modelId, m.costUsd]))
     expect(byModel.get('claude-sonnet-4-6')).toBeCloseTo(COST_A, 10)
     expect(byModel.get('claude-opus-4-8')).toBeGreaterThan(0)
@@ -136,7 +161,7 @@ describe('opencodeHistoryStatusLine — messages it cannot price', () => {
         userMessage('u1', 1_000),
         assistantMessage('a1', {
           modelID: 'mystery-model-9',
-          tokens: { input: 1000, output: 500 }
+          tokens: tokens({ input: 1000, output: 500 })
         })
       ],
       SONNET
@@ -147,10 +172,7 @@ describe('opencodeHistoryStatusLine — messages it cannot price', () => {
   })
 
   it('keeps the known part of a history that also holds a priced message', () => {
-    const history = twoTurnHistory()
-    history[1].info.modelID = 'mystery-model-9'
-
-    const line = opencodeHistoryStatusLine(history, SONNET)
+    const line = opencodeHistoryStatusLine(twoTurnHistory({ a1: 'mystery-model-9' }), SONNET)
     expect(line.totalCostUsd).toBeCloseTo(COST_B, 10)
     expect(line.unknownCostMessages).toBe(1)
   })
@@ -167,7 +189,7 @@ describe('opencodeHistoryStatusLine — nothing to report', () => {
     expect(line.totalDurationMs).toBe(0)
   })
 
-  it('a history with no assistant message reports the same', () => {
+  it('a history with no step reports the same', () => {
     const line = opencodeHistoryStatusLine([userMessage('u1', 1_000)], SONNET)
 
     expect(line.totalCostUsd).toBe(0)
@@ -205,15 +227,13 @@ describe('opencodeHistoryStatusLine — dispatched spend', () => {
 
 describe('lastOpencodeModel', () => {
   it('is the model the session last answered on', () => {
-    const history = twoTurnHistory()
-    history[3].info.modelID = 'claude-opus-4-8'
-    expect(lastOpencodeModel(history)).toEqual({
+    expect(lastOpencodeModel(twoTurnHistory({ a2: 'claude-opus-4-8' }))).toEqual({
       providerID: 'anthropic',
       modelID: 'claude-opus-4-8'
     })
   })
 
-  it('is empty when no stored message names one', () => {
+  it('is empty when no stored step names one', () => {
     expect(lastOpencodeModel([userMessage('u1', 1_000)])).toEqual({
       providerID: '',
       modelID: ''

@@ -384,9 +384,11 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     loadSharedAutoMode: () => ipcRenderer.invoke('config:load-shared-automode'),
     saveSharedAutoMode: (config) => ipcRenderer.invoke('config:save-shared-automode', config),
     loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
-    saveOpencodeSettings: (settings) => unwrap('config:save-opencode-settings', settings),
+    saveOpencodeSettings: (settings, base) =>
+      unwrap('config:save-opencode-settings', settings, base),
     readOpencodeNativeRaw: async () => ({ config: {}, path: '' }),
     patchOpencodeNative: async () => {},
+    setOpencodeToolDisabled: async () => {},
     readPiNativeRaw: async () => ({ config: {}, path: '', text: '' }),
     patchPiNative: async () => {},
     writePiNativeText: async () => {},

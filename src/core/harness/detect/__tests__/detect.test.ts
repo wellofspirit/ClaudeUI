@@ -96,20 +96,40 @@ describe('classification', () => {
     expect(bestSystemInstall(detection)).toBeNull()
   })
 
+  // 2.x prints `opencode v<version>`; 1.x printed the bare version.
   it.each([
-    [harnessManifest('opencode').tested, 'tested'],
-    ['1.99.0', 'untested'],
-    ['2.0.20', 'incompatible']
-  ])('opencode %s is %s', async (version, verdict) => {
+    [OPENCODE_TESTED, `opencode v${OPENCODE_TESTED}`, 'tested'],
+    ['2.99.0', 'opencode v2.99.0', 'untested'],
+    ['1.18.34', '1.18.34', 'too-old'],
+    ['3.0.0', 'opencode v3.0.0', 'incompatible']
+  ])('opencode %s is %s', async (version, stdout, verdict) => {
     const bin = writeNative(path.join(home, '.opencode', 'bin', `opencode${EXE}`))
-    const [install] = mine(await detectHarness('opencode', depsFor({ [bin]: `${version}\n` })))
+    const [install] = mine(await detectHarness('opencode', depsFor({ [bin]: `${stdout}\n` })))
     expect(install).toMatchObject({ version, verdict, installKind: 'native-installer' })
   })
 
-  it("opencode's `local` is incompatible; a probe that fails is failed", async () => {
+  it('labels a 1.x opencode too old as the previous line, not a broken build', async () => {
+    const bin = writeNative(path.join(tmp, 'bin', `opencode${EXE}`))
+    const [install] = mine(
+      await detectHarness(
+        'opencode',
+        depsFor({ [bin]: '1.18.34\n' }, { pathEntries: [path.dirname(bin)] })
+      )
+    )
+    const floor = harnessManifest('opencode').floor
+    expect(install).toMatchObject({
+      version: '1.18.34',
+      verdict: 'too-old',
+      reason: `opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (${floor} or newer)`
+    })
+  })
+
+  it("opencode's `local` (either line) is incompatible; a probe that fails is failed", async () => {
     const local = writeNative(path.join(home, '.opencode', 'bin', `opencode${EXE}`))
     const [a] = mine(await detectHarness('opencode', depsFor({ [local]: 'local\n' })))
     expect(a).toMatchObject({ version: null, verdict: 'incompatible' })
+    const [v2] = mine(await detectHarness('opencode', depsFor({ [local]: 'opencode vlocal\n' })))
+    expect(v2).toMatchObject({ version: null, verdict: 'incompatible' })
     const [b] = mine(await detectHarness('opencode', depsFor({})))
     expect(b).toMatchObject({
       version: null,
@@ -300,7 +320,9 @@ describe('detectHarnesses', () => {
       peak = Math.max(peak, ++active)
       await new Promise((r) => setTimeout(r, 5))
       active--
-      return ok(command === claude ? `${CLAUDE_TESTED} (Claude Code)` : OPENCODE_TESTED)
+      return ok(
+        command === claude ? `${CLAUDE_TESTED} (Claude Code)` : `opencode v${OPENCODE_TESTED}`
+      )
     })
     const deps = depsFor({}, { probeRun, pathEntries: [path.join(tmp, 'bin')], concurrency: 1 })
     const detections = await detectHarnesses(undefined, deps)

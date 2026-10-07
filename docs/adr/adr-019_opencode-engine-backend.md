@@ -3,6 +3,7 @@
 **Status:** Accepted (V2 design; implementation complete. The detailed `docs/v2/` design docs were removed after V2 shipped — recoverable from git history.)
 **Date:** 2026-06-19
 **Supersedes:** [ADR-017](adr-017_codex-app-server-backend.md)
+**Amended by:** [ADR-097](adr-097_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — server pool, spawn and wire. As built: ADR-097 §2 "As built (S2)" (one `opencode serve --stdio` per config injection, not per cwd; stdin-bound lifetime; exact `releaseIfCurrent` leases), §7 (S3 client and feed, S4 mapper); the dispatcher's opencode targets share one feed per SERVER (S9). Wire reference: [`docs/protocol-opencode/`](../protocol-opencode/README.md).
 
 **Scoped amendment:** [ADR-066](adr-066_codex-fourth-engine.md) supersedes only the dormant-Codex restriction below and plans a fourth engine. This opencode decision remains accepted and as built; its historical Codex removal is not reversed by documentation alone.
 

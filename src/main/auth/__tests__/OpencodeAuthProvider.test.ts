@@ -1,80 +1,37 @@
 /**
  * @vitest-environment node
  *
- * Unit tests for OpencodeAuthProvider (Phase 5c — Part A).
- *
- * Tests:
- *   1. probe() merges /config/providers + /provider/auth into the right VendorAuthMap
- *   2. billingType inference (free, subscription, apiKey, unknown)
- *   3. setVendorApiKey / oauthAuthorize / oauthCallback call the right endpoints
- *   4. Cache invalidation fires on mutation (probe() re-fetches after mutation)
- *   5. Degrades to {} on failure (opencode optional)
- *   6. Claude provider lacks per-vendor methods → graceful error
- *   7. vendor-auth routing: engineAuthRegistry routes by engineId
+ * OpencodeAuthProvider on opencode 2.x (ADR-097 §5): the catalog reads go to
+ * `/api/integration` + `/api/provider`, every credential write goes through the
+ * credential store (here over an in-memory credential table), OAuth sign-ins
+ * run on opencode's integration flows, and nothing is ever recycled.
+ * Fake keys and fake JWTs only.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// ---------------------------------------------------------------------------
-// Hoist mock functions before vi.mock() calls
-// ---------------------------------------------------------------------------
-
-const {
-  mockAcquire,
-  mockRelease,
-  mockRecycleAll,
-  mockGetConfigProviders,
-  mockGetProviderAuth,
-  mockSetAuth,
-  mockRemoveAuth,
-  mockOauthAuthorize,
-  mockOauthCallback,
-  MockOpencodeClient,
-  mockInvalidateOpencodeModelCache
-} = vi.hoisted(() => {
-  const mockAcquire = vi.fn()
-  const mockRelease = vi.fn()
-  const mockRecycleAll = vi.fn()
-  const mockGetConfigProviders = vi.fn()
-  const mockGetProviderAuth = vi.fn()
-  const mockSetAuth = vi.fn()
-  const mockRemoveAuth = vi.fn()
-  const mockOauthAuthorize = vi.fn()
-  const mockOauthCallback = vi.fn()
-  const MockOpencodeClient = vi.fn()
-  const mockInvalidateOpencodeModelCache = vi.fn()
-
-  return {
-    mockAcquire,
-    mockRelease,
-    mockRecycleAll,
-    mockGetConfigProviders,
-    mockGetProviderAuth,
-    mockSetAuth,
-    mockRemoveAuth,
-    mockOauthAuthorize,
-    mockOauthCallback,
-    MockOpencodeClient,
-    mockInvalidateOpencodeModelCache
+const { mockAcquire, mockReleaseIfCurrent, client } = vi.hoisted(() => ({
+  mockAcquire: vi.fn(),
+  mockReleaseIfCurrent: vi.fn(),
+  client: {
+    integrations: vi.fn(),
+    providers: vi.fn(),
+    call: vi.fn()
   }
-})
+}))
 
 vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
     acquire: mockAcquire,
-    release: mockRelease,
-    recycleAll: mockRecycleAll
+    releaseIfCurrent: mockReleaseIfCurrent,
+    setServerStartedHook: vi.fn(),
+    isBinaryAvailable: () => true
   }
 }))
 
 vi.mock('../../../core/opencode/OpencodeClient', () => ({
-  OpencodeClient: MockOpencodeClient
-}))
-
-vi.mock('../../../core/opencode/model-discovery', () => ({
-  invalidateOpencodeModelCache: mockInvalidateOpencodeModelCache
+  OpencodeClient: vi.fn(function () {
+    return client
+  })
 }))
 
 vi.mock('../../../core/services/persisted-sessions-dir', () => ({
@@ -85,655 +42,320 @@ vi.mock('../../../core/services/logger', () => ({
   logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() }
 }))
 
-// Import SUT AFTER mocking
-import { OpencodeAuthProvider } from '../../../core/auth/OpencodeAuthProvider'
+import { OpencodeAuthProvider, OAUTH_POLL_MS } from '../../../core/auth/OpencodeAuthProvider'
+import { opencodeCredentialStore } from '../../../core/opencode/opencode-credentials'
+import { memorySlotMemory } from '../../../core/opencode/credential-store'
+import {
+  fakeChatgptJwt,
+  fakeCredentialTable,
+  type FakeCredentialTable
+} from '../../../core/opencode/__tests__/fixtures/fake-credential-table'
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-const MOCK_CONN = { baseUrl: 'http://127.0.0.1:9999', authHeader: 'Basic test' }
-
-const SAMPLE_CONFIG_PROVIDERS = {
-  providers: [
-    { id: 'opencode', name: 'opencode', source: 'config', env: [], options: {}, models: {} },
-    { id: 'anthropic', name: 'Anthropic', source: 'config', env: [], options: {}, models: {} }
-  ]
+const CONN = {
+  baseUrl: 'http://127.0.0.1:1',
+  password: 'p',
+  authHeader: 'Basic x',
+  directory: '/fake/persisted',
+  startedAt: 0
 }
 
-const SAMPLE_PROVIDER_AUTH: Record<string, Array<{ type: string; label: string }>> = {
-  opencode: [{ type: 'oauth', label: 'opencode (free)' }],
-  anthropic: [
-    { type: 'oauth', label: 'Claude Pro/Max' },
-    { type: 'api', label: 'API key' }
-  ],
-  openai: [{ type: 'api', label: 'OpenAI API key' }],
-  'github-copilot': [{ type: 'oauth', label: 'GitHub Copilot' }]
-}
+const integrations = [
+  { id: 'opencode', name: 'OpenCode Console', methods: [{ type: 'key' }], connections: [] },
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    methods: [
+      { type: 'key' },
+      { type: 'env', names: ['OPENAI_API_KEY'] },
+      { id: 'chatgpt-browser', type: 'oauth', label: 'Codex browser (legacy)' }
+    ],
+    connections: []
+  },
+  { id: 'openrouter', name: 'OpenRouter', methods: [{ type: 'key' }], connections: [] },
+  { id: 'anthropic', name: 'Anthropic', methods: [{ type: 'key' }], connections: [] },
+  {
+    id: 'groq',
+    name: 'Groq',
+    methods: [{ type: 'key' }, { type: 'env', names: ['GROQ_API_KEY'] }],
+    connections: [{ type: 'env', name: 'GROQ_API_KEY' }]
+  },
+  {
+    id: 'github-copilot',
+    name: 'GitHub Copilot',
+    methods: [
+      { type: 'env', names: ['GITHUB_TOKEN'] },
+      {
+        id: 'device',
+        type: 'oauth',
+        label: 'Login with GitHub Copilot',
+        form: [
+          {
+            key: 'deploymentType',
+            title: 'Select GitHub deployment type',
+            type: 'string',
+            options: []
+          },
+          { key: 'server', hidden: true, type: 'string' }
+        ]
+      }
+    ],
+    connections: []
+  }
+]
 
-function setupMocks(): void {
-  mockAcquire.mockReset()
-  mockRelease.mockReset()
-  mockRecycleAll.mockReset()
-  mockGetConfigProviders.mockReset()
-  mockGetProviderAuth.mockReset()
-  mockSetAuth.mockReset()
-  mockRemoveAuth.mockReset()
-  mockOauthAuthorize.mockReset()
-  mockOauthCallback.mockReset()
-  mockInvalidateOpencodeModelCache.mockReset()
-
-  mockAcquire.mockResolvedValue(MOCK_CONN)
-  mockRelease.mockReturnValue(undefined)
-  mockGetConfigProviders.mockResolvedValue(SAMPLE_CONFIG_PROVIDERS)
-  mockGetProviderAuth.mockResolvedValue(SAMPLE_PROVIDER_AUTH)
-  mockSetAuth.mockResolvedValue(true)
-  mockRemoveAuth.mockResolvedValue(true)
-  mockOauthAuthorize.mockResolvedValue({
-    url: 'https://auth.example.com/oauth?state=xyz',
-    method: 'code',
-    instructions: 'Paste the code shown in your browser.'
-  })
-  mockOauthCallback.mockResolvedValue(true)
-
-  MockOpencodeClient.mockReset()
-  MockOpencodeClient.mockImplementation(function () {
-    return {
-      getConfigProviders: mockGetConfigProviders,
-      getProviderAuth: mockGetProviderAuth,
-      setAuth: mockSetAuth,
-      removeAuth: mockRemoveAuth,
-      oauthAuthorize: mockOauthAuthorize,
-      oauthCallback: mockOauthCallback
-    }
-  })
-}
-
-function makeProvider(): OpencodeAuthProvider {
-  // Use the internal class (not the singleton) to get a fresh instance per test
-  return new OpencodeAuthProvider()
-}
-
-// ---------------------------------------------------------------------------
-// probe() reads opencode's own auth.json to decide a vendor's billing type
-// (ADR-071 §2), and that file is resolved from XDG_DATA_HOME. Point it at an
-// empty temp dir for EVERY test here, so no assertion depends on whether the
-// machine running the suite happens to be signed into opencode.
-// ---------------------------------------------------------------------------
-
-let dataHome: string
-let originalDataHome: string | undefined
+let table: FakeCredentialTable
+let provider: OpencodeAuthProvider
 
 beforeEach(() => {
-  originalDataHome = process.env.XDG_DATA_HOME
-  dataHome = mkdtempSync(join(tmpdir(), 'opencode-datahome-'))
-  process.env.XDG_DATA_HOME = dataHome
+  vi.clearAllMocks()
+  table = fakeCredentialTable()
+  opencodeCredentialStore.configure({
+    connect: table.connect,
+    available: () => true,
+    memory: memorySlotMemory()
+  })
+  mockAcquire.mockResolvedValue(CONN)
+  client.integrations.mockResolvedValue(integrations)
+  client.providers.mockImplementation(async () => {
+    const usable = new Set(['opencode', 'groq'])
+    for (const row of table.rows()) if (row.active) usable.add(row.integrationID)
+    return [...usable].map((id) => ({ id, name: id, activation: 'auto', package: 'x' }))
+  })
+  provider = new OpencodeAuthProvider()
 })
 
 afterEach(() => {
-  if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME
-  else process.env.XDG_DATA_HOME = originalDataHome
-  rmSync(dataHome, { recursive: true, force: true })
+  // Every lease handed out was released.
+  expect(mockReleaseIfCurrent.mock.calls.length).toBe(mockAcquire.mock.calls.length)
+  expect(table.leases.opened).toBe(table.leases.released)
 })
 
-/** Write opencode's auth.json under the ACTIVE XDG_DATA_HOME. */
-function writeAuthJson(contents: string): void {
-  const dir = join(process.env.XDG_DATA_HOME as string, 'opencode')
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'auth.json'), contents, 'utf-8')
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-describe('OpencodeAuthProvider — probe()', () => {
-  beforeEach(setupMocks)
-
-  it('merges config/providers + provider/auth into VendorAuthMap', async () => {
-    const provider = makeProvider()
-    const map = await provider.probe()
-
-    // configured vendors → authenticated
-    expect(map['opencode']?.authState).toBe('authenticated')
-    expect(map['anthropic']?.authState).toBe('authenticated')
-
-    // unconfigured but in catalog → unauthenticated
-    expect(map['openai']?.authState).toBe('unauthenticated')
-    expect(map['github-copilot']?.authState).toBe('unauthenticated')
-  })
-
-  it('infers billingType: free for opencode/zen vendors', async () => {
-    const provider = makeProvider()
-    const map = await provider.probe()
-    expect(map['opencode']?.billingType).toBe('free')
-  })
-
-  it('infers billingType: subscription for oauth-only configured vendor', async () => {
-    // github-copilot is unconfigured here, but if it were configured with only oauth...
-    mockGetConfigProviders.mockResolvedValue({
-      providers: [
-        ...SAMPLE_CONFIG_PROVIDERS.providers,
-        {
-          id: 'github-copilot',
-          name: 'GitHub Copilot',
-          source: 'config',
-          env: [],
-          options: {},
-          models: {}
-        }
-      ]
+describe('probe()', () => {
+  it('merges integrations, usable providers and the credential snapshot', async () => {
+    await provider.setVendorApiKey('openrouter', 'sk-or-fake')
+    await opencodeCredentialStore.vendChatgpt({
+      access: fakeChatgptJwt('acct-1', Math.floor(Date.now() / 1000) + 3600),
+      expires: Date.now() + 3_600_000
     })
-    const provider = makeProvider()
     const map = await provider.probe()
-    expect(map['github-copilot']?.billingType).toBe('subscription')
+    expect(map.opencode).toEqual({ authState: 'authenticated', billingType: 'free' })
+    expect(map.openai).toEqual({ authState: 'authenticated', billingType: 'subscription' })
+    expect(map.openrouter).toEqual({ authState: 'authenticated', billingType: 'apiKey' })
+    expect(map.anthropic).toEqual({ authState: 'unauthenticated', billingType: 'unknown' })
+    // Configured from the environment: no row, the methods decide.
+    expect(map.groq).toEqual({ authState: 'authenticated', billingType: 'apiKey' })
   })
 
-  it('infers billingType: apiKey for api-only configured vendor', async () => {
-    mockGetConfigProviders.mockResolvedValue({
-      providers: [
-        ...SAMPLE_CONFIG_PROVIDERS.providers,
-        { id: 'openai', name: 'OpenAI', source: 'config', env: [], options: {}, models: {} }
-      ]
-    })
-    const provider = makeProvider()
-    const map = await provider.probe()
-    expect(map['openai']?.billingType).toBe('apiKey')
-  })
-
-  it('infers billingType: unknown for unconfigured vendors', async () => {
-    const provider = makeProvider()
-    const map = await provider.probe()
-    expect(map['openai']?.billingType).toBe('unknown')
-    expect(map['github-copilot']?.billingType).toBe('unknown')
-  })
-
-  // ADR-071 §2 — the STORED credential, not the auth options a vendor offers,
-  // decides how its turns are billed. `openai` offers both oauth and api, so
-  // the option-based inference read a ChatGPT subscription as 'apiKey' and
-  // priced covered turns as real spend.
-  it('takes billingType from an oauth credential, even when the vendor also offers api', async () => {
-    mockGetProviderAuth.mockResolvedValue({
-      ...SAMPLE_PROVIDER_AUTH,
-      openai: [
-        { type: 'oauth', label: 'ChatGPT' },
-        { type: 'api', label: 'OpenAI API key' }
-      ]
-    })
-    mockGetConfigProviders.mockResolvedValue({
-      providers: [
-        ...SAMPLE_CONFIG_PROVIDERS.providers,
-        { id: 'openai', name: 'OpenAI', source: 'config', env: [], options: {}, models: {} }
-      ]
-    })
-    writeAuthJson(JSON.stringify({ openai: { type: 'oauth', expires: 1 } }))
-
-    const map = await makeProvider().probe()
-    expect(map['openai']?.billingType).toBe('subscription')
-  })
-
-  it('takes billingType from an api credential for the same vendor', async () => {
-    mockGetProviderAuth.mockResolvedValue({
-      ...SAMPLE_PROVIDER_AUTH,
-      openai: [
-        { type: 'oauth', label: 'ChatGPT' },
-        { type: 'api', label: 'OpenAI API key' }
-      ]
-    })
-    mockGetConfigProviders.mockResolvedValue({
-      providers: [
-        ...SAMPLE_CONFIG_PROVIDERS.providers,
-        { id: 'openai', name: 'OpenAI', source: 'config', env: [], options: {}, models: {} }
-      ]
-    })
-    writeAuthJson(JSON.stringify({ openai: { type: 'api' } }))
-
-    const map = await makeProvider().probe()
-    expect(map['openai']?.billingType).toBe('apiKey')
-  })
-
-  it('falls back to the option-based inference for a vendor with NO stored credential', async () => {
-    // A key from the environment or from opencode.json: configured, nothing in
-    // auth.json. anthropic offers oauth AND api → the old inference says apiKey.
-    writeAuthJson(JSON.stringify({ openai: { type: 'api' } }))
-
-    const map = await makeProvider().probe()
-    expect(map['anthropic']?.billingType).toBe('apiKey')
-  })
-
-  it('a missing or unparseable auth.json changes nothing', async () => {
-    const missing = await makeProvider().probe()
-    expect(missing['anthropic']?.billingType).toBe('apiKey')
-    expect(missing['opencode']?.billingType).toBe('free')
-
-    writeAuthJson('{"anthropic":{"type":"oauth"')
-    const corrupt = await makeProvider().probe()
-    expect(corrupt).toEqual(missing)
-  })
-
-  it('a free vendor stays free whatever it stored', async () => {
-    writeAuthJson(JSON.stringify({ opencode: { type: 'oauth', expires: 1 } }))
-    const map = await makeProvider().probe()
-    expect(map['opencode']?.billingType).toBe('free')
-  })
-
-  it('degrades to {} on any failure (opencode optional)', async () => {
-    mockAcquire.mockRejectedValue(new Error('binary not found'))
-    const provider = makeProvider()
-    const map = await provider.probe()
-    expect(map).toEqual({})
-  })
-
-  it('caches the probe result (second call skips HTTP)', async () => {
-    const provider = makeProvider()
+  it('caches, and a credential change ClaudeUI makes drops the cache', async () => {
     await provider.probe()
     await provider.probe()
-    // acquire should only be called once
-    expect(mockAcquire).toHaveBeenCalledTimes(1)
+    expect(client.integrations).toHaveBeenCalledTimes(1)
+    await provider.setVendorApiKey('anthropic', 'sk-ant-fake')
+    const map = await provider.probe()
+    expect(client.integrations).toHaveBeenCalledTimes(2)
+    expect(map.anthropic).toEqual({ authState: 'authenticated', billingType: 'apiKey' })
+  })
+
+  it('degrades to {} when opencode cannot be reached', async () => {
+    mockAcquire.mockRejectedValueOnce(new Error('no binary'))
+    await expect(provider.probe()).resolves.toEqual({})
+    // No lease was handed out, so none is owed (afterEach balances the rest).
+    mockAcquire.mock.calls.pop()
   })
 })
 
-describe('OpencodeAuthProvider — setVendorApiKey()', () => {
-  beforeEach(setupMocks)
-
-  it('calls PUT /auth/{vendorId} with {type:api, key}', async () => {
-    const provider = makeProvider()
-    await provider.setVendorApiKey('openai', 'sk-test-123')
-    expect(mockSetAuth).toHaveBeenCalledWith('openai', { type: 'api', key: 'sk-test-123' })
+describe('API keys', () => {
+  it('vends cred_claudeui_<vendor>_v<n> and lists the active types — never a key', async () => {
+    await provider.setVendorApiKey('openrouter', 'sk-or-fake')
+    expect(table.active('openrouter')?.id).toBe('cred_claudeui_openrouter_v1')
+    const ids = await provider.listVendorCredentialIds()
+    expect(ids).toEqual({ openrouter: 'api' })
+    expect(JSON.stringify(ids)).not.toContain('sk-or')
+    expect([...(await provider.listRemovableVendorIds())]).toEqual(['openrouter'])
   })
 
-  it('invalidates the model cache after setting key', async () => {
-    const provider = makeProvider()
-    await provider.setVendorApiKey('openai', 'sk-test-123')
-    expect(mockInvalidateOpencodeModelCache).toHaveBeenCalledTimes(1)
+  it('removeVendorAuth removes only ClaudeUI’s rows and gives the slot back to the user’s', async () => {
+    table.seed({
+      id: 'cred_user_or',
+      integrationID: 'openrouter',
+      value: { type: 'key', key: 'sk-user-own' }
+    })
+    await provider.setVendorApiKey('openrouter', 'sk-or-fake')
+    expect(table.active('openrouter')?.id).toBe('cred_claudeui_openrouter_v1')
+    await provider.removeVendorAuth('openrouter')
+    expect(table.rows().map((row) => [row.id, row.active])).toEqual([['cred_user_or', true]])
+    expect(await provider.listRemovableVendorIds()).toEqual(new Set())
   })
 
-  it('invalidates the probe cache so next probe() re-fetches', async () => {
-    const provider = makeProvider()
-    await provider.probe() // warm cache
-    await provider.setVendorApiKey('openai', 'sk-test-123')
-    await provider.probe() // should re-fetch
-    expect(mockAcquire).toHaveBeenCalledTimes(3) // probe + setKey + re-probe each acquire once
+  it('a removal of a key ClaudeUI never vended touches nothing', async () => {
+    table.seed({
+      id: 'cred_user_or',
+      integrationID: 'openrouter',
+      value: { type: 'key', key: 'k' }
+    })
+    await provider.removeVendorAuth('openrouter')
+    expect(table.calls).toEqual([])
+    expect(table.rows()).toHaveLength(1)
   })
 })
 
-// The shared-provider sync re-vends every key at each boot. Re-storing a key
-// opencode already holds used to start a server for the PUT, invalidate the
-// model cache (killing the probe in flight) and recycle every opencode server.
-describe('OpencodeAuthProvider — setVendorApiKey() with the key already stored', () => {
-  beforeEach(setupMocks)
+describe('listVendorAuthOptions()', () => {
+  it('offers opencode’s key and OAuth methods in order (env and command are not sign-ins)', async () => {
+    const options = await provider.listVendorAuthOptions()
+    expect(options.openai).toEqual([
+      { type: 'api', label: 'API key' },
+      { type: 'oauth', label: 'Codex browser (legacy)' }
+    ])
+    expect(options['github-copilot']).toEqual([
+      {
+        type: 'oauth',
+        label: 'Login with GitHub Copilot',
+        prompts: [
+          { type: 'select', key: 'deploymentType', message: 'Select GitHub deployment type' }
+        ]
+      }
+    ])
+  })
+})
 
-  function expectNoMutation(): void {
-    expect(mockAcquire).not.toHaveBeenCalled()
-    expect(mockSetAuth).not.toHaveBeenCalled()
-    expect(mockInvalidateOpencodeModelCache).not.toHaveBeenCalled()
-    expect(mockRecycleAll).not.toHaveBeenCalled()
-  }
+describe('OAuth on opencode’s integration flow', () => {
+  const attempt = (mode: 'auto' | 'code') => ({
+    data: {
+      attemptID: 'att_1',
+      url: 'https://example.invalid/authorize',
+      instructions: 'Open the link',
+      mode,
+      time: { created: Date.now(), expires: Date.now() + 600_000 }
+    }
+  })
 
-  function expectMutation(key: string): void {
-    expect(mockSetAuth).toHaveBeenCalledWith('openrouter', { type: 'api', key })
-    expect(mockInvalidateOpencodeModelCache).toHaveBeenCalledTimes(1)
-    expect(mockRecycleAll).toHaveBeenCalledTimes(1)
-  }
+  it('code mode: connect with the method id by index and a one-off label, complete with the pasted code, adopt the row, release', async () => {
+    table.seed({
+      id: 'cred_user_gh',
+      integrationID: 'github-copilot',
+      label: 'mine',
+      value: { type: 'key', key: 'gh-user' }
+    })
+    let label = ''
+    client.call.mockImplementation(async (op: string, init: { body?: { label?: string } }) => {
+      if (op === 'integration.get') return { data: integrations[5] }
+      if (op === 'integration.oauth.connect') {
+        label = init.body?.label ?? ''
+        return attempt('code')
+      }
+      // opencode stores the attempt's row: ITS id, the attempt's label.
+      if (op === 'integration.oauth.complete')
+        table.seed({
+          id: 'ghc_opencode_chosen',
+          integrationID: 'github-copilot',
+          label,
+          value: { type: 'oauth', methodID: 'device', refresh: 'r', access: 'a', expires: 1 }
+        })
+      return undefined
+    })
+    const started = await provider.oauthAuthorize('github-copilot', 0, {
+      deploymentType: 'github.com'
+    })
+    expect(started).toEqual({
+      url: 'https://example.invalid/authorize',
+      method: 'code',
+      instructions: 'Open the link'
+    })
+    expect(client.call).toHaveBeenCalledWith('integration.oauth.connect', {
+      params: { integrationID: 'github-copilot' },
+      body: {
+        methodID: 'device',
+        label: expect.stringMatching(/^claudeui:signin:[0-9a-f]{16}$/),
+        answer: { deploymentType: 'github.com' }
+      }
+    })
+    // The attempt lives in that server: still held.
+    expect(mockReleaseIfCurrent).not.toHaveBeenCalled()
+    await expect(provider.oauthCallback('github-copilot', 0, 'CODE-1')).resolves.toBe(true)
+    expect(client.call).toHaveBeenCalledWith('integration.oauth.complete', {
+      params: { integrationID: 'github-copilot', attemptID: 'att_1' },
+      body: { code: 'CODE-1' }
+    })
+    expect(mockReleaseIfCurrent).toHaveBeenCalledTimes(1)
+    // The sign-in started from ClaudeUI is ClaudeUI's: Remove takes it and
+    // gives the slot back to the user's row.
+    expect(await provider.listRemovableVendorIds()).toEqual(new Set(['github-copilot']))
+    await provider.removeVendorAuth('github-copilot')
+    expect(table.rows().map((row) => [row.id, row.active])).toEqual([['cred_user_gh', true]])
+  })
 
-  it('starts no server, writes nothing, invalidates nothing and recycles nothing', async () => {
-    writeAuthJson(
-      JSON.stringify({
-        openrouter: { type: 'api', key: 'sk-fixture-1' },
-        openai: { type: 'oauth', refresh: 'r', access: 'a', expires: 1 }
+  it('auto mode: polls the attempt until it completes', async () => {
+    vi.useFakeTimers()
+    try {
+      let polls = 0
+      client.call.mockImplementation(async (op: string) => {
+        if (op === 'integration.get') return { data: integrations[1] }
+        if (op === 'integration.oauth.connect') return attempt('auto')
+        if (op === 'integration.oauth.status')
+          return { data: { status: ++polls < 3 ? 'pending' : 'complete', time: {} } }
+        return undefined
       })
-    )
-    await makeProvider().setVendorApiKey('openrouter', 'sk-fixture-1')
-    expectNoMutation()
+      await provider.oauthAuthorize('openai', 1)
+      expect(client.call).toHaveBeenCalledWith('integration.oauth.connect', {
+        params: { integrationID: 'openai' },
+        body: {
+          methodID: 'chatgpt-browser',
+          label: expect.stringMatching(/^claudeui:signin:/)
+        }
+      })
+      const done = provider.oauthCallback('openai', 1)
+      await vi.advanceTimersByTimeAsync(OAUTH_POLL_MS * 3)
+      await expect(done).resolves.toBe(true)
+      expect(polls).toBe(3)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
-  it('keeps the probe cache: the next probe() does not re-fetch', async () => {
-    writeAuthJson(JSON.stringify({ openrouter: { type: 'api', key: 'sk-fixture-1' } }))
-    const provider = makeProvider()
-    await provider.probe()
-    await provider.setVendorApiKey('openrouter', 'sk-fixture-1')
-    await provider.probe()
-    expect(mockAcquire).toHaveBeenCalledTimes(1)
+  it('refuses a method index that is not an OAuth method, and releases', async () => {
+    client.call.mockResolvedValue({ data: integrations[1] })
+    await expect(provider.oauthAuthorize('openai', 0)).rejects.toThrow(/no OAuth method/)
+    expect(mockReleaseIfCurrent).toHaveBeenCalledTimes(1)
   })
 
-  it('stores a different key exactly as before', async () => {
-    writeAuthJson(JSON.stringify({ openrouter: { type: 'api', key: 'sk-fixture-1' } }))
-    await makeProvider().setVendorApiKey('openrouter', 'sk-fixture-2')
-    expectMutation('sk-fixture-2')
-  })
-
-  it.each([
-    ['the vendor has no entry', { openai: { type: 'api', key: 'sk-fixture-1' } }],
-    ['the vendor holds an oauth entry', { openrouter: { type: 'oauth', access: 'sk-fixture-1' } }],
-    // opencode's PUT replaces the entry whole, so a field beyond {type, key}
-    // is something it would drop: that is a change, not a match.
-    [
-      'the entry carries more than the PUT would store',
-      { openrouter: { type: 'api', key: 'sk-fixture-1', metadata: { a: 'b' } } }
-    ]
-  ])('stores the key when %s', async (_label, file) => {
-    writeAuthJson(JSON.stringify(file))
-    await makeProvider().setVendorApiKey('openrouter', 'sk-fixture-1')
-    expectMutation('sk-fixture-1')
-  })
-
-  it.each([
-    ['missing', null],
-    ['unparseable', '{"openrouter":{"type":"api","key":"sk-fixture-1"'],
-    ['not an object', '["openrouter"]']
-  ])('goes through the server as before when auth.json is %s', async (_label, contents) => {
-    if (contents !== null) writeAuthJson(contents)
-    await makeProvider().setVendorApiKey('openrouter', 'sk-fixture-1')
-    expectMutation('sk-fixture-1')
-  })
-})
-
-describe('OpencodeAuthProvider — oauthAuthorize()', () => {
-  beforeEach(setupMocks)
-
-  it('calls POST /provider/{vendorId}/oauth/authorize with method + inputs', async () => {
-    const provider = makeProvider()
-    const result = await provider.oauthAuthorize('anthropic', 0, { extra: 'val' })
-    expect(mockOauthAuthorize).toHaveBeenCalledWith('anthropic', 0, { extra: 'val' })
-    expect(result.url).toBe('https://auth.example.com/oauth?state=xyz')
-    expect(result.method).toBe('code')
-    expect(result.instructions).toBeTruthy()
-  })
-
-  it('does NOT invalidate cache (no mutation)', async () => {
-    const provider = makeProvider()
-    await provider.probe() // warm cache
-    await provider.oauthAuthorize('anthropic', 0)
-    // cache still warm — no second acquire for probe
-    expect(mockInvalidateOpencodeModelCache).not.toHaveBeenCalled()
-  })
-})
-
-describe('OpencodeAuthProvider — oauthCallback()', () => {
-  beforeEach(setupMocks)
-
-  it('calls POST /provider/{vendorId}/oauth/callback with method + code', async () => {
-    const provider = makeProvider()
-    const ok = await provider.oauthCallback('anthropic', 0, 'abc123')
-    expect(mockOauthCallback).toHaveBeenCalledWith('anthropic', 0, 'abc123')
-    expect(ok).toBe(true)
-  })
-
-  it('invalidates model cache and probe cache on success', async () => {
-    const provider = makeProvider()
-    await provider.probe() // warm cache
-    await provider.oauthCallback('anthropic', 0, 'abc123')
-    expect(mockInvalidateOpencodeModelCache).toHaveBeenCalledTimes(1)
-    // next probe should re-fetch
-    await provider.probe()
-    expect(mockAcquire).toHaveBeenCalledTimes(3) // probe + callback + re-probe
-  })
-})
-
-describe('OpencodeAuthProvider — OAuth flow server continuity', () => {
-  beforeEach(setupMocks)
-
-  it('holds the server open across authorize → callback (does not release after authorize)', async () => {
-    const provider = makeProvider()
-    await provider.oauthAuthorize('openai', 0)
-    // authorize acquired but must NOT release — the loopback/PKCE state lives in
-    // that process and a release would kill it before callback runs.
-    expect(mockAcquire).toHaveBeenCalledTimes(1)
-    expect(mockRelease).not.toHaveBeenCalled()
-
-    await provider.oauthCallback('openai', 0)
-    // callback acquires its own ref then releases BOTH (its ref + the hold).
-    expect(mockAcquire).toHaveBeenCalledTimes(2)
-    expect(mockRelease).toHaveBeenCalledTimes(2)
-  })
-
-  it('releases the hold if authorize itself fails', async () => {
-    mockOauthAuthorize.mockRejectedValueOnce(new Error('authorize boom'))
-    const provider = makeProvider()
-    await expect(provider.oauthAuthorize('openai', 0)).rejects.toThrow('authorize boom')
-    // acquired then released — no dangling hold.
-    expect(mockAcquire).toHaveBeenCalledTimes(1)
-    expect(mockRelease).toHaveBeenCalledTimes(1)
-  })
-
-  it('cancelVendorOauth() releases an in-flight hold (idempotent)', async () => {
-    const provider = makeProvider()
-    await provider.oauthAuthorize('openai', 0)
-    expect(mockRelease).not.toHaveBeenCalled()
-
+  it('cancel cancels the attempt and releases once', async () => {
+    client.call.mockImplementation(async (op: string) => {
+      if (op === 'integration.get') return { data: integrations[1] }
+      if (op === 'integration.oauth.connect') return attempt('auto')
+      return undefined
+    })
+    await provider.oauthAuthorize('openai', 1)
     await provider.cancelVendorOauth()
-    expect(mockRelease).toHaveBeenCalledTimes(1)
-    // second cancel is a no-op (hold already released)
     await provider.cancelVendorOauth()
-    expect(mockRelease).toHaveBeenCalledTimes(1)
-  })
-
-  it('a new authorize releases a stale hold from an abandoned prior flow', async () => {
-    const provider = makeProvider()
-    await provider.oauthAuthorize('openai', 0) // hold #1
-    await provider.oauthAuthorize('anthropic', 0) // should release #1, take #2
-    // acquire: 2 (one per authorize); release: 1 (stale #1 dropped)
-    expect(mockAcquire).toHaveBeenCalledTimes(2)
-    expect(mockRelease).toHaveBeenCalledTimes(1)
-  })
-
-  it('orphan callback (no prior authorize) acquires + releases once, no double-release', async () => {
-    const provider = makeProvider()
-    await provider.oauthCallback('openai', 0)
-    expect(mockAcquire).toHaveBeenCalledTimes(1)
-    expect(mockRelease).toHaveBeenCalledTimes(1)
+    expect(client.call).toHaveBeenCalledWith('integration.oauth.cancel', {
+      params: { integrationID: 'openai', attemptID: 'att_1' }
+    })
+    expect(mockReleaseIfCurrent).toHaveBeenCalledTimes(1)
   })
 })
 
-describe('OpencodeAuthProvider — removeVendorAuth()', () => {
-  beforeEach(setupMocks)
-
-  it('calls DELETE /auth/{vendorId}', async () => {
-    writeAuthJson(JSON.stringify({ openai: { type: 'api', key: 'sk-fixture-1' } }))
-    const provider = makeProvider()
-    await provider.removeVendorAuth('openai')
-    expect(mockRemoveAuth).toHaveBeenCalledWith('openai')
+describe('accounts', () => {
+  it('names the account of the active row (ChatGPT vended, a key) and the native key otherwise', async () => {
+    await opencodeCredentialStore.vendChatgpt({
+      access: fakeChatgptJwt('acct-9', Math.floor(Date.now() / 1000) + 3600),
+      expires: Date.now()
+    })
+    await provider.setVendorApiKey('openrouter', 'sk-or-fake-1234')
+    expect(provider.accountIdentity('openai').accountKey).toMatch(/^chatgpt:acct-9/)
+    expect(provider.accountIdentity('openrouter').accountKey).not.toContain('sk-or-fake')
+    expect(provider.accountIdentity('mistral')).toEqual({
+      accountKey: 'opencode:mistral:native',
+      accountLabel: 'mistral'
+    })
   })
 
-  it('invalidates model cache after removal', async () => {
-    writeAuthJson(JSON.stringify({ openai: { type: 'api', key: 'sk-fixture-1' } }))
-    const provider = makeProvider()
-    await provider.removeVendorAuth('openai')
-    expect(mockInvalidateOpencodeModelCache).toHaveBeenCalledTimes(1)
-  })
-
-  // The shared-provider sync removes the key of every provider whose opencode
-  // route is off, at each boot, mostly where there is none. Removing nothing
-  // must not start a server, drop the model cache (killing the probe in flight)
-  // or recycle the pool.
-  it.each([
-    ['the vendor has no entry', JSON.stringify({ openai: { type: 'api', key: 'sk-fixture-1' } })],
-    ['auth.json does not exist', null]
-  ])('does nothing when %s', async (_label, contents) => {
-    if (contents !== null) writeAuthJson(contents)
-    await makeProvider().removeVendorAuth('openrouter')
-    expect(mockAcquire).not.toHaveBeenCalled()
-    expect(mockRemoveAuth).not.toHaveBeenCalled()
-    expect(mockInvalidateOpencodeModelCache).not.toHaveBeenCalled()
-    expect(mockRecycleAll).not.toHaveBeenCalled()
-  })
-
-  it.each([
-    [
-      'the vendor has an entry',
-      JSON.stringify({ openrouter: { type: 'api', key: 'sk-fixture-1' } })
-    ],
-    // Unreadable is not "absent": opencode's own DELETE decides, as before.
-    ['auth.json is unparseable', '{"openrouter":{"type":"api"']
-  ])('removes through the server as before when %s', async (_label, contents) => {
-    writeAuthJson(contents)
-    await makeProvider().removeVendorAuth('openrouter')
-    expect(mockRemoveAuth).toHaveBeenCalledWith('openrouter')
-    expect(mockInvalidateOpencodeModelCache).toHaveBeenCalledTimes(1)
-    expect(mockRecycleAll).toHaveBeenCalledTimes(1)
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Pooled-server recycle. opencode builds its provider map once per process and
-// never watches auth.json, so a credential change is invisible to every
-// already-running server (ProviderModelNotFoundError on the next prompt) until
-// it restarts. Every USER-INITIATED mutation must therefore recycle the pool —
-// but only on success, and only after our own transient ref is released.
-// ---------------------------------------------------------------------------
-
-describe('OpencodeAuthProvider — recycles pooled servers on auth mutations', () => {
-  beforeEach(setupMocks)
-
-  it('setVendorApiKey success recycles exactly once, AFTER release', async () => {
-    await makeProvider().setVendorApiKey('openai', 'sk-test-123')
-    expect(mockRecycleAll).toHaveBeenCalledTimes(1)
-    expect(mockRelease).toHaveBeenCalledTimes(1)
-    expect(mockRecycleAll.mock.invocationCallOrder[0]).toBeGreaterThan(
-      mockRelease.mock.invocationCallOrder[0]
-    )
-  })
-
-  it('setVendorApiKey does NOT recycle when the PUT fails', async () => {
-    mockSetAuth.mockRejectedValueOnce(new Error('403 policy'))
-    await expect(makeProvider().setVendorApiKey('openai', 'sk-test-123')).rejects.toThrow('403')
-    expect(mockRelease).toHaveBeenCalledTimes(1) // ref still released
-    expect(mockRecycleAll).not.toHaveBeenCalled()
-  })
-
-  it('removeVendorAuth success recycles; a failed DELETE does not', async () => {
-    writeAuthJson(JSON.stringify({ openai: { type: 'api', key: 'sk-fixture-1' } }))
-    await makeProvider().removeVendorAuth('openai')
-    expect(mockRecycleAll).toHaveBeenCalledTimes(1)
-
-    mockRecycleAll.mockClear()
-    mockRemoveAuth.mockRejectedValueOnce(new Error('delete boom'))
-    await expect(makeProvider().removeVendorAuth('openai')).rejects.toThrow('delete boom')
-    expect(mockRecycleAll).not.toHaveBeenCalled()
-  })
-
-  it('oauthCallback recycles only when the flow actually completed', async () => {
-    await makeProvider().oauthCallback('anthropic', 0, 'abc123')
-    expect(mockRecycleAll).toHaveBeenCalledTimes(1)
-
-    // `false` = flow did not complete → auth.json unchanged → nothing stale.
-    mockRecycleAll.mockClear()
-    mockOauthCallback.mockResolvedValueOnce(false)
-    await makeProvider().oauthCallback('anthropic', 0, 'abc123')
-    expect(mockRecycleAll).not.toHaveBeenCalled()
-
-    mockOauthCallback.mockRejectedValueOnce(new Error('callback boom'))
-    await expect(makeProvider().oauthCallback('anthropic', 0, 'abc123')).rejects.toThrow(
-      'callback boom'
-    )
-    expect(mockRecycleAll).not.toHaveBeenCalled()
-  })
-})
-
-describe('OpencodeAuthProvider — buildAccountRef()', () => {
-  beforeEach(setupMocks)
-
-  it('returns null before probe() has run', () => {
-    const provider = makeProvider()
-    const ref = provider.buildAccountRef('openai')
-    expect(ref).toBeNull()
-  })
-
-  it('returns an AccountRef after warmCache()', async () => {
-    const provider = makeProvider()
+  it('buildAccountRef reads the warmed probe', async () => {
+    expect(provider.buildAccountRef('opencode')).toBeNull()
     await provider.warmCache()
-    const ref = provider.buildAccountRef('openai')
-    expect(ref).not.toBeNull()
-    expect(ref?.engineId).toBe('opencode')
-    expect(ref?.vendorId).toBe('openai')
-    expect(ref?.authState).toBe('unauthenticated')
-    expect(ref?.billingType).toBe('unknown')
-  })
-
-  it('returns authenticated ref for configured vendor after warmCache()', async () => {
-    const provider = makeProvider()
-    await provider.warmCache()
-    const ref = provider.buildAccountRef('anthropic')
-    expect(ref?.authState).toBe('authenticated')
-  })
-})
-
-// ---------------------------------------------------------------------------
-// H18 / R2: feedOauthCredential is a read-modify-write against opencode's
-// auth.json — it must NOT overwrite a corrupt-but-present file (which would
-// delete every other vendor's credential). auth.json is resolved from
-// XDG_DATA_HOME, redirected to a temp dir here.
-//
-// RED-FIRST NOTE: pre-fix, feedOauthCredential caught the parse error and
-// "started fresh" (file = {}), so the write dropped anthropic — the survival
-// assertions below would FAIL.
-// ---------------------------------------------------------------------------
-
-describe('OpencodeAuthProvider — feedOauthCredential corrupt guard (H18)', () => {
-  let xdg: string
-  let authPath: string
-  let originalXdg: string | undefined
-
-  beforeEach(() => {
-    setupMocks()
-    originalXdg = process.env.XDG_DATA_HOME
-    xdg = mkdtempSync(join(tmpdir(), 'opencode-auth-'))
-    process.env.XDG_DATA_HOME = xdg
-    authPath = join(xdg, 'opencode', 'auth.json')
-  })
-
-  afterEach(() => {
-    if (originalXdg === undefined) delete process.env.XDG_DATA_HOME
-    else process.env.XDG_DATA_HOME = originalXdg
-    rmSync(xdg, { recursive: true, force: true })
-  })
-
-  const corrupt = '{"anthropic":{"type":"api","key":"sk-ant"},"openai":' // truncated
-
-  it('REFUSES to write over a corrupt auth.json — other vendors survive + a backup is made', async () => {
-    mkdirSync(join(xdg, 'opencode'), { recursive: true })
-    writeFileSync(authPath, corrupt, 'utf-8')
-
-    await expect(
-      makeProvider().feedOauthCredential('openai', { access: 'a', refresh: 'r', expires: 1 })
-    ).rejects.toThrow(/Refusing to overwrite/)
-
-    const onDisk = readFileSync(authPath, 'utf-8')
-    expect(onDisk).toBe(corrupt)
-    expect(onDisk).toContain('sk-ant')
-    expect(readFileSync(`${authPath}.corrupt`, 'utf-8')).toBe(corrupt)
-  })
-
-  it('merges into a VALID auth.json, preserving every other vendor', async () => {
-    mkdirSync(join(xdg, 'opencode'), { recursive: true })
-    writeFileSync(authPath, JSON.stringify({ anthropic: { type: 'api', key: 'sk-ant' } }), 'utf-8')
-
-    await makeProvider().feedOauthCredential('openai', {
-      access: 'a',
-      refresh: 'r',
-      expires: 1,
-      accountId: 'acct-1'
+    expect(provider.buildAccountRef('opencode')).toMatchObject({
+      engineId: 'opencode',
+      vendorId: 'opencode',
+      billingType: 'free'
     })
-
-    expect(JSON.parse(readFileSync(authPath, 'utf-8'))).toEqual({
-      anthropic: { type: 'api', key: 'sk-ant' },
-      openai: { type: 'oauth', refresh: 'r', access: 'a', expires: 1, accountId: 'acct-1' }
-    })
-  })
-
-  it('creates a fresh auth.json when the file is simply MISSING', async () => {
-    await makeProvider().feedOauthCredential('openai', { access: 'a', refresh: 'r', expires: 1 })
-    expect(JSON.parse(readFileSync(authPath, 'utf-8'))).toEqual({
-      openai: { type: 'oauth', refresh: 'r', access: 'a', expires: 1 }
-    })
-  })
-
-  it('does NOT recycle pooled servers — this feed fires on a background timer', async () => {
-    // Deliberate asymmetry with the user-initiated mutations: killing whatever
-    // sessions happen to be mid-turn on a refresh tick the user never chose is
-    // worse than the documented 401-until-restart edge. See the LIVE-SERVER
-    // STALENESS block in OpencodeAuthProvider.
-    await makeProvider().feedOauthCredential('openai', { access: 'a', refresh: 'r', expires: 1 })
-    expect(mockRecycleAll).not.toHaveBeenCalled()
   })
 })

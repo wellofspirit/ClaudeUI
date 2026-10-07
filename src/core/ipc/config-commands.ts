@@ -96,7 +96,8 @@ import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import {
   readOpencodeNativeConfig,
   writeOpencodeNativeConfig,
-  migrateOpencodeConfigToNative
+  migrateOpencodeConfigToNative,
+  setOpencodeToolDisabled
 } from '../opencode/opencode-config'
 import { readOpencodeNativeRaw, patchOpencodeNativeRaw } from '../opencode/opencode-native-raw'
 import { readPiNativeRaw, patchPiNativeRaw, writePiNativeRawText } from '../pi/pi-native-raw'
@@ -533,7 +534,7 @@ export function configCommands(
       channel: 'config:save-opencode-settings',
       capability: 'config',
       kind: 'command',
-      handler: safeHandler(async (settings: OpencodeConfigSettings) => {
+      handler: safeHandler(async (settings: OpencodeConfigSettings, base?: unknown) => {
         // Write the six native fields to opencode's own config file — and
         // NOTHING else. `modelAllowlist` is dropped on the floor, never routed
         // into `engines/opencode.json`: its one writer is
@@ -542,7 +543,13 @@ export function configCommands(
         // it here let a stale pane put back curation the Manage sheet had just
         // changed.
         const { modelAllowlist: _ignored, ...nativeFields } = settings
-        writeOpencodeNativeConfig(nativeFields)
+        // `base` is the snapshot the pane edited: with it, only what the pane
+        // changed lands on the file as it is now (ADR-097 S8, review F11).
+        const snapshot =
+          base && typeof base === 'object'
+            ? (({ modelAllowlist: _b, ...rest }) => rest)(base as OpencodeConfigSettings)
+            : undefined
+        writeOpencodeNativeConfig(nativeFields, snapshot)
         // Provider changes affect the discoverable model set.
         invalidateOpencodeModelCache()
       })
@@ -591,6 +598,19 @@ export function configCommands(
         patchOpencodeNativeRaw(patches)
         // Capability edits (attachment/modalities/…) change model discovery.
         invalidateOpencodeModelCache()
+      })
+    },
+    // The Tools pane's built-in tool switch (opencode 2.x top-level
+    // `permissions`, which the raw writer refuses): off appends ClaudeUI's
+    // `{action,*,deny}`, on removes it.
+    {
+      channel: 'config:set-opencode-tool-disabled',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (action: unknown, disabled: unknown) => {
+        if (typeof action !== 'string' || typeof disabled !== 'boolean')
+          throw new Error('Invalid opencode tool switch')
+        setOpencodeToolDisabled(action, disabled)
       })
     },
 
@@ -803,9 +823,9 @@ export function configCommands(
         return await testProxyConnection(proxy)
       })
     },
-    // Phase 9b: fetch opencode pricing from /config/providers, persist + register.
-    // Spawns a LOCAL opencode server — host-side work, not host-physical, so it
-    // rides the everything-remote ruling like the rest of this file.
+    // Phase 9b: fetch the models.dev price catalog (ADR-071 §5), persist + register.
+    // Host-side work, not host-physical, so it rides the everything-remote
+    // ruling like the rest of this file.
     {
       channel: 'usage:refresh-prices',
       capability: 'config',

@@ -7,7 +7,7 @@
  * Three sources, in this order (the first place an install is seen supplies
  * its display path, so a PATH hit wins over the package directory behind it):
  *
- *   1. PATH hits for the harness's command, in PATH order.
+ *   1. PATH hits for the harness's command (and its aliases), in PATH order.
  *   2. The harness's own install locations: native installers, Homebrew,
  *      WinGet, scoop, pi.dev's managed install, Codex's standalone installer.
  *   3. The harness's npm package in every npm-family global root (npm, nvm,
@@ -58,8 +58,21 @@ export const HARNESS_COMMANDS: Record<HarnessId, string> = {
 }
 
 /**
- * The npm packages that install each harness. `@opencode/cli` is opencode 2.x,
- * found so it can be labelled incompatible rather than go unmentioned.
+ * Other command names a harness installs (ADR-097 §1): opencode 2.x also
+ * ships `opencode2` (npm's second bin, the install script's legacy shim), so a
+ * 2.x install is found even where a 1.x `opencode` shadows it on PATH.
+ */
+export const HARNESS_COMMAND_ALIASES: Record<HarnessId, readonly string[]> = {
+  claude: [],
+  opencode: ['opencode2'],
+  pi: [],
+  codex: []
+}
+
+/**
+ * The npm packages that install each harness. `@opencode/cli` is opencode 2.x;
+ * 1.x's `opencode-ai` is found so it can be labelled too old rather than go
+ * unmentioned.
  */
 export const HARNESS_PACKAGES: Record<HarnessId, readonly string[]> = {
   claude: ['@anthropic-ai/claude-code'],
@@ -358,8 +371,10 @@ export function harnessDirCandidates(id: HarnessId, deps: CandidateDeps): Candid
 export function harnessCandidates(id: HarnessId, deps: CandidateDeps): Candidate[] {
   const all: Candidate[] = []
   for (const dir of deps.pathEntries) {
-    const hit = commandIn(dir, HARNESS_COMMANDS[id], deps.platform)
-    if (hit) all.push({ id, kind: 'file', path: hit })
+    for (const name of [HARNESS_COMMANDS[id], ...HARNESS_COMMAND_ALIASES[id]]) {
+      const hit = commandIn(dir, name, deps.platform)
+      if (hit) all.push({ id, kind: 'file', path: hit })
+    }
   }
   all.push(...harnessDirCandidates(id, deps))
   for (const root of npmGlobalRoots(deps)) {

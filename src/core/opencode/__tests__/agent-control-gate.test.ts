@@ -54,6 +54,18 @@ describe('opencodeEditTargets', () => {
     ])
   })
 
+  it('opencode 2.x edit/write spell the target `path` (S5): an ordinary edit is clear, a control path is not', () => {
+    expect(
+      opencodeEditTargets(['src/a.ts'], { path: 'src/a.ts', oldString: 'a', newString: 'b' })
+    ).toEqual(['src/a.ts', 'src/a.ts'])
+    expect(
+      editClearsAgentControl(['notes.txt'], { path: 'notes.txt', content: 'x' }, '/repo')
+    ).toBe(true)
+    expect(
+      editClearsAgentControl(['.git/hooks/pre-push'], { path: '.git/hooks/pre-push' }, '/repo')
+    ).toBe(false)
+  })
+
   it('apply_patch from the tool input: move destinations from the patch text', () => {
     expect(opencodeEditTargets(['src/a.ts'], { patchText: PATCH_MOVE })).toEqual([
       'src/a.ts',

@@ -31,8 +31,10 @@
  *
  * Bumping a harness: set `tested` (and `floor`) in
  * `src/shared/harness-manifests/<id>.json` with the new release's reviewed
- * digests (opencode: each platform package's npm `integrity` and the SHA-256 of
- * `package/bin/opencode[.exe]`; pi: each asset's SHA-256 from the release's
+ * digests (opencode: each `@opencode/cli-<os>-<arch>` package's npm `integrity`
+ * and the SHA-256 of `package/bin/opencode[.exe]`, then the tag's commit as
+ * `PIN_COMMIT` in `scripts/generate-opencode-protocol.mjs` and
+ * `bun run generate-opencode-protocol`; pi: each asset's SHA-256 from the release's
  * `SHA256SUMS`; Codex: every host's archive and binary digests, the source
  * commit and the LICENSE digest, then `bun run generate-codex-protocol`), and
  * run `bun run ensure-<id>`.

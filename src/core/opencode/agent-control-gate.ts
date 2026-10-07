@@ -1,21 +1,19 @@
 /**
  * opencode's auto-mode edit gate (ADR-084 §3).
  *
- * In auto mode every opencode `edit` ask reaches ClaudeUI (`buildAutoModeRuleset`),
+ * In auto mode every opencode `edit` ask reaches ClaudeUI (`permission-v2.ts` `autoModeGates`),
  * and `OpencodeSession.handleAutoModeApproval` clears the ordinary ones here,
  * host-side, with the shared agent-control matcher — no judge call. Anything
  * that names an agent-control path, or whose targets cannot all be told, goes
  * to the judge.
  *
- * What an `edit` ask names (vendor/opencode-src/packages/opencode/src/tool/):
- *  - `patterns`: the written path(s) relative to the project worktree —
- *    edit.ts:104/147, write.ts:56, apply_patch.ts:205. For apply_patch these
- *    are the SOURCE paths only; a move destination is not among them.
- *  - the approval's `input`: the tool call's own input when the event mapper
- *    found it (`{filePath, …}` for edit/write, `{patchText}` for apply_patch),
- *    else the ask's `metadata` (`{filepath, diff, …}`, or for apply_patch
- *    `{files: [{filePath, movePath?, …}]}` with absolute paths —
- *    apply_patch.ts:194-202).
+ * What an `edit` ask names (vendor/opencode-src/packages/core/src/tool/plugin/):
+ *  - `patterns` (the ask's resources): the written path(s) — edit.ts, write.ts,
+ *    patch.ts; for a patch they include its move destinations.
+ *  - the approval's `input`: the tool call's own input (`{path, …}` for
+ *    edit/write, `{patchText}` for patch), else the ask's `metadata`
+ *    (`{filepath, diff, files}`). The 1.x shapes (`filePath`, apply_patch's
+ *    `files[].movePath`) are still read: they only add paths to check.
  *
  * Patterns are resolved against the session cwd. opencode makes them relative
  * to the git worktree root, which ClaudeUI does not track; when cwd is the
@@ -26,7 +24,7 @@
  */
 import { isAgentControlTarget } from '../automode/agent-control-paths'
 
-/** apply_patch's move directive (vendor/opencode-src/packages/opencode/src/patch/index.ts:92). */
+/** A patch's move directive (vendor/opencode-src/packages/util/src/patch.ts). */
 const MOVE_TO = /^\s*\*\*\* Move to:(.*)$/i
 
 /**
@@ -70,6 +68,9 @@ export function opencodeEditTargets(
       if (typeof movePath !== 'string' || !movePath) return null
       targets.push(movePath)
     }
+  } else if (typeof input.path === 'string') {
+    // opencode 2.x `edit`/`write` (`tool/plugin/edit.ts`, `write.ts`: `filePath` → `path`).
+    targets.push(input.path)
   } else if (typeof input.filePath === 'string' || typeof input.filepath === 'string') {
     targets.push((typeof input.filePath === 'string' ? input.filePath : input.filepath) as string)
   } else {

@@ -1727,6 +1727,39 @@ describe('decide — acceptEdits base asks for agent-control paths (ADR-084)', (
   })
 })
 
+describe('decide — Windows `//c/…` absolute rules (Claude Code writes C:/x as //c/x)', () => {
+  const ctx = (deny: string[], cwd: string) => ({
+    mode: 'default',
+    rules: rules({ deny }),
+    sessionAllows: NO_SESSION_ALLOWS,
+    cwd
+  })
+
+  it.each(['Edit(//c/repo/secrets/**)', 'Edit(//C:/repo/secrets/**)', 'Edit(//C/repo/secrets/**)'])(
+    '%s denies an Edit of C:\\repo\\secrets\\k under a Windows cwd',
+    (rule) => {
+      const c = ctx([rule], 'C:\\repo')
+      expect(decide('edit', { path: 'C:\\repo\\secrets\\k' }, c)).toBe('deny')
+      expect(decide('edit', { path: 'c:/repo/secrets/k' }, c)).toBe('deny')
+      expect(decide('edit', { path: 'secrets\\k' }, c)).toBe('deny')
+      expect(decide('edit', { path: 'C:\\repo\\src\\k' }, c)).toBe('ask')
+    }
+  )
+
+  it('the bare drive `//c` covers the whole drive', () => {
+    expect(decide('read', { path: 'C:\\any\\thing' }, ctx(['Read(//c/**)'], 'C:\\repo'))).toBe(
+      'deny'
+    )
+    expect(decide('read', { path: 'D:\\any\\thing' }, ctx(['Read(//c/**)'], 'C:\\repo'))).toBe(
+      'allow'
+    )
+  })
+
+  it('a POSIX cwd keeps `//c/x` as `/c/x`', () => {
+    expect(decide('read', { path: '/c/x' }, ctx(['Read(//c/x)'], '/repo'))).toBe('deny')
+  })
+})
+
 /**
  * ADR-096. pi names an MCP tool `mcp__<server>__<tool>` passed through its
  * sanitizer (everything but `[A-Za-z0-9_]` → `_`), so `my-server`'s `get-issue`

@@ -29,6 +29,9 @@ describe('parseVersionOutput', () => {
   it.each([
     ['claude', '2.1.280 (Claude Code)\n', '2.1.280'],
     ['claude', '2.1.198 (Claude Code)', '2.1.198'],
+    // 2.x prints `opencode v<version>` (verbatim from 2.0.24); 1.x the bare version.
+    ['opencode', 'opencode v2.0.24\n', '2.0.24'],
+    ['opencode', 'opencode v2.1.0-beta.1\r\n', '2.1.0-beta.1'],
     ['opencode', '1.18.32\n', '1.18.32'],
     ['pi', '0.87.1\n', '0.87.1'],
     ['codex', 'codex-cli 0.156.0\n', '0.156.0']
@@ -36,11 +39,18 @@ describe('parseVersionOutput', () => {
     expect(parseVersionOutput(id, stdout)).toEqual({ status: 'ok', version })
   })
 
-  it("reports opencode's source-build `local` as not a version", () => {
-    expect(parseVersionOutput('opencode', 'local\n')).toEqual({
-      status: 'not-a-version',
-      output: 'local'
-    })
+  it("reports opencode's source-build `local` as not a version (1.x and 2.x)", () => {
+    for (const stdout of ['local\n', 'opencode vlocal\n']) {
+      expect(parseVersionOutput('opencode', stdout)).toEqual({
+        status: 'not-a-version',
+        output: 'local'
+      })
+    }
+  })
+
+  it('reads the `opencode v` prefix for opencode only', () => {
+    expect(parseVersionOutput('pi', 'opencode v2.0.24').status).toBe('failed')
+    expect(parseVersionOutput('opencode', 'opencode 2.0.24').status).toBe('failed')
   })
 
   it('fails on output of the wrong shape', () => {

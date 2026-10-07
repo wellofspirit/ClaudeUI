@@ -10,6 +10,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import {
   installKindFor,
+  opencodePlatformPackages,
   parseBunxShim,
   parseScoopShim,
   resolveCandidate,
@@ -148,6 +149,51 @@ describe('npm opencode', () => {
       resolveCandidate({ id: 'opencode', kind: 'package', path: pkg }, { ...deps, ...WIN })
     )
     expect(r.realPath).toBe(path.join(baseline, 'bin', 'opencode.exe'))
+  })
+
+  it("resolves 2.x's bin/opencode.exe, which its postinstall links on every OS", () => {
+    const pkg = writePackage(
+      path.join(tmp, 'npm', 'lib', 'node_modules', '@opencode', 'cli'),
+      { name: '@opencode/cli', version: '2.0.24' },
+      { 'bin/opencode.exe': 'native' }
+    )
+    const r = resolved(resolveCandidate({ id: 'opencode', kind: 'package', path: pkg }, deps))
+    expect(r.realPath).toBe(path.join(pkg, 'bin', 'opencode.exe'))
+  })
+
+  it('finds the 2.x @opencode/cli-<os>-<arch> build when the postinstall was not run', () => {
+    const nm = path.join(tmp, 'npm', 'node_modules')
+    const pkg = writePackage(
+      path.join(nm, '@opencode', 'cli'),
+      { name: '@opencode/cli', version: '2.0.24' },
+      { 'bin/opencode.exe': 'echo "postinstall was not run" >&2\nexit 1\n' }
+    )
+    const platformPkg = writePackage(
+      path.join(nm, '@opencode', 'cli-windows-x64'),
+      { name: '@opencode/cli-windows-x64', version: '2.0.24' },
+      { 'bin/opencode.exe': 'native' }
+    )
+    const r = resolved(
+      resolveCandidate({ id: 'opencode', kind: 'package', path: pkg }, { ...deps, ...WIN })
+    )
+    expect(r.realPath).toBe(path.join(platformPkg, 'bin', 'opencode.exe'))
+  })
+})
+
+describe('opencodePlatformPackages', () => {
+  it('names 2.x builds under @opencode/cli and 1.x builds under opencode-', () => {
+    expect(opencodePlatformPackages('darwin', 'x64')).toEqual([
+      '@opencode/cli-darwin-x64',
+      '@opencode/cli-darwin-x64-baseline'
+    ])
+    expect(opencodePlatformPackages('linux', 'arm64', '@opencode/cli')).toEqual([
+      '@opencode/cli-linux-arm64',
+      '@opencode/cli-linux-arm64-musl'
+    ])
+    expect(opencodePlatformPackages('win32', 'x64', 'opencode-ai')).toEqual([
+      'opencode-windows-x64',
+      'opencode-windows-x64-baseline'
+    ])
   })
 })
 
@@ -416,6 +462,16 @@ describe('shimTargets', () => {
     expect(
       shimTargets('#!/bin/bash\nexec "/opt/homebrew/Cellar/x/1/libexec/bin/x" "$@"\n', tmp)
     ).toEqual(['/opt/homebrew/Cellar/x/1/libexec/bin/x'])
+  })
+
+  it("reads opencode 2.x's opencode2 shims (install script), sh and cmd", () => {
+    // Verbatim from opencode v2.0.24 `install` (install_legacy_shim).
+    expect(shimTargets('#!/bin/sh\nexec "$(dirname "$0")/opencode" "$@"\n', tmp)).toEqual([
+      path.join(tmp, 'opencode')
+    ])
+    expect(
+      shimTargets('@echo off\r\n"%~dp0opencode.exe" %*\r\nexit /b %errorlevel%\r\n', tmp)
+    ).toEqual([path.join(tmp, 'opencode.exe')])
   })
 })
 

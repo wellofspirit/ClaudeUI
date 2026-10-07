@@ -407,13 +407,18 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
   {
     method: 'saveOpencodeSettings',
     channel: 'config:save-opencode-settings',
-    args: [{ theme: 'dark' }]
+    args: [{ theme: 'dark' }, { theme: 'light' }]
   },
   { method: 'readOpencodeNativeRaw', channel: 'config:read-opencode-native-raw', args: [] },
   {
     method: 'patchOpencodeNative',
     channel: 'config:patch-opencode-native',
     args: [[{ path: ['model'], value: 'anthropic/x' }]]
+  },
+  {
+    method: 'setOpencodeToolDisabled',
+    channel: 'config:set-opencode-tool-disabled',
+    args: ['shell', true]
   },
   // pi's raw trio — the in-file precedent this pass extended to its neighbours.
   { method: 'readPiNativeRaw', channel: 'config:read-pi-native-raw', args: [] },

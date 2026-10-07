@@ -52,7 +52,11 @@ vi.mock('../../services/vscode-web-service', () => ({
   vscodeWebService: { setHostActor: vi.fn() }
 }))
 vi.mock('../../opencode/OpencodeServerManager', () => ({
-  opencodeServerManager: { setCallerSessionLookup: vi.fn(), setDispatchAgent: vi.fn() }
+  opencodeServerManager: {
+    setServerStartedHook: vi.fn(),
+    setCallerSessionLookup: vi.fn(),
+    setDispatchAgent: vi.fn()
+  }
 }))
 vi.mock('../../services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: { dispatch: vi.fn() }

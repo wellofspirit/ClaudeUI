@@ -13,11 +13,25 @@
  * opencode has no other marker for "this session is a dispatch target": it is
  * a real top-level session in opencode's own database, indistinguishable from
  * one a person started. The title is what tells them apart, and opencode does
- * not overwrite it — `SessionPrompt.ensureTitle` only renames a session whose
- * title is still opencode's default (pinned source, `session/prompt.ts:200`).
+ * not overwrite it — 2.x generates a title only for a root session whose title
+ * is still its exact fallback (`SessionTitle.isUntitled`, pinned source
+ * `core/src/session/runner/llm.ts:174`).
  *
- * The comparison is exact: `listOpencodeSessionsGlobal` reports
- * `displayTitle(row.title)`, which returns the trimmed raw title for anything
- * that is not one of opencode's default-title patterns.
+ * The comparison is exact on the trimmed title.
  */
 export const OPENCODE_DISPATCH_SESSION_TITLE = 'xeng-dispatch'
+
+/** The title of the throwaway session an opencode side question runs on. */
+export const OPENCODE_SIDE_QUESTION_TITLE = 'side-question'
+/** The title of the throwaway session an opencode agent generation runs on. */
+export const OPENCODE_AGENT_GENERATE_TITLE = 'agent-generate'
+
+/**
+ * ClaudeUI's own opencode sessions — dispatch targets and throwaways (deleted
+ * after use; a crash can leave one) — which the sidebar never lists (S9).
+ */
+export const HIDDEN_OPENCODE_SESSION_TITLES: readonly string[] = [
+  OPENCODE_DISPATCH_SESSION_TITLE,
+  OPENCODE_SIDE_QUESTION_TITLE,
+  OPENCODE_AGENT_GENERATE_TITLE
+]

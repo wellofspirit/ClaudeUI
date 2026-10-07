@@ -68,7 +68,7 @@ function setup(current: NativeOpencodeFields = {}, modelAllowlist: Record<string
   const invalidateModelCache = vi.fn()
   const authTarget: OpencodeSharedProviderAuthTarget = {
     setVendorApiKey: vi.fn(async () => {}),
-    feedOauthCredential: vi.fn(async () => {}),
+    vendChatgpt: vi.fn(async () => {}),
     removeVendorAuth: vi.fn(async () => {})
   }
   return {
@@ -261,7 +261,7 @@ describe('OpencodeSharedProviderAdapter', () => {
 
     await adapter.vendOauthCredential(chatgpt, { access: 'a', refresh: 'r', expires: 1 })
     await adapter.removeCredential(chatgpt)
-    expect(authTarget.feedOauthCredential).toHaveBeenCalledWith('openai', {
+    expect(authTarget.vendChatgpt).toHaveBeenCalledWith({
       access: 'a',
       refresh: 'r',
       expires: 1
@@ -280,7 +280,7 @@ describe('OpencodeSharedProviderAdapter', () => {
       adapter.vendOauthCredential(definition, { access: 'a', refresh: 'r', expires: 1 })
     ).rejects.toThrow(/API-key/)
     expect(authTarget.setVendorApiKey).not.toHaveBeenCalled()
-    expect(authTarget.feedOauthCredential).not.toHaveBeenCalled()
+    expect(authTarget.vendChatgpt).not.toHaveBeenCalled()
     expect(invalidateModelCache).not.toHaveBeenCalled()
   })
 
@@ -354,7 +354,7 @@ describe('OpencodeSharedProviderAdapter', () => {
         writeConfig: vi.fn(),
         authTarget: {
           setVendorApiKey: vi.fn(async () => {}),
-          feedOauthCredential: vi.fn(async () => {}),
+          vendChatgpt: vi.fn(async () => {}),
           removeVendorAuth: vi.fn(async () => {})
         },
         invalidateModelCache: vi.fn(),
@@ -416,6 +416,34 @@ describe('OpencodeSharedProviderAdapter — model capabilities (ADR-074 slice 10
       { id: 'mapped', harnessOverrides: { opencode: { id: 'native-mapped' } } }
     ]
   }
+
+  it('re-syncs a reasoning model as opencode 2.x reads it back (no variants list) without a write', () => {
+    // 2.x has no "reasons" flag: a reasoning model is written with no `variants`,
+    // which the reader reports as unknown (ADR-097 S8).
+    const asRead = {
+      name: 'Local API',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: 'http://localhost/v1',
+      models: [
+        {
+          id: 'base',
+          name: 'Base',
+          attachment: true,
+          toolCall: true,
+          inputModalities: ['text', 'image'],
+          limit: { context: 262144, output: 32768 }
+        },
+        { id: 'native-mapped', ...CAPS }
+      ]
+    }
+    const { adapter, writeConfig } = setup({ providers: { 'local-api': asRead } })
+    adapter.applyDefinitionRoute({
+      definition: described,
+      previouslyManaged: true,
+      previousDefinition: described
+    })
+    expect(writeConfig).not.toHaveBeenCalled()
+  })
 
   it('declares what each model can do and how large it is', () => {
     const { adapter, writeConfig } = setup()

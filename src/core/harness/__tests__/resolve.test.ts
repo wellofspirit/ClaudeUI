@@ -359,17 +359,20 @@ describe('managed selection', () => {
   })
 
   it('latest picks the newest valid install by semver', () => {
-    fakeHarnessInstall(store, 'opencode', '1.18.33')
-    fakeHarnessInstall(store, 'opencode', '1.18.40-beta.1')
-    const newest = fakeHarnessInstall(store, 'opencode', '1.18.40')
+    // Versions inside this build's [floor, ceiling), derived from the manifest.
+    const [major, minor] = harnessManifest('opencode').floor.split('.').map(Number)
+    const v = (patch: number, minorOffset = 0) => `${major}.${minor + minorOffset}.${patch}`
+    fakeHarnessInstall(store, 'opencode', v(1, 1))
+    fakeHarnessInstall(store, 'opencode', `${v(8, 1)}-beta.1`)
+    const newest = fakeHarnessInstall(store, 'opencode', v(8, 1))
     // Newer, but not an install: another host's record, and no record at all.
-    fakeHarnessInstall(store, 'opencode', '1.19.0', { record: { arch: 'not-this-arch' } })
-    fakeHarnessInstall(store, 'opencode', '1.20.0', { record: null })
+    fakeHarnessInstall(store, 'opencode', v(0, 2), { record: { arch: 'not-this-arch' } })
+    fakeHarnessInstall(store, 'opencode', v(0, 3), { record: null })
     writeSelections({ opencode: { source: 'managed', version: 'latest' } })
     expect(resolveHarness('opencode')).toMatchObject({
       dir: newest,
       source: 'managed',
-      version: '1.18.40'
+      version: v(8, 1)
     })
   })
 

@@ -10,6 +10,7 @@ vi.mock('node:os', async () => {
 })
 import { AuthVault, vaultPath } from '../../../../core/auth/vault/AuthVault'
 import { CredentialSync, type CodexFeedTarget } from '../../../../core/auth/vault/CredentialSync'
+import { fakeOpencodeTarget } from './fixtures/fake-opencode-target'
 import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
 import {
   CodexDeviceCodeFlow,
@@ -92,16 +93,17 @@ describe('AuthVault', () => {
       removeVendorAuth: vi.fn(async () => {})
     })
     const pi = native({ access: 'pi', refresh: 'pi', expires: 10 })
-    const opencode = native({ access: 'oc', refresh: 'oc', expires: 20 })
+    // opencode 2.x holds no refresh token ClaudeUI could recover from (ADR-097 §5).
+    const opencode = fakeOpencodeTarget()
     const sync = new CredentialSync({ vault: new AuthVault() })
-    sync.configure({ pi, opencode })
+    sync.configure({ pi, opencode: opencode.target })
     await sync.start()
     expect(JSON.parse(readFileSync(vaultPath(), 'utf8'))).toMatchObject({
       v: 3,
       credentials: {},
       accounts: {
         chatgpt: {
-          list: [{ credential: { type: 'oauth', access: 'oc', refresh: 'oc', expires: 20 } }]
+          list: [{ credential: { type: 'oauth', access: 'pi', refresh: 'pi', expires: 10 } }]
         }
       }
     })
@@ -119,14 +121,14 @@ describe('AuthVault', () => {
       removeVendorAuth: vi.fn(async () => {})
     })
     const pi = native()
-    const opencode = native()
+    const opencode = fakeOpencodeTarget()
     const sync = new CredentialSync({ vault })
-    sync.configure({ pi, opencode })
+    sync.configure({ pi, opencode: opencode.target })
     await sync.disconnectChatgpt()
     await expect(vault.load()).resolves.toBeNull()
     await expect(vault.loadCredential('custom')).resolves.toEqual({ type: 'api_key', key: 'keep' })
     expect(pi.removeVendorAuth).toHaveBeenCalledWith('openai-codex')
-    expect(opencode.removeVendorAuth).toHaveBeenCalledWith('openai')
+    expect(opencode.remove).toHaveBeenCalledWith('openai')
   })
   it('clears an unreadable encrypted v1 with no native recovery source so future boots do not retry it', async () => {
     mkdirSync(dirname(vaultPath()), { recursive: true })
@@ -139,7 +141,7 @@ describe('AuthVault', () => {
     })
     const vault = new AuthVault()
     const sync = new CredentialSync({ vault })
-    sync.configure({ pi: target(), opencode: target() })
+    sync.configure({ pi: target(), opencode: fakeOpencodeTarget().target })
     await sync.start()
     expect(vault.hasUnreadableLegacyVault()).toBe(false)
     await expect(vault.load()).resolves.toBeNull()

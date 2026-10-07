@@ -48,6 +48,8 @@ import { terminalService } from '../services/terminal-service'
 import { vscodeWebService, type VscodeWebService } from '../services/vscode-web-service'
 import { hostConnection } from '../ipc/command-registry'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
+import { onOpencodeConfigWritten } from '../opencode/opencode-config'
+import { scheduleOpencodeConfigReload } from '../opencode/opencode-config-reload'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
 import { armCodexRulesSync, syncCodexRulesFile } from '../codex/rules-sync'
 import { followCodexActiveAccount } from '../codex/codex-account-switch'
@@ -55,6 +57,10 @@ import { scanCodexLineage } from '../codex/history'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { fedTokenHistory } from '../auth/vault/fed-token-history'
+import { opencodeCredentialStore } from '../opencode/opencode-credentials'
+import { fileSlotMemory } from '../opencode/credential-store'
+import { setOpencodeAuthHooks } from '../opencode/opencode-auth-hooks'
+import { OPENCODE_CODEX_VENDOR_ID } from '../auth/vault/CredentialSync'
 import { usageHubClient } from '../services/usage-hub/client'
 import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
 import { emitEvent } from '../services/sync-host'
@@ -197,6 +203,9 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     }
   })
   opencodeServerManager.setDispatchAgent((req, ctx) => crossEngineDispatcher.dispatch(req, ctx))
+  // ClaudeUI's opencode config writes (settings, raw editor, providers, tools,
+  // agent files) reload the running servers' locations (ADR-097 S8).
+  onOpencodeConfigWritten((reason) => void scheduleOpencodeConfigReload(reason))
 
   // The host's own post-session wiring — see the module header for why this is
   // one ordered hook rather than several options.
@@ -269,6 +278,24 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     // out a stale copy of its own too (ADR-082 §8, S7e). The file, here, for
     // both hosts; the class defaults to memory so its tests touch no home.
     fedTokens: fedTokenHistory()
+  })
+
+  // opencode 2.x credentials (ADR-097 §5). ClaudeUI's record of the slots it
+  // holds in opencode's credential table — the file, here, for both hosts (the
+  // store defaults to memory so its tests touch no home). Then the session's
+  // two meeting points with the vault: the pre-turn gate and the recovery
+  // after a `provider.auth` turn, for opencode's ChatGPT integration only.
+  opencodeCredentialStore.configure({
+    memory: fileSlotMemory(),
+    // Copy recognition lives in the store, so no vend or removal bypasses it.
+    isClaudeuiToken: (refresh) => credentialSync.isClaudeuiRefreshToken(refresh)
+  })
+  setOpencodeAuthHooks({
+    beforeTurn: async (providerID) =>
+      providerID === OPENCODE_CODEX_VENDOR_ID ? credentialSync.opencodeTurnGate() : null,
+    authFailed: (providerID) => {
+      if (providerID === OPENCODE_CODEX_VENDOR_ID) void credentialSync.opencodeAuthFailed()
+    }
   })
 
   // THE USAGE HUB (ADR-072 §7), after the credential wiring and not before it.

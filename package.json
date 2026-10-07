@@ -33,6 +33,8 @@
     "update-codex": "node scripts/build.mjs update-codex",
     "generate-codex-protocol": "bun scripts/generate-codex-protocol.mjs",
     "check-codex-protocol": "bun scripts/generate-codex-protocol.mjs --check",
+    "generate-opencode-protocol": "bun scripts/generate-opencode-protocol.mjs",
+    "check-opencode-protocol": "bun scripts/generate-opencode-protocol.mjs --check",
     "postinstall": "node node_modules/electron/install.js && electron-builder install-app-deps && npm run ensure-cli && npm run ensure-opencode && npm run ensure-pi && npm run ensure-codex",
     "rebuild:native": "electron-builder install-app-deps",
     "build:unpack": "node scripts/build.mjs build:unpack",

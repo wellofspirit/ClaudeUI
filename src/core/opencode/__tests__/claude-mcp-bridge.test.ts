@@ -26,14 +26,14 @@ describe('translateClaudeMcpServer', () => {
       type: 'local',
       command: ['node', 'x.js'],
       environment: { A: '1' },
-      enabled: true
+      codemode: false
     })
   })
 
   it('stdio: no env → omits environment key', () => {
     const result = translateClaudeMcpServer({ type: 'stdio', command: 'node', args: ['x.js'] })
     expect(result).not.toHaveProperty('environment')
-    expect(result).toMatchObject({ type: 'local', command: ['node', 'x.js'], enabled: true })
+    expect(result).toMatchObject({ type: 'local', command: ['node', 'x.js'], codemode: false })
   })
 
   it('stdio: empty env object → omits environment key', () => {
@@ -51,14 +51,14 @@ describe('translateClaudeMcpServer', () => {
       type: 'remote',
       url: 'http://x',
       headers: { H: 'v' },
-      enabled: true
+      codemode: false
     })
   })
 
   it('http: url (no headers) → remote entry without headers key', () => {
     const result = translateClaudeMcpServer({ type: 'http', url: 'http://y' })
     expect(result).not.toHaveProperty('headers')
-    expect(result).toMatchObject({ type: 'remote', url: 'http://y', enabled: true })
+    expect(result).toMatchObject({ type: 'remote', url: 'http://y', codemode: false })
   })
 
   it('type-less with command → treated as local', () => {
@@ -69,6 +69,18 @@ describe('translateClaudeMcpServer', () => {
   it('type-less with url → treated as remote', () => {
     const result = translateClaudeMcpServer({ url: 'http://remote/mcp' })
     expect(result).toMatchObject({ type: 'remote', url: 'http://remote/mcp' })
+  })
+
+  it('every entry is opencode 2.x shaped: codemode:false (no Code Mode), no 1.x `enabled`', () => {
+    for (const cfg of [
+      { type: 'stdio' as const, command: 'node', args: ['x.js'] },
+      { type: 'http' as const, url: 'http://y' },
+      { type: 'sse' as const, url: 'http://z' }
+    ]) {
+      const entry = translateClaudeMcpServer(cfg)
+      expect(entry?.codemode).toBe(false)
+      expect(entry).not.toHaveProperty('enabled')
+    }
   })
 
   it('empty config (no command, no url) → null', () => {

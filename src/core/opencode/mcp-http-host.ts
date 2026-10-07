@@ -1,15 +1,26 @@
 /**
- * Per-cwd HTTP MCP host for opencode's hosted tools.
+ * HTTP MCP host for opencode's hosted tools (one per opencode server).
  *
- * Binds to 127.0.0.1:0 (ephemeral port), wires the McpServer to a
- * StreamableHTTPServerTransport, and validates Bearer auth on every request.
+ * Binds to 127.0.0.1:0 (ephemeral port), serves MCP over Streamable HTTP, and
+ * validates Bearer auth on every request.
  * Lifecycle: start() → {port, token, close()}, close() tears down the listener
- * and the transport.
+ * and every session's transport.
+ *
+ * MULTI-SESSION: an opencode 2.x server connects its MCP clients per LOCATION
+ * (directory) — vendor/opencode-src/packages/core/src/mcp/index.ts is a
+ * location node — so one server opens one MCP session per directory it serves.
+ * Each `initialize` therefore gets its own StreamableHTTPServerTransport and its
+ * own McpServer from `createServer()`; later requests are routed by their
+ * `mcp-session-id`, and a session's DELETE (or close) drops it.
+ *
+ * Session mode, not stateless: a stateless transport rejects the client's
+ * `notifications/initialized` and every later request, so the handshake never
+ * completes. One transport per session is the SDK's documented stateful shape.
  */
 import { createServer } from 'node:http'
 import type { Server } from 'node:http'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 
 export interface McpHttpHost {
@@ -18,31 +29,40 @@ export interface McpHttpHost {
   close(): Promise<void>
 }
 
-/**
- * Start an HTTP MCP host. Returns {port, token, close()} once the server
- * is listening. The caller is responsible for calling close() when done.
- *
- * Uses SESSION mode (sessionIdGenerator: () => randomUUID()). A single
- * long-lived transport + McpServer per cwd is correct here because a session
- * is exactly one opencode-server↔MCP relationship, and opencode's
- * StreamableHTTPClientTransport drives the mcp-session-id round-trip.
- *
- * Stateless mode (sessionIdGenerator: undefined) does NOT work with one shared
- * transport: after `initialize` succeeds the client's `notifications/initialized`
- * POST (and every later request) is rejected because the transport never minted
- * a session id, so the connect handshake fails before a single tool call. Session
- * mode keeps the per-cwd factory intact and supports the full multi-request
- * lifecycle (initialize → initialized → listTools → callTool × N).
- *
- * @param mcpServer - An unconnected McpServer instance. connect() is called
- *   here, so do NOT call it before passing.
- */
-export async function startMcpHttpHost(mcpServer: McpServer): Promise<McpHttpHost> {
-  const token = randomBytes(24).toString('base64url')
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() })
+interface Session {
+  transport: StreamableHTTPServerTransport
+  server: McpServer
+}
 
-  // Connect the McpServer to the transport before the server starts accepting.
-  await mcpServer.connect(transport)
+/**
+ * Start an HTTP MCP host. Returns {port, token, close()} once the server is
+ * listening. The caller is responsible for calling close() when done.
+ *
+ * @param createServer_ - Builds a fresh, unconnected McpServer for each MCP
+ *   session (connect() is called here).
+ */
+export async function startMcpHttpHost(createServer_: () => McpServer): Promise<McpHttpHost> {
+  const token = randomBytes(24).toString('base64url')
+  const sessions = new Map<string, Session>()
+  let closed = false
+
+  /** A transport + server for a request that carries no session id (an `initialize`). */
+  const open = async (): Promise<Session> => {
+    const session = {} as Session
+    session.transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (id) => {
+        sessions.set(id, session)
+      }
+    })
+    session.transport.onclose = () => {
+      const id = session.transport.sessionId
+      if (id && sessions.get(id) === session) sessions.delete(id)
+    }
+    session.server = createServer_()
+    await session.server.connect(session.transport)
+    return session
+  }
 
   const expectedAuth = Buffer.from(`Bearer ${token}`, 'utf-8')
   const server: Server = createServer((req, res) => {
@@ -57,14 +77,46 @@ export async function startMcpHttpHost(mcpServer: McpServer): Promise<McpHttpHos
       res.end(JSON.stringify({ error: 'Unauthorized' }))
       return
     }
-    // Route all authenticated requests (POST /mcp, GET for SSE) to the transport.
-    transport.handleRequest(req, res).catch((err: Error) => {
+    const header = req.headers['mcp-session-id']
+    const sessionId = Array.isArray(header) ? header[0] : header
+    void (async () => {
+      if (sessionId) {
+        const session = sessions.get(sessionId)
+        if (!session) {
+          // Unknown or closed session: 404 tells the client to re-initialize.
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32001, message: 'Session not found' },
+              id: null
+            })
+          )
+          return
+        }
+        await session.transport.handleRequest(req, res)
+        return
+      }
+      if (closed) {
+        res.writeHead(503)
+        res.end()
+        return
+      }
+      // No session id: only an `initialize` is valid; the transport answers
+      // anything else with 400 itself. A transport that minted no session
+      // (that 400 path) is dropped right away rather than leaked.
+      const session = await open()
+      await session.transport.handleRequest(req, res)
+      if (!session.transport.sessionId) {
+        await session.transport.close().catch(() => {})
+        await session.server.close().catch(() => {})
+      }
+    })().catch(() => {
+      // Localhost transport errors: no useful recovery path.
       if (!res.headersSent) {
         res.writeHead(500)
         res.end()
       }
-      // Localhost transport errors: no useful recovery path. Silent discard.
-      void err
     })
   })
 
@@ -86,7 +138,11 @@ export async function startMcpHttpHost(mcpServer: McpServer): Promise<McpHttpHos
     port,
     token,
     async close() {
-      await transport.close()
+      closed = true
+      const open = [...sessions.values()]
+      sessions.clear()
+      await Promise.all(open.map((s) => s.transport.close().catch(() => {})))
+      server.closeAllConnections?.()
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()))
       })

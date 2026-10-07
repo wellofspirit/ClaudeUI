@@ -94,16 +94,6 @@ function harness(definitions: SharedProviderDefinition[], running: Record<Route,
       writes[engine].push(`remove:${id}`)
       auth[engine].delete(id)
     },
-    // opencode's file edit (`OpencodeAuthProvider.removeVendorAuthDirect`); the
-    // pi target has none, its removal being a file edit already.
-    ...(engine === 'opencode'
-      ? {
-          removeVendorAuthDirect: async (id: string) => {
-            writes.opencode.push(`direct:${id}`)
-            auth.opencode.delete(id)
-          }
-        }
-      : {}),
     listVendorCredentialIds: async () =>
       Object.fromEntries([...auth[engine].keys()].map((id) => [id, 'api' as const]))
   })
@@ -288,7 +278,7 @@ describe('removals from a harness that does not run', () => {
     expect(h.writes.pi).toEqual(['remove:spark']) // an absent entry: the real provider writes nothing
   })
 
-  it('opencode not running: its block and key go at once, the key as a direct file edit', async () => {
+  it('opencode not running: its block goes at once, and its key removal is handed to the credential store', async () => {
     const h = harness([chatgpt(), catalog(), custom()], { pi: true, opencode: true })
     await h.service.setApiKey('openrouter', KEY)
     await h.service.setApiKey('spark', KEY)
@@ -303,8 +293,9 @@ describe('removals from a harness that does not run', () => {
     expect(h.opencodeConfig().providers?.spark).toBeUndefined()
     expect(h.auth.opencode.has('spark')).toBe(false)
     expect(h.auth.opencode.has('openrouter')).toBe(false)
-    // Not through its server: nothing to spawn, nothing to recycle.
-    expect(h.writes.opencode).toEqual(['config', 'direct:spark', 'direct:openrouter'])
+    // opencode 2.x has no file to edit: the store records the removal and runs
+    // it once opencode can (credential-store.test.ts, "opencode not installed").
+    expect(h.writes.opencode).toEqual(['config', 'remove:spark', 'remove:openrouter'])
   })
 
   it('opencode running: a key goes through its server, as before', async () => {
@@ -324,7 +315,7 @@ describe('removals from a harness that does not run', () => {
     h.running.opencode = true
     h.restart()
 
-    expect(h.service.listPlainApiKeyVendorIds().opencode).not.toContain('openrouter')
+    expect((await h.service.listPlainApiKeyVendorIds()).opencode).not.toContain('openrouter')
     expect(await h.service.scanNativeKeys()).toEqual([])
     await h.service.adoptNativeKeys()
     expect(h.records.has('openrouter')).toBe(false)

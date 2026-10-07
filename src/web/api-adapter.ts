@@ -1021,9 +1021,12 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     saveSharedAutoMode: (config) =>
       connection.invoke('config:save-shared-automode', config) as Promise<void>,
     loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
-    saveOpencodeSettings: (settings) => unwrap('config:save-opencode-settings', settings),
+    saveOpencodeSettings: (settings, base) =>
+      unwrap('config:save-opencode-settings', settings, base),
     readOpencodeNativeRaw: () => unwrap('config:read-opencode-native-raw'),
     patchOpencodeNative: (patches) => unwrap('config:patch-opencode-native', patches),
+    setOpencodeToolDisabled: (action, disabled) =>
+      unwrap('config:set-opencode-tool-disabled', action, disabled),
     readPiNativeRaw: () => unwrap('config:read-pi-native-raw'),
     patchPiNative: (patches) => unwrap('config:patch-pi-native', patches),
     writePiNativeText: (text) => unwrap('config:write-pi-native-text', text),

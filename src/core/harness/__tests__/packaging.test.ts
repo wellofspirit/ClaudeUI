@@ -25,7 +25,10 @@ interface ExtraResource {
 }
 
 describe('electron-builder.yml', () => {
-  const config = parse(read('electron-builder.yml')) as { extraResources: ExtraResource[] }
+  const config = parse(read('electron-builder.yml')) as {
+    extraResources: ExtraResource[]
+    asarUnpack: string[]
+  }
 
   it('ships Claude Code — binary and version metadata only — and no other harness', () => {
     const froms = config.extraResources.map((r) => r.from)
@@ -37,6 +40,14 @@ describe('electron-builder.yml', () => {
     // ADR-098: nothing loads a loose `.node` addon — cli.js loads its own from
     // inside the Bun binary, and voice capture moved into the renderer.
     expect(claude.filter?.some((pattern) => pattern.includes('.node'))).toBe(false)
+  })
+
+  it("unpacks resources/, so opencode can load ClaudeUI's directory plugin from disk (ADR-097 §4)", () => {
+    // opencode 2.x reads a plugin DIRECTORY (index.js + package.json); a path
+    // inside app.asar is not a directory to the external process.
+    expect(config.asarUnpack).toContain('resources/**')
+    expect(() => read('resources/opencode/claudeui-xeng/index.js')).not.toThrow()
+    expect(() => read('resources/opencode/claudeui-xeng/package.json')).not.toThrow()
   })
 
   it('names no unbundled harness directory anywhere', () => {

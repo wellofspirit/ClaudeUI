@@ -95,7 +95,8 @@ import { locatePiDisplayPath } from '../pi/pi-locate'
 import { logger } from '../services/logger'
 import {
   listOpencodeSessionsGlobal,
-  loadOpencodeSessionHistory
+  loadOpencodeSessionHistory,
+  onOpencodeSessionListChanged
 } from '../services/opencode-session-list'
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
 import type { ISession } from '../providers/ISession'
@@ -1020,7 +1021,9 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'fs-read',
     kind: 'query',
     handler: async () => {
-      return await listOpencodeSessionsGlobal()
+      // The sidebar's open/focus nudge (ADR-097 §6, S9): answered from the
+      // cached listing at once; a stale one is refreshed in the background.
+      return await listOpencodeSessionsGlobal({ interaction: true })
     }
   })
 
@@ -1896,6 +1899,9 @@ function startProjectsWatcher(): void {
   setInterval(() => {
     void refreshCanonicalDirectories()
   }, DIRECTORY_POLL_MS).unref?.()
+  // opencode's list is refreshed from its server in the background (ADR-097
+  // §6, S9): a refresh that changed it re-emits the merged listing at once.
+  onOpencodeSessionListChanged(() => void refreshCanonicalDirectories())
 
   const projectsDir = path.join(os.homedir(), '.claude', 'projects')
   if (!fs.existsSync(projectsDir)) return

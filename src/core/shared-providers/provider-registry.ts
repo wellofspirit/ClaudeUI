@@ -50,7 +50,8 @@ import { CHATGPT_PROVIDER_ID } from '../auth/vault/AuthVault'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { PI_NATIVE_VENDOR_IDS } from '../auth/pi-vendor-ids'
-import { readOpencodeCredentialTypes } from '../opencode/auth-store'
+import { opencodeCredentialStore } from '../opencode/opencode-credentials'
+import { credentialTypes } from '../opencode/credential-store'
 import { discoverOpencodeProviderCatalog } from '../opencode/model-discovery'
 import { peekPiCatalogCounts } from '../pi/model-discovery'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
@@ -97,7 +98,10 @@ export interface ProviderRegistrySources {
   statuses: readonly SharedProviderStatus[]
   /** `discoverOpencodeProviderCatalog()`, or NULL when the opencode binary is absent. */
   opencodeCatalog: readonly OpencodeProviderCatalogEntry[] | null
-  /** `readOpencodeCredentialTypes()` — which ids have an entry in opencode's own auth.json. */
+  /**
+   * Which ids have an ACTIVE credential in opencode 2.x's credential table, and
+   * of what type (ClaudeUI's row or the user's; ADR-097 §5).
+   */
   opencodeCredentialKinds: Readonly<Record<string, 'api' | 'oauth'>>
   /** `opencodeConfig.modelAllowlist` — per-provider, key-presence gated. */
   opencodeModelAllowlist: Readonly<Record<string, string[]>>
@@ -199,7 +203,12 @@ export async function listProviderRegistry(): Promise<ProviderRegistrySnapshot> 
   ] = await Promise.all([
     sharedProviderService.listStatuses(),
     opencodeInstalled ? discoverOpencodeProviderCatalog() : null,
-    opencodeInstalled ? readOpencodeCredentialTypes() : {},
+    opencodeInstalled
+      ? opencodeCredentialStore
+          .snapshot()
+          .then(credentialTypes)
+          .catch(() => ({}))
+      : {},
     // pi is optional: a missing binary or auth file already degrades to {}.
     piAuthProvider.probe(),
     piAuthProvider.listVendorAuthOptions(),
@@ -244,7 +253,7 @@ export async function listProviderRegistry(): Promise<ProviderRegistrySnapshot> 
     piModelAllowlist: loadEngineConfig('pi').piConfig?.modelAllowlist,
     accounts,
     claudeAccount: buildClaudeAccountRef(accounts?.activeId ?? null),
-    plainApiKeys: sharedProviderService.listPlainApiKeyVendorIds(),
+    plainApiKeys: await sharedProviderService.listPlainApiKeyVendorIds(),
     piCatalogCounts: peekPiCatalogCounts(),
     keyConflicts: Object.fromEntries(
       nativeKeys.flatMap((candidate) =>
@@ -442,8 +451,8 @@ function opencodeNativeEntry(
     name: entry.name,
     origin: 'opencode-native',
     credential,
-    // A key or sign-in opencode holds of its own (in its auth.json, an env var or
-    // its config): the row says whose it is (ADR-082 §8, S7f).
+    // A key or sign-in opencode holds of its own (in its credential table, an
+    // env var or its config): the row says whose it is (ADR-082 §8, S7f).
     ...(credential === 'api-key' || credential === 'connected' || credential === 'custom'
       ? { ownedBy: 'opencode' as const }
       : {}),
@@ -674,7 +683,7 @@ function opencodeCredential(
   const kind = kinds[entry.id]
   if (kind === 'oauth') return 'connected'
   if (kind === 'api') return 'api-key'
-  // Usable with no entry in opencode's auth.json: the key comes from an env var
+  // Usable with no opencode credential row: the key comes from an env var
   // or a config file ClaudeUI does not own (`source` says which, for wording).
   return entry.authState === 'authenticated' ? 'custom' : 'none'
 }

@@ -57,9 +57,9 @@ export function nodeSqliteDriver(DatabaseSyncCtor: DatabaseSyncCtor): SqliteDriv
     open(filename: string, options?: SqliteOpenOptions): SqliteDatabase {
       // node:sqlite has no `fileMustExist`. better-sqlite3 throws when the file
       // is absent under that option, so reproduce it rather than silently
-      // creating an empty database — `readOpencodeSessionRows` is the only
-      // caller, and a silently-created file would turn "opencode is not
-      // installed" into an empty foreign DB that then reports schema drift.
+      // creating an empty database — a silently-created file would turn "the
+      // foreign program is not installed" into an empty foreign DB that then
+      // reports schema drift.
       if (options?.fileMustExist && filename !== ':memory:' && !fs.existsSync(filename)) {
         throw new Error(`unable to open database file: ${filename}`)
       }

@@ -161,6 +161,7 @@ const S1B_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'que
   'config:save-opencode-settings': { capability: 'config', kind: 'command' },
   'config:read-opencode-native-raw': { capability: 'config', kind: 'query' },
   'config:patch-opencode-native': { capability: 'config', kind: 'command' },
+  'config:set-opencode-tool-disabled': { capability: 'config', kind: 'command' },
   'config:read-pi-native-raw': { capability: 'config', kind: 'query' },
   'config:patch-pi-native': { capability: 'config', kind: 'command' },
   'config:write-pi-native-text': { capability: 'config', kind: 'command' },

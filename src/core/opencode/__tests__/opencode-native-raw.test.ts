@@ -68,78 +68,142 @@ describe('readOpencodeNativeRaw', () => {
   })
 })
 
-describe('patchOpencodeNativeRaw', () => {
+describe('patchOpencodeNativeRaw (opencode 2.x schema, ADR-097 S8)', () => {
   it('sets a leaf while preserving sibling keys and comments', () => {
     const p = writeConfig(
       'opencode.jsonc',
       `{
   // keep me
   "theme": "opencode",
-  "provider": {
+  "providers": {
     "ec2": {
-      "options": { "apiKey": "sekret" }
+      "settings": { "apiKey": "sekret" }
     }
   }
 }`
     )
     patchOpencodeNativeRaw([
-      { path: ['provider', 'ec2', 'models', 'qwen3.6:27b', 'attachment'], value: true }
+      {
+        path: ['providers', 'ec2', 'models', 'qwen3.6:27b', 'capabilities', 'input'],
+        value: ['text', 'image']
+      }
     ])
     const text = fs.readFileSync(p, 'utf8')
     expect(text).toContain('// keep me')
     const parsed = jsoncParse(text)
     expect(parsed.theme).toBe('opencode')
-    expect(parsed.provider.ec2.options.apiKey).toBe('sekret')
-    expect(parsed.provider.ec2.models['qwen3.6:27b'].attachment).toBe(true)
+    expect(parsed.providers.ec2.settings.apiKey).toBe('sekret')
+    expect(parsed.providers.ec2.models['qwen3.6:27b'].capabilities.input).toEqual(['text', 'image'])
   })
 
   it('deleting under a MISSING parent is a no-op (not a throw)', () => {
     const p = writeConfig('opencode.json', `{ "theme": "opencode" }`)
     expect(() =>
-      patchOpencodeNativeRaw([{ path: ['provider', 'ghost', 'models', 'x', 'attachment'] }])
+      patchOpencodeNativeRaw([{ path: ['providers', 'ghost', 'models', 'x', 'variants'] }])
     ).not.toThrow()
-    // File unchanged.
     expect(jsoncParse(fs.readFileSync(p, 'utf8'))).toEqual({ theme: 'opencode' })
   })
 
   it('deletes an EXISTING leaf, preserving siblings', () => {
     const p = writeConfig(
       'opencode.json',
-      `{ "provider": { "ec2": { "models": { "q": { "attachment": true, "reasoning": false } } } } }`
+      `{ "providers": { "ec2": { "models": { "q": { "variants": [], "limit": { "context": 5 } } } } } }`
     )
-    patchOpencodeNativeRaw([{ path: ['provider', 'ec2', 'models', 'q', 'attachment'] }])
-    const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
-    expect(parsed.provider.ec2.models.q.attachment).toBeUndefined()
-    expect(parsed.provider.ec2.models.q.reasoning).toBe(false)
+    patchOpencodeNativeRaw([{ path: ['providers', 'ec2', 'models', 'q', 'variants'] }])
+    expect(jsoncParse(fs.readFileSync(p, 'utf8')).providers.ec2.models.q).toEqual({
+      limit: { context: 5 }
+    })
   })
 
-  it('rejects a patch whose top-level key is excluded (defense in depth)', () => {
+  it('rejects a patch under a protected path (defense in depth)', () => {
     writeConfig('opencode.json', `{}`)
-    expect(() => patchOpencodeNativeRaw([{ path: ['permission', 'bash'], value: 'ask' }])).toThrow(
-      /protected opencode config key "permission"/
-    )
-    expect(() => patchOpencodeNativeRaw([{ path: ['model'], value: 'x' }])).toThrow(/"model"/)
-  })
-
-  it('allows provider leaf patches (provider is NOT excluded — capability editing needs it)', () => {
-    writeConfig('opencode.json', `{ "provider": { "ec2": { "models": { "q": {} } } } }`)
+    const refused: [(string | number)[], RegExp][] = [
+      [['permissions', 0], /"permissions"/],
+      [['permission', 'bash'], /"permission"/],
+      [['model'], /"model"/],
+      [['agents', 'build', 'model'], /"agents"/],
+      [['mcp', 'servers', 'x'], /"mcp.servers"/],
+      [['mcp'], /"mcp.servers"/],
+      [['experimental', 'policies'], /"experimental.policies"/],
+      [['experimental'], /"experimental.policies"/],
+      [['provider', 'x', 'name'], /"provider"/]
+    ]
+    for (const [path, message] of refused)
+      expect(() => patchOpencodeNativeRaw([{ path, value: 'x' }])).toThrow(message)
+    // …but their writable siblings are fine.
     expect(() =>
       patchOpencodeNativeRaw([
-        { path: ['provider', 'ec2', 'models', 'q', 'reasoning'], value: true }
+        { path: ['mcp', 'timeout', 'execution'], value: 5000 },
+        { path: ['experimental', 'subagent_depth'], value: 2 }
       ])
     ).not.toThrow()
   })
 
+  it('refuses to SET a key opencode 2.x does not have (1.x keys included), allows deleting one', () => {
+    const p = writeConfig(
+      'opencode.json',
+      `{ "logLevel": "DEBUG", "compaction": { "tail_turns": 2 }, "snapshot": true }`
+    )
+    const refused: (string | number)[][] = [
+      ['logLevel'],
+      ['snapshot'],
+      ['attachment', 'image', 'max_width'],
+      ['compaction', 'tail_turns'],
+      ['providers', 'x', 'models', 'm', 'attachment'],
+      ['providers', 'x', 'models', 'm', 'reasoning']
+    ]
+    for (const path of refused)
+      expect(() => patchOpencodeNativeRaw([{ path, value: 1 }])).toThrow(/no such config key/)
+    patchOpencodeNativeRaw([
+      { path: ['logLevel'] },
+      { path: ['compaction', 'tail_turns'] },
+      { path: ['snapshot'] },
+      { path: ['snapshots'], value: false }
+    ])
+    expect(jsoncParse(fs.readFileSync(p, 'utf8'))).toEqual({ compaction: {}, snapshots: false })
+  })
+
+  it('accepts the 2.x paths the panes and the capability editor write', () => {
+    writeConfig('opencode.json', `{}`)
+    const ok: [(string | number)[], unknown][] = [
+      [['compaction', 'keep', 'tokens'], 1000],
+      [['compaction', 'buffer'], 500],
+      [['media', 'image', 'max_width'], 2000],
+      [['tool_output', 'max_lines'], 100],
+      [['plugins'], ['x']],
+      [['skills'], ['/s']],
+      [['formatter', 'prettier', 'disabled'], true],
+      [['providers', 'x', 'models', 'm', 'body', 'temperature'], 0.2],
+      [['providers', 'x', 'models', 'm', 'variants'], []],
+      [['providers', 'x', 'models', 'm', 'cost'], { input: 1, output: 2 }]
+    ]
+    for (const [path, value] of ok)
+      expect(() => patchOpencodeNativeRaw([{ path, value }]), path.join('.')).not.toThrow()
+  })
+
   it('rejects a schema-invalid result and writes nothing', () => {
-    const p = writeConfig('opencode.json', `{ "provider": { "ec2": { "models": { "q": {} } } } }`)
+    const p = writeConfig('opencode.json', `{ "providers": { "ec2": { "models": { "q": {} } } } }`)
     const before = fs.readFileSync(p, 'utf8')
     expect(() =>
       patchOpencodeNativeRaw([
-        { path: ['provider', 'ec2', 'models', 'q', 'attachment'], value: 'yes' }
+        { path: ['providers', 'ec2', 'models', 'q', 'capabilities', 'tools'], value: 'yes' }
       ])
-    ).toThrow(/attachment must be boolean/)
-    // Nothing written.
+    ).toThrow(/tools must be boolean/)
+    expect(() =>
+      patchOpencodeNativeRaw([
+        { path: ['providers', 'ec2', 'models', 'q', 'cost'], value: { input: 1 } }
+      ])
+    ).toThrow(/would be invalid/)
     expect(fs.readFileSync(p, 'utf8')).toBe(before)
+  })
+
+  it('a 1.x value elsewhere in the file never blocks an unrelated edit', () => {
+    const p = writeConfig(
+      'opencode.json',
+      `{ "skills": { "paths": ["/old"] }, "plugin": [["x", {}]], "compaction": { "prune": true } }`
+    )
+    patchOpencodeNativeRaw([{ path: ['compaction', 'auto'], value: false }])
+    expect(jsoncParse(fs.readFileSync(p, 'utf8')).compaction).toEqual({ prune: true, auto: false })
   })
 
   it('a no-op patch (value already present) does not rewrite the file', () => {
@@ -147,28 +211,25 @@ describe('patchOpencodeNativeRaw', () => {
       'opencode.jsonc',
       `{
   // untouched
-  "provider": { "ec2": { "models": { "q": { "attachment": true } } } }
+  "providers": { "ec2": { "models": { "q": { "variants": [] } } } }
 }`
     )
     const mtimeBefore = fs.statSync(p).mtimeMs
     const before = fs.readFileSync(p, 'utf8')
-    patchOpencodeNativeRaw([
-      { path: ['provider', 'ec2', 'models', 'q', 'attachment'], value: true }
-    ])
+    patchOpencodeNativeRaw([{ path: ['providers', 'ec2', 'models', 'q', 'variants'], value: [] }])
     expect(fs.readFileSync(p, 'utf8')).toBe(before)
-    // Byte no-op → not rewritten (mtime unchanged).
     expect(fs.statSync(p).mtimeMs).toBe(mtimeBefore)
   })
 
   it('accepts unknown top-level keys in the existing config (schema not closed against them)', () => {
     const p = writeConfig('opencode.json', `{ "myFutureKey": 42 }`)
-    expect(() => patchOpencodeNativeRaw([{ path: ['snapshot'], value: true }])).not.toThrow()
+    expect(() => patchOpencodeNativeRaw([{ path: ['snapshots'], value: true }])).not.toThrow()
     const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
     expect(parsed.myFutureKey).toBe(42)
-    expect(parsed.snapshot).toBe(true)
+    expect(parsed.snapshots).toBe(true)
   })
 
-  it('END-TO-END: enabling attachment on qwen keeps apiKey + comment intact', () => {
+  it('END-TO-END: a capability edit on a 1.x provider moves it to providers whole, apiKey + comment intact', () => {
     const p = writeConfig(
       'opencode.jsonc',
       `{
@@ -177,20 +238,37 @@ describe('patchOpencodeNativeRaw', () => {
     "ec2": {
       "name": "EC2 self-hosted",
       "options": { "apiKey": "sk-secret", "baseURL": "http://ec2/v1" },
-      "models": { "qwen3.6:27b": {} }
+      "models": { "qwen3.6:27b": { "attachment": false } }
     }
   }
 }`
     )
     patchOpencodeNativeRaw([
-      { path: ['provider', 'ec2', 'models', 'qwen3.6:27b', 'attachment'], value: true }
+      {
+        path: ['providers', 'ec2', 'models', 'qwen3.6:27b', 'capabilities', 'input'],
+        value: ['text', 'image']
+      }
     ])
     const text = fs.readFileSync(p, 'utf8')
     expect(text).toContain('// my custom EC2 provider')
     const parsed = jsoncParse(text)
-    expect(parsed.provider.ec2.models['qwen3.6:27b'].attachment).toBe(true)
-    expect(parsed.provider.ec2.options.apiKey).toBe('sk-secret')
-    expect(parsed.provider.ec2.options.baseURL).toBe('http://ec2/v1')
-    expect(parsed.provider.ec2.name).toBe('EC2 self-hosted')
+    expect(parsed.provider).toEqual({})
+    expect(parsed.providers.ec2).toEqual({
+      name: 'EC2 self-hosted',
+      settings: { apiKey: 'sk-secret', baseURL: 'http://ec2/v1' },
+      models: { 'qwen3.6:27b': { capabilities: { input: ['text', 'image'] } } }
+    })
+  })
+
+  it('F5: an mcp.timeout edit moves the 1.x mcp_timeout into the other leaf too (probe3)', () => {
+    const p = writeConfig('opencode.jsonc', `{ "experimental": { "mcp_timeout": 60000 } }`)
+    patchOpencodeNativeRaw([
+      { path: ['mcp', 'timeout', 'execution'], value: 120000 },
+      { path: ['experimental', 'mcp_timeout'] }
+    ])
+    expect(jsoncParse(fs.readFileSync(p, 'utf8'))).toEqual({
+      experimental: {},
+      mcp: { timeout: { catalog: 60000, execution: 120000 } }
+    })
   })
 })

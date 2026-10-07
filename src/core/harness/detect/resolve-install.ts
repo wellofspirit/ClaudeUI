@@ -11,9 +11,11 @@
  * - A native file (PE, ELF, Mach-O) is taken as-is.
  * - A text file inside a harness's npm package (a placeholder `bin/*.exe`
  *   stub, pi's `cli.js`, Codex's `codex.js`) resolves through the package:
- *     Claude Code, opencode  `<pkg>/bin/<name>.exe` when native, else the
- *                            platform package's binary (`createRequire` from
- *                            the realpath'd package, as their postinstall does)
+ *     Claude Code, opencode  `<pkg>/bin/<name>.exe` when native (opencode 2.x's
+ *                            postinstall links its binary there on every OS),
+ *                            else the platform package's binary
+ *                            (`createRequire` from the realpath'd package, as
+ *                            their postinstall does)
  *     Codex                  `@openai/codex-<os>-<arch>` → `vendor/<triple>/bin/codex`,
  *                            falling back to `<pkg>/vendor/…` (`codex.js`'s
  *                            `findCodexExecutable`)
@@ -147,9 +149,9 @@ export function parseBunxShim(buf: Buffer): string | null {
 
 /**
  * The paths an npm-family shim (cmd-shim's `.cmd`, `.ps1`, `sh`) or a wrapper
- * script runs, in order of appearance: `%dp0%\…` / `%~dp0\…` and
- * `$basedir/…` relative to the shim, plus quoted absolute paths. The shim's
- * own `node` preference is left out.
+ * script runs, in order of appearance: `%dp0%\…` / `%~dp0\…` / `%~dp0…`,
+ * `$basedir/…` and `$(dirname "$0")/…` relative to the shim, plus quoted
+ * absolute paths. The shim's own `node` preference is left out.
  */
 export function shimTargets(text: string, shimDir: string): string[] {
   const found: { at: number; target: string }[] = []
@@ -157,8 +159,16 @@ export function shimTargets(text: string, shimDir: string): string[] {
   for (const m of text.matchAll(/%~?dp0%?[\\/]+([^"%\r\n]+)/g)) {
     found.push({ at: m.index ?? 0, target: rel(m[1].trim()) })
   }
+  // opencode 2.x's `opencode2.cmd`: `"%~dp0opencode.exe" %*` (no separator).
+  for (const m of text.matchAll(/%~dp0(?![\\/])(\w[^"%\r\n]*)/g)) {
+    found.push({ at: m.index ?? 0, target: rel(m[1].trim()) })
+  }
   for (const m of text.matchAll(/\$basedir[\\/]+([^"\r\n]+)/g)) {
     found.push({ at: m.index ?? 0, target: rel(m[1].trim()) })
+  }
+  // opencode 2.x's `opencode2`: `exec "$(dirname "$0")/opencode" "$@"`.
+  for (const m of text.matchAll(/\$\(dirname "\$0"\)[\\/]+([^"\s]+)/g)) {
+    found.push({ at: m.index ?? 0, target: rel(m[1]) })
   }
   for (const m of text.matchAll(/"((?:[A-Za-z]:[\\/]|\/)[^"\r\n]+)"/g)) {
     found.push({ at: m.index ?? 0, target: m[1] })
@@ -228,12 +238,19 @@ export function claudePlatformPackages(platform: string, arch: string): string[]
 }
 
 /**
- * opencode's platform packages for a host (`script/postinstall.mjs`). Without
- * the postinstall's AVX2 probe, the regular build is tried before `-baseline`.
+ * opencode's platform packages for a host, by the package that installed it:
+ * `@opencode/cli-<os>-<arch>` for 2.x (`postinstall.mjs`), `opencode-<os>-<arch>`
+ * for 1.x's `opencode-ai` (found so it can be labelled too old). Without the
+ * postinstall's AVX2 and musl probes, the regular build is tried before
+ * `-baseline`, and glibc before `-musl`.
  */
-export function opencodePlatformPackages(platform: string, arch: string): string[] {
+export function opencodePlatformPackages(
+  platform: string,
+  arch: string,
+  pkgName: string = '@opencode/cli'
+): string[] {
   const os = platform === 'win32' ? 'windows' : platform
-  const base = `opencode-${os}-${arch}`
+  const base = `${pkgName === 'opencode-ai' ? 'opencode' : pkgName}-${os}-${arch}`
   const names = [base]
   if (arch === 'x64') names.push(`${base}-baseline`)
   if (platform === 'linux') {
@@ -479,13 +496,10 @@ export function resolvePackage(
       const binName = id === 'claude' ? 'claude' : 'opencode'
       const own = path.join(realPkg, 'bin', `${binName}.exe`)
       if (isNativeExecutable(own)) return nativeResolved(id, displayPath, own)
-      // opencode 2.x (`@opencode/cli`) has no platform-package lookup of ours.
       const platformPkgs =
         id === 'claude'
           ? claudePlatformPackages(platform, arch)
-          : name === 'opencode-ai'
-            ? opencodePlatformPackages(platform, arch)
-            : []
+          : opencodePlatformPackages(platform, arch, name)
       const files: string[] = []
       for (const pkg of platformPkgs) {
         const dir = requirePackageDir(realPkg, pkg)

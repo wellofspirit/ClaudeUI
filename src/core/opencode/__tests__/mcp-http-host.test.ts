@@ -97,7 +97,7 @@ afterEach(async () => {
 
 describe('startMcpHttpHost', () => {
   it('returns a port and token after binding', async () => {
-    const host = await startMcpHttpHost(makeBlankServer())
+    const host = await startMcpHttpHost(makeBlankServer)
     hosts.push(host)
 
     expect(host.port).toBeGreaterThan(0)
@@ -107,7 +107,7 @@ describe('startMcpHttpHost', () => {
   })
 
   it('rejects requests with no Authorization header → 401', async () => {
-    const host = await startMcpHttpHost(makeBlankServer())
+    const host = await startMcpHttpHost(makeBlankServer)
     hosts.push(host)
 
     const { status, body } = await httpPost(`http://127.0.0.1:${host.port}/mcp`, {}, MCP_INITIALIZE)
@@ -117,7 +117,7 @@ describe('startMcpHttpHost', () => {
   })
 
   it('rejects requests with a wrong bearer token → 401', async () => {
-    const host = await startMcpHttpHost(makeBlankServer())
+    const host = await startMcpHttpHost(makeBlankServer)
     hosts.push(host)
 
     const { status } = await httpPost(
@@ -132,7 +132,7 @@ describe('startMcpHttpHost', () => {
     // timingSafeEqual THROWS on a length mismatch, so the equal-length case is
     // the branch that actually reaches the constant-time compare. It must 401,
     // never 500 or hang.
-    const host = await startMcpHttpHost(makeBlankServer())
+    const host = await startMcpHttpHost(makeBlankServer)
     hosts.push(host)
 
     const sameLenWrong = 'a'.repeat(host.token.length)
@@ -145,7 +145,7 @@ describe('startMcpHttpHost', () => {
   })
 
   it('accepts MCP initialize with the correct bearer token', async () => {
-    const host = await startMcpHttpHost(makeBlankServer())
+    const host = await startMcpHttpHost(makeBlankServer)
     hosts.push(host)
 
     const { status, body } = await httpPost(
@@ -169,8 +169,8 @@ describe('startMcpHttpHost', () => {
   })
 
   it('generates a distinct token per host (no sharing)', async () => {
-    const h1 = await startMcpHttpHost(makeBlankServer())
-    const h2 = await startMcpHttpHost(makeBlankServer())
+    const h1 = await startMcpHttpHost(makeBlankServer)
+    const h2 = await startMcpHttpHost(makeBlankServer)
     hosts.push(h1, h2)
 
     expect(h1.token).not.toBe(h2.token)
@@ -178,7 +178,7 @@ describe('startMcpHttpHost', () => {
   })
 
   it('close() shuts down the server (subsequent connections fail)', async () => {
-    const host = await startMcpHttpHost(makeBlankServer())
+    const host = await startMcpHttpHost(makeBlankServer)
     const { port, token } = host
     await host.close()
 
@@ -224,7 +224,7 @@ describe('startMcpHttpHost — full MCP round-trip (SDK client)', () => {
   }
 
   it('rejects a client connect with no bearer token (401)', async () => {
-    const host = await startMcpHttpHost(createOpencodeHostedToolsServer(tmp))
+    const host = await startMcpHttpHost(() => createOpencodeHostedToolsServer(tmp))
     hosts.push(host)
 
     const client = new Client({ name: 'noauth', version: '0.0.0' }, {})
@@ -237,7 +237,7 @@ describe('startMcpHttpHost — full MCP round-trip (SDK client)', () => {
   })
 
   it('lists all four hosted tools', async () => {
-    const host = await startMcpHttpHost(createOpencodeHostedToolsServer(tmp))
+    const host = await startMcpHttpHost(() => createOpencodeHostedToolsServer(tmp))
     hosts.push(host)
     const client = await connectClient(host)
 
@@ -252,7 +252,7 @@ describe('startMcpHttpHost — full MCP round-trip (SDK client)', () => {
   })
 
   it('callTool render_mermaid executes the real handler through the transport', async () => {
-    const host = await startMcpHttpHost(createOpencodeHostedToolsServer(tmp))
+    const host = await startMcpHttpHost(() => createOpencodeHostedToolsServer(tmp))
     hosts.push(host)
     const client = await connectClient(host)
 
@@ -268,7 +268,7 @@ describe('startMcpHttpHost — full MCP round-trip (SDK client)', () => {
   })
 
   it('callTool create_mockup writes the file under <cwd>/.claude/ui/mockups and returns a dir id', async () => {
-    const host = await startMcpHttpHost(createOpencodeHostedToolsServer(tmp))
+    const host = await startMcpHttpHost(() => createOpencodeHostedToolsServer(tmp))
     hosts.push(host)
     const client = await connectClient(host)
 
@@ -292,7 +292,7 @@ describe('startMcpHttpHost — full MCP round-trip (SDK client)', () => {
   it('supports multiple sequential callTool requests on one connection (session lifecycle)', async () => {
     // The crux: stateless single-transport breaks after the first request. This
     // proves the session-mode transport survives a multi-request conversation.
-    const host = await startMcpHttpHost(createOpencodeHostedToolsServer(tmp))
+    const host = await startMcpHttpHost(() => createOpencodeHostedToolsServer(tmp))
     hosts.push(host)
     const client = await connectClient(host)
 
@@ -315,5 +315,62 @@ describe('startMcpHttpHost — full MCP round-trip (SDK client)', () => {
     expect(r1.content[0].text).toContain('rendered successfully')
     expect(r2.content[0].text).toContain('Mockup created successfully')
     expect(r3.content[0].text).toContain('rendered successfully')
+  })
+  it('serves one MCP session per client — opencode 2.x connects once per directory', async () => {
+    // The 1.x host had ONE transport: a second client's initialize was refused
+    // ("Server already initialized"), so a second directory on the same
+    // opencode server never got the hosted tools.
+    let built = 0
+    const host = await startMcpHttpHost(() => {
+      built++
+      return createOpencodeHostedToolsServer(tmp)
+    })
+    hosts.push(host)
+    const a = await connectClient(host)
+    const b = await connectClient(host)
+    expect(built).toBe(2)
+    const [ra, rb] = (await Promise.all([
+      a.callTool({ name: 'render_mermaid', arguments: { source: 'graph TD; A-->B' } }),
+      b.callTool({ name: 'render_mermaid', arguments: { source: 'graph TD; C-->D' } })
+    ])) as Array<{ isError?: boolean; content: Array<{ text: string }> }>
+    expect(ra.isError).toBeFalsy()
+    expect(rb.isError).toBeFalsy()
+    // Closing one session leaves the other working.
+    await a.close()
+    const again = (await b.callTool({
+      name: 'render_mermaid',
+      arguments: { source: 'graph TD; E-->F' }
+    })) as { isError?: boolean }
+    expect(again.isError).toBeFalsy()
+  })
+
+  it('an unknown mcp-session-id gets 404 (the client re-initializes), not a new session', async () => {
+    let built = 0
+    const host = await startMcpHttpHost(() => {
+      built++
+      return makeBlankServer()
+    })
+    hosts.push(host)
+    const { status } = await httpPost(
+      `http://127.0.0.1:${host.port}/mcp`,
+      { Authorization: `Bearer ${host.token}`, 'mcp-session-id': 'no-such-session' },
+      { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }
+    )
+    expect(status).toBe(404)
+    expect(built).toBe(0)
+  })
+
+  it('a non-initialize request without a session id is refused and leaves no session behind', async () => {
+    const host = await startMcpHttpHost(makeBlankServer)
+    hosts.push(host)
+    const { status } = await httpPost(
+      `http://127.0.0.1:${host.port}/mcp`,
+      { Authorization: `Bearer ${host.token}` },
+      { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }
+    )
+    expect(status).toBe(400)
+    // A real client still connects afterwards.
+    const client = await connectClient(host)
+    expect(client).toBeTruthy()
   })
 })

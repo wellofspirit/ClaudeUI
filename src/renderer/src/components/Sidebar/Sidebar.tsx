@@ -273,6 +273,21 @@ export function Sidebar({
     [handleRename]
   )
 
+  // opencode's sessions are listed from its server (ADR-097 §6, S9), refreshed
+  // in main in the background. The sidebar opening and the app coming to the
+  // front are the moments a stale listing may be refreshed: this nudge is
+  // answered from main's cache at once and never awaited — the list renders
+  // from `directories`, and a refresh that changed it arrives as ONE
+  // `session:directories-changed`.
+  useEffect(() => {
+    const nudge = (): void => {
+      void window.api.listOpencodeSessionsGlobal?.().catch(() => {})
+    }
+    nudge()
+    window.addEventListener('focus', nudge)
+    return () => window.removeEventListener('focus', nudge)
+  }, [])
+
   // NO refresh loop here any more. The three-query merge (Claude JSONL +
   // opencode + pi) and the 30 s poll moved to the MAIN process
   // (`services/sync-seed.ts`), and `session:directories-changed` now CARRIES the
