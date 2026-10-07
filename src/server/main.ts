@@ -116,19 +116,19 @@ async function loadSqliteDriver(): Promise<SqliteDriver> {
 /**
  * Where the built web client lives, expressed the way `HostPaths` wants it.
  *
- * `RemoteServer.getWebClientDir()` resolves `<appPath>/out/web`, so `appPath`
+ * `RemoteServer.getWebClientDir()` resolves `<appPath>/out/renderer`, so `appPath`
  * must be the directory that CONTAINS `out/`. Three layouts have to work:
  *
  *   - **from source** — `__dirname` is `<repo>/src/server`, so the root is two
  *     levels up;
  *   - **pure-asset distribution** — the bundle sits at `<dist>/claudeui-server.js`
- *     with `<dist>/out/web` beside it, so the root is `__dirname` itself;
+ *     with `<dist>/out/renderer` beside it, so the root is `__dirname` itself;
  *   - **compiled executable** — `__dirname` is bun's virtual `/$bunfs` root, which
  *     holds no assets at all, so the root is the directory of the EXECUTABLE.
  *
  * Rather than detect the packaging (which is exactly the kind of guess that
  * silently serves a stale bundle), each candidate is tested for the thing we
- * actually need: an `out/web` directory. `CLAUDEUI_APP_PATH` overrides
+ * actually need: the web client's `out/renderer/web.html`. `CLAUDEUI_APP_PATH` overrides
  * everything, for a layout nobody anticipated.
  */
 function resolveAppPath(): string {
@@ -138,7 +138,7 @@ function resolveAppPath(): string {
   const fromSource = path.resolve(__dirname, '..', '..')
   const candidates = [__dirname, path.dirname(process.execPath), fromSource]
   for (const candidate of candidates) {
-    if (fs.existsSync(path.join(candidate, 'out', 'web'))) return candidate
+    if (fs.existsSync(path.join(candidate, 'out', 'renderer', 'web.html'))) return candidate
   }
   // Nothing found: fall back to the source layout so the error a caller
   // eventually sees names a real path rather than a virtual one.

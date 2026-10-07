@@ -14,11 +14,12 @@ name: CI
 # tag is published, so a Windows-only regression is caught at push-to-pre-release
 # time. Add an os matrix here if PR-time Windows coverage becomes worth the cost.
 #
-# The build steps at the end are gates, not artifacts: electron-vite + the web
-# bundle catch vite-config regressions that tests cannot see, and the server
-# steps are the ONLY workflow anywhere that runs `build:server*` and its
-# bun:sqlite conformance arm (`verify:sqlite`) — the release workflows ship the
-# same linux-x64 executable this job proves buildable and bootable.
+# The build steps at the end are gates, not artifacts: the electron-vite build
+# (one renderer build, desktop + web) catches vite-config regressions that
+# tests cannot see, and the server steps are the ONLY workflow anywhere that
+# runs `build:server*` and its bun:sqlite conformance arm (`verify:sqlite`) — the
+# release workflows ship the same linux-x64 executable this job proves buildable
+# and bootable.
 
 on:
   # Pull requests only (owner, 2026-09-22): main and pre-release have their own
@@ -57,10 +58,8 @@ jobs:
 
       # The raw bundler pass the release workflows' "Build app" step runs. Not
       # `bun run build`: that also rebuilds the CLI, which install already did.
-      - name: Build (electron + web)
-        run: |
-          bunx electron-vite build
-          bunx vite build --config vite.web.config.ts
+      - name: Build (electron-vite)
+        run: bunx electron-vite build
 
       # `build:server` runs verify:sqlite before bundling; the compile step
       # produces the same host-native linux-x64 executable the release

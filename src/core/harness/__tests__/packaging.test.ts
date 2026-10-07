@@ -50,6 +50,17 @@ describe('electron-builder.yml', () => {
     expect(() => read('resources/opencode/claudeui-xeng/package.json')).not.toThrow()
   })
 
+  it('ships the one UI build inside the asar, with no separate web copy', () => {
+    // RemoteServer serves web.html + assets/ out of out/renderer, read through the
+    // asar (remote-server getWebClientDir) — a second copy would be dead weight.
+    expect(config.extraResources.map((r) => r.to)).not.toContain('web')
+  })
+
+  it('keeps a stale pre-one-bundle out/web build out of the asar', () => {
+    const files = (parse(read('electron-builder.yml')) as { files: string[] }).files
+    expect(files).toContain('!out/web/**')
+  })
+
   it('names no unbundled harness directory anywhere', () => {
     const text = read('electron-builder.yml')
       .split('\n')

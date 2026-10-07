@@ -17,7 +17,7 @@
  * fail-fast), so a failed build reports all broken stages at once.
  *
  * Targets mirror the package.json scripts: build, build:mac, build:win,
- * build:linux, build:unpack, build:web, ensure-cli, update-cli,
+ * build:linux, build:unpack, ensure-cli, update-cli,
  * ensure-opencode, update-opencode, ensure-pi, update-pi, ensure-codex,
  * update-codex.
  */
@@ -38,7 +38,6 @@ if (args.includes('-h') || args.includes('--help')) {
         'build:win',
         'build:linux',
         'build:unpack',
-        'build:web',
         'ensure-cli',
         'update-cli',
         'ensure-opencode',
@@ -90,15 +89,6 @@ const typecheckStages = [
 const electronViteBuild = [
   { label: 'electron-vite build', steps: [['bunx', ['electron-vite', 'build', ...LL]]] }
 ]
-const webBuild = [
-  {
-    label: 'web build',
-    steps: [
-      ['bunx', ['vite', 'build', '--config', 'vite.web.config.ts', ...LL]],
-      ['node', ['scripts/compress-web-assets.mjs', ...Q]]
-    ]
-  }
-]
 
 const ensureCli = (update) => [
   {
@@ -125,16 +115,12 @@ const ensureHarness = (id, update) => [
 
 // Everything a package needs before electron-builder, as one parallel group.
 // The members share no outputs: typecheck is --noEmit, ensure-cli writes
-// vendor/claude-cli, electron-vite writes out/{main,preload,renderer} (each
-// target empties only its own dir), and the web build writes out/web.
+// vendor/claude-cli, and electron-vite writes out/{main,preload,renderer} (each
+// target empties only its own dir; the one renderer build is both the desktop
+// and the web client, and compresses its own assets).
 const prepare = ({ typecheck }) => [
   {
-    parallel: [
-      ...(typecheck ? typecheckStages : []),
-      ...ensureCli(false),
-      ...electronViteBuild,
-      ...webBuild
-    ]
+    parallel: [...(typecheck ? typecheckStages : []), ...ensureCli(false), ...electronViteBuild]
   }
 ]
 
@@ -193,7 +179,6 @@ const TARGETS = {
       steps: [['bunx', ['electron-builder', '--dir']]]
     }
   ],
-  'build:web': [...webBuild],
   'ensure-cli': [...ensureCli(false)],
   'update-cli': [...ensureCli(true)],
   'ensure-opencode': [...ensureHarness('opencode', false)],

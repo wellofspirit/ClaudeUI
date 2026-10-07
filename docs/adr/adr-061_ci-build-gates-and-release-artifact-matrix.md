@@ -5,7 +5,9 @@
 win-x64 `claudeui-server` zips; see the amendment section, which supersedes the
 artifact matrix. **Amended by [ADR-082](adr-082_harness-sources-downloads-and-unbundling.md)
 (2026-09-30)** — release artifacts lose the opencode, pi and Codex directories; see the
-last amendment, which supersedes both matrices.
+last amendment, which supersedes both matrices. **Amended by [ADR-099](adr-099_one-ui-bundle.md)
+(2026-10-07)** — no step builds the web client separately, and server layouts carry
+`out/renderer`, not `out/web`.
 **Relates to:** ADR-006 (the rebundled bun-claude binary — the mechanism whose linux gap
 this ADR takes a position on), ADR-058 (the `claudeui-server` artifacts this ADR ships),
 ADR-056 (the headless admission model those artifacts serve).

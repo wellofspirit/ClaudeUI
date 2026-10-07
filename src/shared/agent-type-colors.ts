@@ -7,7 +7,7 @@
  * so they cannot disagree. The renderer's `AgentTypeTile` is the one renderer.
  *
  * One shared palette for every engine. Eight named colours, each a theme token
- * (`--color-agent-<id>` in `main.css`, defined for the dark and the light
+ * (`--color-agent-<id>` in `app.css`, defined for the dark and the light
  * themes): a free hex would be unreadable in one of the two. The palette ids
  * live here, the hues live in CSS; {@link PALETTE_HUE} mirrors the dark hues so
  * a native colour can be mapped to the nearest one without a DOM.
@@ -88,7 +88,7 @@ export function dispatchTileTitle(dispatch: { engine: string; model?: string }):
 
 // ── Native colours → the nearest palette colour ──────────────────────
 
-/** The dark-theme hue of each palette colour, in degrees (see `--color-agent-*` in main.css). */
+/** The dark-theme hue of each palette colour, in degrees (see `--color-agent-*` in app.css). */
 const PALETTE_HUE: Record<AgentColorId, number> = {
   sky: 194,
   violet: 266,

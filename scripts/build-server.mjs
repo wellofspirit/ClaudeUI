@@ -22,9 +22,10 @@
  *
  * ## The web client
  *
- * `RemoteServer` serves the built web bundle from `<appPath>/out/web` with
- * ordinary `fs` reads. The pure-asset artifact ships `out/web` beside the
- * bundle, which `resolveAppPath()` finds. The COMPILED artifact does the same:
+ * `RemoteServer` serves the web client (`web.html` + `assets/`) from the one
+ * renderer build, `<appPath>/out/renderer`, with ordinary `fs` reads. The
+ * pure-asset artifact ships `out/renderer` beside the bundle, which
+ * `resolveAppPath()` finds. The COMPILED artifact does the same:
  * a bun single-file executable exposes its embedded files through `Bun.file`,
  * not through `fs` against a real path, so genuinely embedding the web bundle
  * would require changing `RemoteServer`'s static serving — a core change,
@@ -39,7 +40,7 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const ENTRY = path.join(ROOT, 'src', 'server', 'main.ts')
-const WEB_SRC = path.join(ROOT, 'out', 'web')
+const WEB_SRC = path.join(ROOT, 'out', 'renderer')
 
 /**
  * Left external.
@@ -100,7 +101,7 @@ function ensureWebBundle() {
   if (!fs.existsSync(WEB_SRC)) {
     fail(
       `the web client is not built (${path.relative(ROOT, WEB_SRC)} is missing). ` +
-        'Run `bun run build:web` first.'
+        'Run `bun run build` first.'
     )
   }
 }
@@ -148,8 +149,8 @@ function buildBundle() {
     ...EXTERNAL.flatMap((dep) => ['--external', dep])
   ])
 
-  log('copying the web client → dist/server/out/web')
-  copyDir(WEB_SRC, path.join(out, 'out', 'web'))
+  log('copying the web client → dist/server/out/renderer')
+  copyDir(WEB_SRC, path.join(out, 'out', 'renderer'))
 
   fs.writeFileSync(path.join(out, 'README.md'), READMES.bundle, 'utf-8')
   log(`done → ${path.relative(ROOT, out)}`)
@@ -190,8 +191,8 @@ function buildCompile(target) {
 
   // The web client rides BESIDE the executable rather than inside it — see the
   // module header for why embedding needs a RemoteServer change.
-  log('copying the web client → dist/server-bin/out/web')
-  copyDir(WEB_SRC, path.join(out, 'out', 'web'))
+  log('copying the web client → dist/server-bin/out/renderer')
+  copyDir(WEB_SRC, path.join(out, 'out', 'renderer'))
 
   fs.writeFileSync(path.join(out, 'README.md'), READMES.compile, 'utf-8')
   log(`done → ${path.relative(ROOT, out)}`)
@@ -210,11 +211,11 @@ Run with your own bun:
 > — \`jsonc-parser\` — ships a UMD entry that does not survive bundling for the
 > node target. Use bun, or run from source.
 
-Layout — \`out/web\` must stay beside the bundle, or set \`CLAUDEUI_APP_PATH\`
+Layout — \`out/renderer\` must stay beside the bundle, or set \`CLAUDEUI_APP_PATH\`
 to the directory that contains it.
 
     claudeui-server.js
-    out/web/…
+    out/renderer/…
 
 ## Storage
 
@@ -240,11 +241,11 @@ HTTPS name. \`claudeui-server show-link\` re-prints it later.
 
     ./claudeui-server --help
 
-Layout — \`out/web\` must stay beside the executable, or set
+Layout — \`out/renderer\` must stay beside the executable, or set
 \`CLAUDEUI_APP_PATH\` to the directory that contains it.
 
     claudeui-server(.exe)
-    out/web/…
+    out/renderer/…
 
 ## Building for other platforms
 

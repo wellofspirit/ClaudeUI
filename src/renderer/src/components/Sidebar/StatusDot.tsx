@@ -1,7 +1,14 @@
 import { useState } from 'react'
 
-export type SessionDotState =
-  'attention' | 'running' | 'subagents' | 'idle' | 'watching' | 'inactive'
+export const SESSION_DOT_STATES = [
+  'attention',
+  'running',
+  'subagents',
+  'idle',
+  'watching',
+  'inactive'
+] as const
+export type SessionDotState = (typeof SESSION_DOT_STATES)[number]
 
 export interface SessionDotInput {
   active: boolean
@@ -40,8 +47,11 @@ const LABELS: Record<SessionDotState, string> = {
 
 const RIPPLE: ReadonlySet<SessionDotState> = new Set(['attention', 'running', 'subagents'])
 
-/** Ripple cycle length in seconds — keep in step with the `status-dot-*` keyframes in main.css. */
-const CYCLE_S = 3.2
+/**
+ * Ripple cycle length in seconds — keep in step with the `status-dot-*` animations in app.css
+ * (StatusDot.unit.test.ts checks it).
+ */
+export const CYCLE_S = 2
 
 export function statusDotLabel(state: SessionDotState, runningSubagents: number): string {
   if (runningSubagents <= 0) return LABELS[state]

@@ -150,7 +150,7 @@ describe('nearestPaletteColor', () => {
   })
 
   it('maps every palette hue to itself', () => {
-    // The dark-theme hexes of main.css: a palette colour is its own nearest.
+    // The dark-theme hexes of app.css: a palette colour is its own nearest.
     const dark: Record<string, string> = {
       sky: '#4fc3e8',
       violet: '#b28bf0',
@@ -263,9 +263,9 @@ describe('withAgentColorOverride', () => {
   })
 })
 
-describe('the palette tokens in main.css', () => {
+describe('the palette tokens in app.css', () => {
   it('defines every palette colour for the dark and the light theme', () => {
-    const css = readFileSync(join(__dirname, '../../renderer/src/assets/main.css'), 'utf8')
+    const css = readFileSync(join(__dirname, '../../renderer/src/assets/app.css'), 'utf8')
     const light = css.slice(
       css.indexOf("[data-theme='light']"),
       css.indexOf("[data-theme='monokai']")

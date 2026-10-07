@@ -41,7 +41,6 @@
     "build:win": "node scripts/build.mjs build:win",
     "build:mac": "node scripts/build.mjs build:mac",
     "build:linux": "node scripts/build.mjs build:linux",
-    "build:web": "node scripts/build.mjs build:web",
     "test": "vitest run --project unit --project unit-node --project component --project e2e --project browser",
     "test:unit": "vitest run --project unit --project unit-node",
     "test:component": "vitest run --project component",

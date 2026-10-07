@@ -81,7 +81,7 @@ const { tempHome, priorHome } = vi.hoisted(() => {
 })
 
 // `getAppPath()` must be the repo root: `RemoteServer.getWebClientDir()` resolves
-// `<appPath>/out/web`, and the REAL built bundle is what is under test here.
+// `<appPath>/out/renderer`, and the REAL built bundle is what is under test here.
 vi.mock('electron', async () => {
   const shim = await import('../../test/stubs/electron-shim')
   const nodePath = await import('node:path')
@@ -288,10 +288,10 @@ async function raceTestIds(ids: string[], timeoutMs: number): Promise<string> {
 describe.skipIf(SKIP)('E2E (gated): LAN link password sign-in from a real browser', () => {
   beforeAll(async () => {
     expect(tempHome, 'the hermetic HOME redirect must be active').toContain('claudeui-lan-walk-')
-    const webIndex = path.resolve(__dirname, '..', '..', '..', 'out', 'web', 'index.html')
+    const webIndex = path.resolve(__dirname, '..', '..', '..', 'out', 'renderer', 'web.html')
     expect(
       fs.existsSync(webIndex),
-      `built web client missing at ${webIndex} — run bun run build:web`
+      `built web client missing at ${webIndex} — run bun run build`
     ).toBe(true)
 
     const { TestIpcBridge: Bridge } = await import('../../test/bridges/test-ipc-bridge')

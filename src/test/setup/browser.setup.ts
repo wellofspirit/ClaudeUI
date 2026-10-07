@@ -8,7 +8,7 @@
 // The node project has no DOM/Vite ambient types; this file is the one place a
 // bare CSS import needs them.
 /// <reference types="vite/client" />
-import '../../renderer/src/assets/main.css'
+import '../../renderer/src/assets/app.css'
 // One pinned UI font for every run (fontsource ships the files, no network).
 // The app's stack is the SYSTEM font (`-apple-system, BlinkMacSystemFont,
 // 'Segoe UI', 'Noto Sans', …`), so a geometry assertion measured whichever

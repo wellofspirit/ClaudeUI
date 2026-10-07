@@ -1,6 +1,8 @@
 # ADR-008: Type-check the remote web client (`src/web`) against `ClaudeAPI`
 
-**Status:** Accepted
+**Status:** Accepted. **Amended by [ADR-099](adr-099_one-ui-bundle.md) (2026-10-07)**: `build:web` and
+`vite.web.config.ts` are gone; the web client is part of the one renderer build. The type-check is
+unchanged.
 **Date:** 2026-05-30
 
 ## Context

@@ -1,6 +1,7 @@
 # ADR-058 — `src/core` and `claudeui-server`: one service graph, two hosts
 
 **Status:** **Accepted** — as-built record (2026-08-18/19). Three series on `v3`: S2 `c61c9d8` (the physical extraction), S3 stage 1 `f007525` (the SQLite driver seam + the registrar move behind a pluggable desktop binder), S3 stages 2-3 `a0d0f90` (the entrypoint and its distributions). As-built mechanics live in [sync-core.md](../architecture/sync-core.md) (§Topology, §Headless specifics, §Follow-ons), [source-layout.md](../architecture/source-layout.md) (the tree and the seam table) and [persistence.md](../architecture/persistence.md) (the driver seam); this ADR keeps the decisions and the reasoning that the code does not carry on its face.
+**Amended by [ADR-099](adr-099_one-ui-bundle.md) (2026-10-07):** §5's web assets beside the artifact are `out/renderer` (the one UI build), not `out/web`.
 **Relates to:** ADR-051 (this realizes its decision 5, "Headless-first" — the core split it anticipated; the topology prose is [sync-core.md](../architecture/sync-core.md) §Topology), ADR-054 (the host anchor, whose meaning this generalizes), ADR-056 (the admission model the first-boot chain bootstraps), ADR-057 (vendor OAuth — why `HostAuth` is data-only), ADR-006 (the rebundled `bun-claude` binary the core still spawns).
 
 ## Context
