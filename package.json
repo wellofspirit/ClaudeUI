@@ -51,6 +51,7 @@
     "test:git": "vitest run --project git",
     "test:git:changed": "vitest run --project git --changed",
     "test:ci": "vitest run --project unit --project unit-node --project component --project e2e --project browser --project git",
+    "test:ci:no-browser": "vitest run --project unit --project unit-node --project component --project e2e --project git",
     "test:patch": "node patch/test-all.mjs",
     "verify:sqlite": "bun scripts/verify-bun-sqlite.ts",
     "build:server": "node scripts/build-server.mjs bundle",
@@ -85,6 +86,7 @@
   "devDependencies": {
     "@electron-toolkit/eslint-config-ts": "^3.1.0",
     "@electron-toolkit/tsconfig": "^2.0.0",
+    "@fontsource/roboto": "^5.3.0",
     "@simplewebauthn/browser": "^13.3.0",
     "@swc/core": "^1.15.47",
     "@tailwindcss/vite": "^4.3.3",
