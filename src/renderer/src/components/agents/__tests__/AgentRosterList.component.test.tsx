@@ -1,7 +1,8 @@
 /**
- * Layer 2: the roster list (ADR-073) — foldable sections, the Running filter
- * (the default), what a row reports, and (§7) the agent tree: indent, guides,
- * context ancestors under Running, and Stop only where there is a record.
+ * Layer 2: the roster list (ADR-073) — one tree with no sections (§10), the
+ * Running filter (the default), what a row reports, and (§7) the agent tree:
+ * indent, guides, context ancestors under Running (a running shell under a
+ * finished agent keeps that agent), and Stop only where there is a record.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
@@ -18,6 +19,7 @@ function row(over: Partial<AgentRosterRow> & { toolUseId: string }): AgentRoster
   return {
     kind: 'agent',
     name: 'agent',
+    hasExplicitName: true,
     description: 'doing something',
     isRunning: false,
     isError: false,
@@ -37,6 +39,8 @@ function roster(over: Partial<AgentRoster> = {}): AgentRoster {
   return {
     agents,
     shells,
+    // Callers that care about nesting pass `rows`; otherwise agents then shells.
+    rows: over.rows ?? [...agents, ...shells],
     runningCount: over.runningCount ?? runningAgentCount + runningShellCount,
     runningAgentCount,
     runningShellCount,
@@ -64,6 +68,10 @@ async function renderList(
 
 describe('AgentRosterList', () => {
   let app: TestApp
+  const setActiveTasks = (activeTasks: Record<string, ActiveTask>): void =>
+    useSessionStore.setState((state) => ({
+      sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], activeTasks } }
+    }))
 
   beforeEach(async () => {
     app = await bootTestApp()
@@ -85,8 +93,27 @@ describe('AgentRosterList', () => {
         ]
       })
     )
-    expect(screen.getByTestId('AgentRoster').textContent).toContain('1 running')
-    expect(screen.getByTestId('AgentRoster').textContent).toContain('2 total')
+    // The summary's own words (roster-summary), without "in this session".
+    expect(screen.getByTestId('AgentRoster.summary').textContent).toBe('1 agent running · 2 agents')
+  })
+
+  it('counts running shells in the header, in the same words as the tooltip', async () => {
+    await renderList(
+      roster({
+        agents: [row({ toolUseId: 'a', isRunning: true }), row({ toolUseId: 'b' })],
+        shells: [
+          row({ toolUseId: 's1', kind: 'shell', isRunning: true }),
+          row({ toolUseId: 's2', kind: 'shell', isRunning: true })
+        ]
+      })
+    )
+    expect(screen.getByTestId('AgentRoster.summary').textContent).toBe(
+      '1 agent, 2 shells running · 2 agents'
+    )
+    // The running part is the accented one.
+    expect(
+      screen.getByTestId('AgentRoster.summary').querySelector('.text-accent')?.textContent
+    ).toBe('1 agent, 2 shells running')
   })
 
   it('opens on Running, and All shows the finished rows too', async () => {
@@ -137,45 +164,43 @@ describe('AgentRosterList', () => {
     expect(rows.map((r) => r.getAttribute('data-tool-use-id'))).toEqual(['open-done'])
   })
 
-  it('splits agents from background shells', async () => {
+  it('lists agents and shells in one tree, with no section headings', async () => {
     await renderList(
       roster({
         agents: [row({ toolUseId: 'a', name: 'reviewer', isRunning: true })],
         shells: [row({ toolUseId: 's', kind: 'shell', name: 'bun', isRunning: true })]
       })
     )
-    expect(screen.getByTestId('AgentRoster.section.Agents').textContent).toContain('1')
-    expect(screen.getByTestId('AgentRoster.section.Background shells')).toBeTruthy()
-    expect(screen.getAllByTestId('AgentRow')).toHaveLength(2)
+    expect(screen.queryByTestId(/^AgentRoster\.section/)).toBeNull()
+    expect(screen.queryByText('Agents')).toBeNull()
+    expect(screen.queryByText('Background shells')).toBeNull()
+    const rows = screen.getAllByTestId('AgentRow')
+    expect(rows.map((r) => r.getAttribute('data-kind'))).toEqual(['agent', 'shell'])
   })
 
-  it('heads even a lone section, since the heading is what folds it', async () => {
-    await renderList(roster({ agents: [row({ toolUseId: 'a', isRunning: true })] }))
-    expect(screen.getByTestId('AgentRoster.section.Agents')).toBeTruthy()
-    expect(screen.queryByTestId('AgentRoster.section.Background shells')).toBeNull()
-  })
-
-  it('folds one section without touching the other', async () => {
+  it('renders the rows in the roster order, nested shells included', async () => {
     await renderList(
       roster({
         agents: [
-          row({ toolUseId: 'a1', isRunning: true }),
-          row({ toolUseId: 'a2', isRunning: true })
+          row({ toolUseId: 'a', isRunning: true }),
+          row({ toolUseId: 'b', isRunning: true })
         ],
-        shells: [row({ toolUseId: 's', kind: 'shell', isRunning: true })]
+        rows: [
+          row({ toolUseId: 'a', isRunning: true }),
+          row({
+            toolUseId: 's',
+            kind: 'shell',
+            depth: 1,
+            parentToolUseId: 'a',
+            isRunning: true
+          }),
+          row({ toolUseId: 'b', isRunning: true })
+        ]
       })
     )
-    const toggle = screen.getByTestId('AgentRoster.section.Agents.toggle')
-    fireEvent.click(toggle)
-    expect(toggle.getAttribute('aria-expanded')).toBe('false')
-    // The count stays on the folded heading — that is what it is folded down to.
-    expect(screen.getByTestId('AgentRoster.section.Agents').textContent).toContain('2')
     expect(
       screen.getAllByTestId('AgentRow').map((r) => r.getAttribute('data-tool-use-id'))
-    ).toEqual(['s'])
-
-    fireEvent.click(toggle)
-    expect(screen.getAllByTestId('AgentRow')).toHaveLength(3)
+    ).toEqual(['a', 's', 'b'])
   })
 
   it('scrolls a row into view when it becomes selected, not when it mounts selected', async () => {
@@ -237,7 +262,9 @@ describe('AgentRosterList', () => {
     fireEvent.click(screen.getByTestId('AgentRoster.filter.all'))
     const badges = screen.getAllByTestId('AgentRow.resumed')
     expect(badges).toHaveLength(1)
-    expect(badges[0].textContent).toContain('×2')
+    // Always the short form, at every width (§10); the title carries the sentence.
+    expect(badges[0].textContent).toBe('↻2')
+    expect(badges[0].title).toContain('ran again')
   })
 
   describe('the agent tree (§7)', () => {
@@ -261,10 +288,10 @@ describe('AgentRosterList', () => {
       )
       expect(ids()).toEqual(['lead', 'impl'])
       expect(context()).toEqual(['lead'])
-      // The heading counts the running row only.
-      expect(
-        screen.getByTestId('AgentRoster.section.Agents.toggle').textContent?.trim().endsWith('1')
-      ).toBe(true)
+      // The header counts the running row only: the context row is not counted.
+      expect(screen.getByTestId('AgentRoster.summary').textContent).toBe(
+        '1 agent running · 3 agents'
+      )
       const [lead, impl] = screen.getAllByTestId('AgentRow')
       expect(lead.className).toContain('opacity-55')
       expect(impl.getAttribute('data-depth')).toBe('1')
@@ -286,10 +313,70 @@ describe('AgentRosterList', () => {
       )
       expect(ids()).toEqual(['d0', 'd1', 'd2', 'd3'])
       expect(context()).toEqual(['d0', 'd1', 'd2'])
-      expect(screen.getByTestId('AgentRoster').textContent).toContain('1 running')
+      expect(screen.getByTestId('AgentRoster.summary').textContent).toBe(
+        '1 agent running · 5 agents'
+      )
 
       fireEvent.click(screen.getAllByTestId('AgentRow')[0])
       expect(onOpen).toHaveBeenCalledWith('d0')
+    })
+
+    it('keeps a finished agent as context for the running shell it launched', async () => {
+      // The shell outlived its agent: the agent is not running, the shell is, and
+      // a running shell always has its lifecycle record.
+      setActiveTasks({ sh: { taskId: 'b1', taskType: 'local_bash', isBackgrounded: true } })
+      await renderList(
+        roster({
+          agents: [row({ toolUseId: 'lead', name: 'lead' }), row({ toolUseId: 'other' })],
+          shells: [row({ toolUseId: 'sh', kind: 'shell', isRunning: true })],
+          rows: [
+            row({ toolUseId: 'lead', name: 'lead' }),
+            row({
+              toolUseId: 'sh',
+              kind: 'shell',
+              depth: 1,
+              parentToolUseId: 'lead',
+              isRunning: true
+            }),
+            row({ toolUseId: 'other' })
+          ]
+        })
+      )
+      expect(ids()).toEqual(['lead', 'sh'])
+      expect(context()).toEqual(['lead'])
+      const [lead, sh] = screen.getAllByTestId('AgentRow')
+      expect(lead.className).toContain('opacity-55')
+      expect(lead.querySelector('[data-testid="AgentRow.stop"]')).toBeNull()
+      expect(sh.getAttribute('data-kind')).toBe('shell')
+      expect(sh.getAttribute('data-depth')).toBe('1')
+      expect(sh.getAttribute('data-context')).toBeNull()
+      // Stop is on the shell, not on the dimmed context row above it.
+      expect(sh.querySelector('[data-testid="AgentRow.stop"]')).not.toBeNull()
+      expect(screen.getAllByTestId('AgentRow.stop')).toHaveLength(1)
+      expect(screen.getByTestId('AgentRoster.summary').textContent).toBe(
+        '1 shell running · 2 agents'
+      )
+    })
+
+    it('offers a nested shell no Stop without a lifecycle record', async () => {
+      await renderList(
+        roster({
+          agents: [row({ toolUseId: 'lead' })],
+          shells: [row({ toolUseId: 'sh', kind: 'shell', isRunning: true })],
+          rows: [
+            row({ toolUseId: 'lead' }),
+            row({
+              toolUseId: 'sh',
+              kind: 'shell',
+              depth: 1,
+              parentToolUseId: 'lead',
+              isRunning: true
+            })
+          ]
+        })
+      )
+      const sh = screen.getAllByTestId('AgentRow')[1]
+      expect(sh.querySelector('[data-testid="AgentRow.stop"]')).toBeNull()
     })
 
     it('does not mark an open ancestor as context', async () => {
@@ -339,10 +426,6 @@ describe('AgentRosterList', () => {
   })
 
   describe('Stop on a nested row', () => {
-    const setActiveTasks = (activeTasks: Record<string, ActiveTask>): void =>
-      useSessionStore.setState((state) => ({
-        sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], activeTasks } }
-      }))
     const nested = (): AgentRoster =>
       roster({
         agents: [

@@ -1,27 +1,29 @@
 /**
  * The roster itself (ADR-073): a header that counts, a Running/All filter, and
- * the rows in two sections — agents, and the background shells that get lost to
- * scrolling for exactly the same reason (owner ruling, 2026-09-21).
+ * ONE tree of rows (§10). Agents and the background shells that get lost to
+ * scrolling for exactly the same reason (owner ruling, 2026-09-21) share it: a
+ * shell sits under the agent that launched it, and one the main session
+ * launched sits at the top level. There are no sections to fold.
  *
  * The list opens on Running: in a long session the finished rows are most of
- * it, and they bury the few that still matter. Each section folds, so one busy
- * kind cannot push the other out of reach.
+ * it, and they bury the few that still matter.
  *
- * The filter and the folds are local component state on purpose. They are a way
- * of looking at the list for a moment, not a preference: persisting them would
- * eventually hide a finished agent from someone who had forgotten they set it.
+ * The filter is local component state on purpose. It is a way of looking at the
+ * list for a moment, not a preference: persisting it would eventually hide a
+ * finished agent from someone who had forgotten they set it.
  *
- * Agents form a tree (ADR-073 §7): a nested agent sits under the agent that
- * spawned it. Under Running, a finished ancestor of a running (or open) row is
- * kept as dimmed context, so an indented row never floats without its parent;
- * context rows are not counted. The shells section is not filtered: every row
- * in it is running, or open.
+ * A nested row sits under the agent that spawned it (ADR-073 §7). Under
+ * Running, a finished ancestor of a running (or open) row is kept as dimmed
+ * context, so an indented row never floats without its parent; context rows are
+ * not counted. This is what keeps a shell reachable after the agent that
+ * launched it has finished: the shell is running, so the agent stays. Every
+ * listed shell is running or open, so the filter needs no rule of its own for
+ * them.
  */
 import { useState } from 'react'
 import type { AgentRoster, AgentRosterRow } from '../../hooks/useAgentRoster'
 import { AgentRow, type RowGuide } from './AgentRow'
-
-type SectionLabel = 'Agents' | 'Background shells'
+import { rosterSummaryParts } from './roster-summary'
 
 interface ListedRow {
   row: AgentRosterRow
@@ -78,62 +80,6 @@ function withGuides(listed: { row: AgentRosterRow; isContext: boolean }[]): List
   })
 }
 
-function Section({
-  label,
-  rows,
-  count,
-  selectedIds,
-  collapsed,
-  onToggleCollapsed,
-  onOpen
-}: {
-  label: SectionLabel
-  rows: ListedRow[]
-  /** The heading's number: the rows shown, context rows excluded. */
-  count: number
-  selectedIds: string[]
-  collapsed: boolean
-  onToggleCollapsed: () => void
-  onOpen: (toolUseId: string) => void
-}): React.JSX.Element | null {
-  if (rows.length === 0) return null
-  return (
-    <div data-testid={`AgentRoster.section.${label}`} data-collapsed={collapsed}>
-      <button
-        data-testid={`AgentRoster.section.${label}.toggle`}
-        onClick={onToggleCollapsed}
-        aria-expanded={!collapsed}
-        className="w-full flex items-center gap-1 px-2.5 pt-1.5 pb-0.5 text-[10px] uppercase tracking-wide text-text-muted hover:text-text-secondary cursor-default transition-colors"
-      >
-        <svg
-          width="8"
-          height="8"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="3"
-          className={`shrink-0 transition-transform ${collapsed ? '-rotate-90' : ''}`}
-        >
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
-        <span>{label}</span>
-        <span className="tabular-nums normal-case">{count}</span>
-      </button>
-      {!collapsed &&
-        rows.map(({ row, isContext, guide }) => (
-          <AgentRow
-            key={row.toolUseId}
-            row={row}
-            selected={selectedIds.includes(row.toolUseId)}
-            onOpen={onOpen}
-            isContext={isContext}
-            guide={guide}
-          />
-        ))}
-    </div>
-  )
-}
-
 export function AgentRosterList({
   roster,
   selectedIds,
@@ -147,27 +93,16 @@ export function AgentRosterList({
   emptyHint?: string
 }): React.JSX.Element {
   const [runningOnly, setRunningOnly] = useState(true)
-  const [collapsed, setCollapsed] = useState<ReadonlySet<SectionLabel>>(() => new Set())
-
-  const toggleCollapsed = (label: SectionLabel): void =>
-    setCollapsed((prev) => {
-      const next = new Set(prev)
-      if (next.has(label)) next.delete(label)
-      else next.add(label)
-      return next
-    })
 
   // An open row stays listed after it finishes: it is still on screen below,
   // and clicking its row again is how it gets put away.
-  const agents = withGuides(
+  const listed = withGuides(
     runningOnly
-      ? keepRunning(roster.agents, selectedIds)
-      : roster.agents.map((row) => ({ row, isContext: false }))
+      ? keepRunning(roster.rows, selectedIds)
+      : roster.rows.map((row) => ({ row, isContext: false }))
   )
-  const agentCount = agents.filter((a) => !a.isContext).length
-  // Already running-or-open by construction (the shell rule), so never filtered.
-  const shells: ListedRow[] = roster.shells.map((row) => ({ row, isContext: false }))
-  const shown = agentCount + shells.length
+  const shown = listed.filter((l) => !l.isContext).length
+  const summary = rosterSummaryParts(roster)
 
   const filterButton = (running: boolean, label: string): React.JSX.Element => {
     const active = runningOnly === running
@@ -186,18 +121,19 @@ export function AgentRosterList({
   }
 
   return (
-    // A named container: the rows go two-line below 480px of ROSTER width (the
-    // 420px desktop overlay included: one line cannot hold a readable Claude row
-    // in it) — ADR-073 §9.
+    // A named container: the metrics drop the current tool below 360px of ROSTER
+    // width, which is the roster's own width and never the viewport's (§10).
     <div data-testid="AgentRoster" className="@container/roster">
       {/* Sticky, so the counts and the filter survive scrolling a long list. */}
       <div className="sticky top-0 z-10 bg-bg-secondary flex items-center gap-2 px-2.5 py-1.5 border-b border-border">
-        <span className="text-[11px] text-text-secondary flex-1 min-w-0 truncate">
-          {roster.runningCount > 0 && (
-            <span className="text-accent">{roster.runningCount} running</span>
-          )}
-          {roster.runningCount > 0 && ' · '}
-          {roster.totalCount} total
+        <span
+          data-testid="AgentRoster.summary"
+          className="text-[11px] text-text-secondary flex-1 min-w-0 truncate"
+        >
+          {summary.running && <span className="text-accent">{summary.running}</span>}
+          {summary.running && summary.total && ' · '}
+          {summary.total}
+          {!summary.running && !summary.total && 'No agents'}
         </span>
         <div className="flex items-center rounded-md border border-border overflow-hidden text-[10px] shrink-0">
           {filterButton(true, 'Running')}
@@ -228,26 +164,16 @@ export function AgentRosterList({
           )}
         </div>
       ) : (
-        <>
-          <Section
-            label="Agents"
-            rows={agents}
-            count={agentCount}
-            selectedIds={selectedIds}
-            collapsed={collapsed.has('Agents')}
-            onToggleCollapsed={() => toggleCollapsed('Agents')}
+        listed.map(({ row, isContext, guide }) => (
+          <AgentRow
+            key={row.toolUseId}
+            row={row}
+            selected={selectedIds.includes(row.toolUseId)}
             onOpen={onOpen}
+            isContext={isContext}
+            guide={guide}
           />
-          <Section
-            label="Background shells"
-            rows={shells}
-            count={shells.length}
-            selectedIds={selectedIds}
-            collapsed={collapsed.has('Background shells')}
-            onToggleCollapsed={() => toggleCollapsed('Background shells')}
-            onOpen={onOpen}
-          />
-        </>
+        ))
       )}
     </div>
   )
