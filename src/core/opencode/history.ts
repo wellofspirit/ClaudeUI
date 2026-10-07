@@ -280,9 +280,19 @@ export function childSessionsOf(rows: readonly Session_Message_Info[]): string[]
 export const MAX_HISTORY_CHILDREN = 200
 
 /**
+ * Child reads in flight at once. Siblings are independent, so one level is read
+ * in parallel — one at a time made every child a full round trip (a session
+ * with 9-15 children took ~250 ms against ~80 ms without) — but the server is
+ * shared with live sessions, so a wide level does not get one request per child.
+ */
+export const HISTORY_READ_CONCURRENCY = 8
+
+/**
  * Read a session's rows and, breadth-first, those of every child its
- * subagent calls ran (bounded). A child that cannot be read is skipped: its
- * call still renders, with its notification and without a transcript.
+ * subagent calls ran (bounded). Each level is read in parallel and kept in
+ * call order, so the result does not depend on which read answers first. A
+ * child that cannot be read is skipped: its call still renders, with its
+ * notification and without a transcript.
  */
 export async function readOpencodeHistory(
   listMessages: (sessionID: string) => Promise<Session_Message_Info[]>,
@@ -290,14 +300,25 @@ export async function readOpencodeHistory(
 ): Promise<{ rows: Session_Message_Info[]; children: Map<string, Session_Message_Info[]> }> {
   const rows = await listMessages(sessionID)
   const children = new Map<string, Session_Message_Info[]>()
-  const queue = childSessionsOf(rows)
-  while (queue.length > 0 && children.size < MAX_HISTORY_CHILDREN) {
-    const childID = queue.shift()!
-    if (children.has(childID) || childID === sessionID) continue
-    const childRows = await listMessages(childID).catch(() => null)
-    if (!childRows) continue
-    children.set(childID, childRows)
-    for (const next of childSessionsOf(childRows)) if (!children.has(next)) queue.push(next)
+  const seen = new Set([sessionID])
+  let level = childSessionsOf(rows)
+  while (level.length > 0 && children.size < MAX_HISTORY_CHILDREN) {
+    const ids = [...new Set(level)]
+      .filter((id) => !seen.has(id))
+      .slice(0, MAX_HISTORY_CHILDREN - children.size)
+    for (const id of ids) seen.add(id)
+    const read: (Session_Message_Info[] | null)[] = []
+    for (let i = 0; i < ids.length; i += HISTORY_READ_CONCURRENCY) {
+      const batch = ids.slice(i, i + HISTORY_READ_CONCURRENCY)
+      read.push(...(await Promise.all(batch.map((id) => listMessages(id).catch(() => null)))))
+    }
+    level = []
+    ids.forEach((id, i) => {
+      const childRows = read[i]
+      if (!childRows) return
+      children.set(id, childRows)
+      level.push(...childSessionsOf(childRows))
+    })
   }
   return { rows, children }
 }
