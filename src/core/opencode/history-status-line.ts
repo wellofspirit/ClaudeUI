@@ -207,8 +207,10 @@ function seedFromUsageRows(
     tokens.cacheWrite += t.cache?.write ?? 0
     tokens.cacheRead += t.cache?.read ?? 0
     // Context used is the LATEST turn's prompt, not the cumulative sum — same
-    // definition the live `result` handler applies.
-    if (info.context) lastContextLength = (t.input ?? 0) + (t.cache?.read ?? 0)
+    // definition the live `result` handler applies. A row that reports no
+    // prompt (nothing metered) keeps the last reading, as the live meter does.
+    const length = (t.input ?? 0) + (t.cache?.read ?? 0)
+    if (info.context && length > 0) lastContextLength = length
   }
 
   return {

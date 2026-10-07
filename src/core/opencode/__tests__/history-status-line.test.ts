@@ -144,6 +144,21 @@ describe('opencodeHistoryStatusLine — a subscription history', () => {
     expect(line.turnStartedAtMs).toBeNull()
   })
 
+  it('a later step reporting no context does not wipe the last reading', () => {
+    const line = opencodeHistoryStatusLine(
+      [
+        ...twoTurnHistory(),
+        userMessage('u3', 8_000),
+        assistantMessage('a3', { tokens: tokens({}), created: 8_100, completed: 8_200 }),
+        idle('i3', 8_200)
+      ],
+      SONNET
+    )
+
+    expect(line.contextWindow).toEqual({ used: 2000, size: 200_000 })
+    expect(line.usedPercentage).toBe(1)
+  })
+
   it('leaves the context meter unknown rather than guessing when the window is not cached', () => {
     mockContextWindow.mockReturnValue(0)
     const line = opencodeHistoryStatusLine(twoTurnHistory(), SONNET)
