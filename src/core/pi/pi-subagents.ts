@@ -109,7 +109,7 @@ export interface PiSubagentHost {
   /** The parent's skill-dirs env (`CLAUDEUI_PI_SKILL_DIRS`), or `{}`. */
   skillDirsEnv(): Record<string, string>
   /**
-   * The parent's MCP catalog snapshot (ADR-094) — a child registers the same
+   * The parent's MCP catalog snapshot (ADR-096) — a child registers the same
    * servers its parent did, as a Claude subagent sees its parent's MCP tools.
    * Absent = none.
    */
@@ -201,7 +201,7 @@ export function narrowMode(parentMode: string, definitionMode?: string): string 
  * `dispatch_agent`, no plan-mode tools (the parent's gate enforces plan mode
  * for children), and the `agent` tool (with `task_stop`) only when it may
  * spawn. Every child gets `send_message` (S3b) and the parent's MCP catalog
- * (ADR-094).
+ * (ADR-096).
  */
 export function buildPiSubagentChildEnv(
   bridge: { url: string; token: string },
@@ -218,7 +218,7 @@ export function buildPiSubagentChildEnv(
     CLAUDEUI_PI_AGENT_LISTING: opts.childCanSpawn ? opts.listing : '',
     CLAUDEUI_PI_SEND_MESSAGE: '1',
     CLAUDEUI_PI_SKILL_DIRS: opts.skillDirsEnv.CLAUDEUI_PI_SKILL_DIRS ?? '',
-    // The parent's MCP catalog (ADR-094), served by the child's own bridge host.
+    // The parent's MCP catalog (ADR-096), served by the child's own bridge host.
     CLAUDEUI_PI_MCP: '1'
   }
 }
@@ -250,7 +250,7 @@ export function buildPiSubagentChildArgs(opts: {
     // `--tools` is an allowlist over built-in AND extension tools (P3), so the
     // bridge's own tools have to be named to stay active: send_message always,
     // agent, task_stop and list_models only when the child may spawn.
-    // MCP entries are spelled as pi names them (ADR-094): a Claude-form
+    // MCP entries are spelled as pi names them (ADR-096): a Claude-form
     // `mcp__my-server__x` would match nothing, a bare `mcp__github` neither.
     // Without any `mcp__` entry pi keeps MCP tools registered but never
     // declares a `direct` one (agent-session.ts `_isActivatable`), which is

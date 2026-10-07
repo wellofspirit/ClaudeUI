@@ -59,7 +59,7 @@ import { recordUsageEvent } from '../services/usage-recorder'
 import { PiBridgeHost, writeBridgeExtension } from './PiBridgeHost'
 import { HostedGrants, notApprovedHostedTool } from './hosted-grants'
 import { piUsageEvent } from './usage-row'
-// ADR-094: the shared MCP catalog, registered by the bridge extension.
+// ADR-096: the shared MCP catalog, registered by the bridge extension.
 import {
   claudeServerForPi,
   collectClaudeMcpForPi,
@@ -228,7 +228,7 @@ export function allowRuleActionFor(
   const piServer = sep < 0 ? rest : rest.slice(0, sep)
   if (!piServer) return undefined
   const tool = sep < 0 ? '' : rest.slice(sep + 2)
-  // pi sanitizes server names (`my-server` → `my_server`, ADR-094): the skip
+  // pi sanitizes server names (`my-server` → `my_server`, ADR-096): the skip
   // compares the rule's server in Claude's form, so map back when exactly one
   // known server (the bridged catalog + pi's own mcp.json) stands for it. The
   // tool part stays pi's; the caller's `mcpToolKey` spells the rule's the same.
@@ -453,7 +453,7 @@ export class PiSession extends BaseSession {
   /** "Allow for this session" entries — bare pi tool name, or `bash:<normalized command>` for bash (see permission-engine.ts's sessionAllowKey). */
   private sessionAllows = new Set<string>()
   /**
-   * The MCP catalog this session's pi registers (ADR-094): read at each spawn,
+   * The MCP catalog this session's pi registers (ADR-096): read at each spawn,
    * served to the bridge extension by the bridge host's `/mcp-servers`, and
    * handed to host-run subagents. Null until the first spawn.
    */
@@ -835,7 +835,7 @@ export class PiSession extends BaseSession {
   }
 
   /**
-   * Read the shared MCP catalog for this spawn (ADR-094) and remember it, the
+   * Read the shared MCP catalog for this spawn (ADR-096) and remember it, the
    * names pi will know its MCP tools by, and pi's own same-named servers.
    * Never throws (`collectClaudeMcpForPi` degrades to an empty catalog).
    */
@@ -886,7 +886,7 @@ export class PiSession extends BaseSession {
     // protocol"): hold/abandon budgets stay at their defaults, but the
     // abandonment callback is wired so a pi child that stops polling can't
     // leave a live approval card or an orphaned dispatched child behind.
-    // The shared MCP catalog (ADR-094), read fresh at every spawn: the bridge
+    // The shared MCP catalog (ADR-096), read fresh at every spawn: the bridge
     // extension fetches it from this host while pi loads (secrets never touch
     // an env var or a file), and a respawn picks up McpDialog's edits.
     const mcpCatalog = this.loadMcpCatalog()
@@ -939,7 +939,7 @@ export class PiSession extends BaseSession {
         env: {
           CLAUDEUI_PI_BRIDGE_URL: bridge.url,
           CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
-          // The bridge registers the shared MCP catalog (ADR-094). Always on:
+          // The bridge registers the shared MCP catalog (ADR-096). Always on:
           // the configs themselves come over the host channel, not from here.
           CLAUDEUI_PI_MCP: '1',
           ...(this.capabilities.hostedMcp ? { CLAUDEUI_PI_HOSTED_TOOLS: '1' } : {}),
@@ -1777,7 +1777,7 @@ export class PiSession extends BaseSession {
 
       case 'mcp_notice':
         // pi's MCP warnings (a server failed, needs a sign-in, or was refused
-        // at registration — ADR-094): a warning, never a turn error.
+        // at registration — ADR-096): a warning, never a turn error.
         logger.info('PiSession', output.message)
         this.send('session:warning', output.message)
         break
@@ -2139,7 +2139,7 @@ export class PiSession extends BaseSession {
       rules: autoMode ? withoutAllowRules(rules) : rules,
       sessionAllows: this.sessionAllows,
       cwd: this.cwd,
-      // pi's MCP tool names are sanitized (ADR-094): spell rules the same way.
+      // pi's MCP tool names are sanitized (ADR-096): spell rules the same way.
       mcpRuleKey: piMcpRuleKey
     })
 
@@ -2962,7 +2962,7 @@ export class PiSession extends BaseSession {
         permissions: () => this.currentRules(),
         honoursWorkdir: false,
         allowRuleAction: (name, input) => allowRuleActionFor(name, input, this.knownMcpServers),
-        // A rule's MCP tool part in pi's spelling (ADR-094), as the action's is.
+        // A rule's MCP tool part in pi's spelling (ADR-096), as the action's is.
         mcpToolKey: piMcpName,
         // A configured judge model that no longer exists fails CLOSED — never
         // judged by a stand-in (see judgeModelUnavailable).

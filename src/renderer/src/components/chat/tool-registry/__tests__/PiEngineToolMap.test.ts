@@ -602,7 +602,7 @@ describe('PiEngineToolMap — send_message / task_stop rows (ADR-089 S3b)', () =
   })
 })
 
-describe('PiEngineToolMap — bridged MCP tools (ADR-094)', () => {
+describe('PiEngineToolMap — bridged MCP tools (ADR-096)', () => {
   it('renders a pi MCP call exactly as Claude renders one: the mcp kind, the raw name as header', () => {
     expect(PiEngineToolMap.kindOf('mcp__fixture__echo')).toBe('mcp')
     expect(PiEngineToolMap.displayName('mcp__fixture__echo')).toBe('mcp__fixture__echo')

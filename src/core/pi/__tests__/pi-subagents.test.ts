@@ -242,7 +242,7 @@ describe('buildPiSubagentChildEnv', () => {
       CLAUDEUI_PI_AGENT_LISTING: '- x: y',
       CLAUDEUI_PI_SEND_MESSAGE: '1',
       CLAUDEUI_PI_SKILL_DIRS: '/s',
-      // ADR-094: the parent's MCP catalog, served by the child's own bridge host.
+      // ADR-096: the parent's MCP catalog, served by the child's own bridge host.
       CLAUDEUI_PI_MCP: '1'
     })
     const cannot = buildPiSubagentChildEnv(
@@ -296,7 +296,7 @@ describe('buildPiSubagentChildArgs', () => {
     ).toEqual(['--tools', 'read,send_message'])
   })
 
-  it('spells MCP entries the way pi names MCP tools (ADR-094): Claude-form names, bare servers', () => {
+  it('spells MCP entries the way pi names MCP tools (ADR-096): Claude-form names, bare servers', () => {
     expect(
       buildPiSubagentChildArgs({
         ...base,

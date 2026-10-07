@@ -1,6 +1,6 @@
 /**
  * pi + ClaudeUI's shared MCP catalog, end to end, with NO credential and NO
- * network (ADR-094).
+ * network (ADR-096).
  *
  * The real pinned pi binary, the real bridge extension (`writeBridgeExtension`),
  * the real `PiBridgeHost` serving `/mcp-servers`, the real translator
@@ -141,7 +141,7 @@ function lastUserText(messages: ChatMessage[]): string {
   return typeof user.content === 'string' ? user.content : JSON.stringify(user.content)
 }
 
-describe.skipIf(!LAUNCH)('pi + the shared MCP catalog (credential-free, ADR-094)', () => {
+describe.skipIf(!LAUNCH)('pi + the shared MCP catalog (credential-free, ADR-096)', () => {
   let dir: string
   let marker: string
   let provider: Server

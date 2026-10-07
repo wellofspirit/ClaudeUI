@@ -379,7 +379,7 @@ vi.mock('node:fs', () => ({
 // read-only bypass never clears a git command and no gitConfigArmed meta line
 // appears unless a test says the repo config was measured. The other captures
 // stay real (the `/cwd` fixture is not a repository, so they fail, by design).
-// ADR-094: the shared MCP catalog. The I/O reads are stubbed (never the
+// ADR-096: the shared MCP catalog. The I/O reads are stubbed (never the
 // developer's own ~/.claude/.mcp.json); the pure helpers stay real.
 const mcpCatalogMock = vi.hoisted(() => ({
   collect: vi.fn(() => ({ servers: {}, skipped: [] }) as Record<string, unknown>),
@@ -761,7 +761,7 @@ describe('PiSession.run — sends a prompt', () => {
         env: {
           CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9999',
           CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token',
-          // ADR-094: the shared MCP catalog, always registered by a session.
+          // ADR-096: the shared MCP catalog, always registered by a session.
           CLAUDEUI_PI_MCP: '1',
           CLAUDEUI_PI_HOSTED_TOOLS: '1',
           CLAUDEUI_PI_DISPATCH_ENABLED: '1',
@@ -7615,7 +7615,7 @@ describe('PiSession — the headline follows the cost rule (ADR-071 §2)', () =>
   })
 })
 
-describe('PiSession — shared MCP catalog (ADR-094)', () => {
+describe('PiSession — shared MCP catalog (ADR-096)', () => {
   const FIXTURE_ENTRY = { type: 'stdio', command: 'node', args: ['srv.js'], exposure: 'direct' }
 
   beforeEach(() => {
@@ -7694,7 +7694,7 @@ describe('PiSession — shared MCP catalog (ADR-094)', () => {
   })
 })
 
-describe('allowRuleActionFor — auto-mode allow skip for pi MCP calls (ADR-094)', () => {
+describe('allowRuleActionFor — auto-mode allow skip for pi MCP calls (ADR-096)', () => {
   it("maps pi's sanitized server back to the one known Claude name it stands for", () => {
     expect(allowRuleActionFor('mcp__my_srv__get_issue', {}, ['my-srv', 'other'])).toEqual({
       kind: 'mcp',

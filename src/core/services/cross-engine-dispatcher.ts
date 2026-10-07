@@ -2161,7 +2161,7 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
  *    hook) still activates normally — it depends ONLY on
  *    `CLAUDEUI_PI_BRIDGE_URL`/`TOKEN`, independent of the hosted-tools gate
  *    (verified against pi-bridge-source.ts's own independence design).
- *  - The shared MCP catalog IS registered (ADR-094, `CLAUDEUI_PI_MCP=1`, the
+ *  - The shared MCP catalog IS registered (ADR-096, `CLAUDEUI_PI_MCP=1`, the
  *    servers handed to the target's bridge host at the spawn site), as an
  *    opencode target gets it — MCP tools are not a recursion path.
  */
@@ -2197,7 +2197,7 @@ export function buildPiTargetChildEnv(bridge: { url: string; token: string }): N
     // `send_message` tools (same leak argument as the three above).
     CLAUDEUI_PI_AGENT_TOOL: '',
     CLAUDEUI_PI_SEND_MESSAGE: '',
-    // ADR-094: a dispatch target registers the shared MCP catalog, as an
+    // ADR-096: a dispatch target registers the shared MCP catalog, as an
     // opencode target does; the configs come from the target's own bridge
     // host (`mcpServers` at the spawn site), never from this env.
     CLAUDEUI_PI_MCP: '1'
@@ -5426,7 +5426,7 @@ export class CrossEngineDispatcher {
       cwd: ctx.cwd,
       model,
       spawn: this.spawnPiTarget,
-      // The shared MCP catalog (ADR-094), read at target creation and served
+      // The shared MCP catalog (ADR-096), read at target creation and served
       // by the target's bridge host; its calls hit this target's gate, which
       // spells Claude MCP rules in pi's form (`mcpRuleKey`).
       spawnOpts: {
@@ -5514,7 +5514,7 @@ export class CrossEngineDispatcher {
       // `.claude/worktrees/<name>` checkout would ask on every edit.
       cwd: entry.cwd,
       // pi sanitizes MCP tool names (its own mcp.json servers run here too):
-      // a user's Claude-form deny/ask rule must still match (ADR-094).
+      // a user's Claude-form deny/ask rule must still match (ADR-096).
       mcpRuleKey: piMcpRuleKey
     })
 

@@ -165,7 +165,7 @@ export type PiMapperOutput =
   /**
    * A warning pi's MCP extension (or the bridge's MCP block) raised with
    * `ctx.ui.notify` — servers that failed or need a sign-in, a catalog server
-   * pi refused (ADR-094). RPC mode has no other channel for them.
+   * pi refused (ADR-096). RPC mode has no other channel for them.
    */
   | { kind: 'mcp_notice'; message: string }
   | { kind: 'ignore' }
@@ -546,7 +546,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       // sends). Of those, only MCP's warnings: pi's MCP extension reports
       // failed / needs-sign-in servers this way and nowhere else in RPC mode,
       // and the bridge reports a catalog server pi refused the same way
-      // (ADR-094). Every MCP message starts "MCP " (extensions/mcp/index.ts).
+      // (ADR-096). Every MCP message starts "MCP " (extensions/mcp/index.ts).
       const req = ev as Record<string, unknown>
       if (
         req.method === 'notify' &&

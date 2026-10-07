@@ -30,7 +30,7 @@
  *
  * Plus ONE plain route that is not an exchange: `POST /mcp-servers` answers
  * the spawn-time MCP catalog snapshot the extension registers while pi loads
- * (ADR-094; see {@link PiBridgeHostOptions.mcpServers} for the secrets note).
+ * (ADR-096; see {@link PiBridgeHostOptions.mcpServers} for the secrets note).
  *
  * ## Long-poll protocol (2026-09-09)
  *
@@ -150,7 +150,7 @@ export interface PiBridgeHostOptions {
   onAbandoned?: (info: PiBridgeAbandoned) => void
   /**
    * The MCP servers `POST /mcp-servers` hands the bridge extension to register
-   * with `pi.registerMcpServer()` (ADR-094) — a snapshot taken at spawn, served
+   * with `pi.registerMcpServer()` (ADR-096) — a snapshot taken at spawn, served
    * on EVERY extension load (pi reloads extensions on fork). Absent = the route
    * answers an empty set.
    *
@@ -183,7 +183,7 @@ const DEFAULT_HOLD_MS = 45_000
  */
 const DEFAULT_ABANDON_MS = 30_000
 
-/** The one non-exchange route: the MCP servers the extension registers at load (ADR-094). */
+/** The one non-exchange route: the MCP servers the extension registers at load (ADR-096). */
 const MCP_SERVERS_ROUTE = '/mcp-servers'
 
 /** `req.url` → the exchange it addresses. `/wait` re-parks; the bare route starts. */

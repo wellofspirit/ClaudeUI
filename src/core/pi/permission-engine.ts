@@ -88,7 +88,7 @@ export interface PermissionEngineContext {
   realpath?: PlanReadOnlyScope['realpath']
   /**
    * How a Claude MCP rule's tool name is spelled in THIS engine's tool names
-   * before it is compared (ADR-094). pi sanitizes `mcp__<server>__<tool>` to
+   * before it is compared (ADR-096). pi sanitizes `mcp__<server>__<tool>` to
    * `[A-Za-z0-9_]` (`mcp__my-server__x` is called `mcp__my_server__x`), so pi's
    * gates pass `piMcpRuleKey` and a rule written for Claude matches pi's call.
    * Absent = compared as written (Codex names MCP calls in Claude's own form).

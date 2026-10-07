@@ -107,7 +107,7 @@ vi.mock('../../services/claude-mcp', () => {
     loadMcpServers,
     readDisabledMcpServers,
     mergeClaudeMcpServers,
-    // The merge-minus-disabled read every bridge shares (ADR-094), over the
+    // The merge-minus-disabled read every bridge shares (ADR-096), over the
     // same mocked reads — so the disabled-list assertions keep measuring it.
     readEnabledClaudeMcpServers: vi.fn((cwd: string) => {
       const disabled = new Set((readDisabledMcpServers(cwd) as string[] | undefined) ?? [])

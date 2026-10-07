@@ -376,7 +376,7 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
     ])
   })
 
-  it('replays a bridged MCP call (ADR-094) as the same tool_use/tool_result pair the live mapper sends', async () => {
+  it('replays a bridged MCP call (ADR-096) as the same tool_use/tool_result pair the live mapper sends', async () => {
     writeSessionFile('--proj-mcp--', 'x_sess-mcp.jsonl', [
       {
         type: 'session',

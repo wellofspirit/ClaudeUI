@@ -1728,14 +1728,14 @@ describe('decide — acceptEdits base asks for agent-control paths (ADR-084)', (
 })
 
 /**
- * ADR-094. pi names an MCP tool `mcp__<server>__<tool>` passed through its
+ * ADR-096. pi names an MCP tool `mcp__<server>__<tool>` passed through its
  * sanitizer (everything but `[A-Za-z0-9_]` → `_`), so `my-server`'s `get-issue`
  * is called `mcp__my_server__get_issue`. A rule the user wrote for Claude
  * (`mcp__my-server__get-issue`, `mcp__my-server`) must bind to that call; pi's
  * gates pass `mcpRuleKey: piMcpRuleKey` for it. Without the key (Codex, which
  * names MCP calls in Claude's own form) rules compare as written.
  */
-describe('decide — MCP rules against pi-sanitized tool names (ADR-094)', () => {
+describe('decide — MCP rules against pi-sanitized tool names (ADR-096)', () => {
   const ctx = (partial: Partial<MergedClaudeRules>, keyed = true) => ({
     mode: 'default',
     rules: rules(partial),

@@ -1639,7 +1639,7 @@ describe('mapPiEvent — a runtime send_message extension_error (ADR-089 review 
   })
 })
 
-describe('mapPiEvent — extension_ui_request notify (ADR-094)', () => {
+describe('mapPiEvent — extension_ui_request notify (ADR-096)', () => {
   const notify = (message: string, notifyType?: string): unknown => ({
     type: 'extension_ui_request',
     id: 'n',

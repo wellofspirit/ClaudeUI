@@ -894,7 +894,7 @@ describe('writeBridgeExtension (A2 — content-verify against tampering/preplant
   })
 })
 
-describe('PiBridgeHost — POST /mcp-servers (ADR-094)', () => {
+describe('PiBridgeHost — POST /mcp-servers (ADR-096)', () => {
   let host: PiBridgeHost | null = null
   afterEach(() => {
     host?.dispose()

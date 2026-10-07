@@ -55,7 +55,7 @@ vi.mock('../../../core/opencode/claude-mcp-bridge', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../core/opencode/claude-mcp-bridge')>()),
   collectClaudeMcpForOpencode: mockCollectClaudeMcp
 }))
-// ADR-094 — a pi target's MCP catalog: hermetic, empty unless a test says so.
+// ADR-096 — a pi target's MCP catalog: hermetic, empty unless a test says so.
 const { mockCollectPiMcp } = vi.hoisted(() => ({
   mockCollectPiMcp: vi.fn((_cwd: string): { servers: Record<string, unknown>; skipped: [] } => ({
     servers: {},
@@ -5024,7 +5024,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): target lifecycle', () =>
     expect(setModelCall?.[0]).toMatchObject({ provider: 'openai-codex', modelId: 'gpt-5.6-luna' })
   })
 
-  it("hands the target's bridge host the shared MCP catalog for the dispatch cwd (ADR-094)", async () => {
+  it("hands the target's bridge host the shared MCP catalog for the dispatch cwd (ADR-096)", async () => {
     const servers = { fixture: { type: 'stdio', command: 'node', exposure: 'direct' } }
     mockCollectPiMcp.mockReturnValueOnce({ servers, skipped: [] })
     const target = makeFakePiTarget()
@@ -6872,7 +6872,7 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
     expect(env.CLAUDEUI_PI_AGENT_TOOL).toBe('')
     // ADR-089 S3b: nor `send_message`.
     expect(env.CLAUDEUI_PI_SEND_MESSAGE).toBe('')
-    // ADR-094: a dispatch target registers the shared MCP catalog (served by
+    // ADR-096: a dispatch target registers the shared MCP catalog (served by
     // its bridge host, never carried in this env).
     expect(env.CLAUDEUI_PI_MCP).toBe('1')
     expect(env.CLAUDEUI_PI_BRIDGE_URL).toBe('http://127.0.0.1:54321')

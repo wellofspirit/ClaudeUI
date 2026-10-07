@@ -16,7 +16,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 13 (ADR-094: registers the shared MCP catalog)', () => {
+  it('is version 13 (ADR-096: registers the shared MCP catalog)', () => {
     expect(PI_BRIDGE_VERSION).toBe('13')
   })
 
@@ -120,7 +120,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain("baseUrl + '/wait'")
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain('parsed.pending !== true')
     // Exactly two fetch() call sites: the helper's own (every long-polled
-    // exchange), and the one-shot, time-bounded MCP catalog load (ADR-094),
+    // exchange), and the one-shot, time-bounded MCP catalog load (ADR-096),
     // which is not an exchange — nothing is held open for a decision.
     expect(PI_BRIDGE_EXTENSION_SOURCE.match(/await fetch\(/g)).toHaveLength(2)
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain("fetch(bridgeUrl + '/mcp-servers'")
@@ -1512,7 +1512,7 @@ describe('Electron-as-Node cleanup (ADR-082 §2)', () => {
   })
 })
 
-describe('PI_BRIDGE_EXTENSION_SOURCE — shared MCP catalog (bridge v13, ADR-094)', () => {
+describe('PI_BRIDGE_EXTENSION_SOURCE — shared MCP catalog (bridge v13, ADR-096)', () => {
   const realFetch = globalThis.fetch
   afterEach(() => {
     globalThis.fetch = realFetch

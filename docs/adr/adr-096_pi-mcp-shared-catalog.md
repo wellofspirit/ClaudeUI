@@ -1,4 +1,4 @@
-# ADR-094: pi sessions get ClaudeUI's shared MCP catalog through `registerMcpServer`
+# ADR-096: pi sessions get ClaudeUI's shared MCP catalog through `registerMcpServer`
 
 **Status:** Accepted (2026-10-06, owner decision). Built on branch `pi-mcp` (based on
 `harness-pins`: pi pinned and floored at 1.0.4).

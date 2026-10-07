@@ -1,5 +1,5 @@
 /**
- * Bridge ClaudeUI's ONE shared MCP catalog into pi (ADR-094).
+ * Bridge ClaudeUI's ONE shared MCP catalog into pi (ADR-096).
  *
  * The catalog is the Claude-scoped server list McpDialog manages (user /
  * project / local, minus the cwd's `disabledMcpServers`) — the same read the

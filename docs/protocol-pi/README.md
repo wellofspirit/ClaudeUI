@@ -379,7 +379,7 @@ session file + ClaudeUI log; no new probe run):
   `agent_settled`. Every real provider maps an abort to `"aborted"`; the setup path is the hole
   (upstream bug). ClaudeUI suppresses the banner inside the user-stop window instead (ADR-090).
 
-## MCP (pi 1.0 + ClaudeUI's shared catalog, ADR-094)
+## MCP (pi 1.0 + ClaudeUI's shared catalog, ADR-096)
 
 Source-read at v1.0.4 (`vendor/pi-src/packages/coding-agent/src/core/mcp-servers.ts`,
 `src/extensions/mcp/`) and proven credential-free end to end by

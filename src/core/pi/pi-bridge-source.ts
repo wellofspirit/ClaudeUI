@@ -158,7 +158,7 @@
  *    Content and details are untouched (pi merges `details:
  *    afterResult.details ?? result.details`), so a failed foreground agent
  *    keeps details.cuiAgent.
- *  - v13 (ADR-094) ADDED the shared MCP catalog, gated on CLAUDEUI_PI_MCP=1 +
+ *  - v13 (ADR-096) ADDED the shared MCP catalog, gated on CLAUDEUI_PI_MCP=1 +
  *    the bridge creds, as the LAST block of the factory: it fetches
  *    `POST /mcp-servers` from the host (bounded, 10 s) and calls
  *    `pi.registerMcpServer(name, config)` per entry (each config is already
@@ -655,7 +655,7 @@ export default function (pi) {
   // binary by hand still gets pi's own built-in trust prompt untouched.
   pi.on('project_trust', () => ({ trusted: 'yes', remember: false }));
 
-  // MCP servers from ClaudeUI's shared catalog (bridge v13, ADR-094): its OWN
+  // MCP servers from ClaudeUI's shared catalog (bridge v13, ADR-096): its OWN
   // gate (CLAUDEUI_PI_MCP=1) on top of the bridge creds. The configs carry
   // secrets, so they come from the host over the authenticated channel, never
   // an env var. The factory returns the load's promise and pi awaits it, so

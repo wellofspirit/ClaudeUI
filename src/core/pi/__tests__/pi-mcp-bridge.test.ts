@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * The pi MCP bridge (ADR-094): ClaudeUI's shared catalog → pi's
+ * The pi MCP bridge (ADR-096): ClaudeUI's shared catalog → pi's
  * `registerMcpServer` shape. Pure translation + filtering, the escape that
  * keeps pi's config-value resolver from running a value as a command, and the
  * small I/O readers (Claude catalog mocked; pi's own mcp.json from a temp dir).

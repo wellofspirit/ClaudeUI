@@ -57,7 +57,7 @@ export interface PiChildSpawnOpts {
   hostedToolHandler?: PiHostedToolHandler
   /** The child bridge's abandonment hook (see `PiBridgeHostOptions.onAbandoned`). */
   onAbandoned?: (info: PiBridgeAbandoned) => void
-  /** The MCP servers the child's bridge host serves at `/mcp-servers` (ADR-094; subagents: the parent's catalog). */
+  /** The MCP servers the child's bridge host serves at `/mcp-servers` (ADR-096; subagents: the parent's catalog). */
   mcpServers?: Record<string, unknown>
   /** Flags after `--mode rpc -e <bridge>` (dispatch: `['--no-session']`). */
   args?: string[]
@@ -90,7 +90,7 @@ function defaultChildEnv(bridge: { url: string; token: string }): NodeJS.Process
     CLAUDEUI_PI_HOSTED_TOOLS: '',
     CLAUDEUI_PI_DISPATCH_ENABLED: '',
     CLAUDEUI_PI_DISPATCH_DESCRIPTION: '',
-    // No bridged MCP catalog unless the consumer's env asks for it (ADR-094).
+    // No bridged MCP catalog unless the consumer's env asks for it (ADR-096).
     CLAUDEUI_PI_MCP: ''
   }
 }
@@ -824,7 +824,7 @@ export function forwardPiChildStream(
     // The runner consumes these (run start, delivery confirmation); no stream.
     // A child's MCP warnings (`mcp_notice`) are dropped too: the child runs the
     // parent's catalog, whose problems the parent session already reports
-    // (ADR-094).
+    // (ADR-096).
     case 'turn_start':
     case 'agent_delivery':
     case 'delivery_error':

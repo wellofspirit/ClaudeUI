@@ -36,7 +36,7 @@ vi.mock('../../services/claude-mcp', () => {
     loadMcpServers,
     readDisabledMcpServers,
     mergeClaudeMcpServers,
-    // The merge-minus-disabled read the bridges share (ADR-094), composed over
+    // The merge-minus-disabled read the bridges share (ADR-096), composed over
     // the same mocked reads, so the order and disabled-list assertions keep
     // measuring what they always did.
     readEnabledClaudeMcpServers: vi.fn((cwd: string) => {
