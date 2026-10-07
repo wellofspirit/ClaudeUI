@@ -134,7 +134,8 @@ export function taskElapsedLabel({
   progressSeconds?: number
 }): string | undefined {
   if (isRunning && startedAt !== undefined) {
-    return formatElapsed(Math.max(0, (now - startedAt) / 1000))
+    // Floored, not rounded by formatElapsed: 59.6 s must read 59s, not 60s.
+    return formatElapsed(Math.floor(Math.max(0, (now - startedAt) / 1000)))
   }
   if (!isRunning && durationMs != null) return formatDuration(durationMs)
   return progressSeconds ? formatElapsed(progressSeconds) : undefined
