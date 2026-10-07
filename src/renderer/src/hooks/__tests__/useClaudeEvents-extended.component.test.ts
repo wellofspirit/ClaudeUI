@@ -27,6 +27,16 @@ import type {
   FileDiff
 } from '../../../../shared/types'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import {
+  resetVoiceNoticesForTests,
+  useVoiceNoticeStore,
+  voiceNoticeFor
+} from '../../lib/voice/voice-notice'
+import {
+  resetVoiceControllerForTests,
+  voiceController,
+  VOICE_OWNERSHIP_WINDOW_MS
+} from '../../lib/voice/voice-controller'
 
 let app: TestApp
 
@@ -1261,26 +1271,97 @@ describe('useClaudeEvents extended component tests', () => {
     })
   })
 
+  // S3a item 2: a voice message is the mic's notice pill, NEVER the session's
+  // error stack — and the tone main sends decides its colour.
   describe('voice:error', () => {
-    it('adds voice error to session errors array', () => {
-      const routingId = 'route-1'
-      useSessionStore.getState().createNewSession(routingId, '/test')
+    const noticeOf = (routingId: string): ReturnType<typeof voiceNoticeFor> =>
+      voiceNoticeFor(useVoiceNoticeStore.getState().notices, routingId)
 
-      app.emit('voice:error', routingId, 'Microphone access denied')
+    /**
+     * Press and release through the REAL controller. jsdom has no audio, so the
+     * capture refuses — but the press is this client's from the moment it is
+     * made, exactly as a refused microphone's error is.
+     */
+    async function pressAndRelease(routingId: string): Promise<void> {
+      await voiceController()
+        .start(routingId, 'en')
+        .catch(() => {})
+      await voiceController()
+        .stop(routingId)
+        .catch(() => {})
+    }
 
-      expect(useSessionStore.getState().sessions[routingId].errors).toContain(
-        'Microphone access denied'
-      )
+    beforeEach(async () => {
+      resetVoiceNoticesForTests()
+      resetVoiceControllerForTests()
+      // These cases are about what a notice LOOKS like; this client captured.
+      await pressAndRelease('route-1')
     })
 
-    it('accumulates multiple voice errors', () => {
+    it('becomes the session’s voice notice, not a session error', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      app.emit('voice:error', routingId, 'error 1')
-      app.emit('voice:error', routingId, 'error 2')
+      app.emit('voice:error', routingId, 'Deepgram said no', 'warn')
 
-      expect(useSessionStore.getState().sessions[routingId].errors).toHaveLength(2)
+      expect(noticeOf(routingId)).toMatchObject({ text: 'Deepgram said no', tone: 'warn' })
+      expect(useSessionStore.getState().sessions[routingId].errors).toEqual([])
+    })
+
+    it('carries the tone main sent — an outcome is info', () => {
+      app.emit('voice:error', 'route-1', 'No speech detected', 'info')
+      expect(noticeOf('route-1')).toMatchObject({ text: 'No speech detected', tone: 'info' })
+    })
+
+    it('an older two-argument emitter reads as warn', () => {
+      app.emit('voice:error', 'route-1', 'legacy')
+      expect(noticeOf('route-1')).toMatchObject({ text: 'legacy', tone: 'warn' })
+    })
+
+    // Review item 1: `voice:error` is replicated — a client watching the session
+    // must not show another client's microphone messages above its own mic.
+    it('a session this client never captured for shows nothing (and no session error)', () => {
+      useSessionStore.getState().createNewSession('route-2', '/test')
+      app.emit('voice:error', 'route-2', 'Deepgram said no', 'warn')
+      expect(noticeOf('route-2')).toBeNull()
+      expect(useSessionStore.getState().sessions['route-2'].errors).toEqual([])
+    })
+
+    it('shows during its own capture and just after it, and nothing once the window closes', async () => {
+      resetVoiceControllerForTests()
+      vi.useFakeTimers({ toFake: ['Date'] })
+      try {
+        const starting = voiceController()
+          .start('route-3', 'en')
+          .catch(() => {})
+        app.emit('voice:error', 'route-3', 'during', 'warn')
+        expect(noticeOf('route-3')).toMatchObject({ text: 'during' })
+        await starting
+
+        await voiceController()
+          .stop('route-3')
+          .catch(() => {})
+        vi.setSystemTime(Date.now() + VOICE_OWNERSHIP_WINDOW_MS - 1000)
+        app.emit('voice:error', 'route-3', 'No speech detected', 'info')
+        expect(noticeOf('route-3')).toMatchObject({ text: 'No speech detected' })
+
+        vi.setSystemTime(Date.now() + 1000)
+        app.emit('voice:error', 'route-3', 'too late', 'warn')
+        expect(noticeOf('route-3')).toMatchObject({ text: 'No speech detected' })
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('a newer message replaces the older rather than stacking', () => {
+      const routingId = 'route-1'
+      useSessionStore.getState().createNewSession(routingId, '/test')
+
+      app.emit('voice:error', routingId, 'error 1', 'warn')
+      app.emit('voice:error', routingId, 'error 2', 'warn')
+
+      expect(noticeOf(routingId)).toMatchObject({ text: 'error 2' })
+      expect(useSessionStore.getState().sessions[routingId].errors).toEqual([])
     })
   })
 

@@ -56,9 +56,9 @@ export abstract class BaseSession implements ISession {
    * The host's window, as a HOST HANDLE — never a delivery target (4c deleted
    * that; see {@link send}). `null` when the app runs windowless
    * (`CLAUDEUI_NO_WINDOW=1`, phase 4d): a session created by a WebSocket client
-   * spawns, streams and queues identically, and the one thing that genuinely
-   * needs a window — voice capture, which belongs to the machine with the
-   * microphone — refuses instead of dereferencing null.
+   * spawns, streams and queues identically. Voice capture was the one thing that
+   * used it; it has since moved into the renderer (`core/services/voice-relay.ts`
+   * relays it), so no engine reads this handle today.
    */
   protected win: HostWindowHandle | null
   /** Mutable: SessionManager.rekey() writes this when the session UUID arrives. */
@@ -526,8 +526,8 @@ export abstract class BaseSession implements ISession {
    * channel a session emits is replicated or volatile, so it reaches every
    * SUBSCRIBER, and the session's own `this.win` is no longer part of the fan-out
    * (the desktop renderer is a subscriber like any other). `this.win` survives as
-   * the spawn/host handle the engines need, not as a delivery target — which is
-   * why it can be `null` in a windowless boot without any of this changing.
+   * a host handle, not as a delivery target — which is why it can be `null` in a
+   * windowless boot without any of this changing.
    *
    * `routingId` rides as `args[0]`, which is the wire encoding of contract 2's
    * `sessionId` — positional, not a named field (see sync-core.md §"Wire

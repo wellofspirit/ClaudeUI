@@ -58,11 +58,6 @@ vi.mock('../../../core/services/session-history', () => ({
 }))
 vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
-vi.mock('../../../core/services/voice-capture', () => ({
-  startRecording: vi.fn(),
-  stopRecording: vi.fn()
-}))
-vi.mock('../../../core/services/voice-client', () => ({ VoiceClient: class {} }))
 vi.mock('../../../core/services/context-window', () => ({
   getContextWindowSize: vi.fn(() => 200000)
 }))

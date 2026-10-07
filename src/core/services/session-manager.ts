@@ -62,7 +62,7 @@ export class SessionManager {
 
   create(
     routingId: string,
-    /** Host handle for the session (voice capture); `null` when windowless — phase 4d. */
+    /** Host handle for the session; `null` when windowless — phase 4d. */
     win: HostWindowHandle | null,
     cwd: string,
     opts: EngineSpawnOptions = {},

@@ -162,7 +162,7 @@ describe('emission funnel (item 2)', () => {
   it('a VARIABLE-channel webContents.send exists only where it is host-local by construction', () => {
     // The scan above matches a channel LITERAL, so `wc.send(channel, ...args)`
     // slipped straight past it — and that is not hypothetical: `VoiceClient.send`
-    // was routing the REPLICATED `voice:error` through a targeted window send, which
+    // (the desktop voice delivery, now in `voice-relay.ts`) was routing the REPLICATED `voice:error` through a targeted window send, which
     // 4c made invisible to the renderer (it subscribes to that channel now). Caught
     // by reading the tree, not by this test, so the test exists to make the next one
     // cheaper.
@@ -170,9 +170,10 @@ describe('emission funnel (item 2)', () => {
     // The allowlist is per-file and each entry must be host-local BY CONSTRUCTION —
     // i.e. every channel that reaches the helper is classified `host-local`.
     const ALLOWED = new Set([
-      // Only `voice:state` / `voice:transcript` (microphone capture belongs to the
-      // machine with the microphone). `voice:error` goes through the funnel.
-      'src/core/services/voice-client.ts',
+      // The desktop voice owner: only `voice:state` / `voice:transcript` (a
+      // capture's UI belongs to the window holding the microphone). `voice:error`
+      // goes through the funnel; a remote owner's frames ride the stream lane.
+      'src/core/services/voice-relay.ts',
       // The separate log-viewer BrowserWindow: `log-viewer:*`, host diagnostics.
       'src/main/services/log-viewer.ts',
       // `plugin:<id>:<event>` (ADR-005) — matched by the `plugin:` PREFIX spec,

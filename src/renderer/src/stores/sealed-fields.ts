@@ -160,7 +160,7 @@ export const SEALED_APP_FIELD_SOURCE: Readonly<Record<string, keyof FullStateSna
  * surface's later phase). Their store writers and per-channel listeners stay.
  */
 export const TRANSIENT_SESSION_FIELDS = [
-  'errors', // session:error, voice:error
+  'errors', // session:error (voice messages go to the mic's notice pill instead)
   'warnings', // session:warning
   'sandboxViolations', // session:sandbox-violation
   'gitStatus', // git:status-update

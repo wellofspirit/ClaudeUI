@@ -415,7 +415,7 @@ The delimiter is `// @bun-chunk ` + the exact module name + `\n`, nothing else o
 
 Module names are **host-specific**: Bun mounts its standalone FS at `B:/~BUN/root/` on Windows and `/$bunfs/root/` on macOS and Linux, and the chunk set differs per platform too (2.1.261: 1,631 chunks on win32-x64, 1,650 on darwin-arm64). Nothing downstream may key on the prefix — matching `// @bun-chunk B:` is what red-lighted every non-Windows job on the 2.1.261 bump, with extraction and all 14 patches succeeding and only the guard failing. The delimiter and its header predicate are defined once, in `scripts/lib/chunk-format.mjs`, imported by extract-cli, apply-all and rebundle-cli; `src/main/__tests__/chunk-format.test.ts` pins both namespaces.
 
-Native `.node` addons are still extracted separately to `vendor/claude-cli/vendor/<addon>/<arch>-<platform>/<addon>.node` — `voice-capture.ts` in the Electron main process needs a loose copy on disk. They also stay inside the Bun binary and get re-injected intact.
+Native `.node` addons stay inside the Bun binary and get re-injected intact; cli.js loads them from its own module graph. They are no longer extracted as loose copies (ADR-098: voice capture moved into the renderer, so nothing in the Electron main process loads them).
 
 `version.json` records `{ version, source, sourceBinary, extractedAt, cliSize, cliSha256, form: "chunked", chunkCount }` (`cliSize`/`cliSha256` describe the concat file).
 

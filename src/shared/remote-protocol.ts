@@ -923,7 +923,7 @@ export interface WsTermDetached {
 //
 // Accepted ONLY from a connection that currently holds a live capture, which is
 // established by an audited `voice:start`. A frame that arrives without one is
-// dropped in silence rather than answered (services/remote-voice.ts).
+// dropped in silence rather than answered (core/services/voice-relay.ts).
 
 /**
  * Client → Server: one batch of 16 kHz i16LE mono PCM, base64-encoded.

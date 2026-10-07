@@ -20,6 +20,7 @@
 
 import { useSessionStore } from '../stores/session-store'
 import { getReplicaState } from '../stores/replica'
+import { useVoiceNoticeStore } from '../lib/voice/voice-notice'
 import { getSyncResyncCount } from '../../../core/shared/sync/client-registry'
 import { countMessageRoles, endsWithUserMessage } from './projection-audit'
 
@@ -73,6 +74,8 @@ export interface VerifierHandle {
   sessionStore: typeof useSessionStore
   /** The replica's current `CanonicalState`. */
   canonical: typeof getReplicaState
+  /** The voice notice pill's store — lets a drive show a notice without a microphone. */
+  voiceNoticeStore: typeof useVoiceNoticeStore
   snapshot: () => VerifierSnapshot
 }
 
@@ -115,6 +118,7 @@ export function installVerifierHooks(target: Window = window): boolean {
   target.__claudeuiVerifier = {
     sessionStore: useSessionStore,
     canonical: getReplicaState,
+    voiceNoticeStore: useVoiceNoticeStore,
     snapshot: buildVerifierSnapshot
   }
   return true

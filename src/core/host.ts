@@ -33,6 +33,12 @@ import type { AccountsState, AccountRef, OAuthAccount } from '../shared/types'
  */
 export interface HostWindowHandle {
   readonly webContents: {
+    /**
+     * Electron's webContents id. The desktop voice capture is keyed by it
+     * (`voice-relay.ts` `desktopVoiceOwnerKey`), because the audio feed in main
+     * only knows the IPC sender's id.
+     */
+    readonly id: number
     send(channel: string, ...args: unknown[]): void
     isDestroyed?(): boolean
   }

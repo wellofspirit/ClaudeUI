@@ -26,6 +26,7 @@ import {
 } from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { voiceRefusal } from '../services/voice-gate'
+import { desktopVoiceOwner, desktopVoiceOwnerKey, voiceRelay } from '../services/voice-relay'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
 import {
   loadSettings,
@@ -433,8 +434,6 @@ const SESSION_IPC_CHANNELS = [
   'worktree:list',
   'app:quit-confirm',
   'session:sandbox-violation',
-  'voice:start-server',
-  'voice:stop-server',
   'voice:start-recording',
   'voice:stop-recording',
   'proxy:test-connection',
@@ -723,34 +722,20 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   })
 
   // Voice input handlers (Claude-only, and only on a binary carrying the
-  // voice-server patch: capabilities.voice)
-  handleIpc({
-    channel: 'voice:start-server',
-    capability: 'host',
-    kind: 'command',
-    sessionIdArg: 0,
-    handler: safeHandler(async (routingId: string) => {
-      const session = manager.get(routingId)
-      if (!session) throw new Error('No active session')
-      const refusal = voiceRefusal(session)
-      if (refusal) throw new Error(refusal)
-      await session.voiceStartServer?.()
-    })
-  })
-
-  handleIpc({
-    channel: 'voice:stop-server',
-    capability: 'host',
-    kind: 'command',
-    sessionIdArg: 0,
-    handler: safeHandler(async (routingId: string) => {
-      const session = manager.get(routingId)
-      if (!session) throw new Error('No active session')
-      if (!session.capabilities.voice) return
-      await session.voiceStopServer?.()
-    })
-  })
-
+  // voice-server patch: capabilities.voice).
+  //
+  // The microphone is the RENDERER's (`renderer/src/lib/voice/`): these two verbs
+  // only bind the desktop window's pushed audio — the `voice:audio` IPC message,
+  // fed in by `main/ipc/voice-feed.ts` — to the session's voice server, through
+  // the same relay a remote browser's capture uses. They stay registry commands,
+  // so "a microphone was opened on this session" is in the audit trail.
+  //
+  // The capture OWNER is the host window. Handlers never see Electron's invoke
+  // event (desktop-transport-binding.ts), so the owner is not read off the IPC
+  // sender; it does not need to be — the host window is the only renderer that
+  // carries the voice API (the log viewer has its own preload), so it IS the
+  // sender. The audio feed keys by `event.sender.id`, and the two meet in
+  // `desktopVoiceOwnerKey`.
   handleIpc({
     channel: 'voice:start-recording',
     capability: 'host',
@@ -761,7 +746,9 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       if (!session) throw new Error('No active session')
       const refusal = voiceRefusal(session)
       if (refusal) throw new Error(refusal)
-      await session.voiceStartRecording?.(language)
+      const win = getHostWindow()
+      if (!win) throw new Error('No desktop window to capture for')
+      await voiceRelay.start(manager, desktopVoiceOwner(win), routingId, language)
     })
   })
 
@@ -770,10 +757,12 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'host',
     kind: 'command',
     sessionIdArg: 0,
-    handler: safeHandler(async (routingId: string) => {
-      const session = manager.get(routingId)
-      if (!session || !session.capabilities.voice) return
-      await session.voiceStopRecording?.()
+    // Not gated on the session: the capture is the WINDOW's, and a session that
+    // vanished (or lost voice) mid-press must still release it. Idempotent.
+    handler: safeHandler(async (_routingId: string) => {
+      const win = getHostWindow()
+      if (!win) return
+      await voiceRelay.stop(desktopVoiceOwnerKey(win.webContents.id))
     })
   })
 

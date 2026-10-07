@@ -191,7 +191,9 @@ there (ADR-082). So no artifact carries `vendor/opencode-cli`, `vendor/pi-cli` o
 `vendor/codex-cli`: `electron-builder.yml` lost the three `extraResources` entries, and
 the server assembly steps in `pre-release.yml` / `release.yml` lost their copies (the
 linux tarball is now the executable alone). Claude Code stays bundled, with
-`audio-capture.node`, in the desktop packages and the mac and Windows server zips. A
+`audio-capture.node`, in the desktop packages and the mac and Windows server zips. _(Since
+[ADR-098](adr-098_voice-capture-in-the-renderer.md), 2026-10-07: without the loose
+`audio-capture.node` — nothing loads it.)_ A
 fresh server has no opencode, pi or Codex until an admin installs them from Settings ›
 Harnesses › Installed (ADR-082, resolved question 5).
 

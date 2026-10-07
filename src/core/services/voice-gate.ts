@@ -1,7 +1,7 @@
 /**
  * Why a session cannot take voice input — the wording of the refusal that the
- * desktop IPC (`voice:start-server`, `voice:start-recording`) and the remote
- * `voice:start` verb give.
+ * desktop IPC (`voice:start-recording`) and the remote `voice:start` verb give
+ * (both through `voice-relay.ts`, which re-checks it).
  *
  * The decision itself is `session.capabilities.voice` and nothing else. This
  * only picks the words: for Claude that flag is false exactly when the spawned
