@@ -1870,6 +1870,9 @@ const TRUST_LIST_CHANNELS = ['config:load-shared-automode', 'config:save-shared-
  */
 const MODEL_ALLOWLIST_CHANNELS = ['models:set-provider-allowlist'] as const
 
+/** ADR-094 — the agent types an engine can spawn (read-only, `config`). */
+const AGENT_TYPE_CHANNELS = ['config:list-agent-types'] as const
+
 /**
  * S4 — the vendor-OAuth / account-mutation / native-OAuth family (ADR-057).
  *
@@ -2148,6 +2151,7 @@ describe('remote surface parity (phase 1 port)', () => {
         ...S1B_SWEEP_CHANNELS,
         ...TRUST_LIST_CHANNELS,
         ...MODEL_ALLOWLIST_CHANNELS,
+        ...AGENT_TYPE_CHANNELS,
         ...S4_VENDOR_CREDENTIAL_CHANNELS,
         ...PROVIDER_REGISTRY_CHANNELS,
         ...PROVIDER_ACCOUNT_CHANNELS,
@@ -2205,9 +2209,12 @@ describe('remote surface parity (phase 1 port)', () => {
     // authenticated connection reaches these. Asserted through the CAPABILITY
     // (what dispatch actually checks) rather than by calling every handler —
     // most of them would touch the real filesystem.
-    const caps = [...S1B_SWEEP_CHANNELS, ...TRUST_LIST_CHANNELS, ...MODEL_ALLOWLIST_CHANNELS].map(
-      (c) => [c, commandRegistry.declaration(c)?.capability] as const
-    )
+    const caps = [
+      ...S1B_SWEEP_CHANNELS,
+      ...TRUST_LIST_CHANNELS,
+      ...MODEL_ALLOWLIST_CHANNELS,
+      ...AGENT_TYPE_CHANNELS
+    ].map((c) => [c, commandRegistry.declaration(c)?.capability] as const)
     const ungranted = caps.filter(([, cap]) => !cap || !AUTH_OFF_GRANTS.has(cap))
     expect(
       ungranted,

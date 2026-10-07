@@ -65,6 +65,7 @@ import { harnessManifest } from './manifests'
 import { harnessSelection } from './selection-store'
 import { installDir, installedVersions, markVersionUsed, readInstallRecord } from './store'
 import { resolveSystemInstall } from './system-source'
+import { withinRange } from './version-gate'
 
 const LABELS: Record<HarnessId, string> = {
   claude: 'Claude Code',
@@ -307,6 +308,13 @@ export function codexHostFor(exePath: string): string | null {
 interface CacheEntry {
   /** The env override's raw value at resolution time. */
   env: string | undefined
+  /**
+   * `getAppPath()` at resolution time: the bundled Claude Code lives under it.
+   * A resolution made before the host wires its paths (a module-level caller
+   * runs before `src/main/index.ts` reaches `setHostPaths`) looked under
+   * `process.cwd()` instead, and must not outlive the wiring.
+   */
+  appPath: string
   resolved: ResolvedHarness
   /** Codex only: the `codex-code-mode-host` the resolved `codex` will run (`codexHostFor`). */
   codexHost: string | null
@@ -379,8 +387,16 @@ function managedVersion(
 ): { version: string } | { reason: string } {
   const label = LABELS[id]
   if (choice === 'latest') {
-    const newest = installedVersions(id)[0]
-    return newest ? { version: newest } : { reason: `No version of ${label} is installed` }
+    // The newest installed version THIS build can run: the store is shared by
+    // every ClaudeUI build, so it can hold a version past this one's ceiling
+    // (another build's next major) that this adapter cannot drive.
+    const manifest = harnessManifest(id)
+    const newest = installedVersions(id).find((v) => withinRange(manifest, v))
+    return newest
+      ? { version: newest }
+      : {
+          reason: `No version of ${label} from ${manifest.floor} up to, not including, ${manifest.ceiling} is installed`
+        }
   }
   const version = !choice || choice === 'tested' ? harnessManifest(id).tested : choice
   return readInstallRecord(id, version)
@@ -512,12 +528,13 @@ function resolveUncached(id: HarnessId, rawEnv: string | undefined): ResolvedHar
 
 function entry(id: HarnessId): CacheEntry {
   const env = process.env[harnessEnvVar(id)] || undefined
+  const appPath = getAppPath()
   const hit = cache.get(id)
-  if (hit && hit.env === env) return hit
+  if (hit && hit.env === env && hit.appPath === appPath) return hit
   const raw = resolveUncached(id, env)
   const resolved = Object.freeze({ ...raw, launch: raw.launch && freezeLaunch(raw.launch) })
   const codexHost = id === 'codex' && resolved.path !== null ? codexHostFor(resolved.path) : null
-  const next: CacheEntry = { env, resolved, codexHost }
+  const next: CacheEntry = { env, appPath, resolved, codexHost }
   cache.set(id, next)
   return next
 }

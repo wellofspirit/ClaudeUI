@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { PiEngineToolMap } from '../PiEngineToolMap'
+import { ClaudeEngineToolMap } from '../ClaudeEngineToolMap'
 import { deriveTaskState } from '../../task-state'
 import type { ToolKind } from '../../../../../../shared/tool-kinds'
 // Main can't import renderer code (separate Electron processes/bundles), so
@@ -295,7 +296,7 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
     expect(view).toEqual({ kind: 'mockup', directory: undefined, title: undefined })
   })
 
-  it('task: dispatch_agent input (engine present) -> "Dispatch: <engine>" / "<engine> · <model>"', () => {
+  it('task: dispatch_agent input (engine present) -> "Dispatch: <engine>" / the dispatch field', () => {
     const view = PiEngineToolMap.normalize('task', {
       engine: 'opencode',
       prompt: 'do X',
@@ -305,17 +306,17 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       kind: 'task',
       description: 'Dispatch: opencode',
       prompt: 'do X',
-      subagent: 'opencode · openai/gpt-5'
+      dispatch: { engine: 'opencode', model: 'openai/gpt-5' }
     })
   })
 
-  it('task: dispatch_agent without a model -> subagent is just the engine name', () => {
+  it('task: dispatch_agent without a model -> the dispatch field is just the engine', () => {
     const view = PiEngineToolMap.normalize('task', { engine: 'claude', prompt: 'do X' })
     expect(view).toEqual({
       kind: 'task',
       description: 'Dispatch: claude',
       prompt: 'do X',
-      subagent: 'claude'
+      dispatch: { engine: 'claude' }
     })
   })
 
@@ -401,7 +402,7 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       kind: 'task',
       description: 'Dispatch: claude',
       prompt: 'x',
-      subagent: 'claude'
+      dispatch: { engine: 'claude' }
     })
   })
 })
@@ -598,5 +599,16 @@ describe('PiEngineToolMap — send_message / task_stop rows (ADR-089 S3b)', () =
         }
       )
     ).toEqual({ kind: 'note', icon: 'stop', text: 'Agent scout is not running.' })
+  })
+})
+
+describe('PiEngineToolMap — bridged MCP tools (ADR-096)', () => {
+  it('renders a pi MCP call exactly as Claude renders one: the mcp kind, the raw name as header', () => {
+    expect(PiEngineToolMap.kindOf('mcp__fixture__echo')).toBe('mcp')
+    expect(PiEngineToolMap.displayName('mcp__fixture__echo')).toBe('mcp__fixture__echo')
+    expect(ClaudeEngineToolMap.kindOf('mcp__fixture__echo')).toBe('mcp')
+    expect(PiEngineToolMap.normalize('mcp', { text: 'hi' })).toEqual(
+      ClaudeEngineToolMap.normalize('mcp', { text: 'hi' })
+    )
   })
 })

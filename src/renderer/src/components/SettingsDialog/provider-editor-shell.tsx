@@ -76,7 +76,7 @@ export function DialogShell({
       onClick={onClose}
     >
       <div
-        className="w-[min(620px,94vw)] max-h-[85vh] flex flex-col bg-bg-primary border border-border rounded-lg shadow-xl"
+        className="w-[min(620px,94%)] max-h-[85%] flex flex-col bg-bg-primary border border-border rounded-lg shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-4 py-3 border-b border-border/50 flex items-center justify-between gap-3">

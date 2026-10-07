@@ -1037,6 +1037,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // model tokens. Both are in the base grant set, so an authenticated remote
     // connection reaches all six.
     listOpencodeAgents: (cwd) => unwrap('opencode-agents:list', cwd),
+    listAgentTypes: (engine, cwd) => unwrap('config:list-agent-types', engine, cwd),
     readOpencodeAgent: (name, scope, cwd) => unwrap('opencode-agents:read', name, scope, cwd),
     saveOpencodeAgent: (input, cwd) => unwrap('opencode-agents:save', input, cwd),
     deleteOpencodeAgent: (name, scope, cwd) => unwrap('opencode-agents:delete', name, scope, cwd),

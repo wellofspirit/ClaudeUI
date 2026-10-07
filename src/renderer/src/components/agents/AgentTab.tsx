@@ -82,9 +82,13 @@ export function AgentTab(): React.JSX.Element | null {
   return (
     <div ref={wrapRef} className="contents">
       {open && (
+        // `max-w-full` is the composer box (the nearest positioned ancestor,
+        // InputBox/View.tsx). Not `100vw - N`: SessionView's `zoom: uiFontScale`
+        // multiplies vw lengths, so that box spilled off a phone at any scale
+        // above 1 — see THE ZOOM TRAP in shared/use-anchored-menu.ts.
         <div
           data-testid="AgentOverlay"
-          className="absolute bottom-full right-0 mb-[18px] w-[min(420px,calc(100vw-32px))] max-h-[260px] overflow-y-auto rounded-lg border border-border bg-bg-secondary shadow-2xl z-50 animate-fade-in"
+          className="absolute bottom-full right-0 mb-[18px] w-[420px] max-w-full max-h-[260px] overflow-y-auto rounded-lg border border-border bg-bg-secondary shadow-2xl z-50 animate-fade-in"
         >
           <AgentRosterList
             roster={roster}

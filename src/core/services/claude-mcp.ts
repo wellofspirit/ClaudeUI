@@ -104,10 +104,10 @@ export function loadMcpServers(scope: McpScope, cwd?: string): Record<string, Mc
  * project, then local (highest). A name declared in more than one scope
  * resolves to the narrowest declaration, which is Claude Code's own precedence.
  *
- * Shared by `collectClaudeMcpForOpencode` and `collectClaudeMcpForCodex` so the
- * two translations cannot drift on WHICH servers they see — only on how each
- * one is shaped for its engine. Callers still apply `readDisabledMcpServers`
- * themselves: the disabled list is per-cwd policy, not part of the merge.
+ * Shared by every engine bridge through {@link readEnabledClaudeMcpServers}
+ * (opencode, Codex, pi), so the translations cannot drift on WHICH servers
+ * they see — only on how each one is shaped for its engine. The disabled list
+ * is per-cwd policy, applied on top of the merge, not part of it.
  */
 export function mergeClaudeMcpServers(cwd: string): Record<string, McpServerConfig> {
   return {
@@ -115,6 +115,20 @@ export function mergeClaudeMcpServers(cwd: string): Record<string, McpServerConf
     ...loadMcpServers('project', cwd),
     ...loadMcpServers('local', cwd)
   }
+}
+
+/**
+ * The servers every engine bridge inherits for `cwd`: {@link mergeClaudeMcpServers}
+ * minus the cwd's `disabledMcpServers` (the per-cwd switch McpDialog writes).
+ * The ONE read the opencode, Codex and pi bridges share, so they cannot drift on
+ * WHICH servers a session in `cwd` gets — each bridge only filters and shapes
+ * the result for its engine. Throws on what the two reads throw on; every
+ * bridge wraps it, since a config-read failure must never block a spawn.
+ */
+export function readEnabledClaudeMcpServers(cwd: string): Record<string, McpServerConfig> {
+  const merged = mergeClaudeMcpServers(cwd)
+  const disabled = new Set(readDisabledMcpServers(cwd))
+  return Object.fromEntries(Object.entries(merged).filter(([name]) => !disabled.has(name)))
 }
 
 /**

@@ -82,9 +82,21 @@ export type ToolView =
        * `SendMessage{to}` back to the agent it addressed (ADR-073).
        */
       name?: string
+      /**
+       * The agent TYPE the spawning call named: Claude's `subagent_type`,
+       * opencode's, pi's, never a model and never a path. Absent on a
+       * cross-engine dispatch (see `dispatch`) and on a Codex spawn, whose wire
+       * carries no role (ADR-094): a Codex model is not a type.
+       */
       subagent?: string
       model?: string
       background?: boolean
+      /**
+       * Present exactly when this task is a cross-engine dispatch (ADR-033),
+       * on every engine's tool map. The tile and the roster read this rather
+       * than parse the card's label.
+       */
+      dispatch?: { engine: string; model?: string }
     }
   | { kind: 'todo'; items: { status: string; text: string; activeForm?: string }[] }
   | { kind: 'plan'; plan: string }
@@ -165,6 +177,39 @@ export interface EngineToolMap {
   ): ToolView
   displayName(toolName: string): string
   hidden: ReadonlySet<string>
+}
+
+// ---------------------------------------------------------------------------
+// dispatchTaskView — the one 'task' view of a cross-engine dispatch
+// ---------------------------------------------------------------------------
+
+/**
+ * A cross-engine dispatch (ADR-033) as a 'task' view. All four engine tool maps
+ * build it the same way from `dispatch_agent`'s `{ engine, prompt, model? }`
+ * input, so the structured `dispatch` field (what the type tile and the roster
+ * read, ADR-094) is set in one place.
+ *
+ * It carries no `name` (a dispatch has no agent identity) and no `subagent`
+ * (that field is an agent TYPE, and a dispatch has none): the card's chip and
+ * the roster's label are {@link dispatchLabel} of `dispatch`.
+ */
+export function dispatchTaskView(input: {
+  engine: string
+  prompt?: unknown
+  model?: unknown
+}): Extract<ToolView, { kind: 'task' }> {
+  const model = input.model != null ? String(input.model) : undefined
+  return {
+    kind: 'task',
+    description: `Dispatch: ${input.engine}`,
+    prompt: input.prompt != null ? String(input.prompt) : '',
+    dispatch: { engine: input.engine, ...(model ? { model } : {}) }
+  }
+}
+
+/** "<engine> · <model>", or the bare engine: how a dispatch is named in a list and on its card. */
+export function dispatchLabel(dispatch: { engine: string; model?: string }): string {
+  return dispatch.model ? `${dispatch.engine} · ${dispatch.model}` : dispatch.engine
 }
 
 // ---------------------------------------------------------------------------

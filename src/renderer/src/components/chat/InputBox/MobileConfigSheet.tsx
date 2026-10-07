@@ -725,7 +725,7 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
             className="absolute inset-0 bg-black/50"
           />
           <div
-            className="relative flex flex-col rounded-t-2xl bg-bg-secondary border-t border-border shadow-2xl max-h-[min(80dvh,32rem)]"
+            className="relative flex flex-col rounded-t-2xl bg-bg-secondary border-t border-border shadow-2xl max-h-[min(80%,32rem)]"
             style={{ paddingBottom: 'max(16px, env(safe-area-inset-bottom))' }}
           >
             <div className="flex justify-center pt-2 pb-1 shrink-0">

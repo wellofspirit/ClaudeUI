@@ -517,7 +517,9 @@ export function SettingsDialogView({
           exactly as SessionView does for its own root. */}
       <div
         style={{
+          // eslint-disable-next-line no-restricted-syntax -- divides by uiFontScale
           width: `min(1040px, calc(92vw / ${uiFontScale}))`,
+          // eslint-disable-next-line no-restricted-syntax -- divides by uiFontScale
           height: `min(700px, calc(88vh / ${uiFontScale}))`
         }}
         className="rounded-xl border border-border bg-bg-secondary shadow-2xl shadow-black/40 flex flex-col overflow-hidden"

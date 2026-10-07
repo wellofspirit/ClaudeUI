@@ -49,6 +49,9 @@ node scripts/app-shot.mjs [--out <png>] [--needle <text>] [--settle <ms>]
                           [--keep]                   # leave the app open (implies --headed)
                           [--with-remote]            # don't suppress remote access
                           [--headed]                 # show the window on-screen
+                          [--profile <name>]         # emulate a device (see "Mobile profile")
+                          [--font-scale <n>]         # uiFontScale, in memory only
+                          [--overflow-audit]         # print OVERFLOW [...] after the shot
 ```
 
 It launches the app, waits for the first window + `--settle` ms (default 3000) so
@@ -135,6 +138,36 @@ user's app.
 - `--wait <ms>` — a pause as its own ordered step, for a transition that outlasts
   the 1.2 s each action already waits. It counts against the watchdog, so raise
   `--timeout` alongside it.
+
+## Mobile profile (`--profile`, `--font-scale`, `--overflow-audit`)
+
+Any change that is visible on mobile is verified here, not only in a desktop-sized window: the phone layout
+is a different component tree (`useIsMobile` is `window.innerWidth < 768`) under a different `zoom`.
+
+- `--profile <name>` emulates a device from `scripts/lib/mobile-profiles.mjs`, the single copy of the numbers
+  that the vitest `browser` project asserts at too. `s25-ultra-edge` is the owner's phone: Samsung S25 Ultra,
+  Edge on Android, 412 x 728 CSS px, touch. It applies `Emulation.setDeviceMetricsOverride` /
+  `setTouchEmulationEnabled` / `setUserAgentOverride` over a CDP session on the window (falling back to
+  `webContents.enableDeviceEmulation`), then waits for `window.innerWidth < 768`. It prints
+  `PROFILE <name> via cdp 412x728`.
+- `--font-scale <n>` (1 to 1.5) sets `settings.uiFontScale` for this run only, through
+  `window.__claudeuiVerifier.sessionStore.setState`. It never calls `updateSettings` (that persists), and the
+  original value is put back before the app closes, so the owner's settings file is never changed. It prints
+  `FONT_SCALE <n> (was <original>, restored on exit)`.
+- `--overflow-audit` prints one line `OVERFLOW [...]` after the shot. An entry is any visible element whose
+  rect leaves the viewport horizontally (`kind: "viewport"`), or whose `scrollWidth` exceeds its `clientWidth`
+  while its `overflow-x` is `visible` or `hidden` (`kind: "scrollWidth"`); `auto`/`scroll` boxes,
+  `text-overflow: ellipsis` truncation and `mask-image` fades are ignored. Each entry carries the nearest
+  `data-testid`, the tag, the rect `[left, top, right, bottom]` and the overflow in px. `OVERFLOW []` is clean.
+
+The rule: verify a mobile-visible change with `--profile s25-ultra-edge` at `--font-scale` 1 and 1.1, and also
+1.5 for layout-dense surfaces (rosters, cards, headers, sheets), with `--overflow-audit` clean on each:
+
+```
+node scripts/app-shot.mjs --profile s25-ultra-edge --font-scale 1.1 --overflow-audit   --out .cache/screenshots/mobile-1.1.png
+```
+
+Assert the structure (`--assert-testid`, `--eval`) before reading the PNG, as everywhere else.
 
 ## Driving the UI
 

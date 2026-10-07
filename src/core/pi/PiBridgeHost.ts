@@ -28,6 +28,10 @@
  *    (PiSession.handleHostedTool); omitting it just fails closed on every
  *    /hosted-tool request (see runHostedTool).
  *
+ * Plus ONE plain route that is not an exchange: `POST /mcp-servers` answers
+ * the spawn-time MCP catalog snapshot the extension registers while pi loads
+ * (ADR-096; see {@link PiBridgeHostOptions.mcpServers} for the secrets note).
+ *
  * ## Long-poll protocol (2026-09-09)
  *
  * An exchange used to be ONE request held open until the handler settled —
@@ -144,6 +148,22 @@ export interface PiBridgeHostOptions {
   /** How long an unpolled exchange survives before it is abandoned. Default {@link DEFAULT_ABANDON_MS}. */
   abandonMs?: number
   onAbandoned?: (info: PiBridgeAbandoned) => void
+  /**
+   * The MCP servers `POST /mcp-servers` hands the bridge extension to register
+   * with `pi.registerMcpServer()` (ADR-096) — a snapshot taken at spawn, served
+   * on EVERY extension load (pi reloads extensions on fork). Absent = the route
+   * answers an empty set.
+   *
+   * The configs carry secrets (stdio `env`, HTTP `headers`). The route is
+   * behind the same bearer token as the gate, which sits in the pi child's env
+   * — so a process pi starts (an approved shell command, an MCP server) can
+   * read them. That is no wider than the source of the catalog: the same
+   * processes run as the same user and can read `~/.claude/.mcp.json` and the
+   * project's `.mcp.json` directly. What the channel avoids is copying the
+   * secrets into an env var every pi child would inherit (and `env` would print
+   * into the model's context) or into a file.
+   */
+  mcpServers?: Record<string, unknown>
 }
 
 /**
@@ -162,6 +182,9 @@ const DEFAULT_HOLD_MS = 45_000
  * so on loopback this much silence means the pi child is gone.
  */
 const DEFAULT_ABANDON_MS = 30_000
+
+/** The one non-exchange route: the MCP servers the extension registers at load (ADR-096). */
+const MCP_SERVERS_ROUTE = '/mcp-servers'
 
 /** `req.url` → the exchange it addresses. `/wait` re-parks; the bare route starts. */
 const ROUTES: Record<string, { route: PiBridgeRoute; wait: boolean } | undefined> = {
@@ -241,6 +264,7 @@ export class PiBridgeHost {
   private readonly holdMs: number
   private readonly abandonMs: number
   private readonly onAbandoned?: (info: PiBridgeAbandoned) => void
+  private readonly mcpServers: Record<string, unknown>
   /**
    * One entry per exchange that has been STARTED and whose result has not been
    * collected yet, keyed `${route}:${toolCallId}`.
@@ -268,6 +292,7 @@ export class PiBridgeHost {
     this.holdMs = options?.holdMs ?? DEFAULT_HOLD_MS
     this.abandonMs = options?.abandonMs ?? DEFAULT_ABANDON_MS
     this.onAbandoned = options?.onAbandoned
+    this.mcpServers = options?.mcpServers ?? {}
   }
 
   /** Bind 127.0.0.1:0 (OS-assigned ephemeral port) and mint a fresh bearer token. */
@@ -319,8 +344,9 @@ export class PiBridgeHost {
   }
 
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
+    const isMcpServers = req.url === MCP_SERVERS_ROUTE
     const target = ROUTES[req.url ?? '']
-    if (req.method !== 'POST' || !target) {
+    if (req.method !== 'POST' || (!target && !isMcpServers)) {
       res.writeHead(404).end()
       return
     }
@@ -358,6 +384,11 @@ export class PiBridgeHost {
     })
     req.on('end', () => {
       if (tooLarge) return
+      // No body to read: the answer is the spawn-time snapshot, whole.
+      if (!target) {
+        this.endJson(res, { servers: this.mcpServers })
+        return
+      }
       this.dispatchBody(target.route, target.wait, Buffer.concat(chunks).toString('utf-8'), res)
     })
     req.on('error', () => {

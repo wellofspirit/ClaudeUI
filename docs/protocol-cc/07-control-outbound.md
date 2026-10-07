@@ -704,6 +704,32 @@ session warning.
 
 ---
 
+### `get_task_output` (native as of v2.1.289)
+
+Read the tail of one background shell or Monitor task without starting a model
+turn. The `task_id` comes from `task_started` or `background_tasks_changed`.
+
+```json
+{ "subtype": "get_task_output", "task_id": "…" }
+```
+
+Success returns:
+
+```json
+{ "output": "…", "total_bytes": 12345, "truncated": true }
+```
+
+`output` is UTF-8 plain text including any escape sequences, empty when nothing
+has been written, and capped to the last 8 KiB. `truncated` says whether earlier
+bytes were omitted. cli.js refuses ids that are not shell/Monitor tasks from this
+session and lanes that redact persisted output; an ended task whose output file
+has disappeared reads as empty. The 2.1.289 SDK wrapper is
+`getTaskOutput(taskId)`. ClaudeUI does not call it: its background Bash cards
+already follow the output path from the tool result, so this additive subtype is
+not an integration break.
+
+---
+
 ### `get_usage` (native as of v2.1.177)
 
 Expose cli.js's `/usage` data. Originally added by the `usage-relay` patch (a

@@ -61,7 +61,7 @@ export function RemoteAccessModalView({
           link rows with actions rather than one URL under a QR. The BODY
           scrolls, not the card, so the header (and its close button) stays put
           when the rows expand a QR. */}
-      <div className="bg-bg-secondary rounded-xl border border-border shadow-2xl w-[440px] max-h-[90vh] overflow-hidden flex flex-col animate-fade-in">
+      <div className="bg-bg-secondary rounded-xl border border-border shadow-2xl w-[440px] max-h-[90%] overflow-hidden flex flex-col animate-fade-in">
         {/* Header */}
         <div className="shrink-0 flex items-center justify-between px-5 py-4 border-b border-border">
           <div className="flex items-center gap-2.5">

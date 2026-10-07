@@ -16,6 +16,7 @@ import { spawnSync } from 'node:child_process'
 import { afterEach, expect, it, vi } from 'vitest'
 import { CodexAppServerClient } from '../../core/codex/CodexAppServerClient'
 import { setHostPaths } from '../../core/host'
+import { codexTurnPolicy } from '../../core/codex/codex-turn-policy'
 import {
   FIXTURE_CODEX_DIR,
   codexInstalled,
@@ -34,19 +35,50 @@ import type { SandboxPolicy } from '../../core/codex/protocol/v2/SandboxPolicy'
  * sandboxPolicy)` pair actually routes a server→client approval request, what
  * the request carries, and what runs without one.
  *
- * Every assertion here pins an OBSERVED shape, not a desired one. Two
+ * Every assertion here pins an OBSERVED shape, not a desired one. Three
  * observations are load-bearing for reading the rest of the file:
  *
- *  1. THE CONTAINMENT SANDBOX HIDES CODEX'S OWN SANDBOX. macOS lets a process
- *     re-apply the SAME seatbelt profile but refuses a different one, however
- *     permissive either is (`sandbox_apply: Operation not permitted`, exit 71
- *     — pinned by the last test in this file). The fixture wraps every spawn in
- *     `sandbox-exec`, so any command Codex decides to run SANDBOXED dies at
- *     exit 71 before touching the filesystem, and only commands it runs
- *     UNSANDBOXED (approved, or under `dangerFullAccess`) execute for real.
- *     That makes the approval dimension measurable and the sandbox-enforcement
- *     dimension NOT measurable here — `EXIT_NESTED_SANDBOX` marks the spots.
- *  2. There is no `shell` tool and no `apply_patch` tool on the wire. The
+ *  1. THE CONTAINMENT SANDBOX HIDES CODEX'S OWN SANDBOX. Every spawn is wrapped
+ *     in `sandbox-exec` with a strict profile (no reads under /Users, no
+ *     network but the fixture port, no writes outside the fixture directory),
+ *     and that containment stays: it is what makes running a real agent binary
+ *     in CI safe. But macOS lets a process re-apply the SAME seatbelt profile
+ *     and refuses a different one, however permissive either is
+ *     (`sandbox_apply: Operation not permitted`, exit 71 — pinned by the last
+ *     test in this file), so every attempt Codex runs under its OWN sandbox
+ *     dies at exit 71 before touching the filesystem. Only attempts it runs
+ *     UNSANDBOXED execute for real. The approval dimension is measurable here;
+ *     the sandbox-enforcement dimension is NOT — `EXIT_NESTED_SANDBOX` marks
+ *     those spots.
+ *  2. AN APPROVAL DOES NOT MAKE THE FIRST ATTEMPT UNSANDBOXED
+ *     (`core/src/tools/orchestrator.rs`, rust-v0.160.1: approval at 197-220,
+ *     first attempt under the turn's sandbox at 223-326 unless
+ *     `sandbox_override_for_first_attempt` in `core/src/tools/sandboxing.rs`
+ *     239-268 sees `require_escalated` or an execpolicy `allow`). A plain
+ *     approved command therefore reaches the unsandboxed RETRY (327-523) only
+ *     if the failed first attempt is CLASSIFIED as a sandbox denial, and for
+ *     `exec_command` that classification is a timing heuristic: it waits at
+ *     most 20 ms for output, then keyword-matches whatever arrived
+ *     (`core/src/unified_exec/process.rs` `check_for_sandbox_denial` 307-356,
+ *     `sandboxing/src/denial.rs`; exit 71 alone never counts). Under parallel
+ *     load that classification has been seen to miss — most plausibly the
+ *     stderr arriving after the window; the retry probe prints the output to
+ *     settle it — and then no retry happens and the approved command reports
+ *     71. `apply_patch` is NOT affected — its runtime collects
+ *     the helper's whole output before classifying
+ *     (`core/src/tools/runtimes/apply_patch.rs` 168-237). So:
+ *       - a test about approval ROUTING or EXECUTION uses either a command the
+ *         model explicitly escalates (`sandbox_permissions: "require_escalated"`
+ *         — first attempt unsandboxed, no heuristic involved), a sandbox-free
+ *         policy, or an `apply_patch`;
+ *       - where the plain (non-escalated) path is the subject, the approval is
+ *         asserted exactly (it is decided BEFORE anything runs) and the
+ *         post-approval outcome is asserted as one of its two documented
+ *         branches — see {@link plainApprovedOutcome};
+ *       - the retry itself has ONE dedicated, opt-in, serial-only test near
+ *         the end of this file, which prints the sanitized command output when
+ *         it misses.
+ *  3. There is no `shell` tool and no `apply_patch` tool on the wire. The
  *     pinned binary offers `exec_command` + `write_stdin` (a `shell` call is
  *     answered `unsupported call: shell`), and file changes reach the
  *     `item/fileChange/requestApproval` path only because Codex intercepts an
@@ -130,6 +162,8 @@ const done = (): Record<string, unknown> => ({
 })
 
 type Fixture = {
+  /** The fixture root; redacted to `<fixture>` in anything a failure prints. */
+  directory: string
   cwd: string
   outside: string
   env: NodeJS.ProcessEnv
@@ -277,6 +311,7 @@ ${options.features ?? ''}
     JSON.stringify({ OPENAI_API_KEY: 'codex-fixture-not-a-real-key' })
   )
   return {
+    directory,
     cwd,
     outside,
     requests,
@@ -393,6 +428,21 @@ function scriptSteps(fixture: Fixture, steps: Step[]): void {
   }
 }
 
+/** Every `function_call_output` Codex sent the model for `callId`, deduped across resends. */
+function callOutput(fixture: Fixture, callId: string): string | null {
+  const outputs = new Set(
+    fixture.requests
+      .flatMap((request) => (request.input as Array<Record<string, unknown>> | undefined) ?? [])
+      .filter((item) => item.type === 'function_call_output' && item.call_id === callId)
+      .map((item) => String(item.output))
+  )
+  return outputs.size ? [...outputs].join('\n---\n') : null
+}
+
+/** `text` with the fixture's temp root replaced, so a failure message names no real path. */
+const sanitize = (fixture: Fixture, text: string | null): string | null =>
+  text === null ? null : text.split(fixture.directory).join('<fixture>')
+
 /** Exit code Codex reported back to the model for `callId`, or null. */
 function exitCode(fixture: Fixture, callId: string): number | null {
   const output = (fixture.requests.at(-1)?.input as Array<Record<string, unknown>> | undefined)
@@ -429,11 +479,18 @@ function approvalFor(active: Root, callId: string): Record<string, unknown> | nu
   }
 }
 
+/** How many approval requests reached the client for `callId` (a retry prompt is a second one). */
+const askCount = (active: Root, callId: string): number =>
+  active.approvals.filter(({ params }) => params.itemId === callId).length
+
 const COMMAND_DECISIONS = (amendment: string[]): unknown[] => [
   'accept',
   { acceptWithExecpolicyAmendment: { execpolicy_amendment: amendment } },
   'cancel'
 ]
+
+/** The `justification` every escalated step sends; it arrives as the request's `reason`. */
+const ESCALATION_REASON = 'Isolated fixture probe'
 
 /**
  * The six actions the spike asks about, as one scripted turn.
@@ -451,23 +508,44 @@ function matrixSteps(cwd: string, outside: string): Step[] {
   ]
 }
 
+/**
+ * The same two writes, but ESCALATED by the model. `require_escalated` is what
+ * makes an approved command's FIRST attempt unsandboxed
+ * (`sandbox_override_for_first_attempt`, observation 2), so whether these land
+ * is decided by the approval alone, never by the denial-classification race.
+ * They are the deterministic evidence for "an accepted write lands, inside and
+ * outside the workspace, whatever the sandbox".
+ */
+function escalatedSteps(cwd: string, outside: string): Step[] {
+  return [
+    { id: 'esc-inside', cmd: `echo x > ${cwd}/esc-inside.txt`, escalate: true },
+    { id: 'esc-outside', cmd: `echo x > ${outside}/esc-outside.txt`, escalate: true }
+  ]
+}
+
+type StepRecord = {
+  id: string
+  approval: Record<string, unknown> | null
+  asks: number
+  exitCode: number | null
+  /** The sanitized `function_call_output`, so a failing record shows what Codex said. */
+  output: string | null
+}
+
 type ComboRecord = {
   approvalPolicy: AskForApproval
   sandbox: string
   cwd: string
   outside: string
-  steps: Array<{
-    id: string
-    approval: Record<string, unknown> | null
-    exitCode: number | null
-  }>
+  steps: StepRecord[]
   artifacts: Record<string, boolean>
 }
 
 async function runCombo(
   approvalPolicy: AskForApproval,
   sandbox: (cwd: string) => SandboxPolicy,
-  label: string
+  label: string,
+  options: { escalated?: boolean } = {}
 ): Promise<ComboRecord> {
   const fixture = await setupFixture()
   const active = await root(fixture, (method) =>
@@ -481,7 +559,10 @@ async function runCombo(
     modelProvider: 'fixture',
     historyMode: 'paginated'
   })
-  const steps = matrixSteps(fixture.cwd, fixture.outside)
+  const steps = [
+    ...matrixSteps(fixture.cwd, fixture.outside),
+    ...(options.escalated ? escalatedSteps(fixture.cwd, fixture.outside) : [])
+  ]
   scriptSteps(fixture, steps)
   await runTurn(active, started.thread.id, {
     approvalPolicy,
@@ -495,18 +576,60 @@ async function runCombo(
     steps: steps.map((step) => ({
       id: step.id,
       approval: approvalFor(active, step.id),
-      exitCode: exitCode(fixture, step.id)
+      asks: askCount(active, step.id),
+      exitCode: exitCode(fixture, step.id),
+      output: sanitize(fixture, callOutput(fixture, step.id))
     })),
     artifacts: {
       'inside.txt': existsSync(join(fixture.cwd, 'inside.txt')),
       'outside.txt': existsSync(join(fixture.outside, 'outside.txt')),
       'patched-inside.txt': existsSync(join(fixture.cwd, 'patched-inside.txt')),
-      'patched-outside.txt': existsSync(join(fixture.outside, 'patched-outside.txt'))
+      'patched-outside.txt': existsSync(join(fixture.outside, 'patched-outside.txt')),
+      ...(options.escalated
+        ? {
+            'esc-inside.txt': existsSync(join(fixture.cwd, 'esc-inside.txt')),
+            'esc-outside.txt': existsSync(join(fixture.outside, 'esc-outside.txt'))
+          }
+        : {})
     }
   }
   console.log(JSON.stringify({ probe: 'matrix', ...record }))
   expect(fixture.errors).toEqual([])
   return record
+}
+
+/**
+ * The outcome of a plain (non-escalated) `exec_command` that the client
+ * accepts, or — under `granular` — would be asked to accept, in this fixture,
+ * asserted without depending on the 20 ms classification window.
+ *
+ * Its first attempt always runs under Codex's own sandbox and always dies at
+ * {@link EXIT_NESTED_SANDBOX} (observation 1). From there exactly one of two
+ * things happens, and which one is decided by thread scheduling, not by Codex's
+ * policy or by ClaudeUI:
+ *
+ *  - `retried`: the denial was classified, Codex re-ran the command
+ *    unsandboxed, and the model sees the command's REAL exit code
+ *    (`ranExitCode`) — with its artifact, if it writes one;
+ *  - `nested`: the stderr missed the window, nothing was retried, and the
+ *    model sees 71 — with NO artifact. 71 is never accepted as "it ran": it is
+ *    accepted only together with the artifact being ABSENT, i.e. as the
+ *    documented containment outcome, and anything else (a third exit code, a
+ *    missing exit code, 71 with the file present, the real code without it)
+ *    fails with the sanitized output in the message.
+ *
+ * The retry branch itself is asserted strictly by the dedicated, serial-only
+ * retry probe near the end of this file.
+ */
+function plainApprovedOutcome(
+  step: StepRecord,
+  ranExitCode: number,
+  landed?: boolean
+): 'retried' | 'nested' {
+  const retried = step.exitCode === ranExitCode && landed !== false
+  const nested = step.exitCode === EXIT_NESTED_SANDBOX && landed !== true
+  expect(retried || nested, `${step.id}: ${JSON.stringify({ ...step, landed })}`).toBe(true)
+  return retried ? 'retried' : 'nested'
 }
 
 const SANDBOXES: Array<[string, (cwd: string) => SandboxPolicy]> = [
@@ -553,19 +676,37 @@ it.skipIf(!enabled)(
   'probes `untrusted` across the three sandbox policies',
   async () => {
     for (const [label, sandbox] of SANDBOXES) {
-      const record = await runCombo('untrusted', sandbox, label)
-      // `untrusted` asks FIRST, for all six steps, under EVERY sandbox, and
-      // with no `reason` — the decision is taken before anything runs, so the
-      // sandbox policy changes nothing about whether we are asked.
+      const record = await runCombo('untrusted', sandbox, label, { escalated: true })
+      // `untrusted` asks FIRST, for all eight steps, under EVERY sandbox. The
+      // six plain steps carry no `reason` — the decision is taken before
+      // anything runs, so the sandbox policy changes nothing about whether we
+      // are asked — and the two escalated ones carry the model's
+      // `justification`. Every one of these requests precedes execution, so
+      // none of this depends on what the containment does to the attempt.
       expect(methods(record)).toEqual([
         COMMAND,
         COMMAND,
         COMMAND,
         FILE_CHANGE,
         FILE_CHANGE,
+        COMMAND,
+        COMMAND,
         COMMAND
       ])
-      expect(reasons(record)).toEqual([null, null, null, null, null, null])
+      expect(reasons(record)).toEqual([
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        ESCALATION_REASON,
+        ESCALATION_REASON
+      ])
+      // Asked ONCE per action: the unsandboxed retry of an approved action
+      // reuses the approval (`should_bypass_approval(.., already_approved)`),
+      // so the client is never asked twice about the same thing.
+      expect(record.steps.map((step) => step.asks)).toEqual([1, 1, 1, 1, 1, 1, 1, 1])
       expect(record.steps[0].approval!.kind).toBe('command')
       expect(record.steps[0].approval!.availableDecisions).toEqual(COMMAND_DECISIONS(['ls']))
       // `decline` and `acceptForSession` are in the wire type but are NOT
@@ -599,14 +740,38 @@ it.skipIf(!enabled)(
       // ask arrives UP FRONT (`reason: null`, above) and an accepted write
       // LANDS — inside AND outside the workspace — under `readOnly` exactly as
       // under `dangerFullAccess`. There is no "approve but keep it sandboxed".
-      //
-      // The accepted command's exit code is deliberately NOT pinned: whether
-      // the containment profile nests on any given run is a fixture artefact
-      // (observation 1 at the top of this file), so an approved `ls` is seen
-      // both as 0 and as EXIT_NESTED_SANDBOX. Only "it ran and reported an
-      // outcome to the model" is a property of Codex.
-      expect(record.steps[0].exitCode).not.toBeNull()
-      expect(record.artifacts).toEqual(ALL_LANDED)
+      // The escalated writes prove it deterministically (first attempt
+      // unsandboxed), and so do the patches (the `apply_patch` runtime
+      // classifies its sandbox failure from the complete output).
+      expect(record.steps[6].exitCode).toBe(0)
+      expect(record.steps[7].exitCode).toBe(0)
+      expect(record.artifacts['esc-inside.txt']).toBe(true)
+      expect(record.artifacts['esc-outside.txt']).toBe(true)
+      expect(record.artifacts['patched-inside.txt']).toBe(true)
+      expect(record.artifacts['patched-outside.txt']).toBe(true)
+      if (label === 'dangerFullAccess') {
+        // No sandbox, so no nested attempt and no race: the plain commands
+        // run on the first attempt and report their real exit codes.
+        expect(record.steps.map((step) => step.exitCode)).toEqual([0, 0, 0, 0, 0, 7, 0, 0])
+        expect(record.artifacts['inside.txt']).toBe(true)
+        expect(record.artifacts['outside.txt']).toBe(true)
+      } else {
+        // The PLAIN commands' outcome goes through the denial-classification
+        // race (observation 2), so each is asserted as one of its two
+        // documented branches rather than pinned to one. In an UNCONTAINED
+        // environment the same accepted command runs sandboxed first — an
+        // inside write simply succeeds there, an outside write is denied by
+        // the real seatbelt and retried unsandboxed through the very same
+        // classifier, which the dedicated retry probe below pins.
+        const outcomes = [
+          plainApprovedOutcome(record.steps[0], 0),
+          plainApprovedOutcome(record.steps[1], 0, record.artifacts['inside.txt']),
+          plainApprovedOutcome(record.steps[2], 0, record.artifacts['outside.txt']),
+          // `curl` to a closed port: 7 when it really ran.
+          plainApprovedOutcome(record.steps[5], 7)
+        ]
+        console.log(JSON.stringify({ probe: 'untrusted-plain-outcomes', label, outcomes }))
+      }
     }
   },
   240000
@@ -627,7 +792,10 @@ it.skipIf(!enabled)(
       // COMMANDS are never reviewed under `on-request`: the policy means "ask
       // when the MODEL asks", and this model never sets
       // `sandbox_permissions: require_escalated`. They run sandboxed and die at
-      // the nested-seatbelt code, having asked nothing.
+      // the nested-seatbelt code, having asked nothing. This is deterministic
+      // despite observation 2: `on-request` never retries a sandbox denial
+      // (`wants_no_sandbox_approval` is false for it), so a classified and an
+      // unclassified denial both reach the model as exit 71.
       expect(record.steps[0].approval).toBeNull()
       expect(record.steps[1].approval).toBeNull()
       expect(record.steps[2].approval).toBeNull()
@@ -667,7 +835,9 @@ it.skipIf(!enabled)(
         expect(record.steps.map((step) => step.exitCode)).toEqual([0, 0, 0, 0, 0, 7])
         expect(record.artifacts).toEqual(ALL_LANDED)
       } else {
-        // A sandbox failure is terminal rather than an escalation prompt.
+        // A sandbox failure is terminal rather than an escalation prompt —
+        // classified or not (observation 2), `never` does not retry, so this
+        // is deterministic.
         expect(record.steps[0].exitCode).toBe(EXIT_NESTED_SANDBOX)
         expect(record.artifacts).toEqual(NONE_LANDED)
       }
@@ -680,38 +850,70 @@ it.skipIf(!enabled)(
   'probes the `granular` policy with every flag set across the three sandbox policies',
   async () => {
     for (const [label, sandbox] of SANDBOXES) {
-      const record = await runCombo(GRANULAR_ALL, sandbox, label)
+      const record = await runCombo(GRANULAR_ALL, sandbox, label, { escalated: true })
       if (label === 'dangerFullAccess') {
-        // Every granular flag on, and still nothing is reviewed: with no
-        // sandbox there is no escalation to gate.
-        expect(methods(record)).toEqual([null, null, null, null, null, null])
-        expect(record.artifacts).toEqual(ALL_LANDED)
+        // Every granular flag on, and still nothing is reviewed — not even a
+        // model-initiated escalation: with no sandbox there is nothing to
+        // escalate from, so there is nothing to gate.
+        expect(methods(record)).toEqual([null, null, null, null, null, null, null, null])
+        expect(record.steps.map((step) => step.exitCode)).toEqual([0, 0, 0, 0, 0, 7, 0, 0])
+        expect(Object.values(record.artifacts)).toEqual([true, true, true, true, true, true])
         continue
       }
-      // All six steps are reviewed, but the commands are reviewed AFTER a
-      // sandboxed attempt failed, never before — `reason` is the retry prompt
-      // on every one of them. So `granular` is an escalation gate, not a
-      // pre-execution review: it cannot be used to vet a command up front.
-      expect(methods(record)).toEqual([
-        COMMAND,
-        COMMAND,
-        COMMAND,
-        FILE_CHANGE,
-        FILE_CHANGE,
-        COMMAND
-      ])
-      expect(record.steps[0].approval!.reason).toBe(RETRY)
-      expect(record.steps[1].approval!.reason).toBe(RETRY)
-      expect(record.steps[2].approval!.reason).toBe(RETRY)
-      expect(record.steps[5].approval!.reason).toBe(RETRY)
-      expect(record.steps[0].approval!.availableDecisions).toEqual(COMMAND_DECISIONS(['ls']))
-      // Same split as `on-request` on the file-change path.
+      // A MODEL-initiated escalation is reviewed UP FRONT, with the model's
+      // justification as the reason, and accepting it runs the write
+      // unsandboxed on the first attempt — inside and outside the workspace.
+      for (const step of record.steps.slice(6)) {
+        expect(step.approval!.method, step.id).toBe(COMMAND)
+        expect(step.approval!.reason, step.id).toBe(ESCALATION_REASON)
+        expect(step.asks, step.id).toBe(1)
+        expect(step.exitCode, step.id).toBe(0)
+      }
+      expect(record.artifacts['esc-inside.txt']).toBe(true)
+      expect(record.artifacts['esc-outside.txt']).toBe(true)
+      // Same split as `on-request` on the file-change path: the `apply_patch`
+      // runtime classifies its own sandbox failure from complete output, so
+      // these are deterministic.
+      expect(record.steps[3].approval!.method).toBe(FILE_CHANGE)
+      expect(record.steps[4].approval!.method).toBe(FILE_CHANGE)
       expect(record.steps[3].approval!.reason).toBe(label === 'readOnly' ? null : RETRY)
       expect(record.steps[4].approval!.reason).toBeNull()
-      // The accepted retry runs, and everything lands anyway. Its exact exit
-      // code is a containment artefact — see the `untrusted` matrix above.
-      expect(record.steps[0].exitCode).not.toBeNull()
-      expect(record.artifacts).toEqual(ALL_LANDED)
+      expect(record.artifacts['patched-inside.txt']).toBe(true)
+      expect(record.artifacts['patched-outside.txt']).toBe(true)
+      // A PLAIN command is NEVER reviewed up front. `granular` is an
+      // escalation gate, not a pre-execution review: it cannot be used to vet a
+      // command before it runs. It is reviewed only AFTER a sandboxed attempt
+      // failed AND that failure was classified as a sandbox denial — which, for
+      // `exec_command`, is the 20 ms race of observation 2. So each plain step
+      // is one of exactly two shapes, and the ask and the outcome must agree:
+      //   asked → the retry prompt, once, and the accepted retry really ran;
+      //   not asked → the unclassified nested denial: 71, nothing landed.
+      // A plain command asked up front (`reason: null`), asked twice, or asked
+      // with no matching run fails here.
+      const plain: Array<[number, number, boolean | undefined]> = [
+        [0, 0, undefined],
+        [1, 0, record.artifacts['inside.txt']],
+        [2, 0, record.artifacts['outside.txt']],
+        [5, 7, undefined]
+      ]
+      const outcomes = plain.map(([index, ranExitCode, landed]) => {
+        const step = record.steps[index]
+        const outcome = plainApprovedOutcome(step, ranExitCode, landed)
+        const detail = JSON.stringify(step)
+        if (outcome === 'retried') {
+          expect(step.approval?.method, detail).toBe(COMMAND)
+          expect(step.approval?.reason, detail).toBe(RETRY)
+          expect(step.asks, detail).toBe(1)
+        } else {
+          expect(step.approval, detail).toBeNull()
+        }
+        return outcome
+      })
+      console.log(JSON.stringify({ probe: 'granular-plain-outcomes', label, outcomes }))
+      // When `ls` IS asked, the request offers the same three decisions as
+      // under `untrusted`.
+      if (record.steps[0].approval)
+        expect(record.steps[0].approval.availableDecisions).toEqual(COMMAND_DECISIONS(['ls']))
     }
   },
   240000
@@ -1227,6 +1429,95 @@ it.skipIf(!enabled)(
     expect(toolNames).not.toContain('shell')
     expect(toolNames).not.toContain('apply_patch')
     expect(shellOutput).toBe('unsupported call: shell')
+    expect(fixture.errors).toEqual([])
+  },
+  120000
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The silent unsandboxed retry — the one place the classification race is the
+// subject rather than noise.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Opt-in, and only meaningful SERIAL: `CODEX_INTEGRATION_RETRY=1` with
+ * `--maxWorkers=1`. The retry depends on Codex classifying the failed sandboxed
+ * attempt from output that must arrive within a fixed 20 ms window
+ * (observation 2). With the machine otherwise idle it does; with four workers
+ * each driving its own app-server it intermittently does not, and no fixture
+ * change can widen an upstream timer. Running it in the default parallel suite
+ * would make the suite measure CPU contention. Skipped, it is a visible gap
+ * rather than a flake; the matrix tests above assert this path's two branches
+ * without it.
+ */
+const retryProbeEnabled = enabled && process.env.CODEX_INTEGRATION_RETRY === '1'
+
+it.skipIf(!retryProbeEnabled)(
+  'probes the silent unsandboxed retry of an approved plain command under the default mode (serial-only: CODEX_INTEGRATION_RETRY=1)',
+  async () => {
+    // The product path: ClaudeUI's `default` mode (`untrusted` +
+    // `workspace-write`, reviewer `user`), and a model that writes OUTSIDE the
+    // workspace WITHOUT asking for escalation. ClaudeUI accepts it. Codex then
+    // runs the first attempt under its sandbox, the attempt is denied — by the
+    // real seatbelt in the product, by the containment nesting here — and
+    // Codex must classify that denial and re-run unsandboxed WITHOUT a second
+    // ask. ClaudeUI's "an accepted command runs" (docs/architecture/codex.md,
+    // Permissions) rests on exactly this.
+    const fixture = await setupFixture()
+    const active = await root(fixture, () => ({ decision: 'accept' }))
+    const policy = codexTurnPolicy('default')
+    const started = await active.client.request<{ thread: { id: string } }>('thread/start', {
+      cwd: fixture.cwd,
+      model: 'mock-model',
+      modelProvider: 'fixture',
+      historyMode: 'paginated'
+    })
+    scriptSteps(fixture, [{ id: 'retry-outside', cmd: `echo x > ${fixture.outside}/retried.txt` }])
+    await runTurn(active, started.thread.id, policy)
+    const forItem = active.notifications.filter(
+      ({ params }) =>
+        params.itemId === 'retry-outside' ||
+        (params.item as { id?: string } | undefined)?.id === 'retry-outside'
+    )
+    const completed = forItem.find(({ method }) => method === 'item/completed')?.params.item as
+      Record<string, unknown> | undefined
+    // Everything that can prove or refute the 20 ms race on a miss: what the
+    // model was told, the streamed output deltas, and the item lifecycle.
+    // Fixture paths are redacted.
+    const diagnostics = {
+      policy,
+      functionCallOutput: sanitize(fixture, callOutput(fixture, 'retry-outside')),
+      outputDeltas: sanitize(
+        fixture,
+        forItem
+          .filter(({ method }) => method === 'item/commandExecution/outputDelta')
+          .map(({ params }) => String(params.delta))
+          .join('')
+      ),
+      lifecycle: forItem.map(({ method }) => method),
+      completedItem: completed
+        ? {
+            status: completed.status ?? null,
+            exitCode: completed.exitCode ?? null,
+            aggregatedOutput: sanitize(fixture, (completed.aggregatedOutput as string) ?? null)
+          }
+        : null
+    }
+    console.log(JSON.stringify({ probe: 'retry', diagnostics }))
+    const observed = {
+      asks: askCount(active, 'retry-outside'),
+      reason: approvalFor(active, 'retry-outside')?.reason ?? null,
+      exitCode: exitCode(fixture, 'retry-outside'),
+      landed: existsSync(join(fixture.outside, 'retried.txt'))
+    }
+    // Asked once, up front; the retry reuses that approval; the write lands.
+    // An exit 71 here is a MISSED retry, never a pass.
+    expect(observed, JSON.stringify(diagnostics)).toEqual({
+      asks: 1,
+      reason: null,
+      exitCode: 0,
+      landed: true
+    })
     expect(fixture.errors).toEqual([])
   },
   120000

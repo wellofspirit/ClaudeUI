@@ -16,6 +16,14 @@ import { ApprovalButtons } from './ApprovalButtons'
 import { PermissionDenialChip, PermissionDenialStrip } from './tool-registry/PermissionDenial'
 import { ToolReviewChip, ToolReviewStrip, canApproveBlock } from './tool-registry/ToolReview'
 import { deriveTaskState, latestNotification } from './task-state'
+import { modelDisplayName } from '../../lib/model-display-name'
+import { dispatchLabel } from '../../../../shared/tool-kinds'
+import {
+  AGENT_CHIP_CLASS,
+  AgentTile,
+  useAgentTile,
+  type AgentTileSpec
+} from '../agents/AgentTypeTile'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -149,6 +157,215 @@ export function formatTokens(n: number): string {
   return String(n)
 }
 
+/**
+ * Narrow card: below this container width the header and footer shed what they
+ * can — the review chip's reviewer prefix, the word "Task", the usage text — and
+ * "Open in panel" becomes an icon. The header sheds, it never wraps (one row,
+ * always); a clock under 300px goes too (`@max-[300px]/taskcard:hidden`).
+ */
+const NARROW_ONLY_HIDE = '@max-[480px]/taskcard:hidden'
+
+/**
+ * The "send to background" glyph, the arrow-into-a-tray path of the harness
+ * install pill's DownloadIcon (SettingsDialog/HarnessesInstalled.tsx), at 12px.
+ * Shown only on a narrow card, in place of the words.
+ */
+function BackgroundIcon({
+  testId,
+  className = ''
+}: {
+  testId?: string
+  className?: string
+}): React.JSX.Element {
+  return (
+    <svg
+      data-testid={testId}
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={`hidden @max-[480px]/taskcard:block ${className}`}
+      aria-hidden="true"
+    >
+      <path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14" />
+    </svg>
+  )
+}
+/**
+ * The footer is one line unless even its whole chips cannot share it (resumed
+ * at a large `chatFontScale`): then WHOLE chips wrap, the icon last on its line.
+ * Wide cards never wrap.
+ */
+const NARROW_WRAP = '@max-[480px]/taskcard:flex-wrap @max-[480px]/taskcard:gap-y-1'
+
+/**
+ * A model label this many characters or longer gets the 5rem floor; a shorter
+ * one (`opus`, `sonnet`, `Opus 5`) is `shrink-0`: it is already narrower than the
+ * floor, so a floor would only pad it with blank space. The floor exists so a
+ * LONG name cannot be crushed to "D.".
+ *
+ * Measured at 10px in the browser project (chip = text + 12px padding; the floor
+ * is 80px, so the text budget is 68px). Mono is 5.5px a character: 12 chars =
+ * 66px, 13 = 71.5px. Sans averages 4.8px (`Sonnet 4.5` 46.8px, `Claude Opus 5`
+ * 64.7px, `DeepSeek V4.1 Flash` 91px) but runs to 9.3px for capitals (9 `W`s =
+ * 84px). 11 errs toward the floor: it covers every mono label from 11 characters
+ * (60.5px + 12 = 72.5px, 7.5px of slack under the floor) and the sans ones that
+ * can reach 68px; only a label under 11 characters that is all wide capitals
+ * could exceed the floor unfloored, and `shrink-0` keeps even that whole.
+ */
+const MODEL_FLOOR_MIN_CHARS = 11
+
+/**
+ * The card's footer row, left to right: type, background, model, then resumed,
+ * usage and Open in panel at the right. The collapsed card and the expanded card
+ * both end in it; only the wrapper differs (`className`).
+ *
+ * The type (ADR-094) is its tile: the engine's default type has none, and
+ * neither a chip nor a tile is drawn. Below 480px it is the 16px letter tile
+ * alone; wide, one element draws a chip in the type's colour, led by that same
+ * tile and followed by the name, so phone and desktop read alike. A dispatch is
+ * the X tile.
+ *
+ * Every chip is `whitespace-nowrap shrink-0` except the model, the one that
+ * gives way: at phone width a chip breaking mid-token is worse than a truncated
+ * model id. But it gives way to a floor (5rem): a model of "D." tells nobody
+ * anything. Wide, the usage text and the model both give way; narrow, the usage
+ * is gone, "Open in panel" is an icon and so is "background", so the row stays
+ * one line wherever it can. Narrow, the footer can wrap, and `flex-wrap` breaks
+ * a line on the items' BASIS sizes before anything shrinks, so the model's
+ * natural width (about 130px, or 246px for a raw id) would push the chips after
+ * it onto a second row even though shrinking it to its floor fits them all.
+ * Hence `basis-[5rem]` (the floor, so line-breaking sees 5rem) with `grow` and
+ * `max-w-fit` (it takes the leftover space, never more than its own text).
+ */
+function TaskFooter({
+  className,
+  tile,
+  model,
+  modelName,
+  isBackground,
+  runIndex,
+  usage,
+  openTestId,
+  onOpenPanel
+}: {
+  className: string
+  /** The type tile's spec; `null` for the default type (no tile, no chip). */
+  tile: AgentTileSpec | null
+  /** The raw model id, or a dispatch's "<engine> · <model>". */
+  model: string | null
+  /** The model's catalog name, when the picker has one; the raw id otherwise. */
+  modelName: string | undefined
+  isBackground: boolean
+  runIndex: number
+  usage: ParsedUsage | null | undefined
+  openTestId: string
+  onOpenPanel: () => void
+}): React.JSX.Element {
+  return (
+    <div className={`${className} ${NARROW_WRAP}`}>
+      {tile && (
+        // One element, two faces (ADR-094): the tile alone below 480px, a chip in
+        // the type's colour wide. The chip's padding and tint drop away narrow.
+        <span
+          data-testid="TaskCard.type"
+          className={`inline-flex items-center gap-1 text-[10px] font-mono pl-0.5 pr-1.5 py-px rounded whitespace-nowrap shrink-0 @max-[480px]/taskcard:p-0 @max-[480px]/taskcard:bg-transparent ${AGENT_CHIP_CLASS[tile.colorId]}`}
+        >
+          <AgentTile
+            testId="TaskCard.typeTile"
+            letter={tile.letter}
+            colorId={tile.colorId}
+            title={tile.title}
+          />
+          <span className={NARROW_ONLY_HIDE}>{tile.label}</span>
+        </span>
+      )}
+      {isBackground && (
+        // One chip, two faces: the word wide, the tray icon below 480px (a word-only chip
+        // left the ↗ alone on row 2 at chat ~1.22). The glyph is shared with Send to
+        // background on purpose: that button shows only on FOREGROUND tasks, this chip
+        // only on BACKGROUND ones, so the two never share a card.
+        <span
+          data-testid="TaskCard.background"
+          title="Running in the background"
+          aria-label="Running in the background"
+          className="text-[10px] font-mono px-1.5 py-0.5 @max-[480px]/taskcard:p-1 rounded bg-warning/10 text-warning whitespace-nowrap shrink-0"
+        >
+          <span className={NARROW_ONLY_HIDE}>background</span>
+          <BackgroundIcon testId="TaskCard.background.icon" />
+        </span>
+      )}
+      {model && (
+        <span
+          data-testid="TaskCard.model"
+          title={model}
+          className={`text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary ${
+            (modelName ?? model).length >= MODEL_FLOOR_MIN_CHARS
+              ? 'min-w-[5rem] truncate @max-[480px]/taskcard:basis-[5rem] @max-[480px]/taskcard:grow @max-[480px]/taskcard:max-w-fit'
+              : 'shrink-0 whitespace-nowrap'
+          } ${modelName ? '' : 'font-mono'}`}
+        >
+          {modelName ?? model}
+        </span>
+      )}
+      {runIndex > 1 && (
+        <span
+          data-testid="TaskCard.resumed"
+          className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent whitespace-nowrap shrink-0"
+          title="This agent was sent a message after it finished, and ran again"
+        >
+          resumed ×{runIndex - 1}
+        </span>
+      )}
+      {usage && (
+        <span
+          {...TOOL_OUTPUT_SCOPE}
+          className={`text-[10px] font-mono text-text-secondary truncate min-w-0 ${NARROW_ONLY_HIDE}`}
+        >
+          {[
+            usage.totalTokens != null && `${formatTokens(usage.totalTokens)} tokens`,
+            usage.toolUses != null && `${usage.toolUses} tools`,
+            usage.durationMs != null && formatDuration(usage.durationMs)
+          ]
+            .filter(Boolean)
+            .join(' · ')}
+        </span>
+      )}
+      {/* One button, two faces: the words wide, the ↗ icon (as ExitPlanModeCard's) narrow. */}
+      <button
+        data-testid={openTestId}
+        onClick={onOpenPanel}
+        title="Open in panel"
+        aria-label="Open in panel"
+        className="text-[11px] text-accent hover:underline @max-[480px]/taskcard:p-1 cursor-pointer whitespace-nowrap shrink-0 ml-auto"
+      >
+        <span className={NARROW_ONLY_HIDE}>Open in panel</span>
+        <svg
+          data-testid="TaskCard.openInPanel.icon"
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="hidden @max-[480px]/taskcard:block"
+          aria-hidden="true"
+        >
+          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+          <polyline points="15 3 21 3 21 9" />
+          <line x1="10" y1="14" x2="21" y2="3" />
+        </svg>
+      </button>
+    </div>
+  )
+}
+
 export function TaskCard({
   block,
   result,
@@ -170,6 +387,8 @@ export function TaskCard({
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const backgroundTasksEnabled = useActiveSession((s) => s.status.capabilities.backgroundTasks)
+  const engineId = useActiveSession((s) => s.status.engineId)
+  const availableModels = useSessionStore((s) => s.availableModels)
   const [expanded, setExpanded] = useState(false)
 
   const toolUseId = block.toolUseId
@@ -226,8 +445,13 @@ export function TaskCard({
   // Read display fields from the engine-neutral view (not block.toolInput)
   const description = (view.description || view.prompt || '').slice(0, 120)
   const prompt = view.prompt
-  const subagentType = view.subagent ?? ''
-  const model = view.model ?? null
+  // The type tile (ADR-094): a dispatch is an X, the engine's default type has
+  // none. `view.subagent` is a TYPE on every engine, and a Codex spawn has none.
+  const tile = useAgentTile(engineId, view.subagent, view.dispatch)
+  // A dispatch has no model of its own to name: its chip says where it went.
+  const model = view.dispatch ? dispatchLabel(view.dispatch) : (view.model ?? null)
+  const modelName =
+    model && !view.dispatch ? modelDisplayName(availableModels, engineId, model) : undefined
 
   const progress = taskProgressMap[toolUseId]
   const startedAt = isRunning ? activeTasks[toolUseId]?.startedAt : undefined
@@ -360,6 +584,17 @@ export function TaskCard({
     }, 10000)
   }
 
+  // Both footers (collapsed, expanded) say the same thing; only the wrapper differs.
+  const footerProps = {
+    tile,
+    model,
+    modelName,
+    isBackground,
+    runIndex,
+    usage,
+    onOpenPanel: () => activeSessionId && openTaskPanel(activeSessionId, toolUseId)
+  }
+
   const statusIcon = isError ? (
     <svg
       width="12"
@@ -421,17 +656,19 @@ export function TaskCard({
     <div
       data-testid="TaskCard"
       data-status={status}
-      className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden`}
+      className={`@container/taskcard rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden`}
     >
       {/* Header — always visible, clickable to expand/collapse */}
       <button
         data-testid="TaskCard.expand"
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 h-9 border-b border-border hover:bg-bg-hover transition-colors cursor-pointer"
+        className="w-full flex items-center gap-2 @max-[300px]/taskcard:gap-1.5 px-3 h-9 border-b border-border hover:bg-bg-hover transition-colors cursor-pointer"
       >
         {statusIcon}
-        <span className="font-medium text-[13px] text-accent shrink-0">Task</span>
-        <span className="text-text-secondary text-[12px] truncate flex-1 text-left">
+        <span className={`font-medium text-[13px] text-accent shrink-0 ${NARROW_ONLY_HIDE}`}>
+          Task
+        </span>
+        <span className="text-text-secondary text-[12px] truncate flex-1 min-w-[3rem] @max-[300px]/taskcard:min-w-[2rem] text-left">
           {description}
         </span>
         {denial && <PermissionDenialChip denial={denial} testIdPrefix="TaskCard" />}
@@ -440,12 +677,13 @@ export function TaskCard({
             review={review}
             onApprove={expanded ? undefined : approveBlocked}
             testIdPrefix="TaskCard"
+            prefixClassName={NARROW_ONLY_HIDE}
           />
         )}
         {elapsed !== undefined && (
           <span
             data-testid="TaskCard.elapsed"
-            className="text-[11px] text-text-muted font-mono shrink-0"
+            className="text-[11px] text-text-muted font-mono shrink-0 @max-[300px]/taskcard:hidden"
           >
             {elapsed}
           </span>
@@ -463,14 +701,23 @@ export function TaskCard({
               e.stopPropagation()
               handleBackgroundTask()
             }}
-            className="text-[11px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 transition-colors shrink-0"
+            title="Send to background"
+            aria-label="Send to background"
+            className="text-[11px] px-2 py-0.5 @max-[480px]/taskcard:p-1 rounded bg-accent/10 text-accent hover:bg-accent/20 transition-colors shrink-0"
           >
-            Send to background
+            <span className={NARROW_ONLY_HIDE}>Send to background</span>
+            <BackgroundIcon testId="TaskCard.sendToBackground.icon" />
           </button>
         )}
         {isBackgrounding && isForegroundTask && (
-          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">
-            sending to background…
+          <span
+            title="Sending to background…"
+            aria-label="Sending to background…"
+            className="text-[10px] font-mono px-1.5 py-0.5 @max-[480px]/taskcard:p-1 rounded bg-accent/10 text-accent shrink-0"
+          >
+            {/* Narrow: the same tray glyph, pulsing, instead of the words. */}
+            <span className={NARROW_ONLY_HIDE}>sending to background…</span>
+            <BackgroundIcon className="animate-pulse" />
           </span>
         )}
         {isRunning && !isStopping && !isHistorical && !isPendingApproval && (
@@ -506,52 +753,11 @@ export function TaskCard({
 
       {/* Collapsed footer */}
       {!expanded && (hasResult || isRunning) && (
-        <div className="flex items-center px-3 py-1.5 gap-1.5">
-          {subagentType && (
-            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent">
-              {subagentType}
-            </span>
-          )}
-          {model && (
-            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
-              {model}
-            </span>
-          )}
-          {isBackground && (
-            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning">
-              background
-            </span>
-          )}
-          {runIndex > 1 && (
-            <span
-              data-testid="TaskCard.resumed"
-              className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent"
-              title="This agent was sent a message after it finished, and ran again"
-            >
-              resumed ×{runIndex - 1}
-            </span>
-          )}
-          {/* Usage stats inline when collapsed */}
-          {usage && (
-            <span {...TOOL_OUTPUT_SCOPE} className="text-[10px] font-mono text-text-secondary">
-              {[
-                usage.totalTokens != null && `${formatTokens(usage.totalTokens)} tokens`,
-                usage.toolUses != null && `${usage.toolUses} tools`,
-                usage.durationMs != null && formatDuration(usage.durationMs)
-              ]
-                .filter(Boolean)
-                .join(' · ')}
-            </span>
-          )}
-          <div className="flex-1" />
-          <button
-            data-testid="TaskCard.openInPanel"
-            onClick={() => activeSessionId && openTaskPanel(activeSessionId, toolUseId)}
-            className="text-[11px] text-accent hover:underline cursor-pointer"
-          >
-            Open in panel
-          </button>
-        </div>
+        <TaskFooter
+          {...footerProps}
+          className="flex items-center px-3 py-1.5 gap-1.5"
+          openTestId="TaskCard.openInPanel"
+        />
       )}
 
       {/* Expanded content */}
@@ -611,54 +817,11 @@ export function TaskCard({
 
           {/* Footer — badges + usage + open in panel */}
           {(hasResult || isRunning) && (
-            <div className="border-t border-border px-3 py-1.5 flex items-center gap-1.5">
-              {subagentType && (
-                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent">
-                  {subagentType}
-                </span>
-              )}
-              {model && (
-                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
-                  {model}
-                </span>
-              )}
-              {isBackground && (
-                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning">
-                  background
-                </span>
-              )}
-              {runIndex > 1 && (
-                <span
-                  data-testid="TaskCard.resumed"
-                  className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent"
-                  title="This agent was sent a message after it finished, and ran again"
-                >
-                  resumed ×{runIndex - 1}
-                </span>
-              )}
-              {usage && (
-                <span
-                  {...TOOL_OUTPUT_SCOPE}
-                  className="text-[10px] font-mono text-text-secondary ml-1"
-                >
-                  {[
-                    usage.totalTokens != null && `${formatTokens(usage.totalTokens)} tokens`,
-                    usage.toolUses != null && `${usage.toolUses} tools`,
-                    usage.durationMs != null && formatDuration(usage.durationMs)
-                  ]
-                    .filter(Boolean)
-                    .join(' · ')}
-                </span>
-              )}
-              <div className="flex-1" />
-              <button
-                data-testid="TaskCard.expanded.openInPanel"
-                onClick={() => activeSessionId && openTaskPanel(activeSessionId, toolUseId)}
-                className="text-[11px] text-accent hover:underline cursor-pointer"
-              >
-                Open in panel
-              </button>
-            </div>
+            <TaskFooter
+              {...footerProps}
+              className="border-t border-border px-3 py-1.5 flex items-center gap-1.5"
+              openTestId="TaskCard.expanded.openInPanel"
+            />
           )}
         </>
       )}

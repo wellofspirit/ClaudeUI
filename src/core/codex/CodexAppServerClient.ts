@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { TextDecoder } from 'node:util'
 import { getLogDir, logger } from '../services/logger'
 import { killProcessTree } from '../services/process-tree'
-import { codexHomeForEnv, codexHomeKey } from './codex-home'
+import { codexHomeForEnv, codexHomeKey, ensureDerivedCodexHome } from './codex-home'
 import { locateCodexLaunch } from './codex-locate'
 import { withLaunch, type HarnessLaunch } from '../harness/launch'
 import { classifyVersion } from '../harness/version-gate'
@@ -320,6 +320,29 @@ export class CodexAppServerClient {
   }
 
   /**
+   * Create the home {@link childEnv} names when this client DERIVED it — Codex
+   * refuses an explicit `CODEX_HOME` that does not exist, and a fresh HOME has
+   * none (see {@link ensureDerivedCodexHome}). Best effort: a home that cannot
+   * be made is left to Codex, whose own exit reason is the accurate one.
+   */
+  private ensureHome(): void {
+    try {
+      if (ensureDerivedCodexHome(this.options.env)) {
+        logger.info(
+          'CodexAppServerClient',
+          `created the Codex home ${codexHomeForEnv(this.options.env)} (${this.label})`
+        )
+      }
+    } catch (err) {
+      logger.warn(
+        'CodexAppServerClient',
+        `could not create the Codex home ${codexHomeForEnv(this.options.env)} (${this.label})`,
+        err
+      )
+    }
+  }
+
+  /**
    * Every error this client mints, stamped with its caller label. Only that
    * field is added: `message` and the payload-free arguments are unchanged, so
    * nothing a caller reads today moves.
@@ -349,6 +372,7 @@ export class CodexAppServerClient {
       if (!launch) throw this.error('binary-unavailable')
       await this.checkVersion(launch)
       if (this.closedError) throw this.closedError
+      this.ensureHome()
       await this.awaitFirstRun()
       const spec = withLaunch(launch, ['app-server', '--listen', 'stdio://'], this.childEnv)
       const child = spawn(spec.command, spec.args, {

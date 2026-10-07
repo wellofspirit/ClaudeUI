@@ -519,6 +519,155 @@ describe('forkFromMessage', () => {
     expect(newId).toBeNull()
   })
 
+  // The fork's agent rows. A branch seeded with the source's messages but none of
+  // its notifications read every background agent "running" after its first send.
+  describe('seeding task notifications', () => {
+    // Fork at 'a1': agent A launched inside the slice, agent B after it.
+    function seedSource(routingId: string): void {
+      store().loadHistoricalSession(
+        routingId,
+        [
+          makeChatMessage({ id: 'u1' }),
+          makeAssistantMessage('a', {
+            id: 'a1',
+            content: [makeToolUseBlock('Agent', { prompt: 'A' }, 'toolu_A')]
+          }),
+          makeChatMessage({ id: 'u2' }),
+          makeAssistantMessage('b', {
+            id: 'a2',
+            content: [makeToolUseBlock('Agent', { prompt: 'B' }, 'toolu_B')]
+          })
+        ],
+        '/proj',
+        [
+          makeTaskNotification({ taskId: 'tA', toolUseId: 'toolu_A', status: 'completed' }),
+          makeTaskNotification({ taskId: 'tB', toolUseId: 'toolu_B', status: 'completed' }),
+          makeTaskNotification({ taskId: 'tX', toolUseId: null })
+        ]
+      )
+      ;(window.api as any).resolveForkAnchor = vi.fn().mockResolvedValue({ anchorUuid: 'anchor-1' })
+    }
+
+    function listSource(routingId: string): void {
+      useSessionStore.setState({
+        directories: [
+          {
+            cwd: '/proj',
+            projectKey: 'proj-key',
+            folderName: 'proj',
+            sessions: [
+              {
+                sessionId: routingId,
+                cwd: '/proj',
+                projectKey: 'proj-key',
+                title: 'Source',
+                timestamp: 0,
+                lastActivityAt: 0
+              }
+            ]
+          }
+        ]
+      })
+      mirrorStoreIntoReplica()
+    }
+
+    it('Claude: seeds messages, notifications and status line from the anchor-aware loader', async () => {
+      seedSource('src-session')
+      listSource('src-session')
+      const loaded = {
+        messages: [
+          makeChatMessage({ id: 'u1' }),
+          makeAssistantMessage('a', {
+            id: 'a1',
+            content: [makeToolUseBlock('Agent', { prompt: 'A' }, 'toolu_A')]
+          })
+        ],
+        // Agent A finished AFTER the anchor: the loader truncates there and says
+        // `unfinished`, where the source's in-memory copy says `completed`.
+        taskNotifications: [
+          makeTaskNotification({ taskId: 'tA', toolUseId: 'toolu_A', status: 'unfinished' })
+        ],
+        statusLine: { totalCostUsd: 1.5 },
+        customTitle: 'Source title',
+        warnings: ['a source warning'],
+        agentIdToToolUseId: {},
+        taskPrompts: {}
+      }
+      const loader = vi.fn().mockResolvedValue(loaded)
+      ;(window.api as any).loadSessionHistory = loader
+
+      const newId = await store().forkFromMessage('src-session', 'a1')
+
+      expect(loader).toHaveBeenCalledWith('src-session', 'proj-key', 'anchor-1')
+      const branch = store().sessions[newId!]
+      expect(branch.messages).toEqual(loaded.messages)
+      expect(branch.taskNotifications).toEqual(loaded.taskNotifications)
+      expect(branch.statusLine).toEqual(loaded.statusLine)
+      // A fork is a new session: neither the source's title nor its warnings carry.
+      expect(store().customTitles[newId!]).toBeUndefined()
+      expect(branch.warnings).toEqual([])
+      expect(branch.forkOrigin).toEqual({ sourceSessionId: 'src-session', anchorUuid: 'anchor-1' })
+    })
+
+    it.each([
+      ['the source is not listed', false, () => vi.fn()],
+      ['the loader rejects', true, () => vi.fn().mockRejectedValue(new Error('ENOENT'))],
+      [
+        'the loader returns no messages',
+        true,
+        () =>
+          vi.fn().mockResolvedValue({
+            messages: [],
+            taskNotifications: [],
+            statusLine: null,
+            customTitle: null,
+            warnings: [],
+            agentIdToToolUseId: {},
+            taskPrompts: {}
+          })
+      ]
+    ])('Claude fallback when %s: in-memory slice + its own agents only', async (_, listed, mk) => {
+      seedSource('src-session')
+      if (listed) listSource('src-session')
+      const loader = mk()
+      ;(window.api as any).loadSessionHistory = loader
+      const logRelay = vi.fn()
+      ;(window.api as any).logRelay = logRelay
+
+      const newId = await store().forkFromMessage('src-session', 'a1')
+
+      expect(loader).toHaveBeenCalledTimes(listed ? 1 : 0)
+      const branch = store().sessions[newId!]
+      expect(branch.messages.map((m) => m.id)).toEqual(['u1', 'a1'])
+      expect(branch.taskNotifications.map((n) => n.taskId)).toEqual(['tA'])
+      expect(logRelay).toHaveBeenCalledTimes(1)
+    })
+
+    it('pi: does not read the Claude loader, copies only the slice’s own notifications', async () => {
+      seedSource('pi-src')
+      listSource('pi-src')
+      useSessionStore.setState((s) => ({
+        sessions: {
+          ...s.sessions,
+          'pi-src': {
+            ...s.sessions['pi-src'],
+            status: makeSessionStatus({ engineId: 'pi', capabilities: resolvePiCapabilities() })
+          }
+        }
+      }))
+      mirrorStoreIntoReplica()
+      const loader = vi.fn()
+      ;(window.api as any).loadSessionHistory = loader
+
+      const newId = await store().forkFromMessage('pi-src', 'a1')
+
+      expect(loader).not.toHaveBeenCalled()
+      const branch = store().sessions[newId!]
+      expect(branch.messages.map((m) => m.id)).toEqual(['u1', 'a1'])
+      expect(branch.taskNotifications.map((n) => n.taskId)).toEqual(['tA'])
+    })
+  })
+
   it('returns null + records an error and does NOT resolve an anchor when the engine lacks forkFromMessage', async () => {
     store().loadHistoricalSession(
       'src-session',

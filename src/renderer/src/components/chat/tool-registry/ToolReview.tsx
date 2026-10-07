@@ -136,16 +136,24 @@ export function canApproveBlock(
 export function ToolReviewChip({
   review,
   onApprove,
-  testIdPrefix = 'ToolCard'
+  testIdPrefix = 'ToolCard',
+  prefixClassName
 }: {
   review: ToolReviewBlock
   /** Set → the compact Approve beside the chip (the caller shows it while collapsed). */
   onApprove?: () => void
   /** The hosting card type (ADR-027 two-tier ids), as PermissionDenialChip takes it. */
   testIdPrefix?: string
+  /**
+   * Set → the reviewer word and its separator ("Auto mode · ") sit in their own
+   * span carrying these classes, so a card can drop them when it is narrow.
+   * Unset → one plain string, as every other card renders it. The text is the
+   * same either way.
+   */
+  prefixClassName?: string
 }): React.JSX.Element {
-  const label = [
-    review.reviewer === 'auto-mode' ? 'Auto mode' : 'Auto-review',
+  const reviewer = review.reviewer === 'auto-mode' ? 'Auto mode' : 'Auto-review'
+  const rest = [
     decisionWord(review),
     ...(review.overriddenByUser ? ['approved by you'] : []),
     ...(review.riskLevel ? [review.riskLevel] : [])
@@ -157,7 +165,16 @@ export function ToolReviewChip({
         className={`inline-flex items-center gap-1 shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold tracking-wide ${tone(review.decision).chip}`}
       >
         <ShieldIcon size={10} />
-        {label}
+        {prefixClassName ? (
+          // One flex item, like the plain string: separate items would pick up
+          // the chip's gap-1 between the prefix and the decision word.
+          <span>
+            <span className={prefixClassName}>{reviewer} · </span>
+            {rest}
+          </span>
+        ) : (
+          `${reviewer} · ${rest}`
+        )}
       </span>
       {onApprove && (
         <ApproveButton onApprove={onApprove} testid="ToolReview.approveCompact" compact />

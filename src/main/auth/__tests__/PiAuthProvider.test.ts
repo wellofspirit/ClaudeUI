@@ -186,6 +186,13 @@ describe('PiAuthProvider.listVendorAuthOptions', () => {
     expect(options.openai.map((o) => o.type)).toEqual(['api'])
   })
 
+  it("offers Azure under pi's provider id `azure`, not the pre-1.0.3 `azure-openai-responses`", async () => {
+    const provider = new PiAuthProvider()
+    const options = await provider.listVendorAuthOptions()
+    expect(options.azure?.map((o) => o.type)).toEqual(['api'])
+    expect(options['azure-openai-responses']).toBeUndefined()
+  })
+
   it('the api option carries a secret text prompt for the key', async () => {
     const provider = new PiAuthProvider()
     const options = await provider.listVendorAuthOptions()

@@ -1,6 +1,29 @@
 # pi wire protocol — verified integration notes
 
-Current pin: **0.87.1** ([stable release](https://github.com/earendil-works/pi/releases/tag/v0.87.1)). The dated 0.84.3 findings below are historical probes, not fresh verification of every behavior on 0.87.1. On Windows, all 13 gated pi integration tests passed, including live approval, hosted tools, subagents, dispatch, fork and clone. The run used an isolated `PI_CODING_AGENT_DIR`, an explicit `openai-codex/gpt-5.6-luna` model entry, and a credential command that supplied the active vault access token over a pipe without copying tokens to disk or refreshing them. The credential gates now honor `PI_CODING_AGENT_DIR`. Pi 0.87.1 persists system messages; fork/clone tests compare the complete expected transcript rather than assuming only user/assistant messages contribute to `messageCount`.
+Current tested release: **1.0.4** ([stable release](https://github.com/earendil-works/pi/releases/tag/v1.0.4)); floor = tested = **1.0.4**, ceiling **2.0.0** (ADR-082's next-major rule; owner, 2026-10-06 — the temporary 1.1.0 ceiling of the 1.0.2 bump is retired). A version in [1.0.4, 2.0.0) other than 1.0.4 runs as _untested_; only **1.0.4** was measured. The dated 0.84.3 findings below are historical probes, not fresh verification of every behavior on 1.0.4. The prior Windows 0.87.1 run passed all 13 gated tests, including live approval, hosted tools, subagents, dispatch, fork and clone. It used an isolated `PI_CODING_AGENT_DIR`, an explicit `openai-codex/gpt-5.6-luna` model entry, and a credential command that supplied the active vault access token over a pipe without copying tokens to disk or refreshing them. The credential gates honor `PI_CODING_AGENT_DIR`. Pi 0.87.1 persists system messages; fork/clone tests compare the complete expected transcript rather than assuming only user/assistant messages contribute to `messageCount`.
+
+## 1.0.2 → 1.0.4 compatibility assessment (2026-10-06)
+
+`git diff v1.0.2..v1.0.4` (51 commits; most of the 203 changed files are the new `pi-env`/durable packages and codemode, which ClaudeUI does not drive). Of the contracts ClaudeUI consumes:
+
+- **RPC, session files, extension runner:** `packages/coding-agent/src/modes/rpc/`, `core/session-manager.ts`, `core/extensions/runner.ts` and `packages/agent/src/` are unchanged. `extensions/types.ts` adds one method to the pi-provided `ToolLoadout` (`getPromptGuidelines`). 0 commands, events or hooks added, removed or reshaped.
+- **CLI:** one flag added (`--no-mcp`), none removed. `--tools` and `--exclude-tools` now take `*` patterns, and a `--tools` list with no `mcp__` entry keeps pi's own MCP tools _registered_ (previously it dropped them); they stay undeclared to the model unless `tool_search` is allowed, and are reachable through `codemode`. ClaudeUI passes `--tools`/`--exclude-tools` only for host-run subagents with an explicit tool list (`pi-subagents.ts`): a definition naming `codemode` or `tool_search` can now reach pi-configured MCP servers, still behind the bridge's `tool_call` gate; a literal `*` in a definition's (dis)allowed tools is now a glob.
+- **Provider ids (1.0.3, breaking upstream):** the Azure provider was renamed `azure-openai-responses` → `azure` (provider key in `auth.json`, `models.json`, `settings.json`; the api id and `AZURE_OPENAI_*` env vars are unchanged). ClaudeUI's API-key vendor list (`src/core/auth/pi-vendor-ids.ts`) followed. `openai-codex` is unchanged.
+- **Auth:** a started OAuth refresh now completes and persists the rotated refresh token even when its request is cancelled (1.0.3), which can only reduce lost-refresh-token cases for ClaudeUI's fed `openai-codex` credential. Output files (truncated tool output, codemode images) are now user-only (0600).
+- **Ported classifiers:** `retry.ts` gained 5 patterns (ChatGPT subscription limit/unavailable, "model is at capacity", HTTP/2 pending-stream cancel) and `overflow.ts` 1 (z.ai CN) since 0.87.1; `src/core/pi/pi-agent-failure.ts` is re-synced to 1.0.4.
+
+Credential-free checks on the 1.0.4 managed-store binary: the RPC/command/skill integration cases pass (5 of 13; the 8 model-call cases are credential-gated and were not run), and a bridge load registers all eight ClaudeUI tools with no extension error.
+
+## 0.87.1 → 1.0.2 compatibility assessment (2026-10-05, historical)
+
+Source comparison covered the original tested tag, not only the intervening local checkout (`git diff v0.87.1..v1.0.2`), across RPC types/server, extension types/runner, CLI arguments, session persistence and auth/provider code. Of the contracts ClaudeUI consumes:
+
+- **RPC commands/events:** no command or event type was removed or renamed. Three success responses gained required `data.disposition`: `prompt` (`handled | queued | started`), `steer` and `follow_up` (`handled | queued`). ClaudeUI's generic response envelope already accepts `data`, so this is wire-compatible. Optional, unconsumed additions include nested-tool `parentToolCallId`, structured tool output, assistant `thinkingLevel` and nested-call history.
+- **Extension API:** the consumed hooks and actions (`tool_call`, `resources_discover`, `session_start`, `project_trust`, `registerTool`, `registerCommand`, `sendMessage`, `getActiveTools`, `setActiveTools`) retain their shapes. Seven API methods were added (`registerToolRenderer`, `getSettings`, `registerMcpServer`, `unregisterMcpServer`, `getMcpServers`, `registerVirtualModel`, `unregisterVirtualModel`) and none was removed. Two hook event types were added (`mcp_servers_change`, `provider_stream_event`); six optional fields were added across existing tool hook events (`parentToolCallId` on five event records and `structuredContent` on `tool_result`), plus `structuredContent` on the corresponding handler result. Tool definitions and execution context gained optional MCP/codemode metadata and nested execution; existing definitions remain valid. Source inspection found no built-in codemode/MCP/tool-search name collision with ClaudeUI's tools; a real 1.0.2 load also registered all eight ClaudeUI bridge tools together with no extension error. Explicit `-e` files still load under `--no-extensions`.
+- **CLI/session/auth:** none of ClaudeUI's spawn flags was removed. `--provider` now requires `--model` (ClaudeUI never sends it alone), `--no-extensions` additionally disables built-ins, and `--models` ignores empty patterns. Session files now flush on the first user message rather than waiting for the first assistant reply; the existing history reader accepts the same entry union. `openai-codex` remains registered with the same credential/provider id, although upstream now labels it legacy beside a new `openai` ChatGPT OAuth route.
+- **Prompt disposition is newly observable, not a new hang:** a no-op extension command returned success and no `agent_settled` on both 0.87.1 and 1.0.2; only 1.0.2 added `data: {disposition: "handled"}`. Clients can use the field to avoid waiting when no independent extension work starts, but the old behavior is a pre-existing limitation rather than a 1.0 regression. ClaudeUI's own `/cui-deliver` may deliberately start independent work, so `handled` alone cannot replace its settle tracking.
+
+No adapter change was required by the source diff or credential-free real-binary smoke tests. The model-call integration cases remain credential-gated and were not run during this assessment; therefore this is measured acceptance of **1.0.2**, not a claim that every historical wire note was manually re-verified.
 
 How ClaudeUI drives the [pi coding agent](https://github.com/earendil-works/pi) and what we
 verified against the real binary. Everything here was probed on Windows against the pinned
@@ -270,6 +293,9 @@ Probed for ADR-089 host-run subagents (2026-10-01, the 0.87.1 managed-store bina
 - **P3 `--tools a,b` is an allowlist over built-in AND extension tools** — a registered extension
   tool missing from the list is inactive (`--tools read,grep,agent` gave `[read, grep, agent]`);
   `-xt <name>` removes one tool; no `--tools` gives pi's defaults plus every extension tool.
+  Since 1.0.4 (source, not re-probed): entries may be `*` patterns, and a list without an `mcp__`
+  entry keeps pi's own MCP tools registered for `codemode`/`tool_search` (see the 1.0.4
+  assessment above).
 - **P4 resume**: with an existing `<D>/<ts>_<id>.jsonl`, the same `--session-dir`/`--session-id`
   reopen it — but only from the cwd in its header. From a different cwd the same flags create a NEW
   session (`SessionManager.findById` filters by header cwd when the session dir is not pi's
@@ -352,6 +378,45 @@ session file + ClaudeUI log; no new probe run):
   (`packages/ai/src/api/lazy.ts:4-23, 46-60`); the loop ends on it (`agent-loop.ts:244-254`), then
   `agent_settled`. Every real provider maps an abort to `"aborted"`; the setup path is the hole
   (upstream bug). ClaudeUI suppresses the banner inside the user-stop window instead (ADR-090).
+
+## MCP (pi 1.0 + ClaudeUI's shared catalog, ADR-096)
+
+Source-read at v1.0.4 (`vendor/pi-src/packages/coding-agent/src/core/mcp-servers.ts`,
+`src/extensions/mcp/`) and proven credential-free end to end by
+`src/integration/pi/pi-mcp.integration.test.ts` (isolated `PI_CODING_AGENT_DIR`, a localhost
+OpenAI-compatible provider in `models.json`, a stdio fixture server):
+
+- **pi's own MCP** is a built-in extension: servers from `~/.pi/agent/mcp.json` and the trusted
+  project's `.pi/mcp.json` (the bridge trusts every project ClaudeUI opens). ClaudeUI never passes
+  `--no-mcp` and never edits those files.
+- **`pi.registerMcpServer(name, config)`** adds a session-only server (config = one `mcpServers`
+  entry). Registered while extensions load, it connects at `session_start`; later, right away.
+  Re-register on every load: `fork` / `switch_session` / `new_session` rebuild the runtime and re-run
+  every extension factory. A `mcp.json` server with the same namespace wins. Invalid names
+  (outside `[A-Za-z0-9_-]`), legacy SSE and non-http(s) URLs throw; registrations staged in one load
+  are NOT clash-checked against each other (ClaudeUI dedupes namespaces itself).
+- **Tool names** are `mcp__<server>__<tool>` with `[^A-Za-z0-9_]` → `_` (`my-server` →
+  `my_server`), hash-suffixed past 64 chars. Every call runs the `tool_call` hook (the gate).
+- **Exposure**: default `codemode` hides tools behind the `codemode` script tool; ClaudeUI registers
+  `direct` (declared like built-ins). The first prompt waits up to 10 s for `direct` servers.
+- **Config values are templates** in `env` and `headers` (`core/resolve-config-value.ts`): a leading
+  `!` RUNS A SHELL COMMAND, `$NAME`/`${NAME}` interpolate, `$$`/`$!` escape. ClaudeUI expands
+  Claude's `${VAR}`/`${VAR:-default}` itself and escapes the result.
+- **Stdio servers inherit pi's env** (`{...process.env, ...env}`), bridge token included.
+- **Warnings reach RPC only as `extension_ui_request` notifies** (`method: "notify"`,
+  `notifyType`): "MCP servers need attention: … needs sign-in / failed …", "MCP failed to load …".
+  The event mapper surfaces warning/error notifies starting `MCP ` as `session:warning`.
+- **OAuth**: an HTTP server without an `Authorization` header that answers 401 is "needs sign-in";
+  nothing prompts and nothing hangs. `/mcp login` opens a browser and waits on an `input` dialog
+  ClaudeUI does not answer (untested from ClaudeUI).
+- **`--tools` without an `mcp__` entry** keeps MCP tools registered but never activates a `direct`
+  one (`agent-session.ts` `_isActivatable`), so a subagent with an explicit list gets none —
+  Claude's rule.
+
+ClaudeUI's side: `src/core/pi/pi-mcp-bridge.ts` (translation, filtering, escaping, pi's own
+names), `PiBridgeHost` `POST /mcp-servers` (the spawn-time snapshot, bearer-authenticated,
+repeatable), bridge v13's `CLAUDEUI_PI_MCP=1` block (fetch, `registerMcpServer` per entry, one
+`session_start` notify for failures; the factory returns that promise so pi waits).
 
 ## Behavior gotchas
 

@@ -192,6 +192,13 @@ jobs:
         run: |
           node -e "const p=require('./package.json'); p.version='${{ needs.version.outputs.version }}'; require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2)+'\n')"
 
+      # test:ci includes the `browser` vitest project (Layer 2b layout tests),
+      # which drives real headless Chromium; no runner image ships the build
+      # Playwright wants. The headless shell is all it uses; no --with-deps on
+      # macOS or Windows.
+      - name: Install Chromium for the browser tests
+        run: bunx playwright install --only-shell chromium
+
       - name: Run tests
         run: bun run test:ci
 

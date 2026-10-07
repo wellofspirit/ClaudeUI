@@ -173,7 +173,7 @@ export function DialogFrame({
         className={
           isMobile
             ? 'relative z-10 w-full h-full flex flex-col bg-bg-primary animate-fade-in'
-            : 'relative z-10 m-auto w-[460px] max-w-[92vw] max-h-[88vh] flex flex-col bg-bg-primary border border-border rounded-xl shadow-2xl animate-fade-in'
+            : 'relative z-10 m-auto w-[460px] max-w-[92%] max-h-[88%] flex flex-col bg-bg-primary border border-border rounded-xl shadow-2xl animate-fade-in'
         }
       >
         <div className="min-h-[52px] shrink-0 flex items-center flex-wrap gap-2 px-4 py-2 border-b border-border">

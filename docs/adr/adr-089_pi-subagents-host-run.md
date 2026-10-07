@@ -3,6 +3,7 @@
 **Status:** Accepted (2026-10-01). Built on branch `pi-subagents-dispatch-judge`.
 **Amended by:** [ADR-091](adr-091_judge-blocks-hold-and-session-local-targets.md) (a child's judge reads parent, queued user turns and trajectory in time order; a block holds for the user).
 **Amended (2026-10-05):** [Messaging v2](#messaging-v2-2026-10-05) — a user-stopped agent is resumable once the user speaks, failed agents resume only after a temporary failure, children know their identity, `list_models` and model resolution, and the shared `dispatch_agent` description (also amends [ADR-033](adr-033_cross-engine-dispatch.md)).
+**Amended by:** [ADR-096](adr-096_pi-mcp-shared-catalog.md) (2026-10-06) — a child registers its parent's MCP catalog; `mcp__…` entries in an agent's `tools`/`disallowedTools` are spelled as pi names MCP tools.
 **Supersedes:** [ADR-035](adr-035_pi-engine-backend.md)'s M5b in-pi subagent extension
 (`pi-subagent-source.ts`).
 **Relates to:** [ADR-035](adr-035_pi-engine-backend.md) (the pi backend and its bridge),
@@ -280,7 +281,7 @@ text points at its own subagent tool; pi learns which models exist instead of gu
   transient; a launch failure → transient for a resume, permanent for a first run (no task to
   resume); a refused `/cui-` prompt and anything unmatched → permanent. The overflow, quota and
   retryable patterns are PORTED from `vendor/pi-src/packages/ai/src/utils/{overflow,retry}.ts` at
-  pi 0.87.1 — re-diff them at every pi bump. `failure` and `failureMessage` (one line, ≤ 200
+  pi 1.0.4 — re-diff them at every pi bump. `failure` and `failureMessage` (one line, ≤ 200
   characters, capped again on read) persist in `details.cuiAgent` and the notification `details`;
   a later notification without them clears them; a failed link written before this change reads as
   transient. A permanently failed agent refuses `send_message` with its message. pi drops errored

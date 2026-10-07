@@ -246,7 +246,7 @@ describe('ClaudeEngineToolMap.normalize', () => {
     // (never present on native Task/Agent) — the discriminator that routes
     // to the dispatch-flavored task view instead of the native one.
     describe('dispatch_agent (engine present)', () => {
-      it('builds "Dispatch: <engine>" description + "<engine> · <model>" badge', () => {
+      it('builds "Dispatch: <engine>" description + the structured dispatch field', () => {
         const view = ClaudeEngineToolMap.normalize('task', {
           engine: 'opencode',
           prompt: 'Get a second opinion',
@@ -256,16 +256,18 @@ describe('ClaudeEngineToolMap.normalize', () => {
           kind: 'task',
           description: 'Dispatch: opencode',
           prompt: 'Get a second opinion',
-          subagent: 'opencode · openai/gpt-5'
+          dispatch: { engine: 'opencode', model: 'openai/gpt-5' }
         })
+        // A dispatch has no agent TYPE: the tile reads `dispatch`, never `subagent` (ADR-094).
+        expect((view as { subagent?: string }).subagent).toBeUndefined()
       })
 
-      it('badge falls back to bare engine name when model is omitted', () => {
+      it('the dispatch field has no model when none is given', () => {
         const view = ClaudeEngineToolMap.normalize('task', {
           engine: 'opencode',
           prompt: 'x'
         })
-        expect(view).toMatchObject({ kind: 'task', subagent: 'opencode' })
+        expect(view).toMatchObject({ kind: 'task', dispatch: { engine: 'opencode' } })
         if (view.kind === 'task') {
           expect(view.model).toBeUndefined()
         }

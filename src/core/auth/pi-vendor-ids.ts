@@ -20,7 +20,9 @@
 export const PI_API_KEY_VENDOR_IDS: readonly string[] = [
   'anthropic',
   'ant-ling',
-  'azure-openai-responses',
+  // pi 1.0.3 renamed the provider from `azure-openai-responses` (still its api
+  // id, not a provider or auth.json key any more).
+  'azure',
   'openai',
   'deepseek',
   'nvidia',

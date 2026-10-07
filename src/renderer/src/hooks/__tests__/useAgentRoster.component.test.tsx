@@ -127,13 +127,59 @@ describe('useAgentRoster', () => {
     await renderProbe()
 
     expect(seen?.agents.map((r) => r.name)).toEqual(['reviewer', 'Plan'])
-    expect(seen?.agents[0].badge).toBe('Explore')
+    expect(seen?.agents[0].type).toBe('Explore')
+    // An unnamed agent carries its type too (its name is the type): the tile
+    // does not depend on whether the name repeats it.
+    expect(seen?.agents[1].type).toBe('Plan')
     expect(seen?.agents[0].description).toBe('audit the reducer')
     expect(seen?.shells.map((r) => r.name)).toEqual(['bun'])
     expect(seen?.shells[0].description).toBe('bun run dev')
     // Shells are not agents: the total counts agents only (§7).
     expect(seen?.totalCount).toBe(2)
     expect(seen?.runningShellCount).toBe(1)
+  })
+
+  it('names a Codex v1 spawn after its model, and gives it no type (ADR-094)', async () => {
+    setSession({
+      ...withEngine('codex'),
+      messages: [
+        assistantWithTool('m1', 'tu-c', 'collab:spawnAgent', {
+          prompt: 'survey the tests',
+          model: 'gpt-5.6-luna',
+          receiverThreadIds: ['child-1']
+        }),
+        assistantWithTool('m2', 'tu-p', 'collab:spawnAgent', {
+          agentPath: '/root/probe',
+          receiverThreadIds: ['child-2']
+        }),
+        assistantWithTool('m3', 'tu-n', 'collab:spawnAgent', { receiverThreadIds: ['child-3'] })
+      ]
+    })
+    await renderProbe()
+
+    // The model names it (as before the type tile); a path leaf wins over it; with
+    // neither it is the bare tool name.
+    expect(seen?.agents.map((r) => r.name)).toEqual(['gpt-5.6-luna', 'probe', 'Agent'])
+    expect(seen?.agents.map((r) => r.type)).toEqual([undefined, undefined, undefined])
+  })
+
+  it('marks a cross-engine dispatch with the structured field, not a type (ADR-094)', async () => {
+    setSession({
+      messages: [
+        assistantWithTool('m1', 'tu-d', 'mcp__claude-ui-collab__dispatch_agent', {
+          engine: 'opencode',
+          model: 'deepseek-v4',
+          prompt: 'review it'
+        })
+      ]
+    })
+    await renderProbe()
+
+    const [row] = seen?.agents ?? []
+    expect(row.dispatch).toEqual({ engine: 'opencode', model: 'deepseek-v4' })
+    expect(row.type).toBeUndefined()
+    // The list still names it as it always has.
+    expect(row.name).toBe('opencode · deepseek-v4')
   })
 
   // ADR-085 §3: the opencode host refuses a plan-mode `general` spawn before it

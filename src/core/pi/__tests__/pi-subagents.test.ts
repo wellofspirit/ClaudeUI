@@ -241,7 +241,9 @@ describe('buildPiSubagentChildEnv', () => {
       CLAUDEUI_PI_AGENT_TOOL: '1',
       CLAUDEUI_PI_AGENT_LISTING: '- x: y',
       CLAUDEUI_PI_SEND_MESSAGE: '1',
-      CLAUDEUI_PI_SKILL_DIRS: '/s'
+      CLAUDEUI_PI_SKILL_DIRS: '/s',
+      // ADR-096: the parent's MCP catalog, served by the child's own bridge host.
+      CLAUDEUI_PI_MCP: '1'
     })
     const cannot = buildPiSubagentChildEnv(
       { url: 'u', token: 't' },
@@ -292,6 +294,24 @@ describe('buildPiSubagentChildArgs', () => {
         childCanSpawn: false
       }).slice(6)
     ).toEqual(['--tools', 'read,send_message'])
+  })
+
+  it('spells MCP entries the way pi names MCP tools (ADR-096): Claude-form names, bare servers', () => {
+    expect(
+      buildPiSubagentChildArgs({
+        ...base,
+        definition: def({
+          tools: ['read', 'mcp__my-srv__get-issue', 'mcp__github'],
+          disallowedTools: ['mcp__my-srv__delete-repo']
+        }),
+        childCanSpawn: false
+      }).slice(6)
+    ).toEqual([
+      '--tools',
+      'read,mcp__my_srv__get_issue,mcp__github__*,send_message',
+      '--exclude-tools',
+      'mcp__my_srv__delete_repo'
+    ])
   })
 })
 
