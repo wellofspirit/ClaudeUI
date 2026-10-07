@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { PiEngineToolMap } from '../PiEngineToolMap'
+import { ClaudeEngineToolMap } from '../ClaudeEngineToolMap'
 import { deriveTaskState } from '../../task-state'
 import type { ToolKind } from '../../../../../../shared/tool-kinds'
 // Main can't import renderer code (separate Electron processes/bundles), so
@@ -598,5 +599,16 @@ describe('PiEngineToolMap — send_message / task_stop rows (ADR-089 S3b)', () =
         }
       )
     ).toEqual({ kind: 'note', icon: 'stop', text: 'Agent scout is not running.' })
+  })
+})
+
+describe('PiEngineToolMap — bridged MCP tools (ADR-096)', () => {
+  it('renders a pi MCP call exactly as Claude renders one: the mcp kind, the raw name as header', () => {
+    expect(PiEngineToolMap.kindOf('mcp__fixture__echo')).toBe('mcp')
+    expect(PiEngineToolMap.displayName('mcp__fixture__echo')).toBe('mcp__fixture__echo')
+    expect(ClaudeEngineToolMap.kindOf('mcp__fixture__echo')).toBe('mcp')
+    expect(PiEngineToolMap.normalize('mcp', { text: 'hi' })).toEqual(
+      ClaudeEngineToolMap.normalize('mcp', { text: 'hi' })
+    )
   })
 })

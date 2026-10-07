@@ -162,6 +162,12 @@ export type PiMapperOutput =
    * the consumer decides by whether a delivery of its own is pending.
    */
   | { kind: 'send_message_error'; message: string }
+  /**
+   * A warning pi's MCP extension (or the bridge's MCP block) raised with
+   * `ctx.ui.notify` — servers that failed or need a sign-in, a catalog server
+   * pi refused (ADR-096). RPC mode has no other channel for them.
+   */
+  | { kind: 'mcp_notice'; message: string }
   | { kind: 'ignore' }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +541,24 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       ]
     }
 
+    case 'extension_ui_request': {
+      // Fire-and-forget notifies only (dialogs need a response ClaudeUI never
+      // sends). Of those, only MCP's warnings: pi's MCP extension reports
+      // failed / needs-sign-in servers this way and nowhere else in RPC mode,
+      // and the bridge reports a catalog server pi refused the same way
+      // (ADR-096). Every MCP message starts "MCP " (extensions/mcp/index.ts).
+      const req = ev as Record<string, unknown>
+      if (
+        req.method === 'notify' &&
+        (req.notifyType === 'warning' || req.notifyType === 'error') &&
+        typeof req.message === 'string' &&
+        req.message.startsWith('MCP ')
+      ) {
+        return [{ kind: 'mcp_notice', message: req.message }]
+      }
+      return [{ kind: 'ignore' }]
+    }
+
     case 'agent_start':
       // A run began. PiSession knows of the runs it starts itself (run()), but
       // a woken delivery starts one inside pi (ADR-089 S3), and the session
@@ -545,7 +569,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
     // (start carries nothing new — the arguments are already in the
     // toolcall_end message_update above; end is fully covered by the
     // following toolResult message_end), queue_update, compaction_start,
-    // auto_retry_*, extension_ui_request (M2), and any unrecognised future
+    // auto_retry_*, and any unrecognised future
     // event type.
     default:
       return [{ kind: 'ignore' }]

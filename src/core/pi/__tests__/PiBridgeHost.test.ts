@@ -893,3 +893,54 @@ describe('writeBridgeExtension (A2 — content-verify against tampering/preplant
     expect(statSync(file).mtime.getTime()).toBe(oldTime.getTime())
   })
 })
+
+describe('PiBridgeHost — POST /mcp-servers (ADR-096)', () => {
+  let host: PiBridgeHost | null = null
+  afterEach(() => {
+    host?.dispose()
+    host = null
+  })
+
+  const SERVERS = {
+    fixture: { type: 'stdio', command: 'node', env: { TOKEN: 'secret' }, exposure: 'direct' }
+  }
+
+  it('serves the spawn-time catalog to an authenticated caller, on every load (repeatable)', async () => {
+    host = new PiBridgeHost(async () => ({ behavior: 'allow' }), undefined, {
+      mcpServers: SERVERS
+    })
+    const { url, token } = await host.start()
+    for (let load = 0; load < 2; load++) {
+      const res = await fetch(`${url}/mcp-servers`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: '{}'
+      })
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ servers: SERVERS })
+    }
+  })
+
+  it('refuses a caller without the token (401) and anything but POST (404)', async () => {
+    host = new PiBridgeHost(async () => ({ behavior: 'allow' }), undefined, {
+      mcpServers: SERVERS
+    })
+    const { url } = await host.start()
+    const unauth = await fetch(`${url}/mcp-servers`, { method: 'POST', body: '{}' })
+    expect(unauth.status).toBe(401)
+    expect(await unauth.text()).not.toContain('secret')
+    const get = await fetch(`${url}/mcp-servers`)
+    expect(get.status).toBe(404)
+  })
+
+  it('answers an empty set when no catalog was given', async () => {
+    host = new PiBridgeHost(async () => ({ behavior: 'allow' }))
+    const { url, token } = await host.start()
+    const res = await fetch(`${url}/mcp-servers`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      body: '{}'
+    })
+    expect(await res.json()).toEqual({ servers: {} })
+  })
+})

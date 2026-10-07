@@ -17,7 +17,7 @@
  */
 
 import type { McpServerConfig } from '../../shared/types'
-import { mergeClaudeMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
+import { readEnabledClaudeMcpServers } from '../services/claude-mcp'
 import { logger } from '../services/logger'
 
 // ---------------------------------------------------------------------------
@@ -101,13 +101,12 @@ export function translateClaudeMcpServer(cfg: McpServerConfig): OpencodeMcpEntry
  */
 export function collectClaudeMcpForOpencode(cwd: string): Record<string, OpencodeMcpEntry> {
   try {
-    // Merge: user first (lowest priority), then project, then local (highest priority).
-    const merged: Record<string, McpServerConfig> = mergeClaudeMcpServers(cwd)
-
-    const disabled = new Set(readDisabledMcpServers(cwd))
+    // Merge: user first (lowest priority), then project, then local (highest
+    // priority), minus the cwd's disabled list — the read every bridge shares.
+    const enabled: Record<string, McpServerConfig> = readEnabledClaudeMcpServers(cwd)
 
     const result: Record<string, OpencodeMcpEntry> = {}
-    for (const [name, cfg] of Object.entries(merged)) {
+    for (const [name, cfg] of Object.entries(enabled)) {
       if (name === 'claudeui') {
         logger.warn(
           'ClaudeMcpBridge',
@@ -115,7 +114,6 @@ export function collectClaudeMcpForOpencode(cwd: string): Record<string, Opencod
         )
         continue
       }
-      if (disabled.has(name)) continue
 
       const entry = translateClaudeMcpServer(cfg)
       if (entry !== null) {
