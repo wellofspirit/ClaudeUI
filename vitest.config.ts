@@ -1,6 +1,10 @@
 import { defineConfig } from 'vitest/config'
 import { homedir } from 'os'
 import { resolve } from 'path'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+import { playwright } from '@vitest/browser-playwright'
+import { MOBILE_PROFILES } from './scripts/lib/mobile-profiles.mjs'
 
 /**
  * ClaudeUI's real managed harness store (ADR-082 §8: opencode, pi and Codex
@@ -51,8 +55,10 @@ const unitTest = {
     '**/dist/**',
     '**/.{idea,git,cache,output,temp}/**',
     // `*.test.*` above also matches `*.component.test.*`; those belong
-    // to the `component` project alone, or every one runs twice.
+    // to the `component` project alone, or every one runs twice. Same for
+    // `*.browser.test.*` and the `browser` project (real Chromium, not jsdom).
     '**/*.component.test.{ts,tsx}',
+    '**/*.browser.test.{ts,tsx}',
     'src/main/services/__tests__/git-service*.test.ts',
     'src/main/services/__tests__/worktree.test.ts'
   ],
@@ -115,6 +121,39 @@ export default defineConfig({
           setupFiles: ['./src/test/setup/jsdom.setup.ts'],
           include: ['src/**/__tests__/**/*.component.test.{ts,tsx}'],
           testTimeout: 10000
+        }
+      },
+      {
+        // Layout tests (docs/testing-strategy.md, Layer 2b): real Chromium at the
+        // owner's phone size, real Tailwind CSS. jsdom evaluates no layout, so
+        // anything that is a claim about geometry lives here. NOT the jsdom/sqlite
+        // setup: this project has its own.
+        resolve: { alias: sharedAlias },
+        plugins: [react(), tailwindcss()],
+        test: {
+          name: 'browser',
+          globals: true,
+          setupFiles: ['./src/test/setup/browser.setup.ts'],
+          include: ['src/**/__tests__/**/*.browser.test.{ts,tsx}'],
+          testTimeout: 10000,
+          // Failure screenshots and attachments would otherwise land in the
+          // source tree (`__screenshots__`, `.vitest-attachments`).
+          attachmentsDir: '.cache/vitest-attachments',
+          browser: {
+            enabled: true,
+            headless: true,
+            screenshotFailures: false,
+            provider: playwright(),
+            instances: [
+              {
+                browser: 'chromium',
+                viewport: {
+                  width: MOBILE_PROFILES['s25-ultra-edge'].width,
+                  height: MOBILE_PROFILES['s25-ultra-edge'].height
+                }
+              }
+            ]
+          }
         }
       },
       {

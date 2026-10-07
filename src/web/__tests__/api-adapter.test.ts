@@ -408,6 +408,8 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     channel: 'models:set-provider-allowlist',
     args: ['pi', 'openrouter', ['z-ai/glm-5.3']]
   },
+  // ADR-094: the agent types an engine can spawn (read-only).
+  { method: 'listAgentTypes', channel: 'config:list-agent-types', args: ['claude', '/repo/app'] },
   // opencode agent CRUD — five `config` verbs plus one `chat` verb.
   { method: 'listOpencodeAgents', channel: 'opencode-agents:list', args: ['/repo/app'] },
   {

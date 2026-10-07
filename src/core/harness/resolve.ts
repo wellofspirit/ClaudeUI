@@ -307,6 +307,13 @@ export function codexHostFor(exePath: string): string | null {
 interface CacheEntry {
   /** The env override's raw value at resolution time. */
   env: string | undefined
+  /**
+   * `getAppPath()` at resolution time: the bundled Claude Code lives under it.
+   * A resolution made before the host wires its paths (a module-level caller
+   * runs before `src/main/index.ts` reaches `setHostPaths`) looked under
+   * `process.cwd()` instead, and must not outlive the wiring.
+   */
+  appPath: string
   resolved: ResolvedHarness
   /** Codex only: the `codex-code-mode-host` the resolved `codex` will run (`codexHostFor`). */
   codexHost: string | null
@@ -512,12 +519,13 @@ function resolveUncached(id: HarnessId, rawEnv: string | undefined): ResolvedHar
 
 function entry(id: HarnessId): CacheEntry {
   const env = process.env[harnessEnvVar(id)] || undefined
+  const appPath = getAppPath()
   const hit = cache.get(id)
-  if (hit && hit.env === env) return hit
+  if (hit && hit.env === env && hit.appPath === appPath) return hit
   const raw = resolveUncached(id, env)
   const resolved = Object.freeze({ ...raw, launch: raw.launch && freezeLaunch(raw.launch) })
   const codexHost = id === 'codex' && resolved.path !== null ? codexHostFor(resolved.path) : null
-  const next: CacheEntry = { env, resolved, codexHost }
+  const next: CacheEntry = { env, appPath, resolved, codexHost }
   cache.set(id, next)
   return next
 }

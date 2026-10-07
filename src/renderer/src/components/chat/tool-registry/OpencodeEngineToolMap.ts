@@ -16,7 +16,7 @@
  */
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
-import { hostedMcpKind } from '../../../../../shared/tool-kinds'
+import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kinds'
 import type { AskUserQuestion, ContentBlock } from '../../../../../shared/types'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -143,14 +143,8 @@ function opencodeNormalize(
       // Cross-engine dispatch (ADR-033 M3) — see the identical discriminator
       // note in ClaudeEngineToolMap.ts. `engine` is present only on the
       // dispatch tool's input, never on opencode's native task tool.
-      if (typeof inp.engine === 'string') {
-        return {
-          kind: 'task',
-          description: `Dispatch: ${inp.engine}`,
-          prompt: inp.prompt != null ? String(inp.prompt) : '',
-          subagent: inp.model != null ? `${inp.engine} · ${String(inp.model)}` : String(inp.engine)
-        }
-      }
+      if (typeof inp.engine === 'string')
+        return dispatchTaskView({ engine: inp.engine, prompt: inp.prompt, model: inp.model })
       return {
         kind: 'task',
         description: inp.description != null ? String(inp.description) : '',

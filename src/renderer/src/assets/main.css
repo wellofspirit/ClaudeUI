@@ -56,6 +56,19 @@ pre .token.table {
   --color-mode-auto: #d97706;
   --color-mode-auto-dim: #92400e;
 
+  /* Agent type tiles (ADR-094): the one palette every engine shares. The letter
+     is the colour, on a tint of it. Keep these hues in step with PALETTE_HUE in
+     shared/agent-type-colors.ts, which maps an engine's own colour to the
+     nearest one. Light is darker so the letter holds 4.5:1 on its tint. */
+  --color-agent-sky: #4fc3e8;
+  --color-agent-violet: #b28bf0;
+  --color-agent-green: #7bc47f;
+  --color-agent-orange: #f0965a;
+  --color-agent-rose: #f2708a;
+  --color-agent-amber: #e3c45a;
+  --color-agent-teal: #3fcfb4;
+  --color-agent-pink: #ec82c8;
+
   --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
 }
 
@@ -82,6 +95,15 @@ pre .token.table {
   --color-mode-plan-dim: #4bbcac;
   --color-mode-auto: #b45309;
   --color-mode-auto-dim: #d97706;
+
+  --color-agent-sky: #07567b;
+  --color-agent-violet: #5a2fa8;
+  --color-agent-green: #125c2c;
+  --color-agent-orange: #843905;
+  --color-agent-rose: #961e3a;
+  --color-agent-amber: #634500;
+  --color-agent-teal: #065b50;
+  --color-agent-pink: #8c2468;
 }
 
 /* ── Monokai theme ── */
@@ -182,6 +204,139 @@ html,
   }
   50% {
     opacity: 0.3;
+  }
+}
+
+/* Sidebar session status dot (SessionItem → StatusDot). Colour per `data-state`;
+   geometry comes from Tailwind classes so `group-hover:hidden` still wins (these
+   rules are unlayered and would beat a utility's `display`). */
+.status-dot {
+  background-color: var(--dot-color);
+}
+.status-dot[data-state='running'],
+.status-dot[data-state='idle'] {
+  --dot-color: #4ade80;
+}
+.status-dot[data-state='subagents'] {
+  --dot-color: #a78bfa;
+}
+[data-theme='light'] .status-dot[data-state='subagents'] {
+  --dot-color: #7c3aed;
+}
+.status-dot[data-state='attention'] {
+  --dot-color: var(--color-warning);
+}
+.status-dot[data-state='watching'] {
+  --dot-color: #60a5fa;
+}
+.status-dot[data-state='inactive'] {
+  --dot-color: color-mix(in srgb, var(--color-text-muted) 30%, transparent);
+}
+
+/* The busy ripple. Only transform and opacity animate, so it stays on the
+   compositor (no main-thread paint per frame) however many rows are busy: the
+   dot dips like a drop landing, a fixed blurred glow breathes, and a hairline
+   ring drawn at its FINAL size scales up from 0.3x. Never name a class `ring`
+   here — that is a Tailwind utility. */
+@keyframes status-dot-dip {
+  0% {
+    transform: scale(1);
+  }
+  6% {
+    transform: scale(0.55);
+  }
+  14% {
+    transform: scale(1.15);
+  }
+  22%,
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes status-dot-glow {
+  0% {
+    opacity: 0.45;
+  }
+  6% {
+    opacity: 0.25;
+  }
+  14% {
+    opacity: 1;
+  }
+  40% {
+    opacity: 0.6;
+  }
+  100% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes status-dot-ring {
+  0%,
+  8% {
+    transform: scale(0.3);
+    opacity: 0;
+  }
+  10% {
+    transform: scale(0.3);
+    opacity: 0.8;
+  }
+  65% {
+    transform: scale(1);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
+
+.status-dot--ripple {
+  animation: status-dot-dip 3.2s ease-out infinite;
+}
+.status-dot--ripple::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  box-shadow: 0 0 8px 2px color-mix(in srgb, var(--dot-color) 75%, transparent);
+  animation: status-dot-glow 3.2s ease-out infinite;
+  will-change: opacity;
+}
+.status-dot--ripple::after {
+  content: '';
+  position: absolute;
+  left: -7px;
+  top: -7px;
+  width: 20px;
+  height: 20px;
+  border-radius: 9999px;
+  opacity: 0;
+  border: 0.75px solid var(--dot-color);
+  box-shadow: 0 0 2px var(--dot-color);
+  animation: status-dot-ring 3.2s cubic-bezier(0.15, 0.55, 0.35, 1) infinite;
+  will-change: transform, opacity;
+}
+/* AFTER the shorthands: `animation:` resets animation-delay. The per-mount
+   negative phase keeps a list of busy rows from rippling in unison. */
+.status-dot--ripple,
+.status-dot--ripple::before,
+.status-dot--ripple::after {
+  animation-delay: var(--dot-phase, 0s);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-dot--ripple,
+  .status-dot--ripple::before,
+  .status-dot--ripple::after {
+    animation: none;
+  }
+  .status-dot--ripple::before {
+    opacity: 0.45;
+  }
+  .status-dot--ripple::after {
+    display: none;
   }
 }
 

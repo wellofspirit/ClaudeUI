@@ -186,7 +186,10 @@ export function AgentRosterList({
   }
 
   return (
-    <div data-testid="AgentRoster">
+    // A named container: the rows go two-line below 480px of ROSTER width (the
+    // 420px desktop overlay included: one line cannot hold a readable Claude row
+    // in it) — ADR-073 §9.
+    <div data-testid="AgentRoster" className="@container/roster">
       {/* Sticky, so the counts and the filter survive scrolling a long list. */}
       <div className="sticky top-0 z-10 bg-bg-secondary flex items-center gap-2 px-2.5 py-1.5 border-b border-border">
         <span className="text-[11px] text-text-secondary flex-1 min-w-0 truncate">

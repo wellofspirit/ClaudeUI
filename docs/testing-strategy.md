@@ -30,7 +30,7 @@ Tests are organized into four layers that target different concerns:
 | **Component**   | Business logic (events → state)          | Electron IPC transport, SDK           | Yes        |
 | **E2E**         | Full pipeline (action → state → outcome) | Electron IPC transport, SDK           | Yes        |
 | **Integration** | SDK event contracts                      | Nothing (real SDK)                    | No (gated) |
-| **Layout**      | Geometry (flex, container queries, z)    | Nothing (real CSS, real Chromium)     | No (gated) |
+| **Layout**      | Geometry (flex, container queries, z)    | Nothing (real CSS, real Chromium)     | Yes        |
 
 ## Layer 1: Unit Tests
 
@@ -149,6 +149,65 @@ it('rekeys session when status has different sessionId', () => {
 **File naming:** `*.component.test.ts`
 
 **File location:** `src/**/__tests__/`
+
+## Layer 2b: Browser layout tests
+
+**Purpose:** Verify a claim about geometry. jsdom evaluates no layout: every `getBoundingClientRect()` is zeros, container queries never fire, and `zoom` does nothing. A bug that is "the Stop button is clipped on my phone" is invisible to Layers 1-3 by construction, and that is exactly the bug class this layer exists for.
+
+**What it is:** the `browser` vitest project. Real Chromium (`@vitest/browser-playwright`, headless), real Tailwind (the same `react()` + `tailwindcss()` plugins as the renderer build), `src/renderer/src/assets/main.css` loaded, at the owner's phone size. It has its own setup file (`src/test/setup/browser.setup.ts`: the stylesheet and a `window.api` Proxy whose members resolve `{ success: true }`) and does NOT load the jsdom setup: no throwaway home, no SQLite driver. Failure screenshots and attachments are redirected out of the source tree (`.cache/`).
+
+**When to write one:** any invariant a layout can break that jsdom cannot see: something fits, wraps, truncates, overlaps, stays inside the screen, or switches layout at a container width (`@max-[400px]/roster:`). Pin the invariant, not the pixels. Component and E2E tests still own logic; do not move them here.
+
+**The reference profile:** `scripts/lib/mobile-profiles.mjs` is the one place the device numbers live (`s25-ultra-edge`: 412 x 728 CSS px, Edge on Android, `uiFontScale` 1, 1.1 and 1.5). The vitest project and `scripts/app-shot.mjs --profile` both import it, so the tests and the real-app check cannot disagree about what "the phone" is. Every test loops over `fontScales`.
+
+**The zoom wrapper:** SessionView renders the app under CSS `zoom: uiFontScale` with `width: calc(100vw / scale)`, and inside a zoomed subtree `vw`/`vh` lengths are multiplied by the zoom. A test that mounted a component bare would never meet the bug. `ZoomFrame` and `LayoutComposer` (`src/test/helpers/mobile-layout.ts`) reproduce SessionView's root and the composer's margins; mount through them, and measure with `getBoundingClientRect()` (page px under Chromium's standardised zoom), which is what the screen shows.
+
+**Use the zoom and the container chain of the surface under test.** There are two zooms. The composer, the roster overlay and the dialogs are under the app zoom (`uiFontScale`). The chat's message list is zoomed again by ChatPanel (`chatFontScale / uiFontScale`), so a Task card is under `chatFontScale` alone, and is much narrower than the window: scroller `mr-2`, column `px-3`, and the bordered `p-2` group around two or more tool calls (about 404/chatScale - 42 px on the phone). `LayoutChatList` models that chain with the file:line of each class; a card test drives `chatScale` through it, and a test that put the card in the app-zoom wrapper measured a card 26px too wide and predicted a footer on one line that wrapped in the app.
+
+**Seeding:** components read the Zustand store directly. Set it with `useSessionStore.setState({ activeSessionId, sessions: { [id]: { ...EMPTY_SESSION_STATE, ... } }, availableModels })`; there is no IPC bridge here. If a component needs more than the store, that part belongs in Layer 2.
+
+**How to write:**
+
+```tsx
+// File: src/**/__tests__/MyThing.browser.test.tsx
+import { render } from '@testing-library/react'
+import {
+  FONT_SCALES,
+  ZoomFrame,
+  LayoutComposer,
+  rectOf,
+  hasNoHorizontalOverflow
+} from '@test/helpers/mobile-layout'
+
+for (const scale of FONT_SCALES) {
+  it(`fits the phone at uiFontScale ${scale}`, async () => {
+    seedTheStore()
+    const view = render(
+      <ZoomFrame scale={scale}>
+        <LayoutComposer>
+          <MyThing />
+        </LayoutComposer>
+      </ZoomFrame>
+    )
+    expect(rectOf(view.getByTestId('MyThing')).right).toBeLessThanOrEqual(window.innerWidth)
+  })
+}
+```
+
+Prove a guard: revert the production fix and watch the test fail before you trust it.
+
+**Assert readability, not just containment.** "Nothing overflows" is a weak claim: a name squeezed to one character and a model chip squeezed to "D." contain perfectly. The first round of these tests asserted only containment, and those defects passed. For every element a layout can shrink, also assert a floor on what is left:
+
+- a name or a model is at least its minimum width, or all of its text if that is shorter (`clientWidth >= min(scrollWidth, floor)`);
+- a badge or chip that must stay whole is not truncated (`scrollWidth <= clientWidth`);
+- a header is ONE row (`rowCount` of its visible children, by vertical centre) and keeps its description at its floor;
+- what a breakpoint sheds is shed where it should be (assert `innerText`, which skips `display: none`, and that `textContent` still has the words for assistive tech).
+
+Check at every scale in the profile plus 1.25, and revert the fix to prove the assertion fails.
+
+**File naming:** `*.browser.test.tsx`, under `src/**/__tests__/`. The `unit` project excludes them.
+
+**Speed:** about 7 s for the project, most of it starting Chromium. It runs in `bun run test` and `test:ci`.
 
 ## Layer 3: E2E Tests
 
@@ -308,9 +367,10 @@ Orchestrator for Layer 2/3 tests. Creates bridge, registers stub IPC handlers fo
 bun run test           # All layers
 bun run test:unit      # Layer 1 — unit tests only
 bun run test:component # Layer 2 — component tests only
+bun run test:browser   # Layer 2b — browser layout tests only (real Chromium, phone viewport)
 bun run test:e2e       # Layer 3 — e2e tests only
 bun run test:integration # Layer 4 — integration tests (needs CLAUDE_INTEGRATION_TESTS=1)
-bun run test:ci        # Layers 1+2+3 — what runs in CI pipeline
+bun run test:ci        # Layers 1+2+2b+3 and the git project — what runs in CI pipeline
 bun run test:watch     # Unit + component tests in watch mode
 ```
 

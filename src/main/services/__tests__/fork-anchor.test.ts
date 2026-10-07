@@ -44,6 +44,48 @@ const toolResultLine = (uuid: string, toolUseIds: string[]): Record<string, unkn
   }
 })
 
+// The lines cli.js writes around a background agent's completion (shapes from a
+// real 2.1.290 transcript, trimmed).
+const AGENT = 'a590150601107b985'
+const notificationXml = (agentId: string): string =>
+  `<task-notification>\n<task-id>${agentId}</task-id>\n<status>completed</status>\n` +
+  `<summary>Agent "sleep" finished</summary>\n</task-notification>`
+
+/** The agent's handback note: an isMeta user line, origin `peer`. */
+const handbackLine = (uuid: string): Record<string, unknown> => ({
+  type: 'user',
+  uuid,
+  isMeta: true,
+  origin: { kind: 'peer', from: AGENT, handback: true },
+  message: { role: 'user', content: 'Another Claude session sent a message: <agent-message …>' }
+})
+
+/** Queue bookkeeping: no uuid. */
+const queueOp = (operation: string, content?: string): Record<string, unknown> => ({
+  type: 'queue-operation',
+  operation,
+  ...(content ? { content } : {})
+})
+
+/** A delivered completion, as the turn-starting user line. */
+const notificationLine = (uuid: string, agentId = AGENT): Record<string, unknown> => ({
+  type: 'user',
+  uuid,
+  origin: { kind: 'task-notification', producer: 'session-task' },
+  message: { role: 'user', content: notificationXml(agentId) }
+})
+
+/** A delivered completion absorbed mid-turn, as a queued_command attachment. */
+const queuedNotification = (uuid: string, agentId: string): Record<string, unknown> => ({
+  type: 'attachment',
+  uuid,
+  attachment: {
+    type: 'queued_command',
+    commandMode: 'task-notification',
+    prompt: notificationXml(agentId)
+  }
+})
+
 describe('findForkAnchorUuid', () => {
   it('returns the assistant line uuid for a text-only turn', () => {
     const lines = [
@@ -105,6 +147,100 @@ describe('findForkAnchorUuid', () => {
   it('prefers the last line sharing a message id (defensive against partials)', () => {
     const lines = [assistantText('a1', 'msg_1', 'partial'), assistantText('a1b', 'msg_1', 'final')]
     expect(findForkAnchorUuid(lines, 'msg_1')).toBe('a1b')
+  })
+  describe('completions delivered right after the turn stay in the branch', () => {
+    // Cut before the notification, the fork's first send makes cli.js reap the
+    // agent as "didn't finish before the previous session ended".
+    it('the real shape: forking the reply anchors on the notification after it (GUARD)', () => {
+      const lines = [
+        userLine('u1', 'start an agent'),
+        handbackLine('hb'),
+        queueOp('enqueue', notificationXml(AGENT)),
+        assistantText('a1', 'msg_1', 'The background agent ran `sleep 45` and replied "done".'),
+        queueOp('dequeue'),
+        notificationLine('n1')
+      ]
+      expect(findForkAnchorUuid(lines, 'msg_1')).toBe('n1')
+    })
+
+    it('two deliveries in a row, a user line then a queued_command attachment: the last wins', () => {
+      const lines = [
+        userLine('u1', 'start two agents'),
+        assistantText('a1', 'msg_1', 'both launched'),
+        queueOp('dequeue'),
+        notificationLine('n1', 'agentA'),
+        { type: 'attachment', uuid: 'env', attachment: { type: 'environment' } },
+        queuedNotification('n2', 'agentB'),
+        { type: 'system', uuid: 's1', subtype: 'informational' }
+      ]
+      expect(findForkAnchorUuid(lines, 'msg_1')).toBe('n2')
+    })
+
+    it('a completion after a real prompt or another assistant line does not move the anchor', () => {
+      const afterPrompt = [
+        assistantText('a1', 'msg_1', 'reply'),
+        userLine('u2', 'next question'),
+        notificationLine('n1')
+      ]
+      expect(findForkAnchorUuid(afterPrompt, 'msg_1')).toBe('a1')
+
+      const afterAssistant = [
+        assistantText('a1', 'msg_1', 'reply'),
+        assistantText('a2', 'msg_2', 'more'),
+        notificationLine('n1')
+      ]
+      expect(findForkAnchorUuid(afterAssistant, 'msg_1')).toBe('a1')
+
+      const afterSteer = [
+        assistantText('a1', 'msg_1', 'reply'),
+        {
+          type: 'attachment',
+          uuid: 'steer',
+          attachment: { type: 'queued_command', commandMode: 'prompt', prompt: 'also do X' }
+        },
+        queuedNotification('n1', AGENT)
+      ]
+      expect(findForkAnchorUuid(afterSteer, 'msg_1')).toBe('a1')
+    })
+
+    it('a plain user line with no notification is not a delivery', () => {
+      // `<task-notification>` text typed by a human (origin `human`) is a prompt.
+      const lines = [
+        assistantText('a1', 'msg_1', 'reply'),
+        {
+          type: 'user',
+          uuid: 'typed',
+          origin: { kind: 'human' },
+          message: { role: 'user', content: notificationXml(AGENT) }
+        }
+      ]
+      expect(findForkAnchorUuid(lines, 'msg_1')).toBe('a1')
+    })
+
+    it('a tool-using turn balances first, then a following notification moves it further', () => {
+      const lines = [
+        userLine('u1', 'run it'),
+        assistantTools('a1', 'msg_1', ['t1']),
+        toolResultLine('tr1', ['t1']),
+        queueOp('dequeue'),
+        queuedNotification('n1', AGENT),
+        assistantText('a2', 'msg_2', 'done'),
+        notificationLine('n2', 'later')
+      ]
+      expect(findForkAnchorUuid(lines, 'msg_1')).toBe('n1')
+      // Forking the later reply picks up the delivery after it, not the earlier one.
+      expect(findForkAnchorUuid(lines, 'msg_2')).toBe('n2')
+    })
+
+    it('the tool_result of the next turn stops the walk', () => {
+      const lines = [
+        assistantTools('a1', 'msg_1', ['t1']),
+        toolResultLine('tr1', ['t1']),
+        toolResultLine('tr-other', ['t9']),
+        notificationLine('n1')
+      ]
+      expect(findForkAnchorUuid(lines, 'msg_1')).toBe('tr1')
+    })
   })
 })
 

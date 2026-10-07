@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, createContext, useContext } from 'react'
 import { Sidebar } from './Sidebar'
+import { MobileSidebarDrawer } from './MobileSidebarDrawer'
 import { ChatPanel } from './chat/ChatPanel'
 import { TaskDetailPanel } from './TaskDetailPanel'
 import { MobileTaskView } from './MobileTaskView'
@@ -332,20 +333,20 @@ export function SessionView(): React.JSX.Element {
           height: visualHeight
             ? `${visualHeight / uiFontScale}px`
             : uiFontScale !== 1
-              ? `calc(100dvh / ${uiFontScale})`
+              ? // eslint-disable-next-line no-restricted-syntax -- this IS the zoomed root: it divides by uiFontScale
+                `calc(100dvh / ${uiFontScale})`
               : undefined,
+          // eslint-disable-next-line no-restricted-syntax -- the zoomed root: divides by uiFontScale
           ...(uiFontScale !== 1 ? { zoom: uiFontScale, width: `calc(100vw / ${uiFontScale})` } : {})
         }}
+        // eslint-disable-next-line no-restricted-syntax -- the zoomed root: h-screen only applies at scale 1; otherwise the inline height divides by uiFontScale
         className={`${visualHeight ? '' : 'h-screen'} flex ${import.meta.env.DEV ? 'border-2 border-orange-400 rounded-2xl overflow-hidden' : ''}`}
       >
         {/* Mobile sidebar drawer */}
         {isMobile && !sidebarCollapsed && (
-          <>
-            <div className="fixed inset-0 bg-black/40 z-40" onClick={toggleSidebar} />
-            <div className="fixed inset-y-0 left-0 z-50 w-[280px] animate-slide-in-left overflow-y-auto">
-              <Sidebar style={{ width: 280, height: '100%' }} onToggleCollapse={toggleSidebar} />
-            </div>
-          </>
+          <MobileSidebarDrawer onClose={toggleSidebar}>
+            <Sidebar style={{ width: '100%', height: '100%' }} onToggleCollapse={toggleSidebar} />
+          </MobileSidebarDrawer>
         )}
         {/* Desktop sidebar */}
         {!isMobile && !sidebarCollapsed && (
