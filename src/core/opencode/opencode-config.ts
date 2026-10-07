@@ -5,7 +5,7 @@
  * comment-safe (jsonc-parser leaf edits). Mirrors the role that
  * claude-settings.ts plays for Claude's ~/.claude/settings.json.
  *
- * opencode 2.x (ADR-093 S8). The file may be in either shape: 2.x reads a
+ * opencode 2.x (ADR-097 S8). The file may be in either shape: 2.x reads a
  * 1.x-shaped file by normalizing it in memory
  * (`vendor/opencode-v2-src/packages/core/src/config/normalize.ts`). So the
  * READER accepts both and projects what 2.x would use, and the WRITER emits

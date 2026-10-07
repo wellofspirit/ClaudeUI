@@ -8,7 +8,7 @@
  *   - DISABLE writes `disabled_providers`, the only veto that works against
  *     every derivation source. Nothing is destroyed; it is reversible.
  *   - REMOVE destroys what ClaudeUI actually owns — its `cred_claudeui_*` key
- *     in opencode's credential table (ADR-093 §5; a sign-in of the user's own
+ *     in opencode's credential table (ADR-097 §5; a sign-in of the user's own
  *     stays) and/or the provider declaration in the one global config file it
  *     writes.
  *     A disabled-only row removes its veto and picker curation without deleting

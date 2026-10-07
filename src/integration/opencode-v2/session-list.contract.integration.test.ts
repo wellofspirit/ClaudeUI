@@ -1,6 +1,6 @@
 /**
  * opencode 2.x contract: the sidebar's session list through opencode's API
- * (ADR-093 §6, S9) — the production `opencode-session-list` module on the
+ * (ADR-097 §6, S9) — the production `opencode-session-list` module on the
  * production server manager and the real pinned engine. Test-side
  * substitutions only: the isolated home/proxy env, the fixture model, and the
  * read lease's directory (`PERSISTED_SESSIONS_DIR`) inside the test home.

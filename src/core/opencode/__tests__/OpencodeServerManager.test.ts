@@ -352,7 +352,7 @@ describe('SSE block parsing', () => {
   })
 })
 
-// ── One server for every directory, keyed by injected config (ADR-093 §2) ──────
+// ── One server for every directory, keyed by injected config (ADR-097 §2) ──────
 
 describe('OpencodeServerManager (2.x) — keying', () => {
   it('different cwds with the same config share ONE server (1.x spawned one per cwd)', async () => {
@@ -1084,7 +1084,7 @@ describe('locatePluginDir', () => {
 // Typed seam check: a ServerConnection carries what S3's client needs.
 export type _S3Seam = Pick<ServerConnection, 'baseUrl' | 'authHeader' | 'directory' | 'startedAt'>
 
-describe('ADR-093 §3 (S6) — fail closed without the plugin permission guard', () => {
+describe('ADR-097 §3 (S6) — fail closed without the plugin permission guard', () => {
   /** The real guard probe against a server whose RPC answers `status` (never `active`). */
   const silentGuard =
     (status = 404): WaitGuardFn =>

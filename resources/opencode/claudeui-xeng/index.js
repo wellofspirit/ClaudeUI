@@ -1,4 +1,4 @@
-// ClaudeUI's opencode 2.x plugin (ADR-093 §4, ADR-033). Loaded by the EXTERNAL
+// ClaudeUI's opencode 2.x plugin (ADR-097 §4, ADR-033). Loaded by the EXTERNAL
 // opencode process as a DIRECTORY plugin: OPENCODE_CONFIG_CONTENT's `plugins`
 // lists this directory (2.x ignores a plugin path that is a file, with only a
 // warning). It is never part of a ClaudeUI bundle, so it must stay import-free:
@@ -17,7 +17,7 @@
 //    `claudeui-xeng.tools` RPC (POST /api/rpc/claudeui-xeng/tools, per
 //    location) lists the registered `claudeui_*` tools, so ClaudeUI can wait
 //    until a first turn would actually be offered them.
-// 3. Saved "always" allows do not answer ClaudeUI's asks (ADR-093 §3). opencode
+// 3. Saved "always" allows do not answer ClaudeUI's asks (ADR-097 §3). opencode
 //    appends the project's SAVED allows (`/api/permission/saved`, shared with
 //    the user's own opencode through the data dir) after the configured rules,
 //    so a saved row outranks any `ask` (core/src/permission.ts
@@ -120,7 +120,7 @@ async function configuredRules(ctx, event) {
  * the configured-rules verdict. A failure to read the rules answers `ask`
  * (fail toward the human), still never looser than opencode's own effect.
  *
- * A subagent child (ADR-093 §3, S5 review #1): a child is created with the
+ * A subagent child (ADR-097 §3, S5 review #1): a child is created with the
  * PARENT's whole session ruleset, which comes after its agent's rules, so a
  * parent allow outranks the agent's own deny until ClaudeUI PATCHes the
  * child — and for a deny the agent carves itself (`git *` deny, then

@@ -1,11 +1,11 @@
 # opencode 2.x wire protocol
 
-How ClaudeUI talks to opencode 2.x ([ADR-093](../adr/adr-093_opencode-v2-only.md)): the pin, the
+How ClaudeUI talks to opencode 2.x ([ADR-097](../adr/adr-097_opencode-v2-only.md)): the pin, the
 server lifecycle, the routes and events it uses, permissions, credentials, the inbox, the
 `claudeui-xeng` plugin, the config it injects, and the contract suite that gates every pin bump.
 Facts are for the pinned version and cite `vendor/opencode-v2-src/...` at that tag. The spike's
 evidence and live transcripts are in [`docs/opencode-v2-spike.md`](../opencode-v2-spike.md); the
-as-built decisions per slice are ADR-093's "As built" sections.
+as-built decisions per slice are ADR-097's "As built" sections.
 
 The 1.x adapter (`OpencodeV1Client`, `OpencodeV1Session`, `protocol/`, `event-mapper.ts`) is still
 in the tree until slice S10 deletes it; nothing in this document applies to it.
@@ -25,7 +25,7 @@ in the tree until slice S10 deletes it; nothing in this document applies to it.
   `vendor/opencode-v2-src`. (`vendor/opencode-src` is the 1.x checkout; S10 retires it.)
 - Floor = tested, ceiling `3.0.0`.
 
-## Acquisition (ADR-082 §4, ADR-093 §1)
+## Acquisition (ADR-082 §4, ADR-097 §1)
 
 - npm: `@opencode/cli` (bins `opencode` and `opencode2`, both `bin/opencode.exe`, a placeholder its
   postinstall replaces with a hard link to the platform build on every OS) and one package per host,
@@ -54,7 +54,7 @@ in the tree until slice S10 deletes it; nothing in this document applies to it.
 | Command       | `opencode serve --stdio --hostname 127.0.0.1 --port 0` (never `--service`)                                                                                                                                                                                                                                                                                                              |
 | Listen line   | The FIRST stdout line is JSON `{"url":"http://127.0.0.1:<port>"}`; only a loopback `http:` URL with a port is accepted                                                                                                                                                                                                                                                                  |
 | Auth          | HTTP Basic `opencode:<password>`; the password goes in `OPENCODE_PASSWORD` (the legacy `OPENCODE_SERVER_PASSWORD` is deleted from the child env). In `--stdio` mode the server deletes both from its own env, so its tools cannot read it                                                                                                                                               |
-| Env           | `OPENCODE_CONFIG_CONTENT` (the injection, §Config; it holds secrets — never logged), `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_SHARE=1`. No `HOME`/`XDG_*` override: the data dir is SHARED with the user's own opencode (owner decision, ADR-093 §6)                                                                                                                          |
+| Env           | `OPENCODE_CONFIG_CONTENT` (the injection, §Config; it holds secrets — never logged), `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_SHARE=1`. No `HOME`/`XDG_*` override: the data dir is SHARED with the user's own opencode (owner decision, ADR-097 §6)                                                                                                                          |
 | End           | Close stdin (the `--stdio` lease, as pi, ADR-092); a tree kill (`taskkill /T` on Windows) only if the process outlives 5 s. If ClaudeUI dies the pipe closes and the server ends anyway                                                                                                                                                                                                 |
 | Keying        | ONE server per distinct config injection (`configIdentity`, a digest of bridged MCP + plugin dir + agent permission overlay), not per cwd: the directory travels per request. In practice one long-lived server per app; a cwd with a project-scoped Claude MCP server gets its own. A config change starts a new server for new leases; the old one ends at its last release (drained) |
 | Leases        | `acquire(cwd)` (turn-running: waits for the hosted tools and requires the plugin guard), `acquire(cwd, {waitForHostedTools:false})` (reads), `lingerMs` (a read lease keeps the server idle 60 s after the last release), `acquireIfRunning` (a background read that must never spawn), `acquireDetached` (a server of the caller's own)                                                |
@@ -121,7 +121,7 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
   reasoning beside output); `session.usage.updated` is the session cumulative (it also counts title
   generation, which no step carries).
 
-## Turns, the inbox and the queue (ADR-093 §9)
+## Turns, the inbox and the queue (ADR-097 §9)
 
 - Every prompt ClaudeUI posts carries its own inbox id `msg_claudeui_<32 hex>` (2.x requires the
   `msg_` prefix). Re-posting an id the session already has returns the first admission unchanged
@@ -137,7 +137,7 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
   `stopOpencodeSessions`): a server shutdown keeps a running execution's claim, and opencode would
   resume it headless on its next start.
 
-## Permissions (ADR-093 §3; `permission-v2.ts`, `permission-keys.ts`)
+## Permissions (ADR-097 §3; `permission-v2.ts`, `permission-keys.ts`)
 
 - Rules are `{action, resource, effect}`, last match wins, no match = `ask`. Actions: `shell`
   (Claude `Bash`), `subagent` (`Task`), `edit` (also write/patch/apply_patch/multiedit), `read`,
@@ -188,7 +188,7 @@ spawns loads it.
 | `rpc claudeui-xeng.tools`     | Lists the registered `claudeui_*` tools (hosted-tools readiness)                                                                                                                                                                                                                                                                      |
 | `rpc claudeui-xeng.guard`     | `{permissionHook, mcpDirect}` — both hooks registered (the turn-running acquire requires it)                                                                                                                                                                                                                                          |
 
-## Hosted MCP and caller identity (ADR-093 §4; `mcp-http-host.ts`, `opencode-hosted-tools.ts`)
+## Hosted MCP and caller identity (ADR-097 §4; `mcp-http-host.ts`, `opencode-hosted-tools.ts`)
 
 - ClaudeUI serves its hosted tools (`render_mermaid`, `create_mockup`, `show_mockup`,
   `dispatch_agent`) as the `claudeui` MCP server per opencode server: Streamable HTTP on loopback,
@@ -204,7 +204,7 @@ spawns loads it.
 - Mockups resolve their directory per call from the calling session (ClaudeUI's own, else the
   server's session record).
 
-## Credentials (ADR-093 §5; `credential-store.ts`)
+## Credentials (ADR-097 §5; `credential-store.ts`)
 
 - Credentials live in opencode's DB (`/api/credential`), not `auth.json`. ClaudeUI owns rows
   `cred_claudeui_<slot>_v<n>` (keys: `{type:'key', key}`; ChatGPT:
@@ -227,12 +227,12 @@ metadata:{accountID}}`) plus the sign-ins started from ClaudeUI (labelled
   `agents.<name>.permissions` (the mode-less overlay: `plan` denies the `general` subagent).
   Nothing else (no `experimental.continue_loop_on_deny`, no `autoupdate`).
 - The user's own config stays theirs (ADR-028). ClaudeUI's editors write 2.x keys only and read
-  both shapes (2.x normalizes a 1.x file in memory); see ADR-093 §6 "As built (S8)" for the key
+  both shapes (2.x normalizes a 1.x file in memory); see ADR-097 §6 "As built (S8)" for the key
   mapping (`agents`, `system`, `permissions`, `request.body`, `capabilities.input`, `variants`,
   `providers`, `experimental.policies`, …). `src/shared/opencode-config-schema.json` is generated
   from the pinned `Config.InfoEncoded`.
 
-## Session list and history (ADR-093 §6, S9; `opencode-session-list.ts`)
+## Session list and history (ADR-097 §6, S9; `opencode-session-list.ts`)
 
 - The sidebar lists every root session with ONE paged `GET /api/session?parentID=null` (global);
   archived sessions are left out, the cwd is `location.directory`. A DB created by 2.x has only
@@ -305,7 +305,7 @@ The unit test `src/core/opencode/__tests__/opencode-protocol-v2.test.ts` runs ev
 emitter, checks the committed `openapi.ts` against provenance, and regenerates byte-for-byte when
 the upstream checkout is present.
 
-## Contract suite (the per-bump gate, ADR-093 §8.1)
+## Contract suite (the per-bump gate, ADR-097 §8.1)
 
 `src/integration/opencode-v2/` drives a real `opencode serve --stdio` against a localhost
 fixture model (scripted by markers in the last user message — `harness/fixture-provider.ts`). It is
@@ -351,4 +351,4 @@ two directories in one global listing, the directory filter, delete, history).
 5. `bun run ensure-opencode`, then the contract suite above (twice, and once with
    `--maxWorkers=4`). Read the files the S4–S8 notes name as wire facts (mapper, credential
    resolution, config normalization, plugin hooks) for the release's changes.
-6. Before a release: the Windows lifecycle/shell run (ADR-093 §8.2).
+6. Before a release: the Windows lifecycle/shell run (ADR-097 §8.2).

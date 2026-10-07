@@ -1,5 +1,5 @@
 /**
- * The opencode 2.x event feed (`GET /api/event`, ADR-093 §7) as an async
+ * The opencode 2.x event feed (`GET /api/event`, ADR-097 §7) as an async
  * stream: SSE framing, the curated event union, and reconnects the CONSUMER
  * is told about.
  *

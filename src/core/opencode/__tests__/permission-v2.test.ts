@@ -1,5 +1,5 @@
 /**
- * opencode 2.x permission compilation (ADR-093 §3, S6): the ADR-022/085
+ * opencode 2.x permission compilation (ADR-097 §3, S6): the ADR-022/085
  * compiler cases on the `{action, resource, effect}` shape and 2.x key table,
  * plus the session ruleset per mode, wire ordering and the wholly-denied
  * decision table. `v2ToolHidden` / `evaluateV2Call` are ports of 2.x's own

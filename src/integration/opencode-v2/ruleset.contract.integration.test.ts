@@ -1,6 +1,6 @@
 /**
  * opencode 2.x contract: ClaudeUI's COMPILED rulesets on the real engine
- * (ADR-093 §3, S6 — `permission-v2.ts`, `subagent-permissions.ts`).
+ * (ADR-097 §3, S6 — `permission-v2.ts`, `subagent-permissions.ts`).
  *
  * (a) an allowed shell command runs without an ask; (b) an `ask` resource
  * raises `permission.asked` with the 2.x action and resources; (c) a narrow
@@ -226,7 +226,7 @@ describeV2(
       const rules = parent()
       const id = await create(r, rules)
       // What S5 caches per session: the agents' own rulesets.
-      // A cold directory lists no agents until its plugins load (ADR-093 S3).
+      // A cold directory lists no agents until its plugins load (ADR-097 S3).
       await r.api.ok('integration.list')
       const agents = (await r.api.ok('agent.list')).data
       const general = agents.find((agent) => agent.id === 'general')

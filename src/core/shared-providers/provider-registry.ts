@@ -100,7 +100,7 @@ export interface ProviderRegistrySources {
   opencodeCatalog: readonly OpencodeProviderCatalogEntry[] | null
   /**
    * Which ids have an ACTIVE credential in opencode 2.x's credential table, and
-   * of what type (ClaudeUI's row or the user's; ADR-093 §5).
+   * of what type (ClaudeUI's row or the user's; ADR-097 §5).
    */
   opencodeCredentialKinds: Readonly<Record<string, 'api' | 'oauth'>>
   /** `opencodeConfig.modelAllowlist` — per-provider, key-presence gated. */

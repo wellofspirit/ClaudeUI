@@ -27,7 +27,7 @@ like the others, 2.0.0; the temporary 1.1.0 of the 1.0.2 bump is retired.
 **Amended by:** [ADR-092](adr-092_model-catalogs-per-engine-and-a-clean-boot.md) (2026-10-05) — a harness change re-fetches only that engine's models in the composer (per-engine reload counters), not every engine's.
 **Relates to:** [ADR-052](adr-052_remote-auth-passkeys-capabilities.md) (the capability that gates
 installs from a remote device), [ADR-035](adr-035_pi-engine-backend.md), [ADR-019](adr-019_opencode-engine-backend.md).
-**Amended by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — manifest coordinates and ceiling. As built: ADR-093 §1 (S1: `@opencode/cli-<plat>` 2.0.24, floor = tested, ceiling 3.0.0).
+**Amended by:** [ADR-097](adr-097_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — manifest coordinates and ceiling. As built: ADR-097 §1 (S1: `@opencode/cli-<plat>` 2.0.24, floor = tested, ceiling 3.0.0).
 
 ## Context
 
@@ -157,7 +157,7 @@ on a `--version` probe.
 Each harness declares its floor and ceiling in the release manifest (§5). The ceiling is exclusive
 and is the next major version, so a new major is never "untested but selectable": opencode 2.x
 (`@opencode/cli`) ships an executable named `opencode` whose configuration is incompatible with
-1.x. The ceilings are Claude Code 3.0.0, opencode 3.0.0 (2.0.0 until the ADR-093 arc moved it to
+1.x. The ceilings are Claude Code 3.0.0, opencode 3.0.0 (2.0.0 until the ADR-097 arc moved it to
 2.x), pi 2.0.0 and Codex 1.0.0. Codex is
 0.x, where a minor release may break in semver terms; its ceiling is set at 1.0.0 anyway, because
 what ClaudeUI depends on (Codex's app-server protocol) is what the tested version is checked
@@ -169,7 +169,7 @@ Every floor equals its tested version unless a lower one is measured and worth k
 2026-10-06; see the amendment above): a bump moves the floor with the pin. The Claude Code floor
 was 2.1.275 until then (owner, 2026-09-30), the build the protocol docs relied on
 (`--forward-subagent-text` from 2.1.211, subagent and skill fixes through 2.1.275). opencode was
-the one exception (floor 1.18.32 below tested 1.18.34) until ADR-093 moved it to 2.x with floor =
+the one exception (floor 1.18.32 below tested 1.18.34) until ADR-097 moved it to 2.x with floor =
 tested.
 
 ### 4. Downloads
@@ -195,7 +195,7 @@ tested.
 As built (arc 2, S3; `src/core/harness/install/`):
 
 - Hosts. opencode comes from `registry.npmjs.org` only: the metadata of
-  `@opencode/cli-<os>-<arch>@<version>` (1.x: `opencode-<os>-<arch>`; ADR-093 §1) names the
+  `@opencode/cli-<os>-<arch>@<version>` (1.x: `opencode-<os>-<arch>`; ADR-097 §1) names the
   tarball, which must itself be on
   `https://registry.npmjs.org/`, and only `package/bin/opencode[.exe]` is kept. pi and Codex come
   from `github.com/<owner>/<repo>/releases/download/...`, whose redirect may go only to

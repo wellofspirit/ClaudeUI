@@ -258,7 +258,7 @@ describe('request building', () => {
   })
 })
 
-describe('permission replies (ADR-093 §3)', () => {
+describe('permission replies (ADR-097 §3)', () => {
   it('refuses a reject without a non-empty message, before sending anything', async () => {
     const { api, fetchFn } = client(() => empty())
     // @ts-expect-error — the type makes the message mandatory on reject

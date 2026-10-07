@@ -1,6 +1,6 @@
 # ADR-047 — Recycle pooled opencode servers on user-initiated credential changes; the timer feed stays write-only
 
-**Status:** Accepted (2026-08-04) — shipped in `5926792`. **Superseded for opencode 2.x** by [ADR-093](adr-093_opencode-v2-only.md) §5: 2.x hot-reloads credentials (`credential.switched`), so nothing recycles on an auth change; `recycleAll()` has no caller and is removed with the 1.x code at S10.
+**Status:** Accepted (2026-08-04) — shipped in `5926792`. **Superseded for opencode 2.x** by [ADR-097](adr-097_opencode-v2-only.md) §5: 2.x hot-reloads credentials (`credential.switched`), so nothing recycles on an auth change; `recycleAll()` has no caller and is removed with the 1.x code at S10.
 **Relates to:** ADR-044 (provider disable vs remove — the auth mutations this covers),
 ADR-045 (engine disconnect contract — the recycle deliberately rides that exact
 fan-out → `markDisconnected` → lazy-reconnect path)

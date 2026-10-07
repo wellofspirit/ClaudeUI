@@ -2,7 +2,7 @@
  * @vitest-environment node
  *
  * `opencode serve --stdio` spawn / listen-line parse / stdin-EOF teardown
- * (ADR-093 §2), against a fake child — no binary.
+ * (ADR-097 §2), against a fake child — no binary.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { EventEmitter } from 'node:events'
@@ -95,7 +95,7 @@ describe('buildServerEnv', () => {
     expect(env.KEEP_ME).toBe('1')
   })
 
-  it('never overrides the data dir (ADR-093 §6: shared with the user)', () => {
+  it('never overrides the data dir (ADR-097 §6: shared with the user)', () => {
     const parent = { HOME: '/home/u', XDG_DATA_HOME: '/home/u/.xdg' }
     const env = buildServerEnv(parent, 'pw', '{}')
     expect(env.HOME).toBe('/home/u')

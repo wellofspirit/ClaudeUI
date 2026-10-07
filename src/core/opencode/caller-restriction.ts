@@ -1,6 +1,6 @@
 /**
  * A subagent child's own restrictions, carried into the dispatch it makes
- * (ADR-093 S9, owner decision 2026-10-07, option a).
+ * (ADR-097 S9, owner decision 2026-10-07, option a).
  *
  * When an opencode subagent child calls `dispatch_agent`, the dispatch belongs
  * to the chat it descends from (`resolveCallerRoot`), so the target would run
@@ -13,7 +13,7 @@
  * Codex's permission engine, opencode's `compileClaudeRulesV2`.
  *
  * Semantics: the agent's own rules evaluated ALONE are a floor (the
- * `claudeui-xeng` plugin's child-agent floor, ADR-093 §3): last match wins, no
+ * `claudeui-xeng` plugin's child-agent floor, ADR-097 §3): last match wins, no
  * match = ask. Only ever TIGHTENS: deny and ask rules only, never an allow, and
  * a deny with no exact Claude-form equivalent becomes a whole-category deny —
  * never dropped. An ask with no equivalent is kept when it maps to a category,
@@ -50,7 +50,7 @@ const ACTION_TOOLS: Readonly<Record<string, readonly string[]>> = {
   skill: ['Skill'],
   question: ['AskUserQuestion'],
   // Not mapped: Code Mode's `execute`. Every ClaudeUI session ruleset denies it
-  // (ADR-093 §3) and a child copies that, so the agent's own `execute` rule
+  // (ADR-097 §3) and a child copies that, so the agent's own `execute` rule
   // never decides what the child can do; the categories it would call are
   // mapped on their own.
   // No Claude-form "outside the workspace": every file and shell tool.

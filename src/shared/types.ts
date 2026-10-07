@@ -964,7 +964,7 @@ export interface EngineConfig {
   /** Claude session defaults (ADR-074 §8). Lives in engines/claude.json. */
   claudeConfig?: ClaudeEngineConfig
   /**
-   * opencode only (ADR-093 S8): the built-in tools whose top-level
+   * opencode only (ADR-097 S8): the built-in tools whose top-level
    * `{action,*,deny}` rule ClaudeUI's Tools switch wrote — the only rules the
    * switch ever removes again.
    */

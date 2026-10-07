@@ -1,5 +1,5 @@
 /**
- * Host side of the opencode 2.x contract suite (ADR-093 §8.1): spawn a real
+ * Host side of the opencode 2.x contract suite (ADR-097 §8.1): spawn a real
  * `opencode serve --stdio`, talk to it through the GENERATED operation table,
  * and read its SSE feed as the curated event union.
  *

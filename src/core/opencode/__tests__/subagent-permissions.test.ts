@@ -571,7 +571,7 @@ describe('subagentBackstopRules', () => {
   })
 })
 
-// ── opencode 2.x: the child's ruleset (ADR-093 §3, S6) ──────────────────────
+// ── opencode 2.x: the child's ruleset (ADR-097 §3, S6) ──────────────────────
 
 describe('2.x subagent children — childSessionRuleset / agentWhollyDenies', () => {
   const v = (action: string, effect: V2Rule['effect'], resource = '*'): V2Rule => ({

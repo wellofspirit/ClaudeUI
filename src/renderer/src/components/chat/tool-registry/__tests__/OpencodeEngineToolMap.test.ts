@@ -13,7 +13,7 @@ import type { ToolKind } from '../../../../../../shared/tool-kinds'
 
 describe('OpencodeEngineToolMap.kindOf', () => {
   const cases: [string, ToolKind][] = [
-    // opencode 2.x names (ADR-093 S4) — render as their 1.x counterparts did
+    // opencode 2.x names (ADR-097 S4) — render as their 1.x counterparts did
     ['shell', 'command'],
     ['patch', 'fileEdit'],
     ['subagent', 'task'],

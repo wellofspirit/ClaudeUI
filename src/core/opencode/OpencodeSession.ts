@@ -1,5 +1,5 @@
 /**
- * One ClaudeUI chat on opencode 2.x (ADR-093 S5). The 1.x session survives
+ * One ClaudeUI chat on opencode 2.x (ADR-097 S5). The 1.x session survives
  * verbatim as `OpencodeV1Session` until S10.
  *
  * Lifecycle. A lease from the S2 manager (a turn-running `acquire`, so the
@@ -13,7 +13,7 @@
  * `connected`, exactly as after any feed gap. Every mapper output is
  * dispatched to the engine-neutral channels in {@link dispatch}.
  *
- * Prompts and the queue (ADR-093 §9). Every prompt ClaudeUI posts carries a
+ * Prompts and the queue (ADR-097 §9). Every prompt ClaudeUI posts carries a
  * ClaudeUI-chosen inbox id (`msg_claudeui_…`). A prompt typed while a turn
  * runs is still ADR-053's queue item (the queue card, take-back on ArrowUp),
  * but the engine holds it: the item is posted to opencode's inbox at once
@@ -24,7 +24,7 @@
  * `setQueuedItemDelivery` switches an item between steer and queue (`PATCH`).
  * The host-held forward of 1.x is gone for opencode.
  *
- * Permissions (ADR-093 §3, S6). The session ruleset is
+ * Permissions (ADR-097 §3, S6). The session ruleset is
  * `buildSessionRuleset` (created with it, PATCHed when it changes; PATCH
  * replaces), the plan agent is `switchAgent`. Every `permission.asked` goes
  * through the host pre-check, the session-allow set, the auto-mode judge or
@@ -196,7 +196,7 @@ function newInboxId(): string {
 /** The reason a host-sent reject carries when nothing better is known (never empty). */
 const DEFAULT_REJECT_MESSAGE = 'The user denied this tool call'
 
-/** A form the user dismissed (every cancel carries a message, ADR-093 §3). */
+/** A form the user dismissed (every cancel carries a message, ADR-097 §3). */
 const FORM_DISMISSED_MESSAGE = 'The user dismissed the question without answering'
 
 // The child-PATCH test seam lives with the keeper; re-exported for the contract.
@@ -387,7 +387,7 @@ export class OpencodeSession extends BaseSession {
   private replayInFlight: Promise<void> | null = null
   private replayedSessionId: string | null = null
   private resumeSessionId: string | undefined
-  /** The last turn was held before sending for a ChatGPT sign-in (ADR-093 §5). */
+  /** The last turn was held before sending for a ChatGPT sign-in (ADR-097 §5). */
   private authHeld = false
 
   constructor(
@@ -523,7 +523,7 @@ export class OpencodeSession extends BaseSession {
     this.authHeld = false
     this.sendStatus()
 
-    // ADR-093 §5 rule 2: a ChatGPT turn goes only on a token with time left.
+    // ADR-097 §5 rule 2: a ChatGPT turn goes only on a token with time left.
     // Inside the establishing window, so a prompt queued meanwhile waits for
     // the answer (and is never posted ahead of this turn's prompt).
     const gate: { notice: string | null } = { notice: null }
@@ -1221,7 +1221,7 @@ export class OpencodeSession extends BaseSession {
     void this.flushQueuedItems()
   }
 
-  // ── Queue (ADR-093 §9 over ADR-053's queue of record) ──────────────────────
+  // ── Queue (ADR-097 §9 over ADR-053's queue of record) ──────────────────────
 
   /** A prompt typed while busy: posted to the inbox at once (see the file header). */
   protected override onPromptQueued(item: QueuedItem): void {
@@ -1577,7 +1577,7 @@ export class OpencodeSession extends BaseSession {
     if (!allow && toolUseId) this.recordToolOutcome(toolUseId, 'rejected-by-user')
     // ADR-085 S2: never `always` (opencode's saved table is shared with the
     // user's own opencode); a session allow is remembered host-side. A reject
-    // always carries the model-visible reason (ADR-093 §3).
+    // always carries the model-visible reason (ADR-097 §3).
     this.replyPermission(
       requestId,
       allow

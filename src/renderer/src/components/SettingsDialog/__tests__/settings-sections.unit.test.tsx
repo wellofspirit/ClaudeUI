@@ -41,7 +41,7 @@ function renderWithMocks(item: SettingItem): React.JSX.Element {
 }
 
 describe('opencode raw-config key partition', () => {
-  // The generated opencode 2.x schema (ADR-093 S8): rooted at Config.InfoEncoded.
+  // The generated opencode 2.x schema (ADR-097 S8): rooted at Config.InfoEncoded.
   const configProps = Object.keys(
     opencodeConfigSchema.$defs[
       opencodeConfigSchema.$ref.replace('#/$defs/', '') as 'Config.InfoEncoded'

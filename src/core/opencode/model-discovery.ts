@@ -1,5 +1,5 @@
 /**
- * opencode model and provider discovery on 2.x (ADR-093 §6, S7).
+ * opencode model and provider discovery on 2.x (ADR-097 §6, S7).
  *
  * One probe reads three catalogs of ONE server: `GET /api/integration` (every
  * integration opencode knows, with its auth methods and connections — the
@@ -290,7 +290,7 @@ function provenance(
 
 /**
  * Who owns what, for deciding which row actions are legitimate. The
- * credential half is ClaudeUI's own rows (`cred_claudeui_*` keys, ADR-093 §5):
+ * credential half is ClaudeUI's own rows (`cred_claudeui_*` keys, ADR-097 §5):
  * only those can Remove delete.
  */
 interface ProviderOwnership {

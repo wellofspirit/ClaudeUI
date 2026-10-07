@@ -1,5 +1,5 @@
 /**
- * The opencode 2.x permission key table (ADR-093 §3): which 2.x permission
+ * The opencode 2.x permission key table (ADR-097 §3): which 2.x permission
  * `action` a ClaudeUI (Claude-form) rule targets, and how 2.x spells the
  * `resource` it asks with for that action. Read at the pinned tag
  * (`vendor/opencode-v2-src` @ v2.0.24, `packages/core/src/tool/plugin/*.ts`).

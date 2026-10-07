@@ -322,7 +322,7 @@ describe('OpencodeAgentsSection', () => {
     const input = capturedSaveInputs[0]
     expect(input.permission).toBeDefined()
     // All categories default to 'allow' when the grid hasn't been modified
-    // opencode 2.x actions (bash → shell, task → subagent; ADR-093 §3).
+    // opencode 2.x actions (bash → shell, task → subagent; ADR-097 §3).
     expect(Object.keys(input.permission ?? {})).toEqual([
       'shell',
       'edit',

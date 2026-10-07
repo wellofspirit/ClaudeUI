@@ -2,7 +2,7 @@
  * @vitest-environment node
  *
  * Tests for agent-generate.ts: AI-assisted agent authoring on opencode 2.x
- * (ADR-093 S5) — one `generate` on a throwaway session created with every tool
+ * (ADR-097 S5) — one `generate` on a throwaway session created with every tool
  * hidden. Mocks the 2.x client and the server manager (no network, no spawn).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'

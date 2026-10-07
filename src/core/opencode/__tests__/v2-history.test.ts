@@ -1,5 +1,5 @@
 /**
- * The opencode 2.x cold-history converter (ADR-093 S4) and the 2.x status-line
+ * The opencode 2.x cold-history converter (ADR-097 S4) and the 2.x status-line
  * seed: stored `Session.Message` rows → the transcript and accounting a
  * reopened chat shows. Parity with the live mapper is `v2-parity.test.ts`.
  */

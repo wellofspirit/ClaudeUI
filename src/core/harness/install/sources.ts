@@ -148,7 +148,7 @@ export function opencodePlatformKey(platform: string, arch: string): string | nu
 }
 
 /**
- * opencode 2.x's platform packages (ADR-093 §1): `@opencode/cli-<os>-<arch>`.
+ * opencode 2.x's platform packages (ADR-097 §1): `@opencode/cli-<os>-<arch>`.
  * The manifest names them; anything else (1.x's `opencode-<os>-<arch>`
  * included) is refused before a request is made.
  */

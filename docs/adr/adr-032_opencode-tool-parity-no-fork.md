@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-07-08
 **Relates to:** [ADR-019](adr-019_opencode-engine-backend.md) (opencode backend), [ADR-022](adr-022_opencode-permission-mapping.md) (permission mapping), [ADR-023](adr-023_opencode-automode-classifier.md) (auto-mode judge — amends its observability guard), [ADR-024](adr-024_opencode-interaction-parity.md) (interaction parity), [ADR-030](adr-030_capability-honesty.md), [ADR-031](adr-031_opencode-config-leaf-merge-writes.md) (ephemeral-config constraint)
-**Superseded in part by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — its `continue_loop_on_deny` mechanism for non-fatal denials. As built: ADR-093 §3 (a reject WITH a message is non-fatal natively in 2.x; the key is no longer injected).
+**Superseded in part by:** [ADR-097](adr-097_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — its `continue_loop_on_deny` mechanism for non-fatal denials. As built: ADR-097 §3 (a reject WITH a message is non-fatal natively in 2.x; the key is no longer injected).
 
 ## Context
 

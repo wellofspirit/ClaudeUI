@@ -7,7 +7,7 @@
  *
  * Targets are headless dispatcher-owned mini-sessions built on engine client
  * primitives — NOT SessionManager/ISession. Two directions are supported:
- *  - Claude → opencode (M1, opencode 2.x since ADR-093 S9): a target is an
+ *  - Claude → opencode (M1, opencode 2.x since ADR-097 S9): a target is an
  *    opencode session on a turn-running lease of the S2 server manager, driven
  *    with the S3 `OpencodeClient` — an inbox prompt answered at once, the turn
  *    followed on the SERVER's shared event feed through the target's own S4
@@ -300,7 +300,7 @@ export interface DispatchContext {
    */
   chatgptAccountId?: string | null
   /**
-   * The calling SUBAGENT's own restriction (ADR-093 S9, option a): set when an
+   * The calling SUBAGENT's own restriction (ADR-097 S9, option a): set when an
    * opencode subagent child called `dispatch_agent` (the dispatch belongs to
    * its chat, whose mode and rules the target runs under). Claude-form deny/ask
    * rules added to the user's on every target engine — only ever tighter — and
@@ -337,7 +337,7 @@ export interface DispatchResult {
 }
 
 /**
- * Structural subset of the opencode 2.x `OpencodeClient` (ADR-093 S3) an
+ * Structural subset of the opencode 2.x `OpencodeClient` (ADR-097 S3) an
  * opencode dispatch target uses — injectable so tests stub the transport
  * without HTTP. One per target, scoped to the caller's directory.
  */
@@ -793,7 +793,7 @@ interface TargetRuleInputs {
 }
 
 /**
- * A live opencode dispatch target (opencode 2.x, ADR-093 S9) — persists across
+ * A live opencode dispatch target (opencode 2.x, ADR-097 S9) — persists across
  * turns for `session_id` continuation. It holds its OWN lease (released
  * exactly, `releaseIfCurrent`) and shares its server's feed record.
  */
@@ -1251,7 +1251,7 @@ type TargetEntry = OpencodeTargetEntry | ClaudeTargetEntry | PiTargetEntry | Cod
 
 /**
  * One opencode SERVER's event feed, shared by every dispatch target on it
- * (ADR-093 §2: one server serves every directory, so records are keyed by
+ * (ADR-097 §2: one server serves every directory, so records are keyed by
  * server identity, never by cwd — a config change while a target lives can
  * no longer pair one server's client with another's lease).
  */
@@ -1496,7 +1496,7 @@ function codexTurnCostUsd(model: string, delta: TokenUsageBreakdown): number | n
 
 /**
  * The judge's subagent description for a target: its model, plus what the
- * calling subagent may not do when a restricted child dispatched (ADR-093 S9).
+ * calling subagent may not do when a restricted child dispatched (ADR-097 S9).
  */
 function judgeDescription(model: string, restriction: CallerRestriction | undefined): string {
   const note = restrictionNote(restriction)
@@ -2355,7 +2355,7 @@ export class CrossEngineDispatcher {
     }
     // A continuation keeps the restriction its target was created with, and
     // may not loosen it: a caller restricted further than the target was
-    // starts a fresh dispatch (ADR-093 S9, option a).
+    // starts a fresh dispatch (ADR-097 S9, option a).
     if (req.sessionId) {
       const held = this.targets.get(req.sessionId)?.ctx.callerRestriction
       if (held || ctx.callerRestriction) {
@@ -2483,7 +2483,7 @@ export class CrossEngineDispatcher {
     // Never `always` (ADR-085 S2): opencode's saved table is shared with the
     // user's own opencode and would outrank the user's deny/ask rules for every
     // chat. No session-allow set is kept for a target (`NO_SESSION_ALLOWS`).
-    // A reject always carries the model-visible reason (ADR-093 §3).
+    // A reject always carries the model-visible reason (ADR-097 §3).
     replyTargetPermission(
       pending.client,
       pending.askingSessionId,
@@ -2550,7 +2550,7 @@ export class CrossEngineDispatcher {
     }
   }
 
-  // ── opencode direction (M1, opencode 2.x — ADR-093 S9) ────────────────────
+  // ── opencode direction (M1, opencode 2.x — ADR-097 S9) ────────────────────
 
   /** Everything past the guards for engine:'opencode' — runs with an
    *  activeDispatches slot held and the Stop handle already registered
@@ -2653,7 +2653,7 @@ export class CrossEngineDispatcher {
         emitDispatchNotification(ctx, entry.sessionId, 'failed', `Dispatched turn failed: ${msg}`)
         return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId)
       }
-      // ADR-093 §5 rule 2: a ChatGPT turn goes only on a token with time left.
+      // ADR-097 §5 rule 2: a ChatGPT turn goes only on a token with time left.
       const notice = await opencodeAuthHooks()
         .beforeTurn(parseModelString(model).providerID)
         .catch(() => null)
@@ -3536,7 +3536,7 @@ export class CrossEngineDispatcher {
    * deny rules, plan mode, the user's ask rules) — a deny rule or plan mode
    * refuses, an ask rule goes to the human in every mode; else ClaudeUI's
    * judge under a judged auto parent (ADR-088), else a card on the
-   * dispatching chat. Every reject and cancel carries a message (ADR-093 §3).
+   * dispatching chat. Every reject and cancel carries a message (ADR-097 §3).
    */
   private onTargetApproval(
     entry: OpencodeTargetEntry,

@@ -1,5 +1,5 @@
 /**
- * Guards what the manager's DEFAULT spawn path actually runs (ADR-093 §2).
+ * Guards what the manager's DEFAULT spawn path actually runs (ADR-097 §2).
  *
  * The lifecycle test injects `spawnFn`, which skips the real spawn entirely —
  * so this one mocks `node:child_process` instead and lets the default

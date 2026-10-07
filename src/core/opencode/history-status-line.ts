@@ -99,7 +99,7 @@ export interface OpencodeV2SeedExtras {
 }
 
 /**
- * {@link opencodeHistorySeed} for opencode 2.x rows (ADR-093 S4). ONE rule,
+ * {@link opencodeHistorySeed} for opencode 2.x rows (ADR-097 S4). ONE rule,
  * the same as the live mapper's outputs and as Claude's status line (which
  * folds subagent transcripts into the session, `session-history.ts`
  * `foldSubagentCosts`): every request the chat caused counts —

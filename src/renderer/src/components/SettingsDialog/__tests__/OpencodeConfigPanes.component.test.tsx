@@ -11,7 +11,7 @@
  *      `permissions`, opencode 2.x), never a raw patch.
  *   4. The `formatter`/`lsp` boolean|object union: an object value still reads
  *      as ON; OFF writes false; ON deletes.
- *   5. 2.x keys only (ADR-093 S8): a 1.x key 2.x still reads shows as the value
+ *   5. 2.x keys only (ADR-097 S8): a 1.x key 2.x still reads shows as the value
  *      and moves to its 2.x key in the same write; `mcp` is patched as leaves.
  *   6. `default_agent` offers only agents opencode would accept as a default.
  *   7. The Managed pane is static: FORCED rows, no IPC.

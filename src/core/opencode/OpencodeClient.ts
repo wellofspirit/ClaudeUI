@@ -1,5 +1,5 @@
 /**
- * HTTP client for the opencode 2.x server (ADR-093 §7), built on the
+ * HTTP client for the opencode 2.x server (ADR-097 §7), built on the
  * GENERATED operation table (`./protocol-v2/openapi`): every request and
  * response is typed per operationId, and a pin bump that moves a route or a
  * field breaks the build here, not at runtime.
@@ -7,7 +7,7 @@
  * Every request carries:
  * - `authorization` — Basic `opencode:<password>` (`ServerConnection.authHeader`);
  * - `x-opencode-directory` — the lease's directory, URI-encoded. One 2.x server
- *   serves every directory (ADR-093 §2), and a request without it is answered
+ *   serves every directory (ADR-097 §2), and a request without it is answered
  *   for the SERVER's cwd (`packages/server/src/location.ts requestRef`), which
  *   is never the caller's project. `forDirectory()` re-targets a client.
  *
@@ -187,7 +187,7 @@ export class OpencodeTimeoutError extends Error {
 // --- Domain shapes ----------------------------------------------------------
 
 /**
- * A permission answer. A reject MUST carry a non-empty message (ADR-093 §3):
+ * A permission answer. A reject MUST carry a non-empty message (ADR-097 §3):
  * 2.x ends the whole turn on a messageless reject, while a reject with a
  * message fails only the tool and the model reads the message. The type makes
  * the message mandatory; `replyPermission` also refuses a blank one at runtime.
@@ -429,7 +429,7 @@ export class OpencodeClient {
    * `POST /api/session/{id}/prompt` — enqueue user input; answers at once with
    * the inbox item (the turn runs on the event feed). Pass a ClaudeUI-chosen
    * `id` (`msg_…`) to make it addressable for `cancelInbox` /
-   * `setInboxDelivery` (ADR-093 §9) and idempotent: re-posting an id the
+   * `setInboxDelivery` (ADR-097 §9) and idempotent: re-posting an id the
    * session already has returns the FIRST admission unchanged (the new text is
    * ignored); an id owned by another session is a 409 `ConflictError`
    * (`packages/core/src/session/inbox.ts reconcile`). `delivery`: `steer`
@@ -531,7 +531,7 @@ export class OpencodeClient {
   ): Promise<void> {
     if (reply.decision === 'reject' && !reply.message?.trim())
       throw new TypeError(
-        'opencode permission reject needs a non-empty message (ADR-093 §3: a messageless reject ends the turn)'
+        'opencode permission reject needs a non-empty message (ADR-097 §3: a messageless reject ends the turn)'
       )
     const message = reply.message?.trim() ? reply.message : undefined
     return this.call('session.permission.reply', {
@@ -564,7 +564,7 @@ export class OpencodeClient {
 
   /**
    * Dismiss a form; `message` reaches the model as the call's failure. It is
-   * REQUIRED, like a reject's (ADR-093 §3, review #4c): a cancel without one
+   * REQUIRED, like a reject's (ADR-097 §3, review #4c): a cancel without one
    * fails the question tool `aborted` and ends the turn `interrupted{shutdown}`,
    * which keeps the execution claim — opencode would resume the turn on its
    * next start. A blank message throws before anything is sent.
@@ -577,7 +577,7 @@ export class OpencodeClient {
   ): Promise<void> {
     if (!message?.trim())
       throw new TypeError(
-        'opencode form cancel needs a non-empty message (ADR-093 §3: a messageless cancel ends the turn and keeps its claim)'
+        'opencode form cancel needs a non-empty message (ADR-097 §3: a messageless cancel ends the turn and keeps its claim)'
       )
     return this.call('session.form.cancel', {
       params: { sessionID, formID },
@@ -731,7 +731,7 @@ export class OpencodeClient {
 
   /**
    * `POST /api/credential` with a caller-chosen `id` (409 if it exists — rotate
-   * by creating the next generation, then deleting the old one; ADR-093 §5).
+   * by creating the next generation, then deleting the old one; ADR-097 §5).
    */
   async createCredential(
     input: Credential_CreateInput,

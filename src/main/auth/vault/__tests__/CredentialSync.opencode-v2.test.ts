@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * CredentialSync's opencode 2.x lifecycle (ADR-093 §5): the vend at start, the
+ * CredentialSync's opencode 2.x lifecycle (ADR-097 §5): the vend at start, the
  * pre-turn gate, the `provider.auth` recovery, the resume resync, the slot
  * handed back on quit, and the token check that recognises ClaudeUI's own
  * sign-in. The vault is in memory, every refresh is an injected fake (nothing

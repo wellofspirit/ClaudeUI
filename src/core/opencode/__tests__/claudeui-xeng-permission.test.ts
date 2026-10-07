@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * The `claudeui-xeng` plugin's permission and MCP hooks (ADR-093 §3, S6):
+ * The `claudeui-xeng` plugin's permission and MCP hooks (ADR-097 §3, S6):
  * saved "always" allows never answer a ClaudeUI ask (the hook only TIGHTENS
  * opencode's effect to what the configured rules say), and every MCP server is
  * declared directly (`codemode: false`). Loaded as opencode loads it — a plain

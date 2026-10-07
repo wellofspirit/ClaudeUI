@@ -1,5 +1,5 @@
 /**
- * Hosted-tools readiness (S0 finding 1, ADR-093 §2): a scripted server and a
+ * Hosted-tools readiness (S0 finding 1, ADR-097 §2): a scripted server and a
  * fake clock — every wait is virtual.
  */
 import { describe, it, expect } from 'vitest'
@@ -152,7 +152,7 @@ describe('modelListIsAuthoritative (S7 seam)', () => {
   })
 })
 
-describe('waitForPermissionGuard (ADR-093 §3, S6: no heuristic fallback)', () => {
+describe('waitForPermissionGuard (ADR-097 §3, S6: no heuristic fallback)', () => {
   const guardDeps = (answers: ({ status: number; body: unknown } | Error)[]) => {
     let i = 0
     let t = 0

@@ -1,5 +1,5 @@
 /**
- * opencode 2.x event feed → ClaudeUI's engine-neutral session stream (ADR-093
+ * opencode 2.x event feed → ClaudeUI's engine-neutral session stream (ADR-097
  * S4). Replaces the 1.x `event-mapper.ts` once S5 moves `OpencodeSession` onto
  * it (the 1.x mapper stays until S10).
  *
@@ -27,7 +27,7 @@
  * Turn ends (ADR-090): `succeeded` → `result`; `failed` → `error` (or
  * `auth-required` for `provider.auth`); `interrupted` → `stopped` with its
  * reason. `reason:'shutdown'` after a REJECT in the same turn is a denial-ended
- * turn (`stopped/denied`: a reject without a message is a hard stop, ADR-093
+ * turn (`stopped/denied`: a reject without a message is a hard stop, ADR-097
  * §3), never a server shutdown nor a user stop.
  *
  * Reconnects: the feed has no replay (`opencode-event-stream.ts`). On

@@ -1,5 +1,5 @@
 /**
- * Subagent children's rulesets on opencode 2.x (ADR-093 §3, S6) — one
+ * Subagent children's rulesets on opencode 2.x (ADR-097 §3, S6) — one
  * implementation for the chat (`OpencodeSession`, S5) and the dispatcher's
  * opencode targets (`cross-engine-dispatcher.ts`, S9).
  *

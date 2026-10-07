@@ -1,4 +1,4 @@
-# ADR-093: opencode moves to 2.x only
+# ADR-097: opencode moves to 2.x only
 
 **Status:** Accepted (2026-10-06, owner; arc started with S0; S0–S9 built on the arc branch by
 2026-10-07; S10 — real-app verification, Windows pass, 1.x removal — remains). It comes from the spike in

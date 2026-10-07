@@ -1,5 +1,5 @@
 /**
- * The two places an opencode session meets ClaudeUI's ChatGPT vault (ADR-093
+ * The two places an opencode session meets ClaudeUI's ChatGPT vault (ADR-097
  * §5), as a seam so the session imports no vault: the boot seam
  * (`core-services.ts`) wires them to `credentialSync`. Defaults let every turn
  * go and ignore failures (tests, a host with no vault).

@@ -1,6 +1,6 @@
 /**
  * opencode 2.x contract: ClaudeUI-owned credentials over `/api/credential`
- * (ADR-093 §5). No restart anywhere: a change applies to the next request.
+ * (ADR-097 §5). No restart anywhere: a change applies to the next request.
  *
  * (h1) key credential with a ClaudeUI id: POST → next request carries it → DELETE.
  * (h2) ChatGPT access-token-only vending and rotate-by-replace

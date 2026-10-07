@@ -1,5 +1,5 @@
 /**
- * opencode 2.x contract: the `question` tool becomes a form (ADR-093 / spike
+ * opencode 2.x contract: the `question` tool becomes a form (ADR-097 / spike
  * §5 → AskUserQuestion). A single-choice question is a `string` field with
  * options, and its answer is a STRING keyed by the field key — an array is
  * rejected.

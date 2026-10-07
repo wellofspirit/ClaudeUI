@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * OpencodeCredentialStore (ADR-093 §5) against an in-memory model of opencode
+ * OpencodeCredentialStore (ADR-097 §5) against an in-memory model of opencode
  * 2.x's credential table. Fake JWTs and fake keys only.
  */
 import { describe, expect, it, vi } from 'vitest'

@@ -1,5 +1,5 @@
 /**
- * opencode 1.x config entries → their opencode 2.x form (ADR-093 S8).
+ * opencode 1.x config entries → their opencode 2.x form (ADR-097 S8).
  *
  * opencode 2.x still READS a 1.x-shaped config: it normalizes it in memory
  * (`vendor/opencode-v2-src/packages/core/src/config/normalize.ts`) and keeps

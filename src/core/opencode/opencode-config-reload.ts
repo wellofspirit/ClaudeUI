@@ -1,6 +1,6 @@
 /**
  * After ClaudeUI writes opencode's config (settings, raw editor, providers,
- * tools, agent files — ADR-093 S8): drop ClaudeUI's own caches of what that
+ * tools, agent files — ADR-097 S8): drop ClaudeUI's own caches of what that
  * config decides (model discovery; the sessions' agent lists, via the server
  * manager's config listeners) and reload the running servers' locations
  * (`OpencodeServerManager.reloadConfig`: `POST /api/location/reload` on idle

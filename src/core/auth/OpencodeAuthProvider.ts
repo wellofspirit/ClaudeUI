@@ -1,6 +1,6 @@
 /**
  * OpencodeAuthProvider — EngineAuthProvider for the 'opencode' engine, on
- * opencode 2.x (ADR-093 §5).
+ * opencode 2.x (ADR-097 §5).
  *
  * 2.x keeps credentials in its database behind `/api/credential`, and the data
  * dir is shared with the user's own opencode. Every write here goes through

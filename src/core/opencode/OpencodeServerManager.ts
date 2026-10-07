@@ -50,7 +50,7 @@ export type { HostedToolsReadiness, PermissionGuard }
 
 /**
  * Thrown by `acquire` when the server's `claudeui-xeng` plugin is not loaded
- * and answering (ADR-093 §3, S6). Without its `permission.evaluate` hook the
+ * and answering (ADR-097 §3, S6). Without its `permission.evaluate` hook the
  * user's saved "always" approvals from their own opencode would answer
  * ClaudeUI's permission asks, so ClaudeUI refuses to run sessions there.
  */
@@ -69,7 +69,7 @@ export class OpencodePermissionGuardError extends Error {
 }
 
 /**
- * opencode 2.x server lifecycle (ADR-093 §2, amends ADR-019).
+ * opencode 2.x server lifecycle (ADR-097 §2, amends ADR-019).
  *
  * ONE `opencode serve --stdio` serves every directory: the directory travels
  * per request (`x-opencode-directory`), so servers are keyed by the config
@@ -106,7 +106,7 @@ export interface ServerConnection {
   /**
    * Asked for at acquire: when THIS lease is the last one released (by
    * `releaseIfCurrent`), the server stays up idle this long for the next read
-   * instead of ending at once (S7, ADR-093 §5).
+   * instead of ending at once (S7, ADR-097 §5).
    */
   lingerMs?: number
 }
@@ -208,7 +208,7 @@ function locateLaunch(): HarnessLaunch {
 }
 
 /**
- * Locate the `claudeui-xeng` DIRECTORY plugin (ADR-093 §4) the external
+ * Locate the `claudeui-xeng` DIRECTORY plugin (ADR-097 §4) the external
  * opencode process loads. opencode 2.x refuses a plugin path that is a file
  * (only a warning: `core/src/config/plugin/source.ts`), so it is a directory
  * (`index.js` + `package.json`). Same dev/packaged split as before: it ships
@@ -395,7 +395,7 @@ export class OpencodeServerManager {
   private detached = new Set<ServerHandle>()
   /**
    * The last start, until it printed its URL (or failed). Starts take turns:
-   * opencode has no cross-process lock on its database (ADR-093 §6), and a
+   * opencode has no cross-process lock on its database (ADR-097 §6), and a
    * first 2.x start migrates a 1.x-created one in place, so two processes must
    * not start at once (a discovery server beside the pooled one).
    */
@@ -423,7 +423,7 @@ export class OpencodeServerManager {
   private dispatchAgentFn: DispatchAgentFn | undefined
   private serverStartedHook: ((endpoint: Endpoint) => Promise<void>) | undefined
   /**
-   * `agents.<name>.permissions` per cwd (ADR-093 §3). Default: the mode-less
+   * `agents.<name>.permissions` per cwd (ADR-097 §3). Default: the mode-less
    * overlay (`permission-v2.ts` `agentPermissionOverlay`).
    */
   private agentPermissionsFn: (
@@ -455,7 +455,7 @@ export class OpencodeServerManager {
 
   /**
    * Per-agent permission rules injected as `agents.<name>.permissions`
-   * (ADR-093 §3; replaces the default overlay). A changed answer changes the
+   * (ADR-097 §3; replaces the default overlay). A changed answer changes the
    * config identity, so it reaches new leases on a new server.
    */
   setAgentPermissionProvider(
@@ -555,7 +555,7 @@ export class OpencodeServerManager {
       return endpoint ? (await fetchSessionRef(endpoint, sessionId))?.directory : undefined
     }
     // A subagent child of a ClaudeUI chat calling a hosted tool: its id is not
-    // a ClaudeUI session, so walk its parents (ADR-093 §4, S9). Every child on
+    // a ClaudeUI session, so walk its parents (ADR-097 §4, S9). Every child on
     // the way contributes its agent's own restriction (option a); an agent
     // whose rules cannot be read refuses the call (fail closed).
     const resolveCallerRoot: CallerRootResolver = async (sessionId) => {
@@ -660,7 +660,7 @@ export class OpencodeServerManager {
   }
 
   /**
-   * The first-contact hook (S7 follow-up, ADR-093 §5): the credential store's
+   * The first-contact hook (S7 follow-up, ADR-097 §5): the credential store's
    * proven-copy cleanup. 2.0.24 resolves (and so may refresh) the active OAuth
    * credential only when a location activates its plugins; the credential
    * routes do not activate one, so a hook using only them runs ahead of every
@@ -956,7 +956,7 @@ export class OpencodeServerManager {
   }
 
   /**
-   * After ClaudeUI wrote opencode's config (ADR-093 S8): rebuild every pooled
+   * After ClaudeUI wrote opencode's config (ADR-097 S8): rebuild every pooled
    * server's locations with `POST /api/location/reload`, then re-run each held
    * directory's hosted-tools readiness (the reload reconnects MCP) and drop its
    * permission-guard memo (the plugin registers again).
@@ -1140,7 +1140,7 @@ export class OpencodeServerManager {
    * End every pooled server so the next acquire starts a fresh one, fanning
    * out exit listeners so attached sessions drop their connections now.
    * (1.x needed this after every auth change; 2.x hot-reloads credentials and
-   * S7 removes the callers — ADR-093 §5.) Deletion precedes the end so a racing
+   * S7 removes the callers — ADR-097 §5.) Deletion precedes the end so a racing
    * acquire starts fresh and the exit handler stays quiet. In-flight starts
    * are left alone.
    */

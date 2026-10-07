@@ -22,7 +22,7 @@ export interface NativeApiKeyReader {
   /**
    * That vendor's raw key, or null when it has no plain API-key entry. MAIN
    * PROCESS ONLY. pi's is a file read; opencode 2.x's is the integration's
-   * ACTIVE key row, read over its credential API (ADR-093 §5).
+   * ACTIVE key row, read over its credential API (ADR-097 §5).
    */
   readApiKey(vendorId: string): string | null | Promise<string | null>
 }

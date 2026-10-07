@@ -1,7 +1,7 @@
 /**
  * The shared 2.x teardown (`stopOpencodeSessions`) and worktree read
  * (`locationWorktree`) — used by `OpencodeSession` and the dispatcher's
- * opencode targets (ADR-093 S5/S9).
+ * opencode targets (ADR-097 S5/S9).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { locationWorktree, stopOpencodeSessions } from '../session-support'

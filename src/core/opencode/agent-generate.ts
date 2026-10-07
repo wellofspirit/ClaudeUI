@@ -2,7 +2,7 @@
  * agent-generate.ts
  *
  * AI-assisted agent authoring: one transient completion from opencode 2.x
- * (`POST /api/session/{id}/generate`, ADR-093 S5) on a throwaway session, with
+ * (`POST /api/session/{id}/generate`, ADR-097 S5) on a throwaway session, with
  * the meta-prompt below, parsed into a structured agent config.
  *
  * 2.x has no synchronous prompt (`session.prompt` only enqueues), and

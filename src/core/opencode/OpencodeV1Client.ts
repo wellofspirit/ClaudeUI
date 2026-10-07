@@ -63,14 +63,14 @@ export interface OpencodeAgentInfo {
 /**
  * The opencode **1.x** HTTP client (`opencode-ai` 1.18.x wire: `/session`,
  * `/event` with `properties`, `/permission/{id}/reply`, …), kept only so the
- * callers a later ADR-093 slice rewrites keep compiling until then. Nothing in
+ * callers a later ADR-097 slice rewrites keep compiling until then. Nothing in
  * it can talk to the 2.x server the branch now spawns. The 2.x client is
  * `./OpencodeClient`.
  *
  * TODO(S10): delete with the last caller (OpencodeSession → S5, model
  * discovery + OpencodeAuthProvider → S7, cross-engine dispatcher → S9,
  * session-list history load → S4, subagent-permissions' agent type → S6).
- * @deprecated 1.x only (ADR-093).
+ * @deprecated 1.x only (ADR-097).
  */
 export class OpencodeV1Client {
   private baseUrl: string

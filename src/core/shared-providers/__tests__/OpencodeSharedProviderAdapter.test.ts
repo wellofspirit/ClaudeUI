@@ -419,7 +419,7 @@ describe('OpencodeSharedProviderAdapter — model capabilities (ADR-074 slice 10
 
   it('re-syncs a reasoning model as opencode 2.x reads it back (no variants list) without a write', () => {
     // 2.x has no "reasons" flag: a reasoning model is written with no `variants`,
-    // which the reader reports as unknown (ADR-093 S8).
+    // which the reader reports as unknown (ADR-097 S8).
     const asRead = {
       name: 'Local API',
       npm: '@ai-sdk/openai-compatible',

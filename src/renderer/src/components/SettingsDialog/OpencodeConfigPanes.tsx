@@ -12,7 +12,7 @@
  * siblings survive. The built-in tool switches, which live in the top-level
  * `permissions` rules, have their own writer (`setOpencodeToolDisabled`).
  *
- * opencode 2.x keys only (ADR-093 S8): a 1.x key the user still has (2.x reads
+ * opencode 2.x keys only (ADR-097 S8): a 1.x key the user still has (2.x reads
  * it) shows as the effective value where 2.x maps it one-to-one, and a pane
  * edit writes the 2.x key and deletes the 1.x one in the same write. 1.x keys
  * with no 2.x meaning (compaction.prune/tail_turns, logLevel,

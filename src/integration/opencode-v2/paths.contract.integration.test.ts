@@ -1,6 +1,6 @@
 /**
  * opencode 2.x contract: path deny rules in a session that runs in a
- * SUB-DIRECTORY of a git repo (ADR-093 §3, S6 review #1). 2.x asks with the
+ * SUB-DIRECTORY of a git repo (ADR-097 §3, S6 review #1). 2.x asks with the
  * path relative to the session directory for any file in the worktree, so an
  * edit of `<repo>/secrets/x` from `<repo>/pkg` is asked as `../secrets/x`;
  * `deny Edit(//<repo>/secrets/**)` must still block it.

@@ -40,7 +40,7 @@
  * account and to no other. A `VaultLike` with no account methods is driven
  * exactly as before — one credential, one timer.
  *
- * OPENCODE 2.x (ADR-093 §5). opencode no longer reads a file: ClaudeUI vends
+ * OPENCODE 2.x (ADR-097 §5). opencode no longer reads a file: ClaudeUI vends
  * the active account into its credential table as an access-token-only row it
  * owns by id (`OpencodeChatgptTarget`, the credential store behind it). There
  * is nothing to adopt back (opencode cannot refresh a token without its
@@ -202,7 +202,7 @@ export interface CodexFeedTarget {
 }
 
 /**
- * opencode 2.x's half of the feed (ADR-093 §5) — `OpencodeAuthProvider`
+ * opencode 2.x's half of the feed (ADR-097 §5) — `OpencodeAuthProvider`
  * implements it structurally over the credential store. `isClaudeuiToken`
  * recognises a refresh token ClaudeUI manages (the vault's, or one it fed the
  * 1.x `auth.json`): such a row of the user's is a copy of ClaudeUI's sign-in,
@@ -355,7 +355,7 @@ function errMessage(err: unknown): string {
 }
 
 /**
- * ONE expiry for every opencode decision (ADR-093 §5): the earlier of the
+ * ONE expiry for every opencode decision (ADR-097 §5): the earlier of the
  * access token's own `exp` and the vault's expiry for it — so the gate never
  * finds a token "not fresh" that it would also not refresh.
  */
@@ -561,7 +561,7 @@ export class CredentialSync {
         `start: failed to remove one or more disabled credential copies: ${errMessage(err)}`
       )
     }
-    // opencode at start (ADR-093 §5 rule 4): a vend prunes every generation of
+    // opencode at start (ADR-097 §5 rule 4): a vend prunes every generation of
     // ClaudeUI's a crash left and re-asserts the active slot; with no
     // credential, whatever ClaudeUI left there goes.
     if (this.isCurrent(generation)) {
@@ -1061,7 +1061,7 @@ export class CredentialSync {
   }
 
   // -------------------------------------------------------------------------
-  // opencode 2.x lifecycle (ADR-093 §5)
+  // opencode 2.x lifecycle (ADR-097 §5)
   // -------------------------------------------------------------------------
 
   /**
@@ -1271,7 +1271,7 @@ export class CredentialSync {
   }
 
   /**
-   * Vend `cred` into opencode 2.x (ADR-093 §5): rotate-by-replace, made the
+   * Vend `cred` into opencode 2.x (ADR-097 §5): rotate-by-replace, made the
    * active `openai` row. Skipped like a feed (route off, harness not running,
    * no target); a failure is logged and leaves `false`.
    */
@@ -1638,7 +1638,7 @@ export class CredentialSync {
 
   private startWatchers(): void {
     const routes = this.routes()
-    // opencode 2.x has no file to watch (ADR-093 §5).
+    // opencode 2.x has no file to watch (ADR-097 §5).
     if (routes.pi) this.startWatcher('pi', this.piTarget)
   }
 

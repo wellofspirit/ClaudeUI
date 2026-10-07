@@ -68,7 +68,7 @@ describe('readOpencodeNativeRaw', () => {
   })
 })
 
-describe('patchOpencodeNativeRaw (opencode 2.x schema, ADR-093 S8)', () => {
+describe('patchOpencodeNativeRaw (opencode 2.x schema, ADR-097 S8)', () => {
   it('sets a leaf while preserving sibling keys and comments', () => {
     const p = writeConfig(
       'opencode.jsonc',

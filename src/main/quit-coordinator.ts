@@ -28,7 +28,7 @@ export interface QuitCoordinatorDeps {
   fallbackMs?: number
   /**
    * Async work that needs the services ALIVE and must finish before the real
-   * quit (ADR-093 §5: giving opencode's ChatGPT slot back to the user's own
+   * quit (ADR-097 §5: giving opencode's ChatGPT slot back to the user's own
    * credential needs an opencode server). Runs once, after the quit is
    * confirmed and before `quit()`, bounded by `prepareTimeoutMs`; a failure
    * never stops the quit.

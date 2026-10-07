@@ -11,7 +11,7 @@
  *              never collide (different message_id namespaces); re-runs are
  *              idempotent via ON CONFLICT(message_id) DO NOTHING.
  *   opencode → sessions are enumerated GLOBALLY (across every cwd) through
- *              2.x's GET /api/session?parentID=null, which is global (ADR-093
+ *              2.x's GET /api/session?parentID=null, which is global (ADR-097
  *              §6, S9) — read fresh, the same list the sidebar caches
  *              (listOpencodeSessionsForReconcile). Messages are then fetched over the HTTP API
  *              (GET /api/session/{id}/message?type=assistant), global-by-id.
@@ -123,7 +123,7 @@ class UsageReconciler {
    *      GET /api/session?parentID=null (listOpencodeSessionsForReconcile — see
    *      the file header for why 1.x could not, M-DB1).
    *   2. Ride a server that is ALREADY running (any one: the routes are global)
-   *      — the reconciler never starts one (ADR-093 S9 review: a server every
+   *      — the reconciler never starts one (ADR-097 S9 review: a server every
    *      10 min for a user who never runs opencode); none running → skipped
    *      until one is. Fetch each
    *      session's messages over HTTP — /api/session/{id}/message is global-by-id

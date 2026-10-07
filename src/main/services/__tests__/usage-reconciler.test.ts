@@ -44,7 +44,7 @@ vi.mock('../../../core/services/block-usage', () => ({
 }))
 
 vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
-  // The reconciler only RIDES a running server (never starts one, ADR-093 S9).
+  // The reconciler only RIDES a running server (never starts one, ADR-097 S9).
   opencodeServerManager: { acquireIfRunning: mockAcquire, releaseIfCurrent: mockRelease }
 }))
 

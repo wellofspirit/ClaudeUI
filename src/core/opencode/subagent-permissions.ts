@@ -2,7 +2,7 @@
  * ADR-085 S4 (owner ruling 4) — opencode task subagents follow the PARENT
  * session's rules and mode for every gated tool.
  *
- * ## opencode 2.x (ADR-093 §3, S6) — {@link childSessionRuleset}
+ * ## opencode 2.x (ADR-097 §3, S6) — {@link childSessionRuleset}
  *
  * 2.x makes ruling 4 native: a `subagent` child is created with the parent's
  * WHOLE session ruleset (`core/src/session.ts` create, `permissions ??
@@ -20,7 +20,7 @@
  * the parent (the child's copy is a snapshot).
  *
  * The 1.x half below (static asks, backstop) serves the 1.x
- * `OpencodeSession`/dispatcher path only and goes with it (ADR-093 S10).
+ * `OpencodeSession`/dispatcher path only and goes with it (ADR-097 S10).
  *
  * ## opencode 1.x
  *

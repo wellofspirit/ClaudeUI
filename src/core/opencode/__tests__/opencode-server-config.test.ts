@@ -1,5 +1,5 @@
 /**
- * The opencode 2.x OPENCODE_CONFIG_CONTENT builder (ADR-093 §2, §4).
+ * The opencode 2.x OPENCODE_CONFIG_CONTENT builder (ADR-097 §2, §4).
  *
  * Guards:
  * - native 2.x keys only: `mcp.servers`, `plugins`, `agents.*.permissions`;

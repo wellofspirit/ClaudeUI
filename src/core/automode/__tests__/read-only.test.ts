@@ -1269,7 +1269,7 @@ describe('purity', () => {
     const wildcard = read('../opencode/wildcard.ts')
     expect(
       importsOf(wildcard).filter((i) => !i.startsWith('type ')),
-      'wildcard.ts may import only the shared matcher (ADR-093 S8 moved it to shared/)'
+      'wildcard.ts may import only the shared matcher (ADR-097 S8 moved it to shared/)'
     ).toEqual(['../../shared/opencode-wildcard'])
     expect(wildcard).not.toMatch(/process\.env|node:/)
     const matcher = read('../../shared/opencode-wildcard.ts')

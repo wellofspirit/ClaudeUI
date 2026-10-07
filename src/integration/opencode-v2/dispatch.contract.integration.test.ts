@@ -1,6 +1,6 @@
 /**
  * opencode 2.x contract: the PRODUCTION cross-engine dispatcher with an
- * opencode TARGET (ADR-093 S9; ADR-033, ADR-085, ADR-088) on the real pinned
+ * opencode TARGET (ADR-097 S9; ADR-033, ADR-085, ADR-088) on the real pinned
  * engine — the S2 manager, the S3 client and feed, the S4 mapper, the S6
  * rulesets and the `claudeui-xeng` plugin all real. Test-side substitutions
  * only: the isolated home/proxy env (sandboxed, loopback-only), the fixture

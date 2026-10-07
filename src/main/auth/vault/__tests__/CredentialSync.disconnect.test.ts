@@ -10,7 +10,7 @@
  * (and the marker it keeps) runs with real storage semantics and never touches
  * the real `~/.claude/ui`. pi's store is an in-memory map, never `~/.pi`;
  * opencode 2.x is the real credential store over an in-memory credential
- * table (ADR-093 §5: ClaudeUI's rows are known by id), never a real opencode; no refresh runs (an injected fake refuses) and
+ * table (ADR-097 §5: ClaudeUI's rows are known by id), never a real opencode; no refresh runs (an injected fake refuses) and
  * every login flow is a fake. Every token string is an obvious fake.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'

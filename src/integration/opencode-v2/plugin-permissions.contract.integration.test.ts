@@ -1,6 +1,6 @@
 /**
  * opencode 2.x contract: the REAL `claudeui-xeng` plugin
- * (`resources/opencode/claudeui-xeng/`) on the real engine (ADR-093 §3, S6).
+ * (`resources/opencode/claudeui-xeng/`) on the real engine (ADR-097 §3, S6).
  *
  * - Saved "always" allows (the project table in the shared DB) no longer answer
  *   ClaudeUI's asks: a row saved through the reply API in another session still

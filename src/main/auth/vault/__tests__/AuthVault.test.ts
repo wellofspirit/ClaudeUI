@@ -93,7 +93,7 @@ describe('AuthVault', () => {
       removeVendorAuth: vi.fn(async () => {})
     })
     const pi = native({ access: 'pi', refresh: 'pi', expires: 10 })
-    // opencode 2.x holds no refresh token ClaudeUI could recover from (ADR-093 §5).
+    // opencode 2.x holds no refresh token ClaudeUI could recover from (ADR-097 §5).
     const opencode = fakeOpencodeTarget()
     const sync = new CredentialSync({ vault: new AuthVault() })
     sync.configure({ pi, opencode: opencode.target })

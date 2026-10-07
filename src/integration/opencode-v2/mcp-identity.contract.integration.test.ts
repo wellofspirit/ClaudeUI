@@ -1,5 +1,5 @@
 /**
- * opencode 2.x contract: caller identity for hosted MCP tools (ADR-093 §4,
+ * opencode 2.x contract: caller identity for hosted MCP tools (ADR-097 §4,
  * spike blocker 2), against a LOCAL (stdio) MCP server.
  * (f) every `tools/call` carries `_meta["ai.opencode/sessionID"]` — native, no plugin;
  * (g) a v2 DIRECTORY plugin's `execute.before` stamps the caller session and the

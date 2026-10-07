@@ -38,7 +38,7 @@ import {
 import type { FSWatcher } from 'node:fs'
 import { fakeOpencodeTarget } from './fixtures/fake-opencode-target'
 
-/** Unexpired: opencode 2.x is never vended an expired token (ADR-093 §5). */
+/** Unexpired: opencode 2.x is never vended an expired token (ADR-097 §5). */
 const FUTURE = Date.now() + 24 * 60 * 60 * 1000
 import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
 
@@ -726,7 +726,7 @@ describe('CredentialSync route policy', () => {
     expect(opencode.feed).not.toHaveBeenCalled()
   })
 
-  it('opencode 2.x: start takes ClaudeUI’s rows out of a disabled route, vault or not — ownership is the row id (ADR-093 §5)', async () => {
+  it('opencode 2.x: start takes ClaudeUI’s rows out of a disabled route, vault or not — ownership is the row id (ADR-097 §5)', async () => {
     // The credential store behind the target deletes only `cred_claudeui_*`
     // rows (credential-store.test.ts), so CredentialSync no longer reads a
     // token to decide: it asks for the removal, with or without a vault.
@@ -1842,7 +1842,7 @@ describe('CredentialSync — fs-watch resync', () => {
         () => reconciles('pi') >= 1,
         'guarded pi reconcile to run'
       )
-      // opencode 2.x has no file to watch: its half is a vend (ADR-093 §5).
+      // opencode 2.x has no file to watch: its half is a vend (ADR-097 §5).
       expect(save).not.toHaveBeenCalled()
     } finally {
       sync.stop()

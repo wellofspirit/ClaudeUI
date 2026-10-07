@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * The opencode 2.x session (ADR-093 S5) against a fake 2.x client and a
+ * The opencode 2.x session (ADR-097 S5) against a fake 2.x client and a
  * scripted event feed: lifecycle, the inbox-backed queue, approvals (every
  * reject and form cancel carries a message), subagent child rulesets and their
  * backstop, interrupt, reconnect, usage. The mapper, the permission compiler,
@@ -349,7 +349,7 @@ beforeEach(() => {
 afterEach(() => {
   session?.dispose()
   clearSyncSubscribersForTests()
-  // ADR-093 §3 / review #4c: whatever a test did, nothing went out without a message.
+  // ADR-097 §3 / review #4c: whatever a test did, nothing went out without a message.
   for (const [, , reply] of h.client.replyPermission?.mock.calls ?? []) {
     const r = reply as { decision: string; message?: string }
     if (r.decision === 'reject') expect(r.message?.trim()).toBeTruthy()
@@ -658,7 +658,7 @@ describe('dispatch', () => {
   })
 })
 
-// ─── Queue = the native inbox (ADR-093 §9) ──────────────────────────────────
+// ─── Queue = the native inbox (ADR-097 §9) ──────────────────────────────────
 
 describe('queue via the inbox', () => {
   const queueItems = () =>
@@ -1663,7 +1663,7 @@ describe('recorded sequences: what the session emits folds to the cold history',
   })
 })
 
-// ─── ChatGPT credentials (ADR-093 §5, S7) ─────────────────────────────────────
+// ─── ChatGPT credentials (ADR-097 §5, S7) ─────────────────────────────────────
 
 describe('the ChatGPT credential gate and recovery', () => {
   afterEach(() => setOpencodeAuthHooks(null))

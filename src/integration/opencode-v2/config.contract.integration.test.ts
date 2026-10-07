@@ -1,5 +1,5 @@
 /**
- * opencode 2.x contract: ClaudeUI's config writers (S8, ADR-093 §6 / S8).
+ * opencode 2.x contract: ClaudeUI's config writers (S8, ADR-097 §6 / S8).
  *
  * The PRODUCTION writers (`writeOpencodeNativeConfig`, `patchOpencodeNativeRaw`,
  * `saveAgent`) write the isolated user config dir (`OPENCODE_CONFIG_DIR`, set

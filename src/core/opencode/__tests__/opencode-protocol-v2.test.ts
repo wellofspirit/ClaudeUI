@@ -63,7 +63,7 @@ describe('committed output', () => {
     expect(reviewed).toMatchObject({ version: PIN.version, commit: PIN.commit })
   })
 
-  it('describes the opencode the harness manifest installs (one pin, ADR-093 §1)', () => {
+  it('describes the opencode the harness manifest installs (one pin, ADR-097 §1)', () => {
     const { tested } = harnessManifest('opencode')
     expect(PIN).toMatchObject({ version: tested, tag: `v${tested}` })
     expect(provenance.version).toBe(tested)

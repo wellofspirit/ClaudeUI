@@ -1297,7 +1297,7 @@ function OpencodeModelsSection(): React.JSX.Element {
 // ── opencode raw-config (schema-driven) editing ─────────────────────
 
 const OPENCODE_SCHEMA_DEFS = (opencodeConfigSchema as { $defs: SchemaDefs }).$defs
-/** The root of the generated opencode 2.x schema (`Config.InfoEncoded`, ADR-093 S8). */
+/** The root of the generated opencode 2.x schema (`Config.InfoEncoded`, ADR-097 S8). */
 const OPENCODE_CONFIG_NODE = OPENCODE_SCHEMA_DEFS[
   opencodeConfigSchema.$ref.replace('#/$defs/', '')
 ] as SchemaNode

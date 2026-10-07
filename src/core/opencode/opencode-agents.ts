@@ -2,7 +2,7 @@
  * opencode-agents.ts
  *
  * CRUD service for opencode agent markdown files (ADR-029), on opencode 2.x
- * (ADR-093 S8). opencode 2.x discovers them at `{agent,agents}/**\/*.md` under
+ * (ADR-097 S8). opencode 2.x discovers them at `{agent,agents}/**\/*.md` under
  * its global config dir and each project `.opencode/` (and `{mode,modes}/*.md`
  * as primary agents, which ClaudeUI does not write).
  *
@@ -119,7 +119,7 @@ export interface OpencodeAgentInput {
   previous?: { name: string; scope: OpencodeAgentScope }
 }
 
-/** The 2.x actions the permission grid shows (ADR-093 §3 key table). */
+/** The 2.x actions the permission grid shows (ADR-097 §3 key table). */
 export const AGENT_GRID_ACTIONS = [
   'shell',
   'edit',

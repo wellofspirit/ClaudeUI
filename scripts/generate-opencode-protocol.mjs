@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * opencode 2.x wire types (ADR-093 §7), generated from the pinned upstream
+ * opencode 2.x wire types (ADR-097 §7), generated from the pinned upstream
  * `packages/protocol/openapi.json`. Zero dependencies: a small OpenAPI 3.1 /
  * JSON Schema 2020-12 → TypeScript emitter that understands exactly the
  * constructs that spec uses and FAILS CLOSED on anything else.
@@ -34,7 +34,7 @@ export const GENERATOR_VERSION = 1
 
 /**
  * The opencode 2.x the generated types describe: the harness manifest's
- * `tested` (one source of truth for the pin, ADR-093 §1), its release tag, and
+ * `tested` (one source of truth for the pin, ADR-097 §1), its release tag, and
  * the commit that tag was reviewed at. `pinnedReader` proves the tag still
  * names that commit, so bumping `tested` without re-reviewing `PIN_COMMIT`
  * fails both generate and check.
@@ -79,7 +79,7 @@ export const OUTPUT_DIR = 'src/core/opencode/protocol-v2'
 const GENERATED_FILE = 'openapi.ts'
 const PROVENANCE_FILE = 'provenance.json'
 /**
- * The raw config editor's JSON Schema (ADR-093 S8): `Config.InfoEncoded` and
+ * The raw config editor's JSON Schema (ADR-097 S8): `Config.InfoEncoded` and
  * every component it reaches, as a draft 2020-12 document. It lives beside the
  * renderer's other shared data (`src/shared/`), not in OUTPUT_DIR.
  */

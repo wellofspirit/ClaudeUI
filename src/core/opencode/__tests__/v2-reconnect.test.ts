@@ -1,5 +1,5 @@
 /**
- * The re-read half of the 2.x reconnect contract (ADR-093 S4): what is read,
+ * The re-read half of the 2.x reconnect contract (ADR-097 S4): what is read,
  * in which order, and the extra round for a child the re-read itself links.
  */
 import { describe, expect, it, vi } from 'vitest'

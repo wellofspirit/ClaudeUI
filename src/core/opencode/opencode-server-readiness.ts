@@ -1,6 +1,6 @@
 /**
  * "Would a turn in this directory be offered ClaudeUI's hosted tools yet?"
- * (ADR-093 §2; S0 finding 1).
+ * (ADR-097 §2; S0 finding 1).
  *
  * In opencode 2.x MCP servers are LOCATION-scoped: every directory a server is
  * asked about connects its own MCP clients, asynchronously, the first time it
@@ -27,7 +27,7 @@
  * proceeds (the turn just may lack the hosted tools, as before S2).
  *
  * NOT covered: the model catalog. The first `/api/model` after a boot can be
- * empty for ~1.5 s (ADR-093 §6) — see `modelListIsAuthoritative`.
+ * empty for ~1.5 s (ADR-097 §6) — see `modelListIsAuthoritative`.
  */
 import { HOSTED_MCP_SERVER } from './claude-mcp-bridge'
 
@@ -155,7 +155,7 @@ export async function waitForHostedTools(
   }
 }
 
-// ── The permission guard (ADR-093 §3, S6) ───────────────────────────────────
+// ── The permission guard (ADR-097 §3, S6) ───────────────────────────────────
 
 export const GUARD_TIMEOUT_MS = 10_000
 
@@ -211,7 +211,7 @@ export async function waitForPermissionGuard(
 }
 
 /**
- * Model-discovery seam for S7 (ADR-093 §6, ADR-092): an empty `/api/model`
+ * Model-discovery seam for S7 (ADR-097 §6, ADR-092): an empty `/api/model`
  * shortly after a server started is a cold location, not "no models" — the
  * catalog fills ~1.5 s later. Discovery must not negative-cache a list this
  * says is not authoritative; it retries (or waits for `model.updated`).

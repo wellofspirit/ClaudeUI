@@ -1,5 +1,5 @@
 /**
- * opencode 2.x contract for the S4 mapper (ADR-093 S4): the PRODUCTION client
+ * opencode 2.x contract for the S4 mapper (ADR-097 S4): the PRODUCTION client
  * and feed, the live mapper consuming it as `OpencodeSession` will (a
  * reconnect pauses the feed while `reconcileAfterReconnect` runs), against
  * the real engine — and the cold converter on the stored history, which must
@@ -500,7 +500,7 @@ describeV2('opencode 2.x contract: the S4 mapper on the production client', () =
       from = feed.outputs.length
       await client.prompt(sessionID, { text: `[tool] ${nonce('declined')}` })
       const ask = await feed.output('approval', from)
-      // The production client refuses a messageless reject (ADR-093 §3); the
+      // The production client refuses a messageless reject (ADR-097 §3); the
       // harness's raw API sends one, as an older or foreign client could.
       await rig().api.ok('session.permission.reply', {
         params: { sessionID, requestID: ask.approval.requestId },

@@ -330,7 +330,7 @@ describe('suggestOpencodeAllowRule (reverse: opencode approval → Claude sugges
   it('unmapped category → null (no suggestion)', () => {
     expect(suggestOpencodeAllowRule('doom_loop', ['*'])).toBeNull()
   })
-  it('2.x action ids (`shell`, `subagent`) map back like `bash`/`task` (ADR-093 §3)', () => {
+  it('2.x action ids (`shell`, `subagent`) map back like `bash`/`task` (ADR-097 §3)', () => {
     expect(suggestOpencodeAllowRule('shell', ['echo hi'])?.rules).toEqual([
       { toolName: 'Bash', ruleContent: 'echo hi' }
     ])

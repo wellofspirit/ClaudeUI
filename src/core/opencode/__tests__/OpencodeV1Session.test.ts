@@ -632,7 +632,7 @@ describe('OpencodeSession — run()', () => {
     expect(mockCreateSession).toHaveBeenCalledTimes(1)
 
     // Ref balance: dispose() releases exactly once (acquire 1 ↔ release 1),
-    // by connection identity (ADR-093 §2: never by cwd alone).
+    // by connection identity (ADR-097 §2: never by cwd alone).
     session.dispose()
     expect(mockReleaseIfCurrent).toHaveBeenCalledTimes(1)
     expect(mockRelease).not.toHaveBeenCalled()

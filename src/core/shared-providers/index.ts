@@ -51,7 +51,7 @@ export const sharedProviderService = new SharedProviderService({
   harnessRuns: harnessWritable,
   deliveredKeys: deliveredKeyFingerprints(),
   // ADR-074 §6 adoption: plain API keys each engine holds — pi's `api_key`
-  // entries in its auth.json, opencode 2.x's ACTIVE key rows (ADR-093 §5).
+  // entries in its auth.json, opencode 2.x's ACTIVE key rows (ADR-097 §5).
   // opencode's catalog costs a server spawn, so the service asks for it only
   // once a vendor holds a key in both.
   nativeKeys: {

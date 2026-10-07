@@ -496,7 +496,7 @@ describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033
 })
 
 // ---------------------------------------------------------------------------
-// Caller identity on opencode 2.x (ADR-093 §4): _meta first, plugin stamp fallback
+// Caller identity on opencode 2.x (ADR-097 §4): _meta first, plugin stamp fallback
 // ---------------------------------------------------------------------------
 
 describe('resolveCallerIdentity', () => {
@@ -548,7 +548,7 @@ describe('resolveCallerIdentity', () => {
   })
 })
 
-describe('dispatch_agent caller identity through the handler (ADR-093 §4)', () => {
+describe('dispatch_agent caller identity through the handler (ADR-097 §4)', () => {
   it('reads the caller from _meta even without the plugin stamp (no call id)', async () => {
     const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'c-1' }))
     const lookup = vi.fn(() => callerHandle())

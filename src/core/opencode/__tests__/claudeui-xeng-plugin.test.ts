@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * The opencode 2.x `claudeui-xeng` DIRECTORY plugin (ADR-093 §4):
+ * The opencode 2.x `claudeui-xeng` DIRECTORY plugin (ADR-097 §4):
  * `resources/opencode/claudeui-xeng/index.js`. It runs inside the EXTERNAL
  * opencode process, so it is loaded here the way opencode loads it — as a
  * plain ES module — against a fake plugin context.

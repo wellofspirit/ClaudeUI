@@ -19,7 +19,7 @@
  * because it depends on TWO things this module must NOT import directly —
  * see the cycle note on `CallerSessionLookup`/`DispatchAgentFn` below.
  *
- * Caller identity (ADR-093 §4, amends ADR-033): see `resolveCallerIdentity`.
+ * Caller identity (ADR-097 §4, amends ADR-033): see `resolveCallerIdentity`.
  * One McpServer is built per MCP SESSION (mcp-http-host.ts): an opencode 2.x
  * server serves every directory and connects its MCP clients per directory, so
  * the mockup tools resolve their cwd per CALL from the calling session.
@@ -98,7 +98,7 @@ export type CallerSessionLookup = (sessionId: string) => CallerSessionHandle | u
 
 /**
  * The ClaudeUI chat a non-chat caller (a subagent child) descends from, with
- * the restriction its agent chain carries (ADR-093 S9, option a); `refused`
+ * the restriction its agent chain carries (ADR-097 S9, option a); `refused`
  * when that restriction cannot be read (fail closed); undefined when no
  * ancestor is a ClaudeUI chat.
  */
@@ -134,7 +134,7 @@ export interface CallerIdentity {
 }
 
 /**
- * Who called a hosted tool. PRECEDENCE (ADR-093 §4):
+ * Who called a hosted tool. PRECEDENCE (ADR-097 §4):
  *
  * 1. Session — `_meta["ai.opencode/sessionID"]` wins. It is opencode's own
  *    first-party contract, set by the engine outside anything the model or a

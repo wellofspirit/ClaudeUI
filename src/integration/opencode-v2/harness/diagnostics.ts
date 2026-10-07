@@ -1,6 +1,6 @@
 /**
  * Failure output for the opencode 2.x contract suite: these tests are the
- * per-pin-bump gate (ADR-093 §8.1), so a red test must say WHAT the engine did
+ * per-pin-bump gate (ADR-097 §8.1), so a red test must say WHAT the engine did
  * — the event sequence, what the model was sent, outbound attempts, the
  * engine's own log — with every secret redacted.
  */

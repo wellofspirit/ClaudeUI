@@ -1,6 +1,6 @@
 /**
  * The `OPENCODE_CONFIG_CONTENT` ClaudeUI injects into the opencode 2.x server it
- * spawns (ADR-093 §2, §4), in 2.x's native keys only
+ * spawns (ADR-097 §2, §4), in 2.x's native keys only
  * (`Config.InfoEncoded` in `protocol-v2/openapi.ts`):
  *
  * - `mcp.servers` — the user's Claude MCP catalog for the cwd
@@ -10,12 +10,12 @@
  *   tool-call id the `execute` call's id).
  * - `plugins` — the `claudeui-xeng` DIRECTORY plugin (caller identity + the
  *   readiness RPC; `resources/opencode/claudeui-xeng/`).
- * - `agents.<name>.permissions` — the mode-less agent overlay (ADR-093 §3,
+ * - `agents.<name>.permissions` — the mode-less agent overlay (ADR-097 §3,
  *   `permission-v2.ts` `agentPermissionOverlay`); an empty overlay emits no
  *   `agents` key at all.
  *
  * Not emitted any more: `experimental.continue_loop_on_deny` (2.x continues a
- * turn after a reject-with-message natively, ADR-093 §3) and `autoupdate`
+ * turn after a reject-with-message natively, ADR-097 §3) and `autoupdate`
  * (`OPENCODE_DISABLE_AUTOUPDATE=1` is the 2.x switch, see opencode-server-spawn.ts).
  *
  * Secrets: the hosted server's bearer and any bridged server's env/headers live
@@ -31,7 +31,7 @@ export { HOSTED_MCP_SERVER }
 
 /**
  * Per-agent permission rules, injected as `agents.<name>.permissions`
- * (ADR-093 §3). The manager's default provider is `permission-v2.ts`
+ * (ADR-097 §3). The manager's default provider is `permission-v2.ts`
  * `agentPermissionOverlay`.
  */
 export type AgentPermissionOverlay = Readonly<Record<string, Permission_Ruleset>>
@@ -114,7 +114,7 @@ function stableJson(value: unknown): string {
 }
 
 /**
- * The server key (ADR-093 §2: one server per distinct config injection). Covers
+ * The server key (ADR-097 §2: one server per distinct config injection). Covers
  * exactly what `buildOpencodeConfig` injects except the hosted endpoint, which
  * is per server rather than per config. Equal inputs → equal identity,
  * whatever their key order. A sha256 prefix: safe to log, reveals no secret.

@@ -1,5 +1,5 @@
 /**
- * Cold history for opencode 2.x (ADR-093 S4): the stored `Session.Message`
+ * Cold history for opencode 2.x (ADR-097 S4): the stored `Session.Message`
  * rows of `GET /api/session/:id/message` → the same engine-neutral transcript
  * the live mapper (`v2-event-mapper.ts`) streams, so a reopened chat reads
  * exactly as it did live. Parity is pinned by recorded 2.0.24 sequences

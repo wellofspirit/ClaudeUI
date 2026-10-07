@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * Tests for opencode-session-list (opencode 2.x, ADR-093 §6 / S9):
+ * Tests for opencode-session-list (opencode 2.x, ADR-097 §6 / S9):
  *  - the sidebar list comes from `GET /api/session?parentID=null` (global,
  *    paged), served from the last listing at once and refreshed in the
  *    background — never a spawn per call; [] when opencode is not installed;
@@ -156,7 +156,7 @@ const flush = async (): Promise<void> => {
   await new Promise((done) => setImmediate(done))
 }
 
-describe('the opencode session list (2.x API, ADR-093 §6; onInteraction policy)', () => {
+describe('the opencode session list (2.x API, ADR-097 §6; onInteraction policy)', () => {
   it('maps root sessions → SessionInfo[] (cwd from location, title fallback, archived and ClaudeUI throwaways left out, newest first)', async () => {
     mockListSessions.mockResolvedValue([
       apiSession('ses_a', '/proj/a', 5, { title: 'Fix bug' }),
@@ -398,7 +398,7 @@ describe('the opencode session list (2.x API, ADR-093 §6; onInteraction policy)
   })
 })
 
-// 2.x stored rows (ADR-093 S4): `GET /api/session/:id/message` → Session.Message.Info.
+// 2.x stored rows (ADR-097 S4): `GET /api/session/:id/message` → Session.Message.Info.
 const user = (id: string, created: number, text: string) => ({
   id,
   type: 'user',

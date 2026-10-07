@@ -10,7 +10,7 @@
  * `providers.<id>.models.<m>.capabilities.input`, …) and we patch exactly those
  * leaves through jsonc-parser, byte-preserving every comment and sibling.
  *
- * opencode 2.x (ADR-093 S8):
+ * opencode 2.x (ADR-097 S8):
  *  - The schema is the pinned 2.x `Config.InfoEncoded`
  *    (`shared/opencode-config-schema.json`, generated).
  *  - A SET may only name a path that schema has: 1.x keys (`provider`,

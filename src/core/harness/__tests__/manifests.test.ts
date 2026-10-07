@@ -37,7 +37,7 @@ describe('harness manifests', () => {
     expect(harnessManifest('claude').platforms).toEqual({})
   })
 
-  it('pins opencode to the 2.x line: floor = tested, ceiling 3.0.0 (ADR-093 §1)', () => {
+  it('pins opencode to the 2.x line: floor = tested, ceiling 3.0.0 (ADR-097 §1)', () => {
     const { tested, floor, ceiling } = harnessManifest('opencode')
     expect(tested).toMatch(/^2\.\d+\.\d+$/)
     expect(floor).toBe(tested)

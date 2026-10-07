@@ -136,7 +136,7 @@ export function translateSpecifierPatterns(
   specifier: string | undefined
 ): string[] {
   if (!specifier) return ['*']
-  // `shell` is the 2.x id of the same tool (ADR-093 §3, `permission-v2.ts`).
+  // `shell` is the 2.x id of the same tool (ADR-097 §3, `permission-v2.ts`).
   if (category === 'bash' || category === 'shell') {
     const prefix = specifier.match(/^(.+):\*$/)
     return [prefix ? `${prefix[1]}*` : specifier]
@@ -442,7 +442,7 @@ export function withoutMutatingAllowRules(
 
 /**
  * Inverse of TOOL_TO_CATEGORY (first/canonical Claude tool per opencode category).
- * `shell` and `subagent` are the 2.x ids of `bash` and `task` (ADR-093 §3), so a
+ * `shell` and `subagent` are the 2.x ids of `bash` and `task` (ADR-097 §3), so a
  * 2.x `permission.asked` action maps back the same way.
  */
 const CATEGORY_TO_TOOL: Record<string, string> = {

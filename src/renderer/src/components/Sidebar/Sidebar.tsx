@@ -273,7 +273,7 @@ export function Sidebar({
     [handleRename]
   )
 
-  // opencode's sessions are listed from its server (ADR-093 §6, S9), refreshed
+  // opencode's sessions are listed from its server (ADR-097 §6, S9), refreshed
   // in main in the background. The sidebar opening and the app coming to the
   // front are the moments a stale listing may be refreshed: this nudge is
   // answered from main's cache at once and never awaited — the list renders

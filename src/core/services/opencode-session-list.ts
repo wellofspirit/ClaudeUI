@@ -3,7 +3,7 @@
  *
  * Builds the sidebar's opencode session list, and loads a session's transcript.
  *
- * Everything goes through opencode's own API (ADR-093 §6, S9). 2.x's
+ * Everything goes through opencode's own API (ADR-097 §6, S9). 2.x's
  * `GET /api/session` is GLOBAL — every directory the shared DB knows; the
  * `directory` query narrows it — so the list is one paged
  * `GET /api/session?parentID=null` (root sessions; children are a parent's
@@ -282,7 +282,7 @@ export function __resetOpencodeSessionListForTests(): void {
  * are global by session id), so a burst of history loads reuses one server.
  *
  * Reuses `convertOpencodeHistory` (the 2.x cold converter, held to parity with
- * the live mapper — ADR-093 S4) so there's a single rendering path, children's
+ * the live mapper — ADR-097 S4) so there's a single rendering path, children's
  * transcripts included (`subagentMessages`, `taskNotifications`), and
  * `opencodeV2HistoryStatusLine` (the same reconstruction the session's own
  * resume seeding runs) so the cold figure and the live one agree.

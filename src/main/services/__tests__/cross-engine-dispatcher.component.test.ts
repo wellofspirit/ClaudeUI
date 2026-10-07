@@ -109,7 +109,7 @@ import { callerRestrictionFromAgent } from '../../../core/opencode/caller-restri
 // ---------------------------------------------------------------------------
 
 /**
- * The opencode side of the harness. opencode TARGETS (opencode 2.x, ADR-093
+ * The opencode side of the harness. opencode TARGETS (opencode 2.x, ADR-097
  * S9) have their own suite, `cross-engine-dispatcher-opencode.component.test.ts`,
  * with a fake 2.x server; this file covers the Claude, pi and Codex targets and
  * the shared machinery, so an opencode lease or client here is a test bug.
@@ -6626,7 +6626,7 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
       await finish()
     })
 
-    it("a subagent with `edit: deny` dispatching: the Claude target's settings deny every edit tool (ADR-093 S9, option a)", async () => {
+    it("a subagent with `edit: deny` dispatching: the Claude target's settings deny every edit tool (ADR-097 S9, option a)", async () => {
       // The calling opencode agent's own rules, mapped (caller-restriction.ts).
       const callerRestriction = callerRestrictionFromAgent(
         {

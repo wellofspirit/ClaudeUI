@@ -4,7 +4,7 @@ import { opencodeServerManager } from './OpencodeServerManager'
 import type { ServerConnection } from './OpencodeServerManager'
 // @deprecated — the opencode 1.x session (`prompt_async` + `/event` with
 // `properties`, `/permission/{id}/reply`, `/question/*`, `/abort`), kept
-// verbatim beside its 1.x client until the arc removes 1.x (ADR-093).
+// verbatim beside its 1.x client until the arc removes 1.x (ADR-097).
 // TODO(S10): delete with `OpencodeV1Client`, `event-mapper.ts` and the 1.x
 // permission compiler. The engine registers `OpencodeSession` (2.x, S5).
 import { OpencodeV1Client } from './OpencodeV1Client'
@@ -1749,7 +1749,7 @@ export class OpencodeV1Session extends BaseSession {
     this.unsubscribeServerExit = null
     if (this.conn) {
       // Exact, never by cwd alone: one server serves many directories, and a
-      // config change can leave two servers holding this cwd (ADR-093 §2).
+      // config change can leave two servers holding this cwd (ADR-097 §2).
       opencodeServerManager.releaseIfCurrent(this.cwd, this.conn)
       this.conn = null
       this.client = null

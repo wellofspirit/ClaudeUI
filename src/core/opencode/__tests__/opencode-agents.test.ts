@@ -715,7 +715,7 @@ describe('agent name path guard (F1 backstop)', () => {
   })
 })
 
-// ─── opencode 2.x (ADR-093 S8) ────────────────────────────────────────────────
+// ─── opencode 2.x (ADR-097 S8) ────────────────────────────────────────────────
 
 describe('opencode 2.x agent files', () => {
   const agentsDir = (): string => path.join(configDir, 'agents')

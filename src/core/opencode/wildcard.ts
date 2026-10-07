@@ -146,7 +146,7 @@ export function evaluateOpencodeAsk(
   return verdict
 }
 
-// ── opencode 2.x (`{action, resource, effect}`, ADR-093 §3) ──────────────────
+// ── opencode 2.x (`{action, resource, effect}`, ADR-097 §3) ──────────────────
 
 /** A 2.x rule (structurally `Permission_Rule`). */
 interface V2RuleShape {

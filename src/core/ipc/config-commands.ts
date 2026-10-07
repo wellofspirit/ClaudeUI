@@ -541,7 +541,7 @@ export function configCommands(
         // changed.
         const { modelAllowlist: _ignored, ...nativeFields } = settings
         // `base` is the snapshot the pane edited: with it, only what the pane
-        // changed lands on the file as it is now (ADR-093 S8, review F11).
+        // changed lands on the file as it is now (ADR-097 S8, review F11).
         const snapshot =
           base && typeof base === 'object'
             ? (({ modelAllowlist: _b, ...rest }) => rest)(base as OpencodeConfigSettings)

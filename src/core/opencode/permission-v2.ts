@@ -1,5 +1,5 @@
 /**
- * ClaudeUI's permission model compiled for opencode 2.x (ADR-093 §3, amending
+ * ClaudeUI's permission model compiled for opencode 2.x (ADR-097 §3, amending
  * ADR-022 and ADR-085 for the 2.x engine). Pure: no I/O, no logger.
  *
  * ## 2.x facts this module is built on (`vendor/opencode-v2-src` @ v2.0.24)
@@ -23,7 +23,7 @@
  *   `resource:"*"` and `effect:"deny"`. `edit`/`write`/`patch` share the id
  *   `edit`. Code Mode's `execute` is hidden the same way.
  *
- * ## Decisions (ADR-093 §3 "As built (S6)")
+ * ## Decisions (ADR-097 §3 "As built (S6)")
  *
  * - The session ruleset only TIGHTENS: no `{*: allow}` baseline (every agent
  *   starts from one natively). Mode gates are catch-all `ask`s, the user's

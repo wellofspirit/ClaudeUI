@@ -387,7 +387,7 @@ describe('readDeclaredProviderIds', () => {
 
 // ── writeOpencodeNativeConfig ──────────────────────────────────────────────────
 
-describe('writeOpencodeNativeConfig (opencode 2.x keys, ADR-093 S8)', () => {
+describe('writeOpencodeNativeConfig (opencode 2.x keys, ADR-097 S8)', () => {
   const read = (name = 'opencode.json'): Record<string, any> =>
     jsoncParse(fs.readFileSync(path.join(tmpDir, name), 'utf8'))
 
@@ -800,7 +800,7 @@ describe('writeOpencodeNativeConfig — diff-driven leaf merge', () => {
 
 // ── A 1.x-shaped file: an edited entry moves WHOLE to its 2.x key ───────────────
 
-describe('writeOpencodeNativeConfig — 1.x-shaped files (ADR-093 S8 write policy)', () => {
+describe('writeOpencodeNativeConfig — 1.x-shaped files (ADR-097 S8 write policy)', () => {
   function seed(value: unknown): string {
     const p = path.join(tmpDir, 'opencode.json')
     fs.writeFileSync(p, JSON.stringify(value, null, 2))

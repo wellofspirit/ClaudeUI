@@ -1,6 +1,6 @@
 /**
  * Layer 2: Component tests for the curated per-model capability editor
- * (OpencodeModelCapabilities.tsx), opencode 2.x keys (ADR-093 S8).
+ * (OpencodeModelCapabilities.tsx), opencode 2.x keys (ADR-097 S8).
  *
  * Everything worth guarding is about WHAT LANDS IN THE FILE:
  *

@@ -1,5 +1,5 @@
 /**
- * opencode 2.x contract: the PRODUCTION `OpencodeSession` (ADR-093 S5) on the
+ * opencode 2.x contract: the PRODUCTION `OpencodeSession` (ADR-097 S5) on the
  * real pinned engine — the S2 manager, the S3 client and feed, the S4 mapper,
  * the S6 rulesets and the `claudeui-xeng` plugin all real. Test-side
  * substitutions only: the isolated home/proxy env (sandboxed, loopback-only),

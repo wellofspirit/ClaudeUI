@@ -1,5 +1,5 @@
 /**
- * opencode 2.x contract: non-fatal denial (ADR-093 §3, spike blocker 1).
+ * opencode 2.x contract: non-fatal denial (ADR-097 §3, spike blocker 1).
  * A reject WITH a message fails only the tool — the model reads the message as
  * the tool result and the turn goes on. A reject WITHOUT one ends the turn,
  * which is why every ClaudeUI reject must carry a message.

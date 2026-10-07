@@ -1,7 +1,7 @@
 # opencode 2.x spike: can ClaudeUI move to 2.x only?
 
 Date: 2026-10-06. Time-boxed spike: research plus a throwaway prototype. Read with the draft decision
-[ADR-093](adr/adr-093_opencode-v2-only.md) and the prior research in `.cache/followup-opencode-adoption.md`
+[ADR-097](adr/adr-097_opencode-v2-only.md) and the prior research in `.cache/followup-opencode-adoption.md`
 (main checkout).
 
 **Verdict: GO, with conditions.** All three blockers have a working 2.x answer, each proven against

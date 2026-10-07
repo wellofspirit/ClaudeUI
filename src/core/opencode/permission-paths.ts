@@ -1,6 +1,6 @@
 /**
  * Claude path specifiers (`Read(…)`, `Edit(…)`) → the resource globs opencode
- * 2.x matches file asks against (ADR-093 §3, S6). Pure.
+ * 2.x matches file asks against (ADR-097 §3, S6). Pure.
  *
  * ## How 2.x names a file (`vendor/opencode-v2-src/packages/core/src/file-access.ts` `resolve`)
  *

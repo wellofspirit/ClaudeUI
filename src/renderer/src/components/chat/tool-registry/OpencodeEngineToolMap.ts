@@ -4,7 +4,7 @@
  * the kind bodies consume (so opencode renders through ClaudeUI's rich cards).
  *
  * The kindOf switch below IS the canonical opencode→kind table. It carries
- * BOTH vocabularies (ADR-093 S4):
+ * BOTH vocabularies (ADR-097 S4):
  * - 2.x (`vendor/opencode-v2-src/packages/core/src/tool/plugin/*.ts` `name`):
  *   `shell`, `subagent`, `patch`, `read`/`edit`/`write` taking `path`,
  *   `subagent` taking `agent`; `execute` is Code Mode's wrapper;

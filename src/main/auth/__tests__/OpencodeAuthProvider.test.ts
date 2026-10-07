@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * OpencodeAuthProvider on opencode 2.x (ADR-093 §5): the catalog reads go to
+ * OpencodeAuthProvider on opencode 2.x (ADR-097 §5): the catalog reads go to
  * `/api/integration` + `/api/provider`, every credential write goes through the
  * credential store (here over an in-memory credential table), OAuth sign-ins
  * run on opencode's integration flows, and nothing is ever recycled.

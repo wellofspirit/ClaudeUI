@@ -1,5 +1,5 @@
 /**
- * opencode 2.x contract for S7 (ADR-093 §5/§6): ClaudeUI's PRODUCTION credential
+ * opencode 2.x contract for S7 (ADR-097 §5/§6): ClaudeUI's PRODUCTION credential
  * store and model discovery against a real 2.0.24 server, hermetic (isolated
  * home, refusing proxy; on darwin also loopback-only sandbox-exec and a plugin
  * that rewrites every ChatGPT request to the localhost fixture). Fake keys and

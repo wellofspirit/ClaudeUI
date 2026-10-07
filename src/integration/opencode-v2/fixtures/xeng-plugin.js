@@ -1,4 +1,4 @@
-// Caller-identity plugin in the opencode 2.x shape (ADR-093 §4), installed by the
+// Caller-identity plugin in the opencode 2.x shape (ADR-097 §4), installed by the
 // contract suite as a DIRECTORY plugin. It must stay import-free: opencode loads
 // a structural default export `{ id, setup(ctx) }` (core/src/plugin/module.ts).
 // `execute.before` may replace `event.input`; the tool runs with the replacement

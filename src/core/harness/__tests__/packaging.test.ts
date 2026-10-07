@@ -40,7 +40,7 @@ describe('electron-builder.yml', () => {
     )
   })
 
-  it("unpacks resources/, so opencode can load ClaudeUI's directory plugin from disk (ADR-093 §4)", () => {
+  it("unpacks resources/, so opencode can load ClaudeUI's directory plugin from disk (ADR-097 §4)", () => {
     // opencode 2.x reads a plugin DIRECTORY (index.js + package.json); a path
     // inside app.asar is not a directory to the external process.
     expect(config.asarUnpack).toContain('resources/**')

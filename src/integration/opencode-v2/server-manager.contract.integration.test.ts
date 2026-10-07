@@ -1,5 +1,5 @@
 /**
- * opencode 2.x contract: the PRODUCTION server manager (S2, ADR-093 §2/§4).
+ * opencode 2.x contract: the PRODUCTION server manager (S2, ADR-097 §2/§4).
  *
  * Everything ClaudeUI ships runs here — `OpencodeServerManager`, the v2
  * `OPENCODE_CONFIG_CONTENT` builder, `spawnStdioServer`/`endStdioServer`, the

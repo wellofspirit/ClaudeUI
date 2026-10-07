@@ -1,6 +1,6 @@
 /**
  * opencode 2.x SSE events (`GET /api/event`) that ClaudeUI consumes — a
- * HAND-CURATED closure, not generated (ADR-093 §7).
+ * HAND-CURATED closure, not generated (ADR-097 §7).
  *
  * Why curated: the spec types every event as an opaque JSON string
  * (`V2EventEncoded`, also in the server's own `/openapi.json`). The payloads

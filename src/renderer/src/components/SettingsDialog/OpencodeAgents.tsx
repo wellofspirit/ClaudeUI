@@ -56,7 +56,7 @@ type ViewState =
 // ── Permission tool categories ───────────────────────────────────────
 
 /**
- * opencode 2.x permission actions (ADR-093 §3 key table; 1.x `bash` is
+ * opencode 2.x permission actions (ADR-097 §3 key table; 1.x `bash` is
  * `shell`, `task` is `subagent`, `todowrite`/`lsp` are gone). The service
  * writes a `{action, resource:"*", effect}` rule per non-allow choice.
  */

@@ -711,7 +711,7 @@ app.whenReady().then(() => {
   // of it needs a window; `createWindow()` below only attaches to it.
   core = bootCore({ remoteAccessDisabled })
 
-  // System resume / unlock (ADR-093 §5 rule 2): refresh timers may have slept
+  // System resume / unlock (ADR-097 §5 rule 2): refresh timers may have slept
   // through their deadline, and opencode's ChatGPT row must have time left
   // before the next turn. Best-effort; never throws.
   powerMonitor.on('resume', () => void credentialSync.onSystemResume())
@@ -761,7 +761,7 @@ app.whenReady().then(() => {
     quit: () => app.quit(),
     // opencode 2.x shares its credential table with the user's own opencode:
     // hand the ChatGPT slot back to their credential while a server can still
-    // run (ADR-093 §5). Bounded; a crash skips it and the next start re-asserts.
+    // run (ADR-097 §5). Bounded; a crash skips it and the next start re-asserts.
     prepareQuit: () => credentialSync.prepareQuit(),
     // The first before-quit pass asks the renderer about active worktrees and waits.
     // Windowless there is nobody to ask — and no UI decision to make — so collapse

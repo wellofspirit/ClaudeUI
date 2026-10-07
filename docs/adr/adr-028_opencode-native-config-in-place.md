@@ -4,7 +4,7 @@
 **Date:** 2026-06-29
 **Implements:** [ADR-020](adr-020_v2-persistence-and-config-plane.md) (config-plane principle)
 **Relates to:** [ADR-018](adr-018_v2-engine-vendor-account-model.md), [ADR-019](adr-019_opencode-engine-backend.md), [ADR-022](adr-022_opencode-permission-mapping.md), [ADR-024](adr-024_opencode-interaction-parity.md)
-**Amended by:** [ADR-093](adr-093_opencode-v2-only.md) §6 "As built (S8)" — the principle holds on opencode 2.x (the user's file stays theirs); ClaudeUI's editors write 2.x keys only and read both shapes.
+**Amended by:** [ADR-097](adr-097_opencode-v2-only.md) §6 "As built (S8)" — the principle holds on opencode 2.x (the user's file stays theirs); ClaudeUI's editors write 2.x keys only and read both shapes.
 
 ## Context
 

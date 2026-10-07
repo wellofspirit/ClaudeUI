@@ -42,7 +42,7 @@ vi.mock('../opencode-config', () => ({
   writeOpencodeNativeConfig: (fields: NativeOpencodeFields) => writeNative(fields)
 }))
 vi.mock('../model-discovery', () => ({ invalidateOpencodeModelCache: () => invalidate() }))
-// opencode 2.x (ADR-093 §5): Remove is offered for ClaudeUI's OWN key rows —
+// opencode 2.x (ADR-097 §5): Remove is offered for ClaudeUI's OWN key rows —
 // ClaudeUI's slot record; `credentials` names those integrations here.
 vi.mock('../opencode-credentials', () => ({
   opencodeCredentialStore: {

@@ -1,6 +1,6 @@
 // @vitest-environment node
 /**
- * The 1.x → 2.x config entry migration (ADR-093 S8): upstream's own
+ * The 1.x → 2.x config entry migration (ADR-097 S8): upstream's own
  * `ConfigMigrateV1` at v2.0.24, plus ClaudeUI's mapping of the capability keys
  * 2.x drops (`attachment`, `reasoning`).
  */

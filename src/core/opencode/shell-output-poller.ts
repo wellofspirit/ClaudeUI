@@ -1,6 +1,6 @@
 /**
  * Live output of a running opencode 2.x shell call (ADR-032 bash streaming,
- * ported by ADR-093 S4).
+ * ported by ADR-097 S4).
  *
  * 1.x republished a cumulative output preview on the tool part's metadata.
  * 2.x does not stream shell output on the feed at all: the shell tool reports

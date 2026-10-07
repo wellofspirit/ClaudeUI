@@ -121,7 +121,7 @@ describe('QuitCoordinator', () => {
     expect(quit).toHaveBeenCalledOnce()
   })
 
-  describe('prepareQuit (ADR-093 §5: the opencode slot is handed back while services live)', () => {
+  describe('prepareQuit (ADR-097 §5: the opencode slot is handed back while services live)', () => {
     it('runs once after confirm, BEFORE quit and while nothing is torn down', async () => {
       let release!: () => void
       const prepareQuit = vi.fn(() => new Promise<void>((resolve) => (release = resolve)))

@@ -95,7 +95,7 @@ describe('the ChatGPT feed and a harness that does not run (ADR-082 §8, S7d)', 
     expect(h.opencode.feed).toHaveBeenCalledWith(OPENCODE_CODEX_VENDOR_ID, expect.anything())
     expect(h.opencode.held()).toBe('access-r1')
     expect(h.watching('pi')).toBe(false)
-    // opencode 2.x has no auth file to watch (ADR-093 §5).
+    // opencode 2.x has no auth file to watch (ADR-097 §5).
     expect(h.watching('opencode')).toBe(false)
     h.sync.stop()
   })

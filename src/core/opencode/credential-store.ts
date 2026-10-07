@@ -1,5 +1,5 @@
 /**
- * ClaudeUI's credentials in opencode 2.x's credential table (ADR-093 §5).
+ * ClaudeUI's credentials in opencode 2.x's credential table (ADR-097 §5).
  *
  * 2.x keeps credentials in its database, several per integration with one
  * ACTIVE, behind `/api/credential`. The data dir is shared with the user's own

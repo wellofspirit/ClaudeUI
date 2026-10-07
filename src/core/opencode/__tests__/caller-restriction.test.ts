@@ -1,5 +1,5 @@
 /**
- * A subagent child's restriction carried into its dispatch (ADR-093 S9,
+ * A subagent child's restriction carried into its dispatch (ADR-097 S9,
  * option a): the agent's own rules alone are a floor, mapped to Claude-form
  * deny/ask rules; only ever tighter; a deny with no exact equivalent becomes
  * the whole category.

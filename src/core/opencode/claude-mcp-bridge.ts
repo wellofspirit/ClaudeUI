@@ -6,7 +6,7 @@
  * Claude-scoped MCP servers (user/project/local) into opencode 2.x's native
  * `mcp.servers.<name>` shape (`Mcp.LocalConfig` / `Mcp.RemoteConfig`,
  * vendor/opencode-v2-src/packages/schema/src/mcp.ts) and returns them for
- * injection into OPENCODE_CONFIG_CONTENT at spawn (ADR-093 §4).
+ * injection into OPENCODE_CONFIG_CONTENT at spawn (ADR-097 §4).
  *
  * Key constraints:
  * - Pure I/O separation: `translateClaudeMcpServer` is pure; `collectClaudeMcpForOpencode`

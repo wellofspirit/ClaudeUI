@@ -1,5 +1,5 @@
 /**
- * A spy `OpencodeChatgptTarget` (opencode 2.x, ADR-093 §5) for CredentialSync
+ * A spy `OpencodeChatgptTarget` (opencode 2.x, ADR-097 §5) for CredentialSync
  * tests. Its spies keep the 1.x feed-target call shape — `feed('openai', cred)`,
  * `remove('openai')` — so an assertion reads the same for both engines; the
  * credential store behind the real target is tested on its own

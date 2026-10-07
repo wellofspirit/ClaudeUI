@@ -2,7 +2,7 @@
  * opencode 2.x payloads → ClaudeUI content, shared by the LIVE mapper
  * (`v2-event-mapper.ts`) and the COLD history converter (`v2-history.ts`), so
  * a turn read back from `GET /message` renders exactly as it streamed
- * (ADR-093 S4). Everything here is pure apart from `blobStore` interning.
+ * (ADR-097 S4). Everything here is pure apart from `blobStore` interning.
  *
  * Wire facts (opencode v2.0.24, `vendor/opencode-v2-src`):
  * - A tool result is `content: Tool.Content[]` (`{type:'text',text}` |

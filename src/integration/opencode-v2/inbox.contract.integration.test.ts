@@ -1,6 +1,6 @@
 /**
  * opencode 2.x contract: the native inbox replaces ClaudeUI's host-held queue
- * (ADR-093 §9). Inbox items carry ClaudeUI-chosen ids; a steer lands inside the
+ * (ADR-097 §9). Inbox items carry ClaudeUI-chosen ids; a steer lands inside the
  * running turn, queued items after it, in order; a cancelled item never
  * reaches the model; re-posting an id is idempotent.
  */

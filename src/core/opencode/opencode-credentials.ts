@@ -1,5 +1,5 @@
 /**
- * The one {@link OpencodeCredentialStore} of the process (ADR-093 §5), on the
+ * The one {@link OpencodeCredentialStore} of the process (ADR-097 §5), on the
  * pooled server for ClaudeUI's own directory — a lease per operation that runs
  * no turn. The slot records default to memory so a test touches no home; the
  * boot seam (`core-services.ts`) wires the file.
@@ -50,7 +50,7 @@ export const opencodeCredentialStore = new OpencodeCredentialStore({
 })
 
 /**
- * First contact with every new server (ADR-093 §5, owner decision 2026-10-07):
+ * First contact with every new server (ADR-097 §5, owner decision 2026-10-07):
  * proven copies of ClaudeUI's own sign-in are deleted through the credential
  * routes BEFORE the server serves anything that can activate a location.
  * opencode resolves (and so may refresh) the active OAuth credential only when

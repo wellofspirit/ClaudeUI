@@ -3,7 +3,7 @@
  * + `opencode-event-stream`), not the harness's: directory routing by header,
  * a turn followed on the client's own feed, history, the directory-filtered
  * session list, delete with its typed error, and the reconnect contract after
- * a server-side drop (ADR-093 §2, §7; S3).
+ * a server-side drop (ADR-097 §2, §7; S3).
  *
  *   OPENCODE_V2_INTEGRATION=1 [OPENCODE_V2_BIN=/path/to/opencode] \
  *     bun run test:integration src/integration/opencode-v2

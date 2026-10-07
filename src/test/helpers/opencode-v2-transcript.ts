@@ -1,5 +1,5 @@
 /**
- * Live/cold parity for the opencode 2.x mapper (ADR-093 S4): fold the LIVE
+ * Live/cold parity for the opencode 2.x mapper (ADR-097 S4): fold the LIVE
  * mapper outputs into a transcript the way the shared reducer would
  * (`core/shared/sync/reducer.ts`: upsert by id keeping appended results,
  * item open/delta/seal on a block, a tool result appended to the message

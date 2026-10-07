@@ -138,7 +138,7 @@ describe('Sidebar FC', () => {
     return render(React.createElement(Sidebar))
   }
 
-  it("nudges main's opencode list on open and on app focus — never awaiting it (ADR-093 S9)", async () => {
+  it("nudges main's opencode list on open and on app focus — never awaiting it (ADR-097 S9)", async () => {
     const calls: number[] = []
     // A refresh that never answers must not hold the sidebar.
     app.bridge.ipcMain.handle('session:list-opencode', async () => {

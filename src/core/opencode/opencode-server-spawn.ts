@@ -1,5 +1,5 @@
 /**
- * Spawning and ending one `opencode serve --stdio` (opencode 2.x, ADR-093 §2).
+ * Spawning and ending one `opencode serve --stdio` (opencode 2.x, ADR-097 §2).
  *
  * - Listen line: `--stdio` prints ONE JSON line `{"url": "http://127.0.0.1:<port>"}`
  *   on stdout (vendor/opencode-v2-src/packages/cli/src/server-process.ts). It
@@ -12,7 +12,7 @@
  *   same contract as pi, ADR-092). Ending = close stdin, then a tree kill only
  *   if it outlives the grace period. If ClaudeUI itself dies the pipe closes and
  *   the server follows, so no orphan survives a crash.
- * - Data dir: the user's default (ADR-093 §6, owner decision: shared). No XDG
+ * - Data dir: the user's default (ADR-097 §6, owner decision: shared). No XDG
  *   or HOME override here, ever — the parent env is inherited as is.
  */
 import { spawn as realSpawn } from 'node:child_process'
@@ -32,7 +32,7 @@ export const SERVE_ARGS: readonly string[] = [
 
 /**
  * How long a start may take to print its URL. The first 2.x start on a
- * 1.x-created data dir migrates it in place (ADR-093 §6), so this is generous.
+ * 1.x-created data dir migrates it in place (ADR-097 §6), so this is generous.
  */
 export const LISTEN_TIMEOUT_MS = 60_000
 

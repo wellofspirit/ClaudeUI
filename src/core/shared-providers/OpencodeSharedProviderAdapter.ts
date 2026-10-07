@@ -21,7 +21,7 @@ import type {
  * key, or removing one that is not there, at boot must not kill the model probe
  * in flight (`OpencodeAuthProvider.setVendorApiKey` / `removeVendorAuth`).
  *
- * opencode 2.x (ADR-093 §5): a key is ClaudeUI's own `cred_claudeui_*` row, a
+ * opencode 2.x (ADR-097 §5): a key is ClaudeUI's own `cred_claudeui_*` row, a
  * removal deletes only those rows (and, while opencode is not installed, waits
  * for it in ClaudeUI's own record — there is no file to edit).
  */
@@ -193,7 +193,7 @@ export class OpencodeSharedProviderAdapter {
 
   /**
    * Take ClaudeUI's key for this definition out of opencode (its
-   * `cred_claudeui_*` rows, ADR-093 §5). Whether opencode runs no longer picks
+   * `cred_claudeui_*` rows, ADR-097 §5). Whether opencode runs no longer picks
    * a path: while it is not installed the removal is recorded and runs when it
    * is (ADR-082 §8, S7d's "at once" as far as opencode allows).
    */
@@ -270,7 +270,7 @@ function npmForProtocol(protocol: NonNullable<SharedProviderDefinition['protocol
  * absent fact — except the limits, where 0 is opencode's own "unknown". Key
  * order matches the config reader's.
  *
- * opencode 2.x (ADR-093 S8): `reasoning: false` is written as `variants: []`
+ * opencode 2.x (ADR-097 S8): `reasoning: false` is written as `variants: []`
  * (no reasoning variants); `true` as NO `variants` (opencode generates effort
  * variants from the package), which the reader reports as unknown — see
  * `mergeCapabilities`.

@@ -58,7 +58,7 @@ export const HARNESS_COMMANDS: Record<HarnessId, string> = {
 }
 
 /**
- * Other command names a harness installs (ADR-093 §1): opencode 2.x also
+ * Other command names a harness installs (ADR-097 §1): opencode 2.x also
  * ships `opencode2` (npm's second bin, the install script's legacy shim), so a
  * 2.x install is found even where a 1.x `opencode` shadows it on PATH.
  */

@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * opencode model and provider discovery on 2.x (ADR-093 §6, S7): one probe of
+ * opencode model and provider discovery on 2.x (ADR-097 §6, S7): one probe of
  * `/api/integration` + `/api/provider` + `/api/model` (shapes as 2.0.24 answers
  * them), no negative cache of a cold-boot empty model list, a session's own
  * server reused at eager connect, and the generation guard. Hermetic: the
@@ -321,7 +321,7 @@ describe('discoverOpencodeModels', () => {
   })
 })
 
-// ── A cold boot (ADR-093 §6) ─────────────────────────────────────────────────
+// ── A cold boot (ADR-097 §6) ─────────────────────────────────────────────────
 
 describe('a cold location', () => {
   it('an empty /api/model right after boot is read again, never taken for "no models"', async () => {

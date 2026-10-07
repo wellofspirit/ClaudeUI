@@ -1,5 +1,5 @@
 /**
- * The re-read half of the 2.x reconnect contract (ADR-093 §7, S4): on
+ * The re-read half of the 2.x reconnect contract (ADR-097 §7, S4): on
  * `connected {reconnected:true}` the consumer awaits this BEFORE applying the
  * next feed event (the `for await` pause is what keeps the read and the live
  * events from interleaving), and dispatches what it returns.

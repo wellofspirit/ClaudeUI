@@ -131,7 +131,7 @@ export function planModeRefusesAsk(
   scope?: PlanReadOnlyScope
 ): boolean {
   if (approval.toolName === 'edit') return true
-  // `subagent` is 2.x's `task` (ADR-093 §3).
+  // `subagent` is 2.x's `task` (ADR-097 §3).
   if (approval.toolName === 'task' || approval.toolName === 'subagent')
     return (approval.patterns ?? []).includes('general')
   if (!isShellToolName(approval.toolName)) return false

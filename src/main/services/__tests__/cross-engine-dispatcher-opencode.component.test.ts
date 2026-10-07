@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * CrossEngineDispatcher — opencode targets on opencode 2.x (ADR-093 S9;
+ * CrossEngineDispatcher — opencode targets on opencode 2.x (ADR-097 S9;
  * ADR-033, ADR-085, ADR-088, ADR-091). The dispatcher's opencode client is the
  * structural `DispatchTargetClient` (a Pick of the 2.x `OpencodeClient`), so a
  * FAKE SERVER here speaks the 2.x wire: inbox prompts, the event feed in the
@@ -581,7 +581,7 @@ const emitted = (ctx: { emit: ReturnType<typeof vi.fn> }, channel: string) =>
 const createdRules = (client: FakeOpencode['client'], n = 0): Permission_Rule[] =>
   (client.createSession.mock.calls[n][0] as { permissions: Permission_Rule[] }).permissions
 
-/** No reject ever went out without a message (ADR-093 §3). */
+/** No reject ever went out without a message (ADR-097 §3). */
 function expectEveryRejectHasAMessage(client: FakeOpencode['client']): void {
   for (const [, , reply] of client.replyPermission.mock.calls) {
     const r = reply as { decision: string; message?: string }

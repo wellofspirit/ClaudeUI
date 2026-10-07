@@ -1031,7 +1031,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'fs-read',
     kind: 'query',
     handler: async () => {
-      // The sidebar's open/focus nudge (ADR-093 §6, S9): answered from the
+      // The sidebar's open/focus nudge (ADR-097 §6, S9): answered from the
       // cached listing at once; a stale one is refreshed in the background.
       return await listOpencodeSessionsGlobal({ interaction: true })
     }
@@ -1909,7 +1909,7 @@ function startProjectsWatcher(): void {
   setInterval(() => {
     void refreshCanonicalDirectories()
   }, DIRECTORY_POLL_MS).unref?.()
-  // opencode's list is refreshed from its server in the background (ADR-093
+  // opencode's list is refreshed from its server in the background (ADR-097
   // §6, S9): a refresh that changed it re-emits the merged listing at once.
   onOpencodeSessionListChanged(() => void refreshCanonicalDirectories())
 

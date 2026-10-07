@@ -17,7 +17,7 @@
  * dialog mounted it before the restyle). The frame is presentation only — every
  * write below is identical either way, pinned by a patch-identity test.
  *
- * WHAT IT WRITES (opencode 2.x, ADR-093 S8). The model's entry lives at
+ * WHAT IT WRITES (opencode 2.x, ADR-097 S8). The model's entry lives at
  * `providers.<providerId>.models.<modelId>`. Every commit is a minimal LEAF
  * diff of that entry (diffToPatches → patchOpencodeNative), so the keys this
  * editor does not render — modelID, family, name, hand-written extras — are

@@ -46,7 +46,7 @@ afterEach(() => {
   rmSync(testHome, { recursive: true, force: true })
 })
 
-/** Unexpired: opencode 2.x is never vended an expired token (ADR-093 §5). */
+/** Unexpired: opencode 2.x is never vended an expired token (ADR-097 §5). */
 const FUTURE = Date.now() + 24 * 60 * 60 * 1000
 
 function cred(over: Partial<VaultCredential> & { ws?: string } = {}): VaultCredential {

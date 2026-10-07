@@ -204,7 +204,7 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   })
   opencodeServerManager.setDispatchAgent((req, ctx) => crossEngineDispatcher.dispatch(req, ctx))
   // ClaudeUI's opencode config writes (settings, raw editor, providers, tools,
-  // agent files) reload the running servers' locations (ADR-093 S8).
+  // agent files) reload the running servers' locations (ADR-097 S8).
   onOpencodeConfigWritten((reason) => void scheduleOpencodeConfigReload(reason))
 
   // The host's own post-session wiring — see the module header for why this is
@@ -280,7 +280,7 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     fedTokens: fedTokenHistory()
   })
 
-  // opencode 2.x credentials (ADR-093 §5). ClaudeUI's record of the slots it
+  // opencode 2.x credentials (ADR-097 §5). ClaudeUI's record of the slots it
   // holds in opencode's credential table — the file, here, for both hosts (the
   // store defaults to memory so its tests touch no home). Then the session's
   // two meeting points with the vault: the pre-turn gate and the recovery

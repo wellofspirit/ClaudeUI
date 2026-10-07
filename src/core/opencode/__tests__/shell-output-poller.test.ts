@@ -1,5 +1,5 @@
 /**
- * Live shell output for opencode 2.x (ADR-093 S4): 2.x pushes no shell output
+ * Live shell output for opencode 2.x (ADR-097 S4): 2.x pushes no shell output
  * on the feed, so a running call is followed by paging
  * `GET /api/shell/{id}/output` from a byte cursor. The fake below answers as
  * `core/src/shell.ts` `output` does at 2.0.24: the bytes `[cursor,

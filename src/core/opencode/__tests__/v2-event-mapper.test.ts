@@ -1,5 +1,5 @@
 /**
- * The opencode 2.x live mapper (ADR-093 S4), per event family. Payload
+ * The opencode 2.x live mapper (ADR-097 S4), per event family. Payload
  * shapes follow `protocol-v2/events.ts` (transcribed from upstream
  * `schema/src/session-event.ts` at 2.0.24) and the recorded sequences in
  * `fixtures/opencode-v2/`; `v2-parity.test.ts` holds the mapper to the cold
