@@ -415,6 +415,17 @@ function normalizeAbsolute(p: string): string {
 }
 
 /**
+ * Claude Code's Windows absolute rule `//c/rest` (cli.js writes `C:/x` that way
+ * and reads it back as drive `C:` + `/rest`); `//c` is the drive root. cli.js
+ * does not recognise `//C:/rest`, but accepting it only ever tightens a deny.
+ * Only a single-letter first segment is a drive. Null for anything else.
+ */
+function windowsDriveRule(specifier: string): string | null {
+  const match = /^\/\/([A-Za-z]):?(?:[\\/](.*))?$/.exec(specifier)
+  return match ? `${match[1].toUpperCase()}:/${match[2] ?? ''}` : null
+}
+
+/**
  * RULE-side normalisation: does this specifier denote an ABSOLUTE location,
  * and if so what glob does it become? Returns null for an ordinary
  * cwd-relative glob (`src/**`), whose semantics are deliberately untouched.
@@ -427,7 +438,8 @@ function normalizeAbsolute(p: string): string {
  *
  *  - `//abs/path/**` — Claude rule syntax marks an absolute path with a
  *    DOUBLED leading slash (a single `/` means "relative to the settings file"
- *    and is left alone here). Strip one slash.
+ *    and is left alone here). Strip one slash. On a Windows session (`windows`)
+ *    `//c/rest` (and `//C:/rest`) is the drive form `C:/rest`.
  *  - `~` / `~/…` — the user's home directory.
  *  - `X:\…` / `X:/…` / `\\server\share\…` — Windows absolute + UNC.
  *
@@ -435,8 +447,10 @@ function normalizeAbsolute(p: string): string {
  * Claude `//`-absolute form (→ `/server/share/**`); spell UNC rules with
  * backslashes, as Windows itself does, to get UNC semantics.
  */
-function absoluteSpecifierGlob(specifier: string): string | null {
-  if (specifier.startsWith('//')) return normalizeAbsolute(specifier.slice(1))
+function absoluteSpecifierGlob(specifier: string, windows: boolean): string | null {
+  if (specifier.startsWith('//')) {
+    return normalizeAbsolute((windows ? windowsDriveRule(specifier) : null) ?? specifier.slice(1))
+  }
   if (specifier === '~') return normalizeAbsolute(homedir())
   if (specifier.startsWith('~/') || specifier.startsWith('~\\')) {
     return normalizeAbsolute(`${homedir().replace(/[\\/]+$/, '')}/${specifier.slice(2)}`)
@@ -524,7 +538,12 @@ function ruleMatchesTool(
     // An absolute/home/Windows-absolute specifier is matched against the
     // ABSOLUTE tool path; everything else keeps the cwd-relative semantics
     // (which is what opencode's real server-side matcher compares against).
-    const absoluteGlob = absoluteSpecifierGlob(parsed.specifier)
+    // `//c/x` is a drive on a Windows session (cwd's own syntax, as in
+    // `pathFlavor`; the host platform only when there is no cwd).
+    const absoluteGlob = absoluteSpecifierGlob(
+      parsed.specifier,
+      cwd ? looksWindowsAbsolute(cwd) : process.platform === 'win32'
+    )
     if (absoluteGlob !== null) {
       return claudeGlobMatches(resolveAbsoluteMatchPath(rawPath, cwd), absoluteGlob)
     }
