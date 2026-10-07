@@ -23,6 +23,17 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, beforeEach, expect, it, vi, type TestContext } from 'vitest'
 
+/**
+ * A text file by its BOM: 2.x runs shell commands through PowerShell on
+ * Windows, whose `>` writes UTF-16LE with a BOM; anywhere else it is UTF-8.
+ */
+function readTextByBom(file: string): string {
+  const bytes = readFileSync(file)
+  return bytes[0] === 0xff && bytes[1] === 0xfe
+    ? bytes.subarray(2).toString('utf16le')
+    : bytes.toString('utf8')
+}
+
 const holder = vi.hoisted(() => ({ blockHoldSeconds: 0 }))
 
 vi.mock('../../core/services/claude-settings', () => ({
@@ -262,7 +273,7 @@ describeV2('opencode 2.x contract: the dispatcher with an opencode target', () =
       review: expect.objectContaining({ reviewer: 'auto-mode', decision: 'approved' })
     })
     // It ran: the redirect wrote its file.
-    expect(readFileSync(join(cwd, 'judged.txt'), 'utf8').trim()).toBe('judged')
+    expect(readTextByBom(join(cwd, 'judged.txt')).trim()).toBe('judged')
     // The card streamed under the dispatch tool_use id, and ended completed.
     expect(of('session:subagent-message').length).toBeGreaterThan(0)
     expect(of('session:task-notification').at(-1)).toMatchObject({

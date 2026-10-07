@@ -93,7 +93,7 @@ describeV2('opencode 2.x contract: config writers (S8)', () => {
       .filter(
         (line) =>
           line.includes('configuration normalization diagnostic') &&
-          line.includes(file) &&
+          (line.includes(file) || line.includes(JSON.stringify(file).slice(1, -1))) &&
           (/timestamp=(\S+)/.exec(line)?.[1] ?? '') >= since
       )
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
