@@ -19,6 +19,14 @@ import { buildSessionRuleset } from '../../core/opencode/permission-v2'
 import type { FixtureProvider } from './harness/fixture-provider'
 import { describeV2, fixtureConfig, nonce, useRig } from './harness/host'
 
+const slashed = (path: string): string => path.replaceAll('\\', '/')
+
+/** The Claude absolute-path rule for `root` (cli.js `ht`): `//abs`, or `//c/rest` for a drive path. */
+function canonicalAbsolute(root: string): string {
+  const drive = /^([A-Za-z]):[\\/](.*)$/.exec(root)
+  return drive ? `//${drive[1].toLowerCase()}/${slashed(drive[2])}` : `/${slashed(root)}`
+}
+
 interface Scripted {
   readonly baseURL: string
   readonly toolsSeen: string[][]
@@ -120,7 +128,7 @@ describeV2('opencode 2.x contract: path rules from a sub-directory session', () 
     return { root, pkg: join(root, 'pkg'), secret: join(root, 'secrets', 'x') }
   }
 
-  async function editUp(denies: string[]) {
+  async function editUp(denies: (root: string) => string[]) {
     const r = rig()
     const { root, pkg, secret } = repo()
     const { rules } = buildSessionRuleset({
@@ -129,7 +137,7 @@ describeV2('opencode 2.x contract: path rules from a sub-directory session', () 
       permissions: {
         allow: [],
         ask: [],
-        deny: denies.map((d) => d.replace('<repo>', root)),
+        deny: denies(root),
         additionalDirectories: [],
         defaultMode: undefined
       },
@@ -156,14 +164,23 @@ describeV2('opencode 2.x contract: path rules from a sub-directory session', () 
   }
 
   it('control: without a rule, acceptEdits edits ../secrets/x (the call reaches the file)', async () => {
-    const { content, failed, end } = await editUp([])
+    const { content, failed, end } = await editUp(() => [])
     expect(failed).toHaveLength(0)
     expect(content).toBe('beta\n')
     expect(end.type).toBe('session.execution.succeeded')
   })
 
-  it('deny Edit(//<repo>/secrets/**) blocks the edit asked as ../secrets/x', async () => {
-    const { content, failed, asked, end } = await editUp(['Edit(/<repo>/secrets/**)'])
+  // The canonical absolute rule is `//<abs>` on POSIX and `//c/<rest>` on
+  // Windows (cli.js writes `C:/x` that way); on Windows the bare drive form
+  // `C:/<rest>` is absolute too.
+  const forms: [string, (root: string) => string][] = [
+    ['//<repo>/secrets/**', (root) => `Edit(${canonicalAbsolute(root)}/secrets/**)`]
+  ]
+  if (process.platform === 'win32')
+    forms.push(['<drive>:/<repo>/secrets/**', (root) => `Edit(${slashed(root)}/secrets/**)`])
+
+  it.each(forms)('deny Edit(%s) blocks the edit asked as ../secrets/x', async (_form, rule) => {
+    const { content, failed, asked, end } = await editUp((root) => [rule(root)])
     expect(asked).toHaveLength(0)
     expect(failed.map((e) => e.data.error)).toEqual([
       { type: 'permission.rejected', message: 'Permission denied: edit' }

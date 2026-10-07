@@ -14,7 +14,8 @@
  *
  * A deny that misses its file is a silent allow, so deny/ask rules compile to
  * every spelling of the files they cover:
- * - an absolute rule (`//abs`, `~/x`, `C:\x`): the absolute form, plus the
+ * - an absolute rule (`//abs`, `~/x`, `C:\x`; on Windows `//c/x` and `//C:/x`
+ *   are the drive form `C:/x`, as in Claude Code): the absolute form, plus the
  *   relative form against the session directory AND each of its ancestors
  *   (`../`-prefixed) whose subtree the rule's literal prefix lies in — the
  *   worktree root is one of them, wherever it is. A form for an ancestor above
@@ -46,8 +47,10 @@ export interface PathCompileContext {
   cwd?: string
   /** The session's git worktree root, when known (a settings-relative root candidate). */
   worktree?: string
-  /** Fold case when comparing directories (default: on win32). */
+  /** Fold case when comparing directories (default: on win32, per `platform`). */
   caseInsensitive?: boolean
+  /** The platform `//c/x` is read for (default `process.platform`). */
+  platform?: NodeJS.Platform
 }
 
 const GLOB = /[*?]/
@@ -59,9 +62,29 @@ function isWindowsAbsolute(spec: string): boolean {
   return /^[A-Za-z]:[\\/]/.test(spec) || spec.startsWith('\\\\')
 }
 
-/** A Claude specifier's absolute form, or `null` for a relative / settings-relative one. */
-export function absoluteSpecifier(spec: string, home: string = homedir()): string | null {
-  if (spec.startsWith('//')) return slash(spec.slice(1))
+/**
+ * Claude Code's Windows absolute rule: `//c/rest` (`ht` writes `C:/x` that way,
+ * `GSt` reads it back as root `C:\` + `/rest`). `//c` is the drive root;
+ * `//C:/rest` is not recognised by cli.js but only ever tightens a deny, so it
+ * is accepted too. Only a single-letter first segment is a drive.
+ */
+function windowsDriveRule(spec: string): string | null {
+  const match = /^\/\/([A-Za-z]):?(?:[\\/](.*))?$/.exec(spec)
+  return match ? `${match[1]!.toUpperCase()}:/${slash(match[2] ?? '')}` : null
+}
+
+/**
+ * A Claude specifier's absolute form, or `null` for a relative / settings-relative one.
+ * `platform` decides how `//c/x` reads: a drive on win32, the POSIX `/c/x` elsewhere.
+ */
+export function absoluteSpecifier(
+  spec: string,
+  home: string = homedir(),
+  platform: NodeJS.Platform = process.platform
+): string | null {
+  if (spec.startsWith('//')) {
+    return (platform === 'win32' ? windowsDriveRule(spec) : null) ?? slash(spec.slice(1))
+  }
   if (spec === '~') return trimTrailing(slash(home))
   if (spec.startsWith('~/') || spec.startsWith('~\\'))
     return `${trimTrailing(slash(home))}/${slash(spec.slice(2))}`
@@ -146,13 +169,13 @@ export function pathResources(
   conservative: boolean
 ): string[] {
   const home = ctx.home ?? homedir()
-  const fold = ctx.caseInsensitive ?? process.platform === 'win32'
+  const fold = ctx.caseInsensitive ?? (ctx.platform ?? process.platform) === 'win32'
   const cwd = ctx.cwd ? trimTrailing(slash(ctx.cwd)) : undefined
   const out: string[] = []
   const add = (value: string) => {
     if (value && !out.includes(value)) out.push(value)
   }
-  const abs = absoluteSpecifier(specifier, home)
+  const abs = absoluteSpecifier(specifier, home, ctx.platform)
 
   if (!conservative) {
     if (abs !== null) {

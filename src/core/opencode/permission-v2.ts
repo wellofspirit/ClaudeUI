@@ -92,6 +92,8 @@ export interface CompileV2Options {
   cwd?: string
   /** The session's git worktree root, when known (a settings-relative `/x` root). */
   worktree?: string
+  /** The platform `//c/x` path rules are read for (default `process.platform`). */
+  platform?: NodeJS.Platform
 }
 
 const slash = (value: string): string => value.replaceAll('\\', '/')
@@ -167,7 +169,7 @@ export function compileClaudeRulesV2(
   ]
   for (const dir of perms.additionalDirectories ?? []) {
     if (!dir) continue
-    const abs = absoluteSpecifier(dir, opts.home) ?? slash(dir)
+    const abs = absoluteSpecifier(dir, opts.home, opts.platform) ?? slash(dir)
     out.push(rule('external_directory', 'allow', `${abs.replace(/\/+$/, '')}/*`))
   }
   return out
@@ -345,6 +347,8 @@ export interface SessionRulesetInput {
   externalDirAllows?: readonly V2Rule[]
   /** Home for `~/` specifiers (tests). */
   home?: string
+  /** The platform path rules are read for (tests; default `process.platform`). */
+  platform?: NodeJS.Platform
 }
 
 /** The compiled session ruleset and what the host keeps beside it. */
@@ -374,7 +378,8 @@ export function buildSessionRuleset(input: SessionRulesetInput): SessionRuleset 
     mcpServers: input.mcpServers,
     cwd: input.cwd,
     worktree: input.worktree,
-    home: input.home
+    home: input.home,
+    platform: input.platform
   })
   const effective = autoMode
     ? withoutAllowRulesV2(userRules)

@@ -33,7 +33,7 @@ import {
   type SessionRulesetInput,
   type V2Rule
 } from '../permission-v2'
-import { pathResources } from '../permission-paths'
+import { absoluteSpecifier, pathResources } from '../permission-paths'
 import { evaluateV2Call, lastMatchingV2Rule, v2ToolHidden } from '../wildcard'
 
 function perms(p: Partial<ClaudePermissions>): ClaudePermissions {
@@ -780,5 +780,69 @@ describe('auto mode (review #10)', () => {
       evaluateV2Call(rules, 'external_directory', ['/data/opencode/tool-output/*'], 'linux')
     ).toBe('allow')
     expect(evaluateV2Call(rules, 'external_directory', ['/etc/*'], 'linux')).toBe('ask')
+  })
+})
+
+describe('Windows absolute rules: `//c/x` is the canonical drive form (cli.js `ht`/`GSt`)', () => {
+  const win = { cwd: 'C:/repo/pkg', worktree: 'C:/repo', home: HOME, platform: 'win32' } as const
+
+  it.each(['//c/repo/secrets/**', '//C:/repo/secrets/**', 'C:\\repo\\secrets\\**'])(
+    'win32: deny %s covers the drive form and the worktree-relative form',
+    (spec) => {
+      const resources = pathResources(spec, win, true)
+      expect(resources).toEqual(expect.arrayContaining(['C:/repo/secrets/**', '../secrets/**']))
+      // Nothing keeps the `/c/…` spelling that no 2.x ask can produce.
+      expect(resources.some((x) => x.startsWith('/c/') || x.startsWith('/C:'))).toBe(false)
+    }
+  )
+
+  it('win32: the bare drive `//c` is the drive root', () => {
+    expect(absoluteSpecifier('//c', HOME, 'win32')).toBe('C:/')
+    expect(absoluteSpecifier('//c/', HOME, 'win32')).toBe('C:/')
+    expect(absoluteSpecifier('//d/x/y', HOME, 'win32')).toBe('D:/x/y')
+  })
+
+  it('win32: a multi-letter first segment is a POSIX-style path, not a drive', () => {
+    expect(absoluteSpecifier('//cc/x', HOME, 'win32')).toBe('/cc/x')
+  })
+
+  it('POSIX: `//c/x` stays `/c/x`', () => {
+    expect(absoluteSpecifier('//c/x', HOME, 'darwin')).toBe('/c/x')
+    expect(absoluteSpecifier('//c/x', HOME, 'linux')).toBe('/c/x')
+    expect(pathResources('//c/x', { ...win, platform: 'darwin', cwd: '/proj' }, true)).toContain(
+      '/c/x'
+    )
+  })
+
+  it('an allow keeps its own (drive) spelling plus the relative form under the cwd', () => {
+    expect(pathResources('//c/repo/pkg/src/**', win, false)).toEqual([
+      'C:/repo/pkg/src/**',
+      'src/**'
+    ])
+  })
+
+  it('buildSessionRuleset: the deny blocks the resources 2.x asks with on Windows', () => {
+    const { rules } = buildSessionRuleset({
+      mode: 'acceptEdits',
+      autoMode: false,
+      permissions: perms({ deny: ['Edit(//c/repo/secrets/**)'] }),
+      mcpServers: ['claudeui'],
+      ...win
+    })
+    const all = [r('*', 'allow'), ...rules]
+    // Inside the worktree, outside the `C:/repo/pkg` session directory.
+    expect(evaluateV2Call(all, 'edit', ['../secrets/k.pem'], 'win32')).toBe('deny')
+    // Outside the worktree: asked by its absolute path (drive case does not matter).
+    expect(evaluateV2Call(all, 'edit', ['C:/repo/secrets/k.pem'], 'win32')).toBe('deny')
+    expect(evaluateV2Call(all, 'edit', ['c:/repo/secrets/k.pem'], 'win32')).toBe('deny')
+    expect(evaluateV2Call(all, 'edit', ['../src/k.ts'], 'win32')).toBe('allow')
+  })
+
+  it('compileClaudeRulesV2: additionalDirectories accept `//c/x` on win32', () => {
+    expect(
+      compileClaudeRulesV2(perms({ additionalDirectories: ['//c/shared'] }), {
+        platform: 'win32'
+      })
+    ).toEqual([r('external_directory', 'allow', 'C:/shared/*')])
   })
 })
