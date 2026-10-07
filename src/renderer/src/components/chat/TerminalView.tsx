@@ -28,11 +28,17 @@ export function TerminalView({ text, maxHeight }: Props): React.JSX.Element {
   // Fresh AnsiUp per conversion: AnsiUp carries SGR state across calls, so a
   // shared module-level instance bled colors between unrelated tool cards. Each
   // card renders its complete text, so no cross-call state is needed.
+  //
+  // The memo holds the `{ __html }` OBJECT, not just the string: React compares
+  // dangerouslySetInnerHTML by identity and rewrites innerHTML whenever the object
+  // changes, so a fresh literal on every render (the follow state re-renders this
+  // box when it is scrolled) would replace the text nodes under a find-in-chat
+  // match or a selection.
   const html = useMemo(() => {
     const ansi = new AnsiUp()
     ansi.use_classes = false
     ansi.escape_html = true
-    return ansi.ansi_to_html(text)
+    return { __html: ansi.ansi_to_html(text) }
   }, [text])
 
   return (
@@ -48,7 +54,7 @@ export function TerminalView({ text, maxHeight }: Props): React.JSX.Element {
         minHeight: maxHeight === 'none' ? 0 : undefined
       }}
     >
-      <div ref={contentRef} dangerouslySetInnerHTML={{ __html: html }} />
+      <div ref={contentRef} dangerouslySetInnerHTML={html} />
     </pre>
   )
 }

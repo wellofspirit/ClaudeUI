@@ -31,12 +31,14 @@ export function LiveBashOutput({
   const fg = theme === 'light' ? '#1a1d24' : theme === 'monokai' ? '#f8f8f2' : '#d1d5db'
 
   // Fresh AnsiUp per conversion so SGR state can't bleed between bash tool cards
-  // (a shared module-level instance carried color state across cards).
+  // (a shared module-level instance carried color state across cards). The memo
+  // holds the `{ __html }` object: React rewrites innerHTML whenever its identity
+  // changes (see TerminalView).
   const html = useMemo(() => {
     const ansi = new AnsiUp()
     ansi.use_classes = false
     ansi.escape_html = true
-    return ansi.ansi_to_html(output)
+    return { __html: ansi.ansi_to_html(output) }
   }, [output])
 
   return (
@@ -54,7 +56,7 @@ export function LiveBashOutput({
         className="text-[12px] font-mono whitespace-pre-wrap break-words leading-[1.3] rounded-md p-2 border border-border overflow-y-auto"
         style={{ background: bg, color: fg, maxHeight: 300 }}
       >
-        <div ref={contentRef} dangerouslySetInnerHTML={{ __html: html }} />
+        <div ref={contentRef} dangerouslySetInnerHTML={html} />
       </pre>
     </div>
   )

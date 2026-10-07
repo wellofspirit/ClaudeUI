@@ -145,6 +145,20 @@ describe('TerminalView — following the bottom', () => {
     expect(pre().scrollTop).toBe(40)
   })
 
+  it('keeps its text nodes when the follow state re-renders it (find-in-chat Ranges live there)', () => {
+    render(<TerminalView text={'alpha\nbeta'} />)
+    const node = inner().firstChild
+    expect(node).not.toBeNull()
+    clock += 1000
+    // A reveal scrolls the box well away from its bottom: isAtBottom flips, the
+    // component re-renders. React rewrites innerHTML when the __html object
+    // changes identity, which would detach a Range anchored in the old nodes.
+    pre().scrollTop = 0
+    act(() => dispatchScroll(pre()))
+    expect(inner().firstChild).toBe(node)
+    expect(node?.isConnected).toBe(true)
+  })
+
   it('a user who scrolled up inside a growing box is left alone', () => {
     render(<TerminalView text="output" />)
     act(() => dispatchWheel(pre(), -120))

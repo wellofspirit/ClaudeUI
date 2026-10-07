@@ -54,6 +54,16 @@ describe('LiveBashOutput', () => {
     expect(distanceFromBottom(pre())).toBe(0)
   })
 
+  it('keeps its text nodes when the follow state re-renders it', () => {
+    render(<LiveBashOutput output={'a\nb'} totalLines={2} totalBytes={3} theme="dark" />)
+    const node = inner().firstChild
+    act(() => dispatchWheel(pre(), -120))
+    pre().scrollTop = 0
+    act(() => dispatchScroll(pre()))
+    expect(inner().firstChild).toBe(node)
+    expect(node?.isConnected).toBe(true)
+  })
+
   it('leaves a user who scrolled up alone', () => {
     render(<LiveBashOutput output="a" totalLines={1} totalBytes={1} theme="dark" />)
     act(() => dispatchWheel(pre(), -120))
