@@ -389,6 +389,35 @@ describe('Sidebar FC', () => {
     expect(useSessionStore.getState().sessions['pi-sess'].statusLine).toEqual(HISTORY_STATUS_LINE)
   })
 
+  // Opening a session only VIEWS it: Recent is bumped by sending in it (the
+  // `session:user-message` event) or a double-click, the same for every engine.
+  // A single click once moved opencode / pi / Codex rows to the top of Recent
+  // while a Claude row stayed put.
+  it.each(['claude', 'opencode', 'pi', 'codex'] as const)(
+    'a click on a %s session leaves Recent alone; a double-click bumps it',
+    async (engineId) => {
+      const empty = { messages: [], statusLine: null, lastModel: null }
+      app.bridge.ipcMain.handle('session:load-opencode-history', async () => empty)
+      app.bridge.ipcMain.handle('session:load-pi-history', async () => empty)
+      useSessionStore.setState({ recentSessionIds: ['older'] })
+      const info = { ...makeSessionInfo(`${engineId}-sess`), engineId }
+
+      await act(async () => {
+        await renderFC()
+      })
+      await act(async () => {
+        viewProps.onClickSession(info)
+        await new Promise((r) => setTimeout(r, 0))
+      })
+
+      expect(useSessionStore.getState().activeSessionId).toBe(info.sessionId)
+      expect(useSessionStore.getState().recentSessionIds).toEqual(['older'])
+
+      act(() => viewProps.onSessionDoubleClick(info))
+      expect(useSessionStore.getState().recentSessionIds).toEqual([info.sessionId, 'older'])
+    }
+  )
+
   it('a history load that fails leaves the session without a status line', async () => {
     app.bridge.ipcMain.handle('session:load-opencode-history', async () => {
       throw new Error('opencode is down')

@@ -48,8 +48,6 @@ export interface HistoryLoadOptions {
    * silent empty one would hide that), so the caller owns the banner.
    */
   onCodexError?: (message: string | null) => void
-  /** Put the session at the top of Recent, as a click on a row does. */
-  markRecent?: boolean
   /**
    * Replace the transcript the store already holds instead of filling an empty
    * one. The active session after a resync still shows its last-known
@@ -132,7 +130,7 @@ export async function loadSessionIntoStore(
   info: SessionInfo,
   options: HistoryLoadOptions
 ): Promise<HistoryLoadResult> {
-  const { isCurrent, onCodexError, markRecent = false, replace = false } = options
+  const { isCurrent, onCodexError, replace = false } = options
   const routingId = info.sessionId
   const store = (): ReturnType<typeof useSessionStore.getState> => useSessionStore.getState()
 
@@ -190,7 +188,6 @@ export async function loadSessionIntoStore(
       statusLine
     )
     if (info.title && info.title !== 'Untitled') store().setCustomTitle(routingId, info.title)
-    if (markRecent) store().addRecentSession(routingId)
     return 'loaded'
   }
 
@@ -229,7 +226,6 @@ export async function loadSessionIntoStore(
       history.warnings
     )
     if (info.title) store().setCustomTitle(routingId, info.title)
-    if (markRecent) store().addRecentSession(routingId)
     return 'loaded'
   }
 
