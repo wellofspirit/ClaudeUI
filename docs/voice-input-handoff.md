@@ -51,13 +51,13 @@ UISettings — a phone and the Mac have different microphones.
 
 ## Slices
 
-| # | Slice | Status |
-|---|---|---|
-| S1 | Renderer-owned capture for desktop + web (behavior-preserving move) | committed a814b15b (gates green; real-app boot + worklet asset + mic button verified) |
-| S2 (4949d471) | Lifecycle robustness: never drop a short press, ready timeout, error-before-ready, stale port, outcome messages, visible errors, `resume()`, track ended/mute, worklet tail flush | todo |
-| S3 | (S3a d11bc206, S3b committed) Device selection: system default + preferred device, `devicechange` hot-swap, level meter, live digital-silence warning, Settings UI | todo |
-| S4 | Phone/car: tap-to-talk mode with silence auto-stop, touch hardening, no keyboard pop, capture diagnostics (track label/settings/level stats → logRelay, never audio) | todo |
-| — | Other-engine STT (Codex realtime w/ API key, BYO-key provider, on-device) | open — needs Daniel |
+| #             | Slice                                                                                                                                                                             | Status                                                                                |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| S1            | Renderer-owned capture for desktop + web (behavior-preserving move)                                                                                                               | committed a814b15b (gates green; real-app boot + worklet asset + mic button verified) |
+| S2 (4949d471) | Lifecycle robustness: never drop a short press, ready timeout, error-before-ready, stale port, outcome messages, visible errors, `resume()`, track ended/mute, worklet tail flush | todo                                                                                  |
+| S3            | (S3a d11bc206, S3b committed) Device selection: system default + preferred device, `devicechange` hot-swap, level meter, live digital-silence warning, Settings UI                | todo                                                                                  |
+| S4            | Phone/car: tap-to-talk mode with silence auto-stop, touch hardening, no keyboard pop, capture diagnostics (track label/settings/level stats → logRelay, never audio)              | todo                                                                                  |
+| —             | Other-engine STT (Codex realtime w/ API key, BYO-key provider, on-device)                                                                                                         | open — needs Daniel                                                                   |
 
 ## S1 outcome (review 2026-10-06)
 
@@ -258,7 +258,7 @@ window and the web client. All items below get a guard test that fails against `
    feedback during a cold spawn too). Update the remote tests that pinned the old silence, and the
    e2e flow if it asserts on it.
 8. **`AudioContext.resume()`.** After building the context, if `state === 'suspended'`, `await
-   resume()` (with the same post-await bail checks as the other awaits).
+resume()` (with the same post-await bail checks as the other awaits).
 9. **Track faults.** `BrowserVoiceCapture` takes an optional `onFault(message)` option. Track
    `ended` while capturing → fault "The microphone was disconnected." and the controller ends the
    capture through the normal stop path (so what was said still finalizes). Track `mute` while
@@ -288,11 +288,13 @@ revert the one source hunk, run the test, show the failure, restore; report the 
 ```
 fix(voice): never lose a short press; make every voice failure visible
 ```
+
 (+ a body listing the items.)
 
 ## Hands-on checks for Daniel (cannot be automated without probing the voice API)
 
 Run on the real Mac, with the dev build of this branch:
+
 1. First press after launch on a cold session, short (~1 s) phrase → transcript appears (S2 drain).
 2. Lid closed + Bluetooth headset connected, macOS default input left on the MacBook mic → after S3,
    the preferred-device setting picks the headset; before S3, expect "No audio detected from microphone…".
@@ -353,8 +355,7 @@ in the main checkout — read-only) and the "Approved UI" section above.
    `shared/audio/` rather than duplicating it). Controller exposes a level subscription; the
    recording mic renders a ring whose scale follows the level (rAF-throttled, no React re-render per
    block if avoidable). `data-testid="InputBox.voiceLevel"`.
-6. **Live silence warning.** While capturing, ≥ 1.5 s of digital silence (every block level exactly
-   0) → amber notice "No signal from <track label> — lid closed or muted?" (label from the live
+6. **Live silence warning.** While capturing, ≥ 1.5 s of digital silence (every block level exactly 0) → amber notice "No signal from <track label> — lid closed or muted?" (label from the live
    track; fall back to "the microphone"). It stays while silent and is removed as soon as a block
    has signal. Distinct from main's after-the-fact "No audio" outcome; when the live warning fired,
    suppress main's duplicate outcome for that capture if it is cheap to do so cleanly — otherwise
