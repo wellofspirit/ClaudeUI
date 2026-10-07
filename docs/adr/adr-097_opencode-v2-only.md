@@ -1,7 +1,8 @@
 # ADR-097: opencode moves to 2.x only
 
 **Status:** Accepted (2026-10-06, owner; arc started with S0; S0–S9 built on the arc branch by
-2026-10-07; S10 — real-app verification, Windows pass, 1.x removal — remains). It comes from the spike in
+2026-10-07; S10a — the 1.x removal — built 2026-10-07; S10 real-app verification and the Windows
+pass remain). It comes from the spike in
 [`docs/opencode-v2-spike.md`](../opencode-v2-spike.md), which has the evidence, citations and live
 transcripts this ADR relies on. **Owner decisions recorded 2026-10-06** (Daniel):
 
@@ -136,8 +137,8 @@ Proposed: **GO**, on the conditions in §8.
 - **Invariant: every reject carries a non-empty message.** That includes host-decided and judge
   (auto-mode) rejects. A messageless reject is a hard stop in 2.x. A unit test pins it.
 - `experimental.continue_loop_on_deny` is no longer injected.
-- A `resource:"*"` + `deny` rule hides the tool from the model. The `opencodeWireRuleset`
-  "whole-category deny goes last" transform must be re-verified against that rule.
+- A `resource:"*"` + `deny` rule hides the tool from the model. The 1.x "whole-category deny goes
+  last" transform must be re-verified against that rule (as built: `wireOrder`, S6).
 
 **As built (S6, 2026-10-06).** `permission-keys.ts` is the key table (Claude tool → 2.x action →
 how 2.x spells the resource); `permission-v2.ts` compiles and composes; `subagent-permissions.ts`
@@ -208,7 +209,7 @@ session `ask` but never a `deny`; Code Mode's `execute` runtime has an ungated `
   ended) when the plugin is missing from the build or does not confirm both hooks within 10 s — a
   clear error, never a silent downgrade. Only an `active` answer is cached. The `mcp-status` fallback
   still gates TOOL readiness but never stands in for the guard. Turn-less acquires (session lists,
-  auth, usage reads) skip it; detached throwaway servers run `{*,*,deny}`, which saved rows cannot
+  auth, usage reads) skip it; throwaway sessions run `{*,*,deny}`, which saved rows cannot
   answer.
 - **MCP allows never land on a built-in (review fix).** A tool-level MCP allow whose action is a 2.x
   built-in (`mcp__external__directory` → `external_directory`) is refused like a server-level one;
@@ -639,10 +640,11 @@ providers) answer empty for about 100-250 ms until its plugins load, so the clie
 idempotent within a session. The event feed has no replay: it yields `connected` with
 `reconnected:true` before any event of a new subscription, and the consumer re-reads messages,
 permissions, forms, inbox and active sessions. The server's 15 s heartbeat keeps the 45 s stall
-watchdog quiet on idle sessions. The 1.x client survives as `OpencodeV1Client` until S10.
+watchdog quiet on idle sessions. The 1.x client survived as `OpencodeV1Client` until S10a deleted
+it.
 
-**As built (S4, 2026-10-06).** Each chat gets one `OpencodeEventMapper` (`v2-event-mapper.ts`),
-which maps the feed to the engine-neutral stream. Cold history (`v2-history.ts`) shares its content
+**As built (S4, 2026-10-06).** Each chat gets one `OpencodeEventMapper` (`event-mapper.ts`),
+which maps the feed to the engine-neutral stream. Cold history (`history.ts`) shares its content
 helpers, and recorded 2.0.24 sequences plus contract cases hold it equal to what streamed live.
 
 - **Content.** One assistant message per step. Blocks come in started order, and an empty text or
@@ -700,13 +702,13 @@ helpers, and recorded 2.0.24 sequences plus contract cases hold it equal to what
 - Other engines keep ADR-053.
 
 **As built (S5, 2026-10-07).** `OpencodeSession` runs on the 2.x client, feed and mapper; the 1.x
-session survives verbatim as `OpencodeV1Session` (with its tests) until S10.
+session survived verbatim as `OpencodeV1Session` (with its tests) until S10a deleted it.
 
 - **Lifecycle.** A turn-running `acquire` (so a missing `claudeui-xeng` guard fails the turn with
   `OpencodePermissionGuardError`'s text), one `OpencodeClient` for the chat's directory, one
   `OpencodeEventMapper` per chat and one feed. A new session is created with its ruleset, agent and
   model in the body. A resumed one is read once (cold history → the judge's transcript and the
-  replayed rows, `opencodeV2HistorySeed` with the session totals, `mapper.seed`), and its feed's
+  replayed rows, `opencodeHistorySeed` with the session totals, `mapper.seed`), and its feed's
   first `connected` runs `reconcileAfterReconnect` exactly like a gap, which also surfaces asks
   left pending. A prompt that arrives while an eager resume still replays waits for it (the
   mapper is seeded before the feed starts). Every mapper output goes to the existing channels;
@@ -788,11 +790,49 @@ Total: about 34–48 working days, roughly 7–10 weeks. The order is S0 → S1 
 The work ships as one arc on a branch. Nothing reaches `main` until S10, because a half-ported
 adapter cannot run either line.
 
+**As built (S10a, 2026-10-07): the 1.x code paths are gone.** Deleted, with their tests: the 1.x
+client and session (`OpencodeV1Client`, `OpencodeV1Session`), the 1.x event mapper and its
+stored-message converter, the 1.x wire types (`core/opencode/protocol/`, with the 1.18.9 doc
+snapshot), the 1.x ruleset builders (`permission-ruleset.ts`: `buildRuleset`,
+`buildAutoModeRuleset`, `opencodeWireRuleset`), the 1.x compiler half of `permission-compiler.ts`
+(`compileClaudeRulesToOpencode`, `withoutAllowRules`, `withoutMutatingAllowRules`, the 1.x
+built-in key list), the spawn-time subagent asks and the `task:<name>` backstop
+(`subagent-permissions.ts` 1.x half, `opencode-config-permissions.ts` and its raw front-matter
+scan), the host pre-check's parent rung (`parentRuleset` / `childGatedCategories`, the
+`parent-allow` verdict, `evaluateOpencodeAsk`), the 1.x status-line seed over stored messages,
+`OpencodeServerManager.recycleAll` / `acquireDetached` / cwd-only `release(cwd)` (no caller left;
+`releaseIfCurrent` is the one release), the dead 1.x tool-kind map, the 1.x integration suite
+(`OPENCODE_INTEGRATION_TESTS`; every case it held has a 2.x contract: server smoke → `client`,
+MCP connect → `mcp-identity` / `server-manager`, recycle and detached discovery → obsolete) and
+`scripts/probe-opencode-caps.mjs` (1.x `/config/providers`).
+
+- Ported rather than dropped: the history status-line tests (to 2.x rows), the host pre-check
+  tests (to `compileClaudeRulesV2` rules and 2.x tool ids), and the cross-engine permission
+  conformance matrix (`src/main/__tests__/permission-conformance.test.ts`, now the 2.x session
+  ruleset under the agents' default rules, evaluated by a port of 2.x `Permission.evaluate`).
+- Renamed where the 1.x sibling is gone: `v2-event-mapper.ts` → `event-mapper.ts`, `v2-history.ts`
+  → `history.ts`, `v2-content.ts` → `content.ts`, `v2-reconnect.ts` → `reconnect.ts` (+ tests),
+  the `opencodeV2History*` seed functions → `opencodeHistory*`, and `src/integration/opencode-v2/`
+  → `src/integration/opencode/`. Kept: `protocol-v2/` (generator output path, ~50 importers),
+  `permission-v2.ts` and its `…V2` symbols, the `OPENCODE_V2_*` contract-suite variables and the
+  `fixtures/opencode-v2/` recordings. `CLAUDEUI_MCP_SERVER` moved to `permission-v2.ts`.
+- `opencode-pricing.ts` stays on models.dev, not 2.x `GET /api/model`: it had no 1.x route left
+  (ADR-071 §5 moved it off `/config/providers`), and `/api/model` zeroes every model a ChatGPT
+  plan covers (`cost: []`) and lists usable providers only.
+- Still read on purpose (2.x behaviour, not 1.x paths): 1.x-shaped config files (S8), 1.x tool
+  names in a migrated session's history (S4), and the opencode entries of the fed-token history,
+  which recognise the copy of ClaudeUI's 1.x sign-in 2.x imported from `auth.json` (S7).
+- The protocol generator finds its checkout at `vendor/opencode-src` first and the pre-S10
+  `vendor/opencode-v2-src` second (the first holding the pinned tag); code comments cite
+  `vendor/opencode-src/…` (the 2.x tree once the checkout is renamed).
+
 ## Rollback
 
 - Until S10 merges, `main` keeps 1.18.x and the arc lives on a branch.
 - After the merge, rollback means reverting the arc's merge commit. That restores the 1.x manifest,
-  adapter and `auth.json` writer.
+  adapter and `auth.json` writer. Reverting S10a's commit alone does NOT give a working 1.x: the
+  files it restores sit beside a 2.x manifest, server manager and credential store, so the 1.x
+  adapter last ran against a 1.x binary before S1 moved the manifest to 2.x.
 - The data dir is shared, so by then the user's DB has been migrated by 2.x (`session_v2` added).
   - The 1.x runner skips unknown migrations and keeps booting.
   - Sessions created under 2.x live in `session_v2` and are invisible to 1.x.

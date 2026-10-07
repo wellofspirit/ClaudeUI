@@ -5,14 +5,14 @@
  * ## Why
  *
  * opencode evaluates a session's ruleset server-side, last-match-wins, over
- * glob TEXT: one pattern per shell statement (`patterns` = one `source(node)`
- * per `command` node — `vendor/opencode-src/packages/opencode/src/tool/shell.ts`
- * `:408`, asked at `:283-290`; `sudo git push --force` is ONE pattern), matched
+ * glob TEXT: one resource per shell statement (`resources` = one per parsed
+ * command — `vendor/opencode-src/packages/core/src/tool/plugin/shell.ts`
+ * `permission.assert`; `sudo git push --force` is ONE resource), matched
  * by `Wildcard.match` (`vendor/opencode-src/packages/core/src/util/wildcard.ts`:
  * `*` → `.*` crosses everything including `/` and spaces, `?` → `.`, a pattern
  * ending ` *` makes that tail optional, `\` → `/` on both sides, case-folded on
- * win32 only), over `ruleset, approved`
- * (`vendor/opencode-src/packages/opencode/src/permission/index.ts` `evaluate`).
+ * win32 only), over the agent's, the session's and the saved rules
+ * (`vendor/opencode-src/packages/core/src/permission.ts` `evaluate`).
  * The verbatim compile of `Bash(git push --force:*)` is `git push --force*`,
  * which `git push origin main --force` does not match — so a user allow
  * `Bash(git:*)` (`git*`) answered it and the force-push ran with no ask (S2

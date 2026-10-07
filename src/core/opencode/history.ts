@@ -1,9 +1,9 @@
 /**
  * Cold history for opencode 2.x (ADR-097 S4): the stored `Session.Message`
  * rows of `GET /api/session/:id/message` → the same engine-neutral transcript
- * the live mapper (`v2-event-mapper.ts`) streams, so a reopened chat reads
+ * the live mapper (`event-mapper.ts`) streams, so a reopened chat reads
  * exactly as it did live. Parity is pinned by recorded 2.0.24 sequences
- * (`__tests__/v2-parity.test.ts`) and a contract case against the real
+ * (`__tests__/history-parity.test.ts`) and a contract case against the real
  * engine.
  *
  * Shape decisions that make the two paths equal:
@@ -41,7 +41,7 @@ import {
   toolSuccessResult,
   userChatMessage,
   type OpencodeToolResult
-} from './v2-content'
+} from './content'
 
 export interface OpencodeHistory {
   messages: ChatMessage[]

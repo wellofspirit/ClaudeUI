@@ -1,6 +1,5 @@
 /**
- * One ClaudeUI chat on opencode 2.x (ADR-097 S5). The 1.x session survives
- * verbatim as `OpencodeV1Session` until S10.
+ * One ClaudeUI chat on opencode 2.x (ADR-097 S5).
  *
  * Lifecycle. A lease from the S2 manager (a turn-running `acquire`, so the
  * `claudeui-xeng` permission guard is probed and a missing plugin surfaces as
@@ -54,10 +53,10 @@ import {
   type OpencodeMapperOutput,
   type OpencodeStepUsage,
   type OpencodeStopReason
-} from './v2-event-mapper'
-import type { OpencodeFormField, OpencodeToolResult } from './v2-content'
-import { reconcileAfterReconnect } from './v2-reconnect'
-import { convertOpencodeHistory, readOpencodeHistory } from './v2-history'
+} from './event-mapper'
+import type { OpencodeFormField, OpencodeToolResult } from './content'
+import { reconcileAfterReconnect } from './reconnect'
+import { convertOpencodeHistory, readOpencodeHistory } from './history'
 import { ShellOutputPoller } from './shell-output-poller'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions } from '../providers/ISession'
@@ -94,7 +93,7 @@ import {
 import { equivalentCostUsd } from '../../shared/pricing'
 import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
 import { opencodeCostInputs, resolveOpencodeCosts, type OpencodeCostInputs } from './message-cost'
-import { opencodeV2HistorySeed, type OpencodeHistoryTokens } from './history-status-line'
+import { opencodeHistorySeed, type OpencodeHistoryTokens } from './history-status-line'
 import { logger } from '../services/logger'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { opencodeAuthHooks } from './opencode-auth-hooks'
@@ -114,6 +113,7 @@ import type { OpencodePermissionRule } from './permission-compiler'
 import {
   asHostPrecheckRules,
   buildSessionRuleset,
+  CLAUDEUI_MCP_SERVER,
   compileClaudeRulesV2,
   opencodeOwnDirAllows,
   THROWAWAY_RULESET,
@@ -168,7 +168,6 @@ import {
   crossEngineDispatcher,
   crossEngineDispatchAvailable
 } from '../services/cross-engine-dispatcher'
-import { CLAUDEUI_MCP_SERVER } from './permission-ruleset'
 import { editClearsAgentControl } from './agent-control-gate'
 import { collectClaudeMcpForOpencode } from './claude-mcp-bridge'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../pi/permission-engine'
@@ -768,7 +767,7 @@ export class OpencodeSession extends BaseSession {
       const sessionTotals = { cost: info.cost, tokens: info.tokens }
       this.mapper?.seed(rows, { sessionTotals })
       const parsed = parseModelString(this._model)
-      const seed = opencodeV2HistorySeed(rows, parsed, {
+      const seed = opencodeHistorySeed(rows, parsed, {
         children: children.values(),
         sessionTotals
       })
@@ -2089,8 +2088,9 @@ export class OpencodeSession extends BaseSession {
    * Route one permission ask (own or a child's): the host pre-check ladder
    * (deny rules, plan mode, user ask rules, session allows — ADR-085), then
    * the judge in auto mode or the card. An `external_directory` ask is an
-   * ordinary ask here (card, or the judge in auto mode). 2.x children inherit
-   * the parent's rules, so the 1.x parent rung is not used.
+   * ordinary ask here (card, or the judge in auto mode). Children run under
+   * the parent's rules (`childSessionRuleset`), so their asks take the same
+   * ladder.
    */
   private routePermissionAsk(approval: PendingApproval): void {
     const category = approval.toolName
@@ -2142,9 +2142,6 @@ export class OpencodeSession extends BaseSession {
           'OpencodeSession',
           `plan mode: allow rule covers a read-only ${category} (rule ${verdict.rule})`
         )
-        this.autoReply(approval.requestId, { decision: 'once' })
-        return
-      case 'parent-allow':
         this.autoReply(approval.requestId, { decision: 'once' })
         return
       case 'continue':

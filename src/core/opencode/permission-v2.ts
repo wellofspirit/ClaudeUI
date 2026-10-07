@@ -2,7 +2,7 @@
  * ClaudeUI's permission model compiled for opencode 2.x (ADR-097 §3, amending
  * ADR-022 and ADR-085 for the 2.x engine). Pure: no I/O, no logger.
  *
- * ## 2.x facts this module is built on (`vendor/opencode-v2-src` @ v2.0.24)
+ * ## 2.x facts this module is built on (`vendor/opencode-src` @ v2.0.24)
  *
  * - A rule is `{action, resource, effect}`. A call is checked against
  *   `agent.permissions ++ session.permissions` (`core/src/permission.ts`
@@ -203,8 +203,11 @@ export function withoutMutatingAllowRulesV2(rules: readonly V2Rule[]): V2Rule[] 
 
 // ── Mode rulesets ────────────────────────────────────────────────────────────
 
-/** ClaudeUI's own hosted MCP server (`opencode-hosted-tools.ts`). */
-const CLAUDEUI_MCP_SERVER = 'claudeui'
+/**
+ * ClaudeUI's own hosted MCP server name on opencode (`opencode-hosted-tools.ts`,
+ * `OpencodeServerManager.ts` — its tools are `claudeui_<tool>`).
+ */
+export const CLAUDEUI_MCP_SERVER = 'claudeui'
 
 /**
  * The hosted cross-engine dispatch tool asks in every mode, after the user's
@@ -406,7 +409,7 @@ export function agentPermissionOverlay(): AgentPermissionOverlay {
 
 /**
  * 2.x rules in the shape the host pre-check reads (`host-precheck.ts`
- * `HostPrecheckContext.userRules` / `parentRuleset`). The matching is the same
+ * `HostPrecheckContext.userRules`). The matching is the same
  * glob logic on either shape, and a 2.x `permission.asked` carries the 2.x
  * action as the approval's tool name, so the ladder runs unchanged on 2.x
  * rules through this view.

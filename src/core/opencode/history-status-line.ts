@@ -16,10 +16,13 @@
 
 import type { ModelCostEntry, StatusLineData } from '../../shared/types'
 import { totalCosts } from '../../shared/cost-rule'
-import { computeStoredDurationMs, type MessageTokens } from './event-mapper'
-import { opencodeCostInputs, resolveOpencodeCosts, type OpencodeCostInputs } from './message-cost'
+import {
+  opencodeCostInputs,
+  resolveOpencodeCosts,
+  type MessageTokens,
+  type OpencodeCostInputs
+} from './message-cost'
 import { getOpencodeModelContextWindow } from './model-discovery'
-import type { StoredMessage } from './protocol/types'
 import type { Session_Message_Info, TokenUsage_Info } from './protocol-v2/openapi'
 
 /** Cumulative token counts, in the shape the status line reports them. */
@@ -46,9 +49,9 @@ export interface OpencodeHistorySeed {
 }
 
 /**
- * One priced request in a stored history, whatever the engine version wrote
- * it as: a 1.x assistant message, a 2.x step (`assistant` row) or a 2.x
- * compaction's own request.
+ * One priced request in a stored history: a step (`assistant` row) or a
+ * compaction's own request. (2.x's migration of a 1.x database turns 1.x
+ * assistant messages into steps, so this covers sessions 1.x created too.)
  */
 export interface OpencodeUsageRow {
   providerID?: string
@@ -59,39 +62,8 @@ export interface OpencodeUsageRow {
   context: boolean
 }
 
-/**
- * Rebuild a session's accounting from the messages opencode stored for it.
- *
- * A stored message is priced by the same rule as a live one (ADR-071 §2).
- * Unlike a live own message it carries its OWN providerID/modelID, so the
- * model it actually ran on prices it, not whatever the session is set to now;
- * `fallbackModel` covers the message that carries neither.
- *
- * `listMessages` returns only the session's own messages — a child (subagent)
- * session's messages live under a distinct id — so there is nothing to filter
- * out here, mirroring the live overlay's own child exclusion.
- */
-export function opencodeHistorySeed(
-  storedMessages: StoredMessage[],
-  fallbackModel: { providerID: string; modelID: string }
-): OpencodeHistorySeed {
-  const rows: OpencodeUsageRow[] = []
-  for (const stored of storedMessages) {
-    const info = stored.info
-    if (!info || info.role !== 'assistant') continue
-    rows.push({
-      providerID: info.providerID,
-      modelID: info.modelID,
-      cost: info.cost,
-      tokens: info.tokens,
-      context: true
-    })
-  }
-  return seedFromUsageRows(rows, fallbackModel, computeStoredDurationMs(storedMessages))
-}
-
 /** What a 2.x cold load knows beyond the session's own rows. */
-export interface OpencodeV2SeedExtras {
+export interface OpencodeHistorySeedExtras {
   /** The rows of every child session its subagent calls ran (nested ones too). */
   children?: Iterable<readonly Session_Message_Info[]>
   /** `GET /api/session/:id` `cost`/`tokens`: opencode's cumulative for the session. */
@@ -99,7 +71,10 @@ export interface OpencodeV2SeedExtras {
 }
 
 /**
- * {@link opencodeHistorySeed} for opencode 2.x rows (ADR-097 S4). ONE rule,
+ * Rebuild a session's accounting from the rows opencode stored for it
+ * (ADR-071 §2, ADR-097 S4). A stored step is priced by the same rule as a
+ * live one, under the model it actually ran on (`fallbackModel` covers a row
+ * that names none). ONE rule,
  * the same as the live mapper's outputs and as Claude's status line (which
  * folds subagent transcripts into the session, `session-history.ts`
  * `foldSubagentCosts`): every request the chat caused counts —
@@ -111,10 +86,10 @@ export interface OpencodeV2SeedExtras {
  *   fallback model.
  * Only the own session's steps move the context meter.
  */
-export function opencodeV2HistorySeed(
+export function opencodeHistorySeed(
   messages: readonly Session_Message_Info[],
   fallbackModel: { providerID: string; modelID: string },
-  extras: OpencodeV2SeedExtras = {}
+  extras: OpencodeHistorySeedExtras = {}
 ): OpencodeHistorySeed {
   const rows: OpencodeUsageRow[] = []
   const usageRows = (list: readonly Session_Message_Info[], context: boolean) => {
@@ -142,7 +117,7 @@ export function opencodeV2HistorySeed(
   for (const child of extras.children ?? []) usageRows(child, false)
   const remainder = extras.sessionTotals ? sessionRemainder(extras.sessionTotals, own) : null
   if (remainder) rows.push(remainder)
-  return seedFromUsageRows(rows, fallbackModel, opencodeV2ActiveDurationMs(messages))
+  return seedFromUsageRows(rows, fallbackModel, opencodeActiveDurationMs(messages))
 }
 
 /** The part of the session's cumulative no own row carries (positive fields only), or null. */
@@ -170,13 +145,12 @@ function sessionRemainder(
 }
 
 /**
- * Accumulated ACTIVE time of a 2.x history (ADR-034's semantic, as
- * `computeStoredDurationMs` for 1.x): opencode writes an `idle` row when an
+ * Accumulated ACTIVE time of a 2.x history (ADR-034's semantic): opencode writes an `idle` row when an
  * execution ends, so a turn runs from the first row after the previous idle
  * (its user prompt, or a compaction) to its idle. A turn with no idle yet (in
  * flight, or the engine shut down mid-turn) ends at its last completed step.
  */
-export function opencodeV2ActiveDurationMs(messages: readonly Session_Message_Info[]): number {
+export function opencodeActiveDurationMs(messages: readonly Session_Message_Info[]): number {
   let total = 0
   let start: number | null = null
   let lastEnd: number | null = null
@@ -259,26 +233,13 @@ function seedFromUsageRows(
  * they are breakdown-only, never folded into the headline.
  */
 export function opencodeHistoryStatusLine(
-  storedMessages: StoredMessage[],
-  fallbackModel: { providerID: string; modelID: string },
-  dispatchedCosts: ModelCostEntry[] = []
-): StatusLineData {
-  return statusLineFromSeed(
-    opencodeHistorySeed(storedMessages, fallbackModel),
-    fallbackModel,
-    dispatchedCosts
-  )
-}
-
-/** {@link opencodeHistoryStatusLine} for opencode 2.x rows. */
-export function opencodeV2HistoryStatusLine(
   messages: readonly Session_Message_Info[],
   fallbackModel: { providerID: string; modelID: string },
   dispatchedCosts: ModelCostEntry[] = [],
-  extras: OpencodeV2SeedExtras = {}
+  extras: OpencodeHistorySeedExtras = {}
 ): StatusLineData {
   return statusLineFromSeed(
-    opencodeV2HistorySeed(messages, fallbackModel, extras),
+    opencodeHistorySeed(messages, fallbackModel, extras),
     fallbackModel,
     dispatchedCosts
   )
@@ -321,24 +282,11 @@ function statusLineFromSeed(
 }
 
 /**
- * The model a cold load prices its unattributed messages under: the last one
- * the session actually used. A session object has its own current model to
- * fall back on; a history read has only the transcript.
+ * The model a cold load prices its unattributed rows under: the last step's.
+ * A session object has its own current model to fall back on; a history read
+ * has only the transcript.
  */
-export function lastOpencodeModel(storedMessages: StoredMessage[]): {
-  providerID: string
-  modelID: string
-} {
-  for (let i = storedMessages.length - 1; i >= 0; i--) {
-    const info = storedMessages[i]?.info
-    if (info?.role !== 'assistant' || !info.modelID) continue
-    return { providerID: info.providerID ?? '', modelID: info.modelID }
-  }
-  return { providerID: '', modelID: '' }
-}
-
-/** {@link lastOpencodeModel} for opencode 2.x rows: the last step's model. */
-export function lastOpencodeV2Model(messages: readonly Session_Message_Info[]): {
+export function lastOpencodeModel(messages: readonly Session_Message_Info[]): {
   providerID: string
   modelID: string
 } {

@@ -15,10 +15,10 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { OpencodeEvent } from '../protocol-v2/events'
 import type { Session_Message_Info } from '../protocol-v2/openapi'
-import { OpencodeEventMapper, type OpencodeMapperOutput } from '../v2-event-mapper'
-import { convertOpencodeHistory } from '../v2-history'
+import { OpencodeEventMapper, type OpencodeMapperOutput } from '../event-mapper'
+import { convertOpencodeHistory } from '../history'
 import { foldOutputs, normalizeTranscript } from '../../../test/helpers/opencode-v2-transcript'
-import { opencodeV2HistorySeed } from '../history-status-line'
+import { opencodeHistorySeed } from '../history-status-line'
 import type { TokenUsage_Info } from '../protocol-v2/openapi'
 
 // Pricing reads the billing type; the figures compared here (opencode's own
@@ -118,7 +118,7 @@ describe('opencode 2.x mapper — live equals cold on recorded 2.0.24 sequences'
         else if (o.kind === 'compaction' && o.usage) add(o.usage.cost, o.usage.tokens)
         else if (o.kind === 'overhead-usage') add(o.cost, o.tokens)
       }
-      const seed = opencodeV2HistorySeed(
+      const seed = opencodeHistorySeed(
         recording.messages,
         { providerID: 'fixture', modelID: 'fixture-model' },
         { children: Object.values(recording.children), sessionTotals: recording.sessionTotals }

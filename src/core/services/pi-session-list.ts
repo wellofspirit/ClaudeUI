@@ -294,15 +294,15 @@ export function findPiSessionFile(sessionId: string): string | null {
 /**
  * Convert a single stored pi AgentMessage entry to a ChatMessage, or null if
  * it doesn't render as its own message. EXPORTED so PiSession's resume replay
- * reuses this EXACT conversion (single source of truth — mirrors opencode
- * event-mapper's `convertStoredMessage`).
+ * reuses this EXACT conversion (single source of truth — the pattern
+ * opencode's cold history follows too, `opencode/history.ts`).
  *
  * Mapping (same field conventions as the live mapper — src/main/pi/event-mapper.ts):
  *   user      → role 'user', string/array content → text/image blocks
  *   assistant → role 'assistant', text/thinking/toolCall → text/thinking/tool_use
  *               blocks; a completed toolCall ALSO gets a `tool_result` block
  *               immediately after it (looked up via `toolResultsByCallId`) —
- *               mirrors convertStoredMessage's tool_use+tool_result pairing
+ *               mirrors opencode's cold-history tool_use+tool_result pairing
  *               (tool results live in the SAME message as their tool_use, not
  *               as their own message — unlike the live mapper's separate
  *               `session:tool-result` event, which pi-session-list.ts's caller
@@ -395,7 +395,7 @@ function convertPiTextOrImageContent(
  * Two passes: (1) index every toolResult message by toolCallId, (2) convert
  * `message`/`compaction`/`custom_message` entries (everything else —
  * model_change, thinking_level_change, branch_summary, label, custom — is
- * skipped, matching convertStoredMessage's "silently skip unknown/irrelevant
+ * skipped, matching the opencode converter's "silently skip unknown/irrelevant
  * types" precedent).
  */
 export function convertPiSessionEntries(entries: PiSessionEntry[]): ChatMessage[] {

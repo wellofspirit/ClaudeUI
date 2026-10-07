@@ -20,7 +20,6 @@ vi.mock('../OpencodeServerManager', () => ({
     release: vi.fn()
   }
 }))
-vi.mock('../OpencodeV1Client', () => ({ OpencodeV1Client: vi.fn() }))
 vi.mock('../../services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted'
 }))

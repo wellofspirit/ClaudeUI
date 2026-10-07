@@ -5,7 +5,7 @@
  * scan ~/.claude or project .mcp.json files. This module translates the user's
  * Claude-scoped MCP servers (user/project/local) into opencode 2.x's native
  * `mcp.servers.<name>` shape (`Mcp.LocalConfig` / `Mcp.RemoteConfig`,
- * vendor/opencode-v2-src/packages/schema/src/mcp.ts) and returns them for
+ * vendor/opencode-src/packages/schema/src/mcp.ts) and returns them for
  * injection into OPENCODE_CONFIG_CONTENT at spawn (ADR-097 §4).
  *
  * Key constraints:

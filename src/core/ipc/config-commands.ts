@@ -823,9 +823,9 @@ export function configCommands(
         return await testProxyConnection(proxy)
       })
     },
-    // Phase 9b: fetch opencode pricing from /config/providers, persist + register.
-    // Spawns a LOCAL opencode server — host-side work, not host-physical, so it
-    // rides the everything-remote ruling like the rest of this file.
+    // Phase 9b: fetch the models.dev price catalog (ADR-071 §5), persist + register.
+    // Host-side work, not host-physical, so it rides the everything-remote
+    // ruling like the rest of this file.
     {
       channel: 'usage:refresh-prices',
       capability: 'config',

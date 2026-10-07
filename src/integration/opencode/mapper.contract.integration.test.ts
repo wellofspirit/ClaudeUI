@@ -6,11 +6,11 @@
  * equal what streamed live.
  *
  *   OPENCODE_V2_INTEGRATION=1 [OPENCODE_V2_BIN=/path/to/opencode] \
- *     bun run test:integration src/integration/opencode-v2
+ *     bun run test:integration src/integration/opencode
  *
  * `OPENCODE_V2_CAPTURE=1` also writes each scenario's events and stored rows
  * (paths redacted) to `core/opencode/__tests__/fixtures/opencode-v2/`, which
- * the unit parity suite replays (`v2-parity.test.ts`).
+ * the unit parity suite replays (`history-parity.test.ts`).
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -23,9 +23,9 @@ import type {
   Session_Message_Info
 } from '../../core/opencode/protocol-v2/openapi'
 import type { SubscribeOptions } from '../../core/opencode/opencode-event-stream'
-import { OpencodeEventMapper, type OpencodeMapperOutput } from '../../core/opencode/v2-event-mapper'
-import { convertOpencodeHistory, readOpencodeHistory } from '../../core/opencode/v2-history'
-import { reconcileAfterReconnect, type OpencodeStateReader } from '../../core/opencode/v2-reconnect'
+import { OpencodeEventMapper, type OpencodeMapperOutput } from '../../core/opencode/event-mapper'
+import { convertOpencodeHistory, readOpencodeHistory } from '../../core/opencode/history'
+import { reconcileAfterReconnect, type OpencodeStateReader } from '../../core/opencode/reconnect'
 import {
   foldOutputs,
   normalizeTranscript,

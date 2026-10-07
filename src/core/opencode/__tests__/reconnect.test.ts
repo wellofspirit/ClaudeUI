@@ -5,8 +5,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { OpencodeEvent } from '../protocol-v2/events'
 import type { Session_Message_Info } from '../protocol-v2/openapi'
-import { OpencodeEventMapper } from '../v2-event-mapper'
-import { reconcileAfterReconnect, type OpencodeStateReader } from '../v2-reconnect'
+import { OpencodeEventMapper } from '../event-mapper'
+import { reconcileAfterReconnect, type OpencodeStateReader } from '../reconnect'
 
 const SID = 'ses_own'
 const MODEL = { providerID: 'p', id: 'm' }

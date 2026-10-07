@@ -59,7 +59,7 @@ export function hostedMcpEntry(endpoint: HostedMcpEndpoint): OpencodeMcpRemoteEn
     headers: { Authorization: `Bearer ${endpoint.token}` },
     // A static bearer, never OAuth: without this opencode registers the server
     // as an OAuth integration (listed by GET /api/integration) and would start
-    // an OAuth flow on a 401 (vendor/opencode-v2-src/packages/core/src/mcp/index.ts
+    // an OAuth flow on a 401 (vendor/opencode-src/packages/core/src/mcp/index.ts
     // `register`).
     oauth: false,
     codemode: false

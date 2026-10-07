@@ -26,7 +26,22 @@
 import { equivalentCostUsd } from '../../shared/pricing'
 import { resolveCosts, type ResolvedCosts } from '../../shared/cost-rule'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
-import type { MessageTokens } from './event-mapper'
+
+/**
+ * One request's token snapshot in opencode's DISJOINT shape (2.x
+ * `TokenUsage.Info`, a step's or a compaction's `tokens`): `input` excludes
+ * cache reads and writes, `reasoning` sits beside `output`.
+ */
+export interface MessageTokens {
+  input?: number
+  output?: number
+  /** Reasoning/thinking tokens — billed as output. */
+  reasoning?: number
+  cache?: {
+    read?: number
+    write?: number
+  }
+}
 
 /** One message's cost inputs: the half that depends on the model, not the account. */
 export interface OpencodeCostInputs {

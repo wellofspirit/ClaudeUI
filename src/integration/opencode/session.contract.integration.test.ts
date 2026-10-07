@@ -180,7 +180,6 @@ describeV2('opencode 2.x contract: the production OpencodeSession', () => {
       },
       releaseIfCurrent: (dir: string, conn: ServerConnection) =>
         manager.releaseIfCurrent(dir, real.get(conn) ?? conn),
-      release: (dir: string) => manager.release(dir),
       subscribeExit: (dir: string, cb: () => void, conn?: ServerConnection) =>
         manager.subscribeExit(dir, cb, conn ? (real.get(conn) ?? conn) : undefined)
     } as never

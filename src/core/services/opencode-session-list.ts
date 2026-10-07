@@ -37,8 +37,8 @@
 import { opencodeServerManager, type ServerConnection } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
 import type { Session_Info } from '../opencode/protocol-v2/openapi'
-import { convertOpencodeHistory, readOpencodeHistory } from '../opencode/v2-history'
-import { lastOpencodeV2Model, opencodeV2HistoryStatusLine } from '../opencode/history-status-line'
+import { convertOpencodeHistory, readOpencodeHistory } from '../opencode/history'
+import { lastOpencodeModel, opencodeHistoryStatusLine } from '../opencode/history-status-line'
 import { READ_LINGER_MS } from '../opencode/read-linger'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
@@ -284,7 +284,7 @@ export function __resetOpencodeSessionListForTests(): void {
  * Reuses `convertOpencodeHistory` (the 2.x cold converter, held to parity with
  * the live mapper — ADR-097 S4) so there's a single rendering path, children's
  * transcripts included (`subagentMessages`, `taskNotifications`), and
- * `opencodeV2HistoryStatusLine` (the same reconstruction the session's own
+ * `opencodeHistoryStatusLine` (the same reconstruction the session's own
  * resume seeding runs) so the cold figure and the live one agree.
  *
  * Best-effort: returns no messages and a null status line on any error.
@@ -307,7 +307,7 @@ export async function loadOpencodeSessionHistory(sessionId: string): Promise<Eng
     // failure cost the user their transcript — an unwarmed vendor simply reads
     // as `unknown`, which prices the history at its list-price equivalent.
     await opencodeAuthProvider.warmCache().catch(() => {})
-    const last = lastOpencodeV2Model(stored)
+    const last = lastOpencodeModel(stored)
     // The session's cumulative carries what no row does (title generation); a
     // failed read just leaves that remainder out.
     const session = await Promise.resolve()
@@ -315,7 +315,7 @@ export async function loadOpencodeSessionHistory(sessionId: string): Promise<Eng
       .catch(() => null)
     const statusLine =
       stored.length > 0
-        ? opencodeV2HistoryStatusLine(stored, last, dispatchedCostEntriesFor(sessionId), {
+        ? opencodeHistoryStatusLine(stored, last, dispatchedCostEntriesFor(sessionId), {
             children: children.values(),
             ...(session ? { sessionTotals: { cost: session.cost, tokens: session.tokens } } : {})
           })

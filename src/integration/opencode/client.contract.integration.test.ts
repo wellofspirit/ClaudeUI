@@ -6,7 +6,7 @@
  * a server-side drop (ADR-097 §2, §7; S3).
  *
  *   OPENCODE_V2_INTEGRATION=1 [OPENCODE_V2_BIN=/path/to/opencode] \
- *     bun run test:integration src/integration/opencode-v2
+ *     bun run test:integration src/integration/opencode
  */
 import { randomBytes } from 'node:crypto'
 import { expect, it } from 'vitest'

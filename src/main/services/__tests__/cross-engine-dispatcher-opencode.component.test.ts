@@ -7,7 +7,7 @@
  * FAKE SERVER here speaks the 2.x wire: inbox prompts, the event feed in the
  * S4 mapper's vocabulary (`session.execution.*`, steps, parts, asks), the
  * reconnect re-read, interrupt and `GET /api/session/active`. The real 2.0.24
- * engine is exercised by `src/integration/opencode-v2/dispatch.contract…`.
+ * engine is exercised by `src/integration/opencode/dispatch.contract…`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 

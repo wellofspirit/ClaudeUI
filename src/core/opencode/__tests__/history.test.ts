@@ -1,7 +1,7 @@
 /**
  * The opencode 2.x cold-history converter (ADR-097 S4) and the 2.x status-line
  * seed: stored `Session.Message` rows → the transcript and accounting a
- * reopened chat shows. Parity with the live mapper is `v2-parity.test.ts`.
+ * reopened chat shows. Parity with the live mapper is `history-parity.test.ts`.
  */
 import { describe, expect, it, vi } from 'vitest'
 import type { Session_Message_Info } from '../protocol-v2/openapi'
@@ -10,7 +10,7 @@ import {
   convertOpencodeHistory,
   MAX_HISTORY_CHILDREN,
   readOpencodeHistory
-} from '../v2-history'
+} from '../history'
 
 vi.mock('../../auth/OpencodeAuthProvider', () => ({
   opencodeAuthProvider: { buildAccountRef: () => ({ billingType: 'api' }) }
@@ -18,10 +18,10 @@ vi.mock('../../auth/OpencodeAuthProvider', () => ({
 vi.mock('../model-discovery', () => ({ getOpencodeModelContextWindow: () => 1_000 }))
 
 import {
-  lastOpencodeV2Model,
-  opencodeV2ActiveDurationMs,
-  opencodeV2HistorySeed,
-  opencodeV2HistoryStatusLine
+  lastOpencodeModel,
+  opencodeActiveDurationMs,
+  opencodeHistorySeed,
+  opencodeHistoryStatusLine
 } from '../history-status-line'
 
 type Assistant = Extract<Session_Message_Info, { type: 'assistant' }>
@@ -394,7 +394,7 @@ describe('the 2.x status-line seed', () => {
   ]
 
   it('sums steps and compactions, prices each on its own model, keeps the last step’s context', () => {
-    const seed = opencodeV2HistorySeed(rows, { providerID: 'openai', modelID: 'gpt-x' })
+    const seed = opencodeHistorySeed(rows, { providerID: 'openai', modelID: 'gpt-x' })
     expect(seed.engineReportedCostUsd).toBeCloseTo(0.85, 10)
     expect(seed.tokens).toEqual({ input: 1_300, output: 40, cacheWrite: 2, cacheRead: 60 })
     expect(seed.lastContextLength).toBe(350)
@@ -404,7 +404,7 @@ describe('the 2.x status-line seed', () => {
 
   it('active time runs from a turn’s first row to its idle; an open turn to its last step', () => {
     expect(
-      opencodeV2ActiveDurationMs([
+      opencodeActiveDurationMs([
         user('u', 0, 'x'),
         assistant('a', 10, []),
         idle('i', 50),
@@ -415,7 +415,7 @@ describe('the 2.x status-line seed', () => {
   })
 
   it('the line reports the seed; the last step names the model', () => {
-    const line = opencodeV2HistoryStatusLine(rows, lastOpencodeV2Model(rows))
+    const line = opencodeHistoryStatusLine(rows, lastOpencodeModel(rows))
     expect(line).toMatchObject({
       totalInputTokens: 1_300,
       totalOutputTokens: 40,
@@ -423,7 +423,7 @@ describe('the 2.x status-line seed', () => {
       usedPercentage: 35,
       turnStartedAtMs: null
     })
-    expect(lastOpencodeV2Model(rows)).toEqual({ providerID: 'anthropic', modelID: 'claude-x' })
-    expect(lastOpencodeV2Model([user('u', 1, 'x')])).toEqual({ providerID: '', modelID: '' })
+    expect(lastOpencodeModel(rows)).toEqual({ providerID: 'anthropic', modelID: 'claude-x' })
+    expect(lastOpencodeModel([user('u', 1, 'x')])).toEqual({ providerID: '', modelID: '' })
   })
 })

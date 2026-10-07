@@ -16,7 +16,7 @@
  *    from the acceptEdits mode base (`pi/permission-engine.ts`);
  *  - opencode evaluates its ruleset server-side, so the list is rendered into
  *    opencode `edit` ask patterns by {@link agentControlEditPatterns}
- *    (`opencode/permission-ruleset.ts`).
+ *    (`opencode/permission-v2.ts`).
  *
  * Pure: no fs, no platform lookups — it must decide the same way wherever the
  * command runs (remote hosts included).

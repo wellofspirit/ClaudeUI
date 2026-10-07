@@ -111,11 +111,6 @@ export interface ServerConnection {
   lingerMs?: number
 }
 
-/** A server of the caller's own (`acquireDetached`): `release()` ends it, once. */
-export interface DetachedServer extends ServerConnection {
-  release: () => void
-}
-
 interface ServerHandle {
   /** `configIdentity` of what this server was injected with. */
   key: string
@@ -129,12 +124,12 @@ interface ServerHandle {
   mcpHost: McpHttpHost
   pluginExpected: boolean
   refCount: number
-  /** Refs per normalized directory — `release(cwd)` and `subscribeExit(cwd)` look here. */
+  /** Refs per normalized directory — `subscribeExit(cwd)` without a lease looks here. */
   cwdRefs: Map<string, number>
   /**
    * Fired when THIS server goes away and attached sessions must drop their
-   * connection: an unexpected death, or a deliberate recycleAll(). NOT on the
-   * last release or dispose(), which drop the handle (and clear this) first.
+   * connection: an unexpected death. NOT on the last release or dispose(),
+   * which drop the handle (and clear this) first.
    */
   exitListeners: Set<() => void>
   /** Hosted-tools readiness per directory (each directory is its own MCP location). */
@@ -161,7 +156,7 @@ export const CLEANUP_RETRY_DELAYS_MS: readonly number[] = [500, 1_500]
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
- * Thrown by `acquire` (and `acquireDetached`) when ClaudeUI could not check a
+ * Thrown by `acquire` when ClaudeUI could not check a
  * server's credentials for copies of its own ChatGPT sign-in: such a server
  * is not used for anything that activates a location (fail closed).
  */
@@ -391,13 +386,11 @@ export class OpencodeServerManager {
    * concurrent acquires with the same config share one start.
    */
   private pending = new Map<string, Promise<ServerHandle>>()
-  /** Servers handed out by acquireDetached() and not yet released. */
-  private detached = new Set<ServerHandle>()
   /**
    * The last start, until it printed its URL (or failed). Starts take turns:
    * opencode has no cross-process lock on its database (ADR-097 §6), and a
    * first 2.x start migrates a 1.x-created one in place, so two processes must
-   * not start at once (a discovery server beside the pooled one).
+   * not start at once (a server for a changed config beside the current one).
    */
   private startTurn: Promise<unknown> = Promise.resolve()
   /** Set once dispose() runs: nothing starts after it, and a start in flight reaps itself. */
@@ -499,7 +492,7 @@ export class OpencodeServerManager {
       handle.process.on('exit', (code, signal) => {
         if (this.handles.get(key) !== handle) return
         // Reaching this identity gate means the death was UNEXPECTED: every
-        // deliberate end (last release, recycleAll, dispose) removes the
+        // deliberate end (last release, dispose) removes the
         // handle first. Fan out so attached sessions drop the dead connection.
         this.handles.delete(key)
         handle.mcpHost.close().catch(() => {})
@@ -533,8 +526,8 @@ export class OpencodeServerManager {
   }
 
   /**
-   * Start one server with its MCP host — registered NOWHERE: the caller owns
-   * it (the pool, or a detached lease). Reaps what it started, and rejects,
+   * Start one server with its MCP host — registered NOWHERE: the caller
+   * (`resolveHandle`) pools it. Reaps what it started, and rejects,
    * when dispose() ran meanwhile.
    */
   private async startServer(key: string, input: OpencodeConfigInput): Promise<ServerHandle> {
@@ -897,7 +890,7 @@ export class OpencodeServerManager {
       throw new OpencodePermissionGuardError(directory, guard.reason)
     }
     if (this.handles.get(key) !== handle) {
-      // It died (or was recycled) while we waited: hand out nothing dead.
+      // It died while we waited: hand out nothing dead.
       handle.refCount--
       this.decrementCwd(handle, directory)
       throw new Error(`opencode server ${handle.baseUrl} went away while starting`)
@@ -968,8 +961,7 @@ export class OpencodeServerManager {
    * (config documents, agent and provider definitions, ~0.5 s); the reload is
    * what makes the change deterministic where nothing is in flight. Residual: an
    * execution that starts between the check and the reload (well under a
-   * second) can lose an ask the same way. Detached servers are short-lived and
-   * left alone. Never throws.
+   * second) can lose an ask the same way. Never throws.
    */
   async reloadConfig(): Promise<ConfigReloadReport> {
     const report: ConfigReloadReport = { reloaded: 0, busy: 0, failed: 0 }
@@ -1013,37 +1005,6 @@ export class OpencodeServerManager {
     return report
   }
 
-  /**
-   * A server for `cwd` of its OWN — never the pooled one, never shared — that
-   * lives until its `release()`. For reads that must answer from the opencode
-   * ClaudeUI runs NOW (model discovery). Spawned from the resolver's current
-   * answer and reaped by dispose(). No readiness wait (`hostedTools: skipped`).
-   */
-  async acquireDetached(cwd: string): Promise<DetachedServer> {
-    const directory = resolvePath(cwd)
-    const input = this.configInputFn(directory)
-    const handle = await this.startServer(configIdentity(input), input)
-    try {
-      await this.ensureCleaned(handle)
-    } catch (err) {
-      this.endServerFn(handle.process)
-      handle.mcpHost.close().catch(() => {})
-      throw err
-    }
-    this.detached.add(handle)
-    handle.process.on('exit', () => {
-      if (this.detached.delete(handle)) handle.mcpHost.close().catch(() => {})
-    })
-    return {
-      ...this.connectionOf(handle, directory, { state: 'skipped' }),
-      release: () => {
-        if (!this.detached.delete(handle)) return
-        this.endServerFn(handle.process)
-        handle.mcpHost.close().catch(() => {})
-      }
-    }
-  }
-
   private handleOf(conn: Pick<ServerConnection, 'baseUrl' | 'password'>): ServerHandle | undefined {
     for (const handle of this.handles.values())
       if (handle.baseUrl === conn.baseUrl && handle.password === conn.password) return handle
@@ -1056,18 +1017,6 @@ export class OpencodeServerManager {
     for (const handle of this.handles.values())
       if ((handle.cwdRefs.get(directory) ?? 0) > 0) found = handle
     return found
-  }
-
-  /**
-   * Release a lease by cwd. When servers with different configs both hold
-   * `cwd` (a config change between two acquires), the NEWEST is released —
-   * right for an acquire/release pair around one call. A long-lived holder
-   * should use releaseIfCurrent(cwd, conn), which is exact.
-   */
-  release(cwd: string): void {
-    const directory = resolvePath(cwd)
-    const handle = this.newestHolding(directory)
-    if (handle) this.releaseHandle(handle, directory)
   }
 
   /**
@@ -1122,7 +1071,7 @@ export class OpencodeServerManager {
   }
 
   /**
-   * Subscribe to the loss of a server — an unexpected death, or recycleAll().
+   * Subscribe to the loss of a server — an unexpected death.
    * With `conn`, exactly that lease's server; without, the newest live server
    * holding `cwd`. Returns an unsubscribe bound to that handle (a stale one can
    * never touch a respawn); a no-op when there is none.
@@ -1133,24 +1082,6 @@ export class OpencodeServerManager {
     handle.exitListeners.add(cb)
     return () => {
       handle.exitListeners.delete(cb)
-    }
-  }
-
-  /**
-   * End every pooled server so the next acquire starts a fresh one, fanning
-   * out exit listeners so attached sessions drop their connections now.
-   * (1.x needed this after every auth change; 2.x hot-reloads credentials and
-   * S7 removes the callers — ADR-097 §5.) Deletion precedes the end so a racing
-   * acquire starts fresh and the exit handler stays quiet. In-flight starts
-   * are left alone.
-   */
-  recycleAll(): void {
-    for (const [key, handle] of [...this.handles]) {
-      if (handle.idleTimer) clearTimeout(handle.idleTimer)
-      this.handles.delete(key)
-      this.fanOutExit(handle)
-      this.endServerFn(handle.process)
-      handle.mcpHost.close().catch(() => {})
     }
   }
 
@@ -1169,11 +1100,6 @@ export class OpencodeServerManager {
     }
     this.handles.clear()
     this.pending.clear()
-    for (const handle of this.detached) {
-      this.endServerFn(handle.process)
-      handle.mcpHost.close().catch(() => {})
-    }
-    this.detached.clear()
   }
 
   /** For testing: the count of live (resolved) pooled servers. */

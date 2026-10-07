@@ -7,7 +7,7 @@
  * and every session's transport.
  *
  * MULTI-SESSION: an opencode 2.x server connects its MCP clients per LOCATION
- * (directory) — vendor/opencode-v2-src/packages/core/src/mcp/index.ts is a
+ * (directory) — vendor/opencode-src/packages/core/src/mcp/index.ts is a
  * location node — so one server opens one MCP session per directory it serves.
  * Each `initialize` therefore gets its own StreamableHTTPServerTransport and its
  * own McpServer from `createServer()`; later requests are routed by their

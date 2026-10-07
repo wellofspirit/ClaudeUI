@@ -100,7 +100,7 @@ export class ShellOutputPoller {
   }
 
   /**
-   * One poll. Wire facts (`vendor/opencode-v2-src/packages/core/src/shell.ts`
+   * One poll. Wire facts (`vendor/opencode-src/packages/core/src/shell.ts`
    * `output`): a page is the capture file's bytes `[cursor, cursor+limit)`
    * decoded SERVER-side (`toString("utf8")`); a cursor at or past the end
    * answers at once with `size` and no output. So:

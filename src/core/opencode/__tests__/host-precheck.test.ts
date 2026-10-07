@@ -1,9 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { hostPrecheck, planModeRefusesAsk, type HostPrecheckContext } from '../host-precheck'
 import { OpencodeSessionAllows } from '../session-allows'
-import { compileClaudeRulesToOpencode } from '../permission-compiler'
-import type { OpencodePermissionRule } from '../permission-compiler'
-import { buildRuleset } from '../permission-ruleset'
+import { asHostPrecheckRules, compileClaudeRulesV2 } from '../permission-v2'
 import { matchesUserAskRule } from '../wildcard'
 import { denyAskHit } from '../../permissions/shell-rules'
 import type { PendingApproval } from '../../../shared/types'
@@ -29,22 +27,18 @@ function ctxWith(
   return {
     mode: opts.mode ?? 'default',
     rules: { deny, ask, allow },
-    userRules: compileClaudeRulesToOpencode({
-      allow,
-      deny,
-      ask,
-      additionalDirectories: [],
-      defaultMode: undefined
-    }),
+    userRules: asHostPrecheckRules(
+      compileClaudeRulesV2({ allow, deny, ask, additionalDirectories: [], defaultMode: undefined })
+    ),
     sessionAllows: opts.allows ?? new OpencodeSessionAllows(),
     platform: opts.platform ?? 'linux',
     ...(opts.cwd !== undefined ? { cwd: opts.cwd, realpath: () => undefined } : {})
   }
 }
 
-/** A shell ask as the mapper builds it: `metadata.command` (or the tool part's input) + per-statement patterns. */
+/** A shell ask as the mapper builds it: the tool's `command` input + per-statement resources. */
 function bash(command: string, patterns: string[] = [command]): PendingApproval {
-  return { requestId: 'per_1', toolUseId: 'c1', toolName: 'bash', input: { command }, patterns }
+  return { requestId: 'per_1', toolUseId: 'c1', toolName: 'shell', input: { command }, patterns }
 }
 
 describe('hostPrecheck (ADR-085 S2)', () => {
@@ -60,7 +54,7 @@ describe('hostPrecheck (ADR-085 S2)', () => {
     it('falls back to the patterns when the ask carries no command', () => {
       const approval: PendingApproval = {
         requestId: 'per_1',
-        toolName: 'bash',
+        toolName: 'shell',
         input: {},
         patterns: ['echo ok', 'git push origin main --force']
       }
@@ -76,7 +70,7 @@ describe('hostPrecheck (ADR-085 S2)', () => {
     })
   })
 
-  describe('1b: a user deny rule by glob (the narrow denies the server gets as asks)', () => {
+  describe('1b: a user deny rule by glob', () => {
     const edit = (path: string): PendingApproval => ({
       requestId: 'per_e',
       toolUseId: 'c_e',
@@ -117,17 +111,15 @@ describe('hostPrecheck (ADR-085 S2)', () => {
       })
     })
 
-    it('a child ask too, before the parent’s allow answers it', () => {
+    it('a child ask too', () => {
       const childEdit = {
         ...edit('secrets/key.pem'),
         subagent: { sessionId: 's', parentToolUseId: 't' }
       }
-      const ctx = {
-        ...denyEdit(),
-        parentRuleset: [{ permission: '*', pattern: '*', action: 'allow' as const }],
-        childGatedCategories: ['bash', 'edit', 'webfetch']
-      }
-      expect(hostPrecheck(childEdit, ctx)).toEqual({ kind: 'deny', rule: 'edit(secrets/**)' })
+      expect(hostPrecheck(childEdit, denyEdit())).toEqual({
+        kind: 'deny',
+        rule: 'edit(secrets/**)'
+      })
     })
 
     it('a later user allow for the same pattern does not outrank the deny (deny tier is last)', () => {
@@ -143,7 +135,7 @@ describe('hostPrecheck (ADR-085 S2)', () => {
       const command = 'docker.exe --context x run alpine'
       const ctx = ctxWith()
       // The glob (G9, including the broad globs) does not see it…
-      expect(matchesUserAskRule(ctx.userRules, 'bash', [command], 'linux')).toBe(false)
+      expect(matchesUserAskRule(ctx.userRules, 'shell', [command], 'linux')).toBe(false)
       // …§1 does.
       expect(hostPrecheck(bash(command), ctx)).toEqual({
         kind: 'user-ask',
@@ -167,7 +159,7 @@ describe('hostPrecheck (ADR-085 S2)', () => {
   describe('order: rules before the session-allow set', () => {
     it('deny beats a session allow', () => {
       const allows = new OpencodeSessionAllows()
-      allows.add('bash', ['git push *'])
+      allows.add('shell', ['git push *'])
       expect(hostPrecheck(bash('git push --force x'), ctxWith({ allows }))).toEqual({
         kind: 'deny',
         rule: 'Bash(git push --force:*)'
@@ -176,7 +168,7 @@ describe('hostPrecheck (ADR-085 S2)', () => {
 
     it('ask beats a session allow', () => {
       const allows = new OpencodeSessionAllows()
-      allows.add('bash', ['docker run *', 'docker *'])
+      allows.add('shell', ['docker run *', 'docker *'])
       expect(hostPrecheck(bash('docker --context x run alpine'), ctxWith({ allows }))).toEqual({
         kind: 'user-ask',
         rule: 'Bash(docker run:*)'
@@ -197,7 +189,7 @@ describe('hostPrecheck (ADR-085 S2)', () => {
 
     it('a session allow covers otherwise', () => {
       const allows = new OpencodeSessionAllows()
-      allows.add('bash', ['git push *'])
+      allows.add('shell', ['git push *'])
       expect(hostPrecheck(bash('git push origin feat'), ctxWith({ allows }))).toEqual({
         kind: 'session-allow'
       })
@@ -224,11 +216,10 @@ describe('hostPrecheck (ADR-085 S2)', () => {
     it('a mention is no §1 deny hit, but rung 1b keeps the broad glob’s over-refusal', () => {
       // §1: `echo rm -rf` has no `rm` in a program position.
       expect(denyAskHit('echo rm -rf', { deny: DENY, ask: [] })).toBeUndefined()
-      // The broad glob `* rm -rf*` matches it — the server's deny before the
-      // glob was sent as an ask (ADR-085's accepted over-refusal), now the host's.
+      // The broad glob `* rm -rf*` matches it (ADR-085's accepted over-refusal).
       expect(hostPrecheck(bash('echo rm -rf'), ctxWith())).toEqual({
         kind: 'deny',
-        rule: 'bash(* rm -rf*)'
+        rule: 'shell(* rm -rf*)'
       })
     })
 
@@ -248,7 +239,7 @@ describe('hostPrecheck (ADR-085 S2)', () => {
     it('a hostile approval (input: null) → an answer, no exception', () => {
       const hostile = {
         requestId: 'per_h',
-        toolName: 'bash',
+        toolName: 'shell',
         input: null,
         patterns: ['rm -rf /']
       } as unknown as PendingApproval
@@ -292,8 +283,8 @@ describe('ADR-085 S3b — hostPrecheck plan-mode rungs', () => {
   }
   const task = (subagent: string): PendingApproval => ({
     requestId: 'per_t',
-    toolName: 'task',
-    input: { subagent_type: subagent },
+    toolName: 'subagent',
+    input: { agent: subagent },
     patterns: [subagent]
   })
 
@@ -302,7 +293,7 @@ describe('ADR-085 S3b — hostPrecheck plan-mode rungs', () => {
       expect(hostPrecheck(edit, plan())).toEqual({ kind: 'plan-refuse' })
     })
 
-    it('a task for the general subagent, even under a Task allow; explore is not refused', () => {
+    it('the general subagent, even under a Task allow; explore is not refused', () => {
       expect(hostPrecheck(task('general'), plan())).toEqual({ kind: 'plan-refuse' })
       expect(hostPrecheck(task('explore'), plan())).toEqual({ kind: 'continue' })
     })
@@ -315,7 +306,7 @@ describe('ADR-085 S3b — hostPrecheck plan-mode rungs', () => {
     )
 
     it('a shell ask with no command text at all (nothing to vouch for)', () => {
-      const approval: PendingApproval = { requestId: 'per_b', toolName: 'bash', input: {} }
+      const approval: PendingApproval = { requestId: 'per_b', toolName: 'shell', input: {} }
       expect(hostPrecheck(approval, plan())).toEqual({ kind: 'plan-refuse' })
     })
 
@@ -334,7 +325,7 @@ describe('ADR-085 S3b — hostPrecheck plan-mode rungs', () => {
       expect(hostPrecheck(envEdit, plan())).toEqual({ kind: 'plan-refuse' })
       // A session allow covering the command / the edit.
       const allows = new OpencodeSessionAllows()
-      allows.add('bash', ['git commit *'])
+      allows.add('shell', ['git commit *'])
       allows.add('edit', ['*'])
       expect(hostPrecheck(bash('git commit -m x'), plan({ allows }))).toEqual({
         kind: 'plan-refuse'
@@ -344,18 +335,15 @@ describe('ADR-085 S3b — hostPrecheck plan-mode rungs', () => {
 
     it('planModeRefusesAsk — the shared predicate (a non-mutating category is never refused)', () => {
       expect(planModeRefusesAsk({ toolName: 'edit' }, undefined)).toBe(true)
-      expect(planModeRefusesAsk({ toolName: 'task', patterns: ['general'] }, undefined)).toBe(true)
-      expect(planModeRefusesAsk({ toolName: 'task', patterns: ['explore'] }, undefined)).toBe(false)
-      // 2.x names the tool `subagent` (ADR-097 §3).
       expect(planModeRefusesAsk({ toolName: 'subagent', patterns: ['general'] }, undefined)).toBe(
         true
       )
       expect(planModeRefusesAsk({ toolName: 'subagent', patterns: ['explore'] }, undefined)).toBe(
         false
       )
-      expect(planModeRefusesAsk({ toolName: 'bash' }, undefined)).toBe(true)
-      expect(planModeRefusesAsk({ toolName: 'bash' }, 'git commit -m x')).toBe(true)
-      expect(planModeRefusesAsk({ toolName: 'bash' }, 'git status')).toBe(false)
+      expect(planModeRefusesAsk({ toolName: 'shell' }, undefined)).toBe(true)
+      expect(planModeRefusesAsk({ toolName: 'shell' }, 'git commit -m x')).toBe(true)
+      expect(planModeRefusesAsk({ toolName: 'shell' }, 'git status')).toBe(false)
       expect(planModeRefusesAsk({ toolName: 'webfetch', patterns: ['x'] }, undefined)).toBe(false)
       expect(planModeRefusesAsk({ toolName: 'read', patterns: ['x'] }, undefined)).toBe(false)
     })
@@ -387,7 +375,7 @@ describe('ADR-085 S3b — hostPrecheck plan-mode rungs', () => {
 
     it('a session allow still answers before the allow rule', () => {
       const allows = new OpencodeSessionAllows()
-      allows.add('bash', ['git status *'])
+      allows.add('shell', ['git status *'])
       expect(hostPrecheck(bash('git status'), plan({ allows }))).toEqual({
         kind: 'session-allow'
       })
@@ -497,7 +485,7 @@ describe('ADR-085 S3b — hostPrecheck plan mode reads the union oracle', () => 
       kind: 'plan-refuse'
     })
     expect(
-      planModeRefusesAsk({ toolName: 'bash' }, 'Get-Content README.md', {
+      planModeRefusesAsk({ toolName: 'shell' }, 'Get-Content README.md', {
         cwd: 'D:/repo',
         additionalDirectories: [],
         rules: { deny: [] },
@@ -505,153 +493,5 @@ describe('ADR-085 S3b — hostPrecheck plan mode reads the union oracle', () => 
         realpath: () => undefined
       })
     ).toBe(false)
-  })
-})
-
-describe('ADR-085 S4 — a child ask is answered with the parent ruleset (rung 6)', () => {
-  const GIT_ALLOW = 'Bash(git:*)'
-  /** The default-mode base + the compiled `Bash(git:*)` allow, as the session patches it. */
-  const parentDefault: OpencodePermissionRule[] = [
-    ...buildRuleset('default'),
-    ...compileClaudeRulesToOpencode({
-      allow: [GIT_ALLOW],
-      deny: [],
-      ask: [],
-      additionalDirectories: [],
-      defaultMode: undefined
-    })
-  ]
-  const everything: OpencodePermissionRule[] = [{ permission: '*', pattern: '*', action: 'allow' }]
-  const marker = { sessionId: 'ses_child', parentToolUseId: 'call_task' }
-  const child = (a: PendingApproval): PendingApproval => ({ ...a, subagent: marker })
-  const childEdit: PendingApproval = child({
-    requestId: 'per_e',
-    toolUseId: 'c_e',
-    toolName: 'edit',
-    input: { filepath: 'src/a.ts' },
-    patterns: ['src/a.ts']
-  })
-  /** What the session passes: the gated built-ins + the bridged MCP key. */
-  const GATED = ['bash', 'edit', 'webfetch', 'lsphub_*']
-  const ctx = (
-    parentRuleset: OpencodePermissionRule[] | undefined,
-    mode = 'default',
-    /** `null` = the context carries no list. */
-    childGatedCategories: string[] | null = GATED
-  ) => ({
-    ...ctxWith({ allow: [GIT_ALLOW], mode }),
-    ...(parentRuleset ? { parentRuleset } : {}),
-    ...(childGatedCategories ? { childGatedCategories } : {})
-  })
-
-  describe('only the categories the static asks cover (R1)', () => {
-    const childAsk = (toolName: string, patterns: string[]): PendingApproval =>
-      child({ requestId: 'per_x', toolUseId: 'c_x', toolName, input: {}, patterns })
-
-    it('a child `external_directory` / `doom_loop` ask under `{*: allow}` → continue (asked today)', () => {
-      expect(hostPrecheck(childAsk('external_directory', ['/outside/*']), ctx(everything))).toEqual(
-        { kind: 'continue' }
-      )
-      expect(hostPrecheck(childAsk('doom_loop', ['*']), ctx(everything))).toEqual({
-        kind: 'continue'
-      })
-    })
-
-    it('a child MCP ask: parent-allow when its key is in the list; continue when it is not', () => {
-      const mcp = childAsk('lsphub_find_refs', ['*'])
-      expect(hostPrecheck(mcp, ctx(parentDefault))).toEqual({ kind: 'parent-allow' })
-      expect(
-        hostPrecheck(mcp, ctx(parentDefault, 'default', ['bash', 'edit', 'webfetch']))
-      ).toEqual({ kind: 'continue' })
-    })
-
-    it('no list → continue, even for bash', () => {
-      expect(hostPrecheck(child(bash('git status')), ctx(parentDefault, 'default', null))).toEqual({
-        kind: 'continue'
-      })
-    })
-  })
-
-  it('child `git status` under the parent’s Bash(git:*) allow → parent-allow', () => {
-    expect(hostPrecheck(child(bash('git status')), ctx(parentDefault))).toEqual({
-      kind: 'parent-allow'
-    })
-  })
-
-  it('child `hostname` (the parent base asks) → continue', () => {
-    expect(hostPrecheck(child(bash('hostname')), ctx(parentDefault))).toEqual({ kind: 'continue' })
-  })
-
-  it('child edit under a parent ruleset with `edit * allow` → parent-allow', () => {
-    const acceptEdits = [
-      ...parentDefault,
-      { permission: 'edit', pattern: '*', action: 'allow' as const }
-    ]
-    expect(hostPrecheck(childEdit, ctx(acceptEdits))).toEqual({ kind: 'parent-allow' })
-    expect(hostPrecheck(childEdit, ctx(parentDefault))).toEqual({ kind: 'continue' })
-  })
-
-  it('a parent-ruleset deny → deny with the rendered rule', () => {
-    const fetch: PendingApproval = child({
-      requestId: 'per_w',
-      toolUseId: 'c_w',
-      toolName: 'webfetch',
-      input: { url: 'https://example.invalid' },
-      patterns: ['https://example.invalid']
-    })
-    const denied = [
-      ...parentDefault,
-      { permission: 'webfetch', pattern: '*', action: 'deny' as const }
-    ]
-    expect(hostPrecheck(fetch, ctx(denied))).toEqual({ kind: 'deny', rule: 'webfetch(*)' })
-  })
-
-  it('NO subagent marker → never parent-allow, even when the ruleset allows', () => {
-    expect(hostPrecheck(bash('hostname'), ctx(everything))).toEqual({ kind: 'continue' })
-    expect(hostPrecheck(bash('git status'), ctx(parentDefault))).toEqual({ kind: 'continue' })
-  })
-
-  it('no parentRuleset → continue (today’s path)', () => {
-    expect(hostPrecheck(child(bash('git status')), ctx(undefined))).toEqual({ kind: 'continue' })
-  })
-
-  describe('the earlier rungs still come first', () => {
-    it('a §1 deny the child hits → deny with the user rule', () => {
-      expect(hostPrecheck(child(bash('sudo git push --force')), ctx(everything))).toEqual({
-        kind: 'deny',
-        rule: 'Bash(git push --force:*)'
-      })
-    })
-
-    it('plan: a child `git commit` under the allow → plan-refuse', () => {
-      expect(hostPrecheck(child(bash('git commit -m x')), ctx(everything, 'plan'))).toEqual({
-        kind: 'plan-refuse'
-      })
-    })
-
-    it('a user ask rule → user-ask', () => {
-      expect(hostPrecheck(child(bash('docker run alpine')), ctx(everything))).toEqual({
-        kind: 'user-ask',
-        rule: 'Bash(docker run:*)'
-      })
-    })
-
-    it('a session allow → session-allow', () => {
-      const allows = new OpencodeSessionAllows()
-      allows.add('bash', ['hostname *'])
-      expect(
-        hostPrecheck(child(bash('hostname')), {
-          ...ctxWith({ allows }),
-          parentRuleset: everything
-        })
-      ).toEqual({ kind: 'session-allow' })
-    })
-
-    it('plan: a child plan-safe command under the allow → allow-rule (rung 5), not parent-allow', () => {
-      expect(hostPrecheck(child(bash('git status')), ctx(everything, 'plan'))).toEqual({
-        kind: 'allow-rule',
-        rule: GIT_ALLOW
-      })
-    })
   })
 })

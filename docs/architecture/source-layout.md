@@ -26,11 +26,9 @@ src/
                          SpawnPrepRegistry, session-queue, register-engines
     opencode/          — opencode 2.x backend (ADR-097): OpencodeServerManager,
                          OpencodeClient + protocol-v2/ (generated), OpencodeSession,
-                         v2-event-mapper / v2-history / v2-reconnect, permission-v2,
+                         event-mapper / history / reconnect, permission-v2,
                          child-rulesets, session-support, credential-store,
                          model-discovery, config writers, hosted-tools MCP host
-                         (the 1.x adapter files — OpencodeV1*, event-mapper,
-                         protocol/ — are removed at S10)
     pi/                — pi backend: PiRpcClient (stdio JSONL), PiSession, event-mapper,
                          model-discovery, PiBridgeHost (loopback approval + hosted-tool
                          host), pi-bridge-source (the -e extension), permission-engine,
@@ -152,7 +150,7 @@ Key modules in `src/core/services/`:
 | `usage-fetcher.ts`                                                                                              | Polls `/api/oauth/usage`, merges rate-limit headers, disk cache                                                                                                                                      |
 | `block-usage.ts`                                                                                                | JSONL → `usage_event` ingestion, 5h billing windows, per-model/per-engine breakdown                                                                                                                  |
 | `usage-recorder.ts` / `usage-reconciler.ts` / `usage-aggregation.ts` / `usage-provider.ts` / `usage-windows.ts` | DB-backed metering: live recording, backfill reconcile, SQL aggregation, window identity (ADR-011/020)                                                                                               |
-| `opencode-pricing.ts`                                                                                           | Pricing from opencode's `/config/providers`, persisted supplemental table                                                                                                                            |
+| `opencode-pricing.ts`                                                                                           | Pricing from the models.dev catalog opencode reads (ADR-071 §5), persisted supplemental table                                                                                                        |
 | `opencode-session-list.ts` / `pi-session-list.ts`                                                               | Sidebar lists for opencode / pi sessions: opencode's from its API (cached, refreshed in the background, ADR-097 §6), pi's from its own store                                                         |
 | `context-window.ts`                                                                                             | Mirror of cli.js's model context-window resolution (`docs/protocol-cc/13-context-window.md`)                                                                                                         |
 | `db.ts`                                                                                                         | Operational SQLite DB — migrations + typed repos, on the driver seam (below)                                                                                                                         |

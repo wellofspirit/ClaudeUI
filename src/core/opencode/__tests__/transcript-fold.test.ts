@@ -3,7 +3,7 @@
  * a second terminal notification or a second result for one call fails.
  */
 import { describe, expect, it } from 'vitest'
-import type { OpencodeMapperOutput } from '../v2-event-mapper'
+import type { OpencodeMapperOutput } from '../event-mapper'
 import { foldOutputs } from '../../../test/helpers/opencode-v2-transcript'
 
 const notification: OpencodeMapperOutput = {

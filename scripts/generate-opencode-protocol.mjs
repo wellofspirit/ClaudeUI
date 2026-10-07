@@ -12,8 +12,9 @@
  *
  * Input: the pinned commit of the upstream checkout, read with `git show` so
  * the checkout's working tree does not matter. The checkout is found at
- * `$OPENCODE_V2_SRC`, else `vendor/opencode-v2-src`, else (agent worktrees) the
- * main checkout's `vendor/opencode-v2-src`.
+ * `$OPENCODE_SRC`, else `vendor/opencode-src`, else the pre-S10 name
+ * `vendor/opencode-v2-src`, else (agent worktrees) the same in the main
+ * checkout — the first that holds the pinned tag (`locateSource`).
  *
  * SSE event payloads are NOT in the spec (`V2EventEncoded` is an opaque JSON
  * string, at runtime too: the served `/openapi.json` says the same). They are
@@ -520,22 +521,60 @@ function git(cwd, args) {
   })
 }
 
-export function locateSource() {
+/** The checkout directory names, in order: the opencode checkout, then its pre-S10 2.x name. */
+export const SOURCE_DIR_NAMES = ['opencode-src', 'opencode-v2-src']
+
+/**
+ * Where an opencode checkout may be, in order: `$OPENCODE_SRC` (or the older
+ * `$OPENCODE_V2_SRC`), then `vendor/opencode-src` and `vendor/opencode-v2-src`
+ * (the 2.x checkout's name until ADR-097 S10 renamed it) of this checkout, then
+ * the same two of the main checkout (an agent worktree has no `vendor/` of its
+ * own).
+ */
+export function sourceCandidates(repoRoot = root, env = process.env) {
   const candidates = []
-  if (process.env.OPENCODE_V2_SRC) candidates.push(resolve(process.env.OPENCODE_V2_SRC))
-  candidates.push(join(root, 'vendor', 'opencode-v2-src'))
+  for (const name of ['OPENCODE_SRC', 'OPENCODE_V2_SRC'])
+    if (env[name]) candidates.push(resolve(env[name]))
+  const roots = [repoRoot]
   try {
-    // An agent worktree has no vendor/ source of its own: use the main checkout's.
-    const common = git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']).trim()
-    candidates.push(join(dirname(common), 'vendor', 'opencode-v2-src'))
+    const common = git(repoRoot, ['rev-parse', '--path-format=absolute', '--git-common-dir']).trim()
+    roots.push(dirname(common))
   } catch {
-    // not a git checkout: only the explicit candidates
+    // not a git checkout: this root only
   }
-  const found = candidates.find((dir) => existsSync(join(dir, '.git')))
+  for (const base of roots)
+    for (const name of SOURCE_DIR_NAMES) candidates.push(join(base, 'vendor', name))
+  return [...new Set(candidates)]
+}
+
+/** Whether `dir`'s repository has the pinned tag naming the pinned commit. */
+function hasPin(dir, pin = PIN) {
+  try {
+    return git(dir, ['rev-parse', `${pin.tag}^{commit}`]).trim() === pin.commit
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The checkout to read: the first candidate that is a git checkout holding the
+ * pinned tag at the pinned commit — so a `vendor/opencode-src` that is still
+ * the old 1.x clone without the 2.x tags is passed over for the next one —
+ * else the first git checkout at all, so `pinnedReader` names what is wrong
+ * with it.
+ */
+export function locateSource({
+  candidates = sourceCandidates(),
+  isCheckout = (dir) => existsSync(join(dir, '.git')),
+  holdsPin = (dir) => hasPin(dir)
+} = {}) {
+  const checkouts = candidates.filter((dir) => isCheckout(dir))
+  const found = checkouts.find((dir) => holdsPin(dir)) ?? checkouts[0]
   if (!found)
     throw new Error(
-      `No opencode 2.x source checkout (tried ${candidates.join(', ')}). ` +
-        `Create it with: git -C vendor/opencode-src worktree add ../opencode-v2-src ${PIN.tag}`
+      `No opencode source checkout (tried ${candidates.join(', ')}). ` +
+        `Create it with: git clone https://github.com/anomalyco/opencode vendor/opencode-src && ` +
+        `git -C vendor/opencode-src checkout ${PIN.tag}`
     )
   return found
 }

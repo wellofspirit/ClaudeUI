@@ -118,7 +118,7 @@ export type DispatchAgentFn = (
 
 /**
  * The `_meta` key opencode 2.x puts on EVERY MCP `tools/call`
- * (vendor/opencode-v2-src/packages/core/src/mcp/client.ts `callTool`).
+ * (vendor/opencode-src/packages/core/src/mcp/client.ts `callTool`).
  */
 export const OPENCODE_SESSION_META_KEY = 'ai.opencode/sessionID'
 

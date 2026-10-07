@@ -12,8 +12,8 @@
  * call throws — mapper bugs the reducer's first-wins rules would hide.
  */
 import type { ChatMessage, ContentBlock, TaskNotification } from '../../shared/types'
-import type { OpencodeMapperOutput } from '../../core/opencode/v2-event-mapper'
-import type { OpencodeHistory } from '../../core/opencode/v2-history'
+import type { OpencodeMapperOutput } from '../../core/opencode/event-mapper'
+import type { OpencodeHistory } from '../../core/opencode/history'
 
 export type Transcript = OpencodeHistory
 

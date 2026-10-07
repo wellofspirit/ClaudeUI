@@ -4,21 +4,22 @@ import { wildcardMatch as sharedWildcardMatch } from '../../shared/opencode-wild
 /**
  * Host-side port of opencode's permission matcher, used by the ask-rule
  * precedence guard (G9, `docs/automode-rework-plan.md` §4.5 — since ADR-085 S2
- * part of the host pre-check, `host-precheck.ts`, in every mode) and by the
- * host session-allow set's coverage test (`session-allows.ts`).
+ * part of the host pre-check, `host-precheck.ts`, in every mode), by the host
+ * session-allow set's coverage test (`session-allows.ts`) and by the 2.x
+ * evaluators below.
  *
- * Why we need it: opencode evaluates the ruleset itself, logs the matched rule,
- * and then **discards** it (`permission/index.ts:73`) — the `permission.asked`
- * event carries `{id, sessionID, permission, patterns, metadata, always, tool}`
- * and no provenance. So to know whether the ask we just received came from a
+ * Why we need it: opencode evaluates the ruleset itself and does not say
+ * which rule decided — `permission.asked` carries the action and resources
+ * but no provenance. So to know whether the ask we just received came from a
  * rule the *user* wrote, we have to re-run the match ourselves.
  *
  * This is deliberately opencode-specific and lives next to `permission-compiler.ts`
  * rather than in the engine-neutral `src/main/automode/` module.
  *
- * Ported verbatim in behaviour from opencode 1.17.14
- * (`vendor/opencode-src/packages/opencode/src/util/wildcard.ts` and
- * `.../permission/index.ts`).
+ * The match is opencode's `Wildcard.match` (`packages/core/src/util/wildcard.ts`)
+ * and its last-match-wins evaluation (`packages/core/src/permission.ts`).
+ * The host-precheck helpers take rules in the `{permission, pattern, action}`
+ * shape (`permission-v2.ts` `asHostPrecheckRules` adapts 2.x rules).
  */
 
 /**
@@ -52,8 +53,7 @@ export function evaluateOpencodeRules(
 /**
  * The rule {@link evaluateOpencodeRules} decides by — the LAST rule whose
  * `permission` and `pattern` both match — or `undefined` when none does. Used
- * where the host has to name the rule it acted on (ADR-085 S4: a child ask
- * the parent's ruleset denies is refused with that rule's text).
+ * where the host has to name the rule it acted on ({@link userDenyRule}).
  */
 export function lastMatchingRule(
   permission: string,
@@ -100,11 +100,8 @@ export function matchesUserAskRule(
 /**
  * The user DENY rule an ask resolves to, or `undefined`: the first of the
  * ask's patterns (absent/empty → `['*']`) whose last matching user-origin rule
- * denies. The host's replay of the server-side deny that
- * `permission-ruleset.ts` `opencodeWireRuleset` sends as an `ask` (ADR-085
- * follow-up) — the compiler emits allow → ask → deny, so a matching deny is
- * always the user tier's last match, and the rules the session appends after
- * that tier (the subagent backstop, the dispatch ask) are other permissions.
+ * denies. The compiler emits allow → ask → deny, so a matching deny is always
+ * the user tier's last match.
  */
 export function userDenyRule(
   rules: readonly OpencodePermissionRule[],
@@ -119,31 +116,6 @@ export function userDenyRule(
     if (rule?.action === 'deny') return rule
   }
   return undefined
-}
-
-/**
- * opencode's per-ask verdict over a ruleset (`permission/index.ts` `ask()`):
- * evaluate every pattern (absent/empty → `['*']`); any `deny` → `'deny'`; all
- * `allow` → `'allow'`; else `'ask'`. A pattern no rule matches counts as
- * `'ask'` (opencode's own fallthrough — and fail toward the human).
- *
- * ADR-085 S4: the host answers a task child's ask with this verdict over the
- * PARENT session's current ruleset (`host-precheck.ts`, `parent-allow`).
- */
-export function evaluateOpencodeAsk(
-  rules: readonly OpencodePermissionRule[],
-  permission: string,
-  patterns: readonly string[] | undefined,
-  platform: NodeJS.Platform = process.platform
-): OpencodeAction {
-  const list = patterns && patterns.length > 0 ? patterns : ['*']
-  let verdict: OpencodeAction = 'allow'
-  for (const pattern of list) {
-    const action = evaluateOpencodeRules(permission, pattern, rules, platform) ?? 'ask'
-    if (action === 'deny') return 'deny'
-    if (action !== 'allow') verdict = 'ask'
-  }
-  return verdict
 }
 
 // ── opencode 2.x (`{action, resource, effect}`, ADR-097 §3) ──────────────────

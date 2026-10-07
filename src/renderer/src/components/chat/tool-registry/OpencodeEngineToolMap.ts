@@ -5,13 +5,12 @@
  *
  * The kindOf switch below IS the canonical opencode→kind table. It carries
  * BOTH vocabularies (ADR-097 S4):
- * - 2.x (`vendor/opencode-v2-src/packages/core/src/tool/plugin/*.ts` `name`):
+ * - 2.x (`vendor/opencode-src/packages/core/src/tool/plugin/*.ts` `name`):
  *   `shell`, `subagent`, `patch`, `read`/`edit`/`write` taking `path`,
  *   `subagent` taking `agent`; `execute` is Code Mode's wrapper;
- * - 1.x (opencode-src tool/registry.ts): `bash`, `task`, `apply_patch`,
- *   `filePath`, `subagent_type` — still what a session migrated from 1.x
- *   holds in its history (2.x's v1 migration keeps the stored names,
- *   `core/src/database/v1-migration.bun.ts`), and the 1.x adapter until S10.
+ * - 1.x: `bash`, `task`, `apply_patch`, `filePath`, `subagent_type` — still
+ *   what a session migrated from 1.x holds in its history (2.x's v1 migration
+ *   keeps the stored names, `core/src/database/v1-migration.bun.ts`).
  *
  * Hosted-tools MCP names: the in-process HTTP MCP server is named 'claudeui'.
  * opencode sanitizes tool names as `sanitize(serverName)_sanitize(toolName)`,
@@ -101,7 +100,7 @@ function opencodeNormalize(
       // opencode edit input: { path (2.x) | filePath (1.x), oldString, newString }.
       // patch / apply_patch have no old/new pair on their input, but their (and
       // edit's) tool result carries real unified diffs in metadata — the mappers
-      // (v2-content.ts toolFileDiffs; 1.x event-mapper.ts extractFileDiffs) put
+      // (content.ts toolFileDiffs; 1.x event-mapper.ts extractFileDiffs) put
       // them on result.fileDiffs, which we surface as `files` here so the body
       // renders real per-file diff cards instead of the generic JSON view.
       const fileDiffs = result?.fileDiffs

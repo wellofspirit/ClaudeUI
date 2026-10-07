@@ -1,16 +1,15 @@
 /**
  * Tests for the host-side port of opencode's permission matcher (auto-mode G9).
  *
- * The port has to be behaviourally identical to
- * `vendor/opencode-src/packages/opencode/src/util/wildcard.ts` +
- * `permission/index.ts:evaluate()`, because a divergence means we either miss a
+ * The port has to be behaviourally identical to opencode's
+ * `packages/core/src/util/wildcard.ts` + `packages/core/src/permission.ts`
+ * evaluation (last match wins), because a divergence means we either miss a
  * user `ask` (auto mode silently downgrades a permission the user singled out)
  * or invent one (auto mode stops working).
  */
 import { describe, it, expect } from 'vitest'
 import {
   wildcardMatch,
-  evaluateOpencodeAsk,
   evaluateOpencodeRules,
   lastMatchingRule,
   matchesUserAskRule
@@ -118,37 +117,13 @@ describe('matchesUserAskRule (G9 — user ask outranks the classifier)', () => {
   })
 })
 
-describe('evaluateOpencodeAsk (ADR-085 S4 — the per-ask verdict over a ruleset)', () => {
+describe('lastMatchingRule', () => {
   const rules: OpencodePermissionRule[] = [
     rule('*', '*', 'allow'),
     rule('bash', '*', 'ask'),
     rule('bash', 'git *', 'allow'),
     rule('bash', 'git push *', 'deny')
   ]
-
-  it('every pattern allowed → allow', () => {
-    expect(evaluateOpencodeAsk(rules, 'bash', ['git status', 'git log'], 'linux')).toBe('allow')
-  })
-
-  it('one pattern denied → deny, whatever the others say', () => {
-    expect(evaluateOpencodeAsk(rules, 'bash', ['ls', 'git push origin'], 'linux')).toBe('deny')
-    expect(evaluateOpencodeAsk(rules, 'bash', ['git status', 'git push x'], 'linux')).toBe('deny')
-  })
-
-  it('allow + ask mixed → ask', () => {
-    expect(evaluateOpencodeAsk(rules, 'bash', ['git status', 'hostname'], 'linux')).toBe('ask')
-  })
-
-  it('a pattern no rule matches → ask (opencode fallthrough)', () => {
-    expect(evaluateOpencodeAsk([rule('edit', '*', 'allow')], 'bash', ['ls'], 'linux')).toBe('ask')
-    expect(evaluateOpencodeAsk([], 'webfetch', ['https://x'], 'linux')).toBe('ask')
-  })
-
-  it("absent/empty patterns → ['*']", () => {
-    expect(evaluateOpencodeAsk(rules, 'bash', [], 'linux')).toBe('ask')
-    expect(evaluateOpencodeAsk(rules, 'bash', undefined, 'linux')).toBe('ask')
-    expect(evaluateOpencodeAsk(rules, 'edit', undefined, 'linux')).toBe('allow')
-  })
 
   it('lastMatchingRule names the rule evaluateOpencodeRules decides by', () => {
     expect(lastMatchingRule('bash', 'git push x', rules, 'linux')).toEqual(

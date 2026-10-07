@@ -2,7 +2,7 @@
  * opencode 1.x config entries → their opencode 2.x form (ADR-097 S8).
  *
  * opencode 2.x still READS a 1.x-shaped config: it normalizes it in memory
- * (`vendor/opencode-v2-src/packages/core/src/config/normalize.ts`) and keeps
+ * (`vendor/opencode-src/packages/core/src/config/normalize.ts`) and keeps
  * the user's file as it is. ClaudeUI's writers emit 2.x keys only, and that
  * forces one rule on them: a map entry (`provider.<id>`, `agent.<name>`) must
  * live under ONE key. When the same id is under both the 1.x key and the 2.x

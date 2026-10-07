@@ -4,7 +4,7 @@
  *
  * In opencode 2.x MCP servers are LOCATION-scoped: every directory a server is
  * asked about connects its own MCP clients, asynchronously, the first time it
- * is used (vendor/opencode-v2-src/packages/core/src/mcp/index.ts — "initial
+ * is used (vendor/opencode-src/packages/core/src/mcp/index.ts — "initial
  * connections stay asynchronous so one slow server does not block Location
  * startup"). A server reporting `connected` is not yet a registered tool: the
  * tool registry picks the catalog up on an INTERNAL `mcp.tools.changed`, after

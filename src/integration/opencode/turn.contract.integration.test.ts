@@ -3,7 +3,7 @@
  * child sessions, the session list, and cold history (ADR-097 §2, §5, §6, §8.1).
  *
  *   OPENCODE_V2_INTEGRATION=1 [OPENCODE_V2_BIN=/path/to/opencode] \
- *     bun run test:integration src/integration/opencode-v2
+ *     bun run test:integration src/integration/opencode
  */
 import { execFileSync } from 'node:child_process'
 import { expect, it } from 'vitest'

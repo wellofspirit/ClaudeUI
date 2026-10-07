@@ -1,11 +1,12 @@
 /**
  * opencode-pricing.ts — fetch, persist, and register supplemental model prices.
  *
- * Source: https://models.dev/api.json, the catalog opencode itself reads. We used
- * to read it second-hand through a transient opencode server's /config/providers,
- * but that view is zeroed for any provider the user is signed into with OAuth, so
- * a new model under a subscription came back with no price at all (ADR-071 §5).
- * Going to the source removes the server spin-up and the sign-in dependency.
+ * Source: https://models.dev/api.json, the catalog opencode itself reads. Not
+ * opencode's own model list (2.x `GET /api/model`): that view zeroes the cost
+ * of every model a subscription covers (2.x's ChatGPT provider plugins set
+ * `cost: []`), so a subscription model would come back unpriced (ADR-071 §5),
+ * and it lists only the providers the user can use. Going to the source also
+ * needs no server and no sign-in.
  *
  * refreshPrices() fetches the catalog, converts it to PricingEntry[], persists it
  * to ~/.claude/ui/opencode-prices.json, and calls registerSupplementalPricing so
@@ -15,9 +16,9 @@
  *
  * The file keeps its name so the persisted path stays put across this change.
  *
- * Cost unit: CONFIRMED USD per 1 million tokens. opencode's session.ts:442-445
- * (v1.17.9) computes cost as `Decimal(tokens.input).mul(costInfo.input).div(1_000_000)`
- * from these same numbers, so cost.* maps 1:1 to ModelPricing's *PerMTok fields.
+ * Cost unit: USD per 1 million tokens — 2.x decodes these same numbers into
+ * `Money.USDPerMillionTokens` (`packages/core/src/models-dev.ts`), so cost.*
+ * maps 1:1 to ModelPricing's *PerMTok fields.
  */
 
 import * as fs from 'fs'

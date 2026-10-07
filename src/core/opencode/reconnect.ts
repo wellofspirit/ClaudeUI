@@ -21,7 +21,7 @@ import type {
   OpencodeEventMapper,
   OpencodeMapperOutput,
   OpencodeReconnectSnapshot
-} from './v2-event-mapper'
+} from './event-mapper'
 
 /** The `OpencodeClient` reads a reconnect needs (structural, for tests). */
 export interface OpencodeStateReader {

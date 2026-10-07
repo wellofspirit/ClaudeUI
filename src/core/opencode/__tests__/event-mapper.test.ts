@@ -1,2687 +1,1525 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+/**
+ * The opencode 2.x live mapper (ADR-097 S4), per event family. Payload
+ * shapes follow `protocol-v2/events.ts` (transcribed from upstream
+ * `schema/src/session-event.ts` at 2.0.24) and the recorded sequences in
+ * `fixtures/opencode-v2/`; `history-parity.test.ts` holds the mapper to the cold
+ * converter on those recordings.
+ */
+import { beforeEach, describe, expect, it } from 'vitest'
+import type { OpencodeEvent } from '../protocol-v2/events'
+import type { Session_Message_Info } from '../protocol-v2/openapi'
 import {
-  mapEvent,
-  buildChatMessage,
-  extractToolResult,
-  extractFileDiffs,
-  computeStoredDurationMs,
-  type MessageAccumulator
+  OpencodeEventMapper,
+  type OpencodeMapperOutput,
+  type OpencodeReconnectSnapshot
 } from '../event-mapper'
-import type { OpencodeEvent, StoredMessage } from '../protocol/types'
-import { blobRefOf } from '../../../test/helpers/blob-refs'
 
-const SESSION_ID = 'ses_abc123'
-const START_TIME = Date.now()
+const SID = 'ses_own'
+const CHILD = 'ses_child'
+const MSG = 'msg_a1'
+const MODEL = { providerID: 'openai', id: 'gpt-x' }
+const TOKENS = { input: 100, output: 20, reasoning: 5, cache: { read: 10, write: 0 } }
 
-function makeEvent(type: string, properties: Record<string, unknown>): OpencodeEvent {
-  return { id: 'evt_1', type, properties }
+let clock = 1_000
+let seq = 0
+/** An event as the feed delivers it (the mapper never reads `durable`). */
+function ev(type: string, data: Record<string, unknown>, at?: number): OpencodeEvent {
+  clock = at ?? clock + 1
+  return {
+    id: `evt_${String(++seq).padStart(4, '0')}`,
+    type,
+    created: clock,
+    data
+  } as unknown as OpencodeEvent
 }
 
-function opened(messageId: string, partId: string, type: 'text' | 'reasoning' = 'text') {
-  return new Map<string, MessageAccumulator>([
-    [
-      messageId,
-      {
-        messageId,
-        role: 'assistant',
-        partOrder: [partId],
-        parts: new Map([[partId, { type, text: '' }]])
-      }
-    ]
-  ])
+const kinds = (outputs: readonly OpencodeMapperOutput[]) => outputs.map((o) => o.kind)
+const of = <K extends OpencodeMapperOutput['kind']>(
+  outputs: readonly OpencodeMapperOutput[],
+  kind: K
+) => outputs.filter((o): o is Extract<OpencodeMapperOutput, { kind: K }> => o.kind === kind)
+
+let mapper: OpencodeEventMapper
+const map = (...events: OpencodeEvent[]) => events.flatMap((event) => mapper.map(event))
+
+/** A step of the own session (or `session`), started. */
+function step(id = MSG, session = SID, model = MODEL): OpencodeEvent {
+  return ev('session.step.started', {
+    sessionID: session,
+    assistantMessageID: id,
+    agent: 'build',
+    model,
+    started: clock + 1
+  })
 }
-
-describe('mapEvent — cross-session filter', () => {
-  it('ignores events from an UNKNOWN foreign session', () => {
-    const ev = makeEvent('message.part.delta', {
-      sessionID: 'ses_OTHER',
-      messageID: 'msg_1',
-      partID: 'p1',
-      field: 'text',
-      delta: 'hello'
-    })
-    const accumulators = opened('msg_1', 'p1')
-    const totalCostRef = { value: 0 }
-    // No childSessions entry for 'ses_OTHER' — must be ignored.
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef, new Map())
-    expect(out.kind).toBe('ignore')
+const tool = (
+  id: string,
+  name: string,
+  input: Record<string, unknown>,
+  session = SID,
+  msg = MSG
+) => [
+  ev('session.tool.input.started', { sessionID: session, assistantMessageID: msg, id, name }),
+  ev('session.tool.called', {
+    sessionID: session,
+    assistantMessageID: msg,
+    id,
+    input,
+    executed: false
   })
+]
 
-  it('passes events matching the session', () => {
-    const ev = makeEvent('message.part.delta', {
-      sessionID: SESSION_ID,
-      messageID: 'msg_1',
-      partID: 'p1',
-      field: 'text',
-      delta: 'hello'
-    })
-    const accumulators = opened('msg_1', 'p1')
-    const totalCostRef = { value: 0 }
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef, new Map())
-    expect(out.kind).toBe('stream')
-  })
-
-  it('passes events from a KNOWN child session (no longer ignored)', () => {
-    // A child session that was registered via a task tool part must be routed,
-    // not ignored. Its delta → subagent-stream, not stream.
-    const CHILD_ID = 'ses_CHILD'
-    const PARENT_CALL_ID = 'call_task_1'
-    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
-    const ev = makeEvent('message.part.delta', {
-      sessionID: CHILD_ID,
-      messageID: 'child_msg_1',
-      partID: 'cp1',
-      field: 'text',
-      delta: 'child text'
-    })
-    const out = mapEvent(
-      ev,
-      SESSION_ID,
-      opened('child_msg_1', 'cp1'),
-      START_TIME,
-      { value: 0 },
-      childSessions
-    )
-    expect(out.kind).toBe('subagent-stream')
-    if (out.kind === 'subagent-stream') {
-      expect(out.toolUseId).toBe(PARENT_CALL_ID)
-      expect(out.delta).toBe('child text')
-    }
-  })
-
-  it('surfaces a session.error that carries NO sessionID (plugin crash) instead of dropping it', () => {
-    // The vendor publishes plugin faults as session.error with no sessionID
-    // (plugin/index.ts). ClaudeUI always loads claudeui-xeng-plugin, so such a
-    // crash matched neither the own nor a child branch and fell through to
-    // {kind:'ignore'} — surfacing nowhere. It must now become a generic error.
-    const ev = makeEvent('session.error', {
-      error: { name: 'UnknownError', data: { message: 'plugin boom' } }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, new Map())
-    expect(out.kind).toBe('error')
-    if (out.kind === 'error') expect(out.message).toBe('plugin boom')
-  })
-
-  it('still IGNORES a session.error scoped to an unrelated foreign session', () => {
-    // A sessionID that IS present but matches neither own nor a child belongs to
-    // someone else — it must stay ignored (only the sessionID-less GLOBAL error
-    // is adopted).
-    const ev = makeEvent('session.error', {
-      sessionID: 'ses_SOMEONE_ELSE',
-      error: { name: 'UnknownError', data: { message: 'not ours' } }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, new Map())
-    expect(out.kind).toBe('ignore')
-  })
+beforeEach(() => {
+  mapper = new OpencodeEventMapper({ sessionID: SID })
 })
 
-describe('mapEvent — message.part.delta', () => {
-  let accumulators: Map<string, MessageAccumulator>
-  let totalCostRef: { value: number }
-
-  beforeEach(() => {
-    accumulators = new Map()
-    totalCostRef = { value: 0 }
-  })
-
-  it('returns stream with text delta', () => {
-    accumulators = opened('msg_1', 'p1')
-    const ev = makeEvent('message.part.delta', {
-      sessionID: SESSION_ID,
-      messageID: 'msg_1',
-      partID: 'p1',
-      field: 'text',
-      delta: 'hello world'
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    expect(out.kind).toBe('stream')
-    if (out.kind === 'stream') {
-      expect(out.streamType).toBe('text')
-      expect(out.delta).toBe('hello world')
-    }
-  })
-
-  it('returns stream with thinking type for reasoning field', () => {
-    accumulators = opened('msg_1', 'p1', 'reasoning')
-    const ev = makeEvent('message.part.delta', {
-      sessionID: SESSION_ID,
-      messageID: 'msg_1',
-      partID: 'p1',
-      // The pinned processor emits field:'text' for reasoning deltas; the
-      // already-open native part determines the item kind.
-      field: 'text',
-      delta: 'thinking...'
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    expect(out.kind).toBe('stream')
-    if (out.kind === 'stream') {
-      expect(out.streamType).toBe('thinking')
-    }
-  })
-
-  it('ignores delta with unknown field', () => {
-    const ev = makeEvent('message.part.delta', {
-      sessionID: SESSION_ID,
-      messageID: 'msg_1',
-      partID: 'p1',
-      field: 'unknown',
-      delta: 'x'
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    expect(out.kind).toBe('ignore')
-  })
-
-  it('addresses the rendered slot after filtered native parts and tool blocks', () => {
-    const acc: MessageAccumulator = {
-      messageId: 'msg_slots',
+describe('text and reasoning', () => {
+  it('a text part streams as item-open → item-delta → item-seal on block 0', () => {
+    const out = map(
+      step(),
+      ev('session.text.started', { sessionID: SID, assistantMessageID: MSG, ordinal: 0 }),
+      ev('session.text.delta', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        ordinal: 0,
+        delta: 'Hel'
+      }),
+      ev('session.text.delta', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        ordinal: 0,
+        delta: 'lo'
+      }),
+      ev('session.text.ended', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        ordinal: 0,
+        text: 'Hello'
+      })
+    )
+    expect(kinds(out)).toEqual(['item-open', 'item-delta', 'item-delta', 'item-seal'])
+    const [open] = of(out, 'item-open')
+    expect(open.open.target).toEqual({ messageId: MSG, blockIndex: 0, kind: 'text' })
+    expect(open.open.message.content).toEqual([{ type: 'text', text: '' }])
+    expect(of(out, 'item-delta').map((o) => o.chunk)).toEqual(['Hel', 'lo'])
+    expect(of(out, 'item-seal')[0].seal.message).toMatchObject({
+      id: MSG,
       role: 'assistant',
-      timestamp: 123,
-      partOrder: ['step', 'text1', 'tool', 'reasoning2'],
-      parts: new Map([
-        ['step', { type: 'step-start' }],
-        ['text1', { type: 'text', text: 'answer' }],
-        ['tool', { type: 'tool', toolName: 'bash', callID: 'call1', state: { input: {} } }],
-        ['reasoning2', { type: 'reasoning', text: '' }]
-      ])
-    }
-    accumulators.set(acc.messageId, acc)
-    const out = mapEvent(
-      makeEvent('message.part.delta', {
-        sessionID: SESSION_ID,
-        messageID: acc.messageId,
-        partID: 'reasoning2',
-        field: 'reasoning',
-        delta: 'why'
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-    expect(out).toMatchObject({
-      kind: 'stream',
-      item: { messageId: 'msg_slots', partId: 'reasoning2', blockIndex: 2, kind: 'thinking' }
-    })
-    expect(buildChatMessage(acc.messageId, acc).timestamp).toBe(123)
-    expect(buildChatMessage(acc.messageId, acc).content[2]).toMatchObject({
-      type: 'thinking',
-      text: 'why'
+      content: [{ type: 'text', text: 'Hello' }]
     })
   })
 
-  it('ignores a late delta after the native part has an end timestamp', () => {
-    const acc = opened('msg_done', 'p_done').get('msg_done')!
-    acc.parts.get('p_done')!.time = { start: 10, end: 20 }
-    accumulators.set(acc.messageId, acc)
-    expect(
-      mapEvent(
-        makeEvent('message.part.delta', {
-          sessionID: SESSION_ID,
-          messageID: acc.messageId,
-          partID: 'p_done',
-          field: 'text',
-          delta: 'late'
-        }),
-        SESSION_ID,
-        accumulators,
-        START_TIME,
-        totalCostRef
-      ).kind
-    ).toBe('ignore')
-    expect(acc.parts.get('p_done')!.text).toBe('')
-  })
-
-  it('preserves a fallback seal across a stale nonterminal snapshot', () => {
-    const acc = opened('msg_stopped', 'p_stopped').get('msg_stopped')!
-    acc.parts.set('p_stopped', {
-      type: 'text',
-      text: 'accepted partial',
-      time: { start: 10, end: 20 },
-      sealed: true
-    })
-    accumulators.set(acc.messageId, acc)
-    const snapshot = mapEvent(
-      makeEvent('message.part.updated', {
-        sessionID: SESSION_ID,
-        part: {
-          id: 'p_stopped',
-          messageID: 'msg_stopped',
-          type: 'text',
-          text: 'partial stale',
-          time: { start: 10 }
-        }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-    expect(snapshot.kind).toBe('ignore')
-    expect(acc.parts.get('p_stopped')?.sealed).toBe(true)
-    expect(acc.parts.get('p_stopped')?.text).toBe('accepted partial')
-    expect(acc.parts.get('p_stopped')?.time).toEqual({ start: 10, end: 20 })
-    expect(
-      mapEvent(
-        makeEvent('message.part.delta', {
-          sessionID: SESSION_ID,
-          messageID: 'msg_stopped',
-          partID: 'p_stopped',
-          field: 'text',
-          delta: ' rejected'
-        }),
-        SESSION_ID,
-        accumulators,
-        START_TIME,
-        totalCostRef
-      ).kind
-    ).toBe('ignore')
-  })
-
-  it('drops a child stale nonterminal snapshot without changing its sealed partial', () => {
-    const childSessions = new Map([['ses_child_stopped', 'call_parent']])
-    const acc = opened('msg_child_stopped', 'p_child_stopped').get('msg_child_stopped')!
-    acc.parts.set('p_child_stopped', {
-      type: 'reasoning',
-      text: 'kept thought',
-      time: { start: 30, end: 50 },
-      sealed: true
-    })
-    accumulators.set(acc.messageId, acc)
-    const output = mapEvent(
-      makeEvent('message.part.updated', {
-        sessionID: 'ses_child_stopped',
-        part: {
-          id: 'p_child_stopped',
-          messageID: 'msg_child_stopped',
-          type: 'reasoning',
-          text: 'stale thought',
-          time: { start: 30 }
-        }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef,
-      childSessions
-    )
-    expect(output.kind).toBe('ignore')
-    expect(acc.parts.get('p_child_stopped')).toMatchObject({
-      text: 'kept thought',
-      time: { start: 30, end: 50 },
-      sealed: true
-    })
-  })
-})
-
-describe('mapEvent — message.part.updated', () => {
-  let accumulators: Map<string, MessageAccumulator>
-  let totalCostRef: { value: number }
-
-  beforeEach(() => {
-    accumulators = new Map()
-    totalCostRef = { value: 0 }
-  })
-
-  it('creates accumulator and returns message for text part', () => {
-    const ev = makeEvent('message.part.updated', {
-      sessionID: SESSION_ID,
-      part: {
-        id: 'p1',
-        messageID: 'msg_1',
-        type: 'text',
-        text: 'Hello!'
-      }
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    expect(out.kind).toBe('message')
-    if (out.kind === 'message') {
-      expect(out.message.id).toBe('msg_1')
-      expect(out.message.role).toBe('assistant')
-      expect(out.message.content).toHaveLength(1)
-      expect(out.message.content[0].type).toBe('text')
-      if (out.message.content[0].type === 'text') {
-        expect(out.message.content[0].text).toBe('Hello!')
-      }
-    }
-    expect(accumulators.has('msg_1')).toBe(true)
-  })
-
-  it('creates tool_use block for tool part', () => {
-    const ev = makeEvent('message.part.updated', {
-      sessionID: SESSION_ID,
-      part: {
-        id: 'p_tool',
-        messageID: 'msg_2',
-        type: 'tool',
-        tool: 'bash',
-        callID: 'call_abc',
-        state: { status: 'running', input: { command: 'ls' } }
-      }
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    expect(out.kind).toBe('message')
-    if (out.kind === 'message') {
-      const block = out.message.content[0]
-      expect(block.type).toBe('tool_use')
-      if (block.type === 'tool_use') {
-        expect(block.toolName).toBe('bash')
-        expect(block.toolUseId).toBe('call_abc')
-      }
-    }
-  })
-
-  it('appends parts in insertion order across multiple updates', () => {
-    const ev1 = makeEvent('message.part.updated', {
-      sessionID: SESSION_ID,
-      part: { id: 'p1', messageID: 'msg_3', type: 'text', text: 'First' }
-    })
-    const ev2 = makeEvent('message.part.updated', {
-      sessionID: SESSION_ID,
-      part: { id: 'p2', messageID: 'msg_3', type: 'text', text: 'Second' }
-    })
-    mapEvent(ev1, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    const out2 = mapEvent(ev2, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    expect(out2.kind).toBe('message')
-    if (out2.kind === 'message') {
-      expect(out2.message.content).toHaveLength(2)
-    }
-  })
-})
-
-describe('mapEvent — permission.asked', () => {
-  it('returns approval output', () => {
-    const ev = makeEvent('permission.asked', {
-      sessionID: SESSION_ID,
-      id: 'perm_1',
-      permission: 'bash',
-      tool: { callID: 'call_1' },
-      metadata: { command: 'rm -rf' }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
-    expect(out.kind).toBe('approval')
-    if (out.kind === 'approval') {
-      expect(out.approval.requestId).toBe('perm_1')
-      expect(out.approval.toolName).toBe('bash')
-      expect(out.approval.toolUseId).toBe('call_1')
-    }
-  })
-
-  it('attaches an "always allow" suggestion derived from the matched pattern', () => {
-    const ev = makeEvent('permission.asked', {
-      sessionID: SESSION_ID,
-      id: 'perm_2',
-      permission: 'bash',
-      patterns: ['echo hi'],
-      tool: { callID: 'call_2' }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
-    if (out.kind === 'approval') {
-      expect(out.approval.suggestions).toEqual([
-        {
-          type: 'addRules',
-          behavior: 'allow',
-          destination: 'localSettings',
-          rules: [{ toolName: 'Bash', ruleContent: 'echo hi' }]
-        }
-      ])
-    } else {
-      throw new Error('expected approval')
-    }
-  })
-
-  it('omits suggestions for an unmappable permission category', () => {
-    const ev = makeEvent('permission.asked', {
-      sessionID: SESSION_ID,
-      id: 'perm_3',
-      permission: 'doom_loop',
-      patterns: ['*'],
-      tool: { callID: 'call_3' }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
-    if (out.kind === 'approval') {
-      expect(out.approval.suggestions).toBeUndefined()
-    } else {
-      throw new Error('expected approval')
-    }
-  })
-
-  // M-OC6: surface the real tool input to the approval/judge for MCP tools that
-  // ask with metadata:{}.
-  it('surfaces the accumulated tool-call input when metadata is empty (M-OC6)', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    // The streamed tool part carrying the real args arrives BEFORE the ask.
-    mapEvent(
-      makeEvent('message.part.updated', {
-        sessionID: SESSION_ID,
-        part: {
-          id: 'prt_1',
-          messageID: 'msg_1',
-          type: 'tool',
-          tool: 'claudeui_dispatch_agent',
-          callID: 'call_9',
-          state: { status: 'pending', input: { engine: 'claude', prompt: 'do the thing' } }
-        }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 }
-    )
-
-    const out = mapEvent(
-      makeEvent('permission.asked', {
-        sessionID: SESSION_ID,
-        id: 'perm_mcp',
-        permission: 'claudeui_dispatch_agent',
-        tool: { messageID: 'msg_1', callID: 'call_9' },
-        metadata: {} // the MCP-tool blind spot
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 }
-    )
-    expect(out.kind).toBe('approval')
-    if (out.kind === 'approval') {
-      // Pre-fix this was {} (metadata); now it carries the real args.
-      expect(out.approval.input).toEqual({ engine: 'claude', prompt: 'do the thing' })
-    }
-  })
-
-  it('finds the tool input even when the ask omits messageID (scans all accumulators)', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    mapEvent(
-      makeEvent('message.part.updated', {
-        sessionID: SESSION_ID,
-        part: {
-          id: 'prt_2',
-          messageID: 'msg_2',
-          type: 'tool',
-          tool: 'somemcp',
-          callID: 'call_x',
-          state: { input: { a: 1 } }
-        }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 }
-    )
-    const out = mapEvent(
-      makeEvent('permission.asked', {
-        sessionID: SESSION_ID,
-        id: 'perm_x',
-        permission: 'somemcp',
-        tool: { callID: 'call_x' }, // no messageID
-        metadata: {}
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 }
-    )
-    if (out.kind === 'approval') expect(out.approval.input).toEqual({ a: 1 })
-    else throw new Error('expected approval')
-  })
-
-  it('falls back to metadata when no matching tool part carries input', () => {
-    const out = mapEvent(
-      makeEvent('permission.asked', {
-        sessionID: SESSION_ID,
-        id: 'perm_meta',
-        permission: 'bash',
-        tool: { callID: 'call_none' },
-        metadata: { command: 'ls' }
-      }),
-      SESSION_ID,
-      new Map(),
-      START_TIME,
-      { value: 0 }
-    )
-    if (out.kind === 'approval') expect(out.approval.input).toEqual({ command: 'ls' })
-    else throw new Error('expected approval')
-  })
-
-  // ADR-085 S2: `always` keys the host session-allow set (ClaudeUI never sends it).
-  it('carries the ask `always` patterns, and no child marker', () => {
-    const out = mapEvent(
-      makeEvent('permission.asked', {
-        sessionID: SESSION_ID,
-        id: 'perm_always',
-        permission: 'bash',
-        patterns: ['git push origin feat'],
-        always: ['git push *'],
-        tool: { callID: 'call_always' },
-        metadata: { command: 'git push origin feat' }
-      }),
-      SESSION_ID,
-      new Map(),
-      START_TIME,
-      { value: 0 }
-    )
-    if (out.kind !== 'approval') throw new Error('expected approval')
-    expect(out.approval.always).toEqual(['git push *'])
-    expect('subagent' in out.approval).toBe(false)
-  })
-
-  it('omits `always` when the ask carries none (or an empty list)', () => {
-    for (const always of [undefined, []]) {
-      const out = mapEvent(
-        makeEvent('permission.asked', {
-          sessionID: SESSION_ID,
-          id: 'perm_no_always',
-          permission: 'bash',
-          patterns: ['ls'],
-          ...(always ? { always } : {}),
-          tool: { callID: 'call_no_always' }
-        }),
-        SESSION_ID,
-        new Map(),
-        START_TIME,
-        { value: 0 }
+  it('reasoning opens a thinking item timed from its start and seals with its duration', () => {
+    const out = map(
+      step(),
+      ev(
+        'session.reasoning.started',
+        { sessionID: SID, assistantMessageID: MSG, ordinal: 0 },
+        5_000
+      ),
+      ev(
+        'session.reasoning.delta',
+        { sessionID: SID, assistantMessageID: MSG, ordinal: 0, delta: 'hmm' },
+        5_010
+      ),
+      // 2.0.24 starts the text before it ends the reasoning (recorded).
+      ev('session.text.started', { sessionID: SID, assistantMessageID: MSG, ordinal: 0 }, 5_020),
+      ev(
+        'session.reasoning.ended',
+        { sessionID: SID, assistantMessageID: MSG, ordinal: 0, text: 'hmm' },
+        5_250
+      ),
+      ev(
+        'session.text.delta',
+        { sessionID: SID, assistantMessageID: MSG, ordinal: 0, delta: 'ok' },
+        5_260
+      ),
+      ev(
+        'session.text.ended',
+        { sessionID: SID, assistantMessageID: MSG, ordinal: 0, text: 'ok' },
+        5_270
       )
-      if (out.kind !== 'approval') throw new Error('expected approval')
-      expect('always' in out.approval).toBe(false)
-    }
-  })
-})
-
-// M-OC2: permission.replied retracts the (possibly cascade-resolved) card.
-describe('mapEvent — permission.replied (M-OC2)', () => {
-  it('maps permission.replied → approval-resolved with the requestID', () => {
-    const out = mapEvent(
-      makeEvent('permission.replied', { sessionID: SESSION_ID, requestID: 'perm_1' }),
-      SESSION_ID,
-      new Map(),
-      START_TIME,
-      { value: 0 }
     )
-    // Pre-fix this fell through to {kind:'ignore'} — the stale card never cleared.
-    expect(out.kind).toBe('approval-resolved')
-    if (out.kind === 'approval-resolved') expect(out.requestId).toBe('perm_1')
-  })
-
-  it('ignores a permission.replied with no requestID', () => {
-    const out = mapEvent(
-      makeEvent('permission.replied', { sessionID: SESSION_ID }),
-      SESSION_ID,
-      new Map(),
-      START_TIME,
-      { value: 0 }
-    )
-    expect(out.kind).toBe('ignore')
-  })
-})
-
-describe('mapEvent — session.idle', () => {
-  it('returns result output', () => {
-    const ev = makeEvent('session.idle', { sessionID: SESSION_ID })
-    const totalCostRef = { value: 1.23 }
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, totalCostRef)
-    expect(out.kind).toBe('result')
-    if (out.kind === 'result') {
-      expect(out.result.sessionId).toBe(SESSION_ID)
-      expect(out.result.totalCostUsd).toBe(1.23)
-      expect(out.result.durationMs).toBeGreaterThanOrEqual(0)
-    }
-  })
-})
-
-describe('mapEvent — message.updated cost (S1: cumulative snapshot, not additive)', () => {
-  it('sets the turn total from the per-message cumulative snapshot', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    const ev = makeEvent('message.updated', {
-      sessionID: SESSION_ID,
-      info: { id: 'msg_1', role: 'assistant', cost: 0.5 }
+    const opens = of(out, 'item-open')
+    expect(opens[0].open).toMatchObject({
+      target: { blockIndex: 0, kind: 'thinking' },
+      startedAt: 5_000
     })
-    const totalCostRef = { value: 0 }
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    expect(out.kind).toBe('cost_update')
-    expect(totalCostRef.value).toBeCloseTo(0.5)
-  })
-
-  it('does NOT double-count when the same message re-emits a cumulative cost', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    const totalCostRef = { value: 0 }
-    // opencode re-emits message.updated for the same message multiple times with
-    // a growing CUMULATIVE cost. The total must reflect the latest snapshot, not
-    // the sum of every snapshot.
-    mapEvent(
-      makeEvent('message.updated', { sessionID: SESSION_ID, info: { id: 'msg_1', cost: 0.2 } }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-    mapEvent(
-      makeEvent('message.updated', { sessionID: SESSION_ID, info: { id: 'msg_1', cost: 0.5 } }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-    expect(totalCostRef.value).toBeCloseTo(0.5) // NOT 0.7
-  })
-
-  it('sums distinct messages within a turn', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    const totalCostRef = { value: 0 }
-    mapEvent(
-      makeEvent('message.updated', { sessionID: SESSION_ID, info: { id: 'msg_1', cost: 0.3 } }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-    mapEvent(
-      makeEvent('message.updated', { sessionID: SESSION_ID, info: { id: 'msg_2', cost: 0.4 } }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-    expect(totalCostRef.value).toBeCloseTo(0.7)
-  })
-
-  it('records role even when cost is zero/absent (does not early-return before role)', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    const out = mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: { id: 'msg_u', role: 'user', cost: 0 }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 }
-    )
-    expect(out.kind).toBe('ignore')
-    expect(accumulators.get('msg_u')?.role).toBe('user')
-  })
-})
-
-// ── message.updated info.tokens — cumulative-per-message (store, not sum) ──────
-// These guard the Phase 7 metering recorder: opencode re-emits message.updated
-// for the same message with a growing CUMULATIVE token snapshot, so the
-// accumulator must STORE the latest (final) tokens, not sum across events.
-describe('mapEvent — message.updated info.tokens (Phase 7 metering)', () => {
-  it('stores info.tokens on the accumulator (final snapshot, replace not sum)', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    const totalCostRef = { value: 0 }
-    // Two updates for the SAME message id with growing cumulative tokens.
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: {
-          id: 'msg_tok',
-          role: 'assistant',
-          cost: 0.1,
-          tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 10, write: 4 } }
-        }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: {
-          id: 'msg_tok',
-          role: 'assistant',
-          cost: 0.2,
-          tokens: { input: 100, output: 80, reasoning: 12, cache: { read: 10, write: 4 } }
-        }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-    const acc = accumulators.get('msg_tok')
-    // Latest snapshot wins — output 80, NOT 20+80=100
-    expect(acc?.tokens?.input).toBe(100)
-    expect(acc?.tokens?.output).toBe(80)
-    expect(acc?.tokens?.reasoning).toBe(12)
-    expect(acc?.tokens?.cache?.read).toBe(10)
-    expect(acc?.tokens?.cache?.write).toBe(4)
-  })
-
-  it('carries tokens + messageId + engineCostUsd on the cost_update output', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    const out = mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: {
-          id: 'msg_co',
-          role: 'assistant',
-          cost: 0.33,
-          tokens: { input: 7, output: 3, cache: { read: 1, write: 2 } }
-        }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 }
-    )
-    expect(out.kind).toBe('cost_update')
-    if (out.kind === 'cost_update') {
-      expect(out.messageId).toBe('msg_co')
-      expect(out.engineCostUsd).toBeCloseTo(0.33)
-      expect(out.tokens?.input).toBe(7)
-      expect(out.tokens?.output).toBe(3)
-      expect(out.tokens?.cache?.write).toBe(2)
-    }
-  })
-
-  it('tolerates missing/partial info.tokens (undefined fields, no cache)', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: { id: 'msg_partial', role: 'assistant', cost: 0.01, tokens: { input: 50 } }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 }
-    )
-    const acc = accumulators.get('msg_partial')
-    expect(acc?.tokens?.input).toBe(50)
-    expect(acc?.tokens?.output).toBeUndefined()
-    expect(acc?.tokens?.cache).toBeUndefined()
-  })
-})
-
-describe('mapEvent — R3: user-role part.updated is not rendered as assistant', () => {
-  it('ignores a part.updated whose message role is user', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    // message.updated (role=user) arrives first, as opencode always orders it.
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: { id: 'msg_user', role: 'user' }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 }
-    )
-    const out = mapEvent(
-      makeEvent('message.part.updated', {
-        sessionID: SESSION_ID,
-        part: { id: 'p1', messageID: 'msg_user', type: 'text', text: 'my prompt' }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 }
-    )
-    expect(out.kind).toBe('ignore')
-  })
-
-  it('still maps an assistant-role message normally', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: { id: 'msg_asst', role: 'assistant' }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 }
-    )
-    const out = mapEvent(
-      makeEvent('message.part.updated', {
-        sessionID: SESSION_ID,
-        part: { id: 'p1', messageID: 'msg_asst', type: 'text', text: 'Hi there' }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 }
-    )
-    expect(out.kind).toBe('message')
-    if (out.kind === 'message') {
-      expect(out.message.role).toBe('assistant')
-      expect(out.message.content[0]).toMatchObject({ type: 'text', text: 'Hi there' })
-    }
-  })
-
-  it('defaults to assistant when no message.updated preceded the part (role unknown)', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    const out = mapEvent(
-      makeEvent('message.part.updated', {
-        sessionID: SESSION_ID,
-        part: { id: 'p1', messageID: 'msg_x', type: 'text', text: 'orphan' }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 }
-    )
-    expect(out.kind).toBe('message')
-    if (out.kind === 'message') expect(out.message.role).toBe('assistant')
-  })
-})
-
-describe('buildChatMessage', () => {
-  it('builds message with text and tool blocks', () => {
-    const acc: MessageAccumulator = {
-      messageId: 'msg_x',
-      partOrder: ['p1', 'p2'],
-      parts: new Map([
-        ['p1', { type: 'text', text: 'hello' }],
-        [
-          'p2',
-          {
-            type: 'tool',
-            toolName: 'read',
-            callID: 'c1',
-            state: { status: 'running', input: { path: '/foo' } }
-          }
-        ]
-      ])
-    }
-    const msg = buildChatMessage('msg_x', acc)
-    expect(msg.id).toBe('msg_x')
-    expect(msg.role).toBe('assistant')
-    expect(msg.content).toHaveLength(2)
-    expect(msg.content[0].type).toBe('text')
-    expect(msg.content[1].type).toBe('tool_use')
-  })
-})
-
-// ── Hosted-tools plugin tool names — RAW pass-through (Phase 6) ───────────────
-// Phase 6 retired the 5c name-normalization hack (OPENCODE_TOOL_NAME_MAP). The
-// mapper now emits the RAW opencode tool name; the renderer's OpencodeEngineToolMap
-// classifies render_mermaid→diagram, create_mockup/show_mockup→mockup, bash→command.
-
-describe('buildChatMessage — raw tool names (no normalization)', () => {
-  it('keeps render_mermaid as the raw name, preserving callID + toolInput', () => {
-    const acc: MessageAccumulator = {
-      messageId: 'msg_m',
-      partOrder: ['p1'],
-      parts: new Map([
-        [
-          'p1',
-          {
-            type: 'tool',
-            toolName: 'render_mermaid',
-            callID: 'call_abc',
-            state: { status: 'completed', input: { source: 'graph TD; A-->B;', title: 'Flow' } }
-          }
-        ]
-      ])
-    }
-    const msg = buildChatMessage('msg_m', acc)
-    expect(msg.content).toHaveLength(1)
-    const block = msg.content[0]
-    expect(block.type).toBe('tool_use')
-    if (block.type === 'tool_use') {
-      // RAW name preserved — the renderer's OpencodeEngineToolMap maps it to 'diagram'
-      expect(block.toolName).toBe('render_mermaid')
-      // callID / toolUseId preserved
-      expect(block.toolUseId).toBe('call_abc')
-      // toolInput untouched (arg names already match the diagram body)
-      expect(block.toolInput).toEqual({ source: 'graph TD; A-->B;', title: 'Flow' })
-    }
-  })
-
-  it('keeps create_mockup + show_mockup as raw names', () => {
-    const acc: MessageAccumulator = {
-      messageId: 'msg_n',
-      partOrder: ['p1', 'p2'],
-      parts: new Map([
-        [
-          'p1',
-          {
-            type: 'tool',
-            toolName: 'create_mockup',
-            callID: 'c1',
-            state: { status: 'completed', input: { html: '<div/>' } }
-          }
-        ],
-        [
-          'p2',
-          {
-            type: 'tool',
-            toolName: 'show_mockup',
-            callID: 'c2',
-            state: { status: 'completed', input: { directory: 'abc12345' } }
-          }
-        ]
-      ])
-    }
-    const msg = buildChatMessage('msg_n', acc)
-    const names = msg.content.map((b) => (b.type === 'tool_use' ? b.toolName : null))
-    expect(names).toEqual(['create_mockup', 'show_mockup'])
-  })
-
-  it('leaves a native opencode tool name (bash) unchanged', () => {
-    const acc: MessageAccumulator = {
-      messageId: 'msg_o',
-      partOrder: ['p1'],
-      parts: new Map([
-        [
-          'p1',
-          {
-            type: 'tool',
-            toolName: 'bash',
-            callID: 'c1',
-            state: { status: 'completed', input: { command: 'ls' } }
-          }
-        ]
-      ])
-    }
-    const msg = buildChatMessage('msg_o', acc)
-    const block = msg.content[0]
-    if (block.type === 'tool_use') {
-      expect(block.toolName).toBe('bash')
-      expect(block.toolUseId).toBe('c1')
-    }
-  })
-})
-
-describe('extractToolResult', () => {
-  it('returns null for non-tool parts', () => {
-    expect(extractToolResult('p1', { type: 'text', text: 'hi' })).toBeNull()
-  })
-
-  it('returns null for running tool', () => {
-    expect(
-      extractToolResult('p1', { type: 'tool', callID: 'c1', state: { status: 'running' } })
-    ).toBeNull()
-  })
-
-  it('returns result for completed tool', () => {
-    const res = extractToolResult('p1', {
-      type: 'tool',
-      callID: 'c1',
-      state: { status: 'completed', output: 'file content' }
-    })
-    expect(res).not.toBeNull()
-    expect(res?.toolUseId).toBe('c1')
-    expect(res?.result).toBe('file content')
-    expect(res?.isError).toBe(false)
-  })
-
-  it('carries state.attachments data-URIs onto the result as images (live path)', () => {
-    // Verified against the pinned vendor source: a tool that returns media has
-    // the FilePart attachments on its OWN tool part state.attachments
-    // (processor.ts completeToolCall / ToolStateCompleted.attachments), not as
-    // separate assistant-message file parts. They were dropped entirely.
-    const res = extractToolResult('p1', {
-      type: 'tool',
-      callID: 'c-img',
-      state: {
-        status: 'completed',
-        output: 'Image read successfully',
-        attachments: [
-          { type: 'file', mime: 'image/png', url: 'data:image/png;base64,LIVE', filename: 'a.png' },
-          { type: 'file', mime: 'image/tiff', url: 'data:image/tiff;base64,DROP' }
-        ]
-      }
-    })
-    expect(res?.images).toEqual([
-      { mediaType: 'image/png', ...blobRefOf('LIVE'), fileName: 'a.png' }
+    expect(opens[1].open.target).toMatchObject({ blockIndex: 1, kind: 'text' })
+    expect(of(out, 'item-seal').at(-1)?.seal.message.content).toEqual([
+      { type: 'thinking', text: 'hmm', durationMs: 250 },
+      { type: 'text', text: 'ok' }
     ])
   })
 
-  it('omits images for a tool that returned none', () => {
-    const res = extractToolResult('p1', {
-      type: 'tool',
-      callID: 'c-plain',
-      state: { status: 'completed', output: 'text only' }
-    })
-    expect(res).not.toBeNull()
-    expect('images' in res!).toBe(false)
-  })
-
-  it('returns error result for errored tool', () => {
-    const res = extractToolResult('p1', {
-      type: 'tool',
-      callID: 'c1',
-      state: { status: 'error', output: 'permission denied' }
-    })
-    expect(res?.isError).toBe(true)
-    expect(res?.result).toBe('permission denied')
-  })
-
-  it('errored tool with state.error → result is the error text (preferred over output)', () => {
-    // e.g. a permission denial: opencode fails the part with the CorrectedError
-    // feedback on state.error — that text must be visible in the tool card.
-    const res = extractToolResult('p1', {
-      type: 'tool',
-      callID: 'c1',
-      state: {
-        status: 'error',
-        output: 'stale partial output',
-        error:
-          'The user rejected permission to use this specific tool call with the following feedback: Auto mode blocked: unsafe'
-      }
-    })
-    expect(res?.isError).toBe(true)
-    expect(res?.result).toBe(
-      'The user rejected permission to use this specific tool call with the following feedback: Auto mode blocked: unsafe'
+  it('an EMPTY reasoning (encrypted-only) never places a block', () => {
+    const out = map(
+      step(),
+      ev('session.reasoning.started', { sessionID: SID, assistantMessageID: MSG, ordinal: 0 }),
+      ev('session.reasoning.ended', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        ordinal: 0,
+        text: ''
+      }),
+      ev('session.text.started', { sessionID: SID, assistantMessageID: MSG, ordinal: 0 }),
+      ev('session.text.delta', { sessionID: SID, assistantMessageID: MSG, ordinal: 0, delta: 'x' })
     )
+    expect(of(out, 'item-open')[0].open.target).toMatchObject({ blockIndex: 0, kind: 'text' })
+    expect(out.some((o) => o.kind === 'message')).toBe(false)
   })
 
-  it('errored tool with only metadata.output → falls back to it (no state.error)', () => {
-    const res = extractToolResult('p1', {
-      type: 'tool',
-      callID: 'c1',
-      state: { status: 'error', metadata: { output: 'command failed' } }
+  it('a text that ends with no deltas lands as one message, no stream', () => {
+    const out = map(
+      step(),
+      ev('session.text.started', { sessionID: SID, assistantMessageID: MSG, ordinal: 0 }),
+      ev('session.text.ended', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        ordinal: 0,
+        text: 'whole'
+      })
+    )
+    expect(kinds(out)).toEqual(['message'])
+  })
+
+  it('a second text in a step takes the next ordinal and the next block', () => {
+    const out = map(
+      step(),
+      ev('session.text.started', { sessionID: SID, assistantMessageID: MSG, ordinal: 0 }),
+      ev('session.text.ended', { sessionID: SID, assistantMessageID: MSG, ordinal: 0, text: 'a' }),
+      ...tool('call_1', 'read', { path: 'x' }),
+      ev('session.text.started', { sessionID: SID, assistantMessageID: MSG, ordinal: 1 }),
+      ev('session.text.delta', { sessionID: SID, assistantMessageID: MSG, ordinal: 1, delta: 'b' })
+    )
+    expect(of(out, 'item-open')[0].open.target.blockIndex).toBe(2)
+  })
+})
+
+describe('tools', () => {
+  it('input start shows the card; the call fills its input; success sends the result', () => {
+    const out = map(
+      step(),
+      ...tool('call_1', 'shell', { command: 'ls' }),
+      ev('session.tool.success', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: 'call_1',
+        content: [
+          { type: 'text', text: 'a\n' },
+          { type: 'text', text: 'Exited with code 1' }
+        ],
+        metadata: { exit: 1 },
+        executed: false
+      })
+    )
+    const messages = of(out, 'message')
+    expect(messages[0].message.content).toEqual([
+      { type: 'tool_use', toolUseId: 'call_1', toolName: 'shell', toolInput: {} }
+    ])
+    expect(messages[1].message.content[0]).toMatchObject({ toolInput: { command: 'ls' } })
+    expect(of(out, 'tool-result')[0].result).toEqual({
+      toolUseId: 'call_1',
+      result: 'a\n\n\nExited with code 1',
+      isError: false
     })
-    expect(res?.isError).toBe(true)
-    expect(res?.result).toBe('command failed')
   })
 
-  it('completed tool ignores state.error and keeps output', () => {
-    const res = extractToolResult('p1', {
-      type: 'tool',
-      callID: 'c1',
-      state: { status: 'completed', output: 'real output', error: 'leftover' }
-    })
-    expect(res?.isError).toBe(false)
-    expect(res?.result).toBe('real output')
+  it('a tool.input.delta is passed on for live argument rendering', () => {
+    const out = map(
+      step(),
+      ev('session.tool.input.started', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: 'c',
+        name: 'write'
+      }),
+      ev('session.tool.input.delta', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: 'c',
+        delta: '{"pa'
+      })
+    )
+    expect(of(out, 'tool-input-delta')).toEqual([
+      { kind: 'tool-input-delta', toolUseId: 'c', delta: '{"pa' }
+    ])
   })
 
-  it('apply_patch-shaped metadata (files[]) → fileDiffs mapped from relativePath/type', () => {
-    const res = extractToolResult('p1', {
-      type: 'tool',
-      callID: 'c1',
-      state: {
-        status: 'completed',
-        output: 'Success. Updated the following files:\nM a.ts',
+  it('edit/patch results carry per-file diffs (FileDiff.Info → FileDiff)', () => {
+    const out = map(
+      step(),
+      ...tool('call_e', 'patch', { patchText: '…' }),
+      ev('session.tool.success', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: 'call_e',
+        content: [{ type: 'text', text: 'Success.' }],
         metadata: {
-          diff: 'combined diff (unused)',
           files: [
+            { file: 'a.ts', patch: '@@ -1 +1 @@', additions: 1, deletions: 1, status: 'modified' },
+            { file: 'b.ts', patch: '@@ +1 @@', additions: 1, deletions: 0, status: 'added' },
+            { file: 'c.ts', patch: '@@ -1 @@', additions: 0, deletions: 1, status: 'deleted' }
+          ]
+        },
+        executed: false
+      })
+    )
+    expect(of(out, 'tool-result')[0].result.fileDiffs).toEqual([
+      { path: 'a.ts', patch: '@@ -1 +1 @@', additions: 1, deletions: 1, changeType: 'update' },
+      { path: 'b.ts', patch: '@@ +1 @@', additions: 1, deletions: 0, changeType: 'add' },
+      { path: 'c.ts', patch: '@@ -1 @@', additions: 0, deletions: 1, changeType: 'delete' }
+    ])
+  })
+
+  it('an image a tool returned becomes a result image (blob ref)', () => {
+    const out = map(
+      step(),
+      ...tool('call_r', 'read', { path: 'p.png' }),
+      ev('session.tool.success', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: 'call_r',
+        content: [
+          {
+            type: 'file',
+            uri: 'data:image/png;base64,iVBORw0KGgo=',
+            mime: 'image/png',
+            name: 'p.png'
+          }
+        ],
+        executed: false
+      })
+    )
+    expect(of(out, 'tool-result')[0].result.images).toEqual([
+      expect.objectContaining({
+        mediaType: 'image/png',
+        fileName: 'p.png',
+        blobId: expect.any(String)
+      })
+    ])
+  })
+
+  it.each([
+    ['permission.rejected', 'ClaudeUI denied: no', true],
+    ['aborted', 'Tool execution aborted', false],
+    ['tool.execution', 'Unable to execute command: x', false]
+  ])(
+    'a %s failure is an error result; only an unasked rejection adds the rule denial',
+    (type, message, denial) => {
+      const out = map(
+        step(),
+        ...tool('call_f', 'shell', { command: 'x' }),
+        ev('session.tool.failed', {
+          sessionID: SID,
+          assistantMessageID: MSG,
+          id: 'call_f',
+          error: { type, message },
+          executed: false
+        })
+      )
+      expect(of(out, 'tool-result')[0].result).toEqual({
+        toolUseId: 'call_f',
+        result: message,
+        isError: true,
+        errorType: type
+      })
+      expect(of(out, 'permission-denial')).toEqual(
+        denial
+          ? [
+              {
+                kind: 'permission-denial',
+                toolUseId: 'call_f',
+                denial: {
+                  type: 'permission_denial',
+                  toolUseId: 'call_f',
+                  denialId: 'opencode-rule:call_f',
+                  source: 'rule',
+                  reason: message
+                }
+              }
+            ]
+          : []
+      )
+    }
+  )
+
+  it('a rejection the HOST answered (an ask was raised) adds no denial of the mapper’s', () => {
+    const out = map(
+      step(),
+      ...tool('call_f', 'shell', { command: 'x' }),
+      ev('permission.asked', {
+        id: 'per_1',
+        sessionID: SID,
+        action: 'shell',
+        resources: ['x'],
+        source: { type: 'tool', messageID: MSG, id: 'call_f' }
+      }),
+      ev('permission.replied', { sessionID: SID, requestID: 'per_1', reply: 'reject' }),
+      ev('session.tool.failed', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: 'call_f',
+        error: { type: 'permission.rejected', message: 'User denied' },
+        executed: false
+      })
+    )
+    expect(of(out, 'permission-denial')).toEqual([])
+  })
+
+  it('shell progress announces the shellID once (2.x streams no output on the feed)', () => {
+    const progress = ev('session.tool.progress', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: 'call_s',
+      metadata: { shellID: 'sh_1' }
+    })
+    const out = map(step(), ...tool('call_s', 'shell', { command: 'sleep 1' }), progress, progress)
+    expect(of(out, 'shell-started')).toEqual([
+      { kind: 'shell-started', toolUseId: 'call_s', shellID: 'sh_1' }
+    ])
+  })
+
+  it('a duplicate terminal event sends no second result', () => {
+    const done = ev('session.tool.success', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: 'c',
+      content: [{ type: 'text', text: 'x' }],
+      executed: false
+    })
+    expect(of(map(step(), ...tool('c', 'read', {}), done, done), 'tool-result')).toHaveLength(1)
+  })
+})
+
+describe('subagents', () => {
+  const linkEvents = (callID = 'call_sub', child = CHILD) => [
+    ...tool(callID, 'subagent', { agent: 'general', description: 'd', prompt: 'p' }),
+    ev('session.created', {
+      sessionID: child,
+      parentID: SID,
+      projectID: 'p',
+      location: { directory: '/ws' },
+      slug: 's',
+      version: '2.0.24'
+    }),
+    ev('session.tool.progress', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: callID,
+      metadata: { sessionID: child, status: 'running' }
+    })
+  ]
+  const childText = (child = CHILD, msg = 'msg_c1') => [
+    step(msg, child),
+    ev('session.text.started', { sessionID: child, assistantMessageID: msg, ordinal: 0 }),
+    ev('session.text.delta', {
+      sessionID: child,
+      assistantMessageID: msg,
+      ordinal: 0,
+      delta: 'hi'
+    }),
+    ev('session.text.ended', { sessionID: child, assistantMessageID: msg, ordinal: 0, text: 'hi' })
+  ]
+  const subSuccess = (callID = 'call_sub', child = CHILD, status = 'completed') =>
+    ev('session.tool.success', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: callID,
+      content: [
+        { type: 'text', text: `<subagent sessionID="${child}" state="completed">\nhi\n</subagent>` }
+      ],
+      metadata: { sessionID: child, status },
+      executed: false
+    })
+
+  it('progress links the child; its stream and steps route under the call', () => {
+    const out = map(step(), ...linkEvents(), ...childText())
+    expect(of(out, 'subagent-started')).toEqual([
+      { kind: 'subagent-started', toolUseId: 'call_sub', childSessionId: CHILD }
+    ])
+    expect(of(out, 'item-open')[0].open.target).toEqual({
+      messageId: 'msg_c1',
+      blockIndex: 0,
+      kind: 'text',
+      ownerToolUseId: 'call_sub'
+    })
+    expect(of(out, 'item-seal')[0].seal.ownerToolUseId).toBe('call_sub')
+  })
+
+  it('child events before the link are held and replayed when it comes', () => {
+    const [input, called, created, progress] = linkEvents()
+    const early = map(step(), input, called, created, ...childText())
+    expect(early.some((o) => o.kind === 'item-open')).toBe(false)
+    const late = map(progress)
+    expect(kinds(late)).toEqual(['subagent-started', 'item-open', 'item-delta', 'item-seal'])
+  })
+
+  it('a foreground call’s result is its ONE terminal notification; the child’s own end is not', () => {
+    const out = map(
+      step(),
+      ...linkEvents(),
+      ev('session.execution.started', { sessionID: CHILD }),
+      ...childText(),
+      ev('session.execution.succeeded', { sessionID: CHILD }),
+      subSuccess()
+    )
+    expect(of(out, 'task-notification').map((o) => o.notification)).toEqual([
+      { taskId: CHILD, toolUseId: 'call_sub', status: 'completed', outputFile: '', summary: '' }
+    ])
+    // Never a parent turn end from the child.
+    expect(out.some((o) => o.kind === 'result')).toBe(false)
+    // A settled child is not re-read on a reconnect.
+    expect(mapper.followedSessions()).toEqual([SID])
+    expect(of(out, 'tool-result')[0].result.result).toBe('hi')
+  })
+
+  it('a background call returns at once; the child’s end is the notification', () => {
+    const out = map(
+      step(),
+      ...linkEvents(),
+      subSuccess('call_sub', CHILD, 'running'),
+      ev('session.execution.started', { sessionID: CHILD }),
+      ev('session.execution.failed', { sessionID: CHILD, error: { type: 'unknown', message: 'x' } })
+    )
+    expect(of(out, 'task-notification').map((o) => o.notification.status)).toEqual(['failed'])
+  })
+
+  it('an aborted call is `stopped`, a failed one `failed`', () => {
+    const out = map(
+      step(),
+      ...linkEvents(),
+      ev('session.tool.failed', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: 'call_sub',
+        error: { type: 'aborted', message: `Tool execution aborted (sessionID: ${CHILD})` },
+        executed: false
+      })
+    )
+    expect(of(out, 'task-notification')[0].notification.status).toBe('stopped')
+  })
+
+  it('a grandchild routes under the child’s own call', () => {
+    const GRAND = 'ses_grand'
+    const out = map(
+      step(),
+      ...linkEvents(),
+      step('msg_c1', CHILD),
+      ...tool('call_inner', 'subagent', { agent: 'general' }, CHILD, 'msg_c1'),
+      ev('session.created', {
+        sessionID: GRAND,
+        parentID: CHILD,
+        projectID: 'p',
+        location: { directory: '/ws' },
+        slug: 's',
+        version: 'v'
+      }),
+      ev('session.tool.progress', {
+        sessionID: CHILD,
+        assistantMessageID: 'msg_c1',
+        id: 'call_inner',
+        metadata: { sessionID: GRAND, status: 'running' }
+      }),
+      ...childText(GRAND, 'msg_g1')
+    )
+    expect(of(out, 'subagent-started').at(-1)).toEqual({
+      kind: 'subagent-started',
+      toolUseId: 'call_inner',
+      childSessionId: GRAND,
+      ownerToolUseId: 'call_sub'
+    })
+    expect(of(out, 'item-open').at(-1)?.open.target.ownerToolUseId).toBe('call_inner')
+    expect(mapper.followedSessions()).toEqual([SID, CHILD, GRAND])
+  })
+
+  it('a child’s permission ask carries the subagent marker and its own session as the route', () => {
+    const out = map(
+      step(),
+      ...linkEvents(),
+      step('msg_c1', CHILD),
+      ...tool('call_c', 'shell', { command: 'ls' }, CHILD, 'msg_c1'),
+      ev('permission.asked', {
+        id: 'per_c',
+        sessionID: CHILD,
+        action: 'shell',
+        resources: ['ls'],
+        save: ['ls *'],
+        source: { type: 'tool', messageID: 'msg_c1', id: 'call_c' }
+      })
+    )
+    const [ask] = of(out, 'approval')
+    expect(ask.route).toEqual({ sessionID: CHILD })
+    expect(ask.approval).toEqual({
+      requestId: 'per_c',
+      toolUseId: 'call_c',
+      toolName: 'shell',
+      input: { command: 'ls' },
+      patterns: ['ls'],
+      always: ['ls *'],
+      subagent: { sessionId: CHILD, parentToolUseId: 'call_sub' }
+    })
+  })
+})
+
+describe('steps, usage, turn ends', () => {
+  it('a step is metered once, with its model', () => {
+    const ended = ev('session.step.ended', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      finish: 'stop',
+      cost: 0.01,
+      tokens: TOKENS
+    })
+    const out = map(step(), ended, ended)
+    expect(of(out, 'step-usage').map((o) => o.usage)).toEqual([
+      { messageId: MSG, sessionId: SID, model: MODEL, cost: 0.01, tokens: TOKENS, finish: 'stop' }
+    ])
+  })
+
+  it('session usage is the own session’s only', () => {
+    const out = map(
+      ev('session.usage.updated', { sessionID: SID, cost: 1, tokens: TOKENS }),
+      ev('session.usage.updated', { sessionID: 'ses_foreign', cost: 2, tokens: TOKENS })
+    )
+    expect(of(out, 'session-usage')).toEqual([{ kind: 'session-usage', cost: 1, tokens: TOKENS }])
+  })
+
+  it.each([
+    ['session.execution.succeeded', {}, { kind: 'result' }],
+    [
+      'session.execution.failed',
+      { error: { type: 'provider.rate-limit', message: 'slow down' } },
+      { kind: 'error', message: 'slow down', errorType: 'provider.rate-limit' }
+    ],
+    [
+      'session.execution.failed',
+      { error: { type: 'provider.auth', message: 'Request failed: 403' } },
+      { kind: 'auth-required', vendorId: 'openai', message: 'Request failed: 403' }
+    ],
+    // ADR-090: the user's Stop is not an error.
+    ['session.execution.interrupted', { reason: 'user' }, { kind: 'stopped', reason: 'user' }],
+    [
+      'session.execution.interrupted',
+      { reason: 'shutdown' },
+      { kind: 'stopped', reason: 'shutdown' }
+    ],
+    [
+      'session.execution.interrupted',
+      { reason: 'inactivity' },
+      { kind: 'stopped', reason: 'inactivity' }
+    ]
+  ])('%s %j ends the turn as %j', (type, data, expected) => {
+    const out = map(
+      ev('session.execution.started', { sessionID: SID }, 10_000),
+      step(),
+      ev(type, { sessionID: SID, ...data }, 12_500)
+    )
+    expect(out[0]).toEqual({ kind: 'turn-start' })
+    expect(out.at(-1)).toEqual({ ...expected, sessionId: SID, durationMs: 2_500 })
+    expect(mapper.running).toBe(false)
+  })
+
+  it('a shutdown after a REJECT is a denial-ended turn, not a server shutdown nor a user stop', () => {
+    const out = map(
+      ev('session.execution.started', { sessionID: SID }),
+      step(),
+      ...tool('call_1', 'shell', { command: 'rm -rf x' }),
+      ev('permission.asked', {
+        id: 'per_1',
+        sessionID: SID,
+        action: 'shell',
+        resources: ['rm -rf x'],
+        source: { type: 'tool', messageID: MSG, id: 'call_1' }
+      }),
+      ev('permission.replied', { sessionID: SID, requestID: 'per_1', reply: 'reject' }),
+      ev('session.tool.failed', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: 'call_1',
+        error: { type: 'aborted', message: 'Tool execution aborted' },
+        executed: false
+      }),
+      ev('session.execution.interrupted', { sessionID: SID, reason: 'shutdown' })
+    )
+    expect(out.at(-1)).toMatchObject({ kind: 'stopped', reason: 'denied' })
+  })
+
+  it('the turn end seals a stream left open', () => {
+    const out = map(
+      ev('session.execution.started', { sessionID: SID }),
+      step(),
+      ev('session.text.started', { sessionID: SID, assistantMessageID: MSG, ordinal: 0 }),
+      ev('session.text.delta', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        ordinal: 0,
+        delta: 'part'
+      }),
+      ev('session.execution.interrupted', { sessionID: SID, reason: 'user' })
+    )
+    expect(kinds(out).slice(-2)).toEqual(['item-seal', 'stopped'])
+  })
+
+  it('a retry is surfaced with its attempt and time', () => {
+    const error = { type: 'provider.rate-limit', message: '429' }
+    expect(
+      map(
+        step(),
+        ev('session.retry.scheduled', {
+          sessionID: SID,
+          assistantMessageID: MSG,
+          attempt: 2,
+          at: 9_999,
+          error
+        })
+      )
+    ).toEqual([{ kind: 'retry', attempt: 2, at: 9_999, error }])
+  })
+})
+
+describe('compaction', () => {
+  it('ends in a separator row keyed by the input id, with the summary and the request’s usage', () => {
+    const out = map(
+      ev(
+        'session.compaction.started',
+        { sessionID: SID, reason: 'manual', recent: '', inputID: 'msg_in' },
+        7_000
+      ),
+      ev('session.compaction.delta', { sessionID: SID, text: '## Obj' }),
+      ev('session.compaction.ended', {
+        sessionID: SID,
+        reason: 'manual',
+        text: '## Objective\nx',
+        recent: '',
+        cost: 0.5,
+        tokens: TOKENS,
+        model: MODEL
+      })
+    )
+    expect(out).toEqual([
+      { kind: 'compaction', phase: 'started', reason: 'manual' },
+      {
+        kind: 'message',
+        message: {
+          id: 'msg_in',
+          role: 'system',
+          content: [{ type: 'compact_separator', text: '## Objective\nx' }],
+          timestamp: 7_000
+        }
+      },
+      {
+        kind: 'compaction',
+        phase: 'ended',
+        reason: 'manual',
+        usage: { cost: 0.5, tokens: TOKENS, model: MODEL }
+      }
+    ])
+  })
+
+  it('a failed compaction leaves no row', () => {
+    const error = { type: 'compaction.failed', message: 'template' }
+    const out = map(
+      ev('session.compaction.started', { sessionID: SID, reason: 'auto', recent: '' }),
+      ev('session.compaction.failed', { sessionID: SID, reason: 'auto', error })
+    )
+    expect(kinds(out)).toEqual(['compaction', 'compaction'])
+    expect(out[1]).toMatchObject({ phase: 'failed', error })
+  })
+})
+
+describe('approvals', () => {
+  it('an own ask takes the call’s real input and the suggestion; replied retracts it once', () => {
+    mapper = new OpencodeEventMapper({
+      sessionID: SID,
+      suggest: (action, resources) => ({
+        type: 'addRules',
+        rules: [{ toolName: action, ruleContent: resources[0] }],
+        behavior: 'allow',
+        destination: 'localSettings'
+      })
+    })
+    const replied = ev('permission.replied', { sessionID: SID, requestID: 'per_1', reply: 'once' })
+    const out = map(
+      step(),
+      ...tool('call_1', 'edit', { path: 'a', oldString: 'x', newString: 'y' }),
+      ev('permission.asked', {
+        id: 'per_1',
+        sessionID: SID,
+        action: 'edit',
+        resources: ['a'],
+        save: ['*'],
+        metadata: { files: [] },
+        source: { type: 'tool', messageID: MSG, id: 'call_1' }
+      }),
+      replied,
+      replied
+    )
+    const [ask] = of(out, 'approval')
+    expect(ask.approval).toMatchObject({
+      requestId: 'per_1',
+      toolUseId: 'call_1',
+      toolName: 'edit',
+      input: { path: 'a', oldString: 'x', newString: 'y' },
+      suggestions: [expect.objectContaining({ behavior: 'allow' })]
+    })
+    expect(of(out, 'approval-resolved')).toEqual([
+      { kind: 'approval-resolved', requestId: 'per_1' }
+    ])
+  })
+
+  it('an ask with no known call falls back to its metadata', () => {
+    const [ask] = of(
+      map(
+        ev('permission.asked', {
+          id: 'per_2',
+          sessionID: SID,
+          action: 'external_directory',
+          resources: ['/x'],
+          metadata: { path: '/x' }
+        })
+      ),
+      'approval'
+    )
+    expect(ask.approval.input).toEqual({ path: '/x' })
+  })
+
+  it('a question form is an AskUserQuestion with the reply keys', () => {
+    const out = map(
+      ev('form.created', {
+        form: {
+          id: 'frm_1',
+          sessionID: SID,
+          title: 'Questions',
+          metadata: { kind: 'question', tool: { messageID: MSG, id: 'call_q' } },
+          fields: [
             {
-              filePath: '/repo/a.ts',
-              relativePath: 'a.ts',
-              type: 'update',
-              patch: '@@ -1 +1 @@\n-old\n+new',
-              additions: 1,
-              deletions: 1
+              key: 'q0',
+              type: 'string',
+              title: 'Fruit',
+              description: 'Pick a fruit?',
+              custom: true,
+              options: [
+                { value: 'Apple', label: 'Apple', description: 'red' },
+                { value: 'Banana', label: 'Banana' }
+              ]
             },
             {
-              filePath: '/repo/b.ts',
-              relativePath: 'b.ts',
-              type: 'add',
-              patch: '@@ -0,0 +1 @@\n+new file',
-              additions: 1,
-              deletions: 0
+              key: 'q1',
+              type: 'multiselect',
+              title: 'Many',
+              description: 'Pick many?',
+              options: []
             }
           ]
         }
-      }
-    })
-    expect(res?.fileDiffs).toEqual([
+      }),
+      ev('form.cancelled', { sessionID: SID, id: 'frm_1' })
+    )
+    expect(out).toEqual([
       {
-        path: 'a.ts',
-        patch: '@@ -1 +1 @@\n-old\n+new',
-        additions: 1,
-        deletions: 1,
-        changeType: 'update'
-      },
-      {
-        path: 'b.ts',
-        patch: '@@ -0,0 +1 @@\n+new file',
-        additions: 1,
-        deletions: 0,
-        changeType: 'add'
-      }
-    ])
-  })
-
-  it('edit-shaped metadata (filediff singular) → single-entry fileDiffs', () => {
-    const res = extractToolResult('p1', {
-      type: 'tool',
-      callID: 'c1',
-      state: {
-        status: 'completed',
-        output: 'Edit applied successfully.',
-        input: { filePath: '/repo/a.ts', oldString: 'old', newString: 'new' },
-        metadata: {
-          diagnostics: {},
-          diff: '@@ -1 +1 @@\n-old\n+new',
-          filediff: {
-            file: '/repo/a.ts',
-            patch: '@@ -1 +1 @@\n-old\n+new',
-            additions: 1,
-            deletions: 1
+        kind: 'approval',
+        approval: {
+          requestId: 'frm_1',
+          toolUseId: 'call_q',
+          toolName: 'AskUserQuestion',
+          input: {
+            questions: [
+              {
+                question: 'Pick a fruit?',
+                header: 'Fruit',
+                multiSelect: false,
+                options: [
+                  { label: 'Apple', description: 'red' },
+                  { label: 'Banana', description: '' }
+                ]
+              },
+              { question: 'Pick many?', header: 'Many', multiSelect: true, options: [] }
+            ]
+          }
+        },
+        route: {
+          sessionID: SID,
+          form: {
+            formID: 'frm_1',
+            fields: [
+              { key: 'q0', multiSelect: false, values: { Apple: 'Apple', Banana: 'Banana' } },
+              { key: 'q1', multiSelect: true }
+            ]
           }
         }
-      }
-    })
-    expect(res?.fileDiffs).toEqual([
-      {
-        path: '/repo/a.ts',
-        patch: '@@ -1 +1 @@\n-old\n+new',
-        additions: 1,
-        deletions: 1,
-        changeType: 'update'
-      }
-    ])
-  })
-
-  it('bash-shaped metadata (output only, no diff/files) → NO fileDiffs', () => {
-    const res = extractToolResult('p1', {
-      type: 'tool',
-      callID: 'c1',
-      state: {
-        status: 'completed',
-        output: 'stdout tail',
-        metadata: { output: 'stdout tail', exitCode: 0 }
-      }
-    })
-    expect(res?.fileDiffs).toBeUndefined()
-  })
-
-  it('write-shaped metadata (filepath/exists, no diff) → NO fileDiffs', () => {
-    const res = extractToolResult('p1', {
-      type: 'tool',
-      callID: 'c1',
-      state: {
-        status: 'completed',
-        output: 'Wrote file successfully.',
-        metadata: { diagnostics: {}, filepath: '/repo/new.ts', exists: false }
-      }
-    })
-    expect(res?.fileDiffs).toBeUndefined()
-  })
-})
-
-describe('extractFileDiffs', () => {
-  it('returns undefined when metadata is undefined', () => {
-    expect(extractFileDiffs(undefined, undefined)).toBeUndefined()
-  })
-
-  it('apply_patch shape: skips entries with an empty/missing patch', () => {
-    const diffs = extractFileDiffs(
-      {
-        files: [
-          { relativePath: 'a.ts', type: 'update', patch: '' },
-          { relativePath: 'b.ts', type: 'delete', patch: '@@ -1 +0,0 @@\n-gone' }
-        ]
       },
-      undefined
+      { kind: 'approval-resolved', requestId: 'frm_1' }
+    ])
+  })
+})
+
+describe('inbox', () => {
+  const item = (text: string, delivery: 'steer' | 'queue' = 'queue') => ({
+    type: 'user',
+    payload: { text },
+    delivery
+  })
+
+  it('enqueued / delivery changed / delivered (+ the user row) / cancelled', () => {
+    const out = map(
+      ev('session.inbox.enqueued', { sessionID: SID, inboxID: 'msg_q1', item: item('first') }),
+      ev('session.inbox.enqueued', { sessionID: SID, inboxID: 'msg_q2', item: item('second') }),
+      ev('session.inbox.delivery.changed', {
+        sessionID: SID,
+        inboxID: 'msg_q1',
+        delivery: 'steer'
+      }),
+      ev('session.inbox.delivered', { sessionID: SID, inboxID: 'msg_q1' }, 4_242),
+      ev('session.inbox.cancelled', { sessionID: SID, inboxID: 'msg_q2' })
     )
-    expect(diffs).toEqual([
+    expect(out).toEqual([
       {
-        path: 'b.ts',
-        patch: '@@ -1 +0,0 @@\n-gone',
-        additions: undefined,
-        deletions: undefined,
-        changeType: 'delete'
-      }
+        kind: 'inbox',
+        change: 'enqueued',
+        inboxID: 'msg_q1',
+        delivery: 'queue',
+        item: item('first')
+      },
+      {
+        kind: 'inbox',
+        change: 'enqueued',
+        inboxID: 'msg_q2',
+        delivery: 'queue',
+        item: item('second')
+      },
+      { kind: 'inbox', change: 'delivery-changed', inboxID: 'msg_q1', delivery: 'steer' },
+      { kind: 'inbox', change: 'delivered', inboxID: 'msg_q1' },
+      {
+        kind: 'user-message',
+        inboxID: 'msg_q1',
+        message: {
+          id: 'msg_q1',
+          role: 'user',
+          content: [{ type: 'text', text: 'first' }],
+          timestamp: 4_242
+        }
+      },
+      { kind: 'inbox', change: 'cancelled', inboxID: 'msg_q2' }
     ])
   })
 
-  it('apply_patch shape: falls back to filePath when relativePath is absent', () => {
-    const diffs = extractFileDiffs(
-      { files: [{ filePath: '/repo/a.ts', type: 'move', patch: '@@ -1 +1 @@\n-a\n+b' }] },
-      undefined
-    )
-    expect(diffs?.[0]).toMatchObject({ path: '/repo/a.ts', changeType: 'move' })
+  it('a child’s inbox (its subagent prompt) is not ClaudeUI’s queue', () => {
+    expect(
+      map(ev('session.inbox.enqueued', { sessionID: CHILD, inboxID: 'x', item: item('p') }))
+    ).toEqual([])
   })
 
-  it('edit shape: falls back to input.filePath when filediff.file is absent', () => {
-    const diffs = extractFileDiffs(
-      { filediff: { patch: '@@ -1 +1 @@\n-a\n+b' } },
-      { filePath: '/repo/fallback.ts' }
-    )
-    expect(diffs?.[0]).toMatchObject({ path: '/repo/fallback.ts', changeType: 'update' })
-  })
-
-  it('returns undefined for metadata with neither files nor filediff', () => {
-    expect(extractFileDiffs({ output: 'text' }, undefined)).toBeUndefined()
-  })
-})
-
-// ── session.error / ProviderAuthError (Phase 5c) ─────────────────────────────
-
-// ── question.asked / question.replied / question.rejected (Phase 8b) ─────────
-
-describe('mapEvent — question.asked', () => {
-  const accumulators = new Map()
-  const totalCostRef = { value: 0 }
-
-  it('maps question.asked to approval with toolName AskUserQuestion', () => {
-    const ev = makeEvent('question.asked', {
-      sessionID: SESSION_ID,
-      id: 'que_1',
-      questions: [
-        {
-          question: 'Which language?',
-          header: 'Language',
-          options: [
-            { label: 'TypeScript', description: 'TS' },
-            { label: 'Python', description: 'PY' }
-          ],
-          multiple: false,
-          custom: true
-        }
-      ],
-      tool: { callID: 'call_q1' }
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    expect(out.kind).toBe('approval')
-    if (out.kind === 'approval') {
-      expect(out.approval.requestId).toBe('que_1')
-      expect(out.approval.toolName).toBe('AskUserQuestion')
-      expect(out.approval.toolUseId).toBe('call_q1')
-      const input = out.approval.input as { questions: unknown[] }
-      expect(input.questions).toHaveLength(1)
-      const q = input.questions[0] as {
-        question: string
-        header: string
-        multiSelect: boolean
-        options: unknown[]
-      }
-      expect(q.question).toBe('Which language?')
-      expect(q.header).toBe('Language')
-      expect(q.multiSelect).toBe(false)
-      expect(q.options).toEqual([
-        { label: 'TypeScript', description: 'TS' },
-        { label: 'Python', description: 'PY' }
-      ])
-    }
-  })
-
-  it('maps multiple:true to multiSelect:true', () => {
-    const ev = makeEvent('question.asked', {
-      sessionID: SESSION_ID,
-      id: 'que_2',
-      questions: [
-        {
-          question: 'Select features',
-          header: 'Features',
-          options: [
-            { label: 'A', description: '' },
-            { label: 'B', description: '' }
-          ],
-          multiple: true
-        }
-      ]
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    expect(out.kind).toBe('approval')
-    if (out.kind === 'approval') {
-      const input = out.approval.input as { questions: Array<{ multiSelect: boolean }> }
-      expect(input.questions[0].multiSelect).toBe(true)
-    }
-  })
-
-  it('multiple:undefined → multiSelect:false', () => {
-    const ev = makeEvent('question.asked', {
-      sessionID: SESSION_ID,
-      id: 'que_3',
-      questions: [{ question: 'Q?', header: 'H', options: [] }]
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    if (out.kind === 'approval') {
-      const input = out.approval.input as { questions: Array<{ multiSelect: boolean }> }
-      expect(input.questions[0].multiSelect).toBe(false)
-    }
-  })
-
-  it('ignores question.asked from a foreign session', () => {
-    const ev = makeEvent('question.asked', {
-      sessionID: 'ses_OTHER',
-      id: 'que_4',
-      questions: [{ question: 'Q?', header: 'H', options: [] }]
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
-    expect(out.kind).toBe('ignore')
-  })
-
-  it('ignores question.asked when id or questions is missing', () => {
-    const noId = makeEvent('question.asked', {
-      sessionID: SESSION_ID,
-      questions: [{ question: 'Q?', header: 'H', options: [] }]
-    })
-    const noQ = makeEvent('question.asked', {
-      sessionID: SESSION_ID,
-      id: 'que_5'
-    })
-    expect(mapEvent(noId, SESSION_ID, new Map(), START_TIME, { value: 0 }).kind).toBe('ignore')
-    expect(mapEvent(noQ, SESSION_ID, new Map(), START_TIME, { value: 0 }).kind).toBe('ignore')
-  })
-
-  it('maps question.replied to ignore', () => {
-    const ev = makeEvent('question.replied', {
-      sessionID: SESSION_ID,
-      requestID: 'que_1',
-      answers: [['TypeScript']]
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
-    expect(out.kind).toBe('ignore')
-  })
-
-  it('maps question.rejected to ignore', () => {
-    const ev = makeEvent('question.rejected', {
-      sessionID: SESSION_ID,
-      requestID: 'que_1'
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
-    expect(out.kind).toBe('ignore')
-  })
-})
-
-describe('mapEvent — session.error', () => {
-  const SESSION_ID = 'ses_abc123'
-  const accumulators = new Map()
-  const totalCostRef = { value: 0 }
-
-  // Wire shape verified vs 1.17.9 /doc: properties.error =
-  //   { name, data: { providerID?, message } }  (ProviderAuthError / UnknownError / …)
-  it('maps ProviderAuthError with providerID to auth-required kind (structured re-login card)', () => {
-    const ev = makeEvent('session.error', {
-      sessionID: SESSION_ID,
-      error: {
-        name: 'ProviderAuthError',
-        data: { providerID: 'openai', message: 'Token expired' }
-      }
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    expect(out.kind).toBe('auth-required')
-    if (out.kind === 'auth-required') {
-      expect(out.vendorId).toBe('openai')
-      expect(out.message).toBe('Token expired')
-    }
-  })
-
-  it('maps ProviderAuthError without providerID to generic re-login hint', () => {
-    const ev = makeEvent('session.error', {
-      sessionID: SESSION_ID,
-      error: { name: 'ProviderAuthError', data: { message: 'Token expired' } }
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    expect(out.kind).toBe('error')
-    if (out.kind === 'error') {
-      expect(out.message).toContain('Authentication required')
-    }
-  })
-
-  it('maps a non-auth session.error to its error data.message', () => {
-    const ev = makeEvent('session.error', {
-      sessionID: SESSION_ID,
-      error: { name: 'UnknownError', data: { message: 'connection refused' } }
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    expect(out.kind).toBe('error')
-    if (out.kind === 'error') {
-      expect(out.message).toBe('connection refused')
-    }
-  })
-
-  it('cross-session filter still applies for session.error', () => {
-    const ev = makeEvent('session.error', {
-      sessionID: 'ses_OTHER',
-      error: { name: 'ProviderAuthError', data: { message: 'Token expired' } }
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    expect(out.kind).toBe('ignore')
-  })
-})
-
-// ── Phase 8d — child session subagent routing ─────────────────────────────────
-
-const CHILD_SESSION_ID = 'ses_CHILD_001'
-const PARENT_CALL_ID = 'call_task_parent_1'
-
-describe('mapEvent — Phase 8d: child-session registration (task tool part)', () => {
-  it('registers child session when own-session task part has state.metadata.sessionId', () => {
-    const childSessions = new Map<string, string>()
-    const accumulators = new Map<string, MessageAccumulator>()
-    const ev = makeEvent('message.part.updated', {
-      sessionID: SESSION_ID,
-      part: {
-        id: 'p_task',
-        messageID: 'msg_parent_1',
-        type: 'tool',
-        tool: 'task',
-        callID: PARENT_CALL_ID,
-        state: {
-          status: 'running',
-          input: { description: 'do something' },
-          metadata: { sessionId: CHILD_SESSION_ID }
-        }
-      }
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
-    // Must still emit the parent message (parent tool_use block with toolUseId=PARENT_CALL_ID)
-    expect(out.kind).toBe('message')
-    if (out.kind === 'message') {
-      const taskBlock = out.message.content.find((b) => b.type === 'tool_use')
-      expect(taskBlock?.type).toBe('tool_use')
-      if (taskBlock?.type === 'tool_use') {
-        expect(taskBlock.toolName).toBe('task')
-        expect(taskBlock.toolUseId).toBe(PARENT_CALL_ID)
-      }
-    }
-    // Child session must now be registered
-    expect(childSessions.get(CHILD_SESSION_ID)).toBe(PARENT_CALL_ID)
-  })
-
-  it('does NOT register when task part has no state.metadata.sessionId', () => {
-    const childSessions = new Map<string, string>()
-    const accumulators = new Map<string, MessageAccumulator>()
-    const ev = makeEvent('message.part.updated', {
-      sessionID: SESSION_ID,
-      part: {
-        id: 'p_task2',
-        messageID: 'msg_parent_2',
-        type: 'tool',
-        tool: 'task',
-        callID: 'call_task_2',
-        state: { status: 'running', input: { description: 'pending' } }
-      }
-    })
-    mapEvent(ev, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
-    expect(childSessions.size).toBe(0)
-  })
-
-  it('does NOT re-register from a terminal task part (compaction prune republishes it)', () => {
-    // The dispatcher drops the entry when the part completes; a later
-    // republish of that completed part must not resurrect it — nor clobber a
-    // resumed child's newer callID.
-    const childSessions = new Map([[CHILD_SESSION_ID, 'call_task_newer']])
-    const ev = makeEvent('message.part.updated', {
-      sessionID: SESSION_ID,
-      part: {
-        id: 'p_task_done',
-        messageID: 'msg_parent_done',
-        type: 'tool',
-        tool: 'task',
-        callID: PARENT_CALL_ID,
-        state: {
-          status: 'completed',
-          input: { description: 'done' },
-          output: 'ok',
-          metadata: { sessionId: CHILD_SESSION_ID },
-          time: { start: 1, end: 2, compacted: 3 }
-        }
-      }
-    })
-    mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-    expect(childSessions.get(CHILD_SESSION_ID)).toBe('call_task_newer')
-  })
-
-  it('does NOT register for non-task tool parts', () => {
-    const childSessions = new Map<string, string>()
-    const accumulators = new Map<string, MessageAccumulator>()
-    const ev = makeEvent('message.part.updated', {
-      sessionID: SESSION_ID,
-      part: {
-        id: 'p_bash',
-        messageID: 'msg_bash',
-        type: 'tool',
-        tool: 'bash',
-        callID: 'call_bash',
-        state: { status: 'running', input: { command: 'ls' }, metadata: { sessionId: 'fake' } }
-      }
-    })
-    mapEvent(ev, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
-    expect(childSessions.size).toBe(0)
-  })
-})
-
-describe("mapEvent — nested subagent (a child's own task call, ADR-073 §7)", () => {
-  const GRANDCHILD_SESSION_ID = 'ses_grandchild_1'
-  const CHILD_TASK_CALL_ID = 'call_child_task_1'
-
-  const childTaskPart = (): OpencodeEvent =>
-    makeEvent('message.part.updated', {
-      sessionID: CHILD_SESSION_ID,
-      part: {
-        id: 'cp_task',
-        messageID: 'child_msg_task',
-        type: 'tool',
-        tool: 'task',
-        callID: CHILD_TASK_CALL_ID,
-        state: {
-          status: 'running',
-          input: { description: 'nested work', subagent_type: 'general' },
-          metadata: { sessionId: GRANDCHILD_SESSION_ID }
-        }
-      }
-    })
-
-  it("registers the grandchild under the child's task call id", () => {
-    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
-    const out = mapEvent(
-      childTaskPart(),
-      SESSION_ID,
-      new Map(),
-      START_TIME,
-      { value: 0 },
-      childSessions
-    )
-    // The child's task call itself still reaches the child's bucket.
-    expect(out.kind).toBe('subagent-message')
-    if (out.kind === 'subagent-message') expect(out.toolUseId).toBe(PARENT_CALL_ID)
-    expect(childSessions.get(GRANDCHILD_SESSION_ID)).toBe(CHILD_TASK_CALL_ID)
-  })
-
-  it("routes the grandchild's parts and idle to the grandchild's call id", () => {
-    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
-    const accumulators = new Map<string, MessageAccumulator>()
-    mapEvent(childTaskPart(), SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
-
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: GRANDCHILD_SESSION_ID,
-        info: { id: 'gc_msg_1', role: 'assistant' }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 },
-      childSessions
-    )
-    const part = mapEvent(
-      makeEvent('message.part.updated', {
-        sessionID: GRANDCHILD_SESSION_ID,
-        part: { id: 'gc_p1', messageID: 'gc_msg_1', type: 'text', text: 'from the grandchild' }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 },
-      childSessions
-    )
-    expect(part.kind).toBe('subagent-message')
-    if (part.kind === 'subagent-message') expect(part.toolUseId).toBe(CHILD_TASK_CALL_ID)
-
-    const idle = mapEvent(
-      makeEvent('session.idle', { sessionID: GRANDCHILD_SESSION_ID }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 },
-      childSessions
-    )
-    expect(idle.kind).toBe('task-notification')
-    if (idle.kind === 'task-notification') {
-      expect(idle.notification.toolUseId).toBe(CHILD_TASK_CALL_ID)
-      expect(idle.notification.taskId).toBe(GRANDCHILD_SESSION_ID)
-    }
-  })
-})
-
-describe('mapEvent — Phase 8d: parent session.idle still → result (not task-notification)', () => {
-  it('parent session.idle (no childSessions entry for it) → result, NOT task-notification', () => {
-    // The PARENT session's own session.idle must still end the turn normally.
-    // This is the most critical guard: a child's session.idle must not be routed
-    // here. The parent's own idle IS routed here (eventSessionId === ownSessionId).
-    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
-    const ev = makeEvent('session.idle', { sessionID: SESSION_ID })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0.5 }, childSessions)
-    expect(out.kind).toBe('result')
-    if (out.kind === 'result') {
-      expect(out.result.totalCostUsd).toBe(0.5)
-      expect(out.result.sessionId).toBe(SESSION_ID)
-    }
-  })
-})
-
-describe('mapEvent — Phase 8d: child message.part.delta → subagent-stream', () => {
-  it('child text delta → subagent-stream with correct toolUseId', () => {
-    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
-    const ev = makeEvent('message.part.delta', {
-      sessionID: CHILD_SESSION_ID,
-      messageID: 'child_msg_1',
-      partID: 'cp1',
-      field: 'text',
-      delta: 'hello from child'
-    })
-    const out = mapEvent(
-      ev,
-      SESSION_ID,
-      opened('child_msg_1', 'cp1'),
-      START_TIME,
-      { value: 0 },
-      childSessions
-    )
-    expect(out.kind).toBe('subagent-stream')
-    if (out.kind === 'subagent-stream') {
-      expect(out.toolUseId).toBe(PARENT_CALL_ID)
-      expect(out.streamType).toBe('text')
-      expect(out.delta).toBe('hello from child')
-    }
-  })
-
-  it('child reasoning delta → subagent-stream with streamType=thinking when acc has reasoning part', () => {
-    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
-    const accumulators = new Map<string, MessageAccumulator>()
-    // Pre-seed accumulator with a reasoning part so the peek returns 'thinking'
-    const acc: MessageAccumulator = {
-      messageId: 'child_msg_think',
-      partOrder: ['cp_think'],
-      parts: new Map([['cp_think', { type: 'reasoning', text: '' }]])
-    }
-    accumulators.set('child_msg_think', acc)
-    const ev = makeEvent('message.part.delta', {
-      sessionID: CHILD_SESSION_ID,
-      messageID: 'child_msg_think',
-      partID: 'cp_think',
-      field: 'reasoning',
-      delta: '<thought>'
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
-    expect(out.kind).toBe('subagent-stream')
-    if (out.kind === 'subagent-stream') {
-      expect(out.streamType).toBe('thinking')
-    }
-  })
-
-  it('child delta with unknown field → ignore', () => {
-    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
-    const ev = makeEvent('message.part.delta', {
-      sessionID: CHILD_SESSION_ID,
-      messageID: 'child_msg_2',
-      partID: 'cp2',
-      field: 'unknown',
-      delta: 'x'
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-    expect(out.kind).toBe('ignore')
-  })
-})
-
-describe('mapEvent — Phase 8d: child message.part.updated → subagent-message / ignore for user', () => {
-  it('child assistant message → subagent-message keyed by parent callID', () => {
-    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
-    const accumulators = new Map<string, MessageAccumulator>()
-    // Set up role=assistant via a message.updated first
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: CHILD_SESSION_ID,
-        info: { id: 'child_msg_a', role: 'assistant' }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 },
-      childSessions
-    )
-    const ev = makeEvent('message.part.updated', {
-      sessionID: CHILD_SESSION_ID,
-      part: { id: 'cp_a', messageID: 'child_msg_a', type: 'text', text: 'I found it.' }
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
-    expect(out.kind).toBe('subagent-message')
-    if (out.kind === 'subagent-message') {
-      expect(out.toolUseId).toBe(PARENT_CALL_ID)
-      expect(out.message.id).toBe('child_msg_a')
-      expect(out.message.role).toBe('assistant')
-      expect(out.message.content[0]).toMatchObject({ type: 'text', text: 'I found it.' })
-    }
-  })
-
-  it('child user message (task prompt text) → ignore (not rendered in subagent transcript)', () => {
-    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
-    const accumulators = new Map<string, MessageAccumulator>()
-    // Establish user role
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: CHILD_SESSION_ID,
-        info: { id: 'child_msg_u', role: 'user' }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 },
-      childSessions
-    )
-    const ev = makeEvent('message.part.updated', {
-      sessionID: CHILD_SESSION_ID,
-      part: { id: 'cp_u', messageID: 'child_msg_u', type: 'text', text: 'the task prompt' }
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
-    expect(out.kind).toBe('ignore')
-  })
-
-  it('child tool part → subagent-message containing a tool_use block', () => {
-    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
-    const accumulators = new Map<string, MessageAccumulator>()
-    const ev = makeEvent('message.part.updated', {
-      sessionID: CHILD_SESSION_ID,
-      part: {
-        id: 'cp_tool',
-        messageID: 'child_msg_tool',
-        type: 'tool',
-        tool: 'bash',
-        callID: 'child_call_1',
-        state: { status: 'running', input: { command: 'ls /tmp' } }
-      }
-    })
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
-    expect(out.kind).toBe('subagent-message')
-    if (out.kind === 'subagent-message') {
-      expect(out.toolUseId).toBe(PARENT_CALL_ID)
-      const block = out.message.content[0]
-      expect(block.type).toBe('tool_use')
-      if (block.type === 'tool_use') {
-        expect(block.toolName).toBe('bash')
-        expect(block.toolUseId).toBe('child_call_1')
-      }
-    }
-  })
-})
-
-describe('mapEvent — Phase 8d: child session.idle → task-notification (NOT result)', () => {
-  it('child session.idle → task-notification with status=completed, NOT result', () => {
-    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
-    const ev = makeEvent('session.idle', { sessionID: CHILD_SESSION_ID })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-    // CRITICAL GUARD: must NOT be 'result' — that would end the parent turn early.
-    expect(out.kind).not.toBe('result')
-    expect(out.kind).toBe('task-notification')
-    if (out.kind === 'task-notification') {
-      expect(out.notification.toolUseId).toBe(PARENT_CALL_ID)
-      expect(out.notification.taskId).toBe(CHILD_SESSION_ID)
-      expect(out.notification.status).toBe('completed')
-    }
-  })
-
-  // A child's session.error is never terminal and carries no outcome: an
-  // overflow is usually compacted away (processor.ts `halt`), and a real
-  // failure surfaces on the parent's task part (`Subagent failed …`).
-  it.each(['ContextOverflowError', 'UnknownError'])(
-    'child session.error (%s) → ignore, mapping kept',
-    (name) => {
-      const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
-      const ev = makeEvent('session.error', {
-        sessionID: CHILD_SESSION_ID,
-        error: { name, data: { message: 'child trouble' } }
-      })
-      const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-      expect(out.kind).toBe('ignore')
-      expect(childSessions.get(CHILD_SESSION_ID)).toBe(PARENT_CALL_ID)
-    }
-  )
-})
-
-describe('mapEvent — own-session ContextOverflowError', () => {
-  it('→ ignore, not a turn-ending error (the turn ends via session.idle)', () => {
-    const ev = makeEvent('session.error', {
-      sessionID: SESSION_ID,
-      error: { name: 'ContextOverflowError', data: { message: 'prompt is too long' } }
-    })
-    expect(mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }).kind).toBe('ignore')
-  })
-})
-
-describe('mapEvent — Phase 8d: unknown foreign session → ignore', () => {
-  it('event from a session not in childSessions and not own → ignore', () => {
-    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
-    // 'ses_STRANGER' is neither ownSessionId nor a known child
-    const ev = makeEvent('message.part.delta', {
-      sessionID: 'ses_STRANGER',
-      messageID: 'x_msg',
-      partID: 'xp1',
-      field: 'text',
-      delta: 'alien text'
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-    expect(out.kind).toBe('ignore')
-  })
-})
-
-// ── Phase 8e — child session permission.asked (hang fix) ─────────────────────
-
-describe('mapEvent — Phase 8e: child permission.asked → approval (hang fix)', () => {
-  const CHILD_ID = 'ses_child_8e'
-  const CHILD_CALL_ID = 'child_call_8e'
-
-  it('child permission.asked → {kind:approval} with child tool callID and no suggestions', () => {
-    // The key hang fix: a child subagent hitting an ask-gated tool emits
-    // permission.asked under the child sessionId. Without this case it would
-    // fall through to handleChildEvent default:ignore → child blocks → parent hangs.
-    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
-    const ev = makeEvent('permission.asked', {
-      sessionID: CHILD_ID,
-      id: 'perm_child_1',
-      permission: 'bash',
-      patterns: ['echo hi'],
-      tool: { callID: CHILD_CALL_ID },
-      metadata: { command: 'echo hi' }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-
-    expect(out.kind).toBe('approval')
-    if (out.kind !== 'approval') throw new Error('expected approval')
-
-    // requestId from props.id
-    expect(out.approval.requestId).toBe('perm_child_1')
-    // toolName from props.permission
-    expect(out.approval.toolName).toBe('bash')
-    // input from props.metadata
-    expect(out.approval.input).toEqual({ command: 'echo hi' })
-
-    // CRITICAL — toolUseId must be the CHILD tool's callID, NOT the parent task callID.
-    // FloatingApproval's unmatched-approval filter hides the card when toolUseId matches
-    // a callID already in the rendered main assistant blocks (the parent task part is there).
-    // The child callID only appears inside subagent blocks → card shows.
-    expect(out.approval.toolUseId).toBe(CHILD_CALL_ID)
-    expect(out.approval.toolUseId).not.toBe(PARENT_CALL_ID)
-
-    // CRITICAL — no suggestions field. A persisted allow rule compiles into the
-    // parent's ruleset only; deriveSubagentSessionPermission propagates parent *deny*
-    // rules, NOT allows, so the persisted allow would never stop the child re-asking.
-    // Including it would be misleading — omit it entirely.
-    expect('suggestions' in out.approval).toBe(false)
-  })
-
-  it('child permission.asked for doom_loop category → approval with no suggestions (unmappable category)', () => {
-    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
-    const ev = makeEvent('permission.asked', {
-      sessionID: CHILD_ID,
-      id: 'perm_child_dl',
-      permission: 'doom_loop',
-      patterns: ['*'],
-      tool: { callID: CHILD_CALL_ID }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-
-    expect(out.kind).toBe('approval')
-    if (out.kind !== 'approval') throw new Error('expected approval')
-    expect(out.approval.toolName).toBe('doom_loop')
-    expect('suggestions' in out.approval).toBe(false)
-  })
-
-  it('child permission.asked with no tool → approval with toolUseId=undefined', () => {
-    // tool field may be absent in some opencode versions — must not crash.
-    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
-    const ev = makeEvent('permission.asked', {
-      sessionID: CHILD_ID,
-      id: 'perm_child_notool',
-      permission: 'read'
-      // no `tool` field
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-
-    expect(out.kind).toBe('approval')
-    if (out.kind !== 'approval') throw new Error('expected approval')
-    expect(out.approval.toolUseId).toBeUndefined()
-  })
-
-  it('child permission.asked for UNREGISTERED child session → ignore (treated as foreign)', () => {
-    // A permission.asked from a session not in childSessions must be ignored —
-    // the cross-session filter catches it before handleChildEvent is called.
-    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
-    const ev = makeEvent('permission.asked', {
-      sessionID: 'ses_UNREGISTERED',
-      id: 'perm_unregistered',
-      permission: 'bash',
-      tool: { callID: 'call_x' }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-    expect(out.kind).toBe('ignore')
-  })
-
-  // ADR-085 S2 — the child marker, `always`, and the tool part's real input.
-  it('child ask carries `always` and the subagent marker', () => {
-    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
-    const ev = makeEvent('permission.asked', {
-      sessionID: CHILD_ID,
-      id: 'perm_child_always',
-      permission: 'bash',
-      patterns: ['git push origin feat'],
-      always: ['git push *'],
-      tool: { callID: CHILD_CALL_ID },
-      metadata: { command: 'git push origin feat' }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-    if (out.kind !== 'approval') throw new Error('expected approval')
-    expect(out.approval.always).toEqual(['git push *'])
-    expect(out.approval.subagent).toEqual({ sessionId: CHILD_ID, parentToolUseId: PARENT_CALL_ID })
-    // No tool part → the wire metadata.
-    expect(out.approval.input).toEqual({ command: 'git push origin feat' })
-  })
-
-  it('child ask prefers the child tool part input over metadata (M-OC6)', () => {
-    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
-    const accumulators = new Map<string, MessageAccumulator>()
-    // The child's tool part lands first, in the SAME accumulators map.
-    mapEvent(
-      makeEvent('message.part.updated', {
-        sessionID: CHILD_ID,
-        part: {
-          id: 'cp_bash',
-          messageID: 'child_msg_bash',
-          type: 'tool',
-          tool: 'bash',
-          callID: CHILD_CALL_ID,
-          state: { status: 'running', input: { command: 'git push origin feat', workdir: 'sub' } }
+  it('an inline image attachment comes first, a mentioned file not at all', () => {
+    const out = map(
+      ev('session.inbox.enqueued', {
+        sessionID: SID,
+        inboxID: 'msg_q',
+        item: {
+          type: 'user',
+          delivery: 'steer',
+          payload: {
+            text: 'look',
+            files: [
+              { data: 'aGk=', mime: 'text/plain', source: { type: 'uri', uri: 'file:///a' } },
+              { data: 'iVBORw0KGgo=', mime: 'image/png', source: { type: 'inline' }, name: 'p.png' }
+            ]
+          }
         }
       }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 },
-      childSessions
+      ev('session.inbox.delivered', { sessionID: SID, inboxID: 'msg_q' })
     )
-    const out = mapEvent(
-      makeEvent('permission.asked', {
-        sessionID: CHILD_ID,
-        id: 'perm_child_part',
-        permission: 'bash',
-        patterns: ['git push origin feat'],
-        tool: { callID: CHILD_CALL_ID }, // no messageID — found by the scan
-        metadata: { command: 'git push origin feat' }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 },
-      childSessions
-    )
-    if (out.kind !== 'approval') throw new Error('expected approval')
-    expect(out.approval.input).toEqual({ command: 'git push origin feat', workdir: 'sub' })
-    expect(out.approval.subagent).toEqual({ sessionId: CHILD_ID, parentToolUseId: PARENT_CALL_ID })
-  })
-
-  it('child ask with empty metadata and no part → input {}', () => {
-    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
-    const out = mapEvent(
-      makeEvent('permission.asked', {
-        sessionID: CHILD_ID,
-        id: 'perm_child_empty',
-        permission: 'somemcp_tool',
-        patterns: ['*'],
-        tool: { callID: CHILD_CALL_ID },
-        metadata: {}
-      }),
-      SESSION_ID,
-      new Map(),
-      START_TIME,
-      { value: 0 },
-      childSessions
-    )
-    if (out.kind !== 'approval') throw new Error('expected approval')
-    expect(out.approval.input).toEqual({})
-  })
-
-  it('own-session permission.asked still emits suggestions (unchanged)', () => {
-    // Guard: adding the child case must not break the own-session path.
-    const ev = makeEvent('permission.asked', {
-      sessionID: SESSION_ID,
-      id: 'perm_own_1',
-      permission: 'bash',
-      patterns: ['echo hi'],
-      tool: { callID: 'own_call_1' }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
-
-    expect(out.kind).toBe('approval')
-    if (out.kind !== 'approval') throw new Error('expected approval')
-    // Own-session approval DOES get suggestions (persist-rule offer is valid for the parent).
-    expect(out.approval.suggestions).toBeDefined()
-    expect(out.approval.suggestions!.length).toBeGreaterThan(0)
+    expect(of(out, 'user-message')[0].message.content).toEqual([
+      expect.objectContaining({ type: 'image', mediaType: 'image/png', fileName: 'p.png' }),
+      { type: 'text', text: 'look' }
+    ])
   })
 })
 
-// ── Phase 8e Part 2 — child-event ordering guarantee (no buffering needed) ───
-
-describe('mapEvent — Phase 8e Part 2: child-event ordering (registration before transcript)', () => {
-  // Verified vs opencode 1.17.9 task.ts:
-  //   sessions.create(child) →
-  //   ctx.metadata({ metadata: { sessionId } })  ← publishes message.part.updated (this event)
-  //   → background.start(runTask)                ← runTask → ops.prompt(child) → child transcript
-  //
-  // ctx.metadata is yield*-ed (Effect fiber await) before ops.prompt is ever scheduled.
-  // The SSE stream is a single FIFO queue. Therefore:
-  //   Registration event (task part with state.metadata.sessionId) ALWAYS precedes
-  //   any child transcript events (message.updated / permission.asked / session.idle).
-  // No buffering needed — the happy-path ordering is structurally guaranteed.
-
-  it('task-part event registers the child, then a child message.part.updated routes to subagent-message (happy-path order)', () => {
-    const childSessions = new Map<string, string>()
-    const accumulators = new Map<string, import('../event-mapper').MessageAccumulator>()
-
-    // Step 1: own-session task part arrives — registers the child (simulates ctx.metadata publish)
-    const regEvent = makeEvent('message.part.updated', {
-      sessionID: SESSION_ID,
-      part: {
-        id: 'p_task_8e',
-        messageID: 'msg_parent_8e',
-        type: 'tool',
-        tool: 'task',
-        callID: PARENT_CALL_ID,
-        state: {
-          status: 'running',
-          input: { description: 'subwork' },
-          metadata: { sessionId: CHILD_SESSION_ID }
-        }
-      }
-    })
-    const regOut = mapEvent(
-      regEvent,
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 },
-      childSessions
-    )
-    // Registration must succeed (parent message emitted + child registered)
-    expect(regOut.kind).toBe('message')
-    expect(childSessions.has(CHILD_SESSION_ID)).toBe(true)
-
-    // Step 2: child transcript event arrives AFTER registration (FIFO guarantee from task.ts)
-    // This is what used to be at risk of a race — confirmed not a race.
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: CHILD_SESSION_ID,
-        info: { id: 'child_msg_8e', role: 'assistant' }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 },
-      childSessions
-    )
-    const childMsgEvent = makeEvent('message.part.updated', {
-      sessionID: CHILD_SESSION_ID,
-      part: { id: 'cp_8e', messageID: 'child_msg_8e', type: 'text', text: 'child result' }
-    })
-    const childOut = mapEvent(
-      childMsgEvent,
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      { value: 0 },
-      childSessions
-    )
-
-    // Must route to subagent-message (not ignored) — proves registration preceded the transcript event
-    expect(childOut.kind).toBe('subagent-message')
-    if (childOut.kind !== 'subagent-message') throw new Error('expected subagent-message')
-    expect(childOut.toolUseId).toBe(PARENT_CALL_ID)
-    expect(childOut.message.id).toBe('child_msg_8e')
-    expect(childOut.message.content[0]).toMatchObject({ type: 'text', text: 'child result' })
-  })
-})
-
-// ============================================================================
-// Phase 9a — subagent metering field capture + sumAccumulatorCosts guard
-// ============================================================================
-
-describe('Phase 9a — child message.updated captures model + childSessionId + cost', () => {
-  const PARENT_SES = 'ses_parent9a'
-  const CHILD_SES = 'ses_child9a'
-  const TASK_CALL = 'call_task_9a'
-
-  function setup() {
-    const accumulators = new Map<string, MessageAccumulator>()
-    const childSessions = new Map([[CHILD_SES, TASK_CALL]])
-    const totalCostRef = { value: 0 }
-    return { accumulators, childSessions, totalCostRef }
-  }
-
-  it('child message.updated with providerID + modelID + cost → acc.model, acc.childSessionId, acc.cost', () => {
-    const { accumulators, childSessions, totalCostRef } = setup()
-
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: CHILD_SES,
-        info: {
-          id: 'child_msg_9a',
-          role: 'assistant',
-          providerID: 'openai',
-          modelID: 'gpt-4o',
-          cost: 0.42,
-          tokens: { input: 100, output: 50 }
-        }
-      }),
-      PARENT_SES,
-      accumulators,
-      START_TIME,
-      totalCostRef,
-      childSessions
-    )
-
-    const acc = accumulators.get('child_msg_9a')!
-    expect(acc).toBeDefined()
-    expect(acc.isChild).toBe(true)
-    expect(acc.childSessionId).toBe(CHILD_SES)
-    expect(acc.model).toEqual({ providerID: 'openai', modelID: 'gpt-4o' })
-    expect(acc.cost).toBe(0.42)
-    expect(acc.tokens).toMatchObject({ input: 100, output: 50 })
+describe('routing and session events', () => {
+  it('foreign sessions on the shared feed are ignored', () => {
+    const FOREIGN = 'ses_other'
+    expect(
+      map(
+        step('msg_x', FOREIGN),
+        ev('session.text.started', { sessionID: FOREIGN, assistantMessageID: 'msg_x', ordinal: 0 }),
+        ev('session.text.delta', {
+          sessionID: FOREIGN,
+          assistantMessageID: 'msg_x',
+          ordinal: 0,
+          delta: 'x'
+        }),
+        ev('permission.asked', { id: 'per_x', sessionID: FOREIGN, action: 'shell', resources: [] }),
+        ev('session.execution.succeeded', { sessionID: FOREIGN }),
+        ev('server.connected', {})
+      )
+    ).toEqual([])
   })
 
-  it('child message.updated WITHOUT providerID/modelID → acc.model undefined', () => {
-    const { accumulators, childSessions, totalCostRef } = setup()
-
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: CHILD_SES,
-        info: {
-          id: 'child_msg_no_model',
-          role: 'assistant',
-          cost: 0.1,
-          tokens: { input: 10, output: 5 }
-        }
-      }),
-      PARENT_SES,
-      accumulators,
-      START_TIME,
-      totalCostRef,
-      childSessions
-    )
-
-    const acc = accumulators.get('child_msg_no_model')!
-    expect(acc).toBeDefined()
-    expect(acc.isChild).toBe(true)
-    expect(acc.model).toBeUndefined()
-  })
-
-  it('sumAccumulatorCosts guard — child cost does NOT inflate parent totalCostUsd (Phase 9a)', () => {
-    // This is the CRITICAL guard. Before Phase 9a, sumAccumulatorCosts summed ALL
-    // accumulators. Now that children capture cost, it MUST skip isChild.
-    //
-    // Scenario: parent has cost 0.5, child has cost 0.99.
-    // Expected: totalCostUsd.value after parent update = 0.5, NOT 0.5 + 0.99 = 1.49.
-    //
-    // We test this indirectly: fire the parent message.updated AFTER the child has
-    // already set acc.cost = 0.99. The own-session cost_update path calls
-    // sumAccumulatorCosts to recompute totalCostUsd.value.
-    const { accumulators, childSessions, totalCostRef } = setup()
-
-    // First: child message.updated sets acc.cost = 0.99
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: CHILD_SES,
-        info: {
-          id: 'child_cost_guard',
-          role: 'assistant',
-          providerID: 'openai',
-          modelID: 'gpt-4o',
-          cost: 0.99,
-          tokens: { input: 100, output: 50 }
-        }
-      }),
-      PARENT_SES,
-      accumulators,
-      START_TIME,
-      totalCostRef,
-      childSessions
-    )
-    // Child event returns ignore — totalCostUsd must still be 0 (child doesn't update it)
-    expect(totalCostRef.value).toBe(0)
-
-    // Second: parent message.updated fires with cost 0.5 → triggers sumAccumulatorCosts
-    const out = mapEvent(
-      makeEvent('message.updated', {
-        sessionID: PARENT_SES,
-        info: { id: 'parent_cost_9a', role: 'assistant', cost: 0.5 }
-      }),
-      PARENT_SES,
-      accumulators,
-      START_TIME,
-      totalCostRef,
-      childSessions
-    )
-
-    // Must be a cost_update (own path, cost changed)
-    expect(out.kind).toBe('cost_update')
-    // GUARD: totalCostUsd must be 0.5 (parent only), NOT 1.49 (parent + child)
-    expect(totalCostRef.value).toBeCloseTo(0.5, 6)
-    if (out.kind === 'cost_update') {
-      expect(out.totalCostUsd).toBeCloseTo(0.5, 6)
-    }
-  })
-})
-
-// ── Child question.asked (floating AskUserQuestion hang-fix) ──────────────────
-
-describe('mapEvent — child question.asked → floating approval (hang-fix)', () => {
-  const CHILD_Q_ID = 'ses_child_q'
-  const PARENT_Q_CALL = 'call_task_q'
-  const CHILD_Q_CALL = 'child_call_question'
-
-  it('child question.asked → {kind:approval} with toolName AskUserQuestion and child callID', () => {
-    // Core regression: a child subagent calling the `question` tool emits
-    // question.asked under the child sessionId. Without this case it falls through
-    // to handleChildEvent default:ignore → child blocks → parent turn hangs.
-    const childSessions = new Map([[CHILD_Q_ID, PARENT_Q_CALL]])
-    const ev = makeEvent('question.asked', {
-      sessionID: CHILD_Q_ID,
-      id: 'que_child_1',
-      questions: [
-        {
-          question: 'Which approach?',
-          header: 'Strategy',
-          options: [
-            { label: 'Fast', description: 'Quick but rough' },
-            { label: 'Safe', description: 'Slow but correct' }
-          ],
-          multiple: false
-        }
-      ],
-      tool: { callID: CHILD_Q_CALL }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-
-    expect(out.kind).toBe('approval')
-    if (out.kind !== 'approval') throw new Error('expected approval')
-
-    expect(out.approval.requestId).toBe('que_child_1')
-    expect(out.approval.toolName).toBe('AskUserQuestion')
-
-    // CRITICAL — toolUseId must be the CHILD question tool's callID, NOT the
-    // parent task callID. The parent callID is already in the rendered main
-    // assistant blocks → FloatingApproval would hide the card. The child callID
-    // only appears in subagent blocks → card shows correctly.
-    expect(out.approval.toolUseId).toBe(CHILD_Q_CALL)
-    expect(out.approval.toolUseId).not.toBe(PARENT_Q_CALL)
-
-    const input = out.approval.input as {
-      questions: Array<{
-        question: string
-        header: string
-        multiSelect: boolean
-        options: unknown[]
-      }>
-    }
-    expect(input.questions).toHaveLength(1)
-    expect(input.questions[0].question).toBe('Which approach?')
-    expect(input.questions[0].header).toBe('Strategy')
-    expect(input.questions[0].multiSelect).toBe(false)
-    expect(input.questions[0].options).toEqual([
-      { label: 'Fast', description: 'Quick but rough' },
-      { label: 'Safe', description: 'Slow but correct' }
+  it('rename, model and agent switches, delete', () => {
+    expect(
+      map(
+        ev('session.renamed', { sessionID: SID, title: 'T' }),
+        ev('session.model.selected', { sessionID: SID, model: MODEL }),
+        ev('session.agent.selected', { sessionID: SID, agent: 'plan' }),
+        ev('session.deleted', { sessionID: SID })
+      )
+    ).toEqual([
+      { kind: 'session-renamed', title: 'T' },
+      { kind: 'model-selected', model: MODEL },
+      { kind: 'agent-selected', agent: 'plan' },
+      { kind: 'session-deleted' }
     ])
   })
 
-  it('child question.asked with multiple:true → multiSelect:true', () => {
-    const childSessions = new Map([[CHILD_Q_ID, PARENT_Q_CALL]])
-    const ev = makeEvent('question.asked', {
-      sessionID: CHILD_Q_ID,
-      id: 'que_child_multi',
-      questions: [
-        {
-          question: 'Pick features',
-          header: 'Features',
-          options: [
-            { label: 'A', description: '' },
-            { label: 'B', description: '' }
-          ],
-          multiple: true
-        }
-      ],
-      tool: { callID: CHILD_Q_CALL }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-    expect(out.kind).toBe('approval')
-    if (out.kind !== 'approval') throw new Error('expected approval')
-    const input = out.approval.input as { questions: Array<{ multiSelect: boolean }> }
-    expect(input.questions[0].multiSelect).toBe(true)
-  })
-
-  it('child question.asked with no tool field → toolUseId undefined', () => {
-    const childSessions = new Map([[CHILD_Q_ID, PARENT_Q_CALL]])
-    const ev = makeEvent('question.asked', {
-      sessionID: CHILD_Q_ID,
-      id: 'que_child_notool',
-      questions: [{ question: 'Q?', header: 'H', options: [] }]
-      // no `tool` field
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-    expect(out.kind).toBe('approval')
-    if (out.kind !== 'approval') throw new Error('expected approval')
-    expect(out.approval.toolUseId).toBeUndefined()
-  })
-
-  it('child question.asked missing id or questions → ignore', () => {
-    const childSessions = new Map([[CHILD_Q_ID, PARENT_Q_CALL]])
-    const noId = makeEvent('question.asked', {
-      sessionID: CHILD_Q_ID,
-      questions: [{ question: 'Q?', header: 'H', options: [] }]
-    })
-    const noQ = makeEvent('question.asked', {
-      sessionID: CHILD_Q_ID,
-      id: 'que_child_noq'
+  it('provider.auth names the vendor from the session’s model (constructor, created, or step)', () => {
+    mapper = new OpencodeEventMapper({
+      sessionID: SID,
+      model: { providerID: 'openrouter', id: 'm' }
     })
     expect(
-      mapEvent(noId, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions).kind
-    ).toBe('ignore')
-    expect(mapEvent(noQ, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions).kind).toBe(
-      'ignore'
+      map(
+        ev('session.execution.failed', {
+          sessionID: SID,
+          error: { type: 'provider.auth', message: 'x' }
+        })
+      )[0]
+    ).toMatchObject({ kind: 'auth-required', vendorId: 'openrouter' })
+    mapper = new OpencodeEventMapper({ sessionID: SID })
+    expect(
+      map(
+        ev('session.execution.failed', {
+          sessionID: SID,
+          error: { type: 'provider.auth', message: 'x' }
+        })
+      )[0]
+    ).toMatchObject({ kind: 'error', errorType: 'provider.auth' })
+  })
+})
+
+describe('reconnect', () => {
+  const user = (id: string, created: number, text: string): Session_Message_Info => ({
+    id,
+    type: 'user',
+    text,
+    time: { created }
+  })
+  const assistant = (
+    id: string,
+    created: number,
+    content: Extract<Session_Message_Info, { type: 'assistant' }>['content'],
+    done = true
+  ): Session_Message_Info => ({
+    id,
+    type: 'assistant',
+    agent: 'build',
+    model: MODEL,
+    content,
+    time: { created, ...(done ? { completed: created + 5 } : {}) },
+    ...(done ? { cost: 0.01, tokens: TOKENS, finish: 'stop' as const } : {})
+  })
+  const idle = (
+    eventID: string,
+    created: number,
+    outcome: 'succeeded' | 'failed' | 'interrupted' = 'succeeded'
+  ): Session_Message_Info => ({
+    id: eventID.replace(/^evt_/, 'msg_'),
+    type: 'idle',
+    outcome,
+    time: { created }
+  })
+  const snapshot = (
+    messages: Session_Message_Info[],
+    extra: Partial<OpencodeReconnectSnapshot['sessions'][string]> = {},
+    active: Record<string, { type: 'running' }> = {}
+  ): OpencodeReconnectSnapshot => ({
+    sessions: { [SID]: { messages, permissions: [], forms: [], inbox: [], ...extra } },
+    active
+  })
+
+  it('an item open across the gap shows nothing more until its end, which seals the whole text', () => {
+    const before = map(
+      ev('session.execution.started', { sessionID: SID }),
+      step(),
+      ev('session.text.started', { sessionID: SID, assistantMessageID: MSG, ordinal: 0 }),
+      ev('session.text.delta', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        ordinal: 0,
+        delta: 'Hel'
+      })
     )
+    expect(kinds(before)).toContain('item-open')
+    // The read: the step is in progress, its text not ended yet (stored as "").
+    const rec = mapper.reconcile(
+      snapshot(
+        [assistant(MSG, 1, [{ type: 'text', text: '' }], false)],
+        {},
+        { [SID]: { type: 'running' } }
+      )
+    )
+    expect(rec).toEqual([])
+    const after = map(
+      ev('session.text.delta', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        ordinal: 0,
+        delta: 'lo, wor'
+      }),
+      ev('session.text.ended', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        ordinal: 0,
+        text: 'Hello, world'
+      })
+    )
+    expect(kinds(after)).toEqual(['item-seal'])
+    expect(of(after, 'item-seal')[0].seal.message.content).toEqual([
+      { type: 'text', text: 'Hello, world' }
+    ])
   })
 
-  it('child question.asked from UNREGISTERED session → ignore (foreign session filter)', () => {
-    // A question.asked from a session not in childSessions is treated as a foreign
-    // session and ignored before handleChildEvent is ever reached.
-    const childSessions = new Map([[CHILD_Q_ID, PARENT_Q_CALL]])
-    const ev = makeEvent('question.asked', {
-      sessionID: 'ses_UNREGISTERED',
-      id: 'que_unregistered',
-      questions: [{ question: 'Q?', header: 'H', options: [] }],
-      tool: { callID: 'call_x' }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-    expect(out.kind).toBe('ignore')
-  })
-
-  it('own-session question.asked regression — still returns correct approval (helper shared, behavior unchanged)', () => {
-    // Guard: extracting buildQuestionApproval must not change the own-session path.
-    // Re-runs the key assertions from the Phase 8b test suite to catch helper drift.
-    const ev = makeEvent('question.asked', {
-      sessionID: SESSION_ID,
-      id: 'que_own_regression',
-      questions: [
+  it('a turn that ended in the gap: the rest of its content, its result and its end, once', () => {
+    map(ev('session.execution.started', { sessionID: SID }, 100), step())
+    const end = ev('session.execution.succeeded', { sessionID: SID }, 200)
+    const rows = [
+      user('msg_u', 99, 'hi'),
+      assistant(MSG, 101, [
+        { type: 'text', text: 'done' },
         {
-          question: 'Which language?',
-          header: 'Language',
-          options: [{ label: 'TypeScript', description: 'TS' }],
-          multiple: false
+          type: 'tool',
+          id: 'call_1',
+          name: 'read',
+          state: {
+            status: 'completed',
+            input: { path: 'a' },
+            content: [{ type: 'text', text: 'A' }]
+          },
+          time: { created: 102 }
         }
-      ],
-      tool: { callID: 'call_own_q' }
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
-    expect(out.kind).toBe('approval')
-    if (out.kind !== 'approval') throw new Error('expected approval')
-    expect(out.approval.requestId).toBe('que_own_regression')
-    expect(out.approval.toolName).toBe('AskUserQuestion')
-    expect(out.approval.toolUseId).toBe('call_own_q')
-    const input = out.approval.input as {
-      questions: Array<{ question: string; header: string; multiSelect: boolean }>
-    }
-    expect(input.questions).toHaveLength(1)
-    expect(input.questions[0].question).toBe('Which language?')
-    expect(input.questions[0].multiSelect).toBe(false)
+      ]),
+      idle(end.id, 200)
+    ]
+    const rec = mapper.reconcile(snapshot(rows))
+    expect(kinds(rec)).toEqual(['user-message', 'message', 'tool-result', 'step-usage', 'result'])
+    expect(rec.at(-1)).toEqual({ kind: 'result', sessionId: SID, durationMs: 100 })
+    // The end event itself (published after the subscription came back) is not a second end.
+    expect(map(end)).toEqual([])
+    expect(mapper.running).toBe(false)
+  })
+
+  it('the live end of an end already read is dropped; a live START after the read re-arms it', () => {
+    map(ev('session.execution.started', { sessionID: SID }))
+    const end = ev('session.execution.succeeded', { sessionID: SID })
+    mapper.reconcile(snapshot([idle(end.id, 1)]))
+    expect(map(end)).toEqual([])
+    // A turn that started after the reconnect but before the read finished.
+    const restarted = map(ev('session.execution.started', { sessionID: SID }), end)
+    expect(kinds(restarted)).toEqual(['turn-start', 'result'])
+  })
+
+  it('not active and no idle row: the turn ended by shutdown — or by a messageless reject', () => {
+    map(ev('session.execution.started', { sessionID: SID }))
+    expect(mapper.reconcile(snapshot([]))).toEqual([
+      expect.objectContaining({ kind: 'stopped', reason: 'shutdown' })
+    ])
+    // Its late `interrupted{shutdown}` is not a second end.
+    expect(
+      map(ev('session.execution.interrupted', { sessionID: SID, reason: 'shutdown' }))
+    ).toEqual([])
+
+    // The reject was seen live; its call's `aborted` failure only in the read.
+    mapper = new OpencodeEventMapper({ sessionID: SID })
+    map(
+      ev('session.execution.started', { sessionID: SID }),
+      step(),
+      ...tool('call_1', 'shell', { command: 'x' }),
+      ev('permission.asked', {
+        id: 'per_1',
+        sessionID: SID,
+        action: 'shell',
+        resources: ['x'],
+        source: { type: 'tool', messageID: MSG, id: 'call_1' }
+      }),
+      ev('permission.replied', { sessionID: SID, requestID: 'per_1', reply: 'reject' })
+    )
+    const rec = mapper.reconcile(
+      snapshot([
+        assistant(
+          MSG,
+          1,
+          [
+            {
+              type: 'tool',
+              id: 'call_1',
+              name: 'shell',
+              state: {
+                status: 'error',
+                input: { command: 'x' },
+                error: { type: 'aborted', message: 'Tool execution aborted' }
+              },
+              time: { created: 1 }
+            }
+          ],
+          false
+        )
+      ])
+    )
+    expect(rec.at(-1)).toMatchObject({ kind: 'stopped', reason: 'denied' })
+  })
+
+  it('a turn the read shows ended retracts the cards it still had up', () => {
+    map(
+      ev('session.execution.started', { sessionID: SID }),
+      ev('permission.asked', { id: 'per_1', sessionID: SID, action: 'shell', resources: ['x'] })
+    )
+    const end = ev('session.execution.interrupted', { sessionID: SID, reason: 'user' })
+    // Even a read that still lists the request (a stale read) cannot keep a card past the end.
+    const rec = mapper.reconcile(
+      snapshot([idle(end.id, 5, 'interrupted')], {
+        permissions: [{ id: 'per_1', sessionID: SID, action: 'shell', resources: ['x'] }]
+      })
+    )
+    expect(kinds(rec)).toEqual(['approval-resolved', 'stopped'])
+  })
+
+  it('active but believed idle: the turn started in the gap', () => {
+    expect(
+      mapper.reconcile(snapshot([user('msg_u', 1, 'x')], {}, { [SID]: { type: 'running' } }))
+    ).toEqual([expect.objectContaining({ kind: 'user-message' }), { kind: 'turn-start' }])
+    expect(mapper.running).toBe(true)
+  })
+
+  it('pending asks and forms are (re)announced; settled ones retracted', () => {
+    map(
+      ev('permission.asked', { id: 'per_old', sessionID: SID, action: 'shell', resources: ['x'] })
+    )
+    const rec = mapper.reconcile(
+      snapshot([], {
+        permissions: [{ id: 'per_new', sessionID: SID, action: 'edit', resources: ['a'] }],
+        forms: [
+          { id: 'frm_1', sessionID: SID, title: 'Q', fields: [{ key: 'q0', type: 'string' }] }
+        ]
+      })
+    )
+    expect(
+      rec.map((o) =>
+        o.kind === 'approval'
+          ? o.approval.requestId
+          : o.kind === 'approval-resolved'
+            ? `-${o.requestId}`
+            : o.kind
+      )
+    ).toEqual(['-per_old', 'per_new', 'frm_1'])
+  })
+
+  it('the inbox: new items enqueued, gone ones delivered (stored as a row) or cancelled', () => {
+    map(
+      ev('session.inbox.enqueued', {
+        sessionID: SID,
+        inboxID: 'msg_a',
+        item: { type: 'user', payload: { text: 'a' }, delivery: 'queue' }
+      }),
+      ev('session.inbox.enqueued', {
+        sessionID: SID,
+        inboxID: 'msg_b',
+        item: { type: 'user', payload: { text: 'b' }, delivery: 'queue' }
+      }),
+      ev('session.inbox.enqueued', {
+        sessionID: SID,
+        inboxID: 'msg_c',
+        item: { type: 'user', payload: { text: 'c' }, delivery: 'queue' }
+      })
+    )
+    const rec = mapper.reconcile(
+      snapshot([user('msg_a', 5, 'a')], {
+        inbox: [
+          {
+            id: 'msg_c',
+            sessionID: SID,
+            type: 'user',
+            payload: { text: 'c' },
+            delivery: 'steer',
+            time: { created: 1 }
+          },
+          {
+            id: 'msg_d',
+            sessionID: SID,
+            type: 'user',
+            payload: { text: 'd' },
+            delivery: 'queue',
+            time: { created: 2 }
+          }
+        ]
+      })
+    )
+    expect(rec.filter((o) => o.kind === 'inbox')).toEqual([
+      { kind: 'inbox', change: 'delivered', inboxID: 'msg_a' },
+      { kind: 'inbox', change: 'cancelled', inboxID: 'msg_b' },
+      { kind: 'inbox', change: 'delivery-changed', inboxID: 'msg_c', delivery: 'steer' },
+      {
+        kind: 'inbox',
+        change: 'enqueued',
+        inboxID: 'msg_d',
+        delivery: 'queue',
+        item: { type: 'user', payload: { text: 'd' }, delivery: 'queue' }
+      }
+    ])
+    expect(of(rec, 'user-message').map((o) => o.inboxID)).toEqual(['msg_a'])
+  })
+
+  it('a rejection read back adds no rule denial (its ask may have been in the gap)', () => {
+    const rec = mapper.reconcile(
+      snapshot([
+        assistant(MSG, 1, [
+          {
+            type: 'tool',
+            id: 'call_r',
+            name: 'shell',
+            state: {
+              status: 'error',
+              input: { command: 'x' },
+              error: { type: 'permission.rejected', message: 'User denied' }
+            },
+            time: { created: 1 }
+          }
+        ])
+      ])
+    )
+    expect(of(rec, 'tool-result')).toHaveLength(1)
+    expect(of(rec, 'permission-denial')).toEqual([])
+  })
+
+  it('seed() marks stored history as shown: a re-read of the same rows emits nothing', () => {
+    const rows = [
+      user('msg_u', 1, 'hi'),
+      assistant(MSG, 2, [{ type: 'text', text: 'hello' }]),
+      idle('evt_x', 10)
+    ]
+    mapper.seed(rows)
+    expect(mapper.reconcile(snapshot(rows))).toEqual([])
+    expect(mapper.followedSessions()).toEqual([SID])
   })
 })
 
-// ---------------------------------------------------------------------------
-// mapEvent — todo.updated (own session → {kind:'todos'}; child → ignored)
-// ---------------------------------------------------------------------------
+describe('turn ends: cards, classification, background order, overhead', () => {
+  const asked = (id: string, call: string, session = SID, msg = MSG) =>
+    ev('permission.asked', {
+      id,
+      sessionID: session,
+      action: 'shell',
+      resources: ['x'],
+      source: { type: 'tool', messageID: msg, id: call }
+    })
+  const failed = (call: string, type: string, message: string, session = SID, msg = MSG) =>
+    ev('session.tool.failed', {
+      sessionID: session,
+      assistantMessageID: msg,
+      id: call,
+      error: { type, message },
+      executed: false
+    })
+  const questionForm = (id: string, call: string) =>
+    ev('form.created', {
+      form: {
+        id,
+        sessionID: SID,
+        title: 'Questions',
+        metadata: { kind: 'question', tool: { messageID: MSG, id: call } },
+        fields: [{ key: 'q0', type: 'string', title: 'H', description: 'Q?', options: [] }]
+      }
+    })
 
-describe('mapEvent — todo.updated (own session)', () => {
-  it('maps todos array to {kind:"todos", items} with cancelled preserved', () => {
-    const ev = makeEvent('todo.updated', {
-      sessionID: SESSION_ID,
-      todos: [
-        { content: 'Task A', status: 'pending', priority: 'high' },
-        { content: 'Task B', status: 'in_progress', priority: 'medium' },
-        { content: 'Task C', status: 'completed', priority: 'low' },
-        { content: 'Task D', status: 'cancelled', priority: 'low' }
+  it('a Stop with an ask pending retracts its card (an interrupt publishes no permission.replied)', () => {
+    const out = map(
+      ev('session.execution.started', { sessionID: SID }),
+      step(),
+      ...tool('call_1', 'shell', { command: 'x' }),
+      asked('per_1', 'call_1'),
+      failed('call_1', 'aborted', 'Tool execution aborted'),
+      ev('session.execution.interrupted', { sessionID: SID, reason: 'user' })
+    )
+    expect(kinds(out).slice(-2)).toEqual(['approval-resolved', 'stopped'])
+    expect(out.at(-1)).toMatchObject({ reason: 'user' })
+  })
+
+  it('a turn end retracts a foreground child’s cards, not a running background child’s', () => {
+    const link = (call: string, child: string) => [
+      ...tool(call, 'subagent', { agent: 'general' }),
+      ev('session.created', {
+        sessionID: child,
+        parentID: SID,
+        projectID: 'p',
+        location: { directory: '/' },
+        slug: 's',
+        version: 'v'
+      }),
+      ev('session.tool.progress', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: call,
+        metadata: { sessionID: child, status: 'running' }
+      })
+    ]
+    const out = map(
+      ev('session.execution.started', { sessionID: SID }),
+      step(),
+      ...link('call_fg', 'ses_fg'),
+      ...link('call_bg', 'ses_bg'),
+      ev('session.tool.success', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: 'call_bg',
+        content: [{ type: 'text', text: 'bg' }],
+        metadata: { sessionID: 'ses_bg', status: 'running' },
+        executed: false
+      }),
+      ev('session.execution.started', { sessionID: 'ses_bg' }),
+      ev('permission.asked', { id: 'per_fg', sessionID: 'ses_fg', action: 'shell', resources: [] }),
+      ev('permission.asked', { id: 'per_bg', sessionID: 'ses_bg', action: 'shell', resources: [] }),
+      ev('session.execution.interrupted', { sessionID: SID, reason: 'user' })
+    )
+    expect(of(out, 'approval-resolved').map((o) => o.requestId)).toEqual(['per_fg'])
+  })
+
+  it('a form cancelled WITHOUT a message ends the turn as `form-cancelled`, not a shutdown', () => {
+    const out = map(
+      ev('session.execution.started', { sessionID: SID }),
+      step(),
+      ...tool('call_q', 'question', { questions: [] }),
+      questionForm('frm_1', 'call_q'),
+      ev('form.cancelled', { sessionID: SID, id: 'frm_1' }),
+      failed('call_q', 'aborted', 'Tool execution aborted'),
+      ev('session.execution.interrupted', { sessionID: SID, reason: 'shutdown' })
+    )
+    expect(out.at(-1)).toMatchObject({ kind: 'stopped', reason: 'form-cancelled' })
+  })
+
+  it('a reject or cancel WITH a message does not arm the stop: a later real shutdown is a shutdown', () => {
+    const out = map(
+      ev('session.execution.started', { sessionID: SID }),
+      step(),
+      ...tool('call_1', 'shell', { command: 'x' }),
+      asked('per_1', 'call_1'),
+      ev('permission.replied', { sessionID: SID, requestID: 'per_1', reply: 'reject' }),
+      failed('call_1', 'permission.rejected', 'ClaudeUI denied: no'),
+      ...tool('call_q', 'question', { questions: [] }),
+      questionForm('frm_1', 'call_q'),
+      ev('form.cancelled', { sessionID: SID, id: 'frm_1' }),
+      failed('call_q', 'tool.execution', 'The user skipped this'),
+      ev('session.execution.interrupted', { sessionID: SID, reason: 'shutdown' })
+    )
+    expect(out.at(-1)).toMatchObject({ kind: 'stopped', reason: 'shutdown' })
+  })
+
+  it('the arming is per execution', () => {
+    map(
+      ev('session.execution.started', { sessionID: SID }),
+      step(),
+      ...tool('call_1', 'shell', { command: 'x' }),
+      asked('per_1', 'call_1'),
+      ev('permission.replied', { sessionID: SID, requestID: 'per_1', reply: 'reject' }),
+      failed('call_1', 'aborted', 'Tool execution aborted'),
+      ev('session.execution.interrupted', { sessionID: SID, reason: 'shutdown' })
+    )
+    // opencode resumes the claimed turn on its next start; that execution ends on a real shutdown.
+    const out = map(
+      ev('session.execution.started', { sessionID: SID }),
+      ev('session.execution.interrupted', { sessionID: SID, reason: 'shutdown' })
+    )
+    expect(out.at(-1)).toMatchObject({ kind: 'stopped', reason: 'shutdown' })
+  })
+
+  describe('a background call gets exactly one notification, whatever the order', () => {
+    const CH = 'ses_bg'
+    const setup = () => [
+      ev('session.execution.started', { sessionID: SID }),
+      step(),
+      ...tool('call_s', 'subagent', { agent: 'explore', background: true }),
+      ev('session.created', {
+        sessionID: CH,
+        parentID: SID,
+        projectID: 'p',
+        location: { directory: '/' },
+        slug: 's',
+        version: 'v'
+      }),
+      ev('session.tool.progress', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: 'call_s',
+        metadata: { sessionID: CH, status: 'running' }
+      })
+    ]
+    const childRun = (end = 'session.execution.succeeded') => [
+      ev('session.execution.started', { sessionID: CH }),
+      ev(end, { sessionID: CH, error: { type: 'unknown', message: 'x' } })
+    ]
+    const backgrounded = () =>
+      ev('session.tool.success', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: 'call_s',
+        content: [{ type: 'text', text: 'working in the background' }],
+        metadata: { sessionID: CH, status: 'running' },
+        executed: false
+      })
+    it.each([
+      ['child ends first', () => [...setup(), ...childRun(), backgrounded()], 'completed'],
+      ['call returns first', () => [...setup(), backgrounded(), ...childRun()], 'completed'],
+      [
+        'child fails first',
+        () => [...setup(), ...childRun('session.execution.failed'), backgrounded()],
+        'failed'
       ]
+    ])('%s', (_name, events, status) => {
+      const notes = of(map(...events()), 'task-notification')
+      expect(notes.map((o) => [o.notification.toolUseId, o.notification.status])).toEqual([
+        ['call_s', status]
+      ])
     })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
-    expect(out.kind).toBe('todos')
-    if (out.kind !== 'todos') throw new Error('expected todos')
-    expect(out.items).toHaveLength(4)
-    expect(out.items[0]).toMatchObject({ content: 'Task A', status: 'pending' })
-    expect(out.items[1]).toMatchObject({ content: 'Task B', status: 'in_progress' })
-    expect(out.items[2]).toMatchObject({ content: 'Task C', status: 'completed' })
-    // cancelled status must be preserved (opencode emits it; TodoStatus now includes it)
-    expect(out.items[3]).toMatchObject({ content: 'Task D', status: 'cancelled' })
   })
 
-  it('ignores todo.updated with missing todos field', () => {
-    const ev = makeEvent('todo.updated', { sessionID: SESSION_ID })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
-    expect(out.kind).toBe('ignore')
-  })
-
-  it('ignores todo.updated with non-array todos', () => {
-    const ev = makeEvent('todo.updated', { sessionID: SESSION_ID, todos: null })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
-    expect(out.kind).toBe('ignore')
-  })
-})
-
-describe('mapEvent — todo.updated (child session → ignored, not handled)', () => {
-  it('child todo.updated falls through to default ignore in handleChildEvent', () => {
-    const CHILD_ID = 'ses_child_todo'
-    const PARENT_CALL_ID = 'call_task_todo'
-    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
-
-    const ev = makeEvent('todo.updated', {
-      sessionID: CHILD_ID,
-      todos: [{ content: 'Child task', status: 'pending', priority: 'medium' }]
-    })
-    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
-    // Children do NOT drive the parent widget — child todo.updated is ignored
-    expect(out.kind).toBe('ignore')
-  })
-})
-
-// ── Context-token advance (free-model fix) ────────────────────────────────────
-// GUARD: free models report cost:0 on every emission — cost never changes, so the
-// old code always returned {kind:'ignore'} and lastContextLength stayed at 0,
-// rendering "–" in the status line. Fix 1 adds a tokensChanged gate: emit
-// cost_update when input+cacheRead increases (even when cost is unchanged),
-// gated on role==='assistant' to avoid corrupting lastContextLength with user
-// or system token values.
-
-describe('mapEvent — message.updated context-token advance (free-model fix)', () => {
-  it('GUARD: assistant message.updated with cost:0 unchanged but growing input emits cost_update on second event', () => {
-    // First event: establishes the accumulator (prevCtxLen=0, newCtxLen=500 → change → cost_update)
-    const accumulators = new Map<string, MessageAccumulator>()
-    const totalCostRef = { value: 0 }
-
-    // First emission — role set, tokens arrive for the first time (prevCtxLen 0 → 500)
-    const out1 = mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: { id: 'msg_free_ctx', role: 'assistant', cost: 0, tokens: { input: 500, output: 10 } }
+  it('usage no step carries (title generation) is reported as overhead, once, before the end', () => {
+    const title = { input: 120, output: 30, reasoning: 0, cache: { read: 0, write: 0 } }
+    const stepTokens = { input: 100, output: 20, reasoning: 0, cache: { read: 0, write: 0 } }
+    const out = map(
+      ev('session.execution.started', { sessionID: SID }),
+      // title generation lands first (recorded 2.0.24 order)
+      ev('session.usage.updated', { sessionID: SID, cost: 0.2, tokens: title }),
+      step(),
+      ev('session.step.ended', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        finish: 'stop',
+        cost: 0.1,
+        tokens: stepTokens
       }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-    // First event: prevCtxLen was 0, newCtxLen is 500 → context changed → cost_update
-    expect(out1.kind).toBe('cost_update')
-    if (out1.kind === 'cost_update') {
-      expect(out1.tokens?.input).toBe(500)
-      expect(out1.totalCostUsd).toBe(0)
-    }
-
-    // Second emission — same cost:0 still, input grew from 500→800 (cumulative)
-    const out2 = mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: { id: 'msg_free_ctx', role: 'assistant', cost: 0, tokens: { input: 800, output: 30 } }
+      ev('session.usage.updated', {
+        sessionID: SID,
+        cost: 0.3,
+        tokens: { input: 220, output: 50, reasoning: 0, cache: { read: 0, write: 0 } }
       }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
+      ev('session.execution.succeeded', { sessionID: SID }),
+      // an update with nothing new while idle adds nothing
+      ev('session.usage.updated', {
+        sessionID: SID,
+        cost: 0.3,
+        tokens: { input: 220, output: 50, reasoning: 0, cache: { read: 0, write: 0 } }
+      })
     )
-    // GUARD: this was the failing case — cost unchanged, but tokens grew → must be cost_update
-    expect(out2.kind).toBe('cost_update')
-    if (out2.kind === 'cost_update') {
-      expect(out2.tokens?.input).toBe(800)
-      expect(out2.engineCostUsd).toBe(0)
-    }
+    const overhead = of(out, 'overhead-usage')
+    expect(overhead).toHaveLength(1)
+    expect(overhead[0].cost).toBeCloseTo(0.2, 10)
+    expect(overhead[0].tokens).toEqual(title)
+    expect(kinds(out).slice(-3, -1)).toEqual(['overhead-usage', 'result'])
   })
 
-  it('repeated emission with IDENTICAL tokens (no growth) still returns ignore', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    const totalCostRef = { value: 0 }
-
-    // First: establishes tokens (prevCtxLen 0 → 300 → cost_update)
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: { id: 'msg_stable', role: 'assistant', cost: 0, tokens: { input: 300, output: 10 } }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-
-    // Second: identical tokens, identical cost — nothing changed → ignore
-    const out = mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: { id: 'msg_stable', role: 'assistant', cost: 0, tokens: { input: 300, output: 10 } }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-    expect(out.kind).toBe('ignore')
-  })
-
-  it('user-role token change does NOT emit cost_update (would corrupt lastContextLength)', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    const totalCostRef = { value: 0 }
-
-    // Set role=user via a first message.updated (no tokens yet)
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: { id: 'msg_user_tok', role: 'user', cost: 0 }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-
-    // Second event: user role, tokens arrive (input 0→400) — must NOT emit cost_update
-    const out = mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: { id: 'msg_user_tok', role: 'user', cost: 0, tokens: { input: 400, output: 5 } }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-    expect(out.kind).toBe('ignore')
-  })
-
-  it('cache.read increase also triggers cost_update for assistant (cacheRead is part of context length)', () => {
-    const accumulators = new Map<string, MessageAccumulator>()
-    const totalCostRef = { value: 0 }
-
-    // First: input=200, cacheRead=50 → ctxLen=250
-    mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: {
-          id: 'msg_cache',
-          role: 'assistant',
-          cost: 0,
-          tokens: { input: 200, cache: { read: 50 } }
-        }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-
-    // Second: input unchanged=200, cacheRead grows to 150 → ctxLen=350 → cost_update
-    const out = mapEvent(
-      makeEvent('message.updated', {
-        sessionID: SESSION_ID,
-        info: {
-          id: 'msg_cache',
-          role: 'assistant',
-          cost: 0,
-          tokens: { input: 200, cache: { read: 150 } }
-        }
-      }),
-      SESSION_ID,
-      accumulators,
-      START_TIME,
-      totalCostRef
-    )
-    expect(out.kind).toBe('cost_update')
-    if (out.kind === 'cost_update') {
-      expect(out.tokens?.cache?.read).toBe(150)
-    }
-  })
-})
-
-// ---------------------------------------------------------------------------
-// computeStoredDurationMs — active-turn duration reconstruction from
-// opencode's stored-message history (durability across reloads, Slice A).
-// ---------------------------------------------------------------------------
-
-describe('computeStoredDurationMs', () => {
-  function userMsg(id: string, createdMs?: number): StoredMessage {
-    return {
-      info: {
-        id,
-        role: 'user',
-        time: createdMs !== undefined ? { created: createdMs } : undefined
-      },
-      parts: []
-    }
-  }
-  function assistantMsg(id: string, createdMs?: number, completedMs?: number): StoredMessage {
-    return {
-      info: {
-        id,
-        role: 'assistant',
-        time: {
-          ...(createdMs !== undefined ? { created: createdMs } : {}),
-          ...(completedMs !== undefined ? { completed: completedMs } : {})
-        }
-      },
-      parts: []
-    }
-  }
-
-  it('returns 0 for no messages', () => {
-    expect(computeStoredDurationMs([])).toBe(0)
-  })
-
-  it('spans from user.time.created to assistant.time.completed', () => {
-    const messages = [userMsg('u1', 1000), assistantMsg('a1', 1000, 6000)]
-    expect(computeStoredDurationMs(messages)).toBe(5000)
-  })
-
-  it('falls back to assistant.time.created when completed is absent', () => {
-    const messages = [userMsg('u1', 1000), assistantMsg('a1', 4000)]
-    expect(computeStoredDurationMs(messages)).toBe(3000)
-  })
-
-  it('uses the LATEST assistant completion when a turn has multiple assistant messages', () => {
-    const messages = [
-      userMsg('u1', 1000),
-      assistantMsg('a1', 1000, 3000),
-      assistantMsg('a2', 3000, 5000)
-    ]
-    expect(computeStoredDurationMs(messages)).toBe(4000)
-  })
-
-  it('sums multiple turns', () => {
-    const messages = [
-      userMsg('u1', 0),
-      assistantMsg('a1', 0, 5000), // turn 1 span: 5s
-      userMsg('u2', 10_000),
-      assistantMsg('a2', 10_000, 13_000) // turn 2 span: 3s
-    ]
-    expect(computeStoredDurationMs(messages)).toBe(8000)
-  })
-
-  it('drops a turn whose user message has no parseable created timestamp', () => {
-    const messages = [userMsg('u1', undefined), assistantMsg('a1', 1000, 9000)]
-    expect(computeStoredDurationMs(messages)).toBe(0)
-  })
-
-  it('clamps a negative span (assistant completed before the prompt) to 0', () => {
-    const messages = [userMsg('u1', 5000), assistantMsg('a1', 5000, 1000)]
-    expect(computeStoredDurationMs(messages)).toBe(0)
+  it('seed(…, sessionTotals): what the cold line counted is not reported again', () => {
+    const totals = { cost: 1, tokens: TOKENS }
+    mapper.seed([], { sessionTotals: totals })
+    expect(
+      map(ev('session.usage.updated', { sessionID: SID, ...totals })).map((o) => o.kind)
+    ).toEqual(['session-usage'])
   })
 })

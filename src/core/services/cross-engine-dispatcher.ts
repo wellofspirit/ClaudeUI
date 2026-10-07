@@ -58,17 +58,17 @@ import {
   type OpencodeApprovalRoute,
   type OpencodeMapperOutput,
   type OpencodeStepUsage
-} from '../opencode/v2-event-mapper'
-import { reconcileAfterReconnect } from '../opencode/v2-reconnect'
+} from '../opencode/event-mapper'
+import { reconcileAfterReconnect } from '../opencode/reconnect'
 import {
   asHostPrecheckRules,
   buildSessionRuleset,
+  CLAUDEUI_MCP_SERVER,
   opencodeOwnDirAllows,
   wireOrder,
   type V2Rule
 } from '../opencode/permission-v2'
 import type { OpencodePermissionRule } from '../opencode/permission-compiler'
-import { CLAUDEUI_MCP_SERVER } from '../opencode/permission-ruleset'
 import { ChildRulesetKeeper } from '../opencode/child-rulesets'
 import {
   locationWorktree,
@@ -3593,7 +3593,6 @@ export class CrossEngineDispatcher {
         return
       case 'session-allow':
       case 'allow-rule':
-      case 'parent-allow':
         // Unreachable for a target (no allows, no session allows); answered as the verdict says.
         reply({ decision: 'once' })
         return

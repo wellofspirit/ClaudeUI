@@ -5,7 +5,7 @@
  *   1. Built-in table (this file) — exact equivalent cost for Anthropic/OpenAI/Google models.
  *      Authoritative; supplemental entries never override these.
  *   2. Supplemental table — registered at runtime by main via registerSupplementalPricing()
- *      (opencode /config/providers prices, persisted to ~/.claude/ui/opencode-prices.json).
+ *      (the models.dev catalog, `opencode-pricing.ts`, persisted to ~/.claude/ui/opencode-prices.json).
  *   3. Engine-reported cost (fallback/real-spend) — used by the recorder as engine_cost_usd.
  *
  * shared/ — no DB imports, no electron, no node-only APIs. Pure computation.

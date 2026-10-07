@@ -7,8 +7,9 @@
  * ones provenance names.
  */
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   build,
@@ -16,6 +17,7 @@ import {
   driftReport,
   locateSource,
   PIN,
+  sourceCandidates,
   pinnedReader,
   renderConfigSchema,
   renderProtocol,
@@ -85,6 +87,51 @@ describe('committed output', () => {
     expect(generated).toBe(read('openapi.ts'))
     expect(text).toBe(read('provenance.json'))
     expect(JSON.parse(schema)).toEqual(configSchema)
+  })
+})
+
+describe('locating the upstream checkout', () => {
+  it('tries the env override, then vendor/opencode-src before the pre-S10 vendor/opencode-v2-src', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'oc-src-')) // not a git checkout: no main-checkout candidates
+    try {
+      expect(sourceCandidates(repo, { OPENCODE_SRC: '/x/oc', OPENCODE_V2_SRC: '/x/oc2' })).toEqual([
+        resolve('/x/oc'),
+        resolve('/x/oc2'),
+        join(repo, 'vendor', 'opencode-src'),
+        join(repo, 'vendor', 'opencode-v2-src')
+      ])
+      expect(sourceCandidates(repo, {})).toEqual([
+        join(repo, 'vendor', 'opencode-src'),
+        join(repo, 'vendor', 'opencode-v2-src')
+      ])
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  const candidates = ['/r/vendor/opencode-src', '/r/vendor/opencode-v2-src']
+  const pick = (checkouts: string[], pinned: string[]) =>
+    locateSource({
+      candidates,
+      isCheckout: (dir: string) => checkouts.includes(dir),
+      holdsPin: (dir: string) => pinned.includes(dir)
+    })
+
+  it('prefers vendor/opencode-src when it holds the pin', () => {
+    expect(pick(candidates, candidates)).toBe(candidates[0])
+  })
+
+  it('falls back to vendor/opencode-v2-src when opencode-src lacks the pin or is missing', () => {
+    expect(pick(candidates, [candidates[1]])).toBe(candidates[1])
+    expect(pick([candidates[1]], [candidates[1]])).toBe(candidates[1])
+  })
+
+  it('with no candidate holding the pin, the first checkout (pinnedReader then says why)', () => {
+    expect(pick(candidates, [])).toBe(candidates[0])
+  })
+
+  it('throws with what it tried when there is no checkout at all', () => {
+    expect(() => pick([], [])).toThrow(/No opencode source checkout.*opencode-v2-src/)
   })
 })
 

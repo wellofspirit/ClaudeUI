@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # ClaudeUI
 
-A desktop client for coding agents, built with Electron + React 19 + TypeScript. Runs Claude Code (rebundled `bun-claude` binary, in-house stream-json harness — no agent SDK), opencode (`opencode serve` over HTTP+SSE), and pi (`pi --mode rpc` over stdio JSONL) side by side behind an engine-neutral session layer. Package manager: **bun**.
+A desktop client for coding agents, built with Electron + React 19 + TypeScript. Runs Claude Code (rebundled `bun-claude` binary, in-house stream-json harness — no agent SDK), opencode 2.x (`opencode serve --stdio`, HTTP + one SSE feed; 1.x unsupported, ADR-097), and pi (`pi --mode rpc` over stdio JSONL) side by side behind an engine-neutral session layer. Package manager: **bun**.
 
 ## Documentation
 
 Full documentation index: [docs/README.md](docs/README.md)
 
-Architecture, services, persistence, multi-engine design → `docs/architecture/` (README.md is the index; sync/replication/queue/headless in `sync-core.md` — phases 0-4 as built, phase 5 + follow-ons as designed; remote transport + auth as-built in `remote.md`; security model as-built — passkeys, policy modes, capabilities, audit — in `security.md`). cli.js wire protocol + build pipeline + patches → `docs/protocol-cc/` (authoritative — consult before theorizing about cli.js behavior). pi wire protocol → `docs/protocol-pi/` (+ version-exact docs in `vendor/pi-src/packages/coding-agent/docs/` at the pinned tag; ADR-035). Design decisions → `docs/adr/`. Discover these while working; read the one that matches the task.
+Architecture, services, persistence, multi-engine design → `docs/architecture/` (README.md is the index; sync/replication/queue/headless in `sync-core.md` — phases 0-4 as built, phase 5 + follow-ons as designed; remote transport + auth as-built in `remote.md`; security model as-built — passkeys, policy modes, capabilities, audit — in `security.md`). cli.js wire protocol + build pipeline + patches → `docs/protocol-cc/` (authoritative — consult before theorizing about cli.js behavior). opencode 2.x wire protocol, generated types and contract suite → `docs/protocol-opencode/` (ADR-097). pi wire protocol → `docs/protocol-pi/` (+ version-exact docs in `vendor/pi-src/packages/coding-agent/docs/` at the pinned tag; ADR-035). Design decisions → `docs/adr/`. Discover these while working; read the one that matches the task.
 
 **Engine source trees live under `vendor/`:** upstream checkouts in `vendor/<engine>-src/` (`vendor/codex-src`, `vendor/opencode-src`, `vendor/pi-src`), checked out at the tag matching that engine's pin (`src/shared/harness-manifests/<engine>.json#tested`). The engines themselves are not vendored: only Claude Code is (`vendor/claude-cli`); opencode, pi and Codex install into ClaudeUI's managed store `~/.claude/ui/harnesses` (ADR-082 §8). No engine is forked any more: opencode is the upstream npm release, digest-checked by the harness installer (ADR-081, ADR-082 §4). Claude Code has no public source — use `vendor/claude-cli/cli.js` + `docs/protocol-cc/`. The source trees are gitignored (`/vendor/*-src/`) and excluded from ESLint and electron-builder. Never clone source into `.cache/` (build caches only), `/tmp` or the scratchpad. Read the source before black-box probing an engine's behavior, cite paths as `vendor/<engine>-src/...`, and bump the checkout together with the pin.
 
@@ -42,6 +42,7 @@ Trivial one-line/mechanical edits and conversational answers are exempt.
 - `bun run test` — default local run: unit + component + e2e (~100 s on a 16-core Windows box)
 - `bun run test:ci` — adds the slow git project (what CI runs)
 - `bun run test:git:changed` — after touching git-service/worktree code
+- `OPENCODE_V2_INTEGRATION=1 bun run test:integration src/integration/opencode` — the opencode 2.x contract suite (real binary from the managed store, isolated homes, no network); run on every opencode pin bump with `bun run check-opencode-protocol`
 - `bun run test:integration` — gated, real engine binaries (Claude Code from `vendor/`, the others from the managed store; a suite skips when its engine is not installed)
 
 Layers, infra, and conventions: `docs/testing-strategy.md`. Components carry two-tier `data-testid` attributes (ADR-027) — assert structurally first, screenshot last.

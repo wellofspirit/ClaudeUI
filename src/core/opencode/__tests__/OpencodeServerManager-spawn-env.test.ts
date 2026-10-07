@@ -163,11 +163,11 @@ describe('opencode serve --stdio spawn (default spawn path)', () => {
       waitReadyFn: async () => ({ state: 'ready', signal: 'registry', elapsedMs: 0 }),
       waitGuardFn: async () => ({ state: 'active', elapsedMs: 0 })
     })
-    await manager.acquire('/p')
+    const conn = await manager.acquire('/p')
     const child = spawnMock.mock.results[0].value as unknown as { stdin: PassThrough }
     let ended = false
     child.stdin.on('finish', () => (ended = true))
-    manager.release('/p')
+    manager.releaseIfCurrent('/p', conn)
     await new Promise((r) => setTimeout(r, 0))
     expect(ended).toBe(true)
     manager.dispose()

@@ -251,7 +251,7 @@ interface CapabilityToggle {
 
 /**
  * The boolean capability 2.x still has, and the value it gets when absent
- * (`Model.Capabilities.default()`, `vendor/opencode-v2-src/packages/schema/
+ * (`Model.Capabilities.default()`, `vendor/opencode-src/packages/schema/
  * src/model.ts`). Exported for a guard test.
  */
 export const CAPABILITY_TOGGLES: CapabilityToggle[] = [

@@ -141,217 +141,6 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-// The SSE parser lives in the 1.x client (replaced in S3); its tests stay here.
-
-// SSE block parser tests (imported from client)
-describe('SSE block parsing', () => {
-  it('parses a well-formed SSE data line', async () => {
-    const { parseSSEStream } = await import('../OpencodeV1Client')
-    const event = { id: 'evt_1', type: 'server.connected', properties: {} }
-    const encoded = new TextEncoder().encode('data: ' + JSON.stringify(event) + '\n\n')
-
-    const stream = new ReadableStream({
-      start(c) {
-        c.enqueue(encoded)
-        c.close()
-      }
-    })
-
-    const events: unknown[] = []
-    for await (const e of parseSSEStream(stream)) {
-      events.push(e)
-    }
-    expect(events).toHaveLength(1)
-    expect(events[0]).toEqual(event)
-  })
-
-  it('handles chunked delivery across multiple reads', async () => {
-    const { parseSSEStream } = await import('../OpencodeV1Client')
-    const event = { id: 'evt_2', type: 'message.part.updated', properties: { text: 'hello' } }
-    const full = 'data: ' + JSON.stringify(event) + '\n\n'
-    // Split into 2 chunks
-    const mid = Math.floor(full.length / 2)
-    const chunks = [full.slice(0, mid), full.slice(mid)]
-    const enc = new TextEncoder()
-
-    let i = 0
-    const stream = new ReadableStream({
-      pull(c) {
-        if (i < chunks.length) {
-          c.enqueue(enc.encode(chunks[i++]))
-        } else c.close()
-      }
-    })
-
-    const events: unknown[] = []
-    for await (const e of parseSSEStream(stream)) {
-      events.push(e)
-    }
-    expect(events).toHaveLength(1)
-    expect(events[0]).toEqual(event)
-  })
-
-  it('handles multiple events in one chunk', async () => {
-    const { parseSSEStream } = await import('../OpencodeV1Client')
-    const e1 = { id: 'evt_1', type: 'server.connected', properties: {} }
-    const e2 = { id: 'evt_2', type: 'session.created', properties: {} }
-    const raw = 'data: ' + JSON.stringify(e1) + '\n\ndata: ' + JSON.stringify(e2) + '\n\n'
-    const enc = new TextEncoder()
-
-    const stream = new ReadableStream({
-      start(c) {
-        c.enqueue(enc.encode(raw))
-        c.close()
-      }
-    })
-
-    const events: unknown[] = []
-    for await (const e of parseSSEStream(stream)) {
-      events.push(e)
-    }
-    expect(events).toHaveLength(2)
-    expect(events[0]).toEqual(e1)
-    expect(events[1]).toEqual(e2)
-  })
-
-  it('skips non-data SSE lines (id:, event:, retry:)', async () => {
-    const { parseSSEStream } = await import('../OpencodeV1Client')
-    const event = { id: 'evt_1', type: 'server.connected', properties: {} }
-    const raw =
-      'id: evt_1\n' +
-      'event: message\n' +
-      'retry: 3000\n' +
-      'data: ' +
-      JSON.stringify(event) +
-      '\n\n'
-    const enc = new TextEncoder()
-
-    const stream = new ReadableStream({
-      start(c) {
-        c.enqueue(enc.encode(raw))
-        c.close()
-      }
-    })
-
-    const events: unknown[] = []
-    for await (const e of parseSSEStream(stream)) {
-      events.push(e)
-    }
-    expect(events).toHaveLength(1)
-    expect(events[0]).toEqual(event)
-  })
-
-  it('skips malformed JSON without throwing', async () => {
-    const { parseSSEStream } = await import('../OpencodeV1Client')
-    const raw = 'data: {bad json}\n\ndata: {"id":"2","type":"ok","properties":{}}\n\n'
-    const enc = new TextEncoder()
-
-    const stream = new ReadableStream({
-      start(c) {
-        c.enqueue(enc.encode(raw))
-        c.close()
-      }
-    })
-
-    const events: unknown[] = []
-    for await (const e of parseSSEStream(stream)) {
-      events.push(e)
-    }
-    expect(events).toHaveLength(1)
-    expect((events[0] as { type: string }).type).toBe('ok')
-  })
-
-  it('respects AbortSignal', async () => {
-    const { parseSSEStream } = await import('../OpencodeV1Client')
-    const controller = new AbortController()
-
-    let pullCount = 0
-    const stream = new ReadableStream({
-      pull(c) {
-        pullCount++
-        if (pullCount === 1) {
-          controller.abort()
-          // Don't enqueue anything — stream is cancelled
-          c.close()
-        } else {
-          c.close()
-        }
-      }
-    })
-
-    const events: unknown[] = []
-    for await (const e of parseSSEStream(stream, controller.signal)) {
-      events.push(e)
-    }
-    expect(events).toHaveLength(0)
-  })
-
-  it('yields nothing when the signal is already aborted before consumption', async () => {
-    const { parseSSEStream } = await import('../OpencodeV1Client')
-    const controller = new AbortController()
-    controller.abort()
-
-    // Even a stream with a ready event must produce nothing once pre-aborted.
-    const stream = new ReadableStream({
-      start(c) {
-        c.enqueue(
-          new TextEncoder().encode(
-            'data: {"id":"e1","type":"server.connected","properties":{}}\n\n'
-          )
-        )
-        c.close()
-      }
-    })
-
-    const events: unknown[] = []
-    for await (const e of parseSSEStream(stream, controller.signal)) {
-      events.push(e)
-    }
-    expect(events).toHaveLength(0)
-  })
-
-  it('aborts a mid-flight idle stream via reader.cancel (no new chunk needed)', async () => {
-    // The crux of NOTE 3: a silent /event stream that never enqueues another
-    // chunk and never closes. Pre-cancel wiring, parseSSEStream would hang on
-    // reader.read() forever; wiring the signal to reader.cancel() unblocks it.
-    const { parseSSEStream } = await import('../OpencodeV1Client')
-    const controller = new AbortController()
-
-    let cancelled = false
-    const stream = new ReadableStream({
-      start(c) {
-        // Emit one event, then go idle (no further enqueue, no close()).
-        c.enqueue(
-          new TextEncoder().encode(
-            'data: {"id":"e1","type":"message.part.updated","properties":{}}\n\n'
-          )
-        )
-      },
-      cancel() {
-        cancelled = true
-      }
-    })
-
-    const events: unknown[] = []
-    // Abort shortly after consumption starts; the generator must terminate.
-    setTimeout(() => controller.abort(), 20)
-
-    await Promise.race([
-      (async () => {
-        for await (const e of parseSSEStream(stream, controller.signal)) {
-          events.push(e)
-        }
-      })(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('parseSSEStream did not abort an idle stream')), 1000)
-      )
-    ])
-
-    expect(events).toHaveLength(1) // got the one event before going idle
-    expect(cancelled).toBe(true) // reader.cancel() ran, unblocking the read
-  })
-})
-
 // ── One server for every directory, keyed by injected config (ADR-097 §2) ──────
 
 describe('OpencodeServerManager (2.x) — keying', () => {
@@ -412,11 +201,11 @@ describe('OpencodeServerManager (2.x) — keying', () => {
 describe('OpencodeServerManager (2.x) — ref-counting', () => {
   it('acquire×2 spawns once; release×2 ends once', async () => {
     const { manager, calls, hosts } = makeRig()
-    await manager.acquire('/p')
-    await manager.acquire('/p')
-    manager.release('/p')
+    const one = await manager.acquire('/p')
+    const two = await manager.acquire('/p')
+    manager.releaseIfCurrent('/p', one)
     expect(calls[0].child.killed).toBe(false)
-    manager.release('/p')
+    manager.releaseIfCurrent('/p', two)
     expect(calls[0].child.killed).toBe(true)
     expect(hosts[0].closed).toBe(true)
     expect(manager.activeCount).toBe(0)
@@ -424,11 +213,11 @@ describe('OpencodeServerManager (2.x) — ref-counting', () => {
 
   it('leases across directories keep one server alive until the last', async () => {
     const { manager, calls } = makeRig()
-    await manager.acquire('/a')
-    await manager.acquire('/b')
-    manager.release('/a')
+    const a = await manager.acquire('/a')
+    const b = await manager.acquire('/b')
+    manager.releaseIfCurrent('/a', a)
     expect(calls[0].child.killed).toBe(false)
-    manager.release('/b')
+    manager.releaseIfCurrent('/b', b)
     expect(calls[0].child.killed).toBe(true)
   })
 
@@ -437,23 +226,25 @@ describe('OpencodeServerManager (2.x) — ref-counting', () => {
     const conns = await Promise.all(['/a', '/b', '/a', '/c', '/b'].map((d) => manager.acquire(d)))
     expect(calls).toHaveLength(1)
     expect(new Set(conns.map((c) => c.baseUrl)).size).toBe(1)
-    for (const d of ['/a', '/b', '/a', '/c']) manager.release(d)
+    for (const [i, d] of ['/a', '/b', '/a', '/c'].entries()) manager.releaseIfCurrent(d, conns[i])
     expect(calls[0].child.killed).toBe(false)
-    manager.release('/b')
+    manager.releaseIfCurrent('/b', conns[4])
     expect(calls[0].child.killed).toBe(true)
   })
 
-  it('release on an unknown cwd is a no-op', () => {
-    const { manager } = makeRig()
-    expect(() => manager.release('/nope')).not.toThrow()
+  it('releaseIfCurrent for a directory the lease does not hold is a no-op', async () => {
+    const { manager, calls } = makeRig()
+    const conn = await manager.acquire('/p')
+    manager.releaseIfCurrent('/nope', conn)
+    expect(calls[0].child.killed).toBe(false)
   })
 
-  it('release(cwd) with two servers holding the cwd releases the NEWEST; releaseIfCurrent is exact', async () => {
+  it('releaseIfCurrent with two servers holding the cwd releases exactly the lease given', async () => {
     const { manager, calls, configs } = makeRig()
     const old = await manager.acquire('/p')
     configs.set('/p', { pluginDir: null })
-    await manager.acquire('/p')
-    manager.release('/p') // the pair around one call: the newest
+    const fresh = await manager.acquire('/p')
+    manager.releaseIfCurrent('/p', fresh)
     expect(calls[1].child.killed).toBe(true)
     expect(calls[0].child.killed).toBe(false)
     manager.releaseIfCurrent('/p', old)
@@ -463,7 +254,7 @@ describe('OpencodeServerManager (2.x) — ref-counting', () => {
   it('re-acquire after full release starts a fresh server', async () => {
     const { manager, calls } = makeRig()
     const first = await manager.acquire('/p')
-    manager.release('/p')
+    manager.releaseIfCurrent('/p', first)
     const second = await manager.acquire('/p')
     expect(calls).toHaveLength(2)
     expect(second.password).not.toBe(first.password)
@@ -600,7 +391,7 @@ describe('OpencodeServerManager (2.x) — hosted-tools readiness', () => {
     const conn = await manager.acquire('/a')
     await expect(manager.refreshReadiness(conn)).resolves.toEqual(READY)
     expect(waits).toHaveLength(2)
-    manager.release('/a')
+    manager.releaseIfCurrent('/a', conn)
     await expect(manager.refreshReadiness(conn)).resolves.toEqual({ state: 'skipped' })
   })
 })
@@ -704,10 +495,10 @@ describe('OpencodeServerManager (2.x) — exit fan-out', () => {
 
   it('does NOT fire on the deliberate last release or on dispose', async () => {
     const { manager } = makeRig()
-    await manager.acquire('/p')
+    const conn = await manager.acquire('/p')
     const cb = vi.fn()
     manager.subscribeExit('/p', cb)
-    manager.release('/p')
+    manager.releaseIfCurrent('/p', conn)
     await manager.acquire('/q')
     const cb2 = vi.fn()
     manager.subscribeExit('/q', cb2)
@@ -862,112 +653,9 @@ describe('OpencodeServerManager (2.x) — first-contact hook (S7 follow-up)', ()
       vi.useRealTimers()
     }
   })
-
-  it('a detached server that cannot be cleaned is ended, never handed out', async () => {
-    vi.useFakeTimers()
-    try {
-      const { manager, calls } = makeRig()
-      manager.setServerStartedHook(async () => {
-        throw new Error('no')
-      })
-      const detached = manager.acquireDetached('/d').catch((err: unknown) => err)
-      await vi.advanceTimersByTimeAsync(10_000)
-      expect(await detached).toBeInstanceOf(OpencodeCredentialCleanupError)
-      expect(calls[0].child.killed).toBe(true)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
 })
 
-describe('OpencodeServerManager (2.x) — idle linger after a read-only lease (S7)', () => {
-  it('a lingering last release keeps the server for the next read; it ends once the window passes', async () => {
-    vi.useFakeTimers()
-    try {
-      const { manager, calls } = makeRig()
-      const read = await manager.acquire('/a', { waitForHostedTools: false, lingerMs: 60_000 })
-      manager.releaseIfCurrent('/a', read)
-      expect(calls[0].child.killed).toBe(false)
-      const again = await manager.acquire('/a', { waitForHostedTools: false, lingerMs: 60_000 })
-      expect(again.baseUrl).toBe(read.baseUrl) // reused, no second spawn
-      expect(calls).toHaveLength(1)
-      manager.releaseIfCurrent('/a', again)
-      await vi.advanceTimersByTimeAsync(59_999)
-      expect(calls[0].child.killed).toBe(false)
-      await vi.advanceTimersByTimeAsync(1)
-      expect(calls[0].child.killed).toBe(true)
-      expect(manager.activeCount).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a lease without linger still ends the server at its last release; dispose ends a lingering one', async () => {
-    const { manager, calls } = makeRig()
-    const turn = await manager.acquire('/a')
-    manager.releaseIfCurrent('/a', turn)
-    expect(calls[0].child.killed).toBe(true)
-    const read = await manager.acquire('/a', { waitForHostedTools: false, lingerMs: 60_000 })
-    manager.releaseIfCurrent('/a', read)
-    expect(calls[1].child.killed).toBe(false)
-    manager.dispose()
-    expect(calls[1].child.killed).toBe(true)
-  })
-})
-
-describe('OpencodeServerManager (2.x) — acquireIfRunning (S9: background reads never spawn)', () => {
-  it('null with no server for the config; a lease on the running one otherwise (no second spawn)', async () => {
-    const { manager, calls } = makeRig()
-    expect(await manager.acquireIfRunning('/a', { waitForHostedTools: false })).toBeNull()
-    expect(calls).toHaveLength(0)
-    const held = await manager.acquire('/a')
-    const read = await manager.acquireIfRunning('/b', { waitForHostedTools: false })
-    expect(read?.baseUrl).toBe(held.baseUrl)
-    expect(read?.directory).toBe('/b')
-    expect(calls).toHaveLength(1)
-    manager.releaseIfCurrent('/b', read!)
-    manager.releaseIfCurrent('/a', held)
-    expect(calls[0].child.killed).toBe(true)
-    expect(await manager.acquireIfRunning('/a')).toBeNull()
-  })
-
-  it('anyConfig: a directory whose config differs rides the running server (global routes), never a second one', async () => {
-    const { manager, calls, configs } = makeRig()
-    configs.set('/proj-with-mcp', { pluginDir: null })
-    const held = await manager.acquire('/a')
-    expect(
-      await manager.acquireIfRunning('/proj-with-mcp', { waitForHostedTools: false })
-    ).toBeNull()
-    const read = await manager.acquireIfRunning('/proj-with-mcp', {
-      waitForHostedTools: false,
-      anyConfig: true
-    })
-    expect(read?.baseUrl).toBe(held.baseUrl)
-    expect(calls).toHaveLength(1)
-    manager.releaseIfCurrent('/proj-with-mcp', read!)
-    manager.releaseIfCurrent('/a', held)
-    expect(calls[0].child.killed).toBe(true)
-  })
-})
-
-describe('OpencodeServerManager (2.x) — recycleAll / dispose / detached / start turns', () => {
-  it('recycleAll ends every server, fans out, and the next acquire starts fresh', async () => {
-    const { manager, calls, configs } = makeRig()
-    configs.set('/b', { pluginDir: null })
-    const a = await manager.acquire('/a')
-    await manager.acquire('/b')
-    const cb = vi.fn()
-    manager.subscribeExit('/a', cb, a)
-    manager.recycleAll()
-    expect(cb).toHaveBeenCalledTimes(1)
-    expect(calls.every((c) => c.child.killed)).toBe(true)
-    expect(manager.activeCount).toBe(0)
-    const again = await manager.acquire('/a')
-    expect(again.baseUrl).not.toBe(a.baseUrl)
-    manager.releaseIfCurrent('/a', a) // stale: no-op
-    expect(calls[2].child.killed).toBe(false)
-  })
-
+describe('OpencodeServerManager (2.x) — dispose / start turns', () => {
   it('dispose ends all servers and closes hosts; an acquire after it rejects at once', async () => {
     const { manager, calls, hosts } = makeRig()
     await manager.acquire('/a')
@@ -987,28 +675,7 @@ describe('OpencodeServerManager (2.x) — recycleAll / dispose / detached / star
     expect(calls[0].child.killed).toBe(true)
   })
 
-  it('acquireDetached: its own server, no readiness wait, release ends only it', async () => {
-    const { manager, calls, waits } = makeRig()
-    const pooled = await manager.acquire('/a')
-    const lease = await manager.acquireDetached('/a')
-    expect(calls).toHaveLength(2)
-    expect(lease.baseUrl).not.toBe(pooled.baseUrl)
-    expect(lease.hostedTools).toEqual({ state: 'skipped' })
-    expect(waits).toHaveLength(1)
-    lease.release()
-    lease.release()
-    expect(calls[1].child.killed).toBe(true)
-    expect(calls[0].child.killed).toBe(false)
-  })
-
-  it('dispose reaps a detached server nobody released', async () => {
-    const { manager, calls } = makeRig()
-    await manager.acquireDetached('/a')
-    manager.dispose()
-    expect(calls[0].child.killed).toBe(true)
-  })
-
-  it('starts take turns (pooled and detached alike); a failed start passes the turn on', async () => {
+  it('starts take turns; a failed start passes the turn on', async () => {
     let active = 0
     let maxActive = 0
     let n = 0
@@ -1025,10 +692,11 @@ describe('OpencodeServerManager (2.x) — recycleAll / dispose / detached / star
     })
     configs.set('/b', { pluginDir: null })
     configs.set('/c', { pluginDir: 'x' })
+    configs.set('/d', { pluginDir: 'y' })
     const results = await Promise.allSettled([
       manager.acquire('/a'),
       manager.acquire('/b'),
-      manager.acquireDetached('/c'),
+      manager.acquire('/d'),
       manager.acquire('/c')
     ])
     expect(maxActive).toBe(1)

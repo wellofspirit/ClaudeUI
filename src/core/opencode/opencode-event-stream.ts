@@ -3,7 +3,7 @@
  * stream: SSE framing, the curated event union, and reconnects the CONSUMER
  * is told about.
  *
- * Wire facts (opencode v2.0.24, `vendor/opencode-v2-src`):
+ * Wire facts (opencode v2.0.24, `vendor/opencode-src`):
  * - `packages/server/src/handlers/event.ts`: the first frame of every
  *   subscription is `server.connected`, sent after the server-side subscriber
  *   is registered — so once it arrives, nothing published later can be missed

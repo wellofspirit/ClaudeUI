@@ -2117,7 +2117,7 @@ describe('session:auth-required — one event, on the wire (ADR-068 §4, slice 3
     // The two component-side copies of this walk disagreed on exactly this —
     // `AuthRequiredRow` took the FIRST text block, `AuthErrorBlock` joined all of
     // them — so the retry the user got depended on which surface they clicked. A
-    // replayed history message (opencode's `convertStoredMessage`) is where a
+    // replayed history message (an engine's cold-history converter) is where a
     // multi-block user turn actually comes from.
     const owed = fold([
       created(),

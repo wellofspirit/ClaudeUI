@@ -146,15 +146,6 @@ const BUILTIN_AGENTS: Record<string, { mode: OpencodeAgentMode; hidden?: boolean
   compaction: { mode: 'primary', hidden: true }
 }
 
-/** The built-in catalog entry for `name` (mode, hidden), or `undefined` for a non-built-in name. */
-export function builtinAgent(
-  name: string
-): { mode: OpencodeAgentMode; hidden?: boolean } | undefined {
-  return Object.prototype.hasOwnProperty.call(BUILTIN_AGENTS, name)
-    ? BUILTIN_AGENTS[name]
-    : undefined
-}
-
 // ─── Path helpers ─────────────────────────────────────────────────────────────
 
 /**
@@ -527,10 +518,7 @@ export function listAgents(cwd?: string): OpencodeAgentSummary[] {
   return summaries
 }
 
-/**
- * The RAW front matter and body of an agent's file in one scope, or null.
- * For the 1.x permission scan (`opencode-config-permissions.ts`, S10 removes it).
- */
+/** The RAW front matter and body of an agent's file in one scope, or null. */
 export function readAgentFrontmatter(
   name: string,
   scope: OpencodeAgentScope,

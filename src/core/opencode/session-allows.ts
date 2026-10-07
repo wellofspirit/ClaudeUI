@@ -4,16 +4,17 @@ import { wildcardMatch } from './wildcard'
  * ADR-085 S2 — the host-side "allow for this session" memory of ONE ClaudeUI
  * opencode chat.
  *
- * Why host-side. opencode's own memory is the `approved` list an `always`
- * reply fills (vendor/opencode-src/packages/opencode/src/permission/index.ts
- * `reply()`: each `info.always` pattern is pushed as an allow rule). That list
- * lives in the per-directory Instance state, not in the session, and `ask()`
- * evaluates EVERY session's request against `ruleset, approved` with
- * last-match-wins (`evaluate` → `findLast`) — so an approved pattern outranks
- * the compiled deny/ask rules, for every chat, child session and dispatch
- * target in that folder, until the server exits, with no rule, judge or card
- * in the way (H1 / review B1). One innocent `git push origin feat` approved
- * for the session let every later `git push --force …` run server-side.
+ * Why host-side. opencode's own memory is the saved-allow table an `always`
+ * reply fills, and it is not per session: 1.x kept a per-directory `approved`
+ * list, 2.x stores the rows per PROJECT and evaluates every request against
+ * the session's rules THEN them, last match wins
+ * (vendor/opencode-src/packages/core/src/permission.ts `savedRules`; only a
+ * deny is checked before them). So an approved pattern outranks the compiled
+ * ask rules for every chat, child session and dispatch target of that project
+ * — in 1.x the deny rules too, until the server exited — with no rule, judge
+ * or card in the way (H1 / review B1). One innocent `git push origin feat`
+ * approved for the session let every later `git push --force …` run
+ * server-side.
  * ClaudeUI therefore never replies `always` any more; it replies `once` and
  * remembers the approval here.
  *

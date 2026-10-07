@@ -9,10 +9,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { mockAcquire, mockReleaseIfCurrent, mockRecycleAll, client } = vi.hoisted(() => ({
+const { mockAcquire, mockReleaseIfCurrent, client } = vi.hoisted(() => ({
   mockAcquire: vi.fn(),
   mockReleaseIfCurrent: vi.fn(),
-  mockRecycleAll: vi.fn(),
   client: {
     integrations: vi.fn(),
     providers: vi.fn(),
@@ -24,7 +23,6 @@ vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
     acquire: mockAcquire,
     releaseIfCurrent: mockReleaseIfCurrent,
-    recycleAll: mockRecycleAll,
     setServerStartedHook: vi.fn(),
     isBinaryAvailable: () => true
   }
@@ -130,8 +128,6 @@ afterEach(() => {
   // Every lease handed out was released.
   expect(mockReleaseIfCurrent.mock.calls.length).toBe(mockAcquire.mock.calls.length)
   expect(table.leases.opened).toBe(table.leases.released)
-  // 2.x applies credentials live: nothing is ever recycled.
-  expect(mockRecycleAll).not.toHaveBeenCalled()
 })
 
 describe('probe()', () => {

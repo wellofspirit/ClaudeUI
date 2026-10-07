@@ -2,7 +2,7 @@
  * Spawning and ending one `opencode serve --stdio` (opencode 2.x, ADR-097 §2).
  *
  * - Listen line: `--stdio` prints ONE JSON line `{"url": "http://127.0.0.1:<port>"}`
- *   on stdout (vendor/opencode-v2-src/packages/cli/src/server-process.ts). It
+ *   on stdout (vendor/opencode-src/packages/cli/src/server-process.ts). It
  *   replaces 1.x's `opencode server listening on …` text.
  * - Auth: Basic `opencode:<password>`, the password passed as `OPENCODE_PASSWORD`
  *   (`cli/src/env.ts`; `OPENCODE_SERVER_PASSWORD` is the legacy name). In

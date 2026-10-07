@@ -44,7 +44,7 @@ export interface ProviderActionInput {
   disabled?: boolean
   /** True for credential-free bundled gateways (FREE_OPENCODE_VENDOR_IDS). */
   isFree: boolean
-  /** An entry for this id exists in opencode's auth.json (any type). */
+  /** opencode holds an active credential row for this id (any type). */
   hasCredential: boolean
   /** Declared in the `provider` object of the ONE global file ClaudeUI writes. */
   declaredInOurFile: boolean

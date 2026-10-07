@@ -3,7 +3,7 @@
 // lists this directory (2.x ignores a plugin path that is a file, with only a
 // warning). It is never part of a ClaudeUI bundle, so it must stay import-free:
 // opencode accepts a structural default export `{ id, setup(ctx) }`
-// (vendor/opencode-v2-src/packages/core/src/plugin/module.ts).
+// (vendor/opencode-src/packages/core/src/plugin/module.ts).
 //
 // 1. Caller identity. `execute.before` may replace `event.input`; the tool runs
 //    with the replacement while events and history keep the model's input

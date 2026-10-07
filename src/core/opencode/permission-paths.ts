@@ -2,7 +2,7 @@
  * Claude path specifiers (`Read(…)`, `Edit(…)`) → the resource globs opencode
  * 2.x matches file asks against (ADR-097 §3, S6). Pure.
  *
- * ## How 2.x names a file (`vendor/opencode-v2-src/packages/core/src/file-access.ts` `resolve`)
+ * ## How 2.x names a file (`vendor/opencode-src/packages/core/src/file-access.ts` `resolve`)
  *
  * A file inside the session directory OR the session's git worktree is asked
  * as `path.relative(sessionDir, file)` with forward slashes — so a file in the

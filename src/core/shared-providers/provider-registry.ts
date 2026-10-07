@@ -451,8 +451,8 @@ function opencodeNativeEntry(
     name: entry.name,
     origin: 'opencode-native',
     credential,
-    // A key or sign-in opencode holds of its own (in its auth.json, an env var or
-    // its config): the row says whose it is (ADR-082 §8, S7f).
+    // A key or sign-in opencode holds of its own (in its credential table, an
+    // env var or its config): the row says whose it is (ADR-082 §8, S7f).
     ...(credential === 'api-key' || credential === 'connected' || credential === 'custom'
       ? { ownedBy: 'opencode' as const }
       : {}),
@@ -683,7 +683,7 @@ function opencodeCredential(
   const kind = kinds[entry.id]
   if (kind === 'oauth') return 'connected'
   if (kind === 'api') return 'api-key'
-  // Usable with no entry in opencode's auth.json: the key comes from an env var
+  // Usable with no opencode credential row: the key comes from an env var
   // or a config file ClaudeUI does not own (`source` says which, for wording).
   return entry.authState === 'authenticated' ? 'custom' : 'none'
 }

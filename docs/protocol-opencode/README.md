@@ -3,12 +3,15 @@
 How ClaudeUI talks to opencode 2.x ([ADR-097](../adr/adr-097_opencode-v2-only.md)): the pin, the
 server lifecycle, the routes and events it uses, permissions, credentials, the inbox, the
 `claudeui-xeng` plugin, the config it injects, and the contract suite that gates every pin bump.
-Facts are for the pinned version and cite `vendor/opencode-v2-src/...` at that tag. The spike's
+Facts are for the pinned version and cite `vendor/opencode-src/...` at that tag. The spike's
 evidence and live transcripts are in [`docs/opencode-v2-spike.md`](../opencode-v2-spike.md); the
 as-built decisions per slice are ADR-097's "As built" sections.
 
-The 1.x adapter (`OpencodeV1Client`, `OpencodeV1Session`, `protocol/`, `event-mapper.ts`) is still
-in the tree until slice S10 deletes it; nothing in this document applies to it.
+opencode 1.x is not supported: its adapter was deleted at slice S10a (ADR-097 "As built (S10a)").
+What ClaudeUI still reads of 1.x is DATA 2.x migrated or still accepts: 1.x-shaped config files
+(`src/shared/opencode-config-v1.ts`), 1.x tool names in a migrated session's history
+(`content.ts`, the renderer's tool map) and the copy of ClaudeUI's 1.x ChatGPT sign-in 2.x
+imported from `auth.json` (`credential-store.ts`).
 
 ## Pin
 
@@ -19,10 +22,11 @@ in the tree until slice S10 deletes it; nothing in this document applies to it.
   (`src/shared/harness-manifests/opencode.json`); `scripts/generate-opencode-protocol.mjs` reads it
   and keeps only the reviewed commit (`PIN_COMMIT`), which it proves the tag still names. A unit
   test pins `manifest.tested` = `provenance.json#version` = `events.reviewed.json#version`.
-- Source checkout: `vendor/opencode-v2-src` at the tag (gitignored, like every `vendor/*-src`).
-  The generator reads the pinned commit with `git show`, so the checkout's HEAD does not matter; it
-  also honours `OPENCODE_V2_SRC`, and from an agent worktree falls back to the main checkout's
-  `vendor/opencode-v2-src`. (`vendor/opencode-src` is the 1.x checkout; S10 retires it.)
+- Source checkout: `vendor/opencode-src` at the tag (gitignored, like every `vendor/*-src`).
+  The generator reads the pinned commit with `git show`, so the checkout's HEAD does not matter.
+  It takes the first checkout holding the pinned tag, in order: `$OPENCODE_SRC` (or
+  `$OPENCODE_V2_SRC`), `vendor/opencode-src`, `vendor/opencode-v2-src` (the checkout's name before
+  S10), then the same two of the main checkout when run from an agent worktree.
 - Floor = tested, ceiling `3.0.0`.
 
 ## Acquisition (ADR-082 §4, ADR-097 §1)
@@ -57,8 +61,8 @@ in the tree until slice S10 deletes it; nothing in this document applies to it.
 | Env           | `OPENCODE_CONFIG_CONTENT` (the injection, §Config; it holds secrets — never logged), `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_SHARE=1`. No `HOME`/`XDG_*` override: the data dir is SHARED with the user's own opencode (owner decision, ADR-097 §6)                                                                                                                          |
 | End           | Close stdin (the `--stdio` lease, as pi, ADR-092); a tree kill (`taskkill /T` on Windows) only if the process outlives 5 s. If ClaudeUI dies the pipe closes and the server ends anyway                                                                                                                                                                                                 |
 | Keying        | ONE server per distinct config injection (`configIdentity`, a digest of bridged MCP + plugin dir + agent permission overlay), not per cwd: the directory travels per request. In practice one long-lived server per app; a cwd with a project-scoped Claude MCP server gets its own. A config change starts a new server for new leases; the old one ends at its last release (drained) |
-| Leases        | `acquire(cwd)` (turn-running: waits for the hosted tools and requires the plugin guard), `acquire(cwd, {waitForHostedTools:false})` (reads), `lingerMs` (a read lease keeps the server idle 60 s after the last release), `acquireIfRunning` (a background read that must never spawn), `acquireDetached` (a server of the caller's own)                                                |
-| Release       | `releaseIfCurrent(cwd, conn)` is exact (a server's URL + password is unique per spawn); `release(cwd)` releases the NEWEST holder and is only right for an acquire/release pair around one call                                                                                                                                                                                         |
+| Leases        | `acquire(cwd)` (turn-running: waits for the hosted tools and requires the plugin guard), `acquire(cwd, {waitForHostedTools:false})` (reads), `lingerMs` (a read lease keeps the server idle 60 s after the last release), `acquireIfRunning` (a background read that must never spawn)                                                                                                  |
+| Release       | `releaseIfCurrent(cwd, conn)` — exact: a server's URL + password is unique per spawn, so a stale lease never releases a replacement. There is no cwd-only release                                                                                                                                                                                                                       |
 | Death         | An unexpected exit fans out to `subscribeExit` listeners (exact per lease)                                                                                                                                                                                                                                                                                                              |
 | First contact | Before a server serves anything that can activate a location, the credential store's proven-copy cleanup runs on it (S7); until it succeeds the server serves credential-route leases only (fail closed, `OpencodeCredentialCleanupError`)                                                                                                                                              |
 | Readiness     | Per (server, directory): `POST /api/rpc/claudeui-xeng/tools` lists the registered `claudeui_*` tools; `acquire` waits (10 s cap, logged, never throws) until `claudeui_dispatch_agent` is there. Fallback: `GET /api/mcp` connected + 400 ms                                                                                                                                            |
@@ -110,7 +114,7 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
     `session.tool.input.delta`, `session.tool.progress`, `session.compaction.delta`,
     `permission.asked/replied`, `form.created/replied/cancelled`, `credential.updated/switched`,
     `provider.updated`, `model.updated`.
-- Facts the S4 mapper (`v2-event-mapper.ts`) is built on: one assistant message per STEP
+- Facts the S4 mapper (`event-mapper.ts`) is built on: one assistant message per STEP
   (`assistantMessageID`); `text`/`reasoning` ordinals count per kind within a step;
   `tool.called` (with the real input) comes BEFORE the tool runs and before its ask; a subagent
   call links its child by `tool.progress.metadata.sessionID` (child events before the link are
@@ -278,7 +282,7 @@ deny}` and `{question,*,deny}`), agent (`plan` in plan mode) and model in the bo
 
 ## Generated types
 
-`src/core/opencode/protocol-v2/` (the 1.x adapter keeps `protocol/` until S10):
+`src/core/opencode/protocol-v2/` (the directory keeps its `-v2` name; the 1.x `protocol/` is gone):
 
 | File                   | What                                                                                                                                                      |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -307,17 +311,20 @@ the upstream checkout is present.
 
 ## Contract suite (the per-bump gate, ADR-097 §8.1)
 
-`src/integration/opencode-v2/` drives a real `opencode serve --stdio` against a localhost
+`src/integration/opencode/` drives a real `opencode serve --stdio` against a localhost
 fixture model (scripted by markers in the last user message — `harness/fixture-provider.ts`). It is
 gated and skips cleanly without the gate:
 
 ```sh
 bun run ensure-opencode   # the tested version into the managed store, once
-OPENCODE_V2_INTEGRATION=1 bun run test:integration src/integration/opencode-v2
+OPENCODE_V2_INTEGRATION=1 bun run test:integration src/integration/opencode
 ```
 
 The binary defaults to the managed store's copy of the manifest's `tested` (honouring
-`CLAUDEUI_HARNESS_STORE`); `OPENCODE_V2_BIN=/abs/path/to/opencode` overrides it.
+`CLAUDEUI_HARNESS_STORE`); `OPENCODE_V2_BIN=/abs/path/to/opencode` overrides it. The `OPENCODE_V2_*`
+variable names (gate, binary, keep, version mismatch) and the `.cache/opencode-v2-it/` directory
+predate the 1.x removal and keep their names; there is no other opencode integration suite (the
+1.x one, `OPENCODE_INTEGRATION_TESTS=1`, was deleted at S10a).
 
 - Every server runs with `HOME`/`XDG_*` under `.cache/opencode-v2-it/`, a refusing proxy in every
   proxy variable, models.dev fetch and autoupdate off, and on darwin under a loopback-only
@@ -340,7 +347,7 @@ two directories in one global listing, the directory filter, delete, history).
 
 ## Bump procedure
 
-1. Fetch upstream tags into `vendor/opencode-v2-src` and check the new tag out there.
+1. Fetch upstream tags into `vendor/opencode-src` and check the new tag out there.
 2. In `src/shared/harness-manifests/opencode.json` set `tested` and `floor`, with each platform
    package's reviewed `integrity` and `binarySha256` (download, verify against npm, hash the binary).
 3. Set `PIN_COMMIT` in `scripts/generate-opencode-protocol.mjs` to the tag's commit (check it
