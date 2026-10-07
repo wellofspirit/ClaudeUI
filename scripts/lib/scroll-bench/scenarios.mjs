@@ -67,6 +67,18 @@ async function measure(ctx, { geometry = false, trace = ctx.trace, target = 'cha
 const geometryNow = (win, target = 'chat') =>
   win.evaluate((t) => window.__scrollBench.geometry(t), target)
 
+/**
+ * Leave the bottom the way a USER does — one upward wheel notch over the chat — before any
+ * scripted positioning. A post-fix build keeps following until user intent and re-pins the bottom
+ * on the next content growth, so a scripted jump made while following is undone (S1 would start
+ * at the bottom). In a pre-fix build the notch disarms auto-scroll exactly as the scripted jump
+ * itself did, so both builds start the same scenario from the same state.
+ */
+async function leaveBottom(ctx) {
+  await wheelNotch(ctx.cdp, ctx.win, await scrollerPoint(ctx.win), -100)
+  await sleep(150)
+}
+
 async function scrollToFraction(win, frac) {
   return win.evaluate(
     ({ sel, frac }) => {
@@ -82,6 +94,7 @@ async function scrollToFraction(win, frac) {
 
 export async function s1(ctx) {
   await ctx.fresh()
+  await leaveBottom(ctx)
   await scrollToFraction(ctx.win, 0)
   await sleep(800)
   await settle(ctx.win, { stableMs: 300, timeout: 5000 })
@@ -177,6 +190,7 @@ export async function s2(ctx) {
   const passes = []
   let startTop = null
   for (const pass of ['first-exposure', 'revisit']) {
+    await leaveBottom(ctx)
     if (startTop === null) startTop = await scrollToFraction(ctx.win, 0.5)
     else
       await ctx.win.evaluate(
@@ -228,6 +242,7 @@ export async function s3(ctx) {
   await ctx.fresh()
   const jumps = []
   for (const frac of [0.15, 0.4, 0.65, 0.9]) {
+    await leaveBottom(ctx)
     const m = await measure(ctx, { geometry: true }, async () => {
       // Instant jump (a scrollbar-thumb release), then the anchor under the viewport centre is
       // tracked through the settle: its displacement is the visible "content jumped" distance.
