@@ -25,7 +25,11 @@ vi.mock('../../services/ui-config', () => ({
 
 import { createOpencodeHostedToolsServer } from '../opencode-hosted-tools'
 import { resolveCallerIdentity } from '../opencode-hosted-tools'
-import type { CallerSessionHandle, DispatchAgentFn } from '../opencode-hosted-tools'
+import type {
+  CallerRootResolver,
+  CallerSessionHandle,
+  DispatchAgentFn
+} from '../opencode-hosted-tools'
 import { loadEngineConfig } from '../../services/ui-config'
 
 let tmp: string
@@ -186,6 +190,7 @@ function getDispatchTool(
   tmp: string,
   deps: {
     lookupCallerSession?: (id: string) => CallerSessionHandle | undefined
+    resolveCallerRoot?: CallerRootResolver
     dispatch?: DispatchAgentFn
   }
 ): { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> } {
@@ -589,6 +594,62 @@ describe('dispatch_agent caller identity through the handler (ADR-093 §4)', () 
       expect.objectContaining({ fromRoutingId: 'ses_real', toolUseId: undefined })
     )
     expect(onIdentityMismatch).toHaveBeenCalledWith(expect.objectContaining({ mismatch: true }))
+  })
+
+  it("a subagent CHILD calling: the dispatch belongs to the ClaudeUI chat it descends from, carrying the child agent's restriction (S9)", async () => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'c-1' }))
+    const handle = callerHandle()
+    const lookup = vi.fn((id: string) => (id === 'ses_root' ? handle : undefined))
+    const restriction = { agents: ['custom'], deny: ['Edit', 'Write'], ask: [] }
+    const resolveCallerRoot = vi.fn<CallerRootResolver>(async (id) =>
+      id === 'ses_child'
+        ? { root: 'ses_root', restriction }
+        : id === 'ses_unreadable'
+          ? { refused: 'ClaudeUI could not read the permission rules of the calling subagent' }
+          : undefined
+    )
+    const tool = getDispatchTool(tmp, { lookupCallerSession: lookup, resolveCallerRoot, dispatch })
+    const result = (await tool.handler(
+      { engine: 'claude', prompt: 'x' },
+      makeExtra({ 'ai.opencode/sessionID': 'ses_child' })
+    )) as { isError?: boolean }
+    expect(result.isError).toBeUndefined()
+    expect(resolveCallerRoot).toHaveBeenCalledWith('ses_child')
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        fromRoutingId: 'ses_root',
+        cwd: handle.cwd,
+        callerRestriction: restriction
+      })
+    )
+
+    // Rules that cannot be read: refused (fail closed), nothing dispatched.
+    const unreadable = (await tool.handler(
+      { engine: 'claude', prompt: 'x' },
+      makeExtra({ 'ai.opencode/sessionID': 'ses_unreadable' })
+    )) as { isError?: boolean; content: { text: string }[] }
+    expect(unreadable.isError).toBe(true)
+    expect(unreadable.content[0].text).toContain('could not read the permission rules')
+
+    // No ClaudeUI ancestor (a dispatch target's own child, a foreign session): refused.
+    const orphan = (await tool.handler(
+      { engine: 'claude', prompt: 'x' },
+      makeExtra({ 'ai.opencode/sessionID': 'ses_orphan' })
+    )) as { isError?: boolean; content: { text: string }[] }
+    expect(orphan.isError).toBe(true)
+    expect(orphan.content[0].text).toContain('could not find the calling session (ses_orphan)')
+    expect(dispatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('a chat calling for itself carries no restriction', async () => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'c-1' }))
+    const tool = getDispatchTool(tmp, { lookupCallerSession: () => callerHandle(), dispatch })
+    await tool.handler(
+      { engine: 'claude', prompt: 'x' },
+      makeExtra({ 'ai.opencode/sessionID': 'ses_a' })
+    )
+    expect(dispatch.mock.calls[0][1].callerRestriction).toBeUndefined()
   })
 
   it('_meta + matching stamp: session from _meta, call id from the stamp', async () => {

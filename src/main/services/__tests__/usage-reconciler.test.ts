@@ -44,7 +44,8 @@ vi.mock('../../../core/services/block-usage', () => ({
 }))
 
 vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
-  opencodeServerManager: { acquire: mockAcquire, release: mockRelease }
+  // The reconciler only RIDES a running server (never starts one, ADR-093 S9).
+  opencodeServerManager: { acquireIfRunning: mockAcquire, releaseIfCurrent: mockRelease }
 }))
 
 vi.mock('../../../core/opencode/OpencodeClient', () => ({
@@ -54,7 +55,7 @@ vi.mock('../../../core/opencode/OpencodeClient', () => ({
 
 // M-DB1: enumeration now goes through the global DB reader, not GET /session.
 vi.mock('../../../core/services/opencode-session-list', () => ({
-  listOpencodeSessionsGlobal: mockListSessionsGlobal
+  listOpencodeSessionsForReconcile: mockListSessionsGlobal
 }))
 
 vi.mock('../../../core/services/persisted-sessions-dir', () => ({
@@ -336,11 +337,23 @@ describe('reconcileOpencode', () => {
     // only assistant rows are asked for; a read, so no hosted-tools wait
     expect(mockListMessages).toHaveBeenCalledWith('ses_oc_1', { type: 'assistant' })
     expect(mockAcquire).toHaveBeenCalledWith('/tmp/persisted-sessions', {
-      waitForHostedTools: false
+      waitForHostedTools: false,
+      anyConfig: true
     })
-    expect(MockOpencodeClient).toHaveBeenCalledWith(await mockAcquire.mock.results[0].value)
-    // server released
-    expect(mockRelease).toHaveBeenCalledWith('/tmp/persisted-sessions')
+    const conn = await mockAcquire.mock.results[0].value
+    expect(MockOpencodeClient).toHaveBeenCalledWith(conn)
+    // server released, exactly
+    expect(mockRelease).toHaveBeenCalledWith('/tmp/persisted-sessions', conn)
+  })
+
+  it('no server running: skipped — the reconciler never starts one', async () => {
+    mockListSessionsGlobal.mockResolvedValue([
+      { sessionId: 'ses_x', cwd: '/x', title: 't', engineId: 'opencode' }
+    ])
+    mockAcquire.mockResolvedValue(null)
+    await expect(usageReconciler.reconcileOpencode()).resolves.toBeUndefined()
+    expect(MockOpencodeClient).not.toHaveBeenCalled()
+    expect(mockRelease).not.toHaveBeenCalled()
   })
 
   it('attributes each row to the account and billing type the auth provider reports', async () => {

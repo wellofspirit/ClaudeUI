@@ -42,7 +42,6 @@
  * reach the queue bookkeeping, which ignores every non-user item.
  */
 import type { HostWindowHandle } from '../host'
-import { parse as parsePath } from 'node:path'
 import { v4 as uuid } from 'uuid'
 import { opencodeServerManager, OpencodePermissionGuardError } from './OpencodeServerManager'
 import type { ServerConnection } from './OpencodeServerManager'
@@ -121,7 +120,8 @@ import {
   type V2Rule
 } from './permission-v2'
 import { isV2BuiltinAction } from './permission-keys'
-import { childSessionRuleset, evaluateChildCall } from './subagent-permissions'
+import { ChildRulesetKeeper } from './child-rulesets'
+import { locationWorktree, stopOpencodeSessions } from './session-support'
 import { hostPrecheck, type HostPrecheckContext } from './host-precheck'
 import { OpencodeSessionAllows } from './session-allows'
 import { reviewRationale } from '../shared/tool-review'
@@ -172,6 +172,7 @@ import { CLAUDEUI_MCP_SERVER } from './permission-ruleset'
 import { editClearsAgentControl } from './agent-control-gate'
 import { collectClaudeMcpForOpencode } from './claude-mcp-bridge'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../pi/permission-engine'
+import { OPENCODE_SIDE_QUESTION_TITLE } from '../../shared/dispatch-session'
 
 const DEFAULT_MODEL = 'opencode/mimo-v2.5-free'
 
@@ -198,23 +199,11 @@ const DEFAULT_REJECT_MESSAGE = 'The user denied this tool call'
 /** A form the user dismissed (every cancel carries a message, ADR-093 §3). */
 const FORM_DISMISSED_MESSAGE = 'The user dismissed the question without answering'
 
-/**
- * Test seam: hold every child ruleset PATCH until the returned promise
- * settles (the contract proves the plugin hook closes the create → PATCH
- * window without winning a race). Null in production.
- */
-let childPatchGate: ((childID: string) => Promise<void>) | null = null
-export function __holdChildPatchesForTests(
-  gate: ((childID: string) => Promise<void>) | null
-): void {
-  childPatchGate = gate
-}
+// The child-PATCH test seam lives with the keeper; re-exported for the contract.
+export { __holdChildPatchesForTests } from './child-rulesets'
 
 /** Child sessions a resumed chat reads, at most (nested ones included). */
 const MAX_ADOPTED_CHILD_READS = 50
-
-/** How long a teardown waits for its interrupt/cancels before ending the lease. */
-const TEARDOWN_GRACE_MS = 5_000
 
 /** Why a turn that opencode stopped on its own ended (ADR-090: a user stop shows nothing). */
 const STOP_NOTICES: Partial<Record<OpencodeStopReason, string>> = {
@@ -242,26 +231,6 @@ interface PendingForm {
   formID: string
   fields: readonly OpencodeFormField[]
   questions: readonly AskUserQuestion[]
-}
-
-/** A subagent child of this chat (or of one of its children). */
-interface ChildSession {
-  readonly parentID: string
-  /** The child's agent id (`session.created.agent`, then `session.agent.selected`). */
-  agent?: string
-  /** The ruleset last computed for it (what a grandchild's ruleset builds on). */
-  rules?: V2Rule[]
-  /** What was last PATCHed (skip an unchanged one). */
-  patchedKey?: string
-  /** The parent ruleset (its key) the child's rules were last computed from. */
-  parentKey?: string
-  /** PATCHes for this child run one at a time, in order (never a stale one last). */
-  chain: Promise<void>
-  /**
-   * Its ruleset could not be applied (twice): the child was interrupted and
-   * every ask it raises is refused until a PATCH lands (fail closed).
-   */
-  unpatched?: boolean
 }
 
 /** One metered request of this process (a step, a compaction's own request, overhead). */
@@ -377,7 +346,15 @@ export class OpencodeSession extends BaseSession {
   private applied: { sessionId: string; rules: V2Rule[]; key: string } | null = null
   /** The user's compiled rules (all tiers) of the last build — the pre-check's provenance set. */
   private lastUserRules: V2Rule[] | null = null
-  private children = new Map<string, ChildSession>()
+  /** Subagent children's rulesets (S6; shared with the dispatcher's targets). */
+  private readonly childKeeper = new ChildRulesetKeeper({
+    client: () => this.client,
+    rootSessionId: () => this.openSessionId,
+    rootRules: () => this.applied?.rules,
+    loadAgents: () => this.loadAgents(),
+    agentInfo: (id) => this.agentInfo(id),
+    logSource: 'OpencodeSession'
+  })
   /** A resumed chat lists its stored children on the next connect. */
   private adoptChildrenOnConnect = false
   /** Permission applies run one at a time (see applyPermissionMode). */
@@ -982,8 +959,8 @@ export class OpencodeSession extends BaseSession {
 
   /** Raw hooks the mapper does not cover, then every mapper output. */
   private handleEvent(event: OpencodeEvent): void {
-    if (event.type === 'session.created') this.onSessionCreated(event.data)
-    else if (event.type === 'session.agent.selected') this.onAgentSelected(event.data)
+    if (event.type === 'session.created') this.childKeeper.onSessionCreated(event.data)
+    else if (event.type === 'session.agent.selected') this.childKeeper.onAgentSelected(event.data)
     const mapper = this.mapper
     if (!mapper) return
     for (const output of mapper.map(event)) this.dispatch(output)
@@ -1059,7 +1036,8 @@ export class OpencodeSession extends BaseSession {
         return
       case 'subagent-started':
         // A resumed child re-links under a newer call: re-assert its ruleset.
-        if (this.children.has(o.childSessionId)) void this.patchChild(o.childSessionId)
+        if (this.childKeeper.has(o.childSessionId))
+          void this.childKeeper.patchChild(o.childSessionId)
         else void this.adoptUnknownChildren()
         return
       case 'task-notification':
@@ -1500,25 +1478,7 @@ export class OpencodeSession extends BaseSession {
     }
     const followed = this.mapper?.followedSessions() ?? []
     const sessions = [sessionID, ...followed.filter((id) => id !== sessionID)]
-    let over = false
-    const stop = (async () => {
-      await Promise.allSettled([
-        ...sessions.map((id) => Promise.resolve().then(() => client.interrupt(id))),
-        ...inboxIDs.map((id) => Promise.resolve().then(() => client.cancelInbox(sessionID, id)))
-      ])
-      while (!over) {
-        const active = await client.activeSessions()
-        if (!sessions.some((id) => id in active)) return
-        await new Promise((done) => setTimeout(done, 100))
-      }
-    })()
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const grace = new Promise<void>((done) => (timer = setTimeout(done, TEARDOWN_GRACE_MS)))
-    void Promise.race([stop.catch(() => {}), grace]).finally(() => {
-      over = true
-      clearTimeout(timer)
-      release()
-    })
+    void stopOpencodeSessions(client, sessions, { sessionID, ids: inboxIDs }).finally(release)
   }
 
   dispose(): void {
@@ -1579,32 +1539,8 @@ export class OpencodeSession extends BaseSession {
    * refused here with the agent's verdict.
    */
   private refuseByChildAgent(approval: PendingApproval, childID: string): boolean {
-    const child = this.children.get(childID)
-    if (!child) return false
-    if (child.unpatched) {
-      logger.info(
-        'OpencodeSession',
-        `child ask ${approval.toolName} refused: its ruleset is not applied`
-      )
-      this.autoReply(approval.requestId, {
-        decision: 'reject',
-        message:
-          "ClaudeUI could not apply this subagent's permission rules, so its tool calls are refused"
-      })
-      return true
-    }
-    const agent = this.agentInfo(child.agent)
-    if (!agent) return false
-    const resources = approval.patterns && approval.patterns.length > 0 ? approval.patterns : ['*']
-    const denied = resources.find(
-      (resource) => evaluateChildCall(agent.permissions, approval.toolName, resource) === 'deny'
-    )
-    if (denied === undefined) return false
-    const reason = `Denied by the ${agent.id} agent's permission rules: ${approval.toolName}(${denied})`
-    logger.info(
-      'OpencodeSession',
-      `child ask ${approval.toolName} refused by its agent ${agent.id}`
-    )
+    const reason = this.childKeeper.refusal(approval, childID)
+    if (reason === undefined) return false
     this.autoReply(approval.requestId, { decision: 'reject', message: reason })
     return true
   }
@@ -1809,7 +1745,7 @@ export class OpencodeSession extends BaseSession {
     } else {
       logger.debug('OpencodeSession', 'permission ruleset unchanged — no PATCH')
     }
-    this.repatchChildren()
+    this.childKeeper.repatchChildren()
     if (agent && this.currentAgent !== agent) {
       try {
         await client.switchAgent(sessionId, agent)
@@ -1891,13 +1827,10 @@ export class OpencodeSession extends BaseSession {
   /** The location's git worktree root — where 2.x stops spelling paths relatively. */
   private async resolveWorktree(): Promise<string | undefined> {
     if (this.worktree !== undefined) return this.worktree ?? undefined
+    const client = this.client
+    if (!client) return undefined
     try {
-      const location = await this.client?.call('location.get', {})
-      const dir = location?.project?.directory
-      // A location outside any repository reports the filesystem root, which
-      // 2.x does not treat as a worktree either (`file-access.ts`).
-      this.worktree =
-        typeof dir === 'string' && dir !== '' && parsePath(dir).root !== dir ? dir : null
+      this.worktree = await locationWorktree(client)
     } catch (err) {
       logger.debug('OpencodeSession', `GET /api/location failed: ${errText(err)}`)
       return undefined
@@ -1946,153 +1879,19 @@ export class OpencodeSession extends BaseSession {
     return agent ? opencodeOwnDirAllows(agent.permissions) : []
   }
 
-  // ── Subagent children (S6 seam) ────────────────────────────────────────────
+  // ── Subagent children (S6 seam; `child-rulesets.ts`) ───────────────────────
 
-  private onSessionCreated(data: { sessionID: string; parentID?: string; agent?: string }): void {
-    const { sessionID, parentID } = data
-    if (!parentID || sessionID === this.openSessionId) return
-    if (parentID !== this.openSessionId && !this.children.has(parentID)) return
-    if (!this.children.has(sessionID))
-      this.children.set(sessionID, {
-        parentID,
-        chain: Promise.resolve(),
-        ...(data.agent ? { agent: data.agent } : {})
-      })
-    void this.patchChild(sessionID)
-  }
-
-  private onAgentSelected(data: { sessionID: string; agent: string }): void {
-    const child = this.children.get(data.sessionID)
-    if (!child || child.agent === data.agent) return
-    child.agent = data.agent
-    void this.patchChild(data.sessionID, true)
-  }
-
-  /** Re-derive every direct child (each cascades to its own); unchanged parents are skipped. */
-  private repatchChildren(): void {
-    for (const [childID, child] of this.children)
-      if (child.parentID === this.openSessionId) void this.patchChild(childID)
-  }
-
-  /**
-   * PATCH `childSessionRuleset(parent's rules, its agent's rules)` onto a
-   * child, then onto its own children — skipped when the parent ruleset it was
-   * computed from is unchanged (`force`: its agent changed). Serialized per
-   * child, and the parent's rules are read only after every await, so the
-   * last PATCH to land is always the newest one.
-   */
-  private patchChild(childID: string, force = false): Promise<void> {
-    const child = this.children.get(childID)
-    if (!child) return Promise.resolve()
-    const next = child.chain.then(() => this.patchChildNow(childID, force))
-    child.chain = next.catch(() => {})
-    return next
-  }
-
-  private async patchChildNow(childID: string, force: boolean): Promise<void> {
-    const child = this.children.get(childID)
-    const client = this.client
-    if (!child || !client) return
-    if (childPatchGate) await childPatchGate(childID)
-    await this.loadAgents()
-    const parentRules =
-      child.parentID === this.openSessionId
-        ? this.applied?.rules
-        : this.children.get(child.parentID)?.rules
-    if (!parentRules) return
-    const parentKey = JSON.stringify(parentRules)
-    if (!force && !child.unpatched && child.parentKey === parentKey) return
-    const agent = this.agentInfo(child.agent)
-    if (!agent)
-      logger.warn(
-        'OpencodeSession',
-        `subagent ${child.agent ?? '(default)'}: agent rules unknown — the child gets the parent's rules (its agent's own rules still hold in the plugin hook)`
-      )
-    const rules = childSessionRuleset(parentRules, agent?.permissions ?? [])
-    child.rules = rules
-    child.parentKey = parentKey
-    const key = JSON.stringify(rules)
-    if (child.patchedKey !== key || child.unpatched) {
-      let failure: unknown
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          await client.setSessionPermissions(childID, rules)
-          failure = undefined
-          break
-        } catch (err) {
-          failure = err
-        }
-      }
-      if (failure === undefined) {
-        child.patchedKey = key
-        child.unpatched = false
-      } else {
-        // FAIL CLOSED: a child left on a stale (looser) snapshot must not run on.
-        child.unpatched = true
-        logger.error(
-          'OpencodeSession',
-          `child ruleset PATCH failed twice (${childID}) — interrupting it: ${errText(failure)}`
-        )
-        void Promise.resolve()
-          .then(() => client.interrupt(childID))
-          .catch((err) => logger.warn('OpencodeSession', `child interrupt failed: ${errText(err)}`))
-      }
-    }
-    for (const [grandchildID, grandchild] of this.children)
-      if (grandchild.parentID === childID) void this.patchChild(grandchildID)
-  }
-
-  /**
-   * A resumed chat's children from an earlier process (any of them can be
-   * resumed by a later call with its `sessionID`): learn them all and bring
-   * their rulesets to this process's parent rules.
-   */
+  /** A resumed chat's stored children: learned now, PATCHed by the next apply. */
   private async adoptStoredChildren(): Promise<void> {
-    const client = this.client
-    const own = this.openSessionId
-    if (!client || !own) return
     this.adoptChildrenOnConnect = false
-    const queue = [own]
-    for (let read = 0; queue.length > 0 && read < MAX_ADOPTED_CHILD_READS; read++) {
-      const parentID = queue.shift()!
-      let listed: Session_Info[]
-      try {
-        listed = await client.listSessions({ parentID })
-      } catch (err) {
-        logger.debug('OpencodeSession', `children of ${parentID} not listed: ${errText(err)}`)
-        continue
-      }
-      for (const info of listed) {
-        if (this.children.has(info.id) || info.id === own) continue
-        this.children.set(info.id, {
-          parentID,
-          chain: Promise.resolve(),
-          ...(info.agent ? { agent: info.agent } : {})
-        })
-        queue.push(info.id)
-      }
-    }
+    await this.childKeeper.adoptStored(MAX_ADOPTED_CHILD_READS)
   }
 
   /** A re-read linked children whose `session.created` fell in a gap: learn and PATCH them. */
   private async adoptUnknownChildren(): Promise<void> {
-    const client = this.client
     const mapper = this.mapper
-    if (!client || !mapper) return
-    for (const id of mapper.followedSessions()) {
-      if (id === this.openSessionId || this.children.has(id)) continue
-      try {
-        const info = await client.getSession(id)
-        if (!info.parentID) continue
-        this.onSessionCreated({
-          sessionID: id,
-          parentID: info.parentID,
-          ...(info.agent ? { agent: info.agent } : {})
-        })
-      } catch (err) {
-        logger.debug('OpencodeSession', `child ${id} not readable: ${errText(err)}`)
-      }
-    }
+    if (!mapper) return
+    await this.childKeeper.adoptUnknown(mapper.followedSessions())
   }
 
   // ── Auto mode (full) LLM permission gatekeeper (ADR-023) ──────────────────
@@ -2608,7 +2407,7 @@ export class OpencodeSession extends BaseSession {
         return (await client.generate(this.openSessionId, prompt)).trim() || null
       }
       const throwaway = await client.createSession({
-        title: 'side-question',
+        title: OPENCODE_SIDE_QUESTION_TITLE,
         model: this.modelRef(),
         permissions: [...THROWAWAY_RULESET]
       })

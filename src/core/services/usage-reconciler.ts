@@ -10,10 +10,10 @@
  *              Dedup by message_id: live opencode rows + Claude reconciled rows
  *              never collide (different message_id namespaces); re-runs are
  *              idempotent via ON CONFLICT(message_id) DO NOTHING.
- *   opencode → sessions are enumerated GLOBALLY (across every cwd) by reading
- *              opencode's own session DB directly — the same source the sidebar
- *              uses (listOpencodeSessionsGlobal; TODO(S9): the 2.x API list).
- *              Messages are then fetched over the HTTP API
+ *   opencode → sessions are enumerated GLOBALLY (across every cwd) through
+ *              2.x's GET /api/session?parentID=null, which is global (ADR-093
+ *              §6, S9) — read fresh, the same list the sidebar caches
+ *              (listOpencodeSessionsForReconcile). Messages are then fetched over the HTTP API
  *              (GET /api/session/{id}/message?type=assistant), global-by-id.
  *              Best-effort: skipped if opencode isn't installed / no server is up.
  *
@@ -26,7 +26,7 @@
  *              server at PERSISTED_SESSIONS_DIR would therefore only ever see
  *              ClaudeUI's own service sessions and never terminal `opencode` runs
  *              in real project cwds — the whole point of this reconciler (M-DB1).
- *              (2.x's GET /api/session is global — S9 moves the enumeration.)
+ *              2.x's GET /api/session is global, so the enumeration moved there.
  *
  * Failures are swallowed (logged) — reconcile is advisory and must never throw
  * into the caller.
@@ -39,10 +39,10 @@ import { equivalentCostUsd } from '../../shared/pricing'
 import { backfillAttribution, claudeTranscriptRow } from './usage-recorder'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { logger } from './logger'
-import { opencodeServerManager } from '../opencode/OpencodeServerManager'
+import { opencodeServerManager, type ServerConnection } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
 import type { Session_Message_Assistant } from '../opencode/protocol-v2/openapi'
-import { listOpencodeSessionsGlobal } from './opencode-session-list'
+import { listOpencodeSessionsForReconcile } from './opencode-session-list'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 import { OPENCODE_DISPATCH_SESSION_TITLE } from '../../shared/dispatch-session'
 
@@ -119,31 +119,35 @@ class UsageReconciler {
 
   /**
    * Reconcile opencode usage. Best-effort:
-   *   1. Enumerate ALL sessions across every cwd by reading opencode's global
-   *      session DB directly (listOpencodeSessionsGlobal) — see the file header
-   *      for why GET /session can't do this (M-DB1).
-   *   2. Acquire the shared server (PERSISTED_SESSIONS_DIR) and fetch each
+   *   1. Enumerate ALL root sessions across every cwd with 2.x's global
+   *      GET /api/session?parentID=null (listOpencodeSessionsForReconcile — see
+   *      the file header for why 1.x could not, M-DB1).
+   *   2. Ride a server that is ALREADY running (any one: the routes are global)
+   *      — the reconciler never starts one (ADR-093 S9 review: a server every
+   *      10 min for a user who never runs opencode); none running → skipped
+   *      until one is. Fetch each
    *      session's messages over HTTP — /api/session/{id}/message is global-by-id
    *      (it requires the session by id with no project filter), so the shared
    *      server can read any cwd's messages.
    *   3. Import assistant messages that carry tokens (dedup by message id).
    *
-   * Caveat: readOpencodeSessionRows returns only top-level, non-archived
-   * sessions (parent_id IS NULL). Child/forked sessions are excluded — a minor
+   * Caveat: the list holds only top-level, non-archived sessions
+   * (`parentID=null`). Child/forked sessions are excluded — a minor
    * residual, since opencode fork is disabled in ClaudeUI and terminal runs are
    * top-level; the previous GET /session miss was total for out-of-project cwds.
    */
   async reconcileOpencode(): Promise<void> {
-    let acquired = false
+    let conn: ServerConnection | null = null
     try {
-      const sessions = await listOpencodeSessionsGlobal().catch(() => [])
+      const sessions = await listOpencodeSessionsForReconcile().catch(() => [])
       if (sessions.length === 0) return
 
       // Reads only — no turn, so no wait for the hosted MCP tools.
-      const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, {
-        waitForHostedTools: false
+      conn = await opencodeServerManager.acquireIfRunning(PERSISTED_SESSIONS_DIR, {
+        waitForHostedTools: false,
+        anyConfig: true
       })
-      acquired = true
+      if (!conn) return
       const client = new OpencodeClient(conn)
 
       // Warm the billing-type source while we hold the server anyway, so the
@@ -181,7 +185,7 @@ class UsageReconciler {
         `opencode reconcile skipped: ${err instanceof Error ? err.message : String(err)}`
       )
     } finally {
-      if (acquired) opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
+      if (conn) opencodeServerManager.releaseIfCurrent(PERSISTED_SESSIONS_DIR, conn)
     }
   }
 

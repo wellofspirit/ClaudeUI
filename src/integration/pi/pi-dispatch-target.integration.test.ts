@@ -85,8 +85,15 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
           acquire: async () => {
             throw new Error('serverManager.acquire should never be called dispatching engine: "pi"')
           },
-          release: () => {
-            throw new Error('serverManager.release should never be called dispatching engine: "pi"')
+          releaseIfCurrent: () => {
+            throw new Error(
+              'serverManager.releaseIfCurrent should never be called dispatching engine: "pi"'
+            )
+          },
+          subscribeExit: () => {
+            throw new Error(
+              'serverManager.subscribeExit should never be called dispatching engine: "pi"'
+            )
           }
         },
         makeClient: () => {

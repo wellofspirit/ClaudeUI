@@ -247,9 +247,9 @@ export function runSqliteDriverConformance(driver: SqliteDriver, dbPath: string)
     readonlyDb.close()
   }
 
-  // `fileMustExist` on an absent path must throw rather than create — this is
-  // what keeps `readOpencodeSessionRows` from conjuring an empty opencode DB
-  // when opencode simply is not installed.
+  // `fileMustExist` on an absent path must throw rather than create — what
+  // keeps a read of a foreign database from conjuring an empty one when its
+  // program simply is not installed.
   let threw = false
   try {
     driver.open(`${dbPath}.does-not-exist`, { readonly: true, fileMustExist: true }).close()

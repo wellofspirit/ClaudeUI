@@ -915,6 +915,41 @@ describe('OpencodeServerManager (2.x) — idle linger after a read-only lease (S
   })
 })
 
+describe('OpencodeServerManager (2.x) — acquireIfRunning (S9: background reads never spawn)', () => {
+  it('null with no server for the config; a lease on the running one otherwise (no second spawn)', async () => {
+    const { manager, calls } = makeRig()
+    expect(await manager.acquireIfRunning('/a', { waitForHostedTools: false })).toBeNull()
+    expect(calls).toHaveLength(0)
+    const held = await manager.acquire('/a')
+    const read = await manager.acquireIfRunning('/b', { waitForHostedTools: false })
+    expect(read?.baseUrl).toBe(held.baseUrl)
+    expect(read?.directory).toBe('/b')
+    expect(calls).toHaveLength(1)
+    manager.releaseIfCurrent('/b', read!)
+    manager.releaseIfCurrent('/a', held)
+    expect(calls[0].child.killed).toBe(true)
+    expect(await manager.acquireIfRunning('/a')).toBeNull()
+  })
+
+  it('anyConfig: a directory whose config differs rides the running server (global routes), never a second one', async () => {
+    const { manager, calls, configs } = makeRig()
+    configs.set('/proj-with-mcp', { pluginDir: null })
+    const held = await manager.acquire('/a')
+    expect(
+      await manager.acquireIfRunning('/proj-with-mcp', { waitForHostedTools: false })
+    ).toBeNull()
+    const read = await manager.acquireIfRunning('/proj-with-mcp', {
+      waitForHostedTools: false,
+      anyConfig: true
+    })
+    expect(read?.baseUrl).toBe(held.baseUrl)
+    expect(calls).toHaveLength(1)
+    manager.releaseIfCurrent('/proj-with-mcp', read!)
+    manager.releaseIfCurrent('/a', held)
+    expect(calls[0].child.killed).toBe(true)
+  })
+})
+
 describe('OpencodeServerManager (2.x) — recycleAll / dispose / detached / start turns', () => {
   it('recycleAll ends every server, fans out, and the next acquire starts fresh', async () => {
     const { manager, calls, configs } = makeRig()

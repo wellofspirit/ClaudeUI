@@ -4,7 +4,7 @@
 **Date:** 2026-06-29
 **Builds on:** [ADR-028](adr-028_opencode-native-config-in-place.md) (engine-native config in place)
 **Relates to:** [ADR-019](adr-019_opencode-engine-backend.md), [ADR-022](adr-022_opencode-permission-mapping.md), [ADR-023](adr-023_opencode-automode-classifier.md), [ADR-024](adr-024_opencode-interaction-parity.md)
-**Amended by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — v2 config keys.
+**Amended by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — v2 config keys. As built: ADR-093 §6 "As built (S8)" (2.x front matter, `permissions` rules edited in place, never reordered).
 
 ## Context
 

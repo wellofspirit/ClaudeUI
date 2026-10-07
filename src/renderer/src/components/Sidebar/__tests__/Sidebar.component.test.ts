@@ -138,6 +138,24 @@ describe('Sidebar FC', () => {
     return render(React.createElement(Sidebar))
   }
 
+  it("nudges main's opencode list on open and on app focus — never awaiting it (ADR-093 S9)", async () => {
+    const calls: number[] = []
+    // A refresh that never answers must not hold the sidebar.
+    app.bridge.ipcMain.handle('session:list-opencode', async () => {
+      calls.push(Date.now())
+      return new Promise(() => {})
+    })
+    await act(async () => {
+      await renderFC()
+    })
+    expect(calls).toHaveLength(1)
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'))
+    })
+    expect(calls).toHaveLength(2)
+    expect(viewProps).toBeDefined()
+  })
+
   // -------------------------------------------------------------------------
   // 1. Mount — listDirectories populates store
   // -------------------------------------------------------------------------

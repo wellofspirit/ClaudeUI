@@ -8,7 +8,17 @@ import { getAppPath } from '../host'
 import type { McpHttpHost } from './mcp-http-host'
 import { startMcpHttpHost } from './mcp-http-host'
 import { createOpencodeHostedToolsServer } from './opencode-hosted-tools'
-import type { CallerSessionLookup, DispatchAgentFn } from './opencode-hosted-tools'
+import type {
+  CallerRootResolver,
+  CallerSessionLookup,
+  DispatchAgentFn
+} from './opencode-hosted-tools'
+import {
+  callerRestrictionFromAgent,
+  mergeRestrictions,
+  type CallerRestriction
+} from './caller-restriction'
+import type { Permission_Ruleset } from './protocol-v2/openapi'
 import { collectClaudeMcpForOpencode } from './claude-mcp-bridge'
 import {
   buildOpencodeConfigContent,
@@ -217,11 +227,17 @@ export function locatePluginDir(appPath: string = getAppPath()): string | null {
   return existsSync(join(candidate, 'index.js')) ? candidate : null
 }
 
-/** The calling session's directory from the server (`GET /api/session/{id}`), or undefined. */
-async function fetchSessionDirectory(
+/** How many parents a hosted tool call walks up to find ClaudeUI's own session. */
+const MAX_CALLER_DEPTH = 8
+
+/**
+ * A session's directory and parent from the server (`GET /api/session/{id}`),
+ * or undefined when it cannot be read.
+ */
+async function fetchSessionRef(
   endpoint: Endpoint,
   sessionId: string
-): Promise<string | undefined> {
+): Promise<{ directory?: string; parentID?: string; agent?: string } | undefined> {
   try {
     const response = await fetch(
       `${endpoint.baseUrl}/api/session/${encodeURIComponent(sessionId)}`,
@@ -231,9 +247,40 @@ async function fetchSessionDirectory(
       }
     )
     if (!response.ok) return undefined
-    const body = (await response.json()) as { data?: { location?: { directory?: unknown } } }
+    const body = (await response.json()) as {
+      data?: { location?: { directory?: unknown }; parentID?: unknown; agent?: unknown }
+    }
     const directory = body.data?.location?.directory
-    return typeof directory === 'string' && directory ? directory : undefined
+    const parentID = body.data?.parentID
+    const agent = body.data?.agent
+    return {
+      ...(typeof directory === 'string' && directory ? { directory } : {}),
+      ...(typeof parentID === 'string' && parentID ? { parentID } : {}),
+      ...(typeof agent === 'string' && agent ? { agent } : {})
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/** A directory's agents with their rulesets (`GET /api/agent`), or undefined. */
+async function fetchAgents(
+  endpoint: Endpoint,
+  directory: string
+): Promise<readonly { id: string; permissions: Permission_Ruleset }[] | undefined> {
+  try {
+    const response = await fetch(`${endpoint.baseUrl}/api/agent`, {
+      headers: {
+        authorization: endpoint.authHeader,
+        'x-opencode-directory': encodeURIComponent(directory)
+      },
+      signal: AbortSignal.timeout(5_000)
+    })
+    if (!response.ok) return undefined
+    const body = (await response.json()) as { data?: unknown }
+    return Array.isArray(body.data)
+      ? (body.data as { id: string; permissions: Permission_Ruleset }[])
+      : undefined
   } catch {
     return undefined
   }
@@ -505,11 +552,44 @@ export class OpencodeServerManager {
       if (!sessionId) return undefined
       const own = this.callerSessionLookup(sessionId)?.cwd
       if (own) return own
-      return endpoint ? fetchSessionDirectory(endpoint, sessionId) : undefined
+      return endpoint ? (await fetchSessionRef(endpoint, sessionId))?.directory : undefined
+    }
+    // A subagent child of a ClaudeUI chat calling a hosted tool: its id is not
+    // a ClaudeUI session, so walk its parents (ADR-093 §4, S9). Every child on
+    // the way contributes its agent's own restriction (option a); an agent
+    // whose rules cannot be read refuses the call (fail closed).
+    const resolveCallerRoot: CallerRootResolver = async (sessionId) => {
+      const chain: { agent?: string; directory?: string }[] = []
+      let id = sessionId
+      for (let depth = 0; endpoint && depth < MAX_CALLER_DEPTH; depth++) {
+        const ref = await fetchSessionRef(endpoint, id)
+        if (!ref?.parentID) return undefined
+        chain.push({ agent: ref.agent, directory: ref.directory })
+        if (this.callerSessionLookup(ref.parentID)) {
+          let restriction: CallerRestriction | undefined
+          for (const link of chain) {
+            const directory = link.directory ?? this.serverCwd
+            const agents = await fetchAgents(endpoint, directory)
+            const agent = link.agent ? agents?.find((a) => a.id === link.agent) : agents?.[0]
+            if (!agent)
+              return {
+                refused: `ClaudeUI could not read the permission rules of the calling subagent${link.agent ? ` (${link.agent})` : ''}, so it will not dispatch for it.`
+              }
+            restriction = mergeRestrictions(
+              restriction,
+              callerRestrictionFromAgent(agent, directory)
+            )
+          }
+          return { root: ref.parentID, restriction }
+        }
+        id = ref.parentID
+      }
+      return undefined
     }
     const mcpHost = await this.startMcpHostFn(() =>
       createOpencodeHostedToolsServer(resolveCwd, {
         lookupCallerSession: (sessionId) => this.callerSessionLookup(sessionId),
+        resolveCallerRoot,
         dispatch: this.dispatchAgentFn && ((req, ctx) => this.dispatchAgentFn!(req, ctx)),
         onIdentityMismatch: (identity) =>
           logger.warn(
@@ -781,6 +861,16 @@ export class OpencodeServerManager {
     const input = this.configInputFn(directory)
     const key = configIdentity(input)
     const handle = await this.resolveHandle(key, input)
+    return this.leaseOn(handle, directory, options)
+  }
+
+  /** A lease on a resolved server (the rest of `acquire`). */
+  private async leaseOn(
+    handle: ServerHandle,
+    directory: string,
+    options: { waitForHostedTools?: boolean; lingerMs?: number; credentialRoutesOnly?: boolean }
+  ): Promise<ServerConnection> {
+    const key = handle.key
     if (handle.idleTimer) {
       clearTimeout(handle.idleTimer)
       handle.idleTimer = undefined
@@ -814,6 +904,31 @@ export class OpencodeServerManager {
     }
     const conn = this.connectionOf(handle, directory, hostedTools)
     return options.lingerMs ? { ...conn, lingerMs: options.lingerMs } : conn
+  }
+
+  /**
+   * `acquire`, but only on a server already running (and cleaned): null instead
+   * of starting one. For reads that must never cost a spawn of their own (the
+   * sidebar's session-list refresh, S9). `anyConfig`: any live pooled server
+   * will do — for routes that are global (the session list, history and
+   * delete), so a project whose config differs never makes a second server.
+   */
+  async acquireIfRunning(
+    cwd: string,
+    options: { waitForHostedTools?: boolean; lingerMs?: number; anyConfig?: boolean } = {}
+  ): Promise<ServerConnection | null> {
+    if (this.disposed) return null
+    const directory = resolvePath(cwd)
+    const own = this.handles.get(configIdentity(this.configInputFn(directory)))
+    const handle =
+      own?.cleaned === true
+        ? own
+        : options.anyConfig
+          ? [...this.handles.values()].find((h) => h.cleaned)
+          : undefined
+    if (!handle) return null
+    const { anyConfig: _anyConfig, ...lease } = options
+    return this.leaseOn(handle, directory, lease)
   }
 
   /**

@@ -3,71 +3,57 @@
  *
  * Builds the sidebar's opencode session list, and loads a session's transcript.
  *
- * opencode persists every session (all cwds) in one global SQLite DB
- * (~/.local/share/opencode/opencode.db). Its HTTP `GET /session` is PROJECT-scoped
- * (only the serve-cwd's git-root — verified), so we enumerate the LIST by reading
- * that DB directly, read-only (it's in WAL mode → no contention with opencode's
- * writes; see db.ts `readOpencodeSessionRows`). HISTORY (on resume / sidebar click)
- * uses opencode's HTTP API, which IS global-by-id.
+ * Everything goes through opencode's own API (ADR-093 §6, S9). 2.x's
+ * `GET /api/session` is GLOBAL — every directory the shared DB knows; the
+ * `directory` query narrows it — so the list is one paged
+ * `GET /api/session?parentID=null` (root sessions; children are a parent's
+ * subagents). A DB created by 2.x has only `session_v2`, so the 1.x direct
+ * SQLite read is gone.
  *
- * Best-effort throughout: any error (opencode not installed, DB absent, server down)
- * returns an empty array — it NEVER throws and NEVER breaks the Claude sidebar list.
+ * The API needs a running server, and the sidebar must never wait for one or
+ * start one per render. So the list is served from the LAST listing, at once
+ * (all server I/O runs asynchronously in main, off the render path), and
+ * refreshed in the background ({@link refreshOpencodeSessionList}), one
+ * refresh in flight at a time (concurrent triggers share it), at most every
+ * {@link REFRESH_MIN_INTERVAL_MS}. A refresh that changed the list tells its
+ * listeners (the canonical directory refresh), so the sidebar gets ONE update
+ * when it lands.
+ *
+ * When a refresh may START a server — the `onInteraction` policy (owner
+ * decision 2026-10-07): for the first listing of the process; afterwards only
+ * on an INTERACTION (the sidebar opened, the app focused — the renderer's
+ * `session:list-opencode` call) when the listing is older than
+ * {@link STALE_LISTING_MS}. Every other refresh only rides a server that is
+ * already running — ANY live one (the list routes are global), so a project
+ * whose config differs never costs a second server. A failed start or read
+ * backs off exponentially (from {@link REFRESH_MIN_INTERVAL_MS} up to
+ * {@link MAX_BACKOFF_MS}). opencode not installed → [] and no server, ever.
+ * Dispatch targets and ClaudeUI's throwaway sessions are not listed.
+ *
+ * Best-effort throughout: an error keeps the last listing; nothing here throws
+ * to the IPC layer or breaks the Claude sidebar list.
  */
 
-import os from 'os'
-import path from 'path'
-import fs from 'fs'
-import { opencodeServerManager } from '../opencode/OpencodeServerManager'
+import { opencodeServerManager, type ServerConnection } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
+import type { Session_Info } from '../opencode/protocol-v2/openapi'
 import { convertOpencodeHistory, readOpencodeHistory } from '../opencode/v2-history'
 import { lastOpencodeV2Model, opencodeV2HistoryStatusLine } from '../opencode/history-status-line'
+import { READ_LINGER_MS } from '../opencode/read-linger'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
-import { readOpencodeSessionRows } from './db'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 import { logger } from './logger'
 import { cwdToProjectKey } from '../../shared/project-key'
+import { HIDDEN_OPENCODE_SESSION_TITLES } from '../../shared/dispatch-session'
 import type { EngineHistoryLoad, ModelRef, SessionInfo } from '../../shared/types'
 
 /**
- * Resolve the path to opencode's global session DB. Mirrors opencode's own
- * resolution (packages/core/src/global.ts + database/database.ts): the data dir
- * is `$XDG_DATA_HOME/opencode` (falling back to `~/.local/share/opencode` — opencode
- * uses XDG paths even on Windows), and the file is `opencode.db` for the default/prod
- * channel (or `opencode-<channel>.db` otherwise). `OPENCODE_DB` overrides the filename
- * (absolute path used as-is). We pick `opencode.db` first, then the most-recent
- * `opencode*.db` as a channel fallback.
- */
-function resolveOpencodeDbPath(): string {
-  const flag = process.env.OPENCODE_DB
-  if (flag && (path.isAbsolute(flag) || flag === ':memory:')) return flag
-  const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share')
-  const dir = path.join(dataHome, 'opencode')
-  const preferred = path.join(dir, flag || 'opencode.db')
-  if (fs.existsSync(preferred)) return preferred
-  // Channel fallback: newest opencode*.db in the data dir.
-  try {
-    const candidates = fs
-      .readdirSync(dir)
-      .filter((f) => /^opencode.*\.db$/.test(f))
-      .map((f) => path.join(dir, f))
-    if (candidates.length > 0) {
-      candidates.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
-      return candidates[0]
-    }
-  } catch {
-    /* dir missing → opencode not installed */
-  }
-  return preferred
-}
-
-/**
  * opencode stamps newly-created sessions with a default placeholder title
- * ("New session - <ISO>" / "Child session - <ISO>") and only replaces it once its
- * async LLM title generation completes (SessionPrompt.ensureTitle). Mirror
- * opencode's own `isDefaultTitle` so we can hide that placeholder in the sidebar
- * during the brief window before a real title lands — otherwise the raw ISO
- * string would flash in the session list.
+ * ("New session - <ISO>" / "Child session - <ISO>"; 2.x may also leave it
+ * unset) and only replaces it once its async title generation completes.
+ * Mirror opencode's own fallback test so the sidebar shows "Untitled" in that
+ * window instead of the raw ISO string.
  */
 const OPENCODE_DEFAULT_TITLE_RE =
   /^(New session - |Child session - )\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
@@ -78,48 +64,211 @@ function displayTitle(raw: string | null | undefined): string {
   return t
 }
 
+/** Least time between two refreshes of the list. */
+export const REFRESH_MIN_INTERVAL_MS = 20_000
+/** An interaction may start a server only for a listing at least this old. */
+export const STALE_LISTING_MS = 5 * 60_000
+/** The longest a failing refresh waits before the next try. */
+export const MAX_BACKOFF_MS = 30 * 60_000
+
+/** What asked for a refresh. */
+export type ListRefreshTrigger =
+  /** A poll, a watcher tick: rides a running server, starts one only for the first listing. */
+  | 'background'
+  /** The sidebar opened or the app came to the front: may start a server for a stale listing. */
+  | 'interaction'
+  /** The usage reconciler: rides a running server only, never starts one. */
+  | 'reconcile'
+
+/** Where list/history/delete leases are taken (any directory works: the routes are global). */
+const LIST_LEASE = { waitForHostedTools: false, lingerMs: READ_LINGER_MS } as const
+
+/** ClaudeUI's own sessions — dispatch targets and throwaways — never listed. */
+const HIDDEN_TITLES: ReadonlySet<string> = new Set(HIDDEN_OPENCODE_SESSION_TITLES)
+
 /**
- * List ALL opencode sessions (across every cwd) for the sidebar, mapped to
- * SessionInfo[].
- *
- * Sourced by a direct READ-ONLY query on opencode's own global session DB. We do
- * NOT use opencode's HTTP `GET /session` here because it is PROJECT-scoped (it
- * returns only the serve-cwd's git-root sessions), so a single shared server can't
- * enumerate every cwd. opencode runs the DB in WAL mode, so our read-only snapshot
- * never blocks opencode's writes. No server spawn needed. (History replay on resume
- * still uses the HTTP API — `loadOpencodeSessionHistory` — which IS global-by-id.)
- *
- * Best-effort: any error (opencode not installed, file absent, schema drift) → [].
- *
- * @returns Array of SessionInfo with engineId:'opencode', newest first.
+ * A read lease on any running server, else (a user-initiated read: history,
+ * delete) one started for it.
  */
-export async function listOpencodeSessionsGlobal(): Promise<SessionInfo[]> {
-  // Async signature kept for the IPC contract (and future-proofing); the read is sync.
-  // TODO(S9): a DB created by opencode 2.x has no `session` table (only
-  // `session_v2`), and a migrated 1.x DB keeps a stale v1 copy. ADR-093 §6
-  // moves this to the API: `OpencodeClient.listSessions({ parentID: 'null' })`
-  // (GET /api/session is GLOBAL in 2.x, unlike 1.x's project scope) — S9 owns
-  // the switch and when the sidebar may start a server for it.
-  const rows = readOpencodeSessionRows(resolveOpencodeDbPath())
+async function readLease(): Promise<ServerConnection> {
+  return (
+    (await opencodeServerManager.acquireIfRunning(PERSISTED_SESSIONS_DIR, {
+      ...LIST_LEASE,
+      anyConfig: true
+    })) ?? (await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, LIST_LEASE))
+  )
+}
+
+/** 2.x sessions → the sidebar's SessionInfo[] (archived ones left out), newest first. */
+export function toOpencodeSessionInfos(sessions: readonly Session_Info[]): SessionInfo[] {
   const result: SessionInfo[] = []
-  for (const row of rows) {
-    const cwd = row.directory
-    if (!cwd) continue
-    const timestamp = row.timeUpdated ?? row.timeCreated ?? 0
+  for (const session of sessions) {
+    const cwd = session.location?.directory
+    if (!cwd || session.time.archived !== undefined) continue
+    if (session.title && HIDDEN_TITLES.has(session.title.trim())) continue
+    const timestamp = session.time.updated ?? session.time.created ?? 0
     result.push({
-      sessionId: row.id,
+      sessionId: session.id,
       cwd,
       projectKey: cwdToProjectKey(cwd),
-      title: displayTitle(row.title),
+      title: displayTitle(session.title),
       timestamp,
       lastActivityAt: timestamp,
       aiTitle: null,
       engineId: 'opencode'
     })
   }
-  // Newest first (the query already orders DESC, but re-sort defensively).
   result.sort((a, b) => b.lastActivityAt - a.lastActivityAt)
   return result
+}
+
+/**
+ * Every root session the server knows (`GET /api/session?parentID=null`,
+ * paged), or only those located in `directory`.
+ */
+export async function readOpencodeSessions(
+  client: Pick<OpencodeClient, 'listSessions'>,
+  directory?: string
+): Promise<SessionInfo[]> {
+  const sessions = await client.listSessions({
+    parentID: 'null',
+    ...(directory ? { directory } : {})
+  })
+  return toOpencodeSessionInfos(sessions)
+}
+
+// ── The cached listing ───────────────────────────────────────────────────────
+
+let cache: { sessions: SessionInfo[]; at: number } | null = null
+let refreshing: Promise<SessionInfo[] | null> | null = null
+let lastAttemptAt = 0
+let failures = 0
+let backoffUntil = 0
+const listeners = new Set<() => void>()
+
+/** Be told when a refresh changed the list. Returns the unsubscribe. */
+export function onOpencodeSessionListChanged(cb: () => void): () => void {
+  listeners.add(cb)
+  return () => {
+    listeners.delete(cb)
+  }
+}
+
+/** Replace the cached listing (read at `at`) and tell the listeners when it changed. */
+function publish(sessions: SessionInfo[], at = Date.now()): void {
+  const changed = JSON.stringify(cache?.sessions ?? []) !== JSON.stringify(sessions)
+  cache = { sessions, at }
+  if (!changed) return
+  for (const cb of [...listeners]) {
+    try {
+      cb()
+    } catch (err) {
+      logger.warn('OpencodeSessionList', `list listener threw: ${String(err)}`)
+    }
+  }
+}
+
+/**
+ * Refresh the cached listing: one at a time (a trigger while one is in flight
+ * shares it), at most every {@link REFRESH_MIN_INTERVAL_MS} (the reconciler's
+ * excepted), never inside a failure back-off. Resolves with the new listing,
+ * or null when nothing was read (throttled, backing off, no server to ride,
+ * not installed, an error — the last listing stays). Whether it may START a
+ * server: see the file header.
+ */
+export function refreshOpencodeSessionList(
+  trigger: ListRefreshTrigger = 'background'
+): Promise<SessionInfo[] | null> {
+  if (refreshing) return refreshing
+  if (!opencodeServerManager.isBinaryAvailable()) {
+    if (cache) publish([])
+    cache = null
+    return Promise.resolve(null)
+  }
+  const now = Date.now()
+  if (now < backoffUntil) return Promise.resolve(null)
+  if (trigger !== 'reconcile' && now - lastAttemptAt < REFRESH_MIN_INTERVAL_MS)
+    return Promise.resolve(null)
+  lastAttemptAt = now
+  const mayStart =
+    trigger !== 'reconcile' &&
+    (!cache || (trigger === 'interaction' && now - cache.at >= STALE_LISTING_MS))
+  const run = (async (): Promise<SessionInfo[] | null> => {
+    let conn: ServerConnection | null = null
+    try {
+      conn = await opencodeServerManager.acquireIfRunning(PERSISTED_SESSIONS_DIR, {
+        ...LIST_LEASE,
+        anyConfig: true
+      })
+      if (!conn && mayStart)
+        conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, LIST_LEASE)
+      if (!conn) return null
+      const sessions = await readOpencodeSessions(new OpencodeClient(conn))
+      failures = 0
+      backoffUntil = 0
+      publish(sessions)
+      return sessions
+    } catch (err) {
+      failures++
+      backoffUntil = Date.now() + Math.min(REFRESH_MIN_INTERVAL_MS * 2 ** failures, MAX_BACKOFF_MS)
+      logger.debug(
+        'OpencodeSessionList',
+        `opencode session list not refreshed (keeping the last one; next try in ${Math.round((backoffUntil - Date.now()) / 1000)} s): ${err instanceof Error ? err.message : String(err)}`
+      )
+      return null
+    } finally {
+      if (conn) opencodeServerManager.releaseIfCurrent(PERSISTED_SESSIONS_DIR, conn)
+    }
+  })()
+  refreshing = run.finally(() => {
+    refreshing = null
+  })
+  return refreshing
+}
+
+/**
+ * The sidebar's list of ALL opencode sessions (every cwd): the last listing,
+ * at once — never waits for a server, whatever the refresh does — with a
+ * refresh kicked in the background. `interaction`: the caller is the sidebar
+ * opening or the app coming to the front (may start a server for a stale
+ * listing). [] until the first listing lands, and when opencode is not
+ * installed.
+ *
+ * @returns Array of SessionInfo with engineId:'opencode', newest first.
+ */
+export async function listOpencodeSessionsGlobal(
+  options: { interaction?: boolean } = {}
+): Promise<SessionInfo[]> {
+  if (!opencodeServerManager.isBinaryAvailable()) {
+    cache = null
+    return []
+  }
+  void refreshOpencodeSessionList(options.interaction ? 'interaction' : 'background')
+  return cache?.sessions ?? []
+}
+
+/**
+ * For the usage reconciler: the listing read now when a server is running,
+ * else the last one — it never starts a server.
+ */
+export async function listOpencodeSessionsForReconcile(): Promise<SessionInfo[]> {
+  if (!opencodeServerManager.isBinaryAvailable()) return []
+  return (await refreshOpencodeSessionList('reconcile')) ?? cache?.sessions ?? []
+}
+
+/** Test seam: let the next refresh run now (the throttle forgotten, nothing else). */
+export function __resetOpencodeSessionListThrottleForTests(): void {
+  lastAttemptAt = 0
+}
+
+/** Test seam: forget the cached listing, the throttle and the listeners. */
+export function __resetOpencodeSessionListForTests(): void {
+  cache = null
+  refreshing = null
+  lastAttemptAt = 0
+  failures = 0
+  backoffUntil = 0
+  listeners.clear()
 }
 
 /**
@@ -129,10 +278,8 @@ export async function listOpencodeSessionsGlobal(): Promise<SessionInfo[]> {
  * prompt), AND the status line that goes with it: the same stored messages
  * carry the cost, tokens, duration and context the top bar reports (S1d).
  *
- * Read-only: uses the shared server at PERSISTED_SESSIONS_DIR. opencode's message
- * store is keyed by session id globally (the query filters by session_id, not
- * directory), so the shared server can read any session's messages regardless of
- * its cwd — no per-cwd spawn needed.
+ * Read-only: a lingering read lease (any directory works — the message routes
+ * are global by session id), so a burst of history loads reuses one server.
  *
  * Reuses `convertOpencodeHistory` (the 2.x cold converter, held to parity with
  * the live mapper — ADR-093 S4) so there's a single rendering path, children's
@@ -143,13 +290,11 @@ export async function listOpencodeSessionsGlobal(): Promise<SessionInfo[]> {
  * Best-effort: returns no messages and a null status line on any error.
  */
 export async function loadOpencodeSessionHistory(sessionId: string): Promise<EngineHistoryLoad> {
-  let acquired = false
+  let conn: ServerConnection | null = null
   try {
-    // A read — no turn, so no wait for the hosted MCP tools.
-    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, {
-      waitForHostedTools: false
-    })
-    acquired = true
+    // A read — no turn, so no wait for the hosted MCP tools; the server lingers
+    // for the next read.
+    conn = await readLease()
     const client = new OpencodeClient(conn)
     const { rows: stored, children } = await readOpencodeHistory(
       (id) => client.listMessages(id),
@@ -202,9 +347,7 @@ export async function loadOpencodeSessionHistory(sessionId: string): Promise<Eng
     )
     return { messages: [], statusLine: null }
   } finally {
-    if (acquired) {
-      opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
-    }
+    if (conn) opencodeServerManager.releaseIfCurrent(PERSISTED_SESSIONS_DIR, conn)
   }
 }
 
@@ -221,21 +364,22 @@ export async function loadOpencodeSessionHistory(sessionId: string): Promise<Eng
  * to the IPC layer.
  */
 export async function deleteOpencodeSession(sessionId: string): Promise<void> {
-  let acquired = false
+  let conn: ServerConnection | null = null
   try {
-    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, {
-      waitForHostedTools: false
-    })
-    acquired = true
+    conn = await readLease()
     await new OpencodeClient(conn).deleteSession(sessionId)
+    // Gone from the sidebar at once, not at the next refresh.
+    if (cache?.sessions.some((session) => session.sessionId === sessionId))
+      publish(
+        cache.sessions.filter((session) => session.sessionId !== sessionId),
+        cache.at
+      )
   } catch (err) {
     logger.debug(
       'OpencodeSessionList',
       `deleteOpencodeSession(${sessionId}) skipped: ${err instanceof Error ? err.message : String(err)}`
     )
   } finally {
-    if (acquired) {
-      opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
-    }
+    if (conn) opencodeServerManager.releaseIfCurrent(PERSISTED_SESSIONS_DIR, conn)
   }
 }

@@ -19,6 +19,7 @@ import { THROWAWAY_RULESET } from './permission-v2'
 import { resolveOpencodeSpawnModel, parseModelString } from './model-discovery'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { logger } from '../services/logger'
+import { OPENCODE_AGENT_GENERATE_TITLE } from '../../shared/dispatch-session'
 
 // ─── Meta-prompt ──────────────────────────────────────────────────────────────
 
@@ -119,7 +120,7 @@ export async function generateAgent(
     // alone, and nothing it proposes can run. NOT swallowed: without the
     // ruleset the session would offer every tool.
     const session = await client.createSession({
-      title: 'agent-generate',
+      title: OPENCODE_AGENT_GENERATE_TITLE,
       permissions: [...THROWAWAY_RULESET],
       ...(parsedModel
         ? { model: { providerID: parsedModel.providerID, id: parsedModel.modelID } }

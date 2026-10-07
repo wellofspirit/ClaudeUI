@@ -8,8 +8,10 @@
  *
  * Markers (last user text):
  *   [tool]      shell tool call; after the tool result, echo the result
+ *   [toolwrite] shell tool call that WRITES `judged.txt` (not read-only: auto mode judges it)
  *   [mcp]       call the first tool named `*_echo`; then echo the result
  *   [dispatch]  call ClaudeUI's hosted `claudeui_dispatch_agent`; then echo the result
+ *   [subdispatch] `subagent` tool call whose child prompt is `[dispatch]`
  *   [mockup]    call ClaudeUI's hosted `claudeui_create_mockup`; then echo the result
  *   [question]  `question` tool call (one single-choice question)
  *   [sub]       `subagent` tool call
@@ -70,6 +72,8 @@ export interface FixtureProvider {
 
 export const SLOW_CHUNKS = 30
 export const SHELL_COMMAND = 'echo contract-tool-ran'
+/** `[toolwrite]`'s command: a redirect into the workspace, which the read-only gate never vouches for. */
+export const WRITE_COMMAND = 'echo judged > judged.txt'
 export const REASONING_TEXT = 'thinking it over'
 /** opencode accepts a summary carrying one of its template headings (core/src/session/compaction.ts). */
 export const COMPACTION_SUMMARY = '## Objective\nContract compaction summary.'
@@ -226,6 +230,22 @@ export async function startFixtureProvider(
           {
             command: SHELL_COMMAND,
             description: 'contract echo'
+          }
+        )
+      if (text.includes('[toolwrite]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'shell'),
+          { command: WRITE_COMMAND, description: 'contract write' }
+        )
+      if (text.includes('[subdispatch]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          {
+            description: 'contract dispatcher',
+            prompt: 'child dispatches [dispatch]',
+            agent: 'general'
           }
         )
       if (text.includes('[mcp]'))

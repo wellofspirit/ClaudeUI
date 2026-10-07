@@ -40,6 +40,7 @@ import {
 import type { SdkMcpTool, SdkToolExtra } from '../sdk/types'
 import type { ChatMessage, EngineId } from '../../shared/types'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
+import type { CallerRestriction } from './caller-restriction'
 // `import type` only: DispatchContext/DispatchRequest/DispatchResult are
 // ERASED at compile time, so this does NOT create a runtime import cycle
 // even though cross-engine-dispatcher.ts (at runtime) imports
@@ -94,6 +95,20 @@ export interface CallerSessionHandle {
  * safely import sessionManager + crossEngineDispatcher).
  */
 export type CallerSessionLookup = (sessionId: string) => CallerSessionHandle | undefined
+
+/**
+ * The ClaudeUI chat a non-chat caller (a subagent child) descends from, with
+ * the restriction its agent chain carries (ADR-093 S9, option a); `refused`
+ * when that restriction cannot be read (fail closed); undefined when no
+ * ancestor is a ClaudeUI chat.
+ */
+export type CallerRootResolver = (
+  sessionId: string
+) => Promise<
+  | { readonly root: string; readonly restriction: CallerRestriction | undefined }
+  | { readonly refused: string }
+  | undefined
+>
 
 /** Same cycle-avoidance rationale as CallerSessionLookup above. */
 export type DispatchAgentFn = (
@@ -215,6 +230,11 @@ export function createOpencodeHostedToolsServer(
   cwd: string | CallerCwdResolver,
   deps: {
     lookupCallerSession?: CallerSessionLookup
+    /**
+     * The ClaudeUI session a caller descends from, when the caller itself is
+     * not one (a subagent child: opencode's `_meta` names the CHILD session).
+     */
+    resolveCallerRoot?: CallerRootResolver
     dispatch?: DispatchAgentFn
     /** Called when `_meta` and the plugin stamp disagree (diagnostics). */
     onIdentityMismatch?: (identity: CallerIdentity) => void
@@ -378,7 +398,22 @@ export function createOpencodeHostedToolsServer(
         }
       }
 
-      const caller = deps.lookupCallerSession?.(callerId)
+      // The dispatch belongs to the ClaudeUI chat: the caller, or the chat a
+      // subagent child descends from (its targets are disposed with that chat).
+      let routingId = callerId
+      let callerRestriction: CallerRestriction | undefined
+      let caller = deps.lookupCallerSession?.(callerId)
+      if (!caller && deps.resolveCallerRoot) {
+        const resolved = await deps.resolveCallerRoot(callerId).catch(() => undefined)
+        if (resolved && 'refused' in resolved) {
+          return { content: [{ type: 'text' as const, text: resolved.refused }], isError: true }
+        }
+        if (resolved) {
+          routingId = resolved.root
+          callerRestriction = resolved.restriction
+          caller = deps.lookupCallerSession?.(resolved.root)
+        }
+      }
       if (!caller) {
         return {
           content: [
@@ -412,7 +447,7 @@ export function createOpencodeHostedToolsServer(
         { engine, prompt, model, sessionId: session_id },
         {
           fromEngine: 'opencode',
-          fromRoutingId: callerId,
+          fromRoutingId: routingId,
           cwd: caller.cwd,
           getAutonomyMode: caller.getAutonomyMode,
           getMessages: caller.getMessages,
@@ -421,6 +456,7 @@ export function createOpencodeHostedToolsServer(
           emit: caller.emit,
           addDispatchedCost: caller.addDispatchedCost,
           toolUseId: identity.callId,
+          ...(callerRestriction ? { callerRestriction } : {}),
           extra: toolExtra
         }
       )

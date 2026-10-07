@@ -1,6 +1,7 @@
 # ADR-093: opencode moves to 2.x only
 
-**Status:** Accepted (2026-10-06, owner; arc started with S0). It comes from the spike in
+**Status:** Accepted (2026-10-06, owner; arc started with S0; S0–S9 built on the arc branch by
+2026-10-07; S10 — real-app verification, Windows pass, 1.x removal — remains). It comes from the spike in
 [`docs/opencode-v2-spike.md`](../opencode-v2-spike.md), which has the evidence, citations and live
 transcripts this ADR relies on. **Owner decisions recorded 2026-10-06** (Daniel):
 
@@ -28,6 +29,11 @@ They are folded into §5, §6, §9 and the slices.
 - [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) and
   [ADR-021](adr-021_neutral-auth-account-model.md) (where opencode credentials live).
 - [ADR-082](adr-082_harness-sources-downloads-and-unbundling.md) (manifest coordinates, ceiling).
+- [ADR-028](adr-028_opencode-native-config-in-place.md) (as built in S8: 2.x keys).
+- [ADR-047](adr-047_opencode-server-recycle-on-auth-change.md) — superseded for opencode 2.x (no
+  recycle on an auth change, §5).
+
+Wire reference (as built): [`docs/protocol-opencode/`](../protocol-opencode/README.md).
 
 **Relates to:** [ADR-028](adr-028_opencode-native-config-in-place.md),
 [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md),
@@ -237,6 +243,82 @@ for a request without `_meta`. The plugin's `__xeng_call_id` (which keys live st
 card) is trusted only when the same call carries the plugin's session stamp and it agrees with
 `_meta`, so a lone or disagreeing call id cannot redirect a dispatch. The plugin is an import-free
 directory (`resources/opencode/claudeui-xeng/`), unpacked from the asar like the 1.x plugin.
+
+**As built (S9, 2026-10-07): opencode as a dispatch target and source.**
+
+- **Targets on the 2.x stack.** The dispatcher's `DispatchTargetClient` is a structural `Pick` of
+  `OpencodeClient`; `serverManager` is `{acquire, releaseIfCurrent, subscribeExit}` and
+  `makeClient(conn)`. Each target takes its OWN turn-running lease (the plugin guard is required)
+  and releases it EXACTLY; the event feed is shared PER SERVER (`serverKey` = URL + password), so a
+  config change while a target lives can no longer pair one server's client with another's lease
+  (the S2 finding). A record outlives targets still being created on it, and a server exit or a lost
+  feed fails the turn in flight and drops that server's targets (after a best-effort interrupt);
+  their sessions are deleted through the next target's server when theirs is gone. A creation that
+  outlives its feed, or its dispatching chat (`disposeFor` meanwhile), fails and rolls back (session
+  deleted, lease released).
+- **A target** is created with its ruleset, agent and model in the body, titled `xeng-dispatch`.
+  The ruleset is the session's `buildSessionRuleset` over the user's deny/ask rules only (ADR-085
+  §3; never allows or additional directories), then `{claudeui_dispatch_agent,*,deny}` (ADR-033 §4)
+  and `{question,*,deny}` (a headless target has nobody to answer; a form that still arrives is
+  cancelled WITH a message). Every turn re-applies the LIVE mode's ruleset (PATCH replaces, so the
+  1.x "creation-time snapshot" residual is gone) and switches the agent (`plan`), fail closed; and a
+  mode switch DURING a turn re-applies at once (polled every 250 ms while busy, as a chat PATCHes on
+  `setPermissionMode`; the plugin re-reads the session's rules on every ask — a re-apply that fails
+  ends the turn). It runs the ChatGPT pre-turn gate (§5 rule 2), then posts an inbox prompt
+  (`steer`, a ClaudeUI id) — never once a Stop or the caller's abort has fired.
+- **The turn** is followed through the target's own S4 mapper on the shared feed (reconnects re-read
+  through `reconcileAfterReconnect`). It has STARTED when its own inbox item is delivered
+  (`session.inbox.delivered`, or its user row on a re-read — opencode publishes `InboxDelivered` for
+  every promoted user item, `core/src/session/inbox.ts`), whether it opened an execution or was
+  steered into one already running (a parent woken by a background subagent's completion, a give-up
+  still winding down — no `execution.started` of its own; review S9 #2). Only a terminal output
+  after that settles it (closing the 1.x "a stale idle settles the next turn" residual). Its text is
+  the last own step that said something; its usage is every step's, children's included (one ledger
+  row, priced per step by `opencodeMessageCosts`); a step OUTSIDE any dispatch turn (a woken
+  execution, a step after a give-up) is metered too, as a row of its own against the cap and the
+  breakdown. `provider.auth` calls the vault's `authFailed`.
+- **Give-ups** (Stop, timeout, the caller's abort, a refused prompt; review S9 #1): the target
+  DRAINS — the turn's prompt POST, when one is in flight, is awaited (bounded), then the session and
+  followed children are interrupted and that prompt's inbox item cancelled (`stopOpencodeSessions`,
+  which also re-interrupts a session still active while it waits); an execution that starts while
+  draining is interrupted again; the next turn waits for it all to settle. Dispose also deletes the
+  session (shared data dir) before the lease goes. A stop or cancel records a ledger row only when
+  the turn already spent something; a timeout always does.
+- **Asks** — refused WITH a message whenever no dispatch turn is running (idle, or draining): nobody
+  is waiting, so never judged or carded. Otherwise the same ladder as a chat, minus session allows:
+  a child's ask its own agent denies is
+  refused (`child-rulesets.ts`, extracted from `OpencodeSession` and shared — the S6 child PATCHes
+  run for targets too); then `hostPrecheck` (the user's deny rules, plan mode, the user's ask rules
+  → the human in every mode); then ClaudeUI's judge under a judged auto parent (ADR-088), else a card
+  on the dispatching chat. Replies go to the asking session, never `always`, every reject with a
+  message. A target's child streams nothing onto the card (as in 1.x).
+- **Source identity.** Unchanged precedence (`_meta` first). New: a subagent CHILD calling
+  `dispatch_agent` is named by `_meta` as the child; the hosted tool walks `parentID` (up to 8
+  levels, `GET /api/session/{id}`) to the ClaudeUI chat it descends from, and the dispatch belongs to
+  that chat (`fromRoutingId`). No ClaudeUI ancestor (a target's own child, a foreign session) → the
+  call is refused. Contract: `[subdispatch]` in the manager suite.
+- **A subagent caller's own restriction (owner decision 2026-10-07, option a).** When the caller is a
+  subagent child, the target runs under the chat's mode and rules PLUS the calling agent's own deny
+  and ask rules (every child agent on the way up, for a grandchild): `caller-restriction.ts` reads
+  each agent's ruleset (`GET /api/agent` in the child's directory; unreadable → the call is refused,
+  fail closed) and maps it, with the plugin's child-agent floor semantics (the agent's rules alone,
+  last match wins, no match = ask), to Claude-form rules — the vocabulary every target engine already
+  compiles the user's deny/ask tiers from (Claude `--settings`, pi/Codex permission engine, opencode
+  `compileClaudeRulesV2`). Only ever tighter: deny and ask only; a deny with no exact equivalent is
+  the whole category (a shell glob program, a URL host glob, glob/grep/subagent/skill resources,
+  `external_directory` → every file and shell tool); an MCP rule restricts the whole server (the
+  `<server>_<tool>` split is ambiguous); `external_directory` asks are not mapped (targets get no
+  additional directories). Code Mode's `execute` is not mapped: every ClaudeUI session denies it, so
+  an agent's own `execute` rule never decides what a child does. The restriction rides
+  `DispatchContext.callerRestriction`, is merged into the target's user rules on every engine, is
+  named in the judge's subagent header ("dispatched by the … subagent, which may not: …") on top of
+  being in its permission-rule context, and sticks to the target: a continuation from a caller the
+  target's restriction does not cover is refused (start a fresh dispatch). opencode → opencode
+  dispatch stays refused (same engine), so the contract proves the two halves: a real `general`
+  child (configured `edit: deny`) carries the restriction, and an opencode target given it has no
+  edit tool and leaves the file untouched.
+- **Shared pieces** (S5 code, not duplicated): `child-rulesets.ts` (`ChildRulesetKeeper`) and
+  `session-support.ts` (`stopOpencodeSessions`, `locationWorktree`); `OpencodeSession` uses them too.
 
 ### 5. Credentials (amends ADR-068 / ADR-021; ownership per ADR-082 §8)
 
@@ -451,6 +533,29 @@ since quit restores their credential), sees a later expiry than the real one.
   `Switched`.
 - The session list moves from a direct SQLite `SELECT … FROM session` to
   `GET /api/session?directory=…&parentID=null`. A DB created fresh by 2.x has only `session_v2`.
+
+  **As built (S9).** One paged `GET /api/session?parentID=null` with NO directory: 2.x's list is
+  global, so a single request covers every cwd (`directory` narrows it — `readOpencodeSessions`
+  takes one, the contract proves both). Archived sessions are left out; the cwd is
+  `location.directory`; dispatch targets and ClaudeUI's throwaways (`xeng-dispatch`,
+  `side-question`, `agent-generate`) are not listed. The sidebar never waits for a server:
+  `listOpencodeSessionsGlobal` serves the last listing at once — measured 0.001 ms median / 0.008 ms
+  p95 for 2 000 cached rows with a refresh hanging, plus ~1 ms to clone the payload — and kicks a
+  background refresh: one in flight at a time (concurrent triggers share it), at most every 20 s,
+  all server I/O asynchronous in main, ONE `session:directories-changed` when it lands
+  (`onOpencodeSessionListChanged` → `refreshCanonicalDirectories`).
+  **Spawn policy `onInteraction` (owner decision 2026-10-07):** a refresh may START a server only for
+  the first listing of the process, and afterwards only on an interaction — the sidebar opening or
+  the app coming to the front (the renderer's `session:list-opencode` nudge, never awaited) — when the
+  listing is older than 5 min. Every other refresh only RIDES a running server, and any live one
+  does (`acquireIfRunning(…, {anyConfig: true})`: the routes are global, so a project with its own
+  MCP config never costs a second server); history and delete ride one too and start one only when
+  none runs. A failed start or read backs off exponentially (40 s, 80 s, … capped at 30 min). The
+  usage reconciler never starts a server: it rides one or skips the round. Not installed → [] and
+  no server. The direct reader (`db.ts readOpencodeSessionRows`) is deleted. Residual: sessions the
+  user's own opencode creates while ClaudeUI runs no server show at the next interaction on a stale
+  listing.
+
 - The first `/api/model` after a server boot can be empty (cold location; full at +1.5 s), so
   discovery must not negative-cache it (ADR-092).
 

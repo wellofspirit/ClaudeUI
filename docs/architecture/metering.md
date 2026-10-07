@@ -112,7 +112,8 @@ origin.
 
 `usage-reconciler.ts` imports usage that happened outside this app. It runs at start-up and every ten
 minutes: Claude from the JSONL transcripts through block-usage's parse, opencode by enumerating
-sessions from opencode's own store and fetching each session's messages over HTTP. Both paths write
+root sessions through 2.x's global `GET /api/session?parentID=null` (ADR-093 §6) and fetching each
+session's messages over HTTP. Both paths write
 through the shared builders, so a reconciled row and a live one for the same turn agree field for
 field. That cadence is also why a ledger cursor cannot be a timestamp: a row written now can carry
 yesterday's `ts`.

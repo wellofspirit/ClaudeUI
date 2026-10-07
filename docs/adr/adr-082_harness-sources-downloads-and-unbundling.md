@@ -27,7 +27,7 @@ like the others, 2.0.0; the temporary 1.1.0 of the 1.0.2 bump is retired.
 **Amended by:** [ADR-092](adr-092_model-catalogs-per-engine-and-a-clean-boot.md) (2026-10-05) — a harness change re-fetches only that engine's models in the composer (per-engine reload counters), not every engine's.
 **Relates to:** [ADR-052](adr-052_remote-auth-passkeys-capabilities.md) (the capability that gates
 installs from a remote device), [ADR-035](adr-035_pi-engine-backend.md), [ADR-019](adr-019_opencode-engine-backend.md).
-**Amended by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — manifest coordinates and ceiling.
+**Amended by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — manifest coordinates and ceiling. As built: ADR-093 §1 (S1: `@opencode/cli-<plat>` 2.0.24, floor = tested, ceiling 3.0.0).
 
 ## Context
 

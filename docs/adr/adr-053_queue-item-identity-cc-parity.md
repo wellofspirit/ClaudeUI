@@ -3,7 +3,7 @@
 **Status:** Accepted (2026-08-13) — design; implemented in SyncCore phase 3 per `docs/architecture/sync-core.md` §Queue
 **Relates to:** ADR-030 (capability honesty — uniform events over per-engine transports), ADR-035 (pi steer), ADR-038 (event-driven lifecycle, applied to the queue), ADR-051 (the event model this rides on), ADR-089 (agent deliveries into a pi session are NOT queue items: pi's own steer queue gives them boundary timing, and there is nothing to take back)
 **Amends:** ADR-024 (its queue/steer parity for opencode is redefined by the emulation below)
-**Superseded in part by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — its host-held queue, for opencode only.
+**Superseded in part by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — its host-held queue, for opencode only. As built: ADR-093 §9 "As built (S5)" (the item is posted to the inbox at once with `steer` — §1's timing — and stays the queue card until delivered).
 
 ## Context
 

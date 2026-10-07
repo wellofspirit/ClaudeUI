@@ -322,8 +322,11 @@ function makeDispatcher(
       acquire: async () => {
         throw new Error('serverManager.acquire must never run for engine: "codex"')
       },
-      release: () => {
-        throw new Error('serverManager.release must never run for engine: "codex"')
+      releaseIfCurrent: () => {
+        throw new Error('serverManager.releaseIfCurrent must never run for engine: "codex"')
+      },
+      subscribeExit: () => {
+        throw new Error('serverManager.subscribeExit must never run for engine: "codex"')
       }
     },
     makeClient: () => {

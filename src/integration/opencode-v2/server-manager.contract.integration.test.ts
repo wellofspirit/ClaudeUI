@@ -14,6 +14,8 @@
  *   turn after boot is offered `claudeui_*` with no warm-up (S0 finding 1);
  * - caller identity reaches the hosted tool both ways: `_meta` session and the
  *   plugin's stamp (call id = the turn's tool call id), events unstamped;
+ * - a subagent CHILD calling `dispatch_agent` (`_meta` names the child) is
+ *   resolved to the ClaudeUI chat it descends from, through `parentID` (S9);
  * - one server serves a second directory, which gets its own readiness wait
  *   and its own MCP session, and a mockup lands in THAT directory (resolved
  *   via the server's session record — a session ClaudeUI does not know);
@@ -84,7 +86,12 @@ describeV2('opencode 2.x contract: production server manager', () => {
       locateBinaryFn: () => launch,
       // Production spawn; only the parent env is the isolated one.
       spawnFn: (l, options) => spawnStdioServer(l, options, { env }),
-      configInputFn: () => ({ bridgedMcp: {}, pluginDir }),
+      // `general` may not edit: its dispatch carries that restriction (S9, option a).
+      configInputFn: () => ({
+        bridgedMcp: {},
+        pluginDir,
+        agentPermissions: { general: [{ action: 'edit', resource: '*', effect: 'deny' }] }
+      }),
       endServerFn: (child) => {
         ends.push(endStdioServer(child))
       },
@@ -224,6 +231,33 @@ describeV2('opencode 2.x contract: production server manager', () => {
     expect(existsSync(join(home.workspace('one'), '.claude', 'ui', 'mockups'))).toBe(false)
 
     manager.releaseIfCurrent(ws, second)
+  })
+
+  it("a subagent child's dispatch belongs to the ClaudeUI chat it descends from (_meta names the child)", async () => {
+    const ws = home.workspace('one')
+    const api = createApi(first.baseUrl, first.password, ws)
+    const feed = feeds[0]
+    const tag = nonce('subdispatch')
+    const before = dispatched.length
+    const { sessionID } = await turn(api, feed, ws, `[subdispatch] ${tag}`, true)
+
+    expect(dispatched).toHaveLength(before + 1)
+    const { ctx } = dispatched[before]
+    const caller = ctx.extra?.meta?.['ai.opencode/sessionID']
+    // opencode's own signal names the CHILD session that made the call...
+    expect(caller).not.toBe(sessionID)
+    const child = await api.ok('session.get', { params: { sessionID: String(caller) } })
+    expect(child.data.parentID).toBe(sessionID)
+    // ...and the dispatch is the parent chat's (its targets die with it).
+    expect(ctx.fromRoutingId).toBe(sessionID)
+    expect(ctx.cwd).toBe(ws)
+    // ...carrying the calling agent's own restriction, read from opencode
+    // (`general`: no questions, no subagents, and — configured — no edits).
+    expect(ctx.callerRestriction?.agents).toEqual(['general'])
+    expect(ctx.callerRestriction?.deny).toEqual(
+      expect.arrayContaining(['Edit', 'Write', 'MultiEdit', 'AskUserQuestion', 'Task'])
+    )
+    expect(ctx.callerRestriction?.deny).not.toContain('Bash')
   })
 
   it('the last release ends the server by stdin EOF (no kill)', async () => {

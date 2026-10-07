@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-06-23
 **Relates to:** [ADR-019](adr-019_opencode-engine-backend.md) (opencode engine backend), [ADR-018](adr-018_v2-engine-vendor-account-model.md) (capability model / autonomy modes), [ADR-022](adr-022_opencode-permission-mapping.md) (opencode permission mapping), [ADR-023](adr-023_opencode-automode-classifier.md) (auto-mode classifier)
-**Superseded in part by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — its opencode queue semantics (no dequeue).
+**Superseded in part by:** [ADR-093](adr-093_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — its opencode queue semantics (no dequeue). As built: ADR-093 §9 "As built (S5)" (the native inbox: ClaudeUI-chosen ids, `steer` delivery, `DELETE …/inbox/:id` take-back).
 
 ## Context
 
