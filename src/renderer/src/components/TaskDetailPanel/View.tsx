@@ -9,6 +9,11 @@ export type TaskEntryKind = 'bash-background' | 'task' | 'missing'
 export interface TaskEntryDescriptor {
   toolUseId: string
   kind: TaskEntryKind
+  /**
+   * `bash-background` only: the roster's label for the agent that launched the
+   * shell (`agentRowLabel`), absent for a main-session shell.
+   */
+  ownerLabel?: string
 }
 
 export interface TaskDetailPanelViewProps {
@@ -45,7 +50,8 @@ function HResizeHandle({
 
 function PanelEntry({ entry }: { entry: TaskEntryDescriptor }): React.JSX.Element | null {
   if (entry.kind === 'missing') return null
-  if (entry.kind === 'bash-background') return <BashBackgroundEntry toolUseId={entry.toolUseId} />
+  if (entry.kind === 'bash-background')
+    return <BashBackgroundEntry toolUseId={entry.toolUseId} ownerLabel={entry.ownerLabel} />
   return <TaskEntry toolUseId={entry.toolUseId} />
 }
 

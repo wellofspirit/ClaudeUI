@@ -134,7 +134,53 @@ describe('TaskDetailPanel FC', () => {
 
     expect(viewProps?.entries).toEqual([
       { toolUseId: B, kind: 'task' },
-      { toolUseId: A_BG_BASH, kind: 'bash-background' }
+      // The shell entry's "launched by" link is named the way the roster names A.
+      { toolUseId: A_BG_BASH, kind: 'bash-background', ownerLabel: 'probenesta' }
+    ])
+  })
+
+  it('labels an UNNAMED owner by its description, and gives a main-session shell none', async () => {
+    const [spawnA, ...rest] = nestedMessages()
+    const call = spawnA.content[0] as { toolInput: Record<string, unknown> }
+    const { name: _name, ...unnamedInput } = call.toolInput
+    void _name
+    const unnamedA = {
+      ...spawnA,
+      content: [{ ...spawnA.content[0], toolInput: unnamedInput }]
+    } as typeof spawnA
+    const mainShell = {
+      id: 'm-main-sh',
+      role: 'assistant' as const,
+      content: [
+        {
+          type: 'tool_use' as const,
+          toolUseId: 'tu-main-sh',
+          toolName: 'Bash',
+          toolInput: { command: 'bun run dev', run_in_background: true }
+        }
+      ],
+      timestamp: 0
+    }
+    useSessionStore.getState().openTaskPanel(ROUTE, A_BG_BASH)
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          openedTaskToolUseIds: [A_BG_BASH, 'tu-main-sh'],
+          messages: [unnamedA, ...rest, mainShell],
+          subagentMessages: nestedBuckets(),
+          activeTasks: nestedActiveTasks()
+        }
+      }
+    }))
+
+    await renderFC()
+
+    expect(viewProps?.entries).toEqual([
+      // Its name is only the type ("general-purpose"); the description says which agent.
+      { toolUseId: A_BG_BASH, kind: 'bash-background', ownerLabel: 'probe nested a' },
+      { toolUseId: 'tu-main-sh', kind: 'bash-background' }
     ])
   })
 
