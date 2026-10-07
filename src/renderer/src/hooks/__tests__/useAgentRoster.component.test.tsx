@@ -8,6 +8,9 @@
  *
  * §7: agents are listed at every depth, as a tree; background shells come
  * from the live records and are listed only while they run.
+ *
+ * §10: `rows` is one depth-first tree of both: a shell sits under the agent
+ * whose transcript holds its Bash call.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import React from 'react'
@@ -16,12 +19,13 @@ import { useSessionStore } from '../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import {
   useAgentRoster,
+  agentRowLabel,
   scanTranscriptCached,
   scanAgentTree,
   rosterScanStats,
   type AgentRoster
 } from '../useAgentRoster'
-import type { ChatMessage } from '../../../../shared/types'
+import type { ActiveTask, ChatMessage } from '../../../../shared/types'
 import { PI_ASYNC_LAUNCHED_PREFIX } from '../../../../shared/pi-agent-result'
 import {
   A,
@@ -101,6 +105,7 @@ describe('useAgentRoster', () => {
     expect(seen).toEqual({
       agents: [],
       shells: [],
+      rows: [],
       runningCount: 0,
       runningAgentCount: 0,
       runningShellCount: 0,
@@ -668,6 +673,277 @@ describe('useAgentRoster', () => {
       await renderProbe()
       expect(seen?.shells).toEqual([])
       expect(seen?.agents.map((r) => r.isRunning)).toEqual([false, false])
+    })
+  })
+
+  // §10: the list labels an agent with its name when the spawn gave one, and with
+  // its description otherwise. What counts as "gave one" differs per engine's
+  // normalizer, so each is driven through the real one.
+  describe('row labels per engine (§10)', () => {
+    const labels = (): [string, boolean, string][] =>
+      seen!.agents.map((r) => [r.name, r.hasExplicitName, agentRowLabel(r)])
+
+    async function spawnOn(
+      engine: string,
+      toolName: string,
+      input: Record<string, unknown>
+    ): Promise<void> {
+      setSession({
+        ...withEngine(engine),
+        messages: [assistantWithTool('m1', 'tu-1', toolName, input)]
+      })
+      await renderProbe()
+    }
+
+    it('Claude: a named spawn is labelled by its name', async () => {
+      await spawnOn('claude', 'Agent', {
+        name: 'reviewer',
+        subagent_type: 'Explore',
+        description: 'audit the reducer'
+      })
+      expect(labels()).toEqual([['reviewer', true, 'reviewer']])
+    })
+
+    it('Claude: a type-only spawn is labelled by its description, not "Explore"', async () => {
+      await spawnOn('claude', 'Agent', { subagent_type: 'Explore', description: 'find handlers' })
+      expect(labels()).toEqual([['Explore', false, 'find handlers']])
+    })
+
+    it('Claude: an untyped spawn with a model override keeps its description label', async () => {
+      // `model` is only a fallback name here; it is NOT an identity on Claude.
+      await spawnOn('claude', 'Agent', { description: 'audit the reducer', model: 'opus' })
+      expect(labels()).toEqual([['opus', false, 'audit the reducer']])
+    })
+
+    it('Codex v1: a spawn that names only its model is labelled by the model', async () => {
+      await spawnOn('codex', 'collab:spawnAgent', {
+        prompt: 'survey the tests',
+        model: 'gpt-5.6-luna',
+        receiverThreadIds: ['child-1']
+      })
+      // The normalizer's description is the placeholder "Agent": never the label.
+      expect(seen?.agents[0].description).toBe('Agent')
+      expect(labels()).toEqual([['gpt-5.6-luna', true, 'gpt-5.6-luna']])
+    })
+
+    it('Codex v2: the agent path leaf is the name', async () => {
+      await spawnOn('codex', 'collab:spawnAgent', {
+        agentPath: '/root/probe',
+        receiverThreadIds: ['child-2']
+      })
+      expect(labels()).toEqual([['probe', true, 'probe']])
+    })
+
+    it('Codex: a spawn with neither model nor path falls back to the placeholder', async () => {
+      await spawnOn('codex', 'collab:spawnAgent', { receiverThreadIds: ['child-3'] })
+      expect(labels()).toEqual([['Agent', false, 'Agent']])
+    })
+
+    it('opencode: the agent is only a type, so the description labels the row', async () => {
+      await spawnOn('opencode', 'task', { subagent_type: 'general', description: 'edit things' })
+      expect(labels()).toEqual([['general', false, 'edit things']])
+    })
+
+    it('pi: a named spawn is labelled by its name, an unnamed one by its description', async () => {
+      setSession({
+        ...withEngine('pi'),
+        messages: [
+          assistantWithTool('m1', 'tu-named', 'agent', {
+            name: 'scout',
+            description: 'look around',
+            prompt: 'go'
+          }),
+          assistantWithTool('m2', 'tu-bare', 'agent', { description: 'dig deeper', prompt: 'go' })
+        ]
+      })
+      await renderProbe()
+      const [named, bare] = seen!.agents
+      expect([named.name, named.hasExplicitName, agentRowLabel(named)]).toEqual([
+        'scout',
+        true,
+        'scout'
+      ])
+      expect(bare.hasExplicitName).toBe(false)
+      expect(agentRowLabel(bare)).toBe('dig deeper')
+    })
+
+    it('a dispatch is labelled by where it went', async () => {
+      await spawnOn('claude', 'mcp__claude-ui-collab__dispatch_agent', {
+        engine: 'opencode',
+        model: 'deepseek-v4',
+        prompt: 'review it'
+      })
+      expect(labels()).toEqual([['opencode · deepseek-v4', true, 'opencode · deepseek-v4']])
+    })
+  })
+
+  describe('one tree of agents and shells (§10)', () => {
+    const MAIN_SH = 'tu-main-sh'
+    const B_BG_BASH = 'tu-b-bg'
+    const C = 'tu-c'
+    const startedAt = 1_700_000_000_000
+    const record = (taskId: string): ActiveTask => ({
+      taskId,
+      taskType: 'local_bash',
+      runIndex: 1,
+      isBackgrounded: true,
+      startedAt
+    })
+    const shape = (): [string, number, string | undefined][] =>
+      seen!.rows.map((r) => [r.toolUseId, r.depth, r.parentToolUseId])
+
+    function live(): Record<string, unknown> {
+      const buckets = nestedBuckets()
+      // B (depth 1) also launched a background shell: a depth-2 shell.
+      buckets[B] = [
+        ...buckets[B],
+        assistantWithTool('b-2', B_BG_BASH, 'Bash', {
+          command: 'tail -f build.log',
+          run_in_background: true
+        })
+      ]
+      return {
+        messages: [
+          ...nestedMessages(),
+          // A second top-level agent, then a shell the MAIN session launched.
+          assistantWithTool('m-c', C, 'Agent', { subagent_type: 'Plan', description: 'plan it' }),
+          assistantWithTool('m-sh', MAIN_SH, 'Bash', {
+            command: 'bun run dev',
+            run_in_background: true
+          })
+        ],
+        subagentMessages: buckets,
+        activeTasks: {
+          ...nestedActiveTasks(),
+          [A_BG_BASH]: record('t-a-bg'),
+          [B_BG_BASH]: record('t-b-bg'),
+          [MAIN_SH]: record('t-main')
+        }
+      }
+    }
+
+    it('nests a shell under its launching agent, after that agent child agents', async () => {
+      setSession(live())
+      await renderProbe()
+      expect(shape()).toEqual([
+        [A, 0, undefined],
+        // A's child agent first, with ITS shell (depth 2) inside its subtree...
+        [B, 1, A],
+        [B_BG_BASH, 2, B],
+        // ...then A's own shell, one level below A.
+        [A_BG_BASH, 1, A],
+        [C, 0, undefined],
+        // The main session's shell closes the list, at the top level.
+        [MAIN_SH, 0, undefined]
+      ])
+      expect(seen?.rows.map((r) => r.kind)).toEqual([
+        'agent',
+        'agent',
+        'shell',
+        'shell',
+        'agent',
+        'shell'
+      ])
+    })
+
+    it('leaves agents, shells and every count as they were', async () => {
+      setSession(live())
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.toolUseId)).toEqual([A, B, C])
+      // `shells` stays the flat, depth-0 list in listShells order.
+      expect(seen?.shells.map((r) => [r.toolUseId, r.depth, r.parentToolUseId])).toEqual([
+        [A_BG_BASH, 0, undefined],
+        [B_BG_BASH, 0, undefined],
+        [MAIN_SH, 0, undefined]
+      ])
+      // A and B run through their records; C by the legacy heuristic (no result).
+      expect(seen?.runningAgentCount).toBe(3)
+      expect(seen?.runningShellCount).toBe(3)
+      expect(seen?.runningCount).toBe(6)
+      expect(seen?.totalCount).toBe(3)
+      expect(seen?.rows).toHaveLength(6)
+    })
+
+    it('carries the lifecycle start on a shell row, and none on an agent row', async () => {
+      setSession(live())
+      await renderProbe()
+      const byId = new Map(seen!.rows.map((r) => [r.toolUseId, r]))
+      expect(byId.get(A_BG_BASH)?.startedAt).toBe(startedAt)
+      expect(byId.get(MAIN_SH)?.startedAt).toBe(startedAt)
+      expect(byId.get(A)?.startedAt).toBeUndefined()
+    })
+
+    it('keeps a running shell nested under an agent that has finished', async () => {
+      const tasks = { ...(live().activeTasks as Record<string, ActiveTask>) }
+      delete tasks[A]
+      setSession({
+        ...live(),
+        activeTasks: tasks,
+        taskNotifications: [
+          { taskId: 't-a', toolUseId: A, status: 'completed', outputFile: '', summary: '' }
+        ]
+      })
+      await renderProbe()
+      const byId = new Map(seen!.rows.map((r) => [r.toolUseId, r]))
+      expect(byId.get(A)?.isRunning).toBe(false)
+      // The shell is still placed under A and still running: the list keeps A as context.
+      expect(byId.get(A_BG_BASH)).toMatchObject({ isRunning: true, depth: 1, parentToolUseId: A })
+    })
+
+    it('puts a shell whose owner is not an agent row at the top level', async () => {
+      // The shell sits in a bucket whose owner has no spawn call in the tree.
+      setSession({
+        messages: nestedMessages(),
+        subagentMessages: { 'tu-unlisted': nestedBuckets()[A].slice(2) },
+        activeTasks: { [A_BG_BASH]: record('t-a-bg') }
+      })
+      await renderProbe()
+      expect(shape()).toEqual([
+        [A, 0, undefined],
+        [A_BG_BASH, 0, undefined]
+      ])
+    })
+
+    it('flags an explicit name, and not a type-only spawn', async () => {
+      setSession({
+        messages: [
+          assistantWithTool('m1', 'tu-named', 'Task', {
+            name: 'reviewer',
+            subagent_type: 'Explore',
+            description: 'audit the reducer'
+          }),
+          assistantWithTool('m2', 'tu-typed', 'Task', {
+            subagent_type: 'Explore',
+            description: 'find the handlers'
+          }),
+          assistantWithTool('m3', 'tu-sh', 'Bash', {
+            command: 'bun run dev',
+            run_in_background: true
+          })
+        ],
+        activeTasks: { 'tu-sh': record('t-sh') }
+      })
+      await renderProbe()
+      expect(seen?.rows.map((r) => [r.toolUseId, r.name, r.hasExplicitName])).toEqual([
+        ['tu-named', 'reviewer', true],
+        ['tu-typed', 'Explore', false],
+        ['tu-sh', 'bun', false]
+      ])
+    })
+
+    it('lists a lone shell in rows while the agent total stays 0', async () => {
+      setSession({
+        messages: [
+          assistantWithTool('m3', 'tu-sh', 'Bash', {
+            command: 'bun run dev',
+            run_in_background: true
+          })
+        ],
+        activeTasks: { 'tu-sh': record('t-sh') }
+      })
+      await renderProbe()
+      expect(shape()).toEqual([['tu-sh', 0, undefined]])
+      expect(seen?.totalCount).toBe(0)
     })
   })
 

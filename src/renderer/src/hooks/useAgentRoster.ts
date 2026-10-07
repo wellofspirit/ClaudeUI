@@ -16,7 +16,9 @@
  * child row follows its parent, in the parent's spawn order.
  *
  * Shells are the opposite: they come from the live lifecycle records, and only
- * while they run (§7, "the shell rule").
+ * while they run (§7, "the shell rule"). They are listed in the SAME tree as
+ * the agents (§10): a shell sits under the agent whose transcript holds its
+ * Bash call, which `findTaskBlocks` reports as `ownerToolUseId`.
  *
  * Scanning is the expensive part, so it is memoized per message array — one
  * walk per bucket, shared by every surface. A streaming delta in one agent's
@@ -50,8 +52,18 @@ export interface AgentRosterRow {
   /** The agent's ORIGIN tool_use id — what every other store map is keyed by. */
   toolUseId: string
   kind: 'agent' | 'shell'
-  /** What to call it: the spawn call's name, its type, or the command. */
+  /**
+   * The spawn call's name, its type or its model; for a shell the command's first
+   * word. The list shows `agentRowLabel`, not this.
+   */
   name: string
+  /**
+   * The spawn call gave this agent a name of its own (or it is a dispatch, whose
+   * label is a real identity). When false, `name` is only a type or model
+   * fallback ("Explore"), and the list labels the row with its description.
+   * Always false for a shell, whose label is its command.
+   */
+  hasExplicitName: boolean
   /**
    * The agent TYPE the spawn call named (a custom type's tile, ADR-094); absent
    * when it named none, and for a cross-engine dispatch. The default type is
@@ -61,9 +73,12 @@ export interface AgentRosterRow {
   /** Set exactly when this row is a cross-engine dispatch: the tile is an X. */
   dispatch?: { engine: string; model?: string }
   description: string
-  /** 0 for a spawn in the main transcript; one more per agent it is nested in. Shells are 0. */
+  /**
+   * 0 for a spawn in the main transcript; one more per agent it is nested in. A
+   * shell is 0 in `shells`, and one deeper than the agent that launched it in `rows`.
+   */
   depth: number
-  /** The origin id of the agent whose transcript holds the spawn call; absent at depth 0. */
+  /** The origin id of the agent whose transcript holds the spawn call (a shell: that launched it); absent at depth 0. */
   parentToolUseId?: string
   isRunning: boolean
   isError: boolean
@@ -76,13 +91,22 @@ export interface AgentRosterRow {
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
   /** 1 unless the agent was resumed (ADR-073). */
   runIndex: number
+  /** A shell's start (ms epoch, from its lifecycle record): what a running shell's clock counts from. */
+  startedAt?: number
 }
 
 export interface AgentRoster {
   /** Every agent at every depth, depth-first: each row is followed by its descendants. */
   agents: AgentRosterRow[]
-  /** Background shells that are running, plus a finished one whose entry is still open. */
+  /** Background shells that are running, plus a finished one whose entry is still open. All depth 0. */
   shells: AgentRosterRow[]
+  /**
+   * What the list draws (§10): the agents and the shells in one depth-first
+   * tree. A shell is placed under the agent that launched it, one level deeper,
+   * after that agent's child agents; a shell launched by the main session (or
+   * by an agent the tree does not hold) closes the list at depth 0.
+   */
+  rows: AgentRosterRow[]
   /** Running agents (every depth) plus running shells — what the pill and tab show. */
   runningCount: number
   runningAgentCount: number
@@ -91,17 +115,37 @@ export interface AgentRoster {
   totalCount: number
 }
 
+/**
+ * What the list calls a row (§10): a shell is its whole command (`name` is only
+ * the command's first word), an agent its explicit name, and an unnamed agent
+ * its description, because its `name` is only a type or model that many rows
+ * share. Shared with the shell entry's "launched by" line, so the two cannot
+ * disagree.
+ */
+export function agentRowLabel(
+  row: Pick<AgentRosterRow, 'kind' | 'name' | 'description' | 'hasExplicitName'>
+): string {
+  if (row.kind === 'shell') return row.description || row.name
+  return row.hasExplicitName ? row.name : row.description || row.name
+}
+
 /** One spawn call as a bucket walk sees it — no position in the tree yet. */
 export interface ScannedEntry {
   toolUseId: string
   kind: 'agent' | 'shell'
   name: string
+  hasExplicitName: boolean
   type?: string
   dispatch?: { engine: string; model?: string }
   description: string
   hasResult: boolean
   resultIsError: boolean
   isBackground: boolean
+  /**
+   * Shells only: the origin id of the agent whose transcript holds the Bash
+   * call, or null for the main transcript (`findTaskBlocks`' bucket key).
+   */
+  ownerToolUseId?: string | null
 }
 
 /** A scanned entry placed in the tree. */
@@ -115,6 +159,7 @@ type Buckets = Readonly<Record<string, ChatMessage[]>>
 const EMPTY: AgentRoster = {
   agents: [],
   shells: [],
+  rows: [],
   runningCount: 0,
   runningAgentCount: 0,
   runningShellCount: 0,
@@ -198,6 +243,20 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
         toolUseId: block.toolUseId,
         kind: 'agent' as const,
         name,
+        // A name the spawn gave, or a dispatch label, is an identity; the rest
+        // of the chain above is a fallback that many agents share. The engines'
+        // views fill `name` with the TYPE when the call named no one (Claude
+        // `name ?? subagent_type`, opencode's `agent`, pi), so a `name` equal to
+        // the type says nothing about this agent either.
+        hasExplicitName:
+          !!view?.dispatch ||
+          (!!view?.name && view.name !== view.subagent) ||
+          // Codex v1 only: its normalizer's description is the placeholder "Agent",
+          // and a spawn that names no one and has no type carries just its model,
+          // which is what these rows have always been listed under. That model IS
+          // their identity. On any other engine a `model` is an override on an
+          // otherwise anonymous agent, and the description says more.
+          (engineId === 'codex' && !view?.name && !view?.subagent && !!view?.model),
         ...(view?.subagent ? { type: view.subagent } : {}),
         ...(view?.dispatch ? { dispatch: view.dispatch } : {}),
         description: view?.description || view?.prompt || '',
@@ -260,36 +319,44 @@ function listShells(opts: {
   subagentMessages: Buckets
 }): ScannedEntry[] {
   if (opts.isHistorical) return []
-  const shell = (toolUseId: string, block: ToolUseBlock, hasResult: boolean, isError: boolean) => {
+  const shell = (
+    toolUseId: string,
+    block: ToolUseBlock,
+    hasResult: boolean,
+    isError: boolean,
+    ownerToolUseId: string | null
+  ) => {
     const command = String(block.toolInput?.command ?? '')
     return {
       toolUseId,
       kind: 'shell' as const,
       name: command.split(/\s+/)[0] || 'shell',
+      hasExplicitName: false,
       description: command,
       hasResult,
       resultIsError: isError,
-      isBackground: true
+      isBackground: true,
+      ownerToolUseId
     }
   }
 
   const out: ScannedEntry[] = []
   for (const [toolUseId, record] of Object.entries(opts.activeTasks)) {
     if (record.taskType !== 'local_bash' || record.isBackgrounded !== true) continue
-    const { taskBlock, resultBlock } = findTaskBlocks(
+    const { taskBlock, resultBlock, ownerToolUseId } = findTaskBlocks(
       opts.messages,
       toolUseId,
       opts.subagentMessages
     )
     if (!taskBlock) continue
-    out.push(shell(toolUseId, taskBlock, !!resultBlock, !!resultBlock?.isError))
+    out.push(shell(toolUseId, taskBlock, !!resultBlock, !!resultBlock?.isError, ownerToolUseId))
   }
 
   for (const toolUseId of opts.openedIds) {
     if (opts.activeTasks[toolUseId]) continue
     const notification = latestNotification(opts.notifications, toolUseId)
     if (!notification) continue
-    const { taskBlock, resultBlock } = findTaskBlocks(
+    const { taskBlock, resultBlock, ownerToolUseId } = findTaskBlocks(
       opts.messages,
       toolUseId,
       opts.subagentMessages
@@ -302,7 +369,9 @@ function listShells(opts: {
         notification,
         resultText: resultBlock?.toolResult
       })
-    if (background) out.push(shell(toolUseId, taskBlock, !!resultBlock, !!resultBlock?.isError))
+    if (background) {
+      out.push(shell(toolUseId, taskBlock, !!resultBlock, !!resultBlock?.isError, ownerToolUseId))
+    }
   }
   return out
 }
@@ -311,7 +380,10 @@ function toRow(
   entry: RosterEntry,
   opts: {
     isHistorical: boolean
-    activeTasks: Record<string, { taskId: string; taskType: string; runIndex?: number }>
+    activeTasks: Record<
+      string,
+      { taskId: string; taskType: string; runIndex?: number; startedAt?: number }
+    >
     notifications: TaskNotification[]
     progress: Record<
       string,
@@ -335,6 +407,7 @@ function toRow(
     toolUseId: entry.toolUseId,
     kind: entry.kind,
     name: entry.name,
+    hasExplicitName: entry.hasExplicitName,
     ...(entry.type ? { type: entry.type } : {}),
     ...(entry.dispatch ? { dispatch: entry.dispatch } : {}),
     description: entry.description,
@@ -357,7 +430,8 @@ function toRow(
             : (notification?.usage ?? progress?.usage)
         }
       : {}),
-    runIndex: active?.runIndex ?? notification?.runIndex ?? 1
+    runIndex: active?.runIndex ?? notification?.runIndex ?? 1,
+    ...(entry.kind === 'shell' && active?.startedAt ? { startedAt: active.startedAt } : {})
   }
 }
 
@@ -395,6 +469,55 @@ function settleOrphans(
     running.set(entry.toolUseId, r.isRunning)
     return r
   })
+}
+
+/**
+ * The unified list (ADR-073 §10): the settled agents depth-first, with each
+ * shell placed inside its owner's subtree, one level below it. Within a parent
+ * the child agents (each followed by its own subtree) come first, then that
+ * parent's shells in `listShells` order. A shell whose owner is the main
+ * transcript, or is not an agent row in the tree, closes the list at depth 0.
+ *
+ * `agents` is already depth-first, so an owner's shells are emitted when the
+ * walk leaves its subtree: at the next agent that is not deeper than it, or at
+ * the end. A shell may outlive the agent that launched it; its row is still
+ * placed under that agent, and the Running filter keeps the agent as context.
+ */
+function unifyRows(
+  agents: AgentRosterRow[],
+  shells: { row: AgentRosterRow; owner: string | null }[]
+): AgentRosterRow[] {
+  const agentById = new Map(agents.map((a) => [a.toolUseId, a]))
+  const byOwner = new Map<string, AgentRosterRow[]>()
+  const loose: AgentRosterRow[] = []
+  for (const { row, owner } of shells) {
+    const parent = owner ? agentById.get(owner) : undefined
+    if (!parent) {
+      loose.push(row)
+      continue
+    }
+    const nested = { ...row, depth: parent.depth + 1, parentToolUseId: parent.toolUseId }
+    const list = byOwner.get(parent.toolUseId)
+    if (list) list.push(nested)
+    else byOwner.set(parent.toolUseId, [nested])
+  }
+  if (byOwner.size === 0) return [...agents, ...loose]
+
+  const out: AgentRosterRow[] = []
+  // Owners whose subtree is still being walked, innermost last.
+  const open: AgentRosterRow[] = []
+  const leave = (depth: number): void => {
+    while (open.length > 0 && open[open.length - 1].depth >= depth) {
+      out.push(...byOwner.get(open.pop()!.toolUseId)!)
+    }
+  }
+  for (const agent of agents) {
+    leave(agent.depth)
+    out.push(agent)
+    if (byOwner.has(agent.toolUseId)) open.push(agent)
+  }
+  leave(0)
+  return [...out, ...loose]
 }
 
 const NO_BUCKETS: Buckets = {}
@@ -443,11 +566,16 @@ export function useAgentRoster(): AgentRoster {
     }
     const agents = settleOrphans(tree, (entry) => toRow(entry, opts), opts)
     const shellRows = shells.map((entry) => toRow({ ...entry, depth: 0 }, opts))
+    const rows = unifyRows(
+      agents,
+      shellRows.map((row, i) => ({ row, owner: shells[i].ownerToolUseId ?? null }))
+    )
     const runningAgentCount = agents.filter((r) => r.isRunning).length
     const runningShellCount = shellRows.filter((r) => r.isRunning).length
     return {
       agents,
       shells: shellRows,
+      rows,
       runningCount: runningAgentCount + runningShellCount,
       runningAgentCount,
       runningShellCount,

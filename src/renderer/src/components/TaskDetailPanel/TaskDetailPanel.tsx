@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import { useAgentRoster } from '../../hooks/useAgentRoster'
+import { agentRowLabel, useAgentRoster } from '../../hooks/useAgentRoster'
 import { bashMovedToBackground, latestNotification } from '../chat/task-state'
 import { findTaskBlocks } from './utils'
 import { TaskDetailPanelView, type TaskEntryDescriptor } from './View'
@@ -27,7 +27,11 @@ export function TaskDetailPanel({
   const entries = useMemo<TaskEntryDescriptor[]>(() => {
     return openedTaskToolUseIds.map((toolUseId) => {
       // A nested agent's spawn, or a subagent's Bash, lives in its parent's bucket.
-      const { taskBlock, resultBlock } = findTaskBlocks(messages, toolUseId, subagentMessages)
+      const { taskBlock, resultBlock, ownerToolUseId } = findTaskBlocks(
+        messages,
+        toolUseId,
+        subagentMessages
+      )
       if (!taskBlock) return { toolUseId, kind: 'missing' as const }
       // A Bash cli.js moved to the background is a background shell too: its
       // tool_result is only the hand-off text, not the command's output.
@@ -40,7 +44,18 @@ export function TaskDetailPanel({
             notification: latestNotification(taskNotifications, toolUseId),
             resultText: resultBlock?.toolResult
           }))
-      if (isBackgroundBash) return { toolUseId, kind: 'bash-background' as const }
+      if (isBackgroundBash) {
+        // The shell entry links back to the agent that launched it, named the way
+        // the roster names it. Worked out here, once, not per mounted entry.
+        const owner = ownerToolUseId
+          ? roster.agents.find((a) => a.toolUseId === ownerToolUseId)
+          : undefined
+        return {
+          toolUseId,
+          kind: 'bash-background' as const,
+          ...(owner ? { ownerLabel: agentRowLabel(owner) } : {})
+        }
+      }
       return { toolUseId, kind: 'task' as const }
     })
   }, [
@@ -49,7 +64,8 @@ export function TaskDetailPanel({
     subagentMessages,
     isHistorical,
     activeTasks,
-    taskNotifications
+    taskNotifications,
+    roster.agents
   ])
 
   const handleToggle = useCallback(
