@@ -135,3 +135,42 @@ describe('merging and covering', () => {
     expect(restrictionNote(undefined)).toBe('')
   })
 })
+
+describe('path rules on a Windows session (drive paths are bare `D:/…`, never settings-relative `/D:/…`)', () => {
+  const win = (permissions: Permission_Rule[]) =>
+    callerRestrictionFromAgent({ id: 'custom', permissions }, 'D:\\repo\\pkg', 'win32')
+
+  it('a relative resource resolves against the drive cwd; the rule stays a drive path', () => {
+    const r = win([ALLOW_ALL, rule('edit', 'deny', 'secrets/*'), rule('read', 'ask', '../cfg/*')])
+    expect(r.deny).toEqual(
+      expect.arrayContaining([
+        'Edit(D:/repo/pkg/secrets/**)',
+        'Write(D:/repo/pkg/secrets/**)',
+        'MultiEdit(D:/repo/pkg/secrets/**)',
+        'NotebookEdit(D:/repo/pkg/secrets/**)'
+      ])
+    )
+    expect(r.ask).toContain('Read(D:/repo/cfg/**)')
+  })
+
+  it('an absolute resource (either slash style) keeps its drive', () => {
+    const r = win([ALLOW_ALL, rule('edit', 'deny', 'C:\\Users\\me\\.ssh\\*')])
+    expect(r.deny).toContain('Edit(C:/Users/me/.ssh/**)')
+    const slashed = win([ALLOW_ALL, rule('external_directory', 'deny', 'E:/data/*')])
+    expect(slashed.deny).toContain('Write(E:/data/**)')
+  })
+
+  it('no rule is a single-slash settings-relative `/D:/…`', () => {
+    const r = win([ALLOW_ALL, rule('edit', 'deny', 'secrets/*'), rule('read', 'deny', 'C:\\x\\*')])
+    expect(r.deny.filter((d) => /\(\/[A-Za-z]:/.test(d))).toEqual([])
+  })
+
+  it('a POSIX session keeps the `//abs` form, whatever the host platform', () => {
+    const r = callerRestrictionFromAgent(
+      { id: 'custom', permissions: [ALLOW_ALL, rule('edit', 'deny', 'secrets/*')] },
+      '/repo/pkg',
+      'win32'
+    )
+    expect(r.deny).toContain('Edit(//repo/pkg/secrets/**)')
+  })
+})

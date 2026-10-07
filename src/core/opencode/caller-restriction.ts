@@ -21,7 +21,7 @@
  * access outside its workspace: targets get no additional directories,
  * ADR-033).
  */
-import { isAbsolute, resolve as resolvePath } from 'node:path'
+import { posix, win32 } from 'node:path'
 import type { Permission_Ruleset } from './protocol-v2/openapi'
 import { V2_BUILTIN_ACTIONS } from './permission-keys'
 import { agentWhollyDenies, evaluateChildCall } from './subagent-permissions'
@@ -76,10 +76,23 @@ type Tier = 'deny' | 'ask'
 /** `*` in a 2.x resource crosses `/`; in a Claude path rule only `**` does. */
 const pathGlob = (resource: string): string => resource.replace(/\*+/g, '**')
 
-/** An absolute path specifier (`//abs`) for a 2.x path resource of `cwd`. */
+/** `C:\x` or `C:/x`: a Windows drive path (the shape decides, not `process.platform`). */
+const DRIVE_PATH = /^[A-Za-z]:[\\/]/
+
+/**
+ * An absolute path specifier for a 2.x path resource of `cwd`: `//abs` for a
+ * POSIX path, the bare drive form `D:/abs` for a Windows one (`/D:/abs` would
+ * be a single-slash settings-relative rule; cli.js, opencode and pi all read
+ * `X:/…` as absolute). The path flavour follows the paths' shape, so it is the
+ * same on every host. UNC paths (`\\host\share`) keep the old `/` + slashed
+ * form; they are out of scope.
+ */
 function absolutePathRule(resource: string, cwd: string): string {
-  const abs = isAbsolute(resource) ? resource : resolvePath(cwd, resource)
-  return `/${pathGlob(abs.replace(/\\/g, '/'))}`
+  const windows = [cwd, resource].some((p) => DRIVE_PATH.test(p) || p.startsWith('\\\\'))
+  const flavour = windows ? win32 : posix
+  const abs = flavour.isAbsolute(resource) ? resource : flavour.resolve(cwd, resource)
+  const slashed = pathGlob(abs.replace(/\\/g, '/'))
+  return DRIVE_PATH.test(abs) ? slashed : `/${slashed}`
 }
 
 /** The host a URL glob names, when it names one exactly. */
