@@ -15,6 +15,7 @@ import { FloatingError } from '../FloatingError'
 import { SandboxViolationToast } from '../SandboxViolationToast'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import { useStickToBottom } from '../../../hooks/useStickToBottom'
+import { useSettledFlag } from '../../../hooks/useSettledFlag'
 import {
   canUseFullscreenGesture,
   useFullscreenDoubleTap
@@ -34,6 +35,15 @@ import { useMessageHeightEstimator } from './use-message-height-estimator'
 const FULLSCREEN_HINT_KEY = 'claudeui.hint.fullscreenDoubleTap'
 /** The hint retires itself even if the user never acknowledges it. */
 const FULLSCREEN_HINT_TIMEOUT_MS = 10_000
+/**
+ * How long "running, nothing streaming" must hold before the typing indicator
+ * mounts. At the end of a turn the last item stream is removed one store commit
+ * BEFORE `status.state` leaves 'running' (a 2-14 ms gap); mounting the ~27px
+ * indicator row there makes the stick-to-bottom pin scroll to it, and the next
+ * commit unmounts it and the view jumps back — a one-frame flicker. Any gap
+ * between items is this short too; real "waiting for the model" lasts longer.
+ */
+const TYPING_INDICATOR_DELAY_MS = 150
 
 function readFullscreenHintDismissed(): boolean {
   try {
@@ -76,6 +86,10 @@ export function ChatPanel(): React.JSX.Element {
   const hasItemStreams = Object.values(itemStreams).some((s) => !s.target.ownerToolUseId)
   const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
   const status = useActiveSession((s) => s.status)
+  const showTypingIndicator = useSettledFlag(
+    !hasItemStreams && status.state === 'running',
+    TYPING_INDICATOR_DELAY_MS
+  )
   const evicted = useActiveSession((s) => s.evicted)
   const transcriptLoadFailed = useActiveSession((s) => s.transcriptLoadFailed)
 
@@ -320,7 +334,7 @@ export function ChatPanel(): React.JSX.Element {
                 </ImageGalleryProvider>
               </TranscriptSessionProvider>
               <div className="flex flex-col gap-5">
-                {!hasItemStreams && status.state === 'running' && <TypingIndicator />}
+                {showTypingIndicator && <TypingIndicator />}
               </div>
             </div>
           )}

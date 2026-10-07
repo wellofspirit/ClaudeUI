@@ -495,21 +495,104 @@ describe('ChatPanel — stick to bottom', () => {
     unmount()
   })
 
-  it('keeps the typing indicator inside the observed content', async () => {
-    useSessionStore.setState((state) => ({
-      sessions: {
-        ...state.sessions,
-        [ROUTE]: {
-          ...state.sessions[ROUTE],
-          status: { ...state.sessions[ROUTE].status, state: 'running' }
+  describe('typing indicator', () => {
+    // Only timeouts are faked: the stick-to-bottom hook's `performance.now` is spied above.
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    const indicator = (): HTMLElement | null => screen.queryByTestId('ChatPanel.typingIndicator')
+
+    const patchSession = (patch: {
+      state?: 'running' | 'idle'
+      streams?: 'one' | 'none'
+    }): void => {
+      useSessionStore.setState((state) => {
+        const sess = state.sessions[ROUTE]
+        return {
+          sessions: {
+            ...state.sessions,
+            [ROUTE]: {
+              ...sess,
+              status: patch.state ? { ...sess.status, state: patch.state } : sess.status,
+              itemStreams:
+                patch.streams === 'one'
+                  ? {
+                      s1: {
+                        target: { messageId: 'a2', blockIndex: 0, kind: 'text' },
+                        generation: 1,
+                        value: 'hi'
+                      }
+                    }
+                  : patch.streams === 'none'
+                    ? {}
+                    : sess.itemStreams
+            }
+          }
         }
-      }
-    }))
-    const { unmount } = await renderChatPanel()
-    const indicator = screen.getByTestId('ChatPanel.typingIndicator')
-    const watched = observedElements().filter((el) => el !== scroller())
-    expect(watched.some((el) => el.contains(indicator))).toBe(true)
-    unmount()
+      })
+    }
+
+    // Render synchronously (no awaited act) so the fake clock owns every timer the panel schedules.
+    async function renderPanel(): Promise<{ unmount: () => void }> {
+      const { ChatPanel } = await import('../ChatPanel')
+      return render(<ChatPanel />)
+    }
+
+    it('keeps the typing indicator inside the observed content', async () => {
+      patchSession({ state: 'running' })
+      const { unmount } = await renderPanel()
+      act(() => {
+        vi.advanceTimersByTime(150)
+      })
+      const el = screen.getByTestId('ChatPanel.typingIndicator')
+      const watched = observedElements().filter((w) => w !== scroller())
+      expect(watched.some((w) => w.contains(el))).toBe(true)
+      unmount()
+    })
+
+    it('shows the indicator for a running session with no stream only after the delay', async () => {
+      patchSession({ state: 'running' })
+      const { unmount } = await renderPanel()
+      expect(indicator()).toBeNull()
+      act(() => {
+        vi.advanceTimersByTime(149)
+      })
+      expect(indicator()).toBeNull()
+      act(() => {
+        vi.advanceTimersByTime(1)
+      })
+      expect(indicator()).not.toBeNull()
+
+      // And it leaves at once when the turn ends.
+      act(() => patchSession({ state: 'idle' }))
+      expect(indicator()).toBeNull()
+      unmount()
+    })
+
+    it('never renders the indicator across the end-of-turn gap (stream removed, then idle)', async () => {
+      patchSession({ state: 'running', streams: 'one' })
+      const { unmount } = await renderPanel()
+      expect(indicator()).toBeNull()
+
+      // Core drops the last item stream one commit before status leaves 'running'.
+      act(() => patchSession({ streams: 'none' }))
+      expect(indicator()).toBeNull()
+      act(() => {
+        vi.advanceTimersByTime(4)
+      })
+      expect(indicator()).toBeNull()
+      act(() => patchSession({ state: 'idle' }))
+      expect(indicator()).toBeNull()
+      act(() => {
+        vi.advanceTimersByTime(1000)
+      })
+      expect(indicator()).toBeNull()
+      unmount()
+    })
   })
 })
 
