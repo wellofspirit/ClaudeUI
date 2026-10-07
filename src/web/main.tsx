@@ -1,4 +1,4 @@
-import './main.css'
+import '@renderer/assets/app.css'
 
 import { StrictMode, useState, useEffect, useCallback, useRef } from 'react'
 import { createRoot } from 'react-dom/client'

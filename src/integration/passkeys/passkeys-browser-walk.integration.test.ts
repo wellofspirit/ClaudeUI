@@ -5,7 +5,7 @@
  * Everything the unit and component suites have to fake, this file uses for
  * real: a real app instance (windowless, its own DB), a real
  * `tailscale serve` HTTPS origin on the tailnet, real Microsoft Edge, the real
- * built web client from `out/web`, and real WebAuthn ceremonies performed by
+ * built web client from `out/renderer`, and real WebAuthn ceremonies performed by
  * the browser's own credential manager. The single stand-in is the
  * authenticator HARDWARE — a CDP virtual authenticator instead of Windows Hello
  * — because a headless run has no finger to present. Everything downstream of
@@ -35,7 +35,7 @@
  *
  * Requirements when the gate is on: Tailscale up with HTTPS certs on this
  * tailnet, Microsoft Edge installed, network, and a built web client
- * (`out/web`, i.e. `bun run build:web` at least once for the current client).
+ * (`out/renderer`, i.e. `bun run build` at least once for the current client).
  *
  *   CLAUDEUI_PASSKEYS_WALK=1 bunx vitest run --project integration \
  *     src/integration/passkeys/passkeys-browser-walk.integration.test.ts
@@ -130,7 +130,7 @@ const { tempHome, priorHome } = vi.hoisted(() => {
 
 // The electron shim, with two overrides that matter here:
 //  - `getAppPath()` must be the repo root, because `RemoteServer.getWebClientDir()`
-//    resolves `<appPath>/out/web` — the REAL built web client is the thing under
+//    resolves `<appPath>/out/renderer` — the REAL built web client is the thing under
 //    test, and the shim's default (`/test/app`) would serve the "not built yet"
 //    placeholder instead;
 //  - `getPath()` lands inside the temp HOME, so nothing writes next to the
@@ -472,10 +472,10 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     )
     const { existsSync } = await import('node:fs')
     const nodePath = await import('node:path')
-    const webIndex = nodePath.resolve(__dirname, '..', '..', '..', 'out', 'web', 'index.html')
+    const webIndex = nodePath.resolve(__dirname, '..', '..', '..', 'out', 'renderer', 'web.html')
     expect(
       existsSync(webIndex),
-      `built web client missing at ${webIndex} — run bun run build:web`
+      `built web client missing at ${webIndex} — run bun run build`
     ).toBe(true)
 
     const { TailscaleManager: Manager } = await import('../../core/services/tailscale-manager')

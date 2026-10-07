@@ -1,3 +1,7 @@
+@import 'tailwindcss';
+@source "../../";
+@source "../../../web";
+
 /* Prism's markdown tokenizer adds "table" as a token class (e.g. "token table
    table-data-rows"). Tailwind's `table` utility sets `display: table`, which
    breaks inline text flow inside code blocks. Force these back to inline. */
@@ -143,6 +147,36 @@ html,
 #root {
   height: 100vh;
   height: 100dvh; /* override: excludes mobile browser chrome when supported */
+}
+
+/* Platform backgrounds, keyed on <html data-shell> (set in index.html / web.html).
+   Electron paints a transparent vibrancy/acrylic window, so the desktop page must
+   not paint over it; a browser tab has nothing behind the page and needs a solid
+   background (per theme, via --color-bg-primary). The attribute selectors outrank
+   the shared rules above. */
+html[data-shell='desktop'] body {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: transparent;
+}
+
+html[data-shell='desktop'],
+html[data-shell='desktop'] #root {
+  background: transparent;
+}
+
+html[data-shell='web'] body {
+  min-height: 100vh;
+  background: var(--color-bg-primary);
+  /* Prevent iOS rubber-banding */
+  overscroll-behavior: none;
+  /* Prevent text selection on mobile */
+  -webkit-tap-highlight-color: transparent;
+}
+
+html[data-shell='web'],
+html[data-shell='web'] #root {
+  background: var(--color-bg-primary);
 }
 
 /* On mobile, the root layout div gets its height from visualViewport.height

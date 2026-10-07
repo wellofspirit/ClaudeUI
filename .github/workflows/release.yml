@@ -192,7 +192,6 @@ jobs:
         run: |
           bun run typecheck
           bunx electron-vite build
-          bunx vite build --config vite.web.config.ts
 
       - name: Package (macOS)
         if: matrix.platform == 'mac'
@@ -271,7 +270,7 @@ jobs:
           path: ${{ matrix.zip_name }}
 
       # The headless `claudeui-server` for THIS host, compiled from the same tree
-      # and the same `out/web` bundle the desktop package above already produced
+      # and the same `out/renderer` bundle the desktop package above already produced
       # (`build:server:compile` only checks that bundle exists; `verify:sqlite`
       # runs inside it). Host-native, no `--target`: bun cannot extract a foreign
       # runtime from a Windows host (ADR-061 §4) and neither leg needs one.
@@ -280,7 +279,7 @@ jobs:
       # rebundled `bun-claude` exists on mac and windows (ADR-006), and
       # `locateBunClaude()` reads `<appPath>/vendor/claude-cli/bun-claude[.exe]`
       # off the very app path `resolveAppPath()` (src/server/main.ts) settles on
-      # for a compiled executable — the directory holding `out/web`, i.e. the
+      # for a compiled executable — the directory holding `out/renderer`, i.e. the
       # stage root — so the staged layout is runnable as shipped. opencode, pi
       # and Codex are not shipped (ADR-082 §8): a fresh server has none until an
       # admin installs them from Settings › Harnesses › Installed, into the
@@ -341,7 +340,7 @@ jobs:
   # Headless `claudeui-server` for linux x64 + arm64, each compiled host-natively
   # (arm64 hosted runners are free for public repos; bun cross-targets exist but
   # are unnecessary here). The tarball holds the executable alone: it resolves
-  # its app path to the directory holding `out/web`, where Claude Code would
+  # its app path to the directory holding `out/renderer`, where Claude Code would
   # sit under `vendor/claude-cli`, and it does NOT: rebundle-cli is a
   # documented clean skip for ELF (bun's ELF standalone layout is
   # unimplemented), so there is no patched linux bun-claude and the Claude
@@ -435,7 +434,7 @@ jobs:
 
       - name: Build server executable
         run: |
-          bun run build:web
+          bunx electron-vite build
           bun run build:server:compile
           ./dist/server-bin/claudeui-server --help > /dev/null
 

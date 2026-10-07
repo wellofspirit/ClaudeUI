@@ -2127,8 +2127,7 @@ export class RemoteServer {
 
     if (url.pathname === '/remote/auth-info') {
       // Unauthenticated pre-handshake discovery. Deliberately routed BEFORE the
-      // static-asset branch, whose `endsWith('.js')` catch-all would otherwise
-      // hijack any future `/remote/*.js` route.
+      // static-asset branch so no future `/remote/...` route can be shadowed by it.
       this.serveAuthInfo(req, res)
     } else if (url.pathname === '/remote' || url.pathname === '/') {
       // Serve the web client
@@ -2145,17 +2144,15 @@ export class RemoteServer {
       // ADR-064. The entry route, ABOVE the general `/vscode` arm (it is the one
       // path under the prefix that must NOT demand the cookie — it is what mints
       // one) and above the static branch for the same reason `/remote/auth-info`
-      // is: that branch's `endsWith('.js')` catch-all would hijack every
-      // workbench bundle under `/vscode/stable-<commit>/static/…`.
+      // is: no other branch may shadow the entry route, and the IDE proxy below
+      // owns every workbench bundle under `/vscode/stable-<commit>/static/…`.
       this.serveIdeEnter(url, req, res)
     } else if (url.pathname === IDE_BASE_PATH || url.pathname.startsWith(`${IDE_BASE_PATH}/`)) {
       this.proxyIdeHttp(req, res)
-    } else if (
-      url.pathname.startsWith('/assets/') ||
-      url.pathname.endsWith('.js') ||
-      url.pathname.endsWith('.css')
-    ) {
-      // Serve static assets
+    } else if (url.pathname.startsWith('/assets/')) {
+      // Serve static assets. Only `/assets/`: the web dir is `out/renderer`, which
+      // also holds the DESKTOP `index.html` and `log-viewer.html` — they must
+      // never be reachable over HTTP, so no root-level catch-all.
       this.serveStatic(req, url.pathname, res)
     } else {
       res.writeHead(404)
@@ -2739,7 +2736,7 @@ export class RemoteServer {
 
   private serveWebClient(_url: URL, res: http.ServerResponse): void {
     const webDir = this.getWebClientDir()
-    const indexPath = path.join(webDir, 'index.html')
+    const indexPath = path.join(webDir, 'web.html')
 
     if (fs.existsSync(indexPath)) {
       // Serve the client HTML verbatim. The WS token now rides the URL fragment
@@ -2769,7 +2766,7 @@ export class RemoteServer {
 <body style="background:#1a1a2e;color:#eee;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
 <div style="text-align:center">
   <h1>ClaudeUI Remote</h1>
-  <p>Web client not built yet. Run <code>bun run build:web</code> first.</p>
+  <p>Web client not built yet. Run <code>bun run build</code> first.</p>
 </div>
 </body></html>`)
     }
@@ -2780,8 +2777,10 @@ export class RemoteServer {
     const safePath = path.normalize(pathname).replace(/^(\.\.[/\\])+/, '')
     const filePath = path.join(webDir, safePath)
 
-    // Ensure the file is within the web dir (prevent directory traversal)
-    if (!filePath.startsWith(webDir)) {
+    // Ensure the file is inside `<webDir>/assets` (prevent directory traversal).
+    // The trailing separator matters: a bare prefix test would let a sibling such
+    // as `assets-evil` through.
+    if (!filePath.startsWith(path.join(webDir, 'assets') + path.sep)) {
       res.writeHead(403)
       res.end('Forbidden')
       return
@@ -2802,7 +2801,8 @@ export class RemoteServer {
       '.png': 'image/png',
       '.svg': 'image/svg+xml',
       '.woff2': 'font/woff2',
-      '.woff': 'font/woff'
+      '.woff': 'font/woff',
+      '.map': 'application/json'
     }
 
     // Precompressed siblings written at build time by
@@ -2822,8 +2822,8 @@ export class RemoteServer {
       encoding = 'gzip'
     }
 
-    // The existsSync check above races anything that swaps out/web (an app
-    // upgrade replacing resources/web) — a vanished file must be a 404, not an
+    // The existsSync check above races anything that swaps out/renderer (an app
+    // upgrade replacing the asar) — a vanished file must be a 404, not an
     // uncaughtException dialog from the stat below.
     let size: number
     try {
@@ -2861,12 +2861,12 @@ export class RemoteServer {
   }
 
   private getWebClientDir(): string {
-    // In dev: out/web, in prod: resources/web
-    const appPath = getAppPath()
-    if (appPath.includes('app.asar')) {
-      return path.join(path.dirname(appPath), 'web')
-    }
-    return path.join(appPath, 'out', 'web')
+    // The one UI build: `out/renderer` holds `web.html` + `assets/` for this
+    // server and `index.html` for the desktop window. Packaged, `getAppPath()` is
+    // `…/resources/app.asar`; this runs in Electron's main process, whose `fs`
+    // reads inside an asar transparently (stat, existsSync, readFileSync,
+    // createReadStream), so no separate copy ships beside it.
+    return path.join(getAppPath(), 'out', 'renderer')
   }
 
   // ---------------------------------------------------------------------------

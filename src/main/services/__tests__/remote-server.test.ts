@@ -27,8 +27,8 @@ import { buildSentFileUrl } from '../../../shared/sent-file-url'
 // ---------------------------------------------------------------------------
 
 // `getAppPath()` drives where the server looks for the built web client
-// (`<appPath>/out/web/index.html`). Tests that need the real web-client HTML
-// served (mockup-token injection) must NOT depend on the repo's `out/web`
+// (`<appPath>/out/renderer/web.html`). Tests that need the real web-client HTML
+// served (mockup-token injection) must NOT depend on the repo's `out/renderer`
 // build artifact — in CI, tests run before the build, so it doesn't exist.
 // Expose a mutable ref so individual suites can point it at a temp dir they
 // populate themselves. Defaults to cwd to preserve prior behavior.
@@ -872,15 +872,15 @@ describe('RemoteServer — mockup HTTP route', () => {
     )
 
     // Provide a self-contained web-client build so the server serves the real
-    // index.html (and injects the mockup token) instead of the placeholder.
-    // The repo's `out/web` is gitignored and absent in CI, where tests run
+    // web.html (and injects the mockup token) instead of the placeholder.
+    // The repo's `out/renderer` is gitignored and absent in CI, where tests run
     // before the build — relying on it makes these tests non-hermetic.
     appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mockup-app-'))
     appPathRef.current = appDir
-    const webDir = path.join(appDir, 'out', 'web')
+    const webDir = path.join(appDir, 'out', 'renderer')
     fs.mkdirSync(webDir, { recursive: true })
     fs.writeFileSync(
-      path.join(webDir, 'index.html'),
+      path.join(webDir, 'web.html'),
       '<html><head></head><body>web client</body></html>'
     )
   })
@@ -928,8 +928,8 @@ describe('RemoteServer — mockup HTTP route', () => {
   it('serves static assets with nosniff (and no page CSP)', async () => {
     // serveStatic covers the hashed JS/CSS bundles. nosniff is the important
     // one here — CSP is a page-level policy and intentionally omitted for assets.
-    fs.mkdirSync(path.join(appDir, 'out', 'web', 'assets'), { recursive: true })
-    fs.writeFileSync(path.join(appDir, 'out', 'web', 'assets', 'app.js'), '/* bundle */')
+    fs.mkdirSync(path.join(appDir, 'out', 'renderer', 'assets'), { recursive: true })
+    fs.writeFileSync(path.join(appDir, 'out', 'renderer', 'assets', 'app.js'), '/* bundle */')
     await server.start(port, '127.0.0.1')
     const got = await httpGet(`http://127.0.0.1:${port}/assets/app.js`)
     expect(got.status).toBe(200)
@@ -1036,9 +1036,13 @@ describe('RemoteServer — static asset encoding + caching', () => {
     port = await ephemeralPort()
     appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'static-rs-'))
     appPathRef.current = appDir
-    webDir = path.join(appDir, 'out', 'web')
+    webDir = path.join(appDir, 'out', 'renderer')
     fs.mkdirSync(path.join(webDir, 'assets'), { recursive: true })
-    fs.writeFileSync(path.join(webDir, 'index.html'), '<html><body>web client</body></html>')
+    fs.writeFileSync(path.join(webDir, 'web.html'), '<html><body>web client</body></html>')
+    // The desktop entries share this directory and must stay unreachable.
+    fs.writeFileSync(path.join(webDir, 'index.html'), '<html><body>DESKTOP_SHELL</body></html>')
+    fs.writeFileSync(path.join(webDir, 'log-viewer.html'), '<html><body>LOG_VIEWER</body></html>')
+    fs.writeFileSync(path.join(webDir, 'root.js'), 'ROOT_LEVEL_JS')
     fs.writeFileSync(path.join(webDir, 'assets', 'app.js'), PAYLOAD)
     fs.writeFileSync(
       path.join(webDir, 'assets', 'app.js.br'),
@@ -1132,10 +1136,44 @@ describe('RemoteServer — static asset encoding + caching', () => {
     // Raw socket: `http.get` would collapse the dot segments client-side and
     // never put them on the wire. The server's own URL parse collapses them too,
     // so this lands on a non-existent in-dir path rather than reaching the
-    // `startsWith(webDir)` guard — either way nothing outside the dir is served.
+    // `<webDir>/assets` guard — either way nothing outside the dir is served.
     const got = await rawHttpGet(port, '/assets/../../secret.js', `127.0.0.1:${port}`)
     expect([403, 404]).toContain(got.status)
     expect(got.raw).not.toContain('TOP_SECRET')
+  })
+
+  it('serves a linked source map as JSON', async () => {
+    fs.writeFileSync(path.join(webDir, 'assets', 'app.js.map'), '{"version":3}')
+    const got = await httpGet(`http://127.0.0.1:${port}/assets/app.js.map`)
+    expect(got.status).toBe(200)
+    expect(got.headers['content-type']).toBe('application/json')
+    expect(got.body).toBe('{"version":3}')
+  })
+
+  it('cannot reach a sibling directory that shares the web dir name as a prefix', async () => {
+    const evil = path.join(appDir, 'out', 'renderer-evil', 'assets')
+    fs.mkdirSync(evil, { recursive: true })
+    fs.writeFileSync(path.join(evil, 'x.js'), 'EVIL_SIBLING')
+    for (const target of [
+      '/assets/../../renderer-evil/assets/x.js',
+      '/assets/..%2f..%2frenderer-evil/assets/x.js'
+    ]) {
+      const got = await rawHttpGet(port, target, `127.0.0.1:${port}`)
+      expect([403, 404], target).toContain(got.status)
+      expect(got.raw, target).not.toContain('EVIL_SIBLING')
+    }
+  })
+
+  it('serves nothing but web.html and /assets/ from the shared renderer directory', async () => {
+    // `out/renderer` also holds the DESKTOP index.html and log-viewer.html; neither
+    // may be served, and there is no root-level `.js`/`.css` catch-all.
+    for (const target of ['/index.html', '/log-viewer.html', '/root.js', '/web.html']) {
+      const got = await httpGet(`http://127.0.0.1:${port}${target}`)
+      expect(got.status, target).toBe(404)
+      expect(got.body, target).not.toMatch(/DESKTOP_SHELL|LOG_VIEWER|ROOT_LEVEL_JS|web client/)
+    }
+    const page = await httpGet(`http://127.0.0.1:${port}/remote`)
+    expect(page.body).toContain('web client')
   })
 })
 

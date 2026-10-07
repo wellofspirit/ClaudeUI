@@ -25,8 +25,8 @@ files:
   - '!.github/**'
   - '!**/*.log'
   - '!*.md'
-  # out/web is shipped as extraResources (resources/web) and prod resolves it
-  # there (remote-server getWebClientDir) — the asar copy is never read.
+  # The UI is one build in out/renderer now. This keeps a stale pre-one-bundle
+  # out/web left in an old checkout out of the asar.
   - '!out/web/**'
 extraResources:
   # Claude Code is the one bundled harness (ADR-082 §8): opencode, pi and Codex
@@ -44,8 +44,6 @@ extraResources:
     filter:
       - bun-claude*
       - version.json
-  - from: out/web
-    to: web
 asarUnpack:
   - resources/**
   - node_modules/node-pty/**
