@@ -65,6 +65,7 @@ import { harnessManifest } from './manifests'
 import { harnessSelection } from './selection-store'
 import { installDir, installedVersions, markVersionUsed, readInstallRecord } from './store'
 import { resolveSystemInstall } from './system-source'
+import { withinRange } from './version-gate'
 
 const LABELS: Record<HarnessId, string> = {
   claude: 'Claude Code',
@@ -386,8 +387,16 @@ function managedVersion(
 ): { version: string } | { reason: string } {
   const label = LABELS[id]
   if (choice === 'latest') {
-    const newest = installedVersions(id)[0]
-    return newest ? { version: newest } : { reason: `No version of ${label} is installed` }
+    // The newest installed version THIS build can run: the store is shared by
+    // every ClaudeUI build, so it can hold a version past this one's ceiling
+    // (another build's next major) that this adapter cannot drive.
+    const manifest = harnessManifest(id)
+    const newest = installedVersions(id).find((v) => withinRange(manifest, v))
+    return newest
+      ? { version: newest }
+      : {
+          reason: `No version of ${label} from ${manifest.floor} up to, not including, ${manifest.ceiling} is installed`
+        }
   }
   const version = !choice || choice === 'tested' ? harnessManifest(id).tested : choice
   return readInstallRecord(id, version)

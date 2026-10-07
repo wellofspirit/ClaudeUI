@@ -100,12 +100,27 @@ describe('collectHarnessGarbage', () => {
     expect(fs.existsSync(exact)).toBe(true)
   })
 
-  it('keeps the newest installed version for a `latest` selection', async () => {
-    const newest = install('pi', '0.99.1', 30)
-    const older = install('pi', '0.90.0', 30)
+  it('keeps the newest installed version this build can run for a `latest` selection', async () => {
+    const { tested, ceiling } = harnessManifest('pi')
+    const [major, minor] = tested.split('.').map(Number)
+    const newest = install('pi', `${major}.${minor + 1}.0`, 30)
+    const older = install('pi', `${major}.${minor}.${Number(tested.split('.')[2]) + 1}`, 30)
+    // Past the ceiling: not this build's "Latest" (it is a newer build's).
+    const nextMajor = install('pi', ceiling, 30)
     await gc(() => ({ source: 'managed', version: 'latest' }))
     expect(fs.existsSync(newest)).toBe(true)
     expect(fs.existsSync(older)).toBe(false)
+    expect(fs.existsSync(nextMajor)).toBe(true)
+  })
+
+  it('never removes a version past the ceiling: a newer ClaudeUI shares the store', async () => {
+    const { ceiling } = harnessManifest('opencode')
+    const newerBuilds = install('opencode', ceiling, 90)
+    const evenNewer = install('opencode', '9.1.0', 90)
+    const result = await gc()
+    expect(fs.existsSync(newerBuilds)).toBe(true)
+    expect(fs.existsSync(evenNewer)).toBe(true)
+    expect(result.removed).toEqual([])
   })
 
   it('keeps the managed version the resolver runs now, however long since it was resolved', async () => {
