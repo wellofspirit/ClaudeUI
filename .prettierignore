@@ -14,3 +14,6 @@ src/shared/opencode-config-schema.json
 
 # Scratch git worktrees created by the agent harness — not repo sources.
 .claude/worktrees/
+
+# Real opencode 2.x event recordings the mapper tests replay (S4); kept as recorded.
+src/core/opencode/__tests__/fixtures/opencode-v2/
