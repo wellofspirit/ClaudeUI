@@ -228,18 +228,18 @@ html,
 
 /* The busy ripple. Only transform and opacity animate, so it stays on the
    compositor (no main-thread paint per frame) however many rows are busy: the
-   dot dips like a drop landing, a fixed blurred glow breathes, and a hairline
-   ring drawn at its FINAL size scales up from 0.3x. Never name a class `ring`
-   here — that is a Tailwind utility. */
+   dot dips like a drop landing, a fixed blurred glow breathes, and a 2px ring
+   drawn at its FINAL size (13px) scales up from 0.45x. Never name a class
+   `ring` here — that is a Tailwind utility. */
 @keyframes status-dot-dip {
   0% {
     transform: scale(1);
   }
   6% {
-    transform: scale(0.55);
+    transform: scale(0.8);
   }
   14% {
-    transform: scale(1.15);
+    transform: scale(1.05);
   }
   22%,
   100% {
@@ -268,11 +268,11 @@ html,
 @keyframes status-dot-ring {
   0%,
   8% {
-    transform: scale(0.3);
+    transform: scale(0.45);
     opacity: 0;
   }
   10% {
-    transform: scale(0.3);
+    transform: scale(0.45);
     opacity: 0.8;
   }
   65% {
@@ -286,7 +286,7 @@ html,
 }
 
 .status-dot--ripple {
-  animation: status-dot-dip 3.2s ease-out infinite;
+  animation: status-dot-dip 2s ease-out infinite;
 }
 .status-dot--ripple::before {
   content: '';
@@ -294,21 +294,21 @@ html,
   inset: 0;
   border-radius: 9999px;
   box-shadow: 0 0 8px 2px color-mix(in srgb, var(--dot-color) 75%, transparent);
-  animation: status-dot-glow 3.2s ease-out infinite;
+  animation: status-dot-glow 2s ease-out infinite;
   will-change: opacity;
 }
 .status-dot--ripple::after {
   content: '';
   position: absolute;
-  left: -7px;
-  top: -7px;
-  width: 20px;
-  height: 20px;
+  left: -3.5px;
+  top: -3.5px;
+  width: 13px;
+  height: 13px;
   border-radius: 9999px;
   opacity: 0;
-  border: 0.75px solid var(--dot-color);
+  border: 2px solid var(--dot-color);
   box-shadow: 0 0 2px var(--dot-color);
-  animation: status-dot-ring 3.2s cubic-bezier(0.15, 0.55, 0.35, 1) infinite;
+  animation: status-dot-ring 2s cubic-bezier(0.15, 0.55, 0.35, 1) infinite;
   will-change: transform, opacity;
 }
 /* AFTER the shorthands: `animation:` resets animation-delay. The per-mount

@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { deriveSessionDotState, statusDotLabel, type SessionDotInput } from '../StatusDot'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import {
+  CYCLE_S,
+  SESSION_DOT_STATES,
+  deriveSessionDotState,
+  statusDotLabel,
+  type SessionDotInput
+} from '../StatusDot'
 
 const base: SessionDotInput = {
   active: false,
@@ -53,5 +61,36 @@ describe('statusDotLabel', () => {
   it('the subagents state reads as just the count', () => {
     expect(statusDotLabel('subagents', 1)).toBe('1 subagent running')
     expect(statusDotLabel('subagents', 2)).toBe('2 subagents running')
+  })
+})
+
+// The rules must survive merges (a stylesheet move once nearly dropped them) and `CYCLE_S`
+// must match the CSS cycle, because the random per-dot phase is drawn from it.
+describe('the status-dot rules in app.css', () => {
+  const css = readFileSync(join(__dirname, '../../../assets/app.css'), 'utf-8')
+
+  it.each(SESSION_DOT_STATES)('colours the `%s` state', (state) => {
+    expect(css).toContain(`.status-dot[data-state='${state}']`)
+  })
+
+  it.each(['status-dot-dip', 'status-dot-glow', 'status-dot-ring'])(
+    'defines @keyframes %s',
+    (name) => {
+      expect(css).toContain(`@keyframes ${name}`)
+    }
+  )
+
+  it('every ripple animation runs one CYCLE_S-second cycle', () => {
+    const durations: number[] = []
+    const rules = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    for (const rule of rules.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (!rule[1].trim().startsWith('.status-dot--ripple')) continue
+      for (const m of rule[2].matchAll(/animation:\s*status-dot-[\w-]+\s+([\d.]+)s/g)) {
+        durations.push(Number(m[1]))
+      }
+    }
+    // The base rule, ::before and ::after (not the reduced-motion `animation: none`).
+    expect(durations).toHaveLength(3)
+    for (const d of durations) expect(d).toBe(CYCLE_S)
   })
 })

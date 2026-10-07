@@ -1,7 +1,8 @@
 # ADR-095: The sidebar status dot ripples for activity, and turns violet while only subagents work
 
-**Status:** Accepted (2026-10-06).
-**Relates to:** [ADR-073](adr-073_agent-roster-and-task-run-identity.md) (the lifecycle records, `activeTasks`, this reads), [ADR-045](adr-045_engine-disconnect-status-contract.md) (a disconnect clears `activeTasks`, which is what keeps the violet state honest), [ADR-027](adr-027_test-data-attributes.md) (the test ids), mockups `97726c29` → `5dd637c3` → `28209383` → `2bbc3158` (the approved one).
+**Status:** Accepted (2026-10-06). Amended 2026-10-07: ripple retuned (softer dip, 2s cycle, 13px 2px
+ring, mockup `62a33e2c`); the rules live in the shared `app.css`, which the web client lacked until then.
+**Relates to:** [ADR-073](adr-073_agent-roster-and-task-run-identity.md) (the lifecycle records, `activeTasks`, this reads), [ADR-045](adr-045_engine-disconnect-status-contract.md) (a disconnect clears `activeTasks`, which is what keeps the violet state honest), [ADR-027](adr-027_test-data-attributes.md) (the test ids), mockups `97726c29` → `5dd637c3` → `28209383` → `2bbc3158` (the approved one) → `62a33e2c` (2026-10-07 retune).
 
 ## Context
 
@@ -38,12 +39,13 @@ source: they are exact for Claude and pi, cleared on disconnect (ADR-045), and c
 transcript that lost its terminal events (the fork bug fixed alongside this, where history-derived rows read
 "running").
 
-**The ripple.** A drop lands on the dot: the dot dips (scale .55 → 1.15 → 1), its glow blooms and settles
-to a faint halo that stays between drops, and one hairline ring leaves it and fades. One cycle is 3.2s.
+**The ripple.** A drop lands on the dot: the dot dips (scale .8 → 1.05 → 1), its glow blooms and settles
+to a faint halo that stays between drops, and one 2px ring leaves it and fades. One cycle is 2s.
 Each dot starts at a random point in the cycle, so a list of busy sessions does not ripple in unison.
 
 **Compositor-only.** Only `transform` and `opacity` animate. The glow is a fixed blurred layer whose opacity
-breathes; the ring is drawn at its final size (20px) and scaled up from 0.3×, which also keeps its line thin.
+breathes; the ring is drawn at its final size (13px) and scaled up from 0.45×, so its 2px line starts at
+about 0.9px and thickens as it spreads.
 The first build animated `box-shadow` and `inset`, which repaint on the renderer's main thread every frame
 for as long as a session is busy; the owner compared the two side by side and found the compositor version
 smoother as well as cheaper. Chromium already stops CSS animations in a hidden or fully covered window.
@@ -52,8 +54,9 @@ smoother as well as cheaper. Chromium already stops CSS animations in a hidden o
 
 ## Consequences
 
-- The ring overflows the dot's 14px slot (it reaches 20px). Nothing clips it and it does not move layout,
-  because it is an absolutely positioned pseudo-element. Do not add `overflow: hidden` to that slot.
+- The ring (13px) nearly fills the dot's 14px slot, and its glow and the dot's halo reach past it. Nothing
+  clips them and they do not move layout, because they are absolutely positioned pseudo-elements and
+  box-shadows. Do not add `overflow: hidden` to that slot.
 - No class may be called `ring`: Tailwind's `ring` utility draws a 3px box-shadow and silently changes the
   look (it did, in a mockup).
 - A missed terminal event leaves a record behind, and the dot then stays violet until the process
