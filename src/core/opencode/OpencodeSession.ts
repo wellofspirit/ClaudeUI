@@ -281,6 +281,12 @@ export class OpencodeSession extends BaseSession {
   private unsubscribeServerExit: (() => void) | null = null
   /** ClaudeUI changed opencode's config (S8): the agent list is re-read. */
   private unsubscribeConfigChanged: (() => void) | null = null
+  /** The catalog refill this session started, while it runs. */
+  private catalogRefresh: Promise<void> | null = null
+  /** The last window the catalog reported for a model this session ran. */
+  private knownContextWindow: { model: string; size: number } | null = null
+  /** The context window the last status line carried (null before the first). */
+  private shownContextWindow: number | null = null
 
   // ── Cost and context (history base + this process) ─────────────────────────
   private costBase: OpencodeCostInputs[] = []
@@ -409,6 +415,63 @@ export class OpencodeSession extends BaseSession {
         this.sendStatusLine()
       })
       .catch(() => {})
+  }
+
+  /**
+   * Re-read the session model's catalog entry: re-send the status when its
+   * capabilities changed, and the status line when they did or when the
+   * catalog's window is not the one the line shows (a refill after a miss).
+   */
+  private adoptCatalogCaps(): void {
+    if (this._cancelled) return
+    const next = this.resolveCapsForModel()
+    const capsChanged =
+      next.vision !== this._capabilities.vision ||
+      next.contextWindow !== this._capabilities.contextWindow
+    if (capsChanged) {
+      this._capabilities = next
+      this.sendStatus()
+    }
+    const { providerID, modelID } = parseModelString(this._model)
+    const catalogWindow = getOpencodeModelContextWindow(providerID, modelID)
+    const windowChanged =
+      this.shownContextWindow !== null &&
+      catalogWindow > 0 &&
+      catalogWindow !== this.shownContextWindow
+    if (capsChanged || windowChanged) this.sendStatusLine()
+  }
+
+  /**
+   * The session model's context window. Discovery's capability cache is
+   * process-wide and every credential, config or harness change drops it
+   * (`invalidateOpencodeModelCache`); until a discovery refills it, the window
+   * last read for this same model stands in — a window is a fact of the model,
+   * and a refill that disagrees re-sends the line (`adoptCatalogCaps`).
+   */
+  private contextWindowSize(): { size: number; cached: boolean } {
+    const { providerID, modelID } = parseModelString(this._model)
+    const size = getOpencodeModelContextWindow(providerID, modelID)
+    if (size > 0) {
+      this.knownContextWindow = { model: this._model, size }
+      return { size, cached: true }
+    }
+    const known = this.knownContextWindow
+    return { size: known?.model === this._model ? known.size : 0, cached: false }
+  }
+
+  /**
+   * Refill discovery's catalog while this session is connected (one refill at
+   * a time; discovery shares one probe across callers), then adopt what it
+   * holds.
+   */
+  private refreshCatalog(): void {
+    if (this._cancelled || !this.client || this.catalogRefresh) return
+    this.catalogRefresh = discoverOpencodeModels()
+      .catch(() => [])
+      .then(() => {
+        this.catalogRefresh = null
+        this.adoptCatalogCaps()
+      })
   }
 
   private resolveCapsForModel(): ResolvedCapabilities {
@@ -871,15 +934,7 @@ export class OpencodeSession extends BaseSession {
       // config must not leak into the global catalog. With the same config it
       // is this very server (one per config, S2), and it lingers after reads.
       await discoverOpencodeModels().catch(() => [])
-      const nextCaps = this.resolveCapsForModel()
-      if (
-        nextCaps.vision !== this._capabilities.vision ||
-        nextCaps.contextWindow !== this._capabilities.contextWindow
-      ) {
-        this._capabilities = nextCaps
-        this.sendStatus()
-        this.sendStatusLine()
-      }
+      this.adoptCatalogCaps()
     } catch (err) {
       const detail =
         err instanceof OpencodePermissionGuardError
@@ -2452,7 +2507,9 @@ export class OpencodeSession extends BaseSession {
       engineCostUsd: cost,
       tokens: tokensOf(tokens)
     })
-    if (context) this.lastContextLength = tokens.input + tokens.cache.read
+    // A step that reports no prompt (nothing metered) keeps the last reading.
+    const length = tokens.input + tokens.cache.read
+    if (context && length > 0) this.lastContextLength = length
   }
 
   /**
@@ -2537,7 +2594,6 @@ export class OpencodeSession extends BaseSession {
   }
 
   private buildStatusLine(): StatusLineData {
-    const parsed = parseModelString(this._model)
     const live = this.sumLiveTokens()
     const sum = {
       input: this.tokenBase.input + live.input,
@@ -2545,7 +2601,7 @@ export class OpencodeSession extends BaseSession {
       cacheWrite: this.tokenBase.cacheWrite + live.cacheWrite,
       cacheRead: this.tokenBase.cacheRead + live.cacheRead
     }
-    const ctx = getOpencodeModelContextWindow(parsed.providerID, parsed.modelID)
+    const ctx = this.contextWindowSize().size
     const usedPercentage =
       ctx > 0 && this.lastContextLength > 0
         ? Math.round((this.lastContextLength / ctx) * 100)
@@ -2571,7 +2627,12 @@ export class OpencodeSession extends BaseSession {
   }
 
   private sendStatusLine(): void {
-    this.send('session:status-line', this.buildStatusLine())
+    const line = this.buildStatusLine()
+    this.shownContextWindow = line.contextWindow.size
+    this.send('session:status-line', line)
+    // A cold or dropped catalog: refill it. The refill re-sends this line when
+    // the window it shows changes — no new step needed.
+    if (!this.contextWindowSize().cached) this.refreshCatalog()
   }
 
   /** The engine-neutral MeteringSnapshot (cumulative meter; opencode has no window). */
@@ -2599,10 +2660,7 @@ export class OpencodeSession extends BaseSession {
           cacheReadTokens: cacheRead
         }),
         engineReportedCostUsd: this.engineReportedCostUsd,
-        contextWindow: {
-          used: this.lastContextLength,
-          size: getOpencodeModelContextWindow(parsed.providerID, parsed.modelID)
-        }
+        contextWindow: { used: this.lastContextLength, size: this.contextWindowSize().size }
       }
       this.send('session:metering', snapshot)
     } catch {
