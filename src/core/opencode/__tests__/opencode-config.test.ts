@@ -50,6 +50,24 @@ import {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
+/**
+ * Windows only grants file symlinks with Developer Mode or SeCreateSymbolicLink
+ * (`EPERM` otherwise). Probe once so the symlink case is skipped honestly.
+ */
+const CAN_SYMLINK_FILE = ((): boolean => {
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-cfg-symlink-probe-'))
+  try {
+    const target = path.join(probeDir, 'target.json')
+    fs.writeFileSync(target, '{}')
+    fs.symlinkSync(target, path.join(probeDir, 'link.json'), 'file')
+    return true
+  } catch {
+    return false
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true })
+  }
+})()
+
 function withEnv(key: string, value: string | undefined, fn: () => void): void {
   const prev = process.env[key]
   if (value === undefined) {
@@ -1152,7 +1170,19 @@ describe('F11: conflict-aware, atomic writes', () => {
     })
   })
 
-  it('writes atomically, keeping the file mode and a symlink', () => {
+  it('writes atomically, keeping the file mode', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const file = path.join(tmpDir, 'opencode.json')
+      fs.writeFileSync(file, '{}')
+      fs.chmodSync(file, 0o600)
+      writeOpencodeNativeConfig({ model: 'a/b' })
+      expect(JSON.parse(fs.readFileSync(file, 'utf8')).model).toBe('a/b')
+      if (process.platform !== 'win32') expect(fs.statSync(file).mode & 0o777).toBe(0o600)
+      expect(fs.readdirSync(tmpDir).filter((f) => f.endsWith('.tmp'))).toEqual([])
+    })
+  })
+
+  it.skipIf(!CAN_SYMLINK_FILE)('writes through a symlinked config, keeping the link', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
       const real = path.join(tmpDir, 'real.json')
       fs.writeFileSync(real, '{}')

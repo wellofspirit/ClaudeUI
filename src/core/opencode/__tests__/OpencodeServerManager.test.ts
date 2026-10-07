@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { EventEmitter } from 'node:events'
 import type { ChildProcess } from 'node:child_process'
+import { join, resolve } from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import {
   OpencodeServerManager,
@@ -23,6 +24,20 @@ import { waitForPermissionGuard } from '../opencode-server-readiness'
 import type { McpHttpHost } from '../mcp-http-host'
 import type { OpencodeConfigInput } from '../opencode-server-config'
 import { logger } from '../../services/logger'
+
+// The manager `resolve`s every cwd (`/proj/a` becomes `D:\proj\a` on Windows), so
+// the rig's per-cwd config map is keyed, and every expected directory is spelled,
+// through the same `resolve`: the tests keep their POSIX-looking literals.
+const dir = (path: string): string => resolve(path)
+
+class ResolvedKeyMap<V> extends Map<string, V> {
+  override get(key: string): V | undefined {
+    return super.get(resolve(key))
+  }
+  override set(key: string, value: V): this {
+    return super.set(resolve(key), value)
+  }
+}
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
 //
@@ -117,7 +132,7 @@ function makeRig(
   const { spawnFn, calls } = makeSpawnFn(opts.delayMs)
   const { startMcpHostFn, hosts } = makeMcpHostFn()
   const waits: Rig['waits'] = []
-  const configs = new Map<string, OpencodeConfigInput>()
+  const configs = new ResolvedKeyMap<OpencodeConfigInput>()
   const manager = new OpencodeServerManager({
     spawnFn: opts.spawnFn ?? spawnFn,
     locateBinaryFn: opts.locateBinaryFn ?? (() => '/fake/opencode'),
@@ -150,8 +165,8 @@ describe('OpencodeServerManager (2.x) — keying', () => {
     const b = await manager.acquire('/proj/b')
     expect(calls).toHaveLength(1)
     expect(a.baseUrl).toBe(b.baseUrl)
-    expect(a.directory).toBe('/proj/a')
-    expect(b.directory).toBe('/proj/b')
+    expect(a.directory).toBe(dir('/proj/a'))
+    expect(b.directory).toBe(dir('/proj/b'))
     expect(calls[0].cwd).toBe('/server-home')
     expect(manager.activeCount).toBe(1)
   })
@@ -310,7 +325,7 @@ describe('OpencodeServerManager (2.x) — hosted-tools readiness', () => {
     const a = await manager.acquire('/a')
     await manager.acquire('/a')
     await manager.acquire('/b')
-    expect(waits.map((w) => w.directory)).toEqual(['/a', '/b'])
+    expect(waits.map((w) => w.directory)).toEqual([dir('/a'), dir('/b')])
     expect(waits[0]).toMatchObject({ baseUrl: a.baseUrl, pluginExpected: true })
     expect(a.hostedTools).toEqual(READY)
   })
@@ -360,7 +375,14 @@ describe('OpencodeServerManager (2.x) — hosted-tools readiness', () => {
     const conn = await manager.acquire('/a')
     expect(conn.hostedTools.state).toBe('timeout')
     expect(
-      warn.mock.calls.some(([, msg]) => /still not registered.*\/a.*10000 ms/.test(String(msg)))
+      warn.mock.calls.some(([, msg]) => {
+        const line = String(msg)
+        return (
+          line.includes('still not registered') &&
+          line.includes(dir('/a')) &&
+          line.includes('10000 ms')
+        )
+      })
     ).toBe(true)
   })
 
@@ -434,7 +456,7 @@ describe('OpencodeServerManager (2.x) — config reload (S8)', () => {
     waits.length = 0
     await expect(manager.reloadConfig()).resolves.toEqual({ reloaded: 1, busy: 0, failed: 0 })
     expect(reloads).toHaveLength(1)
-    expect(waits.map((w) => w.directory).sort()).toEqual(['/a', '/b'])
+    expect(waits.map((w) => w.directory).sort()).toEqual([dir('/a'), dir('/b')])
     expect(changed).toHaveBeenCalledTimes(1)
     await manager.acquire('/a')
     expect(waitGuard).toHaveBeenCalledTimes(3) // /a, /b, then /a again after the reload
@@ -587,7 +609,7 @@ describe('OpencodeServerManager (2.x) — first-contact hook (S7 follow-up)', ()
       })
       const leased = manager.acquire('/a')
       await vi.advanceTimersByTimeAsync(CLEANUP_RETRY_DELAYS_MS[0])
-      await expect(leased).resolves.toMatchObject({ directory: '/a' })
+      await expect(leased).resolves.toMatchObject({ directory: dir('/a') })
       expect(runs).toBe(2)
       expect(waits).toHaveLength(1) // readiness only after the successful retry
       // Cleaned now: the next acquire runs no hook.
@@ -619,7 +641,7 @@ describe('OpencodeServerManager (2.x) — first-contact hook (S7 follow-up)', ()
       expect(resolved).toBe(false)
       release()
       await vi.advanceTimersByTimeAsync(0)
-      await expect(leased).resolves.toMatchObject({ directory: '/a' })
+      await expect(leased).resolves.toMatchObject({ directory: dir('/a') })
     } finally {
       vi.useRealTimers()
     }
@@ -647,7 +669,7 @@ describe('OpencodeServerManager (2.x) — first-contact hook (S7 follow-up)', ()
       expect(waits).toHaveLength(0)
       expect(calls[0].child.killed).toBe(false) // the credential lease still holds it
       broken = false
-      await expect(manager.acquire('/a')).resolves.toMatchObject({ directory: '/a' })
+      await expect(manager.acquire('/a')).resolves.toMatchObject({ directory: dir('/a') })
       expect(waits).toHaveLength(1)
     } finally {
       vi.useRealTimers()
@@ -743,8 +765,8 @@ describe('OpencodeServerManager (2.x) — secrets', () => {
 
 describe('locatePluginDir', () => {
   it('finds the shipped directory plugin in dev (repo root) and maps app.asar → app.asar.unpacked', () => {
-    const dir = locatePluginDir(process.cwd())
-    expect(dir).toBe(`${process.cwd()}/resources/opencode/claudeui-xeng`)
+    const pluginDir = locatePluginDir(process.cwd())
+    expect(pluginDir).toBe(join(process.cwd(), 'resources', 'opencode', 'claudeui-xeng'))
     expect(locatePluginDir('/nowhere/app.asar')).toBeNull()
   })
 })
@@ -797,9 +819,9 @@ describe('ADR-097 §3 (S6) — fail closed without the plugin permission guard',
     })
     await expect(manager.acquire('/p')).rejects.toBeInstanceOf(OpencodePermissionGuardError)
     answer = 'active'
-    await expect(manager.acquire('/p')).resolves.toMatchObject({ directory: '/p' })
+    await expect(manager.acquire('/p')).resolves.toMatchObject({ directory: dir('/p') })
     await manager.acquire('/p')
-    expect(probes).toEqual(['/p', '/p']) // the active result is memoized
+    expect(probes).toEqual([dir('/p'), dir('/p')]) // the active result is memoized
     manager.dispose()
   })
 })

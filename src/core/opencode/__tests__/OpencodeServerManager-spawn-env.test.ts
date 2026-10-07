@@ -14,6 +14,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { EventEmitter } from 'node:events'
+import { resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
 import type { McpHttpHost } from '../mcp-http-host'
 import type { HarnessLaunch } from '../../harness/launch'
@@ -85,7 +86,7 @@ describe('opencode serve --stdio spawn (default spawn path)', () => {
     })
     const conn = await manager.acquire('/some/project')
     expect(conn.baseUrl).toBe('http://127.0.0.1:41234')
-    expect(conn.directory).toBe('/some/project')
+    expect(conn.directory).toBe(resolve('/some/project'))
     manager.dispose()
     expect(spawnCalls).toHaveLength(1)
     return spawnCalls[0]
