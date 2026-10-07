@@ -33,9 +33,10 @@ extraResources:
   # are downloaded into ClaudeUI's managed store (~/.claude/ui/harnesses), never
   # packaged. A test (src/core/harness/__tests__/packaging.test.ts) holds this.
   #
-  # Ship the rebundled Bun binary + version metadata + native addons that
-  # the Electron main process loads directly (audio-capture.node etc. — see
-  # src/main/services/voice-capture.ts). The source cli.js also present in
+  # Ship the rebundled Bun binary + version metadata. Nothing in the app loads
+  # a loose native addon any more: voice capture runs in the renderer
+  # (ADR-098), and cli.js loads its own addons (audio-capture, computer-use-*)
+  # from inside the Bun binary. The source cli.js also present in
   # vendor/claude-cli/ is a debug artifact (already baked into bun-claude.exe
   # by scripts/rebundle-cli.mjs), no need to duplicate ~13 MB.
   - from: vendor/claude-cli
@@ -43,7 +44,6 @@ extraResources:
     filter:
       - bun-claude*
       - version.json
-      - vendor/**/*.node
   - from: out/web
     to: web
 asarUnpack:

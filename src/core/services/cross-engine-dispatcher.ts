@@ -126,6 +126,7 @@ import {
   type PiTurnOutcome,
   type SpawnPiChildFn
 } from '../pi/pi-child-runner'
+import { collectClaudeMcpForPi, piMcpRuleKey } from '../pi/pi-mcp-bridge'
 // Codex target primitives (ADR-033 slice H — Codex as a dispatch TARGET). Same
 // one-way-edge reasoning as the opencode/pi imports above: none of these leaf
 // modules import THIS file. CodexSession.ts DOES (it is a dispatch SOURCE,
@@ -2096,6 +2097,9 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
  *    hook) still activates normally — it depends ONLY on
  *    `CLAUDEUI_PI_BRIDGE_URL`/`TOKEN`, independent of the hosted-tools gate
  *    (verified against pi-bridge-source.ts's own independence design).
+ *  - The shared MCP catalog IS registered (ADR-096, `CLAUDEUI_PI_MCP=1`, the
+ *    servers handed to the target's bridge host at the spawn site), as an
+ *    opencode target gets it — MCP tools are not a recursion path.
  */
 /**
  * The env vars a pi dispatch TARGET's child process gets. Extracted as a pure
@@ -2128,7 +2132,11 @@ export function buildPiTargetChildEnv(bridge: { url: string; token: string }): N
     // ADR-089: a dispatch target never gets the host-run `agent` or
     // `send_message` tools (same leak argument as the three above).
     CLAUDEUI_PI_AGENT_TOOL: '',
-    CLAUDEUI_PI_SEND_MESSAGE: ''
+    CLAUDEUI_PI_SEND_MESSAGE: '',
+    // ADR-096: a dispatch target registers the shared MCP catalog, as an
+    // opencode target does; the configs come from the target's own bridge
+    // host (`mcpServers` at the spawn site), never from this env.
+    CLAUDEUI_PI_MCP: '1'
   }
 }
 
@@ -5155,7 +5163,14 @@ export class CrossEngineDispatcher {
       cwd: ctx.cwd,
       model,
       spawn: this.spawnPiTarget,
-      spawnOpts: { gateHandler, ...PI_TARGET_SPAWN_FLAGS },
+      // The shared MCP catalog (ADR-096), read at target creation and served
+      // by the target's bridge host; its calls hit this target's gate, which
+      // spells Claude MCP rules in pi's form (`mcpRuleKey`).
+      spawnOpts: {
+        gateHandler,
+        mcpServers: collectClaudeMcpForPi(ctx.cwd).servers,
+        ...PI_TARGET_SPAWN_FLAGS
+      },
       ownerToolUseId: () => entry.ctx.toolUseId,
       emit: () => entry.ctx.emit,
       exitMessage: 'pi target process exited unexpectedly',
@@ -5234,7 +5249,10 @@ export class CrossEngineDispatcher {
       // The acceptEdits base matches agent-control paths cwd-relative
       // (ADR-084 §3); without it an absolute path inside a target running in a
       // `.claude/worktrees/<name>` checkout would ask on every edit.
-      cwd: entry.cwd
+      cwd: entry.cwd,
+      // pi sanitizes MCP tool names (its own mcp.json servers run here too):
+      // a user's Claude-form deny/ask rule must still match (ADR-096).
+      mcpRuleKey: piMcpRuleKey
     })
 
     if (verdict.decision === 'allow') return { behavior: 'allow' }

@@ -86,6 +86,14 @@ export interface PermissionEngineContext {
   platform?: NodeJS.Platform
   /** realpath for plan mode's second read-only oracle. Tests inject; sessions default to the host (`hostRealpath`). */
   realpath?: PlanReadOnlyScope['realpath']
+  /**
+   * How a Claude MCP rule's tool name is spelled in THIS engine's tool names
+   * before it is compared (ADR-096). pi sanitizes `mcp__<server>__<tool>` to
+   * `[A-Za-z0-9_]` (`mcp__my-server__x` is called `mcp__my_server__x`), so pi's
+   * gates pass `piMcpRuleKey` and a rule written for Claude matches pi's call.
+   * Absent = compared as written (Codex names MCP calls in Claude's own form).
+   */
+  mcpRuleKey?: (ruleTool: string) => string
 }
 
 // ---------------------------------------------------------------------------
@@ -487,13 +495,20 @@ const MCP_RULE_PREFIX = 'mcp__'
  * the gate falls back to when the elicitation does not name a tool; pi's own
  * `mcp__*` tool calls now honour the same rules, which they never did before.
  */
-function mcpRuleMatches(parsed: { tool: string; specifier?: string }, toolName: string): boolean {
+function mcpRuleMatches(
+  parsed: { tool: string; specifier?: string },
+  toolName: string,
+  ruleKey: ((ruleTool: string) => string) | undefined
+): boolean {
   // `Tool()` / `Tool(*)` already collapsed to a bare rule in parseClaudeRule; a
   // rule that still carries a specifier is asking for something Claude's MCP
   // syntax cannot express, and inventing a meaning for it here would either
   // over- or under-grant. It matches nothing, exactly as it did before.
   if (parsed.specifier !== undefined) return false
-  const rule = parsed.tool.endsWith('__*') ? parsed.tool.slice(0, -3) : parsed.tool
+  const bare = parsed.tool.endsWith('__*') ? parsed.tool.slice(0, -3) : parsed.tool
+  // The engine's spelling of the rule (pi: its sanitizer), applied AFTER the
+  // server-form `__*` is dropped so the wildcard is never sanitized into a name.
+  const rule = ruleKey ? ruleKey(bare) : bare
   return toolName === rule || toolName.startsWith(`${rule}__`)
 }
 
@@ -520,11 +535,12 @@ function ruleMatchesTool(
   kind: ToolKind,
   toolName: string,
   input: Record<string, unknown>,
-  cwd: string | undefined
+  cwd: string | undefined,
+  mcpRuleKey?: (ruleTool: string) => string
 ): boolean {
   const parsed = parseClaudeRule(rule)
   if (!parsed) return false
-  if (parsed.tool.startsWith(MCP_RULE_PREFIX)) return mcpRuleMatches(parsed, toolName)
+  if (parsed.tool.startsWith(MCP_RULE_PREFIX)) return mcpRuleMatches(parsed, toolName, mcpRuleKey)
   const mappedKind = CLAUDE_TOOL_TO_KIND[parsed.tool]
   if (!mappedKind || mappedKind !== kind) return false
 
@@ -1104,7 +1120,7 @@ export function decideWithSource(
 ): PermissionVerdict {
   const kind = piToolKind(toolName)
   const match = (rules: readonly string[]): string | undefined =>
-    rules.find((r) => ruleMatchesTool(r, kind, toolName, input, ctx.cwd))
+    rules.find((r) => ruleMatchesTool(r, kind, toolName, input, ctx.cwd, ctx.mcpRuleKey))
   // Only Bash rules can match the command kind; both of its rule tiers in one call.
   const shell =
     kind === 'command'

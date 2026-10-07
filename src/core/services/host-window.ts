@@ -6,8 +6,8 @@
  * `CLAUDEUI_NO_WINDOW=1` run never makes one at all, so nothing on the sync,
  * session or service path may CAPTURE a window at registration time. Everything
  * that genuinely needs the host's window — the `host-local` delivery lane, a
- * native folder picker, the spawn handle engines hold for voice capture — reads
- * it from here, at use time, and copes with `null`.
+ * native folder picker, the desktop voice capture owner (`voice:start-recording`)
+ * — reads it from here, at use time, and copes with `null`.
  *
  * One handle, one owner: `createWindow()` publishes it, and it is the only
  * answer to "is there a host window?". A module that stored its own copy would

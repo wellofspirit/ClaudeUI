@@ -75,11 +75,6 @@ vi.mock('../../../core/services/session-history', () => ({
 }))
 vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
-vi.mock('../../../core/services/voice-capture', () => ({
-  startRecording: vi.fn(),
-  stopRecording: vi.fn()
-}))
-vi.mock('../../../core/services/voice-client', () => ({ VoiceClient: class {} }))
 // NOTE: `context-window` is deliberately NOT mocked (the queue test stubs it to
 // a flat 200000). The whole point here is the real alias → window resolution.
 vi.mock('../../../core/services/usage-fetcher', () => ({

@@ -105,18 +105,28 @@ describe('translateClaudeMcpServer', () => {
 // Vitest module mocking: mock the Claude MCP service so no filesystem reads occur.
 vi.mock('../../services/claude-mcp', () => {
   const loadMcpServers = vi.fn()
+  const readDisabledMcpServers = vi.fn()
+  // The three-scope merge moved into `claude-mcp.ts` so the Codex bridge can
+  // share it (ADR-068 §5). Re-expressed here over the SAME mocked reads, so
+  // every assertion below — precedence, the per-scope call args, the
+  // throwing-read case — keeps measuring what it always did.
+  const mergeClaudeMcpServers = vi.fn((cwd: string) => ({
+    ...(loadMcpServers('user') as object),
+    ...(loadMcpServers('project', cwd) as object),
+    ...(loadMcpServers('local', cwd) as object)
+  }))
   return {
     loadMcpServers,
-    readDisabledMcpServers: vi.fn(),
-    // The three-scope merge moved into `claude-mcp.ts` so the Codex bridge can
-    // share it (ADR-068 §5). Re-expressed here over the SAME mocked reads, so
-    // every assertion below — precedence, the per-scope call args, the
-    // throwing-read case — keeps measuring what it always did.
-    mergeClaudeMcpServers: vi.fn((cwd: string) => ({
-      ...(loadMcpServers('user') as object),
-      ...(loadMcpServers('project', cwd) as object),
-      ...(loadMcpServers('local', cwd) as object)
-    }))
+    readDisabledMcpServers,
+    mergeClaudeMcpServers,
+    // The merge-minus-disabled read every bridge shares (ADR-096), over the
+    // same mocked reads — so the disabled-list assertions keep measuring it.
+    readEnabledClaudeMcpServers: vi.fn((cwd: string) => {
+      const disabled = new Set((readDisabledMcpServers(cwd) as string[] | undefined) ?? [])
+      return Object.fromEntries(
+        Object.entries(mergeClaudeMcpServers(cwd)).filter(([name]) => !disabled.has(name))
+      )
+    })
   }
 })
 

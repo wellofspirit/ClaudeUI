@@ -48,6 +48,17 @@ vi.mock('../../../core/opencode/claude-mcp-bridge', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../core/opencode/claude-mcp-bridge')>()),
   collectClaudeMcpForOpencode: vi.fn((): Record<string, unknown> => ({}))
 }))
+// ADR-096 — a pi target's MCP catalog: hermetic, empty unless a test says so.
+const { mockCollectPiMcp } = vi.hoisted(() => ({
+  mockCollectPiMcp: vi.fn((_cwd: string): { servers: Record<string, unknown>; skipped: [] } => ({
+    servers: {},
+    skipped: []
+  }))
+}))
+vi.mock('../../../core/pi/pi-mcp-bridge', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/pi/pi-mcp-bridge')>()),
+  collectClaudeMcpForPi: mockCollectPiMcp
+}))
 // ADR-088 — the target judge's ground truth and the shared trust lists stay
 // hermetic: no git subprocess, never the dev's own `~/.claude/ui/automode.json`.
 vi.mock('../../../core/automode/ground-truth', async (importOriginal) => ({
@@ -2308,6 +2319,23 @@ describe('CrossEngineDispatcher — pi direction (M4c): target lifecycle', () =>
     expect(setModelCall?.[0]).toMatchObject({ provider: 'openai-codex', modelId: 'gpt-5.6-luna' })
   })
 
+  it("hands the target's bridge host the shared MCP catalog for the dispatch cwd (ADR-096)", async () => {
+    const servers = { fixture: { type: 'stdio', command: 'node', exposure: 'direct' } }
+    mockCollectPiMcp.mockReturnValueOnce({ servers, skipped: [] })
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({ spawnPiTarget: target.spawnPiTarget })
+    const pending = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'use mcp' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    await tick()
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+    expect(mockCollectPiMcp).toHaveBeenCalledWith('/tmp/xeng-project')
+    expect(target.spawnCalls[0].mcpServers).toEqual(servers)
+    expect(target.spawnCalls[0].env?.({ url: 'u', token: 't' }).CLAUDEUI_PI_MCP).toBe('1')
+  })
+
   it('rejects a same-engine (pi → pi) dispatch as isError, no spawn', async () => {
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({ spawnPiTarget: target.spawnPiTarget })
@@ -4139,6 +4167,9 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
     expect(env.CLAUDEUI_PI_AGENT_TOOL).toBe('')
     // ADR-089 S3b: nor `send_message`.
     expect(env.CLAUDEUI_PI_SEND_MESSAGE).toBe('')
+    // ADR-096: a dispatch target registers the shared MCP catalog (served by
+    // its bridge host, never carried in this env).
+    expect(env.CLAUDEUI_PI_MCP).toBe('1')
     expect(env.CLAUDEUI_PI_BRIDGE_URL).toBe('http://127.0.0.1:54321')
     expect(env.CLAUDEUI_PI_BRIDGE_TOKEN).toBe('test-token')
     // Exactly these eight keys — nothing else sneaks in either.
@@ -4149,6 +4180,7 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
       'CLAUDEUI_PI_DISPATCH_DESCRIPTION',
       'CLAUDEUI_PI_DISPATCH_ENABLED',
       'CLAUDEUI_PI_HOSTED_TOOLS',
+      'CLAUDEUI_PI_MCP',
       'CLAUDEUI_PI_SEND_MESSAGE',
       'CLAUDEUI_PI_SKILL_DIRS'
     ])

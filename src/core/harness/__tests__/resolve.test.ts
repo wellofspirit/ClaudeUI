@@ -359,26 +359,49 @@ describe('managed selection', () => {
   })
 
   it('latest picks the newest valid install by semver', () => {
-    fakeHarnessInstall(store, 'opencode', '1.2.0')
-    fakeHarnessInstall(store, 'opencode', '1.10.0-beta.1')
-    const newest = fakeHarnessInstall(store, 'opencode', '1.10.0')
+    // Versions inside this build's [floor, ceiling), derived from the manifest.
+    const [major, minor] = harnessManifest('opencode').floor.split('.').map(Number)
+    const v = (patch: number, minorOffset = 0) => `${major}.${minor + minorOffset}.${patch}`
+    fakeHarnessInstall(store, 'opencode', v(1, 1))
+    fakeHarnessInstall(store, 'opencode', `${v(8, 1)}-beta.1`)
+    const newest = fakeHarnessInstall(store, 'opencode', v(8, 1))
     // Newer, but not an install: another host's record, and no record at all.
-    fakeHarnessInstall(store, 'opencode', '2.0.0', { record: { arch: 'not-this-arch' } })
-    fakeHarnessInstall(store, 'opencode', '3.0.0', { record: null })
+    fakeHarnessInstall(store, 'opencode', v(0, 2), { record: { arch: 'not-this-arch' } })
+    fakeHarnessInstall(store, 'opencode', v(0, 3), { record: null })
     writeSelections({ opencode: { source: 'managed', version: 'latest' } })
     expect(resolveHarness('opencode')).toMatchObject({
       dir: newest,
       source: 'managed',
-      version: '1.10.0'
+      version: v(8, 1)
+    })
+  })
+
+  it("latest never picks a version past this build's ceiling or below its floor", () => {
+    // The store is shared by every ClaudeUI build: a newer build's next major
+    // (opencode 2.x) must not become this build's "Latest" (2026-10-06 incident:
+    // a 1.x adapter launched 2.0.24 and it migrated the user's opencode DB).
+    const { floor, ceiling } = harnessManifest('opencode')
+    const inRange = fakeHarnessInstall(store, 'opencode', floor)
+    fakeHarnessInstall(store, 'opencode', ceiling)
+    fakeHarnessInstall(store, 'opencode', '9.0.0')
+    fakeHarnessInstall(store, 'opencode', '0.1.0')
+    writeSelections({ opencode: { source: 'managed', version: 'latest' } })
+    expect(resolveHarness('opencode')).toMatchObject({
+      dir: inRange,
+      source: 'managed',
+      version: floor
     })
   })
 
   it('latest with nothing installed resolves to nothing, with a reason', () => {
+    const { floor, ceiling } = harnessManifest('opencode')
+    // Only versions this build cannot run.
+    fakeHarnessInstall(store, 'opencode', ceiling)
     writeSelections({ opencode: { source: 'managed', version: 'latest' } })
     expect(resolveHarness('opencode')).toMatchObject({
       path: null,
       source: 'managed',
-      reason: 'No version of opencode is installed'
+      reason: `No version of opencode from ${floor} up to, not including, ${ceiling} is installed`
     })
   })
 

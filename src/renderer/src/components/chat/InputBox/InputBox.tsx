@@ -1,4 +1,4 @@
-import { useRef, useCallback, useEffect, useMemo } from 'react'
+import { useRef, useCallback, useEffect, useMemo, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import {
   useSessionStore,
@@ -12,6 +12,13 @@ import {
 } from '../../../stores/session-store'
 import { resolveRekeyed } from '../../../stores/replica'
 import { awaitReloadBeforeSpawn } from '../../../lib/session-history-load'
+import { voiceController } from '../../../lib/voice/voice-controller'
+import { noSignalMessage, switchedMessage } from '../../../lib/voice/browser-voice-capture'
+import {
+  dismissVoiceNotice,
+  showVoiceNotice,
+  useVoiceNotice
+} from '../../../lib/voice/voice-notice'
 import type {
   AttachmentUpload,
   FileAttachment,
@@ -183,6 +190,21 @@ function readFileAsBase64(file: File): Promise<{ mediaType: string; base64Data: 
     }
     reader.readAsDataURL(file)
   })
+}
+
+/**
+ * A voice failure the renderer itself saw (start/stop rejected), surfaced where a
+ * server-side `voice:error` lands (`useClaudeEvents`): the notice pill above the
+ * mic — never the session's error stack.
+ */
+function reportVoiceError(routingId: string, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err)
+  showVoiceNotice(routingId, message, 'warn')
+}
+
+/** Subscribe to the live microphone level — the ring reads it without re-rendering. */
+function subscribeVoiceLevel(listener: (level: number) => void): () => void {
+  return voiceController().onLevel(listener)
 }
 
 // ---------------------------------------------------------------------------
@@ -793,10 +815,19 @@ export function InputBox(): React.JSX.Element {
 
   /**
    * Is the push-to-talk still held? `ensureSession()` can spawn the engine first,
-   * and a release during that await sends its stop BEFORE the start — which main
-   * would then honor by opening a capture nobody is holding.
+   * and a release during that await sends its stop BEFORE the start — which would
+   * then open a microphone (and a main-side capture) nobody is holding.
    */
   const voiceHeldRef = useRef(false)
+  /**
+   * The same fact as {@link voiceHeldRef}, as RENDER state: the notice pill stays
+   * while the push-to-talk is held and starts fading on release. The ref stays
+   * the source of truth for the start/stop sequencing (it must be current inside
+   * an await, which state is not).
+   */
+  const [voiceHeld, setVoiceHeld] = useState(false)
+  /** The live microphone is digitally silent (the warning is up) — dims the mic. */
+  const [voiceSilent, setVoiceSilent] = useState(false)
   /** Numbers each press, so a release-then-repress during one spawn starts once. */
   const voicePressRef = useRef(0)
 
@@ -804,20 +835,91 @@ export function InputBox(): React.JSX.Element {
     if (!activeSessionId || isDisabled || harnessBlocked || voiceState !== 'idle') return
     const press = ++voicePressRef.current
     voiceHeldRef.current = true
+    setVoiceHeld(true)
+    setVoiceSilent(false)
     try {
       await ensureSession()
-      if (!voiceHeldRef.current || voicePressRef.current !== press) return
-      await window.api.voiceStartRecording(activeSessionId, voiceLanguage)
     } catch (err) {
-      window.api.logRelay('error', 'Voice:InputBox', `voiceStartRecording failed: ${err}`)
+      // The spawn's own failure is reported by the session path; log only.
+      window.api.logRelay('error', 'Voice:InputBox', `voice start failed: ${err}`)
+      return
+    }
+    if (!voiceHeldRef.current || voicePressRef.current !== press) return
+    try {
+      await voiceController().start(activeSessionId, voiceLanguage)
+    } catch (err) {
+      // A denied microphone, a refused session, a dead transport: all things the
+      // speaker can act on, so they land where a server-side `voice:error` does —
+      // the notice pill above the mic.
+      window.api.logRelay('error', 'Voice:InputBox', `voice start failed: ${err}`)
+      reportVoiceError(activeSessionId, err)
     }
   }, [activeSessionId, isDisabled, harnessBlocked, voiceState, ensureSession, voiceLanguage])
 
   const handleVoiceStop = useCallback(async () => {
     voiceHeldRef.current = false
+    setVoiceHeld(false)
     if (!activeSessionId) return
-    await window.api.voiceStopRecording(activeSessionId)
+    try {
+      await voiceController().stop(activeSessionId)
+    } catch (err) {
+      window.api.logRelay('error', 'Voice:InputBox', `voice stop failed: ${err}`)
+      reportVoiceError(activeSessionId, err)
+    }
   }, [activeSessionId])
+
+  // The microphone itself failing mid-capture (unplugged, muted by the OS) is
+  // the capture's news, not the server's — surfaced the same way.
+  useEffect(() => {
+    if (!activeSessionId) return
+    return voiceController().onFault((message) => {
+      showVoiceNotice(activeSessionId, message, 'warn')
+    })
+  }, [activeSessionId])
+
+  // The capture moved to another microphone mid-press — grey: nothing to fix,
+  // and what was being said carried on through the switch.
+  useEffect(() => {
+    if (!activeSessionId) return
+    return voiceController().onSwitch((label) => {
+      showVoiceNotice(activeSessionId, switchedMessage(label), 'info')
+    })
+  }, [activeSessionId])
+
+  // The live silence warning: up while the microphone is producing digital
+  // silence, taken down the moment a block has signal — only ITS notice, so a
+  // newer message that replaced it is left alone.
+  //
+  // The id lives in a REF, not the effect's closure: a first press spawns cli.js,
+  // which rekeys the session mid-capture, `activeSessionId` changes, and this
+  // effect resubscribes — a closure variable would be lost with the old
+  // subscription and the warning would outlive the silence. The notice store
+  // follows the rekey, so the new id still finds it.
+  const silenceWarningRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (!activeSessionId) return
+    return voiceController().onSilence(({ silent, trackLabel }) => {
+      setVoiceSilent(silent)
+      if (silent) {
+        silenceWarningRef.current = showVoiceNotice(
+          activeSessionId,
+          noSignalMessage(trackLabel),
+          'warn'
+        )
+      } else if (silenceWarningRef.current !== null) {
+        dismissVoiceNotice(activeSessionId, silenceWarningRef.current)
+        silenceWarningRef.current = null
+      }
+    })
+  }, [activeSessionId])
+
+  const voiceNotice = useVoiceNotice(activeSessionId)
+  const handleVoiceNoticeExpire = useCallback(
+    (id: number) => {
+      if (activeSessionId) dismissVoiceNotice(activeSessionId, id)
+    },
+    [activeSessionId]
+  )
 
   useEffect(() => {
     if (voiceInterimTranscript && voiceState === 'idle' && activeSessionId) {
@@ -1485,6 +1587,11 @@ export function InputBox(): React.JSX.Element {
       sandboxEnabled={sandboxEnabled}
       voiceEnabled={voiceAvailable}
       voiceState={voiceState}
+      voiceHeld={voiceHeld}
+      voiceSilent={voiceSilent && voiceState === 'recording'}
+      voiceNotice={voiceNotice}
+      onVoiceNoticeExpire={handleVoiceNoticeExpire}
+      subscribeVoiceLevel={subscribeVoiceLevel}
       statusLine={statusLine}
       onSend={handleSend}
       onCancel={handleCancel}

@@ -46,6 +46,7 @@ const optimizer = {
 import { bootCore, type CoreBoot } from './boot-core'
 import { setHostWindow, getHostWindow } from '../core/services/host-window'
 import { attachSyncPort } from './services/sync-port'
+import { installDesktopVoiceFeed } from './ipc/voice-feed'
 import { terminalService } from '../core/services/terminal-service'
 import { registerRemoteVersionInfo } from '../core/ipc/remote-handlers'
 import { serviceSession } from '../core/services/service-session'
@@ -409,6 +410,11 @@ function createWindow(): void {
     else if (logLevel === 'debug') logger.debug(source, message)
     else logger.info(source, message)
   })
+
+  // Desktop voice: the window captures its own microphone and pushes PCM here;
+  // the feed relays it under this window's owner key and releases the capture
+  // when the webContents goes away.
+  installDesktopVoiceFeed(mainWindow)
 
   // Attach the window to the already-booted core (SyncCore phase 4d).
   //

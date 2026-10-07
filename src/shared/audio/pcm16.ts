@@ -1,20 +1,21 @@
 /**
  * Float32 audio → 16 kHz signed-16-bit little-endian mono PCM.
  *
- * THE format problem of remote voice, solved in one pure function.
+ * THE format problem of browser voice capture, solved in one pure function.
  *
  * The voice server inside cli.js streams to Deepgram Nova3 with
  * `encoding=linear16, sample_rate=16000, channels=1` (patch/voice-server/README.md),
- * and the desktop's native capture module emits exactly that. A browser cannot:
+ * which Claude Code's native capture module emits directly. A browser cannot —
+ * and every client, the desktop window included, now captures in one:
  * `MediaRecorder` produces opus/webm containers and nothing else — which is what
- * aborted the previous attempt at remote voice. `AudioWorklet` CAN: it hands the
+ * aborted the first attempt at remote voice. `AudioWorklet` CAN: it hands the
  * page raw Float32 blocks at the `AudioContext`'s own rate (typically 48000), and
  * the conversion to the wire format is arithmetic.
  *
  * That arithmetic lives HERE, alone, because it is the one part of the browser
  * capture path that is testable without an audio device: the worklet processor
- * (`src/web/public/voice-worklet.js`) only batches and posts blocks, and the
- * controller (`src/web/voice-capture.ts`) only owns the state machine. Neither
+ * (`renderer/src/lib/voice/voice-worklet.js`) only batches and posts blocks, and
+ * `renderer/src/lib/voice/browser-voice-capture.ts` only owns the state machine. Neither
  * does DSP. A second implementation of the resampling — in the worklet, say, to
  * save a postMessage — would be a second answer to "what does 16 kHz mean here",
  * and drift in it is inaudible until a transcript comes back garbled.
@@ -156,6 +157,41 @@ export function downsampleToPcm16(
 
   return { samples: out.subarray(0, written), state: { consumed, emitted, sum, count } }
 }
+
+/** RMS of one block of int16 samples, in int16 units (0 for an empty block). */
+export function pcm16Rms(samples: Int16Array): number {
+  if (samples.length === 0) return 0
+  let sum = 0
+  for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i]
+  return Math.sqrt(sum / samples.length)
+}
+
+/**
+ * A block's RMS as cli.js's `/voice` turns it into a level: scaled so 2000
+ * (quiet speech) is full scale, square-rooted for perception — 0..1.
+ */
+export function rmsToLevel(rms: number): number {
+  return Math.sqrt(Math.min(rms / 2000, 1))
+}
+
+/**
+ * One block's level ({@link rmsToLevel} of {@link pcm16Rms}).
+ *
+ * One formula for both ends of the wire: the capture computes it per block for
+ * the mic's level ring, and the main process computes it on the PCM it relays to
+ * choose an outcome message.
+ */
+export function pcm16Level(samples: Int16Array): number {
+  return rmsToLevel(pcm16Rms(samples))
+}
+
+/**
+ * At or below this RMS (int16 units) a block is DIGITAL silence — a closed
+ * laptop lid's built-in mic, a muted input — rather than a quiet room. One LSB of
+ * dither or resampler rounding is RMS 1; any live microphone's noise floor is
+ * several times that. The renderer's live silence warning keys on it.
+ */
+export const DIGITAL_SILENCE_RMS = 1
 
 /**
  * int16 samples → the little-endian bytes the wire format names.

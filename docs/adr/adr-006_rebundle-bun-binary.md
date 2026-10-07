@@ -163,3 +163,6 @@ replaced by cli.js's own surfaces and five had become no-ops or dead code.
 the app gates patch-dependent surfaces on that list — so the rebundled binary
 is no longer the only Claude Code binary the app can run: `CLAUDEUI_CLAUDE_CLI`
 points it at Anthropic's unpatched one, on which chat works and voice goes dark.
+
+_Note (2026-10-07, [ADR-098](adr-098_voice-capture-in-the-renderer.md)): the extract step no longer
+writes loose copies of the native addons; they stay inside the rebundled binary only._

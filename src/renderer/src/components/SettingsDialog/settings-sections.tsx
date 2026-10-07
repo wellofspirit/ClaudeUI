@@ -43,6 +43,7 @@ import type { SettingsRenderContext } from './settings-target'
 import { ModelPicker } from '../shared/InlinePickers'
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
 import { OpencodeAgentsSection } from './OpencodeAgents'
+import { MicrophoneSetting } from './MicrophoneSetting'
 import { TrustListsSection } from './TrustLists'
 import {
   RemoteAccessSection,
@@ -2191,6 +2192,14 @@ export const SECTIONS: Section[] = [
             />
           </SettingRow>
         )
+      },
+      {
+        // Per client (localStorage), not a synced setting — hence no appDefault /
+        // Reset: there is no app-wide value to reset to.
+        key: 'voiceMicrophone',
+        label: 'Microphone',
+        keywords: 'voice microphone mic input device bluetooth headset airpods test level',
+        render: (s) => <MicrophoneSetting enabled={s.voiceEnabled} />
       }
     ]
   },

@@ -1,0 +1,882 @@
+/**
+ * Microphone capture for every client — the desktop window and the remote web
+ * client run this same file (`src/web/main.tsx` renders the renderer app).
+ *
+ * It began as the web client's (SyncCore phase 5 S3), when the desktop captured
+ * in the main process through Claude Code's native `audio-capture` module. That
+ * module binds the OS default input at start and has no device API, so desktop
+ * capture moved here too: one Web Audio implementation, pushing 16 kHz i16LE mono
+ * PCM to the main process, which relays it to the cli.js voice server.
+ *
+ * `MediaRecorder` yields opus-in-webm and nothing else, which is what aborted
+ * the first attempt at remote voice. `AudioWorklet` is the way through — it hands
+ * the page raw Float32 blocks — and this file is the state machine around it.
+ *
+ * Three parts, and only one of them can be wrong in a way tests can catch:
+ *  - `voice-worklet.js` batches render quanta (untestable: no AudioWorklet in
+ *    jsdom, no audio device in CI — see its header);
+ *  - `shared/audio/pcm16.ts` converts to the wire format (pure, unit-tested,
+ *    and carries the correctness of the whole path);
+ *  - this class owns permissions, the graph, and the lifecycle.
+ *
+ * Which microphone is `mic-devices.ts`'s policy (a preferred device when it is
+ * connected, else the system default); this class applies it at start and keeps
+ * applying it while capturing — on a `devicechange`, or when the live track
+ * ends, it opens the new microphone and swaps its source into the SAME worklet,
+ * so the resampler, the pre-arm queue and the transport never notice.
+ *
+ * Who it talks to is not its business: `voice-controller.ts` pairs it with a
+ * transport. Everything the environment supplies is injected ({@link CaptureEnv})
+ * so the lifecycle IS testable in jsdom without pretending jsdom has audio.
+ */
+
+import {
+  VOICE_SAMPLE_RATE,
+  downsampleToPcm16,
+  initialDownsampleState,
+  DIGITAL_SILENCE_RMS,
+  pcm16Rms,
+  pcm16ToBytesLe,
+  rmsToLevel,
+  type DownsampleState
+} from '../../../../shared/audio/pcm16'
+// `no-inline`: the worklet is small enough that Vite would otherwise inline it
+// as a `data:` URL, which `script-src 'self'` refuses. As a hashed asset under
+// `/assets/` it is same-origin in both builds — `file://` on the desktop,
+// `remote-server.ts`'s static branch on the web.
+import workletUrl from './voice-worklet.js?url&no-inline'
+import {
+  audioInputs,
+  resolveMic,
+  trackMatchesTarget,
+  type MicDevice,
+  type MicPreference,
+  type MicTarget
+} from './mic-devices'
+
+/** The worklet module's URL, as the build emitted it. */
+export const VOICE_WORKLET_URL: string = workletUrl
+/** The name `voice-worklet.js` registers. */
+const PROCESSOR_NAME = 'voice-capture'
+
+/**
+ * Pre-arm queue depth, in ~150 ms blocks.
+ *
+ * A capture starts the microphone BEFORE the transport's start has resolved,
+ * because that round trip can spawn a cli.js child and open a Deepgram socket — seconds during
+ * which someone is already talking. Frames produced in that window are held here
+ * and flushed when {@link BrowserVoiceCapture.arm} says the server is listening.
+ *
+ * Bounded because a start that never resolves must not grow a buffer
+ * forever, and dropping the OLDEST is the right end to drop: the newest audio is
+ * the audio still being spoken. 64 blocks is ~10 s.
+ */
+const MAX_PENDING_BLOCKS = 64
+
+/**
+ * The slice of `navigator.mediaDevices` a capture uses. Only `getUserMedia` is
+ * required; without `enumerateDevices` a capture cannot honour a preferred
+ * microphone or notice a default change, and simply records from the default.
+ */
+export interface CaptureMediaDevices {
+  getUserMedia(constraints: MediaStreamConstraints): Promise<MediaStream>
+  enumerateDevices?(): Promise<MediaDeviceInfo[]>
+  addEventListener?(type: 'devicechange', listener: () => void): void
+  removeEventListener?(type: 'devicechange', listener: () => void): void
+}
+
+export interface CaptureEnv {
+  /** `getUserMedia` is unavailable outside a secure context — HTTPS or localhost. */
+  isSecureContext: boolean
+  mediaDevices?: CaptureMediaDevices
+  AudioContextCtor?: typeof AudioContext
+  AudioWorkletNodeCtor?: typeof AudioWorkletNode
+}
+
+/** Read the capture environment out of the browser globals. */
+export function detectCaptureEnv(): CaptureEnv {
+  const w = globalThis as unknown as {
+    isSecureContext?: boolean
+    navigator?: Navigator
+    AudioContext?: typeof AudioContext
+    webkitAudioContext?: typeof AudioContext
+    AudioWorkletNode?: typeof AudioWorkletNode
+  }
+  return {
+    isSecureContext: w.isSecureContext === true,
+    mediaDevices: w.navigator?.mediaDevices,
+    AudioContextCtor: w.AudioContext ?? w.webkitAudioContext,
+    AudioWorkletNodeCtor: w.AudioWorkletNode
+  }
+}
+
+/**
+ * Why this environment cannot capture, or null when it can.
+ *
+ * The desktop window passes (`file://` and the dev server's localhost are both
+ * secure contexts), as does the tailnet HTTPS origin; plain-HTTP LAN does not, which is the same
+ * rule passkeys already imposed on this app (security.md) — so the answer for an
+ * owner who wants voice on their phone is the answer they have already been
+ * given for enrollment, not a new one.
+ */
+export function captureUnsupportedReason(env: CaptureEnv): string | null {
+  if (!env.isSecureContext) return VOICE_INSECURE_MESSAGE
+  if (!env.mediaDevices?.getUserMedia) return VOICE_NO_MIC_API_MESSAGE
+  if (!env.AudioContextCtor || !env.AudioWorkletNodeCtor) return VOICE_NO_WORKLET_MESSAGE
+  return null
+}
+
+/**
+ * - `starting`: the microphone and graph are being built (no blocks yet);
+ * - `capturing`: blocks flow — sent if armed, queued if not;
+ * - `halting`: the microphone is closing; the worklet's last partial batch is
+ *   still on its way;
+ * - `halted`: the microphone is closed but the pre-arm queue is KEPT, waiting
+ *   for {@link BrowserVoiceCapture.arm} (flush) or
+ *   {@link BrowserVoiceCapture.stop} (discard).
+ */
+type CaptureState = 'idle' | 'starting' | 'capturing' | 'halting' | 'halted'
+
+/**
+ * How long a halt waits for the worklet's partial batch. The worklet answers
+ * within a render quantum or two; the bound only matters for a context that has
+ * stopped rendering, where waiting longer would just delay the release.
+ */
+export const WORKLET_FLUSH_TIMEOUT_MS = 100
+
+/** What the worklet answers a `flush` with, after posting its partial batch. */
+const WORKLET_FLUSHED = 'flushed'
+
+// Worded for the notice pill above the mic: short, no trailing full stop, the
+// fix after an em dash.
+export const MIC_DISCONNECTED_MESSAGE = 'Microphone disconnected — kept what you said'
+export const MIC_MUTED_MESSAGE = 'The microphone was muted by the system'
+export const MIC_DENIED_WEB_MESSAGE = 'Microphone access denied — allow it for this site'
+export const MIC_DENIED_MACOS_MESSAGE =
+  'Microphone access denied — allow ClaudeUI in System Settings › Privacy › Microphone'
+export const MIC_DENIED_WINDOWS_MESSAGE =
+  'Microphone access denied — allow ClaudeUI in Settings › Privacy & security › Microphone'
+export const MIC_DENIED_DESKTOP_MESSAGE =
+  'Microphone access denied — allow ClaudeUI to use the microphone'
+export const MIC_NOT_FOUND_MESSAGE = 'No microphone found — connect one and try again'
+export const MIC_BUSY_MESSAGE = 'Microphone in use by another app — close it and try again'
+export const VOICE_INSECURE_MESSAGE =
+  'Voice input needs a secure (HTTPS) connection — use the tailnet or tunnel address'
+export const VOICE_NO_MIC_API_MESSAGE = 'This browser has no microphone API — try a current browser'
+export const VOICE_NO_WORKLET_MESSAGE =
+  'This browser can’t run voice capture (no AudioWorklet) — try a current browser'
+/** A capture failure nothing more specific explains. */
+export function captureFailedMessage(detail: string): string {
+  return `Voice capture failed — ${detail.replace(/\.$/, '')}`
+}
+
+/**
+ * What a denied microphone tells the speaker to do, for the client it happened
+ * on (`window.api.platform`: `web` for the remote client, else the desktop's OS).
+ * The web answer is a site permission; the desktop's is the OS privacy pane.
+ */
+export function micDeniedMessage(platform: string | undefined): string {
+  if (platform === 'web') return MIC_DENIED_WEB_MESSAGE
+  if (platform === 'darwin') return MIC_DENIED_MACOS_MESSAGE
+  if (platform === 'win32') return MIC_DENIED_WINDOWS_MESSAGE
+  return MIC_DENIED_DESKTOP_MESSAGE
+}
+
+/**
+ * How long a capture must hear DIGITAL silence — every block at or below
+ * `DIGITAL_SILENCE_RMS` (one LSB) — before the live warning. Measured in audio,
+ * not wall-clock, so a stalled worklet (no blocks at all) is not mistaken for a
+ * silent microphone.
+ */
+export const SILENCE_WARNING_MS = 1500
+const SILENCE_WARNING_SAMPLES = (SILENCE_WARNING_MS * VOICE_SAMPLE_RATE) / 1000
+
+/**
+ * `devicechange` debounce. Connecting a Bluetooth headset fires a burst (its
+ * input and output appear, then the OS default moves), and each event would
+ * otherwise reopen the microphone.
+ */
+export const DEVICE_CHANGE_DEBOUNCE_MS = 300
+
+/** The grey notice after a capture moved to another microphone mid-press. */
+export function switchedMessage(label: string | null | undefined): string {
+  return `Switched to ${label?.trim() || 'the default microphone'}`
+}
+
+/** The live warning for a microphone that is producing nothing at all. */
+export function noSignalMessage(trackLabel: string | null | undefined): string {
+  const name = trackLabel?.trim() || 'the microphone'
+  return `No signal from ${name} — lid closed or muted?`
+}
+
+/**
+ * How long a track must STAY muted before it is reported. Browsers fire brief
+ * mute/unmute pairs on their own — a macOS Bluetooth headset switching between
+ * its A2DP and HFP profiles, an Android audio-focus blip — and each one would
+ * otherwise raise a warning above the mic for a microphone that is fine.
+ */
+export const MIC_MUTE_GRACE_MS = 1000
+
+export interface CaptureFault {
+  message: string
+  /** The track ENDED: no more audio will come, so the capture should be ended. */
+  ended: boolean
+}
+
+export interface CaptureSilence {
+  /** True once {@link SILENCE_WARNING_MS} of digital silence; false when a block has signal. */
+  silent: boolean
+  /** The live track's label ("MacBook Pro Microphone"), or null when the browser hides it. */
+  trackLabel: string | null
+}
+
+export interface BrowserVoiceCaptureOptions {
+  /** Ship one base64 PCM batch upstream (the transport's `voiceAudio`). */
+  sendAudio: (dataB64: string) => void
+  /**
+   * Each block's level while capturing (0..1, `shared/audio/pcm16.ts`'s
+   * `pcm16Level`) — the mic's level ring. Called per ~150 ms block; a
+   * final 0 when the capture halts.
+   */
+  onLevel?: (level: number) => void
+  /**
+   * The microphone went digitally silent while capturing ({@link SILENCE_WARNING_MS}
+   * of blocks at or below one LSB RMS — a closed lid's built-in mic), or came back. Edge-triggered:
+   * one `silent: true`, then one `silent: false` when a block has signal.
+   */
+  onSilence?: (silence: CaptureSilence) => void
+  /** The denied-permission wording for this client ({@link micDeniedMessage}). */
+  deniedMessage?: string
+  /**
+   * The preferred microphone, read at every start and every device change
+   * (`mic-preference.ts`). Absent or null: the system default.
+   */
+  preference?: () => MicPreference | null
+  /**
+   * The capture moved to another microphone mid-press — a device change, or an
+   * unplug it recovered from — with the new microphone's name. Audio carried on
+   * through the same worklet; nothing was restarted.
+   */
+  onSwitch?: (label: string) => void
+  /**
+   * Something happened to the microphone mid-capture that the speaker should
+   * hear about — it was unplugged (`ended`) or the OS muted it. The capture does
+   * not end itself: the owner decides, so an unplug can still finalize what was
+   * said through the normal stop.
+   */
+  onFault?: (fault: CaptureFault) => void
+  env?: CaptureEnv
+}
+
+export class BrowserVoiceCapture {
+  private readonly sendAudio: (dataB64: string) => void
+  private readonly onFault?: (fault: CaptureFault) => void
+  private readonly onLevel?: (level: number) => void
+  private readonly onSilence?: (silence: CaptureSilence) => void
+  private readonly deniedMessage: string
+  private readonly preference: () => MicPreference | null
+  private readonly onSwitch?: (label: string) => void
+  private readonly env: CaptureEnv
+
+  private state: CaptureState = 'idle'
+  private armed = false
+  private pending: string[] = []
+  /** The halt in progress, so a second halt (or a stop) joins it. */
+  private halting: Promise<void> | null = null
+
+  private stream: MediaStream | null = null
+  private context: AudioContext | null = null
+  private source: MediaStreamAudioSourceNode | null = null
+  private worklet: AudioWorkletNode | null = null
+  private sink: GainNode | null = null
+  private resampler: DownsampleState | null = null
+  /** Consecutive digitally-silent 16 kHz samples, and whether the warning is up. */
+  private silentSamples = 0
+  private silent = false
+  /** Whether the live stream was opened on an explicit (preferred) device. */
+  private boundTo: 'preferred' | 'default' = 'default'
+  /** Device switches run one at a time, in order. */
+  private switching: Promise<boolean> = Promise.resolve(true)
+  private deviceChangeTimer: ReturnType<typeof setTimeout> | null = null
+  private unwatchDevices: (() => void) | null = null
+  /** Resolves the halt's wait for the worklet's tail. */
+  private onFlushed: (() => void) | null = null
+  private untrack: (() => void) | null = null
+
+  constructor(options: BrowserVoiceCaptureOptions) {
+    this.sendAudio = options.sendAudio
+    this.onFault = options.onFault
+    this.onLevel = options.onLevel
+    this.onSilence = options.onSilence
+    this.deniedMessage = options.deniedMessage ?? MIC_DENIED_WEB_MESSAGE
+    this.preference = options.preference ?? (() => null)
+    this.onSwitch = options.onSwitch
+    this.env = options.env ?? detectCaptureEnv()
+  }
+
+  /** The microphone is open or opening. False once halted, queue or no queue. */
+  isActive(): boolean {
+    return this.state === 'starting' || this.state === 'capturing'
+  }
+
+  /** Null when capture is possible here; otherwise the reason, for the caller to surface. */
+  unsupportedReason(): string | null {
+    return captureUnsupportedReason(this.env)
+  }
+
+  /**
+   * Open the microphone and start producing batches.
+   *
+   * Throws — rather than failing quietly — on an unsupported environment and on
+   * a denied permission: the caller (the mic button's handler) is what decides
+   * how loud that is, and swallowing it here would leave a button that does
+   * nothing for reasons nobody can see.
+   */
+  async start(): Promise<void> {
+    if (this.state !== 'idle') return
+    const reason = this.unsupportedReason()
+    if (reason) throw new Error(reason)
+
+    this.state = 'starting'
+    this.armed = false
+    this.pending = []
+    this.silentSamples = 0
+    this.silent = false
+
+    try {
+      // ASSIGNED BEFORE THE STATE CHECK, and every bail below releases rather
+      // than returning bare. `start()` is a sequence of awaits and a halt can
+      // land in any of the gaps — on a phone it RELIABLY does, because
+      // `getUserMedia` does not resolve until the permission prompt is answered
+      // and answering it means letting go of a hold-to-talk button. A bail that
+      // returned without cleanup left a live MediaStream in a field nobody would
+      // ever read again: the browser's recording indicator stays lit and the
+      // next press overwrites the field, orphaning the tracks for the page's
+      // lifetime. `release()` is idempotent and frees whatever has been assigned
+      // so far, which is why it is the only correct bail. (Nothing is queued
+      // before `capturing`, so a halt here has no audio to keep.)
+      //
+      // A preferred microphone needs the device list to find it; with none, the
+      // default needs nothing, so the list is not asked for.
+      const resolved = this.preference() ? await this.resolveTarget() : null
+      if (this.state !== 'starting') {
+        await this.release()
+        return
+      }
+      const opened = await this.openMicrophone(resolved?.target ?? null)
+      this.stream = opened.stream
+      this.boundTo = opened.boundTo
+      if (this.state !== 'starting') {
+        await this.release()
+        return
+      }
+      // Ask for the wire rate outright. Where the browser honours it the
+      // resampler becomes a pass-through quantizer and the whole conversion is
+      // one multiply per sample; where it does not (or throws on the option) we
+      // fall back to the device rate and downsample, which is why `pcm16.ts`
+      // handles an arbitrary ratio rather than hard-coding 3:1.
+      this.context = this.makeContext()
+      // A context created outside a user gesture's activation window — the
+      // await on `getUserMedia` above is enough to lose it — can start
+      // SUSPENDED, and a suspended context renders nothing: the worklet would
+      // never post a block and the capture would be silent with no error.
+      if (this.context.state === 'suspended') {
+        await this.context.resume()
+        if (this.state !== 'starting') {
+          await this.release()
+          return
+        }
+      }
+      await this.context.audioWorklet.addModule(VOICE_WORKLET_URL)
+      if (this.state !== 'starting') {
+        await this.release()
+        return
+      }
+
+      const sampleRate = this.context.sampleRate
+      this.resampler = initialDownsampleState(sampleRate)
+
+      this.source = this.context.createMediaStreamSource(this.stream)
+      this.worklet = new this.env.AudioWorkletNodeCtor!(this.context, PROCESSOR_NAME)
+      this.worklet.port.onmessage = (event: MessageEvent): void => {
+        if (event.data === WORKLET_FLUSHED) {
+          this.onFlushed?.()
+          return
+        }
+        this.onBlock(event.data as Float32Array, sampleRate)
+      }
+      // A worklet only runs while its graph reaches the destination, so the node
+      // is routed there through a MUTED gain — connecting it directly would play
+      // the speaker's own voice back at them.
+      this.sink = this.context.createGain()
+      this.sink.gain.value = 0
+      this.source.connect(this.worklet)
+      this.worklet.connect(this.sink)
+      this.sink.connect(this.context.destination)
+
+      this.watchTracks(this.stream)
+      this.watchDevices()
+      this.state = 'capturing'
+    } catch (err) {
+      await this.release()
+      this.discard()
+      throw new Error(describeCaptureFailure(err, this.deniedMessage))
+    }
+  }
+
+  /**
+   * The server is listening: flush what was captured while the transport's start
+   * was in flight, and stream live from here on. On a HALTED capture this is the
+   * drain — the queue goes out and the capture is done.
+   */
+  arm(): void {
+    if (this.state === 'idle') return
+    this.armed = true
+    const queued = this.pending
+    this.pending = []
+    for (const dataB64 of queued) this.sendAudio(dataB64)
+    if (this.state === 'halted') this.state = 'idle'
+  }
+
+  /**
+   * Close the microphone NOW, but keep what was captured.
+   *
+   * The tracks stop at once; the worklet's last partial batch is then fetched
+   * before the graph is torn down (bounded by {@link WORKLET_FLUSH_TIMEOUT_MS}),
+   * so a release does not clip the final syllable. If the capture was armed everything has already gone out and it is
+   * done; if not, it waits `halted` for {@link arm} or {@link stop}. Idempotent;
+   * a halt during `start()` cancels the start (there is nothing to keep yet).
+   */
+  async halt(): Promise<void> {
+    if (this.halting) return this.halting
+    if (this.state === 'idle' || this.state === 'halted') return
+    if (this.state === 'starting') {
+      // The start's own bail releases whatever it acquires after this point.
+      this.state = 'idle'
+      await this.release()
+      return
+    }
+    this.state = 'halting'
+    // The ring settles the moment the speaker lets go, not a round trip later.
+    this.onLevel?.(0)
+    this.halting = (async () => {
+      // The microphone goes off NOW — the recording indicator with it. The
+      // worklet's partial batch is already in the worklet, so the tail can be
+      // fetched after the track has stopped.
+      this.stopTracks()
+      await this.flushWorkletTail()
+      await this.release()
+      // Armed: every block, the tail included, has been sent. Otherwise the queue
+      // waits for the transport's start to say where to send it.
+      this.state = this.armed ? 'idle' : 'halted'
+      if (this.armed) this.pending = []
+    })()
+    try {
+      await this.halting
+    } finally {
+      this.halting = null
+    }
+  }
+
+  /** Close the microphone and DISCARD anything not yet sent. Idempotent. */
+  async stop(): Promise<void> {
+    await this.halt()
+    this.discard()
+  }
+
+  // -- Private ---------------------------------------------------------------
+
+  private discard(): void {
+    this.state = 'idle'
+    this.armed = false
+    this.pending = []
+  }
+
+  /**
+   * Ask the worklet for its partial batch and wait for it. The answer arrives
+   * on the same port as the blocks, after the tail block, so `onBlock` has
+   * handled the tail by the time this resolves.
+   */
+  private async flushWorkletTail(): Promise<void> {
+    const worklet = this.worklet
+    if (!worklet) return
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(done, WORKLET_FLUSH_TIMEOUT_MS)
+      function done(): void {
+        clearTimeout(timer)
+        resolve()
+      }
+      this.onFlushed = done
+      try {
+        worklet.port.postMessage('flush')
+      } catch {
+        done()
+      }
+    })
+    this.onFlushed = null
+  }
+
+  /**
+   * Tear the graph down and close the microphone. Leaves the state and the
+   * queue alone — that is the caller's decision. Idempotent.
+   */
+  private async release(): Promise<void> {
+    this.resampler = null
+    this.unwatchDevices?.()
+    this.unwatchDevices = null
+
+    if (this.worklet) {
+      this.worklet.port.onmessage = null
+      try {
+        this.worklet.disconnect()
+      } catch {
+        /* a node from a closed context throws; nothing left to do about it */
+      }
+      this.worklet = null
+    }
+    for (const node of [this.source, this.sink]) {
+      try {
+        node?.disconnect()
+      } catch {
+        /* as above */
+      }
+    }
+    this.source = null
+    this.sink = null
+
+    // Tracks first: this is what turns the browser's recording indicator off,
+    // and it must happen even if closing the context throws.
+    this.stopTracks()
+
+    const context = this.context
+    this.context = null
+    if (context) {
+      try {
+        await context.close()
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+
+  // -- Choosing and switching the microphone --------------------------------
+
+  /** The device list and where the preference says to bind, or null if unknowable. */
+  private async resolveTarget(): Promise<{ inputs: MicDevice[]; target: MicTarget } | null> {
+    const md = this.env.mediaDevices
+    if (!md?.enumerateDevices) return null
+    try {
+      const inputs = audioInputs(await md.enumerateDevices())
+      return { inputs, target: resolveMic(inputs, this.preference()) }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Open the microphone `target` names. A preferred device is asked for EXACTLY
+   * — a plain `deviceId` is only a hint the browser may ignore — and if it has
+   * gone in the meantime (`OverconstrainedError` / `NotFoundError`), the system
+   * default is opened instead, once.
+   */
+  private async openMicrophone(
+    target: MicTarget | null
+  ): Promise<{ stream: MediaStream; boundTo: 'preferred' | 'default' }> {
+    const md = this.env.mediaDevices!
+    const audio: MediaTrackConstraints = {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    }
+    if (target?.kind === 'preferred') {
+      try {
+        const stream = await md.getUserMedia({
+          audio: { ...audio, deviceId: { exact: target.device.deviceId } }
+        })
+        return { stream, boundTo: 'preferred' }
+      } catch (err) {
+        const name = (err as { name?: string } | null)?.name
+        if (name !== 'OverconstrainedError' && name !== 'NotFoundError') throw err
+      }
+    }
+    return { stream: await md.getUserMedia({ audio }), boundTo: 'default' }
+  }
+
+  /** Follow `devicechange` while capturing, debounced. */
+  private watchDevices(): void {
+    const md = this.env.mediaDevices
+    if (!md?.addEventListener || !md.enumerateDevices) return
+    const onChange = (): void => {
+      if (this.deviceChangeTimer) clearTimeout(this.deviceChangeTimer)
+      this.deviceChangeTimer = setTimeout(() => {
+        this.deviceChangeTimer = null
+        void this.followDevices(false)
+      }, DEVICE_CHANGE_DEBOUNCE_MS)
+    }
+    md.addEventListener('devicechange', onChange)
+    this.unwatchDevices = () => {
+      md.removeEventListener?.('devicechange', onChange)
+      if (this.deviceChangeTimer) clearTimeout(this.deviceChangeTimer)
+      this.deviceChangeTimer = null
+    }
+  }
+
+  /**
+   * Re-resolve and, if the live track is no longer where it should be, move the
+   * capture there. Serialized: a switch never races another. Resolves true when
+   * the capture is (now) on the right microphone.
+   */
+  private followDevices(afterEnded: boolean): Promise<boolean> {
+    this.switching = this.switching.catch(() => false).then(() => this.switchIfNeeded(afterEnded))
+    return this.switching
+  }
+
+  /**
+   * The swap itself. A NEW stream is opened and its source connected to the SAME
+   * worklet in the SAME context — the resampler state, the pre-arm queue and the
+   * armed flag are untouched, and the transport never hears of it — and only then
+   * is the old source disconnected and its tracks stopped. `afterEnded`: the live
+   * track died (an unplug), so a switch is forced and the dead device is never
+   * reopened; false comes back if no other microphone could be opened, for the
+   * caller to report the disconnect.
+   */
+  private async switchIfNeeded(afterEnded: boolean): Promise<boolean> {
+    if (this.state !== 'capturing') return false
+    const resolved = await this.resolveTarget()
+    if (this.state !== 'capturing') return false
+    const live = this.liveTrack()
+    if (!afterEnded) {
+      if (!resolved) return true
+      if (trackMatchesTarget(resolved.target, live, resolved.inputs)) return true
+    }
+    let target = resolved?.target ?? null
+    if (afterEnded && target?.kind === 'preferred' && target.device.deviceId === live.deviceId) {
+      // The unplugged device can linger in the list for a moment.
+      target = null
+    }
+
+    let opened: { stream: MediaStream; boundTo: 'preferred' | 'default' }
+    try {
+      opened = await this.openMicrophone(target)
+    } catch {
+      return false
+    }
+    const context = this.context
+    const worklet = this.worklet
+    const fresh = opened.stream.getTracks()
+    if (
+      this.state !== 'capturing' ||
+      !context ||
+      !worklet ||
+      fresh.some((t) => t.readyState === 'ended')
+    ) {
+      for (const track of fresh) track.stop()
+      return false
+    }
+
+    const source = context.createMediaStreamSource(opened.stream)
+    source.connect(worklet)
+    const oldSource = this.source
+    const oldStream = this.stream
+    this.source = source
+    this.stream = opened.stream
+    this.boundTo = opened.boundTo
+    try {
+      oldSource?.disconnect()
+    } catch {
+      /* already gone with its device */
+    }
+    this.untrack?.()
+    this.untrack = null
+    for (const track of oldStream?.getTracks() ?? []) {
+      try {
+        track.stop()
+      } catch {
+        /* ignore */
+      }
+    }
+    this.watchTracks(opened.stream)
+    // A new microphone gets its own silence count; a warning already up clears
+    // on its first block with signal, as it would have anyway.
+    this.silentSamples = 0
+    const label =
+      this.trackLabel() ?? (target?.kind === 'preferred' ? target.device.label : null) ?? ''
+    this.onSwitch?.(label)
+    return true
+  }
+
+  /** Where the live track is: how it was opened, and the device the browser reports. */
+  private liveTrack(): { boundTo: 'preferred' | 'default'; deviceId: string; groupId: string } {
+    const track = this.stream?.getTracks()[0]
+    const settings = (track?.getSettings?.() ?? {}) as MediaTrackSettings
+    return {
+      boundTo: this.boundTo,
+      deviceId: settings.deviceId ?? '',
+      groupId: settings.groupId ?? ''
+    }
+  }
+
+  /** Close the microphone. Idempotent. */
+  private stopTracks(): void {
+    this.untrack?.()
+    this.untrack = null
+    for (const track of this.stream?.getTracks() ?? []) {
+      try {
+        track.stop()
+      } catch {
+        /* ignore */
+      }
+    }
+    this.stream = null
+  }
+
+  /**
+   * Watch the microphone itself while capturing: `ended` (it was unplugged, or
+   * the OS revoked it — the capture first tries to move to whatever microphone
+   * is there now, and only if none opens is it reported) and a SUSTAINED `mute`
+   * (the OS stopped feeding it — a hardware switch, another app taking exclusive
+   * use). A mute is only reported if it outlasts {@link MIC_MUTE_GRACE_MS} with
+   * the capture still running; `unmute`, `ended` and the capture ending all
+   * cancel the wait. Our own `track.stop()` fires none of these, and all are
+   * ignored outside `capturing`.
+   */
+  private watchTracks(stream: MediaStream): void {
+    const tracks = stream.getTracks()
+    let muteTimer: ReturnType<typeof setTimeout> | null = null
+    const cancelMute = (): void => {
+      if (muteTimer) clearTimeout(muteTimer)
+      muteTimer = null
+    }
+    const onEnded = (): void => {
+      cancelMute()
+      if (this.state !== 'capturing') return
+      // Unplugged: move to whatever microphone is there now, as a device change
+      // would. Only if nothing can be opened is it a disconnect, which ends the
+      // capture (the owner's stop finalizes what was said).
+      void this.followDevices(true).then((switched) => {
+        if (!switched && this.state === 'capturing') {
+          this.onFault?.({ message: MIC_DISCONNECTED_MESSAGE, ended: true })
+        }
+      })
+    }
+    const onMute = (event: Event): void => {
+      if (this.state !== 'capturing' || muteTimer) return
+      const track = event.target as MediaStreamTrack | null
+      muteTimer = setTimeout(() => {
+        muteTimer = null
+        if (this.state !== 'capturing') return
+        // `muted` is the track's live answer; a double without it is taken at its event.
+        if (track && track.muted === false) return
+        this.onFault?.({ message: MIC_MUTED_MESSAGE, ended: false })
+      }, MIC_MUTE_GRACE_MS)
+    }
+    for (const track of tracks) {
+      track.addEventListener?.('ended', onEnded)
+      track.addEventListener?.('mute', onMute)
+      track.addEventListener?.('unmute', cancelMute)
+    }
+    this.untrack = () => {
+      cancelMute()
+      for (const track of tracks) {
+        track.removeEventListener?.('ended', onEnded)
+        track.removeEventListener?.('mute', onMute)
+        track.removeEventListener?.('unmute', cancelMute)
+      }
+    }
+  }
+
+  /** Feed the level ring, and raise / clear the live silence warning. */
+  private observeLevel(rms: number, sampleCount: number): void {
+    this.onLevel?.(rmsToLevel(rms))
+    if (rms <= DIGITAL_SILENCE_RMS) {
+      this.silentSamples += sampleCount
+      if (!this.silent && this.silentSamples >= SILENCE_WARNING_SAMPLES) {
+        this.silent = true
+        this.onSilence?.({ silent: true, trackLabel: this.trackLabel() })
+      }
+      return
+    }
+    this.silentSamples = 0
+    if (this.silent) {
+      this.silent = false
+      this.onSilence?.({ silent: false, trackLabel: this.trackLabel() })
+    }
+  }
+
+  /** The live microphone's name, as the browser reports it (null without permission). */
+  currentTrackLabel(): string | null {
+    return this.trackLabel()
+  }
+
+  private trackLabel(): string | null {
+    const label = this.stream?.getTracks()[0]?.label
+    return label ? label : null
+  }
+
+  private makeContext(): AudioContext {
+    const Ctor = this.env.AudioContextCtor!
+    try {
+      return new Ctor({ sampleRate: VOICE_SAMPLE_RATE })
+    } catch {
+      // Safari refuses rates its hardware cannot run; the fallback is the
+      // device rate, which the resampler handles.
+      return new Ctor()
+    }
+  }
+
+  private onBlock(block: Float32Array, sampleRate: number): void {
+    if ((this.state !== 'capturing' && this.state !== 'halting') || !this.resampler) return
+    const { samples, state } = downsampleToPcm16(block, sampleRate, this.resampler)
+    this.resampler = state
+    if (samples.length === 0) return
+    // Read out of the samples, never stored or sent anywhere: a level is all the
+    // UI gets of the audio. Only while capturing — the tail after a release is
+    // not the speaker's live microphone any more.
+    if (this.state === 'capturing') this.observeLevel(pcm16Rms(samples), samples.length)
+    const dataB64 = bytesToBase64(pcm16ToBytesLe(samples))
+
+    if (this.armed) {
+      this.sendAudio(dataB64)
+      return
+    }
+    this.pending.push(dataB64)
+    // Drop the OLDEST: the newest audio is the audio still being spoken.
+    if (this.pending.length > MAX_PENDING_BLOCKS) this.pending.shift()
+  }
+}
+
+/**
+ * A `getUserMedia` rejection, in words an owner can act on.
+ *
+ * `NotAllowedError` is the one that matters — on a phone it usually means the
+ * site permission was denied once and the browser now refuses silently, which is
+ * not something a generic "capture failed" would ever let someone diagnose.
+ */
+function describeCaptureFailure(err: unknown, deniedMessage: string): string {
+  const name = (err as { name?: string } | null)?.name
+  if (name === 'NotAllowedError' || name === 'SecurityError') return deniedMessage
+  if (name === 'NotFoundError' || name === 'OverconstrainedError') return MIC_NOT_FOUND_MESSAGE
+  if (name === 'NotReadableError') return MIC_BUSY_MESSAGE
+  return captureFailedMessage(err instanceof Error ? err.message : String(err))
+}
+
+/**
+ * Raw bytes → base64.
+ *
+ * `String.fromCharCode(...bytes)` is a spread, so the byte count becomes the
+ * ARGUMENT count and a large enough input overflows the call stack. A real batch
+ * is nowhere near that — 150 ms of 16 kHz i16 mono is 4800 bytes, so the loop
+ * runs once and the chunking never engages. The constant is a backstop for a
+ * future batch size, and it is 8 KB rather than the more common 32 KB precisely
+ * because 32 KB is itself in the neighbourhood of engine argument limits: a cap
+ * that sits next to the hazard it is meant to avoid is not a cap.
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x2000
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
+  }
+  return btoa(binary)
+}

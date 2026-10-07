@@ -26,10 +26,31 @@ function releaseCore(version: string): string {
   return version.split('+')[0].split('-')[0]
 }
 
+/**
+ * At or above the ceiling: a version a NEWER ClaudeUI may use. The managed
+ * store is shared by every ClaudeUI build on the machine, so such a version
+ * is never this build's to run as "Latest" or to garbage-collect.
+ */
+export function aboveCeiling(manifest: { ceiling: string }, version: string): boolean {
+  return compareVersions(releaseCore(version), manifest.ceiling) >= 0
+}
+
+/** floor ≤ version < ceiling against `manifest`: what this build can run. */
+export function withinRange(
+  manifest: { floor: string; ceiling: string },
+  version: string
+): boolean {
+  return (
+    HARNESS_VERSION_RE.test(version) &&
+    !aboveCeiling(manifest, version) &&
+    compareVersions(version, manifest.floor) >= 0
+  )
+}
+
 export function classifyVersion(id: HarnessId, version: string): HarnessVersionClass {
   if (!HARNESS_VERSION_RE.test(version)) return 'incompatible'
   const { tested, floor, ceiling } = harnessManifest(id)
-  if (compareVersions(releaseCore(version), ceiling) >= 0) return 'incompatible'
+  if (aboveCeiling({ ceiling }, version)) return 'incompatible'
   if (compareVersions(version, floor) < 0) return 'too-old'
   return compareVersions(version, tested) === 0 ? 'tested' : 'untested'
 }

@@ -63,7 +63,7 @@ import { ideLaunchPageHtml } from '../../shared/ide-launch-page'
 import type { PtyRemoteSink } from './pty-manager'
 import { textToBase64, base64ToText } from '../../shared/base64-text'
 import { gitWatchRegistry } from './git-watch-registry'
-import { remoteVoice } from './remote-voice'
+import { voiceRelay } from './voice-relay'
 import { STREAM_BACKPRESSURE_BYTES } from '../shared/sync/stream'
 import { logger } from './logger'
 import { TunnelManager } from './tunnel-manager'
@@ -1318,7 +1318,7 @@ export class RemoteServer {
       gitWatchRegistry.releaseConnection(client.connection.connectionId)
       // And the microphone: a capture whose socket is gone has nowhere to send a
       // transcript, and it holds a Deepgram stream open inside the engine.
-      remoteVoice.releaseConnection(client.connection.connectionId)
+      voiceRelay.releaseOwner(client.connection.connectionId)
       closed.push(closeSocket(ws))
     }
 
@@ -3747,7 +3747,7 @@ export class RemoteServer {
       // cares about: the 4010 max-age cut ends a session by CLOSING the socket,
       // so this is what guarantees a capture cannot outlive the authority that
       // started it. A phone that sleeps mid-sentence lands here too.
-      remoteVoice.releaseConnection(connectionId)
+      voiceRelay.releaseOwner(connectionId)
       this.clients.delete(ws)
       if (authenticated) {
         logger.info(
@@ -4792,7 +4792,7 @@ export class RemoteServer {
    * withdrawn" — has no code path behind it today, because nothing withdraws
    * `chat` from a live connection (the terminal's `revokeShellGrant` has no
    * counterpart here). The only revocation that exists is closing the socket,
-   * and that DOES end the capture (`remoteVoice.releaseConnection` in the close
+   * and that DOES end the capture (`voiceRelay.releaseOwner` in the close
    * handler and in `stop()`). If a `chat`-revoking path is ever added, it has to
    * release captures the way `revokeShellGrant` detaches terminals.
    *
@@ -4803,7 +4803,7 @@ export class RemoteServer {
   private handleVoiceAudio(ws: WebSocket, msg: WsVoiceAudio): void {
     const client = this.clients.get(ws)
     if (!client) return
-    remoteVoice.feed(client.connection.connectionId, msg.dataB64)
+    voiceRelay.feed(client.connection.connectionId, msg.dataB64)
   }
 
   private handleTermResize(ws: WebSocket, msg: WsTermResize): void {

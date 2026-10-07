@@ -443,11 +443,9 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       throw new Error('Passkey enrollment runs in a browser')
     },
 
-    voiceStartServer: (routingId) => unwrap('voice:start-server', routingId),
-    voiceStopServer: (routingId) => unwrap('voice:stop-server', routingId),
-    voiceStartRecording: (routingId, language) =>
-      unwrap('voice:start-recording', routingId, language),
-    voiceStopRecording: (routingId) => unwrap('voice:stop-recording', routingId),
+    voiceStart: (routingId, language) => unwrap('voice:start-recording', routingId, language),
+    voiceAudio: (routingId, dataB64) => ipcRenderer.send('voice:audio', routingId, dataB64),
+    voiceStop: (routingId) => unwrap('voice:stop-recording', routingId),
     onVoiceTranscript: onEvent('voice:transcript'),
     onVoiceState: onEvent('voice:state'),
 

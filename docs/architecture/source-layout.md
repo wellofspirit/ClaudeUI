@@ -58,7 +58,8 @@ src/
     index.ts           — app lifecycle, BrowserWindow setup, SQLite driver install
     boot-core.ts       — the desktop composition root: transport binder, host
                          adapters, the ten `remote:*` ipcMain registrations
-    ipc/               — desktop-transport.ts (the ipcMain half of the binder)
+    ipc/               — desktop-transport.ts (the ipcMain half of the binder),
+                         voice-feed.ts (the desktop window's `voice:audio` feed)
     auth/              — ClaudeAuthProvider + EngineAuthRegistry (they stay here:
                          Claude sign-in opens the host browser) + register-auth-
                          providers.ts, side-effect-imported by boot-core.ts to
@@ -85,6 +86,10 @@ src/
                          terminal/, usage/, auth/, SettingsDialog/, Sidebar/,
                          shared/, plugin/
     lib/diff/          — custom diff viewer (parse-patch, unified/split tables)
+    lib/voice/         — microphone capture for desktop AND web: BrowserVoiceCapture,
+                         the AudioWorklet (a `?url` asset), voice-controller.ts,
+                         voice-notice.ts (the mic's notice pill), mic-devices.ts +
+                         mic-preference.ts (which microphone; per client, localStorage)
   renderer/log-viewer/ — standalone log viewer window
   web/                 — remote-access web client (WebSocket + E2E encryption)
   test/                — shared test infra: TestIpcBridge, electron/sdk/sqlite/pty
@@ -163,9 +168,8 @@ Key modules in `src/core/services/`:
 | `sync-seed.ts`                                                                                                  | Seeds canonical state's file/query-sourced fields at boot (settings, session registry, slash commands, sidebar directories) so a `sync-full` is complete before any client connects (phase 4b)       |
 | `logger.ts`                                                                                                     | File + ring-buffer logging (the debug WINDOW is `src/main/services/log-viewer.ts`)                                                                                                                   |
 | `mermaid-tool.ts` / `mockup-tool.ts`                                                                            | Hosted MCP tools for diagram + UI-mockup rendering (ADR-007)                                                                                                                                         |
-| `voice-capture.ts` / `voice-client.ts`                                                                          | Native (host microphone) audio capture + streaming to the in-cli.js transcription server                                                                                                             |
-| `voice-stream-client.ts`                                                                                        | The cli.js voice-server TCP protocol, shared by the host microphone and a remote browser capture                                                                                                     |
-| `remote-voice.ts`                                                                                               | Remote browser voice: audio in on the `voice-audio` lane frame, transcripts back to that connection                                                                                                  |
+| `voice-stream-client.ts`                                                                                        | The cli.js voice-server TCP protocol; the base of the relay's push-fed client                                                                                                                        |
+| `voice-relay.ts`                                                                                                | Voice relay per capture owner: renderer-pushed PCM (desktop `voice:audio` IPC, web `voice-audio` frame) in, transcripts back to that owner                                                           |
 
 What deliberately stayed in `src/main/services/` — every RUNTIME module that is Electron
 or is the desktop's own. (Tests are the exception, and the honest caveat: the legacy

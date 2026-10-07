@@ -27,6 +27,11 @@ import type { InputBoxViewProps } from '../View'
 import type { ModelInfo, QueuedItem } from '../../../../../../shared/types'
 import { InputBox } from '../InputBox'
 import {
+  resetVoiceNoticesForTests,
+  useVoiceNoticeStore,
+  voiceNoticeFor
+} from '../../../../lib/voice/voice-notice'
+import {
   resolveCodexCapabilities,
   type EffortLevel
 } from '../../../../../../shared/model-capabilities'
@@ -79,6 +84,38 @@ vi.mock('../../../../hooks/useFileMention', () => ({
 
 vi.mock('../../../../hooks/useIsMobile', () => ({
   useIsMobile: () => false
+}))
+
+// The voice controller with its microphone taken out: jsdom has no audio, so the
+// real capture would refuse before the TRANSPORT is ever reached. What these
+// tests pin is InputBox's sequencing (held/press refs around `ensureSession()`)
+// as it reaches the transport — `window.api.voiceStart` / `voiceStop`, i.e. the
+// `voice:start-recording` / `voice:stop-recording` invokes recorded below. The
+// controller's own capture-vs-transport order is voice-controller.unit.test.ts's.
+const voiceFaults = vi.hoisted(() => new Set<(message: string) => void>())
+const voiceSwitches = vi.hoisted(() => new Set<(label: string) => void>())
+const voiceSilences = vi.hoisted(
+  () => new Set<(silence: { silent: boolean; trackLabel: string | null }) => void>()
+)
+vi.mock('../../../../lib/voice/voice-controller', () => ({
+  voiceController: () => ({
+    start: (routingId: string, language: string) => window.api.voiceStart(routingId, language),
+    stop: (routingId: string) => window.api.voiceStop(routingId),
+    isActive: () => false,
+    onFault: (listener: (message: string) => void) => {
+      voiceFaults.add(listener)
+      return () => voiceFaults.delete(listener)
+    },
+    onLevel: () => () => {},
+    onSwitch: (listener: (label: string) => void) => {
+      voiceSwitches.add(listener)
+      return () => voiceSwitches.delete(listener)
+    },
+    onSilence: (listener: (silence: { silent: boolean; trackLabel: string | null }) => void) => {
+      voiceSilences.add(listener)
+      return () => voiceSilences.delete(listener)
+    }
+  })
 }))
 
 const ROUTE = 'r-input-1'
@@ -1548,7 +1585,159 @@ describe('InputBox FC — rendered', () => {
     expect(viewProps.selectedModel.engineId).toBe('opencode')
   })
 
-  it('onVoiceStop: calls voiceStopRecording IPC with active session id', async () => {
+  // S2 item 6 made every voice failure visible; S3a moved them off the session's
+  // error stack. A start/stop the renderer saw fail, a microphone fault and the
+  // live silence warning all land in the mic's notice pill — never `addError`.
+  describe('voice messages are notices, never session errors', () => {
+    function liveSession(): void {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: { ...state.sessions[FC_ROUTE], sdkActive: true }
+        }
+      }))
+      mirrorStoreIntoReplica()
+    }
+    const notice = (): ReturnType<typeof voiceNoticeFor> =>
+      voiceNoticeFor(useVoiceNoticeStore.getState().notices, FC_ROUTE)
+    const errors = (): string[] => useSessionStore.getState().sessions[FC_ROUTE].errors
+
+    beforeEach(() => resetVoiceNoticesForTests())
+
+    it('a refused start is a warn notice (and still logged), not a session error', async () => {
+      liveSession()
+      app.bridge.ipcMain.handle('voice:start-recording', () => ({
+        ok: false,
+        error: 'Microphone access denied — allow it for this site'
+      }))
+      renderFC()
+
+      await act(async () => {
+        await viewProps.onVoiceStart()
+      })
+
+      expect(notice()).toMatchObject({
+        text: 'Microphone access denied — allow it for this site',
+        tone: 'warn'
+      })
+      expect(viewProps.voiceNotice).toMatchObject({ text: notice()!.text })
+      expect(errors()).toEqual([])
+    })
+
+    it('a failed stop is a warn notice too', async () => {
+      app.bridge.ipcMain.handle('voice:stop-recording', () => ({
+        ok: false,
+        error: 'stop went wrong'
+      }))
+      renderFC()
+
+      await act(async () => {
+        await viewProps.onVoiceStop()
+      })
+
+      expect(notice()).toMatchObject({ text: 'stop went wrong', tone: 'warn' })
+      expect(errors()).toEqual([])
+    })
+
+    it('a microphone fault is a warn notice for the active session', async () => {
+      renderFC()
+      expect(voiceFaults.size).toBe(1)
+
+      act(() => {
+        for (const listener of voiceFaults) listener('Microphone disconnected — kept what you said')
+      })
+
+      expect(notice()).toMatchObject({
+        text: 'Microphone disconnected — kept what you said',
+        tone: 'warn'
+      })
+      expect(errors()).toEqual([])
+    })
+
+    it('the live silence warning names the track, and is taken down when sound returns', () => {
+      renderFC()
+      expect(voiceSilences.size).toBe(1)
+
+      act(() => {
+        for (const listener of voiceSilences)
+          listener({ silent: true, trackLabel: 'MacBook Pro Microphone' })
+      })
+      expect(notice()).toMatchObject({
+        text: 'No signal from MacBook Pro Microphone — lid closed or muted?',
+        tone: 'warn'
+      })
+
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: false, trackLabel: null })
+      })
+      expect(notice()).toBeNull()
+      expect(errors()).toEqual([])
+    })
+
+    it('a rekey mid-silence: the warning is still taken down when sound returns', () => {
+      // A first press spawns cli.js, which rekeys the brand-new session while
+      // the microphone is open; InputBox resubscribes under the new id.
+      renderFC()
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: true, trackLabel: null })
+      })
+      expect(notice()).not.toBeNull()
+
+      act(() => seed.rekey(FC_ROUTE, 'sdk-voice-1'))
+      expect(useSessionStore.getState().activeSessionId).toBe('sdk-voice-1')
+      expect(voiceSilences.size).toBe(1)
+      expect(voiceNoticeFor(useVoiceNoticeStore.getState().notices, 'sdk-voice-1')).toMatchObject({
+        text: expect.stringMatching(/^No signal from/)
+      })
+
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: false, trackLabel: null })
+      })
+      expect(voiceNoticeFor(useVoiceNoticeStore.getState().notices, 'sdk-voice-1')).toBeNull()
+    })
+
+    it('a mid-press microphone switch is a grey (info) notice', () => {
+      renderFC()
+      expect(voiceSwitches.size).toBe(1)
+      act(() => {
+        for (const listener of voiceSwitches) listener('AirPods Pro')
+      })
+      expect(notice()).toMatchObject({ text: 'Switched to AirPods Pro', tone: 'info' })
+      expect(errors()).toEqual([])
+    })
+
+    it('a cleared silence warning never removes a NEWER notice that replaced it', () => {
+      renderFC()
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: true, trackLabel: null })
+      })
+      act(() => {
+        for (const listener of voiceFaults) listener('The microphone was muted by the system')
+      })
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: false, trackLabel: null })
+      })
+      expect(notice()).toMatchObject({ text: 'The microphone was muted by the system' })
+    })
+
+    it('the push-to-talk is HELD from press to release — the pill stays while it is', async () => {
+      liveSession()
+      renderFC()
+      expect(viewProps.voiceHeld).toBe(false)
+
+      await act(async () => {
+        await viewProps.onVoiceStart()
+      })
+      expect(viewProps.voiceHeld).toBe(true)
+
+      await act(async () => {
+        await viewProps.onVoiceStop()
+      })
+      expect(viewProps.voiceHeld).toBe(false)
+    })
+  })
+
+  it('onVoiceStop: sends voice:stop-recording with the active session id', async () => {
     renderFC()
 
     await viewProps.onVoiceStop()

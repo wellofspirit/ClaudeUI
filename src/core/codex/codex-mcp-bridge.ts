@@ -23,7 +23,7 @@
  */
 
 import type { McpServerConfig } from '../../shared/types'
-import { mergeClaudeMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
+import { readEnabledClaudeMcpServers } from '../services/claude-mcp'
 import { logger } from '../services/logger'
 
 // ---------------------------------------------------------------------------
@@ -108,8 +108,8 @@ export function translateClaudeMcpServerForCodex(cfg: McpServerConfig): CodexMcp
  * Collect the Claude MCP servers a Codex thread in `cwd` should inherit.
  *
  * Merge order and the per-cwd disabled list are the shared ones
- * (`mergeClaudeMcpServers`), so Codex and opencode always see the same set of
- * servers before translation.
+ * (`readEnabledClaudeMcpServers`), so Codex, opencode and pi always see the
+ * same set of servers before translation.
  *
  * `skipped` names the SSE servers that were dropped — the one class of skip a
  * user can act on (re-declare the server over streamable HTTP), which is why
@@ -125,13 +125,11 @@ export function collectClaudeMcpForCodex(cwd: string): {
   skipped: string[]
 } {
   try {
-    const merged = mergeClaudeMcpServers(cwd)
-    const disabled = new Set(readDisabledMcpServers(cwd))
+    const enabled = readEnabledClaudeMcpServers(cwd)
 
     const servers: Record<string, CodexMcpServerEntry> = {}
     const skipped: string[] = []
-    for (const [name, cfg] of Object.entries(merged)) {
-      if (disabled.has(name)) continue
+    for (const [name, cfg] of Object.entries(enabled)) {
       if (cfg?.type === 'sse') {
         skipped.push(name)
         continue

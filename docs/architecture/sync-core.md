@@ -70,7 +70,7 @@ log viewer — and `CLAUDEUI_NO_WINDOW=1` skips it entirely. The rule that keeps
 true: **nothing on the boot path may CAPTURE a window.** Whatever genuinely needs one
 reads it from `services/host-window.ts` at USE time and copes with `null` — the
 `host-local` delivery lane, `session:pick-folder`'s dialog parent, and the spawn handle
-a session keeps for voice capture. Two signatures lost their window parameter for this
+a session keeps (it was for voice capture, which has since moved into the renderer). Two signatures lost their window parameter for this
 (`registerSessionIpc`, `registerRemoteHandlers`); `BaseSession.win` became
 `BrowserWindow | null`.
 
@@ -371,6 +371,8 @@ channel, which the funnel guard's channel-literal scan could not see. Under unif
 delivery the desktop subscribes to that channel, so the targeted send would have landed
 nowhere and voice errors would have gone silent. Routed through `emitEvent`, and the guard
 grew a check for computed-channel sends whose allowlist has to prove itself host-local.
+(`VoiceClient` is gone since desktop capture moved into the renderer; its delivery is the
+desktop owner in `voice-relay.ts`, which carries the same allowlist entry.)
 
 **A defect the seal exposed on the way in.** `BaseSession.trackThinkingSpan` cleared
 only the OPEN clock at a turn boundary, never an already-parked `sealedThinkingMs`;
@@ -641,8 +643,10 @@ background reconnect catches up without a `sync-full`.
   cannot re-mint the entry (the F7 pairing, extended in
   [sync-channels.md](sync-channels.md) §Eviction). Exit criterion:
   `src/e2e/flows/watch-update-refetch.e2e.test.ts`.
-- **The voice surface's lane split remains** — `voice:error` still rings because one of
-  its two emitters is `BaseSession.send` (see the note in `core/shared/sync/channels.ts`).
+- **The voice surface's lane split remains** — `voice:error` still rings. Its
+  `BaseSession.send` emitter is gone (desktop capture moved into the renderer), so the one
+  left is the desktop owner in `voice-relay.ts`; narrowing the class is still a
+  ring-membership change (see the note in `core/shared/sync/channels.ts`).
 
 **Command-registry completeness** (the `command()` migration, ADR-051 contract 1):
 

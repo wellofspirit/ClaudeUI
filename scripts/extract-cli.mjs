@@ -27,21 +27,21 @@
  *     splits it back apart on the delimiters and re-injects each chunk into its
  *     own module-table slot. Every chunk's bytes are pure ASCII and end with a
  *     newline, so delimiters always start at column 0 (validated below).
- *   - `vendor/claude-cli/vendor/<addon>/<arch>-<platform>/<addon>.node` —
- *     native NAPI addons (e.g. `audio-capture.node`) for the Electron
- *     main process to load directly. cli.js itself resolves these from
- *     the rebundled Bun binary's own module graph, but `voice-capture.ts`
- *     in the Electron main process needs a loose copy on disk.
+ *   - Nothing else. The native `.node` addons (`audio-capture`,
+ *     `computer-use-*`) stay inside the Bun binary, where cli.js loads them
+ *     from its own module graph, and `scripts/rebundle-cli.mjs` re-injects them
+ *     intact. Loose copies used to be written for the Electron main process's
+ *     native microphone capture; voice capture moved into the renderer
+ *     (ADR-098), nothing loads them, and they are no longer extracted or shipped.
  *
  * Pipeline:
  *   1. Resolve upstream version (pin via package.json#claudeCliVersion).
  *   2. Download claude-<version>-<platform>.exe from downloads.claude.ai
  *      (verifies SHA256 against manifest; cached under .cache/claude-cli/ —
  *      CI caches this directory keyed on the pinned version).
- *   3. Parse Bun's standalone trailer, walk the modules table, concatenate
- *      every loader==1 module and extract every `.node` addon verbatim.
- *   4. Write to vendor/claude-cli/cli.js + per-triple addon paths +
- *      version.json.
+ *   3. Parse Bun's standalone trailer, walk the modules table and concatenate
+ *      every loader==1 module.
+ *   4. Write to vendor/claude-cli/cli.js + version.json.
  *
  * Runs unconditionally — the full extract + patch + rebundle pipeline costs
  * a few seconds once the source binary is cached, and patches can change
@@ -296,7 +296,7 @@ async function resolveBinary(arg) {
 // ---------------------------------------------------------------------------
 // Chunk extractor — walks the PE `.bun` section (or the whole file for
 // overlay containers), reads the trailer's modules table, and returns every
-// JS chunk plus every `.node` addon.
+// JS chunk. Non-JS modules (`.node` addons, assets) stay in the binary.
 // ---------------------------------------------------------------------------
 
 function findBunSectionRawOff(buf) {
@@ -357,9 +357,9 @@ function validateJsChunk(name, bytes, encoding) {
 }
 
 /**
- * Extract every JS chunk and all `.node` native addons from a Bun standalone
- * binary. Walks the trailer at the end of the `.bun` section (PE) or the file
- * (overlay formats on mac/linux).
+ * Extract every JS chunk from a Bun standalone binary. Walks the trailer at
+ * the end of the `.bun` section (PE) or the file (overlay formats on
+ * mac/linux).
  */
 function extractAssets(buf) {
   let blob
@@ -387,7 +387,7 @@ function extractAssets(buf) {
   const n = mod_len / 52
   const base = data_start + mod_off
 
-  const assets = { chunks: [], addons: [], moduleCount: n }
+  const assets = { chunks: [], moduleCount: n }
   const seen = new Set()
   for (let i = 0; i < n; i++) {
     const e = base + i * 52
@@ -410,10 +410,6 @@ function extractAssets(buf) {
       if (seen.has(name)) throw new Error(`duplicate JS module name in modules table: "${name}"`)
       seen.add(name)
       assets.chunks.push({ name, nameBytes, bytes })
-    } else if (name.endsWith('.node')) {
-      const leaf = name.split(/[\\/]/).pop()
-      const addonName = leaf.replace(/\.node$/, '')
-      assets.addons.push({ name, addonName, bytes })
     }
   }
   if (assets.chunks.length === 0) {
@@ -446,7 +442,7 @@ async function main() {
 
   log(`reading ${binPath}`)
   const buf = readFileSync(binPath)
-  const { chunks, addons, moduleCount } = extractAssets(buf)
+  const { chunks, moduleCount } = extractAssets(buf)
   const concat = buildConcat(chunks)
   // Named (non `chunk-*`) modules are the entry + workers — worth naming in the
   // log since a rename there is exactly what broke extraction on past bumps.
@@ -458,25 +454,12 @@ async function main() {
   )
 
   // Wipe the vendor dir so stale artifacts (previous versions' chunk set,
-  // stale addon copies, vendored ripgrep) don't leak into the build. Safe —
-  // rebundle + addon writes below regenerate what's needed.
+  // loose addon copies from before ADR-098, vendored ripgrep) don't leak into
+  // the build. Safe — the rebundle below regenerates what's needed.
   if (existsSync(VENDOR_DIR)) rmSync(VENDOR_DIR, { recursive: true, force: true })
   mkdirSync(VENDOR_DIR, { recursive: true })
   writeFileSync(OUT_CLI, concat)
   log(`wrote ${OUT_CLI}`)
-
-  // Native addons — extracted for the host triple (Bun binary is
-  // host-specific, so cross-platform packaging is already host-bound).
-  // Layout matches what voice-capture.ts expects:
-  //   vendor/claude-cli/vendor/<addonName>/<arch>-<platform>/<addonName>.node
-  const triple = `${process.arch}-${process.platform}`
-  for (const addon of addons) {
-    const outDir = join(VENDOR_DIR, 'vendor', addon.addonName, triple)
-    mkdirSync(outDir, { recursive: true })
-    const outPath = join(outDir, `${addon.addonName}.node`)
-    writeFileSync(outPath, addon.bytes)
-    log(`wrote ${outPath} (${addon.bytes.length.toLocaleString()} bytes)`)
-  }
 
   // Store `sourceBinary` relative to ROOT when the binary lives inside the
   // project (the usual .cache/claude-cli/ path); fall back to the absolute

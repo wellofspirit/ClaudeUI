@@ -797,7 +797,8 @@ export class RemoteConnection {
   }
 
   /**
-   * One batch of microphone PCM for an open voice capture (phase 5 S3).
+   * One batch of microphone PCM for an open voice capture (phase 5 S3) — the
+   * web transport's `voiceAudio`; the capture itself is `renderer/src/lib/voice/`.
    *
    * Fire-and-forget on the same reasoning as `term-input`: ~7 a second, and a
    * response would carry nothing. `dataB64` is base64 of raw 16 kHz i16LE mono

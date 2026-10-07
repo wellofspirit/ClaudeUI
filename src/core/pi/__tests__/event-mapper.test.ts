@@ -1638,3 +1638,44 @@ describe('mapPiEvent — a runtime send_message extension_error (ADR-089 review 
     ).toEqual([{ kind: 'error', message: 'y' }])
   })
 })
+
+describe('mapPiEvent — extension_ui_request notify (ADR-096)', () => {
+  const notify = (message: string, notifyType?: string): unknown => ({
+    type: 'extension_ui_request',
+    id: 'n',
+    method: 'notify',
+    message,
+    ...(notifyType ? { notifyType } : {})
+  })
+
+  it('surfaces MCP warnings and errors (pi\'s MCP extension and the bridge both start with "MCP ")', () => {
+    const state = createPiMapperState()
+    expect(
+      mapPiEvent(
+        notify('MCP servers need attention:\n  docs: needs sign-in', 'warning') as never,
+        state
+      )
+    ).toEqual([
+      { kind: 'mcp_notice', message: 'MCP servers need attention:\n  docs: needs sign-in' }
+    ])
+    expect(mapPiEvent(notify('MCP failed to load: x', 'error') as never, state)).toEqual([
+      { kind: 'mcp_notice', message: 'MCP failed to load: x' }
+    ])
+  })
+
+  it('ignores info notifies, other extensions, and dialogs', () => {
+    const state = createPiMapperState()
+    expect(mapPiEvent(notify('MCP servers are still connecting', 'info') as never, state)).toEqual([
+      { kind: 'ignore' }
+    ])
+    expect(mapPiEvent(notify('Something else', 'warning') as never, state)).toEqual([
+      { kind: 'ignore' }
+    ])
+    expect(
+      mapPiEvent(
+        { type: 'extension_ui_request', id: 'd', method: 'input', title: 'MCP x' } as never,
+        state
+      )
+    ).toEqual([{ kind: 'ignore' }])
+  })
+})

@@ -543,42 +543,44 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: false,
     why: 'Full ring dump on log-viewer open.'
   },
-  // The three voice channels are classified for the HOST microphone, and phase 5
-  // S3 left that classification untouched while adding a second capture that is
-  // not an emission at all. A remote browser's capture
-  // (`main/services/remote-voice.ts`) sends `voice:state` / `voice:transcript` /
-  // `voice:error` as TARGETED lane frames straight to the one connection holding
-  // the microphone — never through `emitEvent`, so no class here applies to them
-  // and none of them ring. The client cannot tell: a targeted `stream-ev` frame
-  // is dispatched into the same per-channel listeners a host-local
-  // `webContents.send` feeds, which is why the renderer needed no rewiring.
+  // The three voice channels are classified for the DESKTOP window's capture.
+  // Every capture now runs in a renderer and is relayed by
+  // `core/services/voice-relay.ts`, per capture owner. The desktop owner emits
+  // these channels; a remote browser's owner (phase 5 S3) does not emit them at
+  // all — it sends `voice:state` / `voice:transcript` / `voice:error` as TARGETED
+  // lane frames straight to the one connection holding the microphone, never
+  // through `emitEvent`, so no class here applies to them and none of them ring.
+  // The client cannot tell: a targeted `stream-ev` frame is dispatched into the
+  // same per-channel listeners a host-local `webContents.send` feeds, which is
+  // why the renderer needed no rewiring.
   'voice:state': {
     cls: 'host-local',
     ring: false,
     canonical: false,
-    why: 'Host microphone capture (security.md §Host-local). A remote capture does not emit this channel at all — it targets the capturing connection on the volatile lane (phase 5 S3).'
+    why: "The desktop window's capture (security.md §Host-local). A remote capture does not emit this channel at all — it targets the capturing connection on the volatile lane (phase 5 S3)."
   },
   'voice:transcript': {
     cls: 'host-local',
     ring: false,
     canonical: false,
-    why: 'Host microphone capture. Remote captures target the capturing connection on the volatile lane (phase 5 S3) — a transcript belongs to the microphone that produced it, not to everyone watching the session.'
+    why: "The desktop window's capture. Remote captures target the capturing connection on the volatile lane (phase 5 S3) — a transcript belongs to the microphone that produced it, not to everyone watching the session."
   },
-  // NOTE the anomaly, now BOUNDED rather than fixed. `voice:error` is host-local
-  // in nature but one of its emitters is `BaseSession.send` (claude-session.ts's
-  // early-capture failure), so it rings and reaches every client. 4a rule 1
-  // forbids reducing ring membership, so it stays recorded as it behaves.
+  // NOTE the anomaly, still recorded as it behaves. `voice:error` is host-local
+  // in nature but was raised through `BaseSession.send` too (ClaudeSession's
+  // early-capture failure), so it was classified replicated: it rings and reaches
+  // every client. 4a rule 1 forbids reducing ring membership, so it stays.
   //
-  // What phase 5 S3 could honestly do — and did — is refuse to make it worse: the
-  // remote capture, which would have been a THIRD emitter, does not emit this
-  // channel. Its failures are targeted lane frames to the capturing connection.
-  // Splitting the two existing emitters still needs the ring-membership change
-  // rule 1 forbids, so it remains open.
+  // Phase 5 S3 refused to make it worse — the remote capture, which would have
+  // been a THIRD emitter, does not emit this channel. Moving desktop capture into
+  // the renderer then removed the ClaudeSession emitter outright: the ONE emitter
+  // left is the desktop owner in `voice-relay.ts`, through the funnel. Narrowing
+  // the class to host-local is now a classification change only, but it is still
+  // the ring-membership change rule 1 forbids, so it remains open.
   'voice:error': {
     cls: 'replicated',
     ring: true,
     canonical: false,
-    why: 'Mixed emitters: VoiceClient and ClaudeSession (via BaseSession.send) both raise it. Rings, so it reaches every subscriber; no snapshot field. Phase 5 S3 kept a remote capture OFF this channel (targeted lane frames instead) rather than adding a third emitter; splitting the two that remain still needs the ring-membership change rule 1 forbids.'
+    why: 'One emitter since desktop capture moved into the renderer: the desktop owner in voice-relay.ts, through the funnel (ClaudeSession no longer raises it). Args `[routingId, message, tone?]` — every voice message for the mic notice pill, outcomes included; `tone` is `info` | `warn` (absent = `warn`). Rings, so it reaches every subscriber; no snapshot field. Remote captures stay OFF this channel (targeted lane frames with the same args instead, phase 5 S3); narrowing it to host-local is the ring-membership change rule 1 forbids.'
   },
   'terminal:data': {
     cls: 'host-local',
