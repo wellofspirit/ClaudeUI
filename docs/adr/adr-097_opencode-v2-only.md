@@ -521,6 +521,16 @@ since quit restores their credential), sees a later expiry than the real one.
   usable providers only. The judge route accepts 2.x's
   `@opencode/ai/providers/openai-compatible`.
 
+**Owner decisions on quit (2026-10-07, after the S10b real-app run).**
+
+- After ClaudeUI quits, the shared DB holds no ChatGPT credential for the user's own opencode: the
+  first contact deleted the proven copy, and quit removes ClaudeUI's own row. Accepted: ClaudeUI's
+  token is only fresh while ClaudeUI refreshes it, so a row left behind would stop working within
+  about an hour anyway. The user signs in from their own opencode if they want it independently.
+- ClaudeUI's API-key rows (`cred_claudeui_<provider>_v<n>`) stay active after quit, and the user's
+  own key rows for those providers stay inactive. Accepted: keys don't expire or rotate, and the
+  values match, so the user's opencode keeps working.
+
 ### 6. Data dir (owner decision: shared)
 
 - ClaudeUI spawns 2.x on the user's default data dir: shared DB and sessions, as in 1.x. Config stays
