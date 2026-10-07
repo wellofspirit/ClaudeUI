@@ -316,11 +316,20 @@ function sameIdentity(
 }
 
 /**
- * `compiled`, with each model's capability leaves three-way merged against what
- * the file holds: ClaudeUI's new value where the file has none or still has
- * the value ClaudeUI wrote last (`previous`), the file's where someone edited it
- * since. A refresh therefore updates the details nobody touched, and a hand
- * edit in opencode's model editor survives every sync.
+ * `compiled`, with each model's capability leaves merged against what the file
+ * holds, so that an AUTOMATIC sync (every boot re-applies every definition)
+ * writes only what ClaudeUI's definition actually changed (S10b B1):
+ *
+ *  - a leaf the definition CHANGED since the last apply (`previous`) takes the
+ *    new value — unless someone edited it in the file since (it no longer
+ *    holds what ClaudeUI wrote), whose edit wins;
+ *  - a leaf the definition did NOT change keeps the file's value, in the 2.x
+ *    reading of the file. A 1.x entry ClaudeUI wrote under 1.x reads through
+ *    upstream's exact migration, where 1.x `reasoning`/`attachment` are inert
+ *    (unknown, F4): they are NOT re-asserted, so a boot never moves the entry
+ *    or adds a `variants: []` nobody asked for;
+ *  - a model whose file entry declares no capability at all (a block written
+ *    before ADR-074 slice 10) is seeded with the compiled values.
  */
 function mergeCapabilities(
   existing: OpencodeProviderSettings | undefined,
@@ -339,8 +348,12 @@ function mergeCapabilities(
         id: model.id,
         ...(model.name ? { name: model.name } : {})
       }
+      const last = wrote.get(model.id)
+      const declaresNothing = CAPABILITY_KEYS.every((key) => file[key] === undefined)
       for (const key of CAPABILITY_KEYS) {
-        const own = file[key] === undefined || sameJson(file[key], wrote.get(model.id)?.[key])
+        const changed = !sameJson(model[key], last?.[key])
+        const untouched = file[key] === undefined || sameJson(file[key], last?.[key])
+        const own = declaresNothing || (changed && untouched)
         const value = own ? model[key] : file[key]
         // 2.x has no "reasons" flag: a reasoning model is one with no `variants`
         // list, which reads back as unknown. Matching it keeps a sync a no-op.

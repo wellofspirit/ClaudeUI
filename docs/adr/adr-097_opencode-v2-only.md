@@ -608,6 +608,14 @@ theirs, ClaudeUI still writes only through its editors).
   `Config.InfoEncoded` by `generate-opencode-protocol.mjs` (provenance + `check-opencode-protocol`
   cover drift); validation covers the touched top-level keys only. An `mcp.timeout` edit moves the
   1.x `experimental.mcp_timeout` into whichever of catalog/execution is unset.
+- **Automatic syncs write only what the definition changed (S10b B1).** Every boot re-applies the
+  shared-provider definitions; a capability leaf is written only when the definition CHANGED it
+  since the last apply (and the file still holds ClaudeUI's last value), or when the model declares
+  no capability at all (slice-10 seeding). Unchanged leaves keep the file's value in its 2.x reading,
+  so a 1.x entry ClaudeUI wrote under 1.x is neither moved nor given a `variants: []` on boot
+  (the inert 1.x `reasoning`/`attachment` are not re-asserted). Audited the other automatic
+  writers: the default-model write touches only `model`; the private-store migration writes only
+  absent keys; MCP is injected, never written; agents and the Tools switch are user actions only.
 - **Writes are conflict-aware and atomic.** A settings pane sends the snapshot it edited
   (`saveOpencodeSettings(settings, base)`): only its changes relative to that snapshot land on the
   file as it is now (`rebaseFields`), so a provider or veto added meanwhile survives. Every write is
