@@ -20,6 +20,7 @@ import {
   MIC_DISCONNECTED_MESSAGE,
   MIC_MUTED_MESSAGE,
   MIC_MUTE_GRACE_MS,
+  DEVICE_CHANGE_DEBOUNCE_MS,
   SILENCE_WARNING_MS,
   type CaptureEnv,
   type CaptureSilence
@@ -322,9 +323,17 @@ describe('voice controller — drain edge cases (S2 item 1)', () => {
 })
 
 describe('voice controller — microphone faults (S2 item 9)', () => {
-  it('an unplugged microphone is reported AND ends the capture through the normal stop', async () => {
+  it('an unplugged microphone with nothing to move to is reported AND ends the capture through the normal stop', async () => {
     const transport = makeTransport()
-    const controller = createVoiceController(transport, { env: makeEnv() })
+    let opened = 0
+    const controller = createVoiceController(transport, {
+      env: makeEnv(async () => {
+        if (opened++ > 0) throw Object.assign(new Error('gone'), { name: 'NotFoundError' })
+        const track = Object.assign(new EventTarget(), { stop: () => log.push('mic:close') })
+        liveTracks.push(track)
+        return { getTracks: () => [track] } as unknown as MediaStream
+      })
+    })
     const faults: string[] = []
     controller.onFault((message) => faults.push(message))
     await controller.start('rid-1', 'en')
@@ -460,5 +469,69 @@ describe('voice controller — owns a recent capture', () => {
     await controller.stop('sdk-1')
     expect(controller.ownsRecentCapture('pending-1')).toBe(true)
     expect(controller.ownsRecentCapture('sdk-1')).toBe(true)
+  })
+})
+
+describe('voice controller — microphone choice (S3b)', () => {
+  it('opens the preferred microphone it is given, and relays a mid-press switch', async () => {
+    const opened: unknown[] = []
+    const changes = new Set<() => void>()
+    let defaultId = 'mac'
+    const devices = [
+      { kind: 'audioinput', deviceId: 'mac', label: 'MacBook Pro Microphone', groupId: 'g-mac' },
+      { kind: 'audioinput', deviceId: 'pods', label: 'AirPods Pro', groupId: 'g-pods' }
+    ]
+    const env: CaptureEnv = {
+      ...makeEnv(),
+      mediaDevices: {
+        getUserMedia: vi.fn(async (c: MediaStreamConstraints) => {
+          const exact = ((c.audio as MediaTrackConstraints).deviceId as { exact?: string })?.exact
+          const id = exact ?? defaultId
+          opened.push(id)
+          const d = devices.find((x) => x.deviceId === id)!
+          const track = Object.assign(new EventTarget(), {
+            stop: () => {},
+            label: d.label,
+            getSettings: () => ({ deviceId: d.deviceId, groupId: d.groupId })
+          })
+          return { getTracks: () => [track] } as unknown as MediaStream
+        }),
+        enumerateDevices: async () => {
+          const def = devices.find((d) => d.deviceId === defaultId)!
+          return [
+            { ...def, deviceId: 'default', label: `Default - ${def.label}` },
+            ...devices
+          ] as unknown as MediaDeviceInfo[]
+        },
+        addEventListener: (_t: 'devicechange', l: () => void) => changes.add(l),
+        removeEventListener: (_t: 'devicechange', l: () => void) => changes.delete(l)
+      }
+    }
+    let preference: { deviceId: string; label: string } | null = {
+      deviceId: 'pods',
+      label: 'AirPods Pro'
+    }
+    const controller = createVoiceController(makeTransport(), {
+      env,
+      preference: () => preference
+    })
+    const switched: string[] = []
+    controller.onSwitch((label) => switched.push(label))
+
+    await controller.start('rid-1', 'en')
+    expect(opened).toEqual(['pods'])
+
+    // The preference is read live: cleared mid-press, the next change follows the default.
+    preference = null
+    defaultId = 'mac'
+    vi.useFakeTimers()
+    try {
+      for (const l of changes) l()
+      vi.advanceTimersByTime(DEVICE_CHANGE_DEBOUNCE_MS)
+    } finally {
+      vi.useRealTimers()
+    }
+    await vi.waitFor(() => expect(switched).toEqual(['MacBook Pro Microphone']))
+    expect(opened).toEqual(['pods', 'mac'])
   })
 })

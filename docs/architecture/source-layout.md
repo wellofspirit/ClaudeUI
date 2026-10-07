@@ -85,7 +85,9 @@ src/
                          shared/, plugin/
     lib/diff/          — custom diff viewer (parse-patch, unified/split tables)
     lib/voice/         — microphone capture for desktop AND web: BrowserVoiceCapture,
-                         the AudioWorklet (a `?url` asset), voice-controller.ts
+                         the AudioWorklet (a `?url` asset), voice-controller.ts,
+                         voice-notice.ts (the mic's notice pill), mic-devices.ts +
+                         mic-preference.ts (which microphone; per client, localStorage)
   renderer/log-viewer/ — standalone log viewer window
   web/                 — remote-access web client (WebSocket + E2E encryption)
   test/                — shared test infra: TestIpcBridge, electron/sdk/sqlite/pty

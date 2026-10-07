@@ -37,6 +37,8 @@ import {
   type CaptureSilence
 } from './browser-voice-capture'
 import { resolveRekeyed } from '../../stores/replica'
+import { readMicPreference } from './mic-preference'
+import type { MicPreference } from './mic-devices'
 
 /**
  * How long after a stop completes this client still owns that session's voice
@@ -74,6 +76,11 @@ export interface VoiceController {
    * {@link CaptureSilence}). Returns the unsubscribe.
    */
   onSilence(listener: (silence: CaptureSilence) => void): () => void
+  /**
+   * The capture moved to another microphone mid-press (a device change, or an
+   * unplug it recovered from), with the new one's name. Returns the unsubscribe.
+   */
+  onSwitch(listener: (label: string) => void): () => void
   /**
    * Did THIS client capture for `routingId` — a capture live now, or one whose
    * stop completed within {@link VOICE_OWNERSHIP_WINDOW_MS}? Rekeys followed.
@@ -114,6 +121,8 @@ export function createVoiceController(
   options: {
     env?: CaptureEnv
     deniedMessage?: string
+    /** The preferred microphone (`mic-preference.ts`); absent = the system default. */
+    preference?: () => MicPreference | null
     /** Where a pre-rekey id went (`stores/replica`'s `resolveRekeyed`). Test seam. */
     resolveId?: (routingId: string) => string
   } = {}
@@ -142,6 +151,7 @@ export function createVoiceController(
   const faults = listeners<string>()
   const levels = listeners<number>()
   const silences = listeners<CaptureSilence>()
+  const switches = listeners<string>()
 
   // One microphone per client, matching main's one-capture-per-owner rule
   // (core/services/voice-relay.ts). Constructed eagerly and cheaply — it touches
@@ -152,6 +162,8 @@ export function createVoiceController(
     deniedMessage: options.deniedMessage,
     onLevel: (level) => levels.emit(level),
     onSilence: (silence) => silences.emit(silence),
+    preference: options.preference,
+    onSwitch: (label) => switches.emit(label),
     onFault: (fault) => {
       faults.emit(fault.message)
       // Unplugged: nothing more will come, so end the capture the normal way —
@@ -247,6 +259,7 @@ export function createVoiceController(
     onFault: (listener) => faults.add(listener),
     onLevel: (listener) => levels.add(listener),
     onSilence: (listener) => silences.add(listener),
+    onSwitch: (listener) => switches.add(listener),
 
     ownsRecentCapture(routingId) {
       prune()
@@ -273,7 +286,7 @@ export function voiceController(): VoiceController {
         audio: (routingId, dataB64) => window.api.voiceAudio(routingId, dataB64),
         stop: (routingId) => window.api.voiceStop(routingId)
       },
-      { deniedMessage: micDeniedMessage(window.api?.platform) }
+      { deniedMessage: micDeniedMessage(window.api?.platform), preference: readMicPreference }
     )
   }
   return shared

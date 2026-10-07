@@ -19,6 +19,12 @@
  *    and carries the correctness of the whole path);
  *  - this class owns permissions, the graph, and the lifecycle.
  *
+ * Which microphone is `mic-devices.ts`'s policy (a preferred device when it is
+ * connected, else the system default); this class applies it at start and keeps
+ * applying it while capturing — on a `devicechange`, or when the live track
+ * ends, it opens the new microphone and swaps its source into the SAME worklet,
+ * so the resampler, the pre-arm queue and the transport never notice.
+ *
  * Who it talks to is not its business: `voice-controller.ts` pairs it with a
  * transport. Everything the environment supplies is injected ({@link CaptureEnv})
  * so the lifecycle IS testable in jsdom without pretending jsdom has audio.
@@ -39,6 +45,14 @@ import {
 // `/assets/` it is same-origin in both builds — `file://` on the desktop,
 // `remote-server.ts`'s static branch on the web.
 import workletUrl from './voice-worklet.js?url&no-inline'
+import {
+  audioInputs,
+  resolveMic,
+  trackMatchesTarget,
+  type MicDevice,
+  type MicPreference,
+  type MicTarget
+} from './mic-devices'
 
 /** The worklet module's URL, as the build emitted it. */
 export const VOICE_WORKLET_URL: string = workletUrl
@@ -59,10 +73,22 @@ const PROCESSOR_NAME = 'voice-capture'
  */
 const MAX_PENDING_BLOCKS = 64
 
+/**
+ * The slice of `navigator.mediaDevices` a capture uses. Only `getUserMedia` is
+ * required; without `enumerateDevices` a capture cannot honour a preferred
+ * microphone or notice a default change, and simply records from the default.
+ */
+export interface CaptureMediaDevices {
+  getUserMedia(constraints: MediaStreamConstraints): Promise<MediaStream>
+  enumerateDevices?(): Promise<MediaDeviceInfo[]>
+  addEventListener?(type: 'devicechange', listener: () => void): void
+  removeEventListener?(type: 'devicechange', listener: () => void): void
+}
+
 export interface CaptureEnv {
   /** `getUserMedia` is unavailable outside a secure context — HTTPS or localhost. */
   isSecureContext: boolean
-  mediaDevices?: { getUserMedia(constraints: MediaStreamConstraints): Promise<MediaStream> }
+  mediaDevices?: CaptureMediaDevices
   AudioContextCtor?: typeof AudioContext
   AudioWorkletNodeCtor?: typeof AudioWorkletNode
 }
@@ -165,6 +191,18 @@ export function micDeniedMessage(platform: string | undefined): string {
 export const SILENCE_WARNING_MS = 1500
 const SILENCE_WARNING_SAMPLES = (SILENCE_WARNING_MS * VOICE_SAMPLE_RATE) / 1000
 
+/**
+ * `devicechange` debounce. Connecting a Bluetooth headset fires a burst (its
+ * input and output appear, then the OS default moves), and each event would
+ * otherwise reopen the microphone.
+ */
+export const DEVICE_CHANGE_DEBOUNCE_MS = 300
+
+/** The grey notice after a capture moved to another microphone mid-press. */
+export function switchedMessage(label: string | null | undefined): string {
+  return `Switched to ${label?.trim() || 'the default microphone'}`
+}
+
 /** The live warning for a microphone that is producing nothing at all. */
 export function noSignalMessage(trackLabel: string | null | undefined): string {
   const name = trackLabel?.trim() || 'the microphone'
@@ -210,6 +248,17 @@ export interface BrowserVoiceCaptureOptions {
   /** The denied-permission wording for this client ({@link micDeniedMessage}). */
   deniedMessage?: string
   /**
+   * The preferred microphone, read at every start and every device change
+   * (`mic-preference.ts`). Absent or null: the system default.
+   */
+  preference?: () => MicPreference | null
+  /**
+   * The capture moved to another microphone mid-press — a device change, or an
+   * unplug it recovered from — with the new microphone's name. Audio carried on
+   * through the same worklet; nothing was restarted.
+   */
+  onSwitch?: (label: string) => void
+  /**
    * Something happened to the microphone mid-capture that the speaker should
    * hear about — it was unplugged (`ended`) or the OS muted it. The capture does
    * not end itself: the owner decides, so an unplug can still finalize what was
@@ -225,6 +274,8 @@ export class BrowserVoiceCapture {
   private readonly onLevel?: (level: number) => void
   private readonly onSilence?: (silence: CaptureSilence) => void
   private readonly deniedMessage: string
+  private readonly preference: () => MicPreference | null
+  private readonly onSwitch?: (label: string) => void
   private readonly env: CaptureEnv
 
   private state: CaptureState = 'idle'
@@ -242,6 +293,12 @@ export class BrowserVoiceCapture {
   /** Consecutive digitally-silent 16 kHz samples, and whether the warning is up. */
   private silentSamples = 0
   private silent = false
+  /** Whether the live stream was opened on an explicit (preferred) device. */
+  private boundTo: 'preferred' | 'default' = 'default'
+  /** Device switches run one at a time, in order. */
+  private switching: Promise<boolean> = Promise.resolve(true)
+  private deviceChangeTimer: ReturnType<typeof setTimeout> | null = null
+  private unwatchDevices: (() => void) | null = null
   /** Resolves the halt's wait for the worklet's tail. */
   private onFlushed: (() => void) | null = null
   private untrack: (() => void) | null = null
@@ -252,6 +309,8 @@ export class BrowserVoiceCapture {
     this.onLevel = options.onLevel
     this.onSilence = options.onSilence
     this.deniedMessage = options.deniedMessage ?? MIC_DENIED_WEB_MESSAGE
+    this.preference = options.preference ?? (() => null)
+    this.onSwitch = options.onSwitch
     this.env = options.env ?? detectCaptureEnv()
   }
 
@@ -296,14 +355,17 @@ export class BrowserVoiceCapture {
       // lifetime. `release()` is idempotent and frees whatever has been assigned
       // so far, which is why it is the only correct bail. (Nothing is queued
       // before `capturing`, so a halt here has no audio to keep.)
-      this.stream = await this.env.mediaDevices!.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      })
+      //
+      // A preferred microphone needs the device list to find it; with none, the
+      // default needs nothing, so the list is not asked for.
+      const resolved = this.preference() ? await this.resolveTarget() : null
+      if (this.state !== 'starting') {
+        await this.release()
+        return
+      }
+      const opened = await this.openMicrophone(resolved?.target ?? null)
+      this.stream = opened.stream
+      this.boundTo = opened.boundTo
       if (this.state !== 'starting') {
         await this.release()
         return
@@ -353,6 +415,7 @@ export class BrowserVoiceCapture {
       this.sink.connect(this.context.destination)
 
       this.watchTracks(this.stream)
+      this.watchDevices()
       this.state = 'capturing'
     } catch (err) {
       await this.release()
@@ -459,6 +522,8 @@ export class BrowserVoiceCapture {
    */
   private async release(): Promise<void> {
     this.resampler = null
+    this.unwatchDevices?.()
+    this.unwatchDevices = null
 
     if (this.worklet) {
       this.worklet.port.onmessage = null
@@ -494,6 +559,164 @@ export class BrowserVoiceCapture {
     }
   }
 
+  // -- Choosing and switching the microphone --------------------------------
+
+  /** The device list and where the preference says to bind, or null if unknowable. */
+  private async resolveTarget(): Promise<{ inputs: MicDevice[]; target: MicTarget } | null> {
+    const md = this.env.mediaDevices
+    if (!md?.enumerateDevices) return null
+    try {
+      const inputs = audioInputs(await md.enumerateDevices())
+      return { inputs, target: resolveMic(inputs, this.preference()) }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Open the microphone `target` names. A preferred device is asked for EXACTLY
+   * — a plain `deviceId` is only a hint the browser may ignore — and if it has
+   * gone in the meantime (`OverconstrainedError` / `NotFoundError`), the system
+   * default is opened instead, once.
+   */
+  private async openMicrophone(
+    target: MicTarget | null
+  ): Promise<{ stream: MediaStream; boundTo: 'preferred' | 'default' }> {
+    const md = this.env.mediaDevices!
+    const audio: MediaTrackConstraints = {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    }
+    if (target?.kind === 'preferred') {
+      try {
+        const stream = await md.getUserMedia({
+          audio: { ...audio, deviceId: { exact: target.device.deviceId } }
+        })
+        return { stream, boundTo: 'preferred' }
+      } catch (err) {
+        const name = (err as { name?: string } | null)?.name
+        if (name !== 'OverconstrainedError' && name !== 'NotFoundError') throw err
+      }
+    }
+    return { stream: await md.getUserMedia({ audio }), boundTo: 'default' }
+  }
+
+  /** Follow `devicechange` while capturing, debounced. */
+  private watchDevices(): void {
+    const md = this.env.mediaDevices
+    if (!md?.addEventListener || !md.enumerateDevices) return
+    const onChange = (): void => {
+      if (this.deviceChangeTimer) clearTimeout(this.deviceChangeTimer)
+      this.deviceChangeTimer = setTimeout(() => {
+        this.deviceChangeTimer = null
+        void this.followDevices(false)
+      }, DEVICE_CHANGE_DEBOUNCE_MS)
+    }
+    md.addEventListener('devicechange', onChange)
+    this.unwatchDevices = () => {
+      md.removeEventListener?.('devicechange', onChange)
+      if (this.deviceChangeTimer) clearTimeout(this.deviceChangeTimer)
+      this.deviceChangeTimer = null
+    }
+  }
+
+  /**
+   * Re-resolve and, if the live track is no longer where it should be, move the
+   * capture there. Serialized: a switch never races another. Resolves true when
+   * the capture is (now) on the right microphone.
+   */
+  private followDevices(afterEnded: boolean): Promise<boolean> {
+    this.switching = this.switching.catch(() => false).then(() => this.switchIfNeeded(afterEnded))
+    return this.switching
+  }
+
+  /**
+   * The swap itself. A NEW stream is opened and its source connected to the SAME
+   * worklet in the SAME context — the resampler state, the pre-arm queue and the
+   * armed flag are untouched, and the transport never hears of it — and only then
+   * is the old source disconnected and its tracks stopped. `afterEnded`: the live
+   * track died (an unplug), so a switch is forced and the dead device is never
+   * reopened; false comes back if no other microphone could be opened, for the
+   * caller to report the disconnect.
+   */
+  private async switchIfNeeded(afterEnded: boolean): Promise<boolean> {
+    if (this.state !== 'capturing') return false
+    const resolved = await this.resolveTarget()
+    if (this.state !== 'capturing') return false
+    const live = this.liveTrack()
+    if (!afterEnded) {
+      if (!resolved) return true
+      if (trackMatchesTarget(resolved.target, live, resolved.inputs)) return true
+    }
+    let target = resolved?.target ?? null
+    if (afterEnded && target?.kind === 'preferred' && target.device.deviceId === live.deviceId) {
+      // The unplugged device can linger in the list for a moment.
+      target = null
+    }
+
+    let opened: { stream: MediaStream; boundTo: 'preferred' | 'default' }
+    try {
+      opened = await this.openMicrophone(target)
+    } catch {
+      return false
+    }
+    const context = this.context
+    const worklet = this.worklet
+    const fresh = opened.stream.getTracks()
+    if (
+      this.state !== 'capturing' ||
+      !context ||
+      !worklet ||
+      fresh.some((t) => t.readyState === 'ended')
+    ) {
+      for (const track of fresh) track.stop()
+      return false
+    }
+
+    const source = context.createMediaStreamSource(opened.stream)
+    source.connect(worklet)
+    const oldSource = this.source
+    const oldStream = this.stream
+    this.source = source
+    this.stream = opened.stream
+    this.boundTo = opened.boundTo
+    try {
+      oldSource?.disconnect()
+    } catch {
+      /* already gone with its device */
+    }
+    this.untrack?.()
+    this.untrack = null
+    for (const track of oldStream?.getTracks() ?? []) {
+      try {
+        track.stop()
+      } catch {
+        /* ignore */
+      }
+    }
+    this.watchTracks(opened.stream)
+    // A new microphone gets its own silence count; a warning already up clears
+    // on its first block with signal, as it would have anyway.
+    this.silentSamples = 0
+    const label =
+      this.trackLabel() ?? (target?.kind === 'preferred' ? target.device.label : null) ?? ''
+    this.onSwitch?.(label)
+    return true
+  }
+
+  /** Where the live track is: how it was opened, and the device the browser reports. */
+  private liveTrack(): { boundTo: 'preferred' | 'default'; deviceId: string; groupId: string } {
+    const track = this.stream?.getTracks()[0]
+    const settings = (track?.getSettings?.() ?? {}) as MediaTrackSettings
+    return {
+      boundTo: this.boundTo,
+      deviceId: settings.deviceId ?? '',
+      groupId: settings.groupId ?? ''
+    }
+  }
+
   /** Close the microphone. Idempotent. */
   private stopTracks(): void {
     this.untrack?.()
@@ -509,13 +732,14 @@ export class BrowserVoiceCapture {
   }
 
   /**
-   * Report what happens to the microphone itself while capturing: `ended` (it
-   * was unplugged, or the OS revoked it) and a SUSTAINED `mute` (the OS stopped
-   * feeding it — a hardware switch, another app taking exclusive use). A mute is
-   * only reported if it outlasts {@link MIC_MUTE_GRACE_MS} with the capture still
-   * running; `unmute`, `ended` and the capture ending all cancel the wait. Our
-   * own `track.stop()` fires none of these, and all are ignored outside
-   * `capturing`.
+   * Watch the microphone itself while capturing: `ended` (it was unplugged, or
+   * the OS revoked it — the capture first tries to move to whatever microphone
+   * is there now, and only if none opens is it reported) and a SUSTAINED `mute`
+   * (the OS stopped feeding it — a hardware switch, another app taking exclusive
+   * use). A mute is only reported if it outlasts {@link MIC_MUTE_GRACE_MS} with
+   * the capture still running; `unmute`, `ended` and the capture ending all
+   * cancel the wait. Our own `track.stop()` fires none of these, and all are
+   * ignored outside `capturing`.
    */
   private watchTracks(stream: MediaStream): void {
     const tracks = stream.getTracks()
@@ -526,9 +750,15 @@ export class BrowserVoiceCapture {
     }
     const onEnded = (): void => {
       cancelMute()
-      if (this.state === 'capturing') {
-        this.onFault?.({ message: MIC_DISCONNECTED_MESSAGE, ended: true })
-      }
+      if (this.state !== 'capturing') return
+      // Unplugged: move to whatever microphone is there now, as a device change
+      // would. Only if nothing can be opened is it a disconnect, which ends the
+      // capture (the owner's stop finalizes what was said).
+      void this.followDevices(true).then((switched) => {
+        if (!switched && this.state === 'capturing') {
+          this.onFault?.({ message: MIC_DISCONNECTED_MESSAGE, ended: true })
+        }
+      })
     }
     const onMute = (event: Event): void => {
       if (this.state !== 'capturing' || muteTimer) return
@@ -574,7 +804,11 @@ export class BrowserVoiceCapture {
     }
   }
 
-  /** The live microphone's name, as the browser reports it (empty without permission). */
+  /** The live microphone's name, as the browser reports it (null without permission). */
+  currentTrackLabel(): string | null {
+    return this.trackLabel()
+  }
+
   private trackLabel(): string | null {
     const label = this.stream?.getTracks()[0]?.label
     return label ? label : null

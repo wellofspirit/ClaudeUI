@@ -304,6 +304,8 @@ function AttachMenu({
 export const VOICE_NOTICE_LINGER_MS = 5000
 /** The fade-out at the end of the linger. */
 export const VOICE_NOTICE_FADE_MS = 400
+/** The tail square's side (`w-2.5`), for centring it. */
+const VOICE_NOTICE_TAIL_PX = 10
 /** How much the level ring grows at full level (scale 1 → 1 + this). */
 const VOICE_RING_GROWTH = 0.45
 
@@ -339,6 +341,8 @@ function VoiceNoticePill({
   const [hovered, setHovered] = useState(false)
   const [fading, setFading] = useState(false)
   const [place, setPlace] = useState<{ right: number; maxWidth: number } | null>(null)
+  /** The tail's `right`, centring it on the measured mic (null: the 28 px-button default). */
+  const [tailRight, setTailRight] = useState<number | null>(null)
   const onExpireRef = useRef(onExpire)
   onExpireRef.current = onExpire
   const { id, text, tone } = notice
@@ -384,6 +388,17 @@ function VoiceNoticePill({
     }
   }, [micRef])
 
+  // The tail is centred from where the pill actually LANDED, not from the
+  // offset it was given: the box's border and the containing block's padding
+  // edge put the two a few px apart, which read as a tail left of the mic.
+  useLayoutEffect(() => {
+    const pill = pillRef.current?.getBoundingClientRect()
+    const mic = micRef.current?.getBoundingClientRect()
+    if (!pill || !mic || mic.width === 0) return
+    const micCentre = mic.left + mic.width / 2
+    setTailRight(Math.round(pill.right - micCentre - VOICE_NOTICE_TAIL_PX / 2))
+  }, [place, micRef])
+
   const toneClass =
     tone === 'info' ? 'text-text-secondary border-border-bright' : 'text-warning border-warning/40'
   return (
@@ -416,10 +431,12 @@ function VoiceNoticePill({
         />
         <span>{text}</span>
       </div>
-      {/* The tail, centred over the mic (a 28 px button: 14 px in from its right edge). */}
+      {/* The tail, centred over the mic. */}
       <div
         aria-hidden
-        className={`absolute right-[9px] -bottom-[5px] w-2.5 h-2.5 rotate-45 border-r border-b bg-bg-tertiary ${
+        data-testid="InputBox.voiceNoticeTail"
+        style={{ right: tailRight ?? 9 }}
+        className={`absolute -bottom-[5px] w-2.5 h-2.5 rotate-45 border-r border-b bg-bg-tertiary ${
           tone === 'info' ? 'border-border-bright' : 'border-warning/40'
         }`}
       />

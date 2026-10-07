@@ -55,7 +55,7 @@ UISettings — a phone and the Mac have different microphones.
 |---|---|---|
 | S1 | Renderer-owned capture for desktop + web (behavior-preserving move) | committed a814b15b (gates green; real-app boot + worklet asset + mic button verified) |
 | S2 (4949d471) | Lifecycle robustness: never drop a short press, ready timeout, error-before-ready, stale port, outcome messages, visible errors, `resume()`, track ended/mute, worklet tail flush | todo |
-| S3 | Device selection: system default + preferred device, `devicechange` hot-swap, level meter, live digital-silence warning, Settings UI | todo |
+| S3 | (S3a d11bc206, S3b committed) Device selection: system default + preferred device, `devicechange` hot-swap, level meter, live digital-silence warning, Settings UI | todo |
 | S4 | Phone/car: tap-to-talk mode with silence auto-stop, touch hardening, no keyboard pop, capture diagnostics (track label/settings/level stats → logRelay, never audio) | todo |
 | — | Other-engine STT (Codex realtime w/ API key, BYO-key provider, on-device) | open — needs Daniel |
 
@@ -299,7 +299,11 @@ Run on the real Mac, with the dev build of this branch:
 3. Deny/revoke mic permission (System Settings → Privacy → Microphone) → visible error in the session.
 4. Unplug/disconnect the Bluetooth mic mid-press → "The microphone was disconnected." and what was
    said before still transcribes.
-5. Phone (tailnet HTTPS), short press on a cold session → transcript; with Android Auto connected →
+5. (S3b) With System default selected, change the macOS default input mid-press (or connect the
+   Bluetooth mic) → "Switched to …" pill and the transcript continues. Unplug the default mic mid-press
+   → switch or "Microphone disconnected — kept what you said".
+6. Settings › Voice input › Test mic with the lid closed → "No signal …"; pick the Bluetooth mic → level moves.
+7. Phone (tailnet HTTPS), short press on a cold session → transcript; with Android Auto connected →
    note what happens (S4 adds diagnostics to the log).
 
 ## Approved UI (Daniel, 2026-10-07) — binding for S3/S4
@@ -362,3 +366,52 @@ detection on the capture with fake blocks, InputBox: no `addError` for voice. Gu
 at `4949d471` where applicable. Gates as before. Report as before.
 
 Suggested commit: `feat(voice): quiet notice pill above the mic, live level ring and silence warning`
+
+## S3b kickoff spec — microphone picker, mid-press switching, test meter
+
+Base: `d11bc206` (S3a). Standing constraints unchanged. UI BINDING to mockup `9ba790b8`
+(Settings › Voice input: Microphone row + Test mic; the Recording mode row is S4 — do NOT build it)
+and the phone layout in `1b412724` (settings column). Notices use the S3a pill (`showVoiceNotice`).
+
+1. **Per-client preference** (renderer `localStorage`, every access in try/catch, works when storage
+   throws): preferred mic `{ deviceId, label } | null` (null = system default). Small module next to
+   the capture (e.g. `lib/voice/mic-preference.ts`). Never in synced UISettings.
+2. **Resolution** (pure, unit-tested): given `enumerateDevices()` audioinputs + the preference →
+   the target: the preferred device if present (match `deviceId`, else exact `label` — deviceIds can
+   rotate), otherwise the system default. Ignore Chromium's synthetic `communications` entry.
+   `getUserMedia` uses `{ deviceId: { exact } }` for a preferred device; on `OverconstrainedError` /
+   `NotFoundError` fall back to the default once.
+3. **Mid-press switching.** While capturing, on `navigator.mediaDevices` `devicechange`: re-resolve;
+   if the target differs from the live track (compare `deviceId`, and for system default the
+   `default` entry's `groupId` vs the track's `getSettings().groupId` — that is how Chromium shows an
+   OS default change), open the new stream and swap the `MediaStreamSource` feeding the SAME worklet
+   (same context, resampler state kept), then stop the old tracks. No gap in the queue/armed logic,
+   no transport restart. Grey notice "Switched to <label>". A live track `ended` (unplug) first tries
+   the same swap; only if that fails does S2's fault path ("Microphone disconnected — kept what you
+   said" + end capture) run. Debounce `devicechange` (~300 ms; Bluetooth fires bursts).
+4. **Settings › Voice input** (`settings-sections.tsx`, existing `SettingRow`/`SelectField`
+   patterns, "this device" badge as in the mockup, `data-testid`s per ADR-027):
+   - Microphone select: "System default — <current default label>", each input, and a remembered
+     preferred device that is absent shown disabled as "<label> · not connected"; under it the amber
+     "Not connected now — using <default label>" line when applicable. Labels need permission: if
+     labels are empty, show a small "Allow microphone access to list devices" action that opens and
+     immediately closes a stream (user-initiated only).
+   - Test mic: Start/Stop button, a level bar from the capture's `onLevel`, and the status line —
+     "Speak to see the level. Nothing is recorded or sent." / "Hearing you on <label>." / the silence
+     warning text from S3a. Runs a LOCAL `BrowserVoiceCapture` whose `sendAudio` is a no-op (never
+     the voice controller, never the transport); stops on Stop, on unmount and on window blur.
+   - Follows `devicechange` while open (list refresh + default label).
+   - Same component on the web client (phone layout per `1b412724`).
+5. **Pill tail alignment** (S3a leftover): the tail is ~4 px left of the mic's centre in the real
+   app — centre it on the measured mic rect rather than a fixed offset.
+
+Tests: resolution table (preferred present/absent/rotated id/label match, default, communications
+ignored); hot-swap with a fake env firing `devicechange` and `ended` (source swapped, worklet kept,
+old tracks stopped, queue intact, notice shown, fallback to fault when swap fails); preference
+storage incl. throwing storage; settings component with fake `mediaDevices` (list, not-connected
+line, permission action, test meter start/stop/unmount, never touches the transport). Guards fail
+at `d11bc206`. Gates as before.
+
+Suggested commit: `feat(voice): choose a microphone, follow device changes mid-press, test it in Settings`
+
+S4 carry-over: the Settings microphone dropdown menu overflows the dialog's right edge by ~20 px.

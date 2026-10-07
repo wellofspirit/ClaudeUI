@@ -93,6 +93,7 @@ vi.mock('../../../../hooks/useIsMobile', () => ({
 // `voice:start-recording` / `voice:stop-recording` invokes recorded below. The
 // controller's own capture-vs-transport order is voice-controller.unit.test.ts's.
 const voiceFaults = vi.hoisted(() => new Set<(message: string) => void>())
+const voiceSwitches = vi.hoisted(() => new Set<(label: string) => void>())
 const voiceSilences = vi.hoisted(
   () => new Set<(silence: { silent: boolean; trackLabel: string | null }) => void>()
 )
@@ -106,6 +107,10 @@ vi.mock('../../../../lib/voice/voice-controller', () => ({
       return () => voiceFaults.delete(listener)
     },
     onLevel: () => () => {},
+    onSwitch: (listener: (label: string) => void) => {
+      voiceSwitches.add(listener)
+      return () => voiceSwitches.delete(listener)
+    },
     onSilence: (listener: (silence: { silent: boolean; trackLabel: string | null }) => void) => {
       voiceSilences.add(listener)
       return () => voiceSilences.delete(listener)
@@ -1689,6 +1694,16 @@ describe('InputBox FC — rendered', () => {
         for (const listener of voiceSilences) listener({ silent: false, trackLabel: null })
       })
       expect(voiceNoticeFor(useVoiceNoticeStore.getState().notices, 'sdk-voice-1')).toBeNull()
+    })
+
+    it('a mid-press microphone switch is a grey (info) notice', () => {
+      renderFC()
+      expect(voiceSwitches.size).toBe(1)
+      act(() => {
+        for (const listener of voiceSwitches) listener('AirPods Pro')
+      })
+      expect(notice()).toMatchObject({ text: 'Switched to AirPods Pro', tone: 'info' })
+      expect(errors()).toEqual([])
     })
 
     it('a cleared silence warning never removes a NEWER notice that replaced it', () => {

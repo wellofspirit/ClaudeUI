@@ -13,7 +13,7 @@ import {
 import { resolveRekeyed } from '../../../stores/replica'
 import { awaitReloadBeforeSpawn } from '../../../lib/session-history-load'
 import { voiceController } from '../../../lib/voice/voice-controller'
-import { noSignalMessage } from '../../../lib/voice/browser-voice-capture'
+import { noSignalMessage, switchedMessage } from '../../../lib/voice/browser-voice-capture'
 import {
   dismissVoiceNotice,
   showVoiceNotice,
@@ -874,6 +874,15 @@ export function InputBox(): React.JSX.Element {
     if (!activeSessionId) return
     return voiceController().onFault((message) => {
       showVoiceNotice(activeSessionId, message, 'warn')
+    })
+  }, [activeSessionId])
+
+  // The capture moved to another microphone mid-press — grey: nothing to fix,
+  // and what was being said carried on through the switch.
+  useEffect(() => {
+    if (!activeSessionId) return
+    return voiceController().onSwitch((label) => {
+      showVoiceNotice(activeSessionId, switchedMessage(label), 'info')
     })
   }, [activeSessionId])
 

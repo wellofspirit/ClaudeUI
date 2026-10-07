@@ -616,6 +616,42 @@ describe('voice notice pill — alignment over the mic', () => {
     expect(pill.style.right).toBe('60px')
     expect(pill.style.maxWidth).toBe('440px')
   })
+
+  it('centres the tail on the MEASURED mic, from where the pill actually landed', () => {
+    const observers: Array<() => void> = []
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(private readonly callback: () => void) {
+          observers.push(() => this.callback())
+        }
+        observe(): void {}
+        disconnect(): void {}
+      }
+    )
+    render(
+      <InputBoxView
+        {...makeProps({
+          voiceEnabled: true,
+          voiceNotice: { id: 1, text: 'No speech detected', tone: 'info' }
+        })}
+      />
+    )
+    const pill = screen.getByTestId('InputBox.voiceNotice')
+    const box = pill.parentElement!
+    const mic = screen.getByTestId('InputBox.voice')
+    const tail = screen.getByTestId('InputBox.voiceNoticeTail')
+    const rect = (r: Partial<DOMRect>) => () => ({ ...new DOMRect(), ...r }) as DOMRect
+    box.getBoundingClientRect = rect({ left: 0, right: 500, width: 500 })
+    // A 28 px mic, centre at 426 — and the pill landed 4 px right of the mic's
+    // edge (the box's border), which a fixed 9 px offset would leave off-centre.
+    mic.getBoundingClientRect = rect({ left: 412, right: 440, width: 28 })
+    pill.getBoundingClientRect = rect({ right: 444 })
+    act(() => observers[0]())
+
+    // 444 − 426 − 5 (half the tail square)
+    expect(tail.style.right).toBe('13px')
+  })
 })
 
 describe('mic states and the level ring (S3a item 5)', () => {

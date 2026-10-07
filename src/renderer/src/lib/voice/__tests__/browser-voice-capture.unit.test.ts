@@ -32,11 +32,13 @@ import {
   MIC_MUTED_MESSAGE,
   MIC_MUTE_GRACE_MS,
   VOICE_WORKLET_URL,
+  DEVICE_CHANGE_DEBOUNCE_MS,
   SILENCE_WARNING_MS,
   WORKLET_FLUSH_TIMEOUT_MS,
   captureUnsupportedReason,
   micDeniedMessage,
   noSignalMessage,
+  switchedMessage,
   type CaptureEnv,
   type CaptureFault,
   type CaptureSilence
@@ -89,8 +91,12 @@ class FakeAudioContext {
     contexts.push(this)
   }
 
-  createMediaStreamSource(): FakeAudioNode {
-    return new FakeAudioNode()
+  /** Every source built on this context, in order — a device switch adds one. */
+  sources: Array<FakeAudioNode & { stream: MediaStream }> = []
+  createMediaStreamSource(stream: MediaStream): FakeAudioNode {
+    const node = Object.assign(new FakeAudioNode(), { stream })
+    this.sources.push(node)
+    return node
   }
 
   createGain(): FakeAudioNode {
@@ -152,6 +158,23 @@ function makeEnv(
     AudioContextCtor: FakeAudioContext as unknown as typeof AudioContext,
     AudioWorkletNodeCtor: FakeAudioWorkletNode as unknown as typeof AudioWorkletNode,
     ...overrides
+  }
+}
+
+/** Let a promise chain (an unplug's attempted switch) settle. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 20; i++) await Promise.resolve()
+}
+
+/**
+ * getUserMedia that opens the microphone once and then finds none — an unplug
+ * with no other microphone to move to.
+ */
+function onlyOneMicrophone(): () => Promise<MediaStream> {
+  let opened = 0
+  return async () => {
+    if (opened++ > 0) throw Object.assign(new Error('gone'), { name: 'NotFoundError' })
+    return makeStream()
   }
 }
 
@@ -433,7 +456,8 @@ describe('BrowserVoiceCapture', () => {
     })
 
     const starting = capture.start()
-    await vi.waitFor(() => expect(typeof resolveModule).toBe('function'))
+    // `resolveModule` starts out a function, so wait for the module load itself.
+    await vi.waitFor(() => expect(contexts[0]?.audioWorklet.addModule).toHaveBeenCalled())
     await capture.stop()
     resolveModule()
     await starting
@@ -554,12 +578,17 @@ describe('BrowserVoiceCapture — a suspended context is resumed (S2 item 8)', (
 })
 
 describe('BrowserVoiceCapture — track faults (S2 item 9)', () => {
-  it('reports an unplugged microphone as an ENDED fault', async () => {
+  it('reports an unplugged microphone as an ENDED fault when no other one can be opened', async () => {
     const onFault = vi.fn((_fault: CaptureFault) => {})
-    const capture = new BrowserVoiceCapture({ sendAudio: vi.fn(), onFault, env: makeEnv() })
+    const capture = new BrowserVoiceCapture({
+      sendAudio: vi.fn(),
+      onFault,
+      env: makeEnv({}, onlyOneMicrophone())
+    })
     await capture.start()
 
     tracks[0].dispatchEvent(new Event('ended'))
+    await settle()
     expect(onFault).toHaveBeenCalledWith({ message: MIC_DISCONNECTED_MESSAGE, ended: true })
     // The capture does not end itself — that is the owner's call.
     expect(capture.isActive()).toBe(true)
@@ -581,7 +610,11 @@ describe('BrowserVoiceCapture — track faults (S2 item 9)', () => {
       onFault: ReturnType<typeof vi.fn>
     }> {
       const onFault = vi.fn((_fault: CaptureFault) => {})
-      const capture = new BrowserVoiceCapture({ sendAudio: vi.fn(), onFault, env: makeEnv() })
+      const capture = new BrowserVoiceCapture({
+        sendAudio: vi.fn(),
+        onFault,
+        env: makeEnv({}, onlyOneMicrophone())
+      })
       await capture.start()
       return { capture, onFault }
     }
@@ -636,6 +669,7 @@ describe('BrowserVoiceCapture — track faults (S2 item 9)', () => {
 
       mute(tracks[0])
       tracks[0].dispatchEvent(new Event('ended'))
+      await settle()
       vi.advanceTimersByTime(MIC_MUTE_GRACE_MS * 2)
 
       expect(onFault.mock.calls.map(([fault]) => fault)).toEqual([
@@ -849,5 +883,297 @@ describe('the notice wording (S3a item 4 — the approved voice UI)', () => {
     ]) {
       expect(message).not.toMatch(/\.$/)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// S3b: choosing the microphone, and following device changes mid-press.
+// ---------------------------------------------------------------------------
+
+interface FakeDevice {
+  deviceId: string
+  label: string
+  groupId: string
+}
+
+/**
+ * A `mediaDevices` that behaves like Chromium's: a synthetic `default` entry
+ * sharing the real default's groupId, `getUserMedia` honouring `{ exact }` (and
+ * failing like a browser when the device is gone), tracks that report their
+ * device through `getSettings()`, and `devicechange` listeners.
+ */
+function deviceWorld(initial: FakeDevice[], defaultId: string) {
+  let devices = initial
+  let defaultDevice = defaultId
+  let refuseAll = false
+  const listeners = new Set<() => void>()
+  const opened: Array<{ exact: string | undefined; deviceId: string }> = []
+  const enumerate = vi.fn(async () => {
+    const def = devices.find((d) => d.deviceId === defaultDevice)
+    const list = [
+      ...(def
+        ? [
+            {
+              kind: 'audioinput',
+              deviceId: 'default',
+              label: `Default - ${def.label}`,
+              groupId: def.groupId
+            }
+          ]
+        : []),
+      ...devices.map((d) => ({ kind: 'audioinput', ...d }))
+    ]
+    return list as unknown as MediaDeviceInfo[]
+  })
+  const getUserMedia = vi.fn(async (constraints: MediaStreamConstraints) => {
+    const audio = constraints.audio as MediaTrackConstraints
+    const exact = (audio.deviceId as { exact?: string } | undefined)?.exact
+    const id = exact ?? defaultDevice
+    const device = devices.find((d) => d.deviceId === id)
+    if (refuseAll || !device) {
+      throw Object.assign(new Error('gone'), {
+        name: exact ? 'OverconstrainedError' : 'NotFoundError'
+      })
+    }
+    opened.push({ exact, deviceId: id })
+    const track = Object.assign(new EventTarget(), {
+      stop: vi.fn(),
+      label: device.label,
+      getSettings: () => ({ deviceId: device.deviceId, groupId: device.groupId })
+    }) as FakeTrack
+    tracks.push(track)
+    return { getTracks: () => [track] } as unknown as MediaStream
+  })
+  const env = makeEnv({
+    mediaDevices: {
+      getUserMedia,
+      enumerateDevices: enumerate,
+      addEventListener: (_type: 'devicechange', listener: () => void) => listeners.add(listener),
+      removeEventListener: (_type: 'devicechange', listener: () => void) =>
+        listeners.delete(listener)
+    }
+  })
+  return {
+    env,
+    opened,
+    enumerate,
+    listeners,
+    /** The OS reports a device change: a new list and/or default, then the event. */
+    change(next: { devices?: FakeDevice[]; defaultId?: string }): void {
+      if (next.devices) devices = next.devices
+      if (next.defaultId) defaultDevice = next.defaultId
+      for (const listener of [...listeners]) listener()
+    },
+    refuseEverything(): void {
+      refuseAll = true
+    }
+  }
+}
+
+const MAC: FakeDevice = { deviceId: 'mac', label: 'MacBook Pro Microphone', groupId: 'g-mac' }
+const PODS: FakeDevice = { deviceId: 'pods', label: 'AirPods Pro', groupId: 'g-pods' }
+const JABRA: FakeDevice = { deviceId: 'jabra', label: 'Jabra Evolve2 65', groupId: 'g-jabra' }
+
+describe('BrowserVoiceCapture — choosing the microphone (S3b)', () => {
+  it('opens a connected preferred microphone EXACTLY', async () => {
+    const world = deviceWorld([MAC, PODS], 'mac')
+    const capture = new BrowserVoiceCapture({
+      sendAudio: vi.fn(),
+      env: world.env,
+      preference: () => ({ deviceId: 'pods', label: 'AirPods Pro' })
+    })
+    await capture.start()
+    expect(world.opened).toEqual([{ exact: 'pods', deviceId: 'pods' }])
+  })
+
+  it('finds a preferred microphone whose id rotated, by its label', async () => {
+    const world = deviceWorld([MAC, PODS], 'mac')
+    const capture = new BrowserVoiceCapture({
+      sendAudio: vi.fn(),
+      env: world.env,
+      preference: () => ({ deviceId: 'stale-id', label: 'AirPods Pro' })
+    })
+    await capture.start()
+    expect(world.opened).toEqual([{ exact: 'pods', deviceId: 'pods' }])
+  })
+
+  it('uses the system default when the preferred microphone is not connected', async () => {
+    const world = deviceWorld([MAC], 'mac')
+    const capture = new BrowserVoiceCapture({
+      sendAudio: vi.fn(),
+      env: world.env,
+      preference: () => ({ deviceId: 'pods', label: 'AirPods Pro' })
+    })
+    await capture.start()
+    expect(world.opened).toEqual([{ exact: undefined, deviceId: 'mac' }])
+  })
+
+  it('falls back to the default ONCE when the exact device vanishes between list and open', async () => {
+    const world = deviceWorld([MAC, PODS], 'mac')
+    const realGum = world.env.mediaDevices!.getUserMedia
+    let first = true
+    world.env.mediaDevices!.getUserMedia = vi.fn(async (c: MediaStreamConstraints) => {
+      if (first) {
+        first = false
+        throw Object.assign(new Error('gone'), { name: 'OverconstrainedError' })
+      }
+      return realGum(c)
+    })
+    const capture = new BrowserVoiceCapture({
+      sendAudio: vi.fn(),
+      env: world.env,
+      preference: () => ({ deviceId: 'pods', label: 'AirPods Pro' })
+    })
+    await capture.start()
+    expect(world.env.mediaDevices!.getUserMedia).toHaveBeenCalledTimes(2)
+    expect(world.opened).toEqual([{ exact: undefined, deviceId: 'mac' }])
+  })
+
+  it('without a preference it does not even list the devices', async () => {
+    const world = deviceWorld([MAC], 'mac')
+    const capture = new BrowserVoiceCapture({ sendAudio: vi.fn(), env: world.env })
+    await capture.start()
+    expect(world.enumerate).not.toHaveBeenCalled()
+  })
+})
+
+describe('BrowserVoiceCapture — following the microphone mid-press (S3b)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  async function capturing(
+    world: ReturnType<typeof deviceWorld>,
+    preference: () => { deviceId: string; label: string } | null = () => null
+  ) {
+    const sendAudio = vi.fn()
+    const onSwitch = vi.fn()
+    const onFault = vi.fn()
+    const capture = new BrowserVoiceCapture({
+      sendAudio,
+      env: world.env,
+      preference,
+      onSwitch,
+      onFault
+    })
+    await capture.start()
+    return { capture, sendAudio, onSwitch, onFault }
+  }
+
+  /** Past the debounce, and the switch's awaits. */
+  async function debounce(): Promise<void> {
+    vi.advanceTimersByTime(DEVICE_CHANGE_DEBOUNCE_MS)
+    await settle()
+  }
+
+  it('an OS default change swaps the SOURCE into the same worklet — nothing restarted', async () => {
+    const world = deviceWorld([MAC, PODS], 'mac')
+    const { capture, sendAudio, onSwitch } = await capturing(world)
+    // Queued before the transport's start resolved: must survive the switch.
+    pushBlock(1600, 0.5)
+
+    world.change({ defaultId: 'pods' })
+    await debounce()
+
+    const ctx = contexts[0]
+    expect(contexts).toHaveLength(1)
+    expect(workletNodes).toHaveLength(1)
+    expect(ctx.sources).toHaveLength(2)
+    expect(ctx.sources[1].connect).toHaveBeenCalledWith(workletNodes[0])
+    expect(ctx.sources[0].disconnect).toHaveBeenCalled()
+    expect(tracks[0].stop).toHaveBeenCalled()
+    expect(tracks[1].stop).not.toHaveBeenCalled()
+    expect(world.opened.at(-1)).toEqual({ exact: undefined, deviceId: 'pods' })
+    expect(onSwitch).toHaveBeenCalledWith('AirPods Pro')
+    expect(switchedMessage('AirPods Pro')).toBe('Switched to AirPods Pro')
+
+    // The queue and the armed logic are untouched: the pre-switch block and a
+    // post-switch block both go out, in order, on arm.
+    pushBlock(1600, 0.25)
+    expect(sendAudio).not.toHaveBeenCalled()
+    capture.arm()
+    expect(sendAudio).toHaveBeenCalledTimes(2)
+    expect(capture.isActive()).toBe(true)
+  })
+
+  it('debounces a Bluetooth burst into one switch', async () => {
+    const world = deviceWorld([MAC, PODS], 'mac')
+    const { onSwitch } = await capturing(world)
+    world.change({ defaultId: 'pods' })
+    world.change({})
+    world.change({})
+    await debounce()
+    expect(world.enumerate).toHaveBeenCalledTimes(1)
+    expect(onSwitch).toHaveBeenCalledTimes(1)
+  })
+
+  it('a change that leaves the target where it is opens nothing', async () => {
+    const world = deviceWorld([MAC], 'mac')
+    const { onSwitch } = await capturing(world)
+    world.change({ devices: [MAC, JABRA] }) // a new mic, but the default is unchanged
+    await debounce()
+    expect(world.opened).toHaveLength(1)
+    expect(onSwitch).not.toHaveBeenCalled()
+  })
+
+  it('the preferred microphone connecting mid-press takes over', async () => {
+    const world = deviceWorld([MAC], 'mac')
+    const { onSwitch } = await capturing(world, () => ({ deviceId: 'pods', label: 'AirPods Pro' }))
+    world.change({ devices: [MAC, PODS] })
+    await debounce()
+    expect(world.opened.at(-1)).toEqual({ exact: 'pods', deviceId: 'pods' })
+    expect(onSwitch).toHaveBeenCalledWith('AirPods Pro')
+  })
+
+  it('an unplug moves to what is left, with no fault', async () => {
+    const world = deviceWorld([MAC, PODS], 'pods')
+    const { onSwitch, onFault, capture } = await capturing(world)
+    world.change({ devices: [MAC], defaultId: 'mac' }) // the OS also fires devicechange
+    tracks[0].dispatchEvent(new Event('ended'))
+    await settle()
+    expect(world.opened.at(-1)).toEqual({ exact: undefined, deviceId: 'mac' })
+    expect(onSwitch).toHaveBeenCalledWith('MacBook Pro Microphone')
+    expect(onFault).not.toHaveBeenCalled()
+    expect(capture.isActive()).toBe(true)
+    // The debounced devicechange then finds the capture already where it should be.
+    await debounce()
+    expect(onSwitch).toHaveBeenCalledTimes(1)
+  })
+
+  it('an unplug that cannot be recovered from is the disconnect fault, as before', async () => {
+    const world = deviceWorld([MAC], 'mac')
+    const { onSwitch, onFault } = await capturing(world)
+    world.refuseEverything()
+    tracks[0].dispatchEvent(new Event('ended'))
+    await settle()
+    expect(onSwitch).not.toHaveBeenCalled()
+    expect(onFault).toHaveBeenCalledWith({ message: MIC_DISCONNECTED_MESSAGE, ended: true })
+  })
+
+  it('a release during a switch closes the NEW microphone too', async () => {
+    const world = deviceWorld([MAC, PODS], 'mac')
+    let openGate: () => void = () => {}
+    const realGum = world.env.mediaDevices!.getUserMedia
+    const { capture, onSwitch } = await capturing(world)
+    world.env.mediaDevices!.getUserMedia = vi.fn(async (c: MediaStreamConstraints) => {
+      await new Promise<void>((resolve) => (openGate = resolve))
+      return realGum(c)
+    })
+    world.change({ defaultId: 'pods' })
+    await debounce()
+    await capture.stop()
+    openGate()
+    await settle()
+    expect(tracks).toHaveLength(2)
+    expect(tracks[1].stop).toHaveBeenCalled()
+    expect(contexts[0].sources).toHaveLength(1)
+    expect(onSwitch).not.toHaveBeenCalled()
+  })
+
+  it('stops listening for device changes once released', async () => {
+    const world = deviceWorld([MAC], 'mac')
+    const { capture } = await capturing(world)
+    expect(world.listeners.size).toBe(1)
+    await capture.stop()
+    expect(world.listeners.size).toBe(0)
   })
 })
