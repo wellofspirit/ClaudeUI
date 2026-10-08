@@ -51,6 +51,7 @@ Exception: `session_state_changed` has no `session_id`/`uuid` (raw emit, not thr
 | `session_title_changed`    | Session has / gets a user-set name (2.1.285)     | Title subscription (§4.29)       |
 | `per_turn_effort_changed`  | Server refused per-turn effort (2.1.285)         | Request retry path (§4.30)       |
 | `instruction_size_warning` | Instruction files exceed size limits (2.1.289)   | Main generator (§4.31)           |
+| `permission_check_status`  | Auto-mode permission check past ~4 s (2.1.293)   | SDK event queue (§4.32)          |
 
 Subtypes that exist in the SDK schema union but are **not** emitted on the SDK stdout wire are cataloged in §4.27.
 
@@ -263,6 +264,18 @@ A task transitions from non-existent to existing (first `setAppState` update).
   "uuid": "..."
 }
 ```
+
+### `run_id`, `parent_task_id` (2.1.293)
+
+`run_id` (optional) identifies one run of a task and is equal across that run's
+`task_started` / `task_updated` / `task_progress` / `task_notification` frames and its
+`background_tasks_changed` entries. A resumed task keeps its `task_id` and gets a new
+`run_id`; run ids sort, as plain strings, in the order runs opened. Absent for tasks
+this process did not register. `parent_task_id` (optional, on `task_started` and
+`background_tasks_changed` entries) is the `task_id` of the subagent task that
+launched this one, absent when the main thread did. `background_tasks_changed`
+entries also carry `subagent_type`. `@internal`: `awaited`, and
+`task_notification.handback` / `handback_report`. ClaudeUI reads none of these yet.
 
 ### `is_backgrounded` — foreground or background (2.1.280)
 
@@ -1166,3 +1179,27 @@ the 2.1.289 darwin-arm64 concat at char `~27236553`; it returns `null` when
 there is no aggregate-limit warning or the gate is off. ClaudeUI does not
 consume this subtype; its permissive system-message handling makes it a no-op
 rather than a break.
+
+## 4.32 `permission_check_status`
+
+**Added in 2.1.293, `@internal`.** Sent for a tool call whose automatic permission
+check (the auto-mode classifier) has been waiting for about 4 s.
+
+```json
+{
+  "type": "system",
+  "subtype": "permission_check_status",
+  "tool_use_id": "toolu_…",
+  "agent_id": "…",
+  "status": "checking",
+  "uuid": "…",
+  "session_id": "…"
+}
+```
+
+`checking` goes out once the check has waited ~4 s, and `done` when it ends; a check
+that answers sooner sends nothing. `agent_id` is present only when the call came from
+inside a subagent, as on `permission_denied` (§4.25). It travels the shared SDK event
+queue (the `task_notification` path), so it is on the stream-json wire in print mode.
+Read from the 2.1.293 bundle, not probed live. ClaudeUI does not consume it; unknown
+subtypes are no-ops.

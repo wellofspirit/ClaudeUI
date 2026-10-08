@@ -26,10 +26,10 @@ describe('harness manifests', () => {
     expect(typeof manifest.platforms).toBe('object')
   })
 
-  it('floors Claude Code at 2.1.290, the bundled build (owner, 2026-10-06)', () => {
+  it('floors Claude Code at 2.1.293, the bundled build (floor = tested, ADR-082 §3)', () => {
     // The bundled build is the baseline: floor = tested. A deliberate floor
     // decision, so a bump that moves it has to touch this test too.
-    expect(harnessManifest('claude').floor).toBe('2.1.290')
+    expect(harnessManifest('claude').floor).toBe('2.1.293')
   })
 
   it('keeps Claude Code on the bundled build that package.json pins', () => {

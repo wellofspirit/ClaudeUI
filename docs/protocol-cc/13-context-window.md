@@ -25,6 +25,20 @@ Sonnet 4.x $3/$15 until this entry. `defaultEffort()` now mirrors the catalog's
 `default_effort` (`medium` for Opus 5.5 and Sonnet 5.5, which Opus 5.5 already
 had at 2.1.280), and aliases are judged by the model they resolve to.
 
+**2.1.293:** one new model, `claude-haiku-5-5` (Haiku 5.5): 1M native
+(`context:{window:1e6,native_1m:!0}`), 128K output (`default` and `upper`),
+`haiku_55` pricing (input $0.10, output $0.50, cache write $0.125 / 1h $0.20, read
+$0.01; above 100K prompt tokens $0.50 / $2.50 / $0.625 / $1 / $0.05),
+`default_effort:"medium"`, capabilities `effort`, `max_effort`, `xhigh_effort`,
+`adaptive_thinking`, `rejects_disabled_thinking` and `org_locked_thinking`. The
+first-party `haiku` alias and `latest_per_family.haiku` moved from
+`claude-haiku-4-5` to `claude-haiku-5-5`; every third-party per-provider haiku target
+stays `claude-haiku-4-5`. `fable`, `opus` and `sonnet` are unchanged.
+`mid_conv_system` was dropped from several models (not mirrored). **Not yet
+mirrored in `src/shared/`:** `canonicalizeModelValue('haiku')`,
+`IMPLICIT_1M_BASE_MODELS` / `IMPLICIT_1M_ALIASES`, the haiku exclusions in the
+effort/thinking heuristics, `defaultEffort` and `pricing.ts` still describe Haiku 4.5.
+
 Partial 2.1.280 drift check: the baked catalog's native-1M model prefixes
 remain covered by `IMPLICIT_1M_BASE_MODELS`; its `opus` default moved to
 `claude-opus-5-5` and its `tier_4_20_cache_read_0_20` is now mirrored in

@@ -81,6 +81,7 @@ Anthropic-shaped assistant message. Fires on every assistant response, including
   "type": "assistant",
   "message": {...},
   "parent_tool_use_id": "toolu_parent",   // points to the parent's Task tool_use block
+  "agent_id": "...",                       // 2.1.293+: the subagent's task_id (also on `user`)
   "session_id": "...",
   "uuid": "..."
 }

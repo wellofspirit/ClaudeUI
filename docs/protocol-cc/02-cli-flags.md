@@ -883,6 +883,9 @@ used by the stream-json harness.
 Re-diffed at **2.1.290** against 2.1.289: no long flag added or removed (71 → 71). Only
 the `attach` and `logs` commands changed, to accept a session name in place of the id.
 
+Re-diffed at **2.1.293** against 2.1.290: top-level `--help` is byte-identical (71 → 71).
+`plugin install` gained `--marketplace <source>`; the harness does not use it.
+
 | Flag                                          | Type / values      | Effect                                                                                                                                                                                                                                                                               |
 | --------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `--forward-subagent-text`                     | boolean            | Forward subagent text + thinking blocks as assistant/user messages with `parent_tool_use_id` set. Requires a non-interactive session + `--output-format=stream-json`. ClaudeUI always passes it (see §2.1); patch/subagent-streaming still supplies the `stream_event` token deltas. |

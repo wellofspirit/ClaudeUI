@@ -1,7 +1,7 @@
 {
   "id": "claude",
-  "tested": "2.1.290",
-  "floor": "2.1.290",
+  "tested": "2.1.293",
+  "floor": "2.1.293",
   "ceiling": "3.0.0",
   "platforms": {}
 }

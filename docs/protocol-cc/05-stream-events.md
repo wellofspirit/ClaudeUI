@@ -278,6 +278,12 @@ Closes the assistant message. No fields beyond `type`.
 
 After `message_stop`, no more stream_events for this `message.id` arrive. The next stream sequence (if any) has a new `message_start` with a fresh id.
 
+**2.1.293+:** a `message_stop` that cli.js synthesizes after the API stream failed,
+stalled or ended early may carry the `@internal`
+`abandoned_blocks: {api_message_id, from_block_index}` beside `event`. Blocks of that
+response at index ≥ `from_block_index` never get an `assistant` snapshot (§5.9). Its
+absence implies nothing. ClaudeUI does not read it.
+
 ---
 
 ## 5.9 Ordering within a turn
