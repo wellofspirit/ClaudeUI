@@ -21,6 +21,20 @@ import {
 } from '../../../../stores/session-store'
 import { reloadActiveTranscript } from '../../../../lib/session-history-load'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import {
+  dispatchScroll,
+  dispatchWheel,
+  distanceFromBottom,
+  fireResize,
+  geo,
+  installScrollGeometry,
+  maxScrollTop,
+  observedElements,
+  setDefaultGeometry
+} from '@test/helpers/scroll-geometry'
+import type { ChatMessage } from '../../../../../../shared/types'
+import { estimateMessageHeight } from '../estimate-height'
+import { prose } from './estimate-samples'
 
 let mockIsMobile = true
 vi.mock('../../../../hooks/useIsMobile', () => ({
@@ -42,7 +56,11 @@ vi.mock('../../BtwCard', () => ({ BtwCard: () => null }))
 vi.mock('../../FloatingError', () => ({ FloatingError: () => null }))
 vi.mock('../../VendorAuthRequiredCard', () => ({ VendorAuthRequiredCard: () => null }))
 vi.mock('../../SandboxViolationToast', () => ({ SandboxViolationToast: () => null }))
-vi.mock('../../ChatSearch', () => ({ ChatSearchOverlay: () => null }))
+// A close button while active, so a test can end a search the way the real bar does.
+vi.mock('../../ChatSearch', () => ({
+  ChatSearchOverlay: ({ active, onClose }: { active: boolean; onClose: () => void }) =>
+    active ? <button data-testid="ChatSearchOverlay.close" onClick={onClose} /> : null
+}))
 vi.mock('../../../TodoWidget', () => ({ TodoWidget: () => null }))
 vi.mock('../../../SentFilesWidget', () => ({ SentFilesWidget: () => null }))
 
@@ -313,6 +331,410 @@ describe('ChatPanel — an evicted active entry (ADR-087 §2)', () => {
     })
 
     expect(screen.queryByTestId('TranscriptLoading')).toBeNull()
+    unmount()
+  })
+})
+
+/**
+ * The scroll behaviour ChatPanel keeps on top of useStickToBottom (the hook's own
+ * decision logic is covered by hooks/__tests__/useStickToBottom.unit.test.tsx):
+ * the scroll-to-bottom button, landing at the bottom on a session switch, the
+ * find bar holding the view still, and the typing indicator being inside the
+ * observed content so it is never left below the fold.
+ */
+describe('ChatPanel — stick to bottom', () => {
+  let app: TestApp
+  let restoreGeometry: () => void
+  let clock = 1000
+  const originalMatchMedia = window.matchMedia
+  const OTHER = 'route-chat-panel-other'
+
+  const message = (id: string): ChatMessage => ({
+    id,
+    role: 'assistant',
+    content: [{ type: 'text', text: id }],
+    timestamp: 1
+  })
+
+  const scroller = (): HTMLElement => screen.getByTestId('ChatPanel.scroll')
+  const content = (): HTMLElement => {
+    const el = scroller().firstElementChild
+    if (!(el instanceof HTMLElement)) throw new Error('content not mounted')
+    return el
+  }
+
+  /** Content grows after commit with no DOM mutation (a cv-auto swap, an image). */
+  function growLayoutOnly(by: number): void {
+    geo(scroller()).scrollHeight += by
+    act(() => fireResize(content()))
+  }
+
+  /** The user scrolls: input, the offset change, the scroll event. */
+  function userScrollTo(top: number): void {
+    act(() => dispatchWheel(scroller(), top < scroller().scrollTop ? -120 : 120))
+    scroller().scrollTop = top
+    act(() => dispatchScroll(scroller()))
+    clock += 1000
+  }
+
+  async function renderChatPanel(): Promise<{ unmount: () => void }> {
+    const { ChatPanel } = await import('../ChatPanel')
+    let result!: { unmount: () => void }
+    await act(async () => {
+      result = render(<ChatPanel />)
+    })
+    return result
+  }
+
+  beforeEach(async () => {
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    })) as unknown as typeof window.matchMedia
+    restoreGeometry = installScrollGeometry()
+    setDefaultGeometry({ scrollHeight: 4000, clientHeight: 600 })
+    clock = 1000
+    vi.spyOn(performance, 'now').mockImplementation(() => clock)
+    mockIsMobile = false
+    window.localStorage.setItem(HINT_KEY, '1')
+
+    app = await bootTestApp()
+    for (const id of [ROUTE, OTHER]) {
+      useSessionStore.getState().createNewSession(id, '/d/repo')
+    }
+    useSessionStore.setState((state) => ({
+      activeSessionId: ROUTE,
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: { ...state.sessions[ROUTE], messages: [message('a1'), message('a2')] },
+        [OTHER]: { ...state.sessions[OTHER], messages: [message('b1')] }
+      }
+    }))
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    window.localStorage.clear()
+    window.matchMedia = originalMatchMedia
+    vi.restoreAllMocks()
+    restoreGeometry()
+  })
+
+  it('opens at the bottom and follows layout-only growth', async () => {
+    const { unmount } = await renderChatPanel()
+    expect(distanceFromBottom(scroller())).toBe(0)
+    growLayoutOnly(900)
+    expect(distanceFromBottom(scroller())).toBe(0)
+    unmount()
+  })
+
+  it('shows the scroll-to-bottom button only away from the bottom, and it re-arms following', async () => {
+    const { unmount } = await renderChatPanel()
+    expect(screen.queryByTestId('ChatPanel.scrollToBottom')).toBeNull()
+
+    userScrollTo(1000)
+    expect(screen.getByTestId('ChatPanel.scrollToBottom')).toBeInTheDocument()
+    // Not following: growth leaves the view where the user put it.
+    growLayoutOnly(300)
+    expect(distanceFromBottom(scroller())).toBe(2700)
+
+    // Far from the bottom the click jumps instantly (no animation to outrun the swaps).
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('ChatPanel.scrollToBottom'))
+    })
+    expect(geo(scroller()).scrollToCalls).toEqual([])
+    expect(distanceFromBottom(scroller())).toBe(0)
+    expect(screen.queryByTestId('ChatPanel.scrollToBottom')).toBeNull()
+    growLayoutOnly(500)
+    expect(distanceFromBottom(scroller())).toBe(0)
+    unmount()
+  })
+
+  it('lands at the bottom, following, after a session switch from a scrolled-up view', async () => {
+    const { unmount } = await renderChatPanel()
+    userScrollTo(200)
+    expect(screen.getByTestId('ChatPanel.scrollToBottom')).toBeInTheDocument()
+
+    await act(async () => {
+      useSessionStore.setState({ activeSessionId: OTHER })
+    })
+    expect(distanceFromBottom(scroller())).toBe(0)
+    expect(screen.queryByTestId('ChatPanel.scrollToBottom')).toBeNull()
+    growLayoutOnly(700)
+    expect(distanceFromBottom(scroller())).toBe(0)
+    unmount()
+  })
+
+  it('holds the view still while the find bar is open, and stays put after it closes', async () => {
+    const { unmount } = await renderChatPanel()
+    await act(async () => {
+      fireEvent.keyDown(window, { key: 'f', ctrlKey: true })
+    })
+    expect(screen.getByTestId('ChatSearchOverlay.close')).toBeInTheDocument()
+
+    // A search jump scrolled somewhere; streaming growth must not pin it away.
+    scroller().scrollTop = 1200
+    act(() => dispatchScroll(scroller()))
+    growLayoutOnly(500)
+    expect(scroller().scrollTop).toBe(1200)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('ChatSearchOverlay.close'))
+    })
+    // Opening the bar stopped following; closing it does not resume it.
+    growLayoutOnly(500)
+    expect(scroller().scrollTop).toBe(1200)
+
+    // Reaching the bottom again does.
+    userScrollTo(maxScrollTop(scroller()))
+    growLayoutOnly(500)
+    expect(distanceFromBottom(scroller())).toBe(0)
+    unmount()
+  })
+
+  describe('typing indicator', () => {
+    // Only timeouts are faked: the stick-to-bottom hook's `performance.now` is spied above.
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    const indicator = (): HTMLElement | null => screen.queryByTestId('ChatPanel.typingIndicator')
+
+    const patchSession = (patch: {
+      state?: 'running' | 'idle'
+      streams?: 'one' | 'none'
+    }): void => {
+      useSessionStore.setState((state) => {
+        const sess = state.sessions[ROUTE]
+        return {
+          sessions: {
+            ...state.sessions,
+            [ROUTE]: {
+              ...sess,
+              status: patch.state ? { ...sess.status, state: patch.state } : sess.status,
+              itemStreams:
+                patch.streams === 'one'
+                  ? {
+                      s1: {
+                        target: { messageId: 'a2', blockIndex: 0, kind: 'text' },
+                        generation: 1,
+                        value: 'hi'
+                      }
+                    }
+                  : patch.streams === 'none'
+                    ? {}
+                    : sess.itemStreams
+            }
+          }
+        }
+      })
+    }
+
+    // Render synchronously (no awaited act) so the fake clock owns every timer the panel schedules.
+    async function renderPanel(): Promise<{ unmount: () => void }> {
+      const { ChatPanel } = await import('../ChatPanel')
+      return render(<ChatPanel />)
+    }
+
+    it('keeps the typing indicator inside the observed content', async () => {
+      patchSession({ state: 'running' })
+      const { unmount } = await renderPanel()
+      act(() => {
+        vi.advanceTimersByTime(150)
+      })
+      const el = screen.getByTestId('ChatPanel.typingIndicator')
+      const watched = observedElements().filter((w) => w !== scroller())
+      expect(watched.some((w) => w.contains(el))).toBe(true)
+      unmount()
+    })
+
+    it('shows the indicator for a running session with no stream only after the delay', async () => {
+      patchSession({ state: 'running' })
+      const { unmount } = await renderPanel()
+      expect(indicator()).toBeNull()
+      act(() => {
+        vi.advanceTimersByTime(149)
+      })
+      expect(indicator()).toBeNull()
+      act(() => {
+        vi.advanceTimersByTime(1)
+      })
+      expect(indicator()).not.toBeNull()
+
+      // And it leaves at once when the turn ends.
+      act(() => patchSession({ state: 'idle' }))
+      expect(indicator()).toBeNull()
+      unmount()
+    })
+
+    it('never renders the indicator across the end-of-turn gap (stream removed, then idle)', async () => {
+      patchSession({ state: 'running', streams: 'one' })
+      const { unmount } = await renderPanel()
+      expect(indicator()).toBeNull()
+
+      // Core drops the last item stream one commit before status leaves 'running'.
+      act(() => patchSession({ streams: 'none' }))
+      expect(indicator()).toBeNull()
+      act(() => {
+        vi.advanceTimersByTime(4)
+      })
+      expect(indicator()).toBeNull()
+      act(() => patchSession({ state: 'idle' }))
+      expect(indicator()).toBeNull()
+      act(() => {
+        vi.advanceTimersByTime(1000)
+      })
+      expect(indicator()).toBeNull()
+      unmount()
+    })
+  })
+})
+
+/**
+ * `contain-intrinsic-size` per message: only a never-rendered message uses it, and
+ * with a flat 100px the scrollbar and scroll anchoring were wrong by the ratio of
+ * a real message to 100px. The numbers themselves are estimate-height's (unit and
+ * browser tests); this is the wiring: every wrapper carries its estimate, one
+ * message's update leaves the others' alone, and the column width comes from the
+ * rendered column, bucketed.
+ */
+describe('ChatPanel — message height estimates', () => {
+  let app: TestApp
+  let restoreGeometry: () => void
+  const originalMatchMedia = window.matchMedia
+  const clientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+  let wrapperWidth = 0
+
+  const message = (id: string, body: string): ChatMessage => ({
+    id,
+    role: 'assistant',
+    content: [{ type: 'text', text: body }],
+    timestamp: 1
+  })
+  const MESSAGES = [message('e1', 'short'), message('e2', prose(8)), message('e3', prose(2))]
+
+  /** What the estimate is told about the session: the fork row exists when the engine can fork. */
+  const forkRow = (): boolean =>
+    useSessionStore.getState().sessions[ROUTE].status.capabilities.forkFromMessage
+  const expectedHeight = (m: ChatMessage, column: number): number =>
+    estimateMessageHeight(m, column, { forkRow: forkRow() })
+
+  const wrappers = (): HTMLElement[] =>
+    Array.from(document.querySelectorAll<HTMLElement>('.cv-auto'))
+  const estimates = (): number[] => wrappers().map((el) => Number(el.dataset.estH))
+
+  async function renderChatPanel(): Promise<{ unmount: () => void }> {
+    const { ChatPanel } = await import('../ChatPanel')
+    let result!: { unmount: () => void }
+    await act(async () => {
+      result = render(<ChatPanel />)
+    })
+    return result
+  }
+
+  beforeEach(async () => {
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    })) as unknown as typeof window.matchMedia
+    restoreGeometry = installScrollGeometry()
+    setDefaultGeometry({ scrollHeight: 4000, clientHeight: 600 })
+    // jsdom has no layout: the column the estimate measures is whatever a test says.
+    wrapperWidth = 0
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains('cv-auto') ? wrapperWidth : 0
+      }
+    })
+    mockIsMobile = false
+    window.localStorage.setItem(HINT_KEY, '1')
+
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState((state) => ({
+      activeSessionId: ROUTE,
+      sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], messages: MESSAGES } }
+    }))
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    window.localStorage.clear()
+    window.matchMedia = originalMatchMedia
+    if (clientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', clientWidth)
+    restoreGeometry()
+  })
+
+  it('gives every wrapper its estimate as an inline intrinsic size and data-est-h', async () => {
+    const { unmount } = await renderChatPanel()
+    expect(wrappers()).toHaveLength(3)
+    wrappers().forEach((el, i) => {
+      // Nothing measured yet (no layout): the default column from the width settings.
+      const expected = expectedHeight(MESSAGES[i], 700)
+      expect(el.dataset.estH).toBe(String(expected))
+      expect(el.style.containIntrinsicSize).toBe(`auto ${expected}px`)
+      expect(el.className).toContain('cv-auto')
+    })
+    // Not the flat 100px: the long message is estimated taller than the short one.
+    expect(estimates()[1]).toBeGreaterThan(estimates()[0] * 3)
+    unmount()
+  })
+
+  it('a streaming update to one message leaves every other message’s estimate alone', async () => {
+    const { unmount } = await renderChatPanel()
+    const before = estimates()
+    await act(async () => {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: {
+            ...state.sessions[ROUTE],
+            messages: state.sessions[ROUTE].messages.map((m) =>
+              m.id === 'e3' ? message('e3', prose(30)) : m
+            )
+          }
+        }
+      }))
+    })
+    const after = estimates()
+    expect(after[0]).toBe(before[0])
+    expect(after[1]).toBe(before[1])
+    expect(after[2]).toBeGreaterThan(before[2] * 3)
+    unmount()
+  })
+
+  it('measures the column from a rendered wrapper, in 50px buckets', async () => {
+    wrapperWidth = 424
+    const { unmount } = await renderChatPanel()
+    const content = wrappers()[0].parentElement as HTMLElement
+    // Mounting reads no layout: until the browser reports the content laid out,
+    // the default column from the width settings stands.
+    expect(estimates()[1]).toBe(expectedHeight(MESSAGES[1], 700))
+
+    // The observer's initial notification measures: 424 -> the 400 bucket.
+    act(() => fireResize(content))
+    expect(estimates()[1]).toBe(expectedHeight(MESSAGES[1], 400))
+    expect(estimates()[1]).toBeGreaterThan(expectedHeight(MESSAGES[1], 700))
+
+    // A resize inside the bucket changes nothing.
+    wrapperWidth = 410
+    act(() => fireResize(content))
+    expect(estimates()[1]).toBe(expectedHeight(MESSAGES[1], 400))
+
+    // Crossing into the next one re-estimates narrower -> taller text.
+    wrapperWidth = 340
+    act(() => fireResize(content))
+    expect(estimates()[1]).toBe(expectedHeight(MESSAGES[1], 350))
     unmount()
   })
 })
