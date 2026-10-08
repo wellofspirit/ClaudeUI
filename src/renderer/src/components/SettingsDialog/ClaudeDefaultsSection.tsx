@@ -74,13 +74,14 @@ export interface ClaudeEffortRow {
 }
 
 /**
- * Group the Claude catalog by `claudeEffortKey`, in cli.js's own order.
+ * Group the Claude catalog by `claudeEffortKey`, in cli.js's own order. The
+ * catalog lists aliases only (ADR-100), so a group is an alias plus `default`
+ * when `default` resolves where it does.
  *
- * The NAME comes from the concrete row (`value` is a `claude-…` id) when the
- * group has one, else from the first row that is not `default` — whose display
- * name is "Default (recommended)", which says nothing about the model. Levels
- * come from the same row's `supportedEffortLevels`, falling back to the id
- * heuristic for the key.
+ * The NAME comes from the first row that is not `default` — whose display name
+ * is "Default (recommended)", which says nothing about the model. Levels come
+ * from the same row's `supportedEffortLevels`, falling back to the id heuristic
+ * for the key.
  */
 export function buildClaudeEffortRows(models: ModelInfo[]): ClaudeEffortRow[] {
   const groups = new Map<string, ModelInfo[]>()
@@ -90,10 +91,7 @@ export function buildClaudeEffortRows(models: ModelInfo[]): ClaudeEffortRow[] {
     groups.set(key, [...(groups.get(key) ?? []), m])
   }
   return [...groups.entries()].map(([key, rows]) => {
-    const rep =
-      rows.find((r) => r.value.toLowerCase().startsWith('claude-')) ??
-      rows.find((r) => r.value !== DEFAULT_ALIAS) ??
-      rows[0]
+    const rep = rows.find((r) => r.value !== DEFAULT_ALIAS) ?? rows[0]
     const modelId = claudeResolvedModelId(rep)
     // The row's capability flags, judged against the MODEL: an alias value is
     // opaque to the id heuristic the fallback uses.
@@ -143,7 +141,7 @@ export function ClaudeDefaultsSection({
   const efforts = settings.modelEffortDefaults ?? {}
 
   // `default` is the empty option's job, so it is not offered twice; the
-  // concrete row it collapses with (`opus[1m]`) then survives the dedupe.
+  // alias row it collapses with (`opus[1m]`) then survives the dedupe.
   const pickable = useMemo(
     () =>
       dedupeResolvedModels(

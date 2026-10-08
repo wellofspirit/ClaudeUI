@@ -16,9 +16,13 @@ import {
   modelDefaultThinkingMode,
   modelResolveEffort,
   canonicalizeModelValue,
+  claudeAliasForModel,
+  claudeConfigWithAliases,
   claudeEffortKey,
   claudeLegacyEffortKey,
   claudeSavedEffort,
+  isClaudeModelAlias,
+  isConcreteClaudeModel,
   resolveDesiredEffort,
   resolveSpawnEffort,
   withSavedEffort,
@@ -172,7 +176,7 @@ describe('defaultEffort', () => {
   it('judges a picker alias by the model it resolves to', () => {
     expect(defaultEffort('opus')).toBe('medium')
     expect(defaultEffort('sonnet[1m]')).toBe('medium')
-    expect(defaultEffort('haiku')).toBe('high')
+    expect(defaultEffort('haiku')).toBe('medium')
   })
 })
 
@@ -349,12 +353,12 @@ describe('modelDefaultThinkingMode', () => {
 })
 
 describe('canonicalizeModelValue', () => {
-  it('maps known aliases to current canonical ids (mirrors cli.js alias map, 2.1.285)', () => {
+  it('maps known aliases to current canonical ids (mirrors cli.js alias map, 2.1.293)', () => {
     expect(canonicalizeModelValue('opus')).toBe('claude-opus-5-5')
     expect(canonicalizeModelValue('opus[1m]')).toBe('claude-opus-5-5')
     expect(canonicalizeModelValue('sonnet')).toBe('claude-sonnet-5-5')
     expect(canonicalizeModelValue('sonnet[1m]')).toBe('claude-sonnet-5-5')
-    expect(canonicalizeModelValue('haiku')).toBe('claude-haiku-4-5')
+    expect(canonicalizeModelValue('haiku')).toBe('claude-haiku-5-5')
   })
   it('passes canonical ids through (normalised, date stripped)', () => {
     expect(canonicalizeModelValue('claude-opus-4-8')).toBe('claude-opus-4-8')
@@ -442,6 +446,125 @@ describe('claudeSavedEffort — v3.5 values saved under the resolved model id', 
   })
 })
 
+describe('alias-only Claude catalog (ADR-100)', () => {
+  // The 2.1.293 catalog once concrete rows are dropped: aliases only.
+  const CATALOG = [
+    { value: 'default', resolvedModel: 'claude-opus-5-5[1m]' },
+    { value: 'fable', resolvedModel: 'claude-fable-5-1' },
+    { value: 'opus', resolvedModel: 'claude-opus-5-5' },
+    { value: 'sonnet', resolvedModel: 'claude-sonnet-5-5' },
+    { value: 'haiku', resolvedModel: 'claude-haiku-5-5' }
+  ]
+
+  it('isConcreteClaudeModel drops concrete ids and keeps aliases and custom values', () => {
+    for (const v of ['claude-opus-4-8', 'claude-fable-5-1[1m]', 'Claude-Sonnet-4-6']) {
+      expect(isConcreteClaudeModel(v)).toBe(true)
+    }
+    for (const v of ['default', 'opus', 'sonnet[1m]', 'haiku', 'fable', 'my-gateway-model']) {
+      expect(isConcreteClaudeModel(v)).toBe(false)
+    }
+  })
+
+  it('isClaudeModelAlias is `default` and the family aliases, `[1m]` included', () => {
+    for (const v of ['default', 'opus', 'opus[1m]', 'sonnet', 'haiku', 'fable']) {
+      expect(isClaudeModelAlias(v)).toBe(true)
+    }
+    for (const v of ['claude-opus-5-5', 'my-gateway-model', '']) {
+      expect(isClaudeModelAlias(v)).toBe(false)
+    }
+  })
+
+  it('maps a concrete id, dated or not, to the alias that resolves to it', () => {
+    expect(claudeAliasForModel('claude-sonnet-5-5', CATALOG)).toBe('sonnet')
+    expect(claudeAliasForModel('claude-haiku-5-5-20261001', CATALOG)).toBe('haiku')
+    // The 2.1.280 Fable row: `[1m]` value, no `fable[1m]` alias listed.
+    expect(claudeAliasForModel('claude-fable-5-1[1m]', CATALOG)).toBe('fable')
+  })
+
+  it('prefers the `[1m]` alias for a `[1m]` value, and the plain one otherwise', () => {
+    const catalog = [...CATALOG, { value: 'opus[1m]', resolvedModel: 'claude-opus-5-5[1m]' }]
+    expect(claudeAliasForModel('claude-opus-5-5[1m]', catalog)).toBe('opus[1m]')
+    expect(claudeAliasForModel('claude-opus-5-5', catalog)).toBe('opus')
+  })
+
+  it('never maps to `default`, even when only `default` reaches the model', () => {
+    const catalog = [{ value: 'default', resolvedModel: 'claude-opus-4-8' }, ...CATALOG.slice(1)]
+    expect(claudeAliasForModel('claude-opus-4-8', catalog)).toBe('claude-opus-4-8')
+  })
+
+  it('leaves aliases, unreached ids and everything on an empty catalog alone', () => {
+    expect(claudeAliasForModel('opus', CATALOG)).toBe('opus')
+    expect(claudeAliasForModel('default', CATALOG)).toBe('default')
+    expect(claudeAliasForModel('my-gateway-model', CATALOG)).toBe('my-gateway-model')
+    expect(claudeAliasForModel('claude-haiku-4-5-20251001', CATALOG)).toBe(
+      'claude-haiku-4-5-20251001'
+    )
+    expect(claudeAliasForModel('claude-sonnet-5-5', [])).toBe('claude-sonnet-5-5')
+  })
+
+  it('is idempotent', () => {
+    const once = claudeAliasForModel('claude-sonnet-5-5', CATALOG)
+    expect(claudeAliasForModel(once, CATALOG)).toBe(once)
+  })
+
+  it('claudeConfigWithAliases moves the default model and dispatch picks, deduping the allowlist', () => {
+    const config = {
+      sandbox: { enabled: true },
+      claudeConfig: { defaultModel: 'claude-sonnet-5-5' },
+      dispatch: {
+        defaultModel: 'claude-haiku-5-5',
+        allowedModels: ['sonnet', 'claude-sonnet-5-5', 'claude-opus-4-8'],
+        maxCostUsd: 5
+      }
+    }
+    expect(claudeConfigWithAliases(config, CATALOG)).toEqual({
+      sandbox: { enabled: true },
+      claudeConfig: { defaultModel: 'sonnet' },
+      dispatch: {
+        defaultModel: 'haiku',
+        allowedModels: ['sonnet', 'claude-opus-4-8'],
+        maxCostUsd: 5
+      }
+    })
+  })
+
+  it('claudeConfigWithAliases returns the same object when nothing moves', () => {
+    const config = {
+      claudeConfig: { defaultModel: 'opus' },
+      dispatch: { allowedModels: ['claude-opus-4-8'] }
+    }
+    expect(claudeConfigWithAliases(config, CATALOG)).toBe(config)
+    expect(claudeConfigWithAliases({}, CATALOG)).toEqual({})
+    const concrete = { claudeConfig: { defaultModel: 'claude-sonnet-5-5' } }
+    expect(claudeConfigWithAliases(concrete, [])).toBe(concrete)
+  })
+
+  // ADR-074 §8's legacy-key path is what carries an effort saved on a concrete
+  // row onto its alias once the concrete row is gone — no effort migration.
+  it('an effort saved under the resolved id applies to its alias row, and the alias key wins', () => {
+    const opus = CATALOG[2]
+    expect(claudeLegacyEffortKey(opus, CATALOG)).toBe('claude-opus-5-5')
+    expect(claudeSavedEffort({ 'claude-opus-5-5': 'low' }, opus, CATALOG)).toBe('low')
+    // `default` shares opus's row, so it reads the same carried value.
+    expect(claudeSavedEffort({ 'claude-opus-5-5': 'low' }, CATALOG[0], CATALOG)).toBe('low')
+    expect(claudeSavedEffort({ 'claude-opus-5-5': 'low', opus: 'max' }, opus, CATALOG)).toBe('max')
+    // Editing the row moves the value onto the alias key.
+    expect(
+      withSavedEffort(
+        { 'claude-opus-5-5': 'low' },
+        { key: 'opus', legacyKey: claudeLegacyEffortKey(opus, CATALOG) },
+        'high'
+      )
+    ).toEqual({ opus: 'high' })
+    // While a concrete row was listed, it owned the key and the alias row could not borrow it.
+    const withConcrete = [
+      ...CATALOG,
+      { value: 'claude-opus-5-5', resolvedModel: 'claude-opus-5-5' }
+    ]
+    expect(claudeSavedEffort({ 'claude-opus-5-5': 'low' }, opus, withConcrete)).toBeUndefined()
+  })
+})
+
 describe('modelResolveEffort', () => {
   it('returns null for models with SDK-declared no-effort support', () => {
     expect(modelResolveEffort({ value: 'haiku', supportsEffort: false }, 'high')).toBeNull()
@@ -498,6 +621,30 @@ describe('claude-sonnet-5 capabilities (authoritative from cli.js 2.1.197)', () 
   })
 })
 
+describe('Haiku 5.5 vs Haiku 4.x (cli.js 2.1.293 catalog)', () => {
+  it('Haiku 5.x takes effort (xhigh and max included) and adaptive thinking, defaulting to medium', () => {
+    for (const id of ['claude-haiku-5-5', 'claude-haiku-5-5-20261001']) {
+      expect(supportsAdaptiveThinking(id)).toBe(true)
+      expect(supportsEffort(id)).toBe(true)
+      expect(supportedEffortLevels(id)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+      expect(defaultEffort(id)).toBe('medium')
+      expect(maxOutputTokens(id)).toBe(128_000)
+      expect(resolveContextWindow(id)).toBe(CONTEXT_WINDOW_1M)
+    }
+  })
+  it('Haiku 4.5 and 3.x keep their answers — `haiku-4-5` must not read as `haiku-5`', () => {
+    for (const id of ['claude-haiku-4-5', 'claude-haiku-4-5-20251001', 'claude-3-5-haiku']) {
+      expect(supportsAdaptiveThinking(id)).toBe(false)
+      expect(supportsEffort(id)).toBe(false)
+      expect(supportsXhighEffort(id)).toBe(false)
+      expect(supportsMaxEffort(id)).toBe(false)
+      expect(defaultEffort(id)).toBe('high')
+      expect(resolveContextWindow(id)).toBe(200_000)
+    }
+    expect(maxOutputTokens('claude-haiku-4-5')).toBe(64_000)
+  })
+})
+
 describe('maxOutputTokens (mirrors cli.js N0e upperLimit)', () => {
   it('128K models: Fable/Mythos 5, Sonnet 5, Opus 4.6/4.7/4.8, Sonnet 4.6', () => {
     for (const m of [
@@ -534,10 +681,10 @@ describe('maxOutputTokens (mirrors cli.js N0e upperLimit)', () => {
     expect(maxOutputTokens('claude-3-5-sonnet')).toBe(8_192)
     expect(maxOutputTokens('claude-3-5-haiku')).toBe(8_192)
   })
-  it('resolves picker aliases via canonicalization (haiku → 64K, not the default)', () => {
-    expect(maxOutputTokens('sonnet')).toBe(128_000) // → claude-sonnet-5
-    expect(maxOutputTokens('opus')).toBe(128_000) // → claude-opus-4-8
-    expect(maxOutputTokens('haiku')).toBe(64_000) // → claude-haiku-4-5
+  it('resolves picker aliases via canonicalization', () => {
+    expect(maxOutputTokens('sonnet')).toBe(128_000) // → claude-sonnet-5-5
+    expect(maxOutputTokens('opus')).toBe(128_000) // → claude-opus-5-5
+    expect(maxOutputTokens('haiku')).toBe(128_000) // → claude-haiku-5-5
   })
   it('resolves dated / provider-prefixed ids by substring', () => {
     expect(maxOutputTokens('claude-sonnet-5-20260115')).toBe(128_000)
@@ -598,6 +745,8 @@ describe('resolveContextWindow', () => {
     expect(resolveContextWindow('opus')).toBe(ONE_M)
     // sonnet now resolves to claude-sonnet-5 (native-1M since 2.1.197)
     expect(resolveContextWindow('sonnet')).toBe(ONE_M)
+    // haiku → claude-haiku-5-5 in the 2.1.293 baked catalog
+    expect(resolveContextWindow('haiku')).toBe(ONE_M)
   })
 
   it('resolves implicit-1M full ids by substring (dated / Bedrock)', () => {
@@ -607,8 +756,8 @@ describe('resolveContextWindow', () => {
     expect(resolveContextWindow('claude-sonnet-5')).toBe(ONE_M)
   })
 
-  it('keeps 200K models and aliases at the default', () => {
-    expect(resolveContextWindow('haiku')).toBe(DEFAULT)
+  it('keeps 200K models at the default', () => {
+    expect(resolveContextWindow('claude-haiku-4-5-20251001')).toBe(DEFAULT)
     expect(resolveContextWindow('claude-sonnet-4-6')).toBe(DEFAULT)
     expect(resolveContextWindow('claude-opus-4-6')).toBe(DEFAULT)
   })
@@ -650,10 +799,8 @@ describe('claudeModelCapabilities — sizing from resolvedModel', () => {
     ).toBe(DEFAULT)
   })
 
-  // maxOutput is routed through resolvedModel too. It agrees with the `value`
-  // derivation on all five real 2.1.268 catalog rows; haiku is the one row
-  // where the figure is not the 128K unknown-model default, so it is the row
-  // that would expose a divergence.
+  // maxOutput is routed through resolvedModel too: an account whose `haiku`
+  // still runs Haiku 4.5 gets Haiku 4.5's ceiling, not the alias table's 5.5.
   it('resolveClaudeCapabilities sizes a `default` session from the init-reported id', () => {
     expect(resolveClaudeCapabilities('default', 'claude-opus-5[1m]').contextWindow).toBe(ONE_M)
   })
@@ -676,11 +823,12 @@ describe('claudeModelCapabilities — sizing from resolvedModel', () => {
     expect(resolveClaudeCapabilities('default', 'claude-sonnet-4-6[1m]').contextWindow).toBe(ONE_M)
   })
 
-  it('routes maxOutput through resolvedModel without changing any real catalog row', () => {
+  it('routes maxOutput through resolvedModel', () => {
     expect(
       claudeModelCapabilities({ value: 'haiku', resolvedModel: 'claude-haiku-4-5-20251001' })
         .maxOutput
-    ).toBe(maxOutputTokens('haiku'))
+    ).toBe(64_000)
+    expect(maxOutputTokens('haiku')).toBe(128_000)
     expect(
       claudeModelCapabilities({ value: 'default', resolvedModel: 'claude-opus-5[1m]' }).maxOutput
     ).toBe(128_000)

@@ -47,6 +47,7 @@ import { autoModeAvailableForEngine } from '../../../../../shared/permission-mod
 import type { EngineId, PermissionMode } from '../../../../../shared/types'
 import { HARNESS_IDS } from '../../../../../shared/harness-types'
 import {
+  claudeAliasForModel,
   claudeModelCapabilities,
   modelResolveThinkingMode,
   modelResolveEffort,
@@ -396,6 +397,13 @@ export function InputBox(): React.JSX.Element {
     }
     const exact = sameEngine.find((m) => m.value === selectedModelValue)
     if (exact) return exact
+    // A session saved on a concrete Claude model shows the alias that runs that
+    // model today — display only, the session keeps its own value (ADR-100).
+    if (engine === 'claude' && selectedModelValue) {
+      const alias = claudeAliasForModel(selectedModelValue, sameEngine)
+      const viaAlias = sameEngine.find((m) => m.value === alias)
+      if (viaAlias) return viaAlias
+    }
     // Curation changes the picker, not an existing session's model. Keep the
     // reference visible even when discovery no longer returns its metadata.
     const missingSelection = {

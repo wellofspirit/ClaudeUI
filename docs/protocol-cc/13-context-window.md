@@ -34,10 +34,18 @@ $0.01; above 100K prompt tokens $0.50 / $2.50 / $0.625 / $1 / $0.05),
 first-party `haiku` alias and `latest_per_family.haiku` moved from
 `claude-haiku-4-5` to `claude-haiku-5-5`; every third-party per-provider haiku target
 stays `claude-haiku-4-5`. `fable`, `opus` and `sonnet` are unchanged.
-`mid_conv_system` was dropped from several models (not mirrored). **Not yet
-mirrored in `src/shared/`:** `canonicalizeModelValue('haiku')`,
-`IMPLICIT_1M_BASE_MODELS` / `IMPLICIT_1M_ALIASES`, the haiku exclusions in the
-effort/thinking heuristics, `defaultEffort` and `pricing.ts` still describe Haiku 4.5.
+`mid_conv_system` was dropped from several models (not mirrored). Alias
+resolution is served per account, not fixed by the release: on the same 2.1.293
+binary `haiku` resolved to `claude-haiku-4-5-20251001` on 2026-10-08 and to
+`claude-haiku-5-5` on 2026-10-09, after a served model-catalog refresh (both in
+the `initialize` row and in a real turn's `system/init.model`). ClaudeUI therefore
+follows cli.js: a session on `default` or any family alias takes its window,
+capabilities and price from `system/init.model`, a picker row from its
+`resolvedModel` (ADR-100). The fallbacks now mirror the baked catalog:
+`canonicalizeModelValue('haiku')` → `claude-haiku-5-5`, `claude-haiku-5` and
+`haiku` are implicit-1M, the effort/thinking heuristics and `defaultEffort` treat
+Haiku 5.x like the other 5.x models, and `pricing.ts` has a `haiku-5` entry (the
+long-prompt tier is not modelled).
 
 Partial 2.1.280 drift check: the baked catalog's native-1M model prefixes
 remain covered by `IMPLICIT_1M_BASE_MODELS`; its `opus` default moved to
@@ -136,8 +144,9 @@ Sonnet → 200K depending on account/config). The resolved canonical id is
 recovered from the wire instead:
 
 - Live: the `model` field on `system/init` (4.2) → `claude-session.ts`
-  `resolvedModelId`, used by the `contextWindowSize` getter when `this.model`
-  is `default`.
+  `resolvedModelId`, which `effectiveModel` (window, capabilities, price) prefers
+  whenever `this.model` is `default` or a family alias (an `<alias>[1m]` keeps
+  its `[1m]`).
 - History: the `message.model` on the latest main-chain assistant line in the
   transcript → `computeTokenMetrics` `transcriptModel`, which takes precedence
   over the caller-supplied alias (the transcript records the resolved id).

@@ -1,7 +1,9 @@
 import type { ModelInfo } from '../../shared/types'
+import { isConcreteClaudeModel } from '../../shared/model-capabilities'
 import { query as sdkQuery } from '../sdk'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import { getSdkExecutableOpts } from './claude-session'
+import { migrateSavedClaudeModels } from './claude-model-alias-migration'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 
 /**
@@ -43,10 +45,12 @@ export function resetCachedClaudeModels(): void {
 /**
  * Ask cli.js for Claude's model list through a throwaway init-only query and
  * record it in the catalog above. Uncached: the TTL-bound read is the caller's
- * ({@link freshClaudeModels}). `onInit` receives the same initialize response
- * (the user's account) for a caller that reports login status from it; its
- * failure is non-fatal, and the remote transport, which has no such side effects,
- * omits it.
+ * ({@link freshClaudeModels}). Concrete model rows are dropped here, so every
+ * transport and the catalog above list aliases only, and a non-empty answer
+ * moves the host's saved concrete picks to their aliases (ADR-100). `onInit`
+ * receives the same initialize response (the user's account) for a caller that
+ * reports login status from it; its failure is non-fatal, and the remote
+ * transport, which has no such side effects, omits it.
  */
 export async function queryClaudeModels(
   onInit?: (init: Record<string, unknown>) => void,
@@ -72,10 +76,13 @@ export async function queryClaudeModels(
       supportedModels(): Promise<ModelInfo[]>
       initializationResult(): Promise<Record<string, unknown>>
     }
-    const models = await handle.supportedModels()
+    const models = (await handle.supportedModels()).filter((m) => !isConcreteClaudeModel(m.value))
     // An aborted query (a timed-out catalog wait) answers `[]` without asking
     // cli.js; caching that would serve an empty picker for the whole TTL.
-    if (!abort.signal.aborted && models.length > 0) setCachedClaudeModels(models)
+    if (!abort.signal.aborted && models.length > 0) {
+      setCachedClaudeModels(models)
+      migrateSavedClaudeModels(models)
+    }
     if (onInit) {
       try {
         onInit(await handle.initializationResult())

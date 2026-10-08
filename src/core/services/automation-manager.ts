@@ -294,6 +294,25 @@ export class AutomationManager {
     this.notifyAutomationsChanged()
   }
 
+  /**
+   * Rewrite each automation's saved model through `map` — ADR-100 moves a concrete
+   * Claude model to the alias that resolves to it. Saves and announces only what
+   * changed. Schedules are left alone: a timer already armed runs on the value it
+   * captured, which cli.js still accepts, and the next one reads the new value.
+   */
+  remapModels(map: (model: string) => string): void {
+    let changed = false
+    this.automations = this.automations.map((automation) => {
+      const model = automation.model && map(automation.model)
+      if (model === automation.model) return automation
+      changed = true
+      const next = { ...automation, model }
+      this.saveAutomation(next)
+      return next
+    })
+    if (changed) this.notifyAutomationsChanged()
+  }
+
   delete(id: string): void {
     // M-AU3: reject a traversal id BEFORE any side effect (schedule cancel, list
     // mutation, and — critically — the recursive rmSync below).

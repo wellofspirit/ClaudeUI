@@ -1,5 +1,6 @@
 import type { ModelInfo } from '../../../shared/types'
 import {
+  claudeAliasForModel,
   modelResolveEffort,
   rememberEffortPatch,
   resolveSpawnEffort,
@@ -31,7 +32,9 @@ export interface EffortSession {
 
 /**
  * The session's engine catalog and its model's row in it — the ONE filter every
- * effort read goes through (an `engineId`-less row is Claude's).
+ * effort read goes through (an `engineId`-less row is Claude's). A Claude session
+ * saved on a concrete model reads the row of the alias that runs it today
+ * (ADR-100), the row the composer shows for it.
  */
 export function catalogFor(
   state: Pick<EffortState, 'availableModels'>,
@@ -39,7 +42,14 @@ export function catalogFor(
 ): { modelInfo: ModelInfo | undefined; engineModels: ModelInfo[] } {
   const engineId = session.selectedEngineId ?? 'claude'
   const engineModels = state.availableModels.filter((m) => (m.engineId ?? 'claude') === engineId)
-  return { modelInfo: engineModels.find((m) => m.value === session.selectedModel), engineModels }
+  const rowFor = (value: string): ModelInfo | undefined =>
+    engineModels.find((m) => m.value === value)
+  const modelInfo =
+    rowFor(session.selectedModel) ??
+    (engineId === 'claude'
+      ? rowFor(claudeAliasForModel(session.selectedModel, engineModels))
+      : undefined)
+  return { modelInfo, engineModels }
 }
 
 /**

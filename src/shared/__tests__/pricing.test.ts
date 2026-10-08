@@ -99,6 +99,30 @@ describe('equivalentCostUsd — anthropic pricing', () => {
     expect(cost).toBeCloseTo(1.0)
   })
 
+  it('haiku-5: Haiku 5.5 at haiku_55 base rates (cli.js 2.1.293), dated id too', () => {
+    for (const id of ['claude-haiku-5-5', 'claude-haiku-5-5-20261001']) {
+      const cost = equivalentCostUsd(
+        'anthropic',
+        id,
+        oneMTok({
+          inputTokens: 1_000_000,
+          outputTokens: 1_000_000,
+          cacheWriteTokens: 2_000_000,
+          cacheWrite1hTokens: 1_000_000,
+          cacheReadTokens: 1_000_000
+        })
+      )
+      expect(cost).toBeCloseTo(0.1 + 0.5 + 0.125 + 0.2 + 0.01)
+    }
+  })
+
+  it('haiku-4-5 is not caught by the haiku-5 entry; the fallback keeps its historical rate', () => {
+    const input = oneMTok({ inputTokens: 1_000_000 })
+    expect(equivalentCostUsd('anthropic', 'claude-haiku-4-5-20251001', input)).toBeCloseTo(1.0)
+    // Usage history is priced from this table: a dated 3.x id must not be re-priced.
+    expect(equivalentCostUsd('anthropic', 'claude-3-5-haiku-20241022', input)).toBeCloseTo(1.0)
+  })
+
   it('haiku-3: input rate = $0.8/MTok', () => {
     const cost = equivalentCostUsd(
       'anthropic',
@@ -818,6 +842,7 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
       'opus',
       'sonnet-5',
       'sonnet',
+      'haiku-5',
       'haiku-4',
       'haiku-3',
       'haiku'
@@ -830,6 +855,7 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
     expect(order.indexOf('opus-4-5')).toBeLessThan(order.indexOf('opus-4'))
     expect(order.indexOf('opus-4')).toBeLessThan(order.indexOf('opus'))
     expect(order.indexOf('haiku-4')).toBeLessThan(order.indexOf('haiku'))
+    expect(order.indexOf('haiku-5')).toBeLessThan(order.indexOf('haiku'))
     expect(order.indexOf('sonnet-5')).toBeLessThan(order.indexOf('sonnet'))
   })
 

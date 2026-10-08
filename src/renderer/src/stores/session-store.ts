@@ -3,6 +3,8 @@ import { useShallow } from 'zustand/react/shallow'
 import { VOICE_LANGUAGES } from '../../../shared/types'
 import {
   carriesPicksIntoNewSessions,
+  claudeAliasForModel,
+  claudeConfigWithAliases,
   codexPublishesEffort,
   resolveClaudeCapabilities
 } from '../../../shared/model-capabilities'
@@ -414,6 +416,33 @@ function loadLastSelectedModels(): Partial<Record<EngineId, string>> {
     if (value) out[id] = value
   }
   return out
+}
+
+/**
+ * The store's own copies of saved Claude picks, moved to their aliases once
+ * Claude's catalog lands (ADR-100; main moves the files). The last pick lives
+ * only here, in localStorage. The default model and the engine-config snapshot
+ * are copies: left concrete, the first would read as stale until a restart and
+ * a later whole-file save of the second would write the concrete ids back.
+ * Returns only what moved.
+ */
+function claudePicksOnAliases(
+  state: Pick<SessionState, 'lastSelectedModelByEngine' | 'claudeDefaultModel' | 'engineConfig'>,
+  catalog: ModelInfo[]
+): Partial<SessionState> {
+  if (catalog.length === 0) return {}
+  const patch: Partial<SessionState> = {}
+  const sticky = state.lastSelectedModelByEngine.claude
+  const stickyAlias = sticky && claudeAliasForModel(sticky, catalog)
+  if (stickyAlias && stickyAlias !== sticky) {
+    localStorage.setItem(lastSelectedModelKey('claude'), stickyAlias)
+    patch.lastSelectedModelByEngine = { ...state.lastSelectedModelByEngine, claude: stickyAlias }
+  }
+  const defaultAlias = claudeAliasForModel(state.claudeDefaultModel, catalog)
+  if (defaultAlias !== state.claudeDefaultModel) patch.claudeDefaultModel = defaultAlias
+  const engineConfig = claudeConfigWithAliases(state.engineConfig, catalog)
+  if (engineConfig !== state.engineConfig) patch.engineConfig = engineConfig
+  return patch
 }
 
 /**
@@ -3280,7 +3309,7 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setAvailableModels: (models) => set({ availableModels: models }),
 
-  setEngineModels: (engineId, models) =>
+  setEngineModels: (engineId, models) => {
     set((s) => ({
       // Rebuilt in the fixed engine order, not appended: a lookup by value
       // across engines (`availableModels.find`) must not answer differently
@@ -3288,7 +3317,11 @@ export const useSessionStore = create<SessionState>((set) => ({
       availableModels: HARNESS_IDS.flatMap((id) =>
         id === engineId ? models : s.availableModels.filter((m) => (m.engineId ?? 'claude') === id)
       )
-    })),
+    }))
+    if (engineId !== 'claude') return
+    const moved = claudePicksOnAliases(useSessionStore.getState(), models)
+    if (Object.keys(moved).length > 0) set(moved)
+  },
 
   setAccountUsage: (data) => set({ accountUsage: data }),
 

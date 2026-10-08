@@ -1139,3 +1139,96 @@ describe('AutomationManager — id validation (M-AU3)', () => {
     mgr.stopAll()
   })
 })
+
+// ---------------------------------------------------------------------------
+// ADR-100: the catalog fetch lists aliases only and moves saved concrete picks
+// to their aliases — engines/claude.json and every automation, on the real files.
+// ---------------------------------------------------------------------------
+
+describe('Claude catalog fetch — aliases only, saved picks moved (ADR-100)', () => {
+  const ROWS = [
+    { value: 'default', resolvedModel: 'claude-opus-5-5[1m]' },
+    { value: 'opus', resolvedModel: 'claude-opus-5-5' },
+    { value: 'sonnet', resolvedModel: 'claude-sonnet-5-5' },
+    { value: 'haiku', resolvedModel: 'claude-haiku-5-5' },
+    { value: 'claude-opus-4-8', resolvedModel: 'claude-opus-4-8' },
+    { value: 'claude-sonnet-5', resolvedModel: 'claude-sonnet-5' },
+    { value: 'gateway-custom' }
+  ]
+  const engineFile = (): string =>
+    nodePath.join(TEMP_HOME, '.claude', 'ui', 'engines', 'claude.json')
+
+  async function setup(): Promise<{
+    mgr: AutomationManagerT
+    automationDir: () => string
+    query: typeof import('../../../core/services/claude-model-catalog').queryClaudeModels
+  }> {
+    const { mgr, automationDir } = await freshManager()
+    mgr.load()
+    // Same module graph as the manager (freshManager reset it).
+    const { setAutomationManager } = await import('../../../core/ipc/automation-commands')
+    setAutomationManager(mgr)
+    const { queryClaudeModels } = await import('../../../core/services/claude-model-catalog')
+    fs.mkdirSync(nodePath.dirname(engineFile()), { recursive: true })
+    return { mgr, automationDir, query: queryClaudeModels }
+  }
+
+  it('drops concrete rows from the answer and the cache, keeping a custom value', async () => {
+    const { query } = await setup()
+    supportedModelsImpl = async () => ROWS
+    const models = await query()
+    expect(models.map((m) => m.value)).toEqual([
+      'default',
+      'opus',
+      'sonnet',
+      'haiku',
+      'gateway-custom'
+    ])
+    const { cachedClaudeModels } = await import('../../../core/services/claude-model-catalog')
+    expect(cachedClaudeModels()).toEqual(models)
+  })
+
+  it('moves a concrete default model, dispatch picks and automation models; leaves the rest', async () => {
+    const { mgr, automationDir, query } = await setup()
+    fs.writeFileSync(
+      engineFile(),
+      JSON.stringify({
+        sandbox: { enabled: true },
+        claudeConfig: { defaultModel: 'claude-sonnet-5-5-20260901' },
+        dispatch: { defaultModel: 'claude-haiku-5-5', allowedModels: ['claude-opus-4-8'] }
+      })
+    )
+    mgr.upsert(makeAutomation({ id: 'concrete', model: 'claude-opus-5-5' }))
+    mgr.upsert(makeAutomation({ id: 'unreached', model: 'claude-opus-4-7' }))
+    mgr.upsert(makeAutomation({ id: 'alias', model: 'sonnet' }))
+    supportedModelsImpl = async () => ROWS
+
+    await query()
+
+    expect(JSON.parse(fs.readFileSync(engineFile(), 'utf8'))).toEqual({
+      sandbox: { enabled: true },
+      claudeConfig: { defaultModel: 'sonnet' },
+      dispatch: { defaultModel: 'haiku', allowedModels: ['claude-opus-4-8'] }
+    })
+    const onDisk = (id: string): Automation =>
+      JSON.parse(fs.readFileSync(nodePath.join(automationDir(), `${id}.json`), 'utf8'))
+    expect(onDisk('concrete').model).toBe('opus')
+    expect(onDisk('unreached').model).toBe('claude-opus-4-7')
+    expect(onDisk('alias').model).toBe('sonnet')
+    expect(mgr.list().find((a) => a.id === 'concrete')!.model).toBe('opus')
+    mgr.stopAll()
+  })
+
+  it('an aborted or empty answer moves nothing', async () => {
+    const { query } = await setup()
+    fs.writeFileSync(
+      engineFile(),
+      JSON.stringify({ claudeConfig: { defaultModel: 'claude-opus-5-5' } })
+    )
+    supportedModelsImpl = async () => []
+    await query()
+    expect(JSON.parse(fs.readFileSync(engineFile(), 'utf8')).claudeConfig.defaultModel).toBe(
+      'claude-opus-5-5'
+    )
+  })
+})

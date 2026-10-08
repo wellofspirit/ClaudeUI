@@ -73,6 +73,7 @@ import { getHostWindow } from '../services/host-window'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
 import { queryClaudeModels } from '../services/claude-model-catalog'
+import { generateCommitMessage } from '../services/commit-message'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import { logger } from '../services/logger'
 import { sharedProviderService } from '../shared-providers'
@@ -242,12 +243,10 @@ async function claudeSupportedModels(): Promise<ModelInfo[]> {
   return queryClaudeModels()
 }
 
-// Title/commit-message generation. Kept behaviorally identical to the desktop
-// twins in session.ipc.ts (importing those would drag session.ipc.ts's whole
-// Electron/auth import graph into the hermetically-mocked remote-handlers test).
-const COMMIT_MSG_SYSTEM_PROMPT =
-  'You are a commit message generator. Given a git diff of staged changes, write a concise conventional commit message. Output ONLY the commit message — no explanation, no quotes, no markdown. Use imperative mood. First line should be a short summary (max 72 chars). If needed, add a blank line followed by bullet points for details. Focus on the "why" not the "what".'
-
+// Title generation. Kept behaviorally identical to the desktop twin in
+// session.ipc.ts (importing it would drag session.ipc.ts's whole Electron/auth
+// import graph into the hermetically-mocked remote-handlers test). The commit
+// message generator is shared (services/commit-message.ts).
 async function generateTitle(conversationText: string): Promise<string | null> {
   const abort = new AbortController()
   await ensureHostTokenFresh()
@@ -277,50 +276,6 @@ async function generateTitle(conversationText: string): Promise<string | null> {
     return trimmed.length >= 2 ? trimmed : null
   } catch (err) {
     logger.error('remote-handlers', `generateTitle failed: ${err}`)
-    return null
-  } finally {
-    abort.abort()
-  }
-}
-
-async function generateCommitMessage(diff: string): Promise<string | null> {
-  const abort = new AbortController()
-  try {
-    await ensureHostTokenFresh()
-    const q = sdkQuery({
-      prompt: diff,
-      options: {
-        ...getSdkExecutableOpts(),
-        cwd: PERSISTED_SESSIONS_DIR,
-        abortController: abort,
-        // One tool-less turn: plugin MCP servers would connect for nothing.
-        reloadPlugins: false,
-        systemPrompt: COMMIT_MSG_SYSTEM_PROMPT,
-        model: 'claude-haiku-4-5-20251001',
-        maxTurns: 1,
-        tools: [],
-        thinking: { type: 'disabled' },
-        persistSession: false
-      }
-    })
-    let result = ''
-    for await (const message of q) {
-      if (!message || typeof message !== 'object') continue
-      const msg = message as Record<string, unknown>
-      if (msg.type === 'assistant') {
-        const betaMessage = msg.message as
-          { content?: Array<{ type: string; text?: string }> } | undefined
-        if (betaMessage?.content) {
-          for (const block of betaMessage.content) {
-            if (block.type === 'text' && block.text) result += block.text
-          }
-        }
-      }
-    }
-    const cleaned = result.trim()
-    return cleaned.length >= 3 ? cleaned : null
-  } catch (err) {
-    logger.error('remote-handlers', `generateCommitMessage failed: ${err}`)
     return null
   } finally {
     abort.abort()

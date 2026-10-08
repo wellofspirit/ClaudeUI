@@ -60,6 +60,7 @@ import { equivalentCostUsd } from '../../shared/pricing'
 import { withoutToolUses } from '../../shared/content-blocks'
 import { resolveUsageProvider } from './usage-provider'
 import {
+  isClaudeModelAlias,
   resolveThinkingMode,
   resolveClaudeCapabilities,
   type ThinkingMode
@@ -217,7 +218,9 @@ export class ClaudeSession extends BaseSession {
   readonly engineId = 'claude' as const
 
   get capabilities(): ResolvedCapabilities {
-    const base = resolveClaudeCapabilities(this.model, this.resolvedModelId)
+    // Judged on the model system/init reported once it has, `[1m]` included.
+    const model = this.effectiveModel
+    const base = resolveClaudeCapabilities(model, this.resolvedModelId ? model : null)
     // ADR-030/ADR-033 M4-A: the static flag is true (both directions ship),
     // but the HONEST per-session value also requires an opencode binary the
     // harness resolver can run — otherwise there is no possible dispatch target.
@@ -406,9 +409,8 @@ export class ClaudeSession extends BaseSession {
   private effort: string
   private thinkingMode: 'adaptive' | 'enabled' | 'disabled'
   private model: string = 'default'
-  /** Canonical model id reported by system/init — what the `default` alias
-   *  (and other server-resolved aliases) actually map to. Used to resolve the
-   *  context window when `this.model` is an ambiguous alias. */
+  /** Canonical model id reported by system/init — what `default` and the family
+   *  aliases actually map to for this account (ADR-100). See `effectiveModel`. */
   private resolvedModelId: string | null = null
   /** One-shot bootstrap facts (slash commands, skills, MCP servers, the init
    *  permission-mode reconciliation) are captured from the FIRST system/init only.
@@ -1331,8 +1333,8 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
 
     if (isInit) {
       const sys = msg as SystemMessage
-      // Resolved canonical model id ("default" → "claude-opus-5[1m]"), which is
-      // how contextWindowSize sizes an opaque alias. cli.js re-emits system/init
+      // Resolved canonical model id ("default" → "claude-opus-5[1m]"), which
+      // `effectiveModel` follows for every alias. cli.js re-emits system/init
       // at the head of EVERY turn carrying the model actually in force (verified
       // on 2.1.268: --model haiku → "claude-haiku-4-5-20251001", then a set_model
       // to "default" → "claude-opus-5[1m]" on the next turn), so this is
@@ -2128,13 +2130,8 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
       // straight into modelCostBase, so an alias here outlives the process that
       // produced it.
       //
-      // Deliberately broader than the two window sites (the contextWindowSize
-      // getter, buildMeteringSnapshot), which prefer the resolved id only when
-      // `this.model === 'default'`. They can afford that narrow test because
-      // resolveContextWindow reads every OTHER alias correctly on its own
-      // ('haiku' → 200K, 'sonnet' → 1M) — `default` is the single one it cannot
-      // see through. A cost KEY has no such luck: every alias is a wrong key.
-      // Don't "unify" the three sites; they answer different questions.
+      // Not `effectiveModel`: that keeps a concrete pick's own spelling and an
+      // alias's `[1m]` for the window, while a cost KEY is the id cli.js reported.
       this.liveModelCosts = new Map([[this.resolvedModelId ?? this.model, cost]])
     }
 
@@ -2386,7 +2383,10 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
 
   async setModel(model: string): Promise<void> {
     const previousModel = this.model
+    const previousResolved = this.resolvedModelId
     this.model = model
+    // The resolved id was the OLD model's; the next turn's system/init reports the new one.
+    if (model !== previousModel) this.resolvedModelId = null
     if (this.activeQuery) {
       try {
         await this.activeQuery.setModel(model)
@@ -2397,6 +2397,7 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
         // reverts the same way). Re-emit so the renderer resyncs to the real
         // model, then propagate so the caller sees the failure.
         this.model = previousModel
+        this.resolvedModelId = previousResolved
         this.sendStatus()
         throw err
       }
@@ -2721,13 +2722,23 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
     return true
   }
 
-  /** Context window size based on the currently selected model. The `default`
-   *  alias is resolved server-side by cli.js, so its real window is only known
-   *  from the canonical id reported in system/init — prefer that when present. */
+  /**
+   * The model this session runs, for its window, capabilities and price. cli.js
+   * resolves `default` and the family aliases per account, and that answer moves
+   * without a release (ADR-100: `haiku` went from Haiku 4.5 to 5.5 overnight on
+   * the same binary), so once system/init has reported the resolved id it wins
+   * over ClaudeUI's alias table. An `<alias>[1m]` pick keeps its `[1m]` if the
+   * reported id dropped it. A concrete pick is already what it runs.
+   */
+  private get effectiveModel(): string {
+    const resolved = this.resolvedModelId
+    if (!resolved || !isClaudeModelAlias(this.model)) return this.model
+    return /\[1m\]$/i.test(this.model) && !/\[1m\]/i.test(resolved) ? `${resolved}[1m]` : resolved
+  }
+
+  /** Context window size of the model this session runs ({@link effectiveModel}). */
   private get contextWindowSize(): number {
-    const effectiveModel =
-      this.model === 'default' && this.resolvedModelId ? this.resolvedModelId : this.model
-    return getContextWindowSize(effectiveModel)
+    return getContextWindowSize(this.effectiveModel)
   }
 
   /** Build StatusLineData from in-memory accumulators (zero I/O) */
@@ -2760,8 +2771,7 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
    * authoritative cost source). window + projection are subscription-gated.
    */
   private buildMeteringSnapshot(): import('../../shared/types').MeteringSnapshot {
-    const effectiveModel =
-      this.model === 'default' && this.resolvedModelId ? this.resolvedModelId : this.model
+    const effectiveModel = this.effectiveModel
     const account = buildClaudeAccountRef(this.resolveActiveAccountId())
     const billingType = account?.billingType ?? 'unknown'
 

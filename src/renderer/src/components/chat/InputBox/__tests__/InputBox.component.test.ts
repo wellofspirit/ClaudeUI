@@ -878,6 +878,29 @@ describe('InputBox FC — rendered', () => {
     expect(ipcCalls['session:create'][0][2]).toBe('low')
   })
 
+  it('a session saved on a concrete Claude model shows its alias, and spawns its own value', async () => {
+    // ADR-100: the catalog lists aliases only. Display (and the effort read)
+    // goes through the alias that runs the model; the session is not rewritten.
+    fcClaudeModels = [
+      claudeRow('default', 'claude-opus-5-5[1m]', 'Default (recommended)'),
+      claudeRow('sonnet', 'claude-sonnet-5-5', 'Sonnet 5.5')
+    ]
+    useSessionStore.setState((state) => ({
+      settings: { ...state.settings, modelEffortDefaults: { sonnet: 'low' } },
+      availableModels: fcClaudeModels,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'claude-sonnet-5-5' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.selectedModel.value).toBe('sonnet')
+    await sendDraft()
+    expect(ipcCalls['session:create'][0][5]).toBe('claude-sonnet-5-5')
+    expect(ipcCalls['session:create'][0][2]).toBe('low')
+  })
+
   it('an UNCONFIGURED Claude default still spawns an empty model exactly as before', async () => {
     useSessionStore.setState((state) => ({
       claudeDefaultModel: '',

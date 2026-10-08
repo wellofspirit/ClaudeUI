@@ -33,6 +33,19 @@ describe('sessionSpawnEffort / rememberedEffortPatch', () => {
       rememberedEffortPatch(state(), { ...session, selectedModel: 'gone' }, 'high')
     ).toBeUndefined()
   })
+  // ADR-100: the catalog lists aliases only, so a session saved on a concrete
+  // model reads the row of the alias that runs it — the row its composer shows.
+  it('reads a concrete Claude session through the alias that resolves to its model', () => {
+    const concrete = { ...session, selectedModel: 'claude-opus-5-5-20260801' }
+    expect(sessionSpawnEffort(state({ opus: 'xhigh' }), concrete)).toBe('xhigh')
+    expect(rememberedEffortPatch(state(), concrete, 'low')).toEqual({
+      modelEffortDefaults: { opus: 'low' }
+    })
+    // A model no alias reaches still has no row.
+    expect(
+      rememberedEffortPatch(state(), { ...session, selectedModel: 'claude-opus-4-7' }, 'low')
+    ).toBeUndefined()
+  })
 })
 
 describe('spawnAnnouncement', () => {

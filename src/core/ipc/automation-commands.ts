@@ -63,6 +63,11 @@ export function setAutomationManager(manager: AutomationManager): void {
   managerRef = manager
 }
 
+/** The live manager, or null on a host that never started automations. */
+export function runningAutomationManager(): AutomationManager | null {
+  return managerRef
+}
+
 /**
  * The live manager, or a throw.
  *

@@ -996,7 +996,7 @@ export interface EngineConfig {
  * silently starting on something else.
  */
 export interface ClaudeEngineConfig {
-  /** A Claude picker value from `supportedModels()` (`opus`, `claude-fable-5-1`, …). */
+  /** A Claude picker value from `supportedModels()`: an alias (`opus`, `sonnet[1m]`, …; ADR-100). */
   defaultModel?: string
 }
 

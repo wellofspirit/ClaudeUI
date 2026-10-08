@@ -102,6 +102,7 @@ import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-sessi
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
 import { freshClaudeModels, queryClaudeModels } from '../services/claude-model-catalog'
+import { generateCommitMessage } from '../services/commit-message'
 import { safeHandler } from './safe-handler'
 import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 import { configCommands } from './config-commands'
@@ -159,9 +160,6 @@ import {
 // on cwd change / a model reload) pick them up without an app restart.
 const MODELS_CACHE_TTL_MS = 2 * 60_000
 
-const COMMIT_MSG_SYSTEM_PROMPT =
-  'You are a commit message generator. Given a git diff of staged changes, write a concise conventional commit message. Output ONLY the commit message — no explanation, no quotes, no markdown. Use imperative mood. First line should be a short summary (max 72 chars). If needed, add a blank line followed by bullet points for details. Focus on the "why" not the "what".'
-
 /**
  * Ask cli.js to generate a session title for the given conversation text.
  *
@@ -209,60 +207,6 @@ async function generateTitle(conversationText: string): Promise<string | null> {
     return null
   } catch (err) {
     logger.error('generateTitle', 'Failed to generate title', err)
-    return null
-  } finally {
-    abort.abort()
-  }
-}
-
-async function generateCommitMessage(diff: string): Promise<string | null> {
-  const abort = new AbortController()
-  logger.debug('generateCommitMessage', `request: ${diff.length} chars`)
-
-  try {
-    await ensureHostTokenFresh()
-    const q = sdkQuery({
-      prompt: diff,
-      options: {
-        ...getSdkExecutableOpts(),
-        cwd: PERSISTED_SESSIONS_DIR,
-        abortController: abort,
-        // One tool-less turn: plugin MCP servers would connect for nothing.
-        reloadPlugins: false,
-        systemPrompt: COMMIT_MSG_SYSTEM_PROMPT,
-        model: 'claude-haiku-4-5-20251001',
-        maxTurns: 1,
-        tools: [],
-        thinking: { type: 'disabled' },
-        persistSession: false
-      }
-    })
-
-    let result = ''
-    for await (const message of q) {
-      if (!message || typeof message !== 'object') continue
-      const msg = message as Record<string, unknown>
-      if (msg.type === 'assistant') {
-        const betaMessage = msg.message as
-          { content?: Array<{ type: string; text?: string }> } | undefined
-        if (betaMessage?.content) {
-          for (const block of betaMessage.content) {
-            if (block.type === 'text' && block.text) result += block.text
-          }
-        }
-      }
-    }
-
-    logger.debug('generateCommitMessage', `response: ${JSON.stringify(result)}`)
-
-    const cleaned = result.trim()
-    if (cleaned.length >= 3) {
-      return cleaned
-    }
-    logger.debug('generateCommitMessage', 'no usable message extracted')
-    return null
-  } catch (err) {
-    logger.error('generateCommitMessage', 'Failed to generate commit message', err)
     return null
   } finally {
     abort.abort()

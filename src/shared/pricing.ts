@@ -205,6 +205,21 @@ const ANTHROPIC_PRICING: PricingEntry[] = [
       cacheReadPerMTok: 0.3
     }
   },
+  // Haiku 5.5 — cli.js 2.1.293 `haiku_55`. Its long-prompt tier (5× every rate
+  // above 100K prompt tokens) is NOT modelled, as with OpenAI's >200k tier below:
+  // the base rate is the honest estimate. `claude-haiku-4-5` does not contain
+  // 'haiku-5', so this entry cannot catch Haiku 4.5.
+  {
+    vendorId: 'anthropic',
+    match: 'haiku-5',
+    pricing: {
+      inputPerMTok: 0.1,
+      outputPerMTok: 0.5,
+      cacheWritePerMTok: 0.125,
+      cacheWrite1hPerMTok: 0.2,
+      cacheReadPerMTok: 0.01
+    }
+  },
   // Haiku 4.x
   {
     vendorId: 'anthropic',
@@ -229,7 +244,10 @@ const ANTHROPIC_PRICING: PricingEntry[] = [
       cacheReadPerMTok: 0.08
     }
   },
-  // Haiku fallback
+  // Haiku fallback. Kept at its historical rates: dated Haiku 3.x ids
+  // (`claude-3-5-haiku-20241022`) land here, and usage history is priced from
+  // this table, so moving it would re-price old transcripts. Live sessions price
+  // by the model cli.js reports (ADR-100), not by the bare alias.
   {
     vendorId: 'anthropic',
     match: 'haiku',

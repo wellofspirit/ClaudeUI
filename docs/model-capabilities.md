@@ -45,15 +45,15 @@ If the user is on a model without effort support, the dropdown is hidden entirel
 
 ### Default effort per model
 
-From the catalog's `default_effort` (cli.js 2.1.285). A picker alias is judged by
+From the catalog's `default_effort` (cli.js 2.1.293). A picker alias is judged by
 the model it resolves to, so `opus` and `default` start at `medium` while they
 point at Opus 5.5.
 
-| Model                         | Default  |
-| ----------------------------- | -------- |
-| Opus 5.5 / Sonnet 5.5         | `medium` |
-| Opus 4.7                      | `xhigh`  |
-| Every other model with effort | `high`   |
+| Model                             | Default  |
+| --------------------------------- | -------- |
+| Opus 5.5 / Sonnet 5.5 / Haiku 5.5 | `medium` |
+| Opus 4.7                          | `xhigh`  |
+| Every other model with effort     | `high`   |
 
 A saved **Starting effort per model** (Settings › Models & providers › Default
 models) overrides this. An alias row saves under the alias's own name, so the
@@ -134,7 +134,8 @@ The id-based table below applies to canonical model ids and to heuristic fallbac
 | claude-3-7-sonnet       |         ❌         |         ❌         |  ❌   | ❌  |
 | claude-3-5-sonnet       |         ❌         |         ❌         |  ❌   | ❌  |
 | claude-3-opus / -sonnet |         ❌         |         ❌         |  ❌   | ❌  |
-| All `*-haiku-*`         |         ❌         |         ❌         |  ❌   | ❌  |
+| claude-haiku-5-x        |         ✅         |         ✅         |  ✅   | ✅  |
+| Haiku 4.x / 3.x         |         ❌         |         ❌         |  ❌   | ❌  |
 | Unknown / future        | ✅ (assume modern) | ✅ (assume modern) |  ❌   | ✅  |
 
 ### Rules
@@ -142,7 +143,7 @@ The id-based table below applies to canonical model ids and to heuristic fallbac
 - **Adaptive thinking** is gated by an explicit allowlist (Opus 4.7, Opus 4.6, Sonnet 4.6). All other named families return false. Unknown families default to true on the assumption that future models support adaptive — re-verify when a new model ships.
 - **Effort support** uses the same allowlist as adaptive thinking.
 - **xhigh** is Opus 4.7 only.
-- **max** is denied for haiku and for an explicit legacy set: opus-4-5, opus-4-1, opus-4-0, opus-4, sonnet-4-5, sonnet-4-0, sonnet-4, 3-7-sonnet, 3-5-sonnet, 3-sonnet, 3-opus.
+- **max** is denied for Haiku before 5.x and for an explicit legacy set: opus-4-5, opus-4-1, opus-4-0, opus-4, sonnet-4-5, sonnet-4-0, sonnet-4, 3-7-sonnet, 3-5-sonnet, 3-sonnet, 3-opus.
 
 The model identifier is normalised before lookup: lowercased, date suffixes (`-20260101`) and version suffixes (`-v1`, `-v1:0`) stripped.
 

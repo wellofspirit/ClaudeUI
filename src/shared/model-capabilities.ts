@@ -55,9 +55,9 @@ function normaliseModelId(model: string | undefined | null): string {
 
 /**
  * Map a model picker value to its canonical id. Mirrors cli.js's baked model
- * catalog aliases at the time of writing (2.1.285):
+ * catalog aliases at the time of writing (2.1.293):
  *   `opus` → `claude-opus-5-5` (default provider), `sonnet` → `claude-sonnet-5-5`,
- *   `haiku` → `claude-haiku-4-5`. (Upstream also maps `fable` →
+ *   `haiku` → `claude-haiku-5-5`. (Upstream also maps `fable` →
  *   `claude-fable-5-1`; there has never been a `fable` case here — a bare
  *   `fable` value falls through to the unknown-family "assume modern"
  *   defaults, which match Fable's actual capabilities.)
@@ -65,6 +65,10 @@ function normaliseModelId(model: string | undefined | null): string {
  * The `default` alias intentionally has no mapping — it resolves at the cli.js
  * layer to whatever the user (or environment) has configured. Returns the
  * input unchanged for canonical ids that don't need translation.
+ *
+ * Only a fallback: cli.js resolves aliases against a catalog served per account,
+ * which can move an alias without a release (ADR-100), so whatever cli.js reports
+ * (`resolvedModel`, `system/init.model`) wins over this table.
  */
 export function canonicalizeModelValue(value: string | undefined | null): string {
   if (!value) return ''
@@ -78,7 +82,7 @@ export function canonicalizeModelValue(value: string | undefined | null): string
     case 'sonnet[1m]':
       return 'claude-sonnet-5-5'
     case 'haiku':
-      return 'claude-haiku-4-5'
+      return 'claude-haiku-5-5'
     default:
       return normaliseModelId(value) || value
   }
@@ -96,6 +100,88 @@ const CLAUDE_FAMILY_ALIASES = new Set(['opus', 'sonnet', 'haiku', 'fable'])
 function claudeFamilyAlias(value: string): string | null {
   const bare = value.toLowerCase().replace(/\[1m\]$/, '')
   return CLAUDE_FAMILY_ALIASES.has(bare) ? bare : null
+}
+
+/**
+ * Does a Claude picker value name one specific Anthropic model (`claude-opus-4-8`,
+ * `claude-fable-5-1[1m]`)? ClaudeUI offers Claude models by alias only (ADR-100),
+ * so these rows are dropped from cli.js's catalog. `default`, the family aliases
+ * and anything else cli.js offers (a gateway's own model option) are kept.
+ */
+export function isConcreteClaudeModel(value: string): boolean {
+  return value.toLowerCase().startsWith('claude-')
+}
+
+/** Is this Claude picker value an alias cli.js resolves: `default` or a family alias? */
+export function isClaudeModelAlias(value: string): boolean {
+  return value === 'default' || claudeFamilyAlias(value) !== null
+}
+
+/**
+ * The family alias in `catalog` that resolves to the concrete model `value`
+ * names (`claude-sonnet-5-5-20260901` → `sonnet` while `sonnet` runs Sonnet 5.5),
+ * preferring the `[1m]` alias for a `[1m]` value when the catalog lists one.
+ * Anything else comes back unchanged: an alias already, `default`'s target (it is
+ * never the answer — `default` means "follow the recommendation", a different
+ * intent), a model no alias reaches, or an empty catalog. Idempotent.
+ */
+export function claudeAliasForModel(
+  value: string,
+  catalog: readonly ClaudeEffortRowInput[]
+): string {
+  if (!isConcreteClaudeModel(value)) return value
+  const id = normaliseModelId(value)
+  const reaching = catalog.filter(
+    (m) => claudeFamilyAlias(m.value) !== null && claudeResolvedModelId(m) === id
+  )
+  const is1m = (v: string): boolean => /\[1m\]$/i.test(v)
+  const match = reaching.find((m) => is1m(m.value) === is1m(value)) ?? reaching[0]
+  return match?.value ?? value
+}
+
+/** The fields of `engines/claude.json` that hold Claude picker values. */
+interface ClaudeModelPicks {
+  claudeConfig?: { defaultModel?: string }
+  dispatch?: { defaultModel?: string; allowedModels?: string[] }
+}
+
+/**
+ * `config` with every saved Claude pick in it moved to its alias
+ * ({@link claudeAliasForModel}): the default model, and cross-engine dispatch's
+ * default and allowlist. Returns the SAME object when nothing moved, so the
+ * caller knows whether there is anything to save.
+ */
+export function claudeConfigWithAliases<T extends ClaudeModelPicks>(
+  config: T,
+  catalog: readonly ClaudeEffortRowInput[]
+): T {
+  const alias = (v: string | undefined): string | undefined =>
+    v === undefined ? v : claudeAliasForModel(v, catalog)
+  const defaultModel = alias(config.claudeConfig?.defaultModel)
+  const dispatchDefault = alias(config.dispatch?.defaultModel)
+  const allowed = config.dispatch?.allowedModels
+  // Two saved ids can meet on one alias; the list keeps it once.
+  const nextAllowed = allowed && [...new Set(allowed.map((v) => claudeAliasForModel(v, catalog)))]
+  const allowedMoved =
+    !!allowed &&
+    (nextAllowed!.length !== allowed.length || nextAllowed!.some((v, i) => v !== allowed[i]))
+  if (
+    defaultModel === config.claudeConfig?.defaultModel &&
+    dispatchDefault === config.dispatch?.defaultModel &&
+    !allowedMoved
+  ) {
+    return config
+  }
+  const next = { ...config }
+  if (config.claudeConfig) next.claudeConfig = { ...config.claudeConfig, defaultModel }
+  if (config.dispatch) {
+    next.dispatch = {
+      ...config.dispatch,
+      defaultModel: dispatchDefault,
+      allowedModels: nextAllowed
+    }
+  }
+  return next
 }
 
 /**
@@ -170,7 +256,7 @@ export function claudeSavedEffort(
 
 /**
  * Models known NOT to support `effort: 'max'`. Mirrors cli.js `c8z` set.
- * Note: haiku is excluded by name elsewhere (it never supports `max`).
+ * Note: Haiku before 5.x is excluded by name elsewhere (it never supports `max`).
  */
 const NO_MAX_EFFORT = new Set([
   'claude-3-opus',
@@ -498,7 +584,11 @@ export function resolveAutomationThinking(args: {
 // Kept exported for tests and for future models the SDK hasn't labelled yet.
 // ---------------------------------------------------------------------------
 
-/** Mirrors cli.js `kh8` (2.1.261: registry `capabilities` incl. "adaptive_thinking"). */
+/**
+ * Mirrors cli.js `kh8` (2.1.261: registry `capabilities` incl. "adaptive_thinking";
+ * Haiku 5.5 since 2.1.293). `haiku-5` is matched on purpose: `claude-haiku-4-5`
+ * does not contain it, so Haiku 4.x/3.x still fall to the legacy-family branch.
+ */
 export function supportsAdaptiveThinking(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
   if (
@@ -507,7 +597,8 @@ export function supportsAdaptiveThinking(model: string | undefined | null): bool
     id.includes('opus-4-7') ||
     id.includes('opus-4-6') ||
     id.includes('sonnet-4-6') ||
-    id.includes('sonnet-5')
+    id.includes('sonnet-5') ||
+    id.includes('haiku-5')
   )
     return true
   if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
@@ -515,7 +606,7 @@ export function supportsAdaptiveThinking(model: string | undefined | null): bool
   return true
 }
 
-/** Mirrors cli.js `QI` (2.1.261: registry `capabilities` incl. "effort"). */
+/** Mirrors cli.js `QI` (2.1.261: registry `capabilities` incl. "effort"; Haiku 5.5 since 2.1.293). */
 export function supportsEffort(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
   if (
@@ -524,7 +615,8 @@ export function supportsEffort(model: string | undefined | null): boolean {
     id.includes('opus-4-7') ||
     id.includes('opus-4-6') ||
     id.includes('sonnet-4-6') ||
-    id.includes('sonnet-5')
+    id.includes('sonnet-5') ||
+    id.includes('haiku-5')
   )
     return true
   if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
@@ -533,9 +625,9 @@ export function supportsEffort(model: string | undefined | null): boolean {
 
 /**
  * Mirrors cli.js's xhigh gate (2.1.197): explicit true for fable-5, mythos-5,
- * opus-4-8, opus-4-7, sonnet-5; explicit false for sonnet-4-6 / haiku-4-5
- * (covered here by the legacy-family branch). Unknown families are assumed
- * modern and allowed, consistent with `supportsEffort`.
+ * opus-4-8, opus-4-7, sonnet-5 and (2.1.293) haiku-5; explicit false for
+ * sonnet-4-6 / haiku-4-5 (covered here by the legacy-family branch). Unknown
+ * families are assumed modern and allowed, consistent with `supportsEffort`.
  */
 export function supportsXhighEffort(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
@@ -545,7 +637,8 @@ export function supportsXhighEffort(model: string | undefined | null): boolean {
     id.includes('opus-4-8') ||
     id.includes('fable-5') ||
     id.includes('mythos-5') ||
-    id.includes('sonnet-5')
+    id.includes('sonnet-5') ||
+    id.includes('haiku-5')
   ) {
     return true
   }
@@ -553,10 +646,13 @@ export function supportsXhighEffort(model: string | undefined | null): boolean {
   return true
 }
 
-/** Mirrors cli.js `Ct6`. Haiku never supports max; legacy models in NO_MAX_EFFORT don't either. */
+/**
+ * Mirrors cli.js `Ct6`. Haiku before 5.x never supports max (Haiku 5.5 carries
+ * `max_effort`, 2.1.293); legacy models in NO_MAX_EFFORT don't either.
+ */
 export function supportsMaxEffort(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
-  if (id.includes('haiku')) return false
+  if (id.includes('haiku') && !id.includes('haiku-5')) return false
   return !NO_MAX_EFFORT.has(id)
 }
 
@@ -571,14 +667,15 @@ export function supportedEffortLevels(model: string | undefined | null): EffortL
 }
 
 /**
- * Mirrors the catalog's `default_effort` (cli.js 2.1.285): `xhigh` for Opus
- * 4.7, `medium` for Opus 5.5 and Sonnet 5.5, `high` for everything else.
- * Picker aliases are resolved through the baked alias table first.
+ * Mirrors the catalog's `default_effort` (cli.js 2.1.293): `xhigh` for Opus
+ * 4.7, `medium` for Opus 5.5, Sonnet 5.5 and Haiku 5.5, `high` for everything
+ * else. Picker aliases are resolved through the baked alias table first.
  */
 export function defaultEffort(model: string | undefined | null): EffortLevel {
   const id = normaliseModelId(canonicalizeModelValue(model))
   if (id.includes('opus-4-7')) return 'xhigh'
-  if (id.includes('opus-5-5') || id.includes('sonnet-5-5')) return 'medium'
+  if (id.includes('opus-5-5') || id.includes('sonnet-5-5') || id.includes('haiku-5-5'))
+    return 'medium'
   return 'high'
 }
 
@@ -629,17 +726,18 @@ export function resolveEffort(
  * beta) so it lines up with the opencode side's `limit.output` semantic.
  *
  * Values are keyed on the canonical base id, so picker aliases are resolved
- * first (`haiku` → claude-haiku-4-5 → 64000, not the default). Unknown / future
- * ids fall back to cli.js's `tLd` default of 128000.
+ * first (`haiku` → claude-haiku-5-5 → 128000; Haiku 4.5 is 64000). Unknown /
+ * future ids fall back to cli.js's `tLd` default of 128000.
  */
 export function maxOutputTokens(model: string | undefined | null): number {
   const id = normaliseModelId(canonicalizeModelValue(model))
-  // 128K ceiling — Fable/Mythos 5, Sonnet 5, Opus 4.6/4.7/4.8/5, Sonnet 4.6
+  // 128K ceiling — Fable/Mythos 5, Sonnet 5, Haiku 5, Opus 4.6/4.7/4.8/5, Sonnet 4.6
   if (
     id.includes('opus-5') ||
     id.includes('fable-5') ||
     id.includes('mythos-5') ||
     id.includes('sonnet-5') ||
+    id.includes('haiku-5') ||
     id.includes('opus-4-8') ||
     id.includes('opus-4-7') ||
     id.includes('opus-4-6') ||
@@ -681,6 +779,7 @@ export const CONTEXT_WINDOW_DEFAULT = 200_000
  */
 const IMPLICIT_1M_BASE_MODELS = [
   'claude-fable-5',
+  'claude-haiku-5',
   'claude-mythos-5',
   'claude-opus-4-7',
   'claude-opus-4-8',
@@ -689,13 +788,14 @@ const IMPLICIT_1M_BASE_MODELS = [
 ]
 
 /**
- * Picker aliases that cli.js currently resolves to an implicit-1M base model:
+ * Picker aliases that cli.js's baked catalog resolves to an implicit-1M base model:
  * "fable" → claude-fable-5-1, "opus" → claude-opus-5-5 (as of 2.1.280),
- * "sonnet" → claude-sonnet-5-5 (as of 2.1.285; Sonnet has been native-1M since 2.1.197).
- * Aliases track the latest model generation, so re-verify this set on
- * claudeCliVersion bumps.
+ * "sonnet" → claude-sonnet-5-5 (as of 2.1.285; Sonnet has been native-1M since 2.1.197),
+ * "haiku" → claude-haiku-5-5 (as of 2.1.293). Only the fallback before cli.js
+ * reports what an alias resolves to for this account (ADR-100); re-verify this
+ * set on claudeCliVersion bumps.
  */
-const IMPLICIT_1M_ALIASES = new Set(['fable', 'opus', 'sonnet'])
+const IMPLICIT_1M_ALIASES = new Set(['fable', 'haiku', 'opus', 'sonnet'])
 
 /**
  * Resolve a model value (picker alias or full id) to its context-window size,
