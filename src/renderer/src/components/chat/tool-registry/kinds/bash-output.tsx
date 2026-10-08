@@ -13,6 +13,7 @@ import { AnsiUp } from 'ansi_up'
 import { useSessionStore, useActiveSession, type ThemeId } from '../../../../stores/session-store'
 import { useStickToBottom } from '../../../../hooks/useStickToBottom'
 import { TOOL_OUTPUT_SCOPE } from '../../ChatSearch/search-scope'
+import { TERMINAL_BOX_MAX_HEIGHT } from '../../terminal-box'
 
 export function LiveBashOutput({
   output,
@@ -26,6 +27,8 @@ export function LiveBashOutput({
   theme: ThemeId
 }): React.JSX.Element {
   // The pre scrolls and has a fixed max-height: the wrapper inside it is what grows.
+  // It is capped like the result box that replaces it when the command finishes
+  // (terminal-box.ts), so the card does not change height at that moment.
   const { scrollerRef, contentRef } = useStickToBottom<HTMLPreElement>()
   const bg = theme === 'light' ? '#e8eaed' : theme === 'monokai' ? '#272822' : '#0d1117'
   const fg = theme === 'light' ? '#1a1d24' : theme === 'monokai' ? '#f8f8f2' : '#d1d5db'
@@ -54,7 +57,7 @@ export function LiveBashOutput({
       <pre
         ref={scrollerRef}
         className="text-[12px] font-mono whitespace-pre-wrap break-words leading-[1.3] rounded-md p-2 border border-border overflow-y-auto"
-        style={{ background: bg, color: fg, maxHeight: 300 }}
+        style={{ background: bg, color: fg, maxHeight: TERMINAL_BOX_MAX_HEIGHT }}
       >
         <div ref={contentRef} dangerouslySetInnerHTML={html} />
       </pre>
@@ -129,7 +132,7 @@ export function BackgroundBashOutput({
       <pre
         ref={scrollerRef}
         className="text-[12px] font-mono text-text-primary/70 bg-bg-primary rounded-md p-2 border border-border overflow-y-auto whitespace-pre-wrap break-words leading-[1.3]"
-        style={{ maxHeight: 10 * 12 * 1.3 + 16 }}
+        style={{ maxHeight: TERMINAL_BOX_MAX_HEIGHT }}
       >
         <div ref={contentRef}>
           {prependedContent}

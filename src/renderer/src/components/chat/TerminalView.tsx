@@ -2,15 +2,13 @@ import { useMemo } from 'react'
 import { AnsiUp } from 'ansi_up'
 import { useSessionStore, type ThemeId } from '../../stores/session-store'
 import { useStickToBottom } from '../../hooks/useStickToBottom'
+import { TERMINAL_BOX_MAX_HEIGHT } from './terminal-box'
 
 interface Props {
   text: string
   /** Override the default max height. Use "none" to fill available space. */
   maxHeight?: number | string
 }
-
-// 10 rows * 12px fontSize * 1.3 lineHeight + 16px padding
-const MAX_VISIBLE_HEIGHT = 10 * 12 * 1.3 + 16 // ~172px
 
 function terminalColors(theme: ThemeId): { bg: string; fg: string } {
   if (theme === 'light') return { bg: '#e8eaed', fg: '#1a1d24' }
@@ -49,7 +47,7 @@ export function TerminalView({ text, maxHeight }: Props): React.JSX.Element {
       style={{
         background: bg,
         color: fg,
-        maxHeight: maxHeight ?? MAX_VISIBLE_HEIGHT,
+        maxHeight: maxHeight ?? TERMINAL_BOX_MAX_HEIGHT,
         flex: maxHeight === 'none' ? 1 : undefined,
         minHeight: maxHeight === 'none' ? 0 : undefined
       }}

@@ -32,6 +32,7 @@ import type { ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { engineToolMap } from '../tool-registry/engine-tool-maps'
 import { detectOutputFormat } from '../../../lib/shell-highlight'
 import { groupSearchResult } from '../tool-registry/kinds/SearchBody'
+import { TERMINAL_BOX_MAX_HEIGHT } from '../terminal-box'
 
 // ── Settings that change the default rendering ───────────────────────────────
 
@@ -129,8 +130,8 @@ const BOX_CHROME_X = 18
 const BOX_FONT = 12
 /** Input `pre`s (ShellCode, JSON dump): `max-h-32` (border-box). */
 const INPUT_BOX_MAX = 128
-/** TerminalView: MAX_VISIBLE_HEIGHT = 10 * 12 * 1.3 + 16 (TerminalView.tsx). */
-const TERMINAL_MAX = 10 * 12 * 1.3 + 16
+/** TerminalView's cap (shared with the live bash box: terminal-box.ts). */
+const TERMINAL_MAX = TERMINAL_BOX_MAX_HEIGHT
 /** OutputView boxes a detected grep / diff / JSON / file output at `maxHeight: 260` (OutputView.tsx). */
 const OUTPUT_VIEW_MAX = 260
 /** CodeView (Read/Write result): 11px mono, leading-[1.3], NO max-height, 1px border; line-number gutter. */
