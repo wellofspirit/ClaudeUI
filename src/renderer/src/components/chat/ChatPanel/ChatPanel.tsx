@@ -168,9 +168,13 @@ export function ChatPanel(): React.JSX.Element {
       const width = probe instanceof HTMLElement ? probe.clientWidth : 0
       if (width > 0) setMeasuredColumn(bucketColumnWidth(width))
     }
-    measure()
-    // jsdom has no ResizeObserver.
-    if (typeof ResizeObserver === 'undefined') return
+    // Reading `clientWidth` here would force a layout ahead of the browser's own;
+    // the observer's initial notification (once the content is laid out, before
+    // paint) takes the first measurement. jsdom has no ResizeObserver: measure at once.
+    if (typeof ResizeObserver === 'undefined') {
+      measure()
+      return
+    }
     const observer = new ResizeObserver(measure)
     observer.observe(contentEl)
     return () => observer.disconnect()

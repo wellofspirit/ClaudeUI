@@ -249,6 +249,11 @@ describe('TaskEntry — following the bottom', () => {
     act(() => fireResize(content()))
   }
 
+  /** What a browser does once the body is laid out: the observer's first notification. */
+  function laidOut(): void {
+    act(() => fireResize())
+  }
+
   function userScrollTo(top: number): void {
     act(() => dispatchWheel(body(), top < body().scrollTop ? -120 : 120))
     body().scrollTop = top
@@ -297,6 +302,7 @@ describe('TaskEntry — following the bottom', () => {
 
   it('opens at the bottom and follows layout-only growth of its content', () => {
     render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    laidOut()
     expect(distanceFromBottom(body())).toBe(0)
 
     growLayoutOnly(800)
@@ -308,6 +314,7 @@ describe('TaskEntry — following the bottom', () => {
 
   it('stops following when the user scrolls up, and the button re-arms it', () => {
     render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    laidOut()
 
     userScrollTo(300)
     expect(screen.getByTestId('TaskEntry.scrollToBottom')).toBeInTheDocument()
@@ -325,6 +332,7 @@ describe('TaskEntry — following the bottom', () => {
 
   it('does not treat its own scroll events as the user leaving', () => {
     render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    laidOut()
     userScrollTo(300)
     fireEvent.click(screen.getByTestId('TaskEntry.scrollToBottom'))
     // Mid-animation scroll events, well over 40px from the bottom, long after any input.
@@ -341,6 +349,7 @@ describe('TaskEntry — following the bottom', () => {
     expect(screen.queryByTestId('TaskEntry.body')).toBeNull()
 
     fireEvent.click(screen.getByTestId('TaskEntry.toggle'))
+    laidOut()
     expect(distanceFromBottom(body())).toBe(0)
     growLayoutOnly(600)
     expect(distanceFromBottom(body())).toBe(0)

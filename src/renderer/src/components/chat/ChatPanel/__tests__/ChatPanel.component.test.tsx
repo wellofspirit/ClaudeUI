@@ -716,12 +716,17 @@ describe('ChatPanel — message height estimates', () => {
   it('measures the column from a rendered wrapper, in 50px buckets', async () => {
     wrapperWidth = 424
     const { unmount } = await renderChatPanel()
-    // 424 -> the 400 bucket (not the 700 default).
+    const content = wrappers()[0].parentElement as HTMLElement
+    // Mounting reads no layout: until the browser reports the content laid out,
+    // the default column from the width settings stands.
+    expect(estimates()[1]).toBe(expectedHeight(MESSAGES[1], 700))
+
+    // The observer's initial notification measures: 424 -> the 400 bucket.
+    act(() => fireResize(content))
     expect(estimates()[1]).toBe(expectedHeight(MESSAGES[1], 400))
     expect(estimates()[1]).toBeGreaterThan(expectedHeight(MESSAGES[1], 700))
 
     // A resize inside the bucket changes nothing.
-    const content = wrappers()[0].parentElement as HTMLElement
     wrapperWidth = 410
     act(() => fireResize(content))
     expect(estimates()[1]).toBe(expectedHeight(MESSAGES[1], 400))

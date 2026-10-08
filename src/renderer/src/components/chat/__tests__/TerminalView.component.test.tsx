@@ -121,6 +121,9 @@ describe('TerminalView — following the bottom', () => {
 
   it('opens at the bottom and follows growth that changes no text', () => {
     render(<TerminalView text="output" />)
+    // Nothing is pinned until the browser reports the box laid out.
+    expect(pre().scrollTop).toBe(0)
+    act(() => fireResize())
     expect(distanceFromBottom(pre())).toBe(0)
     geo(pre()).scrollHeight += 300
     act(() => fireResize(inner()))
@@ -129,6 +132,7 @@ describe('TerminalView — following the bottom', () => {
 
   it('follows new output', () => {
     const view = render(<TerminalView text="one" />)
+    act(() => fireResize())
     geo(pre()).scrollHeight += 200
     view.rerender(<TerminalView text={'one\ntwo'} />)
     act(() => fireResize(inner()))
@@ -137,6 +141,7 @@ describe('TerminalView — following the bottom', () => {
 
   it('a finished box a find reveal scrolled does not snap back', () => {
     render(<TerminalView text="output" />)
+    act(() => fireResize())
     clock += 1000
     // find-in-chat centres a match: a programmatic scroll, no input, no size change.
     pre().scrollTop = 40
@@ -147,6 +152,7 @@ describe('TerminalView — following the bottom', () => {
 
   it('keeps its text nodes when the follow state re-renders it (find-in-chat Ranges live there)', () => {
     render(<TerminalView text={'alpha\nbeta'} />)
+    act(() => fireResize())
     const node = inner().firstChild
     expect(node).not.toBeNull()
     clock += 1000
@@ -161,6 +167,7 @@ describe('TerminalView — following the bottom', () => {
 
   it('a user who scrolled up inside a growing box is left alone', () => {
     render(<TerminalView text="output" />)
+    act(() => fireResize())
     act(() => dispatchWheel(pre(), -120))
     pre().scrollTop = 100
     act(() => dispatchScroll(pre()))

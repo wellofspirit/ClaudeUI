@@ -112,6 +112,9 @@ beforeEach(() => {
   setDefaultGeometry({ scrollHeight: START_HEIGHT, clientHeight: VIEWPORT })
   renders = 0
   view = render(<Harness />)
+  // A browser delivers the observer's initial notification once the box is laid
+  // out; attaching pins nothing by itself (see 'attaching reads no layout').
+  act(() => fireResize())
 })
 
 afterEach(() => {
@@ -121,7 +124,7 @@ afterEach(() => {
 })
 
 describe('useStickToBottom — pinning', () => {
-  it('lands at the bottom on mount', () => {
+  it('lands at the bottom once laid out', () => {
     expect(scroller().scrollTop).toBe(maxScrollTop(scroller()))
     expect(following()).toBe('true')
   })
@@ -487,6 +490,8 @@ describe('useStickToBottom — elements that come and go', () => {
     view.rerender(<Harness showContent={false} />)
     geo(scroller()).scrollHeight = 3000
     view.rerender(<Harness showContent />)
+    // The new observer's initial notification: the content has been laid out.
+    act(() => fireResize(content()))
     expect(atBottom()).toBe(0)
   })
 
@@ -509,5 +514,92 @@ describe('useStickToBottom — elements that come and go', () => {
     // A late event on the detached element must not throw or touch state.
     expect(() => dispatchWheel(el, -120)).not.toThrow()
     view = render(<Harness />) // afterEach unmounts it
+  })
+})
+
+describe('useStickToBottom — attaching reads no layout', () => {
+  // Every output box in a transcript attaches this hook, many inside messages that
+  // `content-visibility: auto` is skipping: reading a skipped box's geometry forces
+  // a layout of its contents. The browser's own first ResizeObserver notification
+  // arrives only once the box is laid out, so that is when the first pin happens.
+  const GETTERS = ['scrollTop', 'scrollHeight', 'clientHeight'] as const
+
+  function spyGeometry(): {
+    reads: Array<ReturnType<typeof vi.spyOn>>
+    writes: ReturnType<typeof vi.spyOn>
+  } {
+    return {
+      reads: GETTERS.map((prop) => vi.spyOn(Element.prototype, prop, 'get')),
+      writes: vi.spyOn(Element.prototype, 'scrollTop', 'set')
+    }
+  }
+
+  /** Replace the harness `beforeEach` mounted (it already fired the notification). */
+  function remount(ui: React.JSX.Element): void {
+    view.unmount()
+    view = render(ui)
+  }
+
+  it('touches no geometry on attach; the first notification pins', () => {
+    const spies = spyGeometry()
+    try {
+      remount(<Harness />)
+      for (const read of spies.reads) expect(read).not.toHaveBeenCalled()
+      expect(spies.writes).not.toHaveBeenCalled()
+      expect(scroller().getAttribute('data-following')).toBe('true')
+      expect(geo(scroller()).scrollTop).toBe(0)
+    } finally {
+      vi.restoreAllMocks()
+    }
+
+    act(() => fireResize(content()))
+    expect(atBottom()).toBe(0)
+    expect(scroller().scrollTop).toBe(maxScrollTop(scroller()))
+  })
+
+  it('the first notification also syncs isAtBottom (here a paused box that does not pin)', () => {
+    remount(<Harness paused />)
+    expect(scroller().getAttribute('data-at-bottom')).toBe('true') // unknown until laid out
+    act(() => fireResize(scroller()))
+    expect(atBottom()).toBe(START_HEIGHT - VIEWPORT)
+    expect(scroller().getAttribute('data-at-bottom')).toBe('false')
+  })
+
+  it('a re-attached scroller is laid-out-free too (remount under a new key)', () => {
+    const spies = spyGeometry()
+    try {
+      view.rerender(<Harness scrollerKey="b" />)
+      for (const read of spies.reads) expect(read).not.toHaveBeenCalled()
+      expect(spies.writes).not.toHaveBeenCalled()
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('without ResizeObserver (jsdom) it settles at once instead', () => {
+    const saved = Object.getOwnPropertyDescriptor(globalThis, 'ResizeObserver')
+    delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver
+    try {
+      remount(<Harness />)
+      expect(atBottom()).toBe(0)
+    } finally {
+      if (saved) Object.defineProperty(globalThis, 'ResizeObserver', saved)
+    }
+  })
+
+  it('the first scroll event after attach is not "moved up", whatever offset it reports', () => {
+    // Pre-fix the offset at attach was read as the baseline: a box that attaches
+    // with a restored offset, then reports a smaller one under the user's hand,
+    // looked like a scroll up before the hook had ever pinned or seen a scroll.
+    const top = vi.spyOn(Element.prototype, 'scrollTop', 'get').mockReturnValue(1500)
+    try {
+      remount(<Harness />)
+      act(() => dispatchWheel(scroller(), 120)) // user input, but not upward
+      top.mockReturnValue(200)
+      act(() => dispatchScroll(scroller()))
+      expect(following()).toBe('true')
+    } finally {
+      vi.restoreAllMocks()
+    }
   })
 })

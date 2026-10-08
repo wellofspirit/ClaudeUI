@@ -47,6 +47,8 @@ describe('LiveBashOutput', () => {
   it('keeps its text and follows growth that changes no text', () => {
     render(<LiveBashOutput output={'a\nb'} totalLines={2} totalBytes={3} theme="dark" />)
     expect(pre().textContent).toBe('a\nb')
+    expect(pre().scrollTop).toBe(0) // pinned only once the browser reports it laid out
+    act(() => fireResize())
     expect(distanceFromBottom(pre())).toBe(0)
 
     geo(pre()).scrollHeight += 400
@@ -56,6 +58,7 @@ describe('LiveBashOutput', () => {
 
   it('keeps its text nodes when the follow state re-renders it', () => {
     render(<LiveBashOutput output={'a\nb'} totalLines={2} totalBytes={3} theme="dark" />)
+    act(() => fireResize())
     const node = inner().firstChild
     act(() => dispatchWheel(pre(), -120))
     pre().scrollTop = 0
@@ -66,6 +69,7 @@ describe('LiveBashOutput', () => {
 
   it('leaves a user who scrolled up alone', () => {
     render(<LiveBashOutput output="a" totalLines={1} totalBytes={1} theme="dark" />)
+    act(() => fireResize())
     act(() => dispatchWheel(pre(), -120))
     pre().scrollTop = 50
     act(() => dispatchScroll(pre()))
@@ -108,6 +112,7 @@ describe('BackgroundBashOutput', () => {
 
   it('follows the streaming tail', () => {
     render(<BackgroundBashOutput toolUseId={TOOL_USE_ID} />)
+    act(() => fireResize())
     expect(distanceFromBottom(pre())).toBe(0)
     geo(pre()).scrollHeight += 300
     act(() => {
@@ -120,6 +125,7 @@ describe('BackgroundBashOutput', () => {
   it('Load earlier does not pin the view back to the end', async () => {
     readBackgroundRange.mockResolvedValue('earlier output\n')
     render(<BackgroundBashOutput toolUseId={TOOL_USE_ID} />)
+    act(() => fireResize()) // laid out, so pinned at the end ...
     // The user reads from the top; the box is still "following" (never scrolled).
     pre().scrollTop = 0
     clock += 1000

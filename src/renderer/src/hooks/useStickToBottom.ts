@@ -21,6 +21,16 @@
  * clientHeight — never rects), so CSS `zoom` on the scroller or an ancestor needs
  * no correction, and every comparison is a tolerance, never an equality.
  *
+ * Attaching touches no layout. Every consumer sits in a transcript whose cards
+ * `content-visibility: auto` may be skipping, and reading `scrollTop` /
+ * `scrollHeight` / `clientHeight` of a skipped card forces a layout of its
+ * contents (that pattern was ~70% of the time to open a 665-message session).
+ * So the first pin and the first `isAtBottom` sync wait for the observer's
+ * initial notification, which a browser delivers once the box is laid out — see
+ * the pin effect. Geometry is read only inside an observer callback, a scroll or
+ * input event, or an explicit call (`scrollToBottom`, `jumpToBottom`, and the
+ * catch-up when `paused` ends).
+ *
  * The scroller and the content element are callback refs backed by state, so
  * they may mount late, unmount and come back (a conditional content div, an
  * accordion body): listeners and observers re-attach to whatever is live.
@@ -92,8 +102,12 @@ interface Tracker {
   touchHeld: boolean
   /** A smooth `scrollToBottom` is in flight. */
   smoothing: boolean
-  /** `scrollTop` at the last scroll event or pin: "moved up" is measured from here. */
-  lastTop: number
+  /**
+   * `scrollTop` at the last scroll event or pin: "moved up" is measured from
+   * here. `null` until the first pin or scroll event after attaching — nothing
+   * on attach may read it (see the layout-free attach note on the hook).
+   */
+  lastTop: number | null
 }
 
 function distanceFromBottom(el: HTMLElement): number {
@@ -147,7 +161,7 @@ export function useStickToBottom<T extends HTMLElement = HTMLElement>(
     scrollbarHeld: false,
     touchHeld: false,
     smoothing: false,
-    lastTop: 0
+    lastTop: null
   })
   const smoothTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -236,7 +250,9 @@ export function useStickToBottom<T extends HTMLElement = HTMLElement>(
     if (!scroller) return
     const s = tracker.current
     const doc = scroller.ownerDocument
-    s.lastTop = scroller.scrollTop
+    // No geometry is read here (see the layout-free attach note on the hook): the
+    // first pin or the first scroll event establishes where "moved up" is measured from.
+    s.lastTop = null
     scroller.setAttribute(FOLLOWING_ATTR, String(s.following))
     let touchLastY = 0
     // How far the finger has moved down since it last moved up.
@@ -317,7 +333,7 @@ export function useStickToBottom<T extends HTMLElement = HTMLElement>(
         // scroll events inside the window.
         markInput()
         if (distanceFromBottom(scroller) <= REARM_PX) setFollowing(true)
-        else if (top < s.lastTop - 0.5) {
+        else if (s.lastTop !== null && top < s.lastTop - 0.5) {
           endSmooth()
           setFollowing(false)
         }
@@ -341,7 +357,6 @@ export function useStickToBottom<T extends HTMLElement = HTMLElement>(
     doc.addEventListener('pointerup', onPointerEnd, { passive: true })
     doc.addEventListener('pointercancel', onPointerEnd, { passive: true })
     doc.addEventListener('keydown', onKeyDown, { capture: true, passive: true })
-    syncAtBottom()
     return () => {
       scroller.removeEventListener('wheel', onWheel)
       scroller.removeEventListener('touchstart', onTouchStart)
@@ -372,11 +387,16 @@ export function useStickToBottom<T extends HTMLElement = HTMLElement>(
       }
       syncAtBottom()
     }
-    // Content already laid out: the observer's first delivery is a frame away,
-    // and the first paint should already be at the bottom.
-    settle()
-    // jsdom (and so most unit tests) has no ResizeObserver.
-    if (typeof ResizeObserver === 'undefined') return
+    // Attaching reads no geometry. The first pin and the first `isAtBottom` sync
+    // happen in the observer's initial notification, which the browser delivers
+    // once the observed box is laid out and before it paints: an on-screen box
+    // never paints unpinned, and one that `content-visibility: auto` is skipping
+    // reports only when it becomes relevant, instead of being laid out up front.
+    // jsdom (and so most unit tests) has no ResizeObserver: settle at once.
+    if (typeof ResizeObserver === 'undefined') {
+      settle()
+      return
+    }
     const observer = new ResizeObserver(settle)
     observer.observe(scroller)
     if (content) observer.observe(content, { box: 'border-box' })
