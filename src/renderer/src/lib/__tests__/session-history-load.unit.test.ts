@@ -119,7 +119,6 @@ describe('a click on a LIVE evicted entry', () => {
     expect(opensResident(store().sessions['sess'])).toBe(false)
     const result = await loadSessionIntoStore(INFO, {
       isCurrent: () => true,
-      markRecent: true,
       replace: replaceOnClick(store().sessions['sess'])
     })
     expect(result).toBe('loaded')
@@ -202,7 +201,6 @@ describe('a replace that lands after the session went live', () => {
     loadSessionHistory.mockReturnValue(new Promise((resolve) => (release = resolve)))
     const click = loadSessionIntoStore(INFO, {
       isCurrent: () => true,
-      markRecent: true,
       replace: replaceOnClick(store().sessions['sess'])
     })
 
@@ -271,7 +269,6 @@ describe('a click whose read cannot replace a held transcript', () => {
 
     const result = await loadSessionIntoStore(opencode, {
       isCurrent: () => true,
-      markRecent: true,
       replace: replaceOnClick(store().sessions['sess'])
     })
 
@@ -465,7 +462,6 @@ describe('a fill that live events already beat', () => {
     expect(replaceOnClick(store().sessions['sess'])).toBe(true)
     const result = await loadSessionIntoStore(INFO, {
       isCurrent: () => true,
-      markRecent: true,
       replace: replaceOnClick(store().sessions['sess'])
     })
 

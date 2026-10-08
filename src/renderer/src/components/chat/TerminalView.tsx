@@ -32,10 +32,24 @@ export function TerminalView({ text, maxHeight }: Props): React.JSX.Element {
     return ansi.ansi_to_html(text)
   }, [text])
 
-  // Auto-scroll to bottom when content changes
+  // Show the tail: pin to the bottom on mount and whenever the content changes.
+  // NOT by reading `scrollHeight` right in the effect — that forces a layout of
+  // the card even while its message is skipped by `content-visibility: auto`
+  // (`.cv-auto`), and on a transcript with hundreds of tool cards those forced
+  // layouts were most of the time it took to open the session. A ResizeObserver
+  // reports only once the card is actually laid out (skipped content is not),
+  // after layout and before paint, so the pin is cheap and never flashes the
+  // top first. A card already on screen reports right away; one scrolled past
+  // reports when it is scrolled back into view.
   useEffect(() => {
     const el = preRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => {
+      el.scrollTop = el.scrollHeight
+      ro.disconnect()
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
   }, [html])
 
   return (

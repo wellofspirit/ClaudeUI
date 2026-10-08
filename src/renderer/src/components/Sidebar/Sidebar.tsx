@@ -341,7 +341,6 @@ export function Sidebar({
     const result = await loadSessionIntoStore(info, {
       isCurrent: () => seq === selectionSeq.current,
       onCodexError: setHistoryError,
-      markRecent: true,
       replace: replaceOnClick(inMemory)
     })
     // `declined` kept the held transcript (the read failed or came back empty):

@@ -141,10 +141,7 @@ describe('hydrating a snapshot that dropped an exited session', () => {
 
     // The click path: same loader the sidebar runs, filling the evicted entry.
     loadSessionHistory.mockResolvedValue(history('g1', 'g2'))
-    const loaded = await loadSessionIntoStore(GONE_INFO, {
-      isCurrent: () => true,
-      markRecent: true
-    })
+    const loaded = await loadSessionIntoStore(GONE_INFO, { isCurrent: () => true })
 
     expect(loaded).toBe('loaded')
     expect(loadSessionHistory).toHaveBeenCalledWith('gone', '-p')
@@ -318,7 +315,7 @@ describe('reloadActiveTranscript when it cannot read', () => {
 })
 
 describe('the shared history loader, per engine', () => {
-  it('opencode: seeds the engine, loads the transcript and bumps recents on a click', async () => {
+  it('opencode: seeds the engine and loads the transcript on a click', async () => {
     const loadOpencodeHistory = vi.fn(async () => ({
       messages: [message('o1')],
       statusLine: null,
@@ -327,13 +324,12 @@ describe('the shared history loader, per engine', () => {
     Object.assign(window.api, { loadOpencodeHistory })
     const info: SessionInfo = { ...GONE_INFO, sessionId: 'oc-1', engineId: 'opencode' }
 
-    const loaded = await loadSessionIntoStore(info, { isCurrent: () => true, markRecent: true })
+    const loaded = await loadSessionIntoStore(info, { isCurrent: () => true })
 
     expect(loaded).toBe('loaded')
     expect(loadOpencodeHistory).toHaveBeenCalledWith('oc-1')
     expect(store().sessionEngines['oc-1'].engineId).toBe('opencode')
     expect(store().sessions['oc-1'].messages.map((m) => m.id)).toEqual(['o1'])
-    expect(store().recentSessionIds).toContain('oc-1')
   })
 
   it('opencode: a click paints an empty transcript when the engine is down; a replace does not', async () => {
@@ -410,7 +406,6 @@ describe('the click path after an abandoned reload', () => {
     loadSessionHistory.mockResolvedValue(history('d1', 'd2', 'd3'))
     const loaded = await loadSessionIntoStore(GONE_INFO, {
       isCurrent: () => true,
-      markRecent: true,
       replace: replaceOnClick(store().sessions['gone'])
     })
 

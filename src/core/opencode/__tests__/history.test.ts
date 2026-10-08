@@ -8,6 +8,7 @@ import type { Session_Message_Info } from '../protocol-v2/openapi'
 import {
   childSessionsOf,
   convertOpencodeHistory,
+  HISTORY_READ_CONCURRENCY,
   MAX_HISTORY_CHILDREN,
   readOpencodeHistory
 } from '../history'
@@ -353,6 +354,27 @@ describe('readOpencodeHistory', () => {
     expect([...children.keys()]).toEqual(['ses_1', 'ses_2'])
     const history = convertOpencodeHistory(rows, children)
     expect(Object.keys(history.subagentMessages).sort()).toEqual(['call_ses_1', 'call_ses_2'])
+  })
+
+  it('reads siblings in parallel, bounded, and keeps call order whatever answers first', async () => {
+    const kids = Array.from({ length: 20 }, (_, i) => `ses_${i}`)
+    let inFlight = 0
+    let peak = 0
+    const list = vi.fn(async (id: string) => {
+      inFlight++
+      peak = Math.max(peak, inFlight)
+      // Later siblings answer first.
+      const delay = id === 'root' ? 0 : 20 - Number(id.slice(4))
+      await new Promise((r) => setTimeout(r, delay))
+      inFlight--
+      return id === 'root'
+        ? [assistant('a', 1, kids.map(call))]
+        : [assistant(`m_${id}`, 2, [{ type: 'text', text: id }])]
+    })
+    const { children } = await readOpencodeHistory(list, 'root')
+    expect([...children.keys()]).toEqual(kids)
+    expect(peak).toBeGreaterThan(1)
+    expect(peak).toBeLessThanOrEqual(HISTORY_READ_CONCURRENCY)
   })
 
   it('stops at MAX_HISTORY_CHILDREN', async () => {
