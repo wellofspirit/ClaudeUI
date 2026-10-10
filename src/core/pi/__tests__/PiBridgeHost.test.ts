@@ -10,10 +10,10 @@ import http from 'node:http'
 import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-// writeBridgeExtension()/writeSubagentExtension() (A2 tests below) redirect
+// writeBridgeExtension() (A2 tests below) redirects
 // os.homedir() to a fresh per-test scratch dir — mirrors pi-session-list.
 // test.ts's identical os.homedir() redirection technique, so no test ever
-// touches the real system home dir (both writers now live under
+// touches the real system home dir (the writer now lives under
 // `~/.claude/ui/pi-ext` per the audit-residual fix, not os.tmpdir()).
 const { mockHomedir } = vi.hoisted(() => ({ mockHomedir: vi.fn() }))
 vi.mock('node:os', async () => {
@@ -31,7 +31,7 @@ vi.mock('../../services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-import { PiBridgeHost, writeBridgeExtension, writeSubagentExtension } from '../PiBridgeHost'
+import { PiBridgeHost, writeBridgeExtension } from '../PiBridgeHost'
 import type {
   GateDecision,
   PiBridgeAbandoned,
@@ -40,7 +40,6 @@ import type {
   PiToolCallPayload
 } from '../PiBridgeHost'
 import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from '../pi-bridge-source'
-import { PI_SUBAGENT_EXTENSION_SOURCE, PI_SUBAGENT_VERSION } from '../pi-subagent-source'
 
 describe('PiBridgeHost', () => {
   let host: PiBridgeHost | null = null
@@ -895,55 +894,53 @@ describe('writeBridgeExtension (A2 — content-verify against tampering/preplant
   })
 })
 
-describe('writeSubagentExtension (M5b; audit-residual A — per-user base dir, SAME posture as writeBridgeExtension)', () => {
-  let scratchRoot: string
-
-  beforeEach(async () => {
-    const realOs = await vi.importActual<typeof import('node:os')>('node:os')
-    scratchRoot = mkdtempSync(join(realOs.tmpdir(), 'pi-subagent-host-test-'))
-    mockHomedir.mockReturnValue(scratchRoot)
-  })
-
+describe('PiBridgeHost — POST /mcp-servers (ADR-096)', () => {
+  let host: PiBridgeHost | null = null
   afterEach(() => {
-    rmSync(scratchRoot, { recursive: true, force: true })
+    host?.dispose()
+    host = null
   })
 
-  function extensionFilePath(): string {
-    return join(
-      scratchRoot,
-      '.claude',
-      'ui',
-      'pi-ext',
-      'claudeui-pi-subagent',
-      PI_SUBAGENT_VERSION,
-      'claudeui-subagent.ts'
-    )
+  const SERVERS = {
+    fixture: { type: 'stdio', command: 'node', env: { TOKEN: 'secret' }, exposure: 'direct' }
   }
 
-  it('writes the file under ~/.claude/ui/pi-ext (per-user, NOT os.tmpdir()) when absent — a SEPARATE dir from writeBridgeExtension', () => {
-    const file = writeSubagentExtension()
-
-    expect(file).toBe(extensionFilePath())
-    expect(readFileSync(file, 'utf-8')).toBe(PI_SUBAGENT_EXTENSION_SOURCE)
+  it('serves the spawn-time catalog to an authenticated caller, on every load (repeatable)', async () => {
+    host = new PiBridgeHost(async () => ({ behavior: 'allow' }), undefined, {
+      mcpServers: SERVERS
+    })
+    const { url, token } = await host.start()
+    for (let load = 0; load < 2; load++) {
+      const res = await fetch(`${url}/mcp-servers`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: '{}'
+      })
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ servers: SERVERS })
+    }
   })
 
-  it('rewrites when the on-disk content differs from PI_SUBAGENT_EXTENSION_SOURCE (tampered/hand-edited)', () => {
-    const file = writeSubagentExtension()
-    writeFileSync(file, '// TAMPERED — hand-edited content', 'utf-8')
-
-    const secondPath = writeSubagentExtension()
-
-    expect(secondPath).toBe(file)
-    expect(readFileSync(file, 'utf-8')).toBe(PI_SUBAGENT_EXTENSION_SOURCE)
+  it('refuses a caller without the token (401) and anything but POST (404)', async () => {
+    host = new PiBridgeHost(async () => ({ behavior: 'allow' }), undefined, {
+      mcpServers: SERVERS
+    })
+    const { url } = await host.start()
+    const unauth = await fetch(`${url}/mcp-servers`, { method: 'POST', body: '{}' })
+    expect(unauth.status).toBe(401)
+    expect(await unauth.text()).not.toContain('secret')
+    const get = await fetch(`${url}/mcp-servers`)
+    expect(get.status).toBe(404)
   })
 
-  it('leaves the file COMPLETELY untouched (no rewrite) when content already matches', () => {
-    const file = writeSubagentExtension()
-    const oldTime = new Date('2020-01-01T00:00:00.000Z')
-    utimesSync(file, oldTime, oldTime)
-
-    writeSubagentExtension() // second call — content is already identical.
-
-    expect(statSync(file).mtime.getTime()).toBe(oldTime.getTime())
+  it('answers an empty set when no catalog was given', async () => {
+    host = new PiBridgeHost(async () => ({ behavior: 'allow' }))
+    const { url, token } = await host.start()
+    const res = await fetch(`${url}/mcp-servers`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      body: '{}'
+    })
+    expect(await res.json()).toEqual({ servers: {} })
   })
 })

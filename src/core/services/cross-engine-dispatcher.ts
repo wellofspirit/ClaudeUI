@@ -7,12 +7,12 @@
  *
  * Targets are headless dispatcher-owned mini-sessions built on engine client
  * primitives — NOT SessionManager/ISession. Two directions are supported:
- *  - Claude → opencode (M1): targets use OpencodeClient directly (the
- *    askSideQuestion / judge precedent). A turn is `POST /session/{id}/
- *    prompt_async` (204-and-forget) completed by the shared per-cwd SSE loop's
- *    `session.idle`/`session.error`, with the final text/usage read back from
- *    the stored last assistant message — see `resolveAndRunOpencode` for why
- *    the original synchronous `POST /session/{id}/message` had to go.
+ *  - Claude → opencode (M1, opencode 2.x since ADR-097 S9): a target is an
+ *    opencode session on a turn-running lease of the S2 server manager, driven
+ *    with the S3 `OpencodeClient` — an inbox prompt answered at once, the turn
+ *    followed on the SERVER's shared event feed through the target's own S4
+ *    mapper, which also yields its text, usage and asks. Asks go through the
+ *    session's host pre-check (S6 rules), then ClaudeUI's judge or a card.
  *  - opencode → Claude (M2): targets use a raw `sdkQuery()` (the
  *    service-session.ts precedent) kept alive across turns via a pushable
  *    streaming-input channel, driven by a manual iterator loop (see the
@@ -38,46 +38,95 @@ import {
 } from 'node:path'
 import { v4 as uuidv4 } from 'uuid'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
-import { OpencodeClient } from '../opencode/OpencodeClient'
-// NOT imported from OpencodeSession.ts — that module now imports
-// crossEngineDispatcher (ADR-033 M2 — cancel() disposes owned targets), so
-// importing it here would form a require-cycle. permission-ruleset.ts holds
-// the same buildRuleset/PermissionRule, re-exported from OpencodeSession.ts
-// for any other existing importer.
-import { buildRuleset } from '../opencode/permission-ruleset'
-import type { PermissionRule } from '../opencode/permission-ruleset'
-import { parseModelString } from '../opencode/model-discovery'
+import type { ServerConnection } from '../opencode/OpencodeServerManager'
+import {
+  isOpencodeApiError,
+  OpencodeClient,
+  type PermissionReply
+} from '../opencode/OpencodeClient'
+import type { Agent_Info } from '../opencode/protocol-v2/openapi'
+import {
+  eventSessionID,
+  type OpencodeEvent as OpencodeV2Event
+} from '../opencode/protocol-v2/events'
+// Leaf modules of the opencode 2.x stack (no session class): the S4 mapper and
+// reconnect re-read, the S6 rulesets and the child keeper, the S5 teardown.
+// OpencodeSession.ts imports THIS module (cancel() disposes owned targets), so
+// nothing here may import it back.
+import {
+  OpencodeEventMapper,
+  type OpencodeApprovalRoute,
+  type OpencodeMapperOutput,
+  type OpencodeStepUsage
+} from '../opencode/event-mapper'
+import { reconcileAfterReconnect } from '../opencode/reconnect'
+import {
+  asHostPrecheckRules,
+  buildSessionRuleset,
+  CLAUDEUI_MCP_SERVER,
+  opencodeOwnDirAllows,
+  wireOrder,
+  type V2Rule
+} from '../opencode/permission-v2'
+import type { OpencodePermissionRule } from '../opencode/permission-compiler'
+import { ChildRulesetKeeper } from '../opencode/child-rulesets'
+import {
+  locationWorktree,
+  stopOpencodeSessions,
+  TEARDOWN_GRACE_MS
+} from '../opencode/session-support'
+import { hostPrecheck, type HostPrecheckContext } from '../opencode/host-precheck'
+import {
+  mergeRestrictions,
+  restrictionCovers,
+  restrictionNote,
+  type CallerRestriction
+} from '../opencode/caller-restriction'
+import { OpencodeSessionAllows } from '../opencode/session-allows'
+import { opencodeAuthHooks } from '../opencode/opencode-auth-hooks'
+import { collectClaudeMcpForOpencode } from '../opencode/claude-mcp-bridge'
+import { denyAskHit } from '../permissions/shell-rules'
+import { isShellToolName } from '../automode/shell-lexical'
+import { parseModelString, peekOpencodeModels } from '../opencode/model-discovery'
+import { peekPiModels } from '../pi/model-discovery'
+import { editClearsAgentControl } from '../opencode/agent-control-gate'
+// ADR-088 — ClaudeUI's judge for pi/opencode targets. Leaf modules (the
+// automode pipeline + the judge transport), no session class.
+import { DispatchTargetJudge } from './dispatch-target-judge'
+import { armBlockHold, blockHoldMs } from '../automode/block-hold'
+import {
+  blockApprovalNotice,
+  blockedCallDelivery,
+  blockGrantKey,
+  type BlockedCall,
+  type BlockedCallLedger
+} from '../automode/blocked-calls'
+import { collectToolUseIds, recordTrajectoryMessage } from '../automode/trajectory'
+import type { JudgeTransport } from '../automode/classifier'
+import type { SessionJudgeOptions } from '../automode/session-judge'
 import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
 import { loadEngineConfig, loadSettings } from './ui-config'
 import { resolveDispatchMaxConcurrent } from '../../shared/dispatch-concurrency'
 import { transformAssistantMessage } from './assistant-message'
 import { extractToolResultContent } from './tool-result-content'
-import { ClaudeItemStreamLifecycle } from './claude-item-stream'
-// event-mapper.ts is a leaf module (no cycle risk — it does not import
-// OpencodeSession.ts/OpencodeServerManager.ts/this module). Reused here so the
-// opencode-target streaming tap (ADR-033 M3) shares the exact same
-// message.part.delta/updated → {stream|message} logic OpencodeSession.ts uses
-// for its own turns, instead of a second hand-rolled implementation.
-import { mapEvent, extractToolResult, buildChatMessage } from '../opencode/event-mapper'
-import type { MessageAccumulator, OpencodeStreamItem } from '../opencode/event-mapper'
-import type { ItemStreamTarget } from '../shared/sync/item-stream'
-import type { OpencodeEvent, StoredMessage } from '../opencode/protocol/types'
+import { ClaudeItemStreamLifecycle, streamEventParent } from './claude-item-stream'
+import type { ItemStreamOpen, ItemStreamSeal, ItemStreamTarget } from '../shared/sync/item-stream'
 // pi target primitives (ADR-033 M4c — pi as a dispatch TARGET). None of these
 // leaf modules import THIS file (or PiSession.ts, which does), so — same
 // reasoning as the opencode imports above — this is a one-way edge, not a
-// cycle. Reused verbatim, never reimplemented (per the M4c kickoff spec).
-import { locatePiBinary, piBinaryAvailable } from '../pi/pi-locate'
-import { PiRpcClient } from '../pi/PiRpcClient'
-import { PiBridgeHost, writeBridgeExtension } from '../pi/PiBridgeHost'
+// cycle. Reused verbatim, never reimplemented (per the M4c kickoff spec). The
+// process/transport half of a pi target lives in `PiChildRunner` (ADR-089),
+// shared with PiSession's host-run subagents; the gate policy stays here.
 import type { GateDecision, PiBridgeHandler, PiToolCallPayload } from '../pi/PiBridgeHost'
-import { mapPiEvent, createPiMapperState, finishPiMessage } from '../pi/event-mapper'
-import type { PiMapperOutput, PiMapperState } from '../pi/event-mapper'
-import { decide, EMPTY_RULES as EMPTY_PI_RULES } from '../pi/permission-engine'
-import type {
-  PiGetStateData,
-  PiGetLastAssistantTextData,
-  PiGetSessionStatsData
-} from '../pi/pi-protocol'
+import {
+  defaultSpawnPiChild,
+  PiChildRunner,
+  type PiChildPrimitives,
+  type PiChildSpawnOpts,
+  type PiTurnOutcome,
+  type SpawnPiChildFn
+} from '../pi/pi-child-runner'
+import { collectClaudeMcpForPi, piMcpRuleKey } from '../pi/pi-mcp-bridge'
 // Codex target primitives (ADR-033 slice H — Codex as a dispatch TARGET). Same
 // one-way-edge reasoning as the opencode/pi imports above: none of these leaf
 // modules import THIS file. CodexSession.ts DOES (it is a dispatch SOURCE,
@@ -92,8 +141,8 @@ import {
   type CodexThreadConnection,
   type CodexThreadOwner
 } from '../codex/CodexHost'
-import { codexBinaryAvailable } from '../codex/codex-locate'
-import { codexModePolicy, codexTurnInput } from '../codex/codex-turn-policy'
+import { harnessAvailable } from '../harness/resolve'
+import { codexModePolicy, codexTurnInput, codexTurnPolicy } from '../codex/codex-turn-policy'
 import { assertCodexProvider, selectCodexModel } from '../codex/model-selection'
 import { codexItemId, mapCodexDelta, mapCodexItem } from '../codex/event-mapper'
 import { codexDisjointTokens } from '../codex/usage-ledger'
@@ -101,10 +150,10 @@ import type { CodexMappedEvent } from '../codex/event-mapper'
 import { unwrapShellCommand } from '../codex/command-text'
 import {
   decideWithSource,
-  EMPTY_RULES as EMPTY_CODEX_RULES,
-  PLAN_MODE_DENY_REASON
+  mergedClaudeRulesFor,
+  PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
 } from '../pi/permission-engine'
-import type { PermissionDecision } from '../pi/permission-engine'
+import type { MergedClaudeRules, PermissionDecision } from '../pi/permission-engine'
 import type { Model } from '../codex/protocol/v2/Model'
 import type { ThreadItem } from '../codex/protocol/v2/ThreadItem'
 import type { Turn } from '../codex/protocol/v2/Turn'
@@ -116,7 +165,8 @@ import type { ResolvedCosts } from '../../shared/cost-rule'
 import { opencodeMessageCosts } from '../opencode/message-cost'
 import { piMessageCosts, type PiCostTokens } from '../pi/message-cost'
 import { ENGINE_META, engineMeta } from '../../shared/engine-meta'
-import { query as sdkQuery, locateBunClaude, sendProgress } from '../sdk'
+import { query as sdkQuery, sendProgress } from '../sdk'
+import { ensureHostTokenFresh } from '../sdk/host-token'
 import type {
   CanUseTool,
   CanUseToolContext,
@@ -139,6 +189,7 @@ import type { UsageTurnEvent, UsageTurnTokens } from './usage-recorder'
 import { usageFetcher } from './usage-fetcher'
 import { activeClaudeAttribution } from './usage-windows'
 import { buildClaudeAccountRef } from '../host'
+import { DISPATCH_TARGETS } from './dispatch-targets'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { credentialSync } from '../auth/vault/CredentialSync'
@@ -154,65 +205,32 @@ import type {
   EngineId,
   FileDiff,
   PendingApproval,
-  PermissionSuggestion
+  PermissionSuggestion,
+  ToolReviewBlock
 } from '../../shared/types'
 
 /**
  * Whether cross-engine dispatch is a real, honest capability for `engineId`
- * (ADR-030 + ADR-033 M4-A): "this engine can host the dispatch tool AND at
- * least one OTHER installed engine can be a target." Lives here (not in
- * shared/model-capabilities.ts, which must stay renderer-safe / import-free
- * of main-process-only modules) — both ClaudeSession.ts and OpencodeSession.ts
- * already import THIS module (for `crossEngineDispatcher`/`disposeFor`), so
- * adding one more named export here forms no new import edge, let alone a
- * cycle.
- *  - 'claude' hosts the tool for opencode-originated dispatches into Claude;
- *    the only other engine is opencode, so honesty requires the opencode
- *    binary actually being vendored/available.
- *  - 'opencode' hosts the tool for Claude-originated dispatches into opencode;
- *    the only other engine is Claude, which is ClaudeUI's bundled default
- *    engine — always present, so always true.
- *  - 'pi' (ADR-033 M4c) hosts the tool for Claude/opencode-originated
- *    dispatches into pi — gates on the vendored pi binary actually being
- *    present, mirroring the 'claude' branch's opencode-binary check.
- *  - 'codex' (slice E) hosts the tool for Codex-originated dispatches into
- *    claude/opencode/pi. Claude is one of those three and is ClaudeUI's
- *    bundled default engine, so — same reasoning as the 'opencode' branch —
- *    a Codex session always has somewhere to dispatch to; the other two
- *    binaries being absent only narrows the useful target list, which the
- *    dispatcher's own per-request guards report.
+ * (ADR-030 + ADR-033 M4-A): "a session on this engine hosts the dispatch tool
+ * AND at least one engine it can dispatch into is available." Lives here (not
+ * in shared/model-capabilities.ts, which must stay renderer-safe / import-free
+ * of main-process-only modules) — every session class already imports THIS
+ * module (for `crossEngineDispatcher`/`disposeFor`), so the export forms no new
+ * import edge, let alone a cycle.
  *
- * Slice H makes CODEX a target as well, so the 'claude' branch is no longer a
- * one-engine question: a Claude session can dispatch into opencode, pi OR
- * codex, and ANY of the three being installed makes the tool honest. (The pi
- * disjunct also closes a gap left when M4c made pi a target without widening
- * this branch — a machine with the pi binary but no opencode one hid
- * dispatch_agent from Claude sessions that could in fact use it.)
+ * One rule for every engine since ADR-082: ANY target being available makes
+ * the tool honest; the ones that are not only narrow the useful list, which
+ * the dispatcher's own per-request guards report. Before it, the opencode and
+ * Codex branches answered `true` because Claude Code was always bundled, and
+ * pi's asked about pi itself. Neither holds any more: a harness is chosen,
+ * installed and removed while the app runs, and a Claude Code selection can
+ * resolve to nothing. Callers read this when a session's capabilities are
+ * computed, so a session spawned after a harness change sees the new answer.
  */
 export function crossEngineDispatchAvailable(engineId: EngineId): boolean {
-  if (engineId === 'claude')
-    return (
-      opencodeServerManager.isBinaryAvailable() || piBinaryAvailable() || codexBinaryAvailable()
-    )
-  if (engineId === 'pi') return piBinaryAvailable()
-  return true
-}
-
-/**
- * Collect the `tool_use` block IDS from a forwarded assistant message into the
- * per-turn set — the best-effort `toolUses` figure in `TaskNotification.usage`
- * (ADR-033 M4-B) is that set's size at turn end. A SET (not a counter) because
- * the same assistant message is forwarded repeatedly: Claude targets run
- * `includePartialMessages` (each partial re-carries the same blocks under the
- * same betaMessage id), and the opencode SSE tap re-emits the whole rebuilt
- * message on every `message.part.updated` (event-mapper's upsert-by-message-id
- * model). A counter would re-count the same tool_use on every emission.
- * Shared by both directions' streaming taps.
- */
-function collectToolUseIds(message: ChatMessage, into: Set<string>): void {
-  for (const block of message.content) {
-    if (block.type === 'tool_use') into.add(block.toolUseId)
-  }
+  // `harnessAvailable` is cached by the resolver: this runs on every
+  // ClaudeSession status emit and must do no filesystem work.
+  return DISPATCH_TARGETS[engineId].some((target) => harnessAvailable(target))
 }
 
 // ── Public surface ────────────────────────────────────────────────────────────
@@ -221,8 +239,37 @@ export interface DispatchContext {
   fromEngine: EngineId
   fromRoutingId: string
   cwd: string
-  /** Dispatching session's permission mode (Claude-style string). */
-  autonomyMode: string
+  /**
+   * The dispatching session's permission mode (Claude-style string), read LIVE
+   * (ADR-088 ruling 3): every decision point calls it again, so a target
+   * follows the parent's mode switches instead of a creation-time snapshot.
+   * `entry.ctx` is replaced on every continuation, so `entry.ctx.getAutonomyMode()`
+   * is always the latest caller's accessor.
+   */
+  getAutonomyMode: () => string
+  /**
+   * The DISPATCHING session's transcript (`messageHistory`), read live — the
+   * live array, never a copy. What ClaudeUI's judge reads the user's intent
+   * from when it judges a pi/opencode target's call (ADR-088; the ADR-085 S4
+   * precedent: a delegated call is judged against the parent transcript).
+   */
+  getMessages: () => ChatMessage[]
+  /**
+   * The DISPATCHING session's still-queued user turns
+   * (`BaseSession.queuedUserTurns`), read live — merged in time order into
+   * that judge's transcript (ADR-091 §4): a "go ahead" typed while the parent
+   * waits on this dispatch is queued, not yet in `getMessages()`. Optional
+   * like `addDispatchedCost`; every production caller sets it.
+   */
+  getQueuedUserTurns?: () => ChatMessage[]
+  /**
+   * The DISPATCHING session's approvable blocks and grants
+   * (`BaseSession.blockedCalls`, ADR-091 part 6): a pi/opencode target's judge
+   * block is recorded there, so the user approves it from the dispatching
+   * chat, and that session's grants clear the target's next identical call.
+   * Optional like `getQueuedUserTurns`; every production caller sets it.
+   */
+  blockedCalls?: BlockedCallLedger
   /** Re-emits under the dispatching session's routing (BaseSession.send). */
   emit: (channel: string, data: unknown) => void
   /**
@@ -253,6 +300,15 @@ export interface DispatchContext {
    * the target then runs as the ACTIVE account, exactly as slice 2a left it.
    */
   chatgptAccountId?: string | null
+  /**
+   * The calling SUBAGENT's own restriction (ADR-097 S9, option a): set when an
+   * opencode subagent child called `dispatch_agent` (the dispatch belongs to
+   * its chat, whose mode and rules the target runs under). Claude-form deny/ask
+   * rules added to the user's on every target engine — only ever tighter — and
+   * shown to the target's judge. A target keeps the restriction it was created
+   * with; a continuation cannot loosen it.
+   */
+  callerRestriction?: CallerRestriction
   extra?: SdkToolExtra
 }
 
@@ -263,6 +319,18 @@ export interface DispatchRequest {
   sessionId?: string
 }
 
+/**
+ * The dispatching session's LIVE permission mode as every target path reads it
+ * (ADR-088), with the legacy `full` normalised to `auto`. Sessions speak `auto`
+ * today, so this is defensive — but `CODEX_TURN_POLICY` has no `full` row (a
+ * `full` parent would run a Codex thread with no guardian) and `full` is not a
+ * cli.js permission mode, so no target path may see it raw.
+ */
+function liveMode(ctx: DispatchContext): string {
+  const mode = ctx.getAutonomyMode()
+  return mode === 'full' ? 'auto' : mode
+}
+
 export interface DispatchResult {
   text: string
   sessionId: string
@@ -270,59 +338,33 @@ export interface DispatchResult {
 }
 
 /**
- * Structural subset of OpencodeClient the dispatcher uses — injectable so
- * tests can stub the transport without HTTP.
+ * Structural subset of the opencode 2.x `OpencodeClient` (ADR-097 S3) an
+ * opencode dispatch target uses — injectable so tests stub the transport
+ * without HTTP. One per target, scoped to the caller's directory.
  */
-export interface DispatchTargetClient {
-  createSession(req?: { title?: string }): Promise<{ id: string }>
-  patchSession(
-    sessionId: string,
-    patch: { permission?: Array<{ permission: string; pattern: string; action: string }> }
-  ): Promise<unknown>
-  prompt(
-    sessionId: string,
-    req: {
-      model?: { providerID: string; modelID: string }
-      parts: Array<{ type: 'text'; text: string }>
-    }
-  ): Promise<unknown>
-  /**
-   * The dispatcher's ACTUAL turn driver for opencode targets (`prompt` above is
-   * only still in this interface because the structural type mirrors
-   * OpencodeClient, whose other callers still use it). Returns as soon as the
-   * server has FORKED the turn — completion arrives on the SSE stream. See
-   * `resolveAndRunOpencode`.
-   */
-  promptAsync(
-    sessionId: string,
-    req: {
-      model?: { providerID: string; modelID: string }
-      parts: Array<{ type: 'text'; text: string }>
-    }
-  ): Promise<unknown>
-  /** Stored history for a target session — the dispatcher reads the LAST
-   *  assistant message from it for a completed turn's text + usage (the
-   *  fire-and-forget prompt has no response body to carry them). */
-  listMessages(sessionId: string): Promise<StoredMessage[]>
-  /** Live per-session status map — ABSENCE MEANS IDLE (see
-   *  `OpencodeClient.getSessionStatus`). Used to reconcile busy turns after an
-   *  SSE reconnect, where a `session.idle` may have been missed. */
-  getSessionStatus(): Promise<Record<string, { type?: string }>>
-  deleteSession(sessionId: string): Promise<boolean>
-  abortSession(sessionId: string): Promise<boolean>
-  replyPermission(
-    requestId: string,
-    reply: 'once' | 'always' | 'reject',
-    message?: string
-  ): Promise<unknown>
-  /** `onConnected` fires once the subscription is provably receiving — see
-   *  `OpencodeClient.subscribeEvents` for why the reconnect reconcile has to
-   *  hang off it rather than run before the subscribe. */
-  subscribeEvents(
-    signal?: AbortSignal,
-    onConnected?: () => void
-  ): AsyncGenerator<{ id: string; type: string; properties: Record<string, unknown> }>
-}
+export type DispatchTargetClient = Pick<
+  OpencodeClient,
+  | 'createSession'
+  | 'deleteSession'
+  | 'getSession'
+  | 'listSessions'
+  | 'setSessionPermissions'
+  | 'switchAgent'
+  | 'prompt'
+  | 'interrupt'
+  | 'cancelInbox'
+  | 'activeSessions'
+  | 'replyPermission'
+  | 'cancelForm'
+  | 'agents'
+  | 'mcpServers'
+  | 'call'
+  | 'listMessages'
+  | 'listPermissionRequests'
+  | 'listForms'
+  | 'listInbox'
+  | 'subscribeEvents'
+>
 
 /** Spawn opts for a headless Claude dispatch target (ADR-033 M2). */
 export interface ClaudeQuerySpawnOpts {
@@ -333,6 +375,14 @@ export interface ClaudeQuerySpawnOpts {
   canUseTool: CanUseTool
   abortController: AbortController
   prompt: AsyncIterable<Record<string, unknown>>
+  /**
+   * `--settings <json>` for the target (ADR-085 §3): `{ permissions: { deny,
+   * ask } }` when the user has any deny/ask rule, absent otherwise. It is
+   * cli.js's `flagSettings` source, independent of `settingSources: []`
+   * (`docs/protocol-cc/02-cli-flags.md` §2.6; `sdk/args.ts` emits
+   * `options.settings` as `--settings`).
+   */
+  settings?: Record<string, unknown>
 }
 
 /**
@@ -343,32 +393,24 @@ export interface ClaudeQuerySpawnOpts {
  */
 export type SpawnClaudeQueryFn = (opts: ClaudeQuerySpawnOpts) => Promise<QueryHandle>
 
-/** Spawn opts for a headless pi dispatch target (ADR-033 M4c). */
-export interface PiTargetSpawnOpts {
-  cwd: string
-  /**
-   * Gate handler for the per-target PiBridgeHost's `/tool-call` route — the
-   * two-stage approval gate (see `CrossEngineDispatcher.gatePiTargetToolCall`).
-   * Threaded in rather than constructed inside the default spawn function so
-   * the SAME closure (bound to the target's `entry`) is used regardless of
-   * which spawn implementation (real or test-injected) is active.
-   */
-  gateHandler: PiBridgeHandler
-}
+/**
+ * Spawn opts for a headless pi dispatch target (ADR-033 M4c) — the shared
+ * `PiChildSpawnOpts` (ADR-089). `gateHandler` is the two-stage approval gate
+ * (see `CrossEngineDispatcher.gatePiTargetToolCall`); a target passes no
+ * `hostedToolHandler`.
+ */
+export type PiTargetSpawnOpts = PiChildSpawnOpts
 
 /** The two live primitives a pi dispatch target owns — one PiRpcClient (the
  *  headless child) and its OWN PiBridgeHost (approval gate transport). */
-export interface PiTargetPrimitives {
-  client: PiRpcClient
-  bridgeHost: PiBridgeHost
-}
+export type PiTargetPrimitives = PiChildPrimitives
 
 /**
  * Spawns a headless pi dispatch target's PiRpcClient + its own PiBridgeHost.
  * Injectable so tests drive a fake target without a real binary (mirrors
  * `SpawnClaudeQueryFn`/`defaultSpawnClaudeQuery`).
  */
-export type SpawnPiTargetFn = (opts: PiTargetSpawnOpts) => Promise<PiTargetPrimitives>
+export type SpawnPiTargetFn = SpawnPiChildFn
 
 /**
  * The four native server-request methods a Codex dispatch TARGET answers
@@ -439,14 +481,34 @@ const defaultAttachCodexTarget =
   }
 
 export interface DispatcherDeps {
+  /**
+   * The opencode 2.x server manager (S2). Every target takes a turn-running
+   * lease (the `claudeui-xeng` guard is required) and releases it EXACTLY
+   * (`releaseIfCurrent`): one server serves every directory and a config
+   * change starts a new one, so a cwd no longer names a server.
+   */
   serverManager: {
-    acquire(cwd: string): Promise<{ baseUrl: string; authHeader: string }>
-    release(cwd: string): void
+    acquire(cwd: string): Promise<ServerConnection>
+    releaseIfCurrent(cwd: string, conn: ServerConnection): void
+    subscribeExit(cwd: string, cb: () => void, conn?: ServerConnection): () => void
   }
-  makeClient: (baseUrl: string, authHeader: string) => DispatchTargetClient
+  makeClient: (conn: ServerConnection) => DispatchTargetClient
   loadEngineConfig: (engineId: string) => EngineConfig
   /** Defaults to the real sdkQuery + claudeSpawnPrep. */
   spawnClaudeQuery?: SpawnClaudeQueryFn
+  /**
+   * The user's merged Claude permission rules for a cwd (ADR-085 §3 — every
+   * target gets their deny/ask tiers, never their allow tier). Defaults to
+   * `mergedClaudeRulesFor`, which reads the user's settings files; tests inject
+   * a stub to stay hermetic.
+   */
+  loadUserRules?: (cwd: string) => MergedClaudeRules
+  /**
+   * The judge transport factory for pi/opencode targets in auto mode
+   * (ADR-088). Defaults to `makeSessionJudgeTransport` (ClaudeUI's own HTTP
+   * judge, ADR-081); tests inject a scripted transport.
+   */
+  makeJudgeTransport?: (opts: SessionJudgeOptions) => JudgeTransport
   /** Defaults to the real PiRpcClient + PiBridgeHost construction (ADR-033 M4c). */
   spawnPiTarget?: SpawnPiTargetFn
   /** Defaults to a thread on the caller's host (ADR-033 slice H, ADR-069 §7). */
@@ -474,7 +536,7 @@ export interface DispatcherDeps {
   /**
    * ADR-033 M4c: how long `resolveAndRunPi`'s give-up path (timeout/abort/
    * stop) waits for the ABANDONED turn's own terminal pi events to drain
-   * before releasing the target's `busy` flag — see `PiTargetEntry.settled`'s
+   * before releasing the target's `busy` flag — see `PiChildRunner.settled`'s
    * "RACE NOTE" doc comment for why this exists (pi's `abort` is turn-scoped,
    * not process-killing, and its wire has no per-event turn correlation).
    * Bounded so a hung/never-arriving settle can't wedge the stop path
@@ -494,10 +556,6 @@ export interface DispatcherDeps {
    * can never hold the stop path open. Injectable for tests.
    */
   codexAbortSettleGraceMs?: number
-  /** Delay between opencode SSE reconnect attempts after a dropped subscription
-   *  (see runSseLoop). Small enough to recover approval forwarding quickly, big
-   *  enough that a dead server can't hot-spin the loop. Injectable for tests. */
-  sseReconnectDelayMs?: number
   /** Clock, injectable for the pendingStops TTL tests. Defaults to Date.now. */
   now?: () => number
   /**
@@ -563,7 +621,7 @@ export const XENG_REQUEST_PREFIX = 'xeng:'
  * escalation set — UNLIKE PiSession's own interactive sessionAllows, a
  * dispatched target's `gatePiTargetToolCall` treats 'allowForSession'
  * IDENTICALLY to a one-off 'allow' (see its resolve callback): each tool_call
- * runs `decide()` fresh, matching `awaitClaudeTargetApproval`, which ALSO
+ * runs `decideWithSource()` fresh, matching `awaitClaudeTargetApproval`, which ALSO
  * never persists any escalation state across a Claude target's tool calls.
  * One shared, frozen, empty Set — never mutated — so no per-target
  * allocation is needed.
@@ -575,6 +633,11 @@ const EMPTY_PI_SESSION_ALLOWS: ReadonlySet<string> = new Set()
  * has no per-session "always allow" escalation set, so 'allowForSession' is
  * handled identically to a one-off 'allow' and every request is decided fresh.
  * One shared, frozen, never-mutated Set.
+ *
+ * An opencode target is the same (ADR-085 S2): its 'allowForSession' replies
+ * `once` like a plain 'allow' (`resolveApproval`) — never opencode's `always`,
+ * whose instance-global memory would outrank the user's deny/ask rules — and
+ * the dispatcher keeps no host-side session-allow set for it either.
  */
 const EMPTY_CODEX_SESSION_ALLOWS: ReadonlySet<string> = new Set()
 
@@ -667,38 +730,27 @@ const PI_TIMEOUT_AFTERMATH =
   'the target agent was interrupted (the session survives; a fresh turn may still be dispatched against it).'
 const CODEX_TIMEOUT_AFTERMATH =
   'the target agent was interrupted (the thread survives; a fresh turn may still be dispatched against it).'
+/** How often a running opencode target turn checks the parent's live mode. */
+const MODE_WATCH_MS = 250
+/** The reject a target's ask gets while no turn of its own is running (a woken execution, a give-up winding down). */
+const TARGET_NOT_RUNNING_MESSAGE =
+  "The dispatched agent's turn is not running (it was stopped, or it already ended), so this call is not allowed."
+/** How long an opencode target's first prompt waits for its server's feed to connect. */
+const FEED_READY_WAIT_MS = 10_000
 /**
- * Slack allowed when `reconcileBusyTargets` compares a stored message's
- * server-written `info.time.created` against the dispatcher's own
- * `entry.turnStartedAt` (see that comparison for what it decides).
- *
- * ZERO, deliberately — the comparison is strict. Two reasons it can afford to
- * be, and one reason it must be:
- *  - SAME CLOCK. The opencode server is ALWAYS a local child of this process
- *    (`OpencodeServerManager` spawns the vendored binary and talks to it over
- *    127.0.0.1), so both timestamps come from the same host clock and cannot
- *    genuinely disagree.
- *  - STRICT ORDERING. `turnStartedAt` is taken BEFORE the `prompt_async` POST;
- *    THIS turn's assistant message is created inside `runLoop`, i.e. strictly
- *    later in real time. Genuine evidence is therefore never rejected by a zero
- *    allowance (barring a backwards clock step between the two reads).
- *  - ASYMMETRIC FAILURE. A false NEGATIVE (evidence wrongly rejected) costs a
- *    bounded watchdog delay on an already-rare path. A false POSITIVE (the
- *    PREVIOUS turn's assistant admitted as this turn's evidence) is a silently
- *    wrong result handed to the caller plus a live turn left orphaned. Any
- *    positive allowance buys the second failure to insure against a clock
- *    artifact that a shared clock cannot produce — and buys it constantly, not
- *    rarely: a dispatching model typically re-dispatches the same session_id
- *    within one MCP round-trip (1–3 s), so an allowance of N seconds
- *    false-positives on EVERY continuation whose gap is under N.
- *
- * Kept as a named constant rather than inlined because it is the seam a future
- * REMOTE opencode-server deployment would have to revisit — and the answer
- * there is not to widen it but to replace the comparison with a clock-free
- * anchor (e.g. snapshot the session's message ids before the turn and test for
- * a NEW id).
+ * Rules every opencode target carries after its mode's: it can never call the
+ * dispatch tool back (ADR-033 §4), and it asks no questions — a headless
+ * target has nobody to answer them (both hidden: whole-category denies).
  */
-const CLOCK_SKEW_ALLOWANCE_MS = 0
+const TARGET_ONLY_RULES: readonly V2Rule[] = [
+  { action: 'claudeui_dispatch_agent', resource: '*', effect: 'deny' },
+  { action: 'question', resource: '*', effect: 'deny' }
+]
+/** A target's form (should one still come — `question` is hidden): cancelled WITH a message. */
+const TARGET_FORM_CANCEL_MESSAGE =
+  'No user can answer questions in a dispatched agent — continue without asking, and state any assumption you make.'
+/** A target has no session allows (ADR-085 S2: 'allowForSession' replies `once`). Never added to. */
+const NO_SESSION_ALLOWS = new OpencodeSessionAllows()
 /** How long an armed stop-intent (see `pendingStops`) stays valid. Generous —
  *  it only needs to outlive the MCP tools/call round-trip + handler prelude. */
 const PENDING_STOP_TTL_MS = 60 * 1000
@@ -711,8 +763,6 @@ const CODEX_ABORT_SETTLE_GRACE_MS = 3_000
  *  forever). A real catalog is one page. */
 const CODEX_CATALOG_PAGE_LIMIT = 100
 
-/** Default for `DispatcherDeps.sseReconnectDelayMs` — see runSseLoop. */
-const SSE_RECONNECT_DELAY_MS = 1_000
 /**
  * Bounded timeout for the BEST-EFFORT `get_session_stats` reconciliation read
  * in `accountPiNonSuccessCostReconciled` (audit-residual C fix) — short,
@@ -731,142 +781,129 @@ interface PendingStop {
   expiresAt: number
 }
 
-/** A live opencode dispatch target — persists across turns for `session_id` continuation. */
-interface OpencodeTargetEntry {
+/** What a target's ruleset is built from — cached per target (a failed read is not cached). */
+interface TargetRuleInputs {
+  client: DispatchTargetClient
+  cwd: string
+  /** `GET /api/agent` — the default agent, plan, and auto mode's own-dir allows. */
+  agents: Agent_Info[] | null
+  /** Bridged + `claudeui` + `GET /api/mcp` server names (MCP rule keys, the auto catch-all). */
+  mcpServers: string[] | null
+  /** The location's git worktree root; undefined = not read yet, null = none. */
+  worktree: string | null | undefined
+}
+
+/**
+ * A live opencode dispatch target (opencode 2.x, ADR-097 S9) — persists across
+ * turns for `session_id` continuation. It holds its OWN lease (released
+ * exactly, `releaseIfCurrent`) and shares its server's feed record.
+ */
+interface OpencodeTargetEntry extends TargetRuleInputs {
   kind: 'opencode'
   sessionId: string
   fromRoutingId: string
   cwd: string
-  cwdKey: string
-  client: DispatchTargetClient
+  /** This target's lease (the server it was created on). */
+  conn: ServerConnection
+  /** The server's shared feed. */
+  rec: ConnRecord
   /** Latest dispatching context — used to forward approvals mid-turn. */
   ctx: DispatchContext
   /**
-   * True while a turn is in flight (ADR-033 M3). Gates the SSE stream tap
-   * (`handleOpencodeTargetStream`) — stray events from a PRIOR turn (or the
-   * server's own trailing chatter) must never emit stream deltas for a turn
-   * that already returned its result.
+   * True while a turn is in flight (from the turn's first await to its
+   * return). Busy-rejects a concurrent continuation and gates the card's
+   * stream: a finished turn's trailing events must never emit.
    */
   busy: boolean
   /**
-   * Resolver for the turn CURRENTLY in flight; null when idle. Same
-   * event-driven settle shape as `PiTargetEntry.settled` (read that field's
-   * doc for the general pattern) — installed by `resolveAndRunOpencode`
-   * SYNCHRONOUSLY before `promptAsync` is even called, invoked EXACTLY ONCE by
-   * `handleSseEvent`'s `session.idle`/`session.error` branches or by
-   * `reconcileBusyTargets` after an SSE reconnect.
-   *
-   * SETTLE-ONCE DISCIPLINE: every settler READS-AND-NULLS this field before
-   * invoking it, and every give-up path (timeout/abort/stop) plus the turn's
-   * `finally` nulls it too. That is what makes the `session.idle` opencode
-   * publishes AFTER our own `abortSession` a harmless no-op instead of a
-   * second settle landing on an already-returned turn.
-   *
-   * UNLIKE pi, no post-abort DRAIN WINDOW is installed. opencode's events carry
-   * their `sessionID` and a session runs at most one turn at a time
-   * (busy-reject), so a stale event is always attributable to the session — but
-   * not to the TURN. One narrow residual window therefore remains, and is
-   * accepted deliberately: if a continuation turn starts before the previous
-   * (aborted) turn's own `session.idle` has been consumed off the stream, that
-   * idle settles the NEW turn early, which would then return the PREVIOUS
-   * turn's stored text. It takes the dispatching model re-dispatching the same
-   * session_id inside the abort's own round-trip. The opposite failure — a
-   * completion we never see, which HANGS a dispatch — is the one worth
-   * engineering against, and it is covered twice (the inactivity/absolute
-   * watchdog and `reconcileBusyTargets`).
+   * Resolver for the turn CURRENTLY in flight; null when idle. Installed
+   * before the prompt is sent; invoked EXACTLY ONCE by the target's own
+   * terminal mapper output (`settleTargetTurn`) or a lost connection. Every
+   * settler and every give-up path reads-and-nulls it first, so the
+   * `stopped` output our own interrupt produces is a no-op.
    */
   settled: ((outcome: OpencodeTurnOutcome) => void) | null
   /**
-   * `this.now()` at turn start — the ABSOLUTE watchdog's baseline, and the
-   * "is this stored history evidence of THIS turn?" cut-off
-   * `reconcileBusyTargets` compares message timestamps against. 0 until the
-   * target's first turn.
+   * THIS turn's prompt reached the model: opencode delivered its inbox item
+   * (`turnInboxId`), as a fresh execution's first input or steered into one
+   * already running (a woken parent, a give-up still winding down). Only then
+   * may a terminal output settle the turn — one before it belongs to another
+   * execution (the 1.x "stale idle settles the next turn" residual is gone),
+   * and a joined execution has no `execution.started` of its own.
    */
+  turnStarted: boolean
+  /** The inbox id of the turn's prompt (`msg_claudeui_…`). */
+  turnInboxId: string | null
+  /** The turn's prompt POST while it may still be in flight (a give-up waits for it, then cancels it). */
+  pendingPrompt: { posted: Promise<unknown>; inboxID: string } | null
+  /**
+   * A give-up (stop, timeout, abort, a refused prompt) is winding down: any
+   * execution that starts on the session is interrupted again, and any ask is
+   * refused with a message — nobody is waiting for this turn any more.
+   * Cleared when the next turn begins.
+   */
+  draining: boolean
+  /** The live mode the applied ruleset was built for (a mid-turn switch re-applies). */
+  appliedMode: string | null
+  /** A ruleset re-apply in flight (one at a time). */
+  applying: Promise<void> | null
+  /**
+   * A give-up's interrupt still settling (bounded); the next turn awaits it so
+   * its prompt cannot steer into the interrupted execution.
+   */
+  stopping: Promise<void> | null
+  /** `this.now()` at turn start — the ABSOLUTE watchdog's baseline. */
   turnStartedAt: number
   /**
-   * `this.now()` at the last sign of life from this session while busy — the
-   * inactivity watchdog's clock (see `startTurnWatchdog`). Two feeds:
-   *  - `handleSseEvent` bumps it for EVERY event type carrying this sessionID,
-   *    not just streamed content — a tool part updating or a cost snapshot is
-   *    proof of life just as much as a text delta;
-   *  - the watchdog itself refreshes it while a forwarded approval for this
-   *    target is still unanswered. A target BLOCKED on `ctx.ask` emits no
-   *    session events at all (the server's keepalives carry no sessionID), so
-   *    without that refresh a human slower than `idleTimeoutMs` would have the
-   *    dispatch aborted out from under them. Refreshing (rather than skipping
-   *    the check) also means answering the approval starts a FRESH inactivity
-   *    window for the resumed turn.
-   * Reset to turn start at every turn start.
+   * `this.now()` at the last sign of life from this target (any event of its
+   * session or a followed child) while busy — the inactivity watchdog's clock.
+   * The watchdog itself refreshes it while a forwarded approval is unanswered.
    */
   lastActivityAt: number
-  /**
-   * Dedup for tool-result forwarding, keyed `${messageId}:${partId}`. TARGET-
-   * lifetime, never cleared — a genuine mirror of
-   * `OpencodeSession.emittedToolResults` (session-lifetime there, likewise never
-   * cleared). Two jobs:
-   *  - the SSE tap re-emits the WHOLE rebuilt assistant message on every part
-   *    update, so a completed tool part would otherwise re-emit its
-   *    `session:subagent-tool-result` on every subsequent update of a sibling;
-   *  - across turns, opencode's post-abort cleanup republishes an INTERRUPTED
-   *    turn's tool parts (see `priorMessageIds`), and a per-turn Set would have
-   *    forgotten they were already reported.
-   * Message ids never repeat, so the set is naturally bounded by target life.
-   */
-  emittedToolResults: Set<string>
-  /**
-   * Message ids that already existed on this target when the CURRENT turn
-   * started — snapshotted from `accumulators` at turn start (empty on the
-   * first turn), and the gate the streaming tap applies before emitting
-   * anything.
-   *
-   * WHY (verified against the fork): aborting a turn does not stop its parts
-   * from being republished. `processor.ts`'s abort path waits 250 ms for
-   * in-flight tool calls, then rewrites each one as `status: 'error'` /
-   * `interrupted: true` — which publishes `message.part.updated` events for the
-   * OLD turn's message. A quick continuation turn is already `busy` by then, so
-   * the tap would attribute the old message to the NEW turn's card: re-emitting
-   * it as a `session:subagent-message`, re-reporting its tool results, and
-   * inflating the new turn's `toolUses`. A dispatch turn never legitimately
-   * updates a PRIOR turn's message, so ignoring known-prior ids is exact.
-   */
-  priorMessageIds: Set<string>
-  /**
-   * Per-messageId part accumulators for the SSE streaming tap — same shape
-   * `OpencodeSession` keeps for its own turns (event-mapper.ts's
-   * `MessageAccumulator`). Scoped to this target so a fresh turn's
-   * message ids never collide with a previous turn's.
-   */
-  accumulators: Map<string, MessageAccumulator>
-  activeStreamItems: Map<
-    string,
-    { target: ItemStreamTarget; ownerSessionId: string; partId: string }
-  >
-  /** Cumulative cost across every turn this target has run (ADR-033 M4-C —
-   *  the per-dispatch cost cap). Never decreases; reset only by creating a
-   *  fresh target (a new session_id). */
+  /** The S4 mapper for this target's session and its subagent children. */
+  mapper: OpencodeEventMapper
+  /** The S6 child rulesets (shared with `OpencodeSession`). */
+  children: ChildRulesetKeeper
+  /** The agent the session is on (`plan` in plan mode, else the default). */
+  agent: string | null
+  /** The ruleset last applied (created with, or PATCHed — 2.x's PATCH replaces). */
+  applied: { rules: V2Rule[]; key: string } | null
+  /** The user's compiled deny/ask rules — the host pre-check's provenance set. */
+  hostRules: OpencodePermissionRule[]
+  /** Item streams open on the dispatch card, keyed by `targetItemKey`. */
+  openItems: Map<string, { target: ItemStreamTarget; message: ChatMessage }>
+  /** This turn's steps (own and children's) — its tokens and cost. */
+  turnSteps: OpencodeStepUsage[]
+  /** This turn's own assistant messages (per step), in first-seen order — its text. */
+  turnMessages: Map<string, ChatMessage>
+  /** Cumulative cost across every turn this target has run (ADR-033 M4-C). */
   cumulativeCostUsd: number
-  /** Turns whose cost the rule could not resolve, and which
-   *  `cumulativeCostUsd` therefore does NOT include. Two causes: a model with
-   *  no known price, and a failed turn whose stored message could not be read
-   *  back at all. Reported on the turn itself (the first cause only — the
-   *  second returns an error text already) and again when the cap rejects a
-   *  continuation, so the spent figure is never read as complete (ADR-030). */
+  /** Turns whose cost the rule could not resolve (not in `cumulativeCostUsd`). */
   unpricedTurns: number
-  /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033
-   *  M4-B). A fresh Set at every turn start, populated by the streaming tap
-   *  (`collectToolUseIds` — a Set, not a counter, because the tap re-emits the
-   *  same rebuilt message on every part update), `.size` read once at turn
-   *  end for the notification/usage-record `toolUses` figure. */
+  /** DISTINCT tool_use ids seen in the turn in flight (ADR-033 M4-B). */
   turnToolUseIds: Set<string>
+  /** ClaudeUI's judge for this target's asks under auto mode (ADR-088). */
+  judge: DispatchTargetJudge
+  /**
+   * The resolved canonical model this target was created with — the judge's
+   * fallback model and its subagent label. A continuation that passes a
+   * different `model` keeps this one.
+   */
+  model: string
+  /** The latest dispatch prompt (set at every turn start) — the judge's subagent task. */
+  lastPrompt: string
+  /**
+   * Permission ids under judgement. An id leaves on the verdict, on the
+   * mapper's `approval-resolved` (answered elsewhere) and on stop/dispose, so
+   * a verdict that lands afterwards replies nothing.
+   */
+  judging: Set<string>
+  /** The target's own assistant messages (bounded) — what the judge reads after the parent transcript (ADR-088 D1). */
+  trajectory: Map<string, ChatMessage>
 }
 
-/**
- * What an opencode dispatch turn settles with — see `OpencodeTargetEntry.settled`.
- * Only the two SSE-borne outcomes live here; every other way a turn can end
- * (promptAsync rejection, watchdog, user stop, caller abort) is a race arm in
- * `resolveAndRunOpencode`, not a settle.
- */
-type OpencodeTurnOutcome = { kind: 'idle' } | { kind: 'sseError'; message: string }
+/** What an opencode dispatch turn settles with — see `OpencodeTargetEntry.settled`. */
+type OpencodeTurnOutcome = { kind: 'done' } | { kind: 'failed'; message: string }
 
 /**
  * A live Claude dispatch target (ADR-033 M2). The `sdkQuery()` process stays
@@ -908,6 +945,22 @@ interface ClaudeTargetEntry {
   /** Latest dispatching context — used to forward approvals mid-turn. */
   ctx: DispatchContext
   /**
+   * The permission mode the target's cli.js process currently runs under
+   * (ADR-088): the spawn's `permissionMode`, then whatever
+   * `syncClaudeTargetMode` last applied with `set_permission_mode`.
+   */
+  appliedPermissionMode: PermissionMode
+  /**
+   * Spawned with `allowDangerouslySkipPermissions` (a `bypassPermissions`
+   * parent). The skip flag is a SPAWN option, so a process spawned without it
+   * is never switched into `bypassPermissions` later (see `syncClaudeTargetMode`).
+   */
+  bypassSpawned: boolean
+  /** The one "auto mode was rejected" warning was sent; `auto` is not retried on this process. */
+  autoRejectedReported: boolean
+  /** In-flight `syncClaudeTargetMode`, so concurrent callers serialize on it. */
+  modeSync: Promise<void> | null
+  /**
    * The Claude account this target's turns are billed to (ADR-071 §3),
    * resolved ONCE at creation. A dispatched cli.js process reads the app's
    * credentials when it is spawned and holds them for its whole life, so
@@ -946,6 +999,22 @@ interface ClaudeTargetEntry {
    *  forwarded repeatedly under the same betaMessage id). */
   turnToolUseIds: Set<string>
   itemStreams: ClaudeItemStreamLifecycle
+  /**
+   * task_id → the tool_use id that first started it, learned from the
+   * target's own `system/task_started` frames — the ORIGIN, which is what the
+   * relay parents a resumed agent's snapshots to. Lets an agent_id-only
+   * `stream_event` (an idle self-resume inside the target) reach the lane its
+   * snapshots use. Lives as long as the target's process, like the agents.
+   */
+  agentOrigins: Map<string, string>
+  /**
+   * A later run's tool_use id (the SendMessage call that resumed an agent) →
+   * that agent's origin, learned from a second `task_started` for a known
+   * task_id (ADR-073 §1; `ClaudeSession.runAliasByToolUseId`). That run's
+   * stream events carry the run's id while its snapshots carry the origin's;
+   * resolving both through this map puts them on one item-lane state.
+   */
+  agentRunAliases: Map<string, string>
 }
 
 /**
@@ -953,21 +1022,27 @@ interface ClaudeTargetEntry {
  * level — ONE persistent headless `pi --mode rpc --no-session` child per
  * target, alive across turns — but its EVENT model is not an async iterable:
  * `PiRpcClient.onEvent()` is a single ambient callback registered ONCE for the
- * target's whole lifetime (installed in `createPiTarget`), not something a
- * turn-loop can manually `.next()` through. There is therefore no
- * `driveClaudeTurn`-style pull loop and no `.return()`-kills-the-process
- * hazard to guard against — see `drivePiTurn`'s doc comment for the full
- * divergence. `settled` is how a turn currently in flight gets resolved by
- * that ambient callback.
+ * target's whole lifetime (installed by `PiChildRunner.start`, called from
+ * `createPiTarget`), not something a turn-loop can manually `.next()`
+ * through. There is therefore no `driveClaudeTurn`-style pull loop and no
+ * `.return()`-kills-the-process hazard to guard against — see
+ * `PiChildRunner.runTurn`'s doc comment for the full divergence. The runner's
+ * `settled` is how a turn currently in flight gets resolved by that ambient
+ * callback.
  *
  * ABORT SEMANTICS DIVERGE FROM CLAUDE TOO (verified empirically — see the
  * M4c kickoff investigation): pi's `abort` command is TURN-scoped like
- * opencode's `abortSession` — the process and session survive an abort, then
+ * opencode's interrupt — the process and session survive an abort, then
  * happily serve a fresh `prompt`. This is UNLIKE Claude, whose
  * `abortController.abort()` kills the whole process (forcing
  * resolveAndRunClaude to delete the entry on timeout/abort/stop). pi's
  * timeout/abort/stop handling therefore keeps the entry alive for
  * continuation, matching the opencode target's survive-the-process pattern.
+ *
+ * The process, its bridge, the mapper, the per-turn accumulators, the
+ * trajectory and the abort-and-drain race live on `runner` (ADR-089, shared
+ * with PiSession's host-run subagents); the gate, the cost rule and cap, the
+ * ledger row and the busy-reject stay on this entry and in the dispatcher.
  */
 interface PiTargetEntry {
   kind: 'pi'
@@ -984,26 +1059,21 @@ interface PiTargetEntry {
   sessionId: string | null
   fromRoutingId: string
   cwd: string
-  client: PiRpcClient
-  /** This target's OWN loopback approval-gate host (ADR-033 §4 — a dispatch
-   *  target gets its own bridge, never shares the dispatching session's). */
-  bridgeHost: PiBridgeHost
-  /** Latest dispatching context — used to forward approvals/stream events mid-turn. */
-  ctx: DispatchContext
+  /** The child process + its OWN loopback approval-gate host (ADR-033 §4 — a
+   *  dispatch target gets its own bridge, never shares the dispatching
+   *  session's), driven by the shared `PiChildRunner` (ADR-089). */
+  runner: PiChildRunner
   /**
-   * Fixed at target creation from `ctx.autonomyMode` — a continuation call's
-   * (possibly different) `ctx.autonomyMode` is IGNORED for gating purposes,
-   * mirroring the Claude target's `permissionMode`, which is baked into the
-   * spawned process at creation and can never change later either. Passed
-   * DIRECTLY (no translation) as `permission-engine.ts`'s `decide()` `mode`
-   * param — `modeBaseDecision` already natively accepts this exact vocabulary
-   * ('auto'/'bypassPermissions' → allow-all, 'acceptEdits' → partial,
-   * 'plan'/'default'/anything else → conservative), so unlike
-   * `mapAutonomyToClaudeTargetMode` (which translates into a DIFFERENT
-   * vocabulary — `PermissionMode` + a boolean — for `sdkQuery`), pi needs no
-   * translation function at all: this is the identity mapping.
+   * Latest dispatching context — used to forward approvals/stream events
+   * mid-turn. The gate reads the mode LIVE from it
+   * (`ctx.getAutonomyMode()`, ADR-088 ruling 3) — there is no creation-time
+   * mode snapshot on this entry: pi's gate is ClaudeUI's own (the bridge
+   * asks per call), so nothing native has to agree with it. The mode is
+   * passed DIRECTLY (no translation) as `permission-engine.ts`'s
+   * `decideWithSource()` `mode`, except that a judged auto mode decides from
+   * the `acceptEdits` base (see `gatePiTargetToolCall`).
    */
-  autonomyMode: string
+  ctx: DispatchContext
   /** True while a turn is being driven — same busy-reject rationale as
    *  ClaudeTargetEntry (a single ambient event stream per process; two
    *  concurrent turns would have no way to tell which `result` belongs to
@@ -1015,98 +1085,18 @@ interface PiTargetEntry {
    *  field of the same name. On this target only a non-finite figure from pi
    *  gets here; there is no message-read-back path to fail. */
   unpricedTurns: number
-  /**
-   * Mirrors `ClaudeTargetEntry.lastReportedTotalCostUsd` — VERIFIED WIRE FACT
-   * (event-mapper.ts's `agent_settled` case echoes `state.totalCostUsd`, which
-   * only grows via `+=` in the assistant `message_end` branch): the mapper's
-   * `result` output's `totalCostUsd` is CUMULATIVE across this target's WHOLE
-   * process lifetime, not per-turn. Converts each turn's reported running
-   * total into a per-turn delta against this baseline — the exact same
-   * pattern as the Claude target (same wire-cumulative-total hazard).
-   */
-  lastReportedTotalCostUsd: number
-  /**
-   * `this.now()` at the last pi RPC event received for this target while busy
-   * — the inactivity watchdog's clock. Fed by the ambient `onEvent` callback
-   * installed in `createPiTarget`, BEFORE the mapper runs, so an event the
-   * mapper drops as `ignore` still counts as proof of life; refreshed by the
-   * watchdog itself while a forwarded approval is unanswered. See
-   * `startTurnWatchdog`; reset to turn start at the start of every turn.
-   */
-  lastActivityAt: number
-  /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033
-   *  M4-B) — same Set-not-counter rationale as the other two target kinds. */
-  turnToolUseIds: Set<string>
-  /** Sum of input+output+reasoning tokens across the turn CURRENTLY in flight
-   *  (ADR-033 M4-B) — pi's `usage` MapperOutput fires once per ASSISTANT
-   *  MESSAGE (a multi-tool-call turn can have several), so this accumulates
-   *  across them; reset to 0 at the start of every turn. */
-  turnTotalTokens: number
-  /** The same accumulation as `turnTotalTokens`, kept SPLIT for the ledger row
-   *  (ADR-071 §1) — pi's `usage` output carries the breakdown the total throws
-   *  away, and `usage_event` has a column per part. Reset with it. */
-  turnTokens: UsageTurnTokens
-  /** The turn's reasoning tokens, kept beside `turnTokens` because the ledger
-   *  has no column for them (they are billed as output) but `piCostInputs`
-   *  prices them — the same fold `PiSession` makes for its own turns. */
-  turnReasoningTokens: number
   /** pi's OWN figure for the turn in flight (the delta `applyPiTurnCost` was
    *  handed), for the ledger row. Null until that runs. Reset per turn. */
   turnEngineCostUsd: number | null
-  /** Pure per-process mapper state (event-mapper.ts) — NOT reset between
-   *  turns (its `totalCostUsd` is the cumulative baseline `lastReportedTotalCostUsd`
-   *  is diffed against; `currentMessageId` is message-scoped bookkeeping that
-   *  naturally clears itself on every assistant `message_end`). */
-  mapperState: PiMapperState
   /** The model this target was created with (picker-value string, e.g.
    *  "openai-codex/gpt-5.6-luna") — fixed for the target's lifetime, same as
    *  Claude/opencode targets (a continuation call cannot switch models). */
   model: string
-  /**
-   * Resolver for the turn CURRENTLY in flight; null when idle. Set by
-   * `drivePiTurn` just before sending `prompt`, invoked EXACTLY ONCE per turn
-   * by `forwardPiTargetMessage`'s `result`/`error` handling, or by the
-   * `onExit` handler if the process dies mid-turn. See `drivePiTurn`'s doc
-   * comment for why pi needs this event-driven settle instead of Claude's
-   * manual iterator pull.
-   *
-   * RACE NOTE (pi-specific — Claude/opencode don't have this): on timeout/
-   * abort/stop, pi's target process SURVIVES (see the class doc comment) and
-   * its OWN terminal event sequence for the ABANDONED turn is still in
-   * flight (message_end→turn_end→agent_end→agent_settled, triggered by the
-   * `abort` command). pi's wire has NO per-event turn correlation — whatever
-   * wrapper is CURRENTLY installed here receives the NEXT settle-shaped
-   * event, whichever turn actually produced it — so `resolveAndRunPi`'s
-   * give-up path WAITS (briefly, bounded) for this field to go quiet before
-   * releasing `busy`, instead of returning immediately, so a fast-enough
-   * continuation can never install a new wrapper while a stale one is still
-   * pending delivery. See `resolveAndRunPi`'s stop/timeout/abort branch.
-   */
-  settled: ((outcome: PiTurnOutcome) => void) | null
-  /**
-   * RACE NOTE (pi-specific, same root cause as `settled`'s RACE NOTE above):
-   * the ABANDONED turn's own in-flight terminal event sequence can carry a
-   * `/tool-call` 'ask' that lands AFTER `resolveAndRunPi`'s timeout/abort/stop
-   * branch has already run `dismissPendingForTarget` — pi's wire has no
-   * per-event turn correlation, so the gate has no other way to recognize
-   * that ask as belonging to a turn the caller was already told is
-   * stopped/failed. Without this flag, that late ask would register a FRESH
-   * `pendingApprovals` entry and emit a `session:approval-request` for a
-   * dispatch that already settled — orphaned until a manual deny or
-   * `disposeFor`. Set true as the FIRST action in the timeout/abort/stop
-   * winner branch (before the `abort` RPC even sends, so no event can race
-   * ahead of it); `gatePiTargetToolCall` checks this FIRST and short-circuits
-   * to `deny` — never registers a pending approval while draining. Cleared at
-   * the start of `drivePiTurn` — a fresh continuation turn is no longer
-   * draining.
-   */
-  draining: boolean
+  /** ClaudeUI's judge for this target's asks under auto mode (ADR-088). */
+  judge: DispatchTargetJudge
+  /** The latest dispatch prompt (set at every turn start) — the judge's subagent task. */
+  lastPrompt: string
 }
-
-/** What a pi dispatch turn settles with — see `PiTargetEntry.settled`. */
-type PiTurnOutcome =
-  | { kind: 'ok'; totalCostUsd: number; durationMs: number; sessionId: string | null }
-  | { kind: 'error'; message: string }
 
 /**
  * A live Codex dispatch target (ADR-033 slice H).
@@ -1148,14 +1138,17 @@ interface CodexTargetEntry {
   /** Latest dispatching context — used to forward approvals/stream events mid-turn. */
   ctx: DispatchContext
   /**
-   * Fixed at target creation from `ctx.autonomyMode`; a continuation call's
-   * (possibly different) mode is IGNORED, mirroring `PiTargetEntry
-   * .autonomyMode` and the Claude target's spawn-baked `permissionMode`. It
-   * has to be fixed here for a second reason the other engines do not have:
-   * the NATIVE half of the envelope (`approvalPolicy`/`sandbox`/
-   * `approvalsReviewer`) is written into the thread by `thread/start` and the
-   * target never re-policies it, so a gate that drifted from it would leave
-   * ClaudeUI's decision and Codex's containment disagreeing.
+   * The mode the thread's NATIVE policy currently runs under (ADR-088): set
+   * from `ctx.getAutonomyMode()` at creation (`thread/start`'s baseline) and
+   * REFRESHED at every `turn/start`, which sends `codexTurnPolicy(mode)` so
+   * the thread follows the parent's live mode turn by turn.
+   *
+   * The gate (`decideCodexTargetRequest`) reads THIS, never the live
+   * accessor: the native half of the envelope (`approvalPolicy`/`sandbox`/
+   * `approvalsReviewer`) only changes at a turn start, so a mid-turn switch
+   * into `auto` must not make the gate allow by mode-base while the thread
+   * still runs `approvalsReviewer: 'user'` — no guardian would be reviewing.
+   * A mid-turn switch therefore binds at the next turn.
    *
    * Passed DIRECTLY (no translation) as `decideWithSource`'s `mode` — the
    * shared engine natively speaks this vocabulary.
@@ -1194,7 +1187,7 @@ interface CodexTargetEntry {
    * A late approval request from an already stopped/timed-out/aborted turn must
    * never register a fresh pending approval on the caller. Set as the FIRST
    * action of the give-up branch, cleared at the start of the next turn — same
-   * contract as `PiTargetEntry.draining`, and belt-and-braces next to
+   * contract as `PiChildRunner.draining`, and belt-and-braces next to
    * `endedTurns` (a request whose turn id we never learned still has this).
    */
   draining: boolean
@@ -1257,22 +1250,32 @@ type CodexTurnOutcome =
 
 type TargetEntry = OpencodeTargetEntry | ClaudeTargetEntry | PiTargetEntry | CodexTargetEntry
 
-/** One shared opencode server connection (+ SSE loop) per cwd with live targets. */
+/**
+ * One opencode SERVER's event feed, shared by every dispatch target on it
+ * (ADR-097 §2: one server serves every directory, so records are keyed by
+ * server identity, never by cwd — a config change while a target lives can
+ * no longer pair one server's client with another's lease).
+ */
 interface ConnRecord {
+  /** `serverKey(conn)` — unique per spawn. */
+  key: string
+  /** The client the feed is read with (the feed is server-wide). */
   client: DispatchTargetClient
-  sseAbort: AbortController
-  targetCount: number
-  /** The resolved cwd this record is keyed by (`this.connections`' key). Stored
-   *  ON the record — not just threaded to `createOpencodeTarget` — so
-   *  `runSseLoop`'s reconnect reconcile can select exactly the targets served by
-   *  THIS connection (`entry.cwdKey === rec.cwdKey`) without a reverse lookup. */
-  cwdKey: string
+  abort: AbortController
+  targets: Set<OpencodeTargetEntry>
+  /** Targets being created on it (not in `targets` yet): the record must outlive them. */
+  creating: number
+  /** Resolves on the feed's first `connected` (or its end): prompts wait for it. */
+  ready: Promise<void>
+  unsubscribeExit: () => void
 }
 
 interface OpencodePendingApproval {
   kind: 'opencode'
-  /** Raw opencode permission id (no prefix). */
+  /** Raw opencode request id (no prefix). */
   permissionId: string
+  /** The session that asked — the target's own, or a task child's. Replies go there. */
+  askingSessionId: string
   targetSessionId: string
   client: DispatchTargetClient
   emit: (channel: string, data: unknown) => void
@@ -1312,8 +1315,85 @@ interface CodexPendingApproval {
   resolve: (decision: ApprovalDecision, answers?: Record<string, string>) => void
 }
 
-type PendingForwardedApproval =
+/**
+ * A forwarded card that holds a pi/opencode target's auto-mode judge block
+ * (ADR-091 §3). `resolveApproval` turns the answer into the hold's semantics
+ * before the kind's own reply: Keep blocked (or the expiry) → the judge's deny
+ * text + `automode-blocked` on the target's outcomes; Approve anyway → allow +
+ * the target's denial streak reset.
+ */
+interface ForwardedBlockHold {
+  /** The judge's model-visible deny text. */
+  reason: string
+  /** The target-side call id the outcome annotates (the judged `toolUseId`). */
+  toolUseId: string
+  judge: DispatchTargetJudge
+  /** The dispatching session's ledger the block is recorded in (ADR-091 part 6). */
+  ledger?: BlockedCallLedger
+  cancel: () => void
+}
+
+type PendingForwardedApproval = (
   OpencodePendingApproval | ClaudePendingApproval | PiPendingApproval | CodexPendingApproval
+) & { hold?: ForwardedBlockHold }
+
+/**
+ * A pi/opencode target's judge block that stands — Keep blocked, its expiry,
+ * or no hold at all (ADR-091 §3 / part 6): the block is annotated on the
+ * target's outcomes (post-block consent inheritance), never as a human
+ * refusal, and the judge's own deny text is what the target's model reads —
+ * returned for the caller's reply.
+ */
+function keepTargetBlock(judge: DispatchTargetJudge, toolUseId: string, reason: string): string {
+  judge.recordOutcome(toolUseId, 'automode-blocked')
+  return reason
+}
+
+/**
+ * Record a target's judge block at the DISPATCHING session (ADR-091 part 6),
+ * so the user can approve it from there: the grant clears the target's next
+ * identical call (keyed on the target's cwd), and the nudge goes to the target
+ * itself while it can take one (`deliver`, a pi target in flight), else to the
+ * dispatching agent, told the target's session id so it can dispatch the call
+ * back. No review (the call had no tool block to bind one to) → nothing to
+ * approve from.
+ */
+function recordTargetBlock(
+  ctx: DispatchContext,
+  toolUseId: string,
+  toolName: string,
+  input: Record<string, unknown>,
+  review: ToolReviewBlock | undefined,
+  target: {
+    engine: 'pi' | 'opencode'
+    label: string
+    cwd: string
+    sessionId: string | null
+    held: boolean
+    deliver?: (call: BlockedCall) => string | null
+  }
+): void {
+  if (!review || !ctx.blockedCalls) return
+  ctx.blockedCalls.record(
+    toolUseId,
+    {
+      toolName,
+      input,
+      review,
+      grantKey: blockGrantKey(
+        target.engine,
+        toolName,
+        input,
+        target.cwd,
+        target.engine === 'opencode'
+      ),
+      agentLabel: target.label,
+      ...(target.sessionId ? { dispatchSessionId: target.sessionId } : {}),
+      ...(target.deliver ? { deliver: target.deliver } : {})
+    },
+    target.held
+  )
+}
 
 function errorResult(text: string, sessionId = ''): DispatchResult {
   return { text, sessionId, isError: true }
@@ -1416,64 +1496,140 @@ function codexTurnCostUsd(model: string, delta: TokenUsageBreakdown): number | n
 }
 
 /**
- * The LAST assistant message in a target session's stored history — an opencode
- * dispatch turn's result, now that `promptAsync` returns nothing but a 204
- * (ADR-033's 2026-09-01 amendment). Scanning BACKWARDS for `role === 'assistant'`
- * is what makes this the turn's OWN result on a multi-turn target: every turn
- * appends a fresh user + assistant pair, so the tail is always the turn that
- * just ended. The shape it returns (`{info, parts}`) is byte-identical to what
- * the old synchronous `prompt()` resolved with, so the result-processing below
- * maps onto it 1:1.
+ * The judge's subagent description for a target: its model, plus what the
+ * calling subagent may not do when a restricted child dispatched (ADR-097 S9).
  */
-function lastAssistantMessage(messages: StoredMessage[]): StoredMessage | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i]
-    if (msg?.info?.role === 'assistant') return msg
+function judgeDescription(model: string, restriction: CallerRestriction | undefined): string {
+  const note = restrictionNote(restriction)
+  return note ? `${model} — ${note}` : model
+}
+
+/** One opencode dispatch turn's spend, summed over its steps (own and children's). */
+interface OpencodeTurnUsage {
+  steps: number
+  /** The ledger's disjoint split (opencode's tokens are already disjoint; reasoning bills as output). */
+  tokens: UsageTurnTokens
+  /** input + output + reasoning (the notification's figure; cache excluded, as before). */
+  totalTokens: number
+  /** opencode's own charge, summed; null when no step reported one. */
+  engineCostUsd: number | null
+  /**
+   * What the cap and the dispatching session's breakdown count (ADR-071 §2,
+   * `opencodeMessageCosts` per step); null when any step's model has no known
+   * price — the cap cannot count it at all (ADR-030). A turn with no step is a
+   * known zero.
+   */
+  costUsd: number | null
+}
+
+/**
+ * An opencode dispatch turn's usage from the mapper's per-step metering (S4:
+ * one `step-usage` per assistant message, a subagent child's included — the
+ * rule Claude's status line follows). Each step is priced under the model
+ * that ran it (falling back to the target's), by the same module an opencode
+ * session's own headline uses.
+ */
+function opencodeTurnUsage(model: string, steps: readonly OpencodeStepUsage[]): OpencodeTurnUsage {
+  const fallback = parseModelString(model)
+  const tokens: UsageTurnTokens = {
+    input: 0,
+    output: 0,
+    cacheWrite: 0,
+    // opencode publishes one cache-write rate; the 5m/1h split is Anthropic's.
+    cacheWrite1h: 0,
+    cacheRead: 0
   }
-  return undefined
+  let totalTokens = 0
+  let engineCostUsd: number | null = null
+  let costUsd: number | null = 0
+  for (const step of steps) {
+    const t = step.tokens
+    tokens.input += t.input
+    tokens.output += t.output + t.reasoning
+    tokens.cacheWrite += t.cache.write
+    tokens.cacheRead += t.cache.read
+    totalTokens += t.input + t.output + t.reasoning
+    engineCostUsd = (engineCostUsd ?? 0) + step.cost
+    const display = opencodeMessageCosts(
+      step.model?.providerID ?? fallback.providerID,
+      step.model?.id ?? fallback.modelID,
+      t,
+      step.cost
+    ).displayCostUsd
+    costUsd = costUsd === null || display === null ? null : costUsd + display
+  }
+  return { steps: steps.length, tokens, totalTokens, engineCostUsd, costUsd }
 }
 
-/**
- * Sum of a stored message's `info.tokens` — the same per-MESSAGE (i.e.
- * per-turn) cumulative snapshot `event-mapper.ts` reads for OpencodeSession's
- * own metering, and the same three fields the old synchronous path summed.
- * `cache` is deliberately excluded (parity with the pre-amendment code and
- * with the Claude direction's input+output).
- */
-function storedMessageTotalTokens(info: StoredMessage['info'] | undefined): number {
-  const tokens = info?.tokens
-  if (!tokens) return 0
-  return (tokens.input ?? 0) + (tokens.output ?? 0) + (tokens.reasoning ?? 0)
+/** The text of the turn's last own step that said anything (its final answer). */
+function lastTurnText(messages: ReadonlyMap<string, ChatMessage>): string {
+  const all = [...messages.values()]
+  for (let i = all.length - 1; i >= 0; i--) {
+    const text = all[i].content.map((block) => (block.type === 'text' ? block.text : '')).join('')
+    if (text) return text
+  }
+  return ''
 }
 
-/**
- * An opencode dispatch turn's costs, from the stored assistant message the turn
- * ended on — the same rule, from the same module, that an opencode session's
- * own headline follows (ADR-071 §2). `dispatch.maxCostUsd` and the dispatching
- * session's breakdown both count `displayCostUsd`: the list-price equivalent
- * under a subscription, the billed figure under an API key (a gateway's margin
- * is real spend), zero for a free vendor, and `null` when the model has no
- * known price — which the cap cannot count at all (ADR-030: never pretend it
- * is armed). `opencodeCostInputs` owns the disjoint-token mapping, the
- * zero-token short circuit and the billing lookup; the only thing left here is
- * which model the turn ran on.
- *
- * The vendor/model pair is the one the turn was DISPATCHED with, which is also
- * the pair `promptAsync` sent and the one the usage row records as
- * `targetModel`.
- *
- * The CLAUDE and CODEX targets deliberately do not route through the rule,
- * because both already hand the cap exactly what it would return.
- * `codexTurnCostUsd` derives a list-price equivalent from the turn's own tokens
- * for every billing type (ADR-066: a ChatGPT-subscription charge is unknowable
- * from here) and yields `null` for an unpriced model; cli.js's
- * `total_cost_usd` is likewise an API-equivalent whatever plan is behind it
- * (ADR-034). Feeding either through a billing type we would have to infer could
- * only make those two figures worse.
- */
-function opencodeTurnCost(model: string, info: StoredMessage['info'] | undefined): ResolvedCosts {
-  const { providerID, modelID } = parseModelString(model)
-  return opencodeMessageCosts(providerID, modelID, info?.tokens, info?.cost ?? null)
+/** A server's identity: its URL and password are unique per spawn. */
+function serverKey(conn: Pick<ServerConnection, 'baseUrl' | 'password'>): string {
+  return `${conn.baseUrl}#${conn.password}`
+}
+
+/** The key of an item stream on the dispatch card. */
+function targetItemKey(target: ItemStreamTarget): string {
+  return JSON.stringify([target.messageId, target.blockIndex])
+}
+
+/** The dispatch card a target streams onto right now, or undefined (no turn of its own running, no id). */
+function streamOwner(entry: OpencodeTargetEntry): string | undefined {
+  return entry.busy && entry.turnStarted ? entry.ctx.toolUseId : undefined
+}
+
+/** An agent by id from a target's cached list (the default agent for an unnamed one). */
+function agentById(
+  agents: readonly Agent_Info[] | null,
+  id: string | undefined
+): Agent_Info | undefined {
+  if (!agents) return undefined
+  return id ? agents.find((agent) => agent.id === id) : agents[0]
+}
+
+/** A dispatch prompt's inbox id (2.x requires `msg_`; ClaudeUI's own prefix). */
+function newDispatchInboxId(): string {
+  return `msg_claudeui_${uuidv4().replaceAll('-', '')}`
+}
+
+/** Reply to a target's permission ask on the session that asked. Never throws. */
+function replyTargetPermission(
+  client: DispatchTargetClient,
+  sessionID: string,
+  requestID: string,
+  reply: PermissionReply
+): void {
+  try {
+    void client.replyPermission(sessionID, requestID, reply).catch((err) => {
+      logger.warn('CrossEngineDispatcher', `replyPermission failed: ${errText(err)}`)
+    })
+  } catch (err) {
+    logger.warn('CrossEngineDispatcher', `replyPermission refused: ${errText(err)}`)
+  }
+}
+
+/** `promise`, or nothing once `ms` pass first (the timer never outlives the race). */
+async function withinMs(promise: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  await Promise.race([
+    promise,
+    new Promise<void>((done) => {
+      timer = setTimeout(done, ms)
+    })
+  ])
+  clearTimeout(timer)
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 /**
@@ -1526,7 +1682,7 @@ const UNKNOWN_DISPATCH_ACCOUNT: DispatchTurnAccount = {
   billingType: 'unknown'
 }
 
-/** An opencode target's account, off opencode's own `auth.json` and auth probe. */
+/** An opencode target's account, off opencode's credential snapshot and auth probe. */
 function opencodeDispatchAccount(model: string): DispatchTurnAccount {
   const { providerID } = parseModelString(model)
   return {
@@ -1579,31 +1735,7 @@ function claudeDispatchAccount(): DispatchTurnAccount {
 }
 
 // ── A dispatched turn's tokens, in the ledger's disjoint shape ──────────────
-
-/** A fresh per-turn accumulator (the pi target sums its `usage` outputs). */
-function zeroDispatchTokens(): UsageTurnTokens {
-  return { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 }
-}
-
-/**
- * An opencode turn's split from the stored assistant message. opencode's
- * `info.tokens` is ALREADY disjoint (its `session.ts` subtracts cache reads
- * and writes from input) and `reasoning` sits beside `output` rather than
- * inside it — the same mapping `opencodeCostInputs` makes, so the ledger's
- * `api_cost_usd` matches what the cap counted.
- */
-function opencodeDispatchTokens(info: StoredMessage['info'] | undefined): UsageTurnTokens {
-  const tokens = info?.tokens
-  return {
-    input: tokens?.input ?? 0,
-    output: (tokens?.output ?? 0) + (tokens?.reasoning ?? 0),
-    cacheWrite: tokens?.cache?.write ?? 0,
-    // opencode publishes one cache-write rate; the 5m/1h TTL split is
-    // Anthropic's, and nothing in `info.tokens` carries it.
-    cacheWrite1h: 0,
-    cacheRead: tokens?.cache?.read ?? 0
-  }
-}
+// (The pi target's fresh per-turn accumulator is `PiChildRunner.beginTurn`'s.)
 
 // ── A dispatched turn as a ledger row (ADR-071 §1) ─────────────────────────
 
@@ -1835,8 +1967,20 @@ class ClaudeInputChannel implements AsyncIterable<Record<string, unknown>> {
   }
 }
 
+/**
+ * Prefixed to every prompt a Claude TARGET receives (ADR-088). cli.js's own
+ * auto-mode judge sees only the target's transcript, where the dispatch prompt
+ * is a `user` message — without this it would read another agent's words as
+ * the user's own authorisation. pi/opencode targets need none (ClaudeUI's
+ * judge reads the PARENT transcript with a `dispatch:<engine>` subagent
+ * header); Codex's guardian is left alone.
+ */
+export const DISPATCH_PROMPT_PREAMBLE =
+  'Task delegated to you by another agent acting for the user:\n\n'
+
 /** Build the `{type:'user', ...}` SDK message shape cli.js expects on the
- *  streaming-input channel — mirrors claude-session.ts's `run()`. */
+ *  streaming-input channel — mirrors claude-session.ts's `run()`, with the
+ *  {@link DISPATCH_PROMPT_PREAMBLE} in front of the prompt. */
 function buildClaudeDispatchMessage(
   prompt: string,
   sessionId: string | null
@@ -1844,7 +1988,7 @@ function buildClaudeDispatchMessage(
   return {
     type: 'user' as const,
     session_id: sessionId ?? '',
-    message: { role: 'user' as const, content: prompt },
+    message: { role: 'user' as const, content: DISPATCH_PROMPT_PREAMBLE + prompt },
     parent_tool_use_id: null
   }
 }
@@ -1852,10 +1996,16 @@ function buildClaudeDispatchMessage(
 /**
  * Map the dispatching session's inherited autonomy (a Claude-style
  * permission-mode string) to the Claude TARGET's permissionMode (ADR-033 M2
- * item 5).
- *  - 'auto' / 'bypassPermissions' → bypassPermissions + allowDangerouslySkipPermissions:
- *    no LLM judge is spun up for dispatched targets in v1 (ADR-033 §5) —
- *    "full" autonomy on the caller means allow-all on the target too.
+ * item 5, amended by ADR-088).
+ *  - 'auto' → cli.js `auto`: the target is JUDGED by cli.js's own auto-mode
+ *    classifier (ADR-088 rulings 1-2), never run allow-all. No skip flag —
+ *    `auto` needs none.
+ *  - 'bypassPermissions' → bypassPermissions + allowDangerouslySkipPermissions:
+ *    a parent that is itself in bypass is not in auto, and its target is
+ *    allow-all too, except the user's deny/ask rules (ADR-085 §3, passed as
+ *    `--settings`): cli.js returns an ask for a bare or specifier ask rule
+ *    BEFORE its bypassPermissions mode-allow branch, and a deny before that
+ *    (cli.js 2.1.280 `kNt`, verified 2026-09-30).
  *  - 'plan' → 'default': a strictly read-only dispatched agent can't do any
  *    useful work, so we fall back to the conservative ask-everything mode
  *    instead of inheriting plan's refusal-by-default.
@@ -1867,6 +2017,7 @@ function mapAutonomyToClaudeTargetMode(autonomyMode: string): {
 } {
   switch (autonomyMode) {
     case 'auto':
+      return { permissionMode: 'auto', allowDangerouslySkipPermissions: false }
     case 'bypassPermissions':
       return { permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true }
     case 'plan':
@@ -1883,20 +2034,19 @@ function mapAutonomyToClaudeTargetMode(autonomyMode: string): {
  * Real default for `DispatcherDeps.spawnClaudeQuery`. Duplicates
  * `getSdkExecutableOpts()` (claude-session.ts) inline rather than importing
  * it — claude-session.ts imports THIS module (for the collab server /
- * disposeFor wiring), so importing back would form a require-cycle. The
- * duplicated shape is 5 fields wide and changes only if the Bun-binary spawn
- * pipeline itself changes (ADR-006).
+ * disposeFor wiring), so importing back would form a require-cycle. Like it,
+ * this names no executable: `query()` spawns the resolver's Claude Code launch
+ * (ADR-082 §2).
  */
 async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<QueryHandle> {
   const engineCfg = loadEngineConfig('claude')
   await claudeSpawnPrep(opts.model, engineCfg)
-  const bunClaude = locateBunClaude()
+  // After the spawn prep: it is what sets an endpoint profile, which decides
+  // whether this spawn carries a host token at all.
+  await ensureHostTokenFresh()
   return sdkQuery({
     prompt: opts.prompt as AsyncIterable<never>,
     options: {
-      pathToClaudeCodeExecutable: bunClaude,
-      executable: bunClaude,
-      executableArgs: [],
       standaloneExecutable: true,
       env: {},
       cwd: opts.cwd,
@@ -1905,6 +2055,7 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
       ...(opts.allowDangerouslySkipPermissions ? { allowDangerouslySkipPermissions: true } : {}),
       persistSession: false,
       settingSources: [],
+      ...(opts.settings ? { settings: opts.settings } : {}),
       abortController: opts.abortController,
       canUseTool: opts.canUseTool,
       // ADR-033 M3: stream_event text/thinking deltas so driveClaudeTurn can
@@ -1915,9 +2066,10 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
 }
 
 /**
- * Real default for `DispatcherDeps.spawnPiTarget` (ADR-033 M4c). Mirrors
+ * Real default for `DispatcherDeps.spawnPiTarget` (ADR-033 M4c):
+ * `defaultSpawnPiChild` (pi-child-runner.ts, ADR-089), which mirrors
  * `PiSession.doStart()`'s spawn shape (bridge host first, then the version-
- * keyed extension file, then the child) with two deliberate differences for
+ * keyed extension file, then the child), with two deliberate differences for
  * a headless DISPATCH target:
  *  - `--no-session`: ephemeral — no `~/.pi/agent/sessions` write (verified:
  *    `get_state`/`set_model`/`prompt`/`get_last_assistant_text`/`abort` all
@@ -1936,8 +2088,8 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
  *    never has a `dispatch_agent` tool to call in the first place — recursion
  *    is impossible at the wire level, not just by policy (mirrors ADR-033
  *    §4's "dispatcher-created targets never get the collab server"). Belt-
- *    and-suspenders even if a hosted tool were somehow still registered: this
- *    `PiBridgeHost` below is constructed with ONLY `opts.gateHandler` (no
+ *    and-suspenders even if a hosted tool were somehow still registered: the
+ *    target's `PiBridgeHost` is constructed with ONLY `opts.gateHandler` (no
  *    `hostedToolHandler`), so any `/hosted-tool` execute against this target
  *    fails closed with an isError result — never actually runs anything (see
  *    `PiBridgeHost.processHostedToolBody`'s own documented no-handler
@@ -1945,12 +2097,15 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
  *    hook) still activates normally — it depends ONLY on
  *    `CLAUDEUI_PI_BRIDGE_URL`/`TOKEN`, independent of the hosted-tools gate
  *    (verified against pi-bridge-source.ts's own independence design).
+ *  - The shared MCP catalog IS registered (ADR-096, `CLAUDEUI_PI_MCP=1`, the
+ *    servers handed to the target's bridge host at the spawn site), as an
+ *    opencode target gets it — MCP tools are not a recursion path.
  */
 /**
  * The env vars a pi dispatch TARGET's child process gets. Extracted as a pure
  * function (rather than inlined into `defaultSpawnPiTarget`) so the
  * recursion-guard property is DIRECTLY unit-testable without mocking
- * PiRpcClient/PiBridgeHost/locatePiBinary: NO `CLAUDEUI_PI_HOSTED_TOOLS` /
+ * PiRpcClient/PiBridgeHost/locatePiLaunch: NO `CLAUDEUI_PI_HOSTED_TOOLS` /
  * `CLAUDEUI_PI_DISPATCH_ENABLED` / `CLAUDEUI_PI_SKILL_DIRS` — see
  * `defaultSpawnPiTarget`'s doc comment for the full rationale.
  *
@@ -1972,39 +2127,31 @@ export function buildPiTargetChildEnv(bridge: { url: string; token: string }): N
     CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
     CLAUDEUI_PI_HOSTED_TOOLS: '',
     CLAUDEUI_PI_DISPATCH_ENABLED: '',
-    CLAUDEUI_PI_SKILL_DIRS: ''
+    CLAUDEUI_PI_DISPATCH_DESCRIPTION: '',
+    CLAUDEUI_PI_SKILL_DIRS: '',
+    // ADR-089: a dispatch target never gets the host-run `agent` or
+    // `send_message` tools (same leak argument as the three above).
+    CLAUDEUI_PI_AGENT_TOOL: '',
+    CLAUDEUI_PI_SEND_MESSAGE: '',
+    // ADR-096: a dispatch target registers the shared MCP catalog, as an
+    // opencode target does; the configs come from the target's own bridge
+    // host (`mcpServers` at the spawn site), never from this env.
+    CLAUDEUI_PI_MCP: '1'
   }
 }
 
-async function defaultSpawnPiTarget(opts: PiTargetSpawnOpts): Promise<PiTargetPrimitives> {
-  const bin = locatePiBinary()
-  if (!bin) {
-    throw new Error(
-      'pi binary not found — run `bun run ensure-pi` to vendor it ' +
-        `(vendor/pi-cli/pi${process.platform === 'win32' ? '.exe' : ''} is missing).`
-    )
-  }
-  const bridgeHost = new PiBridgeHost(opts.gateHandler)
-  let bridge: { url: string; token: string }
-  try {
-    bridge = await bridgeHost.start()
-  } catch (err) {
-    throw err instanceof Error ? err : new Error(String(err))
-  }
-  const bridgePath = writeBridgeExtension()
-  const client = new PiRpcClient(bin, {
-    cwd: opts.cwd,
-    args: ['--mode', 'rpc', '--no-session', '-e', bridgePath],
-    env: buildPiTargetChildEnv(bridge)
-  })
-  try {
-    await client.start()
-  } catch (err) {
-    bridgeHost.dispose()
-    throw err instanceof Error ? err : new Error(String(err))
-  }
-  return { client, bridgeHost }
+/**
+ * The flags a pi dispatch target's spawn carries after `--mode rpc -e
+ * <bridge>` and its env — see `defaultSpawnPiTarget`'s doc comment above.
+ * Handed to whichever spawn is active (real or test-injected) in the spawn
+ * opts, so the dispatcher states them once.
+ */
+const PI_TARGET_SPAWN_FLAGS: Pick<PiTargetSpawnOpts, 'args' | 'env'> = {
+  args: ['--no-session'],
+  env: buildPiTargetChildEnv
 }
+
+const defaultSpawnPiTarget: SpawnPiTargetFn = defaultSpawnPiChild
 
 export class CrossEngineDispatcher {
   private readonly deps: DispatcherDeps
@@ -2012,8 +2159,8 @@ export class CrossEngineDispatcher {
   private readonly heartbeatMs: number
   private readonly piAbortSettleGraceMs: number
   private readonly codexAbortSettleGraceMs: number
-  private readonly sseReconnectDelayMs: number
   private readonly spawnClaudeQuery: SpawnClaudeQueryFn
+  private readonly loadUserRules: (cwd: string) => MergedClaudeRules
   private readonly spawnPiTarget: SpawnPiTargetFn
   private readonly attachCodexTarget: AttachCodexTargetFn
   private readonly codexVaultAccounts: boolean
@@ -2028,8 +2175,12 @@ export class CrossEngineDispatcher {
 
   /** Keyed by target session id (opencode session id, or Claude session UUID). */
   private targets = new Map<string, TargetEntry>()
-  /** Keyed by resolved cwd — opencode connections only. */
+  /** opencode feed records, keyed by SERVER (`serverKey`), never by cwd. */
   private connections = new Map<string, ConnRecord>()
+  /** Target sessions to delete once a server is reachable (lost with theirs). */
+  private orphanSessions = new Set<string>()
+  /** Per dispatching session, bumped by `disposeFor`: a target created across one is disposed too. */
+  private disposals = new Map<string, number>()
   /** Keyed by prefixed requestId ('xeng:<id>'). */
   private pendingApprovals = new Map<string, PendingForwardedApproval>()
   private activeDispatches = 0
@@ -2064,8 +2215,8 @@ export class CrossEngineDispatcher {
     this.heartbeatMs = deps.heartbeatMs ?? HEARTBEAT_MS
     this.piAbortSettleGraceMs = deps.piAbortSettleGraceMs ?? PI_ABORT_SETTLE_GRACE_MS
     this.codexAbortSettleGraceMs = deps.codexAbortSettleGraceMs ?? CODEX_ABORT_SETTLE_GRACE_MS
-    this.sseReconnectDelayMs = deps.sseReconnectDelayMs ?? SSE_RECONNECT_DELAY_MS
     this.spawnClaudeQuery = deps.spawnClaudeQuery ?? defaultSpawnClaudeQuery
+    this.loadUserRules = deps.loadUserRules ?? mergedClaudeRulesFor
     this.spawnPiTarget = deps.spawnPiTarget ?? defaultSpawnPiTarget
     this.attachCodexTarget = deps.attachCodexTarget ?? defaultAttachCodexTarget(codexHostRegistry)
     this.codexVaultAccounts = deps.codexVaultAccounts ?? false
@@ -2076,6 +2227,25 @@ export class CrossEngineDispatcher {
   /** For tests: current in-flight dispatch count. */
   get inFlightCount(): number {
     return this.activeDispatches
+  }
+
+  /**
+   * The user's deny and ask rules for `cwd`, with an EMPTY allow tier (ADR-085
+   * §3, owner ruling 3: deny/ask rules hold in every mode, dispatch targets
+   * included). Targets never get the user's allow rules or additional
+   * directories — a dispatched agent is governed by its autonomy mode, not by
+   * what the user pre-approved for their own chats (ADR-033). Read fresh per
+   * call, like the interactive sessions' gates.
+   */
+  private userDenyAsk(cwd: string, restriction?: CallerRestriction): MergedClaudeRules {
+    const rules = this.loadUserRules(cwd)
+    return {
+      deny: [...rules.deny, ...(restriction?.deny ?? [])],
+      ask: [...rules.ask, ...(restriction?.ask ?? [])],
+      allow: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    }
   }
 
   /**
@@ -2191,6 +2361,22 @@ export class CrossEngineDispatcher {
     ) {
       return errorResult(`Dispatching into engine "${req.engine}" is not supported yet.`)
     }
+    // A continuation keeps the restriction its target was created with, and
+    // may not loosen it: a caller restricted further than the target was
+    // starts a fresh dispatch (ADR-097 S9, option a).
+    if (req.sessionId) {
+      const held = this.targets.get(req.sessionId)?.ctx.callerRestriction
+      if (held || ctx.callerRestriction) {
+        if (!restrictionCovers(held, ctx.callerRestriction)) {
+          return errorResult(
+            `Dispatch session "${req.sessionId}" was started without the calling subagent's restrictions — ` +
+              'start a fresh dispatch without session_id.',
+            req.sessionId
+          )
+        }
+        ctx = { ...ctx, callerRestriction: mergeRestrictions(held, ctx.callerRestriction) }
+      }
+    }
     // Read the cap HERE, not in the constructor: the user can raise it in
     // Settings mid-run and the next dispatch has to honour the new number.
     // `Infinity` (the "no limit" pick) can never satisfy the comparison, so the
@@ -2214,7 +2400,7 @@ export class CrossEngineDispatcher {
     // TaskCard's Stop button is clickable as soon as the dispatch tool part
     // renders "running" (opencode marks it running when ctx.ask resolves),
     // which is potentially SECONDS before model resolution + target creation
-    // finish (a cold per-cwd opencode server spawn can take ~15s). Registering
+    // finish (a cold opencode server spawn can take seconds). Registering
     // inside resolveAndRun* left that whole window unstoppable — the stop
     // missed the registry, fell through to the session path, and the dispatch
     // ran to completion (live-reproduced). A stop landing during target
@@ -2271,69 +2457,82 @@ export class CrossEngineDispatcher {
     _updatedPermissions?: PermissionSuggestion[]
   ): boolean {
     if (!requestId.startsWith(XENG_REQUEST_PREFIX)) return false
-    const pending = this.pendingApprovals.get(requestId)
+    const pending = this.takePendingApproval(requestId)
     // Prefixed ids are exclusively dispatcher-owned: consume even when stale
     // (e.g. already cascade-rejected) so no session ever sees an xeng id.
     if (!pending) return true
-    this.pendingApprovals.delete(requestId)
+
+    // A held auto-mode block (ADR-091 §3): an override of this ONE call, so
+    // `allowForSession` is a plain allow; a deny answers with the judge's own
+    // text and records the block on the target's outcomes, never a human
+    // refusal.
+    let answer = { decision, answers }
+    if (pending.hold) {
+      const { hold } = pending
+      if (decision === 'deny') {
+        answer = {
+          decision,
+          answers: { feedback: keepTargetBlock(hold.judge, hold.toolUseId, hold.reason) }
+        }
+      } else {
+        hold.judge.recordHoldApproved()
+        // The review reads "approved by you" (ADR-091 part 6).
+        hold.ledger?.approveHeld(hold.toolUseId)
+        answer = { decision: 'allow', answers: undefined }
+      }
+    }
 
     if (pending.kind === 'claude' || pending.kind === 'pi' || pending.kind === 'codex') {
-      pending.resolve(decision, answers)
+      pending.resolve(answer.decision, answer.answers)
       return true
     }
 
-    const allow = decision === 'allow' || decision === 'allowForSession'
-    const reply = !allow ? 'reject' : decision === 'allowForSession' ? 'always' : 'once'
-    // Deny feedback is model-visible (CorrectedError, non-fatal) — parity with
-    // OpencodeSession.resolveApproval.
-    const message = !allow ? answers?.feedback || 'User denied' : undefined
-    const replied = message
-      ? pending.client.replyPermission(pending.permissionId, reply, message)
-      : pending.client.replyPermission(pending.permissionId, reply)
-    replied.catch((err) => {
-      logger.warn(
-        'CrossEngineDispatcher',
-        `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`
-      )
-    })
+    const allow = answer.decision === 'allow' || answer.decision === 'allowForSession'
+    // Never `always` (ADR-085 S2): opencode's saved table is shared with the
+    // user's own opencode and would outrank the user's deny/ask rules for every
+    // chat. No session-allow set is kept for a target (`NO_SESSION_ALLOWS`).
+    // A reject always carries the model-visible reason (ADR-097 §3).
+    replyTargetPermission(
+      pending.client,
+      pending.askingSessionId,
+      pending.permissionId,
+      allow
+        ? { decision: 'once' }
+        : { decision: 'reject', message: answer.answers?.feedback?.trim() || 'User denied' }
+    )
     return true
   }
 
-  /** Tear down every target (+ SSE subs / server refs) owned by a dispatching session. */
+  /** Tear down every target (+ feeds / server leases) owned by a dispatching session. */
   disposeFor(routingId: string): void {
+    this.disposals.set(routingId, (this.disposals.get(routingId) ?? 0) + 1)
     for (const [sessionId, entry] of [...this.targets]) {
       if (entry.fromRoutingId !== routingId) continue
       this.targets.delete(sessionId)
       this.dismissPendingForTarget(sessionId)
       if (entry.kind === 'opencode') {
-        if (entry.ctx.toolUseId) this.sealOpencodeTargetItems(entry, entry.ctx.toolUseId)
-        // Settle a turn still in flight (ADR-033's 2026-09-01 amendment). The
-        // entry has just left `this.targets` and its session is about to be
-        // deleted, so NOTHING can settle it afterwards — the SSE branches look
-        // targets up by session id, and `promptAsync` has no pending promise to
-        // reject the way the old synchronous prompt did. Without this the
-        // dispatch would hang, holding its `activeDispatches` slot, until the
-        // inactivity watchdog eventually fired.
+        // A verdict still in flight sees the entry gone from `this.targets`
+        // (its `stillPending`), so it replies nothing (ADR-088).
+        this.sealOpencodeTargetItems(entry)
+        // Settle a turn still in flight (ADR-033's 2026-09-01 amendment): the
+        // entry has just left `this.targets`, so nothing else can.
         const settle = entry.settled
         entry.settled = null
-        settle?.({ kind: 'sseError', message: 'the dispatching session was disposed' })
-        entry.client.deleteSession(sessionId).catch(() => {})
-        this.releaseConnection(entry)
+        settle?.({ kind: 'failed', message: 'the dispatching session was disposed' })
+        this.teardownOpencodeTarget(entry)
       } else if (entry.kind === 'claude') {
         entry.itemStreams.sealAll()
         // Killing the process is the only teardown a Claude target needs —
         // no server ref, no remote session to delete.
         entry.abortController.abort()
       } else if (entry.kind === 'pi') {
-        for (const output of finishPiMessage(entry.mapperState))
-          this.forwardPiTargetMessage(entry, output)
+        entry.runner.flush()
         // pi (ADR-033 M4c): kill the child + its OWN per-target bridge host
         // (mirrors PiSession.cancel()'s identical teardown order). Both calls
         // are idempotent (PiRpcClient.dispose()/PiBridgeHost.dispose() no-op
         // if already torn down), so this is safe even if the process already
         // exited on its own (onExit already disposed the bridge host).
-        entry.client.dispose()
-        entry.bridgeHost.dispose()
+        entry.runner.dispose()
       } else {
         if (entry.ctx.toolUseId) this.sealCodexTargetItems(entry, entry.ctx.toolUseId)
         // codex (slice H, ADR-069 §7): a target is a THREAD on the caller's
@@ -2359,16 +2558,18 @@ export class CrossEngineDispatcher {
     }
   }
 
-  // ── opencode direction (M1) ───────────────────────────────────────────────
+  // ── opencode direction (M1, opencode 2.x — ADR-097 S9) ────────────────────
 
   /** Everything past the guards for engine:'opencode' — runs with an
    *  activeDispatches slot held and the Stop handle already registered
    *  (`stopController` is created + registered in dispatchInner, BEFORE any
    *  await, so a Stop click during target creation is not lost).
    *
-   *  The turn itself is `promptAsync` + SSE-driven completion (ADR-033's
-   *  2026-09-01 amendment) — see the block comment at the promptAsync call for
-   *  the undici-headersTimeout failure that retired the synchronous prompt. */
+   *  The turn is an inbox prompt (`POST …/prompt`, answered at once) followed
+   *  on the server's event feed through the target's own S4 mapper: its
+   *  `result`/`error`/`auth-required`/`stopped` output settles the turn, and
+   *  the turn's text and usage come from the same mapper outputs. Nothing
+   *  waits header-silently on a model turn (ADR-033's 2026-09-01 amendment). */
   private async resolveAndRunOpencode(
     req: DispatchRequest,
     ctx: DispatchContext,
@@ -2380,7 +2581,7 @@ export class CrossEngineDispatcher {
     if (!requestedModel) {
       return errorResult(
         'No model is configured for cross-engine dispatch into opencode. Ask the user to set ' +
-          'Engines › opencode › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
+          'Settings › Cross-engine dispatch › Dispatch into › opencode (the `dispatch.defaultModel` field in ' +
           '~/.claude/ui/engines/opencode.json), or pass `model` explicitly.'
       )
     }
@@ -2409,16 +2610,9 @@ export class CrossEngineDispatcher {
             'Start a fresh dispatch without session_id.'
         )
       }
-      // M-XE1: busy-reject BEFORE touching entry state — same rationale as the
-      // Claude/pi targets. opencode drives ONE turn per session over a single
-      // ambient SSE tap gated by `entry.busy`; two concurrent same-session_id
-      // dispatch_agent calls (their MCP handlers overlap within one assistant
-      // turn) would both clear the cost-cap check before either records spend,
-      // both promptAsync() the same session, and the first finisher's `finally`
-      // would flip `busy` off, reset `turnToolUseIds` and NULL `settled` out
-      // from under the still-running second turn (whose completion would then
-      // never settle at all). Reject the second call; the running turn is left
-      // completely undisturbed (no abort, no removal, no ctx swap).
+      // M-XE1: busy-reject BEFORE touching entry state — two concurrent
+      // same-session_id calls would both pass the cost cap and the first
+      // finisher's `finally` would clear the second turn's state.
       if (existing.busy) {
         return errorResult(
           `Dispatch session "${req.sessionId}" is already running a turn — wait for it to finish before continuing it.`,
@@ -2428,8 +2622,7 @@ export class CrossEngineDispatcher {
       // ADR-033 M4-C: reject a continuation turn once this target's tracked
       // cumulative cost has met/exceeded the configured cap. The target stays
       // alive — raising dispatch.maxCostUsd or starting a fresh dispatch both
-      // recover. A brand-new target (the `else` branch below) always starts
-      // at cumulativeCostUsd 0, so no check is needed there.
+      // recover. A brand-new target always starts at 0.
       if (
         dispatchCfg?.maxCostUsd !== undefined &&
         existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd
@@ -2445,13 +2638,57 @@ export class CrossEngineDispatcher {
       existing.ctx = ctx
       entry = existing
     } else {
-      entry = await this.createOpencodeTarget(ctx)
+      entry = await this.createOpencodeTarget(ctx, model)
     }
+    // The judge's subagent task is the LATEST dispatch prompt (ADR-088).
+    entry.lastPrompt = req.prompt
+    // Reserve the target before the first await below, so a concurrent
+    // continuation is busy-rejected rather than racing this one.
+    entry.busy = true
+    let started = false
+    try {
+      // A previous turn's give-up is still settling: a prompt now would steer
+      // into the interrupted execution instead of starting this one.
+      if (entry.stopping) await entry.stopping
+      entry.draining = false
 
-    // ── Run the turn ──────────────────────────────────────────────────────
-    // Progress heartbeat: resets opencode's MCP callTool timeout on the
-    // reverse direction later, and feeds TaskCard progress. Harmless no-op
-    // for Claude-side dispatch today (in-process MCP sets no progressToken).
+      // The LIVE mode's ruleset (a continuation follows the parent's mode
+      // switches — 2.x's PATCH replaces). Fail closed: no rules, no turn.
+      try {
+        await this.applyTargetRules(entry)
+      } catch (err) {
+        const msg = `could not apply the dispatch permissions: ${errText(err)}`
+        emitDispatchNotification(ctx, entry.sessionId, 'failed', `Dispatched turn failed: ${msg}`)
+        return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId)
+      }
+      // ADR-097 §5 rule 2: a ChatGPT turn goes only on a token with time left.
+      const notice = await opencodeAuthHooks()
+        .beforeTurn(parseModelString(model).providerID)
+        .catch(() => null)
+      if (notice !== null) {
+        emitDispatchNotification(ctx, entry.sessionId, 'failed', notice)
+        return errorResult(notice, entry.sessionId)
+      }
+      // The feed has no replay: follow it before the prompt goes out.
+      await withinMs(entry.rec.ready, FEED_READY_WAIT_MS)
+      started = true
+      return await this.runOpencodeTurn(entry, req, ctx, model, stopController)
+    } finally {
+      if (!started) entry.busy = false
+    }
+  }
+
+  /** One dispatch turn on a ready target (`busy` already set; cleared here). */
+  private async runOpencodeTurn(
+    entry: OpencodeTargetEntry,
+    req: DispatchRequest,
+    ctx: DispatchContext,
+    model: string,
+    stopController: AbortController
+  ): Promise<DispatchResult> {
+    const dispatchCfg = this.deps.loadEngineConfig(req.engine).dispatch
+    // Progress heartbeat: resets the caller's MCP callTool timeout (opencode as
+    // the source) and feeds TaskCard progress.
     let beats = 0
     const heartbeat = setInterval(() => {
       beats++
@@ -2465,79 +2702,58 @@ export class CrossEngineDispatcher {
     const signal = ctx.extra?.signal
     let abortListener: (() => void) | undefined
 
-    // Only while a turn is actually running: gates the SSE stream tap so
-    // stray events after this turn ends never emit stale deltas (ADR-033 M3).
-    entry.busy = true
-    // Per-turn distinct tool_use id set (ADR-033 M4-B) — fresh at the start of
-    // every turn, populated by the SSE streaming tap, .size read at turn end.
+    // Per-turn state. `turnStarted` gates the settle: a terminal output seen
+    // before THIS turn's prompt was delivered belongs to another execution.
+    const inboxID = newDispatchInboxId()
+    entry.turnInboxId = inboxID
+    entry.turnStarted = false
     entry.turnToolUseIds = new Set()
-    // Everything this target has already streamed belongs to a PREVIOUS turn —
-    // see `priorMessageIds`. (`emittedToolResults` is deliberately NOT reset:
-    // it is target-lifetime, see its own doc.)
-    entry.priorMessageIds = new Set(entry.accumulators.keys())
+    entry.turnSteps = []
+    entry.turnMessages = new Map()
+    entry.openItems.clear()
     const turnStartedAt = this.now()
     entry.turnStartedAt = turnStartedAt
     entry.lastActivityAt = turnStartedAt
 
     type Raced =
-      | { kind: 'sse-idle' }
-      | { kind: 'sse-error'; message: string }
+      | { kind: 'done' }
+      | { kind: 'failed'; message: string }
       | { kind: 'err'; err: unknown }
       | { kind: 'timeout'; reason: 'absolute' | 'inactivity' }
       | { kind: 'abort' }
       | { kind: 'stop' }
 
-    // Install the settle resolver BEFORE the prompt is sent — synchronously, so
-    // no `session.idle`/`session.error` can possibly arrive first and find a
-    // null `settled` (the SSE loop is already running for this cwd, and a fast
-    // local model can idle within milliseconds of the fork).
+    // Installed BEFORE the prompt goes out, so no terminal output can find it null.
     const settledPromise = new Promise<Raced>((resolve) => {
-      entry.settled = (outcome): void =>
-        resolve(
-          outcome.kind === 'idle'
-            ? { kind: 'sse-idle' }
-            : { kind: 'sse-error', message: outcome.message }
-        )
+      entry.settled = (outcome): void => resolve(outcome)
     })
-
-    /*
-     * WHY prompt_async AND NOT prompt (ADR-033's 2026-09-01 amendment):
-     * `POST /session/{id}/message` sends NO response headers until the whole
-     * turn finishes, and in Electron main the global `fetch` is Node's undici,
-     * whose default `headersTimeout` is 300 s. Every dispatched turn longer
-     * than five minutes therefore died client-side with a bare
-     * `TypeError: fetch failed` (live-reproduced on three ~5m02s local-model
-     * turns) while the SERVER-side turn kept running, unsupervised and still
-     * editing files. `prompt_async` returns 204 the moment the turn is forked
-     * server-side, so nothing is waiting on a silent socket; completion comes
-     * from the SSE stream this cwd is already subscribed to — the exact shape
-     * the interactive OpencodeSession has always used.
-     *
-     * A RESOLVED promptAsync must NOT settle the race (the turn has only just
-     * STARTED), hence the never-resolving promise on the success branch; only a
-     * rejection — the server refused the prompt outright — is a race outcome.
-     */
-    const promptPromise: Promise<Raced> = entry.client
-      .promptAsync(entry.sessionId, {
-        model: parseModelString(model),
-        parts: [{ type: 'text', text: req.prompt }]
+    // The prompt answers at once with the inbox item; only a REFUSAL is a race
+    // outcome (the turn itself ends on the feed). NEVER posted once the turn
+    // was given up (a Stop armed before it, the caller's abort): an interrupt
+    // cannot stop a turn that has not started yet.
+    const givenUp = stopController.signal.aborted || signal?.aborted === true
+    let promptPromise: Promise<Raced> = new Promise<Raced>(() => {})
+    entry.pendingPrompt = null
+    if (!givenUp) {
+      const posted = entry.client.prompt(entry.sessionId, {
+        id: inboxID,
+        text: req.prompt,
+        delivery: 'steer'
       })
-      .then(
+      entry.pendingPrompt = { posted, inboxID }
+      promptPromise = posted.then(
         () => new Promise<Raced>(() => {}),
         (err): Raced => ({ kind: 'err', err })
       )
-    /*
-     * Turn liveness — the two caps the user configured for the TARGET engine,
-     * both unlimited unless set (ADR-033's 2026-09-01 amendment for the shape,
-     * its 2026-09-18 amendment for "no built-in default", and
-     * `startTurnWatchdog` for the one implementation all four directions now
-     * share).
-     */
+    }
+    // A switch of the parent's mode mid-turn re-applies the ruleset at once,
+    // as an opencode chat does (2.x's PATCH replaces; the plugin re-reads the
+    // session's rules on every ask).
+    const modeWatch = setInterval(() => this.followTargetMode(entry), MODE_WATCH_MS)
     const caps = resolveTurnLiveness(dispatchCfg)
     const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
       this.hasPendingApprovalFor(entry.sessionId)
     )
-    const timeoutPromise: Promise<Raced> = watchdog.promise
     const abortPromise: Promise<Raced> = signal
       ? signal.aborted
         ? Promise.resolve({ kind: 'abort' })
@@ -2554,75 +2770,15 @@ export class CrossEngineDispatcher {
           })
         })
 
-    try {
-      const winner = await Promise.race([
-        settledPromise,
-        promptPromise,
-        timeoutPromise,
-        abortPromise,
-        stopPromise
-      ])
-
-      if (winner.kind === 'stop') {
-        // Session survives (parity with the timeout path) — abortSession
-        // only interrupts THIS turn server-side. Drop the settle resolver
-        // FIRST: opencode publishes `session.idle` for the aborted turn too,
-        // and that must land on a null `settled` (this call has already
-        // returned its result) — see OpencodeTargetEntry.settled.
-        entry.settled = null
-        entry.client.abortSession(entry.sessionId).catch(() => {})
-        this.dismissPendingForTarget(entry.sessionId)
-        emitDispatchNotification(ctx, entry.sessionId, 'stopped', 'Dispatch stopped by user.')
-        return errorResult('Dispatch stopped by user.', entry.sessionId)
+    /** The ledger row + cap + breakdown for whatever this turn spent so far. */
+    const account = (record: boolean): { costUsd: number | null; usage: OpencodeTurnUsage } => {
+      const usage = opencodeTurnUsage(model, entry.turnSteps)
+      if (usage.costUsd === null) entry.unpricedTurns++
+      else {
+        entry.cumulativeCostUsd += usage.costUsd
+        if (usage.costUsd > 0) ctx.addDispatchedCost?.(req.engine, model, usage.costUsd)
       }
-
-      if (winner.kind === 'timeout' || winner.kind === 'abort') {
-        // Same settle-first ordering as the stop branch above.
-        entry.settled = null
-        // Interrupt the target turn server-side.
-        entry.client.abortSession(entry.sessionId).catch(() => {})
-        this.dismissPendingForTarget(entry.sessionId)
-        const text =
-          winner.kind === 'abort'
-            ? 'Dispatch cancelled.'
-            : turnTimeoutText(winner.reason, caps, OPENCODE_TIMEOUT_AFTERMATH)
-        const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
-        emitDispatchNotification(ctx, entry.sessionId, status, text)
-        // Recorded for 'failed' (timeout) only — 'stopped' (abort/cancel) is
-        // never recorded (ADR-033 M4-B: "not for stopped-before-start" — no
-        // usage numbers exist for a turn that never returned a result).
-        if (status === 'failed') {
-          this.safeRecordUsage({
-            ts: this.now(),
-            fromRoutingId: ctx.fromRoutingId,
-            targetEngine: req.engine,
-            targetModel: model,
-            targetSessionId: entry.sessionId,
-            toolUseId: ctx.toolUseId ?? null,
-            account: opencodeDispatchAccount(model),
-            engineCostIsEquivalent: false
-          })
-        }
-        return errorResult(text, entry.sessionId)
-      }
-      if (winner.kind === 'err') {
-        // promptAsync itself was refused (the server never accepted the turn).
-        // Null the resolver first, like every other give-up path — there is no
-        // real window here (nothing awaits before the `finally` that nulls it
-        // anyway), this is the invariant on `settled` holding uniformly.
-        entry.settled = null
-        this.dismissPendingForTarget(entry.sessionId)
-        // ZOMBIE GUARD: the refusal may still have left a turn running — the
-        // fork's `promptAsync` handler forks the prompt with
-        // `startImmediately: true` and only THEN returns, and a transport-level
-        // failure (a dropped socket on an accepted request) is indistinguishable
-        // from a rejected one out here. An abort against a session that never
-        // started anything is a harmless no-op; the reverse — a dispatched agent
-        // left editing files with nobody watching — is exactly the bug this
-        // rework closes.
-        entry.client.abortSession(entry.sessionId).catch(() => {})
-        const msg = winner.err instanceof Error ? winner.err.message : String(winner.err)
-        emitDispatchNotification(ctx, entry.sessionId, 'failed', `Dispatched turn failed: ${msg}`)
+      if (record)
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
@@ -2630,798 +2786,1062 @@ export class CrossEngineDispatcher {
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
+          ...(usage.steps > 0 ? { tokens: usage.tokens } : {}),
+          engineCostUsd: usage.engineCostUsd,
           account: opencodeDispatchAccount(model),
+          // opencode reports what it CHARGED, not an equivalent (ADR-071 §1).
           engineCostIsEquivalent: false
         })
+      return { costUsd: usage.costUsd, usage }
+    }
+
+    try {
+      const winner = await Promise.race([
+        settledPromise,
+        promptPromise,
+        watchdog.promise,
+        abortPromise,
+        stopPromise
+      ])
+
+      if (winner.kind === 'stop' || winner.kind === 'timeout' || winner.kind === 'abort') {
+        // The session survives for a continuation; only this turn is
+        // interrupted. Drop the resolver FIRST: the interrupt's own
+        // `stopped` output must find nothing to settle.
+        entry.settled = null
+        entry.draining = true
+        void this.stopTargetTurn(entry, entry.pendingPrompt)
+        this.dismissPendingForTarget(entry.sessionId)
+        const text =
+          winner.kind === 'stop'
+            ? 'Dispatch stopped by user.'
+            : winner.kind === 'abort'
+              ? 'Dispatch cancelled.'
+              : turnTimeoutText(winner.reason, caps, OPENCODE_TIMEOUT_AFTERMATH)
+        const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
+        // A timeout is a failed turn (always a row); a stop or cancel is a row
+        // only when the turn already spent something (ADR-033 M4-B).
+        account(status === 'failed' || entry.turnSteps.length > 0)
+        emitDispatchNotification(ctx, entry.sessionId, status, text)
+        return errorResult(text, entry.sessionId)
+      }
+
+      if (winner.kind === 'err') {
+        // The server refused the prompt. ZOMBIE GUARD: a transport failure on
+        // an accepted request is indistinguishable from a refusal out here,
+        // and an interrupt of an idle session is a no-op upstream.
+        entry.settled = null
+        entry.draining = true
+        void this.stopTargetTurn(entry, entry.pendingPrompt)
+        this.dismissPendingForTarget(entry.sessionId)
+        const msg = errText(winner.err)
+        account(true)
+        emitDispatchNotification(ctx, entry.sessionId, 'failed', `Dispatched turn failed: ${msg}`)
         return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId)
       }
 
-      if (winner.kind === 'sse-error') {
-        // The turn RAN and failed server-side (`session.error`) — the same
-        // class of outcome as the stored `info.error` below, just delivered on
-        // the event stream instead (a turn that dies before writing a final
-        // assistant message only ever surfaces here). No abort: it already
-        // ended.
+      if (winner.kind === 'failed') {
+        // The turn RAN and failed server-side; it already ended (no interrupt).
+        // Its spend still counts toward the cap and the breakdown.
         this.dismissPendingForTarget(entry.sessionId)
-        // Best-effort spend recovery — a turn that errored mid-flight can still
-        // have burned real tokens, and that spend must count toward the cap +
-        // the dispatching session's breakdown exactly like the `info.error`
-        // path's does. Purely additive: a failed read leaves the row's numbers
-        // null rather than failing an already-failed turn twice.
-        //
-        // Null until a message is actually read back: a failed read is not a
-        // free turn, and neither is a turn on a model we cannot price.
-        let errTurnCostUsd: number | null = null
-        // The LEDGER half of the same recovery (ADR-071 §1) — the turn's token
-        // split and opencode's own charge, both left unset when the read fails
-        // so the row says "unknown" rather than "nothing".
-        let errTokens: UsageTurnTokens | undefined
-        let errEngineCostUsd: number | null = null
-        try {
-          const info = lastAssistantMessage(await entry.client.listMessages(entry.sessionId))?.info
-          errTurnCostUsd = opencodeTurnCost(model, info).displayCostUsd
-          errTokens = opencodeDispatchTokens(info)
-          errEngineCostUsd = info?.cost ?? null
-        } catch (err) {
-          logger.debug(
-            'CrossEngineDispatcher',
-            `usage recovery after session.error failed: ${err instanceof Error ? err.message : String(err)}`
-          )
-        }
+        account(true)
         emitDispatchNotification(
           ctx,
           entry.sessionId,
           'failed',
           `Dispatched turn failed: ${winner.message}`
         )
-        this.safeRecordUsage({
-          ts: this.now(),
-          fromRoutingId: ctx.fromRoutingId,
-          targetEngine: req.engine,
-          targetModel: model,
-          targetSessionId: entry.sessionId,
-          toolUseId: ctx.toolUseId ?? null,
-          ...(errTokens ? { tokens: errTokens } : {}),
-          engineCostUsd: errEngineCostUsd,
-          account: opencodeDispatchAccount(model),
-          engineCostIsEquivalent: false
-        })
-        if (errTurnCostUsd === null) entry.unpricedTurns++
-        else {
-          entry.cumulativeCostUsd += errTurnCostUsd
-          if (errTurnCostUsd > 0) ctx.addDispatchedCost?.(req.engine, model, errTurnCostUsd)
-        }
         return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId)
       }
 
-      // ── The turn ended cleanly (`session.idle`) ─────────────────────────
-      // `prompt_async` carried no result body, so the turn's own output is read
-      // back from stored history. No abort on a failed read: the turn DID end
-      // server-side, there is nothing left to interrupt.
-      let messages: StoredMessage[]
-      try {
-        messages = await entry.client.listMessages(entry.sessionId)
-      } catch (err) {
-        this.dismissPendingForTarget(entry.sessionId)
-        const msg = err instanceof Error ? err.message : String(err)
-        emitDispatchNotification(ctx, entry.sessionId, 'failed', `Dispatched turn failed: ${msg}`)
-        this.safeRecordUsage({
-          ts: this.now(),
-          fromRoutingId: ctx.fromRoutingId,
-          targetEngine: req.engine,
-          targetModel: model,
-          targetSessionId: entry.sessionId,
-          toolUseId: ctx.toolUseId ?? null,
-          account: opencodeDispatchAccount(model),
-          engineCostIsEquivalent: false
-        })
-        return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId)
-      }
-      const finalMessage = lastAssistantMessage(messages)
-      // A turn can go idle having reported a failure — opencode records it on
-      // the assistant message's `info.error` (a named-error union, each
-      // { name, data?: { message? } }) rather than on the event stream. Rides
-      // through StoredMessage['info']'s index signature, so it needs the cast.
-      // Surface it as an isError instead of silently returning the empty-text
-      // fallback (hiding a hard failure like "Key limit exceeded" as an apparent
-      // success). Target stays alive for continuation, so return its sessionId
-      // (parity with other error paths).
-      const turnError = finalMessage?.info.error as
-        { name?: string; data?: { message?: string } } | undefined
-      if (turnError) {
-        this.dismissPendingForTarget(entry.sessionId)
-        const detail =
-          turnError.data?.message || turnError.name || 'the dispatched agent reported an error'
-        emitDispatchNotification(
-          ctx,
-          entry.sessionId,
-          'failed',
-          `Dispatched turn failed: ${detail}`
-        )
-        // The stored message carries real `info.tokens`/`info.cost` even when
-        // the turn reports an error (the turn ran, it just didn't finish
-        // cleanly) — capture that spend instead of fabricating nulls, and fold
-        // it into the cap + Slice-C breakdown. Mirrors the Claude failed-subtype
-        // path; without it a target whose turns keep erroring spends real tokens
-        // that never count toward maxCostUsd or the dispatching session's cost.
-        const errTurnCostUsd = opencodeTurnCost(model, finalMessage?.info).displayCostUsd
-        this.safeRecordUsage({
-          ts: this.now(),
-          fromRoutingId: ctx.fromRoutingId,
-          targetEngine: req.engine,
-          targetModel: model,
-          targetSessionId: entry.sessionId,
-          toolUseId: ctx.toolUseId ?? null,
-          tokens: opencodeDispatchTokens(finalMessage?.info),
-          engineCostUsd: finalMessage?.info.cost ?? null,
-          account: opencodeDispatchAccount(model),
-          engineCostIsEquivalent: false
-        })
-        if (errTurnCostUsd === null) entry.unpricedTurns++
-        else {
-          entry.cumulativeCostUsd += errTurnCostUsd
-          if (errTurnCostUsd > 0) ctx.addDispatchedCost?.(req.engine, model, errTurnCostUsd)
-        }
-        return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId)
-      }
-      // No assistant message at all (a turn that idled without producing one)
-      // falls through here to the empty-text fallback with zero usage — the
-      // same result the old synchronous path produced for an empty `parts`.
-      const text = (finalMessage?.parts ?? [])
-        .filter((p) => p?.type === 'text')
-        .map((p) => p?.text ?? '')
-        .join('')
-      const finalText = text || '(the dispatched agent returned no text)'
-
-      // ── Usage capture (ADR-033 M4-B) ────────────────────────────────────
-      // opencode's `info.tokens`/`info.cost` are a per-MESSAGE (i.e. per-turn
-      // — each turn creates a new message id) cumulative snapshot, same shape
-      // event-mapper.ts reads for OpencodeSession's own metering.
-      const totalTokens = storedMessageTotalTokens(finalMessage?.info)
-      // `info.cost` alone is what let a subscription-authenticated target spend
-      // past the cap forever (ADR-071 §2) — see opencodeTurnCost.
-      const turnCostUsd = opencodeTurnCost(model, finalMessage?.info).displayCostUsd
-      const durationMs = this.now() - turnStartedAt
-
-      // ── Cost cap crossing note (ADR-033 M4-C) ───────────────────────────
+      // ── The turn succeeded ──────────────────────────────────────────────
+      const finalText =
+        lastTurnText(entry.turnMessages) || '(the dispatched agent returned no text)'
       const maxCostUsd = dispatchCfg?.maxCostUsd
       const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
-      entry.cumulativeCostUsd += turnCostUsd ?? 0
+      const { costUsd, usage } = account(true)
       let outText = finalText
-      if (turnCostUsd === null) {
-        // An unpriced turn can never trip the cap, so say so on the turn
-        // itself rather than let a silent zero read as a counted turn.
-        entry.unpricedTurns++
+      if (costUsd === null) {
+        // An unpriced turn can never trip the cap: say so on the turn itself.
         if (maxCostUsd !== undefined) outText += cannotCountNote(model)
       } else if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
         outText +=
           '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
       }
-
-      // ── Fold into the dispatching session's own cost breakdown (Slice C) ──
-      if (turnCostUsd !== null && turnCostUsd > 0) {
-        ctx.addDispatchedCost?.(req.engine, model, turnCostUsd)
-      }
-
       emitDispatchNotification(ctx, entry.sessionId, 'completed', finalText, {
-        totalTokens,
+        totalTokens: usage.totalTokens,
         toolUses: entry.turnToolUseIds.size,
-        durationMs
-      })
-      this.safeRecordUsage({
-        ts: this.now(),
-        fromRoutingId: ctx.fromRoutingId,
-        targetEngine: req.engine,
-        targetModel: model,
-        targetSessionId: entry.sessionId,
-        toolUseId: ctx.toolUseId ?? null,
-        tokens: opencodeDispatchTokens(finalMessage?.info),
-        // opencode reports what it CHARGED, not an equivalent — the ledger's
-        // cost rule treats it as a bill (ADR-071 §1).
-        engineCostUsd: finalMessage?.info.cost ?? null,
-        account: opencodeDispatchAccount(model),
-        engineCostIsEquivalent: false
+        durationMs: this.now() - turnStartedAt
       })
       return { text: outText, sessionId: entry.sessionId }
     } finally {
-      if (ctx.toolUseId) this.sealOpencodeTargetItems(entry, ctx.toolUseId)
+      this.sealOpencodeTargetItems(entry)
       entry.busy = false
-      // Belt-and-suspenders settle-once (the winner branches already null it on
-      // the give-up paths, and the settlers null it before invoking): whatever
-      // happened, no LATER SSE event may resolve a turn that has returned.
+      entry.pendingPrompt = null
+      // Settle-once: no LATER output may resolve a turn that has returned.
       entry.settled = null
       clearInterval(heartbeat)
+      clearInterval(modeWatch)
       watchdog.dispose()
       if (signal && abortListener) signal.removeEventListener('abort', abortListener)
     }
   }
 
-  private async createOpencodeTarget(ctx: DispatchContext): Promise<OpencodeTargetEntry> {
-    const cwdKey = resolvePath(ctx.cwd)
-    // One serverManager ref per target; the per-cwd client + SSE loop are shared.
+  /**
+   * A new opencode dispatch target: a turn-running lease (so the
+   * `claudeui-xeng` permission guard is required), a client scoped to the
+   * caller's directory, a session created WITH its ruleset, agent and model,
+   * and the server's shared feed. Its own mapper follows the session and its
+   * subagent children; the child keeper narrows those children (S6).
+   */
+  private async createOpencodeTarget(
+    ctx: DispatchContext,
+    model: string
+  ): Promise<OpencodeTargetEntry> {
+    // A dispose of the dispatching chat while this target is being created
+    // disposes the new target too.
+    const generation = this.disposals.get(ctx.fromRoutingId) ?? 0
     const conn = await this.deps.serverManager.acquire(ctx.cwd)
-    let rec = this.connections.get(cwdKey)
-    if (!rec) {
-      rec = {
-        client: this.deps.makeClient(conn.baseUrl, conn.authHeader),
-        sseAbort: new AbortController(),
-        targetCount: 0,
-        cwdKey
-      }
-      this.connections.set(cwdKey, rec)
-      void this.runSseLoop(rec)
-    }
-    rec.targetCount++
-
+    let rec: ConnRecord | null = null
+    let client: DispatchTargetClient | null = null
+    let createdId: string | null = null
     try {
+      client = this.deps.makeClient(conn)
+      rec = this.connectionFor(conn, client)
+      rec.creating++
+      const inputs: TargetRuleInputs = {
+        client,
+        cwd: ctx.cwd,
+        agents: null,
+        mcpServers: null,
+        worktree: undefined
+      }
+      // ADR-088 — the judge reads the target through `entry`, declared below
+      // (it is only ever called once the target runs a turn).
+      const judge = new DispatchTargetJudge({
+        engine: 'opencode',
+        cwd: ctx.cwd,
+        routingId: ctx.fromRoutingId,
+        sessionId: () => entry.sessionId,
+        model: () => entry.model,
+        emit: () => entry.ctx.emit,
+        messages: () => entry.ctx.getMessages(),
+        queuedTurns: () => entry.ctx.getQueuedUserTurns?.() ?? [],
+        blockedCalls: () => entry.ctx.blockedCalls,
+        trajectory: () => entry.trajectory.values(),
+        subagent: () => ({
+          type: 'dispatch:opencode',
+          description: judgeDescription(entry.model, entry.ctx.callerRestriction),
+          prompt: entry.lastPrompt
+        }),
+        loadEngineConfig: this.deps.loadEngineConfig,
+        peekModels: peekOpencodeModels,
+        ...(this.deps.makeJudgeTransport ? { makeTransport: this.deps.makeJudgeTransport } : {})
+      })
+      const mode = liveMode(ctx)
+      const built = await this.buildTargetRuleset(
+        inputs,
+        mode,
+        judge.autoModeActive(mode),
+        ctx.callerRestriction
+      )
+      const { providerID, modelID } = parseModelString(model)
       // The title is load-bearing, not cosmetic: this is a real top-level
       // opencode session, so `usage-reconciler.ts` would otherwise import every
       // assistant message under it a SECOND time, as an ordinary `origin:
       // 'session'` row beside the `dispatch` row this dispatcher writes. It
       // skips sessions carrying this exact title — see the constant's doc.
-      const session = await rec.client.createSession({
-        title: OPENCODE_DISPATCH_SESSION_TITLE
+      const session = await client.createSession({
+        title: OPENCODE_DISPATCH_SESSION_TITLE,
+        model: { providerID, id: modelID },
+        permissions: built.rules,
+        ...(built.agent ? { agent: built.agent } : {})
       })
-      // Inherit the dispatcher's autonomy mode, plus a structural recursion
-      // guard: the target can never call the dispatch tool back (ADR-033 §4).
-      const ruleset: PermissionRule[] = [
-        ...buildRuleset(ctx.autonomyMode),
-        { permission: 'claudeui_dispatch_agent*', pattern: '*', action: 'deny' }
-      ]
-      await rec.client.patchSession(session.id, { permission: ruleset })
-
+      createdId = session.id
+      // A feed lost meanwhile would never deliver this target's events, and a
+      // chat disposed meanwhile owns no target any more: fail, roll back.
+      if (rec.abort.signal.aborted) throw new Error('the opencode event feed was lost')
+      if ((this.disposals.get(ctx.fromRoutingId) ?? 0) !== generation)
+        throw new Error('the dispatching session was disposed')
+      const targetClient = client
       const entry: OpencodeTargetEntry = {
         kind: 'opencode',
         sessionId: session.id,
         fromRoutingId: ctx.fromRoutingId,
-        cwd: ctx.cwd,
-        cwdKey,
-        client: rec.client,
+        conn,
+        rec,
+        ...inputs,
         ctx,
         busy: false,
         settled: null,
+        turnStarted: false,
+        turnInboxId: null,
+        pendingPrompt: null,
+        draining: false,
+        appliedMode: mode,
+        applying: null,
+        stopping: null,
         turnStartedAt: 0,
         lastActivityAt: 0,
-        emittedToolResults: new Set(),
-        priorMessageIds: new Set(),
-        accumulators: new Map(),
-        activeStreamItems: new Map(),
+        mapper: new OpencodeEventMapper({
+          sessionID: session.id,
+          model: session.model ?? { providerID, id: modelID }
+        }),
+        children: new ChildRulesetKeeper({
+          client: () => targetClient,
+          rootSessionId: () => entry.sessionId,
+          rootRules: () => entry.applied?.rules,
+          loadAgents: () => this.targetAgents(entry),
+          agentInfo: (id) => agentById(entry.agents, id),
+          logSource: 'CrossEngineDispatcher'
+        }),
+        agent: session.agent ?? built.agent ?? null,
+        applied: { rules: built.rules, key: JSON.stringify(built.rules) },
+        hostRules: asHostPrecheckRules(built.userRules),
+        openItems: new Map(),
+        turnSteps: [],
+        turnMessages: new Map(),
         cumulativeCostUsd: 0,
         unpricedTurns: 0,
-        turnToolUseIds: new Set()
+        turnToolUseIds: new Set(),
+        judge,
+        model,
+        lastPrompt: '',
+        judging: new Set(),
+        trajectory: new Map()
       }
+      rec.targets.add(entry)
+      rec.creating--
       this.targets.set(session.id, entry)
+      this.reapOrphanSessions(client)
       return entry
     } catch (err) {
-      // Roll back the ref we took for this target.
-      this.releaseConnection({ cwd: ctx.cwd, cwdKey })
+      // Roll back the session, the lease and the record (when it was the only
+      // reason for one).
+      if (rec) {
+        rec.creating--
+        this.releaseRecord(rec)
+      }
+      const rollback =
+        client && createdId ? this.deleteTargetSession(client, createdId) : Promise.resolve()
+      void rollback.finally(() => this.deps.serverManager.releaseIfCurrent(ctx.cwd, conn))
       throw err
     }
   }
 
-  private releaseConnection(entry: Pick<OpencodeTargetEntry, 'cwd' | 'cwdKey'>): void {
-    this.deps.serverManager.release(entry.cwd)
-    const rec = this.connections.get(entry.cwdKey)
-    if (!rec) return
-    rec.targetCount--
-    if (rec.targetCount <= 0) {
-      this.connections.delete(entry.cwdKey)
-      rec.sseAbort.abort()
+  /** The server's shared feed record, started on first use (one per server, not per cwd). */
+  private connectionFor(conn: ServerConnection, client: DispatchTargetClient): ConnRecord {
+    const key = serverKey(conn)
+    const existing = this.connections.get(key)
+    if (existing) return existing
+    let markReady!: () => void
+    const ready = new Promise<void>((resolve) => (markReady = resolve))
+    const rec: ConnRecord = {
+      key,
+      client,
+      abort: new AbortController(),
+      targets: new Set(),
+      creating: 0,
+      ready,
+      unsubscribeExit: () => {}
     }
+    this.connections.set(key, rec)
+    // A server that dies takes every target on it down with it.
+    rec.unsubscribeExit = this.deps.serverManager.subscribeExit(
+      conn.directory,
+      () => this.loseConnection(rec, 'the opencode server exited'),
+      conn
+    )
+    void this.runTargetFeed(rec, markReady)
+    return rec
   }
 
-  // ── SSE approval forwarding (opencode targets only) ──────────────────────
+  /** Drop a record once no target uses it: its feed ends. */
+  private releaseRecord(rec: ConnRecord): void {
+    if (rec.targets.size > 0 || rec.creating > 0) return
+    if (this.connections.get(rec.key) === rec) this.connections.delete(rec.key)
+    rec.abort.abort()
+    rec.unsubscribeExit()
+  }
 
-  private async runSseLoop(rec: ConnRecord): Promise<void> {
-    // opencode holds /event open for the server's lifetime, so a non-aborted end
-    // (stream close or transport error) means the subscription DROPPED, not that
-    // we are done. Un-retried, `permission.asked` forwarding for EVERY target on
-    // this cwd dies silently and their dispatches hang to the 10-min timeout with
-    // no card ever shown. Reconnect until the record is torn down —
-    // releaseConnection() aborts `sseAbort` when the last target leaves, which
-    // both ends the for-await and breaks this loop.
-    while (!rec.sseAbort.signal.aborted) {
-      try {
-        // A turn's COMPLETION now rides this stream (`session.idle`), so a gap
-        // in it is no longer merely a UX problem: a turn that finished while we
-        // were disconnected would otherwise hang until the watchdog fired an
-        // abort at an already-finished turn and threw its result away. Hence the
-        // per-(re)connect reconcile against the server's own status map.
-        //
-        // It hangs off `onConnected` — which fires once the subscription is
-        // provably RECEIVING — and NOT before the subscribe, because the two
-        // orderings are not equivalent. Reconciling first leaves a real window:
-        // the status read says "busy", the turn goes idle, and only THEN does
-        // the stream go live, so nobody ever sees that idle. Reconciling after
-        // connection-live closes it exhaustively:
-        //   · an idle published BEFORE the connection is live → the session is
-        //     already absent from the status map the reconcile reads;
-        //   · an idle published AFTER  → delivered as an event on this stream;
-        //   · the overlap where BOTH see it → absorbed by settle-once
-        //     (read-and-null `entry.settled`; the loser is a no-op).
-        // Fire-and-forget is fine: `reconcileBusyTargets` swallows everything
-        // and no-ops when this connection has no turn in flight — which is
-        // always the case on the very first connection.
-        const onConnected = (): void => void this.reconcileBusyTargets(rec)
-        // subscribeEvents is UNFILTERED — we filter by registered target ids.
-        for await (const ev of rec.client.subscribeEvents(rec.sseAbort.signal, onConnected)) {
-          if (rec.sseAbort.signal.aborted) break
-          this.handleSseEvent(ev)
-        }
-      } catch (err) {
-        if (!rec.sseAbort.signal.aborted) {
-          logger.warn(
-            'CrossEngineDispatcher',
-            `SSE loop error (will reconnect): ${err instanceof Error ? err.message : String(err)}`
-          )
-        }
-      }
-      if (rec.sseAbort.signal.aborted) break
-      // Stream ended/broke while targets are still live. Pause briefly before
-      // re-subscribing so a genuinely dead server can't hot-spin the loop (the
-      // pending dispatches' own 10-min timeouts still bound the worst case).
-      await this.sseReconnectDelay(rec.sseAbort.signal)
+  /**
+   * A server's feed or process is gone: every target on it fails its turn in
+   * flight and is dropped (nothing can be answered or continued on it), after
+   * a best-effort interrupt, and its lease is released exactly.
+   */
+  private loseConnection(rec: ConnRecord, reason: string): void {
+    if (this.connections.get(rec.key) === rec) this.connections.delete(rec.key)
+    rec.abort.abort()
+    rec.unsubscribeExit()
+    for (const entry of [...rec.targets]) {
+      rec.targets.delete(entry)
+      if (this.targets.get(entry.sessionId) === entry) this.targets.delete(entry.sessionId)
+      this.dismissPendingForTarget(entry.sessionId)
+      const settle = entry.settled
+      entry.settled = null
+      settle?.({ kind: 'failed', message: reason })
+      logger.warn('CrossEngineDispatcher', `opencode target ${entry.sessionId} dropped: ${reason}`)
+      // A server still up (only its feed was lost) must not run on unwatched;
+      // against a dead one the requests fail at once, and the session is
+      // deleted through the next target's server.
+      entry.draining = true
+      void this.stopTargetTurn(entry, entry.pendingPrompt)
+        .then(() => this.deleteTargetSession(entry.client, entry.sessionId))
+        .finally(() => this.deps.serverManager.releaseIfCurrent(entry.cwd, entry.conn))
     }
   }
 
   /**
-   * Close the SSE-gap hole for turns in flight on `rec`'s connection: a
-   * `session.idle` published while the subscription was down is GONE (opencode
-   * does not replay), so a turn whose completion landed in the gap would sit
-   * `busy` with a live `settled` until the inactivity watchdog eventually
-   * aborted an already-finished turn. `GET /session/status` is the
-   * authoritative catch-up — ABSENCE MEANS IDLE there (the server deletes a
-   * session's entry the moment it goes idle; see
-   * `OpencodeClient.getSessionStatus`) — but NOT that a missing session has
-   * finished, which is the subtlety this method is built around. Three-way
-   * disambiguation, see the branches below:
-   *   · present in the map              → alive; bump the activity clock so the
-   *                                        blackout itself never reads as
-   *                                        inactivity.
-   *   · absent + completion evidence    → the turn ran and ENDED during the
-   *                                        gap; settle it as if its
-   *                                        `session.idle` had arrived.
-   *   · absent + no completion evidence → the turn has not STARTED server-side
-   *                                        yet; skip and let the now-live
-   *                                        stream (or the watchdog) handle it.
-   *
-   * CALLED ONLY FROM `runSseLoop`'s `onConnected`, i.e. once the replacement
-   * subscription is already receiving — see that call site for why the ordering
-   * is load-bearing and why the resulting double-delivery is safe.
-   *
-   * Wholly best-effort: ONE request, only when this connection actually has a
-   * turn in flight, and every failure is swallowed with a debug line — a
-   * reconcile that throws must never break the reconnect loop it runs beside
-   * (that would take approval forwarding down with it).
+   * Interrupt a target's turn — its own session and every subagent child the
+   * mapper still follows — and wait (bounded) until the server no longer lists
+   * them active. Recorded on the entry so the next turn waits for it.
    */
-  private async reconcileBusyTargets(rec: ConnRecord): Promise<void> {
-    // The snapshot carries each entry's CURRENT resolver alongside it — see the
-    // identity check below for why the entry alone is not enough.
-    const pending: Array<{
-      entry: OpencodeTargetEntry
-      settled: NonNullable<OpencodeTargetEntry['settled']>
-    }> = []
-    for (const entry of this.targets.values()) {
-      if (entry.kind !== 'opencode') continue
-      const settled = entry.settled
-      if (!entry.busy || settled === null) continue
-      if (entry.cwdKey !== rec.cwdKey) continue
-      pending.push({ entry, settled })
-    }
-    if (pending.length === 0) return
-    try {
-      const status = await rec.client.getSessionStatus()
-      for (const { entry, settled } of pending) {
-        const info = status[entry.sessionId]
-        if (!info || info.type === 'idle') {
-          // RESOLVER-IDENTITY GUARD — the same pattern the pi direction uses
-          // (`drivePiTurn`/`forwardPiTargetMessage` compare `entry.settled ===
-          // resolve` before settling). The status GET is an await: during it the
-          // snapshotted turn can settle on the live stream AND a continuation
-          // turn can start on the same entry, installing a FRESH resolver. The
-          // status map — snapshotted server-side before that new turn existed —
-          // may then report the session absent, i.e. "idle", and settling on
-          // that verdict would hand the NEW turn the PREVIOUS turn's stored
-          // assistant message as its result. A changed resolver means the turn
-          // this verdict describes is already over: skip, and let the live
-          // turn's own `session.idle` (or the watchdog) settle it.
-          if (entry.settled !== settled) continue
-
-          /*
-           * COMPLETION-EVIDENCE CHECK. "Absent from the status map" alone does
-           * NOT mean the turn finished — it also covers a turn that has not
-           * STARTED yet. Verified against the fork: `prompt_async` returns 204
-           * at FORK time, and the forked `prompt()` first runs
-           * `createUserMessage` (a storage write) and only then enters
-           * `runLoop`, whose first act is `status.set(sessionID, {type:'busy'})`.
-           * A reconcile landing in that window sees an absent session for a
-           * turn that is about to run: settling there would hand the caller the
-           * PREVIOUS turn's assistant message as this turn's result AND leave
-           * the real turn running unsupervised (resolver nulled, watchdog
-           * cleared, its eventual `session.idle` a no-op). The resolver-identity
-           * guard above cannot see this — the resolver IS current; it is the
-           * VERDICT that is stale.
-           *
-           * Evidence = the newest ASSISTANT message in stored history is at
-           * least as new as this turn. Assistant messages are created inside
-           * `runLoop`, i.e. strictly AFTER `status.set(busy)`, so one that is
-           * newer than turn start proves this turn both ran and got far enough
-           * to produce output — whereas the pre-busy window has, at most, this
-           * turn's own USER message. (Which is exactly why "newest message of
-           * ANY role" would NOT discriminate: `createUserMessage` runs BEFORE
-           * busy, so the user message alone satisfies it.)
-           *
-           * The comparison is STRICT (`CLOCK_SKEW_ALLOWANCE_MS` is 0 — see its
-           * doc). A positive allowance would admit the PREVIOUS turn's
-           * assistant message as this turn's evidence on every continuation
-           * whose gap is under the allowance, which is most of them: a
-           * dispatching model re-dispatches within one MCP round-trip.
-           *
-           * ACCEPTED RESIDUAL: a turn that goes idle WITHOUT producing an
-           * assistant message (the empty-text-fallback case) leaves no
-           * evidence, so a blackout-spanning reconcile will not settle it and
-           * it falls to the inactivity watchdog. Deliberate — absent +
-           * tail-is-user-message is genuinely ambiguous between "pre-busy
-           * window" and "ended with no output", and disambiguating would cost a
-           * delayed second status read for a vanishingly rare case.
-           *
-           * A read failure is simply no evidence: skip (the turn stays on the
-           * watchdog), never settle on a guess.
-           */
-          let evidenceAt: number | undefined
-          try {
-            const messages = await rec.client.listMessages(entry.sessionId)
-            evidenceAt = lastAssistantMessage(messages)?.info.time?.created
-          } catch (err) {
-            logger.debug(
-              'CrossEngineDispatcher',
-              `reconcile evidence read failed (turn stays on the watchdog): ${err instanceof Error ? err.message : String(err)}`
-            )
-            continue
-          }
-          if (
-            evidenceAt === undefined ||
-            evidenceAt < entry.turnStartedAt - CLOCK_SKEW_ALLOWANCE_MS
-          ) {
-            continue
-          }
-          // The evidence read is an await of its own — re-check identity before
-          // settling, same reasoning as the guard above.
-          if (entry.settled !== settled) continue
-          entry.settled = null
-          settled({ kind: 'idle' })
-        } else {
-          // Unguarded on purpose: bumping a newer turn's activity clock is
-          // harmless — it only ever says "this session was alive just now",
-          // which is true for whichever turn is running.
-          entry.lastActivityAt = this.now()
-        }
-      }
-    } catch (err) {
-      logger.debug(
-        'CrossEngineDispatcher',
-        `busy-target reconcile failed (turn stays on the watchdog): ${err instanceof Error ? err.message : String(err)}`
+  private stopTargetTurn(
+    entry: OpencodeTargetEntry,
+    pending?: { posted: Promise<unknown>; inboxID: string } | null
+  ): Promise<void> {
+    const stopping = (async () => {
+      // A prompt still in flight is admitted (or refused) first; only then can
+      // its inbox item be cancelled and the execution it started interrupted.
+      if (pending)
+        await withinMs(
+          pending.posted.catch(() => {}),
+          TEARDOWN_GRACE_MS
+        )
+      await stopOpencodeSessions(
+        entry.client,
+        entry.mapper.followedSessions(),
+        pending ? { sessionID: entry.sessionId, ids: [pending.inboxID] } : undefined
       )
+    })()
+    entry.stopping = stopping
+    void stopping.finally(() => {
+      if (entry.stopping === stopping) entry.stopping = null
+    })
+    return stopping
+  }
+
+  /**
+   * End a disposed target (already out of `this.targets`): stop what runs on
+   * it, delete its session (the data dir is shared with the user's own
+   * opencode), then release its lease exactly and its feed record.
+   */
+  private teardownOpencodeTarget(entry: OpencodeTargetEntry): void {
+    entry.rec.targets.delete(entry)
+    this.releaseRecord(entry.rec)
+    entry.draining = true
+    void this.stopTargetTurn(entry, entry.pendingPrompt)
+      .then(() => this.deleteTargetSession(entry.client, entry.sessionId))
+      .finally(() => this.deps.serverManager.releaseIfCurrent(entry.cwd, entry.conn))
+  }
+
+  /**
+   * Delete a target's session (the data dir is shared with the user's own
+   * opencode); one that cannot be deleted now (its server is gone) is
+   * remembered and deleted through the next target's server.
+   */
+  private async deleteTargetSession(
+    client: DispatchTargetClient,
+    sessionId: string
+  ): Promise<void> {
+    try {
+      await client.deleteSession(sessionId)
+      this.orphanSessions.delete(sessionId)
+    } catch (err) {
+      // A 404 means it is gone already.
+      if (isOpencodeApiError(err) && err.status === 404) this.orphanSessions.delete(sessionId)
+      else this.orphanSessions.add(sessionId)
     }
   }
 
-  /** Abortable delay between SSE reconnect attempts (see runSseLoop). Resolves
-   *  early if the record is torn down mid-wait, and never leaks its abort
-   *  listener. Overridable via deps for tests. */
-  private sseReconnectDelay(signal: AbortSignal): Promise<void> {
-    if (signal.aborted) return Promise.resolve()
-    return new Promise<void>((resolve) => {
-      const onAbort = (): void => {
-        clearTimeout(timer)
-        resolve()
-      }
-      const timer = setTimeout(() => {
-        signal.removeEventListener('abort', onAbort)
-        resolve()
-      }, this.sseReconnectDelayMs)
-      signal.addEventListener('abort', onAbort, { once: true })
+  /** Delete the sessions of targets lost with their server, through a live one. */
+  private reapOrphanSessions(client: DispatchTargetClient): void {
+    for (const sessionId of [...this.orphanSessions])
+      void this.deleteTargetSession(client, sessionId)
+  }
+
+  // ── Target permissions (S6 rulesets, recomputed per turn) ────────────────
+
+  /**
+   * The target's ruleset for `mode`: the interactive session's
+   * `buildSessionRuleset` over the user's deny/ask rules ONLY (ADR-085 §3,
+   * ADR-033: never their allow rules or additional directories), then
+   * {@link TARGET_ONLY_RULES} — no dispatch back (ADR-033 §4) and no questions
+   * (nobody to answer them). Whole-category denies go last (hidden tools).
+   */
+  private async buildTargetRuleset(
+    inputs: TargetRuleInputs,
+    mode: string,
+    autoMode: boolean,
+    restriction: CallerRestriction | undefined
+  ): Promise<{ rules: V2Rule[]; userRules: V2Rule[]; agent: string | undefined }> {
+    const [mcpServers, worktree, agents] = await Promise.all([
+      this.targetMcpServers(inputs),
+      this.targetWorktree(inputs),
+      this.targetAgents(inputs)
+    ])
+    const primary =
+      mode === 'plan'
+        ? agents?.find((agent) => agent.id === 'plan')
+        : agents?.find((agent) => agent.mode !== 'subagent')
+    const built = buildSessionRuleset({
+      mode,
+      autoMode,
+      permissions: this.userDenyAsk(inputs.cwd, restriction),
+      mcpServers,
+      cwd: inputs.cwd,
+      ...(worktree ? { worktree } : {}),
+      ...(autoMode && primary
+        ? { externalDirAllows: opencodeOwnDirAllows(primary.permissions) }
+        : {})
+    })
+    const first = agents?.[0]
+    const defaultAgent = first && first.mode !== 'subagent' ? first.id : undefined
+    return {
+      rules: wireOrder([...built.rules, ...TARGET_ONLY_RULES]),
+      userRules: built.userRules,
+      agent: built.agent ?? defaultAgent
+    }
+  }
+
+  /**
+   * Put the LIVE mode's ruleset and agent on the target before a turn: PATCH
+   * (which replaces) only when it changed, re-derive the children, switch the
+   * agent (`plan` in plan mode). Throws — the turn then does not run.
+   */
+  private applyTargetRules(entry: OpencodeTargetEntry): Promise<void> {
+    const run = (entry.applying ?? Promise.resolve())
+      .catch(() => {})
+      .then(() => this.applyTargetRulesNow(entry))
+    entry.applying = run
+    void run
+      .finally(() => {
+        if (entry.applying === run) entry.applying = null
+      })
+      .catch(() => {})
+    return run
+  }
+
+  private async applyTargetRulesNow(entry: OpencodeTargetEntry): Promise<void> {
+    const mode = liveMode(entry.ctx)
+    const built = await this.buildTargetRuleset(
+      entry,
+      mode,
+      entry.judge.autoModeActive(mode),
+      entry.ctx.callerRestriction
+    )
+    entry.hostRules = asHostPrecheckRules(built.userRules)
+    const key = JSON.stringify(built.rules)
+    if (entry.applied?.key !== key) {
+      await entry.client.setSessionPermissions(entry.sessionId, built.rules)
+      entry.applied = { rules: built.rules, key }
+    }
+    entry.children.repatchChildren()
+    if (built.agent && entry.agent !== built.agent) {
+      await entry.client.switchAgent(entry.sessionId, built.agent)
+      entry.agent = built.agent
+    }
+    entry.appliedMode = mode
+  }
+
+  /**
+   * Mid-turn: the parent's mode moved off the one the ruleset was built for →
+   * re-apply now (a switch to plan or default tightens at once). Fails CLOSED:
+   * a ruleset that cannot be applied ends the turn (interrupted).
+   */
+  private followTargetMode(entry: OpencodeTargetEntry): void {
+    if (!entry.busy || entry.draining || entry.applying) return
+    if (liveMode(entry.ctx) === entry.appliedMode) return
+    void this.applyTargetRules(entry).catch((err) => {
+      logger.error(
+        'CrossEngineDispatcher',
+        `opencode target ${entry.sessionId}: mode switch not applied — ending the turn: ${errText(err)}`
+      )
+      const settle = entry.settled
+      entry.settled = null
+      entry.draining = true
+      void this.stopTargetTurn(entry, entry.pendingPrompt)
+      settle?.({
+        kind: 'failed',
+        message: `could not apply the new permission mode: ${errText(err)}`
+      })
     })
   }
 
-  private handleSseEvent(ev: OpencodeEvent): void {
-    const props = ev.properties
-
-    // Liveness FIRST, before any type dispatch: ANY event carrying a busy
-    // target's sessionID proves that target is alive — a tool part updating, a
-    // cost snapshot, a permission being asked (a turn parked on a human is not
-    // an inactive turn). The inactivity watchdog reads this clock.
-    const eventSessionId = props.sessionID as string | undefined
-    if (eventSessionId) {
-      const active = this.targets.get(eventSessionId)
-      if (active && active.kind === 'opencode' && active.busy) active.lastActivityAt = this.now()
+  /**
+   * A step outside any turn of the dispatcher's (an execution woken by a
+   * background subagent's completion, a step landing after a give-up): its
+   * spend is still the dispatch's — one ledger row, the cap and the
+   * dispatching session's breakdown.
+   */
+  private meterStrayStep(entry: OpencodeTargetEntry, step: OpencodeStepUsage): void {
+    const usage = opencodeTurnUsage(entry.model, [step])
+    if (usage.costUsd === null) entry.unpricedTurns++
+    else {
+      entry.cumulativeCostUsd += usage.costUsd
+      if (usage.costUsd > 0) entry.ctx.addDispatchedCost?.('opencode', entry.model, usage.costUsd)
     }
+    this.safeRecordUsage({
+      ts: this.now(),
+      fromRoutingId: entry.fromRoutingId,
+      targetEngine: 'opencode',
+      targetModel: entry.model,
+      targetSessionId: entry.sessionId,
+      toolUseId: entry.ctx.toolUseId ?? null,
+      tokens: usage.tokens,
+      engineCostUsd: usage.engineCostUsd,
+      account: opencodeDispatchAccount(entry.model),
+      engineCostIsEquivalent: false
+    })
+  }
 
-    if (
-      ev.type === 'message.part.delta' ||
-      ev.type === 'message.part.updated' ||
-      // `message.updated` carries no renderable delta of its own, but mapEvent
-      // needs it to record the message's ROLE on the accumulator — without it
-      // the very first `message.part.updated` of a turn is dropped as
-      // not-yet-known-to-be-assistant. It was never routed here while the
-      // synchronous prompt owned completion; now that the tap is also the
-      // tool-result source, the accumulators must be complete.
-      ev.type === 'message.updated'
-    ) {
-      this.handleOpencodeTargetStream(ev)
-      return
+  /** Bridged + `claudeui` + `GET /api/mcp` names (cached; a failed read is not). */
+  private async targetMcpServers(inputs: TargetRuleInputs): Promise<string[]> {
+    if (inputs.mcpServers) return inputs.mcpServers
+    const known = [
+      ...new Set([...Object.keys(collectClaudeMcpForOpencode(inputs.cwd)), CLAUDEUI_MCP_SERVER])
+    ]
+    try {
+      const servers = await inputs.client.mcpServers()
+      inputs.mcpServers = [...new Set([...known, ...servers.map((server) => server.name)])]
+      return inputs.mcpServers
+    } catch (err) {
+      logger.debug('CrossEngineDispatcher', `opencode target: GET /api/mcp failed: ${errText(err)}`)
+      return known
     }
+  }
 
-    if (ev.type === 'session.idle') {
-      // TURN COMPLETION (see resolveAndRunOpencode). Published for a normal
-      // finish AND after our own `abortSession` — the read-and-null makes the
-      // second case a no-op, since the give-up branches already nulled it.
-      const entry = this.targets.get(eventSessionId ?? '')
-      if (!entry || entry.kind !== 'opencode') return
-      const settle = entry.settled
-      entry.settled = null
-      settle?.({ kind: 'idle' })
-      return
+  /** The location's worktree root (cached; a failed read is not). */
+  private async targetWorktree(inputs: TargetRuleInputs): Promise<string | undefined> {
+    if (inputs.worktree !== undefined) return inputs.worktree ?? undefined
+    try {
+      inputs.worktree = await locationWorktree(inputs.client)
+    } catch (err) {
+      logger.debug(
+        'CrossEngineDispatcher',
+        `opencode target: GET /api/location failed: ${errText(err)}`
+      )
+      return undefined
     }
+    return inputs.worktree ?? undefined
+  }
 
-    if (ev.type === 'session.error') {
-      // TURN FAILURE. Message derivation mirrors event-mapper.ts's own
-      // `session.error` case (`{ name, data: { providerID?, message? } }`), with
-      // the auth branch folded into plain error text: a dispatch target has no
-      // vendor-auth card to raise — the dispatching model gets the hint as the
-      // tool's error text instead.
-      const entry = this.targets.get(eventSessionId ?? '')
-      if (!entry || entry.kind !== 'opencode') return
-      const err = props.error as { name?: string; data?: Record<string, unknown> } | undefined
-      const name = err?.name
-      const data = err?.data ?? {}
-      const detail = typeof data.message === 'string' ? data.message : undefined
-      const vendorId = typeof data.providerID === 'string' ? data.providerID : undefined
-      const message =
-        name === 'ProviderAuthError'
-          ? `Authentication required${vendorId ? ` for "${vendorId}"` : ''}` +
-            `${detail ? `: ${detail}` : ''} — re-authorize in Settings › Vendors.`
-          : (detail ?? name ?? 'the dispatched agent reported an error')
-      const settle = entry.settled
-      entry.settled = null
-      settle?.({ kind: 'sseError', message })
-      return
+  /** `GET /api/agent` (cached; a failed read is not, and answers null). */
+  private async targetAgents(inputs: TargetRuleInputs): Promise<Agent_Info[] | null> {
+    if (inputs.agents) return inputs.agents
+    try {
+      const listed = await inputs.client.agents()
+      if (!Array.isArray(listed)) throw new Error('GET /api/agent did not return a list')
+      inputs.agents = [...listed]
+      return inputs.agents
+    } catch (err) {
+      logger.warn(
+        'CrossEngineDispatcher',
+        `opencode target: GET /api/agent failed: ${errText(err)}`
+      )
+      return null
     }
+  }
 
-    if (ev.type === 'permission.asked') {
-      const sessionID = props.sessionID as string | undefined
-      const id = props.id as string | undefined
-      if (!sessionID || !id) return
-      const entry = this.targets.get(sessionID)
-      if (!entry || entry.kind !== 'opencode') return // foreign session — not an opencode dispatch target
+  // ── The feed (one per server, shared by its targets) ──────────────────────
 
-      const requestId = XENG_REQUEST_PREFIX + id
-      const permission = (props.permission as string | undefined) ?? 'tool'
-      const metadata = (props.metadata as Record<string, unknown> | undefined) ?? {}
-      const patterns = props.patterns as string[] | undefined
-      // The TARGET-side tool call this ask belongs to. The target's stream is
-      // replayed on the dispatching client under the dispatch tool card, so
-      // this id is the one the nested tool block there carries — binding it
-      // lets the approval render INLINE on that block instead of only floating
-      // (both surfaces share `requestId`). Absent on the wire for a
-      // non-tool-scoped ask; never invent one — a wrong id binds the card to
-      // the wrong block, which is worse than no inline card at all.
-      const tool = props.tool as { messageID?: string; callID?: string } | undefined
-      const approval: PendingApproval = {
-        requestId,
-        ...(tool?.callID ? { toolUseId: tool.callID } : {}),
-        toolName: `dispatch:${permission}`,
-        input: { ...metadata, ...(patterns ? { patterns } : {}) }
+  private async runTargetFeed(rec: ConnRecord, markReady: () => void): Promise<void> {
+    const { signal } = rec.abort
+    try {
+      // Reconnects are the feed's own (no replay: `connected{reconnected}`
+      // means re-read). It ends only on abort, or when the server refuses the
+      // subscription outright (not ours any more) — then the targets are lost.
+      for await (const item of rec.client.subscribeEvents({
+        signal,
+        maxConsecutiveFailures: Infinity
+      })) {
+        if (signal.aborted) break
+        if (item.kind === 'connected') {
+          // The read pauses the feed, so live events never interleave with it.
+          if (item.reconnected) await this.reconcileTargets(rec)
+          markReady()
+          continue
+        }
+        if (item.kind === 'disconnected') {
+          logger.info(
+            'CrossEngineDispatcher',
+            `opencode event feed dropped (${item.error.message}); retrying in ${item.retryInMs} ms`
+          )
+          continue
+        }
+        this.handleTargetEvent(rec, item.event)
       }
-      this.pendingApprovals.set(requestId, {
-        kind: 'opencode',
-        permissionId: id,
-        targetSessionId: sessionID,
-        client: entry.client,
-        emit: entry.ctx.emit
-      })
-      // The dispatching session's emit puts its own routingId on the wire, so
-      // the approval card shows on the dispatching chat with zero renderer changes.
-      entry.ctx.emit('session:approval-request', approval)
-      return
+    } catch (err) {
+      if (!signal.aborted)
+        logger.warn('CrossEngineDispatcher', `opencode event feed failed: ${errText(err)}`)
+    } finally {
+      markReady()
+      if (!signal.aborted) this.loseConnection(rec, 'the opencode event feed was lost')
     }
+  }
 
-    if (ev.type === 'permission.replied') {
-      // opencode resolved a permission without us — its deny-cascade bare-rejects
-      // every other pending ask in the session (ADR-033). Reconcile: drop our
-      // pending entry and dismiss the renderer card. (When WE replied, the entry
-      // was already deleted in resolveApproval, so this is a no-op.)
-      const requestID = props.requestID as string | undefined
-      if (!requestID) return
-      const key = XENG_REQUEST_PREFIX + requestID
-      const pending = this.pendingApprovals.get(key)
-      if (!pending) return
-      this.pendingApprovals.delete(key)
-      pending.emit('session:approval-dismiss', { requestId: key })
+  /** After a gap: re-read every target's sessions and apply what the gap hid (S4 contract). */
+  private async reconcileTargets(rec: ConnRecord): Promise<void> {
+    for (const entry of [...rec.targets]) {
+      try {
+        const outputs = await reconcileAfterReconnect(entry.client, entry.mapper)
+        for (const output of outputs) this.onTargetOutput(entry, output)
+        await entry.children.adoptUnknown(entry.mapper.followedSessions())
+      } catch (err) {
+        logger.warn(
+          'CrossEngineDispatcher',
+          `opencode target ${entry.sessionId}: reconnect catch-up failed (the watchdog still runs): ${errText(err)}`
+        )
+      }
+    }
+  }
+
+  /** One feed event: the child keeper's raw hooks, liveness, then each target's mapper. */
+  private handleTargetEvent(rec: ConnRecord, event: OpencodeV2Event): void {
+    const sessionID = eventSessionID(event)
+    for (const entry of [...rec.targets]) {
+      if (event.type === 'session.created') entry.children.onSessionCreated(event.data)
+      else if (event.type === 'session.agent.selected') entry.children.onAgentSelected(event.data)
+      // ANY event of a busy target's session or child proves it alive (a turn
+      // parked on a human is refreshed by the watchdog itself).
+      if (entry.busy && sessionID && entry.mapper.followedSessions().includes(sessionID))
+        entry.lastActivityAt = this.now()
+      for (const output of entry.mapper.map(event)) this.onTargetOutput(entry, output)
     }
   }
 
   /**
-   * Forward an opencode dispatch target's live turn output as engine-neutral
-   * subagent events (ADR-033 M3). Reuses `mapEvent` (event-mapper.ts) by
-   * treating the TARGET's session id as the "own" session — the exact same
-   * message.updated/part.delta/part.updated → {stream|message} logic
-   * OpencodeSession.ts uses for its own turns, just re-keyed to the dispatching
-   * tool_use id.
-   *
-   * Gated on `entry.busy` (a completed/aborted turn's trailing SSE chatter
-   * must never emit), on `entry.ctx.toolUseId` (no id → no way to key the
-   * event on the renderer side — never fail the dispatch over it, just skip),
-   * and on `entry.priorMessageIds` (a PREVIOUS turn's message must never land
-   * on this turn's card — see that field's doc for the post-abort republish
-   * that makes this reachable).
+   * One mapper output of a target (live or re-read). Only the target's OWN
+   * output streams onto the dispatch card (a task child's stays off it, as
+   * before); approvals, usage and turn ends come from every followed session.
    */
-  private handleOpencodeTargetStream(ev: OpencodeEvent): void {
-    const sessionID = ev.properties.sessionID as string | undefined
-    if (!sessionID) return
-    const entry = this.targets.get(sessionID)
-    if (!entry || entry.kind !== 'opencode' || !entry.busy) return
-    const toolUseId = entry.ctx.toolUseId
-    if (!toolUseId) return
-
-    // DUMMY startTimeMs/totalCostUsd — they are consumed ONLY by mapEvent's
-    // cost_update / result branches, which this tap deliberately ignores:
-    // completion is settled directly from `session.idle` (never routed through
-    // mapEvent, precisely because these refs are fake) and metering is read
-    // from stored history at turn end.
-    const output = mapEvent(ev, sessionID, entry.accumulators, Date.now(), { value: 0 })
-    switch (output.kind) {
-      case 'stream':
-        // A delta against a prior turn's message is that turn's, not ours.
-        if (output.messageId !== undefined && entry.priorMessageIds.has(output.messageId)) break
-        this.appendOpencodeTargetItem(entry, output.item, output.delta, toolUseId)
-        break
+  private onTargetOutput(entry: OpencodeTargetEntry, o: OpencodeMapperOutput): void {
+    switch (o.kind) {
+      case 'turn-start':
+        // An execution starting while a give-up winds down is interrupted
+        // again (nobody is waiting for it).
+        if (entry.draining) void this.stopTargetTurn(entry)
+        return
+      case 'inbox':
+        if (o.change === 'delivered') this.markTurnDelivered(entry, o.inboxID)
+        return
+      case 'user-message':
+        this.markTurnDelivered(entry, o.inboxID)
+        return
+      case 'item-open':
+        if (!o.open.target.ownerToolUseId) this.openOpencodeTargetItem(entry, o.open)
+        return
+      case 'item-delta':
+        if (!o.target.ownerToolUseId) this.appendOpencodeTargetItem(entry, o.target, o.chunk)
+        return
+      case 'item-seal':
+        if (!o.seal.ownerToolUseId && !o.seal.target?.ownerToolUseId)
+          this.sealOpencodeTargetItem(entry, o.seal)
+        return
       case 'message': {
-        // A message this target streamed in an EARLIER turn is not this turn's
-        // output, however it got republished (the post-abort interrupted-part
-        // rewrite is the live case — see `priorMessageIds`). Skipping the whole
-        // branch keeps three things out of the new turn's card at once: the
-        // stale message itself, its already-reported tool results, and its
-        // tool_use ids in `turnToolUseIds`.
-        if (entry.priorMessageIds.has(output.message.id)) break
-        collectToolUseIds(output.message, entry.turnToolUseIds)
-        if (output.item)
-          this.updateOpencodeTargetItem(entry, output.item, output.message, toolUseId)
-        else entry.ctx.emit('session:subagent-message', { toolUseId, message: output.message })
-        // Tool RESULTS are a separate channel from the message's `tool_use`
-        // blocks — an opencode ChatMessage never carries them, so without this
-        // the dispatch TaskCard's tool chips spin forever (the Claude tap has
-        // always forwarded results via the `user`/tool_result branch, and the pi
-        // tap via its mapper's `tool_result` output; the opencode tap was the
-        // only one missing it). Byte-parallel to OpencodeSession's own
-        // subagent-message case: walk the rebuilt message's parts, emit each
-        // newly-completed tool part ONCE (`emittedToolResults` — the whole
-        // message re-emits on every part update).
-        const acc = entry.accumulators.get(output.message.id)
-        if (!acc) break
-        for (const [partId, snap] of acc.parts) {
-          const cacheKey = `${output.message.id}:${partId}`
-          if (entry.emittedToolResults.has(cacheKey)) continue
-          const toolRes = extractToolResult(partId, snap)
-          if (!toolRes) continue
-          entry.emittedToolResults.add(cacheKey)
-          entry.ctx.emit('session:subagent-tool-result', {
-            toolUseId,
-            toolResultToolUseId: toolRes.toolUseId,
-            result: toolRes.result,
-            isError: toolRes.isError,
-            ...(toolRes.fileDiffs ? { fileDiffs: toolRes.fileDiffs } : {}),
-            ...(toolRes.images ? { images: toolRes.images } : {})
-          })
-        }
-        break
+        if (o.ownerToolUseId) return
+        this.noteTargetMessage(entry, o.message)
+        const owner = streamOwner(entry)
+        if (!owner) return
+        collectToolUseIds(o.message, entry.turnToolUseIds)
+        entry.ctx.emit('session:subagent-message', { toolUseId: owner, message: o.message })
+        return
       }
+      case 'tool-result': {
+        const owner = streamOwner(entry)
+        if (o.ownerToolUseId || !owner) return
+        entry.ctx.emit('session:subagent-tool-result', {
+          toolUseId: owner,
+          toolResultToolUseId: o.result.toolUseId,
+          result: o.result.result,
+          isError: o.result.isError,
+          ...(o.result.fileDiffs ? { fileDiffs: o.result.fileDiffs } : {}),
+          ...(o.result.images ? { images: o.result.images } : {})
+        })
+        return
+      }
+      case 'subagent-started':
+        // A resumed child re-links under a newer call: re-assert its ruleset.
+        if (entry.children.has(o.childSessionId)) void entry.children.patchChild(o.childSessionId)
+        else void entry.children.adoptUnknown(entry.mapper.followedSessions())
+        return
+      case 'approval':
+        this.onTargetApproval(entry, o.approval, o.route)
+        return
+      case 'approval-resolved': {
+        // Answered elsewhere (a cascade, an interrupt, the execution's end):
+        // a verdict still being judged replies nothing (ADR-088), the card goes.
+        entry.judging.delete(o.requestId)
+        const key = XENG_REQUEST_PREFIX + o.requestId
+        const pending = this.takePendingApproval(key)
+        if (pending) pending.emit('session:approval-dismiss', { requestId: key })
+        return
+      }
+      case 'step-usage':
+        if (entry.settled && entry.turnStarted) entry.turnSteps.push(o.usage)
+        else this.meterStrayStep(entry, o.usage)
+        return
+      case 'result':
+        this.settleTargetTurn(entry, o.sessionId, { kind: 'done' })
+        return
+      case 'error':
+        this.settleTargetTurn(entry, o.sessionId, { kind: 'failed', message: o.message })
+        return
+      case 'auth-required':
+        // §5 rule 3: refresh and rotate now (the vault decides whether it is ours).
+        opencodeAuthHooks().authFailed(o.vendorId)
+        this.settleTargetTurn(entry, o.sessionId, {
+          kind: 'failed',
+          message:
+            `Authentication required for "${o.vendorId}": ${o.message}` +
+            ' — re-authorize in Settings › Vendors.'
+        })
+        return
+      case 'stopped':
+        // Not ours (our own give-ups drop the resolver first): another client
+        // interrupted it, or opencode ended it.
+        this.settleTargetTurn(entry, o.sessionId, {
+          kind: 'failed',
+          message: `the dispatched turn was stopped (${o.reason})`
+        })
+        return
       default:
-        // cost_update / result / approval / approval-resolved / ignore / … —
-        // this tap owns neither completion nor metering (see the DUMMY note
-        // above), and approvals ride handleSseEvent's own branches.
+        return
+    }
+  }
+
+  /** THIS turn's prompt was delivered (promoted into an execution): the turn has started. */
+  private markTurnDelivered(entry: OpencodeTargetEntry, inboxID: string): void {
+    if (entry.busy && !entry.draining && inboxID === entry.turnInboxId) entry.turnStarted = true
+  }
+
+  /** Settle the turn in flight on its own session's end — only after THIS turn started. */
+  private settleTargetTurn(
+    entry: OpencodeTargetEntry,
+    sessionId: string,
+    outcome: OpencodeTurnOutcome
+  ): void {
+    if (sessionId !== entry.sessionId || !entry.turnStarted) return
+    const settle = entry.settled
+    entry.settled = null
+    settle?.(outcome)
+  }
+
+  /** The target's own assistant message: the turn's text source and the judge's trajectory. */
+  private noteTargetMessage(entry: OpencodeTargetEntry, message: ChatMessage): void {
+    // ADR-088 D1 — whether or not the card streams.
+    recordTrajectoryMessage(entry.trajectory, message)
+    if (entry.busy && entry.turnStarted) entry.turnMessages.set(message.id, message)
+  }
+
+  // ── Approvals (the host ladder, then the judge or a card) ─────────────────
+
+  /**
+   * One ask of the target or a task child. In order: a form is cancelled
+   * (nobody can answer it; `question` is hidden from targets, so this is a
+   * backstop); a child's ask its own agent denies is refused (S6 backstop);
+   * the host pre-check (`host-precheck.ts`, the session's ladder: the user's
+   * deny rules, plan mode, the user's ask rules) — a deny rule or plan mode
+   * refuses, an ask rule goes to the human in every mode; else ClaudeUI's
+   * judge under a judged auto parent (ADR-088), else a card on the
+   * dispatching chat. Every reject and cancel carries a message (ADR-097 §3).
+   */
+  private onTargetApproval(
+    entry: OpencodeTargetEntry,
+    approval: PendingApproval,
+    route: OpencodeApprovalRoute
+  ): void {
+    if (route.form) {
+      this.cancelTargetForm(entry.client, route.sessionID, route.form.formID)
+      return
+    }
+    const reply = (reply: PermissionReply): void =>
+      replyTargetPermission(entry.client, route.sessionID, approval.requestId, reply)
+    // No turn of the dispatcher's is running (a woken execution, a give-up
+    // winding down): nobody may answer — refused, never judged or carded.
+    if (!entry.busy || entry.draining) {
+      logger.info(
+        'CrossEngineDispatcher',
+        `opencode target ${entry.sessionId}: ${approval.toolName} asked with no turn running — refused`
+      )
+      reply({ decision: 'reject', message: TARGET_NOT_RUNNING_MESSAGE })
+      return
+    }
+    if (approval.subagent) {
+      const refusal = entry.children.refusal(approval, route.sessionID)
+      if (refusal !== undefined) {
+        reply({ decision: 'reject', message: refusal })
+        return
+      }
+    }
+    const verdict = hostPrecheck(approval, this.targetPrecheckContext(entry))
+    switch (verdict.kind) {
+      case 'deny':
+        // No command text on an info line (ADR-084 logging rule).
+        logger.info(
+          'CrossEngineDispatcher',
+          `opencode target: permission rule deny ${approval.toolName} — ${verdict.rule}`
+        )
+        reply({ decision: 'reject', message: `Denied by permission rule: ${verdict.rule}` })
+        return
+      case 'plan-refuse':
+        logger.info(
+          'CrossEngineDispatcher',
+          `opencode target: plan mode refused ${approval.toolName}`
+        )
+        reply({ decision: 'reject', message: PLAN_MODE_DENY_REASON_NO_EXIT_TOOL })
+        return
+      case 'user-ask':
+        if (entry.judge.autoModeActive(liveMode(entry.ctx)))
+          logger.info(
+            'CrossEngineDispatcher',
+            `opencode target: auto-mode → human: user ask rule matches ${approval.toolName}`
+          )
+        this.forwardOpencodeTargetAsk(entry, approval, route)
+        return
+      case 'session-allow':
+      case 'allow-rule':
+        // Unreachable for a target (no allows, no session allows); answered as the verdict says.
+        reply({ decision: 'once' })
+        return
+      case 'continue':
         break
     }
-  }
-
-  private opencodeTargetItemKey(ownerToolUseId: string, partId: string): string {
-    return JSON.stringify([ownerToolUseId, partId])
-  }
-
-  private opencodeTargetItemTarget(
-    item: OpencodeStreamItem,
-    ownerToolUseId: string
-  ): ItemStreamTarget {
-    return {
-      messageId: item.messageId,
-      blockIndex: item.blockIndex,
-      kind: item.kind,
-      ownerToolUseId
+    if (entry.judge.autoModeActive(liveMode(entry.ctx))) {
+      void this.judgeOpencodeTargetAsk(entry, approval, route)
+      return
     }
+    this.forwardOpencodeTargetAsk(entry, approval, route)
+  }
+
+  /** The host pre-check over a target: the user's deny/ask tiers only, no session allows. */
+  private targetPrecheckContext(entry: OpencodeTargetEntry): HostPrecheckContext {
+    const rules = this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction)
+    return {
+      mode: liveMode(entry.ctx),
+      rules: { deny: rules.deny, ask: rules.ask, allow: [] },
+      userRules: entry.hostRules,
+      sessionAllows: NO_SESSION_ALLOWS,
+      cwd: entry.cwd,
+      // Targets get no additional directories (ADR-033, as `userDenyAsk` says).
+      additionalDirectories: [],
+      onError: (err) =>
+        logger.warn(
+          'CrossEngineDispatcher',
+          `opencode target: host pre-check failed — asking the human: ${errText(err)}`
+        )
+    }
+  }
+
+  /** Cancel a target's form WITH a message (a messageless cancel ends the turn). */
+  private cancelTargetForm(client: DispatchTargetClient, sessionID: string, formID: string): void {
+    try {
+      void client.cancelForm(sessionID, formID, TARGET_FORM_CANCEL_MESSAGE).catch((err) => {
+        logger.warn('CrossEngineDispatcher', `opencode target: form cancel failed: ${errText(err)}`)
+      })
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `opencode target: form cancel refused: ${errText(err)}`)
+    }
+  }
+
+  /**
+   * An opencode target's ask to the human: a card on the dispatching chat.
+   *
+   * `toolUseId` is the TARGET-side tool call this ask belongs to. The target's
+   * stream is replayed on the dispatching client under the dispatch tool card,
+   * so this id is the one the nested tool block there carries — binding it lets
+   * the approval render INLINE on that block instead of only floating (both
+   * surfaces share `requestId`). Absent for a non-tool-scoped ask; never
+   * invent one. `decisionReason` is auto mode's denial-cap sentence when the
+   * judge handed the call back (ADR-088), or the judge's deny text on a held
+   * block. `block` makes it a held judge block (ADR-091 §3) — the deny text a
+   * kept block answers with, and the hold window; a kept block is annotated on
+   * the id the judge was given (the call id, else the request id).
+   */
+  private forwardOpencodeTargetAsk(
+    entry: OpencodeTargetEntry,
+    approval: PendingApproval,
+    route: OpencodeApprovalRoute,
+    decisionReason?: string,
+    block?: { reason: string; ms: number }
+  ): void {
+    const requestId = XENG_REQUEST_PREFIX + approval.requestId
+    const held = block
+      ? this.armForwardedHold(
+          requestId,
+          entry.ctx,
+          entry.judge,
+          approval.toolUseId ?? approval.requestId,
+          block
+        )
+      : null
+    const card: PendingApproval = {
+      requestId,
+      ...(approval.toolUseId ? { toolUseId: approval.toolUseId } : {}),
+      toolName: `dispatch:${approval.toolName}`,
+      input: {
+        ...(approval.input as Record<string, unknown>),
+        ...(approval.patterns ? { patterns: approval.patterns } : {})
+      },
+      agent: { agentId: entry.sessionId, label: entry.model, subagentType: 'dispatch:opencode' },
+      ...(held ? { autoModeBlock: held.autoModeBlock } : {}),
+      ...(decisionReason ? { decisionReason } : {})
+    }
+    this.pendingApprovals.set(requestId, {
+      kind: 'opencode',
+      permissionId: approval.requestId,
+      askingSessionId: route.sessionID,
+      // The TARGET's id even for a child's ask, so disposal and the turn
+      // watchdog's "parked on a human" check see it.
+      targetSessionId: entry.sessionId,
+      client: entry.client,
+      emit: entry.ctx.emit,
+      ...(held ? { hold: held.hold } : {})
+    })
+    // The dispatching session's emit puts its own routingId on the wire, so
+    // the approval card shows on the dispatching chat with zero renderer changes.
+    entry.ctx.emit('session:approval-request', card)
+  }
+
+  /**
+   * ADR-088 — an opencode target's ask under a judged auto mode: ClaudeUI's
+   * judge (the shared pipeline, `DispatchTargetJudge`) decides, the human only
+   * when the judge cannot. (A user ask rule never reaches here: the host
+   * pre-check sent it to the human — G9.)
+   *
+   * 1. An edit clear of every agent-control path → `once` (the acceptEdits
+   *    auto-allow the auto ruleset asks for so this host check runs, ADR-084 §3).
+   * 2. The judge's input is the call's own (2.x publishes `tool.called` before
+   *    the ask, so the mapper has it — a child's too); a shell ask without a
+   *    command text skips the read-only gate (nothing can vouch for it).
+   * 3. allow → `once`; hold → the card as a held block (ADR-091 §3: Keep
+   *    blocked / Approve anyway, Keep blocked on expiry); human → the card
+   *    (with the denial cap's sentence); settled (the ask was answered
+   *    elsewhere, or the target stopped / was disposed meanwhile) → nothing.
+   */
+  private async judgeOpencodeTargetAsk(
+    entry: OpencodeTargetEntry,
+    approval: PendingApproval,
+    route: OpencodeApprovalRoute
+  ): Promise<void> {
+    const id = approval.requestId
+    const permission = approval.toolName
+    const input = { ...(approval.input as Record<string, unknown>) }
+    const reply = (reply: PermissionReply): void =>
+      replyTargetPermission(entry.client, route.sessionID, id, reply)
+
+    if (permission === 'edit' && editClearsAgentControl(approval.patterns, input, entry.cwd)) {
+      logger.info(
+        'CrossEngineDispatcher',
+        'opencode target: edit clear of agent-control paths — allowed'
+      )
+      reply({ decision: 'once' })
+      return
+    }
+
+    const toolUseId = approval.toolUseId ?? id
+    entry.judging.add(id)
+    let outcome: Awaited<ReturnType<DispatchTargetJudge['judge']>>
+    try {
+      outcome = await entry.judge.judge(
+        { toolUseId, toolName: permission, input },
+        {
+          currentMode: () => liveMode(entry.ctx),
+          stillPending: () => entry.judging.has(id) && this.targets.get(entry.sessionId) === entry,
+          honoursWorkdir: true,
+          ...(typeof input.command === 'string' ? {} : { skipReadOnlyGate: true }),
+          permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction)
+        }
+      )
+    } finally {
+      entry.judging.delete(id)
+    }
+    switch (outcome.kind) {
+      case 'allow':
+        reply({ decision: 'once' })
+        return
+      case 'hold': {
+        // ADR-091 part 6 — recorded at the dispatching session; with no hold
+        // window it is kept at once, through the Keep blocked path.
+        const ms = blockHoldMs()
+        // An opencode target takes no delivery: the nudge goes to the
+        // dispatching agent.
+        recordTargetBlock(entry.ctx, toolUseId, permission, input, outcome.review, {
+          engine: 'opencode',
+          label: entry.model,
+          cwd: entry.cwd,
+          sessionId: entry.sessionId,
+          held: ms > 0
+        })
+        if (ms === 0) {
+          reply({
+            decision: 'reject',
+            message: keepTargetBlock(entry.judge, toolUseId, outcome.reason)
+          })
+          return
+        }
+        this.forwardOpencodeTargetAsk(entry, approval, route, outcome.reason, {
+          reason: outcome.reason,
+          ms
+        })
+        return
+      }
+      case 'human':
+        this.forwardOpencodeTargetAsk(entry, approval, route, outcome.reason)
+        return
+      case 'settled':
+        return
+    }
+  }
+
+  // ── The dispatch card's item streams (the target's own items) ─────────────
+
+  private openOpencodeTargetItem(entry: OpencodeTargetEntry, open: ItemStreamOpen): void {
+    this.noteTargetMessage(entry, open.message)
+    const owner = streamOwner(entry)
+    if (!owner) return
+    const target: ItemStreamTarget = { ...open.target, ownerToolUseId: owner }
+    entry.openItems.set(targetItemKey(target), { target, message: structuredClone(open.message) })
+    entry.ctx.emit('session:item-open', { ...open, target })
   }
 
   private appendOpencodeTargetItem(
     entry: OpencodeTargetEntry,
-    item: OpencodeStreamItem,
-    chunk: string,
-    ownerToolUseId: string
+    target: ItemStreamTarget,
+    chunk: string
   ): void {
-    const key = this.opencodeTargetItemKey(ownerToolUseId, item.partId)
-    let active = entry.activeStreamItems.get(key)
-    const acc = entry.accumulators.get(item.messageId)
-    if (!active && acc && !acc.parts.get(item.partId)?.sealed) {
-      const target = this.opencodeTargetItemTarget(item, ownerToolUseId)
-      const message = buildChatMessage(item.messageId, acc)
-      const content = [...message.content]
-      content[item.blockIndex] =
-        item.kind === 'thinking' ? { type: 'thinking', text: '' } : { type: 'text', text: '' }
-      entry.ctx.emit('session:item-open', {
-        target,
-        message: { ...message, content },
-        ...(item.kind === 'thinking'
-          ? { startedAt: acc.parts.get(item.partId)?.time?.start ?? Date.now() }
-          : {})
-      })
-      active = { target, ownerSessionId: ownerToolUseId, partId: item.partId }
-      entry.activeStreamItems.set(key, active)
-    }
-    if (active) entry.ctx.emit('session:item-delta', { target: active.target, chunk })
+    const open = entry.openItems.get(targetItemKey(target))
+    if (!open || !streamOwner(entry)) return
+    const block = open.message.content[target.blockIndex]
+    if (block && (block.type === 'text' || block.type === 'thinking')) block.text += chunk
+    entry.ctx.emit('session:item-delta', { target: open.target, chunk })
   }
 
-  private updateOpencodeTargetItem(
-    entry: OpencodeTargetEntry,
-    item: OpencodeStreamItem,
-    message: ChatMessage,
-    ownerToolUseId: string
-  ): void {
-    const key = this.opencodeTargetItemKey(ownerToolUseId, item.partId)
-    const target = this.opencodeTargetItemTarget(item, ownerToolUseId)
-    const snap = entry.accumulators.get(item.messageId)?.parts.get(item.partId)
-    if (snap?.sealed) {
-      if (item.completed) entry.ctx.emit('session:item-seal', { target, ownerToolUseId, message })
+  private sealOpencodeTargetItem(entry: OpencodeTargetEntry, seal: ItemStreamSeal): void {
+    this.noteTargetMessage(entry, seal.message)
+    const owner = streamOwner(entry)
+    if (!owner) return
+    if (seal.target) {
+      const key = targetItemKey(seal.target)
+      const target = entry.openItems.get(key)?.target ?? { ...seal.target, ownerToolUseId: owner }
+      entry.openItems.delete(key)
+      entry.ctx.emit('session:item-seal', { ...seal, target, ownerToolUseId: owner })
       return
     }
-    if (!entry.activeStreamItems.has(key)) {
-      const block = message.content[item.blockIndex]
-      if (item.kind === 'thinking' && block?.type === 'thinking' && !block.text) return
-      entry.ctx.emit('session:item-open', {
-        target,
-        message,
-        ...(item.kind === 'thinking' ? { startedAt: snap?.time?.start ?? Date.now() } : {})
-      })
-      entry.activeStreamItems.set(key, {
-        target,
-        ownerSessionId: ownerToolUseId,
-        partId: item.partId
-      })
-    }
-    if (item.completed) {
-      entry.ctx.emit('session:item-seal', { target, ownerToolUseId, message })
-      entry.activeStreamItems.delete(key)
-      if (snap) snap.sealed = true
-    }
+    for (const [key, open] of entry.openItems)
+      if (open.target.messageId === seal.message.id) entry.openItems.delete(key)
+    entry.ctx.emit('session:item-seal', { ...seal, ownerToolUseId: owner })
   }
 
-  private sealOpencodeTargetItems(entry: OpencodeTargetEntry, ownerToolUseId: string): void {
-    for (const [key, active] of entry.activeStreamItems) {
-      if (active.ownerSessionId !== ownerToolUseId) continue
-      const acc = entry.accumulators.get(active.target.messageId)
-      if (acc) {
-        const snap = acc.parts.get(active.partId)
-        if (snap) {
-          snap.sealed = true
-          if (snap.type === 'reasoning' && typeof snap.time?.end !== 'number') {
-            const end = Date.now()
-            snap.time = { start: snap.time?.start ?? end, end }
-          }
-        }
-        entry.ctx.emit('session:item-seal', {
-          target: active.target,
-          ownerToolUseId,
-          message: buildChatMessage(active.target.messageId, acc)
-        })
-      }
-      entry.activeStreamItems.delete(key)
-    }
+  /** Seal every item still open on the card with what streamed so far (the turn returned). */
+  private sealOpencodeTargetItems(entry: OpencodeTargetEntry): void {
+    for (const { target, message } of entry.openItems.values())
+      entry.ctx.emit('session:item-seal', {
+        target,
+        message,
+        ownerToolUseId: target.ownerToolUseId
+      })
+    entry.openItems.clear()
   }
 
   // ── Claude direction (M2) ─────────────────────────────────────────────────
@@ -3441,7 +3861,7 @@ export class CrossEngineDispatcher {
     if (!model) {
       return errorResult(
         'No model is configured for cross-engine dispatch into Claude. Ask the user to set ' +
-          'Engines › Claude › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
+          'Settings › Cross-engine dispatch › Dispatch into › Claude (the `dispatch.defaultModel` field in ' +
           '~/.claude/ui/engines/claude.json), or pass `model` explicitly.'
       )
     }
@@ -3489,11 +3909,17 @@ export class CrossEngineDispatcher {
       }
       existing.ctx = ctx
       entry = existing
+      // ADR-088 ruling 3 — the parent's mode is read live: bring the process
+      // to it before the turn's prompt is pushed (and before `busy`).
+      await this.syncClaudeTargetMode(entry)
     } else {
       const shell = this.createClaudeTargetShell(ctx)
       entry = shell.entry
       try {
-        const mode = mapAutonomyToClaudeTargetMode(ctx.autonomyMode)
+        const mode = mapAutonomyToClaudeTargetMode(liveMode(ctx))
+        // ADR-085 §3 — the user's deny/ask rules as the target's flag
+        // settings (never the allow tier); omitted when there are none.
+        const { deny, ask } = this.userDenyAsk(ctx.cwd, ctx.callerRestriction)
         entry.query = await this.spawnClaudeQuery({
           cwd: ctx.cwd,
           model,
@@ -3501,9 +3927,12 @@ export class CrossEngineDispatcher {
           allowDangerouslySkipPermissions: mode.allowDangerouslySkipPermissions,
           canUseTool: shell.canUseTool,
           abortController: entry.abortController,
-          prompt: entry.channel
+          prompt: entry.channel,
+          ...(deny.length > 0 || ask.length > 0 ? { settings: { permissions: { deny, ask } } } : {})
         })
         entry.iterator = entry.query[Symbol.asyncIterator]()
+        entry.appliedPermissionMode = mode.permissionMode
+        entry.bypassSpawned = mode.allowDangerouslySkipPermissions
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         return errorResult(`Failed to start dispatched Claude agent: ${msg}`)
@@ -3578,7 +4007,7 @@ export class CrossEngineDispatcher {
       const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise, stopPromise])
 
       if (winner.kind === 'timeout' || winner.kind === 'abort' || winner.kind === 'stop') {
-        // Unlike opencode (abortSession stops the turn, session survives),
+        // Unlike opencode (an interrupt stops the turn, session survives),
         // aborting a Claude target's AbortController KILLS THE PROCESS — so
         // continuation is impossible either way. Remove the entry entirely.
         entry.abortController.abort()
@@ -3809,24 +4238,38 @@ export class CrossEngineDispatcher {
    * subagent events (ADR-033 M3), keyed by the CURRENT dispatching tool_use
    * id (`entry.ctx.toolUseId` — refreshed on every continuation call, so a
    * mid-turn message always lands on whichever call is actively driving it).
-   * No-ops entirely when the id is unset — never fail a dispatch over it.
+   * Emits nothing when the id is unset — never fail a dispatch over it.
    *
    * `includePartialMessages: true` (set in `defaultSpawnClaudeQuery`) makes
    * cli.js emit `stream_event` deltas exactly like a native subagent's
    * `parent_tool_use_id`-routed frames (claude-session.ts's
-   * `handleStreamEvent`) — this mirrors that mapping verbatim, just re-keyed.
+   * `handleStreamEvent`) — this mirrors that mapping, just re-keyed: an
+   * agent_id-only frame resolves through `entry.agentOrigins` to the same lane
+   * key its snapshots use, and one no task_started placed is dropped. A
+   * SendMessage-resumed run's frames and snapshots both resolve through
+   * `entry.agentRunAliases` onto the agent's origin.
    */
   private forwardClaudeTargetMessage(entry: ClaudeTargetEntry, msg: SDKMessage): void {
+    // Learned whether or not a card is listening: it is the target's own
+    // identity, and a later turn's card needs it.
+    if (msg.type === 'system' && msg.subtype === 'task_started') {
+      if (msg.task_id && msg.tool_use_id) {
+        const origin = entry.agentOrigins.get(msg.task_id)
+        if (origin === undefined) entry.agentOrigins.set(msg.task_id, msg.tool_use_id)
+        else if (origin !== msg.tool_use_id) entry.agentRunAliases.set(msg.tool_use_id, origin)
+      }
+      return
+    }
+    const runOwner = (id: string | undefined): string | undefined =>
+      id === undefined ? id : (entry.agentRunAliases.get(id) ?? id)
+
     const toolUseId = entry.ctx.toolUseId
     if (!toolUseId) return
 
     if (msg.type === 'stream_event') {
-      const envelope = msg as {
-        parent_tool_use_id?: string | null
-        event?: Parameters<ClaudeItemStreamLifecycle['handleEvent']>[0]
-      }
-      if (envelope.event)
-        entry.itemStreams.handleEvent(envelope.event, envelope.parent_tool_use_id ?? undefined)
+      if (!msg.event) return
+      const owner = streamEventParent(msg, (agentId) => entry.agentOrigins.get(agentId))
+      if (owner !== null) entry.itemStreams.handleEvent(msg.event, runOwner(owner))
       return
     }
 
@@ -3834,8 +4277,9 @@ export class CrossEngineDispatcher {
       const chatMsg = transformAssistantMessage(msg as unknown as Record<string, unknown>)
       if (chatMsg) {
         collectToolUseIds(chatMsg, entry.turnToolUseIds)
-        const nativeOwner =
+        const nativeOwner = runOwner(
           (msg as unknown as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? undefined
+        )
         if (entry.itemStreams.handleSnapshot(chatMsg, nativeOwner) === 'none')
           entry.ctx.emit('session:subagent-message', { toolUseId, message: chatMsg })
       }
@@ -3890,12 +4334,19 @@ export class CrossEngineDispatcher {
       abortController,
       busy: false,
       ctx,
+      // Set by the caller from the spawn's mode (resolveAndRunClaude).
+      appliedPermissionMode: 'default',
+      bypassSpawned: false,
+      autoRejectedReported: false,
+      modeSync: null,
       account: claudeDispatchAccount(),
       cumulativeCostUsd: 0,
       lastReportedTotalCostUsd: 0,
       lastActivityAt: 0,
       turnToolUseIds: new Set(),
-      itemStreams: undefined as unknown as ClaudeItemStreamLifecycle
+      itemStreams: undefined as unknown as ClaudeItemStreamLifecycle,
+      agentOrigins: new Map(),
+      agentRunAliases: new Map()
     }
     entry.itemStreams = new ClaudeItemStreamLifecycle({
       open: (target, message, startedAt) => {
@@ -3932,6 +4383,13 @@ export class CrossEngineDispatcher {
         const ownerToolUseId = entry.ctx.toolUseId
         if (ownerToolUseId)
           entry.ctx.emit('session:subagent-message', { toolUseId: ownerToolUseId, message })
+      },
+      // A cut-off call was published to the caller's card like any other, so it
+      // has to be taken back there too (see ClaudeItemStreamSink.retractToolUses).
+      retractToolUses: (messageId, toolUseIds) => {
+        const ownerToolUseId = entry.ctx.toolUseId
+        if (ownerToolUseId)
+          entry.ctx.emit('session:tool-uses-retracted', { messageId, toolUseIds, ownerToolUseId })
       }
     })
     const canUseTool: CanUseTool = async (
@@ -3943,16 +4401,124 @@ export class CrossEngineDispatcher {
   }
 
   /**
+   * Bring a Claude target's process to the parent's LIVE mode (ADR-088 ruling
+   * 3) with cli.js's `set_permission_mode` control request.
+   *
+   * Pull model: called at a continuation turn's start and at the target's
+   * every tool ask — there is no push hook from the dispatching session, so a
+   * mid-turn switch takes effect at the target's next tool ask or next turn.
+   * An ask already parked on the human when the parent switches into auto
+   * stays with the human (owner ruling; out of scope).
+   *
+   * - Wanted = `mapAutonomyToClaudeTargetMode(live mode)`; equal to what the
+   *   process runs under → nothing to send.
+   * - `bypassPermissions` on a process spawned without the skip flag → apply
+   *   `default` instead (the flag is a spawn option; conservative).
+   * - A rejected `auto` (cli.js: "set_permission_mode:auto rejected — gate not
+   *   enabled") → `default`, ONE `session:warning` per target, and `auto` is not
+   *   retried on this process (the gate does not open mid-process) — the
+   *   precedent is `ClaudeSession.setPermissionMode`. Any other rejection →
+   *   logged, `appliedPermissionMode` kept.
+   *
+   * Concurrent callers (two asks in one assistant message) serialize on
+   * `entry.modeSync`; each re-reads the live mode once the previous sync ends.
+   */
+  private async syncClaudeTargetMode(entry: ClaudeTargetEntry): Promise<void> {
+    while (entry.modeSync) await entry.modeSync
+    let wanted = mapAutonomyToClaudeTargetMode(liveMode(entry.ctx)).permissionMode
+    if (wanted === 'auto' && entry.autoRejectedReported) wanted = 'default'
+    if (wanted === 'bypassPermissions' && !entry.bypassSpawned) {
+      if (entry.appliedPermissionMode !== 'default') {
+        logger.info(
+          'CrossEngineDispatcher',
+          'claude target: bypassPermissions needs a spawn-time flag — applying default instead'
+        )
+      }
+      wanted = 'default'
+    }
+    if (wanted === entry.appliedPermissionMode) return
+    const run = async (): Promise<void> => {
+      try {
+        await entry.query.setPermissionMode(wanted)
+        entry.appliedPermissionMode = wanted
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (wanted !== 'auto') {
+          logger.warn(
+            'CrossEngineDispatcher',
+            `claude target: set_permission_mode ${wanted} failed — ${msg}`
+          )
+          return
+        }
+        logger.info('CrossEngineDispatcher', `claude target: auto mode rejected — ${msg}`)
+        try {
+          await entry.query.setPermissionMode('default')
+          entry.appliedPermissionMode = 'default'
+        } catch (fallbackErr) {
+          logger.warn(
+            'CrossEngineDispatcher',
+            `claude target: set_permission_mode default failed — ${
+              fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
+            }`
+          )
+        }
+        if (!entry.autoRejectedReported) {
+          entry.autoRejectedReported = true
+          entry.ctx.emit(
+            'session:warning',
+            'Dispatched Claude agent: auto mode was rejected (disabled by your organization?) — its actions will ask you instead.'
+          )
+        }
+      }
+    }
+    const pending = run()
+    entry.modeSync = pending
+    try {
+      await pending
+    } finally {
+      if (entry.modeSync === pending) entry.modeSync = null
+    }
+  }
+
+  /**
    * Forward a Claude target's tool-approval request into the dispatching
    * session's chat (ADR-033 M2 item 7) — the Claude-target mirror of the SSE
    * loop's `permission.asked` handling for opencode targets.
+   *
+   * ADR-085 §3 — first, a shell command a user DENY rule hits by the §1
+   * matcher is refused with the rule, no card: cli.js got the same rules as
+   * `--settings` but matches them by its own text prefix, which a reordered
+   * form evades. Residual: under `bypassPermissions` (a bypass target) and
+   * `auto` (cli.js's own judge decides first, ADR-088) only what cli.js itself
+   * asks reaches this gate, so there cli.js's own matcher decides the rest.
    */
-  private awaitClaudeTargetApproval(
+  private async awaitClaudeTargetApproval(
     entry: ClaudeTargetEntry,
     toolName: string,
     input: Record<string, unknown>,
     opts: CanUseToolContext
   ): Promise<CanUseToolResult> {
+    // ADR-088 — a parent switch since the turn started reaches the process at
+    // its next ask. The ask in hand was produced under the OLD mode and is
+    // decided below as usual (a human answers it; an ask already parked on
+    // the human stays with the human).
+    await this.syncClaudeTargetMode(entry)
+    if (isShellToolName(toolName) && typeof input.command === 'string') {
+      const hit = denyAskHit(
+        input.command,
+        this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction)
+      )
+      if (hit?.tier === 'deny') {
+        logger.info(
+          'CrossEngineDispatcher',
+          `claude target: permission rule deny ${toolName} — ${hit.rule}`
+        )
+        return Promise.resolve({
+          behavior: 'deny',
+          message: `Denied by permission rule: ${hit.rule}`
+        })
+      }
+    }
     return new Promise<CanUseToolResult>((resolve) => {
       const requestId = XENG_REQUEST_PREFIX + uuidv4()
       const approval: PendingApproval = {
@@ -3981,9 +4547,7 @@ export class CrossEngineDispatcher {
       opts.signal.addEventListener(
         'abort',
         () => {
-          const pending = this.pendingApprovals.get(requestId)
-          if (!pending) return
-          this.pendingApprovals.delete(requestId)
+          if (!this.takePendingApproval(requestId)) return
           entry.ctx.emit('session:approval-dismiss', { requestId })
           resolve({ behavior: 'deny', message: 'Dispatch cancelled' })
         },
@@ -4008,6 +4572,53 @@ export class CrossEngineDispatcher {
       if (pending.targetSessionId === targetSessionId) return true
     }
     return false
+  }
+
+  /**
+   * Remove one forwarded approval, disarming a held block's expiry (ADR-091
+   * §3). The ONE way an entry leaves `pendingApprovals`, so no resolution path
+   * — the human, the cascade, a stop, disposal — leaks a timer.
+   */
+  private takePendingApproval(requestId: string): PendingForwardedApproval | undefined {
+    const pending = this.pendingApprovals.get(requestId)
+    if (!pending) return undefined
+    this.pendingApprovals.delete(requestId)
+    if (pending.hold) {
+      pending.hold.cancel()
+      // Approvable after the fact from here on (ADR-091 part 6).
+      pending.hold.ledger?.settle(pending.hold.toolUseId)
+    }
+    return pending
+  }
+
+  /**
+   * Arm a forwarded card's held-block expiry (ADR-091 §3), `block.ms` away:
+   * unanswered, it resolves exactly as a Keep blocked click — through
+   * `resolveApproval` — and the card is withdrawn. Returns the pending entry's
+   * `hold` and the card's `autoModeBlock`.
+   */
+  private armForwardedHold(
+    requestId: string,
+    ctx: DispatchContext,
+    judge: DispatchTargetJudge,
+    toolUseId: string,
+    block: { reason: string; ms: number }
+  ): { hold: ForwardedBlockHold; autoModeBlock: { expiresAt: number } } {
+    const { emit } = ctx
+    const timer = armBlockHold(() => {
+      this.resolveApproval(requestId, 'deny')
+      emit('session:approval-dismiss', { requestId })
+    }, block.ms)
+    return {
+      hold: {
+        reason: block.reason,
+        toolUseId,
+        judge,
+        ...(ctx.blockedCalls ? { ledger: ctx.blockedCalls } : {}),
+        cancel: timer.cancel
+      },
+      autoModeBlock: { expiresAt: timer.expiresAt }
+    }
   }
 
   /**
@@ -4073,9 +4684,13 @@ export class CrossEngineDispatcher {
    *  hanging canUseTool/gate/server-request promise (ADR-033 M2 item 7,
    *  extended to pi in M4c and to codex in slice H). */
   private dismissPendingForTarget(targetSessionId: string): void {
+    // An opencode target's asks still under judgement reply nothing once the
+    // turn is stopped (ADR-088, `OpencodeTargetEntry.judging`).
+    const target = this.targets.get(targetSessionId)
+    if (target?.kind === 'opencode') target.judging.clear()
     for (const [key, pending] of [...this.pendingApprovals]) {
       if (pending.targetSessionId !== targetSessionId) continue
-      this.pendingApprovals.delete(key)
+      this.takePendingApproval(key)
       pending.emit('session:approval-dismiss', { requestId: key })
       if (pending.kind === 'claude' || pending.kind === 'pi' || pending.kind === 'codex') {
         pending.resolve('deny')
@@ -4089,7 +4704,7 @@ export class CrossEngineDispatcher {
    * cap is a SPEND limit, not a success limit", :1797-1802): a turn that
    * streamed real spend before erroring/timing-out/being stopped must still
    * count that spend toward the cap and the dispatching session's cost
-   * breakdown, exactly like a successful turn does. `entry.mapperState.
+   * breakdown, exactly like a successful turn does. `entry.runner.mapperState.
    * totalCostUsd` is the right source here (NOT anything derived from the
    * turn's own outcome, since a non-success outcome carries no such number):
    * it is the mapper's per-PROCESS running total, incremented by `mapPiEvent`
@@ -4105,11 +4720,8 @@ export class CrossEngineDispatcher {
     ctx: DispatchContext,
     model: string
   ): number | null {
-    const rawTurnCostUsd = Math.max(
-      0,
-      entry.mapperState.totalCostUsd - entry.lastReportedTotalCostUsd
-    )
-    entry.lastReportedTotalCostUsd = entry.mapperState.totalCostUsd
+    // The delta against the mapper's running total, advancing the baseline.
+    const rawTurnCostUsd = entry.runner.takeCostDelta()
     return this.applyPiTurnCost(entry, ctx, model, rawTurnCostUsd)
   }
 
@@ -4134,7 +4746,7 @@ export class CrossEngineDispatcher {
     entry.turnEngineCostUsd = rawTurnCostUsd
     const turnCostUsd = piTurnCost(
       model,
-      { ...entry.turnTokens, reasoning: entry.turnReasoningTokens },
+      { ...entry.runner.turnTokens, reasoning: entry.runner.turnReasoningTokens },
       rawTurnCostUsd
     ).displayCostUsd
     if (turnCostUsd === null) {
@@ -4154,7 +4766,7 @@ export class CrossEngineDispatcher {
    * stop/abort path, which stays unreconciled by design: ADR-033 M4-B already
    * records no usage row for a turn that never returned, and this file's own
    * call sites below only ever invoke this method from the err/timeout
-   * branches). `entry.mapperState.totalCostUsd` only grows via cost-bearing
+   * branches). `entry.runner.mapperState.totalCostUsd` only grows via cost-bearing
    * assistant `message_end`s the mapper actually SAW — a turn that dies
    * before its first one (e.g. erroring inside the very first LLM call, or
    * timing out before any assistant message streams back) can still have
@@ -4165,7 +4777,7 @@ export class CrossEngineDispatcher {
    * (`GET_SESSION_STATS_RECONCILE_TIMEOUT_MS`) and swallowed on failure (a
    * wedged target — plausible, since that's often why the turn is on this
    * path at all — must never block the error return on a follow-up RPC): if
-   * the read succeeds AND reports MORE than `entry.mapperState.totalCostUsd`,
+   * the read succeeds AND reports MORE than `entry.runner.mapperState.totalCostUsd`,
    * that authoritative number is used IN PLACE OF the mapper's total for the
    * delta + baseline advance below; otherwise this is behaviorally IDENTICAL
    * to `accountPiNonSuccessCost`.
@@ -4175,23 +4787,12 @@ export class CrossEngineDispatcher {
     ctx: DispatchContext,
     model: string
   ): Promise<number | null> {
-    let totalCostUsd = entry.mapperState.totalCostUsd
-    try {
-      const statsResp = await entry.client.request<PiGetSessionStatsData>(
-        { type: 'get_session_stats' },
-        GET_SESSION_STATS_RECONCILE_TIMEOUT_MS
-      )
-      if (statsResp.success && statsResp.data && statsResp.data.cost > totalCostUsd) {
-        totalCostUsd = statsResp.data.cost
-      }
-    } catch (err) {
-      logger.warn(
-        'CrossEngineDispatcher',
-        `pi get_session_stats cost reconciliation failed (falling back to streamed cost): ${err instanceof Error ? err.message : String(err)}`
-      )
-    }
-    const rawTurnCostUsd = Math.max(0, totalCostUsd - entry.lastReportedTotalCostUsd)
-    entry.lastReportedTotalCostUsd = totalCostUsd
+    // The read, its bound, the swallow-and-fall-back and the warning live in
+    // `PiChildRunner.reconciledTotalCostUsd` (logged under this module's tag).
+    const totalCostUsd = await entry.runner.reconciledTotalCostUsd(
+      GET_SESSION_STATS_RECONCILE_TIMEOUT_MS
+    )
+    const rawTurnCostUsd = entry.runner.takeCostDelta(totalCostUsd)
     return this.applyPiTurnCost(entry, ctx, model, rawTurnCostUsd)
   }
 
@@ -4222,7 +4823,7 @@ export class CrossEngineDispatcher {
     if (!requestedModel) {
       return errorResult(
         'No model is configured for cross-engine dispatch into pi. Ask the user to set ' +
-          'Engines › pi › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
+          'Settings › Cross-engine dispatch › Dispatch into › pi (the `dispatch.defaultModel` field in ' +
           '~/.claude/ui/engines/pi.json), or pass `model` explicitly.'
       )
     }
@@ -4277,16 +4878,14 @@ export class CrossEngineDispatcher {
         return errorResult(`Failed to start dispatched pi agent: ${msg}`)
       }
     }
+    // The judge's subagent task is the LATEST dispatch prompt (ADR-088).
+    entry.lastPrompt = req.prompt
 
     // Mark busy BEFORE the prompt is sent — fresh per-turn accumulators.
     entry.busy = true
-    entry.turnToolUseIds = new Set()
-    entry.turnTotalTokens = 0
-    entry.turnTokens = zeroDispatchTokens()
-    entry.turnReasoningTokens = 0
     entry.turnEngineCostUsd = null
     const turnStartedAt = this.now()
-    entry.lastActivityAt = turnStartedAt
+    entry.runner.beginTurn(turnStartedAt)
 
     // ── Run the turn ──────────────────────────────────────────────────────
     let beats = 0
@@ -4309,16 +4908,17 @@ export class CrossEngineDispatcher {
       | { kind: 'abort' }
       | { kind: 'stop' }
 
-    const turnPromise: Promise<Raced> = this.drivePiTurn(entry, req.prompt).then(
-      (outcome): Raced =>
+    const turnPromise: Promise<Raced> = entry.runner
+      .runTurn(req.prompt)
+      .then((outcome): Raced =>
         outcome.kind === 'ok' ? { kind: 'ok', outcome } : { kind: 'err', message: outcome.message }
-    )
+      )
     // Turn liveness: the TARGET engine's two configured caps, unlimited unless
     // the user set them (ADR-033's 2026-09-18 amendment). The ambient `onEvent`
-    // callback installed in `createPiTarget` is what bumps
-    // `entry.lastActivityAt`.
+    // callback `PiChildRunner.start` installs is what bumps
+    // `entry.runner.lastActivityAt`.
     const caps = resolveTurnLiveness(dispatchCfg)
-    const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
+    const watchdog = this.startTurnWatchdog(entry.runner, caps, turnStartedAt, () =>
       this.hasPendingApprovalFor(entry.sessionId)
     )
     const timeoutPromise: Promise<Raced> = watchdog.promise
@@ -4342,33 +4942,23 @@ export class CrossEngineDispatcher {
       const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise, stopPromise])
 
       if (winner.kind === 'timeout' || winner.kind === 'abort' || winner.kind === 'stop') {
-        // See PiTargetEntry.draining's doc comment — set FIRST, synchronously,
-        // before the `abort` RPC even sends, so no late 'ask' from this turn
-        // can possibly race ahead of it.
-        entry.draining = true
-        // DIVERGES FROM CLAUDE: pi's `abort` interrupts the CURRENT TURN only
-        // (session survives — verified; see PiTargetEntry's doc comment) —
-        // mirrors the OPENCODE target's survive-the-process pattern, so the
-        // entry is kept alive for continuation rather than torn down.
-        void entry.client.request({ type: 'abort' }).catch(() => {})
-        // RACE GUARD (see PiTargetEntry.settled's "RACE NOTE"): wait, BOUNDED,
-        // for the ABANDONED turn's own terminal event sequence (still in
-        // flight — triggered by the abort just sent) to drain and settle
-        // `entry.settled` back to null BEFORE releasing `busy` in the
-        // `finally` below. Without this, a fast-enough continuation could
-        // install a NEW settle wrapper here while the stale one is still
-        // pending delivery — pi's wire has no per-event turn correlation, so
-        // whichever wrapper is CURRENTLY installed receives the next
-        // settle-shaped event regardless of which turn actually produced it.
-        let graceTimer: ReturnType<typeof setTimeout> | undefined
-        await Promise.race([
-          turnPromise,
-          new Promise<void>((r) => {
-            graceTimer = setTimeout(r, this.piAbortSettleGraceMs)
-          })
-        ])
-        if (graceTimer) clearTimeout(graceTimer)
-        entry.settled = null // belt-and-suspenders if the grace period elapsed first
+        // `PiChildRunner.abortTurn`: `draining` FIRST, synchronously, before
+        // the `abort` RPC even sends, so no late 'ask' from this turn can
+        // possibly race ahead of it (see `PiChildRunner.draining`). DIVERGES
+        // FROM CLAUDE: pi's `abort` interrupts the CURRENT TURN only (session
+        // survives — verified; see PiTargetEntry's doc comment) — mirrors the
+        // OPENCODE target's survive-the-process pattern, so the entry is kept
+        // alive for continuation rather than torn down. RACE GUARD (see
+        // `PiChildRunner.settled`'s "RACE NOTE"): it waits, BOUNDED, for the
+        // ABANDONED turn's own terminal event sequence (still in flight —
+        // triggered by the abort just sent) to drain and settle the runner's
+        // `settled` back to null BEFORE `busy` is released in the `finally`
+        // below. Without this, a fast-enough continuation could install a NEW
+        // settle wrapper while the stale one is still pending delivery — pi's
+        // wire has no per-event turn correlation, so whichever wrapper is
+        // CURRENTLY installed receives the next settle-shaped event
+        // regardless of which turn actually produced it.
+        await entry.runner.abortTurn(this.piAbortSettleGraceMs)
         // Read AFTER the grace-period wait, not before — the abandoned turn's
         // own trailing cost-bearing events can still land during that window
         // (see the RACE GUARD above), so this is the earliest point the
@@ -4410,7 +5000,7 @@ export class CrossEngineDispatcher {
             targetModel: model,
             targetSessionId: entry.sessionId,
             toolUseId: ctx.toolUseId ?? null,
-            tokens: entry.turnTokens,
+            tokens: entry.runner.turnTokens,
             engineCostUsd: entry.turnEngineCostUsd,
             account: piDispatchAccount(model),
             engineCostIsEquivalent: true
@@ -4429,7 +5019,7 @@ export class CrossEngineDispatcher {
         if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
         // Audit-residual C fix: reconcile against get_session_stats — an
         // extension_error/rejected-ack can land before ANY cost-bearing
-        // message_end streamed back, in which case entry.mapperState.
+        // message_end streamed back, in which case entry.runner.mapperState.
         // totalCostUsd is still the pre-turn value even though pi's backend
         // may have genuinely spent something.
         await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
@@ -4446,7 +5036,7 @@ export class CrossEngineDispatcher {
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          tokens: entry.turnTokens,
+          tokens: entry.runner.turnTokens,
           engineCostUsd: entry.turnEngineCostUsd,
           account: piDispatchAccount(model),
           engineCostIsEquivalent: true
@@ -4456,26 +5046,15 @@ export class CrossEngineDispatcher {
 
       // ── Success ────────────────────────────────────────────────────────
       const { outcome } = winner
-      const rawTurnCostUsd = Math.max(0, outcome.totalCostUsd - entry.lastReportedTotalCostUsd)
-      entry.lastReportedTotalCostUsd = outcome.totalCostUsd
+      const rawTurnCostUsd = entry.runner.takeCostDelta(outcome.totalCostUsd)
 
       // get_last_assistant_text — simpler + more reliable than accumulating
-      // `message` MapperOutputs across the turn ourselves (see drivePiTurn's
-      // doc comment). Best-effort: a failure here still returns a result
-      // (with a placeholder text) rather than failing an otherwise-successful
-      // turn over a follow-up RPC call.
-      let finalText = '(the dispatched agent returned no text)'
-      try {
-        const textResp = await entry.client.request<PiGetLastAssistantTextData>({
-          type: 'get_last_assistant_text'
-        })
-        if (textResp.success && textResp.data?.text) finalText = textResp.data.text
-      } catch (err) {
-        logger.warn(
-          'CrossEngineDispatcher',
-          `pi get_last_assistant_text failed (using placeholder text): ${err instanceof Error ? err.message : String(err)}`
-        )
-      }
+      // `message` MapperOutputs across the turn ourselves (see
+      // `PiChildRunner.runTurn`'s doc comment). Best-effort: a failure here
+      // still returns a result (with a placeholder text) rather than failing
+      // an otherwise-successful turn over a follow-up RPC call.
+      const finalText =
+        (await entry.runner.lastAssistantText()) ?? '(the dispatched agent returned no text)'
 
       // ── Cost cap crossing note (ADR-033 M4-C) ───────────────────────────
       // applyPiTurnCost does the fold into the cap AND the dispatching
@@ -4492,8 +5071,8 @@ export class CrossEngineDispatcher {
       }
 
       emitDispatchNotification(ctx, entry.sessionId ?? '', 'completed', finalText, {
-        totalTokens: entry.turnTotalTokens,
-        toolUses: entry.turnToolUseIds.size,
+        totalTokens: entry.runner.turnTotalTokens,
+        toolUses: entry.runner.turnToolUseIds.size,
         durationMs: outcome.durationMs
       })
       this.safeRecordUsage({
@@ -4503,7 +5082,7 @@ export class CrossEngineDispatcher {
         targetModel: model,
         targetSessionId: entry.sessionId,
         toolUseId: ctx.toolUseId ?? null,
-        tokens: entry.turnTokens,
+        tokens: entry.runner.turnTokens,
         // pi reports a LIST PRICE, not a charge (S1b) — the ledger must not
         // read it as money that left a wallet.
         engineCostUsd: entry.turnEngineCostUsd,
@@ -4512,8 +5091,7 @@ export class CrossEngineDispatcher {
       })
       return { text: outText, sessionId: entry.sessionId ?? '' }
     } finally {
-      for (const output of finishPiMessage(entry.mapperState))
-        this.forwardPiTargetMessage(entry, output)
+      entry.runner.flush()
       entry.busy = false
       clearInterval(heartbeat)
       watchdog.dispose()
@@ -4522,11 +5100,12 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * Build the target shell + spawn its PiRpcClient + PiBridgeHost, resolve
-   * `get_state` (capturing session_id EAGERLY — see PiTargetEntry's doc
-   * comment), then apply the requested model via `set_model`. Any failure
-   * along the way tears down whatever was already created and re-throws —
-   * `resolveAndRunPi` turns that into a friendly isError.
+   * Build the target shell + start its `PiChildRunner` (spawn its PiRpcClient
+   * + PiBridgeHost, resolve `get_state` — capturing session_id EAGERLY, see
+   * PiTargetEntry's doc comment — then apply the requested model via
+   * `set_model`), and register it. Any failure along the way tears down
+   * whatever was already created and re-throws — `resolveAndRunPi` turns
+   * that into a friendly isError.
    */
   private async createPiTarget(ctx: DispatchContext, model: string): Promise<PiTargetEntry> {
     const entry: PiTargetEntry = {
@@ -4534,275 +5113,102 @@ export class CrossEngineDispatcher {
       sessionId: null,
       fromRoutingId: ctx.fromRoutingId,
       cwd: ctx.cwd,
-      // Populated below, once spawnPiTarget resolves — the gate handler
-      // closure captures `entry` BY REFERENCE (mirrors createClaudeTargetShell),
-      // so it's safe to construct before these fields are filled in: a real
-      // tool_call can only fire after the child has actually spawned.
-      client: undefined as unknown as PiRpcClient,
-      bridgeHost: undefined as unknown as PiBridgeHost,
+      // Populated below, once the runner has started — the gate handler and
+      // stream closures capture `entry` BY REFERENCE (mirrors
+      // createClaudeTargetShell), so it's safe to construct before this field
+      // is filled in: a real tool_call can only fire after the child has
+      // actually spawned and been prompted.
+      runner: undefined as unknown as PiChildRunner,
       ctx,
-      autonomyMode: ctx.autonomyMode,
       busy: false,
       cumulativeCostUsd: 0,
       unpricedTurns: 0,
-      lastReportedTotalCostUsd: 0,
-      lastActivityAt: 0,
-      turnToolUseIds: new Set(),
-      turnTotalTokens: 0,
-      turnTokens: zeroDispatchTokens(),
-      turnReasoningTokens: 0,
       turnEngineCostUsd: null,
-      mapperState: createPiMapperState(),
       model,
-      settled: null,
-      draining: false
+      // ClaudeUI's judge for this target (ADR-088) — its closures read the
+      // entry live (the ctx is replaced on every continuation).
+      judge: undefined as unknown as DispatchTargetJudge,
+      lastPrompt: ''
     }
+    entry.judge = new DispatchTargetJudge({
+      engine: 'pi',
+      cwd: ctx.cwd,
+      routingId: ctx.fromRoutingId,
+      sessionId: () => entry.sessionId,
+      model: () => entry.model,
+      emit: () => entry.ctx.emit,
+      messages: () => entry.ctx.getMessages(),
+      queuedTurns: () => entry.ctx.getQueuedUserTurns?.() ?? [],
+      blockedCalls: () => entry.ctx.blockedCalls,
+      trajectory: () => entry.runner.trajectory.values(),
+      subagent: () => ({
+        type: 'dispatch:pi',
+        description: judgeDescription(entry.model, entry.ctx.callerRestriction),
+        prompt: entry.lastPrompt
+      }),
+      loadEngineConfig: this.deps.loadEngineConfig,
+      peekModels: peekPiModels,
+      ...(this.deps.makeJudgeTransport ? { makeTransport: this.deps.makeJudgeTransport } : {})
+    })
 
     const gateHandler: PiBridgeHandler = (payload) => this.gatePiTargetToolCall(entry, payload)
 
-    let primitives: PiTargetPrimitives
-    try {
-      primitives = await this.spawnPiTarget({ cwd: ctx.cwd, gateHandler })
-    } catch (err) {
-      throw err instanceof Error ? err : new Error(String(err))
-    }
-    entry.client = primitives.client
-    entry.bridgeHost = primitives.bridgeHost
-
-    entry.client.onEvent((ev) => {
-      // Proof of life for the inactivity watchdog, taken BEFORE the mapper so
-      // an event it drops as `ignore` still counts (see
-      // PiTargetEntry.lastActivityAt).
-      entry.lastActivityAt = this.now()
-      const outputs = mapPiEvent(ev, entry.mapperState)
-      for (const output of outputs) this.forwardPiTargetMessage(entry, output)
+    // The runner streams the target's live turn output as engine-neutral
+    // subagent events under the CURRENT dispatching tool_use (both read live:
+    // `entry.ctx` is replaced on every continuation), byte-matching
+    // `forwardClaudeTargetMessage`'s / `handleOpencodeTargetStream`'s payload
+    // shapes, and accumulates the turn's tokens even with no tool_use to
+    // stream to (see `PiChildRunner`'s output handler).
+    entry.runner = await PiChildRunner.start({
+      cwd: ctx.cwd,
+      model,
+      spawn: this.spawnPiTarget,
+      // The shared MCP catalog (ADR-096), read at target creation and served
+      // by the target's bridge host; its calls hit this target's gate, which
+      // spells Claude MCP rules in pi's form (`mcpRuleKey`).
+      spawnOpts: {
+        gateHandler,
+        mcpServers: collectClaudeMcpForPi(ctx.cwd).servers,
+        ...PI_TARGET_SPAWN_FLAGS
+      },
+      ownerToolUseId: () => entry.ctx.toolUseId,
+      emit: () => entry.ctx.emit,
+      exitMessage: 'pi target process exited unexpectedly',
+      logTag: 'CrossEngineDispatcher',
+      now: () => this.now()
     })
-    entry.client.onExit(() => {
-      // If a turn is in flight, nothing else will ever settle it — mirrors
-      // the Claude target's process-exit-kills-the-turn outcome. ALSO dispose
-      // the bridge host here (not just on disposeFor) — an unexpected process
-      // death must not leak the loopback HTTP server's port (mirrors
-      // PiSession's own onExit teardown of its bridgeHost).
-      for (const output of finishPiMessage(entry.mapperState))
-        this.forwardPiTargetMessage(entry, output)
-      const settle = entry.settled
-      entry.settled = null
-      settle?.({ kind: 'error', message: 'pi target process exited unexpectedly' })
-      entry.bridgeHost.dispose()
-    })
-
-    try {
-      const stateResp = await entry.client.request<PiGetStateData>({ type: 'get_state' })
-      if (!stateResp.success || !stateResp.data?.sessionId) {
-        throw new Error(stateResp.error ?? 'pi target did not report a session id')
-      }
-      entry.sessionId = stateResp.data.sessionId
-      entry.mapperState.sessionId = entry.sessionId
-      this.targets.set(entry.sessionId, entry)
-
-      const ref = engineMeta('pi').decodeModelValue(model)
-      const setModelResp = await entry.client.request({
-        type: 'set_model',
-        provider: ref.vendorId,
-        modelId: ref.modelId
-      })
-      if (!setModelResp.success) {
-        throw new Error(setModelResp.error ?? `Failed to set pi model "${model}"`)
-      }
-    } catch (err) {
-      if (entry.sessionId) this.targets.delete(entry.sessionId)
-      entry.client.dispose()
-      entry.bridgeHost.dispose()
-      throw err instanceof Error ? err : new Error(String(err))
-    }
-
+    entry.sessionId = entry.runner.sessionId
+    this.targets.set(entry.sessionId, entry)
     return entry
-  }
-
-  /**
-   * Send the `prompt` command and await turn completion.
-   *
-   * DIVERGES FROM `driveClaudeTurn`: Claude's `sdkQuery()` hands back an
-   * AsyncIterable the dispatcher manually pulls (`iterator.next()`) until it
-   * sees `result` — necessary there because `for await` would `.return()` the
-   * iterator on early exit and kill the process (see ClaudeTargetEntry's
-   * hazard doc). pi's `PiRpcClient` has NO such iterable: agent events arrive
-   * via a single ambient `onEvent` callback registered ONCE for the target's
-   * whole lifetime (wired in `createPiTarget`), so there is nothing to pull
-   * from and no `.return()` hazard to guard against. "Driving a turn" here
-   * instead means: install `entry.settled` as this promise's resolver BEFORE
-   * sending `prompt` (synchronously, so no event or ack can possibly arrive
-   * first), then let the ALREADY-RUNNING onEvent → forwardPiTargetMessage
-   * pipeline settle it once the mapper produces a `result` (agent_settled) or
-   * `error` (extension_error) output. A turn is guaranteed unique in flight by
-   * the busy-reject in `resolveAndRunPi`, mirroring the single-iterator
-   * exclusivity Claude's `busy` flag protects.
-   *
-   * `streamingBehavior` (pi's steer/follow-up mode for a prompt sent while
-   * already streaming) is deliberately NEVER set: a dispatch target only ever
-   * has ONE caller (the dispatcher itself) and the busy-reject above
-   * guarantees at most one turn in flight, so pi is never "already streaming"
-   * when this fires — unlike PiSession.run(), which drives an INTERACTIVE
-   * session where the human can send a follow-up mid-turn.
-   */
-  private drivePiTurn(entry: PiTargetEntry, prompt: string): Promise<PiTurnOutcome> {
-    entry.mapperState.startTimeMs = Date.now()
-    entry.mapperState.messageEnded = false
-    // A fresh turn (first turn, or a continuation after a prior stop/timeout/
-    // abort) is never draining — see PiTargetEntry.draining's doc comment.
-    entry.draining = false
-    return new Promise<PiTurnOutcome>((resolve) => {
-      entry.settled = resolve
-      entry.client.request({ type: 'prompt', message: prompt }).then(
-        (resp) => {
-          // Only the ACK that the prompt was accepted — the real outcome
-          // arrives later via the ambient onEvent pipeline UNLESS pi rejected
-          // it outright (e.g. malformed command), in which case nothing else
-          // will ever settle this promise.
-          if (!resp.success && entry.settled === resolve) {
-            entry.settled = null
-            resolve({ kind: 'error', message: resp.error ?? 'pi rejected the prompt' })
-          }
-        },
-        (err) => {
-          if (entry.settled === resolve) {
-            entry.settled = null
-            resolve({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
-          }
-        }
-      )
-    })
-  }
-
-  /**
-   * Forward a pi dispatch target's live turn output as engine-neutral
-   * subagent events — byte-matches `forwardClaudeTargetMessage`'s /
-   * `handleOpencodeTargetStream`'s payload shapes exactly (item-open / item-delta /
-   * item-seal, subagent-message, subagent-tool-result). ALSO owns turn-completion:
-   * `result`/`error` MapperOutputs settle `entry.settled` (see `drivePiTurn`'s
-   * doc comment) and `usage` outputs accumulate this turn's token total.
-   * `bash_output`/`ignore` are skipped — the caller's TaskCard doesn't stream
-   * a dispatch target's raw bash output (same as the other two directions).
-   */
-  private forwardPiTargetMessage(entry: PiTargetEntry, out: PiMapperOutput): void {
-    if (out.kind === 'result') {
-      entry.settled?.({
-        kind: 'ok',
-        totalCostUsd: out.totalCostUsd,
-        durationMs: out.durationMs,
-        sessionId: out.sessionId
-      })
-      entry.settled = null
-      return
-    }
-    if (out.kind === 'error') {
-      entry.settled?.({ kind: 'error', message: out.message })
-      entry.settled = null
-      // Falls through — also forwarded as a visible stream chunk below (if a
-      // toolUseId is set) so a live-watching human sees WHY the turn ended,
-      // not just the eventual "Dispatched turn failed" summary.
-    }
-
-    // ACCOUNTING IS NOT STREAMING, so it runs ABOVE the tool_use gate below:
-    // the cap and the ledger row need this turn's tokens even for a dispatch
-    // with no caller tool_use to stream chunks to, and a gated accumulator
-    // would report such a turn as a zero split and a countable zero cost.
-    // `usage` is still never a visible chunk — the return here is what keeps
-    // it out of the stream, exactly as the switch's own `case` did.
-    if (out.kind === 'usage') {
-      entry.turnTotalTokens += out.tokens.input + out.tokens.output + (out.tokens.reasoning ?? 0)
-      // The split the ledger row needs, accumulated beside the total across
-      // the turn's several assistant messages. The four fields pi reports
-      // are the four `PiSession` records for its OWN turns — `reasoning` is
-      // deliberately not folded into `output` here, for parity with it, and
-      // is carried separately for the price lookup, which does fold it.
-      entry.turnTokens.input += out.tokens.input
-      entry.turnTokens.output += out.tokens.output
-      entry.turnTokens.cacheWrite += out.tokens.cacheWrite
-      entry.turnTokens.cacheRead += out.tokens.cacheRead
-      entry.turnReasoningTokens += out.tokens.reasoning ?? 0
-      return
-    }
-
-    const toolUseId = entry.ctx.toolUseId
-    if (!toolUseId) return
-
-    switch (out.kind) {
-      case 'item_open': {
-        const target = { ...out.target, ownerToolUseId: toolUseId }
-        // The mapper already measured the thought's start; forwarding it
-        // unchanged is what makes the child's live timer match the parent's.
-        entry.ctx.emit('session:item-open', {
-          target,
-          message: out.message,
-          ...(out.startedAt === undefined ? {} : { startedAt: out.startedAt })
-        })
-        break
-      }
-      case 'item_delta': {
-        const target = { ...out.target, ownerToolUseId: toolUseId }
-        entry.ctx.emit('session:item-delta', { target, chunk: out.chunk })
-        break
-      }
-      case 'item_seal': {
-        const target = out.target ? { ...out.target, ownerToolUseId: toolUseId } : undefined
-        collectToolUseIds(out.message, entry.turnToolUseIds)
-        entry.ctx.emit('session:item-seal', {
-          message: out.message,
-          ownerToolUseId: toolUseId,
-          ...(target ? { target } : {})
-        })
-        break
-      }
-      case 'message':
-        collectToolUseIds(out.message, entry.turnToolUseIds)
-        entry.ctx.emit('session:subagent-message', { toolUseId, message: out.message })
-        break
-      case 'tool_result':
-        entry.ctx.emit('session:subagent-tool-result', {
-          toolUseId,
-          toolResultToolUseId: out.toolUseId,
-          result: out.result,
-          isError: out.isError
-        })
-        break
-      case 'error':
-        entry.ctx.emit('session:subagent-message', {
-          toolUseId,
-          message: {
-            id: uuidv4(),
-            role: 'assistant',
-            content: [{ type: 'text', text: `[error: ${out.message}]` }],
-            timestamp: Date.now()
-          }
-        })
-        break
-      case 'bash_output':
-      case 'ignore':
-        break
-    }
   }
 
   /**
    * Gate handler for a pi dispatch target's PiBridgeHost (the two-stage
    * approval gate, ADR-033 M4c) — mirrors `awaitClaudeTargetApproval`'s
    * ROLE (forward an 'ask' to the dispatching session, resolve a local
-   * Promise) with an extra stage IN FRONT of it: `permission-engine.decide()`
-   * runs FIRST against the target's fixed `autonomyMode` with EMPTY Claude
-   * rules + an empty sessionAllows set — a dispatched target does not
-   * inherit the user's interactive-session rules (see PiTargetEntry.autonomyMode's
-   * doc comment) — so ONLY an 'ask' decision ever reaches a human; 'allow'
-   * resolves immediately (no round-trip), and a full-autonomy dispatch target
-   * (mode 'auto'/'bypassPermissions') NEVER prompts, matching the Claude
-   * target's allow-all under bypassPermissions.
+   * Promise) with an extra stage IN FRONT of it: `permission-engine.decideWithSource()`
+   * runs FIRST against the parent's LIVE mode (`entry.ctx.getAutonomyMode()`,
+   * ADR-088 ruling 3) with the user's DENY and ASK rules only (ADR-085 §3 —
+   * never their allow rules or "allow for this session" clicks: a dispatched
+   * target does not inherit what the user pre-approved for their own chats)
+   * + an empty sessionAllows set — so 'allow' resolves immediately (no
+   * round-trip). The ask-rule rung precedes the mode base, so a user ask rule
+   * still asks and a user deny rule refuses with the rule in every mode.
    *
-   * NOTE: with EMPTY rules, `decide()` can structurally never return 'deny'
-   * (`modeBaseDecision`'s own return type is `'allow' | 'ask'` — rules-based
-   * deny is the ONLY source of a 'deny' verdict, and the rules are empty
-   * here). The 'deny' branch below is kept anyway for defensive completeness
-   * against `decide()`'s full return type (and in case a future change starts
-   * passing real rules) — see the M4c report for the full discussion of this
-   * tension against the kickoff spec's phrasing.
+   * ADR-088 — under a JUDGED auto mode (the parent in `auto`/`full` and pi's
+   * `autoMode.enabled` not false) the ladder decides from the `acceptEdits`
+   * base, exactly as PiSession does for itself, and an 'ask' goes to
+   * ClaudeUI's judge (`DispatchTargetJudge`, the shared pipeline) instead of
+   * the human: a user ask rule (G9) still reaches the human with zero judge
+   * calls; the judge's allow is the decision, and its block is held on the
+   * forwarded card (ADR-091 §3: Keep blocked / Approve anyway, Keep blocked on
+   * expiry); anything it cannot decide (unavailable, denial cap, the mode left
+   * auto meanwhile) goes to the human.
+   * With pi's judge disabled, auto stays the historical allow-all base.
+   *
+   * A 'deny' is either a user deny rule (reported with the rule) or the mode
+   * base (plan mode's read-only refusals, `exit_plan` outside plan mode) —
+   * 'Denied by dispatch autonomy mode'.
    *
    * `toolUseId` on the forwarded approval is the pi tool call's OWN id
    * (`payload.toolCallId`), NOT the outer dispatching `ctx.toolUseId` —
@@ -4820,44 +5226,182 @@ export class CrossEngineDispatcher {
    * private `buildApprovalSuggestions` here or exporting/refactoring it out
    * of PiSession.ts, which the kickoff spec says not to revisit for M4c. The
    * approval still fully functions via Allow/Deny — only the persistent
-   * "always allow" convenience is missing, and it would write to the SAME
-   * shared Claude permission files a dispatch target's gate deliberately does
-   * NOT consult (rules are empty here), so its practical value would be
+   * "always allow" convenience is missing, and it would write an ALLOW rule to
+   * the shared Claude permission files, whose allow tier a dispatch target's
+   * gate deliberately does NOT consult, so its practical value would be
    * limited to a future INTERACTIVE pi session, not this or a future dispatch.
    */
-  private gatePiTargetToolCall(
+  private async gatePiTargetToolCall(
     entry: PiTargetEntry,
     payload: PiToolCallPayload
   ): Promise<GateDecision> {
-    // See PiTargetEntry.draining's doc comment — a late 'ask' from an already
+    // See PiChildRunner.draining's doc comment — a late 'ask' from an already
     // stopped/timed-out/aborted turn must never register a pending approval.
-    if (entry.draining) {
-      return Promise.resolve({ behavior: 'deny', reason: 'Dispatch stopped' })
-    }
-    const decision = decide(payload.toolName, payload.input, {
-      mode: entry.autonomyMode,
-      rules: EMPTY_PI_RULES,
-      sessionAllows: EMPTY_PI_SESSION_ALLOWS
+    if (entry.runner.draining) return { behavior: 'deny', reason: 'Dispatch stopped' }
+    const mode = liveMode(entry.ctx)
+    const auto = entry.judge.autoModeActive(mode)
+    // `userDenyAsk` carries no allow tier, so PiSession's `withoutAllowRules`
+    // step would be a no-op here — not called.
+    const verdict = decideWithSource(payload.toolName, payload.input, {
+      mode: auto ? 'acceptEdits' : mode,
+      rules: this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction),
+      sessionAllows: EMPTY_PI_SESSION_ALLOWS,
+      // The acceptEdits base matches agent-control paths cwd-relative
+      // (ADR-084 §3); without it an absolute path inside a target running in a
+      // `.claude/worktrees/<name>` checkout would ask on every edit.
+      cwd: entry.cwd,
+      // pi sanitizes MCP tool names (its own mcp.json servers run here too):
+      // a user's Claude-form deny/ask rule must still match (ADR-096).
+      mcpRuleKey: piMcpRuleKey
     })
 
-    if (decision === 'allow') return Promise.resolve({ behavior: 'allow' })
-    if (decision === 'deny') {
-      return Promise.resolve({ behavior: 'deny', reason: 'Denied by dispatch autonomy mode' })
+    if (verdict.decision === 'allow') return { behavior: 'allow' }
+    if (verdict.decision === 'deny') {
+      return {
+        behavior: 'deny',
+        reason:
+          verdict.source === 'deny-rule'
+            ? `Denied by permission rule: ${verdict.rule}`
+            : 'Denied by dispatch autonomy mode'
+      }
     }
 
-    // 'ask' — forward to the DISPATCHING session, mirrors awaitClaudeTargetApproval.
+    if (!auto) return this.forwardPiTargetAsk(entry, payload)
+    // G9 — a user-authored ask rule outranks the judge (zero judge calls).
+    if (verdict.source === 'ask-rule') {
+      logger.info(
+        'CrossEngineDispatcher',
+        `pi target: auto-mode → human: user ask rule matches ${payload.toolName} (${verdict.rule})`
+      )
+      return this.forwardPiTargetAsk(entry, payload)
+    }
+    const outcome = await entry.judge.judge(
+      { toolUseId: payload.toolCallId, toolName: payload.toolName, input: payload.input },
+      {
+        currentMode: () => liveMode(entry.ctx),
+        stillPending: () =>
+          !entry.runner.draining &&
+          entry.sessionId !== null &&
+          this.targets.get(entry.sessionId) === entry,
+        honoursWorkdir: false,
+        permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction)
+      }
+    )
+    // Stopped while the judge ran: never forward a drained ask.
+    if (entry.runner.draining) return { behavior: 'deny', reason: 'Dispatch stopped' }
+    switch (outcome.kind) {
+      case 'allow':
+        return { behavior: 'allow' }
+      case 'hold': {
+        // ADR-091 part 6 — recorded at the dispatching session; with no hold
+        // window it is kept at once, through the Keep blocked path.
+        const ms = blockHoldMs()
+        recordTargetBlock(
+          entry.ctx,
+          payload.toolCallId,
+          payload.toolName,
+          payload.input,
+          outcome.review,
+          {
+            engine: 'pi',
+            label: entry.model,
+            cwd: entry.cwd,
+            sessionId: entry.sessionId,
+            held: ms > 0,
+            deliver: (call) => this.deliverToPiTarget(entry, call)
+          }
+        )
+        if (ms === 0) {
+          return {
+            behavior: 'deny',
+            reason: keepTargetBlock(entry.judge, payload.toolCallId, outcome.reason)
+          }
+        }
+        return this.forwardPiTargetAsk(entry, payload, outcome.reason, {
+          reason: outcome.reason,
+          ms
+        })
+      }
+      case 'human':
+        return this.forwardPiTargetAsk(entry, payload, outcome.reason)
+      case 'settled':
+        return { behavior: 'deny', reason: 'Dispatch stopped' }
+    }
+  }
+
+  /**
+   * ADR-091 part 6 — the user approved one of a pi target's blocked calls
+   * after the fact. While that dispatch is still in flight the target takes
+   * the nudge itself, through its runner's `/cui-deliver` (the pi child
+   * delivery path), at its next tool round; returns who took it. Null once
+   * the dispatch finished (or is stopping): the dispatching agent is nudged
+   * instead, and can dispatch the call back with the same session id.
+   */
+  private deliverToPiTarget(entry: PiTargetEntry, call: BlockedCall): string | null {
+    if (
+      !entry.busy ||
+      entry.runner.draining ||
+      entry.sessionId === null ||
+      this.targets.get(entry.sessionId) !== entry
+    ) {
+      return null
+    }
+    const deliveryId = uuidv4()
+    logger.info(
+      'CrossEngineDispatcher',
+      `pi target: block approval ${deliveryId} → ${entry.sessionId}`
+    )
+    void entry.runner.deliver({
+      v: 1,
+      deliveryId,
+      kind: 'agent-message',
+      text: blockApprovalNotice(blockedCallDelivery(call, true)),
+      wake: true,
+      title: 'Message from you',
+      details: {
+        agentId: entry.sessionId,
+        toolUseId: entry.ctx.toolUseId ?? '',
+        from: 'user',
+        fromId: 'user'
+      }
+    })
+    return `"${entry.model}"`
+  }
+
+  /**
+   * A pi target's ask to the human: a card on the DISPATCHING session, mirrors
+   * awaitClaudeTargetApproval. `decisionReason` is auto mode's denial-cap
+   * sentence when the judge handed the call back (ADR-088), or the judge's deny
+   * text on a held block; `block` makes it a held judge block (ADR-091 §3) —
+   * the deny text a kept block answers with, and the hold window.
+   */
+  private forwardPiTargetAsk(
+    entry: PiTargetEntry,
+    payload: PiToolCallPayload,
+    decisionReason?: string,
+    block?: { reason: string; ms: number }
+  ): Promise<GateDecision> {
     return new Promise((resolve) => {
       const requestId = XENG_REQUEST_PREFIX + uuidv4()
+      const held = block
+        ? this.armForwardedHold(requestId, entry.ctx, entry.judge, payload.toolCallId, block)
+        : null
       const approval: PendingApproval = {
         requestId,
         toolUseId: payload.toolCallId,
         toolName: payload.toolName,
-        input: payload.input
+        input: payload.input,
+        ...(entry.sessionId
+          ? { agent: { agentId: entry.sessionId, label: entry.model, subagentType: 'dispatch:pi' } }
+          : {}),
+        ...(held ? { autoModeBlock: held.autoModeBlock } : {}),
+        ...(decisionReason ? { decisionReason } : {})
       }
       this.pendingApprovals.set(requestId, {
         kind: 'pi',
         targetSessionId: entry.sessionId,
         emit: entry.ctx.emit,
+        ...(held ? { hold: held.hold } : {}),
         resolve: (decision, answers) => {
           if (decision === 'allow' || decision === 'allowForSession') {
             resolve({ behavior: 'allow' })
@@ -5251,10 +5795,10 @@ export class CrossEngineDispatcher {
    * turns that into a friendly isError.
    *
    * THE POLICY ENVELOPE (ADR-066, slice H). All three native knobs are set
-   * HERE, on `thread/start`, not per turn: Codex applies `approvalPolicy` per
-   * turn but takes `approvalsReviewer` and the sandbox from the thread
-   * baseline, and a target's mode is fixed at creation anyway, so the thread
-   * baseline is the one place they cannot drift apart. The rows come from the
+   * HERE, on `thread/start`, as the creation-time baseline — and, since
+   * ADR-088, re-sent on every `turn/start` for the parent's LIVE mode
+   * (`driveCodexTurn`; `TurnStartParams` overrides all three "for this turn and
+   * subsequent turns"). The rows come from the
    * SAME table `CodexSession` uses (`codex-turn-policy.ts`), so a dispatched
    * agent is policed exactly like an interactive one:
    *
@@ -5295,7 +5839,7 @@ export class CrossEngineDispatcher {
       // claims a thread anyway.
       connection: undefined as unknown as CodexThreadConnection,
       ctx,
-      autonomyMode: ctx.autonomyMode,
+      autonomyMode: liveMode(ctx),
       model: '',
       // Replaced below, once the account behind the host is known.
       account: UNKNOWN_DISPATCH_ACCOUNT,
@@ -5364,7 +5908,7 @@ export class CrossEngineDispatcher {
       if (model === undefined) {
         throw new Error(
           'Codex reported no usable model for a dispatch target. Ask the user to set ' +
-            'Engines › codex › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
+            'Settings › Cross-engine dispatch › Dispatch into › Codex (the `dispatch.defaultModel` field in ' +
             '~/.claude/ui/engines/codex.json), or pass `model` explicitly.'
         )
       }
@@ -5406,7 +5950,7 @@ export class CrossEngineDispatcher {
   /**
    * Send `turn/start` and await turn completion.
    *
-   * Shaped like `drivePiTurn`, not `driveClaudeTurn`: notifications arrive on a
+   * Shaped like `PiChildRunner.runTurn`, not `driveClaudeTurn`: notifications arrive on a
    * single ambient callback registered once for the target's lifetime, so there
    * is nothing to pull and no `.return()` hazard. Install `entry.settled` as
    * this promise's resolver BEFORE the request leaves (synchronously, so no
@@ -5419,11 +5963,17 @@ export class CrossEngineDispatcher {
    * no-op) or folded into the response, and settling from here is the only
    * thing that would ever settle it.
    *
-   * NO per-turn policy override is sent. The envelope lives on the thread
-   * baseline (see `createCodexTarget`), and a target's mode cannot change, so
-   * re-sending it every turn would only create a second place for it to drift.
+   * The native policy is sent on EVERY turn (`codexTurnPolicy(mode)` — the
+   * same call `CodexSession` makes; `turn/start` overrides it "for this turn
+   * and subsequent turns"), so the thread follows the parent's LIVE mode at
+   * each turn start (ADR-088 ruling 3). `thread/start` still carries the
+   * creation-time baseline. `entry.autonomyMode` is refreshed to the mode sent
+   * here — the mode the gate decides by (see that field: a mid-turn switch
+   * binds at the next turn).
    */
   private driveCodexTurn(entry: CodexTargetEntry, prompt: string): Promise<CodexTurnOutcome> {
+    const mode = liveMode(entry.ctx)
+    entry.autonomyMode = mode
     entry.draining = false
     entry.turnStartedAtMs = Date.now()
     entry.lastAgentText = ''
@@ -5437,7 +5987,8 @@ export class CrossEngineDispatcher {
         .request('turn/start', {
           threadId: entry.sessionId!,
           clientUserMessageId: uuidv4(),
-          input: codexTurnInput(prompt)
+          input: codexTurnInput(prompt),
+          ...codexTurnPolicy(mode)
         })
         .then(
           (result) => {
@@ -5599,7 +6150,7 @@ export class CrossEngineDispatcher {
 
   /**
    * Forward a Codex target's live turn output as engine-neutral subagent
-   * events — byte-matches `forwardPiTargetMessage`'s payload shapes, which are
+   * events — byte-matches `forwardPiChildStream`'s payload shapes, which are
    * themselves the Claude/opencode ones. `commandDelta` is skipped: the
    * caller's TaskCard does not stream a dispatch target's raw bash output, same
    * as every other direction.
@@ -5772,34 +6323,39 @@ export class CrossEngineDispatcher {
    * of its own — the Codex equivalent of `gatePiTargetToolCall`, and a
    * deliberately narrowed copy of `CodexSession.requestApproval`'s gating half.
    *
-   * The shared permission engine runs FIRST, against the target's FIXED
-   * `autonomyMode`, with EMPTY rules and an empty session-allow set: a
-   * dispatched target does not inherit the user's own interactive rules or
-   * their "allow for this session" clicks (same reasoning as the pi target's
-   * gate). Only an `ask` ever reaches a human, and it reaches the CALLER's
+   * The shared permission engine runs FIRST, against `entry.autonomyMode` —
+   * the mode the thread's native policy runs under THIS turn (refreshed at
+   * every turn start, ADR-088; never the live accessor, see that field) —
+   * with the user's DENY and ASK rules only (ADR-085 §3) and an
+   * empty session-allow set: a dispatched target does not inherit the user's
+   * allow rules or their "allow for this session" clicks (same reasoning as
+   * the pi target's gate). Only an `ask` ever reaches a human, and it reaches the CALLER's
    * client, bound to the target ITEM's own id — `FloatingApproval
    * .useUnmatchedApprovals` matches a `PendingApproval.toolUseId` against
    * TOP-LEVEL message tool_use ids only, and a target's inner ids live in the
    * subagent bucket, so an inner id is what makes the card render (floating).
    *
-   * Per mode, with EMPTY rules:
+   * A user deny rule refuses (with the rule) and a user ask rule asks, in
+   * EVERY mode — both rungs precede the mode base — except that in plan mode a
+   * write or a command that is not plan-read-only is refused before the ask
+   * rule (ADR-085 ruling 7, `planModeOutranksRules`). Past them, per mode:
    *  - plan: `planModeBaseDecision` DENIES every write and every command that
-   *    is not plan-safe. Nothing is forwarded and nothing waits — which is the
+   *    is not plan-read-only (`isPlanReadOnlyCommand`). Nothing is forwarded and nothing waits — which is the
    *    whole point for a target with no human: a read-only dispatch cannot
    *    park forever on a question.
    *  - default / acceptEdits: reads and searches allow; the rest asks, and the
    *    ask is forwarded to the caller.
-   *  - auto: allow-all HERE, because the decision was already made natively —
-   *    the thread runs `approvalsReviewer: 'auto_review'`, so the only requests
-   *    that reach this gate at all are the ones that subagent escalated. This
-   *    is the one place the target is laxer than `CodexSession.gate`, which
-   *    re-gates `auto` as `default` because an interactive session HAS a human
-   *    to escalate to. It is also why `auto` never maps to `never`/bypass: the
-   *    native reviewer, not nobody, is the decider.
+   *  - auto: gates as `default`, like `CodexSession.gate`. The thread runs
+   *    `approvalsReviewer: 'auto_review'`, so the native reviewer has already
+   *    approved everything it was willing to and the only requests that reach
+   *    this gate are the ones it ESCALATED — and escalations belong to the
+   *    caller's human, never to a silent mode-base allow. It is also why `auto`
+   *    never maps to `never`/bypass: the native reviewer, not nobody, decides
+   *    first. A user ask rule still asks the caller's human.
    *
    * `suggestions` ("always allow" checkboxes) are deliberately omitted, same as
-   * the pi target: they would write to the shared permission files this gate
-   * deliberately does not read.
+   * the pi target: they would write allow rules to the shared permission
+   * files, whose allow tier this gate deliberately does not read.
    */
   private gateCodexTargetRequest(
     entry: CodexTargetEntry,
@@ -5885,7 +6441,7 @@ export class CrossEngineDispatcher {
     if (verdict.decision === 'deny') {
       // Neither native response type has a reason field, so a denial would be
       // invisible to the caller's human without this line — the same
-      // visibility choice `forwardPiTargetMessage` makes for a target error.
+      // visibility choice `PiChildRunner` makes for a target error.
       if (entry.ctx.toolUseId) {
         entry.ctx.emit('session:subagent-message', {
           toolUseId: entry.ctx.toolUseId,
@@ -5934,8 +6490,12 @@ export class CrossEngineDispatcher {
   ): { decision: PermissionDecision; reason?: string } {
     if (gated.length === 0) return { decision: 'ask' }
     const engineCtx = {
-      mode: entry.autonomyMode,
-      rules: EMPTY_CODEX_RULES,
+      // `auto` gates as `default` — the interactive rule (`CodexSession.gate()`):
+      // under `auto_review` the native guardian has already approved everything
+      // it was willing to, so whatever reaches this gate is what it ESCALATED,
+      // and escalations belong to the human, never to a silent mode-base allow.
+      mode: entry.autonomyMode === 'auto' ? 'default' : entry.autonomyMode,
+      rules: this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction),
       sessionAllows: EMPTY_CODEX_SESSION_ALLOWS,
       cwd: entry.cwd
     }
@@ -5948,8 +6508,8 @@ export class CrossEngineDispatcher {
       // unconditionally, which on this engine would silently apply a patch
       // ANYWHERE on disk, while Codex's own workspaceWrite sandbox draws the
       // line at the workspace. A mode-base allow outside cwd is downgraded to a
-      // human ask. (Only mode-base verdicts — but the rules are empty on a
-      // target, so mode-base is the only rung that can allow here at all.)
+      // human ask. (Only mode-base verdicts — a target's allow tier is empty,
+      // so mode-base is the only rung that can allow here at all.)
       if (
         step === 'allow' &&
         verdict.source === 'mode-base' &&
@@ -5961,9 +6521,11 @@ export class CrossEngineDispatcher {
         return {
           decision: 'deny',
           reason:
-            entry.autonomyMode === 'plan'
-              ? PLAN_MODE_DENY_REASON
-              : 'Denied by dispatch autonomy mode'
+            verdict.source === 'deny-rule'
+              ? `Denied by permission rule: ${verdict.rule}`
+              : entry.autonomyMode === 'plan'
+                ? PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+                : 'Denied by dispatch autonomy mode'
         }
       if (step === 'ask') decision = 'ask'
     }
@@ -5973,7 +6535,7 @@ export class CrossEngineDispatcher {
 
 export const crossEngineDispatcher = new CrossEngineDispatcher({
   serverManager: opencodeServerManager,
-  makeClient: (baseUrl, authHeader) => new OpencodeClient(baseUrl, authHeader),
+  makeClient: (conn) => new OpencodeClient(conn),
   loadEngineConfig,
   codexVaultAccounts: true
 })

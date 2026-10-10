@@ -2,10 +2,13 @@
 
 **Status:** Accepted (implemented on branch `pi`, M0–M4c)
 **Date:** 2026-07-20
+**Amended by:** [ADR-092](adr-092_model-catalogs-per-engine-and-a-clean-boot.md) (2026-10-05) — `PiRpcClient.dispose()` closes stdin and tree-kills only after a 2 s grace (a pi signalled during startup leaks its `models-store.json` lock).
+**Amended by:** [ADR-096](adr-096_pi-mcp-shared-catalog.md) (2026-10-06) — pi 1.0 has an MCP client; the bridge (v13) registers ClaudeUI's shared MCP catalog with `pi.registerMcpServer`, fetched from the bridge host's `/mcp-servers`.
 **Relates to:** ADR-018 (engine/vendor/account model), ADR-019 (opencode backend — the template this
 mirrors), ADR-020 (persistence/config plane), ADR-021 (neutral auth), ADR-022 (permission mapping),
 ADR-024 (interaction parity), ADR-025 (engine-neutral delete), ADR-030 (capability honesty),
-ADR-033/034 (cross-engine dispatch + cost accounting), ADR-026 (workflow)
+ADR-033/034 (cross-engine dispatch + cost accounting), ADR-026 (workflow), ADR-089 (supersedes the
+M5b in-pi subagent extension: host-run subagents)
 
 ## Context
 
@@ -97,7 +100,11 @@ Two facts drove the design, both **probed against the real binary before any pro
   must match; substitution constructs deny; network commands excluded — a plan-mode bash allow is
   an auto-allow with no human gate), and `exit_plan` asks — surfacing the same engine-neutral
   ExitPlanModeCard/Shift+Tab cycle Claude uses (kind `'plan'` in the tool registry).
-- **In-pi subagents (M5b):** a SECOND ClaudeUI-owned `-e` extension (`pi-subagent-source.ts`,
+- **In-pi subagents (M5b) — SUPERSEDED by [ADR-089](adr-089_pi-subagents-host-run.md).** As of
+  ADR-089 the extension below is retired (`pi-subagent-source.ts` deleted): subagents are host-run
+  `pi --mode rpc` children spawned by ClaudeUI through the bridge's own `agent` tool, and every
+  child tool call is gated by the parent session's live mode and judge. The original decision, for
+  history: a SECOND ClaudeUI-owned `-e` extension (`pi-subagent-source.ts`,
   content-verified tmp file like the bridge; this one imports node builtins — allowed, probed)
   ports pi's shipped subagent example to v1 scope: user-level agent `.md` discovery
   (`~/.pi/agent/agents`), single + parallel tasks, children spawned as

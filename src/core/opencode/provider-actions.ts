@@ -40,9 +40,11 @@ import type {
 export type { OpencodeProviderSource, ProviderActions, ProviderRemoveKind }
 
 export interface ProviderActionInput {
+  /** The native veto is the only remaining configuration for this id. */
+  disabled?: boolean
   /** True for credential-free bundled gateways (FREE_OPENCODE_VENDOR_IDS). */
   isFree: boolean
-  /** An entry for this id exists in opencode's auth.json (any type). */
+  /** opencode holds an active credential row for this id (any type). */
   hasCredential: boolean
   /** Declared in the `provider` object of the ONE global file ClaudeUI writes. */
   declaredInOurFile: boolean
@@ -71,7 +73,9 @@ export function resolveProviderActions(input: ProviderActionInput): ProviderActi
         ? 'credential'
         : input.declaredInOurFile
           ? 'declaration'
-          : null
+          : input.disabled && !input.isFree && !input.declaredElsewhereGlobal
+            ? 'settings'
+            : null
 
   if (removeKind) return { canSetCredential, canEditDeclaration, canRemove: true, removeKind }
 

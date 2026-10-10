@@ -150,6 +150,9 @@ export class SyncCore {
     target?: unknown
   ) => void
 
+  /** History reads in flight, by routing id — see {@link trackSeed}. */
+  private readonly seedsInFlight = new Map<string, Promise<void>>()
+
   /** Reentrancy guard + FIFO queue — see {@link emit}. */
   private inFlight = false
   private readonly pending: Array<{ channel: string; args: unknown[]; delivery: Delivery }> = []
@@ -339,6 +342,9 @@ export class SyncCore {
         if (rekey) {
           for (const observer of this.rekeyObservers) observer(rekey.oldId, rekey.newId)
         }
+        // After the apply and the rekey, so the id is the post-rekey one and the
+        // reducer has already marked the engine gone.
+        this.evictOnExit(channel, args, rekey?.newId)
       } catch (err) {
         this.onApplyError(channel, err)
       }
@@ -375,6 +381,22 @@ export class SyncCore {
     if (typeof oldId !== 'string') return null
     const newId = rekeyTargetFor(this.state, oldId, args[1] as SessionStatus | undefined)
     return newId ? { oldId, newId } : null
+  }
+
+  /**
+   * Engine exit is the moment a session stops needing a host-side transcript.
+   * Claude, opencode and Codex report it as `session:status` → `disconnected`, so
+   * the trigger lives here, at the one place that sees every status, rather than in
+   * each engine's teardown. pi reports an unexpected process death that way too,
+   * but its own `cancel()` clears the flag and reports `idle` — so a pi session the
+   * user stopped keeps `sdkActive` true in canonical and is never evicted here.
+   * That is the engine's existing status contract, not something eviction changes.
+   */
+  private evictOnExit(channel: string, args: unknown[], rekeyedTo: string | undefined): void {
+    if (channel !== 'session:status') return
+    if ((args[1] as SessionStatus | undefined)?.state !== 'disconnected') return
+    const routingId = rekeyedTo ?? args[0]
+    if (typeof routingId === 'string') this.evictTranscript(routingId)
   }
 
   // -------------------------------------------------------------------------
@@ -437,6 +459,82 @@ export class SyncCore {
    */
   setDirectories(directories: DirectoryGroup[]): void {
     this.setAppState({ directories })
+  }
+
+  /**
+   * Drop a session's transcript while keeping its row — the host-side mirror of
+   * the client's `evictLocalSessions` (ADR-087 §2).
+   *
+   * Without it canonical held every transcript for the life of the process, so a
+   * snapshot grew with host uptime (worst on a headless server) and a long-dead
+   * session still shipped its whole conversation to every client that connected.
+   * `seeded: false` is what tells a snapshot consumer the transcript is not here
+   * ({@link toSnapshot}), and what lets a later `seedSession` fill it again when
+   * the session is resumed.
+   *
+   * A direct canonical write, NOT an event and not a reducer branch — and that is
+   * the point. A ringed eviction would strip every replica, including one that is
+   * showing the session and would then have to refetch what it was already
+   * displaying. This is a per-host cache decision: connected replicas keep the
+   * transcript they already folded, and only a client that syncs from scratch is
+   * told to read it from disk.
+   *
+   * Everything that is not the transcript stays (status, config, metering, todos,
+   * sentFiles, queue, tasks) — those are small, and a client lists the session
+   * from them. A no-op for an unknown id and for a live session: `sdkActive` or a
+   * running turn means events are still folding into the transcript.
+   */
+  evictTranscript(routingId: string): void {
+    const existing = this.state.sessions[routingId]
+    if (!existing || existing.sdkActive || existing.status.state === 'running') return
+    // Nothing to drop: a session that never held a transcript (spawned, never
+    // prompted, then exited) is already complete as empty. Marking it unseeded would
+    // tell a fresh client to read a conversation from disk that does not exist.
+    // It also makes the call idempotent.
+    if (existing.messages.length === 0 && Object.keys(existing.subagentMessages).length === 0) {
+      return
+    }
+    this.state = {
+      ...this.state,
+      sessions: {
+        ...this.state.sessions,
+        [routingId]: {
+          ...existing,
+          messages: [],
+          subagentMessages: {},
+          itemStreams: {},
+          itemStreamRevision: 0,
+          seeded: false
+        }
+      }
+    }
+  }
+
+  /**
+   * Record the history read that will end in {@link seedSession} for `routingId`.
+   *
+   * `seedSession` only FILLS an empty transcript, so a prompt that lands before
+   * the read resolves leaves canonical with a one-turn transcript marked complete
+   * and the seed a no-op. Every respawn of an evicted session starts from an empty
+   * transcript, so `sendPrompt` waits on {@link pendingSeed}.
+   *
+   * The entry clears when the read settles, success or failure — a failed seed
+   * must not wedge every later prompt behind it.
+   */
+  trackSeed(routingId: string, read: Promise<void>): void {
+    const settled = read.then(
+      () => undefined,
+      () => undefined
+    )
+    this.seedsInFlight.set(routingId, settled)
+    void settled.then(() => {
+      if (this.seedsInFlight.get(routingId) === settled) this.seedsInFlight.delete(routingId)
+    })
+  }
+
+  /** The in-flight history read for `routingId`, or `undefined` when none is. */
+  pendingSeed(routingId: string): Promise<void> | undefined {
+    return this.seedsInFlight.get(routingId)
   }
 
   /**
@@ -515,10 +613,10 @@ export class SyncCore {
    * Idempotent by construction (the reducer branch is identity-stable when the
    * id is unknown), so a double-delete costs one no-op ring entry.
    *
-   * Removal is still the ONLY thing that drops an entry: canonical does not
-   * evict on a timer, because no client does either — `evictLocalSessions`
-   * (stores/replica.ts) strips the heavy arrays and clears `seeded`, KEEPING the
-   * row so a reselect re-hydrates it from disk. See
+   * Removal is still the ONLY thing that drops an ENTRY. Dropping just the
+   * transcript is {@link evictTranscript}, which keeps the row the way the
+   * client's `evictLocalSessions` (stores/replica.ts) does — so a reselect
+   * re-hydrates from disk, and a delete is the only fact replicas must fold. See
    * `docs/architecture/sync-channels.md` §"Eviction".
    */
   removeSession(routingId: string): void {
@@ -528,5 +626,6 @@ export class SyncCore {
   /** Test seam: wipe canonical state (the ring's seq stays monotonic). */
   resetCanonicalForTests(): void {
     this.state = emptyCanonicalState()
+    this.seedsInFlight.clear()
   }
 }

@@ -8,13 +8,14 @@ const skillCache = new Map<string, SkillInfo[]>()
 
 /**
  * Discover opencode skills for a given working directory by spinning up a
- * transient server, calling GET /skill, mapping the result to SkillInfo[], then
+ * transient server, calling GET /api/skill (for THIS directory — the client
+ * sends it as `x-opencode-directory`), mapping the result to SkillInfo[], then
  * releasing the server.
  *
  * Mirrors model-discovery.ts: acquire → fetch → release, cwd-keyed cache,
  * degrade to [] on any failure (opencode is optional — Claude must not break).
  *
- * opencode `{ name, description?, location, content }` → SkillInfo with
+ * opencode 2.x `Skill.Info { id, name, description?, path, content }` → SkillInfo with
  * `source: 'project'` (closest valid union value — opencode unifies project/user
  * sources; the dialog renders them identically, so the distinction doesn't matter).
  */
@@ -23,10 +24,11 @@ export async function discoverOpencodeSkills(cwd: string): Promise<SkillInfo[]> 
   if (hit) return hit
 
   try {
-    const conn = await opencodeServerManager.acquire(cwd)
-    const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
+    // Lists only — no turn, so no wait for the hosted MCP tools.
+    const conn = await opencodeServerManager.acquire(cwd, { waitForHostedTools: false })
+    const client = new OpencodeClient(conn)
     try {
-      const skills = await client.listSkills()
+      const skills = await client.skills()
       const result: SkillInfo[] = skills.map((s) => ({
         name: s.name,
         displayName: s.name,
@@ -35,13 +37,13 @@ export async function discoverOpencodeSkills(cwd: string): Promise<SkillInfo[]> 
         // "available in this workspace" value (all valid SkillSource values render
         // identically in the Skills dialog).
         source: 'project' as const,
-        path: s.location,
+        path: s.path,
         content: s.content
       }))
       skillCache.set(cwd, result)
       return result
     } finally {
-      opencodeServerManager.release(cwd)
+      opencodeServerManager.releaseIfCurrent(cwd, conn)
     }
   } catch (err) {
     logger.warn(

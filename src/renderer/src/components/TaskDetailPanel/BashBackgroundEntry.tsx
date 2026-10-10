@@ -1,17 +1,30 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
+import { useStickToBottom } from '../../hooks/useStickToBottom'
 import { latestNotification } from '../chat/task-state'
 import { findTaskBlocks } from './utils'
 
+/** How long the Copy button says "Copied". */
+const COPIED_MS = 1500
+
 export function BashBackgroundEntry({
-  toolUseId
+  toolUseId,
+  ownerLabel
 }: {
   toolUseId: string
+  /**
+   * How the roster names the agent that launched this shell (`agentRowLabel`),
+   * worked out once by the panel, which already holds the roster. Without it the
+   * link reads "an agent" and still opens the owner.
+   */
+  ownerLabel?: string
 }): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const messages = useActiveSession((s) => s.messages)
+  const subagentMessages = useActiveSession((s) => s.subagentMessages)
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const removeTaskFromPanel = useSessionStore((s) => s.removeTaskFromPanel)
+  const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
   const bgOutput = useActiveSession((s) => s.backgroundOutputs[toolUseId])
   const watchBg = useSessionStore((s) => s.watchBackgroundOutput)
   const unwatchBg = useSessionStore((s) => s.unwatchBackgroundOutput)
@@ -21,11 +34,14 @@ export function BashBackgroundEntry({
   const [expanded, setExpanded] = useState(true)
   const [prependedContent, setPrependedContent] = useState('')
   const [loadingMore, setLoadingMore] = useState(false)
-  const bodyRef = useRef<HTMLDivElement>(null)
-  const [following, setFollowing] = useState(true)
-  const isAutoScrolling = useRef(false)
+  const { scrollerRef, contentRef, following, scrollToBottom, stopFollowing } =
+    useStickToBottom<HTMLDivElement>()
+  const [copied, setCopied] = useState(false)
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => clearTimeout(copiedTimer.current), [])
 
-  const { taskBlock } = findTaskBlocks(messages, toolUseId)
+  // A subagent's background Bash lives in that agent's bucket (ADR-073 §7).
+  const { taskBlock, ownerToolUseId } = findTaskBlocks(messages, toolUseId, subagentMessages)
 
   // Watch on mount/expand, unwatch on unmount/collapse
   useEffect(() => {
@@ -37,35 +53,6 @@ export function BashBackgroundEntry({
     }
   }, [toolUseId, expanded, watchBg, unwatchBg, activeSessionId])
 
-  useEffect(() => {
-    const el = bodyRef.current
-    if (!el || !following) return
-    isAutoScrolling.current = true
-    el.scrollTop = el.scrollHeight
-    requestAnimationFrame(() => {
-      isAutoScrolling.current = false
-    })
-  }, [bgOutput?.tail, following])
-
-  const handleScroll = useCallback(() => {
-    if (isAutoScrolling.current) return
-    const el = bodyRef.current
-    if (!el) return
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-    setFollowing(nearBottom)
-  }, [])
-
-  const scrollToBottom = useCallback(() => {
-    const el = bodyRef.current
-    if (!el) return
-    isAutoScrolling.current = true
-    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-    setFollowing(true)
-    requestAnimationFrame(() => {
-      isAutoScrolling.current = false
-    })
-  }, [])
-
   const handleLoadEarlier = useCallback(async () => {
     if (!bgOutput || loadingMore || !activeSessionId) return
     const alreadyLoaded = prependedContent.length
@@ -74,19 +61,35 @@ export function BashBackgroundEntry({
     if (loaded >= bgOutput.totalSize) return
 
     setLoadingMore(true)
+    // Earlier output lands ABOVE the tail; the user asked to read it, not to be
+    // pinned back down to the end.
+    stopFollowing()
     const chunkSize = 64 * 1024
     const offset = Math.max(0, bgOutput.totalSize - loaded - chunkSize)
     const length = Math.min(chunkSize, bgOutput.totalSize - loaded)
     const chunk = await window.api.readBackgroundRange(activeSessionId, toolUseId, offset, length)
     setPrependedContent((prev) => chunk + prev)
     setLoadingMore(false)
-  }, [bgOutput, prependedContent, loadingMore, toolUseId, activeSessionId])
+  }, [bgOutput, prependedContent, loadingMore, toolUseId, activeSessionId, stopFollowing])
 
   // All hooks above run unconditionally (rules-of-hooks); bail out only after
   // them when the task block isn't present in the message stream yet.
   if (!taskBlock) return null
 
   const command = String(taskBlock.toolInput?.command || '')
+  const callDescription = String(taskBlock.toolInput?.description || '')
+
+  const handleCopy = (): void => {
+    // A rejected write (no permission, an insecure web origin) leaves the label alone.
+    navigator.clipboard
+      ?.writeText(command)
+      .then(() => {
+        setCopied(true)
+        clearTimeout(copiedTimer.current)
+        copiedTimer.current = setTimeout(() => setCopied(false), COPIED_MS)
+      })
+      .catch(() => {})
+  }
   const bgNotification = latestNotification(taskNotifications, toolUseId)
   const isRunning = !bgNotification
   const isError = bgNotification?.status === 'failed'
@@ -157,7 +160,7 @@ export function BashBackgroundEntry({
         </svg>
         <span className="text-[13px] text-accent font-medium shrink-0">Bash</span>
         <span className="text-[12px] text-text-primary truncate flex-1 text-left font-mono">
-          {command.slice(0, 60)}
+          {command}
         </span>
         {statusBadge}
         {isRunning && !isStopping && (
@@ -198,31 +201,72 @@ export function BashBackgroundEntry({
 
       {expanded && (
         <div className="relative flex-1 min-h-0">
-          <div ref={bodyRef} onScroll={handleScroll} className="px-4 py-3 h-full overflow-y-auto">
-            {isRunning && (
-              <div className="flex items-center gap-2 text-[13px] text-text-muted mb-2">
-                <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin-slow" />
-                <span>Running in background...</span>
-              </div>
-            )}
-            {hasMore && (
-              <button
-                data-testid="BashBackgroundEntry.loadEarlier"
-                onClick={handleLoadEarlier}
-                disabled={loadingMore}
-                className="text-[11px] text-accent hover:underline cursor-pointer mb-1 disabled:opacity-50"
+          <div ref={scrollerRef} className="px-4 py-3 h-full overflow-y-auto">
+            <div ref={contentRef}>
+              {/* The header line truncates; this is where the whole command can be read. */}
+              <div
+                data-testid="BashBackgroundEntry.command"
+                className="mb-3 rounded-md border border-border bg-bg-input"
               >
-                {loadingMore ? 'Loading...' : 'Load earlier output...'}
-              </button>
-            )}
-            {bgOutput ? (
-              <pre className="text-[12px] font-mono text-text-primary/70 bg-bg-primary rounded-md p-2 border border-border whitespace-pre-wrap break-words leading-[1.5]">
-                {prependedContent}
-                {bgOutput.tail}
-              </pre>
-            ) : isRunning ? (
-              <div className="text-[12px] text-text-muted">Waiting for output...</div>
-            ) : null}
+                <pre className="m-0 px-2.5 py-2 font-mono text-[11.5px] leading-[1.5] text-text-primary whitespace-pre-wrap break-all select-text">
+                  <span className="text-text-muted select-none">$ </span>
+                  {command}
+                </pre>
+                <div
+                  data-testid="BashBackgroundEntry.commandMeta"
+                  className="flex items-center gap-2 px-2.5 py-1 border-t border-border text-[10.5px] text-text-muted"
+                >
+                  {ownerToolUseId && (
+                    <span className="min-w-0 truncate">
+                      launched by{' '}
+                      <button
+                        data-testid="BashBackgroundEntry.owner"
+                        onClick={() =>
+                          activeSessionId && openTaskPanel(activeSessionId, ownerToolUseId)
+                        }
+                        className="text-accent hover:text-accent-hover cursor-pointer"
+                      >
+                        {ownerLabel ?? 'an agent'}
+                      </button>
+                    </span>
+                  )}
+                  {ownerToolUseId && callDescription && <span>·</span>}
+                  {callDescription && <span className="min-w-0 truncate">{callDescription}</span>}
+                  <button
+                    data-testid="BashBackgroundEntry.copy"
+                    onClick={handleCopy}
+                    title="Copy command"
+                    className="ml-auto shrink-0 hover:text-text-primary transition-colors cursor-pointer"
+                  >
+                    {copied ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+              </div>
+              {isRunning && (
+                <div className="flex items-center gap-2 text-[13px] text-text-muted mb-2">
+                  <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin-slow" />
+                  <span>Running in background...</span>
+                </div>
+              )}
+              {hasMore && (
+                <button
+                  data-testid="BashBackgroundEntry.loadEarlier"
+                  onClick={handleLoadEarlier}
+                  disabled={loadingMore}
+                  className="text-[11px] text-accent hover:underline cursor-pointer mb-1 disabled:opacity-50"
+                >
+                  {loadingMore ? 'Loading...' : 'Load earlier output...'}
+                </button>
+              )}
+              {bgOutput ? (
+                <pre className="text-[12px] font-mono text-text-primary/70 bg-bg-primary rounded-md p-2 border border-border whitespace-pre-wrap break-words leading-[1.5]">
+                  {prependedContent}
+                  {bgOutput.tail}
+                </pre>
+              ) : isRunning ? (
+                <div className="text-[12px] text-text-muted">Waiting for output...</div>
+              ) : null}
+            </div>
           </div>
           {!following && (
             <button

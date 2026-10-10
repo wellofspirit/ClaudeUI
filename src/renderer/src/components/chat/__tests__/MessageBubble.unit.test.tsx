@@ -54,6 +54,7 @@ beforeEach(() => {
         itemStreams: {},
         itemStreamRevision: 0,
         evicted: false,
+        transcriptLoadFailed: false,
         status: makeSessionStatus({ state: 'idle', sessionId: null, model: null, cwd: null }),
         pendingApprovals: [],
         errors: [],
@@ -229,6 +230,28 @@ describe('MessageBubble', () => {
       render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       expect(screen.getByText(/Search codebase/)).toBeInTheDocument()
     })
+
+    it('hands a permission_denial on the task call to its TaskCard (ADR-085 §3)', () => {
+      const msg = makeChatMessage({
+        role: 'assistant',
+        content: [
+          makeToolUseBlock('Agent', { description: 'Search codebase' }, 'toolu_task_denied'),
+          {
+            type: 'permission_denial',
+            toolUseId: 'toolu_task_denied',
+            denialId: 'd-task',
+            source: 'mode',
+            reason: 'Plan mode is read-only — present a plan and call exit_plan to proceed'
+          },
+          makeToolUseBlock('Agent', { description: 'Other task' }, 'toolu_task_ok')
+        ]
+      })
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
+      const chips = screen.getAllByTestId('TaskCard.denialChip')
+      expect(chips).toHaveLength(1)
+      expect(chips[0]).toHaveTextContent('Blocked · mode')
+      expect(screen.getAllByTestId('TaskCard')).toHaveLength(2)
+    })
   })
 
   describe('approval → tool_use binding', () => {
@@ -362,6 +385,34 @@ describe('MessageBubble', () => {
       expect(screen.getByTestId('ToolCard.reviewChip')).toHaveTextContent(
         'Auto-review · approved · low'
       )
+    })
+
+    it('ADR-091 part 6: the overridden copy of an auto-mode block wins — "approved by you", no Approve', () => {
+      const blocked = review('toolu_a', {
+        reviewId: 'rv-1',
+        reviewer: 'auto-mode',
+        decision: 'denied',
+        riskLevel: undefined
+      })
+      const msg = makeChatMessage({
+        role: 'assistant',
+        content: [
+          makeToolUseBlock('Bash', { command: 'git push' }, 'toolu_a'),
+          blocked,
+          {
+            ...blocked,
+            reviewId: 'rv-1:approved',
+            overriddenByUser: true,
+            nudgedTo: 'the main agent'
+          }
+        ]
+      })
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
+      expect(screen.getByTestId('ToolCard.reviewChip')).toHaveTextContent(
+        'Auto mode · blocked · approved by you'
+      )
+      expect(screen.queryByTestId('ToolReview.approve')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('ToolReview.approveCompact')).not.toBeInTheDocument()
     })
 
     it('renders no stray row for the verdict block itself', () => {
@@ -576,6 +627,32 @@ describe('MessageBubble — F20 rows', () => {
     })
     render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
     expect(screen.getByTestId('ContextNoteBlock')).toBeInTheDocument()
+  })
+
+  it('M8 (top level — pins the pre-existing system-row routing, no S3 change): an agent message renders ContextNoteBlock, never the user bubble', () => {
+    const msg = makeChatMessage({
+      role: 'system',
+      content: [
+        {
+          type: 'context_note',
+          title: 'Agent "scout" completed',
+          fragments: [
+            {
+              text: '<task-notification><status>completed</status></task-notification>',
+              label: 'from an agent, not from you'
+            }
+          ]
+        }
+      ]
+    })
+    const { container } = render(
+      <MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />
+    )
+    expect(screen.getByTestId('ContextNoteBlock')).toBeInTheDocument()
+    expect(screen.getByText('Agent "scout" completed')).toBeInTheDocument()
+    // The user bubble is the right-aligned wrapper carrying data-markdown-source.
+    expect(container.querySelector('[data-markdown-source]')).toBeNull()
+    expect(container.querySelector('.justify-end')).toBeNull()
   })
 
   it('routes a review_result system block to ReviewResultCard', () => {

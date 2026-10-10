@@ -14,9 +14,12 @@
 import { describe, it, expect, vi } from 'vitest'
 
 vi.mock('../OpencodeServerManager', () => ({
-  opencodeServerManager: { acquire: vi.fn(), release: vi.fn() }
+  opencodeServerManager: {
+    setServerStartedHook: vi.fn(),
+    acquire: vi.fn(),
+    release: vi.fn()
+  }
 }))
-vi.mock('../OpencodeClient', () => ({ OpencodeClient: vi.fn() }))
 vi.mock('../../services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted'
 }))

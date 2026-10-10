@@ -98,14 +98,28 @@ const { clients, MockPiRpcClient, MockPiBridgeHost } = vi.hoisted(() => {
 })
 
 vi.mock('../PiRpcClient', () => ({ PiRpcClient: MockPiRpcClient }))
-vi.mock('../pi-locate', () => ({ locatePiBinary: () => '/fake/pi', piBinaryAvailable: () => true }))
+// The auto-mode judge's route resolver (ADR-081) reads the vault, provider
+// files and both engines' catalogs; nothing here judges, and its import graph
+// needs the real `node:fs` this file mocks away.
+vi.mock('../../automode/judge-route', () => ({ resolveJudgeRoute: vi.fn() }))
+// ADR-096: never read the developer's own MCP catalog in a unit test.
+vi.mock('../pi-mcp-bridge', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../pi-mcp-bridge')>()),
+  collectClaudeMcpForPi: () => ({ servers: {}, skipped: [] }),
+  readPiNativeMcpServerNames: () => []
+}))
+vi.mock('../pi-locate', () => ({
+  locatePiLaunch: () => ({ command: '/fake/pi', args: [] }),
+  piBinaryAvailable: () => true
+}))
 vi.mock('../model-discovery', async () => {
   const actual = await vi.importActual<typeof import('../model-discovery')>('../model-discovery')
   return { ...actual, getPiModelCatalog: vi.fn().mockResolvedValue([]) }
 })
 vi.mock('../../services/pi-session-list', () => ({
   loadPiSessionHistory: vi.fn().mockResolvedValue({ messages: [], statusLine: null }),
-  findPiSessionFile: vi.fn().mockReturnValue(null)
+  findPiSessionFile: vi.fn().mockReturnValue(null),
+  loadPiAgentLinks: vi.fn().mockReturnValue([])
 }))
 vi.mock('../../services/usage-recorder', () => ({ recordUsageEvent: vi.fn() }))
 vi.mock('../../services/logger', () => ({
@@ -121,8 +135,7 @@ vi.mock('../../services/cross-engine-dispatcher', () => ({
 }))
 vi.mock('../PiBridgeHost', () => ({
   PiBridgeHost: MockPiBridgeHost,
-  writeBridgeExtension: vi.fn().mockReturnValue('/fake/tmp/bridge.ts'),
-  writeSubagentExtension: vi.fn().mockReturnValue('/fake/tmp/subagent.ts')
+  writeBridgeExtension: vi.fn().mockReturnValue('/fake/tmp/bridge.ts')
 }))
 vi.mock('../../auth/PiAuthProvider', () => ({
   piAuthProvider: {

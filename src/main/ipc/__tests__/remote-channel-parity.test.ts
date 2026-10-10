@@ -57,6 +57,12 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  *    `allow_ide` is on, and toggle-off revokes it in place. Its sibling
  *    `ide:availability` is deliberately ABSENT from this list — it declares
  *    `config`, because asking "may I?" must be answerable without the grant.
+ *  - `admin` (ADR-082 §7, `harness:*` writes) — choosing a harness's source,
+ *    installing one into the host's store, cancelling an install, running
+ *    detection, and the update commands (§6: the update mode, Update all,
+ *    Check now), and the upgrade sheet's answer (§8). Putting a program on the host from a phone is close to remote
+ *    code execution, so a base connection only SEES the Installed page:
+ *    `harness:state` and `harness:versions` declare `config` and are absent here.
  *
  * "Invoked but not grantable at connect time" is the POINT for all three, which
  * is why this list is an allowlist rather than an emptiness assertion: a new
@@ -70,6 +76,14 @@ const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
   'authcfg:lan-link',
   'authcfg:rotate-lan-key',
   'authcfg:set-password',
+  'harness:answer-upgrade-prompt',
+  'harness:check-updates',
+  'harness:detect',
+  'harness:install',
+  'harness:install-cancel',
+  'harness:set-selection',
+  'harness:set-update-mode',
+  'harness:update-all',
   'ide:mint-entry',
   'terminal:attach',
   'terminal:create',
@@ -122,7 +136,10 @@ const SHARED_DECLARATION_SOURCES = [
   'src/core/ipc/codex-commands.ts',
   // ADR-072 §7 — the usage hub's six channels, one declaration spread by both
   // transports (`registerSessionIpc` on the desktop side).
-  'src/core/ipc/usage-hub-commands.ts'
+  'src/core/ipc/usage-hub-commands.ts',
+  // ADR-082 arc 2 — the harness manager, one declaration spread by both
+  // transports (`registerSessionIpc` on the desktop side).
+  'src/core/ipc/harness-commands.ts'
 ]
 
 /**
@@ -144,6 +161,7 @@ const S1B_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'que
   'config:save-opencode-settings': { capability: 'config', kind: 'command' },
   'config:read-opencode-native-raw': { capability: 'config', kind: 'query' },
   'config:patch-opencode-native': { capability: 'config', kind: 'command' },
+  'config:set-opencode-tool-disabled': { capability: 'config', kind: 'command' },
   'config:read-pi-native-raw': { capability: 'config', kind: 'query' },
   'config:patch-pi-native': { capability: 'config', kind: 'command' },
   'config:write-pi-native-text': { capability: 'config', kind: 'command' },
@@ -205,8 +223,23 @@ const MODEL_ALLOWLIST_SWEEP: Record<string, { capability: Capability; kind: 'com
     'models:set-provider-allowlist': { capability: 'config', kind: 'command' }
   }
 
+/**
+ * ADR-094 — the agent types an engine can spawn, for the type tile's settings.
+ * Its own table for the reason {@link TRUST_LIST_SWEEP} has one. `config` and a
+ * `query`: it reads agent definitions (names and colours, never a prompt) and
+ * the engine is checked against the closed `EngineId` set at the perimeter.
+ */
+const AGENT_TYPE_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'query' }> = {
+  'config:list-agent-types': { capability: 'config', kind: 'query' }
+}
+
 /** Every channel the two shared config modules declare: S1b plus what followed. */
-const SHARED_CONFIG_SWEEP = { ...S1B_SWEEP, ...TRUST_LIST_SWEEP, ...MODEL_ALLOWLIST_SWEEP }
+const SHARED_CONFIG_SWEEP = {
+  ...S1B_SWEEP,
+  ...TRUST_LIST_SWEEP,
+  ...MODEL_ALLOWLIST_SWEEP,
+  ...AGENT_TYPE_SWEEP
+}
 
 /**
  * The 2026-08-28 status-view ruling, in the same shape as {@link S1B_SWEEP} and

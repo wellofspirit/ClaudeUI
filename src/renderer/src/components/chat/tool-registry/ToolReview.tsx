@@ -10,6 +10,12 @@
  *  - {@link ToolReviewStrip} sits between the header and the body when the card
  *    is expanded, and adds the rationale.
  *
+ * An auto-mode BLOCK the user may still approve (ADR-091 part 6) carries an
+ * Approve button on both surfaces — the strip's, and a compact one by the chip
+ * while the card is collapsed — whenever the caller passes `onApprove`; once
+ * the host marks the review `overriddenByUser`, both read "approved by you",
+ * and the strip says who the "run it again" nudge went to (`nudgedTo`).
+ *
  * `rationale` and `rule` are UNTRUSTED model text from a thread the user never
  * saw. The producer has already collapsed and capped them (`core/shared/
  * tool-review.ts`); here they are rendered as PLAIN TEXT — never through
@@ -46,6 +52,8 @@ function decisionWord(review: ToolReviewBlock): string {
 
 /** The strip's sentence — who decided, and what they decided. */
 function sentence(review: ToolReviewBlock): string {
+  if (review.reviewer === 'auto-mode' && review.overriddenByUser)
+    return 'Auto mode blocked this action — you approved it'
   if (review.reviewer === 'auto-mode')
     return `Auto mode ${review.decision === 'denied' ? 'blocked' : 'allowed'} this action`
   if (review.decision === 'approved') return 'Codex auto-review approved this action'
@@ -77,24 +85,115 @@ function ShieldIcon({ size, className }: { size: number; className?: string }): 
   )
 }
 
-export function ToolReviewChip({ review }: { review: ToolReviewBlock }): React.JSX.Element {
-  const label = [
-    review.reviewer === 'auto-mode' ? 'Auto mode' : 'Auto-review',
-    decisionWord(review),
-    ...(review.riskLevel ? [review.riskLevel] : [])
-  ].join(' · ')
+/**
+ * The after-the-fact Approve (ADR-091 part 6). Rendered inside the card's
+ * header button too, so a click must not toggle the card.
+ */
+function ApproveButton({
+  onApprove,
+  testid,
+  compact = false
+}: {
+  onApprove: () => void
+  testid: string
+  compact?: boolean
+}): React.JSX.Element {
   return (
-    <span
-      data-testid="ToolCard.reviewChip"
-      className={`inline-flex items-center gap-1 shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold tracking-wide ${tone(review.decision).chip}`}
+    <button
+      type="button"
+      data-testid={testid}
+      onClick={(e) => {
+        e.stopPropagation()
+        onApprove()
+      }}
+      title="Approve this call: the agent is asked to run it again, and its next identical attempt is allowed once"
+      className={`shrink-0 rounded font-semibold text-success bg-success/10 hover:bg-success/20 transition-colors cursor-pointer ${compact ? 'px-1.5 py-0.5 text-[10px]' : 'px-2 py-0.5 text-[11px]'}`}
     >
-      <ShieldIcon size={10} />
-      {label}
-    </span>
+      Approve
+    </button>
   )
 }
 
-export function ToolReviewStrip({ review }: { review: ToolReviewBlock }): React.JSX.Element {
+/**
+ * Whether a card may offer the after-the-fact Approve on its review (ADR-091
+ * part 6) — one rule for every card kind that shows a review (ToolCard,
+ * TaskCard): an auto-mode block not yet approved, on a live session, with no
+ * card pending for the call (a held block's own card answers it).
+ */
+export function canApproveBlock(
+  review: ToolReviewBlock | undefined,
+  opts: { isHistorical: boolean; pending: boolean }
+): boolean {
+  return (
+    !opts.isHistorical &&
+    !opts.pending &&
+    review?.reviewer === 'auto-mode' &&
+    review.decision === 'denied' &&
+    !review.overriddenByUser
+  )
+}
+
+export function ToolReviewChip({
+  review,
+  onApprove,
+  testIdPrefix = 'ToolCard',
+  prefixClassName
+}: {
+  review: ToolReviewBlock
+  /** Set → the compact Approve beside the chip (the caller shows it while collapsed). */
+  onApprove?: () => void
+  /** The hosting card type (ADR-027 two-tier ids), as PermissionDenialChip takes it. */
+  testIdPrefix?: string
+  /**
+   * Set → the reviewer word and its separator ("Auto mode · ") sit in their own
+   * span carrying these classes, so a card can drop them when it is narrow.
+   * Unset → one plain string, as every other card renders it. The text is the
+   * same either way.
+   */
+  prefixClassName?: string
+}): React.JSX.Element {
+  const reviewer = review.reviewer === 'auto-mode' ? 'Auto mode' : 'Auto-review'
+  const rest = [
+    decisionWord(review),
+    ...(review.overriddenByUser ? ['approved by you'] : []),
+    ...(review.riskLevel ? [review.riskLevel] : [])
+  ].join(' · ')
+  return (
+    <>
+      <span
+        data-testid={`${testIdPrefix}.reviewChip`}
+        className={`inline-flex items-center gap-1 shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold tracking-wide ${tone(review.decision).chip}`}
+      >
+        <ShieldIcon size={10} />
+        {prefixClassName ? (
+          // One flex item, like the plain string: separate items would pick up
+          // the chip's gap-1 between the prefix and the decision word.
+          <span>
+            <span className={prefixClassName}>{reviewer} · </span>
+            {rest}
+          </span>
+        ) : (
+          `${reviewer} · ${rest}`
+        )}
+      </span>
+      {onApprove && (
+        <ApproveButton onApprove={onApprove} testid="ToolReview.approveCompact" compact />
+      )}
+    </>
+  )
+}
+
+export function ToolReviewStrip({
+  review,
+  onApprove,
+  testIdPrefix = 'ToolCard'
+}: {
+  review: ToolReviewBlock
+  /** Set → the strip offers Approve (an auto-mode block the user may still approve). */
+  onApprove?: () => void
+  /** The hosting card type (ADR-027 two-tier ids), as PermissionDenialStrip takes it. */
+  testIdPrefix?: string
+}): React.JSX.Element {
   const badge = review.riskLevel
     ? { text: `${review.riskLevel} risk`, className: riskTone(review.riskLevel) }
     : review.rule
@@ -102,7 +201,7 @@ export function ToolReviewStrip({ review }: { review: ToolReviewBlock }): React.
       : null
   return (
     <div
-      data-testid="ToolCard.review"
+      data-testid={`${testIdPrefix}.review`}
       className="flex items-start gap-2 border-t border-border bg-bg-secondary px-3 py-2 text-[12px] leading-relaxed"
     >
       <ShieldIcon size={14} className={`mt-[2px] ${tone(review.decision).text}`} />
@@ -118,7 +217,17 @@ export function ToolReviewStrip({ review }: { review: ToolReviewBlock }): React.
         {review.rationale && (
           <div className="text-text-muted whitespace-pre-wrap break-words">{review.rationale}</div>
         )}
+        {review.overriddenByUser && review.nudgedTo && (
+          <div data-testid="ToolReview.nudgedTo" className="text-text-secondary">
+            Sent to {review.nudgedTo}
+          </div>
+        )}
       </div>
+      {onApprove && (
+        <div className="ml-auto pl-2">
+          <ApproveButton onApprove={onApprove} testid="ToolReview.approve" />
+        </div>
+      )}
     </div>
   )
 }

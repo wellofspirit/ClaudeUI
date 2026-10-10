@@ -133,6 +133,7 @@ export function watchSession(
     if (cur && cur.watcher === watcher) {
       if (cur.debounceTimer) clearTimeout(cur.debounceTimer)
       watchers.delete(routingId)
+      syncCore.evictTranscript(routingId)
     }
     try {
       watcher.close()
@@ -145,12 +146,20 @@ export function watchSession(
   watchers.set(routingId, entry)
 }
 
+/**
+ * Stop watching, and let canonical drop the transcript the watch was keeping
+ * fresh. A watched session spawns nothing, so once nobody watches it nothing
+ * holds it on the host — the same cache rule as an engine exit (ADR-087 §2). The
+ * guard against a live session is `evictTranscript`'s own, so this stays safe for
+ * an id that is also spawned.
+ */
 export function unwatchSession(routingId: string): void {
   const entry = watchers.get(routingId)
   if (!entry) return
   if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
   entry.watcher.close()
   watchers.delete(routingId)
+  syncCore.evictTranscript(routingId)
 }
 
 export function unwatchAll(): void {

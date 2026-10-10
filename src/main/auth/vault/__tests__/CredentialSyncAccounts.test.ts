@@ -34,6 +34,7 @@ import {
   type CodexFeedTarget
 } from '../../../../core/auth/vault/CredentialSync'
 import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
+import { fakeOpencodeTarget } from './fixtures/fake-opencode-target'
 
 let testHome: string
 beforeEach(() => {
@@ -44,6 +45,9 @@ afterEach(() => {
   vi.useRealTimers()
   rmSync(testHome, { recursive: true, force: true })
 })
+
+/** Unexpired: opencode 2.x is never vended an expired token (ADR-097 §5). */
+const FUTURE = Date.now() + 24 * 60 * 60 * 1000
 
 function cred(over: Partial<VaultCredential> & { ws?: string } = {}): VaultCredential {
   const { ws, ...rest } = over
@@ -58,7 +62,7 @@ function cred(over: Partial<VaultCredential> & { ws?: string } = {}): VaultCrede
 }
 
 /** A spy feed target whose auth file never exists, so no fs.watch is armed. */
-function fakeTarget(): {
+function fakeTarget(holding: CodexEntrySnapshot | null = null): {
   target: CodexFeedTarget
   feed: ReturnType<typeof vi.fn>
   remove: ReturnType<typeof vi.fn>
@@ -69,7 +73,7 @@ function fakeTarget(): {
     target: {
       authFilePath: () => join(testHome, 'no-such-dir', 'auth.json'),
       feedOauthCredential: feed,
-      readOauthEntry: vi.fn(async (): Promise<CodexEntrySnapshot | null> => null),
+      readOauthEntry: vi.fn(async (): Promise<CodexEntrySnapshot | null> => holding),
       removeVendorAuth: remove
     },
     feed,
@@ -110,7 +114,7 @@ describe('CredentialSync — per-account refresh', () => {
       expires_in: 3600
     }))
     const pi = fakeTarget()
-    const opencode = fakeTarget()
+    const opencode = fakeOpencodeTarget()
     const sync = new CredentialSync({ vault, refreshAccessToken })
     sync.configure({ pi: pi.target, opencode: opencode.target })
 
@@ -159,7 +163,7 @@ describe('CredentialSync — per-account refresh', () => {
       return { access_token: 'x', refresh_token: 'y', expires_in: 3600 }
     })
     const sync = new CredentialSync({ vault, refreshAccessToken })
-    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeOpencodeTarget().target })
 
     await sync.start()
     await vi.advanceTimersByTimeAsync(1_001)
@@ -185,10 +189,10 @@ describe('CredentialSync.removeAccount', () => {
     const active = await vault.upsertAccount(CHATGPT_PROVIDER_ID, cred({ ws: 'ws-a' }))
     const newer = await vault.upsertAccount(
       CHATGPT_PROVIDER_ID,
-      cred({ ws: 'ws-b', access: 'fake-b', refresh: 'fake-rb' })
+      cred({ ws: 'ws-b', access: 'fake-b', refresh: 'fake-rb', expires: FUTURE })
     )
     const pi = fakeTarget()
-    const opencode = fakeTarget()
+    const opencode = fakeOpencodeTarget()
     const onActiveAccountChanged = vi.fn()
     const sync = new CredentialSync({ vault, onActiveAccountChanged })
     sync.configure({ pi: pi.target, opencode: opencode.target })
@@ -214,8 +218,9 @@ describe('CredentialSync.removeAccount', () => {
   it('removing the LAST account removes both engine copies', async () => {
     const vault = new AuthVault()
     const only = await vault.upsertAccount(CHATGPT_PROVIDER_ID, cred({ ws: 'ws-a' }))
-    const pi = fakeTarget()
-    const opencode = fakeTarget()
+    // Both engines hold the copy ClaudeUI vended (S7e: only that one goes).
+    const pi = fakeTarget(cred())
+    const opencode = fakeOpencodeTarget()
     const onActiveAccountChanged = vi.fn()
     const sync = new CredentialSync({ vault, onActiveAccountChanged })
     sync.configure({ pi: pi.target, opencode: opencode.target })
@@ -242,7 +247,7 @@ describe('CredentialSync.removeAccount', () => {
     const pi = fakeTarget()
     const onActiveAccountChanged = vi.fn()
     const sync = new CredentialSync({ vault, onActiveAccountChanged })
-    sync.configure({ pi: pi.target, opencode: fakeTarget().target })
+    sync.configure({ pi: pi.target, opencode: fakeOpencodeTarget().target })
 
     await sync.removeAccount(other.id)
 
@@ -261,11 +266,11 @@ describe('CredentialSync.switchActiveAccount', () => {
     await vault.upsertAccount(CHATGPT_PROVIDER_ID, cred({ ws: 'ws-a' }))
     const target = await vault.upsertAccount(
       CHATGPT_PROVIDER_ID,
-      cred({ ws: 'ws-b', access: 'fake-b', refresh: 'fake-rb' })
+      cred({ ws: 'ws-b', access: 'fake-b', refresh: 'fake-rb', expires: FUTURE })
     )
     const onActiveAccountChanged = vi.fn()
     const pi = fakeTarget()
-    const opencode = fakeTarget()
+    const opencode = fakeOpencodeTarget()
     const sync = new CredentialSync({ vault, onActiveAccountChanged })
     sync.configure({ pi: pi.target, opencode: opencode.target })
 
@@ -289,7 +294,7 @@ describe('CredentialSync.switchActiveAccount', () => {
     await vault.upsertAccount(CHATGPT_PROVIDER_ID, cred({ ws: 'ws-a' }))
     const pi = fakeTarget()
     const sync = new CredentialSync({ vault })
-    sync.configure({ pi: pi.target, opencode: fakeTarget().target })
+    sync.configure({ pi: pi.target, opencode: fakeOpencodeTarget().target })
     await expect(sync.switchActiveAccount('nope')).rejects.toThrow(/account/i)
     expect(pi.feed).not.toHaveBeenCalled()
     sync.stop()
@@ -316,7 +321,7 @@ describe('CredentialSync adoption with several accounts', () => {
       // pi's store holds a strictly-newer, different credential — the engine
       // rotated it while ClaudeUI was closed.
       pi: targetHolding({ access: 'fake-rotated', refresh: 'fake-rotated-r', expires: 99_000 }),
-      opencode: targetHolding(null)
+      opencode: fakeOpencodeTarget().target
     })
 
     await sync.start()
@@ -358,7 +363,7 @@ describe('CredentialSync.getStatus with accounts', () => {
       cred({ ws: 'ws-b', access: 'secret-access-b', refresh: 'secret-refresh-b', expires: 7_000 })
     )
     const sync = new CredentialSync({ vault })
-    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeOpencodeTarget().target })
 
     const status = await sync.getStatus()
 
@@ -382,7 +387,7 @@ describe('CredentialSync.getStatus with accounts', () => {
 
   it('an empty vault reports no accounts and no active id', async () => {
     const sync = new CredentialSync({ vault: new AuthVault() })
-    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeOpencodeTarget().target })
     await expect(sync.getStatus()).resolves.toEqual({
       connected: false,
       needsReauth: false,
@@ -412,7 +417,7 @@ describe('CredentialSync.injectionTokenFor', () => {
     )
     const refreshAccessToken = vi.fn()
     const sync = new CredentialSync({ vault, refreshAccessToken })
-    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeOpencodeTarget().target })
 
     await expect(sync.injectionTokenFor(null)).resolves.toEqual({
       accessToken: 'fake-access-a',
@@ -439,7 +444,7 @@ describe('CredentialSync.injectionTokenFor', () => {
       return { access_token: 'fake-rotated', refresh_token: 'fake-r2', expires_in: 3600 }
     })
     const sync = new CredentialSync({ vault, refreshAccessToken })
-    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeOpencodeTarget().target })
 
     const both = Promise.all([sync.injectionTokenFor(null), sync.injectionTokenFor(null)])
     await Promise.resolve()
@@ -465,7 +470,7 @@ describe('CredentialSync.injectionTokenFor', () => {
     )
     const refreshAccessToken = vi.fn()
     const sync = new CredentialSync({ vault, refreshAccessToken })
-    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeOpencodeTarget().target })
 
     const token = await sync.injectionTokenFor(null, 0)
 
@@ -490,7 +495,7 @@ describe('CredentialSync.injectionTokenFor', () => {
       })
     )
     const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
-    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeOpencodeTarget().target })
 
     expect((await sync.injectionTokenFor(second.id))?.chatgptAccountId).toBe('ws-b')
     expect((await sync.injectionTokenFor(first.id))?.chatgptAccountId).toBe('ws-a')
@@ -509,7 +514,7 @@ describe('CredentialSync.injectionTokenFor', () => {
 
   it('an empty vault injects nothing', async () => {
     const sync = new CredentialSync({ vault: new AuthVault(), refreshAccessToken: vi.fn() })
-    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeOpencodeTarget().target })
     await expect(sync.injectionTokenFor(null)).resolves.toBeNull()
     sync.stop()
   })
@@ -526,7 +531,7 @@ describe('CredentialSync.injectionTokenFor', () => {
       })
     )
     const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
-    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeOpencodeTarget().target })
 
     const token = await sync.injectionTokenFor(null)
     expect(token?.accessToken).toBe('secret-access-a')
@@ -556,7 +561,7 @@ describe('CredentialSync — a credential expiring beyond the setTimeout cap', (
       expires_in: 3600
     }))
     const sync = new CredentialSync({ vault, refreshAccessToken })
-    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeOpencodeTarget().target })
     await sync.start()
 
     // Past the clamp point, and well past it: still nothing to refresh.

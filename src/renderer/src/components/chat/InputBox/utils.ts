@@ -3,7 +3,7 @@
  * picker utilities.
  */
 
-import type { FileAttachment } from '../../../../../shared/types'
+import type { AttachmentUpload, FileAttachment } from '../../../../../shared/types'
 
 // ---------------------------------------------------------------------------
 // Model picker filtering
@@ -21,6 +21,33 @@ export interface ModelEntry {
   engineId?: string
   /** See `ModelInfo.resolvedModel`. Claude rows only; other engines omit it. */
   resolvedModel?: string
+}
+
+/**
+ * A model row's picker label: the name, and the detail line under it.
+ *
+ * Two description shapes reach the picker. opencode and pi discovery, and
+ * cli.js up to 2.1.280, write "Name · detail". cli.js 2.1.285 moved the name
+ * into `displayName` ("Haiku 4.5") and left only the tagline in `description`,
+ * except on `default`, whose `displayName` is "Default (recommended)" and whose
+ * description keeps the "Name · detail" form. Codex's native catalog puts a
+ * marketing sentence in `description`, so its name is `displayName`.
+ */
+export function modelLabel(m: {
+  value: string
+  displayName?: string
+  description?: string
+  engineId?: string
+}): { shortName: string; detail?: string } {
+  const name = m.displayName || m.value
+  const description = m.description?.trim()
+  if (!description) return { shortName: name }
+  const [head, detail] = description.split('·').map((part) => part.trim())
+  if (m.engineId === 'codex') return { shortName: name, detail: detail || undefined }
+  if (detail === undefined) {
+    return m.displayName ? { shortName: m.displayName, detail: head } : { shortName: head }
+  }
+  return { shortName: head || name, detail: detail || undefined }
 }
 
 /**
@@ -91,16 +118,8 @@ export function dedupeResolvedModels<T extends ModelEntry>(
 export type SendAction =
   | { type: 'side-question'; question: string }
   | { type: 'clear-session' }
-  | {
-      type: 'queue-prompt'
-      prompt: string
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    }
-  | {
-      type: 'send-prompt'
-      prompt: string
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    }
+  | { type: 'queue-prompt'; prompt: string; attachments?: AttachmentUpload[] }
+  | { type: 'send-prompt'; prompt: string; attachments?: AttachmentUpload[] }
   | { type: 'noop' }
 
 export interface SendContext {

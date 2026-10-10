@@ -21,8 +21,16 @@ import {
   PERMISSION_MODE_CYCLE,
   PERMISSION_MODE_LABELS
 } from '../../../../../shared/permission-modes'
-import { ENGINE_META, engineMeta } from '../../../../../shared/engine-meta'
+import { engineMeta } from '../../../../../shared/engine-meta'
+import { HARNESS_IDS } from '../../../../../shared/harness-types'
+import { modelLabel } from './utils'
 import { EngineLogo } from '../../shared/EngineLogo'
+import { useHarnessStore } from '../../SettingsDialog/harness-store'
+import {
+  NOT_AVAILABLE_HERE,
+  harnessPickerMark,
+  harnessReadiness
+} from '../../SettingsDialog/harness-view'
 import { useEscapeLayer } from '../../shared/use-escape-layer'
 import {
   ADAPTIVE_UNSUPPORTED_TOOLTIP,
@@ -35,14 +43,14 @@ import {
 import { accountDisplayName } from '../../../utils/sign-in-provider'
 
 const ENGINE_LOCKED_TOOLTIP =
-  'Engine cannot change after session initialization or for historical sessions'
+  'Harness cannot change after session initialization or for historical sessions'
 
 type Page = 'root' | 'mode' | 'engine' | 'model' | 'thinking' | 'variant' | 'effort' | 'account'
 
 const PAGE_HEADING: Record<Page, string> = {
   root: 'Run configuration',
   mode: 'Autonomy mode',
-  engine: 'Engine',
+  engine: 'Harness',
   model: 'Model',
   thinking: 'Thinking mode',
   variant: 'Reasoning variant',
@@ -245,7 +253,7 @@ function ModePage({
               enabled
                 ? undefined
                 : mode === 'plan'
-                  ? "Engine doesn't support plan mode"
+                  ? "This harness doesn't support plan mode"
                   : 'Auto mode is unavailable for this account/organization'
             }
             onClick={() => enabled && onSelect(mode)}
@@ -265,27 +273,40 @@ function EnginePage({
   selectedEngineId: EngineId
   onSelect: (engineId: EngineId) => void
 }): React.JSX.Element {
-  const codexAvailable = useSessionStore((state) =>
-    state.availableModels.some((model) => model.engineId === 'codex')
-  )
+  // The desktop picker's rule (ADR-082 §8): every harness listed, one that
+  // is not installed marked, one this computer cannot run disabled.
+  const harnessSnapshot = useHarnessStore().snapshot
   return (
     <div>
-      {Object.values(ENGINE_META)
-        .filter((meta) => meta.id !== 'codex' || codexAvailable)
-        .map((meta) => (
+      {HARNESS_IDS.map(engineMeta).map((meta) => {
+        const mark = harnessPickerMark(harnessReadiness(harnessSnapshot, meta.id))
+        const disabled = mark === 'disabled'
+        return (
           <OptionButton
             key={meta.id}
             testId="MobileConfigSheet.engineOption"
             dataValue={meta.id}
             active={meta.id === selectedEngineId}
-            onClick={() => onSelect(meta.id)}
+            disabled={disabled}
+            title={disabled ? NOT_AVAILABLE_HERE : undefined}
+            onClick={() => !disabled && onSelect(meta.id)}
           >
             <span className="flex items-center gap-2 min-w-0">
               <EngineLogo engineId={meta.id} size={14} className="shrink-0" />
               <span className="text-[13px] truncate">{meta.label}</span>
+              {mark === 'not-installed' && (
+                <span
+                  data-testid="MobileConfigSheet.notInstalled"
+                  data-engine={meta.id}
+                  className="shrink-0 rounded-full border border-border px-1.5 text-[10px] leading-4 text-text-muted whitespace-nowrap"
+                >
+                  Not installed
+                </span>
+              )}
             </span>
           </OptionButton>
-        ))}
+        )
+      })}
     </div>
   )
 }
@@ -378,7 +399,7 @@ function ModelPage({
                   </span>
                   {m.description && (
                     <span className="text-[11px] text-text-muted truncate">
-                      {m.description.split('·')[1]?.trim()}
+                      {modelLabel(m).detail}
                     </span>
                   )}
                 </div>
@@ -704,7 +725,7 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
             className="absolute inset-0 bg-black/50"
           />
           <div
-            className="relative flex flex-col rounded-t-2xl bg-bg-secondary border-t border-border shadow-2xl max-h-[min(80dvh,32rem)]"
+            className="relative flex flex-col rounded-t-2xl bg-bg-secondary border-t border-border shadow-2xl max-h-[min(80%,32rem)]"
             style={{ paddingBottom: 'max(16px, env(safe-area-inset-bottom))' }}
           >
             <div className="flex justify-center pt-2 pb-1 shrink-0">
@@ -775,7 +796,7 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
                   {showEnginePicker && (
                     <RootRow
                       testId="MobileConfigSheet.engine"
-                      label="Engine"
+                      label="Harness"
                       value={engineMeta(selectedEngineId).label}
                       disabled={engineLocked}
                       title={engineLocked ? ENGINE_LOCKED_TOOLTIP : undefined}

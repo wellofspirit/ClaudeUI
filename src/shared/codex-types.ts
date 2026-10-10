@@ -207,6 +207,11 @@ export interface CodexRulesStatus {
   rules: number
   /** How many of the user's rules could not be expressed as an argv prefix. */
   skipped: number
+  /**
+   * Of `skipped`, the allow rules withheld because a deny/ask rule names a
+   * narrower command inside them (ADR-085). Absent from older snapshots.
+   */
+  carvedOut?: number
   /** The file's mtime, ISO 8601, or null when it has never been written. */
   syncedAt: string | null
   /** The file on disk is byte-identical to what ClaudeUI would write now. */

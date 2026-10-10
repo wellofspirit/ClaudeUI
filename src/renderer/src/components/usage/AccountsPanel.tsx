@@ -37,6 +37,7 @@ import type {
   AccountLimitWindow,
   BillingType,
   BlockUsageData,
+  CreditLimit,
   DashboardAccount,
   DashboardMachine,
   UsageDashboardData
@@ -47,9 +48,13 @@ import { ClaudeBlocksDrillIn } from './ClaudeBlocksDrillIn'
 import {
   SEVERITY_FILL_CLASS,
   SEVERITY_ICON,
+  creditLimitUsedPercent,
   formatCost,
+  formatCreditAmount,
+  formatCreditLimitSummary,
   formatDuration,
   formatReset,
+  formatResetDate,
   formatResetRelative,
   meterSeverity
 } from './usage-utils'
@@ -501,7 +506,7 @@ function LimitsCell({
     )
   }
 
-  const { state, windows, credits } = limits
+  const { state, windows, credits, creditLimit } = limits
   // A stored credential the ledger cannot name yet: say why rather than leaving
   // a reader to wonder which account this is.
   const unidentified = row.kind === 'limits' && limits.accountKey === UNKNOWN_KEY
@@ -539,10 +544,30 @@ function LimitsCell({
           )}
         </span>
       ))}
-      {windows.length === 0 && credits && (
-        <span className="text-[10px] text-text-secondary">{creditsLabel(credits)}</span>
+      {creditLimit && (
+        // The relayed tag beside it too, as beside every window meter: a credits
+        // plan has no window, so for a relayed one this is the only place the
+        // row can say which machine took the reading.
+        <span className="flex flex-wrap items-center gap-x-1.5 min-w-0">
+          <CreditMeter creditLimit={creditLimit} />
+          {relayedFrom !== null && (
+            // The credit's OWN source: the credits relay is separate from the
+            // window relay, so on a row with both they can differ.
+            <RelayedTag
+              source={limits.creditSource ?? relayedFrom}
+              observedAt={limits.creditObservedAt ?? limits.observedAt}
+            />
+          )}
+        </span>
       )}
-      {windows.length === 0 && !credits && (
+      {/* `credits plan` beside the allowance's meter says nothing the meter
+          does not; a real balance or an unlimited one still does. */}
+      {windows.length === 0 &&
+        credits &&
+        (!creditLimit || credits.unlimited || credits.balance !== null) && (
+          <span className="text-[10px] text-text-secondary">{creditsLabel(credits)}</span>
+        )}
+      {windows.length === 0 && !credits && !creditLimit && (
         <span className="text-[10px] text-text-muted">no rate window</span>
       )}
       {state === 'stale' && <StateChip limits={limits} />}
@@ -699,23 +724,85 @@ function StateChip({ limits }: { limits: AccountLimits }): React.JSX.Element {
  * are drawn.
  */
 function Meter({ limitWindow: w }: { limitWindow: AccountLimitWindow }): React.JSX.Element {
-  const pct = Math.max(0, Math.min(100, Math.round(w.usedPercent)))
-  const severity = meterSeverity(pct)
+  const pct = meterPercent(w.usedPercent)
   // The row shows the form this kind of window is acted on; the tooltip carries
   // the other one, so neither reading costs a click.
   const reset = formatReset(w.kind, w.resetsAt, Date.now(), w.windowMinutes)
   const relative = formatResetRelative(w.resetsAt)
 
   return (
+    <MeterBar
+      testId="AccountsPanel.meter"
+      kind={w.kind}
+      label={w.label}
+      pct={pct}
+      title={`${w.label} · ${pct}% used · resets ${reset}${relative === reset ? '' : ` (${relative})`}`}
+      wide={`· ${reset}`}
+    />
+  )
+}
+
+/**
+ * A workspace member's credit allowance, drawn as one more meter on the row.
+ *
+ * The AMOUNTS are drawn at every width, unlike a window's reset: for a credits
+ * plan "how many have I spent" is the question the row is read for, and the
+ * percent alone does not answer it. The reset is a date a month out, so it is
+ * the part that gives way below `xl`, as it is for a window.
+ */
+function CreditMeter({ creditLimit: c }: { creditLimit: CreditLimit }): React.JSX.Element {
+  const pct = meterPercent(creditLimitUsedPercent(c))
+  const reset = c.resetsAt ? formatResetDate(c.resetsAt) : null
+  return (
+    <MeterBar
+      testId="AccountsPanel.creditMeter"
+      kind="credits"
+      label="credits"
+      pct={pct}
+      title={`Monthly credit limit · ${pct}% used · ${formatCreditLimitSummary(c)}${reset ? ` · resets ${reset}` : ''}`}
+      always={`· ${formatCreditAmount(c.used)}/${formatCreditAmount(c.limit)}`}
+      {...(reset ? { wide: `· ${reset}` } : {})}
+    />
+  )
+}
+
+/** A fill as a whole percent the bar can be drawn at. */
+function meterPercent(usedPercent: number): number {
+  return Math.max(0, Math.min(100, Math.round(usedPercent)))
+}
+
+/**
+ * The drawing every meter shares: label, fill, severity icon and percent, then
+ * `always` (drawn at every width) and `wide` (from `xl` up only).
+ */
+function MeterBar({
+  testId,
+  kind,
+  label,
+  pct,
+  title,
+  always,
+  wide
+}: {
+  testId: string
+  kind: string
+  label: string
+  pct: number
+  title: string
+  always?: string
+  wide?: string
+}): React.JSX.Element {
+  const severity = meterSeverity(pct)
+  return (
     <div
-      data-testid="AccountsPanel.meter"
-      data-kind={w.kind}
+      data-testid={testId}
+      data-kind={kind}
       data-severity={severity}
       className="flex items-center gap-1 min-w-0"
-      title={`${w.label} · ${pct}% used · resets ${reset}${relative === reset ? '' : ` (${relative})`}`}
+      title={title}
     >
       <span className="text-[9px] text-text-muted min-w-[40px] shrink-0 whitespace-nowrap">
-        {w.label}
+        {label}
       </span>
       <div className="w-[44px] h-[6px] shrink-0 rounded-full bg-bg-tertiary overflow-hidden">
         <div
@@ -725,10 +812,18 @@ function Meter({ limitWindow: w }: { limitWindow: AccountLimitWindow }): React.J
       </div>
       <span className="font-mono text-[10px] text-text-primary whitespace-nowrap">
         <span aria-hidden="true">{SEVERITY_ICON[severity]}</span> {pct}%
-        <span data-testid="AccountsPanel.meter.reset" className="hidden xl:inline text-text-muted">
-          {' '}
-          · {reset}
-        </span>
+        {always && (
+          <span data-testid={`${testId}.amount`} className="text-text-secondary">
+            {' '}
+            {always}
+          </span>
+        )}
+        {wide && (
+          <span data-testid={`${testId}.reset`} className="hidden xl:inline text-text-muted">
+            {' '}
+            {wide}
+          </span>
+        )}
       </span>
     </div>
   )

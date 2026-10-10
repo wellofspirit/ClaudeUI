@@ -48,12 +48,19 @@ import { terminalService } from '../services/terminal-service'
 import { vscodeWebService, type VscodeWebService } from '../services/vscode-web-service'
 import { hostConnection } from '../ipc/command-registry'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
+import { onOpencodeConfigWritten } from '../opencode/opencode-config'
+import { scheduleOpencodeConfigReload } from '../opencode/opencode-config-reload'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
 import { armCodexRulesSync, syncCodexRulesFile } from '../codex/rules-sync'
 import { followCodexActiveAccount } from '../codex/codex-account-switch'
 import { scanCodexLineage } from '../codex/history'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { credentialSync } from '../auth/vault/CredentialSync'
+import { fedTokenHistory } from '../auth/vault/fed-token-history'
+import { opencodeCredentialStore } from '../opencode/opencode-credentials'
+import { fileSlotMemory } from '../opencode/credential-store'
+import { setOpencodeAuthHooks } from '../opencode/opencode-auth-hooks'
+import { OPENCODE_CODEX_VENDOR_ID } from '../auth/vault/CredentialSync'
 import { usageHubClient } from '../services/usage-hub/client'
 import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
 import { emitEvent } from '../services/sync-host'
@@ -61,6 +68,16 @@ import { sharedProviderService } from '../shared-providers'
 import { logger } from '../services/logger'
 import { loadPersistedPrices, refreshPricesIfStale } from '../services/opencode-pricing'
 import { usageFetcher } from '../services/usage-fetcher'
+import { claudeHostTokenKeeper } from '../services/claude-host-token'
+import { startDetectionScheduler } from '../harness/detect/scheduler'
+import { collectHarnessGarbage } from '../harness/install/gc'
+import { startHarnessUpdater } from '../harness/install/updater'
+import { evaluateUpgradePrompt, startHarnessEvents } from '../ipc/harness-commands'
+import { harnessWritable } from '../harness/resolve'
+import { watchHarnessArrivals } from '../harness/arrivals'
+import { startCatalogInvalidation } from '../harness/catalog-invalidation'
+import { invalidatePiModelCache, onPiCatalogRecovered } from '../pi/model-discovery'
+import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { HostNotifier } from '../host'
@@ -150,6 +167,14 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   loadPersistedPrices()
   void refreshPricesIfStale()
 
+  // The multi-account token keeper, BEFORE anything can spawn cli.js. With
+  // multi-account on, a spawn reads the active account's token through it and
+  // refuses when it is not published (sdk/host-token.ts); it follows the active
+  // dir itself (`onSecurestorageEnvChange`), so it is idle in single-account
+  // mode. It reads no identity and subscribes before the boot-time apply, which
+  // is what arms it for the first account.
+  claudeHostTokenKeeper.start()
+
   // Sessions, config, git, usage, the canonical seeds and the file watchers.
   // Takes no window since 4d — see registerSessionIpc's doc comment.
   const sessionManager = registerSessionIpc(authDeps)
@@ -166,13 +191,21 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     if (!session || session.engineId !== 'opencode') return undefined
     return {
       cwd: session.cwd,
-      autonomyMode: session.getAutonomyMode?.() ?? 'default',
+      // Both read the LIVE session on every call (ADR-088): a target follows
+      // the caller's mode switches and the judge reads its current transcript.
+      getAutonomyMode: () => session.getAutonomyMode?.() ?? 'default',
+      getMessages: () => session.getMessages(),
+      getQueuedUserTurns: () => session.queuedUserTurns?.() ?? [],
+      ...(session.blockedCalls ? { blockedCalls: session.blockedCalls } : {}),
       emit: (channel, data) => session.emit(channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
         session.addDispatchedCost(engineId, modelId, costUsd)
     }
   })
   opencodeServerManager.setDispatchAgent((req, ctx) => crossEngineDispatcher.dispatch(req, ctx))
+  // ClaudeUI's opencode config writes (settings, raw editor, providers, tools,
+  // agent files) reload the running servers' locations (ADR-097 S8).
+  onOpencodeConfigWritten((reason) => void scheduleOpencodeConfigReload(reason))
 
   // The host's own post-session wiring — see the module header for why this is
   // one ordered hook rather than several options.
@@ -235,7 +268,34 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     onCredentialStored: (accountId) =>
       emitEvent('provider:auth-resolved', [
         { providerId: CHATGPT_PROVIDER_ID, ...(accountId ? { accountId } : {}) }
-      ])
+      ]),
+    // Nothing is fed into a harness that does not run, and a removal from one
+    // is a direct file edit (ADR-082 §8, S7d); the arrival wiring below catches
+    // it up. Here, not in the desktop registrar, so the headless server
+    // honours it too.
+    harnessRuns: harnessWritable,
+    // Which ChatGPT tokens ClaudeUI put into each engine, so a disconnect takes
+    // out a stale copy of its own too (ADR-082 §8, S7e). The file, here, for
+    // both hosts; the class defaults to memory so its tests touch no home.
+    fedTokens: fedTokenHistory()
+  })
+
+  // opencode 2.x credentials (ADR-097 §5). ClaudeUI's record of the slots it
+  // holds in opencode's credential table — the file, here, for both hosts (the
+  // store defaults to memory so its tests touch no home). Then the session's
+  // two meeting points with the vault: the pre-turn gate and the recovery
+  // after a `provider.auth` turn, for opencode's ChatGPT integration only.
+  opencodeCredentialStore.configure({
+    memory: fileSlotMemory(),
+    // Copy recognition lives in the store, so no vend or removal bypasses it.
+    isClaudeuiToken: (refresh) => credentialSync.isClaudeuiRefreshToken(refresh)
+  })
+  setOpencodeAuthHooks({
+    beforeTurn: async (providerID) =>
+      providerID === OPENCODE_CODEX_VENDOR_ID ? credentialSync.opencodeTurnGate() : null,
+    authFailed: (providerID) => {
+      if (providerID === OPENCODE_CODEX_VENDOR_ID) void credentialSync.opencodeAuthFailed()
+    }
   })
 
   // THE USAGE HUB (ADR-072 §7), after the credential wiring and not before it.
@@ -265,6 +325,59 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   armCodexRulesSync()
   syncCodexRulesFile()
 
+  // A harness install, uninstall, selection change or update replaces the
+  // binary pi's and opencode's model discovery asked, so their catalogs go with
+  // it (`harness/catalog-invalidation.ts`). Before the events below, so main has
+  // already dropped them when the renderer is nudged to read models again.
+  startCatalogInvalidation({
+    pi: invalidatePiModelCache,
+    opencode: invalidateOpencodeModelCache
+  })
+
+  // The Installed page and every engine-installed gate follow harnesses live:
+  // each resolver invalidation goes out as `harness:changed { id }`, and each
+  // install's progress as `harness:install-progress`, to the desktop renderer
+  // and every remote client alike. Before the scheduler, so its first run's
+  // invalidations are not missed.
+  startHarnessEvents(emitEvent)
+
+  // pi's model catalog came back after some client was answered a degraded
+  // empty one (a failed probe at boot, its backoff, invalidations overtaking
+  // it): no client asks again on its own, so the composer would keep showing a
+  // raw model value. Tell every client, desktop and remote, to reload models.
+  // Here, beside the harness events, so model-discovery stays transport-free
+  // and both hosts get it. App-lifetime, like the subscriptions above.
+  onPiCatalogRecovered(() => {
+    try {
+      emitEvent('engine:models-changed', [{ engineId: 'pi' }])
+    } catch {
+      // No subscriber can take it (shutdown): the next models read is the truth.
+    }
+  })
+
+  // System harness detection (ADR-082 §3), in the background: one run for
+  // every harness a few seconds after boot, on an unref'd timer, and from then
+  // on whenever the resolver finds a System selection's cache missing or stale.
+  // It spawns `--version` probes, so it never runs on boot's critical path or
+  // on a spawn; the resolver only ever reads its cache. Both hosts need it: the
+  // server resolves harnesses the same way. Test runs switch it off
+  // (`CLAUDEUI_DISABLE_HARNESS_DETECTION`, set in the vitest setup files).
+  // After that first run, the managed store's retention (ADR-082 §4): versions
+  // no session used for seven days are removed, off every spawn path. Then the
+  // harness updater (§6): one check against upstream now and every six hours,
+  // installing what it finds only when Install updates is Automatically.
+  // First of all, the one-time upgrade sheet (§8) is evaluated: after the boot
+  // detection, so a usable System install it found is not offered; with
+  // detection off, at once against the cache as it stands.
+  startDetectionScheduler({
+    afterBoot: async () => {
+      evaluateUpgradePrompt()
+      await collectHarnessGarbage()
+      startHarnessUpdater()
+    },
+    whenDisabled: () => evaluateUpgradePrompt()
+  })
+
   // Learn what every Codex thread is a branch OF, once per launch, alongside the
   // Claude session scan the line above sits next to (`registerSessionIpc` seeds
   // canonical and starts the directory walk; this hangs off that same moment).
@@ -291,6 +404,26 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
       )
     }
   })()
+
+  // A harness that ARRIVES — pi or opencode goes from not running to running:
+  // an install, a selection change, a finished detection — gets what ClaudeUI
+  // held back while it could not run (ADR-082 §8, S7d): every shared provider's
+  // current route, then the ChatGPT credential.
+  // Only that harness is written. Before the boot sync below, so a detection
+  // that finishes during it is not missed; the two share the service's queue.
+  watchHarnessArrivals(['pi', 'opencode'], (id) => {
+    void (async () => {
+      try {
+        await sharedProviderService.harnessArrived(id)
+      } catch (err) {
+        logger.warn(
+          'main',
+          `delivering shared providers to ${id} failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+      await credentialSync.harnessArrived(id)
+    })()
+  })
 
   // Reconcile central credentials first, then materialize all shared-provider
   // routes. Both are best-effort and must never block app startup.

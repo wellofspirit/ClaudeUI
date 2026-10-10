@@ -1,8 +1,16 @@
 import { useState } from 'react'
 import { CodexApprovalCard } from './CodexApprovalCard'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import type { ApprovalDecision, ContentBlock, PendingApproval } from '../../../../shared/types'
+import type {
+  ApprovalDecision,
+  ContentBlock,
+  EngineId,
+  PendingApproval
+} from '../../../../shared/types'
+import type { ToolView } from '../../../../shared/tool-kinds'
+import { engineToolMap } from './tool-registry/engine-tool-maps'
 import { AlwaysAllowSection } from './PermissionSuggestions'
+import { HoldCountdown } from './ApprovalButtons'
 import { AskUserQuestionBlock } from './AskUserQuestionBlock/AskUserQuestionBlock'
 
 // ---------------------------------------------------------------------------
@@ -20,6 +28,12 @@ export interface ApprovalCardViewProps {
   /** When true, renders the "Allow for session" button. No current producer —
    *  will be re-wired when opencode is integrated in Phase 5. */
   showAllowForSession?: boolean
+  /**
+   * The call normalized by its engine's tool map ({@link approvalToolView}),
+   * so the summary reads the same for every engine's names and field shapes.
+   * Absent → the raw input.
+   */
+  toolView?: ToolView
 }
 
 export function ApprovalCardView({
@@ -30,33 +44,51 @@ export function ApprovalCardView({
   checkedSuggestions,
   onToggleSuggestion,
   onRespond,
-  showAllowForSession = false
+  showAllowForSession = false,
+  toolView
 }: ApprovalCardViewProps): React.JSX.Element {
   // See ApprovalButtons: the codex card is the native-question surface only.
   if (approval.codex?.questions) return <CodexApprovalCard approval={approval} />
   const input = approval.input
   const toolName = approval.toolName
   const isSandboxEscape = !!input?.dangerouslyDisableSandbox
-  const hasSuggestions = (approval.suggestions?.length ?? 0) > 0
+  // A held auto-mode block (ADR-091 §3) — see ApprovalButtons: Keep blocked /
+  // Approve anyway, never a standing rule or a session allow.
+  const heldBlock = approval.autoModeBlock
+  const hasSuggestions = !heldBlock && (approval.suggestions?.length ?? 0) > 0
 
-  // Render a useful summary based on tool type
+  // Render a useful summary based on the call's normalized kind — engine
+  // names and field shapes differ (Claude `Bash`/`file_path`, pi `bash`/`path`).
+  const filePath =
+    toolView &&
+    (toolView.kind === 'fileEdit' || toolView.kind === 'fileWrite' || toolView.kind === 'fileRead')
+      ? toolView.path
+      : ''
   let summary: React.JSX.Element
-  if (toolName === 'Bash' && input?.command) {
+  if (toolView?.kind === 'command' && toolView.command) {
     summary = (
-      <pre className="text-[12px] font-mono text-text-primary/80 whitespace-pre-wrap break-words bg-bg-primary rounded-md p-2 border border-border max-h-32 overflow-y-auto">
-        $ {String(input.command)}
+      <pre
+        data-testid="ApprovalCardView.summary"
+        className="text-[12px] font-mono text-text-primary/80 whitespace-pre-wrap break-words bg-bg-primary rounded-md p-2 border border-border max-h-32 overflow-y-auto"
+      >
+        $ {toolView.command}
       </pre>
     )
-  } else if (
-    (toolName === 'Edit' || toolName === 'Write' || toolName === 'Read') &&
-    input?.file_path
-  ) {
+  } else if (filePath) {
     summary = (
-      <span className="text-[12px] font-mono text-text-secondary">{String(input.file_path)}</span>
+      <span
+        data-testid="ApprovalCardView.summary"
+        className="text-[12px] font-mono text-text-secondary"
+      >
+        {filePath}
+      </span>
     )
   } else {
     summary = (
-      <pre className="text-[12px] font-mono text-text-primary/70 whitespace-pre-wrap break-words bg-bg-primary rounded-md p-2 border border-border max-h-24 overflow-y-auto">
+      <pre
+        data-testid="ApprovalCardView.summary"
+        className="text-[12px] font-mono text-text-primary/70 whitespace-pre-wrap break-words bg-bg-primary rounded-md p-2 border border-border max-h-24 overflow-y-auto"
+      >
         {JSON.stringify(input, null, 2)}
       </pre>
     )
@@ -69,6 +101,7 @@ export function ApprovalCardView({
 
   return (
     <div
+      data-testid="ApprovalCardView"
       className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden animate-fade-in`}
     >
       <div className="px-3 py-2">
@@ -101,13 +134,38 @@ export function ApprovalCardView({
               <line x1="12" y1="17" x2="12.01" y2="17" />
             </svg>
           )}
-          <span className={`text-[11px] font-semibold ${labelColor} uppercase tracking-wider`}>
+          <span
+            data-testid="ApprovalCardView.label"
+            className={`text-[11px] font-semibold ${labelColor} uppercase tracking-wider`}
+          >
             {labelText}
           </span>
-          <span className="font-mono text-[12px] text-accent">{toolName}</span>
+          <span
+            data-testid="ApprovalCardView.toolName"
+            className="font-mono text-[12px] text-accent"
+          >
+            {toolName}
+          </span>
+          {heldBlock && (
+            <HoldCountdown
+              expiresAt={heldBlock.expiresAt}
+              testid="ApprovalCardView.holdCountdown"
+            />
+          )}
         </div>
+        {approval.agent && (
+          <p
+            data-testid="ApprovalCardView.agent"
+            className="text-[11px] text-text-secondary mb-2 leading-relaxed"
+          >
+            Agent {approval.agent.label} ({approval.agent.subagentType})
+          </p>
+        )}
         {approval.decisionReason && (
-          <p className="text-[11px] text-text-muted/70 mb-2 leading-relaxed">
+          <p
+            data-testid="ApprovalCardView.reason"
+            className="text-[11px] text-text-muted/70 mb-2 leading-relaxed"
+          >
             {approval.decisionReason}
           </p>
         )}
@@ -117,9 +175,10 @@ export function ApprovalCardView({
           </p>
         )}
         {summary}
-        {isSandboxEscape && (
+        {isSandboxEscape && !heldBlock && (
           <label className="flex items-center gap-2 mt-2 cursor-default select-none">
             <input
+              data-testid="ApprovalCardView.alwaysAllowOutsideSandbox"
               type="checkbox"
               checked={alwaysAllow}
               onChange={(e) => onAlwaysAllowChange(e.target.checked)}
@@ -141,15 +200,17 @@ export function ApprovalCardView({
       </div>
       <div className={`flex border-t ${dividerColor}`}>
         <button
+          data-testid="ApprovalCardView.deny"
           onClick={() => onRespond('deny')}
           className="flex-1 h-8 text-[12px] font-medium text-danger hover:bg-danger/5 transition-colors cursor-pointer"
         >
-          Deny
+          {heldBlock ? 'Keep blocked' : 'Deny'}
         </button>
-        {showAllowForSession && (
+        {showAllowForSession && !heldBlock && (
           <>
             <div className={`w-px ${dividerColor.replace('border-', 'bg-')}`} />
             <button
+              data-testid="ApprovalCardView.allowForSession"
               onClick={() => onRespond('allowForSession')}
               className="flex-1 h-8 text-[12px] font-medium text-accent/80 hover:bg-accent/5 transition-colors cursor-pointer"
             >
@@ -159,10 +220,11 @@ export function ApprovalCardView({
         )}
         <div className={`w-px ${dividerColor.replace('border-', 'bg-')}`} />
         <button
+          data-testid="ApprovalCardView.allow"
           onClick={() => onRespond('allow')}
           className="flex-1 h-8 text-[12px] font-medium text-success hover:bg-success/5 transition-colors cursor-pointer"
         >
-          Allow
+          {heldBlock ? 'Approve anyway' : 'Allow'}
         </button>
       </div>
     </div>
@@ -172,6 +234,29 @@ export function ApprovalCardView({
 // ---------------------------------------------------------------------------
 // Logic layer — hooks, store access, IPC calls
 // ---------------------------------------------------------------------------
+
+/**
+ * The approval's call normalized by the tool map of the engine that MADE it:
+ * the session's own, or — for a dispatch target's forwarded card — the
+ * target's (`agent.subagentType: 'dispatch:<engine>'`; an opencode target
+ * prefixes the tool name with `dispatch:`). Undefined when the tool is not one
+ * the map knows, so the card falls back to the raw input.
+ */
+export function approvalToolView(
+  approval: PendingApproval,
+  sessionEngine: EngineId
+): ToolView | undefined {
+  const dispatched = approval.agent?.subagentType.match(/^dispatch:(\w+)$/)?.[1]
+  const engine = (dispatched as EngineId | undefined) ?? sessionEngine
+  const toolName = approval.toolName.replace(/^dispatch:/, '')
+  try {
+    const map = engineToolMap(engine)
+    const kind = map.kindOf(toolName)
+    return kind === 'unknown' ? undefined : map.normalize(kind, approval.input, undefined, toolName)
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * Every pending approval with no matching tool_use block in the session's
@@ -221,6 +306,7 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
   const engineConfig = useSessionStore((s) => s.engineConfig)
   const sandboxSettings = engineConfig.sandbox
   const permissionMode = useActiveSession((s) => s.permissionMode)
+  const engineId = useActiveSession((s) => s.status.engineId)
   const [alwaysAllow, setAlwaysAllow] = useState(false)
   const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(() =>
     (approval.suggestions || []).map(() => false)
@@ -232,7 +318,14 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
     const isSandboxEscape = !!approval.input?.dangerouslyDisableSandbox
 
     // If allowing with "always allow" checked, add command to excluded list
-    if (decision === 'allow' && alwaysAllow && isSandboxEscape && approval.input?.command) {
+    // A held auto-mode block overrides ONE call (ADR-091 §3) — never a standing rule.
+    if (
+      decision === 'allow' &&
+      alwaysAllow &&
+      isSandboxEscape &&
+      !approval.autoModeBlock &&
+      approval.input?.command
+    ) {
       const cmd = String(approval.input.command)
       const currentExcluded = sandboxSettings?.excludedCommands ?? []
       if (!currentExcluded.includes(cmd)) {
@@ -286,6 +379,7 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
         setCheckedSuggestions((prev) => prev.map((v, j) => (j === i ? !v : v)))
       }
       onRespond={handleRespond}
+      toolView={approvalToolView(approval, engineId)}
     />
   )
 }

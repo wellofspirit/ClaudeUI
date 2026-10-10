@@ -39,6 +39,8 @@ import type { AccountsState, EngineId } from '../../../../shared/types'
 import { accountDisplayName } from '../../utils/sign-in-provider'
 import { Button, SettingRow, ToggleSwitch } from './settings-controls'
 import { ProviderSheet } from './ProviderSheet'
+import { useEngineRuns } from './harness-store'
+import { chatgptDisconnectText } from './harness-view'
 import { EnginePill as SharedEnginePill, Pill } from './provider-pills'
 import {
   curationCount,
@@ -147,6 +149,13 @@ export function removeConsequence(opts: {
   }
   parts.push('You can add it back by signing in.')
   return parts.join(' ')
+}
+
+/** "A", "A and B", "A, B and C". */
+function namesList(names: readonly string[]): string {
+  return names.length < 2
+    ? (names[0] ?? '')
+    : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 }
 
 // ── Atoms ────────────────────────────────────────────────────────────────────
@@ -668,8 +677,11 @@ function EnginesRow({
       data-testid={`${SUBS}.engines`}
       className="flex items-center gap-3 mx-4 mb-3 px-3 py-2.5 rounded-[10px] border border-border bg-bg-primary/40"
     >
-      <span className="text-[10px] font-semibold uppercase tracking-wide text-text-secondary">
-        Engines
+      <span
+        data-testid={`${SUBS}.enginesLabel`}
+        className="text-[10px] font-semibold uppercase tracking-wide text-text-secondary"
+      >
+        Harnesses
       </span>
       <span className="flex-1 min-w-0 flex flex-wrap gap-1.5">{children}</span>
       {trailing}
@@ -1027,7 +1039,11 @@ function AnthropicCard({
         ))}
       </div>
 
-      <div className="flex items-center gap-2 px-4 pb-3">
+      <div
+        data-testid={`${SUBS}.actions`}
+        data-id={entry.id}
+        className="flex items-center gap-2 px-4 pb-3"
+      >
         {multi ? (
           <Button
             variant="link"
@@ -1133,13 +1149,11 @@ function useCurationSummary(
 
 function ChatgptCard({
   entry,
-  opencodeInstalled,
   managing,
   menus,
   onManage
 }: {
   entry: ProviderEntry
-  opencodeInstalled: boolean
   /** Its Manage sheet is open — the pill counts wait until it closes. */
   managing: boolean
   menus: MenuControl
@@ -1157,8 +1171,11 @@ function ChatgptCard({
   const active = list.find((account) => account.id === accounts?.activeId)
   const reauth = active?.needsReauth === true
 
-  const opencodeOn = opencodeInstalled && entry.engines.opencode?.enabled === true
-  const piOn = entry.engines.pi?.enabled === true
+  // A harness that does not run has no pill here (ADR-082 §8); its route is
+  // kept, so installing it brings the pill back as it was.
+  const runs = useEngineRuns()
+  const opencodeOn = runs('opencode') && entry.engines.opencode?.enabled === true
+  const piOn = runs('pi') && entry.engines.pi?.enabled === true
   const opencodeCount = useCurationSummary(
     'opencode',
     entry.engines.opencode?.providerId,
@@ -1170,15 +1187,26 @@ function ChatgptCard({
     ...(opencodeOn ? ['opencode' as const] : []),
     ...(piOn ? ['pi' as const] : [])
   ]
+  // The card's copy names only the harnesses that run (ADR-082 §8): Codex
+  // first, then pi and opencode, as it always read.
+  const codexRuns = runs('codex')
+  const others = (['pi', 'opencode'] as const)
+    .filter((engine) => runs(engine))
+    .map((engine) => engineMeta(engine).label)
+  const users = [...(codexRuns ? [engineMeta('codex').label] : []), ...others]
+  // Removing the last account is a disconnect (ADR-082 §8, "As built (S7e)").
+  const disconnectText = chatgptDisconnectText(runs)
 
   const header = (status: React.ReactNode): React.JSX.Element => (
     <CardHeader
       provider="chatgpt"
       name={entry.name}
       subtitle={
-        list.length === 0
-          ? 'ChatGPT Plus, Pro or Business — used by Codex, and by pi and opencode.'
-          : 'ChatGPT subscription'
+        list.length > 0
+          ? 'ChatGPT subscription'
+          : users.length > 0
+            ? `ChatGPT Plus, Pro or Business — used by ${namesList(users)}.`
+            : 'ChatGPT Plus, Pro or Business.'
       }
       accounts={list.length}
       status={status}
@@ -1202,8 +1230,15 @@ function ChatgptCard({
             data-id={entry.id}
             className="flex items-center gap-3 p-4 rounded-[10px] border border-border bg-bg-tertiary"
           >
-            <span className="flex-1 text-[12px] text-text-secondary">
-              Sign in once; Codex, pi and opencode all use the same account.
+            <span
+              data-testid={`${SUBS}.signInNote`}
+              className="flex-1 text-[12px] text-text-secondary"
+            >
+              {users.length > 1
+                ? `Sign in once; ${namesList(users)} ${users.length > 2 ? 'all' : 'both'} use the same account.`
+                : users.length === 1
+                  ? `Sign in once; ${users[0]} uses this account.`
+                  : null}
             </span>
             <Button
               variant="primary"
@@ -1241,7 +1276,7 @@ function ChatgptCard({
     return removeConsequence({
       active: id === accounts?.activeId,
       ...(successor ? { successor: successor.email } : {}),
-      lastAccount: 'ChatGPT is then disconnected from every engine.',
+      ...(disconnectText ? { lastAccount: disconnectText } : {}),
       sessions: successor
         ? chatgptSwitchConsequence(live, routes)
         : n > 0
@@ -1252,6 +1287,12 @@ function ChatgptCard({
 
   const pillCount = (summary: CurationSummary | null): string | undefined =>
     summary && summary.total > 0 ? curationCount(summary) : undefined
+
+  const manage = (
+    <Button variant="tinted" testid={`${SUBS}.manage`} dataId={entry.id} onClick={onManage}>
+      Manage
+    </Button>
+  )
 
   return (
     <div data-testid={`${SUBS}.card`} data-id={entry.id}>
@@ -1300,7 +1341,11 @@ function ChatgptCard({
         ))}
       </div>
 
-      <div className="flex items-center gap-2 px-4 pb-3">
+      <div
+        data-testid={`${SUBS}.actions`}
+        data-id={entry.id}
+        className="flex items-center gap-2 px-4 pb-3"
+      >
         <Button
           variant="link"
           testid={`${SUBS}.addAccount`}
@@ -1310,25 +1355,31 @@ function ChatgptCard({
         >
           + Add account
         </Button>
+        {/* No harness it reaches runs: no Harnesses box with nothing in it —
+            Manage (the Claude row, and any saved route) sits with the card's
+            other actions. */}
+        {users.length === 0 && <span className="ml-auto">{manage}</span>}
       </div>
 
-      <EnginesRow
-        trailing={
-          <Button variant="tinted" testid={`${SUBS}.manage`} dataId={entry.id} onClick={onManage}>
-            Manage
-          </Button>
-        }
-      >
-        <EnginePill engine="codex" on={entry.engines.codex?.enabled !== false} warn={reauth} />
-        <EnginePill
-          engine="opencode"
-          on={opencodeOn}
-          count={pillCount(opencodeCount)}
-          warn={reauth}
-        />
-        <EnginePill engine="pi" on={piOn} count={pillCount(piCount)} warn={reauth} />
-      </EnginesRow>
-      {reauth && (
+      {users.length > 0 && (
+        <EnginesRow trailing={manage}>
+          {codexRuns && (
+            <EnginePill engine="codex" on={entry.engines.codex?.enabled !== false} warn={reauth} />
+          )}
+          {runs('opencode') && (
+            <EnginePill
+              engine="opencode"
+              on={opencodeOn}
+              count={pillCount(opencodeCount)}
+              warn={reauth}
+            />
+          )}
+          {runs('pi') && (
+            <EnginePill engine="pi" on={piOn} count={pillCount(piCount)} warn={reauth} />
+          )}
+        </EnginesRow>
+      )}
+      {reauth && users.length > 0 && (
         <div
           data-testid={`${SUBS}.enginesWaiting`}
           className="px-4 -mt-1 pb-3 text-[12px] text-warning"
@@ -1338,8 +1389,9 @@ function ChatgptCard({
       )}
 
       {/* One account is not a choice to make per session, so the option that
-          configures that choice waits until there are two. */}
-      {list.length > 1 && (
+          configures that choice waits until there are two. It is Codex's, so
+          it waits for Codex to run too (ADR-082 §8). */}
+      {list.length > 1 && codexRuns && (
         <OptionsFold
           id={entry.id}
           open={optionsOpen}
@@ -1347,14 +1399,18 @@ function ChatgptCard({
           summary={
             perSession
               ? 'Codex sessions can pin an account'
-              : 'All engines follow the active account'
+              : 'All harnesses follow the active account'
           }
         >
           <OptionRow
             testid={`${SUBS}.perSession`}
             toggleTestid={`${SUBS}.perSessionToggle`}
             label="Pin an account per Codex session"
-            description="When starting a Codex session you can choose its account; it keeps that account when you switch here. Applies to new sessions. pi and opencode always follow the active account."
+            description={`When starting a Codex session you can choose its account; it keeps that account when you switch here. Applies to new sessions.${
+              others.length > 0
+                ? ` ${namesList(others)} always ${others.length > 1 ? 'follow' : 'follows'} the active account.`
+                : ''
+            }`}
             checked={perSession}
             disabled={busy}
             onToggle={() =>
@@ -1409,7 +1465,6 @@ export function SubscriptionsSection(): React.JSX.Element {
           <ChatgptCard
             key={entry.id}
             entry={entry}
-            opencodeInstalled={registry.opencodeInstalled}
             managing={managing === entry.id}
             menus={menus}
             onManage={() => setManaging(entry.id)}
@@ -1420,7 +1475,6 @@ export function SubscriptionsSection(): React.JSX.Element {
         <ProviderSheet
           key={open.id}
           entry={open}
-          opencodeInstalled={registry.opencodeInstalled}
           onWrote={handleWrote}
           onClose={() => setManaging(null)}
         />

@@ -12,6 +12,7 @@ import type {
   VendorConfig,
   SandboxSettings,
   AutoModeConfig,
+  JudgeModelSupport,
   ModelInfo,
   OpencodeConfigSettings
 } from '../../../../shared/types'
@@ -42,6 +43,7 @@ import type { SettingsRenderContext } from './settings-target'
 import { ModelPicker } from '../shared/InlinePickers'
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
 import { OpencodeAgentsSection } from './OpencodeAgents'
+import { MicrophoneSetting } from './MicrophoneSetting'
 import { TrustListsSection } from './TrustLists'
 import {
   RemoteAccessSection,
@@ -55,7 +57,7 @@ import { LastPickNote, NewSessionModelSetting } from './NewSessionModelSetting'
 import { ClaudeEndpointSection, ClaudeModelMappingSection } from './ClaudeEndpointSettings'
 import { ClaudeDefaultsSection } from './ClaudeDefaultsSection'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
-import { useEngineInstalled, useOpencodeInstalled, usePiInstalled } from './use-engine-installed'
+import { useEngineInstalled } from './use-engine-installed'
 import { useDispatchConfig, useDispatchModels, useEngineConfigObject } from './use-engine-config'
 import {
   OpencodeSessionBehaviorSection,
@@ -92,7 +94,7 @@ import {
   PiResourcesSection
 } from './PiConfigPanes'
 import { diffToPatches } from '../../../../shared/opencode-config-diff'
-import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.29.json'
+import opencodeConfigSchema from '../../../../shared/opencode-config-schema.json'
 
 // ── Section definitions ──────────────────────────────────────────────
 //
@@ -108,6 +110,11 @@ export interface SettingItem {
   key: string
   label: string
   keywords?: string // extra search terms
+  /**
+   * The harnesses this row is about, when it is about nothing else: hidden (and
+   * out of search) while none of them runs (ADR-082 §8, `itemsFor`).
+   */
+  harnesses?: readonly EngineId[]
   render: (
     settings: AppSettings,
     update: (p: Partial<AppSettings>) => void,
@@ -177,8 +184,7 @@ const DEFAULT_PROXY: ProxySettings = {
   hostname: '',
   port: 8080,
   username: '',
-  password: '',
-  proxySubprocesses: false
+  password: ''
 }
 
 // ── Proxy test connection row ────────────────────────────────────────
@@ -384,14 +390,15 @@ export function AutonomyModePicker(): React.JSX.Element {
   )
 }
 
-// ── opencode availability probe ──────────────────────────────────────
+// ── Harness availability ─────────────────────────────────────────────
 //
-// `useEngineInstalled` / `useOpencodeInstalled` / `usePiInstalled` moved to
-// ./use-engine-installed (imported above). They gate engine-scoped sections on
-// a cheap, deterministic binary-on-disk check that NEVER spawns a
-// server/process — the earlier `vendorAuthProbe`/`getEngineModels` approaches
-// needed a successful spawn + HTTP round-trip, so any transient spawn failure
-// hid the very sections that configure the engine.
+// No section below asks whether its harness is installed. While one is not
+// (ADR-082 §8, owner ruling 2026-09-30), the page model hides its segments and
+// groups on shared pages and greys its dispatch target (`segmentOptions`,
+// `visibleGroups` in settings-pages.tsx), so these bodies mount only for a
+// harness that runs. That reads the harness store's readiness, which never
+// spawns anything. (`useEngineInstalled`, from ./use-engine-installed, is left
+// to the permissions summary's Codex chip.)
 
 // ── opencode auto-mode (Full) LLM gatekeeper settings (ADR-023) ──────
 
@@ -403,6 +410,9 @@ const TWO_STAGE_OPTIONS: { value: 'both' | 'fast' | 'thinking'; label: string }[
 
 /** Label for the judge-model picker's "no explicit choice" row (judgeModel unset). */
 const JUDGE_MODEL_DEFAULT_LABEL = 'Same as session model (default)'
+/** The judge-model row's second sentence, the same for both engines (ADR-081 §3). */
+const JUDGE_MODEL_ROUTES_NOTE =
+  'ClaudeUI calls the judge itself, so only models from providers set up in ClaudeUI (OpenAI-compatible ones, or the ChatGPT subscription) can judge.'
 /** Label for the dispatch default-model picker's "no explicit choice" row. */
 const DISPATCH_MODEL_DEFAULT_LABEL = '(not set)'
 /** Label for the opencode default/small model pickers' "no explicit choice" row. */
@@ -415,7 +425,7 @@ const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
 
 /**
  * Shared render/load/save core for the per-engine auto-mode editor.
- * `OpencodeAutoModeSection` and `PiAutoModeSection` are thin copy/gating
+ * `OpencodeAutoModeSection` and `PiAutoModeSection` are thin copy
  * wrappers around this — both engines read the SAME `EngineConfig.autoMode`
  * block (`loadEngineConfig(<engine>).autoMode` in OpencodeSession /
  * PiSession), and the classifier policy behind it is engine-neutral
@@ -426,12 +436,15 @@ const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
  * (SettingsDialog only wires the 'claude' engine config), editing ONLY the
  * `autoMode` block so sibling blocks (`dispatch`, `piConfig`, …) survive.
  *
- * `installed`: null = still probing (Loading), false = gate closed.
- *
- * The judge-model picker is fed from `getEngineModels()` filtered to this
- * engine, so its option values are picker VALUES (`<provider>/<modelId>`) —
- * exactly what both sessions feed to `engineMeta(<engine>).decodeModelValue()`
- * when resolving `autoMode.judgeModel`.
+ * The judge-model picker is fed from `getEngineModels(engineId)`, so its
+ * option values are picker VALUES (`<provider>/<modelId>`) — exactly what both
+ * sessions hand the judge route resolver as `autoMode.judgeModel`. ClaudeUI
+ * makes the judge's model call itself
+ * (ADR-081), so the list is then narrowed to the models it can call
+ * (`judgeModelSupport`); a saved value it can't call, or a list with nothing
+ * left in it, gets a notice under the picker ({@link JudgeSupportNotice}).
+ * Until that answer arrives — or if asking fails — every model is listed: the
+ * session refuses an unroutable judge at call time either way, with a banner.
  *
  * What this editor does NOT own is the three trust lists: they are the same
  * values for every engine, so ADR-065 phase 4 moved them to one shared file with
@@ -441,50 +454,51 @@ const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
 function AutoModeSection({
   engineId,
   testid,
-  installed,
-  notInstalledMessage,
   toggleDescription,
   judgeModelDescription
 }: {
-  engineId: EngineId
+  engineId: 'opencode' | 'pi'
   testid: string
-  installed: boolean | null
-  notInstalledMessage: string
   /** One sentence under the master switch — the ⓘ is gone (ADR-065). */
   toggleDescription: string
   judgeModelDescription: string
 }): React.JSX.Element {
   const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
+  /** Per model value, whether ClaudeUI can call it as the judge; null = not known (yet). */
+  const [support, setSupport] = useState<Record<string, JudgeModelSupport> | null>(null)
 
   useEffect(() => {
     window.api
       .loadEngineConfig(engineId)
       .then(setEngineCfg)
       .catch(() => setEngineCfg({}))
+    setSupport(null)
     window.api
-      .getEngineModels()
+      .getEngineModels(engineId)
       .then((groups) => {
-        const own = groups.filter((g) => g.engineId === engineId)
-        setModels(own.flatMap((g) => g.models))
+        const own = groups.filter((g) => g.engineId === engineId).flatMap((g) => g.models)
+        setModels(own)
+        // An empty list says nothing about routes (discovery found nothing), so
+        // there is nothing to ask about.
+        if (own.length === 0) return
+        return window.api
+          .judgeModelSupport(
+            engineId,
+            own.map((m) => m.value)
+          )
+          .then(setSupport)
       })
       .catch(() => {})
   }, [engineId])
 
-  // Both gated states are description-only ROWS, not bespoke markup: a card of
-  // rows that sometimes isn't one was three of the six row grammars ADR-065
-  // counted. Same testid on every branch, per ADR-027.
-  if (engineCfg === null || installed === null) {
+  // Loading is a description-only ROW, not bespoke markup: a card of rows that
+  // sometimes isn't one was three of the six row grammars ADR-065 counted. Same
+  // testid on every branch, per ADR-027.
+  if (engineCfg === null) {
     return (
       <div data-testid={testid}>
         <SettingRow description="Loading…" />
-      </div>
-    )
-  }
-  if (!installed) {
-    return (
-      <div data-testid={testid}>
-        <SettingRow description={notInstalledMessage} />
       </div>
     )
   }
@@ -494,7 +508,11 @@ function AutoModeSection({
   const judgeModel = auto.judgeModel ?? ''
   const twoStageMode = auto.twoStageMode ?? 'both'
 
-  const judgeModelOptions = toModelDisplays(models)
+  // Only an explicit refusal hides a model; an unanswered value stays listed.
+  const judgeable = support ? models.filter((m) => support[m.value]?.ok !== false) : models
+  const judgeModelOptions = toModelDisplays(judgeable)
+  // Selected from the FULL list, so a saved model that can't judge still shows
+  // by name (its notice says why) rather than as an unknown value.
   const selectedJudgeModel = selectedModelDisplay(models, judgeModel, JUDGE_MODEL_DEFAULT_LABEL)
 
   const update = (patch: Partial<AutoModeConfig>): void => {
@@ -538,6 +556,12 @@ function AutoModeSection({
             </span>
           </SettingRow>
           <StaleModelNotice testid={`${testid}.judgeModel`} models={models} value={judgeModel} />
+          <JudgeSupportNotice
+            testid={`${testid}.judgeModel`}
+            value={judgeModel}
+            support={support}
+            noneLeft={support !== null && judgeable.length === 0}
+          />
           {/* `SettingsSelect` IS a `SettingRow` + `Segmented` (settings-controls),
               so using it keeps the row vocabulary and the `.twoStageMode` /
               `.twoStageMode.option` testids the call sites already assert. */}
@@ -556,19 +580,51 @@ function AutoModeSection({
 }
 
 /**
+ * Why the judge picker can't offer what the user might expect (ADR-081 §3),
+ * shown under it like `StaleModelNotice`: nothing in this engine's list can
+ * judge at all (`data-state="none"`), or the SAVED judge model is one ClaudeUI
+ * can't call (`data-state="unsupported"`, carrying the resolver's own reason —
+ * the same sentence the session's banner would show).
+ */
+function JudgeSupportNotice({
+  testid,
+  value,
+  support,
+  noneLeft
+}: {
+  testid: string
+  value: string
+  support: Record<string, JudgeModelSupport> | null
+  noneLeft: boolean
+}): React.JSX.Element | null {
+  const entry = value && support ? support[value] : undefined
+  const reason = entry && !entry.ok ? entry.reason : null
+  if (!noneLeft && reason === null) return null
+  return (
+    <div
+      data-testid={`${testid}.unsupported`}
+      data-state={noneLeft ? 'none' : 'unsupported'}
+      data-model={value}
+      className="px-3.5 pb-2 text-[12px] leading-4 text-warning"
+    >
+      {noneLeft
+        ? 'No model here can judge: ClaudeUI calls the judge itself, and none of these models comes from a provider set up in ClaudeUI. Add one in Settings › Models & providers.'
+        : reason}
+    </div>
+  )
+}
+
+/**
  * Configures the auto-mode LLM permission gatekeeper that runs in Full
  * autonomy on opencode. See ADR-023.
  */
 function OpencodeAutoModeSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
   return (
     <AutoModeSection
       engineId="opencode"
       testid="OpencodeAutoModeSection"
-      installed={installed}
-      notInstalledMessage="opencode is not installed. Auto mode gates risky tool calls for opencode sessions in Full autonomy."
       toggleDescription="In Full autonomy a judge model approves each risky tool call instead of prompting you, and asks you when it is unsure; off, Full prompts you like Ask."
-      judgeModelDescription="Sees each tool call and decides whether to allow it; unset uses the session's own model."
+      judgeModelDescription={`Sees each tool call and decides whether to allow it; unset uses the session's own model. ${JUDGE_MODEL_ROUTES_NOTE}`}
     />
   )
 }
@@ -581,15 +637,12 @@ function OpencodeAutoModeSection(): React.JSX.Element {
  * `auto` and `full` autonomy modes, where opencode's covers Full only.
  */
 export function PiAutoModeSection(): React.JSX.Element {
-  const installed = usePiInstalled()
   return (
     <AutoModeSection
       engineId="pi"
       testid="PiAutoModeSection"
-      installed={installed}
-      notInstalledMessage="pi is not installed. Auto mode gates risky tool calls for pi sessions in Auto and Full autonomy."
       toggleDescription="In Auto and Full autonomy a judge model approves each risky tool call instead of prompting you, and asks you when it is unsure; off, both prompt you like Ask."
-      judgeModelDescription="Sees each tool call and decides whether to allow it, in its own short-lived pi process; unset uses the session's own model."
+      judgeModelDescription={`Sees each tool call and decides whether to allow it; unset uses the session's own model. ${JUDGE_MODEL_ROUTES_NOTE}`}
     />
   )
 }
@@ -609,38 +662,17 @@ export function PiAutoModeSection(): React.JSX.Element {
  */
 
 /**
- * Gate shared by both halves: `null` = still probing (Loading), `false` = no
- * possible caller / target (the explanatory row), `true` = render the rows.
- * A gated state is a description-only ROW now, not a bare paragraph — the id is
- * on the same root either way, so the halves stay assertable in every state
- * (ADR-027).
+ * The Loading row shared by both halves until the engine config has loaded. A
+ * description-only ROW, not a bare paragraph — the id is on the same root
+ * either way, so the halves stay assertable in every state (ADR-027).
  */
-function dispatchGateRow(
-  testid: string,
-  installed: boolean | null,
-  loaded: boolean,
-  notInstalledMessage: string
-): React.JSX.Element | null {
-  if (installed === null || !loaded) {
-    return (
-      <div data-testid={testid} className="divide-y divide-border/55">
-        <SettingRow testid={`${testid}.status`} dataId="loading" description="Loading…" />
-      </div>
-    )
-  }
-  if (!installed) {
-    return (
-      <div data-testid={testid} className="divide-y divide-border/55">
-        <SettingRow
-          testid={`${testid}.status`}
-          dataId="not-installed"
-          dimmed
-          description={notInstalledMessage}
-        />
-      </div>
-    )
-  }
-  return null
+function dispatchLoadingRow(testid: string, loaded: boolean): React.JSX.Element | null {
+  if (loaded) return null
+  return (
+    <div data-testid={testid} className="divide-y divide-border/55">
+      <SettingRow testid={`${testid}.status`} dataId="loading" description="Loading…" />
+    </div>
+  )
 }
 
 /** Past this many models the chip set collapses behind a "Show all N" link. */
@@ -653,22 +685,18 @@ const DISPATCH_CHIP_PREVIEW = 8
 function DispatchIntoSection({
   engineId,
   testid,
-  installed,
-  notInstalledMessage,
   noModelsMessage
 }: {
   engineId: EngineId
   testid: string
-  installed: boolean | null
-  notInstalledMessage: string
   noModelsMessage: string
 }): React.JSX.Element {
   const { engineCfg, dispatch, update } = useDispatchConfig(engineId)
   const models = useDispatchModels(engineId)
   const [showAll, setShowAll] = useState(false)
 
-  const gate = dispatchGateRow(testid, installed, engineCfg !== null, notInstalledMessage)
-  if (gate) return gate
+  const loading = dispatchLoadingRow(testid, engineCfg !== null)
+  if (loading) return loading
 
   const defaultModel = dispatch.defaultModel ?? ''
   const allowedModels = dispatch.allowedModels ?? []
@@ -813,9 +841,7 @@ export function DispatchConcurrencySection({
  */
 function DispatchLimitsSection({
   engineId,
-  testid,
-  installed,
-  notInstalledMessage
+  testid
 }: {
   engineId: EngineId
   /**
@@ -826,14 +852,12 @@ function DispatchLimitsSection({
    * component happens to render it.
    */
   testid: string
-  installed: boolean | null
-  notInstalledMessage: string
 }): React.JSX.Element {
   const { engineCfg, dispatch, update } = useDispatchConfig(engineId)
   const root = `${testid}.limits`
 
-  const gate = dispatchGateRow(root, installed, engineCfg !== null, notInstalledMessage)
-  if (gate) return gate
+  const loading = dispatchLoadingRow(root, engineCfg !== null)
+  if (loading) return loading
 
   // Both timeouts are stored in MILLISECONDS (DispatchConfig) but edited in
   // MINUTES — nobody wants to type 3600000. Blank and 0 BOTH mean no limit
@@ -904,68 +928,39 @@ function DispatchLimitsSection({
 
 // ── The six exported bodies, two per direction ───────────────────────
 //
-// Dispatch INTO Claude can only be CALLED from another engine, and opencode is
-// the only one installed separately — so both Claude halves gate on the same
-// opencode-installed probe as the opencode twin (ADR-030/ADR-033 M4-A: no
-// possible caller means the config has nothing to configure). pi gates on pi.
-
-const CLAUDE_DISPATCH_ABSENT =
-  'opencode is not installed. Cross-engine dispatch lets an opencode session delegate a task to a Claude agent — with no other engine installed, there is no possible caller.'
-const OPENCODE_DISPATCH_ABSENT =
-  'opencode is not installed. Cross-engine dispatch lets a Claude or pi session delegate a task to an opencode agent (e.g. a GPT-backed review).'
-const PI_DISPATCH_ABSENT =
-  'pi is not installed. Cross-engine dispatch lets a Claude or opencode session delegate a task to a pi agent.'
-const CODEX_DISPATCH_ABSENT =
-  'Codex is not installed. Cross-engine dispatch lets a Claude, opencode or pi session delegate a task to a Codex agent.'
+// Dispatch INTO Claude can only be CALLED from another engine, and since
+// ADR-082 §8 every other harness is installed separately — so the Claude target
+// is selectable only while one of opencode, pi or Codex runs (ADR-030/ADR-033
+// M4-A: no possible caller means the config has nothing to configure), and each
+// other target only while it runs itself. The page's segment greys the rest
+// (`segmentOptions`, settings-pages.tsx), so these bodies never ask.
 
 export function ClaudeDispatchIntoSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
   return (
     <DispatchIntoSection
       engineId="claude"
       testid="ClaudeDispatchSection"
-      installed={installed}
-      notInstalledMessage={CLAUDE_DISPATCH_ABSENT}
       noModelsMessage="No Claude models detected."
     />
   )
 }
 
 export function ClaudeDispatchLimitsSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
-  return (
-    <DispatchLimitsSection
-      engineId="claude"
-      testid="ClaudeDispatchSection"
-      installed={installed}
-      notInstalledMessage={CLAUDE_DISPATCH_ABSENT}
-    />
-  )
+  return <DispatchLimitsSection engineId="claude" testid="ClaudeDispatchSection" />
 }
 
 export function OpencodeDispatchIntoSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
   return (
     <DispatchIntoSection
       engineId="opencode"
       testid="OpencodeDispatchSection"
-      installed={installed}
-      notInstalledMessage={OPENCODE_DISPATCH_ABSENT}
       noModelsMessage="No opencode models detected."
     />
   )
 }
 
 export function OpencodeDispatchLimitsSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
-  return (
-    <DispatchLimitsSection
-      engineId="opencode"
-      testid="OpencodeDispatchSection"
-      installed={installed}
-      notInstalledMessage={OPENCODE_DISPATCH_ABSENT}
-    />
-  )
+  return <DispatchLimitsSection engineId="opencode" testid="OpencodeDispatchSection" />
 }
 
 /**
@@ -976,28 +971,17 @@ export function OpencodeDispatchLimitsSection(): React.JSX.Element {
  * pi).
  */
 export function PiDispatchIntoSection(): React.JSX.Element {
-  const installed = usePiInstalled()
   return (
     <DispatchIntoSection
       engineId="pi"
       testid="PiDispatchSection"
-      installed={installed}
-      notInstalledMessage={PI_DISPATCH_ABSENT}
       noModelsMessage="No pi models detected."
     />
   )
 }
 
 export function PiDispatchLimitsSection(): React.JSX.Element {
-  const installed = usePiInstalled()
-  return (
-    <DispatchLimitsSection
-      engineId="pi"
-      testid="PiDispatchSection"
-      installed={installed}
-      notInstalledMessage={PI_DISPATCH_ABSENT}
-    />
-  )
+  return <DispatchLimitsSection engineId="pi" testid="PiDispatchSection" />
 }
 
 /**
@@ -1007,28 +991,17 @@ export function PiDispatchLimitsSection(): React.JSX.Element {
  * `DISPATCH_CALLERS.codex` still said "unsupported".
  */
 export function CodexDispatchIntoSection(): React.JSX.Element {
-  const installed = useEngineInstalled('codex')
   return (
     <DispatchIntoSection
       engineId="codex"
       testid="CodexDispatchSection"
-      installed={installed}
-      notInstalledMessage={CODEX_DISPATCH_ABSENT}
       noModelsMessage="No Codex models detected."
     />
   )
 }
 
 export function CodexDispatchLimitsSection(): React.JSX.Element {
-  const installed = useEngineInstalled('codex')
-  return (
-    <DispatchLimitsSection
-      engineId="codex"
-      testid="CodexDispatchSection"
-      installed={installed}
-      notInstalledMessage={CODEX_DISPATCH_ABSENT}
-    />
-  )
+  return <DispatchLimitsSection engineId="codex" testid="CodexDispatchSection" />
 }
 
 // ── Whole-direction compositions ─────────────────────────────────────
@@ -1099,18 +1072,12 @@ function codexEffortOptions(models: ModelInfo[], selected: string): string[] {
 }
 
 export function CodexDefaultsSection(): React.JSX.Element {
-  const installed = useEngineInstalled('codex')
   const { engineCfg, update } = useEngineConfigObject('codex')
   const models = useDispatchModels('codex')
   const testid = 'CodexDefaultsSection'
 
-  const gate = dispatchGateRow(
-    testid,
-    installed,
-    engineCfg !== null,
-    'Codex is not installed, so there is no session to give a default model to.'
-  )
-  if (gate) return gate
+  const loading = dispatchLoadingRow(testid, engineCfg !== null)
+  if (loading) return loading
 
   const codexConfig = engineCfg?.codexConfig ?? {}
   const defaultModel = codexConfig.defaultModel ?? ''
@@ -1207,13 +1174,12 @@ export function CodexDefaultsSection(): React.JSX.Element {
 // ── opencode Models section ──────────────────────────────────────────
 
 /**
- * Default model + small model selects for the opencode engine.
- * Self-gates on opencode availability (mirrors OpencodeAutoModeSection).
+ * Default model + small model selects for the opencode engine. Its segment is
+ * hidden while opencode is not installed (ADR-082 §8).
  */
 function OpencodeModelsSection(): React.JSX.Element {
   const [cfg, setCfg] = useState<OpencodeConfigSettings | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
-  const installed = useOpencodeInstalled()
 
   useEffect(() => {
     window.api
@@ -1221,7 +1187,7 @@ function OpencodeModelsSection(): React.JSX.Element {
       .then(setCfg)
       .catch(() => setCfg({}))
     window.api
-      .getEngineModels()
+      .getEngineModels('opencode')
       .then((groups) => {
         const oc = groups.filter((g) => g.engineId === 'opencode')
         setModels(oc.flatMap((g) => g.models))
@@ -1229,22 +1195,10 @@ function OpencodeModelsSection(): React.JSX.Element {
       .catch(() => {})
   }, [])
 
-  if (cfg === null || installed === null) {
+  if (cfg === null) {
     return (
       <div data-testid="OpencodeModelsSection" className="divide-y divide-border/55">
         <SettingRow testid="OpencodeModelsSection.status" dataId="loading" description="Loading…" />
-      </div>
-    )
-  }
-  if (!installed) {
-    return (
-      <div data-testid="OpencodeModelsSection" className="divide-y divide-border/55">
-        <SettingRow
-          testid="OpencodeModelsSection.status"
-          dataId="not-installed"
-          dimmed
-          description="opencode is not installed. These settings apply to opencode sessions."
-        />
       </div>
     )
   }
@@ -1255,7 +1209,8 @@ function OpencodeModelsSection(): React.JSX.Element {
     // Never the allowlist loaded at mount: the Manage sheet on this same page may
     // have curated since, and `models:set-provider-allowlist` is its only writer.
     const { modelAllowlist: _stale, ...settings } = next
-    window.api.saveOpencodeSettings(settings).catch(() => {})
+    // `cfg` is the snapshot this pane edited: only its change is written (F11).
+    window.api.saveOpencodeSettings(settings, cfg).catch(() => {})
     // Mirror the default-model choice into the store so new/reopened opencode
     // sessions pick it up immediately, and refresh the picker model list.
     // The RAW value, not the constant — an empty string is what tells the store
@@ -1343,54 +1298,46 @@ function OpencodeModelsSection(): React.JSX.Element {
 // ── opencode raw-config (schema-driven) editing ─────────────────────
 
 const OPENCODE_SCHEMA_DEFS = (opencodeConfigSchema as { $defs: SchemaDefs }).$defs
-const OPENCODE_CONFIG_NODE = OPENCODE_SCHEMA_DEFS.Config as SchemaNode
+/** The root of the generated opencode 2.x schema (`Config.InfoEncoded`, ADR-097 S8). */
+const OPENCODE_CONFIG_NODE = OPENCODE_SCHEMA_DEFS[
+  opencodeConfigSchema.$ref.replace('#/$defs/', '')
+] as SchemaNode
 
 /**
- * Top-level Config keys owned by a DEDICATED UI (rendered as read-only pointers in
- * the raw editor, never editable there). `provider` is patch-writable via the
- * per-model capability editor, but curated as a whole under Custom providers.
- * The bulk of them are the curated Configuration panes (OpencodeConfigPanes.tsx);
- * each label here must match that pane's Section label so the pointer is a
- * usable direction and not just a "not here".
+ * Top-level opencode 2.x Config keys owned by a DEDICATED UI (rendered as
+ * read-only pointers in the raw editor, never editable there). `providers` is
+ * patch-writable via the per-model capability editor, but curated as a whole
+ * under Custom providers. The bulk of them are the curated Configuration panes
+ * (OpencodeConfigPanes.tsx); each label here must match that pane's Section
+ * label so the pointer is a usable direction and not just a "not here".
  *
  * Exported for the guard test: a key MISSPELLED here silently stays editable in
  * the raw editor while its curated pane also writes it — two writers, one key.
  */
 export const CONFIG_POINTER_KEYS: Record<string, string> = {
   model: 'Models',
-  small_model: 'Models',
-  disabled_providers: 'Providers',
-  enabled_providers: 'Providers',
-  provider: 'Custom providers',
-  agent: 'Agents',
-  mcp: 'injected at spawn',
-  permission: 'Autonomy mode',
+  agents: 'Agents',
+  providers: 'Custom providers',
+  permissions: 'Tools & integrations',
+  mcp: 'Diagnostics',
   compaction: 'Session behavior',
-  subagent_depth: 'Session behavior',
-  snapshot: 'Session behavior',
+  snapshots: 'Session behavior',
+  experimental: 'Session behavior',
   tool_output: 'Tool output',
-  attachment: 'Image attachments',
+  media: 'Image attachments',
   instructions: 'Workspace',
   default_agent: 'Workspace',
   shell: 'Workspace',
   watcher: 'Workspace',
-  tools: 'Tools & integrations',
   formatter: 'Tools & integrations',
   lsp: 'Tools & integrations',
-  plugin: 'Tools & integrations',
+  plugins: 'Tools & integrations',
   skills: 'Tools & integrations',
-  logLevel: 'Diagnostics',
-  experimental: 'Diagnostics',
-  autoupdate: 'Managed keys',
+  update: 'Managed keys',
   share: 'Managed keys'
 }
-/**
- * Keys rendered NOWHERE — not editable, not even as a pointer. `$schema` is not
- * user config; `server.*` is overridden by the CLI flags OpencodeServerManager
- * spawns with; `layout` and `autoshare` are deprecated upstream. Listing them as
- * pointers would only imply a UI that owns them.
- */
-export const CONFIG_HIDDEN_KEYS = new Set(['$schema', 'layout', 'autoshare', 'server'])
+/** Keys rendered NOWHERE — not editable, not even as a pointer. `$schema` is not user config. */
+export const CONFIG_HIDDEN_KEYS = new Set(['$schema'])
 /** Config keys the raw editor never renders as editable fields. */
 const CONFIG_EXCLUDED_KEYS = new Set([...CONFIG_HIDDEN_KEYS, ...Object.keys(CONFIG_POINTER_KEYS)])
 
@@ -1398,8 +1345,8 @@ const CONFIG_EXCLUDED_KEYS = new Set([...CONFIG_HIDDEN_KEYS, ...Object.keys(CONF
  * "Raw config (opencode.json)" — schema-driven editor over the top-level
  * opencode Config, EXCLUDING keys owned by dedicated UIs (rendered as pointers)
  * and CONFIG_HIDDEN_KEYS (rendered nowhere). What's left is the long tail no
- * curated pane covers: command, enterprise, mode, reference, references,
- * username. Loads the raw config on mount, accumulates edits locally, and on
+ * curated pane covers: commands, enterprise, references, username, warming,
+ * websearch, worktree. Loads the raw config on mount, accumulates edits locally, and on
  * Save computes a deep diff → leaf patches → patchOpencodeNative. ajv errors
  * surface inline.
  *
@@ -1408,7 +1355,6 @@ const CONFIG_EXCLUDED_KEYS = new Set([...CONFIG_HIDDEN_KEYS, ...Object.keys(CONF
  * per-field commit point to hang an immediate write on.
  */
 function OpencodeRawConfigSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
   const [original, setOriginal] = useState<Record<string, unknown> | null>(null)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [filePath, setFilePath] = useState('')
@@ -1431,17 +1377,8 @@ function OpencodeRawConfigSection(): React.JSX.Element {
   }, [])
   useEffect(() => load(), [load])
 
-  if (installed === null || original === null) {
+  if (original === null) {
     return <SettingRow testid="OpencodeRawConfigSection" description="Loading…" />
-  }
-  if (!installed) {
-    return (
-      <SettingRow
-        testid="OpencodeRawConfigSection"
-        dimmed
-        description="opencode is not installed. This edits opencode's own config file."
-      />
-    )
   }
 
   const configProps = (OPENCODE_CONFIG_NODE.properties as Record<string, SchemaNode>) ?? {}
@@ -2255,6 +2192,14 @@ export const SECTIONS: Section[] = [
             />
           </SettingRow>
         )
+      },
+      {
+        // Per client (localStorage), not a synced setting — hence no appDefault /
+        // Reset: there is no app-wide value to reset to.
+        key: 'voiceMicrophone',
+        label: 'Microphone',
+        keywords: 'voice microphone mic input device bluetooth headset airpods test level',
+        render: (s) => <MicrophoneSetting enabled={s.voiceEnabled} />
       }
     ]
   },
@@ -2380,10 +2325,11 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
-    // The classifier trust lists, ONCE for every engine (ADR-065 phase 4).
-    // Its own section rather than three rows inside each engine's auto-mode
-    // pane: they are stored in one shared file and derived into whichever
-    // engine's judge runs, so an engine-scoped home would misdescribe them.
+    // The classifier trust lists, ONCE for every engine (ADR-065 phase 4), plus
+    // the judge guidance lists that share their file (ADR-083 §4). Its own
+    // section rather than rows inside each engine's auto-mode pane: they are
+    // stored in one shared file and derived into whichever engine's judge
+    // runs, so an engine-scoped home would misdescribe them.
     id: 'trust-lists',
     label: 'Trust & protection',
     icon: (
@@ -2407,7 +2353,7 @@ export const SECTIONS: Section[] = [
         key: 'trustLists',
         label: 'Trust & protection',
         keywords:
-          'trusted domains registries production protected patterns judge auto mode classifier supply chain hosts allowlist',
+          'trusted domains registries production protected patterns judge auto mode classifier supply chain hosts allowlist judge guidance routine allow block ask first read-only bypass skip judge',
         render: () => <TrustListsSection />
       }
     ]
@@ -3027,33 +2973,13 @@ export const SECTIONS: Section[] = [
         }
       },
       {
-        key: 'proxySubprocesses',
-        label: 'Proxy shell commands',
-        keywords: 'proxy bash subprocess shell git curl npm everything all',
-        render: (_s, _u, e, ue) => {
-          const px = e.proxy ?? DEFAULT_PROXY
-          return (
-            <SettingsToggle
-              testid="ClaudeProxy.subprocesses"
-              label="Also proxy shell commands"
-              description="Sets HTTP_PROXY and HTTPS_PROXY for commands the agent runs; off keeps them direct."
-              checked={px.proxySubprocesses === true}
-              onChange={(v) => ue({ proxy: { ...px, proxySubprocesses: v } })}
-              indent
-              dimmed={!px.enabled}
-              disabled={!px.enabled}
-            />
-          )
-        }
-      },
-      {
         key: 'proxyFooter',
         label: 'Proxy info',
-        keywords: 'proxy info env environment variable',
+        keywords: 'proxy info env environment variable bash subprocess shell commands tools',
         render: () => (
           <SettingRow
             testid="ClaudeProxy.note"
-            description="Applies to the Claude API connection; shell commands only when the toggle above is on."
+            description="The proxy also applies to the commands and tools Claude runs."
           />
         )
       }

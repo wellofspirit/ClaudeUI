@@ -9,16 +9,22 @@ import {
   RAIL_GROUPS,
   appliesOnOf,
   bucketSearchHits,
-  enginesOf,
+  engineFor,
   itemsFor,
   noteOf,
   pageOf,
+  pageOpens,
+  segmentOptions,
   storageOf,
   visibleGroups,
+  type SegmentOption,
   type SettingsGroup
 } from './settings-pages'
 import { groupKey } from './settings-target'
+import { useEngineRuns } from './harness-store'
+import { notInstalledTitle } from './harness-view'
 import { ChevronIcon } from '../shared/ChevronIcon'
+import { pinScroll, scrollGroupToTop } from './settings-scroll-pin'
 import type {
   SettingsPageId,
   SettingsRenderContext,
@@ -56,13 +62,27 @@ export interface SettingsDialogViewProps {
   onClose: () => void
 }
 
-/** How far below the pane's top edge a group header counts as "the current one". */
+/** The spy line's MINIMUM depth below the pane's top edge (see {@link SPY_LINE_FRACTION}). */
 export const SPY_OFFSET_PX = 84
+
+/**
+ * The spy line sits this fraction of the pane's height below its top edge, or
+ * {@link SPY_OFFSET_PX}, whichever is deeper. A fixed 84 px line made a group
+ * count only once its header reached the very top: on Sessions & autonomy the
+ * rail kept marking "Permissions" — whose last ~120-250 px were all that was
+ * left on screen — while the Auto-mode judge filled most of a ~600 px pane
+ * below it (its header 115-253 px down). At 45% a group is marked once its
+ * header is in the upper half of the pane, i.e. once it is plausibly what you
+ * are reading.
+ */
+export const SPY_LINE_FRACTION = 0.45
 
 /**
  * How long after a programmatic scroll the spy stays quiet. `scrollIntoView` is
  * smooth-capable and fires a burst of scroll events on the way; letting the spy
- * answer them would re-mark the group the user scrolled AWAY from.
+ * answer them would re-mark the group the user scrolled AWAY from. It is also
+ * the deep-link pin's settle window: each resize of a still-loading page
+ * re-applies the scroll and extends it (`settings-scroll-pin.ts`, S7f).
  */
 const PROGRAMMATIC_SCROLL_MS = 700
 
@@ -80,22 +100,37 @@ function isMacKeyboard(): boolean {
 /**
  * Which group the rail should mark, given where the headers are.
  *
- * The last header at or above the spy line wins — EXCEPT at the bottom of the
- * pane, where the last group wins outright. A group near the end of a page can
- * never bring its header to the top edge (there is not enough content below it
- * to scroll), so without the `atBottom` case clicking the last sub-entry
- * scrolls correctly and is then immediately re-marked as the previous group.
+ * The last header at or above the spy line — `max(SPY_OFFSET_PX,
+ * SPY_LINE_FRACTION × pane height)` below the pane's top — wins, EXCEPT at the
+ * top of the pane, where the FIRST group wins outright, and at the bottom, where
+ * the last one does. At the top the line sits 45% down, so a short first group
+ * (pi's Session behaviour) would hand the rail to the group after it while the
+ * page is still showing its first block — and resetting `scrollTop` when a page
+ * opens fires exactly that measurement. A group near the end
+ * of a page can never bring its header to the top edge (there is not enough
+ * content below it to scroll), so without the `atBottom` case clicking the last
+ * sub-entry scrolls correctly and is then immediately re-marked as the previous
+ * group.
+ *
+ * `pane` and every header `top` must be in the SAME coordinate space — the
+ * caller passes `getBoundingClientRect()` values for all of them. Under the
+ * app's CSS `zoom` (uiFontScale) those are zoomed pixels while `scrollTop` is
+ * not (at 115% a 60 px scroll moves a header ~69 px), which is why nothing here
+ * mixes the two. It also means SPY_OFFSET_PX is effectively in zoomed pixels.
  *
  * Pure and exported so this can be tested with fake rects — jsdom has no layout.
  */
 export function pickActiveGroup(
-  paneTop: number,
+  pane: { top: number; height: number },
   headers: Array<{ id: string; top: number }>,
-  atBottom: boolean
+  atBottom: boolean,
+  atTop = false
 ): string | null {
   if (headers.length === 0) return null
+  // A page that fits entirely is both: its top is what is on screen.
+  if (atTop) return headers[0].id
   if (atBottom) return headers[headers.length - 1].id
-  const line = paneTop + SPY_OFFSET_PX
+  const line = pane.top + Math.max(SPY_OFFSET_PX, SPY_LINE_FRACTION * pane.height)
   let current: string | null = null
   for (const header of headers) if (header.top <= line) current = header.id
   return current
@@ -171,15 +206,20 @@ function StorageTag({ file }: { file: string }): React.JSX.Element {
   )
 }
 
-/** The header's engine segment: one items list per engine, one shown at a time. */
+/**
+ * The header's engine segment: one items list per engine, one shown at a time.
+ * A dispatch target that cannot run is greyed and not clickable (ADR-082 §8):
+ * `aria-disabled` rather than `disabled`, so its title — the one place that
+ * says why — still shows on hover, and out of the tab order.
+ */
 function EngineSegment({
   groupId,
-  engines,
+  options,
   value,
   onChange
 }: {
   groupId: string
-  engines: EngineId[]
+  options: SegmentOption[]
   value: EngineId
   onChange: (engine: EngineId) => void
 }): React.JSX.Element {
@@ -189,17 +229,24 @@ function EngineSegment({
       data-id={groupId}
       className="shrink-0 inline-flex items-center gap-0.5 bg-bg-input border border-border rounded-md p-0.5"
     >
-      {engines.map((engine) => (
+      {options.map(({ engine, selectable, title }) => (
         <button
           key={engine}
           type="button"
           data-testid="SettingsGroup.engineSegment.option"
           data-id={engine}
-          onClick={() => onChange(engine)}
+          aria-disabled={selectable ? undefined : true}
+          tabIndex={selectable ? undefined : -1}
+          title={title}
+          onClick={() => {
+            if (selectable) onChange(engine)
+          }}
           className={`px-2.5 py-[3px] text-[12px] leading-4 rounded transition-colors cursor-default ${
-            engine === value
-              ? 'bg-accent/15 text-accent font-medium'
-              : 'text-text-secondary hover:text-text-primary'
+            !selectable
+              ? 'text-text-muted opacity-50'
+              : engine === value
+                ? 'bg-accent/15 text-accent font-medium'
+                : 'text-text-secondary hover:text-text-primary'
           }`}
         >
           {engineMeta(engine).label}
@@ -256,6 +303,12 @@ export function SettingsDialogView({
   const groupRefs = useRef<Map<string, HTMLElement>>(new Map())
   /** `performance.now()` before which scroll events are ours, not the user's. */
   const programmaticUntil = useRef(0)
+  /** Lets go of the group the last deep link pinned (`settings-scroll-pin.ts`). */
+  const unpin = useRef<(() => void) | null>(null)
+  const releasePin = useCallback((): void => {
+    unpin.current?.()
+    unpin.current = null
+  }, [])
 
   const handleOverlayClick = useCallback(
     (e: React.MouseEvent) => {
@@ -267,8 +320,10 @@ export function SettingsDialogView({
   const query = search.trim()
   const searching = query.length > 0
 
+  /** Which harnesses run: a page of one that does not is greyed in the rail (ADR-082 §8). */
+  const runs = useEngineRuns()
   const page = pageOf(activePage)
-  const groups = useMemo(() => visibleGroups(page), [page])
+  const groups = useMemo(() => visibleGroups(page, undefined, runs), [page, runs])
   /**
    * The group the rail dots. Switching page clears `activeGroup`, and the spy
    * only speaks once the user scrolls — so without a display-side default the
@@ -288,10 +343,11 @@ export function SettingsDialogView({
     if (scrollNonce > 0) setRailOpen(true)
   }, [scrollNonce])
 
-  // Capability visibility is static; one-group pages need no disclosure.
+  // One-group pages need no disclosure.
   const expandablePages = useMemo(
-    () => new Set(PAGES.filter((p) => visibleGroups(p).length > 1).map((p) => p.id)),
-    []
+    () =>
+      new Set(PAGES.filter((p) => visibleGroups(p, undefined, runs).length > 1).map((p) => p.id)),
+    [runs]
   )
   const railId = useId()
 
@@ -332,30 +388,59 @@ export function SettingsDialogView({
       // `engineFrom` names the SIBLING group whose segment this one follows, so
       // two cards about the same target can never fall out of step.
       const key = groupKey(activePage, group.engineFrom ?? group.id)
-      return engineByGroup[key] ?? enginesOf(group)[0]
+      return engineFor(group, engineByGroup[key], runs)
     },
-    [activePage, engineByGroup]
+    [activePage, engineByGroup, runs]
   )
 
-  const scrollToGroup = useCallback((id: string) => {
-    // The scroll this starts must not be answered by the spy, or the clicked
-    // group loses the mark before the scroll has even finished.
-    programmaticUntil.current = performance.now() + PROGRAMMATIC_SCROLL_MS
-    // jsdom implements neither scrollIntoView nor layout, so guard rather than
-    // let a component test explode on a purely visual affordance.
-    groupRefs.current.get(id)?.scrollIntoView?.({ block: 'start' })
-  }, [])
+  /**
+   * Scroll a group under the pane's top edge — the first group to the very top
+   * — and keep it there while the page is still growing (a fresh open renders
+   * its sections as they load), until the user scrolls themselves.
+   */
+  const scrollToGroup = useCallback(
+    (id: string) => {
+      releasePin()
+      const pane = paneRef.current
+      if (!pane) return
+      const first = groups[0]?.id === id
+      unpin.current = pinScroll({
+        pane,
+        content: pane.firstElementChild ?? pane,
+        apply: () => scrollGroupToTop(pane, groupRefs.current.get(id), first),
+        settleMs: PROGRAMMATIC_SCROLL_MS,
+        // The scroll this starts must not be answered by the spy, or the clicked
+        // group loses the mark before the scroll has even finished.
+        onWindow: (until) => {
+          programmaticUntil.current = until
+        }
+      })
+    },
+    [groups, releasePin]
+  )
+
+  // A pin outlives nothing it was for: the dialog, the page, or the page
+  // itself (search replaces it).
+  useEffect(() => releasePin, [releasePin])
+  useEffect(() => {
+    if (searching) releasePin()
+  }, [searching, releasePin])
 
   // One scroll container serves every page, so switching page would otherwise
   // inherit the previous page's scrollTop — landing past the end of a short one.
   useEffect(() => {
+    releasePin()
     if (paneRef.current) paneRef.current.scrollTop = 0
-  }, [activePage])
+  }, [activePage, releasePin])
 
   // A deep link (or a rail click routed through the container) asked for a
-  // group: scroll it under the pane's top edge.
+  // group: scroll it under the pane's top edge — ONCE per nonce bump. The
+  // effect also re-runs when the scroll-spy moves `activeGroup`; answering
+  // that would snap every newly marked group to the top while the user scrolls.
+  const handledNonce = useRef(0)
   useEffect(() => {
-    if (scrollNonce === 0 || !activeGroup || searching) return
+    if (scrollNonce === handledNonce.current || !activeGroup || searching) return
+    handledNonce.current = scrollNonce
     scrollToGroup(activeGroup)
   }, [scrollNonce, activeGroup, searching, scrollToGroup])
 
@@ -372,7 +457,14 @@ export function SettingsDialogView({
         .filter((h): h is { id: string; el: HTMLElement } => h.el !== undefined)
         .map((h) => ({ id: h.id, top: h.el.getBoundingClientRect().top }))
       const atBottom = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 2
-      const current = pickActiveGroup(pane.getBoundingClientRect().top, headers, atBottom)
+      const atTop = pane.scrollTop <= 1
+      const paneRect = pane.getBoundingClientRect()
+      const current = pickActiveGroup(
+        { top: paneRect.top, height: paneRect.height },
+        headers,
+        atBottom,
+        atTop
+      )
       if (current && current !== activeGroup) onActiveGroupChange(current)
     }
     const onScroll = (): void => {
@@ -406,8 +498,8 @@ export function SettingsDialogView({
    * presentations can never bucket or cap the same query differently.
    */
   const { buckets, total } = useMemo(
-    () => (searching ? bucketSearchHits(query) : { buckets: [], total: 0 }),
-    [searching, query]
+    () => (searching ? bucketSearchHits(query, undefined, runs) : { buckets: [], total: 0 }),
+    [searching, query, runs]
   )
 
   return (
@@ -425,7 +517,9 @@ export function SettingsDialogView({
           exactly as SessionView does for its own root. */}
       <div
         style={{
+          // eslint-disable-next-line no-restricted-syntax -- divides by uiFontScale
           width: `min(1040px, calc(92vw / ${uiFontScale}))`,
+          // eslint-disable-next-line no-restricted-syntax -- divides by uiFontScale
           height: `min(700px, calc(88vh / ${uiFontScale}))`
         }}
         className="rounded-xl border border-border bg-bg-secondary shadow-2xl shadow-black/40 flex flex-col overflow-hidden"
@@ -488,8 +582,12 @@ export function SettingsDialogView({
                   {railGroup.label}
                 </div>
                 {PAGES.filter((p) => p.rail === railGroup.id).map((p) => {
+                  // A harness that does not run: greyed, not clickable, out of
+                  // the tab order, and saying why (ADR-082 §8).
+                  const opens = pageOpens(p, runs)
                   const active = p.id === activePage
-                  const expandable = expandablePages.has(p.id)
+                  // An item that cannot open has nothing to expand either.
+                  const expandable = opens && expandablePages.has(p.id)
                   const open = active && expandable && railOpen
                   // A one-group page has no sub-entry to mark, so the page row
                   // is itself the leaf — and wears the accent a child would.
@@ -502,7 +600,11 @@ export function SettingsDialogView({
                         data-id={p.id}
                         data-active={active ? 'true' : 'false'}
                         data-expanded={expandable ? (open ? 'true' : 'false') : undefined}
+                        data-state={opens ? undefined : 'not-installed'}
                         disabled={searching}
+                        aria-disabled={opens ? undefined : true}
+                        tabIndex={opens ? undefined : -1}
+                        title={opens || !p.engine ? undefined : notInstalledTitle(p.engine)}
                         aria-expanded={expandable ? open : undefined}
                         // Only while the list is mounted: `aria-controls` naming
                         // an element that is not in the DOM is a broken
@@ -510,6 +612,7 @@ export function SettingsDialogView({
                         aria-controls={open ? listId : undefined}
                         aria-current={leaf ? 'page' : undefined}
                         onClick={() => {
+                          if (!opens) return
                           // On the page you are already on the header is the
                           // accordion's own trigger; anywhere else it navigates,
                           // and arriving somewhere always opens it.
@@ -521,11 +624,13 @@ export function SettingsDialogView({
                           }
                         }}
                         className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[13px] leading-[18px] text-left transition-colors cursor-default outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${
-                          leaf
-                            ? 'bg-accent/15 text-accent font-medium'
-                            : active
-                              ? 'bg-bg-hover/60 text-text-primary font-medium'
-                              : 'text-text-secondary hover:bg-bg-hover'
+                          !opens
+                            ? 'text-text-muted opacity-50'
+                            : leaf
+                              ? 'bg-accent/15 text-accent font-medium'
+                              : active
+                                ? 'bg-bg-hover/60 text-text-primary font-medium'
+                                : 'text-text-secondary hover:bg-bg-hover'
                         }`}
                       >
                         <span
@@ -646,19 +751,31 @@ export function SettingsDialogView({
               </div>
             ) : (
               <div data-testid="SettingsDialog.page" data-id={page.id}>
-                <div
-                  data-testid="SettingsDialog.pageTitle"
-                  className="text-[18px] font-semibold leading-6 text-text-primary"
-                >
-                  {page.label}
-                </div>
-                <div className="mt-[3px] text-[12px] leading-4 text-text-secondary">
-                  {page.description}
+                <div className="flex items-start gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div
+                      data-testid="SettingsDialog.pageTitle"
+                      className="text-[18px] font-semibold leading-6 text-text-primary"
+                    >
+                      {page.label}
+                    </div>
+                    <div className="mt-[3px] text-[12px] leading-4 text-text-secondary">
+                      {page.description}
+                    </div>
+                  </div>
+                  {page.accessory && (
+                    <div
+                      data-testid="SettingsDialog.pageAccessory"
+                      className="shrink-0 max-w-[60%]"
+                    >
+                      <page.accessory />
+                    </div>
+                  )}
                 </div>
                 {groups.map((group) => {
                   const engine = engineOf(group)
                   // A group that FOLLOWS a sibling's segment draws none itself.
-                  const engines = group.engineFrom ? [] : enginesOf(group)
+                  const options = group.engineFrom ? [] : segmentOptions(group, runs)
                   const storage = storageOf(group, engine)
                   const note = noteOf(group, engine)
                   const appliesOn = appliesOnOf(group, engine)
@@ -682,10 +799,11 @@ export function SettingsDialogView({
                         <span className="flex-1 min-w-0 truncate text-[11px] font-semibold uppercase tracking-wide text-text-secondary">
                           {group.label}
                         </span>
-                        {engines.length > 0 && engine && (
+                        {/* One option is no choice: no segment, that engine's rows. */}
+                        {options.length > 1 && engine && (
                           <EngineSegment
                             groupId={group.id}
-                            engines={engines}
+                            options={options}
                             value={engine}
                             onChange={(next) =>
                               onSelectEngine(groupKey(activePage, group.id), next)
@@ -718,7 +836,7 @@ export function SettingsDialogView({
                           </Button>
                         )}
                       </div>
-                      <GroupCard items={itemsFor(group, engine)} render={renderItem} />
+                      <GroupCard items={itemsFor(group, engine, runs)} render={renderItem} />
                       {note && (
                         <div
                           data-testid="SettingsGroup.note"

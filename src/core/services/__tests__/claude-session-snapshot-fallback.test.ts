@@ -34,7 +34,10 @@ vi.mock('../../sdk', async (importOriginal) => {
 })
 
 vi.mock('../../opencode/OpencodeServerManager', () => ({
-  opencodeServerManager: { isBinaryAvailable: (): boolean => false }
+  opencodeServerManager: {
+    setServerStartedHook: () => {},
+    isBinaryAvailable: (): boolean => false
+  }
 }))
 vi.mock('../cross-engine-dispatcher', () => ({
   crossEngineDispatcher: { dispatch: vi.fn(), resolveApproval: vi.fn(), disposeFor: vi.fn() },
@@ -57,11 +60,9 @@ vi.mock('../session-history', () => ({
 }))
 vi.mock('../skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
-vi.mock('../voice-capture', () => ({ startRecording: vi.fn(), stopRecording: vi.fn() }))
-vi.mock('../voice-client', () => ({ VoiceClient: class {} }))
 vi.mock('../context-window', () => ({ getContextWindowSize: vi.fn(() => 200000) }))
 vi.mock('../usage-fetcher', () => ({
-  usageFetcher: { updateFromRateLimitEvent: vi.fn(), fetch: vi.fn(async () => null) }
+  usageFetcher: { fetch: vi.fn(async () => null) }
 }))
 vi.mock('../usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
 vi.mock('../../../main/services/account-manager', () => ({
@@ -168,5 +169,82 @@ describe('ClaudeSession — unplaceable assistant snapshots fall back to session
         message.content.some((block) => block.type === 'tool_use' && block.toolUseId === 'toolu_1')
       )
     ).toBe(true)
+  })
+})
+
+/**
+ * The output limit cut a Write mid-stream (session efa47532…, `stop_reason:
+ * "max_tokens"`): cli.js snapshots only the thinking block, the call never
+ * runs, and its published `{}` scaffold must be taken back — from the root
+ * transcript kept here and on every client.
+ */
+describe('ClaudeSession — a tool call cut off by the output limit is retracted', () => {
+  const cutTurn = (parent?: string): Array<Record<string, unknown>> => {
+    const withParent = (m: Record<string, unknown>): Record<string, unknown> =>
+      parent ? { ...m, parent_tool_use_id: parent } : m
+    return [
+      streamEvent({ type: 'message_start', message: { id: 'msg_cut' } }),
+      streamEvent({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'thinking', thinking: '' }
+      }),
+      streamEvent({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'thinking_delta', thinking: 'plan the file' }
+      }),
+      {
+        type: 'assistant',
+        uuid: 'u-think',
+        message: {
+          id: 'msg_cut',
+          role: 'assistant',
+          model: 'claude-sonnet-4-6',
+          content: [{ type: 'thinking', thinking: 'plan the file', signature: 's' }]
+        }
+      },
+      streamEvent({ type: 'content_block_stop', index: 0 }),
+      streamEvent({
+        type: 'content_block_start',
+        index: 1,
+        content_block: { type: 'tool_use', id: 'toolu_cut', name: 'Write', input: {} }
+      }),
+      streamEvent({
+        type: 'content_block_delta',
+        index: 1,
+        delta: { type: 'input_json_delta', partial_json: '{"file_path":"/x","con' }
+      }),
+      streamEvent({ type: 'message_delta', delta: { stop_reason: 'max_tokens' } }),
+      streamEvent({ type: 'message_stop' })
+    ].map(withParent)
+  }
+
+  const retractions = (sent: Array<[string, string, unknown]>): unknown[] =>
+    sent.filter(([c]) => c === 'session:tool-uses-retracted').map(([, , d]) => d)
+
+  it('drops the call from the kept transcript and tells every client', async () => {
+    mockQuery.mockImplementation(() => makeFakeQueryHandle(cutTurn()))
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-cut-root', win, '/tmp/proj')
+    liveSessions.push(session)
+    await session.run('write it')
+
+    expect(retractions(sent)).toEqual([{ messageId: 'msg_cut', toolUseIds: ['toolu_cut'] }])
+    const kept = session.getMessages().find((m) => m.id === 'msg_cut')
+    expect(kept?.content.map((b) => b.type)).toEqual(['thinking'])
+  })
+
+  it("retracts a sub-agent's cut call from its card, not the root", async () => {
+    mockQuery.mockImplementation(() => makeFakeQueryHandle(cutTurn('toolu_agent')))
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-cut-child', win, '/tmp/proj')
+    liveSessions.push(session)
+    await session.run('delegate it')
+
+    expect(retractions(sent)).toEqual([
+      { messageId: 'msg_cut', toolUseIds: ['toolu_cut'], ownerToolUseId: 'toolu_agent' }
+    ])
+    expect(session.getMessages().some((m) => m.id === 'msg_cut')).toBe(false)
   })
 })

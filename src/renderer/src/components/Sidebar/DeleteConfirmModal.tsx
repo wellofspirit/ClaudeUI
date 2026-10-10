@@ -13,6 +13,8 @@ export function DeleteConfirmModal({
   path,
   sessionCount,
   branches,
+  sessionPaths,
+  folderKept,
   onConfirm,
   onCancel
 }: {
@@ -30,6 +32,21 @@ export function DeleteConfirmModal({
    * `undefined` for every other engine; empty for an unbranched Codex session.
    */
   branches?: CodexDeleteNode[]
+  /**
+   * Project deletes: Claude session files removed ONE BY ONE rather than with
+   * the project folder (`planClaudeProjectDelete`). Normally these are members
+   * cli.js's `EnterWorktree` moved into a worktree's project folder — the
+   * sidebar lists them under this project, but deleting this project's folder
+   * does not reach them. Empty/undefined in the common case, which renders
+   * exactly as before.
+   */
+  sessionPaths?: string[]
+  /**
+   * Project deletes: the folder at `path` is NOT removed, because it also holds
+   * another project's relocated session; every member in `sessionPaths` goes
+   * individually instead.
+   */
+  folderKept?: boolean
   /** Async — may reject; the modal surfaces the error inline */
   onConfirm: () => Promise<void>
   onCancel: () => void
@@ -48,15 +65,19 @@ export function DeleteConfirmModal({
       confirmLabel={confirmLabel}
       busyLabel="Deleting..."
       errorTitle="Could not delete"
-      detail={path}
+      detail={folderKept ? `${path} — folder kept` : path}
       onConfirm={onConfirm}
       onCancel={onCancel}
       body={
         kind === 'session' ? (
           <>
             This will permanently delete{' '}
+            {/* Engine-neutral on purpose: every engine's delete takes the
+                session's agents with it (Claude's subagent dir, opencode's child
+                sessions, pi's agent sessions, Codex's spawn subtree), and not
+                every engine keeps them on disk. */}
             <span className="font-medium text-text-primary">&quot;{name}&quot;</span> and its
-            subagent data from disk. This cannot be undone.
+            subagents. This cannot be undone.
             {branches?.length ? (
               <span data-testid="DeleteConfirmModal.branches" className="mt-2 block">
                 Also deletes {branches.length} branch
@@ -96,6 +117,25 @@ export function DeleteConfirmModal({
               ''
             )}
             . This cannot be undone.
+            {sessionPaths?.length ? (
+              <span data-testid="DeleteConfirmModal.relocated" className="mt-2 block">
+                {folderKept
+                  ? `Its session${sessionPaths.length === 1 ? ' is' : 's are'} deleted one by one — the folder also holds another project's session, so it is kept:`
+                  : `Also deletes ${sessionPaths.length} session${sessionPaths.length === 1 ? '' : 's'} that moved into a worktree folder:`}
+                <span className="mt-1 block">
+                  {sessionPaths.map((sessionPath) => (
+                    <span
+                      key={sessionPath}
+                      data-testid="DeleteConfirmModal.relocatedPath"
+                      title={sessionPath}
+                      className="block break-all font-mono text-[11px] text-text-primary"
+                    >
+                      {sessionPath}
+                    </span>
+                  ))}
+                </span>
+              </span>
+            ) : null}
           </>
         )
       }

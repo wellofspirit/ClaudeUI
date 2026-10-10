@@ -103,14 +103,129 @@ describe('AutomationConfigView — model / thinking / effort pickers', () => {
     expect(screen.getByTitle('Model')).toHaveTextContent('Opus 4.7')
   })
 
-  it('shows enabled thinking mode when no thinkingMode is saved but model supports adaptive', () => {
+  it('shows enabled thinking mode when no thinkingMode is saved, even on an adaptive-capable model', () => {
     const automation = makeAutomation({
       model: 'claude-opus-4-7',
       thinkingMode: undefined
     })
     render(<AutomationConfigView {...makeProps({ automation })} />)
-    // modelDefaultThinkingMode = 'adaptive' for opus-4-7.
-    expect(screen.getByTitle('Thinking mode')).toHaveTextContent('adaptive')
+    // The run defaults an unset thinking mode to 'enabled' (not the model's
+    // adaptive default), so that is what the screen must say it will use.
+    expect(screen.getByTitle('Thinking mode')).toHaveTextContent('enabled')
+  })
+
+  it('shows an adaptive pick coerced the way the run coerces it', () => {
+    const automation = makeAutomation({ model: 'claude-3-5-sonnet', thinkingMode: 'adaptive' })
+    render(<AutomationConfigView {...makeProps({ automation })} />)
+    expect(screen.getByTitle('Thinking mode')).toHaveTextContent('enabled')
+  })
+
+  // Starting effort: the SAME inputs as automation-manager-expanded.test.ts
+  // ("per-model starting effort") must give the SAME values here.
+  describe('effort follows the run ladder', () => {
+    const opusRows: ModelOption[] = [
+      {
+        value: 'default',
+        resolvedModel: 'claude-opus-5-5',
+        displayName: 'Default',
+        description: '',
+        shortName: 'Default',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+      },
+      {
+        value: 'opus',
+        resolvedModel: 'claude-opus-5-5',
+        displayName: 'Opus',
+        description: '',
+        shortName: 'Opus',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+      }
+    ]
+    const effortOf = (props: Partial<AutomationConfigViewProps>): HTMLElement => {
+      render(<AutomationConfigView {...makeProps(props)} />)
+      return screen.getByTitle('Effort level')
+    }
+
+    it('shows the saved starting effort for an automation with no effort (GUARD)', () => {
+      const automation = makeAutomation({ model: 'opus' })
+      const el = effortOf({
+        automation,
+        models: opusRows,
+        effortDefaults: { catalog: opusRows, modelEffortDefaults: { opus: 'high' } }
+      })
+      expect(el).toHaveTextContent('high') // not Opus 5.5's built-in 'medium'
+    })
+
+    it('`default` reads the alias key through the full catalog, even when the picker list is deduped (GUARD)', () => {
+      const automation = makeAutomation({ model: 'default' })
+      const el = effortOf({
+        automation,
+        // The picker's deduped list lost the alias row; the effort catalog has it.
+        models: [opusRows[0]],
+        effortDefaults: { catalog: opusRows, modelEffortDefaults: { opus: 'max' } }
+      })
+      expect(el).toHaveTextContent('max')
+    })
+
+    it('with no catalog row it judges the model from its value alone, like the run', () => {
+      const automation = makeAutomation({ model: 'claude-opus-4-7' })
+      const el = effortOf({
+        automation,
+        models: [opus47],
+        effortDefaults: { catalog: [], modelEffortDefaults: { 'claude-opus-4-7': 'low' } }
+      })
+      expect(el).toHaveTextContent('low')
+    })
+
+    it('an explicit automation effort wins over the saved one', () => {
+      const automation = makeAutomation({ model: 'opus', effort: 'low' })
+      const el = effortOf({
+        automation,
+        models: opusRows,
+        effortDefaults: { catalog: opusRows, modelEffortDefaults: { opus: 'high' } }
+      })
+      expect(el).toHaveTextContent('low')
+    })
+
+    it('judges the controls on the RUN model, not the picker fallback, when the model is not in the catalog (GUARD)', () => {
+      // `models[0]` is a legacy model with no effort and no adaptive thinking; the
+      // run judges `opus` as the model it names, so the screen must too.
+      const el = effortOf({
+        automation: makeAutomation({ model: 'opus', thinkingMode: 'adaptive' }),
+        models: [legacySonnet],
+        effortDefaults: { catalog: [], modelEffortDefaults: { opus: 'high' } }
+      })
+      expect(el).toHaveTextContent('high')
+      expect(screen.getByTitle('Thinking mode')).toHaveTextContent('adaptive')
+    })
+
+    it('shows no effort control when the run model takes none', () => {
+      render(
+        <AutomationConfigView
+          {...makeProps({
+            automation: makeAutomation({ model: 'claude-3-5-sonnet' }),
+            models: [opus47, legacySonnet]
+          })}
+        />
+      )
+      expect(screen.queryByTitle('Effort level')).toBeNull()
+    })
+
+    it('clamps a saved value the model does not offer', () => {
+      const row: ModelOption = {
+        ...opus47,
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high']
+      }
+      const el = effortOf({
+        automation: makeAutomation({ model: 'claude-opus-4-7' }),
+        models: [row],
+        effortDefaults: { catalog: [row], modelEffortDefaults: { 'claude-opus-4-7': 'max' } }
+      })
+      expect(el).toHaveTextContent('high')
+    })
   })
 
   it('hides the effort picker entirely for models without effort support', () => {

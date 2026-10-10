@@ -159,16 +159,17 @@ describe('codexHistoryStatusLine — the tokens and the cost', () => {
 })
 
 describe('codexHistoryStatusLine — the context meter', () => {
-  it('reads the persisted window and leaves the percentage unrounded', () => {
+  it('reads the persisted window and rounds the percentage exactly as the live line does', () => {
     mocks.rows = [row()]
-    mocks.meta = { engineId: 'codex', contextUsed: 4000, contextWindow: 272_000 }
+    mocks.meta = { engineId: 'codex', contextUsed: 15_100, contextWindow: 272_000 }
 
     const line = codexHistoryStatusLine('root')!
-    expect(line.contextWindow).toEqual({ used: 4000, size: 272_000 })
-    // The live line sends the raw quotient; rounding here would move the meter
-    // on the first frame after a reopen.
-    expect(line.usedPercentage).toBeCloseTo((4000 / 272_000) * 100, 10)
-    expect(line.remainingPercentage).toBeCloseTo(100 - (4000 / 272_000) * 100, 10)
+    expect(line.contextWindow).toEqual({ used: 15_100, size: 272_000 })
+    // Whole percents, the same rounding the live line applies (CodexSession's
+    // status line), so the meter does not move on the first frame after a
+    // reopen — and the footer never prints a long fraction.
+    expect(line.usedPercentage).toBe(6)
+    expect(line.remainingPercentage).toBe(94)
   })
 
   it('leaves the meter unknown for a session that never reported a window', () => {

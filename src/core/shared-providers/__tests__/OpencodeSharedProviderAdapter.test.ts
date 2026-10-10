@@ -68,7 +68,7 @@ function setup(current: NativeOpencodeFields = {}, modelAllowlist: Record<string
   const invalidateModelCache = vi.fn()
   const authTarget: OpencodeSharedProviderAuthTarget = {
     setVendorApiKey: vi.fn(async () => {}),
-    feedOauthCredential: vi.fn(async () => {}),
+    vendChatgpt: vi.fn(async () => {}),
     removeVendorAuth: vi.fn(async () => {})
   }
   return {
@@ -261,14 +261,16 @@ describe('OpencodeSharedProviderAdapter', () => {
 
     await adapter.vendOauthCredential(chatgpt, { access: 'a', refresh: 'r', expires: 1 })
     await adapter.removeCredential(chatgpt)
-    expect(authTarget.feedOauthCredential).toHaveBeenCalledWith('openai', {
+    expect(authTarget.vendChatgpt).toHaveBeenCalledWith({
       access: 'a',
       refresh: 'r',
       expires: 1
     })
     expect(authTarget.setVendorApiKey).not.toHaveBeenCalled()
     expect(authTarget.removeVendorAuth).toHaveBeenCalledWith('openai')
-    expect(invalidateModelCache).toHaveBeenCalledTimes(2)
+    // Neither: the feed and the removal invalidate in the auth target, and only
+    // when they change the stored credential.
+    expect(invalidateModelCache).not.toHaveBeenCalled()
   })
 
   it('fails closed when API-key and OAuth credentials target the wrong provider kind', async () => {
@@ -278,17 +280,31 @@ describe('OpencodeSharedProviderAdapter', () => {
       adapter.vendOauthCredential(definition, { access: 'a', refresh: 'r', expires: 1 })
     ).rejects.toThrow(/API-key/)
     expect(authTarget.setVendorApiKey).not.toHaveBeenCalled()
-    expect(authTarget.feedOauthCredential).not.toHaveBeenCalled()
+    expect(authTarget.vendChatgpt).not.toHaveBeenCalled()
     expect(invalidateModelCache).not.toHaveBeenCalled()
   })
 
-  it('vends API keys through the auth target and invalidates after credential mutations', async () => {
+  // The sync removes the key of every provider whose opencode route is off at
+  // each boot, mostly where there is none; the auth target skips an absent entry
+  // and invalidates only when it removes one, so the adapter must not add its own.
+  it('vends and removes API keys through the auth target, adding no invalidation', async () => {
     const { adapter, authTarget, invalidateModelCache } = setup()
     await adapter.vendApiKey(definition, 'secret')
     await adapter.removeCredential(definition)
     expect(authTarget.setVendorApiKey).toHaveBeenCalledWith('local-api', 'secret')
     expect(authTarget.removeVendorAuth).toHaveBeenCalledWith('local-api')
-    expect(invalidateModelCache).toHaveBeenCalledTimes(2)
+    expect(invalidateModelCache).not.toHaveBeenCalled()
+  })
+
+  // The shared-provider sync re-vends every key at each boot. The auth target
+  // invalidates the model cache itself, and only when the stored credential
+  // changed; a second invalidation here killed the model probe in flight even
+  // when nothing had.
+  it('adds no invalidation of its own after a vend — the auth target owns it', async () => {
+    const { adapter, invalidateModelCache } = setup()
+    await adapter.vendApiKey(definition, 'secret')
+    await adapter.vendOauthCredential(chatgpt, { access: 'a', refresh: 'r', expires: 1 })
+    expect(invalidateModelCache).not.toHaveBeenCalled()
   })
 
   describe('diagnoseZeroModels', () => {
@@ -338,7 +354,7 @@ describe('OpencodeSharedProviderAdapter', () => {
         writeConfig: vi.fn(),
         authTarget: {
           setVendorApiKey: vi.fn(async () => {}),
-          feedOauthCredential: vi.fn(async () => {}),
+          vendChatgpt: vi.fn(async () => {}),
           removeVendorAuth: vi.fn(async () => {})
         },
         invalidateModelCache: vi.fn(),
@@ -400,6 +416,34 @@ describe('OpencodeSharedProviderAdapter — model capabilities (ADR-074 slice 10
       { id: 'mapped', harnessOverrides: { opencode: { id: 'native-mapped' } } }
     ]
   }
+
+  it('re-syncs a reasoning model as opencode 2.x reads it back (no variants list) without a write', () => {
+    // 2.x has no "reasons" flag: a reasoning model is written with no `variants`,
+    // which the reader reports as unknown (ADR-097 S8).
+    const asRead = {
+      name: 'Local API',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: 'http://localhost/v1',
+      models: [
+        {
+          id: 'base',
+          name: 'Base',
+          attachment: true,
+          toolCall: true,
+          inputModalities: ['text', 'image'],
+          limit: { context: 262144, output: 32768 }
+        },
+        { id: 'native-mapped', ...CAPS }
+      ]
+    }
+    const { adapter, writeConfig } = setup({ providers: { 'local-api': asRead } })
+    adapter.applyDefinitionRoute({
+      definition: described,
+      previouslyManaged: true,
+      previousDefinition: described
+    })
+    expect(writeConfig).not.toHaveBeenCalled()
+  })
 
   it('declares what each model can do and how large it is', () => {
     const { adapter, writeConfig } = setup()
@@ -474,5 +518,45 @@ describe('OpencodeSharedProviderAdapter — model capabilities (ADR-074 slice 10
     expect(() => adapter.applyDefinitionRoute({ definition, previouslyManaged: true })).toThrow(
       'changed outside ClaudeUI'
     )
+  })
+})
+
+describe('OpencodeSharedProviderAdapter — a model’s Detect baseline (GUARD)', () => {
+  const plain: SharedProviderDefinition = {
+    ...definition,
+    models: [
+      { id: 'base', name: 'Base', vision: true, contextWindow: 32768, maxTokens: 8192 },
+      { id: 'mapped', harnessOverrides: { opencode: { id: 'native-mapped' } } }
+    ]
+  }
+  const withDetected: SharedProviderDefinition = {
+    ...plain,
+    models: [
+      {
+        ...plain.models[0],
+        detected: {
+          server: 'sglang',
+          at: '2026-09-30T10:00:00.000Z',
+          contextWindow: 32768,
+          maxTokens: 8192,
+          vision: true,
+          reasoning: false
+        }
+      },
+      { ...plain.models[1], detected: { server: 'sglang', at: '2026-09-30T10:00:00.000Z' } }
+    ]
+  }
+
+  it('never reaches opencode: the projection is byte-identical with or without it', () => {
+    const a = setup()
+    a.adapter.applyDefinitionRoute({ definition: plain })
+    const b = setup()
+    b.adapter.applyDefinitionRoute({ definition: withDetected })
+    expect(JSON.stringify(b.writeConfig.mock.calls[0][0])).toBe(
+      JSON.stringify(a.writeConfig.mock.calls[0][0])
+    )
+    // …so a block written before Detect existed is still recognised as ours.
+    const written = setup(a.writeConfig.mock.calls[0][0])
+    expect(written.adapter.hasDefinition(withDetected)).toBe(true)
   })
 })

@@ -1,12 +1,20 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { VOICE_LANGUAGES } from '../../../shared/types'
-import { codexPublishesEffort, resolveClaudeCapabilities } from '../../../shared/model-capabilities'
+import {
+  carriesPicksIntoNewSessions,
+  claudeAliasForModel,
+  claudeConfigWithAliases,
+  codexPublishesEffort,
+  resolveClaudeCapabilities
+} from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type { SharedProviderAccountList } from '../../../shared/shared-provider'
+import type { AgentColorId, AgentTypeColorOverrides } from '../../../shared/agent-type-colors'
 import type { ProviderRegistrySnapshot } from '../../../shared/provider-registry'
 import type { AuthRequiredState } from '../../../shared/remote-protocol'
 import type { ItemStreams } from '../../../core/shared/sync/item-stream'
+import type { CanonicalState } from '../../../core/shared/sync/state'
 import {
   anthropicAuthState,
   chatgptAuthFromRegistry,
@@ -36,6 +44,7 @@ import type {
   QueuedItem,
   TaskProgress,
   TaskNotification,
+  ActiveTask,
   PermissionMode,
   ModelInfo,
   DirectoryGroup,
@@ -64,6 +73,11 @@ import type {
   FileAttachment,
   ChatgptRateLimits
 } from '../../../shared/types'
+import { HARNESS_IDS } from '../../../shared/harness-types'
+// The harness snapshot (ADR-082 §8): whether a new session's harness runs.
+// `harness-store` imports nothing from this module, so there is no cycle.
+import { harnessStore } from '../components/SettingsDialog/harness-store'
+import { harnessCanRun } from '../components/SettingsDialog/harness-view'
 /**
  * The replica owns every SEALED slice of this store (see `sealed-fields.ts`).
  *
@@ -381,7 +395,7 @@ export function staleDefaultModelMessage(engineId: EngineId, model: string): str
     )
   return (
     `The configured ${engineMeta(engineId).label} default model "${model}" is no longer available. ` +
-    `Pick a model in the picker, or change the default in Settings → Engines → ${engineMeta(engineId).label}.`
+    `Pick a model in the picker, or change the default in Settings › Models & providers › Default models (${engineMeta(engineId).label}).`
   )
 }
 
@@ -405,6 +419,33 @@ function loadLastSelectedModels(): Partial<Record<EngineId, string>> {
 }
 
 /**
+ * The store's own copies of saved Claude picks, moved to their aliases once
+ * Claude's catalog lands (ADR-100; main moves the files). The last pick lives
+ * only here, in localStorage. The default model and the engine-config snapshot
+ * are copies: left concrete, the first would read as stale until a restart and
+ * a later whole-file save of the second would write the concrete ids back.
+ * Returns only what moved.
+ */
+function claudePicksOnAliases(
+  state: Pick<SessionState, 'lastSelectedModelByEngine' | 'claudeDefaultModel' | 'engineConfig'>,
+  catalog: ModelInfo[]
+): Partial<SessionState> {
+  if (catalog.length === 0) return {}
+  const patch: Partial<SessionState> = {}
+  const sticky = state.lastSelectedModelByEngine.claude
+  const stickyAlias = sticky && claudeAliasForModel(sticky, catalog)
+  if (stickyAlias && stickyAlias !== sticky) {
+    localStorage.setItem(lastSelectedModelKey('claude'), stickyAlias)
+    patch.lastSelectedModelByEngine = { ...state.lastSelectedModelByEngine, claude: stickyAlias }
+  }
+  const defaultAlias = claudeAliasForModel(state.claudeDefaultModel, catalog)
+  if (defaultAlias !== state.claudeDefaultModel) patch.claudeDefaultModel = defaultAlias
+  const engineConfig = claudeConfigWithAliases(state.engineConfig, catalog)
+  if (engineConfig !== state.engineConfig) patch.engineConfig = engineConfig
+  return patch
+}
+
+/**
  * Derived-state scanners moved to `shared/derive-session.ts` (SyncCore phase 4a):
  * todos / sentFiles are derived inside the shared reducer now, and core plus every
  * client replica must derive identically. Re-exported so existing import sites
@@ -412,6 +453,7 @@ function loadLastSelectedModels(): Partial<Record<EngineId, string>> {
  */
 export { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
 import { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
+import { sessionSpawnEffort, spawnAnnouncement } from '../lib/session-effort'
 
 export type ThemeId = 'dark' | 'light' | 'monokai'
 
@@ -431,9 +473,55 @@ export function seedingModelPicks(state: {
   settings: Pick<AppSettings, 'newSessionModel'>
   lastSelectedModelByEngine: Partial<Record<EngineId, string>>
 }): Readonly<Partial<Record<EngineId, string>>> {
-  return state.settings.newSessionModel === 'configured-default'
-    ? NO_SEEDING_PICKS
-    : state.lastSelectedModelByEngine
+  return carriesPicksIntoNewSessions(state.settings)
+    ? state.lastSelectedModelByEngine
+    : NO_SEEDING_PICKS
+}
+
+/** The `newSessionModel` rule as a predicate — defined once, in `shared/model-capabilities`. */
+export { carriesPicksIntoNewSessions }
+
+/**
+ * The model a session on `engineId` starts with: the user's last pick on that
+ * engine while it is still offered (unless they chose the configured default,
+ * `seedingModelPicks`), else the engine default. `model: null` means the
+ * CONFIGURED default names a model this engine no longer offers; `stale` is
+ * that name, to report rather than substitute (ADR-059). Shared by
+ * `createNewSession` and `seedUnsetModel`, so a session seeded late (its
+ * harness was installed after it was created, ADR-082 §8) gets the model a
+ * new one would.
+ */
+function pickSeedModel(
+  state: SessionState,
+  engineId: EngineId
+): { model: string | null; stale: string | null; sticky: string | undefined } {
+  const defaults = engineDefaultModels(state)
+  // The user's last pick on THIS engine wins over the engine default — the
+  // model twin of `lastSelectedEngineId` — unless the user chose the
+  // configured default instead (`newSessionModel`). Only when it is still offered:
+  // stickiness is a heuristic, so a stale entry falls through quietly (the
+  // configured-default error rule below still applies underneath it).
+  const sticky = seedingModelPicks(state)[engineId]
+  const stickyAvailable =
+    !!sticky &&
+    state.availableModels.some((m) => m.value === sticky && isModelForEngine(m, engineId))
+  // `null` = the user's CONFIGURED default named a model this engine no longer
+  // offers. Seed the picker's unset state and say so, rather than substituting
+  // a model whose capabilities differ from the one the user asked for.
+  let model = stickyAvailable
+    ? (sticky as string)
+    : resolveEngineDefaultModel(engineId, state.availableModels, defaults)
+  if (engineId === 'codex' && sticky) {
+    const hasCatalog = state.availableModels.some((m) => m.engineId === 'codex')
+    model = hasCatalog && !stickyAvailable ? null : sticky
+  }
+  const stale =
+    model === null
+      ? engineId === 'codex' && sticky
+        ? sticky
+        : configuredDefaultModelOf(engineId, defaults, state.availableModels)
+      : null
+  return { model, stale, sticky }
 }
 
 export interface AppSettings {
@@ -451,6 +539,8 @@ export interface AppSettings {
   hideToolInput: boolean
   expandThinking: boolean
   searchCaseSensitive: boolean
+  /** Find-in-chat skips content marked as tool output (TOOL_OUTPUT_SCOPE). */
+  searchExcludeToolOutput: boolean
   diffViewSplit: boolean
   diffIgnoreWhitespace: boolean
   diffWrapLines: boolean
@@ -471,19 +561,38 @@ export interface AppSettings {
   voiceEnabled: boolean
   voiceLanguage: VoiceLanguageCode
   /**
-   * Per-model default effort overrides. Keyed by canonical model id
-   * (`claude-sonnet-5`, `claude-sonnet-4-6`, `claude-opus-4-7`,
-   * `claude-opus-4-8`, `claude-fable-5`). When set, overrides the
-   * cli.js-derived default for that model; a per-session explicit pick
-   * still wins.
+   * Per-model STARTING effort — Claude's (pi keeps its own in
+   * `engineEffortDefaults`; opencode and Codex remember none). Keyed by
+   * `claudeEffortKey` (`shared/model-capabilities`): the family alias (`opus`, `sonnet`) for an alias row, else the resolved model id
+   * (`claude-opus-4-7`, `claude-fable-5`). Written by the Settings table and by a
+   * composer effort pick ("remembered per model"). When set, overrides the
+   * cli.js-derived default for a session that has not started; at spawn the
+   * resolved value freezes into the session's own `effort`, so a later change here
+   * does not touch a running session.
    */
   modelEffortDefaults: Partial<Record<string, EffortLevel>>
+  /**
+   * The same starting effort for every other remembering engine (pi), keyed by
+   * engine id then by the model's picker VALUE verbatim (pi's `provider/model` is
+   * unique per provider, so no normalisation — and no collision with Claude's
+   * `claudeEffortKey` namespace in `modelEffortDefaults`). Written by a composer
+   * effort pick only, and only while `newSessionModel` is not `'configured-default'`
+   * (there is no Settings table for it); read and written ONLY
+   * through `savedEffortFor` / `rememberEffortPatch` (`shared/model-capabilities`),
+   * which decide which engines remember. A session freezes the resolved value at
+   * spawn, exactly as for Claude.
+   */
+  engineEffortDefaults: Partial<Record<EngineId, Partial<Record<string, EffortLevel>>>>
   /**
    * What a NEW session starts on, per engine (providers-v3 slice 9, owner
    * ruling 2026-09-23). `'last-picked'` — absent means this — is today's
    * behaviour: the model last picked on that engine wins over its configured
    * default. `'configured-default'` ignores that pick for seeding (it is still
    * recorded), so the configured default — or the engine's built-in one — seeds.
+   * The same switch governs the effort a composer pick remembers
+   * (`modelEffortDefaults` / `engineEffortDefaults`): under `'configured-default'`
+   * an effort pick changes only its own session and writes neither map
+   * (`carriesPicksIntoNewSessions`).
    */
   newSessionModel?: NewSessionModel
   mermaidTheme: 'auto' | 'dark' | 'default' | 'neutral' | 'forest' // mermaid diagram theme
@@ -520,6 +629,16 @@ export interface AppSettings {
    * clear the key rather than bake today's default into every profile on disk.
    */
   dispatchMaxConcurrent?: number
+  /**
+   * Per-engine overrides of an agent type's tile colour (ADR-094): engine →
+   * type name → palette colour id. A type with no entry is coloured by its
+   * engine's own agent colour, else by a stable hash. Like
+   * `dispatchMaxConcurrent`, absent from {@link DEFAULT_SETTINGS}: "no
+   * override" is the unset state, and Reset deletes the key.
+   */
+  agentTypeColors?: AgentTypeColorOverrides
+  /** The cross-engine dispatch tile's (the letter X) palette colour; unset is orange. */
+  dispatchTileColor?: AgentColorId
 }
 
 /** Exported for the replica's settings projection (one merge base, not two). */
@@ -532,6 +651,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   hideToolInput: false,
   expandThinking: false,
   searchCaseSensitive: false,
+  searchExcludeToolOutput: false,
   diffViewSplit: false,
   diffIgnoreWhitespace: false,
   diffWrapLines: false,
@@ -552,6 +672,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   voiceLanguage: 'en' as VoiceLanguageCode,
   remoteFollowActions: true,
   modelEffortDefaults: {},
+  engineEffortDefaults: {},
   mermaidTheme: 'auto',
   logLevel: 'warn',
   logFilter: '',
@@ -612,6 +733,75 @@ function saveSessionConfig(
     hiddenProjects: merged.hiddenProjectKeys,
     sessionEngines: merged.sessionEngines
   })
+}
+
+/**
+ * Every id-keyed row of the persisted session registry, dropped for `ids` — the one
+ * definition of "forget this session" behind a delete, a project delete and the
+ * empty-session cleanup. It is the same set the reducer's `session:removed` drops
+ * (recents, pins, hidden, titles, worktree info, and the engine/model row), so a
+ * session removed on one path cannot leave a row the others would have cleared.
+ *
+ * Returns only the fields that changed (identity-stable for the rest), or null when
+ * no registry row mentions any of `ids`.
+ *
+ * `keepWorktreeInfo`: `worktreeInfoMap` is not an orphan row, it is the handle on an
+ * on-disk resource (the worktree dir and its branch) that the before-quit
+ * worktree prompt reads. A delete removes it; an abandoned empty session must not,
+ * or its worktree would leak with nothing left to offer to remove it.
+ */
+function scrubSessionRegistry(
+  state: PersistedSessionFields,
+  ids: readonly string[],
+  opts: { keepWorktreeInfo?: boolean } = {}
+): Partial<PersistedSessionFields> | null {
+  const gone = new Set(ids)
+  const patch: Partial<PersistedSessionFields> = {}
+  const dropFromList = (list: string[]): string[] | null => {
+    const kept = list.filter((id) => !gone.has(id))
+    return kept.length === list.length ? null : kept
+  }
+  const dropFromMap = <T>(map: Record<string, T>): Record<string, T> | null => {
+    if (!ids.some((id) => id in map)) return null
+    const kept = { ...map }
+    for (const id of ids) delete kept[id]
+    return kept
+  }
+  const recentSessionIds = dropFromList(state.recentSessionIds)
+  if (recentSessionIds) patch.recentSessionIds = recentSessionIds
+  const pinnedSessionIds = dropFromList(state.pinnedSessionIds)
+  if (pinnedSessionIds) patch.pinnedSessionIds = pinnedSessionIds
+  const hiddenSessionIds = dropFromList(state.hiddenSessionIds)
+  if (hiddenSessionIds) patch.hiddenSessionIds = hiddenSessionIds
+  const customTitles = dropFromMap(state.customTitles)
+  if (customTitles) patch.customTitles = customTitles
+  const worktreeInfoMap = opts.keepWorktreeInfo ? null : dropFromMap(state.worktreeInfoMap)
+  if (worktreeInfoMap) patch.worktreeInfoMap = worktreeInfoMap
+  // The persisted engine/model row is keyed by routingId too — left behind it
+  // survives the session and accumulates forever (RN8).
+  const sessionEngines = dropFromMap(state.sessionEngines)
+  if (sessionEngines) patch.sessionEngines = sessionEngines
+  return Object.keys(patch).length > 0 ? patch : null
+}
+
+/**
+ * Write a registry patch to BOTH homes of the registry: the replica (canonical's
+ * names — `hiddenSessions` / `hiddenProjects`) and the saved config. `canonicalOnly`
+ * carries fields only canonical holds (the sidebar's `directories`).
+ */
+function applyRegistryPatch(
+  state: PersistedSessionFields,
+  patch: Partial<PersistedSessionFields>,
+  canonicalOnly: Partial<Omit<CanonicalState, 'sessions'>> = {}
+): void {
+  const { hiddenSessionIds, hiddenProjectKeys, ...shared } = patch
+  patchLocalApp({
+    ...shared,
+    ...(hiddenSessionIds ? { hiddenSessions: hiddenSessionIds } : {}),
+    ...(hiddenProjectKeys ? { hiddenProjects: hiddenProjectKeys } : {}),
+    ...canonicalOnly
+  })
+  saveSessionConfig(state, patch)
 }
 
 /**
@@ -816,6 +1006,19 @@ function cleanupEmptySession(
   }
 }
 
+/**
+ * Forget a session {@link cleanupEmptySession} dropped: out of the replica AND out
+ * of every registry row it had (`createNewSession` wrote its engine/model row and a
+ * recents slot up front) — recents alone left the `sessionEngines` row behind on
+ * every abandoned "New session". Its worktree entry stays (see
+ * {@link scrubSessionRegistry}).
+ */
+function forgetDroppedSession(state: PersistedSessionFields, routingId: string): void {
+  dropLocalSessions([routingId])
+  const scrub = scrubSessionRegistry(state, [routingId], { keepWorktreeInfo: true })
+  if (scrub) applyRegistryPatch(state, scrub)
+}
+
 /** Per-session state — everything that varies between sessions */
 export interface PerSessionState {
   cwd: string
@@ -834,6 +1037,10 @@ export interface PerSessionState {
    *  is kept resident (draft/effort/engine preserved) and re-hydrated from disk
    *  on reselection via loadHistoricalSession. */
   evicted: boolean
+  /** The disk read that would fill an evicted entry failed (or found no listing for
+   *  it), so the chat offers Retry instead of waiting. Per-client view state: set by
+   *  the post-hydrate reload, cleared by any load that lands. */
+  transcriptLoadFailed: boolean
   status: SessionStatus
   pendingApprovals: PendingApproval[]
   errors: string[]
@@ -855,7 +1062,7 @@ export interface PerSessionState {
    * only opencode/pi child sessions and historical transcripts (which never
    * emit task_started) fall back to the old heuristic.
    */
-  activeTasks: Record<string, { taskId: string; taskType: string; runIndex?: number }>
+  activeTasks: Record<string, ActiveTask>
   openedTaskToolUseIds: string[]
   rightPanel: 'none' | 'task' | 'git' | 'plan' | 'mockup'
   subagentMessages: Record<string, ChatMessage[]>
@@ -867,10 +1074,13 @@ export interface PerSessionState {
   needsAttention: boolean
   permissionMode: PermissionMode
   /**
-   * null = use model default; non-null = user explicitly chose this tier.
-   * Canonical `effort` is `string | null` (sync/state.ts): Claude's five rungs
-   * for Claude/opencode/pi, an engine-native tier (Codex's `minimal`…`xhigh`)
-   * for Codex.
+   * null = not started yet, so the model's starting effort applies (Claude's
+   * per-model `modelEffortDefaults`, pi's `engineEffortDefaults`, else the cli.js
+   * default); non-null = the
+   * tier the session runs at — the user's pick, or the starting effort frozen at
+   * spawn (the birth event's `announce`). Canonical `effort` is `string | null`
+   * (sync/state.ts): Claude's five rungs for Claude/opencode/pi, an engine-native
+   * tier (Codex's `minimal`…`xhigh`) for Codex.
    */
   effort: string | null
   /** null = use model default; non-null = user explicitly chose this mode */
@@ -944,6 +1154,7 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   itemStreams: {},
   itemStreamRevision: 0,
   evicted: false,
+  transcriptLoadFailed: false,
   // Full caps assumed for new sessions before the first status event.
   status: {
     state: 'idle',
@@ -1135,6 +1346,101 @@ function errorText(err: unknown): string {
   return typeof err === 'string' ? err : 'Unknown error'
 }
 
+/**
+ * The source's task notifications that belong to a fork's seeded history: only
+ * those whose agent was LAUNCHED inside it (its `toolUseId` names a `tool_use`
+ * block in `seeded`). A fork that inherits the agent rows but not their
+ * notifications reads every background agent as running the moment its first
+ * send clears `isHistorical` (`deriveTaskState`: a background launch with a
+ * result and no terminal notification is "running"); one that inherits a
+ * post-anchor agent's notification paints a card the branch never shows.
+ * Entries with no `toolUseId` cannot be placed in the slice, so they stay behind.
+ */
+function forkTaskNotifications(
+  seeded: readonly ChatMessage[],
+  notifications: readonly TaskNotification[]
+): TaskNotification[] {
+  const launched = new Set<string>()
+  for (const m of seeded) {
+    for (const b of m.content) if (b.type === 'tool_use') launched.add(b.toolUseId)
+  }
+  return notifications.filter((n) => n.toolUseId !== null && launched.has(n.toolUseId))
+}
+
+/**
+ * What a fork's branch starts with: its history, the agents' notifications and
+ * the status line.
+ *
+ * Claude reads it from disk through the anchor-aware history loader — the same
+ * read the host's canonical seed and a reopened fork run, truncated at the anchor
+ * exactly as cli.js truncates on `--resume-session-at`. That is what makes an
+ * agent whose notification landed AFTER the anchor read `unfinished` (neutral)
+ * rather than a borrowed `completed`, and what keeps an agent still running in the
+ * source at fork time from reading "running" forever in the branch. The renderer
+ * cannot get this from `session:created`: the fork already holds messages by
+ * then, and `seedColdSession` is fill-only, so the resumed-transcript fill
+ * refuses it.
+ *
+ * Every other engine (and Claude when the session is not listed yet or the read
+ * fails) slices the source's in-memory history and keeps the notifications of the
+ * agents launched inside the slice ({@link forkTaskNotifications}). That copy
+ * cannot know where a notification sits relative to the anchor, so an agent that
+ * finished after it reads "completed" here, not "unfinished" — wrong in the
+ * direction that does not lie about anything still running.
+ */
+async function loadForkSeed(
+  src: PerSessionState,
+  sourceSessionId: string,
+  anchorUuid: string,
+  idx: number,
+  directories: readonly DirectoryGroup[]
+): Promise<
+  Pick<PerSessionState, 'messages' | 'taskNotifications'> & { statusLine?: StatusLineData }
+> {
+  if (src.status.engineId === 'claude') {
+    // `findSessionInfo`, inlined: `lib/session-history-load` imports this module.
+    let projectKey: string | undefined
+    for (const group of directories) {
+      const info = group.sessions.find((s) => s.sessionId === sourceSessionId)
+      if (info) {
+        projectKey = info.projectKey
+        break
+      }
+    }
+    let reason = `session ${sourceSessionId} is not in the directory listing`
+    if (projectKey) {
+      try {
+        const loaded = await window.api.loadSessionHistory(sourceSessionId, projectKey, anchorUuid)
+        if (loaded.messages.length > 0) {
+          // Not customTitle / warnings: a fork is a new session with its own title.
+          return {
+            messages: loaded.messages,
+            taskNotifications: loaded.taskNotifications,
+            ...(loaded.statusLine ? { statusLine: loaded.statusLine } : {})
+          }
+        }
+        reason = 'the transcript read came back empty'
+      } catch (err) {
+        reason = `the transcript read failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+    window.api?.logRelay?.(
+      'warn',
+      'SessionStore',
+      `fork of ${sourceSessionId}: seeding from memory because ${reason}`
+    )
+  }
+  // Deep-ish copy so edits to one session never mutate the other. cli.js performs
+  // the same slice by uuid when it materializes the fork, so the displayed history
+  // will match (pi's own clone/fork RPCs perform the equivalent truncation on its
+  // side).
+  const messages = (idx >= 0 ? src.messages.slice(0, idx + 1) : src.messages).map((m) => ({
+    ...m,
+    content: m.content.map((b) => ({ ...b }))
+  }))
+  return { messages, taskNotifications: forkTaskNotifications(messages, src.taskNotifications) }
+}
+
 /** Helper to update a specific session's state */
 function updateSession(
   sessions: Record<string, PerSessionState>,
@@ -1163,9 +1469,9 @@ const MAX_RESIDENT_TRANSCRIPTS = 10
  * SEALED, so the strip happens in the replica (`evictLocalSessions`) and the
  * projection carries it into the store; the `evicted` / `isHistorical` flags are
  * per-client view state and stay here. Stripping the store directly would have
- * been undone by the next projection — canonical on the HOST deliberately does
- * not evict (docs/architecture/sync-channels.md §Eviction), so its copy still has
- * the transcript.
+ * been undone by the next projection. The host makes the same cache decision for
+ * itself, on its own rule (`SyncCore.evictTranscript`, docs/architecture/
+ * sync-channels.md §Eviction), and neither one is visible to the other.
  */
 function coldSessionIds(
   sessions: Record<string, PerSessionState>,
@@ -1199,6 +1505,79 @@ function coldSessionIds(
     if (canEvict) cold.push(id)
   }
   return cold
+}
+
+/**
+ * Does this session have a transcript on disk to resume — the question every
+ * lazy spawn asks to choose between `--resume <id>` and a brand-new
+ * conversation?
+ *
+ * Holding messages is not the test: an evicted entry holds none (the host dropped
+ * the transcript and the snapshot said so, ADR-087 §2) and is still the same
+ * conversation, so `evicted` and `isHistorical` count. Answering `false` for one
+ * starts a fresh conversation under a row the user believes they are continuing.
+ */
+export function hasResumableTranscript(
+  session: Pick<PerSessionState, 'messages' | 'evicted' | 'isHistorical'>
+): boolean {
+  return session.messages.length > 0 || session.evicted || session.isHistorical
+}
+
+/**
+ * The per-client VIEW half of an eviction: what a session entry says about
+ * itself once its transcript is not in memory. The transcript strip itself is
+ * sealed and goes through the replica (`evictLocalSessions`); this is the part
+ * that stays here, and the part the sidebar's click path reads — it reloads from
+ * disk exactly when `evicted` is set (`Sidebar.tsx` `handleClickSession`).
+ */
+export function evictedViewPatch(): Partial<PerSessionState> {
+  return {
+    evicted: true,
+    isHistorical: true,
+    bashOutputs: {},
+    backgroundOutputs: {},
+    backgroundWatcherCounts: {}
+  }
+}
+
+/**
+ * Mark sessions evicted in the view, for a transcript the replica does not hold
+ * for a reason other than this client's own cold-session strip — a snapshot that
+ * says the host dropped it. Unknown ids are skipped, like every `updateSession`.
+ */
+export function markViewEvicted(routingIds: readonly string[]): void {
+  if (routingIds.length === 0) return
+  useSessionStore.setState((state) => {
+    let sessions = state.sessions
+    for (const id of routingIds) sessions = updateSession(sessions, id, evictedViewPatch)
+    return { sessions }
+  })
+}
+
+/** Set or clear the "couldn't load this transcript" flag. Unknown ids are skipped. */
+export function setTranscriptLoadFailed(routingId: string, failed: boolean): void {
+  useSessionStore.setState((state) => {
+    const session = state.sessions[routingId]
+    if (!session || session.transcriptLoadFailed === failed) return state
+    return {
+      sessions: updateSession(state.sessions, routingId, () => ({ transcriptLoadFailed: failed }))
+    }
+  })
+}
+
+/**
+ * The sessions are not evicted after all — their transcript is back in memory by a
+ * path other than the sidebar's reload, or they turned out to be live. Only entries
+ * that carry the flag are rewritten.
+ */
+export function clearViewEvicted(routingIds: readonly string[]): void {
+  useSessionStore.setState((state) => {
+    let sessions = state.sessions
+    for (const id of routingIds) {
+      if (sessions[id]?.evicted) sessions = updateSession(sessions, id, () => ({ evicted: false }))
+    }
+    return sessions === state.sessions ? state : { sessions }
+  })
 }
 
 /**
@@ -1348,9 +1727,15 @@ export interface SessionState {
    *  reject it. Claude-only — opencode and pi implement auto themselves and are
    *  not governed by Claude's settings file. */
   autoModeDisabledBySettings: boolean
-  /** Bumped to force the model picker to re-fetch getEngineModels() — e.g. after
-   *  an opencode provider/default-model change in Settings. */
+  /** Bumped by EVERY model reload, whole or one engine's — what a Settings pane
+   *  follows to re-read its models (e.g. after an opencode provider or
+   *  default-model change). */
   modelReloadNonce: number
+  /** Per engine, bumped when THAT engine's models may have changed: by every
+   *  `reloadModels()` and by `reloadEngineModels(engineId)`. The composer
+   *  re-fetches one engine's slice off its own entry, so a one-engine reload
+   *  re-probes no other engine. */
+  engineModelReloadNonces: Record<EngineId, number>
 
   // Global (not per-session)
   engineConfig: EngineConfig
@@ -1458,6 +1843,12 @@ export interface SessionState {
   setLastSelectedEngineId: (engineId: EngineId) => void
   /** Switch the active fresh session's engine and seed its effective default model. */
   setSelectedEngine: (engineId: EngineId) => void
+  /**
+   * Give a session that has not spawned, and holds no model because its
+   * harness was not installed when it was created (ADR-082 §8), the model a
+   * new session would get, now that the harness runs. A no-op otherwise.
+   */
+  seedUnsetModel: (routingId: string) => void
   /** Update the configurable opencode default model (mirrors opencodeConfig.model). */
   setOpencodeDefaultModel: (model: string) => void
   /** Update the configurable pi default model (mirrors piConfig.defaultModel, M3). */
@@ -1469,8 +1860,10 @@ export interface SessionState {
   /** Mirror a Settings-dialog `permissions.defaultMode` write so sessions created
    *  later in THIS app run pick it up without a restart. */
   setDefaultPermissionMode: (mode: PermissionMode) => void
-  /** Force the model picker to re-fetch the engine model list. */
+  /** Force the model picker and every Settings model list to re-fetch, all engines. */
   reloadModels: () => void
+  /** Re-fetch ONE engine's models in the picker; Settings panes re-read too. */
+  reloadEngineModels: (engineId: EngineId) => void
   loadHistoricalSession: (
     routingId: string,
     messages: ChatMessage[],
@@ -1549,6 +1942,12 @@ export interface SessionState {
   unwatchBackgroundOutput: (routingId: string, toolUseId: string) => void
   openTaskPanel: (routingId: string, toolUseId: string) => void
   /**
+   * What a roster row does: open that agent below the roster, or put it away if
+   * it is already open. Unlike `removeTaskFromPanel`, putting the last one away
+   * leaves the panel open on the roster, which is where the click came from.
+   */
+  toggleTaskInPanel: (routingId: string, toolUseId: string) => void
+  /**
    * Open or close the panel on the ROSTER, with no agent selected (ADR-073).
    * What the top-bar pill does: reaching the list must not depend on a card
    * still being on screen, which is what `openTaskPanel` requires.
@@ -1584,6 +1983,12 @@ export interface SessionState {
   setSelectedModel: (model: string) => void
   setCustomCommands: (commands: SlashCommandInfo[]) => void
   setAvailableModels: (models: ModelInfo[]) => void
+  /**
+   * Replace ONE engine's slice of `availableModels` (a model without `engineId`
+   * is Claude's), keeping the others and the claude, opencode, pi, codex order
+   * whatever order the per-engine answers arrive in.
+   */
+  setEngineModels: (engineId: EngineId, models: ModelInfo[]) => void
   /**
    * "Start fresh". Async since the reset became a replicated event — await it
    * before spawning a replacement session, or the birth event can land BEFORE
@@ -1772,6 +2177,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   defaultPermissionMode: 'default' as PermissionMode,
   autoModeDisabledBySettings: false,
   modelReloadNonce: 0,
+  engineModelReloadNonces: { claude: 0, opencode: 0, pi: 0, codex: 0 },
   engineConfig: {},
   settings: DEFAULT_SETTINGS,
   availableModels: [],
@@ -1815,11 +2221,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       activeView: { type: 'chat' } as ActiveView,
       sessions: cleaned.sessions
     })
-    if (cleaned.dropped) dropLocalSessions([cleaned.dropped])
-    if (cleaned.recentSessionIds !== state.recentSessionIds) {
-      patchLocalApp({ recentSessionIds: cleaned.recentSessionIds })
-      saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
-    }
+    if (cleaned.dropped) forgetDroppedSession(state, cleaned.dropped)
   },
 
   switchSession: (routingId) => {
@@ -1842,22 +2244,10 @@ export const useSessionStore = create<SessionState>((set) => ({
       state.directories
     )
     let sessions = updateSession(cleaned.sessions, routingId, () => ({ needsAttention: false }))
-    for (const id of cold) {
-      sessions = updateSession(sessions, id, () => ({
-        evicted: true,
-        isHistorical: true,
-        bashOutputs: {},
-        backgroundOutputs: {},
-        backgroundWatcherCounts: {}
-      }))
-    }
+    for (const id of cold) sessions = updateSession(sessions, id, evictedViewPatch)
     set({ activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView, sessions })
-    if (cleaned.dropped) dropLocalSessions([cleaned.dropped])
+    if (cleaned.dropped) forgetDroppedSession(state, cleaned.dropped)
     if (cold.length > 0) evictLocalSessions(cold)
-    if (cleaned.recentSessionIds !== state.recentSessionIds) {
-      patchLocalApp({ recentSessionIds: cleaned.recentSessionIds })
-      saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
-    }
   },
 
   createNewSession: (routingId, cwd, switchTo = true) => {
@@ -1870,38 +2260,28 @@ export const useSessionStore = create<SessionState>((set) => ({
       // Validate the remembered engine against what is ACTUALLY usable right now.
       // `availableModels` reflects post-discovery, provider-filtered reality. If the
       // remembered engine is opencode but it has no usable model — its provider was
-      // disabled, discovery hasn't run yet, or opencode is unavailable — seeding it
-      // would show a Claude model in the picker while routing send to a phantom
-      // opencode model (the desync regression). Fall back to claude in that case.
+      // disabled or discovery hasn't run yet — seeding it would show a Claude model
+      // in the picker while routing send to a phantom opencode model (the desync
+      // regression). Fall back to claude in that case.
+      //
+      // A harness that is not installed is different (ADR-082 §8): it stays
+      // selected, with NO model seeded — the engine default for an empty catalog
+      // is a phantom value — and the composer offers to install it. Only a
+      // harness this computer cannot run at all falls back to claude. Before the
+      // harness snapshot has loaded (`unknown`) everything behaves as it did.
       let engineId = state.lastSelectedEngineId
+      if (harnessStore.readiness(engineId) === 'unavailable-here') engineId = 'claude'
+      const harnessRuns = harnessCanRun(harnessStore.readiness(engineId))
       const defaults = engineDefaultModels(state)
-      // The user's last pick on THIS engine wins over the engine default — the
-      // model twin of `lastSelectedEngineId` — unless the user chose the
-      // configured default instead (`newSessionModel`). Only when it is still offered:
-      // stickiness is a heuristic, so a stale entry falls through quietly (the
-      // configured-default error rule below still applies underneath it).
-      const sticky = seedingModelPicks(state)[engineId]
-      const stickyAvailable =
-        !!sticky &&
-        state.availableModels.some((m) => m.value === sticky && isModelForEngine(m, engineId))
-      // `null` = the user's CONFIGURED default named a model this engine no longer
-      // offers. Seed the picker's unset state and say so, rather than substituting
-      // a model whose capabilities differ from the one the user asked for.
-      let defaultModel = stickyAvailable
-        ? (sticky as string)
-        : resolveEngineDefaultModel(engineId, state.availableModels, defaults)
-      if (engineId === 'codex' && sticky) {
-        const hasCatalog = state.availableModels.some((model) => model.engineId === 'codex')
-        defaultModel = hasCatalog && !stickyAvailable ? null : sticky
-      }
-      const staleDefault =
-        defaultModel === null
-          ? engineId === 'codex' && sticky
-            ? sticky
-            : configuredDefaultModelOf(engineId, defaults, state.availableModels)
-          : null
+      const seed = harnessRuns
+        ? pickSeedModel(state, engineId)
+        : { model: null, stale: null, sticky: undefined }
+      const sticky = seed.sticky
+      let defaultModel = seed.model
+      const staleDefault = seed.stale
       if (
         engineId === 'opencode' &&
+        harnessRuns &&
         !resolveOpencodeModel(state.availableModels, state.opencodeDefaultModel)
       ) {
         // Distinct from the stale-default case above: opencode has NO usable model
@@ -2022,7 +2402,13 @@ export const useSessionStore = create<SessionState>((set) => ({
       return
     if (session.selectedEngineId === engineId) return
     const defaults = engineDefaultModels(state)
-    const resolved = resolveEngineDefaultModel(engineId, state.availableModels, defaults)
+    // A harness that cannot run is picked with no model (ADR-082 §8): its empty
+    // catalog would resolve to a phantom default, and a "configured default is
+    // gone" error would name the wrong problem. The composer offers the install.
+    const harnessRuns = harnessCanRun(harnessStore.readiness(engineId))
+    const resolved = harnessRuns
+      ? resolveEngineDefaultModel(engineId, state.availableModels, defaults)
+      : ''
     // A stale CONFIGURED default leaves the picker unset (and says why) instead of
     // handing the new engine a substitute model — same rule as `createNewSession`.
     const model = resolved ?? ''
@@ -2073,6 +2459,41 @@ export const useSessionStore = create<SessionState>((set) => ({
     saveSessionConfig(state, { sessionEngines })
   },
 
+  seedUnsetModel: (routingId) => {
+    const state = useSessionStore.getState()
+    const session = state.sessions[routingId]
+    if (!session || session.selectedModel) return
+    if (session.sdkActive || session.status.sessionId || session.isHistorical) return
+    const engineId = session.selectedEngineId
+    if (!harnessCanRun(harnessStore.readiness(engineId))) return
+    const { model, stale, sticky } = pickSeedModel(state, engineId)
+    if (model === null) {
+      if (stale !== null) reportStaleDefaultModel(routingId, engineId, stale)
+      return
+    }
+    const defaults = engineDefaultModels(state)
+    const modelInfo = state.availableModels.find(
+      (candidate) => candidate.value === model && isModelForEngine(candidate, engineId)
+    )
+    const sessionEngines = {
+      ...state.sessionEngines,
+      [routingId]: { engineId, model: engineMeta(engineId).decodeModelValue(model) }
+    }
+    patchLocalSession(routingId, {
+      selectedModel: model,
+      ...(engineId === 'codex'
+        ? { codexModelExplicit: !!sticky || defaults.codexDefaultModelConfigured }
+        : {}),
+      status: {
+        ...session.status,
+        engineId,
+        capabilities: engineMeta(engineId).seedCapabilities(model, modelInfo)
+      }
+    })
+    patchLocalApp({ sessionEngines })
+    saveSessionConfig(state, { sessionEngines })
+  },
+
   setOpencodeDefaultModel: (model) =>
     set({
       opencodeDefaultModel: model || OPENCODE_DEFAULT_MODEL,
@@ -2096,7 +2517,22 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setDefaultPermissionMode: (mode) => set({ defaultPermissionMode: mode }),
 
-  reloadModels: () => set((s) => ({ modelReloadNonce: s.modelReloadNonce + 1 })),
+  reloadModels: () =>
+    set((s) => ({
+      modelReloadNonce: s.modelReloadNonce + 1,
+      engineModelReloadNonces: Object.fromEntries(
+        HARNESS_IDS.map((id) => [id, s.engineModelReloadNonces[id] + 1])
+      ) as Record<EngineId, number>
+    })),
+
+  reloadEngineModels: (engineId) =>
+    set((s) => ({
+      modelReloadNonce: s.modelReloadNonce + 1,
+      engineModelReloadNonces: {
+        ...s.engineModelReloadNonces,
+        [engineId]: s.engineModelReloadNonces[engineId] + 1
+      }
+    })),
 
   loadHistoricalSession: (
     routingId,
@@ -2108,6 +2544,13 @@ export const useSessionStore = create<SessionState>((set) => ({
     warnings?
   ) => {
     const state = useSessionStore.getState()
+    // A disk read can finish after this session has resumed. Guard config as
+    // well as transcript seeding: neither may replace a live backend's state.
+    if (
+      state.sessions[routingId]?.sdkActive ||
+      state.sessions[routingId]?.status.state === 'running'
+    )
+      return
     {
       // Per-session model memory: restore the persisted model when present, so
       // reopening a session brings back the model you last used in it. The engine
@@ -2189,6 +2632,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         sessions: updateSession(s.sessions, routingId, () => ({
           isHistorical: true,
           evicted: false,
+          transcriptLoadFailed: false,
           warnings: warnings ?? base.warnings
         }))
       }))
@@ -2243,14 +2687,16 @@ export const useSessionStore = create<SessionState>((set) => ({
     }
     const anchorUuid = result.anchorUuid
 
-    // Optimistically seed the branch with messages 1..N (deep-ish copy so edits
-    // to one session never mutate the other). cli.js performs the same slice by
-    // uuid when it materializes the fork, so the displayed history will match
-    // (pi's own clone/fork RPCs perform the equivalent truncation on its side).
-    const seeded = (idx >= 0 ? src.messages.slice(0, idx + 1) : src.messages).map((m) => ({
-      ...m,
-      content: m.content.map((b) => ({ ...b }))
-    }))
+    // Seed the branch with messages 1..N and the notifications of the agents
+    // launched in them (see loadForkSeed for where each engine reads them). This
+    // runs before anything is spawned, so no live event can race it.
+    const seed = await loadForkSeed(
+      src,
+      sourceSessionId,
+      anchorUuid,
+      idx,
+      useSessionStore.getState().directories
+    )
 
     const newRoutingId = crypto.randomUUID()
     {
@@ -2277,7 +2723,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         newRoutingId,
         {
           cwd: src.cwd,
-          messages: seeded,
+          ...seed,
           permissionMode: bootstrapPermissionMode(s, forkEngineId),
           // Inherit the source's engine/model/effort/thinking choices.
           selectedEngineId: forkEngineId,
@@ -2428,17 +2874,6 @@ export const useSessionStore = create<SessionState>((set) => ({
     await window.api.deleteSession(sessionId, projectKey, engineId)
     // Also scrub any references to this session from persisted config + in-memory state
     const state = useSessionStore.getState()
-    const recentSessionIds = state.recentSessionIds.filter((id) => id !== sessionId)
-    const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== sessionId)
-    const hiddenSessions = state.hiddenSessionIds.filter((id) => id !== sessionId)
-    const customTitles = { ...state.customTitles }
-    delete customTitles[sessionId]
-    const worktreeInfoMap = { ...state.worktreeInfoMap }
-    delete worktreeInfoMap[sessionId]
-    // The persisted engine/model row is keyed by routingId too — without this
-    // it survives every delete and accumulates forever (RN8).
-    const sessionEngines = { ...state.sessionEngines }
-    delete sessionEngines[sessionId]
     // Drop the session from its directory group; drop the group itself if now empty
     const directories = state.directories
       .map((g) =>
@@ -2456,23 +2891,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     })
     dropLocalSessions([sessionId])
-    patchLocalApp({
-      recentSessionIds,
-      pinnedSessionIds,
-      hiddenSessions,
-      customTitles,
-      worktreeInfoMap,
-      sessionEngines,
-      directories
-    })
-    saveSessionConfig(state, {
-      recentSessionIds,
-      pinnedSessionIds,
-      hiddenSessionIds: hiddenSessions,
-      customTitles,
-      worktreeInfoMap,
-      sessionEngines
-    })
+    applyRegistryPatch(state, scrubSessionRegistry(state, [sessionId]) ?? {}, { directories })
   },
 
   deleteProject: async (projectKey) => {
@@ -2494,20 +2913,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         if (sess.cwd === projectCwd) projectSessionIds.add(id)
       }
     }
-    const recentSessionIds = state.recentSessionIds.filter((id) => !projectSessionIds.has(id))
-    const pinnedSessionIds = state.pinnedSessionIds.filter((id) => !projectSessionIds.has(id))
-    const hiddenSessions = state.hiddenSessionIds.filter((id) => !projectSessionIds.has(id))
     const hiddenProjects = state.hiddenProjectKeys.filter((k) => k !== projectKey)
-    const customTitles = { ...state.customTitles }
-    const worktreeInfoMap = { ...state.worktreeInfoMap }
-    // Persisted engine/model rows are keyed by routingId — purge them with the
-    // rest of the project's state so they can't accumulate forever (RN8).
-    const sessionEngines = { ...state.sessionEngines }
-    for (const id of projectSessionIds) {
-      delete customTitles[id]
-      delete worktreeInfoMap[id]
-      delete sessionEngines[id]
-    }
     const directories = state.directories.filter((g) => g.projectKey !== projectKey)
     set((s) => {
       const sessions = { ...s.sessions }
@@ -2519,25 +2925,14 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     })
     dropLocalSessions([...projectSessionIds])
-    patchLocalApp({
-      recentSessionIds,
-      pinnedSessionIds,
-      hiddenSessions,
-      hiddenProjects,
-      customTitles,
-      worktreeInfoMap,
-      sessionEngines,
-      directories
-    })
-    saveSessionConfig(state, {
-      recentSessionIds,
-      pinnedSessionIds,
-      hiddenSessionIds: hiddenSessions,
-      hiddenProjectKeys: hiddenProjects,
-      customTitles,
-      worktreeInfoMap,
-      sessionEngines
-    })
+    applyRegistryPatch(
+      state,
+      {
+        ...scrubSessionRegistry(state, [...projectSessionIds]),
+        hiddenProjectKeys: hiddenProjects
+      },
+      { directories }
+    )
   },
 
   dismissApproval: (routingId, requestId) => {
@@ -2682,6 +3077,16 @@ export const useSessionStore = create<SessionState>((set) => ({
       }))
     })),
 
+  toggleTaskInPanel: (routingId, toolUseId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        openedTaskToolUseIds: s.openedTaskToolUseIds.includes(toolUseId)
+          ? s.openedTaskToolUseIds.filter((id) => id !== toolUseId)
+          : [...s.openedTaskToolUseIds, toolUseId],
+        rightPanel: 'task' as const
+      }))
+    })),
+
   toggleAgentsPanel: (routingId) =>
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) =>
@@ -2783,9 +3188,11 @@ export const useSessionStore = create<SessionState>((set) => ({
   },
 
   // Effort / thinking / reasoning-variant picks. Applied through the replica
-  // because for effort + thinking there is NO event at all: the desktop picker
-  // restarts the session instead of pushing a live setter, so the value's only
-  // home until the respawn reads it is this client (see InputBox.restartSdkSession).
+  // because for effort + thinking there is no live setter: the desktop picker
+  // restarts the session instead, so until the respawn the value's only home is
+  // this client (see InputBox.restartSdkSession). The respawn (and a first send)
+  // is `session:create`, whose `announce` argument puts the values on the birth
+  // event, which is how they reach every other replica.
   // Where an IPC setter DOES exist (reasoning variant, model), its
   // `session:config-changed` echo re-applies the same per-field replace.
   setEffort: (effort, routingId) => {
@@ -2901,6 +3308,20 @@ export const useSessionStore = create<SessionState>((set) => ({
   setCustomCommands: (commands) => set({ customCommands: commands }),
 
   setAvailableModels: (models) => set({ availableModels: models }),
+
+  setEngineModels: (engineId, models) => {
+    set((s) => ({
+      // Rebuilt in the fixed engine order, not appended: a lookup by value
+      // across engines (`availableModels.find`) must not answer differently
+      // depending on which engine's probe happened to answer first.
+      availableModels: HARNESS_IDS.flatMap((id) =>
+        id === engineId ? models : s.availableModels.filter((m) => (m.engineId ?? 'claude') === id)
+      )
+    }))
+    if (engineId !== 'claude') return
+    const moved = claudePicksOnAliases(useSessionStore.getState(), models)
+    if (Object.keys(moved).length > 0) set(moved)
+  },
 
   setAccountUsage: (data) => set({ accountUsage: data }),
 
@@ -3207,7 +3628,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     // opencode sessions always pass routingId as resumeSessionId (the server resumes
     // the prior opencode session regardless of whether messages are preloaded locally).
     const isOpencode = session.selectedEngineId === 'opencode'
-    const resumeId = session.messages.length > 0 || isOpencode ? routingId : undefined
+    const resumeId = hasResumableTranscript(session) || isOpencode ? routingId : undefined
     // A Codex pick is a NATIVE tier and the store keeps the user's last one at
     // every lifecycle stage (F15); `CodexSession.validateEffort` refuses a start
     // on a tier the model never published, so only a published one may ride
@@ -3221,7 +3642,9 @@ export const useSessionStore = create<SessionState>((set) => ({
           )
           ? (session.effort ?? undefined)
           : undefined
-        : (session.effort ?? undefined)
+        : // The composer's own resolver: a null pick falls to the per-model
+          // starting effort, not to cli.js's heuristic by way of `undefined`.
+          sessionSpawnEffort(useSessionStore.getState(), session)
     await window.api.createSession(
       routingId,
       session.cwd || '',
@@ -3232,7 +3655,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       session.thinkingMode ?? undefined,
       undefined,
       undefined,
-      session.selectedEngineId
+      session.selectedEngineId,
+      spawnAnnouncement(useSessionStore.getState(), session, effort)
     )
     patchLocalSession(routingId, { sdkActive: true })
     await window.api.sendPrompt(routingId, prompt)
@@ -3625,6 +4049,24 @@ export const useSessionStore = create<SessionState>((set) => ({
       }))
     }))
 }))
+
+// A harness that now runs as a different binary (ADR-082 §8): main has
+// already dropped that engine's model catalog (`core/harness/catalog-
+// invalidation.ts`), so the composer re-fetches THAT engine's models (no other
+// engine's catalog changed, so none is re-probed) and every open model sheet
+// reads again off the nonce. The provider registry counts pi's models from
+// main's WARM catalog only, so it is re-read once that is warm. `harness-store`
+// notices the change for every client surface at once; it imports nothing from
+// here.
+harnessStore.followRunChanges((changed) => {
+  for (const id of changed) useSessionStore.getState().reloadEngineModels(id)
+  const warmPi = changed.includes('pi') && harnessStore.readiness('pi') === 'ready'
+  void Promise.resolve()
+    .then(() => (warmPi ? window.api.getPiModelCatalogGroups() : undefined))
+    .catch(() => undefined)
+    .then(() => useSessionStore.getState().refreshProviderAuth())
+    .catch(() => undefined)
+})
 
 // ---------------------------------------------------------------------------
 // Terminal selectors (derive from active session's cwd)

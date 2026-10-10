@@ -16,23 +16,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 
 const tests = [
   { name: 'subagent-streaming', script: resolve(__dirname, 'subagent-streaming/test.mjs') },
-  { name: 'taskstop-notification', script: resolve(__dirname, 'taskstop-notification/test.mjs') },
-  { name: 'queue-control', script: resolve(__dirname, 'queue-control/test.mjs') },
-  { name: 'mcp-status', script: resolve(__dirname, 'mcp-status/test.mjs') },
-  { name: 'mcp-tool-refresh', script: resolve(__dirname, 'mcp-tool-refresh/test.mjs') },
-  { name: 'usage-relay', script: resolve(__dirname, 'usage-relay/test.mjs') },
-  { name: 'request-usage', script: resolve(__dirname, 'request-usage/test.mjs') },
-  { name: 'request-usage-anchors', script: resolve(__dirname, 'request-usage/anchor.test.mjs') },
-  { name: 'rate-limit-relay', script: resolve(__dirname, 'rate-limit-relay/test.mjs') },
-  { name: 'bash-output-streaming', script: resolve(__dirname, 'bash-output-streaming/test.mjs') },
-  { name: 'subprocess-proxy-strip', script: resolve(__dirname, 'subprocess-proxy-strip/test.mjs') },
-  { name: 'skip-securestorage', script: resolve(__dirname, 'skip-securestorage/test.mjs') }
+  { name: 'voice-server-anchors', script: resolve(__dirname, 'voice-server/anchors.test.mjs') },
+  { name: 'bash-output-streaming', script: resolve(__dirname, 'bash-output-streaming/test.mjs') }
 ]
 
 // Tests are independent processes (separate CLI sessions, stdio MCP stubs, no
-// fixed ports; skip-securestorage is a read-only structural check), so they run
-// concurrently with a bounded pool. Each test's output is buffered and printed
-// whole when it finishes, so logs never interleave. PATCH_TEST_CONCURRENCY=1
+// fixed ports), so they run concurrently with a bounded pool. Each test's
+// output is buffered and printed whole when it finishes, so logs never
+// interleave. PATCH_TEST_CONCURRENCY=1
 // restores the old fully-sequential behaviour (e.g. when debugging one test's
 // live session with DEBUG_HARNESS=1).
 const concurrency = Math.max(1, Number(process.env.PATCH_TEST_CONCURRENCY) || 4)

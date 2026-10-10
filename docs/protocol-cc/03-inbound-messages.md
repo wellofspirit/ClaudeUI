@@ -12,7 +12,7 @@ cli.js has **three** paths that reach stdout:
 
 1. **Main generator pipeline** (`Ts1` → `M.write(line)`) at char `~12822400`. Everything yielded by the turn generator passes through here.
 2. **Control channel** (`h.enqueue`) at char `~12843100+`. Control responses/cancels plus some out-of-band system events (auth_status, rate_limit_event native, permission-mode status, prompt_suggestion, transcript_mirror).
-3. **Direct `process.stdout.write`** — used by all ClaudeUI patches (`request-usage`, `rate-limit-relay`, `bash-output-streaming`, subagent-streaming E/G, team-streaming B).
+3. **Direct `process.stdout.write`** — used by the ClaudeUI patches that emit messages (`bash-output-streaming`, subagent-streaming E/G; formerly the retired team-streaming B).
 
 A fourth pseudo-path queues vT-class system subtypes (`task_notification`, `task_started`, `task_updated`, `task_progress`, `notification`) through `JtH`, flushed by `ZtH()` at char `~12838006` / `~12840696` (which injects `uuid` + `session_id` at flush time).
 
@@ -29,12 +29,12 @@ A fourth pseudo-path queues vT-class system subtypes (`task_notification`, `task
 | `result`                 | Generator                                       | Always (once per turn)                                                            | §3.7                                       |
 | `tool_progress`          | Generator                                       | `CLAUDE_CODE_REMOTE` or `CLAUDE_CODE_CONTAINER_ID` for bash/pwsh; always for REPL | §3.8                                       |
 | `tool_use_summary`       | Generator                                       | Always when tool_use_summary attachment produced                                  | §3.9                                       |
-| `request_usage`          | Patch `request-usage` (direct stdout)           | Always (when patched)                                                             | §3.10                                      |
-| `rate_limit_event`       | Patch `rate-limit-relay` or native G_H listener | Patched path: always; native: rare                                                | §3.11                                      |
+| `rate_limit_event`       | Native, print loop (builder `bKe`, at 22241254) | OAuth sessions; when a window's rounded percentage or reset time moves            | §3.11                                      |
 | `bash_output`            | Patch `bash-output-streaming` (direct stdout)   | Rate-limited ≤1/200ms per tool                                                    | §3.12                                      |
 | `auth_status`            | Control channel                                 | `--enable-auth-status` flag                                                       | §3.13                                      |
 | `prompt_suggestion`      | Control channel                                 | `promptSuggestions: true` in initialize                                           | §3.14                                      |
 | `transcript_mirror`      | Direct write from file watcher                  | `sessionMirror: true` (ClaudeUI doesn't use)                                      | §3.15                                      |
+| `command_lifecycle`      | Native lifecycle forwarder (`mw`, at 22677075)  | The inbound `user` frame carried a `uuid` (ClaudeUI: every frame)                 | §3.21                                      |
 | `control_request`        | Control channel                                 | Per inbound subtype — see `08-control-inbound.md`                                 | §3.16                                      |
 | `control_response`       | Control channel                                 | One per inbound outbound control_request                                          | §3.17                                      |
 | `control_cancel_request` | Control channel                                 | On abort of pending inbound control_request                                       | §3.18                                      |
@@ -81,12 +81,13 @@ Anthropic-shaped assistant message. Fires on every assistant response, including
   "type": "assistant",
   "message": {...},
   "parent_tool_use_id": "toolu_parent",   // points to the parent's Task tool_use block
+  "agent_id": "...",                       // 2.1.293+: the subagent's task_id (also on `user`)
   "session_id": "...",
   "uuid": "..."
 }
 ```
 
-### Teammate variant (patch `team-streaming-B`)
+### Teammate variant (patch `team-streaming-B` — retired)
 
 ```jsonc
 {
@@ -161,15 +162,23 @@ When `shouldQuery=false` or during session resume, cli.js re-yields past user me
 }
 ```
 
-### Trigger 3 — Queued command consumed (patch `queue-control`)
+### Trigger 3 — Echo of a user frame we sent (`--replay-user-messages` only)
 
-When a mid-turn steer is consumed, cli.js re-emits the prompt as a `user` message with `isReplay: true` (char `~12805950`).
+With `--replay-user-messages`, an inbound `user` frame that carried a `uuid` is echoed back as
+`{type:"user", message, uuid: <client uuid>, isReplay: true, …}` as soon as cli.js accepts it
+into its command queue (2.1.280, `.cache/pristine-cli.js` @22833639). ClaudeUI does not pass the
+flag; it learns what happened to a message from `command_lifecycle` (§3.21).
 
 Shape same as Trigger 2.
 
 ### Trigger 4 — Duplicate message ACK
 
-When a `user` with a pre-existing `uuid` arrives, cli.js emits an `isReplay: true` ack to preserve client ordering (char `~12861187`).
+An inbound `user` frame whose `uuid` cli.js has already received in this process, or finds
+already persisted in the session transcript, is skipped as a duplicate (`skipDuplicate` @22456715,
+called from the stdin loop @22829853). With `--replay-user-messages` the skip is acknowledged by
+an `isReplay: true` echo; a duplicate that was persisted but not received by this process also
+gets a `command_lifecycle` `completed`. The one exception: a persisted message whose turn went
+unanswered is re-run when nothing else is queued. A host must therefore never reuse a uuid.
 
 ### Subagent variant (`parent_tool_use_id`)
 
@@ -185,7 +194,7 @@ When a `user` with a pre-existing `uuid` arrives, cli.js emits an `isReplay: tru
 
 ### Teammate variant (`teammate_id`)
 
-Per patch `team-streaming-B` at char `8648903`:
+Per patch `team-streaming-B` (retired) at char `8648903`:
 
 ```jsonc
 {
@@ -201,7 +210,29 @@ Per patch `team-streaming-B` at char `8648903`:
 
 - **`isSynthetic`** — true when message was synthesized by cli.js (e.g., MCP `setVisibleInTranscriptOnly` annotations).
 - **`tool_use_result`** — raw tool result payload (before wrapping in the tool_result block). For MCP tools, shape is `{content, ...mcpMeta}`.
-- **`origin`** — carried through from upstream (remote control path).
+- **`origin`** — carried through from upstream (remote control path). Also cli.js's authorship marker
+  on user messages (2.1.241+): `{kind: 'task-notification', …}` on a delivered `<task-notification>`
+  (the message converter `case"user"` → `…n.origin!==void 0&&{origin:n.origin}`, and the
+  `queued_command` attachment converter `Sur` → `…n.origin&&{origin:n.origin}` on its `isReplay`
+  frame), `{kind: 'human'}` on a typed prompt; other kinds include `auto-continuation`, `plugin`,
+  `peer`. On disk verified (2.1.285 transcripts: the turn-starting `user` line and the
+  `queued_command` attachment, with `commandMode: 'task-notification'`, both carry it).
+  **On stdout the delivered `<task-notification>` user frame exists only with
+  `--replay-user-messages`, and only for a MID-TURN absorption** (static reading of 2.1.285, S4d):
+  the absorbed `queued_command` attachment reaches stdout through the converter `Sur` (the
+  `isReplay` frame above), which runs only on the replay path; an IDLE-time completion's turn-starting
+  user message is dropped from the SDK stream even with the flag (the stream filter `Gy` drops it via
+  `Lae` — a user message whose text carries the `<task-notification>` tag — and `Sbo`, which treats
+  `origin.kind: 'task-notification'` as not-external). ClaudeUI passes no `--replay-user-messages`,
+  so it never sees this frame live; its live signal is `system/task_notification` (§4.4 of
+  `04-system-subtypes.md`: `task_id`, `tool_use_id`, `status`, `output_file`, `summary`, `usage`,
+  optional `skip_transcript` / `ambient`; no XML, no result text). Find the functions by the strings
+  `function Sur(`, `function Lae(`, `function Sbo(` in `vendor/claude-cli/cli.js`. ClaudeSession
+  builds the agent note from that system frame (a backgrounded run only; none for `skip_transcript`
+  / `ambient`) and keeps the user-frame path as a fallback deduped per task run; it recognises a
+  notification user frame by `origin.kind` first and by the XML only when `origin` is absent (S4,
+  ADR-088 amendment). A foreground run also emits `system/task_notification` (its result returns
+  through the tool_result), so the frame alone does not mean the model was notified.
 - **`isReplay`** — present and `true` only on replay/ack/queued-command paths. Absent on live synthetic tool_result messages.
 - **`parent_tool_use_id`** — null for top-level; non-null when the user message is inside a subagent's tool execution.
 
@@ -439,80 +470,64 @@ Summary of a tool-use sequence. Emitted when a `tool_use_summary` attachment flo
 
 ---
 
-## 3.10 `request_usage` (PATCHED)
+## 3.10 `request_usage` (retired)
 
-Emitted after every `message_stop` — i.e., after each API call finishes within a turn.
-
-**Anchor:** `12804937` (patched by `patch/request-usage/`).
-
-**Gate:** Requires the `request-usage` ClaudeUI patch. Always fires when patched.
-
-```jsonc
-{
-  "type": "request_usage",
-  "usage": {
-    "input_tokens": 1234,
-    "output_tokens": 567,
-    "cache_creation_input_tokens": 890,
-    "cache_read_input_tokens": 100,
-    "cache_creation": {...},
-    "server_tool_use": {...}
-  },
-  "model": "claude-opus-4-7",
-  "uuid": "...",
-  "session_id": "..."
-}
-```
-
-**Ordering:** Arrives before the corresponding `assistant` line with `stop_reason`. Consumer can attribute per-call token costs incrementally.
+Emitted only by the deleted `request-usage` patch; no build since 2.1.280 writes it. The same per-request numbers arrive natively on `stream_event` `message_start` (`message.usage`) and `message_delta` (`usage`) — see `05-stream-events.md`.
 
 ---
 
 ## 3.11 `rate_limit_event`
 
-Two shape variants.
+Subscription rate-limit state, parsed from the `anthropic-ratelimit-unified-*` headers of the
+inference responses. Native; the `rate-limit-relay` patch that used to add a
+`header_utilization` field was deleted at 2.1.280.
 
-### Patched variant (`patch/rate-limit-relay`) — primary path in ClaudeUI
+**Anchor (2.1.280, `.cache/pristine-cli.js`):** `rate_limit_info` schema `nSr` @2128537; the
+builder `bKe` (@22241254) fills `unifiedWindows` from the account state via `Xr`, and the print
+loop enqueues the event (`let I=bKe(h);if(!I)return;if(Ee.enqueue(I),…` @22708343).
 
-**Anchor:** `11176048`.
-
-**Gate:** Patch applied. Always fires after streaming API calls.
-
-```jsonc
-{
-  "type": "rate_limit_event",
-  "header_utilization": {
-    "five_hour": { "utilization": 0.35, "resets_at": 1711500000 },
-    "seven_day": { "utilization": 0.12, "resets_at": 1712100000 }
-  }
-}
-```
-
-- `utilization` is **fractional (0.0–1.0)**, NOT percent.
-- `resets_at` is epoch seconds.
-- Omits `uuid`/`session_id`.
-
-### Native variant (G_H listener)
-
-**Anchor:** `12825090`.
-
-**Gate:** OAuth user + unified rate-limit change. Rarely fires (dedup-gated).
+**Gate:** OAuth subscription sessions. `unifiedWindows` is absent until the first response
+carrying the headers, and always absent for API-key, Bedrock and Vertex sessions.
 
 ```jsonc
+// probes/rate-limit-relay/official.three-turn.jsonl:7 (official 2.1.280, Haiku 4.5)
 {
   "type": "rate_limit_event",
   "rate_limit_info": {
-    "status": "allowed"|"throttled"|...,
-    "resetsAt": 1711500000,
-    "rateLimitType": "...",
-    ...
+    "status": "allowed", // "allowed" | "allowed_warning" | "rejected" — the LIMITING window
+    "resetsAt": 1790209200, // epoch seconds, limiting window
+    "rateLimitType": "five_hour", // which window is limiting
+    "overageStatus": "rejected",
+    "overageDisabledReason": "org_level_disabled_until",
+    "isUsingOverage": false,
+    "unifiedWindows": {
+      "five_hour": { "utilization": 0.77, "resetsAt": 1790209200 },
+      "seven_day": { "utilization": 0.29, "resetsAt": 1790398800 }
+      // "seven_day_overage_included": {…} — per-model weekly bucket, only for accounts that have one
+    }
   },
   "uuid": "...",
   "session_id": "..."
 }
 ```
 
-**Handle both.** Consumer must check which shape is present.
+- `unifiedWindows.<window>.utilization` is a **fraction**, usually 0–1. The schema says values
+  above 1 occur "when usage legitimately runs past a window's cap". `resetsAt` is epoch seconds.
+  cli.js drops a window whose `resetsAt` has already passed (`va` @13719730).
+- The top-level `status` / `resetsAt` / `rateLimitType` / `utilization` describe only the
+  currently limiting window. `utilization` there is present only in some states.
+  `unifiedWindows` tracks every window on every observation.
+
+**When it fires.** The schema describes it as: "events are emitted when a window's rounded
+percentage or reset time moves, not only on status transitions". Observed on the official binary
+(`probes/rate-limit-relay/probe-change.out.txt`): four turns 45 s apart, five-hour utilization
+0.78 → 0.79 → 0.79 → 0.80, produced three events. The turn that left every window at the same
+rounded percentage produced none. So expect at most one event per turn, and none for most turns
+of a long session.
+
+**Consumer:** `ClaudeSession.handleRateLimitEvent` → `usageFetcher.updateFromRateLimitWindows`
+(`five_hour` → `fiveHour`, `seven_day` → `sevenDay`, fraction × 100, epoch → ISO). The other
+windows keep their values from the last `/api/oauth/usage` read.
 
 ---
 
@@ -660,9 +675,9 @@ Typical sequence within one user turn:
 4.  assistant                           (partial, shared id with stream_event)
 5.  stream_event content_block_* (many)       [gate: includePartialMessages]
 6.  assistant                           (partial, refined)
-7.  request_usage                       [PATCHED, after message_stop]
+7.  stream_event message_delta (usage)        [gate: includePartialMessages]
 8.  stream_event message_stop                 [gate: includePartialMessages]
-9.  rate_limit_event                    [PATCHED]
+9.  rate_limit_event                    [only when a window moved]
 10. user (synthetic tool_result)        (per tool_use in assistant)
 11. tool_progress (possibly many)       [gated]
 12. bash_output (possibly many)         [PATCHED]
@@ -676,6 +691,10 @@ Typical sequence within one user turn:
 
 Subagent messages nest inside step 10 (each with `parent_tool_use_id`). Teammate messages use `teammate_id`.
 
+A user frame that carried a `uuid` adds `command_lifecycle` frames (§3.21): `queued` + `started`
+ahead of step 1 when it starts the turn, and `started` right after a step-10 tool_result when a
+running turn folds it in.
+
 Control-channel messages (`control_request`/`control_response`/`control_cancel_request`, `auth_status`, `prompt_suggestion`, `bridge_state`) interleave freely — no turn-boundary correlation.
 
 ---
@@ -684,11 +703,95 @@ Control-channel messages (`control_request`/`control_response`/`control_cancel_r
 
 Messages that exist ONLY because of ClaudeUI patches:
 
-- `request_usage` — `patch/request-usage`
-- `rate_limit_event` (header_utilization variant) — `patch/rate-limit-relay`
 - `bash_output` — `patch/bash-output-streaming`
-- `system/queued_command_consumed` — `patch/queue-control`
 - Subagent `stream_event` with `parent_tool_use_id` — `patch/subagent-streaming` (filter 0 unblock)
-- All teammate-tagged messages — `patch/team-streaming`
 
-An unpatched upstream cli.js omits these. If the harness ever runs against unpatched cli.js, don't assume these exist.
+(Teammate-tagged messages came from `team-streaming`, retired with its directory — 01 §1.12.)
+
+An unpatched upstream cli.js omits these. The app does run against unpatched cli.js — Anthropic's own binary, via `CLAUDEUI_CLAUDE_CLI` (ADR-079) — so never assume these exist: the cards render what arrives and fall back to complete messages and the final tool result. The `voice_server_*` control subtypes (07) are the other patch-only surface; the app gates them on `version.json` `patches` (01 §1.12).
+
+---
+
+## 3.21 `command_lifecycle`
+
+What happened to one inbound `user` frame, named by the client `uuid` that frame carried. Native;
+it replaced the `queue-control` patch's `system/queued_command_consumed` (04 §4.10) for ClaudeUI
+on 2026-09-25. cli.js emits **nothing** for a frame sent without a `uuid` — which is why, on the
+official binary, a uuid-less queued message sat QUEUED on the card past the point the model read
+it. It also emits frames for commands it enqueues itself (cron triggers, teammate shutdown
+prompts, deferred-turn resume): those mint a fresh uuid and emit `started` and a terminal state
+without `queued`.
+
+**Anchors (2.1.280, `.cache/pristine-cli.js`):** schema `Ev` @2234189 (described as "@internal
+Fate of a queued command"); the stdout forwarder `mw` @22677075, which stamps the frame's own
+`uuid` and `session_id`; mid-turn fold `started` @14791535; between-turns drain `startBatch`
+@22454143.
+
+**Gate:** the inbound `user` frame carries `uuid` (06 §6.2). The inbound schema types it as a plain
+string (`ns` @2125908, `uuid: m().optional()` with `m = o()`), so nothing checks its format; it
+must be unique (§3.4 Trigger 4).
+
+```jsonc
+{
+  "type": "command_lifecycle",
+  "command_uuid": "d6a3baa8-e2c7-4b64-89ae-87dd294bece0", // the uuid OUR user frame carried
+  "state": "queued" | "started" | "completed" | "cancelled" | "discarded" | "refused",
+  "uuid": "504cc05e-ef36-48fc-bf70-8f81b19fcc30",         // this frame's own id
+  "session_id": "903d5166-8025-4343-b927-eddd67c69bfb"
+}
+```
+
+| `state`     | Meaning (from the schema description)                                                                                                                                                                                                                                 |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `queued`    | The message entered the command queue.                                                                                                                                                                                                                                |
+| `started`   | It drained into a turn: folded into the running turn at a tool boundary, or taken as the prompt of a fresh turn. **The consumption signal.**                                                                                                                          |
+| `completed` | The turn that consumed it ended cleanly. For a fold, before that turn's `result`; for a message that started a turn, after it.                                                                                                                                        |
+| `cancelled` | Removed by `cancel_async_message`, swept by an `interrupt` with `cancel_queued: true`, caught by a pending cancel just before dispatch (07, `cancel_async_message`), or consumed into a turn that was aborted or died on a hard failure — so it can FOLLOW `started`. |
+| `discarded` | The session ended (`end_session`) with the message still queued.                                                                                                                                                                                                      |
+| `refused`   | Declined by the session's receive-side policy before entering the queue. Never preceded by `queued`; it will not run.                                                                                                                                                 |
+
+Not a strict pairing: a terminal state can arrive without a `started`, and a turn that fails by
+throwing can leave `started` without a terminal state.
+
+**Observed ordering** (official 2.1.280, Haiku, 2026-09-24; `probes/queue-control/official.uuid.jsonl`):
+
+```
+mid-turn — sent while a foreground Bash ran
+t=5817   → user {uuid: d6a3…}
+t=5818   command_lifecycle queued        (1 ms after the frame)
+t=17199  user (tool_result of that Bash)
+t=17204  command_lifecycle started       (the fold, 5 ms after the tool_result)
+         … assistant, answering it
+t=20052  command_lifecycle completed
+t=20054  result
+
+between turns — sent 1.5 s after the previous result
+t=21554  → user {uuid: 8c3b…}
+t=21555  command_lifecycle queued
+t=21556  command_lifecycle started
+t=21561  system/init
+         … the turn
+t=23615  result
+t=23616  command_lifecycle completed
+```
+
+A message still queued when a turn ends — the turn reached no further tool boundary to fold it at —
+is drained the same way immediately after that turn's `result`, so its `started` follows the
+`result`.
+
+**Consumer hazard.** The frames carry `session_id`, and `queued`/`started` precede the turn's
+`system/init`. A bootstrap latch keyed on "the first message carrying a `session_id`" is tripped by
+them (04 §4.2).
+
+**Transcript.** A message drained as a fresh turn is persisted as the `user` line, with `uuid` = the
+client uuid. A message folded mid-turn is persisted at the fold as
+`{type:"attachment", attachment:{type:"queued_command", prompt, source_uuid: <client uuid>, commandMode:"prompt", …}}`,
+where `prompt` is the frame's `message.content` (a string, or a block array when it carried images
+or a PDF).
+
+**ClaudeUI.** `ClaudeSession` sends a queued item under its `itemId` and every other prompt under a
+fresh uuid. `handleCommandLifecycle`: `started` → `SessionQueue.consumeById(command_uuid)`, which
+places the steer bubble at the true consumption point; `cancelled` → `recallById` (no-op for an
+item already consumed); `discarded`/`refused` → `recallById` + `session:warning`; `queued` and
+`completed` change nothing. A uuid the queue never saw — every ordinary send, every command cli.js
+enqueues itself — is a no-op.

@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useMemo, useCallback } from 'react'
+import { useEffect, useLayoutEffect, useState, useMemo, useCallback } from 'react'
 import { overlayItemStreams } from '../../../../../core/shared/sync/item-stream'
 import {
   useActiveSession,
@@ -14,6 +14,8 @@ import { BtwCard } from '../BtwCard'
 import { FloatingError } from '../FloatingError'
 import { SandboxViolationToast } from '../SandboxViolationToast'
 import { useIsMobile } from '../../../hooks/useIsMobile'
+import { useStickToBottom } from '../../../hooks/useStickToBottom'
+import { useSettledFlag } from '../../../hooks/useSettledFlag'
 import {
   canUseFullscreenGesture,
   useFullscreenDoubleTap
@@ -22,13 +24,26 @@ import { ImageGalleryProvider } from '../../shared/ImageViewer'
 import { DiagramGalleryProvider } from '../DiagramGallery'
 import { TopBar } from './TopBar'
 import { WelcomeState } from './WelcomeState'
+import { reloadActiveTranscript } from '../../../lib/session-history-load'
 import { QueuedMessageCard } from './QueuedMessageCard'
 import { ChatSearchOverlay } from '../ChatSearch'
+import { SEARCH_ANCHOR } from '../ChatSearch/search-scope'
+import { bucketColumnWidth, defaultColumnWidth, type EstimateOptions } from './estimate-height'
+import { useMessageHeightEstimator } from './use-message-height-estimator'
 
 /** One-time discovery hint for the mobile-web double-tap fullscreen gesture. */
 const FULLSCREEN_HINT_KEY = 'claudeui.hint.fullscreenDoubleTap'
 /** The hint retires itself even if the user never acknowledges it. */
 const FULLSCREEN_HINT_TIMEOUT_MS = 10_000
+/**
+ * How long "running, nothing streaming" must hold before the typing indicator
+ * mounts. At the end of a turn the last item stream is removed one store commit
+ * BEFORE `status.state` leaves 'running' (a 2-14 ms gap); mounting the ~27px
+ * indicator row there makes the stick-to-bottom pin scroll to it, and the next
+ * commit unmounts it and the view jumps back — a one-frame flicker. Any gap
+ * between items is this short too; real "waiting for the model" lasts longer.
+ */
+const TYPING_INDICATOR_DELAY_MS = 150
 
 function readFullscreenHintDismissed(): boolean {
   try {
@@ -71,147 +86,32 @@ export function ChatPanel(): React.JSX.Element {
   const hasItemStreams = Object.values(itemStreams).some((s) => !s.target.ownerToolUseId)
   const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
   const status = useActiveSession((s) => s.status)
+  const showTypingIndicator = useSettledFlag(
+    !hasItemStreams && status.state === 'running',
+    TYPING_INDICATOR_DELAY_MS
+  )
+  const evicted = useActiveSession((s) => s.evicted)
+  const transcriptLoadFailed = useActiveSession((s) => s.transcriptLoadFailed)
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const [isAtBottom, setIsAtBottom] = useState(true)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  // The find bar holds the view still: a search jump must not be pinned away
+  // by a streaming turn.
+  const {
+    scrollerRef,
+    contentRef: followContentRef,
+    scrollerEl: scrollRef,
+    isAtBottom,
+    scrollToBottom,
+    jumpToBottom,
+    stopFollowing
+  } = useStickToBottom<HTMLDivElement>({ paused: searchOpen })
 
-  const shouldAutoScroll = useRef(true)
-  const lastScrollTop = useRef(0)
-  const isAutoScrolling = useRef(false)
-  const wasNearBottom = useRef(true)
-
-  const checkAtBottom = useCallback(() => {
-    const el = scrollRef.current
-    if (!el) return
-    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-
-    if (!isAutoScrolling.current) {
-      if (el.scrollTop < lastScrollTop.current - 10) {
-        shouldAutoScroll.current = false
-      } else if (distFromBottom < 100) {
-        shouldAutoScroll.current = true
-      }
-    }
-    lastScrollTop.current = el.scrollTop
-
-    const nearBottom = distFromBottom < 100
-    wasNearBottom.current = nearBottom
-    setIsAtBottom(nearBottom)
-  }, [])
-
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    el.addEventListener('scroll', checkAtBottom, { passive: true })
-    return () => el.removeEventListener('scroll', checkAtBottom)
-  }, [checkAtBottom])
-
-  // Scroll to bottom when switching sessions
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    shouldAutoScroll.current = true
-    setIsAtBottom(true)
-
-    el.scrollTop = el.scrollHeight
-    lastScrollTop.current = el.scrollTop
-
-    const timers = [
-      requestAnimationFrame(() => {
-        if (el) {
-          el.scrollTop = el.scrollHeight
-          lastScrollTop.current = el.scrollTop
-        }
-      }),
-      setTimeout(() => {
-        requestAnimationFrame(() => {
-          if (el) {
-            el.scrollTop = el.scrollHeight
-            lastScrollTop.current = el.scrollTop
-          }
-        })
-      }, 80) as unknown as number
-    ]
-    return () => {
-      cancelAnimationFrame(timers[0])
-      clearTimeout(timers[1])
-    }
-  }, [activeSessionId])
-
-  const smoothGuardRaf = useRef(0)
-  const smoothGuardTimeout = useRef<ReturnType<typeof setTimeout>>(null)
-  const doAutoScroll = useCallback((el: HTMLDivElement, smooth = true) => {
-    isAutoScrolling.current = true
-    cancelAnimationFrame(smoothGuardRaf.current)
-    if (smoothGuardTimeout.current) clearTimeout(smoothGuardTimeout.current)
-    if (smooth) {
-      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-      const clearGuard = (): void => {
-        const dist = el.scrollHeight - el.scrollTop - el.clientHeight
-        if (dist < 10) {
-          isAutoScrolling.current = false
-          lastScrollTop.current = el.scrollTop
-          wasNearBottom.current = true
-        } else {
-          smoothGuardRaf.current = requestAnimationFrame(clearGuard)
-        }
-      }
-      smoothGuardRaf.current = requestAnimationFrame(clearGuard)
-      smoothGuardTimeout.current = setTimeout(() => {
-        cancelAnimationFrame(smoothGuardRaf.current)
-        isAutoScrolling.current = false
-        lastScrollTop.current = el.scrollTop
-        wasNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100
-      }, 500)
-    } else {
-      el.scrollTop = el.scrollHeight
-      lastScrollTop.current = el.scrollTop
-      wasNearBottom.current = true
-      requestAnimationFrame(() => {
-        isAutoScrolling.current = false
-      })
-    }
-  }, [])
-
-  // Universal auto-scroll via MutationObserver
-  const scrollRafRef = useRef(0)
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-
-    const scheduleScroll = (): void => {
-      cancelAnimationFrame(scrollRafRef.current)
-      scrollRafRef.current = requestAnimationFrame(() => {
-        if (!el) return
-        const dist = el.scrollHeight - el.scrollTop - el.clientHeight
-        setIsAtBottom(dist < 100)
-        if (!shouldAutoScroll.current && wasNearBottom.current) {
-          shouldAutoScroll.current = true
-        }
-        if (shouldAutoScroll.current) doAutoScroll(el, true)
-      })
-    }
-
-    const observer = new MutationObserver(scheduleScroll)
-    observer.observe(el, { childList: true, subtree: true, characterData: true })
-
-    let lastScrollHeight = el.scrollHeight
-    const resizeObserver = new ResizeObserver(() => {
-      if (el.scrollHeight === lastScrollHeight) return
-      lastScrollHeight = el.scrollHeight
-      scheduleScroll()
-    })
-    resizeObserver.observe(el)
-
-    return () => {
-      observer.disconnect()
-      resizeObserver.disconnect()
-      cancelAnimationFrame(scrollRafRef.current)
-    }
-  }, [doAutoScroll])
+  // Land at the bottom when switching sessions (and keep following from there).
+  useLayoutEffect(() => {
+    jumpToBottom()
+  }, [activeSessionId, jumpToBottom])
 
   useEffect(() => {
     if (!activeSessionId) return
@@ -231,17 +131,8 @@ export function ChatPanel(): React.JSX.Element {
   }, [activeSessionId])
 
   useEffect(() => {
-    if (searchOpen) {
-      shouldAutoScroll.current = false
-    }
-  }, [searchOpen])
-
-  const scrollToBottom = useCallback(() => {
-    const el = scrollRef.current
-    if (!el) return
-    shouldAutoScroll.current = true
-    doAutoScroll(el, true)
-  }, [doAutoScroll])
+    if (searchOpen) stopFollowing()
+  }, [searchOpen, stopFollowing])
 
   const chatFontScale = useSessionStore((s) => s.settings.chatFontScale)
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
@@ -256,13 +147,80 @@ export function ChatPanel(): React.JSX.Element {
       : `${chatWidthPercent}%`
   const chatZoom = chatFontScale / uiFontScale
   const hasContent = messages.length > 0
+
+  // What a never-rendered message is assumed to measure (`contain-intrinsic-size`,
+  // see estimate-height.ts). The column is measured in the wrapper's own units from
+  // the first message wrapper — the content div is padded and zoomed, a wrapper is
+  // neither — and bucketed, so a window resize inside one bucket re-renders nothing.
+  const [contentEl, setContentEl] = useState<HTMLElement | null>(null)
+  const contentRef = useCallback(
+    (el: HTMLElement | null) => {
+      followContentRef(el)
+      setContentEl(el)
+    },
+    [followContentRef]
+  )
+  const [measuredColumn, setMeasuredColumn] = useState<number | null>(null)
+  useLayoutEffect(() => {
+    if (!contentEl) return
+    const measure = (): void => {
+      const probe = contentEl.firstElementChild
+      const width = probe instanceof HTMLElement ? probe.clientWidth : 0
+      if (width > 0) setMeasuredColumn(bucketColumnWidth(width))
+    }
+    // Reading `clientWidth` here would force a layout ahead of the browser's own;
+    // the observer's initial notification (once the content is laid out, before
+    // paint) takes the first measurement. jsdom has no ResizeObserver: measure at once.
+    if (typeof ResizeObserver === 'undefined') {
+      measure()
+      return
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(contentEl)
+    return () => observer.disconnect()
+  }, [contentEl])
+  const columnWidth =
+    measuredColumn ?? defaultColumnWidth({ isMobile, mode: chatWidthMode, px: chatWidthPx })
+  const expandToolCalls = useSessionStore((s) => s.settings.expandToolCalls)
+  const expandReadResults = useSessionStore((s) => s.settings.expandReadResults)
+  const expandThinking = useSessionStore((s) => s.settings.expandThinking)
+  const hideToolInput = useSessionStore((s) => s.settings.hideToolInput)
+  const toolOutputMaxChars = useSessionStore((s) => s.settings.toolOutputMaxChars)
+  const engineId = useActiveSession((s) => s.status.engineId)
+  const forkRow = useActiveSession((s) => s.status.capabilities.forkFromMessage)
+  const estimateOptions = useMemo<EstimateOptions>(
+    () => ({
+      engineId,
+      expandToolCalls,
+      expandReadResults,
+      expandThinking,
+      hideToolInput,
+      toolOutputMaxChars,
+      forkRow
+    }),
+    [
+      engineId,
+      expandToolCalls,
+      expandReadResults,
+      expandThinking,
+      hideToolInput,
+      toolOutputMaxChars,
+      forkRow
+    ]
+  )
+  const estimateHeight = useMessageHeightEstimator(columnWidth, estimateOptions)
   const lastAssistantId = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === 'assistant') return messages[i].id
     }
     return null
   }, [messages])
-  const showEmptyScreen = !hasContent && status.state === 'idle'
+  // An evicted entry is empty because its transcript is not in memory, not because
+  // the conversation is — the disk read that fills it is in flight or was
+  // abandoned (ADR-087 §2). `WelcomeState` there would present an existing
+  // conversation as a blank one with a live composer.
+  const loadingTranscript = !hasContent && evicted
+  const showEmptyScreen = !hasContent && !evicted && status.state === 'idle'
 
   // Mobile web only: double-tapping the chat toggles browser fullscreen (there
   // is no button — reclaiming the browser chrome is the whole point).
@@ -296,17 +254,51 @@ export function ChatPanel(): React.JSX.Element {
         />
         <div className="h-8 bg-gradient-to-b from-bg-primary to-transparent pointer-events-none -mb-8 relative z-[1]" />
 
-        <div ref={scrollRef} className="flex-1 overflow-y-auto chat-scroll mr-2">
+        <div
+          data-testid="ChatPanel.scroll"
+          ref={scrollerRef}
+          className="flex-1 overflow-y-auto chat-scroll mr-2"
+        >
           {showEmptyScreen ? (
             <div className="h-full flex items-center justify-center">
               <WelcomeState />
             </div>
+          ) : loadingTranscript ? (
+            transcriptLoadFailed ? (
+              <div
+                data-testid="TranscriptLoadFailed"
+                className="h-full flex items-center justify-center"
+              >
+                <div className="flex items-center gap-3 -mt-16 animate-fade-in">
+                  <span className="text-[13px] text-text-muted">
+                    Couldn&apos;t load this conversation
+                  </span>
+                  <button
+                    data-testid="TranscriptLoadFailed.retry"
+                    onClick={() => {
+                      if (activeSessionId) void reloadActiveTranscript(activeSessionId)
+                    }}
+                    className="text-[13px] text-accent hover:underline"
+                  >
+                    Retry
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div
+                data-testid="TranscriptLoading"
+                className="h-full flex items-center justify-center"
+              >
+                <LoadingState label="Loading conversation..." />
+              </div>
+            )
           ) : !hasContent && status.state === 'running' ? (
             <div className="h-full flex items-center justify-center">
               <LoadingState />
             </div>
           ) : (
             <div
+              ref={contentRef}
               style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }}
               className={`mx-auto pt-5 pb-6 flex flex-col gap-3 ${isMobile ? 'px-3' : 'px-8'}`}
             >
@@ -321,21 +313,32 @@ export function ChatPanel(): React.JSX.Element {
               <TranscriptSessionProvider value={activeSessionId}>
                 <ImageGalleryProvider messages={messages}>
                   <DiagramGalleryProvider messages={messages}>
-                    {messages.map((msg) => (
-                      <div key={msg.id} className="cv-auto">
-                        <MessageBubble
-                          message={msg}
-                          pendingApprovals={pendingApprovals}
-                          isLastAssistant={msg.id === lastAssistantId}
-                          activeThinking={activeThinkingByMessage.get(msg.id)}
-                        />
-                      </div>
-                    ))}
+                    {messages.map((msg) => {
+                      const estimate = estimateHeight(msg)
+                      return (
+                        <div
+                          key={msg.id}
+                          className="cv-auto"
+                          // Only a never-rendered message uses this: `auto` keeps the
+                          // remembered size afterwards. data-est-h is for calibration.
+                          style={{ containIntrinsicSize: `auto ${estimate}px` }}
+                          data-est-h={estimate}
+                          {...SEARCH_ANCHOR}
+                        >
+                          <MessageBubble
+                            message={msg}
+                            pendingApprovals={pendingApprovals}
+                            isLastAssistant={msg.id === lastAssistantId}
+                            activeThinking={activeThinkingByMessage.get(msg.id)}
+                          />
+                        </div>
+                      )
+                    })}
                   </DiagramGalleryProvider>
                 </ImageGalleryProvider>
               </TranscriptSessionProvider>
               <div className="flex flex-col gap-5">
-                {!hasItemStreams && status.state === 'running' && <TypingIndicator />}
+                {showTypingIndicator && <TypingIndicator />}
               </div>
             </div>
           )}
@@ -448,7 +451,7 @@ export function ChatNoticeStack(): React.JSX.Element {
   )
 }
 
-function LoadingState(): React.JSX.Element {
+function LoadingState({ label = 'Thinking...' }: { label?: string }): React.JSX.Element {
   return (
     <div className="flex items-center gap-2.5 -mt-16 animate-fade-in">
       <div className="flex gap-[3px]">
@@ -460,14 +463,14 @@ function LoadingState(): React.JSX.Element {
           />
         ))}
       </div>
-      <span className="text-[13px] text-text-muted">Thinking...</span>
+      <span className="text-[13px] text-text-muted">{label}</span>
     </div>
   )
 }
 
 function TypingIndicator(): React.JSX.Element {
   return (
-    <div className="flex items-start animate-fade-in">
+    <div data-testid="ChatPanel.typingIndicator" className="flex items-start animate-fade-in">
       <div className="bg-bg-tertiary rounded-2xl px-4 py-3 flex items-center gap-[5px]">
         {[0, 150, 300].map((delay) => (
           <span

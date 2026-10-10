@@ -1,11 +1,12 @@
 import * as fs from 'fs'
-import { codexBinaryAvailable } from '../codex/codex-locate'
-import { discoverCodexModels } from '../codex/model-discovery'
+import { engineInstalled } from '../harness/resolve'
 import { codexCommands, CODEX_CHANNELS } from './codex-commands'
 import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
 import * as path from 'path'
 import * as os from 'os'
 import { query as sdkQuery } from '../sdk'
+import { ensureHostTokenFresh } from '../sdk/host-token'
+import { claudeLoginSignal } from '../services/claude-login-state'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { getSdkExecutableOpts } from '../services/claude-session'
@@ -24,6 +25,8 @@ import {
   loadBackgroundOutput
 } from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
+import { voiceRefusal } from '../services/voice-gate'
+import { desktopVoiceOwner, desktopVoiceOwnerKey, voiceRelay } from '../services/voice-relay'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
 import {
   loadSettings,
@@ -67,6 +70,7 @@ import {
 } from '../host'
 import type {
   ApprovalDecision,
+  AttachmentUpload,
   ModelInfo,
   EngineModelGroup,
   PermissionSuggestion,
@@ -77,7 +81,6 @@ import type {
   ClaudePermissions
 } from '../../shared/types'
 import {
-  discoverOpencodeModels,
   discoverOpencodeProviderCatalog,
   getOpencodeProviderModels
 } from '../opencode/model-discovery'
@@ -86,23 +89,29 @@ import {
   setOpencodeProviderDisabled
 } from '../opencode/provider-management'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
-import { discoverPiModels, getPiModelCatalogGroups } from '../pi/model-discovery'
-import { piBinaryAvailable, locatePiBinary } from '../pi/pi-locate'
+import { getPiModelCatalogGroups } from '../pi/model-discovery'
+import { listEngineModels } from './engine-models'
+import { locatePiDisplayPath } from '../pi/pi-locate'
 import { logger } from '../services/logger'
 import {
   listOpencodeSessionsGlobal,
-  loadOpencodeSessionHistory
+  loadOpencodeSessionHistory,
+  onOpencodeSessionListChanged
 } from '../services/opencode-session-list'
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
 import type { ISession } from '../providers/ISession'
-import { prepareAndCreateSession } from './create-session'
+import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
+import { freshClaudeModels, queryClaudeModels } from '../services/claude-model-catalog'
+import { generateCommitMessage } from '../services/commit-message'
 import { safeHandler } from './safe-handler'
 import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 import { configCommands } from './config-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { usageHubCommands, USAGE_HUB_CHANNELS } from './usage-hub-commands'
+import { harnessCommands, HARNESS_CHANNELS } from './harness-commands'
 import {
   sendPrompt,
+  getBlob,
   watchBackground,
   unwatchBackground,
   readBackgroundRange,
@@ -131,7 +140,9 @@ import {
   deleteSession,
   deleteProject,
   codexDeletePlanFor,
-  clearConversation
+  clearConversation,
+  judgeModelSupport,
+  approveBlocked
 } from './handlers-core'
 
 // `safeHandler` (the IpcResult envelope) and `handleIpc` (the desktop transport
@@ -146,12 +157,8 @@ import {
 // bootstrap fetch a few seconds AFTER a spawn's init resolves (fire-and-forget),
 // so newly-entitled models (e.g. Fable) can be absent from the very first fetch on
 // a cold cache. A short TTL lets a subsequent picker fetch (the renderer re-fetches
-// on cwd change / modelReloadNonce) pick them up without an app restart.
+// on cwd change / a model reload) pick them up without an app restart.
 const MODELS_CACHE_TTL_MS = 2 * 60_000
-let cachedModels: { models: ModelInfo[]; at: number } | null = null
-
-const COMMIT_MSG_SYSTEM_PROMPT =
-  'You are a commit message generator. Given a git diff of staged changes, write a concise conventional commit message. Output ONLY the commit message — no explanation, no quotes, no markdown. Use imperative mood. First line should be a short summary (max 72 chars). If needed, add a blank line followed by bullet points for details. Focus on the "why" not the "what".'
 
 /**
  * Ask cli.js to generate a session title for the given conversation text.
@@ -167,12 +174,15 @@ async function generateTitle(conversationText: string): Promise<string | null> {
   const abort = new AbortController()
   logger.debug('generateTitle', `request: ${conversationText.length} chars`)
 
+  await ensureHostTokenFresh()
   const q = sdkQuery({
     prompt: '',
     options: {
       ...getSdkExecutableOpts(),
       cwd: PERSISTED_SESSIONS_DIR,
-      abortController: abort
+      abortController: abort,
+      // A control request, then abort: no turn to use a plugin's tools.
+      reloadPlugins: false
     }
   })
 
@@ -203,109 +213,42 @@ async function generateTitle(conversationText: string): Promise<string | null> {
   }
 }
 
-async function generateCommitMessage(diff: string): Promise<string | null> {
-  const abort = new AbortController()
-  logger.debug('generateCommitMessage', `request: ${diff.length} chars`)
+/** Has a desktop model fetch reported login status from cli.js's init yet? */
+let loginStatusReported = false
 
-  try {
-    const q = sdkQuery({
-      prompt: diff,
-      options: {
-        ...getSdkExecutableOpts(),
-        cwd: PERSISTED_SESSIONS_DIR,
-        abortController: abort,
-        systemPrompt: COMMIT_MSG_SYSTEM_PROMPT,
-        model: 'claude-haiku-4-5-20251001',
-        maxTurns: 1,
-        tools: [],
-        thinking: { type: 'disabled' },
-        persistSession: false
-      }
-    })
-
-    let result = ''
-    for await (const message of q) {
-      if (!message || typeof message !== 'object') continue
-      const msg = message as Record<string, unknown>
-      if (msg.type === 'assistant') {
-        const betaMessage = msg.message as
-          { content?: Array<{ type: string; text?: string }> } | undefined
-        if (betaMessage?.content) {
-          for (const block of betaMessage.content) {
-            if (block.type === 'text' && block.text) result += block.text
-          }
-        }
-      }
-    }
-
-    logger.debug('generateCommitMessage', `response: ${JSON.stringify(result)}`)
-
-    const cleaned = result.trim()
-    if (cleaned.length >= 3) {
-      return cleaned
-    }
-    logger.debug('generateCommitMessage', 'no usable message extracted')
-    return null
-  } catch (err) {
-    logger.error('generateCommitMessage', 'Failed to generate commit message', err)
-    return null
-  } finally {
-    abort.abort()
-  }
+/** Test seam: forget that a desktop fetch has reported, so the next one queries again. */
+export function resetLoginStatusReportedForTests(): void {
+  loginStatusReported = false
 }
 
 async function fetchModels(): Promise<ModelInfo[]> {
-  if (cachedModels && Date.now() - cachedModels.at < MODELS_CACHE_TTL_MS) {
-    return cachedModels.models
-  }
+  // A remote picker fetch fills the same catalog, so a fresh one need not be
+  // ours: the desktop's FIRST fetch still queries, because only it reports login
+  // status from the init response (the remote path has no auth side effects).
+  const fresh = loginStatusReported ? freshClaudeModels(MODELS_CACHE_TTL_MS) : null
+  if (fresh) return fresh
 
-  const abort = new AbortController()
-  const q = sdkQuery({
-    prompt: '',
-    options: {
-      ...getSdkExecutableOpts(),
-      cwd: PERSISTED_SESSIONS_DIR,
-      abortController: abort
-    }
-  })
-
-  try {
-    const handle = q as unknown as {
-      supportedModels(): Promise<ModelInfo[]>
-      initializationResult(): Promise<Record<string, unknown>>
-    }
-    const models = await handle.supportedModels()
-    cachedModels = { models, at: Date.now() }
+  const models = await queryClaudeModels((init) => {
     // The same initialize response carries the user's account — report login
     // status at app load so the sign-in banner is accurate before any chat
-    // session is opened. Resolves immediately (init already completed). ADR-014.
-    try {
-      const init = await handle.initializationResult()
-      // reportLoginStatus broadcasts session:auth-source to the window (legacy
-      // path). Through the `HostAuth` seam since S3 stage 1b — status-only, and
-      // a no-op with no host wired.
-      reportHostLoginStatus(init?.account)
-      // Also update the ClaudeAuthProvider probe cache so probe() and session.account
-      // are accurate from the first model-fetch, before any chat session opens.
-      const acc = init?.account as Record<string, unknown> | undefined
-      if (acc) {
-        const loggedIn = !!acc.email
-        updateClaudeAuthSource(loggedIn ? 'authenticated' : 'none', {
-          email: (acc.email as string | null) ?? null,
-          organization: (acc.organization as string | null) ?? null,
-          subscriptionType: (acc.subscriptionType as string | null) ?? null,
-          tokenSource: (acc.tokenSource as string | null) ?? null,
-          apiKeySource: (acc.apiKeySource as string | null) ?? null,
-          apiProvider: (acc.apiProvider as string | null) ?? null
-        })
-      }
-    } catch {
-      /* non-fatal — per-session init will still report status */
+    // session is opened. ADR-014.
+    // reportLoginStatus broadcasts session:auth-source to the window (legacy
+    // path). Through the `HostAuth` seam since S3 stage 1b — status-only, and
+    // a no-op with no host wired.
+    reportHostLoginStatus(init?.account)
+    // Also update the ClaudeAuthProvider probe cache so probe() and session.account
+    // are accurate from the first model-fetch, before any chat session opens.
+    // The same signal the banner reads (claude-login-state.ts).
+    if (init?.account) {
+      const { loggedIn, account } = claudeLoginSignal(init.account)
+      updateClaudeAuthSource(loggedIn ? 'authenticated' : 'none', account)
     }
-    return models
-  } finally {
-    abort.abort()
-  }
+  })
+  // Set once the query answered, whether or not its init could be read: a
+  // failed read is non-fatal (per-session init reports status too), and must not
+  // send every later fetch past the cache.
+  loginStatusReported = true
+  return models
 }
 
 const SESSION_IPC_CHANNELS = [
@@ -320,6 +263,7 @@ const SESSION_IPC_CHANNELS = [
   'session:cancel',
   'session:interrupt',
   'session:approval-response',
+  'session:approve-blocked',
   'session:watch-background',
   'session:unwatch-background',
   'session:read-background-range',
@@ -334,6 +278,7 @@ const SESSION_IPC_CHANNELS = [
   'session:set-reasoning-variant',
   'session:get-models',
   'session:get-engine-models',
+  'automode:judge-model-support',
   'session:get-opencode-providers',
   'session:set-opencode-provider-disabled',
   'session:remove-opencode-provider',
@@ -355,6 +300,7 @@ const SESSION_IPC_CHANNELS = [
   'session:load-pi-history',
   'session:load-history',
   'session:load-subagent-history',
+  'blob:get',
   'session:build-subagent-file-map',
   'session:load-background-output',
   'session:watch-session',
@@ -371,6 +317,7 @@ const SESSION_IPC_CHANNELS = [
   'config:save-opencode-settings',
   'config:read-opencode-native-raw',
   'config:patch-opencode-native',
+  'config:list-agent-types',
   'opencode-agents:list',
   'opencode-agents:read',
   'opencode-agents:save',
@@ -432,8 +379,6 @@ const SESSION_IPC_CHANNELS = [
   'worktree:list',
   'app:quit-confirm',
   'session:sandbox-violation',
-  'voice:start-server',
-  'voice:stop-server',
   'voice:start-recording',
   'voice:stop-recording',
   'proxy:test-connection',
@@ -470,7 +415,12 @@ export function getSessionManager(): SessionManager | null {
 export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // Remove previous handlers to allow re-registration (e.g. a second bootCore in
   // a test; production boots core exactly once).
-  unbindDesktopChannels([...SESSION_IPC_CHANNELS, ...CODEX_CHANNELS, ...USAGE_HUB_CHANNELS])
+  unbindDesktopChannels([
+    ...SESSION_IPC_CHANNELS,
+    ...CODEX_CHANNELS,
+    ...USAGE_HUB_CHANNELS,
+    ...HARNESS_CHANNELS
+  ])
 
   const manager = new SessionManager()
   sharedManager = manager
@@ -511,7 +461,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       thinkingMode?: string,
       resumeSessionAt?: string,
       forkSession?: boolean,
-      engineId?: EngineId
+      engineId?: EngineId,
+      announce?: CreateSessionArgs['announce']
     ) => {
       await prepareAndCreateSession(manager, getHostWindow(), {
         routingId,
@@ -523,7 +474,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
         thinkingMode,
         resumeSessionAt,
         forkSession,
-        engineId
+        engineId,
+        announce
       })
     }
   })
@@ -561,11 +513,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'chat',
     kind: 'command',
     sessionIdArg: 0,
-    handler: (
-      routingId: string,
-      prompt: string,
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    ) => sendPrompt(manager, routingId, prompt, attachments)
+    handler: (routingId: string, prompt: string, attachments?: AttachmentUpload[]) =>
+      sendPrompt(manager, routingId, prompt, attachments)
   })
 
   handleIpc({
@@ -609,6 +558,16 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       }
       manager.get(routingId)?.resolveApproval(requestId, decision, answers, updatedPermissions)
     }
+  })
+
+  // ADR-091 part 6 — gated exactly like the approval it extends: a `chat`
+  // command on the session it names.
+  handleIpc({
+    channel: 'session:approve-blocked',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: (routingId: string, toolUseId: string) => approveBlocked(manager, routingId, toolUseId)
   })
 
   handleIpc({
@@ -707,33 +666,21 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: async (routingId: string, mode: string) => setPermissionMode(manager, routingId, mode)
   })
 
-  // Voice input handlers (Claude-only: capabilities.voice)
-  handleIpc({
-    channel: 'voice:start-server',
-    capability: 'host',
-    kind: 'command',
-    sessionIdArg: 0,
-    handler: safeHandler(async (routingId: string) => {
-      const session = manager.get(routingId)
-      if (!session) throw new Error('No active session')
-      if (!session.capabilities.voice) throw new Error('Provider does not support voice')
-      await session.voiceStartServer?.()
-    })
-  })
-
-  handleIpc({
-    channel: 'voice:stop-server',
-    capability: 'host',
-    kind: 'command',
-    sessionIdArg: 0,
-    handler: safeHandler(async (routingId: string) => {
-      const session = manager.get(routingId)
-      if (!session) throw new Error('No active session')
-      if (!session.capabilities.voice) return
-      await session.voiceStopServer?.()
-    })
-  })
-
+  // Voice input handlers (Claude-only, and only on a binary carrying the
+  // voice-server patch: capabilities.voice).
+  //
+  // The microphone is the RENDERER's (`renderer/src/lib/voice/`): these two verbs
+  // only bind the desktop window's pushed audio — the `voice:audio` IPC message,
+  // fed in by `main/ipc/voice-feed.ts` — to the session's voice server, through
+  // the same relay a remote browser's capture uses. They stay registry commands,
+  // so "a microphone was opened on this session" is in the audit trail.
+  //
+  // The capture OWNER is the host window. Handlers never see Electron's invoke
+  // event (desktop-transport-binding.ts), so the owner is not read off the IPC
+  // sender; it does not need to be — the host window is the only renderer that
+  // carries the voice API (the log viewer has its own preload), so it IS the
+  // sender. The audio feed keys by `event.sender.id`, and the two meet in
+  // `desktopVoiceOwnerKey`.
   handleIpc({
     channel: 'voice:start-recording',
     capability: 'host',
@@ -742,8 +689,11 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: safeHandler(async (routingId: string, language: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
-      if (!session.capabilities.voice) throw new Error('Provider does not support voice')
-      await session.voiceStartRecording?.(language)
+      const refusal = voiceRefusal(session)
+      if (refusal) throw new Error(refusal)
+      const win = getHostWindow()
+      if (!win) throw new Error('No desktop window to capture for')
+      await voiceRelay.start(manager, desktopVoiceOwner(win), routingId, language)
     })
   })
 
@@ -752,10 +702,12 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'host',
     kind: 'command',
     sessionIdArg: 0,
-    handler: safeHandler(async (routingId: string) => {
-      const session = manager.get(routingId)
-      if (!session || !session.capabilities.voice) return
-      await session.voiceStopRecording?.()
+    // Not gated on the session: the capture is the WINDOW's, and a session that
+    // vanished (or lost voice) mid-press must still release it. Idempotent.
+    handler: safeHandler(async (_routingId: string) => {
+      const win = getHostWindow()
+      if (!win) return
+      await voiceRelay.stop(desktopVoiceOwnerKey(win.webContents.id))
     })
   })
 
@@ -816,34 +768,20 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'session:get-engine-models',
     capability: 'config',
     kind: 'query',
-    handler: async (): Promise<EngineModelGroup[]> => {
-      // Claude models as a flat group. supportedModels() returns bare ModelInfo
-      // (no engineId/vendorId) — stamp them so the renderer can attribute a Claude
-      // pick to the 'claude' engine. Without this, picking a Claude model while on
-      // an opencode session leaves engineId undefined and the pick is mis-recorded
-      // under the session's current engine (e.g. "opencode/default").
-      const claudeModels = (await fetchModels().catch(() => [])).map((m) => ({
-        ...m,
-        engineId: 'claude' as const,
-        vendorId: 'anthropic'
-      }))
-      const claudeGroup: EngineModelGroup = {
-        engineId: 'claude',
-        vendorId: 'anthropic',
-        vendorName: 'Anthropic',
-        models: claudeModels
-      }
-      // opencode models — returns [] if binary not present or discovery fails
-      const opencodeGroups = await discoverOpencodeModels()
-      // pi models — returns [] if binary not present, no auth configured, or discovery fails
-      const piGroups = await discoverPiModels()
-      return [
-        claudeGroup,
-        ...opencodeGroups,
-        ...piGroups,
-        ...(await discoverCodexModels().catch(() => []))
-      ]
-    }
+    // One engine, or all of them concurrently; shared with the remote twin
+    // (engine-models.ts), which also validates the engine id.
+    handler: (engineId?: unknown): Promise<EngineModelGroup[]> =>
+      listEngineModels(fetchModels, engineId)
+  })
+
+  // Which judge-picker values ClaudeUI can call for the auto-mode judge
+  // (ADR-081 §3). Read-only and token-free, so the same class as
+  // get-engine-models above.
+  handleIpc({
+    channel: 'automode:judge-model-support',
+    capability: 'config',
+    kind: 'query',
+    handler: (engineId: unknown, values: unknown) => judgeModelSupport(engineId, values)
   })
 
   // Full opencode provider catalog for the settings provider manager. Returns []
@@ -873,9 +811,10 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     }
   })
 
-  // Destructive: deletes the credential and/or the provider declaration ClaudeUI
+  // Deletes the credential and/or the provider declaration ClaudeUI
   // owns. `kind` must come from the entry's resolved actions — widening it here
-  // would delete something the UI never warned about.
+  // would delete something the UI never warned about. `settings` clears only
+  // disabled-list membership/curation, revalidating at the write boundary.
   handleIpc({
     channel: 'session:remove-opencode-provider',
     capability: 'config',
@@ -1026,7 +965,9 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'fs-read',
     kind: 'query',
     handler: async () => {
-      return await listOpencodeSessionsGlobal()
+      // The sidebar's open/focus nudge (ADR-097 §6, S9): answered from the
+      // cached listing at once; a stale one is refreshed in the background.
+      return await listOpencodeSessionsGlobal({ interaction: true })
     }
   })
 
@@ -1087,6 +1028,16 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: async (sessionId: string, projectKey: string, agentId: string) => {
       return await loadSubagentHistory(sessionId, projectKey, agentId)
     }
+  })
+
+  // The bytes behind a transcript BlobRef (ADR-087). `chat`, not `fs-read`: a
+  // `chat` grant already read these exact bytes inside the snapshot, and the
+  // store is not the filesystem — it holds only what a transcript carried.
+  handleIpc({
+    channel: 'blob:get',
+    capability: 'chat',
+    kind: 'query',
+    handler: (blobId: string) => getBlob(blobId)
   })
 
   handleIpc({
@@ -1170,28 +1121,25 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'query',
     handler: (cwd: string) => loadSkillDetails(manager, cwd)
   })
-  // Cheap, deterministic engine availability check. Backs the renderer's
-  // "is opencode/pi installed?" gate WITHOUT spawning a server/process — a
-  // transient spawn/HTTP failure can no longer masquerade as "not installed".
-  // Claude is always installed (it's the bundled default engine).
+  // Cheap, deterministic engine availability check (the harness resolver's
+  // answer, shared with the remote handler). Backs the renderer's "is this
+  // engine installed?" gate WITHOUT spawning a server/process — a transient
+  // spawn/HTTP failure can no longer masquerade as "not installed".
   handleIpc({
     channel: 'engine:is-installed',
     capability: 'config',
     kind: 'query',
-    handler: (engineId: EngineId): boolean => {
-      if (engineId === 'opencode') return opencodeServerManager.isBinaryAvailable()
-      if (engineId === 'pi') return piBinaryAvailable()
-      if (engineId === 'codex') return codexBinaryAvailable()
-      return engineId === 'claude'
-    }
+    handler: (engineId: EngineId): boolean => engineInstalled(engineId)
   })
-  // Absolute path to the vendored pi binary, for the Settings › pi subscription
-  // hint's copyable "run this command in a terminal" block. Null if not found.
+  // The pi a user can run in a terminal, for the Settings › pi subscription
+  // hint's copyable "run this command in a terminal" block: the resolved
+  // executable, or for a System pi the shim detection found rather than the
+  // `cli.js` node runs (ADR-082 §2). Null if not found.
   handleIpc({
     channel: 'pi:binary-path',
     capability: 'config',
     kind: 'query',
-    handler: (): string | null => locatePiBinary()
+    handler: (): string | null => locatePiDisplayPath()
   })
   // Read-only Codex (ChatGPT) auth-vault status for Settings › pi's "Connect
   // ChatGPT" UI (M6c) — mirrors 'pi:binary-path''s registration shape exactly.
@@ -1792,6 +1740,12 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handleIpc(cmd)
   }
 
+  // The harness manager (ADR-082 arc 2), from the same declarations the remote
+  // transport spreads: reads are `config`, every write `admin` (§7).
+  for (const cmd of harnessCommands()) {
+    handleIpc(cmd)
+  }
+
   // Mockup preview — read HTML from mockup directory. `cwd`/`directory` are
   // caller-supplied (and reachable remotely), so confine the read to a direct
   // child of the project's mockups root — a crafted `directory` (e.g. '../../..')
@@ -1889,6 +1843,9 @@ function startProjectsWatcher(): void {
   setInterval(() => {
     void refreshCanonicalDirectories()
   }, DIRECTORY_POLL_MS).unref?.()
+  // opencode's list is refreshed from its server in the background (ADR-097
+  // §6, S9): a refresh that changed it re-emits the merged listing at once.
+  onOpencodeSessionListChanged(() => void refreshCanonicalDirectories())
 
   const projectsDir = path.join(os.homedir(), '.claude', 'projects')
   if (!fs.existsSync(projectsDir)) return

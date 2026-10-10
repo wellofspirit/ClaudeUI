@@ -9,6 +9,8 @@ import type {
 } from './remote-protocol'
 import type {
   ConfigurableHarnessId,
+  EndpointProbeInput,
+  EndpointProbeResult,
   SharedProviderAccountList,
   SharedProviderAccountStatus,
   SharedProviderCuration,
@@ -17,6 +19,18 @@ import type {
   SharedProviderStatus
 } from './shared-provider'
 import type { ProviderRegistrySnapshot } from './provider-registry'
+import type {
+  HarnessId,
+  HarnessInstallCancelResult,
+  HarnessInstallResult,
+  HarnessSelection,
+  HarnessStateEntry,
+  HarnessStateSnapshot,
+  HarnessUpdateMode,
+  HarnessUpdatesView,
+  HarnessUpgradePromptView,
+  HarnessVersionsResult
+} from './harness-types'
 
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string; code?: string }
 
@@ -49,19 +63,50 @@ export interface FileDiff {
  * `tool_result` block that produced them, feed the image viewer's "Tool results"
  * gallery, and are never sent back up as prompt input.
  *
- * Field names are load-bearing — the gallery reader
- * (renderer/components/shared/ImageViewer/gallery.ts) builds
- * `data:<mediaType>;base64,<base64Data>` from them verbatim, so the media type
- * is narrowed to what an `<img src>` will actually render.
+ * The bytes are NOT here: a `BlobRef` into the host's blob store
+ * (`core/services/blob-store.ts`), fetched on demand through `blob:get`
+ * (ADR-087). The renderer builds `data:<mediaType>;base64,…` from the fetched
+ * bytes, so the media type is narrowed to what an `<img src>` will render.
  *
  * Producers must OMIT the carrying `images` key when there is nothing to carry
  * (never `images: []`) — the renderer's gallery/tab visibility is driven by
  * presence.
  */
-export interface ToolResultImage {
+export interface ToolResultImage extends BlobRef {
   mediaType: ImageMediaType
-  base64Data: string
   /** Only when the engine supplies one (opencode file parts); Claude transcripts carry none. */
+  fileName?: string
+}
+
+/**
+ * Content-addressed handle to bytes the host keeps out of band (ADR-087).
+ *
+ * Images and documents ride every transcript lane — events, the ring, the
+ * snapshot, history loads — as this handle instead of inline base64, so a
+ * screenshot-heavy session costs a few dozen bytes per image on the wire. A
+ * client fetches the bytes with `ClaudeAPI.getBlob`; the host may have evicted
+ * them (LRU), which a client renders as "unavailable", never as an error.
+ */
+export interface BlobRef {
+  /** Lowercase hex SHA-256 of the DECODED bytes. */
+  blobId: string
+  /** Decoded size — lets a client budget and label without fetching. */
+  bytes: number
+}
+
+/**
+ * What a client uploads with a prompt — an invoke ARGUMENT, never ringed, never
+ * snapshotted. Keeps base64 because the engine needs the bytes.
+ */
+export interface AttachmentUpload {
+  mediaType: string
+  base64Data: string
+  fileName?: string
+}
+
+/** The same attachment after the host interned it — what events, queue items and blocks carry. */
+export interface AttachmentRef extends BlobRef {
+  mediaType: string
   fileName?: string
 }
 
@@ -93,10 +138,14 @@ export function isImageMediaType(mediaType: unknown): mediaType is ImageMediaTyp
  * of that call rather than as prose beside it (ADR-067, F18).
  *
  * Two reviewers produce one: Codex's native auto-review (`codex-auto-review`,
- * whose `riskLevel` is the reviewer's own) and ClaudeUI's Auto-mode classifier
- * for opencode and pi (`auto-mode`, whose `rule` names the corpus rule it
- * matched). Claude's Auto mode is cli.js-native and emits no verdict on the
- * wire, so it produces none.
+ * whose `riskLevel` is the reviewer's own) and the Auto-mode classifier
+ * (`auto-mode`, whose `rule` names the rule it matched). `auto-mode` covers two
+ * judges that answer the same question: ClaudeUI's own classifier on opencode
+ * and pi, and cli.js's native one on Claude, whose verdict reaches us as
+ * `system/permission_denied` — blocks only, since cli.js emits no frame for an
+ * allow. A pre-ask denial that was NOT a judge's call — a deny rule, a hook,
+ * the static safety checker — is a {@link PermissionDenialBlock} instead,
+ * because it carries no verdict that could have gone the other way.
  *
  * `rationale` and `rule` are UNTRUSTED model text. The PRODUCER (core) collapses
  * whitespace and caps the length once — see `core/shared/tool-review.ts` — so
@@ -115,11 +164,100 @@ export type ToolReviewBlock = {
   /** ClaudeUI's judge only — the corpus rule name behind a block. */
   rule?: string
   rationale?: string
+  /**
+   * ADR-091 part 6 — the user overrode this auto-mode BLOCK: Approve anyway on
+   * its held card, or Approve on the blocked review afterwards. The host
+   * re-sends the review with this set (a new `reviewId`, so the reducer's
+   * last-one-wins shows it and it replicates like any review); the card then
+   * reads "approved by you" and offers no Approve. Never set by Codex.
+   */
+  overriddenByUser?: true
+  /**
+   * With {@link overriddenByUser} after an after-the-fact Approve: who the
+   * host sent the "run it again" nudge to, as the card says it — "the main
+   * agent", or a live subagent's quoted label. Absent after Approve anyway (the
+   * held call simply ran).
+   */
+  nudgedTo?: string
+}
+
+/**
+ * Who refused a tool call before any prompt was raised — cli.js's
+ * `PermissionDecisionReason` discriminator, narrowed to the set it declares
+ * (`docs/protocol-cc/04-system-subtypes.md` §4.25). `classifier` is deliberately
+ * absent: a judge's verdict is a {@link ToolReviewBlock}. Anything unrecognised
+ * lands on `other` rather than widening the union, so a new upstream source
+ * renders as a generic denial instead of vanishing.
+ *
+ * One member is NOT cli.js's: `autoModeNoVerdict` is derived by the producer
+ * (`core/services/claude-permission-decision.ts`) from a `classifier` denial
+ * where the classifier reached no verdict and the frame says so natively: it was
+ * unavailable, it gave no verdict repeatedly, or the transcript overflowed its
+ * context. The action was refused, but nobody judged it, so it is a denial
+ * rather than a review. It is never accepted from the wire.
+ */
+export type PermissionDenialSource =
+  | 'autoModeNoVerdict'
+  | 'rule'
+  | 'mode'
+  | 'subcommandResults'
+  | 'permissionPromptTool'
+  | 'hook'
+  | 'asyncAgent'
+  | 'sandboxOverride'
+  | 'workingDir'
+  | 'safetyCheck'
+  | 'other'
+
+/**
+ * A tool call refused before any prompt was raised, by something that is not a
+ * judge — a deny rule, the permission mode (`dontAsk`), a PermissionRequest
+ * hook, the static safety checker, a working-directory bound.
+ *
+ * Without this the refusal reaches the user as a bare `is_error` tool_result
+ * and nothing says WHO refused or why; the whole point of cli.js emitting the
+ * frame is that SDK hosts can render the denial rather than only its fallout.
+ *
+ * The `message` cli.js hands the model IS the tool_result's text, so it is
+ * deliberately not carried here — duplicating it on the card would say the same
+ * sentence twice. This block adds only what the result cannot: the source, and
+ * the reason when the source has one.
+ *
+ * `reason` is UNTRUSTED text (a hook's output, a classifier-adjacent string)
+ * collapsed and capped ONCE by the producer — `core/shared/tool-review.ts`,
+ * the same gate `ToolReviewBlock.rationale` goes through — and rendered
+ * verbatim as plain text by every client, never through markdown.
+ */
+export type PermissionDenialBlock = {
+  type: 'permission_denial'
+  /** The `tool_use` block this denial is about. */
+  toolUseId: string
+  /**
+   * The emitting frame's `uuid` — the block's identity, which is what makes a
+   * replayed catch-up a no-op. cli.js mints one per frame; unlike a review
+   * there is never a second denial for the same call, so this is a dedupe key
+   * rather than a version.
+   */
+  denialId: string
+  source: PermissionDenialSource
+  /**
+   * Present only when the source carries one: cli.js's `Noe` returns a reason
+   * for `hook`, `safetyCheck`, `asyncAgent`, `sandboxOverride`, `workingDir` and
+   * `other`, and returns NOTHING for `rule`, `mode`, `subcommandResults` and
+   * `permissionPromptTool` — those denials are fully described by their source.
+   * The opencode host's own `rule` denial (ADR-085 S2) does carry one: the
+   * rule that refused, `Denied by permission rule: <rule>`, since no other
+   * frame names it. So does its `mode` denial (ADR-085 §3, plan mode's
+   * host-side refusal of an edit or a `general` subagent): the plan-mode text
+   * the model was given.
+   */
+  reason?: string
 }
 
 export type ContentBlock =
   | { type: 'text'; text: string }
   | ToolReviewBlock
+  | PermissionDenialBlock
   | { type: 'tool_use'; toolUseId: string; toolName: string; toolInput?: Record<string, unknown> }
   | {
       type: 'tool_result'
@@ -158,13 +296,16 @@ export type ContentBlock =
    * text loses the structure that makes it usable.
    */
   | { type: 'review_result'; text: string }
+  /** A user-attached image. The bytes live in the host's blob store (see {@link BlobRef}). */
+  | { type: 'image'; mediaType: ImageMediaType; blobId: string; bytes: number; fileName?: string }
+  /** A user-attached PDF. The bytes live in the host's blob store (see {@link BlobRef}). */
   | {
-      type: 'image'
-      mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
-      base64Data: string
+      type: 'document'
+      mediaType: 'application/pdf'
+      blobId: string
+      bytes: number
       fileName?: string
     }
-  | { type: 'document'; mediaType: 'application/pdf'; base64Data: string; fileName?: string }
 
 export interface FileAttachment {
   id: string
@@ -242,8 +383,10 @@ export type BillingType = 'subscription' | 'apiKey' | 'free' | 'unknown'
  * Where a metered turn came from (ADR-071 §1). 'child' is a native subagent or
  * a Codex child thread; 'dispatch' is a cross-engine dispatch (ADR-033), which
  * counts in dashboard totals but not in the dispatching session's headline.
+ * 'judge' is an auto-mode judge call ClaudeUI made itself for the session named
+ * by `parentRoutingId` (ADR-081 §5).
  */
-export type UsageOrigin = 'session' | 'child' | 'dispatch'
+export type UsageOrigin = 'session' | 'child' | 'dispatch' | 'judge'
 
 /**
  * Resolved tri-state auth status for a single (engine, vendor) pair.
@@ -355,6 +498,38 @@ export interface PendingApproval {
    * user-authored rules, which outrank the auto-mode classifier (ADR-023 G9).
    */
   patterns?: string[]
+  /**
+   * opencode only: the patterns opencode would remember on an `always` reply
+   * (`permission.asked`'s `always` — for a shell call the arity prefix + ` *`
+   * per statement, `["*"]` for edit / webfetch / MCP). ClaudeUI never sends
+   * `always` (ADR-085 S2); the host session-allow set is keyed by these
+   * instead (`core/opencode/session-allows.ts`).
+   */
+  always?: string[]
+  /**
+   * opencode only: set on a CHILD (task subagent) ask — the child's opencode
+   * session id and the parent `task` part's callID (the `childSessions` value).
+   * Absent on an own-session ask. ADR-085 S2 carries it (and logs it); S4
+   * evaluates child asks against the parent's rules on this marker.
+   */
+  subagent?: { sessionId: string; parentToolUseId: string }
+  /**
+   * pi (ADR-089): set on a host-run child's ask — WHICH agent proposes the
+   * action, so the card can say so (the label is the agent's name, else its
+   * task description, sanitized). An "allow for this session" on such a card
+   * still allows for the whole session, children included (Claude Code parity).
+   * Also set on a pi/opencode dispatch target's forwarded ask (ADR-091 §3): the
+   * target's session id, its model as the label, `dispatch:<engine>` as the type.
+   */
+  agent?: { agentId: string; label: string; subagentType: string }
+  /**
+   * Set when the card holds an auto-mode judge BLOCK for the user (ADR-091 §3;
+   * pi, opencode and their dispatch targets): the card offers Keep blocked /
+   * Approve anyway, never a standing rule. `expiresAt` (epoch ms) is when the
+   * host resolves it as Keep blocked and withdraws the card. Engine-neutral,
+   * unlike Codex's after-the-fact `codex.guardianOverride`.
+   */
+  autoModeBlock?: { expiresAt: number }
   suggestions?: PermissionSuggestion[]
   decisionReason?: string
   blockedPath?: string
@@ -413,12 +588,6 @@ export interface ProxySettings {
   port: number
   username: string
   password: string
-  /**
-   * When true, cli.js's subprocesses (Bash tool, MCP, LSP, shell-snapshot) also
-   * route through the proxy. When false (default), only cli.js's own Anthropic
-   * API calls are proxied — git/curl/npm/etc. spawned by Claude stay direct.
-   */
-  proxySubprocesses?: boolean
 }
 
 /**
@@ -540,6 +709,21 @@ export interface OpencodeAgentSummary {
   overridden?: boolean
   disabled?: boolean
   hidden?: boolean
+  /** opencode 2.x: the agent's OWN permission rules, in file order. */
+  rules?: { action: string; resource: string; effect: 'allow' | 'ask' | 'deny' }[]
+}
+
+/**
+ * One agent type an engine can spawn, for the type tile's settings (ADR-094).
+ * `source` says where it comes from: the engine itself, the user's own agent
+ * files, or the project's. `nativeColor` is the colour the engine's own agent
+ * definition names (Claude Code's `color` frontmatter, opencode's `color`), when
+ * it has one — the tile maps it to the nearest palette colour.
+ */
+export interface AgentTypeInfo {
+  type: string
+  source: 'builtin' | 'user' | 'project'
+  nativeColor?: string
 }
 
 export interface OpencodeAgentDetail extends OpencodeAgentSummary {
@@ -548,9 +732,15 @@ export interface OpencodeAgentDetail extends OpencodeAgentSummary {
   temperature?: number
   topP?: number
   steps?: number
+  /** opencode 2.x: the agent model's VARIANT (`model: p/m#<variant>`). */
   reasoningEffort?: string
   restrict: boolean
+  /** One effect per opencode 2.x action (shell, edit, read, …). */
   permission?: Record<string, 'allow' | 'ask' | 'deny'>
+  /** Permission rules the grid cannot show; a save keeps them. */
+  extraRules?: number
+  /** The file is in the opencode 1.x shape; saving moves it to the 2.x shape. */
+  legacy?: boolean
 }
 
 export interface OpencodeAgentInput {
@@ -568,6 +758,8 @@ export interface OpencodeAgentInput {
   hidden?: boolean
   disable?: boolean
   permission?: Record<string, 'allow' | 'ask' | 'deny'>
+  /** The agent this save replaces (a rename or a scope move): its unmodelled fields carry over. */
+  previous?: { name: string; scope: OpencodeAgentScope }
 }
 
 /**
@@ -667,11 +859,11 @@ export interface PiModelsRaw {
  * (getOpencodeProviderModels) so this list stays cheap even with hundreds of
  * models per provider.
  */
-/** opencode's own provenance label for a configured provider (`/config/providers`). */
+/** Where opencode gets a usable provider's credential (`model-discovery.ts` `provenance`, from `/api/integration` connections). */
 export type OpencodeProviderSource = 'env' | 'config' | 'custom' | 'api'
 
-/** What Remove would actually destroy. `null` when Remove is unavailable. */
-export type ProviderRemoveKind = 'credential' | 'declaration' | 'both'
+/** What Remove deletes; `settings` clears a disabled-only entry and picker curation. */
+export type ProviderRemoveKind = 'credential' | 'declaration' | 'both' | 'settings'
 
 /**
  * Which actions the opencode provider row may offer for one provider. Computed
@@ -697,14 +889,14 @@ export interface OpencodeProviderCatalogEntry {
   id: string
   name: string
   /**
-   * 'authenticated' — currently usable (configured / has credentials, i.e. present
-   *   in /config/providers); 'free' — bundled, needs no credentials; 'unauthenticated'
+   * 'authenticated' — currently usable (configured / has credentials, i.e. listed
+   *   by `GET /api/provider`); 'free' — bundled, needs no credentials; 'unauthenticated'
    *   — supported but not yet set up.
    */
   authState: 'authenticated' | 'unauthenticated' | 'free'
   /**
-   * Auth methods the provider supports. 'oauth' when a custom OAuth loader exists
-   * (from /provider/auth); 'api' for a plain API key. Providers absent from the
+   * Auth methods the provider supports. 'oauth' when its integration offers an
+   * OAuth method (`GET /api/integration`); 'api' for a plain API key. Providers absent from the
    * auth catalog still accept a generic API key, so this defaults to ['api'].
    */
   authMethods: ('api' | 'oauth')[]
@@ -713,17 +905,17 @@ export interface OpencodeProviderCatalogEntry {
   /**
    * True when the id sits in opencode's `disabled_providers`. Disabled providers
    * still belong in the "Added providers" list (rendered in a disabled state);
-   * they are NOT addable rows. opencode omits them from GET /provider entirely,
+   * they are NOT addable rows. opencode omits them from its provider list,
    * so these entries are re-synthesized — see discoverOpencodeProviderCatalog.
    */
   disabled: boolean
   /**
-   * opencode's own provenance label from /config/providers ('env' | 'config' |
-   * 'custom' | 'api'), absent for providers that aren't currently configured.
+   * Where opencode gets the provider's credential ('env' | 'config' | 'custom' |
+   * 'api'), derived from its integration's connections (`GET /api/integration`);
+   * absent for providers that aren't currently usable.
    *
    * Used for MESSAGE WORDING ONLY — never to decide which actions are offered
-   * (see provider-actions.ts). Read from /config/providers and never from
-   * /provider, whose `all` hardcodes source:'custom' for unconnected entries.
+   * (see provider-actions.ts).
    */
   source?: OpencodeProviderSource
   /** Env var names opencode reads a key from, for the blocked-removal tooltip. */
@@ -784,6 +976,12 @@ export interface EngineConfig {
   codexConfig?: CodexEngineConfig
   /** Claude session defaults (ADR-074 §8). Lives in engines/claude.json. */
   claudeConfig?: ClaudeEngineConfig
+  /**
+   * opencode only (ADR-097 S8): the built-in tools whose top-level
+   * `{action,*,deny}` rule ClaudeUI's Tools switch wrote — the only rules the
+   * switch ever removes again.
+   */
+  opencodeToolSwitches?: string[]
 }
 
 /**
@@ -798,7 +996,7 @@ export interface EngineConfig {
  * silently starting on something else.
  */
 export interface ClaudeEngineConfig {
-  /** A Claude picker value from `supportedModels()` (`opus`, `claude-fable-5-1`, …). */
+  /** A Claude picker value from `supportedModels()`: an alias (`opus`, `sonnet[1m]`, …; ADR-100). */
   defaultModel?: string
 }
 
@@ -920,6 +1118,13 @@ export interface AutoModeConfig {
 }
 
 /**
+ * Whether ClaudeUI can make the auto-mode judge's model call for one picker
+ * value itself (ADR-081 §3: no fallback to the engine) — one entry of
+ * `ClaudeAPI.judgeModelSupport`. `reason` is user-facing copy.
+ */
+export type JudgeModelSupport = { ok: true } | { ok: false; reason: string }
+
+/**
  * The classifier trust lists, shared by every engine that runs ClaudeUI's own
  * judge — ONE file, `~/.claude/ui/automode.json` (ADR-065 § Shared trust lists).
  *
@@ -936,6 +1141,13 @@ export interface AutoModeConfig {
  * for it (see `EnvironmentInfo`). An empty list is therefore stored as an ABSENT
  * key — the sessions read them behind `?.length`, so `[]` is not a distinct
  * state and storing it would invent a second encoding of one meaning.
+ *
+ * The same file also carries the two judge guidance lists (ADR-083 §4,
+ * `judgeAllow` / `judgeBlock`), under the same storage rules. Every entry of
+ * all five lists is written verbatim into the judge's system prompt, and a
+ * guidance entry becomes its own bullet line — which is why the IPC perimeter
+ * refuses line breaks and other control characters in guidance entries, and
+ * the environment builder drops any such entry a hand edit let through.
  */
 export interface SharedAutoModeConfig {
   /** External domains/services the agent may send data to or fetch from. */
@@ -945,6 +1157,39 @@ export interface SharedAutoModeConfig {
   /** Production/protected target patterns. When set, they REPLACE the default
    *  'prod'/'production' name heuristic the policy would otherwise apply. */
   protectedPatterns?: string[]
+  /**
+   * The user's judge guidance (ADR-083 §4), in plain language: kinds of action
+   * that are routine for this user ("creating and switching git branches").
+   * Rendered as the User-Specified Allow exception — mandatory when it applies,
+   * but never over the HARD rule, an adversarial rule or an explicit boundary.
+   * This is cli.js's `autoMode.allow` for the opencode and pi judge. Unlike the
+   * trust lists this is not about the environment but about the judge's
+   * behaviour; it lives here because it is equally shared by every engine that
+   * runs ClaudeUI's judge. Empty = absent, as for the lists above.
+   */
+  judgeAllow?: string[]
+  /**
+   * Kinds of action the user wants to approve personally ("running database
+   * migrations"). Rendered as the User-Specified Block soft rule: the judge
+   * blocks a matching action unless the user asked for it in the chat, and a
+   * post-block "go ahead" clears it like any soft block. cli.js's
+   * `autoMode.soft_deny`. Empty = absent.
+   */
+  judgeBlock?: string[]
+  /**
+   * ADR-084 §1: plainly read-only shell commands in the workspace skip the
+   * judge. ON unless this is `false`; `true` is stored as an ABSENT key, so
+   * the default and "on" are one encoding, as for the lists above.
+   */
+  readOnlyBypass?: boolean
+  /**
+   * ADR-091 part 6: how long a judge block holds for the user (Keep blocked /
+   * Approve anyway) before it resolves as Keep blocked, in whole seconds,
+   * clamped to [0, 600]. 0 — the default, stored as an ABSENT key — holds
+   * nothing: the block is denied at once and the user can approve it
+   * afterwards from the blocked review. Read live when a block arrives.
+   */
+  blockHoldSeconds?: number
 }
 
 export interface VendorConfig {
@@ -1036,7 +1281,11 @@ export interface SentFile {
 export interface QueuedItem {
   itemId: string
   text: string
-  attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  /**
+   * Refs, never bytes: this item is broadcast and folded into canonical state.
+   * The engine-bound uploads stay private to the host's `SessionQueue`.
+   */
+  attachments?: AttachmentRef[]
   state: 'queued' | 'consumed' | 'recalled'
 }
 
@@ -1086,12 +1335,49 @@ export interface TaskStartedData {
   runToolUseId?: string
   /** 1-based run counter for this agent. `> 1` means it was resumed. */
   runIndex?: number
+  /**
+   * cli.js's `is_backgrounded` (Claude only): `false` for a task running in the
+   * foreground — the only kind "Send to background" can move — and `true` once
+   * it runs in the background, from the start or after a `background_tasks`
+   * flip, which ClaudeSession reports by re-sending this event for the same
+   * run. Absent when the engine or task type has no such notion.
+   */
+  isBackgrounded?: boolean
+  /**
+   * Epoch ms at which THIS run started, stamped by the emitter when it saw the
+   * start (the reducer is clock-free). A resume stamps its own run's start. It
+   * is what a running task's elapsed clock counts from: cli.js sends no
+   * elapsed ticks for an agent (`tool_progress` is Bash/REPL-only in stock
+   * use), so without it a running card had no clock at all.
+   */
+  startedAt?: number
 }
+
+/**
+ * One `activeTasks` entry: a task that has started and not yet ended (ADR-040),
+ * keyed by its origin tool_use id. The fields of the {@link TaskStartedData}
+ * that armed it.
+ */
+export type ActiveTask = Pick<
+  TaskStartedData,
+  'taskId' | 'taskType' | 'runIndex' | 'isBackgrounded' | 'startedAt'
+>
+
+/** The terminal states an engine reports for a task run. */
+export type TaskTerminalStatus = 'completed' | 'failed' | 'stopped'
 
 export interface TaskNotification {
   taskId: string
   toolUseId: string | null
-  status: 'completed' | 'failed' | 'stopped'
+  /**
+   * `unfinished` is not a wire status: the history loader writes it for an
+   * agent whose transcript shows its last run starting and never ending
+   * (ADR-073 §5). A transcript cannot tell an agent that died with its process
+   * from one still running in another process, so history claims neither —
+   * the card reads neutral, and a live session replaces it with cli.js's own
+   * `stopped` reap.
+   */
+  status: TaskTerminalStatus | 'unfinished'
   outputFile: string
   summary: string
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
@@ -1297,7 +1583,19 @@ interface SessionAPI {
     thinkingMode?: string,
     resumeSessionAt?: string,
     forkSession?: boolean,
-    engineId?: EngineId
+    engineId?: EngineId,
+    /**
+     * The values every replica adopts as this session's OWN on the birth event
+     * (`session:created`). `effort` has three states: a string = announce the
+     * effort the process is spawned with (the positional `effort`); `null` = the
+     * model is KNOWN to take none (clears); absent / `undefined` = the model is
+     * unknown to this client (empty or failed catalog), announce nothing so no
+     * replica loses a pick. `thinkingMode` is the raw pick (`null` = no pick). A
+     * replica thus shows what the process runs, and a later change to the per-model
+     * starting effort cannot re-label a session already started. Omitted by older
+     * clients (and `null` over WS JSON): nothing is announced.
+     */
+    announce?: { effort?: string | null; thinkingMode?: string | null }
   ): Promise<void>
   /**
    * `rekeySession` was DELETED in SyncCore phase 4c. Core owns the rekey: it
@@ -1320,11 +1618,7 @@ interface SessionAPI {
     engineId: EngineId,
     messageIndex: number
   ): Promise<ForkAnchorResult>
-  sendPrompt(
-    routingId: string,
-    prompt: string,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-  ): Promise<void>
+  sendPrompt(routingId: string, prompt: string, attachments?: AttachmentUpload[]): Promise<void>
   cancelSession(routingId: string): Promise<void>
   /**
    * Reset a session's conversation in place ("start fresh"). Emits the
@@ -1340,6 +1634,13 @@ interface SessionAPI {
     answers?: Record<string, string>,
     updatedPermissions?: PermissionSuggestion[]
   ): Promise<void>
+  /**
+   * Approve an auto-mode block after the fact (ADR-091 part 6): the host grants
+   * the next identical call once (pi, opencode, their dispatch targets), marks
+   * the review approved, and sends the agent a user prompt to run it again.
+   * An unknown or already-approved `toolUseId` is a no-op.
+   */
+  approveBlocked(routingId: string, toolUseId: string): Promise<void>
   minimizeWindow(): Promise<void>
   maximizeWindow(): Promise<void>
   closeWindow(): Promise<void>
@@ -1386,6 +1687,12 @@ interface SessionAPI {
     projectKey: string,
     agentId: string
   ): Promise<ChatMessage[]>
+  /**
+   * The bytes behind a {@link BlobRef} (`blob:get`, ADR-087). `null` for an
+   * unknown, evicted or malformed id — a legal answer the caller renders as
+   * "unavailable".
+   */
+  getBlob(blobId: string): Promise<{ mediaType: string; base64Data: string } | null>
   buildSubagentFileMap(
     sessionId: string,
     projectKey: string,
@@ -1461,7 +1768,21 @@ interface SessionAPI {
   setThinkingMode(routingId: string, mode: string): Promise<void>
   setReasoningVariant(routingId: string, variant: string | null): Promise<void>
   getModels(): Promise<ModelInfo[]>
-  getEngineModels(): Promise<EngineModelGroup[]>
+  /**
+   * The model catalog as engine groups: with `engineId`, only that engine's
+   * groups (and only its probe runs); without, every engine's in one reply that
+   * waits for the slowest probe. Rejects an unknown engine id.
+   */
+  getEngineModels(engineId?: EngineId): Promise<EngineModelGroup[]>
+  /**
+   * For each judge-picker value, whether ClaudeUI can call that model for the
+   * engine's auto-mode judge (ADR-081 §3), and if not, why. Token-free: it
+   * checks credentials for presence and never fetches or refreshes one.
+   */
+  judgeModelSupport(
+    engineId: 'opencode' | 'pi',
+    values: string[]
+  ): Promise<Record<string, JudgeModelSupport>>
   /** Full opencode provider catalog (~146 providers) for the settings provider manager.
    *  Returns [] when opencode isn't installed or discovery fails. */
   getOpencodeProviders(): Promise<OpencodeProviderCatalogEntry[]>
@@ -1469,7 +1790,8 @@ interface SessionAPI {
   setOpencodeProviderDisabled(providerId: string, disabled: boolean): Promise<void>
   /**
    * Destructive: deletes the credential and/or provider declaration ClaudeUI owns,
-   * then clears the id from `disabled_providers` and the model allowlist. Pass the
+   * then clears the id from `disabled_providers` and the model allowlist. Settings-only
+   * removal clears those entries without deleting credentials or declarations. Pass the
    * `removeKind` from the entry's resolved `actions` — never a widened value.
    */
   removeOpencodeProvider(providerId: string, kind: ProviderRemoveKind): Promise<void>
@@ -1480,6 +1802,30 @@ interface SessionAPI {
   /** Deterministic "is this engine installed?" check (binary on disk). Does NOT
    *  spawn a server, so transient runtime failures can't read as "not installed". */
   engineIsInstalled(engineId: EngineId): Promise<boolean>
+  // ── Harness manager (ADR-082 arc 2; `core/ipc/harness-commands.ts`) ──
+  // Reads are `config`; every write is `admin` (§7), so a base remote
+  // connection is refused them. Live updates arrive as the `harness:changed`
+  // and `harness:install-progress` sync events (`onSyncEvent`).
+  /** Every harness: manifest, selection, resolver answer, detection, store. No probes. */
+  harnessState(): Promise<HarnessStateSnapshot>
+  /** Upstream releases for the version dropdown (network, cached for an hour). */
+  harnessVersions(id: HarnessId): Promise<HarnessVersionsResult>
+  /** Save a harness's source; running sessions keep their binary. Throws on an invalid choice. */
+  setHarnessSelection(id: HarnessId, selection: HarnessSelection): Promise<HarnessStateEntry>
+  /** Install into ClaudeUI's store; resolves when the install finishes. */
+  installHarness(id: HarnessId, version: string): Promise<HarnessInstallResult>
+  /** Abort an in-flight `installHarness` for this harness and version. */
+  cancelHarnessInstall(id: HarnessId, version: string): Promise<HarnessInstallCancelResult>
+  /** Re-detect System installs (all harnesses when omitted); resolves with the new state. */
+  detectHarnesses(ids?: HarnessId[]): Promise<HarnessStateSnapshot>
+  /** Install updates: Automatically | Ask me (ADR-082 §6). Answers the updates view. */
+  setHarnessUpdateMode(mode: HarnessUpdateMode): Promise<HarnessUpdatesView>
+  /** Install every available harness update; resolves with the state once the run ends. */
+  updateHarnesses(): Promise<HarnessStateSnapshot>
+  /** Ask upstream for new versions now; resolves with the new state. */
+  checkHarnessUpdates(): Promise<HarnessStateSnapshot>
+  /** Answer the one-time upgrade sheet (ADR-082 §8): it does not come back. */
+  answerHarnessUpgradePrompt(): Promise<HarnessUpgradePromptView>
   generateTitle(conversationText: string): Promise<string | null>
   generateCommitMessage(diff: string): Promise<string | null>
   writeCustomTitle(sessionId: string, projectKey: string, title: string): Promise<void>
@@ -1523,11 +1869,17 @@ interface SessionAPI {
   /** Load opencode's engine-native config from opencode's own global config file. */
   loadOpencodeSettings(): Promise<OpencodeConfigSettings>
   /** Save opencode's engine-native config to opencode's own global config file. */
-  saveOpencodeSettings(settings: OpencodeConfigSettings): Promise<void>
+  /** `base`: the snapshot the caller edited — only its changes relative to it are written. */
+  saveOpencodeSettings(
+    settings: OpencodeConfigSettings,
+    base?: OpencodeConfigSettings
+  ): Promise<void>
   /** Read opencode's config file verbatim (no projection) for the schema-driven editor. */
   readOpencodeNativeRaw(): Promise<OpencodeNativeRaw>
   /** Apply leaf patches to opencode's config file, preserving comments + siblings. */
   patchOpencodeNative(patches: RawConfigPatch[]): Promise<void>
+  /** Switch an opencode 2.x built-in tool off (top-level `{action,*,deny}`) or back on. */
+  setOpencodeToolDisabled(action: string, disabled: boolean): Promise<void>
   /** Read pi's global settings.json verbatim for the curated pi Configuration panes. */
   readPiNativeRaw(): Promise<PiNativeRaw>
   /** Apply leaf patches to pi's global settings.json, preserving siblings + formatting. */
@@ -1548,6 +1900,11 @@ interface SessionAPI {
     models: string[] | null
   ): Promise<void>
   listOpencodeAgents(cwd?: string): Promise<OpencodeAgentSummary[]>
+  /**
+   * The agent types `engine` can spawn (ADR-094): built-ins plus the agent
+   * definitions found for `cwd` (user and project). Read-only.
+   */
+  listAgentTypes(engine: EngineId, cwd?: string): Promise<AgentTypeInfo[]>
   readOpencodeAgent(
     name: string,
     scope: OpencodeAgentScope,
@@ -1592,13 +1949,28 @@ interface SharedProviderAPI {
   getSharedProviderStatuses(): Promise<SharedProviderStatus[]>
   listSharedProviderModels(id: string): Promise<SharedProviderModel[]>
   saveSharedProvider(definition: SharedProviderDefinition): Promise<void>
+  /**
+   * Detect: what a custom endpoint serves, read host-side. The typed `apiKey`
+   * wins; otherwise `providerId` names a saved provider whose stored key the
+   * host uses. Never answers the key.
+   */
+  probeSharedEndpoint(input: EndpointProbeInput): Promise<EndpointProbeResult>
   removeSharedProvider(id: string): Promise<void>
   setSharedProviderRoute(
     id: string,
     harness: ConfigurableHarnessId,
     enabled: boolean
   ): Promise<void>
-  setSharedProviderApiKey(id: string, key: string): Promise<void>
+  /**
+   * Store a provider's key and deliver it to each enabled harness. A harness
+   * holding a key of its own for the vendor keeps it unless `replaceOwn` names
+   * it — the harnesses the user agreed to overwrite (ADR-082 §8, S7f).
+   */
+  setSharedProviderApiKey(
+    id: string,
+    key: string,
+    replaceOwn?: readonly ConfigurableHarnessId[]
+  ): Promise<void>
   /**
    * Adopt a key an engine already holds into a catalog definition (ADR-074 §6).
    * `keep` names the engine whose key wins; omitted, both must hold the same key.
@@ -1609,10 +1981,23 @@ interface SharedProviderAPI {
   /**
    * Switch a key or endpoint provider off (delivered to no engine; key, routes
    * and model list kept) or back on (ADR-074 slice 10). Switching on refuses to
-   * replace a key an engine holds of its own unless `replaceOwn` confirms it.
+   * replace a key a harness holds of its own unless `replaceOwn` names that
+   * harness (S7f: per harness).
    */
-  setSharedProviderDisabled(id: string, disabled: boolean, replaceOwn?: boolean): Promise<void>
+  setSharedProviderDisabled(
+    id: string,
+    disabled: boolean,
+    replaceOwn?: readonly ConfigurableHarnessId[]
+  ): Promise<void>
   syncSharedProvider(id: string): Promise<void>
+  /** Replace the key a route's engine kept of its own with the stored one (ADR-082 §8, S7d). */
+  useSharedProviderStoredKey(id: string, harness: ConfigurableHarnessId): Promise<void>
+  /**
+   * The running harnesses that hold a key of their own for a provider (a
+   * definition id, or a vendor id with no definition) right now, read from
+   * their auth files — what an own-key question names (S7f).
+   */
+  getSharedProviderOwnKeyHolders(id: string): Promise<ConfigurableHarnessId[]>
   disconnectSharedProvider(id: string): Promise<void>
   setSharedProviderDefaultModel(
     id: string,
@@ -2019,9 +2404,9 @@ interface AccountAPI {
   /** Fired when the active account changed — renderer should respawn sessions. */
   onAccountRespawnSessions(cb: () => void): () => void
   /**
-   * Fetch opencode's live /config/providers price table, persist it, and register
-   * it as supplemental pricing so equivalentCostUsd resolves opencode model costs.
-   * Desktop-only (spawns a local opencode server). Phase 9b.
+   * Fetch the models.dev price catalog (the one opencode reads, ADR-071 §5),
+   * persist it, and register it as supplemental pricing so equivalentCostUsd
+   * resolves opencode model costs. Phase 9b.
    */
   refreshPrices(): Promise<{ count: number; refreshedAt: number }>
   /**
@@ -2845,11 +3230,26 @@ export interface VoiceTranscript {
 
 export type VoiceState = 'idle' | 'connecting' | 'recording' | 'processing'
 
+/**
+ * How a voice message reads in the notice pill above the mic: `info` (grey) is
+ * an outcome — "No speech detected"; `warn` (amber) is an error or something to
+ * fix. Sent by main with each `voice:error` so the renderer never has to guess
+ * from the wording (ADR-070); a message without one is `warn`.
+ */
+export type VoiceNoticeTone = 'info' | 'warn'
+
+/**
+ * The voice TRANSPORT. Capture is the renderer's (`renderer/src/lib/voice/`, one
+ * implementation for the desktop window and the web client); these only bind its
+ * pushed audio to a session's transcription server in the main process.
+ */
 interface VoiceAPI {
-  voiceStartServer(routingId: string): Promise<void>
-  voiceStopServer(routingId: string): Promise<void>
-  voiceStartRecording(routingId: string, language: string): Promise<void>
-  voiceStopRecording(routingId: string): Promise<void>
+  /** Bind this client's audio to `routingId`'s voice server. Rejects on refusal. */
+  voiceStart(routingId: string, language: string): Promise<void>
+  /** One ~150 ms batch of base64 16 kHz i16LE mono PCM. Fire-and-forget. */
+  voiceAudio(routingId: string, dataB64: string): void
+  /** End this client's capture; transcripts still in flight arrive afterwards. */
+  voiceStop(routingId: string): Promise<void>
   onVoiceTranscript(cb: (routingId: string, data: VoiceTranscript) => void): () => void
   onVoiceState(cb: (routingId: string, state: VoiceState) => void): () => void
 }
@@ -2899,7 +3299,8 @@ export interface ClaudeAPI
   getVersionInfo(): Promise<{ appVersion: string; cliVersion: string }>
   /** Open the standalone log viewer window */
   openLogViewer(): Promise<void>
-  /** Absolute path to the vendored pi binary (locatePiBinary()), or null if not
+  /** The pi a user can run in a terminal (`locatePiDisplayPath()`): the resolved
+   *  executable, or a System pi's shim rather than its `cli.js`; null if not
    *  found. Settings › pi's subscription hint block (`pi /login`). */
   getPiBinaryPath(): Promise<string | null>
   /** Read-only Codex (ChatGPT) auth-vault connection status (M6c). Drives
@@ -2956,7 +3357,35 @@ export interface ChatgptAccountLimits {
    * panel shows for it. Absent when the backend says the account has no credits.
    */
   credits?: { unlimited: boolean; balance: string | null }
+  /**
+   * What a workspace's spend controls allow THIS member to use — see
+   * {@link CreditLimit}. Absent when the workspace sets no per-member limit.
+   */
+  creditLimit?: CreditLimit
   fetchedAt: number
+}
+
+/**
+ * A business workspace member's credit allowance: the backend's
+ * `spend_control.individual_limit`, which Codex forwards as `individualLimit`
+ * and its own `/status` renders as "Monthly credit limit — N of M credits used".
+ *
+ * It is what makes a credits plan's usage legible. `credits` only says the
+ * workspace HAS credits (its balance is usually withheld from members), while
+ * this says how much of the member's share is spent.
+ *
+ * The wire carries the amounts as decimal STRINGS; they are parsed once on the
+ * way in, and an allowance whose amounts do not parse is dropped whole, as
+ * Codex's own display drops it. `resetsAt` is ISO 8601 like every
+ * {@link RateWindow}. It is a month away, not a rolling window, so it is never a
+ * window kind and is not sampled (ADR-071 §6 samples rolling windows only).
+ */
+export interface CreditLimit {
+  used: number
+  limit: number
+  /** 0-100, as the backend states it — not recomputed from the amounts. */
+  remainingPercent: number
+  resetsAt: string | null
 }
 
 /** Every account's limits, keyed by VAULT account id (never the workspace id). */
@@ -3008,6 +3437,20 @@ export interface AccountLimits {
   plan: string | null
   windows: AccountLimitWindow[]
   credits?: { unlimited: boolean; balance: string | null }
+  /**
+   * Local, or relayed through the hub's credits relay (ADR-072 §4, amended
+   * 2026-10-01) for an account only another machine reads.
+   */
+  creditLimit?: CreditLimit
+  /**
+   * For a RELAYED credit reading only: which machine took it, and when. The
+   * credits relay is separate from the window relay, so on a row that has both
+   * they can come from different machines at different times, and the tag beside
+   * each meter has to describe the reading it sits beside. {@link source} and
+   * {@link observedAt} describe the windows when there are any.
+   */
+  creditSource?: { deviceId: string; deviceName: string }
+  creditObservedAt?: number
   observedAt: number
   /**
    * Where the reading came from — ADR-072 relays readings from other machines.
@@ -3243,6 +3686,8 @@ export interface DashboardModel {
   totals: CostTotals
   /** The `dispatch`-origin part of {@link totals}, or null when none of it was dispatched. */
   dispatched: CostTotals | null
+  /** The `judge`-origin part of {@link totals} (ADR-081 §5), or null when none of it was. */
+  judge: CostTotals | null
 }
 
 /**
@@ -3263,6 +3708,8 @@ export interface DashboardAccount {
   models: DashboardModel[]
   /** The `dispatch`-origin part of {@link totals}, or null when none of it was dispatched. */
   dispatched: CostTotals | null
+  /** The `judge`-origin part of {@link totals} (ADR-081 §5), or null when none of it was. */
+  judge: CostTotals | null
   /**
    * The machines this account's spend came from, this one as its own device id
    * (S5c). Emitted under the `all` scope only — under `local` there is one
@@ -3351,6 +3798,8 @@ export interface DashboardMachineAccount {
   totals: CostTotals
   /** The `dispatch`-origin part of {@link totals}, or null when none of it was. */
   dispatched: CostTotals | null
+  /** The `judge`-origin part of {@link totals}, or null when none of it was. */
+  judge: CostTotals | null
 }
 
 /**
@@ -3516,7 +3965,7 @@ export interface AccountInfo {
 }
 
 export interface AccountsState {
-  /** Multi-account mode (file-based credentials via SKIP_SECURESTORAGE). */
+  /** Multi-account mode (app-owned per-account credential files, ADR-015). */
   enabled: boolean
   activeId: string | null
   accounts: AccountInfo[]
@@ -3656,6 +4105,19 @@ export interface EngineHistoryLoad {
    * fallback in place.
    */
   lastModel?: ModelRef | null
+  /**
+   * Host-run pi subagent transcripts (ADR-089), by the parent `agent` call id
+   * — the key `session:subagent-message` uses live. pi only; absent when the
+   * session ran no agents.
+   */
+  subagentMessages?: Record<string, ChatMessage[]>
+  /**
+   * Host-run pi subagents' terminal events (ADR-089 S3), from the task
+   * notifications ClaudeUI delivered into the parent and child files — read
+   * from the stored message's `details`, never parsed from its text. A
+   * background launch with no notification reads `unfinished`. pi only.
+   */
+  taskNotifications?: TaskNotification[]
 }
 
 /**

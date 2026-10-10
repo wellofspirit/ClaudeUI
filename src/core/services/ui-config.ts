@@ -184,6 +184,14 @@ function migrateConfigPlane(): void {
 const TRUST_LIST_KEYS = ['trustedDomains', 'trustedRegistries', 'protectedPatterns'] as const
 type TrustListKey = (typeof TRUST_LIST_KEYS)[number]
 
+/**
+ * Every list `automode.json` holds: the three trust lists plus the judge
+ * guidance lists (ADR-083 §4). The SAVE path walks this one; the migration walks
+ * {@link TRUST_LIST_KEYS} only, because the guidance lists never lived in an
+ * engine file and have nothing to migrate.
+ */
+const SHARED_AUTOMODE_LIST_KEYS = [...TRUST_LIST_KEYS, 'judgeAllow', 'judgeBlock'] as const
+
 /** The engines that ever wrote a trust list — Claude runs cli.js's classifier. */
 const TRUST_LIST_ENGINES = ['opencode', 'pi'] as const
 
@@ -218,7 +226,8 @@ let sharedTrustListsMigrated = false
  * The engine files are then stripped of the three keys and rewritten, so the
  * next `loadEngineConfig` sees the block `AutoModeConfig` now describes. A
  * second run finds no key to strip and writes nothing — including on a fresh
- * install, which must NOT gain an empty `automode.json`.
+ * install, which must NOT gain an empty `automode.json`. Every other key of
+ * `automode.json` (the judge guidance lists) is carried over untouched.
  */
 function migrateSharedTrustLists(): void {
   if (sharedTrustListsMigrated) return
@@ -270,9 +279,15 @@ function migrateSharedTrustLists(): void {
 
     if (!stripped) return
 
-    const next: import('../../shared/types').SharedAutoModeConfig = {}
+    // Start from the existing file, not from `{}`: the trust lists are only
+    // three of its keys, and the rewrite must not drop the others (the judge
+    // guidance lists, ADR-083 §4) — a migration that fires on a profile an older
+    // client wrote trust keys back into would otherwise erase them.
+    const next: Record<string, unknown> =
+      shared && typeof shared === 'object' && !Array.isArray(shared) ? { ...shared } : {}
     for (const key of TRUST_LIST_KEYS) {
       if (merged[key].length > 0) next[key] = merged[key]
+      else delete next[key]
     }
     writeJson(SHARED_AUTOMODE_FILE, next)
   } catch (err) {
@@ -291,7 +306,15 @@ export function loadSharedAutoModeConfig(): import('../../shared/types').SharedA
   return readJson<import('../../shared/types').SharedAutoModeConfig>(SHARED_AUTOMODE_FILE) ?? {}
 }
 
-/** Replaces the shared trust lists. An empty list is written as an ABSENT key. */
+/**
+ * Replaces the shared trust and guidance lists and the read-only bypass switch.
+ * An empty list is written as an ABSENT key, and so is `readOnlyBypass: true`
+ * (the default): only an explicit `false` is stored. `blockHoldSeconds` is
+ * clamped to whole seconds in [0, 600], and 0 (the default) is absent too. The object is REBUILT from
+ * the known keys rather than spread, so a key missing from
+ * {@link SHARED_AUTOMODE_LIST_KEYS} (or not handled below) is dropped on save —
+ * which is why the guidance lists have to be named there.
+ */
 export function saveSharedAutoModeConfig(
   config: import('../../shared/types').SharedAutoModeConfig
 ): void {
@@ -299,11 +322,30 @@ export function saveSharedAutoModeConfig(
   // entries on top of a list the user just emptied.
   migrateSharedTrustLists()
   const next: import('../../shared/types').SharedAutoModeConfig = {}
-  for (const key of TRUST_LIST_KEYS) {
+  for (const key of SHARED_AUTOMODE_LIST_KEYS) {
     const entries = normalizeTrustEntries(config[key])
     if (entries && entries.length > 0) next[key] = entries
   }
+  // Boolean only: anything else (a hand-edited "false" string) is not an
+  // opt-out and is dropped, leaving the bypass at its default.
+  if (config.readOnlyBypass === false) next.readOnlyBypass = false
+  // ADR-091 part 6 — the default (0, no hold) is the absent key.
+  const holdSeconds = normalizeBlockHoldSeconds(config.blockHoldSeconds)
+  if (holdSeconds > 0) next.blockHoldSeconds = holdSeconds
   writeJson(SHARED_AUTOMODE_FILE, next)
+}
+
+/** The longest a judge block may hold for the user (ADR-091 part 6). */
+export const BLOCK_HOLD_MAX_SECONDS = 600
+
+/**
+ * `SharedAutoModeConfig.blockHoldSeconds` as the hold uses it: whole seconds in
+ * [0, {@link BLOCK_HOLD_MAX_SECONDS}]. Anything that is not a finite number —
+ * an absent key, a hand-edited string — is 0, the default: no hold.
+ */
+export function normalizeBlockHoldSeconds(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0
+  return Math.min(BLOCK_HOLD_MAX_SECONDS, Math.max(0, Math.round(value)))
 }
 
 export function loadSettings(): UISettings {
@@ -354,6 +396,24 @@ export function loadSessionConfig(): UISessionConfig {
   config.sessionEngines = allSessionMeta()
 
   return config
+}
+
+/**
+ * False when sessions.json exists but does not parse. {@link loadSessionConfig}
+ * degrades that to an empty config, which is fine for a UI that just shows nothing
+ * but not for a caller deciding that NOTHING references some id. A missing file is
+ * a genuinely empty registry and reads as readable.
+ */
+export function sessionConfigIsReadable(): boolean {
+  try {
+    if (!fs.existsSync(SESSIONS_FILE)) return true
+    // An object, as `loadSessionConfig` reads it: `null` or an array would load
+    // as `{}` too, and must not read as "nothing is referenced".
+    const parsed: unknown = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf-8'))
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+  } catch {
+    return false
+  }
 }
 
 export function saveSessionConfig(config: UISessionConfig): void {

@@ -1,7 +1,10 @@
 # ADR-074 — Provider surfaces v3: subscriptions vs API providers, one key and one model list per provider, pi curation that works
 
-**Status:** Implemented (2026-09-23, slices 1–10 — see § As built); accepted 2026-09-23, owner-ruled from mockups `829a066c` (A · Subscriptions), `7eeb6bff` (B · Models in the picker), `4a21c0c4` (C · Claude defaults & endpoint), `42e09418` (D · API providers & shared keys)
+**Status:** Implemented (2026-09-23, slices 1–10 — see § As built; §12 amended 2026-10-01; §8 amended 2026-10-05); accepted 2026-09-23, owner-ruled from mockups `829a066c` (A · Subscriptions), `7eeb6bff` (B · Models in the picker), `4a21c0c4` (C · Claude defaults & endpoint), `42e09418` (D · API providers & shared keys)
 **Amends:** [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) § "Providers: one list" (one list becomes two groups; the Accounts group folds into Subscriptions; the Anthropic endpoint leaves Models & providers) · [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) §2 as amended by F14 (accounts move from the Accounts group onto each subscription card; the workspace explainer row becomes a tooltip)
+**Amended by:** [ADR-086](adr-086_custom-endpoint-model-details-and-detect.md) (2026-09-30) — the custom-endpoint form (§7 "Endpoint (custom)") edits each model's context window, max output, vision and reasoning, with provenance badges, and a Detect button fills them from vLLM and SGLang; this is how the capabilities §11 projects into opencode get set.
+**Amended by:** [ADR-092](adr-092_model-catalogs-per-engine-and-a-clean-boot.md) (2026-10-05) — the boot sync is idempotent: an unchanged key or token writes and invalidates nothing, removing an absent key is a no-op.
+**Amended by:** [ADR-100](adr-100_claude-models-by-alias-only.md) (2026-10-09) — §8's Claude lists offer aliases only; Starting effort per model has one row per alias, and saved concrete picks map to their alias.
 **Relates to:** [ADR-009](adr-009_claude-settings-vs-uisettings.md) (which store a setting lives in), [ADR-027](adr-027_test-data-attributes.md) (testids), [ADR-035](adr-035_pi-engine-backend.md) (pi wire), [ADR-059](adr-059_no-silent-model-fallback.md) (the spawn gate and the orphan guard this keeps), [ADR-036](adr-036_unified-auth-vault.md) (the vault that now holds catalog keys)
 
 ## Context
@@ -147,6 +150,51 @@ column listing the aliases that reach it, effort levels from the model's own `su
 A saved effort for a model the account no longer offers is listed, folded, with Remove. When the
 Claude page pins one model or renames aliases, a banner here says so.
 
+**Amended 2026-09-30 (owner ruling), effort keys follow the alias.** cli.js 2.1.285 moved `sonnet`
+from Sonnet 5 to Sonnet 5.5, and a setting keyed on the resolved model stayed behind with the old
+one. Starting effort is now keyed per family alias (`opus`, `sonnet`, `haiku`, `fable`, with `[1m]`
+folded in). `default` shares the row of the alias that resolves to the same model. A row that
+names a specific model id keys on that id. The table still shows the model each row runs on
+today. A value a v3.5 build saved under the resolved id is read for its alias row, is not listed
+as orphaned, and moves to the alias key when the row is edited (`claudeSavedEffort`,
+`claudeLegacyEffortKey` in `src/shared/model-capabilities.ts`). The unset default is cli.js's
+catalog `default_effort` for the resolved model (`medium` on Opus 5.5 and Sonnet 5.5).
+
+**Amended 2026-10-05 (owner ruling), effort is remembered per model and is what the session runs.**
+The owner set Opus to start at High and still saw new sessions, and remote clients watching a
+session that ran High, read Medium: the composer's effort read `effort ?? modelDefaultEffort` and
+skipped the starting effort that spawn applied, and an effort pick (a local write plus a respawn)
+never reached canonical state. Four rules replace that:
+
+- **One ladder.** A session's own effort, else the model's starting effort, else cli.js's
+  `default_effort`, clamped to the model's levels (`resolveDesiredEffort` / `resolveSpawnEffort`
+  in `src/shared/model-capabilities.ts`, `sessionSpawnEffort` in
+  `src/renderer/src/lib/session-effort.ts`). The composer and every spawn path (first send,
+  respawn, retry, plan "start fresh", review) read it over the same inputs. Automations run and
+  display the same ladder (`resolveAutomationEffort`), judged against the Claude catalog the
+  host last fetched on any transport; a model the catalog lacks is judged as the model its
+  alias names.
+- **A pick is remembered for its model.** Picking an effort in the composer also saves it as that
+  model's starting effort, so the next session on the model starts there and Starting effort per
+  model shows it. Claude writes the row this table edits (`modelEffortDefaults`, keys as above).
+  pi remembers too, in its own map (`engineEffortDefaults.pi`, keyed by the model value as pi
+  names it), because pi's `provider/model` values would otherwise land on Claude's keys. opencode
+  (no effort) and Codex (native tiers, set live) do not remember. Like the model (§10), this
+  follows "New sessions start on": with `configured-default` a pick changes only its session, the
+  table stays as configured, and pi's remembered values (which have no table to show or clear
+  them) are not applied (`carriesPicksIntoNewSessions`).
+- **The starting effort is fixed at spawn.** `session:create` takes an optional `announce`; the
+  host announces on `session:created` the effort the process is actually spawned with (`null` for
+  a model known to take no effort, nothing for a model not yet in the catalog), and every replica
+  adopts it as the session's own. A later change to a model's starting effort, by another
+  session's pick or by this table, affects only sessions that have not started; one already
+  running keeps showing what it runs. Canonical effort is not persisted, so after a host restart
+  a resumed session re-resolves against the current starting effort (and runs it). A client that
+  omits `announce` behaves as before.
+- **Switching model.** Before a session has a process, switching model clears its effort so the
+  new model's starting effort applies. A running session keeps its own, adjusted to the new
+  model's levels.
+
 ### 9. The Anthropic endpoint moves to the Claude page
 
 `vendors/anthropic.json`'s endpoint and model mapping become **Claude › Endpoint**: first "Claude
@@ -194,6 +242,18 @@ What the build changed about the decision:
 7. **Removal logging**: every `removeVendorAuth` logs the vendor id and call path (never the key), after
    an unexplained loss of the owner's pi OpenRouter key during the arc.
 
+**Amended 2026-10-01, stale rows and live model identity.** API providers' Remove action can remove
+disabled-only stale opencode entries by clearing their native veto and ClaudeUI curation.
+The ownership checks and conditional rediscovery of external providers are specified in
+[ADR-044](adr-044_opencode-provider-disable-vs-remove.md).
+
+Defaults and picker curation do not switch an existing session's model. When curation removes its
+model, the composer retains its identity and reported live capabilities rather than substituting
+a listed/default model. For live opencode/pi sessions the model badge follows `status.model`,
+including while an explicit picker change awaits the backend acknowledgement. Status events
+reconcile the shared selected model and per-session model record, as Codex already does. A delayed
+historical load cannot overwrite the config or transcript of a session that has become live.
+
 ### 10. New sessions: last pick or configured default (owner ruling)
 
 The last model picked on an engine still seeds new sessions ahead of the configured default, but
@@ -218,6 +278,44 @@ composer." while the last pick wins.
   ownership rules and clears engine defaults pointing at it, keeping key, routes, curation and defaults;
   on restores them, refusing to replace a key an engine was given meanwhile unless confirmed. A key
   stranded by an interrupted switch-off is reclaimed by the next sync only while it equals the vault key.
+- **A harness that is not installed** is given no key and not asked about; removals of ClaudeUI's own
+  entries still happen at once (opencode's key as a direct file edit), a catalog route's removal
+  takes out only ClaudeUI's key (the vault's, or the one it last delivered) and never an engine's
+  own, and an automatic sync never replaces an
+  engine's own key — told from ClaudeUI's earlier ones by fingerprint, with "Use the stored key" to
+  replace it — see [ADR-082](adr-082_harness-sources-downloads-and-unbundling.md) §8 "As built
+  (arc 3, S7d)".
+
+### 12. A provider created in ClaudeUI is usable where a harness has its own key (owner ruling, 2026-10-01)
+
+"When I create an OpenRouter provider in ClaudeUI, I want it to be usable in opencode/pi." Amends §6
+and the Add sheet's candidate rule:
+
+- **The Add sheet offers every catalog provider ClaudeUI does not manage yet**, with every running
+  harness that offers it as a target, whether or not that harness holds its own key for the vendor
+  (an authenticated opencode entry, a keyed pi vendor). Such a harness carries a note — "pi has its
+  own key for OpenRouter". Only an id a shared definition already owns is left out. pi vendors are
+  named by opencode's catalog name, else their id title-cased.
+- **Creating asks before replacing an own key**, once, naming the harness(es): "pi already has its
+  own OpenRouter key. Overwrite it and manage the key from ClaudeUI?" **Overwrite and manage from
+  ClaudeUI** creates the provider for every picked harness and replaces that key with the stored one
+  (`shared-provider:set-key` with `replaceOwn` naming the harnesses asked about); ClaudeUI manages
+  the slot from then on (fingerprinted). **Keep pi’s own key** creates it for the other picked
+  harnesses, with that harness's route off and its key untouched. Leaving the sheet writes nothing.
+  Save asks the host who holds an own key before asking the user — read from the harnesses' auth
+  files, never a cached catalog — so the question names every such harness as of then; so do "Use
+  ClaudeUI’s … here instead" and switching a provider on. The confirmation is PER HARNESS: the service replaces an own key only in a harness
+  `replaceOwn` names; any other keeps its own key and says so (`ownKeyKept`, "Use the stored key"),
+  as an automatic delivery does — so Replace key on the Manage sheet no longer replaces one silently
+  either, and switching a provider on refuses an own key the confirm did not name.
+- **A harness's own credential is named for whose it is**: a native row that no ClaudeUI provider
+  claims reads "OpenRouter · pi’s own key" (`ownedBy`, `providerEntryTitle`; "· opencode’s own key",
+  "· pi’s own sign-in"), never the raw id. When a ClaudeUI provider for the same vendor exists but
+  is off (switched off, or its route to that harness off), that row's sheet offers **Use ClaudeUI’s
+  OpenRouter here instead**, which asks the same question and then turns the route on and the
+  provider on with `replaceOwn` naming the harnesses it asked about.
+
+See [ADR-082](adr-082_harness-sources-downloads-and-unbundling.md) §8 "As built (arc 3, S7f)".
 
 ## Consequences
 

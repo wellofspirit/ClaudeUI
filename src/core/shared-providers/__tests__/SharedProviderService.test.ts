@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { SharedProviderDefinition } from '../../../shared/shared-provider'
-import { SharedProviderService } from '../SharedProviderService'
+import type { EndpointProbeResult, SharedProviderDefinition } from '../../../shared/shared-provider'
+import { SharedProviderService, type SharedProviderServiceDeps } from '../SharedProviderService'
 import type { PiSharedProviderAdapter } from '../PiSharedProviderAdapter'
 import type { OpencodeSharedProviderAdapter } from '../OpencodeSharedProviderAdapter'
 
@@ -27,7 +27,8 @@ const chatgpt = (): SharedProviderDefinition => ({
 })
 function setup(
   definitions: SharedProviderDefinition[] = [custom()],
-  catalog: SharedProviderDefinition['models'] = []
+  catalog: SharedProviderDefinition['models'] = [],
+  probeEndpoint?: SharedProviderServiceDeps['probeEndpoint']
 ) {
   const records = new Map(
     definitions.map((definition) => [definition.id, structuredClone(definition)])
@@ -109,6 +110,7 @@ function setup(
     opencode,
     credentialSync,
     getChatgptModels: async () => catalog,
+    probeEndpoint,
     defaults: {
       getPiDefault: () => piDefault,
       setPiDefault: (value) => {
@@ -585,5 +587,133 @@ describe('SharedProviderService', () => {
 
       expect(status.routes.opencode.diagnosis).toBe('no-models-discovered')
     })
+  })
+})
+
+describe('SharedProviderService — Detect (probeEndpoint)', () => {
+  const detected = { status: 'detected' as const, server: 'vllm' as const, models: [] }
+  const refused = {
+    status: 'failed' as const,
+    reason: 'unauthorized' as const,
+    message: 'http://elsewhere:8000/v1/models refused the request (HTTP 401).'
+  }
+  const catalog = (): SharedProviderDefinition => ({
+    id: 'openrouter',
+    name: 'OpenRouter',
+    kind: 'catalog',
+    managed: true,
+    models: [],
+    routes: { pi: { enabled: true }, opencode: { enabled: true } }
+  })
+
+  function probing(answer: EndpointProbeResult = detected) {
+    const probe = vi.fn<NonNullable<SharedProviderServiceDeps['probeEndpoint']>>(async () => answer)
+    const harness = setup([custom(), catalog()], [], probe)
+    harness.credentials.set('local-api', { type: 'api_key', key: 'stored-key' })
+    harness.credentials.set('openrouter', { type: 'api_key', key: 'sk-or-stored' })
+    return { probe, ...harness }
+  }
+
+  it('uses the stored key for its own custom endpoint, same origin, any path', async () => {
+    const { service, probe } = probing()
+    // Saved as https://api.test/v1.
+    await expect(
+      service.probeEndpoint({ baseUrl: 'https://api.test/openai/v1/', providerId: 'local-api' })
+    ).resolves.toEqual(detected)
+    expect(probe).toHaveBeenCalledWith({
+      baseUrl: 'https://api.test/openai/v1/',
+      apiKey: 'stored-key'
+    })
+  })
+
+  it('a typed key wins over the stored one, and goes wherever it is typed for', async () => {
+    const { service, probe } = probing()
+    await service.probeEndpoint({
+      baseUrl: 'http://gpu:8000/v1',
+      protocol: 'anthropic-messages',
+      apiKey: 'typed-key',
+      providerId: 'local-api'
+    })
+    expect(probe).toHaveBeenCalledWith({
+      baseUrl: 'http://gpu:8000/v1',
+      protocol: 'anthropic-messages',
+      apiKey: 'typed-key'
+    })
+  })
+
+  describe('the stored key goes only where it is already configured to go (GUARD)', () => {
+    it('never for a catalog provider, whatever the URL', async () => {
+      const { service, probe } = probing()
+      await service.probeEndpoint({
+        baseUrl: 'https://openrouter.ai/api/v1',
+        providerId: 'openrouter'
+      })
+      expect(probe).toHaveBeenCalledWith({ baseUrl: 'https://openrouter.ai/api/v1' })
+    })
+
+    it('not to another origin — and a failure says the key was withheld', async () => {
+      const { service, probe } = probing(refused)
+      for (const baseUrl of [
+        'http://elsewhere:8000/v1',
+        'http://api.test/v1', // scheme differs
+        'https://api.test:8443/v1' // port differs
+      ]) {
+        await expect(service.probeEndpoint({ baseUrl, providerId: 'local-api' })).resolves.toEqual({
+          ...refused,
+          keyWithheld: true
+        })
+        expect(probe).toHaveBeenLastCalledWith({ baseUrl })
+      }
+    })
+
+    it('not for an unknown id', async () => {
+      const { service, probe, credentials } = probing()
+      // A key in the vault with no definition behind it (a half-finished removal).
+      credentials.set('ghost', { type: 'api_key', key: 'ghost-key' })
+      await service.probeEndpoint({ baseUrl: 'https://api.test/v1', providerId: 'ghost' })
+      await service.probeEndpoint({ baseUrl: 'https://api.test/v1', providerId: 'nobody' })
+      expect(probe.mock.calls.map(([request]) => request)).toEqual([
+        { baseUrl: 'https://api.test/v1' },
+        { baseUrl: 'https://api.test/v1' }
+      ])
+    })
+  })
+
+  it('withholding is only reported on a failure, and only when a key was held back', async () => {
+    const withheld = probing()
+    await expect(
+      withheld.service.probeEndpoint({ baseUrl: 'http://elsewhere/v1', providerId: 'local-api' })
+    ).resolves.toEqual(detected)
+
+    const nothingStored = probing(refused)
+    nothingStored.credentials.delete('local-api')
+    await expect(
+      nothingStored.service.probeEndpoint({
+        baseUrl: 'http://elsewhere/v1',
+        providerId: 'local-api'
+      })
+    ).resolves.toEqual(refused)
+  })
+
+  it('probes without a key when none is typed or stored, and never with an OAuth token', async () => {
+    const { service, credentials, probe } = probing()
+    credentials.delete('local-api')
+    await service.probeEndpoint({ baseUrl: 'https://api.test/v1', apiKey: '' })
+    await service.probeEndpoint({ baseUrl: 'https://api.test/v1', providerId: 'local-api' })
+    credentials.set('chatgpt', { type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
+    await service.probeEndpoint({ baseUrl: 'https://api.test/v1', providerId: 'chatgpt' })
+    expect(probe.mock.calls.map(([request]) => request)).toEqual([
+      { baseUrl: 'https://api.test/v1' },
+      { baseUrl: 'https://api.test/v1' },
+      { baseUrl: 'https://api.test/v1' }
+    ])
+  })
+
+  it('refuses a malformed provider id before touching the vault', async () => {
+    const { service, probe } = probing()
+    await expect(
+      service.probeEndpoint({ baseUrl: 'https://api.test/v1', providerId: '../x' })
+    ).rejects.toThrow(/Invalid/)
+    expect(probe).not.toHaveBeenCalled()
   })
 })

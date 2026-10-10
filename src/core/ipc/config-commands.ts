@@ -96,7 +96,8 @@ import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import {
   readOpencodeNativeConfig,
   writeOpencodeNativeConfig,
-  migrateOpencodeConfigToNative
+  migrateOpencodeConfigToNative,
+  setOpencodeToolDisabled
 } from '../opencode/opencode-config'
 import { readOpencodeNativeRaw, patchOpencodeNativeRaw } from '../opencode/opencode-native-raw'
 import { readPiNativeRaw, patchPiNativeRaw, writePiNativeRawText } from '../pi/pi-native-raw'
@@ -110,12 +111,21 @@ import {
 } from '../opencode/opencode-agents'
 import type { OpencodeAgentInput } from '../opencode/opencode-agents'
 import { generateAgent } from '../opencode/agent-generate'
+import { listAgentTypes } from '../services/agent-type-catalog'
+import { ENGINE_META } from '../../shared/engine-meta'
 import { refreshPrices } from '../services/opencode-pricing'
 import { socks5Connect } from '../services/socks-bridge'
 import { assertSafeIdSegment } from '../services/path-containment'
 import { setProviderModelAllowlist } from '../services/provider-model-allowlist'
+import {
+  JUDGE_GUIDANCE_MAX_ENTRIES,
+  JUDGE_GUIDANCE_MAX_ENTRY_CHARS,
+  codePointLength,
+  hasPromptBreakingChar
+} from '../../shared/judge-guidance'
 import type {
   EngineConfig,
+  EngineId,
   VendorConfig,
   SharedAutoModeConfig,
   OpencodeConfigSettings,
@@ -279,35 +289,69 @@ async function testProxyConnection(
 }
 
 // ---------------------------------------------------------------------------
-// Shared trust lists (ADR-065 phase 4)
+// Shared trust lists (ADR-065 phase 4) + judge guidance (ADR-083 §4)
 // ---------------------------------------------------------------------------
 
-/** The only three keys `config:save-shared-automode` may carry. */
+/** The trust lists `config:save-shared-automode` may carry. */
 const SHARED_TRUST_KEYS = ['trustedDomains', 'trustedRegistries', 'protectedPatterns'] as const
 
+/** The judge guidance lists — same file, a stricter entry rule (see below). */
+const JUDGE_GUIDANCE_KEYS = ['judgeAllow', 'judgeBlock'] as const
+
 /**
- * Validate the shared trust-list payload AT THE PERIMETER, for the same reason
+ * Validate the shared auto-mode payload AT THE PERIMETER, for the same reason
  * `engineId` is validated here: this is a remotely reachable `config` write, and
  * what it writes is fed verbatim into the judge's prompt on the next session.
  * Garbage in that file is not a crash — it is a silently mis-specified
  * classifier environment, which is exactly the failure nobody notices.
  *
- * The shape is narrow on purpose: three OPTIONAL string arrays, each entry a
- * non-empty trimmed string, and no other keys. An empty list is expressed by
+ * The shape is narrow on purpose: five OPTIONAL string arrays, each entry a
+ * non-empty trimmed string, one optional boolean (`readOnlyBypass`, ADR-084's
+ * opt-out), one optional finite number (`blockHoldSeconds`, ADR-091 part 6,
+ * clamped by the service), and no other keys. An empty list is expressed by
  * omitting the key (see {@link SharedAutoModeConfig}) — `[]` is accepted from a
  * caller and normalised away by the service, so an older client cannot create a
  * second encoding of "nothing is trusted".
+ *
+ * The two guidance lists (`judgeAllow` / `judgeBlock`) are held to more. They
+ * are not host names or patterns but free text written straight into the
+ * judge's SYSTEM PROMPT — each entry becomes one `- ` bullet line under a
+ * User-Specified rule — and this channel is reachable from any remote client
+ * holding the `config` capability. So an entry may carry no line break or other
+ * control character (an embedded newline could forge a `### Rule` heading or a
+ * fake Environment line and rewrite the policy), and each list is capped at
+ * {@link JUDGE_GUIDANCE_MAX_ENTRIES} entries of at most
+ * {@link JUDGE_GUIDANCE_MAX_ENTRY_CHARS} characters, so no caller can bloat
+ * every judged call's prompt. The limits and the character rule live in
+ * `shared/judge-guidance.ts`, the one definition the environment builder (which
+ * applies them again on read, for a hand-edited file that never came through
+ * here) and the settings UI (which refuses such an entry before saving) share.
  */
 function assertSharedAutoModeConfig(value: unknown): asserts value is SharedAutoModeConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Invalid shared auto-mode config: expected an object')
   }
-  const allowed = new Set<string>(SHARED_TRUST_KEYS)
+  const lists = new Set<string>([...SHARED_TRUST_KEYS, ...JUDGE_GUIDANCE_KEYS])
   for (const key of Object.keys(value)) {
-    if (!allowed.has(key)) throw new Error(`Invalid shared auto-mode config: unknown key "${key}"`)
+    if (!lists.has(key) && key !== 'readOnlyBypass' && key !== 'blockHoldSeconds') {
+      throw new Error(`Invalid shared auto-mode config: unknown key "${key}"`)
+    }
   }
   const record = value as Record<string, unknown>
-  for (const key of SHARED_TRUST_KEYS) {
+  // ADR-084 §1's opt-out: a boolean or nothing.
+  if (record.readOnlyBypass !== undefined && typeof record.readOnlyBypass !== 'boolean') {
+    throw new Error('Invalid shared auto-mode config: "readOnlyBypass" must be a boolean')
+  }
+  // ADR-091 part 6's hold window: a number or nothing. The service clamps it
+  // to whole seconds in [0, 600]; a string or NaN never reaches the file.
+  if (
+    record.blockHoldSeconds !== undefined &&
+    (typeof record.blockHoldSeconds !== 'number' || !Number.isFinite(record.blockHoldSeconds))
+  ) {
+    throw new Error('Invalid shared auto-mode config: "blockHoldSeconds" must be a number')
+  }
+  const guidance = new Set<string>(JUDGE_GUIDANCE_KEYS)
+  for (const key of lists) {
     const list = record[key]
     if (list === undefined) continue
     if (!Array.isArray(list)) {
@@ -317,6 +361,25 @@ function assertSharedAutoModeConfig(value: unknown): asserts value is SharedAuto
       if (typeof entry !== 'string' || entry.trim() !== entry || entry === '') {
         throw new Error(
           `Invalid shared auto-mode config: "${key}" entries must be non-empty trimmed strings`
+        )
+      }
+    }
+    if (!guidance.has(key)) continue
+    if (list.length > JUDGE_GUIDANCE_MAX_ENTRIES) {
+      throw new Error(
+        `Invalid shared auto-mode config: "${key}" holds at most ${JUDGE_GUIDANCE_MAX_ENTRIES} entries`
+      )
+    }
+    for (const entry of list as string[]) {
+      if (hasPromptBreakingChar(entry)) {
+        throw new Error(
+          `Invalid shared auto-mode config: "${key}" entries must not contain line breaks or control characters`
+        )
+      }
+      // Code points, not UTF-16 units: the cap is "characters" to the user.
+      if (codePointLength(entry) > JUDGE_GUIDANCE_MAX_ENTRY_CHARS) {
+        throw new Error(
+          `Invalid shared auto-mode config: "${key}" entries must be at most ${JUDGE_GUIDANCE_MAX_ENTRY_CHARS} characters`
         )
       }
     }
@@ -471,7 +534,7 @@ export function configCommands(
       channel: 'config:save-opencode-settings',
       capability: 'config',
       kind: 'command',
-      handler: safeHandler(async (settings: OpencodeConfigSettings) => {
+      handler: safeHandler(async (settings: OpencodeConfigSettings, base?: unknown) => {
         // Write the six native fields to opencode's own config file — and
         // NOTHING else. `modelAllowlist` is dropped on the floor, never routed
         // into `engines/opencode.json`: its one writer is
@@ -480,7 +543,13 @@ export function configCommands(
         // it here let a stale pane put back curation the Manage sheet had just
         // changed.
         const { modelAllowlist: _ignored, ...nativeFields } = settings
-        writeOpencodeNativeConfig(nativeFields)
+        // `base` is the snapshot the pane edited: with it, only what the pane
+        // changed lands on the file as it is now (ADR-097 S8, review F11).
+        const snapshot =
+          base && typeof base === 'object'
+            ? (({ modelAllowlist: _b, ...rest }) => rest)(base as OpencodeConfigSettings)
+            : undefined
+        writeOpencodeNativeConfig(nativeFields, snapshot)
         // Provider changes affect the discoverable model set.
         invalidateOpencodeModelCache()
       })
@@ -529,6 +598,19 @@ export function configCommands(
         patchOpencodeNativeRaw(patches)
         // Capability edits (attachment/modalities/…) change model discovery.
         invalidateOpencodeModelCache()
+      })
+    },
+    // The Tools pane's built-in tool switch (opencode 2.x top-level
+    // `permissions`, which the raw writer refuses): off appends ClaudeUI's
+    // `{action,*,deny}`, on removes it.
+    {
+      channel: 'config:set-opencode-tool-disabled',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (action: unknown, disabled: unknown) => {
+        if (typeof action !== 'string' || typeof disabled !== 'boolean')
+          throw new Error('Invalid opencode tool switch')
+        setOpencodeToolDisabled(action, disabled)
       })
     },
 
@@ -591,6 +673,20 @@ export function configCommands(
       capability: 'config',
       kind: 'query',
       handler: safeHandler(async (cwd?: string) => listAgents(cwd))
+    },
+    // The agent types an engine can spawn, with their native colours (ADR-094):
+    // read-only, and engine-neutral, so it is not an `opencode-agents:*` verb.
+    {
+      channel: 'config:list-agent-types',
+      capability: 'config',
+      kind: 'query',
+      handler: safeHandler(async (engine: string, cwd?: string) => {
+        // The engine table's own keys: a new engine is accepted the moment it has a meta.
+        if (typeof engine !== 'string' || !Object.hasOwn(ENGINE_META, engine)) {
+          throw new Error(`Unknown engine: ${engine}`)
+        }
+        return listAgentTypes(engine as EngineId, typeof cwd === 'string' && cwd ? cwd : undefined)
+      })
     },
     {
       channel: 'opencode-agents:read',
@@ -727,9 +823,9 @@ export function configCommands(
         return await testProxyConnection(proxy)
       })
     },
-    // Phase 9b: fetch opencode pricing from /config/providers, persist + register.
-    // Spawns a LOCAL opencode server — host-side work, not host-physical, so it
-    // rides the everything-remote ruling like the rest of this file.
+    // Phase 9b: fetch the models.dev price catalog (ADR-071 §5), persist + register.
+    // Host-side work, not host-physical, so it rides the everything-remote
+    // ruling like the rest of this file.
     {
       channel: 'usage:refresh-prices',
       capability: 'config',

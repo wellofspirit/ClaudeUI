@@ -1,0 +1,21 @@
+{
+  "version": "2.0.24",
+  "tag": "v2.0.24",
+  "commit": "e7a34f09bfd9134dfade5a8ddb843f7030bc9a69",
+  "spec": "packages/protocol/openapi.json",
+  "specSha256": "0612418392961ef22f0337ce0e1e520270917665fc85f29c4af1c94d1e1873ee",
+  "specInfo": {
+    "title": "opencode HttpApi",
+    "version": "0.0.1"
+  },
+  "generator": "scripts/generate-opencode-protocol.mjs",
+  "generatorVersion": 1,
+  "counts": {
+    "schemas": 256,
+    "operations": 141
+  },
+  "files": {
+    "openapi.ts": "18222145b6d9aac7efcae296a2f340e4c453c70ba2fa48520dccfd6a0a722f62",
+    "src/shared/opencode-config-schema.json": "c83fb16b1d0ba48be0db8b98fd7adb90f2f8035bd58a6a4871e82663b9db7890"
+  }
+}

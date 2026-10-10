@@ -1,0 +1,33 @@
+{
+  "id": "opencode",
+  "tested": "2.0.24",
+  "floor": "2.0.24",
+  "ceiling": "3.0.0",
+  "platforms": {
+    "win32-x64": {
+      "package": "@opencode/cli-windows-x64",
+      "integrity": "sha512-wOIVih65Qp27mkwl8cC6u1i3ZW+HYXChSKLRBk8IGVIoFALkIC/wuZgfhoXbUGkbAX3vLFOXX6CeQzDnKazA1Q==",
+      "binarySha256": "542c51f075026e1dbd5b676ebce685d0b454face48872b0813d08f867e2c4eaa"
+    },
+    "darwin-arm64": {
+      "package": "@opencode/cli-darwin-arm64",
+      "integrity": "sha512-KGZeXsTu7YQuijMuihwTsKM6ezLoksyqkL+RUdKBUv87XBdwDf9bv692tFaTQqcyuL++BMGEZdffy0ImLBtm3w==",
+      "binarySha256": "e68cc32cb37b1f3242991c668be3934396825778925cb85670dad61038b05fe7"
+    },
+    "darwin-x64": {
+      "package": "@opencode/cli-darwin-x64",
+      "integrity": "sha512-fS1994qO6N2+KSxuye3YxbQ+6zY92lUvHn6bTo12/EkTsxaoNplbZFisYXSVsmXHQEiVT4UpxItU6KygLZ9H4g==",
+      "binarySha256": "cacdfa5106c59b1a3432ac6a5af4407a82316df5494f7cafc643911251f7de39"
+    },
+    "linux-x64": {
+      "package": "@opencode/cli-linux-x64",
+      "integrity": "sha512-WDBunGoImJOYjwUvDDfl0GJiKR/WbATnSXW1QTrK+VDp+oOUNLXo84QTUCBVUqvb8VsseWhs3uyWCD9o9c5JDA==",
+      "binarySha256": "d73436b88f2c412abb4e72056c2f6d133d9651f121952ade7fc3fe95fc9f5ddc"
+    },
+    "linux-arm64": {
+      "package": "@opencode/cli-linux-arm64",
+      "integrity": "sha512-n+C1XkoIB0NaHK9CQo4gGIc9FRGDhrMdCXO8heEOvUgKsH/0ROxCr3CxUuJaKolL/5+c5u3CoiXsckL+fa52ag==",
+      "binarySha256": "216f1d58b539bba2dd662fe68cfbae2d1eb3b4ab7c4f20088827437f204c5921"
+    }
+  }
+}

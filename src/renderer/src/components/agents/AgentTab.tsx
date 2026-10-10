@@ -12,13 +12,17 @@
  * It expands UPWARD into a floating overlay, the way SlashCommandMenu and
  * FileMentionMenu already do, so opening the list never reflows the chat.
  *
- * Unlike the pill, it exists only while something is actually running.
+ * Unlike the pill, it exists only while something is actually running: an
+ * agent at any depth, or a listed background shell. Its label is the pill's
+ * form (ADR-073 §7): a dot and the running count, then the longest clock; the
+ * tooltip and `aria-label` carry the breakdown.
  */
 import { useEffect, useRef, useState } from 'react'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import { useAgentRoster } from '../../hooks/useAgentRoster'
 import { formatElapsed } from '../chat/TaskCard'
 import { AgentRosterList } from './AgentRosterList'
+import { rosterSummary } from './roster-summary'
 
 export function AgentTab(): React.JSX.Element | null {
   const enabled = useSessionStore((s) => s.settings.showAgentTab)
@@ -59,7 +63,7 @@ export function AgentTab(): React.JSX.Element | null {
 
   if (!visible) return null
 
-  // The longest-running agent's clock — the one number worth the width.
+  // The longest-running clock, agent or shell — the one number worth the width.
   const longest = roster.agents
     .concat(roster.shells)
     .filter((r) => r.isRunning && r.elapsedSeconds !== undefined)
@@ -67,6 +71,8 @@ export function AgentTab(): React.JSX.Element | null {
       (max, r) => (max === undefined || r.elapsedSeconds! > max ? r.elapsedSeconds : max),
       undefined
     )
+
+  const summary = rosterSummary(roster)
 
   const handleOpenAgent = (toolUseId: string): void => {
     if (activeSessionId) openTaskPanel(activeSessionId, toolUseId)
@@ -76,9 +82,13 @@ export function AgentTab(): React.JSX.Element | null {
   return (
     <div ref={wrapRef} className="contents">
       {open && (
+        // `max-w-full` is the composer box (the nearest positioned ancestor,
+        // InputBox/View.tsx). Not `100vw - N`: SessionView's `zoom: uiFontScale`
+        // multiplies vw lengths, so that box spilled off a phone at any scale
+        // above 1 — see THE ZOOM TRAP in shared/use-anchored-menu.ts.
         <div
           data-testid="AgentOverlay"
-          className="absolute bottom-full right-0 mb-[18px] w-[min(420px,calc(100vw-32px))] max-h-[260px] overflow-y-auto rounded-lg border border-border bg-bg-secondary shadow-2xl z-50 animate-fade-in"
+          className="absolute bottom-full right-0 mb-[18px] w-[420px] max-w-full max-h-[260px] overflow-y-auto rounded-lg border border-border bg-bg-secondary shadow-2xl z-50 animate-fade-in"
         >
           <AgentRosterList
             roster={roster}
@@ -91,7 +101,8 @@ export function AgentTab(): React.JSX.Element | null {
         data-testid="AgentTab"
         data-open={open}
         onClick={() => setOpen((o) => !o)}
-        title={`${runningCount} agent${runningCount > 1 ? 's' : ''} running — click for the list`}
+        title={summary}
+        aria-label={summary}
         className={`absolute bottom-full right-3 px-1.5 pt-0.5 pb-px rounded-t text-[9px] font-semibold tracking-wider uppercase border border-b-0 flex items-center gap-1 cursor-default transition-colors ${
           open
             ? 'border-accent/60 bg-accent/25 text-accent-hover'
@@ -102,8 +113,8 @@ export function AgentTab(): React.JSX.Element | null {
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-70" />
           <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-accent" />
         </span>
-        <span data-testid="AgentTab.count">
-          {runningCount} agent{runningCount > 1 ? 's' : ''}
+        <span data-testid="AgentTab.count" className="tabular-nums">
+          {runningCount}
         </span>
         {longest !== undefined && <span className="tabular-nums">· {formatElapsed(longest)}</span>}
       </button>

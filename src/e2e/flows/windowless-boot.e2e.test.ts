@@ -144,8 +144,7 @@ vi.mock('../../core/services/usage-fetcher', () => ({
     setSessionGetter: vi.fn(),
     setIntervalSecs: vi.fn(),
     startPolling: vi.fn(),
-    fetch: vi.fn(async () => null),
-    updateFromRateLimitEvent: vi.fn()
+    fetch: vi.fn(async () => null)
   }
 }))
 vi.mock('../../core/services/service-session', () => ({
@@ -189,6 +188,7 @@ vi.mock('../../core/shared-providers', () => ({
 }))
 vi.mock('../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
+    setServerStartedHook: () => {},
     isBinaryAvailable: vi.fn(() => false),
     setCallerSessionLookup: vi.fn(),
     setDispatchAgent: vi.fn(),
@@ -206,20 +206,24 @@ vi.mock('../../core/pi/model-discovery', () => ({
   discoverPiModels: vi.fn(async () => []),
   getPiModelCatalogGroups: vi.fn(async () => []),
   invalidatePiModelCache: vi.fn(),
+  // Boot subscribes it to the sync funnel (core-services.ts).
+  onPiCatalogRecovered: vi.fn(() => () => {}),
   resolvePiSpawnModel: vi.fn(async (m?: string) => m),
   getPiModelCatalog: vi.fn(async () => []),
   effortLevelsFromModel: vi.fn(() => [])
 }))
 vi.mock('../../core/pi/pi-locate', () => ({
   piBinaryAvailable: vi.fn(() => false),
-  locatePiBinary: vi.fn(() => null)
+  locatePiBinary: vi.fn(() => null),
+  locatePiDisplayPath: vi.fn(() => null)
 }))
 // Same reason as `pi-locate`: the boot seed walks every engine's session list,
-// and `listCodexSessions()` spawns a real `codex app-server` whenever the
-// vendored binary is present (darwin/arm64 dev machines). That is a subprocess
-// this flow never asserts on, and it made the seed slow enough to land AFTER
-// the `sync-full` this file reads — the directory listing raced to empty on a
-// developer's machine and passed on CI, which has no vendored codex.
+// and `listCodexSessions()` spawns a real `codex app-server` whenever a
+// codex resolves. That is a subprocess this flow never asserts on, and it made
+// the seed slow enough to land AFTER the `sync-full` this file reads — the
+// directory listing raced to empty on a developer's machine (a vendored codex,
+// before ADR-082 §8) and passed on CI, which had none. Kept so no installed
+// codex can reintroduce the race.
 vi.mock('../../core/codex/codex-locate', () => ({
   codexBinaryAvailable: vi.fn(() => false),
   locateCodexBinary: vi.fn(() => null)
@@ -234,11 +238,6 @@ vi.mock('../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatchAvailable: (): boolean => false,
   XENG_REQUEST_PREFIX: 'xeng:'
 }))
-vi.mock('../../core/services/voice-capture', () => ({
-  startRecording: vi.fn(() => false),
-  stopRecording: vi.fn()
-}))
-vi.mock('../../core/services/voice-client', () => ({ VoiceClient: class {} }))
 vi.mock('../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 vi.mock('../../core/services/context-window', () => ({
@@ -286,14 +285,14 @@ interface EngineHandle {
   /** Push one stream-json message into the run's for-await loop. */
   emit: (msg: unknown) => void
   end: () => void
-  dequeueMessage: ReturnType<typeof vi.fn>
+  cancelAsyncMessage: ReturnType<typeof vi.fn>
 }
 
 function makeEngineHandle(): EngineHandle {
   const pending: unknown[] = []
   let wake: (() => void) | null = null
   let done = false
-  const dequeueMessage = vi.fn(async () => ({ removed: 1 }))
+  const cancelAsyncMessage = vi.fn(async (_uuid: string) => ({ cancelled: true }))
   const handle = {
     async *[Symbol.asyncIterator](): AsyncGenerator<unknown> {
       for (;;) {
@@ -306,7 +305,7 @@ function makeEngineHandle(): EngineHandle {
     },
     initializationResult: (): Promise<never> => new Promise<never>(() => {}),
     interrupt: vi.fn(async () => {}),
-    dequeueMessage
+    cancelAsyncMessage
   }
   return {
     handle,
@@ -320,7 +319,7 @@ function makeEngineHandle(): EngineHandle {
       wake?.()
       wake = null
     },
-    dequeueMessage
+    cancelAsyncMessage
   }
 }
 
@@ -605,13 +604,16 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     ])
 
     // Take-back: the ArrowUp gesture's invoke. cli.js's queue is the holder for
-    // the claude engine, so recall goes out to the engine handle per item.
+    // the claude engine, so recall goes out to the engine handle per item, by
+    // the item id the message's frame carried as its uuid.
     const result = await client.invoke<{ recalled: string[]; notRecalled: number }>(
       'session:recall-queued',
       ROUTING_ID
     )
     expect(result).toEqual({ recalled: ['also update the tests'], notRecalled: 0 })
-    expect(engines[0].dequeueMessage.mock.calls.map((c) => c[0])).toEqual(['also update the tests'])
+    expect(engines[0].cancelAsyncMessage.mock.calls.map((c) => c[0])).toEqual([
+      queued.items[0].itemId
+    ])
 
     // Every client converges on the same queue, including the taken-back item's
     // terminal state.

@@ -16,6 +16,7 @@
 
 import type { ContentBlock } from '../../../../shared/types'
 import type { ToolView } from '../../../../shared/tool-kinds'
+import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -132,7 +133,9 @@ export function ToolNoteRow({ result, view, displayName }: Props): React.JSX.Ele
         {view.text}
       </span>
       {failed && result?.toolResult && (
-        <span className="truncate text-[11px] opacity-80">— {result.toolResult}</span>
+        <span {...TOOL_OUTPUT_SCOPE} className="truncate text-[11px] opacity-80">
+          — {result.toolResult}
+        </span>
       )}
     </div>
   )

@@ -4,10 +4,11 @@
  * instead of getting clipped.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
 import { useContextMenu } from '../useContextMenu'
 import { useSessionStore } from '../../stores/session-store'
+import { __escapeLayerCount } from '../../components/shared/use-escape-layer'
 
 /** Test harness: wraps the hook so we can drive it and read its style. */
 function Harness({ menuSize }: { menuSize: { w: number; h: number } }): React.JSX.Element {
@@ -149,5 +150,34 @@ describe('useContextMenu edge-flip', () => {
     })
     const menu = screen.getByTestId('menu')
     expect(Number(menu.style.left.replace('px', ''))).toBeLessThan(450)
+  })
+})
+
+describe('useContextMenu Escape', () => {
+  it('closes on Escape and keeps the key from reaching window-level handlers', () => {
+    stubMenuSize(100, 50)
+    const behind = vi.fn()
+    window.addEventListener('keydown', behind)
+    try {
+      render(<Harness menuSize={{ w: 100, h: 50 }} />)
+      act(() => {
+        rightClick(10, 10)
+      })
+      expect(screen.getByTestId('menu')).toBeInTheDocument()
+
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      expect(screen.queryByTestId('menu')).toBeNull()
+      // Everything behind the menu listens below `document` — the input box's
+      // Escape-to-interrupt via React's root, dialogs on `document` in the
+      // bubble phase — so an Escape the menu answered must not reach them.
+      expect(behind).not.toHaveBeenCalled()
+
+      // Closed, the menu is no layer at all: the next Escape goes through.
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      expect(behind).toHaveBeenCalledOnce()
+      expect(__escapeLayerCount()).toBe(0)
+    } finally {
+      window.removeEventListener('keydown', behind)
+    }
   })
 })

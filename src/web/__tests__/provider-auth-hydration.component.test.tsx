@@ -37,7 +37,7 @@ const storeMocks = vi.hoisted(() => ({ refreshProviderAuth: vi.fn(async () => {}
 vi.mock('@renderer/App', () => ({ default: () => <div data-testid="FakeApp">app</div> }))
 vi.mock('@renderer/stores/replica', () => ({
   startReplica: () => {},
-  hydrateReplica: () => {},
+  hydrateReplica: () => ({ reloadActive: null, fillResumed: [] }),
   // The render-loss detector starts beside the replica on this path and observes
   // it through the post-apply seam, so the mock has to offer one.
   onReplicaApplied: () => () => {},
@@ -50,6 +50,10 @@ vi.mock('@renderer/stores/replica', () => ({
 // when the environment tore down: every test green, and vitest failing the run
 // on an EnvironmentTeardownError. Nothing here is about the audit; stub it.
 vi.mock('@renderer/utils/projection-audit', () => ({ startProjectionAudit: () => {} }))
+// The same entry block lazy-imports the history loader, which pulls the real
+// renderer graph (sign-in-provider -> shared-provider) and raced teardown the
+// same way. The test only needs `finishHydrate` to exist.
+vi.mock('@renderer/lib/session-history-load', () => ({ finishHydrate: () => {} }))
 vi.mock('@renderer/stores/session-store', () => ({
   useSessionStore: { getState: () => ({ refreshProviderAuth: storeMocks.refreshProviderAuth }) }
 }))

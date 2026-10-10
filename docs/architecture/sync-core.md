@@ -70,7 +70,7 @@ log viewer — and `CLAUDEUI_NO_WINDOW=1` skips it entirely. The rule that keeps
 true: **nothing on the boot path may CAPTURE a window.** Whatever genuinely needs one
 reads it from `services/host-window.ts` at USE time and copes with `null` — the
 `host-local` delivery lane, `session:pick-folder`'s dialog parent, and the spawn handle
-a session keeps for voice capture. Two signatures lost their window parameter for this
+a session keeps (it was for voice capture, which has since moved into the renderer). Two signatures lost their window parameter for this
 (`registerSessionIpc`, `registerRemoteHandlers`); `BaseSession.win` became
 `BrowserWindow | null`.
 
@@ -116,19 +116,19 @@ Every feature must express each interaction as exactly one of these. There is no
 ## Replication model
 
 - **Shared reducer:** a pure `applyEvent(state, event)` in `src/core/shared/sync/`, used by core (canonical) and by every client replica. One interpretation of every event; snapshot/event divergence becomes unrepresentable.
-- **Canonical state in core:** per-session domain state + app-level registry. Per-session eviction mirrors today's renderer eviction; evicted sessions rehydrate from transcripts via queries.
+- **Canonical state in core:** per-session domain state + app-level registry. Per-session eviction mirrors the renderer's: the host drops an exited session's transcript (`SyncCore.evictTranscript`, a cache decision — not an event, not a reducer branch; ADR-087 §2) and the snapshot says so with `seeded: false`; evicted sessions rehydrate from transcripts via queries, on the client.
 - **Client stores split:** a _replica store_ (reducer output only — no local writes) and a _view store_ (selection, drafts, layout, scroll — per-client by design; ADR-041's lesson, now type-enforced).
 - **Cursor discipline:** `lastSeq` advances only after an event is **applied**; pre-mount events buffer; a detected gap requests resync. `sync`/`sync-catchup`/`sync-full` + per-process `epoch` semantics carry over unchanged from the as-built protocol.
-- **Ring sizing:** domain events only (streams excluded — **true as of phase 5 S2**: neither the two canonical-backed delta channels nor the three tails take a seq) — 5000 entries ≈ hours of catchup instead of minutes. Memory-only (see Persistence).
+- **Ring sizing:** domain events only (streams excluded — **true as of phase 5 S2**: neither the two canonical-backed delta channels nor the three tails take a seq) — 5000 entries ≈ hours of catchup instead of minutes. Memory-only (see Persistence). The bound is by entry COUNT, not bytes, so it only means something while entries are small: images and documents ride as `BlobRef`s (ADR-087), never as inline base64, and a client fetches the bytes on demand through `blob:get`. The same holds for the snapshot — a `sync-full` is all of canonical state, and one screenshot-heavy session used to make it ~273 MB.
 - **Optimistic apply:** opt-in per command via `causedBy` reconcile; the default is round-trip (in-process for desktop, tailnet-RTT for phones — both fine).
 
 ## State classification
 
-| Class          | Contents                                                                                                                                                                                                                                                                                                                   | Mechanism                                       |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| **Replicated** | messages, coalesced streaming text/thinking, status, approvals, todos, **queue items**, tasks, sentFiles, per-session config (`selectedModel`, `effort`, `thinkingMode`, `reasoningVariant`, `permissionMode`, engine), session registry, pins/titles/hidden, settings, sessionEngines, worktree map, git status summaries | Domain events + snapshot                        |
-| **Per-client** | active session selection, draft text/attachments, panel layout, scroll, gallery state                                                                                                                                                                                                                                      | View store; never synced (deliberate — ADR-041) |
-| **Host-local** | window controls, native folder picker, voice capture, OAuth browser flows                                                                                                                                                                                                                                                  | `host`-capability commands, desktop shell only  |
+| Class          | Contents                                                                                                                                                                                                                                                                                                                                                                                          | Mechanism                                       |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| **Replicated** | messages (images and documents as blob refs, bytes fetched on demand — ADR-087), coalesced streaming text/thinking, status, approvals, todos, **queue items**, tasks, sentFiles, per-session config (`selectedModel`, `effort`, `thinkingMode`, `reasoningVariant`, `permissionMode`, engine), session registry, pins/titles/hidden, settings, sessionEngines, worktree map, git status summaries | Domain events + snapshot                        |
+| **Per-client** | active session selection, draft text/attachments, panel layout, scroll, gallery state                                                                                                                                                                                                                                                                                                             | View store; never synced (deliberate — ADR-041) |
+| **Host-local** | window controls, native folder picker, voice capture, OAuth browser flows                                                                                                                                                                                                                                                                                                                         | `host`-capability commands, desktop shell only  |
 
 Per-channel classification of every event, with its ring/canonical/delivery
 consequences: [sync-channels.md](sync-channels.md).
@@ -169,9 +169,13 @@ per-channel listeners and their store writers.
 
 **Per-engine mechanics** (uniform events, per-engine transports — ADR-030 honesty):
 
-- **claude** — push into cli.js's native queue immediately (native sub-turn timing, zero added latency). Core correlates per-item by text via the existing `dequeue_message` / `queued_command_consumed` patch surface — **no patch growth**; duplicate-text items are interchangeable, so text ambiguity is harmless.
-  - **"By text" needs normalizing, and that was a real defect.** `queued_command_consumed` carries the queued attachment's `prompt` **verbatim**, and that prompt is the pushed message's `message.content` — a plain string for a text-only prompt but a **content-block ARRAY** whenever the prompt carried an image or a PDF. Comparing the array against `item.text` never matched, so an attachment-carrying steer was never seen as consumed at the moment cli.js injected it; it survived to the turn-end `result` flush and its user bubble was synthesized **after the entire turn** — visibly below the answer it had prompted. The RECALL half never had the bug, which is why it survived: `dequeue_message` matches with cli.js's own extractor (`VV_(v) = typeof v === 'string' ? v : Lu(v,'\n')`, `Lu` keeping `text` blocks). `sdk/queued-command-text.ts` applies that same rule at the read site, which is where cli.js applies it too — still no patch growth.
-- **opencode / pi** — these engines commit-on-post (coalesce/steer; unrecallable instantly), so core **holds the item and forwards at the next observed tool/step boundary** in the engine's event stream. The commitment point moves from keypress to boundary — up to one tool-call of extra latency versus today's instant post, ratified as the price of a real take-back window and cross-engine consistency.
+- **claude** — push into cli.js's native queue immediately (native sub-turn timing, zero added latency), correlated **by id**, not by text (since 2026-09-25, ADR-079). Every user frame carries a client `uuid`, and a queued item's is its `itemId`; cli.js names the message back by it:
+  - **consumed** at `command_lifecycle` `started` (protocol-cc 03 §3.21) — at the tool boundary where the running turn folds it in (right after that boundary's tool_result), or when the between-turns drain makes it the next turn's prompt. Consuming there is what puts the steer bubble where the model actually read it. The turn-end `result` flush stays as a safety net: an item still queued at `result` is drained right after it, so the flush marks it at the same boundary a millisecond early.
+  - **recalled** by `cancel_async_message {message_uuid}` (protocol-cc 07) — `{cancelled:true}` takes it back, preceded by a `cancelled` frame; `{cancelled:false}` means cli.js already took it, so it stays queued until its `started`.
+  - **recalled with a warning** on `discarded` (the session ended with it queued) or `refused` (cli.js declined it). `cancelled` for an item already consumed (its turn was aborted) changes nothing.
+  - Duplicate texts are individually addressable. This replaced text correlation over the `queue-control` patch (`dequeue_message` / `system/queued_command_consumed`), which the official binary lacks: there recall silently failed and cards stayed QUEUED past consumption. That surface carried the queued `prompt` verbatim — a content-block ARRAY whenever the prompt had an image or PDF — so it also had to normalize text the way cli.js does (`sdk/queued-command-text.ts`).
+- **pi** — commits on post (coalesce/steer; unrecallable instantly), so core **holds the item and forwards at the next observed tool/step boundary** in the engine's event stream. The commitment point moves from keypress to boundary — up to one tool-call of extra latency versus today's instant post, ratified as the price of a real take-back window and cross-engine consistency.
+- **opencode 2.x** ([ADR-097](../adr/adr-097_opencode-v2-only.md) §9) — the queue item is posted at once to opencode's native inbox under a ClaudeUI id (`delivery: 'steer'`, the same next-step-boundary timing); take-back is `DELETE …/inbox/{id}`, and the stored row decides a race with delivery. The queue card and its states are unchanged.
 
 Details and supersessions: ADR-053.
 
@@ -367,6 +371,8 @@ channel, which the funnel guard's channel-literal scan could not see. Under unif
 delivery the desktop subscribes to that channel, so the targeted send would have landed
 nowhere and voice errors would have gone silent. Routed through `emitEvent`, and the guard
 grew a check for computed-channel sends whose allowlist has to prove itself host-local.
+(`VoiceClient` is gone since desktop capture moved into the renderer; its delivery is the
+desktop owner in `voice-relay.ts`, which carries the same allowlist entry.)
 
 **A defect the seal exposed on the way in.** `BaseSession.trackThinkingSpan` cleared
 only the OPEN clock at a turn boundary, never an already-parked `sealedThinkingMs`;
@@ -409,6 +415,13 @@ Seeds are **not** events: they are refreshes of query-shaped state
 client's state changes, because every client either read the file itself or will receive
 it in its next snapshot.
 
+A session's TRANSCRIPT seed has a lifecycle of its own (ADR-087 §2). `seedSession` fills an
+empty transcript once, from `create-session.ts`; the host drops it again when the engine
+exits or the watch ends (`evictTranscript`, which clears `seeded` and is equally not an
+event), and a later resume seeds it again. The in-flight read is tracked per routing id
+(`trackSeed` / `pendingSeed`) and `handlers-core.sendPrompt` waits on it, because a seed
+that loses the race to a prompt is a no-op — it only fills an EMPTY transcript.
+
 Phase 5 S4 moved a WATCHED session's transcript into that category
 (`SyncCore.seedWatchedSession`, the REPLACE twin of `seedSession` — a watched `.jsonl`
 is its own only writer and only grows, so filling-only would freeze it at its first
@@ -419,7 +432,15 @@ snapshot still carries it, so a fresh client never refetches at all.
 
 **The invariant that certifies the cutover.** `restore(snapshot@N) + fold(events N+1 …
 head) === canonical@head`, over seeded random interleavings drawn from the committed
-golden fixtures (`src/core/sync/__tests__/snapshot-invariant.unit.test.ts`). It replaces
+golden fixtures (`src/core/sync/__tests__/snapshot-invariant.unit.test.ts`). Its scope
+excludes exactly one thing: the transcript of a session the host evicted AFTER the
+snapshot (`evictTranscript`, ADR-087 §2). Eviction is a host cache policy outside the
+reducer, so a replica restored before it and folding the same events keeps the transcript
+canonical dropped. For such a session the comparison masks `messages`, `subagentMessages`,
+the item streams, and the `todos` / `sentFiles` derived from the transcript, and holds on
+every other field. `seeded` is stripped for such a session (canonical dropped it, the replica
+never did) and compared for every other one. A snapshot taken after the eviction restores the
+same empty transcript and is compared in full. It replaces
 the deleted `event-log.test.ts`, which pinned a workaround rather than a property: the old
 snapshot came from an async renderer round-trip, so the server deliberately UNDER-claimed
 the watermark; `getSnapshot()` reads the seq and serializes in one synchronous tick, so
@@ -496,13 +517,20 @@ line is a named next step with the reason it is not phase-4 work.
   to emit the birth event before constructing the session, which reorders a spawn path
   with its own races. Recorded so the next reader does not mistake it for the ghost
   class F7 closed.
-- **Fork seeding reads the whole parent transcript for its status line.** F3 truncates
-  the MESSAGES at the anchor, but `ClaudeSession`'s resume-time
-  `reconcileAccumulatorsFromTranscript` (and `computeTokenMetrics` behind it) still
-  walks the parent's entire file, so a fork's opening token/cost figures include the
-  turns the fork discarded. Cosmetic and self-correcting — the first `result` of the
-  forked session replaces them with cli.js's authoritative numbers — but wrong until
-  then. The fix is the same anchor, threaded one level further down.
+- ~~**Fork seeding reads the whole parent transcript for its status line.**~~
+  **RESOLVED.** Two readers were named; neither still over-counts. (1) `ClaudeSession`'s
+  resume-time `reconcileAccumulatorsFromTranscript` was already guarded for forks
+  (`claude-session.ts`, the `!this.forkSession` condition at its call): a fork's fresh
+  transcript reconciles normally after its first result instead. (2) The status line
+  `loadSessionHistory` returns — which canonical's seed writes
+  (`seed-canonical-transcript.ts`) and `session:load-history` serves — came from
+  `computeTokenMetrics(filePath)` over the whole file. It now takes the same
+  `resumeSessionAt` anchor as the message truncation, with the same boundary (the anchor
+  line is the last one counted) and the same fallback (an anchor not in the file
+  truncates nothing), and limits subagent spend to the agents the kept lines spawned.
+  Agents spawned from inside a subagent cannot be placed on a side of the anchor from
+  the main file, so a truncated read leaves them out (a slight under-count rather than
+  the parent's whole spend).
 - ~~**The delete channels keep the `config` capability while now cancelling engines.**~~
   **RESOLVED by ADR-056:** both moved to `chat`, in both registrars. The review this
   asked for concluded that the honest label was neither "config" nor something
@@ -536,12 +564,12 @@ line is a named next step with the reason it is not phase-4 work.
   is documented as leaving the object usable for a later `run()` — and harmless
   because canonical no longer has the id, so nothing it emits is folded. Noted so
   it is not mistaken for a leak introduced by the delete path.
-- **Turn-end queue flush cannot position what it sweeps.** When a queue push lands
-  at/after a turn's `result`, cli.js takes it as the next turn's fresh prompt and no
-  `queued_command_consumed` ever arrives, so the item's position in the transcript is
-  genuinely unknowable — the flush marks it consumed at the boundary and the bubble
-  appears there. Attachment-carrying items no longer take this path by accident (that
-  was the correlation defect above); this is the residual, honest case.
+- ~~**Turn-end queue flush cannot position what it sweeps.**~~ **RESOLVED 2026-09-25
+  (ADR-079):** when a queue push lands at/after a turn's `result`, cli.js takes it as the
+  next turn's fresh prompt, and the uuid-keyed `command_lifecycle` `started` for it now
+  arrives right after that `result`. So the boundary where the flush marks it consumed
+  IS where cli.js takes it; the flush just runs a millisecond ahead, and the late
+  `started` no-ops.
 
 **Phase 5** — volatile-stream separation and per-client subscriptions: stream/PTY/log
 frames leave the ring entirely (`{streamId, turnId, offset, chunk}` with self-healing
@@ -615,8 +643,10 @@ background reconnect catches up without a `sync-full`.
   cannot re-mint the entry (the F7 pairing, extended in
   [sync-channels.md](sync-channels.md) §Eviction). Exit criterion:
   `src/e2e/flows/watch-update-refetch.e2e.test.ts`.
-- **The voice surface's lane split remains** — `voice:error` still rings because one of
-  its two emitters is `BaseSession.send` (see the note in `core/shared/sync/channels.ts`).
+- **The voice surface's lane split remains** — `voice:error` still rings. Its
+  `BaseSession.send` emitter is gone (desktop capture moved into the renderer), so the one
+  left is the desktop owner in `voice-relay.ts`; narrowing the class is still a
+  ring-membership change (see the note in `core/shared/sync/channels.ts`).
 
 **Command-registry completeness** (the `command()` migration, ADR-051 contract 1):
 
@@ -651,14 +681,41 @@ background reconnect catches up without a `sync-full`.
 
 **Replication gaps recorded rather than closed:**
 
-- **The desktop's effort / thinking-mode / reasoning-variant picks are client-local.**
-  `session-store`'s `setEffort` / `setThinkingMode` / `setReasoningVariant` call
-  `patchLocalSession` with no IPC: the desktop picker RESTARTS the session and the
-  respawn carries the value, so between the pick and the respawn that value's only home
-  is the client that made it — canonical (and therefore every remote client) does not
-  see it. Main-side setters exist (`session:set-effort`, `session:set-thinking-mode`)
-  and the pre-spawn `session:config-changed` echo exists; wiring the desktop picker to
-  them is the remaining half.
+- **The reasoning-variant pick is client-local until the session is live.** Effort and
+  thinking mode were the same gap and are now CLOSED for Claude / opencode / pi, by
+  freezing what the process starts with into the session. Their pickers write
+  `session-store`'s `setEffort` / `setThinkingMode` (`patchLocalSession`, no IPC) and
+  RESTART the session, and every spawn (the respawn, and the first send, which is also
+  how a pre-spawn pick leaves the originating client) goes through `session:create`,
+  whose trailing `announce` argument says what every replica adopts as the session's own
+  (`spawnAnnouncement`, `lib/session-effort.ts`): `effort` is `null` for a model KNOWN to
+  take none, omitted for a model the client does not know (empty or failed catalog), and
+  otherwise a signal to announce the effort the host spawns with; `thinkingMode` is the
+  raw pick. `prepareAndCreateSession` puts `thinkingMode` on `session:created` whenever
+  `announce` is present and `effort` unless it was omitted (`null` clears), taking the
+  effort from the positional spawn arg so replicas show what the process runs, and the
+  reducer folds them by key presence — an unknown model can therefore never wipe a pick. A client that omits
+  `announce` (cached phone bundles; WS JSON `null`) sends neither field and behaves as
+  before. Canonical `effort` is therefore null only BEFORE a session's first spawn, when
+  the per-model starting effort still applies and every client derives it from the
+  replicated settings (Claude: `modelEffortDefaults`, keyed by `claudeEffortKey`; pi:
+  `engineEffortDefaults.pi`, keyed by the model value — kept apart so a pi model embedding
+  a Claude id cannot hit a Claude row; opencode and Codex remember none); at spawn that
+  effort becomes the session's own. Freezing is the intent: a later change to the
+  per-model value (the composer's effort pick also rewrites it, "remembered per
+  model") affects only sessions that have not started, and every replica shows what the
+  process runs rather than the current map. The freeze lasts for the host run: canonical
+  `effort` is not persisted, so after a host restart a resumed session re-resolves
+  against the current per-model value, which is also what it is respawned with. A model
+  switch on a session that has not started (no process, no thread id) clears the effort
+  so the new model's starting effort applies; a started or running one keeps its
+  (coerced) effort, as the live process does. Codex's native tiers are out of scope:
+  they use the live `session:set-effort` setter. Still open:
+  `session:set-reasoning-variant` has a main-side setter, but `session:config-changed`
+  is dropped when no live session exists (the R5 gate in `handlers-core.ts` — a
+  pre-spawn session lives only in its creating client's replica, so the echo the earlier
+  design assumed does not exist), so a pre-spawn variant pick still reaches no other
+  client.
 - **A zero-session `sync-full` cannot carry `slashCommands` / `sdkSkillNames`.**
   `SyncCore.setAppState` seeds them app-level at boot, but `FullStateSnapshot` has no
   app-level field — `toSnapshot` fans the one list into every PER-SESSION entry — so a

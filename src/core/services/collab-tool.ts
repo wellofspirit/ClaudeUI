@@ -5,14 +5,28 @@ import { crossEngineDispatcher } from './cross-engine-dispatcher'
 import { loadEngineConfig } from './ui-config'
 import { peekOpencodeModels } from '../opencode/model-discovery'
 import { describeDispatchModels } from './dispatch-model-hint'
-import type { EngineId } from '../../shared/types'
+import type { ChatMessage, EngineId } from '../../shared/types'
+import {
+  dispatchAgentDescription,
+  joinDispatchHints,
+  OWN_SUBAGENT_TOOL
+} from '../../shared/dispatch-agent-description'
+import type { BlockedCallLedger } from '../automode/blocked-calls'
 
 export interface CollabServerContext {
   engineId: EngineId
   /** Live routingId lookup — the session is rekeyed to its UUID after init. */
   getRoutingId: () => string
   cwd: string
+  /** Live permission-mode lookup — read at every dispatch decision (ADR-088). */
   getAutonomyMode: () => string
+  /** The session's live transcript (`getMessages()`), for the judge of a
+   *  dispatched pi/opencode target's calls (ADR-088). */
+  getMessages: () => ChatMessage[]
+  /** The session's still-queued user turns (ADR-091 §4), for the same judge. */
+  getQueuedUserTurns?: () => ChatMessage[]
+  /** The session's approvable blocks and grants (ADR-091 part 6), for the same judge. */
+  blockedCalls?: BlockedCallLedger
   /** BaseSession.send — re-emits under the dispatching session's routing. */
   emit: (channel: string, data: unknown) => void
   /** BaseSession.addDispatchedCost — folds a dispatched turn's spend into this
@@ -69,14 +83,15 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
     tools: [
       tool(
         'dispatch_agent',
-        'Delegate a task to an agent running on a DIFFERENT engine — opencode (fronts ' +
-          'non-Anthropic model vendors, e.g. GPT or Gemini models), pi (an alternative coding-agent ' +
-          "harness) or codex (OpenAI's own coding agent). The agent runs headless in the same working " +
-          'directory and its final answer is returned as this tool result. The result includes a ' +
-          'session_id — pass it back as `session_id` to continue the same agent with its context ' +
-          'intact (multi-turn collaboration). The available model list is user-configured per target ' +
-          "engine; omit `model` to use that engine's configured default. " +
-          `For opencode: ${modelHint.long} For pi: ${piModelHint.long} For codex: ${codexModelHint.long}`,
+        dispatchAgentDescription({
+          targets: ['opencode', 'pi', 'codex'],
+          ownSubagentTool: OWN_SUBAGENT_TOOL.claude,
+          hints: joinDispatchHints([
+            { targetEngine: 'opencode', long: modelHint.long },
+            { targetEngine: 'pi', long: piModelHint.long },
+            { targetEngine: 'codex', long: codexModelHint.long }
+          ])
+        }),
         {
           // 'opencode', 'pi' (ADR-033 M4c) and 'codex' (slice H) are listed:
           // dispatching to 'claude' from a Claude session is same-engine and
@@ -110,7 +125,10 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
               fromEngine: ctx.engineId,
               fromRoutingId: ctx.getRoutingId(),
               cwd: ctx.cwd,
-              autonomyMode: ctx.getAutonomyMode(),
+              getAutonomyMode: ctx.getAutonomyMode,
+              getMessages: ctx.getMessages,
+              ...(ctx.getQueuedUserTurns ? { getQueuedUserTurns: ctx.getQueuedUserTurns } : {}),
+              ...(ctx.blockedCalls ? { blockedCalls: ctx.blockedCalls } : {}),
               emit: ctx.emit,
               addDispatchedCost: ctx.addDispatchedCost,
               toolUseId: typeof toolUseId === 'string' ? toolUseId : undefined,

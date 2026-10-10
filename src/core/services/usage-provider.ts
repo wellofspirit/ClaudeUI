@@ -46,8 +46,10 @@ import {
   latestAccountLabels,
   latestWindowSamples,
   listRemoteDevices,
+  listRemoteCredits,
   listRemoteLimits,
   updateAccountIdentity,
+  type RemoteCreditRow,
   type RemoteLimitRow
 } from './db'
 import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
@@ -437,6 +439,7 @@ const chatgptLimitsProvider: LimitsProvider = {
         plan: account.planType ?? null,
         windows,
         ...(account.credits ? { credits: account.credits } : {}),
+        ...(account.creditLimit ? { creditLimit: account.creditLimit } : {}),
         observedAt: account.fetchedAt,
         source: 'local',
         state: 'ok'
@@ -533,15 +536,17 @@ async function readEveryProvider(refresh: boolean, relayed: boolean): Promise<Ac
  */
 function relayedLimits(local: ReadonlyArray<AccountLimits>): AccountLimits[] {
   let rows: RemoteLimitRow[]
+  let creditRows: RemoteCreditRow[]
   try {
     rows = listRemoteLimits()
+    creditRows = listRemoteCredits()
   } catch (err) {
     // The remote cache being unreadable must not take the local readings down
     // with it: they are the ones with meters on screen.
     logger.debug('UsageProvider', `relayed limits unavailable: ${err}`)
     return []
   }
-  if (rows.length === 0) return []
+  if (rows.length === 0 && creditRows.length === 0) return []
 
   const held = new Set(local.map((entry) => entry.accountKey))
   // The hub's machine list, so a reading can say WHO took it rather than only
@@ -561,7 +566,12 @@ function relayedLimits(local: ReadonlyArray<AccountLimits>): AccountLimits[] {
 
   const byAccount = new Map<
     string,
-    { vendorId: string; plan: string | null; rows: RemoteLimitRow[] }
+    {
+      vendorId: string
+      plan: string | null
+      rows: RemoteLimitRow[]
+      credit: RemoteCreditRow | null
+    }
   >()
   for (const row of rows) {
     // `unknown` is the bucket every unattributable row shares, never an account
@@ -569,7 +579,29 @@ function relayedLimits(local: ReadonlyArray<AccountLimits>): AccountLimits[] {
     if (row.accountKey === UNKNOWN_ACCOUNT_KEY || held.has(row.accountKey)) continue
     const entry = byAccount.get(row.accountKey)
     if (entry) entry.rows.push(row)
-    else byAccount.set(row.accountKey, { vendorId: row.vendorId, plan: row.plan, rows: [row] })
+    else
+      byAccount.set(row.accountKey, {
+        vendorId: row.vendorId,
+        plan: row.plan,
+        rows: [row],
+        credit: null
+      })
+  }
+  // A credits plan's credits (ADR-072 §4, amended 2026-10-01). Joined on the key
+  // like the windows, and an account with credits and NO window — a ChatGPT
+  // business workspace — becomes a row of its own: before this the relay never
+  // mentioned it, and another machine showed nothing for the account.
+  for (const credit of creditRows) {
+    if (credit.accountKey === UNKNOWN_ACCOUNT_KEY || held.has(credit.accountKey)) continue
+    const entry = byAccount.get(credit.accountKey)
+    if (entry) entry.credit = credit
+    else
+      byAccount.set(credit.accountKey, {
+        vendorId: credit.vendorId,
+        plan: credit.plan,
+        rows: [],
+        credit
+      })
   }
 
   const out: AccountLimits[] = []
@@ -586,22 +618,37 @@ function relayedLimits(local: ReadonlyArray<AccountLimits>): AccountLimits[] {
         resetsAt: row.resetsAt,
         windowMinutes: row.windowMinutes
       }))
-    // The newest observation across the kinds: the age a surface shows is the
-    // age of the freshest thing on the row.
-    const observedAt = Math.max(...entry.rows.map((row) => row.observedAt))
-    const newest = entry.rows.find((row) => row.observedAt === observedAt) ?? entry.rows[0]
+    // The newest observation across the kinds: the age a surface shows is the age
+    // of the freshest thing on the row. The WINDOWS' when there are any — the
+    // credits carry their own source below, because the two relays are separate
+    // and can come from different machines — and the credit's on a row that is
+    // nothing but credits.
+    const credit = entry.credit
+    const observations: Array<{
+      deviceId: string
+      labelMasked: string | null
+      observedAt: number
+    }> = entry.rows.length > 0 ? entry.rows : credit ? [credit] : []
+    const observedAt = Math.max(...observations.map((row) => row.observedAt))
+    const newest = observations.find((row) => row.observedAt === observedAt) ?? observations[0]
     const ledgerLabel = ledgerLabels.get(accountKey)
+    const deviceName = (deviceId: string): string => deviceNames.get(deviceId)?.trim() || deviceId
     out.push({
       accountKey,
       label: ledgerLabel ?? newest.labelMasked ?? accountKey,
       vendorId: entry.vendorId,
       plan: entry.plan,
       windows,
+      ...(credit?.credits ? { credits: credit.credits } : {}),
+      ...(credit?.allowance ? { creditLimit: credit.allowance } : {}),
+      ...(credit
+        ? {
+            creditSource: { deviceId: credit.deviceId, deviceName: deviceName(credit.deviceId) },
+            creditObservedAt: credit.observedAt
+          }
+        : {}),
       observedAt,
-      source: {
-        deviceId: newest.deviceId,
-        deviceName: deviceNames.get(newest.deviceId)?.trim() || newest.deviceId
-      },
+      source: { deviceId: newest.deviceId, deviceName: deviceName(newest.deviceId) },
       ...(ledgerLabel === undefined && newest.labelMasked !== null ? { labelMasked: true } : {}),
       // `ok` rather than `stale`: the reading is as current as the account's
       // state gets, and `stale` means "this machine did not spend a grant",

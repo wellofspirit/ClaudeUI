@@ -1,8 +1,9 @@
 # ADR-053 — Queued messages: itemized identity in core, Claude-Code-parity take-back on every engine
 
 **Status:** Accepted (2026-08-13) — design; implemented in SyncCore phase 3 per `docs/architecture/sync-core.md` §Queue
-**Relates to:** ADR-030 (capability honesty — uniform events over per-engine transports), ADR-035 (pi steer), ADR-038 (event-driven lifecycle, applied to the queue), ADR-051 (the event model this rides on)
+**Relates to:** ADR-030 (capability honesty — uniform events over per-engine transports), ADR-035 (pi steer), ADR-038 (event-driven lifecycle, applied to the queue), ADR-051 (the event model this rides on), ADR-089 (agent deliveries into a pi session are NOT queue items: pi's own steer queue gives them boundary timing, and there is nothing to take back)
 **Amends:** ADR-024 (its queue/steer parity for opencode is redefined by the emulation below)
+**Superseded in part by:** [ADR-097](adr-097_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — its host-held queue, for opencode only. As built: ADR-097 §9 "As built (S5)" (the item is posted to the inbox at once with `steer` — §1's timing — and stays the queue card until delivered).
 
 ## Context
 
@@ -25,3 +26,25 @@ The owner's original interaction design is Claude Code CLI's, deliberately: queu
 - opencode/pi gain a genuine cancel window for the first time; the cross-engine UX contract is uniform (ADR-030: the flag is true because the full path works — via emulation core owns, not engine claims).
 - cli.js patch surface does not grow, and the steer-side patch (`queue-control`) becomes the claude transport detail behind the uniform events.
 - Attachments ride queue items end-to-end (the as-built blob dropped them from display).
+
+## Amended 2026-09-25 — the claude transport is keyed by uuid
+
+Decision §3's claude bullet — correlate by text over the `queue-control` patch surface — is
+retired for the claude engine ([ADR-079](adr-079_claude-harness-capability-gating-and-patch-set.md)
+§3). The patch is deleted, and Anthropic's official binary never had it: there `dequeue_message`
+is rejected, so take-back silently failed, and no consumption signal arrived for a message with no
+client id, so the card stayed QUEUED past consumption and the steer bubble landed below its own
+answer.
+
+Every claude user frame now carries a client `uuid`, and a queued item's is its `itemId`. cli.js's
+native `command_lifecycle` frames name the message by it: `started` consumes the item (at the
+tool boundary where the running turn folds it in, or when the between-turns drain makes it the
+next turn's prompt), `discarded`/`refused` recall it with a warning, and `cancelled` recalls it
+only while it is still queued. Take-back is `cancel_async_message {message_uuid: itemId}`. Items
+with duplicate texts are now individually addressable, so the "duplicates are interchangeable"
+argument no longer carries any weight for claude. The turn-end `result` flush stays as a safety
+net. The rest of this ADR is unchanged — itemized storage, CC-parity timing, recall-all on
+ArrowUp, event-driven transitions — and text correlation remains the mechanism for opencode and
+pi, whose posts carry no id we choose (Codex correlates by `clientUserMessageId`, ADR-066).
+Wire detail: `docs/protocol-cc/03-inbound-messages.md` §3.21 and `07-control-outbound.md`
+(`cancel_async_message`).

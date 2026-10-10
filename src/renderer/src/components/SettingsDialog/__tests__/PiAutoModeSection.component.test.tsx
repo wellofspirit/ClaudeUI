@@ -5,7 +5,8 @@
  * PiSession has read `loadEngineConfig('pi').autoMode` since the phase-4
  * gatekeeper wiring; this section is the first UI that can write it. Tested
  * flows:
- *   1. Gated states: loading (probes pending) and pi-not-installed
+ *   1. Loading while the config is pending (a pi that does not run hides the
+ *      judge's pi segment, never reaches here — ADR-082 §8)
  *   2. Load renders the saved autoMode block; judge options are pi models ONLY
  *   3. The judge picker is the themed ModelPicker, NOT a native <select>
  *      (native <option> lists are OS-painted — unreadable under Monokai)
@@ -17,10 +18,13 @@
  *   8. The three trust lists are NOT here any more: ADR-065 phase 4 moved them
  *      to the shared `automode.json` and its own Trust & protection group
  *      (TrustLists.component.test.tsx). This pane must not resurrect them.
+ *   9. ClaudeUI calls the judge itself (ADR-081): the picker lists only the
+ *      models `judgeModelSupport` says it can call, a saved model it can't
+ *      call gets a notice with the reason, and an empty list says so
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
-import type { EngineConfig, EngineModelGroup } from '../../../../../shared/types'
+import type { EngineConfig, EngineModelGroup, JudgeModelSupport } from '../../../../../shared/types'
 
 import { SECTIONS, PiAutoModeSection } from '../settings-sections'
 
@@ -80,11 +84,23 @@ const saveEngineConfig = vi.fn(async (engineId: string, cfg: EngineConfig) => {
   savedConfigs.push(structuredClone(cfg))
 })
 
+/** Every value is callable, unless listed in `refused` (value → reason). */
+function supportFor(refused: Record<string, string> = {}) {
+  return vi.fn(async (_engineId: string, values: string[]) =>
+    Object.fromEntries(
+      values.map((v): [string, JudgeModelSupport] => [
+        v,
+        v in refused ? { ok: false, reason: refused[v] } : { ok: true }
+      ])
+    )
+  )
+}
+
 function installApiStub(overrides: Record<string, unknown> = {}): void {
   ;(window as unknown as { api: Record<string, unknown> }).api = {
-    engineIsInstalled: vi.fn(async () => true),
     loadEngineConfig: vi.fn(async () => structuredClone(BASE_CONFIG)),
     getEngineModels: vi.fn(async () => MODEL_GROUPS),
+    judgeModelSupport: supportFor(),
     saveEngineConfig,
     ...overrides
   }
@@ -130,26 +146,12 @@ describe('PiAutoModeSection — registration', () => {
   })
 })
 
-describe('PiAutoModeSection — gated states', () => {
-  it('shows Loading while probes are pending', () => {
-    installApiStub({
-      engineIsInstalled: vi.fn(() => new Promise(() => {})),
-      loadEngineConfig: vi.fn(() => new Promise(() => {}))
-    })
+describe('PiAutoModeSection — loading', () => {
+  it('shows Loading while the config is pending', () => {
+    installApiStub({ loadEngineConfig: vi.fn(() => new Promise(() => {})) })
     render(<PiAutoModeSection />)
     expect(screen.getByTestId('PiAutoModeSection').textContent).toContain('Loading')
     expect(screen.queryByTestId('PiAutoModeSection.enabled')).toBeNull()
-  })
-
-  it('shows the not-installed message (no controls) when pi is absent', async () => {
-    installApiStub({ engineIsInstalled: vi.fn(async () => false) })
-    render(<PiAutoModeSection />)
-    await waitFor(() =>
-      expect(screen.getByTestId('PiAutoModeSection').textContent).toContain('not installed')
-    )
-    expect(screen.queryByTestId('PiAutoModeSection.enabled')).toBeNull()
-    expect(screen.queryByTestId('PiAutoModeSection.judgeModel')).toBeNull()
-    expect(screen.queryByTestId('PiAutoModeSection.twoStageMode')).toBeNull()
   })
 })
 
@@ -369,6 +371,10 @@ describe('OpencodeAutoModeSection - same core, own engine + testids', () => {
       screen.getAllByTestId('ModelPicker.option').map((o) => o.getAttribute('data-value'))
     ).toEqual(['', 'openai/gpt-5'])
 
+    // The support query names opencode's own values, never pi's.
+    const api = (window as unknown as { api: { judgeModelSupport: ReturnType<typeof vi.fn> } }).api
+    expect(api.judgeModelSupport).toHaveBeenCalledWith('opencode', ['openai/gpt-5'])
+
     fireEvent.click(judgeOption('openai/gpt-5'))
     expect(savedEngineIds[0]).toBe('opencode')
     expect(savedConfigs[0].autoMode?.judgeModel).toBe('openai/gpt-5')
@@ -382,5 +388,83 @@ describe('OpencodeAutoModeSection - same core, own engine + testids', () => {
     for (const field of ['trustedDomains', 'trustedRegistries', 'protectedPatterns']) {
       expect(screen.queryByTestId(`OpencodeAutoModeSection.${field}`)).toBeNull()
     }
+  })
+})
+
+// -- ADR-081: only models ClaudeUI can call for the judge are offered -------
+
+describe('AutoModeSection - the picker offers only models ClaudeUI can call', () => {
+  const MINI = 'openai-codex/gpt-5.6-mini'
+  const LUNA = 'openai-codex/gpt-5.6-luna'
+  const REASON =
+    '"openai-codex" is set up inside pi, not in ClaudeUI, so ClaudeUI cannot call it for the judge.'
+
+  function options(): (string | null)[] {
+    return screen.getAllByTestId('ModelPicker.option').map((o) => o.getAttribute('data-value'))
+  }
+
+  it("asks about this engine's models and lists only the supported ones", async () => {
+    const judgeModelSupport = supportFor({ [LUNA]: REASON })
+    installApiStub({
+      judgeModelSupport,
+      loadEngineConfig: vi.fn(async () => ({ autoMode: { enabled: true } }))
+    })
+    await renderLoaded()
+    await waitFor(() => expect(judgeModelSupport).toHaveBeenCalled())
+    expect(judgeModelSupport).toHaveBeenCalledWith('pi', [LUNA, MINI])
+
+    openJudgePicker()
+    await waitFor(() => expect(options()).toEqual(['', MINI]))
+    // The saved value is unset, so nothing needs a notice.
+    expect(screen.queryByTestId('PiAutoModeSection.judgeModel.unsupported')).toBeNull()
+  })
+
+  it("a SAVED judge model ClaudeUI can't call keeps its name and gets the reason underneath", async () => {
+    installApiStub({ judgeModelSupport: supportFor({ [MINI]: REASON }) })
+    await renderLoaded()
+
+    const notice = await screen.findByTestId('PiAutoModeSection.judgeModel.unsupported')
+    expect(notice.getAttribute('data-state')).toBe('unsupported')
+    expect(notice.getAttribute('data-model')).toBe(MINI)
+    expect(notice.textContent).toBe(REASON)
+    // Still shown by its display name — not as an unknown value, not as stale.
+    const field = screen.getByTestId('PiAutoModeSection.judgeModel')
+    expect(field.textContent).toContain('GPT-5.6 Mini')
+    expect(field.textContent).not.toContain('(unavailable)')
+    expect(screen.queryByTestId('PiAutoModeSection.judgeModel.staleModel')).toBeNull()
+    // …and no longer offered.
+    openJudgePicker()
+    expect(options()).toEqual(['', LUNA])
+  })
+
+  it('no model left → only the default row, and a notice naming Models & providers', async () => {
+    installApiStub({ judgeModelSupport: supportFor({ [LUNA]: REASON, [MINI]: REASON }) })
+    await renderLoaded()
+
+    const notice = await screen.findByTestId('PiAutoModeSection.judgeModel.unsupported')
+    expect(notice.getAttribute('data-state')).toBe('none')
+    expect(notice.textContent).toContain('No model here can judge')
+    expect(notice.textContent).toContain('Settings › Models & providers')
+    openJudgePicker()
+    expect(options()).toEqual([''])
+  })
+
+  it('a failed support query lists every model and shows no notice', async () => {
+    installApiStub({
+      judgeModelSupport: vi.fn(async () => {
+        throw new Error('boom')
+      })
+    })
+    await renderLoaded()
+    openJudgePicker()
+    expect(options()).toEqual(['', LUNA, MINI])
+    expect(screen.queryByTestId('PiAutoModeSection.judgeModel.unsupported')).toBeNull()
+  })
+
+  it('the row says why the list is short', async () => {
+    await renderLoaded()
+    expect(screen.getByTestId('PiAutoModeSection.judgeModelRow').textContent).toContain(
+      'ClaudeUI calls the judge itself'
+    )
   })
 })

@@ -1,0 +1,67 @@
+{
+  "id": "codex",
+  "tested": "0.160.1",
+  "floor": "0.160.1",
+  "ceiling": "1.0.0",
+  "sourceCommit": "d27764b82f7118f674371e6d6e76271d9d606edb",
+  "license": "https://raw.githubusercontent.com/openai/codex/d27764b82f7118f674371e6d6e76271d9d606edb/LICENSE",
+  "licenseSha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
+  "platforms": {
+    "darwin-arm64": {
+      "binaries": {
+        "codex": {
+          "member": "codex-aarch64-apple-darwin",
+          "archiveSha256": "670af2b049d9c95afb74d7da385f30c5033d13a07175001dd8958c51944984d0",
+          "binarySha256": "09fa44fdc37a5fc70dc1ace31235f90468a2e193d0e85f7552eab068ea2582be"
+        },
+        "codex-code-mode-host": {
+          "member": "codex-code-mode-host-aarch64-apple-darwin",
+          "archiveSha256": "6e502df69d9220fa305b0c3c7c17ba8f31ab1d4591fc140084dbb823e800c7db",
+          "binarySha256": "6ac432b170e2c30f90de5af0da584def5201497a0d3d988d37dc58b951236b2f"
+        }
+      }
+    },
+    "win32-x64": {
+      "binaries": {
+        "codex.exe": {
+          "member": "codex-x86_64-pc-windows-msvc.exe",
+          "archiveSha256": "12cf8aa4f5e4ef3e6602f6c0e98838f8092f63357f01bd3c7379b216df27cc78",
+          "binarySha256": "9e7c59c05cc1ce5677b1f94e835b2ac038ca3be14504e78d558eacdb0ea3f55d"
+        },
+        "codex-code-mode-host.exe": {
+          "member": "codex-code-mode-host-x86_64-pc-windows-msvc.exe",
+          "archiveSha256": "40f9fa92d6d1366d12b67c6668e3bf69324efae02bd5f58e069c8a6c5c161b15",
+          "binarySha256": "b905b5169bd758dbe3c31ca22c22ad0c24df0047ba7ae32652c706d3ac3ba78d"
+        }
+      }
+    },
+    "linux-x64": {
+      "binaries": {
+        "codex": {
+          "member": "codex-x86_64-unknown-linux-musl",
+          "archiveSha256": "9226581be592d18f7e7f740a352fdb63aa61e45e39f7eb9b09d3888c84bba33f",
+          "binarySha256": "f34a4d2301892ae96c90097786bfe5dc269f187b6f69faf42a7b357b8c081e35"
+        },
+        "codex-code-mode-host": {
+          "member": "codex-code-mode-host-x86_64-unknown-linux-musl",
+          "archiveSha256": "8a69207d97545ac753b6585974e1e67a4c51ae5deacf06517db512bb25e0e3c2",
+          "binarySha256": "b33e8a5283f3c65c2a0aca6d43a59cfe850f624d8fa16992e3cad4fcc27c14e1"
+        }
+      }
+    },
+    "linux-arm64": {
+      "binaries": {
+        "codex": {
+          "member": "codex-aarch64-unknown-linux-musl",
+          "archiveSha256": "f54dc5852042445bf41da3aa31156f3cb02f52c5a1a04074de73dc5598f7e1f7",
+          "binarySha256": "fbbaec80443919f86dd63648a0b62759cf6f1d0e09310602fde96885e0bceb3e"
+        },
+        "codex-code-mode-host": {
+          "member": "codex-code-mode-host-aarch64-unknown-linux-musl",
+          "archiveSha256": "e5e027e6689efda2e3570aa600179f0ebb18632803350e152ed6c9b97dcf9741",
+          "binarySha256": "fbccde22982e3e679678e203a9c18eee8342fb04b096063d05159f1f80df4fd8"
+        }
+      }
+    }
+  }
+}

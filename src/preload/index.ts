@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   ApprovalDecision,
+  AttachmentUpload,
   ClaudeAPI,
   PermissionSuggestion,
   ProxySettings
@@ -16,7 +17,7 @@ import { verifierHooksEnabled } from '../shared/verifier-hooks'
  * events no longer ride `webContents.send`: they arrive on the sync port and are
  * subscribed to in the renderer via `shared/sync/client-registry.onSyncEvent`.
  * What is left here is the host talking to its own shell — window chrome, the
- * native OAuth flow, voice capture, desktop PTY bytes, the log-viewer window,
+ * native OAuth flow, voice state/transcripts, desktop PTY bytes, the log-viewer window,
  * plugin views, quit handshake — none of which a remote client has or wants.
  */
 function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
@@ -99,7 +100,8 @@ const api: ClaudeAPI = {
     thinkingMode?: string,
     resumeSessionAt?: string,
     forkSession?: boolean,
-    engineId?: import('../shared/types').EngineId
+    engineId?: import('../shared/types').EngineId,
+    announce?: { effort?: string | null; thinkingMode?: string | null }
   ) =>
     ipcRenderer.invoke(
       'session:create',
@@ -112,7 +114,8 @@ const api: ClaudeAPI = {
       thinkingMode,
       resumeSessionAt,
       forkSession,
-      engineId
+      engineId,
+      announce
     ),
   resolveForkAnchor: (
     sessionId: string,
@@ -129,11 +132,8 @@ const api: ClaudeAPI = {
       engineId,
       messageIndex
     ),
-  sendPrompt: (
-    routingId: string,
-    prompt: string,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-  ) => ipcRenderer.invoke('session:send', routingId, prompt, attachments),
+  sendPrompt: (routingId: string, prompt: string, attachments?: AttachmentUpload[]) =>
+    ipcRenderer.invoke('session:send', routingId, prompt, attachments),
   cancelSession: (routingId: string) => ipcRenderer.invoke('session:cancel', routingId),
   clearConversation: (routingId: string, permissionMode?: string) =>
     ipcRenderer.invoke('session:clear-conversation', routingId, permissionMode),
@@ -153,6 +153,8 @@ const api: ClaudeAPI = {
       answers,
       updatedPermissions
     ),
+  approveBlocked: (routingId: string, toolUseId: string) =>
+    ipcRenderer.invoke('session:approve-blocked', routingId, toolUseId),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
@@ -166,6 +168,7 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:load-history', sessionId, projectKey, resumeSessionAt),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>
     ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
+  getBlob: (blobId: string) => ipcRenderer.invoke('blob:get', blobId),
   buildSubagentFileMap: (
     sessionId: string,
     projectKey: string,
@@ -223,7 +226,9 @@ const api: ClaudeAPI = {
   setReasoningVariant: (routingId: string, variant: string | null) =>
     ipcRenderer.invoke('session:set-reasoning-variant', routingId, variant),
   getModels: () => ipcRenderer.invoke('session:get-models'),
-  getEngineModels: () => ipcRenderer.invoke('session:get-engine-models'),
+  getEngineModels: (engineId) => ipcRenderer.invoke('session:get-engine-models', engineId),
+  judgeModelSupport: (engineId, values) =>
+    ipcRenderer.invoke('automode:judge-model-support', engineId, values),
   getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
   setOpencodeProviderDisabled: (providerId: string, disabled: boolean) =>
     ipcRenderer.invoke('session:set-opencode-provider-disabled', providerId, disabled),
@@ -233,6 +238,18 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
   getPiModelCatalogGroups: () => ipcRenderer.invoke('session:get-pi-model-catalog'),
   engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
+  harnessState: () => ipcRenderer.invoke('harness:state'),
+  harnessVersions: (id) => ipcRenderer.invoke('harness:versions', { id }),
+  setHarnessSelection: (id, selection) =>
+    ipcRenderer.invoke('harness:set-selection', { id, selection }),
+  installHarness: (id, version) => ipcRenderer.invoke('harness:install', { id, version }),
+  cancelHarnessInstall: (id, version) =>
+    ipcRenderer.invoke('harness:install-cancel', { id, version }),
+  detectHarnesses: (ids) => ipcRenderer.invoke('harness:detect', ids ? { ids } : {}),
+  setHarnessUpdateMode: (mode) => ipcRenderer.invoke('harness:set-update-mode', { mode }),
+  updateHarnesses: () => ipcRenderer.invoke('harness:update-all'),
+  checkHarnessUpdates: () => ipcRenderer.invoke('harness:check-updates'),
+  answerHarnessUpgradePrompt: () => ipcRenderer.invoke('harness:answer-upgrade-prompt'),
   getPiBinaryPath: () => ipcRenderer.invoke('pi:binary-path'),
   getPiAuthStatus: () => ipcRenderer.invoke('pi:auth-status'),
   generateTitle: (conversationText: string) =>
@@ -472,11 +489,15 @@ const api: ClaudeAPI = {
   saveEngineConfig: (engineId: string, config: import('../shared/types').EngineConfig) =>
     ipcRenderer.invoke('config:save-engine-config', engineId, config),
   loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
-  saveOpencodeSettings: (settings: import('../shared/types').OpencodeConfigSettings) =>
-    unwrap('config:save-opencode-settings', settings),
+  saveOpencodeSettings: (
+    settings: import('../shared/types').OpencodeConfigSettings,
+    base?: import('../shared/types').OpencodeConfigSettings
+  ) => unwrap('config:save-opencode-settings', settings, base),
   readOpencodeNativeRaw: () => unwrap('config:read-opencode-native-raw'),
   patchOpencodeNative: (patches: import('../shared/types').RawConfigPatch[]) =>
     unwrap('config:patch-opencode-native', patches),
+  setOpencodeToolDisabled: (action: string, disabled: boolean) =>
+    unwrap('config:set-opencode-tool-disabled', action, disabled),
   readPiNativeRaw: () => unwrap('config:read-pi-native-raw'),
   patchPiNative: (patches: import('../shared/types').RawConfigPatch[]) =>
     unwrap('config:patch-pi-native', patches),
@@ -490,6 +511,8 @@ const api: ClaudeAPI = {
     models: string[] | null
   ) => unwrap('models:set-provider-allowlist', engine, providerId, models),
   listOpencodeAgents: (cwd?: string) => unwrap('opencode-agents:list', cwd),
+  listAgentTypes: (engine: import('../shared/types').EngineId, cwd?: string) =>
+    unwrap('config:list-agent-types', engine, cwd),
   readOpencodeAgent: (
     name: string,
     scope: import('../shared/types').OpencodeAgentScope,
@@ -528,15 +551,27 @@ const api: ClaudeAPI = {
   getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
   listSharedProviderModels: (id: string) => unwrap('shared-provider:models', id),
   saveSharedProvider: (definition) => unwrap('shared-provider:save', definition),
+  probeSharedEndpoint: (input) => unwrap('shared-provider:probe', input),
   removeSharedProvider: (id: string) => unwrap('shared-provider:remove', id),
   setSharedProviderRoute: (id, harness, enabled) =>
     unwrap('shared-provider:set-route', id, harness, enabled),
-  setSharedProviderApiKey: (id: string, key: string) => unwrap('shared-provider:set-key', id, key),
+  // `replaceOwn` (the harnesses the user agreed to overwrite) goes on the
+  // wire only when it names one (S7f).
+  setSharedProviderApiKey: (id, key, replaceOwn) =>
+    unwrap('shared-provider:set-key', id, key, ...(replaceOwn?.length ? [replaceOwn] : [])),
   adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
   setSharedProviderCuration: (id, curation) => unwrap('shared-provider:set-curation', id, curation),
   setSharedProviderDisabled: (id, disabled, replaceOwn) =>
-    unwrap('shared-provider:set-disabled', id, disabled, replaceOwn),
+    unwrap(
+      'shared-provider:set-disabled',
+      id,
+      disabled,
+      ...(replaceOwn?.length ? [replaceOwn] : [])
+    ),
   syncSharedProvider: (id: string) => unwrap('shared-provider:sync', id),
+  useSharedProviderStoredKey: (id, harness) =>
+    unwrap('shared-provider:use-stored-key', id, harness),
+  getSharedProviderOwnKeyHolders: (id) => unwrap('shared-provider:own-key-holders', id),
   disconnectSharedProvider: (id: string) => unwrap('shared-provider:disconnect', id),
   setSharedProviderDefaultModel: (id, harness, modelId?) =>
     unwrap('shared-provider:set-default', id, harness, modelId),
@@ -604,12 +639,13 @@ const api: ClaudeAPI = {
     throw new Error('Passkey enrollment runs in a browser — use the enrollment link or QR code.')
   },
 
-  // Voice input
-  voiceStartServer: (routingId: string) => unwrap('voice:start-server', routingId),
-  voiceStopServer: (routingId: string) => unwrap('voice:stop-server', routingId),
-  voiceStartRecording: (routingId: string, language: string) =>
+  // Voice input — the transport only; the renderer owns the microphone. Audio is
+  // a fire-and-forget `send`, not an invoke: ~7 a second, nothing to answer.
+  voiceStart: (routingId: string, language: string) =>
     unwrap('voice:start-recording', routingId, language),
-  voiceStopRecording: (routingId: string) => unwrap('voice:stop-recording', routingId),
+  voiceAudio: (routingId: string, dataB64: string) =>
+    ipcRenderer.send('voice:audio', routingId, dataB64),
+  voiceStop: (routingId: string) => unwrap('voice:stop-recording', routingId),
   onVoiceTranscript: onEvent('voice:transcript'),
   onVoiceState: onEvent('voice:state'),
 

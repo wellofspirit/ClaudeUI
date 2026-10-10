@@ -161,7 +161,7 @@ describe('composeReviewPrompt', () => {
 import React from 'react'
 import { render, act } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
-import { useSessionStore } from '../../../../stores/session-store'
+import { markViewEvicted, useSessionStore } from '../../../../stores/session-store'
 import { resetFactoryCounter } from '@test/factories/messages'
 import type { ReviewBarViewProps } from '../View'
 import { ReviewBar } from '../ReviewBar'
@@ -253,6 +253,50 @@ describe('ReviewBar FC — rendered', () => {
 
     // clearDiffComments should have been called: gitReviewComments is empty
     expect(useSessionStore.getState().sessions[FC_ROUTE].gitReviewComments).toEqual([])
+  })
+
+  it('onSend on an evicted, empty session resumes it by id instead of starting a new one', async () => {
+    // ADR-087 §2: the transcript was not carried, but the conversation exists.
+    markViewEvicted([FC_ROUTE])
+    render(React.createElement(ReviewBar, { comments: [makeDiffComment()] }))
+
+    await act(async () => {
+      await viewProps.onSend()
+    })
+
+    expect(createCalls).toHaveLength(1)
+    // createSession args: routingId, cwd, effort, resumeId, ...
+    expect(createCalls[0][3]).toBe(FC_ROUTE)
+  })
+
+  it("onSend spawns at the model's saved starting effort, not a hardcoded 'medium'", async () => {
+    useSessionStore.setState((s) => ({
+      availableModels: [
+        {
+          value: 'opus',
+          resolvedModel: 'claude-opus-5-5',
+          displayName: 'Opus',
+          description: '',
+          engineId: 'claude',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+        }
+      ],
+      settings: { ...s.settings, modelEffortDefaults: { opus: 'high' } },
+      sessions: {
+        ...s.sessions,
+        [FC_ROUTE]: { ...s.sessions[FC_ROUTE], selectedModel: 'opus', effort: null }
+      }
+    }))
+    render(React.createElement(ReviewBar, { comments: [makeDiffComment()] }))
+
+    await act(async () => {
+      await viewProps.onSend()
+    })
+
+    // createSession args: routingId, cwd, effort, ..., engineId, announce
+    expect(createCalls[0][2]).toBe('high')
+    expect(createCalls[0][10]).toEqual({ effort: 'high', thinkingMode: null })
   })
 
   it('onSend skips session creation when already active', async () => {

@@ -4,7 +4,10 @@ import { useSessionStore } from '../../stores/session-store'
 import type { EngineConfig, ModelInfo, VendorConfig } from '../../../../shared/types'
 import {
   claudeEffortKey,
+  claudeLegacyEffortKey,
+  claudeResolvedModelId,
   modelDefaultEffort,
+  withSavedEffort,
   modelSupportedEffortLevels,
   type EffortLevel
 } from '../../../../shared/model-capabilities'
@@ -28,9 +31,11 @@ import { LastPickNote } from './NewSessionModelSetting'
  *    Claude's `default` alias, i.e. today's behaviour; the store resolves a
  *    configured value that has vanished to "Select a model" + banner (ADR-059).
  *  - **Starting effort per model** — `settings.modelEffortDefaults`, one row per
- *    distinct `claudeEffortKey`: the key the composer reads at spawn, so an alias
- *    row and the model it resolves to share one setting. The aliases that reach
- *    a row are listed beside it instead of being explained in a footer.
+ *    distinct `claudeEffortKey`: the key the composer reads at spawn. A family
+ *    alias row is keyed by the alias, so its setting follows the alias to a new
+ *    model; `default` shares the row of the alias that resolves where it does.
+ *    The aliases that reach a row are listed beside it instead of being
+ *    explained in a footer.
  *
  * A saved effort for a model the account no longer offers is listed, folded,
  * with Remove — not dropped, and not hidden. When Claude › Model mapping pins
@@ -55,6 +60,10 @@ const DEFAULT_ALIAS = 'default'
 /** One table row: every catalog row that shares an effort key. */
 export interface ClaudeEffortRow {
   key: string
+  /** The concrete model the row runs on today. */
+  modelId: string
+  /** Where a v3.5 build saved this row's effort, still read until the row is edited. */
+  legacyKey?: string
   name: string
   /** Picker values that reach this model under another name. */
   aliases: string[]
@@ -65,37 +74,38 @@ export interface ClaudeEffortRow {
 }
 
 /**
- * Group the Claude catalog by `claudeEffortKey`, in cli.js's own order.
+ * Group the Claude catalog by `claudeEffortKey`, in cli.js's own order. The
+ * catalog lists aliases only (ADR-100), so a group is an alias plus `default`
+ * when `default` resolves where it does.
  *
- * The NAME comes from the concrete row (`value` is a `claude-…` id) when the
- * group has one, else from the first row that is not `default` — whose display
- * name is "Default (recommended)", which says nothing about the model. Levels
- * come from the same row's `supportedEffortLevels`, falling back to the id
- * heuristic for the key.
+ * The NAME comes from the first row that is not `default` — whose display name
+ * is "Default (recommended)", which says nothing about the model. Levels come
+ * from the same row's `supportedEffortLevels`, falling back to the id heuristic
+ * for the key.
  */
 export function buildClaudeEffortRows(models: ModelInfo[]): ClaudeEffortRow[] {
   const groups = new Map<string, ModelInfo[]>()
   for (const m of models) {
-    const key = claudeEffortKey(m)
+    const key = claudeEffortKey(m, models)
     if (!key) continue
     groups.set(key, [...(groups.get(key) ?? []), m])
   }
   return [...groups.entries()].map(([key, rows]) => {
-    const rep =
-      rows.find((r) => r.value.toLowerCase().startsWith('claude-')) ??
-      rows.find((r) => r.value !== DEFAULT_ALIAS) ??
-      rows[0]
-    // The row's capability flags, judged against the KEY: an alias value is
+    const rep = rows.find((r) => r.value !== DEFAULT_ALIAS) ?? rows[0]
+    const modelId = claudeResolvedModelId(rep)
+    // The row's capability flags, judged against the MODEL: an alias value is
     // opaque to the id heuristic the fallback uses.
     const probe = {
-      value: key,
+      value: modelId,
       supportsEffort: rep.supportsEffort,
       supportedEffortLevels: rep.supportedEffortLevels
     }
     return {
       key,
+      modelId,
+      legacyKey: claudeLegacyEffortKey(rep, models),
       name: rep.displayName || rep.value,
-      aliases: rows.map((r) => r.value).filter((v) => v !== key),
+      aliases: rows.map((r) => r.value).filter((v) => v !== modelId),
       values: rows.map((r) => r.value),
       levels: modelSupportedEffortLevels(probe),
       fallback: modelDefaultEffort(probe)
@@ -131,7 +141,7 @@ export function ClaudeDefaultsSection({
   const efforts = settings.modelEffortDefaults ?? {}
 
   // `default` is the empty option's job, so it is not offered twice; the
-  // concrete row it collapses with (`opus[1m]`) then survives the dedupe.
+  // alias row it collapses with (`opus[1m]`) then survives the dedupe.
   const pickable = useMemo(
     () =>
       dedupeResolvedModels(
@@ -156,11 +166,14 @@ export function ClaudeDefaultsSection({
     // change up without a restart — the same rule `setPiDefaultModel` follows.
     useSessionStore.getState().setClaudeDefaultModel(value)
   }
-  const saveEffort = (key: string, next: EffortLevel | undefined): void => {
-    const map = { ...efforts }
-    if (next === undefined) delete map[key]
-    else map[key] = next
-    update({ modelEffortDefaults: map })
+  const effortOf = (row: ClaudeEffortRow): EffortLevel | undefined =>
+    efforts[row.key] ?? (row.legacyKey ? efforts[row.legacyKey] : undefined)
+  // Writing a row moves a v3.5 value off its legacy key, so it cannot resurface.
+  const saveEffort = (
+    row: Pick<ClaudeEffortRow, 'key' | 'legacyKey'>,
+    next: EffortLevel | undefined
+  ): void => {
+    update({ modelEffortDefaults: withSavedEffort(efforts, row, next) })
   }
 
   const override = effectiveModelOverride(vendorConfig.modelOverride)
@@ -175,7 +188,7 @@ export function ClaudeDefaultsSection({
     ? (): void => navigate({ page: 'claude', group: 'model-mapping' })
     : undefined
 
-  const tableKeys = new Set(rows.map((r) => r.key))
+  const tableKeys = new Set(rows.flatMap((r) => (r.legacyKey ? [r.key, r.legacyKey] : [r.key])))
   const orphans = Object.entries(efforts).filter(
     (entry): entry is [string, EffortLevel] => !tableKeys.has(entry[0]) && !!entry[1]
   )
@@ -261,7 +274,7 @@ export function ClaudeDefaultsSection({
               </thead>
               <tbody className="divide-y divide-border/55">
                 {rows.map((row) => {
-                  const current = efforts[row.key]
+                  const current = effortOf(row)
                   return (
                     <tr key={row.key} data-testid={`${T}.effortRow`} data-id={row.key}>
                       <td className="px-3.5 py-2 align-middle">
@@ -277,7 +290,7 @@ export function ClaudeDefaultsSection({
                           )}
                         </span>
                         <span className="block font-mono text-[11px] leading-4 text-text-muted">
-                          {row.key}
+                          {row.modelId}
                         </span>
                       </td>
                       <td
@@ -304,7 +317,7 @@ export function ClaudeDefaultsSection({
                                 dataId={row.key}
                                 value={current ?? ''}
                                 onChange={(v) =>
-                                  saveEffort(row.key, v === '' ? undefined : (v as EffortLevel))
+                                  saveEffort(row, v === '' ? undefined : (v as EffortLevel))
                                 }
                                 options={[
                                   {
@@ -322,7 +335,7 @@ export function ClaudeDefaultsSection({
                                   testid={`${T}.effortReset`}
                                   dataId={row.key}
                                   variant="link"
-                                  onClick={() => saveEffort(row.key, undefined)}
+                                  onClick={() => saveEffort(row, undefined)}
                                 >
                                   reset
                                 </Button>
@@ -383,7 +396,7 @@ export function ClaudeDefaultsSection({
                   testid={`${T}.orphanRemove`}
                   dataId={key}
                   variant="link"
-                  onClick={() => saveEffort(key, undefined)}
+                  onClick={() => saveEffort({ key }, undefined)}
                 >
                   Remove
                 </Button>

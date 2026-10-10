@@ -16,7 +16,11 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, fireEvent, screen, act, cleanup, waitFor } from '@testing-library/react'
-import { useSessionStore } from '../../../../stores/session-store'
+import {
+  clearViewEvicted,
+  markViewEvicted,
+  useSessionStore
+} from '../../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { TopBar } from '../TopBar'
 import { TIER1_HIDE, TIER1_ROW_HIDE, TIER2_HIDE, TIER2_ROW_HIDE } from '../top-bar-tiers'
@@ -1962,5 +1966,81 @@ describe('TopBar — VSCode button (remote IDE, ADR-064)', () => {
     expect(ideMintEntry).not.toHaveBeenCalled()
     expect(windowOpen).not.toHaveBeenCalled()
     expect(screen.queryByTestId('IdeUnavailableDialog')).toBeNull()
+  })
+})
+
+describe('TopBar — the title of an evicted active entry', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {}, directories: [] })
+    mirrorStoreIntoReplica()
+  })
+
+  const listed = (title: string): never =>
+    [
+      {
+        cwd: '/d/repo',
+        projectKey: '-d-repo',
+        folderName: 'repo',
+        sessions: [
+          {
+            sessionId: ROUTE,
+            cwd: '/d/repo',
+            projectKey: '-d-repo',
+            title,
+            timestamp: 1,
+            lastActivityAt: 1
+          }
+        ]
+      }
+    ] as never
+
+  it('control: an empty, never-spawned session reads "New session"', () => {
+    useSessionStore.setState({ directories: listed('Fix the parser') })
+    const { unmount } = render(<TopBar hasContent={false} />)
+    expect(screen.getByTestId('TopBar.title')).toHaveTextContent('New session')
+    unmount()
+  })
+
+  it('names an evicted, empty entry from the listing the sidebar row uses', () => {
+    useSessionStore.setState({ directories: listed('Fix the parser') })
+    markViewEvicted([ROUTE])
+    const { unmount } = render(<TopBar hasContent={false} />)
+    expect(screen.getByTestId('TopBar.title')).toHaveTextContent('Fix the parser')
+    unmount()
+  })
+
+  it('the title is stable across the load: the same name before and after the transcript lands', () => {
+    useSessionStore.setState({ directories: listed('Fix the parser') })
+    markViewEvicted([ROUTE])
+    const loading = render(<TopBar hasContent={false} />)
+    expect(screen.getByTestId('TopBar.title')).toHaveTextContent('Fix the parser')
+    loading.unmount()
+
+    // The transcript lands: content, no longer evicted, still no custom title.
+    clearViewEvicted([ROUTE])
+    const loaded = render(<TopBar hasContent />)
+    expect(screen.getByTestId('TopBar.title')).toHaveTextContent('Fix the parser')
+    loaded.unmount()
+  })
+
+  it('a custom title wins over the listing, as it does on the row', () => {
+    useSessionStore.setState({
+      directories: listed('Fix the parser'),
+      customTitles: { [ROUTE]: 'My title' }
+    })
+    markViewEvicted([ROUTE])
+    const { unmount } = render(<TopBar hasContent={false} />)
+    expect(screen.getByTestId('TopBar.title')).toHaveTextContent('My title')
+    unmount()
+    useSessionStore.setState({ customTitles: {} })
   })
 })

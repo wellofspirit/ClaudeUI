@@ -46,8 +46,14 @@ export function ContextNoteBlock({ block }: { block: ContextNote }): React.JSX.E
           <path d="M4 19.5A2.5 2.5 0 016.5 17H20" />
           <path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" />
         </svg>
-        <span className="font-mono text-text-secondary">{block.title}</span>
-        <span className="text-text-muted text-[11px]">
+        <span
+          data-testid="ContextNoteBlock.title"
+          title={block.title}
+          className="font-mono text-text-secondary min-w-0 truncate"
+        >
+          {block.title}
+        </span>
+        <span className="text-text-muted text-[11px] shrink-0 whitespace-nowrap">
           {count === 1 ? '1 fragment' : `${count} fragments`}
         </span>
         <span className="flex-1" />

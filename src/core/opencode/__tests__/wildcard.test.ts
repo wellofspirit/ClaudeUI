@@ -1,14 +1,19 @@
 /**
  * Tests for the host-side port of opencode's permission matcher (auto-mode G9).
  *
- * The port has to be behaviourally identical to
- * `vendor/opencode-src/packages/opencode/src/util/wildcard.ts` +
- * `permission/index.ts:evaluate()`, because a divergence means we either miss a
+ * The port has to be behaviourally identical to opencode's
+ * `packages/core/src/util/wildcard.ts` + `packages/core/src/permission.ts`
+ * evaluation (last match wins), because a divergence means we either miss a
  * user `ask` (auto mode silently downgrades a permission the user singled out)
  * or invent one (auto mode stops working).
  */
 import { describe, it, expect } from 'vitest'
-import { wildcardMatch, evaluateOpencodeRules, matchesUserAskRule } from '../wildcard'
+import {
+  wildcardMatch,
+  evaluateOpencodeRules,
+  lastMatchingRule,
+  matchesUserAskRule
+} from '../wildcard'
 import type { OpencodePermissionRule } from '../permission-compiler'
 
 const rule = (
@@ -109,5 +114,21 @@ describe('matchesUserAskRule (G9 — user ask outranks the classifier)', () => {
   it('honours win32 case-insensitivity end to end', () => {
     expect(matchesUserAskRule(askGit, 'bash', ['GIT PUSH'], 'win32')).toBe(true)
     expect(matchesUserAskRule(askGit, 'bash', ['GIT PUSH'], 'linux')).toBe(false)
+  })
+})
+
+describe('lastMatchingRule', () => {
+  const rules: OpencodePermissionRule[] = [
+    rule('*', '*', 'allow'),
+    rule('bash', '*', 'ask'),
+    rule('bash', 'git *', 'allow'),
+    rule('bash', 'git push *', 'deny')
+  ]
+
+  it('lastMatchingRule names the rule evaluateOpencodeRules decides by', () => {
+    expect(lastMatchingRule('bash', 'git push x', rules, 'linux')).toEqual(
+      rule('bash', 'git push *', 'deny')
+    )
+    expect(lastMatchingRule('bash', 'ls', [], 'linux')).toBeUndefined()
   })
 })

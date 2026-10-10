@@ -360,11 +360,10 @@ describe('SyncCore.seedSession (item 5)', () => {
   })
 
   it('survives an eviction + rehydrate cycle (item 5)', () => {
-    // 4a mirrors the renderer's real policy: the renderer never REMOVES an entry,
-    // it strips the heavy arrays and re-hydrates from disk on reselect. Canonical
-    // therefore does not evict on a timer either; `removeSession` exists for
-    // explicit removal, and a later resume re-seeds from the transcript. Both
-    // halves must be lossless.
+    // Removal and re-hydration are both lossless: `removeSession` is the explicit
+    // removal (the host's drop of an exited session's transcript while KEEPING the
+    // row is `evictTranscript`, covered in sync-core-eviction.unit.test.ts), and a
+    // later resume re-seeds from the transcript.
     const { core } = recordingCore()
     core.emit('session:created', ['rid', { cwd: '/x', resumeSessionId: 'uuid-1' }], ALL)
     core.seedSession('rid', {

@@ -19,14 +19,20 @@ import {
   SECTION_TARGET,
   appliesOnOf,
   bucketSearchHits,
+  engineFor,
   enginesOf,
+  itemsFor,
   noteOf,
+  openableTarget,
   pageOf,
+  pageOpens,
   searchSettings,
+  segmentOptions,
   storageOf,
   visibleGroups,
   type SettingsGroup
 } from '../settings-pages'
+import type { EngineRuns } from '../harness-view'
 import type { EngineCapabilities } from '../../../../../shared/model-capabilities'
 
 /**
@@ -49,7 +55,7 @@ function allItemsOf(group: SettingsGroup): Array<{ key: string; engine?: string 
 }
 
 describe('PAGES structure', () => {
-  it('has the 13 documented pages, in order', () => {
+  it('has the 14 documented pages, in order', () => {
     expect(PAGES.map((p) => p.id)).toEqual([
       'appearance',
       'chat',
@@ -60,6 +66,7 @@ describe('PAGES structure', () => {
       'dispatch',
       'mockups',
       'remote',
+      'harnesses',
       'claude',
       'opencode',
       'pi',
@@ -73,16 +80,31 @@ describe('PAGES structure', () => {
     for (const page of PAGES) expect(ids.has(page.rail)).toBe(true)
   })
 
-  it('rail membership matches ADR-065 (App / Features / Engines)', () => {
+  it('rail membership matches ADR-065 / ADR-082 (App / Features / Harnesses)', () => {
     const byRail = (rail: string): string[] => PAGES.filter((p) => p.rail === rail).map((p) => p.id)
     expect(byRail('app')).toEqual(['appearance', 'chat', 'sessions', 'advanced', 'about'])
     expect(byRail('features')).toEqual(['models', 'dispatch', 'mockups', 'remote'])
-    expect(byRail('engines')).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    // ADR-082 §1: Installed first, then the per-harness pages.
+    expect(byRail('engines')).toEqual(['harnesses', 'claude', 'opencode', 'pi', 'codex'])
   })
 
-  it('only the Engines pages declare an engine', () => {
+  it('the rail group reads Harnesses, Installed comes first and Claude reads Claude Code', () => {
+    expect(RAIL_GROUPS.find((g) => g.id === 'engines')?.label).toBe('Harnesses')
+    const rail = PAGES.filter((p) => p.rail === 'engines')
+    expect(rail[0].label).toBe('Installed')
+    expect(pageOf('claude').label).toBe('Claude Code')
+    expect(rail.map((p) => p.label)).toEqual([
+      'Installed',
+      'Claude Code',
+      'opencode',
+      'pi',
+      'Codex'
+    ])
+  })
+
+  it('only the per-harness pages declare an engine', () => {
     for (const page of PAGES) {
-      if (page.rail === 'engines') expect(page.engine).toBe(page.id)
+      if (page.rail === 'engines' && page.id !== 'harnesses') expect(page.engine).toBe(page.id)
       else expect(page.engine).toBeUndefined()
     }
   })
@@ -110,12 +132,16 @@ describe('PAGES structure', () => {
         'providers',
         'defaults'
       ],
-      dispatch: ['concurrency', 'into', 'limits'],
+      // 'tile' (ADR-094): the X tile's one colour, app-level like the cap.
+      dispatch: ['concurrency', 'tile', 'into', 'limits'],
       mockups: ['network'],
       // 'usage-hub' last (ADR-072 §7): the one group here that pushes OUT.
       remote: ['follow', 'server', 'access', 'security', 'links', 'usage-hub'],
+      harnesses: ['harnesses', 'updates'],
       // The Anthropic endpoint FIRST: it only ever reaches cli.js (ADR-074 §9).
-      claude: ['endpoint', 'model-mapping', 'sandbox', 'proxy'],
+      // 'agent-colours' (ADR-094): one group on each harness page, after that page's own
+      // settings groups (last on Claude, before 'raw' on opencode, pi and Codex's 'mcp').
+      claude: ['endpoint', 'model-mapping', 'sandbox', 'proxy', 'agent-colours'],
       opencode: [
         'session',
         'tool-output',
@@ -125,9 +151,20 @@ describe('PAGES structure', () => {
         'diagnostics',
         'managed',
         'agents',
+        'agent-colours',
         'raw'
       ],
-      pi: ['session', 'retry', 'tools', 'attachments', 'workspace', 'resources', 'network', 'raw'],
+      pi: [
+        'session',
+        'retry',
+        'tools',
+        'attachments',
+        'workspace',
+        'resources',
+        'network',
+        'agent-colours',
+        'raw'
+      ],
       // Slice 5a (ADR-068 §6): the Codex page grew the curated groups over
       // `config.toml`, in the one-home table's order.
       codex: [
@@ -139,6 +176,7 @@ describe('PAGES structure', () => {
         'shell',
         'tools',
         'agents',
+        'agent-colours',
         'mcp',
         'history',
         'managed',
@@ -149,30 +187,38 @@ describe('PAGES structure', () => {
   })
 
   it('engine-native groups say when they apply, with the three-value badge vocabulary', () => {
+    // Agent colours (ADR-094) are ClaudeUI's own setting and bind on the spot: no badge.
+    const immediate = (g: { id: string }): boolean => g.id === 'agent-colours'
     for (const g of pageOf('opencode').groups) {
-      if (g.id === 'managed' || g.id === 'agents') continue
+      if (g.id === 'managed' || g.id === 'agents' || immediate(g)) continue
       expect(g.appliesOn, `opencode/${g.id}`).toBe('next-server-start')
       expect(g.note, `opencode/${g.id}`).toBeTruthy()
     }
     for (const g of pageOf('pi').groups) {
+      if (immediate(g)) continue
       expect(g.appliesOn, `pi/${g.id}`).toBe('next-session')
       expect(g.note, `pi/${g.id}`).toBeTruthy()
     }
-    for (const g of pageOf('claude').groups) expect(g.appliesOn).toBe('next-session')
+    for (const g of pageOf('claude').groups) {
+      if (!immediate(g)) expect(g.appliesOn).toBe('next-session')
+    }
     // Codex writes ONE file, and the binary does not hot-reload the
     // session-static keys on it, so every group that writes says "next session"
     // with the same tag. Account, Managed and Raw config write nothing.
     for (const g of pageOf('codex').groups) {
-      if (['account', 'managed', 'raw'].includes(g.id)) {
+      if (['account', 'managed', 'raw', 'agent-colours'].includes(g.id)) {
         expect(g.appliesOn, `codex/${g.id}`).toBeUndefined()
         continue
       }
       expect(g.appliesOn, `codex/${g.id}`).toBe('next-session')
       expect(g.note, `codex/${g.id}`).toBeTruthy()
     }
+    // Codex's Agent colours says why its cards show no tile today (no role on the wire).
+    const codexColours = pageOf('codex').groups.find((g) => g.id === 'agent-colours')
+    expect(codexColours?.note).toContain('no role')
     for (const g of pageOf('codex').groups) {
       expect(storageOf(g, 'codex'), `codex/${g.id}`).toBe(
-        g.id === 'account' ? undefined : 'config.toml'
+        g.id === 'account' || g.id === 'agent-colours' ? undefined : 'config.toml'
       )
     }
     // ClaudeUI's own settings apply at once — no badge, no note.
@@ -398,7 +444,15 @@ describe('inventory guard', () => {
       'otherEnginePermissions',
       'versions',
       'codexNativeAccount',
-      'usageHub'
+      'usageHub',
+      'harnessesInstalled',
+      'harnessUpdates',
+      // ADR-094: one Agent colours item per harness page, and the dispatch tile.
+      'claudeAgentColours',
+      'opencodeAgentColours',
+      'piAgentColours',
+      'codexAgentColours',
+      'dispatchTileColour'
     ])
 
     expect([...reachable].sort()).toEqual([...fromSections, ...local].sort())
@@ -454,7 +508,8 @@ describe('visibleGroups', () => {
       'endpoint',
       'model-mapping',
       'sandbox',
-      'proxy'
+      'proxy',
+      'agent-colours'
     ])
   })
 
@@ -463,13 +518,15 @@ describe('visibleGroups', () => {
     const caps = { sandbox: false, proxy: false } as unknown as EngineCapabilities
     expect(visibleGroups(pageOf('claude'), caps).map((g) => g.id)).toEqual([
       'endpoint',
-      'model-mapping'
+      'model-mapping',
+      'agent-colours'
     ])
     const onlyProxy = { sandbox: false, proxy: true } as unknown as EngineCapabilities
     expect(visibleGroups(pageOf('claude'), onlyProxy).map((g) => g.id)).toEqual([
       'endpoint',
       'model-mapping',
-      'proxy'
+      'proxy',
+      'agent-colours'
     ])
   })
 
@@ -582,5 +639,117 @@ describe('bucketSearchHits', () => {
 
   it('is empty for a query that matches nothing', () => {
     expect(bucketSearchHits('zzzznotasetting')).toEqual({ buckets: [], total: 0 })
+  })
+})
+
+// ── A harness that does not run (ADR-082 §8) ─────────────────────────
+
+describe('harnesses that do not run', () => {
+  /** Every engine runs except the named ones (Claude always does). */
+  const except =
+    (...missing: string[]): EngineRuns =>
+    (engine) =>
+      !missing.includes(engine)
+  const group = (pageId: Parameters<typeof pageOf>[0], id: string): SettingsGroup =>
+    pageOf(pageId).groups.find((g) => g.id === id)!
+
+  it('a harness page opens only while its harness runs; a route onto it lands on Installed', () => {
+    const runs = except('pi')
+    expect(pageOpens(pageOf('pi'), runs)).toBe(false)
+    expect(pageOpens(pageOf('opencode'), runs)).toBe(true)
+    expect(pageOpens(pageOf('claude'), except('opencode', 'pi', 'codex'))).toBe(true)
+    expect(pageOpens(pageOf('models'), except('opencode', 'pi', 'codex'))).toBe(true)
+    expect(openableTarget({ page: 'pi', group: 'retry' }, runs)).toEqual({ page: 'harnesses' })
+    expect(openableTarget({ page: 'codex', group: 'mcp' }, runs)).toEqual({
+      page: 'codex',
+      group: 'mcp'
+    })
+  })
+
+  it('an ordinary segment hides the harness; a dispatch target greys it instead', () => {
+    const runs = except('pi')
+    expect(segmentOptions(group('models', 'defaults'), runs).map((o) => o.engine)).toEqual([
+      'claude',
+      'opencode',
+      'codex'
+    ])
+    const into = segmentOptions(group('dispatch', 'into'), runs)
+    expect(into.map((o) => [o.engine, o.selectable])).toEqual([
+      ['claude', true],
+      ['opencode', true],
+      ['pi', false],
+      ['codex', true]
+    ])
+    expect(into[2].title).toBe('pi is not installed · install it from Harnesses › Installed')
+    // Limits follows the same rule, so the two cards never disagree.
+    expect(segmentOptions(group('dispatch', 'limits'), runs)).toEqual(into)
+  })
+
+  it('the Claude target needs a caller: greyed only while opencode, pi and Codex all do not run', () => {
+    const claude = (runs: EngineRuns) =>
+      segmentOptions(group('dispatch', 'into'), runs).find((o) => o.engine === 'claude')!
+    expect(claude(except('opencode', 'codex')).selectable).toBe(true)
+    expect(claude(except('opencode', 'pi', 'codex'))).toEqual({
+      engine: 'claude',
+      selectable: false,
+      title: 'No harness that can call Claude is installed · install one from Harnesses › Installed'
+    })
+  })
+
+  it('engineFor keeps a selectable request and falls through otherwise', () => {
+    const into = group('dispatch', 'into')
+    expect(engineFor(into, 'codex', except('pi'))).toBe('codex')
+    expect(engineFor(into, 'pi', except('pi'))).toBe('claude')
+    expect(engineFor(into, 'pi', except('opencode', 'pi', 'codex'))).toBeUndefined()
+    expect(engineFor(group('sessions', 'judge'), undefined, except('opencode'))).toBe('pi')
+  })
+
+  it('visibleGroups drops what serves only harnesses that do not run', () => {
+    const ids = (runs: EngineRuns): string[] =>
+      visibleGroups(pageOf('sessions'), undefined, runs).map((g) => g.id)
+    expect(ids(except())).toEqual(['autonomy', 'permissions', 'judge', 'trust', 'retention'])
+    // Trust & protection is read by the opencode and pi judges alone.
+    expect(ids(except('opencode', 'pi'))).toEqual(['autonomy', 'permissions', 'judge', 'retention'])
+    expect(ids(except('opencode', 'pi', 'codex'))).toEqual(['autonomy', 'permissions', 'retention'])
+    // The "opencode and pi" permissions row goes with them; the Claude rules stay.
+    const permissions = group('sessions', 'permissions')
+    expect(
+      itemsFor(permissions, undefined, except('opencode', 'pi')).map((i) => i.key)
+    ).not.toContain('otherEnginePermissions')
+    expect(itemsFor(permissions, undefined, except('pi')).map((i) => i.key)).toContain(
+      'otherEnginePermissions'
+    )
+    expect(
+      visibleGroups(pageOf('dispatch'), undefined, except('opencode', 'pi', 'codex')).map(
+        (g) => g.id
+      )
+      // The dispatch tile's colour is app-level, like the cap: it stays.
+    ).toEqual(['concurrency', 'tile'])
+  })
+
+  it('API providers is hidden, and out of search, while neither opencode nor pi runs', () => {
+    const ids = (runs: EngineRuns): string[] =>
+      visibleGroups(pageOf('models'), undefined, runs).map((g) => g.id)
+    expect(ids(except('pi'))).toContain('providers')
+    expect(ids(except('opencode'))).toContain('providers')
+    expect(ids(except('opencode', 'pi'))).not.toContain('providers')
+    expect(ids(except('opencode', 'pi'))).toContain('subscriptions')
+    const inProviders = (runs: EngineRuns): boolean =>
+      searchSettings('provider', runs).some((h) => h.group.id === 'providers')
+    expect(inProviders(except('pi'))).toBe(true)
+    expect(inProviders(except('opencode', 'pi'))).toBe(false)
+  })
+
+  it('search skips a page that cannot open, and segments and groups that are hidden', () => {
+    const runs = except('pi')
+    const hits = searchSettings('model', runs)
+    expect(hits.some((h) => h.page.id === 'pi')).toBe(false)
+    expect(hits.some((h) => h.engine === 'pi')).toBe(false)
+    expect(hits.some((h) => h.engine === 'opencode')).toBe(true)
+    expect(searchSettings('retry', runs).some((h) => h.page.id === 'pi')).toBe(false)
+    expect(searchSettings('retry').some((h) => h.page.id === 'pi')).toBe(true)
+    expect(
+      bucketSearchHits('trust', undefined, except('opencode', 'pi')).buckets.map((b) => b.id)
+    ).not.toContain('sessions/trust')
   })
 })

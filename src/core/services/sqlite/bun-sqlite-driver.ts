@@ -64,8 +64,8 @@ export function bunSqliteDriver(BunDatabaseCtor: BunDatabaseCtor): SqliteDriver 
     name: 'bun:sqlite',
     open(filename: string, options?: SqliteOpenOptions): SqliteDatabase {
       // `create: false` is bun's spelling of better-sqlite3's `fileMustExist` —
-      // it throws `unable to open database file` on a missing path, which is the
-      // same failure `readOpencodeSessionRows` already catches.
+      // it throws `unable to open database file` on a missing path, the same
+      // failure better-sqlite3 raises.
       const inner = new BunDatabaseCtor(filename, {
         readonly: options?.readonly === true,
         create: options?.fileMustExist ? false : true

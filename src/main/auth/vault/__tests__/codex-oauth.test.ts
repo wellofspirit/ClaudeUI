@@ -21,6 +21,7 @@ import {
   exchangeCodeForTokens,
   refreshAccessToken,
   parseJwtClaims,
+  computeResidencyFromToken,
   extractAccountId,
   extractEmail,
   parsePastedCallback,
@@ -322,6 +323,33 @@ describe('extractAccountId', () => {
   it('returns undefined when neither token carries an account id', () => {
     expect(extractAccountId({ id_token: makeJwt({}), access_token: makeJwt({}) })).toBeUndefined()
     expect(extractAccountId({})).toBeUndefined()
+  })
+})
+
+describe('computeResidencyFromToken (ADR-081 §4)', () => {
+  it('reads the namespaced claim, which wins over the top-level one', () => {
+    expect(
+      computeResidencyFromToken(
+        makeJwt({
+          chatgpt_compute_residency: 'top-level',
+          'https://api.openai.com/auth': { chatgpt_compute_residency: 'us' }
+        })
+      )
+    ).toBe('us')
+  })
+
+  it('falls back to the top-level claim', () => {
+    expect(computeResidencyFromToken(makeJwt({ chatgpt_compute_residency: 'eu' }))).toBe('eu')
+  })
+
+  it('no_constraint, an absent claim or a malformed token → undefined', () => {
+    expect(
+      computeResidencyFromToken(
+        makeJwt({ 'https://api.openai.com/auth': { chatgpt_compute_residency: 'no_constraint' } })
+      )
+    ).toBeUndefined()
+    expect(computeResidencyFromToken(makeJwt({ chatgpt_account_id: 'acct-1' }))).toBeUndefined()
+    expect(computeResidencyFromToken('not-a-jwt')).toBeUndefined()
   })
 })
 

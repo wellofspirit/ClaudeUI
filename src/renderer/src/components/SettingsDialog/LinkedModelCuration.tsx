@@ -127,6 +127,32 @@ export function LinkedModelCuration({
   const latestEdit = useRef(0)
   /** Saves not yet landed — while any are, the local record is newer than the prop. */
   const pending = useRef(0)
+  /**
+   * Writes not yet on disk. A selection read while one is (or overtaken by a
+   * later edit) predates what the user has picked, so a load keeps the one on
+   * show instead (see `loadLists`).
+   */
+  const unwritten = useRef(0)
+  /** Each load's turn: only the latest one started lands. */
+  const loadTurn = useRef(0)
+  /**
+   * Set on every effect setup, not at creation: StrictMode replays setup →
+   * cleanup → setup on mount, and a latch set only by the first render would
+   * stay false and drop every load after the replay.
+   */
+  const mounted = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+  /**
+   * Bumped by every `reloadModels()`: a curation write anywhere, a harness
+   * install or selection change. An open block reads its catalogs again — a
+   * newly installed pi lists models the old one never did.
+   */
+  const modelReloadNonce = useSessionStore((s) => s.modelReloadNonce)
 
   // The definition is re-read after every write; follow it when nothing of ours
   // is still in flight, so a record changed elsewhere (or a stale seed) never
@@ -143,6 +169,9 @@ export function LinkedModelCuration({
   const adapterKey = adapters.map((a) => `${a.engine}:${a.providerId}`).join(',')
 
   const loadLists = useCallback(async (): Promise<void> => {
+    const turn = ++loadTurn.current
+    const editAtStart = latestEdit.current
+    const writingAtStart = unwritten.current > 0
     const loaded = await Promise.all(
       adapters.map(async (adapter) => {
         const [catalog, selection] = await Promise.all([
@@ -154,14 +183,25 @@ export function LinkedModelCuration({
         return [adapter.engine, { catalog, selection, emptyText }] as const
       })
     )
-    setLists(Object.fromEntries(loaded))
+    if (!mounted.current || turn !== loadTurn.current) return
+    const selectionFresh = !writingAtStart && latestEdit.current === editAtStart
+    setLists((prev) =>
+      Object.fromEntries(
+        loaded.map(([engine, list]) => [
+          engine,
+          selectionFresh || prev[engine] === undefined
+            ? list
+            : { ...list, selection: prev[engine].selection }
+        ])
+      )
+    )
     // `adapterKey` is the adapters' identity; the objects are rebuilt per render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adapterKey])
 
   useEffect(() => {
     void loadLists()
-  }, [loadLists])
+  }, [loadLists, modelReloadNonce])
 
   useEffect(() => {
     let cancelled = false
@@ -182,7 +222,7 @@ export function LinkedModelCuration({
     return () => {
       cancelled = true
     }
-  }, [adapterKey])
+  }, [adapterKey, modelReloadNonce])
 
   const opencodeList = lists.opencode
   const piList = lists.pi
@@ -253,10 +293,16 @@ export function LinkedModelCuration({
   const writeCuration = (next: SharedProviderCuration, onFail: () => void): void => {
     const generation = ++latestEdit.current
     pending.current += 1
+    unwritten.current += 1
     saveChain.current = saveChain.current.then(async () => {
       try {
-        await window.api.setSharedProviderCuration(definition.id, next)
-        await Promise.all([reloadEngineConfigObject('opencode'), reloadEngineConfigObject('pi')])
+        try {
+          await window.api.setSharedProviderCuration(definition.id, next)
+          await Promise.all([reloadEngineConfigObject('opencode'), reloadEngineConfigObject('pi')])
+        } finally {
+          // On disk or refused: either way a read from here on is not older than it.
+          unwritten.current -= 1
+        }
         useSessionStore.getState().reloadModels()
         await loadLists()
         await onWrote()
@@ -325,22 +371,22 @@ export function LinkedModelCuration({
     <SettingRow
       testid={`${testid}.curationLinkRow`}
       layout="stacked"
-      description="Which engines use this list"
+      description="Which harnesses use this list"
     >
       <ChoiceCards
         testid={`${testid}.curationLink`}
-        ariaLabel="Which engines use this list"
+        ariaLabel="Which harnesses use this list"
         value={linked ? 'one' : 'separate'}
         options={[
           {
             value: 'one',
-            label: 'One list for all engines',
+            label: 'One list for all harnesses',
             description: 'opencode and pi offer the same models.'
           },
           {
             value: 'separate',
-            label: 'Separate per engine',
-            description: 'Each engine keeps its own list.'
+            label: 'Separate per harness',
+            description: 'Each harness keeps its own list.'
           }
         ]}
         onChange={chooseLink}
@@ -371,7 +417,7 @@ export function LinkedModelCuration({
           label: `Both combined (${count(combined)})`,
           description: unionAll
             ? 'One side shows all models, so the combined list is all models.'
-            : 'Nothing either engine shows today is removed.'
+            : 'Nothing either harness shows today is removed.'
         }
       ]
       return (
@@ -459,7 +505,7 @@ export function LinkedModelCuration({
           testid={`${testid}.models`}
           dataId="empty"
           label={`No models from ${providerName}`}
-          description={emptyText ?? 'Neither engine reports a model for this provider.'}
+          description={emptyText ?? 'Neither harness reports a model for this provider.'}
         />
       </>
     )
@@ -510,7 +556,9 @@ export function LinkedModelCuration({
             data-testid={`${testid}.modelMark`}
             data-id={e}
             data-available={has ? 'true' : 'false'}
+            role="img"
             title={has ? `Offered by ${label}` : `${label} does not offer this model`}
+            aria-label={has ? `Offered by ${label}` : `${label} does not offer this model`}
             className={`rounded px-[5px] font-mono text-[9.5px] font-bold leading-4 border ${
               has ? 'border-accent/30 bg-accent/5 text-accent' : 'border-border text-text-muted'
             }`}

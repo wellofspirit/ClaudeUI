@@ -17,50 +17,57 @@
  * dialog mounted it before the restyle). The frame is presentation only — every
  * write below is identical either way, pinned by a patch-identity test.
  *
- * WHAT IT WRITES. The model's entry lives in opencode's own config file at
- * `provider.<providerId>.models.<modelId>`. Every commit is a minimal LEAF diff
- * of that entry (diffToPatches → patchOpencodeNative), so the keys this editor
- * does not render — id, name, family, status, release_date, anything
- * hand-written — are never part of a patch and survive untouched. It composes
- * with the ADR-031 projection writer that owns id/name for the same reason.
+ * WHAT IT WRITES (opencode 2.x, ADR-097 S8). The model's entry lives at
+ * `providers.<providerId>.models.<modelId>`. Every commit is a minimal LEAF
+ * diff of that entry (diffToPatches → patchOpencodeNative), so the keys this
+ * editor does not render — modelID, family, name, hand-written extras — are
+ * never part of a patch. A provider that still lives under the 1.x `provider`
+ * key is SHOWN in its 2.x form (`nativeProviderEntry`) and MOVED there whole by
+ * the main-process writer before the first patch lands.
+ *
+ * 2.x has no per-model `attachment`, `reasoning` or `temperature` flag (it
+ * drops them with a warning). What they meant is expressed as:
+ *   attachment  → `image`/`pdf` in `capabilities.input` (the input chips)
+ *   reasoning   → `variants`: an empty list means "no reasoning variants";
+ *                 absent lets opencode generate effort variants from the package
+ *   temperature → no switch any more; a fixed value goes in `body.temperature`
+ *   interleaved → `compatibility.reasoningField` (Advanced)
+ * The editor says so in a row of its own rather than offering dead switches.
  *
  * WHEN IT WRITES. Immediately, like the Configuration panes: a toggle or chip
  * click commits at once, number inputs commit on blur AND Enter, raw-JSON leaves
- * commit on blur. There is no Save button (the dialog's footer already promises
- * "Changes are saved as you type", and the model list needs a saved provider id
- * to target anyway).
+ * commit on blur. There is no Save button.
  *
  * THREE RULES RUN THROUGH IT:
  *
  *  · ABSENT MEANS DEFAULT. A key whose absence already produces the wanted
  *    behaviour is deleted rather than written. The defaults are opencode's OWN
- *    (provider.ts's model parse), not the JSON schema's — the vendored schema
- *    carries no `default` keywords at all. `tool_call` is the one that bites:
- *    opencode reads an absent `tool_call` as TRUE, so a toggle that showed OFF
- *    for it could never write the `tool_call: false` a user opens this editor
- *    to set.
- *  · EMPTY PARENTS GO. When a delete leaves `cost` / `modalities` / `limit` with
- *    no keys at all, the block itself is deleted rather than written back as
- *    `{}`. A block still holding keys this editor doesn't render is kept.
- *  · REQUIRED FIELDS COME IN PAIRS. `cost` requires input+output, `limit`
- *    requires context+output, and the raw writer validates the whole resulting
- *    config with ajv before writing. A block can therefore never be half-filled:
- *    creating one seeds its missing partner with 0 (exactly what opencode
- *    computes for an absent block), and clearing either half removes the block.
+ *    (`Model.Capabilities.default()`: tools on, input text+image, output text),
+ *    not the schema's — the generated schema carries no `default` keywords.
+ *  · EMPTY PARENTS GO. When a delete leaves `capabilities` / `cost` / `limit`
+ *    with no keys at all, the block itself is deleted rather than written back
+ *    as `{}`. A block still holding keys this editor doesn't render is kept.
+ *  · REQUIRED FIELDS COME IN PAIRS. 2.x's `cost` requires input+output, and
+ *    the raw writer validates the touched keys with ajv before writing. So
+ *    creating a pricing block seeds its missing partner with 0, and clearing
+ *    either half removes the block. A TIERED cost (an array) is edited under
+ *    Advanced.
  */
 
 import { useCallback, useEffect, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { RawJsonField } from './OpencodeSchemaForm'
 import { StackedRow, ToggleRow, LeafNumberInput } from './OpencodeConfigPanes'
+import { SettingRow } from './settings-controls'
 import { DialogShell, Disclosure, pillClass } from './provider-editor-shell'
 import { diffToPatches, isPlainObject } from '../../../../shared/opencode-config-diff'
+import { nativeProviderEntry } from '../../../../shared/opencode-config-v1'
 import type { RawConfigPatch } from '../../../../shared/types'
 
 const TESTID = 'ModelCapabilityEditor'
 
-/** A path INSIDE the model entry (the `provider…models.<id>` prefix is added at
- *  patch time), e.g. `['cost', 'context_over_200k', 'input']`. */
+/** A path INSIDE the model entry (the `providers…models.<id>` prefix is added at
+ *  patch time), e.g. `['cost', 'cache', 'read']`. */
 type EntryPath = string[]
 type Entry = Record<string, unknown>
 
@@ -79,26 +86,15 @@ function readAt(root: unknown, path: EntryPath): unknown {
 // ── Schema-required blocks ───────────────────────────────────────────────────
 
 /**
- * Fields the v1.18.29 schema marks `required` inside a model entry, by the
- * dotted path of the block that requires them
- * ($defs.ProviderConfig.properties.models.additionalProperties).
- *
- * This is not decoration: `patchOpencodeNativeRaw` validates the ENTIRE
- * resulting config with ajv before writing, and its schema preparation strips
- * only `additionalProperties: false` — `required` survives. So `cost:
- * { input: 3 }` is rejected outright, and a naive per-field commit could never
- * create a pricing block at all. opencode itself reads an absent cost/limit
- * field as 0 (provider.ts, `parsedModel.cost` / `.limit`), so seeding the
- * missing partner with 0 changes no behaviour.
- *
- * Exported for the guard test: this table restates the schema, and a bump that
- * moved it would make the editor either destructive (removing a block for a
- * field no longer required) or unable to write at all (missing a new one).
+ * Fields the generated 2.x schema marks `required` inside a model entry, by
+ * the dotted path of the block that requires them (`Config.ModelEncoded` →
+ * `Config.Model.CostEncoded`). `patchOpencodeNativeRaw` validates the touched
+ * keys with ajv before writing, so `cost: { input: 3 }` is rejected outright;
+ * opencode reads an absent cost as 0, so seeding the partner with 0 changes no
+ * behaviour. Exported for the guard test (it restates the schema).
  */
 export const REQUIRED_FIELDS: Record<string, string[]> = {
-  cost: ['input', 'output'],
-  'cost.context_over_200k': ['input', 'output'],
-  limit: ['context', 'output']
+  cost: ['input', 'output']
 }
 
 // ── Entry mutation (immutable at the call site — these run on a clone) ───────
@@ -184,7 +180,8 @@ function useModelEntry(providerId: string, modelId: string): ModelEntryApi {
     window.api
       .readOpencodeNativeRaw()
       .then(({ config }) => {
-        const found = readAt(config, ['provider', providerId, 'models', modelId])
+        const provider = nativeProviderEntry(config, providerId)
+        const found = readAt(provider, ['models', modelId])
         setEntry(isPlainObject(found) ? found : {})
       })
       .catch(() => setEntry({}))
@@ -205,7 +202,7 @@ function useModelEntry(providerId: string, modelId: string): ModelEntryApi {
         fillRequired(next, path)
       }
       const patches: RawConfigPatch[] = diffToPatches(entry, next, [
-        'provider',
+        'providers',
         providerId,
         'models',
         modelId
@@ -239,63 +236,31 @@ function useModelEntry(providerId: string, modelId: string): ModelEntryApi {
   return { entry, read, commit, errorAt }
 }
 
-// ── Row 2-6 · boolean capabilities ───────────────────────────────────────────
+// ── Boolean capabilities ─────────────────────────────────────────────────────
 
 interface CapabilityToggle {
+  /** Row id (and testid data-id). */
   key: string
+  /** The entry path the toggle reads and writes. */
+  path: EntryPath
   label: string
   helper: string
   /** What opencode assumes when the key is ABSENT. */
   defaultOn: boolean
-  /**
-   * Always write an explicit boolean instead of deleting on return-to-default.
-   * Only `interleaved` needs it: its absent value is model-DEPENDENT (opencode
-   * infers `{ field: "reasoning_content" }` for an openai-compatible model whose
-   * id contains "deepseek", `false` otherwise), so deleting the key would not
-   * reliably mean "off" and `false` has to be recorded.
-   */
-  explicit?: boolean
 }
 
 /**
- * The five boolean capability keys and the value opencode gives them when they
- * are absent — from `Provider.parseModel` in the vendored source
- * (vendor/opencode-src, packages/opencode/src/provider/provider.ts): temperature
- * / reasoning / attachment default false, `tool_call` defaults TRUE. The JSON
- * schema states none of this (it has no `default` keywords anywhere), which is
- * why the values are pinned here and exported for a guard test.
+ * The boolean capability 2.x still has, and the value it gets when absent
+ * (`Model.Capabilities.default()`, `vendor/opencode-src/packages/schema/
+ * src/model.ts`). Exported for a guard test.
  */
 export const CAPABILITY_TOGGLES: CapabilityToggle[] = [
   {
-    key: 'attachment',
-    label: 'File attachments',
-    helper: 'Model accepts images and files in a message —',
-    defaultOn: false
-  },
-  {
-    key: 'reasoning',
-    label: 'Reasoning',
-    helper: 'Model emits reasoning content —',
-    defaultOn: false
-  },
-  {
-    key: 'temperature',
-    label: 'Temperature control',
-    helper: 'Model honours a temperature setting —',
-    defaultOn: false
-  },
-  {
-    key: 'tool_call',
+    key: 'capabilities.tools',
+    path: ['capabilities', 'tools'],
     label: 'Tool calling',
     helper: 'Model can call tools; opencode assumes it can when unset —',
     defaultOn: true
-  },
-  {
-    key: 'interleaved',
-    label: 'Interleaved reasoning',
-    helper: 'Reasoning arrives interleaved with tool calls —',
-    defaultOn: false,
-    explicit: true
   }
 ]
 
@@ -306,10 +271,8 @@ function CapabilityToggleRow({
   api: ModelEntryApi
   spec: CapabilityToggle
 }): React.JSX.Element {
-  const raw = api.read([spec.key])
-  // `interleaved` may hold a string or an object; anything that is not literally
-  // `false` is the capability being ON.
-  const on = raw === undefined ? spec.defaultOn : raw !== false
+  const raw = api.read(spec.path)
+  const on = typeof raw === 'boolean' ? raw : spec.defaultOn
   return (
     <ToggleRow
       testidPrefix={TESTID}
@@ -318,28 +281,51 @@ function CapabilityToggleRow({
       helper={spec.helper}
       checked={on}
       onChange={(next) =>
-        api.commit(
-          spec.key,
-          [spec.key],
-          !spec.explicit && next === spec.defaultOn ? undefined : next
-        )
+        api.commit(spec.key, spec.path, next === spec.defaultOn ? undefined : next)
       }
       error={api.errorAt(spec.key)}
     />
   )
 }
 
-// ── Row 7 · modalities ───────────────────────────────────────────────────────
+/**
+ * Reasoning, the 2.x way: OFF is `variants: []` (opencode generates no
+ * reasoning-effort variants for the model); ON deletes that empty list. A
+ * non-empty list is the user's own variants — ON, and never touched here.
+ */
+function ReasoningRow({ api }: { api: ModelEntryApi }): React.JSX.Element {
+  const variants = api.read(['variants'])
+  const off = Array.isArray(variants) && variants.length === 0
+  return (
+    <ToggleRow
+      testidPrefix={TESTID}
+      configKey="variants"
+      keyText="variants: [] = none"
+      label="Reasoning variants"
+      helper="Off writes an empty variant list, so opencode offers no reasoning efforts for this model; on lets it generate them from the provider package —"
+      checked={!off}
+      onChange={(next) => {
+        if (next && off) api.commit('variants', ['variants'], undefined)
+        if (!next && !off && variants === undefined) api.commit('variants', ['variants'], [])
+      }}
+      error={api.errorAt('variants')}
+    />
+  )
+}
 
-/** `modalities.input` / `.output` item enum, v1.18.29. Exported for the guard test. */
+// ── Modalities (capabilities.input / .output) ──────────────────────────────
+
+/** The modality chips. Exported for the guard test. */
 export const MODALITIES = ['text', 'audio', 'image', 'video', 'pdf'] as const
 /**
- * opencode's reading of an ABSENT modality list: text on, everything else off
- * (provider.ts `capabilities.input` / `.output`). Shown as the chip state so a
- * user adding `image` gets `["text","image"]` rather than silently dropping text
- * support, and a list that lands back on exactly this deletes the key.
+ * opencode 2.x's reading of an ABSENT list (`Model.Capabilities.default()`):
+ * input text+image, output text. Shown as the chip state, and a list that lands
+ * back on exactly this deletes the key.
  */
-const DEFAULT_MODALITIES: string[] = ['text']
+export const DEFAULT_MODALITIES: Record<'input' | 'output', readonly string[]> = {
+  input: ['text', 'image'],
+  output: ['text']
+}
 
 function ModalityChips({
   api,
@@ -348,21 +334,20 @@ function ModalityChips({
   api: ModelEntryApi
   direction: 'input' | 'output'
 }): React.JSX.Element {
-  const path: EntryPath = ['modalities', direction]
+  const path: EntryPath = ['capabilities', direction]
   const raw = api.read(path)
+  const fallback = DEFAULT_MODALITIES[direction]
   const selected = Array.isArray(raw)
     ? raw.filter((v): v is string => typeof v === 'string')
-    : DEFAULT_MODALITIES
+    : [...fallback]
 
   const toggle = (id: string): void => {
     const wanted = new Set(selected)
     if (wanted.has(id)) wanted.delete(id)
     else wanted.add(id)
-    // Rebuilt in schema order (and dropping anything outside the enum, which
-    // ajv would reject anyway) so the file stays predictable.
+    // Rebuilt in chip order so the file stays predictable.
     const next = MODALITIES.filter((m) => wanted.has(m))
-    const isDefault =
-      next.length === DEFAULT_MODALITIES.length && next.every((m, i) => m === DEFAULT_MODALITIES[i])
+    const isDefault = next.length === fallback.length && next.every((m, i) => m === fallback[i])
     api.commit('modalities', path, isDefault ? undefined : next)
   }
 
@@ -396,12 +381,13 @@ function ModalityChips({
 const COST_FIELDS = [
   { key: 'input', label: 'Input' },
   { key: 'output', label: 'Output' },
-  { key: 'cache_read', label: 'Cache read' },
-  { key: 'cache_write', label: 'Cache write' }
+  { key: 'cache.read', label: 'Cache read' },
+  { key: 'cache.write', label: 'Cache write' }
 ]
 
 const LIMIT_FIELDS = [
   { key: 'context', label: 'Context window' },
+  { key: 'input', label: 'Max input' },
   { key: 'output', label: 'Max output' }
 ]
 
@@ -433,7 +419,7 @@ function LeafNumberGrid({
   return (
     <div className={`px-3 grid ${columns} gap-1.5`}>
       {fields.map((field) => {
-        const leaf = [...basePath, field.key]
+        const leaf = [...basePath, ...field.key.split('.')]
         const id = pathId(leaf.slice(1))
         return (
           <label key={field.key} className="min-w-0 block">
@@ -460,9 +446,14 @@ function LeafNumberGrid({
 
 const ADVANCED_LEAVES = [
   {
-    key: 'options',
-    label: 'Provider options',
-    helper: 'Passed to the AI SDK model on every call —'
+    key: 'settings',
+    label: 'Provider settings',
+    helper: 'Merged into the provider package settings for this model (1.x `options`) —'
+  },
+  {
+    key: 'body',
+    label: 'Request body',
+    helper: 'Merged into every request body, e.g. {"temperature":0.2} —'
   },
   {
     key: 'headers',
@@ -472,7 +463,18 @@ const ADVANCED_LEAVES = [
   {
     key: 'variants',
     label: 'Variants',
-    helper: 'Per-variant overrides, e.g. {"high":{"disabled":true}} —'
+    helper: 'Per-variant overlays, e.g. [{"id":"high","settings":{"reasoningEffort":"high"}}] —'
+  },
+  {
+    key: 'compatibility',
+    label: 'Compatibility',
+    helper: 'e.g. {"reasoningField":"reasoning_content"} for interleaved reasoning —'
+  },
+  {
+    key: 'cost',
+    label: 'Cost (raw)',
+    helper:
+      'The whole cost value; tiered pricing is a list with tier {"type":"context","size":200000} —'
   }
 ]
 
@@ -513,21 +515,22 @@ function AdvancedLeaf({
  * the two modes cannot drift into different field sets.
  */
 function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
-  const [longContextOpen, setLongContextOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const tiered = Array.isArray(api.read(['cost']))
 
   return (
     <>
       {CAPABILITY_TOGGLES.map((spec) => (
         <CapabilityToggleRow key={spec.key} api={api} spec={spec} />
       ))}
+      <ReasoningRow api={api} />
 
       <StackedRow
         testidPrefix={TESTID}
         configKey="modalities"
         label="Modalities"
-        helper="Content types the model takes and returns; text only is what opencode assumes when the key is absent."
-        keyText="modalities.input / output"
+        helper="Content types the model takes and returns; image or pdf input is what 1.x called attachments. Unset is text+image in, text out."
+        keyText="capabilities.input / output"
         error={api.errorAt('modalities')}
       >
         <div className="px-3 space-y-1">
@@ -540,10 +543,14 @@ function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
         testidPrefix={TESTID}
         configKey="cost"
         label="Pricing"
-        helper="$ per 1M tokens; input and output are written together."
+        helper={
+          tiered
+            ? 'Tiered pricing (a list): edit it under Advanced.'
+            : '$ per 1M tokens; input and output are written together.'
+        }
         error={api.errorAt('cost')}
       >
-        <div className="space-y-1">
+        {!tiered && (
           <LeafNumberGrid
             api={api}
             rowKey="cost"
@@ -554,39 +561,21 @@ function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
             placeholder="0"
             step="any"
           />
-          <div className="px-3 mt-1">
-            <Disclosure
-              testid={`${TESTID}.disclosure`}
-              id="context_over_200k"
-              label={`${longContextOpen ? '▾' : '▸'} Long-context pricing (>200k)`}
-              open={longContextOpen}
-              onToggle={() => setLongContextOpen((o) => !o)}
-            />
-            <div className="mt-0.5 text-[12px] text-text-secondary leading-relaxed">
-              Alternate rates for the whole request once input exceeds 200k tokens.{' '}
-              <span className="font-mono text-text-muted/80">cost.context_over_200k</span>
-            </div>
-          </div>
-          {longContextOpen && (
-            <LeafNumberGrid
-              api={api}
-              rowKey="cost"
-              testid={`${TESTID}.cost`}
-              basePath={['cost', 'context_over_200k']}
-              fields={COST_FIELDS}
-              columns="grid-cols-4"
-              placeholder="0"
-              step="any"
-            />
-          )}
-        </div>
+        )}
       </StackedRow>
+
+      <SettingRow
+        testid={`${TESTID}.gone`}
+        dimmed
+        label="Not in opencode 2.x"
+        description="The 1.x temperature switch is gone: a fixed temperature goes in the request body (Advanced). Attachments are input modalities, interleaved reasoning is compatibility.reasoningField."
+      />
 
       <StackedRow
         testidPrefix={TESTID}
         configKey="limit"
         label="Limits"
-        helper="Tokens. Context window and max output are written together."
+        helper="Tokens; each is its own leaf (unset is the provider catalog's value, or unknown)."
         error={api.errorAt('limit')}
       >
         <LeafNumberGrid
@@ -595,7 +584,7 @@ function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
           testid={`${TESTID}.limit`}
           basePath={['limit']}
           fields={LIMIT_FIELDS}
-          columns="grid-cols-2"
+          columns="grid-cols-3"
           placeholder="unset"
         />
       </StackedRow>
@@ -605,7 +594,7 @@ function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
         configKey="advanced"
         label="Advanced"
         helper="Free-form JSON leaves."
-        keyText="options / headers / variants"
+        keyText="settings / body / headers / variants / compatibility / cost"
         error={
           // One shared slot: only one raw leaf can be in flight at a time.
           ADVANCED_LEAVES.map((leaf) => api.errorAt(leaf.key)).find(Boolean) ?? null

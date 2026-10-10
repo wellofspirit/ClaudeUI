@@ -3,6 +3,10 @@
 **Status:** Accepted (2026-08-03)
 **Relates to:** ADR-030 (capability honesty), ADR-038 (event-driven approval lifecycle — the
 same "never infer lifecycle in the renderer" principle applied to approvals)
+**Related:** [ADR-090](adr-090_user-stop-is-not-an-error.md) (a user stop is not an error — the
+sibling adapter contract for turn-error banners; the disconnect banners stay unsuppressed),
+[ADR-092](adr-092_model-catalogs-per-engine-and-a-clean-boot.md) (pi's `cancel()` brought into line
+with path 3 below)
 
 ## Context
 
@@ -49,6 +53,11 @@ Adapter-side corollaries learned in 5d0c118:
   with no active stream still learn about death; deliberate kills must not fan out
   (drop-handle-before-kill makes the exit handler's identity gate mean "unexpected").
 - Loss teardown must null the adapter's connection refs so the next `run()` reacquires.
+
+> **As built (2026-10-05, `542e96ec`).** `PiSession.cancel()` violated path 3: it cleared its
+> `disconnected` flag and reported `idle`, so a pi session's Disconnect killed the process but the dot
+> stayed green and the menu kept offering Disconnect (the idle-timeout auto-disconnect too). It now
+> sets the flag like `OpencodeSession.cancel()`; `doStart()` clears it on respawn.
 
 ## Consequences
 

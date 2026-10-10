@@ -19,12 +19,23 @@ import {
   type CurationAdapter
 } from '../ModelCuration'
 import type { CurationModel } from '../ModelCurationList'
+import { useSessionStore } from '../../../stores/session-store'
+import { harnessStore } from '../harness-store'
+import type {
+  HarnessId,
+  HarnessStateEntry,
+  HarnessStateSnapshot
+} from '../../../../../shared/harness-types'
 import type { EngineConfig, EngineModelGroup } from '../../../../../shared/types'
 
 const catalogOf = (n: number): CurationModel[] =>
   Array.from({ length: n }, (_, i) => ({ id: `m-${i}`, name: `Model ${i}` }))
 
-/** A fake adapter: the catalog and selection it answers, and every save it got. */
+/**
+ * A fake adapter: the catalog and selection it answers, and every save it got.
+ * A save is read back, as the engine's file is: the block re-reads after its
+ * own writes (every write reloads models).
+ */
 function fakeAdapter(
   engine: CuratedEngine,
   catalog: CurationModel[],
@@ -39,6 +50,7 @@ function fakeAdapter(
     loadSelection: async () => selection,
     save: async (next) => {
       saves.push(next)
+      selection = next ?? undefined
     },
     pickerValue: (id) => `prov/${id}`,
     saves,
@@ -342,5 +354,113 @@ describe('ModelCuration', () => {
     const models = screen.getByTestId('S.models')
     expect(models).toHaveAttribute('data-id', 'empty')
     expect(models).toHaveTextContent('pi reports no models for this provider — check its key.')
+  })
+})
+
+describe('ModelCuration — an open block follows a model reload', () => {
+  /** What a harness install or selection change does in the renderer. */
+  const reloadModels = (): Promise<void> =>
+    act(async () => {
+      useSessionStore.getState().reloadModels()
+    })
+  const rowIds = (): string[] => screen.getAllByTestId('S.models.row').map((el) => el.dataset.id!)
+
+  it('lists a model a newer harness reports, without closing', async () => {
+    const catalog = catalogOf(2)
+    await mount({ ...fakeAdapter('pi', [], undefined), loadCatalog: async () => [...catalog] })
+    expect(rowIds()).toEqual(['m-0', 'm-1'])
+
+    catalog.push({ id: 'm-2', name: 'Model 2' })
+    await reloadModels()
+    expect(rowIds()).toEqual(['m-0', 'm-1', 'm-2'])
+  })
+
+  it('a reload while a save is on its way keeps the edit on show', async () => {
+    let land!: () => void
+    const adapter = fakeAdapter('pi', catalogOf(3), ['m-0', 'm-1'])
+    const save = adapter.save
+    adapter.save = (next) =>
+      new Promise<void>((resolve) => {
+        land = () => void save(next).then(resolve)
+      })
+    await mount(adapter)
+    await click(row('m-2'))
+    expect(row('m-2')).toHaveAttribute('aria-checked', 'true')
+
+    // The file still holds the old list: a read now is older than the edit.
+    await reloadModels()
+    expect(row('m-2')).toHaveAttribute('aria-checked', 'true')
+
+    await act(async () => land())
+    expect(adapter.saves).toEqual([['m-0', 'm-1', 'm-2']])
+    expect(row('m-2')).toHaveAttribute('aria-checked', 'true')
+  })
+
+  it('a reload after the save landed reads what was saved', async () => {
+    const adapter = fakeAdapter('pi', catalogOf(3), ['m-0'])
+    await mount(adapter)
+    await click(row('m-1'))
+    await reloadModels()
+    expect(row('m-1')).toHaveAttribute('aria-checked', 'true')
+    expect(row('m-2')).toHaveAttribute('aria-checked', 'false')
+  })
+
+  it('a harness that now runs another binary reloads an open block with no composer mounted', async () => {
+    // pi upgraded in place: same path, same stated version, a new revision.
+    const harnessSnapshot = (piRevision: string): HarnessStateSnapshot => {
+      const of = (id: HarnessId): HarnessStateEntry => ({
+        id,
+        manifest: { tested: '1.0.0', floor: '1.0.0', ceiling: '9.0.0' },
+        selection: { source: 'system' },
+        resolved: {
+          source: 'system',
+          version: '1.0.0',
+          path: `/usr/local/bin/${id}`,
+          available: true,
+          revision: id === 'pi' ? piRevision : `${id}-r1`
+        },
+        system: { detectedAt: null, installs: [], choice: { kind: 'fallback', reason: 'none' } },
+        managed: [],
+        installable: true
+      })
+      return {
+        harnesses: {
+          claude: of('claude'),
+          opencode: of('opencode'),
+          pi: of('pi'),
+          codex: of('codex')
+        },
+        detection: { running: false },
+        installs: [],
+        updates: { mode: 'ask', available: [], status: { running: false, results: [] } },
+        upgradePrompt: { pending: false, candidates: [] }
+      }
+    }
+    let harness = harnessSnapshot('pi-r1')
+    Object.assign((window as unknown as { api: Record<string, unknown> }).api, {
+      harnessState: async () => harness,
+      getPiModelCatalogGroups: async () => []
+    })
+    harnessStore.resetForTests()
+    await harnessStore.refresh()
+
+    const catalog = catalogOf(2)
+    await mount({ ...fakeAdapter('pi', [], undefined), loadCatalog: async () => [...catalog] })
+    expect(rowIds()).toEqual(['m-0', 'm-1'])
+
+    catalog.push({ id: 'm-2', name: 'Model 2' })
+    harness = harnessSnapshot('pi-r2')
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    expect(rowIds()).toEqual(['m-0', 'm-1', 'm-2'])
+
+    // A re-read that moves nothing reloads nothing.
+    catalog.push({ id: 'm-3', name: 'Model 3' })
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    expect(rowIds()).toEqual(['m-0', 'm-1', 'm-2'])
+    harnessStore.resetForTests()
   })
 })

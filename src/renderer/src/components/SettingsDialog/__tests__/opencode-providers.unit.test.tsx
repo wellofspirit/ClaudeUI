@@ -366,10 +366,10 @@ describe('opencode provider configuration dialog', () => {
     })
 
     it('a declared provider WITHOUT stored credentials still shows the password input (declared ≠ has key)', async () => {
-      // Regression guard: opencode's GET /config/providers reports a custom
-      // provider as "configured" the moment it is declared, so an authState-based
-      // indicator would flip to "Key set" here and hide the input, making it
-      // impossible to ever enter a key. The auth.json peek must keep it visible.
+      // Regression guard: opencode reports a custom provider as usable the
+      // moment it is declared, so an authState-based indicator would flip to
+      // "Key set" here and hide the input, making it impossible to ever enter a
+      // key. The credential peek must keep it visible.
       installApiStub({ providers: { 'my-ollama': { baseURL: 'http://localhost:11434/v1' } } })
       await renderModal('my-ollama')
 

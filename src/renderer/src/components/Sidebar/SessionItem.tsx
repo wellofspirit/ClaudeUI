@@ -5,6 +5,8 @@ import type { SessionInfo } from '../../../../shared/types'
 import { PermissionsDialog } from '../PermissionsDialog'
 import { useContextMenu } from '../../hooks/useContextMenu'
 import { EngineLogo } from '../shared/EngineLogo'
+import { countAutoContinuingTasks } from '../../lib/task-types'
+import { StatusDot, deriveSessionDotState } from './StatusDot'
 
 export const SessionItem = memo(function SessionItem({
   info,
@@ -58,14 +60,16 @@ export const SessionItem = memo(function SessionItem({
   onDrop?: (e: React.DragEvent) => void
 }): React.JSX.Element {
   // Self-subscribe to session status fields — avoids parent needing the full sessions map
-  const { isRunning, isSdkActive, isWatching, needsAttention } = useSessionStore(
+  const { isRunning, isSdkActive, isWatching, needsAttention, runningSubagents } = useSessionStore(
     useShallow((s) => {
       const sess = s.sessions[info.sessionId]
       return {
         isRunning: sess?.status?.state === 'running',
         isSdkActive: !!sess?.sdkActive,
         isWatching: !!sess?.isWatching,
-        needsAttention: !!sess?.needsAttention
+        needsAttention: !!sess?.needsAttention,
+        // A count, not the record map, so useShallow skips the rows whose tasks didn't change.
+        runningSubagents: sess ? countAutoContinuingTasks(sess.activeTasks) : 0
       }
     })
   )
@@ -76,16 +80,14 @@ export const SessionItem = memo(function SessionItem({
   const renameCommittedRef = useRef(false)
   const [permissionsOpen, setPermissionsOpen] = useState(false)
 
-  const dotColor =
-    needsAttention && !active
-      ? 'bg-warning animate-pulse'
-      : isRunning
-        ? 'bg-green-400 animate-pulse'
-        : isSdkActive
-          ? 'bg-green-400'
-          : isWatching
-            ? 'bg-blue-400'
-            : 'bg-text-muted/30'
+  const dotState = deriveSessionDotState({
+    active,
+    needsAttention,
+    isRunning,
+    isSdkActive,
+    isWatching,
+    runningSubagents
+  })
 
   // Right-side icon overlay is sized to its actual icon count. Each icon ≈20px
   // (icon + gap) tightly wrapped, plus 5px right padding, plus a 40px blur-in
@@ -135,8 +137,11 @@ export const SessionItem = memo(function SessionItem({
         `}
       >
         <span className="shrink-0 w-[14px] h-[14px] flex items-center justify-center">
-          <span
-            className={`inline-block w-[6px] h-[6px] rounded-full ${dotColor} ${onRemove ? 'group-hover:hidden' : ''}`}
+          <StatusDot
+            state={dotState}
+            runningSubagents={runningSubagents}
+            testid="SessionItem.statusDot"
+            className={onRemove ? 'group-hover:hidden' : ''}
           />
           {onRemove && (
             <span
@@ -383,8 +388,9 @@ export const SessionItem = memo(function SessionItem({
               Unhide session
             </button>
           )}
-          {onDelete && info.engineId !== 'codex' && (
+          {onDelete && (
             <button
+              data-testid="SessionItem.delete"
               onClick={() => {
                 menu.close()
                 onDelete()

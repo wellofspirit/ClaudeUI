@@ -5,8 +5,8 @@ interface Props {
   msgs: ChatMessage[]
   isRunning: boolean
   isBackground: boolean
-  /** Pre-formatted elapsed label (each caller has its own formatElapsed — kept
-   *  out of this shared component to avoid a cross-directory import). */
+  /** Pre-formatted elapsed label — callers build it with TaskCard's
+   *  `taskElapsedLabel`, so a running task's clock ticks from its start. */
   elapsedLabel?: string
   /** Visual density: 'sm' for the compact inline TaskCard, 'md' for the
    *  full-height TaskDetailPanel entry. Purely cosmetic (text/spinner size). */

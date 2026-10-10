@@ -10,7 +10,7 @@
  *
  * Protocol mirrors src/main/sdk/: newline-delimited JSON on stdio, with a
  * control channel for request/response pairs (stopTask, mcpServerStatus,
- * dequeueMessage, toggleMcpServer, …).
+ * toggleMcpServer, …).
  *
  * Usage:
  *   import { createQuery, collectMessages, TestRunner, dumpMessages,
@@ -34,7 +34,9 @@ export const PROJECT_ROOT = resolve(__dirname, '..')
  * are tested in the exact form they ship.
  */
 const BIN_NAME = process.platform === 'win32' ? 'bun-claude.exe' : 'bun-claude'
-export const BUN_CLAUDE_PATH = resolve(PROJECT_ROOT, 'vendor', 'claude-cli', BIN_NAME)
+export const BUN_CLAUDE_PATH = process.env.CLAUDEUI_TEST_BIN
+  ? resolve(process.env.CLAUDEUI_TEST_BIN)
+  : resolve(PROJECT_ROOT, 'vendor', 'claude-cli', BIN_NAME)
 
 /** @deprecated Kept for legacy imports — prefer BUN_CLAUDE_PATH. */
 export const CLI_JS_PATH = BUN_CLAUDE_PATH
@@ -70,6 +72,13 @@ function buildArgs(options) {
   if (options.maxTurns != null) args.push('--max-turns', String(options.maxTurns))
   if (options.model) args.push('--model', options.model)
   if (options.permissionMode) args.push('--permission-mode', options.permissionMode)
+  // Opt-in: ClaudeUI always runs with `--permission-prompt-tool stdio` (args.ts
+  // passes it whenever canUseTool is set), which makes cli.js build a different
+  // permission wrapper than the no-prompt-tool default these tests otherwise
+  // exercise. See the can_use_tool responder in spawnQuery.
+  if (options.permissionPromptTool) {
+    args.push('--permission-prompt-tool', options.permissionPromptTool)
+  }
   if (options.allowDangerouslySkipPermissions) args.push('--allow-dangerously-skip-permissions')
   if (options.persistSession === false) args.push('--no-session-persistence')
   if (options.resume) args.push('--resume', options.resume)
@@ -96,6 +105,9 @@ function buildArgs(options) {
       typeof options.settings === 'string' ? options.settings : JSON.stringify(options.settings)
     )
   }
+  // Verbatim argv tail for flags this builder does not model, e.g.
+  // `extraArgs: ['--forward-subagent-text']` (which the app always passes).
+  if (Array.isArray(options.extraArgs)) args.push(...options.extraArgs)
   return args
 }
 
@@ -105,7 +117,7 @@ function buildArgs(options) {
 
 /**
  * Spawn bun-claude and return an async-iterable query handle with control
- * methods (close/stopTask/mcpServerStatus/dequeueMessage/toggleMcpServer).
+ * methods (close/stopTask/mcpServerStatus/toggleMcpServer).
  *
  * The handle iterates stream-json data messages. Control responses are
  * intercepted and routed to the pending request map instead of being yielded.
@@ -119,7 +131,10 @@ function spawnQuery({ prompt, options, ac }) {
 
   const child = spawn(BUN_CLAUDE_PATH, buildArgs(options), {
     cwd: options.cwd ?? PROJECT_ROOT,
-    env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
+    env: {
+      ...process.env,
+      CLAUDE_CODE_ENTRYPOINT: process.env.CLAUDEUI_TEST_ENTRYPOINT || 'sdk-ts'
+    },
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true
   })
@@ -167,6 +182,9 @@ function spawnQuery({ prompt, options, ac }) {
       })
       writer({ type: 'control_request', request_id, request: { subtype, ...fields } })
     })
+
+  /** can_use_tool requests auto-denied under `permissionPromptTool: 'stdio'`. */
+  const canUseToolRequests = []
 
   // --- Message queue -------------------------------------------------------
   const queue = []
@@ -254,7 +272,29 @@ function spawnQuery({ prompt, options, ac }) {
       // Inbound control_request (can_use_tool, hooks, initialize, etc.) —
       // the test harness doesn't register handlers; drop them. Tests that
       // need these features should use the real SDK harness.
-      if (obj && obj.type === 'control_request') continue
+      //
+      // Exception: with `permissionPromptTool: 'stdio'` cli.js asks US about
+      // every escalated tool call and waits for the answer, so an unanswered
+      // can_use_tool would hang the turn. Deny it (same response shape as
+      // src/core/sdk/query.ts handleCanUseTool) and record it for the test.
+      if (obj && obj.type === 'control_request') {
+        if (options.permissionPromptTool === 'stdio' && obj.request?.subtype === 'can_use_tool') {
+          canUseToolRequests.push(obj.request)
+          writer({
+            type: 'control_response',
+            response: {
+              subtype: 'success',
+              request_id: obj.request_id,
+              response: {
+                behavior: 'deny',
+                message: 'Denied by the patch test harness.',
+                toolUseID: obj.request.tool_use_id
+              }
+            }
+          })
+        }
+        continue
+      }
 
       if (waiter) {
         const w = waiter
@@ -331,10 +371,6 @@ function spawnQuery({ prompt, options, ac }) {
     async stopTask(task_id) {
       return controlRequest('stop_task', { task_id })
     },
-    async dequeueMessage(value) {
-      const r = await controlRequest('dequeue_message', { value })
-      return { removed: r?.removed ?? 0 }
-    },
     async mcpServerStatus() {
       const r = await controlRequest('mcp_status', {})
       if (Array.isArray(r)) return r
@@ -357,6 +393,7 @@ function spawnQuery({ prompt, options, ac }) {
       return controlRequest(subtype, fields, opts)
     },
 
+    canUseToolRequests,
     _writer: writer,
     _child: child
   }
@@ -373,7 +410,7 @@ const DEFAULT_OPTIONS = {
   settingSources: [],
   thinking: { type: 'enabled', budgetTokens: 10_000 },
   effort: 'low',
-  model: 'claude-sonnet-4-6'
+  model: process.env.CLAUDEUI_TEST_MODEL || 'claude-sonnet-4-6'
 }
 
 /**

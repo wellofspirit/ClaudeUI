@@ -24,7 +24,12 @@ vi.mock('../../services/ui-config', () => ({
 }))
 
 import { createOpencodeHostedToolsServer } from '../opencode-hosted-tools'
-import type { CallerSessionHandle, DispatchAgentFn } from '../opencode-hosted-tools'
+import { resolveCallerIdentity } from '../opencode-hosted-tools'
+import type {
+  CallerRootResolver,
+  CallerSessionHandle,
+  DispatchAgentFn
+} from '../opencode-hosted-tools'
 import { loadEngineConfig } from '../../services/ui-config'
 
 let tmp: string
@@ -161,14 +166,31 @@ describe('createOpencodeHostedToolsServer', () => {
 // dispatch_agent (ADR-033 M2 — opencode → Claude)
 // ---------------------------------------------------------------------------
 
-function makeExtra(): { signal: AbortSignal; sendNotification: ReturnType<typeof vi.fn> } {
-  return { signal: new AbortController().signal, sendNotification: vi.fn(async () => {}) }
+function makeExtra(meta?: Record<string, unknown>): {
+  signal: AbortSignal
+  sendNotification: ReturnType<typeof vi.fn>
+  _meta?: Record<string, unknown>
+} {
+  return {
+    signal: new AbortController().signal,
+    sendNotification: vi.fn(async () => {}),
+    ...(meta ? { _meta: meta } : {})
+  }
 }
+
+const callerHandle = (): CallerSessionHandle => ({
+  cwd: '/proj',
+  getAutonomyMode: () => 'default',
+  getMessages: () => [],
+  emit: vi.fn(),
+  addDispatchedCost: vi.fn()
+})
 
 function getDispatchTool(
   tmp: string,
   deps: {
     lookupCallerSession?: (id: string) => CallerSessionHandle | undefined
+    resolveCallerRoot?: CallerRootResolver
     dispatch?: DispatchAgentFn
   }
 ): { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> } {
@@ -184,14 +206,15 @@ function getDispatchTool(
 }
 
 describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () => {
-  it('missing __xeng_caller_session → isError mentioning the caller-identity plugin', async () => {
+  it('neither _meta nor the plugin stamp → isError naming both signals', async () => {
     const tool = getDispatchTool(tmp, {})
     const result = (await tool.handler({ engine: 'claude', prompt: 'x' }, makeExtra())) as {
       content: Array<{ type: string; text: string }>
       isError?: boolean
     }
     expect(result.isError).toBe(true)
-    expect(result.content[0].text).toContain('claudeui-xeng-plugin')
+    expect(result.content[0].text).toContain('ai.opencode/sessionID')
+    expect(result.content[0].text).toContain('claudeui-xeng')
   })
 
   it('unknown/expired caller session id → isError (lookup returns undefined)', async () => {
@@ -208,7 +231,8 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     const tool = getDispatchTool(tmp, {
       lookupCallerSession: () => ({
         cwd: '/proj',
-        autonomyMode: 'default',
+        getAutonomyMode: () => 'default',
+        getMessages: () => [],
         emit: vi.fn(),
         addDispatchedCost: vi.fn()
       })
@@ -222,6 +246,8 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
 
   it('happy path: strips the internal arg, dispatches with fromRoutingId = caller id, appends session_id', async () => {
     const emit = vi.fn()
+    const getAutonomyMode = (): string => 'acceptEdits'
+    const getMessages = (): [] => []
     const addDispatchedCost = vi.fn()
     const dispatch = vi.fn<DispatchAgentFn>(async () => ({
       text: 'the review',
@@ -230,7 +256,13 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     const tool = getDispatchTool(tmp, {
       lookupCallerSession: (id) => {
         expect(id).toBe('ses_caller')
-        return { cwd: '/proj', autonomyMode: 'acceptEdits', emit, addDispatchedCost }
+        return {
+          cwd: '/proj',
+          getAutonomyMode,
+          getMessages,
+          emit,
+          addDispatchedCost
+        }
       },
       dispatch
     })
@@ -252,7 +284,9 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
         fromEngine: 'opencode',
         fromRoutingId: 'ses_caller',
         cwd: '/proj',
-        autonomyMode: 'acceptEdits',
+        // The caller's live accessors, passed through (ADR-088).
+        getAutonomyMode,
+        getMessages,
         emit,
         addDispatchedCost,
         toolUseId: 'call_99'
@@ -273,7 +307,8 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     const tool = getDispatchTool(tmp, {
       lookupCallerSession: () => ({
         cwd: '/proj',
-        autonomyMode: 'default',
+        getAutonomyMode: () => 'default',
+        getMessages: () => [],
         emit: vi.fn(),
         addDispatchedCost: vi.fn()
       }),
@@ -299,7 +334,8 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     const tool = getDispatchTool(tmp, {
       lookupCallerSession: () => ({
         cwd: '/proj',
-        autonomyMode: 'default',
+        getAutonomyMode: () => 'default',
+        getMessages: () => [],
         emit: vi.fn(),
         addDispatchedCost: vi.fn()
       }),
@@ -340,7 +376,8 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     const tool = getDispatchTool(tmp, {
       lookupCallerSession: () => ({
         cwd: '/proj',
-        autonomyMode: 'default',
+        getAutonomyMode: () => 'default',
+        getMessages: () => [],
         emit,
         addDispatchedCost
       }),
@@ -410,6 +447,18 @@ describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033
     expect(def.inputSchema.shape.model.description).toContain('sonnet')
   })
 
+  it('steers opencode to its own task tool first (S4) and lists claude, pi and codex as targets', () => {
+    vi.mocked(loadEngineConfig).mockReturnValue({})
+    const { description } = getDispatchToolDef(tmp)
+    expect(description).toContain(
+      'Use this only when the user asks for a different engine or model vendor'
+    )
+    expect(description).toContain('use your own task tool instead')
+    expect(description).toContain(
+      "claude (Anthropic's models), pi (an alternative coding-agent harness) or codex"
+    )
+  })
+
   it('falls back to the generic Claude-alias hint when nothing is configured', () => {
     vi.mocked(loadEngineConfig).mockReturnValue({})
     const def = getDispatchToolDef(tmp)
@@ -443,5 +492,217 @@ describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033
     vi.mocked(loadEngineConfig).mockReturnValue({})
     const def = getDispatchToolDef(tmp)
     expect(def.description).toContain('provider/modelId')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Caller identity on opencode 2.x (ADR-097 §4): _meta first, plugin stamp fallback
+// ---------------------------------------------------------------------------
+
+describe('resolveCallerIdentity', () => {
+  const META = 'ai.opencode/sessionID'
+
+  it('_meta wins; a matching plugin stamp contributes the call id', () => {
+    expect(
+      resolveCallerIdentity(
+        { [META]: 'ses_a' },
+        { __xeng_caller_session: 'ses_a', __xeng_call_id: 'call_1' }
+      )
+    ).toEqual({ sessionId: 'ses_a', callId: 'call_1', source: 'meta' })
+  })
+
+  it('_meta alone (plugin not loaded): the session, no call id', () => {
+    expect(resolveCallerIdentity({ [META]: 'ses_a' }, {})).toEqual({
+      sessionId: 'ses_a',
+      callId: undefined,
+      source: 'meta'
+    })
+  })
+
+  it('a call id without the plugin session stamp is not trusted', () => {
+    expect(
+      resolveCallerIdentity({ [META]: 'ses_a' }, { __xeng_call_id: 'call_forged' }).callId
+    ).toBeUndefined()
+  })
+
+  it('stamp and _meta disagree: _meta wins, the call id is dropped, the mismatch flagged', () => {
+    expect(
+      resolveCallerIdentity(
+        { [META]: 'ses_a' },
+        { __xeng_caller_session: 'ses_b', __xeng_call_id: 'call_1' }
+      )
+    ).toEqual({ sessionId: 'ses_a', callId: undefined, source: 'meta', mismatch: true })
+  })
+
+  it('no _meta (an engine that does not send it): the plugin stamp is the fallback', () => {
+    expect(
+      resolveCallerIdentity(undefined, { __xeng_caller_session: 'ses_b', __xeng_call_id: 'call_2' })
+    ).toEqual({ sessionId: 'ses_b', callId: 'call_2', source: 'plugin' })
+  })
+
+  it('nothing, or only empty/non-string values: no identity', () => {
+    expect(resolveCallerIdentity(undefined, {})).toEqual({ source: 'none' })
+    expect(resolveCallerIdentity({ [META]: '' }, { __xeng_caller_session: 42 })).toEqual({
+      source: 'none'
+    })
+  })
+})
+
+describe('dispatch_agent caller identity through the handler (ADR-097 §4)', () => {
+  it('reads the caller from _meta even without the plugin stamp (no call id)', async () => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'c-1' }))
+    const lookup = vi.fn(() => callerHandle())
+    const tool = getDispatchTool(tmp, { lookupCallerSession: lookup, dispatch })
+    const result = (await tool.handler(
+      { engine: 'claude', prompt: 'x' },
+      makeExtra({ 'ai.opencode/sessionID': 'ses_meta' })
+    )) as { isError?: boolean }
+    expect(result.isError).toBeUndefined()
+    expect(lookup).toHaveBeenCalledWith('ses_meta')
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ fromRoutingId: 'ses_meta', toolUseId: undefined })
+    )
+  })
+
+  it('a stamp that disagrees with _meta cannot redirect the dispatch to another session', async () => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'c-1' }))
+    const lookup = vi.fn(() => callerHandle())
+    const onIdentityMismatch = vi.fn()
+    const server = createOpencodeHostedToolsServer(tmp, {
+      lookupCallerSession: lookup,
+      dispatch,
+      onIdentityMismatch
+    })
+    const tool = (
+      server as unknown as {
+        _registeredTools: Record<string, { handler: (a: unknown, e: unknown) => Promise<unknown> }>
+      }
+    )._registeredTools['dispatch_agent']
+    await tool.handler(
+      {
+        engine: 'claude',
+        prompt: 'x',
+        __xeng_caller_session: 'ses_other',
+        __xeng_call_id: 'call_9'
+      },
+      makeExtra({ 'ai.opencode/sessionID': 'ses_real' })
+    )
+    expect(lookup).toHaveBeenCalledWith('ses_real')
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ fromRoutingId: 'ses_real', toolUseId: undefined })
+    )
+    expect(onIdentityMismatch).toHaveBeenCalledWith(expect.objectContaining({ mismatch: true }))
+  })
+
+  it("a subagent CHILD calling: the dispatch belongs to the ClaudeUI chat it descends from, carrying the child agent's restriction (S9)", async () => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'c-1' }))
+    const handle = callerHandle()
+    const lookup = vi.fn((id: string) => (id === 'ses_root' ? handle : undefined))
+    const restriction = { agents: ['custom'], deny: ['Edit', 'Write'], ask: [] }
+    const resolveCallerRoot = vi.fn<CallerRootResolver>(async (id) =>
+      id === 'ses_child'
+        ? { root: 'ses_root', restriction }
+        : id === 'ses_unreadable'
+          ? { refused: 'ClaudeUI could not read the permission rules of the calling subagent' }
+          : undefined
+    )
+    const tool = getDispatchTool(tmp, { lookupCallerSession: lookup, resolveCallerRoot, dispatch })
+    const result = (await tool.handler(
+      { engine: 'claude', prompt: 'x' },
+      makeExtra({ 'ai.opencode/sessionID': 'ses_child' })
+    )) as { isError?: boolean }
+    expect(result.isError).toBeUndefined()
+    expect(resolveCallerRoot).toHaveBeenCalledWith('ses_child')
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        fromRoutingId: 'ses_root',
+        cwd: handle.cwd,
+        callerRestriction: restriction
+      })
+    )
+
+    // Rules that cannot be read: refused (fail closed), nothing dispatched.
+    const unreadable = (await tool.handler(
+      { engine: 'claude', prompt: 'x' },
+      makeExtra({ 'ai.opencode/sessionID': 'ses_unreadable' })
+    )) as { isError?: boolean; content: { text: string }[] }
+    expect(unreadable.isError).toBe(true)
+    expect(unreadable.content[0].text).toContain('could not read the permission rules')
+
+    // No ClaudeUI ancestor (a dispatch target's own child, a foreign session): refused.
+    const orphan = (await tool.handler(
+      { engine: 'claude', prompt: 'x' },
+      makeExtra({ 'ai.opencode/sessionID': 'ses_orphan' })
+    )) as { isError?: boolean; content: { text: string }[] }
+    expect(orphan.isError).toBe(true)
+    expect(orphan.content[0].text).toContain('could not find the calling session (ses_orphan)')
+    expect(dispatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('a chat calling for itself carries no restriction', async () => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'c-1' }))
+    const tool = getDispatchTool(tmp, { lookupCallerSession: () => callerHandle(), dispatch })
+    await tool.handler(
+      { engine: 'claude', prompt: 'x' },
+      makeExtra({ 'ai.opencode/sessionID': 'ses_a' })
+    )
+    expect(dispatch.mock.calls[0][1].callerRestriction).toBeUndefined()
+  })
+
+  it('_meta + matching stamp: session from _meta, call id from the stamp', async () => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'c-1' }))
+    const tool = getDispatchTool(tmp, { lookupCallerSession: () => callerHandle(), dispatch })
+    await tool.handler(
+      { engine: 'claude', prompt: 'x', __xeng_caller_session: 'ses_a', __xeng_call_id: 'call_7' },
+      makeExtra({ 'ai.opencode/sessionID': 'ses_a' })
+    )
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ fromRoutingId: 'ses_a', toolUseId: 'call_7' })
+    )
+  })
+})
+
+describe('mockup tools with a per-call cwd resolver (one opencode server, many directories)', () => {
+  type Handler = (a: Record<string, unknown>, e: unknown) => Promise<unknown>
+  const toolsOf = (server: McpServer): Record<string, { handler: Handler }> =>
+    (server as unknown as { _registeredTools: Record<string, { handler: Handler }> })
+      ._registeredTools
+
+  it("writes under the CALLING session's directory, resolved from _meta per call", async () => {
+    const tmp2 = await mkdtemp(join(tmpdir(), 'claudeui-hosted-tools-r-'))
+    try {
+      const dirs: Record<string, string> = { ses_a: tmp, ses_b: tmp2 }
+      const resolver = vi.fn(async (sid: string | undefined) => (sid ? dirs[sid] : undefined))
+      const tools = toolsOf(createOpencodeHostedToolsServer(resolver))
+      const a = (await tools['create_mockup'].handler(
+        { html: '<p>A</p>' },
+        makeExtra({ 'ai.opencode/sessionID': 'ses_a' })
+      )) as { content: Array<{ text: string }> }
+      const b = (await tools['create_mockup'].handler(
+        { html: '<p>B</p>' },
+        makeExtra({ 'ai.opencode/sessionID': 'ses_b' })
+      )) as { content: Array<{ text: string }> }
+      const idA = /Directory:\s*(\S+)/.exec(a.content[0].text)![1]
+      const idB = /Directory:\s*(\S+)/.exec(b.content[0].text)![1]
+      expect(existsSync(join(tmp, '.claude', 'ui', 'mockups', idA, 'index.html'))).toBe(true)
+      expect(existsSync(join(tmp2, '.claude', 'ui', 'mockups', idB, 'index.html'))).toBe(true)
+      expect(resolver).toHaveBeenCalledWith('ses_a')
+    } finally {
+      await rm(tmp2, { recursive: true, force: true })
+    }
+  })
+
+  it('an unresolvable caller is an isError result, never a write to a guessed directory', async () => {
+    const tools = toolsOf(createOpencodeHostedToolsServer(async () => undefined))
+    const result = (await tools['create_mockup'].handler(
+      { html: '<p>x</p>' },
+      makeExtra({ 'ai.opencode/sessionID': 'ses_gone' })
+    )) as { isError?: boolean; content: Array<{ text: string }> }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('ses_gone')
   })
 })

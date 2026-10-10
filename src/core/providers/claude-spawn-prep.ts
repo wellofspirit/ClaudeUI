@@ -1,6 +1,6 @@
 import { loadVendorConfig } from '../services/ui-config'
 import { startSocksBridge, stopSocksBridge } from '../services/socks-bridge'
-import { setProxyEnv, setProxyAllSubprocesses } from '../sdk/proxy'
+import { setProxyEnv } from '../sdk/proxy'
 import { setEndpointEnv } from '../sdk/endpoint-env'
 import { setModelEnv } from '../sdk/model-env'
 import { logger } from '../services/logger'
@@ -39,9 +39,8 @@ function buildProxyUrl(proxy: ProxySettings): string {
  * - SOCKS5 proxy: starts a local HTTP CONNECT bridge that tunnels through SOCKS5,
  *   because cli.js has no native SOCKS5 support
  *
- * cli.js subprocess inheritance (Bash tool, MCP, LSP, shell-snapshot) is
- * controlled by `proxy.proxySubprocesses` — see `src/main/sdk/proxy.ts` and
- * `patch/subprocess-proxy-strip/`.
+ * cli.js hands its env to every child it spawns (Bash tool, MCP stdio servers,
+ * LSP, hooks), so the proxy applies to those too.
  */
 export async function applyProxyEnv(proxy: ProxySettings | undefined): Promise<void> {
   if (proxy?.enabled && proxy.hostname) {
@@ -74,11 +73,9 @@ export async function applyProxyEnv(proxy: ProxySettings | undefined): Promise<v
       setProxyEnv({ HTTP_PROXY: url, HTTPS_PROXY: url, ALL_PROXY: url })
       logger.info('Proxy', `HTTP proxy enabled: ${proxy.hostname}:${proxy.port}`)
     }
-    setProxyAllSubprocesses(proxy.proxySubprocesses === true)
   } else {
     await stopSocksBridge()
     setProxyEnv(null)
-    setProxyAllSubprocesses(false)
   }
 }
 

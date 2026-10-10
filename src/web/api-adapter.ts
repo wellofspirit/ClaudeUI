@@ -18,7 +18,6 @@ import { buildMockupHttpUrl } from '../shared/mockup-url'
 import { buildSentFileUrl } from '../shared/sent-file-url'
 import { derivePasswordProof } from './password-proof'
 import type { RemoteConnection } from './connection'
-import { BrowserVoiceCapture } from './voice-capture'
 
 declare global {
   interface Window {
@@ -34,13 +33,6 @@ declare global {
 }
 
 export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
-  // One microphone per client, matching the server's one-capture-per-connection
-  // rule (services/remote-voice.ts). Constructed eagerly and cheaply — it touches
-  // no device until `start()`.
-  const voiceCapture = new BrowserVoiceCapture({
-    sendAudio: (dataB64) => connection.sendVoiceAudio(dataB64)
-  })
-
   // Listener registration mirrors preload's onEvent(). The registry itself
   // lives in the connection's SyncClient — it has to be the thing that knows an
   // event was dispatched, or the cursor advances past events nobody applied
@@ -91,7 +83,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       thinkingMode?,
       resumeSessionAt?,
       forkSession?,
-      engineId?
+      engineId?,
+      announce?
     ) =>
       connection.invoke(
         'session:create',
@@ -104,7 +97,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         thinkingMode,
         resumeSessionAt,
         forkSession,
-        engineId
+        engineId,
+        announce
       ) as Promise<void>,
 
     resolveForkAnchor: (sessionId, cwd, messageId, engineId, messageIndex) =>
@@ -135,6 +129,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         answers,
         updatedPermissions
       ) as Promise<void>,
+
+    approveBlocked: (routingId: string, toolUseId: string) =>
+      connection.invoke('session:approve-blocked', routingId, toolUseId) as Promise<void>,
 
     // Window controls — no-op on web
     minimizeWindow: async () => {},
@@ -175,6 +172,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         projectKey,
         agentId
       ) as ReturnType<ClaudeAPI['loadSubagentHistory']>,
+
+    getBlob: (blobId) => connection.invoke('blob:get', blobId) as ReturnType<ClaudeAPI['getBlob']>,
 
     buildSubagentFileMap: (sessionId, projectKey, taskPrompts) =>
       connection.invoke(
@@ -279,8 +278,14 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     setReasoningVariant: (routingId, variant) =>
       connection.invoke('session:set-reasoning-variant', routingId, variant) as Promise<void>,
     getModels: () => connection.invoke('session:get-models') as ReturnType<ClaudeAPI['getModels']>,
-    getEngineModels: () =>
-      connection.invoke('session:get-engine-models') as ReturnType<ClaudeAPI['getEngineModels']>,
+    getEngineModels: (engineId) =>
+      connection.invoke('session:get-engine-models', engineId) as ReturnType<
+        ClaudeAPI['getEngineModels']
+      >,
+    judgeModelSupport: (engineId, values) =>
+      connection.invoke('automode:judge-model-support', engineId, values) as ReturnType<
+        ClaudeAPI['judgeModelSupport']
+      >,
     getOpencodeProviders: () =>
       connection.invoke('session:get-opencode-providers') as ReturnType<
         ClaudeAPI['getOpencodeProviders']
@@ -306,6 +311,42 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     engineIsInstalled: (engineId) =>
       connection.invoke('engine:is-installed', engineId) as ReturnType<
         ClaudeAPI['engineIsInstalled']
+      >,
+    // The harness manager (ADR-082 arc 2). Plain results (no safeHandler
+    // envelope), so `connection.invoke` like the reads beside them. The writes
+    // declare `admin`: a base connection is refused them by the registry.
+    harnessState: () => connection.invoke('harness:state') as ReturnType<ClaudeAPI['harnessState']>,
+    harnessVersions: (id) =>
+      connection.invoke('harness:versions', { id }) as ReturnType<ClaudeAPI['harnessVersions']>,
+    setHarnessSelection: (id, selection) =>
+      connection.invoke('harness:set-selection', { id, selection }) as ReturnType<
+        ClaudeAPI['setHarnessSelection']
+      >,
+    installHarness: (id, version) =>
+      connection.invoke('harness:install', { id, version }) as ReturnType<
+        ClaudeAPI['installHarness']
+      >,
+    cancelHarnessInstall: (id, version) =>
+      connection.invoke('harness:install-cancel', { id, version }) as ReturnType<
+        ClaudeAPI['cancelHarnessInstall']
+      >,
+    detectHarnesses: (ids) =>
+      connection.invoke('harness:detect', ids ? { ids } : {}) as ReturnType<
+        ClaudeAPI['detectHarnesses']
+      >,
+    setHarnessUpdateMode: (mode) =>
+      connection.invoke('harness:set-update-mode', { mode }) as ReturnType<
+        ClaudeAPI['setHarnessUpdateMode']
+      >,
+    // Resolves when the run ends; the 30 s invoke timeout may come first, which
+    // the harness store treats as still running (the events carry on).
+    updateHarnesses: () =>
+      connection.invoke('harness:update-all') as ReturnType<ClaudeAPI['updateHarnesses']>,
+    checkHarnessUpdates: () =>
+      connection.invoke('harness:check-updates') as ReturnType<ClaudeAPI['checkHarnessUpdates']>,
+    answerHarnessUpgradePrompt: () =>
+      connection.invoke('harness:answer-upgrade-prompt') as ReturnType<
+        ClaudeAPI['answerHarnessUpgradePrompt']
       >,
     getPiBinaryPath: () =>
       connection.invoke('pi:binary-path') as ReturnType<ClaudeAPI['getPiBinaryPath']>,
@@ -343,16 +384,28 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // carries a real refusal back. `set-key` sends the key host-side and returns
     // nothing — the same direction `vendor-auth:set-key` already travels.
     saveSharedProvider: (definition) => unwrap('shared-provider:save', definition),
+    probeSharedEndpoint: (input) => unwrap('shared-provider:probe', input),
     removeSharedProvider: (id) => unwrap('shared-provider:remove', id),
     setSharedProviderRoute: (id, harness, enabled) =>
       unwrap('shared-provider:set-route', id, harness, enabled),
-    setSharedProviderApiKey: (id, key) => unwrap('shared-provider:set-key', id, key),
+    // `replaceOwn` (the harnesses the user agreed to overwrite) goes on the
+    // wire only when it names one (S7f).
+    setSharedProviderApiKey: (id, key, replaceOwn) =>
+      unwrap('shared-provider:set-key', id, key, ...(replaceOwn?.length ? [replaceOwn] : [])),
     adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
     setSharedProviderCuration: (id, curation) =>
       unwrap('shared-provider:set-curation', id, curation),
     setSharedProviderDisabled: (id, disabled, replaceOwn) =>
-      unwrap('shared-provider:set-disabled', id, disabled, replaceOwn),
+      unwrap(
+        'shared-provider:set-disabled',
+        id,
+        disabled,
+        ...(replaceOwn?.length ? [replaceOwn] : [])
+      ),
     syncSharedProvider: (id) => unwrap('shared-provider:sync', id),
+    useSharedProviderStoredKey: (id, harness) =>
+      unwrap('shared-provider:use-stored-key', id, harness),
+    getSharedProviderOwnKeyHolders: (id) => unwrap('shared-provider:own-key-holders', id),
     disconnectSharedProvider: (id) => unwrap('shared-provider:disconnect', id),
     setSharedProviderDefaultModel: (id, harness, modelId) =>
       unwrap('shared-provider:set-default', id, harness, modelId),
@@ -892,48 +945,19 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         ClaudeAPI['webauthnRegisterVerify']
       >,
 
-    // Voice input — SyncCore phase 5 S3. It USED to be four no-ops here ("audio
-    // hardware is on the server"), which left the mic button rendered and inert
-    // on web. It is now a real capture: the browser's AudioWorklet produces the
-    // 16 kHz i16LE PCM the cli.js voice server wants, `voice:start` binds this
-    // connection's audio to the session, and the transcripts come back as lane
-    // frames targeted at this socket — landing in `on('voice:transcript')` below,
-    // which is the same listener the desktop's host-local send feeds.
-    //
-    // The two SERVER verbs stay no-ops: starting and stopping the transcription
-    // server inside cli.js is `voice:start`'s business, and nothing on the web
-    // client calls them (the desktop's InputBox does not either — ClaudeSession
-    // starts the server lazily from voiceStartRecording).
-    voiceStartServer: async () => {},
-    voiceStopServer: async () => {},
-    voiceStartRecording: async (routingId, language) => {
-      // IDEMPOTENT, defensively. `BrowserVoiceCapture.start()` already no-ops
-      // while active, but that alone is not enough: a second call would still
-      // reach `voice:start`, and the server answers that by tearing the live
-      // capture down and building a new one — an interrupted sentence. The mic
-      // button's own `voiceState !== 'idle'` guard cannot cover this, because
-      // that state arrives from the server a round trip later, so two presses
-      // inside the window both see `idle`. This is the check that holds.
-      if (voiceCapture.isActive()) return
-      // Microphone FIRST, engine second: a denied permission must not spawn a
-      // cli.js child and open a Deepgram stream nobody will speak into. Blocks
-      // captured while `voice:start` is in flight are held by the controller and
-      // flushed on `arm()`, so the first second of speech is not lost to the
-      // round trip.
-      await voiceCapture.start()
-      try {
-        await connection.invoke('voice:start', routingId, language)
-      } catch (err) {
-        await voiceCapture.stop()
-        throw err
-      }
-      voiceCapture.arm()
+    // Voice input — the TRANSPORT only. The microphone is the renderer's
+    // (`renderer/src/lib/voice/`, shared with the desktop window), which calls
+    // these: `voice:start` binds this connection's audio to the session, the
+    // audio rides the `voice-audio` lane frame, and the transcripts come back as
+    // lane frames targeted at this socket — landing in `on('voice:transcript')`
+    // below, the same listener the desktop's host-local send feeds.
+    voiceStart: async (routingId, language) => {
+      await connection.invoke('voice:start', routingId, language)
     },
-    voiceStopRecording: async () => {
-      await voiceCapture.stop()
-      // Always told, even if the capture was never armed: the server may be
-      // holding a stream open, and finalization is what flushes the last
-      // transcript back.
+    // The lane frame carries no session id: the capture is the CONNECTION's, and
+    // the server routes by that (core/services/voice-relay.ts).
+    voiceAudio: (_routingId, dataB64) => connection.sendVoiceAudio(dataB64),
+    voiceStop: async () => {
       await connection.invoke('voice:stop')
     },
     onVoiceTranscript: on('voice:transcript') as ClaudeAPI['onVoiceTranscript'],
@@ -997,9 +1021,12 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     saveSharedAutoMode: (config) =>
       connection.invoke('config:save-shared-automode', config) as Promise<void>,
     loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
-    saveOpencodeSettings: (settings) => unwrap('config:save-opencode-settings', settings),
+    saveOpencodeSettings: (settings, base) =>
+      unwrap('config:save-opencode-settings', settings, base),
     readOpencodeNativeRaw: () => unwrap('config:read-opencode-native-raw'),
     patchOpencodeNative: (patches) => unwrap('config:patch-opencode-native', patches),
+    setOpencodeToolDisabled: (action, disabled) =>
+      unwrap('config:set-opencode-tool-disabled', action, disabled),
     readPiNativeRaw: () => unwrap('config:read-pi-native-raw'),
     patchPiNative: (patches) => unwrap('config:patch-pi-native', patches),
     writePiNativeText: (text) => unwrap('config:write-pi-native-text', text),
@@ -1013,6 +1040,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // model tokens. Both are in the base grant set, so an authenticated remote
     // connection reaches all six.
     listOpencodeAgents: (cwd) => unwrap('opencode-agents:list', cwd),
+    listAgentTypes: (engine, cwd) => unwrap('config:list-agent-types', engine, cwd),
     readOpencodeAgent: (name, scope, cwd) => unwrap('opencode-agents:read', name, scope, cwd),
     saveOpencodeAgent: (input, cwd) => unwrap('opencode-agents:save', input, cwd),
     deleteOpencodeAgent: (name, scope, cwd) => unwrap('opencode-agents:delete', name, scope, cwd),

@@ -69,13 +69,24 @@ import type {
   VendorDeviceCodeStart,
   VendorDeviceCodeStatus
 } from '../../shared/types'
-import type {
-  ConfigurableHarnessId,
-  SharedProviderAccountList,
-  SharedProviderCuration,
-  SharedProviderDefinition
+import {
+  validateVendorId,
+  type ConfigurableHarnessId,
+  type EndpointProbeInput,
+  type EndpointProbeResult,
+  type SharedProviderAccountList,
+  type SharedProviderCuration,
+  type SharedProviderDefinition,
+  type SharedProviderProtocol
 } from '../../shared/shared-provider'
 import type { ProviderRegistrySnapshot } from '../../shared/provider-registry'
+
+/** The protocols `shared-provider:probe` accepts — the definition's own enum. */
+const PROBE_PROTOCOLS: ReadonlySet<SharedProviderProtocol> = new Set([
+  'openai-completions',
+  'openai-responses',
+  'anthropic-messages'
+])
 
 /**
  * The desktop-auth capabilities this family needs, injected from the boot seam
@@ -110,6 +121,18 @@ function accountProvider(providerId: string): SharedProviderDefinition {
     throw new Error(`Shared provider "${providerId}" does not have accounts`)
   }
   return definition
+}
+
+/**
+ * The harnesses a `replaceOwn` argument names (S7f): absent is none. Anything
+ * but a list of harness ids is refused — never read as "every harness", which
+ * is how a question asked about one harness could replace another's own key.
+ */
+function confirmedHarnesses(value: unknown): ConfigurableHarnessId[] {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value) || value.some((harness) => harness !== 'pi' && harness !== 'opencode'))
+    throw new Error('Invalid replaceOwn: expected a list of harnesses')
+  return value as ConfigurableHarnessId[]
 }
 
 /**
@@ -375,6 +398,18 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
     // carries no key material — every count, chip and badge is derived, and the
     // mutations behind the row are the existing channels above and below.
     {
+      // S7f round 3 — who holds a key of their OWN for a provider right now,
+      // read from the harnesses' auth files (never a cached catalog), so an
+      // own-key question names exactly them. Harness ids only; no key leaves.
+      channel: 'shared-provider:own-key-holders',
+      capability: 'config',
+      kind: 'query',
+      handler: safeHandler(async (id: unknown): Promise<ConfigurableHarnessId[]> => {
+        validateVendorId(id)
+        return sharedProviderService.ownKeyHolders(id)
+      })
+    },
+    {
       channel: 'provider-registry:list',
       capability: 'config',
       kind: 'query',
@@ -451,6 +486,36 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
       )
     },
     {
+      // Detect for a custom endpoint: the host reads the server's `/models`
+      // (and SGLang's `/model_info`). `config` like the save beside it, because
+      // it makes the host fetch a URL the caller typed — a view-only remote
+      // session must not get the host as a proxy into its network. The key is
+      // typed, or read from the vault host-side by `providerId`; the answer
+      // carries model facts only.
+      channel: 'shared-provider:probe',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (input: unknown): Promise<EndpointProbeResult> => {
+        // A wire payload: every field is checked before the host dials anything.
+        const { baseUrl, protocol, apiKey, providerId } = (input ?? {}) as Record<string, unknown>
+        if (
+          typeof baseUrl !== 'string' ||
+          (apiKey != null && typeof apiKey !== 'string') ||
+          (providerId != null && typeof providerId !== 'string')
+        )
+          throw new Error('Invalid endpoint probe request')
+        if (protocol != null && !PROBE_PROTOCOLS.has(protocol as SharedProviderProtocol))
+          throw new Error(`Unknown protocol: ${String(protocol)}`)
+        const request: EndpointProbeInput = {
+          baseUrl,
+          ...(protocol != null ? { protocol: protocol as SharedProviderProtocol } : {}),
+          ...(apiKey ? { apiKey: apiKey as string } : {}),
+          ...(providerId ? { providerId: providerId as string } : {})
+        }
+        return sharedProviderService.probeEndpoint(request)
+      })
+    },
+    {
       channel: 'shared-provider:remove',
       capability: 'config',
       kind: 'command',
@@ -465,11 +530,14 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
       )
     },
     {
+      // `replaceOwn` names the harnesses whose own key for the vendor the user
+      // agreed to replace (ADR-082 §8, S7f); every other harness keeps its own.
+      // The keys are compared host-side.
       channel: 'shared-provider:set-key',
       capability: 'config',
       kind: 'command',
-      handler: safeHandler(async (id: string, key: string) =>
-        sharedProviderService.setApiKey(id, key)
+      handler: safeHandler(async (id: string, key: string, replaceOwn?: unknown) =>
+        sharedProviderService.setApiKey(id, key, confirmedHarnesses(replaceOwn))
       )
     },
     {
@@ -498,15 +566,28 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
     },
     {
       // ADR-074 slice 10 — a key or endpoint provider switched off (delivered to
-      // no engine, everything else kept) or back on. `replaceOwn` is the user's
-      // confirmation that switching on may replace a key an engine holds of its
-      // own; the keys are compared host-side.
+      // no engine, everything else kept) or back on. `replaceOwn` names the
+      // harnesses where the user confirmed switching on may replace a key the
+      // harness holds of its own (S7f); the keys are compared host-side.
       channel: 'shared-provider:set-disabled',
       capability: 'config',
       kind: 'command',
-      handler: safeHandler(async (id: string, disabled: boolean, replaceOwn?: boolean | null) => {
+      handler: safeHandler(async (id: string, disabled: boolean, replaceOwn?: unknown) => {
         if (typeof disabled !== 'boolean') throw new Error('Invalid on/off state')
-        await sharedProviderService.setDisabled(id, disabled, replaceOwn === true)
+        await sharedProviderService.setDisabled(id, disabled, confirmedHarnesses(replaceOwn))
+      })
+    },
+    {
+      // ADR-082 §8 (S7d) — a route whose engine kept a key of its own (an
+      // automatic delivery never replaces one) takes the stored key instead,
+      // after the same confirm as switching on. The keys stay host-side.
+      channel: 'shared-provider:use-stored-key',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (id: string, harness: ConfigurableHarnessId) => {
+        if (harness !== 'pi' && harness !== 'opencode')
+          throw new Error(`Unknown engine: ${String(harness)}`)
+        await sharedProviderService.useStoredKey(id, harness)
       })
     },
     {

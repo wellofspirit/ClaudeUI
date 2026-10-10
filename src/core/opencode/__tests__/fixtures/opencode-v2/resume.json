@@ -1,0 +1,2137 @@
+{
+ "scenario": "resume",
+ "opencode": "2.0.24",
+ "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+ "events": [
+  {
+   "id": "evt_11128b3ed002Z5Xe8AaCg7RhXe",
+   "created": 1791289242605,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "inboxID": "msg_11128b3ed001CcTJaCD14biQnY",
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "item": {
+     "type": "user",
+     "payload": {
+      "text": "[subread] first-5f972640"
+     },
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 1,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b3ed003FCGq84sHsa3Nrb",
+   "created": 1791289242605,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 2,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b3ef0025CIT8VOKXAOkn6",
+   "created": 1791289242607,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "inboxID": "msg_11128b3ed001CcTJaCD14biQnY"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 4,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b3f6002RqUQXYeTapB4ko",
+   "created": 1791289242614,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b3f6003YW5qFCtNXCcb5C",
+   "created": 1791289242614,
+   "type": "session.renamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "title": "Fixture title"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 6,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b41d001dvAM7G9r8iIGxK",
+   "created": 1791289242653,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "agent": "build",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_11128b3f2001KOY0zgrPfB3Xem",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289242651
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 7,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b41e001We3UFwHg020vtR",
+   "created": 1791289242654,
+   "type": "session.tool.input.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b3f2001KOY0zgrPfB3Xem",
+    "id": "call_fx_31_0",
+    "name": "subagent"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 8,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b41e002Cc0XJaK3aFFYWE",
+   "created": 1791289242654,
+   "type": "session.tool.input.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b3f2001KOY0zgrPfB3Xem",
+    "id": "call_fx_31_0",
+    "text": "{\"description\":\"contract reader\",\"prompt\":\"child reads [read]\",\"agent\":\"general\"}"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 9,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b41e003dG6NGaTtIKHIBV",
+   "created": 1791289242654,
+   "type": "session.tool.called",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b3f2001KOY0zgrPfB3Xem",
+    "id": "call_fx_31_0",
+    "input": {
+     "description": "contract reader",
+     "prompt": "child reads [read]",
+     "agent": "general"
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 10,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b41f001CMokFb1ZsVADu5",
+   "created": 1791289242655,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b3f2001KOY0zgrPfB3Xem"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 11,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b443001IHhUVFGcvjvdio",
+   "created": 1791289242691,
+   "type": "session.created",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "slug": "hidden-lagoon",
+    "version": "2.0.24",
+    "projectID": "97d5336a520999812c1b4fc7086d9c0f736fabf2",
+    "parentID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "location": {
+     "directory": "/ws/main"
+    },
+    "subpath": ".cache/opencode-v2-it/home/ws/main",
+    "title": "contract reader",
+    "agent": "general",
+    "permissions": [
+     {
+      "action": "*",
+      "resource": "*",
+      "effect": "allow"
+     }
+    ]
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 0,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b443002BChgYKah5egFTZ",
+   "created": 1791289242691,
+   "type": "session.tool.progress",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b3f2001KOY0zgrPfB3Xem",
+    "id": "call_fx_31_0",
+    "metadata": {
+     "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+     "status": "running"
+    }
+   }
+  },
+  {
+   "id": "evt_11128b44400154cf80jnDmmOOr",
+   "created": 1791289242692,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "inboxID": "msg_11128b443003SRi8DU7zsaG8bz",
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "item": {
+     "type": "user",
+     "payload": {
+      "text": "You are a subagent spawned by another session.\nchild reads [read]"
+     },
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 1,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b4440022CFOjLTUDNcl5A",
+   "created": 1791289242692,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 2,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b446002sUZvx5v7Qmo77r",
+   "created": 1791289242694,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "inboxID": "msg_11128b443003SRi8DU7zsaG8bz"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 4,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b469001v7ei22vMQxV0he",
+   "created": 1791289242730,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "agent": "general",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_11128b448001285JTRlBtIbcGP",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289242728
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 5,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b46a001lkzIB4QpRxi5bU",
+   "created": 1791289242730,
+   "type": "session.tool.input.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b448001285JTRlBtIbcGP",
+    "id": "call_fx_32_0",
+    "name": "read"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 6,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b46b0015hs7AclCFr8uwG",
+   "created": 1791289242731,
+   "type": "session.tool.input.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b448001285JTRlBtIbcGP",
+    "id": "call_fx_32_0",
+    "text": "{\"path\":\"notes.txt\"}"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 7,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b46b0024mr5PgOWGURYnf",
+   "created": 1791289242731,
+   "type": "session.tool.called",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b448001285JTRlBtIbcGP",
+    "id": "call_fx_32_0",
+    "input": {
+     "path": "notes.txt"
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 8,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b46b003Oj41CfbQoEWxj8",
+   "created": 1791289242731,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b448001285JTRlBtIbcGP"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 9,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b46c001hMqR4rWJ2b02B9",
+   "created": 1791289242732,
+   "type": "session.tool.success",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b448001285JTRlBtIbcGP",
+    "id": "call_fx_32_0",
+    "content": [
+     {
+      "type": "text",
+      "text": "Read file notes.txt, lines 1-1\n1: alpha"
+     }
+    ],
+    "metadata": {
+     "truncated": false
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 10,
+    "version": 2
+   }
+  },
+  {
+   "id": "evt_11128b48c001LeF2gR5CWRkNKZ",
+   "created": 1791289242764,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b448001285JTRlBtIbcGP",
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 11,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b48c002sh6cO3j389nzK7",
+   "created": 1791289242764,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b4b40018hcXYv6bfCDrcn",
+   "created": 1791289242804,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "agent": "general",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_11128b48f001bl7wV5E9k9VwxF",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289242802
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 12,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b4b4002TB6uJAjR1rXMEb",
+   "created": 1791289242804,
+   "type": "session.text.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b48f001bl7wV5E9k9VwxF",
+    "ordinal": 0
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 13,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b4b5001mTO9SsyoZT4GvQ",
+   "created": 1791289242805,
+   "type": "session.text.delta",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b48f001bl7wV5E9k9VwxF",
+    "ordinal": 0,
+    "delta": "TOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha"
+   }
+  },
+  {
+   "id": "evt_11128b4b50026XawhYej097Kcx",
+   "created": 1791289242805,
+   "type": "session.text.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b48f001bl7wV5E9k9VwxF",
+    "ordinal": 0,
+    "text": "TOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 14,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b4b50033unKCA70HXafBo",
+   "created": 1791289242805,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b48f001bl7wV5E9k9VwxF"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 15,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b4d7001Em6WbbBmfj4Hpj",
+   "created": 1791289242839,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b48f001bl7wV5E9k9VwxF",
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 16,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b4d8001qr9jKGJrABu5V6",
+   "created": 1791289242840,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "cost": 0.00036,
+    "tokens": {
+     "input": 240,
+     "output": 60,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b4d8002AXxj8eOwaPoGi0",
+   "created": 1791289242840,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 17,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b4d9001AkpSvO1rMLym6e",
+   "created": 1791289242841,
+   "type": "session.tool.success",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b3f2001KOY0zgrPfB3Xem",
+    "id": "call_fx_31_0",
+    "content": [
+     {
+      "type": "text",
+      "text": "<subagent sessionID=\"ses_eeed74be0ffdqdXO9K6nWMCa2D\" state=\"completed\">\nTOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha\n</subagent>"
+     }
+    ],
+    "metadata": {
+     "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+     "status": "completed",
+     "truncated": false
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 12,
+    "version": 2
+   }
+  },
+  {
+   "id": "evt_11128b4fb001KvxS55zf4eFokV",
+   "created": 1791289242875,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b3f2001KOY0zgrPfB3Xem",
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 13,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b4fb0023HaDSHiBvmJJIm",
+   "created": 1791289242875,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "cost": 0.00036,
+    "tokens": {
+     "input": 240,
+     "output": 60,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b521001tpyA1BKdKgafUy",
+   "created": 1791289242913,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "agent": "build",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_11128b4fe001RMnCUttw9F6gHI",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289242912
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 14,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b522001KbjarRTVdWt5HJ",
+   "created": 1791289242914,
+   "type": "session.text.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b4fe001RMnCUttw9F6gHI",
+    "ordinal": 0
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 15,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b522002trqlYhw4MyWJOB",
+   "created": 1791289242914,
+   "type": "session.text.delta",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b4fe001RMnCUttw9F6gHI",
+    "ordinal": 0,
+    "delta": "TOOL_RESULT_SEEN: <subagent sessionID=\"ses_eeed74be0ffdqdXO9K6nWMCa2D\" state=\"completed\">\nTOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha\n</subagent>"
+   }
+  },
+  {
+   "id": "evt_11128b522003eYpbT7nZxW8Eim",
+   "created": 1791289242914,
+   "type": "session.text.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b4fe001RMnCUttw9F6gHI",
+    "ordinal": 0,
+    "text": "TOOL_RESULT_SEEN: <subagent sessionID=\"ses_eeed74be0ffdqdXO9K6nWMCa2D\" state=\"completed\">\nTOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha\n</subagent>"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 16,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b523001NkCDcHwTe3Rbee",
+   "created": 1791289242915,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b4fe001RMnCUttw9F6gHI"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 17,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b542001cjGQ9uHFvnDDt6",
+   "created": 1791289242946,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b4fe001RMnCUttw9F6gHI",
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 18,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b543001CfkJrjvb3uzouU",
+   "created": 1791289242947,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "cost": 0.00054,
+    "tokens": {
+     "input": 360,
+     "output": 90,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b543002OTFaSjebMIwhuD",
+   "created": 1791289242947,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 19,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b545002Xx8z5HuB8Uw2Hg",
+   "created": 1791289242949,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "inboxID": "msg_11128b5450013T47bzcmeABnl4",
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "item": {
+     "type": "user",
+     "payload": {
+      "text": "[subresume] again-ca744297"
+     },
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 20,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b546001l6As1q009lAIdK",
+   "created": 1791289242950,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 21,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b547001uGgBwpm2W4XiWO",
+   "created": 1791289242951,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "inboxID": "msg_11128b5450013T47bzcmeABnl4"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 22,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b56f001OE1ruugWA6ycGd",
+   "created": 1791289242991,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "agent": "build",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_11128b5490010yV6Ab6izPtehL",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289242989
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 23,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b56f002jOIelfztFLwJte",
+   "created": 1791289242991,
+   "type": "session.tool.input.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b5490010yV6Ab6izPtehL",
+    "id": "call_fx_35_0",
+    "name": "subagent"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 24,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b570001lR69yjqRWNOMyO",
+   "created": 1791289242992,
+   "type": "session.tool.input.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b5490010yV6Ab6izPtehL",
+    "id": "call_fx_35_0",
+    "text": "{\"description\":\"contract reader again\",\"prompt\":\"child reads again [read]\",\"agent\":\"general\",\"sessionID\":\"ses_eeed74be0ffdqdXO9K6nWMCa2D\"}"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 25,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b570002yaUhqSFbeIjOwj",
+   "created": 1791289242992,
+   "type": "session.tool.called",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b5490010yV6Ab6izPtehL",
+    "id": "call_fx_35_0",
+    "input": {
+     "description": "contract reader again",
+     "prompt": "child reads again [read]",
+     "agent": "general",
+     "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D"
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 26,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b570003N934QArik5x9bD",
+   "created": 1791289242992,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b5490010yV6Ab6izPtehL"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 27,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b571001CWEenrKtpePjRk",
+   "created": 1791289242993,
+   "type": "session.tool.progress",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b5490010yV6Ab6izPtehL",
+    "id": "call_fx_35_0",
+    "metadata": {
+     "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+     "status": "running"
+    }
+   }
+  },
+  {
+   "id": "evt_11128b5710036Zj4rCqrQWzYdr",
+   "created": 1791289242993,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "inboxID": "msg_11128b571002cArFW60Oph03cU",
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "item": {
+     "type": "user",
+     "payload": {
+      "text": "child reads again [read]"
+     },
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 18,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b5720012ApalAN4ZJFQ8u",
+   "created": 1791289242994,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 19,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b573001JpwwhquBgLVxlJ",
+   "created": 1791289242995,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "inboxID": "msg_11128b571002cArFW60Oph03cU"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 20,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b5990016vZxh3Ayck51pG",
+   "created": 1791289243033,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "agent": "general",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_11128b574001BqWIdkO0MqkAMH",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289243031
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 21,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b599002Y2BXArU1zr4CBy",
+   "created": 1791289243033,
+   "type": "session.tool.input.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b574001BqWIdkO0MqkAMH",
+    "id": "call_fx_36_0",
+    "name": "read"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 22,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b59a001bG2RX7y8KxMHmS",
+   "created": 1791289243034,
+   "type": "session.tool.input.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b574001BqWIdkO0MqkAMH",
+    "id": "call_fx_36_0",
+    "text": "{\"path\":\"notes.txt\"}"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 23,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b59a0027MpLtn2fRszMB6",
+   "created": 1791289243034,
+   "type": "session.tool.called",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b574001BqWIdkO0MqkAMH",
+    "id": "call_fx_36_0",
+    "input": {
+     "path": "notes.txt"
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 24,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b59a003FtdJV90ecvxL2P",
+   "created": 1791289243034,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b574001BqWIdkO0MqkAMH"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 25,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b59b0015oD284SK26aEJF",
+   "created": 1791289243035,
+   "type": "session.tool.success",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b574001BqWIdkO0MqkAMH",
+    "id": "call_fx_36_0",
+    "content": [
+     {
+      "type": "text",
+      "text": "Read file notes.txt, lines 1-1\n1: alpha"
+     }
+    ],
+    "metadata": {
+     "truncated": false
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 26,
+    "version": 2
+   }
+  },
+  {
+   "id": "evt_11128b5bc001Gj7JFJOhc5mQqi",
+   "created": 1791289243068,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b574001BqWIdkO0MqkAMH",
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 27,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b5bc002SScw9PvbfRMnz0",
+   "created": 1791289243068,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "cost": 0.00054,
+    "tokens": {
+     "input": 360,
+     "output": 90,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b5e7001ji6LkyD67IdlNA",
+   "created": 1791289243111,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "agent": "general",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_11128b5bf001uArjfNxjLruKN1",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289243109
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 28,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b5e7002F7gffMHsevi1pV",
+   "created": 1791289243111,
+   "type": "session.text.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b5bf001uArjfNxjLruKN1",
+    "ordinal": 0
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 29,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b5e8001RjftegHhWa634u",
+   "created": 1791289243112,
+   "type": "session.text.delta",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b5bf001uArjfNxjLruKN1",
+    "ordinal": 0,
+    "delta": "TOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha"
+   }
+  },
+  {
+   "id": "evt_11128b5e8002EngWxjsnsqxrvg",
+   "created": 1791289243112,
+   "type": "session.text.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b5bf001uArjfNxjLruKN1",
+    "ordinal": 0,
+    "text": "TOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 30,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b5e8003bwZYCI4aURplnV",
+   "created": 1791289243112,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b5bf001uArjfNxjLruKN1"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 31,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b60b001orQvJ7h1xDd9b4",
+   "created": 1791289243147,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "assistantMessageID": "msg_11128b5bf001uArjfNxjLruKN1",
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 32,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b60c001Mc8zKVzh0q9FVR",
+   "created": 1791289243148,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "cost": 0.00072,
+    "tokens": {
+     "input": 480,
+     "output": 120,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b60c002WRTH3Kp836L3Be",
+   "created": 1791289243148,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+    "seq": 33,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b60d001BSMYm4VFA3XsL1",
+   "created": 1791289243149,
+   "type": "session.tool.success",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b5490010yV6Ab6izPtehL",
+    "id": "call_fx_35_0",
+    "content": [
+     {
+      "type": "text",
+      "text": "<subagent sessionID=\"ses_eeed74be0ffdqdXO9K6nWMCa2D\" state=\"completed\">\nTOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha\n</subagent>"
+     }
+    ],
+    "metadata": {
+     "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+     "status": "completed",
+     "truncated": false
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 28,
+    "version": 2
+   }
+  },
+  {
+   "id": "evt_11128b62e001FHNP0hMt5MMxEd",
+   "created": 1791289243182,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b5490010yV6Ab6izPtehL",
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 29,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b62e002CWH6Gs7jpmyjmb",
+   "created": 1791289243182,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "cost": 0.00072,
+    "tokens": {
+     "input": 480,
+     "output": 120,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b653001YD8bXRk9PEs93e",
+   "created": 1791289243219,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "agent": "build",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_11128b630001k9oQKg0XJWu5vb",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289243217
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 30,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b6530029ZtiYtVffSNqz2",
+   "created": 1791289243219,
+   "type": "session.text.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b630001k9oQKg0XJWu5vb",
+    "ordinal": 0
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 31,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b654001rSxifJjoeLkGtE",
+   "created": 1791289243220,
+   "type": "session.text.delta",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b630001k9oQKg0XJWu5vb",
+    "ordinal": 0,
+    "delta": "TOOL_RESULT_SEEN: <subagent sessionID=\"ses_eeed74be0ffdqdXO9K6nWMCa2D\" state=\"completed\">\nTOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha\n</subagent>"
+   }
+  },
+  {
+   "id": "evt_11128b654002Votg5dLCycqCrh",
+   "created": 1791289243220,
+   "type": "session.text.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b630001k9oQKg0XJWu5vb",
+    "ordinal": 0,
+    "text": "TOOL_RESULT_SEEN: <subagent sessionID=\"ses_eeed74be0ffdqdXO9K6nWMCa2D\" state=\"completed\">\nTOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha\n</subagent>"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 32,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b654003xRYBFKq4fqdtUG",
+   "created": 1791289243220,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b630001k9oQKg0XJWu5vb"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 33,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b675001HS9I2EX2cgQohY",
+   "created": 1791289243253,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "assistantMessageID": "msg_11128b630001k9oQKg0XJWu5vb",
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 34,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b6760013ewATgUwyYnBlH",
+   "created": 1791289243254,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "cost": 0.0009000000000000001,
+    "tokens": {
+     "input": 600,
+     "output": 150,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b6760022ApfUWNKSJnTtV",
+   "created": 1791289243254,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_eeed74c3dffeHFykBUUCiWI8Hm"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74c3dffeHFykBUUCiWI8Hm",
+    "seq": 35,
+    "version": 1
+   }
+  }
+ ],
+ "messages": [
+  {
+   "id": "msg_11128b3ed001CcTJaCD14biQnY",
+   "time": {
+    "created": 1791289242607
+   },
+   "text": "[subread] first-5f972640",
+   "type": "user"
+  },
+  {
+   "id": "msg_11128b3f2001KOY0zgrPfB3Xem",
+   "time": {
+    "created": 1791289242651,
+    "streamed": 1791289242655,
+    "completed": 1791289242875
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "fixture-model",
+    "providerID": "fixture"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_fx_31_0",
+     "name": "subagent",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "description": "contract reader",
+       "prompt": "child reads [read]",
+       "agent": "general"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "<subagent sessionID=\"ses_eeed74be0ffdqdXO9K6nWMCa2D\" state=\"completed\">\nTOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha\n</subagent>"
+       }
+      ],
+      "metadata": {
+       "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+       "status": "completed",
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1791289242654,
+      "ran": 1791289242654,
+      "completed": 1791289242841
+     }
+    }
+   ],
+   "snapshot": {
+    "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_11128b4fe001RMnCUttw9F6gHI",
+   "time": {
+    "created": 1791289242912,
+    "streamed": 1791289242915,
+    "completed": 1791289242946
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "fixture-model",
+    "providerID": "fixture"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "TOOL_RESULT_SEEN: <subagent sessionID=\"ses_eeed74be0ffdqdXO9K6nWMCa2D\" state=\"completed\">\nTOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha\n</subagent>"
+    }
+   ],
+   "snapshot": {
+    "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_11128b543002OTFaSjebMIwhuD",
+   "time": {
+    "created": 1791289242947
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  },
+  {
+   "id": "msg_11128b5450013T47bzcmeABnl4",
+   "time": {
+    "created": 1791289242951
+   },
+   "text": "[subresume] again-ca744297",
+   "type": "user"
+  },
+  {
+   "id": "msg_11128b5490010yV6Ab6izPtehL",
+   "time": {
+    "created": 1791289242989,
+    "streamed": 1791289242992,
+    "completed": 1791289243182
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "fixture-model",
+    "providerID": "fixture"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_fx_35_0",
+     "name": "subagent",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "description": "contract reader again",
+       "prompt": "child reads again [read]",
+       "agent": "general",
+       "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "<subagent sessionID=\"ses_eeed74be0ffdqdXO9K6nWMCa2D\" state=\"completed\">\nTOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha\n</subagent>"
+       }
+      ],
+      "metadata": {
+       "sessionID": "ses_eeed74be0ffdqdXO9K6nWMCa2D",
+       "status": "completed",
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1791289242991,
+      "ran": 1791289242992,
+      "completed": 1791289243149
+     }
+    }
+   ],
+   "snapshot": {
+    "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_11128b630001k9oQKg0XJWu5vb",
+   "time": {
+    "created": 1791289243217,
+    "streamed": 1791289243220,
+    "completed": 1791289243253
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "fixture-model",
+    "providerID": "fixture"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "TOOL_RESULT_SEEN: <subagent sessionID=\"ses_eeed74be0ffdqdXO9K6nWMCa2D\" state=\"completed\">\nTOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha\n</subagent>"
+    }
+   ],
+   "snapshot": {
+    "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_11128b6760022ApfUWNKSJnTtV",
+   "time": {
+    "created": 1791289243254
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ],
+ "children": {
+  "ses_eeed74be0ffdqdXO9K6nWMCa2D": [
+   {
+    "id": "msg_11128b443003SRi8DU7zsaG8bz",
+    "time": {
+     "created": 1791289242694
+    },
+    "text": "You are a subagent spawned by another session.\nchild reads [read]",
+    "type": "user"
+   },
+   {
+    "id": "msg_11128b448001285JTRlBtIbcGP",
+    "time": {
+     "created": 1791289242728,
+     "streamed": 1791289242731,
+     "completed": 1791289242764
+    },
+    "type": "assistant",
+    "agent": "general",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "content": [
+     {
+      "type": "tool",
+      "id": "call_fx_32_0",
+      "name": "read",
+      "executed": false,
+      "state": {
+       "status": "completed",
+       "input": {
+        "path": "notes.txt"
+       },
+       "content": [
+        {
+         "type": "text",
+         "text": "Read file notes.txt, lines 1-1\n1: alpha"
+        }
+       ],
+       "metadata": {
+        "truncated": false
+       }
+      },
+      "time": {
+       "created": 1791289242730,
+       "ran": 1791289242731,
+       "completed": 1791289242732
+      }
+     }
+    ],
+    "snapshot": {
+     "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+     "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+     "files": []
+    },
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   },
+   {
+    "id": "msg_11128b48f001bl7wV5E9k9VwxF",
+    "time": {
+     "created": 1791289242802,
+     "streamed": 1791289242805,
+     "completed": 1791289242839
+    },
+    "type": "assistant",
+    "agent": "general",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "content": [
+     {
+      "type": "text",
+      "text": "TOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha"
+     }
+    ],
+    "snapshot": {
+     "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+     "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+     "files": []
+    },
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   },
+   {
+    "id": "msg_11128b4d8002AXxj8eOwaPoGi0",
+    "time": {
+     "created": 1791289242840
+    },
+    "type": "idle",
+    "outcome": "succeeded"
+   },
+   {
+    "id": "msg_11128b571002cArFW60Oph03cU",
+    "time": {
+     "created": 1791289242995
+    },
+    "text": "child reads again [read]",
+    "type": "user"
+   },
+   {
+    "id": "msg_11128b574001BqWIdkO0MqkAMH",
+    "time": {
+     "created": 1791289243031,
+     "streamed": 1791289243034,
+     "completed": 1791289243068
+    },
+    "type": "assistant",
+    "agent": "general",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "content": [
+     {
+      "type": "tool",
+      "id": "call_fx_36_0",
+      "name": "read",
+      "executed": false,
+      "state": {
+       "status": "completed",
+       "input": {
+        "path": "notes.txt"
+       },
+       "content": [
+        {
+         "type": "text",
+         "text": "Read file notes.txt, lines 1-1\n1: alpha"
+        }
+       ],
+       "metadata": {
+        "truncated": false
+       }
+      },
+      "time": {
+       "created": 1791289243033,
+       "ran": 1791289243034,
+       "completed": 1791289243035
+      }
+     }
+    ],
+    "snapshot": {
+     "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+     "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+     "files": []
+    },
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   },
+   {
+    "id": "msg_11128b5bf001uArjfNxjLruKN1",
+    "time": {
+     "created": 1791289243109,
+     "streamed": 1791289243112,
+     "completed": 1791289243147
+    },
+    "type": "assistant",
+    "agent": "general",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "content": [
+     {
+      "type": "text",
+      "text": "TOOL_RESULT_SEEN: Read file notes.txt, lines 1-1\n1: alpha"
+     }
+    ],
+    "snapshot": {
+     "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+     "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+     "files": []
+    },
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   },
+   {
+    "id": "msg_11128b60c002WRTH3Kp836L3Be",
+    "time": {
+     "created": 1791289243148
+    },
+    "type": "idle",
+    "outcome": "succeeded"
+   }
+  ]
+ },
+ "sessionTotals": {
+  "cost": 0.0009000000000000001,
+  "tokens": {
+   "input": 600,
+   "output": 150,
+   "reasoning": 0,
+   "cache": {
+    "read": 0,
+    "write": 0
+   }
+  }
+ }
+}

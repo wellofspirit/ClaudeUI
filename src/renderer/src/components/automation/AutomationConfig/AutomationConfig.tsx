@@ -8,7 +8,7 @@ import type {
   ModelInfo
 } from '../../../../../shared/types'
 import { AutomationConfigView, type ModelOption, type InheritedPerms } from './View'
-import { dedupeResolvedModels } from '../../chat/InputBox/utils'
+import { dedupeResolvedModels, modelLabel } from '../../chat/InputBox/utils'
 
 export function AutomationConfig(): React.JSX.Element {
   const selectedId = useAutomationStore((s) => s.selectedAutomationId)
@@ -30,13 +30,21 @@ function AutomationConfigController({ automation }: { automation: Automation }):
   const [fetchedModels, setFetchedModels] = useState<ModelOption[]>([])
   const [globalPerms, setGlobalPerms] = useState<InheritedPerms | null>(null)
 
-  // `shortName` comes off the description, and cli.js lists `default` and its
+  // `shortName` comes off `modelLabel`, and cli.js lists `default` and its
   // concrete equivalent (`opus[1m]`) with an identical one — so the raw catalog
   // yields two rows that read the same. Collapse them on `resolvedModel`,
   // keeping whichever row this automation is actually pinned to.
   const models = useMemo(
     () => dedupeResolvedModels(fetchedModels, automation.model),
     [fetchedModels, automation.model]
+  )
+
+  // The run judges its starting effort against the full catalog and the saved
+  // per-model efforts; hand the screen the same inputs.
+  const modelEffortDefaults = useSessionStore((s) => s.settings.modelEffortDefaults)
+  const effortDefaults = useMemo(
+    () => ({ catalog: fetchedModels, modelEffortDefaults }),
+    [fetchedModels, modelEffortDefaults]
   )
 
   const runs = useAutomationStore((s) => s.runs[automation.id])
@@ -51,7 +59,7 @@ function AutomationConfigController({ automation }: { automation: Automation }):
       setFetchedModels(
         infos.map((m) => ({
           ...m,
-          shortName: m.description?.split('·')[0]?.trim() || m.displayName
+          shortName: modelLabel(m).shortName
         }))
       )
     })
@@ -162,6 +170,7 @@ function AutomationConfigController({ automation }: { automation: Automation }):
     <AutomationConfigView
       automation={automation}
       models={models}
+      effortDefaults={effortDefaults}
       globalPerms={globalPerms}
       hasRunningRun={hasRunningRun}
       runs={runs}

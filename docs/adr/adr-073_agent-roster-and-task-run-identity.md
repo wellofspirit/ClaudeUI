@@ -1,6 +1,6 @@
 # ADR-073: An agent is a `task_id`, a run is a `tool_use_id` — and the roster that reads them
 
-**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
+**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended 2026-10-01 by §8: an opencode run's terminal status comes from its `task` part, and a `session.error` is never terminal. Amended 2026-10-06 by §9: the overlay is bounded by the composer, not the viewport, and a roster narrower than 480px lays its rows out on two lines, and the type badge becomes a letter tile ([ADR-094](adr-094_agent-type-colour-coding.md)). Amended 2026-10-07 by §10: the list is one tree with the background shells nested under the agent that launched them, and every row is one line at every width (superseding §9's two shapes and the separate shells section). Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`.
 **Amends:** [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) — `activeTasks` is no longer keyed only by the spawning tool call, and the `taskId → toolUseId` mapping is no longer evicted on a terminal notification.
 **Relates to:** [ADR-027](adr-027_test-data-attributes.md) (the `data-testid` tiers the new surfaces carry), [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch cards share the `task` ToolView), [ADR-035](adr-035_pi-engine-backend.md) / [ADR-036](adr-036_unified-auth-vault.md) (pi subagents), [ADR-070](adr-070_one-auth-surface.md) (the measured top-bar tiers this adds a control to), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5/§4.6 (the wire shapes, amended by the probe below)
 
@@ -74,8 +74,8 @@ The session layer normalizes runs onto the **origin** tool_use id — the one th
 so the renderer's tool_use-id keying is untouched everywhere.
 
 - `ClaudeSession` keeps `originByTaskId: Map<taskId, originToolUseId>`, set on the **first**
-  `task_started` for a task id and **not evicted** by a terminal notification. It is cleared with the
-  session, like the other per-session maps.
+  `task_started` for a task id and **not evicted** by a terminal notification. It belongs to the
+  conversation, not to the cli.js process — see §5.
 - A later `task_started` for a known `taskId` with a different `tool_use_id` is a **resume**. It
   emits `session:task-started` under the **origin** id, carrying `runToolUseId` and a 1-based
   `runIndex`, and registers an alias `runToolUseId → originToolUseId`.
@@ -86,7 +86,11 @@ so the renderer's tool_use-id keying is untouched everywhere.
   `task_started` is re-emitted on every resume, so that second path is redundant — and not harmless,
   because `task_updated` is a patch diff that fires on transitions this code does not enumerate, and
   a non-terminal patch arriving after a notification (or out of order) would strand a finished card
-  as running. The authoritative signal is handled; the speculative one is not.
+  as running. The authoritative signal is handled; the speculative one is not. _Amended by
+  [ADR-079](adr-079_claude-harness-capability-gating-and-patch-set.md) (2026-09-25): the one
+  non-terminal patch that does re-arm is `is_backgrounded: true` — cli.js's own report that a
+  foreground task moved to the background — re-sent as the same run (same `runIndex`) with
+  `isBackgrounded: true`, and only while the task is still live._
 - The renderer reads the **last** notification for a tool_use id, never the first, and keeps
   `runIndex` so a card can say "resumed ×2".
 
@@ -110,6 +114,9 @@ One `useAgentRoster()` selector, one row component, three placements:
 - **Panel** — the existing `rightPanel === 'task'` dock gains a roster header above the entry stack,
   in two sections: **Agents** and **Background shells**. It keeps its scope: a background Bash is
   lost to scrolling for the same reason and already has `local_bash` lifecycle events.
+  _Amended by §7:_ a shell is listed only while it runs, and agents are listed at every depth.
+  _(Superseded by §10: the two sections are one tree, with each shell nested under the agent that
+  launched it.)_
 
 The pill is **never dropped** by the tier system, for the same reason `GitChangesPill` is not: it is
 a panel's only entry point. It therefore has no `⋯` row — the bar's rule is that a menu row is the
@@ -162,6 +169,14 @@ spec that first held it did not ship (the ADR and the protocol doc are the durab
   and the reducer **merges** rather than replaces, so a usage tick cannot blank the clock. A resumed
   run's `tool_progress` is reported against the SendMessage call, so its `tool_name` is withheld and
   the origin's is kept.
+  _Correction (2026-09-27, `a3c5d1c7`):_ in stock local use `tool_progress` carries **no clock for an
+  agent**. Its producers in 2.1.280 are Bash/PowerShell progress (only under `CLAUDE_CODE_REMOTE`),
+  REPL, API-retry frames (`elapsed_time_seconds: 0`), and a 30 s main-agent heartbeat keyed
+  `<id>-heartbeat-N`, which matches no card. A usage-only `task_progress` then left the reducer's
+  default `0`, and a running Task card read "0s" for its whole run. `session:task-started` now
+  carries the run's `startedAt`, stamped by the emitter; a re-reported start keeps it and a resume
+  starts a new one. The card and the Tasks panel count live from it and show the run's duration once
+  it ends.
 - The legacy user-message `<task-notification>` XML path, kept for pre-2.1.241 binaries, resolves
   through the origin exactly as the system-message path does.
 - `deriveTaskState` settles a **foreground** task on a terminal notification too (ADR-040 calls it
@@ -184,6 +199,394 @@ spec that first held it did not ship (the ADR and the protocol doc are the durab
   roster, the re-armed card with `resumed ×1`, the origin-keyed `runIndex: 2` notification, and the
   two Appearance toggles all asserted by `data-testid` before the screenshots were read.
 
+### 5. Identity outlives the process (amendment, 2026-09-23)
+
+§1 cleared the identity maps "with the session", and `cancel()` was where that happened. But
+`cancel()` ends a **process**, not the conversation. The user's Stop, the idle reaper and an account
+switch all call it, and the next send `--resume`s the same conversation, either on the same object or
+on a new one after an app restart. The agents outlive the process. Probed against 2.1.280
+(`scripts/probe-agent-respawn.mjs`; protocol-cc §4.5):
+
+```
+[p1] Agent            toolu_019e…  → task_started task_id=acb38d…  (mid-run when p1 is killed)
+[p2] task_notification task_id=acb38d… tool_use_id=—  status=stopped   ← the reap, before system/init
+[p2] SendMessage to=acb38d…        → task_started task_id=acb38d… tool_use_id=<the SendMessage>
+[p2] child/assistant parent=toolu_019e…                            ← the ORIGINAL Agent call, from p1
+```
+
+A session without the maps can attribute neither event, and the owner hit both on 2026-09-23:
+
+- **Stuck running.** Three agents were mid-run when the session was killed. An agent spawned with
+  `run_in_background: true` stays running until a terminal event matches its card, and the reap
+  carries only the task id, so it matched no card and the agents read "running" forever, including
+  after they were resumed and finished.
+- **Resumed agent reads complete.** The resume armed the SendMessage call's id, which no card
+  renders as a task. The agent's own card read "complete" with a frozen token count, while its
+  output kept streaming into it through the original id.
+
+**Decision.** The identity maps (`originByTaskId`, the run aliases, the run counts) are never
+cleared on `cancel()`; they live as long as the `ClaudeSession` object. A new object that resumes a
+transcript rebuilds them from it (`core/services/agent-identity.ts`): a spawn result's `agentId`
+(structured `toolUseResult.agentId`, falling back to the `agentId:` text the live path matches)
+names the origin, and each SendMessage result carrying `resumedAgentId` adds one run. A SendMessage
+to a running agent answers "queued" and starts no run, exactly as the live counter sees it. The seed
+fills gaps only, and is merged at the top of the message loop before the first wire message is
+handled, because the reap arrives before `system/init`. Waiting there delays only that process's
+first message and cannot reorder concurrent `run()` calls. Forks are seeded too: an agent spawned
+before the anchor can be resumed from the fork.
+
+**Settled when the process ends.** An agent dies with its process, but cli.js says so only in the
+reap, and only if the session is resumed. Until then, a `run_in_background` card read "running", and
+it stayed that way for good if the session was never resumed. `ClaudeSession` now tracks the tasks
+the current process has started and not ended (`liveTasks`). When a run's process goes (cancel,
+crash, idle reaper) it reports each one as `stopped` against its card and run index. A superseded
+run leaves them to its successor, whose `--resume` reaps them. A disposed object stays silent on the
+shared routing id. When the reap does come, it has the same tool_use id and run index, and the
+reducer folds the two into one entry.
+
+**Stopped reads as stopped.** `deriveTaskState` returns `isStopped`. The roster dot (`stopped`,
+warning) and the transcript card (a stop glyph, warning border, `data-status="stopped"`) now draw a
+stop differently from a finish, as the panel's `TaskEntry` badge already did. An agent that was
+stopped never got to answer, so drawing it as "done" was wrong.
+
+**History says `unfinished`, never `stopped`.** The history loader folds the transcript's spawns,
+resumes and `<task-notification>`s (`foldAgentIdentity`). An agent whose last run starts (an async
+launch or a resume) and never ends gets a synthetic entry with `status: 'unfinished'` and its run
+index. A foreground spawn ends with its own result. A notification whose `<tool-use-id>` names an
+earlier run does not close the current one. The reap, which carries no id, closes whatever run is
+current. `unfinished` is deliberately not `stopped`: session-watcher runs the same loader over
+sessions another CLI is still running, where the agent may well be working. It renders neutral:
+`isLoaded`, the muted dot, and the card's "unfinished" label. A live resume replaces it with the
+real reap.
+
+**Not addressed:** after a respawn, `SendMessage{to: <name>}` fails ("No agent named … is
+reachable") and only the raw agent id resumes. That is cli.js's name registry and nothing ClaudeUI
+can change.
+
+### 6. A long roster stays usable (amendment, 2026-09-29)
+
+In a long session the panel roster was unusable: it sat in a `shrink-0` box above the entry stack,
+so twenty-odd rows pushed the entries off the panel and the list itself could not scroll. The
+owner's rulings of 2026-09-29:
+
+- **Running is the default filter** (the buttons read Running | All). Finished rows are most of a
+  long session's list and bury the ones that still matter. Under Running, a finished row that is
+  open in the panel stays listed, because clicking it again is how it is put away. With nothing
+  running, the empty state offers "Show all N".
+- **Each section folds.** "Agents" and "Background shells" always carry a heading, even alone,
+  because the heading is the fold control; it keeps the row count when folded. The filter and the
+  folds stay local component state, for the reason the filter already was: they are a way of
+  looking, not a preference. _(Superseded by §10: there are no sections, so nothing folds; the
+  filter stays local state.)_
+- **The roster scrolls on its own** (`TaskDetailPanel.roster`). Alone it fills the panel; with
+  entries open it is capped at 40% of the panel so they stay in view. Its header is sticky, and a
+  row that becomes selected scrolls into view, since the cap can otherwise push the row just
+  clicked below the fold.
+- **A row click in the panel toggles** its entry (`toggleTaskInPanel`). Putting the last entry away
+  leaves the panel open on the roster, unlike an entry's own close button
+  (`removeTaskFromPanel`), which closes the panel with it. The composer overlay still only opens:
+  it is a door into the panel, not the panel.
+
+### 7. Nested agents, running-only shells, and a bare number (amendment, 2026-09-30)
+
+In session `4dc0e3dc` a depth-1 background agent spawned a depth-2 implementer, handed back and went
+idle. The roster showed sixteen finished rows and nothing running, the pill read a grey "17 agents"
+(sixteen agents plus a background shell that had long finished), and all twelve depth-2 agents in the
+session were missing. The roster scanned only the main transcript, while a nested spawn call lives in
+its parent agent's bucket (`subagentMessages[<parent origin id>]`). The owner's rulings of
+2026-09-30, from mockup `6be482b8`:
+
+**Wire facts** (S0 probe, cli.js 2.1.280, `scripts/probe-nested-agents.mjs`;
+`docs/protocol-cc/04-system-subtypes.md` §4.5). A nested agent's `task_started` is on the top-level
+stream, keyed by its own spawn call's id, with `spawn_depth: 2`, so ClaudeSession already records it
+like any task. Its snapshots carry its own call id as `parent_tool_use_id`. Its spawn call and that
+call's result arrive in the parent's bucket. Its sidecar names `parentAgentId`. A subagent's
+**foreground** Bash registers `is_backgrounded: false`, like the main agent's.
+
+**The roster lists every depth.** `useAgentRoster` walks the main transcript, then, depth-first, the
+bucket of every agent it finds, with a visited set so a malformed bucket cannot loop. Each walk is
+cached by the bucket array's identity, and the reducer replaces only the bucket it touched, so a
+streaming delta in one agent re-walks that bucket alone. A nested row sits directly under the agent
+that spawned it, in the parent's spawn order, indented 14px per level with a file-tree guide.
+Top-level rows keep transcript order. There is no per-parent fold.
+
+**Context ancestors.** Under the Running filter, a finished ancestor of a running (or open) row is
+kept, dimmed (`data-context="true"`), so an indented row never floats without its parent. The whole
+chain is kept. A context row is not counted as running, not counted in the section's number _(§10: the header's
+running count)_, and offers no Stop, but still opens on click.
+
+**Dot and number.** The pill and the composer tab show a dot and a bare number, no noun. While
+anything runs the number is the running count: running agents at every depth plus running shells, so
+a lone shell lights the pill. Otherwise the pill shows the session's agent total. The panel header
+counts the same way. The tooltip and `aria-label` carry the breakdown, for example
+`1 agent, 1 shell running · 28 agents in this session`. This supersedes the 2026-09-22 "N agents"
+label ruling. The tab adds the longest clock, and it now appears when only a nested agent or a shell
+runs. The top-bar tier thresholds are unchanged: a narrower pill only frees room.
+
+**Background shells: running only.** A shell row exists only while the shell runs. Nobody reads a
+finished shell's output from the roster, and the row's real value is a Stop that does not depend on
+scrolling. This amends §2's "Background shells" section and reverses the roster half of `1b484442`,
+which listed finished and moved shells from the transcript (its Bash-card and entry-panel half
+stays). Shell rows come from the live lifecycle records, not from a transcript scan: a shell is
+listed when `activeTasks[id]` exists, its `taskType` is `local_bash` and its `isBackgrounded` is
+`true`, at any depth. The kickoff first needed a second clause, because protocol-cc said cli.js
+registers every subagent Bash as backgrounded. S0 showed otherwise: a foreground Bash registers
+`false` at every depth, and only `run_in_background` or a later move flips it, so the flag alone means
+"running in the background", including a nested command a timeout moves. Rows are flat, in a section
+that renders only while it has rows and that the Running filter does not touch _(superseded by §10: shells
+are rows in the one tree, nested under their launching agent, and the Running filter keeps them because
+they are running)_. The one exception
+follows §6: a finished shell whose entry is open stays listed until the entry is put away. It is
+recognized the way the panel recognizes a background Bash (a terminal event, plus
+`run_in_background` or the moved-to-background result). A reopened session lists no shells. Only
+Claude reports shell lifecycles, so only Claude lists shells. A subagent's background command now
+also gets its output file recorded (`recordBackgroundOutput`, split out of `detectTaskMapping`), so
+its entry can tail it; the identity half of that function stays main-agent only, since
+`task_started` maps nested tasks.
+
+**Opening a nested row.** `findTaskBlocks` takes the buckets: it searches the main transcript, then
+the first bucket that holds the call, and takes the result from that bucket. A nested entry then
+renders `subagentMessages[<its id>]`, its own transcript, like any agent.
+
+**Stop guard.** A nested row, and a nested entry in the panel, offers Stop only when
+`activeTasks[id]` exists. Without a lifecycle record the engine has nothing to target, and Claude's
+`stopTask` would fall back to `interrupt()` and abort the main turn.
+
+**A nested row with no lifecycle record cannot outlive its parent.** It runs only by ADR-040's
+legacy heuristic (no result yet), and on some engines the result never comes. In tree assembly,
+evaluated top-down so a parent's final state decides its children's: a row at depth > 0 with no
+`activeTasks` entry and no terminal event, whose parent is not running, is not running, and without a
+result it settles as neutral (`isLoaded`), not "done". A row nothing reported on must not claim it
+finished. A row WITH a record is never touched: a Claude agent running on after its parent went idle
+is exactly what this section exists to show. Nested rows without lifecycle events are best-effort.
+
+**History.** `loadSessionHistory` reads every sidecar in the flat `subagents/` directory
+(`readNestedAgentOrigins`, through `readAgentSidecar`'s id validation) and adds each one that names a
+`parentAgentId` to `agentIdToToolUseId`, so the Sidebar loads its transcript like any other. A
+notification the main transcript holds for a nested agent is attributed to its origin. Agents
+without a sidecar (older CLIs) stay unlisted. Historical rows never read running.
+
+**Per engine.** The renderer is engine-neutral; engine plumbing changed only where nested content
+was delivered and dropped.
+
+- **Claude:** as above.
+- **opencode:** a subagent may call `task` when `subagent_depth` > 1 (default 1) and its agent's
+  permissions allow it (`vendor/opencode-src/packages/opencode/src/tool/task.ts:104-117,145-149`;
+  ClaudeUI exposes the setting). `handleChildEvent` now registers a child's own `task` call the way
+  the own-session path does, so a grandchild's messages reach a bucket under its call id and its
+  `session.idle` becomes that call's task-notification. _(Superseded by §8: the terminal notification
+  now comes from the child's `task` part, and the grandchild's idle only seals its streams.)_
+- **pi:** ClaudeUI's child processes load no `-e` extension, so its own `subagent` tool cannot
+  recurse. A user-installed extension discovered in the child could spawn one; its content stays
+  inside that extension's tool result and is not shown. Such a row settles through the rule above.
+- **Codex:** nesting stays refused (one warning), but the grandchild's spawn card is still published
+  into the child's bucket, live and in history. A v2 `started` card never gets a result and settles
+  as `isLoaded` through the rule above. A v1 spawn call returns at once, so its row reads "done"
+  while the grandchild runs on natively. That is accepted: Codex refuses nesting and says so.
+
+### 8. An opencode run ends when its `task` part ends (amendment, 2026-10-01)
+
+In session `ses_f0ad4e70fffeKSjL66R1MCNhnz` a subagent ran past its model's context window. opencode
+treats `ContextOverflowError` as recoverable: the processor's `halt`
+(`vendor/opencode-fork-src/packages/opencode/src/session/processor.ts` ~620-631) sets
+`needsCompaction`, **publishes `session.error` anyway**, compacts, replays the prompt and carries on.
+ClaudeUI read that `session.error` as the end of the run. The card flipped to "failed" and
+`childSessions` dropped the child. After compaction the child's next `bash` raised `permission.asked`
+for a session ClaudeUI no longer knew, so the ask was ignored as foreign. The tool waited forever,
+the parent's `task` never returned, and the main session read "running" for 76 minutes until the
+user aborted. The owner's rulings of 2026-10-01:
+
+**`session.error` is not terminal.** It is a report, not a lifecycle event. For a child it is
+ignored, whatever its name. For the session itself, a `ContextOverflowError` is ignored (the turn
+ends via `session.idle` either way); other errors keep their banner. The same applies to a
+cross-engine dispatch target: its overflow no longer settles the dispatched turn. A turn that really
+died of an overflow (`compaction.auto: false`) is caught at idle by the existing check of the last
+assistant message's `info.error`.
+
+**The parent's `task` part is the one source of a run's terminal notification.** Only the part knows
+the outcome. opencode's task tool fails with `Subagent failed (task_id: …): <message>` exactly when
+the child ended on an error (`tool/task.ts` ~213-222), and completes when the child recovered. When the
+part reaches a terminal state (`settleTaskChildren`, for the session's own `task` calls and for a
+child's), ClaudeUI sends exactly one notification:
+
+- `completed`: the part completed.
+- `stopped`: the part errored because it was aborted, either `metadata.interrupted` (the processor
+  aborting an in-flight tool, `processor.ts` ~602) or the error `Task cancelled` (`task.ts:340`,
+  which sets no metadata). This matches Claude (`killed` → `stopped`) and Codex
+  (`interrupted`/`shutdown` → `stopped`).
+- `failed`: any other error.
+
+A child's `session.idle` now only seals the child's streams. The exception is a **background** call
+(`metadata.background`, opencode's experimental background subagents, which ClaudeUI does not
+enable). Its part completes while the child runs on, so the child's idle sends the notification.
+
+**The child mapping lives as long as the call.** A `childSessions` entry is removed when the call's
+part settles, matched by callID, so a child resumed with `task_id` under a newer call keeps its
+routing. A child is registered only from a live (pending or running) part. Compaction's prune
+republishes old completed tool parts, and that must not revive a removed entry or overwrite a newer
+callID.
+
+**The failure reason is shown.** A failed TaskCard with subagent output shows the tool result's
+error text in `TaskCard.failureSummary`. The result body still shows the subagent's output. Before,
+the reason was only visible when the subagent produced nothing.
+
+### 9. The roster on a narrow screen (amendment, 2026-10-06)
+
+_Superseded by §10 (2026-10-07): the two-shape rule and the 480px split below are gone. The zoom-trap
+fix and the Task card paragraphs still stand; the tool-name rule stays but moves from 400px to 360px._
+
+On the owner's phone (Samsung S25 Ultra, Edge, 412 x 728 CSS px, `uiFontScale` 1.1) the overlay hung 15px
+off the left edge, each row lost its description, and Stop was clipped. Two causes, both layout, neither
+visible to jsdom. The rule that came out of the first is [ADR-093](adr-093_zoom-trap-no-viewport-units.md).
+
+**The zoom trap.** The overlay was `w-[min(420px,calc(100vw-32px))]`. SessionView renders the app under
+CSS `zoom: uiFontScale`, and inside a zoomed subtree `vw` lengths are multiplied by the zoom: that box
+measured 380px at zoom 1, 418px at 1.1 and 570px at 1.5, on a 412px screen. It is now
+`w-[420px] max-w-full`: a percentage resolves against the composer, which is already laid out in zoomed
+px (`shared/use-anchored-menu.ts` has the long account of the same trap). `max-w-full` is relative to
+the composer box because that is the overlay's containing block (the nearest positioned ancestor,
+`InputBox/View.tsx`).
+
+**A row has two shapes, chosen by the roster's own width.** `AgentRosterList` is a named container
+(`@container/roster`). Below **480px** of roster width a row is two lines: status dot, then a column
+holding name, resumed chip and metrics over the type tile and description, then Stop, centred at the right with a
+taller touch target. At 480px and above it is one line. The threshold was first 400, which left the
+420px desktop overlay on one line; in the real app a Claude row (name, type badge, resumed chip, `Bash · 2m 15s ·
+8720.9k`, Stop) cannot be read there, and the shrink weights left a name of "m13…" and a badge of "g.". So the
+420px overlay is two-line too, and only a panel wider than 480px keeps one line. It is a container query, not
+a viewport one, so the zoom cannot fool it and the panel's roster, which can also be narrow, gets the same
+behaviour.
+
+**What each shape protects.** Narrow, line 1 gives the name a floor (`min-w-[4.5rem]`) and lets the metrics
+truncate before the name does (to a 3rem floor, so a 43-character name cannot take the clock and the tokens too); line 2 keeps the type tile whole and lets the description give way; under
+**400px** the metrics also drop the current tool (`Bash`, `Read`), leaving `2m 15s · 2270.0k` (every phone list is under 400px: about 350px at uiFontScale 1.1, where the token count was being cut to `872…`; the 420px overlay keeps the tool), as one
+`AgentRow.metrics` element with the tool in its own hidden-when-narrow span. Wide, Stop and the metrics never
+shrink and the description gives way first (to a 3rem floor), then the name (still capped at 140px); the tile
+never shrinks. These are flex-shrink weights (description 10000, name 1), far enough apart that the description
+absorbs the cut before the name loses a pixel.
+
+**The type is a tile, not a badge (2026-10-06, [ADR-094](adr-094_agent-type-colour-coding.md)).** The text
+badge (`general-purpose`, `migration-reviewer`) cost 60-140px of line 2, which is what the description lost on a
+phone. It is replaced by a 16px letter tile in the type's colour: it leads line 2 when narrow and sits where the
+badge was when wide (`AgentRow.typeTile`; `AgentRow.badge` is gone), and the engine's default type has no tile.
+
+**Option A, not "drop by priority".** The alternative was to keep one line on the phone and drop the
+badge, the current tool and the Stop label. It is denser but throws information away and leaves a
+20px Stop. Two lines keep everything, and the dot stays vertically centred so the nested rows' tree
+elbow (`h-1/2`) still meets it.
+
+**One DOM, CSS only.** Both shapes come from the same elements: no `ResizeObserver`, no measured widths,
+no element rendered twice with one copy hidden. The exceptions are text variants inside one element: the
+`resumed x N` text has a `↻N` variant inside the same chip, and the metrics' tool name is its own span. Line
+wrappers are `display: contents` when wide, and the wide order is carried by `order-*`, which also puts each
+element on its own narrow line.
+
+The Task card has the same trap and the same cure (`@container/taskcard`, 480px): its header sheds the word
+"Task" under 480px and the clock under 300px (one row, never wrapped; under 300px the description floor drops from 3rem to 2rem, which a blocked review's chip plus Approve needs), and its footer turns "Open in panel" into
+an icon and keeps the model chip at least 5rem wide. Narrow, the footer may wrap whole chips; `flex-wrap` breaks
+a line on the items' basis sizes before anything shrinks, so the model chip's basis is its 5rem floor
+(`basis-[5rem] grow max-w-fit`), not its text. The yellow "background" chip is an icon (the tray glyph, with
+`title`/`aria-label` "Running in the background") under 480px: as a word it left a row about 23px short, and the
+↗ alone on row 2, at chat scale ~1.22. The glyph is Send to background's on purpose; that button shows only on
+foreground tasks and this chip only on background ones. The footer reads, left to right, type tile · background · model, then ↗ (ADR-094): the 16px tile took the type chip's place, which is what lets the common row stay on one line at every chat scale.
+
+**Two zooms, two surfaces.** The roster (the composer's overlay, the panel) lives under the app zoom,
+`uiFontScale`. A Task card lives in the chat's message list, which ChatPanel zooms again by
+`chatFontScale / uiFontScale`, so the card's own zoom is `chatFontScale` and `uiFontScale` does not touch it.
+The card is also narrower than the window by more than a margin: scroller `mr-2` and its 7px classic scrollbar
+(`.chat-scroll`, `main.css`; overlay scrollbars on Android take none, so the classic case is the narrower one),
+column `px-3`, and, when a message holds two or more tool calls, the bordered `p-2` group. On a 412px phone that
+is `(412 - 8 - 7) / chatFontScale - 42` CSS px: 355, 319, 276 and 223px at chat scale 1, 1.1, 1.25 and 1.5
+(measured in the real app: 354.4, 318.5, 275.5, 222.9). A layout
+test uses the zoom and the container chain of the surface it tests. The browser layout tests (`docs/testing-strategy.md`,
+Layer 2b) assert readability, not just containment: the roster at uiFontScale 1, 1.1, 1.25 and 1.5, the card
+at the same four values of chatFontScale.
+
+### 10. One tree, one line (amendment, 2026-10-07)
+
+Two rulings of the owner's, from mockup `9d76c8c0` (variant U3 and its detail view). They supersede §9's
+two-shape rule and the 2026-09-21 ruling that background shells get a section of their own.
+
+**One tree.** The list has no sections and no headings. A background shell sits under the agent whose
+transcript holds its Bash call, one level deeper than that agent, with the same tree guide. The owner is
+already known: `findTaskBlocks` returns `ownerToolUseId`, the key of the bucket that holds the call (null for
+the main transcript), and `listShells` carries it. `useAgentRoster` derives `rows`, one depth-first list
+mixing both kinds, in the existing final `useMemo`; `agents`, `shells` and every count are unchanged, so the
+pill, the tab and the tooltip read what they read before (`totalCount` still counts agents only, and `shells`
+still holds depth-0 rows).
+
+Placement is deterministic: within one parent, the parent's child agents come first, each followed by its own
+subtree, then that parent's shells in `listShells` order. Shells launched by the main session come after all
+top-level agents, at depth 0, and so does a shell whose owner is not an agent row in the tree (defensive).
+`settleOrphans` is untouched: it is about agents, and a shell is never settled because it is listed only
+while it has a lifecycle record or a notification.
+
+A shell can outlive the agent that launched it, which is the case the tree has to survive. Under Running,
+`keepRunning` works over the unified list, so a running shell under a finished agent keeps that agent, and
+its ancestors, as dimmed context rows. The shell stays reachable and a row never floats without its parent.
+The header counts running rows only, and context rows are not counted.
+
+**The label.** An agent's label is its `name` when the spawn call gave one (or it is a dispatch, whose label
+is a real identity), recorded as `hasExplicitName` on the row. The engines' task views already fill `name`
+with the type when the call named no one (Claude `name ?? subagent_type`, opencode's `agent`, pi), so "explicit"
+means a name that differs from the type. One exception, scoped to Codex on purpose: a v1 spawn names no one
+and has no type, only its model (its normalizer's description is the placeholder "Agent"), and that model is what
+those rows have always been listed under, so it counts as explicit and is the label. On any other engine a
+`model` is an override on an anonymous agent and the description labels the row. Otherwise the `name` is only a type or model fallback ("Explore",
+"general-purpose") that many rows share, so the label is the description, in `text-text-secondary`. A shell's label is its whole command, monospace, secondary. The label is `truncate`,
+floors at 4.5rem and has no maximum width. `agentRowLabel` is the one place these rules live; the shell
+entry's "launched by" line uses it (the panel works the label out once, from the roster it already holds, and
+passes it to the entry).
+
+**The description line is gone.** It was a static summary written at spawn time, and what it said did not
+change while the row ran. It is the label's `title` tooltip now (a shell's tooltip is its command).
+
+**One line at every width.** §9 split rows at 480px because a 60-140px text type badge made one line
+unreadable in the 420px overlay. [ADR-094](adr-094_agent-type-colour-coding.md) replaced that badge with a
+16px tile, and with the description line gone the reason for two lines is gone too. The order, left to
+right: tree guide, status dot, a 16px type column, label, resumed chip, spacer, Stop (running rows only),
+metrics. The type column is 16px on every row so labels align: the tile for a typed agent, an empty span for
+the default type, a `$` glyph (`AgentRow.shellGlyph`, "Background shell") for a shell. The resumed chip is
+always `↻N`; the long `resumed ×N` form is dropped.
+
+**Stop is inline, before the metrics, and red.** A reserved Stop column would cost every finished row
+about 42px for nothing, and most rows are finished under All. Inline, the metrics stay flush right on every
+row, and a row loses width only while it runs. Stop is styled like the entry's own Stop (`bg-danger/10
+text-danger`), not the grey outline §9 used. The cost is that Stop has no fixed x: the spacer pushes it right
+up against the metrics, so its x moves with the width of the metrics (a row without a tool name or tokens puts
+it further right), a column of Stops cannot be run down by eye, and it is next to the click target that opens
+the entry. It is 16px tall, the row's line height, so a running row is no taller than a finished one. It still stops propagation, and the condition for showing it is unchanged (running, not context, depth 0
+or a lifecycle record).
+
+**Shrink priority** when the line is too narrow: the status dot, the type column, the resumed chip and Stop
+never shrink; the metrics shrink first, to a 3rem floor; the label last, to 4.5rem, or 3rem under 300px of roster
+width. The 300px rule exists because the deepest row (a resumed chip and Stop, at the phone's maximum
+`uiFontScale` of 1.5, where the roster is about 256px) overflowed by about 8px at the 4.5rem floor and the metrics
+spilled into the row's padding. The current tool name in the metrics moves from §9's 400px to **360px**: under 360px of roster width (the
+container's, never the viewport's) the metrics drop it. With the description line gone a row has the room, and
+400 was wrong for the common case: the side panel opens at 400px wide and its border leaves the roster 399px, so
+the tool name was hidden in the default desktop panel. The row must not overflow at any roster width of 240px
+or more; the browser layout test checks 240, 280, 350, 380, 420, 460 and 600px, and the phone widths at every
+font scale, and that every row has the same height whether or not it is running.
+
+**A running shell has a live clock.** Nothing reports elapsed time for a shell, so its row counts from the
+`startedAt` of its lifecycle record, ticking once a second only while that row is a running shell with a
+start (`useTicker`, `taskElapsedLabel`, the Task card's own clock, which now floors to whole seconds: a
+running clock read "60s" at 59.6 s before). Agents keep the elapsed figure from their
+progress, as before.
+
+**The shell entry shows the whole command.** The panel's `BashBackgroundEntry` header used
+`command.slice(0, 60)`, truncated again by CSS, and the full command appeared nowhere. The header now holds
+the whole command and CSS truncates it. The body opens with a command block (`BashBackgroundEntry.command`):
+the full command, wrapped and selectable, with a meta line (`.commandMeta`) under it: "launched by" the agent
+when the call is in an agent's bucket (a button, `.owner`, that opens that agent's entry), the Bash call's
+own `description` if it gave one, and a Copy button (`.copy`, "Copied" for 1.5 s).
+
+**Why.** The 480px split was set for a text badge the tile replaced. The description was a static spawn-time
+summary that cost a line per row in a list that is mostly read at a glance. Metrics at one x down the
+column are what make a list of clocks and token counts scannable. A shell can outlive its agent, so one
+list needs the context-row rule rather than two lists.
+
 ## Consequences
 
 - A resumed agent re-arms its own card, streams into it live, and reports the run that actually
@@ -193,10 +596,18 @@ spec that first held it did not ship (the ADR and the protocol doc are the durab
   harness no longer exists, so the record is the comment block in `top-bar-tiers.ts`; the next
   never-dropped control will need a one-off measurement the same way.
 - `originByTaskId` grows by one entry per agent per session and is never pruned within a session.
-  That is bounded by how many agents a session spawns and is not worth an eviction policy; it is
-  cleared with the session.
+  That is bounded by how many agents a session spawns and is not worth an eviction policy; it lives
+  as long as the session object and is rebuilt from the transcript when a new object resumes (§5).
 - If cli.js ever stops re-emitting `task_started` on resume, the failure mode is today's behaviour —
   the card reads complete during run 2 — caught by the guard tests this arc adds, and by
   `scripts/probe-agent-resume.mjs` re-run against the new binary at the next CLI bump.
 - The ADR-040 invariant is unchanged in spirit: running state still mirrors explicit lifecycle
   events. What changes is that a task's identity is the task id, and one task can have several runs.
+- §7 follow-ups, not addressed: a reopened nested agent that died mid-run reads "done", not
+  "unfinished" (the `unfinished` fold covers only the main transcript's agents); and a reopened
+  opencode session loads no child transcripts at all.
+- §8 depends on opencode wording in two places: the `Task cancelled` string, and the
+  `ContextOverflowError` name. Re-check both, and `processor.ts` `halt`, at every opencode bump. If
+  two calls ever mapped to the same child at once (a resume registered before the old part settled),
+  the older call would get no notification. The foreground flow can't produce that, because the
+  parent blocks on `task`.

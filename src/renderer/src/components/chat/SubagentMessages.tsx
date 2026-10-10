@@ -3,13 +3,16 @@ import type {
   ChatMessage,
   ContentBlock,
   PendingApproval,
-  ToolReviewBlock
+  ToolReviewBlock,
+  PermissionDenialBlock
 } from '../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ImageGalleryProvider } from '../shared/ImageViewer'
 import { DiagramGalleryProvider } from './DiagramGallery'
 import { ToolCallBlock } from './ToolCallBlock'
+import { ContextNoteBlock } from './ContextNoteBlock'
+import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 
 interface Props {
   messages: ChatMessage[]
@@ -57,6 +60,12 @@ const ContentBlockView = memo(function ContentBlockView({
   if (block.type === 'thinking' && block.text) {
     return <ThinkingBlock text={block.text} />
   }
+  // Context the host put into the CHILD's prompt that no one typed there: a
+  // task notification or an agent message (ADR-089 S3). Verbatim, collapsed,
+  // the same row the top-level transcript uses, never a user bubble.
+  if (block.type === 'context_note') {
+    return <ContextNoteBlock block={block} />
+  }
   return null
 })
 
@@ -76,13 +85,15 @@ export const SubagentMessages = memo(function SubagentMessages({
     return map
   }, [messages])
 
-  // A permission judge's verdict on a nested call (F18), paired exactly as the
-  // result is. LAST one wins — a re-review is a new decision, not a second one.
-  const reviewMap = useMemo(() => {
-    const map = new Map<string, ToolReviewBlock>()
+  // What the permission system decided about a nested call — a judge's verdict
+  // (F18) or a pre-ask refusal nothing judged — paired exactly as the result is.
+  // LAST one wins (a re-review is a new decision, not a second one), and the two
+  // kinds share a map because a call only ever carries one of them.
+  const decisionMap = useMemo(() => {
+    const map = new Map<string, ToolReviewBlock | PermissionDenialBlock>()
     for (const msg of messages) {
       for (const b of msg.content) {
-        if (b.type === 'tool_review') map.set(b.toolUseId, b)
+        if (b.type === 'tool_review' || b.type === 'permission_denial') map.set(b.toolUseId, b)
       }
     }
     return map
@@ -122,6 +133,7 @@ export const SubagentMessages = memo(function SubagentMessages({
   return (
     <div
       data-testid="SubagentMessages"
+      {...TOOL_OUTPUT_SCOPE}
       className="flex flex-col gap-2 overflow-y-auto"
       style={{ maxHeight }}
     >
@@ -144,15 +156,22 @@ export const SubagentMessages = memo(function SubagentMessages({
               className="flex flex-col gap-1.5"
             >
               {msg.content.map((block, i) => {
-                if (block.type === 'tool_result' || block.type === 'tool_review') return null
+                if (
+                  block.type === 'tool_result' ||
+                  block.type === 'tool_review' ||
+                  block.type === 'permission_denial'
+                )
+                  return null
                 if (block.type === 'tool_use') {
+                  const decision = decisionMap.get(block.toolUseId)
                   return (
                     <ToolCallBlock
                       key={`${msg.id}-${i}`}
                       block={block}
                       result={resultMap.get(block.toolUseId)}
                       approval={approvalMap.get(block.toolUseId)}
-                      review={reviewMap.get(block.toolUseId)}
+                      review={decision?.type === 'tool_review' ? decision : undefined}
+                      denial={decision?.type === 'permission_denial' ? decision : undefined}
                     />
                   )
                 }

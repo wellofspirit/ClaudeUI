@@ -52,9 +52,11 @@ Rationale: **[ADR-006](../adr/adr-006_rebundle-bun-binary.md)**. The previous pi
 
 Resolved by `locateBunClaude()` in `src/core/sdk/locate.ts`. `locateCliJs()` is kept as a deprecated alias returning the same path — lingering external callers.
 
+`CLAUDEUI_CLAUDE_CLI=<path>` overrides all three rows, in dev and in a packaged build: the app spawns that binary instead (a relative path resolves against the cwd; a path that names no file falls back to the table with one warning). This is how the app runs against Anthropic's unpatched binary. What the spawned binary can do is read from the `version.json` beside it (§1.12, "version.json `patches`"); the official binary has none, so the app treats it as unpatched.
+
 ### How the binary gets there
 
-`bun run ensure-cli` is the chained pipeline: `extract-cli.mjs` (download upstream Bun binary, concatenate the JS chunks out of its `__BUN`/`.bun` section) → `patch/apply-all.mjs` (14 content-regex patches) → `rebundle-cli.mjs` (re-inject the patched chunks into the Bun binary + ad-hoc codesign + clear quarantine on macOS). Cache key: `package.json#claudeCliVersion`. Full details in §1.12 below.
+`bun run ensure-cli` is the chained pipeline: `extract-cli.mjs` (download upstream Bun binary, concatenate the JS chunks out of its `__BUN`/`.bun` section) → `patch/apply-all.mjs` (the content-regex patches in `patch/`) → `rebundle-cli.mjs` (re-inject the patched chunks into the Bun binary + ad-hoc codesign + clear quarantine on macOS). Cache key: `package.json#claudeCliVersion`. Full details in §1.12 below.
 
 ---
 
@@ -132,7 +134,7 @@ Built by `src/core/sdk/args.ts::buildArgs()`. The prefix is always exactly:
 --output-format stream-json --verbose --input-format stream-json
 ```
 
-Everything else is optional. See `docs/protocol-cc/02-cli-flags.md` for the complete flag reference.
+Everything else is optional, except `--forward-subagent-text`, which follows the stream flags on every spawn (02-cli-flags §2.1). See `docs/protocol-cc/02-cli-flags.md` for the complete flag reference.
 
 **Flag order matters.** cli.js's parser is tolerant, but we mirror the upstream SDK's order exactly so future diffs against `sdk.mjs` stay clean. Never reorder without re-checking.
 
@@ -142,18 +144,19 @@ Everything else is optional. See `docs/protocol-cc/02-cli-flags.md` for the comp
 
 ### Set by the harness at spawn time
 
-| Var                             | Source                                            | Effect                                                                                                                                            |
-| ------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CLAUDE_CODE_ENTRYPOINT=sdk-ts` | `buildEnv()` default                              | cli.js telemetry tag. Distinguishes our harness from the upstream SDK (`sdk-mjs`) and the interactive CLI. Doesn't affect behavior.               |
-| `DEBUG=1`                       | `buildEnv()` when `DEBUG_CLAUDE_AGENT_SDK` is set | Enables cli.js's internal debug trace.                                                                                                            |
-| `NODE_OPTIONS`                  | Deleted                                           | Prevents the child from inheriting debug attach / loader flags that would confuse startup. Harmless under Bun but kept for defensive consistency. |
+| Var                                     | Source                                                  | Effect                                                                                                                                                                                                                                                                                                           |
+| --------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE_CODE_ENTRYPOINT=claude-desktop` | `buildEnv()`, always (`APP_ENTRYPOINT`)                 | Claude Desktop's entrypoint. Also half of the `oauth_token_refresh` gate (08 §8.7).                                                                                                                                                                                                                              |
+| `CLAUDE_CODE_OAUTH_TOKEN` and four more | `buildEnv()`, multi-account without an endpoint profile | The active account's host-owned token with its scopes, plan, tier and `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH=1`, on Claude Desktop's contract (02 §2.14, "Host-owned OAuth token"). `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_CUSTOM_HEADERS` are removed. No readable token = the spawn is refused. |
+| `DEBUG=1`                               | `buildEnv()` when `DEBUG_CLAUDE_AGENT_SDK` is set       | Enables cli.js's internal debug trace.                                                                                                                                                                                                                                                                           |
+| `NODE_OPTIONS`                          | Deleted                                                 | Prevents the child from inheriting debug attach / loader flags that would confuse startup. Harmless under Bun but kept for defensive consistency.                                                                                                                                                                |
 
 Historically the table also carried `ELECTRON_RUN_AS_NODE=1` (when we spawned cli.js under Electron-as-Node) and `NODE_PATH` (pointing the unwrapped cli.js at our `node_modules` for `ws`/`undici`/`ajv`/etc.). Both retired with ADR-006 — the rebundled Bun binary is self-contained. `buildEnv()` still exists and still supports the `options.env` overlay so callers can pass per-spawn env without mutating `process.env`; that machinery is useful independently of the retired vars.
 
 ### Env vars cli.js itself reads (non-exhaustive — full list in `02-cli-flags.md`)
 
 - `DEBUG` — enables internal event trace
-- `CLAUDE_CODE_SYNC_PLUGIN_INSTALL` — forces synchronous plugin installation (affects MCP refresh timing, see `patch/mcp-status`)
+- `CLAUDE_CODE_SYNC_PLUGIN_INSTALL` — forces synchronous plugin installation at startup. ClaudeUI does not set it: `query()` sends `reload_plugins` after initialize instead, which connects plugin MCP servers (07 §7.4, `reload_plugins`)
 - `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS` — gates `system/session_state_changed` emissions
 - `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` — credential sources
 - `ANTHROPIC_BASE_URL`, `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_MODEL` — API endpoint / model overrides
@@ -244,6 +247,8 @@ fs.writeFileSync('debug.jsonl',
 
 Default capacity 1000 entries. Override with `options.wireLogCapacity` — bump only when a specific debug dump needs more history (stream_event deltas dominate the line rate at ~100/turn).
 
+The two outbound frames that carry an OAuth token are recorded masked (`[redacted]`): the values of `update_environment_variables` (06 §6.7) and the `accessToken` of an `oauth_token_refresh` answer (08 §8.7).
+
 ---
 
 ## 1.9 Signals
@@ -314,7 +319,7 @@ vendor/claude-cli/cli.js                 (~1,630 minified ESM chunks joined by
                                           `// @bun-chunk <name>` delimiter lines)
           │
           ▼
-patch/apply-all.mjs                      (14 content-regex patches, idempotent;
+patch/apply-all.mjs                      (content-regex patches, idempotent;
                                           structural check, not a whole-file parse)
           │
           ▼
@@ -339,10 +344,10 @@ vendor/claude-cli/bun-claude[.exe]       (shipped artifact — spawned natively)
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `vendor/claude-cli/bun-claude[.exe]` | Rebundled Bun binary — what ClaudeUI actually spawns. Never checked in; regenerated by `bun run ensure-cli`.                                                                                     |
 | `vendor/claude-cli/cli.js`           | All JS chunks concatenated behind `// @bun-chunk` delimiter lines, post-patch. Kept on disk for debugging, grepping, and `/bundle-analyzer`. Not shipped — already baked into `bun-claude`.      |
-| `vendor/claude-cli/version.json`     | Upstream version + extraction metadata + path to the cached source binary (`sourceBinary` field feeds the rebundler in pipeline mode).                                                           |
+| `vendor/claude-cli/version.json`     | Upstream version + extraction metadata + path to the cached source binary (`sourceBinary` feeds the rebundler in pipeline mode) + `patches`, the patches the build carries (§1.12).              |
 | `scripts/extract-cli.mjs`            | Downloads the per-platform Bun binary (SHA-verified against the manifest; cached under `.cache/claude-cli/` keyed on version), concatenates every JS chunk out of its Bun section.               |
 | `scripts/rebundle-cli.mjs`           | Splits the patched concat and re-injects each chunk into its module slot. PE writer shrinks the section + strips the Authenticode cert; Mach-O writer pads to original section size + codesigns. |
-| `patch/`                             | 14 content-regex patches against the concatenated `cli.js`. Idempotent; safe to re-run. Per-patch READMEs carry the bundle-analyzer anchors.                                                     |
+| `patch/`                             | Content-regex patches against the concatenated `cli.js` (the set is in §1.12). Idempotent; safe to re-run. Per-patch READMEs carry the bundle-analyzer anchors.                                  |
 
 ### Bun standalone serialization (reverse-engineered from Bun's `src/StandaloneModuleGraph.zig`)
 
@@ -384,7 +389,7 @@ StringPointer offsets are **relative to the data buffer start** (`data_start = m
 | 0–3  | `DISABLE_DEFAULT_ENV_FILES`, `DISABLE_AUTOLOAD_BUNFIG`, `DISABLE_AUTOLOAD_TSCONFIG`, `DISABLE_AUTOLOAD_PACKAGE_JSON` — behavioural; **must be preserved**.                                                                                  |
 | 4–10 | `SOURCE_TEXT_CONTIGUOUS`, `HAS_SOURCE_HASHES`, `HAS_BUILTIN_BYTECODE`, `HAS_BYTECODE_STRING_TABLE`, `HAS_STARTUP_MODULE_COUNT`, `HAS_MODULE_INFO_STRING_TABLE`, `CROSS_COMPILED_BYTECODE` — each declares a trailing record we do not emit. |
 
-The 2.1.261 binary ships `flags = 0x3ff`. Our writer emits none of the optional records, so it writes `flags & 0xf`. Copying the flags verbatim while omitting the records makes the loader parse whatever follows the table as record data — **empirically a segfault before `main`**.
+The 2.1.261 binary ships `flags = 0x3ff`. The 2.1.285 binary (Bun 1.4.3) ships `0x1bff`: bits 11 and 12 are new and not identified in the table above. They are dropped with the rest, and the `0xf` output loads and runs (`--version`, the voice probe and the live patch harness all pass). Our writer emits none of the optional records, so it writes `flags & 0xf`. Copying the flags verbatim while omitting the records makes the loader parse whatever follows the table as record data — **empirically a segfault before `main`**.
 
 ### Per-platform container wrappers
 
@@ -410,7 +415,7 @@ The delimiter is `// @bun-chunk ` + the exact module name + `\n`, nothing else o
 
 Module names are **host-specific**: Bun mounts its standalone FS at `B:/~BUN/root/` on Windows and `/$bunfs/root/` on macOS and Linux, and the chunk set differs per platform too (2.1.261: 1,631 chunks on win32-x64, 1,650 on darwin-arm64). Nothing downstream may key on the prefix — matching `// @bun-chunk B:` is what red-lighted every non-Windows job on the 2.1.261 bump, with extraction and all 14 patches succeeding and only the guard failing. The delimiter and its header predicate are defined once, in `scripts/lib/chunk-format.mjs`, imported by extract-cli, apply-all and rebundle-cli; `src/main/__tests__/chunk-format.test.ts` pins both namespaces.
 
-Native `.node` addons are still extracted separately to `vendor/claude-cli/vendor/<addon>/<arch>-<platform>/<addon>.node` — `voice-capture.ts` in the Electron main process needs a loose copy on disk. They also stay inside the Bun binary and get re-injected intact.
+Native `.node` addons stay inside the Bun binary and get re-injected intact; cli.js loads them from its own module graph. They are no longer extracted as loose copies (ADR-098: voice capture moved into the renderer, so nothing in the Electron main process loads them).
 
 `version.json` records `{ version, source, sourceBinary, extractedAt, cliSize, cliSha256, form: "chunked", chunkCount }` (`cliSize`/`cliSha256` describe the concat file).
 
@@ -446,23 +451,15 @@ Module inventory (confirmed at 2.1.261, Windows PE x64): 1,815 modules — 1,631
 
 ### Patch registry
 
-14 content-regex patches under `patch/` (registry: `patch/apply-all.mjs`), applied between the extract and rebundle steps. Three auto-detect upstream fixes and no-op on recent cli.js versions (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 11:
+Content-regex patches under `patch/` (registry: `PATCH_REGISTRY` in `patch/lib/patch-registry.mjs`, run by `patch/apply-all.mjs`), applied between the extract and rebundle steps. The current set:
 
-| Patch                    | What it adds to cli.js                                                                                                                                                                                                  |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `subagent-streaming`     | Forwards subagent stream_events + messages that would otherwise be swallowed by internal aggregation                                                                                                                    |
-| `queue-control`          | `dequeue_message` control subtype + `queued_command_consumed` notification                                                                                                                                              |
-| `mcp-status`             | Awaits MCP refresh before responding so `mcpServerStatus()` returns the full list                                                                                                                                       |
-| `background-task`        | `background_task` control subtype — convert foreground task to background                                                                                                                                               |
-| `usage-relay`            | `get_usage` control subtype — exposes cli.js's internal /usage API                                                                                                                                                      |
-| `request-usage`          | Emits per-request token usage events after each API call                                                                                                                                                                |
-| `rate-limit-relay`       | Emits rate limit headers after each API call                                                                                                                                                                            |
-| `voice-server`           | Adds internal TCP voice-transcription server, control subtypes `voice_server_start`/`stop`                                                                                                                              |
-| `bash-output-streaming`  | Pushes Bash output to stream_event immediately instead of buffering 2s                                                                                                                                                  |
-| `subprocess-proxy-strip` | Strips `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY` from env handed to bash/MCP/LSP/etc. subprocesses so cli.js's own proxy doesn't leak into shell tools (gated off via `CLAUDEUI_PROXY_SUBPROCESSES=1`)                 |
-| `skip-securestorage`     | When `SKIP_SECURESTORAGE` is set, forces the credential store to the plaintext file backend (bypassing macOS Keychain) so per-account `.credentials.json` files can be managed/swapped. Enables multi-account (ADR-015) |
+| Patch                   | What it adds to cli.js                                                                               |
+| ----------------------- | ---------------------------------------------------------------------------------------------------- |
+| `subagent-streaming`    | Forwards subagent stream_events + messages that would otherwise be swallowed by internal aggregation |
+| `voice-server`          | Adds internal TCP voice-transcription server, control subtypes `voice_server_start`/`stop`           |
+| `bash-output-streaming` | Pushes Bash output to stream_event immediately instead of buffering 2s                               |
 
-Retired: `ci-path-remap` (obsolete once cli.js runs inside its native Bun runtime — ADR-006), `sandbox-network-fix` (upstream's "no allowed domains = no network" semantics kept deliberately), `team-streaming` (dir removed).
+Retired: `ci-path-remap` (obsolete once cli.js runs inside its native Bun runtime — ADR-006), `sandbox-network-fix` (upstream's "no allowed domains = no network" semantics kept deliberately), `team-streaming` (dir removed). Deleted at 2.1.280: `usage-relay` (the native `get_usage` handler answered before the injected branch, so the patch was dead code — 07 §7.3), `request-usage` (`stream_event` `message_start` / `message_delta` carry the same per-request usage, and nothing read its log), and `taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`, whose fixes are upstream and whose apply scripts had been no-ops. Replaced by a native surface at 2.1.280: `background-task` (native `background_tasks`, 07 §7.3), `rate-limit-relay` (native `rate_limit_event.rate_limit_info.unifiedWindows`, 03 §3.11), `mcp-status` (a `reload_plugins` after initialize connects plugin MCP servers, 07 §7.4), `queue-control` (every user frame carries a client `uuid`, so native `command_lifecycle` frames report when a queued message is consumed — 03 §3.21 — and `cancel_async_message` takes one back by that uuid — 07 §7.3). Removed 2026-09-27 by owner ruling: `subprocess-proxy-strip`, which stripped the in-app proxy from Bash/MCP/LSP child env; the in-app proxy now reaches cli.js's children, as a shell-set proxy does on the unpatched binary. Removed 2026-09-27 by owner ruling: `skip-securestorage`, which forced cli.js's credential store to the plaintext file named by `CLAUDE_SECURESTORAGE_CONFIG_DIR` when `SKIP_SECURESTORAGE` was set, so cli.js read and refreshed each multi-account file itself. Multi-account now hands cli.js the active account's token through `CLAUDE_CODE_OAUTH_TOKEN` and the app keeps it fresh (02 §2.14, 08 §8.7), as Claude Desktop does. Removed 2026-09-28 by owner ruling: `automode-verdict`, which emitted `system/permission_allowed` when the auto-mode classifier allowed a call and flagged no-verdict decisions with `no_verdict`; allow verdicts were not worth a patch, and the denial half is native `permission_denied` (04 §4.25).
 
 Patches operate on the chunk concat at `vendor/claude-cli/cli.js` — a plain text search-and-replace across all ~1,630 chunks at once, so a patch neither knows nor cares which chunk its anchor lives in. Two consequences of the 2.1.261 chunking worth remembering when re-anchoring: code that used to sit in one file is now split across chunks and crosses module boundaries as `import`/`export` bindings, and a single minified name may now be reused in several chunks — an anchor that was unique in the monolith may match more than once, so `verify pattern matches exactly once` earns its keep. When the minifier changes variable names between versions, a patch fails with "cannot locate anchor" — update that patch's regex using its README's bundle-analyzer anchors.
 
@@ -476,24 +473,32 @@ Patches operate on the chunk concat at `vendor/claude-cli/cli.js` — a plain te
 4. Use `const V = '[\\w$]+'` for matching minified identifiers.
 5. Verify pattern matches exactly once, apply replacement with marker, write back.
 
-Register new patches in the `patches` array in `patch/apply-all.mjs`. Skills for patch work: `/bundle-analyzer` (locate targets in minified cli.js), `/patch-readme` (per-patch README with anchors), `/patch-test-harness` (behavioral tests).
+Register new patches in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`), with a `marker` regex that matches every `/*PATCHED:…*/` comment the patch's apply script writes and no other patch's; `src/main/__tests__/patch-registry.test.ts` fails otherwise. Skills for patch work: `/bundle-analyzer` (locate targets in minified cli.js), `/patch-readme` (per-patch README with anchors), `/patch-test-harness` (behavioral tests).
+
+### version.json `patches`
+
+After the structure check, `apply-all.mjs` records which patches the build carries: it searches the patched `cli.js` for each registry entry's `marker` and merges the names it finds, in registry order, into `vendor/claude-cli/version.json` as `patches` (every other field kept; written to a temp file and renamed over the original). It prints the list as one `patches: a, b, c` line, `--quiet` included. The list comes from the bytes, not from the registry: a patch whose apply script finds its fix already upstream writes no marker and is not listed (`taskstop-notification`, `incomplete-session-resume-fix` and `mcp-tool-refresh` read that way at 2.1.280, before they were deleted). `extract-cli.mjs` rewrites version.json without the field on every run, so a binary rebundled without patching carries no `patches`. `rebundle-cli.mjs` reads only `sourceBinary` and ignores the rest.
+
+The app reads the list back through `src/core/sdk/harness.ts`: `readHarnessInfo(binaryPath)` parses the version.json beside whatever binary `locateBunClaude()` returns (cached per path until the file's mtime changes), and `harnessHasPatch(name)` answers for the binary the app spawns. A missing or malformed file, or a missing field, reads as version `'unknown'` with no patches, so a surface that needs a patch goes dark rather than failing on use (ADR-030). Anthropic's binary ships no version.json and reads as unpatched. Consumers today: `ClaudeSession.capabilities.voice` requires `voice-server`; `getCliVersion()` reads `version` from the same file.
 
 ---
 
 ## 1.13 Harness module map (`src/core/sdk/`)
 
-| File                | Responsibility                                                                                                                                                                                                               |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `index.ts`          | Public exports: `query`, `tool`, `createSdkMcpServer`, `locateBunClaude`, `locateCliJs` (deprecated alias), `getCliVersion`, + types.                                                                                        |
-| `types.ts`          | `QueryOptions`, `QueryHandle`, `SDKMessage`, `McpServerConfig`, `PermissionUpdate`, `HooksConfig`, etc. `QueryOptions.standaloneExecutable` defaults to `true` — skips `cliPath` argv injection for self-contained binaries. |
-| `locate.ts`         | Resolves `bun-claude[.exe]` path in dev (`vendor/claude-cli/`) and prod (`<Resources>/claude-cli/`).                                                                                                                         |
-| `args.ts`           | Builds argv. Exact port of sdk.mjs arg-builder (flag order + syntax). `buildEnv()` merges `options.env` overlay onto `process.env`.                                                                                          |
-| `protocol.ts`       | `NdjsonReader` / `NdjsonWriter` — newline-delimited JSON over stdio.                                                                                                                                                         |
-| `control.ts`        | `ControlChannel` — outbound control_request + response correlation, inbound AbortController registry for cancellation, `onPendingPermissionRequests` hook.                                                                   |
-| `mcp-host.ts`       | In-process MCP hosting. Real `McpServer` from `@modelcontextprotocol/sdk` connected via a custom `PairedTransport` that bridges cli.js JSON-RPC ↔ our server.                                                                |
-| `create-sdk-mcp.ts` | `createSdkMcpServer()` + `tool()` helpers. Zod-raw-shape passes directly through to `McpServer.registerTool()`.                                                                                                              |
-| `query.ts`          | Orchestration: spawn child, wire reader/writer, initialize control_request, inbound dispatch, expose QueryHandle.                                                                                                            |
-| `wire-log.ts`       | Per-query ring buffer of every ndjson line (§1.8). Snapshot via `queryHandle.wireLog()`.                                                                                                                                     |
+| File                | Responsibility                                                                                                                                                                                                                       |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `index.ts`          | Public exports: `query`, `tool`, `createSdkMcpServer`, `locateBunClaude`, `locateCliJs` (deprecated alias), `readHarnessInfo`, `harnessHasPatch`, `getCliVersion`, + types.                                                          |
+| `types.ts`          | `QueryOptions`, `QueryHandle`, `SDKMessage`, `McpServerConfig`, `PermissionUpdate`, `HooksConfig`, etc. `QueryOptions.standaloneExecutable` defaults to `true` — skips `cliPath` argv injection for self-contained binaries.         |
+| `locate.ts`         | Resolves `bun-claude[.exe]` path in dev (`vendor/claude-cli/`) and prod (`<Resources>/claude-cli/`), or the `CLAUDEUI_CLAUDE_CLI` override (§1.1).                                                                                   |
+| `harness.ts`        | Reads the `version.json` beside the spawned binary: `readHarnessInfo`, `harnessHasPatch`, `getCliVersion` (§1.12, "version.json `patches`").                                                                                         |
+| `args.ts`           | Builds argv. Exact port of sdk.mjs arg-builder (flag order + syntax). `buildEnv()` / `buildSpawnEnv()` merge the `options.env` overlay onto `process.env` and apply the scoped proxy, endpoint, model and host-token env.            |
+| `host-token.ts`     | The multi-account host-token seam: `hostTokenDir()`, `readHostTokenSpawn()`, `ensureHostTokenFresh()`, `HostTokenUnavailableError`, and the `HostTokenSource` the token keeper (`src/core/services/claude-host-token.ts`) publishes. |
+| `protocol.ts`       | `NdjsonReader` / `NdjsonWriter` — newline-delimited JSON over stdio.                                                                                                                                                                 |
+| `control.ts`        | `ControlChannel` — outbound control_request + response correlation, inbound AbortController registry for cancellation, `onPendingPermissionRequests` hook.                                                                           |
+| `mcp-host.ts`       | In-process MCP hosting. Real `McpServer` from `@modelcontextprotocol/sdk` connected via a custom `PairedTransport` that bridges cli.js JSON-RPC ↔ our server.                                                                        |
+| `create-sdk-mcp.ts` | `createSdkMcpServer()` + `tool()` helpers. Zod-raw-shape passes directly through to `McpServer.registerTool()`.                                                                                                                      |
+| `query.ts`          | Orchestration: spawn child, wire reader/writer, initialize control_request, inbound dispatch, expose QueryHandle.                                                                                                                    |
+| `wire-log.ts`       | Per-query ring buffer of every ndjson line (§1.8). Snapshot via `queryHandle.wireLog()`.                                                                                                                                             |
 
 `SDKMessage` is a discriminated union over `type`; each variant carries an index signature (`[k: string]: unknown`) so unknown upstream fields stay forward-compatible. `UnknownSDKMessage` is exported but NOT part of `SDKMessage` — it's for raw stream-json parsing (wire log, tests) where unknown types may appear.
 

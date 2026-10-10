@@ -30,7 +30,7 @@ Tests are organized into four layers that target different concerns:
 | **Component**   | Business logic (events → state)          | Electron IPC transport, SDK           | Yes        |
 | **E2E**         | Full pipeline (action → state → outcome) | Electron IPC transport, SDK           | Yes        |
 | **Integration** | SDK event contracts                      | Nothing (real SDK)                    | No (gated) |
-| **Layout**      | Geometry (flex, container queries, z)    | Nothing (real CSS, real Chromium)     | No (gated) |
+| **Layout**      | Geometry (flex, container queries, z)    | Nothing (real CSS, real Chromium)     | Yes        |
 
 ## Layer 1: Unit Tests
 
@@ -46,6 +46,10 @@ Tests are organized into four layers that target different concerns:
 
 - Business logic (event handling, state transitions, IPC routing)
 - Side effects (IPC calls, navigation, timers)
+
+**Environment:** two vitest projects share Layer 1 and differ only in environment. `unit-node` runs the unit tests under `src/{main,core,shared,server,preload}` in plain Node, with `src/test/setup/node.setup.ts`; `unit` runs every other unit test under jsdom. A jsdom window per file was the largest single cost of the suite, and the non-renderer code never touches the DOM. A unit test placed in those folders gets no `window` or `document`; give it a `// @vitest-environment jsdom` docblock if it really needs one.
+
+**Never switch the pool to `threads`.** Inside a worker thread, the setup files' `process.env.USERPROFILE`/`HOME` redirect changes only the thread's copy of the environment, while `os.homedir()` reads the real process environment, so tests would reach the developer's real `~/.claude`. The default `forks` pool keeps one process per worker.
 
 **How to write:**
 
@@ -145,6 +149,69 @@ it('rekeys session when status has different sessionId', () => {
 **File naming:** `*.component.test.ts`
 
 **File location:** `src/**/__tests__/`
+
+## Layer 2b: Browser layout tests
+
+**Purpose:** Verify a claim about geometry. jsdom evaluates no layout: every `getBoundingClientRect()` is zeros, container queries never fire, and `zoom` does nothing. A bug that is "the Stop button is clipped on my phone" is invisible to Layers 1-3 by construction, and that is exactly the bug class this layer exists for.
+
+**What it is:** the `browser` vitest project. Real Chromium (`@vitest/browser-playwright`, headless), real Tailwind (the same `react()` + `tailwindcss()` plugins as the renderer build), `src/renderer/src/assets/app.css` loaded, at the owner's phone size. It has its own setup file (`src/test/setup/browser.setup.ts`: the stylesheet and a `window.api` Proxy whose members resolve `{ success: true }`) and does NOT load the jsdom setup: no throwaway home, no SQLite driver. Failure screenshots and attachments are redirected out of the source tree (`.cache/`).
+
+**When to write one:** any invariant a layout can break that jsdom cannot see: something fits, wraps, truncates, overlaps, stays inside the screen, or switches layout at a container width (`@max-[400px]/roster:`). Pin the invariant, not the pixels. Component and E2E tests still own logic; do not move them here.
+
+**The reference profile:** `scripts/lib/mobile-profiles.mjs` is the one place the device numbers live (`s25-ultra-edge`: 412 x 728 CSS px, Edge on Android, `uiFontScale` 1, 1.1 and 1.5). The vitest project and `scripts/app-shot.mjs --profile` both import it, so the tests and the real-app check cannot disagree about what "the phone" is. Every test loops over `fontScales`.
+
+**The zoom wrapper:** SessionView renders the app under CSS `zoom: uiFontScale` with `width: calc(100vw / scale)`, and inside a zoomed subtree `vw`/`vh` lengths are multiplied by the zoom. A test that mounted a component bare would never meet the bug. `ZoomFrame` and `LayoutComposer` (`src/test/helpers/mobile-layout.ts`) reproduce SessionView's root and the composer's margins; mount through them, and measure with `getBoundingClientRect()` (page px under Chromium's standardised zoom), which is what the screen shows.
+
+**Use the zoom and the container chain of the surface under test.** There are two zooms. The composer, the roster overlay and the dialogs are under the app zoom (`uiFontScale`). The chat's message list is zoomed again by ChatPanel (`chatFontScale / uiFontScale`), so a Task card is under `chatFontScale` alone, and is much narrower than the window: scroller `mr-2`, column `px-3`, and the bordered `p-2` group around two or more tool calls (about 404/chatScale - 42 px on the phone). `LayoutChatList` models that chain with the file:line of each class; a card test drives `chatScale` through it, and a test that put the card in the app-zoom wrapper measured a card 26px too wide and predicted a footer on one line that wrapped in the app.
+
+**Seeding:** components read the Zustand store directly. Set it with `useSessionStore.setState({ activeSessionId, sessions: { [id]: { ...EMPTY_SESSION_STATE, ... } }, availableModels })`; there is no IPC bridge here. If a component needs more than the store, that part belongs in Layer 2.
+
+**How to write:**
+
+```tsx
+// File: src/**/__tests__/MyThing.browser.test.tsx
+import { render } from '@testing-library/react'
+import {
+  FONT_SCALES,
+  ZoomFrame,
+  LayoutComposer,
+  rectOf,
+  hasNoHorizontalOverflow
+} from '@test/helpers/mobile-layout'
+
+for (const scale of FONT_SCALES) {
+  it(`fits the phone at uiFontScale ${scale}`, async () => {
+    seedTheStore()
+    const view = render(
+      <ZoomFrame scale={scale}>
+        <LayoutComposer>
+          <MyThing />
+        </LayoutComposer>
+      </ZoomFrame>
+    )
+    expect(rectOf(view.getByTestId('MyThing')).right).toBeLessThanOrEqual(window.innerWidth)
+  })
+}
+```
+
+Prove a guard: revert the production fix and watch the test fail before you trust it.
+
+**Assert readability, not just containment.** "Nothing overflows" is a weak claim: a name squeezed to one character and a model chip squeezed to "D." contain perfectly. The first round of these tests asserted only containment, and those defects passed. For every element a layout can shrink, also assert a floor on what is left:
+
+- a name or a model is at least its minimum width, or all of its text if that is shorter (`clientWidth >= min(scrollWidth, floor)`);
+- a badge or chip that must stay whole is not truncated (`scrollWidth <= clientWidth`);
+- a header is ONE row (`rowCount` of its visible children, by vertical centre) and keeps its description at its floor;
+- what a breakpoint sheds is shed where it should be (assert `innerText`, which skips `display: none`, and that `textContent` still has the words for assistive tech).
+
+Check at every scale in the profile plus 1.25, and revert the fix to prove the assertion fails.
+
+**The pinned font:** the app's UI font is the system stack (`-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', …`), so a geometry assertion used to measure whatever the host had: Noto/Helvetica on Linux CI, SF Pro on the macOS release runner, neither of them the reference phone's Roboto. The same TaskCard header test passed on Linux and failed on macOS. `browser.setup.ts` now loads Roboto (`@fontsource/roboto`, dev-only, the weights the components use) and makes it the UI font for every browser test, and waits for it to load before any test measures. A layout result is therefore the same on every OS and matches the profile's device. The monospace font (JetBrains Mono) is already bundled by the app and unaffected.
+
+**Where they run:** once, in CI (`ci.yml`, Linux, inside `test:ci`). The release workflows run `test:ci:no-browser`: with the font pinned, another OS adds no signal, only a Chromium download.
+
+**File naming:** `*.browser.test.tsx`, under `src/**/__tests__/`. The `unit` project excludes them.
+
+**Speed:** about 7 s for the project, most of it starting Chromium. It runs in `bun run test` and `test:ci`.
 
 ## Layer 3: E2E Tests
 
@@ -266,7 +333,11 @@ describe('factory validation', () => {
 
 **Running:** `CLAUDE_INTEGRATION_TESTS=1 bun run test:integration`
 
+**Engine binaries.** Claude Code comes from `vendor/claude-cli`. opencode, pi and Codex are not vendored (ADR-082 §8): the suites run the ones in ClaudeUI's managed store, `~/.claude/ui/harnesses` (`postinstall`, or `bun run ensure-<id>`, installs the tested versions). The project's setup moves HOME to a throwaway directory, so `vitest.config.ts` names the real store through `CLAUDEUI_HARNESS_STORE` for the `integration` project only; set it yourself to run against another store. A suite whose engine is not installed skips. The `unit` and `unit-node` projects get the same store read-only as `CLAUDEUI_TEST_HARNESS_STORE`, for the one unit test that runs a real binary (`rules-sync.test.ts` against Codex's `execpolicy` parser); every other unit test keeps the throwaway store.
+
 **The Codex fixture provider.** The real-binary Codex suites (`src/integration/codex/*.integration.test.ts`, gated by `CODEX_INTEGRATION=1`) never talk to a paid provider: they run against one shared localhost Responses server, `src/integration/codex/fixture-provider.ts`, which also writes the isolated `CODEX_HOME` (`config.toml`, `auth.json`) the child reads. `scripts/codex-fixture-provider.mjs` is a thin CLI wrapper around the same module, so a real-app drive and the integration suites exercise the identical fixture — there is deliberately no second copy. Its `chatgpt` mode serves a drive under an INJECTED ChatGPT identity (ADR-068 §1): `chatgpt_base_url` is pointed at the fixture, the binary's own backend calls are answered 404 and recorded, any bearer is accepted, and `writeFabricatedVault()` mints the scratch vault it comes from (it refuses `os.homedir()`). On the CLI: `--chatgpt --vault-home <home> --accounts <n>`, or `scripts/codex-render-stress.mjs --accounts <n>`. The module's own guards are `src/integration/codex/__tests__/fixture-provider.test.ts`, which runs everywhere — the suites it serves do not.
+
+**The opencode contract suite.** `src/integration/opencode/*.contract.integration.test.ts` (gated by `OPENCODE_V2_INTEGRATION=1`; the name predates the 1.x removal) runs a real `opencode serve --stdio` of the pinned 2.x version against an in-process localhost fixture model (`harness/fixture-provider.ts`, scripted by markers in the last user message), with `HOME`/`XDG_*` under `.cache/opencode-v2-it/`, a refusing proxy and, on darwin, a loopback-only `sandbox-exec` profile. It is the per-pin-bump gate of ADR-097 §8.1; details in `docs/protocol-opencode/README.md` §Contract suite. It is the only opencode integration suite: the 1.x one was deleted with the 1.x adapter (ADR-097 S10a).
 
 ## Test Infrastructure
 
@@ -302,10 +373,11 @@ Orchestrator for Layer 2/3 tests. Creates bridge, registers stub IPC handlers fo
 bun run test           # All layers
 bun run test:unit      # Layer 1 — unit tests only
 bun run test:component # Layer 2 — component tests only
+bun run test:browser   # Layer 2b — browser layout tests only (real Chromium, phone viewport)
 bun run test:e2e       # Layer 3 — e2e tests only
 bun run test:integration # Layer 4 — integration tests (needs CLAUDE_INTEGRATION_TESTS=1)
-bun run test:ci        # Layers 1+2+3 — what runs in CI pipeline
-bun run test:watch     # Unit tests in watch mode
+bun run test:ci        # Layers 1+2+2b+3 and the git project — what runs in CI pipeline
+bun run test:watch     # Unit + component tests in watch mode
 ```
 
 ## Conventions

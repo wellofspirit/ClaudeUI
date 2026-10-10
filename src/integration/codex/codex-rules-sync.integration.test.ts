@@ -28,11 +28,18 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { afterEach, expect, it, vi } from 'vitest'
 import { CodexAppServerClient } from '../../core/codex/CodexAppServerClient'
 import { setHostPaths } from '../../core/host'
+import {
+  FIXTURE_CODEX_DIR,
+  codexInstalled,
+  releaseFixtureCodex,
+  storeCodexPath,
+  useFixtureCodex
+} from './integration-host'
 import { syncCodexRulesFile } from '../../core/codex/rules-sync'
 import provenance from '../../core/codex/protocol/provenance.json'
 import type { SandboxPolicy } from '../../core/codex/protocol/v2/SandboxPolicy'
@@ -56,7 +63,10 @@ vi.mock('node:child_process', async (importOriginal) => {
 })
 
 const enabled =
-  process.env.CODEX_INTEGRATION === '1' && process.platform === 'darwin' && process.arch === 'arm64'
+  process.env.CODEX_INTEGRATION === '1' &&
+  process.platform === 'darwin' &&
+  process.arch === 'arm64' &&
+  codexInstalled
 
 const clients: CodexAppServerClient[] = []
 const teardowns: Array<() => Promise<void>> = []
@@ -85,6 +95,7 @@ afterEach(async () => {
     }
   } finally {
     setHostPaths(null)
+    releaseFixtureCodex()
     for (const teardown of teardowns.splice(0)) await teardown()
   }
   expect(survivors, 'app-server groups survived bounded disposal').toEqual([])
@@ -111,10 +122,7 @@ const done = (): Record<string, unknown> => ({
 })
 
 async function setupFixture(): Promise<Fixture> {
-  const installed = resolve(
-    'vendor/codex-cli',
-    process.platform === 'win32' ? 'codex.exe' : 'codex'
-  )
+  const installed = storeCodexPath(process.platform === 'win32' ? 'codex.exe' : 'codex')
   expect(createHash('sha256').update(readFileSync(installed)).digest('hex')).toBe(
     provenance.codexBinaries[
       `${process.platform}-${process.arch}` as keyof typeof provenance.codexBinaries
@@ -124,14 +132,15 @@ async function setupFixture(): Promise<Fixture> {
   const home = join(directory, 'home')
   const codexHome = join(home, '.codex')
   const cwd = join(directory, 'cwd')
-  for (const name of [codexHome, cwd, join(directory, 'tmp'), join(directory, 'vendor/codex-cli')])
+  for (const name of [codexHome, cwd, join(directory, 'tmp'), join(directory, FIXTURE_CODEX_DIR)])
     mkdirSync(name, { recursive: true })
   // BOTH binaries: `codexBinaryAvailable()` gates the rule sync on the
   // code-mode host sitting beside `codex`, so a fixture without it would make
   // the writer a silent no-op and the whole test vacuous.
   for (const name of ['codex', 'codex-code-mode-host'])
-    copyFileSync(resolve('vendor/codex-cli', name), join(directory, 'vendor/codex-cli', name))
+    copyFileSync(storeCodexPath(name), join(directory, FIXTURE_CODEX_DIR, name))
   setHostPaths({ getAppPath: () => directory })
+  useFixtureCodex(directory)
 
   const requests: ProviderRequest[] = []
   const errors: string[] = []
@@ -426,6 +435,10 @@ it.skipIf(!enabled)(
     // missing from the list is the rule at work. `echo hi` is the control.
     expect(askedAbout(active)).toEqual(['rule-echo'])
     expect(String(callOutput(fixture, 'rule-ls'))).not.toContain('policy forbids')
+    // Exit 0 is deterministic despite the containment: an execpolicy `allow`
+    // that matches every segment also bypasses Codex's sandbox on the first
+    // attempt (`exec_policy.rs` `Skip { bypass_sandbox }`), so no nested
+    // seatbelt and no denial-classification race is involved.
     expect(callOutput(fixture, 'rule-ls')).toMatch(/Process exited with code 0|Exit code: 0/)
   },
   240000

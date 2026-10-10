@@ -114,7 +114,6 @@ const generateOpencodeAgent = vi.fn(async () => ({
 function installApiStub(overrides: Record<string, unknown> = {}): void {
   ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
-    engineIsInstalled: vi.fn(async () => true),
     listOpencodeAgents: vi.fn(async () => []),
     readOpencodeAgent: vi.fn(async () => null),
     saveOpencodeAgent,
@@ -323,9 +322,65 @@ describe('OpencodeAgentsSection', () => {
     const input = capturedSaveInputs[0]
     expect(input.permission).toBeDefined()
     // All categories default to 'allow' when the grid hasn't been modified
-    expect(input.permission?.bash).toBe('allow')
-    expect(input.permission?.edit).toBe('allow')
-    expect(input.permission?.task).toBe('allow')
+    // opencode 2.x actions (bash → shell, task → subagent; ADR-097 §3).
+    expect(Object.keys(input.permission ?? {})).toEqual([
+      'shell',
+      'edit',
+      'read',
+      'glob',
+      'grep',
+      'webfetch',
+      'websearch',
+      'subagent',
+      'skill',
+      'question'
+    ])
+    expect(input.permission?.shell).toBe('allow')
+    expect(input.previous).toBeUndefined()
+  })
+
+  it('a rename sends the previous name so the file moves with its hand-added fields', async () => {
+    installApiStub({
+      listOpencodeAgents: vi.fn(async () => [CUSTOM_AGENT]),
+      readOpencodeAgent: vi.fn(async () => ({ ...CUSTOM_DETAIL }))
+    })
+    await renderSection()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('OpencodeAgentsSection.agentRow'))
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    const name = screen.getByDisplayValue(CUSTOM_DETAIL.name)
+    await act(async () => {
+      fireEvent.change(name, { target: { value: 'renamed-agent' } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('OpencodeAgentsSection.save'))
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(capturedSaveInputs[0]).toMatchObject({
+      name: 'renamed-agent',
+      previous: { name: CUSTOM_DETAIL.name, scope: CUSTOM_DETAIL.scope }
+    })
+  })
+
+  it('says when the file is in the 1.x format and that a save rewrites it', async () => {
+    installApiStub({
+      listOpencodeAgents: vi.fn(async () => [CUSTOM_AGENT]),
+      readOpencodeAgent: vi.fn(async () => ({ ...CUSTOM_DETAIL, legacy: true, extraRules: 2 }))
+    })
+    await renderSection()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('OpencodeAgentsSection.agentRow'))
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(screen.getByTestId('OpencodeAgentsSection.legacy').textContent).toContain('1.x')
+    expect(screen.getByTestId('OpencodeAgentsSection.extraRules').textContent).toContain('2 more')
   })
 
   // ── Test 5: Generate ──────────────────────────────────────────────
@@ -479,15 +534,20 @@ describe('OpencodeAgentsSection', () => {
     expect((projectBtn as HTMLButtonElement).disabled).toBe(true)
   })
 
-  // ── Not installed gate ────────────────────────────────────────────
+  // ── Not installed ─────────────────────────────────────────────────
 
-  it('shows not-installed message when opencode is not installed', async () => {
+  it('lists the agent files without asking whether opencode is installed (ADR-082 §8)', async () => {
+    // The files are ClaudeUI's own read, and the opencode page cannot be opened
+    // while opencode is not installed (SettingsDialogView's rail test).
+    const engineIsInstalled = vi.fn(async () => false)
     installApiStub({
-      engineIsInstalled: vi.fn(async () => false)
+      engineIsInstalled,
+      listOpencodeAgents: vi.fn(async () => [BUILTIN_AGENT])
     })
 
     await renderSection()
 
-    expect(screen.getByText(/opencode is not installed/)).toBeTruthy()
+    expect(screen.getAllByTestId('OpencodeAgentsSection.agentRow')).toHaveLength(1)
+    expect(engineIsInstalled).not.toHaveBeenCalled()
   })
 })

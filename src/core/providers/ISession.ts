@@ -1,4 +1,6 @@
 import type {
+  AttachmentRef,
+  AttachmentUpload,
   ChatMessage,
   EngineId,
   ApprovalDecision,
@@ -9,6 +11,7 @@ import type {
 } from '../../shared/types'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { HostWindowHandle } from '../host'
+import type { BlockedCallLedger } from '../automode/blocked-calls'
 
 /**
  * Engine-neutral session interface. All methods here are implemented by
@@ -38,7 +41,7 @@ export interface ISession {
   /** Run a prompt turn. Passing null spawns the process without sending a message. */
   run(
     prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>,
+    attachments?: AttachmentUpload[],
     clientUserMessageId?: string
   ): Promise<void>
 
@@ -46,15 +49,40 @@ export interface ISession {
   readonly queuedItems: QueuedItem[]
 
   /**
+   * {@link queuedItems} as user turns stamped with their queue time, for a
+   * delegated judge's transcript (ADR-091 §4). Implemented in BaseSession;
+   * optional so a minimal test double need not carry it.
+   */
+  queuedUserTurns?(): ChatMessage[]
+
+  /**
+   * This session's auto-mode blocks the user can approve after the fact, and
+   * the one-shot grants approving them made (ADR-091 part 6) — shared with its
+   * children and its pi/opencode dispatch targets. Implemented in BaseSession;
+   * optional so a minimal test double need not carry it.
+   */
+  readonly blockedCalls?: BlockedCallLedger
+
+  /**
+   * Approve one auto-mode block after the fact (ADR-091 part 6): grant, route
+   * the nudge, mark the review approved. `prompt` is the nudge the caller
+   * sends this session's agent as a user prompt, or `null` when a live agent
+   * below the root already took it. `undefined` → unknown, already approved or
+   * still held: nothing happened.
+   */
+  approveBlocked?(toolUseId: string): { prompt: string | null } | undefined
+
+  /**
    * Queue a prompt that arrived while the session was busy. Implemented once in
    * BaseSession for every engine; the only per-engine difference is WHEN the
    * item reaches the engine (claude pushes into cli.js's native queue
    * immediately, opencode/pi hold until the next sub-turn boundary).
+   *
+   * `attachments` are the engine-bound uploads; `refs` are what the broadcast
+   * item carries (ADR-087). `sendPrompt` interns once and passes both; a caller
+   * that omits `refs` gets the uploads interned here.
    */
-  enqueuePrompt(
-    text: string,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-  ): void
+  enqueuePrompt(text: string, attachments?: AttachmentUpload[], refs?: AttachmentRef[]): void
 
   /**
    * Take back every still-recallable queued item, oldest first. `recalled`
@@ -106,17 +134,13 @@ export interface ISession {
   stopTask?(toolUseId: string): Promise<{ success: boolean; error?: string }>
   backgroundTask?(toolUseId: string): Promise<{ success: boolean; error?: string }>
 
-  /** Per-item dequeue against the ENGINE's own queue. Claude-only; no capability
-   *  flag gates it — the absence of the method is the gate (opencode/pi hold
-   *  their items core-side instead, so they need nothing here). Used by
-   *  ClaudeSession's `tryRecallQueuedItem`, never called directly by IPC. */
-  dequeueMessage?(value: string): Promise<{ removed: number }>
-
-  /** Voice input (gated by capabilities.voice). */
+  /**
+   * Voice input (gated by capabilities.voice): the transcription server only.
+   * Captures are owned by the client holding the microphone and relayed by
+   * `services/voice-relay.ts`, which starts the server through this.
+   */
   voiceStartServer?(): Promise<{ port: number }>
   voiceStopServer?(): Promise<void>
-  voiceStartRecording?(language: string): Promise<void>
-  voiceStopRecording?(): Promise<void>
 
   /**
    * Pin this session to one stored vendor account, or `null` to follow the

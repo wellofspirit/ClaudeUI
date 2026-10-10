@@ -1,5 +1,4 @@
-import { join } from 'node:path'
-import type { ClaudePermissions, PermissionSuggestion } from '../../shared/types'
+import type { PermissionSuggestion } from '../../shared/types'
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
 // Import cycle by construction: `rules-sync` needs THIS module's
 // `parseClaudeRule` to read a Claude rule, and this module needs its writer to
@@ -10,46 +9,26 @@ import { syncCodexRulesFile } from '../codex/rules-sync'
 import { logger } from '../services/logger'
 
 /**
- * Compile ClaudeUI's neutral permission rules (stored in Claude's
- * `Tool(specifier)` form — the source of truth the PermissionsDialog edits) into
- * an opencode permission ruleset, so the SAME user-configured allow/ask/deny
- * rules + additional directories apply to opencode sessions. See ADR-022.
- *
- * opencode rules are an ordered array evaluated LAST-MATCH-WINS. The caller
- * appends the compiled rules AFTER the autonomy-mode base ruleset, so user rules
- * override the base. Within the compiled block we emit allow → ask → deny so
- * that a tool matching multiple tiers resolves deny > ask > allow (deny is last
- * → wins), replicating Claude's precedence.
+ * The Claude-rule half of opencode's permission handling that does not depend
+ * on the wire shape: parsing a Claude `Tool(specifier)` rule, translating a
+ * specifier into the resource globs opencode matches, opencode's MCP key
+ * naming, and the reverse direction — an opencode ask → a Claude "always
+ * allow" suggestion, persisted to the shared Claude permission store. The
+ * compiler itself (Claude rules → 2.x `{action, resource, effect}` rules) is
+ * `permission-v2.ts` (ADR-022, ADR-085 §3, ADR-097 §3).
  */
 
 export type OpencodeAction = 'allow' | 'ask' | 'deny'
 
+/**
+ * A rule in the host pre-check's shape (`host-precheck.ts`, `wildcard.ts`):
+ * `permission` = the 2.x action, `pattern` = the resource glob
+ * (`permission-v2.ts` `asHostPrecheckRules`).
+ */
 export interface OpencodePermissionRule {
   permission: string
   pattern: string
   action: OpencodeAction
-}
-
-/**
- * Map a Claude tool name → opencode permission category. opencode groups tools
- * by category (`edit` covers Write/Edit/NotebookEdit; read-class tools each have
- * their own key). Unmapped tools (e.g. `mcp__…`) are skipped — opencode manages
- * MCP permissions separately and a bad guess could over/under-grant.
- */
-const TOOL_TO_CATEGORY: Record<string, string> = {
-  Read: 'read',
-  Glob: 'glob',
-  Grep: 'grep',
-  LS: 'list',
-  Edit: 'edit',
-  MultiEdit: 'edit',
-  Write: 'edit',
-  NotebookEdit: 'edit',
-  NotebookRead: 'read',
-  Bash: 'bash',
-  WebFetch: 'webfetch',
-  WebSearch: 'websearch',
-  Task: 'task'
 }
 
 /**
@@ -72,9 +51,9 @@ export function parseClaudeRule(rule: string): { tool: string; specifier?: strin
 /**
  * The only two URL schemes opencode's webfetch tool will act on — it throws on
  * anything else BEFORE asking for permission
- * (vendor/opencode-src/packages/opencode/src/tool/webfetch.ts: `if
- * (!params.url.startsWith("http://") && !params.url.startsWith("https://"))
- * throw`). So enumerating both is an exhaustive, not a heuristic, cover.
+ * (vendor/opencode-src/packages/core/src/tool/plugin/webfetch.ts `assertHttpUrl`,
+ * then `permission.assert` with `resources: [input.url]`). So enumerating both
+ * is an exhaustive, not a heuristic, cover.
  */
 const WEBFETCH_SCHEMES = ['http://', 'https://'] as const
 
@@ -102,7 +81,7 @@ const WEBFETCH_HOST_TERMINATORS = ['', '/*', ':*', '#*'] as const
  * every emitted pattern carries the rule's action, so they are semantically
  * one rule.
  *
- * - Bash: Claude's `cmd:*` prefix form → opencode glob `cmd*`; an existing glob
+ * - shell (Bash): Claude's `cmd:*` prefix form → opencode glob `cmd*`; an existing glob
  *   or exact command passes through.
  * - WebFetch: `domain:example.com` → the URL-shaped patterns opencode actually
  *   matches against. opencode asks with the FULL URL (`patterns: [params.url]`
@@ -122,7 +101,7 @@ export function translateSpecifierPatterns(
   specifier: string | undefined
 ): string[] {
   if (!specifier) return ['*']
-  if (category === 'bash') {
+  if (category === 'shell') {
     const prefix = specifier.match(/^(.+):\*$/)
     return [prefix ? `${prefix[1]}*` : specifier]
   }
@@ -142,106 +121,71 @@ export function translateSpecifierPatterns(
   return [specifier]
 }
 
-function compileTier(rules: string[], action: OpencodeAction): OpencodePermissionRule[] {
-  const out: OpencodePermissionRule[] = []
-  for (const raw of rules) {
-    const parsed = parseClaudeRule(raw)
-    if (!parsed) continue
-    const category = TOOL_TO_CATEGORY[parsed.tool]
-    if (!category) continue // unmappable (e.g. MCP) — skip in v1
-    for (const pattern of translateSpecifierPatterns(category, parsed.specifier)) {
-      out.push({ permission: category, pattern, action })
-    }
-  }
-  return out
+// ── MCP rules → opencode MCP permission keys (ADR-085 §3) ────────────────────
+
+/**
+ * opencode's MCP name sanitiser, ported verbatim
+ * (`vendor/opencode-src/packages/core/src/tool/mcp.ts` `namespace`/`name`). Exported
+ * for the auto-mode allow-rule skip (ADR-085 §4), which compares a rule's
+ * tool name to an MCP ask's key in the key's form.
+ */
+export function sanitizeMcpName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, '_')
 }
 
 /**
- * Compile a Claude permission set → opencode rules (allow → ask → deny order).
- * `additionalDirectories` become `external_directory` ALLOW rules (path + `/*`),
- * widening access — we intentionally do NOT add a blanket `external_directory:ask`
- * (that would prompt on opencode's own tool-output/temp dirs). See ADR-022.
+ * The opencode permission key an MCP tool asks under, or the server-level glob
+ * over them. opencode names an MCP tool `sanitize(server) + "_" +
+ * sanitize(tool)` (`mcp/catalog.ts:117-119`) and asks with exactly that key and
+ * `patterns: ["*"]` (`session/tools.ts:408`), so a rule is a `permission` glob
+ * with pattern `*`. Server level is `sanitize(server) + "_*"` — never `*_*`:
+ * built-in keys contain `_` too (`external_directory`, `doom_loop`, …).
  */
-export function compileClaudeRulesToOpencode(perms: ClaudePermissions): OpencodePermissionRule[] {
-  const rules: OpencodePermissionRule[] = [
-    ...compileTier(perms.allow ?? [], 'allow'),
-    ...compileTier(perms.ask ?? [], 'ask'),
-    ...compileTier(perms.deny ?? [], 'deny')
-  ]
-  for (const dir of perms.additionalDirectories ?? []) {
-    if (!dir) continue
-    rules.push({ permission: 'external_directory', pattern: join(dir, '*'), action: 'allow' })
-  }
-  return rules
+export function opencodeMcpKey(server: string, tool?: string): string {
+  return `${sanitizeMcpName(server)}_${tool === undefined ? '*' : sanitizeMcpName(tool)}`
 }
 
 /**
- * The compiled user ruleset with every ALLOW rule removed — what auto mode
- * patches onto the opencode session instead of the full set.
- *
- * ## Why (cli.js parity, `docs/protocol-cc/14-auto-mode-classifier.md` §3 step 2)
- *
- * cli.js's auto-mode fast path re-runs the permission check "with
- * classifier-bypassing allow rules **filtered out**". We had no equivalent, and
- * the consequence was live-observed: with a user allow rule `Bash(git:*)`, NO
- * git command ever raised `permission.asked`, so the judge never saw one — an
- * agent then evaded the static deny `Bash(git push --force:*)` by reordering
- * arguments (`git push origin main --force`) and the force-pushes landed
- * completely unclassified. A user allow rule is a statement about the *ask*
- * tier ("don't interrupt me for this"), not a waiver of the security monitor;
- * in auto mode, where the monitor IS the reviewer, treating it as one turns
- * every allow rule into a hole straight through the gate.
- *
- * ## Why ALL allow rules, not just `bash`
- *
- * Auto mode's base is already `acceptEdits` (`buildRuleset('acceptEdits')` =
- * `{*:allow}` + guards, with only `bash`/`webfetch` asking). So reads, edits,
- * globs, greps, tasks and `external_directory` (the compiled form of
- * `additionalDirectories`) are auto-allowed by the BASE regardless of what the
- * user's allow rules say — dropping them changes nothing. The only allow rules
- * that can have any effect here are precisely the ones that override a base
- * `ask`, i.e. exactly the "classifier-bypassing" set cli.js filters. Scoping the
- * filter to `bash` would therefore be a narrower rule with identical behavior
- * today and a silent hole the next time the base gates another category.
- *
- * ASK and DENY rules are kept: they only ever tighten, and the ask tier is what
- * the G9 precedence guard (`wildcard.ts` `matchesUserAskRule`) reads back.
- * Session-scoped "always allow" answers are NOT affected — those are opencode's
- * own per-session state from a live human click, not a stored config rule.
- *
- * Non-auto modes keep the full compiled ruleset: with no judge in the loop, an
- * allow rule is the user's only way to say "stop asking me", and removing it
- * there would be a pure regression.
+ * Parse an MCP rule's TOOL NAME (a specifier in parens is ignored):
+ * `mcp__<server>` or `mcp__<server>__*` → server level, `mcp__<server>__<tool>`
+ * → tool level, the server being everything up to the next `__` (Claude's own
+ * left-to-right reading). `null` when it is not an MCP rule or names no server.
  */
-export function withoutAllowRules(
-  rules: readonly OpencodePermissionRule[]
-): OpencodePermissionRule[] {
-  return rules.filter((r) => r.action !== 'allow')
+export function parseMcpRuleTool(tool: string): { server: string; tool?: string } | null {
+  if (!tool.startsWith('mcp__')) return null
+  const rest = tool.slice('mcp__'.length)
+  const sep = rest.indexOf('__')
+  const server = sep < 0 ? rest : rest.slice(0, sep)
+  if (!server) return null
+  const name = sep < 0 ? '' : rest.slice(sep + 2)
+  return name === '' || name === '*' ? { server } : { server, tool: name }
 }
 
 // ── Reverse direction: opencode approval → Claude "always allow" suggestion ────
 
-/** Inverse of TOOL_TO_CATEGORY (first/canonical Claude tool per opencode category). */
+/**
+ * opencode 2.x action → the canonical Claude tool (the inverse of
+ * `permission-keys.ts` `CLAUDE_TOOL_TO_V2_ACTION`).
+ */
 const CATEGORY_TO_TOOL: Record<string, string> = {
+  shell: 'Bash',
+  subagent: 'Task',
   read: 'Read',
   glob: 'Glob',
   grep: 'Grep',
-  list: 'LS',
   edit: 'Edit',
-  bash: 'Bash',
   webfetch: 'WebFetch',
-  websearch: 'WebSearch',
-  task: 'Task'
+  websearch: 'WebSearch'
 }
 
 /**
  * Build an "always allow" suggestion (Claude `addRules` form) for an opencode
  * `permission.asked` event, so the approval dialog can offer persisting the rule.
- * `permission` is the opencode category (e.g. `bash`), `patterns` the matched
+ * `permission` is the opencode action (e.g. `shell`), `patterns` the matched
  * argument(s) (e.g. the command / path). Returns null for an unmapped category.
  *
  * The matched pattern becomes the rule specifier (`Bash(echo hi)`), which the
- * forward compiler maps back to opencode `{bash,'echo hi',allow}` — round-trips.
+ * forward compiler maps back to opencode `{shell,'echo hi',allow}` — round-trips.
  * No specific/`*` pattern → a whole-tool rule.
  */
 export function suggestOpencodeAllowRule(
@@ -269,7 +213,8 @@ export function suggestionRuleToClaudeString(rule: {
 }
 
 /** Map a PermissionSuggestion `destination` → a ClaudePermissions scope, or null
- *  (e.g. `session`, which opencode persists natively via replyPermission('always')). */
+ *  (e.g. `session`, which the opencode host keeps in its session-allow set,
+ *  `session-allows.ts` — ADR-085 S2; nothing is written for it). */
 export function suggestionDestinationToScope(
   destination: string
 ): 'user' | 'project' | 'local' | null {
@@ -292,8 +237,8 @@ export function suggestionDestinationToScope(
  * `destination` maps to, then merge each group into that scope's allow list.
  *
  * Destinations with no on-disk scope (`session`, `cliArg`) are skipped — those
- * are the engines' own in-memory grants (opencode's `replyPermission('always')`,
- * Codex's `sessionAllows`), already applied by the caller.
+ * are the engines' own in-memory grants (opencode's host session-allow set,
+ * `session-allows.ts`; Codex's `sessionAllows`), already applied by the caller.
  *
  * Returns whether any scope was written, so a caller holding a cached rules
  * merge (PiSession) knows to invalidate it and honour the new rule on its very

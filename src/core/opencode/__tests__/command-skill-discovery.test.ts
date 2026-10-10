@@ -2,7 +2,7 @@
  * @vitest-environment node
  *
  * Unit tests for command-skill-discovery.ts — verifies that discoverOpencodeSkills
- * maps opencode Skill[] → SkillInfo[] correctly and degrades to [] on failure.
+ * maps opencode 2.x Skill.Info[] → SkillInfo[] correctly and degrades to [] on failure.
  * Stubs OpencodeServerManager + OpencodeClient (no real binary/network).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const { mockAcquire, mockRelease, mockListSkills, MockOpencodeClient } = vi.hoisted(() => {
   const mockAcquire = vi.fn()
+  // releaseIfCurrent — the exact release for this lease.
   const mockRelease = vi.fn()
   const mockListSkills = vi.fn()
   const MockOpencodeClient = vi.fn()
@@ -22,7 +23,7 @@ const { mockAcquire, mockRelease, mockListSkills, MockOpencodeClient } = vi.hois
 vi.mock('../OpencodeServerManager', () => ({
   opencodeServerManager: {
     acquire: mockAcquire,
-    release: mockRelease
+    releaseIfCurrent: mockRelease
   }
 }))
 
@@ -52,24 +53,30 @@ beforeEach(() => {
   // Invalidate cache so each test starts fresh
   invalidateOpencodeSkillCache()
 
-  mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:9000', authHeader: 'Basic test' })
+  mockAcquire.mockImplementation(async (cwd: string) => ({
+    baseUrl: 'http://127.0.0.1:9000',
+    authHeader: 'Basic test',
+    directory: cwd
+  }))
   MockOpencodeClient.mockImplementation(function () {
-    return { listSkills: mockListSkills }
+    return { skills: mockListSkills }
   })
 })
 
 describe('discoverOpencodeSkills', () => {
-  it('maps opencode Skill[] → SkillInfo[] with correct fields', async () => {
+  it('maps opencode Skill.Info[] → SkillInfo[] with correct fields', async () => {
     mockListSkills.mockResolvedValue([
       {
+        id: 'my-skill',
         name: 'my-skill',
         description: 'Does something useful',
-        location: '/home/user/.claude/skills/my-skill/SKILL.md',
+        path: '/home/user/.claude/skills/my-skill/SKILL.md',
         content: '# My Skill\nHelp text here.'
       },
       {
+        id: 'no-description',
         name: 'no-description',
-        location: '/home/user/.agents/skills/no-description/SKILL.md',
+        path: '/home/user/.agents/skills/no-description/SKILL.md',
         content: '# No Description'
       }
     ])
@@ -96,17 +103,20 @@ describe('discoverOpencodeSkills', () => {
     })
   })
 
-  it('acquires + releases the server (transient pattern)', async () => {
+  it('acquires + releases the server (transient pattern), without the hosted-tools wait', async () => {
     mockListSkills.mockResolvedValue([])
 
     await discoverOpencodeSkills('/my/project')
 
-    expect(mockAcquire).toHaveBeenCalledWith('/my/project')
-    expect(mockRelease).toHaveBeenCalledWith('/my/project')
+    expect(mockAcquire).toHaveBeenCalledWith('/my/project', { waitForHostedTools: false })
+    const conn = await mockAcquire.mock.results[0].value
+    // The client is built on the lease, so it sends the lease's directory.
+    expect(MockOpencodeClient).toHaveBeenCalledWith(conn)
+    expect(mockRelease).toHaveBeenCalledWith('/my/project', conn)
   })
 
   it('caches the result — second call does not re-acquire', async () => {
-    mockListSkills.mockResolvedValue([{ name: 's', location: '/x', content: 'c' }])
+    mockListSkills.mockResolvedValue([{ id: 's', name: 's', path: '/x', content: 'c' }])
 
     const first = await discoverOpencodeSkills('/cached/cwd')
     const second = await discoverOpencodeSkills('/cached/cwd')
@@ -117,8 +127,8 @@ describe('discoverOpencodeSkills', () => {
 
   it('different cwds have separate cache entries', async () => {
     mockListSkills
-      .mockResolvedValueOnce([{ name: 'skill-a', location: '/a', content: 'a' }])
-      .mockResolvedValueOnce([{ name: 'skill-b', location: '/b', content: 'b' }])
+      .mockResolvedValueOnce([{ id: 'skill-a', name: 'skill-a', path: '/a', content: 'a' }])
+      .mockResolvedValueOnce([{ id: 'skill-b', name: 'skill-b', path: '/b', content: 'b' }])
 
     const a = await discoverOpencodeSkills('/cwd/a')
     const b = await discoverOpencodeSkills('/cwd/b')
@@ -137,17 +147,17 @@ describe('discoverOpencodeSkills', () => {
   })
 
   it('degrades to [] on listSkills failure', async () => {
-    mockListSkills.mockRejectedValue(new Error('opencode GET /skill → 500'))
+    mockListSkills.mockRejectedValue(new Error('opencode skill.list (GET /api/skill) → 500'))
 
     const result = await discoverOpencodeSkills('/fail2/cwd')
 
     expect(result).toEqual([])
     // Server was acquired + must be released even on failure
-    expect(mockRelease).toHaveBeenCalledWith('/fail2/cwd')
+    expect(mockRelease).toHaveBeenCalledWith('/fail2/cwd', expect.anything())
   })
 
   it('invalidateOpencodeSkillCache(cwd) clears only that cwd', async () => {
-    mockListSkills.mockResolvedValue([{ name: 's', location: '/x', content: '' }])
+    mockListSkills.mockResolvedValue([{ id: 's', name: 's', path: '/x', content: '' }])
 
     await discoverOpencodeSkills('/clear/this')
     await discoverOpencodeSkills('/keep/this')
@@ -155,14 +165,14 @@ describe('discoverOpencodeSkills', () => {
     invalidateOpencodeSkillCache('/clear/this')
 
     // '/clear/this' re-fetches; '/keep/this' still cached
-    mockListSkills.mockResolvedValue([{ name: 's2', location: '/y', content: '' }])
+    mockListSkills.mockResolvedValue([{ id: 's2', name: 's2', path: '/y', content: '' }])
     const re = await discoverOpencodeSkills('/clear/this')
     expect(re[0].name).toBe('s2')
     expect(mockAcquire).toHaveBeenCalledTimes(3) // original 2 + 1 re-fetch
   })
 
   it('invalidateOpencodeSkillCache() (no cwd) clears all', async () => {
-    mockListSkills.mockResolvedValue([{ name: 's', location: '/x', content: '' }])
+    mockListSkills.mockResolvedValue([{ id: 's', name: 's', path: '/x', content: '' }])
     await discoverOpencodeSkills('/cwd1')
     await discoverOpencodeSkills('/cwd2')
 

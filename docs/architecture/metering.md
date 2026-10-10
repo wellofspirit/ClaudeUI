@@ -40,8 +40,9 @@ them wins. A recording failure is logged and swallowed; metering never fails a t
 A row carries what the turn was (`engine_id`, `vendor_id`, `model_id`, the five token counts), what
 it was worth (`equiv_cost_usd` and `engine_cost_usd` as the raw inputs, `api_cost_usd` and
 `billed_cost_usd` as the two resolved figures), and who ran it (`account_key`, `account_label`,
-`billing_type`). `origin` is `session`, `child` for a native subagent or a Codex child thread, or
-`dispatch`, and `parent_routing_id` names the spawning or dispatching session for the last two.
+`billing_type`). `origin` is `session`, `child` for a native subagent or a Codex child thread,
+`dispatch`, or `judge` for an auto-mode judge call ClaudeUI made itself (ADR-081), and
+`parent_routing_id` names the spawning, dispatching or judged session for the last three.
 Migration v18 added those seven columns; `SessionManager.rekey()` renames `parent_routing_id` with
 the session it belongs to.
 
@@ -95,9 +96,24 @@ every dashboard total and can still be marked. The opencode reconciler skips the
 throwaway sessions by their title (`OPENCODE_DISPATCH_SESSION_TITLE`), because their messages are
 already rows and a second copy under opencode's own message ids could never be deduplicated.
 
+Judge calls are ledger rows too. ClaudeUI makes the opencode and pi auto-mode judge's model call
+itself (ADR-081), so no engine meters it; the transport hands each call's usage to
+`recordJudgeUsage` in `src/core/automode/judge-usage.ts`, which writes one row through
+`recordUsageEvent` with `origin: 'judge'`, the judged session's engine, engine session id and routing
+id, and a fresh `judge:<uuid>` message id per call, because the hub is idempotent on it. Both wires
+report cached tokens inside the input count and reasoning inside the output count, so the row's
+`input` is the uncached part, `cache_read` the cached part, `output` the whole output, and no cache
+write. The account is the one that paid: the ChatGPT identity under `subscription`, or the API key's
+`<vendor>:key:<hex16>` under `apiKey`; `engine_cost_usd` is OpenRouter's reported `usage.cost` and
+null elsewhere, and it is a charge, not an equivalent. The row records whatever usage the provider
+reported before the call completed or was aborted, and a call that reported nothing writes nothing.
+A judge row counts in every dashboard total and in its account's window numerator, like any other
+origin.
+
 `usage-reconciler.ts` imports usage that happened outside this app. It runs at start-up and every ten
 minutes: Claude from the JSONL transcripts through block-usage's parse, opencode by enumerating
-sessions from opencode's own store and fetching each session's messages over HTTP. Both paths write
+root sessions through 2.x's global `GET /api/session?parentID=null` (ADR-097 §6) and fetching each
+session's messages over HTTP. Both paths write
 through the shared builders, so a reconciled row and a live one for the same turn agree field for
 field. That cadence is also why a ledger cursor cannot be a timestamp: a row written now can carry
 yesterday's `ts`.
@@ -135,7 +151,10 @@ literal sum of `api_cost_usd` with the unpriced turns counted rather than added.
 from `window_minutes` when the vendor stated one and from the kind's own name otherwise; a window whose
 length nothing states is sampled and never materialised, because with no interval there is no
 numerator. Windows seeded by v22 are open, and `unknown` is excluded from the seed and from every
-recompute.
+recompute. A sample group whose peak is 0% is not materialised either (ADR-071 §7, amended
+2026-10-01): a meter at 0% has not started its window, and ChatGPT reports "a week from now" for an
+idle weekly limit, a different instant on every reading. The first reading above 0% names the window,
+and migration v28 deleted the windows created before the rule (`peak_percent = 0`).
 
 A window closes 24 hours after its end, not at its end (`WINDOW_CLOSE_GRACE_MS`). A turn reaches the
 ledger later than it happened, so a window shut on the first pass past its end would drop every late
@@ -157,7 +176,10 @@ bias; nothing closes the claude.ai half.
 credentials for, not only the active one. The Claude provider reads the active account through
 `usage-fetcher.ts` and each stored account directory (ADR-015) through `fetchClaudeUsage`; the ChatGPT
 provider maps `ChatgptRateLimitStore`'s snapshot, resolving each vault account's identity through
-`CredentialSync.accountIdentity`. A provider that throws yields nothing rather than blanking the
+`CredentialSync.accountIdentity`. A ChatGPT credits plan (a business workspace) has no window: its
+reading carries `credits` (unlimited, and a balance usually withheld from a member) and `creditLimit`,
+the member's monthly allowance from Codex's `individualLimit` (used, limit, percent left, reset). The
+allowance is drawn as a meter, never sampled and never a window kind. A provider that throws yields nothing rather than blanking the
 others, and a per-account failure travels as `state` on that account.
 
 Inactive accounts are never refreshed on a timer. `refresh: false` answers from the last persisted
@@ -223,9 +245,10 @@ providers found, joined on the account key and never on `unknown`, with each acc
 as meters; the Claude block analytics live behind those rows in `ClaudeBlocksDrillIn`. `SpendChart`
 stacks display cost by provider per day or per hour, because `byProvider` is the only per-day split
 the query carries, and says so when the group-by disagrees. `BreakdownTable` is a tree whose levels
-the group-by reorders, with dispatched work as an inline marker on the row it ran under rather than a
-section of its own. `WindowValue` compares subscriptions, charts one account's windows in time order
-and scatters peak against dollars. `MachinesPanel` lists the machines, flags one more than 24 hours
+the group-by reorders, with dispatched work and judge calls as inline markers on the row they ran
+under rather than sections of their own; the query reports both as sub-totals (`dispatched`,
+`judge`) of the account, model and machine slice they are already inside. `WindowValue` compares
+subscriptions, charts one account's windows in time order and scatters peak against dollars. `MachinesPanel` lists the machines, flags one more than 24 hours
 behind against the reader's own clock, and is the only widget that says which machines the combined
 figures came from.
 
@@ -266,24 +289,35 @@ where it is stated; the migration that carried it also reset this machine's curs
 history already on disk is re-read under the new rule and the hub deduplicates what it already holds.
 
 `client.ts` runs the pass. A push sends batches of at most 500 events, advancing the cursor only after
-the hub has taken a batch, then the queued limit readings. An empty events array is a valid request
+the hub has taken a batch, then the queued limit readings with the newest credit reading per account
+beside them. Credit readings reach the client through `credit-readings.ts`, which the ChatGPT store
+publishes each account's merged credits to, dated by the last FULL read (`account/rateLimits/read`)
+and never by a live turn's push: Codex builds a push from response headers with no allowance and
+copies the previous one forward, so dating that copy by the push would let it overwrite another
+machine's newer reading on the hub, whose rule is newest-wins. Until a full read has happened in this
+process nothing is relayed, and a reading identical to the last published one (its instant included)
+is not published again. On a relayed row the credits carry their own source (`creditSource`,
+`creditObservedAt`), because the two relays are separate. An empty events array is a valid request
 and is how a machine announces itself: the hub learns a device exists only from that route, and the
 three device facts travel only on it, so the client sends one when it has never pushed or when the
 facts have changed since the marker in `meta` under `hub.announced`. A pull walks buckets paged by the
-hub's `rev`, then windows by their own `rev`, then the latest limit reading per account and kind, then
+hub's `rev`, then windows by their own `rev`, then the latest limit reading per account and kind and
+the latest credits per account, then
 the machine list, then the accounts list that names a key a bucket only keys. Every response carries
 the hub's `epoch`; the client takes it from the first response of a pass and holds it, drops every
 `remote_*` cache and re-pulls from zero when it differs from the stored one, and abandons the pass
 without writing anything when a later response in the same pass disagrees. Rows the hub attributes to
 the calling device are dropped on the way in, so no hour is counted twice.
 
-What a pull stores is five cache tables, added by migrations v26 and v27 beside `usage_hub_config`
-itself. `remote_usage_bucket` and `remote_usage_window` mirror their local twins with a `device_id`
+What a pull stores is six cache tables, added by migrations v26, v27 and v29 beside
+`usage_hub_config` itself. `remote_usage_bucket` and `remote_usage_window` mirror their local twins with a `device_id`
 that joins the primary key, because two machines legitimately hold the same hour or the same window
 and merging them there would be the double counting the whole design avoids. `remote_limits` keeps
 the latest reading per account key and window kind, so its `device_id` records who saw it rather than
 being part of the key. `remote_device` is the machine list, which is the only place a peer's name can
-come from, and `remote_account` is the account list. None of them has a foreign key into the local
+come from, and `remote_account` is the account list. `remote_credits` (v29) is the credits relay,
+one row per account, keyed without a window because a credits plan has none; `relayedLimits` joins it
+to the same account's windows, and an account with credits and no window becomes a row of its own. None of them has a foreign key into the local
 tables: a remote row is about an account this machine may never have held a credential for.
 
 Resync is the one repair, and it is a button rather than anything automatic. The client sends the
@@ -316,7 +350,10 @@ against both the Worker and the fake hub, then copy it back. `types.ts` holds th
 two rules that are not shapes, `codec.ts` the encoders, decoders and the privacy check, and
 `fixtures/` one golden JSON file per request and response, which a replay test asserts round-trips
 byte for byte. The folder is deliberately self-contained, and `billingType`, `origin` and `windowKind`
-are plain strings so that a hub can accept a value a newer client knows.
+are plain strings so that a hub can accept a value a newer client knows. On the way in, `asOrigin` in
+`client.ts` keeps the origins this build names, `judge` among them since 3.6, and stores any other
+as `session`; a client older than 3.6 therefore folds a peer's `judge` buckets into `session`
+(ADR-081 §5).
 
 This build speaks `SCHEMA_VERSION = 2`. Every request states its version, in the body on a write and
 in the `schemaVersion` query parameter on a read, and every route may answer `426 { hubSchemaVersion }`.
@@ -324,11 +361,11 @@ in the `schemaVersion` query parameter on a read, and every route may answer `42
 | Route                          | Caller        | What it does                                                                             |
 | ------------------------------ | ------------- | ---------------------------------------------------------------------------------------- |
 | `POST /v1/events`              | device        | Up to 500 rows, idempotent on `messageId`; an empty array announces the device           |
-| `POST /v1/limits`              | device        | Up to 500 limit readings, each with its window kind and stated length                    |
+| `POST /v1/limits`              | device        | Up to 500 limit readings with window kind and length, and an optional `credits` array    |
 | `POST /v1/devices/self/resync` | device        | Delete this device's rows from `since` forward, rebuild, raise `epoch`                   |
 | `GET /v1/buckets`              | device, owner | Hourly buckets paged by `rev`, excluding the caller's own, with an optional `from` bound |
 | `GET /v1/windows`              | device, owner | The hub's window ledger paged by `rev`, every row carrying the literal `deviceId: "hub"` |
-| `GET /v1/limits`               | device, owner | The latest reading per account key and window kind, with the device that observed it     |
+| `GET /v1/limits`               | device, owner | The latest reading per account and window kind, and the latest credits per account       |
 | `GET /v1/devices`              | device, owner | The machine list: id, name, OS family, app version, last push, retired                   |
 | `GET /v1/accounts`             | device, owner | One row per account the hub has heard of, with the newest label it was told              |
 | `GET /v1/hub`                  | owner         | The hub's status line: schema version, last recompute, retention, whether R2 is bound    |

@@ -9,7 +9,9 @@ import { PiSession } from '../pi/PiSession'
 import { CodexSession } from '../codex/CodexSession'
 import { codexAuthHook } from '../codex/codex-auth-hook'
 import { codexBinaryAvailable } from '../codex/codex-locate'
+import { harnessUnavailableMessage } from '../harness/resolve'
 import { syncCodexRulesFile } from '../codex/rules-sync'
+import { ensureDerivedCodexHome } from '../codex/codex-home'
 import { engineRegistry } from './EngineRegistry'
 import { claudeSpawnPrep } from './claude-spawn-prep'
 import { opencodeSpawnPrep } from '../opencode/opencode-spawn-prep'
@@ -35,22 +37,29 @@ spawnPrepRegistry.register('claude', claudeSpawnPrep)
 spawnPrepRegistry.register('opencode', opencodeSpawnPrep)
 spawnPrepRegistry.register('pi', piSpawnPrep)
 engineRegistry.register('codex', (routingId, win, cwd, opts) => {
-  if (!codexBinaryAvailable())
-    throw new Error(
-      'Codex is not installed for this platform; run ensure-codex on a supported host (macOS arm64, Windows x64, Linux x64, Linux arm64)'
-    )
+  if (!codexBinaryAvailable()) throw new Error(harnessUnavailableMessage('codex'))
   // The composition root for ADR-068 §1: every session ClaudeUI starts runs as
   // the vault's ACTIVE ChatGPT account. One hook per session — it remembers
   // which account this process was injected with.
   return new CodexSession(routingId, win, cwd, opts, { auth: codexAuthHook() })
 })
 spawnPrepRegistry.register('codex', async (model) => {
-  if (!codexBinaryAvailable()) throw new Error('Codex is not installed for this platform')
+  if (!codexBinaryAvailable()) throw new Error(harnessUnavailableMessage('codex'))
   // Staleness check before every Codex session. Codex reads
   // `$CODEX_HOME/rules/*.rules` ONCE per thread (`thread/start`/`thread/resume`),
   // so this is the last moment a user permission edit made OUTSIDE ClaudeUI can
   // still reach the session about to start. A no-op (one read + a hash compare)
   // when nothing changed, and it never throws.
+  //
+  // A first-time user has no Codex home yet, and the sync skips a missing one.
+  // The session's app-server would create it moments later — after this point,
+  // so its first thread would start without the user's rules. Create it here,
+  // best effort, exactly as the transport does (`ensureDerivedCodexHome`).
+  try {
+    ensureDerivedCodexHome(undefined)
+  } catch {
+    // The transport retries it and warns; Codex reports anything still wrong.
+  }
   syncCodexRulesFile()
   return { resolvedModel: model || undefined }
 })

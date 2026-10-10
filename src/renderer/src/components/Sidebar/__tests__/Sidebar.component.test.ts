@@ -138,6 +138,24 @@ describe('Sidebar FC', () => {
     return render(React.createElement(Sidebar))
   }
 
+  it("nudges main's opencode list on open and on app focus — never awaiting it (ADR-097 S9)", async () => {
+    const calls: number[] = []
+    // A refresh that never answers must not hold the sidebar.
+    app.bridge.ipcMain.handle('session:list-opencode', async () => {
+      calls.push(Date.now())
+      return new Promise(() => {})
+    })
+    await act(async () => {
+      await renderFC()
+    })
+    expect(calls).toHaveLength(1)
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'))
+    })
+    expect(calls).toHaveLength(2)
+    expect(viewProps).toBeDefined()
+  })
+
   // -------------------------------------------------------------------------
   // 1. Mount — listDirectories populates store
   // -------------------------------------------------------------------------
@@ -224,6 +242,29 @@ describe('Sidebar FC', () => {
     expect(pickCalls).toBe(0)
     expect(useSessionStore.getState().welcomeBrowseToken).toBe(1)
     expect(useSessionStore.getState().activeSessionId).toBeNull()
+  })
+
+  /**
+   * ADR-082 S7b: a session that never spawned (a pi session whose first spawn
+   * failed because pi was not installed) is in memory only, and its Recent row
+   * read as Claude: the in-memory row carried no engine, so `SessionItem` fell
+   * back to Claude's logo.
+   */
+  it('shows a session that never spawned under its own harness in Recent', async () => {
+    useSessionStore.setState({ lastSelectedEngineId: 'pi' })
+    try {
+      useSessionStore.getState().createNewSession('pi-never-spawned', CWD)
+      await act(async () => {
+        await renderFC()
+      })
+      const recent = viewProps.recentSessions.find((s) => s.sessionId === 'pi-never-spawned')
+      expect(recent?.engineId).toBe('pi')
+      // The directory tree's in-memory rows agree.
+      const tree = viewProps.augmentedDirs.flatMap((group) => group.sessions)
+      expect(tree.find((s) => s.sessionId === 'pi-never-spawned')?.engineId).toBe('pi')
+    } finally {
+      useSessionStore.setState({ lastSelectedEngineId: 'claude' })
+    }
   })
 
   // -------------------------------------------------------------------------
@@ -347,6 +388,35 @@ describe('Sidebar FC', () => {
 
     expect(useSessionStore.getState().sessions['pi-sess'].statusLine).toEqual(HISTORY_STATUS_LINE)
   })
+
+  // Opening a session only VIEWS it: Recent is bumped by sending in it (the
+  // `session:user-message` event) or a double-click, the same for every engine.
+  // A single click once moved opencode / pi / Codex rows to the top of Recent
+  // while a Claude row stayed put.
+  it.each(['claude', 'opencode', 'pi', 'codex'] as const)(
+    'a click on a %s session leaves Recent alone; a double-click bumps it',
+    async (engineId) => {
+      const empty = { messages: [], statusLine: null, lastModel: null }
+      app.bridge.ipcMain.handle('session:load-opencode-history', async () => empty)
+      app.bridge.ipcMain.handle('session:load-pi-history', async () => empty)
+      useSessionStore.setState({ recentSessionIds: ['older'] })
+      const info = { ...makeSessionInfo(`${engineId}-sess`), engineId }
+
+      await act(async () => {
+        await renderFC()
+      })
+      await act(async () => {
+        viewProps.onClickSession(info)
+        await new Promise((r) => setTimeout(r, 0))
+      })
+
+      expect(useSessionStore.getState().activeSessionId).toBe(info.sessionId)
+      expect(useSessionStore.getState().recentSessionIds).toEqual(['older'])
+
+      act(() => viewProps.onSessionDoubleClick(info))
+      expect(useSessionStore.getState().recentSessionIds).toEqual([info.sessionId, 'older'])
+    }
+  )
 
   it('a history load that fails leaves the session without a status line', async () => {
     app.bridge.ipcMain.handle('session:load-opencode-history', async () => {
@@ -503,6 +573,36 @@ describe('Sidebar FC', () => {
     expect(writeCalls[0][1]).toBe('rename-sess')
     expect(writeCalls[0][2]).toBe(PROJECT_KEY)
     expect(writeCalls[0][3]).toBe('My New Title')
+  })
+
+  it('writes a relocated session’s title into the dir its FILE lives in, not its group’s', async () => {
+    // cli.js's `EnterWorktree` moved this transcript into the worktree's
+    // project dir; the listing still groups it under its home project. The
+    // write appends, so the group key would CREATE a stray one-line transcript
+    // under the home dir instead of titling the real one.
+    const worktreeKey = `${PROJECT_KEY}--claude-worktrees-wt`
+    const group = makeDirectoryGroup([
+      { ...makeSessionInfo('moved-sess'), projectKey: worktreeKey }
+    ])
+
+    const writeCalls: unknown[][] = []
+    app.bridge.ipcMain.handle('session:write-custom-title', async (...args) => {
+      writeCalls.push(args)
+    })
+
+    await act(async () => {
+      await renderFC()
+    })
+    act(() => {
+      seed.directories([group])
+    })
+
+    act(() => {
+      viewProps.onFinishRename('moved-sess', 'Moved Title')
+    })
+
+    expect(writeCalls).toHaveLength(1)
+    expect(writeCalls[0][2]).toBe(worktreeKey)
   })
 
   // -------------------------------------------------------------------------
@@ -978,6 +1078,35 @@ describe('Sidebar FC', () => {
 
     expect(deleteProjectCalls).toHaveLength(1)
     expect(deleteProjectCalls[0][1]).toBe(PROJECT_KEY)
+  })
+
+  it('the project delete request names the relocated sessions the delete removes', async () => {
+    // cli.js's `EnterWorktree` moved `moved` into the worktree's project folder;
+    // the listing keeps it under this project, and main deletes it by its own
+    // key (`planClaudeProjectDelete`). The dialog must say so up front.
+    const worktreeKey = `${PROJECT_KEY}--claude-worktrees-wt`
+    const group = makeDirectoryGroup([
+      makeSessionInfo('home-1'),
+      { ...makeSessionInfo('moved'), projectKey: worktreeKey, engineId: 'claude' }
+    ])
+
+    await act(async () => {
+      await renderFC()
+    })
+    act(() => {
+      seed.directories([group])
+    })
+    act(() => {
+      viewProps.onDeleteProject(group)
+    })
+
+    const target = viewProps.deleteTarget
+    expect(target?.kind).toBe('project')
+    if (target?.kind !== 'project') return
+    expect(target.claudeFiles).toEqual({
+      removeDir: true,
+      sessionFiles: [{ sessionId: 'moved', projectKey: worktreeKey }]
+    })
   })
 
   // -------------------------------------------------------------------------

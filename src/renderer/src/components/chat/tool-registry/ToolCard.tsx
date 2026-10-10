@@ -22,12 +22,14 @@
 
 import { useState, useEffect } from 'react'
 import type {
+  ActiveTask,
   ContentBlock,
   PendingApproval,
   PermissionMode,
   PermissionSuggestion,
   TaskNotification,
-  ToolReviewBlock
+  ToolReviewBlock,
+  PermissionDenialBlock
 } from '../../../../../shared/types'
 import type { ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import type { ThemeId } from '../../../stores/session-store'
@@ -39,7 +41,8 @@ import { TOOL_RENDERERS, type PassiveToolKind } from './kinds'
 import { GenericBody } from './kinds/GenericBody'
 import { BackgroundBashOutput } from './kinds/bash-output'
 import { ToolResultImages } from './ToolResultImages'
-import { ToolReviewChip, ToolReviewStrip } from './ToolReview'
+import { ToolReviewChip, ToolReviewStrip, canApproveBlock } from './ToolReview'
+import { PermissionDenialChip, PermissionDenialStrip } from './PermissionDenial'
 import type { BashOutputSlice, BgOutputSlice } from './kinds/types'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -70,6 +73,12 @@ export interface ToolCardProps {
    * reviewed twice (a re-review after "approve anyway"); the caller picks it.
    */
   review?: ToolReviewBlock
+  /**
+   * A pre-ask refusal by something that is NOT a judge — a deny rule, the
+   * permission mode, a hook. Mutually exclusive with `review` in practice: one
+   * decision is made per call, and it is either weighed or looked up.
+   */
+  denial?: PermissionDenialBlock
   isHistorical: boolean
   permissionMode: PermissionMode
   expandToolCalls: boolean
@@ -81,6 +90,13 @@ export interface ToolCardProps {
   bgOutput?: BgOutputSlice
   bgNotification: TaskNotification | null
   isStopping: boolean
+  /**
+   * The call's live task record (`activeTasks`), once cli.js has registered it
+   * as a task. "Send to background" needs `isBackgrounded === false`: before
+   * registration, or once in the background, `background_tasks` has nothing
+   * to move.
+   */
+  activeTask?: ActiveTask
   isBackgrounding: boolean
   hasActiveSession: boolean
   /** Show the "Send to background" affordance. Gated on capabilities.backgroundTasks. */
@@ -97,6 +113,12 @@ export interface ToolCardProps {
     decision: 'allow' | 'deny',
     selectedSuggestions?: PermissionSuggestion[]
   ) => Promise<void>
+  /**
+   * Approve an auto-mode block after the fact (ADR-091 part 6). Offered only on
+   * a live card whose review is an auto-mode block not yet approved, and not
+   * while a card for the call is pending (a held block's own card answers it).
+   */
+  onApproveBlocked?: () => void
   onBackgroundTask: () => Promise<void>
   onStopTask: () => Promise<void>
   onOpenTaskPanel: () => void
@@ -109,6 +131,7 @@ export function ToolCard({
   result,
   approval,
   review,
+  denial,
   isHistorical,
   permissionMode,
   expandToolCalls,
@@ -120,12 +143,14 @@ export function ToolCard({
   bgOutput,
   bgNotification,
   isStopping,
+  activeTask,
   isBackgrounding,
   hasActiveSession,
   backgroundTasksEnabled,
   displayName,
   toolOutputMaxChars,
   onApproval,
+  onApproveBlocked,
   onBackgroundTask,
   onStopTask,
   onOpenTaskPanel
@@ -156,6 +181,10 @@ export function ToolCard({
   // array must not render an empty bordered strip.
   const resultImages = result?.images?.length ? result.images : undefined
   const isPendingApproval = !isHistorical && !!approval
+  const approveBlocked =
+    onApproveBlocked && canApproveBlock(review, { isHistorical, pending: !!approval })
+      ? onApproveBlocked
+      : undefined
 
   const bgRunning = isBackgroundBash && !bgNotification && !isHistorical
   const isCommand = kind === 'command'
@@ -174,6 +203,8 @@ export function ToolCard({
   const isSuccess = visualState === 'success'
   const isLoaded = visualState === 'loaded'
   const isForegroundBashRunning = visualState === 'running' && !isBackgroundBash
+  const isForegroundTask = activeTask?.isBackgrounded === false
+  const canBackground = isForegroundBashRunning && isForegroundTask && backgroundTasksEnabled
 
   const statusIcon = isPendingApproval ? (
     <svg
@@ -295,14 +326,17 @@ export function ToolCard({
             {chip.label}
           </span>
         ))}
-        {review && <ToolReviewChip review={review} />}
+        {review && (
+          <ToolReviewChip review={review} onApprove={expanded ? undefined : approveBlocked} />
+        )}
+        {denial && <PermissionDenialChip denial={denial} />}
         {isPendingApproval && (
           <span className="text-[11px] font-semibold text-warning uppercase tracking-wider mr-1">
             Permission
           </span>
         )}
         {isLoaded && <span className="text-[10px] text-text-muted shrink-0">loaded</span>}
-        {isForegroundBashRunning && !isBackgrounding && backgroundTasksEnabled && (
+        {canBackground && !isBackgrounding && (
           <button
             data-testid="ToolCard.sendToBackground"
             onClick={(e) => {
@@ -314,7 +348,7 @@ export function ToolCard({
             Send to background
           </button>
         )}
-        {isBackgrounding && (
+        {isBackgrounding && isForegroundTask && (
           <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">
             sending to background…
           </span>
@@ -351,7 +385,8 @@ export function ToolCard({
 
       {/* The verdict sits between the header and the body, in the approval
           card's own vocabulary — it is a permission decision, not reasoning. */}
-      {expanded && review && <ToolReviewStrip review={review} />}
+      {expanded && review && <ToolReviewStrip review={review} onApprove={approveBlocked} />}
+      {expanded && denial && <PermissionDenialStrip denial={denial} />}
 
       {expanded && (
         <div className="border-t border-border">

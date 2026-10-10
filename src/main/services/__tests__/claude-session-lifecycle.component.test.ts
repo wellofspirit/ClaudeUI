@@ -34,7 +34,10 @@ vi.mock('../../../core/sdk', async (importOriginal) => {
 })
 
 vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
-  opencodeServerManager: { isBinaryAvailable: (): boolean => false }
+  opencodeServerManager: {
+    setServerStartedHook: () => {},
+    isBinaryAvailable: (): boolean => false
+  }
 }))
 const { mockDisposeFor } = vi.hoisted(() => ({ mockDisposeFor: vi.fn() }))
 vi.mock('../../../core/services/cross-engine-dispatcher', () => ({
@@ -62,16 +65,11 @@ vi.mock('../../../core/services/session-history', () => ({
 }))
 vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
-vi.mock('../../../core/services/voice-capture', () => ({
-  startRecording: vi.fn(),
-  stopRecording: vi.fn()
-}))
-vi.mock('../../../core/services/voice-client', () => ({ VoiceClient: class {} }))
 vi.mock('../../../core/services/context-window', () => ({
   getContextWindowSize: vi.fn(() => 200000)
 }))
 vi.mock('../../../core/services/usage-fetcher', () => ({
-  usageFetcher: { updateFromRateLimitEvent: vi.fn(), fetch: vi.fn(async () => null) }
+  usageFetcher: { fetch: vi.fn(async () => null) }
 }))
 vi.mock('../../../core/services/usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
 vi.mock('../account-manager', () => ({
@@ -224,6 +222,33 @@ describe("ClaudeSession — cancel()'s disconnected survives the dying run's fin
   })
 })
 
+describe('ClaudeSession — a run that never produces a query handle', () => {
+  it('leaves no unhandled rejection when sdkQuery() throws (GUARD — fails pre-fix)', async () => {
+    const { win } = makeWin()
+    // What a multi-account spawn refused for want of a token does: query() throws.
+    mockQuery.mockImplementationOnce(() => {
+      throw new Error('The active Claude account is not signed in. Sign in to it to continue.')
+    })
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const session = new ClaudeSession('routing-no-handle', win, '/tmp/proj')
+      liveSessions.push(session)
+      await session.run('hi')
+      // Two macrotask turns: Node reports an unhandled rejection after the
+      // microtask queue drains.
+      await new Promise((resolve) => setImmediate(resolve))
+      await new Promise((resolve) => setImmediate(resolve))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+})
+
 describe('ClaudeSession — setModel reverts on control-request failure', () => {
   it('a rejected activeQuery.setModel restores the previous model (GUARD — fails pre-fix)', async () => {
     const { win } = makeWin()
@@ -325,5 +350,32 @@ describe('ClaudeSession — M-CL3: a DISPOSED (replaced) object cannot re-arm it
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('ClaudeSession — the voice server port dies with the child (S2 item 4)', () => {
+  it('a respawned engine is asked for a fresh port, not handed the dead one', async () => {
+    const ports = [4101, 4202]
+    mockQuery.mockImplementation(() => {
+      const h = makeParkedHandle()
+      const port = ports[createdHandles.length]
+      Object.assign(h.handle, { voiceServerStart: vi.fn(async () => ({ port })) })
+      createdHandles.push(h)
+      return h.handle
+    })
+    const { win } = makeWin()
+    const session = new ClaudeSession('routing-voice-port', win, '/tmp/proj')
+    liveSessions.push(session)
+
+    const first = session.run('first')
+    expect(await session.voiceStartServer()).toEqual({ port: 4101 })
+
+    // cli.js exits (crash, idle reap): the voice server inside it is gone.
+    createdHandles[0].end()
+    await first
+
+    // The next capture spawns a fresh child — and must ask IT for the port.
+    expect(await session.voiceStartServer()).toEqual({ port: 4202 })
+    expect(mockQuery).toHaveBeenCalledTimes(2)
   })
 })

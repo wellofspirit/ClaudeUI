@@ -15,8 +15,10 @@ import {
 import { scanCodexLineage } from '../codex/history'
 import type { CodexDeletePlan } from '../../shared/codex-types'
 import type {
+  AttachmentUpload,
   ClaudePermissions,
   EngineId,
+  JudgeModelSupport,
   ListPlacesResult,
   PermissionScope
 } from '../../shared/types'
@@ -32,15 +34,19 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
 import { logger } from '../services/logger'
 import { emitEvent, syncCore } from '../services/sync-host'
+import { blobStore, internAttachments } from '../services/blob-store'
 import { deleteSessionByEngine } from '../services/session-delete'
-import { deleteProjectFiles } from '../services/delete-session-files'
+import { deleteProjectFiles, deleteSessionFiles } from '../services/delete-session-files'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
+import { seedCanonicalTranscript } from './seed-canonical-transcript'
 import { unwatchSession } from '../services/session-watcher'
 import { cwdToProjectKey } from '../../shared/project-key'
+import { planClaudeProjectDelete } from '../../shared/claude-project-delete'
 import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import type { ISession } from '../providers/ISession'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
 import { getSessionMeta } from '../services/db'
+import { describeJudgeModels } from '../automode/judge-route'
 
 // ---------------------------------------------------------------------------
 // Shared session-domain IPC handler bodies (desktop IPC + remote WebSocket)
@@ -75,8 +81,8 @@ import { getSessionMeta } from '../services/db'
 //    on this list for exactly that reason; they stopped being single-line the
 //    moment a delete had to cancel the live session and replicate the removal,
 //    so they moved into this module — see §Deletion.
-//  - `session:set-reasoning-variant` — desktop-only, no remote counterpart,
-//    nothing to dedup.
+// (`session:set-reasoning-variant` used to be listed here as desktop-only. It is
+// registered on both surfaces, and `setReasoningVariant` below is its one copy.)
 
 // ---------------------------------------------------------------------------
 // Session control
@@ -102,18 +108,79 @@ import { getSessionMeta } from '../services/db'
  * the state of record, that difference would surface as a transcript whose ids
  * change under a client on every resync. One mint at the emitter is the fix; the
  * queue path already had stable `steer-<itemId>` ids and is unchanged.
+ *
+ * **Attachments split here (ADR-087).** The upload is interned ONCE, at the top:
+ * the engine still gets the bytes (`attachments`), while everything that is
+ * replicated — the user-message event, a queue item — carries only the refs, so
+ * a pasted screenshot never rides the ring or a snapshot.
+ *
+ * **A resumed session's history read goes first (ADR-087 §2).** Canonical's seed
+ * only fills an EMPTY transcript, so a prompt that beat the read would be the
+ * whole transcript and the history a no-op. The wait is conditional — a session
+ * with no read in flight still sends synchronously, so this stays a plain `void`
+ * for every other caller — and every send waiting on the same read resumes in the
+ * order it arrived (promise reactions run in registration order), so two quick
+ * sends are not reordered by it.
  */
 export function sendPrompt(
   manager: SessionManager,
   routingId: string,
   prompt: string,
-  attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  attachments?: AttachmentUpload[]
 ): void | Promise<void> {
   const session = manager.get(routingId)
   if (!session) throw new Error(`No session for routingId: ${routingId}`)
+  const seeding = syncCore.pendingSeed(routingId) ?? reseedAfterExit(session, routingId)
+  if (!seeding) return deliverPrompt(manager, routingId, prompt, attachments)
+  return seeding.then(() => deliverPrompt(manager, routingId, prompt, attachments))
+}
+
+/**
+ * A session that exited and is respawning IN PLACE has no `createSession` to seed
+ * canonical for it. The inactivity timer (or any `cancel()`) reports
+ * `disconnected`, which drops canonical's transcript; a prompt then reaches the same
+ * still-usable session object, which resumes its engine session by itself. Without a
+ * seed here the prompt would be the whole transcript and `seeded` would stay false,
+ * so every client that syncs would be told the transcript is on its way and be
+ * refused the fill.
+ *
+ * Applies when canonical holds nothing for the session, did not drop it as an empty
+ * one (`seeded` false), and the engine has a session to resume. Not when the prompt
+ * will only queue behind a running turn, and not for Codex: its `cancel()` closes the
+ * object for good (`run` refuses), so a Codex respawn always goes through
+ * `createSession`, which seeds. Registered with core exactly as `create-session.ts`
+ * does, so the send waits on the read.
+ */
+function reseedAfterExit(session: ISession, routingId: string): Promise<void> | undefined {
+  if (session.willQueue || session.engineId === 'codex') return undefined
+  const held = syncCore.getCanonicalState().sessions[routingId]
+  if (!held || held.seeded || held.messages.length > 0) return undefined
+  const resumeId = session.getSessionId()
+  if (!resumeId) return undefined
+  syncCore.trackSeed(
+    routingId,
+    seedCanonicalTranscript(routingId, resumeId, held.cwd, undefined, session.engineId)
+  )
+  return syncCore.pendingSeed(routingId)
+}
+
+/**
+ * The body of {@link sendPrompt}. Looks the session up again: it can be cancelled
+ * and removed while the send waited on a history read, and that must surface as the
+ * same error rather than a send into nothing.
+ */
+function deliverPrompt(
+  manager: SessionManager,
+  routingId: string,
+  prompt: string,
+  attachments?: AttachmentUpload[]
+): void | Promise<void> {
+  const session = manager.get(routingId)
+  if (!session) throw new Error(`No session for routingId: ${routingId}`)
+  const refs = internAttachments(attachments)
   // Check before run() — if the session is already active this send queues.
   if (session.willQueue) {
-    session.enqueuePrompt(prompt, attachments)
+    session.enqueuePrompt(prompt, attachments, refs)
     return
   }
   const id = `msg-${crypto.randomUUID()}`
@@ -122,9 +189,48 @@ export function sendPrompt(
     routingId,
     // `msg-` prefix + randomUUID mirrors what the renderer minted, so nothing
     // downstream (React keys, retraction bookkeeping) sees a new id SHAPE.
-    { id, timestamp: Date.now(), prompt, attachments }
+    { id, timestamp: Date.now(), prompt, ...(refs ? { attachments: refs } : {}) }
   ])
   if (session.engineId === 'codex') return session.run(prompt, attachments, id)
+}
+
+/**
+ * `session:approve-blocked` — approve an auto-mode block after the fact
+ * (ADR-091 part 6). The session grants the call's next identical attempt once
+ * and routes the nudge (`BaseSession.approveBlocked`); a nudge for this
+ * session's own agent then goes through {@link sendPrompt}, the composer's own
+ * path, so it lands in the transcript as the user's message, or queues behind
+ * a busy turn. A nudge a live agent below the root took is not sent again. An unknown session, a
+ * malformed or unknown id, or one already approved is a silent no-op: a
+ * historical card's click has nothing to answer it.
+ */
+export function approveBlocked(
+  manager: SessionManager,
+  routingId: string,
+  toolUseId: string
+): void | Promise<void> {
+  if (typeof toolUseId !== 'string' || toolUseId === '') return
+  const session = manager.get(routingId)
+  const nudge = session?.approveBlocked?.(toolUseId)
+  if (!nudge?.prompt) return
+  return sendPrompt(manager, routingId, nudge.prompt)
+}
+
+/** A blob id is a lowercase hex SHA-256 — anything else cannot name a blob. */
+const BLOB_ID_RE = /^[0-9a-f]{64}$/
+
+/**
+ * `blob:get` — the bytes behind a transcript `BlobRef` (ADR-087).
+ *
+ * `null` for a malformed id, an unknown one, and one the store's LRU has
+ * dropped: all three are "unavailable" to the client, never an error. The
+ * result deliberately has no `ok` key — preload/web `unwrap` would mistake an
+ * `{ok}` object for the transport envelope and hand the caller `undefined`.
+ */
+export function getBlob(blobId: unknown): { mediaType: string; base64Data: string } | null {
+  if (typeof blobId !== 'string' || !BLOB_ID_RE.test(blobId)) return null
+  const blob = blobStore.get(blobId)
+  return blob ? { mediaType: blob.mediaType, base64Data: blob.data.toString('base64') } : null
 }
 
 /**
@@ -409,7 +515,27 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
     }
   })
 
-  await deleteProjectFiles(projectKey)
+  // Claude files, and WHICH of them: the home dir wholesale, members relocated
+  // into a worktree's project dir one by one, and — when this dir also holds
+  // another project's relocated member — every member one by one with the dir
+  // kept. The rule is `planClaudeProjectDelete`'s (shared), so the confirmation
+  // dialog describes exactly what runs here. `allSettled` for the same reason as
+  // the engine sweep above — one stuck file must not abandon the rest.
+  const { removeDir, sessionFiles } = planClaudeProjectDelete(state.directories, projectKey)
+  const fileResults = await Promise.allSettled(
+    sessionFiles.map((s) => deleteSessionFiles(s.sessionId, s.projectKey))
+  )
+  fileResults.forEach((result, i) => {
+    if (result.status === 'rejected') {
+      logger.warn(
+        'IPC',
+        `session:delete-project: session ${sessionFiles[i].sessionId} (${sessionFiles[i].projectKey}) survived the delete`,
+        result.reason
+      )
+    }
+  })
+
+  if (removeDir) await deleteProjectFiles(projectKey)
   void refreshCanonicalDirectories()
 }
 
@@ -889,6 +1015,26 @@ export function saveUiSettings(manager: SessionManager, incomingSettings: UISett
 // ---------------------------------------------------------------------------
 // Stateless
 // ---------------------------------------------------------------------------
+
+/**
+ * `automode:judge-model-support` — which judge-picker values ClaudeUI can call
+ * for the engine's auto-mode judge (ADR-081 §3), for the Settings picker.
+ * Token-free: `describeJudgeModels` checks credentials for presence only, so a
+ * remote caller learns a yes/no and the resolver's own copy, never a key.
+ * Arguments arrive from the renderer or the web client, so they are checked.
+ */
+export async function judgeModelSupport(
+  engineId: unknown,
+  values: unknown
+): Promise<Record<string, JudgeModelSupport>> {
+  if (engineId !== 'opencode' && engineId !== 'pi') {
+    throw new Error(`judge-model-support: unsupported engine ${JSON.stringify(engineId)}`)
+  }
+  if (!Array.isArray(values) || values.some((v) => typeof v !== 'string')) {
+    throw new Error('judge-model-support: values must be an array of strings')
+  }
+  return describeJudgeModels(engineId, values as string[])
+}
 
 export async function listDirEntries(dirPath: string): Promise<{
   entries: Array<{ name: string; isDirectory: boolean }>

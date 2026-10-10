@@ -8,9 +8,12 @@
  *    with watch/unwatch + load-earlier paging).
  */
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { AnsiUp } from 'ansi_up'
 import { useSessionStore, useActiveSession, type ThemeId } from '../../../../stores/session-store'
+import { useStickToBottom } from '../../../../hooks/useStickToBottom'
+import { TOOL_OUTPUT_SCOPE } from '../../ChatSearch/search-scope'
+import { TERMINAL_BOX_MAX_HEIGHT } from '../../terminal-box'
 
 export function LiveBashOutput({
   output,
@@ -23,27 +26,26 @@ export function LiveBashOutput({
   totalBytes: number
   theme: ThemeId
 }): React.JSX.Element {
-  const preRef = useRef<HTMLPreElement>(null)
+  // The pre scrolls and has a fixed max-height: the wrapper inside it is what grows.
+  // It is capped like the result box that replaces it when the command finishes
+  // (terminal-box.ts), so the card does not change height at that moment.
+  const { scrollerRef, contentRef } = useStickToBottom<HTMLPreElement>()
   const bg = theme === 'light' ? '#e8eaed' : theme === 'monokai' ? '#272822' : '#0d1117'
   const fg = theme === 'light' ? '#1a1d24' : theme === 'monokai' ? '#f8f8f2' : '#d1d5db'
 
   // Fresh AnsiUp per conversion so SGR state can't bleed between bash tool cards
-  // (a shared module-level instance carried color state across cards).
+  // (a shared module-level instance carried color state across cards). The memo
+  // holds the `{ __html }` object: React rewrites innerHTML whenever its identity
+  // changes (see TerminalView).
   const html = useMemo(() => {
     const ansi = new AnsiUp()
     ansi.use_classes = false
     ansi.escape_html = true
-    return ansi.ansi_to_html(output)
+    return { __html: ansi.ansi_to_html(output) }
   }, [output])
 
-  useEffect(() => {
-    const el = preRef.current
-    if (!el) return
-    el.scrollTop = el.scrollHeight
-  }, [html])
-
   return (
-    <div data-testid="LiveBashOutput" className="px-3 py-2.5">
+    <div data-testid="LiveBashOutput" {...TOOL_OUTPUT_SCOPE} className="px-3 py-2.5">
       <div className="flex items-center gap-2 mb-1.5">
         <div className="text-[11px] text-text-secondary uppercase tracking-wider">Live Output</div>
         <span className="text-[10px] font-mono text-text-muted">
@@ -53,11 +55,12 @@ export function LiveBashOutput({
         <div className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
       </div>
       <pre
-        ref={preRef}
+        ref={scrollerRef}
         className="text-[12px] font-mono whitespace-pre-wrap break-words leading-[1.3] rounded-md p-2 border border-border overflow-y-auto"
-        style={{ background: bg, color: fg, maxHeight: 300 }}
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
+        style={{ background: bg, color: fg, maxHeight: TERMINAL_BOX_MAX_HEIGHT }}
+      >
+        <div ref={contentRef} dangerouslySetInnerHTML={html} />
+      </pre>
     </div>
   )
 }
@@ -73,9 +76,7 @@ export function BackgroundBashOutput({
   const unwatchBg = useSessionStore((s) => s.unwatchBackgroundOutput)
   const [prependedContent, setPrependedContent] = useState('')
   const [loadingMore, setLoadingMore] = useState(false)
-  const preRef = useRef<HTMLPreElement>(null)
-  const isAutoScrolling = useRef(false)
-  const [following, setFollowing] = useState(true)
+  const { scrollerRef, contentRef, stopFollowing } = useStickToBottom<HTMLPreElement>()
 
   useEffect(() => {
     if (!activeSessionId) return
@@ -85,24 +86,6 @@ export function BackgroundBashOutput({
     }
   }, [toolUseId, activeSessionId, watchBg, unwatchBg])
 
-  useEffect(() => {
-    const el = preRef.current
-    if (!el || !following) return
-    isAutoScrolling.current = true
-    el.scrollTop = el.scrollHeight
-    requestAnimationFrame(() => {
-      isAutoScrolling.current = false
-    })
-  }, [bgOutput?.tail, following])
-
-  const handleScroll = useCallback(() => {
-    if (isAutoScrolling.current) return
-    const el = preRef.current
-    if (!el) return
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-    setFollowing(nearBottom)
-  }, [])
-
   const handleLoadEarlier = useCallback(async () => {
     if (!bgOutput || loadingMore) return
     const alreadyLoaded = prependedContent.length
@@ -111,6 +94,9 @@ export function BackgroundBashOutput({
     if (loaded >= bgOutput.totalSize) return
 
     setLoadingMore(true)
+    // Earlier output lands ABOVE the tail; the user asked to read it, not to be
+    // pinned back down to the end.
+    stopFollowing()
     const chunkSize = 64 * 1024
     const offset = Math.max(0, bgOutput.totalSize - loaded - chunkSize)
     const length = Math.min(chunkSize, bgOutput.totalSize - loaded)
@@ -119,7 +105,7 @@ export function BackgroundBashOutput({
     const chunk = await window.api.readBackgroundRange(rid, toolUseId, offset, length)
     setPrependedContent((prev) => chunk + prev)
     setLoadingMore(false)
-  }, [bgOutput, prependedContent, loadingMore, toolUseId])
+  }, [bgOutput, prependedContent, loadingMore, toolUseId, stopFollowing])
 
   if (!bgOutput) return null
 
@@ -127,7 +113,11 @@ export function BackgroundBashOutput({
   const hasMore = bgOutput.totalSize > prependedContent.length + tailLen
 
   return (
-    <div data-testid="BackgroundBashOutput" className="border-t border-border px-3 py-2.5">
+    <div
+      data-testid="BackgroundBashOutput"
+      {...TOOL_OUTPUT_SCOPE}
+      className="border-t border-border px-3 py-2.5"
+    >
       <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1.5">Output</div>
       {hasMore && (
         <button
@@ -140,13 +130,14 @@ export function BackgroundBashOutput({
         </button>
       )}
       <pre
-        ref={preRef}
-        onScroll={handleScroll}
+        ref={scrollerRef}
         className="text-[12px] font-mono text-text-primary/70 bg-bg-primary rounded-md p-2 border border-border overflow-y-auto whitespace-pre-wrap break-words leading-[1.3]"
-        style={{ maxHeight: 10 * 12 * 1.3 + 16 }}
+        style={{ maxHeight: TERMINAL_BOX_MAX_HEIGHT }}
       >
-        {prependedContent}
-        {bgOutput.tail}
+        <div ref={contentRef}>
+          {prependedContent}
+          {bgOutput.tail}
+        </div>
       </pre>
     </div>
   )

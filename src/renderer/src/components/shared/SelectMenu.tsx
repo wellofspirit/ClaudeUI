@@ -34,6 +34,17 @@ export interface SelectMenuOption {
   label: string
   /** Rendered but unselectable — mirrors `<option disabled>`. */
   disabled?: boolean
+  /** What the closed trigger reads while this option is selected. Defaults to `label`. */
+  selectedLabel?: string
+  /** A second, muted line under the label (the harness version menu's "moves with ClaudeUI releases"). */
+  description?: string
+  /** Right-aligned after the label: a status chip or a short note ("installed"). */
+  trailing?: React.ReactNode
+  /**
+   * Starts a titled section, like an `<optgroup>` label: a small uppercase
+   * heading before this option, and a divider above it unless it is the first.
+   */
+  section?: string
 }
 
 const DEFAULT_TRIGGER_CLASS =
@@ -109,7 +120,7 @@ export function SelectMenu({
   }, [disabled])
 
   const selected = options.find((o) => o.value === value)
-  const label = selected?.label ?? fallbackLabel ?? value
+  const label = selected?.selectedLabel ?? selected?.label ?? fallbackLabel ?? value
 
   return (
     <div
@@ -153,9 +164,10 @@ export function SelectMenu({
           // a min-width measured from the trigger.
           className="w-max max-w-[22rem] max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-30"
         >
-          {options.map((opt) => {
+          {options.map((opt, index) => {
             const active = opt.value === value
-            return (
+            const rich = opt.description !== undefined || opt.trailing !== undefined
+            const option = (
               <button
                 key={opt.value}
                 type="button"
@@ -177,9 +189,44 @@ export function SelectMenu({
                       : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer'
                 }`}
               >
-                {opt.label}
+                {rich ? (
+                  <>
+                    <span className="flex-1 min-w-0">
+                      <span className="block truncate">{opt.label}</span>
+                      {opt.description !== undefined && (
+                        <span className="block truncate text-[11px] leading-4 text-text-muted">
+                          {opt.description}
+                        </span>
+                      )}
+                    </span>
+                    {opt.trailing !== undefined && (
+                      <span className="shrink-0 ml-3 flex items-center">{opt.trailing}</span>
+                    )}
+                  </>
+                ) : (
+                  opt.label
+                )}
               </button>
             )
+            if (opt.section === undefined) return option
+            return [
+              index > 0 ? (
+                <div
+                  key={`${opt.value}:divider`}
+                  role="presentation"
+                  className="h-px my-1 mx-0.5 bg-border"
+                />
+              ) : null,
+              <div
+                key={`${opt.value}:section`}
+                role="presentation"
+                data-testid={testid ? `${testid}.section` : undefined}
+                className="px-3 pt-1.5 pb-0.5 text-[10px] uppercase tracking-wider text-text-muted"
+              >
+                {opt.section}
+              </div>,
+              option
+            ]
           })}
         </div>
       )}

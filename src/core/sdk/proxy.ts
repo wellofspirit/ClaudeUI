@@ -15,7 +15,6 @@ export interface ProxyEnv {
 }
 
 let current: ProxyEnv | null = null
-let proxySubprocesses = false
 
 export function setProxyEnv(env: ProxyEnv | null): void {
   current = env
@@ -23,17 +22,4 @@ export function setProxyEnv(env: ProxyEnv | null): void {
 
 export function getProxyEnv(): ProxyEnv | null {
   return current
-}
-
-/**
- * When true, cli.js subprocesses (Bash tool, MCP, LSP, shell-snapshot) inherit
- * the proxy env vars. When false (default), the subprocess-proxy-strip patch
- * strips them so only cli.js's own Anthropic API traffic is proxied.
- */
-export function setProxyAllSubprocesses(v: boolean): void {
-  proxySubprocesses = v
-}
-
-export function getProxyAllSubprocesses(): boolean {
-  return proxySubprocesses
 }

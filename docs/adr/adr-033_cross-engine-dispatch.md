@@ -6,6 +6,8 @@ per-direction liveness split superseded by the 2026-09-18 amendment below)
 **Amendment proposed:** [ADR-071](adr-071_metering-ledger-and-window-value.md) §1–§2 moves dispatched usage into `usage_event` and gates `dispatch.maxCostUsd` on the API-equivalent cost for every target.
 **Date:** 2026-07-14
 **Relates to:** ADR-018/019 (engine model), ADR-020 (config plane), ADR-022/023 (opencode permissions), ADR-026 (workflow), ADR-030 (capability honesty), ADR-032 (non-fatal denials)
+**Amended by:** [ADR-088](adr-088_dispatch-autonomy-inheritance.md) (§5 and the M2 note: auto-mode targets are judged and follow the parent's mode live); [ADR-089 messaging v2](adr-089_pi-subagents-host-run.md#messaging-v2-2026-10-05) (2026-10-05: one shared `dispatch_agent` description, `src/shared/dispatch-agent-description.ts`, that steers each engine to its own subagent tool for ordinary delegation)
+**Amended by:** [ADR-097](adr-097_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — caller identity. As built: ADR-097 §4 "As built (S2)" (`_meta["ai.opencode/sessionID"]` wins over the plugin stamp) and "As built (S9)" (opencode TARGETS on the 2.x client, per-server feed, exact leases, the session's host pre-check; a subagent child's call resolved to its chat through `parentID`).
 
 ## Context
 
@@ -60,8 +62,15 @@ De-risked against opencode v1.17.14 source (pinned clone in git-ignored `vendor/
    No depth counters. The tool is main-agent-only by policy; Claude-native subagents share the
    parent's MCP channel, so enforcement there is best-effort v1 (documented limitation).
 5. **Subtask-identical UX**: the target inherits the dispatcher's autonomy mode (mapped through the
-   ADR-022 `buildRuleset` for opencode; permission mode for Claude — auto-mode judge is _not_
-   spun up for targets in v1, `full` maps to allow-all). Target approval requests are re-emitted as
+   ADR-022 `buildRuleset` for opencode; permission mode for Claude — since
+   [ADR-088](adr-088_dispatch-autonomy-inheritance.md) an auto-mode target is JUDGED (cli.js's own
+   judge for Claude, ClaudeUI's for pi/opencode, Codex's `auto_review` for Codex) and the mode is
+   read LIVE from the parent at every decision point; and since
+   [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md) §2 every
+   target engine carries the user's deny and ask rules — never the allow rules — and the host's
+   robust matcher runs on every forwarded ask, so a denied command is refused and an ask-rule command
+   reaches the human in every mode; target child sessions are registered so their asks are
+   forwarded too). Target approval requests are re-emitted as
    `session:approval-request` under the **dispatching** session's routing with a reserved requestId
    prefix (`xeng:`); the approve IPC handler routes that prefix to the dispatcher instead of the
    session. Output streams into the dispatching chat through the existing
@@ -122,8 +131,8 @@ matter for maintenance are folded in below.)
   `asyncIterator.return()` kills the child, so `for await`+`break` is forbidden. Concurrent
   same-`session_id` dispatches are busy-rejected (one iterator per target). Target approvals
   forward as `xeng:` `PendingApproval`s resolved back into the target's `canUseTool` promise.
-  `full`/`auto` callers map to `bypassPermissions` on the target (no judge for targets in v1,
-  per §5); `plan` maps to `default`.
+  `full`/`auto` callers map to cli.js `auto` on the target (ADR-088; `bypassPermissions` callers
+  still map to `bypassPermissions`); `plan` maps to `default`.
 
 - **M3 shipped (subtask-parity UX).** Dispatched work renders via TaskCard ('task' kind; engine ·
   model badge in the subagent slot), streams live keyed by the dispatching tool_use id (Claude

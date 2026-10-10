@@ -87,12 +87,16 @@ function seedV26(db: Db): void {
 }
 
 describe('migration v27 — remote_account and the cursor reset', () => {
-  it('is the latest migration', () => {
+  it('stands up by itself', () => {
     const db = openRawDb()
     try {
-      runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v27 (the hub's account
-      // names and the one-time cursor reset).
+      runMigrations(
+        db,
+        MIGRATIONS.filter((m) => m.version <= 27)
+      )
+      // The "is this the latest" assertion moved to the newest migration's own
+      // test (`usage-window-v28-migration.test.ts`) when v28 landed; what
+      // belongs here is that v27 still stands up by itself.
       expect(userVersion(db)).toBe(27)
     } finally {
       db.close()

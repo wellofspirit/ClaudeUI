@@ -21,6 +21,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { parse as jsoncParse } from 'jsonc-parser'
 import type { EngineConfig } from '../../../shared/types'
+import { agentsOverridingSwitch, configAgentRules } from '../../../shared/opencode-config-v1'
 
 // Mock ui-config so the migration's load/save are controllable and we don't drag
 // in db.ts / the better-sqlite3 chain. The mock is hoisted; tests configure
@@ -41,11 +42,31 @@ import {
   writeOpencodeNativeConfig,
   computeMigrationPatch,
   migrateOpencodeConfigToNative,
+  onOpencodeConfigWritten,
+  setOpencodeToolDisabled,
+  toolDisabledIn,
   __resetMigrationGuardForTests
 } from '../opencode-config'
-import type { NativeOpencodeFields } from '../opencode-config'
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
+
+/**
+ * Windows only grants file symlinks with Developer Mode or SeCreateSymbolicLink
+ * (`EPERM` otherwise). Probe once so the symlink case is skipped honestly.
+ */
+const CAN_SYMLINK_FILE = ((): boolean => {
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-cfg-symlink-probe-'))
+  try {
+    const target = path.join(probeDir, 'target.json')
+    fs.writeFileSync(target, '{}')
+    fs.symlinkSync(target, path.join(probeDir, 'link.json'), 'file')
+    return true
+  } catch {
+    return false
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true })
+  }
+})()
 
 function withEnv(key: string, value: string | undefined, fn: () => void): void {
   const prev = process.env[key]
@@ -145,6 +166,54 @@ describe('resolveOpencodeConfigFile', () => {
 // ── readOpencodeNativeConfig ───────────────────────────────────────────────────
 
 describe('readOpencodeNativeConfig', () => {
+  it('reads a 2.x file: explicit model selection, agents.title, policies, providers, agents', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      fs.writeFileSync(
+        path.join(tmpDir, 'opencode.json'),
+        JSON.stringify({
+          model: { providerID: 'anthropic', model: 'claude', variant: 'high' },
+          agents: {
+            title: { model: 'a/small' },
+            build: { model: 'x/y', request: { body: { temperature: 0.4 } } }
+          },
+          experimental: {
+            policies: [{ action: 'provider.use', resource: 'groq', effect: 'deny' }]
+          },
+          providers: {
+            p: {
+              name: 'P',
+              package: '@opencode/ai/providers/openai-compatible',
+              settings: { baseURL: 'http://p/v1' },
+              models: { m: { capabilities: { tools: false, input: ['text'] }, variants: [] } }
+            }
+          }
+        })
+      )
+      expect(readOpencodeNativeConfig()).toEqual({
+        model: 'anthropic/claude#high',
+        smallModel: 'a/small',
+        disabledProviders: ['groq'],
+        providers: {
+          p: {
+            name: 'P',
+            npm: '@opencode/ai/providers/openai-compatible',
+            baseURL: 'http://p/v1',
+            models: [
+              {
+                id: 'm',
+                reasoning: false,
+                attachment: false,
+                toolCall: false,
+                inputModalities: ['text']
+              }
+            ]
+          }
+        },
+        agents: { build: { model: 'x/y', temperature: 0.4 } }
+      })
+    })
+  })
+
   it('returns {} when no file exists', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
       expect(readOpencodeNativeConfig()).toEqual({})
@@ -274,6 +343,16 @@ describe('readOpencodeNativeConfig', () => {
 // provider map) previously read as "no declared providers".
 
 describe('readDeclaredProviderIds', () => {
+  it('reads the 2.x providers key and the 1.x provider key alike', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      fs.writeFileSync(
+        path.join(tmpDir, 'opencode.json'),
+        JSON.stringify({ provider: { old: {} }, providers: { neu: {} } })
+      )
+      expect(readDeclaredProviderIds().sort()).toEqual(['neu', 'old'])
+    })
+  })
+
   it('unions provider ids across a split layout (jsonc: disabled only; json: provider map)', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
       fs.writeFileSync(
@@ -326,18 +405,18 @@ describe('readDeclaredProviderIds', () => {
 
 // ── writeOpencodeNativeConfig ──────────────────────────────────────────────────
 
-describe('writeOpencodeNativeConfig', () => {
+describe('writeOpencodeNativeConfig (opencode 2.x keys, ADR-097 S8)', () => {
+  const read = (name = 'opencode.json'): Record<string, any> =>
+    jsoncParse(fs.readFileSync(path.join(tmpDir, name), 'utf8'))
+
   it('creates opencode.json in the dir with the managed fields', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
       writeOpencodeNativeConfig({ model: 'anthropic/claude-sonnet-4-6' })
-      const filePath = path.join(tmpDir, 'opencode.json')
-      expect(fs.existsSync(filePath)).toBe(true)
-      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'))
-      expect(parsed.model).toBe('anthropic/claude-sonnet-4-6')
+      expect(read().model).toBe('anthropic/claude-sonnet-4-6')
     })
   })
 
-  it('sets model, small_model, disabled_providers, enabled_providers', () => {
+  it('writes small model, disabled and enabled providers as 2.x keys, never the 1.x ones', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
       writeOpencodeNativeConfig({
         model: 'anthropic/claude-sonnet-4-6',
@@ -345,69 +424,95 @@ describe('writeOpencodeNativeConfig', () => {
         disabledProviders: ['bedrock'],
         enabledProviders: ['anthropic', 'openai']
       })
-      const parsed = JSON.parse(fs.readFileSync(path.join(tmpDir, 'opencode.json'), 'utf8'))
-      expect(parsed.model).toBe('anthropic/claude-sonnet-4-6')
-      expect(parsed.small_model).toBe('anthropic/claude-haiku-3')
-      expect(parsed.disabled_providers).toEqual(['bedrock'])
-      expect(parsed.enabled_providers).toEqual(['anthropic', 'openai'])
+      const parsed = read()
+      expect(parsed.agents).toEqual({ title: { model: 'anthropic/claude-haiku-3' } })
+      expect(parsed.experimental.policies).toEqual([
+        { action: 'provider.use', resource: '*', effect: 'deny' },
+        { action: 'provider.use', resource: 'anthropic', effect: 'allow' },
+        { action: 'provider.use', resource: 'openai', effect: 'allow' },
+        { action: 'provider.use', resource: 'bedrock', effect: 'deny' }
+      ])
+      for (const legacy of ['small_model', 'disabled_providers', 'enabled_providers'])
+        expect(parsed).not.toHaveProperty(legacy)
+      expect(readOpencodeNativeConfig()).toEqual({
+        model: 'anthropic/claude-sonnet-4-6',
+        smallModel: 'anthropic/claude-haiku-3',
+        disabledProviders: ['bedrock'],
+        enabledProviders: ['anthropic', 'openai']
+      })
     })
   })
 
   it('deletes a managed key when value is emptied', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
-      // First set it
-      writeOpencodeNativeConfig({ model: 'anthropic/claude-sonnet-4-6' })
-      // Then clear it
+      writeOpencodeNativeConfig({ model: 'anthropic/claude-sonnet-4-6', smallModel: 'a/b' })
       writeOpencodeNativeConfig({ model: undefined })
-      const parsed = JSON.parse(fs.readFileSync(path.join(tmpDir, 'opencode.json'), 'utf8'))
-      expect(parsed).not.toHaveProperty('model')
+      expect(read()).not.toHaveProperty('model')
+      expect(read()).not.toHaveProperty('agents')
     })
   })
 
-  it('deletes managed key for empty array (disabledProviders: [])', () => {
+  it('re-enabling a provider removes its deny; emptying the list removes the policies', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
-      writeOpencodeNativeConfig({ disabledProviders: ['bedrock'] })
+      writeOpencodeNativeConfig({ disabledProviders: ['bedrock', 'groq'] })
+      writeOpencodeNativeConfig({ disabledProviders: ['groq'] })
+      expect(read().experimental.policies).toEqual([
+        { action: 'provider.use', resource: 'groq', effect: 'deny' }
+      ])
       writeOpencodeNativeConfig({ disabledProviders: [] })
-      const parsed = JSON.parse(fs.readFileSync(path.join(tmpDir, 'opencode.json'), 'utf8'))
-      expect(parsed).not.toHaveProperty('disabled_providers')
+      expect(read().experimental).toEqual({})
     })
   })
 
-  it('preserves comments, theme key, and mcp block when editing model', () => {
+  it('moves the 1.x disabled/enabled lists into policies in 2.x order, keeping other policies', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
-      const filePath = path.join(tmpDir, 'opencode.jsonc')
-      // Seed a realistic .jsonc with a comment, a theme key, and an mcp block.
-      const original = [
-        '// my opencode config',
-        '{',
-        '  "theme": "dark",',
-        '  "mcp": {',
-        '    "myserver": { "type": "stdio", "command": "my-mcp" }',
-        '  }',
-        '}'
-      ].join('\n')
-      fs.writeFileSync(filePath, original)
-
-      writeOpencodeNativeConfig({ model: 'anthropic/claude-sonnet-4-6' })
-
-      const written = fs.readFileSync(filePath, 'utf8')
-      // Comment must survive
-      expect(written).toContain('// my opencode config')
-      // theme must survive
-      expect(written).toContain('"theme"')
-      // mcp block must survive
-      expect(written).toContain('"mcp"')
-      expect(written).toContain('"myserver"')
-      // model must be set
-      const parsed = JSON.parse(
-        written.replace(/\/\/.*/g, '') // strip line comments for JSON.parse
+      fs.writeFileSync(
+        path.join(tmpDir, 'opencode.json'),
+        JSON.stringify({
+          disabled_providers: ['groq'],
+          experimental: {
+            subagent_depth: 2,
+            policies: [{ action: 'permission', resource: 'shell:rm *', effect: 'deny' }]
+          }
+        })
       )
-      expect(parsed.model).toBe('anthropic/claude-sonnet-4-6')
-      expect(parsed.theme).toBe('dark')
+      expect(readOpencodeNativeConfig().disabledProviders).toEqual(['groq'])
+      writeOpencodeNativeConfig({ disabledProviders: ['groq', 'xai'] })
+      const parsed = read()
+      expect(parsed).not.toHaveProperty('disabled_providers')
+      expect(parsed.experimental).toEqual({
+        subagent_depth: 2,
+        policies: [
+          { action: 'provider.use', resource: 'groq', effect: 'deny' },
+          { action: 'permission', resource: 'shell:rm *', effect: 'deny' },
+          { action: 'provider.use', resource: 'xai', effect: 'deny' }
+        ]
+      })
     })
   })
 
-  it('writes provider in native opencode shape (Record not array)', () => {
+  it('re-enabling an id a wildcard still denies adds a literal allow after it', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      fs.writeFileSync(
+        path.join(tmpDir, 'opencode.json'),
+        JSON.stringify({
+          experimental: {
+            policies: [{ action: 'provider.use', resource: 'open*', effect: 'deny' }]
+          },
+          disabled_providers: ['openai']
+        })
+      )
+      expect(readOpencodeNativeConfig().disabledProviders).toEqual(['openai'])
+      writeOpencodeNativeConfig({ disabledProviders: [] })
+      expect(read().experimental.policies).toEqual([
+        { action: 'provider.use', resource: 'open*', effect: 'deny' },
+        { action: 'provider.use', resource: 'openai', effect: 'allow' }
+      ])
+      expect(readOpencodeNativeConfig().disabledProviders).toBeUndefined()
+    })
+  })
+
+  it('writes a new provider in the 2.x shape (package, settings.baseURL, capabilities, variants)', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
       writeOpencodeNativeConfig({
         providers: {
@@ -415,35 +520,51 @@ describe('writeOpencodeNativeConfig', () => {
             name: 'My Ollama',
             baseURL: 'http://localhost:11434/v1',
             npm: '@ai-sdk/openai-compatible',
-            models: [{ id: 'llama3.2', name: 'Llama 3.2' }, { id: 'mistral-7b' }]
+            models: [
+              { id: 'llama3.2', name: 'Llama 3.2', reasoning: false, attachment: false },
+              { id: 'qwen', reasoning: true, attachment: true, toolCall: true },
+              { id: 'mistral-7b' }
+            ]
           }
         }
       })
-      const parsed = JSON.parse(fs.readFileSync(path.join(tmpDir, 'opencode.json'), 'utf8'))
-      const entry = parsed.provider?.['my-ollama']
-      expect(entry).toBeDefined()
-      expect(entry.name).toBe('My Ollama')
-      expect(entry.options?.baseURL).toBe('http://localhost:11434/v1')
-      // models must be a Record (object), not an array
-      expect(Array.isArray(entry.models)).toBe(false)
-      expect(entry.models?.['llama3.2']).toMatchObject({ name: 'Llama 3.2' })
-      expect(entry.models?.['mistral-7b']).toEqual({})
+      const parsed = read()
+      expect(parsed).not.toHaveProperty('provider')
+      expect(parsed.providers['my-ollama']).toEqual({
+        name: 'My Ollama',
+        package: 'aisdk:@ai-sdk/openai-compatible',
+        settings: { baseURL: 'http://localhost:11434/v1' },
+        models: {
+          'llama3.2': { name: 'Llama 3.2', capabilities: { input: ['text'] }, variants: [] },
+          qwen: { capabilities: { tools: true, input: ['text', 'image'] } },
+          'mistral-7b': {}
+        }
+      })
+      expect(readOpencodeNativeConfig().providers?.['my-ollama']).toEqual({
+        name: 'My Ollama',
+        npm: '@ai-sdk/openai-compatible',
+        baseURL: 'http://localhost:11434/v1',
+        models: [
+          {
+            id: 'llama3.2',
+            name: 'Llama 3.2',
+            reasoning: false,
+            attachment: false,
+            inputModalities: ['text']
+          },
+          { id: 'qwen', attachment: true, toolCall: true, inputModalities: ['text', 'image'] },
+          { id: 'mistral-7b' }
+        ]
+      })
     })
   })
 
   it('writes to the existing .jsonc file, not creating a new .json', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
-      // Only .jsonc exists
       const jsoncPath = path.join(tmpDir, 'opencode.jsonc')
       fs.writeFileSync(jsoncPath, '{}')
-
       writeOpencodeNativeConfig({ model: 'anthropic/claude-sonnet-4-6' })
-
-      // .jsonc was updated
-      expect(fs.existsSync(jsoncPath)).toBe(true)
-      const parsed = JSON.parse(fs.readFileSync(jsoncPath, 'utf8'))
-      expect(parsed.model).toBe('anthropic/claude-sonnet-4-6')
-      // No new .json created alongside
+      expect(read('opencode.jsonc').model).toBe('anthropic/claude-sonnet-4-6')
       expect(fs.existsSync(path.join(tmpDir, 'opencode.json'))).toBe(false)
     })
   })
@@ -452,249 +573,129 @@ describe('writeOpencodeNativeConfig', () => {
 // ── writeOpencodeNativeConfig: diff-driven leaf-merge (ADR-031) ─────────────────
 //
 // The writer must touch ONLY the keys it models AND that actually changed, and
-// must NEVER delete keys it does not model (attachment/modalities/npm/apiKey/…).
-// These guard the real-world clobber: a hand-added `attachment: true` on a model
-// (to enable image input) survives a UI save that touches an unrelated field.
+// must NEVER delete keys it does not model (settings.apiKey/headers/cost/…).
 
 describe('writeOpencodeNativeConfig — diff-driven leaf merge', () => {
-  /** Seed a .jsonc file and return its path. */
   function seed(content: string): string {
     const p = path.join(tmpDir, 'opencode.jsonc')
     fs.writeFileSync(p, content)
     return p
   }
 
-  it('preserves model-level attachment + modalities across a provider display-name rename', () => {
+  it('preserves comments, unknown keys and unmodelled leaves across a display-name rename', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
       const p = seed(
         [
+          '// keep me',
           '{',
-          '  "provider": {',
+          '  "theme": "dark",',
+          '  "providers": {',
+          '    // provider-level comment',
           '    "myprov": {',
           '      "name": "Old Name",',
-          '      "options": { "baseURL": "http://x/v1" },',
+          '      "settings": { "baseURL": "http://x/v1", "apiKey": "secret-key" },',
+          '      "headers": { "x-team": "a" },',
           '      "models": {',
-          '        "qwen3.6:27b": {',
-          '          "attachment": true,',
-          '          "modalities": { "input": ["text", "image"] }',
-          '        }',
+          '        "qwen": { "capabilities": { "input": ["text", "image"] }, "cost": { "input": 1, "output": 2 } }',
           '      }',
           '    }',
           '  }',
           '}'
         ].join('\n')
       )
-      // The UI reads the (lossy) projection, renames the display name, and saves.
       const cur = readOpencodeNativeConfig()
-      const incoming: NativeOpencodeFields = {
-        ...cur,
-        providers: {
-          myprov: { ...cur.providers!.myprov, name: 'New Name' }
+      writeOpencodeNativeConfig({
+        providers: { myprov: { ...cur.providers!.myprov, name: 'New Name' } }
+      })
+      const written = fs.readFileSync(p, 'utf8')
+      expect(written).toContain('// keep me')
+      expect(written).toContain('// provider-level comment')
+      const parsed = jsoncParse(written)
+      expect(parsed.theme).toBe('dark')
+      expect(parsed.providers.myprov).toEqual({
+        name: 'New Name',
+        settings: { baseURL: 'http://x/v1', apiKey: 'secret-key' },
+        headers: { 'x-team': 'a' },
+        models: {
+          qwen: { capabilities: { input: ['text', 'image'] }, cost: { input: 1, output: 2 } }
         }
-      }
-      writeOpencodeNativeConfig(incoming)
-
-      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
-      const model = parsed.provider.myprov.models['qwen3.6:27b']
-      expect(model.attachment).toBe(true)
-      expect(model.modalities).toEqual({ input: ['text', 'image'] })
-      expect(parsed.provider.myprov.name).toBe('New Name')
+      })
     })
   })
 
-  it('round-trips npm and updates only that leaf while preserving options.apiKey', () => {
+  it('updates package and settings.baseURL leaf by leaf, keeping settings.apiKey', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
       const p = seed(
         JSON.stringify({
-          provider: { myprov: { npm: '@old/adapter', options: { apiKey: 'secret-key' } } }
+          providers: {
+            myprov: {
+              package: 'aisdk:@old/adapter',
+              settings: { baseURL: 'http://old/v1', apiKey: 'k' }
+            }
+          }
         })
       )
       const cur = readOpencodeNativeConfig()
       expect(cur.providers?.myprov.npm).toBe('@old/adapter')
       writeOpencodeNativeConfig({
-        providers: { myprov: { ...cur.providers!.myprov, npm: '@ai-sdk/openai-compatible' } }
-      })
-      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
-      expect(parsed.provider.myprov.npm).toBe('@ai-sdk/openai-compatible')
-      expect(parsed.provider.myprov.options.apiKey).toBe('secret-key')
-    })
-  })
-
-  it('preserves provider-level npm + options.apiKey across a baseURL change', () => {
-    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
-      const p = seed(
-        JSON.stringify(
-          {
-            provider: {
-              myprov: {
-                npm: '@ai-sdk/openai-compatible',
-                options: { baseURL: 'http://old/v1', apiKey: 'secret-key' }
-              }
-            }
-          },
-          null,
-          2
-        )
-      )
-      const cur = readOpencodeNativeConfig()
-      const incoming: NativeOpencodeFields = {
         providers: {
-          myprov: { ...cur.providers!.myprov, baseURL: 'http://new/v1' }
+          myprov: {
+            ...cur.providers!.myprov,
+            npm: '@ai-sdk/openai-compatible',
+            baseURL: 'http://new/v1'
+          }
         }
-      }
-      writeOpencodeNativeConfig(incoming)
-
-      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
-      expect(parsed.provider.myprov.npm).toBe('@ai-sdk/openai-compatible')
-      expect(parsed.provider.myprov.options.apiKey).toBe('secret-key')
-      expect(parsed.provider.myprov.options.baseURL).toBe('http://new/v1')
+      })
+      expect(jsoncParse(fs.readFileSync(p, 'utf8')).providers.myprov).toEqual({
+        package: 'aisdk:@ai-sdk/openai-compatible',
+        settings: { baseURL: 'http://new/v1', apiKey: 'k' }
+      })
     })
   })
 
-  it('preserves comments across a provider edit', () => {
+  it('removing a provider deletes it under both keys; a sibling keeps its fields', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
       const p = seed(
-        [
-          '// keep me',
-          '{',
-          '  "provider": {',
-          '    // provider-level comment',
-          '    "myprov": { "name": "Old", "options": { "baseURL": "http://x/v1" } }',
-          '  }',
-          '}'
-        ].join('\n')
+        JSON.stringify({
+          provider: { dropme: { name: 'Drop', options: { baseURL: 'http://drop/v1' } } },
+          providers: {
+            keepme: { package: 'aisdk:@custom/pkg', settings: { apiKey: 'k' } },
+            dropme: { name: 'Drop' }
+          }
+        })
       )
       const cur = readOpencodeNativeConfig()
-      writeOpencodeNativeConfig({
-        providers: { myprov: { ...cur.providers!.myprov, name: 'New' } }
-      })
-      const written = fs.readFileSync(p, 'utf8')
-      expect(written).toContain('// keep me')
-      expect(written).toContain('// provider-level comment')
-    })
-  })
-
-  it('removing one provider deletes only its subtree; a sibling exotic field survives', () => {
-    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
-      const p = seed(
-        JSON.stringify(
-          {
-            provider: {
-              keepme: {
-                npm: '@custom/pkg',
-                options: { baseURL: 'http://keep/v1', apiKey: 'k' },
-                models: { m1: { attachment: true } }
-              },
-              dropme: { name: 'Drop', options: { baseURL: 'http://drop/v1' } }
-            }
-          },
-          null,
-          2
-        )
-      )
-      const cur = readOpencodeNativeConfig()
-      // Save with `dropme` removed from the projection.
-      writeOpencodeNativeConfig({
-        providers: { keepme: cur.providers!.keepme }
-      })
+      writeOpencodeNativeConfig({ providers: { keepme: cur.providers!.keepme } })
       const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
-      expect(parsed.provider.dropme).toBeUndefined()
-      expect(parsed.provider.keepme.npm).toBe('@custom/pkg')
-      expect(parsed.provider.keepme.options.apiKey).toBe('k')
-      expect(parsed.provider.keepme.models.m1.attachment).toBe(true)
+      expect(parsed.provider).toEqual({}) // an emptied 1.x map stays (its comments with it)
+      expect(parsed.providers).toEqual({
+        keepme: { package: 'aisdk:@custom/pkg', settings: { apiKey: 'k' } }
+      })
     })
   })
 
-  it('removing one model id deletes only that model; a sibling model attachment survives', () => {
+  it('maps capabilities onto 2.x keys leaf by leaf, keeping unmodelled siblings (ADR-074 slice 10)', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
       const p = seed(
-        JSON.stringify(
-          {
-            provider: {
-              myprov: {
-                options: { baseURL: 'http://x/v1' },
-                models: {
-                  keep: { attachment: true },
-                  drop: { name: 'Drop Me' }
+        JSON.stringify({
+          providers: {
+            spark: {
+              name: 'Spark',
+              models: {
+                old: { name: 'Old' },
+                edited: {
+                  capabilities: { output: ['text'] },
+                  limit: { context: 1000, output: 10, input: 900 },
+                  cost: { input: 1, output: 2 },
+                  variants: [{ id: 'high', body: { effort: 'high' } }]
                 }
               }
             }
-          },
-          null,
-          2
-        )
+          }
+        })
       )
-      const cur = readOpencodeNativeConfig()
-      const keptModels = cur.providers!.myprov.models!.filter((m) => m.id === 'keep')
-      writeOpencodeNativeConfig({
-        providers: { myprov: { ...cur.providers!.myprov, models: keptModels } }
-      })
-      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
-      expect(parsed.provider.myprov.models.drop).toBeUndefined()
-      expect(parsed.provider.myprov.models.keep.attachment).toBe(true)
-    })
-  })
-
-  it('preserves an unknown agent field (prompt) across a temperature change', () => {
-    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
-      const p = seed(
-        JSON.stringify(
-          {
-            agent: {
-              build: {
-                model: 'anthropic/claude-haiku-3',
-                temperature: 0.2,
-                prompt: 'You are a builder.'
-              }
-            }
-          },
-          null,
-          2
-        )
-      )
-      const cur = readOpencodeNativeConfig()
-      writeOpencodeNativeConfig({
-        agents: { build: { ...cur.agents!.build, temperature: 0.9 } }
-      })
-      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
-      expect(parsed.agent.build.prompt).toBe('You are a builder.')
-      expect(parsed.agent.build.temperature).toBe(0.9)
-      expect(parsed.agent.build.model).toBe('anthropic/claude-haiku-3')
-    })
-  })
-
-  it('writes capability leaves one by one, creating parents and keeping unmodelled siblings (ADR-074 slice 10)', () => {
-    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
-      const p = seed(
-        JSON.stringify(
-          {
-            provider: {
-              spark: {
-                name: 'Spark',
-                options: { baseURL: 'http://127.0.0.1:8888/v1' },
-                models: {
-                  // As ClaudeUI wrote it before slice 10, plus two hand edits.
-                  old: { name: 'Old' },
-                  edited: {
-                    modalities: { output: ['text'] },
-                    limit: { context: 1000, output: 10, input: 900 },
-                    cost: { input: 1, output: 2 }
-                  }
-                }
-              }
-            }
-          },
-          null,
-          2
-        )
-      )
-      const cur = readOpencodeNativeConfig()
-      expect(cur.providers?.spark.models).toEqual([
-        { id: 'old', name: 'Old' },
-        { id: 'edited', limit: { context: 1000, output: 10 } }
-      ])
       const caps = {
-        reasoning: true,
+        reasoning: false,
         attachment: true,
         toolCall: true,
         inputModalities: ['text', 'image'],
@@ -703,33 +704,49 @@ describe('writeOpencodeNativeConfig — diff-driven leaf merge', () => {
       writeOpencodeNativeConfig({
         providers: {
           spark: {
-            ...cur.providers!.spark,
+            name: 'Spark',
             models: [
               { id: 'old', name: 'Old', ...caps },
-              { id: 'edited', ...caps },
-              { id: 'new-one', ...caps }
+              { id: 'edited', ...caps, reasoning: true }
             ]
           }
         }
       })
-      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
-      const models = parsed.provider.spark.models
+      const models = jsoncParse(fs.readFileSync(p, 'utf8')).providers.spark.models
       expect(models.old).toEqual({
         name: 'Old',
-        reasoning: true,
-        attachment: true,
-        tool_call: true,
-        modalities: { input: ['text', 'image'] },
+        capabilities: { tools: true, input: ['text', 'image'] },
+        variants: [],
         limit: { context: 262144, output: 32768 }
       })
-      // Leaf by leaf: output modalities, limit.input and cost are not ours.
-      expect(models.edited.modalities).toEqual({ output: ['text'], input: ['text', 'image'] })
-      expect(models.edited.limit).toEqual({ context: 262144, output: 32768, input: 900 })
-      expect(models.edited.cost).toEqual({ input: 1, output: 2 })
-      expect(models['new-one'].tool_call).toBe(true)
-      expect(readOpencodeNativeConfig().providers?.spark.models?.[1]).toEqual({
-        id: 'edited',
-        ...caps
+      expect(models.edited).toEqual({
+        capabilities: { output: ['text'], tools: true, input: ['text', 'image'] },
+        limit: { context: 262144, output: 32768, input: 900 },
+        cost: { input: 1, output: 2 },
+        variants: [{ id: 'high', body: { effort: 'high' } }]
+      })
+    })
+  })
+
+  it('reasoning true removes an empty variant list (opencode generates variants again)', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(JSON.stringify({ providers: { s: { models: { m: { variants: [] } } } } }))
+      expect(readOpencodeNativeConfig().providers?.s.models?.[0].reasoning).toBe(false)
+      writeOpencodeNativeConfig({ providers: { s: { models: [{ id: 'm', reasoning: true }] } } })
+      expect(jsoncParse(fs.readFileSync(p, 'utf8')).providers.s.models.m).toEqual({})
+    })
+  })
+
+  it('attachment alone toggles image in capabilities.input', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(
+        JSON.stringify({
+          providers: { s: { models: { m: { capabilities: { input: ['text', 'pdf'] } } } } }
+        })
+      )
+      writeOpencodeNativeConfig({ providers: { s: { models: [{ id: 'm', attachment: true }] } } })
+      expect(jsoncParse(fs.readFileSync(p, 'utf8')).providers.s.models.m.capabilities).toEqual({
+        input: ['text', 'pdf', 'image']
       })
     })
   })
@@ -738,46 +755,589 @@ describe('writeOpencodeNativeConfig — diff-driven leaf merge', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
       const p = seed(
         JSON.stringify({
-          provider: {
-            spark: {
-              models: { m: { name: 'M', reasoning: true, limit: { context: 5, output: 1 } } }
-            }
+          providers: {
+            spark: { models: { m: { name: 'M', variants: [], limit: { context: 5, output: 1 } } } }
           }
         })
       )
-      // The opencode provider pane rebuilds models as `{ id, name }` only.
       writeOpencodeNativeConfig({
         providers: { spark: { models: [{ id: 'm', name: 'Renamed' }] } }
       })
-      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
-      expect(parsed.provider.spark.models.m).toEqual({
+      expect(jsoncParse(fs.readFileSync(p, 'utf8')).providers.spark.models.m).toEqual({
         name: 'Renamed',
-        reasoning: true,
+        variants: [],
         limit: { context: 5, output: 1 }
       })
     })
   })
 
-  it('no-op save leaves the file byte-identical', () => {
+  it('agent overrides: model and request.body.temperature, other fields kept', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(
+        JSON.stringify({
+          agents: {
+            build: {
+              model: 'anthropic/claude-haiku-3',
+              system: 'You are a builder.',
+              request: { body: { temperature: 0.2, top_p: 0.9 } }
+            }
+          }
+        })
+      )
+      const cur = readOpencodeNativeConfig()
+      expect(cur.agents?.build).toEqual({ model: 'anthropic/claude-haiku-3', temperature: 0.2 })
+      writeOpencodeNativeConfig({ agents: { build: { ...cur.agents!.build, temperature: 0.9 } } })
+      expect(jsoncParse(fs.readFileSync(p, 'utf8')).agents.build).toEqual({
+        model: 'anthropic/claude-haiku-3',
+        system: 'You are a builder.',
+        request: { body: { temperature: 0.9, top_p: 0.9 } }
+      })
+    })
+  })
+
+  it('no-op save leaves the file byte-identical (either shape)', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
       const original = [
         '// header',
         '{',
         '  "theme": "dark",',
-        '  "provider": {',
-        '    "myprov": {',
-        '      "name": "Prov",',
-        '      "options": { "baseURL": "http://x/v1", "apiKey": "k" },',
-        '      "models": { "qwen": { "attachment": true } }',
-        '    }',
-        '  },',
-        '  "agent": { "build": { "model": "anthropic/claude-haiku-3", "temperature": 0.3 } }',
+        '  "disabled_providers": ["groq"],',
+        '  "small_model": "a/b",',
+        '  "provider": { "legacy": { "options": { "baseURL": "http://l/v1" }, "models": { "q": { "attachment": true } } } },',
+        '  "providers": { "myprov": { "name": "Prov", "settings": { "apiKey": "k" }, "models": { "qwen": { "capabilities": { "input": ["text", "image"] } } } } },',
+        '  "agent": { "build": { "model": "anthropic/claude-haiku-3", "temperature": 0.3 } },',
+        '  "agents": { "plan": { "model": { "providerID": "a", "model": "b" } } }',
         '}'
       ].join('\n')
       const p = seed(original)
-      const cur = readOpencodeNativeConfig()
-      writeOpencodeNativeConfig(cur)
+      writeOpencodeNativeConfig(readOpencodeNativeConfig())
       expect(fs.readFileSync(p, 'utf8')).toBe(original)
+    })
+  })
+})
+
+// ── A 1.x-shaped file: an edited entry moves WHOLE to its 2.x key ───────────────
+
+describe('writeOpencodeNativeConfig — 1.x-shaped files (ADR-097 S8 write policy)', () => {
+  function seed(value: unknown): string {
+    const p = path.join(tmpDir, 'opencode.json')
+    fs.writeFileSync(p, JSON.stringify(value, null, 2))
+    return p
+  }
+
+  it('moves an edited 1.x provider whole, mapping every field 2.x reads; untouched 1.x entries stay', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed({
+        provider: {
+          myprov: {
+            name: 'Old',
+            npm: '@ai-sdk/openai-compatible',
+            whitelist: ['qwen'],
+            options: {
+              baseURL: 'http://x/v1',
+              apiKey: '{env:MY_KEY}',
+              headers: { 'x-a': '1' },
+              body: { foo: 1 }
+            },
+            models: {
+              qwen: {
+                name: 'Qwen',
+                attachment: false,
+                reasoning: false,
+                temperature: true,
+                tool_call: true,
+                limit: { context: 1000, output: 100 },
+                cost: { input: 1, output: 2, cache_read: 0.5 },
+                options: { num_ctx: 8192 },
+                variants: { high: { reasoningEffort: 'high' } }
+              },
+              vision: { attachment: true, release_date: '2026-01-01' }
+            }
+          },
+          untouched: { options: { baseURL: 'http://u/v1' } }
+        }
+      })
+      const cur = readOpencodeNativeConfig()
+      writeOpencodeNativeConfig({
+        providers: { ...cur.providers, myprov: { ...cur.providers!.myprov, name: 'New' } }
+      })
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf8'))
+      expect(parsed.provider).toEqual({ untouched: { options: { baseURL: 'http://u/v1' } } })
+      expect(parsed.providers.myprov).toEqual({
+        name: 'New',
+        package: 'aisdk:@ai-sdk/openai-compatible',
+        settings: { baseURL: 'http://x/v1', apiKey: '{env:MY_KEY}' },
+        headers: { 'x-a': '1' },
+        body: { foo: 1 },
+        models: {
+          // `attachment:false`, `reasoning:false`, `temperature` are inert in 2.x
+          // and stay inert: no capabilities.input/variants appear (F4).
+          qwen: {
+            name: 'Qwen',
+            settings: { num_ctx: 8192 },
+            capabilities: { tools: true, input: ['text', 'image'], output: ['text'] },
+            variants: [{ id: 'high', settings: { reasoningEffort: 'high' } }],
+            cost: [{ input: 1, output: 2, cache: { read: 0.5 } }],
+            limit: { context: 1000, output: 100 }
+          },
+          vision: {}
+        }
+      })
+    })
+  })
+
+  it('a 1.x provider nobody edited is not moved (byte-identical file)', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed({
+        model: 'a/b',
+        provider: { p: { options: { baseURL: 'http://x' } } }
+      })
+      const before = fs.readFileSync(p, 'utf8')
+      writeOpencodeNativeConfig({ ...readOpencodeNativeConfig(), model: 'a/b' })
+      expect(fs.readFileSync(p, 'utf8')).toBe(before)
+    })
+  })
+
+  it('a 1.x entry beside a 2.x entry of the same id is dropped when ClaudeUI edits it (2.x uses the 2.x one)', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed({
+        provider: { p: { name: 'Legacy' } },
+        providers: { p: { name: 'Native', settings: { apiKey: 'k' } } }
+      })
+      expect(readOpencodeNativeConfig().providers?.p.name).toBe('Native')
+      writeOpencodeNativeConfig({ providers: { p: { name: 'Edited' } } })
+      expect(JSON.parse(fs.readFileSync(p, 'utf8'))).toEqual({
+        provider: {},
+        providers: { p: { name: 'Edited', settings: { apiKey: 'k' } } }
+      })
+    })
+  })
+
+  it('moves a 1.x agent override whole (prompt → system, temperature → request.body)', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed({
+        agent: {
+          build: {
+            model: 'anthropic/claude-haiku-3',
+            temperature: 0.2,
+            prompt: 'You are a builder.',
+            permission: { bash: 'ask' },
+            maxSteps: 7
+          }
+        }
+      })
+      const cur = readOpencodeNativeConfig()
+      writeOpencodeNativeConfig({ agents: { build: { ...cur.agents!.build, temperature: 0.9 } } })
+      expect(JSON.parse(fs.readFileSync(p, 'utf8'))).toEqual({
+        agent: {},
+        agents: {
+          build: {
+            model: { providerID: 'anthropic', model: 'claude-haiku-3' },
+            request: { body: { temperature: 0.9 } },
+            system: 'You are a builder.',
+            steps: 7,
+            permissions: [{ action: 'shell', resource: '*', effect: 'ask' }]
+          }
+        }
+      })
+    })
+  })
+
+  it('small model: folds small_model and agent.title into agents.title', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed({
+        small_model: 'old/small',
+        agent: { title: { description: 'Titles' } }
+      })
+      expect(readOpencodeNativeConfig().smallModel).toBe('old/small')
+      writeOpencodeNativeConfig({ ...readOpencodeNativeConfig(), smallModel: 'new/small' })
+      expect(JSON.parse(fs.readFileSync(p, 'utf8'))).toEqual({
+        agent: {},
+        agents: { title: { model: 'new/small', description: 'Titles' } }
+      })
+    })
+  })
+
+  it('the shared-provider adapter projection stays stable across the move (no re-write)', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      seed({ provider: { p: { name: 'P', models: { m: { attachment: true, tool_call: true } } } } })
+      const legacy = readOpencodeNativeConfig()
+      writeOpencodeNativeConfig({
+        providers: { p: { ...legacy.providers!.p, name: 'P2' } }
+      })
+      const native = readOpencodeNativeConfig().providers!.p
+      expect(native.models).toEqual([
+        { id: 'm', attachment: true, toolCall: true, inputModalities: ['text', 'image'] }
+      ])
+    })
+  })
+})
+
+// ── S8 review fixes: F4 runtime-neutral moves, F7, F8, F9, F11 ──────────────
+
+describe('F4: moving a 1.x provider changes nothing 2.x runs on', () => {
+  function seed(text: string): string {
+    const p = path.join(tmpDir, 'opencode.jsonc')
+    fs.writeFileSync(p, text)
+    return p
+  }
+
+  it('unedited inert keys stay inert; the projection is what 2.x does before and after', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(
+        JSON.stringify({
+          provider: {
+            corp: {
+              npm: '@ai-sdk/openai-compatible',
+              options: { baseURL: 'https://gw', apiKey: '{env:CORP_KEY}', timeout: 600000 },
+              models: {
+                m1: { name: 'M1', attachment: true, reasoning: false, temperature: true },
+                m2: { attachment: false }
+              }
+            }
+          }
+        })
+      )
+      const before = readOpencodeNativeConfig().providers!.corp
+      // What 2.x does with them today: nothing (they are dropped as unsupported).
+      expect(before.models).toEqual([{ id: 'm1', name: 'M1' }, { id: 'm2' }])
+      writeOpencodeNativeConfig({ providers: { corp: { ...before, name: 'Corp' } } })
+      const moved = jsoncParse(fs.readFileSync(p, 'utf8')).providers.corp
+      expect(moved.models).toEqual({ m1: { name: 'M1' }, m2: {} })
+      expect(moved.settings).toEqual({
+        baseURL: 'https://gw',
+        apiKey: '{env:CORP_KEY}',
+        timeout: 600000
+      })
+      expect(readOpencodeNativeConfig().providers!.corp).toEqual({ ...before, name: 'Corp' })
+    })
+  })
+
+  it('a capability the user edits in that save IS written on the 2.x key', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(JSON.stringify({ provider: { c: { models: { m: { attachment: true } } } } }))
+      writeOpencodeNativeConfig({
+        providers: { c: { models: [{ id: 'm', attachment: false, reasoning: false }] } }
+      })
+      expect(jsoncParse(fs.readFileSync(p, 'utf8')).providers.c.models.m).toEqual({
+        capabilities: { input: ['text'] },
+        variants: []
+      })
+    })
+  })
+
+  it('keeps the comments of a moved entry, gathered above it (probe3)', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(
+        [
+          '{',
+          '  // my providers',
+          '  "provider": {',
+          '    // corp gateway, key from env',
+          '    "corp": {',
+          '      "npm": "@ai-sdk/openai-compatible", // the adapter',
+          '      /* block note */',
+          '      "options": { "baseURL": "https://gw" }',
+          '    }',
+          '  }',
+          '}'
+        ].join('\n')
+      )
+      const cur = readOpencodeNativeConfig()
+      writeOpencodeNativeConfig({ providers: { corp: { ...cur.providers!.corp, name: 'Corp' } } })
+      const text = fs.readFileSync(p, 'utf8')
+      for (const comment of [
+        '// my providers',
+        '// corp gateway, key from env',
+        '// the adapter',
+        '/* block note */'
+      ])
+        expect(text).toContain(comment)
+      expect(text.indexOf('// corp gateway')).toBeLessThan(text.indexOf('"corp"'))
+      expect(jsoncParse(text).providers.corp.name).toBe('Corp')
+    })
+  })
+})
+
+describe('F7: the 1.x mode map is honoured', () => {
+  it('mode.<name> wins over agent.<name>, reads as primary, and moves whole', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = path.join(tmpDir, 'opencode.json')
+      fs.writeFileSync(
+        p,
+        JSON.stringify({
+          agent: { docs: { model: 'a/old', temperature: 0.1 } },
+          mode: { docs: { model: 'a/mode', temperature: 0.5, prompt: 'Write docs.' } }
+        })
+      )
+      expect(readOpencodeNativeConfig().agents?.docs).toEqual({ model: 'a/mode', temperature: 0.5 })
+      writeOpencodeNativeConfig({ agents: { docs: { model: 'a/mode', temperature: 0.9 } } })
+      expect(JSON.parse(fs.readFileSync(p, 'utf8'))).toEqual({
+        agent: {},
+        mode: {},
+        agents: {
+          docs: {
+            model: { providerID: 'a', model: 'mode' },
+            request: { body: { temperature: 0.9 } },
+            system: 'Write docs.',
+            mode: 'primary'
+          }
+        }
+      })
+    })
+  })
+})
+
+describe('F8: reasoning:false never overwrites hand-written variants', () => {
+  it('a non-empty variants list stays', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = path.join(tmpDir, 'opencode.json')
+      const variants = [{ id: 'high', settings: { reasoningEffort: 'high' } }]
+      fs.writeFileSync(p, JSON.stringify({ providers: { s: { models: { m: { variants } } } } }))
+      writeOpencodeNativeConfig({ providers: { s: { models: [{ id: 'm', reasoning: false }] } } })
+      expect(JSON.parse(fs.readFileSync(p, 'utf8')).providers.s.models.m.variants).toEqual(variants)
+    })
+  })
+})
+
+describe('F9: enabled_providers: [] denies every provider', () => {
+  it('reads as an empty allowlist, and survives a save', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = path.join(tmpDir, 'opencode.json')
+      fs.writeFileSync(p, JSON.stringify({ enabled_providers: [], model: 'a/b' }))
+      const cur = readOpencodeNativeConfig()
+      expect(cur.enabledProviders).toEqual([])
+      writeOpencodeNativeConfig({ ...cur, model: 'c/d' })
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf8'))
+      expect(parsed.enabled_providers).toEqual([])
+      expect(readOpencodeNativeConfig().enabledProviders).toEqual([])
+    })
+  })
+
+  it('policies with a * deny and no allows read the same way', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      fs.writeFileSync(
+        path.join(tmpDir, 'opencode.json'),
+        JSON.stringify({
+          experimental: { policies: [{ action: 'provider.use', resource: '*', effect: 'deny' }] }
+        })
+      )
+      expect(readOpencodeNativeConfig().enabledProviders).toEqual([])
+    })
+  })
+})
+
+describe('F11: conflict-aware, atomic writes', () => {
+  it('a stale snapshot never deletes what was added since; only its own changes land', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = path.join(tmpDir, 'opencode.json')
+      fs.writeFileSync(p, JSON.stringify({ model: 'a/b', providers: { mine: { name: 'Mine' } } }))
+      const snapshot = readOpencodeNativeConfig() // the pane loads…
+      // …the user hand-adds a provider and a disabled id meanwhile…
+      fs.writeFileSync(
+        p,
+        JSON.stringify({
+          model: 'a/b',
+          providers: { mine: { name: 'Mine' }, theirs: { name: 'Theirs' } },
+          disabled_providers: ['groq']
+        })
+      )
+      // …and the pane saves its stale snapshot with ONE change.
+      writeOpencodeNativeConfig({ ...snapshot, smallModel: 'x/y' }, snapshot)
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf8'))
+      expect(parsed.providers.theirs).toEqual({ name: 'Theirs' })
+      expect(parsed.disabled_providers).toEqual(['groq'])
+      expect(parsed.agents.title.model).toBe('x/y')
+    })
+  })
+
+  it('a stale snapshot adds/removes provider ids and disabled ids as set changes', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = path.join(tmpDir, 'opencode.json')
+      fs.writeFileSync(p, JSON.stringify({ providers: { a: {}, b: {} } }))
+      const snapshot = readOpencodeNativeConfig()
+      fs.writeFileSync(p, JSON.stringify({ providers: { a: {}, b: { name: 'B2' }, c: {} } }))
+      writeOpencodeNativeConfig(
+        { ...snapshot, providers: { b: {}, d: { name: 'D' } }, disabledProviders: ['x'] },
+        snapshot
+      )
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf8'))
+      expect(Object.keys(parsed.providers).sort()).toEqual(['b', 'c', 'd'])
+      expect(parsed.providers.b).toEqual({ name: 'B2' }) // edited since, not by the pane
+      expect(parsed.experimental.policies).toEqual([
+        { action: 'provider.use', resource: 'x', effect: 'deny' }
+      ])
+    })
+  })
+
+  it('writes atomically, keeping the file mode', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const file = path.join(tmpDir, 'opencode.json')
+      fs.writeFileSync(file, '{}')
+      fs.chmodSync(file, 0o600)
+      writeOpencodeNativeConfig({ model: 'a/b' })
+      expect(JSON.parse(fs.readFileSync(file, 'utf8')).model).toBe('a/b')
+      if (process.platform !== 'win32') expect(fs.statSync(file).mode & 0o777).toBe(0o600)
+      expect(fs.readdirSync(tmpDir).filter((f) => f.endsWith('.tmp'))).toEqual([])
+    })
+  })
+
+  it.skipIf(!CAN_SYMLINK_FILE)('writes through a symlinked config, keeping the link', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const real = path.join(tmpDir, 'real.json')
+      fs.writeFileSync(real, '{}')
+      fs.chmodSync(real, 0o600)
+      fs.symlinkSync(real, path.join(tmpDir, 'opencode.json'))
+      writeOpencodeNativeConfig({ model: 'a/b' })
+      expect(fs.lstatSync(path.join(tmpDir, 'opencode.json')).isSymbolicLink()).toBe(true)
+      expect(JSON.parse(fs.readFileSync(real, 'utf8')).model).toBe('a/b')
+      if (process.platform !== 'win32') expect(fs.statSync(real).mode & 0o777).toBe(0o600)
+      expect(fs.readdirSync(tmpDir).filter((f) => f.endsWith('.tmp'))).toEqual([])
+    })
+  })
+})
+
+// ── Built-in tool switches (top-level permissions) ────────────────────────────
+
+describe("setOpencodeToolDisabled (F3: upstream whollyDisabled, only ClaudeUI's own rule)", () => {
+  // ClaudeUI's record of the switches it set lives in engines/opencode.json.
+  let engine: EngineConfig = {}
+  beforeEach(() => {
+    engine = {}
+    loadEngineConfigMock.mockImplementation(() => structuredClone(engine))
+    saveEngineConfigMock.mockImplementation((_id, cfg) => {
+      engine = structuredClone(cfg)
+    })
+  })
+  afterEach(() => {
+    loadEngineConfigMock.mockImplementation(() => ({}))
+    saveEngineConfigMock.mockImplementation(() => {})
+  })
+
+  it('appends {action,*,deny} once and removes exactly that on re-enable', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = path.join(tmpDir, 'opencode.jsonc')
+      fs.writeFileSync(
+        p,
+        '{\n  // mine\n  "permissions": [{ "action": "shell", "resource": "rm *", "effect": "deny" }]\n}'
+      )
+      setOpencodeToolDisabled('webfetch', true)
+      setOpencodeToolDisabled('webfetch', true)
+      let parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
+      expect(parsed.permissions).toEqual([
+        { action: 'shell', resource: 'rm *', effect: 'deny' },
+        { action: 'webfetch', resource: '*', effect: 'deny' }
+      ])
+      expect(engine.opencodeToolSwitches).toEqual(['webfetch'])
+      expect(toolDisabledIn(parsed, 'webfetch', 'darwin')).toBe(true)
+      expect(toolDisabledIn(parsed, 'shell', 'darwin')).toBe(false)
+      setOpencodeToolDisabled('webfetch', false)
+      const text = fs.readFileSync(p, 'utf8')
+      expect(text).toContain('// mine')
+      parsed = jsoncParse(text)
+      expect(parsed.permissions).toEqual([{ action: 'shell', resource: 'rm *', effect: 'deny' }])
+      expect(engine.opencodeToolSwitches).toBeUndefined()
+    })
+  })
+
+  it('"off" is upstream whollyDisabled: a later narrower allow keeps the tool offered', () => {
+    const rules = {
+      permissions: [
+        { action: 'shell', resource: '*', effect: 'deny' },
+        { action: 'shell', resource: 'git *', effect: 'allow' }
+      ]
+    }
+    expect(toolDisabledIn(rules, 'shell', 'darwin')).toBe(false)
+    expect(
+      toolDisabledIn({ permissions: [...rules.permissions].reverse() }, 'shell', 'darwin')
+    ).toBe(true)
+    // A wildcard action is matched like upstream does.
+    expect(
+      toolDisabledIn(
+        { permissions: [{ action: '*', resource: '*', effect: 'deny' }] },
+        'read',
+        'darwin'
+      )
+    ).toBe(true)
+  })
+
+  it("never removes the user's own deny-all: switching on a tool they switched off throws", () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = path.join(tmpDir, 'opencode.json')
+      const userRules = {
+        permissions: [
+          { action: 'shell', resource: 'git *', effect: 'allow' },
+          { action: 'shell', resource: '*', effect: 'deny' }
+        ]
+      }
+      fs.writeFileSync(p, JSON.stringify(userRules))
+      expect(() => setOpencodeToolDisabled('shell', false)).toThrow(/your own permission rules/)
+      expect(JSON.parse(fs.readFileSync(p, 'utf8'))).toEqual(userRules)
+    })
+  })
+
+  it("removes only ClaudeUI's own rule, the user's identical earlier one stays", () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = path.join(tmpDir, 'opencode.json')
+      fs.writeFileSync(
+        p,
+        JSON.stringify({
+          permissions: [
+            { action: 'read', resource: '*', effect: 'deny' },
+            { action: 'read', resource: 'docs/*', effect: 'allow' }
+          ]
+        })
+      )
+      setOpencodeToolDisabled('read', true) // the narrower allow keeps it on, so ClaudeUI appends
+      setOpencodeToolDisabled('read', false)
+      expect(JSON.parse(fs.readFileSync(p, 'utf8')).permissions).toEqual([
+        { action: 'read', resource: '*', effect: 'deny' },
+        { action: 'read', resource: 'docs/*', effect: 'allow' }
+      ])
+    })
+  })
+
+  it("a 1.x tools:false is the user's: never removed by the switch", () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = path.join(tmpDir, 'opencode.json')
+      fs.writeFileSync(p, JSON.stringify({ tools: { bash: false } }))
+      expect(toolDisabledIn(JSON.parse(fs.readFileSync(p, 'utf8')), 'shell', 'darwin')).toBe(true)
+      expect(() => setOpencodeToolDisabled('shell', false)).toThrow(/your own/)
+      expect(JSON.parse(fs.readFileSync(p, 'utf8'))).toEqual({ tools: { bash: false } })
+    })
+  })
+
+  it('names the config agents whose own rules still offer a switched-off tool', () => {
+    const config = {
+      agent: { rev: { permission: { '*': 'allow', bash: 'deny' } } },
+      mode: { loose: { permission: 'allow' } },
+      agents: { strict: { permissions: [{ action: 'read', resource: '*', effect: 'deny' }] } }
+    }
+    const agents = configAgentRules(config)
+    expect(agentsOverridingSwitch('read', agents, 'darwin')).toEqual(['rev', 'loose'])
+    expect(agentsOverridingSwitch('shell', agents, 'darwin')).toEqual(['loose'])
+  })
+
+  it('refuses an action that is not a switchable built-in', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      expect(() => setOpencodeToolDisabled('*', true)).toThrow(/switchable/)
+    })
+  })
+})
+
+// ── Write notifications (the reload hook) ─────────────────────────────────────
+
+describe('onOpencodeConfigWritten', () => {
+  it('fires once per write that changed the file, never for a no-op', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const seen: string[] = []
+      const off = onOpencodeConfigWritten((reason) => seen.push(reason))
+      writeOpencodeNativeConfig({ model: 'a/b' })
+      writeOpencodeNativeConfig({ model: 'a/b' })
+      setOpencodeToolDisabled('read', true)
+      off()
+      writeOpencodeNativeConfig({ model: 'c/d' })
+      expect(seen).toEqual(['settings', 'tool read'])
     })
   })
 })

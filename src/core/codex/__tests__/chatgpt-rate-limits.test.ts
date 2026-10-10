@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   ChatgptRateLimitStore,
+  creditLimit,
   pickRateLimitSnapshot,
   rateWindow,
   type ChatgptRateLimitDeps
@@ -58,13 +59,16 @@ function store(over: Partial<ChatgptRateLimitDeps> = {}): {
   changed: ReturnType<typeof vi.fn>
   read: ReturnType<typeof vi.fn>
   persist: ReturnType<typeof vi.fn>
+  publishCredits: ReturnType<typeof vi.fn>
 } {
   const changed = vi.fn()
   const persist = vi.fn()
+  const publishCredits = vi.fn()
   const read = vi.fn(async () => new Map<string, GetAccountRateLimitsResponse>())
   return {
     changed,
     persist,
+    publishCredits,
     read: read as ReturnType<typeof vi.fn>,
     store: new ChatgptRateLimitStore({
       accounts: async () => [],
@@ -74,6 +78,7 @@ function store(over: Partial<ChatgptRateLimitDeps> = {}): {
       // DB-free — the real dep resolves the vault's account key and writes a
       // usage_window_sample.
       persist,
+      publishCredits,
       now: () => 1_700_000_000_000,
       ...over
     })
@@ -481,5 +486,176 @@ describe('pickRateLimitSnapshot', () => {
       secondary: null,
       credits: { unlimited: false, balance: '7.00' }
     })
+  })
+})
+
+/**
+ * A business workspace member's credit allowance — the backend's
+ * `spend_control.individual_limit`, which Codex forwards as `individualLimit`
+ * (`backend-client/src/client.rs` `map_individual_limit`) and its own `/status`
+ * shows as "Monthly credit limit — N of M credits used". Before this, a credits
+ * plan rendered only "Credits available", with the member's real numbers one
+ * field away on the same snapshot.
+ */
+describe('member credit allowance (individualLimit)', () => {
+  const allowance = (
+    over: Partial<{ limit: string; used: string; remainingPercent: number; resetsAt: number }> = {}
+  ): NonNullable<RateLimitSnapshot['individualLimit']> => ({
+    limit: '25000',
+    used: '8000',
+    remainingPercent: 68,
+    resetsAt: 1_735_693_200,
+    ...over
+  })
+
+  it('parses the wire strings and converts the reset from SECONDS', () => {
+    expect(creditLimit(allowance())).toEqual({
+      used: 8000,
+      limit: 25000,
+      remainingPercent: 68,
+      resetsAt: '2025-01-01T01:00:00.000Z'
+    })
+  })
+
+  it('keeps fractional amounts as they are - rounding is the display job', () => {
+    expect(creditLimit(allowance({ used: ' 12.5 ', limit: '100.25' }))).toMatchObject({
+      used: 12.5,
+      limit: 100.25
+    })
+  })
+
+  it.each([
+    ['an empty amount', { used: '' }],
+    ['a non-numeric amount', { limit: 'n/a' }],
+    ['a negative amount', { used: '-1' }],
+    ['a non-finite percent', { remainingPercent: Number.NaN }]
+  ])('drops the whole allowance for %s', (_, over) => {
+    expect(creditLimit(allowance(over))).toBeNull()
+  })
+
+  it('clamps the percent and treats a non-positive reset as none', () => {
+    expect(creditLimit(allowance({ remainingPercent: 140, resetsAt: 0 }))).toMatchObject({
+      remainingPercent: 100,
+      resetsAt: null
+    })
+  })
+
+  it('folds the allowance into the account beside its credits', () => {
+    const { store: limits } = store()
+    limits.record(
+      'acct-biz',
+      noWindows({
+        credits: { hasCredits: true, unlimited: false, balance: null },
+        individualLimit: allowance()
+      })
+    )
+    expect(limits.snapshot()['acct-biz']).toMatchObject({
+      credits: { unlimited: false, balance: null },
+      creditLimit: { used: 8000, limit: 25000, remainingPercent: 68 }
+    })
+  })
+
+  it('a sparse update keeps the allowance the last full read established', () => {
+    const { store: limits } = store()
+    limits.record('acct-biz', noWindows({ individualLimit: allowance() }))
+    limits.record('acct-biz', noWindows())
+    expect(limits.snapshot()['acct-biz'].creditLimit).toMatchObject({ used: 8000 })
+  })
+
+  it('a newer allowance replaces the old one', () => {
+    const { store: limits } = store()
+    limits.record('acct-biz', noWindows({ individualLimit: allowance() }))
+    limits.record(
+      'acct-biz',
+      noWindows({ individualLimit: allowance({ used: '9000', remainingPercent: 64 }) })
+    )
+    expect(limits.snapshot()['acct-biz'].creditLimit).toMatchObject({
+      used: 9000,
+      remainingPercent: 64
+    })
+  })
+
+  it('is never sampled - it is a monthly allowance, not a rolling window', () => {
+    const { store: limits, persist } = store()
+    limits.record('acct-biz', noWindows({ individualLimit: allowance() }))
+    expect(persist).not.toHaveBeenCalled()
+  })
+
+  it('counts as something to say, so the bucket fallback can find it', () => {
+    const bucket = noWindows({ individualLimit: allowance() })
+    expect(pickRateLimitSnapshot(response(noWindows(), { codex: bucket }))).toBe(bucket)
+  })
+})
+
+/**
+ * The credits relay (ADR-072 §4, amended 2026-10-01): a credits plan has no
+ * window to sample, so its credits are handed on by themselves — the MERGED
+ * entry, because the hub replaces its row whole — dated by the last FULL read.
+ *
+ * Never by a push: a live turn's push is built from response headers with no
+ * allowance, and Codex copies the previous one forward
+ * (`codex-api/src/rate_limits.rs`, `core/src/state/session.rs`). Dated by the
+ * push, that copy would overwrite another machine's newer reading on the hub.
+ */
+describe('relaying credits', () => {
+  const allowance = { limit: '8000', used: '100', remainingPercent: 99, resetsAt: 1_735_693_200 }
+  const READ_AT = 1_700_000_000_000
+
+  it('hands on the merged entry, dated by the full read that established it', () => {
+    const { store: limits, publishCredits } = store()
+    limits.record(
+      'acct-biz',
+      noWindows({
+        credits: { hasCredits: true, unlimited: false, balance: null },
+        individualLimit: allowance
+      }),
+      { planType: 'business' },
+      READ_AT
+    )
+    expect(publishCredits).toHaveBeenCalledWith(
+      'acct-biz',
+      expect.objectContaining({
+        planType: 'business',
+        credits: { unlimited: false, balance: null },
+        creditLimit: expect.objectContaining({ used: 100, limit: 8000 })
+      }),
+      READ_AT
+    )
+  })
+
+  it('a later push keeps the full read’s date — the allowance on it is that read’s copy', () => {
+    const { store: limits, publishCredits } = store()
+    limits.record('acct-biz', noWindows({ individualLimit: allowance }), {}, READ_AT)
+    publishCredits.mockClear()
+    // What Codex sends on a live turn: the previous allowance, copied forward.
+    limits.record('acct-biz', noWindows({ individualLimit: allowance }))
+    limits.record('acct-biz', noWindows())
+    expect(publishCredits).toHaveBeenCalledTimes(2)
+    for (const call of publishCredits.mock.calls) expect(call[2]).toBe(READ_AT)
+  })
+
+  it('relays nothing from pushes alone — nothing here could date them', () => {
+    const { store: limits, publishCredits } = store()
+    limits.record('acct-biz', noWindows({ individualLimit: allowance }))
+    expect(publishCredits).not.toHaveBeenCalled()
+  })
+
+  it('a full read sweep dates the credits with its own instant', async () => {
+    const { store: limits, publishCredits } = store({
+      accounts: async () => [{ id: 'acct-biz' }],
+      read: (async () =>
+        new Map([
+          ['acct-biz', response(noWindows({ individualLimit: allowance }))]
+        ])) as unknown as ChatgptRateLimitDeps['read']
+    })
+    await limits.refresh()
+    // `now()` of the fixture deps.
+    expect(publishCredits).toHaveBeenCalledWith('acct-biz', expect.anything(), 1_700_000_000_000)
+  })
+
+  it('relays nothing for an account with neither', () => {
+    const { store: limits, publishCredits } = store()
+    limits.record('acct-a', snapshot(), {}, READ_AT)
+    expect(publishCredits).not.toHaveBeenCalled()
   })
 })

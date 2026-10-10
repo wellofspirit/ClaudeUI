@@ -23,6 +23,8 @@
  * - a fresh install creates NO automode.json
  * - an engine file without an `autoMode` block is left byte-identical
  * - save: an empty list becomes an ABSENT key; load: absent file → {}
+ * - save keeps the judge guidance lists (ADR-083 §4), normalised the same way
+ * - the migration's rewrite keeps every non-trust key (the guidance lists)
  * - `loadSettings()` also triggers the migration
  */
 
@@ -167,6 +169,35 @@ describe('migrateSharedTrustLists', () => {
     expect(readJsonFile(engineFile('opencode'))).toEqual({ autoMode: {} })
   })
 
+  it('keeps every other automode.json key when it rewrites the file', async () => {
+    // The guidance lists (ADR-083 §4) never lived in an engine file, so the
+    // migration has nothing to say about them — but it rewrites the whole
+    // shared file, and an older client writing a trust key back into an engine
+    // file is enough to make it fire on a profile that already has them.
+    writeFileSync(
+      sharedFile(),
+      JSON.stringify(
+        {
+          trustedDomains: ['files.acme.com'],
+          judgeAllow: ['creating and switching git branches'],
+          judgeBlock: ['running database migrations']
+        },
+        null,
+        2
+      )
+    )
+    writeEngine('opencode', { autoMode: { trustedDomains: ['api.acme.com'] } })
+
+    const mod = await freshModule()
+    expect(mod.loadSharedAutoModeConfig()).toEqual({
+      trustedDomains: ['files.acme.com', 'api.acme.com'],
+      judgeAllow: ['creating and switching git branches'],
+      judgeBlock: ['running database migrations']
+    })
+    // The migration did fire: the engine key is gone.
+    expect(readJsonFile(engineFile('opencode'))).toEqual({ autoMode: {} })
+  })
+
   it('creates no automode.json on a fresh install', async () => {
     const mod = await freshModule()
     expect(mod.loadSharedAutoModeConfig()).toEqual({})
@@ -218,6 +249,79 @@ describe('load/saveSharedAutoModeConfig', () => {
     expect(onDisk).toEqual({ trustedDomains: ['files.acme.com'] })
     expect('trustedRegistries' in onDisk).toBe(false)
     expect('protectedPatterns' in onDisk).toBe(false)
+  })
+
+  it('saves the judge guidance lists alongside the trust lists (ADR-083 §4)', async () => {
+    // The save REBUILDS the object from a key list, so a list missing from it
+    // is silently dropped — the UI would show the entry and the judge never see it.
+    const mod = await freshModule()
+    mod.saveSharedAutoModeConfig({
+      trustedDomains: ['files.acme.com'],
+      judgeAllow: ['creating and switching git branches'],
+      judgeBlock: ['running database migrations']
+    })
+
+    expect(readJsonFile(sharedFile())).toEqual({
+      trustedDomains: ['files.acme.com'],
+      judgeAllow: ['creating and switching git branches'],
+      judgeBlock: ['running database migrations']
+    })
+  })
+
+  it('normalises the guidance lists like the trust lists: trimmed, non-empty, [] → absent', async () => {
+    const mod = await freshModule()
+    mod.saveSharedAutoModeConfig({
+      judgeAllow: ['  running the linter  ', '', '   '],
+      judgeBlock: []
+    })
+
+    const onDisk = readJsonFile(sharedFile())!
+    expect(onDisk).toEqual({ judgeAllow: ['running the linter'] })
+    expect('judgeBlock' in onDisk).toBe(false)
+  })
+
+  it('stores readOnlyBypass only as an explicit false (ADR-084 §1)', async () => {
+    const mod = await freshModule()
+    mod.saveSharedAutoModeConfig({ trustedDomains: ['files.acme.com'], readOnlyBypass: false })
+    expect(readJsonFile(sharedFile())).toEqual({
+      trustedDomains: ['files.acme.com'],
+      readOnlyBypass: false
+    })
+
+    // `true` is the default, so it is written ABSENT — one encoding of "on".
+    mod.saveSharedAutoModeConfig({ trustedDomains: ['files.acme.com'], readOnlyBypass: true })
+    expect(readJsonFile(sharedFile())).toEqual({ trustedDomains: ['files.acme.com'] })
+
+    // A non-boolean is not an opt-out.
+    mod.saveSharedAutoModeConfig({ readOnlyBypass: 'false' as unknown as boolean })
+    expect(readJsonFile(sharedFile())).toEqual({})
+  })
+
+  it('stores blockHoldSeconds as whole seconds in [0, 600]; 0, the default, as an absent key (ADR-091 part 6)', async () => {
+    const mod = await freshModule()
+    mod.saveSharedAutoModeConfig({ blockHoldSeconds: 120 })
+    expect(readJsonFile(sharedFile())).toEqual({ blockHoldSeconds: 120 })
+    const second = await freshModule()
+    expect(second.loadSharedAutoModeConfig()).toEqual({ blockHoldSeconds: 120 })
+
+    mod.saveSharedAutoModeConfig({ blockHoldSeconds: 9_999 })
+    expect(readJsonFile(sharedFile())).toEqual({ blockHoldSeconds: 600 })
+    mod.saveSharedAutoModeConfig({ blockHoldSeconds: 29.6 })
+    expect(readJsonFile(sharedFile())).toEqual({ blockHoldSeconds: 30 })
+    for (const off of [0, -5, Number.NaN, '60' as unknown as number, undefined]) {
+      mod.saveSharedAutoModeConfig({ blockHoldSeconds: off })
+      expect(readJsonFile(sharedFile()), String(off)).toEqual({})
+    }
+  })
+
+  it('normalizeBlockHoldSeconds: absent or garbage is 0 (no hold), clamped otherwise', async () => {
+    const { normalizeBlockHoldSeconds } = await freshModule()
+    expect(normalizeBlockHoldSeconds(undefined)).toBe(0)
+    expect(normalizeBlockHoldSeconds('120')).toBe(0)
+    expect(normalizeBlockHoldSeconds(Infinity)).toBe(0)
+    expect(normalizeBlockHoldSeconds(-1)).toBe(0)
+    expect(normalizeBlockHoldSeconds(300)).toBe(300)
+    expect(normalizeBlockHoldSeconds(601)).toBe(600)
   })
 
   it('round-trips through the file, not through memory', async () => {

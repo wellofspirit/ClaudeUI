@@ -65,6 +65,22 @@ describe('equivalentCostUsd — anthropic pricing', () => {
     expect(cost).toBeCloseTo(24.2)
   })
 
+  it('sonnet-5 / sonnet-5-5: tier_2_10 mirrors cli.js 2.1.285, not the 3.x/4.x $3/$15', () => {
+    for (const model of ['claude-sonnet-5', 'claude-sonnet-5-5']) {
+      const cost = equivalentCostUsd(
+        'anthropic',
+        model,
+        oneMTok({
+          inputTokens: 1_000_000,
+          outputTokens: 1_000_000,
+          cacheWriteTokens: 1_000_000,
+          cacheReadTokens: 1_000_000
+        })
+      )
+      expect(cost).toBeCloseTo(2 + 10 + 2.5 + 0.2)
+    }
+  })
+
   it('opus-4 (classic): input rate = $15/MTok', () => {
     const cost = equivalentCostUsd(
       'anthropic',
@@ -81,6 +97,30 @@ describe('equivalentCostUsd — anthropic pricing', () => {
       oneMTok({ inputTokens: 1_000_000 })
     )
     expect(cost).toBeCloseTo(1.0)
+  })
+
+  it('haiku-5: Haiku 5.5 at haiku_55 base rates (cli.js 2.1.293), dated id too', () => {
+    for (const id of ['claude-haiku-5-5', 'claude-haiku-5-5-20261001']) {
+      const cost = equivalentCostUsd(
+        'anthropic',
+        id,
+        oneMTok({
+          inputTokens: 1_000_000,
+          outputTokens: 1_000_000,
+          cacheWriteTokens: 2_000_000,
+          cacheWrite1hTokens: 1_000_000,
+          cacheReadTokens: 1_000_000
+        })
+      )
+      expect(cost).toBeCloseTo(0.1 + 0.5 + 0.125 + 0.2 + 0.01)
+    }
+  })
+
+  it('haiku-4-5 is not caught by the haiku-5 entry; the fallback keeps its historical rate', () => {
+    const input = oneMTok({ inputTokens: 1_000_000 })
+    expect(equivalentCostUsd('anthropic', 'claude-haiku-4-5-20251001', input)).toBeCloseTo(1.0)
+    // Usage history is priced from this table: a dated 3.x id must not be re-priced.
+    expect(equivalentCostUsd('anthropic', 'claude-3-5-haiku-20241022', input)).toBeCloseTo(1.0)
   })
 
   it('haiku-3: input rate = $0.8/MTok', () => {
@@ -280,6 +320,60 @@ describe('equivalentCostUsd — openai pricing', () => {
   it('gpt-5.5-fast: substring-falls-back to the gpt-5.5 base rate ($5/MTok)', () => {
     const cost = equivalentCostUsd('openai', 'gpt-5.5-fast', oneMTok({ inputTokens: 1_000_000 }))
     expect(cost).toBeCloseTo(5.0)
+  })
+
+  // Ordering guards (ADR-081 §5): these ids used to fall through to an older
+  // family's entry by substring — gpt-4.1* to `gpt-4` ($30/$60), o3-pro to `o3`.
+  it('gpt-4.1-mini on openai is no longer priced as gpt-4 ($30/$60)', () => {
+    const input = equivalentCostUsd('openai', 'gpt-4.1-mini', oneMTok({ inputTokens: 1_000_000 }))
+    const output = equivalentCostUsd('openai', 'gpt-4.1-mini', oneMTok({ outputTokens: 1_000_000 }))
+    expect(input).toBeCloseTo(0.4)
+    expect(output).toBeCloseTo(1.6)
+    expect(input).not.toBeCloseTo(30)
+    expect(output).not.toBeCloseTo(60)
+  })
+
+  it.each([
+    // model, input, cached input, output — the models.dev snapshot's figures
+    ['gpt-4.1', 2, 0.5, 8],
+    ['gpt-4.1-mini', 0.4, 0.1, 1.6],
+    ['gpt-4.1-nano', 0.1, 0.025, 0.4],
+    ['o3-pro', 20, 20, 80]
+  ] as const)('%s: $%s in / $%s cached / $%s out', (model, input, cacheRead, output) => {
+    expect(equivalentCostUsd('openai', model, oneMTok({ inputTokens: 1_000_000 }))).toBeCloseTo(
+      input
+    )
+    expect(equivalentCostUsd('openai', model, oneMTok({ cacheReadTokens: 1_000_000 }))).toBeCloseTo(
+      cacheRead
+    )
+    expect(equivalentCostUsd('openai', model, oneMTok({ outputTokens: 1_000_000 }))).toBeCloseTo(
+      output
+    )
+  })
+
+  it('gpt-4.1 dated ids resolve to their own family, not gpt-4', () => {
+    const cost = equivalentCostUsd(
+      'openai',
+      'gpt-4.1-mini-2025-04-14',
+      oneMTok({ inputTokens: 1_000_000 })
+    )
+    expect(cost).toBeCloseTo(0.4)
+  })
+
+  it('o3-pro is not priced as o3', () => {
+    expect(equivalentCostUsd('openai', 'o3-pro', oneMTok({ inputTokens: 1_000_000 }))).toBeCloseTo(
+      20
+    )
+    expect(equivalentCostUsd('openai', 'o3', oneMTok({ inputTokens: 1_000_000 }))).toBeCloseTo(2)
+  })
+
+  // o3 at the snapshot's rates, not the pre-cut $10/$40 the table used to carry.
+  it('o3: $2 in / $0.50 cached / $8 out', () => {
+    expect(equivalentCostUsd('openai', 'o3', oneMTok({ inputTokens: 1_000_000 }))).toBeCloseTo(2)
+    expect(equivalentCostUsd('openai', 'o3', oneMTok({ cacheReadTokens: 1_000_000 }))).toBeCloseTo(
+      0.5
+    )
+    expect(equivalentCostUsd('openai', 'o3', oneMTok({ outputTokens: 1_000_000 }))).toBeCloseTo(8)
   })
 })
 
@@ -746,7 +840,9 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
       'opus-4',
       'opus-5-5',
       'opus',
+      'sonnet-5',
       'sonnet',
+      'haiku-5',
       'haiku-4',
       'haiku-3',
       'haiku'
@@ -759,6 +855,8 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
     expect(order.indexOf('opus-4-5')).toBeLessThan(order.indexOf('opus-4'))
     expect(order.indexOf('opus-4')).toBeLessThan(order.indexOf('opus'))
     expect(order.indexOf('haiku-4')).toBeLessThan(order.indexOf('haiku'))
+    expect(order.indexOf('haiku-5')).toBeLessThan(order.indexOf('haiku'))
+    expect(order.indexOf('sonnet-5')).toBeLessThan(order.indexOf('sonnet'))
   })
 
   it('carries the pricing numbers block-usage bills on, without a vendorId field', () => {

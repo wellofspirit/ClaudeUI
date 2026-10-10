@@ -5,9 +5,10 @@
 ## M1a foundation
 
 `src/core/codex/CodexAppServerClient.ts` owns one non-reusable JSONL connection.
-It locates only vendored executables through the host app path, validates the
-pinned executable version before initialize and then sends initialized. The
-locator reserves extraResources/unpacked paths, but packaging is not wired.
+It spawns the executable the harness resolver names (at M1a only a vendored
+copy; since ADR-082 §8 ClaudeUI's managed store or a System install, never a
+packaged copy), validates the executable's version before initialize and then
+sends initialized.
 Caller-provided environment replaces inheritance; omission inherits the native
 runtime environment. Neither environment nor stderr nor raw protocol errors
 are logged. The transport itself does not own account or login policy.
@@ -52,6 +53,8 @@ Every client names its CALLER. `CodexClientOptions.label` is a bare identifier t
 
 **Closing is graceful.** `CodexAppServerClient.dispose()` now ends the child's stdin first — Codex's stdio transport exits on `stdio_connection_closed` on every platform (`app-server/src/lib.rs`), and that is the only shutdown that lets it close its sqlite state files itself; a `taskkill /F` never does, and what it leaves behind is one half of the "failed to initialize sqlite state runtime" class F7/F8 chased. The process-tree guarantee is unchanged because the grace is bounded: `killGraceMs` after the EOF, or the moment the child exits, `terminate()` runs exactly as before (`taskkill /T /F` on Windows, SIGTERM then SIGKILL on the process GROUP on POSIX), so a child that ignores the EOF and any descendants that outlive their parent are still reaped. Only a close the CLIENT initiated takes that path; every other failure is already a dead or dying child and goes straight to the kill. A disposal never writes the F7 death line, including the `stdout-closed` the EOF itself produces — the failure code stays `disposed`, which is not a death code. App quit disposes every host this way (`codexHostRegistry.dispose()` in `src/main/index.ts`), bounded: nothing waits on a child, and a parent that exits first closes the pipe, which is the same EOF.
 
+**A home ClaudeUI derived is created before the app-server spawns.** The transport always hands the child an explicit `CODEX_HOME` (`CodexAppServerClient.childEnv`), and Codex requires an explicit `CODEX_HOME` to exist already — only the implicit `~/.codex` is created on demand (`codex-rs/utils/home-dir/src/lib.rs` `find_codex_home`; the default is made by `codex-rs/arg0/src/lib.rs` `prepare_path_entry_for_codex_aliases`). On a fresh HOME — a first-time user on the managed install — the app-server therefore exited 1 before `initialize` with `CODEX_HOME points to "…/.codex", but that path does not exist`. `ensureDerivedCodexHome` (`codex-home.ts`) now creates the derived home, recursive and owner-only (0o700 through the umask; Codex's own default is the umask's, but this directory receives `auth.json`), in `start()` after the version check and before the first-run gate. An existing directory is untouched, and an operator's own non-empty `CODEX_HOME` is never created: that keeps Codex's native refusal. A failed `mkdir` is a warn line, and the spawn proceeds so Codex reports the real reason. The Codex spawn prep (`providers/register-engines.ts`) does the same before `syncCodexRulesFile()`, which skips a missing home: otherwise a first-time user's first thread would start before `rules/claudeui.rules` existed, without their Bash deny rules.
+
 The FIRST app-server per Codex home is serialised. Codex builds its sqlite state runtime the first time an app-server starts in a home, and a second one racing it dies with `failed to initialize sqlite state runtime under <home>` and exit 1 (`app-server/src/lib.rs`); ClaudeUI's boot starts three within milliseconds — the catalog discovery behind the renderer's first models request, the launch-time lineage scan and the auth probe — so on a machine with no `~/.codex` the loser could be the user's first session. `start()` therefore resolves the home the child will use (`codex-home.ts`: the client's own `env` first, since that environment REPLACES inheritance, then `CODEX_HOME`, then `~/.codex` — Codex's `find_codex_home` rule) and, if that directory holds no `state_*.sqlite`, takes a module-level gate keyed by the normalised path. Everything else starting on the same home waits for it and then re-checks: a holder that lived created the databases, so the check passes; one that died left the home uninitialised, so the first waiter to re-check becomes the next holder and the rest wait on it. The holder releases when `initialize` has answered or when `fail()` closes it — whichever comes first, and `fail()` is on every other exit including `dispose()` — and a client disposed while waiting rejects with `disposed` without spawning. An initialised home pays one `readdirSync` per start. Retrying a dead app-server instead was considered and rejected: it hides a race behind a second process, and the loser's death is indistinguishable from a real startup failure. Known limit, captured live on 2026-09-15: the same failure also hits an INITIALISED home when an app-server starts while a short-lived sibling (the auth probe's native read that session creation triggers) is shutting down a few hundred milliseconds after it started; widening the gate to every start made that deterministic, because the waiter is released exactly when the sibling has answered `initialize` and is about to exit. That second shape was F8 (landed 2026-09-15). Since ADR-069's H1 the gate guards HOST starts: reads no longer start app-servers of their own, so the racers it serialises are the hosts for a home and the sessions that still own a process until H2 — which also removes the second shape's trigger, a short-lived sibling shutting down under a starting app-server.
 
 One of those three spawns is now gone after the first: `model/list` is answered locally by the binary and cannot change without a re-vendor, so `discoverCodexModels()` (`model-discovery.ts`) memoises the catalog for the life of the process, keyed by the located binary's path, size and mtime plus the vault's active account (Codex fills the list with `RefreshStrategy::OnlineIfUncached`, so a signed-in process may fetch it online and a switched identity may see a different list), and single-flights the discovery so the composer's re-fetch on every cwd change — and the two requests boot lands at once — share one app-server instead of spawning their own; only a succeeded, non-empty catalog is stored, and `discoverCodexModels({ refresh: true })` re-asks the binary (wired to nothing but the tests today).
@@ -93,7 +96,7 @@ on macOS or Linux. Process tree: with one session mid-`ping` and again with two 
 two `codex-code-mode-host.exe`, two `PING.EXE`, two Codex `pwsh.exe`), nothing survived five seconds after the app closed;
 the taskkill-first helper reaps the whole tree. Linux evidence is in the Linux section below.
 
-`scripts/ensure-codex.mjs` acquires the reviewed 0.154.0 binaries for every host in `scripts/codex-digests.json#hosts` — macOS arm64, Windows x64 (installing `codex.exe` and `codex-code-mode-host.exe`) and Linux x64/arm64 (the statically linked musl assets); since `e5bf09b6` it runs from `postinstall` and from every packaging target in `scripts/build.mjs`, and `electron-builder.yml` ships `vendor/codex-cli` (both members) as `Resources/codex-cli`. On a host the manifest does not cover (Windows arm64 today) it skips with one line and exits 0, and the engine gates itself off. Generated
+ClaudeUI's harness installer (`src/core/harness/install/`, ADR-082 §4) installs the reviewed binaries of the pin for every host in `src/shared/harness-manifests/codex.json#platforms` — macOS arm64, Windows x64 (`codex.exe` and `codex-code-mode-host.exe`) and Linux x64/arm64 (the statically linked musl assets) — into `~/.claude/ui/harnesses/codex/<version>/`. Codex is not bundled (ADR-082 §8, which replaced the `vendor/codex-cli` packaging of `e5bf09b6`): the Installed page installs it, and in a development checkout `postinstall` runs `bun run ensure-codex`, a thin wrapper over the same installer. On a host the manifest does not cover (Windows arm64 today) the wrapper skips with one line and exits 0, and the engine gates itself off. Generated
 initialize types are exact CLI output; envelopes are derived from the pinned
 CLI's JSON schema because its TypeScript generator omits them. M1b adds typed
 method maps over this generic transport without claiming runtime payload-schema validation.
@@ -103,21 +106,21 @@ engine behavior.
 
 ### Linux
 
-Linux x64 and arm64 are reviewed hosts: `scripts/codex-digests.json#hosts` pins the
+Linux x64 and arm64 are reviewed hosts: `src/shared/harness-manifests/codex.json#platforms` pins the
 statically linked `-unknown-linux-musl` `codex` and `codex-code-mode-host`,
-`CODEX_SUPPORTED_HOSTS` offers the engine, and CI caches `vendor/codex-cli` per
-`runner.arch`. The Linux ARTIFACT is the headless server tarball, not a desktop
-build: `claudeui-server-*-linux-{x64,arm64}.tar.gz` now carries
-`vendor/codex-cli` beside `vendor/opencode-cli` and `vendor/pi-cli`, which
-resolves because the compiled executable's app path is the directory holding
-`out/web` and `locateCodexBinary()` reads `<appPath>/vendor/codex-cli/codex`. No
-Linux desktop build ships, so `electron-builder.yml` needed no change.
+`CODEX_SUPPORTED_HOSTS` offers the engine, and CI caches the managed store's
+`codex/<version>` directory per `runner.arch`. The Linux ARTIFACT is the headless
+server tarball, not a desktop build: `claudeui-server-*-linux-{x64,arm64}.tar.gz`
+carries no engine since ADR-082 §8, so a fresh server has no Codex until an admin
+installs it from Settings › Harnesses › Installed, into the deployment box's
+`~/.claude/ui/harnesses`, where `locateCodexBinary()` (the harness resolver)
+finds it.
 
 Linux is no longer the only headless host. Since 2026-09-14 the desktop `build`
 matrix also stages a server archive — `claudeui-server-*-mac-arm64.zip` and
-`claudeui-server-*-win-x64.zip`, with `vendor/claude-cli` alongside the other
-three engines (ADR-061's 2026-09-14 amendment). Codex behaves identically there:
-same locator, same app path. Only the sandbox differs, and `bwrap` is a Linux
+`claudeui-server-*-win-x64.zip`, with `vendor/claude-cli` (ADR-061's 2026-09-14
+amendment; since ADR-082 §8 no other engine ships). Codex behaves identically
+there: same resolver, same managed store. Only the sandbox differs, and `bwrap` is a Linux
 concern alone — the note below applies to the tarballs, not the zips.
 
 **bubblewrap is a system dependency, deliberately not a manifest member.** Codex's
@@ -222,9 +225,19 @@ ClaudeUI owns rules and session allows, and Codex's execpolicy is not written.
 Under `auto` the native `auto_review` guardian reviews escalations first, and
 whatever still reaches the client is gated exactly like `default`.
 
-Approving is a full-access grant on this wire: an accepted command runs
-unsandboxed whatever the sandbox policy says (probe, [codex-spike.md](../codex-spike.md)
-section "Native approval surface probe"). The sandbox is what the model is told
+Approving is a full-access grant on this wire in effect, but not on the first attempt. An accepted
+command still runs first under the turn's sandbox, unless the model escalated it
+(`sandbox_permissions: "require_escalated"`) or an execpolicy `allow` matched
+(`core/src/tools/orchestrator.rs` and `sandbox_override_for_first_attempt` in
+`core/src/tools/sandboxing.rs`, rust-v0.160.1). When that attempt is denied by the sandbox, Codex
+re-runs it unsandboxed without asking again, but only if it CLASSIFIES the failure as a denial: for
+`exec_command` it waits at most 20 ms for output, then keyword-matches it
+(`core/src/unified_exec/process.rs` `check_for_sandbox_denial`, `sandboxing/src/denial.rs`; the exit
+code alone never counts). A miss reaches the model as an ordinary failed command, with no second
+prompt. That fails closed, but an approved outside-workspace write in default mode can come back
+failed; `apply_patch` classifies from complete output and is not affected. The integration
+suite's policy probe documents both branches, and its opt-in retry probe
+(`CODEX_INTEGRATION_RETRY=1`, serial) pins the retry. The sandbox is what the model is told
 about its environment and what contains Auto's silent in-workspace work, not a
 second decision layer. Sandbox enforcement itself cannot be measured in the
 integration fixture, so containment claims rest on the Codex source at tag
@@ -351,7 +364,7 @@ ADR-038 while compensating for Codex's missing dynamic-call resolution event.
 Built: `CodexEngineToolMap` feeds the existing renderer `ToolView` kinds; the
 three hosted UI tools run over the native dynamic-tool channel (`30421310`,
 `hostedMcp: true`); `dispatch_agent` makes Codex a dispatch SOURCE (`843b4ecf`,
-`crossEngineDispatch: true`, ADR-033 amendment). Native children render as subagent transcripts under the spawning card on both collab surfaces (`5452d3c5`, `subagents: true`). Codex is also a dispatch TARGET (`749886cc`): the dispatcher runs a headless thread per target under the caller's mode.
+`crossEngineDispatch: true`, ADR-033 amendment). Native children render as subagent transcripts under the spawning card on both collab surfaces (`5452d3c5`, `subagents: true`). Codex is also a dispatch TARGET (`749886cc`): the dispatcher runs a headless thread per target under the caller's mode, read live at each turn start (ADR-088: `codexTurnPolicy(mode)` on every `turn/start`).
 
 **The Codex desktop app's own entries never reach a ClaudeUI thread (F17).** The desktop app shares `~/.codex` with the CLI and writes into the USER's `config.toml`: its own MCP servers (`[mcp_servers.node_repl]`, `[mcp_servers.cua_repl]`, `[mcp_servers.computer-use]`, commands inside the app bundle), a local `[marketplaces.openai-bundled]`, and `[plugins."<name>@openai-bundled"] enabled = true` for `browser`, `codex-app-tools`, `computer-use`, `visualize`. Nothing in the binary gates plugin or MCP LOADING on which client opened the thread — `core-plugins/src/manager.rs` uses the app-server client name only to filter install SUGGESTIONS, and the TUI merely hides the marketplace from its menus — so an app-server ClaudeUI starts loaded them all. That is the real source of the "in-app browser" a ClaudeUI turn once offered to test a build with: the `browser@openai-bundled` manifest and skill say "Use Browser, the ChatGPT in-app browser, when the user asks to open, inspect, navigate or test local web targets", and Codex injects that text into every prompt.
 

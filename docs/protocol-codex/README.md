@@ -3,8 +3,8 @@
 This is the transport reference. Codex is registered as the fourth engine and
 runs under the shared permission model (ADR-067); the phase-1 release gates in
 the [handoff](../codex-integration-handoff.md) are still open.
-The pin is `package.json#codexCliVersion`, currently `0.156.0` ([stable release](https://github.com/openai/codex/releases/tag/rust-v0.156.0)). The generated protocol and per-host digest manifest track this release; the dated 0.154.0 probes below remain historical evidence. The Windows x64 isolated integration run passed 30 tests with 56 platform-gated tests skipped using `CODEX_INTEGRATION=1 bun run test:integration src/integration/codex --maxWorkers=1`. Parallel execution hit process-disposal deadlines. The fixtures now answer workspace-routing discovery on a separate loopback origin and assert that projectless threads do not persist trust. No Codex command
-is hooked into postinstall, ordinary builds or release packaging yet.
+The pin is `src/shared/harness-manifests/codex.json#tested` (ADR-082), currently `0.160.1` ([stable release](https://github.com/openai/codex/releases/tag/rust-v0.160.1)), and the floor equals it (owner, 2026-10-06): ClaudeUI accepts 0.160.1 up to, not including, 1.0.0. The generated protocol and per-host digest manifest track this release; the dated 0.154.0 probes below remain historical evidence. 0.160.0 to 0.160.1 is a two-file patch release (the workspace version and a Windows remote-stdio-MCP environment allowlist in `rmcp-client/src/stdio_server_launcher.rs`); the regenerated protocol is byte-identical apart from provenance. On macOS arm64 the isolated real-binary suite passed 86 of 86 tests in one serial run on 0.160.1 (`CODEX_INTEGRATION=1 bun run test:integration src/integration/codex --maxWorkers=1`). The 0.160.0 runs before it were not green as a whole: 84 of 86 serially and 84 of 86 with four workers, where the failures were nested-Seatbelt containment exits (71) that passed on serial replay. Keep running the suite serially. The 0.160.0 bump recorded one behaviour change: archiving now materializes an empty rollout, so a turn-less fork appears in `thread/list {archived:true}`. The earlier Windows x64 0.156.0 run passed 30 tests with 56 platform-gated tests skipped. Codex is not bundled
+(ADR-082 §8): ClaudeUI installs the pin into its managed store, `~/.claude/ui/harnesses`.
 
 ## Acquisition
 
@@ -13,18 +13,21 @@ bun run ensure-codex
 bun run update-codex
 ```
 
-The second command forces reinstall of the same reviewed pin, not an upgrade to
-latest. `scripts/codex-digests.json` pins the release archives, extracted binaries,
-source commit and Apache-2.0 license. It is a per-host map: `hosts.<platform>-<arch>`
-(Node's own names) carries the install names and digests for one host, and
-`hostManifest()` flattens the entry into the record written to `version.json`.
-macOS arm64, Windows x64 and Linux x64/arm64 are pinned. Windows uses the
-`.exe.tar.gz` assets — single-member ustar archives the same extractor handles —
-and installs `.exe` names, which is what Codex looks for when it resolves its
-code-mode host; Linux uses the statically linked `-unknown-linux-musl` assets and
-installs the plain POSIX names. Windows arm64 is not pinned: release names and
-digests alone do not establish provisioning readiness, so acquisition skips there
-with one line.
+Both install into ClaudeUI's managed store (`~/.claude/ui/harnesses/codex/<pin>/`,
+`CLAUDEUI_HARNESS_STORE` moves it) through the app's own installer
+(`src/core/harness/install/`, ADR-082 §4 and §8); `scripts/ensure-codex.mjs` is a
+thin wrapper, and `postinstall` runs it. The second command moves the installed
+pin aside and installs it again, not an upgrade to latest: Codex installs only
+its tested version. `src/shared/harness-manifests/codex.json` pins the release
+archives, extracted binaries, source commit and Apache-2.0 license. It is a
+per-host map: `platforms.<platform>-<arch>` (Node's own names) carries the
+install names and digests for one host. macOS arm64, Windows x64 and Linux
+x64/arm64 are pinned. Windows uses the `.exe.tar.gz` assets — single-member
+ustar archives — and installs `.exe` names, which is what Codex looks for when
+it resolves its code-mode host; Linux uses the statically linked
+`-unknown-linux-musl` assets and installs the plain POSIX names. Windows arm64 is
+not pinned: release names and digests alone do not establish provisioning
+readiness, so `ensure-codex` skips there with one line.
 
 The release ships two assets per host that must be installed together:
 `codex-aarch64-apple-darwin.tar.gz` with
@@ -38,34 +41,17 @@ The release ships two assets per host that must be installed together:
 own binary (`install-context::code_mode_host_program_from_exe`; the `code_mode_host`
 feature is Stable and default-enabled). Without it each `exec_command` fails with
 "the command tool failed to start" and no approval ever reaches ClaudeUI, so the
-host is mandatory, not optional: the whole manifest is acquired and published by a
-single directory rename, a missing or wrong-digest host is a cache miss, and
-`codexBinaryAvailable()` reports Codex unavailable unless the host sits beside
-`codex`. Only `codex` answers `--version`; the host is gated by its pinned digest.
-The mock-model fixture is not code-mode, so it does not exercise this path.
+host is mandatory, not optional: both members and the LICENSE are verified and
+published by a single directory rename, and `codexBinaryAvailable()` reports
+Codex unavailable unless the host sits beside `codex`. Only `codex` answers
+`--version`; the host is gated by its pinned digest. The mock-model fixture is
+not code-mode, so it does not exercise this path.
 
-Existing archives can avoid the downloads, matched to their manifest member by
-digest rather than flag order; `--archive` may be repeated. Supplying the pinned
-license also avoids its network fetch. Every file still undergoes digest
-verification.
-
-```sh
-bun run ensure-codex \
-  --archive /path/to/codex-aarch64-apple-darwin.tar.gz \
-  --archive /path/to/codex-code-mode-host-aarch64-apple-darwin.tar.gz \
-  --license /path/to/LICENSE
-```
-
-Acquisition bounds downloads and decompression, accepts exactly the expected
+The installer bounds downloads and decompression, accepts exactly the expected
 regular tar member from each archive, and rejects links, traversal, extra members,
-truncation and digest mismatch. Cache hits rehash actual payload/license bytes. Installation
-stages complete files before directory rename and restores the prior directory
-if replacement fails. If restoring the prior directory also fails, its backup
-is retained under the staging directory and the command reports the exact
-recovery location without raw OS error details. During replacement an existing
-install has a short
-unavailable-path interval; callers should not provision concurrently with runtime
-startup. Acquisition is developer opt-in, not a concurrent runtime updater.
+truncation and digest mismatch (ADR-082 §4 "As built"). The offline `--archive` /
+`--license` inputs of the old vendoring script are gone: every install downloads
+from the official hosts.
 
 ## Regeneration
 
@@ -74,7 +60,8 @@ bun run generate-codex-protocol
 bun run check-codex-protocol
 ```
 
-Both commands verify the installed cache and executable version, then run in
+Both commands run the pinned Codex from the managed store (`bun run ensure-codex`
+first), re-hash it against this host's reviewed digest and verify its version, then run in
 fresh HOME/CODEX_HOME directories with a minimal, replacement environment. They
 do not inspect native user auth. The generator runs no app-server session or
 model request. Temporary generator outputs are removed afterward.
@@ -114,7 +101,7 @@ returns nonzero on mismatch, and never changes checked-in outputs.
 bun run test:unit src/core/codex
 CODEX_INTEGRATION=1 bun run test:integration src/integration/codex
 bun run typecheck
-bunx eslint scripts/ensure-codex.mjs scripts/generate-codex-protocol.mjs src/core/codex src/integration/codex
+bunx eslint scripts/ensure-harness.mjs scripts/codex-tooling.mjs scripts/generate-codex-protocol.mjs src/core/codex src/integration/codex
 # Linux x64/arm64, where no CI job runs the binary (see docs/architecture/codex.md):
 scripts/docker/codex-linux-verify.sh --arch x64
 scripts/docker/codex-linux-verify.sh --arch arm64
@@ -126,8 +113,9 @@ covers. Four of them (`codex-injection`, `codex-mcp-override`,
 `src/integration/codex/integration-host.ts` and run on every reviewed host; the
 other eight remain macOS arm64 only, because their containment is `sandbox-exec`
 itself and two of them assert macOS's `/bin/zsh -lc` command wrapper. Each test
-uses the production client and copies the installed verified binary into a
-disposable directory. On macOS test spawns are wrapped with `sandbox-exec`, whose
+uses the production client and copies the pinned binary from the managed store
+into a disposable directory, which the resolver runs through `CLAUDEUI_CODEX_CLI`;
+a store without the pin skips the suites. On macOS test spawns are wrapped with `sandbox-exec`, whose
 outer profile blocks user-data reads and outbound network except the fixture's
 localhost port; on Windows and Linux the child runs unwrapped and the isolation is
 the fixture's own replacement environment. HOME/CODEX_HOME are isolated, auth
@@ -193,8 +181,8 @@ privately captured the vendored CLI's `login status` streams and emitted only:
 { "authenticated": true, "authKind": "chatgpt", "requiresLogin": false }
 ```
 
-The runner preserves the user's native environment/CODEX_HOME and verifies the
-vendored cache first. It never prints captured streams or native error payloads.
+The runner preserves the user's native environment/CODEX_HOME and looks up the
+pinned Codex in the managed store first. It never prints captured streams or native error payloads.
 No user auth/config file was inspected by tools, no vault credentials were
 injected, and no login/logout/explicit refresh or real-provider model turn ran.
 This establishes stored native login status, not token freshness or successful

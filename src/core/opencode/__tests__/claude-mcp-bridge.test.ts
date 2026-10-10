@@ -26,14 +26,14 @@ describe('translateClaudeMcpServer', () => {
       type: 'local',
       command: ['node', 'x.js'],
       environment: { A: '1' },
-      enabled: true
+      codemode: false
     })
   })
 
   it('stdio: no env → omits environment key', () => {
     const result = translateClaudeMcpServer({ type: 'stdio', command: 'node', args: ['x.js'] })
     expect(result).not.toHaveProperty('environment')
-    expect(result).toMatchObject({ type: 'local', command: ['node', 'x.js'], enabled: true })
+    expect(result).toMatchObject({ type: 'local', command: ['node', 'x.js'], codemode: false })
   })
 
   it('stdio: empty env object → omits environment key', () => {
@@ -51,14 +51,14 @@ describe('translateClaudeMcpServer', () => {
       type: 'remote',
       url: 'http://x',
       headers: { H: 'v' },
-      enabled: true
+      codemode: false
     })
   })
 
   it('http: url (no headers) → remote entry without headers key', () => {
     const result = translateClaudeMcpServer({ type: 'http', url: 'http://y' })
     expect(result).not.toHaveProperty('headers')
-    expect(result).toMatchObject({ type: 'remote', url: 'http://y', enabled: true })
+    expect(result).toMatchObject({ type: 'remote', url: 'http://y', codemode: false })
   })
 
   it('type-less with command → treated as local', () => {
@@ -69,6 +69,18 @@ describe('translateClaudeMcpServer', () => {
   it('type-less with url → treated as remote', () => {
     const result = translateClaudeMcpServer({ url: 'http://remote/mcp' })
     expect(result).toMatchObject({ type: 'remote', url: 'http://remote/mcp' })
+  })
+
+  it('every entry is opencode 2.x shaped: codemode:false (no Code Mode), no 1.x `enabled`', () => {
+    for (const cfg of [
+      { type: 'stdio' as const, command: 'node', args: ['x.js'] },
+      { type: 'http' as const, url: 'http://y' },
+      { type: 'sse' as const, url: 'http://z' }
+    ]) {
+      const entry = translateClaudeMcpServer(cfg)
+      expect(entry?.codemode).toBe(false)
+      expect(entry).not.toHaveProperty('enabled')
+    }
   })
 
   it('empty config (no command, no url) → null', () => {
@@ -93,18 +105,28 @@ describe('translateClaudeMcpServer', () => {
 // Vitest module mocking: mock the Claude MCP service so no filesystem reads occur.
 vi.mock('../../services/claude-mcp', () => {
   const loadMcpServers = vi.fn()
+  const readDisabledMcpServers = vi.fn()
+  // The three-scope merge moved into `claude-mcp.ts` so the Codex bridge can
+  // share it (ADR-068 §5). Re-expressed here over the SAME mocked reads, so
+  // every assertion below — precedence, the per-scope call args, the
+  // throwing-read case — keeps measuring what it always did.
+  const mergeClaudeMcpServers = vi.fn((cwd: string) => ({
+    ...(loadMcpServers('user') as object),
+    ...(loadMcpServers('project', cwd) as object),
+    ...(loadMcpServers('local', cwd) as object)
+  }))
   return {
     loadMcpServers,
-    readDisabledMcpServers: vi.fn(),
-    // The three-scope merge moved into `claude-mcp.ts` so the Codex bridge can
-    // share it (ADR-068 §5). Re-expressed here over the SAME mocked reads, so
-    // every assertion below — precedence, the per-scope call args, the
-    // throwing-read case — keeps measuring what it always did.
-    mergeClaudeMcpServers: vi.fn((cwd: string) => ({
-      ...(loadMcpServers('user') as object),
-      ...(loadMcpServers('project', cwd) as object),
-      ...(loadMcpServers('local', cwd) as object)
-    }))
+    readDisabledMcpServers,
+    mergeClaudeMcpServers,
+    // The merge-minus-disabled read every bridge shares (ADR-096), over the
+    // same mocked reads — so the disabled-list assertions keep measuring it.
+    readEnabledClaudeMcpServers: vi.fn((cwd: string) => {
+      const disabled = new Set((readDisabledMcpServers(cwd) as string[] | undefined) ?? [])
+      return Object.fromEntries(
+        Object.entries(mergeClaudeMcpServers(cwd)).filter(([name]) => !disabled.has(name))
+      )
+    })
   }
 })
 

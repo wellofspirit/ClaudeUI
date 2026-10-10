@@ -22,7 +22,24 @@ import { resolvePiForkAnchor } from './pi-session-list'
 import { calculateCostFromTokens, normalizeModelName } from './block-usage'
 import { dispatchedCostsByRouting } from './db'
 import { cwdToProjectKey } from '../../shared/project-key'
+import { locateClaudeTranscript } from './claude-transcript-locator'
 import { extractToolResultContent } from './tool-result-content'
+import { blobStore } from './blob-store'
+import {
+  agentIdOf,
+  foldAgentIdentity,
+  readNestedAgentOrigins,
+  type TranscriptAgentEvent,
+  type TranscriptTerminal
+} from './agent-identity'
+import {
+  isTaskNotificationDelivery,
+  parseTaskNotificationXml,
+  taskNotificationNoteTitle,
+  type ParsedTaskNotification
+} from './task-notification-xml'
+import { agentNoteMessage } from './agent-note'
+import { queuedCommandText } from '../sdk/queued-command-text'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
@@ -270,7 +287,9 @@ function foldSubagentFile(
 async function foldSubagentCosts(
   filePath: string,
   modelTokens: Map<string, ModelTokenAgg>,
-  seenMessageIds: Set<string>
+  seenMessageIds: Set<string>,
+  /** Fold only these agents (a fork's anchor-truncated figures); absent = all. */
+  onlyAgentIds?: ReadonlySet<string>
 ): Promise<void> {
   const subagentsDir = path.join(
     path.dirname(filePath),
@@ -287,16 +306,32 @@ async function foldSubagentCosts(
     return
   }
 
-  const agentFiles = files.filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl')).sort()
+  const agentFiles = files
+    .filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl'))
+    .filter((f) => !onlyAgentIds || onlyAgentIds.has(f.slice('agent-'.length, -'.jsonl'.length)))
+    .sort()
 
   for (const f of agentFiles) {
     await foldSubagentFile(path.join(subagentsDir, f), modelTokens, seenMessageIds)
   }
 }
 
+/**
+ * Token, cost and duration figures reconstructed from a transcript.
+ *
+ * `resumeSessionAt` is the fork/branch anchor, with `loadSessionHistory`'s
+ * semantics: the anchor line is the last one counted (cli.js keeps
+ * `lines.slice(0, w + 1)`), so a fork's figures stop where its conversation does
+ * instead of counting the whole parent. An anchor not in the file truncates
+ * nothing. Subagent spend is then limited to the agents the kept lines spawned
+ * (their `agentId`s are in the kept tool results); agents spawned from inside a
+ * subagent are not attributable to a side of the anchor from the main file, so a
+ * truncated read leaves them out.
+ */
 export async function computeTokenMetrics(
   filePath: string,
-  model?: string
+  model?: string,
+  resumeSessionAt?: string
 ): Promise<StatusLineData> {
   const empty: StatusLineData = {
     totalCostUsd: 0,
@@ -341,12 +376,30 @@ export async function computeTokenMetrics(
     const modelTokens = new Map<string, ModelTokenAgg>()
     const seenMessageIds = new Set<string>()
 
+    // Fork anchor (see the doc comment): set once the anchor line is READ, so that
+    // line is still counted and every later one is dropped.
+    let pastAnchor = false
+    let anchorFound = false
+    const keptAgentIds = new Set<string>()
+
     const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     const rl = readline.createInterface({ input: stream })
 
     rl.on('line', (line) => {
+      if (pastAnchor) return
       try {
         const data = JSON.parse(line)
+        if (resumeSessionAt && data.uuid === resumeSessionAt) {
+          pastAnchor = true
+          anchorFound = true
+        }
+        if (resumeSessionAt && data.type === 'user' && Array.isArray(data.message?.content)) {
+          for (const block of data.message.content) {
+            if (block?.type !== 'tool_result') continue
+            const agentId = agentIdOf(extractToolResultContent(block.content).text)
+            if (agentId) keptAgentIds.add(agentId)
+          }
+        }
         turnSpanAcc.push(data)
 
         if (data.type === 'assistant' && data.message?.usage) {
@@ -413,7 +466,12 @@ export async function computeTokenMetrics(
       // Task-tool subagent spend lives in separate transcript files (see
       // foldSubagentCosts's doc comment) — fold it into the same modelTokens
       // map before deriving modelCosts/totalCostUsd below.
-      await foldSubagentCosts(filePath, modelTokens, seenMessageIds)
+      await foldSubagentCosts(
+        filePath,
+        modelTokens,
+        seenMessageIds,
+        anchorFound ? keptAgentIds : undefined
+      )
 
       const modelCosts: ModelCostEntry[] = []
       for (const [modelId, agg] of modelTokens) {
@@ -452,6 +510,26 @@ export async function computeTokenMetrics(
  * Scan ~/.claude/projects/ for session directories and build DirectoryGroup[].
  * Uses a disk-based metadata cache (~/.claude/ui/directory-cache.json) keyed by
  * file path + mtime. Only re-parses files whose mtime has changed.
+ *
+ * ## Groups are keyed by a session's HOME, not by the dir its file sits in
+ *
+ * cli.js's `EnterWorktree` relocates the live transcript into the worktree
+ * path's project dir (`-…-<repo>--claude-worktrees-<name>`), but the
+ * transcript's first user entry keeps the ORIGINAL cwd. Keyed by directory,
+ * that session became a second group with the same `cwd` (and so the same
+ * label) as its real project. So a session's home key is
+ * `cwdToProjectKey(meta.cwd)` — falling back to the dir it lives in when the
+ * cwd is unknown — and the group is built under that key.
+ *
+ * `SessionInfo.projectKey` stays the dir the file ACTUALLY lives in: loading
+ * history, watching, renaming and single-session delete all address the file
+ * through it. Only the GROUP's key is the home key, so a home group can exist
+ * with every member relocated and no directory of its own on disk (project
+ * delete handles that — see `handlers-core.deleteProject`).
+ *
+ * Scope: keys are only compared, never resolved through git. A session whose
+ * FIRST prompt was already inside a worktree (ClaudeUI's "new session in
+ * worktree") has the worktree as its home and keeps its own group.
  */
 export async function listDirectories(): Promise<DirectoryGroup[]> {
   let projectDirs: string[]
@@ -468,7 +546,13 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
   const cache = loadDiskCache()
   let cacheChanged = false
 
-  const groups: DirectoryGroup[] = []
+  // Keyed by HOME key (see the doc comment). `cwd` comes from a member whose
+  // file lives in the home dir; `relocatedCwd` is the fallback for a home group
+  // whose members were all relocated. They are equal by construction (up to the
+  // key's lossiness — the home key IS derived from that cwd), but preferring the
+  // home dir's own sessions keeps the label identical to what it was before
+  // relocated members merged in.
+  const byHome = new Map<string, { cwd: string; relocatedCwd: string; sessions: SessionInfo[] }>()
 
   for (const projectKey of projectDirs) {
     const projectDir = path.join(CLAUDE_PROJECTS_DIR, projectKey)
@@ -531,9 +615,6 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
     }
 
     // Build sessions from cache
-    const sessions: SessionInfo[] = []
-    let groupCwd = ''
-
     for (const f of fileEntries) {
       const meta = cache[f.filePath]
       if (!meta) continue
@@ -541,15 +622,28 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
       // Skip sessions with no user or assistant messages
       if (meta.hasConversation === false) continue
 
-      if (!groupCwd && meta.cwd) groupCwd = meta.cwd
+      const homeKey = (meta.cwd && cwdToProjectKey(meta.cwd)) || projectKey
+      let home = byHome.get(homeKey)
+      if (!home) {
+        home = { cwd: '', relocatedCwd: '', sessions: [] }
+        byHome.set(homeKey, home)
+      }
+      if (meta.cwd) {
+        if (homeKey === projectKey) {
+          if (!home.cwd) home.cwd = meta.cwd
+        } else if (!home.relocatedCwd) {
+          home.relocatedCwd = meta.cwd
+        }
+      }
 
       // Priority: custom-title (user override) > ai-title (cli.js auto) > summary (compact) > first user prompt title
       const displayTitle =
         meta.customTitle || meta.aiTitle || meta.summary || meta.title || 'Untitled'
 
-      sessions.push({
+      home.sessions.push({
         sessionId: f.sessionId,
         cwd: meta.cwd || '',
+        // The dir the file lives in — NOT the home key (see the doc comment).
         projectKey,
         title: displayTitle,
         timestamp: meta.timestamp || f.mtime,
@@ -558,16 +652,19 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
         engineId: 'claude'
       })
     }
+  }
 
-    if (sessions.length === 0) continue
-
+  const groups: DirectoryGroup[] = []
+  for (const [homeKey, home] of byHome) {
+    const { sessions } = home
     sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt)
 
-    const folderName = groupCwd ? groupCwd.split(/[\\/]/).pop() || groupCwd : projectKey
+    const groupCwd = home.cwd || home.relocatedCwd
+    const folderName = groupCwd ? groupCwd.split(/[\\/]/).pop() || groupCwd : homeKey
 
     groups.push({
       cwd: groupCwd,
-      projectKey,
+      projectKey: homeKey,
       folderName,
       sessions
     })
@@ -744,45 +841,6 @@ export function fallbackBlockText(block: Record<string, unknown>): string {
   return `Switched models${from ? ` from ${from}` : ''}${to ? ` to ${to}` : ''}.`
 }
 
-/**
- * Parse task-notification XML from JSONL content strings.
- * Returns null if no task notification found.
- */
-function parseTaskNotificationXml(
-  text: string
-): Omit<TaskNotification, 'toolUseId' | 'outputFile'> | null {
-  const match = text.match(/<task-notification>([\s\S]*?)<\/task-notification>/)
-  if (!match) return null
-
-  const xml = match[1]
-  const get = (tag: string): string => {
-    const m = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`))
-    return m ? m[1].trim() : ''
-  }
-
-  const taskId = get('task-id')
-  const status = get('status') as 'completed' | 'failed' | 'stopped'
-  const summary = get('summary')
-
-  // Parse usage block if present
-  const usageStr = get('usage')
-  let usage: TaskNotification['usage'] | undefined
-  if (usageStr) {
-    const getNum = (key: string): number => {
-      const m = usageStr.match(new RegExp(`${key}:\\s*(\\d+)`))
-      return m ? Number(m[1]) : 0
-    }
-    usage = {
-      totalTokens: getNum('total_tokens'),
-      toolUses: getNum('tool_uses'),
-      durationMs: getNum('duration_ms')
-    }
-  }
-
-  if (!taskId || !status) return null
-  return { taskId, status, summary, usage }
-}
-
 /** Parse CLI command XML into structured data */
 function parseCliCommand(
   text: string
@@ -813,10 +871,12 @@ function parseCliCommand(
   return null
 }
 
-/** Extract <output-file> path from task-notification XML */
-function extractOutputFile(text: string): string {
-  const m = text.match(/<output-file>([\s\S]*?)<\/output-file>/)
-  return m ? m[1].trim() : ''
+const UNFINISHED_SUMMARY = 'The transcript ends before this agent reported back.'
+
+/** A `<task-notification>` the loader shows: one that names a task AND a known status. */
+function readTaskNotification(text: string): ParsedTaskNotification | null {
+  const notif = parseTaskNotificationXml(text)
+  return notif?.status ? notif : null
 }
 
 /**
@@ -832,7 +892,8 @@ function extractOutputFile(text: string): string {
  * The transcript carries no filename, so `fileName` is omitted. Blocks with a
  * non-base64 source, a missing/empty `data`, or a media type outside
  * `IMAGE_MEDIA_TYPES` are skipped — never thrown on (a transcript is untrusted
- * input).
+ * input). The bytes are interned into the blob store and the blocks carry refs
+ * (ADR-087); a payload the store refuses is skipped the same way.
  */
 function extractAttachmentBlocks(content: unknown): ContentBlock[] {
   if (!Array.isArray(content)) return []
@@ -848,9 +909,11 @@ function extractAttachmentBlocks(content: unknown): ContentBlock[] {
     if (typeof mediaType !== 'string' || typeof data !== 'string' || !data) continue
     if (block.type === 'image') {
       if (!isImageMediaType(mediaType)) continue
-      blocks.push({ type: 'image', mediaType, base64Data: data })
+      const ref = blobStore.put(mediaType, data)
+      if (ref) blocks.push({ type: 'image', mediaType, ...ref })
     } else if (mediaType === 'application/pdf') {
-      blocks.push({ type: 'document', mediaType: 'application/pdf', base64Data: data })
+      const ref = blobStore.put(mediaType, data)
+      if (ref) blocks.push({ type: 'document', mediaType: 'application/pdf', ...ref })
     }
   }
   return blocks
@@ -894,9 +957,11 @@ export async function resolveForkAnchor(
   if (engineId === 'pi') return resolvePiForkAnchor(sessionId, messageIndex)
   if (engineId !== 'claude') throw new Error(`Session fork is unsupported for engine "${engineId}"`)
 
-  const projectKey = cwdToProjectKey(cwd)
-  const filePath = path.join(CLAUDE_PROJECTS_DIR, projectKey, `${sessionId}.jsonl`)
-  if (!fs.existsSync(filePath)) return { anchorUuid: null, reason: 'transcript-not-found' }
+  // Located, not derived from `cwd`: a transcript cli.js relocated into a
+  // worktree's project dir (`EnterWorktree`) does not live under the key its
+  // session cwd derives, and branching from such a session used to fail here.
+  const filePath = locateClaudeTranscript(sessionId, cwd, CLAUDE_PROJECTS_DIR)
+  if (!filePath) return { anchorUuid: null, reason: 'transcript-not-found' }
 
   let raw: string
   try {
@@ -952,6 +1017,52 @@ export async function loadSessionHistory(
     let customTitle: string | null = null
     // Map agentId (from task-notification <task-id>) → toolUseId (from Task tool_use)
     const agentIdToToolUseId: Record<string, string> = {}
+    // Spawns, resumes and terminal events, in transcript order — folded at the
+    // end to find agents whose last run never ended (ADR-073 §5).
+    const agentEvents: TranscriptAgentEvent[] = []
+    // cli.js writes every notification twice with identical text — the
+    // queue-operation `enqueue`, then the user message when the parent
+    // consumes it. One entry per notification; the enqueue alone still counts
+    // (a notification queued as the session died is never consumed).
+    const seenNotifications = new Set<string>()
+    // Each entry with the terminal event it came from: the run it ends is only
+    // known once the whole transcript has been folded.
+    const unstamped: Array<[TaskNotification, TranscriptTerminal]> = []
+    const pushNotification = (notif: ParsedTaskNotification): void => {
+      if (seenNotifications.has(notif.raw)) return
+      seenNotifications.add(notif.raw)
+      const entry: TaskNotification = {
+        taskId: notif.taskId,
+        toolUseId: agentIdToToolUseId[notif.taskId] || null,
+        status: notif.status ?? 'completed',
+        outputFile: notif.outputFile,
+        summary: notif.summary,
+        ...(notif.usage ? { usage: notif.usage } : {})
+      }
+      const event: TranscriptTerminal = {
+        kind: 'terminal',
+        taskId: notif.taskId,
+        runToolUseId: notif.runToolUseId
+      }
+      taskNotifications.push(entry)
+      agentEvents.push(event)
+      unstamped.push([entry, event])
+    }
+    /**
+     * A notification cli.js DELIVERED (a turn-starting user line, or a
+     * `queued_command` attachment absorbed mid-turn): the same agent note the
+     * live session shows (ClaudeSession.handleTaskNotificationUserMessage), at
+     * the point the model read it, plus the usual `taskNotifications` entry.
+     * The queue-operation `enqueue` records are bookkeeping, not deliveries:
+     * they only feed `taskNotifications`.
+     */
+    const pushDeliveredNotification = (text: string, id: string, timestamp: number): void => {
+      const parsed = parseTaskNotificationXml(text)
+      messages.push(
+        agentNoteMessage({ id, title: taskNotificationNoteTitle(parsed), text, timestamp })
+      )
+      if (parsed?.status) pushNotification(parsed)
+    }
     /** Set once the anchor line has been READ — every LATER line is dropped. */
     let pastAnchor = false
 
@@ -1020,11 +1131,14 @@ export async function loadSessionHistory(
           // String content — can be user prompt, task-notification, or command
           if (isString) {
             const text = content as string
-            // Task notification
-            const notif = parseTaskNotificationXml(text)
-            if (notif) {
-              const toolUseId = agentIdToToolUseId[notif.taskId] || null
-              taskNotifications.push({ ...notif, toolUseId, outputFile: extractOutputFile(text) })
+            // Task notification — cli.js's delivery, by its `origin` marker
+            // (else its XML); a typed prompt (`origin.kind: 'human'`) never is.
+            if (isTaskNotificationDelivery(obj.origin, text)) {
+              pushDeliveredNotification(
+                text,
+                obj.uuid || `notif-${messages.length}`,
+                obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+              )
               return
             }
             // CLI commands — parse and emit as cli_command block
@@ -1067,10 +1181,12 @@ export async function loadSessionHistory(
             const attachments = extractAttachmentBlocks(content)
 
             // Check if text is actually a task notification
-            const notif = text ? parseTaskNotificationXml(text) : null
-            if (notif) {
-              const toolUseId = agentIdToToolUseId[notif.taskId] || null
-              taskNotifications.push({ ...notif, toolUseId, outputFile: extractOutputFile(text) })
+            if (text && isTaskNotificationDelivery(obj.origin, text)) {
+              pushDeliveredNotification(
+                text,
+                obj.uuid || `notif-${messages.length}`,
+                obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+              )
             } else if (
               text &&
               (text.startsWith('<command-name>') || text.startsWith('<local-command'))
@@ -1105,10 +1221,21 @@ export async function loadSessionHistory(
                 const { text: resultText, images } = extractToolResultContent(block.content)
 
                 // Extract agentId from Task tool results for mapping
-                const agentMatch = resultText.match(/(?:agentId|agent_id):\s*(\S+)/)
-                if (agentMatch) {
-                  agentIdToToolUseId[agentMatch[1]] = block.tool_use_id
+                const agentId = agentIdOf(resultText)
+                if (agentId) {
+                  agentIdToToolUseId[agentId] = block.tool_use_id
                 }
+                agentEvents.push({
+                  kind: 'result',
+                  toolUseId: block.tool_use_id,
+                  text: resultText,
+                  structured:
+                    obj.toolUseResult &&
+                    typeof obj.toolUseResult === 'object' &&
+                    !Array.isArray(obj.toolUseResult)
+                      ? obj.toolUseResult
+                      : undefined
+                })
 
                 // Find last assistant message with matching tool_use
                 for (let i = messages.length - 1; i >= 0; i--) {
@@ -1241,16 +1368,54 @@ export async function loadSessionHistory(
           // Task notifications can appear as queue-operation entries
           const content = obj.content as string | undefined
           if (content) {
-            const notif = parseTaskNotificationXml(content)
-            if (notif) {
-              const toolUseId = agentIdToToolUseId[notif.taskId] || null
-              taskNotifications.push({
-                ...notif,
-                toolUseId,
-                outputFile: extractOutputFile(content)
-              })
-            }
+            const notif = readTaskNotification(content)
+            if (notif) pushNotification(notif)
           }
+        } else if (type === 'attachment') {
+          // A message cli.js folded into a RUNNING turn at a tool boundary — a
+          // steer. It is persisted at the fold, between the boundary's
+          // tool_result and the answer, as
+          //   {type:'attachment', attachment:{type:'queued_command', prompt,
+          //    source_uuid, commandMode, …}}
+          // and never as a `user` line (a message that STARTS a turn is one),
+          // so without this branch every steer vanished from a reopened
+          // session (docs/protocol-cc/03-inbound-messages.md §3.21). The live
+          // bubble is `steer-<itemId>`; this one is keyed by the uuid its frame
+          // carried, which for a ClaudeUI send IS the itemId.
+          const att = obj.attachment as Record<string, unknown> | undefined
+          if (att?.type !== 'queued_command') return
+          // cli.js's own injections (forwarded intent, peer notes) are meta.
+          if (att.isMeta === true) return
+          const text = queuedCommandText(att.prompt)
+          // A task notification absorbed mid-turn rides the same attachment
+          // (`commandMode: 'task-notification'`, `origin.kind` likewise); its
+          // queue-operation `enqueue` already recorded the taskNotifications
+          // entry (deduped by text), and this is where the model read it.
+          if (
+            text &&
+            (att.commandMode === 'task-notification' ||
+              isTaskNotificationDelivery(att.origin, text))
+          ) {
+            pushDeliveredNotification(
+              text,
+              obj.uuid || `notif-${messages.length}`,
+              obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+            )
+            return
+          }
+          if (att.commandMode !== undefined && att.commandMode !== 'prompt') return
+          const attachments = extractAttachmentBlocks(att.prompt)
+          if (!text.trim() && attachments.length === 0) return
+          messages.push({
+            id:
+              typeof att.source_uuid === 'string' && att.source_uuid
+                ? att.source_uuid
+                : obj.uuid || `queued-${messages.length}`,
+            role: 'user',
+            // Attachments first, then the text — the live steer bubble's order.
+            content: [...attachments, ...(text ? [{ type: 'text' as const, text }] : [])],
+            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+          })
         } else if (type === 'system') {
           const subtype = obj.subtype as string | undefined
           if (subtype === 'compact_boundary') {
@@ -1276,7 +1441,46 @@ export async function loadSessionHistory(
     })
 
     rl.on('close', async () => {
-      const statusLine = await computeTokenMetrics(filePath)
+      // Nested agents (ADR-073 §7): their spawn results live in the parent
+      // agent's transcript, so the loop above never mapped them. Their
+      // sidecars name each one's origin; the Sidebar then loads their
+      // transcripts like any other. A notification the main transcript holds
+      // for one could not be attributed while reading — attribute it now.
+      for (const [agentId, toolUseId] of Object.entries(readNestedAgentOrigins(filePath))) {
+        if (agentIdToToolUseId[agentId]) continue
+        agentIdToToolUseId[agentId] = toolUseId
+        for (const entry of taskNotifications) {
+          if (entry.taskId === agentId && entry.toolUseId === null) entry.toolUseId = toolUseId
+        }
+      }
+      // An agent whose last run the transcript opens and never closes gets a
+      // neutral `unfinished` entry, so its card stops reading "completed" off
+      // the launch result. Never `stopped`: this loader also serves sessions a
+      // CLI elsewhere is still running (session-watcher), where the agent may
+      // well be working. A live resume replaces it with cli.js's own reap.
+      const lifecycle = foldAgentIdentity(agentEvents)
+      // The run each notification ends, numbered as the live session numbers
+      // them — so a reopened session still says "resumed ×N", and a live
+      // resume's events fold into these entries instead of beside them.
+      for (const [entry, event] of unstamped) {
+        const runIndex = lifecycle.closedRun.get(event)
+        if (runIndex !== undefined && entry.toolUseId) entry.runIndex = runIndex
+      }
+      for (const taskId of lifecycle.unfinished) {
+        const origin = lifecycle.origins.get(taskId)
+        if (!origin) continue
+        taskNotifications.push({
+          taskId,
+          toolUseId: origin,
+          status: 'unfinished',
+          outputFile: '',
+          summary: UNFINISHED_SUMMARY,
+          runIndex: lifecycle.runCounts.get(origin) ?? 1
+        })
+      }
+
+      // A fork's figures stop at its anchor, like the messages above.
+      const statusLine = await computeTokenMetrics(filePath, undefined, resumeSessionAt)
       // Slice C — merge durable dispatched-cost rows into the history-loaded
       // status line. A reopened session that hasn't spawned a ClaudeSession
       // yet has no seedDispatchedCosts() run for it, and computeTokenMetrics
@@ -1519,7 +1723,7 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
               if (textBlock) text = textBlock.text as string
             }
             const attachments = isArray ? extractAttachmentBlocks(content) : []
-            const isNotif = text ? parseTaskNotificationXml(text) !== null : false
+            const isNotif = text ? readTaskNotification(text) !== null : false
             if (!isNotif && (text || attachments.length > 0)) {
               // Attachments before text — see the main parser for rationale.
               messages.push({

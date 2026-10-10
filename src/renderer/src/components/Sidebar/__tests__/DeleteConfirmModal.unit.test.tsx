@@ -177,3 +177,64 @@ describe('DeleteConfirmModal (codex branches)', () => {
     expect(screen.getByRole('button', { name: 'Delete' })).toBeInTheDocument()
   })
 })
+
+/**
+ * Claude sessions a project delete removes one by one (`planClaudeProjectDelete`).
+ * cli.js's `EnterWorktree` moves a session's transcript into a worktree's project
+ * folder while the sidebar still lists it under its home project, so deleting the
+ * home folder alone would not reach it — and the dialog has to name it.
+ */
+describe('DeleteConfirmModal (project, relocated sessions)', () => {
+  const RELOCATED = '~/.claude/projects/-repo--claude-worktrees-wt/moved.jsonl'
+
+  it('names the relocated session files alongside the folder', () => {
+    renderModal({
+      kind: 'project',
+      name: 'repo',
+      path: '~/.claude/projects/-repo/',
+      sessionCount: 3,
+      sessionPaths: [RELOCATED]
+    })
+    const block = screen.getByTestId('DeleteConfirmModal.relocated')
+    expect(block).toHaveTextContent('Also deletes 1 session that moved into a worktree folder:')
+    expect(
+      screen.getAllByTestId('DeleteConfirmModal.relocatedPath').map((el) => el.textContent)
+    ).toEqual([RELOCATED])
+    // The folder itself is still deleted, and said so, exactly as before.
+    expect(screen.getByText('~/.claude/projects/-repo/')).toBeInTheDocument()
+  })
+
+  it('does not claim the folder when it is kept — its sessions go one by one', () => {
+    const own = [
+      '~/.claude/projects/-repo--claude-worktrees-wt/a.jsonl',
+      '~/.claude/projects/-repo--claude-worktrees-wt/b.jsonl'
+    ]
+    renderModal({
+      kind: 'project',
+      name: 'wt',
+      path: '~/.claude/projects/-repo--claude-worktrees-wt/',
+      sessionCount: 2,
+      sessionPaths: own,
+      folderKept: true
+    })
+    expect(screen.getByTestId('DeleteConfirmModal.relocated')).toHaveTextContent(
+      /sessions are deleted one by one — the folder also holds another project's session, so it is kept/
+    )
+    expect(screen.getAllByTestId('DeleteConfirmModal.relocatedPath')).toHaveLength(2)
+    expect(
+      screen.getByText('~/.claude/projects/-repo--claude-worktrees-wt/ — folder kept')
+    ).toBeInTheDocument()
+  })
+
+  it('renders exactly as before when no session is deleted one by one', () => {
+    renderModal({
+      kind: 'project',
+      name: 'repo',
+      path: '~/.claude/projects/-repo/',
+      sessionCount: 2,
+      sessionPaths: []
+    })
+    expect(screen.queryByTestId('DeleteConfirmModal.relocated')).not.toBeInTheDocument()
+    expect(screen.getByText('~/.claude/projects/-repo/')).toBeInTheDocument()
+  })
+})

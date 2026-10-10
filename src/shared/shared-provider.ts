@@ -15,6 +15,94 @@ export interface SharedProviderModel {
       { id?: string; enabled?: boolean; available?: boolean; default?: boolean }
     >
   >
+  /**
+   * What the last Detect read (or, for maxTokens, suggested) for this model — the baseline that
+   * tells "still the server's value" from "the user edited it". Never projected into any engine.
+   */
+  detected?: SharedProviderModelDetected
+}
+
+/** The server software behind a custom endpoint, as Detect recognised it from `/models`. */
+export type EndpointServerKind = 'vllm' | 'sglang' | 'openai-compatible'
+
+/**
+ * A model's Detect baseline (see {@link SharedProviderModel.detected}): each
+ * field holds the value Detect filled or last confirmed, absent where Detect
+ * supplied nothing. A model field equal to its baseline is still the server's;
+ * one that differs is the user's own.
+ */
+export interface SharedProviderModelDetected {
+  server: EndpointServerKind
+  /** When Detect last ran against this model, ISO 8601. */
+  at: string
+  contextWindow?: number
+  /** Always a SUGGESTION: neither vLLM nor SGLang reports a max output. */
+  maxTokens?: number
+  vision?: boolean
+  reasoning?: boolean
+}
+
+/**
+ * What `shared-provider:probe` answers. Discriminated on `status` and never on
+ * an `ok` key: the preload and web `unwrap` read any object carrying `ok` as
+ * the transport envelope and would hand back its (absent) `data`.
+ */
+export type EndpointProbeResult = EndpointProbeDetected | EndpointProbeFailed
+
+export interface EndpointProbeDetected {
+  status: 'detected'
+  server: EndpointServerKind
+  models: EndpointProbeModel[]
+  /** SGLang only: null = server runs without --tool-call-parser (agents can't call tools). */
+  toolCallParser?: string | null
+  /** SGLang only: model_info could not be read — vision/reasoning not detected. */
+  modelInfoUnavailable?: boolean
+}
+
+export interface EndpointProbeFailed {
+  status: 'failed'
+  reason: EndpointProbeFailure
+  /** Names the URL without its query string or userinfo, and never the key. */
+  message: string
+  /**
+   * The provider's stored key exists but was NOT sent: it goes only to the
+   * origin its saved custom definition already points at, and this Base URL is
+   * another one (or the provider is not a custom endpoint). Typing the key
+   * sends it. Set on failures only — a keyless success needs no explaining.
+   */
+  keyWithheld?: boolean
+}
+
+export type EndpointProbeFailure =
+  | 'unauthorized'
+  | 'unreachable'
+  | 'timeout'
+  | 'redirect'
+  | 'http'
+  | 'invalid-response'
+  | 'invalid-url'
+
+/** One served model as the endpoint reported it. Absent fields were not reported. */
+export interface EndpointProbeModel {
+  id: string
+  contextWindow?: number
+  vision?: boolean
+  reasoning?: boolean
+  /** SGLang's `--reasoning-parser` (`qwen3`, `deepseek-r1`, …), when reasoning is on. */
+  reasoningParser?: string
+}
+
+/** What `shared-provider:probe` takes. The key never comes back. */
+export interface EndpointProbeInput {
+  baseUrl: string
+  protocol?: SharedProviderProtocol
+  /** A key typed into the form. Wins over the stored one. */
+  apiKey?: string
+  /**
+   * An existing custom definition whose stored key the host uses when no key is
+   * typed — only while `baseUrl` has the origin its saved `baseUrl` has.
+   */
+  providerId?: string
 }
 
 export interface SharedProviderRoute {
@@ -188,6 +276,11 @@ export interface SharedProviderStatus {
       modelCount?: number
       error?: string
       /**
+       * The engine kept a key of its own for this route's vendor: an automatic
+       * delivery never replaces one (ADR-082 §8, S7d). `error` carries the words.
+       */
+      ownKeyKept?: true
+      /**
        * Set only when the route is enabled and surfaces zero models. Distinct
        * from `error`, which means an operation FAILED — a diagnosis is a healthy
        * route with a configuration reason for being empty.
@@ -201,4 +294,15 @@ const PROVIDER_ID = /^[a-z0-9][a-z0-9-]{0,62}$/
 
 export function validateSharedProviderId(id: string): void {
   if (!PROVIDER_ID.test(id)) throw new Error(`Invalid shared provider id: ${id}`)
+}
+
+/**
+ * A vendor id as a harness's auth file keys it — looser than a shared
+ * provider id: models.dev ids carry dots (`io.net`) and capitals, never a path
+ * separator or whitespace. Checked wherever one arrives over the wire.
+ */
+const VENDOR_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+
+export function validateVendorId(id: unknown): asserts id is string {
+  if (typeof id !== 'string' || !VENDOR_ID.test(id)) throw new Error('Invalid provider id')
 }

@@ -1,44 +1,46 @@
 /**
- * Resolve the rebundled Bun standalone binary path in both dev and production.
+ * The Claude Code binary the app spawns: a thin delegate to the harness
+ * resolver (`../harness/resolve.ts`, ADR-082), which decides for every harness.
  *
- *   dev        → <projectRoot>/vendor/claude-cli/bun-claude[.exe]
- *   production → <Resources>/claude-cli/bun-claude[.exe]  (primary, extraResources)
- *                <app.asar.unpacked>/vendor/claude-cli/bun-claude[.exe]  (fallback)
+ *   `CLAUDEUI_CLAUDE_CLI=<path>`  development override (warns once and falls
+ *                                 back when it names no file); it is how the app
+ *                                 runs against Anthropic's unpatched binary
+ *   bundled                       the rebundled `bun-claude[.exe]`:
+ *                                   dev        <projectRoot>/vendor/claude-cli/
+ *                                   production <Resources>/claude-cli/
+ *                                              <app.asar.unpacked>/vendor/claude-cli/
  *
- * The binary is produced by `scripts/rebundle-cli.mjs` and contains our
- * patched cli.js embedded in Anthropic's Bun runtime — no Electron-as-Node
- * shim required. electron-builder copies vendor/claude-cli → extraResources
- * at build time.
+ * The bundled binary is produced by `scripts/rebundle-cli.mjs` (our patched
+ * cli.js embedded in Anthropic's Bun runtime); electron-builder copies
+ * vendor/claude-cli → extraResources. What a binary can do is read from the
+ * `version.json` beside it (`./harness.ts`); the official one has none, so it
+ * counts as unpatched.
  */
-import * as fs from 'node:fs'
-import * as path from 'node:path'
-import { getAppPath } from '../host'
+import type { HarnessLaunch } from '../../shared/harness-types'
+import { nativeLaunch } from '../harness/launch'
+import { bundledClaudePath, harnessEnvVar, harnessLaunch, resolveHarness } from '../harness/resolve'
 
-const BIN_NAME = process.platform === 'win32' ? 'bun-claude.exe' : 'bun-claude'
+/** Env var naming a Claude Code binary to spawn instead of the bundled one. */
+export const CLAUDE_CLI_OVERRIDE_ENV = harnessEnvVar('claude')
 
-/** Resolve the path to the rebundled Bun standalone binary. */
+/**
+ * Resolve the path to the Claude Code binary the app spawns: the resolved
+ * launch's command (ADR-082 §2), which for Claude Code is always the
+ * executable itself, a System install's included. Never null: when nothing was
+ * found it returns where the bundled binary would be, so the spawn error names
+ * that path.
+ */
 export function locateBunClaude(): string {
-  // Outside Electron (vitest integration project, harness scripts) no host
-  // paths are wired — `getAppPath()` falls back to cwd, which is the project
-  // root in those contexts.
-  const appPath = getAppPath()
+  return resolveHarness('claude').launch?.command ?? bundledClaudePath()
+}
 
-  if (!appPath.includes('app.asar')) {
-    // Dev — appPath is the project root.
-    return path.join(appPath, 'vendor', 'claude-cli', BIN_NAME)
-  }
-
-  // Production — extraResources copies vendor/claude-cli → <Resources>/claude-cli.
-  // path.dirname(appPath) is the Resources directory (where app.asar lives).
-  const candidates = [
-    path.join(path.dirname(appPath), 'claude-cli', BIN_NAME),
-    path.join(appPath.replace('app.asar', 'app.asar.unpacked'), 'vendor', 'claude-cli', BIN_NAME)
-  ]
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return c
-  }
-  // Return primary candidate anyway — caller surfaces the missing-file error.
-  return candidates[0]
+/**
+ * How to spawn Claude Code (ADR-082 §2). Never null, like `locateBunClaude`:
+ * when nothing was found it is a native launch of where the bundled binary
+ * would be, so the spawn error names that path.
+ */
+export function locateClaudeLaunch(): HarnessLaunch {
+  return harnessLaunch('claude') ?? nativeLaunch(bundledClaudePath())
 }
 
 /** @deprecated Use {@link locateBunClaude}. Kept for callers mid-migration. */
@@ -46,14 +48,5 @@ export function locateCliJs(): string {
   return locateBunClaude()
 }
 
-/** Read the vendored CLI version string (or "unknown" on any failure). */
-export function getCliVersion(): string {
-  try {
-    const bin = locateBunClaude()
-    const versionPath = path.join(path.dirname(bin), 'version.json')
-    const v = JSON.parse(fs.readFileSync(versionPath, 'utf-8'))
-    return typeof v.version === 'string' ? v.version : 'unknown'
-  } catch {
-    return 'unknown'
-  }
-}
+// `getCliVersion()` lives in ./harness.ts, the one reader of version.json. It
+// sits there rather than here so harness.ts → locate.ts stays a one-way import.

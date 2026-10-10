@@ -7,6 +7,7 @@ import {
   type SharedProviderRouteDiagnosis
 } from '../../shared/shared-provider'
 import { isPiModelAllowed } from '../../shared/pi-model-allowlist'
+import { PI_DEFAULT_MAX_OUTPUT } from '../../shared/endpoint-detect'
 import { piAgentDir } from '../services/pi-session-list'
 import { loadEngineConfig } from '../services/ui-config'
 import { getPiModelCatalog, invalidatePiModelCache } from '../pi/model-discovery'
@@ -14,12 +15,13 @@ import type { PiModel } from '../pi/pi-protocol'
 import { PI_NATIVE_VENDOR_IDS } from '../auth/pi-vendor-ids'
 
 const DEFAULT_CONTEXT_WINDOW = 128_000
-const DEFAULT_MAX_TOKENS = 16_384
+// Shared with the endpoint form's output warning, which must measure what pi is sent.
+const DEFAULT_MAX_TOKENS = PI_DEFAULT_MAX_OUTPUT
 
 /**
  * The `apiKey` written into a keyless custom provider's models.json entry
  * (ADR-074 §4). pi omits a provider with no usable credential from
- * `get_available_models` (`vendor/pi-cli/pi/docs/models.md`: "The dummy key
+ * `get_available_models` (`vendor/pi-src/packages/coding-agent/docs/models.md`: "The dummy key
  * makes the model available"), so a self-hosted endpoint added with the key
  * left blank would never reach pi's picker without one.
  *
@@ -150,10 +152,12 @@ export class PiSharedProviderAdapter {
       throw new Error(`Pi provider changed outside ClaudeUI: ${providerId}`)
     }
 
-    file.providers = {
-      ...providers,
-      [providerId]: mergeProvider(existing, compiled)
-    }
+    const target = mergeProvider(existing, compiled)
+    // Re-applied at every boot: an entry already in shape writes nothing, since
+    // every write invalidates pi's model cache and that killed the probe in
+    // flight (the opencode adapter's applyDefinitionRoute skips the same way).
+    if (sameJson(existing, target)) return
+    file.providers = { ...providers, [providerId]: target }
     this.writeModelsFile(file)
   }
 
@@ -209,6 +213,8 @@ export class PiSharedProviderAdapter {
     // ChatGPT (kind:'subscription') legitimately targets built-in 'openai-codex'
     // and is NOT a collision, so it still removes as before.
     if (isPiBuiltinCollision(definition)) return
+    // A file edit: needs no pi process, and creates nothing when the entry (or
+    // the file) is absent (`PiAuthProvider.removeVendorAuth`).
     await this.deps.auth.removeVendorAuth(nativeProviderId(definition))
   }
 

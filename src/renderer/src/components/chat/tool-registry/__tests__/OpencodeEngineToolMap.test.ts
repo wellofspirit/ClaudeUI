@@ -13,9 +13,14 @@ import type { ToolKind } from '../../../../../../shared/tool-kinds'
 
 describe('OpencodeEngineToolMap.kindOf', () => {
   const cases: [string, ToolKind][] = [
+    // opencode 2.x names (ADR-097 S4) — render as their 1.x counterparts did
+    ['shell', 'command'],
+    ['patch', 'fileEdit'],
+    ['subagent', 'task'],
+    ['execute', 'unknown'],
     ['bash', 'command'],
     ['edit', 'fileEdit'],
-    // 'patch' was a dead case — opencode's real id is 'apply_patch' (§2 verified)
+    // 1.x id, still in sessions migrated from 1.x
     ['apply_patch', 'fileEdit'],
     ['write', 'fileWrite'],
     ['read', 'fileRead'],
@@ -55,9 +60,15 @@ describe('OpencodeEngineToolMap.kindOf', () => {
     expect(OpencodeEngineToolMap.kindOf('todowrite')).toBe('todo')
   })
 
-  // Guard: patch was a dead case that mapped to 'fileEdit' — it should now be 'unknown'
-  it('GUARD: dead "patch" case removed — falls through to unknown', () => {
-    expect(OpencodeEngineToolMap.kindOf('patch')).toBe('unknown')
+  // Guard: 2.x renamed bash→shell, task→subagent, apply_patch→patch. Unmapped,
+  // every 2.x shell/subagent/patch card fell to the generic JSON view.
+  it('GUARD: the 2.x renamed tools keep their 1.x cards and names', () => {
+    expect(OpencodeEngineToolMap.kindOf('shell')).toBe(OpencodeEngineToolMap.kindOf('bash'))
+    expect(OpencodeEngineToolMap.kindOf('subagent')).toBe(OpencodeEngineToolMap.kindOf('task'))
+    expect(OpencodeEngineToolMap.kindOf('patch')).toBe(OpencodeEngineToolMap.kindOf('apply_patch'))
+    expect(OpencodeEngineToolMap.displayName('shell')).toBe('Bash')
+    expect(OpencodeEngineToolMap.displayName('subagent')).toBe('Task')
+    expect(OpencodeEngineToolMap.displayName('patch')).toBe('Patch')
   })
 
   // Guard: list was a dead case that mapped to 'search' — it should now be 'unknown'
@@ -145,6 +156,40 @@ describe('OpencodeEngineToolMap.normalize', () => {
     }
   })
 
+  it('2.x file tools: `path` (not `filePath`) → path', () => {
+    expect(
+      OpencodeEngineToolMap.normalize('fileEdit', {
+        path: 'notes.txt',
+        oldString: 'alpha',
+        newString: 'beta'
+      })
+    ).toMatchObject({ kind: 'fileEdit', path: 'notes.txt', before: 'alpha', after: 'beta' })
+    expect(
+      OpencodeEngineToolMap.normalize('fileWrite', { path: 'new.txt', content: 'x' })
+    ).toMatchObject({ kind: 'fileWrite', path: 'new.txt', content: 'x' })
+    expect(OpencodeEngineToolMap.normalize('fileRead', { path: 'notes.txt' })).toMatchObject({
+      kind: 'fileRead',
+      path: 'notes.txt'
+    })
+  })
+
+  it('2.x subagent: `agent` names the subagent (1.x `subagent_type`)', () => {
+    const view = OpencodeEngineToolMap.normalize('task', {
+      agent: 'general',
+      description: 'look around',
+      prompt: 'go',
+      background: true
+    })
+    expect(view).toMatchObject({
+      kind: 'task',
+      name: 'general',
+      subagent: 'general',
+      description: 'look around',
+      prompt: 'go',
+      background: true
+    })
+  })
+
   it('fileWrite: maps opencode filePath/content → path/content', () => {
     const view = OpencodeEngineToolMap.normalize('fileWrite', {
       filePath: '/src/new.ts',
@@ -209,7 +254,7 @@ describe('OpencodeEngineToolMap.normalize', () => {
   // Cross-engine dispatch (ADR-033 M3): `engine` present discriminates
   // claudeui_dispatch_agent's input from opencode's native task tool.
   describe('task: dispatch_agent (engine present)', () => {
-    it('builds "Dispatch: <engine>" description + "<engine> · <model>" badge', () => {
+    it('builds "Dispatch: <engine>" description + the structured dispatch field', () => {
       const view = OpencodeEngineToolMap.normalize('task', {
         engine: 'claude',
         prompt: 'review this',
@@ -219,13 +264,13 @@ describe('OpencodeEngineToolMap.normalize', () => {
         kind: 'task',
         description: 'Dispatch: claude',
         prompt: 'review this',
-        subagent: 'claude · haiku'
+        dispatch: { engine: 'claude', model: 'haiku' }
       })
     })
 
-    it('badge falls back to bare engine name when model is omitted', () => {
+    it('the dispatch field has no model when none is given', () => {
       const view = OpencodeEngineToolMap.normalize('task', { engine: 'claude', prompt: 'x' })
-      expect(view).toMatchObject({ kind: 'task', subagent: 'claude' })
+      expect(view).toMatchObject({ kind: 'task', dispatch: { engine: 'claude' } })
       if (view.kind === 'task') {
         expect(view.model).toBeUndefined()
       }

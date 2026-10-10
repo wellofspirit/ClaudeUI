@@ -37,6 +37,19 @@ describe('ContextNoteBlock', () => {
     expect(screen.getByTestId('ContextNoteBlock').textContent).not.toContain('1 fragments')
   })
 
+  it('keeps the header to one line: the title truncates, the full text is a tooltip', () => {
+    // The header is a fixed-height row inside an overflow-hidden card — a
+    // wrapping title (a long background-command notification) gets clipped
+    // top and bottom instead of ellipsed. jsdom has no layout, so pin the
+    // classes that make the ellipsis work.
+    const title = 'Background command "until grep -q done chain.log; do sleep 20; done" completed'
+    render(<ContextNoteBlock block={{ ...note, title }} />)
+    const el = screen.getByTestId('ContextNoteBlock.title')
+    expect(el.className).toContain('truncate')
+    expect(el.className).toContain('min-w-0')
+    expect(el.getAttribute('title')).toBe(title)
+  })
+
   it('reveals every fragment verbatim, with its label, on expand', () => {
     render(<ContextNoteBlock block={note} />)
     fireEvent.click(screen.getByTestId('ContextNoteBlock.toggle'))

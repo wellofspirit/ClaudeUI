@@ -1,53 +1,25 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useSessionStore } from '../../stores/session-store'
-import type {
-  ChatMessage,
-  DirectoryGroup,
-  ModelRef,
-  SessionInfo,
-  WorktreeInfo
-} from '../../../../shared/types'
+import type { DirectoryGroup, EngineId, SessionInfo, WorktreeInfo } from '../../../../shared/types'
 import { useAutomationStore } from '../../stores/automation-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import type { CodexDeletePlan } from '../../../../shared/codex-types'
 import { SidebarView, type DeleteTarget } from './View'
 import { cwdToProjectKey } from '../../../../shared/project-key'
+import { planClaudeProjectDelete } from '../../../../shared/claude-project-delete'
+import {
+  ensureTranscriptLoaded,
+  loadSessionIntoStore,
+  opensResident,
+  replaceOnClick
+} from '../../lib/session-history-load'
 
 /** Lightweight projection of session data needed by the sidebar for structural/display decisions */
 type SidebarSessionData = {
   cwd: string
   isWatching: boolean
   firstUserText?: string
-}
-
-/**
- * Seed `sessionEngines` for a session reopened from another engine's own store,
- * before `loadHistoricalSession` reads it back.
- *
- * `model` comes from the transcript's last assistant message because a session
- * that engine created on its own has nothing persisted here, and without it the
- * composer's pill names the configured default — a model the session never ran
- * and the resume will not spawn. A model already persisted for this routing id
- * is the user's own last pick in this session and always wins.
- */
-function seedHistoricalEngine(
-  routingId: string,
-  engineId: 'opencode' | 'pi',
-  lastModel: ModelRef | null | undefined
-): void {
-  const state = useSessionStore.getState()
-  const existing = state.sessionEngines[routingId]
-  const sessionEngines = {
-    ...state.sessionEngines,
-    [routingId]: {
-      ...existing,
-      engineId,
-      ...(!existing?.model && lastModel ? { model: lastModel } : {})
-    }
-  }
-  useSessionStore.setState({ sessionEngines })
-  window.api.saveSessionConfig({ sessionEngines })
 }
 
 function isCodexSession(sessionId: string): boolean {
@@ -59,6 +31,31 @@ function isCodexSession(sessionId: string): boolean {
       group.sessions.some((info) => info.sessionId === sessionId && info.engineId === 'codex')
     )
   )
+}
+
+/**
+ * A session that is in memory but not on disk yet (never spawned, or its
+ * transcript not listed yet), as a sidebar row. Its harness comes from
+ * `sessionEngines`, the record `createNewSession` writes: without it the row
+ * reads as Claude (`SessionItem`'s fallback), which is how a pi session whose
+ * first spawn failed showed Claude's logo in Recent (ADR-082 S7b).
+ */
+function inMemorySessionInfo(
+  sessionId: string,
+  data: SidebarSessionData,
+  engineId: EngineId | undefined,
+  projectKey: string
+): SessionInfo {
+  const now = Date.now()
+  return {
+    sessionId,
+    cwd: data.cwd,
+    projectKey,
+    title: data.firstUserText || 'New session',
+    timestamp: now,
+    lastActivityAt: now,
+    engineId: engineId ?? 'claude'
+  }
 }
 
 /** Structural equality for the sidebar session projection — avoids re-renders from unrelated session changes */
@@ -122,7 +119,6 @@ export function Sidebar({
   })
   const createNewSession = useSessionStore((s) => s.createNewSession)
   const switchSession = useSessionStore((s) => s.switchSession)
-  const loadHistoricalSession = useSessionStore((s) => s.loadHistoricalSession)
   const setWatching = useSessionStore((s) => s.setWatching)
   const pinSession = useSessionStore((s) => s.pinSession)
   const unpinSession = useSessionStore((s) => s.unpinSession)
@@ -170,11 +166,16 @@ export function Sidebar({
   const hiddenProjectSet = useMemo(() => new Set(hiddenProjectKeys), [hiddenProjectKeys])
   const hasAnyHidden = hiddenSessionIds.length > 0 || hiddenProjectKeys.length > 0
 
-  // Find the projectKey for a session from directories
+  // Find the projectKey for a session from directories. The SESSION's key, not
+  // its group's: a transcript cli.js relocated into a worktree's project dir is
+  // listed under its home group, so the group key names a dir the file is not in
+  // — and `writeCustomTitle` appends, so it would CREATE a stray one-line
+  // transcript there.
   const findProjectKey = useCallback(
     (sessionId: string): string | undefined => {
       for (const group of directories) {
-        if (group.sessions.some((s) => s.sessionId === sessionId)) return group.projectKey
+        const info = group.sessions.find((s) => s.sessionId === sessionId)
+        if (info) return info.projectKey
       }
       return undefined
     },
@@ -207,29 +208,10 @@ export function Sidebar({
       }
       // Auto-generate: collect text from session messages
       let session = useSessionStore.getState().sessions[sessionId]
-      // If session not loaded in memory, try loading from disk
-      if (!session) {
-        const info = (() => {
-          for (const group of directories) {
-            const found = group.sessions.find((s) => s.sessionId === sessionId)
-            if (found) return found
-          }
-          return undefined
-        })()
-        if (info?.projectKey) {
-          const { messages, taskNotifications, statusLine, warnings } =
-            await window.api.loadSessionHistory(sessionId, info.projectKey)
-          loadHistoricalSession(
-            sessionId,
-            messages,
-            info.cwd,
-            taskNotifications,
-            {},
-            statusLine,
-            warnings
-          )
-          session = useSessionStore.getState().sessions[sessionId]
-        }
+      // If the transcript is not in memory (never loaded, or evicted and idle), load
+      // it from disk; a resident or live entry is used as it is.
+      if ((await ensureTranscriptLoaded(sessionId)) !== 'resident') {
+        session = useSessionStore.getState().sessions[sessionId]
       }
       if (!session) return
       const texts: string[] = []
@@ -281,7 +263,7 @@ export function Sidebar({
         setCustomTitle(sessionId, '') // clear stuck "generating..." title
       }
     },
-    [directories, setCustomTitle, applyTitle, loadHistoricalSession]
+    [setCustomTitle, applyTitle]
   )
 
   const handleAutoRename = useCallback(
@@ -290,6 +272,21 @@ export function Sidebar({
     },
     [handleRename]
   )
+
+  // opencode's sessions are listed from its server (ADR-097 §6, S9), refreshed
+  // in main in the background. The sidebar opening and the app coming to the
+  // front are the moments a stale listing may be refreshed: this nudge is
+  // answered from main's cache at once and never awaited — the list renders
+  // from `directories`, and a refresh that changed it arrives as ONE
+  // `session:directories-changed`.
+  useEffect(() => {
+    const nudge = (): void => {
+      void window.api.listOpencodeSessionsGlobal?.().catch(() => {})
+    }
+    nudge()
+    window.addEventListener('focus', nudge)
+    return () => window.removeEventListener('focus', nudge)
+  }, [])
 
   // NO refresh loop here any more. The three-query merge (Claude JSONL +
   // opencode + pi) and the 30 s poll moved to the MAIN process
@@ -328,143 +325,27 @@ export function Sidebar({
     // Bump the selection token first, so any in-flight slower load for a prior
     // click sees a newer token after its awaits and bails before committing.
     const seq = ++selectionSeq.current
-    // Already loaded and still resident (an evicted entry is re-hydrated from
-    // disk below, exactly like a never-loaded session)?
+    // Already loaded and still resident? An evicted entry that is idle is
+    // re-hydrated from disk below, exactly like a never-loaded session. An evicted
+    // one that is LIVE is resident: the live fold and `loadResumedTranscript` own it,
+    // and a load here would stamp it historical.
     const inMemory = useSessionStore.getState().sessions[routingId]
-    if (inMemory && !inMemory.evicted) {
+    if (opensResident(inMemory)) {
       switchSession(routingId)
       if (isMobile && onToggleCollapse) onToggleCollapse()
       return
     }
 
-    // opencode sessions: load the prior transcript from opencode's own store
-    // (read-only, via the global session id) so the chat view paints immediately
-    // on click — parity with Claude's JSONL load. The OpencodeSession is created
-    // only when the user sends a prompt; it then resumes the same session id (and
-    // re-replays the same messages, idempotent by id). We seed sessionEngines with
-    // engineId:'opencode' so loadHistoricalSession sets selectedEngineId, which
-    // InputBox uses to pass routingId as resumeSessionId on the first createSession.
-    if (info.engineId === 'opencode') {
-      // Best-effort history load (empty if opencode is down) — paints the
-      // transcript immediately rather than waiting for the first new prompt.
-      // The status line rides along, so the cost and token figures appear with
-      // it instead of only after the first new turn (S1d), and so does the
-      // model the transcript last answered on.
-      const { messages, statusLine, lastModel } = await window.api
-        .loadOpencodeHistory(info.sessionId)
-        .catch(() => ({ messages: [], statusLine: null, lastModel: null }))
-      // A newer click superseded this one while history loaded — discard.
-      if (seq !== selectionSeq.current) return
-      // Seed sessionEngines BEFORE loadHistoricalSession so it reads the right
-      // engine (and model) — it is the one that restores both onto the session.
-      seedHistoricalEngine(routingId, 'opencode', lastModel)
-      loadHistoricalSession(routingId, messages, info.cwd, undefined, undefined, statusLine)
-      if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
-      addRecentSession(routingId)
-      switchSession(routingId)
-      if (isMobile && onToggleCollapse) onToggleCollapse()
-      return
-    }
-
-    // pi sessions: same treatment as opencode above, but the "always resume by
-    // id" nuance does NOT apply — pi is a claude-shaped (spawn-per-session,
-    // no server) engine, so PiSession only resumes when session-store's own
-    // isHistorical gate is true (i.e. this history load actually returned
-    // messages), exactly like Claude. No extra sessionEngines/resumeSessionId
-    // wiring is needed here beyond seeding engineId, same as the opencode branch.
-    if (info.engineId === 'pi') {
-      const { messages, statusLine, lastModel } = await window.api
-        .loadPiHistory(info.sessionId)
-        .catch(() => ({ messages: [], statusLine: null, lastModel: null }))
-      if (seq !== selectionSeq.current) return
-      seedHistoricalEngine(routingId, 'pi', lastModel)
-      loadHistoricalSession(routingId, messages, info.cwd, undefined, undefined, statusLine)
-      if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
-      addRecentSession(routingId)
-      switchSession(routingId)
-      if (isMobile && onToggleCollapse) onToggleCollapse()
-      return
-    }
-
-    if (info.engineId === 'codex') {
-      const state = useSessionStore.getState()
-      const sessionEngines = {
-        ...state.sessionEngines,
-        [routingId]: { ...state.sessionEngines[routingId], engineId: 'codex' as const }
-      }
-      useSessionStore.setState({ sessionEngines })
-      setHistoryError(null)
-      const history = await window.api
-        .loadSessionHistory(info.sessionId, info.projectKey)
-        .catch(() => {
-          if (seq === selectionSeq.current)
-            setHistoryError(
-              'Codex history could not be loaded. Check the native installation/account and retry; no transcript was replaced.'
-            )
-          return null
-        })
-      if (!history) return
-      if (seq !== selectionSeq.current) return
-      loadHistoricalSession(
-        routingId,
-        history.messages,
-        info.cwd,
-        history.taskNotifications,
-        // Codex's reader returns the child threads' transcripts inline (they
-        // are native THREADS on the same connection, not JSONL sidecars), so
-        // there is no second fetch to make here as there is for Claude.
-        history.subagentMessages,
-        history.statusLine,
-        history.warnings
-      )
-      if (info.title) setCustomTitle(routingId, info.title)
-      addRecentSession(routingId)
-      switchSession(routingId)
-      if (isMobile && onToggleCollapse) onToggleCollapse()
-      return
-    }
-
-    // Claude sessions: load from JSONL transcript
-    const { messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine, warnings } =
-      await window.api.loadSessionHistory(info.sessionId, info.projectKey)
-
-    // Load subagent histories in parallel
-    const subagentMessages: Record<string, ChatMessage[]> = {}
-    const entries = Object.entries(agentIdToToolUseId)
-    if (entries.length > 0) {
-      const results = await Promise.all(
-        entries.map(async ([agentId, toolUseId]) => {
-          try {
-            const msgs = await window.api.loadSubagentHistory(
-              info.sessionId,
-              info.projectKey,
-              agentId
-            )
-            return { toolUseId, msgs }
-          } catch {
-            return { toolUseId, msgs: [] as ChatMessage[] }
-          }
-        })
-      )
-      for (const { toolUseId, msgs } of results) {
-        if (msgs.length > 0) subagentMessages[toolUseId] = msgs
-      }
-    }
-    // A newer click superseded this one while history + subagents loaded — discard.
-    if (seq !== selectionSeq.current) return
-    loadHistoricalSession(
-      routingId,
-      messages,
-      info.cwd,
-      taskNotifications,
-      subagentMessages,
-      statusLine,
-      warnings
-    )
-    if (customTitle) setCustomTitle(routingId, customTitle)
-    // todos + the Files widget are derived from the transcript INSIDE the cold-
-    // history seed now (SyncCore 4c): they are sealed, and deriving them here
-    // would have been a client computing state the reducer already computes.
+    // The per-engine load (opencode / pi / codex / Claude + subagent files) is
+    // shared with the post-hydrate reload of the active session.
+    const result = await loadSessionIntoStore(info, {
+      isCurrent: () => seq === selectionSeq.current,
+      onCodexError: setHistoryError,
+      replace: replaceOnClick(inMemory)
+    })
+    // `declined` kept the held transcript (the read failed or came back empty):
+    // the click still opens it, and the entry stays evicted so the next click retries.
+    if (result === 'skipped') return
     switchSession(routingId)
     // Close drawer on mobile after selecting a session
     if (isMobile && onToggleCollapse) onToggleCollapse()
@@ -486,24 +367,17 @@ export function Sidebar({
       window.api.unwatchSession(routingId)
       setWatching(routingId, false)
     } else {
-      // Load JSONL history if not already in memory, then watch the .jsonl file
-      if (!session) {
-        window.api
-          .loadSessionHistory(info.sessionId, info.projectKey)
-          .then(({ messages, taskNotifications, customTitle: ct, statusLine: sl, warnings }) => {
-            loadHistoricalSession(
-              routingId,
-              messages,
-              info.cwd,
-              taskNotifications,
-              {},
-              sl,
-              warnings
-            )
-            if (ct) setCustomTitle(routingId, ct)
-            window.api.watchSession(routingId, info.sessionId, info.projectKey, info.cwd)
-            setWatching(routingId, true)
-          })
+      // Load the transcript if it is not in memory (an idle evicted entry is resident
+      // but empty), then watch the .jsonl file. A resident or live entry is used as is.
+      if (!opensResident(session)) {
+        void loadSessionIntoStore(info, {
+          isCurrent: () => true,
+          replace: replaceOnClick(session)
+        }).then((result) => {
+          if (result === 'skipped') return
+          window.api.watchSession(routingId, info.sessionId, info.projectKey, info.cwd)
+          setWatching(routingId, true)
+        })
       } else {
         window.api.watchSession(routingId, info.sessionId, info.projectKey, info.cwd)
         setWatching(routingId, true)
@@ -535,16 +409,7 @@ export function Sidebar({
       }
       if (!info) {
         const data = sidebarSessions[rid]
-        if (data) {
-          info = {
-            sessionId: rid,
-            cwd: data.cwd,
-            projectKey: '',
-            title: data.firstUserText || 'New session',
-            timestamp: Date.now(),
-            lastActivityAt: Date.now()
-          }
-        }
+        if (data) info = inMemorySessionInfo(rid, data, sessionEngines[rid]?.engineId, '')
       }
       // Apply custom title if set
       if (info && customTitles[rid]) {
@@ -552,7 +417,7 @@ export function Sidebar({
       }
       return info
     },
-    [directories, sidebarSessions, customTitles]
+    [directories, sidebarSessions, customTitles, sessionEngines]
   )
 
   // Memoize derived lists — only recompute when their inputs change
@@ -632,15 +497,22 @@ export function Sidebar({
     })
   }, [])
 
-  const handleDeleteProjectRequest = useCallback((group: DirectoryGroup) => {
-    if (!group.projectKey) return
-    setDeleteTarget({
-      kind: 'project',
-      projectKey: group.projectKey,
-      folderName: group.folderName,
-      sessionCount: group.sessions.length
-    })
-  }, [])
+  const handleDeleteProjectRequest = useCallback(
+    (group: DirectoryGroup) => {
+      if (!group.projectKey) return
+      setDeleteTarget({
+        kind: 'project',
+        projectKey: group.projectKey,
+        folderName: group.folderName,
+        sessionCount: group.sessions.length,
+        // From the LISTING (`directories`), not the rendered group: that is what
+        // main plans from when the delete runs, and the in-memory rows merged
+        // into the rendered group have no file to name yet.
+        claudeFiles: planClaudeProjectDelete(directories, group.projectKey)
+      })
+    },
+    [directories]
+  )
 
   /**
    * What deleting the pending CODEX target would actually remove.
@@ -697,18 +569,8 @@ export function Sidebar({
     const inMemoryByPk: Record<string, SessionInfo[]> = {}
     for (const [rid, data] of Object.entries(sidebarSessions)) {
       if (dirSessionIds.has(rid) || !data.cwd) continue
-      const sessionEngineId = (sessionEngines[rid]?.engineId ??
-        'claude') as import('../../../../shared/types').EngineId
       const pk = cwdToProjectKey(data.cwd)
-      const info: SessionInfo = {
-        sessionId: rid,
-        cwd: data.cwd,
-        projectKey: pk,
-        title: data.firstUserText || 'New session',
-        timestamp: Date.now(),
-        lastActivityAt: Date.now(),
-        engineId: sessionEngineId
-      }
+      const info = inMemorySessionInfo(rid, data, sessionEngines[rid]?.engineId, pk)
       if (!inMemoryByPk[pk]) inMemoryByPk[pk] = []
       inMemoryByPk[pk].push(info)
     }

@@ -30,6 +30,8 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { resolveSuccessResponseHelper } from './anchors.mjs'
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(__dirname, '../..')
 const cliPath = resolve(projectRoot, 'vendor/claude-cli/cli.js')
@@ -103,6 +105,45 @@ function assertNoChunkBoundary(matchText, label) {
     console.error(`ERROR: ${label} match spans a chunk boundary — the pattern is too loose`)
     process.exit(1)
   }
+}
+
+const chunkBody = (chunk) => src.slice(chunk.bodyStart, chunk.end)
+
+// `export{a,b as c}` → [['a','a'],['b','c']] as [local, exported] pairs.
+function chunkExports(chunk) {
+  const pairs = []
+  for (const m of chunkBody(chunk).matchAll(/export\{([^}]*)\}/g)) {
+    for (const entry of m[1].split(',')) {
+      const parts = entry.trim().split(/\s+as\s+/)
+      pairs.push([parts[0], parts[1] ?? parts[0]])
+    }
+  }
+  return pairs
+}
+
+const FALLBACK_TEXT = 'Unsupported control request subtype'
+const escapeRe = (s) => s.replace(/[$]/g, '\\$')
+
+// Where `name`, as seen from inside `chunk`, is bound to FALLBACK_TEXT: a
+// declaration in the chunk itself, or an import of one (a single hop — the
+// constant is imported straight from the chunk that declares it). Returns a
+// description of the binding, or null.
+function fallbackTextBinding(chunk, name) {
+  const declares = (c, local) =>
+    new RegExp(
+      `(?:\\b(?:var|let|const) |,)${escapeRe(local)}=${JSON.stringify(FALLBACK_TEXT)}[,;]`
+    ).test(chunkBody(c))
+  if (declares(chunk, name)) return `declared in ${chunk.spec}`
+  for (const m of chunkBody(chunk).matchAll(/import\{([^}]*)\}from"([^"]+)"/g)) {
+    for (const entry of m[1].split(',')) {
+      const parts = entry.trim().split(/\s+as\s+/)
+      if ((parts[1] ?? parts[0]) !== name) continue
+      const from = chunks.find((c) => c.spec === m[2])
+      const local = from && chunkExports(from).find(([, exported]) => exported === parts[0])?.[0]
+      return local && declares(from, local) ? `imported from ${from.spec}` : null
+    }
+  }
+  return null
 }
 
 if (src.includes(PATCH_A_MARKER)) {
@@ -205,19 +246,39 @@ if (src.includes(PATCH_A_MARKER)) {
   //   after:  else Be(r,`Unsupported control request subtype: ${Xn(String(r.request.subtype))}`)
   // The optional `SANITIZE(String(...))` wrapper below matches both shapes.
   //
+  // 2.1.285 hoists the text into a constant that the loop imports from another
+  // chunk (`var r7e="Unsupported control request subtype"`):
+  //   else qe(C,`${r7e}: ${en(String(C.request.subtype))}`)
+  // The loop now carries a second site, the `ui_*` gate
+  // `else if(G8r(…))qe(C,`${r7e}: …`)`, which the leading `else ` excludes.
+  // A `${NAME}` prefix only counts when NAME provably binds the text
+  // (fallbackTextBinding), so the loose identifier cannot pick up some other
+  // `${x}: ${m.request.subtype}` message.
+  //
   // Do NOT confuse with the other "Unsupported control request subtype" sites:
   // the SDK Query transport throws (`throw Error("Unsupported control request subtype: "+…)`),
   // and DirectConnect / RemoteSessionManager prefix their message with a bracketed
   // tag. Only the stream-json stdin loop ClaudeUI drives has this exact shape.
   const anchorRe = new RegExp(
-    `else (${V})\\((${V}),\`Unsupported control request subtype: ` +
-      `\\$\\{(?:${V}\\(String\\()?\\2\\.request\\.subtype(?:\\)\\))?\\}\`\\)`
+    `else (${V})\\((${V}),\`(?:${FALLBACK_TEXT}|\\$\\{(${V})\\}): ` +
+      `\\$\\{(?:${V}\\(String\\()?\\2\\.request\\.subtype(?:\\)\\))?\\}\`\\)`,
+    'g'
   )
-  const anchorMatch = anchorRe.exec(src)
-  if (!anchorMatch) {
+  const allAnchors = [...src.matchAll(anchorRe)].filter((m) => {
+    if (m[3] === undefined) return true
+    const binding = fallbackTextBinding(chunkAt(m.index), m[3])
+    if (binding) console.log(`  Fallback text constant ${m[3]}: ${binding}`)
+    return binding !== null
+  })
+  if (allAnchors.length === 0) {
     console.error('ERROR: Cannot locate control-request fallback anchor')
     process.exit(1)
   }
+  if (allAnchors.length > 1) {
+    console.error(`ERROR: Anchor matched ${allAnchors.length} times`)
+    process.exit(1)
+  }
+  const anchorMatch = allAnchors[0]
   assertNoChunkBoundary(anchorMatch[0], 'control-request fallback')
 
   const anchorIdx = anchorMatch.index
@@ -226,13 +287,6 @@ if (src.includes(PATCH_A_MARKER)) {
   console.log(
     `  Control request anchor at char ${anchorIdx} (msgVar=${msgVar}, chunk ${anchorChunk.spec})`
   )
-
-  // Verify uniqueness
-  const allAnchors = [...src.matchAll(new RegExp(anchorRe, 'g'))]
-  if (allAnchors.length > 1) {
-    console.error('ERROR: Anchor matched multiple times')
-    process.exit(1)
-  }
 
   // -------------------------------------------------------------------------
   // Step 4: Work out how to reach the voice stream fn from the anchor's chunk
@@ -247,17 +301,7 @@ if (src.includes(PATCH_A_MARKER)) {
   // -------------------------------------------------------------------------
   console.log('\n--- Resolving voice fn reachability ---')
 
-  const voiceChunkBody = src.slice(voiceChunk.bodyStart, voiceChunk.end)
-  // `export{a,b as c}` — build local → exported name
-  let exportedAs = null
-  for (const m of voiceChunkBody.matchAll(/export\{([^}]*)\}/g)) {
-    for (const entry of m[1].split(',')) {
-      const parts = entry.trim().split(/\s+as\s+/)
-      const local = parts[0]
-      const exported = parts[1] ?? parts[0]
-      if (local === voiceFnLocal) exportedAs = exported
-    }
-  }
+  const exportedAs = chunkExports(voiceChunk).find(([local]) => local === voiceFnLocal)?.[1] ?? null
 
   let voiceCallExpr // expression evaluating to the voice stream fn at the injection site
   let voiceImportStmt = '' // optional preamble that binds it
@@ -279,10 +323,14 @@ if (src.includes(PATCH_A_MARKER)) {
   // -------------------------------------------------------------------------
   // Step 5: Find the success response function
   //
-  // Search globally — the pattern `,X(MSG,{})}catch` is unique to this
-  // dispatch chain, and a windowed search around the anchor breaks once prior
-  // patches (background-task / usage-relay / etc.) shift the anchor and push
-  // the original site out of the lookback window.
+  // Search globally for every `X(MSG,{})` reply site, retain the sites in the
+  // anchor's chunk, and require those to name one helper (five sites at 2.1.280,
+  // where the single `,X(MSG,{})}catch` site of older versions is gone — README
+  // "2.1.280 reply-helper anchor"). The chunk filter matters as of 2.1.289:
+  // another chunk calls an unrelated helper with the same single-letter MSG
+  // variable and `{}` argument. A windowed search around the anchor broke when
+  // other patches injected at the same anchor (background-task, usage-relay;
+  // both deleted at 2.1.280) and pushed the site out of the lookback window.
   //
   // 2.1.261: `let Xe=function(f,M){wt.enqueue(A5(f.request_id,M))}` — success;
   //          `let Be=function(f,M){wt.enqueue(_B(f.request_id,M))}` — error
@@ -290,33 +338,15 @@ if (src.includes(PATCH_A_MARKER)) {
   // -------------------------------------------------------------------------
   console.log('\n--- Extracting success response function ---')
 
-  const escMsg = msgVar.replace(/\$/g, '\\$')
-  const successRe = new RegExp(`(${V})\\(${escMsg},\\{\\}\\)`, 'g')
-  const successMatches = [...src.matchAll(successRe)]
-  if (successMatches.length === 0) {
-    console.error('ERROR: Cannot find success response helper')
+  let successHelper
+  try {
+    successHelper = resolveSuccessResponseHelper(src, msgVar, anchorChunk.spec, chunkAt)
+  } catch (error) {
+    console.error(`ERROR: ${error.message}`)
     process.exit(1)
   }
-  // Multiple match sites are fine as long as they all reference the same helper.
-  const successNames = new Set(successMatches.map((m) => m[1]))
-  if (successNames.size > 1) {
-    console.error(
-      `ERROR: Success response helper pattern resolved to multiple names: ${[...successNames].join(', ')}`
-    )
-    process.exit(1)
-  }
-  const successFn = successMatches[0][1]
-  // All success sites must be in the anchor's chunk, or the name we captured is
-  // some other module's helper that merely looks the same.
-  for (const m of successMatches) {
-    if (chunkAt(m.index).spec !== anchorChunk.spec) {
-      console.error(
-        `ERROR: success helper site at ${m.index} is in ${chunkAt(m.index).spec}, not the anchor chunk ${anchorChunk.spec}`
-      )
-      process.exit(1)
-    }
-  }
-  console.log(`  Success response function: ${successFn} (${successMatches.length} call sites)`)
+  const successFn = successHelper.name
+  console.log(`  Success response function: ${successFn} (${successHelper.callSites} call sites)`)
 
   // -------------------------------------------------------------------------
   // Step 6: Inject voice_server_start and voice_server_stop handlers

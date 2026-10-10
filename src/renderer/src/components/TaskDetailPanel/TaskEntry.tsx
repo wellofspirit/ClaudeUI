@@ -1,12 +1,17 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { useState, useMemo } from 'react'
 import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
+import { useStickToBottom } from '../../hooks/useStickToBottom'
 import { MarkdownRenderer } from '../chat/MarkdownRenderer'
 import { SubagentOutputBody } from '../chat/SubagentOutputBody'
 import { TerminalView } from '../chat/TerminalView'
 import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
 import { deriveTaskState, latestNotification } from '../chat/task-state'
-import { findTaskBlocks, formatElapsed } from './utils'
+import { findTaskBlocks } from './utils'
+import { taskElapsedLabel, useTicker } from '../chat/TaskCard'
+import type { ToolView } from '../../../../shared/tool-kinds'
+
+type TaskView = Extract<ToolView, { kind: 'task' }>
 
 function BashOutputPanel({
   output,
@@ -54,48 +59,30 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const activeTasks = useActiveSession((s) => s.activeTasks)
   const engineId = useActiveSession((s) => s.status.engineId)
   const [expanded, setExpanded] = useState(true)
-  const bodyRef = useRef<HTMLDivElement>(null)
-  const [following, setFollowing] = useState(true)
-  const isAutoScrolling = useRef(false)
+  // The body is the scroller; the elements inside it are what grow. It only
+  // exists while expanded, and which child holds the growing content depends on
+  // the branch, so both are attached where they render.
+  const { scrollerRef, contentRef, following, scrollToBottom } = useStickToBottom<HTMLDivElement>()
 
-  const { taskBlock, resultBlock } = findTaskBlocks(messages, toolUseId)
+  // Nested-aware: a nested agent's call and result live in its parent's bucket,
+  // while its own transcript is `subagentMsgs[toolUseId]` as for any agent.
+  const { taskBlock, resultBlock, ownerToolUseId } = findTaskBlocks(
+    messages,
+    toolUseId,
+    subagentMsgs
+  )
 
-  // Referenced by the autoscroll effect below, so they must be computed before
-  // it; they default to empty when the task block isn't present yet. `msgs` is
-  // memoized so its identity is stable across renders (it's an effect dep).
+  // Computed before the early return below (rules-of-hooks); empty while the
+  // task block isn't present yet.
   const msgs = useMemo(
     () => overlayItemStreams(subagentMsgs[toolUseId] || [], itemStreams, toolUseId),
     [subagentMsgs, itemStreams, toolUseId]
   )
 
-  useEffect(() => {
-    const el = bodyRef.current
-    if (!el || !following) return
-    isAutoScrolling.current = true
-    el.scrollTop = el.scrollHeight
-    requestAnimationFrame(() => {
-      isAutoScrolling.current = false
-    })
-  }, [msgs, bashOutput, following])
-
-  const handleScroll = useCallback(() => {
-    if (isAutoScrolling.current) return
-    const el = bodyRef.current
-    if (!el) return
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-    setFollowing(nearBottom)
-  }, [])
-
-  const scrollToBottom = useCallback(() => {
-    const el = bodyRef.current
-    if (!el) return
-    isAutoScrolling.current = true
-    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-    setFollowing(true)
-    requestAnimationFrame(() => {
-      isAutoScrolling.current = false
-    })
-  }, [])
+  // A live record is running by construction here (isHistorical is false), so
+  // its start alone decides whether the clock ticks.
+  const startedAt = activeTasks[toolUseId]?.startedAt
+  const now = useTicker(startedAt !== undefined)
 
   // All hooks above run unconditionally (rules-of-hooks); bail out only after
   // them when the task block isn't present in the message stream yet.
@@ -105,9 +92,19 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const description = String(input.description || input.prompt || '')
   const hasSubagentOutput = msgs.length > 0
   const isBash = engineToolMap(engineId).kindOf(taskBlock.toolName) === 'command'
-  const isBackground = !!input.run_in_background
+  // The engine's normalized view, with the result — the same reading TaskCard
+  // and the roster use (pi decides background from the launch result), plus a
+  // lifecycle record's own word.
+  const isBackground =
+    !!(
+      engineToolMap(engineId).normalize(
+        'task',
+        input,
+        resultBlock ?? undefined,
+        taskBlock.toolName
+      ) as TaskView
+    ).background || activeTasks[toolUseId]?.isBackgrounded === true
   const progress = taskProgressMap[toolUseId]
-  const elapsed = progress?.elapsedTimeSeconds
   const hasResult = !!resultBlock
   const resultText =
     resultBlock?.toolResult?.replace(/<usage>[\s\S]*?<\/usage>/, '').trimEnd() || ''
@@ -123,7 +120,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   // immediate "launched successfully" tool_result (so `resultBlock.isError` is
   // false) — a FAILED one showed no failure badge in the panel at all.
   const hasActiveTask = !!activeTasks[toolUseId]
-  const { isRunning, isError } = deriveTaskState({
+  const { isRunning, isError, isStopped, isLoaded } = deriveTaskState({
     isHistorical: false,
     hasActiveTask,
     isBackground,
@@ -131,15 +128,26 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     notification: bgNotification,
     resultIsError: resultBlock?.isError ?? false
   })
+  const elapsed = taskElapsedLabel({
+    isRunning,
+    startedAt,
+    now,
+    durationMs: bgNotification?.usage?.durationMs,
+    progressSeconds: progress?.elapsedTimeSeconds
+  })
 
   const statusBadge = isError ? (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">
       failed
     </span>
   ) : !isRunning ? (
-    bgNotification?.status === 'stopped' ? (
+    isStopped ? (
       <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning shrink-0">
         stopped
+      </span>
+    ) : isLoaded ? (
+      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-bg-hover text-text-muted shrink-0">
+        unfinished
       </span>
     ) : (
       <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">
@@ -153,6 +161,9 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   )
 
   const isStopping = stoppingTaskIds.includes(toolUseId)
+  // A nested call with no lifecycle record gives the engine nothing to stop:
+  // Claude's stopTask would fall back to interrupting the main turn (ADR-073 §7).
+  const canStop = ownerToolUseId === null || hasActiveTask
 
   const handleStopTask = async (e: React.MouseEvent): Promise<void> => {
     e.stopPropagation()
@@ -200,12 +211,15 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
           {isBash ? String(input.command || description) : description}
         </span>
         {statusBadge}
-        {elapsed != null && (
-          <span className="text-[11px] text-text-muted font-mono shrink-0">
-            {formatElapsed(elapsed)}
+        {elapsed !== undefined && (
+          <span
+            data-testid="TaskEntry.elapsed"
+            className="text-[11px] text-text-muted font-mono shrink-0"
+          >
+            {elapsed}
           </span>
         )}
-        {isRunning && !isStopping && (
+        {isRunning && !isStopping && canStop && (
           <button
             data-testid="TaskEntry.stop"
             onClick={handleStopTask}
@@ -244,17 +258,17 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
       {expanded && (
         <div className="relative flex-1 min-h-0">
           <div
-            ref={bodyRef}
-            onScroll={handleScroll}
+            data-testid="TaskEntry.body"
+            ref={scrollerRef}
             className="px-4 py-3 h-full overflow-y-auto flex flex-col"
           >
             {hasSubagentOutput ? (
-              <div>
+              <div ref={contentRef}>
                 <SubagentOutputBody
                   msgs={msgs}
                   isRunning={isRunning}
                   isBackground={isBackground}
-                  elapsedLabel={elapsed != null ? formatElapsed(elapsed) : undefined}
+                  elapsedLabel={elapsed}
                   size="md"
                 />
               </div>
@@ -268,16 +282,14 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
             ) : isBash && hasResult && resultText ? (
               <TerminalView text={resultText} maxHeight="none" />
             ) : hasResult && resultText && !isBackground ? (
-              <div className="text-[12px] text-text-primary/80 leading-[1.6]">
+              <div ref={contentRef} className="text-[12px] text-text-primary/80 leading-[1.6]">
                 <MarkdownRenderer content={resultText} />
               </div>
             ) : isRunning ? (
               <div className="flex items-center gap-2 text-[13px] text-text-muted">
                 <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin-slow" />
                 <span>{isBackground ? 'Running in background...' : 'Running...'}</span>
-                {elapsed != null && (
-                  <span className="font-mono text-[11px]">{formatElapsed(elapsed)}</span>
-                )}
+                {elapsed !== undefined && <span className="font-mono text-[11px]">{elapsed}</span>}
               </div>
             ) : null}
           </div>

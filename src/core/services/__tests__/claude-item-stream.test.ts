@@ -12,7 +12,9 @@ function harness() {
     seal: (target, message, owner) =>
       events.push({ kind: 'seal', value: { target, message, owner } }),
     updateLocal: (message, owner) => events.push({ kind: 'local', value: { message, owner } }),
-    publish: (message, owner) => events.push({ kind: 'publish', value: { message, owner } })
+    publish: (message, owner) => events.push({ kind: 'publish', value: { message, owner } }),
+    retractToolUses: (messageId, toolUseIds, owner) =>
+      events.push({ kind: 'retract', value: { messageId, toolUseIds, owner } })
   })
   return { lifecycle, events }
 }
@@ -30,7 +32,8 @@ describe('ClaudeItemStreamLifecycle', () => {
           { ...(target ? { target } : {}), message, ...(ownerToolUseId ? { ownerToolUseId } : {}) }
         ]),
       updateLocal: () => {},
-      publish: (message) => core.emit('session:message', ['s', message])
+      publish: (message) => core.emit('session:message', ['s', message]),
+      retractToolUses: () => {}
     })
     lifecycle.handleEvent({ type: 'message_start', message: { id: 'm' } }, undefined)
     lifecycle.handleEvent(
@@ -330,5 +333,228 @@ describe('ClaudeItemStreamLifecycle', () => {
       { type: 'text', text: 'final' }
     ])
     expect(final.message.content).toHaveLength(2)
+  })
+
+  /**
+   * A tool call cut off mid-stream never runs and never gets a result, and
+   * cli.js never snapshots it (verified: session efa47532…, `stop_reason:
+   * "max_tokens"` while streaming a Write — the message's snapshots are only
+   * its two thinking blocks). Its `{}` scaffold was published the moment the
+   * block started, so without a retraction the card spins forever.
+   */
+  describe('tool calls cut off mid-stream', () => {
+    type Harness = ReturnType<typeof harness>
+    const OWNER = 'toolu_agent'
+
+    const start = (h: Harness, owner?: string): void =>
+      h.lifecycle.handleEvent({ type: 'message_start', message: { id: 'msg' } }, owner)
+    const thinking = (h: Harness, index: number, owner?: string): void => {
+      h.lifecycle.handleEvent(
+        { type: 'content_block_start', index, content_block: { type: 'thinking', thinking: '' } },
+        owner
+      )
+      h.lifecycle.handleEvent(
+        { type: 'content_block_delta', index, delta: { type: 'thinking_delta', thinking: 'hm' } },
+        owner
+      )
+      h.lifecycle.handleSnapshot(
+        { id: 'msg', role: 'assistant', timestamp: 1, content: [{ type: 'thinking', text: 'hm' }] },
+        owner
+      )
+      h.lifecycle.handleEvent({ type: 'content_block_stop', index }, owner)
+    }
+    const toolStart = (h: Harness, index: number, id: string, owner?: string): void =>
+      h.lifecycle.handleEvent(
+        {
+          type: 'content_block_start',
+          index,
+          content_block: { type: 'tool_use', id, name: 'Write', input: {} }
+        },
+        owner
+      )
+    const toolSnapshot = (h: Harness, id: string, owner?: string): unknown =>
+      h.lifecycle.handleSnapshot(
+        {
+          id: 'msg',
+          role: 'assistant',
+          timestamp: 1,
+          content: [
+            { type: 'tool_use', toolUseId: id, toolName: 'Write', toolInput: { file_path: '/x' } }
+          ]
+        },
+        owner
+      )
+    const stop = (h: Harness, stopReason: string, owner?: string): void => {
+      h.lifecycle.handleEvent({ type: 'message_delta', delta: { stop_reason: stopReason } }, owner)
+      h.lifecycle.handleEvent({ type: 'message_stop' }, owner)
+    }
+    const retractions = (h: Harness): Array<Record<string, unknown>> =>
+      h.events.filter((e) => e.kind === 'retract').map((e) => e.value as Record<string, unknown>)
+    const finalSeal = (h: Harness): ChatMessage | undefined =>
+      (
+        h.events
+          .filter((e) => e.kind === 'seal' && !(e.value as { target?: unknown }).target)
+          .at(-1)?.value as { message: ChatMessage } | undefined
+      )?.message
+    const lastLocal = (h: Harness): ChatMessage =>
+      (h.events.filter((e) => e.kind === 'local').at(-1)!.value as { message: ChatMessage }).message
+    const toolIds = (m: ChatMessage | undefined): string[] =>
+      (m?.content ?? []).flatMap((b) => (b.type === 'tool_use' ? [b.toolUseId] : []))
+
+    it('retracts the unsnapshotted call when the output limit cuts it', () => {
+      const h = harness()
+      start(h)
+      thinking(h, 0)
+      toolStart(h, 1, 'toolu_cut')
+      // The scaffold is out on every client already — that is the phantom.
+      expect(h.events.some((e) => e.kind === 'publish')).toBe(true)
+      stop(h, 'max_tokens')
+
+      expect(retractions(h)).toEqual([
+        { messageId: 'msg', toolUseIds: ['toolu_cut'], owner: undefined }
+      ])
+      expect(finalSeal(h)!.content.map((b) => b.type)).toEqual(['thinking'])
+      expect(toolIds(lastLocal(h))).toEqual([])
+      // Reported before the seal, so no client ever holds a sealed phantom.
+      const kinds = h.events.map((e) => e.kind)
+      expect(kinds.indexOf('retract')).toBeLessThan(kinds.lastIndexOf('seal'))
+    })
+
+    it('never retracts a call whose message stopped for tool_use, even if its snapshot lags', () => {
+      const h = harness()
+      start(h, OWNER)
+      toolStart(h, 0, 'toolu_real', OWNER)
+      h.lifecycle.handleEvent({ type: 'content_block_stop', index: 0 }, OWNER)
+      stop(h, 'tool_use', OWNER)
+      // A sub-agent's snapshot takes a different path than Patch E's stream
+      // events, so it may land only after message_stop.
+      toolSnapshot(h, 'toolu_real', OWNER)
+
+      expect(retractions(h)).toEqual([])
+      expect(toolIds(finalSeal(h))).toEqual(['toolu_real'])
+    })
+
+    it('retracts only the unconfirmed call when a complete one precedes it', () => {
+      const h = harness()
+      start(h)
+      toolStart(h, 0, 'toolu_done')
+      expect(toolSnapshot(h, 'toolu_done')).toBe('handled')
+      h.lifecycle.handleEvent({ type: 'content_block_stop', index: 0 }, undefined)
+      toolStart(h, 1, 'toolu_cut')
+      stop(h, 'max_tokens')
+
+      expect(retractions(h)).toEqual([
+        { messageId: 'msg', toolUseIds: ['toolu_cut'], owner: undefined }
+      ])
+      expect(toolIds(finalSeal(h))).toEqual(['toolu_done'])
+      expect(toolIds(lastLocal(h))).toEqual(['toolu_done'])
+    })
+
+    it('retracts a call cut by sealAll mid-stream (no message_delta at all)', () => {
+      const h = harness()
+      start(h, OWNER)
+      thinking(h, 0, OWNER)
+      toolStart(h, 1, 'toolu_cut', OWNER)
+      h.lifecycle.sealAll()
+
+      expect(retractions(h)).toEqual([
+        { messageId: 'msg', toolUseIds: ['toolu_cut'], owner: OWNER }
+      ])
+      expect(finalSeal(h)!.content.map((b) => b.type)).toEqual(['thinking'])
+    })
+
+    it('counts a snapshot that falls through to the ordinary upsert as confirmation', () => {
+      const h = harness()
+      start(h)
+      thinking(h, 0)
+      toolStart(h, 1, 'toolu_real')
+      // Neither the one-block nor the equal-length placement applies: 'none'.
+      expect(
+        h.lifecycle.handleSnapshot(
+          {
+            id: 'msg',
+            role: 'assistant',
+            timestamp: 1,
+            content: [
+              { type: 'thinking', text: 'hm' },
+              { type: 'tool_use', toolUseId: 'toolu_real', toolName: 'Write', toolInput: {} },
+              { type: 'text', text: 'extra' }
+            ]
+          },
+          undefined
+        )
+      ).toBe('none')
+      stop(h, 'max_tokens')
+
+      expect(retractions(h)).toEqual([])
+      expect(toolIds(finalSeal(h))).toEqual(['toolu_real'])
+    })
+
+    it('ignores a snapshot of another message when deciding what was confirmed', () => {
+      const h = harness()
+      start(h)
+      toolStart(h, 0, 'toolu_cut')
+      h.lifecycle.handleSnapshot(
+        {
+          id: 'other',
+          role: 'assistant',
+          timestamp: 1,
+          content: [{ type: 'tool_use', toolUseId: 'toolu_cut', toolName: 'Write', toolInput: {} }]
+        },
+        undefined
+      )
+      stop(h, 'end_turn')
+      expect(retractions(h)).toEqual([
+        { messageId: 'msg', toolUseIds: ['toolu_cut'], owner: undefined }
+      ])
+    })
+
+    it('retracts a message that was nothing but the cut call without sealing it', () => {
+      const h = harness()
+      start(h)
+      toolStart(h, 0, 'toolu_cut')
+      stop(h, 'max_tokens')
+      expect(retractions(h)).toEqual([
+        { messageId: 'msg', toolUseIds: ['toolu_cut'], owner: undefined }
+      ])
+      expect(finalSeal(h)).toBeUndefined()
+      expect(h.lifecycle.activeOwnerCount()).toBe(0)
+    })
+
+    it('leaves whole-message retraction as it was', () => {
+      const h = harness()
+      start(h)
+      toolStart(h, 0, 'toolu_cut')
+      h.lifecycle.retract(['msg'])
+      h.lifecycle.handleEvent({ type: 'message_stop' }, undefined)
+      expect(retractions(h)).toEqual([])
+      expect(finalSeal(h)).toBeUndefined()
+      expect(toolSnapshot(h, 'toolu_cut')).toBe('drop')
+    })
+
+    it('leaves no phantom in canonical state once folded through SyncCore', () => {
+      const core = new SyncCore({ capacity: 50 })
+      core.emit('session:created', ['s', { cwd: '/fixture', engineId: 'claude' }])
+      const lifecycle = new ClaudeItemStreamLifecycle({
+        open: (target, message) => core.emit('session:item-open', ['s', { target, message }]),
+        delta: (target, chunk) => core.emit('session:item-delta', ['s', { target, chunk }]),
+        seal: (target, message) =>
+          core.emit('session:item-seal', ['s', { ...(target ? { target } : {}), message }]),
+        updateLocal: () => {},
+        publish: (message) => core.emit('session:message', ['s', message]),
+        retractToolUses: (messageId, toolUseIds) =>
+          core.emit('session:tool-uses-retracted', ['s', { messageId, toolUseIds }])
+      })
+      const h = { lifecycle, events: [] } as unknown as Harness
+      start(h)
+      thinking(h, 0)
+      toolStart(h, 1, 'toolu_cut')
+      expect(toolIds(core.getCanonicalState().sessions.s.messages[0])).toEqual(['toolu_cut'])
+      stop(h, 'max_tokens')
+
+      const [message] = core.getCanonicalState().sessions.s.messages
+      expect(message.content.map((b) => b.type)).toEqual(['thinking'])
+      expect(core.getCanonicalState().sessions.s.itemStreams).toEqual({})
+    })
   })
 })

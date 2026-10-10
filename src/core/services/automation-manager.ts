@@ -1,4 +1,5 @@
 import { query as sdkQuery } from '../sdk'
+import { ensureHostTokenFresh } from '../sdk/host-token'
 import { v4 as uuid } from 'uuid'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -12,12 +13,13 @@ import { logger } from './logger'
 import { isPathInside } from './path-containment'
 import { isValidAutomationId } from './automation-id'
 import {
-  resolveThinkingMode,
-  resolveEffort,
-  defaultEffort,
+  resolveAutomationThinking,
+  resolveAutomationEffort,
   type EffortLevel,
   type ThinkingMode
 } from '../../shared/model-capabilities'
+import { ensureClaudeModels } from './claude-model-catalog'
+import { loadSettings } from './ui-config'
 import type { Automation, AutomationRun, ChatMessage, ContentBlock } from '../../shared/types'
 import type { HostNotifier } from '../host'
 
@@ -290,6 +292,25 @@ export class AutomationManager {
       this.scheduleNext(automation)
     }
     this.notifyAutomationsChanged()
+  }
+
+  /**
+   * Rewrite each automation's saved model through `map` — ADR-100 moves a concrete
+   * Claude model to the alias that resolves to it. Saves and announces only what
+   * changed. Schedules are left alone: a timer already armed runs on the value it
+   * captured, which cli.js still accepts, and the next one reads the new value.
+   */
+  remapModels(map: (model: string) => string): void {
+    let changed = false
+    this.automations = this.automations.map((automation) => {
+      const model = automation.model && map(automation.model)
+      if (model === automation.model) return automation
+      changed = true
+      const next = { ...automation, model }
+      this.saveAutomation(next)
+      return next
+    })
+    if (changed) this.notifyAutomationsChanged()
   }
 
   delete(id: string): void {
@@ -631,18 +652,59 @@ export class AutomationManager {
       const canUseTool = buildCanUseTool()
 
       const modelValue = automation.model || 'default'
-      const desiredThinking: ThinkingMode =
-        (automation.thinkingMode as ThinkingMode | undefined) ?? 'enabled'
-      const thinkingMode = resolveThinkingMode(modelValue, desiredThinking)
+      // Both the thinking mode and the effort are judged on the row the config screen
+      // judges (`automationModelRow`): the catalog cli.js last reported, else the
+      // model the value names — so a bare alias (`opus`) is not read as "no effort,
+      // no adaptive thinking". A host nothing has fetched the catalog on yet (a fresh
+      // claudeui-server) populates it first; a failure or timeout is logged and the
+      // run goes ahead judging the model from its value alone.
+      const catalog = await ensureClaudeModels((err) =>
+        logger.warn(
+          'AutomationManager',
+          `Claude model catalog unavailable for ${automation.name}; judging "${modelValue}" by value`,
+          err
+        )
+      )
+      // Cancelled during the catalog wait: skip the token refresh too.
+      if (abortController.signal.aborted) return { costUsd: 0, lastText: '' }
+      const thinkingMode = resolveAutomationThinking({
+        explicit: automation.thinkingMode as ThinkingMode | undefined,
+        modelValue,
+        catalog
+      })
       const thinkingConfig =
         thinkingMode === 'disabled'
           ? { type: 'disabled' as const }
           : thinkingMode === 'adaptive'
             ? { type: 'adaptive' as const, display: 'summarized' as const }
             : { type: 'enabled' as const, display: 'summarized' as const, budgetTokens: 10000 }
-      const desiredEffort =
-        (automation.effort as EffortLevel | undefined) ?? defaultEffort(modelValue)
-      const resolvedEffort = resolveEffort(modelValue, desiredEffort) ?? undefined
+      // The same ladder as a session (the automation's own effort, else Claude's
+      // saved starting effort for the model, else the model default), through the
+      // function the config screen shows its value from. The catalog is what
+      // cli.js last reported (empty before the first fetch — the model is then
+      // judged as the model its value names, as the screen does for a missing row), and
+      // the settings are read per run so a starting effort saved a minute ago
+      // applies to the next one.
+      const resolvedEffort =
+        resolveAutomationEffort({
+          explicit: automation.effort,
+          modelValue,
+          catalog,
+          modelEffortDefaults: (
+            loadSettings() as { modelEffortDefaults?: Record<string, EffortLevel> }
+          ).modelEffortDefaults
+        }) ?? undefined
+
+      // Multi-account: renew the active account's token, or fail the run with
+      // HostTokenUnavailableError (executeRun records its message as the run's
+      // error). A no-op in single-account mode.
+      await ensureHostTokenFresh()
+
+      // Both awaits above can outlast a cancel/delete (the catalog wait is up to
+      // 15 s). The run's abort already fired, so nothing would ever wake the
+      // query's listener: end the run here the way a cancel mid-run ends it — the
+      // stream finishes with no result, which executeRun records as a finished run.
+      if (abortController.signal.aborted) return { costUsd: 0, lastText: '' }
 
       // Start with acceptEdits (auto mode) or default. The acceptEdits base ensures
       // the SDK always accepts the mode; we attempt to upgrade to native auto below.

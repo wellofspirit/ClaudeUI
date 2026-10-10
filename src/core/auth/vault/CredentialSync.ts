@@ -40,6 +40,20 @@
  * account and to no other. A `VaultLike` with no account methods is driven
  * exactly as before — one credential, one timer.
  *
+ * OPENCODE 2.x (ADR-097 §5). opencode no longer reads a file: ClaudeUI vends
+ * the active account into its credential table as an access-token-only row it
+ * owns by id (`OpencodeChatgptTarget`, the credential store behind it). There
+ * is nothing to adopt back (opencode cannot refresh a token without its
+ * refresh half) and nothing to watch, so opencode has no watcher, no
+ * reconcile-on-start read and no fed-token history of its own any more; the
+ * 1.x history is still READ, to recognise the copy of ClaudeUI's sign-in that
+ * opencode's migration imported from `auth.json`. In their place: a vend at
+ * start (prunes generations a crash left, re-asserts the active slot), the
+ * pre-turn gate ({@link CredentialSync.opencodeTurnGate}), the recovery after a
+ * `provider.auth` turn ({@link CredentialSync.opencodeAuthFailed}), a resync on
+ * system resume, and the slot handed back on quit
+ * ({@link CredentialSync.prepareQuit}).
+ *
  * HARD SAFETY NOTE (same as AuthVault.ts / codex-oauth.ts): no test may let
  * `refreshAccessToken` reach the real auth.openai.com — every scheduler test
  * injects a fake `refreshAccessToken`; every watcher test uses fake
@@ -50,13 +64,16 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { logger } from '../../services/logger'
 import { authVault, CHATGPT_PROVIDER_ID, type VaultAccount } from './AuthVault'
+import { redactSecrets } from '../../services/redact-secrets'
 import {
   buildVaultCredential,
+  parseJwtClaims,
   refreshAccessToken as defaultRefreshAccessToken,
   type TokenResponse,
   type VaultCredential
 } from './codex-oauth'
 import type { DeviceCodeStart } from './codex-device-code'
+import { memoryFedTokenHistory, type FedTokenHistory } from './fed-token-history'
 import { chatgptAccountIdentity, codexNativeIdentity } from '../account-identity'
 import type { AccountIdentity } from '../../../shared/account-key'
 
@@ -66,8 +83,15 @@ import type { AccountIdentity } from '../../../shared/account-key'
 
 /** pi's auth.json key for the Codex credential (PiAuthProvider.ts's PI_SUBSCRIPTION_VENDOR_IDS). */
 export const PI_CODEX_VENDOR_ID = 'openai-codex'
-/** opencode's auth.json key for the Codex credential — its ChatGPT-plugin provider id (recon-verified; NOT 'openai-codex'). */
+/** opencode's integration for the ChatGPT credential — its openai provider id (NOT 'openai-codex'). */
 export const OPENCODE_CODEX_VENDOR_ID = 'openai'
+
+/**
+ * After a `provider.auth` turn, how long before another one may trigger a
+ * refresh-and-rotate: a token the issuer keeps rejecting must not turn every
+ * failed turn into a token request.
+ */
+export const OPENCODE_AUTH_RECOVERY_COOLDOWN_MS = 60 * 1000
 
 /**
  * How long BEFORE `expires` the vault refreshes. The engines themselves only
@@ -118,6 +142,13 @@ export interface VaultLike {
   removeAccount?(providerId: string, id: string): Promise<void>
   saveAccountCredential?(providerId: string, id: string, cred: VaultCredential): Promise<void>
   removeCredential?(providerId: string): Promise<void>
+  /**
+   * The disconnect marker (ADR-082 §8, "As built (S7e)"): set by a disconnect or
+   * the last account's removal, cleared by a sign-in through ClaudeUI. Optional
+   * so a fake stays minimal; a vault without it keeps no marker.
+   */
+  isDisconnected?(providerId: string): Promise<boolean>
+  setDisconnected?(providerId: string, disconnected: boolean): Promise<void>
   hasUnreadableLegacyVault?(): boolean
   beginLogin(): Promise<{ authorizeUrl: string }>
   completeLogin(): Promise<VaultCredential>
@@ -149,8 +180,9 @@ export interface CodexEntrySnapshot {
 }
 
 /**
- * One engine's half of the feed-forward / resync loop. PiAuthProvider and
- * OpencodeAuthProvider each implement this (structurally — no import here).
+ * A file-backed engine's half of the feed-forward / resync loop — pi's
+ * (PiAuthProvider implements it structurally; no import here). opencode 2.x
+ * has no file: see {@link OpencodeChatgptTarget}.
  */
 export interface CodexFeedTarget {
   /** Absolute path to this engine's OWN auth-store file — used to derive the fs.watch dir + filename filter. */
@@ -161,6 +193,40 @@ export interface CodexFeedTarget {
   readOauthEntry(vendorId: string): Promise<CodexEntrySnapshot | null>
   /** Remove this vendor's native credential and invalidate the target's auth cache. */
   removeVendorAuth(vendorId: string): Promise<void>
+  /**
+   * The same removal as a direct file edit, for while the harness does not run
+   * (ADR-082 §8, S7d). Absent (pi, whose removal is a file edit already),
+   * `removeVendorAuth`.
+   */
+  removeVendorAuthDirect?(vendorId: string): Promise<void>
+}
+
+/**
+ * opencode 2.x's half of the feed (ADR-097 §5) — `OpencodeAuthProvider`
+ * implements it structurally over the credential store. `isClaudeuiToken`
+ * recognises a refresh token ClaudeUI manages (the vault's, or one it fed the
+ * 1.x `auth.json`): such a row of the user's is a copy of ClaudeUI's sign-in,
+ * never remembered as theirs and never restored.
+ */
+export interface OpencodeChatgptTarget {
+  /** Vend the ACTIVE account (access-only, padded expiry, rotate-by-replace, active). */
+  vendChatgpt(
+    cred: CodexCredentialInput,
+    isClaudeuiToken: (refresh: string) => Promise<boolean>
+  ): Promise<void>
+  /**
+   * Remove ClaudeUI's ChatGPT rows and give the slot back; false when none were
+   * removed. `vaultEmptying` (disconnect, last account): ClaudeUI's row goes
+   * even when opencode then falls back to a copy of its sign-in; otherwise the
+   * store keeps it rather than let a copy become active.
+   */
+  removeChatgpt(
+    context: string,
+    isClaudeuiToken: (refresh: string) => Promise<boolean>,
+    options?: { vaultEmptying?: boolean }
+  ): Promise<boolean>
+  /** What this process last vended: the token and its REAL expiry. */
+  vendedChatgpt(): { access: string; realExpires: number } | null
 }
 
 export interface CodexEnabledRoutes {
@@ -206,6 +272,19 @@ export interface CredentialSyncDeps {
    * apart there is nothing to name.
    */
   onCredentialStored?: (accountId: string | undefined) => void
+  /**
+   * Whether an engine's harness runs (ADR-082 §8, "As built (S7d)"). One that
+   * does not is neither fed, nor watched, nor read for a credential to adopt;
+   * {@link CredentialSync.harnessArrived} catches it up. The boot seam wires
+   * `harnessWritable`; absent, both run.
+   */
+  harnessRuns?: (engine: EngineKey) => boolean
+  /**
+   * Fingerprints of the refresh tokens ClaudeUI put into each engine (ADR-082
+   * §8, "As built (S7e)"), so a removal recognises a stale copy of its own. The
+   * boot seam wires the file; absent, an in-memory history.
+   */
+  fedTokens?: FedTokenHistory
 }
 
 /**
@@ -251,10 +330,40 @@ export interface CodexInjectionToken {
   vaultAccountId: string
 }
 
-type EngineKey = 'pi' | 'opencode'
+export type EngineKey = 'pi' | 'opencode'
 
-function errMessage(err: unknown): string {
+/** What one engine store is fed from a vault credential. */
+function feedInput(cred: VaultCredential): CodexCredentialInput {
+  return {
+    access: cred.access,
+    refresh: cred.refresh,
+    expires: cred.expires,
+    accountId: cred.accountId
+  }
+}
+
+function rawMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * An error for a LOG line: redacted and capped — a token endpoint's or
+ * opencode's error body may echo a token (classification reads the raw one).
+ */
+function errMessage(err: unknown): string {
+  return redactSecrets(rawMessage(err))
+}
+
+/**
+ * ONE expiry for every opencode decision (ADR-097 §5): the earlier of the
+ * access token's own `exp` and the vault's expiry for it — so the gate never
+ * finds a token "not fresh" that it would also not refresh.
+ */
+export function tokenExpiry(cred: { access: string; expires: number }): number {
+  const exp = (parseJwtClaims(cred.access) as { exp?: unknown } | undefined)?.exp
+  return typeof exp === 'number' && Number.isFinite(exp) && exp > 0
+    ? Math.min(exp * 1000, cred.expires)
+    : cred.expires
 }
 
 /**
@@ -277,7 +386,7 @@ function errMessage(err: unknown): string {
  * Exported for direct unit testing of the classification matrix.
  */
 export function isRefreshRevoked(err: unknown): boolean {
-  const message = errMessage(err)
+  const message = rawMessage(err)
   if (/invalid_grant/i.test(message)) return true
   const match = /failed:\s*(\d{3})/.exec(message)
   if (!match) return false
@@ -295,7 +404,11 @@ export class CredentialSync {
   private lifecycleGeneration = 0
 
   private piTarget: CodexFeedTarget | undefined
-  private opencodeTarget: CodexFeedTarget | undefined
+  private opencodeTarget: OpencodeChatgptTarget | undefined
+  /** When the last `provider.auth` recovery ran (cooldown). */
+  private lastAuthRecovery = Number.NEGATIVE_INFINITY
+  /** Set by prepareQuit: nothing re-vends while the slot is handed back. */
+  private quitting = false
 
   // -- scheduler state, PER ACCOUNT (ADR-068 §2) --
   private readonly runtimes = new Map<string, AccountRuntime>()
@@ -307,6 +420,8 @@ export class CredentialSync {
   private activeKey: string = LEGACY_ACCOUNT_KEY
   private onActiveAccountChanged: () => void | Promise<void>
   private onCredentialStored: (accountId: string | undefined) => void
+  private harnessRuns: (engine: EngineKey) => boolean
+  private fedTokens: FedTokenHistory
 
   // -- watcher state --
   private watchers = new Map<EngineKey, fs.FSWatcher>()
@@ -329,6 +444,8 @@ export class CredentialSync {
     this.hasConfiguredRoutePolicy = deps.getEnabledRoutes !== undefined
     this.onActiveAccountChanged = deps.onActiveAccountChanged ?? ((): void => {})
     this.onCredentialStored = deps.onCredentialStored ?? ((): void => {})
+    this.harnessRuns = deps.harnessRuns ?? ((): boolean => true)
+    this.fedTokens = deps.fedTokens ?? memoryFedTokenHistory()
   }
 
   /**
@@ -343,10 +460,12 @@ export class CredentialSync {
    */
   configure(targets: {
     pi?: CodexFeedTarget
-    opencode?: CodexFeedTarget
+    opencode?: OpencodeChatgptTarget
     getEnabledRoutes?: () => CodexEnabledRoutes
     onActiveAccountChanged?: () => void | Promise<void>
     onCredentialStored?: (accountId: string | undefined) => void
+    harnessRuns?: (engine: EngineKey) => boolean
+    fedTokens?: FedTokenHistory
   }): void {
     if (targets.pi) this.piTarget = targets.pi
     if (targets.opencode) this.opencodeTarget = targets.opencode
@@ -356,6 +475,8 @@ export class CredentialSync {
     }
     if (targets.onActiveAccountChanged) this.onActiveAccountChanged = targets.onActiveAccountChanged
     if (targets.onCredentialStored) this.onCredentialStored = targets.onCredentialStored
+    if (targets.harnessRuns) this.harnessRuns = targets.harnessRuns
+    if (targets.fedTokens) this.fedTokens = targets.fedTokens
   }
 
   /**
@@ -440,6 +561,13 @@ export class CredentialSync {
         `start: failed to remove one or more disabled credential copies: ${errMessage(err)}`
       )
     }
+    // opencode at start (ADR-097 §5 rule 4): a vend prunes every generation of
+    // ClaudeUI's a crash left and re-asserts the active slot; with no
+    // credential, whatever ClaudeUI left there goes.
+    if (this.isCurrent(generation)) {
+      if (cred && this.routes().opencode) await this.vendOpencode(feedInput(cred))
+      else if (!cred) await this.removeOpencode('start').catch(() => false)
+    }
     if (!cred || !this.isCurrent(generation)) return // empty vault + no engine credential — clean no-op
     await this.scheduleAll(cred)
     if (!this.isCurrent(generation)) return
@@ -480,6 +608,19 @@ export class CredentialSync {
   private async reconcileOnStart(generation: number): Promise<VaultCredential | null> {
     const vaultCred = await this.vault.load()
     if (!this.isCurrent(generation)) return null
+    // The user disconnected ChatGPT in ClaudeUI (ADR-082 §8, "As built (S7e)"):
+    // a sign-in an engine kept is its own, and ClaudeUI does not sign itself
+    // back in from it. This also stands before the legacy-vault recovery: the
+    // marker was written after that vault existed (writing it replaces the
+    // legacy file, so the two do not meet on disk).
+    if (!vaultCred && (await this.chatgptDisconnected())) {
+      logger.info(
+        'CredentialSync',
+        'reconcileOnStart: ChatGPT was disconnected in ClaudeUI — not signing in from an engine credential'
+      )
+      return null
+    }
+    if (!this.isCurrent(generation)) return null
     const recoveringLegacyVault = !vaultCred && this.vault.hasUnreadableLegacyVault?.() === true
     const newestEngine = await this.readNewestEngineEntry(recoveringLegacyVault)
     if (!this.isCurrent(generation)) return null
@@ -494,7 +635,7 @@ export class CredentialSync {
           'CredentialSync',
           'reconcileOnStart: engine store holds a newer credential than the vault — adopting'
         )
-        return this.persistAdopted(newestEngine, vaultCred, generation)
+        return this.persistAdopted(newestEngine, vaultCred, generation, newestEngine.engine)
       }
       return vaultCred // vault is the newest (or tied) — keep it
     }
@@ -511,18 +652,25 @@ export class CredentialSync {
     return null
   }
 
-  /** Read both engines' Codex entries (best-effort) and return the one with the strictly-largest expiry, or null if neither has one. */
-  private async readNewestEngineEntry(includeDisabled = false): Promise<CodexEntrySnapshot | null> {
+  /** Read both engines' Codex entries (best-effort) and return the one with the strictly-largest expiry, and whose it is, or null if neither has one. */
+  private async readNewestEngineEntry(
+    includeDisabled = false
+  ): Promise<(CodexEntrySnapshot & { engine: EngineKey }) | null> {
     const routes = this.routes()
-    const snapshots = await Promise.all([
-      includeDisabled || routes.pi
-        ? this.safeReadEntry('pi', this.piTarget, PI_CODEX_VENDOR_ID)
-        : null,
-      includeDisabled || routes.opencode
-        ? this.safeReadEntry('opencode', this.opencodeTarget, OPENCODE_CODEX_VENDOR_ID)
-        : null
-    ])
-    let newest: CodexEntrySnapshot | null = null
+    // A harness that does not run is not adopted from (ADR-082 §8, S7d); a
+    // legacy-vault recovery still reads it — it may be the only copy left.
+    const reads = (engine: EngineKey): boolean =>
+      includeDisabled || (routes[engine] && this.harnessRuns(engine))
+    // pi only: opencode 2.x holds ClaudeUI's access-only row (nothing to adopt)
+    // or the user's own sign-ins (never adopted — no sign-in import, §5).
+    const snapshots = await Promise.all(
+      (['pi'] as const).map(async (engine) => {
+        if (!reads(engine)) return null
+        const snap = await this.safeReadEntry(engine, this.piTarget, PI_CODEX_VENDOR_ID)
+        return snap ? { ...snap, engine } : null
+      })
+    )
+    let newest: (CodexEntrySnapshot & { engine: EngineKey }) | null = null
     for (const snap of snapshots) {
       if (snap && (!newest || snap.expires > newest.expires)) newest = snap
     }
@@ -606,6 +754,15 @@ export class CredentialSync {
       await this.removeChatgptCredential()
       throw new Error('ChatGPT login was cancelled')
     }
+    // A sign-in through ClaudeUI ends a disconnect (ADR-082 §8, "As built
+    // (S7e)"). Every login path runs this tail, so none keeps a copy. Not fatal:
+    // the credential is stored, and a marker left beside an account is inert.
+    await this.setChatgptDisconnected(false).catch((err: unknown) =>
+      logger.warn(
+        'CredentialSync',
+        `completeLogin: clearing the disconnect marker failed: ${errMessage(err)}`
+      )
+    )
     // The vault UPSERTED this credential onto an account (a re-login updates the
     // one it belongs to, a new workspace appends one). Only the ACTIVE account is
     // vended: adding a second subscription must not silently re-point pi and
@@ -675,15 +832,24 @@ export class CredentialSync {
 
   /**
    * Drop one account. Its timer goes with it; removing the ACTIVE one vends the
-   * promoted account instead, and removing the LAST one cleans both engine
-   * copies out the way `disconnectChatgpt` does — an engine left holding a
-   * credential the vault no longer owns is the one state nothing would ever fix.
+   * promoted account instead, and removing the LAST one is a disconnect: it
+   * takes ClaudeUI's copies out of both engines and leaves the marker, the way
+   * `disconnectChatgpt` does (ADR-082 §8, "As built (S7e)").
    */
   async removeAccount(id: string): Promise<void> {
     if (!this.vault.removeAccount || !this.vault.listAccounts) {
       throw new Error('CredentialSync: this vault does not support accounts')
     }
+    await this.flushPendingWatches()
     const wasActive = (await this.readActiveKey()) === id
+    // Read before the vault forgets them: what ClaudeUI vended is recognised by
+    // these refresh tokens, and the removal below may take the last of them.
+    const before = await this.accounts()
+    const managed = await this.managedRefreshTokens(before)
+    const last = before.some((account) => account.id === id) && before.length === 1
+    // Marked before the vault empties, so no crash in between can leave an
+    // empty, unmarked vault for the next start to bootstrap.
+    if (last) await this.setChatgptDisconnected(true)
     this.clearRefreshTimer(id)
     this.clearRetryTimer(id)
     this.runtimes.delete(id)
@@ -700,20 +866,19 @@ export class CredentialSync {
       await this.onActiveAccountChanged()
       return
     }
-    await Promise.all([
-      this.removeOne('pi', this.piTarget, PI_CODEX_VENDOR_ID).catch((err: unknown) =>
-        logger.warn('CredentialSync', `removeAccount: pi cleanup failed: ${errMessage(err)}`)
-      ),
-      this.removeOne('opencode', this.opencodeTarget, OPENCODE_CODEX_VENDOR_ID).catch(
-        (err: unknown) =>
+    await Promise.all(
+      (['pi', 'opencode'] as const).map((engine) =>
+        this.removeManagedCopy('removeAccount', engine, managed).catch((err: unknown) =>
           logger.warn(
             'CredentialSync',
-            `removeAccount: opencode cleanup failed: ${errMessage(err)}`
+            `removeAccount: ${engine} cleanup failed: ${errMessage(err)}`
           )
+        )
       )
-    ])
-    // Same reason on the empty path, and more sharply: the engine files are gone
-    // but a running opencode server would keep serving the deleted credential.
+    )
+    // Same reason on the empty path, and more sharply: ClaudeUI's copies are out
+    // of the engine files, but a running opencode server would keep serving the
+    // deleted credential.
     await this.onActiveAccountChanged()
   }
 
@@ -729,20 +894,30 @@ export class CredentialSync {
     return this.vault.completeLoginFromPastedInput(input)
   }
 
-  /** Remove only ChatGPT credentials, preserving all other central-vault records. */
+  /**
+   * Remove only ChatGPT credentials, preserving all other central-vault records
+   * (ADR-082 §8, "As built (S7e)"; owner ruling 2026-10-01). An engine's ChatGPT
+   * entry goes only when it is ClaudeUI's — its refresh token is one of the
+   * vault's accounts' — so a sign-in made directly in pi or opencode stays. The
+   * marker then keeps the next start (and the watcher) from signing ClaudeUI
+   * back in from that kept sign-in.
+   */
   async disconnectChatgpt(): Promise<void> {
+    await this.flushPendingWatches()
     this.lifecycleGeneration += 1
     this.cancelLogin()
     this.stop()
     this.runtimes.clear()
     this.activeKey = LEGACY_ACCOUNT_KEY
     const failures: unknown[] = []
+    // Both before the vault empties: the tokens are how ClaudeUI's copies are
+    // recognised, and the marker must never be missing beside an empty vault.
+    const managed = await this.managedRefreshTokens()
+    await this.setChatgptDisconnected(true).catch((err) => failures.push(err))
     await Promise.all([
       this.removeChatgptCredential().catch((err) => failures.push(err)),
-      this.removeOne('pi', this.piTarget, PI_CODEX_VENDOR_ID).catch((err) => failures.push(err)),
-      this.removeOne('opencode', this.opencodeTarget, OPENCODE_CODEX_VENDOR_ID).catch((err) =>
-        failures.push(err)
-      )
+      this.removeManagedCopy('disconnect', 'pi', managed).catch((err) => failures.push(err)),
+      this.removeManagedCopy('disconnect', 'opencode', managed).catch((err) => failures.push(err))
     ])
     if (failures.length)
       throw new AggregateError(failures, 'Failed to disconnect ChatGPT credentials')
@@ -886,20 +1061,158 @@ export class CredentialSync {
   }
 
   // -------------------------------------------------------------------------
+  // opencode 2.x lifecycle (ADR-097 §5)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Whether opencode holds the active account's CURRENT token with more than
+   * {@link REFRESH_MARGIN_MS} left on its REAL expiry (the vended row's
+   * `expires` is padded; this reads what was vended, never the row).
+   */
+  private opencodeFresh(cred: VaultCredential): boolean {
+    const vended = this.opencodeTarget?.vendedChatgpt()
+    return (
+      !!vended &&
+      vended.access === cred.access &&
+      tokenExpiry(cred) - REFRESH_MARGIN_MS > this.now()
+    )
+  }
+
+  /** opencode is a route this class vends to now. */
+  private vendsOpencode(): boolean {
+    return (
+      !this.quitting &&
+      !!this.opencodeTarget &&
+      this.routes().opencode &&
+      this.harnessRuns('opencode')
+    )
+  }
+
+  /** The account is in a refresh back-off (retry or give-up) or needs a sign-in. */
+  private refreshHeld(key: string): boolean {
+    const runtime = this.runtimes.get(key)
+    return !!runtime && (runtime.needsReauth || runtime.giveUpCount > 0 || !!runtime.retryTimer)
+  }
+
+  /** Whether a refresh token is ClaudeUI's (the credential store's copy check, wired at boot). */
+  isClaudeuiRefreshToken(refresh: string): Promise<boolean> {
+    return this.claudeuiTokenCheck()(refresh)
+  }
+
+  /**
+   * The gate before an opencode turn on ChatGPT (§5 rule 2): opencode's row
+   * must hold the active account's token with more than 15 min left. If it
+   * does not, refresh (when the vault's token is due) or re-vend, first.
+   * Resolves `null` when the turn may go, else the notice to hold it with
+   * (offline, or the sign-in needs redoing). No ChatGPT credential in the
+   * vault: nothing of ClaudeUI's to check, the turn goes.
+   */
+  async opencodeTurnGate(): Promise<string | null> {
+    if (!this.vendsOpencode()) return null
+    const key = await this.readActiveKey()
+    let cred = await this.loadForKey(key)
+    if (!cred || this.opencodeFresh(cred)) return null
+    const signIn =
+      'Your ChatGPT sign-in has expired. Sign in to ChatGPT again in Settings, then resend your message.'
+    // A dead refresh token gets no further request (L3).
+    if (this.runtime(key).needsReauth) return signIn
+    // One expiry decides both "fresh?" and "refresh?" (M2).
+    if (tokenExpiry(cred) - REFRESH_MARGIN_MS <= this.now()) {
+      await this.runRefresh(key)
+      cred = await this.loadForKey(key)
+    } else {
+      await this.vendOpencode(feedInput(cred))
+    }
+    if (cred && this.opencodeFresh(cred)) return null
+    // Still expired after the refresh: never vended (L7) — a sign-in is due.
+    if (cred && tokenExpiry(cred) <= this.now()) {
+      this.runtime(key).needsReauth = true
+      logger.warn(
+        'CredentialSync',
+        'ChatGPT token expired and could not be refreshed — needs sign-in'
+      )
+    }
+    if (this.runtime(key).needsReauth) return signIn
+    return "ClaudeUI couldn't refresh your ChatGPT sign-in (are you offline?), so the message was not sent. Try again in a moment."
+  }
+
+  /**
+   * An opencode turn on ChatGPT failed `provider.auth` (§5 rule 3): refresh
+   * the active account now and rotate opencode's row, whatever its expiry says
+   * (a rejected token is the one fact that counts). Once per
+   * {@link OPENCODE_AUTH_RECOVERY_COOLDOWN_MS}; never throws.
+   */
+  async opencodeAuthFailed(): Promise<void> {
+    if (!this.vendsOpencode()) return
+    if (this.refreshHeld(await this.readActiveKey())) return
+    if (this.now() - this.lastAuthRecovery < OPENCODE_AUTH_RECOVERY_COOLDOWN_MS) return
+    this.lastAuthRecovery = this.now()
+    try {
+      const key = await this.readActiveKey()
+      if (!(await this.loadForKey(key))) return
+      logger.info('CredentialSync', 'opencode turn failed provider.auth — refreshing and rotating')
+      await this.runRefresh(key)
+    } catch (err) {
+      logger.warn('CredentialSync', `opencode auth recovery failed: ${errMessage(err)}`)
+    }
+  }
+
+  /**
+   * System resume or unlock (§5 rule 2): timers may have slept through their
+   * deadline, so every account is re-scheduled from the wall clock (a due one
+   * refreshes now) and opencode's row is brought up to date. Never throws.
+   */
+  async onSystemResume(): Promise<void> {
+    if (this.quitting) return
+    try {
+      // An account in back-off or needing a sign-in keeps its schedule (L3).
+      const resync = (key: string, cred: VaultCredential): void => {
+        if (!this.refreshHeld(key)) this.scheduleRefresh(key, cred)
+      }
+      if (this.supportsAccounts()) {
+        const accounts = await this.accounts()
+        for (const account of accounts) resync(account.id, account.credential)
+        if (accounts.length === 0) {
+          const cred = await this.vault.load()
+          if (cred) resync(LEGACY_ACCOUNT_KEY, cred)
+        }
+      } else {
+        const cred = await this.vault.load()
+        if (cred) resync(LEGACY_ACCOUNT_KEY, cred)
+      }
+      if (!this.refreshHeld(await this.readActiveKey())) await this.opencodeTurnGate()
+    } catch (err) {
+      logger.warn('CredentialSync', `onSystemResume failed: ${errMessage(err)}`)
+    }
+  }
+
+  /**
+   * Graceful quit (§5): give opencode's `openai` slot back to the user's own
+   * credential, so their opencode does not run on a token nobody refreshes.
+   * A crash skips this; the next start re-asserts ClaudeUI's row. Never throws.
+   */
+  async prepareQuit(): Promise<void> {
+    // From here nothing re-vends: no refresh timer, no gate, no recovery (L4).
+    this.quitting = true
+    this.stop()
+    if (!this.opencodeTarget || !this.harnessRuns('opencode')) return
+    try {
+      await this.removeOpencode('quit')
+    } catch {
+      // logged by removeOpencode
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // 1. Feed-forward
   // -------------------------------------------------------------------------
 
   /** Write `cred` into BOTH engine stores. Each write is independent/best-effort — a failure in one never aborts the other. */
   async feedAll(cred: VaultCredential): Promise<{ pi: boolean; opencode: boolean }> {
-    const input: CodexCredentialInput = {
-      access: cred.access,
-      refresh: cred.refresh,
-      expires: cred.expires,
-      accountId: cred.accountId
-    }
+    const input = feedInput(cred)
     const [pi, opencode] = await Promise.all([
       this.feedOne('pi', this.piTarget, PI_CODEX_VENDOR_ID, input),
-      this.feedOne('opencode', this.opencodeTarget, OPENCODE_CODEX_VENDOR_ID, input)
+      this.vendOpencode(input)
     ])
     logger.info('CredentialSync', `feedAll: pi=${pi} opencode=${opencode}`)
     return { pi, opencode }
@@ -913,6 +1226,10 @@ export class CredentialSync {
   ): Promise<boolean> {
     if (!this.routes()[label]) {
       logger.info('CredentialSync', `feedAll: ${label} route disabled — skipping`)
+      return false
+    }
+    if (!this.harnessRuns(label)) {
+      logger.info('CredentialSync', `feedAll: ${label} not installed — skipping`)
       return false
     }
     if (!target) {
@@ -940,12 +1257,90 @@ export class CredentialSync {
       return false
     }
     try {
+      // Recorded BEFORE the write, so no crash between the two leaves a copy of
+      // ClaudeUI's in the engine unrecorded; a record of a token that never
+      // landed only ever matches that token.
+      this.recordFed(label, cred.refresh)
       await target.feedOauthCredential(vendorId, cred)
       this.startWatcher(label, target)
       return true
     } catch (err) {
       logger.warn('CredentialSync', `feedAll: ${label} write failed: ${errMessage(err)}`)
       return false
+    }
+  }
+
+  /**
+   * Vend `cred` into opencode 2.x (ADR-097 §5): rotate-by-replace, made the
+   * active `openai` row. Skipped like a feed (route off, harness not running,
+   * no target); a failure is logged and leaves `false`.
+   */
+  private async vendOpencode(cred: CodexCredentialInput): Promise<boolean> {
+    if (this.quitting) return false
+    // An expired token is never vended (L7): the refresh that follows vends.
+    if (tokenExpiry(cred) <= this.now()) {
+      logger.info(
+        'CredentialSync',
+        'feedAll: the ChatGPT token has expired — not vended to opencode'
+      )
+      return false
+    }
+    if (!this.routes().opencode) {
+      logger.info('CredentialSync', 'feedAll: opencode route disabled — skipping')
+      return false
+    }
+    if (!this.harnessRuns('opencode')) {
+      logger.info('CredentialSync', 'feedAll: opencode not installed — skipping')
+      return false
+    }
+    const target = this.opencodeTarget
+    if (!target) {
+      logger.warn('CredentialSync', 'feedAll: no opencode target configured — skipping')
+      return false
+    }
+    try {
+      await target.vendChatgpt(cred, this.claudeuiTokenCheck())
+      return true
+    } catch (err) {
+      logger.warn('CredentialSync', `feedAll: opencode vend failed: ${errMessage(err)}`)
+      return false
+    }
+  }
+
+  /**
+   * Take ClaudeUI's ChatGPT rows out of opencode and give the slot back to the
+   * user's previously active credential. Ownership is the row id, so this runs
+   * whatever opencode holds; `managed` is the vault's tokens as read before a
+   * disconnect empties it.
+   */
+  private async removeOpencode(
+    context: string,
+    managed?: ReadonlySet<string>,
+    options: { vaultEmptying?: boolean } = {}
+  ): Promise<boolean> {
+    const target = this.opencodeTarget
+    if (!target) return false
+    try {
+      return await target.removeChatgpt(context, this.claudeuiTokenCheck(managed), options)
+    } catch (err) {
+      logger.warn(
+        'CredentialSync',
+        `${context}: removing opencode's ChatGPT credential failed: ${errMessage(err)}`
+      )
+      throw err
+    }
+  }
+
+  /**
+   * Whether a refresh token is ClaudeUI's: one of the vault's (as `managed`,
+   * or read now) or one it fed opencode's 1.x `auth.json` (the fed-token
+   * history, read only).
+   */
+  private claudeuiTokenCheck(managed?: ReadonlySet<string>): (refresh: string) => Promise<boolean> {
+    let tokens: Promise<ReadonlySet<string>> | null = null
+    return async (refresh) => {
+      tokens ??= managed ? Promise.resolve(managed) : this.managedRefreshTokens()
+      return (await tokens).has(refresh) || this.heldFed('opencode', refresh)
     }
   }
 
@@ -990,6 +1385,40 @@ export class CredentialSync {
     }
     if (!entry) return false
     return entry.refresh !== cred.refresh && entry.expires > cred.expires
+  }
+
+  /**
+   * `engine`'s harness runs now, after a time it did not (ADR-082 §8, "As built
+   * (S7d)"): feed it the ACTIVE credential once (which arms its watcher), or
+   * take a disabled route's copy of it back. Only that engine: the other's
+   * store is not rewritten. Never throws.
+   */
+  async harnessArrived(engine: EngineKey): Promise<void> {
+    if (!this.harnessRuns(engine)) return
+    if (engine === 'opencode') {
+      try {
+        const cred = await this.vault.load()
+        if (cred && this.routes().opencode) {
+          const delivered = await this.vendOpencode(feedInput(cred))
+          logger.info('CredentialSync', `harnessArrived: opencode vended=${delivered}`)
+        } else await this.removeOpencode('harnessArrived')
+      } catch (err) {
+        logger.warn('CredentialSync', `harnessArrived(opencode) failed: ${errMessage(err)}`)
+      }
+      return
+    }
+    const { target, vendorId } = this.slot(engine)
+    try {
+      const cred = await this.vault.load()
+      if (cred && this.routes()[engine]) {
+        const delivered = await this.feedOne(engine, target, vendorId, feedInput(cred))
+        logger.info('CredentialSync', `harnessArrived: ${engine} fed=${delivered}`)
+      } else if (cred) {
+        await this.removeManagedCopy('harnessArrived', engine, await this.managedRefreshTokens())
+      }
+    } catch (err) {
+      logger.warn('CredentialSync', `harnessArrived(${engine}) failed: ${errMessage(err)}`)
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1209,8 +1638,8 @@ export class CredentialSync {
 
   private startWatchers(): void {
     const routes = this.routes()
+    // opencode 2.x has no file to watch (ADR-097 §5).
     if (routes.pi) this.startWatcher('pi', this.piTarget)
-    if (routes.opencode) this.startWatcher('opencode', this.opencodeTarget)
   }
 
   /**
@@ -1226,6 +1655,8 @@ export class CredentialSync {
    */
   private startWatcher(engine: EngineKey, target: CodexFeedTarget | undefined): void {
     if (!target || this.watchers.has(engine)) return
+    // Not armed while the harness does not run; its arrival arms it.
+    if (!this.harnessRuns(engine)) return
 
     let filePath: string
     try {
@@ -1290,6 +1721,27 @@ export class CredentialSync {
     )
   }
 
+  /**
+   * Run now the watcher reconciles still waiting out their debounce (S7e): an
+   * engine that rotated ClaudeUI's token just before a disconnect holds a token
+   * the vault and the history learn of only when that reconcile runs, and the
+   * removal that follows must recognise it as ClaudeUI's.
+   */
+  private async flushPendingWatches(): Promise<void> {
+    const pending = [...this.watchDebounceTimers.entries()]
+    for (const [engine, timer] of pending) {
+      clearTimeout(timer)
+      this.watchDebounceTimers.delete(engine)
+    }
+    await Promise.all(
+      pending.map(([engine]) =>
+        this.handleExternalChange(engine).catch((err: unknown) =>
+          logger.warn('CredentialSync', `flushPendingWatches(${engine}) failed: ${errMessage(err)}`)
+        )
+      )
+    )
+  }
+
   private stopWatchers(): void {
     for (const watcher of this.watchers.values()) watcher.close()
     this.watchers.clear()
@@ -1307,10 +1759,9 @@ export class CredentialSync {
    */
   private async handleExternalChange(engine: EngineKey): Promise<void> {
     const generation = this.lifecycleGeneration
-    if (!this.routes()[engine]) return
-    const target = engine === 'pi' ? this.piTarget : this.opencodeTarget
+    if (!this.routes()[engine] || !this.harnessRuns(engine)) return
+    const { target, vendorId } = this.slot(engine)
     if (!target) return
-    const vendorId = engine === 'pi' ? PI_CODEX_VENDOR_ID : OPENCODE_CODEX_VENDOR_ID
 
     let entry: CodexEntrySnapshot | null
     try {
@@ -1325,7 +1776,10 @@ export class CredentialSync {
     if (!entry || !this.isCurrent(generation)) return
 
     const vaultCred = await this.vault.load()
-    if (!this.isCurrent(generation) || !vaultCred) return // nothing to reconcile against yet — first credential must arrive via completeLogin()
+    // Nothing to reconcile against: the first credential arrives through
+    // completeLogin() (or the start's bootstrap). So a watcher never signs an
+    // empty vault in, and a disconnect (S7e) is honoured here by construction.
+    if (!this.isCurrent(generation) || !vaultCred) return
 
     if (entry.refresh === vaultCred.refresh) return // our own write (loop guard) or genuinely unchanged
     if (entry.expires <= vaultCred.expires) {
@@ -1340,7 +1794,7 @@ export class CredentialSync {
       'CredentialSync',
       `handleExternalChange(${engine}): adopting externally-rotated credential`
     )
-    const adopted = await this.persistAdopted(entry, vaultCred, generation)
+    const adopted = await this.persistAdopted(entry, vaultCred, generation, engine)
     if (adopted && this.isCurrent(generation)) {
       this.scheduleRefresh(await this.readActiveKey(), adopted)
     }
@@ -1356,11 +1810,16 @@ export class CredentialSync {
    * (handleExternalChange / start) owns scheduling so start() schedules
    * exactly once. Shared by Finding A's reconcile-on-start and the fs-watch
    * resync path.
+   *
+   * `source` is the engine the snapshot was read from. A ROTATION (a `prior`
+   * credential exists) is a rotation of ClaudeUI's own copy there, so its
+   * token joins that engine's history (S7e); a bootstrap is not recorded here.
    */
   private async persistAdopted(
     snapshot: CodexEntrySnapshot,
     prior: VaultCredential | null,
-    generation: number
+    generation: number,
+    source?: EngineKey
   ): Promise<VaultCredential | null> {
     const adopted: VaultCredential = {
       type: 'oauth',
@@ -1374,6 +1833,7 @@ export class CredentialSync {
     if (prior?.planType) adopted.planType = prior.planType
 
     if (!this.isCurrent(generation)) return null
+    if (prior && source) this.recordFed(source, snapshot.refresh)
     // The ACTIVE account, explicitly: an engine store holds the credential WE
     // vended, so a rotation found there belongs to the account in use and to no
     // other (ADR-068 §2). An empty vault has no active account yet, and save()
@@ -1417,28 +1877,60 @@ export class CredentialSync {
   private async removeDisabledCopies(vaultCred: VaultCredential | null): Promise<void> {
     if (!vaultCred) return
     const routes = this.routes()
-    await Promise.allSettled([
-      routes.pi
-        ? undefined
-        : this.removeManagedCopy('pi', this.piTarget, PI_CODEX_VENDOR_ID, vaultCred.refresh),
-      routes.opencode
-        ? undefined
-        : this.removeManagedCopy(
-            'opencode',
-            this.opencodeTarget,
-            OPENCODE_CODEX_VENDOR_ID,
-            vaultCred.refresh
-          )
-    ])
+    const managed = (await this.managedRefreshTokens()).add(vaultCred.refresh)
+    await Promise.allSettled(
+      (['pi', 'opencode'] as const)
+        .filter((engine) => !routes[engine])
+        .map((engine) => this.removeManagedCopy('removeDisabledCopies', engine, managed))
+    )
   }
 
-  /** Remove a disabled route's Codex entry ONLY when it is the credential ClaudeUI vended (refresh token matches the vault's). A read failure or a mismatched/absent entry is left untouched (fail-safe: never delete when unsure). */
+  /**
+   * The refresh tokens of every ChatGPT credential the vault holds — each
+   * account's, and the active one's for a vault with no accounts. An engine
+   * entry holding one of them is a copy ClaudeUI vended (ADR-082 §8, "As built
+   * (S7e)"): a background account's token counts, since it was the active one
+   * when it was fed. `accounts` is a list the caller has already read. Never
+   * logged: token material.
+   */
+  private async managedRefreshTokens(accounts?: VaultAccount[]): Promise<Set<string>> {
+    const tokens = new Set(
+      (accounts ?? (await this.accounts())).map((account) => account.credential.refresh)
+    )
+    try {
+      const active = await this.vault.load()
+      if (active) tokens.add(active.refresh)
+    } catch (err) {
+      logger.warn('CredentialSync', `managedRefreshTokens: vault load failed: ${errMessage(err)}`)
+    }
+    return tokens
+  }
+
+  /**
+   * Remove `engine`'s Codex entry ONLY when it is a credential ClaudeUI vended —
+   * its refresh token is in `managed` ({@link managedRefreshTokens}, the vault's
+   * now) or in that engine's fed-token history (a stale copy of ClaudeUI's: the
+   * vault rotated while the harness did not run). Any other entry is a sign-in
+   * made in the harness itself and stays, with one info line. A read failure is
+   * left untouched (fail-safe: never delete when unsure). The removal itself is
+   * {@link removeOne}, so a harness that does not run is edited as a file (S7d);
+   * once nothing of ClaudeUI's is left there, the engine's history is forgotten.
+   * `context` names the caller in the log.
+   */
   private async removeManagedCopy(
-    label: EngineKey,
-    target: CodexFeedTarget | undefined,
-    vendorId: string,
-    vaultRefresh: string
+    context: string,
+    engine: EngineKey,
+    managed: ReadonlySet<string>
   ): Promise<void> {
+    // opencode 2.x: ClaudeUI's rows are known by id, running or not (a
+    // removal while it is not installed waits for it in ClaudeUI's record).
+    if (engine === 'opencode') {
+      await this.removeOpencode(context, managed, {
+        vaultEmptying: context === 'disconnect' || context === 'removeAccount'
+      })
+      return
+    }
+    const { target, vendorId } = this.slot(engine)
     if (!target) return
     let entry: CodexEntrySnapshot | null
     try {
@@ -1446,19 +1938,86 @@ export class CredentialSync {
     } catch (err) {
       logger.warn(
         'CredentialSync',
-        `removeDisabledCopies: readOauthEntry(${label}) failed — preserving: ${errMessage(err)}`
+        `${context}: readOauthEntry(${engine}) failed — preserving: ${errMessage(err)}`
       )
       return
     }
-    if (!entry) return // nothing to remove
-    if (entry.refresh !== vaultRefresh) {
+    if (!entry) {
+      this.forgetFed(engine) // nothing of ClaudeUI's is there
+      return
+    }
+    if (!managed.has(entry.refresh) && !this.heldFed(engine, entry.refresh)) {
       logger.info(
         'CredentialSync',
-        `removeDisabledCopies: ${label} holds an unmanaged Codex credential — preserving`
+        `${context}: ${engine} holds a ChatGPT sign-in ClaudeUI did not make — kept`
       )
       return
     }
-    await this.removeOne(label, target, vendorId)
+    await this.removeOne(engine, target, vendorId)
+    this.forgetFed(engine)
+  }
+
+  // The fed-token history (S7e) is best-effort: a failure logs and never fails
+  // a feed or a removal, and an unreadable history recognises nothing (the rule
+  // before it existed: the vault's tokens only).
+
+  private recordFed(engine: EngineKey, refresh: string): void {
+    try {
+      this.fedTokens.record(engine, refresh)
+    } catch (err) {
+      logger.warn(
+        'CredentialSync',
+        `fed-token history (${engine}): record failed: ${errMessage(err)}`
+      )
+    }
+  }
+
+  private heldFed(engine: EngineKey, refresh: string): boolean {
+    try {
+      return this.fedTokens.holds(engine, refresh)
+    } catch (err) {
+      logger.warn(
+        'CredentialSync',
+        `fed-token history (${engine}): read failed: ${errMessage(err)}`
+      )
+      return false
+    }
+  }
+
+  private forgetFed(engine: EngineKey): void {
+    try {
+      this.fedTokens.forget(engine)
+    } catch (err) {
+      logger.warn(
+        'CredentialSync',
+        `fed-token history (${engine}): forget failed: ${errMessage(err)}`
+      )
+    }
+  }
+
+  /** The disconnect marker, read fail-open: an unreadable marker is no marker (the behaviour before it existed). */
+  private async chatgptDisconnected(): Promise<boolean> {
+    if (!this.vault.isDisconnected) return false
+    try {
+      return await this.vault.isDisconnected(CHATGPT_PROVIDER_ID)
+    } catch (err) {
+      logger.warn('CredentialSync', `isDisconnected failed: ${errMessage(err)}`)
+      return false
+    }
+  }
+
+  private async setChatgptDisconnected(disconnected: boolean): Promise<void> {
+    await this.vault.setDisconnected?.(CHATGPT_PROVIDER_ID, disconnected)
+  }
+
+  /**
+   * The file-backed feed target and the vendor id its auth store keys ChatGPT
+   * under — pi's; opencode 2.x has none (its rows go through `opencodeTarget`).
+   */
+  private slot(engine: EngineKey): { target: CodexFeedTarget | undefined; vendorId: string } {
+    return engine === 'pi'
+      ? { target: this.piTarget, vendorId: PI_CODEX_VENDOR_ID }
+      : { target: undefined, vendorId: OPENCODE_CODEX_VENDOR_ID }
   }
 
   private isCurrent(generation: number): boolean {
@@ -1472,7 +2031,12 @@ export class CredentialSync {
   ): Promise<void> {
     if (!target) return
     try {
-      await target.removeVendorAuth(vendorId)
+      // At once, whether or not the harness runs (ADR-082 §8, S7d): a harness
+      // that does not run is edited as a file (`removeVendorAuthDirect`, where
+      // its normal removal needs its process); pi's removal is a file edit anyway.
+      if (!this.harnessRuns(label) && target.removeVendorAuthDirect)
+        await target.removeVendorAuthDirect(vendorId)
+      else await target.removeVendorAuth(vendorId)
     } catch (err) {
       logger.warn('CredentialSync', `removeVendorAuth(${label}) failed: ${errMessage(err)}`)
       throw err

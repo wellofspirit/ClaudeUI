@@ -1,6 +1,5 @@
 import * as fs from 'fs'
-import { codexBinaryAvailable } from '../codex/codex-locate'
-import { discoverCodexModels } from '../codex/model-discovery'
+import { engineInstalled } from '../harness/resolve'
 import { codexCommands } from './codex-commands'
 import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
 import * as os from 'os'
@@ -17,14 +16,13 @@ import {
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
 import { gitServiceManager } from '../services/git-service'
 import { watchSession, unwatchSession } from '../services/session-watcher'
-import { accountState } from '../host'
+import { accountState, hostAppVersion } from '../host'
 import {
   listOpencodeSessionsGlobal,
   loadOpencodeSessionHistory
 } from '../services/opencode-session-list'
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
 import {
-  discoverOpencodeModels,
   discoverOpencodeProviderCatalog,
   getOpencodeProviderModels
 } from '../opencode/model-discovery'
@@ -33,8 +31,9 @@ import {
   setOpencodeProviderDisabled
 } from '../opencode/provider-management'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
-import { discoverPiModels, getPiModelCatalogGroups } from '../pi/model-discovery'
-import { piBinaryAvailable, locatePiBinary } from '../pi/pi-locate'
+import { getPiModelCatalogGroups } from '../pi/model-discovery'
+import { listEngineModels } from './engine-models'
+import { locatePiDisplayPath } from '../pi/pi-locate'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import type { EngineModelGroup, ModelInfo, ProviderRemoveKind } from '../../shared/types'
 import { loadSettings, loadSessionConfig, loadSlashCommands } from '../services/ui-config'
@@ -58,6 +57,7 @@ import {
 import { blockUsageService } from '../services/block-usage'
 import type {
   ApprovalDecision,
+  AttachmentUpload,
   PermissionSuggestion,
   EngineId,
   PermissionScope,
@@ -67,15 +67,19 @@ import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
 import { getSessionMeta } from '../services/db'
 import { emitEvent } from '../services/sync-host'
+import { getCliVersion } from '../sdk/harness'
 import { listAllDirectories } from '../services/sync-seed'
 import { getHostWindow } from '../services/host-window'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
+import { queryClaudeModels } from '../services/claude-model-catalog'
+import { generateCommitMessage } from '../services/commit-message'
+import { ensureHostTokenFresh } from '../sdk/host-token'
 import { logger } from '../services/logger'
 import { sharedProviderService } from '../shared-providers'
-import { prepareAndCreateSession } from './create-session'
+import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
 import { terminalService } from '../services/terminal-service'
-import { remoteVoice } from '../services/remote-voice'
+import { remoteVoiceOwner, voiceRelay } from '../services/voice-relay'
 import {
   registerCommand,
   type CommandConnection,
@@ -89,6 +93,7 @@ import { opt } from './wire-args'
 import { configCommands } from './config-commands'
 import { ideCommands, type IdeCommandHost } from './ide-commands'
 import { usageHubCommands } from './usage-hub-commands'
+import { harnessCommands } from './harness-commands'
 import { remoteViewCommands, type RemoteStatusHost } from './remote-view-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { AUTOMATION_COMMANDS } from './automation-commands'
@@ -115,6 +120,7 @@ import {
 import type { RegistrationResponseJSON } from '@simplewebauthn/server'
 import {
   sendPrompt,
+  getBlob,
   watchBackground,
   unwatchBackground,
   readBackgroundRange,
@@ -143,7 +149,9 @@ import {
   deleteSession,
   deleteProject,
   codexDeletePlanFor,
-  clearConversation
+  clearConversation,
+  judgeModelSupport,
+  approveBlocked
 } from './handlers-core'
 
 /**
@@ -169,29 +177,44 @@ function handleRemote(reg: Omit<CommandRegistration, 'transport'>): void {
   registerCommand({ ...reg, transport: 'remote' })
 }
 
-/**
- * True once registerRemoteHandlers has run. `registerRemoteVersionInfo` is
- * called later in the app bootstrap and must stay a no-op when the remote
- * surface was never set up (it was previously gated on the captured dispatcher).
- */
-let remoteHandlersRegistered = false
-
-/**
- * Register the `app:version-info` channel on the remote transport. Called from
- * the main bootstrap once the build versions are known (they're computed after
- * registerRemoteHandlers runs). No-op if remote handlers aren't set up.
- */
-export function registerRemoteVersionInfo(versionInfo: {
+/** What `app:version-info` answers. */
+export interface VersionInfo {
   appVersion: string
   cliVersion: string
-}): void {
-  if (!remoteHandlersRegistered) return
-  handleRemote({
-    channel: 'app:version-info',
-    capability: 'config',
-    kind: 'query',
-    handler: async () => versionInfo
-  })
+}
+
+/**
+ * What `app:version-info` serves unless a host overrides it
+ * ({@link registerRemoteVersionInfo}): the version the host published
+ * (`setHostAppVersion`, which the desktop sets from `app.getVersion()` and
+ * claudeui-server from its package manifest, `unknown` when it has none) and the
+ * Claude Code version of the harness that would spawn — read per call, since the
+ * harness selection can change while the host runs (ADR-082).
+ */
+const defaultVersionInfo = (): VersionInfo => ({
+  appVersion: hostAppVersion(),
+  cliVersion: getCliVersion()
+})
+
+let versionInfoSource: () => VersionInfo = defaultVersionInfo
+
+/** Test seam: drop any override, so `app:version-info` serves the host's defaults again. */
+export function resetRemoteVersionInfoForTests(): void {
+  versionInfoSource = defaultVersionInfo
+}
+
+/**
+ * Override what `app:version-info` answers. Order-independent: the channel itself
+ * is registered by {@link registerRemoteHandlers} (so every host that serves the
+ * remote surface — the desktop AND claudeui-server — serves it), and this only
+ * replaces its source, whether it runs before or after that. The desktop passes
+ * its display-form version.
+ *
+ * A function is read per call: the Claude Code version follows the harness
+ * selection, so the desktop passes one that asks `getCliVersion()`.
+ */
+export function registerRemoteVersionInfo(versionInfo: VersionInfo | (() => VersionInfo)): void {
+  versionInfoSource = typeof versionInfo === 'function' ? versionInfo : () => versionInfo
 }
 
 /**
@@ -212,39 +235,29 @@ async function withGit<T>(
   }
 }
 
-/** Uncached claude model list via a throwaway SDK query (no auth-source side
- *  effects — those are desktop-only; see handlers-core.ts rationale). */
+/** Uncached claude model list (no auth-source side effects — those are
+ *  desktop-only; see handlers-core.ts rationale). Goes through the shared query
+ *  that also records the host's model catalog, so a remote picker fetch feeds
+ *  automation runs the way a desktop one does. */
 async function claudeSupportedModels(): Promise<ModelInfo[]> {
-  const abort = new AbortController()
-  const q = sdkQuery({
-    prompt: '',
-    options: {
-      ...getSdkExecutableOpts(),
-      cwd: PERSISTED_SESSIONS_DIR,
-      abortController: abort
-    }
-  })
-  try {
-    return await (q as unknown as { supportedModels(): Promise<ModelInfo[]> }).supportedModels()
-  } finally {
-    abort.abort()
-  }
+  return queryClaudeModels()
 }
 
-// Title/commit-message generation. Kept behaviorally identical to the desktop
-// twins in session.ipc.ts (importing those would drag session.ipc.ts's whole
-// Electron/auth import graph into the hermetically-mocked remote-handlers test).
-const COMMIT_MSG_SYSTEM_PROMPT =
-  'You are a commit message generator. Given a git diff of staged changes, write a concise conventional commit message. Output ONLY the commit message — no explanation, no quotes, no markdown. Use imperative mood. First line should be a short summary (max 72 chars). If needed, add a blank line followed by bullet points for details. Focus on the "why" not the "what".'
-
+// Title generation. Kept behaviorally identical to the desktop twin in
+// session.ipc.ts (importing it would drag session.ipc.ts's whole Electron/auth
+// import graph into the hermetically-mocked remote-handlers test). The commit
+// message generator is shared (services/commit-message.ts).
 async function generateTitle(conversationText: string): Promise<string | null> {
   const abort = new AbortController()
+  await ensureHostTokenFresh()
   const q = sdkQuery({
     prompt: '',
     options: {
       ...getSdkExecutableOpts(),
       cwd: PERSISTED_SESSIONS_DIR,
-      abortController: abort
+      abortController: abort,
+      // A control request, then abort: no turn to use a plugin's tools.
+      reloadPlugins: false
     }
   })
   try {
@@ -263,47 +276,6 @@ async function generateTitle(conversationText: string): Promise<string | null> {
     return trimmed.length >= 2 ? trimmed : null
   } catch (err) {
     logger.error('remote-handlers', `generateTitle failed: ${err}`)
-    return null
-  } finally {
-    abort.abort()
-  }
-}
-
-async function generateCommitMessage(diff: string): Promise<string | null> {
-  const abort = new AbortController()
-  try {
-    const q = sdkQuery({
-      prompt: diff,
-      options: {
-        ...getSdkExecutableOpts(),
-        cwd: PERSISTED_SESSIONS_DIR,
-        abortController: abort,
-        systemPrompt: COMMIT_MSG_SYSTEM_PROMPT,
-        model: 'claude-haiku-4-5-20251001',
-        maxTurns: 1,
-        tools: [],
-        thinking: { type: 'disabled' },
-        persistSession: false
-      }
-    })
-    let result = ''
-    for await (const message of q) {
-      if (!message || typeof message !== 'object') continue
-      const msg = message as Record<string, unknown>
-      if (msg.type === 'assistant') {
-        const betaMessage = msg.message as
-          { content?: Array<{ type: string; text?: string }> } | undefined
-        if (betaMessage?.content) {
-          for (const block of betaMessage.content) {
-            if (block.type === 'text' && block.text) result += block.text
-          }
-        }
-      }
-    }
-    const cleaned = result.trim()
-    return cleaned.length >= 3 ? cleaned : null
-  } catch (err) {
-    logger.error('remote-handlers', `generateCommitMessage failed: ${err}`)
     return null
   } finally {
     abort.abort()
@@ -346,7 +318,15 @@ export function registerRemoteHandlers(
    */
   authDeps?: AuthCommandDeps
 ): void {
-  remoteHandlersRegistered = true
+  // Registered here, not by `registerRemoteVersionInfo`, so the channel exists
+  // whatever order a host calls them in (the desktop calls the latter BEFORE
+  // `bootCore` gets here; claudeui-server never calls it).
+  handleRemote({
+    channel: 'app:version-info',
+    capability: 'config',
+    kind: 'query',
+    handler: async () => versionInfoSource()
+  })
 
   // -------------------------------------------------------------------------
   // Session lifecycle
@@ -367,7 +347,8 @@ export function registerRemoteHandlers(
       thinkingMode?: string | null,
       resumeSessionAt?: string | null,
       forkSession?: boolean | null,
-      engineId?: EngineId | null
+      engineId?: EngineId | null,
+      announce?: CreateSessionArgs['announce'] | null
     ) => {
       // Every optional argument through `opt` — see its doc comment. `effort`
       // is the one that broke in the field; the rest are the same shape and
@@ -382,7 +363,8 @@ export function registerRemoteHandlers(
         thinkingMode: opt(thinkingMode),
         resumeSessionAt: opt(resumeSessionAt),
         forkSession: opt(forkSession),
-        engineId: opt(engineId)
+        engineId: opt(engineId),
+        announce: opt(announce)
       })
     }
   })
@@ -421,11 +403,8 @@ export function registerRemoteHandlers(
     capability: 'chat',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (
-      routingId: string,
-      prompt: string,
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }> | null
-    ) => sendPrompt(manager, routingId, prompt, opt(attachments))
+    handler: async (routingId: string, prompt: string, attachments?: AttachmentUpload[] | null) =>
+      sendPrompt(manager, routingId, prompt, opt(attachments))
   })
 
   handleRemote({
@@ -469,6 +448,16 @@ export function registerRemoteHandlers(
       }
       manager.get(routingId)?.resolveApproval(requestId, decision, answers, updatedPermissions)
     }
+  })
+
+  // ADR-091 part 6 — gated exactly like `session:approval-response`.
+  handleRemote({
+    channel: 'session:approve-blocked',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, toolUseId: string) =>
+      approveBlocked(manager, routingId, toolUseId)
   })
 
   // -------------------------------------------------------------------------
@@ -612,34 +601,26 @@ export function registerRemoteHandlers(
     handler: async () => claudeSupportedModels()
   })
 
-  // Cross-engine model catalog (Claude + opencode + pi) for the model picker.
-  // Mirrors session.ipc.ts's get-engine-models minus the desktop-only
-  // auth-source reporting side effects.
+  // Cross-engine model catalog (Claude + opencode + pi + Codex, or one engine's
+  // share of it) for the model picker: the same `listEngineModels` as
+  // session.ipc.ts's, minus the desktop-only auth-source reporting side effects
+  // of its Claude read. It validates the client's engine id.
   handleRemote({
     channel: 'session:get-engine-models',
     capability: 'config',
     kind: 'query',
-    handler: async (): Promise<EngineModelGroup[]> => {
-      const claudeModels = (await claudeSupportedModels().catch(() => [])).map((m) => ({
-        ...m,
-        engineId: 'claude' as const,
-        vendorId: 'anthropic'
-      }))
-      const claudeGroup: EngineModelGroup = {
-        engineId: 'claude',
-        vendorId: 'anthropic',
-        vendorName: 'Anthropic',
-        models: claudeModels
-      }
-      const opencodeGroups = await discoverOpencodeModels()
-      const piGroups = await discoverPiModels()
-      return [
-        claudeGroup,
-        ...opencodeGroups,
-        ...piGroups,
-        ...(await discoverCodexModels().catch(() => []))
-      ]
-    }
+    handler: (engineId?: unknown): Promise<EngineModelGroup[]> =>
+      listEngineModels(claudeSupportedModels, engineId)
+  })
+
+  // Which judge-picker values ClaudeUI can call for the auto-mode judge
+  // (ADR-081 §3). Mirrors session.ipc.ts's registration: read-only and
+  // token-free (presence checks only), so the class of get-engine-models.
+  handleRemote({
+    channel: 'automode:judge-model-support',
+    capability: 'config',
+    kind: 'query',
+    handler: (engineId: unknown, values: unknown) => judgeModelSupport(engineId, values)
   })
 
   // Full opencode provider catalog / per-provider models for the allowlist UI.
@@ -729,7 +710,7 @@ export function registerRemoteHandlers(
     channel: 'session:list-opencode',
     capability: 'fs-read',
     kind: 'query',
-    handler: async () => listOpencodeSessionsGlobal()
+    handler: async () => listOpencodeSessionsGlobal({ interaction: true })
   })
   handleRemote({
     channel: 'session:load-opencode-history',
@@ -831,6 +812,17 @@ export function registerRemoteHandlers(
     handler: async (sessionId: string, projectKey: string, agentId: string) => {
       return await loadSubagentHistory(sessionId, projectKey, agentId)
     }
+  })
+
+  // The bytes behind a transcript BlobRef (ADR-087). An invoke on purpose, not
+  // an HTTP route like `/sent-file`: on an E2E origin the bytes stay inside the
+  // encrypted channel, exactly as they were when they rode the snapshot. `chat`
+  // because a `chat` grant already read them there.
+  handleRemote({
+    channel: 'blob:get',
+    capability: 'chat',
+    kind: 'query',
+    handler: async (blobId: string) => getBlob(blobId)
   })
 
   handleRemote({
@@ -1261,18 +1253,13 @@ export function registerRemoteHandlers(
     channel: 'engine:is-installed',
     capability: 'config',
     kind: 'query',
-    handler: async (engineId: EngineId): Promise<boolean> => {
-      if (engineId === 'opencode') return opencodeServerManager.isBinaryAvailable()
-      if (engineId === 'pi') return piBinaryAvailable()
-      if (engineId === 'codex') return codexBinaryAvailable()
-      return engineId === 'claude'
-    }
+    handler: async (engineId: EngineId): Promise<boolean> => engineInstalled(engineId)
   })
   handleRemote({
     channel: 'pi:binary-path',
     capability: 'config',
     kind: 'query',
-    handler: async (): Promise<string | null> => locatePiBinary()
+    handler: async (): Promise<string | null> => locatePiDisplayPath()
   })
   handleRemote({
     channel: 'pi:auth-status',
@@ -1496,7 +1483,7 @@ export function registerRemoteHandlers(
     sessionIdArg: 0,
     withConnection: true,
     handler: async (connection: CommandConnection, routingId: string, language?: string | null) =>
-      remoteVoice.start(manager, connection, routingId, opt(language))
+      voiceRelay.start(manager, remoteVoiceOwner(connection.connectionId), routingId, opt(language))
   })
 
   handleRemote({
@@ -1504,7 +1491,7 @@ export function registerRemoteHandlers(
     capability: 'chat',
     kind: 'command',
     withConnection: true,
-    handler: async (connection: CommandConnection) => remoteVoice.stop(connection.connectionId)
+    handler: async (connection: CommandConnection) => voiceRelay.stop(connection.connectionId)
   })
 
   // Capability honesty: the ONLY thing a web client needs to decide whether to
@@ -1546,6 +1533,19 @@ export function registerRemoteHandlers(
   // settings group that configures it. `capability: 'config'`, like the rest of
   // the metering surface — and no shape here can return the device secret.
   for (const cmd of usageHubCommands()) {
+    handleRemote(cmd)
+  }
+
+  // -------------------------------------------------------------------------
+  // The harness manager (ADR-082 arc 2, §7)
+  // -------------------------------------------------------------------------
+  //
+  // From the same declarations the desktop spreads. Every device sees the
+  // Installed page (`harness:state` / `harness:versions` are `config` queries);
+  // installing, choosing a source and running detection are `admin`, because
+  // putting a program on the host from a phone is close to remote code
+  // execution. A base connection is refused them by the registry.
+  for (const cmd of harnessCommands()) {
     handleRemote(cmd)
   }
 

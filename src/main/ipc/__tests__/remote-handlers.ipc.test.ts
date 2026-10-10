@@ -76,7 +76,10 @@ vi.mock('../../../core/opencode/model-discovery', () => ({
 }))
 
 vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
-  opencodeServerManager: { isBinaryAvailable: vi.fn(() => false) }
+  opencodeServerManager: {
+    setServerStartedHook: () => {},
+    isBinaryAvailable: vi.fn(() => false)
+  }
 }))
 
 vi.mock('../../../core/pi/model-discovery', () => ({
@@ -91,7 +94,15 @@ vi.mock('../../../core/pi/model-discovery', () => ({
 
 vi.mock('../../../core/pi/pi-locate', () => ({
   piBinaryAvailable: vi.fn(() => false),
-  locatePiBinary: vi.fn(() => null)
+  locatePiBinary: vi.fn(() => null),
+  locatePiDisplayPath: vi.fn(() => null)
+}))
+
+// `engine:is-installed` is the harness resolver's answer (ADR-082), tested in
+// src/core/harness; here only the routing matters, off the real vendor/ tree.
+vi.mock('../../../core/harness/resolve', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/harness/resolve')>()),
+  engineInstalled: vi.fn(() => false)
 }))
 
 vi.mock('../../../core/auth/vault/CredentialSync', () => ({
@@ -152,8 +163,7 @@ vi.mock('../../../core/services/git-service', () => ({
 }))
 
 vi.mock('../../../core/sdk/proxy', () => ({
-  setProxyEnv: vi.fn(),
-  setProxyAllSubprocesses: vi.fn()
+  setProxyEnv: vi.fn()
 }))
 
 vi.mock('../../../core/sdk/endpoint-env', () => ({
@@ -269,10 +279,17 @@ vi.mock('../../../core/ipc/create-session', async (importOriginal) => {
 })
 
 // Import AFTER mocks.
+import {
+  cachedClaudeModels,
+  resetCachedClaudeModels
+} from '../../../core/services/claude-model-catalog'
+import { hostAppVersion } from '../../../core/host'
+import { getCliVersion } from '../../../core/sdk/harness'
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import {
   registerRemoteHandlers,
-  registerRemoteVersionInfo
+  registerRemoteVersionInfo,
+  resetRemoteVersionInfoForTests
 } from '../../../core/ipc/remote-handlers'
 import {
   CommandRegistry,
@@ -299,8 +316,10 @@ import { setModelEnv } from '../../../core/sdk/model-env'
 import { usageFetcher } from '../../../core/services/usage-fetcher'
 import { blockUsageService } from '../../../core/services/block-usage'
 import { logger } from '../../../core/services/logger'
+import { blobStore } from '../../../core/services/blob-store'
 import { query } from '../../../core/sdk'
 import { discoverCodexModels } from '../../../core/codex/model-discovery'
+import { engineInstalled } from '../../../core/harness/resolve'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -348,7 +367,6 @@ const sessionStub: any = {
   readBackgroundRange: vi.fn(() => ''),
   stopTask: vi.fn(async () => ({ success: true })),
   backgroundTask: vi.fn(async () => ({ success: true })),
-  dequeueMessage: vi.fn(async () => ({ removed: 1 })),
   queuedItems: [],
   enqueuePrompt: vi.fn(),
   recallQueued: vi.fn(async () => ({ recalled: ['a'], notRecalled: 0 })),
@@ -455,6 +473,39 @@ describe('registerRemoteHandlers', () => {
     )
   })
 
+  // A remote client's per-engine request: the id reaches the shared handler,
+  // only that engine answers, and an id that is not an engine rejects.
+  it('session:get-engine-models answers only the engine a remote client asks for', async () => {
+    const native = {
+      engineId: 'codex' as const,
+      vendorId: 'openai',
+      vendorName: 'Native OpenAI',
+      models: [
+        { value: 'native', displayName: 'Native', description: '', engineId: 'codex' as const }
+      ]
+    }
+    vi.mocked(discoverCodexModels).mockResolvedValueOnce([native])
+    await expect(
+      dispatcher.handle(makeRequest('session:get-engine-models', 'codex'), remoteConn)
+    ).resolves.toEqual([native])
+    expect(vi.mocked(query)).not.toHaveBeenCalled()
+    await expect(
+      dispatcher.handle(makeRequest('session:get-engine-models', 'gemini'), remoteConn)
+    ).rejects.toThrow(/unknown engine/)
+  })
+
+  // The model probe, title and commit message never run a turn that could use
+  // a plugin's tools, so their processes skip the post-initialize reload.
+  it.each([
+    ['session:get-models', []],
+    ['session:generate-title', ['a conversation']],
+    ['session:generate-commit-message', ['diff --git a/x b/x']]
+  ])('%s spawns its process without a plugin reload', async (channel, args) => {
+    await dispatcher.handle(makeRequest(channel, ...args), remoteConn)
+    expect(vi.mocked(query)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(query).mock.calls[0][0].options).toMatchObject({ reloadPlugins: false })
+  })
+
   it("routes 'xeng:'-prefixed approval responses to the cross-engine dispatcher (ADR-033)", async () => {
     await dispatcher.handle(
       makeRequest('session:approval-response', 'rid-1', 'xeng:perm-7', 'deny', { feedback: 'no' }),
@@ -467,6 +518,17 @@ describe('registerRemoteHandlers', () => {
       undefined
     )
     expect(sessionStub.resolveApproval).not.toHaveBeenCalled()
+  })
+
+  it('routes an after-the-fact block approval to the session, and its nudge through the send path (ADR-091 part 6)', async () => {
+    sessionStub.approveBlocked = vi.fn(() => ({ prompt: 'nudge' }))
+    try {
+      await dispatcher.handle(makeRequest('session:approve-blocked', 'rid-1', 'call-1'), remoteConn)
+      expect(sessionStub.approveBlocked).toHaveBeenCalledWith('call-1')
+      expect(sessionStub.run).toHaveBeenCalledWith('nudge', undefined)
+    } finally {
+      delete sessionStub.approveBlocked
+    }
   })
 
   it('routes ordinary approval responses to the session', async () => {
@@ -535,6 +597,7 @@ describe('registerRemoteHandlers', () => {
     // the everything-remote ruling reaches provider routing as well.
     for (const channel of [
       'shared-provider:save',
+      'shared-provider:probe',
       'shared-provider:remove',
       'shared-provider:set-route',
       'shared-provider:set-key',
@@ -542,6 +605,7 @@ describe('registerRemoteHandlers', () => {
       'shared-provider:set-curation',
       'shared-provider:set-disabled',
       'shared-provider:sync',
+      'shared-provider:use-stored-key',
       'shared-provider:disconnect',
       'shared-provider:set-default'
     ])
@@ -602,12 +666,34 @@ describe('registerRemoteHandlers', () => {
     } finally {
       sessionStub.willQueue = false
     }
-    expect(sessionStub.enqueuePrompt).toHaveBeenCalledWith('later', undefined)
+    // (text, uploads, refs) — no attachments, so neither half exists.
+    expect(sessionStub.enqueuePrompt).toHaveBeenCalledWith('later', undefined, undefined)
     expect(win.webContents.send).not.toHaveBeenCalledWith(
       'session:user-message',
       'rid-1',
       expect.anything()
     )
+  })
+
+  it('blob:get serves a blob over the remote transport; a miss is null, not an error', async () => {
+    const bytes = Buffer.from('remote-blob-bytes')
+    const ref = blobStore.putBytes('image/webp', bytes)!
+
+    expect(await dispatcher.handle(makeRequest('blob:get', ref.blobId), remoteConn)).toEqual({
+      mediaType: 'image/webp',
+      base64Data: bytes.toString('base64')
+    })
+    expect(await dispatcher.handle(makeRequest('blob:get', 'b'.repeat(64)), remoteConn)).toBeNull()
+    expect(await dispatcher.handle(makeRequest('blob:get', 'not-a-hash'), remoteConn)).toBeNull()
+    expect(await dispatcher.handle(makeRequest('blob:get', 42), remoteConn)).toBeNull()
+  })
+
+  it('blob:get is a base-reachable chat query, so a plain token connection can fetch images', () => {
+    const decl = commandRegistry.declaration('blob:get')
+    expect(decl?.capability).toBe('chat')
+    expect(decl?.kind).toBe('query')
+    expect(AUTH_OFF_GRANTS.has(decl!.capability)).toBe(true)
+    expect(commandRegistry.channels('remote')).toContain('blob:get')
   })
 
   it('session:send rejects when routingId not found', async () => {
@@ -816,11 +902,49 @@ describe('registerRemoteHandlers', () => {
     })
   })
 
-  it('registerRemoteVersionInfo exposes app:version-info on the dispatcher', async () => {
-    expect(dispatcher.has('app:version-info')).toBe(false)
-    registerRemoteVersionInfo({ appVersion: '1.2.3', cliVersion: '2.9' })
-    const res = await dispatcher.handle(makeRequest('app:version-info'), remoteConn)
-    expect(res).toEqual({ appVersion: '1.2.3', cliVersion: '2.9' })
+  describe('app:version-info', () => {
+    // The override is module-global: neither this describe's own override nor one
+    // left by an earlier test may reach the next.
+    beforeEach(() => resetRemoteVersionInfoForTests())
+    afterEach(() => resetRemoteVersionInfoForTests())
+
+    // A web client's Settings › About read this and got nothing: the channel was
+    // registered only by `registerRemoteVersionInfo`, which the desktop calls
+    // BEFORE `registerRemoteHandlers` (a no-op then) and claudeui-server never
+    // calls at all.
+    it('is served by registerRemoteHandlers alone, from what the host published (GUARD)', async () => {
+      expect(dispatcher.has('app:version-info')).toBe(true)
+      const res = (await dispatcher.handle(makeRequest('app:version-info'), remoteConn)) as {
+        appVersion: string
+        cliVersion: string
+      }
+      expect(res.appVersion).toBe(hostAppVersion())
+      expect(res.cliVersion).toBe(getCliVersion())
+    })
+
+    it('registerRemoteVersionInfo overrides it, before or after registration (GUARD)', async () => {
+      registerRemoteVersionInfo({ appVersion: '1.2.3', cliVersion: '2.9' })
+      const fresh = new RemoteDispatcher()
+      registerRemoteHandlers(fresh, sessionManagerStub)
+      // Called BEFORE the second registration, as the desktop does.
+      expect(await fresh.handle(makeRequest('app:version-info'), remoteConn)).toEqual({
+        appVersion: '1.2.3',
+        cliVersion: '2.9'
+      })
+      // And after.
+      registerRemoteVersionInfo({ appVersion: '4', cliVersion: '5' })
+      expect(await fresh.handle(makeRequest('app:version-info'), remoteConn)).toEqual({
+        appVersion: '4',
+        cliVersion: '5'
+      })
+    })
+
+    it('the override from the previous test does not outlive it (the reset seam)', async () => {
+      const res = (await dispatcher.handle(makeRequest('app:version-info'), remoteConn)) as {
+        appVersion: string
+      }
+      expect(res.appVersion).toBe(hostAppVersion())
+    })
   })
 
   // Regression: mockup channels must be reachable over remote — the web client
@@ -1020,16 +1144,22 @@ describe('registerRemoteHandlers', () => {
       expect(res).toEqual({ enabled: false, accounts: [] })
     })
 
-    it('engine:is-installed reports claude=true, opencode/pi from the binary probes', async () => {
+    it('engine:is-installed asks the harness resolver for every engine, claude included', async () => {
+      vi.mocked(engineInstalled).mockImplementation((id) => id === 'pi')
       expect(
         await dispatcher.handle(makeRequest('engine:is-installed', 'claude'), remoteConn)
-      ).toBe(true)
+      ).toBe(false)
       expect(
         await dispatcher.handle(makeRequest('engine:is-installed', 'opencode'), remoteConn)
       ).toBe(false)
       expect(await dispatcher.handle(makeRequest('engine:is-installed', 'pi'), remoteConn)).toBe(
-        false
+        true
       )
+      expect(vi.mocked(engineInstalled).mock.calls.map(([id]) => id)).toStrictEqual([
+        'claude',
+        'opencode',
+        'pi'
+      ])
     })
 
     it('registers the account mutations (S4 / ADR-057 — config, not admin)', () => {
@@ -1136,7 +1266,8 @@ describe('registerRemoteHandlers', () => {
           null, // thinkingMode
           null, // resumeSessionAt
           null, // forkSession
-          null // engineId
+          null, // engineId
+          null // announce
         ),
         remoteConn
       )
@@ -1151,7 +1282,8 @@ describe('registerRemoteHandlers', () => {
         'thinkingMode',
         'resumeSessionAt',
         'forkSession',
-        'engineId'
+        'engineId',
+        'announce'
       ] as const) {
         expect(args[key], `${key} must be undefined, not null`).toBeUndefined()
       }
@@ -1173,7 +1305,8 @@ describe('registerRemoteHandlers', () => {
           'think',
           'anchor-1',
           false,
-          'opencode'
+          'opencode',
+          { effort: 'xhigh', thinkingMode: null }
         ),
         remoteConn
       )
@@ -1189,7 +1322,8 @@ describe('registerRemoteHandlers', () => {
         resumeSessionAt: 'anchor-1',
         // `false` is a real value, not "unset" — `?? undefined` must not eat it.
         forkSession: false,
-        engineId: 'opencode'
+        engineId: 'opencode',
+        announce: { effort: 'xhigh', thinkingMode: null }
       })
     })
 
@@ -1286,6 +1420,38 @@ describe('registerRemoteHandlers', () => {
         expect.not.objectContaining({ sandbox: expect.anything() })
       )
     })
+
+    it('a remote model-picker fetch feeds the host catalog automation runs read (GUARD)', async () => {
+      // Headless / remote hosts never run the desktop `fetchModels`; their picker
+      // fetch is the only thing that can tell an automation run which rows exist.
+      resetCachedClaudeModels()
+      expect(cachedClaudeModels()).toEqual([])
+      await dispatcher.handle(makeRequest('session:get-models'), remoteConn)
+      expect(cachedClaudeModels()).toEqual([{ value: 'sonnet', description: '' }])
+
+      resetCachedClaudeModels()
+      await dispatcher.handle(makeRequest('session:get-engine-models'), remoteConn)
+      expect(cachedClaudeModels()).toEqual([{ value: 'sonnet', description: '' }])
+    })
+
+    it('keeps the per-engine starting-effort map through save and broadcast', async () => {
+      // `engineEffortDefaults` is an ordinary UI setting, not engine/vendor-owned:
+      // no strip list may eat it, and every client (the desktop included) must be
+      // handed it back on `config:settings-changed`.
+      const engineEffortDefaults = { pi: { 'anthropic/claude-opus-5-5': 'high' } }
+      await dispatcher.handle(
+        makeRequest('config:save-settings', { theme: 'light', engineEffortDefaults }),
+        remoteConn
+      )
+
+      expect(uiConfigMocks.saveSettings.mock.calls[0][0]).toEqual(
+        expect.objectContaining({ engineEffortDefaults })
+      )
+      expect(win.webContents.send).toHaveBeenCalledWith(
+        'config:settings-changed',
+        expect.objectContaining({ engineEffortDefaults })
+      )
+    })
   })
   // LOW-RW3 — session:write-custom-title interpolates both caller-supplied
   // identifiers straight into ~/.claude/projects/<projectKey>/<sessionId>.jsonl.
@@ -1367,6 +1533,9 @@ describe('registerRemoteHandlers', () => {
 //   - `session:recall-queued` (phase 3 / ADR-053) — the itemized replacement
 //     for `session:dequeue-message`, same `chat` capability as the channel it
 //     supersedes, so the effective remote surface is unchanged in substance.
+//   - `session:approve-blocked` (ADR-091 part 6) — approving an auto-mode
+//     block after the fact; a `chat` command on the named session, gated
+//     exactly like `session:approval-response`, which it extends.
 // ---------------------------------------------------------------------------
 
 const PRE_PORT_REMOTE_CHANNELS = [
@@ -1413,6 +1582,7 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'pi:auth-status',
   'pi:binary-path',
   'session:approval-response',
+  'session:approve-blocked',
   'session:ask-side-question',
   'session:background-task',
   'session:build-subagent-file-map',
@@ -1532,7 +1702,14 @@ const SHELL_GATED_CHANNELS = [
  * strictly weaker read than the arbitrary-path listing that channel already
  * grants, so the effective remote surface widens by nothing.
  */
-const POST_PORT_CHANNELS = ['session:clear-conversation', 'file:list-places'] as const
+const POST_PORT_CHANNELS = [
+  'session:clear-conversation',
+  'file:list-places',
+  // ADR-087: the bytes behind a transcript BlobRef. `chat`, the capability that
+  // already read these exact bytes inside the snapshot — an invoke, not an HTTP
+  // route, so on an E2E origin they stay inside the encrypted channel.
+  'blob:get'
+] as const
 
 /**
  * ADR-052 passkeys. Listed separately for the same reason the terminal set is:
@@ -1654,6 +1831,7 @@ const S1B_SWEEP_CHANNELS = [
   'config:read-pi-native-raw',
   'config:save-engine-config',
   'config:save-opencode-settings',
+  'config:set-opencode-tool-disabled',
   'config:save-slash-commands',
   'config:save-vendor-config',
   'config:write-pi-native-text',
@@ -1696,6 +1874,9 @@ const TRUST_LIST_CHANNELS = ['config:load-shared-automode', 'config:save-shared-
  */
 const MODEL_ALLOWLIST_CHANNELS = ['models:set-provider-allowlist'] as const
 
+/** ADR-094 — the agent types an engine can spawn (read-only, `config`). */
+const AGENT_TYPE_CHANNELS = ['config:list-agent-types'] as const
+
 /**
  * S4 — the vendor-OAuth / account-mutation / native-OAuth family (ADR-057).
  *
@@ -1725,6 +1906,9 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
   // ADR-074 §6 — the key moves host-side; nothing about it comes back.
   'shared-provider:adopt-native',
   'shared-provider:disconnect',
+  // Detect: the host fetches a typed URL, so `config` like the save — never a
+  // view-only session's proxy. The stored key is read host-side; none comes back.
+  'shared-provider:probe',
   'shared-provider:remove',
   'shared-provider:save',
   'shared-provider:set-curation',
@@ -1734,6 +1918,8 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
   'shared-provider:set-key',
   'shared-provider:set-route',
   'shared-provider:sync',
+  // ADR-082 §8 (S7d) — a kept own key replaced by the stored one, host-side.
+  'shared-provider:use-stored-key',
   'vendor-auth:list-keys',
   'vendor-auth:list-options',
   'vendor-auth:oauth-authorize',
@@ -1757,7 +1943,12 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
  * key material: the shared definitions, opencode's catalog and pi's vendor
  * entries reduce to names, counts, credential BADGES and per-engine chips.
  */
-const PROVIDER_REGISTRY_CHANNELS = ['provider-registry:list'] as const
+const PROVIDER_REGISTRY_CHANNELS = [
+  'provider-registry:list',
+  // S7f — who holds an own key for a provider now, read from the harnesses'
+  // auth files host-side; harness ids only, no key material.
+  'shared-provider:own-key-holders'
+] as const
 
 /**
  * ADR-068 §2 — the ChatGPT vault's ACCOUNTS.
@@ -1859,6 +2050,16 @@ const REMOTE_VIEW_CHANNELS = ['remote:status-view'] as const
  */
 const IDE_CHANNELS = ['ide:availability', 'ide:mint-entry'] as const
 
+/**
+ * ADR-081 §3 — which judge-picker values ClaudeUI can call for the auto-mode
+ * judge. A `query` declaring `config`, the class of `session:get-engine-models`
+ * beside it, so a base connection reaches it: the Settings judge picker is not
+ * desktop-only. Token-free by construction — the resolver's describe path
+ * checks a key for PRESENCE and reads ChatGPT's token-free status, so the
+ * answer is a yes/no and the resolver's own copy per value.
+ */
+const JUDGE_MODEL_SUPPORT_CHANNELS = ['automode:judge-model-support'] as const
+
 /** The half of {@link IDE_CHANNELS} that is gated by the `ide` capability. */
 const IDE_GATED_CHANNELS = ['ide:mint-entry'] as const
 
@@ -1876,6 +2077,38 @@ const USAGE_HUB_CHANNELS = [
   'usage-hub:sync-now',
   'usage-hub:resync',
   'usage-hub:forget'
+] as const
+
+/**
+ * The harness manager (ADR-082 arc 2). Restated rather than imported from
+ * `harness-commands.ts`, for the reason {@link USAGE_HUB_CHANNELS} is. The two
+ * reads are `config`; the eight writes `admin` (§7), which a base connection
+ * never holds: four for sources and installs, three for updates (§6), and the
+ * upgrade sheet's answer (§8).
+ */
+const HARNESS_CHANNELS = [
+  'harness:state',
+  'harness:versions',
+  'harness:set-selection',
+  'harness:install',
+  'harness:install-cancel',
+  'harness:detect',
+  'harness:set-update-mode',
+  'harness:update-all',
+  'harness:check-updates',
+  'harness:answer-upgrade-prompt'
+] as const
+
+/** The part of {@link HARNESS_CHANNELS} that is gated by `admin` (ADR-082 §7). */
+const HARNESS_ADMIN_CHANNELS = [
+  'harness:set-selection',
+  'harness:install',
+  'harness:install-cancel',
+  'harness:detect',
+  'harness:set-update-mode',
+  'harness:update-all',
+  'harness:check-updates',
+  'harness:answer-upgrade-prompt'
 ] as const
 
 /** channel → the capability it must declare (the reachability decision). */
@@ -1922,6 +2155,7 @@ describe('remote surface parity (phase 1 port)', () => {
         ...S1B_SWEEP_CHANNELS,
         ...TRUST_LIST_CHANNELS,
         ...MODEL_ALLOWLIST_CHANNELS,
+        ...AGENT_TYPE_CHANNELS,
         ...S4_VENDOR_CREDENTIAL_CHANNELS,
         ...PROVIDER_REGISTRY_CHANNELS,
         ...PROVIDER_ACCOUNT_CHANNELS,
@@ -1929,6 +2163,7 @@ describe('remote surface parity (phase 1 port)', () => {
         ...CHATGPT_DEVICE_CODE_CHANNELS,
         ...REMOTE_VIEW_CHANNELS,
         ...IDE_CHANNELS,
+        ...JUDGE_MODEL_SUPPORT_CHANNELS,
         // ADR-068 §1: the three `codex:login-*` channels are gone with the
         // native device-code UI; the vault owns the ChatGPT identity and
         // `provider-account:*` is how a remote client reads it.
@@ -1955,9 +2190,22 @@ describe('remote surface parity (phase 1 port)', () => {
         // the combined dashboard and the settings group that configures it are
         // not desktop-only — and no shape among them can return the device
         // secret, which is why a write-only `set-secret` command is safe here.
-        ...USAGE_HUB_CHANNELS
+        ...USAGE_HUB_CHANNELS,
+        // ADR-082 arc 2: the Installed page is on every device (reads are
+        // `config`); installing, re-sourcing and detecting are `admin`.
+        ...HARNESS_CHANNELS
       ].sort()
     )
+  })
+
+  it('automode:judge-model-support is a base-reachable config QUERY, like get-engine-models', () => {
+    const decl = commandRegistry.declaration('automode:judge-model-support')
+    const twin = commandRegistry.declaration('session:get-engine-models')
+    expect(decl?.capability).toBe('config')
+    expect(decl?.capability).toBe(twin?.capability)
+    expect(decl?.kind).toBe('query')
+    expect(decl?.kind).toBe(twin?.kind)
+    expect(AUTH_OFF_GRANTS.has(decl!.capability)).toBe(true)
   })
 
   it('the S1b sweep is reachable with the base grant set, and audited where it mutates', async () => {
@@ -1965,9 +2213,12 @@ describe('remote surface parity (phase 1 port)', () => {
     // authenticated connection reaches these. Asserted through the CAPABILITY
     // (what dispatch actually checks) rather than by calling every handler —
     // most of them would touch the real filesystem.
-    const caps = [...S1B_SWEEP_CHANNELS, ...TRUST_LIST_CHANNELS, ...MODEL_ALLOWLIST_CHANNELS].map(
-      (c) => [c, commandRegistry.declaration(c)?.capability] as const
-    )
+    const caps = [
+      ...S1B_SWEEP_CHANNELS,
+      ...TRUST_LIST_CHANNELS,
+      ...MODEL_ALLOWLIST_CHANNELS,
+      ...AGENT_TYPE_CHANNELS
+    ].map((c) => [c, commandRegistry.declaration(c)?.capability] as const)
     const ungranted = caps.filter(([, cap]) => !cap || !AUTH_OFF_GRANTS.has(cap))
     expect(
       ungranted,
@@ -2116,7 +2367,9 @@ describe('remote surface parity (phase 1 port)', () => {
       // ADR-064: `ide:mint-entry` only. Its sibling `ide:availability` is
       // deliberately absent — it declares `config` and IS reachable at connect,
       // which is what makes the button able to explain itself.
-      ...IDE_GATED_CHANNELS.map((c) => [c, 'ide'] as const)
+      ...IDE_GATED_CHANNELS.map((c) => [c, 'ide'] as const),
+      // ADR-082 §7: the harness manager's writes. The two reads are `config`.
+      ...HARNESS_ADMIN_CHANNELS.map((c) => [c, 'admin'] as const)
     ].sort(([a], [b]) => a.localeCompare(b))
     expect(
       [...unreachable].sort(([a], [b]) => a.localeCompare(b)),
@@ -2288,12 +2541,13 @@ describe('remote surface parity (phase 1 port)', () => {
   })
 
   it('exposes no channel whose capability the old denylist stood for, except the sanctioned ones', () => {
-    // FOUR sanctioned widenings, each deliberate and each behind a ceremony:
-    // the terminal set (ADR-052 decision 6), the passkey set (decision 1), the
-    // `authcfg:*` settings namespace (ADR-054 §6, extended by ADR-056 with the
-    // two LAN-channel verbs — which is also when the namespace joined the pin
-    // table, `admin` having shrunk to exactly these two families), and the IDE
-    // mint (ADR-064).
+    // FIVE sanctioned widenings, each deliberate and each behind a proven
+    // identity: the terminal set (ADR-052 decision 6), the passkey set
+    // (decision 1), the `authcfg:*` settings namespace (ADR-054 §6, extended by
+    // ADR-056 with the two LAN-channel verbs — which is also when the namespace
+    // joined the pin table, `admin` having shrunk to exactly these two
+    // families), the IDE mint (ADR-064), and the harness manager's writes
+    // (ADR-082 §7: `admin`, so a passkey or break-glass connection only).
     // Everything else in the pin table must still be absent from the remote
     // surface — which, for `remote:set-config`, is what makes the `off` master
     // switch structurally unreachable from a remote client now that a passkey
@@ -2306,7 +2560,8 @@ describe('remote surface parity (phase 1 port)', () => {
       // ADR-064's widening: `ide:mint-entry` is pinned to `ide`, registered for
       // remote, and reachable only behind the toggle + a step-up. Same shape as
       // the terminal set above.
-      ...IDE_GATED_CHANNELS
+      ...IDE_GATED_CHANNELS,
+      ...HARNESS_ADMIN_CHANNELS
     ])
     for (const channel of Object.keys(PINNED_CAPABILITIES)) {
       if (sanctioned.has(channel)) continue

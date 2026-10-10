@@ -12,8 +12,7 @@
  *
  * Nothing about that class of bug is visible from reading the palette: the
  * offending colour never appears in our config. It has to be measured on the
- * rendered SVG. Hence this script — same posture as `probe-opencode-caps.mjs`:
- * **re-run it on every mermaid version bump** (the vendored version is pinned by
+ * rendered SVG. Hence this script: **re-run it on every mermaid version bump** (the vendored version is pinned by
  * `package.json#mermaid`), and after every edit to `mermaid-themes.ts`. A bump
  * can change a derivation, a default, or a diagram's DOM structure, and the only
  * honest answer is a fresh measurement.
@@ -37,7 +36,7 @@
  *  - The page body is painted with the app theme's real `--color-bg-primary`.
  *    Every theme config sets mermaid's `background: 'transparent'`, so the
  *    canvas colour behind the diagram is part of the contrast maths, not a
- *    detail. Values are mirrored from `src/renderer/src/assets/main.css`.
+ *    detail. Values are mirrored from `src/renderer/src/assets/app.css`.
  *  - mermaid is loaded from the vendored `node_modules/mermaid/dist/mermaid.min.js`
  *    (a plain script that assigns `globalThis.mermaid`), and initialized with
  *    `buildMermaidInitConfig()` imported from the app's own module. Measuring a
@@ -109,7 +108,7 @@ const TARGET = 4.5
 // ── App canvas colours ───────────────────────────────────────────────────────
 /**
  * `--color-bg-primary` per app theme, mirrored from
- * src/renderer/src/assets/main.css (`@theme` = dark, `[data-theme='light']`,
+ * src/renderer/src/assets/app.css (`@theme` = dark, `[data-theme='light']`,
  * `[data-theme='monokai']`). Duplicated rather than parsed because the CSS is a
  * Tailwind v4 `@theme` block, not something a script should try to interpret —
  * but it is only three values, and if they drift the shots make it obvious.

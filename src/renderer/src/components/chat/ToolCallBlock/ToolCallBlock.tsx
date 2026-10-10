@@ -17,13 +17,14 @@ import type {
   ContentBlock,
   PendingApproval,
   PermissionSuggestion,
-  ToolReviewBlock
+  ToolReviewBlock,
+  PermissionDenialBlock
 } from '../../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../../stores/session-store'
 import { hostedMcpKind } from '../../../../../shared/tool-kinds'
 import { engineToolMap } from '../tool-registry/engine-tool-maps'
 import { ToolCard } from '../tool-registry/ToolCard'
-import { latestNotification } from '../task-state'
+import { bashMovedToBackground, latestNotification } from '../task-state'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -34,13 +35,16 @@ interface Props {
   approval?: PendingApproval
   /** A permission judge's verdict on this call (F18) — the caller pairs it by id. */
   review?: ToolReviewBlock
+  /** A pre-ask refusal no judge made — same pairing, different block. */
+  denial?: PermissionDenialBlock
 }
 
 export const ToolCallBlock = memo(function ToolCallBlock({
   block,
   result,
   approval,
-  review
+  review,
+  denial
 }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const dismissApproval = useSessionStore((s) => s.dismissApproval)
@@ -59,16 +63,25 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const toolOutputMaxChars = useSessionStore((s) => s.settings.toolOutputMaxChars)
 
   const toolUseId = block.toolUseId || ''
-  const isBackgroundBash = block.toolName === 'Bash' && !!block.toolInput?.run_in_background
+  const isBash = block.toolName === 'Bash'
   const bashOutput = useActiveSession((s) => s.bashOutputs[toolUseId])
   const bgOutput = useActiveSession((s) => s.backgroundOutputs[toolUseId])
+  // The live task record (session:task-started), when cli.js has registered this
+  // call as a task — a foreground Bash does so a few seconds after it starts.
+  const activeTask = useActiveSession((s) => (isHistorical ? undefined : s.activeTasks[toolUseId]))
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const watchBackgroundOutput = useSessionStore((s) => s.watchBackgroundOutput)
   const unwatchBackgroundOutput = useSessionStore((s) => s.unwatchBackgroundOutput)
 
-  const bgNotification = isBackgroundBash
-    ? (latestNotification(taskNotifications, toolUseId) ?? null)
-    : null
+  const notification = isBash ? (latestNotification(taskNotifications, toolUseId) ?? null) : null
+  const movedToBackground = bashMovedToBackground({
+    isHistorical,
+    activeTask,
+    notification,
+    resultText: result?.toolResult
+  })
+  const isBackgroundBash = isBash && (!!block.toolInput?.run_in_background || movedToBackground)
+  const bgNotification = isBackgroundBash ? notification : null
 
   const isStopping = stoppingTaskIds.includes(toolUseId)
   const [isBackgrounding, setIsBackgrounding] = useState(false)
@@ -113,13 +126,25 @@ export const ToolCallBlock = memo(function ToolCallBlock({
     dismissApproval(activeSessionId, approval.requestId)
   }
 
+  // ADR-091 part 6 — the host grants, marks and nudges; the marked review it
+  // re-sends is what hides the button (ToolCard), on every client.
+  const handleApproveBlocked = (): void => {
+    if (!activeSessionId || !toolUseId) return
+    window.api.approveBlocked(activeSessionId, toolUseId).catch((err: unknown) => {
+      window.api.logError('ToolCallBlock', `Failed to approve blocked call: ${String(err)}`)
+    })
+  }
+
   const handleBackgroundTask = async (): Promise<void> => {
     if (!activeSessionId) return
     setIsBackgrounding(true)
     const bgResult = await window.api.backgroundTask(activeSessionId, toolUseId)
+    // Success needs no local state: the task's record flips to the background,
+    // which hides the button on every client. A failure also arrives as a
+    // session warning.
+    setIsBackgrounding(false)
     if (!bgResult.success) {
       window.api.logError('ToolCallBlock', `Failed to background task: ${bgResult.error}`)
-      setIsBackgrounding(false)
     }
   }
 
@@ -154,6 +179,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
       result={result}
       approval={approval}
       review={review}
+      denial={denial}
       isHistorical={isHistorical}
       permissionMode={permissionMode}
       expandToolCalls={expandToolCalls}
@@ -165,12 +191,14 @@ export const ToolCallBlock = memo(function ToolCallBlock({
       bgOutput={bgOutput}
       bgNotification={bgNotification}
       isStopping={isStopping}
+      activeTask={activeTask}
       isBackgrounding={isBackgrounding}
       hasActiveSession={activeSessionId !== null}
       backgroundTasksEnabled={backgroundTasksEnabled}
       displayName={toolDisplayName}
       toolOutputMaxChars={toolOutputMaxChars}
       onApproval={handleApproval}
+      onApproveBlocked={handleApproveBlocked}
       onBackgroundTask={handleBackgroundTask}
       onStopTask={handleStopTask}
       onOpenTaskPanel={handleOpenTaskPanel}

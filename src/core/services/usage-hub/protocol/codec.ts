@@ -31,9 +31,13 @@ import {
   ALLOWED_EVENT_FIELDS,
   FORBIDDEN_EVENT_FIELDS,
   MAX_EVENTS_PER_PUSH,
+  MAX_READINGS_PER_PUSH,
   SCHEMA_VERSION,
   type HubAccount,
   type HubEvent,
+  type HubCreditAllowance,
+  type HubCreditReading,
+  type HubCredits,
   type HubLimitReading,
   type HubDevice,
   type HubStatusResponse,
@@ -53,6 +57,7 @@ import {
   type PushLimitsRequest,
   type PushLimitsResponse,
   type RemoteBucket,
+  type RemoteCreditReading,
   type RemoteLimitReading,
   type RemoteWindow,
   type ResyncRequest,
@@ -205,14 +210,70 @@ export function encodeLimitReading(source: unknown): HubLimitReading {
   }
 }
 
+/** A credits object, or null — a malformed one is no statement rather than a guess. */
+function creditsOf(source: unknown): HubCredits | null {
+  if (!isRecord(source)) return null
+  return { unlimited: bool(source.unlimited), balance: nullableStr(source.balance) }
+}
+
+/**
+ * An allowance, or null. Both amounts must be finite and non-negative and the
+ * percent finite: an allowance with half its numbers is a claim nobody made, so
+ * a bad field drops the whole allowance rather than becoming a zero.
+ */
+function allowanceOf(source: unknown): HubCreditAllowance | null {
+  if (!isRecord(source)) return null
+  const used = nullableNum(source.used)
+  const limit = nullableNum(source.limit)
+  const remainingPercent = nullableNum(source.remainingPercent)
+  if (used === null || limit === null || remainingPercent === null) return null
+  if (used < 0 || limit < 0) return null
+  return {
+    used,
+    limit,
+    remainingPercent: Math.min(100, Math.max(0, remainingPercent)),
+    resetsAt: nullableStr(source.resetsAt)
+  }
+}
+
+export function encodeCreditReading(source: unknown): HubCreditReading {
+  if (!isRecord(source)) throw new ProtocolError('credit reading is not an object')
+  const accountKey = str(source.accountKey)
+  if (accountKey === '' || accountKey === 'unknown') {
+    throw new ProtocolError('a credit reading with no account key may not be pushed')
+  }
+  const credits = creditsOf(source.credits)
+  const allowance = allowanceOf(source.allowance)
+  if (credits === null && allowance === null) {
+    throw new ProtocolError('a credit reading must carry credits or an allowance')
+  }
+  return {
+    accountKey,
+    accountLabel: nullableStr(source.accountLabel),
+    vendorId: str(source.vendorId),
+    plan: nullableStr(source.plan),
+    credits,
+    allowance,
+    observedAt: num(source.observedAt)
+  }
+}
+
 export function encodePushLimits(input: {
   deviceId: string
   readings: ReadonlyArray<unknown>
+  credits?: ReadonlyArray<unknown>
 }): PushLimitsRequest {
+  const credits = input.credits ?? []
+  if (credits.length > MAX_READINGS_PER_PUSH) {
+    throw new ProtocolError(`a push may carry at most ${MAX_READINGS_PER_PUSH} credit readings`)
+  }
   return {
     schemaVersion: SCHEMA_VERSION,
     deviceId: input.deviceId,
-    readings: input.readings.map(encodeLimitReading)
+    readings: input.readings.map(encodeLimitReading),
+    // ABSENT rather than empty when there are none: such a push is then
+    // byte-identical to one from a client that predates credits (ADR-072 §8).
+    ...(credits.length > 0 ? { credits: credits.map(encodeCreditReading) } : {})
   }
 }
 
@@ -359,13 +420,40 @@ function decodeLimitReading(source: unknown): RemoteLimitReading | null {
   }
 }
 
+function decodeCreditReading(source: unknown): RemoteCreditReading | null {
+  if (!isRecord(source)) return null
+  const accountKey = str(source.accountKey)
+  if (accountKey === '') return null
+  const credits = creditsOf(source.credits)
+  const allowance = allowanceOf(source.allowance)
+  // Nothing to show is not a reading.
+  if (credits === null && allowance === null) return null
+  return {
+    deviceId: str(source.deviceId),
+    accountKey,
+    labelMasked: nullableStr(source.labelMasked),
+    vendorId: str(source.vendorId),
+    plan: nullableStr(source.plan),
+    credits,
+    allowance,
+    observedAt: num(source.observedAt),
+    // The `accountLabel` rule of `decodeLimitReading`: passed through only when sent.
+    ...('accountLabel' in source ? { accountLabel: nullableStr(source.accountLabel) } : {})
+  }
+}
+
 export function decodePullLimitsResponse(payload: unknown): PullLimitsResponse {
   if (!isRecord(payload)) throw new ProtocolError('limit relay response is not an object')
   const raw = Array.isArray(payload.readings) ? payload.readings : []
   const readings = raw
     .map(decodeLimitReading)
     .filter((reading): reading is RemoteLimitReading => reading !== null)
-  return { epoch: num(payload.epoch), readings }
+  // A hub that predates credits sends no key at all: no credits, which is true.
+  const rawCredits = Array.isArray(payload.credits) ? payload.credits : []
+  const credits = rawCredits
+    .map(decodeCreditReading)
+    .filter((reading): reading is RemoteCreditReading => reading !== null)
+  return { epoch: num(payload.epoch), readings, credits }
 }
 
 // ---------------------------------------------------------------------------

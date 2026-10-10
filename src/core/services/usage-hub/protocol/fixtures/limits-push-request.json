@@ -38,5 +38,24 @@
       "resetsAt": "2026-09-22T23:39:00.000Z",
       "observedAt": 1758412900000
     }
+  ],
+  "credits": [
+    {
+      "accountKey": "chatgpt:ws-3c1e9a:user-5d20b4",
+      "accountLabel": "someone@example.com",
+      "vendorId": "openai",
+      "plan": "business",
+      "credits": {
+        "unlimited": false,
+        "balance": null
+      },
+      "allowance": {
+        "used": 100.25,
+        "limit": 8000,
+        "remainingPercent": 99,
+        "resetsAt": "2026-10-24T00:00:00.000Z"
+      },
+      "observedAt": 1758412900000
+    }
   ]
 }

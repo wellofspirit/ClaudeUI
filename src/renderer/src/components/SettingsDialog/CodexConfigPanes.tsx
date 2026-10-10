@@ -73,7 +73,7 @@ const UNSET = ''
 // ── Pane shell ───────────────────────────────────────────────────────────────
 
 /**
- * Loading / not-installed gating and the hairline between rows.
+ * The Loading and unreadable states, and the hairline between rows.
  *
  * A group CARD divides its items (View.tsx), but a whole pane is one item, so
  * the rows inside it need the same divider to read as the card's rows. There is
@@ -100,6 +100,10 @@ function PaneShell({
       </div>
     )
   }
+  // Nothing here asks whether Codex is installed: while it is not, the Codex
+  // page cannot be opened and the judge's Codex segment is hidden (ADR-082 §8),
+  // so a pane mounts fresh — and reads — once Codex runs. A Codex that runs but
+  // whose config cannot be read says so, in every section.
   if (api.status === 'unavailable') {
     return (
       <div data-testid={testid}>
@@ -393,7 +397,7 @@ function useCodexCatalog(): { models: ModelInfo[]; efforts: string[] } {
   useEffect(() => {
     let cancelled = false
     window.api
-      .getEngineModels()
+      .getEngineModels('codex')
       .then((groups) => {
         if (cancelled) return
         setModels(groups.filter((g) => g.engineId === 'codex').flatMap((g) => g.models))
@@ -1025,7 +1029,7 @@ export function CodexManagedSection(): React.JSX.Element {
       <ManagedRow
         configKey="check_for_update_on_startup"
         label="Self-update check"
-        why="The Codex binary is vendored and pinned, so an update check could only offer one ClaudeUI would not run."
+        why="ClaudeUI installs and updates its own Codex at the pinned version, so an update check could only offer one ClaudeUI would not run."
         value="false"
         locked="Forced off"
       />
@@ -1065,7 +1069,7 @@ export function CodexManagedSection(): React.JSX.Element {
         label="Compiled Bash rules"
         description={
           rules
-            ? `${rules.rules} rule${rules.rules === 1 ? '' : 's'} compiled from your Claude permission rules${rules.skipped > 0 ? `, ${rules.skipped} skipped` : ''}. ${
+            ? `${rules.rules} rule${rules.rules === 1 ? '' : 's'} compiled from your Claude permission rules${rules.skipped > 0 ? `, ${rules.skipped} skipped` : ''}${rules.carvedOut ? ` (${rules.carvedOut} held back by your deny/ask rules)` : ''}. ${
                 rules.syncedAt
                   ? `Last written ${new Date(rules.syncedAt).toLocaleString()}.`
                   : 'Not written yet.'

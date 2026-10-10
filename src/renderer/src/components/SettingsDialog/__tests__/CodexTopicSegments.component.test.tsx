@@ -227,17 +227,6 @@ describe('CodexDefaultsSection — engines/codex.json#codexConfig', () => {
     await waitFor(() => expect(screen.getByTestId('CodexDefaultsSection.staleEffort')).toBeTruthy())
     expect(screen.getByTestId('CodexDefaultsSection.staleEffort').textContent).toContain('xhigh')
   })
-
-  it('renders the not-installed row instead of a picker when Codex is absent', async () => {
-    installApiStub({ engineIsInstalled: vi.fn(async () => false) })
-    render(<CodexDefaultsSection />)
-    await waitFor(() =>
-      expect(screen.getByTestId('CodexDefaultsSection.status').getAttribute('data-id')).toBe(
-        'not-installed'
-      )
-    )
-    expect(screen.queryByTestId('CodexDefaultsSection.defaultModel')).toBeNull()
-  })
 })
 
 // ── 2. Cross-engine dispatch › Codex ─────────────────────────────────

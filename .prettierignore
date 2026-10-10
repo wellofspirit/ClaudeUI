@@ -6,6 +6,14 @@ tsconfig.json
 tsconfig.*.json
 # Exact output from the pinned Codex generator, checked by check-codex-protocol.
 src/core/codex/protocol/
+# Exact output from the pinned opencode generator, checked by check-opencode-protocol
+# (events.ts beside them is hand-written and formatted normally).
+src/core/opencode/protocol-v2/openapi.ts
+src/core/opencode/protocol-v2/*.json
+src/shared/opencode-config-schema.json
 
 # Scratch git worktrees created by the agent harness — not repo sources.
 .claude/worktrees/
+
+# Real opencode 2.x event recordings the mapper tests replay (S4); kept as recorded.
+src/core/opencode/__tests__/fixtures/opencode-v2/

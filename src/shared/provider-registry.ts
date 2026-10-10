@@ -70,6 +70,12 @@ export interface ProviderEngineFacts {
   /** A shared route's last delivery failure (`SharedProviderStatus`), for the engine row. */
   error?: string
   /**
+   * An ENABLED shared route whose engine kept a key of its own — an automatic
+   * delivery never replaces one (ADR-082 §8, S7d). `error` says so; the row
+   * offers "Use the stored key".
+   */
+  ownKeyKept?: true
+  /**
    * An ENABLED shared route: whether the engine's own store actually holds the
    * credential now (`SharedProviderStatus.routes[r].delivered`). A route with no
    * error can still be undelivered — the file was changed outside ClaudeUI.
@@ -193,6 +199,15 @@ export interface ProviderEntry {
    * sheet's Remove affordance is gated on its presence.
    */
   opencodeRemoveKind?: NonNullable<OpencodeProviderCatalogEntry['actions']['removeKind']>
+  /**
+   * A NATIVE row whose credential is the harness's own — a key or sign-in it
+   * holds for a catalog vendor that no ClaudeUI provider claims (ADR-074,
+   * ADR-082 §8 "As built (S7f)"). The row is titled with whose it is
+   * ({@link providerEntryTitle}), so it never reads as a second copy of a
+   * ClaudeUI provider of the same name. Absent on a free provider, a vetoed one
+   * with nothing configured, and a custom pi provider the user declared.
+   */
+  ownedBy?: 'opencode' | 'pi'
 }
 
 /**
@@ -225,4 +240,29 @@ export interface ProviderRegistrySnapshot {
    * catalog section in the Add sheet.
    */
   opencodeInstalled: boolean
+}
+
+/**
+ * A catalog vendor's display name: the opencode / models.dev catalog's name when
+ * one is known, else the id title-cased (`amazon-bedrock` → `Amazon Bedrock`).
+ * pi ships no display names, and its raw id is never a name to show.
+ */
+export function vendorDisplayName(id: string, catalogName?: string): string {
+  if (catalogName) return catalogName
+  return id
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((word) => word[0].toUpperCase() + word.slice(1))
+    .join(' ')
+}
+
+/**
+ * A row's title: its name, and — on a harness's own credential — whose it is:
+ * `OpenRouter · pi’s own key`, `Anthropic · pi’s own sign-in`.
+ */
+export function providerEntryTitle(
+  entry: Pick<ProviderEntry, 'name' | 'ownedBy' | 'credential'>
+): string {
+  if (!entry.ownedBy) return entry.name
+  return `${entry.name} · ${entry.ownedBy}’s own ${entry.credential === 'connected' ? 'sign-in' : 'key'}`
 }

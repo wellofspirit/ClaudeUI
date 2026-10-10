@@ -28,10 +28,10 @@ export type SDKMessage =
   | SystemMessage
   | ResultMessage
   | ToolProgressMessage
-  | RequestUsageMessage
   | RateLimitEventMessage
   | BashOutputMessage
   | AuthStatusMessage
+  | CommandLifecycleMessage
   | ControlRequestMessage
   | ControlResponseMessage
   | ControlCancelRequestMessage
@@ -92,6 +92,10 @@ export interface StreamEventMessage extends BaseSDKMessage {
     [k: string]: unknown
   }
   parent_tool_use_id?: string | null
+  /** The sub-agent that produced the event (Patch E, background runs). Present
+   *  even when `parent_tool_use_id` is not — an idle self-resume has no
+   *  tool_use id on its context. */
+  agent_id?: string
 }
 
 export interface SystemMessage extends BaseSDKMessage {
@@ -103,10 +107,10 @@ export interface SystemMessage extends BaseSDKMessage {
     | 'task_updated'
     | 'task_notification'
     | 'task_progress'
-    | 'queued_command_consumed'
     | 'compact_boundary'
     | 'model_refusal_fallback'
     | 'model_fallback'
+    | 'permission_denied'
     | string
   permissionMode?: string
   /** init-only fields */
@@ -121,14 +125,40 @@ export interface SystemMessage extends BaseSDKMessage {
   tool_use_id?: string
   description?: string
   task_type?: string
-  /** task_updated patch — partial update to the task's state record */
+  /**
+   * task_started-only: whether the task started in the background. `false` for
+   * a foreground Bash or subagent (the only kind `background_tasks` can move);
+   * absent for task types without the notion (docs/protocol-cc/
+   * 04-system-subtypes.md §4.5).
+   */
+  is_backgrounded?: boolean
+  /** task_updated patch — the fields of the task's record that changed */
   patch?: {
     status?: string
     end_time?: number
+    /** Set when the task moved to the background (`background_tasks`, Ctrl+B). */
+    is_backgrounded?: boolean
     [k: string]: unknown
   }
   /** task_progress-only: the tool the task ran most recently (§4.7). */
   last_tool_name?: string
+  /**
+   * `permission_denied` — a tool call refused before any prompt was raised
+   * (docs/protocol-cc/04-system-subtypes.md §4.25). `tool_use_id` above binds
+   * the decision to its call.
+   */
+  tool_name?: string
+  /** Subagent id when the decision was made INSIDE a subagent. */
+  agent_id?: string
+  /** cli.js's `PermissionDecisionReason` discriminator — `classifier`, `rule`, … */
+  decision_reason_type?: string
+  /**
+   * Human-readable reason, present only for the sources cli.js's `Noe` renders
+   * one for (`classifier`, `hook`, `safetyCheck`, `workingDir`, …). UNTRUSTED.
+   */
+  decision_reason?: string
+  /** The rejection text handed to the model — already the tool_result's body. */
+  message?: string
   /** task_notification-only fields */
   output_file?: string
   status?: string
@@ -139,13 +169,12 @@ export interface SystemMessage extends BaseSDKMessage {
     duration_ms?: number
   } | null
   /**
-   * `queued_command_consumed`-only. NOT always a string: it is the queued
-   * attachment's `prompt` verbatim, which is the pushed message's
-   * `message.content` — an array of content blocks whenever the queued prompt
-   * carried images or a PDF. Normalize with `sdk/queued-command-text.ts`
-   * (cli.js's own `ZPe`/`VV_` rule) before comparing it to anything.
+   * task_notification: the run is not recorded in the transcript (cli.js's
+   * internal forks — dreams, scans, fork workers). Its model never sees it.
    */
-  prompt?: string | Array<{ type?: string; text?: string }>
+  skip_transcript?: boolean
+  /** task_notification: an ambient (housekeeping) task the model never sees. */
+  ambient?: boolean
   /** model_refusal_fallback / model_fallback fields (docs/protocol-cc/04-system-subtypes.md §4.20–4.21) */
   trigger?: string
   direction?: 'retry' | 'revert' | 'sticky'
@@ -197,14 +226,33 @@ export interface ToolProgressMessage extends BaseSDKMessage {
   elapsed_time_seconds?: number
 }
 
-export interface RequestUsageMessage extends BaseSDKMessage {
-  type: 'request_usage'
-  usage?: Record<string, unknown>
+/**
+ * One subscription rate-limit window as `rate_limit_event` reports it:
+ * `utilization` is a FRACTION (usually 0–1; above 1 when usage runs past the
+ * cap), `resetsAt` is unix epoch seconds.
+ */
+export interface RateLimitWindowInfo {
+  utilization: number
+  resetsAt: number
 }
 
+/** Native `rate_limit_event` (docs/protocol-cc/03-inbound-messages.md §3.11). */
 export interface RateLimitEventMessage extends BaseSDKMessage {
   type: 'rate_limit_event'
-  header_utilization?: Record<string, { utilization: number; resets_at: number }>
+  rate_limit_info?: {
+    /** The currently limiting window's state: `allowed` | `allowed_warning` | `rejected`. */
+    status?: string
+    resetsAt?: number
+    rateLimitType?: string
+    utilization?: number
+    /**
+     * Every window the account has, keyed `five_hour` / `seven_day` /
+     * `seven_day_overage_included`, whichever is limiting. Absent for API-key,
+     * Bedrock and Vertex sessions.
+     */
+    unifiedWindows?: Record<string, RateLimitWindowInfo>
+    [k: string]: unknown
+  }
 }
 
 export interface BashOutputMessage extends BaseSDKMessage {
@@ -220,6 +268,27 @@ export interface AuthStatusMessage extends BaseSDKMessage {
   isAuthenticating?: boolean
   output?: string
   error?: string
+  uuid?: string
+}
+
+/**
+ * The fate of one inbound user message that carried a client `uuid`
+ * (docs/protocol-cc/03-inbound-messages.md §3.21). cli.js emits nothing for a
+ * message sent without one.
+ *
+ * `started` is the consumption signal: the message was folded into the running
+ * turn at a tool boundary, or drained as the prompt of a fresh turn. Every other
+ * state is either informational (`queued`, `completed`) or means the message
+ * will not run (`cancelled`, `discarded`, `refused`). A terminal state can
+ * arrive without a preceding `started`, and `cancelled` can FOLLOW `started`
+ * (a turn that consumed it was aborted).
+ */
+export interface CommandLifecycleMessage extends BaseSDKMessage {
+  type: 'command_lifecycle'
+  /** The client uuid of the user frame this is about. */
+  command_uuid?: string
+  state?: 'queued' | 'started' | 'completed' | 'cancelled' | 'discarded' | 'refused' | string
+  /** The frame's own uuid — unrelated to `command_uuid`. */
   uuid?: string
 }
 
@@ -356,7 +425,29 @@ export type ElicitationCallback = (
   opts: { signal: AbortSignal }
 ) => Promise<unknown>
 
-export type GetOAuthTokenCallback = (opts: { signal: AbortSignal }) => Promise<string | null>
+/**
+ * Why the host returned no token to cli.js's `oauth_token_refresh` — cli.js
+ * 2.1.280's reason enum `jr` (`.cache/pristine-cli.js` @2259664), carried in
+ * the response schema `aSr` beside `accessToken: null`.
+ */
+export type OAuthRefreshDeclineReason =
+  'signed_out' | 'identity_changed' | 'transient' | 'refresh_failed'
+
+/** A token for cli.js, or none and (optionally) why. */
+export interface OAuthTokenAnswer {
+  accessToken: string | null
+  /** Only meaningful when `accessToken` is null. */
+  reason?: OAuthRefreshDeclineReason
+}
+
+/**
+ * Answers cli.js's `oauth_token_refresh` (docs/protocol-cc/08 §8.7). A bare
+ * string or null is the original contract and still accepted; an
+ * {@link OAuthTokenAnswer} can also say why there is no token.
+ */
+export type GetOAuthTokenCallback = (opts: {
+  signal: AbortSignal
+}) => Promise<string | null | OAuthTokenAnswer>
 
 /**
  * Generic user-dialog prompt initiated by cli.js
@@ -597,6 +688,16 @@ export interface QueryOptions {
    *  reference), but stream_event deltas can arrive at 100+ per turn, so
    *  bump this only when a debug dump actually needs the history. */
   wireLogCapacity?: number
+  /**
+   * Send `reload_plugins` after the initialize response (default true). It is
+   * what connects the MCP servers of settings-enabled plugins in a headless
+   * session. False for a process that never runs a turn that could use them:
+   * an init-only probe (model list, title), a control-only service process, a
+   * tool-less one-shot. Otherwise it would connect those servers, or download
+   * an enabled plugin missing from its cache, for nothing — in a probe, while
+   * the process is being shut down.
+   */
+  reloadPlugins?: boolean
 
   // --- Initialize-payload fields (not CLI flags) --------------------------
   /** Hook callbacks, registered at initialize and fired via hook_callback. */
@@ -681,7 +782,13 @@ export interface QueryHandle extends AsyncIterable<SDKMessage> {
   applyFlagSettings(settings: Record<string, unknown>): Promise<unknown>
   getSettings(): Promise<unknown>
   rewindFiles(userMessageId: string, opts?: { dryRun?: boolean }): Promise<unknown>
-  cancelAsyncMessage(messageUuid: string): Promise<{ cancelled: boolean } | unknown>
+  /**
+   * Take a queued user message back by the `uuid` its frame carried.
+   * `cancelled: false` is an answer, not an error: cli.js does not hold it
+   * (already folded into a turn or drained, being folded right now, or not
+   * received yet) — docs/protocol-cc/07-control-outbound.md.
+   */
+  cancelAsyncMessage(messageUuid: string): Promise<{ cancelled: boolean }>
   seedReadState(path: string, mtime: number): Promise<unknown>
   enableRemoteControl(enabled: boolean, opts?: { name?: string }): Promise<unknown>
   generateSessionTitle(
@@ -691,12 +798,26 @@ export interface QueryHandle extends AsyncIterable<SDKMessage> {
   askSideQuestion(question: string): Promise<string | null>
   launchUltrareview(args: unknown, opts?: { confirm?: boolean }): Promise<unknown>
   stopTask(taskId: string): Promise<unknown>
-  backgroundTask(toolUseId: string): Promise<unknown>
-  dequeueMessage(value: string): Promise<{ removed: number }>
+  /**
+   * Move the foreground task started by this tool_use to the background.
+   * `backgrounded: false` is an answer, not an error: cli.js has no running
+   * foreground task with that id (not registered yet, already backgrounded,
+   * or finished).
+   */
+  backgroundTask(toolUseId: string): Promise<{ backgrounded: boolean }>
   voiceServerStart(): Promise<{ port: number }>
   voiceServerStop(): Promise<{ stopped: boolean }>
   getUsage(): Promise<Record<string, unknown>>
   getContextUsage(): Promise<Record<string, unknown>>
+  /**
+   * Set variables in cli.js's own `process.env` through the stdin frame
+   * `update_environment_variables` (docs/protocol-cc/06 §6.7), and wait for
+   * cli.js's `control_response`. cli.js applies only an allowlist
+   * (`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_SESSION_ACCESS_TOKEN`) and drops
+   * every other key. Resolves `false` rather than rejecting when the frame is
+   * refused, times out, or cannot be written; the failure is logged.
+   */
+  updateEnvironmentVariables(variables: Record<string, string>): Promise<boolean>
 
   // --- MCP servers --------------------------------------------------------
   mcpServerStatus(): Promise<unknown[]>

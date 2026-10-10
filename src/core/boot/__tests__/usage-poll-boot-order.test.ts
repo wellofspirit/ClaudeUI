@@ -63,7 +63,11 @@ vi.mock('../../services/vscode-web-service', () => ({
   vscodeWebService: { setHostActor: vi.fn() }
 }))
 vi.mock('../../opencode/OpencodeServerManager', () => ({
-  opencodeServerManager: { setCallerSessionLookup: vi.fn(), setDispatchAgent: vi.fn() }
+  opencodeServerManager: {
+    setServerStartedHook: vi.fn(),
+    setCallerSessionLookup: vi.fn(),
+    setDispatchAgent: vi.fn()
+  }
 }))
 vi.mock('../../services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: { dispatch: vi.fn() }
@@ -104,8 +108,8 @@ describe('the usage poll and the active credential dir', () => {
 
     expect(afterSessionGraph).toHaveBeenCalledTimes(1)
     expect(usageMocks.usageFetcher.startPolling).toHaveBeenCalledTimes(1)
-    // THE CONTRACT. `afterSessionGraph` is where the desktop applies
-    // `CLAUDE_SECURESTORAGE_CONFIG_DIR`; nothing may resolve an account
+    // THE CONTRACT. `afterSessionGraph` is where the desktop applies the
+    // active credential dir; nothing may resolve an account
     // identity — or subscribe to the switch that changes it — before it.
     expect(afterSessionGraph.mock.invocationCallOrder[0]).toBeLessThan(
       usageMocks.usageFetcher.startPolling.mock.invocationCallOrder[0]

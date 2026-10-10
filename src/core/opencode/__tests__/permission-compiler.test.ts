@@ -1,19 +1,19 @@
 /**
- * Unit tests for the Claude→opencode permission rule compiler (ADR-022).
- * Pure function: ClaudePermissions (Tool(specifier) strings) → opencode ruleset.
+ * Unit tests for the wire-shape-independent half of opencode's permission
+ * handling (ADR-022): Claude rule parsing, specifier translation, MCP keys,
+ * and the reverse direction (an ask → a Claude "always allow" suggestion,
+ * persisted). The 2.x compiler itself is `permission-v2.test.ts`.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { join } from 'node:path'
 import {
   parseClaudeRule,
   translateSpecifierPatterns,
-  compileClaudeRulesToOpencode,
   suggestOpencodeAllowRule,
   suggestionRuleToClaudeString,
   suggestionDestinationToScope,
-  persistAllowSuggestions,
-  withoutAllowRules
+  persistAllowSuggestions
 } from '../permission-compiler'
+import { compileClaudeRulesV2 } from '../permission-v2'
 import type { ClaudePermissions, PermissionSuggestion } from '../../../shared/types'
 
 // The store the shared persister writes through — never the dev machine's real
@@ -59,16 +59,16 @@ describe('parseClaudeRule', () => {
 })
 
 describe('translateSpecifierPatterns', () => {
-  it('bash prefix `cmd:*` → glob `cmd*`', () => {
-    expect(translateSpecifierPatterns('bash', 'git diff:*')).toEqual(['git diff*'])
+  it('shell prefix `cmd:*` → glob `cmd*`', () => {
+    expect(translateSpecifierPatterns('shell', 'git diff:*')).toEqual(['git diff*'])
   })
-  it('bash existing glob/exact passes through', () => {
-    expect(translateSpecifierPatterns('bash', 'npm *')).toEqual(['npm *'])
-    expect(translateSpecifierPatterns('bash', 'ls')).toEqual(['ls'])
+  it('shell existing glob/exact passes through', () => {
+    expect(translateSpecifierPatterns('shell', 'npm *')).toEqual(['npm *'])
+    expect(translateSpecifierPatterns('shell', 'ls')).toEqual(['ls'])
   })
   it('webfetch domain: → URL-shaped patterns (opencode asks with the FULL URL)', () => {
-    // vendor/opencode-src/.../tool/webfetch.ts: `ctx.ask({permission:'webfetch',
-    // patterns:[params.url]})` after rejecting non-http(s) URLs. A host-shaped
+    // opencode's webfetch asks with the URL as the resource after rejecting
+    // non-http(s) URLs. A host-shaped
     // `example.com*` therefore never matched anything — the rule was inert.
     expect(translateSpecifierPatterns('webfetch', 'domain:example.com')).toEqual([
       'http://example.com',
@@ -105,74 +105,9 @@ describe('translateSpecifierPatterns', () => {
   })
 })
 
-describe('compileClaudeRulesToOpencode', () => {
-  it('maps tool names to opencode categories and emits allow→ask→deny order', () => {
-    const out = compileClaudeRulesToOpencode(
-      perms({
-        allow: ['Bash(git diff:*)', 'Read'],
-        ask: ['WebFetch(domain:example.com)'],
-        deny: ['Edit(secrets/**)']
-      })
-    )
-    expect(out).toEqual([
-      { permission: 'bash', pattern: 'git diff*', action: 'allow' },
-      { permission: 'read', pattern: '*', action: 'allow' },
-      // One WebFetch domain rule expands to the URL forms opencode can
-      // actually ask with — all carrying the SAME action, so they remain one
-      // rule semantically and the allow→ask→deny tier order is preserved.
-      { permission: 'webfetch', pattern: 'http://example.com', action: 'ask' },
-      { permission: 'webfetch', pattern: 'http://example.com/*', action: 'ask' },
-      { permission: 'webfetch', pattern: 'http://example.com:*', action: 'ask' },
-      { permission: 'webfetch', pattern: 'http://example.com#*', action: 'ask' },
-      { permission: 'webfetch', pattern: 'https://example.com', action: 'ask' },
-      { permission: 'webfetch', pattern: 'https://example.com/*', action: 'ask' },
-      { permission: 'webfetch', pattern: 'https://example.com:*', action: 'ask' },
-      { permission: 'webfetch', pattern: 'https://example.com#*', action: 'ask' },
-      { permission: 'edit', pattern: 'secrets/**', action: 'deny' }
-    ])
-  })
-
-  it('Write/MultiEdit/NotebookEdit all map to the `edit` category', () => {
-    const out = compileClaudeRulesToOpencode(
-      perms({ allow: ['Write(dist/**)', 'MultiEdit', 'NotebookEdit'] })
-    )
-    expect(out.every((r) => r.permission === 'edit')).toBe(true)
-    expect(out).toHaveLength(3)
-  })
-
-  it('skips unmappable tools (e.g. MCP) rather than guessing', () => {
-    const out = compileClaudeRulesToOpencode(perms({ allow: ['mcp__server__tool', 'Bash'] }))
-    expect(out).toEqual([{ permission: 'bash', pattern: '*', action: 'allow' }])
-  })
-
-  it('additionalDirectories → external_directory allow rules (platform-correct glob)', () => {
-    const dir = process.platform === 'win32' ? 'D:\\extra' : '/extra'
-    const out = compileClaudeRulesToOpencode(perms({ additionalDirectories: [dir] }))
-    expect(out).toEqual([
-      { permission: 'external_directory', pattern: join(dir, '*'), action: 'allow' }
-    ])
-  })
-
-  it('deny is emitted last so it wins under last-match-wins', () => {
-    const out = compileClaudeRulesToOpencode(
-      perms({ allow: ['Edit(src/**)'], deny: ['Edit(src/secret.ts)'] })
-    )
-    expect(out[0]).toEqual({ permission: 'edit', pattern: 'src/**', action: 'allow' })
-    expect(out[out.length - 1]).toEqual({
-      permission: 'edit',
-      pattern: 'src/secret.ts',
-      action: 'deny'
-    })
-  })
-
-  it('empty permissions → empty ruleset', () => {
-    expect(compileClaudeRulesToOpencode(perms({}))).toEqual([])
-  })
-})
-
 describe('suggestOpencodeAllowRule (reverse: opencode approval → Claude suggestion)', () => {
-  it('bash + command pattern → addRules Bash(command), localSettings', () => {
-    expect(suggestOpencodeAllowRule('bash', ['echo hi'])).toEqual({
+  it('shell + command pattern → addRules Bash(command), localSettings', () => {
+    expect(suggestOpencodeAllowRule('shell', ['echo hi'])).toEqual({
       type: 'addRules',
       behavior: 'allow',
       destination: 'localSettings',
@@ -193,6 +128,12 @@ describe('suggestOpencodeAllowRule (reverse: opencode approval → Claude sugges
   it('unmapped category → null (no suggestion)', () => {
     expect(suggestOpencodeAllowRule('doom_loop', ['*'])).toBeNull()
   })
+  it('`subagent` maps back to Task; the suggestion round-trips through the `shell` prefix form', () => {
+    expect(suggestOpencodeAllowRule('subagent', ['explore'])?.rules).toEqual([
+      { toolName: 'Task', ruleContent: 'explore' }
+    ])
+    expect(translateSpecifierPatterns('shell', 'git diff:*')).toEqual(['git diff*'])
+  })
 })
 
 describe('suggestionRuleToClaudeString + suggestionDestinationToScope', () => {
@@ -203,10 +144,10 @@ describe('suggestionRuleToClaudeString + suggestionDestinationToScope', () => {
     expect(suggestionRuleToClaudeString({ toolName: 'Edit' })).toBe('Edit')
   })
   it('round-trips: suggested rule → claude string → compiled opencode rule', () => {
-    const s = suggestOpencodeAllowRule('bash', ['git diff'])!
+    const s = suggestOpencodeAllowRule('shell', ['git diff'])!
     const ruleStr = suggestionRuleToClaudeString(s.rules![0])
-    const compiled = compileClaudeRulesToOpencode(perms({ allow: [ruleStr] }))
-    expect(compiled).toEqual([{ permission: 'bash', pattern: 'git diff', action: 'allow' }])
+    const compiled = compileClaudeRulesV2(perms({ allow: [ruleStr] }))
+    expect(compiled).toEqual([{ action: 'shell', resource: 'git diff', effect: 'allow' }])
   })
   it('maps destinations to scopes; session/unknown → null', () => {
     expect(suggestionDestinationToScope('userSettings')).toBe('user')
@@ -292,41 +233,3 @@ describe('persistAllowSuggestions', () => {
 // ---------------------------------------------------------------------------
 // withoutAllowRules — auto mode's classifier-bypass filter (cli.js §3 step 2).
 // ---------------------------------------------------------------------------
-
-describe('withoutAllowRules', () => {
-  const compiled = (): ReturnType<typeof compileClaudeRulesToOpencode> =>
-    compileClaudeRulesToOpencode(
-      perms({
-        allow: ['Bash(git:*)', 'WebFetch(domain:example.com)'],
-        ask: ['Bash(git push:*)'],
-        deny: ['Bash(rm:*)'],
-        additionalDirectories: ['/extra']
-      })
-    )
-
-  it('drops every allow rule and keeps ask + deny intact', () => {
-    const filtered = withoutAllowRules(compiled())
-    expect(filtered.every((r) => r.action !== 'allow')).toBe(true)
-    // The tightening tiers survive verbatim — the filter only ever removes
-    // permission, never grants it.
-    expect(filtered).toEqual(compiled().filter((r) => r.action !== 'allow'))
-    expect(filtered).toContainEqual({ permission: 'bash', pattern: 'git push*', action: 'ask' })
-    expect(filtered).toContainEqual({ permission: 'bash', pattern: 'rm*', action: 'deny' })
-  })
-
-  it('drops the external_directory allows compiled from additionalDirectories', () => {
-    // Harmless: auto mode's base is buildRuleset('acceptEdits'), whose `{*:allow}`
-    // baseline already covers external_directory (ADR-022 leaves that category
-    // ungated in every mode) — so this removes nothing that was load-bearing.
-    expect(withoutAllowRules(compiled()).some((r) => r.permission === 'external_directory')).toBe(
-      false
-    )
-  })
-
-  it('does NOT mutate its input — the provenance set (G9) shares this array', () => {
-    const original = compiled()
-    const snapshot = structuredClone(original)
-    withoutAllowRules(original)
-    expect(original).toEqual(snapshot)
-  })
-})

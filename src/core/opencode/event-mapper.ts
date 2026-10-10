@@ -1,1329 +1,1803 @@
-import { v4 as uuid } from 'uuid'
-import type {
-  OpencodeEvent,
-  QuestionInfo,
-  StoredMessage,
-  StoredMessagePart
-} from './protocol/types'
+/**
+ * opencode 2.x event feed → ClaudeUI's engine-neutral session stream (ADR-097
+ * S4).
+ *
+ * One mapper per ClaudeUI chat. It follows the chat's own opencode session and
+ * every subagent child linked under it, and ignores the rest of the feed (one
+ * 2.x server serves every chat and directory, so foreign sessions are normal).
+ * `map(event)` returns the outputs that event produces, in order; the session
+ * dispatches them. The mapper does the bookkeeping — tool results,
+ * child-task outcomes, idempotency — so the consumer is a switch.
+ *
+ * Content model (mirrors opencode's own projection, `core/src/session/
+ * message-updater.ts`, so live and cold agree by construction):
+ * - one assistant ChatMessage per STEP (`assistantMessageID`), timestamped
+ *   with the step's `started`;
+ * - its blocks in `*.started` order: text, thinking, tool_use. A text or
+ *   thinking block is placed when it first has content, so an empty one
+ *   (OpenAI's encrypted-only reasoning, an empty text start) never renders —
+ *   the cold converter drops the same empty items;
+ * - `text`/`reasoning` ordinals count per kind within a step (each kind has its
+ *   own counter in `runner/publish-llm-event.ts`);
+ * - tool results travel as `tool-result` outputs and the reducer appends them,
+ *   as for every engine.
+ *
+ * Turn ends (ADR-090): `succeeded` → `result`; `failed` → `error` (or
+ * `auth-required` for `provider.auth`); `interrupted` → `stopped` with its
+ * reason. `reason:'shutdown'` after a REJECT in the same turn is a denial-ended
+ * turn (`stopped/denied`: a reject without a message is a hard stop, ADR-097
+ * §3), never a server shutdown nor a user stop.
+ *
+ * Reconnects: the feed has no replay (`opencode-event-stream.ts`). On
+ * `connected {reconnected:true}` the consumer reads a {@link
+ * OpencodeReconnectSnapshot} (`reconnect.ts`) and passes it to
+ * `reconcile`, which emits what the gap hid and marks it handled, so the live
+ * events that follow (which the read may already reflect) are applied
+ * idempotently — by message id, tool call id, request/form id, inbox id and
+ * the terminal event's idle-row id.
+ */
 import type {
   ChatMessage,
   ContentBlock,
   PendingApproval,
-  SessionResult,
-  AskUserQuestion,
-  TodoItem,
-  FileDiff,
-  ToolResultImage
+  PermissionDenialBlock,
+  PermissionSuggestion,
+  TaskNotification
 } from '../../shared/types'
-import { isImageMediaType } from '../../shared/types'
-import { suggestOpencodeAllowRule } from './permission-compiler'
+import type { ItemStreamOpen, ItemStreamSeal, ItemStreamTarget } from '../shared/sync/item-stream'
+import type {
+  Form_Info,
+  Model_Ref,
+  Permission_Request,
+  SessionActive,
+  Session_Inbox_Delivery,
+  Session_Inbox_Info,
+  Session_Message_Assistant,
+  Session_Message_Info,
+  Session_StructuredError,
+  TokenUsage_Info,
+  Tool_Content
+} from './protocol-v2/openapi'
+import type { EventOf, OpencodeEvent, SessionInboxItem } from './protocol-v2/events'
+import { eventSessionID } from './protocol-v2/events'
+import { reviewRationale } from '../shared/tool-review'
+import {
+  compactionChatMessage,
+  formQuestions,
+  formToolCall,
+  messageIdFromEvent,
+  type OpencodeFormField,
+  type OpencodeToolResult,
+  SHELL_TOOL_NAMES,
+  subagentBackgrounded,
+  subagentChildSession,
+  SUBAGENT_TOOL_NAMES,
+  toolFailureResult,
+  toolInputRecord,
+  toolSuccessResult,
+  userChatMessage
+} from './content'
 
-// Phase 6: the 5c tool-name normalization hack (OPENCODE_TOOL_NAME_MAP /
-// normalizeOpencodeToolName, which rewrote the hosted-tools plugin names to the
-// canonical `mcp__claude-ui*` forms) is RETIRED. tool_use blocks now carry the
-// engine's RAW tool name (e.g. `bash`, `render_mermaid`); the renderer's
-// kind-keyed registry (OpencodeEngineToolMap.kindOf) maps them to diagram/mockup/
-// command/etc. and the engine-agnostic kind bodies render them.
+// --- Outputs ----------------------------------------------------------------
 
-// ── Part accumulator ─────────────────────────────────────────────────────────
-
-/**
- * Token counts as reported by opencode's message.updated info.tokens.
- * All fields are optional — opencode may not populate all of them.
- */
-export interface MessageTokens {
-  input?: number
-  output?: number
-  /** Reasoning/thinking tokens (maps to a cache-write slot in billing) */
-  reasoning?: number
-  cache?: {
-    read?: number
-    write?: number
-  }
+/** Per-step metering: one per assistant message (step), own or child. */
+export interface OpencodeStepUsage {
+  readonly messageId: string
+  /** The opencode session that ran the step (a child's own id for a subagent step). */
+  readonly sessionId: string
+  /** Set on a child step: the parent call it runs under. */
+  readonly ownerToolUseId?: string
+  readonly model?: Model_Ref
+  readonly cost: number
+  /** Per step, disjoint (opencode subtracts cache from input; reasoning sits beside output). */
+  readonly tokens: TokenUsage_Info
+  readonly finish?: string
 }
 
-/**
- * Live state for an in-progress assistant message.
- * Parts arrive as snapshots (upsert by part.id).
- */
-export interface MessageAccumulator {
-  messageId: string
-  /** Role of the message (from `message.updated`'s `info.role`). Defaults to
-   *  'assistant' until a `message.updated` records it. opencode emits
-   *  `message.part.updated` for the USER's own text too — we must not render
-   *  those as assistant bubbles. */
-  role?: 'user' | 'assistant' | 'system'
-  /** Latest cumulative cost snapshot for this message (`info.cost`). opencode
-   *  re-emits `message.updated` multiple times per turn with a CUMULATIVE cost,
-   *  so we store-not-add and sum across messages to get the turn total. */
-  cost?: number
-  /** Latest cumulative token snapshot for this message (`info.tokens`). Same
-   *  cumulative semantics as cost — store, do not add. */
-  tokens?: MessageTokens
-  /** True when this accumulator belongs to a `task`-tool CHILD session (Phase 8d).
-   *  Child messages share the parent's `accumulators` map (distinct messageIds),
-   *  so the parent's metering loops (recordTurnUsage / sendMetering) must SKIP
-   *  these — otherwise the child's tokens are silently attributed to the parent
-   *  model. Phase 9a: child usage IS metered, but under the child's own model +
-   *  childSessionId (not the parent). */
-  isChild?: boolean
-  /** The child's own session ID (populated on child message.updated events). Used by
-   *  recordTurnUsage to attribute usage_events under the correct child session. */
-  childSessionId?: string
-  /** The model the child message was generated by (`info.providerID` + `info.modelID`).
-   *  Only populated for child accumulators when both fields are present in the event. */
-  model?: { providerID: string; modelID: string }
-  /** Ordered part ids for block ordering. */
-  partOrder: string[]
-  /** Current snapshot per part.id */
-  parts: Map<string, PartSnapshot>
-  /** Stable creation time reused by every live projection of this message. */
-  timestamp?: number
-  timestampNative?: boolean
+/** Why a turn stopped without succeeding or failing (ADR-090). */
+export type OpencodeStopReason =
+  /** The user's Stop (`POST /interrupt`). */
+  | 'user'
+  /** A reject without a message ended it (its call failed `aborted`, then `interrupted{shutdown}`). */
+  | 'denied'
+  /** A form (question) cancelled without a message ended it, the same way. */
+  | 'form-cancelled'
+  /** The engine is shutting down; it resumes the turn on its next start. */
+  | 'shutdown'
+  | 'superseded'
+  | 'inactivity'
+  /** Read back after a reconnect: the stored `idle{interrupted}` row records no reason. */
+  | 'unknown'
+
+/** What a reply to an `approval` needs beyond `PendingApproval`. */
+export interface OpencodeApprovalRoute {
+  /** The session the request belongs to — a child's own id for a subagent ask. Replies go there. */
+  readonly sessionID: string
+  /** Present for a form (`form.created`): reply with `{answer: {<key>: value}}`. */
+  readonly form?: { readonly formID: string; readonly fields: readonly OpencodeFormField[] }
 }
 
-export interface PartSnapshot {
-  type: string
-  text?: string
-  toolName?: string
-  callID?: string
-  state?: ToolPartState
-  time?: { start?: number; end?: number }
-  sealed?: boolean
-}
+export type OpencodeInboxChange =
+  | {
+      readonly change: 'enqueued'
+      readonly inboxID: string
+      readonly delivery: Session_Inbox_Delivery
+      readonly item: SessionInboxItem
+    }
+  | { readonly change: 'delivered'; readonly inboxID: string }
+  | { readonly change: 'cancelled'; readonly inboxID: string }
+  | {
+      readonly change: 'delivery-changed'
+      readonly inboxID: string
+      readonly delivery: Session_Inbox_Delivery
+    }
 
-export interface OpencodeStreamItem {
-  messageId: string
-  partId: string
-  blockIndex: number
-  kind: 'text' | 'thinking'
-  completed: boolean
-}
-
-export interface ToolPartState {
-  status?: string
-  input?: Record<string, unknown>
-  output?: string
-  error?: string
-  metadata?: Record<string, unknown>
-  title?: string
+export type OpencodeMapperOutput =
+  /** The own session started executing (a prompt, a steer, a queued item, a compaction). */
+  | { readonly kind: 'turn-start' }
+  /** `session:item-open`; `open.target.ownerToolUseId` set for a child item. */
+  | { readonly kind: 'item-open'; readonly open: ItemStreamOpen }
+  /** `session:item-delta`. */
+  | { readonly kind: 'item-delta'; readonly target: ItemStreamTarget; readonly chunk: string }
+  /** `session:item-seal`. */
+  | { readonly kind: 'item-seal'; readonly seal: ItemStreamSeal }
+  /** `session:message` (own) / `session:subagent-message` (child, `ownerToolUseId`). */
+  | { readonly kind: 'message'; readonly message: ChatMessage; readonly ownerToolUseId?: string }
+  /** A user prompt reached the own session; its id is the inbox id (ClaudeUI's when it chose one). */
+  | { readonly kind: 'user-message'; readonly inboxID: string; readonly message: ChatMessage }
+  /** A tool's arguments streaming in (optional live rendering). */
+  | {
+      readonly kind: 'tool-input-delta'
+      readonly toolUseId: string
+      readonly delta: string
+      readonly ownerToolUseId?: string
+    }
+  /** `session:tool-result` (own) / `session:subagent-tool-result` (child). */
+  | {
+      readonly kind: 'tool-result'
+      readonly result: OpencodeToolResult
+      readonly ownerToolUseId?: string
+    }
+  /** A deny RULE inside opencode refused the call with no ask (ADR-022). Host rejects send their own. */
+  | {
+      readonly kind: 'permission-denial'
+      readonly toolUseId: string
+      readonly denial: PermissionDenialBlock
+      readonly ownerToolUseId?: string
+    }
+  /** A shell call is running: poll `GET /api/shell/{shellID}/output` for live output (2.x pushes none). */
+  | {
+      readonly kind: 'shell-started'
+      readonly toolUseId: string
+      readonly shellID: string
+      readonly ownerToolUseId?: string
+    }
+  /** A subagent call started (or resumed) its child session; its events now route under `toolUseId`. */
+  | {
+      readonly kind: 'subagent-started'
+      readonly toolUseId: string
+      readonly childSessionId: string
+      readonly ownerToolUseId?: string
+    }
+  /** The ONE terminal notification of a subagent call (foreground: its tool result; background: the child's end). */
+  | { readonly kind: 'task-notification'; readonly notification: TaskNotification }
+  | {
+      readonly kind: 'approval'
+      readonly approval: PendingApproval
+      readonly route: OpencodeApprovalRoute
+    }
+  /** A request or form was settled (ours, a cascade, another client): retract its card. */
+  | { readonly kind: 'approval-resolved'; readonly requestId: string }
+  | { readonly kind: 'step-usage'; readonly usage: OpencodeStepUsage }
+  /** Session-cumulative usage (includes title/compaction requests opencode ran). */
+  | { readonly kind: 'session-usage'; readonly cost: number; readonly tokens: TokenUsage_Info }
+  | {
+      readonly kind: 'retry'
+      readonly attempt: number
+      /** Epoch ms of the next attempt. */
+      readonly at: number
+      readonly error: Session_StructuredError
+    }
+  | {
+      readonly kind: 'compaction'
+      readonly phase: 'started' | 'ended' | 'failed'
+      readonly reason: 'auto' | 'manual'
+      readonly error?: Session_StructuredError
+      /** The compaction request's own usage (opencode bills it to the session; not context). */
+      readonly usage?: {
+        readonly cost: number
+        readonly tokens: TokenUsage_Info
+        readonly model?: Model_Ref
+      }
+      /** Set for a child's compaction (only its usage is reported). */
+      readonly ownerToolUseId?: string
+    }
   /**
-   * Media a COMPLETED tool returned — `read` on a .png/.pdf, an MCP tool
-   * returning a resource. Verified against the pinned vendor source
-   * (vendor/opencode-src): `session/processor.ts` `completeToolCall` writes
-   * `state.attachments = output.attachments` (the tool's own
-   * `attachments: FilePart[]`), and `sdk/js/.../types.gen.ts`
-   * `ToolStateCompleted.attachments?: FilePart[]` is the schema.
-   *
-   * IMPORTANT: these live on the TOOL part, not as separate assistant-message
-   * `file` parts, so no part-ordering heuristic is needed to associate them
-   * with their tool call. `status: 'error'` parts never carry them.
+   * Own-session usage no step or compaction carries (title generation),
+   * from the session's cumulative. Counted in the headline like the rest.
    */
-  attachments?: ToolAttachment[]
-}
-
-/**
- * A `FilePart`-shaped attachment as it rides on a tool part's state. Only the
- * fields ClaudeUI reads are modelled (`source` and the part ids are ignored);
- * everything is optional because this is untrusted wire/stored input.
- */
-export interface ToolAttachment {
-  /** Always 'file' on the wire; unused for gating (the mime + data URI decide). */
-  type?: string
-  mime?: string
-  url?: string
-  filename?: string
-}
-
-// ── Mapper output types ───────────────────────────────────────────────────────
-
-export type MapperOutput =
   | {
-      kind: 'stream'
-      streamType: 'text' | 'thinking'
-      delta: string
-      messageId: string
-      item: OpencodeStreamItem
+      readonly kind: 'overhead-usage'
+      readonly cost: number
+      readonly tokens: TokenUsage_Info
     }
-  | { kind: 'message'; message: ChatMessage; item?: OpencodeStreamItem }
-  | { kind: 'tool_result'; toolUseId: string; result: string; isError: boolean }
-  | { kind: 'approval'; approval: PendingApproval }
-  /** A pending permission was resolved server-side (M-OC2 — `permission.replied`).
-   *  Fires for the reply we originated AND for every OTHER pending permission the
-   *  vendor cascade-rejects (one reject rejects all) or cascade-approves (an
-   *  `always` auto-approves matching ones). The consumer must retract the stale
-   *  approval card for `requestId` — clicking it later would 404 forever. */
-  | { kind: 'approval-resolved'; requestId: string }
+  | ({ readonly kind: 'inbox' } & OpencodeInboxChange)
+  | { readonly kind: 'session-renamed'; readonly title: string }
+  | { readonly kind: 'model-selected'; readonly model: Model_Ref }
+  | { readonly kind: 'agent-selected'; readonly agent: string }
+  | { readonly kind: 'session-deleted' }
+  | { readonly kind: 'result'; readonly sessionId: string; readonly durationMs: number }
   | {
-      kind: 'result'
-      result: Pick<SessionResult, 'totalCostUsd' | 'durationMs' | 'result'> & {
-        sessionId: string | null
-      }
+      readonly kind: 'stopped'
+      readonly sessionId: string
+      readonly reason: OpencodeStopReason
+      readonly durationMs: number
     }
-  /** Emitted when cost changes OR when a token-snapshot context advance is detected (input+cacheRead
-   *  increased on an assistant message). The latter fires even when cost=0 (free models), so that
-   *  lastContextLength / buildStatusLine can reflect a real "context used %" instead of showing "–". */
   | {
-      kind: 'cost_update'
-      totalCostUsd: number
-      messageId: string
-      tokens?: MessageTokens
-      engineCostUsd?: number
+      readonly kind: 'error'
+      readonly sessionId: string
+      readonly message: string
+      readonly errorType: string
+      readonly durationMs: number
     }
-  | { kind: 'error'; message: string }
-  | { kind: 'auth-required'; vendorId: string; message: string }
   | {
-      kind: 'subagent-stream'
-      toolUseId: string
-      streamType: 'text' | 'thinking'
-      delta: string
-      item: OpencodeStreamItem
-    }
-  | { kind: 'subagent-message'; toolUseId: string; message: ChatMessage; item?: OpencodeStreamItem }
-  | {
-      kind: 'subagent-tool-result'
-      toolUseId: string
-      toolResultToolUseId: string
-      result: string
-      isError: boolean
-    }
-  | { kind: 'task-notification'; notification: import('../../shared/types').TaskNotification }
-  | { kind: 'todos'; items: TodoItem[] }
-  | { kind: 'ignore' }
-
-// ── Mapper ────────────────────────────────────────────────────────────────────
-
-/**
- * Pure function: map a single opencode SSE event to a MapperOutput.
- *
- * Stateful: `accumulators` is a Map keyed by messageId (the `msg_…` id from
- * message.updated / part.updated). The caller owns the map and passes it on
- * every call so this module stays pure and unit-testable.
- *
- * `childSessions` is a caller-owned Map<childSessionId, parentToolUseId> that
- * the mapper both reads (to route child events) and mutates (to register new
- * child sessions when a task tool part appears with state.metadata.sessionId).
- *
- * Routing logic (CRITICAL — order matters):
- *   1. eventSessionId === ownSessionId → own-session handler (existing switch)
- *      — also registers child sessions when a task tool part is seen.
- *   2. eventSessionId is a known child → child handler.
- *      A child's session.idle MUST be handled here and MUST NOT fall through to
- *      the own-session switch (where it would emit {kind:'result'} and end the
- *      parent turn early — the worst bug here).
- *   3. Unknown foreign session → ignore.
- */
-export function mapEvent(
-  ev: OpencodeEvent,
-  ownSessionId: string,
-  accumulators: Map<string, MessageAccumulator>,
-  startTimeMs: number,
-  totalCostUsd: { value: number },
-  childSessions: Map<string, string> = new Map()
-): MapperOutput {
-  const props = ev.properties as Record<string, unknown>
-
-  const eventSessionId = props.sessionID as string | undefined
-
-  // ── Route: own session ───────────────────────────────────────────────────
-  if (eventSessionId === ownSessionId) {
-    return handleOwnEvent(ev, ownSessionId, accumulators, startTimeMs, totalCostUsd, childSessions)
-  }
-
-  // ── Route: known child session ────────────────────────────────────────────
-  // CRITICAL: this branch must be reached BEFORE the own-session switch so that
-  // a child's session.idle emits task-notification, NOT {kind:'result'}.
-  if (eventSessionId && childSessions.has(eventSessionId)) {
-    return handleChildEvent(ev, eventSessionId, accumulators, childSessions)
-  }
-
-  // ── Route: session.error with no sessionID → surface (don't drop) ─────────
-  // The vendor marks `sessionID` optional on session.error and publishes plugin
-  // crashes without one (plugin/index.ts). ClaudeUI always loads
-  // claudeui-xeng-plugin, so a plugin fault would fall straight through to the
-  // "ignore" fallback below and surface NOWHERE. Route it to a generic error so
-  // the user at least sees that something failed. (A sessionID that IS present
-  // but matches neither own nor a child belongs to another session and stays
-  // ignored — only the sessionID-less global error is adopted here.)
-  if (!eventSessionId && ev.type === 'session.error') {
-    const err = props.error as { data?: Record<string, unknown> } | undefined
-    const message =
-      (err?.data?.message as string | undefined) ?? 'An opencode plugin or server error occurred'
-    return { kind: 'error', message }
-  }
-
-  // ── Route: unknown foreign session → ignore ───────────────────────────────
-  return { kind: 'ignore' }
-}
-
-/**
- * Handle events from the parent (own) session. This is the existing switch —
- * plus child-session registration when we see a task tool part.
- */
-function handleOwnEvent(
-  ev: OpencodeEvent,
-  ownSessionId: string,
-  accumulators: Map<string, MessageAccumulator>,
-  startTimeMs: number,
-  totalCostUsd: { value: number },
-  childSessions: Map<string, string>
-): MapperOutput {
-  const props = ev.properties as Record<string, unknown>
-
-  switch (ev.type) {
-    case 'message.part.delta': {
-      const messageId = props.messageID as string | undefined
-      const field = props.field as string | undefined
-      const delta = props.delta as string | undefined
-      if (!delta || (field !== 'text' && field !== 'reasoning')) return { kind: 'ignore' }
-      const partId = props.partID as string | undefined
-      const acc = messageId ? accumulators.get(messageId) : undefined
-      if (!messageId || !partId || !acc || acc.role === 'user') return { kind: 'ignore' }
-      const item = streamItemOf(acc, messageId, partId)
-      if (!item || (field !== 'text' && field !== 'reasoning')) return { kind: 'ignore' }
-      const snap = acc.parts.get(partId)
-      if (item.completed || snap?.sealed) return { kind: 'ignore' }
-      if (snap) snap.text = (snap.text ?? '') + delta
-      return { kind: 'stream', streamType: item.kind, delta, messageId, item }
+      readonly kind: 'auth-required'
+      readonly sessionId: string
+      /** opencode's provider id (`openai`, `openrouter`, …) of the model that failed. */
+      readonly vendorId: string
+      readonly message: string
+      readonly durationMs: number
     }
 
-    case 'message.part.updated': {
-      const part = props.part as Record<string, unknown> | undefined
-      if (!part) return { kind: 'ignore' }
-
-      const partId = part.id as string | undefined
-      const messageId = (part.messageID ?? part.messageId) as string | undefined
-      if (!partId || !messageId) return { kind: 'ignore' }
-
-      const acc = ensureAccumulator(accumulators, messageId)
-      const previous = acc.parts.get(partId)
-      const incomingTime = part.time as { start?: number; end?: number } | undefined
-      if (
-        previous?.sealed &&
-        (part.type === 'text' || part.type === 'reasoning') &&
-        typeof incomingTime?.end !== 'number'
-      )
-        return { kind: 'ignore' }
-      const isNew = !acc.parts.has(partId)
-      if (isNew) acc.partOrder.push(partId)
-
-      // opencode compacted the conversation. It is a PART on the assistant
-      // message, but the separator is a row of its own (the renderer paints
-      // `compact_separator` only on a system message), so it becomes one —
-      // identified by the PART id, which is what keeps a re-delivered
-      // `message.part.updated` from stacking a second hairline.
-      if (part.type === 'compaction')
-        return { kind: 'message', message: opencodeCompactionMessage(partId) }
-
-      const partType = part.type as string
-      const snap: PartSnapshot = { type: partType }
-
-      if (partType === 'text' || partType === 'reasoning') {
-        snap.text = (part.text as string) ?? ''
-        snap.time = incomingTime
-        snap.sealed = previous?.sealed
-      } else if (partType === 'tool') {
-        snap.toolName = part.tool as string
-        snap.callID = part.callID as string
-        const state = part.state as ToolPartState | undefined
-        snap.state = state
-
-        // Child-session registration: when a task tool part reports its child
-        // sessionId, register it so future events from that child are routed to
-        // handleChildEvent with the correct parent toolUseId (= callID).
-        //
-        // Ordering guarantee (verified vs opencode 1.17.9 task.ts):
-        //   sessions.create(child)
-        //   → ctx.metadata({ metadata: { sessionId } })   ← publishes this event (yield*)
-        //   → background.start(runTask)                    ← runTask calls ops.prompt(child)
-        //
-        // ctx.metadata is yield*-ed (awaited synchronously in the Effect fiber) before
-        // ops.prompt(child) is ever scheduled, so the registration event is emitted
-        // and flushed to the single FIFO SSE stream BEFORE the child can emit any
-        // transcript events (message.updated / message.part.updated / permission.asked).
-        // No buffering is needed: child transcript events are always processed after
-        // this registration is in place. (opencode/packages/opencode/src/tool/task.ts
-        // lines 178–259 are the authoritative reference.)
-        if (partType === 'tool' && (part.tool as string) === 'task') {
-          const childSessionId = (state?.metadata as Record<string, unknown> | undefined)
-            ?.sessionId as string | undefined
-          const callId = part.callID as string | undefined
-          if (childSessionId && callId) {
-            childSessions.set(childSessionId, callId)
-          }
-        }
-      }
-      acc.parts.set(partId, snap)
-
-      // opencode emits part.updated for the USER's own text part too. The
-      // user message is already rendered optimistically by the renderer, so
-      // skip user-role messages here. `message.updated` (carrying info.role)
-      // always arrives before the message's part.updated, so acc.role is set.
-      if (acc.role === 'user') return { kind: 'ignore' }
-
-      // Build the ChatMessage from current accumulator state
-      const message = buildChatMessage(messageId, acc)
-
-      const item = streamItemOf(acc, messageId, partId)
-      return { kind: 'message', message, ...(item ? { item } : {}) }
-    }
-
-    case 'permission.asked': {
-      const id = props.id as string | undefined
-      const permission = props.permission as string | undefined
-      const tool = props.tool as { messageID?: string; callID?: string } | undefined
-      if (!id || !permission) return { kind: 'ignore' }
-
-      // Offer an "always allow" suggestion (Claude addRules form) so the dialog
-      // can persist a rule for this tool/pattern. patterns carries the matched
-      // argument(s) (command / path / subagent type). See ADR-022 write-back.
-      const patterns = props.patterns as string[] | undefined
-      const suggestion = suggestOpencodeAllowRule(permission, patterns)
-
-      // M-OC6: prefer the REAL tool-call input over the wire `metadata`. MCP
-      // tools (claudeui_dispatch_agent + every bridged Claude MCP server) ask
-      // with `metadata: {}`, leaving both the approval dialog and the ADR-023
-      // auto-mode judge with zero context about what's being run. The tool part
-      // carrying `state.input` is published (message.part.updated) before the
-      // tool calls ctx.ask (verified vs vendor session/tools.ts — ctx.metadata
-      // sets `input: args`), so it's already in the accumulator here. Fall back
-      // to `metadata` (populated for built-in tools) then {}.
-      const metadata = props.metadata as Record<string, unknown> | undefined
-      const toolInput = findToolInput(accumulators, tool?.messageID, tool?.callID)
-      const input = toolInput ?? (metadata && Object.keys(metadata).length > 0 ? metadata : {})
-
-      const approval: PendingApproval = {
-        requestId: id,
-        toolUseId: tool?.callID,
-        toolName: permission,
-        input,
-        // Carried through for the auto-mode ask-rule precedence check (G9) —
-        // the classifier must never auto-approve what a user rule says to ask.
-        ...(patterns && patterns.length > 0 ? { patterns } : {}),
-        ...(suggestion ? { suggestions: [suggestion] } : {})
-      }
-      return { kind: 'approval', approval }
-    }
-
-    case 'permission.replied': {
-      // M-OC2: a permission was resolved on the server. The vendor publishes
-      // this for the reply we originated AND — on a `reject` — for EVERY other
-      // pending permission in the session (cascade-reject), and on `always` for
-      // matching pendings it auto-approves. Either way ClaudeUI's card for that
-      // request is now stale (a later click 404s). Surface the requestId so the
-      // consumer can retract it. Wire shape (vendor permission/index.ts +
-      // event-reducer.test.ts): `{ sessionID, requestID }` — note `requestID`,
-      // NOT `id` (which `permission.asked` uses).
-      const requestId = props.requestID as string | undefined
-      if (!requestId) return { kind: 'ignore' }
-      return { kind: 'approval-resolved', requestId }
-    }
-
-    case 'session.idle': {
-      const durationMs = Date.now() - startTimeMs
-      return {
-        kind: 'result',
-        result: {
-          totalCostUsd: totalCostUsd.value,
-          durationMs,
-          result: '',
-          sessionId: ownSessionId
-        }
-      }
-    }
-
-    case 'session.error': {
-      // Map opencode session.error → session:error or session:vendor-auth-required.
-      // Wire shape (verified vs 1.17.9 /doc): properties.error =
-      //   { name: 'ProviderAuthError'|'UnknownError'|…, data: { providerID?, message } }
-      const err = props.error as { name?: string; data?: Record<string, unknown> } | undefined
-      const name = err?.name
-      const data = err?.data ?? {}
-      if (name === 'ProviderAuthError') {
-        const vendorId = data.providerID as string | undefined
-        if (vendorId) {
-          return {
-            kind: 'auth-required',
-            vendorId,
-            message: (data.message as string | undefined) ?? 'Authentication required'
-          }
-        }
-        // No providerID — fall back to generic error hint
-        return {
-          kind: 'error',
-          message: 'Authentication required. Re-authorize in Settings › Vendors.'
-        }
-      }
-      return { kind: 'error', message: (data.message as string | undefined) ?? 'An error occurred' }
-    }
-
-    case 'message.updated': {
-      const info = props.info as Record<string, unknown> | undefined
-      if (!info) return { kind: 'ignore' }
-
-      const infoId = (info.id as string | undefined) ?? messageIdFromProps(props)
-      if (!infoId) return { kind: 'ignore' }
-
-      const acc = ensureAccumulator(accumulators, infoId)
-
-      // Record role FIRST (before any early-return) so part.updated can gate
-      // on it. opencode always emits message.updated before that message's
-      // part.updated.
-      const role = info.role as 'user' | 'assistant' | 'system' | undefined
-      if (role === 'user' || role === 'assistant' || role === 'system') acc.role = role
-      const time = info.time as { created?: number } | undefined
-      if (typeof time?.created === 'number' && !acc.timestampNative) {
-        acc.timestamp = time.created
-        acc.timestampNative = true
-      }
-
-      // info.tokens is a per-message CUMULATIVE snapshot (store, do not add).
-      // Shape (from opencode 1.17.9 /doc): { input, output, reasoning, cache: { read, write } }
-      // Capture the previous context dimension (input + cacheRead) BEFORE overwriting acc.tokens,
-      // so we can detect a context-snapshot advance for free models (cost=0 never changes).
-      const prevCtxLen = (acc.tokens?.input ?? 0) + (acc.tokens?.cache?.read ?? 0)
-      const rawTokens = info.tokens as Record<string, unknown> | undefined
-      if (rawTokens) {
-        const cacheRaw = rawTokens.cache as Record<string, unknown> | undefined
-        acc.tokens = {
-          input: typeof rawTokens.input === 'number' ? rawTokens.input : undefined,
-          output: typeof rawTokens.output === 'number' ? rawTokens.output : undefined,
-          reasoning: typeof rawTokens.reasoning === 'number' ? rawTokens.reasoning : undefined,
-          cache: cacheRaw
-            ? {
-                read: typeof cacheRaw.read === 'number' ? cacheRaw.read : undefined,
-                write: typeof cacheRaw.write === 'number' ? cacheRaw.write : undefined
-              }
-            : undefined
-        }
-      }
-      const newCtxLen = (acc.tokens?.input ?? 0) + (acc.tokens?.cache?.read ?? 0)
-      // Gate on assistant role: only assistant messages carry a meaningful prompt size;
-      // user/system token changes would corrupt lastContextLength in the session.
-      const tokensChanged = newCtxLen !== prevCtxLen && acc.role === 'assistant'
-
-      // info.cost is a per-message CUMULATIVE snapshot that re-emits multiple
-      // times per turn. Store (not add) it on the accumulator, then sum across
-      // all messages so the turn total is correct and never double-counts.
-      let costChanged = false
-      const cost = info.cost as number | undefined
-      if (typeof cost === 'number') {
-        const prev = acc.cost ?? 0
-        acc.cost = cost
-        if (cost !== prev) {
-          costChanged = true
-          totalCostUsd.value = sumAccumulatorCosts(accumulators)
-        }
-      }
-
-      if (costChanged || tokensChanged) {
-        return {
-          kind: 'cost_update',
-          totalCostUsd: totalCostUsd.value,
-          messageId: infoId,
-          tokens: acc.tokens,
-          engineCostUsd: cost
-        }
-      }
-      return { kind: 'ignore' }
-    }
-
-    case 'question.asked': {
-      // The model is asking the user a structured question (opencode's analog of
-      // Claude's AskUserQuestion tool). This is BLOCKING — the model suspends
-      // until we reply or reject; an unanswered question hangs the turn.
-      // Map to a PendingApproval with toolName:'AskUserQuestion' so the existing
-      // AskUserQuestionBlock UI handles it engine-neutrally.
-      const id = props.id as string | undefined
-      const rawQuestions = props.questions as QuestionInfo[] | undefined
-      const tool = props.tool as { messageID?: string; callID?: string } | undefined
-      if (!id || !rawQuestions) return { kind: 'ignore' }
-      return buildQuestionApproval(id, rawQuestions, tool?.callID)
-    }
-
-    case 'question.replied':
-    case 'question.rejected':
-      // Ack events — we originate the reply/reject from resolveApproval; the
-      // server echo is redundant for a single client. Ignore silently.
-      return { kind: 'ignore' }
-
-    case 'command.executed':
-      // Informational — the command's output has already streamed via the normal
-      // message.updated / message.part.updated events. Completion is still marked
-      // by session.idle, not this event. Nothing to do here. (Phase A note:
-      // subtask command child-session events stay filtered until Phase D.)
-      return { kind: 'ignore' }
-
-    case 'todo.updated': {
-      // opencode publishes todo.updated when the agent writes its TodoWrite tool.
-      // Map to a {kind:'todos'} output so OpencodeSession can feed the floating widget.
-      // Shape: { sessionID, todos: [{content, status, priority}] }
-      const rawTodos = props.todos as Array<Record<string, unknown>> | undefined
-      if (!Array.isArray(rawTodos)) return { kind: 'ignore' }
-      const items: TodoItem[] = rawTodos.map((t) => ({
-        content: t.content != null ? String(t.content) : '',
-        // opencode adds 'cancelled'; TodoStatus now includes it — pass through
-        status: (t.status as TodoItem['status']) ?? 'pending',
-        activeForm: '' // opencode todowrite has no activeForm concept
-      }))
-      return { kind: 'todos', items }
-    }
-
-    default:
-      return { kind: 'ignore' }
-  }
-}
-
-/**
- * Handle events from a known child session (spawned by the parent's `task` tool).
- *
- * `toolUseId` = the parent task part's callID (from childSessions map).
- * The child's session.idle → task-notification (NEVER result — that would end
- * the parent turn early, the critical guard of this phase).
- */
-function handleChildEvent(
-  ev: OpencodeEvent,
-  childSessionId: string,
-  accumulators: Map<string, MessageAccumulator>,
-  childSessions: Map<string, string>
-): MapperOutput {
-  const props = ev.properties as Record<string, unknown>
-  const toolUseId = childSessions.get(childSessionId)!
-
-  switch (ev.type) {
-    case 'message.part.delta': {
-      const messageId = props.messageID as string | undefined
-      const field = props.field as string | undefined
-      const delta = props.delta as string | undefined
-      if (!delta || (field !== 'text' && field !== 'reasoning')) return { kind: 'ignore' }
-      const partId = props.partID as string | undefined
-      const acc = messageId ? accumulators.get(messageId) : undefined
-      if (!messageId || !partId || !acc || acc.role === 'user') return { kind: 'ignore' }
-      const item = streamItemOf(acc, messageId, partId)
-      if (!item || (field !== 'text' && field !== 'reasoning')) return { kind: 'ignore' }
-      const snap = acc.parts.get(partId)
-      if (item.completed || snap?.sealed) return { kind: 'ignore' }
-      if (snap) snap.text = (snap.text ?? '') + delta
-      return { kind: 'subagent-stream', toolUseId, streamType: item.kind, delta, item }
-    }
-
-    case 'message.part.updated': {
-      const part = props.part as Record<string, unknown> | undefined
-      if (!part) return { kind: 'ignore' }
-
-      const partId = part.id as string | undefined
-      const messageId = (part.messageID ?? part.messageId) as string | undefined
-      if (!partId || !messageId) return { kind: 'ignore' }
-
-      const acc = ensureAccumulator(accumulators, messageId)
-      const previous = acc.parts.get(partId)
-      const incomingTime = part.time as { start?: number; end?: number } | undefined
-      if (
-        previous?.sealed &&
-        (part.type === 'text' || part.type === 'reasoning') &&
-        typeof incomingTime?.end !== 'number'
-      )
-        return { kind: 'ignore' }
-      // Mark as a child accumulator so the parent's metering loops skip it
-      // (otherwise the child's tokens are attributed to the parent model).
-      acc.isChild = true
-      const isNew = !acc.parts.has(partId)
-      if (isNew) acc.partOrder.push(partId)
-
-      const partType = part.type as string
-      const snap: PartSnapshot = { type: partType }
-
-      if (partType === 'text' || partType === 'reasoning') {
-        snap.text = (part.text as string) ?? ''
-        snap.time = incomingTime
-        snap.sealed = previous?.sealed
-      } else if (partType === 'tool') {
-        snap.toolName = part.tool as string
-        snap.callID = part.callID as string
-        const state = part.state as ToolPartState | undefined
-        snap.state = state
-      }
-      acc.parts.set(partId, snap)
-
-      // Skip child user-role messages (the task prompt text) — mirrors the own path.
-      // message.updated (with info.role) always precedes the message's part.updated.
-      if (acc.role === 'user') return { kind: 'ignore' }
-
-      const message = buildChatMessage(messageId, acc)
-      const item = streamItemOf(acc, messageId, partId)
-      return { kind: 'subagent-message', toolUseId, message, ...(item ? { item } : {}) }
-    }
-
-    case 'message.updated': {
-      // Record role so part.updated can gate on it (same ordering contract as own path).
-      // Accumulate tokens + cost for child metering (Phase 9a: recorded under the child's
-      // own model + childSessionId in recordTurnUsage, not the parent's).
-      // No cost_update emitted for child messages — the live MeteringSnapshot is the
-      // parent turn's per-model meter; children are metered as their own usage_event.
-      const info = props.info as Record<string, unknown> | undefined
-      if (!info) return { kind: 'ignore' }
-
-      const infoId =
-        (info.id as string | undefined) ??
-        ((props.messageID ?? props.messageId) as string | undefined)
-      if (!infoId) return { kind: 'ignore' }
-
-      const acc = ensureAccumulator(accumulators, infoId)
-      // Mark as a child accumulator so the parent's metering loops skip it.
-      acc.isChild = true
-      // Record which child session this accumulator belongs to (for usage attribution).
-      acc.childSessionId = childSessionId
-
-      const role = info.role as 'user' | 'assistant' | 'system' | undefined
-      if (role === 'user' || role === 'assistant' || role === 'system') acc.role = role
-      const time = info.time as { created?: number } | undefined
-      if (typeof time?.created === 'number' && !acc.timestampNative) {
-        acc.timestamp = time.created
-        acc.timestampNative = true
-      }
-
-      const rawTokens = info.tokens as Record<string, unknown> | undefined
-      if (rawTokens) {
-        const cacheRaw = rawTokens.cache as Record<string, unknown> | undefined
-        acc.tokens = {
-          input: typeof rawTokens.input === 'number' ? rawTokens.input : undefined,
-          output: typeof rawTokens.output === 'number' ? rawTokens.output : undefined,
-          reasoning: typeof rawTokens.reasoning === 'number' ? rawTokens.reasoning : undefined,
-          cache: cacheRaw
-            ? {
-                read: typeof cacheRaw.read === 'number' ? cacheRaw.read : undefined,
-                write: typeof cacheRaw.write === 'number' ? cacheRaw.write : undefined
-              }
-            : undefined
-        }
-      }
-
-      // Phase 9a: capture cost for child messages (was deliberately omitted before).
-      // Used by recordTurnUsage to emit a usage_event under the child's own model.
-      const cost = info.cost as number | undefined
-      if (typeof cost === 'number') acc.cost = cost
-
-      // Capture the child's own model so recordTurnUsage can attribute the usage_event
-      // correctly (child may run a different model than the parent).
-      const providerID = info.providerID as string | undefined
-      const modelID = info.modelID as string | undefined
-      if (providerID && modelID) acc.model = { providerID, modelID }
-
-      return { kind: 'ignore' }
-    }
-
-    case 'session.idle': {
-      // CRITICAL GUARD: child session.idle → task-notification, NOT {kind:'result'}.
-      // {kind:'result'} would flip isProcessing=false and end the parent turn early.
-      // The child's toolUseId is deleted from childSessions in the dispatcher after
-      // this notification is emitted (tidy cleanup).
-      const notification: import('../../shared/types').TaskNotification = {
-        taskId: childSessionId,
-        toolUseId,
-        status: 'completed',
-        outputFile: '',
-        summary: ''
-      }
-      return { kind: 'task-notification', notification }
-    }
-
-    case 'permission.asked': {
-      // A child subagent hit an ask-gated tool. Surface it as a PendingApproval so
-      // the user can unblock it — otherwise the child fiber stays suspended and the
-      // synchronous parent turn hangs.
-      //
-      // Two deliberate differences from the own-session permission.asked case:
-      //
-      //   1. toolUseId = tool?.callID (THE CHILD TOOL'S own callID, NOT the parent
-      //      task part's toolUseId stored in `toolUseId` above). The parent task
-      //      toolUseId is already inside the rendered main assistant blocks, so
-      //      FloatingApproval's unmatched-approval filter would immediately hide the
-      //      card. The child tool's callID only appears inside the subagent blocks,
-      //      so the card shows correctly.
-      //
-      //   2. `suggestions` (persist-rule) field is OMITTED. An "always allow" rule
-      //      would be persisted to the shared Claude permission store → compiled into
-      //      the parent's ruleset next spawn, but `deriveSubagentSessionPermission`
-      //      (opencode 1.17.9) only copies parent *deny* rules to children — so the
-      //      persisted allow would NOT stop the child re-asking. Including the
-      //      suggestion would be misleading. Child approvals are once / session / deny
-      //      only.
-      const id = props.id as string | undefined
-      const permission = props.permission as string | undefined
-      const tool = props.tool as { messageID?: string; callID?: string } | undefined
-      if (!id || !permission) return { kind: 'ignore' }
-
-      const childPatterns = props.patterns as string[] | undefined
-      const approval: import('../../shared/types').PendingApproval = {
-        requestId: id,
-        // Child tool's own callID — see note 1 above.
-        toolUseId: tool?.callID,
-        toolName: permission,
-        input: (props.metadata as Record<string, unknown>) ?? {},
-        // Carried for the auto-mode ask-rule precedence check (G9); a child ask
-        // reaches handleAutoModeApproval on the same path as an own-session one.
-        ...(childPatterns && childPatterns.length > 0 ? { patterns: childPatterns } : {})
-        // No `suggestions` — see note 2 above.
-      }
-      return { kind: 'approval', approval }
-    }
-
-    case 'question.asked': {
-      // A child subagent called the `question` tool. Surface it as a PendingApproval
-      // so the user can answer it in the floating layer — otherwise the child fiber
-      // stays suspended and the synchronous parent turn hangs.
-      //
-      // Key differences from the own-session question.asked case:
-      //   1. toolUseId = tool?.callID (THE CHILD TOOL'S own callID, NOT the parent
-      //      task part's toolUseId stored in `toolUseId` above). This keeps the
-      //      card unmatched in FloatingApproval's filter — the child callID only
-      //      appears inside subagent blocks, not the main assistant blocks.
-      //   2. No `suggestions` field — question approvals never carry suggestions.
-      // Everything else is shared via buildQuestionApproval.
-      const id = props.id as string | undefined
-      const rawQuestions = props.questions as QuestionInfo[] | undefined
-      const tool = props.tool as { messageID?: string; callID?: string } | undefined
-      if (!id || !rawQuestions) return { kind: 'ignore' }
-      // Use tool?.callID (child question tool's callID), not the parent `toolUseId`.
-      return buildQuestionApproval(id, rawQuestions, tool?.callID)
-    }
-
-    case 'session.error': {
-      // Child session error → task-notification with status:'failed'.
-      const notification: import('../../shared/types').TaskNotification = {
-        taskId: childSessionId,
-        toolUseId,
-        status: 'failed',
-        outputFile: '',
-        summary: ''
-      }
-      return { kind: 'task-notification', notification }
-    }
-
-    default:
-      return { kind: 'ignore' }
-  }
-}
-
-/**
- * Build a {kind:'approval'} output for a question.asked event (own-session or child).
- *
- * Shared by both handleOwnEvent and handleChildEvent to keep the QuestionInfo[]→
- * AskUserQuestion[] mapping and PendingApproval construction in one place.
- *
- * @param id        The question request id (props.id)
- * @param rawQuestions The raw QuestionInfo array from the event
- * @param callID    The tool callID to use as toolUseId (own or child question tool's callID)
- */
-function buildQuestionApproval(
-  id: string,
-  rawQuestions: QuestionInfo[],
-  callID: string | undefined
-): MapperOutput {
-  const questions: AskUserQuestion[] = rawQuestions.map((q) => ({
-    question: q.question,
-    header: q.header,
-    options: (q.options ?? []).map((o) => ({ label: o.label, description: o.description })),
-    multiSelect: !!q.multiple
-  }))
-  const approval: PendingApproval = {
-    requestId: id,
-    toolUseId: callID,
-    toolName: 'AskUserQuestion',
-    input: { questions }
-  }
-  return { kind: 'approval', approval }
-}
-
-/** Get-or-create the accumulator for a messageId. */
-function ensureAccumulator(
-  accumulators: Map<string, MessageAccumulator>,
-  messageId: string
-): MessageAccumulator {
-  let acc = accumulators.get(messageId)
-  if (!acc) {
-    acc = { messageId, partOrder: [], parts: new Map() }
-    accumulators.set(messageId, acc)
-  }
-  return acc
-}
-
-/** Best-effort messageId from a message.updated event's properties. */
-function messageIdFromProps(props: Record<string, unknown>): string | undefined {
-  return (props.messageID ?? props.messageId) as string | undefined
-}
-
-/**
- * M-OC6: find the real input args of an in-flight tool call from the
- * accumulated tool part (state.input), matched by callID. Returns undefined
- * when no matching part carries a non-empty input — the caller then falls back
- * to the wire `metadata`. Checks the named message first, then scans all
- * accumulators (the permission event's `messageID` may be absent/mismatched).
- */
-function findToolInput(
-  accumulators: Map<string, MessageAccumulator>,
-  messageId: string | undefined,
-  callId: string | undefined
-): Record<string, unknown> | undefined {
-  if (!callId) return undefined
-  const scan = (acc: MessageAccumulator | undefined): Record<string, unknown> | undefined => {
-    if (!acc) return undefined
-    for (const snap of acc.parts.values()) {
-      if (snap.type === 'tool' && snap.callID === callId) {
-        const input = snap.state?.input
-        if (input && Object.keys(input).length > 0) return input
-      }
-    }
-    return undefined
-  }
-  if (messageId) {
-    const found = scan(accumulators.get(messageId))
-    if (found) return found
-  }
-  for (const acc of accumulators.values()) {
-    const found = scan(acc)
-    if (found) return found
-  }
-  return undefined
-}
-
-/**
- * Sum the cumulative per-message cost snapshots into a turn total.
- *
- * Phase 9a: SKIP child accumulators (isChild). Now that child accumulators
- * capture `cost` for their own metering, failing to skip them here would inflate
- * the parent turn's totalCostUsd / cost_update (the own path calls this at the
- * cost_update path ~line 334 on every message.updated).
- */
-function sumAccumulatorCosts(accumulators: Map<string, MessageAccumulator>): number {
-  let total = 0
-  for (const acc of accumulators.values()) {
-    if (acc.isChild) continue
-    total += acc.cost ?? 0
-  }
-  return total
-}
-
-/**
- * Build a ChatMessage from a MessageAccumulator snapshot.
- * Blocks are ordered by part insertion order; tool parts get tool_use blocks.
- */
-export function buildChatMessage(messageId: string, acc: MessageAccumulator): ChatMessage {
-  const content: ContentBlock[] = []
-
-  for (const partId of acc.partOrder) {
-    const snap = acc.parts.get(partId)
-    if (!snap) continue
-
-    if (snap.type === 'text') {
-      content.push({ type: 'text', text: snap.text ?? '' })
-    } else if (snap.type === 'reasoning') {
-      content.push({
-        type: 'thinking',
-        text: snap.text ?? '',
-        ...(typeof snap.time?.start === 'number' && typeof snap.time.end === 'number'
-          ? { durationMs: Math.max(0, snap.time.end - snap.time.start) }
-          : {})
-      })
-    } else if (snap.type === 'tool') {
-      const toolUseId = snap.callID ?? partId
-      content.push({
-        type: 'tool_use',
-        toolUseId,
-        // RAW opencode tool name — the renderer's OpencodeEngineToolMap classifies
-        // it to a ToolKind (bash→command, render_mermaid→diagram, …). callID +
-        // toolInput stay untouched (plugin arg names already match the bodies).
-        toolName: snap.toolName ?? 'unknown',
-        toolInput: snap.state?.input ?? {}
-      })
-    }
-    // step-start/step-finish: ignored for now
-  }
-
-  return {
-    id: messageId,
-    role: acc.role ?? 'assistant',
-    content,
-    timestamp: (acc.timestamp ??= Date.now())
-  }
-}
-
-/** Resolve a native part id to the renderer slot after unsupported parts are filtered. */
-export function streamItemOf(
-  acc: MessageAccumulator,
-  messageId: string,
-  partId: string
-): OpencodeStreamItem | undefined {
-  let blockIndex = 0
-  for (const id of acc.partOrder) {
-    const snap = acc.parts.get(id)
-    if (!snap) continue
-    const emitted = snap.type === 'text' || snap.type === 'reasoning' || snap.type === 'tool'
-    if (id === partId) {
-      if (snap.type !== 'text' && snap.type !== 'reasoning') return undefined
-      return {
-        messageId,
-        partId,
-        blockIndex,
-        kind: snap.type === 'reasoning' ? 'thinking' : 'text',
-        completed: typeof snap.time?.end === 'number'
-      }
-    }
-    if (emitted) blockIndex++
-  }
-  return undefined
-}
-
-/**
- * Extract per-file unified diffs from a completed tool part's metadata, for the
- * file-mutation tools (apply_patch / edit). Shape-gated, not tool-name-gated —
- * bash's `{ output }` metadata (and anything else without `files`/`filediff`)
- * never matches, so callers don't need a hardcoded tool-name allowlist.
- *
- * Verified against vendor/opencode-src tag v1.17.15 (byte-identical to 1.17.14;
- * tool/{apply_patch,edit,write}.ts unchanged through pinned v1.18.9):
- *  - apply_patch result.metadata: `{ diff, files: [{ filePath, relativePath,
- *    type: 'add'|'update'|'delete'|'move', patch, additions, deletions,
- *    movePath }], diagnostics }`. The SAME shape also rides the
- *    `permission.asked` event, but that's a different message type — this
- *    helper only ever sees a completed/error part's `state.metadata`.
- *  - edit result.metadata: `{ diagnostics, diff, filediff: { file, patch,
- *    additions, deletions } }` — a SINGULAR object (always exactly one file),
- *    not an array. `filediff.file` is edit's own absolute `filePath` input
- *    echoed back; `input.filePath` is used only as a fallback if that's ever
- *    absent.
- *  - write result.metadata: `{ diagnostics, filepath, exists }` — NO diff at
- *    all. write's `permission.asked` event carries `{ filepath, diff }`, but
- *    that never reaches a completed part's `state.metadata`, so write
- *    intentionally yields no fileDiffs (falls through to the `undefined`
- *    return below — its generic/text rendering is unchanged).
- */
-export function extractFileDiffs(
-  metadata: Record<string, unknown> | undefined,
-  input: Record<string, unknown> | undefined
-): FileDiff[] | undefined {
-  if (!metadata) return undefined
-
-  // apply_patch shape: files[]
-  if (Array.isArray(metadata.files)) {
-    const diffs: FileDiff[] = []
-    for (const raw of metadata.files as Array<Record<string, unknown>>) {
-      const patch = raw.patch
-      if (typeof patch !== 'string' || patch.length === 0) continue
-      const path =
-        (typeof raw.relativePath === 'string' && raw.relativePath) ||
-        (typeof raw.filePath === 'string' ? raw.filePath : undefined)
-      if (!path) continue
-      const changeType =
-        raw.type === 'add' || raw.type === 'update' || raw.type === 'delete' || raw.type === 'move'
-          ? raw.type
-          : undefined
-      diffs.push({
-        path,
-        patch,
-        additions: typeof raw.additions === 'number' ? raw.additions : undefined,
-        deletions: typeof raw.deletions === 'number' ? raw.deletions : undefined,
-        changeType
-      })
-    }
-    return diffs.length > 0 ? diffs : undefined
-  }
-
-  // edit shape: filediff (singular)
-  const filediff = metadata.filediff as Record<string, unknown> | undefined
-  if (filediff && typeof filediff.patch === 'string' && filediff.patch.length > 0) {
-    const path =
-      (typeof filediff.file === 'string' && filediff.file) ||
-      (typeof input?.filePath === 'string' ? input.filePath : undefined)
-    if (!path) return undefined
-    return [
+/** What a reconnect re-reads (`reconnect.ts` builds it). */
+export interface OpencodeReconnectSnapshot {
+  /** Per followed session: the own one and every linked child. */
+  readonly sessions: Readonly<
+    Record<
+      string,
       {
-        path,
-        patch: filediff.patch,
-        additions: typeof filediff.additions === 'number' ? filediff.additions : undefined,
-        deletions: typeof filediff.deletions === 'number' ? filediff.deletions : undefined,
-        changeType: 'update'
+        readonly messages: readonly Session_Message_Info[]
+        readonly permissions: readonly Permission_Request[]
+        readonly forms: readonly Form_Info[]
+        /** Own session only. */
+        readonly inbox?: readonly Session_Inbox_Info[]
       }
-    ]
-  }
-
-  return undefined
+    >
+  >
+  /** `GET /api/session/active`: absent means idle. */
+  readonly active: Readonly<Record<string, SessionActive>>
 }
 
-/**
- * Check if a tool part snapshot represents a newly completed tool invocation.
- * Returns the tool result data, or null if not applicable.
- */
-export function extractToolResult(
-  _partId: string,
-  snap: PartSnapshot
-): {
-  toolUseId: string
-  result: string
-  isError: boolean
-  fileDiffs?: FileDiff[]
-  images?: ToolResultImage[]
-} | null {
-  if (snap.type !== 'tool') return null
-  const status = snap.state?.status
-  if (status !== 'completed' && status !== 'error') return null
-  const toolUseId = snap.callID ?? _partId
-  const metadata = snap.state?.metadata as Record<string, unknown> | undefined
-  // Error parts carry the failure text on state.error (e.g. a permission
-  // denial's CorrectedError feedback) — prefer it so the reason is visible in
-  // the tool card, live. Mirrors convertStoredMessage's history-path fallback.
-  const stateError = snap.state?.error
-  const rawOutput =
-    status === 'error' && typeof stateError === 'string' && stateError.length > 0
-      ? stateError
-      : (snap.state?.output ?? metadata?.output)
-  const result = rawOutput !== undefined ? String(rawOutput) : ''
-  const fileDiffs = extractFileDiffs(metadata, snap.state?.input)
-  const images = toolAttachmentImages(snap.state?.attachments)
+export interface OpencodeEventMapperOptions {
+  /** The ClaudeUI chat's opencode session. */
+  readonly sessionID: string
+  /** The session's model when known up front (names the vendor of a `provider.auth` failure). */
+  readonly model?: Model_Ref
+  /** The "always allow" suggestion for an own-session ask (S5 wires `suggestOpencodeAllowRule`). */
+  readonly suggest?: (
+    action: string,
+    resources: readonly string[]
+  ) => PermissionSuggestion | null | undefined
+}
+
+// --- State ------------------------------------------------------------------
+
+interface ItemState {
+  readonly kind: 'text' | 'reasoning' | 'tool'
+  readonly ordinal?: number
+  readonly toolId?: string
+  text: string
+  ended: boolean
+  /** Block index in the message, once it has content (tools: at once). */
+  index: number | null
+  /** An item stream is open for it. */
+  open: boolean
+  /** Deltas were missed (reconnect): show nothing more until its `ended`. */
+  gapped: boolean
+  startedAt?: number
+  durationMs?: number
+}
+
+interface MessageState {
+  readonly id: string
+  /**
+   * The subagent call this (child) step ran under, fixed when the step is
+   * first seen: a child resumed by a later call keeps its earlier steps under
+   * the earlier call.
+   */
+  readonly owner?: string
+  timestamp: number
+  model?: Model_Ref
+  readonly items: ItemState[]
+  readonly blocks: ContentBlock[]
+  metered: boolean
+}
+
+interface ToolState {
+  readonly id: string
+  name: string
+  readonly message: MessageState
+  input: Record<string, unknown>
+  settled: boolean
+  /** A permission ask was raised for this call (so a rejection is the host's, not a rule's). */
+  asked: boolean
+  shellID?: string
+  childSession?: string
+  /** When the call started (`tool.called`, = the stored part's `time.ran`). */
+  startedAt?: number
+}
+
+interface SessionState {
+  readonly id: string
+  /** The parent call a child runs under; undefined for the own session. */
+  owner?: string
+  model?: Model_Ref
+  running: boolean
+  turnStartedAt?: number
+  /**
+   * Calls of the running execution the host declined WITHOUT a message: a
+   * messageless reject (`DeclinedError`) or a messageless form cancel
+   * (`QuestionTool.CancelledError`). Either dies as a self-interrupt that ends
+   * the turn `interrupted{shutdown}` (`runner/step.ts`), and its tool fails
+   * `aborted`; a reject or cancel WITH a message fails the tool with that
+   * message and the turn goes on.
+   */
+  readonly declined: Map<string, 'denied' | 'form-cancelled'>
+  /** Set when a declined call failed `aborted`: how a following `shutdown` end reads. */
+  armedStop?: 'denied' | 'form-cancelled'
+  /** A reconnect ended the turn without an idle row (shutdown): drop the late terminal event. */
+  endedWithoutIdle: boolean
+  /** Background child: its own end is the call's terminal notification. */
+  background: boolean
+  /** The terminal notification for the current call went out. */
+  notified: boolean
+  /** A child that ended before its call said it went to the background (the outcome waits for it). */
+  endedAs?: TaskNotification['status']
+  readonly messages: Map<string, MessageState>
+  readonly tools: Map<string, ToolState>
+  readonly idleSeen: Set<string>
+  readonly usersSeen: Set<string>
+  readonly compactionsSeen: Set<string>
+  readonly inbox: Map<string, Session_Inbox_Delivery>
+  readonly inboxItems: Map<string, SessionInboxItem>
+  compactionId?: string
+  compactionStartedAt?: number
+  /**
+   * The last compaction a re-read found settled: its live end may still
+   * arrive without the start that names it (`compaction.ended` carries no id).
+   */
+  compactionFromRead?: string
+  /** Compactions whose request usage went out (by compaction id). */
+  readonly compactionsMetered: Set<string>
+}
+
+const PENDING_CHILD_BUFFER = 1_000
+
+function newSession(id: string, owner?: string): SessionState {
   return {
-    toolUseId,
-    result,
-    isError: status === 'error',
-    ...(fileDiffs ? { fileDiffs } : {}),
-    ...(images ? { images } : {})
+    id,
+    owner,
+    running: false,
+    declined: new Map(),
+    endedWithoutIdle: false,
+    background: false,
+    notified: false,
+    messages: new Map(),
+    tools: new Map(),
+    idleSeen: new Set(),
+    usersSeen: new Set(),
+    compactionsSeen: new Set(),
+    compactionsMetered: new Set(),
+    inbox: new Map(),
+    inboxItems: new Map()
   }
 }
 
-// Helper: generate a stable uuid for user messages
-export function makeUserMessageId(): string {
-  return uuid()
+type Out = OpencodeMapperOutput[]
+
+interface Usage {
+  readonly cost: number
+  readonly tokens: TokenUsage_Info
+}
+const ZERO_USAGE: Usage = {
+  cost: 0,
+  tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
 }
 
-/**
- * Decode the base64 payload of a `data:<mime>;base64,<data>` URI, requiring the
- * header to match `mime` exactly. Returns null for anything else (`file://`
- * @-mention urls, missing comma, empty payload, mime/header mismatch, a
- * non-base64 data URI) — stored parts are untrusted input.
- */
-function decodeBase64DataUri(url: string, mime: string): string | null {
-  const comma = url.indexOf(',')
-  if (comma === -1) return null
-  if (url.slice(0, comma) !== `data:${mime};base64`) return null
-  const data = url.slice(comma + 1)
-  return data || null
-}
-
-/**
- * Images a tool RETURNED, from its part state's `attachments` (see
- * `ToolPartState.attachments` for the vendor-source provenance). Shared by the
- * live accumulator path (`extractToolResult`) and the stored-replay path
- * (`convertStoredMessage`), so both produce the same set.
- *
- * Reuses the same gates as the user-attachment reader: an image mime in
- * `IMAGE_MEDIA_TYPES` and a genuine `data:<mime>;base64,` URI. PDFs and
- * `file://` urls are skipped (the gallery is images-only). Returns undefined
- * rather than [] when nothing survives.
- */
-function toolAttachmentImages(
-  attachments: ToolAttachment[] | undefined
-): ToolResultImage[] | undefined {
-  if (!Array.isArray(attachments)) return undefined
-  const images: ToolResultImage[] = []
-  for (const a of attachments) {
-    if (!a || typeof a !== 'object') continue
-    const { mime, url, filename } = a
-    if (!isImageMediaType(mime) || typeof url !== 'string') continue
-    const base64Data = decodeBase64DataUri(url, mime)
-    if (!base64Data) continue
-    images.push({ mediaType: mime, base64Data, ...(filename ? { fileName: filename } : {}) })
-  }
-  return images.length > 0 ? images : undefined
-}
-
-/**
- * Map a stored `file` part to an attachment ContentBlock, or null when it is not
- * an inline user attachment. opencode uses `file` parts for two unrelated things:
- * real attachments (`data:` url, image/pdf mime — see OpencodeSession's file
- * parts) and @-mentioned files/directories (`file://` url, `text/plain` /
- * `application/x-directory` mime — vendor prompt.ts resolvePromptParts, already
- * expanded into synthetic text parts). Only the former is rehydrated.
- */
-function storedFilePartToAttachment(part: StoredMessagePart): ContentBlock | null {
-  const { mime, url, filename } = part
-  if (typeof mime !== 'string' || typeof url !== 'string') return null
-  const isImage = isImageMediaType(mime)
-  if (!isImage && mime !== 'application/pdf') return null
-  const base64Data = decodeBase64DataUri(url, mime)
-  if (!base64Data) return null
-  const fileName = filename ? { fileName: filename } : {}
-  return isImage
-    ? { type: 'image', mediaType: mime, base64Data, ...fileName }
-    : { type: 'document', mediaType: 'application/pdf', base64Data, ...fileName }
-}
-
-/**
- * Convert a single stored opencode message (from GET /session/{id}/message) into
- * a `ChatMessage` for history replay.
- *
- * Mirrors `buildChatMessage`'s part→block mapping for parity with live turns:
- *   text      → { type:'text', text }
- *   reasoning → { type:'thinking', text }
- *   tool      → { type:'tool_use', toolUseId, toolName, toolInput }
- *              + { type:'tool_result', toolUseId, toolResult, isError, images? }
- *                when completed/error — `images` from the part's own
- *                `state.attachments` (media the TOOL returned)
- *   file      → { type:'image'|'document', … } for inline USER attachments only
- *
- * Step-start, step-finish, agent, subtask, compaction, non-attachment file parts,
- * and any unknown part types are silently skipped. Assistant-role `file` parts
- * are NOT a tool-image carrier in this opencode version (see
- * `ToolPartState.attachments`), so they remain skipped.
- *
- * Returns null if the message has no displayable content (so the caller can skip it).
- */
-/**
- * The separator row for one opencode `compaction` part.
- *
- * opencode's compaction carries no summary on either path, so this is always
- * the HAIRLINE form. Keyed by the part id so the live event and the stored
- * replay of the same compaction produce one row, not two.
- */
-export function opencodeCompactionMessage(partId: string): ChatMessage {
+function addUsage(a: Usage, b: Usage): Usage {
   return {
-    id: partId,
-    role: 'system',
-    content: [{ type: 'compact_separator' }],
-    timestamp: Date.now()
+    cost: a.cost + b.cost,
+    tokens: {
+      input: a.tokens.input + b.tokens.input,
+      output: a.tokens.output + b.tokens.output,
+      reasoning: a.tokens.reasoning + b.tokens.reasoning,
+      cache: {
+        read: a.tokens.cache.read + b.tokens.cache.read,
+        write: a.tokens.cache.write + b.tokens.cache.write
+      }
+    }
   }
 }
 
-/**
- * The compaction separators inside ONE stored message, for the replay paths.
- *
- * `convertStoredMessage` cannot carry them: it returns the user/assistant
- * message the parts belong to, and a `compact_separator` renders only on a
- * SYSTEM row. The callers push these alongside it instead.
- */
-export function storedCompactionMessages(stored: StoredMessage): ChatMessage[] {
-  return ((stored.parts ?? []) as StoredMessagePart[]).flatMap((part) =>
-    part.type === 'compaction' ? [opencodeCompactionMessage(part.id ?? uuid())] : []
-  )
+function subtractUsage(a: Usage, b: Usage): Usage {
+  const neg = (u: Usage): Usage => ({
+    cost: -u.cost,
+    tokens: {
+      input: -u.tokens.input,
+      output: -u.tokens.output,
+      reasoning: -u.tokens.reasoning,
+      cache: { read: -u.tokens.cache.read, write: -u.tokens.cache.write }
+    }
+  })
+  return addUsage(a, neg(b))
 }
 
-export function convertStoredMessage(stored: StoredMessage): ChatMessage | null {
-  const { info, parts } = stored
-  if (!info?.id) return null
+/** Field-wise max(0, x); undefined when nothing is left (cost below a nano-dollar, no token). */
+function positivePart(u: Usage): Usage | undefined {
+  const p = (x: number) => (x > 0 ? x : 0)
+  const out: Usage = {
+    cost: u.cost > 1e-9 ? u.cost : 0,
+    tokens: {
+      input: p(u.tokens.input),
+      output: p(u.tokens.output),
+      reasoning: p(u.tokens.reasoning),
+      cache: { read: p(u.tokens.cache.read), write: p(u.tokens.cache.write) }
+    }
+  }
+  const t = out.tokens
+  return out.cost > 0 || t.input || t.output || t.reasoning || t.cache.read || t.cache.write
+    ? out
+    : undefined
+}
 
-  const role = info.role ?? 'assistant'
-  // Only user/assistant messages are renderable; skip system messages.
-  if (role !== 'user' && role !== 'assistant') return null
+/** Where a turn ending at `idle` began: its first row after the previous idle. */
+function turnStart(
+  rows: readonly Session_Message_Info[],
+  idle: Extract<Session_Message_Info, { type: 'idle' }>
+): number {
+  const end = rows.indexOf(idle)
+  let start = idle.time.created
+  for (let i = end - 1; i >= 0 && rows[i].type !== 'idle'; i--) start = rows[i].time.created
+  return start
+}
 
-  const content: ContentBlock[] = []
-  // Attachments are hoisted ahead of the rest: ClaudeUI sends opencode
-  // [text, ...fileParts] so they persist AFTER the prompt, while the live echo
-  // (session-store.ts addUserMessage / OpencodeSession.buildUserContent) puts
-  // them first. Replay must match the live order.
-  const attachments: ContentBlock[] = []
+function compactionUsage(
+  cost: number | undefined,
+  tokens: TokenUsage_Info | undefined,
+  model?: Model_Ref
+): { usage?: { cost: number; tokens: TokenUsage_Info; model?: Model_Ref } } {
+  if (cost === undefined || tokens === undefined) return {}
+  return { usage: { cost, tokens, ...(model ? { model } : {}) } }
+}
 
-  for (const part of (parts ?? []) as StoredMessagePart[]) {
-    const type = part.type
+// --- Mapper -----------------------------------------------------------------
 
-    if (type === 'file') {
-      if (role !== 'user') continue
-      const block = storedFilePartToAttachment(part)
-      if (block) attachments.push(block)
-    } else if (type === 'text') {
-      const text = part.text ?? ''
-      if (text) content.push({ type: 'text', text })
-    } else if (type === 'reasoning') {
-      const text = part.text ?? ''
-      if (text) content.push({ type: 'thinking', text })
-    } else if (type === 'tool') {
-      const toolUseId = part.callID ?? part.id ?? uuid()
-      const toolName = part.tool ?? 'unknown'
-      const input = (part.state?.input ?? {}) as Record<string, unknown>
-      content.push({ type: 'tool_use', toolUseId, toolName, toolInput: input })
+export class OpencodeEventMapper {
+  readonly sessionID: string
+  private readonly own: SessionState
+  /** Linked children (and grandchildren), by their own session id. */
+  private readonly children = new Map<string, SessionState>()
+  /** Announced (`session.created` with a followed parent) but not yet linked to a call. */
+  private readonly pending = new Map<string, { parentID: string; buffer: OpencodeEvent[] }>()
+  /** Every call that ran a child, in start order (a resumed child has several). */
+  private readonly childCalls = new Map<string, { toolId: string; start?: number }[]>()
+  /** Open approval cards: request/form id → the asking session and the call it is about. */
+  private readonly approvals = new Map<string, { sessionID: string; callID?: string }>()
+  private readonly suggest: OpencodeEventMapperOptions['suggest']
+  /** `seed()` replays settled history: it must not follow every old child. */
+  private seeding = false
+  /** Rows from a re-read are being applied (provenance the feed would have told is unknown). */
+  private reading = false
+  /** Own-session usage already reported (see `emitOverhead`). */
+  private accounted: Usage = ZERO_USAGE
+  /** The own session's last cumulative usage (`session.usage.updated`). */
+  private cumulative?: Usage
 
-      // Add tool_result if the tool completed or errored.
-      const status = part.state?.status
-      if (status === 'completed' || status === 'error') {
-        const rawOutput = part.state?.output ?? part.state?.error ?? ''
-        const fileDiffs = extractFileDiffs(part.state?.metadata, input)
-        // Media the tool returned rides on the tool part's OWN state, not as a
-        // separate assistant `file` part — see ToolPartState.attachments.
-        const images = toolAttachmentImages(part.state?.attachments)
-        content.push({
-          type: 'tool_result',
-          toolUseId,
-          toolResult: rawOutput ?? '',
-          isError: status === 'error',
-          ...(fileDiffs ? { fileDiffs } : {}),
-          ...(images ? { images } : {})
+  constructor(options: OpencodeEventMapperOptions) {
+    this.sessionID = options.sessionID
+    this.own = newSession(options.sessionID)
+    this.own.model = options.model
+    this.suggest = options.suggest
+  }
+
+  /**
+   * The sessions a reconnect must re-read: the own one, then every linked
+   * child whose call has not settled (a settled child has nothing left to
+   * say; it is still routed if a later call resumes it).
+   */
+  followedSessions(): string[] {
+    const live = [...this.children.values()].filter((child) => child.running || !child.notified)
+    return [this.sessionID, ...live.map((child) => child.id)]
+  }
+
+  /**
+   * Forget every open approval/form without retracting anything (no
+   * outputs): the host dropped its cards (a lost connection), so the next
+   * re-read must announce the requests that are still pending again instead of
+   * taking them as already shown.
+   */
+  forgetRequests(): void {
+    this.approvals.clear()
+  }
+
+  /** True between the own session's `execution.started` and its end. */
+  get running(): boolean {
+    return this.own.running
+  }
+
+  // ── Live events ────────────────────────────────────────────────────────────
+
+  map(event: OpencodeEvent): OpencodeMapperOutput[] {
+    if (event.type === 'server.connected') return []
+    const sessionID = eventSessionID(event)
+    if (!sessionID) return []
+    if (event.type === 'session.created') return this.announce(event)
+    const session = this.sessionOf(sessionID)
+    if (!session) {
+      const pending = this.pending.get(sessionID)
+      if (pending && pending.buffer.length < PENDING_CHILD_BUFFER) pending.buffer.push(event)
+      return []
+    }
+    const out: Out = []
+    this.apply(session, event, out)
+    return out
+  }
+
+  private sessionOf(sessionID: string): SessionState | undefined {
+    return sessionID === this.sessionID ? this.own : this.children.get(sessionID)
+  }
+
+  /** A child of a followed session was created: hold its events until a call links it. */
+  private announce(event: EventOf<'session.created'>): Out {
+    const { sessionID, parentID } = event.data
+    if (sessionID === this.sessionID) {
+      if (event.data.model) this.own.model = event.data.model
+      return []
+    }
+    if (!parentID || !this.sessionOf(parentID) || this.children.has(sessionID)) return []
+    if (!this.pending.has(sessionID)) this.pending.set(sessionID, { parentID, buffer: [] })
+    return []
+  }
+
+  private apply(s: SessionState, event: OpencodeEvent, out: Out): void {
+    const own = s === this.own
+    switch (event.type) {
+      case 'session.step.started': {
+        const { assistantMessageID, model, started } = event.data
+        const message = this.messageOf(s, assistantMessageID, started)
+        message.timestamp = started
+        message.model = model
+        s.model = model
+        return
+      }
+      case 'session.text.started':
+      case 'session.reasoning.started': {
+        const kind = event.type === 'session.text.started' ? 'text' : 'reasoning'
+        const message = this.messageOf(s, event.data.assistantMessageID, event.created)
+        if (!this.itemByOrdinal(message, kind, event.data.ordinal))
+          message.items.push({
+            kind,
+            ordinal: event.data.ordinal,
+            text: '',
+            ended: false,
+            index: null,
+            open: false,
+            gapped: false,
+            ...(kind === 'reasoning' ? { startedAt: event.created } : {})
+          })
+        return
+      }
+      case 'session.text.delta':
+      case 'session.reasoning.delta': {
+        const kind = event.type === 'session.text.delta' ? 'text' : 'reasoning'
+        const message = s.messages.get(event.data.assistantMessageID)
+        const item = message && this.itemByOrdinal(message, kind, event.data.ordinal)
+        // A delta of an item whose start we never saw (reconnect gap): wait for its end.
+        if (!message || !item) {
+          if (message)
+            message.items.push({
+              kind,
+              ordinal: event.data.ordinal,
+              text: '',
+              ended: false,
+              index: null,
+              open: false,
+              gapped: true
+            })
+          return
+        }
+        this.appendDelta(message, item, event.data.delta, out)
+        return
+      }
+      case 'session.text.ended':
+      case 'session.reasoning.ended': {
+        const kind = event.type === 'session.text.ended' ? 'text' : 'reasoning'
+        const message = this.messageOf(s, event.data.assistantMessageID, event.created)
+        let item = this.itemByOrdinal(message, kind, event.data.ordinal)
+        if (!item) {
+          item = {
+            kind,
+            ordinal: event.data.ordinal,
+            text: '',
+            ended: false,
+            index: null,
+            open: false,
+            gapped: false
+          }
+          message.items.push(item)
+        }
+        if (item.ended) return
+        if (kind === 'reasoning' && item.startedAt !== undefined)
+          item.durationMs = Math.max(0, event.created - item.startedAt)
+        this.endItem(message, item, event.data.text, out)
+        return
+      }
+      case 'session.tool.input.started': {
+        const message = this.messageOf(s, event.data.assistantMessageID, event.created)
+        this.toolOf(s, message, event.data.id, event.data.name, out)
+        return
+      }
+      case 'session.tool.input.delta': {
+        const tool = s.tools.get(event.data.id)
+        if (!tool) return
+        out.push({
+          kind: 'tool-input-delta',
+          toolUseId: event.data.id,
+          delta: event.data.delta,
+          ...this.ownerOf(tool.message)
+        })
+        return
+      }
+      case 'session.tool.input.ended':
+        return
+      case 'session.tool.called': {
+        const message = this.messageOf(s, event.data.assistantMessageID, event.created)
+        const tool = this.toolOf(s, message, event.data.id, undefined, out)
+        tool.startedAt ??= event.created
+        tool.input = toolInputRecord(event.data.input)
+        this.setToolBlock(message, tool)
+        out.push(this.messageOutput(message))
+        return
+      }
+      case 'session.tool.progress': {
+        const tool = s.tools.get(event.data.id)
+        if (!tool) return
+        this.toolProgress(tool, event.data.metadata, out)
+        return
+      }
+      case 'session.tool.success': {
+        const message = this.messageOf(s, event.data.assistantMessageID, event.created)
+        const tool = this.toolOf(s, message, event.data.id, undefined, out)
+        this.settleTool(
+          s,
+          tool,
+          { ok: true, content: event.data.content, metadata: event.data.metadata },
+          out
+        )
+        return
+      }
+      case 'session.tool.failed': {
+        const message = this.messageOf(s, event.data.assistantMessageID, event.created)
+        const tool = this.toolOf(s, message, event.data.id, undefined, out)
+        this.settleTool(
+          s,
+          tool,
+          {
+            ok: false,
+            error: event.data.error,
+            content: event.data.content,
+            metadata: event.data.metadata
+          },
+          out
+        )
+        return
+      }
+      case 'session.step.ended':
+      case 'session.step.failed': {
+        const message = s.messages.get(event.data.assistantMessageID)
+        if (message) this.sealMessage(message, out)
+        const { cost, tokens } = event.data
+        if (message && cost !== undefined && tokens !== undefined)
+          this.meter(
+            s,
+            message,
+            { cost, tokens },
+            event.type === 'session.step.ended' ? event.data.finish : 'error',
+            out
+          )
+        return
+      }
+      case 'session.step.streamed':
+        return
+      case 'session.usage.updated':
+        if (!own) return
+        this.cumulative = { cost: event.data.cost, tokens: event.data.tokens }
+        out.push({ kind: 'session-usage', cost: event.data.cost, tokens: event.data.tokens })
+        // Mid-turn the steps are still landing; settle the remainder when quiet.
+        if (!s.running) this.emitOverhead(out)
+        return
+      case 'session.execution.started':
+        s.running = true
+        s.turnStartedAt = event.created
+        s.declined.clear()
+        s.armedStop = undefined
+        s.endedWithoutIdle = false
+        if (own) out.push({ kind: 'turn-start' })
+        return
+      case 'session.execution.succeeded':
+        this.endExecution(s, { outcome: 'succeeded' }, event.created, event.id, out)
+        return
+      case 'session.execution.failed':
+        this.endExecution(
+          s,
+          { outcome: 'failed', error: event.data.error },
+          event.created,
+          event.id,
+          out
+        )
+        return
+      case 'session.execution.interrupted':
+        this.endExecution(
+          s,
+          { outcome: 'interrupted', reason: event.data.reason },
+          event.created,
+          event.id,
+          out
+        )
+        return
+      case 'session.retry.scheduled':
+        if (own)
+          out.push({
+            kind: 'retry',
+            attempt: event.data.attempt,
+            at: event.data.at,
+            error: event.data.error
+          })
+        return
+      case 'session.compaction.started': {
+        s.compactionId = event.data.inputID ?? messageIdFromEvent(event.id)
+        s.compactionStartedAt = event.created
+        if (own) out.push({ kind: 'compaction', phase: 'started', reason: event.data.reason })
+        return
+      }
+      case 'session.compaction.delta':
+        return
+      case 'session.compaction.ended':
+        this.endCompaction(
+          s,
+          {
+            phase: 'ended',
+            reason: event.data.reason,
+            summary: event.data.text,
+            usage: compactionUsage(event.data.cost, event.data.tokens, event.data.model).usage
+          },
+          event.id,
+          event.created,
+          out
+        )
+        return
+      case 'session.compaction.failed':
+        this.endCompaction(
+          s,
+          {
+            phase: 'failed',
+            reason: event.data.reason,
+            error: event.data.error,
+            usage: compactionUsage(event.data.cost, event.data.tokens).usage
+          },
+          event.id,
+          event.created,
+          out
+        )
+        return
+      case 'permission.asked':
+        this.ask(s, event.data, out)
+        return
+      case 'permission.replied':
+        if (event.data.reply === 'reject') this.declineCall(s, event.data.requestID, 'denied')
+        this.resolve(event.data.requestID, out)
+        return
+      case 'form.created':
+        this.askForm(s, event.data.form, out)
+        return
+      case 'form.cancelled':
+        this.declineCall(s, event.data.id, 'form-cancelled')
+        this.resolve(event.data.id, out)
+        return
+      case 'form.replied':
+        this.resolve(event.data.id, out)
+        return
+      case 'session.inbox.enqueued': {
+        if (!own) return
+        const { inboxID, item } = event.data
+        s.inboxItems.set(inboxID, item)
+        if (s.inbox.has(inboxID)) return
+        s.inbox.set(inboxID, item.delivery)
+        out.push({ kind: 'inbox', change: 'enqueued', inboxID, delivery: item.delivery, item })
+        return
+      }
+      case 'session.inbox.delivered': {
+        if (!own) return
+        const { inboxID } = event.data
+        const known = s.inbox.delete(inboxID)
+        const item = s.inboxItems.get(inboxID)
+        s.inboxItems.delete(inboxID)
+        if (known) out.push({ kind: 'inbox', change: 'delivered', inboxID })
+        if (item?.type === 'user' && !s.usersSeen.has(inboxID)) {
+          s.usersSeen.add(inboxID)
+          const message = userChatMessage(inboxID, item.payload, event.created)
+          if (message) out.push({ kind: 'user-message', inboxID, message })
+        }
+        return
+      }
+      case 'session.inbox.cancelled': {
+        if (!own) return
+        s.inboxItems.delete(event.data.inboxID)
+        if (s.inbox.delete(event.data.inboxID))
+          out.push({ kind: 'inbox', change: 'cancelled', inboxID: event.data.inboxID })
+        return
+      }
+      case 'session.inbox.delivery.changed': {
+        if (!own) return
+        const { inboxID, delivery } = event.data
+        if (s.inbox.get(inboxID) === delivery) return
+        s.inbox.set(inboxID, delivery)
+        out.push({ kind: 'inbox', change: 'delivery-changed', inboxID, delivery })
+        return
+      }
+      case 'session.renamed':
+        if (own) out.push({ kind: 'session-renamed', title: event.data.title })
+        return
+      case 'session.model.selected':
+        s.model = event.data.model
+        if (own) out.push({ kind: 'model-selected', model: event.data.model })
+        return
+      case 'session.agent.selected':
+        if (own) out.push({ kind: 'agent-selected', agent: event.data.agent })
+        return
+      case 'session.deleted':
+        if (own) out.push({ kind: 'session-deleted' })
+        return
+      default:
+        return
+    }
+  }
+
+  // ── Messages and items ─────────────────────────────────────────────────────
+
+  private messageOf(
+    s: SessionState,
+    id: string,
+    timestamp: number,
+    owner: string | undefined = s.owner
+  ): MessageState {
+    let message = s.messages.get(id)
+    if (!message) {
+      message = {
+        id,
+        timestamp,
+        items: [],
+        blocks: [],
+        metered: false,
+        ...(owner ? { owner } : {})
+      }
+      s.messages.set(id, message)
+    }
+    return message
+  }
+
+  private itemByOrdinal(
+    message: MessageState,
+    kind: 'text' | 'reasoning',
+    ordinal: number
+  ): ItemState | undefined {
+    return message.items.find((item) => item.kind === kind && item.ordinal === ordinal)
+  }
+
+  private snapshot(message: MessageState): ChatMessage {
+    return {
+      id: message.id,
+      role: 'assistant',
+      content: message.blocks.map((block) => ({ ...block })),
+      timestamp: message.timestamp
+    }
+  }
+
+  private ownerField(s: SessionState): { ownerToolUseId?: string } {
+    return s.owner ? { ownerToolUseId: s.owner } : {}
+  }
+
+  private messageOutput(message: MessageState): OpencodeMapperOutput {
+    return { kind: 'message', message: this.snapshot(message), ...this.ownerOf(message) }
+  }
+
+  private ownerOf(message: MessageState): { ownerToolUseId?: string } {
+    return message.owner ? { ownerToolUseId: message.owner } : {}
+  }
+
+  /**
+   * The call a child's step at `time` ran under: the last call of that child
+   * that started at or before it (the cold converter splits a resumed child
+   * the same way). Falls back to the current link.
+   */
+  private ownerAt(s: SessionState, time: number): string | undefined {
+    const calls = this.childCalls.get(s.id) ?? []
+    if (calls.length === 0 || calls.some((call) => call.start === undefined)) return s.owner
+    let owner = calls[0].toolId
+    for (const call of calls) if ((call.start as number) <= time) owner = call.toolId
+    return owner
+  }
+
+  private target(message: MessageState, item: ItemState): ItemStreamTarget {
+    return {
+      messageId: message.id,
+      blockIndex: item.index ?? 0,
+      kind: item.kind === 'reasoning' ? 'thinking' : 'text',
+      ...this.ownerOf(message)
+    }
+  }
+
+  private textBlock(item: ItemState): ContentBlock {
+    return item.kind === 'reasoning'
+      ? {
+          type: 'thinking',
+          text: item.text,
+          ...(item.ended && item.durationMs !== undefined ? { durationMs: item.durationMs } : {})
+        }
+      : { type: 'text', text: item.text }
+  }
+
+  private place(message: MessageState, item: ItemState): void {
+    item.index = message.blocks.length
+    message.blocks.push(this.textBlock(item))
+  }
+
+  private appendDelta(message: MessageState, item: ItemState, delta: string, out: Out): void {
+    if (item.ended || item.gapped || !delta) return
+    if (item.index === null) {
+      // First content: place the block empty and open its stream on it.
+      this.place(message, item)
+      item.open = true
+      out.push({
+        kind: 'item-open',
+        open: {
+          target: this.target(message, item),
+          message: this.snapshot(message),
+          ...(item.kind === 'reasoning' && item.startedAt !== undefined
+            ? { startedAt: item.startedAt }
+            : {})
+        }
+      })
+    } else if (!item.open) return
+    item.text += delta
+    message.blocks[item.index!] = this.textBlock(item)
+    out.push({ kind: 'item-delta', target: this.target(message, item), chunk: delta })
+  }
+
+  /** `text` is authoritative (the `*.ended` payload, or the stored row). */
+  private endItem(message: MessageState, item: ItemState, text: string, out: Out): void {
+    item.text = text
+    item.ended = true
+    item.gapped = false
+    if (item.index === null) {
+      if (!text) return
+      this.place(message, item)
+      out.push(this.messageOutput(message))
+      return
+    }
+    message.blocks[item.index] = this.textBlock(item)
+    if (item.open) {
+      item.open = false
+      out.push({
+        kind: 'item-seal',
+        seal: {
+          target: this.target(message, item),
+          message: this.snapshot(message),
+          ...this.ownerOf(message)
+        }
+      })
+    } else out.push(this.messageOutput(message))
+  }
+
+  /** Close every stream still open in a message, on what it has (a safety net: `*.ended` normally does it). */
+  private sealMessage(message: MessageState, out: Out): void {
+    for (const item of message.items) {
+      if (!item.open || item.index === null) continue
+      item.open = false
+      item.ended = true
+      out.push({
+        kind: 'item-seal',
+        seal: {
+          target: this.target(message, item),
+          message: this.snapshot(message),
+          ...this.ownerOf(message)
+        }
+      })
+    }
+  }
+
+  private sealSession(s: SessionState, out: Out): void {
+    for (const message of s.messages.values()) this.sealMessage(message, out)
+  }
+
+  // ── Tools ──────────────────────────────────────────────────────────────────
+
+  private toolOf(
+    s: SessionState,
+    message: MessageState,
+    id: string,
+    name: string | undefined,
+    out: Out
+  ): ToolState {
+    let tool = s.tools.get(id)
+    if (tool) {
+      if (name) tool.name = name
+      return tool
+    }
+    tool = { id, name: name ?? 'unknown', message, input: {}, settled: false, asked: false }
+    s.tools.set(id, tool)
+    const item: ItemState = {
+      kind: 'tool',
+      toolId: id,
+      text: '',
+      ended: false,
+      index: null,
+      open: false,
+      gapped: false
+    }
+    message.items.push(item)
+    item.index = message.blocks.length
+    message.blocks.push(this.toolBlock(tool))
+    out.push(this.messageOutput(message))
+    return tool
+  }
+
+  private toolBlock(tool: ToolState): ContentBlock {
+    return {
+      type: 'tool_use',
+      toolUseId: tool.id,
+      toolName: tool.name,
+      toolInput: { ...tool.input }
+    }
+  }
+
+  private setToolBlock(message: MessageState, tool: ToolState): void {
+    const item = message.items.find((candidate) => candidate.toolId === tool.id)
+    if (item?.index != null) message.blocks[item.index] = this.toolBlock(tool)
+  }
+
+  private toolProgress(
+    tool: ToolState,
+    metadata: { readonly [key: string]: unknown },
+    out: Out
+  ): void {
+    if (SHELL_TOOL_NAMES.has(tool.name) && typeof metadata.shellID === 'string' && !tool.shellID) {
+      tool.shellID = metadata.shellID
+      out.push({
+        kind: 'shell-started',
+        toolUseId: tool.id,
+        shellID: metadata.shellID,
+        ...this.ownerOf(tool.message)
+      })
+    }
+    const child = subagentChildSession(tool.name, metadata)
+    if (child) this.linkChild(tool, child, out)
+  }
+
+  /** Route a child's events under the call that runs it (a resumed child re-links under the newer call). */
+  private linkChild(tool: ToolState, childID: string, out: Out): void {
+    if (tool.childSession === childID || this.seeding) return
+    tool.childSession = childID
+    const calls = this.childCalls.get(childID) ?? []
+    if (!calls.some((call) => call.toolId === tool.id))
+      calls.push({
+        toolId: tool.id,
+        ...(tool.startedAt !== undefined ? { start: tool.startedAt } : {})
+      })
+    if (calls.every((call) => call.start !== undefined))
+      calls.sort((a, b) => (a.start as number) - (b.start as number))
+    this.childCalls.set(childID, calls)
+    let child = this.children.get(childID)
+    if (child) {
+      child.owner = tool.id
+      child.background = false
+      child.notified = false
+      child.endedAs = undefined
+    } else {
+      child = newSession(childID, tool.id)
+      this.children.set(childID, child)
+    }
+    out.push({
+      kind: 'subagent-started',
+      toolUseId: tool.id,
+      childSessionId: childID,
+      ...this.ownerOf(tool.message)
+    })
+    const pending = this.pending.get(childID)
+    this.pending.delete(childID)
+    for (const event of pending?.buffer ?? []) this.apply(child, event, out)
+  }
+
+  private settleTool(
+    s: SessionState,
+    tool: ToolState,
+    outcome:
+      | {
+          ok: true
+          content: readonly Tool_Content[]
+          metadata?: { readonly [key: string]: unknown }
+        }
+      | {
+          ok: false
+          error: Session_StructuredError
+          content?: readonly Tool_Content[]
+          metadata?: { readonly [key: string]: unknown }
+        },
+    out: Out
+  ): void {
+    if (tool.settled) return
+    tool.settled = true
+    // A messageless decline: the call dies `aborted` and the turn ends `shutdown`.
+    const declined = s.declined.get(tool.id)
+    if (declined && !outcome.ok && outcome.error.type === 'aborted') s.armedStop = declined
+    const result = outcome.ok
+      ? toolSuccessResult(tool.id, tool.name, outcome.content, outcome.metadata)
+      : toolFailureResult(tool.id, outcome.error, outcome.content, outcome.metadata)
+    out.push({ kind: 'tool-result', result, ...this.ownerOf(tool.message) })
+    // Rejected with no ask seen: a deny rule inside opencode. Not decidable from
+    // a re-read (the ask may have been in the gap, answered by the host).
+    const reason = outcome.ok ? undefined : reviewRationale(outcome.error.message)
+    if (!outcome.ok && outcome.error.type === 'permission.rejected' && !tool.asked && !this.reading)
+      out.push({
+        kind: 'permission-denial',
+        toolUseId: tool.id,
+        denial: {
+          type: 'permission_denial',
+          toolUseId: tool.id,
+          denialId: `opencode-rule:${tool.id}`,
+          source: 'rule',
+          ...(reason ? { reason } : {})
+        },
+        ...this.ownerOf(tool.message)
+      })
+    if (!SUBAGENT_TOOL_NAMES.has(tool.name)) return
+    const childID =
+      tool.childSession ??
+      subagentChildSession(
+        tool.name,
+        outcome.metadata,
+        outcome.ok ? result.result : outcome.error.message
+      )
+    if (!childID) return
+    if (tool.childSession !== childID) this.linkChild(tool, childID, out)
+    const child = this.children.get(childID)
+    if (outcome.ok && subagentBackgrounded(outcome.metadata)) {
+      // The child may already have ended (a near-instant run): its outcome is the notification.
+      if (child?.endedAs && !child.running) this.notifyTask(childID, tool.id, child.endedAs, out)
+      else if (child) child.background = true
+      return
+    }
+    this.notifyTask(
+      childID,
+      tool.id,
+      outcome.ok ? 'completed' : outcome.error.type === 'aborted' ? 'stopped' : 'failed',
+      out
+    )
+  }
+
+  private notifyTask(
+    childID: string,
+    toolUseId: string,
+    status: TaskNotification['status'],
+    out: Out
+  ): void {
+    const child = this.children.get(childID)
+    if (child) {
+      if (child.notified) return
+      child.notified = true
+      this.sealSession(child, out)
+    }
+    out.push({
+      kind: 'task-notification',
+      notification: { taskId: childID, toolUseId, status, outputFile: '', summary: '' }
+    })
+  }
+
+  // ── Turn ends ──────────────────────────────────────────────────────────────
+
+  private endExecution(
+    s: SessionState,
+    end:
+      | { outcome: 'succeeded' }
+      | { outcome: 'failed'; error: Session_StructuredError }
+      | { outcome: 'interrupted'; reason: 'user' | 'shutdown' | 'superseded' | 'inactivity' },
+    created: number,
+    eventID: string,
+    out: Out
+  ): void {
+    // A shutdown writes no idle row; every other end does, under this id. A
+    // re-read already reported this end — unless a later live start re-armed
+    // the turn (the read reflected a turn that started after the reconnect),
+    // when the consumer, having seen that start, needs the end again.
+    const idleId = messageIdFromEvent(eventID)
+    if (s.idleSeen.has(idleId) && !s.running) return
+    if (
+      end.outcome === 'interrupted' &&
+      end.reason === 'shutdown' &&
+      s.endedWithoutIdle &&
+      !s.running
+    ) {
+      s.endedWithoutIdle = false
+      return
+    }
+    s.idleSeen.add(idleId)
+    const durationMs = Math.max(0, created - (s.turnStartedAt ?? created))
+    const reason: OpencodeStopReason | undefined =
+      end.outcome !== 'interrupted'
+        ? undefined
+        : end.reason === 'shutdown' && s.armedStop
+          ? s.armedStop
+          : end.reason
+    this.finishTurn(
+      s,
+      end.outcome,
+      reason,
+      end.outcome === 'failed' ? end.error : undefined,
+      durationMs,
+      out
+    )
+  }
+
+  private finishTurn(
+    s: SessionState,
+    outcome: 'succeeded' | 'failed' | 'interrupted',
+    reason: OpencodeStopReason | undefined,
+    error: Session_StructuredError | undefined,
+    durationMs: number,
+    out: Out
+  ): void {
+    s.running = false
+    s.declined.clear()
+    s.armedStop = undefined
+    s.turnStartedAt = undefined
+    this.sealSession(s, out)
+    // Nothing answers a card once its execution is over: an interrupt drops
+    // pending permission asks with no `permission.replied` (core/src/permission.ts
+    // assert: only `pending.delete`). A foreground child is interrupted with its
+    // parent; a background one keeps running and keeps its cards.
+    this.resolveAll(s.id, out)
+    if (s === this.own)
+      for (const child of this.children.values())
+        if (!(child.background && child.running)) this.resolveAll(child.id, out)
+    // A child announced under this session but never linked to a call will not be.
+    for (const [childID, pending] of [...this.pending])
+      if (pending.parentID === s.id) this.pending.delete(childID)
+    if (s !== this.own) {
+      const status: TaskNotification['status'] =
+        outcome === 'succeeded' ? 'completed' : outcome === 'failed' ? 'failed' : 'stopped'
+      // A background child's end is its call's one terminal notification; if the
+      // call has not said it went to the background yet, the outcome waits for it.
+      if (s.background && s.owner) this.notifyTask(s.id, s.owner, status, out)
+      else s.endedAs = status
+      return
+    }
+    this.emitOverhead(out)
+    if (outcome === 'succeeded') out.push({ kind: 'result', sessionId: s.id, durationMs })
+    else if (outcome === 'interrupted')
+      out.push({ kind: 'stopped', sessionId: s.id, reason: reason ?? 'unknown', durationMs })
+    else if (error?.type === 'provider.auth' && s.model?.providerID)
+      out.push({
+        kind: 'auth-required',
+        sessionId: s.id,
+        vendorId: s.model.providerID,
+        message: error.message || 'Authentication required',
+        durationMs
+      })
+    else
+      out.push({
+        kind: 'error',
+        sessionId: s.id,
+        message: error?.message || 'The opencode turn failed',
+        errorType: error?.type ?? 'unknown',
+        durationMs
+      })
+  }
+
+  // ── Approvals ──────────────────────────────────────────────────────────────
+
+  private ask(s: SessionState, request: Permission_Request, out: Out): void {
+    if (this.approvals.has(request.id)) return
+    const callID = request.source?.id
+    this.approvals.set(request.id, { sessionID: s.id, ...(callID ? { callID } : {}) })
+    const tool = callID ? s.tools.get(callID) : undefined
+    if (tool) tool.asked = true
+    const metadata = request.metadata ?? {}
+    const input =
+      tool && Object.keys(tool.input).length > 0
+        ? { ...tool.input }
+        : Object.keys(metadata).length > 0
+          ? { ...metadata }
+          : {}
+    const suggestion =
+      s === this.own ? this.suggest?.(request.action, request.resources) : undefined
+    const approval: PendingApproval = {
+      requestId: request.id,
+      ...(callID ? { toolUseId: callID } : {}),
+      toolName: request.action,
+      input,
+      ...(request.resources.length > 0 ? { patterns: [...request.resources] } : {}),
+      ...(request.save && request.save.length > 0 ? { always: [...request.save] } : {}),
+      ...(s.owner ? { subagent: { sessionId: s.id, parentToolUseId: s.owner } } : {}),
+      ...(suggestion ? { suggestions: [suggestion] } : {})
+    }
+    out.push({ kind: 'approval', approval, route: { sessionID: s.id } })
+  }
+
+  private askForm(s: SessionState, form: Form_Info, out: Out): void {
+    if (this.approvals.has(form.id)) return
+    const callID = formToolCall(form)
+    this.approvals.set(form.id, { sessionID: s.id, ...(callID ? { callID } : {}) })
+    const { questions, fields } = formQuestions(form)
+    out.push({
+      kind: 'approval',
+      approval: {
+        requestId: form.id,
+        ...(callID ? { toolUseId: callID } : {}),
+        toolName: 'AskUserQuestion',
+        input: { questions }
+      },
+      route: { sessionID: s.id, form: { formID: form.id, fields } }
+    })
+  }
+
+  private resolve(requestId: string, out: Out): void {
+    if (!this.approvals.delete(requestId)) return
+    out.push({ kind: 'approval-resolved', requestId })
+  }
+
+  /**
+   * A compaction ended or failed. The own session gets its separator row (a
+   * completed one) and the phase; any session's compaction request is billed
+   * once (`usage`, keyed by the compaction's id).
+   */
+  private endCompaction(
+    s: SessionState,
+    end: {
+      phase: 'ended' | 'failed'
+      reason: 'auto' | 'manual'
+      summary?: string
+      error?: Session_StructuredError
+      usage?: { cost: number; tokens: TokenUsage_Info; model?: Model_Ref }
+    },
+    eventID: string | null,
+    created: number,
+    out: Out,
+    rowId?: string
+  ): void {
+    const id =
+      rowId ??
+      s.compactionId ??
+      s.compactionFromRead ??
+      (eventID ? messageIdFromEvent(eventID) : `compaction-${created}`)
+    const at = rowId ? created : (s.compactionStartedAt ?? created)
+    if (!rowId) {
+      s.compactionId = undefined
+      s.compactionStartedAt = undefined
+      s.compactionFromRead = undefined
+    }
+    const own = s === this.own
+    if (own && end.phase === 'ended' && end.summary !== undefined && !s.compactionsSeen.has(id)) {
+      s.compactionsSeen.add(id)
+      out.push({ kind: 'message', message: compactionChatMessage(id, end.summary, at) })
+    }
+    const usage = end.usage && !s.compactionsMetered.has(id) ? end.usage : undefined
+    if (usage) {
+      s.compactionsMetered.add(id)
+      if (own) this.account(usage)
+    }
+    if (!own && !usage) return
+    out.push({
+      kind: 'compaction',
+      phase: end.phase,
+      reason: end.reason,
+      ...(end.error ? { error: end.error } : {}),
+      ...(usage ? { usage } : {}),
+      ...this.ownerField(s)
+    })
+  }
+
+  /** Own-session usage reported so far (steps, compactions, overhead): the base of the next overhead. */
+  private account(usage: { cost: number; tokens: TokenUsage_Info }): void {
+    this.accounted = addUsage(this.accounted, usage)
+  }
+
+  /**
+   * Usage opencode billed to the own session that no step or compaction
+   * carries — its title generation (`session.usage.recorded {source:'title'}`
+   * is folded into the session's cumulative, `session.usage.updated`, and
+   * nowhere else). Emitted at quiet points (turn end, an update while idle)
+   * as the positive part of cumulative − accounted.
+   */
+  private emitOverhead(out: Out): void {
+    if (!this.cumulative) return
+    const extra = positivePart(subtractUsage(this.cumulative, this.accounted))
+    if (!extra) return
+    this.account(extra)
+    out.push({ kind: 'overhead-usage', cost: extra.cost, tokens: extra.tokens })
+  }
+
+  /** Retract every card a session still shows (its execution ended: nothing will answer them). */
+  private resolveAll(sessionID: string, out: Out): void {
+    for (const [id, entry] of [...this.approvals])
+      if (entry.sessionID === sessionID) this.resolve(id, out)
+  }
+
+  /** A reject / cancel of a request: remember its call until the call settles. */
+  private declineCall(s: SessionState, requestId: string, as: 'denied' | 'form-cancelled'): void {
+    const callID = this.approvals.get(requestId)?.callID
+    if (callID) s.declined.set(callID, as)
+  }
+
+  /** A step's usage, once per step. */
+  private meter(
+    s: SessionState,
+    message: MessageState,
+    usage: Usage,
+    finish: string | undefined,
+    out: Out
+  ): void {
+    if (message.metered) return
+    message.metered = true
+    if (s === this.own) this.account(usage)
+    out.push({
+      kind: 'step-usage',
+      usage: this.stepUsage(s, message, usage.cost, usage.tokens, finish)
+    })
+  }
+
+  private stepUsage(
+    s: SessionState,
+    message: MessageState,
+    cost: number,
+    tokens: TokenUsage_Info,
+    finish: string | undefined
+  ): OpencodeStepUsage {
+    return {
+      messageId: message.id,
+      sessionId: s.id,
+      ...this.ownerOf(message),
+      ...((message.model ?? s.model) ? { model: message.model ?? s.model } : {}),
+      cost,
+      tokens,
+      ...(finish ? { finish } : {})
+    }
+  }
+
+  // ── Seeding and reconnect ──────────────────────────────────────────────────
+
+  /**
+   * Mark a session's stored history as already shown (a resumed chat replays
+   * it from the cold converter), so nothing in it is emitted again when a
+   * reconnect re-reads the same rows. No outputs.
+   */
+  seed(
+    messages: readonly Session_Message_Info[],
+    options: { sessionTotals?: { cost: number; tokens: TokenUsage_Info } } = {}
+  ): void {
+    this.seeding = true
+    try {
+      this.ingestRows(this.own, messages, [])
+    } finally {
+      this.seeding = false
+    }
+    // The cold status line counted the session's whole cumulative (title
+    // generation included, `opencodeHistorySeed`): that is all accounted for.
+    if (options.sessionTotals) this.accounted = options.sessionTotals
+    for (const row of messages) if (row.type === 'idle') this.own.idleSeen.add(row.id)
+  }
+
+  /**
+   * Emit what a feed gap hid, from a fresh read of state, and mark it
+   * handled. Call on `connected {reconnected:true}`, before applying any
+   * further event.
+   */
+  reconcile(snapshot: OpencodeReconnectSnapshot): OpencodeMapperOutput[] {
+    const out: Out = []
+    for (const s of [this.own, ...this.children.values()]) {
+      const read = snapshot.sessions[s.id]
+      if (!read) continue
+      // Deltas from the gap are gone: an open stream shows nothing more until its end.
+      for (const message of s.messages.values())
+        for (const item of message.items) if (item.open) item.gapped = true
+      const before = new Set(s.idleSeen)
+      this.ingestRows(s, read.messages, out)
+      this.reconcileRequests(s, read.permissions, read.forms, out)
+      if (s === this.own) this.reconcileInbox(s, read.inbox ?? [], read.messages, out)
+      this.reconcileRunning(s, read.messages, before, snapshot.active[s.id] !== undefined, out)
+    }
+    return out
+  }
+
+  private ingestRows(s: SessionState, rows: readonly Session_Message_Info[], out: Out): void {
+    this.reading = true
+    try {
+      this.ingestRowsInner(s, rows, out)
+    } finally {
+      this.reading = false
+    }
+  }
+
+  private ingestRowsInner(s: SessionState, rows: readonly Session_Message_Info[], out: Out): void {
+    for (const row of rows) {
+      switch (row.type) {
+        case 'user':
+          if (s !== this.own || s.usersSeen.has(row.id)) break
+          s.usersSeen.add(row.id)
+          {
+            const message = userChatMessage(row.id, row, row.time.created)
+            if (message) out.push({ kind: 'user-message', inboxID: row.id, message })
+          }
+          break
+        case 'assistant':
+          this.ingestAssistant(s, row, out)
+          break
+        case 'compaction':
+          if (row.status === 'running') {
+            // Its live end will need this id.
+            s.compactionId = row.id
+            s.compactionStartedAt = row.time.created
+            break
+          }
+          if (s.compactionId === row.id) {
+            s.compactionId = undefined
+            s.compactionStartedAt = undefined
+          }
+          // Its live end (no id on the event) may still come: it is this one.
+          s.compactionFromRead = row.id
+          this.endCompaction(
+            s,
+            row.status === 'completed'
+              ? {
+                  phase: 'ended',
+                  reason: row.reason,
+                  summary: row.summary,
+                  usage: compactionUsage(row.cost, row.tokens, row.model).usage
+                }
+              : {
+                  phase: 'failed',
+                  reason: row.reason,
+                  error: row.error,
+                  usage: compactionUsage(row.cost, row.tokens).usage
+                },
+            null,
+            row.time.created,
+            out,
+            row.id
+          )
+          break
+        default:
+          break
+      }
+    }
+  }
+
+  private ingestAssistant(s: SessionState, row: Session_Message_Assistant, out: Out): void {
+    const message = this.messageOf(
+      s,
+      row.id,
+      row.time.created,
+      s === this.own ? undefined : this.ownerAt(s, row.time.created)
+    )
+    message.timestamp = row.time.created
+    message.model = row.model
+    let changed = false
+    const seen = { text: 0, reasoning: 0 }
+    for (const part of row.content) {
+      if (part.type === 'tool') {
+        if (!s.tools.has(part.id)) changed = true
+        // Its message goes out below, once (not one per new tool).
+        const tool = this.toolOf(s, message, part.id, part.name, [])
+        tool.startedAt ??= part.time?.ran ?? part.time?.created
+        const input = toolInputRecord(part.state.input)
+        if (Object.keys(input).length > 0 && JSON.stringify(input) !== JSON.stringify(tool.input)) {
+          tool.input = input
+          this.setToolBlock(message, tool)
+          changed = true
+        }
+        if (part.state.status === 'streaming') continue
+        // The tool_use must be on the wire before anything keyed to it.
+        if (changed) {
+          out.push(this.messageOutput(message))
+          changed = false
+        }
+        if (part.state.status === 'running')
+          // What progress said while we were away (the shell id, the child link).
+          this.toolProgress(tool, part.state.metadata, out)
+        else
+          this.settleTool(
+            s,
+            tool,
+            part.state.status === 'completed'
+              ? { ok: true, content: part.state.content, metadata: part.state.metadata }
+              : {
+                  ok: false,
+                  error: part.state.error,
+                  content: part.state.content,
+                  metadata: part.state.metadata
+                },
+            out
+          )
+        continue
+      }
+      const ordinal = seen[part.type]++
+      let item = this.itemByOrdinal(message, part.type, ordinal)
+      if (!item) {
+        item = {
+          kind: part.type,
+          ordinal,
+          text: '',
+          ended: false,
+          index: null,
+          open: false,
+          gapped: false,
+          ...(part.type === 'reasoning' && part.time ? { startedAt: part.time.created } : {})
+        }
+        message.items.push(item)
+      }
+      // A stored text/reasoning is final once it has text (opencode stores the
+      // `*.ended` text; an unfinished one is still ""), or a reasoning has its end time.
+      const final =
+        part.text !== '' || (part.type === 'reasoning' && part.time?.completed !== undefined)
+      if (!final || item.ended) continue
+      if (part.type === 'reasoning' && part.time?.completed !== undefined)
+        item.durationMs = Math.max(0, part.time.completed - part.time.created)
+      if (item.open) {
+        this.endItem(message, item, part.text, out)
+        continue
+      }
+      item.text = part.text
+      item.ended = true
+      item.gapped = false
+      if (!part.text) continue
+      if (item.index === null) this.place(message, item)
+      else message.blocks[item.index] = this.textBlock(item)
+      changed = true
+    }
+    if (changed) out.push(this.messageOutput(message))
+    if (
+      !message.metered &&
+      row.time.completed !== undefined &&
+      row.cost !== undefined &&
+      row.tokens
+    ) {
+      this.meter(s, message, { cost: row.cost, tokens: row.tokens }, row.finish, out)
+    }
+  }
+
+  private reconcileRequests(
+    s: SessionState,
+    permissions: readonly Permission_Request[],
+    forms: readonly Form_Info[],
+    out: Out
+  ): void {
+    const pending = new Set([...permissions.map((p) => p.id), ...forms.map((f) => f.id)])
+    for (const [id, entry] of [...this.approvals])
+      if (entry.sessionID === s.id && !pending.has(id)) this.resolve(id, out)
+    for (const request of permissions) this.ask(s, request, out)
+    for (const form of forms) this.askForm(s, form, out)
+  }
+
+  private reconcileInbox(
+    s: SessionState,
+    inbox: readonly Session_Inbox_Info[],
+    rows: readonly Session_Message_Info[],
+    out: Out
+  ): void {
+    const listed = new Map(inbox.map((item) => [item.id, item]))
+    const delivered = new Set(rows.map((row) => row.id))
+    for (const [inboxID] of [...s.inbox]) {
+      if (listed.has(inboxID)) continue
+      s.inbox.delete(inboxID)
+      s.inboxItems.delete(inboxID)
+      out.push({
+        kind: 'inbox',
+        change: delivered.has(inboxID) ? 'delivered' : 'cancelled',
+        inboxID
+      })
+    }
+    for (const item of inbox) {
+      const known = s.inbox.get(item.id)
+      if (known === undefined) {
+        const entry = {
+          type: item.type,
+          payload: item.payload,
+          delivery: item.delivery
+        } as SessionInboxItem
+        s.inbox.set(item.id, item.delivery)
+        s.inboxItems.set(item.id, entry)
+        out.push({
+          kind: 'inbox',
+          change: 'enqueued',
+          inboxID: item.id,
+          delivery: item.delivery,
+          item: entry
+        })
+      } else if (known !== item.delivery) {
+        s.inbox.set(item.id, item.delivery)
+        out.push({
+          kind: 'inbox',
+          change: 'delivery-changed',
+          inboxID: item.id,
+          delivery: item.delivery
         })
       }
     }
-    // step-start, step-finish, agent, subtask → skip. `compaction` is not
-    // dropped: it is lifted into its own system row by
-    // {@link storedCompactionMessages}, which the replay callers push alongside.
   }
 
-  if (attachments.length > 0) content.unshift(...attachments)
-
-  // If there's no renderable content, skip this message entirely.
-  if (content.length === 0) return null
-
-  const timestamp = (info.time as { created?: number } | undefined)?.created ?? Date.now()
-  return {
-    id: info.id,
-    role: role as 'user' | 'assistant',
-    content,
-    timestamp
-  }
-}
-
-/**
- * Reconstruct accumulated ACTIVE (turn-processing) duration from opencode's
- * stored-message history (GET /session/{id}/message), for durability across
- * reloads. Mirrors Claude's transcript turn-span reconstruction (see
- * session-history.ts `computeTurnSpanDurationMs`) with the same semantic:
- * accumulated wall-clock time actively processing turns — idle time (waiting
- * on the user) is excluded, and both engines share this definition.
- *
- * A turn starts at a `role: 'user'` stored message (`info.time.created`) and
- * ends at the latest `time.completed` (fallback: `time.created`) among the
- * assistant messages that follow it, up to the next user message. Messages
- * are assumed to arrive in chronological order, as `listMessages` returns
- * them. Missing/non-finite timestamps are skipped for span math (a user
- * message with no parseable `created` drops that whole turn rather than
- * guessing a start); negative/NaN spans are clamped to 0.
- */
-export function computeStoredDurationMs(storedMessages: StoredMessage[]): number {
-  let totalMs = 0
-  let turnStartMs: number | null = null
-  let turnEndMs: number | null = null
-
-  const finalizeTurn = (): void => {
-    if (turnStartMs !== null && turnEndMs !== null) {
-      const span = turnEndMs - turnStartMs
-      if (Number.isFinite(span) && span > 0) totalMs += span
+  /**
+   * Turn state after a gap. `active` is read FIRST (`reconnect.ts`):
+   * opencode writes the idle row inside the terminal publish, before the
+   * execution leaves the active set, so "not active" means its idle row (if
+   * the end writes one) is already in `rows`.
+   */
+  private reconcileRunning(
+    s: SessionState,
+    rows: readonly Session_Message_Info[],
+    idleBefore: ReadonlySet<string>,
+    active: boolean,
+    out: Out
+  ): void {
+    const unseen = rows.filter(
+      (row): row is Extract<Session_Message_Info, { type: 'idle' }> =>
+        row.type === 'idle' && !idleBefore.has(row.id)
+    )
+    for (const row of unseen) s.idleSeen.add(row.id)
+    const last = unseen.at(-1)
+    if (last) {
+      if (!s.running) {
+        // A whole turn ran inside the gap.
+        s.running = true
+        s.turnStartedAt = turnStart(rows, last)
+        if (s === this.own) out.push({ kind: 'turn-start' })
+      }
+      // The stored row keeps the outcome, not the error: take the step's, if one failed.
+      const failedStep = rows
+        .slice(0, rows.indexOf(last))
+        .findLast(
+          (row): row is Session_Message_Assistant =>
+            row.type === 'assistant' && row.error !== undefined
+        )
+      this.finishTurn(
+        s,
+        last.outcome,
+        last.outcome === 'interrupted' ? 'unknown' : undefined,
+        last.outcome === 'failed' ? failedStep?.error : undefined,
+        Math.max(0, last.time.created - (s.turnStartedAt ?? last.time.created)),
+        out
+      )
     }
-    turnStartMs = null
-    turnEndMs = null
-  }
-
-  for (const stored of storedMessages) {
-    const info = stored.info
-    if (!info) continue
-    const time = info.time as { created?: number; completed?: number } | undefined
-
-    if (info.role === 'user') {
-      finalizeTurn()
-      const created = time?.created
-      turnStartMs = typeof created === 'number' && Number.isFinite(created) ? created : null
-      continue
+    // Active, but the read ends on the idle just handled: the turn ended between the reads.
+    const endedSinceActiveRead = last !== undefined && rows.at(-1) === last
+    if (active && !endedSinceActiveRead) {
+      if (!s.running) {
+        s.running = true
+        s.declined.clear()
+        s.armedStop = undefined
+        s.turnStartedAt = Date.now()
+        if (s === this.own) out.push({ kind: 'turn-start' })
+      }
+      return
     }
-
-    if (info.role !== 'assistant' || turnStartMs === null) continue
-    const end = time?.completed ?? time?.created
-    if (typeof end !== 'number' || !Number.isFinite(end)) continue
-    if (turnEndMs === null || end > turnEndMs) turnEndMs = end
+    if (active || !s.running) return
+    // Not running, and no idle row: an engine shutdown, or a messageless reject.
+    s.endedWithoutIdle = true
+    this.finishTurn(
+      s,
+      'interrupted',
+      s.armedStop ?? 'shutdown',
+      undefined,
+      Math.max(0, Date.now() - (s.turnStartedAt ?? Date.now())),
+      out
+    )
   }
-  finalizeTurn()
-
-  return totalMs
 }

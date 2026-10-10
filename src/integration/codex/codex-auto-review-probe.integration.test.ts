@@ -10,12 +10,19 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { afterEach, expect, it, vi } from 'vitest'
 import { CodexAppServerClient } from '../../core/codex/CodexAppServerClient'
 import { setHostPaths } from '../../core/host'
+import {
+  FIXTURE_CODEX_DIR,
+  codexInstalled,
+  releaseFixtureCodex,
+  storeCodexPath,
+  useFixtureCodex
+} from './integration-host'
 import provenance from '../../core/codex/protocol/provenance.json'
 import type { AskForApproval } from '../../core/codex/protocol/v2/AskForApproval'
 import type { ApprovalsReviewer } from '../../core/codex/protocol/v2/ApprovalsReviewer'
@@ -35,8 +42,17 @@ import type { SandboxPolicy } from '../../core/codex/protocol/v2/SandboxPolicy'
  *  1. THE CONTAINMENT SANDBOX HIDES CODEX'S OWN SANDBOX. macOS refuses to nest a
  *     DIFFERENT seatbelt profile (`sandbox_apply: Operation not permitted`, exit
  *     71 — pinned by the last test of the policy probe). Every spawn here is
- *     wrapped in `sandbox-exec`, so whatever Codex runs SANDBOXED dies at exit 71
- *     and only what it runs UNSANDBOXED executes for real.
+ *     wrapped in `sandbox-exec` (kept: it confines a real agent binary to the
+ *     fixture), so whatever Codex runs SANDBOXED dies at exit 71 and only what
+ *     it runs UNSANDBOXED executes for real. An approval does NOT make the
+ *     first attempt unsandboxed; an approved plain command reaches the
+ *     unsandboxed retry only through a 20 ms output-classification window that
+ *     parallel load can miss (the policy probe's observation 2, with source
+ *     lines). So no assertion here depends on a plain approved command's exit
+ *     code: a step that must RUN is either escalated by the model
+ *     (`require_escalated` — unsandboxed first attempt), allowed by an
+ *     execpolicy rule (bypasses the sandbox too), or an `apply_patch` (whose
+ *     runtime classifies from complete output).
  *  2. AUTO-REVIEW ONLY ROUTES UNDER `on-request` AND `granular`
  *     (`core/src/guardian/review.rs` `routes_approval_policy_to_guardian`), so
  *     `untrusted` bypasses it entirely. The auto-review probes use the catalog
@@ -79,7 +95,10 @@ vi.mock('node:child_process', async (importOriginal) => {
 })
 
 const enabled =
-  process.env.CODEX_INTEGRATION === '1' && process.platform === 'darwin' && process.arch === 'arm64'
+  process.env.CODEX_INTEGRATION === '1' &&
+  process.platform === 'darwin' &&
+  process.arch === 'arm64' &&
+  codexInstalled
 
 /** `sandbox-exec` refusing to nest inside the containment profile. */
 const EXIT_NESTED_SANDBOX = 71
@@ -117,6 +136,7 @@ afterEach(async () => {
     }
   } finally {
     setHostPaths(null)
+    releaseFixtureCodex()
     for (const teardown of teardowns.splice(0)) await teardown()
   }
   expect(survivors, 'app-server groups survived bounded disposal').toEqual([])
@@ -172,10 +192,7 @@ async function setupFixture(
     model?: string
   } = {}
 ): Promise<Fixture> {
-  const installed = resolve(
-    'vendor/codex-cli',
-    process.platform === 'win32' ? 'codex.exe' : 'codex'
-  )
+  const installed = storeCodexPath(process.platform === 'win32' ? 'codex.exe' : 'codex')
   expect(createHash('sha256').update(readFileSync(installed)).digest('hex')).toBe(
     provenance.codexBinaries[
       `${process.platform}-${process.arch}` as keyof typeof provenance.codexBinaries
@@ -191,11 +208,12 @@ async function setupFixture(
     cwd,
     outside,
     join(directory, 'tmp'),
-    join(directory, 'vendor/codex-cli')
+    join(directory, FIXTURE_CODEX_DIR)
   ])
     mkdirSync(name, { recursive: true })
-  copyFileSync(installed, join(directory, 'vendor/codex-cli/codex'))
+  copyFileSync(installed, join(directory, `${FIXTURE_CODEX_DIR}/codex`))
   setHostPaths({ getAppPath: () => directory })
+  useFixtureCodex(directory)
   const requests: ProviderRequest[] = []
   const errors: string[] = []
   const script = { current: done as Script }
@@ -510,9 +528,10 @@ function messages(request: ProviderRequest): Array<{ role: unknown; text: string
  * `apply_patch` heredocs.
  *
  * A plain (non-escalated) command is deliberately absent. `granular` only
- * reviews a command AFTER a sandboxed attempt fails, and the containment
- * profile's exit-71 failure is not always classified as a sandbox denial, so
- * WHICH plain commands get reviewed varies run to run. See the `granular` probe.
+ * reviews a command AFTER a sandboxed attempt fails AND that failure is
+ * classified as a sandbox denial within a 20 ms window (observation 1), so
+ * WHICH plain commands get reviewed varies with load. See the `granular` probe
+ * in the policy probe, which asserts both branches.
  */
 const MATRIX = (cwd: string, outside: string): Step[] => [
   { id: 'esc', cmd: `echo x > ${outside}/escalated.txt`, escalate: true },
@@ -909,10 +928,10 @@ it.skipIf(!enabled)(
     // changes WHO decides.
     //
     // The extra commands `granular` would also review are NOT probed, because
-    // it reviews a plain command only after a sandboxed attempt fails, and the
-    // containment profile's exit-71 failure is not reliably classified as a
-    // sandbox denial — a repeat run reviews a different subset. That is a
-    // fixture limit, not a Codex behaviour.
+    // it reviews a plain command only after a sandboxed attempt fails and is
+    // classified as a denial inside a 20 ms window (observation 1) — a run
+    // under load reviews a different subset. The nested failure is a fixture
+    // limit; the timing window is Codex's.
     expect(record.clientCalls).toEqual([])
     expect(completedReviews(record).map((review) => review.targetItemId)).toEqual([
       'esc',
@@ -1060,8 +1079,21 @@ trust_level = "trusted"
       // pattern of `["echo"]` then matches nothing — the policy probe pins that
       // an amendment for a redirection is `["/bin/zsh", "-lc", …]`. `ls` is the
       // unruled control in the same turn.
+      //
+      // Under `untrusted` + the `user` reviewer the echo is ESCALATED. Whether a
+      // rule fires is decided before anything runs and does not depend on
+      // `sandbox_permissions` (`exec_policy.rs` evaluates the parsed argv; only
+      // the UNMATCHED fallback reads it), but what an approved, unescalated
+      // command does afterwards is the policy probe's classification race
+      // (its observation 2): exit 0 or 71 depending on load. Escalated, an
+      // approved echo runs unsandboxed on the first attempt, so "the rule had
+      // no effect: it was asked about and ran" is pinned as exit 0. The
+      // `on-request` / `granular` variants keep it plain on purpose: there an
+      // escalation is itself a gate, and would route `echo` to the reviewer or
+      // the client for a reason other than the rule.
+      const escalateEcho = variant.approvalPolicy === 'untrusted'
       scriptSteps(fixture, [
-        { id: 'rule-echo', cmd: 'echo hi' },
+        { id: 'rule-echo', cmd: 'echo hi', escalate: escalateEcho },
         { id: 'rule-ls', cmd: 'ls' }
       ])
       await runTurn(active, started.thread.id, {
@@ -1092,10 +1124,10 @@ trust_level = "trusted"
       expect(hit, label).toBeDefined()
       return hit!
     }
-    // Whether an APPROVED command then runs sandboxed is racy in this fixture —
-    // the policy probe's `untrusted` test flakes on exactly that exit code at
-    // HEAD — so these assertions read "was the command blocked BY THE RULE",
-    // never its exit code.
+    // The plain `on-request` / `granular` variants read "was the command
+    // blocked BY THE RULE", never an exit code: their echo, when it runs at
+    // all, runs sandboxed and dies at the containment's nesting code. The
+    // escalated `untrusted` variants do pin exit 0.
     const ruleBlocked = (label: string): boolean =>
       /rejected: policy forbids|AskForApproval::Granular\.rules is false/.test(
         String(at(label).echoOutput)
@@ -1211,7 +1243,10 @@ prefix_rules = [{ decision = "forbidden", pattern = [{ token = "echo" }], justif
       modelProvider: 'fixture',
       historyMode: 'paginated'
     })
-    scriptSteps(fixture, [{ id: 'toml-echo', cmd: 'echo hi' }])
+    // Escalated so that "asked about and runs" is pinned as exit 0 rather than
+    // left to the denial-classification race (policy probe, observation 2). A
+    // rule — had one loaded — would fire on the argv regardless.
+    scriptSteps(fixture, [{ id: 'toml-echo', cmd: 'echo hi', escalate: true }])
     await runTurn(active, started.thread.id, {
       approvalPolicy: 'untrusted',
       sandboxPolicy: WORKSPACE_WRITE(fixture.cwd)
@@ -1263,7 +1298,7 @@ it.skipIf(!enabled)(
     const fixture = await setupFixture()
     const starlark = join(fixture.directory, 'fixture.rules')
     writeFileSync(starlark, FORBID_ECHO)
-    const binary = join(fixture.directory, 'vendor/codex-cli/codex')
+    const binary = join(fixture.directory, `${FIXTURE_CODEX_DIR}/codex`)
     const run = (...argv: string[]): { status: number | null; stdout: string } => {
       const result = spawnSync(binary, ['execpolicy', 'check', '--rules', starlark, ...argv], {
         encoding: 'utf8',

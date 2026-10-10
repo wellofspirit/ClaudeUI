@@ -36,9 +36,12 @@ vi.mock('@renderer/App', () => ({ default: () => <div data-testid="FakeApp">app<
 // when the environment tore down: every test green, and vitest failing the run
 // on an EnvironmentTeardownError. Nothing here is about the audit; stub it.
 vi.mock('@renderer/utils/projection-audit', () => ({ startProjectionAudit: () => {} }))
+// The entry block also lazy-imports the history loader (real renderer graph); stub it
+// so it can't still be resolving when the environment tears down.
+vi.mock('@renderer/lib/session-history-load', () => ({ finishHydrate: () => {} }))
 vi.mock('@renderer/stores/replica', () => ({
   startReplica: () => {},
-  hydrateReplica: () => {},
+  hydrateReplica: () => ({ reloadActive: null, fillResumed: [] }),
   // The render-loss detector starts beside the replica on this path and observes
   // it through the post-apply seam, so the mock has to offer one.
   onReplicaApplied: () => () => {},

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useSessionStore } from '../stores/session-store'
+import { useEscapeLayer } from '../components/shared/use-escape-layer'
 
 export type ContextMenuPosition = { x: number; y: number }
 
@@ -42,6 +43,11 @@ export function useContextMenu(): {
     setAnchor(null)
     setResolved(null)
   }, [])
+
+  // Escape closes the menu and stops there — through the app's one Escape stack,
+  // registered only while the menu is open, so the key never also reaches the
+  // chat's interrupt or a dialog behind the menu.
+  useEscapeLayer(close, true, anchor !== null)
 
   // Outside-click dismissal
   useEffect(() => {

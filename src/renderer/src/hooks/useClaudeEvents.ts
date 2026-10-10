@@ -30,12 +30,11 @@
 import { useEffect } from 'react'
 import { onSyncEvent, markSyncReady } from '../../../core/shared/sync/client-registry'
 import { useSessionStore } from '../stores/session-store'
-import {
-  onReplicaApplied,
-  seedColdSession,
-  seedWatchedSession,
-  getReplicaState
-} from '../stores/replica'
+import { onReplicaApplied, seedWatchedSession, getReplicaState } from '../stores/replica'
+import { loadResumedTranscript } from '../lib/session-history-load'
+import { showVoiceNotice } from '../lib/voice/voice-notice'
+import { voiceController } from '../lib/voice/voice-controller'
+import { hasAutoContinuingTask } from '../lib/task-types'
 import type { SessionStatus, TaskNotification, SlashCommandInfo } from '../../../shared/types'
 
 /** Send a system notification if the session is not currently focused */
@@ -68,41 +67,6 @@ export function deriveWorktreeName(wtPath: string, wtBranch: string): string {
 }
 
 /**
- * Task types whose completion makes cli.js AUTO-CONTINUE the conversation.
- *
- * Upstream's own interactive busy predicate counts exactly these four and
- * deliberately excludes the rest: `local_bash` is a dev-server-shaped background
- * shell (an idle session with one running is the user's turn), and the monitor
- * types (`monitor_mcp` / `monitor_ws`) stay armed across many normal turns, so
- * counting either would silence every legitimate turn-end for the session's life.
- */
-const AUTO_CONTINUING_TASK_TYPES = new Set([
-  'local_agent',
-  'remote_agent',
-  'in_process_teammate',
-  'local_workflow'
-])
-
-/**
- * Is delegated work still running, so this `result` is NOT the user's turn?
- *
- * cli.js emits a normal `result` when the main agent ends its turn even while a
- * background subagent runs on; when that task finishes it auto-continues with a
- * fresh `system/init` + turn of its own. Firing "Ready for input" at the first
- * `result` tells the user they are up while the session visibly keeps working.
- *
- * `activeTasks` (reducer, `session:task-started` in / `session:task-notification`
- * out) is exact at result-time in both orderings: a mid-turn completion is folded
- * into the current turn, so its notification always precedes that turn's single
- * `result`. No pending-injection tracking is needed.
- */
-export function hasAutoContinuingTask(
-  activeTasks: Record<string, { taskId: string; taskType: string }>
-): boolean {
-  return Object.values(activeTasks).some((t) => AUTO_CONTINUING_TASK_TYPES.has(t.taskType))
-}
-
-/**
  * Was this session already resident when its `session:created` arrived?
  *
  * Captured by a PRE-fold listener, because after the fold the answer is always
@@ -110,8 +74,13 @@ export function hasAutoContinuingTask(
  * whether this client is the ORIGINATOR (which already registered the session
  * locally, with its engine/model pick) or a follower learning about someone
  * else's session for the first time.
+ *
+ * `evicted` rides along because a resident entry is not always one WITH a
+ * transcript: a snapshot that did not carry it (ADR-087 §2) leaves an empty,
+ * evicted entry, and this client then needs the resumed session's history
+ * exactly as a follower that had never seen the session does.
  */
-const wasResidentAtCreate = new Map<string, boolean>()
+const wasResidentAtCreate = new Map<string, { evicted: boolean }>()
 
 // ---------------------------------------------------------------------------
 // The watched-session refetch (phase 5 S4)
@@ -252,10 +221,8 @@ export function useClaudeEvents(): void {
       // Pre-fold capture (see wasResidentAtCreate)
       // -------------------------------------------------------------------
       onSyncEvent('session:created', (routingId) => {
-        wasResidentAtCreate.set(
-          routingId,
-          useSessionStore.getState().sessions[routingId] !== undefined
-        )
+        const resident = useSessionStore.getState().sessions[routingId]
+        if (resident) wasResidentAtCreate.set(routingId, { evicted: resident.evicted })
       }),
 
       // -------------------------------------------------------------------
@@ -305,6 +272,18 @@ export function useClaudeEvents(): void {
       // `false`: re-read what the host already holds, never provoke a fetch.
       onSyncEvent('usage:chatgpt-limits-changed', () => {
         void useSessionStore.getState().loadChatgptLimits(false)
+      }),
+      // A bare nudge: an engine's catalog filled after main had answered us a
+      // degraded empty one (pi's probe failing at boot). The composer re-fetches
+      // THAT engine's slice only (no other engine is re-probed) and the Settings
+      // panes re-read off the shared nonce; main's cache is warm by now, so the
+      // re-read answers at once and cannot provoke another nudge. The provider
+      // registry counts pi's models from that warm catalog only, so it is
+      // re-read too (as `harnessStore.followRunChanges` does).
+      onSyncEvent('engine:models-changed', ({ engineId }) => {
+        const store = useSessionStore.getState()
+        store.reloadEngineModels(engineId)
+        void store.refreshProviderAuth().catch(() => undefined)
       }),
       // Auth source from session init ('none' = logged out) — drives the banner
       // Also updates the vendorAuth probe so AuthBanner reads from the probe.
@@ -374,8 +353,17 @@ export function useClaudeEvents(): void {
             /* Same posture as above — a failed read keeps the last good answer. */
           })
       }),
-      onSyncEvent('voice:error', (routingId, error) => {
-        useSessionStore.getState().addError(routingId, error)
+      // Every voice message — failure or outcome — is the mic's notice pill, never
+      // the session's error stack. Main sends the tone; absent (an older
+      // emitter) is `warn`.
+      //
+      // The desktop's `voice:error` is REPLICATED, so every client watching the
+      // session hears it. Only the client whose microphone it was shows it — on
+      // anyone else's mic it would read as a fault in THEIR microphone — so a
+      // message for a session this client did not just capture for is dropped.
+      onSyncEvent('voice:error', (routingId, error, tone) => {
+        if (!voiceController().ownsRecentCapture(routingId)) return
+        showVoiceNotice(routingId, error, tone === 'info' ? 'info' : 'warn')
       }),
 
       // -------------------------------------------------------------------
@@ -495,48 +483,33 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
     case 'session:created': {
       const data = args[1] as
         { cwd?: string; resumeSessionId?: string; resumeSessionAt?: string } | undefined
-      const wasResident = wasResidentAtCreate.get(routingId) === true
+      const resident = wasResidentAtCreate.get(routingId)
       wasResidentAtCreate.delete(routingId)
       // The reducer has already bootstrapped the entry (cwd, sdkActive, seeded);
       // `isHistorical` is view state, so it is cleared here.
       store.markSessionLive(routingId)
-      if (wasResident) return
-      // Another client created this session. Register it locally — recents +
-      // engine map — and either follow it or flag it in the sidebar.
-      const follow = store.settings.remoteFollowActions
-      store.registerRemoteSession(routingId, follow)
-      if (!follow) store.setNeedsAttention(routingId, true)
+      if (resident && !resident.evicted) return
+      // An evicted resident entry is already registered (recents, engine map) and
+      // must not re-announce itself; it only lacks the transcript.
+      if (!resident) {
+        // Another client created this session. Register it locally — recents +
+        // engine map — and either follow it or flag it in the sidebar.
+        const follow = store.settings.remoteFollowActions
+        store.registerRemoteSession(routingId, follow)
+        if (!follow) store.setNeedsAttention(routingId, true)
+      }
       if (!data?.resumeSessionId) return
       // A resumed session's transcript lives on disk. The HOST seeds its own
       // canonical copy (create-session.ts), but that seed is not an event, so
-      // this replica has to read the same source for itself; `seedColdSession`
-      // is idempotent and refuses to clobber live content.
-      const resumeSessionId = data.resumeSessionId
-      const projectKey = store.directories.find((g) =>
-        g.sessions.some((s) => s.sessionId === resumeSessionId)
-      )?.projectKey
-      if (!projectKey) return
-      // The FORK anchor rides the birth event (F3) and is passed straight
-      // through: without it this client painted the parent's post-anchor turns
-      // above an engine that was resumed from the truncated prefix — a
-      // conversation whose visible tail the model has never seen. Absent (the
-      // non-fork case, and an older host) loads the whole transcript, exactly as
-      // before. Canonical's own seed passes the same value to the same loader.
-      void window.api
-        .loadSessionHistory(resumeSessionId, projectKey, data.resumeSessionAt)
-        .then(({ messages, taskNotifications, customTitle, statusLine, warnings }) => {
-          const s = useSessionStore.getState()
-          if (!s.sessions[routingId]) return
-          seedColdSession(routingId, {
-            cwd: data.cwd ?? s.sessions[routingId].cwd,
-            messages,
-            taskNotifications,
-            ...(statusLine ? { statusLine } : {})
-          })
-          if (warnings?.length) for (const w of warnings) s.addWarning(routingId, w)
-          if (customTitle) s.setCustomTitle(routingId, customTitle)
-          s.markSessionLive(routingId)
-        })
+      // this replica has to read the same source for itself — fill-only, so live
+      // content that already streamed in wins. The fork anchor rides the birth
+      // event (F3) and is passed through for the same reason canonical's own seed
+      // takes it.
+      void loadResumedTranscript(routingId, {
+        resumeSessionId: data.resumeSessionId,
+        resumeSessionAt: data.resumeSessionAt,
+        cwd: data.cwd
+      })
       return
     }
 

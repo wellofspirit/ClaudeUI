@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import type { EngineId } from '../../../../shared/types'
 import { engineMeta } from '../../../../shared/engine-meta'
 import { SelectMenu, type SelectMenuOption } from '../shared/SelectMenu'
@@ -49,8 +49,8 @@ export const APPLIES_ON_LABEL: Record<AppliesOn, string> = {
 /** Which element the row renders as. `button`/`label` make the whole row a hit. */
 type RowElement = 'div' | 'button' | 'label'
 
-/** The 9px padlock of the `locked` badge. */
-function LockIcon(): React.JSX.Element {
+/** The 9px padlock of the `locked` badge (and of a locked value, e.g. a harness pinned to its version). */
+export function LockIcon(): React.JSX.Element {
   return (
     <svg
       width="9"
@@ -363,17 +363,33 @@ export interface SegmentedOption<T extends string> {
   label: string
   /** Offered but unselectable — mirrors `SelectMenuOption.disabled`. */
   disabled?: boolean
+  /**
+   * Why the option is as it is (e.g. why it is off). A hover title, and in
+   * radio mode also the option's accessible description.
+   */
+  title?: string
 }
 
 /**
  * Up to five short options. Six or more becomes a `SelectField` — the caller
  * decides, because only it knows the option count.
+ *
+ * With `ariaLabel` it is a `radiogroup` of `radio`s — one tab stop (the checked
+ * option, else the first enabled one), the arrow keys move AND select,
+ * wrapping and skipping disabled options (the WAI-ARIA radio pattern, as
+ * `ChoiceCards` does). Without it, the original toggle-button semantics
+ * (`aria-pressed`) stay, so the existing call sites are unchanged.
+ *
+ * A radio that cannot be chosen is `aria-disabled` rather than `disabled`: a
+ * natively disabled button gets no pointer events, so its `title` — the one
+ * place that says WHY it is off — would never show on hover.
  */
 export function Segmented<T extends string>({
   value,
   options,
   onChange,
   disabled = false,
+  ariaLabel,
   testid,
   optionTestid
 }: {
@@ -381,35 +397,87 @@ export function Segmented<T extends string>({
   options: SegmentedOption<T>[]
   onChange: (value: T) => void
   disabled?: boolean
+  /** Names the group and switches it to radio semantics. */
+  ariaLabel?: string
   testid?: string
   /** Defaults to `${testid}.option`; set it when the root carries another id. */
   optionTestid?: string
 }): React.JSX.Element {
   const root = testid ?? 'Segmented'
+  const radio = ariaLabel !== undefined
+  const describedBy = useId()
+  const enabled = options.filter((o) => !disabled && !o.disabled)
+  const tabStop = enabled.some((o) => o.value === value) ? value : enabled[0]?.value
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>): void => {
+    const step =
+      e.key === 'ArrowRight' || e.key === 'ArrowDown'
+        ? 1
+        : e.key === 'ArrowLeft' || e.key === 'ArrowUp'
+          ? -1
+          : 0
+    if (step === 0 || enabled.length === 0) return
+    e.preventDefault()
+    const at = enabled.findIndex((o) => o.value === value)
+    const next =
+      at < 0
+        ? enabled[step > 0 ? 0 : enabled.length - 1]
+        : enabled[(at + step + enabled.length) % enabled.length]
+    if (next.value !== value) onChange(next.value)
+    const target = Array.from(e.currentTarget.parentElement?.children ?? []).find(
+      (el) => el.getAttribute('data-id') === next.value
+    )
+    if (target instanceof HTMLElement) target.focus()
+  }
+
   return (
     <span
       data-testid={root}
+      role={radio ? 'radiogroup' : undefined}
+      aria-label={ariaLabel}
+      aria-disabled={radio && disabled ? true : undefined}
       className="inline-flex items-center gap-0.5 bg-bg-input border border-border rounded-md p-0.5"
     >
-      {options.map((opt) => (
-        <button
-          key={opt.value}
-          type="button"
-          // Repeated instance: stable testid + `data-id` discriminator (ADR-027).
-          data-testid={optionTestid ?? `${root}.option`}
-          data-id={opt.value}
-          aria-pressed={value === opt.value}
-          disabled={disabled || opt.disabled}
-          onClick={() => onChange(opt.value)}
-          className={`px-2.5 py-[3px] text-[12px] leading-4 rounded transition-colors cursor-default disabled:opacity-40 ${
-            value === opt.value
-              ? 'bg-accent/15 text-accent font-medium'
-              : 'text-text-secondary hover:text-text-primary'
-          }`}
-        >
-          {opt.label}
-        </button>
-      ))}
+      {options.map((opt) => {
+        const off = disabled || opt.disabled === true
+        const descId = radio && opt.title ? `${describedBy}-${opt.value}` : undefined
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            // Repeated instance: stable testid + `data-id` discriminator (ADR-027).
+            data-testid={optionTestid ?? `${root}.option`}
+            data-id={opt.value}
+            role={radio ? 'radio' : undefined}
+            aria-checked={radio ? value === opt.value : undefined}
+            aria-pressed={radio ? undefined : value === opt.value}
+            tabIndex={radio ? (opt.value === tabStop ? 0 : -1) : undefined}
+            title={opt.title}
+            disabled={radio ? undefined : off}
+            aria-disabled={radio && off ? true : undefined}
+            aria-describedby={descId}
+            onClick={() => {
+              if (radio && off) return
+              onChange(opt.value)
+            }}
+            onKeyDown={radio ? onKeyDown : undefined}
+            className={`px-2.5 py-[3px] text-[12px] leading-4 rounded transition-colors cursor-default disabled:opacity-40 aria-disabled:opacity-40 ${
+              radio ? 'outline-none focus-visible:ring-1 focus-visible:ring-accent/60' : ''
+            } ${
+              value === opt.value
+                ? 'bg-accent/15 text-accent font-medium'
+                : 'text-text-secondary hover:text-text-primary'
+            }`}
+          >
+            {opt.label}
+            {descId && (
+              <span id={descId} className="sr-only">
+                {opt.title}
+              </span>
+            )}
+          </button>
+        )
+      })}
     </span>
   )
 }
@@ -648,13 +716,29 @@ export function SliderField({
   )
 }
 
+/**
+ * The optional entry rules a list can hold its editor to. Both are for lists
+ * whose backend REFUSES a bad value (the judge guidance lists, ADR-083 §4):
+ * without them the chip would appear, the save would be rejected, and the entry
+ * would silently vanish on the next load. Checked on add only — an entry
+ * already in the list came from disk and is the backend's business.
+ */
+export interface ListEntryRules {
+  /** The problem with `entry` as short user-facing copy, or `null` when it is fine. */
+  validate?: (entry: string) => string | null
+  /** The most entries the list may hold; adding past it is refused. */
+  maxItems?: number
+}
+
 /** Chips with remove, one add field. Domains, paths, globs, packages. */
 export function ListEditor({
   items,
   placeholder,
   onUpdate,
   disabled = false,
-  testid
+  testid,
+  validate,
+  maxItems
 }: {
   items: string[]
   placeholder: string
@@ -662,15 +746,27 @@ export function ListEditor({
   /** A dependent list whose parent is off: chips stay visible, nothing edits. */
   disabled?: boolean
   testid?: string
-}): React.JSX.Element {
+} & ListEntryRules): React.JSX.Element {
   const [inputVal, setInputVal] = useState('')
+  // Why the last add was refused. Cleared as soon as the input changes, so it
+  // always describes the text in front of the user.
+  const [error, setError] = useState<string | null>(null)
 
   const handleAdd = (): void => {
     const trimmed = inputVal.trim()
-    if (trimmed && !items.includes(trimmed)) {
-      onUpdate([...items, trimmed])
-      setInputVal('')
+    if (!trimmed || items.includes(trimmed)) return
+    if (maxItems !== undefined && items.length >= maxItems) {
+      setError(`At most ${maxItems} entries — remove one first.`)
+      return
     }
+    const problem = validate?.(trimmed) ?? null
+    if (problem) {
+      setError(problem)
+      return
+    }
+    setError(null)
+    onUpdate([...items, trimmed])
+    setInputVal('')
   }
 
   return (
@@ -705,14 +801,22 @@ export function ListEditor({
           data-testid={testid ? `${testid}.input` : undefined}
           type="text"
           value={inputVal}
-          onChange={(e) => setInputVal(e.target.value)}
+          onChange={(e) => {
+            setInputVal(e.target.value)
+            setError(null)
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') handleAdd()
           }}
           placeholder={placeholder}
           spellCheck={false}
           disabled={disabled}
-          className="flex-1 min-w-0 h-7 bg-bg-input border border-border rounded-md px-2.5 text-[12px] text-text-primary placeholder:text-text-muted outline-none focus:border-accent/50 transition-colors"
+          aria-invalid={error ? true : undefined}
+          className={`flex-1 min-w-0 h-7 bg-bg-input border rounded-md px-2.5 text-[12px] text-text-primary placeholder:text-text-muted outline-none transition-colors ${
+            error
+              ? 'border-danger/60 focus:border-danger/70'
+              : 'border-border focus:border-accent/50'
+          }`}
         />
         <Button
           testid={testid ? `${testid}.add` : undefined}
@@ -722,6 +826,15 @@ export function ListEditor({
           Add
         </Button>
       </span>
+      {error && (
+        <span
+          data-testid={testid ? `${testid}.error` : undefined}
+          role="alert"
+          className="block mt-1 text-[12px] leading-4 text-danger"
+        >
+          {error}
+        </span>
+      )}
     </span>
   )
 }
@@ -1365,7 +1478,9 @@ export function SandboxListSetting({
   dimmed,
   disabled,
   indent,
-  testid
+  testid,
+  validate,
+  maxItems
 }: {
   label: string
   labelColor: string
@@ -1382,7 +1497,7 @@ export function SandboxListSetting({
   disabled?: boolean
   indent?: boolean
   testid?: string
-}): React.JSX.Element {
+} & ListEntryRules): React.JSX.Element {
   const editor = (
     <ListEditor
       items={items}
@@ -1390,6 +1505,8 @@ export function SandboxListSetting({
       onUpdate={onUpdate}
       disabled={disabled}
       testid={testid}
+      validate={validate}
+      maxItems={maxItems}
     />
   )
 

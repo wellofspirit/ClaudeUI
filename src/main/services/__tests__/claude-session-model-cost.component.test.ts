@@ -47,7 +47,10 @@ vi.mock('../../../core/sdk', async (importOriginal) => {
 })
 
 vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
-  opencodeServerManager: { isBinaryAvailable: (): boolean => false }
+  opencodeServerManager: {
+    setServerStartedHook: () => {},
+    isBinaryAvailable: (): boolean => false
+  }
 }))
 vi.mock('../../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: { dispatch: vi.fn(), resolveApproval: vi.fn(), disposeFor: vi.fn() },
@@ -70,16 +73,11 @@ vi.mock('../../../core/services/session-history', () => ({
 }))
 vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
-vi.mock('../../../core/services/voice-capture', () => ({
-  startRecording: vi.fn(),
-  stopRecording: vi.fn()
-}))
-vi.mock('../../../core/services/voice-client', () => ({ VoiceClient: class {} }))
 vi.mock('../../../core/services/context-window', () => ({
   getContextWindowSize: vi.fn(() => 200000)
 }))
 vi.mock('../../../core/services/usage-fetcher', () => ({
-  usageFetcher: { updateFromRateLimitEvent: vi.fn(), fetch: vi.fn(async () => null) }
+  usageFetcher: { fetch: vi.fn(async () => null) }
 }))
 vi.mock('../../../core/services/usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
 vi.mock('../account-manager', () => ({

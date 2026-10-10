@@ -958,6 +958,18 @@ console.log('\n--- Patch E: Background agent streaming (BVe or legacy re-backgro
 const patchEMarker = '/*PATCHED:subagent-E*/'
 
 if (src.includes(patchEMarker)) {
+  // A file patched before `agent_id` joined the BVe injection carries the same
+  // marker, so a bare marker check would skip it and ship the idle self-resume
+  // bug (see the agent_id comment below). The legacy (<= v2.1.196) injection
+  // never carries agent_id; it is recognisable by its `_ptu` owner lookup.
+  const injected = src.slice(src.indexOf(patchEMarker), src.indexOf(patchEMarker) + 600)
+  if (!injected.includes('agent_id:') && !injected.includes('_ptu')) {
+    console.error(
+      'ERROR: Patch E is applied without `agent_id` (a stale pre-agent_id patch). ' +
+        'Re-extract a pristine cli.js (`bun run ensure-cli`) and re-apply.'
+    )
+    process.exit(1)
+  }
   console.log('Already applied. Skipping.')
 } else {
   // The session-id getter is resolved per injection site (see findSessionIdFn):
@@ -974,7 +986,8 @@ if (src.includes(patchEMarker)) {
   //   - msg var (ce) = loop variable
   //   - arr var (h) = collection array
   //   - p() = shouldNotifyOwner callback — returns Fe (true when backgrounded)
-  //   - toolUseContext param (.toolUseId = parent_tool_use_id)
+  //   - toolUseContext param (.toolUseId = parent_tool_use_id; undefined on an idle self-resume)
+  //   - taskId param (the agent id = agent_id)
   //
   // The anchor is matched in TWO parts. Up to v2.1.220 the api_error `continue`
   // was immediately followed by `ARR.push(MSG)`, so one regex covered both. In
@@ -1046,7 +1059,8 @@ if (src.includes(patchEMarker)) {
     const globalSigRe = new RegExp(`async function (${V})\\([^)]*toolUseContext:(${V})[,)]`, 'g')
     const sigCandidates = [...sigBefore.matchAll(globalSigRe)].map((m) => ({
       fn: m[1],
-      ctxVar: m[2]
+      ctxVar: m[2],
+      index: sigBeforeStart + m.index
     }))
     if (sigCandidates.length === 0) {
       console.error(
@@ -1067,6 +1081,34 @@ if (src.includes(patchEMarker)) {
     console.log(
       `  toolUseContext var: ${toolUseCtxVar} (from function sig "${sigCandidates[0].fn}", 1/1 matches)`
     )
+
+    // The runner's own `taskId` param — the agent id — stamped on every frame
+    // as `agent_id`. `toolUseContext.toolUseId` is NOT always set: when a
+    // background agent that stopped with its own background children still
+    // running is woken by a child's notification while the session is idle,
+    // cli.js resumes it with `_buildIdleToolUseContext()` (a generic main-loop
+    // context, no toolUseId). `parent_tool_use_id` is then undefined and
+    // JSON.stringify drops it, so without agent_id the partials read as the
+    // MAIN agent's. The consumer maps agent_id back to the agent's card.
+    //
+    // Bound from the SAME signature as toolUseContext (so it is the runner's
+    // param, not a neighbouring function's): the destructured param list runs
+    // from that signature to its `}){`, and must bind `taskId:` exactly once.
+    const paramsEnd = src.indexOf('}){', sigCandidates[0].index)
+    const sigParams =
+      paramsEnd !== -1 && paramsEnd < anchorIdx
+        ? src.slice(sigCandidates[0].index, paramsEnd + 1)
+        : ''
+    const taskIdMatches = [...sigParams.matchAll(new RegExp(`[{,]taskId:(${V})[,}=]`, 'g'))]
+    if (taskIdMatches.length !== 1) {
+      console.error(
+        `ERROR: \`taskId:VAR\` matched ${taskIdMatches.length} times in the destructured params of ` +
+          `"${sigCandidates[0].fn}" (expected 1). Cannot bind the agent id for agent_id.`
+      )
+      process.exit(1)
+    }
+    const taskIdVar = taskIdMatches[0][1]
+    console.log(`  taskId var: ${taskIdVar} (from the same signature)`)
 
     // Extract the shouldNotifyOwner gate. It must NOT be hardcoded: in
     // v2.1.197–v2.1.207 the defaulted alias was `p` (`shouldNotifyOwner:d}){let p=d??(()=>!0)`),
@@ -1139,7 +1181,7 @@ if (src.includes(patchEMarker)) {
     //
     // Injection (GATE = extracted shouldNotifyOwner alias):
     //   if(MSG.type==="stream_event"){
-    //     if(GATE())try{process.stdout.write(...)...}catch(_e){}
+    //     if(GATE())try{process.stdout.write({...,parent_tool_use_id:CTX.toolUseId,agent_id:TASKID,...})}catch(_e){}
     //     continue  ← skip h.push regardless — stream_events must NOT enter h[]
     //   }
     //   // only when the native relay is absent (pre-v2.1.219):
@@ -1156,7 +1198,7 @@ if (src.includes(patchEMarker)) {
       `${patchEMarker}` +
       `if(${msgVar}.type==="stream_event"){` +
       `if(${notifyFn}())try{process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar}.event,` +
-      `parent_tool_use_id:${toolUseCtxVar}.toolUseId,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")}catch(_e){}` +
+      `parent_tool_use_id:${toolUseCtxVar}.toolUseId,agent_id:${taskIdVar},session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")}catch(_e){}` +
       `continue}` +
       assistantUserWrite
 

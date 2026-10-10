@@ -22,18 +22,28 @@ vi.mock('../../services/claude-mcp', () => {
     if (scopes.fail) throw new Error('unreadable')
     return scopes[scope]
   })
+  const readDisabledMcpServers = vi.fn((_cwd: string) => scopes.disabled)
+  // The REAL merge order, over the mocked per-scope reads. The helper itself
+  // is four lines of spread in `claude-mcp.ts`; what this suite has to pin is
+  // that the bridge consumes it with the right cwd and gets the right winner,
+  // and the `loadMcpServers` call assertion below keeps the order honest.
+  const mergeClaudeMcpServers = vi.fn((cwd: string) => ({
+    ...loadMcpServers('user'),
+    ...loadMcpServers('project', cwd),
+    ...loadMcpServers('local', cwd)
+  }))
   return {
     loadMcpServers,
-    readDisabledMcpServers: vi.fn(() => scopes.disabled),
-    // The REAL merge order, over the mocked per-scope reads. The helper itself
-    // is four lines of spread in `claude-mcp.ts`; what this suite has to pin is
-    // that the bridge consumes it with the right cwd and gets the right winner,
-    // and the `loadMcpServers` call assertion below keeps the order honest.
-    mergeClaudeMcpServers: vi.fn((cwd: string) => ({
-      ...loadMcpServers('user'),
-      ...loadMcpServers('project', cwd),
-      ...loadMcpServers('local', cwd)
-    }))
+    readDisabledMcpServers,
+    mergeClaudeMcpServers,
+    // The merge-minus-disabled read the bridges share (ADR-096), composed over
+    // the same mocked reads, so the order and disabled-list assertions keep
+    // measuring what they always did.
+    readEnabledClaudeMcpServers: vi.fn((cwd: string) => {
+      const merged = mergeClaudeMcpServers(cwd)
+      const disabled = new Set(readDisabledMcpServers(cwd))
+      return Object.fromEntries(Object.entries(merged).filter(([name]) => !disabled.has(name)))
+    })
   }
 })
 vi.mock('../../services/logger', () => ({

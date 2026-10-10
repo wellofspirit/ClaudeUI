@@ -201,3 +201,45 @@ describe('setClaudeDefaultModel', () => {
     expect(store().claudeDefaultModelConfigured).toBe(false)
   })
 })
+
+/**
+ * ADR-100: once Claude's catalog lands, the store's own copies of saved picks move
+ * to their aliases — the last pick (localStorage only), the configured default it
+ * seeds from, and the engine-config snapshot a later whole-file save writes back.
+ */
+describe('setEngineModels — saved Claude picks move to their aliases (ADR-100)', () => {
+  it('moves the last pick, the configured default and the engine-config snapshot', () => {
+    localStorage.setItem('lastSelectedModel:claude', 'claude-sonnet-5')
+    useSessionStore.setState({
+      lastSelectedModelByEngine: { claude: 'claude-sonnet-5', pi: 'openai/x' },
+      claudeDefaultModel: 'claude-haiku-4-5',
+      claudeDefaultModelConfigured: true,
+      engineConfig: {
+        sandbox: { enabled: true } as never,
+        claudeConfig: { defaultModel: 'claude-haiku-4-5' }
+      }
+    })
+    store().setEngineModels('claude', CATALOG)
+    expect(store().lastSelectedModelByEngine).toEqual({ claude: 'sonnet', pi: 'openai/x' })
+    expect(localStorage.getItem('lastSelectedModel:claude')).toBe('sonnet')
+    expect(store().claudeDefaultModel).toBe('haiku')
+    expect(store().claudeDefaultModelConfigured).toBe(true)
+    expect(store().engineConfig).toEqual({
+      sandbox: { enabled: true },
+      claudeConfig: { defaultModel: 'haiku' }
+    })
+  })
+
+  it('leaves aliases and unreached ids alone, and does nothing on an empty catalog', () => {
+    useSessionStore.setState({
+      lastSelectedModelByEngine: { claude: 'claude-opus-4-7' },
+      claudeDefaultModel: 'claude-sonnet-5',
+      claudeDefaultModelConfigured: true
+    })
+    store().setEngineModels('claude', [])
+    expect(store().claudeDefaultModel).toBe('claude-sonnet-5')
+    store().setEngineModels('claude', CATALOG)
+    expect(store().lastSelectedModelByEngine.claude).toBe('claude-opus-4-7')
+    expect(store().claudeDefaultModel).toBe('sonnet')
+  })
+})

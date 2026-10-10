@@ -1,6 +1,7 @@
 import { readFile, stat } from 'node:fs/promises'
 import { extname } from 'node:path'
 import { isImageMediaType, type ToolResultImage } from '../../shared/types'
+import { blobStore } from '../services/blob-store'
 
 /**
  * The bytes behind a Codex `imageView` item.
@@ -8,8 +9,9 @@ import { isImageMediaType, type ToolResultImage } from '../../shared/types'
  * `imageView` carries a PATH and nothing else — the `view_image` tool hands the
  * model a local file, and the thread item records where it was. Every other
  * harness ships the bytes with the result, so the card would otherwise say an
- * image was viewed and show nothing. This reads the file ONCE, at map time, and
- * hands the caller a `ToolResultImage` to hang off the tool_result.
+ * image was viewed and show nothing. This reads the file ONCE, at map time,
+ * interns the bytes into the blob store (ADR-087) and hands the caller a
+ * `ToolResultImage` ref to hang off the tool_result.
  *
  * Nothing new is exposed: the model has already read the file, and the item is
  * the record of that read. The read is still bounded on every axis that matters:
@@ -18,8 +20,9 @@ import { isImageMediaType, type ToolResultImage } from '../../shared/types'
  *    read, so a huge (or endless) file costs a stat and not a heap;
  *  - the EXTENSION must be one of the four renderable ones, and the leading
  *    bytes must agree — a `.png` that is really a PDF is refused, and so is a
- *    PNG named `.txt`. The renderer builds `data:<mediaType>;base64,…` verbatim,
- *    so a lie here would be a broken thumbnail at best;
+ *    PNG named `.txt`. The renderer builds a `data:<mediaType>;base64,…` URI from
+ *    the ref's media type verbatim, so a lie here would be a broken thumbnail at
+ *    best;
  *  - it NEVER throws. A missing file, a directory, a permission error, a
  *    symlink loop, a device node: every one of them returns `undefined` and the
  *    card falls back to the path-only form, which is the honest answer.
@@ -84,7 +87,8 @@ export async function readCodexImageView(path: string): Promise<ToolResultImage 
     // The file can have grown between the stat and the read.
     if (bytes.length > IMAGE_VIEW_MAX_BYTES) return undefined
     if (sniff(bytes) !== declared) return undefined
-    return { mediaType: declared, base64Data: bytes.toString('base64') }
+    const ref = blobStore.putBytes(declared, bytes)
+    return ref ? { mediaType: declared, ...ref } : undefined
   } catch {
     return undefined
   }

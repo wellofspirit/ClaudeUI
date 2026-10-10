@@ -36,6 +36,16 @@ export function mergeContentBlocks(
       .filter((b): b is Extract<ContentBlock, { type: 'tool_review' }> => b.type === 'tool_review')
       .map((b) => b.reviewId)
   )
+  // A pre-ask denial arrives on its own channel too, for the same reason and
+  // with the same consequence — preserved by `denialId`.
+  const newDenialIds = new Set(
+    newBlocks
+      .filter(
+        (b): b is Extract<ContentBlock, { type: 'permission_denial' }> =>
+          b.type === 'permission_denial'
+      )
+      .map((b) => b.denialId)
+  )
   const newThinkingCount = newBlocks.filter((b) => b.type === 'thinking').length
   const newHasText = newBlocks.some((b) => b.type === 'text')
 
@@ -53,6 +63,8 @@ export function mergeContentBlocks(
       preserved.push(b)
     } else if (b.type === 'tool_review' && !newReviewIds.has(b.reviewId)) {
       preserved.push(b)
+    } else if (b.type === 'permission_denial' && !newDenialIds.has(b.denialId)) {
+      preserved.push(b)
     } else if (b.type === 'thinking') {
       if (thinkingsSeen < droppedThinkingCount) {
         preserved.push(b)
@@ -64,4 +76,26 @@ export function mergeContentBlocks(
   }
 
   return [...preserved, ...newBlocks]
+}
+
+/**
+ * Removes the given tool calls from a message's content together with every
+ * block keyed to them — the call's result, a judge's review, a pre-ask denial.
+ * Shared by the main-process transcript and the SyncCore reducer so a
+ * retraction reads the same everywhere (see `session:tool-uses-retracted`).
+ */
+export function withoutToolUses(
+  blocks: ContentBlock[],
+  toolUseIds: readonly string[]
+): ContentBlock[] {
+  return blocks.filter(
+    (b) =>
+      !(
+        (b.type === 'tool_use' ||
+          b.type === 'tool_result' ||
+          b.type === 'tool_review' ||
+          b.type === 'permission_denial') &&
+        toolUseIds.includes(b.toolUseId)
+      )
+  )
 }

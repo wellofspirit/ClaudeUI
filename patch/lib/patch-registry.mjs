@@ -1,0 +1,100 @@
+/**
+ * The cli.js patch registry, and how a build records which patches it carries.
+ *
+ * `patch/apply-all.mjs` runs `PATCH_REGISTRY` in order. Afterwards it asks
+ * `patchesPresent()` which patches the patched `cli.js` actually contains and
+ * merges that list into `vendor/claude-cli/version.json` as `patches`. The app
+ * reads it back (`src/core/sdk/harness.ts`) to decide which patch-dependent
+ * surfaces to offer (ADR-030).
+ *
+ * The list comes from the bytes, not from the registry: a patch whose apply
+ * script found nothing to do (its fix is upstream now) leaves no marker and is
+ * not listed. Every apply script tags each injection with a
+ * `/*PATCHED:<marker>*\/` comment; `marker` below matches the family of those
+ * comments that one patch writes.
+ *
+ * This module has no side effects on import, so vitest can load it
+ * (src/main/__tests__/patch-registry.test.ts).
+ */
+
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
+const applyScript = (name) => fileURLToPath(new URL(`../${name}/apply.mjs`, import.meta.url))
+
+/** `/*PATCHED:<one of the names>*\/`, anchored on both comment delimiters. */
+const markerRe = (namePattern) => new RegExp(`/\\*PATCHED:(?:${namePattern})\\*/`)
+
+/**
+ * Apply order matters: later patches anchor on code earlier ones leave intact.
+ *
+ * @type {ReadonlyArray<{ name: string, apply: string, marker: RegExp }>}
+ */
+export const PATCH_REGISTRY = Object.freeze(
+  [
+    // subagent-A … subagent-G, plus subagent-F2.
+    { name: 'subagent-streaming', marker: markerRe('subagent-[A-G]\\d?') },
+    { name: 'voice-server', marker: markerRe('voice-server') },
+    { name: 'bash-output-streaming', marker: markerRe('bash-output-streaming|bash-early-poll') }
+    // Retired at Claude Code 2.1.280: usage-relay (the native get_usage handler
+    // answers first), request-usage (stream_event message_start/message_delta
+    // carry the same usage), and mcp-tool-refresh, taskstop-notification,
+    // incomplete-session-resume-fix (fixed upstream; their apply scripts had
+    // been no-ops). background-task and rate-limit-relay: native
+    // `background_tasks` and `rate_limit_event.rate_limit_info.unifiedWindows`
+    // replaced them. mcp-status: query() sends `reload_plugins` after
+    // initialize, which connects plugin MCP servers. queue-control: every user
+    // frame carries a client `uuid`, so native `command_lifecycle` frames report
+    // consumption and `cancel_async_message` takes a queued message back.
+    // ci-path-remap retired: cli.js now runs inside a rebundled Bun binary,
+    // which resolves baked file:// URLs natively via its module graph. The
+    // Node-compatibility shim is no longer needed.
+    // subprocess-proxy-strip removed 2026-09-27 by owner ruling: the in-app
+    // proxy now reaches children, as on the unpatched binary.
+    // skip-securestorage removed 2026-09-27 by owner ruling: multi-account
+    // hands cli.js the active account's token through CLAUDE_CODE_OAUTH_TOKEN
+    // (Claude Desktop's contract), so cli.js no longer reads the account file.
+    // automode-verdict removed 2026-09-28 by owner ruling: auto-mode allow
+    // verdicts are not worth a patch; denials are native (permission_denied).
+  ].map((entry) => Object.freeze({ ...entry, apply: applyScript(entry.name) }))
+)
+
+/**
+ * Names of the registry entries whose marker occurs in `src`, in registry order.
+ *
+ * `String.prototype.search` ignores `lastIndex`, so a marker built with the `g`
+ * flag cannot make the answer depend on an earlier call.
+ *
+ * @param {string} src the patched cli.js text
+ * @param {ReadonlyArray<{ name: string, marker: RegExp }>} [registry]
+ * @returns {string[]}
+ */
+export function patchesPresent(src, registry = PATCH_REGISTRY) {
+  return registry.filter((entry) => src.search(entry.marker) !== -1).map((entry) => entry.name)
+}
+
+/**
+ * Merge `fields` into the JSON object at `versionPath`, keeping every other
+ * field. The file is replaced by a rename, so a reader never sees half a file.
+ *
+ * Throws when the file is missing or is not a JSON object: `extract-cli.mjs`
+ * writes it before any patch runs, and a build without it would ship a binary
+ * the app cannot describe.
+ *
+ * @param {string} versionPath
+ * @param {Record<string, unknown>} fields
+ */
+export function mergeIntoVersionJson(versionPath, fields) {
+  const meta = JSON.parse(readFileSync(versionPath, 'utf8'))
+  if (meta === null || typeof meta !== 'object' || Array.isArray(meta)) {
+    throw new Error(`${versionPath} does not hold a JSON object`)
+  }
+  const tmp = `${versionPath}.${process.pid}.tmp`
+  try {
+    writeFileSync(tmp, JSON.stringify({ ...meta, ...fields }, null, 2) + '\n')
+    renameSync(tmp, versionPath)
+  } catch (err) {
+    rmSync(tmp, { force: true })
+    throw err
+  }
+}

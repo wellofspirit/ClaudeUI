@@ -14,11 +14,12 @@ name: CI
 # tag is published, so a Windows-only regression is caught at push-to-pre-release
 # time. Add an os matrix here if PR-time Windows coverage becomes worth the cost.
 #
-# The build steps at the end are gates, not artifacts: electron-vite + the web
-# bundle catch vite-config regressions that tests cannot see, and the server
-# steps are the ONLY workflow anywhere that runs `build:server*` and its
-# bun:sqlite conformance arm (`verify:sqlite`) — the release workflows ship the
-# same linux-x64 executable this job proves buildable and bootable.
+# The build steps at the end are gates, not artifacts: the electron-vite build
+# (one renderer build, desktop + web) catches vite-config regressions that
+# tests cannot see, and the server steps are the ONLY workflow anywhere that
+# runs `build:server*` and its bun:sqlite conformance arm (`verify:sqlite`) — the
+# release workflows ship the same linux-x64 executable this job proves buildable
+# and bootable.
 
 on:
   # Pull requests only (owner, 2026-09-22): main and pre-release have their own
@@ -35,77 +36,16 @@ permissions:
   contents: read
 
 jobs:
+  # Typecheck, lint, format and the build gates in one job; the tests run beside
+  # it in `tests`, split three ways. The wall time is the slower of the two
+  # instead of their sum (one serial job took ~9.5 min, ~6 of it tests).
   gates:
-    name: Typecheck, lint, format & tests
+    name: Typecheck, lint, format & build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v7
-        with:
-          # Pinned to 24.15.0 to match the release workflows: Node 24.16.0 ships a
-          # libuv that aborts on Windows when fs.watch() targets a single file,
-          # cascading vitest workers to "failed". Kept identical here for parity.
-          node-version: 24.15.0
-
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Cache bun install
-        uses: actions/cache@v6
-        with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-bun-
-
-      - name: Read claude CLI version
-        id: cli-version
-        shell: bash
-        run: echo "version=$(node -p "require('./package.json').claudeCliVersion")" >> "$GITHUB_OUTPUT"
-
-      - name: Cache claude CLI source binary
-        uses: actions/cache@v6
-        with:
-          path: .cache/claude-cli
-          key: ${{ runner.os }}-claude-cli-src-${{ steps.cli-version.outputs.version }}
-
-      - name: Read codex CLI version
-        id: codex-version
-        shell: bash
-        run: echo "version=$(node -p "require('./package.json').codexCliVersion")" >> "$GITHUB_OUTPUT"
-
-      # No restore-keys: `cacheValid` rehashes every pinned payload, so a partial
-      # hit from another pin is a guaranteed re-download rather than a saving.
-      - name: Cache codex CLI binaries
-        uses: actions/cache@v6
-        with:
-          path: vendor/codex-cli
-          key: ${{ runner.os }}-${{ runner.arch }}-codex-cli-${{ steps.codex-version.outputs.version }}
-
-      - name: Cache Electron binaries
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cache/electron
-            ~/.cache/electron-builder
-          key: ${{ runner.os }}-electron-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-electron-
-
-      # Full install (runs postinstall: install-app-deps + ensure-cli/opencode/pi),
-      # mirroring the release workflows. postinstall's ensure-cli also proves the
-      # cli.js patches still APPLY against the pinned claudeCliVersion — a patch
-      # that no longer applies fails the install and turns CI red. (Behavioural
-      # correctness of the applied patches is a separate, live-only concern:
-      # `bun run test:patch` locally, with real Claude credentials — deliberately
-      # not a CI job.)
-      - name: Install dependencies
-        run: bun install
-
-      # bun can leave a Node-ABI better-sqlite3 behind; install-app-deps (run
-      # again explicitly, idempotent) rebuilds native modules for the Electron ABI.
-      - name: Rebuild native modules
-        run: bun run rebuild:native
+      - uses: ./.github/actions/setup-workspace
 
       - name: Typecheck
         run: bun run typecheck
@@ -116,16 +56,10 @@ jobs:
       - name: Format check
         run: bun run format:check
 
-      - name: Tests (unit + component + e2e + git)
-        run: bun run test:ci
-
-      # Typecheck already ran above, so this is the raw bundler pass the release
-      # workflows' "Build app" step runs — not `bun run build`, which would
-      # typecheck a second time.
-      - name: Build (electron + web)
-        run: |
-          bunx electron-vite build
-          bunx vite build --config vite.web.config.ts
+      # The raw bundler pass the release workflows' "Build app" step runs. Not
+      # `bun run build`: that also rebuilds the CLI, which install already did.
+      - name: Build (electron-vite)
+        run: bunx electron-vite build
 
       # `build:server` runs verify:sqlite before bundling; the compile step
       # produces the same host-native linux-x64 executable the release
@@ -135,3 +69,40 @@ jobs:
           bun run build:server
           bun run build:server:compile
           ./dist/server-bin/claudeui-server --help > /dev/null
+
+  tests:
+    name: Tests (shard ${{ matrix.shard }}/3)
+    runs-on: ubuntu-latest
+    strategy:
+      # Every shard reports: a failure in one must not cancel the others and
+      # hide their results.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-workspace
+
+      # The `browser` vitest project (Layer 2b layout tests) drives real headless
+      # Chromium, which `bun install` does not fetch and the runner image does not
+      # ship. Here, not in setup-workspace: only this job runs tests. The headless
+      # shell is all a headless run uses; the browser build is tied to the
+      # playwright version, so that keys the cache. The apt packages `--with-deps`
+      # adds are not cached, so the install always runs (no download on a hit).
+      - name: Read playwright version
+        id: playwright-version
+        run: echo "version=$(node -p "require('./node_modules/playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Chromium for the browser tests
+        run: bunx playwright install --with-deps --only-shell chromium
+
+      # unit + unit-node + component + e2e + browser + git, split by file across shards.
+      - name: Tests (unit + component + e2e + browser + git)
+        run: bun run test:ci --shard=${{ matrix.shard }}/3

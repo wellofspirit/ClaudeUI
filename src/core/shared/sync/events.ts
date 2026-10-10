@@ -23,6 +23,7 @@
  */
 
 import type {
+  AttachmentRef,
   Automation,
   AutomationRun,
   AccountUsage,
@@ -35,6 +36,7 @@ import type {
   GitStatusData,
   MeteringSnapshot,
   PendingApproval,
+  PermissionDenialBlock,
   PermissionMode,
   QueuedItem,
   SessionResult,
@@ -52,16 +54,11 @@ import type {
   ToolReviewBlock,
   FileDiff,
   UISessionConfig,
+  VoiceNoticeTone,
   WatchUpdate
 } from '../../../shared/types'
+import type { HarnessId, HarnessInstallProgress } from '../../../shared/harness-types'
 import type { ItemStreamOpen, ItemStreamSeal } from './item-stream'
-
-/** Attachment shape as it rides `session:user-message` / a queued item. */
-export interface WireAttachment {
-  mediaType: string
-  base64Data: string
-  fileName?: string
-}
 
 export interface SyncEventMap {
   // -------------------------------------------------------------------------
@@ -79,9 +76,15 @@ export interface SyncEventMap {
    * except the originator (and canonical itself, hence every snapshot) folded
    * `emptySession()`'s default/claude/default over the session's real config.
    *
-   * `effort` / `thinkingMode` are NOT here on purpose: the spawn args carrying
-   * them are already resolved model defaults, whereas the canonical fields mean
-   * "explicitly picked" — see the emit site's note.
+   * `effort` / `thinkingMode` are present ONLY when the spawning client sent an
+   * `announce`. `thinkingMode` is then ALWAYS present (the client's raw pick; `null`
+   * clears). `effort` is present when the client named it — the effort the host
+   * spawned the process with, or `null` for a model known to take none (clears) —
+   * and absent when the client did not know the model, which leaves the value
+   * alone. They become the session's OWN, so a later change to the per-model
+   * starting effort cannot re-label it; canonical `effort` is null only before the
+   * first spawn (see the emit site's note). Absent leaves the existing value
+   * alone, like every other optional field here.
    */
   'session:created': (
     routingId: string,
@@ -97,6 +100,8 @@ export interface SyncEventMap {
       permissionMode?: PermissionMode
       engineId?: EngineId
       model?: string
+      effort?: string | null
+      thinkingMode?: string | null
     }
   ) => void
   /**
@@ -138,12 +143,26 @@ export interface SyncEventMap {
       id?: string
       timestamp?: number
       prompt: string
-      attachments?: WireAttachment[]
+      /**
+       * Blob REFS (ADR-087) — `sendPrompt` interns the upload before it emits,
+       * so the ring and the snapshot never carry an attachment's bytes.
+       */
+      attachments?: AttachmentRef[]
     }
   ) => void
   'session:message': (routingId: string, msg: ChatMessage) => void
   /** Refusal-fallback retraction (docs/protocol-cc/04-system-subtypes.md §4.20). */
   'session:messages-retracted': (routingId: string, data: { messageIds: string[] }) => void
+  /**
+   * Tool calls streamed but cut off before cli.js confirmed them (an output-limit
+   * cut, an interrupted stream): removed with their keyed result/review/denial
+   * blocks from `messageId` — in the sub-agent bucket when `ownerToolUseId` is set.
+   * See docs/protocol-cc/05-stream-events.md §5.9.
+   */
+  'session:tool-uses-retracted': (
+    routingId: string,
+    data: { messageId: string; toolUseIds: string[]; ownerToolUseId?: string }
+  ) => void
   'session:tool-result': (
     routingId: string,
     data: {
@@ -165,6 +184,17 @@ export interface SyncEventMap {
   'session:tool-review': (
     routingId: string,
     data: { toolUseId: string; review: ToolReviewBlock }
+  ) => void
+  /**
+   * A pre-ask refusal nobody judged — a deny rule, a mode, a hook, or auto mode
+   * failing to reach a verdict — on the tool call it refused. The sibling of
+   * `session:tool-review`, with the same producer-holds / reducer-drops rule:
+   * it binds to an assistant message that already holds the `tool_use`, and is
+   * idempotent by `denialId`.
+   */
+  'session:permission-denial': (
+    routingId: string,
+    data: { toolUseId: string; denial: PermissionDenialBlock }
   ) => void
   'session:status': (routingId: string, status: SessionStatus) => void
   'session:result': (routingId: string, result: SessionResult) => void
@@ -313,6 +343,25 @@ export interface SyncEventMap {
    */
   'usage-hub:changed': () => void
   /**
+   * The harness resolver was invalidated for `id` (ADR-082 arc 2): a detection
+   * or an install finished, a selection was saved, retention removed a
+   * version, the update set or the updater's state moved (§6). A nudge:
+   * `harness:state` / `engine:is-installed` are the shapes, and a consumer
+   * debounces its re-read.
+   */
+  'harness:changed': (data: { id: HarnessId }) => void
+  /** A managed install's progress (ADR-082 §4), at most four a second per install. */
+  'harness:install-progress': (progress: HarnessInstallProgress) => void
+  /**
+   * An engine's model catalog became available after main had answered a
+   * client with a degraded empty one (today: pi's probe failed, or boot's
+   * invalidations kept killing it, and a later probe filled it). A nudge:
+   * `session:get-engine-models` (asked for `engineId`) is the shape, and a
+   * client reloads that engine's models. Never fired by a warm-cache read, so
+   * that reload cannot loop.
+   */
+  'engine:models-changed': (data: { engineId: EngineId }) => void
+  /**
    * A credential for `providerId` was successfully stored — the ONE resolution
    * signal (ADR-070 §2). Before it, nothing in the app meant "this provider's
    * credential is good now", so every auth surface invented its own clear
@@ -355,12 +404,17 @@ export interface SyncEventMap {
   // Anomaly, recorded not fixed
   // -------------------------------------------------------------------------
   /**
-   * `voice:error` is host-local in nature but ONE of its two emitters is
-   * `BaseSession.send`, so it rings and reaches every subscriber. Kept in this map
-   * for the sync path; the desktop's `window.api.onVoiceError` is gone with the
-   * per-channel preload surface, so BOTH emitters land here.
+   * `voice:error` is host-local in nature but was once raised through
+   * `BaseSession.send`, so it rings and reaches every subscriber (channels.ts
+   * records the anomaly). Kept in this map for the sync path; the desktop's
+   * `window.api.onVoiceError` is gone with the per-channel preload surface.
+   *
+   * Despite the name it carries every voice MESSAGE for the mic's notice pill,
+   * outcomes included; `tone` says how it reads (`info` grey, `warn` amber).
+   * Optional on the wire so an older emitter's two-argument frame stays valid —
+   * absent means `warn`.
    */
-  'voice:error': (routingId: string, error: string) => void
+  'voice:error': (routingId: string, error: string, tone?: VoiceNoticeTone) => void
 }
 
 /** Every channel a client may subscribe to through the sync transport. */

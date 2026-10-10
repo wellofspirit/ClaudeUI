@@ -9,7 +9,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { afterEach, expect, it, vi } from 'vitest'
 import { CodexHostRegistry } from '../../core/codex/CodexHost'
@@ -20,6 +20,13 @@ import {
   type DispatcherDeps
 } from '../../core/services/cross-engine-dispatcher'
 import { setHostPaths } from '../../core/host'
+import {
+  FIXTURE_CODEX_DIR,
+  codexInstalled,
+  releaseFixtureCodex,
+  storeCodexPath,
+  useFixtureCodex
+} from './integration-host'
 import provenance from '../../core/codex/protocol/provenance.json'
 import type { UsageTurnEvent } from '../../core/services/usage-recorder'
 
@@ -71,7 +78,10 @@ vi.mock('node:child_process', async (importOriginal) => {
 })
 
 const enabled =
-  process.env.CODEX_INTEGRATION === '1' && process.platform === 'darwin' && process.arch === 'arm64'
+  process.env.CODEX_INTEGRATION === '1' &&
+  process.platform === 'darwin' &&
+  process.arch === 'arm64' &&
+  codexInstalled
 
 const ROUTING_ID = 'routing-codex-dispatch-target-integration'
 
@@ -121,6 +131,7 @@ afterEach(async () => {
       }
     } finally {
       setHostPaths(null)
+      releaseFixtureCodex()
       if (directory) rmSync(directory, { recursive: true, force: true })
       directory = undefined
     }
@@ -144,10 +155,7 @@ async function setupFixture(): Promise<{
   requests: Record<string, unknown>[]
   script: { current: Script }
 }> {
-  const installed = resolve(
-    'vendor/codex-cli',
-    process.platform === 'win32' ? 'codex.exe' : 'codex'
-  )
+  const installed = storeCodexPath(process.platform === 'win32' ? 'codex.exe' : 'codex')
   expect(createHash('sha256').update(readFileSync(installed)).digest('hex')).toBe(
     provenance.codexBinaries[
       `${process.platform}-${process.arch}` as keyof typeof provenance.codexBinaries
@@ -157,10 +165,11 @@ async function setupFixture(): Promise<{
   const home = join(directory, 'home')
   const codexHome = join(home, '.codex')
   const cwd = join(directory, 'cwd')
-  for (const name of [codexHome, cwd, join(directory, 'tmp'), join(directory, 'vendor/codex-cli')])
+  for (const name of [codexHome, cwd, join(directory, 'tmp'), join(directory, FIXTURE_CODEX_DIR)])
     mkdirSync(name, { recursive: true })
-  copyFileSync(installed, join(directory, 'vendor/codex-cli/codex'))
+  copyFileSync(installed, join(directory, `${FIXTURE_CODEX_DIR}/codex`))
   setHostPaths({ getAppPath: () => directory! })
+  useFixtureCodex(directory!)
 
   const requests: Record<string, unknown>[] = []
   const script = { current: (() => message('fixture complete')) as Script }
@@ -313,8 +322,11 @@ function makeDispatcher(
       acquire: async () => {
         throw new Error('serverManager.acquire must never run for engine: "codex"')
       },
-      release: () => {
-        throw new Error('serverManager.release must never run for engine: "codex"')
+      releaseIfCurrent: () => {
+        throw new Error('serverManager.releaseIfCurrent must never run for engine: "codex"')
+      },
+      subscribeExit: () => {
+        throw new Error('serverManager.subscribeExit must never run for engine: "codex"')
       }
     },
     makeClient: () => {
@@ -350,7 +362,8 @@ it.runIf(enabled)(
       fromEngine: 'claude',
       fromRoutingId: ROUTING_ID,
       cwd: fixture.cwd,
-      autonomyMode: 'default',
+      getAutonomyMode: () => 'default',
+      getMessages: () => [],
       emit: (channel, data) => emitted.push({ channel, data }),
       toolUseId: 'toolu_dispatch_integration'
     }
@@ -428,7 +441,8 @@ it.runIf(enabled)(
       fromEngine: 'claude',
       fromRoutingId: ROUTING_ID,
       cwd: fixture.cwd,
-      autonomyMode: 'default',
+      getAutonomyMode: () => 'default',
+      getMessages: () => [],
       emit: () => {},
       toolUseId: 'toolu_dispatch_stop'
     }

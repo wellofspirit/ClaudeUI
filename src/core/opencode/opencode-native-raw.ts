@@ -3,55 +3,86 @@
  *
  * The NON-lossy sibling of opencode-config.ts's projection writer (ADR-031).
  *
- * Where writeOpencodeNativeConfig() projects opencode's rich ConfigV1 down to the
- * six modelled keys and reconciles them, this module reads/writes opencode's own
- * config file with NO projection: the schema-driven settings UI hands us the
- * literal opencode field names (attachment, modalities, tool_call, cost, limit,
- * …) and we patch exactly those leaves through jsonc-parser modify()+applyEdits,
- * byte-preserving every comment and sibling.
+ * Where writeOpencodeNativeConfig() projects opencode's config down to the
+ * fields ClaudeUI models and reconciles them, this module reads/writes
+ * opencode's own config file with NO projection: the schema-driven settings UI
+ * and the curated panes hand us literal opencode 2.x paths (`media.image.…`,
+ * `providers.<id>.models.<m>.capabilities.input`, …) and we patch exactly those
+ * leaves through jsonc-parser, byte-preserving every comment and sibling.
  *
- * Both writers share the same resolved file (resolveOpencodeConfigFile), the same
- * EOL/formatting/write-gate discipline (opencode-jsonc-io), and the same
- * delete-safety INVARIANT: jsonc-parser modify() THROWS when deleting under a
- * missing parent, so a delete patch is a no-op unless its path exists in the
- * CURRENT parsed doc.
+ * opencode 2.x (ADR-097 S8):
+ *  - The schema is the pinned 2.x `Config.InfoEncoded`
+ *    (`shared/opencode-config-schema.json`, generated).
+ *  - A SET may only name a path that schema has: 1.x keys (`provider`,
+ *    `logLevel`, `compaction.tail_turns`, …) are refused, so the file never
+ *    gains a key 2.x warns about. A DELETE of a 1.x leaf is allowed (that is
+ *    how a pane resets a key it used to own), except the ones the projection
+ *    writer owns.
+ *  - Validation covers the TOUCHED top-level keys only: a 1.x value elsewhere
+ *    in the user's file (2.x still reads it) never blocks an unrelated edit.
+ *  - A patch under `providers.<id>` for a provider that only exists as a 1.x
+ *    `provider.<id>` moves that entry to its 2.x key first, whole
+ *    (`moveProviderToNative`), so the edit lands on the entry 2.x uses; the
+ *    same for `attachment` → `media` and `snapshot` → `snapshots`.
  */
 
 import Ajv2020 from 'ajv/dist/2020'
 import type { ValidateFunction, AnySchemaObject } from 'ajv/dist/2020'
-import { modify, applyEdits } from 'jsonc-parser'
-import type { FormattingOptions } from 'jsonc-parser'
-import { resolveOpencodeConfigFile } from './opencode-config'
-import { detectEol, safeRead, jsoncParseSafe, writeIfChanged } from './opencode-jsonc-io'
+import {
+  moveProviderToNative,
+  notifyOpencodeConfigWritten,
+  resolveOpencodeConfigFile
+} from './opencode-config'
+import { JsoncDoc, safeRead, jsoncParseSafe, writeIfChanged } from './opencode-jsonc-io'
 import { isPlainObject } from '../../shared/opencode-config-diff'
 import type { RawConfigPatch } from '../../shared/types'
-import schemaJson from '../../shared/opencode-config-schema.1.18.29.json'
+import schemaJson from '../../shared/opencode-config-schema.json'
 
 // ─── Patch shape ────────────────────────────────────────────────────────────
 
 /**
- * Top-level keys the raw patcher REFUSES to touch (defense in depth). Each has a
- * dedicated owner elsewhere and a raw write here would fight that owner:
- *   model / small_model / disabled_providers / enabled_providers / agent
- *     → the ADR-031 projection writer (saveOpencodeSettings) + Models/Agents UIs
- *   mcp        → mcp.claudeui is injected ephemerally at spawn; user mcp.* is user-owned
- *   permission → derived from ClaudeUI's neutral autonomy-mode mapping (ADR-022)
- *   $schema    → not user-editable config
+ * Paths the raw patcher REFUSES to touch (defense in depth), as prefixes. Each
+ * has a dedicated owner elsewhere and a raw write here would fight it:
+ *   model / agents        → the projection writer (Models: default + small
+ *                           model) and the agent editor
+ *   mcp.servers           → ClaudeUI injects its own at spawn; the user's are theirs
+ *   permissions           → the Tools pane's own writer + autonomy (ADR-022)
+ *   experimental.policies → the provider enable/disable writer
+ *   $schema               → not user-editable config
+ * and the 1.x keys those owners read and move (provider, agent, small_model,
+ * disabled_providers, enabled_providers, permission, tools, mode).
  *
- * `provider` is DELIBERATELY absent: the model-capability editor (part C2) writes
- * provider.<id>.models.<modelId>.<capability> leaves through this exact path, and
- * that composes with the projection writer because both are leaf-scoped.
+ * `providers` is DELIBERATELY absent: the model-capability editor writes
+ * `providers.<id>.models.<m>.…` leaves through this path, which composes with
+ * the projection writer because both are leaf-scoped.
  */
-export const RAW_PATCH_EXCLUDED_TOP_LEVEL: ReadonlySet<string> = new Set([
-  '$schema',
-  'model',
-  'small_model',
-  'disabled_providers',
-  'enabled_providers',
-  'agent',
-  'mcp',
-  'permission'
-])
+export const RAW_PATCH_EXCLUDED_PATHS: readonly (readonly string[])[] = [
+  ['$schema'],
+  ['model'],
+  ['agents'],
+  ['mcp', 'servers'],
+  ['permissions'],
+  ['experimental', 'policies'],
+  ['provider'],
+  ['agent'],
+  ['small_model'],
+  ['disabled_providers'],
+  ['enabled_providers'],
+  ['permission'],
+  ['tools'],
+  ['mode']
+]
+
+function excludedBy(path: (string | number)[]): readonly string[] | undefined {
+  return RAW_PATCH_EXCLUDED_PATHS.find(
+    (prefix) =>
+      // `mcp` as a whole is excluded when the patch would replace `mcp.servers` with it.
+      (path.length < prefix.length &&
+        path.every((seg, i) => String(seg) === prefix[i]) &&
+        prefix.length > 1) ||
+      prefix.every((seg, i) => String(path[i]) === seg)
+  )
+}
 
 // ─── Read ─────────────────────────────────────────────────────────────────────
 
@@ -69,26 +100,71 @@ export function readOpencodeNativeRaw(): { config: Record<string, unknown>; path
   return { config: isPlainObject(parsed) ? parsed : {}, path: filePath }
 }
 
-// ─── Schema validation (ajv, draft 2020-12) ─────────────────────────────────
+// ─── Schema ───────────────────────────────────────────────────────────────────
+
+type Node = Record<string, unknown>
+const DEFS = (schemaJson as { $defs: Record<string, Node> }).$defs
+const ROOT = DEFS[(schemaJson as { $ref: string }).$ref.replace('#/$defs/', '')]
+
+function resolveRef(node: unknown): Node | undefined {
+  if (!isPlainObject(node)) return undefined
+  const ref = node.$ref
+  if (typeof ref === 'string') return resolveRef(DEFS[ref.replace('#/$defs/', '')])
+  return node
+}
+
+/** Every concrete node an `anyOf`/`oneOf`/`allOf` union may stand for. */
+function branches(node: Node | undefined): Node[] {
+  if (!node) return []
+  const union = (node.anyOf ?? node.oneOf ?? node.allOf) as unknown[] | undefined
+  if (Array.isArray(union)) return union.flatMap((b) => branches(resolveRef(b)))
+  return [node]
+}
+
+/**
+ * Whether the pinned 2.x schema has `path`: each segment must be a declared
+ * property, a record key (`additionalProperties` schema), or an array index.
+ * An open object (no `additionalProperties: false`) accepts any key below it.
+ */
+export function schemaHasPath(path: (string | number)[]): boolean {
+  let nodes: Node[] = branches(ROOT)
+  for (const seg of path) {
+    const next: Node[] = []
+    for (const node of nodes) {
+      const props = isPlainObject(node.properties) ? node.properties : undefined
+      if (props && String(seg) in props) next.push(...branches(resolveRef(props[String(seg)])))
+      else if (typeof seg === 'number' && node.items !== undefined)
+        next.push(...branches(resolveRef(node.items)))
+      else if (isPlainObject(node.additionalProperties))
+        next.push(...branches(resolveRef(node.additionalProperties)))
+      else if (
+        node.additionalProperties !== false &&
+        (node.type === 'object' || props !== undefined) &&
+        typeof seg === 'string'
+      )
+        next.push({}) // an open object: anything goes below
+      else if (Object.keys(node).length === 0) next.push({}) // unconstrained (Json values)
+    }
+    if (next.length === 0) return false
+    nodes = next
+  }
+  return true
+}
 
 let cachedValidator: ValidateFunction | null = null
 
 /**
- * Prepare the vendored schema for ajv:
- *  - drop the non-standard root keys allowComments / allowTrailingCommas
- *  - drop every `additionalProperties: false` so a config carrying keys this
- *    PINNED schema doesn't model (unknown top-level keys, future opencode fields,
- *    hand-added nested options) does NOT fail validation. Type/enum/format
- *    constraints on the fields we DO edit are still enforced — which is all the
- *    guard needs to catch a malformed edit (e.g. attachment: "yes"). opencode's
- *    own binary remains the authoritative validator.
+ * Prepare the generated schema for ajv: drop every `additionalProperties:
+ * false` so a 1.x key already inside a 2.x object (2.x drops it with a
+ * diagnostic; it is the user's) does not fail a write that never touches it.
+ * Writing such a key is refused by `schemaHasPath` instead. Types, enums and
+ * `required` on the touched keys are still enforced.
  */
 function prepareSchema(node: unknown): unknown {
   if (Array.isArray(node)) return node.map(prepareSchema)
   if (isPlainObject(node)) {
     const out: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(node)) {
-      if (k === 'allowComments' || k === 'allowTrailingCommas') continue
       if (k === 'additionalProperties' && v === false) continue
       out[k] = prepareSchema(v)
     }
@@ -100,20 +176,17 @@ function prepareSchema(node: unknown): unknown {
 function getValidator(): ValidateFunction {
   if (cachedValidator) return cachedValidator
   const ajv = new Ajv2020({ strict: false, allErrors: true })
-  // The schema $refs an external models.dev schema for `model`/`small_model`.
-  // We don't edit those keys, so a permissive string stub is enough to compile.
-  ajv.addSchema({
-    $id: 'https://models.dev/model-schema.json',
-    $defs: { Model: { type: 'string' } }
-  })
   cachedValidator = ajv.compile(prepareSchema(schemaJson) as AnySchemaObject)
   return cachedValidator
 }
 
-/** Throw with ajv's error text when `config` violates the vendored schema. */
-function validateAgainstSchema(config: unknown): void {
+/** Throw with ajv's error text when the touched keys of `config` violate the schema. */
+function validateTouched(config: Record<string, unknown>, keys: Set<string>): void {
+  const subset = Object.fromEntries(
+    [...keys].filter((k) => config[k] !== undefined).map((k) => [k, config[k]])
+  )
   const validate = getValidator()
-  if (!validate(config)) {
+  if (!validate(subset)) {
     const ajvText = (validate.errors ?? [])
       .map((e) => `${e.instancePath || '(root)'} ${e.message}`)
       .join('; ')
@@ -123,104 +196,80 @@ function validateAgainstSchema(config: unknown): void {
 
 // ─── Write (leaf patches) ─────────────────────────────────────────────────────
 
-/** Whether `path` resolves to an existing leaf/branch in `obj`. */
-function pathExists(obj: unknown, path: (string | number)[]): boolean {
-  let cur: unknown = obj
-  for (const seg of path) {
-    if (Array.isArray(cur)) {
-      if (typeof seg !== 'number' || seg < 0 || seg >= cur.length) return false
-      cur = cur[seg]
-    } else if (isPlainObject(cur)) {
-      if (!(String(seg) in cur)) return false
-      cur = cur[String(seg)]
-    } else {
-      return false
-    }
-  }
-  return true
-}
-
 /**
- * Apply patches to a plain JS object IN PLACE (used only for pre-write schema
- * validation of the projected result — the on-disk write goes through
- * jsonc-parser to preserve comments). Set creates missing parents; delete is a
- * no-op when the path is absent (mirrors the on-disk delete-safety).
+ * 2.x keys that 2.x also reads from a 1.x key of the same shape: a native value
+ * beside the 1.x one REPLACES it whole (with a conflict warning), so before a
+ * patch under the 2.x key the 1.x value moves there.
  */
-function applyPatchesToObject(
-  root: Record<string, unknown>,
-  patches: RawConfigPatch[]
-): Record<string, unknown> {
-  for (const patch of patches) {
-    const path = patch.path
-    if (path.length === 0) continue
-    const isDelete = !('value' in patch) || patch.value === undefined
-    if (isDelete) {
-      if (!pathExists(root, path)) continue
-      let cur: Record<string, unknown> = root
-      for (let i = 0; i < path.length - 1; i++) {
-        cur = cur[String(path[i])] as Record<string, unknown>
-      }
-      delete cur[String(path[path.length - 1])]
-    } else {
-      let cur: Record<string, unknown> = root
-      for (let i = 0; i < path.length - 1; i++) {
-        const key = String(path[i])
-        if (!isPlainObject(cur[key])) cur[key] = {}
-        cur = cur[key] as Record<string, unknown>
-      }
-      cur[String(path[path.length - 1])] = patch.value
-    }
-  }
-  return root
+const TOP_LEVEL_RENAMES: Record<string, string> = { media: 'attachment', snapshots: 'snapshot' }
+
+function moveTopLevel(doc: JsoncDoc, legacy: string, native: string): void {
+  if (!doc.has([legacy])) return
+  if (!doc.has([native])) doc.set([native], doc.get([legacy]))
+  doc.del([legacy])
 }
 
 /**
- * Apply leaf patches to opencode's resolved config file via jsonc-parser
- * modify()+applyEdits, byte-preserving comments and sibling keys.
+ * The 1.x `experimental.mcp_timeout` is BOTH 2.x MCP timeouts (`catalog` and
+ * `execution`, `normalizeMcp`). Before a patch under `mcp.timeout` it moves
+ * into whichever of the two is still unset, so editing one never drops the
+ * other to its default (S8 review F5).
+ */
+function moveMcpTimeout(doc: JsoncDoc): void {
+  const legacy = doc.get(['experimental', 'mcp_timeout'])
+  if (legacy === undefined) return
+  if (typeof legacy === 'number')
+    for (const leaf of ['catalog', 'execution'])
+      if (!doc.has(['mcp', 'timeout', leaf])) doc.set(['mcp', 'timeout', leaf], legacy)
+  doc.del(['experimental', 'mcp_timeout'])
+}
+
+/**
+ * Apply leaf patches to opencode's resolved config file via jsonc-parser,
+ * byte-preserving comments and sibling keys.
  *
  * Guarantees:
- *  - Rejects any patch whose top-level key is in RAW_PATCH_EXCLUDED_TOP_LEVEL.
- *  - Validates the RESULTING config against the vendored schema BEFORE writing;
+ *  - Rejects any patch under RAW_PATCH_EXCLUDED_PATHS, and any SET of a path
+ *    the 2.x schema does not have.
+ *  - Moves a 1.x-only provider entry to `providers.<id>` before patching it.
+ *  - Validates the RESULTING touched keys against the schema BEFORE writing;
  *    throws (with ajv text) on violation — nothing is written.
- *  - Delete patches are no-ops when the path is absent in the current parsed doc
- *    (the modify() delete-under-missing-parent INVARIANT).
+ *  - Delete patches are no-ops when the path is absent.
  *  - Byte-compare write gate: patches producing no textual change → no write.
  */
 export function patchOpencodeNativeRaw(patches: RawConfigPatch[]): void {
   for (const patch of patches) {
-    if (patch.path.length === 0) {
-      throw new Error('Refusing to apply a patch with an empty path')
-    }
-    const top = patch.path[0]
-    if (typeof top === 'string' && RAW_PATCH_EXCLUDED_TOP_LEVEL.has(top)) {
-      throw new Error(`Refusing to patch protected opencode config key "${top}"`)
-    }
+    if (patch.path.length === 0) throw new Error('Refusing to apply a patch with an empty path')
+    const excluded = excludedBy(patch.path)
+    if (excluded)
+      throw new Error(`Refusing to patch protected opencode config key "${excluded.join('.')}"`)
+    const isDelete = !('value' in patch) || patch.value === undefined
+    if (!isDelete && !schemaHasPath(patch.path))
+      throw new Error(
+        `Refusing to write "${patch.path.join('.')}": opencode 2.x has no such config key`
+      )
   }
 
   const { path: filePath, existed } = resolveOpencodeConfigFile()
   const originalText = existed ? safeRead(filePath) : undefined
-  const baseText = originalText ?? '{}'
-  const parsed = (jsoncParseSafe(baseText) ?? {}) as Record<string, unknown>
+  const doc = new JsoncDoc(originalText ?? '{}')
 
-  // Validate the projected RESULT (against a deep clone) before touching disk.
-  const projected = applyPatchesToObject(structuredClone(parsed), patches)
-  validateAgainstSchema(projected)
-
-  const eol = detectEol(baseText)
-  const fmt: FormattingOptions = { insertSpaces: true, tabSize: 2, eol }
-  let text = baseText
   for (const patch of patches) {
-    const isDelete = !('value' in patch) || patch.value === undefined
-    if (isDelete) {
-      // INVARIANT: modify() throws deleting under a missing parent — skip absent.
-      if (!pathExists(parsed, patch.path)) continue
-      text = applyEdits(text, modify(text, patch.path, undefined, { formattingOptions: fmt }))
-    } else {
-      text = applyEdits(text, modify(text, patch.path, patch.value, { formattingOptions: fmt }))
-    }
+    if (patch.path[0] === 'providers' && typeof patch.path[1] === 'string')
+      moveProviderToNative(doc, patch.path[1])
+    const legacy = TOP_LEVEL_RENAMES[String(patch.path[0])]
+    if (legacy) moveTopLevel(doc, legacy, String(patch.path[0]))
+    if (patch.path[0] === 'mcp' && patch.path[1] === 'timeout') moveMcpTimeout(doc)
   }
 
-  writeIfChanged(filePath, text, originalText)
+  for (const patch of patches) {
+    const isDelete = !('value' in patch) || patch.value === undefined
+    if (isDelete) doc.del(patch.path)
+    else doc.set(patch.path, patch.value)
+  }
+
+  validateTouched(doc.value(), new Set(patches.map((p) => String(p.path[0]))))
+  if (writeIfChanged(filePath, doc.text, originalText)) notifyOpencodeConfigWritten('raw config')
 }
 
 /** Test-only: drop the memoised ajv validator so a fresh schema can recompile. */

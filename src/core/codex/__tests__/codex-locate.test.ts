@@ -1,8 +1,24 @@
 // @vitest-environment node
-import { afterEach, expect, it, vi } from 'vitest'
-import { lstatSync } from 'node:fs'
-import { join } from 'node:path'
+/**
+ * codex-locate.ts delegates to the harness resolver (ADR-082). Codex is not
+ * bundled (§8): it runs from ClaudeUI's managed store at the pin (or a System
+ * install), never from a vendored copy and never from PATH. A real temp store
+ * stands in; the resolver caches, so every test starts from
+ * `invalidateHarness()`.
+ */
+import { afterEach, beforeEach, expect, it } from 'vitest'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import { setHostPaths } from '../../host'
+import { harnessManifest } from '../../harness/manifests'
+import { invalidateHarness } from '../../harness/resolve'
+import { HARNESS_STORE_ENV } from '../../harness/store'
+import {
+  exeName,
+  fakeHarnessInstall,
+  writeHarnessPayload
+} from '../../../test/helpers/fake-harness'
 import {
   codexBinaryAvailable,
   codexHostSupported,
@@ -10,37 +26,50 @@ import {
   locateCodexBinary,
   locateCodexCodeModeHost
 } from '../codex-locate'
-vi.mock('node:fs', () => ({ lstatSync: vi.fn() }))
+
+const TESTED = harnessManifest('codex').tested
+let tmp: string
+let store: string
+const saved = { store: process.env[HARNESS_STORE_ENV], override: process.env.CLAUDEUI_CODEX_CLI }
+beforeEach(() => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-locate-'))
+  store = path.join(tmp, 'store')
+  process.env[HARNESS_STORE_ENV] = store
+  delete process.env.CLAUDEUI_CODEX_CLI
+  setHostPaths({ getAppPath: () => path.join(tmp, 'app') })
+  invalidateHarness()
+})
 afterEach(() => {
   setHostPaths(null)
-  vi.resetAllMocks()
+  if (saved.store === undefined) delete process.env[HARNESS_STORE_ENV]
+  else process.env[HARNESS_STORE_ENV] = saved.store
+  if (saved.override === undefined) delete process.env.CLAUDEUI_CODEX_CLI
+  else process.env.CLAUDEUI_CODEX_CLI = saved.override
+  fs.rmSync(tmp, { recursive: true, force: true })
+  invalidateHarness()
 })
-it('uses host dev path and never PATH', () => {
-  setHostPaths({ getAppPath: () => '/project' })
-  vi.mocked(lstatSync).mockReturnValue({ isFile: () => true } as ReturnType<typeof lstatSync>)
-  expect(locateCodexBinary()).toBe(
-    join('/project/vendor/codex-cli', process.platform === 'win32' ? 'codex.exe' : 'codex')
-  )
+it("runs the pinned Codex from ClaudeUI's store", () => {
+  const dir = fakeHarnessInstall(store, 'codex', TESTED)
+  expect(locateCodexBinary()).toBe(path.join(dir, exeName('codex')))
 })
-it('tries packaged resource and unpacked paths, rejecting directories/symlinks', () => {
-  setHostPaths({ getAppPath: () => '/Resources/app.asar' })
-  vi.mocked(lstatSync).mockReturnValue({ isFile: () => false } as ReturnType<typeof lstatSync>)
+it('never falls back to a vendored copy, a packaged one, or PATH', () => {
+  writeHarnessPayload(path.join(tmp, 'app', 'vendor', 'codex-cli'), 'codex')
+  const onPath = writeHarnessPayload(path.join(tmp, 'bin'), 'codex')
+  const savedPath = process.env.PATH
+  process.env.PATH = `${path.dirname(onPath)}${path.delimiter}${savedPath ?? ''}`
+  try {
+    expect(locateCodexBinary()).toBeNull()
+    expect(codexBinaryAvailable()).toBe(false)
+  } finally {
+    process.env.PATH = savedPath
+  }
+  const resources = path.join(tmp, 'Resources')
+  setHostPaths({ getAppPath: () => path.join(resources, 'app.asar') })
+  writeHarnessPayload(path.join(resources, 'codex-cli'), 'codex')
+  invalidateHarness()
   expect(locateCodexBinary()).toBeNull()
-  expect(lstatSync).toHaveBeenCalledTimes(2)
-  // extraResources puts the binaries beside app.asar, so that is the first probe.
-  expect(vi.mocked(lstatSync).mock.calls[0][0]).toBe(
-    join('/Resources/codex-cli', process.platform === 'win32' ? 'codex.exe' : 'codex')
-  )
-  expect(vi.mocked(lstatSync).mock.calls[1][0]).toContain('app.asar.unpacked')
 })
-it('returns unavailable rather than falling back to PATH', () => {
-  vi.mocked(lstatSync).mockImplementation(() => {
-    throw new Error('missing')
-  })
-  expect(locateCodexBinary()).toBeNull()
-  expect(lstatSync).toHaveBeenCalledTimes(1)
-})
-// The set is guarded against `scripts/codex-digests.json#hosts` in codex-tooling.test.ts;
+// The set is guarded against `src/shared/harness-manifests/codex.json#platforms` in codex-tooling.test.ts;
 // here only the predicate's own shape matters.
 it('gates on the hosts with a reviewed acquisition manifest', () => {
   expect(codexHostSupported('darwin', 'arm64')).toBe(true)
@@ -51,29 +80,23 @@ it('gates on the hosts with a reviewed acquisition manifest', () => {
   expect(codexHostSupported('darwin', 'x64')).toBe(false)
   expect(codexHostSupported('linux', 'ia32')).toBe(false)
 })
-const HOST_NAME = process.platform === 'win32' ? 'codex-code-mode-host.exe' : 'codex-code-mode-host'
 it.skipIf(!codexHostSupported())(
   'reports unavailable when the code-mode host is missing beside the binary',
   () => {
-    setHostPaths({ getAppPath: () => '/project' })
-    vi.mocked(lstatSync).mockImplementation((path) => {
-      if (String(path).endsWith(HOST_NAME)) throw new Error('missing')
-      return { isFile: () => true } as ReturnType<typeof lstatSync>
-    })
+    fakeHarnessInstall(store, 'codex', TESTED, { codeModeHost: false })
     expect(locateCodexBinary()).not.toBeNull()
+    expect(locateCodexCodeModeHost()).toBeNull()
     expect(codexBinaryAvailable()).toBe(false)
-    vi.mocked(lstatSync).mockReturnValue({ isFile: () => true } as ReturnType<typeof lstatSync>)
+    const dir = fakeHarnessInstall(store, 'codex', TESTED)
+    invalidateHarness()
+    // The host is located beside the CANONICAL binary: on macOS `os.tmpdir()` is a
+    // symlink (`/var` → `/private/var`), so the expectation must be too.
+    expect(locateCodexCodeModeHost()).toBe(
+      path.join(fs.realpathSync(dir), exeName('codex-code-mode-host'))
+    )
     expect(codexBinaryAvailable()).toBe(true)
   }
 )
-it.skipIf(!codexHostSupported())('locates the host only beside the located binary', () => {
-  setHostPaths({ getAppPath: () => '/project' })
-  vi.mocked(lstatSync).mockReturnValue({ isFile: () => true } as ReturnType<typeof lstatSync>)
-  expect(locateCodexCodeModeHost()).toBe(join('/project/vendor/codex-cli', HOST_NAME))
-  vi.mocked(lstatSync).mockReturnValue({ isFile: () => false } as ReturnType<typeof lstatSync>)
-  expect(locateCodexCodeModeHost()).toBeNull()
-  expect(codexBinaryAvailable()).toBe(false)
-})
 
 /**
  * The Linux sandbox is bubblewrap, and Codex finds it the way `which` would: a

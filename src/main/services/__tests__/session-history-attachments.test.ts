@@ -27,6 +27,7 @@ vi.mock('os', async (importOriginal) => {
 })
 
 import { loadSessionHistory, loadSubagentHistory } from '../../../core/services/session-history'
+import { blobRefOf, storedBase64 } from '../../../test/helpers/blob-refs'
 
 const PROJECT_KEY = 'test-project-attachments'
 const SESSION_ID = '11111111-2222-3333-4444-555555555555'
@@ -88,9 +89,26 @@ describe('loadSessionHistory — user attachment rehydration', () => {
     expect(messages).toHaveLength(1)
     expect(messages[0].role).toBe('user')
     expect(messages[0].content).toEqual([
-      { type: 'image', mediaType: 'image/png', base64Data: 'AAAA' },
+      { type: 'image', mediaType: 'image/png', ...blobRefOf('AAAA') },
       { type: 'text', text: 'look at this' }
     ])
+  })
+
+  it('interns the bytes: the history carries refs only, the store holds the bytes (ADR-087)', async () => {
+    const bytes = Buffer.alloc(256 * 1024, 7)
+    const data = bytes.toString('base64')
+    writeTranscript([
+      userLine([imageBlock('image/png', data), documentBlock('application/pdf', data)])
+    ])
+
+    const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+
+    expect(JSON.stringify(messages).length).toBeLessThan(2048)
+    const [image, doc] = messages[0].content as Array<{ blobId: string; bytes: number }>
+    expect(image.bytes).toBe(bytes.length)
+    // One entry for both: the id names the bytes, not the block that carried them.
+    expect(doc.blobId).toBe(image.blobId)
+    expect(storedBase64(image.blobId)).toBe(data)
   })
 
   it('emits an attachments-only user message (image, no text block)', async () => {
@@ -99,7 +117,7 @@ describe('loadSessionHistory — user attachment rehydration', () => {
     const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
     expect(messages).toHaveLength(1)
     expect(messages[0].content).toEqual([
-      { type: 'image', mediaType: 'image/jpeg', base64Data: 'BBBB' }
+      { type: 'image', mediaType: 'image/jpeg', ...blobRefOf('BBBB') }
     ])
   })
 
@@ -114,8 +132,8 @@ describe('loadSessionHistory — user attachment rehydration', () => {
 
     const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
     expect(messages[0].content).toEqual([
-      { type: 'image', mediaType: 'image/png', base64Data: 'ONE' },
-      { type: 'image', mediaType: 'image/webp', base64Data: 'TWO' },
+      { type: 'image', mediaType: 'image/png', ...blobRefOf('ONE') },
+      { type: 'image', mediaType: 'image/webp', ...blobRefOf('TWO') },
       { type: 'text', text: 'two shots' }
     ])
   })
@@ -144,7 +162,7 @@ describe('loadSessionHistory — user attachment rehydration', () => {
 
     const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
     expect(messages[0].content).toEqual([
-      { type: 'document', mediaType: 'application/pdf', base64Data: 'PDFDATA' },
+      { type: 'document', mediaType: 'application/pdf', ...blobRefOf('PDFDATA') },
       { type: 'text', text: 'read this' }
     ])
   })
@@ -181,7 +199,7 @@ describe('loadSessionHistory — user attachment rehydration', () => {
     expect(messages[0].content[0]).toMatchObject({ type: 'cli_command', commandName: '/clear' })
   })
 
-  it('still routes a task-notification text block to taskNotifications, not a message', async () => {
+  it('still routes a task-notification text block to taskNotifications, and shows it as an agent note, never a user message (S4)', async () => {
     writeTranscript([
       userLine([
         {
@@ -192,7 +210,11 @@ describe('loadSessionHistory — user attachment rehydration', () => {
     ])
 
     const { messages, taskNotifications } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
-    expect(messages).toHaveLength(0)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({
+      role: 'system',
+      content: [{ type: 'context_note', fragments: [{ label: 'from an agent, not from you' }] }]
+    })
     expect(taskNotifications).toHaveLength(1)
     expect(taskNotifications[0].taskId).toBe('agent-9')
   })
@@ -237,7 +259,7 @@ describe('loadSubagentHistory — user attachment rehydration', () => {
     const messages = await loadSubagentHistory(SESSION_ID, PROJECT_KEY, AGENT_ID)
     expect(messages).toHaveLength(1)
     expect(messages[0].content).toEqual([
-      { type: 'image', mediaType: 'image/gif', base64Data: 'GIFDATA' },
+      { type: 'image', mediaType: 'image/gif', ...blobRefOf('GIFDATA') },
       { type: 'text', text: 'subagent prompt' }
     ])
   })
@@ -248,7 +270,7 @@ describe('loadSubagentHistory — user attachment rehydration', () => {
     const messages = await loadSubagentHistory(SESSION_ID, PROJECT_KEY, AGENT_ID)
     expect(messages).toHaveLength(1)
     expect(messages[0].content).toEqual([
-      { type: 'document', mediaType: 'application/pdf', base64Data: 'SUBPDF' }
+      { type: 'document', mediaType: 'application/pdf', ...blobRefOf('SUBPDF') }
     ])
   })
 
@@ -311,7 +333,7 @@ describe('loadSessionHistory — tool-result images', () => {
     expect(result).toMatchObject({
       type: 'tool_result',
       toolUseId: 'tu-1',
-      images: [{ mediaType: 'image/png', base64Data: 'SHOT' }]
+      images: [{ mediaType: 'image/png', ...blobRefOf('SHOT') }]
     })
   })
 
@@ -337,7 +359,7 @@ describe('loadSessionHistory — tool-result images', () => {
     expect(messages[0].content[0]).toMatchObject({
       type: 'tool_result',
       toolUseId: 'tu-emb',
-      images: [{ mediaType: 'image/webp', base64Data: 'EMB' }]
+      images: [{ mediaType: 'image/webp', ...blobRefOf('EMB') }]
     })
   })
 
@@ -365,7 +387,7 @@ describe('loadSubagentHistory — tool-result images', () => {
     const result = messages[0].content.find((b) => b.type === 'tool_result')
     expect(result).toMatchObject({
       toolUseId: 'tu-s1',
-      images: [{ mediaType: 'image/jpeg', base64Data: 'SUBSHOT' }]
+      images: [{ mediaType: 'image/jpeg', ...blobRefOf('SUBSHOT') }]
     })
   })
 
@@ -385,7 +407,7 @@ describe('loadSubagentHistory — tool-result images', () => {
     const messages = await loadSubagentHistory(SESSION_ID, PROJECT_KEY, AGENT_ID)
     expect(messages[0].content[0]).toMatchObject({
       toolUseId: 'tu-s2',
-      images: [{ mediaType: 'image/gif', base64Data: 'SUBEMB' }]
+      images: [{ mediaType: 'image/gif', ...blobRefOf('SUBEMB') }]
     })
   })
 })

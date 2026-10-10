@@ -24,9 +24,11 @@ src/
                          (module map: docs/protocol-cc/01-transport.md §1.13)
     providers/         — engine seam: ISession, BaseSession, EngineRegistry,
                          SpawnPrepRegistry, session-queue, register-engines
-    opencode/          — opencode backend: OpencodeServerManager, OpencodeClient,
-                         OpencodeSession, event-mapper, model-discovery, config
-                         writers, permission compiler, hosted-tools MCP host
+    opencode/          — opencode 2.x backend (ADR-097): OpencodeServerManager,
+                         OpencodeClient + protocol-v2/ (generated), OpencodeSession,
+                         event-mapper / history / reconnect, permission-v2,
+                         child-rulesets, session-support, credential-store,
+                         model-discovery, config writers, hosted-tools MCP host
     pi/                — pi backend: PiRpcClient (stdio JSONL), PiSession, event-mapper,
                          model-discovery, PiBridgeHost (loopback approval + hosted-tool
                          host), pi-bridge-source (the -e extension), permission-engine,
@@ -56,7 +58,8 @@ src/
     index.ts           — app lifecycle, BrowserWindow setup, SQLite driver install
     boot-core.ts       — the desktop composition root: transport binder, host
                          adapters, the ten `remote:*` ipcMain registrations
-    ipc/               — desktop-transport.ts (the ipcMain half of the binder)
+    ipc/               — desktop-transport.ts (the ipcMain half of the binder),
+                         voice-feed.ts (the desktop window's `voice:audio` feed)
     auth/              — ClaudeAuthProvider + EngineAuthRegistry (they stay here:
                          Claude sign-in opens the host browser) + register-auth-
                          providers.ts, side-effect-imported by boot-core.ts to
@@ -83,18 +86,25 @@ src/
                          terminal/, usage/, auth/, SettingsDialog/, Sidebar/,
                          shared/, plugin/
     lib/diff/          — custom diff viewer (parse-patch, unified/split tables)
+    lib/voice/         — microphone capture for desktop AND web: BrowserVoiceCapture,
+                         the AudioWorklet (a `?url` asset), voice-controller.ts,
+                         voice-notice.ts (the mic's notice pill), mic-devices.ts +
+                         mic-preference.ts (which microphone; per client, localStorage)
   renderer/log-viewer/ — standalone log viewer window
   web/                 — remote-access web client (WebSocket + E2E encryption)
   test/                — shared test infra: TestIpcBridge, electron/sdk/sqlite/pty
                          stubs, factories, helpers, setup (installs the SQLite driver)
   e2e/flows/           — layer-3 E2E tests
   integration/         — layer-4 integration tests (real engine binaries, gated)
-vendor/                — rebundled bun-claude + vendored opencode/pi binaries (not checked in)
-scripts/               — build-time helpers (extract-cli, rebundle-cli, ensure-opencode,
+vendor/                — rebundled bun-claude + engine source checkouts (not checked in);
+                         opencode, pi and Codex live in ~/.claude/ui/harnesses (ADR-082)
+scripts/               — build-time helpers (extract-cli, rebundle-cli, ensure-opencode/pi/codex
+                         over the harness installer,
                          build-server.mjs for the two server artifacts,
                          verify-bun-sqlite.ts for driver conformance,
                          app-shot.mjs for real-app verification)
-patch/                 — cli.js content-regex patches (registry: apply-all.mjs)
+patch/                 — cli.js content-regex patches (registry: lib/patch-registry.mjs,
+                         run by apply-all.mjs)
 ```
 
 ## Host seams
@@ -105,7 +115,7 @@ Seven of them, each with a documented headless behaviour:
 | Seam               | Desktop implementation                                                                                                                                                  | Headless                                                                                                                 |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `HostWindowHandle` | the real `BrowserWindow` (read at USE time via `services/host-window.ts`)                                                                                               | `null` — a real mode                                                                                                     |
-| `HostPaths`        | `app.getAppPath()`                                                                                                                                                      | the directory containing `out/web` (`resolveAppPath`)                                                                    |
+| `HostPaths`        | `app.getAppPath()`                                                                                                                                                      | the directory containing `out/renderer` (`resolveAppPath`)                                                               |
 | `hostIsPackaged`   | `app.isPackaged`                                                                                                                                                        | `true` — a deployed server is not a dev build                                                                            |
 | `HostPicker`       | `dialog.showOpenDialog`                                                                                                                                                 | unset; `pickHostDirectory()` resolves `null` (the channel is `host`-capability, so no remote client can reach it anyway) |
 | `HostNotifier`     | Electron `Notification`, passed to `startCoreServices({ notifier })` and handed to `AutomationManager` — a bare type, NOT one of the five `setHostX` module-level seams | omitted — no desktop to notify                                                                                           |
@@ -145,8 +155,8 @@ Key modules in `src/core/services/`:
 | `usage-fetcher.ts`                                                                                              | Polls `/api/oauth/usage`, merges rate-limit headers, disk cache                                                                                                                                      |
 | `block-usage.ts`                                                                                                | JSONL → `usage_event` ingestion, 5h billing windows, per-model/per-engine breakdown                                                                                                                  |
 | `usage-recorder.ts` / `usage-reconciler.ts` / `usage-aggregation.ts` / `usage-provider.ts` / `usage-windows.ts` | DB-backed metering: live recording, backfill reconcile, SQL aggregation, window identity (ADR-011/020)                                                                                               |
-| `opencode-pricing.ts`                                                                                           | Pricing from opencode's `/config/providers`, persisted supplemental table                                                                                                                            |
-| `opencode-session-list.ts` / `pi-session-list.ts`                                                               | Sidebar lists for opencode / pi sessions, read from those engines' own stores                                                                                                                        |
+| `opencode-pricing.ts`                                                                                           | Pricing from the models.dev catalog opencode reads (ADR-071 §5), persisted supplemental table                                                                                                        |
+| `opencode-session-list.ts` / `pi-session-list.ts`                                                               | Sidebar lists for opencode / pi sessions: opencode's from its API (cached, refreshed in the background, ADR-097 §6), pi's from its own store                                                         |
 | `context-window.ts`                                                                                             | Mirror of cli.js's model context-window resolution (`docs/protocol-cc/13-context-window.md`)                                                                                                         |
 | `db.ts`                                                                                                         | Operational SQLite DB — migrations + typed repos, on the driver seam (below)                                                                                                                         |
 | `sqlite-driver.ts` + `sqlite/`                                                                                  | The storage seam: one API, three engines (`better-sqlite3-driver`, `bun-sqlite-driver`, `node-sqlite-driver`); the ENTRYPOINT installs one (ADR-058)                                                 |
@@ -158,9 +168,8 @@ Key modules in `src/core/services/`:
 | `sync-seed.ts`                                                                                                  | Seeds canonical state's file/query-sourced fields at boot (settings, session registry, slash commands, sidebar directories) so a `sync-full` is complete before any client connects (phase 4b)       |
 | `logger.ts`                                                                                                     | File + ring-buffer logging (the debug WINDOW is `src/main/services/log-viewer.ts`)                                                                                                                   |
 | `mermaid-tool.ts` / `mockup-tool.ts`                                                                            | Hosted MCP tools for diagram + UI-mockup rendering (ADR-007)                                                                                                                                         |
-| `voice-capture.ts` / `voice-client.ts`                                                                          | Native (host microphone) audio capture + streaming to the in-cli.js transcription server                                                                                                             |
-| `voice-stream-client.ts`                                                                                        | The cli.js voice-server TCP protocol, shared by the host microphone and a remote browser capture                                                                                                     |
-| `remote-voice.ts`                                                                                               | Remote browser voice: audio in on the `voice-audio` lane frame, transcripts back to that connection                                                                                                  |
+| `voice-stream-client.ts`                                                                                        | The cli.js voice-server TCP protocol; the base of the relay's push-fed client                                                                                                                        |
+| `voice-relay.ts`                                                                                                | Voice relay per capture owner: renderer-pushed PCM (desktop `voice:audio` IPC, web `voice-audio` frame) in, transcripts back to that owner                                                           |
 
 What deliberately stayed in `src/main/services/` — every RUNTIME module that is Electron
 or is the desktop's own. (Tests are the exception, and the honest caveat: the legacy

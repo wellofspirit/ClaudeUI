@@ -53,6 +53,22 @@ describe('deriveTaskState', () => {
     ).toBe(false)
   })
 
+  it('a background spawn refused before launch (error result, no record) is settled', () => {
+    const s = deriveTaskState({
+      ...base,
+      isBackground: true,
+      hasResult: true,
+      resultIsError: true
+    })
+    expect(s.isRunning).toBe(false)
+    expect(s.isError).toBe(true)
+    // …but an armed record still outranks the result.
+    expect(
+      deriveTaskState({ ...base, isBackground: true, hasActiveTask: true, resultIsError: true })
+        .isRunning
+    ).toBe(true)
+  })
+
   it('a foreground task without a lifecycle record falls back to the result', () => {
     // The legacy heuristic, load-bearing for opencode / pi / Codex children.
     expect(deriveTaskState({ ...base }).isRunning).toBe(true)
@@ -114,5 +130,39 @@ describe('deriveTaskState', () => {
 
   it('defaults resultIsError to false', () => {
     expect(deriveTaskState({ ...base }).isError).toBe(false)
+  })
+
+  // ADR-073 §5 — a process that dies takes its agents with it.
+  it('reads a stop as stopped, not completed', () => {
+    const s = deriveTaskState({ ...base, hasResult: true, notification: notif('t', 'stopped') })
+    expect(s).toMatchObject({ isRunning: false, isError: false, isStopped: true, isLoaded: false })
+  })
+
+  it('a resumed run outranks the stop that ended the run before it', () => {
+    const s = deriveTaskState({
+      ...base,
+      hasActiveTask: true,
+      hasResult: true,
+      notification: notif('t', 'stopped')
+    })
+    expect(s).toMatchObject({ isRunning: true, isStopped: false })
+  })
+
+  it('reads an agent whose transcript ends mid-run as neutral, live or historical', () => {
+    for (const isHistorical of [true, false]) {
+      const s = deriveTaskState({
+        ...base,
+        isHistorical,
+        isBackground: true,
+        hasResult: true,
+        notification: notif('t', 'unfinished')
+      })
+      expect(s).toMatchObject({
+        isRunning: false,
+        isError: false,
+        isStopped: false,
+        isLoaded: true
+      })
+    }
   })
 })

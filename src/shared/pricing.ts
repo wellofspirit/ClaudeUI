@@ -5,7 +5,7 @@
  *   1. Built-in table (this file) — exact equivalent cost for Anthropic/OpenAI/Google models.
  *      Authoritative; supplemental entries never override these.
  *   2. Supplemental table — registered at runtime by main via registerSupplementalPricing()
- *      (opencode /config/providers prices, persisted to ~/.claude/ui/opencode-prices.json).
+ *      (the models.dev catalog, `opencode-pricing.ts`, persisted to ~/.claude/ui/opencode-prices.json).
  *   3. Engine-reported cost (fallback/real-spend) — used by the recorder as engine_cost_usd.
  *
  * shared/ — no DB imports, no electron, no node-only APIs. Pure computation.
@@ -180,7 +180,20 @@ const ANTHROPIC_PRICING: PricingEntry[] = [
       cacheReadPerMTok: 0.5
     }
   },
-  // Sonnet (all versions)
+  // Sonnet 5 / 5.5 — cli.js 2.1.285 `tier_2_10`. Must precede the generic
+  // 'sonnet' entry (first substring match wins).
+  {
+    vendorId: 'anthropic',
+    match: 'sonnet-5',
+    pricing: {
+      inputPerMTok: 2,
+      outputPerMTok: 10,
+      cacheWritePerMTok: 2.5,
+      cacheWrite1hPerMTok: 4,
+      cacheReadPerMTok: 0.2
+    }
+  },
+  // Sonnet 3.x / 4.x
   {
     vendorId: 'anthropic',
     match: 'sonnet',
@@ -190,6 +203,21 @@ const ANTHROPIC_PRICING: PricingEntry[] = [
       cacheWritePerMTok: 3.75,
       cacheWrite1hPerMTok: 6,
       cacheReadPerMTok: 0.3
+    }
+  },
+  // Haiku 5.5 — cli.js 2.1.293 `haiku_55`. Its long-prompt tier (5× every rate
+  // above 100K prompt tokens) is NOT modelled, as with OpenAI's >200k tier below:
+  // the base rate is the honest estimate. `claude-haiku-4-5` does not contain
+  // 'haiku-5', so this entry cannot catch Haiku 4.5.
+  {
+    vendorId: 'anthropic',
+    match: 'haiku-5',
+    pricing: {
+      inputPerMTok: 0.1,
+      outputPerMTok: 0.5,
+      cacheWritePerMTok: 0.125,
+      cacheWrite1hPerMTok: 0.2,
+      cacheReadPerMTok: 0.01
     }
   },
   // Haiku 4.x
@@ -216,7 +244,10 @@ const ANTHROPIC_PRICING: PricingEntry[] = [
       cacheReadPerMTok: 0.08
     }
   },
-  // Haiku fallback
+  // Haiku fallback. Kept at its historical rates: dated Haiku 3.x ids
+  // (`claude-3-5-haiku-20241022`) land here, and usage history is priced from
+  // this table, so moving it would re-price old transcripts. Live sessions price
+  // by the model cli.js reports (ADR-100), not by the bare alias.
   {
     vendorId: 'anthropic',
     match: 'haiku',
@@ -440,7 +471,60 @@ const OPENAI_PRICING: PricingEntry[] = [
       cacheReadPerMTok: 1.25
     }
   },
+  // GPT-4.1 — source: the models.dev catalog opencode-pricing.ts persists
+  // (provider `openai`, snapshot of 2026-09-27). Without these three the ids
+  // fell through to the `gpt-4` entry below and were priced at $30/$60 (ADR-081
+  // §5). `-mini` / `-nano` MUST precede `gpt-4.1`, and all three `gpt-4`.
+  {
+    vendorId: 'openai',
+    match: 'gpt-4.1-mini',
+    pricing: {
+      inputPerMTok: 0.4,
+      outputPerMTok: 1.6,
+      cacheWritePerMTok: 0.4,
+      cacheWrite1hPerMTok: 0.4,
+      cacheReadPerMTok: 0.1
+    }
+  },
+  {
+    vendorId: 'openai',
+    match: 'gpt-4.1-nano',
+    pricing: {
+      inputPerMTok: 0.1,
+      outputPerMTok: 0.4,
+      cacheWritePerMTok: 0.1,
+      cacheWrite1hPerMTok: 0.1,
+      cacheReadPerMTok: 0.025
+    }
+  },
+  {
+    vendorId: 'openai',
+    match: 'gpt-4.1',
+    pricing: {
+      inputPerMTok: 2,
+      outputPerMTok: 8,
+      cacheWritePerMTok: 2,
+      cacheWrite1hPerMTok: 2,
+      cacheReadPerMTok: 0.5
+    }
+  },
   // o3 / o4
+  //
+  // o3-pro — same source as GPT-4.1 above. It MUST precede `o3`, which it used
+  // to match. The snapshot carries no cached-input discount for it and prices a
+  // cached token at the input rate, so this does too (not this file's 0.5×
+  // convention for -pro models: here there is a source to follow).
+  {
+    vendorId: 'openai',
+    match: 'o3-pro',
+    pricing: {
+      inputPerMTok: 20,
+      outputPerMTok: 80,
+      cacheWritePerMTok: 20,
+      cacheWrite1hPerMTok: 20,
+      cacheReadPerMTok: 20
+    }
+  },
   {
     vendorId: 'openai',
     match: 'o4-mini',
@@ -463,15 +547,18 @@ const OPENAI_PRICING: PricingEntry[] = [
       cacheReadPerMTok: 0.275
     }
   },
+  // o3 — source: the models.dev catalog opencode-pricing.ts persists (provider
+  // `openai`, snapshot of 2026-09-27). The old $10/$40 predates OpenAI's price
+  // cut and, because this table wins over the snapshot, priced o3 5× too high.
   {
     vendorId: 'openai',
     match: 'o3',
     pricing: {
-      inputPerMTok: 10,
-      outputPerMTok: 40,
-      cacheWritePerMTok: 10,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 2.5
+      inputPerMTok: 2,
+      outputPerMTok: 8,
+      cacheWritePerMTok: 2,
+      cacheWrite1hPerMTok: 2,
+      cacheReadPerMTok: 0.5
     }
   },
   // GPT-4-turbo fallback

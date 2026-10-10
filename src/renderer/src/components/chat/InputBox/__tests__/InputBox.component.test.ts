@@ -17,13 +17,30 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, cleanup, render } from '@testing-library/react'
 import { createElement } from 'react'
-import { useSessionStore } from '../../../../stores/session-store'
+import { markViewEvicted, useSessionStore } from '../../../../stores/session-store'
+import {
+  reloadActiveTranscript,
+  resetHistoryLoadForTests
+} from '../../../../lib/session-history-load'
 import { resetFactoryCounter } from '@test/factories/messages'
 import type { InputBoxViewProps } from '../View'
 import type { ModelInfo, QueuedItem } from '../../../../../../shared/types'
 import { InputBox } from '../InputBox'
-import { resolveCodexCapabilities } from '../../../../../../shared/model-capabilities'
-import { seed, mirrorStoreIntoReplica, resetReplicaSeam } from '@test/helpers/replica-seed'
+import {
+  resetVoiceNoticesForTests,
+  useVoiceNoticeStore,
+  voiceNoticeFor
+} from '../../../../lib/voice/voice-notice'
+import {
+  resolveCodexCapabilities,
+  type EffortLevel
+} from '../../../../../../shared/model-capabilities'
+import {
+  seed,
+  emitSync,
+  mirrorStoreIntoReplica,
+  resetReplicaSeam
+} from '@test/helpers/replica-seed'
 
 // ---------------------------------------------------------------------------
 // View mock — captures whatever props the FC passes to InputBoxView
@@ -67,6 +84,38 @@ vi.mock('../../../../hooks/useFileMention', () => ({
 
 vi.mock('../../../../hooks/useIsMobile', () => ({
   useIsMobile: () => false
+}))
+
+// The voice controller with its microphone taken out: jsdom has no audio, so the
+// real capture would refuse before the TRANSPORT is ever reached. What these
+// tests pin is InputBox's sequencing (held/press refs around `ensureSession()`)
+// as it reaches the transport — `window.api.voiceStart` / `voiceStop`, i.e. the
+// `voice:start-recording` / `voice:stop-recording` invokes recorded below. The
+// controller's own capture-vs-transport order is voice-controller.unit.test.ts's.
+const voiceFaults = vi.hoisted(() => new Set<(message: string) => void>())
+const voiceSwitches = vi.hoisted(() => new Set<(label: string) => void>())
+const voiceSilences = vi.hoisted(
+  () => new Set<(silence: { silent: boolean; trackLabel: string | null }) => void>()
+)
+vi.mock('../../../../lib/voice/voice-controller', () => ({
+  voiceController: () => ({
+    start: (routingId: string, language: string) => window.api.voiceStart(routingId, language),
+    stop: (routingId: string) => window.api.voiceStop(routingId),
+    isActive: () => false,
+    onFault: (listener: (message: string) => void) => {
+      voiceFaults.add(listener)
+      return () => voiceFaults.delete(listener)
+    },
+    onLevel: () => () => {},
+    onSwitch: (listener: (label: string) => void) => {
+      voiceSwitches.add(listener)
+      return () => voiceSwitches.delete(listener)
+    },
+    onSilence: (listener: (silence: { silent: boolean; trackLabel: string | null }) => void) => {
+      voiceSilences.add(listener)
+      return () => voiceSilences.delete(listener)
+    }
+  })
 }))
 
 const ROUTE = 'r-input-1'
@@ -453,7 +502,16 @@ describe('InputBox FC — rendered', () => {
       // The Claude-defaults tests below write these; none may leak forward.
       claudeDefaultModel: '',
       claudeDefaultModelConfigured: false,
-      settings: { ...state.settings, modelEffortDefaults: {} }
+      opencodeDefaultModel: '',
+      opencodeDefaultModelConfigured: false,
+      piDefaultModel: '',
+      piDefaultModelConfigured: false,
+      settings: {
+        ...state.settings,
+        modelEffortDefaults: {},
+        engineEffortDefaults: {},
+        newSessionModel: undefined
+      }
     }))
     mirrorStoreIntoReplica()
     useSessionStore.getState().createNewSession(FC_ROUTE, '/test/cwd')
@@ -462,6 +520,7 @@ describe('InputBox FC — rendered', () => {
 
   afterEach(() => {
     app.teardown()
+    resetHistoryLoadForTests()
     vi.clearAllMocks()
   })
 
@@ -773,10 +832,36 @@ describe('InputBox FC — rendered', () => {
     })
   }
 
-  it('reads the effort default of the model an alias RESOLVES to, not the baked alias table', async () => {
-    // The Default models table keys `opus` by what cli.js says it resolves to
-    // (`claude-opus-5`); the old lookup keyed it `claude-opus-5-5` from the
-    // alias table and never found the row the user set.
+  it('reads the effort saved for the alias, and `default` reads the alias it lands on', async () => {
+    // The Default models table keys `opus` by name, so the setting follows the
+    // alias to a new model; `default` shares the row of the alias that
+    // resolves where it does.
+    fcClaudeModels = [
+      claudeRow('default', 'claude-opus-5-5'),
+      claudeRow('opus', 'claude-opus-5-5'),
+      claudeRow('claude-opus-5', 'claude-opus-5')
+    ]
+    useSessionStore.setState((state) => ({
+      settings: {
+        ...state.settings,
+        modelEffortDefaults: { opus: 'low', 'claude-opus-5-5': 'max', 'claude-opus-5': 'xhigh' }
+      },
+      availableModels: fcClaudeModels,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'default' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await sendDraft()
+    expect(ipcCalls['session:create'][0][5]).toBe('default')
+    expect(ipcCalls['session:create'][0][2]).toBe('low')
+  })
+
+  it('still reads a v3.5 effort saved under the model the alias RESOLVES to', async () => {
+    // v3.5 keyed `opus` by what cli.js said it resolved to (`claude-opus-5`).
+    // Until the row is edited that value still applies.
     fcClaudeModels = [claudeRow('opus', 'claude-opus-5[1m]')]
     useSessionStore.setState((state) => ({
       settings: { ...state.settings, modelEffortDefaults: { 'claude-opus-5': 'low' } },
@@ -790,6 +875,29 @@ describe('InputBox FC — rendered', () => {
     renderFC()
     await sendDraft()
     expect(ipcCalls['session:create'][0][5]).toBe('opus')
+    expect(ipcCalls['session:create'][0][2]).toBe('low')
+  })
+
+  it('a session saved on a concrete Claude model shows its alias, and spawns its own value', async () => {
+    // ADR-100: the catalog lists aliases only. Display (and the effort read)
+    // goes through the alias that runs the model; the session is not rewritten.
+    fcClaudeModels = [
+      claudeRow('default', 'claude-opus-5-5[1m]', 'Default (recommended)'),
+      claudeRow('sonnet', 'claude-sonnet-5-5', 'Sonnet 5.5')
+    ]
+    useSessionStore.setState((state) => ({
+      settings: { ...state.settings, modelEffortDefaults: { sonnet: 'low' } },
+      availableModels: fcClaudeModels,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'claude-sonnet-5-5' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.selectedModel.value).toBe('sonnet')
+    await sendDraft()
+    expect(ipcCalls['session:create'][0][5]).toBe('claude-sonnet-5-5')
     expect(ipcCalls['session:create'][0][2]).toBe('low')
   })
 
@@ -919,6 +1027,97 @@ describe('InputBox FC — rendered', () => {
 
     // markSdkActive called — sdkActive is now true in store
     expect(useSessionStore.getState().sessions[FC_ROUTE].sdkActive).toBe(true)
+  })
+
+  // ADR-087 §2: a snapshot that did not carry this transcript leaves an EMPTY,
+  // evicted entry that is still an existing conversation. The resume decision used
+  // to be `messages.length > 0`, so a prompt sent before the disk reload landed (or
+  // after it failed) spawned a brand-new conversation under the same row.
+  describe('a send on an evicted, empty session resumes it by id', () => {
+    const resumeIdOfSpawn = (): unknown => ipcCalls['session:create'][0][3]
+
+    it('control: a never-spawned empty session starts fresh (no resume id)', async () => {
+      useSessionStore.getState().setDraftText('hello')
+      renderFC()
+      await viewProps.onSend()
+      expect(resumeIdOfSpawn()).toBeUndefined()
+    })
+
+    it('send', async () => {
+      markViewEvicted([FC_ROUTE])
+      useSessionStore.getState().setDraftText('hello')
+      renderFC()
+      await viewProps.onSend()
+      expect(resumeIdOfSpawn()).toBe(FC_ROUTE)
+    })
+
+    it('waits for the transcript reload in flight, then resumes, with history already in place', async () => {
+      // The host seeds its own transcript the moment the engine spawns. A client
+      // read still open at that point loses the race and the sender is left with
+      // only the new turn, so the spawn must not start until the read settles.
+      markViewEvicted([FC_ROUTE])
+      useSessionStore.setState({
+        directories: [
+          {
+            cwd: '/test/cwd',
+            projectKey: '-test-cwd',
+            folderName: 'cwd',
+            sessions: [
+              {
+                sessionId: FC_ROUTE,
+                cwd: '/test/cwd',
+                projectKey: '-test-cwd',
+                title: 'Existing',
+                timestamp: 1,
+                lastActivityAt: 1
+              }
+            ]
+          }
+        ]
+      })
+      let release!: (value: unknown) => void
+      Object.assign(window.api, {
+        loadSessionHistory: vi.fn(() => new Promise((resolve) => (release = resolve)))
+      })
+      const reload = reloadActiveTranscript(FC_ROUTE)
+      useSessionStore.getState().setDraftText('hello')
+      renderFC()
+
+      const sent = viewProps.onSend()
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)))
+      // Held behind the reload: no spawn yet.
+      expect(ipcCalls['session:create']).toBeUndefined()
+
+      release({
+        messages: [
+          { id: 'h1', role: 'assistant', content: [{ type: 'text', text: 'h1' }], timestamp: 1 }
+        ],
+        taskNotifications: [],
+        customTitle: null,
+        agentIdToToolUseId: {},
+        statusLine: null,
+        warnings: []
+      })
+      await act(async () => {
+        await reload
+        await sent
+      })
+
+      expect(ipcCalls['session:create']).toHaveLength(1)
+      expect(ipcCalls['session:create'][0][3]).toBe(FC_ROUTE)
+      expect(useSessionStore.getState().sessions[FC_ROUTE].messages.map((m) => m.id)).toEqual([
+        'h1'
+      ])
+    })
+
+    it('push-to-talk spawn (ensureSession)', async () => {
+      markViewEvicted([FC_ROUTE])
+      renderFC()
+      await act(async () => {
+        await viewProps.onVoiceStart()
+      })
+      expect(resumeIdOfSpawn()).toBe(FC_ROUTE)
+    })
   })
 
   // The pre-spawn mode pick has no event to carry it: `changePermissionMode`
@@ -1104,6 +1303,103 @@ describe('InputBox FC — rendered', () => {
   // R1b — a reopened opencode/pi session whose model the discovered catalog
   // does not (yet) hold used to read as the CONFIGURED default: a model the
   // session never ran and the resume will not spawn.
+  it.each(['claude', 'opencode', 'pi'] as const)(
+    '%s: changing defaults and curation preserves the live model and capabilities until an explicit pick',
+    async (engine) => {
+      const oldValue = engine === 'claude' ? 'old-model' : 'provider/old-model'
+      const nextValue = engine === 'claude' ? 'new-model' : 'provider/new-model'
+      const oldModel: ModelInfo = {
+        value: oldValue,
+        displayName: 'Old model',
+        description: '',
+        engineId: engine,
+        vision: false,
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'high'],
+        supportsAdaptiveThinking: false
+      }
+      const nextModel: ModelInfo = {
+        value: nextValue,
+        displayName: 'New model',
+        description: '',
+        engineId: engine,
+        vision: true,
+        supportsEffort: false,
+        supportsAdaptiveThinking: false
+      }
+      useSessionStore.setState((state) => ({
+        availableModels: [oldModel, nextModel],
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: {
+            ...state.sessions[FC_ROUTE],
+            selectedEngineId: engine,
+            selectedModel: oldValue,
+            sdkActive: true,
+            status: {
+              ...state.sessions[FC_ROUTE].status,
+              engineId: engine,
+              sessionId: 'live-session',
+              model: { engineId: engine, vendorId: 'provider', modelId: 'old-model' },
+              capabilities: {
+                ...state.sessions[FC_ROUTE].status.capabilities,
+                vision: false,
+                reasoning: {
+                  effort: { levels: ['low', 'high'] },
+                  ...(engine === 'claude' ? { thinking: { modes: ['adaptive'] as const } } : {})
+                }
+              }
+            }
+          }
+        }
+      }))
+      mirrorStoreIntoReplica()
+      fcClaudeModels = [oldModel, nextModel]
+      await act(async () => {
+        renderFC()
+      })
+      expect(viewProps.selectedModel.value).toBe(oldValue)
+
+      await act(async () => {
+        useSessionStore.setState({
+          availableModels: [nextModel],
+          [`${engine}DefaultModel`]: nextValue,
+          [`${engine}DefaultModelConfigured`]: true
+        })
+      })
+      expect(viewProps.selectedModel.value).toBe(oldValue)
+      expect(viewProps.selectedModel.shortName).toBe(oldValue)
+      expect(viewProps.models.map((model) => model.value)).toEqual([nextValue])
+      expect(viewProps.visionEnabled).toBe(false)
+      expect(viewProps.effortSupported).toBe(true)
+      expect(viewProps.allowedEffortLevels).toEqual(['low', 'high'])
+      expect(viewProps.showThinkingPicker).toBe(engine === 'claude')
+      if (engine === 'claude') expect(viewProps.thinkingMode).toBe('adaptive')
+      expect(ipcCalls['session:set-model']).toBeUndefined()
+      expect(useSessionStore.getState().sessions[FC_ROUTE].selectedModel).toBe(oldValue)
+
+      await act(async () => {
+        viewProps.onSelectModel(nextValue)
+      })
+      expect(ipcCalls['session:set-model']).toEqual([[FC_ROUTE, nextValue]])
+      expect(useSessionStore.getState().sessions[FC_ROUTE].selectedModel).toBe(nextValue)
+      if (engine !== 'claude') expect(viewProps.selectedModel.value).toBe(oldValue)
+      // Vision follows the backend acknowledgement, not the catalog/default edit.
+      expect(viewProps.visionEnabled).toBe(false)
+      await act(async () => {
+        const status = useSessionStore.getState().sessions[FC_ROUTE].status
+        seed.status(FC_ROUTE, {
+          ...status,
+          model: { engineId: engine, vendorId: 'provider', modelId: 'new-model' },
+          capabilities: { ...status.capabilities, vision: true, reasoning: {} }
+        })
+      })
+      expect(viewProps.selectedModel.value).toBe(nextValue)
+      expect(viewProps.visionEnabled).toBe(true)
+      expect(viewProps.effortSupported).toBe(false)
+    }
+  )
+
   const OPENCODE_CATALOG: ModelInfo[] = [
     {
       value: 'anthropic/claude-x',
@@ -1113,6 +1409,54 @@ describe('InputBox FC — rendered', () => {
       vendorId: 'anthropic'
     }
   ]
+
+  it.each(['opencode', 'pi'] as const)(
+    '%s displays the live model even when a snapshot has a different listed selection',
+    async (engine) => {
+      const next: ModelInfo = {
+        value: 'local/new-default',
+        engineId: engine,
+        displayName: 'New default',
+        description: '',
+        vision: true,
+        supportsEffort: false,
+        supportsAdaptiveThinking: false
+      }
+      useSessionStore.setState((state) => ({
+        availableModels: [next],
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: {
+            ...state.sessions[FC_ROUTE],
+            selectedEngineId: engine,
+            selectedModel: next.value,
+            sdkActive: true,
+            status: {
+              ...state.sessions[FC_ROUTE].status,
+              engineId: engine,
+              sessionId: 'live',
+              model: { engineId: engine, vendorId: 'local', modelId: 'old-model' },
+              capabilities: {
+                ...state.sessions[FC_ROUTE].status.capabilities,
+                vision: false,
+                reasoning: {}
+              }
+            }
+          }
+        }
+      }))
+      mirrorStoreIntoReplica()
+      fcClaudeModels = [next]
+      await act(async () => {
+        renderFC()
+      })
+      expect(viewProps.selectedModel.value).toBe('local/old-model')
+      expect(viewProps.selectedModel.shortName).toBe('local/old-model')
+      expect(viewProps.visionEnabled).toBe(false)
+      expect(viewProps.effortSupported).toBe(false)
+      expect(ipcCalls['session:set-model']).toBeUndefined()
+    }
+  )
 
   it('an active opencode session names an absent model as unavailable, not as the default', () => {
     useSessionStore.setState((state) => ({
@@ -1131,7 +1475,7 @@ describe('InputBox FC — rendered', () => {
     mirrorStoreIntoReplica()
     renderFC()
 
-    expect(viewProps.selectedModel.shortName).toBe('Model unavailable')
+    expect(viewProps.selectedModel.shortName).toBe('alicloud/qwen-x')
     expect(viewProps.selectedModel.displayName).not.toBe('Claude X')
   })
 
@@ -1260,17 +1604,301 @@ describe('InputBox FC — rendered', () => {
 
     renderFC()
 
-    expect(viewProps.selectedModel.displayName).toBe('Model unavailable')
+    expect(viewProps.selectedModel.displayName).toBe('opencode/mimo-v2.5-free')
     expect(viewProps.selectedModel.engineId).toBe('opencode')
   })
 
-  it('onVoiceStop: calls voiceStopRecording IPC with active session id', async () => {
+  // S2 item 6 made every voice failure visible; S3a moved them off the session's
+  // error stack. A start/stop the renderer saw fail, a microphone fault and the
+  // live silence warning all land in the mic's notice pill — never `addError`.
+  describe('voice messages are notices, never session errors', () => {
+    function liveSession(): void {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: { ...state.sessions[FC_ROUTE], sdkActive: true }
+        }
+      }))
+      mirrorStoreIntoReplica()
+    }
+    const notice = (): ReturnType<typeof voiceNoticeFor> =>
+      voiceNoticeFor(useVoiceNoticeStore.getState().notices, FC_ROUTE)
+    const errors = (): string[] => useSessionStore.getState().sessions[FC_ROUTE].errors
+
+    beforeEach(() => resetVoiceNoticesForTests())
+
+    it('a refused start is a warn notice (and still logged), not a session error', async () => {
+      liveSession()
+      app.bridge.ipcMain.handle('voice:start-recording', () => ({
+        ok: false,
+        error: 'Microphone access denied — allow it for this site'
+      }))
+      renderFC()
+
+      await act(async () => {
+        await viewProps.onVoiceStart()
+      })
+
+      expect(notice()).toMatchObject({
+        text: 'Microphone access denied — allow it for this site',
+        tone: 'warn'
+      })
+      expect(viewProps.voiceNotice).toMatchObject({ text: notice()!.text })
+      expect(errors()).toEqual([])
+    })
+
+    it('a failed stop is a warn notice too', async () => {
+      app.bridge.ipcMain.handle('voice:stop-recording', () => ({
+        ok: false,
+        error: 'stop went wrong'
+      }))
+      renderFC()
+
+      await act(async () => {
+        await viewProps.onVoiceStop()
+      })
+
+      expect(notice()).toMatchObject({ text: 'stop went wrong', tone: 'warn' })
+      expect(errors()).toEqual([])
+    })
+
+    it('a microphone fault is a warn notice for the active session', async () => {
+      renderFC()
+      expect(voiceFaults.size).toBe(1)
+
+      act(() => {
+        for (const listener of voiceFaults) listener('Microphone disconnected — kept what you said')
+      })
+
+      expect(notice()).toMatchObject({
+        text: 'Microphone disconnected — kept what you said',
+        tone: 'warn'
+      })
+      expect(errors()).toEqual([])
+    })
+
+    it('the live silence warning names the track, and is taken down when sound returns', () => {
+      renderFC()
+      expect(voiceSilences.size).toBe(1)
+
+      act(() => {
+        for (const listener of voiceSilences)
+          listener({ silent: true, trackLabel: 'MacBook Pro Microphone' })
+      })
+      expect(notice()).toMatchObject({
+        text: 'No signal from MacBook Pro Microphone — lid closed or muted?',
+        tone: 'warn'
+      })
+
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: false, trackLabel: null })
+      })
+      expect(notice()).toBeNull()
+      expect(errors()).toEqual([])
+    })
+
+    it('a rekey mid-silence: the warning is still taken down when sound returns', () => {
+      // A first press spawns cli.js, which rekeys the brand-new session while
+      // the microphone is open; InputBox resubscribes under the new id.
+      renderFC()
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: true, trackLabel: null })
+      })
+      expect(notice()).not.toBeNull()
+
+      act(() => seed.rekey(FC_ROUTE, 'sdk-voice-1'))
+      expect(useSessionStore.getState().activeSessionId).toBe('sdk-voice-1')
+      expect(voiceSilences.size).toBe(1)
+      expect(voiceNoticeFor(useVoiceNoticeStore.getState().notices, 'sdk-voice-1')).toMatchObject({
+        text: expect.stringMatching(/^No signal from/)
+      })
+
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: false, trackLabel: null })
+      })
+      expect(voiceNoticeFor(useVoiceNoticeStore.getState().notices, 'sdk-voice-1')).toBeNull()
+    })
+
+    it('a mid-press microphone switch is a grey (info) notice', () => {
+      renderFC()
+      expect(voiceSwitches.size).toBe(1)
+      act(() => {
+        for (const listener of voiceSwitches) listener('AirPods Pro')
+      })
+      expect(notice()).toMatchObject({ text: 'Switched to AirPods Pro', tone: 'info' })
+      expect(errors()).toEqual([])
+    })
+
+    it('a cleared silence warning never removes a NEWER notice that replaced it', () => {
+      renderFC()
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: true, trackLabel: null })
+      })
+      act(() => {
+        for (const listener of voiceFaults) listener('The microphone was muted by the system')
+      })
+      act(() => {
+        for (const listener of voiceSilences) listener({ silent: false, trackLabel: null })
+      })
+      expect(notice()).toMatchObject({ text: 'The microphone was muted by the system' })
+    })
+
+    it('the push-to-talk is HELD from press to release — the pill stays while it is', async () => {
+      liveSession()
+      renderFC()
+      expect(viewProps.voiceHeld).toBe(false)
+
+      await act(async () => {
+        await viewProps.onVoiceStart()
+      })
+      expect(viewProps.voiceHeld).toBe(true)
+
+      await act(async () => {
+        await viewProps.onVoiceStop()
+      })
+      expect(viewProps.voiceHeld).toBe(false)
+    })
+  })
+
+  it('onVoiceStop: sends voice:stop-recording with the active session id', async () => {
     renderFC()
 
     await viewProps.onVoiceStop()
 
     expect(ipcCalls['voice:stop-recording']).toHaveLength(1)
     expect(ipcCalls['voice:stop-recording'][0][0]).toBe(FC_ROUTE)
+  })
+
+  // Voice needs the user's setting AND the session's capability. The capability
+  // is false on engines without voice and on a Claude Code binary that lacks the
+  // voice-server patch (ClaudeSession.capabilities), and every way into a
+  // capture must honour it, not just the button.
+  describe('voice gate', () => {
+    function setVoice(setting: boolean, capability: boolean): void {
+      useSessionStore.setState((state) => ({
+        settings: { ...state.settings, voiceEnabled: setting },
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: {
+            ...state.sessions[FC_ROUTE],
+            // Live session: the Tab path must not have to spawn one first.
+            sdkActive: true,
+            status: {
+              ...state.sessions[FC_ROUTE].status,
+              capabilities: { ...state.sessions[FC_ROUTE].status.capabilities, voice: capability }
+            }
+          }
+        }
+      }))
+      mirrorStoreIntoReplica()
+    }
+
+    function pressTab(): void {
+      viewProps.onKeyDown({
+        key: 'Tab',
+        shiftKey: false,
+        ctrlKey: false,
+        altKey: false,
+        metaKey: false,
+        preventDefault: vi.fn()
+      } as unknown as Parameters<InputBoxViewProps['onKeyDown']>[0])
+    }
+
+    it.each([
+      [true, true, true],
+      [true, false, false],
+      [false, true, false]
+    ])('setting=%s capability=%s → mic shown=%s', (setting, capability, shown) => {
+      setVoice(setting, capability)
+      renderFC()
+      expect(viewProps.voiceEnabled).toBe(shown)
+    })
+
+    it('Tab starts a capture when the session can take voice', async () => {
+      setVoice(true, true)
+      renderFC()
+      await act(async () => pressTab())
+      await vi.waitFor(() => expect(ipcCalls['voice:start-recording']).toHaveLength(1))
+    })
+
+    it('Tab starts nothing on a session that cannot, even with the setting on', async () => {
+      setVoice(true, false)
+      renderFC()
+      await act(async () => pressTab())
+      // Let any fire-and-forget start settle before asserting its absence.
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)))
+      expect(ipcCalls['voice:start-recording']).toBeUndefined()
+    })
+  })
+
+  /**
+   * Push-to-talk released while `ensureSession()` is still spawning the engine.
+   * The stop goes out first; a start sent after it would open a capture nobody
+   * is holding. `session:create` is held open so the release lands inside it.
+   */
+  function holdSessionCreate(): () => void {
+    let release!: () => void
+    const created = new Promise<null>((resolve) => {
+      release = () => resolve(null)
+    })
+    app.bridge.ipcMain.handle('session:create', () => created)
+    return release
+  }
+
+  const tabEvent = (repeat = false): React.KeyboardEvent =>
+    ({ key: 'Tab', repeat, preventDefault: () => {} }) as unknown as React.KeyboardEvent
+
+  it('onVoiceStart: a release during the session spawn never sends the start', async () => {
+    const releaseCreate = holdSessionCreate()
+    renderFC()
+
+    const startP = viewProps.onVoiceStart() as unknown as Promise<void>
+    await viewProps.onVoiceStop()
+    releaseCreate()
+    await startP
+
+    expect(ipcCalls['voice:stop-recording']).toHaveLength(1)
+    expect(ipcCalls['voice:start-recording']).toBeUndefined()
+  })
+
+  it('release then re-press during ONE session spawn starts voice exactly once', async () => {
+    const releaseCreate = holdSessionCreate()
+    renderFC()
+
+    const start1 = viewProps.onVoiceStart() as unknown as Promise<void>
+    await viewProps.onVoiceStop()
+    const start2 = viewProps.onVoiceStart() as unknown as Promise<void>
+    releaseCreate()
+    await Promise.all([start1, start2])
+
+    expect(ipcCalls['voice:start-recording']).toHaveLength(1)
+  })
+
+  it('Tab released during the session spawn still stops, and never starts', async () => {
+    useSessionStore.setState((state) => ({ settings: { ...state.settings, voiceEnabled: true } }))
+    const releaseCreate = holdSessionCreate()
+    renderFC()
+
+    viewProps.onKeyDown(tabEvent())
+    viewProps.onKeyUp(tabEvent())
+    releaseCreate()
+    await vi.waitFor(() => expect(ipcCalls['voice:stop-recording'] ?? []).toHaveLength(1))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(ipcCalls['voice:start-recording']).toBeUndefined()
+  })
+
+  it('a held Tab auto-repeat does not start voice again', async () => {
+    useSessionStore.setState((state) => ({ settings: { ...state.settings, voiceEnabled: true } }))
+    renderFC()
+
+    viewProps.onKeyDown(tabEvent())
+    viewProps.onKeyDown(tabEvent(true))
+    viewProps.onKeyDown(tabEvent(true))
+    await vi.waitFor(() => expect(ipcCalls['voice:start-recording']).toHaveLength(1))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(ipcCalls['voice:start-recording']).toHaveLength(1)
   })
 
   it('onSend does nothing when text is empty (noop)', async () => {
@@ -1422,6 +2050,404 @@ describe('InputBox FC — rendered', () => {
 
     expect(viewProps.effort).toBe('medium')
     expect(viewProps.thinkingMode).toBe('disabled')
+  })
+
+  // ── Effort is remembered per model, and the pill tells the truth ────────
+  //
+  // The pill and every spawn read ONE resolver (`resolveSpawnEffort`):
+  // explicit pick > the model's saved starting effort > cli.js's heuristic.
+
+  const opusRow = (): ModelInfo => ({
+    value: 'opus',
+    resolvedModel: 'claude-opus-5-5', // cli.js defaults Opus 5.5 to 'medium'
+    displayName: 'Opus 5.5',
+    description: '',
+    engineId: 'claude',
+    supportsEffort: true,
+    supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    supportsAdaptiveThinking: true
+  })
+
+  function opusSession(
+    effort: string | null,
+    modelEffortDefaults: Record<string, EffortLevel>
+  ): void {
+    fcClaudeModels = [opusRow()]
+    useSessionStore.setState((state) => ({
+      settings: { ...state.settings, modelEffortDefaults },
+      availableModels: fcClaudeModels,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'opus', effort }
+      }
+    }))
+    mirrorStoreIntoReplica()
+  }
+
+  it("the pill shows the model's saved starting effort when the session has no pick", async () => {
+    opusSession(null, { opus: 'high' })
+    renderFC()
+    await act(async () => {})
+    expect(viewProps.effort).toBe('high') // not Opus 5.5's built-in 'medium'
+  })
+
+  it('a session pick still outranks the saved starting effort in the pill', async () => {
+    opusSession('low', { opus: 'high' })
+    renderFC()
+    await act(async () => {})
+    expect(viewProps.effort).toBe('low')
+  })
+
+  it('the pill and the first spawn agree on the saved starting effort', async () => {
+    opusSession(null, { opus: 'high' })
+    renderFC()
+    await act(async () => {})
+    const shown = viewProps.effort
+    await sendDraft()
+    expect(ipcCalls['session:create'][0][2]).toBe(shown)
+    // The starting effort freezes into the session, equal to what was sent.
+    expect(ipcCalls['session:create'][0][10]).toEqual({ effort: shown, thinkingMode: null })
+  })
+
+  it('a started session keeps displaying what it runs when the per-model effort changes', async () => {
+    opusSession(null, { opus: 'high' })
+    renderFC()
+    await act(async () => {})
+    await sendDraft()
+    const announce = ipcCalls['session:create'][0][10] as { effort: string | null }
+    expect(announce.effort).toBe('high')
+
+    // Core's birth event hands the announced effort to every replica.
+    await act(async () => {
+      emitSync('session:created', [FC_ROUTE, { cwd: '/test/cwd', effort: announce.effort }])
+    })
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('high')
+
+    // Another session's pick rewrites the per-model value.
+    await act(async () => {
+      useSessionStore.getState().updateSettings({ modelEffortDefaults: { opus: 'max' } })
+    })
+    // Pre-fix the session stayed `null` and this read the NEW map: 'max'.
+    expect(viewProps.effort).toBe('high')
+  })
+
+  it('announces exactly the effort sent positionally on a respawn after a pick too', async () => {
+    opusSession(null, { opus: 'high' })
+    useSessionStore.getState().markSdkActive(FC_ROUTE)
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectEffort('low')
+    })
+    const args = ipcCalls['session:create'][0]
+    expect(args[2]).toBe('low')
+    expect((args[10] as { effort: string }).effort).toBe(args[2])
+  })
+
+  describe('pi remembers effort in its own map', () => {
+    // pi's `anthropic/claude-opus-5-5` canonicalises onto the key Claude's `opus`
+    // row owns; the two maps must stay apart.
+    const piRow = (): ModelInfo => ({
+      ...opusRow(),
+      value: 'anthropic/claude-opus-5-5',
+      resolvedModel: undefined,
+      engineId: 'pi',
+      supportedEffortLevels: ['low', 'medium', 'high']
+    })
+
+    function piSession(settings: Record<string, unknown>, effort: string | null = null): void {
+      fcClaudeModels = [opusRow()]
+      app.bridge.ipcMain.handle('session:get-engine-models', () => [
+        {
+          engineId: 'claude',
+          vendorId: 'anthropic',
+          vendorName: 'Anthropic',
+          models: fcClaudeModels
+        },
+        { engineId: 'pi', vendorId: 'pi', vendorName: 'pi', models: [piRow()] }
+      ])
+      useSessionStore.setState((state) => ({
+        settings: { ...state.settings, ...settings },
+        availableModels: [opusRow(), piRow()],
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: {
+            ...state.sessions[FC_ROUTE],
+            selectedEngineId: 'pi',
+            selectedModel: piRow().value,
+            effort
+          }
+        }
+      }))
+      mirrorStoreIntoReplica()
+    }
+
+    it('a pi pick writes engineEffortDefaults.pi[<value>] and leaves modelEffortDefaults alone', async () => {
+      piSession({ modelEffortDefaults: { opus: 'low' } })
+      renderFC()
+      await act(async () => {})
+      await act(async () => {
+        await viewProps.onSelectEffort('high')
+      })
+      const settings = useSessionStore.getState().settings
+      expect(settings.modelEffortDefaults).toEqual({ opus: 'low' })
+      expect(settings.engineEffortDefaults).toEqual({
+        pi: { 'anthropic/claude-opus-5-5': 'high' }
+      })
+      // The session still carries its own pick.
+      expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('high')
+    })
+
+    it('a new pi session on that model displays AND spawns the remembered effort', async () => {
+      piSession({ engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'low' } } })
+      renderFC()
+      await act(async () => {})
+      expect(viewProps.effort).toBe('low')
+      await sendDraft()
+      expect(ipcCalls['session:create'][0][2]).toBe('low')
+    })
+
+    it('under configured-default a remembered pi effort is not applied: pill and spawn show the model default', async () => {
+      piSession({
+        newSessionModel: 'configured-default',
+        engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'low' } }
+      })
+      renderFC()
+      await act(async () => {})
+      expect(viewProps.effort).toBe('medium')
+      await sendDraft()
+      expect(ipcCalls['session:create'][0][2]).toBe('medium')
+    })
+
+    it('a remembered value the pi model does not offer is clamped, pill and spawn alike', async () => {
+      piSession({ engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'max' } } })
+      renderFC()
+      await act(async () => {})
+      const shown = viewProps.effort
+      expect(['low', 'medium', 'high']).toContain(shown)
+      await sendDraft()
+      expect(ipcCalls['session:create'][0][2]).toBe(shown)
+    })
+
+    it('a pi pick on a model not in the catalog writes nothing', async () => {
+      piSession({})
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'ghost/model' }
+        }
+      }))
+      mirrorStoreIntoReplica()
+      renderFC()
+      await act(async () => {})
+      await act(async () => {
+        await viewProps.onSelectEffort('high')
+      })
+      expect(useSessionStore.getState().settings.engineEffortDefaults).toEqual({})
+      expect(useSessionStore.getState().settings.modelEffortDefaults).toEqual({})
+    })
+  })
+
+  it('a model missing from the catalog: the pill shows exactly what spawn sends', async () => {
+    // Pre-fix the pill resolved from the picker's synthetic "missing selection"
+    // row (which keyed the saved 'low'), spawn from no model at all ('high').
+    fcClaudeModels = [opusRow()]
+    useSessionStore.setState((state) => ({
+      settings: { ...state.settings, modelEffortDefaults: { 'claude-opus-4-7': 'low' } },
+      availableModels: fcClaudeModels,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'claude-opus-4-7', effort: null }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await act(async () => {})
+    const shown = viewProps.effort
+    await sendDraft()
+    expect(ipcCalls['session:create'][0][2]).toBe(shown)
+    // Unknown model: nothing is announced about effort.
+    expect('effort' in (ipcCalls['session:create'][0][10] as object)).toBe(false)
+  })
+
+  it('an EMPTY catalog respawn keeps the session pick: no effort announced, still low after the fold (GUARD)', async () => {
+    // The catalog is emptied on every cwd change until the fetch lands; pi has no
+    // failure fallback. Announcing `null` there would wipe the pick on every
+    // replica, this one included, and the next respawn would send the heuristic.
+    fcClaudeModels = []
+    useSessionStore.setState((state) => ({
+      availableModels: [],
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'opus', effort: 'low' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    useSessionStore.getState().markSdkActive(FC_ROUTE)
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectThinking('disabled')
+    })
+    const args = ipcCalls['session:create'][0]
+    expect(args[2]).toBe('low')
+    const announce = args[10] as Record<string, unknown>
+    expect('effort' in announce).toBe(false)
+    expect(announce.thinkingMode).toBe('disabled')
+    await act(async () => {
+      emitSync('session:created', [FC_ROUTE, { cwd: '/test/cwd', ...announce }])
+    })
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('low')
+  })
+
+  it('onSelectModel (spawned, thread id not reported yet): keeps the frozen effort, coerced', () => {
+    opusSession('xhigh', {})
+    fcClaudeModels = [
+      opusRow(),
+      {
+        ...opusRow(),
+        value: 'sonnet',
+        resolvedModel: 'claude-sonnet-4-6',
+        supportedEffortLevels: ['low', 'medium', 'high', 'max']
+      }
+    ]
+    useSessionStore.setState({ availableModels: fcClaudeModels })
+    useSessionStore.getState().markSdkActive(FC_ROUTE) // process running, no `sessionId` yet
+    mirrorStoreIntoReplica()
+    renderFC()
+
+    viewProps.onSelectModel('sonnet')
+
+    // Pre-fix `!started` alone cleared it though the process runs at 'xhigh'.
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('high')
+  })
+
+  it('announces no effort for a model that accepts none', async () => {
+    fcClaudeModels = [
+      {
+        ...opusRow(),
+        value: 'haiku',
+        resolvedModel: 'claude-haiku-4-5',
+        supportsEffort: false,
+        supportedEffortLevels: []
+      }
+    ]
+    useSessionStore.setState((state) => ({
+      availableModels: fcClaudeModels,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'haiku', effort: 'high' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await act(async () => {})
+    await sendDraft()
+    expect((ipcCalls['session:create'][0][10] as { effort: unknown }).effort).toBeNull()
+  })
+
+  it.each(['claude', 'pi'] as const)(
+    'newSessionModel "configured-default": a %s effort pick writes neither map, the session still gets it',
+    async (engine) => {
+      const piModel = {
+        ...opusRow(),
+        value: 'anthropic/claude-opus-5-5',
+        resolvedModel: undefined,
+        engineId: 'pi' as const
+      }
+      fcClaudeModels = [opusRow()]
+      app.bridge.ipcMain.handle('session:get-engine-models', () => [
+        { engineId: 'claude', vendorId: 'a', vendorName: 'A', models: fcClaudeModels },
+        { engineId: 'pi', vendorId: 'p', vendorName: 'P', models: [piModel] }
+      ])
+      useSessionStore.setState((state) => ({
+        settings: {
+          ...state.settings,
+          newSessionModel: 'configured-default',
+          modelEffortDefaults: { opus: 'low' },
+          engineEffortDefaults: {}
+        },
+        availableModels: [opusRow(), piModel],
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: {
+            ...state.sessions[FC_ROUTE],
+            selectedEngineId: engine,
+            selectedModel: engine === 'pi' ? piModel.value : 'opus',
+            effort: null
+          }
+        }
+      }))
+      mirrorStoreIntoReplica()
+      renderFC()
+      await act(async () => {})
+      await act(async () => {
+        await viewProps.onSelectEffort('xhigh')
+      })
+      const settings = useSessionStore.getState().settings
+      expect(settings.modelEffortDefaults).toEqual({ opus: 'low' })
+      expect(settings.engineEffortDefaults).toEqual({})
+      expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('xhigh')
+    }
+  )
+
+  it("picking an effort remembers it as the model's starting effort and keeps the session pick", async () => {
+    opusSession(null, {})
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectEffort('xhigh')
+    })
+    expect(useSessionStore.getState().settings.modelEffortDefaults).toEqual({ opus: 'xhigh' })
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('xhigh')
+  })
+
+  it('picking moves a v3.5 legacy-keyed value to the new key instead of leaving both', async () => {
+    fcClaudeModels = [opusRow()]
+    useSessionStore.setState((state) => ({
+      settings: { ...state.settings, modelEffortDefaults: { 'claude-opus-5-5': 'low' } },
+      availableModels: fcClaudeModels,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'opus' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectEffort('max')
+    })
+    expect(useSessionStore.getState().settings.modelEffortDefaults).toEqual({ opus: 'max' })
+  })
+
+  it('a respawn after an effort pick announces the pick to createSession', async () => {
+    opusSession(null, {})
+    useSessionStore.getState().markSdkActive(FC_ROUTE)
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectEffort('xhigh')
+    })
+    expect(ipcCalls['session:create']).toHaveLength(1)
+    const args = ipcCalls['session:create'][0]
+    expect(args[2]).toBe('xhigh')
+    expect(args[10]).toEqual({ effort: 'xhigh', thinkingMode: null })
+  })
+
+  it('a thinking-mode pick is announced raw on the respawn too', async () => {
+    opusSession(null, {})
+    useSessionStore.getState().markSdkActive(FC_ROUTE)
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectThinking('disabled')
+    })
+    // Effort is the resolved starting effort (Opus 5.5's built-in 'medium').
+    expect(ipcCalls['session:create'][0][10]).toEqual({
+      effort: 'medium',
+      thinkingMode: 'disabled'
+    })
   })
 
   it('derives capability props from selectedModel: opus-4-7 → adaptive + xhigh + max', () => {
@@ -2002,12 +3028,15 @@ describe('InputBox FC — rendered', () => {
     expect(session.effort).toBeNull() // effort unsupported → explicit pick cleared
   })
 
-  it('onSelectModel: switching to a model with adaptive but no xhigh coerces xhigh → high', () => {
+  it('onSelectModel (started): a model with adaptive but no xhigh coerces xhigh → high', () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
         [FC_ROUTE]: {
           ...state.sessions[FC_ROUTE],
+          // Started: the live process keeps its effort across `setModel`, so the
+          // pick is coerced, not cleared.
+          status: { ...state.sessions[FC_ROUTE].status, sessionId: 'started' },
           selectedModel: 'default',
           thinkingMode: 'adaptive',
           effort: 'xhigh'
@@ -2024,6 +3053,7 @@ describe('InputBox FC — rendered', () => {
         },
         {
           value: 'sonnet',
+          resolvedModel: 'claude-sonnet-4-6',
           displayName: 'Sonnet',
           description: 'Sonnet 4.6',
           supportsEffort: true,
@@ -2041,6 +3071,22 @@ describe('InputBox FC — rendered', () => {
     const session = useSessionStore.getState().sessions[FC_ROUTE]
     expect(session.thinkingMode).toBe('adaptive') // both support adaptive
     expect(session.effort).toBe('high') // xhigh coerced to model's default
+  })
+
+  it('onSelectModel (not started): clears the effort so the new model remembered starting effort applies', () => {
+    opusSession('low', { opus: 'high', sonnet: 'max' })
+    fcClaudeModels = [
+      opusRow(),
+      { ...opusRow(), value: 'sonnet', resolvedModel: 'claude-sonnet-5-5' }
+    ]
+    useSessionStore.setState({ availableModels: fcClaudeModels })
+    mirrorStoreIntoReplica()
+    renderFC()
+
+    viewProps.onSelectModel('sonnet')
+
+    // Pre-fix `low` was kept (it is valid on the new model) and shown for it.
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBeNull()
   })
 
   // -------------------------------------------------------------------------
@@ -2720,7 +3766,7 @@ describe('InputBox FC — pi model fallback (C1 fix)', () => {
 
     renderFC()
 
-    expect(viewProps.selectedModel.displayName).toBe('Model unavailable')
+    expect(viewProps.selectedModel.displayName).toBe('openai-codex/stale-model')
     expect(viewProps.selectedModel.engineId).toBe('pi')
   })
 

@@ -18,13 +18,18 @@ import { render, screen, fireEvent, act } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { makePendingApproval } from '@test/factories/messages'
-import type { ContentBlock } from '../../../../../shared/types'
+import type {
+  ContentBlock,
+  PermissionDenialBlock,
+  ToolReviewBlock
+} from '../../../../../shared/types'
 
 vi.mock('../MarkdownRenderer', () => ({
   MarkdownRenderer: (p: { content: string }) => <div data-testid="md">{p.content}</div>
 }))
 
 import { TaskCard } from '../TaskCard'
+import { PiEngineToolMap } from '../tool-registry/PiEngineToolMap'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -175,6 +180,212 @@ describe('TaskCard — async-launched task lifecycle (activeTasks)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// "Send to background" — native `background_tasks` (docs/protocol-cc/07 §7.3)
+// ---------------------------------------------------------------------------
+//
+// cli.js can only background a task it has REGISTERED as running in the
+// FOREGROUND (`task_started` with `is_backgrounded: false`); for anything else
+// it answers `{backgrounded:false}`. The button used to show exactly when that
+// was the answer — a running card with no task record — and hide once the task
+// registered, which is when it would have worked.
+describe('TaskCard — "Send to background" gate', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const started = (isBackgrounded?: boolean): void =>
+    seed.taskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-fg',
+      taskType: 'local_agent',
+      runIndex: 1,
+      ...(isBackgrounded === undefined ? {} : { isBackgrounded })
+    })
+
+  it('is absent while the running task is not registered yet', () => {
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+    expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
+  })
+
+  it('shows for a task registered in the foreground', () => {
+    started(false)
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    expect(screen.getByTestId('TaskCard.sendToBackground')).toBeInTheDocument()
+  })
+
+  it('is absent for a task registered in the background', () => {
+    started(true)
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
+  })
+
+  it('goes away, and the card reads "background", when the task flips', () => {
+    started(false)
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    expect(screen.getByTestId('TaskCard.sendToBackground')).toBeInTheDocument()
+    expect(screen.queryByText('background')).not.toBeInTheDocument()
+
+    act(() => started(true))
+
+    expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
+    expect(screen.getByText('background')).toBeInTheDocument()
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+  })
+
+  it('clears "sending to background…" once the task flips, without waiting for the reply', async () => {
+    const calls: string[] = []
+    app.bridge.ipcMain.handle('session:background-task', (_e, _rid: string, id: string) => {
+      calls.push(id)
+      return new Promise(() => {}) // the reply never matters to the card
+    })
+    started(false)
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TaskCard.sendToBackground'))
+    })
+    expect(calls).toEqual(['call_task_1'])
+    expect(screen.getByText('sending to background…')).toBeInTheDocument()
+
+    act(() => started(true))
+
+    expect(screen.queryByText('sending to background…')).not.toBeInTheDocument()
+  })
+
+  it('comes back after a failed attempt', async () => {
+    app.bridge.ipcMain.handle('session:background-task', async () => ({
+      success: false,
+      error: 'Task is not registered yet — try again in a moment'
+    }))
+    started(false)
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TaskCard.sendToBackground'))
+    })
+
+    expect(screen.getByTestId('TaskCard.sendToBackground')).toBeInTheDocument()
+    expect(screen.queryByText('sending to background…')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The header clock of a running task
+// ---------------------------------------------------------------------------
+//
+// Observed live (2026-09-27): a run_in_background agent ran ~53 s and its
+// header read "0s" throughout. cli.js sends no elapsed ticks for an agent —
+// `tool_progress` is Bash/PowerShell-under-CLAUDE_CODE_REMOTE, REPL, or a 30 s
+// heartbeat keyed `<id>-heartbeat-N` — so the card's only clock source never
+// arrived, and a usage-only `system/task_progress` merged onto the reducer's
+// default `elapsedTimeSeconds: 0`, which rendered as "0s". The clock now counts
+// from the run's start, stamped on `session:task-started`.
+describe('TaskCard — a running task’s clock', () => {
+  let app: TestApp
+  const T0 = new Date('2026-09-27T12:06:58.000Z').getTime()
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    vi.setSystemTime(T0)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const launched = {
+    type: 'tool_result' as const,
+    toolUseId: 'call_task_1',
+    toolResult: 'Async agent launched successfully. agentId: agent-abc123',
+    isError: false
+  }
+  const backgroundView = { ...defaultTaskView, background: true }
+  const renderCard = (): ReturnType<typeof render> =>
+    render(<TaskCard block={makeTaskBlock()} result={launched} view={backgroundView} />)
+  const elapsedText = (): string | null =>
+    screen.queryByTestId('TaskCard.elapsed')?.textContent ?? null
+  const advance = (ms: number): void => {
+    act(() => {
+      vi.advanceTimersByTime(ms)
+    })
+  }
+  const started = (): void =>
+    seed.taskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'agent-abc123',
+      taskType: 'local_agent',
+      runIndex: 1,
+      startedAt: T0
+    })
+
+  it('advances from the run’s start with no progress frame at all', () => {
+    started()
+    renderCard()
+    advance(22_000)
+    expect(elapsedText()).toBe('22s')
+    advance(13_000)
+    expect(elapsedText()).toBe('35s')
+  })
+
+  it('is not pinned at "0s" by a usage-only task_progress (the live wire)', () => {
+    started()
+    renderCard()
+    act(() => {
+      // system/task_progress carries usage and no clock.
+      seed.taskProgress(ROUTE, {
+        toolUseId: 'call_task_1',
+        usage: { totalTokens: 1200, toolUses: 1, durationMs: 4000 }
+      } as unknown as Parameters<typeof seed.taskProgress>[1])
+    })
+    advance(22_000)
+    expect(elapsedText()).toBe('22s')
+  })
+
+  it('shows the run’s own duration once it ends, and stops ticking', () => {
+    started()
+    renderCard()
+    advance(40_000)
+    act(() => {
+      seed.taskNotification(ROUTE, {
+        taskId: 'agent-abc123',
+        toolUseId: 'call_task_1',
+        status: 'completed',
+        outputFile: '',
+        summary: 'done',
+        usage: { totalTokens: 5000, toolUses: 2, durationMs: 53_500 }
+      })
+    })
+    expect(screen.getByTestId('TaskCard')).toHaveAttribute('data-status', 'completed')
+    expect(elapsedText()).toBe('53.5s')
+    advance(10_000)
+    expect(elapsedText()).toBe('53.5s')
+  })
+
+  it('shows no clock for a task with no start and no progress (other engines)', () => {
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    expect(screen.getByTestId('TaskCard')).toHaveAttribute('data-status', 'running')
+    expect(elapsedText()).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // "Open in panel" — the mobile task-takeover entry point (see MobileTaskView)
 // ---------------------------------------------------------------------------
 //
@@ -215,6 +426,18 @@ describe('TaskCard — "Open in panel" (mobile takeover entry point)', () => {
     render(<TaskCard block={makeTaskBlock()} result={completedResult} view={defaultTaskView} />)
 
     fireEvent.click(screen.getByTestId('TaskCard.openInPanel'))
+
+    const session = useSessionStore.getState().sessions[ROUTE]
+    expect(session.rightPanel).toBe('task')
+    expect(session.openedTaskToolUseIds).toContain('call_task_1')
+  })
+
+  it('the expanded card has its own "Open in panel" (ADR-027 id) that opens the panel the same way', () => {
+    render(<TaskCard block={makeTaskBlock()} result={completedResult} view={defaultTaskView} />)
+    expect(screen.queryByTestId('TaskCard.expanded.openInPanel')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    fireEvent.click(screen.getByTestId('TaskCard.expanded.openInPanel'))
 
     const session = useSessionStore.getState().sessions[ROUTE]
     expect(session.rightPanel).toBe('task')
@@ -307,8 +530,8 @@ describe('TaskCard — inline task approval', () => {
 //
 // dispatch_agent maps to the 'task' ToolKind via hostedMcpKind/OpencodeEngineToolMap
 // (see ClaudeEngineToolMap.test.ts / OpencodeEngineToolMap.test.ts), and its
-// ToolView normalizes to description:'Dispatch: <engine>' + subagent:'<engine> · <model>'
-// (the badge slot — no ToolView extension). This exercises TaskCard's rendering
+// ToolView normalizes to description:'Dispatch: <engine>' + the structured
+// `dispatch: { engine, model }` field (ADR-094). This exercises TaskCard's rendering
 // of that view directly with item-streamed subagent output, mirroring how the
 // dispatcher's item lifecycle lands in the store while a dispatch is in flight.
 
@@ -336,15 +559,18 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
     kind: 'task' as const,
     description: 'Dispatch: opencode',
     prompt: 'Get a second opinion',
-    subagent: 'opencode · openai/gpt-5'
+    dispatch: { engine: 'opencode', model: 'openai/gpt-5' }
   }
 
-  it('shows the "<engine> · <model>" badge in the subagent slot while running', () => {
+  it('shows the X tile and the "<engine> · <model>" chip while running', () => {
     seed.subagentStreamText(ROUTE, 'toolu_dispatch_1', 'Working on it')
     render(<TaskCard block={dispatchBlock} view={dispatchView} />)
 
     fireEvent.click(screen.getByTestId('TaskCard.expand'))
     expect(screen.getByText('opencode · openai/gpt-5')).toBeInTheDocument()
+    const tile = screen.getAllByTestId('TaskCard.typeTile')[0]
+    expect(tile).toHaveTextContent('X')
+    expect(tile).toHaveAttribute('title', 'Dispatch → opencode · openai/gpt-5')
   })
 
   it('renders live-streamed text forwarded from the dispatch target', () => {
@@ -403,7 +629,7 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
           kind: 'task',
           description: 'Dispatch: claude',
           prompt: 'review',
-          subagent: 'claude · haiku'
+          dispatch: { engine: 'claude', model: 'haiku' }
         }}
       />
     )
@@ -424,7 +650,7 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
           kind: 'task',
           description: 'Dispatch: claude',
           prompt: 'review',
-          subagent: 'claude · sonnet'
+          dispatch: { engine: 'claude', model: 'sonnet' }
         }}
       />
     )
@@ -432,7 +658,51 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
     expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
   })
 
-  it('native task card unchanged: running → both Stop and "Send to background" render', () => {
+  it('V1a: a pi agent call the host refused (isError result, no lifecycle record) reads failed, not completed or running', () => {
+    const piInput = { description: 'd', prompt: 'p', model: 'gpt-9' }
+    const refused = {
+      type: 'tool_result' as const,
+      toolUseId: 'call_task_1',
+      toolResult: 'Unknown model "gpt-9". Call list_models to see the models available to agents.',
+      isError: true
+    }
+    const view = PiEngineToolMap.normalize('task', piInput, refused)
+    render(
+      <TaskCard
+        block={makeTaskBlock({ toolName: 'agent', toolInput: piInput })}
+        result={refused}
+        view={view as typeof defaultTaskView}
+      />
+    )
+    expect(screen.getByTestId('TaskCard')).toHaveAttribute('data-status', 'failed')
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+  })
+
+  it('V1a: the same call with a non-error foreground report reads completed', () => {
+    const piInput = { description: 'd', prompt: 'p', run_in_background: false }
+    const done = {
+      type: 'tool_result' as const,
+      toolUseId: 'call_task_1',
+      toolResult: 'the report',
+      isError: false
+    }
+    render(
+      <TaskCard
+        block={makeTaskBlock({ toolName: 'agent', toolInput: piInput })}
+        result={done}
+        view={PiEngineToolMap.normalize('task', piInput, done) as typeof defaultTaskView}
+      />
+    )
+    expect(screen.getByTestId('TaskCard')).toHaveAttribute('data-status', 'completed')
+  })
+
+  it('native task card unchanged: running in the foreground → both Stop and "Send to background" render', () => {
+    seed.taskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-fg',
+      taskType: 'local_agent',
+      isBackgrounded: false
+    })
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
     expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
     expect(screen.getByTestId('TaskCard.sendToBackground')).toBeInTheDocument()
@@ -531,5 +801,251 @@ describe('TaskCard — subagent output ordering + thinking toggle', () => {
     fireEvent.click(screen.getByTestId('TaskCard.expand'))
 
     expect(screen.getByText(longText)).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A refused spawn (ADR-085 §3 — the opencode host's plan-mode refusal of `task`)
+// ---------------------------------------------------------------------------
+
+describe('TaskCard — a permission denial of the task call', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const denial: PermissionDenialBlock = {
+    type: 'permission_denial',
+    toolUseId: 'call_task_1',
+    denialId: 'd1',
+    source: 'mode',
+    reason: 'Plan mode is read-only — present a plan and call exit_plan to proceed'
+  }
+  const refusedResult = {
+    type: 'tool_result' as const,
+    toolUseId: 'call_task_1',
+    toolResult: 'Plan mode is read-only — present a plan and call exit_plan to proceed',
+    isError: true
+  }
+
+  it('shows the chip in the header, and the strip only once expanded', () => {
+    render(
+      <TaskCard
+        block={makeTaskBlock()}
+        result={refusedResult}
+        view={defaultTaskView}
+        denial={denial}
+      />
+    )
+    expect(screen.getByTestId('TaskCard.denialChip')).toHaveTextContent('Blocked · mode')
+    expect(screen.queryByTestId('TaskCard.denial')).not.toBeInTheDocument()
+    // The result is the error: the card still reads failed.
+    expect(screen.getByTestId('TaskCard')).toHaveAttribute('data-status', 'failed')
+
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    const strip = screen.getByTestId('TaskCard.denial')
+    expect(strip).toHaveTextContent('The permission mode refused this action')
+    expect(strip).toHaveTextContent(
+      'Plan mode is read-only — present a plan and call exit_plan to proceed'
+    )
+    // ToolCard's ids are not borrowed.
+    expect(screen.queryByTestId('ToolCard.denialChip')).not.toBeInTheDocument()
+  })
+
+  it('renders neither without a denial', () => {
+    render(<TaskCard block={makeTaskBlock()} result={refusedResult} view={defaultTaskView} />)
+    expect(screen.queryByTestId('TaskCard.denialChip')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    expect(screen.queryByTestId('TaskCard.denial')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A judge-blocked delegation (ADR-091 part 6 — the commonest subagent block)
+// ---------------------------------------------------------------------------
+
+describe('TaskCard — an auto-mode review of the task call', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const blocked: ToolReviewBlock = {
+    type: 'tool_review',
+    toolUseId: 'call_task_1',
+    reviewId: 'r1',
+    reviewer: 'auto-mode',
+    decision: 'denied',
+    rule: 'Git Destructive',
+    rationale: 'This delegates deleting three remote branches.'
+  }
+  const blockedResult = {
+    type: 'tool_result' as const,
+    toolUseId: 'call_task_1',
+    toolResult: 'Auto mode blocked: Git Destructive: …',
+    isError: true
+  }
+
+  it('shows the chip with a compact Approve, and the strip with Approve once expanded', async () => {
+    const calls: Array<[string, string]> = []
+    app.bridge.ipcMain.handle(
+      'session:approve-blocked',
+      async (_e, routingId: string, toolUseId: string) => {
+        calls.push([routingId, toolUseId])
+      }
+    )
+    render(
+      <TaskCard
+        block={makeTaskBlock()}
+        result={blockedResult}
+        view={defaultTaskView}
+        review={blocked}
+      />
+    )
+    expect(screen.getByTestId('TaskCard.reviewChip')).toHaveTextContent('Auto mode · blocked')
+    expect(screen.getByTestId('ToolReview.approveCompact')).toBeInTheDocument()
+    // ToolCard's ids are not borrowed.
+    expect(screen.queryByTestId('ToolCard.reviewChip')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    expect(screen.getByTestId('TaskCard.review')).toHaveTextContent(
+      'This delegates deleting three remote branches.'
+    )
+    expect(screen.queryByTestId('ToolReview.approveCompact')).not.toBeInTheDocument()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('ToolReview.approve'))
+    })
+    expect(calls).toEqual([[ROUTE, 'call_task_1']])
+  })
+
+  it('reads "approved by you" with no button once the host marks it', () => {
+    render(
+      <TaskCard
+        block={makeTaskBlock()}
+        result={blockedResult}
+        view={defaultTaskView}
+        review={{
+          ...blocked,
+          reviewId: 'r1:approved',
+          overriddenByUser: true,
+          nudgedTo: 'the main agent'
+        }}
+      />
+    )
+    expect(screen.getByTestId('TaskCard.reviewChip')).toHaveTextContent('approved by you')
+    expect(screen.queryByTestId('ToolReview.approveCompact')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    expect(screen.getByTestId('ToolReview.nudgedTo')).toHaveTextContent('Sent to the main agent')
+    expect(screen.queryByTestId('ToolReview.approve')).not.toBeInTheDocument()
+  })
+
+  it('offers no Approve on an allowed review or in a historical session', () => {
+    const { unmount } = render(
+      <TaskCard
+        block={makeTaskBlock()}
+        result={blockedResult}
+        view={defaultTaskView}
+        review={{ ...blocked, decision: 'approved' }}
+      />
+    )
+    expect(screen.queryByTestId('ToolReview.approveCompact')).not.toBeInTheDocument()
+    unmount()
+    useSessionStore.setState((state) => ({
+      sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], isHistorical: true } }
+    }))
+    render(
+      <TaskCard
+        block={makeTaskBlock()}
+        result={blockedResult}
+        view={defaultTaskView}
+        review={blocked}
+      />
+    )
+    expect(screen.getByTestId('TaskCard.reviewChip')).toBeInTheDocument()
+    expect(screen.queryByTestId('ToolReview.approveCompact')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Failure reason alongside subagent output
+// ---------------------------------------------------------------------------
+//
+// A subagent that streamed output shows that output as the card body, so the
+// failed tool_result's error text (the reason) never appeared — an opencode
+// subagent that ran out of context read as a bare "failed". It now shows next
+// to that output; a stopped (aborted) task is not a failure and shows none.
+describe('TaskCard — failure reason', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const reason = 'Subagent failed (task_id: ses_child): prompt is too long'
+
+  function renderFinished(status: 'failed' | 'completed' | 'stopped', toolResult: string): void {
+    seed.subagentMessage(ROUTE, 'call_task_1', {
+      id: 'child_m1',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'working through the files' }],
+      timestamp: Date.now()
+    })
+    seed.taskNotification(ROUTE, {
+      taskId: 'ses_child',
+      toolUseId: 'call_task_1',
+      status,
+      outputFile: '',
+      summary: ''
+    })
+    const result = {
+      type: 'tool_result' as const,
+      toolUseId: 'call_task_1',
+      toolResult,
+      isError: status !== 'completed'
+    }
+    render(<TaskCard block={makeTaskBlock()} result={result} view={defaultTaskView} />)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+  }
+
+  it('a failed task with subagent output shows the tool error next to that output', () => {
+    renderFinished('failed', reason)
+    expect(screen.getByTestId('SubagentMessages')).toBeInTheDocument()
+    expect(screen.getByTestId('TaskCard.failureSummary')).toHaveTextContent(reason)
+  })
+
+  it('a stopped task shows no failure strip', () => {
+    renderFinished('stopped', 'Task cancelled')
+    expect(screen.queryByTestId('TaskCard.failureSummary')).not.toBeInTheDocument()
+  })
+
+  it('a completed task shows no failure strip', () => {
+    renderFinished('completed', 'all done')
+    expect(screen.queryByTestId('TaskCard.failureSummary')).not.toBeInTheDocument()
   })
 })

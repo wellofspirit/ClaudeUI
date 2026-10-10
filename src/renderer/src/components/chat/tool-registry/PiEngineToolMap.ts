@@ -43,17 +43,21 @@
  * lifted kind (MessageBubble.renderToolBlock routes it to ExitPlanModeCard
  * before ever consulting displayName), engine-agnostic by design.
  *
- * M5b: in-pi subagents — a SECOND bare-name `pi.registerTool()` registration
- * (`subagent`, from the separate pi-subagent-source.ts extension, gated on
- * CLAUDEUI_PI_SUBAGENTS) also maps to 'task', reusing TaskCard alongside
- * dispatch_agent. Disambiguated by input shape in piNormalize's 'task' case:
- * dispatch_agent always carries `engine`; subagent carries `agent`+`task`
- * (single) or `tasks: [...]` (parallel) — never `engine`.
+ * ADR-089: host-run pi subagents — the bridge's `agent` tool (v9, gated on
+ * CLAUDEUI_PI_AGENT_TOOL) maps to 'task', reusing TaskCard alongside
+ * dispatch_agent. `subagent` (legacy M5b transcripts from the retired in-pi
+ * extension, and pi's upstream example extension) maps to 'task' too.
+ * piNormalize does not receive the tool name, so its 'task' case
+ * disambiguates by input shape: dispatch_agent always carries `engine`;
+ * `agent` carries `prompt`+`description` and none of `engine`/`agent`/`tasks`;
+ * subagent carries `agent`+`task` (single) or `tasks: [...]` (parallel).
  */
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
-import { hostedMcpKind } from '../../../../../shared/tool-kinds'
+import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kinds'
 import type { ContentBlock } from '../../../../../shared/types'
+import { isPiAsyncLaunchResult, piAgentResultModel } from '../../../../../shared/pi-agent-result'
+import { DEFAULT_SUBAGENT_TYPE } from '../../../../../shared/agent-type-colors'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -98,14 +102,27 @@ function piKindOf(toolName: string): ToolKind {
       return 'mockup'
     case 'dispatch_agent':
       return 'task'
-    // In-pi subagents (M5b) — the subagent-discovery extension's OWN
-    // registered tool (pi-subagent-source.ts, gated on CLAUDEUI_PI_SUBAGENTS).
-    // Reuses the SAME 'task' kind dispatch_agent does — TaskCard is
-    // engine-neutral and disambiguates by input shape (see piNormalize's
-    // 'task' case below). Mirrors permission-engine.ts's piToolKind IDENTICAL
-    // case (single-source guard test).
+    // Host-run pi subagents (ADR-089) — the bridge's own `agent` tool. Reuses
+    // the SAME 'task' kind dispatch_agent does — TaskCard is engine-neutral
+    // and disambiguates by input shape (see piNormalize's 'task' case below).
+    // Mirrors permission-engine.ts's piToolKind IDENTICAL case (single-source
+    // guard test).
+    case 'agent':
+      return 'task'
+    // `subagent`: legacy M5b transcripts and pi's upstream example subagent
+    // extension. Mirrors permission-engine.ts's piToolKind IDENTICAL case.
     case 'subagent':
       return 'task'
+    // ADR-089 S3b: the bridge's `send_message` / `task_stop` (Claude's
+    // SendMessage / TaskStop rows). Mirrors permission-engine.ts's piToolKind.
+    case 'send_message':
+      return 'detail'
+    case 'task_stop':
+      return 'note'
+    // The bridge's read-only `list_models`: a one-line note. Mirrors
+    // permission-engine.ts's piToolKind.
+    case 'list_models':
+      return 'note'
     default:
       return 'unknown'
   }
@@ -206,15 +223,46 @@ function piNormalize(
       // discriminator, mirroring Claude/OpencodeEngineToolMap's identical
       // dispatch branch verbatim. Checked FIRST since dispatch_agent's input
       // shape never overlaps with subagent's (below).
-      if (typeof inp.engine === 'string') {
+      if (typeof inp.engine === 'string')
+        return dispatchTaskView({ engine: inp.engine, prompt: inp.prompt, model: inp.model })
+      // Host-run subagents (ADR-089) — the `agent` tool: { description,
+      // prompt, subagent_type?, name?, model?, run_in_background? }. Keyed on the shape (prompt +
+      // description, none of engine/agent/tasks): piNormalize never sees the
+      // tool name. Checked BEFORE the legacy `subagent` shapes below.
+      if (
+        typeof inp.prompt === 'string' &&
+        typeof inp.description === 'string' &&
+        inp.agent === undefined &&
+        inp.tasks === undefined
+      ) {
+        const type =
+          typeof inp.subagent_type === 'string' && inp.subagent_type !== ''
+            ? inp.subagent_type
+            : undefined
+        const name = typeof inp.name === 'string' && inp.name !== '' ? inp.name : type
+        const resolvedModel =
+          (result ? piAgentResultModel(result) : undefined) ||
+          (typeof inp.model === 'string' && inp.model !== '' ? inp.model : undefined)
         return {
           kind: 'task',
-          description: `Dispatch: ${inp.engine}`,
-          prompt: inp.prompt != null ? String(inp.prompt) : '',
-          subagent: inp.model != null ? `${inp.engine} · ${String(inp.model)}` : String(inp.engine)
+          description: inp.description,
+          prompt: inp.prompt,
+          subagent: type ?? DEFAULT_SUBAGENT_TYPE.pi,
+          ...(name ? { name } : {}),
+          // The model the host resolved the request to (an alias or bare id is
+          // not what runs), once the result says; until then, and for a refused
+          // call, what was asked for.
+          ...(resolvedModel ? { model: resolvedModel } : {}),
+          // Once a result exists it decides (ADR-089 S3): only the host's
+          // launch acknowledgement means a background run. A call refused
+          // before any spawn (validation, start failure, a deny) is settled,
+          // not "running" forever, and a definition that forced background
+          // reads as one on reload. Until then the input says: background is
+          // the default (D2), only an explicit false is foreground.
+          background: result ? isPiAsyncLaunchResult(result) : inp.run_in_background !== false
         }
       }
-      // In-pi subagents (M5b) — pi-subagent-source.ts's `subagent` tool.
+      // Legacy `subagent` tool (M5b transcripts; pi's upstream example).
       // Parallel form: { tasks: [{agent, task}, ...] }.
       if (Array.isArray(inp.tasks)) {
         const list = inp.tasks as Array<{ agent?: unknown; task?: unknown }>
@@ -254,6 +302,53 @@ function piNormalize(
       }
     }
 
+    // send_message (ADR-089 S3b): who and the preview as fields, the message
+    // itself as the text — the shape Claude's SendMessage row takes.
+    case 'detail': {
+      const fields: { label: string; value: string }[] = []
+      if (typeof inp.to === 'string' && inp.to !== '') fields.push({ label: 'to', value: inp.to })
+      if (typeof inp.summary === 'string' && inp.summary !== '') {
+        fields.push({ label: 'summary', value: inp.summary })
+      }
+      // A refused send_message shows WHY (the host's answer); the message it
+      // tried to send moves into the fields.
+      if (result?.isError === true) {
+        if (typeof inp.message === 'string' && inp.message !== '') {
+          fields.push({ label: 'message', value: inp.message })
+        }
+        return { kind: 'detail', fields, text: result.toolResult }
+      }
+      const text = typeof inp.message === 'string' ? inp.message : result?.toolResult
+      return { kind: 'detail', fields, ...(text !== undefined ? { text } : {}) }
+    }
+
+    // Both pi 'note' tools, told apart by input shape (piNormalize never sees
+    // the tool name): task_stop always carries `task_id`; list_models takes at
+    // most a `query`.
+    case 'note': {
+      // list_models: the result is a long list the model reads — the row says
+      // only what was asked (a FAILED call still shows what came back, as
+      // every note row does).
+      if (!('task_id' in inp)) {
+        const query = typeof inp.query === 'string' ? inp.query.trim() : ''
+        return {
+          kind: 'note',
+          icon: 'search',
+          text: query ? `Listed models matching "${query}"` : 'Listed the available models'
+        }
+      }
+      // task_stop (ADR-089 S3b): the host's own answer once there is one — a
+      // refusal or "not running" must not read as a stop.
+      return {
+        kind: 'note',
+        icon: 'stop',
+        text:
+          result && result.toolResult
+            ? result.toolResult
+            : `Stopped agent ${typeof inp.task_id === 'string' ? inp.task_id : ''}`.trim()
+      }
+    }
+
     case 'mcp':
       return { kind: 'mcp', input: inp }
 
@@ -283,7 +378,9 @@ const PI_DISPLAY_NAMES: Record<string, string> = {
   create_mockup: 'Mockup',
   show_mockup: 'Mockup',
   dispatch_agent: 'Dispatch',
-  subagent: 'Subagent'
+  agent: 'Agent',
+  subagent: 'Subagent',
+  list_models: 'Models'
 }
 
 function piDisplayName(toolName: string): string {

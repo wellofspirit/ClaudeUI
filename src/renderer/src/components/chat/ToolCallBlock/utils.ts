@@ -2,7 +2,7 @@
  * Pure business logic for ToolCallBlock — visual state machine and display helpers.
  */
 
-import type { ContentBlock } from '../../../../../shared/types'
+import type { ContentBlock, TaskNotification } from '../../../../../shared/types'
 import { isAgentTool } from '../../../../../shared/types'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -15,7 +15,7 @@ export interface ToolStateContext {
   isHistorical: boolean
   hasApproval: boolean
   isBackgroundBash: boolean
-  bgNotificationStatus: 'completed' | 'failed' | 'stopped' | null
+  bgNotificationStatus: TaskNotification['status'] | null
   resultIsError: boolean
 }
 

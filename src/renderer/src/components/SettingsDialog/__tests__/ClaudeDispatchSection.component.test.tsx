@@ -2,10 +2,10 @@
  * Layer 2: Component tests for ClaudeDispatchSection (ADR-033 M2-C — Claude-side twin).
  *
  * Mirrors OpencodeDispatchSection.component.test.tsx. Claude itself is always
- * installed, but dispatch INTO Claude can only be called FROM opencode, so
- * (ADR-033 M4-A) this section gates on the same opencode-installed probe as
- * the opencode twin — hence the gated-states tests below, unlike the earlier
- * M2-C revision of this file.
+ * installed, but dispatch INTO Claude can only be called FROM another harness,
+ * so (ADR-033 M4-A) the dispatch page offers this target only while one of
+ * opencode, pi or Codex runs (ADR-082 §8; SettingsDialogView's page test). The
+ * section itself never asks.
  *
  * ADR-065 split the pane into TWO group bodies over one config read — "Dispatch
  * into" (`ClaudeDispatchSection`) and "Limits" (`ClaudeDispatchSection.limits`)
@@ -14,7 +14,7 @@
  * id it asserts is the id that row carried before the split.
  *
  * Tested flows:
- *   1. Gated states: loading (probes pending) and not-installed (no opencode)
+ *   1. Loading while the config is pending
  *   2. Load renders the current dispatch config (select value + chip states),
  *      filtered to Claude models only (opencode models excluded)
  *   3. Editing the default model saves the FULL merged EngineConfig —
@@ -68,7 +68,6 @@ const saveEngineConfig = vi.fn(async (_engineId: string, cfg: EngineConfig) => {
 
 function installApiStub(overrides: Record<string, unknown> = {}): void {
   ;(window as unknown as { api: Record<string, unknown> }).api = {
-    engineIsInstalled: vi.fn(async () => true),
     loadEngineConfig: vi.fn(async () => structuredClone(BASE_CONFIG)),
     getEngineModels: vi.fn(async () => MODEL_GROUPS),
     saveEngineConfig,
@@ -139,25 +138,12 @@ afterEach(() => {
 
 // ── Tests ────────────────────────────────────────────────────────────
 
-describe('ClaudeDispatchSection — gated states', () => {
-  it('shows Loading while probes are pending', () => {
-    installApiStub({
-      engineIsInstalled: vi.fn(() => new Promise(() => {})),
-      loadEngineConfig: vi.fn(() => new Promise(() => {}))
-    })
+describe('ClaudeDispatchSection — loading', () => {
+  it('shows Loading while the config is pending', () => {
+    installApiStub({ loadEngineConfig: vi.fn(() => new Promise(() => {})) })
     render(<ClaudeDispatchSection />)
     expect(screen.getByTestId('ClaudeDispatchSection').textContent).toContain('Loading')
     expect(screen.queryByTestId('ClaudeDispatchSection.defaultModel')).toBeNull()
-  })
-
-  it('shows the not-installed message (no controls) when opencode is absent — no possible caller', async () => {
-    installApiStub({ engineIsInstalled: vi.fn(async () => false) })
-    render(<ClaudeDispatchSection />)
-    await waitFor(() =>
-      expect(screen.getByTestId('ClaudeDispatchSection').textContent).toContain('not installed')
-    )
-    expect(screen.queryByTestId('ClaudeDispatchSection.defaultModel')).toBeNull()
-    expect(screen.queryAllByTestId('ClaudeDispatchSection.allowedModel')).toHaveLength(0)
   })
 })
 

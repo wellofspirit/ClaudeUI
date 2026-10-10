@@ -55,9 +55,9 @@ function normaliseModelId(model: string | undefined | null): string {
 
 /**
  * Map a model picker value to its canonical id. Mirrors cli.js's baked model
- * catalog aliases at the time of writing (2.1.280):
- *   `opus` → `claude-opus-5-5` (default provider), `sonnet` → `claude-sonnet-5`,
- *   `haiku` → `claude-haiku-4-5`. (Upstream also maps `fable` →
+ * catalog aliases at the time of writing (2.1.293):
+ *   `opus` → `claude-opus-5-5` (default provider), `sonnet` → `claude-sonnet-5-5`,
+ *   `haiku` → `claude-haiku-5-5`. (Upstream also maps `fable` →
  *   `claude-fable-5-1`; there has never been a `fable` case here — a bare
  *   `fable` value falls through to the unknown-family "assume modern"
  *   defaults, which match Fable's actual capabilities.)
@@ -65,6 +65,10 @@ function normaliseModelId(model: string | undefined | null): string {
  * The `default` alias intentionally has no mapping — it resolves at the cli.js
  * layer to whatever the user (or environment) has configured. Returns the
  * input unchanged for canonical ids that don't need translation.
+ *
+ * Only a fallback: cli.js resolves aliases against a catalog served per account,
+ * which can move an alias without a release (ADR-100), so whatever cli.js reports
+ * (`resolvedModel`, `system/init.model`) wins over this table.
  */
 export function canonicalizeModelValue(value: string | undefined | null): string {
   if (!value) return ''
@@ -74,30 +78,120 @@ export function canonicalizeModelValue(value: string | undefined | null): string
     case 'opus[1m]':
       return 'claude-opus-5-5'
     case 'sonnet':
-      return 'claude-sonnet-5'
+      return 'claude-sonnet-5-5'
     case 'sonnet[1m]':
-      return 'claude-sonnet-5'
+      return 'claude-sonnet-5-5'
     case 'haiku':
-      return 'claude-haiku-4-5'
+      return 'claude-haiku-5-5'
     default:
       return normaliseModelId(value) || value
   }
 }
 
+/** A Claude picker row, as far as effort keying needs one. */
+export interface ClaudeEffortRowInput {
+  value: string
+  resolvedModel?: string
+}
+
+const CLAUDE_FAMILY_ALIASES = new Set(['opus', 'sonnet', 'haiku', 'fable'])
+
+/** The family alias a picker value names (`opus[1m]` → `opus`), else null. */
+function claudeFamilyAlias(value: string): string | null {
+  const bare = value.toLowerCase().replace(/\[1m\]$/, '')
+  return CLAUDE_FAMILY_ALIASES.has(bare) ? bare : null
+}
+
 /**
- * The `modelEffortDefaults` key for a Claude picker row (ADR-074 §8) — the ONE
- * rule both the settings table that writes the key and the composer that reads
- * it at spawn use, so the row a user edits is the row a session reads.
- *
- * The concrete model cli.js says the row resolves to wins (`default` →
- * `claude-opus-5[1m]` → `claude-opus-5`; a dated `haiku` target loses its
- * date). `canonicalizeModelValue`'s baked alias table is only the fallback, for
- * a row without `resolvedModel` — it cannot follow an account whose `opus` or
- * `default` resolves somewhere else, and has no answer for `default` at all.
+ * Does a Claude picker value name one specific Anthropic model (`claude-opus-4-8`,
+ * `claude-fable-5-1[1m]`)? ClaudeUI offers Claude models by alias only (ADR-100),
+ * so these rows are dropped from cli.js's catalog. `default`, the family aliases
+ * and anything else cli.js offers (a gateway's own model option) are kept.
  */
-export function claudeEffortKey(
-  model: { value: string; resolvedModel?: string } | undefined | null
+export function isConcreteClaudeModel(value: string): boolean {
+  return value.toLowerCase().startsWith('claude-')
+}
+
+/** Is this Claude picker value an alias cli.js resolves: `default` or a family alias? */
+export function isClaudeModelAlias(value: string): boolean {
+  return value === 'default' || claudeFamilyAlias(value) !== null
+}
+
+/**
+ * The family alias in `catalog` that resolves to the concrete model `value`
+ * names (`claude-sonnet-5-5-20260901` → `sonnet` while `sonnet` runs Sonnet 5.5),
+ * preferring the `[1m]` alias for a `[1m]` value when the catalog lists one.
+ * Anything else comes back unchanged: an alias already, `default`'s target (it is
+ * never the answer — `default` means "follow the recommendation", a different
+ * intent), a model no alias reaches, or an empty catalog. Idempotent.
+ */
+export function claudeAliasForModel(
+  value: string,
+  catalog: readonly ClaudeEffortRowInput[]
 ): string {
+  if (!isConcreteClaudeModel(value)) return value
+  const id = normaliseModelId(value)
+  const reaching = catalog.filter(
+    (m) => claudeFamilyAlias(m.value) !== null && claudeResolvedModelId(m) === id
+  )
+  const is1m = (v: string): boolean => /\[1m\]$/i.test(v)
+  const match = reaching.find((m) => is1m(m.value) === is1m(value)) ?? reaching[0]
+  return match?.value ?? value
+}
+
+/** The fields of `engines/claude.json` that hold Claude picker values. */
+interface ClaudeModelPicks {
+  claudeConfig?: { defaultModel?: string }
+  dispatch?: { defaultModel?: string; allowedModels?: string[] }
+}
+
+/**
+ * `config` with every saved Claude pick in it moved to its alias
+ * ({@link claudeAliasForModel}): the default model, and cross-engine dispatch's
+ * default and allowlist. Returns the SAME object when nothing moved, so the
+ * caller knows whether there is anything to save.
+ */
+export function claudeConfigWithAliases<T extends ClaudeModelPicks>(
+  config: T,
+  catalog: readonly ClaudeEffortRowInput[]
+): T {
+  const alias = (v: string | undefined): string | undefined =>
+    v === undefined ? v : claudeAliasForModel(v, catalog)
+  const defaultModel = alias(config.claudeConfig?.defaultModel)
+  const dispatchDefault = alias(config.dispatch?.defaultModel)
+  const allowed = config.dispatch?.allowedModels
+  // Two saved ids can meet on one alias; the list keeps it once.
+  const nextAllowed = allowed && [...new Set(allowed.map((v) => claudeAliasForModel(v, catalog)))]
+  const allowedMoved =
+    !!allowed &&
+    (nextAllowed!.length !== allowed.length || nextAllowed!.some((v, i) => v !== allowed[i]))
+  if (
+    defaultModel === config.claudeConfig?.defaultModel &&
+    dispatchDefault === config.dispatch?.defaultModel &&
+    !allowedMoved
+  ) {
+    return config
+  }
+  const next = { ...config }
+  if (config.claudeConfig) next.claudeConfig = { ...config.claudeConfig, defaultModel }
+  if (config.dispatch) {
+    next.dispatch = {
+      ...config.dispatch,
+      defaultModel: dispatchDefault,
+      allowedModels: nextAllowed
+    }
+  }
+  return next
+}
+
+/**
+ * The concrete model a Claude picker row runs on: what cli.js says it resolves
+ * to (`default` → `claude-opus-5[1m]` → `claude-opus-5`; a dated `haiku`
+ * target loses its date), else `canonicalizeModelValue`'s baked alias table,
+ * which cannot follow an account whose `opus` resolves somewhere else and has
+ * no answer for `default` at all.
+ */
+export function claudeResolvedModelId(model: ClaudeEffortRowInput | undefined | null): string {
   if (!model) return ''
   const resolved = normaliseModelId(model.resolvedModel)
   if (resolved.startsWith('claude-')) return resolved
@@ -105,8 +199,64 @@ export function claudeEffortKey(
 }
 
 /**
+ * The `modelEffortDefaults` key for a Claude picker row (ADR-074 §8) — the ONE
+ * rule both the settings table that writes the key and the composer that reads
+ * it at spawn use, so the row a user edits is the row a session reads.
+ *
+ * A family alias keys on the alias (`opus`, `opus[1m]` → `opus`), so the
+ * setting follows the alias when cli.js moves it to a new model. `default`
+ * shares the key of the alias in `catalog` that resolves to the same model, as
+ * it names no family of its own. Any other row names one specific model and
+ * keys on that model's id.
+ */
+export function claudeEffortKey(
+  model: ClaudeEffortRowInput | undefined | null,
+  catalog: readonly ClaudeEffortRowInput[] = []
+): string {
+  if (!model) return ''
+  const alias = claudeFamilyAlias(model.value)
+  if (alias) return alias
+  const resolved = claudeResolvedModelId(model)
+  if (model.value === 'default') {
+    const via = catalog.find(
+      (m) => claudeFamilyAlias(m.value) !== null && claudeResolvedModelId(m) === resolved
+    )
+    if (via) return claudeFamilyAlias(via.value)!
+  }
+  return resolved
+}
+
+/**
+ * The key a row's effort was saved under before ADR-074 §8 keyed aliases by
+ * name (v3.5: the resolved model id), when it differs from today's key and no
+ * row in `catalog` owns it. A value saved there still applies until the row is
+ * edited, which rewrites it under the new key.
+ */
+export function claudeLegacyEffortKey(
+  model: ClaudeEffortRowInput | undefined | null,
+  catalog: readonly ClaudeEffortRowInput[] = []
+): string | undefined {
+  const key = claudeEffortKey(model, catalog)
+  const legacy = claudeResolvedModelId(model)
+  if (!legacy || legacy === key) return undefined
+  if (catalog.some((m) => claudeEffortKey(m, catalog) === legacy)) return undefined
+  return legacy
+}
+
+/** The effort saved for a Claude picker row, under its key or its legacy key. */
+export function claudeSavedEffort(
+  efforts: Partial<Record<string, EffortLevel>> | undefined,
+  model: ClaudeEffortRowInput | undefined | null,
+  catalog: readonly ClaudeEffortRowInput[] = []
+): EffortLevel | undefined {
+  if (!efforts || !model) return undefined
+  const legacy = claudeLegacyEffortKey(model, catalog)
+  return efforts[claudeEffortKey(model, catalog)] ?? (legacy ? efforts[legacy] : undefined)
+}
+
+/**
  * Models known NOT to support `effort: 'max'`. Mirrors cli.js `c8z` set.
- * Note: haiku is excluded by name elsewhere (it never supports `max`).
+ * Note: Haiku before 5.x is excluded by name elsewhere (it never supports `max`).
  */
 const NO_MAX_EFFORT = new Set([
   'claude-3-opus',
@@ -155,12 +305,11 @@ export function modelSupportedEffortLevels(
 
 export function modelDefaultEffort(model: ModelCapabilityInput | undefined | null): EffortLevel {
   const allowed = modelSupportedEffortLevels(model)
-  // Use the id-based default first. Mirrors cli.js `YK6`, which since 2.1.154
-  // returns 'xhigh' only for opus-4-7 — opus-4-8 supports xhigh but defaults
-  // to 'high' (4.8-high is roughly 4.7-xhigh quality). A blanket
-  // "xhigh allowed ⇒ xhigh default" rule would now over-select for 4.8 and
-  // for the `default`/`opus` aliases that resolve to it.
-  const fallback = defaultEffort(model?.value)
+  // Use the id-based default first, judged on the model the row resolves to:
+  // `opus` and `default` are opaque to the heuristic, and cli.js defaults Opus
+  // 5.5 to 'medium'. A blanket "xhigh allowed ⇒ xhigh default" rule would
+  // over-select for every model but Opus 4.7.
+  const fallback = defaultEffort(model?.resolvedModel || model?.value)
   if (allowed.includes(fallback)) return fallback
   if (allowed.includes('high')) return 'high'
   return allowed[allowed.length - 1] ?? 'high'
@@ -191,12 +340,255 @@ export function modelResolveEffort(
   return modelDefaultEffort(model)
 }
 
+/**
+ * `efforts` with one row's starting effort written (or cleared, `next ===
+ * undefined`). Writing moves a v3.5 value off its legacy key so it cannot
+ * resurface. The ONE writer of `modelEffortDefaults`: the Settings table and the
+ * composer's remembered pick both go through it, so they cannot disagree about
+ * which key a row lives under.
+ */
+export function withSavedEffort(
+  efforts: Partial<Record<string, EffortLevel>> | undefined,
+  row: { key: string; legacyKey?: string },
+  next: EffortLevel | undefined
+): Partial<Record<string, EffortLevel>> {
+  const map = { ...efforts }
+  if (row.legacyKey) delete map[row.legacyKey]
+  if (next === undefined) delete map[row.key]
+  else map[row.key] = next
+  return map
+}
+
+/**
+ * The settings slice the per-model starting effort lives in. Two maps, because
+ * two namespaces: Claude's `modelEffortDefaults` is keyed by `claudeEffortKey`
+ * (alias / resolved id, with v3.5 legacy keys), while every other remembering
+ * engine uses `engineEffortDefaults[engineId][modelValue]` — the picker value
+ * VERBATIM (pi's `provider/model` is already unique per provider). Keeping them
+ * apart is what stops pi's `anthropic/claude-opus-5-5` from landing on the key
+ * Claude's own `opus` row owns.
+ */
+export interface EffortDefaultsSlice {
+  modelEffortDefaults?: Partial<Record<string, EffortLevel>>
+  engineEffortDefaults?: Partial<Record<string, Partial<Record<string, EffortLevel>>>>
+  /** `AppSettings.newSessionModel`; see {@link carriesPicksIntoNewSessions}. */
+  newSessionModel?: string
+}
+
+/** The two maps themselves: what {@link rememberEffortPatch} returns to be merged into settings. */
+export type EffortDefaultsPatch = Pick<
+  EffortDefaultsSlice,
+  'modelEffortDefaults' | 'engineEffortDefaults'
+>
+
+/**
+ * Do composer picks carry into NEW sessions? The `newSessionModel` rule as a
+ * predicate (`'last-picked'`, or absent, does; `'configured-default'` does not).
+ * THE one statement of it: the model pick follows it (`seedingModelPicks`), the
+ * composer's remembered effort follows it (the write gate in the composer and the
+ * read gate in {@link savedEffortFor}), and the Settings note reads it, so a user
+ * who chose "new sessions start on the configured default" is handed neither the
+ * last model nor the last effort they picked.
+ */
+export function carriesPicksIntoNewSessions(settings: { newSessionModel?: string }): boolean {
+  return settings.newSessionModel !== 'configured-default'
+}
+
+/**
+ * Does this engine remember a per-model starting effort? Claude and pi. opencode
+ * models take no effort (reasoning variants instead) and Codex's tiers are native
+ * and applied over a live setter, so neither remembers. The ONE predicate:
+ * {@link savedEffortFor} (the resolver's middle rung) and
+ * {@link rememberEffortPatch} (the composer's write) both gate on it.
+ */
+export function engineRemembersEffort(engineId: string | undefined): boolean {
+  const id = engineId ?? 'claude'
+  return id === 'claude' || id === 'pi'
+}
+
+/**
+ * The starting effort saved for a model, or undefined. THE reader of both maps:
+ * Claude through `modelEffortDefaults` and `claudeEffortKey` (legacy keys
+ * included), pi through `engineEffortDefaults.pi[modelValue]`. Not clamped here:
+ * the spawn clamp ({@link resolveSpawnEffort}) holds a saved value to the model's
+ * levels.
+ */
+export function savedEffortFor(
+  settings: EffortDefaultsSlice | undefined,
+  engineId: string | undefined,
+  model: ModelCapabilityInput | undefined | null,
+  engineModels: readonly ClaudeEffortRowInput[]
+): EffortLevel | undefined {
+  if (!settings || !model || !engineRemembersEffort(engineId)) return undefined
+  const id = engineId ?? 'claude'
+  // Claude's map IS the configured table (the Settings page edits it), so it
+  // applies in both modes. Everything in `engineEffortDefaults` is a remembered
+  // composer pick with no table to see or clear it, so it applies only while
+  // composer picks carry into new sessions — otherwise a pick made earlier would
+  // keep applying after the user chose "the configured default".
+  if (id === 'claude') return claudeSavedEffort(settings.modelEffortDefaults, model, engineModels)
+  if (!carriesPicksIntoNewSessions(settings)) return undefined
+  return settings.engineEffortDefaults?.[id]?.[model.value]
+}
+
+/**
+ * The settings PATCH that remembers `level` as the model's starting effort, or
+ * undefined — write nothing — for an engine that does not remember, or a model
+ * not in the catalog (no row to key it under; a pick must not be filed under
+ * `''`). THE writer, the twin of {@link savedEffortFor}: `{modelEffortDefaults}`
+ * for Claude (through {@link withSavedEffort}, so a legacy key moves to the new
+ * one), `{engineEffortDefaults}` for the rest.
+ */
+export function rememberEffortPatch(
+  settings: EffortDefaultsSlice | undefined,
+  engineId: string | undefined,
+  model: ModelCapabilityInput | undefined | null,
+  engineModels: readonly ClaudeEffortRowInput[],
+  level: EffortLevel
+): EffortDefaultsPatch | undefined {
+  if (!model || !engineRemembersEffort(engineId)) return undefined
+  const id = engineId ?? 'claude'
+  if (id === 'claude') {
+    return {
+      modelEffortDefaults: withSavedEffort(
+        settings?.modelEffortDefaults,
+        {
+          key: claudeEffortKey(model, engineModels),
+          legacyKey: claudeLegacyEffortKey(model, engineModels)
+        },
+        level
+      )
+    }
+  }
+  const all = settings?.engineEffortDefaults ?? {}
+  return { engineEffortDefaults: { ...all, [id]: { ...all[id], [model.value]: level } } }
+}
+
+/**
+ * The effort a non-native-effort session (Claude / opencode / pi) WANTS, before
+ * any clamp to the model's levels: its own explicit pick, else — for an engine
+ * that remembers (Claude, pi; {@link savedEffortFor}) — the user's per-model
+ * starting effort, else cli.js's own heuristic default.
+ *
+ * The ONE statement of that ladder. The composer's pill and every spawn site
+ * (first send, respawn after a pick, retry, plan "start fresh", review) read it,
+ * so what the pill says is what the process is started with by construction. A
+ * display that skipped the middle rung showed `medium` on a session that really
+ * ran the user's configured `high`.
+ */
+export function resolveDesiredEffort(args: {
+  /** The session's own pick (`session.effort`); `null`/absent = unset. */
+  explicit: string | null | undefined
+  /** The session's engine; absent = Claude. */
+  engineId?: string
+  modelInfo: ModelCapabilityInput | undefined | null
+  /** The catalog the row's `claudeEffortKey` is judged against (its engine's). */
+  engineModels: readonly ClaudeEffortRowInput[]
+  effortDefaults: EffortDefaultsSlice | undefined
+}): EffortLevel {
+  // Not the native branch: the only values a non-native session's pick can hold
+  // are the Claude rungs, the only ones its picker offers.
+  return (
+    (args.explicit as EffortLevel | null | undefined) ??
+    savedEffortFor(args.effortDefaults, args.engineId, args.modelInfo, args.engineModels) ??
+    modelDefaultEffort(args.modelInfo)
+  )
+}
+
+/**
+ * {@link resolveDesiredEffort} clamped to what the model accepts — the value a
+ * spawn sends and the pill shows. A model that takes no effort at all (`null`
+ * from the clamp) keeps the desired value, as the spawn always has.
+ */
+export function resolveSpawnEffort(args: Parameters<typeof resolveDesiredEffort>[0]): EffortLevel {
+  const desired = resolveDesiredEffort(args)
+  return modelResolveEffort(args.modelInfo, desired) ?? desired
+}
+
+/**
+ * The model row an AUTOMATION is judged on — its run and its config screen both:
+ * `modelValue` (`automation.model || 'default'`) in the Claude `catalog` the caller
+ * has (the renderer's undeduped picker models; the host's last
+ * `supportedModels()`), else a row built from the model the value NAMES.
+ *
+ * The fallback matters because a bare alias judged by its raw value is opaque to
+ * the id heuristics (`opus` → "no effort, no adaptive thinking"). So the missing
+ * row's capabilities come from {@link canonicalizeModelValue}'s model, while its
+ * `value` stays the alias, which is what the starting-effort key is derived from.
+ * For a canonical id nothing changes (it canonicalises to itself); `default` has no
+ * mapping and stays heuristic-judged, as before.
+ */
+export function automationModelRow(
+  modelValue: string,
+  catalog: readonly (ModelCapabilityInput & ClaudeEffortRowInput)[]
+): ModelCapabilityInput & ClaudeEffortRowInput {
+  const found = catalog.find((m) => m.value === modelValue)
+  if (found) return found
+  const canonical = canonicalizeModelValue(modelValue)
+  return {
+    value: modelValue,
+    resolvedModel: canonical,
+    supportsEffort: supportsEffort(canonical),
+    supportedEffortLevels: supportedEffortLevels(canonical),
+    supportsAdaptiveThinking: supportsAdaptiveThinking(canonical)
+  }
+}
+
+/**
+ * The effort an AUTOMATION runs at — and the config screen shows: the
+ * automation's own effort, else Claude's saved starting effort for the model
+ * (`modelEffortDefaults` through {@link savedEffortFor}), else the model's
+ * default, clamped to what the model accepts; `null` when it takes none (the run
+ * then sends no `effort`, and the screen shows no effort control). The sessions'
+ * ladder ({@link resolveSpawnEffort}) for a headless Claude run, in ONE function
+ * so the screen and the run cannot disagree. The model is judged on
+ * {@link automationModelRow}.
+ */
+export function resolveAutomationEffort(args: {
+  /** `automation.effort`; unset = follow the ladder. */
+  explicit: string | null | undefined
+  /** `automation.model || 'default'` — the value the run passes to sdkQuery. */
+  modelValue: string
+  catalog: readonly (ModelCapabilityInput & ClaudeEffortRowInput)[]
+  modelEffortDefaults: Partial<Record<string, EffortLevel>> | undefined
+}): EffortLevel | null {
+  const row = automationModelRow(args.modelValue, args.catalog)
+  const desired = resolveDesiredEffort({
+    explicit: args.explicit,
+    engineId: 'claude',
+    modelInfo: row,
+    engineModels: args.catalog,
+    effortDefaults: { modelEffortDefaults: args.modelEffortDefaults }
+  })
+  return modelResolveEffort(row, desired)
+}
+
+/**
+ * The thinking mode an AUTOMATION runs with — and the config screen shows. An
+ * unset pick is `'enabled'` (not the model's adaptive default), and any pick is
+ * coerced to what the model supports, on {@link automationModelRow}.
+ */
+export function resolveAutomationThinking(args: {
+  explicit: ThinkingMode | null | undefined
+  modelValue: string
+  catalog: readonly (ModelCapabilityInput & ClaudeEffortRowInput)[]
+}): ThinkingMode {
+  return modelResolveThinkingMode(
+    automationModelRow(args.modelValue, args.catalog),
+    args.explicit ?? 'enabled'
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Id-based heuristics — used when SDK capability fields are absent.
 // Kept exported for tests and for future models the SDK hasn't labelled yet.
 // ---------------------------------------------------------------------------
 
-/** Mirrors cli.js `kh8` (2.1.261: registry `capabilities` incl. "adaptive_thinking"). */
+/**
+ * Mirrors cli.js `kh8` (2.1.261: registry `capabilities` incl. "adaptive_thinking";
+ * Haiku 5.5 since 2.1.293). `haiku-5` is matched on purpose: `claude-haiku-4-5`
+ * does not contain it, so Haiku 4.x/3.x still fall to the legacy-family branch.
+ */
 export function supportsAdaptiveThinking(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
   if (
@@ -205,7 +597,8 @@ export function supportsAdaptiveThinking(model: string | undefined | null): bool
     id.includes('opus-4-7') ||
     id.includes('opus-4-6') ||
     id.includes('sonnet-4-6') ||
-    id.includes('sonnet-5')
+    id.includes('sonnet-5') ||
+    id.includes('haiku-5')
   )
     return true
   if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
@@ -213,7 +606,7 @@ export function supportsAdaptiveThinking(model: string | undefined | null): bool
   return true
 }
 
-/** Mirrors cli.js `QI` (2.1.261: registry `capabilities` incl. "effort"). */
+/** Mirrors cli.js `QI` (2.1.261: registry `capabilities` incl. "effort"; Haiku 5.5 since 2.1.293). */
 export function supportsEffort(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
   if (
@@ -222,7 +615,8 @@ export function supportsEffort(model: string | undefined | null): boolean {
     id.includes('opus-4-7') ||
     id.includes('opus-4-6') ||
     id.includes('sonnet-4-6') ||
-    id.includes('sonnet-5')
+    id.includes('sonnet-5') ||
+    id.includes('haiku-5')
   )
     return true
   if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
@@ -231,9 +625,9 @@ export function supportsEffort(model: string | undefined | null): boolean {
 
 /**
  * Mirrors cli.js's xhigh gate (2.1.197): explicit true for fable-5, mythos-5,
- * opus-4-8, opus-4-7, sonnet-5; explicit false for sonnet-4-6 / haiku-4-5
- * (covered here by the legacy-family branch). Unknown families are assumed
- * modern and allowed, consistent with `supportsEffort`.
+ * opus-4-8, opus-4-7, sonnet-5 and (2.1.293) haiku-5; explicit false for
+ * sonnet-4-6 / haiku-4-5 (covered here by the legacy-family branch). Unknown
+ * families are assumed modern and allowed, consistent with `supportsEffort`.
  */
 export function supportsXhighEffort(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
@@ -243,7 +637,8 @@ export function supportsXhighEffort(model: string | undefined | null): boolean {
     id.includes('opus-4-8') ||
     id.includes('fable-5') ||
     id.includes('mythos-5') ||
-    id.includes('sonnet-5')
+    id.includes('sonnet-5') ||
+    id.includes('haiku-5')
   ) {
     return true
   }
@@ -251,10 +646,13 @@ export function supportsXhighEffort(model: string | undefined | null): boolean {
   return true
 }
 
-/** Mirrors cli.js `Ct6`. Haiku never supports max; legacy models in NO_MAX_EFFORT don't either. */
+/**
+ * Mirrors cli.js `Ct6`. Haiku before 5.x never supports max (Haiku 5.5 carries
+ * `max_effort`, 2.1.293); legacy models in NO_MAX_EFFORT don't either.
+ */
 export function supportsMaxEffort(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
-  if (id.includes('haiku')) return false
+  if (id.includes('haiku') && !id.includes('haiku-5')) return false
   return !NO_MAX_EFFORT.has(id)
 }
 
@@ -268,10 +666,16 @@ export function supportedEffortLevels(model: string | undefined | null): EffortL
   })
 }
 
-/** Mirrors cli.js `YK6`. Opus 4.7 is the only model that defaults to xhigh. */
+/**
+ * Mirrors the catalog's `default_effort` (cli.js 2.1.293): `xhigh` for Opus
+ * 4.7, `medium` for Opus 5.5, Sonnet 5.5 and Haiku 5.5, `high` for everything
+ * else. Picker aliases are resolved through the baked alias table first.
+ */
 export function defaultEffort(model: string | undefined | null): EffortLevel {
-  const id = normaliseModelId(model)
+  const id = normaliseModelId(canonicalizeModelValue(model))
   if (id.includes('opus-4-7')) return 'xhigh'
+  if (id.includes('opus-5-5') || id.includes('sonnet-5-5') || id.includes('haiku-5-5'))
+    return 'medium'
   return 'high'
 }
 
@@ -322,17 +726,18 @@ export function resolveEffort(
  * beta) so it lines up with the opencode side's `limit.output` semantic.
  *
  * Values are keyed on the canonical base id, so picker aliases are resolved
- * first (`haiku` → claude-haiku-4-5 → 64000, not the default). Unknown / future
- * ids fall back to cli.js's `tLd` default of 128000.
+ * first (`haiku` → claude-haiku-5-5 → 128000; Haiku 4.5 is 64000). Unknown /
+ * future ids fall back to cli.js's `tLd` default of 128000.
  */
 export function maxOutputTokens(model: string | undefined | null): number {
   const id = normaliseModelId(canonicalizeModelValue(model))
-  // 128K ceiling — Fable/Mythos 5, Sonnet 5, Opus 4.6/4.7/4.8/5, Sonnet 4.6
+  // 128K ceiling — Fable/Mythos 5, Sonnet 5, Haiku 5, Opus 4.6/4.7/4.8/5, Sonnet 4.6
   if (
     id.includes('opus-5') ||
     id.includes('fable-5') ||
     id.includes('mythos-5') ||
     id.includes('sonnet-5') ||
+    id.includes('haiku-5') ||
     id.includes('opus-4-8') ||
     id.includes('opus-4-7') ||
     id.includes('opus-4-6') ||
@@ -374,6 +779,7 @@ export const CONTEXT_WINDOW_DEFAULT = 200_000
  */
 const IMPLICIT_1M_BASE_MODELS = [
   'claude-fable-5',
+  'claude-haiku-5',
   'claude-mythos-5',
   'claude-opus-4-7',
   'claude-opus-4-8',
@@ -382,13 +788,14 @@ const IMPLICIT_1M_BASE_MODELS = [
 ]
 
 /**
- * Picker aliases that cli.js currently resolves to an implicit-1M base model:
+ * Picker aliases that cli.js's baked catalog resolves to an implicit-1M base model:
  * "fable" → claude-fable-5-1, "opus" → claude-opus-5-5 (as of 2.1.280),
- * "sonnet" → claude-sonnet-5 (native-1M since 2.1.197).
- * Aliases track the latest model generation, so re-verify this set on
- * claudeCliVersion bumps.
+ * "sonnet" → claude-sonnet-5-5 (as of 2.1.285; Sonnet has been native-1M since 2.1.197),
+ * "haiku" → claude-haiku-5-5 (as of 2.1.293). Only the fallback before cli.js
+ * reports what an alias resolves to for this account (ADR-100); re-verify this
+ * set on claudeCliVersion bumps.
  */
-const IMPLICIT_1M_ALIASES = new Set(['fable', 'opus', 'sonnet'])
+const IMPLICIT_1M_ALIASES = new Set(['fable', 'haiku', 'opus', 'sonnet'])
 
 /**
  * Resolve a model value (picker alias or full id) to its context-window size,
@@ -755,9 +1162,10 @@ export function resolveClaudeCapabilities(
  * does NOT mean opencode exposes Claude's `.mcp.json` server-config UI — that
  * dialog (McpDialog) is scoped to engineId==='claude' in TopBar.tsx, so this flip
  * only enables our hosted tools, not the Claude MCP config surface.
- * queue+steer:true (Phase 8c) — opencode coalesces a mid-turn prompt into the
- * running loop (no server-side holdable queue), so send-while-busy = post-immediately
- * = steer. dequeue is a no-op (can't un-send once coalesced). voice deferred.
+ * queue+steer:true — opencode 2.x's native inbox (ADR-097 §9): a prompt sent
+ * while busy is posted at once under a ClaudeUI id as a `steer` (folded in at the
+ * next step boundary, ADR-053 §1) and stays cancellable until delivered, so
+ * take-back is a real dequeue. voice deferred.
  * subagents:true (Phase 8d) — opencode's `task` tool spawns child sessions whose
  * transcripts stream on the shared SSE; the event-mapper routes them to
  * session:subagent-* events keyed by the parent task part's callID.
@@ -950,21 +1358,24 @@ export function resolveOpencodeCapabilitiesFromModel(m?: {
  *     renderer already has the correct truncated view from the store's own
  *     optimistic seed) — mirrors ClaudeSession's identical "forks excluded"
  *     cost-seeding posture.
- *   - backgroundTasks, voice →
- *     unwired; each becomes a dedicated follow-up once its RPC surface is
- *     wired the same way OpencodeSession's were.
- *   - subagents → SHIPPED in M5b: a SECOND ClaudeUI-owned extension
- *     (pi-subagent-source.ts, gated on CLAUDEUI_PI_SUBAGENTS) registers a
- *     `subagent` pi.registerTool() that spawns one child `pi --mode json -p`
- *     process per user-level agent definition (`~/.pi/agent/agents/*.md`,
- *     port of pi's own shipped example) and streams its progress through the
- *     SAME `session:subagent-*`/TaskCard pipeline the cross-engine dispatch
- *     target uses (event-mapper.ts's `subagent_update` MapperOutput →
- *     PiSession.dispatchOutput). Flipped true only because that full path —
- *     tool visible → gated ('task' kind) → child spawned → streamed →
- *     result rendered — is genuinely wired, not because pi has any NATIVE
- *     subagent concept (it has none; this is entirely a ClaudeUI construct,
- *     same posture as hostedMcp/crossEngineDispatch above).
+ *   - backgroundTasks → true since ADR-089 S2: it is the gate
+ *     `handlers-core.stopTask` checks, and a host-run subagent's TaskCard has
+ *     a per-agent Stop (`PiSession.stopTask`). "Send to background" stays
+ *     inert: it also needs `activeTasks[id].isBackgrounded === false`, which
+ *     pi never sends. Background runs themselves arrive in S3.
+ *   - voice → unwired; a dedicated follow-up once its RPC surface is wired the
+ *     same way OpencodeSession's was.
+ *   - subagents → HOST-RUN (ADR-089, superseding M5b's in-pi extension): the
+ *     bridge's own `agent` tool (pi-bridge-source.ts v9, gated on
+ *     CLAUDEUI_PI_AGENT_TOOL) calls back over `/hosted-tool`, and PiSession's
+ *     `PiSubagentManager` spawns one `pi --mode rpc` child per call
+ *     (`PiChildRunner`) for any agent type in ClaudeUI's registry (built-ins,
+ *     `~/.pi/agent/agents/*.md`, project `.pi/agents/*.md`). Every child tool
+ *     call is gated by the parent session's live mode and judge, and the
+ *     child streams through the SAME `session:subagent-*`/TaskCard pipeline
+ *     the cross-engine dispatch target uses. pi has no NATIVE subagent
+ *     concept; this is entirely a ClaudeUI construct, same posture as
+ *     hostedMcp/crossEngineDispatch above.
  *   - sandbox, proxy → Claude cli.js launch-param concepts; pi has neither
  *     (see EngineCapabilities' own doc comment) — likely permanently false.
  *   - crossEngineDispatch → SHIPPED both directions: pi as a dispatch SOURCE
@@ -980,7 +1391,7 @@ export function resolveOpencodeCapabilitiesFromModel(m?: {
 export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   voice: false,
   hostedMcp: true,
-  backgroundTasks: false,
+  backgroundTasks: true,
   subagents: true,
   plan: true,
   fork: true,

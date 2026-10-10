@@ -20,6 +20,7 @@ import type {
   TodoItem,
   SentFile,
   QueuedItem,
+  ActiveTask,
   TaskNotification,
   TaskProgress,
   StatusLineData,
@@ -52,7 +53,7 @@ export interface CanonicalSessionState {
   /** Pending items only, mirroring the wire field (ADR-053). */
   queue: QueuedItem[]
   taskNotifications: TaskNotification[]
-  activeTasks: Record<string, { taskId: string; taskType: string; runIndex?: number }>
+  activeTasks: Record<string, ActiveTask>
   taskProgressMap: Record<string, TaskProgress>
   subagentMessages: Record<string, ChatMessage[]>
   permissionMode: string
@@ -86,9 +87,17 @@ export interface CanonicalSessionState {
    */
   authRequired: AuthRequiredState | null
   /**
-   * Core-internal, never serialized: has this session's transcript been seeded
-   * from its on-disk history yet? The shadow comparator masks unseeded sessions,
-   * because the renderer loads history through a query the reducer cannot see.
+   * Does canonical hold this session's transcript? `false` while a resumed
+   * session's history read is in flight and again once the host has dropped an
+   * exited session's transcript (`SyncCore.evictTranscript`). Derived-field
+   * checks skip an unseeded session, because its transcript is not here to
+   * derive from.
+   *
+   * On the wire only as `seeded: false` ({@link toSnapshot}), for EVERY unseeded
+   * session — one rule, "canonical does not hold this transcript". Whether a
+   * client should read it from disk (the engine is gone) or fill it fold-style
+   * (a resume's history read is in flight and live events are coming) is the
+   * client's call, from `sdkActive`.
    */
   seeded: boolean
 }
@@ -189,12 +198,14 @@ export function emptyCanonicalState(): CanonicalState {
  * having the restore live here rather than inside the test is what makes the
  * invariant a property of the code instead of a property of a test helper.
  *
- * Two deliberate asymmetries, both benign:
+ * **`seeded`** round-trips: it rides the wire as `false` when the host does not hold
+ * a transcript (see {@link toSnapshot}) and restores as `false`. Absent restores as
+ * `true` — only an older host omits it, and its snapshots are all complete; a
+ * snapshot-fed session is never "still waiting for history", which would make a
+ * restored core skip the comparator and re-seed over live content.
  *
- *  - **`seeded`** is core-internal and not on the wire. A snapshot-fed session is
- *    complete by definition (its transcript is whatever the producer had), so it
- *    restores as `true` — never as "still waiting for history", which would make
- *    a restored core skip the comparator and re-seed over live content.
+ * One deliberate asymmetry, benign:
+ *
  *  - **`slashCommands` / `sdkSkillNames`** are app-level here but the wire
  *    replicates them per session (every entry carries the same list, an as-built
  *    quirk `toSnapshot` preserves). They come back from the first entry, so a
@@ -240,7 +251,7 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       // grew from two fields to five (ADR-070 §2) and a rebuild is the shape of
       // edit that silently drops the new ones on every resync.
       authRequired: s.authRequired ?? null,
-      seeded: true
+      seeded: s.seeded ?? true
     }
   }
   const first = Object.values(snapshot.sessions ?? {})[0]
@@ -298,7 +309,13 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       selectedEngineId: s.selectedEngineId,
       selectedModel: s.selectedModel,
       authRequired: s.authRequired,
-      ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {})
+      ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {}),
+      // One rule: canonical does not hold this transcript. That covers a dropped
+      // one AND a resume whose history read is still in flight; omitting the
+      // second would hand a client that syncs inside that window an empty
+      // transcript marked complete, with no `session:created` coming to fix it.
+      // The client tells the two apart by `sdkActive`.
+      ...(!s.seeded ? { seeded: false } : {})
     }
   }
   return {

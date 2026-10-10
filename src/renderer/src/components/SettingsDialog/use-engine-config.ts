@@ -212,7 +212,7 @@ export function useDispatchModels(engineId: EngineId): ModelInfo[] {
   useEffect(() => {
     let cancelled = false
     window.api
-      .getEngineModels()
+      .getEngineModels(engineId)
       .then((groups) => {
         if (cancelled) return
         setModels(groups.filter((g) => g.engineId === engineId).flatMap((g) => g.models))

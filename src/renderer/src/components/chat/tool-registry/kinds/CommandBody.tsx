@@ -14,6 +14,7 @@ import { OutputView } from '../../OutputView'
 import { ShellCode } from '../../ShellCode'
 import { trunc } from '../../ToolCallBlock/utils'
 import { LiveBashOutput } from './bash-output'
+import { TOOL_OUTPUT_SCOPE } from '../../ChatSearch/search-scope'
 import type { KindBodyProps } from './types'
 
 export function CommandBody({
@@ -71,7 +72,7 @@ export function CommandBody({
       )}
 
       {showResult && (
-        <div className="px-3 py-2.5 border-t border-border">
+        <div {...TOOL_OUTPUT_SCOPE} className="px-3 py-2.5 border-t border-border">
           {!hideToolInput && (
             <div
               className={`text-[11px] uppercase tracking-wider mb-1.5 ${isError ? 'text-danger' : 'text-success'}`}

@@ -1,7 +1,5 @@
 import { randomUUID } from 'crypto'
-import type { QueuedItem } from '../../shared/types'
-
-type Attachments = QueuedItem['attachments']
+import type { AttachmentRef, AttachmentUpload, QueuedItem } from '../../shared/types'
 
 /**
  * The per-session queue of record (ADR-053 / `docs/architecture/sync-core.md`
@@ -9,9 +7,9 @@ type Attachments = QueuedItem['attachments']
  *
  * Composed into {@link BaseSession} rather than inlined there: the list is
  * engine-neutral policy with invariants of its own (FIFO order, first-match
- * text correlation, exactly one broadcast per terminal transition), and keeping
- * it in its own object lets those invariants be tested without an Electron
- * BrowserWindow or a live engine.
+ * text or exact-id correlation, exactly one broadcast per terminal transition),
+ * and keeping it in its own object lets those invariants be tested without an
+ * Electron BrowserWindow or a live engine.
  *
  * {@link SessionQueue.emit} broadcasts the FULL list — idempotent and
  * replay-safe — and only afterwards prunes the terminal (`consumed`/`recalled`)
@@ -27,8 +25,26 @@ export class SessionQueue {
    * detail, not a domain state clients converge on.
    */
   private forwarded = new Set<string>()
+  /**
+   * The engine-bound bytes of each item's attachments, by item id. Private for
+   * the same reason as {@link forwarded}, and for a stronger one: the item is
+   * BROADCAST and folded into canonical state, so it carries blob refs only
+   * (ADR-087), while the engine still needs the upload it was sent. Dropped with
+   * the item when {@link emit} prunes it.
+   */
+  private uploads = new Map<string, AttachmentUpload[]>()
+  /**
+   * When each item was queued (epoch ms), by item id — what places a queued
+   * turn in time on a delegated judge's transcript (ADR-091 §4). Private like
+   * {@link forwarded}: a host-side detail, never on the wire. Dropped with the
+   * item when {@link emit} prunes it.
+   */
+  private queuedAtMs = new Map<string, number>()
 
-  constructor(private readonly broadcast: (items: QueuedItem[]) => void) {}
+  constructor(
+    private readonly broadcast: (items: QueuedItem[]) => void,
+    private readonly now: () => number = Date.now
+  ) {}
 
   /** Items still awaiting consumption, oldest first. Live references. */
   pending(): QueuedItem[] {
@@ -53,20 +69,36 @@ export class SessionQueue {
     this.forwarded.delete(item.itemId)
   }
 
-  add(text: string, attachments?: Attachments): QueuedItem {
+  /**
+   * Queue a prompt. `uploads` are what the engine will be handed
+   * ({@link uploadsFor}); `refs` are what the broadcast item carries.
+   */
+  add(text: string, uploads?: AttachmentUpload[], refs?: AttachmentRef[]): QueuedItem {
     const item: QueuedItem = { itemId: randomUUID(), text, state: 'queued' }
-    if (attachments && attachments.length > 0) item.attachments = attachments
+    if (refs && refs.length > 0) item.attachments = refs
+    if (uploads && uploads.length > 0) this.uploads.set(item.itemId, uploads)
+    this.queuedAtMs.set(item.itemId, this.now())
     this.items.push(item)
     return item
   }
 
+  /** When the item was queued (epoch ms); undefined once it has been pruned. */
+  queuedAt(item: QueuedItem): number | undefined {
+    return this.queuedAtMs.get(item.itemId)
+  }
+
+  /** The attachment bytes to hand the engine for this item, if it has any. */
+  uploadsFor(item: QueuedItem): AttachmentUpload[] | undefined {
+    return this.uploads.get(item.itemId)
+  }
+
   /**
    * Consume the FIRST pending item whose text matches — the correlation ADR-053
-   * pins, because neither cli.js's native queue entries nor an opencode/pi post
-   * carry an id we chose. Duplicate texts are interchangeable, so taking the
-   * oldest is both deterministic and harmless. Returns undefined (a no-op) for
-   * a prompt that was never queued, which is what makes it safe to call from
-   * every engine's post-send ack path.
+   * pins for opencode and pi, whose posts carry no id we chose (claude and
+   * Codex correlate by id, {@link consumeById}). Duplicate texts are
+   * interchangeable, so taking the oldest is both deterministic and harmless.
+   * Returns undefined (a no-op) for a prompt that was never queued, which is
+   * what makes it safe to call from every engine's post-send ack path.
    */
   consumeByText(text: string): QueuedItem | undefined {
     const item = this.items.find((i) => i.state === 'queued' && i.text === text)
@@ -76,14 +108,29 @@ export class SessionQueue {
 
   /**
    * Consume ONE named item — the correlation for an engine that carries a
-   * client-chosen id end to end (Codex's `clientUserMessageId`, ADR-066). Text
-   * never enters into it, so duplicate texts stay individually addressable.
-   * Returns undefined for an id that is unknown or already terminal, so it is
-   * as safe to fire unconditionally as {@link consumeByText}.
+   * client-chosen id end to end (Codex's `clientUserMessageId`, ADR-066;
+   * Claude's user-frame `uuid`, whose `command_lifecycle` frames name it back).
+   * Text never enters into it, so duplicate texts stay individually
+   * addressable. Returns undefined for an id that is unknown or already
+   * terminal, so it is as safe to fire unconditionally as {@link consumeByText}.
    */
   consumeById(itemId: string): QueuedItem | undefined {
+    return this.settleById(itemId, 'consumed')
+  }
+
+  /**
+   * Recall ONE named item the engine reports it will never run (Claude's
+   * `command_lifecycle` `cancelled` / `discarded` / `refused`). Same contract as
+   * {@link consumeById}: undefined, and no change, for an id that is unknown or
+   * already terminal — a consumed item stays consumed.
+   */
+  recallById(itemId: string): QueuedItem | undefined {
+    return this.settleById(itemId, 'recalled')
+  }
+
+  private settleById(itemId: string, state: 'consumed' | 'recalled'): QueuedItem | undefined {
     const item = this.items.find((i) => i.state === 'queued' && i.itemId === itemId)
-    if (item) item.state = 'consumed'
+    if (item) item.state = state
     return item
   }
 
@@ -99,7 +146,10 @@ export class SessionQueue {
     if (this.items.length === 0) return
     this.broadcast(this.items.map((item) => ({ ...item })))
     for (const item of this.items) {
-      if (item.state !== 'queued') this.forwarded.delete(item.itemId)
+      if (item.state === 'queued') continue
+      this.forwarded.delete(item.itemId)
+      this.uploads.delete(item.itemId)
+      this.queuedAtMs.delete(item.itemId)
     }
     this.items = this.items.filter((item) => item.state === 'queued')
   }

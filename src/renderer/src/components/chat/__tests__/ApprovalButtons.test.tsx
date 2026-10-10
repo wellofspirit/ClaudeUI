@@ -11,7 +11,7 @@
  * handleApproval.
  */
 
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
 import { ApprovalButtons } from '../ApprovalButtons'
 import type { PendingApproval, PermissionSuggestion } from '../../../../../shared/types'
@@ -258,6 +258,88 @@ describe('ApprovalButtons', () => {
       render(
         <ApprovalButtons approval={override()} permissionMode="auto" onApproval={onApproval} />
       )
+      await act(async () => {
+        fireEvent.click(screen.getByTestId(testid))
+      })
+      expect(onApproval).toHaveBeenCalledWith(decision, undefined)
+    })
+
+    it('shows no hold countdown', () => {
+      render(
+        <ApprovalButtons
+          approval={override()}
+          permissionMode="auto"
+          onApproval={vi.fn().mockResolvedValue(undefined)}
+        />
+      )
+      expect(screen.queryByTestId('ApprovalButtons.holdCountdown')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('ApprovalButtons.keepBlocked')).not.toBeInTheDocument()
+    })
+  })
+
+  // ADR-091 §3 — ClaudeUI's own judge HOLDS its block for the user: the same
+  // one-call override as Codex's, labelled Keep blocked / Approve anyway, with a
+  // live countdown to the host's Keep-blocked expiry.
+  describe('held auto-mode block', () => {
+    const NOW = 1_700_000_000_000
+    const held = (overrides?: Partial<PendingApproval>): PendingApproval =>
+      makeApproval({
+        toolUseId: 'call-1',
+        toolName: 'bash',
+        input: { command: 'git push origin main' },
+        autoModeBlock: { expiresAt: NOW + 103_000 },
+        ...overrides
+      })
+
+    afterEach(() => vi.useRealTimers())
+
+    it('renders Keep blocked / Approve anyway and a live countdown, no suggestions', () => {
+      vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+      vi.setSystemTime(NOW)
+      const suggestions: PermissionSuggestion[] = [
+        {
+          type: 'addRules',
+          destination: 'projectSettings',
+          rules: [{ toolName: 'Bash', ruleContent: 'git push:*' }]
+        }
+      ]
+      render(
+        <ApprovalButtons
+          approval={held({ suggestions })}
+          permissionMode="auto"
+          onApproval={vi.fn().mockResolvedValue(undefined)}
+        />
+      )
+      expect(screen.getByTestId('ApprovalButtons.keepBlocked')).toHaveTextContent('Keep blocked')
+      expect(screen.getByTestId('ApprovalButtons.approveAnyway')).toHaveTextContent(
+        'Approve anyway'
+      )
+      expect(screen.queryByTestId('ApprovalButtons.allow')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('ApprovalButtons.deny')).not.toBeInTheDocument()
+      expect(screen.queryByText(/Permission rules/i)).not.toBeInTheDocument()
+      expect(screen.getByTestId('ApprovalButtons.holdCountdown')).toHaveTextContent(
+        'blocks in 1:43'
+      )
+      act(() => {
+        vi.advanceTimersByTime(4_000)
+      })
+      expect(screen.getByTestId('ApprovalButtons.holdCountdown')).toHaveTextContent(
+        'blocks in 1:39'
+      )
+      act(() => {
+        vi.advanceTimersByTime(200_000)
+      })
+      expect(screen.getByTestId('ApprovalButtons.holdCountdown')).toHaveTextContent(
+        'blocks in 0:00'
+      )
+    })
+
+    it.each([
+      ['ApprovalButtons.approveAnyway', 'allow'],
+      ['ApprovalButtons.keepBlocked', 'deny']
+    ])('sends %s as the %s decision', async (testid, decision) => {
+      const onApproval = vi.fn().mockResolvedValue(undefined)
+      render(<ApprovalButtons approval={held()} permissionMode="auto" onApproval={onApproval} />)
       await act(async () => {
         fireEvent.click(screen.getByTestId(testid))
       })

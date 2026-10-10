@@ -13,6 +13,7 @@ import { CodeView } from '../../CodeView'
 import { TerminalView } from '../../TerminalView'
 import { MarkdownRenderer } from '../../MarkdownRenderer'
 import { shorten, trunc } from '../../ToolCallBlock/utils'
+import { TOOL_OUTPUT_SCOPE } from '../../ChatSearch/search-scope'
 import type { KindBodyProps } from './types'
 
 export function FileWriteBody({
@@ -52,6 +53,7 @@ export function FileWriteBody({
       {showResult && (
         <div
           data-testid={hideToolInput ? 'FileWriteBody' : undefined}
+          {...(content ? {} : TOOL_OUTPUT_SCOPE)}
           className={`px-3 py-2.5 ${hideToolInput ? '' : 'border-t border-border'}`}
         >
           {!hideToolInput && (

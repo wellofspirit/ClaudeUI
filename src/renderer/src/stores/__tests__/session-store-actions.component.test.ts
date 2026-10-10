@@ -219,6 +219,76 @@ describe('switchSession', () => {
   })
 
   /**
+   * `createNewSession` writes a `sessionEngines` row (and a recents slot) up front, and
+   * the user may pin/title/hide/worktree the session before sending. Dropping the
+   * abandoned session removed only the recents slot, so the engine row (and the saved
+   * config's) outlived it.
+   *
+   * PRE-FIX: `sessionEngines['r1']` is still present, here and in the saved payload.
+   */
+  it('drops the abandoned session from every registry row but its worktree entry', () => {
+    store().createNewSession('r1', '/a') // active, never spawned, no messages
+    store().createNewSession('r2', '/b', false)
+    store().pinSession('r1')
+    store().setCustomTitle('r1', 'scratch')
+    store().hideSession('r1')
+    store().setWorktreeInfo('r1', makeWorktreeInfo())
+    expect(store().sessionEngines['r1']).toBeDefined()
+    ;(window.api.saveSessionConfig as any).mockClear()
+
+    store().switchSession('r2')
+
+    const s = store()
+    expect(s.sessions['r1']).toBeUndefined()
+    expect(s.recentSessionIds).not.toContain('r1')
+    expect(s.pinnedSessionIds).not.toContain('r1')
+    expect(s.hiddenSessionIds).not.toContain('r1')
+    expect(s.customTitles['r1']).toBeUndefined()
+    expect(s.sessionEngines['r1']).toBeUndefined()
+    // The sibling's rows are untouched.
+    expect(s.sessionEngines['r2']).toBeDefined()
+    expect(s.recentSessionIds).toContain('r2')
+    const saves = (window.api.saveSessionConfig as any).mock.calls
+    expect(saves.length).toBeGreaterThan(0)
+    const persisted = saves.at(-1)[0]
+    expect(persisted.recentSessions).not.toContain('r1')
+    expect(persisted.pinnedSessions).not.toContain('r1')
+    expect(persisted.hiddenSessions).not.toContain('r1')
+    expect(persisted.customTitles['r1']).toBeUndefined()
+    expect(persisted.sessionEngines['r1']).toBeUndefined()
+    expect(persisted.sessionEngines['r2']).toBeDefined()
+  })
+
+  /**
+   * `worktreeInfoMap` is the handle on the worktree directory + branch on disk: the
+   * before-quit prompt offers to remove worktrees from it. Dropping an abandoned
+   * "new session in worktree" must leave it, or the worktree leaks.
+   *
+   * PRE-FIX (the scrub took worktreeInfoMap with the rest): the entry is gone.
+   */
+  it('keeps the worktree entry of a dropped empty session, here and in the saved config (GUARD)', () => {
+    store().createNewSession('r1', '/a')
+    store().createNewSession('r2', '/b', false)
+    const info = makeWorktreeInfo({ worktreePath: '/wt/r1' })
+    store().setWorktreeInfo('r1', info)
+    ;(window.api.saveSessionConfig as any).mockClear()
+
+    store().switchSession('r2')
+
+    expect(store().sessions['r1']).toBeUndefined()
+    expect(store().worktreeInfoMap['r1']).toEqual(info)
+    const persisted = (window.api.saveSessionConfig as any).mock.calls.at(-1)[0]
+    expect(persisted.worktreeInfoMap['r1']).toEqual(info)
+  })
+
+  it('an explicit delete still removes the worktree entry', async () => {
+    store().createNewSession('r1', '/a', false)
+    store().setWorktreeInfo('r1', makeWorktreeInfo())
+    await store().deleteSession('r1', 'proj-key')
+    expect(store().worktreeInfoMap['r1']).toBeUndefined()
+  })
+
+  /**
    * R6. "Empty" is a local judgement and it does not distinguish an abandoned
    * scratch session from a REAL host session that was cancelled before its first
    * prompt. Dropping the second kind threw away state the host still had — and
@@ -261,6 +331,16 @@ describe('showWelcome', () => {
     store().showWelcome()
     expect(store().sessions['r1']).toBeUndefined()
     expect(store().recentSessionIds).not.toContain('r1')
+  })
+
+  it('also drops the abandoned session engine row (GUARD)', () => {
+    store().createNewSession('r1', '/a') // never spawned
+    expect(store().sessionEngines['r1']).toBeDefined()
+    ;(window.api.saveSessionConfig as any).mockClear()
+    store().showWelcome()
+    expect(store().sessionEngines['r1']).toBeUndefined()
+    const persisted = (window.api.saveSessionConfig as any).mock.calls.at(-1)[0]
+    expect(persisted.sessionEngines['r1']).toBeUndefined()
   })
 
   it('preserves session with messages when returning to welcome', () => {
@@ -437,6 +517,155 @@ describe('forkFromMessage', () => {
   it('returns null when the source session does not exist', async () => {
     const newId = await store().forkFromMessage('nope', 'msg_1')
     expect(newId).toBeNull()
+  })
+
+  // The fork's agent rows. A branch seeded with the source's messages but none of
+  // its notifications read every background agent "running" after its first send.
+  describe('seeding task notifications', () => {
+    // Fork at 'a1': agent A launched inside the slice, agent B after it.
+    function seedSource(routingId: string): void {
+      store().loadHistoricalSession(
+        routingId,
+        [
+          makeChatMessage({ id: 'u1' }),
+          makeAssistantMessage('a', {
+            id: 'a1',
+            content: [makeToolUseBlock('Agent', { prompt: 'A' }, 'toolu_A')]
+          }),
+          makeChatMessage({ id: 'u2' }),
+          makeAssistantMessage('b', {
+            id: 'a2',
+            content: [makeToolUseBlock('Agent', { prompt: 'B' }, 'toolu_B')]
+          })
+        ],
+        '/proj',
+        [
+          makeTaskNotification({ taskId: 'tA', toolUseId: 'toolu_A', status: 'completed' }),
+          makeTaskNotification({ taskId: 'tB', toolUseId: 'toolu_B', status: 'completed' }),
+          makeTaskNotification({ taskId: 'tX', toolUseId: null })
+        ]
+      )
+      ;(window.api as any).resolveForkAnchor = vi.fn().mockResolvedValue({ anchorUuid: 'anchor-1' })
+    }
+
+    function listSource(routingId: string): void {
+      useSessionStore.setState({
+        directories: [
+          {
+            cwd: '/proj',
+            projectKey: 'proj-key',
+            folderName: 'proj',
+            sessions: [
+              {
+                sessionId: routingId,
+                cwd: '/proj',
+                projectKey: 'proj-key',
+                title: 'Source',
+                timestamp: 0,
+                lastActivityAt: 0
+              }
+            ]
+          }
+        ]
+      })
+      mirrorStoreIntoReplica()
+    }
+
+    it('Claude: seeds messages, notifications and status line from the anchor-aware loader', async () => {
+      seedSource('src-session')
+      listSource('src-session')
+      const loaded = {
+        messages: [
+          makeChatMessage({ id: 'u1' }),
+          makeAssistantMessage('a', {
+            id: 'a1',
+            content: [makeToolUseBlock('Agent', { prompt: 'A' }, 'toolu_A')]
+          })
+        ],
+        // Agent A finished AFTER the anchor: the loader truncates there and says
+        // `unfinished`, where the source's in-memory copy says `completed`.
+        taskNotifications: [
+          makeTaskNotification({ taskId: 'tA', toolUseId: 'toolu_A', status: 'unfinished' })
+        ],
+        statusLine: { totalCostUsd: 1.5 },
+        customTitle: 'Source title',
+        warnings: ['a source warning'],
+        agentIdToToolUseId: {},
+        taskPrompts: {}
+      }
+      const loader = vi.fn().mockResolvedValue(loaded)
+      ;(window.api as any).loadSessionHistory = loader
+
+      const newId = await store().forkFromMessage('src-session', 'a1')
+
+      expect(loader).toHaveBeenCalledWith('src-session', 'proj-key', 'anchor-1')
+      const branch = store().sessions[newId!]
+      expect(branch.messages).toEqual(loaded.messages)
+      expect(branch.taskNotifications).toEqual(loaded.taskNotifications)
+      expect(branch.statusLine).toEqual(loaded.statusLine)
+      // A fork is a new session: neither the source's title nor its warnings carry.
+      expect(store().customTitles[newId!]).toBeUndefined()
+      expect(branch.warnings).toEqual([])
+      expect(branch.forkOrigin).toEqual({ sourceSessionId: 'src-session', anchorUuid: 'anchor-1' })
+    })
+
+    it.each([
+      ['the source is not listed', false, () => vi.fn()],
+      ['the loader rejects', true, () => vi.fn().mockRejectedValue(new Error('ENOENT'))],
+      [
+        'the loader returns no messages',
+        true,
+        () =>
+          vi.fn().mockResolvedValue({
+            messages: [],
+            taskNotifications: [],
+            statusLine: null,
+            customTitle: null,
+            warnings: [],
+            agentIdToToolUseId: {},
+            taskPrompts: {}
+          })
+      ]
+    ])('Claude fallback when %s: in-memory slice + its own agents only', async (_, listed, mk) => {
+      seedSource('src-session')
+      if (listed) listSource('src-session')
+      const loader = mk()
+      ;(window.api as any).loadSessionHistory = loader
+      const logRelay = vi.fn()
+      ;(window.api as any).logRelay = logRelay
+
+      const newId = await store().forkFromMessage('src-session', 'a1')
+
+      expect(loader).toHaveBeenCalledTimes(listed ? 1 : 0)
+      const branch = store().sessions[newId!]
+      expect(branch.messages.map((m) => m.id)).toEqual(['u1', 'a1'])
+      expect(branch.taskNotifications.map((n) => n.taskId)).toEqual(['tA'])
+      expect(logRelay).toHaveBeenCalledTimes(1)
+    })
+
+    it('pi: does not read the Claude loader, copies only the slice’s own notifications', async () => {
+      seedSource('pi-src')
+      listSource('pi-src')
+      useSessionStore.setState((s) => ({
+        sessions: {
+          ...s.sessions,
+          'pi-src': {
+            ...s.sessions['pi-src'],
+            status: makeSessionStatus({ engineId: 'pi', capabilities: resolvePiCapabilities() })
+          }
+        }
+      }))
+      mirrorStoreIntoReplica()
+      const loader = vi.fn()
+      ;(window.api as any).loadSessionHistory = loader
+
+      const newId = await store().forkFromMessage('pi-src', 'a1')
+
+      expect(loader).not.toHaveBeenCalled()
+      const branch = store().sessions[newId!]
+      expect(branch.messages.map((m) => m.id)).toEqual(['u1', 'a1'])
+      expect(branch.taskNotifications.map((n) => n.taskId)).toEqual(['tA'])
+    })
   })
 
   it('returns null + records an error and does NOT resolve an anchor when the engine lacks forkFromMessage', async () => {
@@ -1045,10 +1274,19 @@ describe('session:user-message (the reducer builds the transcript row)', () => {
     seed.userMessage('r1', {
       id: 'u1',
       prompt: 'look at this',
-      attachments: [{ mediaType: 'image/png', base64Data: 'AAA', fileName: 'shot.png' }]
+      attachments: [
+        { mediaType: 'image/png', blobId: 'a'.repeat(64), bytes: 3, fileName: 'shot.png' }
+      ]
     })
     const content = store().sessions['r1'].messages[0].content
-    expect(content[0].type).toBe('image')
+    // The block is a ref: an id and a size, never the bytes (ADR-087).
+    expect(content[0]).toEqual({
+      type: 'image',
+      mediaType: 'image/png',
+      blobId: 'a'.repeat(64),
+      bytes: 3,
+      fileName: 'shot.png'
+    })
     expect(content[1].type).toBe('text')
   })
 
@@ -1056,10 +1294,18 @@ describe('session:user-message (the reducer builds the transcript row)', () => {
     seed.userMessage('r1', {
       id: 'u1',
       prompt: 'read this',
-      attachments: [{ mediaType: 'application/pdf', base64Data: 'AAA', fileName: 'doc.pdf' }]
+      attachments: [
+        { mediaType: 'application/pdf', blobId: 'b'.repeat(64), bytes: 3, fileName: 'doc.pdf' }
+      ]
     })
     const content = store().sessions['r1'].messages[0].content
-    expect(content[0].type).toBe('document')
+    expect(content[0]).toEqual({
+      type: 'document',
+      mediaType: 'application/pdf',
+      blobId: 'b'.repeat(64),
+      bytes: 3,
+      fileName: 'doc.pdf'
+    })
     expect(content[1].type).toBe('text')
   })
 
@@ -1761,6 +2007,14 @@ describe('applyExternalSettings', () => {
     seed.settings({ theme: 'monokai' })
     // maxRecentSessions should still be the default value (5)
     expect(store().settings.maxRecentSessions).toBe(5)
+  })
+
+  it('keeps the per-engine starting-effort map a remote client wrote, and defaults it to {}', () => {
+    const engineEffortDefaults = { pi: { 'anthropic/claude-opus-5-5': 'high' } }
+    seed.settings({ theme: 'light', engineEffortDefaults })
+    expect(store().settings.engineEffortDefaults).toEqual(engineEffortDefaults)
+    seed.settings({ theme: 'light' })
+    expect(store().settings.engineEffortDefaults).toEqual({})
   })
 
   it('does not call saveSettings (no disk write)', () => {

@@ -33,7 +33,6 @@ import {
   SettingsToggle,
   TextField
 } from './settings-controls'
-import { useOpencodeInstalled } from './use-engine-installed'
 
 // ── Shared look ──────────────────────────────────────────────────────
 
@@ -56,18 +55,22 @@ type ViewState =
 
 // ── Permission tool categories ───────────────────────────────────────
 
+/**
+ * opencode 2.x permission actions (ADR-097 §3 key table; 1.x `bash` is
+ * `shell`, `task` is `subagent`, `todowrite`/`lsp` are gone). The service
+ * writes a `{action, resource:"*", effect}` rule per non-allow choice.
+ */
 const PERM_CATS = [
-  'bash',
+  'shell',
   'edit',
   'read',
   'glob',
   'grep',
   'webfetch',
-  'task',
   'websearch',
-  'todowrite',
-  'lsp',
-  'skill'
+  'subagent',
+  'skill',
+  'question'
 ] as const
 type PermAction = 'allow' | 'ask' | 'deny'
 
@@ -351,7 +354,7 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
   useEffect(() => {
     // Load models
     window.api
-      .getEngineModels()
+      .getEngineModels('opencode')
       .then((groups) => {
         const oc = groups.filter((g) => g.engineId === 'opencode')
         setModels(oc.flatMap((g) => g.models))
@@ -449,7 +452,8 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
       if (!isNaN(topPNum)) input.topP = topPNum
       const stepsNum = draft.steps !== '' ? Number(draft.steps) : NaN
       if (!isNaN(stepsNum)) input.steps = stepsNum
-      if (draft.reasoningEffort) input.reasoningEffort = draft.reasoningEffort
+      // An effort is a variant of the agent's model in opencode 2.x.
+      if (draft.reasoningEffort && draft.model) input.reasoningEffort = draft.reasoningEffort
       if (draft.color) input.color = draft.color
       if (draft.hidden) input.hidden = draft.hidden
 
@@ -461,6 +465,10 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
         }
         input.permission = perm
       }
+
+      // A rename or a scope move carries the old file's hand-added fields over.
+      if (view.mode === 'edit' && (view.name !== input.name || view.scope !== input.scope))
+        input.previous = { name: view.name, scope: view.scope }
 
       await window.api.saveOpencodeAgent(input, cwd || undefined)
       onSaved()
@@ -524,6 +532,13 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
       {isBuiltin && (
         <SettingRow
           description={`Overriding the built-in ${view.mode === 'edit' ? view.name : ''} agent — fields left unset use opencode's defaults.`}
+        />
+      )}
+
+      {detail?.legacy && (
+        <SettingRow
+          testid={`${TESTID}.legacy`}
+          description="This file is in the opencode 1.x format. Saving rewrites it in the 2.x format; every field opencode reads is kept (unknown ones move to the request body, as opencode already treats them)."
         />
       )}
 
@@ -648,6 +663,12 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
             />
           </div>
         )}
+        {(detail?.extraRules ?? 0) > 0 && (
+          <SettingRow
+            testid={`${TESTID}.extraRules`}
+            description={`${detail?.extraRules} more permission rule${detail?.extraRules === 1 ? '' : 's'} in the file (narrow patterns or other tools) — kept on save, after the grid.`}
+          />
+        )}
       </div>
 
       <details className="px-3.5 py-2">
@@ -683,15 +704,23 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
               onChange={(v) => update({ steps: numText(v) })}
             />
           </SettingRow>
-          <SettingRow label="Reasoning effort" description="Only for models that expose it.">
+          <SettingRow
+            label="Reasoning effort"
+            description={
+              draft.model
+                ? "A variant of the agent's model (model#effort); only for models that offer it."
+                : "Choose a model first: in opencode 2.x an effort is a variant of the agent's model."
+            }
+          >
             <Segmented
               testid={`${TESTID}.reasoningEffort`}
-              value={draft.reasoningEffort}
+              value={draft.model ? draft.reasoningEffort : ''}
               onChange={(v) => update({ reasoningEffort: v })}
               options={[
                 { value: '', label: 'Default' },
-                { value: 'low', label: 'Low' },
-                { value: 'high', label: 'High' }
+                { value: 'low', label: 'Low', disabled: !draft.model },
+                { value: 'medium', label: 'Medium', disabled: !draft.model },
+                { value: 'high', label: 'High', disabled: !draft.model }
               ]}
             />
           </SettingRow>
@@ -783,8 +812,11 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
 
 // ── OpencodeAgentsSection ────────────────────────────────────────────
 
+/**
+ * The agent files are ClaudeUI's own read, and the opencode page cannot be
+ * opened while opencode is not installed (ADR-082 §8), so nothing here asks.
+ */
 export function OpencodeAgentsSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
   const cwd = useActiveSession((s) => s.cwd)
   const [view, setView] = useState<ViewState>({ mode: 'list' })
   const [refresh, setRefresh] = useState(0)
@@ -792,18 +824,6 @@ export function OpencodeAgentsSection(): React.JSX.Element {
   const handleSaved = (): void => {
     setRefresh((n) => n + 1)
     setView({ mode: 'list' })
-  }
-
-  if (installed === null) return <SettingRow testid={TESTID} description="Loading…" />
-
-  if (!installed) {
-    return (
-      <SettingRow
-        testid={TESTID}
-        dimmed
-        description="opencode is not installed. Agent settings apply to opencode sessions."
-      />
-    )
   }
 
   return (

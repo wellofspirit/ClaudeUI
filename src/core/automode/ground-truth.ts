@@ -34,6 +34,7 @@
 
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
+import { isDescendant, normalizePath, resolveTarget, toPosixish } from './shell-lexical'
 
 // ── Outcome annotations ───────────────────────────────────────────────────────
 
@@ -278,21 +279,9 @@ export function needsRepoVisibility(command: string): boolean {
   })
 }
 
-/**
- * Permission categories whose input carries a raw shell command string. Kept
- * here rather than in the engine wiring so pi (phase 4) inherits it.
- */
-const SHELL_CATEGORIES = new Set(['bash', 'shell'])
-
-/** The shell command a proposed action would run, or `null` if it is not one. */
-export function shellCommandOf(
-  toolName: string,
-  input: Record<string, unknown> | undefined
-): string | null {
-  if (!SHELL_CATEGORIES.has(toolName.toLowerCase())) return null
-  const command = input?.command
-  return typeof command === 'string' && command.trim().length > 0 ? command : null
-}
+// The pure implementation lives in shell-lexical.ts (read-only.ts shares it
+// without pulling in node:child_process); existing callers import it from here.
+export { shellCommandOf } from './shell-lexical'
 
 // ── Redirect analysis (pure) ──────────────────────────────────────────────────
 
@@ -372,6 +361,157 @@ export const MAX_REDIRECT_TARGETS = 20
 const TARGET_END = new Set([' ', '\t', '\n', '\r', ';', '|', '&', '<', '>', '(', ')'])
 
 /**
+ * Commands whose single-quoted arguments are inert text — a pattern, a filter,
+ * a literal — that never reaches a shell. Only a segment led by one of these
+ * may have its single-quoted spans skipped by the redirect scan. An allowlist on
+ * purpose: `git submodule foreach '…'`, `python -c '…'`, `make --eval '…'` all
+ * hand quoted text to a shell, and a list of those would never be complete.
+ */
+const INERT_QUOTE_COMMANDS: ReadonlySet<string> = new Set([
+  'sed',
+  'gsed',
+  'grep',
+  'egrep',
+  'fgrep',
+  'rg',
+  'jq',
+  'yq',
+  'echo',
+  'printf',
+  'tr',
+  'cut'
+])
+
+/**
+ * Words that re-read text as shell — a shell, `eval`, a remote/elevated shell,
+ * an argument-to-command runner, an interpreter fed on stdin — plus awk, whose
+ * own `>` writes a file. Any of them ANYWHERE in the command (`echo '… > x' | sh`)
+ * keeps the whole scan quote-blind.
+ */
+const SHELL_REREADERS: ReadonlySet<string> = new Set([
+  'sh',
+  'bash',
+  'zsh',
+  'dash',
+  'ksh',
+  'mksh',
+  'ash',
+  'fish',
+  'csh',
+  'tcsh',
+  'pwsh',
+  'powershell',
+  'cmd',
+  'eval',
+  'ssh',
+  'su',
+  'sudo',
+  'doas',
+  'runuser',
+  'script',
+  'watch',
+  'xargs',
+  'parallel',
+  'osascript',
+  'tmux',
+  'screen',
+  'expect',
+  'busybox',
+  'python',
+  'python3',
+  'node',
+  'bun',
+  'deno',
+  'perl',
+  'ruby',
+  'php',
+  'awk',
+  'gawk',
+  'mawk',
+  'nawk'
+])
+
+/**
+ * The `[start, end)` ranges of single-quoted text the redirect scan may skip:
+ * bash reads single quotes literally, so a `>` inside `sed 's/a > b/c/'` is
+ * program text, not a redirect. Only spans in a segment led by an
+ * {@link INERT_QUOTE_COMMANDS} word qualify, and none at all when a
+ * {@link SHELL_REREADERS} word appears anywhere. Double quotes are never skipped —
+ * they host live `$(…)`, whose redirects are real.
+ *
+ * A rough lexer, not a shell parser; every imprecision here falls back to the
+ * quote-blind scan, i.e. at worst one extra escalation.
+ */
+function inertQuoteSpans(command: string): Array<[number, number]> {
+  interface Word {
+    text: string
+    spans: Array<[number, number]>
+  }
+  const segments: Word[][] = [[]]
+  let word: Word | null = null
+  let state: 'out' | 'sq' | 'dq' = 'out'
+  let sqStart = 0
+  const endWord = (): void => {
+    if (word) segments[segments.length - 1].push(word)
+    word = null
+  }
+  const cur = (): Word => (word ??= { text: '', spans: [] })
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]
+    if (state === 'sq') {
+      if (ch === "'") {
+        cur().spans.push([sqStart, i])
+        state = 'out'
+      } else cur().text += ch
+      continue
+    }
+    if (state === 'dq') {
+      if (ch === '\\') cur().text += command[++i] ?? ''
+      else if (ch === '"') state = 'out'
+      else cur().text += ch
+      continue
+    }
+    if (ch === "'") {
+      cur()
+      sqStart = i + 1
+      state = 'sq'
+    } else if (ch === '"') {
+      cur()
+      state = 'dq'
+    } else if (ch === '\\') {
+      cur().text += command[++i] ?? ''
+    } else if (ch === ' ' || ch === '\t' || ch === '<' || ch === '>') {
+      endWord()
+    } else if (
+      ch === '&' &&
+      (command[i - 1] === '>' || command[i + 1] === '>' || command[i - 1] === '<')
+    ) {
+      endWord() // `2>&1`, `&>`, `<&3` — an operator, not a separator
+    } else if ('\n\r;|&()`'.includes(ch)) {
+      endWord()
+      segments.push([])
+    } else {
+      cur().text += ch
+    }
+  }
+  if (state !== 'out') return [] // unbalanced quote — read nothing as inert
+  endWord()
+
+  const base = (w: Word): string => w.text.slice(w.text.lastIndexOf('/') + 1).toLowerCase()
+  if (segments.some((seg) => seg.some((w) => SHELL_REREADERS.has(base(w))))) return []
+  const spans: Array<[number, number]> = []
+  for (const seg of segments) {
+    // The command word: the first word that is not a `NAME=value` assignment.
+    const head = seg.find((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w.text))
+    if (head && INERT_QUOTE_COMMANDS.has(base(head))) {
+      for (const w of seg) spans.push(...w.spans)
+    }
+  }
+  return spans
+}
+
+/**
  * Pull the FILE targets out of a command's redirect operators.
  *
  * Handles `>`, `>>`, `N>`, `N>>`, `&>`, `&>>`, `>&file`, `>>&file`, with or
@@ -380,21 +520,30 @@ const TARGET_END = new Set([' ', '\t', '\n', '\r', ';', '|', '&', '<', '>', '(',
  * Input redirects and heredocs (`<`, `<<`) are reads — the scanner never
  * triggers on them.
  *
- * Deliberately QUOTE-BLIND outside a target token, matching {@link parseSegment}'s
- * convention and for the same reason inverted: a `>` inside a quoted string
- * yields a spurious target (an extra escalation), while honouring quotes would
- * let `bash -c "cmd > ~/.bashrc"` report zero redirects and so claim, wrongly,
+ * QUOTE-BLIND by default, matching {@link parseSegment}'s convention and for
+ * the same reason inverted: a `>` inside a quoted string yields a spurious
+ * target (an extra escalation), while honouring quotes would let
+ * `bash -c "cmd > ~/.bashrc"` report zero redirects and so claim, wrongly,
  * that this command redirects nothing dangerous. Over-reporting is the safe
- * error here. It also means segment splitting is unnecessary: a redirect
- * operator binds to the token after it regardless of which segment it sits in
- * (and {@link splitCommandSegments} would tear `2>&1` in half at the `&`).
+ * error here. The one exception is {@link inertQuoteSpans}: single-quoted
+ * program text of a command that never runs it as shell (`sed 's/a>b/c/'`),
+ * which otherwise produced phantom out-of-scope targets on every sed/grep
+ * pattern carrying a `>`. Segment splitting is otherwise unnecessary: a
+ * redirect operator binds to the token after it regardless of which segment it
+ * sits in (and {@link splitCommandSegments} would tear `2>&1` in half at the `&`).
  */
 function extractRedirectTargets(command: string): string[] {
   const out: string[] = []
+  const inert = inertQuoteSpans(command)
   let i = 0
   while (i < command.length) {
     const ch = command[i]
     if (ch !== '>' && !(ch === '&' && command[i + 1] === '>')) {
+      i++
+      continue
+    }
+    const at = i
+    if (inert.some(([start, end]) => at >= start && at < end)) {
       i++
       continue
     }
@@ -430,75 +579,6 @@ function extractRedirectTargets(command: string): string[] {
   return out
 }
 
-/** `\` → `/`, collapsed slashes, and (win32 only) the Git-Bash `/d/x` spelling
- *  folded onto `d:/x`. Gated on platform because `/e/tc` is a real directory on
- *  Linux; `platform` is injectable so both branches are testable anywhere. */
-function toPosixish(raw: string, platform: NodeJS.Platform): string {
-  let s = raw.replace(/\\/g, '/').replace(/\/{2,}/g, '/')
-  if (platform === 'win32') {
-    const msys = /^\/([A-Za-z])(\/|$)/.exec(s)
-    if (msys) s = `${msys[1]}:${s.slice(2) || '/'}`
-  }
-  return s
-}
-
-function isAbsolutePosixish(s: string, platform: NodeJS.Platform): boolean {
-  if (s.startsWith('/')) return true
-  return platform === 'win32' && /^[A-Za-z]:\//.test(s)
-}
-
-interface NormalizedPath {
-  /** Canonical comparison form, e.g. `d:/repo/build.log` or `/repo/build.log`. */
-  full: string
-  /** Path components, drive prefix excluded — what the protected-name check reads. */
-  components: string[]
-}
-
-/**
- * Resolve+normalize without `node:path`, so a test's verdict does not depend on
- * the OS running it (the whole point of the injectable `platform`). `.` and `..`
- * are collapsed textually — there are no symlinks to consult, and a `..` that
- * climbs past the root simply stops there.
- */
-function normalizePath(raw: string, platform: NodeJS.Platform): NormalizedPath {
-  const s = toPosixish(raw, platform)
-  let drive = ''
-  let rest = s
-  if (platform === 'win32') {
-    const m = /^([A-Za-z]:)(\/|$)/.exec(s)
-    if (m) {
-      drive = m[1].toLowerCase()
-      rest = s.slice(m[1].length)
-    }
-  }
-  const absolute = rest.startsWith('/')
-  const components: string[] = []
-  for (const part of rest.split('/')) {
-    if (part === '' || part === '.') continue
-    if (part === '..') {
-      components.pop()
-      continue
-    }
-    components.push(part)
-  }
-  return { full: drive + (absolute || drive ? '/' : '') + components.join('/'), components }
-}
-
-/** Resolve a possibly-relative target against `cwd`, both in posix-ish form. */
-function resolveTarget(cwd: string, target: string, platform: NodeJS.Platform): NormalizedPath {
-  const t = toPosixish(target, platform)
-  if (isAbsolutePosixish(t, platform)) return normalizePath(t, platform)
-  return normalizePath(`${toPosixish(cwd, platform).replace(/\/+$/, '')}/${t}`, platform)
-}
-
-/** True iff `target` is a PROPER descendant of `root` (root-equal is not inside,
- *  mirroring {@link isPathInside} in services/path-containment.ts). */
-function isDescendant(root: string, target: string, platform: NodeJS.Platform): boolean {
-  const fold = (s: string): string => (platform === 'win32' ? s.toLowerCase() : s)
-  const r = fold(root).replace(/\/+$/, '')
-  return fold(target).startsWith(`${r}/`)
-}
-
 function protectedComponentsOf(components: readonly string[]): string[] {
   const hits: string[] = []
   for (const c of components) {
@@ -511,17 +591,28 @@ function protectedComponentsOf(components: readonly string[]): string[] {
 /**
  * The temp roots a redirect may legitimately write to. Read from the env rather
  * than hard-coded so a session running under a sandboxed `TMPDIR` is judged
- * against the temp dir it actually has.
+ * against the temp dir it actually has — plus the conventional `/tmp` on POSIX,
+ * because on macOS every env spelling points at the per-user `/var/folders/…/T`
+ * and `> /tmp/x`, the commonest scratch idiom there is, would otherwise always
+ * measure out-of-scope. `/private/tmp` too: `/tmp` is a symlink to it on macOS
+ * and scope matching compares spellings, never resolves links.
  */
-export function tempDirRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+export function tempDirRoots(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform
+): string[] {
   let osTemp: string | undefined
   try {
-    osTemp = tmpdir()
+    // The host's temp dir only describes the host's platform: asked about
+    // another one (tests do), it would answer `/tmp` for win32 on a Linux box.
+    if (platform === process.platform) osTemp = tmpdir()
   } catch {
     // Never throw out of the approval path for a missing temp dir; one fewer
     // scope root only ever costs an escalation.
   }
-  const candidates = [osTemp, env.TMPDIR, env.TEMP, env.TMP]
+  const conventional =
+    platform === 'win32' ? [] : platform === 'darwin' ? ['/tmp', '/private/tmp'] : ['/tmp']
+  const candidates = [osTemp, env.TMPDIR, env.TEMP, env.TMP, ...conventional]
   return [...new Set(candidates.filter((v): v is string => !!v && v.trim().length > 0))]
 }
 
@@ -778,4 +869,197 @@ export async function captureRepoVisibility(
   if (!res.ok) return 'unknown'
   const v = res.stdout.trim().toLowerCase()
   return v === 'public' || v === 'private' || v === 'internal' ? v : 'unknown'
+}
+
+// ── Repo-armed git config (ADR-084 §2) ────────────────────────────────────────
+
+/**
+ * Does this command run git in any segment? The trigger for the
+ * {@link captureGitConfigArmed} meta line, read with the same naive segment
+ * parser as the other detectors (a stray quote can cost a meta line, never
+ * invent one).
+ */
+export function hasGitSegment(command: string): boolean {
+  return splitCommandSegments(command).some((s) => parseSegment(s)?.cmd === 'git')
+}
+
+/** Config scopes the REPO controls. `system` and `global` are the user's own
+ *  (difftastic as a global `diff.external` is theirs), so they never arm. */
+const REPO_SCOPES: ReadonlySet<string> = new Set(['local', 'worktree', 'command'])
+
+/**
+ * Keys that make an otherwise read-only git command run a program, matched on
+ * the lowercased key, plus one that moves where it reads. `filter.<driver>.process`
+ * is git's long-running filter protocol, which runs a program exactly where
+ * `clean`/`smudge` would.
+ */
+const ARMED_KEY_PATTERNS: readonly RegExp[] = [
+  /^diff\.external$/,
+  /^diff\..+\.(?:command|textconv)$/,
+  /^filter\..+\.(?:clean|smudge|process)$/,
+  /^core\.fsmonitor$/,
+  /^core\.hookspath$/,
+  /^gpg\.program$/,
+  /^gpg\..+\.program$/,
+  /^log\.showsignature$/,
+  /^core\.pager$/,
+  /^pager\..+$/,
+  // Not a program: it redirects status/diff/ls-files/show to another
+  // directory, whose paths the checker's scope rules never see (the command
+  // names none). Any value arms. A session whose cwd is a submodule's work
+  // tree (its git dir sets core.worktree legitimately) loses the git bypass —
+  // accepted.
+  /^core\.worktree$/
+]
+
+/** `core.fsmonitor` set to a boolean is git's built-in daemon, not a hook program. */
+const GIT_BOOLEAN = /^(?:true|false|yes|no|on|off|1|0)$/i
+
+/** A subsection the judge may be shown as written; anything else is masked. */
+const SAFE_SUBSECTION = /^[A-Za-z0-9_.-]{1,64}$/
+
+/**
+ * The key as reported. A subsection (`diff."<name>".textconv`) is text the
+ * repo's author chose, and the list reaches the judge's prompt, so one outside
+ * a plain identifier charset is masked as `*` — the fact is "a textconv is
+ * set", not what the attacker called it.
+ */
+function reportedKey(lowerKey: string): string {
+  const first = lowerKey.indexOf('.')
+  const last = lowerKey.lastIndexOf('.')
+  if (first === last) return lowerKey
+  const sub = lowerKey.slice(first + 1, last)
+  return SAFE_SUBSECTION.test(sub)
+    ? lowerKey
+    : `${lowerKey.slice(0, first)}.*${lowerKey.slice(last)}`
+}
+
+function isArmed(lowerKey: string, value: string | undefined): boolean {
+  if (!ARMED_KEY_PATTERNS.some((re) => re.test(lowerKey))) return false
+  // A bare `fsmonitor` key (no `=`) is boolean true.
+  if (lowerKey === 'core.fsmonitor') return value !== undefined && !GIT_BOOLEAN.test(value.trim())
+  return true
+}
+
+/**
+ * Which repo-controlled git config keys would make git run a program in `cwd`
+ * (ADR-084 §2). Runs `git --no-pager config --list --show-scope --includes -z`
+ * with `shell: false`, so include-sourced entries are seen under the scope of
+ * the file that included them; then, only when that came back with a list,
+ * `git ls-files` for gitlinks (see {@link indexHasGitlink}).
+ *
+ * `-z` rather than the line format the ADR names: records are
+ * `<scope>\0<key>\n<value>\0` (a bare key has no `\n`), so a multi-line value
+ * can neither forge nor split a record.
+ *
+ * Returns the sorted, de-duplicated ARMED keys — never their values, which can
+ * hold paths or tokens — `[]` for a clean repo, and `null` whenever the answer
+ * is not known:
+ * - the capture failed, threw or timed out (git missing, non-zero exit);
+ * - the output was cut at the capture cap, or a record is malformed — an armed
+ *   key could sit past the cut;
+ * - there is no `local` entry at all: `git config --list` succeeds outside a
+ *   repository, and every repository git creates has local entries, so this
+ *   is how "not a repo" reads here;
+ * - the index holds a gitlink (see {@link indexHasGitlink}).
+ *
+ * Callers treat `null` as "cannot verify": the static bypass refuses, and the
+ * judge's meta line is simply absent.
+ */
+export async function captureGitConfigArmed(
+  cwd: string,
+  exec: CaptureExec = defaultExec
+): Promise<string[] | null> {
+  let res: CaptureExecResult
+  try {
+    res = await exec(
+      'git',
+      ['--no-pager', 'config', '--list', '--show-scope', '--includes', '-z'],
+      { cwd, timeoutMs: GIT_CAPTURE_TIMEOUT_MS }
+    )
+  } catch {
+    return null
+  }
+  if (!res.ok || typeof res.stdout !== 'string') return null
+  const out = res.stdout
+  if (out.length >= MAX_CAPTURE_BYTES) return null
+  if (out.length > 0 && !out.endsWith('\0')) return null
+  const fields = out.length > 0 ? out.slice(0, -1).split('\0') : []
+  if (fields.length % 2 !== 0) return null
+
+  let sawLocal = false
+  const armed = new Set<string>()
+  for (let i = 0; i < fields.length; i += 2) {
+    const scope = fields[i]
+    const entry = fields[i + 1]
+    const nl = entry.indexOf('\n')
+    const key = (nl === -1 ? entry : entry.slice(0, nl)).toLowerCase()
+    const value = nl === -1 ? undefined : entry.slice(nl + 1)
+    if (scope === '' || key === '') return null
+    if (scope === 'local') sawLocal = true
+    if (!REPO_SCOPES.has(scope)) continue
+    if (isArmed(key, value)) armed.add(reportedKey(key))
+  }
+  if (!sawLocal) return null
+  if ((await indexHasGitlink(cwd, exec)) !== false) return null
+  return [...armed].sort()
+}
+
+/**
+ * The two ways to list index modes, tried in order. `--format=%(objectmode)`
+ * (git ≥ 2.38) prints 7 bytes per entry, so the capture cap is reached only
+ * past ~140k tracked files; `--stage` (every git) prints the object id and
+ * path too, ~50+ bytes per entry, and is the fallback when `--format` is
+ * refused. Each `-z` record must match its shape exactly.
+ */
+const LS_FILES_MODE_QUERIES: ReadonlyArray<{ args: string[]; record: RegExp }> = [
+  {
+    args: ['--no-pager', 'ls-files', '-z', '--format=%(objectmode)'],
+    record: /^([0-7]{6})$/
+  },
+  {
+    args: ['--no-pager', 'ls-files', '--stage', '-z'],
+    record: /^([0-7]{6}) [0-9a-f]{40,64} [0-3]\t./s
+  }
+]
+
+/** The index mode of a gitlink (a submodule commit). */
+const GITLINK_MODE = '160000'
+
+/**
+ * Does the index in `cwd` hold a gitlink? `null` when it cannot be told
+ * (both queries failed, timeout, output cut at the capture cap, a malformed
+ * record).
+ *
+ * Why it matters to {@link captureGitConfigArmed}: `git status` and `git diff`
+ * run `git status --porcelain=2` inside every populated submodule, with THAT
+ * repository's own config — its `core.fsmonitor`, its `core.hooksPath`, its
+ * `diff.external` — none of which the superproject's `git config --list` shows.
+ * So a repo with a gitlink cannot be verified. This keys off the index, not
+ * `submodule.*` config, because the recursion follows any populated gitlink
+ * whether or not `.gitmodules` or the config names it. Fail closed rather than
+ * recurse: repos with submodules lose only the git part of the bypass.
+ */
+async function indexHasGitlink(cwd: string, exec: CaptureExec): Promise<boolean | null> {
+  for (const query of LS_FILES_MODE_QUERIES) {
+    let res: CaptureExecResult
+    try {
+      res = await exec('git', query.args, { cwd, timeoutMs: GIT_CAPTURE_TIMEOUT_MS })
+    } catch {
+      return null
+    }
+    // A refused `--format` (older git) exits non-zero: try the next query.
+    if (!res.ok || typeof res.stdout !== 'string') continue
+    const out = res.stdout
+    if (out.length >= MAX_CAPTURE_BYTES) return null
+    if (out.length === 0) return false
+    if (!out.endsWith('\0')) return null
+    for (const record of out.slice(0, -1).split('\0')) {
+      const m = query.record.exec(record)
+      if (!m) return null
+      if (m[1] === GITLINK_MODE) return true
+    }
+    return false
+  }
+  return null
 }

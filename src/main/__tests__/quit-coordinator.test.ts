@@ -120,4 +120,67 @@ describe('QuitCoordinator', () => {
 
     expect(quit).toHaveBeenCalledOnce()
   })
+
+  describe('prepareQuit (ADR-097 §5: the opencode slot is handed back while services live)', () => {
+    it('runs once after confirm, BEFORE quit and while nothing is torn down', async () => {
+      let release!: () => void
+      const prepareQuit = vi.fn(() => new Promise<void>((resolve) => (release = resolve)))
+      const { deps, teardownServices, quit } = makeDeps({ prepareQuit })
+      const coord = new QuitCoordinator(deps)
+      coord.handleBeforeQuit(vi.fn())
+      coord.confirm()
+      coord.confirm()
+      expect(prepareQuit).toHaveBeenCalledOnce()
+      expect(quit).not.toHaveBeenCalled()
+      expect(teardownServices).not.toHaveBeenCalled()
+      release()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(quit).toHaveBeenCalledOnce()
+    })
+
+    it('is bounded: a hung prepare cannot block the quit', async () => {
+      const prepareQuit = vi.fn(() => new Promise<void>(() => {}))
+      const { deps, quit } = makeDeps({ prepareQuit, prepareTimeoutMs: 1000 })
+      const coord = new QuitCoordinator(deps)
+      coord.handleBeforeQuit(vi.fn())
+      coord.confirm()
+      await vi.advanceTimersByTimeAsync(999)
+      expect(quit).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(quit).toHaveBeenCalledOnce()
+    })
+
+    it('a second quit while the prepare runs is vetoed and tears nothing down', async () => {
+      let release!: () => void
+      const prepareQuit = vi.fn(() => new Promise<void>((resolve) => (release = resolve)))
+      const { deps, teardownServices, quit } = makeDeps({ prepareQuit })
+      const coord = new QuitCoordinator(deps)
+      coord.handleBeforeQuit(vi.fn())
+      coord.confirm()
+      const second = vi.fn()
+      coord.handleBeforeQuit(second) // Cmd+Q again, mid-removal
+      expect(second).toHaveBeenCalledOnce()
+      expect(teardownServices).not.toHaveBeenCalled()
+      release()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(quit).toHaveBeenCalledOnce()
+      // The real quit pass that follows tears down once.
+      const third = vi.fn()
+      coord.handleBeforeQuit(third)
+      expect(third).not.toHaveBeenCalled()
+      expect(teardownServices).toHaveBeenCalledOnce()
+    })
+
+    it('a failing prepare still quits, and the fallback path prepares too', async () => {
+      const prepareQuit = vi.fn(async () => {
+        throw new Error('opencode gone')
+      })
+      const { deps, quit } = makeDeps({ prepareQuit })
+      const coord = new QuitCoordinator(deps)
+      coord.handleBeforeQuit(vi.fn())
+      await vi.advanceTimersByTimeAsync(5000) // the renderer never answered
+      expect(prepareQuit).toHaveBeenCalledOnce()
+      expect(quit).toHaveBeenCalledOnce()
+    })
+  })
 })

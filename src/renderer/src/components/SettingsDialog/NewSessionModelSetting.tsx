@@ -5,14 +5,20 @@
  * One engine-neutral row — the SAME item at the top of every engine segment —
  * choosing whether a new session starts on the model last picked on that engine
  * (today's behaviour, and the default) or on the configured default below it.
- * The store's `seedingModelPicks` is what honours it.
+ * The store's `seedingModelPicks` is what honours it for the model, and
+ * `carriesPicksIntoNewSessions` for the effort a composer pick remembers.
  *
  * `LastPickNote` is the other half: while the last pick wins, each engine's
  * default-model row says so, or a changed default that new sessions ignore
  * would look broken.
  */
 
-import { useSessionStore, type AppSettings, type NewSessionModel } from '../../stores/session-store'
+import {
+  carriesPicksIntoNewSessions,
+  useSessionStore,
+  type AppSettings,
+  type NewSessionModel
+} from '../../stores/session-store'
 import { Segmented, SettingRow } from './settings-controls'
 
 export const NEW_SESSION_MODEL_TESTID = 'NewSessionModelSetting'
@@ -30,7 +36,7 @@ export function NewSessionModelSetting({
       testid={NEW_SESSION_MODEL_TESTID}
       dataId="newSessionModel"
       label="New sessions start on"
-      description="Per engine. The composer's model picker always changes the session you are in."
+      description="Per harness. The composer's model picker always changes the session you are in. With the default below, an effort picked in the composer also stays with its session instead of becoming the model's starting effort."
     >
       <Segmented
         testid={`${NEW_SESSION_MODEL_TESTID}.choice`}
@@ -50,9 +56,7 @@ export function NewSessionModelSetting({
  * row's description while the last pick wins; nothing otherwise.
  */
 export function LastPickNote(): React.JSX.Element | null {
-  const lastPickWins = useSessionStore(
-    (s) => (s.settings.newSessionModel ?? 'last-picked') === 'last-picked'
-  )
+  const lastPickWins = useSessionStore((s) => carriesPicksIntoNewSessions(s.settings))
   if (!lastPickWins) return null
   return (
     <span data-testid={`${NEW_SESSION_MODEL_TESTID}.lastPickNote`} className="text-text-muted">

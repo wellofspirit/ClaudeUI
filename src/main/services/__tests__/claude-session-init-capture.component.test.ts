@@ -5,12 +5,12 @@
  *
  * The bug this pins: `captureSessionBootstrap` nested its init capture inside
  * the `if (msg.session_id && !this.sessionId)` latch. But `system/init` is not
- * the first message carrying a `session_id` — `system/queued_command_consumed`
- * is (our own `patch/queue-control` Part A3 emits it for EVERY prompt, because
- * the drain path is how an ordinary never-queued prompt reaches its turn, and
- * it lands ahead of init on every turn; see docs/protocol-cc/04-system-subtypes.md
- * §4.2 / §4.10). So the consume message tripped the latch and the init branch
- * never ran.
+ * the first message carrying a `session_id`. It was the retired `queue-control`
+ * patch's `system/queued_command_consumed` when the bug was found; today it is
+ * `command_lifecycle` `queued` and `started`, which cli.js emits for every user
+ * frame that carries a uuid — and every one does — ahead of init on every turn
+ * (docs/protocol-cc/03-inbound-messages.md §3.21, 04-system-subtypes.md §4.2).
+ * Either way the earlier frame tripped the latch and the init branch never ran.
  *
  * Consequences, all guarded below:
  *  - `resolvedModelId` stayed null, so a `default` session sized its context
@@ -49,7 +49,10 @@ vi.mock('../../../core/sdk', async (importOriginal) => {
 })
 
 vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
-  opencodeServerManager: { isBinaryAvailable: (): boolean => false }
+  opencodeServerManager: {
+    setServerStartedHook: () => {},
+    isBinaryAvailable: (): boolean => false
+  }
 }))
 vi.mock('../../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: { dispatch: vi.fn(), resolveApproval: vi.fn(), disposeFor: vi.fn() },
@@ -72,15 +75,10 @@ vi.mock('../../../core/services/session-history', () => ({
 }))
 vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
-vi.mock('../../../core/services/voice-capture', () => ({
-  startRecording: vi.fn(),
-  stopRecording: vi.fn()
-}))
-vi.mock('../../../core/services/voice-client', () => ({ VoiceClient: class {} }))
 // NOTE: `context-window` is deliberately NOT mocked (the queue test stubs it to
 // a flat 200000). The whole point here is the real alias → window resolution.
 vi.mock('../../../core/services/usage-fetcher', () => ({
-  usageFetcher: { updateFromRateLimitEvent: vi.fn(), fetch: vi.fn(async () => null) }
+  usageFetcher: { fetch: vi.fn(async () => null) }
 }))
 vi.mock('../../../core/services/usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
 vi.mock('../account-manager', () => ({
@@ -118,8 +116,9 @@ function makeControlledHandle(): {
       }
     },
     initializationResult: (): Promise<never> => new Promise<never>(() => {}),
+    setModel: vi.fn(async () => {}),
     interrupt: vi.fn(async () => {}),
-    dequeueMessage: vi.fn(async () => ({ removed: 1 }))
+    cancelAsyncMessage: vi.fn(async () => ({ cancelled: true }))
   }
   return {
     handle,
@@ -201,14 +200,17 @@ afterEach(() => {
   for (const s of liveSessions.splice(0)) s.cancel()
 })
 
-/** Start a `default`-model session with a live (parked) cli.js run. */
-async function startSession(routingId: string): Promise<{
+/** Start a session (`default` model unless given) with a live (parked) cli.js run. */
+async function startSession(
+  routingId: string,
+  model?: string
+): Promise<{
   session: ClaudeSession
   sent: Array<[string, string, unknown]>
   handle: ReturnType<typeof makeControlledHandle>
 }> {
   const { win, sent } = makeWin()
-  const session = new ClaudeSession(routingId, win, '/tmp/proj')
+  const session = new ClaudeSession(routingId, win, '/tmp/proj', model ? { model } : {})
   liveSessions.push(session)
   void session.run('hello')
   await vi.waitFor(() => expect(handles.length).toBe(1))
@@ -216,19 +218,34 @@ async function startSession(routingId: string): Promise<{
   return { session, sent, handle: handles[0] }
 }
 
-describe('ClaudeSession system/init capture (behind queued_command_consumed)', () => {
+/**
+ * THE wire order (official 2.1.280, probes/queue-control/official.uuid.jsonl
+ * L198–L200): a user frame's `queued` and `started` lifecycle frames carry a
+ * session_id and precede that turn's init.
+ */
+function emitLifecycleAheadOfInit(
+  handle: ReturnType<typeof makeControlledHandle>,
+  sessionId: string
+): void {
+  for (const [state, uuid] of [
+    ['queued', 'f61e6d9b-1700-402d-b796-4242ef8db404'],
+    ['started', 'be7006e9-764b-49d2-aa18-4f4b702f6095']
+  ]) {
+    handle.emit({
+      type: 'command_lifecycle',
+      command_uuid: '8c3b9635-1a49-4bdc-9ca8-d63c5a205ab3',
+      state,
+      uuid,
+      session_id: sessionId
+    })
+  }
+}
+
+describe('ClaudeSession system/init capture (behind command_lifecycle)', () => {
   it('sizes the context window from the resolved model id, not the `default` alias', async () => {
     const { sent, handle } = await startSession('r-init-window')
 
-    // THE wire order (verified on 2.1.268): the consume notification carries a
-    // session_id and precedes init on every turn.
-    handle.emit({
-      type: 'system',
-      subtype: 'queued_command_consumed',
-      prompt: 'hello',
-      session_id: 's-init-1',
-      uuid: 'u1'
-    })
+    emitLifecycleAheadOfInit(handle, 's-init-1')
     handle.emit({
       type: 'system',
       subtype: 'init',
@@ -270,13 +287,7 @@ describe('ClaudeSession system/init capture (behind queued_command_consumed)', (
   it('re-captures the resolved model on a LATER init, resizing the window', async () => {
     const { sent, handle } = await startSession('r-init-recapture')
 
-    handle.emit({
-      type: 'system',
-      subtype: 'queued_command_consumed',
-      prompt: 'hello',
-      session_id: 's-init-2',
-      uuid: 'u1'
-    })
+    emitLifecycleAheadOfInit(handle, 's-init-2')
     handle.emit({
       type: 'system',
       subtype: 'init',
@@ -307,5 +318,69 @@ describe('ClaudeSession system/init capture (behind queued_command_consumed)', (
     // 600_000 / 200_000 — the status line is re-emitted by the init capture
     // itself, without waiting for another assistant message.
     await vi.waitFor(() => expect(lastUsedPercentage(sent)).toBe(300))
+  })
+})
+
+/** A turn's head `system/init` reporting the model cli.js resolved. */
+function emitInit(
+  handle: ReturnType<typeof makeControlledHandle>,
+  sessionId: string,
+  model: string
+): void {
+  handle.emit({
+    type: 'system',
+    subtype: 'init',
+    session_id: sessionId,
+    model,
+    slash_commands: [],
+    skills: [],
+    mcp_servers: [],
+    uuid: `u-${model}`
+  })
+}
+
+/**
+ * ADR-100: cli.js resolves every family alias per account, and that answer moves
+ * without a release (2.1.293's `haiku` went from Haiku 4.5 to 5.5 overnight). The
+ * session must follow system/init for every alias, not only `default` — the
+ * alias table says `haiku` is a 1M Haiku 5.5, which is wrong for an account whose
+ * `haiku` still runs Haiku 4.5.
+ */
+describe('ClaudeSession follows system/init for every alias (ADR-100)', () => {
+  it('sizes and judges a `haiku` session by the model init reports, re-captured per turn', async () => {
+    const { session, sent, handle } = await startSession('r-alias-haiku', 'haiku')
+
+    emitInit(handle, 's-alias-1', 'claude-haiku-4-5-20251001')
+    handle.emit(ASSISTANT_600K)
+    // 600_000 / 200_000 — the alias table alone would say 1M (60).
+    await vi.waitFor(() => expect(lastUsedPercentage(sent)).toBe(300))
+    expect(session.capabilities.contextWindow).toBe(200_000)
+    expect(session.capabilities.reasoning.effort).toBeUndefined()
+
+    emitInit(handle, 's-alias-1', 'claude-haiku-5-5')
+    await vi.waitFor(() => expect(lastUsedPercentage(sent)).toBe(60))
+    expect(session.capabilities.contextWindow).toBe(1_000_000)
+    expect(session.capabilities.reasoning.effort?.levels).toContain('max')
+  })
+
+  it('keeps an `<alias>[1m]` pick at 1M when the reported id drops the suffix', async () => {
+    const { session, sent, handle } = await startSession('r-alias-1m', 'sonnet[1m]')
+
+    emitInit(handle, 's-alias-2', 'claude-sonnet-4-6')
+    handle.emit(ASSISTANT_600K)
+    await vi.waitFor(() => expect(lastUsedPercentage(sent)).toBe(60))
+    expect(session.capabilities.contextWindow).toBe(1_000_000)
+  })
+
+  it('drops the old resolved id on a model switch, until the next init reports the new one', async () => {
+    const { session, sent, handle } = await startSession('r-alias-switch', 'haiku')
+
+    emitInit(handle, 's-alias-3', 'claude-haiku-4-5-20251001')
+    handle.emit(ASSISTANT_600K)
+    await vi.waitFor(() => expect(lastUsedPercentage(sent)).toBe(300))
+
+    // Haiku 4.5's 200K must not size the `sonnet` session it switched to.
+    await session.setModel('sonnet')
+    expect(lastUsedPercentage(sent)).toBe(60)
   })
 })

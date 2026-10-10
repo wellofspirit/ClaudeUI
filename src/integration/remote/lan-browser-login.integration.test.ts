@@ -81,7 +81,7 @@ const { tempHome, priorHome } = vi.hoisted(() => {
 })
 
 // `getAppPath()` must be the repo root: `RemoteServer.getWebClientDir()` resolves
-// `<appPath>/out/web`, and the REAL built bundle is what is under test here.
+// `<appPath>/out/renderer`, and the REAL built bundle is what is under test here.
 vi.mock('electron', async () => {
   const shim = await import('../../test/stubs/electron-shim')
   const nodePath = await import('node:path')
@@ -150,8 +150,7 @@ vi.mock('../../core/services/usage-fetcher', () => ({
     setSessionGetter: vi.fn(),
     setIntervalSecs: vi.fn(),
     startPolling: vi.fn(),
-    fetch: vi.fn(async () => null),
-    updateFromRateLimitEvent: vi.fn()
+    fetch: vi.fn(async () => null)
   }
 }))
 vi.mock('../../core/services/service-session', () => ({
@@ -212,13 +211,16 @@ vi.mock('../../core/pi/model-discovery', () => ({
   discoverPiModels: vi.fn(async () => []),
   getPiModelCatalogGroups: vi.fn(async () => []),
   invalidatePiModelCache: vi.fn(),
+  // Boot subscribes it to the sync funnel (core-services.ts).
+  onPiCatalogRecovered: vi.fn(() => () => {}),
   resolvePiSpawnModel: vi.fn(async (m?: string) => m),
   getPiModelCatalog: vi.fn(async () => []),
   effortLevelsFromModel: vi.fn(() => [])
 }))
 vi.mock('../../core/pi/pi-locate', () => ({
   piBinaryAvailable: vi.fn(() => false),
-  locatePiBinary: vi.fn(() => null)
+  locatePiBinary: vi.fn(() => null),
+  locatePiDisplayPath: vi.fn(() => null)
 }))
 vi.mock('../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: {
@@ -230,11 +232,6 @@ vi.mock('../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatchAvailable: (): boolean => false,
   XENG_REQUEST_PREFIX: 'xeng:'
 }))
-vi.mock('../../core/services/voice-capture', () => ({
-  startRecording: vi.fn(() => false),
-  stopRecording: vi.fn()
-}))
-vi.mock('../../core/services/voice-client', () => ({ VoiceClient: class {} }))
 vi.mock('../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 vi.mock('../../core/services/usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
@@ -291,10 +288,10 @@ async function raceTestIds(ids: string[], timeoutMs: number): Promise<string> {
 describe.skipIf(SKIP)('E2E (gated): LAN link password sign-in from a real browser', () => {
   beforeAll(async () => {
     expect(tempHome, 'the hermetic HOME redirect must be active').toContain('claudeui-lan-walk-')
-    const webIndex = path.resolve(__dirname, '..', '..', '..', 'out', 'web', 'index.html')
+    const webIndex = path.resolve(__dirname, '..', '..', '..', 'out', 'renderer', 'web.html')
     expect(
       fs.existsSync(webIndex),
-      `built web client missing at ${webIndex} — run bun run build:web`
+      `built web client missing at ${webIndex} — run bun run build`
     ).toBe(true)
 
     const { TestIpcBridge: Bridge } = await import('../../test/bridges/test-ipc-bridge')

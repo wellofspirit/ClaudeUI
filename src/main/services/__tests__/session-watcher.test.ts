@@ -207,6 +207,42 @@ describe('session-watcher', () => {
   })
 
   /**
+   * Nothing holds a watched session on the host once nobody watches it — no engine
+   * spawned, and the file is the only writer — so canonical drops the transcript
+   * (ADR-087 §2) and says so in the snapshot, keeping the row.
+   */
+  it('unwatching drops the transcript canonical was keeping fresh, and keeps the row', async () => {
+    watchSession('routing-evict', ctx.sessionId, ctx.projectKey, '/repo/evict')
+    await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant' }) + '\n')
+    await vi.waitFor(
+      () =>
+        expect(syncCore.getCanonicalState().sessions['routing-evict']?.messages).toHaveLength(1),
+      { timeout: 3000 }
+    )
+
+    unwatchSession('routing-evict')
+
+    const session = syncCore.getCanonicalState().sessions['routing-evict']
+    expect(session.messages).toEqual([])
+    expect(session.seeded).toBe(false)
+    expect(session.cwd).toBe('/repo/evict')
+    expect(syncCore.getSnapshot().sessions['routing-evict'].seeded).toBe(false)
+  })
+
+  it('unwatching never strips a session whose engine is live', async () => {
+    syncCore.emit('session:created', ['routing-live', { cwd: '/repo/live' }])
+    syncCore.emit('session:message', [
+      'routing-live',
+      { id: 'live-1', role: 'assistant', content: [], timestamp: 1 }
+    ])
+    watchSession('routing-live', ctx.sessionId, ctx.projectKey, '/repo/live')
+
+    unwatchSession('routing-live')
+
+    expect(syncCore.getCanonicalState().sessions['routing-live'].messages).toHaveLength(1)
+  })
+
+  /**
    * The post-await race, closed by S4.
    *
    * The debounce callback AWAITS the file read, and a delete can land inside that

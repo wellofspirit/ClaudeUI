@@ -8,7 +8,10 @@
  * OpencodeSession.test.ts / PiSession.test.ts).
  */
 import { describe, it, expect } from 'vitest'
+import { REVIEW_RATIONALE_LIMIT } from '../../shared/tool-review'
 import {
+  ALLOW_RULE_REVIEW_RATIONALE_PREFIX,
+  allowRuleReviewBlock,
   AutoModeDenialTracker,
   formatAutoModeDenyReason,
   CONSECUTIVE_DENIAL_CAP,
@@ -176,5 +179,28 @@ describe('formatAutoModeDenyReason', () => {
 describe('cap constants', () => {
   it('the same-category cap is tighter than the consecutive one, or it could never fire', () => {
     expect(SAME_CATEGORY_DENIAL_CAP).toBeLessThan(CONSECUTIVE_DENIAL_CAP)
+  })
+})
+
+describe('allowRuleReviewBlock (ADR-085 §4)', () => {
+  it("names the user's rule, approved by auto mode", () => {
+    expect(allowRuleReviewBlock('call-1', 'rev-1', 'Bash(git status:*)')).toEqual({
+      type: 'tool_review',
+      toolUseId: 'call-1',
+      reviewId: 'rev-1',
+      reviewer: 'auto-mode',
+      decision: 'approved',
+      rationale: 'Allowed by your permission rule Bash(git status:*)'
+    })
+    expect(ALLOW_RULE_REVIEW_RATIONALE_PREFIX).toBe('Allowed by your permission rule ')
+  })
+
+  it('collapses and caps the rule text like every other rationale', () => {
+    const rule = `Bash(git\n\n  status ${'x'.repeat(2000)}:*)`
+    const { rationale } = allowRuleReviewBlock('c', 'r', rule)
+    expect(rationale).not.toContain('\n')
+    expect(rationale!.startsWith('Allowed by your permission rule Bash(git status x')).toBe(true)
+    expect(rationale!.length).toBe(REVIEW_RATIONALE_LIMIT)
+    expect(rationale!.endsWith('…')).toBe(true)
   })
 })

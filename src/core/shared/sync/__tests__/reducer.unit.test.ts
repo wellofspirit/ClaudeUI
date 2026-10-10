@@ -54,6 +54,30 @@ function assistant(id: string, content: ChatMessage['content']): ChatMessage {
 }
 
 describe('reducer — session registry', () => {
+  it.each(['opencode', 'pi'] as const)(
+    '%s status reconciles a stale selected/default model with the live backend',
+    (engineId) => {
+      const model = { engineId, vendorId: 'local', modelId: 'old-model' }
+      const s = fold([
+        ['session:created', 'rid', { cwd: '/repo', engineId, model: 'local/new-default' }],
+        ['session:status', 'rid', status({ engineId, model })]
+      ])
+      expect(s.sessions.rid.selectedModel).toBe('local/old-model')
+      expect(s.sessionEngines.rid).toEqual({ engineId, model })
+      const changed = fold(
+        [
+          [
+            'session:status',
+            'rid',
+            status({ engineId, model: { ...model, modelId: 'explicit-pick' } })
+          ]
+        ],
+        s
+      )
+      expect(changed.sessions.rid.selectedModel).toBe('local/explicit-pick')
+      expect(changed.sessionEngines.rid.model?.modelId).toBe('explicit-pick')
+    }
+  )
   it('creates a session with its cwd and marks the engine live', () => {
     const s = fold([created()])
     expect(s.sessions['rid'].cwd).toBe('/repo')
@@ -95,6 +119,7 @@ describe('reducer — session registry', () => {
     ['session:queue-changed', ['rid', { items: [] }]],
     ['session:result', ['rid', {}]],
     ['session:messages-retracted', ['rid', { messageIds: ['m1'] }]],
+    ['session:tool-uses-retracted', ['rid', { messageId: 'm1', toolUseIds: ['t1'] }]],
     ['session:approval-dismiss', ['rid', { requestId: 'r1' }]],
     ['session:subagent-tool-result', ['rid', { toolUseId: 't1', toolResultToolUseId: 'x' }]]
   ])('%s for an unknown id is an honest no-op (no ghost session)', (channel, args) => {
@@ -159,11 +184,45 @@ describe('reducer — session registry', () => {
     expect(session.permissionMode).toBe('plan')
     expect(session.selectedEngineId).toBe('pi')
     expect(session.selectedModel).toBe('gpt-5-codex')
-    // Reasoning config is NOT part of the birth payload: what the emitter has at
-    // spawn is a RESOLVED model default, and these fields mean "explicitly
-    // picked" (null = unset, which drives the effort precedence ladder).
+    // Reasoning config rides the birth event only when the spawning client
+    // announced a value; an event without them leaves `null` (= not started yet,
+    // so the per-model starting effort still applies).
     expect(session.effort).toBeNull()
     expect(session.thinkingMode).toBeNull()
+  })
+
+  it('folds the effort / thinking mode a birth event announces', () => {
+    const s = fold([
+      ['session:created', 'rid', { cwd: '/repo', effort: 'high', thinkingMode: 'disabled' }]
+    ])
+    expect(s.sessions['rid'].effort).toBe('high')
+    expect(s.sessions['rid'].thinkingMode).toBe('disabled')
+  })
+
+  it('a birth event carrying null CLEARS the value (key presence decides, not the value)', () => {
+    const picked = fold([
+      ['session:created', 'rid', { cwd: '/repo', effort: 'xhigh', thinkingMode: 'enabled' }]
+    ])
+    const cleared = applyEvent(picked, {
+      channel: 'session:created',
+      args: ['rid', { cwd: '/repo', effort: null, thinkingMode: null }],
+      seq: 2
+    })
+    expect(cleared.sessions['rid'].effort).toBeNull()
+    expect(cleared.sessions['rid'].thinkingMode).toBeNull()
+  })
+
+  it('a birth event WITHOUT picks leaves an existing pick alone (a respawn, an old client)', () => {
+    const picked = fold([
+      ['session:created', 'rid', { cwd: '/repo', effort: 'xhigh', thinkingMode: 'enabled' }]
+    ])
+    const respawned = applyEvent(picked, {
+      channel: 'session:created',
+      args: ['rid', { cwd: '/repo' }],
+      seq: 2
+    })
+    expect(respawned.sessions['rid'].effort).toBe('xhigh')
+    expect(respawned.sessions['rid'].thinkingMode).toBe('enabled')
   })
 
   it('keeps the empty-session defaults for an OLD-SHAPE birth event', () => {
@@ -485,6 +544,408 @@ describe('reducer — transcript', () => {
         hostMessage()
       ])
       expect(reviews(s)).toEqual([review()])
+    })
+  })
+
+  /**
+   * A pre-ask refusal nothing judged (a deny rule, a hook, the safety checker)
+   * binds exactly as a verdict does, and for the same reason — it describes a
+   * call, so it belongs on that call's card. Its identity is `denialId`, the
+   * emitting frame's own uuid: cli.js decides each call once and never revises
+   * it, so unlike a review there is no second copy to append.
+   */
+  describe('session:permission-denial', () => {
+    const denial = (over: Record<string, unknown> = {}) => ({
+      type: 'permission_denial' as const,
+      toolUseId: 't1',
+      denialId: 'dn-1',
+      source: 'rule' as const,
+      ...over
+    })
+    const hostMessage = (): [string, ...unknown[]] => [
+      'session:message',
+      'rid',
+      assistant('m1', [{ type: 'tool_use', toolUseId: 't1', toolName: 'Bash', toolInput: {} }])
+    ]
+    const denials = (s: CanonicalState) =>
+      s.sessions['rid'].messages.flatMap((m) =>
+        m.content.filter((b) => b.type === 'permission_denial')
+      )
+
+    it('attaches the denial to the message holding its tool_use', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }]
+      ])
+      expect(denials(s)).toEqual([denial()])
+    })
+
+    it('is idempotent by denialId — a replayed catch-up appends once', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }],
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }]
+      ])
+      expect(denials(s)).toHaveLength(1)
+    })
+
+    it('is dropped when no message holds the tool_use', () => {
+      const s = fold([
+        created(),
+        ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'hi' }])],
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }]
+      ])
+      expect(denials(s)).toEqual([])
+    })
+
+    it('survives an item-scoped upsert of its host message (mergeContentBlocks)', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }],
+        hostMessage()
+      ])
+      expect(denials(s)).toEqual([denial()])
+    })
+
+    // The two channels share one binding helper; this pins that they still
+    // write DIFFERENT blocks, so a denial can never render as a judgment.
+    it('coexists with a verdict on the same transcript without merging', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        [
+          'session:message',
+          'rid',
+          assistant('m2', [{ type: 'tool_use', toolUseId: 't2', toolName: 'Bash', toolInput: {} }])
+        ],
+        [
+          'session:tool-review',
+          'rid',
+          {
+            toolUseId: 't2',
+            review: {
+              type: 'tool_review',
+              toolUseId: 't2',
+              reviewId: 'rv-9',
+              reviewer: 'auto-mode',
+              decision: 'denied'
+            }
+          }
+        ],
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }]
+      ])
+      expect(denials(s)).toEqual([denial()])
+      expect(
+        s.sessions['rid'].messages.flatMap((m) => m.content.filter((b) => b.type === 'tool_review'))
+      ).toHaveLength(1)
+    })
+  })
+
+  /**
+   * A call made INSIDE a subagent lives in `subagentMessages[<Agent call id>]`,
+   * and that bucket is where its card renders. A verdict or denial for it binds
+   * there when the top-level transcript has no such call: tool-use ids are
+   * unique, so the owning bucket is found by searching, never named by the
+   * producer. Every engine benefits — Codex, opencode and pi reviews of subagent
+   * calls used to be dropped here too.
+   */
+  describe('a decision on a call made inside a subagent', () => {
+    const review = (over: Record<string, unknown> = {}) => ({
+      type: 'tool_review' as const,
+      toolUseId: 'sub-t1',
+      reviewId: 'rv-sub',
+      reviewer: 'auto-mode' as const,
+      decision: 'approved' as const,
+      ...over
+    })
+    const denial = {
+      type: 'permission_denial' as const,
+      toolUseId: 'sub-t1',
+      denialId: 'dn-sub',
+      source: 'rule' as const
+    }
+    const subCall = (id = 'sm1', toolUseId = 'sub-t1'): [string, ...unknown[]] => [
+      'session:subagent-message',
+      'rid',
+      {
+        toolUseId: 'agent-1',
+        message: assistant(id, [{ type: 'tool_use', toolUseId, toolName: 'Bash', toolInput: {} }])
+      }
+    ]
+    const bucket = (s: CanonicalState, owner = 'agent-1') =>
+      s.sessions['rid'].subagentMessages[owner] ?? []
+    const blocksOf = (s: CanonicalState, type: string, owner = 'agent-1') =>
+      bucket(s, owner).flatMap((m) => m.content.filter((b) => b.type === type))
+
+    it('binds a verdict into the bucket holding the call', () => {
+      const s = fold([
+        created(),
+        subCall(),
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }]
+      ])
+      expect(blocksOf(s, 'tool_review')).toEqual([review()])
+      expect(s.sessions['rid'].messages).toEqual([])
+    })
+
+    it('binds a denial into the bucket holding the call', () => {
+      const s = fold([
+        created(),
+        subCall(),
+        ['session:permission-denial', 'rid', { toolUseId: 'sub-t1', denial }]
+      ])
+      expect(blocksOf(s, 'permission_denial')).toEqual([denial])
+    })
+
+    it('searches every bucket, not just the first', () => {
+      const s = fold([
+        created(),
+        [
+          'session:subagent-message',
+          'rid',
+          { toolUseId: 'agent-0', message: assistant('sm0', [{ type: 'text', text: 'hi' }]) }
+        ],
+        subCall(),
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }]
+      ])
+      expect(blocksOf(s, 'tool_review', 'agent-0')).toEqual([])
+      expect(blocksOf(s, 'tool_review')).toEqual([review()])
+    })
+
+    it('annotates the LATEST message in the bucket holding the call', () => {
+      const s = fold([
+        created(),
+        subCall('sm1'),
+        subCall('sm2'),
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }]
+      ])
+      const [first, second] = bucket(s)
+      expect(first.content.some((b) => b.type === 'tool_review')).toBe(false)
+      expect(second.content.some((b) => b.type === 'tool_review')).toBe(true)
+    })
+
+    // Top-level is searched first and keeps its behaviour unchanged.
+    it('prefers a top-level message holding the call over a bucket', () => {
+      const s = fold([
+        created(),
+        subCall(),
+        [
+          'session:message',
+          'rid',
+          assistant('m1', [
+            { type: 'tool_use', toolUseId: 'sub-t1', toolName: 'Bash', toolInput: {} }
+          ])
+        ],
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }]
+      ])
+      expect(s.sessions['rid'].messages[0].content.filter((b) => b.type === 'tool_review')).toEqual(
+        [review()]
+      )
+      expect(blocksOf(s, 'tool_review')).toEqual([])
+    })
+
+    it('is idempotent by identity inside a bucket too', () => {
+      const s = fold([
+        created(),
+        subCall(),
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }],
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }],
+        ['session:permission-denial', 'rid', { toolUseId: 'sub-t1', denial }],
+        ['session:permission-denial', 'rid', { toolUseId: 'sub-t1', denial }]
+      ])
+      expect(blocksOf(s, 'tool_review')).toHaveLength(1)
+      expect(blocksOf(s, 'permission_denial')).toHaveLength(1)
+    })
+
+    it('is dropped when no bucket holds the call either', () => {
+      const s = fold([
+        created(),
+        subCall('sm1', 'other-call'),
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }]
+      ])
+      expect(blocksOf(s, 'tool_review')).toEqual([])
+      expect(s.sessions['rid'].messages).toEqual([])
+    })
+
+    /**
+     * The subagent message is upserted again after the decision lands (a later
+     * snapshot of the same message). The decision must survive it the way the
+     * call's `tool_result` does: `mergeContentBlocks` carries all three as
+     * auxiliary blocks, on every path that re-sends a subagent message.
+     */
+    it.each([
+      ['session:subagent-message', subCall()],
+      [
+        'session:subagent-message-batch',
+        [
+          'session:subagent-message-batch',
+          'rid',
+          {
+            toolUseId: 'agent-1',
+            messages: [
+              assistant('sm1', [
+                { type: 'tool_use', toolUseId: 'sub-t1', toolName: 'Bash', toolInput: {} }
+              ])
+            ]
+          }
+        ] as [string, ...unknown[]]
+      ],
+      [
+        'session:item-seal (untargeted, subagent owner)',
+        [
+          'session:item-seal',
+          'rid',
+          {
+            ownerToolUseId: 'agent-1',
+            message: assistant('sm1', [
+              { type: 'tool_use', toolUseId: 'sub-t1', toolName: 'Bash', toolInput: {} }
+            ])
+          }
+        ] as [string, ...unknown[]]
+      ]
+    ])('survives a re-send of its host message via %s, as the tool_result does', (_, resend) => {
+      const s = fold([
+        created(),
+        subCall(),
+        ['session:tool-review', 'rid', { toolUseId: 'sub-t1', review: review() }],
+        ['session:permission-denial', 'rid', { toolUseId: 'sub-t1', denial }],
+        [
+          'session:subagent-tool-result',
+          'rid',
+          { toolUseId: 'agent-1', toolResultToolUseId: 'sub-t1', result: 'ok', isError: false }
+        ],
+        resend
+      ])
+      expect(bucket(s)).toHaveLength(1)
+      expect(blocksOf(s, 'tool_result')).toHaveLength(1)
+      expect(blocksOf(s, 'tool_review')).toEqual([review()])
+      expect(blocksOf(s, 'permission_denial')).toEqual([denial])
+    })
+  })
+
+  /**
+   * A tool call cut off mid-stream (an output-limit cut, an interrupt): its
+   * scaffold was published, the final seal's merge kept it, and it will never
+   * run. The retraction removes it and anything keyed to it — and nothing else.
+   */
+  describe('session:tool-uses-retracted', () => {
+    const cut = { type: 'tool_use' as const, toolUseId: 't-cut', toolName: 'Write', toolInput: {} }
+    const kept = { type: 'tool_use' as const, toolUseId: 't-ok', toolName: 'Read', toolInput: {} }
+    const aux: ChatMessage['content'] = [
+      { type: 'tool_result', toolUseId: 't-cut', toolResult: 'x' },
+      {
+        type: 'tool_review',
+        toolUseId: 't-cut',
+        reviewId: 'rv',
+        reviewer: 'auto-mode',
+        decision: 'approved'
+      },
+      { type: 'permission_denial', toolUseId: 't-cut', denialId: 'dn', source: 'rule' },
+      { type: 'tool_result', toolUseId: 't-ok', toolResult: 'fine' }
+    ]
+    const retracted = (owner?: string): [string, ...unknown[]] => [
+      'session:tool-uses-retracted',
+      'rid',
+      { messageId: 'm1', toolUseIds: ['t-cut'], ...(owner ? { ownerToolUseId: owner } : {}) }
+    ]
+
+    it('removes the call and its keyed blocks from the root transcript', () => {
+      const s = fold([
+        created(),
+        [
+          'session:message',
+          'rid',
+          assistant('m1', [{ type: 'thinking', text: 'hm' }, kept, cut, ...aux])
+        ],
+        retracted()
+      ])
+      expect(s.sessions['rid'].messages[0].content).toEqual([
+        { type: 'thinking', text: 'hm' },
+        kept,
+        { type: 'tool_result', toolUseId: 't-ok', toolResult: 'fine' }
+      ])
+    })
+
+    it('removes it from the owner bucket, leaving the root alone', () => {
+      const s = fold([
+        created(),
+        ['session:message', 'rid', assistant('m1', [cut])],
+        [
+          'session:subagent-message',
+          'rid',
+          { toolUseId: 'agent-1', message: assistant('m1', [{ type: 'text', text: 'a' }, cut]) }
+        ],
+        retracted('agent-1')
+      ])
+      expect(s.sessions['rid'].subagentMessages['agent-1'][0].content).toEqual([
+        { type: 'text', text: 'a' }
+      ])
+      expect(s.sessions['rid'].messages[0].content).toEqual([cut])
+    })
+
+    it('drops a message the retraction leaves empty', () => {
+      const s = fold([
+        created(),
+        ['session:message', 'rid', assistant('m0', [{ type: 'text', text: 'before' }])],
+        ['session:message', 'rid', assistant('m1', [cut])],
+        [
+          'session:subagent-message',
+          'rid',
+          { toolUseId: 'agent-1', message: assistant('m1', [cut, aux[0]]) }
+        ],
+        retracted(),
+        retracted('agent-1')
+      ])
+      expect(s.sessions['rid'].messages.map((m) => m.id)).toEqual(['m0'])
+      expect(s.sessions['rid'].subagentMessages['agent-1']).toEqual([])
+    })
+
+    it('is an identity-stable no-op on replay, and for an unknown message or owner', () => {
+      const once = fold([
+        created(),
+        ['session:message', 'rid', assistant('m1', [kept, cut])],
+        retracted()
+      ])
+      expect(
+        applyEvent(once, {
+          channel: 'session:tool-uses-retracted',
+          args: retracted().slice(1),
+          seq: 9
+        })
+      ).toBe(once)
+      expect(
+        applyEvent(once, {
+          channel: 'session:tool-uses-retracted',
+          args: ['rid', { messageId: 'nope', toolUseIds: ['t-ok'] }],
+          seq: 9
+        })
+      ).toBe(once)
+      expect(
+        applyEvent(once, {
+          channel: 'session:tool-uses-retracted',
+          args: retracted('ghost').slice(1),
+          seq: 9
+        })
+      ).toBe(once)
+    })
+
+    it('retires an item stream at or after the removed slot, keeping earlier ones', () => {
+      const text = (t: string) => ({ type: 'text' as const, text: t })
+      const open = (blockIndex: number): [string, ...unknown[]] => [
+        'session:item-open',
+        'rid',
+        {
+          target: { messageId: 'm1', blockIndex, kind: 'text' },
+          message: assistant('m1', [text('a'), cut, text('b')])
+        }
+      ]
+      const s = fold([created(), open(0), open(2), retracted()])
+      expect(Object.values(s.sessions['rid'].itemStreams).map((i) => i.target.blockIndex)).toEqual([
+        0
+      ])
+      expect(s.sessions['rid'].messages[0].content).toEqual([text('a'), text('b')])
     })
   })
 
@@ -1177,8 +1638,8 @@ describe('snapshot restore — fromSnapshot (phase 4b)', () => {
       ['config:settings-changed', { theme: 'monokai' }]
     ])
     const restored = fromSnapshot(toSnapshot(live, 42))
-    // `seeded` is core-internal and not on the wire — a restored session is
-    // complete by definition. Everything else must match exactly.
+    // `seeded` is bookkeeping the comparison ignores (a live session here is
+    // seeded, so it restores as such). Everything else must match exactly.
     const strip = (s: CanonicalState): unknown => ({
       ...s,
       sessions: Object.fromEntries(
@@ -1301,6 +1762,21 @@ describe('reducer — subagents', () => {
       ]
     ])
     expect(s.sessions['rid'].subagentMessages['task-1'].map((m) => m.id)).toEqual(['s1'])
+  })
+
+  it("a task start carries its run's clock; a re-reported start keeps it, a resume restarts it", () => {
+    const start = (runIndex: number, startedAt: number): [string, string, unknown] => [
+      'session:task-started',
+      'rid',
+      { toolUseId: 't1', taskId: 'a', taskType: 'local_agent', runIndex, startedAt }
+    ]
+    const clock = (events: Array<[string, string, unknown]>): number | undefined =>
+      fold([created(), ...events]).sessions['rid'].activeTasks['t1']?.startedAt
+    expect(clock([start(1, 1000)])).toBe(1000)
+    // The same run re-reported (a replayed task_started): its clock does not reset.
+    expect(clock([start(1, 1000), start(1, 9000)])).toBe(1000)
+    // A resume is a new run with its own start.
+    expect(clock([start(1, 1000), start(2, 9000)])).toBe(9000)
   })
 
   it('a task notification drops the task from activeTasks', () => {
@@ -1426,6 +1902,89 @@ describe('reducer — subagents', () => {
     ])
     expect(s.sessions['rid'].activeTasks).toEqual({
       t1: { taskId: 'a', taskType: 'local_agent', runIndex: 2 }
+    })
+  })
+
+  it('records whether a task runs in the foreground, and re-arms it as backgrounded on the flip', () => {
+    const foreground = fold([
+      created(),
+      [
+        'session:task-started',
+        'rid',
+        {
+          toolUseId: 't1',
+          taskId: 'b1',
+          taskType: 'local_bash',
+          runIndex: 1,
+          isBackgrounded: false
+        }
+      ]
+    ])
+    expect(foreground.sessions['rid'].activeTasks).toEqual({
+      t1: { taskId: 'b1', taskType: 'local_bash', runIndex: 1, isBackgrounded: false }
+    })
+
+    // "Send to background": ClaudeSession re-sends the start for the same run.
+    const flipped = applyEvent(foreground, {
+      channel: 'session:task-started',
+      args: [
+        'rid',
+        { toolUseId: 't1', taskId: 'b1', taskType: 'local_bash', runIndex: 1, isBackgrounded: true }
+      ],
+      seq: 3
+    })
+    expect(flipped.sessions['rid'].activeTasks).toEqual({
+      t1: { taskId: 'b1', taskType: 'local_bash', runIndex: 1, isBackgrounded: true }
+    })
+
+    // A start that does not say (another engine, a task type without the notion) records nothing.
+    const silent = fold([
+      created(),
+      ['session:task-started', 'rid', { toolUseId: 't2', taskId: 'c', taskType: 'local_agent' }]
+    ])
+    expect(silent.sessions['rid'].activeTasks.t2).not.toHaveProperty('isBackgrounded')
+  })
+
+  it("keeps the run's clock across the background flip", () => {
+    const start = (isBackgrounded: boolean, startedAt: number): [string, string, unknown] => [
+      'session:task-started',
+      'rid',
+      {
+        toolUseId: 't1',
+        taskId: 'b1',
+        taskType: 'local_bash',
+        runIndex: 1,
+        isBackgrounded,
+        startedAt
+      }
+    ]
+    const s = fold([created(), start(false, 1000), start(true, 9000)])
+    expect(s.sessions['rid'].activeTasks.t1).toEqual({
+      taskId: 'b1',
+      taskType: 'local_bash',
+      runIndex: 1,
+      isBackgrounded: true,
+      startedAt: 1000
+    })
+  })
+
+  it('carries isBackgrounded through a snapshot round-trip', () => {
+    const s = fold([
+      created(),
+      [
+        'session:task-started',
+        'rid',
+        {
+          toolUseId: 't1',
+          taskId: 'b1',
+          taskType: 'local_bash',
+          runIndex: 1,
+          isBackgrounded: false
+        }
+      ]
+    ])
+    expect(fromSnapshot(toSnapshot(s, 1)).sessions['rid'].activeTasks).toEqual({
+      t1: { taskId: 'b1', taskType: 'local_bash', runIndex: 1, isBackgrounded: false }
     })
   })
 
@@ -1558,7 +2117,7 @@ describe('session:auth-required — one event, on the wire (ADR-068 §4, slice 3
     // The two component-side copies of this walk disagreed on exactly this —
     // `AuthRequiredRow` took the FIRST text block, `AuthErrorBlock` joined all of
     // them — so the retry the user got depended on which surface they clicked. A
-    // replayed history message (opencode's `convertStoredMessage`) is where a
+    // replayed history message (an engine's cold-history converter) is where a
     // multi-block user turn actually comes from.
     const owed = fold([
       created(),

@@ -47,6 +47,7 @@ import {
   resolvePiForkAnchor
 } from '../../../core/services/pi-session-list'
 import { PI_FORK_CLONE_LATEST_SENTINEL } from '../../../core/services/fork-anchor'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 let testHome: string
 
@@ -375,6 +376,74 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
     ])
   })
 
+  it('replays a bridged MCP call (ADR-096) as the same tool_use/tool_result pair the live mapper sends', async () => {
+    writeSessionFile('--proj-mcp--', 'x_sess-mcp.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-mcp',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/mcp'
+      },
+      userEntry('u1', null, 'echo'),
+      {
+        type: 'message',
+        id: 'a1',
+        parentId: 'u1',
+        timestamp: '2024-01-01T00:00:01.000Z',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'toolCall',
+              id: 'call_m',
+              name: 'mcp__fixture__echo',
+              arguments: { text: 'hi' }
+            }
+          ],
+          api: 'a',
+          provider: 'p',
+          model: 'm',
+          usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+          },
+          stopReason: 'toolUse',
+          timestamp: 2
+        }
+      },
+      {
+        type: 'message',
+        id: 'tr1',
+        parentId: 'a1',
+        timestamp: '2024-01-01T00:00:02.000Z',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call_m',
+          toolName: 'mcp__fixture__echo',
+          content: [{ type: 'text', text: 'tag:hi' }],
+          // pi's MCP tool details (extensions/mcp/tools.ts McpToolDetails).
+          details: { server: 'fixture', tool: 'echo' },
+          isError: false,
+          timestamp: 3
+        }
+      }
+    ])
+    const { messages } = await loadPiSessionHistory('sess-mcp')
+    expect(messages.find((m) => m.id === 'a1')!.content).toEqual([
+      {
+        type: 'tool_use',
+        toolUseId: 'call_m',
+        toolName: 'mcp__fixture__echo',
+        toolInput: { text: 'hi' }
+      },
+      { type: 'tool_result', toolUseId: 'call_m', toolResult: 'tag:hi', isError: false }
+    ])
+  })
+
   it("carries a toolResult's image content onto the folded tool_result block", async () => {
     // pi's read tool on an image returns `{type:'image', data, mimeType}` content
     // blocks alongside (or instead of) text; the replay used to keep only text.
@@ -441,7 +510,7 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
       toolResult: 'Image read',
       isError: false,
       // image/svg+xml is outside the modelled media types — dropped, not widened.
-      images: [{ mediaType: 'image/png', base64Data: 'PIIMG' }]
+      images: [{ mediaType: 'image/png', ...blobRefOf('PIIMG') }]
     })
   })
 
@@ -833,6 +902,70 @@ describe('loadPiSessionHistory — custom_message entries', () => {
     })
   })
 
+  it('M6: our agent message loads as a system context_note titled from details; a look-alike user text stays a user message', async () => {
+    const notification = '<task-notification>\n<status>completed</status>\n</task-notification>'
+    writeSessionFile('--proj-ours--', 'x_sess-ours.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-ours',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/ours'
+      },
+      userEntry('u1', null, notification),
+      // The parent's own link to the agent the notification is about (review R3).
+      ...agentCall('call-1', AGENT_A, 'u1', 1),
+      {
+        type: 'custom_message',
+        id: 'cm-ours',
+        parentId: 'result-entry-1',
+        timestamp: '2024-01-01T00:00:02.000Z',
+        customType: 'claudeui-agent-message',
+        content: [{ type: 'text', text: notification }],
+        display: true,
+        details: {
+          v: 1,
+          kind: 'task-notification',
+          deliveryId: 'd-1',
+          title: 'Agent "scout" completed',
+          agentId: AGENT_A,
+          toolUseId: 'call-1',
+          status: 'completed',
+          runIndex: 1
+        }
+      }
+    ])
+    const { messages, taskNotifications } = await loadPiSessionHistory('sess-ours')
+    // The terminal event comes from details alone; the look-alike user text adds none.
+    expect(taskNotifications).toEqual([
+      {
+        taskId: AGENT_A,
+        toolUseId: 'call-1',
+        status: 'completed',
+        outputFile: '',
+        summary: '',
+        runIndex: 1
+      }
+    ])
+    expect(messages.find((m) => m.id === 'cm-ours')).toEqual({
+      id: 'cm-ours',
+      role: 'system',
+      content: [
+        {
+          type: 'context_note',
+          title: 'Agent "scout" completed',
+          fragments: [{ text: notification, label: 'from an agent, not from you' }]
+        }
+      ],
+      timestamp: Date.parse('2024-01-01T00:00:02.000Z')
+    })
+    // The "never from text" rule: a user turn whose text LOOKS like one is the user's.
+    expect(messages.find((m) => m.id === 'u1')).toMatchObject({
+      role: 'user',
+      content: [{ type: 'text', text: notification }]
+    })
+  })
+
   it('skips a hidden custom_message and one with no text at all', async () => {
     writeSessionFile('--proj-custom3--', 'x_sess-custom3.jsonl', [
       {
@@ -937,5 +1070,322 @@ describe('loadPiSessionHistory — lastModel', () => {
 
     const { lastModel } = await loadPiSessionHistory('sess-lm2')
     expect(lastModel).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Host-run subagents (ADR-089): history link + deletion. Children live under
+// <home>/.claude/ui/pi-subagents/<agentId>/ (the homedir redirect above puts
+// that inside the fixture tree too).
+// ---------------------------------------------------------------------------
+
+const AGENT_A = '11111111-1111-4111-8111-111111111111'
+const AGENT_B = '22222222-2222-4222-8222-222222222222'
+const AGENT_MISSING = '33333333-3333-4333-8333-333333333333'
+
+function subagentsRoot(): string {
+  return join(testHome, '.claude', 'ui', 'pi-subagents')
+}
+
+const header = (id: string) => ({
+  type: 'session',
+  version: 3,
+  id,
+  timestamp: '2024-01-01T00:00:00.000Z',
+  cwd: '/proj/sub'
+})
+
+const assistantText = (id: string, parentId: string | null, text: string) => ({
+  type: 'message',
+  id,
+  parentId,
+  timestamp: '2024-01-01T00:00:02.000Z',
+  message: {
+    role: 'assistant',
+    content: [{ type: 'text', text }],
+    api: 'a',
+    provider: 'p',
+    model: 'm',
+    usage: {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+    },
+    stopReason: 'stop',
+    timestamp: 2
+  }
+})
+
+/** An `agent` call + its toolResult carrying the cuiAgent history link. */
+const agentCall = (callId: string, agentId: string, parentId: string | null, n: number) => [
+  {
+    type: 'message',
+    id: `call-entry-${n}`,
+    parentId,
+    timestamp: '2024-01-01T00:00:03.000Z',
+    message: {
+      role: 'assistant',
+      content: [
+        {
+          type: 'toolCall',
+          id: callId,
+          name: 'agent',
+          arguments: { description: 'd', prompt: 'p' }
+        }
+      ],
+      api: 'a',
+      provider: 'p',
+      model: 'm',
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+      },
+      stopReason: 'toolUse',
+      timestamp: 3
+    }
+  },
+  {
+    type: 'message',
+    id: `result-entry-${n}`,
+    parentId: `call-entry-${n}`,
+    timestamp: '2024-01-01T00:00:04.000Z',
+    message: {
+      role: 'toolResult',
+      toolCallId: callId,
+      toolName: 'agent',
+      content: [{ type: 'text', text: 'report' }],
+      details: { cuiAgent: { v: 1, agentId, subagentType: 'Explore', status: 'completed' } },
+      isError: false,
+      timestamp: 4
+    }
+  }
+]
+
+function writeChild(agentId: string, lines: unknown[]): string {
+  const dir = join(subagentsRoot(), agentId)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'system-prompt.md'), 'prompt', 'utf-8')
+  const file = join(dir, `2024-01-01T00-00-00_${agentId}.jsonl`)
+  writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n', 'utf-8')
+  return file
+}
+
+describe('loadPiSessionHistory — host-run subagents (ADR-089)', () => {
+  it('H1: returns subagentMessages by the parent call id, a nested grandchild included; tolerates a missing child and rejects a traversal id', async () => {
+    writeSessionFile('--proj-sub--', '2024-01-01T00-00-00_parent-1.jsonl', [
+      header('parent-1'),
+      {
+        type: 'message',
+        id: 'u1',
+        parentId: null,
+        timestamp: '2024-01-01T00:00:01.000Z',
+        message: { role: 'user', content: 'go', timestamp: 1 }
+      },
+      ...agentCall('call-A', AGENT_A, 'u1', 1),
+      ...agentCall('call-missing', AGENT_MISSING, 'result-entry-1', 2),
+      ...agentCall('call-evil', '../x', 'result-entry-2', 3)
+    ])
+    writeChild(AGENT_A, [
+      header(AGENT_A),
+      assistantText('a1', null, 'child A here'),
+      ...agentCall('call-B', AGENT_B, 'a1', 9)
+    ])
+    writeChild(AGENT_B, [header(AGENT_B), assistantText('b1', null, 'grandchild B here')])
+    // A decoy file outside the root that '../x' would resolve towards.
+    mkdirSync(join(testHome, '.claude', 'ui', 'x'), { recursive: true })
+    writeFileSync(
+      join(testHome, '.claude', 'ui', 'x', '2024-01-01T00-00-00_x.jsonl'),
+      JSON.stringify(header('x')) + '\n',
+      'utf-8'
+    )
+
+    const history = await loadPiSessionHistory('parent-1')
+    expect(Object.keys(history.subagentMessages ?? {}).sort()).toEqual(['call-A', 'call-B'])
+    expect(history.subagentMessages!['call-A'][0]).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'child A here' }]
+    })
+    expect(history.subagentMessages!['call-B'][0]).toMatchObject({
+      content: [{ type: 'text', text: 'grandchild B here' }]
+    })
+    // The parent's own transcript is unchanged by the link.
+    expect(history.messages.some((m) => m.role === 'user')).toBe(true)
+  })
+
+  it('H1 (ADR-089 S3): taskNotifications from the parent file AND a child file (details only); a background launch with none reads unfinished', async () => {
+    const note = (id: string, parentId: string, agentId: string, toolUseId: string) => ({
+      type: 'custom_message',
+      id,
+      parentId,
+      timestamp: '2024-01-01T00:00:05.000Z',
+      customType: 'claudeui-agent-message',
+      content: [{ type: 'text', text: '<task-notification>…</task-notification>' }],
+      display: true,
+      details: {
+        v: 1,
+        kind: 'task-notification',
+        deliveryId: `d-${id}`,
+        title: 't',
+        agentId,
+        toolUseId,
+        status: 'completed',
+        summary: `Agent "${toolUseId}" completed`,
+        usage: { totalTokens: 7, toolUses: 1, durationMs: 9 },
+        runIndex: 1
+      }
+    })
+    const [bgCall, bgResult] = agentCall('call-C', AGENT_MISSING, 'n1', 5)
+    const bgLaunch = {
+      ...bgResult,
+      message: {
+        ...bgResult.message,
+        details: {
+          cuiAgent: { v: 1, agentId: AGENT_MISSING, background: true, status: 'async_launched' }
+        }
+      }
+    }
+    writeSessionFile('--proj-notes--', '2024-01-01T00-00-00_parent-n.jsonl', [
+      header('parent-n'),
+      {
+        type: 'message',
+        id: 'u1',
+        parentId: null,
+        timestamp: '2024-01-01T00:00:01.000Z',
+        message: { role: 'user', content: 'go', timestamp: 1 }
+      },
+      ...agentCall('call-A', AGENT_A, 'u1', 1),
+      note('n1', 'result-entry-1', AGENT_A, 'call-A'),
+      bgCall,
+      bgLaunch
+    ])
+    writeChild(AGENT_A, [
+      header(AGENT_A),
+      assistantText('a1', null, 'child A here'),
+      ...agentCall('call-B', AGENT_B, 'a1', 9),
+      note('na', 'result-entry-9', AGENT_B, 'call-B')
+    ])
+    writeChild(AGENT_B, [header(AGENT_B), assistantText('b1', null, 'grandchild B here')])
+
+    const { taskNotifications } = await loadPiSessionHistory('parent-n')
+    expect(taskNotifications).toEqual([
+      {
+        taskId: AGENT_A,
+        toolUseId: 'call-A',
+        status: 'completed',
+        outputFile: '',
+        summary: 'Agent "call-A" completed',
+        usage: { totalTokens: 7, toolUses: 1, durationMs: 9 },
+        runIndex: 1
+      },
+      {
+        taskId: AGENT_B,
+        toolUseId: 'call-B',
+        status: 'completed',
+        outputFile: '',
+        summary: 'Agent "call-B" completed',
+        usage: { totalTokens: 7, toolUses: 1, durationMs: 9 },
+        runIndex: 1
+      },
+      {
+        taskId: AGENT_MISSING,
+        toolUseId: 'call-C',
+        status: 'unfinished',
+        outputFile: '',
+        summary: 'The transcript ends before this agent reported back.',
+        runIndex: 1
+      }
+    ])
+  })
+
+  it("R3: a child file's notifications count only for agents THAT child launched; a parent notification must match its link", async () => {
+    const forged = (id: string, agentId: string, toolUseId: string, status: string) => ({
+      type: 'custom_message',
+      id,
+      parentId: null,
+      timestamp: '2024-01-01T00:00:05.000Z',
+      customType: 'claudeui-agent-message',
+      content: [{ type: 'text', text: 'x' }],
+      display: true,
+      details: {
+        v: 1,
+        kind: 'task-notification',
+        deliveryId: `d-${id}`,
+        title: 't',
+        agentId,
+        toolUseId,
+        status,
+        runIndex: 1
+      }
+    })
+    writeSessionFile('--proj-forge--', '2024-01-01T00-00-00_parent-f.jsonl', [
+      header('parent-f'),
+      ...agentCall('call-A', AGENT_A, null, 1),
+      ...agentCall('call-M', AGENT_MISSING, 'result-entry-1', 2),
+      // Parent-file claim whose agent id does not match the call's link.
+      forged('p-bad', AGENT_B, 'call-M', 'completed')
+    ])
+    writeChild(AGENT_A, [
+      header(AGENT_A),
+      // Child A claims its own and its sibling's terminal state: neither is A's child.
+      forged('a-self', AGENT_A, 'call-A', 'failed'),
+      forged('a-sib', AGENT_MISSING, 'call-M', 'stopped')
+    ])
+    const { taskNotifications } = await loadPiSessionHistory('parent-f')
+    expect(taskNotifications ?? []).toEqual([])
+  })
+
+  it('omits subagentMessages for a session that ran no agents', async () => {
+    writeSessionFile('--proj-plain--', '2024-01-01T00-00-00_plain-1.jsonl', [
+      header('plain-1'),
+      assistantText('e1', null, 'hi')
+    ])
+    expect((await loadPiSessionHistory('plain-1')).subagentMessages).toBeUndefined()
+    expect((await loadPiSessionHistory('plain-1')).taskNotifications).toBeUndefined()
+  })
+})
+
+describe('deletePiSession — host-run subagents (ADR-089)', () => {
+  it('H3: removes an unreferenced child (and its grandchild) by name, and keeps a child a second session file still references', async () => {
+    const parentFile = writeSessionFile('--proj-d--', '2024-01-01T00-00-00_parent-d.jsonl', [
+      header('parent-d'),
+      ...agentCall('call-A', AGENT_A, null, 1),
+      ...agentCall('call-M', AGENT_MISSING, 'result-entry-1', 2)
+    ])
+    writeChild(AGENT_A, [header(AGENT_A), ...agentCall('call-B', AGENT_B, null, 9)])
+    writeChild(AGENT_B, [header(AGENT_B), assistantText('b1', null, 'gc')])
+    writeChild(AGENT_MISSING, [header(AGENT_MISSING), assistantText('m1', null, 'shared')])
+    // A fork of the parent that still links AGENT_MISSING.
+    writeSessionFile('--proj-d--', '2024-01-01T00-00-01_fork-d.jsonl', [
+      header('fork-d'),
+      ...agentCall('call-M', AGENT_MISSING, null, 2)
+    ])
+
+    await deletePiSession('parent-d')
+
+    expect(existsSync(parentFile)).toBe(false)
+    expect(existsSync(join(subagentsRoot(), AGENT_A))).toBe(false)
+    expect(existsSync(join(subagentsRoot(), AGENT_B))).toBe(false)
+    expect(readdirSync(join(subagentsRoot(), AGENT_MISSING)).sort()).toEqual([
+      `2024-01-01T00-00-00_${AGENT_MISSING}.jsonl`,
+      'system-prompt.md'
+    ])
+  })
+
+  it('never removes a file it did not create inside a child dir (by-name unlink, non-recursive rmdir)', async () => {
+    writeSessionFile('--proj-e--', '2024-01-01T00-00-00_parent-e.jsonl', [
+      header('parent-e'),
+      ...agentCall('call-A', AGENT_A, null, 1)
+    ])
+    writeChild(AGENT_A, [header(AGENT_A), assistantText('a1', null, 'x')])
+    writeFileSync(join(subagentsRoot(), AGENT_A, 'notes.txt'), 'user file', 'utf-8')
+
+    await deletePiSession('parent-e')
+
+    expect(readdirSync(join(subagentsRoot(), AGENT_A))).toEqual(['notes.txt'])
   })
 })

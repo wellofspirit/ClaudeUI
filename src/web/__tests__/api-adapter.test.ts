@@ -20,6 +20,7 @@ type FakeConnection = {
   passkeyAvailable: ReturnType<typeof vi.fn>
   stepUpWithPasskey: ReturnType<typeof vi.fn>
   whenCredentialsChanged: ReturnType<typeof vi.fn>
+  sendVoiceAudio: ReturnType<typeof vi.fn>
   /** Push a server event to the api's listeners. */
   push: (channel: string, ...args: unknown[]) => void
   /** Fire the close-4008 waiter the password-rotation path races against. */
@@ -44,6 +45,7 @@ function makeConnection(): FakeConnection {
     whenCredentialsChanged: vi.fn(
       () => new Promise<void>((resolve) => credentialsChangedWaiters.push(resolve))
     ),
+    sendVoiceAudio: vi.fn(),
     push: (channel, ...args) => sync.receiveEvent({ seq: ++seq, channel, args }),
     closeWithCredentialsChanged: () => {
       for (const resolve of credentialsChangedWaiters.splice(0)) resolve()
@@ -80,6 +82,32 @@ describe('web api-adapter — git live watching', () => {
   // (`shared/sync/client-registry` does, for both clients), so asserting it here
   // would only be re-testing `SyncClient.on`. What remains in this file is the
   // INVOKE surface, which 4c did not touch.
+})
+
+describe('web api-adapter — voice transport', () => {
+  // The microphone is the renderer's (lib/voice/voice-controller.ts); the adapter
+  // is only the transport, and the capture's audio rides the lane frame rather
+  // than an invoke.
+  it('voiceStart binds the capture with voice:start', async () => {
+    await api.voiceStart('rid-1', 'en')
+    expect(connection.invoke).toHaveBeenCalledWith('voice:start', 'rid-1', 'en')
+  })
+
+  it('voiceAudio sends a voice-audio lane frame, never an invoke', () => {
+    api.voiceAudio('rid-1', 'AAEC')
+    expect(connection.sendVoiceAudio).toHaveBeenCalledWith('AAEC')
+    expect(connection.invoke).not.toHaveBeenCalled()
+  })
+
+  it('voiceStop ends the capture with voice:stop', async () => {
+    await api.voiceStop('rid-1')
+    expect(connection.invoke).toHaveBeenCalledWith('voice:stop')
+  })
+
+  it('a refused voice:start rejects, so the controller can release the microphone', async () => {
+    connection.invoke.mockRejectedValueOnce(new Error('Provider does not support voice'))
+    await expect(api.voiceStart('rid-1', 'en')).rejects.toThrow(/does not support voice/)
+  })
 })
 
 describe('web api-adapter — passkeys (ADR-052)', () => {
@@ -379,13 +407,18 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
   {
     method: 'saveOpencodeSettings',
     channel: 'config:save-opencode-settings',
-    args: [{ theme: 'dark' }]
+    args: [{ theme: 'dark' }, { theme: 'light' }]
   },
   { method: 'readOpencodeNativeRaw', channel: 'config:read-opencode-native-raw', args: [] },
   {
     method: 'patchOpencodeNative',
     channel: 'config:patch-opencode-native',
     args: [[{ path: ['model'], value: 'anthropic/x' }]]
+  },
+  {
+    method: 'setOpencodeToolDisabled',
+    channel: 'config:set-opencode-tool-disabled',
+    args: ['shell', true]
   },
   // pi's raw trio — the in-file precedent this pass extended to its neighbours.
   { method: 'readPiNativeRaw', channel: 'config:read-pi-native-raw', args: [] },
@@ -408,6 +441,8 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     channel: 'models:set-provider-allowlist',
     args: ['pi', 'openrouter', ['z-ai/glm-5.3']]
   },
+  // ADR-094: the agent types an engine can spawn (read-only).
+  { method: 'listAgentTypes', channel: 'config:list-agent-types', args: ['claude', '/repo/app'] },
   // opencode agent CRUD — five `config` verbs plus one `chat` verb.
   { method: 'listOpencodeAgents', channel: 'opencode-agents:list', args: ['/repo/app'] },
   {
@@ -543,6 +578,11 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     channel: 'shared-provider:save',
     args: [{ id: 'local', name: 'Local', kind: 'custom', models: [{ id: 'local-1' }] }]
   },
+  {
+    method: 'probeSharedEndpoint',
+    channel: 'shared-provider:probe',
+    args: [{ baseUrl: 'http://127.0.0.1:8000/v1', providerId: 'local' }]
+  },
   { method: 'removeSharedProvider', channel: 'shared-provider:remove', args: ['local'] },
   {
     method: 'setSharedProviderRoute',
@@ -553,6 +593,11 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     method: 'setSharedProviderApiKey',
     channel: 'shared-provider:set-key',
     args: ['local', 'sk-local']
+  },
+  {
+    method: 'setSharedProviderApiKey',
+    channel: 'shared-provider:set-key',
+    args: ['openrouter', 'sk-or', ['pi']]
   },
   {
     method: 'adoptSharedProviderNativeKey',
@@ -567,9 +612,19 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
   {
     method: 'setSharedProviderDisabled',
     channel: 'shared-provider:set-disabled',
-    args: ['openrouter-work', false, true]
+    args: ['openrouter-work', false, ['opencode']]
   },
   { method: 'syncSharedProvider', channel: 'shared-provider:sync', args: ['local'] },
+  {
+    method: 'useSharedProviderStoredKey',
+    channel: 'shared-provider:use-stored-key',
+    args: ['openrouter', 'pi']
+  },
+  {
+    method: 'getSharedProviderOwnKeyHolders',
+    channel: 'shared-provider:own-key-holders',
+    args: ['openrouter']
+  },
   { method: 'disconnectSharedProvider', channel: 'shared-provider:disconnect', args: ['local'] },
   {
     method: 'setSharedProviderDefaultModel',
@@ -709,8 +764,6 @@ const DESKTOP_ANCHOR_ONLY =
   'no remote registration: a remote client must never reconfigure the transport it rides (ADR-042/054)'
 const QUIT_HANDSHAKE =
   'no remote registration — the quit handshake is the host shell talking to itself'
-const VOICE_SERVER_VERBS =
-  'no remote registration; starting cli.js’s transcription server is `voice:start`’s business'
 const NO_MAIN_LOG_FILE =
   'a `log:*` send, not an invoke — no main-process log file here, so both relays hit the console'
 
@@ -741,8 +794,6 @@ const NOT_ON_THE_WIRE: Readonly<Record<string, string>> = {
   clearRemotePassword: DESKTOP_ANCHOR_ONLY,
   detectTailscale: DESKTOP_ANCHOR_ONLY,
   forceReserve: DESKTOP_ANCHOR_ONLY,
-  voiceStartServer: VOICE_SERVER_VERBS,
-  voiceStopServer: VOICE_SERVER_VERBS,
   logError: NO_MAIN_LOG_FILE,
   logRelay: NO_MAIN_LOG_FILE,
   openLogViewer: NO_REMOTE_CHANNEL,

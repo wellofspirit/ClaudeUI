@@ -12,7 +12,7 @@ files:
   # electron-builder does NOT read .gitignore — without these negations the
   # asar packs the whole working tree: developer-local .claude/ (settings,
   # logs, saved mockups), .cache/ (session screenshots, restored CLI
-  # binaries), the ~2 GB vendor/ tree (already shipped via extraResources),
+  # binaries), the ~2 GB vendor/ tree (Claude Code ships via extraResources),
   # docs, patches, scripts, and stray logs. That both doubles the shipped
   # size and leaks local session data into any built distributable.
   - '!.cache/**'
@@ -25,13 +25,18 @@ files:
   - '!.github/**'
   - '!**/*.log'
   - '!*.md'
-  # out/web is shipped as extraResources (resources/web) and prod resolves it
-  # there (remote-server getWebClientDir) — the asar copy is never read.
+  # The UI is one build in out/renderer now. This keeps a stale pre-one-bundle
+  # out/web left in an old checkout out of the asar.
   - '!out/web/**'
 extraResources:
-  # Ship the rebundled Bun binary + version metadata + native addons that
-  # the Electron main process loads directly (audio-capture.node etc. — see
-  # src/main/services/voice-capture.ts). The source cli.js also present in
+  # Claude Code is the one bundled harness (ADR-082 §8): opencode, pi and Codex
+  # are downloaded into ClaudeUI's managed store (~/.claude/ui/harnesses), never
+  # packaged. A test (src/core/harness/__tests__/packaging.test.ts) holds this.
+  #
+  # Ship the rebundled Bun binary + version metadata. Nothing in the app loads
+  # a loose native addon any more: voice capture runs in the renderer
+  # (ADR-098), and cli.js loads its own addons (audio-capture, computer-use-*)
+  # from inside the Bun binary. The source cli.js also present in
   # vendor/claude-cli/ is a debug artifact (already baked into bun-claude.exe
   # by scripts/rebundle-cli.mjs), no need to duplicate ~13 MB.
   - from: vendor/claude-cli
@@ -39,35 +44,6 @@ extraResources:
     filter:
       - bun-claude*
       - version.json
-      - vendor/**/*.node
-  - from: vendor/opencode-cli
-    to: opencode-cli
-    filter:
-      - opencode*
-      - version.json
-  # pi standalone build resolves runtime assets (native addons, wasm, themes,
-  # export-html template) relative to the executable — ship the vendored dir
-  # minus docs/examples.
-  - from: vendor/pi-cli
-    to: pi-cli
-    filter:
-      - '**/*'
-      - '!docs/**'
-      - '!examples/**'
-  # Codex resolves `codex-code-mode-host` from the directory of its own
-  # executable, and every catalog model is code-mode-only — so both members ship
-  # together or Codex is unusable. src/core/codex/codex-locate.ts looks for them
-  # in <Resources>/codex-cli, which is what `to:` produces here. LICENSE is the
-  # upstream Apache-2.0 text that ships with the binaries; version.json is the
-  # pinned digest record scripts/ensure-codex.mjs writes.
-  - from: vendor/codex-cli
-    to: codex-cli
-    filter:
-      - codex*
-      - version.json
-      - LICENSE
-  - from: out/web
-    to: web
 asarUnpack:
   - resources/**
   - node_modules/node-pty/**

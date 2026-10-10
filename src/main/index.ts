@@ -7,7 +7,8 @@ import {
   Menu,
   clipboard,
   crashReporter,
-  dialog
+  dialog,
+  powerMonitor
 } from 'electron'
 import { codexHostRegistry } from '../core/codex/CodexHost'
 import { join } from 'path'
@@ -45,6 +46,7 @@ const optimizer = {
 import { bootCore, type CoreBoot } from './boot-core'
 import { setHostWindow, getHostWindow } from '../core/services/host-window'
 import { attachSyncPort } from './services/sync-port'
+import { installDesktopVoiceFeed } from './ipc/voice-feed'
 import { terminalService } from '../core/services/terminal-service'
 import { registerRemoteVersionInfo } from '../core/ipc/remote-handlers'
 import { serviceSession } from '../core/services/service-session'
@@ -409,6 +411,11 @@ function createWindow(): void {
     else logger.info(source, message)
   })
 
+  // Desktop voice: the window captures its own microphone and pushes PCM here;
+  // the feed relays it under this window's owner key and releases the capture
+  // when the webContents goes away.
+  installDesktopVoiceFeed(mainWindow)
+
   // Attach the window to the already-booted core (SyncCore phase 4d).
   //
   // AuthManager.setWindow resets the login-success subscribers per window
@@ -638,14 +645,21 @@ app.whenReady().then(() => {
   })
 
   // ── Version info IPC (for Settings dialog) ─────────────────────────
-  const versionInfo = { appVersion, cliVersion }
+  // The CLI version is read per call, not snapshotted here: the Claude Code
+  // harness can change while the app runs (ADR-082 — a System install, a
+  // selection change), and `getCliVersion()` is a cached resolver read.
+  const versionInfo = (): { appVersion: string; cliVersion: string } => ({
+    appVersion,
+    cliVersion: getCliVersion()
+  })
   // Publish it to core as well (ADR-072 §5): the usage hub sends the app version
   // with each push so the hub's machine list can say which build a device is on,
   // and `app.getVersion()` is reachable from main alone.
   setHostAppVersion(appVersion)
-  ipcMain.handle('app:version-info', () => versionInfo)
-  // Mirror to the remote dispatcher so the web client's Settings dialog can
-  // read the server's build versions.
+  ipcMain.handle('app:version-info', () => versionInfo())
+  // Override the remote `app:version-info` source with the display-form version
+  // (the channel itself is registered by core, so this is order-independent), so
+  // the web client's Settings dialog reads the same build versions as ours.
   registerRemoteVersionInfo(versionInfo)
 
   // ── App menu (About panel + standard shortcuts) ────────────────────
@@ -703,6 +717,12 @@ app.whenReady().then(() => {
   // of it needs a window; `createWindow()` below only attaches to it.
   core = bootCore({ remoteAccessDisabled })
 
+  // System resume / unlock (ADR-097 §5 rule 2): refresh timers may have slept
+  // through their deadline, and opencode's ChatGPT row must have time left
+  // before the next turn. Best-effort; never throws.
+  powerMonitor.on('resume', () => void credentialSync.onSystemResume())
+  powerMonitor.on('unlock-screen', () => void credentialSync.onSystemResume())
+
   // Before-quit: give the renderer (if there is one) a chance to prompt about
   // active worktrees, then tear the services down. Process-lifetime — it moved
   // out of `createWindow` in 4d, because a windowless run still has services to
@@ -745,6 +765,10 @@ app.whenReady().then(() => {
       opencodeServerManager.dispose()
     },
     quit: () => app.quit(),
+    // opencode 2.x shares its credential table with the user's own opencode:
+    // hand the ChatGPT slot back to their credential while a server can still
+    // run (ADR-097 §5). Bounded; a crash skips it and the next start re-asserts.
+    prepareQuit: () => credentialSync.prepareQuit(),
     // The first before-quit pass asks the renderer about active worktrees and waits.
     // Windowless there is nobody to ask — and no UI decision to make — so collapse
     // the wait instead of stalling a headless shutdown for the full fallback.

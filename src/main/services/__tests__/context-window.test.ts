@@ -59,8 +59,11 @@ describe('getContextWindowSize', () => {
       expect(getContextWindowSize('sonnet')).toBe(ONE_M)
     })
 
-    it('haiku and opusplan stay at the 200K default', () => {
-      expect(getContextWindowSize('haiku')).toBe(DEFAULT)
+    it('haiku resolves to claude-haiku-5-5 (native-1M, baked catalog since 2.1.293)', () => {
+      expect(getContextWindowSize('haiku')).toBe(ONE_M)
+    })
+
+    it('opusplan stays at the 200K default', () => {
       expect(getContextWindowSize('opusplan')).toBe(DEFAULT)
     })
   })

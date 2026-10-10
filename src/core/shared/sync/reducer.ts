@@ -27,8 +27,10 @@
  */
 
 import type {
+  AttachmentRef,
   ChatMessage,
   ContentBlock,
+  ImageMediaType,
   SessionStatus,
   PendingApproval,
   TodoItem,
@@ -41,9 +43,10 @@ import type {
   ModelRef,
   WorktreeInfo,
   SlashCommandInfo,
-  ToolReviewBlock
+  ToolReviewBlock,
+  PermissionDenialBlock
 } from '../../../shared/types'
-import { mergeContentBlocks } from '../../../shared/content-blocks'
+import { mergeContentBlocks, withoutToolUses } from '../../../shared/content-blocks'
 import { applyItemLifecycle, mergeItemContent, type ItemStreamTarget } from './item-stream'
 import {
   buildTodosFromMessages,
@@ -52,6 +55,7 @@ import {
   SEND_USER_FILE_TOOL
 } from '../../../shared/derive-session'
 import { channelSpec } from './channels'
+import { engineMeta } from '../../../shared/engine-meta'
 import { emptySession, type CanonicalSessionState, type CanonicalState } from './state'
 
 /** One event as the ring holds it (the frame envelope, minus transport bits). */
@@ -131,30 +135,96 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Append a permission-decision block — a judge's verdict or a non-judge
+ * denial — to the assistant message that holds the `tool_use` it is about.
+ *
+ * Shared by `session:tool-review` and `session:permission-denial` because the
+ * binding rule is ONE rule, not two: search from the END (a repeated identical
+ * call must annotate its latest card, not the first one that ever ran), append
+ * once, and DROP rather than park when no message holds the call. Parking is
+ * the producer's job — CodexSession holds a verdict until its target item
+ * lands — and a reducer-side queue would be a second, divergent copy of that
+ * rule.
+ *
+ * The top-level transcript is searched first; on a miss, every subagent
+ * bucket, because a call made INSIDE a subagent lives in
+ * `subagentMessages[<Agent call id>]` and that is where its card renders
+ * (`SubagentMessages.tsx` already draws both block kinds). Tool-use ids are
+ * unique across the session, so the owning bucket needs no hint from the
+ * producer. The appended block survives a later upsert of the same message
+ * the way a `tool_result` does: `mergeContentBlocks` / `mergeItemContent`
+ * carry both kinds as auxiliary blocks.
+ *
+ * `isDuplicate` is the caller's identity test (`reviewId` / `denialId`), which
+ * is what makes a replayed catch-up a no-op.
+ */
+function attachToToolUse(
+  state: CanonicalState,
+  event: ReducerEvent,
+  toolUseId: string | undefined,
+  block: ToolReviewBlock | PermissionDenialBlock,
+  isDuplicate: (b: ContentBlock) => boolean
+): CanonicalState {
+  const routingId = routingIdOf(event)
+  if (!routingId || !toolUseId) return state
+  const session = state.sessions[routingId]
+  if (!session) return state
+
+  const top = appendToCall(session.messages, toolUseId, block, isDuplicate)
+  if (top === 'duplicate') return state
+  if (top) return withSession(state, routingId, () => ({ messages: top }))
+
+  for (const [owner, bucket] of Object.entries(session.subagentMessages)) {
+    const next = appendToCall(bucket, toolUseId, block, isDuplicate)
+    if (next === 'duplicate') return state
+    if (next) {
+      return withSession(state, routingId, (s) => ({
+        subagentMessages: { ...s.subagentMessages, [owner]: next }
+      }))
+    }
+  }
+  return state
+}
+
+/**
+ * {@link attachToToolUse}'s per-transcript step: the latest assistant message
+ * holding the call gets `block` appended. `'duplicate'` when it already carries
+ * this block, `null` when no message holds the call.
+ */
+function appendToCall(
+  messages: readonly ChatMessage[],
+  toolUseId: string,
+  block: ToolReviewBlock | PermissionDenialBlock,
+  isDuplicate: (b: ContentBlock) => boolean
+): ChatMessage[] | 'duplicate' | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg.role !== 'assistant') continue
+    if (!msg.content.some((b) => b.type === 'tool_use' && b.toolUseId === toolUseId)) continue
+    if (msg.content.some(isDuplicate)) return 'duplicate'
+    const next = [...messages]
+    next[i] = { ...msg, content: [...msg.content, { ...block, toolUseId }] }
+    return next
+  }
+  return null
+}
+
+/**
  * Build the ContentBlock[] for a user message: attachments first, then the text
  * block. Duplicated from the renderer store (which will adopt the reducer in 4c)
  * so both replicas render an attachment-carrying prompt identically.
+ *
+ * The attachments are blob REFS (ADR-087): this branch only ever moves an id
+ * and a size, never bytes, so neither the ring nor the snapshot can carry one.
  */
-function buildUserContentBlocks(
-  text: string,
-  attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-): ContentBlock[] {
+function buildUserContentBlocks(text: string, attachments?: AttachmentRef[]): ContentBlock[] {
   const content: ContentBlock[] = []
   for (const att of attachments ?? []) {
+    const ref = { blobId: att.blobId, bytes: att.bytes, fileName: att.fileName }
     if (att.mediaType === 'application/pdf') {
-      content.push({
-        type: 'document',
-        mediaType: 'application/pdf',
-        base64Data: att.base64Data,
-        fileName: att.fileName
-      })
+      content.push({ type: 'document', mediaType: 'application/pdf', ...ref })
     } else {
-      content.push({
-        type: 'image',
-        mediaType: att.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-        base64Data: att.base64Data,
-        fileName: att.fileName
-      })
+      content.push({ type: 'image', mediaType: att.mediaType as ImageMediaType, ...ref })
     }
   }
   if (text) content.push({ type: 'text', text })
@@ -486,6 +556,8 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         permissionMode?: string
         engineId?: EngineId
         model?: string
+        effort?: string | null
+        thinkingMode?: string | null
       }>(event, 1)
       const existing = state.sessions[routingId]
       const base = existing ?? emptySession(routingId)
@@ -503,9 +575,15 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
             // the originator, whose `createNewSession` already seeded the same
             // values into `base`.
             //
-            // `effort` / `thinkingMode` are absent by design, not by omission: the
-            // spawn args carrying them are RESOLVED model defaults, and these
-            // fields mean "explicitly picked" (`null` = unset). See the emit site.
+            // `effort` / `thinkingMode` ride the event only when the spawning client
+            // announced: the effort the process starts with becomes the session's
+            // own from here on (a later change to the per-model starting effort
+            // must not re-label it), and `null` CLEARS (a model that takes none).
+            // KEY presence decides, not value: absent = "leave it alone", which
+            // keeps an old-shape event and an old client's respawn as they were.
+            effort: data && 'effort' in data ? (data.effort ?? null) : base.effort,
+            thinkingMode:
+              data && 'thinkingMode' in data ? (data.thinkingMode ?? null) : base.thinkingMode,
             permissionMode: data?.permissionMode ?? base.permissionMode,
             selectedEngineId: data?.engineId ?? base.selectedEngineId,
             selectedModel: data?.model ?? (data?.engineId === 'codex' ? '' : base.selectedModel),
@@ -633,7 +711,7 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         id?: string
         timestamp?: number
         prompt?: string
-        attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+        attachments?: AttachmentRef[]
       }>(event, 1)
       if (!state.sessions[routingId]) return state
       // Identity comes from the EVENT as of phase 4b (`handlers-core.sendPrompt`
@@ -697,6 +775,54 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         itemStreamRevision: event.seq ?? 0,
         messages:
           messageIds.length > 0 ? s.messages.filter((m) => !messageIds.includes(m.id)) : s.messages
+      }))
+    }
+
+    case 'session:tool-uses-retracted': {
+      // A tool call cut off mid-stream (docs/protocol-cc/05-stream-events.md
+      // §5.9): its scaffold was published, the final seal's merge preserved it,
+      // and no result will ever come. Removed with every block keyed to it.
+      const routingId = routingIdOf(event)
+      const data = arg<{ messageId?: string; toolUseIds?: string[]; ownerToolUseId?: string }>(
+        event,
+        1
+      )
+      if (!routingId || typeof data?.messageId !== 'string' || !Array.isArray(data.toolUseIds))
+        return state
+      const session = state.sessions[routingId]
+      if (!session || data.toolUseIds.length === 0) return state
+      const { messageId, toolUseIds, ownerToolUseId: owner } = data
+      const messages = owner ? session.subagentMessages[owner] : session.messages
+      const index = messages?.findIndex((m) => m.id === messageId) ?? -1
+      if (!messages || index < 0) return state
+      const content = withoutToolUses(messages[index].content, toolUseIds)
+      // A replay finds nothing left to remove — identity-stable.
+      if (content.length === messages[index].content.length) return state
+      const next =
+        content.length === 0
+          ? messages.filter((_, i) => i !== index)
+          : messages.map((m, i) => (i === index ? { ...m, content } : m))
+      // Items are text/thinking — and `plan`, a tool_use, on other engines — so
+      // one can address a removed slot, and every slot after the first removed
+      // one has shifted. Claude retracts only after the message's items are
+      // sealed, so in practice there is none; any that remains is retired
+      // rather than left pointing at the wrong block.
+      const firstRemoved = messages[index].content.findIndex((b) => !content.includes(b))
+      const itemStreams = Object.fromEntries(
+        Object.entries(session.itemStreams).filter(
+          ([, stream]) =>
+            stream.target.messageId !== messageId ||
+            stream.target.ownerToolUseId !== owner ||
+            stream.target.blockIndex < firstRemoved
+        )
+      )
+      const streamsChanged =
+        Object.keys(itemStreams).length !== Object.keys(session.itemStreams).length
+      return withSession(state, routingId, (s) => ({
+        ...(owner
+          ? { subagentMessages: { ...s.subagentMessages, [owner]: next } }
+          : { messages: next }),
+        ...(streamsChanged ? { itemStreams, itemStreamRevision: event.seq ?? 0 } : {})
       }))
     }
 
@@ -764,35 +890,36 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
     /**
      * A permission judge's verdict, attached to the assistant message holding
      * the `tool_use` it judged (F18). Deliberately NOT modelled on
-     * `session:tool-result`'s "first one wins": the identity here is `reviewId`,
+     * `session:tool-result`'s "first one wins": the identity is `reviewId`,
      * because a re-review after "approve anyway" is a genuinely NEW verdict on
-     * the same call and the renderer shows the LAST one. Idempotence is per
-     * review id, which is what makes a replayed catch-up a no-op.
-     *
-     * A verdict with no host message is DROPPED rather than parked: holding it
-     * is the producer's job (CodexSession holds one until its target item
-     * lands), and a reducer-side queue would be a second, divergent copy of
-     * that rule.
+     * the same call and the renderer shows the LAST one.
      */
     case 'session:tool-review': {
-      const routingId = routingIdOf(event)
       const data = arg<{ toolUseId?: string; review?: ToolReviewBlock }>(event, 1)
-      if (!routingId || !data?.toolUseId || !data.review?.reviewId) return state
-      const session = state.sessions[routingId]
-      if (!session) return state
+      if (!data?.review?.reviewId) return state
+      const review = data.review
+      return attachToToolUse(state, event, data.toolUseId, review, (b) =>
+        b.type === 'tool_review' ? b.reviewId === review.reviewId : false
+      )
+    }
 
-      const { toolUseId, review } = data
-      const messages = [...session.messages]
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i]
-        if (msg.role !== 'assistant') continue
-        if (!msg.content.some((b) => b.type === 'tool_use' && b.toolUseId === toolUseId)) continue
-        if (msg.content.some((b) => b.type === 'tool_review' && b.reviewId === review.reviewId))
-          return state
-        messages[i] = { ...msg, content: [...msg.content, { ...review, toolUseId }] }
-        return withSession(state, routingId, () => ({ messages }))
-      }
-      return state
+    /**
+     * A pre-ask refusal that no judge made — a deny rule, the permission mode,
+     * a hook, the static safety checker. Same binding as a verdict (find the
+     * assistant message holding the call, append once), different block,
+     * because the card must not present a policy lookup as a judgment.
+     *
+     * Identity is `denialId`, the emitting frame's own uuid: cli.js mints one
+     * frame per decision and never revises it, so unlike a review there is no
+     * "last one wins" — the first copy stands and every replay is a no-op.
+     */
+    case 'session:permission-denial': {
+      const data = arg<{ toolUseId?: string; denial?: PermissionDenialBlock }>(event, 1)
+      if (!data?.denial?.denialId) return state
+      const denial = data.denial
+      return attachToToolUse(state, event, data.toolUseId, denial, (b) =>
+        b.type === 'permission_denial' ? b.denialId === denial.denialId : false
+      )
     }
 
     // -----------------------------------------------------------------------
@@ -924,19 +1051,34 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
               ...(status.codex?.overrides?.model ? { codexModelExplicit: true } : {})
             }
           : {}),
+        ...((status.engineId === 'opencode' || status.engineId === 'pi') &&
+        status.model?.engineId === status.engineId
+          ? {
+              selectedModel: engineMeta(status.engineId).encodeModelValue(status.model),
+              selectedEngineId: status.engineId
+            }
+          : {}),
         ...(status.cwd && status.cwd !== s.cwd ? { cwd: status.cwd } : {})
       }))
 
-      if (status.engineId === 'codex' && status.model)
+      if (
+        status.model &&
+        (status.engineId === 'codex' ||
+          ((status.engineId === 'opencode' || status.engineId === 'pi') &&
+            status.model.engineId === status.engineId))
+      )
         next = {
           ...next,
           sessionEngines: {
             ...next.sessionEngines,
             [id]: {
-              engineId: 'codex',
+              engineId: status.engineId,
               model: {
                 ...status.model,
-                modelId: status.codex?.overrides?.model ?? status.model.modelId
+                modelId:
+                  status.engineId === 'codex'
+                    ? (status.codex?.overrides?.model ?? status.model.modelId)
+                    : status.model.modelId
               }
             }
           }
@@ -1035,22 +1177,36 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         taskId?: string
         taskType?: string
         runIndex?: number
+        isBackgrounded?: boolean
+        startedAt?: number
       }>(event, 1)
       if (!routingId || !data?.toolUseId) return state
       const toolUseId = data.toolUseId
       // toolUseId is the agent's ORIGIN call, normalized by ClaudeSession — so a
       // resumed agent re-arms the record it already had rather than opening a
-      // second one under the SendMessage call's id (ADR-073).
-      return withSession(state, routingId, (s) => ({
-        activeTasks: {
-          ...s.activeTasks,
-          [toolUseId]: {
-            taskId: data.taskId ?? '',
-            taskType: data.taskType ?? '',
-            ...(data.runIndex !== undefined ? { runIndex: data.runIndex } : {})
+      // second one under the SendMessage call's id (ADR-073). The same re-arm
+      // carries a "Send to background" flip: same run, isBackgrounded now true.
+      return withSession(state, routingId, (s) => {
+        // A re-reported start of the run already armed keeps that run's clock;
+        // a new run (a resume) starts its own.
+        const prev = s.activeTasks[toolUseId]
+        const startedAt =
+          prev?.startedAt !== undefined && prev.runIndex === data.runIndex
+            ? prev.startedAt
+            : data.startedAt
+        return {
+          activeTasks: {
+            ...s.activeTasks,
+            [toolUseId]: {
+              taskId: data.taskId ?? '',
+              taskType: data.taskType ?? '',
+              ...(data.runIndex !== undefined ? { runIndex: data.runIndex } : {}),
+              ...(data.isBackgrounded !== undefined ? { isBackgrounded: data.isBackgrounded } : {}),
+              ...(startedAt !== undefined ? { startedAt } : {})
+            }
           }
         }
-      }))
+      })
     }
 
     case 'session:task-progress': {

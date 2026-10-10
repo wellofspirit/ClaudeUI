@@ -5,7 +5,8 @@
  * ClaudeUI reads/writes `~/.pi/agent/auth.json` DIRECTLY. This is the ONE
  * sanctioned write into `~/.pi/**`: a read-modify-write that preserves every
  * unknown provider entry and unknown field byte-for-byte, and keeps 0600 on
- * POSIX (see docs/protocol-pi/README.md "Auth" + vendor/pi-cli/docs/providers.md).
+ * POSIX (see docs/protocol-pi/README.md "Auth" +
+ * vendor/pi-src/packages/coding-agent/docs/providers.md).
  *
  * pi's native `pi /login` is TUI-interactive, but as of M6 ClaudeUI DOES drive
  * the `openai-codex` (ChatGPT) login itself via its own auth vault
@@ -27,6 +28,7 @@ import { logger } from '../services/logger'
 import { removalCaller } from './removal-caller'
 import { invalidatePiModelCache } from '../pi/model-discovery'
 import { readJsonFileForWrite, writeJsonAtomic } from '../services/write-json-atomic'
+import { deepEqual } from '../../shared/opencode-config-diff'
 import type {
   AccountRef,
   AuthState,
@@ -220,23 +222,21 @@ export class PiAuthProvider implements EngineAuthProvider {
    * (read-modify-write, not overwrite). Invalidates the pi model cache after
    * the write (a newly-keyed vendor's models may now be discoverable) and
    * refreshes the probe snapshot so buildPiAccountRef() reflects it immediately.
+   * The key already stored writes nothing (see mergeEntry).
    */
   async setVendorApiKey(vendorId: string, key: string): Promise<void> {
-    const file = readAuthFileForWrite()
-    file[vendorId] = { ...file[vendorId], type: 'api_key', key }
-    writeAuthFile(file)
-    invalidatePiModelCache()
-    await this.probe()
+    await this.mergeEntry(vendorId, { type: 'api_key', key })
   }
 
   /** Delete a provider's entry from auth.json entirely. Preserves every other entry. */
   async removeVendorAuth(vendorId: string): Promise<void> {
     const file = readAuthFileForWrite()
+    // Nothing to remove: nothing is written, so a pi that is not installed
+    // never gains an auth.json (or ~/.pi) from a removal (ADR-082 §8, S7d).
+    if (!(vendorId in file)) return
     // A removal destroys a credential ClaudeUI cannot restore, so it always
     // leaves a trace: the vendor id and the call site, never the key.
-    if (vendorId in file) {
-      logger.info('PiAuth', `removing ${vendorId} from auth.json (${removalCaller()})`)
-    }
+    logger.info('PiAuth', `removing ${vendorId} from auth.json (${removalCaller()})`)
     delete file[vendorId]
     writeAuthFile(file)
     invalidatePiModelCache()
@@ -266,14 +266,28 @@ export class PiAuthProvider implements EngineAuthProvider {
    * the vault (auth-vault.json) remains the source of truth for that data.
    */
   async feedOauthCredential(vendorId: string, cred: CodexCredentialInput): Promise<void> {
-    const file = readAuthFileForWrite()
-    file[vendorId] = {
-      ...file[vendorId],
+    await this.mergeEntry(vendorId, {
       type: 'oauth',
       access: cred.access,
       refresh: cred.refresh,
       expires: cred.expires
-    }
+    })
+  }
+
+  /**
+   * The read-modify-write both writers above share: `fields` over this vendor's
+   * entry, every other field and entry kept. An entry that already holds them
+   * is left alone — no write, no model-cache invalidation. Both writers run at
+   * every boot (the shared-provider key sync, CredentialSync's feed) with what
+   * is usually already there, and each needless invalidation killed the model
+   * probe in flight. The file is read now, never remembered: pi rewrites the
+   * entry itself when it refreshes a token, and that is a difference to write.
+   */
+  private async mergeEntry(vendorId: string, fields: PiAuthEntry): Promise<void> {
+    const file = readAuthFileForWrite()
+    const entry = { ...file[vendorId], ...fields }
+    if (deepEqual(entry, file[vendorId])) return
+    file[vendorId] = entry
     writeAuthFile(file)
     invalidatePiModelCache()
     await this.probe()

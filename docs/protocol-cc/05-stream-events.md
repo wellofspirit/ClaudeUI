@@ -26,7 +26,7 @@ Verified against cli.js 2.1.114. Emission at main path char `~12805167`; subagen
 
 **`ttft_ms`** — time-to-first-token. Present only on the FIRST `stream_event` of each assistant turn. Use for startup latency metrics.
 
-**`parent_tool_use_id`** — non-null for subagent stream events (patch `subagent-streaming-C` and friends). Teammate variants use `teammate_id`.
+**`parent_tool_use_id`** — non-null for subagent stream events (patch `subagent-streaming-C` and friends). Teammate variants use `teammate_id`. A background sub-agent's events also carry `agent_id`, and on an idle self-resume ONLY `agent_id` (§5.11).
 
 ---
 
@@ -278,6 +278,12 @@ Closes the assistant message. No fields beyond `type`.
 
 After `message_stop`, no more stream_events for this `message.id` arrive. The next stream sequence (if any) has a new `message_start` with a fresh id.
 
+**2.1.293+:** a `message_stop` that cli.js synthesizes after the API stream failed,
+stalled or ended early may carry the `@internal`
+`abandoned_blocks: {api_message_id, from_block_index}` beside `event`. Blocks of that
+response at index ≥ `from_block_index` never get an `assistant` snapshot (§5.9). Its
+absence implies nothing. ClaudeUI does not read it.
+
 ---
 
 ## 5.9 Ordering within a turn
@@ -320,6 +326,25 @@ index/type.
 Verified on 2.1.268, 2026-09-18, localhost SSE fixture. `src/integration/sdk-contract/stream-order.integration.test.ts`
 re-checks this on every CLI bump (`12-maintenance.md` §12.1).
 
+### A `tool_use` cut off mid-stream gets no snapshot
+
+When the output limit ends a message while a `tool_use` block is still streaming, that block
+never gets its per-block `assistant` line — and never runs. Observed in session
+`efa47532-932f-4598-b750-5263dea1c46d`: message `dn74DfqZ` ended with `message_delta
+{stop_reason:"max_tokens"}` mid-`Write`, and its only snapshots were its two thinking blocks.
+The transcript on disk never contains the call, so a reload is already correct. A stream cut by an
+interrupt or abort (no `message_delta` at all) is treated the same way; that case is inferred, not
+yet observed on the wire.
+
+A consumer that shows a `tool_use` at `content_block_start` (ClaudeUI does, so a result always has
+a call to attach to) must take it back. `ClaudeItemStreamLifecycle` records `message_delta`'s
+`stop_reason` and every `tool_use` id any snapshot of the message carried. When the message ends
+with a stop reason other than `"tool_use"` (including none), each unconfirmed `tool_use` is removed
+before the final seal and reported as `session:tool-uses-retracted { messageId, toolUseIds,
+ownerToolUseId? }` (`docs/architecture/sync-channels.md`). A message that stopped for `"tool_use"`
+never retracts anything: every call in it runs, and a sub-agent's snapshot can lag `message_stop`
+because Patch E's stream events and the native relay's snapshots take different paths (§5.11).
+
 ---
 
 ## 5.10 Consumer guidance
@@ -354,7 +379,7 @@ ClaudeUI uses a hybrid: stream_events drive the typewriter effect; assistant sna
 
 ## 5.11 Subagent and teammate variants
 
-Via patches (see `patch/subagent-streaming/` and `patch/team-streaming/`):
+Via patches (see `patch/subagent-streaming/`; `team-streaming`, which produced the teammate variant, is retired and its directory removed — 01 §1.12):
 
 ### Subagent (patches C, E, G)
 
@@ -365,12 +390,17 @@ Via patches (see `patch/subagent-streaming/` and `patch/team-streaming/`):
   "type": "stream_event",
   "event": {...},
   "parent_tool_use_id": "toolu_parent_Task",
+  "agent_id": "ab9368ec953c764ac",   // Patch E (background runner) only, v2.1.280+
   "session_id": "...",
   "uuid": "..."
 }
 ```
 
-### Teammate (patch team-streaming-B)
+**`agent_id`** — the background runner's `taskId` (= the agent id, = `task_started.task_id`). Patch E stamps it on every frame it writes; the foreground path (Patches B/C) does not.
+
+**Idle self-resume: `agent_id` without `parent_tool_use_id`.** A background agent may stop while its own background children still run; when a child reports while the session is idle, cli.js resumes the agent itself with `_buildIdleToolUseContext()` — a main-loop context with **no `toolUseId`**. Patch E's `parent_tool_use_id:CTX.toolUseId` is then `undefined` and `JSON.stringify` drops the key, so the frame looks like the main agent's except for `agent_id`. That run's completed `assistant`/`user` frames (the native relay) are NOT affected: the relay stamps the `toolUseId` the agent's sidecar recorded at spawn, i.e. the ORIGIN Agent call's id (ADR-073), and cli.js's own task-notifications for such a run lack `<tool-use-id>`. A consumer must therefore place such a stream_event by `agent_id` on the same owner the snapshots use — `ClaudeSession.handleStreamEvent` maps it through `originByTaskId` → `resolveTaskOwner` — and must never treat a frame that carries `agent_id` as the main agent's (an unknown `agent_id` is dropped). Evidence and char offsets: `patch/subagent-streaming/README.md`, Patch E § "v2.1.280 — `agent_id`".
+
+### Teammate (patch team-streaming-B — retired)
 
 `teammate_id` instead of `parent_tool_use_id`:
 
@@ -392,3 +422,5 @@ Subagent/teammate variants require both:
 - The corresponding ClaudeUI patch applied
 
 Without the patch, subagent stream events are swallowed by upstream's internal aggregation.
+
+On a harness without `subagent-streaming` (Anthropic's unpatched binary, ADR-079) ClaudeUI still gets a foreground subagent's text and thinking as complete `assistant` messages with `parent_tool_use_id` set, because it always passes `--forward-subagent-text` (02); only the token deltas are missing.

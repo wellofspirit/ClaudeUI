@@ -11,28 +11,20 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-import {
-  DEFAULT_MAX_CONCURRENT_DISPATCHES,
-  resolveDispatchMaxConcurrent
-} from '../../../shared/dispatch-concurrency'
+import { DEFAULT_MAX_CONCURRENT_DISPATCHES } from '../../../shared/dispatch-concurrency'
 
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
-// piBinaryAvailable is a plain function export (unlike opencodeServerManager,
-// a singleton object whose methods vi.spyOn can target directly) — mocked so
-// crossEngineDispatchAvailable('pi') is controllable per-test. Every pi-target
-// TEST in this file injects a fake spawnPiTarget dep (bypassing
-// defaultSpawnPiTarget entirely), so mocking locatePiBinary here has no effect
+// Every pi-target TEST in this file injects a fake spawnPiTarget dep (bypassing
+// defaultSpawnPiTarget entirely), so mocking locatePiLaunch here has no effect
 // on them either way — see buildPiTargetChildEnv's own dedicated test for the
 // real defaultSpawnPiTarget's recursion-guard property.
 vi.mock('../../../core/pi/pi-locate', () => ({
-  locatePiBinary: vi.fn(() => null),
+  locatePiLaunch: vi.fn(() => null),
   piBinaryAvailable: vi.fn(() => true)
 }))
-// Same reasoning as pi-locate above: a plain function export, mocked so
-// crossEngineDispatchAvailable's codex disjunct is controllable per-test.
 // Every codex-target TEST injects a fake spawnCodexTarget (bypassing
 // defaultSpawnCodexTarget, which is the only thing that would ever locate a
 // real binary), so this mock cannot affect them either way.
@@ -41,27 +33,63 @@ vi.mock('../../../core/codex/codex-locate', () => ({
   locateCodexBinary: vi.fn(() => null),
   locateCodexCodeModeHost: vi.fn(() => null)
 }))
+// crossEngineDispatchAvailable asks the harness resolver (ADR-082); mocked so
+// each harness's availability is controllable per-test, off the real vendor/.
+const { harnessInstalled } = vi.hoisted(() => ({
+  harnessInstalled: { opencode: true, pi: true, codex: false } as Record<string, boolean>
+}))
+vi.mock('../../../core/harness/resolve', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/harness/resolve')>()),
+  harnessAvailable: vi.fn((id: string) => harnessInstalled[id] ?? true)
+}))
+// The bridged Claude MCP servers for a cwd. Hermetic — never the dev's real
+// Claude config: no bridged server.
+vi.mock('../../../core/opencode/claude-mcp-bridge', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/opencode/claude-mcp-bridge')>()),
+  collectClaudeMcpForOpencode: vi.fn((): Record<string, unknown> => ({}))
+}))
+// ADR-096 — a pi target's MCP catalog: hermetic, empty unless a test says so.
+const { mockCollectPiMcp } = vi.hoisted(() => ({
+  mockCollectPiMcp: vi.fn((_cwd: string): { servers: Record<string, unknown>; skipped: [] } => ({
+    servers: {},
+    skipped: []
+  }))
+}))
+vi.mock('../../../core/pi/pi-mcp-bridge', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/pi/pi-mcp-bridge')>()),
+  collectClaudeMcpForPi: mockCollectPiMcp
+}))
+// ADR-088 — the target judge's ground truth and the shared trust lists stay
+// hermetic: no git subprocess, never the dev's own `~/.claude/ui/automode.json`.
+vi.mock('../../../core/automode/ground-truth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/automode/ground-truth')>()),
+  captureGitRemotes: vi.fn(async () => []),
+  captureRepoVisibility: vi.fn(async () => 'unknown'),
+  captureGitStatus: vi.fn(async () => null),
+  captureGitConfigArmed: vi.fn(async () => [])
+}))
+vi.mock('../../../core/services/ui-config', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/services/ui-config')>()),
+  loadSharedAutoModeConfig: vi.fn(() => ({}))
+}))
 
 import {
   CrossEngineDispatcher,
+  DISPATCH_PROMPT_PREAMBLE,
   DISPATCH_WATCHDOG_INTERVAL_MS,
   XENG_REQUEST_PREFIX,
   crossEngineDispatchAvailable,
   buildPiTargetChildEnv
 } from '../../../core/services/cross-engine-dispatcher'
-import { opencodeServerManager } from '../../../core/opencode/OpencodeServerManager'
 import { opencodeAuthProvider } from '../../../core/auth/OpencodeAuthProvider'
 import { piAuthProvider } from '../../../core/auth/PiAuthProvider'
 import { usageFetcher } from '../../../core/services/usage-fetcher'
 import type { UsageTurnEvent } from '../../../core/services/usage-recorder'
-import { piBinaryAvailable } from '../../../core/pi/pi-locate'
-import { codexBinaryAvailable } from '../../../core/codex/codex-locate'
 import type {
   ClaudeQuerySpawnOpts,
   DispatchContext,
   DispatcherDeps,
   DispatchResult,
-  DispatchTargetClient,
   PiTargetSpawnOpts,
   PiTargetPrimitives,
   CodexTargetAttachOpts,
@@ -70,187 +98,63 @@ import type {
   AttachCodexTargetFn
 } from '../../../core/services/cross-engine-dispatcher'
 import { CodexMethodNotFound } from '../../../core/codex/CodexAppServerClient'
+import { codexTurnPolicy } from '../../../core/codex/codex-turn-policy'
+import type { SessionJudgeOptions } from '../../../core/automode/session-judge'
+import type { JudgeRequest } from '../../../core/automode/classifier'
 import type { QueryHandle, ResultMessage, SDKMessage, SdkToolExtra } from '../../../core/sdk'
-import type { StoredMessage } from '../../../core/opencode/protocol/types'
-import type { BillingType, EngineConfig, EngineId } from '../../../shared/types'
+import type { ChatMessage, EngineConfig, EngineId, PendingApproval } from '../../../shared/types'
+import { loadSharedAutoModeConfig } from '../../../core/services/ui-config'
+import { BlockedCallLedger } from '../../../core/automode/blocked-calls'
+
+/** The hold window the ADR-091 §3 held-card tests run under (`blockHoldSeconds: 120`). */
+const HOLD_MS = 120_000
 import type { PiRpcClient } from '../../../core/pi/PiRpcClient'
 import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHost'
 import { SyncCore } from '../../../core/sync/sync-core'
+import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../../core/pi/permission-engine'
+import type { MergedClaudeRules } from '../../../core/pi/permission-engine'
+import { callerRestrictionFromAgent } from '../../../core/opencode/caller-restriction'
 
 // ---------------------------------------------------------------------------
 // Fakes
 // ---------------------------------------------------------------------------
 
-/** Push-driven fake of the /event SSE stream (UNFILTERED, like the real one). */
-function makeEventStream(): {
-  subscribe: (
-    signal?: AbortSignal,
-    onConnected?: () => void
-  ) => AsyncGenerator<{
-    id: string
-    type: string
-    properties: Record<string, unknown>
-  }>
-  push: (type: string, properties: Record<string, unknown>) => void
-} {
-  const queue: Array<{ id: string; type: string; properties: Record<string, unknown> }> = []
-  let notify: (() => void) | null = null
-  let seq = 0
-
-  async function* subscribe(
-    signal?: AbortSignal,
-    onConnected?: () => void
-  ): AsyncGenerator<{ id: string; type: string; properties: Record<string, unknown> }> {
-    // Fired where the real client fires it: the connection is now RECEIVING —
-    // anything queued from here on is delivered as an event. The dispatcher's
-    // reconnect reconcile hangs off this.
-    onConnected?.()
-    while (!signal?.aborted) {
-      if (queue.length === 0) {
-        await new Promise<void>((resolve) => {
-          notify = resolve
-          signal?.addEventListener('abort', () => resolve(), { once: true })
-        })
-        continue
-      }
-      yield queue.shift()!
-    }
-  }
-
-  return {
-    subscribe,
-    push(type, properties) {
-      queue.push({ id: `ev-${++seq}`, type, properties })
-      notify?.()
-      notify = null
-    }
-  }
-}
-
 /**
- * One assistant `StoredMessage` as `GET /session/{id}/message` returns it —
- * where an opencode dispatch turn's text and usage now come from (prompt_async
- * has no result body; ADR-033's 2026-09-01 amendment). Same `{info, parts}`
- * shape the old synchronous `prompt()` resolved with, so the fixtures below
- * read almost identically to the ones they replaced.
- *
- * `createdAt` defaults to one second AHEAD of construction, because these
- * fixtures are built BEFORE the dispatch they describe and the reconcile's
- * completion-evidence check compares strictly against the turn's start
- * (`CLOCK_SKEW_ALLOWANCE_MS` is 0): a plain `Date.now()` here would be
- * marginally EARLIER than `turnStartedAt` and correctly read as a previous
- * turn's message — deterministically so under load, which is exactly the
- * ambiguity the strict comparison exists to catch. The default therefore stands
- * for "written during the turn under test". Tests that mean "this belongs to an
- * OLD turn" pass an explicit past timestamp.
+ * The opencode side of the harness. opencode TARGETS (opencode 2.x, ADR-097
+ * S9) have their own suite, `cross-engine-dispatcher-opencode.component.test.ts`,
+ * with a fake 2.x server; this file covers the Claude, pi and Codex targets and
+ * the shared machinery, so an opencode lease or client here is a test bug.
  */
-function storedAssistant(
-  overrides: {
-    text?: string
-    info?: Record<string, unknown>
-    id?: string
-    createdAt?: number
-  } = {}
-): StoredMessage {
+function unusedOpencode(): never {
+  throw new Error(
+    'opencode targets are tested in cross-engine-dispatcher-opencode.component.test.ts'
+  )
+}
+
+/** The user's merged permission rules as the dispatcher loads them (ADR-085 §3). */
+function userRules(r: Partial<MergedClaudeRules> = {}): MergedClaudeRules {
   return {
-    info: {
-      id: overrides.id ?? 'msg-stored-1',
-      role: 'assistant',
-      time: { created: overrides.createdAt ?? Date.now() + 1_000 },
-      ...overrides.info
-    },
-    parts: [{ type: 'text', text: overrides.text ?? 'target answer' }]
+    allow: [],
+    deny: [],
+    ask: [],
+    additionalDirectories: [],
+    defaultMode: undefined,
+    ...r
   }
 }
-
-/** A stored USER message — the one the fork's `createUserMessage` writes BEFORE
- *  the turn is marked busy, i.e. the tail of history in the pre-busy window the
- *  reconcile's completion-evidence check exists to reject. */
-function storedUser(
-  overrides: { text?: string; id?: string; createdAt?: number } = {}
-): StoredMessage {
-  return {
-    info: {
-      id: overrides.id ?? 'msg-user-1',
-      role: 'user',
-      time: { created: overrides.createdAt ?? Date.now() }
-    },
-    parts: [{ type: 'text', text: overrides.text ?? 'the prompt' }]
-  }
-}
-
-function makeFakeClient(stream = makeEventStream()): {
-  client: {
-    createSession: ReturnType<typeof vi.fn<DispatchTargetClient['createSession']>>
-    patchSession: ReturnType<typeof vi.fn<DispatchTargetClient['patchSession']>>
-    prompt: ReturnType<typeof vi.fn<DispatchTargetClient['prompt']>>
-    promptAsync: ReturnType<typeof vi.fn<DispatchTargetClient['promptAsync']>>
-    listMessages: ReturnType<typeof vi.fn<DispatchTargetClient['listMessages']>>
-    getSessionStatus: ReturnType<typeof vi.fn<DispatchTargetClient['getSessionStatus']>>
-    deleteSession: ReturnType<typeof vi.fn<DispatchTargetClient['deleteSession']>>
-    abortSession: ReturnType<typeof vi.fn<DispatchTargetClient['abortSession']>>
-    replyPermission: ReturnType<typeof vi.fn<DispatchTargetClient['replyPermission']>>
-    subscribeEvents: DispatchTargetClient['subscribeEvents']
-  }
-  stream: typeof stream
-} {
-  let sessionSeq = 0
-  const client = {
-    createSession: vi.fn<DispatchTargetClient['createSession']>(async () => ({
-      id: `oc-sess-${++sessionSeq}`
-    })),
-    patchSession: vi.fn<DispatchTargetClient['patchSession']>(async () => ({})),
-    // GUARD: the opencode dispatch direction must never go back to the
-    // synchronous prompt — it dies at undici's 300 s headersTimeout on any long
-    // turn (the bug the prompt_async rework fixed). Loud, not silent.
-    prompt: vi.fn<DispatchTargetClient['prompt']>(async () => {
-      throw new Error('the opencode dispatch direction must not call the synchronous prompt()')
-    }),
-    // Default: the server accepts the prompt AND the turn finishes immediately —
-    // `session.idle` is what actually completes a dispatch turn now, so the fake
-    // publishes it exactly like the real server does. Tests that need a turn to
-    // stay in flight override this with an accept-only implementation
-    // (`async () => {}`) and push `session.idle` by hand when they're ready.
-    promptAsync: vi.fn<DispatchTargetClient['promptAsync']>(async (sessionId) => {
-      stream.push('session.idle', { sessionID: sessionId })
-    }),
-    listMessages: vi.fn<DispatchTargetClient['listMessages']>(async () => [storedAssistant()]),
-    // Empty map = every session idle (absence means idle) — only ever read by
-    // the reconnect reconcile, which no test reaches without opting in.
-    getSessionStatus: vi.fn<DispatchTargetClient['getSessionStatus']>(async () => ({})),
-    deleteSession: vi.fn<DispatchTargetClient['deleteSession']>(async () => true),
-    abortSession: vi.fn<DispatchTargetClient['abortSession']>(async () => true),
-    replyPermission: vi.fn<DispatchTargetClient['replyPermission']>(async () => ({})),
-    subscribeEvents: (signal?: AbortSignal, onConnected?: () => void) =>
-      stream.subscribe(signal, onConnected)
-  }
-  return { client, stream }
-}
-
-type FakeClient = ReturnType<typeof makeFakeClient>['client']
 
 function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
   dispatcher: CrossEngineDispatcher
-  client: FakeClient
-  stream: ReturnType<typeof makeEventStream>
-  deps: {
-    serverManager: {
-      acquire: ReturnType<typeof vi.fn<DispatcherDeps['serverManager']['acquire']>>
-      release: ReturnType<typeof vi.fn<DispatcherDeps['serverManager']['release']>>
-    }
-  }
+  deps: { serverManager: { acquire: ReturnType<typeof vi.fn> } }
 } {
-  const { client, stream } = makeFakeClient()
   const serverManager = {
-    acquire: vi.fn<DispatcherDeps['serverManager']['acquire']>(async () => ({
-      baseUrl: 'http://127.0.0.1:1',
-      authHeader: 'Basic x'
-    })),
-    release: vi.fn<DispatcherDeps['serverManager']['release']>()
+    acquire: vi.fn(async () => unusedOpencode()),
+    releaseIfCurrent: vi.fn(),
+    subscribeExit: vi.fn(() => () => {})
   }
   const deps: DispatcherDeps = {
     serverManager,
-    makeClient: () => client,
+    makeClient: () => unusedOpencode(),
     loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai/gpt-5' } }),
     heartbeatMs: 50,
     // ADR-033 M4c: keep pi's stop/timeout/abort grace-period wait (see
@@ -261,27 +165,77 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
     // (`AppSettings.dispatchMaxConcurrent`), which no test may depend on. Every
     // concurrency test overrides this with the cap it is actually about.
     resolveMaxConcurrent: () => DEFAULT_MAX_CONCURRENT_DISPATCHES,
+    // Hermetic: the production default (`mergedClaudeRulesFor`) reads the
+    // USER's settings files. Tests about the user's rules override it.
+    loadUserRules: () => userRules(),
     ...overrides
   }
-  return { dispatcher: new CrossEngineDispatcher(deps), client, stream, deps: { serverManager } }
+  return { dispatcher: new CrossEngineDispatcher(deps), deps: { serverManager } }
 }
 
-function makeCtx(overrides: Partial<DispatchContext> = {}): DispatchContext & {
+/**
+ * `autonomyMode` is a CONVENIENCE override (the ~50 call sites stay readable):
+ * it becomes `getAutonomyMode: () => mode`. Pass `getAutonomyMode` itself for a
+ * live switch (ADR-088).
+ */
+function makeCtx(
+  overrides: Partial<DispatchContext> & { autonomyMode?: string } = {}
+): DispatchContext & {
   emit: ReturnType<typeof vi.fn>
   addDispatchedCost: ReturnType<typeof vi.fn>
 } {
+  const { autonomyMode = 'default', ...rest } = overrides
   return {
     fromEngine: 'claude',
     fromRoutingId: 'routing-1',
     cwd: '/tmp/xeng-project',
-    autonomyMode: 'default',
+    getAutonomyMode: () => autonomyMode,
+    getMessages: () => [],
     emit: vi.fn(),
     addDispatchedCost: vi.fn(),
-    ...overrides
+    ...rest
   } as DispatchContext & {
     emit: ReturnType<typeof vi.fn>
     addDispatchedCost: ReturnType<typeof vi.fn>
   }
+}
+
+/**
+ * A scripted judge transport for ADR-088's target judge, injected through
+ * `DispatcherDeps.makeJudgeTransport` (no mocked modules). Each reply is
+ * consumed by one judge call (one call per judgement in `twoStageMode: 'fast'`):
+ * a string is the completion, an Error is a transport failure, a function is
+ * awaited (a held judge). Unscripted calls allow.
+ */
+function makeScriptedJudge(): {
+  make: ReturnType<
+    typeof vi.fn<(opts: SessionJudgeOptions) => (req: JudgeRequest) => Promise<string>>
+  >
+  opts: SessionJudgeOptions[]
+  requests: JudgeRequest[]
+  replies: Array<string | Error | (() => Promise<string>)>
+} {
+  const opts: SessionJudgeOptions[] = []
+  const requests: JudgeRequest[] = []
+  const replies: Array<string | Error | (() => Promise<string>)> = []
+  const make = vi.fn((o: SessionJudgeOptions) => {
+    opts.push(o)
+    return async (req: JudgeRequest): Promise<string> => {
+      requests.push(req)
+      const next = replies.shift()
+      if (next instanceof Error) throw next
+      if (typeof next === 'function') return next()
+      return next ?? '<block>no</block>'
+    }
+  })
+  return { make, opts, requests, replies }
+}
+
+/** A promise whose resolution a test controls (a judge held mid-flight). */
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+  let resolve!: (v: T) => void
+  const promise = new Promise<T>((r) => (resolve = r))
+  return { promise, resolve }
 }
 
 function makeExtra(overrides: Partial<SdkToolExtra> = {}): SdkToolExtra {
@@ -295,23 +249,8 @@ function makeExtra(overrides: Partial<SdkToolExtra> = {}): SdkToolExtra {
 const tick = (): Promise<void> => new Promise((r) => setImmediate(r))
 
 /**
- * Hold an opencode dispatch turn open: the server ACCEPTS the prompt (202) but
- * the turn never goes idle on its own — the replacement for the old
- * `client.prompt.mockImplementation(() => new Promise(() => {}))`.
- */
-function holdTurn(client: FakeClient): void {
-  client.promptAsync.mockImplementation(async () => {})
-}
-
-/** End the in-flight turn on `sessionId` the way opencode does — the SSE
- *  `session.idle` the dispatcher settles on. */
-function completeTurn(stream: ReturnType<typeof makeEventStream>, sessionId = 'oc-sess-1'): void {
-  stream.push('session.idle', { sessionID: sessionId })
-}
-
-/**
  * Advance FAKE timers (and flush the microtasks in between) — the watchdog
- * that governs opencode turn timeouts polls on a 10 s interval against the
+ * that governs dispatch turn timeouts polls on a 10 s interval against the
  * injectable clock, so its tests run on fake timers and use this instead of
  * `tick()` (which is `setImmediate` — itself faked, hence never firing).
  */
@@ -358,17 +297,6 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('CrossEngineDispatcher — guards', () => {
-  it('rejects same-engine dispatch as isError text (never throws)', async () => {
-    const { dispatcher, deps } = makeHarness()
-    const result = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'x' },
-      makeCtx({ fromEngine: 'opencode' })
-    )
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('different engine')
-    expect(deps.serverManager.acquire).not.toHaveBeenCalled()
-  })
-
   it('rejects dispatch into a genuinely unsupported engine (defensive guard — EngineId is closed, but this crosses an IPC boundary at runtime)', async () => {
     const { dispatcher } = makeHarness()
     // A string no EngineId has ever been. 'codex' USED to stand in here; slice
@@ -382,499 +310,22 @@ describe('CrossEngineDispatcher — guards', () => {
     expect(result.text).toContain('not supported yet')
   })
 
-  it('enforces the global concurrency cap', async () => {
-    const { dispatcher, client, stream } = makeHarness({ resolveMaxConcurrent: () => 2 })
-    // Hold both turns open so the dispatches stay in flight.
-    holdTurn(client)
-
-    const d1 = dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
-    const d2 = dispatcher.dispatch({ engine: 'opencode', prompt: 'b' }, makeCtx())
-    await tick()
-    expect(dispatcher.inFlightCount).toBe(2)
-
-    const d3 = await dispatcher.dispatch({ engine: 'opencode', prompt: 'c' }, makeCtx())
-    expect(d3.isError).toBe(true)
-    expect(d3.text).toContain('concurrent dispatches')
-
-    completeTurn(stream, 'oc-sess-1')
-    completeTurn(stream, 'oc-sess-2')
-    const [r1, r2] = await Promise.all([d1, d2])
-    expect(r1.isError).toBeUndefined()
-    expect(r2.isError).toBeUndefined()
-    expect(dispatcher.inFlightCount).toBe(0)
-  })
-
   // The cap became a user setting (ADR-033, 2026-09-18): "the slot can be a
   // configuration as well … in certain cases we will need more dispatches". The
   // three tests below pin the three things that ruling asks of the gate.
-
-  it('refuses with the EFFECTIVE cap and where to raise it', async () => {
-    const { dispatcher, client } = makeHarness({ resolveMaxConcurrent: () => 1 })
-    holdTurn(client)
-
-    void dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
-    await tick()
-
-    const refused = await dispatcher.dispatch({ engine: 'opencode', prompt: 'b' }, makeCtx())
-    expect(refused.isError).toBe(true)
-    // The number the caller actually hit, not the built-in default — a model
-    // told "max 3" by an app configured to 1 would retry into the same wall.
-    expect(refused.text).toContain('max 1')
-    expect(refused.text).toContain('Settings')
-    expect(refused.text).toContain('0 means no limit')
-  })
-
-  it('admits past the old built-in cap when the resolver says "no limit"', async () => {
-    // `0` in Settings resolves to Infinity — five at once, where the constant
-    // this replaced allowed three.
-    const { dispatcher, client, stream } = makeHarness({
-      resolveMaxConcurrent: () => resolveDispatchMaxConcurrent(0)
-    })
-    holdTurn(client)
-
-    const runs = [1, 2, 3, 4, 5].map((n) =>
-      dispatcher.dispatch({ engine: 'opencode', prompt: `p${n}` }, makeCtx())
-    )
-    await tick()
-    expect(dispatcher.inFlightCount).toBe(5)
-
-    for (let n = 1; n <= 5; n++) completeTurn(stream, `oc-sess-${n}`)
-    const results = await Promise.all(runs)
-    expect(results.every((r) => r.isError === undefined)).toBe(true)
-    expect(dispatcher.inFlightCount).toBe(0)
-  })
-
-  it('reads the cap per call, so a Settings change binds the very next dispatch', async () => {
-    let cap = 1
-    const { dispatcher, client, stream } = makeHarness({ resolveMaxConcurrent: () => cap })
-    holdTurn(client)
-
-    const d1 = dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
-    await tick()
-    const refused = await dispatcher.dispatch({ engine: 'opencode', prompt: 'b' }, makeCtx())
-    expect(refused.isError).toBe(true)
-
-    // The user raises it while the first dispatch is still running. No restart,
-    // no new dispatcher — the constructor never read this value.
-    cap = 2
-    const d2 = dispatcher.dispatch({ engine: 'opencode', prompt: 'c' }, makeCtx())
-    await tick()
-    expect(dispatcher.inFlightCount).toBe(2)
-
-    completeTurn(stream, 'oc-sess-1')
-    completeTurn(stream, 'oc-sess-2')
-    const [r1, r2] = await Promise.all([d1, d2])
-    expect(r1.isError).toBeUndefined()
-    expect(r2.isError).toBeUndefined()
-  })
-
-  it('same-tick dispatches cannot race past the cap (slot reserved before first await)', async () => {
-    const { dispatcher, client } = makeHarness({ resolveMaxConcurrent: () => 1 })
-    // Gate target creation so the first dispatch is parked INSIDE resolution
-    // when the second one starts — the exact window the old check-then-await
-    // ordering left open.
-    let releaseCreate!: () => void
-    const createGate = new Promise<{ id: string }>((r) => {
-      releaseCreate = (): void => r({ id: 'oc-sess-1' })
-    })
-    client.createSession.mockImplementation(() => createGate)
-
-    const both = Promise.all([
-      dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx()),
-      dispatcher.dispatch({ engine: 'opencode', prompt: 'b' }, makeCtx())
-    ])
-    releaseCreate()
-    const [r1, r2] = await both
-
-    expect(client.createSession).toHaveBeenCalledTimes(1)
-    const errors = [r1, r2].filter((r) => r.isError)
-    const successes = [r1, r2].filter((r) => !r.isError)
-    expect(errors).toHaveLength(1)
-    expect(errors[0].text).toContain('concurrent dispatches')
-    expect(successes).toHaveLength(1)
-    expect(dispatcher.inFlightCount).toBe(0)
-  })
 })
 
 // ---------------------------------------------------------------------------
 // Model resolution
 // ---------------------------------------------------------------------------
 
-describe('CrossEngineDispatcher — model resolution', () => {
-  it('unconfigured + no requested model → isError pointing at the dispatch config', async () => {
-    const { dispatcher, deps } = makeHarness({ loadEngineConfig: vi.fn(() => ({})) })
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('dispatch.defaultModel')
-    expect(deps.serverManager.acquire).not.toHaveBeenCalled()
-  })
-
-  it('falls back to the configured defaultModel when none requested', async () => {
-    const { dispatcher, client } = makeHarness()
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    expect(result.isError).toBeUndefined()
-    expect(client.promptAsync).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({ model: { providerID: 'openai', modelID: 'gpt-5' } })
-    )
-  })
-
-  it('allows a requested model present in allowedModels', async () => {
-    const { dispatcher, client } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({
-        dispatch: { allowedModels: ['openai/gpt-5', 'google/gemini-3'] }
-      }))
-    })
-    const result = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'x', model: 'google/gemini-3' },
-      makeCtx()
-    )
-    expect(result.isError).toBeUndefined()
-    expect(client.promptAsync).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({ model: { providerID: 'google', modelID: 'gemini-3' } })
-    )
-  })
-
-  it('blocks a requested model missing from a non-empty allowlist', async () => {
-    const { dispatcher, deps } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { allowedModels: ['openai/gpt-5'] } }))
-    })
-    const result = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'x', model: 'evil/model' },
-      makeCtx()
-    )
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('allowlist')
-    expect(result.text).toContain('openai/gpt-5')
-    expect(deps.serverManager.acquire).not.toHaveBeenCalled()
-  })
-
-  it('empty allowedModels list means any model is allowed', async () => {
-    const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { allowedModels: [] } }))
-    })
-    const result = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'x', model: 'any/model' },
-      makeCtx()
-    )
-    expect(result.isError).toBeUndefined()
-  })
-})
-
 // ---------------------------------------------------------------------------
 // Target lifecycle
 // ---------------------------------------------------------------------------
 
-describe('CrossEngineDispatcher — target lifecycle', () => {
-  it('happy path: creates a mode-inherited, recursion-guarded target and returns the text + sessionId', async () => {
-    const { dispatcher, client, deps } = makeHarness()
-    const result = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'review this' },
-      makeCtx({ autonomyMode: 'acceptEdits' })
-    )
-
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('target answer')
-    expect(result.sessionId).toBe('oc-sess-1')
-
-    expect(deps.serverManager.acquire).toHaveBeenCalledWith('/tmp/xeng-project')
-    expect(client.createSession).toHaveBeenCalledWith({ title: 'xeng-dispatch' })
-
-    // Ruleset = buildRuleset(autonomyMode) + the structural recursion guard LAST
-    // (last-match-wins — it must override the {*:allow} baseline).
-    const patch = client.patchSession.mock.calls[0][1] as {
-      permission: Array<{ permission: string; pattern: string; action: string }>
-    }
-    const rules = patch.permission
-    expect(rules[0]).toEqual({ permission: '*', pattern: '*', action: 'allow' })
-    expect(rules[rules.length - 1]).toEqual({
-      permission: 'claudeui_dispatch_agent*',
-      pattern: '*',
-      action: 'deny'
-    })
-    // acceptEdits: bash still gated (mode inheritance actually applied).
-    expect(rules).toContainEqual({ permission: 'bash', pattern: '*', action: 'ask' })
-
-    // Prompt carried the task text.
-    expect(client.promptAsync).toHaveBeenCalledWith('oc-sess-1', {
-      model: { providerID: 'openai', modelID: 'gpt-5' },
-      parts: [{ type: 'text', text: 'review this' }]
-    })
-  })
-
-  it('continuation: session_id reuses the live target (no second createSession)', async () => {
-    const { dispatcher, client } = makeHarness()
-    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, makeCtx())
-    const second = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
-      makeCtx()
-    )
-    expect(second.isError).toBeUndefined()
-    expect(second.sessionId).toBe(first.sessionId)
-    expect(client.createSession).toHaveBeenCalledTimes(1)
-    expect(client.promptAsync).toHaveBeenCalledTimes(2)
-    expect(client.promptAsync).toHaveBeenLastCalledWith(
-      first.sessionId,
-      expect.objectContaining({ parts: [{ type: 'text', text: 'two' }] })
-    )
-  })
-
-  it('continuation with an unknown sessionId → isError', async () => {
-    const { dispatcher, client } = makeHarness()
-    const result = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'x', sessionId: 'no-such-session' },
-      makeCtx()
-    )
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('no-such-session')
-    expect(client.promptAsync).not.toHaveBeenCalled()
-  })
-
-  it('M-XE1 busy target: a concurrent same-session_id opencode dispatch is REJECTED without disturbing the running turn', async () => {
-    // Two dispatch_agent calls with the same session_id can run concurrently
-    // (their MCP handlers overlap within one assistant turn). opencode drives
-    // one turn per session over a single busy-gated SSE tap; letting the second
-    // through would promptAsync() the same session twice and reset
-    // turnToolUseIds / flip busy off / null the settle resolver under the
-    // still-running first turn. So the second must busy-reject (M-XE1 — the
-    // opencode branch previously lacked this check that the Claude/pi branches
-    // already had).
-    const { dispatcher, client, stream } = makeHarness()
-    const ctx = makeCtx()
-
-    // Turn 1: establish the session_id (the default fake idles immediately).
-    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
-    expect(first.sessionId).toBe('oc-sess-1')
-
-    // Turn 2: continuation left in flight — accepted, but never goes idle.
-    client.promptAsync.mockImplementationOnce(async () => {})
-    const second = dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'two', sessionId: 'oc-sess-1' },
-      ctx
-    )
-    await tick()
-
-    // Turn 3: concurrent continuation while turn 2 is mid-flight → busy-reject.
-    const third = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'three', sessionId: 'oc-sess-1' },
-      ctx
-    )
-    expect(third.isError).toBe(true)
-    expect(third.text).toContain('already running')
-    expect(third.sessionId).toBe('oc-sess-1')
-
-    // The busy-reject never issued a prompt: still exactly turn1 + turn2 = 2
-    // (pre-fix this would be 3 — the guard assertion).
-    expect(client.promptAsync).toHaveBeenCalledTimes(2)
-
-    // The in-flight turn still completes normally with ITS OWN result.
-    client.listMessages.mockResolvedValueOnce([storedAssistant({ text: 'second answer' })])
-    completeTurn(stream, 'oc-sess-1')
-    const secondResult = await second
-    expect(secondResult.isError).toBeUndefined()
-    expect(secondResult.text).toBe('second answer')
-
-    // The target stays continuable once the busy window closes.
-    const fourth = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'four', sessionId: 'oc-sess-1' },
-      ctx
-    )
-    expect(fourth.text).toBe('target answer')
-    expect(client.createSession).toHaveBeenCalledTimes(1)
-  })
-
-  it("continuation with another session's target → isError (scoped to fromRoutingId)", async () => {
-    const { dispatcher } = makeHarness()
-    const first = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'one' },
-      makeCtx({ fromRoutingId: 'routing-A' })
-    )
-    const stolen = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
-      makeCtx({ fromRoutingId: 'routing-B' })
-    )
-    expect(stolen.isError).toBe(true)
-  })
-
-  it('a REJECTED promptAsync → isError text (never a throw) AND the target turn is aborted (zombie guard)', async () => {
-    const { dispatcher, client } = makeHarness()
-    client.promptAsync.mockRejectedValueOnce(new Error('server exploded'))
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('server exploded')
-    // The fork starts the turn BEFORE responding, so a rejection (or a dropped
-    // socket on an accepted request) can still leave one running — the old
-    // code's missing abort is exactly how a dispatched agent kept editing files
-    // after its caller had given up.
-    expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
-  })
-
-  it('a turn that idles carrying info.error on its final assistant message → isError with the error detail (session stays alive)', async () => {
-    // A turn can END (session.idle) having reported a failure — the error lives
-    // on the stored assistant message's info.error. This must surface as
-    // isError, NOT the empty-text success fallback.
-    const { dispatcher, client } = makeHarness()
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({
-        text: '',
-        info: { error: { name: 'UnknownError', data: { message: 'Key limit exceeded' } } }
-      })
-    ])
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('Key limit exceeded')
-    // Target survives for continuation — sessionId is the created target's id.
-    expect(result.sessionId).toBe('oc-sess-1')
-  })
-
-  it('a turn error with only a name (no data.message) → isError with the name', async () => {
-    const { dispatcher, client } = makeHarness()
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({ text: '', info: { error: { name: 'ContextOverflowError' } } })
-    ])
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('ContextOverflowError')
-    expect(result.sessionId).toBe('oc-sess-1')
-  })
-
-  it('an info.error turn still records its real spend and folds it into the dispatching session', async () => {
-    // The stored message carries real info.tokens/info.cost even when the turn
-    // errors (the turn ran, it just failed). Pre-fix that branch recorded
-    // costUsd/tokens as null and never folded the spend — a target whose turns
-    // keep erroring spent real money that escaped the cap AND the dispatching
-    // session's breakdown. Must capture it (parity with Claude failed-subtype).
-    const recordUsageEvent = vi.fn()
-    const { dispatcher, client } = makeHarness({ recordUsageEvent })
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({
-        text: '',
-        info: {
-          error: { name: 'UnknownError', data: { message: 'Key limit exceeded' } },
-          tokens: { input: 200, output: 80, reasoning: 20 },
-          cost: 0.05
-        }
-      })
-    ])
-    const ctx = makeCtx({ toolUseId: 'toolu_err_cost' })
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.isError).toBe(true)
-    expect(recordUsageEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        messageId: expect.stringContaining('toolu_err_cost'),
-        engineId: 'opencode',
-        // Disjoint, reasoning folded into output: 200 in, 80 + 20 out.
-        tokens: { input: 200, output: 100, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
-        engineCostUsd: 0.05
-      })
-    )
-    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.05)
-  })
-
-  it('a failed createSession rolls back the server ref and returns isError', async () => {
-    const { dispatcher, client, deps } = makeHarness()
-    client.createSession.mockRejectedValueOnce(new Error('cannot create'))
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('cannot create')
-    expect(deps.serverManager.release).toHaveBeenCalledWith('/tmp/xeng-project')
-  })
-
-  it('disposeFor tears down owned targets: deleteSession + server release + dead continuation', async () => {
-    const { dispatcher, client, deps } = makeHarness()
-    const first = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'one' },
-      makeCtx({ fromRoutingId: 'routing-A' })
-    )
-    const other = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'other' },
-      makeCtx({ fromRoutingId: 'routing-B' })
-    )
-
-    dispatcher.disposeFor('routing-A')
-
-    expect(client.deleteSession).toHaveBeenCalledWith(first.sessionId)
-    expect(client.deleteSession).not.toHaveBeenCalledWith(other.sessionId)
-    expect(deps.serverManager.release).toHaveBeenCalledTimes(1)
-
-    const cont = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'again', sessionId: first.sessionId },
-      makeCtx({ fromRoutingId: 'routing-A' })
-    )
-    expect(cont.isError).toBe(true)
-
-    // routing-B's target still works.
-    const contB = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'again', sessionId: other.sessionId },
-      makeCtx({ fromRoutingId: 'routing-B' })
-    )
-    expect(contB.isError).toBeUndefined()
-  })
-})
-
 // ---------------------------------------------------------------------------
 // Timeout / abort / heartbeat
 // ---------------------------------------------------------------------------
-
-describe('CrossEngineDispatcher — timeout, abort, heartbeat', () => {
-  it('the absolute turn timeout aborts the target session and returns isError', async () => {
-    vi.useFakeTimers()
-    try {
-      const { dispatcher, client } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({
-          dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 60_000 }
-        })),
-        heartbeatMs: 30_000
-      })
-      holdTurn(client)
-      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-      await advance(0)
-      await advance(70_000)
-      const result = await pending
-      expect(result.isError).toBe(true)
-      expect(result.text).toContain('timed out')
-      expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
-      expect(dispatcher.inFlightCount).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('extra.signal abort cancels the dispatch and aborts the target session', async () => {
-    const { dispatcher, client } = makeHarness()
-    holdTurn(client)
-    const abort = new AbortController()
-    const pending = dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'x' },
-      makeCtx({ extra: makeExtra({ signal: abort.signal }) })
-    )
-    await tick()
-    abort.abort()
-    const result = await pending
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('cancelled')
-    expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
-  })
-
-  it('sends progress heartbeats through extra while the turn is in flight', async () => {
-    const { dispatcher, client, stream } = makeHarness({ heartbeatMs: 20 })
-    holdTurn(client)
-    const sendNotification = vi.fn<SdkToolExtra['sendNotification']>(async () => {})
-    const pending = dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'x' },
-      makeCtx({ extra: makeExtra({ progressToken: 7, sendNotification }) })
-    )
-    await new Promise((r) => setTimeout(r, 70))
-    completeTurn(stream)
-    await pending
-
-    expect(sendNotification).toHaveBeenCalled()
-    const note = sendNotification.mock.calls[0][0]
-    expect(note.method).toBe('notifications/progress')
-    expect(note.params?.progressToken).toBe(7)
-  })
-})
 
 // ---------------------------------------------------------------------------
 // Turn completion over prompt_async + SSE (ADR-033's 2026-09-01 amendment).
@@ -884,987 +335,6 @@ describe('CrossEngineDispatcher — timeout, abort, heartbeat', () => {
 // stored history — and governed by an inactivity + absolute watchdog instead of
 // the fixed 10-minute cap.
 // ---------------------------------------------------------------------------
-
-describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE)', () => {
-  it('completes on session.idle, taking text + usage from the LAST assistant message in stored history', async () => {
-    const recordUsageEvent = vi.fn()
-    const { dispatcher, client, stream } = makeHarness({ recordUsageEvent })
-    holdTurn(client)
-    // A multi-turn target's history holds every earlier turn too — only the
-    // trailing assistant message belongs to the turn that just ended.
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({ id: 'msg-old', text: 'a previous turn', info: { cost: 1 } }),
-      { info: { id: 'msg-user', role: 'user' }, parts: [{ type: 'text', text: 'the prompt' }] },
-      storedAssistant({
-        id: 'msg-new',
-        text: 'this turn',
-        info: { tokens: { input: 7, output: 3, reasoning: 1 }, cost: 0.02 }
-      })
-    ])
-    const ctx = makeCtx({ toolUseId: 'toolu_idle_done' })
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-    // promptAsync only ACCEPTS the turn — nothing has completed yet.
-    expect(client.promptAsync).toHaveBeenCalledTimes(1)
-    expect(client.listMessages).not.toHaveBeenCalled()
-
-    completeTurn(stream)
-    const result = await pending
-
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('this turn')
-    expect(result.sessionId).toBe('oc-sess-1')
-    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif?.[1]).toMatchObject({ status: 'completed' })
-    expect((notif![1] as { usage?: { totalTokens: number } }).usage).toMatchObject({
-      totalTokens: 11,
-      toolUses: 0
-    })
-    expect(recordUsageEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tokens: expect.objectContaining({ input: 7, output: 4 }),
-        engineCostUsd: 0.02
-      })
-    )
-    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.02)
-  })
-
-  it('a turn that idles with NO assistant message returns the empty-text fallback with zero usage', async () => {
-    const recordUsageEvent = vi.fn()
-    const { dispatcher, client, stream } = makeHarness({ recordUsageEvent })
-    holdTurn(client)
-    client.listMessages.mockResolvedValueOnce([])
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    await tick()
-    completeTurn(stream)
-    const result = await pending
-
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('(the dispatched agent returned no text)')
-    expect(recordUsageEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
-        engineCostUsd: null
-      })
-    )
-  })
-
-  it('a failing listMessages after idle → isError (no abort: the turn already ended server-side)', async () => {
-    const { dispatcher, client, stream } = makeHarness()
-    holdTurn(client)
-    client.listMessages.mockRejectedValueOnce(new Error('history unavailable'))
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    await tick()
-    completeTurn(stream)
-    const result = await pending
-
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('history unavailable')
-    expect(client.abortSession).not.toHaveBeenCalled()
-  })
-
-  it('session.error settles the turn as isError with the vendor message + a "failed" notification', async () => {
-    const recordUsageEvent = vi.fn()
-    const { dispatcher, client, stream } = makeHarness({ recordUsageEvent })
-    holdTurn(client)
-    // A turn that dies mid-flight can still have burned tokens — recovered
-    // best-effort from stored history and folded into the cap/breakdown.
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({ text: 'partial', info: { tokens: { input: 40, output: 10 }, cost: 0.004 } })
-    ])
-    const ctx = makeCtx({ toolUseId: 'toolu_sse_err' })
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-
-    stream.push('session.error', {
-      sessionID: 'oc-sess-1',
-      error: { name: 'UnknownError', data: { message: 'model stream aborted' } }
-    })
-    const result = await pending
-
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('model stream aborted')
-    expect(result.sessionId).toBe('oc-sess-1')
-    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif?.[1]).toMatchObject({ status: 'failed' })
-    expect(recordUsageEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tokens: expect.objectContaining({ input: 40, output: 10 }),
-        engineCostUsd: 0.004
-      })
-    )
-    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.004)
-  })
-
-  it('a ProviderAuthError session.error surfaces the re-authorize hint (a dispatch has no vendor-auth card)', async () => {
-    const { dispatcher, client, stream } = makeHarness()
-    holdTurn(client)
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    await tick()
-    stream.push('session.error', {
-      sessionID: 'oc-sess-1',
-      error: { name: 'ProviderAuthError', data: { providerID: 'openai' } }
-    })
-    const result = await pending
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('Authentication required')
-    expect(result.text).toContain('openai')
-  })
-
-  it('a session.error for a FOREIGN session never settles our turn', async () => {
-    const { dispatcher, client, stream } = makeHarness()
-    holdTurn(client)
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    await tick()
-    stream.push('session.error', {
-      sessionID: 'someone-elses-session',
-      error: { name: 'UnknownError', data: { message: 'not ours' } }
-    })
-    await tick()
-    // Still running: only the real completion ends it.
-    completeTurn(stream)
-    const result = await pending
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('target answer')
-  })
-
-  it('the post-abort session.idle opencode publishes for a STOPPED turn is a no-op (settle-once)', async () => {
-    const { dispatcher, client, stream } = makeHarness()
-    holdTurn(client)
-    const ctx = makeCtx({ toolUseId: 'toolu_settle_once' })
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-    expect(dispatcher.stopDispatch('toolu_settle_once')).toBe(true)
-    const result = await pending
-    expect(result.text).toContain('stopped')
-
-    // The server publishes session.idle for the aborted turn too — it must not
-    // resurrect anything (no second notification, no listMessages read).
-    completeTurn(stream)
-    await tick()
-    expect(client.listMessages).not.toHaveBeenCalled()
-    expect(ctx.emit.mock.calls.filter((c) => c[0] === 'session:task-notification')).toHaveLength(1)
-  })
-
-  it('disposeFor settles a turn still in flight instead of leaking its concurrency slot', async () => {
-    // Nothing else can settle it afterwards: the entry leaves this.targets (so
-    // the SSE branches can no longer find it) and prompt_async has no pending
-    // promise to reject the way the synchronous prompt did.
-    const { dispatcher, client } = makeHarness()
-    holdTurn(client)
-    const ctx = makeCtx({ fromRoutingId: 'routing-doomed', toolUseId: 'toolu_disposed' })
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-    expect(dispatcher.inFlightCount).toBe(1)
-
-    dispatcher.disposeFor('routing-doomed')
-    const result = await pending
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('disposed')
-    expect(dispatcher.inFlightCount).toBe(0)
-  })
-
-  it('the INACTIVITY watchdog aborts a silent turn (reason-specific text, "failed" notification)', async () => {
-    vi.useFakeTimers()
-    try {
-      const recordUsageEvent = vi.fn()
-      const { dispatcher, client } = makeHarness({
-        recordUsageEvent,
-        loadEngineConfig: vi.fn(() => ({
-          dispatch: { defaultModel: 'openai/gpt-5', idleTimeoutMs: 120_000, turnTimeoutMs: 0 }
-        })),
-        heartbeatMs: 30_000
-      })
-      holdTurn(client)
-      const ctx = makeCtx({ toolUseId: 'toolu_idle_watchdog' })
-      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-      await advance(0)
-      await advance(130_000)
-      const result = await pending
-
-      expect(result.isError).toBe(true)
-      expect(result.text).toContain('no activity')
-      expect(result.text).toContain('2 minutes')
-      expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
-      const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-      expect(notif?.[1]).toMatchObject({ status: 'failed' })
-      // A turn that never returned reports no split and no cost — zeros here
-      // are "nothing was reported", which is why the row's costs are null.
-      expect(recordUsageEvent).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
-          engineCostUsd: null
-        })
-      )
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('SSE activity RESETS the inactivity clock — a busy-but-slow turn is never aborted', async () => {
-    vi.useFakeTimers()
-    try {
-      const { dispatcher, client, stream } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({
-          dispatch: { defaultModel: 'openai/gpt-5', idleTimeoutMs: 120_000, turnTimeoutMs: 0 }
-        })),
-        heartbeatMs: 30_000
-      })
-      holdTurn(client)
-      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-      await advance(0)
-
-      // Four 90 s stretches — 6 minutes total, well past the 2-minute idle cap
-      // — each punctuated by one event, so the clock keeps resetting.
-      for (let i = 0; i < 4; i++) {
-        await advance(90_000)
-        stream.push('message.part.updated', {
-          sessionID: 'oc-sess-1',
-          part: { id: `part-${i}`, messageID: 'msg-1', type: 'text', text: `chunk ${i}` }
-        })
-        await advance(0)
-      }
-      expect(client.abortSession).not.toHaveBeenCalled()
-
-      completeTurn(stream)
-      await advance(0)
-      const result = await pending
-      expect(result.isError).toBeUndefined()
-      expect(result.text).toBe('target answer')
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('the ABSOLUTE cap still fires on a continuously-active turn (the runaway backstop)', async () => {
-    vi.useFakeTimers()
-    try {
-      const { dispatcher, client, stream } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({
-          dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 120_000, idleTimeoutMs: 0 }
-        })),
-        heartbeatMs: 30_000
-      })
-      holdTurn(client)
-      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-      await advance(0)
-
-      for (let i = 0; i < 3; i++) {
-        await advance(50_000)
-        stream.push('message.part.updated', {
-          sessionID: 'oc-sess-1',
-          part: { id: `part-${i}`, messageID: 'msg-1', type: 'text', text: `chunk ${i}` }
-        })
-        await advance(0)
-      }
-      const result = await pending
-      expect(result.isError).toBe(true)
-      expect(result.text).toContain('timed out')
-      expect(result.text).toContain('2 minutes')
-      expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a turn PARKED on an unanswered approval is not killed by the inactivity watchdog, and answering starts a fresh window', async () => {
-    // A target blocked on ctx.ask emits no session events at all until the human
-    // answers (the server's keepalives carry no sessionID), so before the fix a
-    // user slower than idleTimeoutMs had the dispatch aborted and the approval
-    // card they were reading dismissed out from under them.
-    vi.useFakeTimers()
-    try {
-      const { dispatcher, client, stream } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({
-          dispatch: { defaultModel: 'openai/gpt-5', idleTimeoutMs: 120_000, turnTimeoutMs: 0 }
-        })),
-        heartbeatMs: 30_000
-      })
-      holdTurn(client)
-      const ctx = makeCtx({ toolUseId: 'toolu_parked' })
-      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-      await advance(0)
-
-      stream.push('permission.asked', {
-        id: 'perm-slow',
-        sessionID: 'oc-sess-1',
-        permission: 'bash'
-      })
-      await advance(0)
-      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
-
-      // Ten minutes of silence — five times the inactivity cap.
-      await advance(600_000)
-      expect(client.abortSession).not.toHaveBeenCalled()
-      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-dismiss')).toBe(false)
-
-      // Answering it starts a FRESH window rather than leaving a stale clock.
-      dispatcher.resolveApproval(`${XENG_REQUEST_PREFIX}perm-slow`, 'allow')
-      await advance(60_000)
-      expect(client.abortSession).not.toHaveBeenCalled()
-
-      completeTurn(stream)
-      await advance(0)
-      const result = await pending
-      expect(result.isError).toBeUndefined()
-      expect(result.text).toBe('target answer')
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('the approval refresh is scoped to the ask: once answered, ordinary silence still times the turn out', async () => {
-    vi.useFakeTimers()
-    try {
-      const { dispatcher, client, stream } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({
-          dispatch: { defaultModel: 'openai/gpt-5', idleTimeoutMs: 120_000, turnTimeoutMs: 0 }
-        })),
-        heartbeatMs: 30_000
-      })
-      holdTurn(client)
-      const ctx = makeCtx({ toolUseId: 'toolu_parked_then_silent' })
-      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-      await advance(0)
-      stream.push('permission.asked', { id: 'perm-x', sessionID: 'oc-sess-1', permission: 'bash' })
-      await advance(0)
-      await advance(300_000)
-      expect(client.abortSession).not.toHaveBeenCalled()
-
-      dispatcher.resolveApproval(`${XENG_REQUEST_PREFIX}perm-x`, 'allow')
-      await advance(130_000) // silence past the cap, with nothing pending now
-      const result = await pending
-      expect(result.isError).toBe(true)
-      expect(result.text).toContain('no activity')
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('both caps disabled (0) → a silent turn runs indefinitely and still completes on session.idle', async () => {
-    vi.useFakeTimers()
-    try {
-      const { dispatcher, client, stream } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({
-          dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 0, idleTimeoutMs: 0 }
-        })),
-        heartbeatMs: 30_000
-      })
-      holdTurn(client)
-      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-      await advance(0)
-      await advance(6 * 60 * 60_000) // six silent hours
-      expect(client.abortSession).not.toHaveBeenCalled()
-
-      completeTurn(stream)
-      await advance(0)
-      const result = await pending
-      expect(result.isError).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Approval forwarding (SSE)
-// ---------------------------------------------------------------------------
-
-describe('CrossEngineDispatcher — approval forwarding', () => {
-  async function makeTarget(): Promise<{
-    dispatcher: CrossEngineDispatcher
-    client: FakeClient
-    stream: ReturnType<typeof makeEventStream>
-    ctx: ReturnType<typeof makeCtx>
-    sessionId: string
-  }> {
-    const { dispatcher, client, stream } = makeHarness()
-    const ctx = makeCtx()
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.isError).toBeUndefined()
-    return { dispatcher, client, stream, ctx, sessionId: result.sessionId }
-  }
-
-  it("permission.asked for a target → 'xeng:'-prefixed PendingApproval on the dispatching session", async () => {
-    const { stream, ctx, sessionId } = await makeTarget()
-
-    stream.push('permission.asked', {
-      id: 'perm-1',
-      sessionID: sessionId,
-      permission: 'bash',
-      patterns: ['rm -rf node_modules'],
-      metadata: { command: 'rm -rf node_modules' }
-    })
-    await tick()
-
-    const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
-    expect(call).toBeTruthy()
-    const approval = call![1] as {
-      requestId: string
-      toolName: string
-      input: Record<string, unknown>
-    }
-    expect(approval.requestId).toBe(`${XENG_REQUEST_PREFIX}perm-1`)
-    expect(approval.toolName).toBe('dispatch:bash')
-    expect(approval.input).toMatchObject({
-      command: 'rm -rf node_modules',
-      patterns: ['rm -rf node_modules']
-    })
-  })
-
-  it("carries the target tool call's id so the card can bind to the nested tool block", async () => {
-    const { stream, ctx, sessionId } = await makeTarget()
-
-    stream.push('permission.asked', {
-      id: 'perm-tool',
-      sessionID: sessionId,
-      permission: 'bash',
-      // The wire shape the own-session mapper already reads (event-mapper.ts):
-      // the calling tool part's id. Without it the forwarded card can only
-      // float — it never binds to the tool block inside the dispatch card.
-      tool: { messageID: 'msg-1', callID: 'call-42' },
-      metadata: { command: 'ls' }
-    })
-    await tick()
-
-    const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
-    const approval = call![1] as { requestId: string; toolUseId?: string }
-    expect(approval.toolUseId).toBe('call-42')
-    // Both surfaces still key off the SAME requestId — the inline binding is
-    // additive, the floating card stays.
-    expect(approval.requestId).toBe(`${XENG_REQUEST_PREFIX}perm-tool`)
-  })
-
-  it('omits toolUseId when the wire event carries no callID (never invents one)', async () => {
-    const { stream, ctx, sessionId } = await makeTarget()
-
-    stream.push('permission.asked', {
-      id: 'perm-bare',
-      sessionID: sessionId,
-      permission: 'bash'
-    })
-    await tick()
-
-    const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
-    const approval = call![1] as { toolUseId?: string }
-    expect(approval.toolUseId).toBeUndefined()
-    expect('toolUseId' in approval).toBe(false)
-  })
-
-  it('permission.asked for a foreign session is ignored (unfiltered stream)', async () => {
-    const { stream, ctx } = await makeTarget()
-    stream.push('permission.asked', {
-      id: 'perm-x',
-      sessionID: 'some-other-session',
-      permission: 'bash'
-    })
-    await tick()
-    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
-  })
-
-  it.each([
-    ['allow', 'once'],
-    ['allowForSession', 'always']
-  ] as const)('resolveApproval(%s) → replyPermission(%s)', async (decision, reply) => {
-    const { dispatcher, client, stream, sessionId } = await makeTarget()
-    stream.push('permission.asked', { id: 'perm-1', sessionID: sessionId, permission: 'bash' })
-    await tick()
-
-    const consumed = dispatcher.resolveApproval(`${XENG_REQUEST_PREFIX}perm-1`, decision)
-    expect(consumed).toBe(true)
-    await tick()
-    expect(client.replyPermission).toHaveBeenCalledWith('perm-1', reply)
-  })
-
-  it('resolveApproval(deny) rejects with model-visible feedback', async () => {
-    const { dispatcher, client, stream, sessionId } = await makeTarget()
-    stream.push('permission.asked', { id: 'perm-1', sessionID: sessionId, permission: 'bash' })
-    await tick()
-
-    dispatcher.resolveApproval(`${XENG_REQUEST_PREFIX}perm-1`, 'deny', {
-      feedback: 'use git clean instead'
-    })
-    expect(client.replyPermission).toHaveBeenCalledWith('perm-1', 'reject', 'use git clean instead')
-  })
-
-  it("resolveApproval(deny) without feedback → 'User denied'", async () => {
-    const { dispatcher, client, stream, sessionId } = await makeTarget()
-    stream.push('permission.asked', { id: 'perm-1', sessionID: sessionId, permission: 'bash' })
-    await tick()
-
-    dispatcher.resolveApproval(`${XENG_REQUEST_PREFIX}perm-1`, 'deny')
-    expect(client.replyPermission).toHaveBeenCalledWith('perm-1', 'reject', 'User denied')
-  })
-
-  it('resolveApproval returns false for non-prefixed ids (falls through to the session)', async () => {
-    const { dispatcher, client } = await makeTarget()
-    expect(dispatcher.resolveApproval('ordinary-request', 'allow')).toBe(false)
-    expect(client.replyPermission).not.toHaveBeenCalled()
-  })
-
-  it('permission.replied cascade → pending removed + dismissal emitted, later reply is a no-op', async () => {
-    const { dispatcher, client, stream, ctx, sessionId } = await makeTarget()
-    stream.push('permission.asked', { id: 'perm-1', sessionID: sessionId, permission: 'bash' })
-    await tick()
-
-    // opencode cascade-rejected it (someone denied a sibling ask).
-    stream.push('permission.replied', {
-      sessionID: sessionId,
-      requestID: 'perm-1',
-      reply: 'reject'
-    })
-    await tick()
-
-    const dismiss = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-dismiss')
-    expect(dismiss).toBeTruthy()
-    expect(dismiss![1]).toEqual({ requestId: `${XENG_REQUEST_PREFIX}perm-1` })
-
-    // The user clicking the (now-gone) card later must not double-reply.
-    const consumed = dispatcher.resolveApproval(`${XENG_REQUEST_PREFIX}perm-1`, 'allow')
-    expect(consumed).toBe(true) // still consumed — xeng ids never reach sessions
-    expect(client.replyPermission).not.toHaveBeenCalled()
-  })
-
-  it('permission.replied for an id WE resolved does not emit a spurious dismissal', async () => {
-    const { dispatcher, client, stream, ctx, sessionId } = await makeTarget()
-    stream.push('permission.asked', { id: 'perm-1', sessionID: sessionId, permission: 'bash' })
-    await tick()
-
-    dispatcher.resolveApproval(`${XENG_REQUEST_PREFIX}perm-1`, 'allow')
-    expect(client.replyPermission).toHaveBeenCalledTimes(1)
-
-    // opencode echoes our own reply back on the stream.
-    stream.push('permission.replied', { sessionID: sessionId, requestID: 'perm-1', reply: 'once' })
-    await tick()
-    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-dismiss')).toBe(false)
-  })
-
-  it('dispatch timeout dismisses forwarded approvals still pending for that target', async () => {
-    vi.useFakeTimers()
-    try {
-      // The ABSOLUTE cap, deliberately: a pending approval keeps arriving as
-      // SSE traffic for the session, which bumps the inactivity clock — a turn
-      // parked on a human is not an inactive turn.
-      const { dispatcher, client, stream } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({
-          dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 60_000 }
-        })),
-        heartbeatMs: 30_000
-      })
-      holdTurn(client)
-      const ctx = makeCtx()
-      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-      await advance(0)
-
-      stream.push('permission.asked', { id: 'perm-1', sessionID: 'oc-sess-1', permission: 'bash' })
-      await advance(0)
-      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
-
-      await advance(70_000)
-      const result = await pending
-      expect(result.isError).toBe(true)
-      const dismiss = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-dismiss')
-      expect(dismiss).toBeTruthy()
-      expect(dismiss![1]).toEqual({ requestId: `${XENG_REQUEST_PREFIX}perm-1` })
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('disposeFor dismisses pending forwarded approvals of the disposed session', async () => {
-    const { dispatcher, stream, ctx, sessionId } = await makeTarget()
-    stream.push('permission.asked', { id: 'perm-9', sessionID: sessionId, permission: 'edit' })
-    await tick()
-
-    dispatcher.disposeFor(ctx.fromRoutingId)
-    const dismiss = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-dismiss')
-    expect(dismiss).toBeTruthy()
-    expect(dismiss![1]).toEqual({ requestId: `${XENG_REQUEST_PREFIX}perm-9` })
-  })
-})
-
-describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)', () => {
-  /**
-   * A client whose /event subscription DROPS on its first attempt (ends without
-   * being aborted — opencode holds the stream open for the server's lifetime,
-   * so an end is a transport drop) and behaves normally afterwards. `push`
-   * feeds the reconnected stream.
-   */
-  function makeDroppingClient(opts: { dropFirst?: boolean } = {}): {
-    client: FakeClient
-    /** Publish an event as the server would. NO REPLAY: published while no
-     *  subscription is live, it is GONE — see the ordering test. */
-    publish: (type: string, properties: Record<string, unknown>) => void
-    /** Drop the CURRENTLY live subscription, so the loop reconnects (and
-     *  reconciles) at a moment of the test's choosing. */
-    endStream: () => void
-    subscribeCount: () => number
-    liveCount: () => number
-  } {
-    const dropFirst = opts.dropFirst ?? true
-    let subscribeCount = 0
-    let liveCount = 0
-    let live = false
-    let ended = false
-    const queue: Array<{ id: string; type: string; properties: Record<string, unknown> }> = []
-    let notify: (() => void) | null = null
-    const publish = (type: string, properties: Record<string, unknown>): void => {
-      if (!live) return
-      queue.push({ id: `e-${queue.length}`, type, properties })
-      notify?.()
-      notify = null
-    }
-    async function* subscribeEvents(
-      signal?: AbortSignal,
-      onConnected?: () => void
-    ): AsyncGenerator<{ id: string; type: string; properties: Record<string, unknown> }> {
-      subscribeCount++
-      // A stream that drops before connecting never reaches `onConnected` —
-      // like the real client, which fires it only after the response is
-      // accepted. So the reconcile hangs off the SECOND (live) subscription.
-      if (dropFirst && subscribeCount === 1) return // dropped stream (ends, not aborted)
-      liveCount++
-      live = true
-      ended = false
-      try {
-        onConnected?.()
-        while (!signal?.aborted && !ended) {
-          if (queue.length === 0) {
-            await new Promise<void>((resolve) => {
-              notify = resolve
-              signal?.addEventListener('abort', () => resolve(), { once: true })
-            })
-            continue
-          }
-          yield queue.shift()!
-        }
-      } finally {
-        live = false
-      }
-    }
-    const client = { ...makeFakeClient().client, subscribeEvents }
-    // Hold the turn open so the target + its connection record stay alive
-    // across the reconnect (a resolved dispatch would tear the record down).
-    holdTurn(client)
-    return {
-      client,
-      publish,
-      endStream: (): void => {
-        ended = true
-        notify?.()
-        notify = null
-      },
-      subscribeCount: () => subscribeCount,
-      liveCount: () => liveCount
-    }
-  }
-
-  function makeReconnectDispatcher(client: FakeClient): CrossEngineDispatcher {
-    const deps: DispatcherDeps = {
-      serverManager: {
-        acquire: vi.fn(async () => ({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })),
-        release: vi.fn()
-      },
-      makeClient: () => client,
-      loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai/gpt-5' } }),
-      heartbeatMs: 50,
-      piAbortSettleGraceMs: 20,
-      sseReconnectDelayMs: 5
-    }
-    return new CrossEngineDispatcher(deps)
-  }
-
-  it('re-subscribes after a dropped SSE stream so a later permission.asked still forwards', async () => {
-    // Pre-fix runSseLoop exited on that first end and never re-subscribed,
-    // silently killing approval forwarding for the whole cwd. A
-    // permission.asked that arrives after the reconnect must still forward.
-    const { client, publish, subscribeCount, liveCount } = makeDroppingClient()
-    // The turn is genuinely still running server-side, so the reconnect's
-    // reconcile must LEAVE IT ALONE (the next test covers the other verdict).
-    client.getSessionStatus.mockResolvedValue({ 'oc-sess-1': { type: 'busy' } })
-    const dispatcher = makeReconnectDispatcher(client)
-    const ctx = makeCtx()
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-
-    // The loop must reconnect (second subscription) after the drop + delay.
-    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThanOrEqual(2))
-
-    // A permission.asked delivered on the reconnected stream forwards as before.
-    publish('permission.asked', { id: 'perm-recon', sessionID: 'oc-sess-1', permission: 'bash' })
-    await vi.waitFor(() =>
-      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
-    )
-
-    // The reconcile ran once per LIVE connection — never for the dropped one (a
-    // subscription that never connected never fires `onConnected`).
-    expect(liveCount()).toBe(1)
-    expect(client.getSessionStatus).toHaveBeenCalledTimes(1)
-
-    publish('session.idle', { sessionID: 'oc-sess-1' })
-    const result = await pending
-    expect(result.isError).toBeUndefined()
-  })
-
-  it('an idle published DURING the reconcile is delivered, not lost — the subscription is live before the status read (ordering guard)', async () => {
-    // THE ORDERING THIS PINS. Reconciling BEFORE subscribing leaves a real
-    // window: the status read answers "busy", the turn goes idle, and only THEN
-    // does the stream go live — nobody ever sees that idle and the turn falsely
-    // dies of inactivity much later. The fake below publishes the completion at
-    // the exact instant the status read answers, and (like a real SSE stream)
-    // DROPS anything published while no subscription is live. So with the old
-    // ordering this turn never settles; with the reconcile hanging off
-    // `onConnected` the stream is already receiving and the event lands.
-    const { client, publish, subscribeCount } = makeDroppingClient()
-    client.getSessionStatus.mockImplementation(async () => {
-      publish('session.idle', { sessionID: 'oc-sess-1' })
-      return { 'oc-sess-1': { type: 'busy' } }
-    })
-    const dispatcher = makeReconnectDispatcher(client)
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-
-    expect(subscribeCount()).toBeGreaterThanOrEqual(2)
-    // The reconcile itself said "still busy" — the EVENT is what settled it.
-    expect(client.getSessionStatus).toHaveBeenCalled()
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('target answer')
-  })
-
-  it('reconciles a busy turn on reconnect: a session ABSENT from the status map settles as a normal completion (the idle event was lost in the gap)', async () => {
-    // Completion now rides the SSE stream, so a `session.idle` published while
-    // the subscription was down is gone forever — without this reconcile the
-    // dispatch would hang until the watchdog aborted an already-finished turn.
-    // Absence from GET /session/status IS idle (the server deletes the entry).
-    const { client, subscribeCount } = makeDroppingClient()
-    client.getSessionStatus.mockResolvedValue({ 'some-other-session': { type: 'busy' } })
-    client.listMessages.mockResolvedValue([
-      storedAssistant({ text: 'finished during the blackout', info: { cost: 0.03 } })
-    ])
-    const dispatcher = makeReconnectDispatcher(client)
-    const ctx = makeCtx({ toolUseId: 'toolu_reconcile' })
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-
-    expect(subscribeCount()).toBeGreaterThanOrEqual(2)
-    expect(client.getSessionStatus).toHaveBeenCalled()
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('finished during the blackout')
-    // A reconciled completion is a completion — same notification/cost path.
-    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif?.[1]).toMatchObject({ status: 'completed' })
-    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.03)
-  })
-
-  it("an ABSENT verdict in the pre-busy window (history tail is THIS turn's user message) does NOT settle — the turn has not started server-side yet", async () => {
-    // THE RACE. `prompt_async` returns 204 at FORK time; the forked prompt first
-    // writes the user message and only then does runLoop mark the session busy.
-    // A reconcile landing in between sees "absent" for a turn that is about to
-    // run — settling there returns the PREVIOUS turn's assistant text and
-    // orphans the real turn. Note the history below is exactly that window:
-    // newest message = this turn's USER message, newer than turn start; the
-    // only assistant message predates the turn. A "newest message of ANY role"
-    // evidence rule passes here and settles — which is why the check reads the
-    // newest ASSISTANT message.
-    const { client, publish, subscribeCount } = makeDroppingClient()
-    client.getSessionStatus.mockResolvedValue({})
-    client.listMessages.mockResolvedValue([
-      storedAssistant({ text: 'a PREVIOUS turn', createdAt: Date.now() - 60_000 }),
-      storedUser({ createdAt: Date.now() + 5 })
-    ])
-    const dispatcher = makeReconnectDispatcher(client)
-    let settled = false
-    const pending = dispatcher
-      .dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-      .then((r) => {
-        settled = true
-        return r
-      })
-
-    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThanOrEqual(2))
-    await vi.waitFor(() => expect(client.getSessionStatus).toHaveBeenCalled())
-    await tick()
-    await tick()
-    // Pre-fix (and with a newest-message-of-any-role rule) the turn is already
-    // finished here, carrying 'a PREVIOUS turn' as its result.
-    expect(settled).toBe(false)
-
-    // The real turn then runs and ends normally, with ITS OWN result.
-    client.listMessages.mockResolvedValue([storedAssistant({ text: 'this turn, for real' })])
-    publish('session.idle', { sessionID: 'oc-sess-1' })
-    const result = await pending
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('this turn, for real')
-  })
-
-  it('an ABSENT verdict with NO assistant message in history does not settle either (no evidence at all)', async () => {
-    const { client, publish, subscribeCount } = makeDroppingClient()
-    client.getSessionStatus.mockResolvedValue({})
-    client.listMessages.mockResolvedValue([storedUser()])
-    const dispatcher = makeReconnectDispatcher(client)
-    let settled = false
-    const pending = dispatcher
-      .dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-      .then((r) => {
-        settled = true
-        return r
-      })
-
-    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThanOrEqual(2))
-    await vi.waitFor(() => expect(client.getSessionStatus).toHaveBeenCalled())
-    await tick()
-    await tick()
-    expect(settled).toBe(false)
-
-    client.listMessages.mockResolvedValue([storedAssistant({ text: 'eventually' })])
-    publish('session.idle', { sessionID: 'oc-sess-1' })
-    expect((await pending).text).toBe('eventually')
-  })
-
-  it("a RAPID continuation is not settled by the PREVIOUS turn's assistant message (the evidence comparison is strict)", async () => {
-    // The realistic shape of the pre-busy race: a dispatching model re-dispatches
-    // the same session_id within one MCP round-trip, so turn 2 starts a second or
-    // two after turn 1's assistant message was written. A reconcile landing in
-    // turn 2's pre-busy window sees "absent" and finds turn 1's assistant as the
-    // newest one — evidence ONLY if the comparison tolerates the continuation
-    // gap. This test fails with any allowance >= that gap (it was written against
-    // CLOCK_SKEW_ALLOWANCE_MS = 2_000, gap 1.5 s): turn 2 settles instantly
-    // carrying 'turn ONE text'.
-    const { client, publish, endStream, subscribeCount } = makeDroppingClient({ dropFirst: false })
-    client.getSessionStatus.mockResolvedValue({}) // absent = idle
-    const dispatcher = makeReconnectDispatcher(client)
-    const ctx = makeCtx()
-
-    // ── Turn 1 runs and completes normally.
-    client.listMessages.mockResolvedValue([storedAssistant({ text: 'turn ONE text' })])
-    const turn1 = dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
-    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThanOrEqual(1))
-    publish('session.idle', { sessionID: 'oc-sess-1' })
-    expect((await turn1).text).toBe('turn ONE text')
-
-    // ── Turn 2, 1.5 s later by the clock the evidence check compares against.
-    // History at reconcile time: turn 1's assistant (1.5 s OLD — before turn 2
-    // started) followed by turn 2's own freshly written user message.
-    client.listMessages.mockResolvedValue([
-      storedAssistant({ id: 'msg-turn-1', text: 'turn ONE text', createdAt: Date.now() - 1_500 }),
-      storedUser({ id: 'msg-user-2', createdAt: Date.now() + 5 })
-    ])
-    let settled2 = false
-    const turn2 = dispatcher
-      .dispatch({ engine: 'opencode', prompt: 'two', sessionId: 'oc-sess-1' }, ctx)
-      .then((r) => {
-        settled2 = true
-        return r
-      })
-    await tick()
-
-    // Drop the stream so the loop reconnects and reconciles INSIDE turn 2's
-    // pre-busy window.
-    const before = subscribeCount()
-    endStream()
-    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThan(before))
-    await vi.waitFor(() => expect(client.getSessionStatus).toHaveBeenCalled())
-    await tick()
-    await tick()
-    expect(settled2).toBe(false)
-
-    // Turn 2 ends on ITS OWN idle, with ITS OWN result.
-    client.listMessages.mockResolvedValue([storedAssistant({ text: 'turn TWO text' })])
-    publish('session.idle', { sessionID: 'oc-sess-1' })
-    const result2 = await turn2
-    expect(result2.isError).toBeUndefined()
-    expect(result2.text).toBe('turn TWO text')
-  })
-
-  it('a failing evidence read is treated as NO evidence — the turn stays on the watchdog rather than settling on a guess', async () => {
-    const { client, publish, subscribeCount } = makeDroppingClient()
-    client.getSessionStatus.mockResolvedValue({})
-    client.listMessages.mockRejectedValueOnce(new Error('history unavailable'))
-    const dispatcher = makeReconnectDispatcher(client)
-    let settled = false
-    const pending = dispatcher
-      .dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-      .then((r) => {
-        settled = true
-        return r
-      })
-
-    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThanOrEqual(2))
-    await vi.waitFor(() => expect(client.listMessages).toHaveBeenCalled())
-    await tick()
-    await tick()
-    expect(settled).toBe(false)
-
-    publish('session.idle', { sessionID: 'oc-sess-1' })
-    expect((await pending).text).toBe('target answer')
-  })
-
-  it('a stale "absent" verdict never settles a CONTINUATION turn started while the status GET was in flight (resolver-identity guard)', async () => {
-    // The snapshot is taken before the status GET; the GET is an await. In that
-    // window turn A can settle on the live stream AND turn B can start on the
-    // same entry with a FRESH resolver — while the status map, snapshotted
-    // server-side before B existed, still reports the session absent (= idle).
-    // Settling on that verdict would hand B the stored assistant message of A.
-    const { client, publish, subscribeCount } = makeDroppingClient()
-    let releaseStatus!: (value: Record<string, { type?: string }>) => void
-    client.getSessionStatus.mockImplementation(
-      () =>
-        new Promise<Record<string, { type?: string }>>((resolve) => {
-          releaseStatus = resolve
-        })
-    )
-    client.listMessages.mockResolvedValue([storedAssistant({ text: 'turn A text' })])
-    const dispatcher = makeReconnectDispatcher(client)
-    const ctx = makeCtx()
-
-    // Turn A, held open. The reconnect's reconcile snapshots it, then parks on
-    // the (manually released) status GET.
-    const turnA = dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
-    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThanOrEqual(2))
-    await vi.waitFor(() => expect(client.getSessionStatus).toHaveBeenCalled())
-
-    // A settles on the LIVE stream while the GET is still pending.
-    publish('session.idle', { sessionID: 'oc-sess-1' })
-    const resultA = await turnA
-    expect(resultA.text).toBe('turn A text')
-
-    // Turn B starts on the same target — a new resolver on the same entry.
-    let bSettled = false
-    const turnB = dispatcher
-      .dispatch({ engine: 'opencode', prompt: 'two', sessionId: 'oc-sess-1' }, ctx)
-      .then((r) => {
-        bSettled = true
-        return r
-      })
-    await tick()
-
-    // The stale verdict lands: absent = idle. Pre-guard, B settles right here
-    // with A's stored text.
-    releaseStatus({})
-    await tick()
-    await tick()
-    await tick()
-    expect(bSettled).toBe(false)
-
-    // B completes only on ITS OWN idle, with ITS OWN result.
-    client.listMessages.mockResolvedValue([storedAssistant({ text: 'turn B text' })])
-    publish('session.idle', { sessionID: 'oc-sess-1' })
-    const resultB = await turnB
-    expect(resultB.isError).toBeUndefined()
-    expect(resultB.text).toBe('turn B text')
-  })
-
-  it('a failing getSessionStatus never breaks the reconnect loop — the turn stays live and still settles on a later session.idle', async () => {
-    const { client, publish, subscribeCount } = makeDroppingClient()
-    client.getSessionStatus.mockRejectedValue(new Error('status unavailable'))
-    const dispatcher = makeReconnectDispatcher(client)
-    const ctx = makeCtx()
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-
-    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThanOrEqual(2))
-    publish('session.idle', { sessionID: 'oc-sess-1' })
-    const result = await pending
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('target answer')
-  })
-})
 
 // ---------------------------------------------------------------------------
 // Claude direction (ADR-033 M2 — opencode → Claude)
@@ -1877,14 +347,17 @@ describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)
  * hazard documented on `ClaudeTargetEntry`); a thrown assertion here catches
  * a regression immediately instead of silently killing a fake process.
  */
-function makeFakeClaudeTarget(): {
+function makeFakeClaudeTarget(opts: { rejectAuto?: boolean } = {}): {
   spawnClaudeQuery: SpawnClaudeQueryFn
   spawnCalls: ClaudeQuerySpawnOpts[]
   push: (msg: Partial<SDKMessage> & { type: string }) => void
   lastCanUseTool: () => ClaudeQuerySpawnOpts['canUseTool'] | undefined
   lastAbortController: () => AbortController | undefined
+  /** Every `set_permission_mode` the dispatcher sent (ADR-088 live mode). */
+  setModeCalls: string[]
 } {
   const spawnCalls: ClaudeQuerySpawnOpts[] = []
+  const setModeCalls: string[] = []
   const queue: SDKMessage[] = []
   let waiting: ((r: IteratorResult<SDKMessage>) => void) | null = null
 
@@ -1901,7 +374,17 @@ function makeFakeClaudeTarget(): {
       )
     }
   }
-  const handle = { [Symbol.asyncIterator]: () => iterator } as unknown as QueryHandle
+  const handle = {
+    [Symbol.asyncIterator]: () => iterator,
+    // cli.js answers a rejected `auto` with a control_response error, which
+    // QueryHandle.setPermissionMode throws (docs/protocol-cc, ADR-088 F3).
+    setPermissionMode: vi.fn(async (mode: string) => {
+      setModeCalls.push(mode)
+      if (opts.rejectAuto && mode === 'auto') {
+        throw new Error('set_permission_mode:auto rejected — gate not enabled')
+      }
+    })
+  } as unknown as QueryHandle
 
   const spawnClaudeQuery = vi.fn<SpawnClaudeQueryFn>(async (opts) => {
     spawnCalls.push(opts)
@@ -1922,7 +405,8 @@ function makeFakeClaudeTarget(): {
       }
     },
     lastCanUseTool: () => spawnCalls.at(-1)?.canUseTool,
-    lastAbortController: () => spawnCalls.at(-1)?.abortController
+    lastAbortController: () => spawnCalls.at(-1)?.abortController,
+    setModeCalls
   }
 }
 
@@ -2127,8 +611,10 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
   })
 
   describe('autonomy-mode inheritance', () => {
+    // ADR-088: an auto parent's Claude target runs cli.js `auto` (its own
+    // judge), never bypass; only a bypass parent still spawns bypass + skip.
     it.each([
-      ['auto', 'bypassPermissions', true],
+      ['auto', 'auto', false],
       ['bypassPermissions', 'bypassPermissions', true],
       ['plan', 'default', false],
       ['default', 'default', false],
@@ -2154,6 +640,161 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
         expect(target.spawnCalls[0].allowDangerouslySkipPermissions).toBe(expectedSkip)
       }
     )
+
+    it('R2: a `full` parent spawns the Claude target in cli.js `auto` (never the invalid mode `full`)', async () => {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x' },
+        makeCtx({ fromEngine: 'opencode', autonomyMode: 'full' })
+      )
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg())
+      await pending
+      expect(target.spawnCalls[0].permissionMode).toBe('auto')
+      expect(target.spawnCalls[0].allowDangerouslySkipPermissions).toBe(false)
+    })
+
+    it('T9: the pushed prompt carries DISPATCH_PROMPT_PREAMBLE, so cli.js’s judge never reads it as the user’s words', async () => {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'tidy the build dir' },
+        makeCtx({ fromEngine: 'opencode', autonomyMode: 'auto' })
+      )
+      await tick()
+      const first = await target.spawnCalls[0].prompt[Symbol.asyncIterator]().next()
+      const message = (first.value as { message: { content: string } }).message
+      expect(message.content).toBe(DISPATCH_PROMPT_PREAMBLE + 'tidy the build dir')
+      expect(target.spawnCalls[0].permissionMode).toBe('auto')
+      expect(target.spawnCalls[0].allowDangerouslySkipPermissions).toBe(false)
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg())
+      await pending
+    })
+
+    async function liveClaude(rejectAuto = false) {
+      const target = makeFakeClaudeTarget({ rejectAuto })
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      let mode = 'default'
+      const ctx = makeCtx({ fromEngine: 'opencode', getAutonomyMode: () => mode })
+      const first = dispatcher.dispatch({ engine: 'claude', prompt: 'one' }, ctx)
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg())
+      await first
+      const turn = async (prompt: string): Promise<void> => {
+        const next = dispatcher.dispatch(
+          { engine: 'claude', prompt, sessionId: 'claude-sess-1' },
+          ctx
+        )
+        await tick()
+        target.push(resultMsg())
+        expect((await next).isError).toBeUndefined()
+      }
+      return { target, ctx, turn, setMode: (m: string) => (mode = m) }
+    }
+
+    it('T11: a continuation after the parent switched default → auto applies auto ONCE; the same mode again sends nothing', async () => {
+      const live = await liveClaude()
+      expect(live.target.spawnCalls[0].permissionMode).toBe('default')
+      live.setMode('auto')
+      await live.turn('two')
+      expect(live.target.setModeCalls).toEqual(['auto'])
+      await live.turn('three')
+      expect(live.target.setModeCalls).toEqual(['auto'])
+      expect(live.target.spawnCalls).toHaveLength(1)
+    })
+
+    it('F9: spawn bookkeeping — an auto-spawned target continuing in auto sends NO set_permission_mode', async () => {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', autonomyMode: 'auto' })
+      const first = dispatcher.dispatch({ engine: 'claude', prompt: 'one' }, ctx)
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg())
+      await first
+      const second = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+        ctx
+      )
+      await tick()
+      target.push(resultMsg())
+      await second
+      expect(target.setModeCalls).toEqual([])
+    })
+
+    it('F9: spawn bookkeeping — a bypass-spawned target continuing in bypass sends NO set_permission_mode', async () => {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', autonomyMode: 'bypassPermissions' })
+      const first = dispatcher.dispatch({ engine: 'claude', prompt: 'one' }, ctx)
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg())
+      await first
+      const second = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+        ctx
+      )
+      await tick()
+      target.push(resultMsg())
+      await second
+      expect(target.setModeCalls).toEqual([])
+    })
+
+    it('T11: a rejected auto falls back to default with ONE warning, and is not retried', async () => {
+      const live = await liveClaude(true)
+      live.setMode('auto')
+      await live.turn('two')
+      expect(live.target.setModeCalls).toEqual(['auto', 'default'])
+      await live.turn('three')
+      expect(live.target.setModeCalls).toEqual(['auto', 'default'])
+      const warnings = live.ctx.emit.mock.calls.filter((c) => c[0] === 'session:warning')
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0][1]).toContain('auto mode was rejected')
+    })
+
+    it('a mid-turn switch reaches the process at the target’s next tool ask', async () => {
+      const live = await liveClaude()
+      const pending = live.target.spawnCalls[0]
+      live.setMode('acceptEdits')
+      const ask = pending.canUseTool('Bash', { command: 'ls' }, {
+        signal: new AbortController().signal,
+        toolUseId: 'toolu_inner'
+      } as never)
+      await tick()
+      expect(live.target.setModeCalls).toEqual(['acceptEdits'])
+      // The ask in hand still goes to the human (it was produced under the old mode).
+      expect(live.ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
+      void ask
+    })
+
+    it('a bypass parent switching a non-bypass process applies default (the skip flag is spawn-only)', async () => {
+      const live = await liveClaude()
+      live.setMode('acceptEdits')
+      await live.turn('two')
+      live.setMode('bypassPermissions')
+      await live.turn('three')
+      expect(live.target.setModeCalls).toEqual(['acceptEdits', 'default'])
+    })
   })
 
   describe('timeout / abort', () => {
@@ -2533,6 +1174,189 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
     expect(core.getSnapshot().seq - before).toBe(reliableItemEvents)
   })
 
+  /**
+   * An idle self-resume of a background agent INSIDE the target (Patch E):
+   * its stream events carry `agent_id` and no `parent_tool_use_id`, while its
+   * snapshots arrive under the agent's ORIGIN Agent call. Before the fix they
+   * opened on the target's ROOT lane — the agent's `message_start` finished
+   * the root message in flight, whose later deltas then streamed into the
+   * agent's message.
+   */
+  it("routes an agent_id-only frame to its agent's origin lane, and drops one no task_started placed", async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'outer-owner' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-agent-id' } as SDKMessage)
+    const frame = (agentId: string | undefined, event: Record<string, unknown>): SDKMessage =>
+      ({
+        type: 'stream_event',
+        ...(agentId ? { agent_id: agentId } : {}),
+        event
+      }) as unknown as SDKMessage
+    const textStart = { type: 'content_block_start', index: 0, content_block: { type: 'text' } }
+    const text = (t: string): Record<string, unknown> => ({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text: t }
+    })
+
+    // The agent's first run: the origin, then a SendMessage run of it.
+    target.push({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'agent-x',
+      tool_use_id: 'native-origin'
+    } as SDKMessage)
+    target.push({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'agent-x',
+      tool_use_id: 'native-run-2'
+    } as SDKMessage)
+    target.push(frame(undefined, { type: 'message_start', message: { id: 'root-message' } }))
+    target.push(frame(undefined, textStart))
+    target.push(frame(undefined, text('root ')))
+    target.push(frame('agent-x', { type: 'message_start', message: { id: 'agent-message' } }))
+    target.push(frame('agent-x', textStart))
+    target.push(frame('agent-x', text('agent')))
+    target.push(frame('agent-unknown', { type: 'message_start', message: { id: 'lost-message' } }))
+    target.push(frame('agent-unknown', textStart))
+    target.push(frame('agent-unknown', text('lost')))
+    target.push(frame(undefined, text('continues')))
+    // The relay parents the agent's snapshot to the origin: same lane as its partials.
+    target.push({
+      type: 'assistant',
+      parent_tool_use_id: 'native-origin',
+      message: {
+        id: 'agent-message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'agent' }]
+      }
+    } as unknown as SDKMessage)
+    await tick()
+    target.push(resultMsg({ result: 'done' }))
+    await pending
+
+    const chunksByMessage = new Map<string, string>()
+    for (const [channel, payload] of ctx.emit.mock.calls) {
+      if (channel !== 'session:item-delta') continue
+      const { target: t, chunk } = payload as { target: { messageId: string }; chunk: string }
+      chunksByMessage.set(t.messageId, (chunksByMessage.get(t.messageId) ?? '') + chunk)
+    }
+    expect(Object.fromEntries(chunksByMessage)).toEqual({
+      'root-message': 'root continues',
+      'agent-message': 'agent'
+    })
+    // The unplaceable agent reaches nothing, the root included.
+    expect(JSON.stringify(ctx.emit.mock.calls)).not.toContain('lost-message')
+    // The snapshot found the partials' state instead of arriving as a stray message.
+    expect(
+      ctx.emit.mock.calls.filter(
+        ([channel, payload]) =>
+          channel === 'session:subagent-message' &&
+          (payload as { message: { id: string } }).message.id === 'agent-message'
+      )
+    ).toEqual([])
+  })
+
+  /**
+   * A SendMessage-resumed run INSIDE the target (ADR-073 §1): cli.js re-emits
+   * `task_started` for the same task_id under the SendMessage call's id, the
+   * run's stream events carry that id as `parent_tool_use_id`, and its
+   * completed snapshots carry the ORIGIN's. Before the fix the two used
+   * different lane keys: the snapshot missed the partials' state and fell back
+   * to a plain `session:subagent-message`, and the partial lane sealed alone.
+   */
+  it("places a SendMessage-resumed run's partials and snapshot on one lane, the origin's", async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'outer-owner' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-run-2' } as SDKMessage)
+    const frame = (parent: string, event: Record<string, unknown>): SDKMessage =>
+      ({ type: 'stream_event', parent_tool_use_id: parent, event }) as unknown as SDKMessage
+    const started = (toolUseId: string): SDKMessage =>
+      ({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'agent-r',
+        tool_use_id: toolUseId
+      }) as SDKMessage
+
+    target.push(started('native-origin'))
+    target.push(started('native-sendmessage'))
+    target.push(
+      frame('native-sendmessage', { type: 'message_start', message: { id: 'run2-message' } })
+    )
+    target.push(
+      frame('native-sendmessage', {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' }
+      })
+    )
+    target.push(
+      frame('native-sendmessage', {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'resumed ' }
+      })
+    )
+    // The relay parents the run's snapshot to the ORIGIN, mid-stream.
+    target.push({
+      type: 'assistant',
+      parent_tool_use_id: 'native-origin',
+      message: {
+        id: 'run2-message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'resumed ' }]
+      }
+    } as unknown as SDKMessage)
+    target.push(
+      frame('native-sendmessage', {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'work' }
+      })
+    )
+    target.push(frame('native-sendmessage', { type: 'content_block_stop', index: 0 }))
+    target.push(frame('native-sendmessage', { type: 'message_stop' }))
+    await tick()
+    target.push(resultMsg({ result: 'done' }))
+    await pending
+
+    // One item stream for the run's message, fed every delta.
+    const opens = ctx.emit.mock.calls.filter(
+      ([channel, payload]) =>
+        channel === 'session:item-open' &&
+        (payload as { target: { messageId: string } }).target.messageId === 'run2-message'
+    )
+    expect(opens).toHaveLength(1)
+    const chunks = ctx.emit.mock.calls
+      .filter(([channel]) => channel === 'session:item-delta')
+      .map(([, payload]) => payload as { target: { messageId: string }; chunk: string })
+      .filter((d) => d.target.messageId === 'run2-message')
+      .map((d) => d.chunk)
+    expect(chunks.join('')).toBe('resumed work')
+    // The snapshot found the partials' state instead of arriving as a stray message.
+    expect(
+      ctx.emit.mock.calls.filter(
+        ([channel, payload]) =>
+          channel === 'session:subagent-message' &&
+          (payload as { message: { id: string } }).message.id === 'run2-message'
+      )
+    ).toEqual([])
+  })
+
   it('toolUseId set: forwards stream_event deltas + assistant messages + heartbeat progress + a final "completed" notification', async () => {
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
@@ -2761,426 +1585,6 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
   })
 })
 
-describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/notification/stop)', () => {
-  it('forwards message.part.updated as a subagent-message while the turn is busy, plus a final "completed" notification', async () => {
-    const { dispatcher, client, stream } = makeHarness({ heartbeatMs: 20 })
-    holdTurn(client)
-    const ctx = makeCtx({ toolUseId: 'toolu_oc_1' })
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-
-    stream.push('message.part.updated', {
-      sessionID: 'oc-sess-1',
-      part: { id: 'part-1', messageID: 'msg-1', type: 'text', text: 'partial output' }
-    })
-    await tick()
-
-    expect(ctx.emit).toHaveBeenCalledWith(
-      'session:item-open',
-      expect.objectContaining({
-        target: expect.objectContaining({ ownerToolUseId: 'toolu_oc_1', kind: 'text' }),
-        message: expect.objectContaining({ content: [{ type: 'text', text: 'partial output' }] })
-      })
-    )
-
-    await new Promise((r) => setTimeout(r, 30))
-    const progressCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-progress')
-    expect(progressCall?.[1]).toMatchObject({ toolUseId: 'toolu_oc_1', toolName: 'dispatch_agent' })
-
-    completeTurn(stream)
-    const result = await pending
-    expect(result.isError).toBeUndefined()
-
-    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif?.[1]).toMatchObject({
-      taskId: 'oc-sess-1',
-      toolUseId: 'toolu_oc_1',
-      status: 'completed'
-    })
-  })
-
-  it('forwards message.part.delta as an addressed text delta', async () => {
-    const { dispatcher, client, stream } = makeHarness()
-    holdTurn(client)
-    const ctx = makeCtx({ toolUseId: 'toolu_oc_2' })
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-
-    // A text part must exist before a delta against it is meaningful.
-    stream.push('message.part.updated', {
-      sessionID: 'oc-sess-1',
-      part: { id: 'part-1', messageID: 'msg-1', type: 'text', text: '' }
-    })
-    await tick()
-    stream.push('message.part.delta', {
-      sessionID: 'oc-sess-1',
-      messageID: 'msg-1',
-      partID: 'part-1',
-      field: 'text',
-      delta: 'streaming chunk'
-    })
-    await tick()
-
-    expect(ctx.emit).toHaveBeenCalledWith('session:item-delta', {
-      target: expect.objectContaining({ ownerToolUseId: 'toolu_oc_2', kind: 'text' }),
-      chunk: 'streaming chunk'
-    })
-
-    completeTurn(stream)
-    await pending
-  })
-
-  it('forwards a completed tool part as ONE session:subagent-tool-result (dedup across the re-emitted message), with fileDiffs + images', async () => {
-    // opencode ChatMessages carry `tool_use` blocks only — results are a
-    // separate channel. Without this forwarding the dispatch TaskCard's tool
-    // chips spin forever (the Claude/pi taps have always emitted them).
-    const { dispatcher, client, stream } = makeHarness()
-    holdTurn(client)
-    const ctx = makeCtx({ toolUseId: 'toolu_oc_toolres' })
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-
-    // Still running — nothing to report yet.
-    stream.push('message.part.updated', {
-      sessionID: 'oc-sess-1',
-      part: {
-        id: 'part-tool-1',
-        messageID: 'msg-1',
-        type: 'tool',
-        tool: 'edit',
-        callID: 'call-1',
-        state: { status: 'running', input: { filePath: '/repo/a.ts' } }
-      }
-    })
-    await tick()
-    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:subagent-tool-result')).toBe(false)
-
-    stream.push('message.part.updated', {
-      sessionID: 'oc-sess-1',
-      part: {
-        id: 'part-tool-1',
-        messageID: 'msg-1',
-        type: 'tool',
-        tool: 'edit',
-        callID: 'call-1',
-        state: {
-          status: 'completed',
-          input: { filePath: '/repo/a.ts' },
-          output: 'edited 1 file',
-          metadata: {
-            filediff: { file: '/repo/a.ts', patch: '@@ -1 +1 @@', additions: 1, deletions: 0 }
-          },
-          attachments: [
-            {
-              type: 'file',
-              mime: 'image/png',
-              url: 'data:image/png;base64,QUJD',
-              filename: 'shot.png'
-            }
-          ]
-        }
-      }
-    })
-    await tick()
-    // A SIBLING part updating re-emits the WHOLE rebuilt message (the mapper's
-    // upsert-by-message-id model) — the tool result must not repeat.
-    stream.push('message.part.updated', {
-      sessionID: 'oc-sess-1',
-      part: { id: 'part-text-1', messageID: 'msg-1', type: 'text', text: 'and done' }
-    })
-    await tick()
-
-    const results = ctx.emit.mock.calls.filter((c) => c[0] === 'session:subagent-tool-result')
-    expect(results).toHaveLength(1)
-    expect(results[0][1]).toMatchObject({
-      toolUseId: 'toolu_oc_toolres',
-      toolResultToolUseId: 'call-1',
-      result: 'edited 1 file',
-      isError: false,
-      fileDiffs: [expect.objectContaining({ path: '/repo/a.ts', patch: '@@ -1 +1 @@' })],
-      images: [
-        expect.objectContaining({
-          mediaType: 'image/png',
-          base64Data: 'QUJD',
-          fileName: 'shot.png'
-        })
-      ]
-    })
-
-    completeTurn(stream)
-    await pending
-  })
-
-  it('a tool part that ENDED IN ERROR forwards its failure text with isError true', async () => {
-    const { dispatcher, client, stream } = makeHarness()
-    holdTurn(client)
-    const ctx = makeCtx({ toolUseId: 'toolu_oc_toolerr' })
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-
-    stream.push('message.part.updated', {
-      sessionID: 'oc-sess-1',
-      part: {
-        id: 'part-tool-9',
-        messageID: 'msg-9',
-        type: 'tool',
-        tool: 'bash',
-        callID: 'call-9',
-        state: { status: 'error', input: { command: 'false' }, error: 'user denied: use git clean' }
-      }
-    })
-    await tick()
-
-    const results = ctx.emit.mock.calls.filter((c) => c[0] === 'session:subagent-tool-result')
-    expect(results).toHaveLength(1)
-    expect(results[0][1]).toMatchObject({
-      toolResultToolUseId: 'call-9',
-      result: 'user denied: use git clean',
-      isError: true
-    })
-
-    completeTurn(stream)
-    await pending
-  })
-
-  it('message.updated is routed into the tap (mapEvent needs it for the role) but emits nothing itself', async () => {
-    const { dispatcher, client, stream } = makeHarness()
-    holdTurn(client)
-    const ctx = makeCtx({ toolUseId: 'toolu_oc_msgupd' })
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-
-    stream.push('message.updated', {
-      sessionID: 'oc-sess-1',
-      info: { id: 'msg-1', role: 'assistant', cost: 0.01, tokens: { input: 5, output: 1 } }
-    })
-    await tick()
-    // cost_update / ignore outputs are the tap's explicit no-op default.
-    expect(
-      ctx.emit.mock.calls.filter((c) => RELEVANT_SUBAGENT_CHANNELS.includes(c[0]))
-    ).toHaveLength(0)
-
-    // ...and the role it recorded is what lets the message's parts render.
-    stream.push('message.part.updated', {
-      sessionID: 'oc-sess-1',
-      part: { id: 'part-1', messageID: 'msg-1', type: 'text', text: 'assistant text' }
-    })
-    await tick()
-    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:item-open')).toBe(true)
-
-    completeTurn(stream)
-    await pending
-  })
-
-  it("a PRIOR turn's republished parts never leak into a continuation turn's card (post-abort interrupted-part rewrite)", async () => {
-    // Verified fork behaviour: aborting a turn does not silence it. The
-    // processor waits 250 ms for in-flight tool calls, then rewrites each one as
-    // status:'error' / interrupted — publishing message.part.updated for the OLD
-    // turn's message, which can land inside a quick continuation's busy window.
-    // Pre-fix all three assertions below fail: the old message re-emits as a
-    // subagent-message on the NEW card, its (already reported) tool result
-    // re-emits with it — `emittedToolResults` used to reset per turn — and its
-    // tool_use id inflates the new turn's toolUses to 1.
-    const { dispatcher, client, stream } = makeHarness()
-    holdTurn(client)
-    const ctx = makeCtx({ toolUseId: 'toolu_turn_1' })
-
-    // ── Turn 1: one completed tool call, then a normal completion.
-    const turn1 = dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
-    await tick()
-    stream.push('message.part.updated', {
-      sessionID: 'oc-sess-1',
-      part: {
-        id: 'part-tool-1',
-        messageID: 'msg-turn-1',
-        type: 'tool',
-        tool: 'bash',
-        callID: 'call-1',
-        state: { status: 'completed', input: { command: 'ls' }, output: 'a.ts' }
-      }
-    })
-    await tick()
-    expect(ctx.emit.mock.calls.filter((c) => c[0] === 'session:subagent-tool-result')).toHaveLength(
-      1
-    )
-    completeTurn(stream)
-    await turn1
-
-    // ── Turn 2 on the same target, held open.
-    const ctx2 = makeCtx({ toolUseId: 'toolu_turn_2' })
-    const turn2 = dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'two', sessionId: 'oc-sess-1' },
-      ctx2
-    )
-    await tick()
-
-    // The abandoned turn-1 tool part, republished as interrupted, arrives now.
-    stream.push('message.part.updated', {
-      sessionID: 'oc-sess-1',
-      part: {
-        id: 'part-tool-1',
-        messageID: 'msg-turn-1',
-        type: 'tool',
-        tool: 'bash',
-        callID: 'call-1',
-        state: {
-          status: 'error',
-          input: { command: 'ls' },
-          error: 'Tool execution aborted',
-          metadata: { interrupted: true }
-        }
-      }
-    })
-    await tick()
-
-    expect(ctx2.emit.mock.calls.some((c) => c[0] === 'session:subagent-message')).toBe(false)
-    expect(ctx2.emit.mock.calls.some((c) => c[0] === 'session:subagent-tool-result')).toBe(false)
-
-    completeTurn(stream)
-    await turn2
-    const notif2 = ctx2.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif2?.[1]).toMatchObject({ status: 'completed' })
-    expect((notif2![1] as { usage?: { toolUses: number } }).usage?.toolUses).toBe(0)
-  })
-
-  it("a continuation turn's OWN new message still streams normally (the prior-message gate is not a blanket mute)", async () => {
-    const { dispatcher, client, stream } = makeHarness()
-    holdTurn(client)
-    const ctx = makeCtx({ toolUseId: 'toolu_gate_1' })
-    const turn1 = dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
-    await tick()
-    stream.push('message.part.updated', {
-      sessionID: 'oc-sess-1',
-      part: { id: 'part-1', messageID: 'msg-turn-1', type: 'text', text: 'turn one' }
-    })
-    await tick()
-    completeTurn(stream)
-    await turn1
-
-    const ctx2 = makeCtx({ toolUseId: 'toolu_gate_2' })
-    const turn2 = dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'two', sessionId: 'oc-sess-1' },
-      ctx2
-    )
-    await tick()
-    stream.push('message.part.updated', {
-      sessionID: 'oc-sess-1',
-      part: { id: 'part-2', messageID: 'msg-turn-2', type: 'text', text: 'turn two' }
-    })
-    await tick()
-
-    const open = ctx2.emit.mock.calls.find((c) => c[0] === 'session:item-open')
-    expect(open?.[1]).toMatchObject({
-      target: { ownerToolUseId: 'toolu_gate_2' },
-      message: { content: [{ type: 'text', text: 'turn two' }] }
-    })
-
-    completeTurn(stream)
-    await turn2
-  })
-
-  it('toolUseId ABSENT: zero subagent/task emits, dispatch still succeeds', async () => {
-    const { dispatcher, stream } = makeHarness()
-    const ctx = makeCtx() // no toolUseId
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-    stream.push('message.part.updated', {
-      sessionID: 'oc-sess-1',
-      part: { id: 'part-1', messageID: 'msg-1', type: 'text', text: 'partial output' }
-    })
-    await tick()
-    const result = await pending
-    expect(result.isError).toBeUndefined()
-
-    expect(
-      ctx.emit.mock.calls.filter((c) => RELEVANT_SUBAGENT_CHANNELS.includes(c[0]))
-    ).toHaveLength(0)
-  })
-
-  it('a foreign session id (not a registered target) never emits stream/message events', async () => {
-    const { dispatcher, client, stream } = makeHarness()
-    holdTurn(client)
-    const ctx = makeCtx({ toolUseId: 'toolu_oc_3' })
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-
-    stream.push('message.part.updated', {
-      sessionID: 'some-other-session',
-      part: { id: 'part-1', messageID: 'msg-1', type: 'text', text: 'not ours' }
-    })
-    await tick()
-    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:subagent-message')).toBe(false)
-
-    completeTurn(stream)
-    await pending
-  })
-
-  it('stray SSE chatter after the turn ends (busy=false) never emits stream/message events', async () => {
-    const { dispatcher, client, stream } = makeHarness()
-    const ctx = makeCtx({ toolUseId: 'toolu_oc_4' })
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.isError).toBeUndefined()
-
-    stream.push('message.part.updated', {
-      sessionID: 'oc-sess-1',
-      part: { id: 'part-1', messageID: 'msg-1', type: 'text', text: 'late chatter' }
-    })
-    await tick()
-    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:subagent-message')).toBe(false)
-    void client
-  })
-
-  it('stopDispatch aborts the target session server-side, emits a "stopped" notification, and the dispatch resolves isError', async () => {
-    const { dispatcher, client } = makeHarness()
-    holdTurn(client)
-    const ctx = makeCtx({ toolUseId: 'toolu_oc_stop' })
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-
-    expect(dispatcher.stopDispatch('toolu_oc_stop')).toBe(true)
-
-    const result = await pending
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('stopped')
-    expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
-
-    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_oc_stop', status: 'stopped' })
-  })
-
-  it('Stop DURING createSession: handle registered before any await; dispatch still ends stopped', async () => {
-    // Mirror of the Claude-direction mid-spawn test — a cold per-cwd opencode
-    // server spawn can take ~15s, and the Stop handle used to be registered
-    // only after target creation (live-reproduced miss).
-    const { dispatcher, client } = makeHarness()
-    let releaseCreate!: () => void
-    client.createSession.mockImplementation(
-      () =>
-        new Promise((r) => {
-          releaseCreate = (): void => r({ id: 'oc-sess-1' })
-        })
-    )
-    // Deterministic race outcome: the (never-reached-in-reality) instant turn
-    // must not beat the pre-resolved stop arm.
-    holdTurn(client)
-    const ctx = makeCtx({ fromRoutingId: 'routing-owner', toolUseId: 'toolu_oc_create_stop' })
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-
-    // Still inside the (gated) createSession — the Stop handle must already exist.
-    expect(dispatcher.stopDispatch('toolu_oc_create_stop', 'routing-owner')).toBe(true)
-
-    releaseCreate()
-    const result = await pending
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('stopped')
-    expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
-
-    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_oc_create_stop', status: 'stopped' })
-  })
-})
-
 // ---------------------------------------------------------------------------
 // ADR-033 M3 — durable stop-intent (armIfUnknown): the renderer's Stop click
 // can arrive BEFORE dispatch() is even invoked (opencode marks the tool part
@@ -3190,34 +1594,6 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
 // ---------------------------------------------------------------------------
 
 describe('CrossEngineDispatcher — durable stop-intent (armIfUnknown)', () => {
-  it('arm on an unknown id returns true; the NEXT dispatch with that id+routingId stops at start; the intent is consumed', async () => {
-    const { dispatcher, client } = makeHarness()
-    // Realistic: the first turn would take a while (also keeps the race
-    // deterministic — the instant default turn mock must not beat the
-    // pre-resolved stop arm).
-    client.promptAsync.mockImplementationOnce(async () => {})
-
-    // Stop clicked before the dispatch reached the main process.
-    expect(dispatcher.stopDispatch('toolu_pre_stop', 'routing-owner', { armIfUnknown: true })).toBe(
-      true
-    )
-
-    const ctx = makeCtx({ fromRoutingId: 'routing-owner', toolUseId: 'toolu_pre_stop' })
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('stopped')
-    expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
-
-    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_pre_stop', status: 'stopped' })
-
-    // CONSUMED: a second dispatch reusing the id runs to normal completion.
-    const ctx2 = makeCtx({ fromRoutingId: 'routing-owner', toolUseId: 'toolu_pre_stop' })
-    const result2 = await dispatcher.dispatch({ engine: 'opencode', prompt: 'y' }, ctx2)
-    expect(result2.isError).toBeUndefined()
-    expect(result2.text).toBe('target answer')
-  })
-
   it('a pre-armed intent also stops a Claude-direction dispatch at start', async () => {
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
@@ -3241,101 +1617,68 @@ describe('CrossEngineDispatcher — durable stop-intent (armIfUnknown)', () => {
     const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
     expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_pre_claude', status: 'stopped' })
   })
-
-  it('an EXPIRED intent is ignored — the dispatch runs normally (injected clock)', async () => {
-    let currentTime = 1_000_000
-    const { dispatcher } = makeHarness({ now: () => currentTime })
-    expect(dispatcher.stopDispatch('toolu_expired', 'routing-owner', { armIfUnknown: true })).toBe(
-      true
-    )
-
-    currentTime += 61_000 // past the 60s TTL
-
-    const ctx = makeCtx({ fromRoutingId: 'routing-owner', toolUseId: 'toolu_expired' })
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('target answer')
-  })
-
-  it('an intent armed by a DIFFERENT session does not stop the dispatch (ownership honored at consumption)', async () => {
-    const { dispatcher } = makeHarness()
-    expect(
-      dispatcher.stopDispatch('toolu_foreign_arm', 'routing-intruder', { armIfUnknown: true })
-    ).toBe(true)
-
-    const ctx = makeCtx({ fromRoutingId: 'routing-owner', toolUseId: 'toolu_foreign_arm' })
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('target answer')
-  })
-
-  it('arming purges other EXPIRED intents (lazy cleanup, no timer)', async () => {
-    let currentTime = 1_000_000
-    const { dispatcher } = makeHarness({ now: () => currentTime })
-    dispatcher.stopDispatch('toolu_old', 'routing-owner', { armIfUnknown: true })
-    currentTime += 61_000
-    dispatcher.stopDispatch('toolu_new', 'routing-owner', { armIfUnknown: true })
-
-    // toolu_old expired AND was purged by the second arm — a dispatch with it
-    // runs normally (this also holds via the lazy-expiry consume check; the
-    // purge keeps the map from growing unboundedly).
-    const ctx = makeCtx({ fromRoutingId: 'routing-owner', toolUseId: 'toolu_old' })
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('target answer')
-  })
 })
 
 // ---------------------------------------------------------------------------
 // ADR-033 M4-A — crossEngineDispatchAvailable capability helper
 // ---------------------------------------------------------------------------
 
-describe('crossEngineDispatchAvailable (ADR-030/M4-A)', () => {
-  it("'opencode' is always true — Claude is ClaudeUI's bundled default engine", () => {
-    expect(crossEngineDispatchAvailable('opencode')).toBe(true)
+describe('crossEngineDispatchAvailable (ADR-030/M4-A, ADR-082)', () => {
+  const setInstalled = (claude: boolean, opencode: boolean, pi: boolean, codex: boolean): void => {
+    Object.assign(harnessInstalled, { claude, opencode, pi, codex })
+  }
+  afterEach(() => {
+    setInstalled(true, true, true, false)
   })
 
   it("'claude' is true when ANY of its three targets is installed, false when none is (slice H)", () => {
-    const spy = vi.spyOn(opencodeServerManager, 'isBinaryAvailable')
-    vi.mocked(codexBinaryAvailable).mockReturnValue(false)
-    vi.mocked(piBinaryAvailable).mockReturnValue(false)
-
-    spy.mockReturnValue(true)
+    setInstalled(true, true, false, false)
     expect(crossEngineDispatchAvailable('claude')).toBe(true)
-    spy.mockReturnValue(false)
+    setInstalled(true, false, false, false)
     expect(crossEngineDispatchAvailable('claude')).toBe(false)
 
     // pi alone is enough — M4c made pi a Claude target but left this branch
     // asking only about opencode, so a pi-only machine hid the tool.
-    vi.mocked(piBinaryAvailable).mockReturnValue(true)
+    setInstalled(true, false, true, false)
     expect(crossEngineDispatchAvailable('claude')).toBe(true)
-    vi.mocked(piBinaryAvailable).mockReturnValue(false)
 
     // codex alone is enough (slice H).
-    vi.mocked(codexBinaryAvailable).mockReturnValue(true)
+    setInstalled(true, false, false, true)
     expect(crossEngineDispatchAvailable('claude')).toBe(true)
-
-    spy.mockRestore()
-    vi.mocked(codexBinaryAvailable).mockReturnValue(false)
-    vi.mocked(piBinaryAvailable).mockReturnValue(true)
   })
 
-  it("'pi' mirrors piBinaryAvailable() (ADR-033 M4c)", () => {
-    vi.mocked(piBinaryAvailable).mockReturnValueOnce(true)
+  it("'opencode' is no longer unconditionally true: Claude Code can resolve to nothing (ADR-082)", () => {
+    setInstalled(true, false, false, false)
+    expect(crossEngineDispatchAvailable('opencode')).toBe(true)
+    setInstalled(false, false, false, false)
+    expect(crossEngineDispatchAvailable('opencode')).toBe(false)
+    // Any other target is enough while Claude Code is unavailable.
+    setInstalled(false, false, true, false)
+    expect(crossEngineDispatchAvailable('opencode')).toBe(true)
+    setInstalled(false, false, false, true)
+    expect(crossEngineDispatchAvailable('opencode')).toBe(true)
+    // opencode itself is not a target of opencode (the same-engine guard).
+    setInstalled(false, true, false, false)
+    expect(crossEngineDispatchAvailable('opencode')).toBe(false)
+  })
+
+  it("'pi' asks about its targets, not about pi itself", () => {
+    setInstalled(true, false, false, false)
     expect(crossEngineDispatchAvailable('pi')).toBe(true)
-    vi.mocked(piBinaryAvailable).mockReturnValueOnce(false)
+    setInstalled(false, false, true, false)
     expect(crossEngineDispatchAvailable('pi')).toBe(false)
-    vi.mocked(piBinaryAvailable).mockReturnValue(true)
+    setInstalled(false, true, true, false)
+    expect(crossEngineDispatchAvailable('pi')).toBe(true)
   })
 
-  it("'codex' is always true — Claude, one of its three targets, is always installed (slice E)", () => {
-    // Neither of the two OPTIONAL target binaries being present may change the
-    // answer: the claude target needs nothing installed, so a Codex session
-    // always has somewhere to dispatch to.
-    const spy = vi.spyOn(opencodeServerManager, 'isBinaryAvailable').mockReturnValue(false)
-    vi.mocked(piBinaryAvailable).mockReturnValueOnce(false)
+  it("'codex' counts Codex itself as a target (ADR-069 §7), and Claude Code no longer by default", () => {
+    setInstalled(false, false, false, false)
+    expect(crossEngineDispatchAvailable('codex')).toBe(false)
+    setInstalled(true, false, false, false)
     expect(crossEngineDispatchAvailable('codex')).toBe(true)
-    spy.mockRestore()
+    // codex → codex is one more thread on the caller's host.
+    setInstalled(false, false, false, true)
+    expect(crossEngineDispatchAvailable('codex')).toBe(true)
   })
 })
 
@@ -3344,16 +1687,6 @@ describe('crossEngineDispatchAvailable (ADR-030/M4-A)', () => {
 // ---------------------------------------------------------------------------
 
 describe('CrossEngineDispatcher — Codex-sourced dispatches', () => {
-  it('runs a codex→opencode dispatch instead of refusing it as unimplemented', async () => {
-    const { dispatcher } = makeHarness()
-    const result = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'x' },
-      makeCtx({ fromEngine: 'codex', fromRoutingId: 'routing-codex' })
-    )
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('target answer')
-  })
-
   it('runs codex→codex — ADR-069 §7 lifted the same-engine guard for this engine alone', async () => {
     // It was never a policy: a same-engine dispatch used to mean a SECOND
     // app-server per dispatch. A target is one more `thread/start` on the
@@ -3405,215 +1738,6 @@ describe('CrossEngineDispatcher — Codex-sourced dispatches', () => {
 // ---------------------------------------------------------------------------
 // ADR-033 M4-B — usage capture + attribution
 // ---------------------------------------------------------------------------
-
-describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', () => {
-  it("captures tokens/cost from the final assistant message's info on success — populates notification.usage and records a row", async () => {
-    const recordUsageEvent = vi.fn()
-    const { dispatcher, client } = makeHarness({ recordUsageEvent })
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({
-        text: 'ok',
-        info: { tokens: { input: 100, output: 50, reasoning: 10 }, cost: 0.02 }
-      })
-    ])
-    const ctx = makeCtx({ toolUseId: 'toolu_usage_1' })
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.isError).toBeUndefined()
-
-    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif?.[1]).toMatchObject({ status: 'completed' })
-    const usage = (
-      notif![1] as { usage?: { totalTokens: number; toolUses: number; durationMs: number } }
-    ).usage
-    expect(usage).toBeTruthy()
-    expect(usage!.totalTokens).toBe(160) // 100 + 50 + 10
-    expect(usage!.toolUses).toBe(0)
-    expect(usage!.durationMs).toEqual(expect.any(Number))
-
-    expect(recordUsageEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        parentRoutingId: 'routing-1',
-        origin: 'dispatch',
-        engineId: 'opencode',
-        vendorId: 'openai',
-        modelId: 'gpt-5',
-        sessionId: 'oc-sess-1',
-        messageId: expect.stringContaining('toolu_usage_1'),
-        engineCostUsd: 0.02
-      })
-    )
-  })
-
-  it('counts DISTINCT tool_use ids as toolUses — repeated part updates for the same call do not double-count', async () => {
-    const recordUsageEvent = vi.fn()
-    const { dispatcher, client, stream } = makeHarness({ recordUsageEvent })
-    holdTurn(client)
-    const ctx = makeCtx({ toolUseId: 'toolu_usage_tools' })
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-
-    // The SAME tool part is re-emitted on every state change (pending →
-    // running → completed) — the event-mapper rebuilds the whole message each
-    // time, re-carrying the same tool_use block. Must count as ONE tool use.
-    const toolPartEvent = {
-      sessionID: 'oc-sess-1',
-      part: {
-        id: 'part-tool-1',
-        messageID: 'msg-1',
-        type: 'tool',
-        tool: 'bash',
-        callID: 'call-1',
-        state: { input: { command: 'ls' } }
-      }
-    }
-    stream.push('message.part.updated', toolPartEvent)
-    await tick()
-    stream.push('message.part.updated', toolPartEvent)
-    await tick()
-
-    completeTurn(stream)
-    await pending
-
-    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    const usage = (notif![1] as { usage?: { toolUses: number } }).usage
-    expect(usage!.toolUses).toBe(1)
-    expect(recordUsageEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ messageId: expect.stringContaining('toolu_usage_tools') })
-    )
-  })
-
-  it('a throwing recordUsageEvent NEVER fails the dispatch — the successful text still returns', async () => {
-    const recordUsageEvent = vi.fn(() => {
-      throw new Error('SQLITE_BUSY: database is locked')
-    })
-    const { dispatcher, client } = makeHarness({ recordUsageEvent })
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({
-        text: 'the successful answer',
-        info: { tokens: { input: 10, output: 5 }, cost: 0.001 }
-      })
-    ])
-    const ctx = makeCtx({ toolUseId: 'toolu_throwing_recorder' })
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-
-    expect(recordUsageEvent).toHaveBeenCalled()
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('the successful answer')
-    // The completion notification is unaffected too.
-    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif?.[1]).toMatchObject({ status: 'completed' })
-  })
-
-  it('a turn stopped by the user is NOT recorded (no usage numbers for a turn that never returned)', async () => {
-    const recordUsageEvent = vi.fn()
-    const { dispatcher, client } = makeHarness({ recordUsageEvent })
-    holdTurn(client)
-    const ctx = makeCtx({ toolUseId: 'toolu_stopped_norecord' })
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
-    expect(dispatcher.stopDispatch('toolu_stopped_norecord')).toBe(true)
-    const result = await pending
-    expect(result.isError).toBe(true)
-    expect(recordUsageEvent).not.toHaveBeenCalled()
-  })
-
-  it('a timed-out turn IS recorded (status "failed") with null usage numbers', async () => {
-    vi.useFakeTimers()
-    try {
-      const recordUsageEvent = vi.fn()
-      const { dispatcher, client } = makeHarness({
-        recordUsageEvent,
-        loadEngineConfig: vi.fn(() => ({
-          dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 60_000 }
-        })),
-        heartbeatMs: 30_000
-      })
-      holdTurn(client)
-      const ctx = makeCtx({ toolUseId: 'toolu_timeout_record' })
-      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-      await advance(0)
-      await advance(70_000)
-      const result = await pending
-      expect(result.isError).toBe(true)
-      expect(recordUsageEvent).toHaveBeenCalledWith(
-        expect.objectContaining({
-          messageId: expect.stringContaining('toolu_timeout_record'),
-          tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
-          engineCostUsd: null
-        })
-      )
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('the real default (no recordUsageEvent injected) does not throw', async () => {
-    const { dispatcher } = makeHarness()
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    expect(result.isError).toBeUndefined()
-  })
-
-  // -------------------------------------------------------------------------
-  // Slice C — folding dispatched spend into the dispatching session's own
-  // cost breakdown (ctx.addDispatchedCost).
-  // -------------------------------------------------------------------------
-
-  it('calls ctx.addDispatchedCost with the target engine/model/cost on a successful turn', async () => {
-    const { dispatcher, client } = makeHarness()
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({ text: 'ok', info: { tokens: { input: 10, output: 5 }, cost: 0.31 } })
-    ])
-    const ctx = makeCtx()
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.isError).toBeUndefined()
-    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.31)
-  })
-
-  it('does NOT call ctx.addDispatchedCost when turn cost is zero/absent', async () => {
-    const { dispatcher, client } = makeHarness()
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({ text: 'ok', info: { tokens: { input: 10, output: 5 }, cost: 0 } })
-    ])
-    const ctx = makeCtx()
-    await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
-  })
-
-  it('does NOT call ctx.addDispatchedCost when the dispatch fails (a timed-out turn)', async () => {
-    vi.useFakeTimers()
-    try {
-      const { dispatcher, client } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({
-          dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 60_000 }
-        })),
-        heartbeatMs: 30_000
-      })
-      holdTurn(client)
-      const ctx = makeCtx()
-      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-      await advance(0)
-      await advance(70_000)
-      const result = await pending
-      expect(result.isError).toBe(true)
-      expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('never fails the dispatch when ctx.addDispatchedCost is not provided', async () => {
-    const { dispatcher, client } = makeHarness()
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({ text: 'ok', info: { cost: 0.02 } })
-    ])
-    const ctx = makeCtx()
-    // Simulate a caller that never wired the field (spec: optional, never
-    // fail a dispatch over a missing capability).
-    delete (ctx as { addDispatchedCost?: unknown }).addDispatchedCost
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.isError).toBeUndefined()
-  })
-})
 
 describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () => {
   it('captures usage/total_cost_usd/duration_ms from the result on success', async () => {
@@ -3910,312 +2034,12 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
 // ADR-033 M4-C — per-dispatch cost cap
 // ---------------------------------------------------------------------------
 
-describe('CrossEngineDispatcher — M4-C cost cap (opencode direction)', () => {
-  it('a continuation turn is rejected once cumulative cost meets the cap; target survives', async () => {
-    const { dispatcher, client } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({
-        dispatch: { defaultModel: 'openai/gpt-5', maxCostUsd: 0.05 }
-      }))
-    })
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({ text: 'first', info: { cost: 0.05 } })
-    ])
-    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, makeCtx())
-    expect(first.isError).toBeUndefined()
-
-    const second = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
-      makeCtx()
-    )
-    expect(second.isError).toBe(true)
-    expect(second.text).toContain('cost cap')
-    expect(second.sessionId).toBe(first.sessionId)
-    // Rejected BEFORE running a turn — no second promptAsync() call.
-    expect(client.promptAsync).toHaveBeenCalledTimes(1)
-  })
-
-  it('a completing turn that crosses the cap appends the warning note to the returned text', async () => {
-    const { dispatcher, client } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({
-        dispatch: { defaultModel: 'openai/gpt-5', maxCostUsd: 0.05 }
-      }))
-    })
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({ text: 'the answer', info: { cost: 0.06 } })
-    ])
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toContain('the answer')
-    expect(result.text).toContain('[dispatch cost cap reached')
-  })
-
-  it('no cap configured → unlimited, no note ever appended regardless of cost', async () => {
-    const { dispatcher, client } = makeHarness()
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({ text: 'the answer', info: { cost: 999 } })
-    ])
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('the answer')
-  })
-})
-
 // ---------------------------------------------------------------------------
 // ADR-071 §2 — the cap counts what a turn was WORTH, not what opencode billed.
 // opencode prices from a catalog that is zeroed for a provider signed in with
 // OAuth, so a subscription-authenticated target used to report `info.cost: 0`
 // on every turn and the cap never tripped at all.
 // ---------------------------------------------------------------------------
-
-describe('CrossEngineDispatcher — cost cap on API-equivalent spend (opencode direction)', () => {
-  /** In the built-in pricing table at $0.20/MTok in, $1.20/MTok out. */
-  const PRICED = 'openai/gpt-5.6-luna'
-  /** `openai` is a KNOWN vendor, so an unknown model under it is a genuine
-   *  pricing miss rather than the cross-vendor fallback findPricing applies to
-   *  unrecognized gateway vendors. */
-  const UNPRICED = 'openai/model-with-no-price'
-  /** Exactly $0.20 of list-price spend on PRICED. */
-  const ONE_MTOK_IN = { input: 1_000_000, output: 0 }
-
-  let billingSpy: ReturnType<typeof vi.spyOn> | undefined
-
-  function billAs(billingType: BillingType): void {
-    billingSpy = vi.spyOn(opencodeAuthProvider, 'buildAccountRef').mockReturnValue({
-      engineId: 'opencode',
-      vendorId: 'openai',
-      billingType,
-      authState: 'authenticated'
-    })
-  }
-
-  afterEach(() => {
-    billingSpy?.mockRestore()
-    billingSpy = undefined
-  })
-
-  it('a subscription target reporting info.cost 0 still trips the cap, on the turn its equivalent crosses it', async () => {
-    billAs('subscription')
-    const { dispatcher, client } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED, maxCostUsd: 0.3 } }))
-    })
-    client.listMessages.mockResolvedValue([
-      storedAssistant({ text: 'ok', info: { tokens: ONE_MTOK_IN, cost: 0 } })
-    ])
-
-    const ctx = makeCtx()
-    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
-    expect(first.isError).toBeUndefined()
-    // $0.20 of $0.30 — under the cap, so no note yet.
-    expect(first.text).toBe('ok')
-    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', PRICED, 0.2)
-
-    const second = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
-      ctx
-    )
-    // $0.40 cumulative — the crossing turn carries the note.
-    expect(second.text).toContain('[dispatch cost cap reached')
-
-    const third = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'three', sessionId: first.sessionId },
-      ctx
-    )
-    expect(third.isError).toBe(true)
-    expect(third.text).toContain('cost cap')
-    expect(client.promptAsync).toHaveBeenCalledTimes(2)
-  })
-
-  it('an apiKey target counts the BILLED figure, not our equivalent (a gateway margin is real spend)', async () => {
-    billAs('apiKey')
-    const recordUsageEvent = vi.fn()
-    const { dispatcher, client } = makeHarness({
-      recordUsageEvent,
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED, maxCostUsd: 0.3 } }))
-    })
-    // Our equivalent for these tokens is $0.20; the gateway charged $0.31.
-    client.listMessages.mockResolvedValue([
-      storedAssistant({ text: 'ok', info: { tokens: ONE_MTOK_IN, cost: 0.31 } })
-    ])
-
-    const ctx = makeCtx()
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.text).toContain('[dispatch cost cap reached')
-    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', PRICED, 0.31)
-    expect(recordUsageEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ engineCostUsd: 0.31, engineCostIsEquivalent: false })
-    )
-  })
-
-  it("a failed turn's tokens count toward the cap at the equivalent rate", async () => {
-    billAs('subscription')
-    const { dispatcher, client } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED, maxCostUsd: 0.15 } }))
-    })
-    client.listMessages.mockResolvedValue([
-      storedAssistant({
-        text: '',
-        info: {
-          tokens: ONE_MTOK_IN,
-          cost: 0,
-          error: { name: 'UnknownError', data: { message: 'stream aborted' } }
-        }
-      })
-    ])
-
-    const ctx = makeCtx()
-    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
-    expect(first.isError).toBe(true)
-    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', PRICED, 0.2)
-
-    const second = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
-      ctx
-    )
-    expect(second.isError).toBe(true)
-    expect(second.text).toContain('cost cap')
-  })
-
-  it('an unpriced model appends the cannot-count line once per turn and never trips the cap', async () => {
-    billAs('subscription')
-    const recordUsageEvent = vi.fn()
-    const { dispatcher, client } = makeHarness({
-      recordUsageEvent,
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: UNPRICED, maxCostUsd: 0.01 } }))
-    })
-    client.listMessages.mockResolvedValue([
-      storedAssistant({ text: 'ok', info: { tokens: ONE_MTOK_IN, cost: 0 } })
-    ])
-
-    const ctx = makeCtx()
-    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
-    expect(first.text).toBe(
-      `ok\n\n[dispatch cost cap cannot count this turn: ${UNPRICED} has no known price]`
-    )
-    expect(first.text).not.toContain('[dispatch cost cap reached')
-    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
-    // The tokens are on the row and opencode's own figure is its zeroed
-    // subscription one; what makes the turn UNCOUNTABLE is that nothing can
-    // price the model, which the recorder resolves to a null cost — never a 0.
-    expect(recordUsageEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tokens: expect.objectContaining({ input: 1_000_000 }),
-        engineCostUsd: 0,
-        billingType: 'subscription'
-      })
-    )
-
-    // Turn 2 runs — an uncountable turn can never trip a cap — and says so
-    // again, once.
-    const second = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
-      ctx
-    )
-    expect(second.isError).toBeUndefined()
-    expect(second.text.match(/cannot count this turn/g)).toHaveLength(1)
-  })
-
-  it('the rejection message reports the turns the spent figure could not count', async () => {
-    billAs('subscription')
-    const { dispatcher, client } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: UNPRICED, maxCostUsd: 0.1 } }))
-    })
-    // One unpriced turn, then one the fallback DOES price (a real engine
-    // charge under `unknown`-free billing is still a figure).
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({ text: 'unpriceable', info: { tokens: ONE_MTOK_IN, cost: 0 } })
-    ])
-    const ctx = makeCtx()
-    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
-    expect(first.text).toContain('cannot count this turn')
-
-    // Force the cap over by billing the next turn as apiKey with a real charge.
-    billingSpy?.mockReturnValue({
-      engineId: 'opencode',
-      vendorId: 'openai',
-      billingType: 'apiKey',
-      authState: 'authenticated'
-    })
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({ text: 'billed', info: { cost: 0.2 } })
-    ])
-    await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
-      ctx
-    )
-
-    const third = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'three', sessionId: first.sessionId },
-      ctx
-    )
-    expect(third.isError).toBe(true)
-    expect(third.text).toContain('1 turn(s) on this session could not be counted')
-  })
-
-  it('a turn that moved no tokens is a known zero, not an uncountable turn, even on an unpriced model', async () => {
-    billAs('subscription')
-    const recordUsageEvent = vi.fn()
-    const { dispatcher, client } = makeHarness({
-      recordUsageEvent,
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: UNPRICED, maxCostUsd: 0.1 } }))
-    })
-    // Zero tokens cost zero at any rate — the price table is irrelevant.
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({ text: 'nothing to do', info: { tokens: { input: 0, output: 0 } } })
-    ])
-    const ctx = makeCtx()
-    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
-    expect(first.text).toBe('nothing to do')
-    expect(first.text).not.toContain('cannot count this turn')
-    expect(recordUsageEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
-        engineCostUsd: null
-      })
-    )
-
-    // …and the entry counted no uncountable turn: drive the cap over with a
-    // real charge and the rejection has nothing to disclaim.
-    billingSpy?.mockReturnValue({
-      engineId: 'opencode',
-      vendorId: 'openai',
-      billingType: 'apiKey',
-      authState: 'authenticated'
-    })
-    client.listMessages.mockResolvedValueOnce([
-      storedAssistant({ text: 'billed', info: { tokens: { input: 10 }, cost: 0.2 } })
-    ])
-    await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
-      ctx
-    )
-    const third = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'three', sessionId: first.sessionId },
-      ctx
-    )
-    expect(third.isError).toBe(true)
-    expect(third.text).toContain('cost cap')
-    expect(third.text).not.toContain('could not be counted')
-  })
-
-  it('a free vendor spends nothing: the cap never trips and the breakdown gets nothing', async () => {
-    billAs('free')
-    const recordUsageEvent = vi.fn()
-    const { dispatcher, client } = makeHarness({
-      recordUsageEvent,
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED, maxCostUsd: 0.01 } }))
-    })
-    client.listMessages.mockResolvedValue([
-      storedAssistant({ text: 'ok', info: { tokens: ONE_MTOK_IN, cost: 0 } })
-    ])
-    const ctx = makeCtx()
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.text).toBe('ok')
-    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
-    expect(recordUsageEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ engineCostUsd: 0, billingType: 'free' })
-    )
-  })
-})
 
 describe('CrossEngineDispatcher — M4-C cost cap (Claude direction)', () => {
   it('a continuation turn is rejected once cumulative cost meets the cap; target survives', async () => {
@@ -4495,6 +2319,23 @@ describe('CrossEngineDispatcher — pi direction (M4c): target lifecycle', () =>
     expect(setModelCall?.[0]).toMatchObject({ provider: 'openai-codex', modelId: 'gpt-5.6-luna' })
   })
 
+  it("hands the target's bridge host the shared MCP catalog for the dispatch cwd (ADR-096)", async () => {
+    const servers = { fixture: { type: 'stdio', command: 'node', exposure: 'direct' } }
+    mockCollectPiMcp.mockReturnValueOnce({ servers, skipped: [] })
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({ spawnPiTarget: target.spawnPiTarget })
+    const pending = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'use mcp' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    await tick()
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+    expect(mockCollectPiMcp).toHaveBeenCalledWith('/tmp/xeng-project')
+    expect(target.spawnCalls[0].mcpServers).toEqual(servers)
+    expect(target.spawnCalls[0].env?.({ url: 'u', token: 't' }).CLAUDEUI_PI_MCP).toBe('1')
+  })
+
   it('rejects a same-engine (pi → pi) dispatch as isError, no spawn', async () => {
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({ spawnPiTarget: target.spawnPiTarget })
@@ -4725,11 +2566,19 @@ describe('CrossEngineDispatcher — pi direction (M4c): model resolution', () =>
 })
 
 describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage approval gate', () => {
-  it("'auto' (full) autonomy auto-allows a mutating tool with NO forwarded approval — decide() short-circuits before any human round-trip", async () => {
+  // ADR-088: an auto parent's pi target is JUDGED (see the ADR-088 block
+  // below); only with pi's own judge switched off does auto keep the
+  // historical allow-all base.
+  it("T8: 'auto' with pi's autoMode.enabled false auto-allows a mutating tool with NO forwarded approval and no judge call", async () => {
     const target = makeFakePiTarget()
+    const makeJudgeTransport = vi.fn()
     const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
-      spawnPiTarget: target.spawnPiTarget
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+        autoMode: { enabled: false }
+      })),
+      spawnPiTarget: target.spawnPiTarget,
+      makeJudgeTransport
     })
     const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -4742,6 +2591,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage app
     })
     expect(decision).toEqual({ behavior: 'allow' })
     expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+    expect(makeJudgeTransport).not.toHaveBeenCalled()
 
     target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
     target.pushEvent(PI_AGENT_SETTLED)
@@ -4762,6 +2612,33 @@ describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage app
       toolCallId: 'pi-call-1',
       toolName: 'read',
       input: { path: 'a.txt' }
+    })
+    expect(decision).toEqual({ behavior: 'allow' })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+  })
+
+  it("'acceptEdits' matches agent-control paths against the target's cwd — an edit inside a .claude/worktrees checkout is not one", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({
+      fromEngine: 'claude',
+      autonomyMode: 'acceptEdits',
+      cwd: '/repo/.claude/worktrees/feat'
+    })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+
+    const decision = await target.gateHandler()({
+      toolCallId: 'pi-call-1',
+      toolName: 'edit',
+      input: { path: '/repo/.claude/worktrees/feat/src/a.ts' }
     })
     expect(decision).toEqual({ behavior: 'allow' })
     expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
@@ -4913,39 +2790,82 @@ describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage app
     await pending
   })
 
-  it('the autonomy mode is FIXED at target creation — a continuation with a DIFFERENT autonomyMode does not change the gate', async () => {
+  it('T10: the gate reads the parent’s mode LIVE — default → auto: the next edit is judged and allowed, no human', async () => {
     const target = makeFakePiTarget()
+    const judge = makeScriptedJudge()
     const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
-      spawnPiTarget: target.spawnPiTarget
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+        autoMode: { twoStageMode: 'fast' as const }
+      })),
+      spawnPiTarget: target.spawnPiTarget,
+      makeJudgeTransport: judge.make
     })
-    const first = dispatcher.dispatch(
-      { engine: 'pi', prompt: 'one' },
-      makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
-    )
+    let mode = 'default'
+    const ctx = makeCtx({ fromEngine: 'claude', getAutonomyMode: () => mode })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
-    target.pushEvent(piAssistantMessageEnd({ text: 'first' }))
+
+    void target.gateHandler()({
+      toolCallId: 'pi-edit-1',
+      toolName: 'edit',
+      input: { path: 'src/a.ts' }
+    })
+    await tick()
+    expect(ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-request')).toHaveLength(1)
+
+    mode = 'auto'
+    // Under the judged auto base (acceptEdits) a plain edit is allowed outright;
+    // a bash command asks and is judged.
+    expect(
+      await target.gateHandler()({
+        toolCallId: 'pi-edit-2',
+        toolName: 'edit',
+        input: { path: 'src/b.ts' }
+      })
+    ).toEqual({ behavior: 'allow' })
+    expect(
+      await target.gateHandler()({
+        toolCallId: 'pi-bash-1',
+        toolName: 'bash',
+        input: { command: 'rm -rf build' }
+      })
+    ).toEqual({ behavior: 'allow' })
+    expect(judge.requests).toHaveLength(1)
+    expect(ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-request')).toHaveLength(1)
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
     target.pushEvent(PI_AGENT_SETTLED)
-    const firstResult = await first
+    await pending
+  })
 
-    // Continuation arrives with a DIFFERENT (conservative) autonomyMode.
-    const second = dispatcher.dispatch(
-      { engine: 'pi', prompt: 'two', sessionId: firstResult.sessionId },
-      makeCtx({ fromEngine: 'claude', autonomyMode: 'default' })
-    )
+  it('T10: created under auto, switched to default — the next bash asks the human with zero judge calls', async () => {
+    const target = makeFakePiTarget()
+    const judge = makeScriptedJudge()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+        autoMode: { twoStageMode: 'fast' as const }
+      })),
+      spawnPiTarget: target.spawnPiTarget,
+      makeJudgeTransport: judge.make
+    })
+    let mode = 'auto'
+    const ctx = makeCtx({ fromEngine: 'claude', getAutonomyMode: () => mode })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
-
-    // The SAME gate closure (bound to 'auto', fixed at creation) still auto-allows.
-    const decision = await target.gateHandler()({
-      toolCallId: 'pi-call-2',
+    mode = 'default'
+    void target.gateHandler()({
+      toolCallId: 'pi-bash-1',
       toolName: 'bash',
-      input: { command: 'x' }
+      input: { command: 'rm -rf build' }
     })
-    expect(decision).toEqual({ behavior: 'allow' })
-
-    target.pushEvent(piAssistantMessageEnd({ text: 'second' }))
+    await tick()
+    expect(ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-request')).toHaveLength(1)
+    expect(judge.requests).toHaveLength(0)
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
     target.pushEvent(PI_AGENT_SETTLED)
-    await second
+    await pending
   })
 })
 
@@ -5613,6 +3533,25 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
     )
   })
 
+  it("a rejected credential (401) is a FAILED dispatch carrying pi's message, not an empty completion", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({ spawnPiTarget: target.spawnPiTarget })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_401' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    const errored = piAssistantMessageEnd({ text: '' })
+    const msg = errored.message as Record<string, unknown>
+    target.pushEvent({
+      ...errored,
+      message: { ...msg, stopReason: 'error', errorMessage: '401 {"type":"error"}' }
+    })
+    // pi's own settle after the errored turn must not turn it into a completion.
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toBe('Dispatched turn failed: 401 {"type":"error"}')
+  })
+
   it('a timed-out turn that streamed cost still advances cumulativeCostUsd/addDispatchedCost and records the spend+tokens on the usage row', async () => {
     vi.useFakeTimers()
     try {
@@ -6221,15 +4160,28 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
     const env = buildPiTargetChildEnv({ url: 'http://127.0.0.1:54321', token: 'test-token' })
     expect(env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('')
     expect(env.CLAUDEUI_PI_DISPATCH_ENABLED).toBe('')
+    // S4: nor the dispatch description the bridge would register it with.
+    expect(env.CLAUDEUI_PI_DISPATCH_DESCRIPTION).toBe('')
     expect(env.CLAUDEUI_PI_SKILL_DIRS).toBe('')
+    // ADR-089: a dispatch target never gets the `agent` tool either.
+    expect(env.CLAUDEUI_PI_AGENT_TOOL).toBe('')
+    // ADR-089 S3b: nor `send_message`.
+    expect(env.CLAUDEUI_PI_SEND_MESSAGE).toBe('')
+    // ADR-096: a dispatch target registers the shared MCP catalog (served by
+    // its bridge host, never carried in this env).
+    expect(env.CLAUDEUI_PI_MCP).toBe('1')
     expect(env.CLAUDEUI_PI_BRIDGE_URL).toBe('http://127.0.0.1:54321')
     expect(env.CLAUDEUI_PI_BRIDGE_TOKEN).toBe('test-token')
-    // Exactly these five keys — nothing else sneaks in either.
+    // Exactly these eight keys — nothing else sneaks in either.
     expect(Object.keys(env).sort()).toEqual([
+      'CLAUDEUI_PI_AGENT_TOOL',
       'CLAUDEUI_PI_BRIDGE_TOKEN',
       'CLAUDEUI_PI_BRIDGE_URL',
+      'CLAUDEUI_PI_DISPATCH_DESCRIPTION',
       'CLAUDEUI_PI_DISPATCH_ENABLED',
       'CLAUDEUI_PI_HOSTED_TOOLS',
+      'CLAUDEUI_PI_MCP',
+      'CLAUDEUI_PI_SEND_MESSAGE',
       'CLAUDEUI_PI_SKILL_DIRS'
     ])
   })
@@ -6519,7 +4471,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): the policy envelo
     ['acceptEdits', 'untrusted', 'workspace-write', 'user'],
     ['auto', 'on-request', 'workspace-write', 'auto_review']
   ])(
-    "autonomy '%s' opens the thread with approvalPolicy '%s', sandbox '%s', reviewer '%s' — all three on thread/start, none per turn",
+    "autonomy '%s' opens the thread with approvalPolicy '%s', sandbox '%s', reviewer '%s' — on thread/start, and again on every turn/start (ADR-088)",
     async (mode, approvalPolicy, sandbox, approvalsReviewer) => {
       const target = makeFakeCodexTarget()
       const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
@@ -6539,12 +4491,12 @@ describe('CrossEngineDispatcher — codex direction (slice H): the policy envelo
         allowProviderModelFallback: false,
         historyMode: 'paginated'
       })
-      // The per-turn request carries NO policy at all — the thread baseline is
-      // the single place the envelope lives.
+      // ADR-088 — the per-turn request re-sends the policy for the parent's
+      // LIVE mode, the same `codexTurnPolicy` CodexSession sends.
       const turnStart = target.requests.find((entry) => entry.method === 'turn/start')!
-      expect(turnStart.params.approvalPolicy).toBeUndefined()
-      expect(turnStart.params.sandboxPolicy).toBeUndefined()
-      expect(turnStart.params.approvalsReviewer).toBeUndefined()
+      expect(turnStart.params).toMatchObject(codexTurnPolicy(mode))
+      expect(turnStart.params.approvalPolicy).toBe(approvalPolicy)
+      expect(turnStart.params.approvalsReviewer).toBe(approvalsReviewer)
     }
   )
 
@@ -6607,24 +4559,29 @@ describe('CrossEngineDispatcher — codex direction (slice H): the policy envelo
     expect(target.client.claim.mock.calls).toEqual([[CODEX_THREAD_ID]])
   })
 
-  it('the envelope is fixed at creation — a continuation with a DIFFERENT autonomyMode neither re-policies the thread nor moves the gate', async () => {
+  it('T12: the parent’s LIVE mode re-policies the thread at the next turn/start, and the gate decides by it', async () => {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
-    const first = dispatcher.dispatch(
-      { engine: 'codex', prompt: 'one' },
-      makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
-    )
+    let mode = 'auto'
+    const ctx = makeCtx({ fromEngine: 'claude', getAutonomyMode: () => mode })
+    const first = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
     await tick()
     target.completeTurn()
     const firstResult = await first
 
+    mode = 'plan'
     const second = dispatcher.dispatch(
       { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
-      makeCtx({ fromEngine: 'claude', autonomyMode: 'plan' })
+      ctx
     )
     await tick()
-    // Still the 'auto' envelope on the wire, and still the 'auto' gate.
+    // One thread; the second turn carries the plan policy.
     expect(target.requests.filter((entry) => entry.method === 'thread/start')).toHaveLength(1)
+    const turnStarts = target.requests.filter((entry) => entry.method === 'turn/start')
+    expect(turnStarts).toHaveLength(2)
+    expect(turnStarts[0].params).toMatchObject(codexTurnPolicy('auto'))
+    expect(turnStarts[1].params).toMatchObject(codexTurnPolicy('plan'))
+    // …and the gate decides by the mode that turn runs under: plan refuses.
     const decision = await target.serverRequest('item/commandExecution/requestApproval', {
       threadId: CODEX_THREAD_ID,
       turnId: target.currentTurnId(),
@@ -6632,9 +4589,49 @@ describe('CrossEngineDispatcher — codex direction (slice H): the policy envelo
       command: '/bin/zsh -lc "rm -rf x"',
       cwd: '/tmp/xeng-project'
     })
-    expect(decision).toEqual({ decision: 'accept' })
+    expect(decision).toEqual({ decision: 'decline' })
     target.completeTurn()
     await second
+  })
+
+  it('R2: a `full` parent runs the thread under the `auto` policy (full is normalised to auto)', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', autonomyMode: 'full' })
+    )
+    await tick()
+    target.completeTurn()
+    await pending
+    expect(target.threadStartParams()).toMatchObject({ approvalsReviewer: 'auto_review' })
+    const turnStart = target.requests.find((entry) => entry.method === 'turn/start')!
+    expect(turnStart.params).toMatchObject(codexTurnPolicy('auto'))
+  })
+
+  it('a mid-turn switch does not move the gate before the next turn/start (the gate decides by the turn’s snapshot)', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    let mode = 'default'
+    const ctx = makeCtx({ fromEngine: 'claude', getAutonomyMode: () => mode })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
+    await tick()
+    // bypassPermissions' mode base would ACCEPT this command; the turn's
+    // snapshot (`default`) asks — so a live-mode gate would fail this test.
+    mode = 'bypassPermissions'
+    const decisionPromise = target.serverRequest('item/commandExecution/requestApproval', {
+      threadId: CODEX_THREAD_ID,
+      turnId: target.currentTurnId(),
+      itemId: 'item-cmd-1',
+      command: '/bin/zsh -lc "rm -rf x"',
+      cwd: '/tmp/xeng-project'
+    })
+    await tick()
+    // Still the default gate: the human is asked, nothing auto-accepted.
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
+    void decisionPromise
+    dispatcher.disposeFor('routing-1')
+    await pending
   })
 })
 
@@ -6693,7 +4690,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): the gate', () => 
         JSON.stringify((c[1] as { message: unknown }).message).includes('denied')
     )
     expect(JSON.stringify((denial![1] as { message: unknown }).message)).toContain(
-      'Plan mode is read-only — present a plan and call exit_plan to proceed'
+      PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
     )
     target.completeTurn()
     await pending
@@ -6793,14 +4790,17 @@ describe('CrossEngineDispatcher — codex direction (slice H): the gate', () => 
     await pending
   })
 
-  it("auto mode ACCEPTS what the native reviewer escalated without asking — 'auto_review' already decided", async () => {
+  // ADR-088 review R1: `auto` gates as `default` (the interactive
+  // `CodexSession.gate()` rule) — what reaches the gate under `auto_review` is
+  // what the guardian ESCALATED, and escalations belong to the human.
+  it('R1: auto mode ASKS the human for what the native reviewer escalated — never a silent accept', async () => {
     const { target, ctx, pending } = await startTarget('auto')
-    const decision = await target.serverRequest(
+    void target.serverRequest(
       'item/commandExecution/requestApproval',
       commandRequest('/bin/zsh -lc "rm -rf x"')
     )
-    expect(decision).toEqual({ decision: 'accept' })
-    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+    await tick()
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
     target.completeTurn()
     await pending
   })
@@ -7654,61 +5654,6 @@ describe('CrossEngineDispatcher — no built-in dispatch time limit (ADR-033 202
   // missing is the UNSET case, which used to mean 60/15 minutes rather than
   // "no limit".
 
-  it('opencode: with no configured caps a turn that keeps producing events runs past 15 AND 60 minutes and completes normally', async () => {
-    vi.useFakeTimers()
-    try {
-      const { dispatcher, client, stream } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai/gpt-5' } })),
-        heartbeatMs: 30_000
-      })
-      holdTurn(client)
-      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-      await settle()
-
-      // 90 minutes of a working target — past the old 15-minute inactivity
-      // default (events keep coming) and past the old 60-minute absolute one.
-      for (let i = 0; i < 18; i++) {
-        await advance(5 * 60_000)
-        stream.push('message.part.updated', {
-          sessionID: 'oc-sess-1',
-          part: { id: `part-${i}`, messageID: 'msg-1', type: 'text', text: `chunk ${i}` }
-        })
-        await settle()
-      }
-      expect(client.abortSession).not.toHaveBeenCalled()
-
-      completeTurn(stream)
-      await settle()
-      const result = await pending
-      expect(result.isError).toBeUndefined()
-      expect(result.text).toBe('target answer')
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('opencode: with no configured caps a SILENT turn is never aborted either — an unset inactivity cap is no cap', async () => {
-    vi.useFakeTimers()
-    try {
-      const { dispatcher, client, stream } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai/gpt-5' } })),
-        heartbeatMs: 30_000
-      })
-      holdTurn(client)
-      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-      await settle()
-      await advance(6 * 60 * 60_000) // six silent hours
-      expect(client.abortSession).not.toHaveBeenCalled()
-
-      completeTurn(stream)
-      await settle()
-      const result = await pending
-      expect(result.isError).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
   // ── Claude direction ─────────────────────────────────────────────────────
 
   it('claude: with no configured caps a turn that keeps producing messages runs past 10 AND 60 minutes and completes normally', async () => {
@@ -8191,9 +6136,6 @@ describe('CrossEngineDispatcher — no built-in dispatch time limit (ADR-033 202
 // ---------------------------------------------------------------------------
 
 describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071 §1)', () => {
-  /** In the built-in pricing table at $0.20/MTok in, $1.20/MTok out. */
-  const PRICED = 'openai/gpt-5.6-luna'
-
   /** Frozen dispatcher clock, so a row's `message_id` is a literal to assert. */
   const LEDGER_TS = 1_700_000_000_000
 
@@ -8221,196 +6163,6 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
     expect(recordUsageEvent).toHaveBeenCalledTimes(1)
     return recordUsageEvent.mock.calls[0]![0] as UsageTurnEvent
   }
-
-  it('an opencode turn is one ledger row carrying the whole turn', async () => {
-    const { dispatcher, client, recordUsageEvent } = ledgerHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED } }))
-    })
-    client.listMessages.mockResolvedValue([
-      storedAssistant({
-        text: 'ok',
-        info: {
-          tokens: { input: 1_000, output: 200, reasoning: 50, cache: { read: 400, write: 100 } },
-          cost: 0.0123
-        }
-      })
-    ])
-
-    const ctx = makeCtx({ toolUseId: 'toolu_ledger_1' })
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.isError).toBeUndefined()
-
-    expect(ledgerRow(recordUsageEvent)).toMatchObject({
-      engineId: 'opencode',
-      vendorId: 'openai',
-      modelId: 'gpt-5.6-luna',
-      sessionId: 'oc-sess-1',
-      origin: 'dispatch',
-      parentRoutingId: 'routing-1',
-      messageId: ledgerId('toolu_ledger_1', 1),
-      source: 'live',
-      // opencode reports a CHARGE, so the ledger's cost rule must not read
-      // `info.cost` as an equivalent.
-      engineCostUsd: 0.0123,
-      engineCostIsEquivalent: false,
-      // Disjoint, with reasoning folded into output — the same mapping the
-      // equivalent is priced from.
-      tokens: { input: 1_000, output: 250, cacheWrite: 100, cacheWrite1h: 0, cacheRead: 400 }
-    })
-  })
-
-  it('a THROWING ledger write never reaches the dispatch flow — the turn still succeeds', async () => {
-    const recordUsageEvent = vi.fn(() => {
-      throw new Error('usage_event is locked')
-    })
-    const { dispatcher } = makeHarness({ recordUsageEvent })
-
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('target answer')
-    expect(recordUsageEvent).toHaveBeenCalledTimes(1)
-  })
-
-  it('the row is stamped with the dispatcher clock at the turn end, not the write', async () => {
-    const clock = 1_700_000_123_456
-    const { dispatcher, recordUsageEvent } = ledgerHarness({
-      now: () => clock
-    })
-    await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'x' },
-      makeCtx({ toolUseId: 'toolu_ts' })
-    )
-    expect(ledgerRow(recordUsageEvent).ts).toBe(clock)
-  })
-
-  it('one turn is exactly one row', async () => {
-    const { dispatcher, recordUsageEvent } = ledgerHarness()
-
-    await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'x' },
-      makeCtx({ toolUseId: 'toolu_once' })
-    )
-
-    expect(recordUsageEvent).toHaveBeenCalledTimes(1)
-    expect(ledgerRow(recordUsageEvent).messageId).toBe(ledgerId('toolu_once', 1))
-  })
-
-  it('TWO turns under ONE tool_use id are TWO rows — a continuation spends too', async () => {
-    // The tool_use id alone looked like the natural dedup key, but a single
-    // dispatch call can drive several turns against the same target (this is
-    // the continuation path: same ctx, same tool_use id, `sessionId` passed
-    // back in). Keying on it would hand every turn after the first to the
-    // ledger's UNIQUE(message_id) to drop — silently, while the cap counted
-    // the spend.
-    const { dispatcher, recordUsageEvent } = ledgerHarness()
-    const ctx = makeCtx({ toolUseId: 'toolu_retry' })
-
-    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await dispatcher.dispatch({ engine: 'opencode', prompt: 'x', sessionId: first.sessionId }, ctx)
-
-    expect(recordUsageEvent).toHaveBeenCalledTimes(2)
-    const ids = recordUsageEvent.mock.calls.map((c) => (c[0] as UsageTurnEvent).messageId)
-    expect(ids).toEqual([ledgerId('toolu_retry', 1), ledgerId('toolu_retry', 2)])
-    expect(new Set(ids).size).toBe(2)
-  })
-
-  it('an id-less dispatch keys the row on the target session instead', async () => {
-    let clock = LEDGER_TS
-    const { dispatcher, recordUsageEvent } = ledgerHarness({ now: () => clock })
-    await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    clock += 5_000
-    await dispatcher.dispatch({ engine: 'opencode', prompt: 'y' }, makeCtx())
-
-    const ids = recordUsageEvent.mock.calls.map((c) => (c[0] as UsageTurnEvent).messageId)
-    expect(ids).toEqual([ledgerId('oc-sess-1', 1), ledgerId('oc-sess-2', 2, LEDGER_TS + 5_000)])
-  })
-
-  it('two turns in the SAME millisecond are still two rows — the sequence breaks the tie', async () => {
-    // The frozen clock is the point: nothing but the counter separates these.
-    const { dispatcher, recordUsageEvent } = ledgerHarness()
-    const ctx = makeCtx({ toolUseId: 'toolu_same_ms' })
-    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await dispatcher.dispatch({ engine: 'opencode', prompt: 'y', sessionId: first.sessionId }, ctx)
-
-    const ids = recordUsageEvent.mock.calls.map((c) => (c[0] as UsageTurnEvent).messageId)
-    expect(new Set(ids).size).toBe(2)
-  })
-
-  it('an opencode target names its account and its billing type', async () => {
-    vi.spyOn(opencodeAuthProvider, 'accountIdentity').mockReturnValue({
-      accountKey: 'chatgpt:acct_123:user_456',
-      accountLabel: 'someone@example.test (plus)'
-    })
-    const billing = vi.spyOn(opencodeAuthProvider, 'buildAccountRef').mockReturnValue({
-      engineId: 'opencode',
-      vendorId: 'openai',
-      billingType: 'subscription',
-      authState: 'authenticated'
-    })
-    try {
-      const { dispatcher, recordUsageEvent } = ledgerHarness()
-      await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-      expect(ledgerRow(recordUsageEvent)).toMatchObject({
-        accountKey: 'chatgpt:acct_123:user_456',
-        accountLabel: 'someone@example.test (plus)',
-        billingType: 'subscription'
-      })
-    } finally {
-      billing.mockRestore()
-    }
-  })
-
-  it('a FAILED opencode turn is a ledger row too — the ledger records spend, not success', async () => {
-    const { dispatcher, client, recordUsageEvent } = ledgerHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED } }))
-    })
-    client.listMessages.mockResolvedValue([
-      storedAssistant({
-        text: '',
-        info: {
-          tokens: { input: 300, output: 60 },
-          cost: 0.004,
-          error: { name: 'UnknownError', data: { message: 'stream aborted' } }
-        }
-      })
-    ])
-    const result = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'x' },
-      makeCtx({ toolUseId: 'toolu_failed' })
-    )
-    expect(result.isError).toBe(true)
-    expect(ledgerRow(recordUsageEvent)).toMatchObject({
-      origin: 'dispatch',
-      messageId: ledgerId('toolu_failed', 1),
-      tokens: { input: 300, output: 60, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
-      engineCostUsd: 0.004
-    })
-  })
-
-  it('a turn whose numbers were never read still records a row, with zeros and no engine figure', async () => {
-    const { dispatcher, client, stream, recordUsageEvent } = ledgerHarness()
-    holdTurn(client)
-    client.listMessages.mockRejectedValueOnce(new Error('history unavailable'))
-    const pending = dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'x' },
-      makeCtx({ toolUseId: 'toolu_blind' })
-    )
-    await tick()
-    completeTurn(stream)
-    const result = await pending
-    expect(result.isError).toBe(true)
-
-    // Zeros, because `usage_event` has no way to say "unknown tokens" — which
-    // is why S2c2's readers must take `api_cost_usd`, not the split, as the
-    // statement of what a turn was worth.
-    expect(ledgerRow(recordUsageEvent)).toMatchObject({
-      origin: 'dispatch',
-      messageId: ledgerId('toolu_blind', 1),
-      tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
-      engineCostUsd: null
-    })
-  })
 
   it("a pi target accumulates the split across the turn's several assistant messages", async () => {
     const target = makeFakePiTarget()
@@ -8455,36 +6207,6 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
       engineCostUsd: 0.04,
       engineCostIsEquivalent: true
     })
-  })
-
-  it('a slash-less configured model is canonicalised before anything keys on it', async () => {
-    // opencode decodes a bare id to its default vendor, so `gpt-5-codex` and
-    // `opencode/gpt-5-codex` are the same model spelled two ways. The ledger
-    // stores the decoded halves and its reader re-encodes them, so unless the
-    // WRITE side picks one spelling, a reloaded session's breakdown carries
-    // the target twice: once under the raw string the live fold-in used, once
-    // under the reader's re-encode.
-    const { dispatcher, client, recordUsageEvent } = ledgerHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'gpt-5-codex' } }))
-    })
-    client.listMessages.mockResolvedValue([
-      storedAssistant({ text: 'ok', info: { tokens: { input: 10, output: 5 }, cost: 0.01 } })
-    ])
-
-    const ctx = makeCtx({ toolUseId: 'toolu_canon' })
-    await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-
-    expect(ledgerRow(recordUsageEvent)).toMatchObject({
-      engineId: 'opencode',
-      vendorId: 'opencode',
-      modelId: 'gpt-5-codex'
-    })
-    // The live breakdown keys on the SAME string the reader will rebuild.
-    expect(ctx.addDispatchedCost).toHaveBeenCalledWith(
-      'opencode',
-      'opencode/gpt-5-codex',
-      expect.closeTo(0.01, 6)
-    )
   })
 
   it('a pi turn pi itself prices at 0 is still counted by the cap, from its tokens', async () => {
@@ -8730,6 +6452,582 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
       // reported, so the row carries no engine figure at all.
       engineCostUsd: null,
       engineCostIsEquivalent: true
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-085 §3 — dispatch targets get the user's deny/ask rules (never allow),
+// opencode target children are registered, plan refusals are host-side.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every target', () => {
+  const FORCE_DENY = 'Bash(git push --force:*)'
+  const DOCKER_ASK = 'Bash(docker run:*)'
+  const RULES = userRules({
+    allow: ['Bash(git:*)', 'Read'],
+    deny: [FORCE_DENY],
+    ask: [DOCKER_ASK],
+    additionalDirectories: ['/extra']
+  })
+  const approvals = (ctx: ReturnType<typeof makeCtx>): unknown[] =>
+    ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-request').map((c) => c[1])
+
+  describe('(e) pi target', () => {
+    // A scripted judge that ALLOWS (ADR-088): without G9 an auto-mode ask rule
+    // would be judged and allowed instead of reaching the human.
+    const piJudge = makeScriptedJudge()
+    async function start(mode: string) {
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+          autoMode: { twoStageMode: 'fast' as const }
+        })),
+        spawnPiTarget: target.spawnPiTarget,
+        loadUserRules: () => RULES,
+        makeJudgeTransport: piJudge.make
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: mode })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await tick()
+      const finish = async (): Promise<void> => {
+        target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+        target.pushEvent(PI_AGENT_SETTLED)
+        await pending
+      }
+      return { target, ctx, finish }
+    }
+
+    it('a deny rule refuses with the rule, even under auto', async () => {
+      const { target, ctx, finish } = await start('auto')
+      const decision = await target.gateHandler()({
+        toolCallId: 'pi-call-d',
+        toolName: 'bash',
+        input: { command: 'git push origin main --force' }
+      })
+      expect(decision).toEqual({
+        behavior: 'deny',
+        reason: `Denied by permission rule: ${FORCE_DENY}`
+      })
+      expect(approvals(ctx)).toHaveLength(0)
+      await finish()
+    })
+
+    it('an ask rule under auto is forwarded (the ask rung precedes the mode base)', async () => {
+      const before = piJudge.requests.length
+      const { target, ctx, finish } = await start('auto')
+      void target.gateHandler()({
+        toolCallId: 'pi-call-a',
+        toolName: 'bash',
+        input: { command: 'docker --context x run alpine' }
+      })
+      for (let i = 0; i < 8; i++) await tick()
+      expect(approvals(ctx)).toHaveLength(1)
+      expect(piJudge.requests.length).toBe(before)
+      await finish()
+    })
+
+    it('the user allow tier is not inherited: a `git` command under default still asks', async () => {
+      const { target, ctx, finish } = await start('default')
+      void target.gateHandler()({
+        toolCallId: 'pi-call-g',
+        toolName: 'bash',
+        input: { command: 'git status' }
+      })
+      await tick()
+      expect(approvals(ctx)).toHaveLength(1)
+      await finish()
+    })
+
+    it('a mode-base deny keeps its own reason', async () => {
+      const { target, finish } = await start('plan')
+      const decision = await target.gateHandler()({
+        toolCallId: 'pi-call-w',
+        toolName: 'write',
+        input: { path: 'a.txt', content: 'x' }
+      })
+      expect(decision).toEqual({ behavior: 'deny', reason: 'Denied by dispatch autonomy mode' })
+      await finish()
+    })
+  })
+
+  describe('(f) codex target', () => {
+    async function start(mode: string) {
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget,
+        loadUserRules: () => RULES
+      })
+      const ctx = makeCtx({
+        fromEngine: 'claude',
+        autonomyMode: mode,
+        toolUseId: 'toolu_dispatch_1'
+      })
+      const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+      await tick()
+      return { target, ctx, pending }
+    }
+    const commandRequest = (command: string): Record<string, unknown> => ({
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-cmd-1',
+      startedAtMs: 0,
+      kind: 'command',
+      environmentId: null,
+      command,
+      cwd: '/tmp/xeng-project'
+    })
+
+    it('an ask rule under auto asks the caller (it no longer allows everything)', async () => {
+      const { target, ctx, pending } = await start('auto')
+      void target.serverRequest(
+        'item/commandExecution/requestApproval',
+        commandRequest('/bin/zsh -lc "docker --context x run alpine"')
+      )
+      await tick()
+      expect(approvals(ctx)).toHaveLength(1)
+      target.completeTurn()
+      await pending
+    })
+
+    it('a deny rule declines and reports the rule', async () => {
+      const { target, ctx, pending } = await start('auto')
+      const decision = await target.serverRequest(
+        'item/commandExecution/requestApproval',
+        commandRequest('/bin/zsh -lc "git push origin main --force"')
+      )
+      expect(decision).toEqual({ decision: 'decline' })
+      expect(approvals(ctx)).toHaveLength(0)
+      const denial = ctx.emit.mock.calls.find(
+        (c) =>
+          c[0] === 'session:subagent-message' &&
+          JSON.stringify((c[1] as { message: unknown }).message).includes('denied')
+      )
+      expect(JSON.stringify((denial![1] as { message: unknown }).message)).toContain(
+        `Denied by permission rule: ${FORCE_DENY}`
+      )
+      target.completeTurn()
+      await pending
+    })
+
+    // ADR-088 review R1: an escalation reaching the gate under `auto` gates as
+    // `default` — with no matching rule, the human decides (was: accepted).
+    it('without a matching rule auto gates as default — the escalation asks the human', async () => {
+      const { target, ctx, pending } = await start('auto')
+      void target.serverRequest(
+        'item/commandExecution/requestApproval',
+        commandRequest('/bin/zsh -lc "ls"')
+      )
+      await tick()
+      expect(approvals(ctx)).toHaveLength(1)
+      target.completeTurn()
+      await pending
+    })
+  })
+
+  describe('(g) Claude target', () => {
+    async function start(
+      rules: MergedClaudeRules,
+      mode = 'default',
+      extra: Partial<DispatchContext> = {}
+    ) {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        loadUserRules: () => rules
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', autonomyMode: mode, ...extra })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      await tick()
+      const finish = async (): Promise<void> => {
+        target.push(resultMsg({ result: 'ok', session_id: 'claude-sess-1' }))
+        await pending
+      }
+      return { target, ctx, finish }
+    }
+
+    it('spawn opts carry settings.permissions.{deny, ask} — never the allow tier', async () => {
+      const { target, finish } = await start(RULES, 'auto')
+      expect(target.spawnCalls[0].settings).toEqual({
+        permissions: { deny: [FORCE_DENY], ask: [DOCKER_ASK] }
+      })
+      await finish()
+    })
+
+    it("a subagent with `edit: deny` dispatching: the Claude target's settings deny every edit tool (ADR-097 S9, option a)", async () => {
+      // The calling opencode agent's own rules, mapped (caller-restriction.ts).
+      const callerRestriction = callerRestrictionFromAgent(
+        {
+          id: 'reviewer',
+          permissions: [
+            { action: '*', resource: '*', effect: 'allow' },
+            { action: 'edit', resource: '*', effect: 'deny' }
+          ]
+        },
+        '/tmp/xeng-project'
+      )
+      const { target, finish } = await start(userRules(), 'acceptEdits', { callerRestriction })
+      const settings = target.spawnCalls[0].settings as { permissions: { deny: string[] } }
+      expect(settings.permissions.deny).toEqual(
+        expect.arrayContaining(['Edit', 'MultiEdit', 'Write', 'NotebookEdit'])
+      )
+      // Only tighter: never an allow.
+      expect(settings.permissions).not.toHaveProperty('allow')
+      await finish()
+    })
+
+    it('no settings key at all when the user has no deny/ask rule', async () => {
+      const { target, finish } = await start(userRules({ allow: ['Bash(git:*)'] }))
+      expect('settings' in target.spawnCalls[0]).toBe(false)
+      await finish()
+    })
+
+    it('a shell command a deny rule hits is refused with the rule, no card', async () => {
+      const { target, ctx, finish } = await start(RULES)
+      const decision = await target.lastCanUseTool()!(
+        'Bash',
+        { command: 'git -C . push origin main --force' },
+        { signal: new AbortController().signal, toolUseId: 'toolu_c1' }
+      )
+      expect(decision).toEqual({
+        behavior: 'deny',
+        message: `Denied by permission rule: ${FORCE_DENY}`
+      })
+      expect(approvals(ctx)).toHaveLength(0)
+
+      // Anything else still reaches the human.
+      void target.lastCanUseTool()!(
+        'Bash',
+        { command: 'ls' },
+        { signal: new AbortController().signal, toolUseId: 'toolu_c2' }
+      )
+      await tick()
+      expect(approvals(ctx)).toHaveLength(1)
+      await finish()
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-088 — dispatch targets inherit auto mode, live, and are JUDGED: pi and
+// opencode targets by ClaudeUI's own judge (the shared pipeline, scripted here
+// through `makeJudgeTransport`), Claude/Codex targets by their engines' own.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
+  // ADR-091 part 6: no hold unless `blockHoldSeconds` says so. These suites
+  // were written for the held card, so they run with a 2-minute window; the
+  // part 6 suites below set their own.
+  beforeEach(() => {
+    vi.mocked(loadSharedAutoModeConfig).mockReturnValue({ blockHoldSeconds: HOLD_MS / 1000 })
+  })
+  afterEach(() => {
+    vi.mocked(loadSharedAutoModeConfig).mockReturnValue({})
+  })
+  /** Enough turns of the event loop for the pipeline's awaits to settle. */
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 8; i++) await tick()
+  }
+  const approvals = (ctx: ReturnType<typeof makeCtx>): unknown[] =>
+    ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-request').map((c) => c[1])
+  const reviews = (
+    ctx: ReturnType<typeof makeCtx>
+  ): Array<{ toolUseId: string; review: Record<string, unknown> }> =>
+    ctx.emit.mock.calls
+      .filter((c) => c[0] === 'session:tool-review')
+      .map((c) => c[1] as { toolUseId: string; review: Record<string, unknown> })
+  const PARENT: ChatMessage[] = [
+    {
+      id: 'parent-1',
+      role: 'user',
+      content: [{ type: 'text', text: 'please clean the build output' }],
+      timestamp: 0
+    }
+  ]
+
+  function judgedConfig(autoMode: EngineConfig['autoMode'] = {}) {
+    return (id: string): EngineConfig => ({
+      dispatch: { defaultModel: id === 'pi' ? 'openai-codex/gpt-5.6-luna' : 'openai/gpt-5' },
+      autoMode: { twoStageMode: 'fast', ...autoMode }
+    })
+  }
+
+  describe('pi target', () => {
+    async function start(
+      autoMode: EngineConfig['autoMode'] = {},
+      extra: Partial<DispatchContext> = {}
+    ) {
+      const target = makeFakePiTarget()
+      const judge = makeScriptedJudge()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: judgedConfig(autoMode),
+        spawnPiTarget: target.spawnPiTarget,
+        makeJudgeTransport: judge.make
+      })
+      let mode = 'auto'
+      const ctx = makeCtx({
+        fromEngine: 'claude',
+        toolUseId: 'toolu_pi_auto',
+        getAutonomyMode: () => mode,
+        getMessages: () => PARENT,
+        ...extra
+      })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'remove the build dir' }, ctx)
+      await tick()
+      const gate = (toolCallId: string, toolName: string, input: Record<string, unknown>) =>
+        target.gateHandler()({ toolCallId, toolName, input })
+      const finish = async (): Promise<void> => {
+        target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+        target.pushEvent(PI_AGENT_SETTLED)
+        await pending
+      }
+      return { target, judge, dispatcher, ctx, gate, finish, setMode: (m: string) => (mode = m) }
+    }
+
+    it('T7: bash is judged from the acceptEdits base — allow, then block; read needs no judge; the review binds to the pi call id', async () => {
+      const t = await start()
+      expect(await t.gate('pi-call-1', 'bash', { command: 'rm -rf x' })).toEqual({
+        behavior: 'allow'
+      })
+      expect(t.judge.requests).toHaveLength(1)
+      expect(t.judge.requests[0].user).toContain('"dispatch:pi" subagent')
+      expect(t.judge.requests[0].user).toContain('User: please clean the build output')
+      expect(reviews(t.ctx)[0]).toMatchObject({
+        toolUseId: 'pi-call-1',
+        review: { reviewer: 'auto-mode', decision: 'approved' }
+      })
+
+      // A block holds on the forwarded card (ADR-091 §3); Keep blocked answers
+      // with the judge's own text.
+      t.judge.replies.push('<block>yes</block><reason>destroys data</reason>')
+      const blocked = t.gate('pi-call-2', 'bash', { command: 'rm -rf y' })
+      await flush()
+      const [card] = approvals(t.ctx) as PendingApproval[]
+      expect(card).toMatchObject({
+        toolUseId: 'pi-call-2',
+        autoModeBlock: { expiresAt: expect.any(Number) },
+        agent: { agentId: 'pi-target-1', subagentType: 'dispatch:pi' }
+      })
+      t.dispatcher.resolveApproval(card.requestId, 'deny')
+      expect(await blocked).toEqual({
+        behavior: 'deny',
+        reason: 'Auto mode blocked: destroys data'
+      })
+
+      expect(await t.gate('pi-call-3', 'read', { path: 'a.txt' })).toEqual({ behavior: 'allow' })
+      expect(t.judge.requests).toHaveLength(2)
+      expect(approvals(t.ctx)).toHaveLength(1)
+      expect(t.judge.opts[0]).toMatchObject({ engine: 'pi', routingId: 'routing-1' })
+      expect(t.judge.opts[0].sessionId()).toBe('pi-target-1')
+      expect(t.judge.opts[0].modelValue()).toBe('openai-codex/gpt-5.6-luna')
+      await t.finish()
+    })
+
+    describe('ADR-091 §3: a held block', () => {
+      const BLOCK = '<block>yes</block><reason>destroys data</reason>'
+      const dismissals = (ctx: ReturnType<typeof makeCtx>): unknown[] =>
+        ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-dismiss').map((c) => c[1])
+      async function hold(t: Awaited<ReturnType<typeof start>>, id: string) {
+        t.judge.replies.push(BLOCK)
+        const decision = t.gate(id, 'bash', { command: 'rm -rf y' })
+        await flush()
+        const card = (approvals(t.ctx) as PendingApproval[]).at(-1)!
+        expect(card.toolUseId).toBe(id)
+        expect(card.autoModeBlock).toBeDefined()
+        return { decision, card }
+      }
+
+      it('Approve anyway runs the exact call; Keep blocked is annotated for the next judgement', async () => {
+        const t = await start()
+        t.target.pushEvent(
+          piAssistantMessageEnd({
+            toolUse: { id: 'pi-kept', name: 'bash', input: { command: 'rm -rf y' } }
+          })
+        )
+        await tick()
+        const kept = await hold(t, 'pi-kept')
+        t.dispatcher.resolveApproval(kept.card.requestId, 'deny')
+        expect(await kept.decision).toEqual({
+          behavior: 'deny',
+          reason: 'Auto mode blocked: destroys data'
+        })
+        const approved = await hold(t, 'pi-approved')
+        expect(t.judge.requests[1].user).toContain('{"outcome":"automode-blocked"}')
+        t.dispatcher.resolveApproval(approved.card.requestId, 'allow')
+        expect(await approved.decision).toEqual({ behavior: 'allow' })
+        await t.finish()
+      })
+
+      it('unanswered, it resolves as Keep blocked when the hold expires, and the card is withdrawn', async () => {
+        const t = await start()
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        try {
+          const { decision, card } = await hold(t, 'pi-timeout')
+          await vi.advanceTimersByTimeAsync(HOLD_MS)
+          expect(await decision).toEqual({
+            behavior: 'deny',
+            reason: 'Auto mode blocked: destroys data'
+          })
+          expect(dismissals(t.ctx)).toEqual([{ requestId: card.requestId }])
+        } finally {
+          vi.useRealTimers()
+        }
+        await t.finish()
+      })
+
+      it('a stop while held force-denies it as before and disarms the expiry', async () => {
+        const t = await start()
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        try {
+          const { decision, card } = await hold(t, 'pi-stopped')
+          expect(t.dispatcher.stopDispatch('toolu_pi_auto')).toBe(true)
+          // The stop's own abort grace runs on the (faked) clock too.
+          await vi.advanceTimersByTimeAsync(10_000)
+          expect(await decision).toEqual({ behavior: 'deny', reason: 'User denied' })
+          expect(dismissals(t.ctx)).toEqual([{ requestId: card.requestId }])
+          await vi.advanceTimersByTimeAsync(HOLD_MS)
+          expect(dismissals(t.ctx)).toHaveLength(1)
+        } finally {
+          vi.useRealTimers()
+        }
+        t.target.pushEvent(PI_AGENT_SETTLED)
+      })
+    })
+
+    describe('ADR-091 part 6: no hold, and approve-after-block', () => {
+      beforeEach(() => {
+        vi.mocked(loadSharedAutoModeConfig).mockReturnValue({})
+      })
+      const delivered = (t: Awaited<ReturnType<typeof start>>): string[] =>
+        t.target.client.request.mock.calls
+          .map((c) => c[0] as { type: string; message?: string })
+          .filter((c) => c.type === 'prompt' && String(c.message).startsWith('/cui-deliver '))
+          .map((c) =>
+            Buffer.from(String(c.message).slice('/cui-deliver '.length), 'base64').toString('utf8')
+          )
+
+      it('no hold: denied at once; approving while the dispatch runs nudges the TARGET, and its retry spends the grant', async () => {
+        const l = new BlockedCallLedger(() => {})
+        const t = await start({}, { blockedCalls: l })
+        t.judge.replies.push('<block>yes</block><reason>destroys data</reason>')
+        expect(await t.gate('pi-b1', 'bash', { command: 'rm -rf y' })).toEqual({
+          behavior: 'deny',
+          reason: 'Auto mode blocked: destroys data'
+        })
+        expect(approvals(t.ctx)).toHaveLength(0)
+        const call = l.approve('pi-b1')!
+        expect(call.deliver!(call)).toBe('"openai-codex/gpt-5.6-luna"')
+        await flush()
+        expect(delivered(t)).toHaveLength(1)
+        expect(delivered(t)[0]).toContain(
+          '[ClaudeUI] The user approved your blocked bash call: rm -rf y.'
+        )
+        expect(await t.gate('pi-b2', 'bash', { command: 'rm -rf y' })).toEqual({
+          behavior: 'allow'
+        })
+        expect(t.judge.requests).toHaveLength(1)
+        await t.finish()
+      })
+
+      it('once the dispatch finished, the target takes no delivery — the dispatching agent is nudged', async () => {
+        const l = new BlockedCallLedger(() => {})
+        const t = await start({}, { blockedCalls: l })
+        t.judge.replies.push('<block>yes</block><reason>destroys data</reason>')
+        await t.gate('pi-f1', 'bash', { command: 'rm -rf y' })
+        await t.finish()
+        const call = l.approve('pi-f1')!
+        expect(call.deliver!(call)).toBeNull()
+        expect(delivered(t)).toHaveLength(0)
+        expect(call.dispatchSessionId).toBe('pi-target-1')
+      })
+    })
+
+    it('T7: the target’s own earlier call is on the judge’s transcript (D1 trajectory)', async () => {
+      const t = await start()
+      t.target.pushEvent(
+        piAssistantMessageEnd({
+          toolUse: { id: 'pi-earlier', name: 'bash', input: { command: 'ls build' } }
+        })
+      )
+      await tick()
+      await t.gate('pi-call-1', 'bash', { command: 'rm -rf build' })
+      const user = t.judge.requests[0].user
+      expect(user).toContain('ls build')
+      expect(user).not.toMatch(/User:[^\n]*remove the build dir/)
+      await t.finish()
+    })
+
+    it('T13 (G10): the parent leaves auto while the judge runs → the verdict is discarded and the ask goes to the human', async () => {
+      const t = await start()
+      const held = deferred<string>()
+      t.judge.replies.push(() => held.promise)
+      const decision = t.gate('pi-call-1', 'bash', { command: 'rm -rf x' })
+      await flush()
+      t.setMode('default')
+      held.resolve('<block>no</block>')
+      await flush()
+      expect(approvals(t.ctx)).toEqual([
+        expect.objectContaining({ toolUseId: 'pi-call-1', toolName: 'bash' })
+      ])
+      expect(reviews(t.ctx)).toHaveLength(0)
+      void decision
+      await t.finish()
+    })
+
+    it('T15: a stop while the ask is judged denies it as stopped, with no card', async () => {
+      const t = await start()
+      const held = deferred<string>()
+      t.judge.replies.push(() => held.promise)
+      const decision = t.gate('pi-call-1', 'bash', { command: 'rm -rf x' })
+      await flush()
+      expect(t.dispatcher.stopDispatch('toolu_pi_auto')).toBe(true)
+      held.resolve('<block>no</block>')
+      expect(await decision).toEqual({ behavior: 'deny', reason: 'Dispatch stopped' })
+      expect(approvals(t.ctx)).toHaveLength(0)
+      expect(reviews(t.ctx)).toHaveLength(0)
+      t.target.pushEvent(PI_AGENT_SETTLED)
+    })
+
+    it('F10: a stop during the transport await whose outcome would be human (transport fails) → deny as stopped, no card', async () => {
+      const t = await start()
+      const held = deferred<string>()
+      t.judge.replies.push(() => held.promise.then(() => Promise.reject(new Error('HTTP 503'))))
+      const decision = t.gate('pi-call-1', 'bash', { command: 'rm -rf x' })
+      await flush()
+      expect(t.dispatcher.stopDispatch('toolu_pi_auto')).toBe(true)
+      held.resolve('')
+      expect(await decision).toEqual({ behavior: 'deny', reason: 'Dispatch stopped' })
+      expect(approvals(t.ctx)).toHaveLength(0)
+      t.target.pushEvent(PI_AGENT_SETTLED)
+    })
+
+    it('a user ask rule (G9) reaches the human with zero judge calls', async () => {
+      const target = makeFakePiTarget()
+      const judge = makeScriptedJudge()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: judgedConfig(),
+        loadUserRules: () => userRules({ ask: ['Bash(git push:*)'] }),
+        spawnPiTarget: target.spawnPiTarget,
+        makeJudgeTransport: judge.make
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await tick()
+      void target.gateHandler()({
+        toolCallId: 'pi-push',
+        toolName: 'bash',
+        input: { command: 'git push origin main' }
+      })
+      await flush()
+      expect(judge.requests).toHaveLength(0)
+      expect(approvals(ctx)).toHaveLength(1)
+      target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      await pending
     })
   })
 })

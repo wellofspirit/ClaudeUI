@@ -79,7 +79,6 @@ import { openProviderSettings, type SettingsTarget } from './settings-target'
 import { isPiModelAllowed, splitPiModelValue } from '../../../../shared/pi-model-allowlist'
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
 import { LastPickNote } from './NewSessionModelSetting'
-import { usePiInstalled } from './use-engine-installed'
 import { useEngineConfigObject } from './use-engine-config'
 import { deepEqual, isPlainObject } from '../../../../shared/opencode-config-diff'
 import type { ModelInfo, RawConfigPatch } from '../../../../shared/types'
@@ -176,15 +175,18 @@ function usePiNativeConfigLeaf(): PiNativeConfigLeaf {
   return { config, text, filePath, read, patch, errorAt, reload }
 }
 
-// ── Pane shell (install gate) ────────────────────────────────────────────────
+// ── Pane shell ───────────────────────────────────────────────────────────────
 
 /**
- * The install gate, and the hairline between rows.
+ * The Loading row, and the hairline between rows.
  *
  * A group CARD divides its items (View.tsx), but a whole pane is one item, so
  * the rows inside it need the same divider to read as the card's rows rather
  * than as one block of text. There is no footer: what the group applies to and
  * where it is stored are the card header's storage tag and its note (ADR-065).
+ *
+ * Nothing here asks whether pi is installed: while it is not, the pi page cannot
+ * be opened and the Models page's pi segment is hidden (ADR-082 §8).
  */
 function PaneShell({
   testid,
@@ -195,24 +197,10 @@ function PaneShell({
   api: PiNativeConfigLeaf
   children: React.ReactNode
 }): React.JSX.Element {
-  const installed = usePiInstalled()
-
-  if (installed === null || api.config === null) {
+  if (api.config === null) {
     return (
       <div data-testid={testid}>
         <SettingRow testid={`${PANE}.status`} dataId="loading" description="Loading…" />
-      </div>
-    )
-  }
-  if (!installed) {
-    return (
-      <div data-testid={testid}>
-        <SettingRow
-          testid={`${PANE}.status`}
-          dataId="not-installed"
-          dimmed
-          description="pi is not installed. These settings edit pi's own settings file."
-        />
       </div>
     )
   }
@@ -669,7 +657,7 @@ export function PiRetrySection(): React.JSX.Element {
  * block.
  *
  * Its testids are unchanged across the ADR-065 restyle so the deep links and
- * tests that name them keep working. The install gate lives in `PaneShell`.
+ * tests that name them keep working.
  */
 function PiSessionDefaultModel({
   navigate
@@ -708,7 +696,7 @@ function PiSessionDefaultModel({
 
   useEffect(() => {
     window.api
-      .getEngineModels()
+      .getEngineModels('pi')
       .then((groups) => {
         const pi = groups.filter((g) => g.engineId === 'pi')
         setModels(pi.flatMap((g) => g.models))
@@ -718,7 +706,7 @@ function PiSessionDefaultModel({
 
   const refreshModels = (): void => {
     window.api
-      .getEngineModels()
+      .getEngineModels('pi')
       .then((groups) =>
         setModels(groups.filter((g) => g.engineId === 'pi').flatMap((g) => g.models))
       )

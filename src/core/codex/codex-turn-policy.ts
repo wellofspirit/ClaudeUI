@@ -1,4 +1,4 @@
-import { isImageMediaType } from '../../shared/types'
+import { isImageMediaType, type AttachmentUpload } from '../../shared/types'
 import type { CollaborationMode } from './protocol/CollaborationMode'
 import type { AskForApproval } from './protocol/v2/AskForApproval'
 import type { ApprovalsReviewer } from './protocol/v2/ApprovalsReviewer'
@@ -20,7 +20,7 @@ import { codexSandboxPolicy } from './settings'
  */
 
 /** Inline image attachments on a prompt — Codex takes base64 PNG/JPEG/GIF/WebP only. */
-export type CodexAttachments = Array<{ mediaType: string; base64Data: string }>
+export type CodexAttachments = AttachmentUpload[]
 
 /** One row of {@link CODEX_TURN_POLICY}. */
 export interface CodexModePolicy {
@@ -39,7 +39,10 @@ export interface CodexModePolicy {
  * what that subagent escalates reaches us, gated exactly like `default`.
  *
  * The sandbox is the containment floor, not the decision: an ACCEPTED command
- * runs unsandboxed on this wire regardless (same probe, "Other observations").
+ * is re-run unsandboxed, without a second ask, when its sandboxed first attempt
+ * is denied — but only if Codex classifies that failure as a denial (a 20 ms
+ * output window for `exec_command`), so a miss surfaces as an ordinary failed
+ * command. See docs/architecture/codex.md, Permissions.
  */
 export const CODEX_TURN_POLICY: Record<string, CodexModePolicy> = {
   plan: { approvalPolicy: 'untrusted', sandbox: 'read-only', approvalsReviewer: 'user' },

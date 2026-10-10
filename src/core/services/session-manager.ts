@@ -6,7 +6,8 @@ import { engineRegistry } from '../providers/EngineRegistry'
 import '../providers/register-engines'
 import { readSessionHistory as loadSessionHistory } from './engine-history'
 import { cwdToProjectKey } from '../../shared/project-key'
-import { renameUsageEventParent } from './db'
+import { claudeProjectKeyFor } from './claude-transcript-locator'
+import { getSessionMeta, renameUsageEventParent } from './db'
 import { logger } from './logger'
 import { syncCore } from './sync-host'
 
@@ -61,7 +62,7 @@ export class SessionManager {
 
   create(
     routingId: string,
-    /** Host handle for the session (voice capture); `null` when windowless — phase 4d. */
+    /** Host handle for the session; `null` when windowless — phase 4d. */
     win: HostWindowHandle | null,
     cwd: string,
     opts: EngineSpawnOptions = {},
@@ -164,8 +165,12 @@ export class SessionManager {
         return session.getMessages()
       }
     }
-    // Fall back to disk
-    const projectKey = cwdToProjectKey(cwd)
+    // Fall back to disk. A Claude transcript is LOCATED rather than derived from
+    // `cwd` (cli.js relocates it into a worktree's project dir on
+    // `EnterWorktree`); the other engines read by id and ignore projectKey.
+    const engineId = getSessionMeta(sessionId)?.engineId ?? 'claude'
+    const projectKey =
+      engineId === 'claude' ? claudeProjectKeyFor(sessionId, cwd) : cwdToProjectKey(cwd)
     const result = await loadSessionHistory(sessionId, projectKey)
     return result.messages
   }

@@ -9,6 +9,7 @@
  * one function now; the views decide how to render the answer, not what it is.
  */
 import type { TaskNotification } from '../../../../shared/types'
+import { backgroundBashTaskId } from '../../../../shared/claude-background-bash'
 
 /**
  * The **last** notification for a tool_use id — never the first.
@@ -56,7 +57,16 @@ export interface TaskLifecycleInput {
 export interface TaskLifecycleState {
   isRunning: boolean
   isError: boolean
-  /** Historical transcripts show unfinished tasks as neutral, not as running. */
+  /**
+   * Ended by a stop — the user's, or the process dying under it — rather than
+   * finishing. Its own look, not "completed": the agent did not get to answer.
+   */
+  isStopped: boolean
+  /**
+   * Neither running nor settled: a historical task with nothing to say how it
+   * ended, or an agent whose transcript ends mid-run (`unfinished`, ADR-073 §5)
+   * and which might equally have died or still be running elsewhere.
+   */
   isLoaded: boolean
 }
 
@@ -90,13 +100,48 @@ export function deriveTaskState({
         // synchronous task that notified may never post a tool_result.
         notification
         ? false
-        : isBackground
-          ? true
+        : // A background launch answers with a success result at once; an
+          // ERROR result means it never launched (a judge block, a start
+          // failure), so nothing will ever notify — it is settled, not running.
+          isBackground
+          ? !(hasResult && resultIsError)
           : !hasResult
 
+  const unfinished = notification?.status === 'unfinished'
   return {
     isRunning,
     isError: notification ? notification.status === 'failed' : resultIsError,
-    isLoaded: isHistorical && !hasResult && !notification
+    isStopped: !isRunning && notification?.status === 'stopped',
+    isLoaded: !isRunning && ((isHistorical && !hasResult && !notification) || unfinished)
   }
+}
+
+/**
+ * Whether cli.js moved a foreground Bash to the background: "Send to
+ * background", a timeout, or a message that arrived while it ran. From then on
+ * it is a background command, and its tool_result only says where the output
+ * goes.
+ *
+ * While the task runs, the record's flip says so (`isBackgrounded`). The
+ * terminal event drops the record; from then on, the tool_result's wording
+ * plus that event say so. A transcript has neither, because history maps no
+ * shell's notification to its call, so a reopened session keeps showing the
+ * tool_result rather than a command that would never end.
+ */
+export function bashMovedToBackground({
+  isHistorical,
+  activeTask,
+  notification,
+  resultText
+}: {
+  isHistorical: boolean
+  activeTask?: { isBackgrounded?: boolean }
+  notification?: TaskNotification | null
+  resultText?: string
+}): boolean {
+  if (isHistorical) return false
+  if (activeTask?.isBackgrounded === true) return true
+  return (
+    !!notification && resultText !== undefined && backgroundBashTaskId(resultText) !== undefined
+  )
 }

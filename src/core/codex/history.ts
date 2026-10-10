@@ -60,6 +60,35 @@ const FORK_READ_CONCURRENCY = 4
 const THREAD_UNRESOLVABLE = 'rpc-error--32600'
 
 /**
+ * Threads THIS process deleted, so a listing that raced the delete cannot
+ * bring one back.
+ *
+ * A sidebar refresh sends `thread/list` and then works on the answer: it adopts
+ * every listed thread (`session_meta`, `codex_session_overrides`) and reads the
+ * lineage of any the cache does not know. When the list went out just before a
+ * delete and comes back just after it, the thread is still in the answer while
+ * the delete has already forgotten its rows — so the refresh re-created them,
+ * read the thread twice, logged the refusal, and tombstoned it in the lineage
+ * cache (observed 2026-10-02, a project delete racing two refreshes). Every
+ * listing path drops these ids instead: a deleted thread is not a row, not a
+ * candidate, and not a refusal worth confirming.
+ *
+ * Process-lifetime and never pruned: ids are UUIDs that no thread reuses, and
+ * one entry per delete is negligible.
+ */
+const deletedThreads = new Set<string>()
+
+/** Called once the binary has CONFIRMED the delete (`delete.ts` `forgetThread`). */
+export function markCodexThreadDeleted(threadId: string): void {
+  deletedThreads.add(threadId)
+}
+
+/** `thread/list`, minus every thread this process has deleted. */
+async function listUndeleted(service: CodexService): Promise<Thread[]> {
+  return (await service.listAllThreads()).filter((thread) => !deletedThreads.has(thread.id))
+}
+
+/**
  * How long to wait before asking a second time whether a refused id is really
  * gone. Long enough to be a genuinely separate attempt (the first pass's lease
  * on the host has been released by then, so the confirmation is a fresh request
@@ -120,8 +149,10 @@ async function readThreads(
         results[index] = await readOne(service, ids[index])
     })
   )
+  // A refusal for a thread this process deleted while the read was in flight
+  // needs no confirming: it is the answer the delete just made true.
   const suspects = results.flatMap((read, index) =>
-    read.thread === null && read.unresolvable ? [index] : []
+    read.thread === null && read.unresolvable && !deletedThreads.has(ids[index]) ? [index] : []
   )
   if (!suspects.length) return results
   await (tuning.sleep ?? wait)(tuning.confirmDelayMs ?? REFUSAL_CONFIRM_MS)
@@ -216,6 +247,8 @@ async function refreshCodexLineage(
   const reads = await readThreads(service, [...candidates], tuning)
   let learned = 0
   for (const read of reads) {
+    // Deleted while this pass was reading: its rows are gone, keep them gone.
+    if (deletedThreads.has(read.threadId)) continue
     const known = cache.get(read.threadId)
     if (read.thread) {
       // A thread that claims itself as its own source is a lineage nothing can
@@ -258,7 +291,7 @@ export async function scanCodexLineage(
     tuning.service ??
     new CodexService({ ...options, identity: { accountId: null }, label: 'lineage-scan' })
   try {
-    return await refreshCodexLineage(service, await service.listAllThreads(), mode, tuning)
+    return await refreshCodexLineage(service, await listUndeleted(service), mode, tuning)
   } finally {
     if (!tuning.service) service.dispose()
   }
@@ -335,7 +368,7 @@ export async function listCodexSessions(
     tuning.service ??
     new CodexService({ ...options, identity: { accountId: null }, label: 'history-list' })
   try {
-    const listed = await service.listAllThreads()
+    const listed = await listUndeleted(service)
     const sessions = listed.filter(listable).map(adoptThread)
     const native = new Set(listed.map((thread) => thread.id))
     // A thread that appeared while the app was running — another client's fork,
@@ -349,11 +382,14 @@ export async function listCodexSessions(
       .map((fork) => fork.threadId)
       .filter((id) => !native.has(id))
     for (const read of await readThreads(service, ids, tuning)) {
+      if (deletedThreads.has(read.threadId)) continue
       if (read.thread) {
         if (listable(read.thread)) sessions.push(adoptThread(read.thread))
       } else if (read.unresolvable) recordCodexLineage(read.threadId, null, null)
     }
-    return sessions
+    // A delete that landed during the reads above already forgot the rows its
+    // adoption wrote; the row itself must not reach the sidebar either.
+    return sessions.filter((session) => !deletedThreads.has(session.sessionId))
   } finally {
     if (!tuning.service) service.dispose()
   }

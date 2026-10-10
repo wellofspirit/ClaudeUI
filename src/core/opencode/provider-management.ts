@@ -7,8 +7,12 @@
  *
  *   - DISABLE writes `disabled_providers`, the only veto that works against
  *     every derivation source. Nothing is destroyed; it is reversible.
- *   - REMOVE destroys what ClaudeUI actually owns — the auth.json credential
- *     and/or the provider declaration in the one global config file it writes.
+ *   - REMOVE destroys what ClaudeUI actually owns — its `cred_claudeui_*` key
+ *     in opencode's credential table (ADR-097 §5; a sign-in of the user's own
+ *     stays) and/or the provider declaration in the one global config file it
+ *     writes.
+ *     A disabled-only row removes its veto and picker curation without deleting
+ *     credentials or declarations (ADR-044's 2026-10-01 amendment).
  *
  * The original bug was applying the general remedy (disable) to a case the
  * specific one covered: ChatGPT's credential was deleted AND the id was vetoed,
@@ -20,9 +24,16 @@
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { loadEngineConfig, saveEngineConfig } from '../services/ui-config'
 import { logger } from '../services/logger'
-import { readOpencodeNativeConfig, writeOpencodeNativeConfig } from './opencode-config'
+import {
+  readDeclaredProviderIds,
+  readOpencodeNativeConfig,
+  writeOpencodeNativeConfig
+} from './opencode-config'
 import { invalidateOpencodeModelCache } from './model-discovery'
 import type { ProviderRemoveKind } from '../../shared/types'
+import { opencodeCredentialStore } from './opencode-credentials'
+import { resolveProviderActions } from './provider-actions'
+import { FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
 
 /**
  * Toggle a provider's `disabled_providers` membership. Purely additive/subtractive
@@ -54,13 +65,35 @@ export function setOpencodeProviderDisabled(id: string, disabled: boolean): void
  * declared provider would silently leave the declaration behind and the provider
  * would still be listed, reading as "Remove did nothing".
  *
- * The credential delete goes through OpencodeAuthProvider (DELETE /auth/{id}) so
- * the HTTP mutation path stays the single owner of credential writes. The
+ * The credential delete goes through OpencodeAuthProvider (ClaudeUI's rows
+ * only, the user's previous credential re-activated) so the credential store
+ * stays the single owner of credential writes. The
  * declaration delete and the veto/allowlist cleanup share ONE config
  * read-modify-write: two separate writes would leave a window where the
  * declaration is gone but the veto still names it.
  */
 export async function removeOpencodeProvider(id: string, kind: ProviderRemoveKind): Promise<void> {
+  if (kind === 'settings') {
+    // Re-read at the write boundary. A stale Settings snapshot must not silently
+    // enable a newly credentialed or declared provider under the old confirmation.
+    const native = readOpencodeNativeConfig()
+    const actions = resolveProviderActions({
+      disabled: native.disabledProviders?.includes(id),
+      isFree: FREE_OPENCODE_VENDOR_IDS.has(id),
+      // ClaudeUI's own record answers (no server): Remove deletes only its rows.
+      hasCredential: opencodeCredentialStore.recordedRemovableIntegrations().has(id),
+      declaredInOurFile: Object.hasOwn(native.providers ?? {}, id),
+      declaredElsewhereGlobal: readDeclaredProviderIds().includes(id)
+    })
+    if (actions.removeKind !== 'settings') {
+      throw new Error(
+        'This provider is no longer a stale disabled entry. Refresh Settings before removing it.'
+      )
+    }
+  }
+  if (kind !== 'credential' && kind !== 'declaration' && kind !== 'both' && kind !== 'settings') {
+    throw new Error('Invalid provider removal kind')
+  }
   if (kind === 'credential' || kind === 'both') {
     await opencodeAuthProvider.removeVendorAuth(id)
   }
@@ -98,7 +131,6 @@ function clearModelAllowlistEntry(id: string): void {
   const config = loadEngineConfig('opencode')
   const allowlist = config.opencodeConfig?.modelAllowlist
   if (!allowlist || allowlist[id] === undefined) return
-
   const next = { ...allowlist }
   delete next[id]
   saveEngineConfig('opencode', {

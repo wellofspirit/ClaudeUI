@@ -28,6 +28,10 @@
  *    (PiSession.handleHostedTool); omitting it just fails closed on every
  *    /hosted-tool request (see runHostedTool).
  *
+ * Plus ONE plain route that is not an exchange: `POST /mcp-servers` answers
+ * the spawn-time MCP catalog snapshot the extension registers while pi loads
+ * (ADR-096; see {@link PiBridgeHostOptions.mcpServers} for the secrets note).
+ *
  * ## Long-poll protocol (2026-09-09)
  *
  * An exchange used to be ONE request held open until the handler settled —
@@ -73,7 +77,6 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { logger } from '../services/logger'
 import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from './pi-bridge-source'
-import { PI_SUBAGENT_EXTENSION_SOURCE, PI_SUBAGENT_VERSION } from './pi-subagent-source'
 
 /** Body size cap for POST /tool-call — generous for any realistic tool input, small enough to bound abuse. */
 const MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -101,6 +104,14 @@ export interface PiHostedToolPayload {
 export interface PiHostedToolResult {
   content: Array<{ type: 'text'; text: string }>
   isError?: boolean
+  /**
+   * Structured data for pi's `toolResult.details` (ADR-089: the `agent` tool's
+   * `cuiAgent` history link). The bridge returns a result whose `content` is
+   * an array VERBATIM (pi-bridge-source.ts), so this reaches pi as-is, and pi
+   * persists `details` on the toolResult message in the session file — never
+   * put anything here that must not be stored.
+   */
+  details?: Record<string, unknown>
 }
 
 export type PiHostedToolHandler = (payload: PiHostedToolPayload) => Promise<PiHostedToolResult>
@@ -137,6 +148,22 @@ export interface PiBridgeHostOptions {
   /** How long an unpolled exchange survives before it is abandoned. Default {@link DEFAULT_ABANDON_MS}. */
   abandonMs?: number
   onAbandoned?: (info: PiBridgeAbandoned) => void
+  /**
+   * The MCP servers `POST /mcp-servers` hands the bridge extension to register
+   * with `pi.registerMcpServer()` (ADR-096) — a snapshot taken at spawn, served
+   * on EVERY extension load (pi reloads extensions on fork). Absent = the route
+   * answers an empty set.
+   *
+   * The configs carry secrets (stdio `env`, HTTP `headers`). The route is
+   * behind the same bearer token as the gate, which sits in the pi child's env
+   * — so a process pi starts (an approved shell command, an MCP server) can
+   * read them. That is no wider than the source of the catalog: the same
+   * processes run as the same user and can read `~/.claude/.mcp.json` and the
+   * project's `.mcp.json` directly. What the channel avoids is copying the
+   * secrets into an env var every pi child would inherit (and `env` would print
+   * into the model's context) or into a file.
+   */
+  mcpServers?: Record<string, unknown>
 }
 
 /**
@@ -155,6 +182,9 @@ const DEFAULT_HOLD_MS = 45_000
  * so on loopback this much silence means the pi child is gone.
  */
 const DEFAULT_ABANDON_MS = 30_000
+
+/** The one non-exchange route: the MCP servers the extension registers at load (ADR-096). */
+const MCP_SERVERS_ROUTE = '/mcp-servers'
 
 /** `req.url` → the exchange it addresses. `/wait` re-parks; the bare route starts. */
 const ROUTES: Record<string, { route: PiBridgeRoute; wait: boolean } | undefined> = {
@@ -234,6 +264,7 @@ export class PiBridgeHost {
   private readonly holdMs: number
   private readonly abandonMs: number
   private readonly onAbandoned?: (info: PiBridgeAbandoned) => void
+  private readonly mcpServers: Record<string, unknown>
   /**
    * One entry per exchange that has been STARTED and whose result has not been
    * collected yet, keyed `${route}:${toolCallId}`.
@@ -261,6 +292,7 @@ export class PiBridgeHost {
     this.holdMs = options?.holdMs ?? DEFAULT_HOLD_MS
     this.abandonMs = options?.abandonMs ?? DEFAULT_ABANDON_MS
     this.onAbandoned = options?.onAbandoned
+    this.mcpServers = options?.mcpServers ?? {}
   }
 
   /** Bind 127.0.0.1:0 (OS-assigned ephemeral port) and mint a fresh bearer token. */
@@ -312,8 +344,9 @@ export class PiBridgeHost {
   }
 
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
+    const isMcpServers = req.url === MCP_SERVERS_ROUTE
     const target = ROUTES[req.url ?? '']
-    if (req.method !== 'POST' || !target) {
+    if (req.method !== 'POST' || (!target && !isMcpServers)) {
       res.writeHead(404).end()
       return
     }
@@ -351,6 +384,11 @@ export class PiBridgeHost {
     })
     req.on('end', () => {
       if (tooLarge) return
+      // No body to read: the answer is the spawn-time snapshot, whole.
+      if (!target) {
+        this.endJson(res, { servers: this.mcpServers })
+        return
+      }
       this.dispatchBody(target.route, target.wait, Buffer.concat(chunks).toString('utf-8'), res)
     })
     req.on('error', () => {
@@ -668,10 +706,12 @@ export class PiBridgeHost {
 }
 
 /**
- * Per-user base dir for both extension files (audit residual fix, 2026-07):
+ * Per-user base dir for the bridge extension file (audit residual fix, 2026-07):
  * `~/.claude/ui/pi-ext` — the SAME `~/.claude/ui/` per-OS-user root db.ts and
- * the auth vault use, derived locally (no import of either — see the two
- * writers' doc comments for the full rationale). `mkdirSync(recursive:true)`
+ * the auth vault use, derived locally (no import of either — see the
+ * writer's doc comment for the full rationale). The retired M5b subagent
+ * extension's copies under `pi-ext/claudeui-pi-subagent/` are inert and left
+ * on disk (ADR-089). `mkdirSync(recursive:true)`
  * creates it with the process's default (umask-restricted) perms under the
  * user's own home dir, which is NOT world-writable the way `os.tmpdir()`
  * (`/tmp` on POSIX) normally is — closing the preplant hole described below.
@@ -720,37 +760,6 @@ export function writeBridgeExtension(): string {
   if (!matches) {
     mkdirSync(dir, { recursive: true })
     writeFileSync(file, PI_BRIDGE_EXTENSION_SOURCE, 'utf-8')
-  }
-  return file
-}
-
-/**
- * Ensure the version-keyed in-pi subagent extension file (M5b,
- * pi-subagent-source.ts) exists on disk AND matches
- * `PI_SUBAGENT_EXTENSION_SOURCE` byte-for-byte, then return its absolute path
- * for `-e <path>`. SAME content-verify-on-every-call posture as
- * `writeBridgeExtension` above (rewrite on any mismatch — corrupted or
- * hand-edited) — a SEPARATE dir + version counter
- * (`claudeui-pi-subagent/<PI_SUBAGENT_VERSION>/`, not nested under the
- * bridge's own dir) since the two extensions version independently. Lives
- * under `~/.claude/ui/pi-ext` (see `piExtBaseDir()` — same per-user,
- * non-world-writable rationale as the bridge writer above) — NEVER
- * `~/.pi/**`, which is user space.
- */
-export function writeSubagentExtension(): string {
-  const dir = join(piExtBaseDir(), 'claudeui-pi-subagent', PI_SUBAGENT_VERSION)
-  const file = join(dir, 'claudeui-subagent.ts')
-  let matches = false
-  if (existsSync(file)) {
-    try {
-      matches = readFileSync(file, 'utf-8') === PI_SUBAGENT_EXTENSION_SOURCE
-    } catch {
-      matches = false // unreadable — treat exactly like a mismatch, rewrite below.
-    }
-  }
-  if (!matches) {
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(file, PI_SUBAGENT_EXTENSION_SOURCE, 'utf-8')
   }
   return file
 }

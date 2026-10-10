@@ -16,6 +16,7 @@
  */
 
 import { TerminalView } from '../../TerminalView'
+import { TOOL_OUTPUT_SCOPE } from '../../ChatSearch/search-scope'
 import type { KindBodyProps } from './types'
 
 const ACTION_LABEL: Readonly<Record<string, string>> = {
@@ -72,6 +73,7 @@ export function WebBody({
       {results.length > 0 && (
         <div
           data-testid={hideToolInput ? 'WebBody' : undefined}
+          {...TOOL_OUTPUT_SCOPE}
           className={`px-3 py-2.5 flex flex-col gap-2.5 ${hideToolInput ? '' : 'border-t border-border'}`}
         >
           <div className="text-[11px] text-text-secondary uppercase tracking-wider">
@@ -112,6 +114,7 @@ export function WebBody({
       {showText && (
         <div
           data-testid={hideToolInput && results.length === 0 ? 'WebBody' : undefined}
+          {...TOOL_OUTPUT_SCOPE}
           className={`px-3 py-2.5 ${hideToolInput ? '' : 'border-t border-border'}`}
         >
           {!hideToolInput && (

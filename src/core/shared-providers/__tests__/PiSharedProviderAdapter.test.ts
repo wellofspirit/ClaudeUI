@@ -93,6 +93,26 @@ describe('PiSharedProviderAdapter', () => {
     })
     expect(invalidations).toBe(1)
   })
+  // Every definition is re-applied at boot. Each write invalidates pi's model
+  // cache, which killed the model probe in flight even when nothing changed.
+  it('re-applying an unchanged definition writes nothing and invalidates nothing', () => {
+    adapter().applyDefinition(provider)
+    // Compact on purpose: the writer indents, so a rewrite would show.
+    writeFileSync(modelsPath, JSON.stringify(readModels()))
+    const raw = readFileSync(modelsPath, 'utf8')
+    adapter().applyDefinition(provider, true, provider)
+    expect(readFileSync(modelsPath, 'utf8')).toBe(raw)
+    expect(invalidations).toBe(1)
+  })
+  it('re-applying a changed definition writes and invalidates as before', () => {
+    adapter().applyDefinition(provider)
+    const moved = { ...provider, baseUrl: 'https://api.example.test/v2' }
+    adapter().applyDefinition(moved, true, provider)
+    expect(
+      (readModels().providers as Record<string, { baseUrl: string }>)['private-api'].baseUrl
+    ).toBe('https://api.example.test/v2')
+    expect(invalidations).toBe(2)
+  })
   it('removes only its exact current compiled provider entry', () => {
     adapter().applyDefinition(provider)
     adapter().removeDefinition(provider)
@@ -546,5 +566,28 @@ describe('PiSharedProviderAdapter — catalog kind (ADR-074 §6)', () => {
     subject.removeDefinition(catalog)
     expect(() => readModels()).toThrow()
     expect(subject.hasDefinition(catalog)).toBe(true)
+  })
+})
+
+describe('PiSharedProviderAdapter — a model’s Detect baseline (GUARD)', () => {
+  it('never reaches pi: models.json is byte-identical with or without it', () => {
+    adapter().applyDefinition(provider)
+    const plain = readFileSync(modelsPath, 'utf8')
+    rmSync(modelsPath)
+    adapter().applyDefinition({
+      ...provider,
+      models: provider.models.map((model) => ({
+        ...model,
+        detected: {
+          server: 'vllm' as const,
+          at: '2026-09-30T10:00:00.000Z',
+          contextWindow: 100_000,
+          maxTokens: 8_000,
+          vision: true,
+          reasoning: true
+        }
+      }))
+    })
+    expect(readFileSync(modelsPath, 'utf8')).toBe(plain)
   })
 })

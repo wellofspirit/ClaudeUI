@@ -6,6 +6,8 @@
 
 import { describe, it, expect } from 'vitest'
 import { PiEngineToolMap } from '../PiEngineToolMap'
+import { ClaudeEngineToolMap } from '../ClaudeEngineToolMap'
+import { deriveTaskState } from '../../task-state'
 import type { ToolKind } from '../../../../../../shared/tool-kinds'
 // Main can't import renderer code (separate Electron processes/bundles), so
 // permission-engine.ts (src/main/pi/) keeps its OWN small copy of this exact
@@ -34,9 +36,12 @@ describe('PiEngineToolMap.kindOf', () => {
     ['create_mockup', 'mockup'],
     ['show_mockup', 'mockup'],
     ['dispatch_agent', 'task'],
-    // In-pi subagents (M5b) — the SECOND extension's bare-name registration,
-    // reusing the SAME 'task' kind as dispatch_agent.
+    // Host-run subagents (ADR-089) — the bridge's `agent` tool.
+    ['agent', 'task'],
+    // Legacy M5b `subagent` (old transcripts, pi's upstream example extension).
     ['subagent', 'task'],
+    // The bridge's read-only list_models (ADR-089 S3): a one-line note.
+    ['list_models', 'note'],
     // Plan mode (M5a) — exit_plan, also a bare-name pi.registerTool() registration.
     ['exit_plan', 'plan'],
     // Unknown tool names fall through gracefully.
@@ -291,7 +296,7 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
     expect(view).toEqual({ kind: 'mockup', directory: undefined, title: undefined })
   })
 
-  it('task: dispatch_agent input (engine present) -> "Dispatch: <engine>" / "<engine> · <model>"', () => {
+  it('task: dispatch_agent input (engine present) -> "Dispatch: <engine>" / the dispatch field', () => {
     const view = PiEngineToolMap.normalize('task', {
       engine: 'opencode',
       prompt: 'do X',
@@ -301,23 +306,58 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       kind: 'task',
       description: 'Dispatch: opencode',
       prompt: 'do X',
-      subagent: 'opencode · openai/gpt-5'
+      dispatch: { engine: 'opencode', model: 'openai/gpt-5' }
     })
   })
 
-  it('task: dispatch_agent without a model -> subagent is just the engine name', () => {
+  it('task: dispatch_agent without a model -> the dispatch field is just the engine', () => {
     const view = PiEngineToolMap.normalize('task', { engine: 'claude', prompt: 'do X' })
     expect(view).toEqual({
       kind: 'task',
       description: 'Dispatch: claude',
       prompt: 'do X',
-      subagent: 'claude'
+      dispatch: { engine: 'claude' }
     })
   })
 
   it('task: no engine field (defensive fallback, unreachable for pi today) -> generic view', () => {
     const view = PiEngineToolMap.normalize('task', { prompt: 'do X' })
     expect(view).toMatchObject({ kind: 'task', description: '', prompt: 'do X' })
+  })
+
+  it('task: the agent tool ({description, prompt, subagent_type?, name?, model?}, ADR-089)', () => {
+    expect(
+      PiEngineToolMap.normalize('task', {
+        description: 'Find the gate',
+        prompt: 'Look for X',
+        subagent_type: 'Explore',
+        model: 'openai-codex/gpt-5.6-luna'
+      })
+    ).toEqual({
+      kind: 'task',
+      description: 'Find the gate',
+      prompt: 'Look for X',
+      subagent: 'Explore',
+      name: 'Explore',
+      model: 'openai-codex/gpt-5.6-luna',
+      background: true
+    })
+    expect(
+      PiEngineToolMap.normalize('task', { description: 'd', prompt: 'p', name: 'scout' })
+    ).toEqual({
+      kind: 'task',
+      description: 'd',
+      prompt: 'p',
+      subagent: 'general-purpose',
+      name: 'scout',
+      background: true
+    })
+    // ADR-089 S3: background is the default; only an explicit false is foreground.
+    expect(
+      PiEngineToolMap.normalize('task', { description: 'd', prompt: 'p', run_in_background: false })
+    ).toMatchObject({ kind: 'task', background: false })
+    // Without description it is not the agent shape (the generic fallback stays).
+    expect(PiEngineToolMap.normalize('task', { prompt: 'do X' })).toMatchObject({ description: '' })
   })
 
   it('task: subagent single mode ({agent, task}) -> "Subagent: <agent>" / subagent field is the bare agent name', () => {
@@ -362,7 +402,7 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       kind: 'task',
       description: 'Dispatch: claude',
       prompt: 'x',
-      subagent: 'claude'
+      dispatch: { engine: 'claude' }
     })
   })
 })
@@ -388,5 +428,187 @@ describe('PiEngineToolMap.displayName', () => {
     expect(PiEngineToolMap.displayName('show_mockup')).toBe('Mockup')
     expect(PiEngineToolMap.displayName('dispatch_agent')).toBe('Dispatch')
     expect(PiEngineToolMap.displayName('subagent')).toBe('Subagent')
+    expect(PiEngineToolMap.displayName('agent')).toBe('Agent')
+  })
+})
+
+describe('PiEngineToolMap — agent background comes from the RESULT once there is one (ADR-089 S3 review R1)', () => {
+  const input = { description: 'd', prompt: 'p' }
+  const result = (toolResult: string, isError?: boolean) => ({
+    type: 'tool_result' as const,
+    toolUseId: 'call-1',
+    toolResult,
+    ...(isError === undefined ? {} : { isError })
+  })
+  const launched = result(
+    "Async agent launched successfully.\nagentId: a (use send_message with to: 'a' to continue this agent.)\n…"
+  )
+  const stateOf = (background: boolean | undefined, hasResult: boolean, notified: boolean) =>
+    deriveTaskState({
+      isHistorical: false,
+      hasActiveTask: false,
+      isBackground: !!background,
+      hasResult,
+      notification: notified
+        ? { taskId: 'a', toolUseId: 'call-1', status: 'completed', outputFile: '', summary: '' }
+        : undefined,
+      resultIsError: false
+    })
+
+  it('a call refused before any spawn (isError, no lifecycle record) is settled, not running', () => {
+    const view = PiEngineToolMap.normalize(
+      'task',
+      input,
+      result('Agent type "nope" not found. Available agents: general-purpose', true)
+    )
+    expect(view).toMatchObject({ kind: 'task', background: false })
+    expect(stateOf(view.kind === 'task' ? view.background : undefined, true, false).isRunning).toBe(
+      false
+    )
+  })
+
+  it('V1b: the model chip shows the RESOLVED model once the result says it, else what was asked for', () => {
+    const asked = { ...input, model: 'opus' }
+    // No result yet, a refusal, or a result without the host line: the request.
+    expect(PiEngineToolMap.normalize('task', asked)).toMatchObject({ model: 'opus' })
+    expect(
+      PiEngineToolMap.normalize('task', asked, result('Unknown model "opus".', true))
+    ).toMatchObject({ model: 'opus' })
+    // The host's launch acknowledgement and foreground trailer carry the resolved value.
+    const launchedWithModel = result(
+      "Async agent launched successfully.\nagentId: a (use send_message with to: 'a' to continue this agent.)\nmodel: anthropic/claude-opus-4-5-20251101\nThe agent is working in the background."
+    )
+    expect(PiEngineToolMap.normalize('task', asked, launchedWithModel)).toMatchObject({
+      model: 'anthropic/claude-opus-4-5-20251101',
+      background: true
+    })
+    const foreground = result(
+      "the report\n\nagentId: a (use send_message with to: 'a' to continue this agent.)\nmodel: openai/o3\n<usage>total_tokens: 1\ntool_uses: 0\nduration_ms: 5</usage>"
+    )
+    expect(PiEngineToolMap.normalize('task', asked, foreground)).toMatchObject({
+      model: 'openai/o3'
+    })
+    // No model asked and none resolved: no chip.
+    expect(PiEngineToolMap.normalize('task', input, result('the report'))).not.toHaveProperty(
+      'model'
+    )
+  })
+
+  it('an async-launched result is background: running until its notification', () => {
+    const view = PiEngineToolMap.normalize('task', input, launched)
+    expect(view).toMatchObject({ background: true })
+    const bg = view.kind === 'task' ? view.background : undefined
+    expect(stateOf(bg, true, false).isRunning).toBe(true)
+    expect(stateOf(bg, true, true).isRunning).toBe(false)
+  })
+
+  it('a definition that forced background (input said false) reads background on reload', () => {
+    const view = PiEngineToolMap.normalize('task', { ...input, run_in_background: false }, launched)
+    expect(view).toMatchObject({ background: true })
+  })
+
+  it('a foreground report is not background; before a result the input decides', () => {
+    expect(PiEngineToolMap.normalize('task', input, result('the report'))).toMatchObject({
+      background: false
+    })
+    expect(PiEngineToolMap.normalize('task', input)).toMatchObject({ background: true })
+  })
+})
+
+describe('PiEngineToolMap — list_models row (ADR-089 S3)', () => {
+  it('a one-line note naming the query; the (long) result list is not the row text; task_stop is unchanged', () => {
+    const result = {
+      type: 'tool_result' as const,
+      toolUseId: 't',
+      toolResult: ['Current session model: a/b', 'x/y — Y'].join('\n'),
+      isError: false
+    }
+    expect(PiEngineToolMap.normalize('note', {}, result)).toEqual({
+      kind: 'note',
+      icon: 'search',
+      text: 'Listed the available models'
+    })
+    expect(PiEngineToolMap.normalize('note', { query: ' sonnet ' })).toEqual({
+      kind: 'note',
+      icon: 'search',
+      text: 'Listed models matching "sonnet"'
+    })
+    expect(PiEngineToolMap.normalize('note', { task_id: 'scout' })).toMatchObject({ icon: 'stop' })
+    expect(PiEngineToolMap.displayName('list_models')).toBe('Models')
+  })
+})
+
+describe('PiEngineToolMap — send_message / task_stop rows (ADR-089 S3b)', () => {
+  it('kinds mirror permission-engine (detail / note)', () => {
+    expect(PiEngineToolMap.kindOf('send_message')).toBe('detail')
+    expect(PiEngineToolMap.kindOf('task_stop')).toBe('note')
+    expect(piToolKind('send_message')).toBe('detail')
+    expect(piToolKind('task_stop')).toBe('note')
+  })
+
+  it('send_message: to + summary as fields, the message as the text; task_stop: a stop note', () => {
+    expect(
+      PiEngineToolMap.normalize('detail', { to: 'scout', summary: 'check X', message: 'also X' })
+    ).toEqual({
+      kind: 'detail',
+      fields: [
+        { label: 'to', value: 'scout' },
+        { label: 'summary', value: 'check X' }
+      ],
+      text: 'also X'
+    })
+    expect(PiEngineToolMap.normalize('note', { task_id: 'scout' })).toEqual({
+      kind: 'note',
+      icon: 'stop',
+      text: 'Stopped agent scout'
+    })
+  })
+
+  it('send_message refused: the host answer is the text, the attempted message a field', () => {
+    expect(
+      PiEngineToolMap.normalize(
+        'detail',
+        { to: 'nobody-here', message: 'hello' },
+        {
+          type: 'tool_result',
+          toolUseId: 't',
+          toolResult: 'No agent "nobody-here" in this session. Agents: (none)',
+          isError: true
+        }
+      )
+    ).toEqual({
+      kind: 'detail',
+      fields: [
+        { label: 'to', value: 'nobody-here' },
+        { label: 'message', value: 'hello' }
+      ],
+      text: 'No agent "nobody-here" in this session. Agents: (none)'
+    })
+  })
+
+  it('task_stop: once the host answered, the row says what it said (a refusal is not a stop)', () => {
+    expect(
+      PiEngineToolMap.normalize(
+        'note',
+        { task_id: 'scout' },
+        {
+          type: 'tool_result',
+          toolUseId: 't',
+          toolResult: 'Agent scout is not running.',
+          isError: true
+        }
+      )
+    ).toEqual({ kind: 'note', icon: 'stop', text: 'Agent scout is not running.' })
+  })
+})
+
+describe('PiEngineToolMap — bridged MCP tools (ADR-096)', () => {
+  it('renders a pi MCP call exactly as Claude renders one: the mcp kind, the raw name as header', () => {
+    expect(PiEngineToolMap.kindOf('mcp__fixture__echo')).toBe('mcp')
+    expect(PiEngineToolMap.displayName('mcp__fixture__echo')).toBe('mcp__fixture__echo')
+    expect(ClaudeEngineToolMap.kindOf('mcp__fixture__echo')).toBe('mcp')
+    expect(PiEngineToolMap.normalize('mcp', { text: 'hi' })).toEqual(
+      ClaudeEngineToolMap.normalize('mcp', { text: 'hi' })
+    )
   })
 })

@@ -25,5 +25,25 @@
       "resetsAt": null,
       "observedAt": 1758413000000
     }
+  ],
+  "credits": [
+    {
+      "deviceId": "2d6e8b11-7c04-49af-8f37-15ba90cd6e72",
+      "accountKey": "chatgpt:ws-3c1e9a:user-5d20b4",
+      "labelMasked": "s•••@e•••.com",
+      "vendorId": "openai",
+      "plan": "business",
+      "credits": {
+        "unlimited": false,
+        "balance": null
+      },
+      "allowance": {
+        "used": 100.25,
+        "limit": 8000,
+        "remainingPercent": 99,
+        "resetsAt": "2026-10-24T00:00:00.000Z"
+      },
+      "observedAt": 1758414000000
+    }
   ]
 }

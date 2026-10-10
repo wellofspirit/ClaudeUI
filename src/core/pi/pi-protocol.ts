@@ -3,10 +3,10 @@
  * the shapes ClaudeUI actually consumes. No runtime code: every export below
  * is a type/interface declared directly in this file, not a re-export.
  *
- * Sources (all version-pinned to package.json#piCliVersion, verified against
+ * Sources (all version-pinned to src/shared/harness-manifests/pi.json#tested, verified against
  * the real binary — see docs/protocol-pi/README.md for the M0 probe notes):
- *   - vendor/pi-cli/docs/rpc.md            — commands, responses, events
- *   - vendor/pi-cli/docs/session-format.md — on-disk session entry shapes
+ *   - vendor/pi-src/packages/coding-agent/docs/rpc.md            — commands, responses, events
+ *   - vendor/pi-src/packages/coding-agent/docs/session-format.md — on-disk session entry shapes
  *
  * Verified doc drift (v0.82.1, first verified v0.80.10; #1 re-verified v0.84.3
  * — docs/protocol-pi/README.md "Verified doc drift" section):
@@ -254,9 +254,29 @@ export interface PiBashExecutionMessage {
   timestamp: number
 }
 
-/** AgentMessage union — custom/branchSummary/compactionSummary omitted (not consumed in M1). */
+/**
+ * An extension's `pi.sendMessage` (messages.ts `CustomMessage`): live as a
+ * `message_start`/`message_end` pair with this role, on disk as a
+ * `custom_message` ENTRY (not a `message` entry). ClaudeUI's own agent
+ * deliveries are these with customType 'claudeui-agent-message' (ADR-089 S3,
+ * pi-delivery.ts). The LLM sees it as a user-role message (messages.ts).
+ */
+export interface PiCustomMessage {
+  role: 'custom'
+  customType: string
+  content: string | Array<PiTextContent | PiImageContent>
+  display: boolean
+  details?: unknown
+  timestamp: number
+}
+
+/** AgentMessage union — branchSummary/compactionSummary omitted (not consumed). */
 export type PiAgentMessage =
-  PiUserMessage | PiAssistantMessage | PiToolResultMessage | PiBashExecutionMessage
+  | PiUserMessage
+  | PiAssistantMessage
+  | PiToolResultMessage
+  | PiBashExecutionMessage
+  | PiCustomMessage
 
 // ---------------------------------------------------------------------------
 // Events (rpc.md "Events" — verified sequence in docs/protocol-pi/README.md)

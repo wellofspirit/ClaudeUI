@@ -2,9 +2,9 @@
  * pi-models-raw.ts
  *
  * Non-lossy reader / leaf-patcher for pi's model catalog file,
- * `~/.pi/agent/models.json` (vendor/pi-cli/docs/models.md). It is the settings
- * twin of `pi-native-raw.ts` — same mechanics, same file-generic core
- * (`pi-json-raw.ts`) — with one thing settings.json does not have: **models.json
+ * `~/.pi/agent/models.json` (vendor/pi-src/packages/coding-agent/docs/models.md).
+ * It is the settings twin of `pi-native-raw.ts` — same mechanics, same
+ * file-generic core (`pi-json-raw.ts`) — with one thing settings.json does not have: **models.json
  * already has a ClaudeUI writer.**
  *
  * `shared-providers/PiSharedProviderAdapter.ts` PROJECTS every enabled custom

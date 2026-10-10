@@ -256,6 +256,31 @@ describe('sessionEngines migration shape acceptance', () => {
 // ---------------------------------------------------------------------------
 
 describe('model persistence loop', () => {
+  it('a delayed opencode history load cannot overwrite a live model with a new default', () => {
+    useSessionStore.setState({
+      lastSelectedEngineId: 'opencode',
+      availableModels: [ocModel('local', 'old-model')]
+    })
+    store().createNewSession('live', '/tmp/proj')
+    store().setSelectedModel('local/old-model')
+    store().markSdkActive('live')
+    seed.status('live', {
+      ...store().sessions.live.status,
+      engineId: 'opencode',
+      state: 'idle',
+      model: { engineId: 'opencode', vendorId: 'local', modelId: 'old-model' }
+    })
+    // The history read began before resume; a config/default change landed while
+    // it was pending. The read must not apply that default to the now-live chat.
+    useSessionStore.setState({ sessionEngines: { live: { engineId: 'opencode' } } })
+    store().setOpencodeDefaultModel('local/new-default')
+    const before = store().sessions.live
+    store().loadHistoricalSession('live', [], '/tmp/proj')
+    expect(store().sessions.live.selectedModel).toBe('local/old-model')
+    expect(store().sessions.live.status).toEqual(before.status)
+    expect(store().sessions.live.sdkActive).toBe(true)
+    expect(store().sessions.live.isHistorical).toBe(before.isHistorical)
+  })
   it('setSelectedModel records the real model into sessionEngines', () => {
     store().createNewSession('r1', '/tmp/proj') // sets activeSessionId = 'r1'
     store().setSelectedModel('claude-opus-4-8')

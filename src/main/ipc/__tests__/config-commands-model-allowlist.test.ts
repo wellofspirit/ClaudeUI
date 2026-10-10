@@ -179,7 +179,22 @@ describe('config:save-opencode-settings — never writes the allowlist', () => {
     await invoke('config:save-opencode-settings', { model: 'x/y', modelAllowlist })
     expect(file('opencode')).toEqual(stored)
     // The native fields still reach opencode's own file.
-    expect(nativeMocks.writeOpencodeNativeConfig).toHaveBeenLastCalledWith({ model: 'x/y' })
+    expect(nativeMocks.writeOpencodeNativeConfig).toHaveBeenLastCalledWith(
+      { model: 'x/y' },
+      undefined
+    )
+  })
+
+  it('passes the snapshot the pane edited as the conflict base, allowlist stripped (S8 F11)', async () => {
+    await invoke(
+      'config:save-opencode-settings',
+      { model: 'x/y', smallModel: 's/m' },
+      { model: 'x/y', modelAllowlist: { a: [] } }
+    )
+    expect(nativeMocks.writeOpencodeNativeConfig).toHaveBeenLastCalledWith(
+      { model: 'x/y', smallModel: 's/m' },
+      { model: 'x/y' }
+    )
   })
 
   it('curation made through the ONE writer survives a stale whole-settings save', async () => {

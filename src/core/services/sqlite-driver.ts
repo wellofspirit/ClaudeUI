@@ -102,9 +102,9 @@ export interface SqliteDatabase {
 }
 
 /**
- * The subset of better-sqlite3's open options db.ts uses — both are set by
- * `readOpencodeSessionRows`, which reads a FOREIGN database (opencode's own) and
- * must never create or write it.
+ * The subset of better-sqlite3's open options the seam supports — for a read
+ * of a FOREIGN database that must never be created or written (the 1.x opencode
+ * session list was one, until ADR-097 S9 moved it to opencode's API).
  */
 export interface SqliteOpenOptions {
   readonly?: boolean

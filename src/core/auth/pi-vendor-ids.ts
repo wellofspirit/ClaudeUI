@@ -10,7 +10,7 @@
  */
 
 /**
- * API-key provider ids documented in vendor/pi-cli/docs/providers.md's
+ * API-key provider ids documented in vendor/pi-src/packages/coding-agent/docs/providers.md's
  * "API Keys" table (auth.json-key column), in the table's own order. This is
  * the exact, versioned, offline reference the M3 kickoff spec calls out —
  * deliberately NOT derived from the pinned source's ~140 built-in provider
@@ -20,7 +20,9 @@
 export const PI_API_KEY_VENDOR_IDS: readonly string[] = [
   'anthropic',
   'ant-ling',
-  'azure-openai-responses',
+  // pi 1.0.3 renamed the provider from `azure-openai-responses` (still its api
+  // id, not a provider or auth.json key any more).
+  'azure',
   'openai',
   'deepseek',
   'nvidia',

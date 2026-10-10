@@ -28,8 +28,12 @@ import type { EngineCapabilities } from '../../../../shared/model-capabilities'
 import { engineMeta } from '../../../../shared/engine-meta'
 import { SECTIONS, type Section, type SettingItem } from './settings-sections'
 import { SettingRow, ActionRow, type AppliesOn } from './settings-controls'
-import type { SettingsPageId } from './settings-target'
+import type { SettingsPageId, SettingsTarget } from './settings-target'
+import { notInstalledTitle, type EngineRuns } from './harness-view'
 import { UsageHubSettings } from './UsageHubSettings'
+import { HarnessesInstalled, HarnessesPageActions } from './HarnessesInstalled'
+import { HarnessUpdateSettings } from './HarnessUpdateSettings'
+import { AgentColoursSection, DispatchTileColourSection } from './AgentColours'
 
 export type { SettingsPageId, SettingsTarget } from './settings-target'
 
@@ -75,6 +79,18 @@ export interface SettingsGroup {
   /** Capability gate, evaluated against the page's engine (sandbox/proxy). */
   requires?: 'sandbox' | 'proxy'
   /**
+   * The harnesses this group serves, when it serves nothing else: hidden (and
+   * out of search) while none of them runs (ADR-082 §8, `visibleGroups`).
+   */
+  harnesses?: readonly EngineId[]
+  /**
+   * A `byEngine` group whose segment picks a dispatch TARGET (ADR-082 §8): a
+   * target that cannot run is greyed and unselectable rather than hidden, and
+   * Claude counts as runnable only while a harness that can call it runs. Every
+   * other `byEngine` group hides the segments of a harness that does not run.
+   */
+  dispatchTargets?: boolean
+  /**
    * One line under the card, with the "applies later" badge when the whole
    * group takes effect at a later moment (ADR-065's three-value vocabulary).
    * Replaces the per-pane prose footers.
@@ -108,7 +124,13 @@ export interface SettingsPage {
   icon: React.JSX.Element
   /** One line under the title. */
   description: string
-  /** Engines pages only: the engine the page is about (drives the gating). */
+  /**
+   * Page-level controls drawn at the right of the title (under the description
+   * on a phone): actions and status that belong to the whole page rather than
+   * to one group — the Installed page's Detect again and install progress.
+   */
+  accessory?: React.ComponentType
+  /** A per-harness page's engine (drives the gating). */
   engine?: EngineId
   groups: SettingsGroup[]
 }
@@ -116,7 +138,8 @@ export interface SettingsPage {
 export const RAIL_GROUPS: ReadonlyArray<{ id: RailGroupId; label: string }> = [
   { id: 'app', label: 'App' },
   { id: 'features', label: 'Features' },
-  { id: 'engines', label: 'Engines' }
+  // The id predates ADR-082's rename; only the label is user-facing.
+  { id: 'engines', label: 'Harnesses' }
 ]
 
 // ── Item lookup ──────────────────────────────────────────────────────
@@ -156,7 +179,7 @@ const SANDBOX_CROSS_LINK: SettingItem = {
     <ActionRow
       testid="SandboxCrossLinkRow"
       label="Command sandbox"
-      description="Isolation, network and filesystem rules live on the Claude engine page."
+      description="Isolation, network and filesystem rules live on the Claude Code page."
       engine="claude"
       action="Configure"
       onAction={() => ctx?.navigate({ page: 'claude', group: 'sandbox' })}
@@ -171,6 +194,8 @@ const SANDBOX_CROSS_LINK: SettingItem = {
 const OTHER_ENGINE_PERMISSIONS: SettingItem = {
   key: 'otherEnginePermissions',
   label: 'opencode and pi',
+  // About those two alone, so it goes while neither runs (ADR-082 §8).
+  harnesses: ['opencode', 'pi'],
   keywords: 'opencode pi permission rules autonomy mapping',
   render: () => (
     <SettingRow
@@ -226,12 +251,76 @@ const USAGE_HUB: SettingItem = {
     'usage hub sync metering device token cloudflare access service token machines resync forget combined spend',
   render: () => <UsageHubSettings />
 }
+
+/**
+ * The Installed page's rows (ADR-082 §2). Page-local: the harness selection is
+ * main's own file (`harnesses.json`, written only through `harness:*`), never a
+ * ClaudeUI setting.
+ */
+const HARNESSES_INSTALLED: SettingItem = {
+  key: 'harnessesInstalled',
+  label: 'Installed harnesses',
+  keywords:
+    'harness harnesses installed install download update version tested latest system bundled managed claude code opencode pi codex detect path',
+  render: () => <HarnessesInstalled />
+}
+
+/**
+ * The Installed page's update rows (ADR-082 §6): Install updates and Check
+ * now. Page-local for the same reason: `updates` in `harnesses.json`, written
+ * only through `harness:set-update-mode`.
+ */
+const HARNESS_UPDATES: SettingItem = {
+  key: 'harnessUpdates',
+  label: 'Install updates',
+  keywords:
+    'harness harnesses update updates install automatically ask me check now new version latest tested upstream',
+  render: () => <HarnessUpdateSettings />
+}
+/**
+ * ADR-094: one engine's agent types and their tile colours. Page-local, one item
+ * per engine page: the types come from the host (`config:list-agent-types`), the
+ * overrides are ClaudeUI's own `agentTypeColors` setting.
+ */
+function agentColoursItem(engine: EngineId): SettingItem {
+  return {
+    key: `${engine}AgentColours`,
+    label: 'Agent colours',
+    keywords:
+      'agent colours colors tile letter palette subagent type roster card swatch override auto',
+    render: (s, u) => <AgentColoursSection engine={engine} settings={s} update={u} />
+  }
+}
+const CLAUDE_AGENT_COLOURS = agentColoursItem('claude')
+const OPENCODE_AGENT_COLOURS = agentColoursItem('opencode')
+const PI_AGENT_COLOURS = agentColoursItem('pi')
+const CODEX_AGENT_COLOURS = agentColoursItem('codex')
+
+/**
+ * ADR-094: the cross-engine dispatch tile's one colour. It belongs to no engine
+ * (it marks work handed to ANOTHER harness), so it lives on the dispatch page,
+ * beside the other app-level dispatch setting.
+ */
+const DISPATCH_TILE_COLOUR: SettingItem = {
+  key: 'dispatchTileColour',
+  label: 'Cross-engine dispatch (X)',
+  keywords: 'dispatch tile colour color x agent palette cross engine',
+  render: (s, u) => <DispatchTileColourSection settings={s} update={u} />
+}
+
 export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   SANDBOX_CROSS_LINK,
   OTHER_ENGINE_PERMISSIONS,
   VERSIONS,
   CODEX_ACCOUNT,
-  USAGE_HUB
+  USAGE_HUB,
+  HARNESSES_INSTALLED,
+  HARNESS_UPDATES,
+  CLAUDE_AGENT_COLOURS,
+  OPENCODE_AGENT_COLOURS,
+  PI_AGENT_COLOURS,
+  CODEX_AGENT_COLOURS,
+  DISPATCH_TILE_COLOUR
 ]
 
 // ── Icons (14px, stroke 1.8 — the rail size on the boards) ───────────
@@ -308,6 +397,13 @@ const ICON_REMOTE = icon(
     <circle cx="12" cy="20" r="1" />
   </>
 )
+const ICON_INSTALLED = icon(
+  <>
+    <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z" />
+    <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+    <line x1="12" y1="22.08" x2="12" y2="12" />
+  </>
+)
 const ICON_CLAUDE = icon(<path d="M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z" />)
 const ICON_OPENCODE = icon(
   <>
@@ -345,6 +441,14 @@ const engineFile = (engine: EngineId): string => `engines/${engine}.json`
  * `cross-engine-dispatcher.ts`), so each row is the full complement minus
  * itself: the dispatcher refuses same-engine work outright.
  */
+/**
+ * The note under every Agent colours card. No applies-later badge and no storage
+ * tag: the colours are ClaudeUI's own settings, and a tile re-reads them on the
+ * spot.
+ */
+const AGENT_COLOURS_NOTE =
+  'One palette for every harness. Auto follows the agent file\u2019s own colour where it has one, else a colour picked from the name.'
+
 const DISPATCH_CALLERS: Record<EngineId, string> = {
   // Codex became a real dispatch TARGET with ADR-033 slice H; only the settings
   // pane was missing, which is what "unsupported" used to describe.
@@ -417,7 +521,7 @@ export const PAGES: SettingsPage[] = [
       {
         id: 'autonomy',
         label: 'Autonomy default',
-        badge: 'All engines',
+        badge: 'All harnesses',
         items: itemsOf('autonomy')
       },
       {
@@ -452,6 +556,9 @@ export const PAGES: SettingsPage[] = [
         id: 'trust',
         label: 'Trust & protection',
         badge: 'opencode · pi',
+        // Only their judges read it (Claude and Codex review with their own),
+        // so it goes while neither runs (ADR-082 §8).
+        harnesses: ['opencode', 'pi'],
         storage: 'automode.json',
         items: itemsOf('trust-lists')
       },
@@ -480,7 +587,7 @@ export const PAGES: SettingsPage[] = [
     label: 'About',
     rail: 'app',
     icon: ICON_ABOUT,
-    description: 'Versions of ClaudeUI and the engines it runs.',
+    description: 'Versions of ClaudeUI and the harnesses it runs.',
     groups: [{ id: 'about', label: 'Versions', items: [VERSIONS] }]
   },
   {
@@ -489,7 +596,7 @@ export const PAGES: SettingsPage[] = [
     rail: 'features',
     icon: ICON_MODELS,
     description:
-      'Which providers ClaudeUI can reach, and which model each engine starts a session with.',
+      'Which providers ClaudeUI can reach, and which model each harness starts a session with.',
     groups: [
       {
         // ADR-074 §7: sign-in subscriptions first, each a card with its
@@ -510,6 +617,10 @@ export const PAGES: SettingsPage[] = [
         id: 'providers',
         label: 'API providers',
         note: 'Keys and self-hosted endpoints. Sign-in subscriptions are listed above.',
+        // An API provider reaches opencode or pi, nothing else: with neither
+        // running, nothing can use one, so the whole group — header, note, rows
+        // and its "+ Add provider" — is hidden and out of search (ADR-082 §8).
+        harnesses: ['opencode', 'pi'],
         action: {
           label: '+ Add provider',
           testid: 'ProviderList.add',
@@ -556,7 +667,7 @@ export const PAGES: SettingsPage[] = [
     rail: 'features',
     icon: ICON_DISPATCH,
     description:
-      'A session on one engine can hand a task to an agent on another. Configure what each engine accepts when it is the target.',
+      'A session on one harness can hand a task to an agent on another. Configure what each harness accepts when it is the target.',
     groups: [
       {
         // App-level and first: the slot count bounds every direction at once,
@@ -570,9 +681,18 @@ export const PAGES: SettingsPage[] = [
         items: itemsOf('dispatch-concurrency')
       },
       {
+        // App-level too: the X tile on a dispatched agent is one colour, whatever
+        // harness it left from or went to (ADR-094). Its own card, like the cap.
+        id: 'tile',
+        label: 'Dispatch tile',
+        note: 'The tile marks an agent handed to another harness. Hover it for where it went.',
+        items: [DISPATCH_TILE_COLOUR]
+      },
+      {
         id: 'into',
         label: 'Dispatch into',
         storage: engineFile,
+        dispatchTargets: true,
         byEngine: {
           claude: itemsOf('claude-dispatch', ['claudeDispatch']),
           opencode: itemsOf('opencode-dispatch', ['opencodeDispatch']),
@@ -594,6 +714,7 @@ export const PAGES: SettingsPage[] = [
         id: 'limits',
         label: 'Limits',
         engineFrom: 'into',
+        dispatchTargets: true,
         note: (engine) =>
           `Governs dispatch_agent calls into ${engineMeta(engine).label} from ${DISPATCH_CALLERS[engine]} session. Each target has its own budget.`,
         byEngine: {
@@ -661,8 +782,38 @@ export const PAGES: SettingsPage[] = [
     ]
   },
   {
+    // The Harnesses group's first page (ADR-082 §1): which program runs for
+    // each engine, and from where. The per-harness pages follow it.
+    id: 'harnesses',
+    label: 'Installed',
+    rail: 'engines',
+    icon: ICON_INSTALLED,
+    description:
+      "Run each harness from ClaudeUI's managed copy, or from what's installed on this computer.",
+    accessory: HarnessesPageActions,
+    groups: [
+      {
+        id: 'harnesses',
+        // Not "Harnesses": the rail group already says that, and a second one
+        // would sit right under it as this page's group entry.
+        label: 'Sources',
+        appliesOn: 'next-session',
+        storage: 'harnesses.json',
+        note: 'New and respawned sessions use the selection. Running sessions keep theirs.',
+        items: [HARNESSES_INSTALLED]
+      },
+      {
+        // Mockup `04c3853c` tab A: its own card under the harness rows.
+        id: 'updates',
+        label: 'Updates',
+        storage: 'harnesses.json',
+        items: [HARNESS_UPDATES]
+      }
+    ]
+  },
+  {
     id: 'claude',
-    label: 'Claude',
+    label: 'Claude Code',
     rail: 'engines',
     icon: ICON_CLAUDE,
     engine: 'claude',
@@ -706,6 +857,12 @@ export const PAGES: SettingsPage[] = [
         note: 'Applies to new Claude sessions.',
         storage: 'engines/claude.json',
         items: itemsOf('proxy')
+      },
+      {
+        id: 'agent-colours',
+        label: 'Agent colours',
+        note: AGENT_COLOURS_NOTE,
+        items: [CLAUDE_AGENT_COLOURS]
       }
     ]
   },
@@ -777,6 +934,12 @@ export const PAGES: SettingsPage[] = [
         label: 'Agents',
         storage: 'agents/*.md',
         items: itemsOf('opencode-agents')
+      },
+      {
+        id: 'agent-colours',
+        label: 'Agent colours',
+        note: AGENT_COLOURS_NOTE,
+        items: [OPENCODE_AGENT_COLOURS]
       },
       {
         id: 'raw',
@@ -852,6 +1015,12 @@ export const PAGES: SettingsPage[] = [
         note: 'Applies to newly started pi sessions.',
         storage: 'settings.json',
         items: itemsOf('pi-config-network')
+      },
+      {
+        id: 'agent-colours',
+        label: 'Agent colours',
+        note: AGENT_COLOURS_NOTE,
+        items: [PI_AGENT_COLOURS]
       },
       {
         id: 'raw',
@@ -933,9 +1102,15 @@ export const PAGES: SettingsPage[] = [
         items: itemsOf('codex-config-agents')
       },
       {
+        id: 'agent-colours',
+        label: 'Agent colours',
+        note: `${AGENT_COLOURS_NOTE} Codex cards show no tile today: its spawn items carry no role (ADR-094).`,
+        items: [CODEX_AGENT_COLOURS]
+      },
+      {
         id: 'mcp',
         label: 'MCP servers',
-        badge: 'Shared · all engines',
+        badge: 'Shared · all harnesses',
         appliesOn: 'next-session',
         note: 'The inherited list is read when a Codex thread starts, so a change applies to the next session.',
         storage: CODEX_FILE,
@@ -976,18 +1151,107 @@ export function pageOf(id: SettingsPageId): SettingsPage {
   return page
 }
 
+// ── Harnesses that are not installed (ADR-082 §8) ────────────────────
+//
+// Owner ruling 2026-09-30: while a harness cannot run, its settings page cannot
+// be opened, and its parts on shared pages are hidden — except a dispatch
+// target, which is greyed in its segment. Every rule below takes the live
+// answer as `runs` (`useEngineRuns`); the default says every harness runs, so
+// a caller that does not pass one sees the full model.
+
+const EVERY_ENGINE_RUNS: EngineRuns = () => true
+
+/** The harnesses that can CALL Claude (`DISPATCH_TARGETS` in cross-engine-dispatcher.ts). */
+const CLAUDE_DISPATCH_CALLERS: readonly EngineId[] = ['opencode', 'pi', 'codex']
+
+/** Whether a page can be opened: a harness page only while its harness runs. */
+export function pageOpens(page: SettingsPage, runs: EngineRuns = EVERY_ENGINE_RUNS): boolean {
+  return !page.engine || runs(page.engine)
+}
+
+/** Where a route onto a page lands: the page itself, or Harnesses › Installed. */
+export function openableTarget(
+  target: SettingsTarget,
+  runs: EngineRuns = EVERY_ENGINE_RUNS
+): SettingsTarget {
+  return pageOpens(pageOf(target.page), runs) ? target : { page: 'harnesses' }
+}
+
+/** One option of a group's engine segment. */
+export interface SegmentOption {
+  engine: EngineId
+  /** False: greyed and not clickable (a dispatch target that cannot run). */
+  selectable: boolean
+  /** Why it is greyed. */
+  title?: string
+}
+
+const NO_CLAUDE_CALLER =
+  'No harness that can call Claude is installed · install one from Harnesses › Installed'
+
+/**
+ * The options a `byEngine` group's segment draws: every engine it offers whose
+ * harness runs, and — for a dispatch target group — the others too, greyed.
+ */
+export function segmentOptions(
+  group: SettingsGroup,
+  runs: EngineRuns = EVERY_ENGINE_RUNS
+): SegmentOption[] {
+  const out: SegmentOption[] = []
+  for (const engine of enginesOf(group)) {
+    if (!group.dispatchTargets) {
+      if (runs(engine)) out.push({ engine, selectable: true })
+      continue
+    }
+    const selectable =
+      engine === 'claude' ? CLAUDE_DISPATCH_CALLERS.some((caller) => runs(caller)) : runs(engine)
+    out.push(
+      selectable
+        ? { engine, selectable }
+        : {
+            engine,
+            selectable,
+            title: engine === 'claude' ? NO_CLAUDE_CALLER : notInstalledTitle(engine)
+          }
+    )
+  }
+  return out
+}
+
+/**
+ * The engine a `byEngine` group shows: the requested one when it can be
+ * selected, else the first that can; `undefined` when none can (the group is
+ * then not visible).
+ */
+export function engineFor(
+  group: SettingsGroup,
+  requested: EngineId | undefined,
+  runs: EngineRuns = EVERY_ENGINE_RUNS
+): EngineId | undefined {
+  const selectable = segmentOptions(group, runs).filter((o) => o.selectable)
+  return (selectable.find((o) => o.engine === requested) ?? selectable[0])?.engine
+}
+
 /**
  * Engines pages declare an engine, so a group can be gated on one of its
- * capabilities (the Claude sandbox/proxy launch params). Pure — no hooks — so
- * the model tests can call it with a stub.
+ * capabilities (the Claude sandbox/proxy launch params). Groups bound to
+ * harnesses that do not run are left out (see `harnesses`, `segmentOptions`),
+ * and so is a group with no row left. Pure — no hooks — so the model tests can
+ * call it with a stub.
  */
 export function visibleGroups(
   page: SettingsPage,
-  caps?: EngineCapabilities | null
+  caps?: EngineCapabilities | null,
+  runs: EngineRuns = EVERY_ENGINE_RUNS
 ): SettingsGroup[] {
   const resolved =
     caps === undefined ? (page.engine ? engineMeta(page.engine).capabilities : null) : caps
-  return page.groups.filter((g) => !g.requires || (resolved ? resolved[g.requires] === true : true))
+  return page.groups.filter((g) => {
+    if (g.requires && resolved && resolved[g.requires] !== true) return false
+    if (g.harnesses && !g.harnesses.some((engine) => runs(engine))) return false
+    if (g.byEngine) return engineFor(g, undefined, runs) !== undefined
+    return itemsFor(g, undefined, runs).length > 0
+  })
 }
 
 /**
@@ -1002,12 +1266,21 @@ export function enginesOf(group: SettingsGroup): EngineId[] {
   return ENGINE_ORDER.filter((e) => group.byEngine?.[e] !== undefined)
 }
 
-/** The items a group renders for the selected engine (or its plain list). */
-export function itemsFor(group: SettingsGroup, engine: EngineId | undefined): SettingItem[] {
-  if (group.items) return group.items
+/**
+ * The items a group renders for the selected engine (or its plain list),
+ * without a row about harnesses none of which runs (`SettingItem.harnesses`).
+ */
+export function itemsFor(
+  group: SettingsGroup,
+  engine: EngineId | undefined,
+  runs: EngineRuns = EVERY_ENGINE_RUNS
+): SettingItem[] {
+  const shown = (items: SettingItem[]): SettingItem[] =>
+    items.filter((item) => !item.harnesses || item.harnesses.some((h) => runs(h)))
+  if (group.items) return shown(group.items)
   if (!group.byEngine) return []
   const chosen = engine && group.byEngine[engine] ? engine : enginesOf(group)[0]
-  return (chosen && group.byEngine[chosen]) || []
+  return shown((chosen && group.byEngine[chosen]) || [])
 }
 
 /**
@@ -1161,23 +1434,29 @@ const lc = (s: string | undefined): string => (s ?? '').toLowerCase()
  * "How ClaudeUI looks." would make half a dozen common words select the whole
  * Appearance page.
  */
-export function searchSettings(query: string): SettingsSearchHit[] {
+export function searchSettings(
+  query: string,
+  runs: EngineRuns = EVERY_ENGINE_RUNS
+): SettingsSearchHit[] {
   const q = query.trim().toLowerCase()
   if (!q) return []
   const hits: SettingsSearchHit[] = []
   for (const page of PAGES) {
+    // A page that cannot be opened has no rows to find (ADR-082 §8).
+    if (!pageOpens(page, runs)) continue
     const pageHit = lc(page.label).includes(q)
-    for (const group of visibleGroups(page)) {
+    for (const group of visibleGroups(page, undefined, runs)) {
       const groupHit = pageHit || lc(group.label).includes(q)
       const push = (item: SettingItem, engine?: EngineId): void => {
         if (groupHit || lc(item.label).includes(q) || lc(item.keywords).includes(q)) {
           hits.push({ page, group, engine, item })
         }
       }
-      if (group.items) for (const item of group.items) push(item)
+      if (group.items) for (const item of itemsFor(group, undefined, runs)) push(item)
       else
-        for (const engine of enginesOf(group))
-          for (const item of group.byEngine![engine]!) push(item, engine)
+        for (const option of segmentOptions(group, runs))
+          if (option.selectable)
+            for (const item of itemsFor(group, option.engine, runs)) push(item, option.engine)
     }
   }
   return hits
@@ -1215,11 +1494,12 @@ export const MAX_RESULT_BUCKETS = 8
  */
 export function bucketSearchHits(
   query: string,
-  cap: number = MAX_RESULT_BUCKETS
+  cap: number = MAX_RESULT_BUCKETS,
+  runs: EngineRuns = EVERY_ENGINE_RUNS
 ): { buckets: SettingsSearchBucket[]; total: number } {
   const all: SettingsSearchBucket[] = []
   const byId = new Map<string, SettingsSearchBucket>()
-  for (const hit of searchSettings(query)) {
+  for (const hit of searchSettings(query, runs)) {
     const id = `${hit.page.id}/${hit.group.id}${hit.engine ? `/${hit.engine}` : ''}`
     let bucket = byId.get(id)
     if (!bucket) {

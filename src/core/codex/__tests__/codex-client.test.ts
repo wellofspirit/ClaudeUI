@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { EventEmitter } from 'node:events'
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -32,10 +33,18 @@ import { CodexClient, CodexInjectionError } from '../CodexClient'
 import { getLogDir, logger } from '../../services/logger'
 import type { CodexAuthHook } from '../codex-auth-hook'
 import type { InitializeParams } from '../protocol/InitializeParams'
+import { harnessManifest } from '../../harness/manifests'
+import { compareVersions } from '../../harness/store'
+
+/** The host's platform, before `beforeEach` stubs `process.platform` to darwin. */
+const realPlatform = process.platform
+
+/** What `codex --version` prints for the version this release tests. */
+const TESTED_VERSION_LINE = `codex-cli ${harnessManifest('codex').tested}\n`
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn(), locate: vi.fn() }))
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }))
-vi.mock('../codex-locate', () => ({ locateCodexBinary: mocks.locate }))
+vi.mock('../codex-locate', () => ({ locateCodexLaunch: mocks.locate }))
 class Child extends EventEmitter {
   pid = 45678
   stdin = new PassThrough()
@@ -69,7 +78,7 @@ function frame(value: unknown): void {
 async function start(options: Partial<CodexClientOptions> = {}): Promise<void> {
   client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect, ...options })
   const promise = client.start(init)
-  version.stdout.write('codex-cli 0.156.0\n')
+  version.stdout.write(TESTED_VERSION_LINE)
   version.emit('close', 0)
   await ticks()
   expect(writes[0]).toMatchObject({ id: 0, method: 'initialize' })
@@ -87,8 +96,15 @@ async function start(options: Partial<CodexClientOptions> = {}): Promise<void> {
 const initialisedHome = mkdtempSync(join(tmpdir(), 'codex-client-home-'))
 writeFileSync(join(initialisedHome, 'state_5.sqlite'), '')
 const savedCodexHome = process.env.CODEX_HOME
+/**
+ * The HOME a replacement-env test hands the client. A scratch directory, not a
+ * made-up path: the transport creates the `.codex` it derives under it, and a
+ * literal `/isolated` would have it reach for the filesystem root.
+ */
+const isolatedHome = mkdtempSync(join(tmpdir(), 'codex-client-isolated-'))
 afterAll(() => {
   rmSync(initialisedHome, { recursive: true, force: true })
+  rmSync(isolatedHome, { recursive: true, force: true })
 })
 
 beforeEach(() => {
@@ -107,7 +123,7 @@ beforeEach(() => {
   // by the caller-label guards below.
   debug = vi.spyOn(logger, 'debug').mockImplementation(() => {})
   app.stdin.on('data', (chunk) => writes.push(JSON.parse(chunk.toString())))
-  mocks.locate.mockReturnValue('/vendor/codex')
+  mocks.locate.mockReturnValue({ command: '/vendor/codex', args: [] })
   mocks.spawn.mockReset().mockImplementation((command, args) => {
     if (command === 'taskkill') return new Child()
     return args[0] === '--version' ? version : app
@@ -125,11 +141,11 @@ afterEach(() => {
 
 describe('Codex JSONL client', () => {
   it('initializes once, validates executable version and replaces caller environment', async () => {
-    await start({ env: { HOME: '/isolated' } })
+    await start({ env: { HOME: isolatedHome } })
     // REPLACEMENT, not a merge: the caller's env is the whole environment, plus
     // the one key the transport pins (see `childEnv`). Nothing of `process.env`
     // rides along — an exact equality, so a future merge cannot pass this.
-    const replaced = { HOME: '/isolated', CODEX_HOME: join('/isolated', '.codex') }
+    const replaced = { HOME: isolatedHome, CODEX_HOME: join(isolatedHome, '.codex') }
     expect(mocks.spawn.mock.calls[0][2].env).toEqual(replaced)
     expect(mocks.spawn.mock.calls[1][2].env).toEqual(replaced)
     await expect(client.start(init)).rejects.toMatchObject({ code: 'one-shot-client' })
@@ -210,7 +226,7 @@ describe('Codex JSONL client', () => {
     client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
     const promise = client.start(init)
     const rejection = expect(promise).rejects.toMatchObject({ code: 'write-error' })
-    version.stdout.write('codex-cli 0.156.0\n')
+    version.stdout.write(TESTED_VERSION_LINE)
     version.emit('close', 0)
     await ticks()
     expect(writes).toEqual([{ id: 0, method: 'initialize', params: init }])
@@ -269,7 +285,7 @@ describe('Codex JSONL client', () => {
     client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
     const promise = client.start(init)
     const rejection = expect(promise).rejects.toMatchObject({ code: 'process-exited' })
-    version.stdout.write('codex-cli 0.156.0\n')
+    version.stdout.write(TESTED_VERSION_LINE)
     version.emit('close', 0)
     await ticks()
     app.emit('exit', 0)
@@ -511,7 +527,7 @@ describe('Codex JSONL client', () => {
     client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
     const promise = client.start(init)
     const rejection = expect(promise).rejects.toMatchObject({ code: 'spawn-failed' })
-    version.stdout.write('codex-cli 0.156.0\n')
+    version.stdout.write(TESTED_VERSION_LINE)
     version.emit('close', 0)
     await ticks()
     app.emit('error', new Error('private-path'))
@@ -586,7 +602,7 @@ describe('ChatGPT token injection', () => {
     typed = new CodexClient({ cwd: '/isolated', onDisconnect: disconnect })
     const started = typed.start(init, auth)
     void started.catch(() => {})
-    version.stdout.write('codex-cli 0.156.0\n')
+    version.stdout.write(TESTED_VERSION_LINE)
     version.emit('close', 0)
     await ticks()
     frame({ id: 0, result: initialized })
@@ -844,13 +860,13 @@ describe('explicit CODEX_HOME on every spawned child', () => {
 
   it('derives it from a replacement USERPROFILE on Windows', async () => {
     vi.stubGlobal('process', { ...process, platform: 'win32' })
-    await start({ env: { USERPROFILE: 'C:/isolated' } })
-    const home = join('C:/isolated', '.codex')
+    await start({ env: { USERPROFILE: isolatedHome } })
+    const home = join(isolatedHome, '.codex')
     // Both children, one value: `--version` does not need a home, but the two
     // must not be able to drift apart.
     expect(childEnvs()).toEqual({
-      version: { USERPROFILE: 'C:/isolated', CODEX_HOME: home },
-      'app-server': { USERPROFILE: 'C:/isolated', CODEX_HOME: home }
+      version: { USERPROFILE: isolatedHome, CODEX_HOME: home },
+      'app-server': { USERPROFILE: isolatedHome, CODEX_HOME: home }
     })
   })
 
@@ -895,6 +911,143 @@ describe('explicit CODEX_HOME on every spawned child', () => {
 })
 
 /**
+ * Codex requires an EXPLICIT `CODEX_HOME` to exist already — only the implicit
+ * `~/.codex` is created on demand (`codex-rs/utils/home-dir/src/lib.rs`
+ * `find_codex_home`). The transport always passes one, so on a fresh HOME the
+ * app-server exited 1 before `initialize`. The home the transport DERIVED is
+ * therefore created before the app-server spawns; one an operator set is theirs,
+ * and keeps Codex's own refusal.
+ */
+describe('a derived Codex home that does not exist yet', () => {
+  const dirs: string[] = []
+  const scratch = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'codex-derived-home-'))
+    dirs.push(dir)
+    return dir
+  }
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
+  /** Whether `home` existed at the moment the app-server child was spawned. */
+  const existedAtAppServerSpawn = (home: string): (() => boolean | undefined) => {
+    let seen: boolean | undefined
+    const spawnChild = mocks.spawn.getMockImplementation()!
+    mocks.spawn.mockImplementation((command: string, args: string[], opts: unknown) => {
+      if (args[0] === 'app-server') seen = existsSync(home)
+      return spawnChild(command, args, opts)
+    })
+    return () => seen
+  }
+  /** The env each codex child got, keyed by which child it is. */
+  const childEnvs = (): Record<string, NodeJS.ProcessEnv> =>
+    Object.fromEntries(
+      mocks.spawn.mock.calls
+        .filter((call) => call[0] === '/vendor/codex')
+        .map((call) => [call[1][0] === '--version' ? 'version' : 'app-server', call[2].env])
+    )
+
+  it('creates it, owner-only, before the app-server spawns (replacement env)', async () => {
+    const home = scratch()
+    const codexHome = join(home, '.codex')
+    const seen = existedAtAppServerSpawn(codexHome)
+    await start({ env: { HOME: home } })
+    expect(seen()).toBe(true)
+    expect(statSync(codexHome).isDirectory()).toBe(true)
+    // Owner-only where the mode means anything; Windows ignores it.
+    if (realPlatform !== 'win32') expect(statSync(codexHome).mode & 0o777).toBe(0o700)
+  })
+
+  it('creates it when the home comes from this process (no replacement env)', async () => {
+    const home = scratch()
+    const codexHome = join(home, '.codex')
+    const saved = { home: process.env.HOME, profile: process.env.USERPROFILE }
+    delete process.env.CODEX_HOME
+    process.env.HOME = home
+    process.env.USERPROFILE = home
+    try {
+      const seen = existedAtAppServerSpawn(codexHome)
+      await start()
+      expect(seen()).toBe(true)
+      expect(childEnvs()['app-server'].CODEX_HOME).toBe(codexHome)
+    } finally {
+      if (saved.home === undefined) delete process.env.HOME
+      else process.env.HOME = saved.home
+      if (saved.profile === undefined) delete process.env.USERPROFILE
+      else process.env.USERPROFILE = saved.profile
+    }
+  })
+
+  it('treats an EMPTY CODEX_HOME as unset, as Codex does, and creates the derived home', async () => {
+    const home = scratch()
+    const codexHome = join(home, '.codex')
+    const seen = existedAtAppServerSpawn(codexHome)
+    await start({ env: { HOME: home, CODEX_HOME: '' } })
+    expect(seen()).toBe(true)
+    expect(childEnvs()['app-server'].CODEX_HOME).toBe(codexHome)
+  })
+
+  it('leaves an existing derived home exactly as it was', async () => {
+    const home = scratch()
+    const codexHome = join(home, '.codex')
+    mkdirSync(codexHome)
+    chmodSync(codexHome, 0o755)
+    writeFileSync(join(codexHome, 'config.toml'), 'model = "kept"\n')
+    await start({ env: { HOME: home } })
+    if (realPlatform !== 'win32') expect(statSync(codexHome).mode & 0o777).toBe(0o755)
+    expect(readFileSync(join(codexHome, 'config.toml'), 'utf8')).toBe('model = "kept"\n')
+    expect(readdirSync(codexHome)).toEqual(['config.toml'])
+  })
+
+  it("never creates an operator's CODEX_HOME — Codex's own refusal stands", async () => {
+    const home = scratch()
+    const chosen = join(home, 'chosen-codex-home')
+    const env = { HOME: home, CODEX_HOME: chosen }
+    await start({ env })
+    expect(existsSync(chosen)).toBe(false)
+    // Nor the derived one beside it: an explicit home means nothing is derived.
+    expect(existsSync(join(home, '.codex'))).toBe(false)
+    expect(childEnvs()).toEqual({ version: env, 'app-server': env })
+  })
+
+  it("never creates an operator's CODEX_HOME inherited from this process", async () => {
+    const chosen = join(scratch(), 'chosen-codex-home')
+    process.env.CODEX_HOME = chosen
+    await start()
+    expect(existsSync(chosen)).toBe(false)
+    expect(childEnvs()['app-server'].CODEX_HOME).toBe(chosen)
+  })
+
+  it('keeps replacement-env semantics: the caller env, unmutated, plus CODEX_HOME only', async () => {
+    const home = scratch()
+    const env = { HOME: home, ONLY_THIS: '1' }
+    process.env.CODEX_PARENT_ONLY = 'must-not-leak'
+    try {
+      await start({ env })
+      const expected = { HOME: home, ONLY_THIS: '1', CODEX_HOME: join(home, '.codex') }
+      expect(childEnvs()).toEqual({ version: expected, 'app-server': expected })
+      // The caller's object is not where the home went.
+      expect(env).toEqual({ HOME: home, ONLY_THIS: '1' })
+    } finally {
+      delete process.env.CODEX_PARENT_ONLY
+    }
+  })
+
+  it('still spawns, with a warn line, when the derived home cannot be created', async () => {
+    // HOME is a FILE, so `<HOME>/.codex` cannot be made. Codex then reports its
+    // own reason; the transport does not invent a second one.
+    const file = join(scratch(), 'not-a-directory')
+    writeFileSync(file, '')
+    await start({ env: { HOME: file } })
+    expect(childEnvs()['app-server'].CODEX_HOME).toBe(join(file, '.codex'))
+    expect(warn).toHaveBeenCalledWith(
+      'CodexAppServerClient',
+      expect.stringContaining('could not create the Codex home'),
+      expect.anything()
+    )
+  })
+})
+
+/**
  * F8. Codex creates its sqlite state runtime on the FIRST app-server start in a
  * home; a second one racing it exits 1 (`failed to initialize sqlite state
  * runtime under <home>`). ClaudeUI's boot starts three within milliseconds, so
@@ -927,7 +1080,7 @@ describe('first app-server on a Codex home with no state database', () => {
     // unhandled rejection in a test that never awaited it.
     ready.catch(() => {})
     const probe = versions[versions.length - 1]
-    probe.stdout.write('codex-cli 0.156.0\n')
+    probe.stdout.write(TESTED_VERSION_LINE)
     probe.emit('close', 0)
     return { client, ready }
   }
@@ -1134,5 +1287,120 @@ describe('caller label on every app-server spawn', () => {
     expect(error.label).toBe('unlabelled')
     expect(JSON.stringify(warn.mock.calls)).not.toContain('someone')
     expect(JSON.stringify(debug.mock.calls)).not.toContain('someone')
+  })
+})
+
+/**
+ * ADR-082 §3 (owner, 2026-09-30): a Codex in `[floor, ceiling)` runs, the tested
+ * version silently and any other as untested; below the floor or at or past the
+ * ceiling it is refused before the app-server spawns.
+ */
+describe('version gate', () => {
+  const { tested, floor, ceiling } = harnessManifest('codex')
+  const [major, minor, patch] = tested.split('.').map(Number)
+  const newer = `${major}.${minor}.${patch + 1}`
+
+  async function startWith(line: string): Promise<void> {
+    client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
+    const promise = client.start(init)
+    version.stdout.write(line)
+    version.emit('close', 0)
+    await ticks()
+    frame({ id: 0, result: initialized })
+    await promise
+  }
+
+  async function refused(line: string, code: string): Promise<void> {
+    client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
+    const promise = client.start(init)
+    const rejection = expect(promise).rejects.toMatchObject({ code })
+    version.stdout.write(line)
+    version.emit('close', 0)
+    await rejection
+    expect(writes).toEqual([])
+    // Never got as far as the app-server.
+    expect(mocks.spawn.mock.calls.map((call) => call[1])).toEqual([['--version']])
+  }
+
+  it('accepts a newer untested version and says so at info', async () => {
+    expect(compareVersions(newer, ceiling)).toBeLessThan(0)
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    await startWith(`codex-cli ${newer}\n`)
+    expect(writes[1]).toEqual({ method: 'initialized' })
+    expect(info).toHaveBeenCalledWith(
+      'CodexAppServerClient',
+      expect.stringContaining(`Codex ${newer} is untested`)
+    )
+  })
+
+  it('accepts the tested version without an untested line', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    await startWith(TESTED_VERSION_LINE)
+    expect(info).not.toHaveBeenCalled()
+  })
+
+  it('refuses a version older than the floor', async () => {
+    const [fMajor, fMinor] = floor.split('.').map(Number)
+    const older = fMinor > 0 ? `${fMajor}.${fMinor - 1}.0` : `${fMajor - 1}.0.0`
+    await refused(`codex-cli ${older}\n`, 'version-too-old')
+    expect(warn).toHaveBeenCalledWith(
+      'CodexAppServerClient',
+      expect.stringContaining(`older than ${floor}`)
+    )
+  })
+
+  it.each([ceiling, `${ceiling}-alpha.1`, '7.0.0'])(
+    'refuses %s, at or past the ceiling',
+    async (v) => {
+      await refused(`codex-cli ${v}\n`, 'version-incompatible')
+    }
+  )
+
+  it.each(['codex-cli local\n', `codex ${tested}\n`, `codex-cli ${tested} extra\n`])(
+    'keeps refusing unparseable output %j',
+    async (line) => {
+      await refused(line, 'version-check-failed')
+    }
+  )
+})
+
+/** Both Codex children are spawned from the resolved launch (ADR-082 §2). */
+describe('launch', () => {
+  it('spawns a native launch exactly as before', async () => {
+    await start({ env: { HOME: isolatedHome } })
+    const env = { HOME: isolatedHome, CODEX_HOME: join(isolatedHome, '.codex') }
+    expect(mocks.spawn.mock.calls.map((call) => [call[0], call[1], call[2].env])).toEqual([
+      ['/vendor/codex', ['--version'], env],
+      ['/vendor/codex', ['app-server', '--listen', 'stdio://'], env]
+    ])
+  })
+
+  it('prepends a node-script launch and lays its env over the child env', async () => {
+    mocks.locate.mockReturnValue({
+      command: '/usr/bin/node',
+      args: ['/pkg/cli.js'],
+      env: { LAUNCH_MARKER: '1' }
+    })
+    mocks.spawn.mockImplementation((command, args: string[]) => {
+      if (command === 'taskkill') return new Child()
+      return args.includes('--version') ? version : app
+    })
+    await start({ env: { HOME: isolatedHome } })
+    const env = {
+      HOME: isolatedHome,
+      CODEX_HOME: join(isolatedHome, '.codex'),
+      LAUNCH_MARKER: '1'
+    }
+    expect(mocks.spawn.mock.calls.map((call) => [call[0], call[1], call[2].env])).toEqual([
+      ['/usr/bin/node', ['/pkg/cli.js', '--version'], env],
+      ['/usr/bin/node', ['/pkg/cli.js', 'app-server', '--listen', 'stdio://'], env]
+    ])
+  })
+
+  it('refuses with binary-unavailable when nothing resolved', async () => {
+    mocks.locate.mockReturnValue(null)
+    client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
+    await expect(client.start(init)).rejects.toMatchObject({ code: 'binary-unavailable' })
+    expect(mocks.spawn).not.toHaveBeenCalled()
   })
 })

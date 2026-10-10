@@ -1,0 +1,833 @@
+{
+ "scenario": "form-compaction",
+ "opencode": "2.0.24",
+ "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+ "events": [
+  {
+   "id": "evt_11128b817002nuz3i6gFiapitL",
+   "created": 1791289243671,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "inboxID": "msg_11128b817001wHtFOwdDYuayna",
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "item": {
+     "type": "user",
+     "payload": {
+      "text": "[question] form-f6c429b9"
+     },
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 1,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b817003J3HL8Sy3La4nXw",
+   "created": 1791289243671,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 2,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b81a001RZtWYsbusHEORf",
+   "created": 1791289243674,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "inboxID": "msg_11128b817001wHtFOwdDYuayna"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 4,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b822001rEQhIYx8f73anN",
+   "created": 1791289243682,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b822002auQ7kpsmcMcZqF",
+   "created": 1791289243682,
+   "type": "session.renamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "title": "Fixture title"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 6,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b841001s3cny7Mmf5mwMK",
+   "created": 1791289243713,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "agent": "build",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_11128b81d001iBDmUY2VsX4x6F",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289243712
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 7,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b842001BNFolTOB1H2F3o",
+   "created": 1791289243714,
+   "type": "session.tool.input.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "assistantMessageID": "msg_11128b81d001iBDmUY2VsX4x6F",
+    "id": "call_fx_45_0",
+    "name": "question"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 8,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b842002FUmBUy4Auaow1s",
+   "created": 1791289243714,
+   "type": "session.tool.input.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "assistantMessageID": "msg_11128b81d001iBDmUY2VsX4x6F",
+    "id": "call_fx_45_0",
+    "text": "{\"questions\":[{\"question\":\"Pick a fruit?\",\"header\":\"Fruit\",\"options\":[{\"label\":\"Apple\",\"description\":\"red\"},{\"label\":\"Banana\",\"description\":\"yellow\"}]}]}"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 9,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b842003eLDwGPc5S1TFzI",
+   "created": 1791289243714,
+   "type": "session.tool.called",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "assistantMessageID": "msg_11128b81d001iBDmUY2VsX4x6F",
+    "id": "call_fx_45_0",
+    "input": {
+     "questions": [
+      {
+       "question": "Pick a fruit?",
+       "header": "Fruit",
+       "options": [
+        {
+         "label": "Apple",
+         "description": "red"
+        },
+        {
+         "label": "Banana",
+         "description": "yellow"
+        }
+       ]
+      }
+     ]
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 10,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b843001isg1IiwEYWOVd4",
+   "created": 1791289243715,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "assistantMessageID": "msg_11128b81d001iBDmUY2VsX4x6F"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 11,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b843003Kt55zuOZjfBBmK",
+   "created": 1791289243715,
+   "type": "form.created",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "form": {
+     "id": "frm_11128b8430024Q440RpjFORVKF",
+     "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+     "title": "Questions",
+     "metadata": {
+      "kind": "question",
+      "tool": {
+       "messageID": "msg_11128b81d001iBDmUY2VsX4x6F",
+       "id": "call_fx_45_0"
+      }
+     },
+     "fields": [
+      {
+       "key": "q0",
+       "title": "Fruit",
+       "description": "Pick a fruit?",
+       "type": "string",
+       "options": [
+        {
+         "value": "Apple",
+         "label": "Apple",
+         "description": "red"
+        },
+        {
+         "value": "Banana",
+         "label": "Banana",
+         "description": "yellow"
+        }
+       ],
+       "custom": true
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "evt_11128b845001z0LY6AEPEkHovs",
+   "created": 1791289243717,
+   "type": "form.replied",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "id": "frm_11128b8430024Q440RpjFORVKF",
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "answer": {
+     "q0": "Banana"
+    }
+   }
+  },
+  {
+   "id": "evt_11128b8450029zMtDjMMLvMKg0",
+   "created": 1791289243717,
+   "type": "session.tool.success",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "assistantMessageID": "msg_11128b81d001iBDmUY2VsX4x6F",
+    "id": "call_fx_45_0",
+    "content": [
+     {
+      "type": "text",
+      "text": "User has answered your questions: \"Pick a fruit?\"=\"Banana\". You can now continue with the user's answers in mind."
+     }
+    ],
+    "metadata": {
+     "answers": [
+      [
+       "Banana"
+      ]
+     ],
+     "truncated": false
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 12,
+    "version": 2
+   }
+  },
+  {
+   "id": "evt_11128b865001RxH09mHcCoSuID",
+   "created": 1791289243749,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "assistantMessageID": "msg_11128b81d001iBDmUY2VsX4x6F",
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 13,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b866001YuaKKYxrF2xyvg",
+   "created": 1791289243750,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "cost": 0.00036,
+    "tokens": {
+     "input": 240,
+     "output": 60,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b88c001BR2kAImwWZBJC9",
+   "created": 1791289243788,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "agent": "build",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_11128b868001rGQY0WAGKIERd7",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289243786
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 14,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b88c002kmXUje7LG6TMwR",
+   "created": 1791289243788,
+   "type": "session.text.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "assistantMessageID": "msg_11128b868001rGQY0WAGKIERd7",
+    "ordinal": 0
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 15,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b88d001zLvohGu7AiWP9M",
+   "created": 1791289243789,
+   "type": "session.text.delta",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "assistantMessageID": "msg_11128b868001rGQY0WAGKIERd7",
+    "ordinal": 0,
+    "delta": "TOOL_RESULT_SEEN: User has answered your questions: \"Pick a fruit?\"=\"Banana\". You can now continue with the user's answers in mind."
+   }
+  },
+  {
+   "id": "evt_11128b88d002JTqjm3RQ4dvJeL",
+   "created": 1791289243789,
+   "type": "session.text.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "assistantMessageID": "msg_11128b868001rGQY0WAGKIERd7",
+    "ordinal": 0,
+    "text": "TOOL_RESULT_SEEN: User has answered your questions: \"Pick a fruit?\"=\"Banana\". You can now continue with the user's answers in mind."
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 16,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b88d003LHKFk4UXR1EwAJ",
+   "created": 1791289243789,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "assistantMessageID": "msg_11128b868001rGQY0WAGKIERd7"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 17,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b8ae0017yX6DQOPFhBfrn",
+   "created": 1791289243822,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "assistantMessageID": "msg_11128b868001rGQY0WAGKIERd7",
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 18,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b8ae002Kst0vBQOeuvzGi",
+   "created": 1791289243822,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "cost": 0.00054,
+    "tokens": {
+     "input": 360,
+     "output": 90,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b8af001hZCbq1zW65h027",
+   "created": 1791289243823,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 19,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b8b1002WBpMDBez4M8brb",
+   "created": 1791289243825,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "inboxID": "msg_11128b8b100197r00pjM4jP7Ze",
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "item": {
+     "type": "compaction",
+     "payload": {},
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 20,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b8b1003GJh3ZVV25sghpU",
+   "created": 1791289243825,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 21,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b8b20011Bm4kQHOl3P67f",
+   "created": 1791289243826,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "inboxID": "msg_11128b8b100197r00pjM4jP7Ze"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 22,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b8b2002F0C53TbHbI6pNH",
+   "created": 1791289243826,
+   "type": "session.compaction.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "reason": "manual",
+    "recent": "",
+    "inputID": "msg_11128b8b100197r00pjM4jP7Ze"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 23,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b8b9001T2w4XCj2gElZEY",
+   "created": 1791289243833,
+   "type": "session.compaction.delta",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "text": "## Objective\nContract compaction summary."
+   }
+  },
+  {
+   "id": "evt_11128b8ba001TrlcS1jNiMBBMK",
+   "created": 1791289243834,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "cost": 0.00072,
+    "tokens": {
+     "input": 480,
+     "output": 120,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b8ba002XLgAZqW2OoC1Fg",
+   "created": 1791289243834,
+   "type": "session.compaction.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "reason": "manual",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "text": "## Objective\nContract compaction summary.",
+    "recent": "",
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "cost": 0.00018
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 25,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b8ba003kUs0QL17ZoAFIy",
+   "created": 1791289243834,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_eeed74814ffevTg00ifU9oGUV9"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74814ffevTg00ifU9oGUV9",
+    "seq": 26,
+    "version": 1
+   }
+  }
+ ],
+ "messages": [
+  {
+   "id": "msg_11128b817001wHtFOwdDYuayna",
+   "time": {
+    "created": 1791289243674
+   },
+   "text": "[question] form-f6c429b9",
+   "type": "user"
+  },
+  {
+   "id": "msg_11128b81d001iBDmUY2VsX4x6F",
+   "time": {
+    "created": 1791289243712,
+    "streamed": 1791289243715,
+    "completed": 1791289243749
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "fixture-model",
+    "providerID": "fixture"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_fx_45_0",
+     "name": "question",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "questions": [
+        {
+         "question": "Pick a fruit?",
+         "header": "Fruit",
+         "options": [
+          {
+           "label": "Apple",
+           "description": "red"
+          },
+          {
+           "label": "Banana",
+           "description": "yellow"
+          }
+         ]
+        }
+       ]
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "User has answered your questions: \"Pick a fruit?\"=\"Banana\". You can now continue with the user's answers in mind."
+       }
+      ],
+      "metadata": {
+       "answers": [
+        [
+         "Banana"
+        ]
+       ],
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1791289243714,
+      "ran": 1791289243714,
+      "completed": 1791289243717
+     }
+    }
+   ],
+   "snapshot": {
+    "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_11128b868001rGQY0WAGKIERd7",
+   "time": {
+    "created": 1791289243786,
+    "streamed": 1791289243789,
+    "completed": 1791289243822
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "fixture-model",
+    "providerID": "fixture"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "TOOL_RESULT_SEEN: User has answered your questions: \"Pick a fruit?\"=\"Banana\". You can now continue with the user's answers in mind."
+    }
+   ],
+   "snapshot": {
+    "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_11128b8af001hZCbq1zW65h027",
+   "time": {
+    "created": 1791289243823
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  },
+  {
+   "type": "compaction",
+   "id": "msg_11128b8b100197r00pjM4jP7Ze",
+   "time": {
+    "created": 1791289243826
+   },
+   "status": "completed",
+   "reason": "manual",
+   "model": {
+    "id": "fixture-model",
+    "providerID": "fixture"
+   },
+   "summary": "## Objective\nContract compaction summary.",
+   "recent": "",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_11128b8ba003kUs0QL17ZoAFIy",
+   "time": {
+    "created": 1791289243834
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ],
+ "children": {},
+ "sessionTotals": {
+  "cost": 0.00072,
+  "tokens": {
+   "input": 480,
+   "output": 120,
+   "reasoning": 0,
+   "cache": {
+    "read": 0,
+    "write": 0
+   }
+  }
+ }
+}

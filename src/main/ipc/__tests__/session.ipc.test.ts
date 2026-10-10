@@ -76,7 +76,6 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     readBackgroundRange: vi.fn(() => ''),
     stopTask: vi.fn(async () => ({ success: true })),
     backgroundTask: vi.fn(async () => ({ success: true })),
-    dequeueMessage: vi.fn(async () => ({ removed: 0 })),
     queuedItems: [],
     enqueuePrompt: vi.fn(),
     recallQueued: vi.fn(async () => ({ recalled: [], notRecalled: 0 })),
@@ -87,8 +86,6 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     setThinkingMode: vi.fn(),
     voiceStartServer: vi.fn(async () => {}),
     voiceStopServer: vi.fn(async () => {}),
-    voiceStartRecording: vi.fn(async () => {}),
-    voiceStopRecording: vi.fn(async () => {}),
     mcpServerStatus: vi.fn(async () => []),
     mcpToggleServer: vi.fn(async () => {}),
     mcpReconnectServer: vi.fn(async () => {}),
@@ -244,9 +241,11 @@ const sharedProviderSpies = vi.hoisted(() => ({
   removeDefinition: vi.fn(async () => {}),
   setRouteEnabled: vi.fn(async () => {}),
   setApiKey: vi.fn(async () => {}),
+  ownKeyHolders: vi.fn(async (): Promise<string[]> => []),
   syncProvider: vi.fn(async () => {}),
   disconnectProvider: vi.fn(async () => {}),
-  setRouteDefaultModel: vi.fn(async () => {})
+  setRouteDefaultModel: vi.fn(async () => {}),
+  probeEndpoint: vi.fn(async () => ({ status: 'detected', server: 'vllm', models: [] }))
 }))
 
 vi.mock('../../../core/shared-providers', () => ({ sharedProviderService: sharedProviderSpies }))
@@ -299,6 +298,17 @@ vi.mock('../../../core/sdk', () => ({
 // Electron shim — must come last among electron-related mocks.
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 
+// The relay itself is voice-relay.test.ts's; here only what the desktop verbs
+// hand it — the session, the owner, the language — and when they refuse first.
+const voiceRelaySpies = vi.hoisted(() => ({
+  start: vi.fn(async (..._args: unknown[]) => {}),
+  stop: vi.fn(async (_ownerKey: string) => {})
+}))
+vi.mock('../../../core/services/voice-relay', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../core/services/voice-relay')>()
+  return { ...actual, voiceRelay: voiceRelaySpies }
+})
+
 vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
@@ -309,13 +319,20 @@ vi.mock('../../../core/services/logger', () => ({
 }))
 
 // Import AFTER mocks.
-import { registerSessionIpc } from '../../../core/ipc/session.ipc'
+import { registerSessionIpc, resetLoginStatusReportedForTests } from '../../../core/ipc/session.ipc'
+import { setHostAuth } from '../../../core/host'
+import {
+  resetCachedClaudeModels,
+  setCachedClaudeModels
+} from '../../../core/services/claude-model-catalog'
 import { gitServiceManager } from '../../../core/services/git-service'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
-import { hostConnection } from '../../../core/ipc/command-registry'
+import { commandRegistry, hostConnection } from '../../../core/ipc/command-registry'
+import { blobStore } from '../../../core/services/blob-store'
 import { addSyncSubscriber } from '../../../core/services/sync-host'
 import { setHostWindow } from '../../../core/services/host-window'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
+import { query } from '../../../core/sdk'
 
 // Fill in the stub's capabilities now that the top-level import is available
 // (it can't be referenced inside the vi.hoisted() factory above).
@@ -473,7 +490,53 @@ describe('session.ipc', () => {
         sessionStub.willQueue = false
       }
       expect(events).toHaveLength(0)
-      expect(sessionStub.enqueuePrompt).toHaveBeenCalledWith('queued one', undefined)
+      // (text, uploads, refs) — no attachments, so neither half exists.
+      expect(sessionStub.enqueuePrompt).toHaveBeenCalledWith('queued one', undefined, undefined)
+    })
+
+    // ADR-087 — the upload is interned once at the top of sendPrompt: the engine
+    // keeps the bytes, everything replicated carries only the ref.
+    it('session:send interns an upload: the engine gets bytes, the relay gets a ref', async () => {
+      const events: any[] = []
+      harness.onEvent('session:user-message', (...args) => events.push(args))
+      const upload = { mediaType: 'image/png', base64Data: 'iVBORw0KGgo=', fileName: 'a.png' }
+      await harness.call('session:send', 'rid-1', 'look', [upload])
+
+      expect(sessionStub.run).toHaveBeenCalledWith('look', [upload])
+      const relayed = events[0][1]
+      expect(relayed.attachments).toEqual([
+        {
+          mediaType: 'image/png',
+          blobId: expect.stringMatching(/^[0-9a-f]{64}$/),
+          bytes: 8,
+          fileName: 'a.png'
+        }
+      ])
+      expect(JSON.stringify(relayed)).not.toContain('iVBORw0KGgo=')
+    })
+
+    // ADR-087 — `blob:get` is a `chat` query on the invoke lane, and a miss of
+    // any kind is `null`, never an error the client has to catch.
+    it('blob:get returns the bytes behind a ref; unknown and malformed ids are null', async () => {
+      const bytes = Buffer.from('desktop-blob-bytes')
+      const ref = blobStore.putBytes('image/png', bytes)!
+
+      expect(await harness.call('blob:get', ref.blobId)).toEqual({
+        mediaType: 'image/png',
+        base64Data: bytes.toString('base64')
+      })
+      expect(await harness.call('blob:get', 'a'.repeat(64))).toBeNull()
+      for (const bad of ['', 'xyz', 'A'.repeat(64), `${ref.blobId}0`, '../../etc/passwd']) {
+        expect(await harness.call('blob:get', bad)).toBeNull()
+      }
+    })
+
+    it('blob:get is declared chat/query, shared by both transports', () => {
+      expect(commandRegistry.declaration('blob:get')).toMatchObject({
+        capability: 'chat',
+        kind: 'query'
+      })
+      expect(commandRegistry.channels('desktop')).toContain('blob:get')
     })
 
     it('session:send throws when routingId not found', async () => {
@@ -535,6 +598,58 @@ describe('session.ipc', () => {
         undefined,
         undefined
       )
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // ADR-091 part 6 — approve an auto-mode block after the fact
+  // -------------------------------------------------------------------------
+
+  describe('session:approve-blocked', () => {
+    afterEach(() => {
+      delete sessionStub.approveBlocked
+      sessionStub.willQueue = false
+    })
+
+    it('is a chat command on the session it names, like session:approval-response', () => {
+      expect(commandRegistry.declaration('session:approve-blocked')).toMatchObject({
+        capability: 'chat',
+        kind: 'command'
+      })
+      expect(commandRegistry.declaration('session:approve-blocked')).toMatchObject(
+        commandRegistry.declaration('session:approval-response')!
+      )
+    })
+
+    it("an idle session: the nudge is sent through the composer's path (a user message)", async () => {
+      sessionStub.approveBlocked = vi.fn(() => ({ prompt: 'I approve the bash call …' }))
+      const events: any[] = []
+      harness.onEvent('session:user-message', (...args) => events.push(args))
+      await harness.call('session:approve-blocked', 'rid-1', 'call-9')
+      expect(sessionStub.approveBlocked).toHaveBeenCalledWith('call-9')
+      expect(sessionStub.run).toHaveBeenCalledWith('I approve the bash call …', undefined)
+      expect(events[0][1]).toMatchObject({ prompt: 'I approve the bash call …' })
+    })
+
+    it('a busy session: the nudge is queued', async () => {
+      sessionStub.approveBlocked = vi.fn(() => ({ prompt: 'nudge' }))
+      sessionStub.willQueue = true
+      await harness.call('session:approve-blocked', 'rid-1', 'call-9')
+      expect(sessionStub.enqueuePrompt).toHaveBeenCalledWith('nudge', undefined, undefined)
+      expect(sessionStub.run).not.toHaveBeenCalled()
+    })
+
+    it('a nudge a live subagent took, an unknown call, or an engine without the method sends nothing', async () => {
+      sessionStub.approveBlocked = vi.fn(() => ({ prompt: null }))
+      await harness.call('session:approve-blocked', 'rid-1', 'call-9')
+      sessionStub.approveBlocked = vi.fn(() => undefined)
+      await harness.call('session:approve-blocked', 'rid-1', 'call-9')
+      delete sessionStub.approveBlocked
+      await harness.call('session:approve-blocked', 'rid-1', 'call-9')
+      sessionManagerSpies.get.mockReturnValueOnce(undefined as any)
+      await harness.call('session:approve-blocked', 'missing', 'call-9')
+      expect(sessionStub.run).not.toHaveBeenCalled()
+      expect(sessionStub.enqueuePrompt).not.toHaveBeenCalled()
     })
   })
 
@@ -756,23 +871,68 @@ describe('session.ipc', () => {
   // -------------------------------------------------------------------------
 
   describe('voice channels', () => {
-    it('voice:start-server routes to session.voiceStartServer', async () => {
-      const res = await harness.call<any>('voice:start-server', 'rid-1')
-      expect(res.ok).toBe(true)
-      expect(sessionStub.voiceStartServer).toHaveBeenCalled()
+    beforeEach(() => {
+      voiceRelaySpies.start.mockClear()
+      voiceRelaySpies.stop.mockClear()
     })
 
-    it('voice:start-recording routes to session.voiceStartRecording with language', async () => {
+    it('voice:start-recording binds the HOST WINDOW as capture owner, with the language', async () => {
       const res = await harness.call<any>('voice:start-recording', 'rid-1', 'en')
       expect(res.ok).toBe(true)
-      expect(sessionStub.voiceStartRecording).toHaveBeenCalledWith('en')
+      expect(voiceRelaySpies.start).toHaveBeenCalledTimes(1)
+      const [manager, owner, routingId, language] = voiceRelaySpies.start.mock.calls[0] as [
+        unknown,
+        { key: string },
+        string,
+        string
+      ]
+      expect((manager as { get: unknown }).get).toBe(sessionManagerSpies.get)
+      // The key the `voice:audio` feed derives from the IPC sender (the bridge's
+      // webContents is id 1).
+      expect(owner.key).toBe(`desktop:${harness.win.webContents.id}`)
+      expect(routingId).toBe('rid-1')
+      expect(language).toBe('en')
     })
 
-    it('voice:stop-server returns ok=false when no session', async () => {
+    it('voice:stop-recording ends the host window owner', async () => {
+      const res = await harness.call<any>('voice:stop-recording', 'rid-1')
+      expect(res.ok).toBe(true)
+      expect(voiceRelaySpies.stop).toHaveBeenCalledWith(`desktop:${harness.win.webContents.id}`)
+    })
+
+    it('voice:start-recording returns ok=false when no session', async () => {
       sessionManagerSpies.get.mockReturnValueOnce(undefined as any)
-      const res = await harness.call<any>('voice:stop-server', 'nope')
+      const res = await harness.call<any>('voice:start-recording', 'nope', 'en')
       expect(res.ok).toBe(false)
       expect(res.error).toBe('No active session')
+      expect(voiceRelaySpies.start).not.toHaveBeenCalled()
+    })
+
+    it('voice:stop-recording releases the window capture even when the session is gone', async () => {
+      // The capture is the WINDOW's: a session that vanished mid-press must not
+      // leave the relay holding a stream open. The handler never looks it up.
+      const res = await harness.call<any>('voice:stop-recording', 'gone')
+      expect(res.ok).toBe(true)
+      expect(voiceRelaySpies.stop).toHaveBeenCalledWith(`desktop:${harness.win.webContents.id}`)
+    })
+
+    it('refuses the start on a Claude binary without the voice-server patch', async () => {
+      // ClaudeSession.capabilities.voice is false exactly then.
+      const caps = sessionStub.capabilities
+      sessionStub.capabilities = { ...caps, voice: false }
+      try {
+        const res = await harness.call<any>('voice:start-recording', 'rid-1', 'en')
+        expect(res.ok).toBe(false)
+        expect(res.error).toMatch(/voice-server patch/)
+        expect(voiceRelaySpies.start).not.toHaveBeenCalled()
+      } finally {
+        sessionStub.capabilities = caps
+      }
+    })
+
+    it('the server verbs are gone — no renderer ever called them', async () => {
+      await expect(harness.call('voice:start-server', 'rid-1')).rejects.toThrow()
+      await expect(harness.call('voice:stop-server', 'rid-1')).rejects.toThrow()
     })
   })
 
@@ -786,8 +946,124 @@ describe('session.ipc', () => {
     })
 
     it('session:get-models is registered', async () => {
-      const res = await harness.call<any[]>('session:get-models')
-      expect(Array.isArray(res)).toBe(true)
+      // Past the 2-minute model cache, so this call spawns its probe.
+      const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60 * 60_000)
+      try {
+        const res = await harness.call<any[]>('session:get-models')
+        expect(Array.isArray(res)).toBe(true)
+      } finally {
+        now.mockRestore()
+      }
+      // Init-only probe: no reload_plugins in a process killed after initialize.
+      expect(vi.mocked(query)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: '',
+          options: expect.objectContaining({ reloadPlugins: false })
+        })
+      )
+    })
+
+    // The composer asks per engine (engine-models.ts); the id must reach the
+    // handler through the desktop transport, or every request answers all four.
+    it('session:get-engine-models carries its engine id: codex probes only codex', async () => {
+      const { discoverCodexModels } = await import('../../../core/codex/model-discovery')
+      const native = {
+        engineId: 'codex' as const,
+        vendorId: 'openai',
+        vendorName: 'OpenAI',
+        models: [{ value: 'gpt', displayName: 'GPT', description: '', engineId: 'codex' as const }]
+      }
+      vi.mocked(discoverCodexModels).mockResolvedValueOnce([native])
+      await expect(harness.call('session:get-engine-models', 'codex')).resolves.toEqual([native])
+      // Claude's probe never ran.
+      expect(vi.mocked(query)).not.toHaveBeenCalled()
+      await expect(harness.call('session:get-engine-models', 'gemini')).rejects.toThrow(
+        /unknown engine/
+      )
+    })
+
+    describe('session:get-models login-status reporting', () => {
+      // A remote picker fetch fills the same catalog WITHOUT reporting login status
+      // (it has no auth side effects), so a fresh catalog must not make the
+      // desktop's first fetch skip its own query.
+      const reportLoginStatus = vi.fn()
+      const account = { emailAddress: 'someone@example.test' }
+
+      function answerWith(initializationResult: () => Promise<unknown>): void {
+        vi.mocked(query).mockImplementationOnce((() => {
+          async function* empty(): AsyncGenerator<unknown> {
+            /* noop */
+          }
+          const gen: any = empty()
+          gen.supportedModels = async () => [{ value: 'sonnet', description: '' }]
+          gen.initializationResult = initializationResult
+          return gen
+        }) as any)
+      }
+
+      beforeEach(() => {
+        reportLoginStatus.mockClear()
+        vi.mocked(query).mockClear()
+        resetCachedClaudeModels()
+        resetLoginStatusReportedForTests()
+        setHostAuth({
+          getAccountState: vi.fn(),
+          buildClaudeAccountRef: vi.fn(),
+          updateClaudeAuthSource: vi.fn(),
+          reportLoginStatus
+        } as any)
+      })
+
+      afterEach(() => {
+        setHostAuth(null)
+        resetCachedClaudeModels()
+        resetLoginStatusReportedForTests()
+      })
+
+      it('queries and reports on the first desktop fetch even when a remote fetch filled the catalog (GUARD)', async () => {
+        setCachedClaudeModels([{ value: 'from-remote', description: '' }] as any)
+        answerWith(async () => ({ account }))
+
+        const res = await harness.call<any[]>('session:get-models')
+
+        expect(vi.mocked(query)).toHaveBeenCalledTimes(1)
+        expect(reportLoginStatus).toHaveBeenCalledTimes(1)
+        expect(reportLoginStatus).toHaveBeenCalledWith(account)
+        expect(res).toEqual([{ value: 'sonnet', description: '' }])
+      })
+
+      it('then serves the next desktop call within the TTL from the cache', async () => {
+        answerWith(async () => ({ account }))
+        await harness.call('session:get-models')
+        vi.mocked(query).mockClear()
+
+        await harness.call('session:get-models')
+
+        expect(vi.mocked(query)).not.toHaveBeenCalled()
+        expect(reportLoginStatus).toHaveBeenCalledTimes(1)
+      })
+
+      it('an init that cannot be read is non-fatal and does not send later calls past the cache', async () => {
+        answerWith(async () => {
+          throw new Error('init unavailable')
+        })
+        await harness.call('session:get-models')
+        expect(reportLoginStatus).not.toHaveBeenCalled()
+        vi.mocked(query).mockClear()
+
+        await harness.call('session:get-models')
+
+        expect(vi.mocked(query)).not.toHaveBeenCalled()
+      })
+    })
+
+    it.each([
+      ['session:generate-title', 'a conversation'],
+      ['session:generate-commit-message', 'diff --git a/x b/x']
+    ])('%s spawns its one-shot without a plugin reload', async (channel, arg) => {
+      await harness.call(channel, arg)
+      expect(vi.mocked(query)).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(query).mock.calls[0][0].options).toMatchObject({ reloadPlugins: false })
     })
 
     it('session:set-permission-mode routes to session.setPermissionMode', async () => {
@@ -826,6 +1102,61 @@ describe('session.ipc', () => {
       expect(sharedProviderSpies.saveDefinition).toHaveBeenCalledWith(definition)
       expect(sharedProviderSpies.setRouteEnabled).toHaveBeenCalledWith('local', 'pi', false)
       expect(sharedProviderSpies.disconnectProvider).toHaveBeenCalledWith('local')
+      // No `replaceOwn` replaces nothing.
+      expect(sharedProviderSpies.setApiKey).toHaveBeenCalledWith('local', 'secret', [])
+    })
+
+    it('set-key takes replaceOwn as a LIST of harnesses, never a blanket yes (S7f)', async () => {
+      sharedProviderSpies.setApiKey.mockClear()
+      await harness.callSafe('shared-provider:set-key', 'local', 'secret', ['pi'])
+      expect(sharedProviderSpies.setApiKey).toHaveBeenCalledWith('local', 'secret', ['pi'])
+      for (const bad of [true, 'pi', ['pi', 'codex']]) {
+        await expect(
+          harness.callSafe('shared-provider:set-key', 'local', 'secret', bad)
+        ).rejects.toThrow(/replaceOwn/)
+      }
+      expect(sharedProviderSpies.setApiKey).toHaveBeenCalledTimes(1)
+    })
+
+    it('own-key-holders answers the service’s list, and refuses a malformed vendor id (S7f)', async () => {
+      sharedProviderSpies.ownKeyHolders.mockClear()
+      sharedProviderSpies.ownKeyHolders.mockResolvedValueOnce(['opencode'])
+      await expect(harness.callSafe('shared-provider:own-key-holders', 'io.net')).resolves.toEqual([
+        'opencode'
+      ])
+      for (const bad of ['', '../auth.json', 'open router', ['openrouter'], null]) {
+        await expect(harness.callSafe('shared-provider:own-key-holders', bad)).rejects.toThrow(
+          /Invalid provider id/
+        )
+      }
+      expect(sharedProviderSpies.ownKeyHolders).toHaveBeenCalledTimes(1)
+    })
+
+    it('shared-provider:probe shape-checks its request before the host dials anything', async () => {
+      // `null`s are what the web transport makes of omitted fields.
+      await expect(
+        harness.callSafe('shared-provider:probe', {
+          baseUrl: 'http://gpu:8000/v1',
+          protocol: null,
+          apiKey: null,
+          providerId: 'local'
+        })
+      ).resolves.toEqual({ status: 'detected', server: 'vllm', models: [] })
+      expect(sharedProviderSpies.probeEndpoint).toHaveBeenLastCalledWith({
+        baseUrl: 'http://gpu:8000/v1',
+        providerId: 'local'
+      })
+
+      sharedProviderSpies.probeEndpoint.mockClear()
+      for (const bad of [
+        undefined,
+        { baseUrl: 42 },
+        { baseUrl: 'http://gpu/v1', protocol: 'grpc' },
+        { baseUrl: 'http://gpu/v1', apiKey: { key: 'x' } },
+        { baseUrl: 'http://gpu/v1', providerId: 7 }
+      ])
+        await expect(harness.callSafe('shared-provider:probe', bad)).rejects.toThrow()
+      expect(sharedProviderSpies.probeEndpoint).not.toHaveBeenCalled()
     })
   })
 
@@ -856,8 +1187,8 @@ describe('session.ipc', () => {
         enqueuePrompt: vi.fn(),
         recallQueued: vi.fn(async () => ({ recalled: [], notRecalled: 0 }))
         // Deliberately no optional members: no watchBackground, stopTask,
-        // dequeueMessage, getPlanContent, getSessionLogPath, mcpServerStatus,
-        // mcpToggleServer, setEffort, etc.
+        // getPlanContent, getSessionLogPath, mcpServerStatus, mcpToggleServer,
+        // setEffort, etc.
       }
       sessionManagerSpies.get.mockReturnValue(minimalStub)
 

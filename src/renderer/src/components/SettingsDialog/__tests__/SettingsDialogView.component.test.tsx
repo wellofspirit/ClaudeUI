@@ -11,7 +11,10 @@ import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { SettingsDialogView, type SettingsDialogViewProps } from '../View'
 import { DEFAULT_SETTINGS, useSessionStore } from '../../../stores/session-store'
 import { PAGES } from '../settings-pages'
+import { harnessStore } from '../harness-store'
+import { harnessSnapshot } from '@test/helpers/harness-snapshot'
 import type { EngineId } from '../../../../../shared/types'
+import type { HarnessId } from '../../../../../shared/harness-types'
 
 const byId = (testid: string, id: string): HTMLElement =>
   screen.getAllByTestId(testid).find((el) => el.dataset.id === id)!
@@ -87,13 +90,46 @@ afterEach(() => {
 })
 
 describe('the rail', () => {
-  it('lists the three rail groups and all 12 pages', () => {
+  it('lists the three rail groups and all 14 pages', () => {
     renderView()
-    for (const label of ['App', 'Features', 'Engines']) {
+    for (const label of ['App', 'Features', 'Harnesses']) {
       expect(screen.getByText(label)).toBeInTheDocument()
     }
     const items = screen.getAllByTestId('SettingsDialog.railItem')
     expect(items.map((el) => el.dataset.id)).toEqual(PAGES.map((p) => p.id))
+  })
+
+  it('the Harnesses group opens with Installed, then the per-harness pages (ADR-082 §1)', async () => {
+    app.bridge.ipcMain.handle('harness:state', async () => {
+      throw new Error('not in this test')
+    })
+    renderView({ activePage: 'harnesses' })
+    const nav = screen.getByRole('navigation', { name: 'Settings pages' })
+    // The rail group's heading, once: the page's own groups are "Sources" and
+    // "Updates" (ADR-082 §6), never a second "Harnesses".
+    const heading = within(nav).getByText('Harnesses')
+    const group = heading.parentElement as HTMLElement
+    expect(
+      within(group)
+        .getAllByTestId('SettingsDialog.railItem')
+        .map((el) => [el.dataset.id, el.textContent])
+    ).toEqual([
+      ['harnesses', 'Installed'],
+      ['claude', 'Claude Code'],
+      ['opencode', 'opencode'],
+      ['pi', 'pi'],
+      ['codex', 'Codex']
+    ])
+    expect(screen.getByTestId('SettingsDialog.pageTitle')).toHaveTextContent('Installed')
+    // The page's own actions sit in the header, beside the title.
+    expect(
+      within(screen.getByTestId('SettingsDialog.pageAccessory')).getByTestId('HarnessesPageActions')
+    ).toBeInTheDocument()
+    expect(
+      within(screen.getByTestId('SettingsDialog.page')).getByTestId('HarnessesInstalled')
+    ).toBeInTheDocument()
+    await act(async () => {})
+    harnessStore.resetForTests()
   })
 
   it('marks the active page and shows ONLY its groups as sub-entries', () => {
@@ -272,6 +308,103 @@ describe('the rail accordion', () => {
     expect(byId('SettingsDialog.railSub', 'git-panel')).toHaveAttribute('data-active', 'true')
   })
 
+  it('a deep link scrolls once; a scroll-spy change after it does not scroll', () => {
+    const scrolled: string[] = []
+    const original = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push((this as HTMLElement).dataset.id ?? '')
+    }
+    try {
+      const { rerender } = renderView({
+        activePage: 'appearance',
+        activeGroup: 'git-panel',
+        scrollNonce: 1
+      })
+      expect(scrolled).toEqual(['git-panel'])
+      // The spy marks the next group as the user scrolls on: same nonce.
+      rerender({ activeGroup: 'diff', scrollNonce: 1 })
+      rerender({ activeGroup: 'theme', scrollNonce: 1 })
+      expect(scrolled).toEqual(['git-panel'])
+      // The next deep link scrolls again.
+      rerender({ activeGroup: 'diff', scrollNonce: 2 })
+      expect(scrolled).toEqual(['git-panel', 'diff'])
+    } finally {
+      // jsdom has none of its own: put back exactly what was there.
+      if (original) Element.prototype.scrollIntoView = original
+      else delete (Element.prototype as Partial<Element>).scrollIntoView
+    }
+  })
+
+  describe('a deep link on a page still settling (S7f)', () => {
+    /** A ResizeObserver whose resizes the test fires — jsdom has none. */
+    class FakeObserver {
+      static all: FakeObserver[] = []
+      disconnected = false
+      constructor(private readonly callback: () => void) {
+        FakeObserver.all.push(this)
+      }
+      observe(): void {}
+      disconnect(): void {
+        this.disconnected = true
+      }
+      resize(): void {
+        if (!this.disconnected) this.callback()
+      }
+    }
+    const scrolled: string[] = []
+    const original = Element.prototype.scrollIntoView
+
+    beforeEach(() => {
+      FakeObserver.all = []
+      scrolled.length = 0
+      vi.stubGlobal('ResizeObserver', FakeObserver)
+      Element.prototype.scrollIntoView = function (this: Element) {
+        scrolled.push((this as HTMLElement).dataset.id ?? '')
+      }
+    })
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      if (original) Element.prototype.scrollIntoView = original
+      else delete (Element.prototype as Partial<Element>).scrollIntoView
+    })
+
+    const pane = (): HTMLElement => screen.getByTestId('SettingsDialog.page').parentElement!
+    /** The page grows: every live observer reports it. */
+    const grow = (): void => FakeObserver.all.forEach((observer) => observer.resize())
+
+    it('keeps the group pinned while the page grows, until the user scrolls', () => {
+      renderView({ activePage: 'appearance', activeGroup: 'git-panel', scrollNonce: 1 })
+      expect(scrolled).toEqual(['git-panel'])
+      grow()
+      grow()
+      expect(scrolled).toEqual(['git-panel', 'git-panel', 'git-panel'])
+
+      fireEvent.wheel(pane())
+      grow()
+      expect(scrolled).toEqual(['git-panel', 'git-panel', 'git-panel'])
+    })
+
+    it('a scroll-spy mark after it neither scrolls nor re-pins', () => {
+      const { rerender } = renderView({
+        activePage: 'appearance',
+        activeGroup: 'git-panel',
+        scrollNonce: 1
+      })
+      fireEvent.wheel(pane())
+      rerender({ activeGroup: 'diff', scrollNonce: 1 })
+      grow()
+      expect(scrolled).toEqual(['git-panel'])
+    })
+
+    it('a link to the page’s FIRST group goes to the very top', () => {
+      renderView({ activePage: 'appearance', activeGroup: 'theme', scrollNonce: 1 })
+      pane().scrollTop = 63
+      grow()
+      expect(pane().scrollTop).toBe(0)
+      expect(scrolled).toEqual([])
+    })
+  })
+
   it('marks the sub-entry the pane is on as the current LOCATION', () => {
     renderView({ activePage: 'appearance', activeGroup: 'diff' })
     expect(byId('SettingsDialog.railSub', 'diff')).toHaveAttribute('aria-current', 'location')
@@ -396,7 +529,7 @@ describe('the page pane', () => {
 
   it('shows the group badge', () => {
     renderView({ activePage: 'sessions' })
-    expect(screen.getAllByTestId('SettingsGroup.badge')[0]).toHaveTextContent('All engines')
+    expect(screen.getAllByTestId('SettingsGroup.badge')[0]).toHaveTextContent('All harnesses')
   })
 
   it('renders a group header ACTION at the right of the header, and only where declared', () => {
@@ -460,7 +593,8 @@ describe('the page pane', () => {
       'endpoint',
       'model-mapping',
       'sandbox',
-      'proxy'
+      'proxy',
+      'agent-colours'
     ])
   })
 })
@@ -514,6 +648,7 @@ describe('engine segments', () => {
     // direction, so it is read before any per-target rule (ADR-033, 2026-09-18).
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
       'dispatchMaxConcurrent',
+      'dispatchTileColour',
       'piDispatch',
       'piDispatchLimits'
     ])
@@ -546,6 +681,7 @@ describe('engine segments', () => {
     // …and the Limits card renders the engine the segment above it is on.
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
       'dispatchMaxConcurrent',
+      'dispatchTileColour',
       'opencodeDispatch',
       'opencodeDispatchLimits'
     ])
@@ -555,6 +691,7 @@ describe('engine segments', () => {
     renderView({ activePage: 'dispatch', engineByGroup: { 'dispatch/into': 'claude' as EngineId } })
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
       'dispatchMaxConcurrent',
+      'dispatchTileColour',
       'claudeDispatch',
       'claudeDispatchLimits'
     ])
@@ -567,6 +704,7 @@ describe('engine segments', () => {
     })
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
       'dispatchMaxConcurrent',
+      'dispatchTileColour',
       'claudeDispatch',
       'claudeDispatchLimits'
     ])
@@ -742,5 +880,256 @@ describe('shell chrome', () => {
     const { props } = renderView({ activePage: 'sessions' })
     fireEvent.click(screen.getByTestId('SandboxCrossLinkRow.action'))
     expect(props.navigate).toHaveBeenCalledWith({ page: 'claude', group: 'sandbox' })
+  })
+})
+
+describe('a harness that does not run (ADR-082 §8)', () => {
+  /** The harness store's answer; `null` never answers (readiness `unknown`). */
+  function harnesses(missing: HarnessId[] | null): void {
+    app.bridge.ipcMain.handle('harness:state', async () =>
+      missing === null ? new Promise(() => {}) : harnessSnapshot(missing)
+    )
+  }
+
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      })
+    }
+  }
+
+  const railItem = (id: string): HTMLElement => byId('SettingsDialog.railItem', id)
+  const segment = (): (string | undefined)[] =>
+    screen.queryAllByTestId('SettingsGroup.engineSegment.option').map((el) => el.dataset.id)
+  const groupIds = (): (string | undefined)[] =>
+    screen.getAllByTestId('SettingsGroup').map((el) => el.dataset.id)
+
+  afterEach(() => harnessStore.resetForTests())
+
+  it('greys its rail item: aria-disabled, out of the tab order, titled, and a click does nothing', async () => {
+    harnesses(['pi', 'codex'])
+    const { props } = renderView({ activePage: 'claude' })
+    await settle()
+    for (const [id, label] of [
+      ['pi', 'pi'],
+      ['codex', 'Codex']
+    ]) {
+      const item = railItem(id)
+      expect(item).toHaveAttribute('aria-disabled', 'true')
+      expect(item).toHaveAttribute('tabindex', '-1')
+      expect(item).toHaveAttribute('data-state', 'not-installed')
+      expect(item).toHaveAttribute(
+        'title',
+        `${label} is not installed · install it from Harnesses › Installed`
+      )
+      expect(item.className).toContain('opacity-50')
+      // Greyed, not struck through.
+      expect(item.className).not.toContain('line-through')
+      fireEvent.click(item)
+    }
+    expect(props.onSelectPage).not.toHaveBeenCalled()
+    // The others are normal.
+    for (const id of ['opencode', 'claude', 'harnesses']) {
+      expect(railItem(id)).not.toHaveAttribute('aria-disabled')
+      expect(railItem(id)).not.toHaveAttribute('title')
+    }
+    fireEvent.click(railItem('opencode'))
+    expect(props.onSelectPage).toHaveBeenCalledWith('opencode')
+  })
+
+  it('a greyed rail item has no chevron and nothing to expand', async () => {
+    harnesses(['pi'])
+    renderView({ activePage: 'claude' })
+    await settle()
+    const pi = railItem('pi')
+    expect(pi).not.toHaveAttribute('aria-expanded')
+    expect(pi).not.toHaveAttribute('data-expanded')
+    expect(within(pi).queryByTestId('SettingsDialog.railChevron')).toBeNull()
+    // opencode's page has groups to disclose, so its item keeps both.
+    expect(railItem('opencode')).toHaveAttribute('aria-expanded', 'false')
+    expect(within(railItem('opencode')).getByTestId('SettingsDialog.railChevron')).toBeTruthy()
+  })
+
+  it('API providers — header, note, rows and + Add provider — is hidden while neither opencode nor pi runs', async () => {
+    const groups = (): (string | undefined)[] =>
+      screen.getAllByTestId('SettingsGroup').map((el) => el.dataset.id)
+    harnesses(['opencode'])
+    renderView({ activePage: 'models' })
+    await settle()
+    expect(groups()).toContain('providers')
+    expect(screen.getByTestId('SettingsGroup.action')).toHaveTextContent('+ Add provider')
+
+    cleanup()
+    harnessStore.resetForTests()
+    harnesses(['opencode', 'pi'])
+    renderView({ activePage: 'models' })
+    await settle()
+    expect(groups()).not.toContain('providers')
+    expect(screen.queryByTestId('SettingsGroup.action')).toBeNull()
+    expect(document.body.textContent).not.toMatch(/API providers|Keys and self-hosted endpoints/)
+    // The subscriptions stay: Claude Code still signs in with one.
+    expect(groups()).toContain('subscriptions')
+  })
+
+  it('lights the rail item up live once the harness runs', async () => {
+    harnesses(['pi'])
+    const { props } = renderView({ activePage: 'claude' })
+    await settle()
+    expect(railItem('pi')).toHaveAttribute('aria-disabled', 'true')
+    harnesses([])
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    expect(railItem('pi')).not.toHaveAttribute('aria-disabled')
+    fireEvent.click(railItem('pi'))
+    expect(props.onSelectPage).toHaveBeenCalledWith('pi')
+  })
+
+  it('an unknown readiness (no snapshot yet) is normal', async () => {
+    harnesses(null)
+    renderView({ activePage: 'claude' })
+    await settle()
+    for (const id of ['opencode', 'pi', 'codex']) {
+      expect(railItem(id)).not.toHaveAttribute('aria-disabled')
+    }
+  })
+
+  it('search returns no row from its page, segment or group', async () => {
+    harnesses(['pi'])
+    renderView({ search: 'model' })
+    await settle()
+    const ids = screen.getAllByTestId('SettingsDialog.resultBucket').map((el) => el.dataset.id!)
+    expect(ids.filter((id) => id.startsWith('pi/') || id.endsWith('/pi'))).toEqual([])
+    expect(ids).toContain('sessions/judge/opencode')
+
+    cleanup()
+    renderView({ search: 'automatic retry' })
+    await settle()
+    expect(screen.queryAllByTestId('SettingsDialog.resultBucket')).toHaveLength(0)
+  })
+
+  it('Default models: no segment or row for it; back when it runs', async () => {
+    harnesses(['pi', 'codex'])
+    renderView({
+      activePage: 'models',
+      engineByGroup: { 'models/defaults': 'pi' as EngineId }
+    })
+    await settle()
+    expect(
+      within(byId('SettingsGroup', 'defaults'))
+        .getAllByTestId('SettingsGroup.engineSegment.option')
+        .map((el) => el.dataset.id)
+    ).toEqual(['claude', 'opencode'])
+
+    cleanup()
+    harnessStore.resetForTests()
+    harnesses(['opencode', 'pi', 'codex'])
+    renderView({
+      activePage: 'models',
+      engineByGroup: { 'models/defaults': 'pi' as EngineId }
+    })
+    await settle()
+    const defaults = within(byId('SettingsGroup', 'defaults'))
+    // One option is no choice: no segment at all, only Claude's rows.
+    expect(defaults.queryByTestId('SettingsGroup.engineSegment')).toBeNull()
+    // The requested pi segment falls through to the first one that shows.
+    const keys = defaults.getAllByTestId('SettingsItem').map((el) => el.dataset.id)
+    expect(keys).not.toContain('piModels')
+    expect(keys).toContain('claudeDefaults')
+    expect(screen.getByTestId('SettingsDialog.page').textContent).not.toMatch(/not installed/)
+
+    harnesses([])
+    await act(async () => {
+      await harnessStore.refresh()
+    })
+    expect(
+      within(byId('SettingsGroup', 'defaults'))
+        .getAllByTestId('SettingsGroup.engineSegment.option')
+        .map((el) => el.dataset.id)
+    ).toEqual(['claude', 'opencode', 'pi', 'codex'])
+  })
+
+  it('Sessions: the judge segments and Trust & protection follow opencode, pi and Codex', async () => {
+    harnesses(['pi'])
+    renderView({ activePage: 'sessions', engineByGroup: { 'sessions/judge': 'pi' as EngineId } })
+    await settle()
+    expect(segment()).toEqual(['opencode', 'codex'])
+    expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toContain(
+      'opencodeAutoMode'
+    )
+    // Trust & protection serves opencode's judge too: kept.
+    expect(groupIds()).toContain('trust')
+    expect(screen.getByTestId('OtherEnginePermissionsRow')).toBeInTheDocument()
+
+    cleanup()
+    harnessStore.resetForTests()
+    harnesses(['opencode', 'pi'])
+    renderView({ activePage: 'sessions' })
+    await settle()
+    // Only Codex's guardian is left in the judge — one option, so no segment —
+    // and the opencode/pi-only parts go.
+    expect(segment()).toEqual([])
+    expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toContain(
+      'codexAutoMode'
+    )
+    expect(groupIds()).not.toContain('trust')
+    expect(screen.queryByTestId('OtherEnginePermissionsRow')).toBeNull()
+    expect(groupIds()).toEqual(['autonomy', 'permissions', 'judge', 'retention'])
+
+    cleanup()
+    harnessStore.resetForTests()
+    harnesses(['opencode', 'pi', 'codex'])
+    renderView({ activePage: 'sessions' })
+    await settle()
+    expect(groupIds()).toEqual(['autonomy', 'permissions', 'retention'])
+  })
+
+  it('Dispatch: a target that does not run is greyed and unselectable, the next one shows', async () => {
+    harnesses(['pi'])
+    const { props } = renderView({
+      activePage: 'dispatch',
+      engineByGroup: { 'dispatch/into': 'pi' as EngineId }
+    })
+    await settle()
+    expect(segment()).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    const pi = byId('SettingsGroup.engineSegment.option', 'pi')
+    expect(pi).toHaveAttribute('aria-disabled', 'true')
+    expect(pi).toHaveAttribute('tabindex', '-1')
+    expect(pi).toHaveAttribute(
+      'title',
+      'pi is not installed · install it from Harnesses › Installed'
+    )
+    fireEvent.click(pi)
+    expect(props.onSelectEngine).not.toHaveBeenCalled()
+    // The selected pi is not selectable: the first that is shows, both cards.
+    expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
+      'dispatchMaxConcurrent',
+      'dispatchTileColour',
+      'claudeDispatch',
+      'claudeDispatchLimits'
+    ])
+    expect(byId('SettingsGroup.engineSegment.option', 'claude')).not.toHaveAttribute(
+      'aria-disabled'
+    )
+  })
+
+  it('Dispatch: Claude is greyed while no caller runs; with no target at all, both cards go', async () => {
+    harnesses(['opencode', 'codex'])
+    renderView({ activePage: 'dispatch' })
+    await settle()
+    // pi can still call Claude.
+    expect(byId('SettingsGroup.engineSegment.option', 'claude')).not.toHaveAttribute(
+      'aria-disabled'
+    )
+
+    cleanup()
+    harnessStore.resetForTests()
+    harnesses(['opencode', 'pi', 'codex'])
+    renderView({ activePage: 'dispatch' })
+    await settle()
+    // No caller for Claude, no other target: nothing to configure but the slots
+    // and the X tile's colour (both app-level, neither about a target).
+    expect(groupIds()).toEqual(['concurrency', 'tile'])
   })
 })

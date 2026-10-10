@@ -1,18 +1,42 @@
 /**
  * Layer 2: the roster selector (ADR-073).
  *
- * The roster must be engine-neutral — it is built from the `task` ToolView
- * kind, not from Claude's `activeTasks` — and it must keep the ADR-040 split:
- * an engine that reports lifecycle events gets exact running state, one that
- * does not keeps the legacy tool_result heuristic.
+ * The roster must be engine-neutral — agents are built from the `task`
+ * ToolView kind, not from Claude's `activeTasks` — and it must keep the ADR-040
+ * split: an engine that reports lifecycle events gets exact running state, one
+ * that does not keeps the legacy tool_result heuristic.
+ *
+ * §7: agents are listed at every depth, as a tree; background shells come
+ * from the live records and are listed only while they run.
+ *
+ * §10: `rows` is one depth-first tree of both: a shell sits under the agent
+ * whose transcript holds its Bash call.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
 import { useSessionStore } from '../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
-import { useAgentRoster, scanTranscriptCached, type AgentRoster } from '../useAgentRoster'
-import type { ChatMessage } from '../../../../shared/types'
+import {
+  useAgentRoster,
+  agentRowLabel,
+  scanTranscriptCached,
+  scanAgentTree,
+  rosterScanStats,
+  type AgentRoster
+} from '../useAgentRoster'
+import type { ActiveTask, ChatMessage } from '../../../../shared/types'
+import { PI_ASYNC_LAUNCHED_PREFIX } from '../../../../shared/pi-agent-result'
+import {
+  A,
+  A_BG_BASH,
+  A_FG_BASH,
+  B,
+  B_FG_BASH,
+  nestedActiveTasks,
+  nestedBuckets,
+  nestedMessages
+} from '@test/factories/nested-agents'
 
 const ROUTE = 'route-roster'
 
@@ -45,6 +69,10 @@ function toolResult(id: string, toolUseId: string, isError = false): ChatMessage
   } as ChatMessage
 }
 
+function withEngine(engineId: string): Record<string, unknown> {
+  return { status: { ...useSessionStore.getState().sessions[ROUTE].status, engineId } }
+}
+
 function setSession(patch: Record<string, unknown>): void {
   useSessionStore.setState((state) => ({
     sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], ...patch } }
@@ -74,10 +102,18 @@ describe('useAgentRoster', () => {
 
   it('is empty for a session that spawned nothing', async () => {
     await renderProbe()
-    expect(seen).toEqual({ agents: [], shells: [], runningCount: 0, totalCount: 0 })
+    expect(seen).toEqual({
+      agents: [],
+      shells: [],
+      rows: [],
+      runningCount: 0,
+      runningAgentCount: 0,
+      runningShellCount: 0,
+      totalCount: 0
+    })
   })
 
-  it('lists agents and background shells separately, in transcript order', async () => {
+  it('lists agents in transcript order and running background shells apart', async () => {
     setSession({
       messages: [
         assistantWithTool('m1', 'tu-a', 'Task', {
@@ -90,15 +126,100 @@ describe('useAgentRoster', () => {
           run_in_background: true
         }),
         assistantWithTool('m3', 'tu-b', 'Task', { subagent_type: 'Plan', description: 'plan it' })
-      ]
+      ],
+      activeTasks: { 'tu-sh': { taskId: 'b1', taskType: 'local_bash', isBackgrounded: true } }
     })
     await renderProbe()
 
     expect(seen?.agents.map((r) => r.name)).toEqual(['reviewer', 'Plan'])
-    expect(seen?.agents[0].badge).toBe('Explore')
+    expect(seen?.agents[0].type).toBe('Explore')
+    // An unnamed agent carries its type too (its name is the type): the tile
+    // does not depend on whether the name repeats it.
+    expect(seen?.agents[1].type).toBe('Plan')
     expect(seen?.agents[0].description).toBe('audit the reducer')
     expect(seen?.shells.map((r) => r.name)).toEqual(['bun'])
-    expect(seen?.totalCount).toBe(3)
+    expect(seen?.shells[0].description).toBe('bun run dev')
+    // Shells are not agents: the total counts agents only (§7).
+    expect(seen?.totalCount).toBe(2)
+    expect(seen?.runningShellCount).toBe(1)
+  })
+
+  it('names a Codex v1 spawn after its model, and gives it no type (ADR-094)', async () => {
+    setSession({
+      ...withEngine('codex'),
+      messages: [
+        assistantWithTool('m1', 'tu-c', 'collab:spawnAgent', {
+          prompt: 'survey the tests',
+          model: 'gpt-5.6-luna',
+          receiverThreadIds: ['child-1']
+        }),
+        assistantWithTool('m2', 'tu-p', 'collab:spawnAgent', {
+          agentPath: '/root/probe',
+          receiverThreadIds: ['child-2']
+        }),
+        assistantWithTool('m3', 'tu-n', 'collab:spawnAgent', { receiverThreadIds: ['child-3'] })
+      ]
+    })
+    await renderProbe()
+
+    // The model names it (as before the type tile); a path leaf wins over it; with
+    // neither it is the bare tool name.
+    expect(seen?.agents.map((r) => r.name)).toEqual(['gpt-5.6-luna', 'probe', 'Agent'])
+    expect(seen?.agents.map((r) => r.type)).toEqual([undefined, undefined, undefined])
+  })
+
+  it('marks a cross-engine dispatch with the structured field, not a type (ADR-094)', async () => {
+    setSession({
+      messages: [
+        assistantWithTool('m1', 'tu-d', 'mcp__claude-ui-collab__dispatch_agent', {
+          engine: 'opencode',
+          model: 'deepseek-v4',
+          prompt: 'review it'
+        })
+      ]
+    })
+    await renderProbe()
+
+    const [row] = seen?.agents ?? []
+    expect(row.dispatch).toEqual({ engine: 'opencode', model: 'deepseek-v4' })
+    expect(row.type).toBeUndefined()
+    // The list still names it as it always has.
+    expect(row.name).toBe('opencode · deepseek-v4')
+  })
+
+  // ADR-085 §3: the opencode host refuses a plan-mode `general` spawn before it
+  // runs, and the refusal lands as a `permission_denial` on the task call.
+  it('a refused spawn (a permission_denial on the task call) is no row', async () => {
+    const refused: ChatMessage = {
+      id: 'm1',
+      role: 'assistant',
+      content: [
+        {
+          type: 'tool_use',
+          toolUseId: 'tu-refused',
+          toolName: 'Task',
+          toolInput: { subagent_type: 'general', description: 'edit things' }
+        },
+        {
+          type: 'permission_denial',
+          toolUseId: 'tu-refused',
+          denialId: 'd1',
+          source: 'mode',
+          reason: 'Plan mode is read-only — present a plan and call exit_plan to proceed'
+        }
+      ],
+      timestamp: Date.now()
+    } as ChatMessage
+    setSession({
+      messages: [
+        refused,
+        toolResult('m2', 'tu-refused', true),
+        assistantWithTool('m3', 'tu-ok', 'Task', { subagent_type: 'explore', description: 'look' })
+      ]
+    })
+    await renderProbe()
+    expect(seen?.agents.map((r) => r.toolUseId)).toEqual(['tu-ok'])
+    expect(seen?.totalCount).toBe(1)
   })
 
   it('ignores ordinary tool calls', async () => {
@@ -111,6 +232,719 @@ describe('useAgentRoster', () => {
     })
     await renderProbe()
     expect(seen?.totalCount).toBe(0)
+    expect(seen?.shells).toEqual([])
+  })
+
+  // Seen live (2026-09-28): a Bash sent to the background with the card's button
+  // never reached the roster, and the panel read "0 total" while it ran. Its
+  // lifecycle record flips to isBackgrounded: true, and that record is what
+  // lists it (§7).
+  describe('a command cli.js moved to the background', () => {
+    const movedResult = (id: string, toolUseId: string): ChatMessage =>
+      ({
+        id,
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            toolUseId,
+            toolResult:
+              'Command was manually backgrounded by user with ID: b7x2k9. Output is being written to: /tmp/claude/proj/session/tasks/b7x2k9.output.',
+            isError: false
+          }
+        ],
+        timestamp: Date.now()
+      }) as ChatMessage
+    const transcript = (): ChatMessage[] => [
+      assistantWithTool('m1', 'tu-fg', 'Bash', { command: 'bun run build' }),
+      movedResult('m2', 'tu-fg')
+    ]
+    const done = {
+      taskId: 'b7x2k9',
+      toolUseId: 'tu-fg',
+      status: 'completed' as const,
+      outputFile: '',
+      summary: ''
+    }
+
+    it('is a background shell while its task runs, and is gone once it ends', async () => {
+      setSession({
+        messages: transcript(),
+        activeTasks: { 'tu-fg': { taskId: 'b7x2k9', taskType: 'local_bash', isBackgrounded: true } }
+      })
+      await renderProbe()
+      expect(seen?.shells.map((r) => r.name)).toEqual(['bun'])
+      expect(seen?.shells[0].description).toBe('bun run build')
+      expect(seen?.shells[0].isRunning).toBe(true)
+      expect(seen?.runningCount).toBe(1)
+
+      await act(async () => {
+        setSession({ activeTasks: {}, taskNotifications: [done] })
+      })
+      expect(seen?.shells).toEqual([])
+      expect(seen?.runningCount).toBe(0)
+    })
+
+    it('stays listed, finished, while its entry is open', async () => {
+      setSession({
+        messages: transcript(),
+        taskNotifications: [done],
+        openedTaskToolUseIds: ['tu-fg']
+      })
+      await renderProbe()
+      expect(seen?.shells.map((r) => [r.toolUseId, r.isRunning])).toEqual([['tu-fg', false]])
+      expect(seen?.runningCount).toBe(0)
+
+      await act(async () => {
+        setSession({ openedTaskToolUseIds: [] })
+      })
+      expect(seen?.shells).toEqual([])
+    })
+
+    it('is not a shell while its result is an ordinary one', async () => {
+      setSession({
+        messages: [
+          assistantWithTool('m1', 'tu-fg', 'Bash', { command: 'ls' }),
+          toolResult('m2', 'tu-fg')
+        ]
+      })
+      await renderProbe()
+      expect(seen?.totalCount).toBe(0)
+      expect(seen?.shells).toEqual([])
+    })
+  })
+
+  describe('nested agents (S0 shapes)', () => {
+    it('lists a nested agent directly after the agent whose bucket holds its spawn', async () => {
+      setSession({
+        messages: [
+          ...nestedMessages(),
+          assistantWithTool('m-later', 'tu-later', 'Agent', { name: 'later', description: 'x' })
+        ],
+        subagentMessages: nestedBuckets()
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => [r.name, r.depth, r.parentToolUseId])).toEqual([
+        ['probenesta', 0, undefined],
+        ['probenestb', 1, A],
+        ['later', 0, undefined]
+      ])
+      expect(seen?.totalCount).toBe(3)
+    })
+
+    it('nests again at depth 2, depth-first', async () => {
+      const buckets = nestedBuckets()
+      buckets[B] = [
+        ...buckets[B],
+        assistantWithTool('b-2', 'tu-c', 'Agent', { name: 'grandchild', description: 'deeper' })
+      ]
+      buckets[A] = [
+        ...buckets[A],
+        assistantWithTool('a-4', 'tu-b2', 'Agent', { name: 'second-child', description: 'y' })
+      ]
+      setSession({ messages: nestedMessages(), subagentMessages: buckets })
+      await renderProbe()
+      expect(seen?.agents.map((r) => [r.name, r.depth])).toEqual([
+        ['probenesta', 0],
+        ['probenestb', 1],
+        ['grandchild', 2],
+        ['second-child', 1]
+      ])
+      expect(seen?.agents[2].parentToolUseId).toBe(B)
+    })
+
+    it('counts a running nested agent whose parent has finished', async () => {
+      setSession({
+        messages: nestedMessages(),
+        subagentMessages: nestedBuckets(),
+        // A handed back and went idle while B still runs: the reported bug.
+        activeTasks: { [B]: nestedActiveTasks()[B] },
+        taskNotifications: [
+          {
+            taskId: 'af110ad6ad039a313',
+            toolUseId: A,
+            status: 'completed',
+            outputFile: '',
+            summary: ''
+          }
+        ]
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.isRunning)).toEqual([false, true])
+      expect(seen?.runningCount).toBe(1)
+      expect(seen?.runningAgentCount).toBe(1)
+    })
+
+    it('terminates on a bucket that holds its own spawn, and on a cycle', async () => {
+      const root = [assistantWithTool('s-1', 'tu-s', 'Agent', { name: 'self' })]
+      setSession({
+        messages: root,
+        subagentMessages: {
+          'tu-s': [...root, assistantWithTool('s-2', 'tu-t', 'Agent', { name: 'child' })],
+          // tu-t's bucket spawns tu-s again: a cycle back to the root.
+          'tu-t': root
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => [r.name, r.depth])).toEqual([
+        ['self', 0],
+        ['child', 1]
+      ])
+    })
+
+    it('re-walks only the bucket whose array changed', () => {
+      const messages = nestedMessages()
+      const buckets = nestedBuckets()
+      scanAgentTree(messages, buckets, 'claude')
+      const before = rosterScanStats.walks
+      // Nothing changed: every bucket is a cache hit.
+      scanAgentTree(messages, buckets, 'claude')
+      expect(rosterScanStats.walks).toBe(before)
+      // A streaming delta replaces B's array only, as the reducer does.
+      scanAgentTree(messages, { ...buckets, [B]: [...buckets[B]] }, 'claude')
+      expect(rosterScanStats.walks).toBe(before + 1)
+    })
+  })
+
+  // ADR-073 §7: a nested row that no lifecycle event describes cannot outlive
+  // its parent. Without this, a refused Codex v2 grandchild (a `started` card
+  // that never gets a result) or a pi/opencode child aborted mid-call reads
+  // "running" forever.
+  describe('a nested row with no lifecycle record', () => {
+    const doneNotification = (toolUseId: string) => ({
+      taskId: `task-${toolUseId}`,
+      toolUseId,
+      status: 'completed' as const,
+      outputFile: '',
+      summary: ''
+    })
+
+    it('settles as loaded, not running, under a finished parent (Codex v2 refused spawn)', async () => {
+      setSession({
+        ...withEngine('codex'),
+        messages: [
+          assistantWithTool('m1', 'tu-child', 'collab:spawnAgent', {
+            agentPath: '/root/child',
+            receiverThreadIds: ['thr-child'],
+            agentsStates: {}
+          })
+        ],
+        subagentMessages: {
+          // The grandchild's `subAgentActivity started` card: no result, ever.
+          'tu-child': [
+            assistantWithTool('c1', 'tu-grandchild', 'collab:spawnAgent', {
+              agentPath: '/root/child/grandchild',
+              receiverThreadIds: ['thr-grandchild'],
+              agentsStates: {}
+            })
+          ]
+        },
+        taskNotifications: [doneNotification('tu-child')]
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => [r.name, r.depth, r.isRunning, r.isLoaded])).toEqual([
+        ['child', 0, false, false],
+        ['grandchild', 1, false, true]
+      ])
+      expect(seen?.runningCount).toBe(0)
+    })
+
+    it('is not running once its parent is done (pi child aborted mid-call)', async () => {
+      setSession({
+        ...withEngine('pi'),
+        messages: [
+          assistantWithTool('m1', 'tu-parent', 'subagent', { agent: 'scout', task: 'look' }),
+          toolResult('m2', 'tu-parent')
+        ],
+        subagentMessages: {
+          'tu-parent': [
+            assistantWithTool('p1', 'tu-nested', 'subagent', { agent: 'worker', task: 'dig' })
+          ]
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => [r.depth, r.isRunning, r.isLoaded])).toEqual([
+        [0, false, false],
+        [1, false, true]
+      ])
+    })
+
+    it('reads done, not loaded, when it has a result', async () => {
+      setSession({
+        ...withEngine('pi'),
+        messages: [
+          assistantWithTool('m1', 'tu-parent', 'subagent', { agent: 'scout', task: 'look' }),
+          toolResult('m2', 'tu-parent')
+        ],
+        subagentMessages: {
+          'tu-parent': [
+            assistantWithTool('p1', 'tu-nested', 'subagent', { agent: 'worker', task: 'dig' }),
+            toolResult('p2', 'tu-nested')
+          ]
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents[1].isRunning).toBe(false)
+      expect(seen?.agents[1].isLoaded).toBe(false)
+    })
+
+    it('settles top-down: a grandchild follows its settled parent', async () => {
+      setSession({
+        ...withEngine('pi'),
+        messages: [
+          assistantWithTool('m1', 'tu-a', 'subagent', { agent: 'a', task: 'x' }),
+          toolResult('m2', 'tu-a')
+        ],
+        subagentMessages: {
+          'tu-a': [assistantWithTool('a1', 'tu-b', 'subagent', { agent: 'b', task: 'y' })],
+          'tu-b': [assistantWithTool('b1', 'tu-c', 'subagent', { agent: 'c', task: 'z' })]
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => [r.depth, r.isRunning, r.isLoaded])).toEqual([
+        [0, false, false],
+        [1, false, true],
+        [2, false, true]
+      ])
+    })
+
+    it('keeps running while its parent runs', async () => {
+      setSession({
+        ...withEngine('pi'),
+        messages: [
+          assistantWithTool('m1', 'tu-parent', 'subagent', { agent: 'scout', task: 'look' })
+        ],
+        subagentMessages: {
+          'tu-parent': [
+            assistantWithTool('p1', 'tu-nested', 'subagent', { agent: 'worker', task: 'dig' })
+          ]
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.isRunning)).toEqual([true, true])
+    })
+
+    it('does not touch a Claude nested row WITH a record under an idle parent (the original bug)', async () => {
+      setSession({
+        messages: nestedMessages(),
+        subagentMessages: nestedBuckets(),
+        activeTasks: { [B]: nestedActiveTasks()[B] },
+        taskNotifications: [doneNotification(A)]
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => [r.depth, r.isRunning])).toEqual([
+        [0, false],
+        [1, true]
+      ])
+    })
+  })
+
+  describe('a pi `agent` call with no lifecycle record', () => {
+    // pi reads "background" from the launch result (ADR-089): the roster must
+    // too, or a call refused before launch reads as a background run that
+    // never notifies — "running" with a Stop button forever.
+    const piResult = (toolUseId: string, toolResult: string, isError: boolean): ChatMessage =>
+      ({
+        id: `r-${toolUseId}`,
+        role: 'user',
+        content: [{ type: 'tool_result', toolUseId, toolResult, isError }],
+        timestamp: Date.now()
+      }) as ChatMessage
+
+    it('a judge-denied or failed-to-start spawn is settled and failed, not running', async () => {
+      setSession({
+        ...withEngine('pi'),
+        messages: [
+          assistantWithTool('m1', 'tu-denied', 'agent', { description: 'd', prompt: 'go' }),
+          piResult('tu-denied', 'Auto mode blocked this call', true),
+          assistantWithTool('m2', 'tu-nomodel', 'agent', {
+            description: 'd',
+            prompt: 'go',
+            model: 'x/y'
+          }),
+          piResult('tu-nomodel', 'Model not found: x/y', true)
+        ]
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => [r.isRunning, r.isError])).toEqual([
+        [false, true],
+        [false, true]
+      ])
+      expect(seen?.runningCount).toBe(0)
+    })
+
+    it('a foreground run that returned is done; a launched one runs until notified', async () => {
+      setSession({
+        ...withEngine('pi'),
+        messages: [
+          assistantWithTool('m1', 'tu-fg', 'agent', { description: 'd', prompt: 'go' }),
+          piResult('tu-fg', 'the answer', false),
+          assistantWithTool('m2', 'tu-bg', 'agent', { description: 'd', prompt: 'go' }),
+          piResult('tu-bg', `${PI_ASYNC_LAUNCHED_PREFIX} id=1`, false)
+        ]
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.isRunning)).toEqual([false, true])
+    })
+  })
+
+  describe('the shell rule (S0 shapes)', () => {
+    const live = (): Record<string, unknown> => ({
+      messages: nestedMessages(),
+      subagentMessages: nestedBuckets(),
+      activeTasks: nestedActiveTasks()
+    })
+
+    it("lists a subagent's run_in_background Bash, and no agent's foreground Bash", async () => {
+      setSession(live())
+      await renderProbe()
+      expect(seen?.shells.map((r) => [r.toolUseId, r.name, r.description, r.depth])).toEqual([
+        [A_BG_BASH, 'sleep', 'sleep 8; echo bg', 0]
+      ])
+      // Two agents and one shell run; the two foreground Bashes count nowhere.
+      expect(seen?.runningAgentCount).toBe(2)
+      expect(seen?.runningShellCount).toBe(1)
+      expect(seen?.runningCount).toBe(3)
+      expect(seen?.totalCount).toBe(2)
+    })
+
+    it('lists a top-level run_in_background Bash from its record', async () => {
+      setSession({
+        messages: [
+          assistantWithTool('m1', 'tu-sh', 'Bash', {
+            command: 'bun run dev',
+            run_in_background: true
+          })
+        ],
+        activeTasks: { 'tu-sh': { taskId: 'b1', taskType: 'local_bash', isBackgrounded: true } }
+      })
+      await renderProbe()
+      expect(seen?.shells.map((r) => r.toolUseId)).toEqual(['tu-sh'])
+    })
+
+    it('lists a foreground Bash once a task_updated flip re-sends it as backgrounded', async () => {
+      setSession(live())
+      await renderProbe()
+      expect(seen?.shells.map((r) => r.toolUseId)).toEqual([A_BG_BASH])
+
+      // A timeout (or "Send to background") moves B's command: same run, now true.
+      await act(async () => {
+        setSession({
+          activeTasks: {
+            ...nestedActiveTasks(),
+            [B_FG_BASH]: { ...nestedActiveTasks()[B_FG_BASH], isBackgrounded: true }
+          }
+        })
+      })
+      expect(seen?.shells.map((r) => r.toolUseId)).toEqual([A_BG_BASH, B_FG_BASH])
+      expect(seen?.shells.map((r) => r.toolUseId)).not.toContain(A_FG_BASH)
+    })
+
+    it('does not list a record whose call cannot be found', async () => {
+      setSession({
+        activeTasks: { 'tu-ghost': { taskId: 'b9', taskType: 'local_bash', isBackgrounded: true } }
+      })
+      await renderProbe()
+      expect(seen?.shells).toEqual([])
+    })
+
+    it('drops a finished shell unless its entry is open', async () => {
+      const rest = { ...nestedActiveTasks() }
+      delete rest[A_BG_BASH]
+      const notification = {
+        taskId: 'bxfh7umpu',
+        toolUseId: A_BG_BASH,
+        status: 'completed' as const,
+        outputFile: '',
+        summary: ''
+      }
+      setSession({ ...live(), activeTasks: rest, taskNotifications: [notification] })
+      await renderProbe()
+      expect(seen?.shells).toEqual([])
+
+      await act(async () => {
+        setSession({ openedTaskToolUseIds: [A_BG_BASH] })
+      })
+      expect(seen?.shells.map((r) => [r.toolUseId, r.isRunning])).toEqual([[A_BG_BASH, false]])
+    })
+
+    it('lists no shells in a reopened session', async () => {
+      setSession({ ...live(), isHistorical: true })
+      await renderProbe()
+      expect(seen?.shells).toEqual([])
+      expect(seen?.agents.map((r) => r.isRunning)).toEqual([false, false])
+    })
+  })
+
+  // §10: the list labels an agent with its name when the spawn gave one, and with
+  // its description otherwise. What counts as "gave one" differs per engine's
+  // normalizer, so each is driven through the real one.
+  describe('row labels per engine (§10)', () => {
+    const labels = (): [string, boolean, string][] =>
+      seen!.agents.map((r) => [r.name, r.hasExplicitName, agentRowLabel(r)])
+
+    async function spawnOn(
+      engine: string,
+      toolName: string,
+      input: Record<string, unknown>
+    ): Promise<void> {
+      setSession({
+        ...withEngine(engine),
+        messages: [assistantWithTool('m1', 'tu-1', toolName, input)]
+      })
+      await renderProbe()
+    }
+
+    it('Claude: a named spawn is labelled by its name', async () => {
+      await spawnOn('claude', 'Agent', {
+        name: 'reviewer',
+        subagent_type: 'Explore',
+        description: 'audit the reducer'
+      })
+      expect(labels()).toEqual([['reviewer', true, 'reviewer']])
+    })
+
+    it('Claude: a type-only spawn is labelled by its description, not "Explore"', async () => {
+      await spawnOn('claude', 'Agent', { subagent_type: 'Explore', description: 'find handlers' })
+      expect(labels()).toEqual([['Explore', false, 'find handlers']])
+    })
+
+    it('Claude: an untyped spawn with a model override keeps its description label', async () => {
+      // `model` is only a fallback name here; it is NOT an identity on Claude.
+      await spawnOn('claude', 'Agent', { description: 'audit the reducer', model: 'opus' })
+      expect(labels()).toEqual([['opus', false, 'audit the reducer']])
+    })
+
+    it('Codex v1: a spawn that names only its model is labelled by the model', async () => {
+      await spawnOn('codex', 'collab:spawnAgent', {
+        prompt: 'survey the tests',
+        model: 'gpt-5.6-luna',
+        receiverThreadIds: ['child-1']
+      })
+      // The normalizer's description is the placeholder "Agent": never the label.
+      expect(seen?.agents[0].description).toBe('Agent')
+      expect(labels()).toEqual([['gpt-5.6-luna', true, 'gpt-5.6-luna']])
+    })
+
+    it('Codex v2: the agent path leaf is the name', async () => {
+      await spawnOn('codex', 'collab:spawnAgent', {
+        agentPath: '/root/probe',
+        receiverThreadIds: ['child-2']
+      })
+      expect(labels()).toEqual([['probe', true, 'probe']])
+    })
+
+    it('Codex: a spawn with neither model nor path falls back to the placeholder', async () => {
+      await spawnOn('codex', 'collab:spawnAgent', { receiverThreadIds: ['child-3'] })
+      expect(labels()).toEqual([['Agent', false, 'Agent']])
+    })
+
+    it('opencode: the agent is only a type, so the description labels the row', async () => {
+      await spawnOn('opencode', 'task', { subagent_type: 'general', description: 'edit things' })
+      expect(labels()).toEqual([['general', false, 'edit things']])
+    })
+
+    it('pi: a named spawn is labelled by its name, an unnamed one by its description', async () => {
+      setSession({
+        ...withEngine('pi'),
+        messages: [
+          assistantWithTool('m1', 'tu-named', 'agent', {
+            name: 'scout',
+            description: 'look around',
+            prompt: 'go'
+          }),
+          assistantWithTool('m2', 'tu-bare', 'agent', { description: 'dig deeper', prompt: 'go' })
+        ]
+      })
+      await renderProbe()
+      const [named, bare] = seen!.agents
+      expect([named.name, named.hasExplicitName, agentRowLabel(named)]).toEqual([
+        'scout',
+        true,
+        'scout'
+      ])
+      expect(bare.hasExplicitName).toBe(false)
+      expect(agentRowLabel(bare)).toBe('dig deeper')
+    })
+
+    it('a dispatch is labelled by where it went', async () => {
+      await spawnOn('claude', 'mcp__claude-ui-collab__dispatch_agent', {
+        engine: 'opencode',
+        model: 'deepseek-v4',
+        prompt: 'review it'
+      })
+      expect(labels()).toEqual([['opencode · deepseek-v4', true, 'opencode · deepseek-v4']])
+    })
+  })
+
+  describe('one tree of agents and shells (§10)', () => {
+    const MAIN_SH = 'tu-main-sh'
+    const B_BG_BASH = 'tu-b-bg'
+    const C = 'tu-c'
+    const startedAt = 1_700_000_000_000
+    const record = (taskId: string): ActiveTask => ({
+      taskId,
+      taskType: 'local_bash',
+      runIndex: 1,
+      isBackgrounded: true,
+      startedAt
+    })
+    const shape = (): [string, number, string | undefined][] =>
+      seen!.rows.map((r) => [r.toolUseId, r.depth, r.parentToolUseId])
+
+    function live(): Record<string, unknown> {
+      const buckets = nestedBuckets()
+      // B (depth 1) also launched a background shell: a depth-2 shell.
+      buckets[B] = [
+        ...buckets[B],
+        assistantWithTool('b-2', B_BG_BASH, 'Bash', {
+          command: 'tail -f build.log',
+          run_in_background: true
+        })
+      ]
+      return {
+        messages: [
+          ...nestedMessages(),
+          // A second top-level agent, then a shell the MAIN session launched.
+          assistantWithTool('m-c', C, 'Agent', { subagent_type: 'Plan', description: 'plan it' }),
+          assistantWithTool('m-sh', MAIN_SH, 'Bash', {
+            command: 'bun run dev',
+            run_in_background: true
+          })
+        ],
+        subagentMessages: buckets,
+        activeTasks: {
+          ...nestedActiveTasks(),
+          [A_BG_BASH]: record('t-a-bg'),
+          [B_BG_BASH]: record('t-b-bg'),
+          [MAIN_SH]: record('t-main')
+        }
+      }
+    }
+
+    it('nests a shell under its launching agent, after that agent child agents', async () => {
+      setSession(live())
+      await renderProbe()
+      expect(shape()).toEqual([
+        [A, 0, undefined],
+        // A's child agent first, with ITS shell (depth 2) inside its subtree...
+        [B, 1, A],
+        [B_BG_BASH, 2, B],
+        // ...then A's own shell, one level below A.
+        [A_BG_BASH, 1, A],
+        [C, 0, undefined],
+        // The main session's shell closes the list, at the top level.
+        [MAIN_SH, 0, undefined]
+      ])
+      expect(seen?.rows.map((r) => r.kind)).toEqual([
+        'agent',
+        'agent',
+        'shell',
+        'shell',
+        'agent',
+        'shell'
+      ])
+    })
+
+    it('leaves agents, shells and every count as they were', async () => {
+      setSession(live())
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.toolUseId)).toEqual([A, B, C])
+      // `shells` stays the flat, depth-0 list in listShells order.
+      expect(seen?.shells.map((r) => [r.toolUseId, r.depth, r.parentToolUseId])).toEqual([
+        [A_BG_BASH, 0, undefined],
+        [B_BG_BASH, 0, undefined],
+        [MAIN_SH, 0, undefined]
+      ])
+      // A and B run through their records; C by the legacy heuristic (no result).
+      expect(seen?.runningAgentCount).toBe(3)
+      expect(seen?.runningShellCount).toBe(3)
+      expect(seen?.runningCount).toBe(6)
+      expect(seen?.totalCount).toBe(3)
+      expect(seen?.rows).toHaveLength(6)
+    })
+
+    it('carries the lifecycle start on a shell row, and none on an agent row', async () => {
+      setSession(live())
+      await renderProbe()
+      const byId = new Map(seen!.rows.map((r) => [r.toolUseId, r]))
+      expect(byId.get(A_BG_BASH)?.startedAt).toBe(startedAt)
+      expect(byId.get(MAIN_SH)?.startedAt).toBe(startedAt)
+      expect(byId.get(A)?.startedAt).toBeUndefined()
+    })
+
+    it('keeps a running shell nested under an agent that has finished', async () => {
+      const tasks = { ...(live().activeTasks as Record<string, ActiveTask>) }
+      delete tasks[A]
+      setSession({
+        ...live(),
+        activeTasks: tasks,
+        taskNotifications: [
+          { taskId: 't-a', toolUseId: A, status: 'completed', outputFile: '', summary: '' }
+        ]
+      })
+      await renderProbe()
+      const byId = new Map(seen!.rows.map((r) => [r.toolUseId, r]))
+      expect(byId.get(A)?.isRunning).toBe(false)
+      // The shell is still placed under A and still running: the list keeps A as context.
+      expect(byId.get(A_BG_BASH)).toMatchObject({ isRunning: true, depth: 1, parentToolUseId: A })
+    })
+
+    it('puts a shell whose owner is not an agent row at the top level', async () => {
+      // The shell sits in a bucket whose owner has no spawn call in the tree.
+      setSession({
+        messages: nestedMessages(),
+        subagentMessages: { 'tu-unlisted': nestedBuckets()[A].slice(2) },
+        activeTasks: { [A_BG_BASH]: record('t-a-bg') }
+      })
+      await renderProbe()
+      expect(shape()).toEqual([
+        [A, 0, undefined],
+        [A_BG_BASH, 0, undefined]
+      ])
+    })
+
+    it('flags an explicit name, and not a type-only spawn', async () => {
+      setSession({
+        messages: [
+          assistantWithTool('m1', 'tu-named', 'Task', {
+            name: 'reviewer',
+            subagent_type: 'Explore',
+            description: 'audit the reducer'
+          }),
+          assistantWithTool('m2', 'tu-typed', 'Task', {
+            subagent_type: 'Explore',
+            description: 'find the handlers'
+          }),
+          assistantWithTool('m3', 'tu-sh', 'Bash', {
+            command: 'bun run dev',
+            run_in_background: true
+          })
+        ],
+        activeTasks: { 'tu-sh': record('t-sh') }
+      })
+      await renderProbe()
+      expect(seen?.rows.map((r) => [r.toolUseId, r.name, r.hasExplicitName])).toEqual([
+        ['tu-named', 'reviewer', true],
+        ['tu-typed', 'Explore', false],
+        ['tu-sh', 'bun', false]
+      ])
+    })
+
+    it('lists a lone shell in rows while the agent total stays 0', async () => {
+      setSession({
+        messages: [
+          assistantWithTool('m3', 'tu-sh', 'Bash', {
+            command: 'bun run dev',
+            run_in_background: true
+          })
+        ],
+        activeTasks: { 'tu-sh': record('t-sh') }
+      })
+      await renderProbe()
+      expect(shape()).toEqual([['tu-sh', 0, undefined]])
+      expect(seen?.totalCount).toBe(0)
+    })
   })
 
   it('takes running state from the lifecycle record when there is one', async () => {
@@ -199,6 +1033,52 @@ describe('useAgentRoster', () => {
     expect(row.runIndex).toBe(2)
   })
 
+  it("reports a finished run's final usage, not the last progress tick before it", async () => {
+    // cli.js's last task_progress lands before the run's final turns; the
+    // terminal notification carries the run's real total. Pre-fix the row kept
+    // the stale tick (22.1k) while the card showed the final figure (23.7k).
+    const progress = {
+      toolUseId: 'tu-a',
+      toolName: 'Task',
+      parentToolUseId: null,
+      elapsedTimeSeconds: 40,
+      usage: { totalTokens: 22100, toolUses: 1, durationMs: 40000 }
+    }
+    const final = {
+      taskId: 'a1',
+      toolUseId: 'tu-a',
+      status: 'completed' as const,
+      outputFile: '',
+      summary: 'TWO',
+      runIndex: 2,
+      usage: { totalTokens: 23700, toolUses: 1, durationMs: 50300 }
+    }
+    setSession({
+      messages: [assistantWithTool('m1', 'tu-a', 'Task', { name: 'impl' })],
+      taskProgressMap: { 'tu-a': progress },
+      taskNotifications: [final]
+    })
+    await renderProbe()
+    expect(seen!.agents[0].usage?.totalTokens).toBe(23700)
+
+    // While a run is live the progress tick is the freshest figure there is.
+    await act(async () => {
+      setSession({
+        activeTasks: { 'tu-a': { taskId: 'a1', taskType: 'local_agent', runIndex: 3 } }
+      })
+    })
+    expect(seen!.agents[0].usage?.totalTokens).toBe(22100)
+
+    // A stop reported for a dead process carries no usage — keep the last tick.
+    await act(async () => {
+      setSession({
+        activeTasks: {},
+        taskNotifications: [final, { ...final, status: 'stopped', runIndex: 3, usage: undefined }]
+      })
+    })
+    expect(seen!.agents[0].usage?.totalTokens).toBe(22100)
+  })
+
   it('shows nothing as running in a historical transcript', async () => {
     setSession({
       isHistorical: true,
@@ -209,6 +1089,7 @@ describe('useAgentRoster', () => {
     expect(seen?.agents[0].isRunning).toBe(false)
     expect(seen?.runningCount).toBe(0)
   })
+
   it('walks the transcript once per message array, however many surfaces ask', async () => {
     const messages = [
       assistantWithTool('m1', 'tu-1', 'Agent', { description: 'one', subagent_type: 'Explore' })

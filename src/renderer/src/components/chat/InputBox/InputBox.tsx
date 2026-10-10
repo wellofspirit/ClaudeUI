@@ -1,4 +1,4 @@
-import { useRef, useCallback, useEffect, useMemo } from 'react'
+import { useRef, useCallback, useEffect, useMemo, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import {
   useSessionStore,
@@ -6,27 +6,52 @@ import {
   bootstrapPermissionMode,
   engineDefaultModels,
   resolveEngineDefaultModel,
-  seedingModelPicks
+  seedingModelPicks,
+  carriesPicksIntoNewSessions,
+  hasResumableTranscript
 } from '../../../stores/session-store'
 import { resolveRekeyed } from '../../../stores/replica'
-import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
+import { awaitReloadBeforeSpawn } from '../../../lib/session-history-load'
+import { voiceController } from '../../../lib/voice/voice-controller'
+import { noSignalMessage, switchedMessage } from '../../../lib/voice/browser-voice-capture'
+import {
+  dismissVoiceNotice,
+  showVoiceNotice,
+  useVoiceNotice
+} from '../../../lib/voice/voice-notice'
+import type {
+  AttachmentUpload,
+  FileAttachment,
+  VoiceState as VoiceStateType
+} from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
-import { resolveSendAction, filterModelsForEngine, dedupeResolvedModels } from './utils'
+import { resolveSendAction, filterModelsForEngine, dedupeResolvedModels, modelLabel } from './utils'
 import { recallQueuedInto } from './recall-queued'
+import {
+  catalogFor,
+  rememberedEffortPatch,
+  sessionSpawnEffort,
+  spawnAnnouncement
+} from '../../../lib/session-effort'
 import { useSlashMenu } from '../../../hooks/useSlashMenu'
 import { mergeSlashCommands } from '../SlashCommandMenu'
 import { useFileMention } from '../../../hooks/useFileMention'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import { InputBoxView } from './View'
+import { HarnessInstallBanner } from '../../harness/HarnessInstallBanner'
+import { useSeedModelWhenHarnessReady } from '../../harness/use-harness-ready'
+import { useHarnessReadiness } from '../../SettingsDialog/harness-store'
+import { HARNESS_LABEL, harnessCanRun } from '../../SettingsDialog/harness-view'
+import { engineMeta } from '../../../../../shared/engine-meta'
 import { autoModeAvailableForEngine } from '../../../../../shared/permission-modes'
-import type { PermissionMode } from '../../../../../shared/types'
+import type { EngineId, PermissionMode } from '../../../../../shared/types'
+import { HARNESS_IDS } from '../../../../../shared/harness-types'
 import {
+  claudeAliasForModel,
   claudeModelCapabilities,
   modelResolveThinkingMode,
   modelResolveEffort,
-  modelDefaultEffort,
   modelDefaultThinkingMode,
-  claudeEffortKey,
   type EffortLevel,
   type ThinkingMode,
   codexPublishesEffort
@@ -168,6 +193,21 @@ function readFileAsBase64(file: File): Promise<{ mediaType: string; base64Data: 
   })
 }
 
+/**
+ * A voice failure the renderer itself saw (start/stop rejected), surfaced where a
+ * server-side `voice:error` lands (`useClaudeEvents`): the notice pill above the
+ * mic — never the session's error stack.
+ */
+function reportVoiceError(routingId: string, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err)
+  showVoiceNotice(routingId, message, 'warn')
+}
+
+/** Subscribe to the live microphone level — the ring reads it without re-rendering. */
+function subscribeVoiceLevel(listener: (level: number) => void): () => void {
+  return voiceController().onLevel(listener)
+}
+
 // ---------------------------------------------------------------------------
 // InputBox — logic layer, provides context to InputBoxView
 // ---------------------------------------------------------------------------
@@ -260,23 +300,16 @@ export function InputBox(): React.JSX.Element {
   } = useFileMention({ cwd, text, setText, textareaRef })
 
   const availableModels = useSessionStore((s) => s.availableModels)
+  const modelEffortDefaults = useSessionStore((s) => s.settings.modelEffortDefaults)
+  const engineEffortDefaults = useSessionStore((s) => s.settings.engineEffortDefaults)
+  const newSessionModel = useSessionStore((s) => s.settings.newSessionModel)
   const setAvailableModels = useSessionStore((s) => s.setAvailableModels)
+  const setEngineModels = useSessionStore((s) => s.setEngineModels)
   const models = useMemo(
-    () =>
-      availableModels.map((m) => {
-        // claude/opencode/pi discovery all emit "Name · detail" descriptions, so
-        // the head of the split is the name. Codex's native catalog puts a
-        // marketing sentence there instead ("Our most capable model for …"),
-        // which splits to the whole sentence — use its display name directly.
-        const shortName =
-          m.engineId === 'codex'
-            ? m.displayName
-            : m.description?.split('·')[0]?.trim() || m.displayName
-        return { ...m, shortName }
-      }),
+    () => availableModels.map((m) => ({ ...m, shortName: modelLabel(m).shortName })),
     [availableModels]
   )
-  const selectedModelValue = useActiveSession((s) => s.selectedModel)
+  const requestedModelValue = useActiveSession((s) => s.selectedModel)
   const setSelectedModel = useSessionStore((s) => s.setSelectedModel)
   const setSelectedEngine = useSessionStore((s) => s.setSelectedEngine)
   const lastSelectedEngineId = useSessionStore((s) => s.lastSelectedEngineId)
@@ -290,7 +323,23 @@ export function InputBox(): React.JSX.Element {
   // On welcome, the picker controls the engine that createNewSession will seed.
   // Once a session exists, it always reflects that session's own engine instead.
   const effectiveEngineId = activeSessionId ? sessionEngineId : lastSelectedEngineId
+  // opencode/pi report the model the live process will actually use. Local
+  // picks and historical hydration can differ until a setter is acknowledged.
+  const selectedModelValue =
+    sdkActive &&
+    !!startedSessionId &&
+    (effectiveEngineId === 'opencode' || effectiveEngineId === 'pi') &&
+    status.model?.engineId === effectiveEngineId
+      ? engineMeta(effectiveEngineId).encodeModelValue(status.model)
+      : requestedModelValue
   const engineLocked = sdkActive || !!startedSessionId || !!isHistorical
+  // A harness that does not run (ADR-082 §8): the banner above the input
+  // offers it, Send stays off and the model picker says why, instead of an
+  // error after the first send. A live process keeps its binary, so a session
+  // already running is never blocked; `unknown` (no snapshot yet) is today's
+  // behaviour.
+  const harnessReadiness = useHarnessReadiness(effectiveEngineId)
+  const harnessBlocked = !harnessCanRun(harnessReadiness) && !sdkActive
   // Deduped: cli.js lists `default` and its concrete equivalent (`opus[1m]`)
   // as two rows with the same description, which the shortName derivation above
   // renders identically. The `selectedModel` memo below deliberately resolves
@@ -348,6 +397,34 @@ export function InputBox(): React.JSX.Element {
     }
     const exact = sameEngine.find((m) => m.value === selectedModelValue)
     if (exact) return exact
+    // A session saved on a concrete Claude model shows the alias that runs that
+    // model today — display only, the session keeps its own value (ADR-100).
+    if (engine === 'claude' && selectedModelValue) {
+      const alias = claudeAliasForModel(selectedModelValue, sameEngine)
+      const viaAlias = sameEngine.find((m) => m.value === alias)
+      if (viaAlias) return viaAlias
+    }
+    // Curation changes the picker, not an existing session's model. Keep the
+    // reference visible even when discovery no longer returns its metadata.
+    const missingSelection = {
+      ...unset,
+      value: selectedModelValue,
+      displayName:
+        engine === 'claude' && selectedModelValue === 'default' ? 'Default' : selectedModelValue,
+      shortName:
+        engine === 'claude' && selectedModelValue === 'default' ? 'Default' : selectedModelValue,
+      description: 'Not in the current model list. Choose a model to change this session.',
+      supportsEffort: sdkActive && !!startedSessionId && !!capabilities.reasoning.effort,
+      supportedEffortLevels:
+        sdkActive && startedSessionId ? capabilities.reasoning.effort?.levels : undefined,
+      supportsAdaptiveThinking:
+        sdkActive &&
+        !!startedSessionId &&
+        capabilities.reasoning.thinking?.modes.includes('adaptive') === true
+    }
+    if (activeSessionId && selectedModelValue && engine === 'claude') {
+      return missingSelection
+    }
     if (engine === 'codex') {
       // Welcome screen, no sticky pick: the CONFIGURED default is what
       // `createNewSession` will seed, so the pill must name it rather than the
@@ -377,17 +454,10 @@ export function InputBox(): React.JSX.Element {
       // not it: on a reopened session whose model the discovered catalog
       // momentarily lacks (an alicloud provider that has not answered yet),
       // substituting the default names a model the session never ran and the
-      // resume will not spawn. Say the catalog cannot place it instead —
-      // exactly as the Codex arm above does.
+      // resume will not spawn. Preserve its identity without claiming that
+      // absence from the curated picker means the live model is unavailable.
       if (activeSessionId && selectedModelValue) {
-        return sameEngine.length > 0
-          ? { ...unset, displayName: 'Model unavailable', shortName: 'Model unavailable' }
-          : {
-              ...unset,
-              value: selectedModelValue,
-              displayName: selectedModelValue,
-              shortName: selectedModelValue
-            }
+        return missingSelection
       }
       // Welcome screen: the SAME resolver the store seeds sessions with, so
       // the pill shows what will actually spawn. `null` = the user's
@@ -426,8 +496,16 @@ export function InputBox(): React.JSX.Element {
     activeSessionId,
     codexModelExplicit,
     isHistorical,
-    startedSessionId
+    startedSessionId,
+    sdkActive,
+    capabilities.reasoning
   ])
+  useSeedModelWhenHarnessReady(
+    activeSessionId,
+    effectiveEngineId,
+    selectedModelValue,
+    pickerModels.length
+  )
   const stickyCodexModel = lastSelectedModelByEngine.codex
   // The exact four fields `resolveSessionSdkOptions` reads off the store, so
   // the pill and the spawn ask `codexModelIsExplicit` the same question.
@@ -454,51 +532,80 @@ export function InputBox(): React.JSX.Element {
   const setReasoningVariant = useSessionStore((s) => s.setReasoningVariant)
   const sandboxEnabled = useSessionStore((s) => s.engineConfig.sandbox?.enabled ?? false)
 
-  // Voice input
+  // Voice input: the user's setting AND the session's capability. The session
+  // value is false on engines without voice and on a Claude Code binary that
+  // lacks the voice-server patch, so both the mic and its Tab shortcut go dark.
   const voiceEnabled = useSessionStore((s) => s.settings.voiceEnabled)
+  const voiceAvailable = voiceEnabled && capabilities.voice
   const voiceLanguage = useSessionStore((s) => s.settings.voiceLanguage)
   const voiceState = useActiveSession((s) => s.voiceState) as VoiceStateType
   const voiceInterimTranscript = useActiveSession((s) => s.voiceInterimTranscript)
   const clearVoiceTranscript = useSessionStore((s) => s.clearVoiceTranscript)
 
-  // Load models from all engines via getEngineModels(). Re-fetches when cwd
-  // changes, and whenever modelReloadNonce is bumped (e.g. an opencode provider
-  // or default-model change in Settings) so newly-available models show up in
-  // the picker without an app restart. Flattens EngineModelGroup[] → ModelInfo[]
-  // (each entry has engineId/vendorId set).
-  const modelReloadNonce = useSessionStore((s) => s.modelReloadNonce)
+  // Load models with one getEngineModels(engineId) request PER ENGINE, each
+  // filling only its own slice of `availableModels` as it answers: a slow probe
+  // (pi's runs up to 15s) holds back its own models, never Claude's. Every
+  // engine re-fetches when cwd changes; one engine re-fetches when its entry in
+  // `engineModelReloadNonces` is bumped — all of them on `reloadModels()` (e.g.
+  // an opencode provider or default-model change in Settings), only the one
+  // whose catalog main says recovered (`engine:models-changed`). Flattens
+  // EngineModelGroup[] → ModelInfo[] (each entry has engineId/vendorId set).
+  const engineModelReloadNonces = useSessionStore((s) => s.engineModelReloadNonces)
   const loadedModelsKey = useRef<string | null>(null)
+  /**
+   * Per engine: the nonce its slice was last requested at, and that request's
+   * token. An answer lands only while its token is still the engine's latest,
+   * so a superseded request (a cwd change, a newer reload of that engine) or
+   * one answering after unmount is dropped — per request, because the effect
+   * re-runs for ANY engine's nonce and must not orphan another engine's answer
+   * still in flight.
+   */
+  const modelRequests = useRef<Partial<Record<EngineId, { nonce: number; token: object }>>>({})
   useEffect(() => {
     const key = cwd ?? ''
-    if (loadedModelsKey.current !== null && loadedModelsKey.current !== key) {
+    const cwdChanged = loadedModelsKey.current !== key
+    if (loadedModelsKey.current !== null && cwdChanged) {
       setAvailableModels([])
     }
     loadedModelsKey.current = key
 
-    let ignore = false
-    window.api
-      .getEngineModels()
-      .then((groups) => {
-        if (!ignore) {
-          const flat = groups.flatMap((g) => g.models)
-          setAvailableModels(flat)
-        }
-      })
-      .catch(() => {
-        // Fallback to Claude-only models if getEngineModels fails
-        window.api
-          .getModels()
-          .then((models) => {
-            if (!ignore) setAvailableModels(models)
-          })
-          .catch(() => {
-            /* non-fatal */
-          })
-      })
-    return () => {
-      ignore = true
+    for (const engineId of HARNESS_IDS) {
+      const nonce = engineModelReloadNonces[engineId]
+      if (!cwdChanged && modelRequests.current[engineId]?.nonce === nonce) continue
+      const token = {}
+      modelRequests.current[engineId] = { nonce, token }
+      const latest = (): boolean => modelRequests.current[engineId]?.token === token
+      window.api
+        .getEngineModels(engineId)
+        .then((groups) => {
+          // Filtered, not trusted: a host that predates the argument answers
+          // every engine's groups to every request.
+          const own = groups.filter((g) => g.engineId === engineId).flatMap((g) => g.models)
+          if (latest()) setEngineModels(engineId, own)
+        })
+        .catch(() => {
+          // Claude falls back to its own model list; the other engines are
+          // optional and keep whatever they last showed.
+          if (engineId !== 'claude') return
+          window.api
+            .getModels()
+            .then((models) => {
+              if (latest()) setEngineModels('claude', models)
+            })
+            .catch(() => {
+              /* non-fatal */
+            })
+        })
     }
-  }, [cwd, modelReloadNonce, setAvailableModels])
+  }, [cwd, engineModelReloadNonces, setAvailableModels, setEngineModels])
+  // Unmount (and StrictMode's rehearsal of it): no request in flight may land.
+  // Emptying the map also makes the next mount's effect request every engine.
+  useEffect(
+    () => () => {
+      modelRequests.current = {}
+    },
+    []
+  )
 
   useEffect(() => {
     if (!isRunning) textareaRef.current?.focus()
@@ -550,24 +657,20 @@ export function InputBox(): React.JSX.Element {
       const effort = picked ?? (fresh ? codexDefaultEffortFor(state, model, catalog) : undefined)
       return { model, ...(effort ? { effort } : {}) }
     }
-    const modelInfo = state.availableModels.find(
-      (m) => m.value === session?.selectedModel && (m.engineId ?? 'claude') === engineId
-    )
+    const { modelInfo } = catalogFor(state, {
+      selectedModel: session?.selectedModel ?? '',
+      selectedEngineId: engineId
+    })
     const desiredThinking: ThinkingMode =
       session?.thinkingMode ?? modelDefaultThinkingMode(modelInfo)
-    // Effort precedence: explicit per-session pick > per-model user default > cli.js heuristic.
-    // Keyed by `claudeEffortKey` — the rule the Default models table writes
-    // with — so an alias row reads the setting of the model it resolves to.
-    const userDefault = state.settings.modelEffortDefaults?.[claudeEffortKey(modelInfo)]
-    // Not the codex branch (returned above): here the store's pick is one of
-    // the Claude rungs, the only values the non-native picker can set.
-    const desiredEffort: EffortLevel =
-      (session?.effort as EffortLevel | null | undefined) ??
-      userDefault ??
-      modelDefaultEffort(modelInfo)
+    // Effort precedence (explicit pick > Claude's per-model starting effort >
+    // cli.js heuristic, clamped to the model): `sessionSpawnEffort`, the SAME
+    // function — fed the same inputs — as the pill and the retry / plan / review
+    // spawns. Not the codex branch (returned above).
+    const effort = session ? sessionSpawnEffort(state, session) : undefined
     return {
       model: session?.selectedModel,
-      effort: modelResolveEffort(modelInfo, desiredEffort) ?? desiredEffort,
+      effort,
       thinkingMode: modelResolveThinkingMode(modelInfo, desiredThinking)
     }
   }
@@ -611,12 +714,12 @@ export function InputBox(): React.JSX.Element {
   }
 
   const doSend = useCallback(
-    async (
-      prompt: string,
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    ) => {
+    async (prompt: string, attachments?: AttachmentUpload[]) => {
       if (!activeSessionId) return
       if (!sdkActive) {
+        // The host seeds its own transcript the moment the engine spawns; a client
+        // read still in flight would then lose the race and show only this turn.
+        await awaitReloadBeforeSpawn(activeSessionId)
         assertModelResolved(activeSessionId)
         const { sessions } = useSessionStore.getState()
         const session = sessions[activeSessionId]
@@ -635,13 +738,14 @@ export function InputBox(): React.JSX.Element {
             opts.thinkingMode,
             fork.anchorUuid,
             true,
-            session?.selectedEngineId
+            session?.selectedEngineId,
+            spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
           )
         } else {
           const isHistorical =
             session?.selectedEngineId === 'codex'
               ? !!(session.status.sessionId || session.isHistorical)
-              : session && session.messages.length > 0
+              : session && hasResumableTranscript(session)
           // For opencode sessions, always pass the routingId as resumeSessionId so
           // OpencodeSession can resume a prior session even when messages are empty
           // (history is replayed from the server, not preloaded into the store).
@@ -659,7 +763,8 @@ export function InputBox(): React.JSX.Element {
             opts.thinkingMode,
             undefined,
             undefined,
-            session?.selectedEngineId
+            session?.selectedEngineId,
+            spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
           )
         }
         markSdkActive(activeSessionId)
@@ -672,6 +777,7 @@ export function InputBox(): React.JSX.Element {
   const ensureSession = useCallback(async () => {
     if (!activeSessionId) return
     if (!sdkActive) {
+      await awaitReloadBeforeSpawn(activeSessionId)
       assertModelResolved(activeSessionId)
       const { sessions } = useSessionStore.getState()
       const session = sessions[activeSessionId]
@@ -688,13 +794,14 @@ export function InputBox(): React.JSX.Element {
           opts.thinkingMode,
           fork.anchorUuid,
           true,
-          session?.selectedEngineId
+          session?.selectedEngineId,
+          spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
         )
       } else {
         const isHistorical =
           session?.selectedEngineId === 'codex'
             ? !!(session.status.sessionId || session.isHistorical)
-            : session && session.messages.length > 0 && !session.sdkActive
+            : session && hasResumableTranscript(session) && !session.sdkActive
         const resumeId = isHistorical ? activeSessionId : undefined
         await window.api.createSession(
           activeSessionId,
@@ -706,27 +813,121 @@ export function InputBox(): React.JSX.Element {
           opts.thinkingMode,
           undefined,
           undefined,
-          session?.selectedEngineId
+          session?.selectedEngineId,
+          spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
         )
       }
       markSdkActive(activeSessionId)
     }
   }, [activeSessionId, sdkActive, markSdkActive])
 
+  /**
+   * Is the push-to-talk still held? `ensureSession()` can spawn the engine first,
+   * and a release during that await sends its stop BEFORE the start — which would
+   * then open a microphone (and a main-side capture) nobody is holding.
+   */
+  const voiceHeldRef = useRef(false)
+  /**
+   * The same fact as {@link voiceHeldRef}, as RENDER state: the notice pill stays
+   * while the push-to-talk is held and starts fading on release. The ref stays
+   * the source of truth for the start/stop sequencing (it must be current inside
+   * an await, which state is not).
+   */
+  const [voiceHeld, setVoiceHeld] = useState(false)
+  /** The live microphone is digitally silent (the warning is up) — dims the mic. */
+  const [voiceSilent, setVoiceSilent] = useState(false)
+  /** Numbers each press, so a release-then-repress during one spawn starts once. */
+  const voicePressRef = useRef(0)
+
   const handleVoiceStart = useCallback(async () => {
-    if (!activeSessionId || isDisabled || voiceState !== 'idle') return
+    if (!activeSessionId || isDisabled || harnessBlocked || voiceState !== 'idle') return
+    const press = ++voicePressRef.current
+    voiceHeldRef.current = true
+    setVoiceHeld(true)
+    setVoiceSilent(false)
     try {
       await ensureSession()
-      await window.api.voiceStartRecording(activeSessionId, voiceLanguage)
     } catch (err) {
-      window.api.logRelay('error', 'Voice:InputBox', `voiceStartRecording failed: ${err}`)
+      // The spawn's own failure is reported by the session path; log only.
+      window.api.logRelay('error', 'Voice:InputBox', `voice start failed: ${err}`)
+      return
     }
-  }, [activeSessionId, isDisabled, voiceState, ensureSession, voiceLanguage])
+    if (!voiceHeldRef.current || voicePressRef.current !== press) return
+    try {
+      await voiceController().start(activeSessionId, voiceLanguage)
+    } catch (err) {
+      // A denied microphone, a refused session, a dead transport: all things the
+      // speaker can act on, so they land where a server-side `voice:error` does —
+      // the notice pill above the mic.
+      window.api.logRelay('error', 'Voice:InputBox', `voice start failed: ${err}`)
+      reportVoiceError(activeSessionId, err)
+    }
+  }, [activeSessionId, isDisabled, harnessBlocked, voiceState, ensureSession, voiceLanguage])
 
   const handleVoiceStop = useCallback(async () => {
+    voiceHeldRef.current = false
+    setVoiceHeld(false)
     if (!activeSessionId) return
-    await window.api.voiceStopRecording(activeSessionId)
+    try {
+      await voiceController().stop(activeSessionId)
+    } catch (err) {
+      window.api.logRelay('error', 'Voice:InputBox', `voice stop failed: ${err}`)
+      reportVoiceError(activeSessionId, err)
+    }
   }, [activeSessionId])
+
+  // The microphone itself failing mid-capture (unplugged, muted by the OS) is
+  // the capture's news, not the server's — surfaced the same way.
+  useEffect(() => {
+    if (!activeSessionId) return
+    return voiceController().onFault((message) => {
+      showVoiceNotice(activeSessionId, message, 'warn')
+    })
+  }, [activeSessionId])
+
+  // The capture moved to another microphone mid-press — grey: nothing to fix,
+  // and what was being said carried on through the switch.
+  useEffect(() => {
+    if (!activeSessionId) return
+    return voiceController().onSwitch((label) => {
+      showVoiceNotice(activeSessionId, switchedMessage(label), 'info')
+    })
+  }, [activeSessionId])
+
+  // The live silence warning: up while the microphone is producing digital
+  // silence, taken down the moment a block has signal — only ITS notice, so a
+  // newer message that replaced it is left alone.
+  //
+  // The id lives in a REF, not the effect's closure: a first press spawns cli.js,
+  // which rekeys the session mid-capture, `activeSessionId` changes, and this
+  // effect resubscribes — a closure variable would be lost with the old
+  // subscription and the warning would outlive the silence. The notice store
+  // follows the rekey, so the new id still finds it.
+  const silenceWarningRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (!activeSessionId) return
+    return voiceController().onSilence(({ silent, trackLabel }) => {
+      setVoiceSilent(silent)
+      if (silent) {
+        silenceWarningRef.current = showVoiceNotice(
+          activeSessionId,
+          noSignalMessage(trackLabel),
+          'warn'
+        )
+      } else if (silenceWarningRef.current !== null) {
+        dismissVoiceNotice(activeSessionId, silenceWarningRef.current)
+        silenceWarningRef.current = null
+      }
+    })
+  }, [activeSessionId])
+
+  const voiceNotice = useVoiceNotice(activeSessionId)
+  const handleVoiceNoticeExpire = useCallback(
+    (id: number) => {
+      if (activeSessionId) dismissVoiceNotice(activeSessionId, id)
+    },
+    [activeSessionId]
+  )
 
   useEffect(() => {
     if (voiceInterimTranscript && voiceState === 'idle' && activeSessionId) {
@@ -740,6 +941,7 @@ export function InputBox(): React.JSX.Element {
   // Not wrapped in useCallback: deps include `text`, which changes on every
   // keystroke, so memoization gives no benefit. View is unmemoized too.
   const handleSend = async (): Promise<void> => {
+    if (harnessBlocked) return
     const action = resolveSendAction({
       text,
       attachedFiles,
@@ -847,13 +1049,22 @@ export function InputBox(): React.JSX.Element {
     if (e.key === 'Escape' && isRunning) handleCancel()
     if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault()
-      if (voiceEnabled && voiceState === 'idle' && !slashMenuOpen && !fileMentionOpen)
+      // Auto-repeat of a held Tab is not a new press: while the renderer's state
+      // still lags at idle, each repeat would start again and re-point the
+      // native capture at a callback that drops the audio.
+      if (e.repeat) return
+      if (voiceAvailable && voiceState === 'idle' && !slashMenuOpen && !fileMentionOpen)
         handleVoiceStart()
     }
   }
 
   const handleKeyUp = (e: React.KeyboardEvent): void => {
-    if (e.key === 'Tab' && (voiceState === 'recording' || voiceState === 'connecting')) {
+    // `voiceHeldRef`: released before main reported `connecting` (the session
+    // was still spawning) — the stop still has to cancel that pending start.
+    if (
+      e.key === 'Tab' &&
+      (voiceState === 'recording' || voiceState === 'connecting' || voiceHeldRef.current)
+    ) {
       e.preventDefault()
       handleVoiceStop()
     }
@@ -974,7 +1185,17 @@ export function InputBox(): React.JSX.Element {
             !codexPublishesEffort(codexCatalogOf(state.availableModels), value, session.effort)
           )
             setEffort(null)
+        } else if (!started && !session.sdkActive) {
+          // Not started and nothing running: no process holds this effort, so it
+          // is no one's value to keep. (A session spawned but not yet initialised
+          // has `sdkActive` and no id: its process runs the frozen effort, so it
+          // takes the coerce path below.) Clear it and the NEW model's remembered starting effort applies
+          // (the pick that made the old one stuck was remembered for the old
+          // model, not this one).
+          setEffort(null)
         } else {
+          // Started: the live process keeps its effort across `setModel`, so the
+          // session keeps showing it, coerced to what the new model accepts.
           const coerced = modelResolveEffort(newModel, session.effort as EffortLevel)
           // Effort unsupported on new model → clear the user's pick (fall back to default).
           if (coerced === null) setEffort(null)
@@ -1021,7 +1242,8 @@ export function InputBox(): React.JSX.Element {
       opts.thinkingMode,
       undefined,
       undefined,
-      session?.selectedEngineId
+      session?.selectedEngineId,
+      spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
     )
     markSdkActive(activeSessionId)
   }, [activeSessionId, sdkActive, markSdkActive])
@@ -1043,6 +1265,22 @@ export function InputBox(): React.JSX.Element {
         return
       }
       setEffort(level as EffortLevel)
+      // Effort is remembered PER MODEL (Claude and pi — `rememberedEffortPatch`
+      // writes nothing for another engine): the pick also becomes the model's
+      // starting effort (Claude: the Settings table's own row; pi: its own
+      // per-engine map), so the next session on it starts at — and displays —
+      // what was last chosen. The session keeps its own pick
+      // too: another open session on the same model must go on showing what IT
+      // runs, not follow this one.
+      const state = useSessionStore.getState()
+      const session = activeSessionId ? state.sessions[activeSessionId] : undefined
+      // Only while composer picks carry into new sessions (`newSessionModel`): with
+      // "configured default" the pick changes this session alone.
+      const remembered =
+        session && carriesPicksIntoNewSessions(state.settings)
+          ? rememberedEffortPatch(state, session, level as EffortLevel)
+          : undefined
+      if (remembered) state.updateSettings(remembered)
       await restartSdkSession()
     },
     [activeSessionId, nativeEffortOptions, liveBackend, setEffort, restartSdkSession]
@@ -1175,9 +1413,9 @@ export function InputBox(): React.JSX.Element {
             ? capabilities.queue
               ? 'Type to queue a message...'
               : 'Wait for this turn, or stop it to send another message'
-            : effectiveEngineId === 'codex'
-              ? 'Ask Codex anything'
-              : 'Ask Claude anything, / for commands'
+            : `Ask ${engineMeta(effectiveEngineId).label} anything${
+                capabilities.slashCommands ? ', / for commands' : ''
+              }`
 
   const textClassName =
     isVoiceActive && voiceInterimTranscript
@@ -1190,7 +1428,21 @@ export function InputBox(): React.JSX.Element {
   // carrying authoritative SDK capability fields) so the pickers track the
   // user's model selection live, before any spawn/setModel round-trip. No
   // parallel modelSupports* derivation here.
-  const reasoning = useMemo(() => claudeModelCapabilities(selectedModel).reasoning, [selectedModel])
+  const reasoning = useMemo(() => {
+    const listed = models.some(
+      (model) =>
+        model.value === selectedModel.value && (model.engineId ?? 'claude') === effectiveEngineId
+    )
+    // A running model can outlive its picker entry. Its reported capabilities
+    // remain valid; a synthetic row has no metadata to replace them with.
+    if (
+      liveBackend &&
+      (!listed || effectiveEngineId === 'opencode' || effectiveEngineId === 'pi')
+    ) {
+      return capabilities.reasoning
+    }
+    return claudeModelCapabilities(selectedModel).reasoning
+  }, [selectedModel, models, effectiveEngineId, liveBackend, capabilities.reasoning])
   const thinkingCap = reasoning.thinking
   const effortCap = reasoning.effort
 
@@ -1218,8 +1470,46 @@ export function InputBox(): React.JSX.Element {
           liveBackend
           ? (status.codex?.reasoningEffort ?? effort ?? selectedModel.nativeDefaultEffort ?? '')
           : (effort ?? status.codex?.reasoningEffort ?? selectedModel.nativeDefaultEffort ?? '')
-        : (effort ?? modelDefaultEffort(selectedModel)),
-    [effort, selectedModel, nativeEffortOptions, liveBackend, status.codex?.reasoningEffort]
+        : // The SPAWN's own function over the SAME inputs, so the pill names the
+          // effort the process starts with — Claude's per-model starting effort
+          // included, and a model missing from the catalog resolved exactly as
+          // spawn resolves it (this used to feed the picker's synthetic
+          // "missing selection" row instead and disagree). With a session, the
+          // inputs are the session's own model and engine; only the welcome
+          // screen, which has no session, resolves from the picker's model.
+          sessionSpawnEffort(
+            {
+              availableModels,
+              settings: { modelEffortDefaults, engineEffortDefaults, newSessionModel }
+            },
+            activeSessionId
+              ? {
+                  selectedModel: requestedModelValue,
+                  selectedEngineId: sessionEngineId,
+                  effort: effort ?? null
+                }
+              : {
+                  selectedModel: selectedModel.value,
+                  selectedEngineId: effectiveEngineId,
+                  effort: null
+                }
+          ),
+    [
+      effort,
+      selectedModel.value,
+      selectedModel.nativeDefaultEffort,
+      availableModels,
+      activeSessionId,
+      requestedModelValue,
+      sessionEngineId,
+      effectiveEngineId,
+      modelEffortDefaults,
+      engineEffortDefaults,
+      newSessionModel,
+      nativeEffortOptions,
+      liveBackend,
+      status.codex?.reasoningEffort
+    ]
   )
   const effectiveThinking = useMemo<ThinkingMode>(
     () => thinkingMode ?? modelDefaultThinkingMode(selectedModel),
@@ -1251,7 +1541,16 @@ export function InputBox(): React.JSX.Element {
       fileMentionIndex={fileMentionIndex}
       filteredFileMentionEntries={filteredFileMentionEntries}
       attachedFiles={attachedFiles}
-      models={pickerModels}
+      models={harnessBlocked ? [] : pickerModels}
+      modelNotice={
+        harnessBlocked
+          ? harnessReadiness === 'unavailable-here'
+            ? `${HARNESS_LABEL[effectiveEngineId]} is not available here`
+            : `Install ${HARNESS_LABEL[effectiveEngineId]} to choose a model`
+          : undefined
+      }
+      sendBlocked={harnessBlocked}
+      banner={harnessBlocked ? <HarnessInstallBanner engineId={effectiveEngineId} /> : null}
       selectedModel={
         effectiveEngineId === 'codex' &&
         !codexModelIsExplicit(
@@ -1294,8 +1593,13 @@ export function InputBox(): React.JSX.Element {
       }
       visionEnabled={capabilities.vision}
       sandboxEnabled={sandboxEnabled}
-      voiceEnabled={voiceEnabled && capabilities.voice}
+      voiceEnabled={voiceAvailable}
       voiceState={voiceState}
+      voiceHeld={voiceHeld}
+      voiceSilent={voiceSilent && voiceState === 'recording'}
+      voiceNotice={voiceNotice}
+      onVoiceNoticeExpire={handleVoiceNoticeExpire}
+      subscribeVoiceLevel={subscribeVoiceLevel}
       statusLine={statusLine}
       onSend={handleSend}
       onCancel={handleCancel}

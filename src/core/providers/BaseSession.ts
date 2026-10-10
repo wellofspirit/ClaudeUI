@@ -1,6 +1,10 @@
 import type { HostWindowHandle } from '../host'
 import type {
+  AttachmentRef,
+  AttachmentUpload,
   ChatMessage,
+  ContentBlock,
+  ImageMediaType,
   SessionStatus,
   EngineId,
   ApprovalDecision,
@@ -11,6 +15,12 @@ import type {
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { ISession } from './ISession'
 import { SessionQueue } from './session-queue'
+import {
+  BlockedCallLedger,
+  blockedCallNudge,
+  NUDGED_TO_MAIN_AGENT
+} from '../automode/blocked-calls'
+import { internAttachments } from '../services/blob-store'
 import { dispatchedCostsByRouting } from '../services/db'
 import { logger } from '../services/logger'
 import { emitEvent } from '../services/sync-host'
@@ -46,9 +56,9 @@ export abstract class BaseSession implements ISession {
    * The host's window, as a HOST HANDLE — never a delivery target (4c deleted
    * that; see {@link send}). `null` when the app runs windowless
    * (`CLAUDEUI_NO_WINDOW=1`, phase 4d): a session created by a WebSocket client
-   * spawns, streams and queues identically, and the one thing that genuinely
-   * needs a window — voice capture, which belongs to the machine with the
-   * microphone — refuses instead of dereferencing null.
+   * spawns, streams and queues identically. Voice capture was the one thing that
+   * used it; it has since moved into the renderer (`core/services/voice-relay.ts`
+   * relays it), so no engine reads this handle today.
    */
   protected win: HostWindowHandle | null
   /** Mutable: SessionManager.rekey() writes this when the session UUID arrives. */
@@ -80,6 +90,16 @@ export abstract class BaseSession implements ISession {
     this.send('session:queue-changed', { items })
   )
 
+  /**
+   * Auto-mode blocks the user can approve after the fact (ADR-091 part 6),
+   * and the one-shot grants approving them made — this session's, its
+   * children's and its dispatch targets' (`DispatchContext.blockedCalls`).
+   * Memory only: a grant never outlives this object.
+   */
+  readonly blockedCalls = new BlockedCallLedger((toolUseId, review) =>
+    this.send('session:tool-review', { toolUseId, review })
+  )
+
   /** Serializes {@link flushQueuedItems} against overlapping boundary signals. */
   private flushingQueue = false
 
@@ -88,6 +108,9 @@ export abstract class BaseSession implements ISession {
    * dropped — see {@link flushQueuedItems}.
    */
   private queueFlushRerun = false
+
+  /** The user-stop window (ADR-090) — see {@link beginUserStop}. */
+  private userStopPending = false
 
   constructor(routingId: string, win: HostWindowHandle | null, cwd: string) {
     this.routingId = routingId
@@ -105,7 +128,7 @@ export abstract class BaseSession implements ISession {
   abstract getSessionId(): string | null
   abstract run(
     prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>,
+    attachments?: AttachmentUpload[],
     clientUserMessageId?: string
   ): Promise<void>
   abstract interrupt(): Promise<void>
@@ -137,6 +160,22 @@ export abstract class BaseSession implements ISession {
     return null
   }
 
+  /**
+   * Approve one auto-mode block after the fact (ADR-091 part 6). The ledger
+   * grants the call's next identical attempt once; the nudge goes to the
+   * nearest live agent on the path from the blocked agent up (the engine
+   * family's `deliver`), else to this session's own agent — returned as the
+   * `prompt` the caller sends through the composer's path, so it queues behind
+   * a busy turn. The review is then marked with where the nudge went.
+   */
+  approveBlocked(toolUseId: string): { prompt: string | null } | undefined {
+    const call = this.blockedCalls.approve(toolUseId)
+    if (!call) return undefined
+    const deliveredTo = call.deliver?.(call) ?? null
+    this.blockedCalls.markApproved(toolUseId, call.review, deliveredTo ?? NUDGED_TO_MAIN_AGENT)
+    return { prompt: deliveredTo ? null : blockedCallNudge(call) }
+  }
+
   setInactivityTimeout(ms: number): void {
     this.inactivityTimeoutMs = ms
     if (!this.willQueue) this.resetInactivityTimer()
@@ -150,11 +189,28 @@ export abstract class BaseSession implements ISession {
     return this.queue.pending()
   }
 
+  /**
+   * The still-queued prompts as ordinary user turns, stamped with the time
+   * they were queued — what a delegated judge (a pi child, a pi/opencode
+   * dispatch target) reads beside this session's transcript (ADR-091 §4). A
+   * prompt typed while this session waits on a foreground child is the
+   * user's own word, merely not delivered to this session's model yet.
+   */
+  queuedUserTurns(): ChatMessage[] {
+    return this.queue.pending().map((item) => ({
+      id: `queued:${item.itemId}`,
+      role: 'user',
+      content: [{ type: 'text', text: item.text }],
+      timestamp: this.queue.queuedAt(item) ?? Date.now()
+    }))
+  }
+
   enqueuePrompt(
     text: string,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+    attachments?: AttachmentUpload[],
+    refs: AttachmentRef[] | undefined = internAttachments(attachments)
   ): void {
-    const item = this.queue.add(text, attachments)
+    const item = this.queue.add(text, attachments, refs)
     this.queue.emit()
     this.onPromptQueued(item)
   }
@@ -184,7 +240,16 @@ export abstract class BaseSession implements ISession {
    * item `queued` tells {@link flushQueuedItems} nothing landed.
    */
   protected forwardQueuedItem(item: QueuedItem): Promise<void> {
-    return this.run(item.text, item.attachments)
+    return this.run(item.text, this.queuedUploads(item))
+  }
+
+  /**
+   * The bytes a queued item's attachments were uploaded with. Every engine's
+   * drain path reads them HERE, never off `item.attachments`: the item is the
+   * broadcast shape and carries blob refs only (ADR-087).
+   */
+  protected queuedUploads(item: QueuedItem): AttachmentUpload[] | undefined {
+    return this.queue.uploadsFor(item)
   }
 
   /**
@@ -387,6 +452,68 @@ export abstract class BaseSession implements ISession {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // A user stop is not an error (ADR-090)
+  // ---------------------------------------------------------------------------
+  //
+  // An engine tearing down a turn the user stopped may report the teardown as
+  // a turn error (pi's aborted model request, opencode's MessageAbortedError,
+  // a Codex turn that fails in a race with the interrupt). That is not news to
+  // the user who pressed Stop, so while the window is open the session's
+  // TURN-ERROR banner is not sent; the turn-end bookkeeping still runs.
+  // ClaudeSession's `wasInterrupted` is the reference rule (it predates this
+  // helper and keeps its own flag). A user stop is reached only through the
+  // `session:interrupt` IPC (→ `interrupt()`), so the window is user-initiated
+  // by construction. The helper never touches status or processing state, and
+  // it never covers auth, prompt-ack, transport-loss, guardian or judge banners.
+
+  /**
+   * `interrupt()`: open the window — only when a turn is live (a window opened
+   * at idle would swallow the NEXT turn's genuine error), and BEFORE the abort
+   * request is sent (the engine's error can arrive before the request's reply).
+   */
+  protected beginUserStop(): void {
+    this.userStopPending = true
+  }
+
+  /** The stopped turn ended, a fresh turn started, or the session went away. */
+  protected endUserStop(): void {
+    this.userStopPending = false
+  }
+
+  /**
+   * True while the window is open — the caller then sends no turn-error
+   * banner. The suppressed text (an engine error string) is logged at info.
+   */
+  protected suppressedAfterUserStop(tag: string, message: string): boolean {
+    if (!this.userStopPending) return false
+    logger.info(tag, `turn error after a user stop, not shown: ${message}`)
+    return true
+  }
+
+  /**
+   * Build the ContentBlock[] for a locally-recorded user ChatMessage, mirroring
+   * the renderer's optimistic addUserMessage (session-store.ts): attachments
+   * first (image/document blocks), then a trailing text block. Keeps
+   * getMessages() fidelity for image/PDF attachments (Claude and opencode; pi
+   * keeps its own image-only variant — it has no document input).
+   */
+  protected userMessageContent(prompt: string, attachments?: AttachmentUpload[]): ContentBlock[] {
+    const content: ContentBlock[] = []
+    // Like every ChatMessage, the blocks carry blob refs, not bytes (pre-release
+    // ADR-087, transcript blobs off the ring).
+    for (const att of internAttachments(attachments) ?? []) {
+      const ref = { blobId: att.blobId, bytes: att.bytes, fileName: att.fileName }
+      if (att.mediaType === 'application/pdf') {
+        content.push({ type: 'document', mediaType: 'application/pdf', ...ref })
+      } else {
+        content.push({ type: 'image', mediaType: att.mediaType as ImageMediaType, ...ref })
+      }
+    }
+    if (prompt) content.push({ type: 'text', text: prompt })
+    return content
+  }
+
   /**
    * Broadcast a domain event to every client.
    *
@@ -399,8 +526,8 @@ export abstract class BaseSession implements ISession {
    * channel a session emits is replicated or volatile, so it reaches every
    * SUBSCRIBER, and the session's own `this.win` is no longer part of the fan-out
    * (the desktop renderer is a subscriber like any other). `this.win` survives as
-   * the spawn/host handle the engines need, not as a delivery target — which is
-   * why it can be `null` in a windowless boot without any of this changing.
+   * a host handle, not as a delivery target — which is why it can be `null` in a
+   * windowless boot without any of this changing.
    *
    * `routingId` rides as `args[0]`, which is the wire encoding of contract 2's
    * `sessionId` — positional, not a named field (see sync-core.md §"Wire

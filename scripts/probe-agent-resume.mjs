@@ -71,7 +71,13 @@ function record(kind, detail, raw) {
   appendFileSync(OUT, JSON.stringify({ tMs: Date.now() - t0, kind, detail, raw }) + '\n')
 }
 
-const { q, channel, cleanup } = createStreamingQuery(SPAWN_PROMPT, {}, 300_000)
+// PROBE_MODEL overrides test-helpers' default (e.g. claude-haiku-4-5-20251001).
+const MODEL = process.env.PROBE_MODEL
+const { q, channel, cleanup } = createStreamingQuery(
+  SPAWN_PROMPT,
+  MODEL ? { model: MODEL } : {},
+  300_000
+)
 
 let phase = 'spawn'
 let notificationsSeen = 0
@@ -98,6 +104,35 @@ try {
         `[${phase}] parent=${msg.parent_tool_use_id} ${JSON.stringify(text)}`,
         null
       )
+    }
+
+    // The <task-notification> XML the parent is fed. ClaudeSession treats it as a
+    // terminal event too, so WHEN it reaches stdout relative to a resume matters.
+    if (msg.type === 'user' && !msg.parent_tool_use_id) {
+      const c = msg.message?.content
+      const text =
+        typeof c === 'string'
+          ? c
+          : Array.isArray(c)
+            ? c.map((b) => (typeof b?.text === 'string' ? b.text : '')).join('')
+            : ''
+      if (text.includes('<task-notification>')) {
+        const tag = (t) => text.match(new RegExp(`<${t}>([\\s\\S]*?)</${t}>`))?.[1]?.trim() ?? '-'
+        record(
+          'user/task-notification',
+          `[${phase}] task_id=${tag('task-id')} tool_use_id=${tag('tool-use-id')} status=${tag('status')}`,
+          msg
+        )
+      }
+    }
+
+    // Native queue lifecycle (docs/protocol-cc/03-inbound-messages.md §3.21);
+    // it replaced the queue-control patch's system/queued_command_consumed,
+    // deleted at 2.1.280. This probe's own frames carry no uuid and get none,
+    // so a frame here names a command cli.js enqueued itself.
+    if (msg.type === 'command_lifecycle') {
+      record('command_lifecycle', `[${phase}] ${msg.state} ${msg.command_uuid}`, msg)
+      continue
     }
 
     if (msg.type === 'system' && typeof msg.subtype === 'string') {

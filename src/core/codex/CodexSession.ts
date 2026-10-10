@@ -15,6 +15,7 @@ import type {
   ToolReviewBlock,
   MeteringSnapshot,
   TaskNotification,
+  TaskTerminalStatus,
   UsageOrigin
 } from '../../shared/types'
 import type {
@@ -42,7 +43,7 @@ import {
   sessionAllowKey,
   type PermissionDecision,
   PI_TOOL_TO_CLAUDE_TOOL,
-  PLAN_MODE_DENY_REASON
+  PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
 } from '../pi/permission-engine'
 import { persistAllowSuggestions } from '../opencode/permission-compiler'
 import type { CodexMethods } from './protocol/methods'
@@ -261,6 +262,15 @@ const OVERRIDABLE_ACTIONS = new Set(['command', 'execve', 'applyPatch'])
 const INTERRUPTED_HOSTED_TOOL = '[Request interrupted by user for tool use]'
 /** The same tombstone for a stop nobody asked for: a failed turn, a lost transport. */
 const STOPPED_HOSTED_TOOL = '[Request stopped before the tool use finished]'
+/**
+ * What an interrupted (or failed) turn's still-open native card says. The
+ * binary does not complete these on an interrupt, so the card would spin for
+ * good; and a command's process is not necessarily gone with the turn.
+ */
+const INTERRUPTED_NATIVE_TOOL: Record<string, string> = {
+  commandExecution: 'Interrupted — the command may still be running in the background',
+  fileChange: 'Interrupted before the change was confirmed'
+}
 
 /**
  * The v2 notification carries a CAMEL-cased projection of the core's own
@@ -415,7 +425,7 @@ type CodexChild = {
 }
 
 /** Agent states that end a child's card, mapped onto the neutral task status. */
-const CHILD_TERMINAL_STATUS: Record<string, TaskNotification['status']> = {
+const CHILD_TERMINAL_STATUS: Record<string, TaskTerminalStatus> = {
   completed: 'completed',
   errored: 'failed',
   notFound: 'failed',
@@ -424,7 +434,7 @@ const CHILD_TERMINAL_STATUS: Record<string, TaskNotification['status']> = {
 }
 
 /** The inverse, for the status a closed child reports on a later `wait` card. */
-const CHILD_CLOSED_STATE: Record<TaskNotification['status'], CollabAgentStatus> = {
+const CHILD_CLOSED_STATE: Record<TaskTerminalStatus, CollabAgentStatus> = {
   completed: 'completed',
   failed: 'errored',
   stopped: 'shutdown'
@@ -808,7 +818,7 @@ export class CodexSession extends BaseSession {
           threadId: this.threadId,
           expectedTurnId: turnId,
           clientUserMessageId,
-          input: codexTurnInput(item.text, item.attachments)
+          input: codexTurnInput(item.text, this.queuedUploads(item))
         })
       } catch (error) {
         // An ambiguous timeout MAY have been delivered, so it is reconciled and
@@ -830,7 +840,7 @@ export class CodexSession extends BaseSession {
       return
     }
     try {
-      await this.run(item.text, item.attachments, clientUserMessageId)
+      await this.run(item.text, this.queuedUploads(item), clientUserMessageId)
     } catch {
       // `run()` already surfaced the failure (and disposed if it was fatal).
       return
@@ -933,6 +943,9 @@ export class CodexSession extends BaseSession {
     if (this.willQueue && prompt !== null)
       throw new Error('Codex turn is already running; send this prompt through the queue')
     if (prompt !== null) {
+      // A fresh turn closes the user-stop window (ADR-090). A prompt never
+      // steers here: a running turn takes it through the queue (above).
+      this.endUserStop()
       this.resetAuthRowLatch()
       this.sending = true
       this.clearInactivityTimer()
@@ -1870,6 +1883,11 @@ export class CodexSession extends BaseSession {
     // down a target a later turn may continue. Idempotent — a dispatch that
     // already settled is simply absent from the dispatcher's registry.
     this.stopInFlightDispatches()
+    // ADR-090: open the user-stop window for a live (or starting) turn BEFORE
+    // `turn/interrupt` — a turn that ends `failed` in a race with the
+    // interrupt is the Stop's aftermath, not a failure to report. Not
+    // `interruptRequested`, which defers an interrupt across a start.
+    if (this.turnId || this.sending) this.beginUserStop()
     if (this.sending && !this.threadId) {
       this.dispose()
       return
@@ -1932,6 +1950,7 @@ export class CodexSession extends BaseSession {
     this.busy = false
     this.sending = false
     this.turnId = null
+    this.endUserStop()
     this.clearInactivityTimer()
     this.bashGate.cancelAll()
     this.output.clear()
@@ -2320,11 +2339,12 @@ export class CodexSession extends BaseSession {
       cachedTokens: cacheRead,
       totalTokens: total,
       contextWindow: { used: usage.last.totalTokens, size: usage.modelContextWindow ?? 0 },
+      // Whole percents, as pi's status line (the template prints the number as is).
       usedPercentage: usage.modelContextWindow
-        ? (usage.last.totalTokens / usage.modelContextWindow) * 100
+        ? Math.round((usage.last.totalTokens / usage.modelContextWindow) * 100)
         : null,
       remainingPercentage: usage.modelContextWindow
-        ? Math.max(0, 100 - (usage.last.totalTokens / usage.modelContextWindow) * 100)
+        ? Math.max(0, 100 - Math.round((usage.last.totalTokens / usage.modelContextWindow) * 100))
         : null
     })
     // AFTER the two sends: the meter is what the user is waiting on, the
@@ -2591,11 +2611,7 @@ export class CodexSession extends BaseSession {
    * child's own `turn/completed`, which only means "idle until the next
    * `send_input`" and would append a notification per turn.
    */
-  private finishChild(
-    childThreadId: string,
-    child: CodexChild,
-    status: TaskNotification['status']
-  ): void {
+  private finishChild(childThreadId: string, child: CodexChild, status: TaskTerminalStatus): void {
     if (child.notified) return
     this.flushItemStreams(undefined, child.parentToolUseId)
     child.notified = true
@@ -2777,11 +2793,34 @@ export class CodexSession extends BaseSession {
    *
    * Only ever ADDITIVE: a `tool_use` that already has a `tool_result` is
    * skipped, so a result the replay did deliver is never overwritten and one
-   * call is tombstoned once. Native `commandExecution` / `fileChange` items are
-   * deliberately out of scope — the binary completes those itself on an
-   * interrupt, so they are not orphaned in the first place.
+   * call is tombstoned once. Native `commandExecution` / `fileChange` items
+   * have their own sweep ({@link failUnresolvedNativeCalls}).
    */
   private failUnresolvedHostedCalls(text: string, turnId: string | null): void {
+    this.tombstoneOpenToolUses(turnId, (toolName) =>
+      CODEX_HOSTED_TOOL_NAMES.has(toolName) ? text : null
+    )
+  }
+
+  /**
+   * Tombstone an interrupted or failed turn's still-open native
+   * `commandExecution` / `fileChange` cards. An interrupt does NOT complete
+   * them: the turn ends `interrupted` with whatever `items` it carries (often
+   * none), so a card whose `item/completed` never came spins for good. The
+   * text stays honest — a command's process may outlive the turn, and a file
+   * change may or may not have landed. Additive and scoped to the turn, like
+   * the hosted sweep; a late completion replacing the tombstone is a
+   * follow-up.
+   */
+  private failUnresolvedNativeCalls(turnId: string): void {
+    this.tombstoneOpenToolUses(turnId, (toolName) => INTERRUPTED_NATIVE_TOOL[toolName] ?? null)
+  }
+
+  /** Give every open `tool_use` of `turnId` (all turns when null) that `textFor` names an error result. */
+  private tombstoneOpenToolUses(
+    turnId: string | null,
+    textFor: (toolName: string) => string | null
+  ): void {
     // `codexItemId` encodes [thread, turn, item] as JSON, so every id minted for
     // one turn shares the prefix an EMPTY item id produces, its own `""]` tail
     // dropped. Scoping matters: a late `turn/completed` for an earlier turn must
@@ -2797,10 +2836,11 @@ export class CodexSession extends BaseSession {
       if (
         block.type !== 'tool_use' ||
         !block.toolUseId.startsWith(prefix) ||
-        !CODEX_HOSTED_TOOL_NAMES.has(block.toolName) ||
         settled.has(block.toolUseId)
       )
         continue
+      const text = textFor(block.toolName)
+      if (text === null) continue
       settled.add(block.toolUseId)
       this.dispatch({ kind: 'toolResult', toolUseId: block.toolUseId, result: text, isError: true })
     }
@@ -2810,11 +2850,13 @@ export class CodexSession extends BaseSession {
     if (!this.threadId || typeof turn.id !== 'string' || this.endedTurns.has(turn.id)) return
     for (const item of turn.items ?? []) this.item(turn.id, item, true, true)
     // After the replay, never before it: what that did not complete never will.
-    if (turn.status === 'interrupted' || turn.status === 'failed')
+    if (turn.status === 'interrupted' || turn.status === 'failed') {
       this.failUnresolvedHostedCalls(
         turn.status === 'interrupted' ? INTERRUPTED_HOSTED_TOOL : STOPPED_HOSTED_TOOL,
         turn.id
       )
+      this.failUnresolvedNativeCalls(turn.id)
+    }
     this.flushItemStreams(turn.id)
     this.endedTurns.add(turn.id)
     // Past the `endedTurns` latch above, so a replayed `turn/completed` for a
@@ -2847,11 +2889,14 @@ export class CodexSession extends BaseSession {
       // Child streams may outlive this root turn.
       this.bashGate.cancelAll()
       this.output.clear()
-      if (turn.error)
-        this.send(
-          'session:error',
+      if (turn.error) {
+        const banner =
           'Codex turn failed. Check native account status and settings; no credentials were changed.'
-        )
+        // ADR-090: not after a user stop — the banner would misread the Stop.
+        if (!this.suppressedAfterUserStop('CodexSession', banner))
+          this.send('session:error', banner)
+      }
+      this.endUserStop()
       this.status('idle')
       this.resetInactivityTimer()
     }
@@ -3189,8 +3234,10 @@ export class CodexSession extends BaseSession {
    *
    * The verdict comes from the SAME shared engine every other tool goes
    * through. For the hosted THREE it can only answer `allow` (the hosted
-   * auto-allow rung of `decideWithSource` sits above every rung but deny, and
-   * no Claude rule string maps to the `diagram`/`mockup` kinds), but the call
+   * auto-allow rung of `decideWithSource` sits above every rung but the deny
+   * rule and the plan-mode rung (ADR-085 ruling 7 — the hosted three are never
+   * mutating kinds, so it cannot change their verdict), and no Claude rule
+   * string maps to the `diagram`/`mockup` kinds), but the call
    * is made anyway so a future ladder change reaches Codex too — and anything
    * but `allow` refuses with the reason as the tool's own output, which is the
    * only channel that tells the model why. `dispatch_agent` is the one hosted
@@ -3332,7 +3379,11 @@ export class CodexSession extends BaseSession {
       // The user's OWN autonomy choice, un-narrowed: `gate()`'s auto→default
       // mapping governs what this client asks about, not what the dispatched
       // agent is allowed to do (the human just approved this dispatch anyway).
-      autonomyMode: this.permissionMode,
+      // Read live (ADR-088): the target follows this session's mode switches.
+      getAutonomyMode: () => this.permissionMode,
+      getMessages: () => this.messageHistory,
+      getQueuedUserTurns: () => this.queuedUserTurns(),
+      blockedCalls: this.blockedCalls,
       emit: (channel, data) => this.send(channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
         this.addDispatchedCost(engineId, modelId, costUsd),
@@ -3720,7 +3771,7 @@ export class CodexSession extends BaseSession {
             verdict.source === 'deny-rule' && verdict.rule
               ? `Denied by permission rule: ${verdict.rule}`
               : this.permissionMode === 'plan'
-                ? PLAN_MODE_DENY_REASON
+                ? PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
                 : 'Denied by permission rules'
         }
       if (step === 'ask') decision = 'ask'

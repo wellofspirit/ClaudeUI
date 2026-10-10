@@ -923,7 +923,7 @@ export interface WsTermDetached {
 //
 // Accepted ONLY from a connection that currently holds a live capture, which is
 // established by an audited `voice:start`. A frame that arrives without one is
-// dropped in silence rather than answered (services/remote-voice.ts).
+// dropped in silence rather than answered (core/services/voice-relay.ts).
 
 /**
  * Client → Server: one batch of 16 kHz i16LE mono PCM, base64-encoded.
@@ -1002,6 +1002,7 @@ import type {
   TodoItem,
   SentFile,
   QueuedItem,
+  ActiveTask,
   TaskNotification,
   TaskProgress,
   StatusLineData,
@@ -1035,7 +1036,7 @@ export interface PerSessionSnapshot {
   /** Started-but-not-finished tasks (task_started with no task_notification
    *  yet) — without this a remote client that connects or resyncs mid-task
    *  reads an async-launched Task as already complete. */
-  activeTasks?: Record<string, { taskId: string; taskType: string }>
+  activeTasks?: Record<string, ActiveTask>
   taskProgressMap: Record<string, TaskProgress>
   subagentMessages: Record<string, ChatMessage[]>
   permissionMode: string
@@ -1074,6 +1075,15 @@ export interface PerSessionSnapshot {
    * host that predates slice 3 sends none, which reads as "nothing owed".
    */
   authRequired?: AuthRequiredState | null
+  /**
+   * `false` means this entry does NOT carry its transcript — `messages` and
+   * `subagentMessages` are empty because the host dropped them (ADR-087 §2) or has
+   * not read them yet (a resume's history read is in flight), not because the
+   * conversation is empty. With `sdkActive` false, read it from disk; with it true,
+   * fill it the way a follower of a resume does. Absent means "complete", which is
+   * also what a host that predates the field means.
+   */
+  seeded?: boolean
 }
 
 /**

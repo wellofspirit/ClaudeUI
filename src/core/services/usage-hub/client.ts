@@ -57,6 +57,7 @@ import {
   replaceRemoteAccounts,
   replaceRemoteDevices,
   upsertHubConfig,
+  upsertRemoteCredits,
   upsertRemoteLimits,
   upsertRemoteUsageBuckets,
   upsertRemoteUsageWindows,
@@ -66,6 +67,7 @@ import {
 } from '../db'
 import { onUsageEventWritten } from '../db'
 import { onLimitSamplesWritten, type LimitReadingWritten } from '../window-samples'
+import { onCreditReading, type CreditReadingWritten } from '../credit-readings'
 import type { UsageHubState, UsageHubStatus } from '../../../shared/types'
 import { getHubConfig, hubCredential, resetRemoteCache } from './config'
 import {
@@ -184,9 +186,16 @@ export class UsageHubClient {
 
   private unsubscribeRows: (() => void) | null = null
   private unsubscribeLimits: (() => void) | null = null
+  private unsubscribeCredits: (() => void) | null = null
 
   /** Readings written since the last successful limits push. */
   private queuedReadings: LimitReadingWritten[] = []
+  /**
+   * The newest credit reading per account since the last successful push
+   * (ADR-072 §4, amended 2026-10-01). A map, not a list: the hub keeps only the
+   * latest per account, so an older one still queued is worth nothing.
+   */
+  private queuedCredits = new Map<string, CreditReadingWritten>()
 
   private readonly fetchImpl: typeof fetch
   private readonly now: () => number
@@ -236,6 +245,7 @@ export class UsageHubClient {
 
     this.unsubscribeRows = onUsageEventWritten(() => this.onLedgerWrite())
     this.unsubscribeLimits = onLimitSamplesWritten((readings) => this.onLimitsWritten(readings))
+    this.unsubscribeCredits = onCreditReading((reading) => this.onCreditWritten(reading))
     this.syncTimer = setInterval(() => {
       // The env gate is re-read, not captured at `start()`: a process whose
       // environment gained the flag must stop reaching the network, and this is
@@ -283,6 +293,8 @@ export class UsageHubClient {
     this.unsubscribeRows = null
     this.unsubscribeLimits?.()
     this.unsubscribeLimits = null
+    this.unsubscribeCredits?.()
+    this.unsubscribeCredits = null
     this.setState('off')
   }
 
@@ -337,6 +349,26 @@ export class UsageHubClient {
       this.queuedReadings = this.queuedReadings.slice(-MAX_QUEUED_READINGS)
     }
     this.onLedgerWrite()
+  }
+
+  private onCreditWritten(reading: CreditReadingWritten): void {
+    // Not queued while paused, for `onLimitsWritten`'s reason.
+    if (!this.armedByActivity()) return
+    this.queuedCredits.set(reading.accountKey, reading)
+    this.onLedgerWrite()
+  }
+
+  /**
+   * Put credit readings back after a failed push, without replacing a NEWER one
+   * that arrived while the request was in flight.
+   */
+  private requeueCredits(credits: ReadonlyArray<CreditReadingWritten>): void {
+    for (const reading of credits) {
+      const queued = this.queuedCredits.get(reading.accountKey)
+      if (!queued || queued.observedAt < reading.observedAt) {
+        this.queuedCredits.set(reading.accountKey, reading)
+      }
+    }
   }
 
   /**
@@ -608,24 +640,31 @@ export class UsageHubClient {
       upsertHubConfig({ lastPushAt: this.now() })
     }
 
-    if (this.queuedReadings.length > 0) {
+    if (this.queuedReadings.length > 0 || this.queuedCredits.size > 0) {
       const readings = this.queuedReadings
+      const credits = [...this.queuedCredits.values()]
       // Cleared before the request, and restored on failure: a reading that
       // arrives mid-flight must not be dropped by a successful push of the
       // batch it was not in.
       this.queuedReadings = []
+      this.queuedCredits = new Map()
       const result = await this.send(
         url,
         HUB_ROUTES.limits,
-        encodePushLimits({ deviceId: deviceId(), readings })
+        encodePushLimits({ deviceId: deviceId(), readings, credits })
       )
       if (result.kind !== 'ok') {
         this.queuedReadings = [...readings, ...this.queuedReadings].slice(-MAX_QUEUED_READINGS)
+        this.requeueCredits(credits)
         this.applyFailure(result)
         return false
       }
       const answer = decodePushLimitsResponse(result.payload)
-      logger.info(LOG_SOURCE, `pushed ${answer.accepted} limit reading(s)`)
+      logger.info(
+        LOG_SOURCE,
+        `pushed ${answer.accepted} limit reading(s)` +
+          (credits.length > 0 ? ` and ${credits.length} credit reading(s)` : '')
+      )
       if (!this.noteEpoch(answer.epoch)) return false
       if (!this.writable()) return false
       upsertHubConfig({ lastPushAt: this.now() })
@@ -724,6 +763,22 @@ export class UsageHubClient {
       }))
     if (!this.writable()) return false
     upsertRemoteLimits(rows)
+    // The credits relay rides the same answer (ADR-072 §4, amended 2026-10-01). A
+    // hub that predates it sends none, which decodes as none.
+    upsertRemoteCredits(
+      limits.credits
+        .filter((credit) => credit.deviceId !== me)
+        .map((credit) => ({
+          accountKey: credit.accountKey,
+          deviceId: credit.deviceId,
+          labelMasked: credit.labelMasked,
+          vendorId: credit.vendorId,
+          plan: credit.plan,
+          credits: credit.credits,
+          allowance: credit.allowance,
+          observedAt: credit.observedAt
+        }))
+    )
 
     // The machine list (ADR-072 §6). A device may read it, and it is the only
     // source of a peer's NAME, its build and the instant it last pushed — the
@@ -1036,10 +1091,13 @@ function asBillingType(value: string): RemoteUsageBucketRow['billingType'] {
  * `origin` has no `unknown` member, so a value this build cannot name becomes
  * `session` — the neutral default `usageEventParams` already applies to a local
  * row that states none, and the one the dashboard's Delegated section excludes
- * rather than mis-attributes.
+ * rather than mis-attributes. `judge` (ADR-081 §5) is named since 3.6; a build
+ * older than that folds it into `session` here.
  */
 function asOrigin(value: string): RemoteUsageBucketRow['origin'] {
-  return value === 'session' || value === 'child' || value === 'dispatch' ? value : 'session'
+  return value === 'session' || value === 'child' || value === 'dispatch' || value === 'judge'
+    ? value
+    : 'session'
 }
 
 function toBucketRow(bucket: RemoteBucket): RemoteUsageBucketRow {

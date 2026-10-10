@@ -21,13 +21,13 @@
  * 4. Optionally updates sandbox exclusions and forwards permission suggestions
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
 import { TestIpcBridge } from '@test/bridges/test-ipc-bridge'
 import { useSessionStore } from '../../../stores/session-store'
 import { makePendingApproval, resetFactoryCounter } from '@test/factories/messages'
-import type { PendingApproval, PermissionSuggestion } from '../../../../../shared/types'
-import { FloatingApproval } from '../FloatingApproval'
+import type { EngineId, PendingApproval, PermissionSuggestion } from '../../../../../shared/types'
+import { ApprovalCardView, FloatingApproval } from '../FloatingApproval'
 import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 let bridge: TestIpcBridge
@@ -419,6 +419,113 @@ describe('FloatingApproval rendered component', () => {
     expect(screen.getByText('Deny')).toBeInTheDocument()
   })
 
+  // ADR-027: structure first — every part of the card is addressable by testid.
+  it('stamps the card and its parts with ADR-027 testids', () => {
+    setup({ toolName: 'Bash', input: { command: 'echo hello' } })
+
+    render(<FloatingApproval />)
+
+    const card = screen.getByTestId('ApprovalCardView')
+    expect(screen.getByTestId('FloatingApproval')).toContainElement(card)
+    expect(screen.getByTestId('ApprovalCardView.label')).toHaveTextContent('Permission')
+    expect(screen.getByTestId('ApprovalCardView.toolName')).toHaveTextContent('Bash')
+    expect(screen.getByTestId('ApprovalCardView.summary')).toHaveTextContent('$ echo hello')
+    expect(screen.getByTestId('ApprovalCardView.deny')).toHaveTextContent('Deny')
+    expect(screen.getByTestId('ApprovalCardView.allow')).toHaveTextContent('Allow')
+    // No producer shows "Allow for session"; no reason, no sandbox checkbox here.
+    expect(screen.queryByTestId('ApprovalCardView.allowForSession')).toBeNull()
+    expect(screen.queryByTestId('ApprovalCardView.reason')).toBeNull()
+    expect(screen.queryByTestId('ApprovalCardView.alwaysAllowOutsideSandbox')).toBeNull()
+  })
+
+  it("F4 (ADR-089): a pi child's card names the agent; an own-session card has no agent line", () => {
+    setup({
+      toolName: 'bash',
+      input: { command: 'npm run build' },
+      agent: { agentId: 'a-1', label: 'Tidy the build', subagentType: 'general-purpose' }
+    })
+    render(<FloatingApproval />)
+    expect(screen.getByTestId('ApprovalCardView.agent')).toHaveTextContent(
+      'Agent Tidy the build (general-purpose)'
+    )
+  })
+
+  it('F4: no agent line without an agent', () => {
+    setup({ toolName: 'Bash', input: { command: 'echo hello' } })
+    render(<FloatingApproval />)
+    expect(screen.queryByTestId('ApprovalCardView.agent')).toBeNull()
+  })
+
+  it('every summary branch carries the same testid', () => {
+    useSessionStore.getState().createNewSession(ROUTE, '/test')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+    seed.approvalRequest(
+      ROUTE,
+      makePendingApproval({ toolName: 'Edit', input: { file_path: '/src/a.ts' } })
+    )
+    seed.approvalRequest(
+      ROUTE,
+      makePendingApproval({ toolName: 'webfetch', input: { url: 'https://example.com' } })
+    )
+
+    render(<FloatingApproval />)
+
+    const summaries = screen.getAllByTestId('ApprovalCardView.summary')
+    expect(summaries).toHaveLength(2)
+    expect(summaries[0]).toHaveTextContent('/src/a.ts')
+    expect(summaries[1]).toHaveTextContent('https://example.com')
+  })
+
+  it('renders the decision reason when present, and the sandbox checkbox on an escape', () => {
+    setup({
+      toolName: 'Bash',
+      input: { command: 'dangerous-cmd', dangerouslyDisableSandbox: true },
+      decisionReason: 'Auto mode blocked 3 actions in a row — asking you instead.'
+    })
+
+    render(<FloatingApproval />)
+
+    expect(screen.getByTestId('ApprovalCardView.reason')).toHaveTextContent(
+      'Auto mode blocked 3 actions in a row — asking you instead.'
+    )
+    expect(screen.getByTestId('ApprovalCardView.label')).toHaveTextContent('Sandbox Escape')
+    expect(screen.getByTestId('ApprovalCardView.alwaysAllowOutsideSandbox')).not.toBeChecked()
+  })
+
+  it('ApprovalCardView with showAllowForSession renders that button by testid', () => {
+    const onRespond = vi.fn()
+    render(
+      <ApprovalCardView
+        approval={makePendingApproval({ toolName: 'Bash', input: { command: 'ls' } })}
+        permissionMode="default"
+        alwaysAllow={false}
+        onAlwaysAllowChange={() => {}}
+        checkedSuggestions={[]}
+        onToggleSuggestion={() => {}}
+        onRespond={onRespond}
+        showAllowForSession
+      />
+    )
+
+    fireEvent.click(screen.getByTestId('ApprovalCardView.allowForSession'))
+    expect(onRespond).toHaveBeenCalledWith('allowForSession')
+  })
+
+  it('clicking the testid-addressed Deny / Allow buttons responds', async () => {
+    const approval = setup({ toolName: 'Bash', input: { command: 'echo hello' } })
+
+    render(<FloatingApproval />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('ApprovalCardView.deny'))
+    })
+
+    expect(lastApprovalResponse).toMatchObject({
+      requestId: approval.requestId,
+      decision: 'deny'
+    })
+  })
+
   // A Codex guardian override is bound to a tool_use already in the transcript,
   // so the declined card owns it and the floating layer must stay empty — the
   // same rule that keeps any id-matched approval off the floater.
@@ -452,6 +559,103 @@ describe('FloatingApproval rendered component', () => {
     const { container } = render(<FloatingApproval />)
 
     expect(container.firstChild).toBeNull()
+  })
+
+  // ADR-091 §3 — a held judge block floats (a subagent's or dispatch target's
+  // call) with the same one-call override as the inline card: Keep blocked /
+  // Approve anyway, a countdown, and no standing rule.
+  it('a held auto-mode block floats as Keep blocked / Approve anyway with a countdown, no suggestions', async () => {
+    const approval = setup({
+      toolName: 'bash',
+      input: { command: 'git push origin main' },
+      autoModeBlock: { expiresAt: Date.now() + 90_000 },
+      suggestions: [
+        {
+          type: 'addRules',
+          destination: 'projectSettings',
+          rules: [{ toolName: 'Bash', ruleContent: 'git push:*' }]
+        }
+      ]
+    })
+
+    render(<FloatingApproval />)
+
+    expect(screen.getByTestId('ApprovalCardView.deny')).toHaveTextContent('Keep blocked')
+    expect(screen.getByTestId('ApprovalCardView.allow')).toHaveTextContent('Approve anyway')
+    expect(screen.getByTestId('ApprovalCardView.holdCountdown')).toHaveTextContent(
+      /blocks in 1:\d\d/
+    )
+    expect(screen.queryByText(/Permission rules/i)).not.toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('ApprovalCardView.allow'))
+    })
+    expect(lastApprovalResponse).toMatchObject({
+      requestId: approval.requestId,
+      decision: 'allow',
+      suggestions: undefined
+    })
+  })
+
+  it('a held sandbox-escape block offers no "always allow outside sandbox" standing rule', () => {
+    setup({
+      toolName: 'Bash',
+      input: { command: 'curl example.com', dangerouslyDisableSandbox: true },
+      autoModeBlock: { expiresAt: Date.now() + 90_000 }
+    })
+
+    render(<FloatingApproval />)
+
+    expect(screen.getByTestId('ApprovalCardView.allow')).toHaveTextContent('Approve anyway')
+    expect(screen.queryByTestId('ApprovalCardView.alwaysAllowOutsideSandbox')).toBeNull()
+  })
+
+  describe('summary — normalized by the engine that made the call', () => {
+    const onEngine = (engineId: EngineId): void => {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: {
+            ...state.sessions[ROUTE],
+            status: { ...state.sessions[ROUTE].status, engineId }
+          }
+        }
+      }))
+    }
+
+    it('renders a pi `bash` call as a command, not raw JSON', () => {
+      setup({ toolName: 'bash', input: { command: 'git push origin main' } })
+      onEngine('pi')
+      render(<FloatingApproval />)
+      expect(screen.getByTestId('ApprovalCardView.summary')).toHaveTextContent(
+        /^\$ git push origin main$/
+      )
+    })
+
+    it('renders a pi `edit` call by its `path`', () => {
+      setup({ toolName: 'edit', input: { path: 'src/auth.py', oldText: 'a', newText: 'b' } })
+      onEngine('pi')
+      render(<FloatingApproval />)
+      expect(screen.getByTestId('ApprovalCardView.summary')).toHaveTextContent(/^src\/auth\.py$/)
+    })
+
+    it("reads a dispatch target's card with the TARGET's map (pi target under a Claude session)", () => {
+      setup({
+        toolName: 'bash',
+        input: { command: 'ls -la' },
+        agent: { agentId: 't1', label: 'x/y', subagentType: 'dispatch:pi' }
+      })
+      onEngine('claude')
+      render(<FloatingApproval />)
+      expect(screen.getByTestId('ApprovalCardView.summary')).toHaveTextContent(/^\$ ls -la$/)
+    })
+
+    it('keeps the raw input for a tool the map does not know', () => {
+      setup({ toolName: 'mystery_tool', input: { a: 1 } })
+      onEngine('pi')
+      render(<FloatingApproval />)
+      expect(screen.getByTestId('ApprovalCardView.summary')).toHaveTextContent('"a": 1')
+    })
   })
 
   it('renders nothing when there are no pending approvals', () => {

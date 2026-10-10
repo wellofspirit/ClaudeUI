@@ -24,7 +24,8 @@ import {
 } from '../../db'
 import { logger } from '../../logger'
 import { recordLimitSamples, resetWindowSampleDedup } from '../../window-samples'
-import { getMeta } from '../../db'
+import { publishCreditReading, resetCreditReadings } from '../../credit-readings'
+import { getMeta, listRemoteCredits, truncateHubRemoteTables, upsertRemoteCredits } from '../../db'
 import { configureHub, setHubSecret } from '../config'
 import { DEVICE_ID_META_KEY, deviceFacts, rememberAnnounced } from '../device'
 import { UsageHubClient } from '../client'
@@ -48,6 +49,7 @@ beforeEach(() => {
   calls = []
   clients = []
   resetWindowSampleDedup()
+  resetCreditReadings()
   vi.useFakeTimers()
 })
 
@@ -568,6 +570,41 @@ describe('the pull', () => {
     expect(getRemoteUsageBucketsSince(0).map((b) => b.deviceId)).toEqual(['device-b'])
   })
 
+  it('keeps a judge bucket as judge and folds an origin it cannot name into session', async () => {
+    enable()
+    let page = 0
+    const hub = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/v1/buckets')) {
+        calls.push({ url, init: init ?? {} })
+        page += 1
+        if (page > 1) return jsonResponse({ epoch: 1, rev: 3, buckets: [] })
+        const b = bucket('device-b', 1, TS)
+        return jsonResponse({
+          epoch: 1,
+          rev: 3,
+          // Same hour, account and model, and the origin is part of the key,
+          // so `judge` is a row of its own beside the session's. The unnamed
+          // origin is on another model so its fold cannot collide with either.
+          buckets: [
+            b,
+            { ...b, rev: 2, origin: 'judge' },
+            { ...b, rev: 3, modelId: 'claude-sonnet-5', origin: 'from-a-newer-build' }
+          ]
+        })
+      }
+      return happyHub()(input, init)
+    }) as unknown as typeof fetch
+
+    await build(hub).syncNow()
+
+    expect(
+      getRemoteUsageBucketsSince(0)
+        .map((b) => `${b.modelId}:${b.origin}`)
+        .sort()
+    ).toEqual(['claude-opus-5:judge', 'claude-opus-5:session', 'claude-sonnet-5:session'])
+  })
+
   it('fills the machine list from GET /v1/devices, minus itself', async () => {
     enable()
     const client = build(happyHub())
@@ -978,6 +1015,164 @@ describe('limit readings ride the same push', () => {
     )
     const body = JSON.parse(push!.init.body as string) as { readings: unknown[] }
     expect(body.readings).toHaveLength(1)
+  })
+})
+
+/**
+ * A credits plan's credits ride the limits push and come back on the limits pull
+ * (ADR-072 §4, amended 2026-10-01) — one reading per account, the newest.
+ */
+describe('credits ride the limits routes', () => {
+  const BUSINESS = 'chatgpt:ws-1:user-1'
+  const credit = (used: number, now = TS, accountKey = BUSINESS): void => {
+    publishCreditReading({
+      accountKey,
+      accountLabel: 'member@example.com',
+      vendorId: 'openai',
+      plan: 'business',
+      credits: { unlimited: false, balance: null },
+      allowance: { used, limit: 8000, remainingPercent: 99, resetsAt: null },
+      observedAt: now
+    })
+  }
+  const pushedCredits = (): Array<Record<string, unknown>> | undefined => {
+    const push = calls.find(
+      (call) => call.url.includes('/v1/limits') && call.init.method === 'POST'
+    )
+    if (!push) return undefined
+    return (JSON.parse(push.init.body as string) as { credits?: Array<Record<string, unknown>> })
+      .credits
+  }
+
+  it('pushes the newest reading per account, with no window reading beside it', async () => {
+    enable()
+    const client = build(happyHub())
+    client.start()
+    await vi.advanceTimersByTimeAsync(0)
+    calls = []
+
+    credit(100, TS)
+    credit(250, TS + 1_000)
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(pushedCredits()).toEqual([
+      {
+        accountKey: BUSINESS,
+        accountLabel: 'member@example.com',
+        vendorId: 'openai',
+        plan: 'business',
+        credits: { unlimited: false, balance: null },
+        allowance: { used: 250, limit: 8000, remainingPercent: 99, resetsAt: null },
+        observedAt: TS + 1_000
+      }
+    ])
+  })
+
+  it('keeps a credit reading that failed to send', async () => {
+    enable()
+    let failing = true
+    const client = build((async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (failing && url.includes('/v1/limits') && init?.method === 'POST') {
+        calls.push({ url, init: init ?? {} })
+        return jsonResponse({ error: 'down' }, 503)
+      }
+      return happyHub()(input, init)
+    }) as unknown as typeof fetch)
+    client.start()
+    await vi.advanceTimersByTimeAsync(0)
+
+    credit(100, TS)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(client.status().state).toBe('backoff')
+
+    failing = false
+    calls = []
+    await client.syncNow()
+    expect(pushedCredits()?.map((one) => (one.allowance as { used: number }).used)).toEqual([100])
+  })
+
+  it('never puts a failed reading back over a newer one that arrived while it was in flight', async () => {
+    enable()
+    let failing = true
+    const client = build((async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (failing && url.includes('/v1/limits') && init?.method === 'POST') {
+        calls.push({ url, init: init ?? {} })
+        // A newer read lands while this push is on the wire.
+        credit(900, TS + 5_000)
+        return jsonResponse({ error: 'down' }, 503)
+      }
+      return happyHub()(input, init)
+    }) as unknown as typeof fetch)
+    client.start()
+    await vi.advanceTimersByTimeAsync(0)
+
+    credit(100, TS)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(client.status().state).toBe('backoff')
+
+    failing = false
+    calls = []
+    await client.syncNow()
+    expect(pushedCredits()?.map((one) => (one.allowance as { used: number }).used)).toEqual([900])
+  })
+
+  it('stores another machine’s credits from the pull, and never its own', async () => {
+    enable()
+    let me = ''
+    const relay = (deviceId: string, accountKey: string): Record<string, unknown> => ({
+      deviceId,
+      accountKey,
+      labelMasked: 'm•••@e•••.com',
+      vendorId: 'openai',
+      plan: 'business',
+      credits: { unlimited: false, balance: null },
+      allowance: { used: 5, limit: 10, remainingPercent: 50, resetsAt: null },
+      observedAt: TS
+    })
+    const client = build(
+      happyHub({
+        '/v1/limits?': () =>
+          jsonResponse({
+            epoch: 1,
+            readings: [],
+            credits: [relay('peer-device', 'chatgpt:ws-2:user-2'), relay(me, BUSINESS)]
+          })
+      })
+    )
+    me = myDeviceId(client)
+    await client.syncNow()
+
+    expect(listRemoteCredits()).toEqual([
+      {
+        accountKey: 'chatgpt:ws-2:user-2',
+        deviceId: 'peer-device',
+        labelMasked: 'm•••@e•••.com',
+        vendorId: 'openai',
+        plan: 'business',
+        credits: { unlimited: false, balance: null },
+        allowance: { used: 5, limit: 10, remainingPercent: 50, resetsAt: null },
+        observedAt: TS
+      }
+    ])
+  })
+
+  it('is dropped with the rest of the cache when the hub rebuilds', () => {
+    upsertRemoteCredits([
+      {
+        accountKey: BUSINESS,
+        deviceId: 'peer-device',
+        labelMasked: null,
+        vendorId: 'openai',
+        plan: null,
+        credits: null,
+        allowance: { used: 1, limit: 2, remainingPercent: 50, resetsAt: null },
+        observedAt: TS
+      }
+    ])
+    truncateHubRemoteTables()
+    expect(listRemoteCredits()).toEqual([])
   })
 })
 

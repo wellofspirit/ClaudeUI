@@ -67,7 +67,11 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { engineMeta } from '../../../../shared/engine-meta'
-import type { ProviderCredential, ProviderEntry } from '../../../../shared/provider-registry'
+import {
+  providerEntryTitle,
+  type ProviderCredential,
+  type ProviderEntry
+} from '../../../../shared/provider-registry'
 import type {
   ConfigurableHarnessId,
   SharedProviderDefinition,
@@ -84,6 +88,14 @@ import {
   ToggleSwitch
 } from './settings-controls'
 import { EnginePill, factsCount } from './provider-pills'
+import { useEngineRuns } from './harness-store'
+import { chatgptDisconnectText } from './harness-view'
+import {
+  ownKeysReplacedOnSwitchOn,
+  ownKeysReplacedText,
+  switchOnReplacesNow
+} from './own-key-question'
+import { UseClaudeUiInstead } from './UseClaudeUiInstead'
 import { dismissConflict, isConflictDismissed } from './key-conflicts'
 import {
   ModelCuration,
@@ -214,24 +226,10 @@ export function nativeProviderId(entry: ProviderEntry): string {
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
-/**
- * The engines whose OWN key for the vendor switching this provider back on
- * would replace (ADR-074 slice 10): a route on in its settings, into an engine
- * that holds a credential of its own. The switch asks first — here and on the
- * list — and the service checks the keys themselves.
- */
-export function ownKeysReplacedOnSwitchOn(entry: ProviderEntry): ('opencode' | 'pi')[] {
-  if (!entry.disabled) return []
-  return (['opencode', 'pi'] as const).filter(
-    (engine) => entry.engines[engine]?.routeOn && entry.engines[engine]?.ownCredential
-  )
-}
-
-/** "pi’s own key for OpenRouter will be replaced by the stored one." */
-export function ownKeysReplacedText(entry: ProviderEntry, engines: string[]): string {
-  const who = engines.map((engine) => `${engine}’s`).join(' and ')
-  return `${who} own key${engines.length > 1 ? 's' : ''} for ${entry.name} will be replaced by the stored one.`
-}
+// The own-key wording lives in one place (`own-key-question.ts`), with the
+// question the Add sheet and "Use ClaudeUI’s … here instead" ask; re-exported
+// for the list.
+export { ownKeysReplacedOnSwitchOn, ownKeysReplacedText }
 
 /**
  * One ENABLED-FOR row.
@@ -291,8 +289,6 @@ function EngineRow({
 
 export interface ProviderSheetProps {
   entry: ProviderEntry
-  /** The registry's one degraded case — no opencode binary (owner ruling 2). */
-  opencodeInstalled: boolean
   onClose: () => void
   /**
    * Re-read `provider-registry:list`. Resolves once the parent has the fresh
@@ -306,12 +302,13 @@ export interface ProviderSheetProps {
   onWrote: (follow?: string) => Promise<void>
 }
 
-export function ProviderSheet({
-  entry,
-  opencodeInstalled,
-  onClose,
-  onWrote
-}: ProviderSheetProps): React.JSX.Element {
+export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): React.JSX.Element {
+  /**
+   * Which harnesses run: one that does not has no row, switch, delivery,
+   * curation or model setup here (ADR-082 §8). Its saved routes are untouched,
+   * so installing it brings them back as they were.
+   */
+  const runs = useEngineRuns()
   /**
    * The shared DEFINITION behind a shared row. The read model deliberately does
    * not carry `kind` — but a disconnected subscription and a disconnected custom
@@ -494,7 +491,8 @@ export function ProviderSheet({
    * happened — a switch-on can fail AFTER the flag cleared (a delivery), and a
    * stale "Off" would then misreport it.
    */
-  const switchProvider = (replaceOwn: boolean): void => {
+  /** `replaceOwn`: the harnesses whose own key the confirm named and the user agreed to replace. */
+  const switchProvider = (replaceOwn: ConfigurableHarnessId[]): void => {
     setBusy(true)
     setError(null)
     void (async () => {
@@ -508,6 +506,23 @@ export function ProviderSheet({
         setBusy(false)
       }
     })()
+  }
+
+  /** The harnesses the switch-on question names — read from the host when it opens. */
+  const [switchOnEngines, setSwitchOnEngines] = useState<ConfigurableHarnessId[]>([])
+  /**
+   * The header switch. Switching ON first asks the host who holds an own key
+   * now (S7f round 3), so the question names exactly who, and a key given to a
+   * harness since the sheet opened is asked about rather than refused.
+   */
+  const switchOnOrAsk = async (): Promise<void> => {
+    setBusy(true)
+    const engines = await switchOnReplacesNow(entry, runs)
+    setBusy(false)
+    if (engines.length === 0) return switchProvider([])
+    setError(null)
+    setSwitchOnEngines(engines)
+    setConfirming('switch-on')
   }
 
   /** Two-click confirm: arm on the first press, act on the second. */
@@ -537,7 +552,7 @@ export function ProviderSheet({
 
   const keyStore =
     entry.origin === 'shared'
-      ? "Stored once in ClaudeUI's vault, and delivered to each engine below."
+      ? "Stored once in ClaudeUI's vault, and delivered to each harness below."
       : entry.origin === 'pi-native'
         ? "Stored in pi's own auth.json, never in ClaudeUI's config."
         : "Stored in opencode's own auth.json, never in ClaudeUI's config."
@@ -636,7 +651,7 @@ export function ProviderSheet({
         {confirmAdopt ? (
           <SettingRow
             testid={`${SHEET}.adoptConfirmRow`}
-            description={`${label(other)}’s key${hinted(other)} is deleted, and ${label(keep)}’s key${hinted(keep)} is delivered to both engines.`}
+            description={`${label(other)}’s key${hinted(other)} is deleted, and ${label(keep)}’s key${hinted(keep)} is delivered to both harnesses.`}
           >
             <span ref={confirmRef}>
               <Button
@@ -702,7 +717,7 @@ export function ProviderSheet({
         testid={`${SHEET}.adoptable`}
         dataId={engine}
         label={`This key is only in ${label}.`}
-        description="Use it for both engines? ClaudeUI stores it once and delivers it to each."
+        description="Use it for both harnesses? ClaudeUI stores it once and delivers it to each."
       >
         <Button
           variant="link"
@@ -795,9 +810,12 @@ export function ProviderSheet({
         />
       )
     }
-    if (entry.keyConflict && !isConflictDismissed(nativeId, entry.keyConflict))
+    // Both are about opencode AND pi holding a key: while either does not run,
+    // there is no second harness to reconcile or share with (ADR-082 §8).
+    const bothRun = runs('opencode') && runs('pi')
+    if (bothRun && entry.keyConflict && !isConflictDismissed(nativeId, entry.keyConflict))
       return conflictPanel(entry.keyConflict)
-    if (entry.adoptable) {
+    if (bothRun && entry.adoptable) {
       return (
         <>
           {keyRow}
@@ -805,7 +823,9 @@ export function ProviderSheet({
         </>
       )
     }
-    if (isShared && definition?.kind === 'catalog') {
+    // A second key goes to opencode or pi: with neither running there is
+    // nowhere to deliver it (ADR-082 §8).
+    if (isShared && definition?.kind === 'catalog' && (runs('opencode') || runs('pi'))) {
       return (
         <>
           {keyRow}
@@ -854,13 +874,13 @@ export function ProviderSheet({
    * catalog is read inside the block, which says why when it is empty.
    */
   const curationAdapters: CurationAdapter[] = [
-    ...(opencodeInstalled &&
+    ...(runs('opencode') &&
     opencodeFacts?.enabled === true &&
     opencodeFacts.native === true &&
     opencodeFacts.providerId
       ? [opencodeCurationAdapter(opencodeFacts.providerId)]
       : []),
-    ...(piFacts?.enabled === true && piFacts.providerId
+    ...(runs('pi') && piFacts?.enabled === true && piFacts.providerId
       ? [piCurationAdapter(piFacts.providerId)]
       : [])
   ]
@@ -939,6 +959,10 @@ export function ProviderSheet({
     // Turning a catalog route on while the engine holds its OWN credential for
     // the vendor replaces that credential — confirmed in place, as a conflict is.
     const confirmingEnable = confirming === `enable-${engine}`
+    // An automatic delivery kept a key the engine holds of its own (ADR-082 §8,
+    // S7d): the user can take the stored one instead, confirmed in place.
+    const ownKeyKept = on && facts?.ownKeyKept === true
+    const confirmingStored = confirming === `use-stored-${engine}`
     /** The route's own setting — `on`, or what it returns to while the provider is off. */
     const routeOn = on || facts?.routeOn === true
     // Enabled, keyed, no error — and still not in the engine's store: the file
@@ -952,12 +976,10 @@ export function ProviderSheet({
       status = facts?.routeOn
         ? `Off while ${entry.name} is off — back on with it.`
         : `Off, and stays off when ${entry.name} is switched on.`
-    } else if (confirmingEnable) {
-      status = (
-        <span className="text-warning">
-          {label}’s own key for {entry.name} will be replaced by the stored one.
-        </span>
-      )
+    } else if (confirmingEnable || confirmingStored) {
+      status = <span className="text-warning">{ownKeysReplacedText(entry, [engine])}</span>
+    } else if (ownKeyKept) {
+      status = <span className="text-warning">{facts?.error}</span>
     } else if (!on) {
       status =
         entry.credential === 'api-key'
@@ -986,7 +1008,42 @@ export function ProviderSheet({
         leading={<EnginePill engine={engine} on={on} testid={`${SHEET}.deliveryPill`} />}
         description={status}
       >
-        {on && (facts?.error || undelivered) && (
+        {ownKeyKept && !confirmingStored && (
+          <Button
+            variant="link"
+            testid={`${SHEET}.useStoredKey`}
+            dataId={engine}
+            disabled={busy}
+            onClick={() => setConfirming(`use-stored-${engine}`)}
+          >
+            Use the stored key
+          </Button>
+        )}
+        {confirmingStored && (
+          <>
+            <Button
+              variant="primary"
+              testid={`${SHEET}.useStoredConfirm`}
+              dataId={engine}
+              disabled={busy}
+              onClick={() => {
+                setConfirming(null)
+                void run(() => window.api.useSharedProviderStoredKey(entry.id, engine))
+              }}
+            >
+              Replace it
+            </Button>
+            <Button
+              variant="link"
+              testid={`${SHEET}.useStoredCancel`}
+              dataId={engine}
+              onClick={() => setConfirming(null)}
+            >
+              Cancel
+            </Button>
+          </>
+        )}
+        {on && !ownKeyKept && (facts?.error || undelivered) && (
           <Button
             variant="link"
             testid={`${SHEET}.retry`}
@@ -1048,19 +1105,15 @@ export function ProviderSheet({
   const isApiShared = isShared && !entry.subscription
 
   function opencodeRow(): React.JSX.Element {
-    if (isApiShared && opencodeInstalled) return deliveryRow('opencode')
-    if (!opencodeInstalled || !opencodeFacts) {
+    if (isApiShared) return deliveryRow('opencode')
+    if (!opencodeFacts) {
       return (
         <SettingRow
           testid={`${SHEET}.engine`}
           dataId="opencode"
           dimmed
           label="opencode"
-          description={
-            opencodeInstalled
-              ? 'Not set up in opencode. Add it under opencode providers.'
-              : 'opencode is not installed.'
-          }
+          description="Not set up in opencode. Add it under opencode providers."
         />
       )
     }
@@ -1282,6 +1335,15 @@ export function ProviderSheet({
   const remove = removeAction()
   /** What Remove deletes, said beside it while nothing failed. */
   const removeNote = !error && isApiShared && remove !== null
+  const settingsRemoveNote = !error && entry.opencodeRemoveKind === 'settings'
+  /**
+   * What disconnecting ChatGPT does to each harness (ADR-082 §8, "As built
+   * (S7e)"), said while the Disconnect press is armed and nothing failed.
+   */
+  const disconnectNote =
+    !error && confirming === 'disconnect' && entry.id === 'chatgpt'
+      ? chatgptDisconnectText(runs)
+      : undefined
   const removeTitle = isShared
     ? 'Built-in providers cannot be removed — disconnect it instead.'
     : 'This provider is not ClaudeUI’s to remove.'
@@ -1298,10 +1360,10 @@ export function ProviderSheet({
    * control reports what is actually saved rather than silently reading as "no
    * default".
    */
-  function defaultModelRows(): React.ReactNode {
-    if (!isShared || definition?.kind !== 'custom') return null
+  function defaultModelRows(): React.JSX.Element[] {
+    if (!isShared || definition?.kind !== 'custom') return []
     return (['pi', 'opencode'] as ConfigurableHarnessId[])
-      .filter((harness) => definition.routes[harness].enabled)
+      .filter((harness) => runs(harness) && definition.routes[harness].enabled)
       .map((harness) => {
         const saved = definition.routes[harness].defaultModel ?? ''
         const available = sharedModels.filter(
@@ -1452,7 +1514,8 @@ export function ProviderSheet({
   function modelSetupGroup(): React.ReactNode {
     // opencode's own model overrides for this provider, under the id opencode
     // knows it by: a native row's id, or a catalog definition's opencode route
-    // (a custom definition's models are edited in its endpoint instead).
+    // (a custom definition's models, limits and capabilities included, are
+    // edited in its endpoint instead — ADR-086).
     const opencodeModelsId =
       entry.origin === 'opencode-native'
         ? nativeId
@@ -1460,7 +1523,7 @@ export function ProviderSheet({
           ? opencodeFacts.providerId
           : undefined
     const rows: React.ReactNode[] = []
-    if (opencodeModelsId) {
+    if (opencodeModelsId && runs('opencode')) {
       rows.push(
         <SettingRow
           key="opencode"
@@ -1472,7 +1535,7 @@ export function ProviderSheet({
           <Button
             variant="link"
             testid={`${SHEET}.opencodeModels`}
-            disabled={busy || !opencodeInstalled}
+            disabled={busy}
             onClick={() =>
               void window.api
                 .getOpencodeProviders()
@@ -1488,7 +1551,9 @@ export function ProviderSheet({
         </SettingRow>
       )
     }
-    if (entry.origin === 'pi-native' && entry.piKind === 'custom') {
+    if (!runs('pi')) {
+      // pi does not run: neither of its model editors (ADR-082 §8).
+    } else if (entry.origin === 'pi-native' && entry.piKind === 'custom') {
       rows.push(
         <SettingRow
           key="pi"
@@ -1529,7 +1594,7 @@ export function ProviderSheet({
     }
     if (rows.length === 0) return null
     return (
-      <SheetGroup testid={`${SHEET}.group`} id="model-setup" label="Engine-specific">
+      <SheetGroup testid={`${SHEET}.group`} id="model-setup" label="Harness-specific">
         {rows}
       </SheetGroup>
     )
@@ -1537,12 +1602,30 @@ export function ProviderSheet({
 
   // ── Frame ──────────────────────────────────────────────────────────────────
 
+  /**
+   * The ENABLED FOR rows. Codex is filtered rather than rendered as null: the
+   * group card draws its separators with `divide-y`, so an empty wrapper would
+   * leave a stray rule under the last real row. A harness that does not run has
+   * none (ADR-082 §8); with none left at all, the group is not drawn.
+   */
+  const engineRows = ENGINE_ORDER.filter(
+    (engine) =>
+      runs(engine) &&
+      (engine !== 'codex' || entry.engines.codex !== undefined) &&
+      // An API provider's rows are its deliveries (opencode, pi); Claude
+      // talks to Anthropic only, which the Claude page already says.
+      (engine !== 'claude' || !isApiShared)
+  )
+  const defaultRows = defaultModelRows()
+
   return (
     <>
       <SheetFrame
         testid={SHEET}
         dataId={entry.id}
-        title={entry.subscription ? `${entry.name} · engines & models` : entry.name}
+        title={
+          entry.subscription ? `${entry.name} · harnesses & models` : providerEntryTitle(entry)
+        }
         titleExtras={
           <>
             <span className="font-mono text-[11px] text-text-muted truncate">{entry.id}</span>
@@ -1561,11 +1644,7 @@ export function ProviderSheet({
                   aria-checked={!entry.disabled}
                   aria-label={entry.name}
                   disabled={busy}
-                  onClick={() =>
-                    ownKeysReplacedOnSwitchOn(entry).length > 0
-                      ? setConfirming('switch-on')
-                      : switchProvider(false)
-                  }
+                  onClick={() => void switchOnOrAsk()}
                   className="cursor-default disabled:opacity-40"
                 >
                   <ToggleSwitch checked={!entry.disabled} />
@@ -1605,10 +1684,18 @@ export function ProviderSheet({
                 a surface ends up reporting a stale failure next to a fresh row. */}
             <span
               data-testid={`${SHEET}.error`}
-              className={`${removeNote ? '' : 'flex-1 '}min-w-0 truncate text-[12px] text-danger`}
+              className={`${removeNote || settingsRemoveNote || disconnectNote ? '' : 'flex-1 '}min-w-0 truncate text-[12px] text-danger`}
             >
               {error}
             </span>
+            {disconnectNote && (
+              <span
+                data-testid={`${SHEET}.disconnectNote`}
+                className="flex-1 min-w-0 text-[12px] leading-4 text-text-secondary"
+              >
+                {disconnectNote}
+              </span>
+            )}
             {/* Wraps rather than truncating: a half-read warning about what
                 Remove deletes is worse than none. */}
             {removeNote && (
@@ -1617,8 +1704,17 @@ export function ProviderSheet({
                 className="flex-1 min-w-0 text-[12px] leading-4 text-text-secondary"
               >
                 {entry.credential === 'api-key'
-                  ? 'Off keeps the key and settings. Removing deletes the key from ClaudeUI and from each engine it’s delivered to.'
+                  ? 'Off keeps the key and settings. Removing deletes the key from ClaudeUI and from each harness it’s delivered to.'
                   : 'Off keeps the settings; Remove deletes them.'}
+              </span>
+            )}
+            {settingsRemoveNote && (
+              <span
+                data-testid={`${SHEET}.removeNote`}
+                className="flex-1 min-w-0 text-[12px] leading-4 text-text-secondary"
+              >
+                Clears this provider from opencode’s disabled list and removes its picker curation.
+                External credentials and configuration are unchanged.
               </span>
             )}
             <Button variant="primary" testid={`${SHEET}.done`} onClick={onClose}>
@@ -1631,9 +1727,7 @@ export function ProviderSheet({
           <SettingRow
             testid={`${SHEET}.switchOnConfirm`}
             description={
-              <span className="text-warning">
-                {ownKeysReplacedText(entry, ownKeysReplacedOnSwitchOn(entry))}
-              </span>
+              <span className="text-warning">{ownKeysReplacedText(entry, switchOnEngines)}</span>
             }
           >
             <Button
@@ -1642,7 +1736,7 @@ export function ProviderSheet({
               disabled={busy}
               onClick={() => {
                 setConfirming(null)
-                switchProvider(true)
+                switchProvider(switchOnEngines)
               }}
             >
               Replace it
@@ -1659,10 +1753,14 @@ export function ProviderSheet({
           entry.disabled && (
             <SettingRow
               testid={`${SHEET}.offNotice`}
-              description="Off — not delivered to any engine. Its key and settings are kept; turn it on to restore them."
+              description="Off — not delivered to any harness. Its key and settings are kept; turn it on to restore them."
             />
           )
         )}
+
+        {/* A harness's own key, while a ClaudeUI provider for the same vendor
+            is off for that harness: offer it here instead (S7f). */}
+        {!isShared && <UseClaudeUiInstead entry={entry} busy={busy} run={run} />}
 
         {/* A subscription's credential IS its accounts, and they live on its
             Subscriptions card (ADR-074 §7) — the sheet is engines and models. */}
@@ -1672,39 +1770,34 @@ export function ProviderSheet({
           </SheetGroup>
         )}
 
-        <SheetGroup
-          testid={`${SHEET}.group`}
-          id="enabled"
-          label={isApiShared ? 'Engines' : 'Enabled for'}
-          trailing={
-            // The vault re-delivers this definition to every enabled engine, so
-            // only a shared row has anything to sync.
-            isShared ? (
-              <Button
-                variant="link"
-                testid={`${SHEET}.sync`}
-                disabled={busy}
-                onClick={() => void run(() => window.api.syncSharedProvider(entry.id))}
-              >
-                Sync now
-              </Button>
-            ) : undefined
-          }
-        >
-          {/* Codex is filtered rather than rendered as null: the group card
-              draws its separators with `divide-y`, so an empty wrapper would
-              leave a stray rule under the last real row. */}
-          {ENGINE_ORDER.filter(
-            (engine) =>
-              (engine !== 'codex' || entry.engines.codex !== undefined) &&
-              // An API provider's rows are its deliveries (opencode, pi); Claude
-              // talks to Anthropic only, which the Claude page already says.
-              (engine !== 'claude' || !isApiShared)
-          ).map((engine) => (
-            <div key={engine}>{engineRow(engine)}</div>
-          ))}
-          {defaultModelRows()}
-        </SheetGroup>
+        {(engineRows.length > 0 || defaultRows.length > 0) && (
+          <SheetGroup
+            testid={`${SHEET}.group`}
+            id="enabled"
+            label={isApiShared ? 'Harnesses' : 'Enabled for'}
+            trailing={
+              // The vault re-delivers this definition to every enabled engine, so
+              // only a shared row has anything to sync — and only while opencode
+              // or pi, the harnesses it syncs to, runs (ADR-082 §8). Claude's
+              // row and Codex's are not synced.
+              isShared && (runs('opencode') || runs('pi')) ? (
+                <Button
+                  variant="link"
+                  testid={`${SHEET}.sync`}
+                  disabled={busy}
+                  onClick={() => void run(() => window.api.syncSharedProvider(entry.id))}
+                >
+                  Sync now
+                </Button>
+              ) : undefined
+            }
+          >
+            {engineRows.map((engine) => (
+              <div key={engine}>{engineRow(engine)}</div>
+            ))}
+            {defaultRows}
+          </SheetGroup>
+        )}
 
         {curationAdapters.length > 0 && (
           <SheetGroup testid={`${SHEET}.group`} id="models" label="Models in the picker">
@@ -1838,7 +1931,8 @@ export function ProviderSheet({
         />
       )}
 
-      {modelEditor === 'opencode' && (
+      {/* An editor whose harness stops running goes with it (ADR-082 §8). */}
+      {modelEditor === 'opencode' && runs('opencode') && (
         <OpencodeProviderConfigModal
           providerId={
             entry.origin === 'opencode-native' ? nativeId : (opencodeFacts?.providerId ?? nativeId)
@@ -1853,7 +1947,7 @@ export function ProviderSheet({
         />
       )}
 
-      {modelEditor === 'pi' && (
+      {modelEditor === 'pi' && runs('pi') && (
         <PiProviderModal
           providerId={nativeId}
           onClose={() => {
@@ -1866,7 +1960,7 @@ export function ProviderSheet({
       {/* `piBuiltinId`, never `nativeId`: on a shared row the native id is the
           DEFINITION id (`chatgpt`), and `providers.chatgpt` is not the entry pi
           reads its ChatGPT models from. */}
-      {modelEditor === 'pi-builtin' && entry.piBuiltinId && (
+      {modelEditor === 'pi-builtin' && runs('pi') && entry.piBuiltinId && (
         <PiProviderModal
           providerId={entry.piBuiltinId}
           builtin

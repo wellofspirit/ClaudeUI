@@ -1,426 +1,531 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { OpencodeClient } from '../OpencodeClient'
+/**
+ * @vitest-environment node
+ *
+ * The opencode 2.x client: request building per operation (path params,
+ * query styles, the directory header, auth), response kinds, typed errors,
+ * the reject-needs-a-message invariant, timeouts/abort, and cursor paging.
+ */
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  GENERATE_TIMEOUT_MS,
+  OpencodeApiError,
+  OpencodeClient,
+  OpencodeTimeoutError,
+  encodeQuery,
+  isOpencodeApiError
+} from '../OpencodeClient'
+import type { FetchFn } from '../opencode-event-stream'
 
-const BASE_URL = 'http://127.0.0.1:9999'
-const AUTH = 'Basic dGVzdDp0ZXN0'
+const BASE = 'http://127.0.0.1:4096'
+const AUTH = 'Basic b3BlbmNvZGU6cHc='
+const DIR = '/Users/me/My Project/ünï#1'
 
-function mockFetch(status: number, body: unknown, headers?: Record<string, string>) {
-  const responseHeaders = new Headers({
-    'Content-Type': 'application/json',
-    ...headers
-  })
-  return vi.fn().mockResolvedValue(
-    new Response(typeof body === 'string' ? body : JSON.stringify(body), {
-      status,
-      headers: responseHeaders
-    })
-  )
+interface Sent {
+  url: string
+  method: string
+  headers: Record<string, string>
+  body: unknown
 }
 
-describe('OpencodeClient', () => {
-  let client: OpencodeClient
-
-  beforeEach(() => {
-    client = new OpencodeClient(BASE_URL, AUTH)
-  })
-
-  describe('getConfigProviders', () => {
-    it('sends GET /config/providers with auth header', async () => {
-      const mock = mockFetch(200, { providers: [], default: {} })
-      vi.stubGlobal('fetch', mock)
-
-      const result = await client.getConfigProviders()
-      expect(result).toEqual({ providers: [], default: {} })
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/config/providers`,
-        expect.objectContaining({
-          method: 'GET',
-          headers: expect.objectContaining({ Authorization: AUTH })
-        })
-      )
-    })
-  })
-
-  describe('getProviderAuth', () => {
-    it('sends GET /provider/auth', async () => {
-      const authData = { openai: [{ type: 'api', label: 'API Key' }] }
-      const mock = mockFetch(200, authData)
-      vi.stubGlobal('fetch', mock)
-
-      const result = await client.getProviderAuth()
-      expect(result).toEqual(authData)
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/provider/auth`,
-        expect.objectContaining({ method: 'GET' })
-      )
-    })
-  })
-
-  describe('setAuth', () => {
-    it('sends PUT /auth/{id} with credentials', async () => {
-      const mock = mockFetch(200, true)
-      vi.stubGlobal('fetch', mock)
-
-      const credentials = { type: 'api' as const, key: 'sk-abc123' }
-      const result = await client.setAuth('openai', credentials)
-      expect(result).toBe(true)
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/auth/openai`,
-        expect.objectContaining({
-          method: 'PUT',
-          body: JSON.stringify(credentials)
-        })
-      )
-    })
-
-    it('encodes provider ID in URL', async () => {
-      const mock = mockFetch(200, true)
-      vi.stubGlobal('fetch', mock)
-      await client.setAuth('github-copilot', { type: 'api', key: 'tok' })
-      expect(mock).toHaveBeenCalledWith(`${BASE_URL}/auth/github-copilot`, expect.anything())
-    })
-  })
-
-  describe('session operations', () => {
-    it('createSession sends POST /session', async () => {
-      const session = { id: 'ses_1', slug: 'test' }
-      const mock = mockFetch(200, session)
-      vi.stubGlobal('fetch', mock)
-
-      const result = await client.createSession({ title: 'My Session' })
-      expect(result).toEqual(session)
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/session`,
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({ title: 'My Session' })
-        })
-      )
-    })
-
-    it('abortSession sends POST /session/{id}/abort', async () => {
-      const mock = mockFetch(200, true)
-      vi.stubGlobal('fetch', mock)
-
-      await client.abortSession('ses_abc')
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/session/ses_abc/abort`,
-        expect.objectContaining({ method: 'POST' })
-      )
-    })
-
-    it('deleteSession sends DELETE /session/{id}', async () => {
-      const mock = mockFetch(200, true)
-      vi.stubGlobal('fetch', mock)
-
-      await client.deleteSession('ses_abc')
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/session/ses_abc`,
-        expect.objectContaining({ method: 'DELETE' })
-      )
-    })
-
-    it('forkSession sends POST /session/{id}/fork', async () => {
-      const session = { id: 'ses_2', parentID: 'ses_1' }
-      const mock = mockFetch(200, session)
-      vi.stubGlobal('fetch', mock)
-
-      const result = await client.forkSession('ses_1', { messageID: 'msg_1' })
-      expect(result).toEqual(session)
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/session/ses_1/fork`,
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({ messageID: 'msg_1' })
-        })
-      )
-    })
-  })
-
-  describe('error handling', () => {
-    it('throws with status on non-ok response', async () => {
-      const mock = mockFetch(401, '')
-      vi.stubGlobal('fetch', mock)
-
-      await expect(client.listSessions()).rejects.toThrow('401')
-    })
-
-    it('throws on 500 with body in message', async () => {
-      const mock = mockFetch(500, 'Internal Server Error')
-      vi.stubGlobal('fetch', mock)
-
-      await expect(client.getConfigProviders()).rejects.toThrow('500')
-    })
-  })
-
-  describe('trailing slash handling', () => {
-    it('strips trailing slash from baseUrl', async () => {
-      const clientWithSlash = new OpencodeClient(BASE_URL + '/', AUTH)
-      const mock = mockFetch(200, [])
-      vi.stubGlobal('fetch', mock)
-
-      await clientWithSlash.listSessions()
-      expect(mock).toHaveBeenCalledWith(`${BASE_URL}/session`, expect.anything())
-    })
-  })
-
-  describe('listCommands', () => {
-    it('sends GET /command with auth header', async () => {
-      const commands = [
-        { name: 'init', description: 'Initialize project', template: '/init' },
-        {
-          name: 'review',
-          description: 'Code review',
-          template: '/review $ARGUMENTS',
-          subtask: true
-        }
-      ]
-      const mock = mockFetch(200, commands)
-      vi.stubGlobal('fetch', mock)
-
-      const result = await client.listCommands()
-      expect(result).toEqual(commands)
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/command`,
-        expect.objectContaining({
-          method: 'GET',
-          headers: expect.objectContaining({ Authorization: AUTH })
-        })
-      )
-    })
-  })
-
-  describe('runCommand', () => {
-    it('sends POST /session/{id}/command with correct body', async () => {
-      const response = { info: { id: 'msg_1', role: 'assistant' }, parts: [] }
-      const mock = mockFetch(200, response)
-      vi.stubGlobal('fetch', mock)
-
-      const result = await client.runCommand('ses_abc', { command: 'review', arguments: 'pr 42' })
-      expect(result).toEqual(response)
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/session/ses_abc/command`,
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({ command: 'review', arguments: 'pr 42' })
-        })
-      )
-    })
-
-    it('encodes session ID in URL', async () => {
-      const mock = mockFetch(200, {})
-      vi.stubGlobal('fetch', mock)
-
-      await client.runCommand('ses with spaces', { command: 'init', arguments: '' })
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/session/ses%20with%20spaces/command`,
-        expect.anything()
-      )
-    })
-
-    it('throws on 400 BadRequest (unknown command)', async () => {
-      const mock = mockFetch(400, 'Available commands: init, review')
-      vi.stubGlobal('fetch', mock)
-
-      await expect(
-        client.runCommand('ses_1', { command: 'nonexistent', arguments: '' })
-      ).rejects.toThrow('400')
-    })
-  })
-
-  describe('replyPermission', () => {
-    it('sends POST /permission/{id}/reply without message key when none given', async () => {
-      const mock = mockFetch(200, {})
-      vi.stubGlobal('fetch', mock)
-
-      await client.replyPermission('per_abc', 'once')
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/permission/per_abc/reply`,
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({ reply: 'once' })
-        })
-      )
-    })
-
-    it('includes message in the body on reject with feedback', async () => {
-      const mock = mockFetch(200, {})
-      vi.stubGlobal('fetch', mock)
-
-      await client.replyPermission('per_abc', 'reject', 'Auto mode blocked: unsafe')
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/permission/per_abc/reply`,
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({ reply: 'reject', message: 'Auto mode blocked: unsafe' })
-        })
-      )
-    })
-  })
-
-  describe('replyQuestion', () => {
-    it('sends POST /question/{id}/reply with answers body', async () => {
-      const mock = mockFetch(200, {})
-      vi.stubGlobal('fetch', mock)
-
-      await client.replyQuestion('que_abc', [['Option A'], ['Option B', 'Option C']])
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/question/que_abc/reply`,
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({ answers: [['Option A'], ['Option B', 'Option C']] })
-        })
-      )
-    })
-
-    it('encodes question ID in URL', async () => {
-      const mock = mockFetch(200, {})
-      vi.stubGlobal('fetch', mock)
-
-      await client.replyQuestion('que/with/slashes', [['yes']])
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/question/que%2Fwith%2Fslashes/reply`,
-        expect.anything()
-      )
-    })
-  })
-
-  describe('rejectQuestion', () => {
-    it('sends POST /question/{id}/reject with no body', async () => {
-      const mock = mockFetch(200, {})
-      vi.stubGlobal('fetch', mock)
-
-      await client.rejectQuestion('que_xyz')
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/question/que_xyz/reject`,
-        expect.objectContaining({
-          method: 'POST',
-          body: undefined
-        })
-      )
-    })
-  })
-
-  describe('listSkills', () => {
-    it('sends GET /skill with auth header', async () => {
-      const skills = [
-        {
-          name: 'my-skill',
-          description: 'Does something',
-          location: '/home/user/.claude/skills/my-skill/SKILL.md',
-          content: '# My Skill\nContent here.'
-        }
-      ]
-      const mock = mockFetch(200, skills)
-      vi.stubGlobal('fetch', mock)
-
-      const result = await client.listSkills()
-      expect(result).toEqual(skills)
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/skill`,
-        expect.objectContaining({
-          method: 'GET',
-          headers: expect.objectContaining({ Authorization: AUTH })
-        })
-      )
-    })
-
-    it('returns empty array when no skills', async () => {
-      const mock = mockFetch(200, [])
-      vi.stubGlobal('fetch', mock)
-
-      const result = await client.listSkills()
-      expect(result).toEqual([])
-    })
-  })
-
-  describe('request timeout + abort (M-OC5)', () => {
-    /** A fetch that never resolves until its AbortSignal fires (a hung server). */
-    function hangingFetch() {
-      return vi.fn(
-        (_url: string, init: RequestInit) =>
-          new Promise((_resolve, reject) => {
-            const signal = init.signal as AbortSignal
-            const fail = (): void =>
-              reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }))
-            if (signal.aborted) return fail()
-            signal.addEventListener('abort', fail, { once: true })
-          })
-      )
+/** A fetch that answers from `reply` and records what was sent. */
+function fakeFetch(reply: (sent: Sent, n: number) => Response | Promise<Response>) {
+  const sent: Sent[] = []
+  const fetchFn = vi.fn<FetchFn>(async (url, init) => {
+    const entry: Sent = {
+      url,
+      method: init?.method ?? 'GET',
+      headers: (init?.headers ?? {}) as Record<string, string>,
+      body:
+        typeof init?.body === 'string'
+          ? JSON.parse(init.body)
+          : init?.body instanceof Uint8Array
+            ? init.body
+            : undefined
     }
+    sent.push(entry)
+    return reply(entry, sent.length - 1)
+  })
+  return { fetchFn, sent }
+}
 
-    it('times out a hung request and surfaces a clear, actionable error', async () => {
-      vi.stubGlobal('fetch', hangingFetch())
-      // Pre-fix this promise never settled — the caller hung forever.
-      await expect(
-        client.prompt('ses_1', { parts: [{ type: 'text', text: 'hi' }] }, { timeoutMs: 20 })
-      ).rejects.toThrow(/timed out after 20ms/)
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+const empty = () => new Response(null, { status: 204 })
+
+const session = (id: string) => ({
+  id,
+  projectID: 'prj',
+  cost: 0,
+  tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  time: { created: 1, updated: 1 },
+  location: { directory: DIR }
+})
+
+function client(reply: Parameters<typeof fakeFetch>[0]) {
+  const fake = fakeFetch(reply)
+  return {
+    ...fake,
+    api: new OpencodeClient(
+      { baseUrl: BASE + '/', authHeader: AUTH, directory: DIR },
+      { fetch: fake.fetchFn }
+    )
+  }
+}
+
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+describe('request building', () => {
+  it('sends Basic auth and the URI-encoded directory on every request', async () => {
+    const { api, sent } = client(() => json({ data: session('ses_1') }))
+    await api.getSession('ses_1')
+    expect(sent[0].url).toBe(`${BASE}/api/session/ses_1`)
+    expect(sent[0].method).toBe('GET')
+    expect(sent[0].headers.authorization).toBe(AUTH)
+    expect(sent[0].headers['x-opencode-directory']).toBe(encodeURIComponent(DIR))
+    // The server decodeURIComponent()s it back (packages/server/src/location.ts).
+    expect(decodeURIComponent(sent[0].headers['x-opencode-directory'])).toBe(DIR)
+    // A GET carries no body and no content-type.
+    expect(sent[0].headers['content-type']).toBeUndefined()
+    expect(sent[0].body).toBeUndefined()
+  })
+
+  it('a per-call directory and forDirectory() re-target the header', async () => {
+    const { api, sent } = client(() => json({ data: session('ses_1') }))
+    await api.getSession('ses_1', { directory: '/other' })
+    await api.forDirectory('/third dir').getSession('ses_1')
+    expect(sent[0].headers['x-opencode-directory']).toBe(encodeURIComponent('/other'))
+    expect(sent[1].headers['x-opencode-directory']).toBe(encodeURIComponent('/third dir'))
+    expect(sent[1].headers.authorization).toBe(AUTH)
+  })
+
+  it('refuses to exist without a directory', () => {
+    expect(() => new OpencodeClient({ baseUrl: BASE, authHeader: AUTH, directory: '' })).toThrow(
+      /directory is required/
+    )
+  })
+
+  it('encodes path params and refuses a missing one before sending', async () => {
+    const { api, sent, fetchFn } = client(() => empty())
+    await api.cancelInbox('ses_a/b', 'msg 1')
+    expect(sent[0]).toMatchObject({
+      method: 'DELETE',
+      url: `${BASE}/api/session/ses_a%2Fb/inbox/msg%201`
     })
+    await expect(api.call('session.get', { params: { sessionID: '' } })).rejects.toThrow(
+      /missing path param sessionID/
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
 
-    it('aborts an in-flight request when the caller signal fires (not a timeout)', async () => {
-      vi.stubGlobal('fetch', hangingFetch())
-      const ac = new AbortController()
-      const p = client.prompt(
-        'ses_1',
-        { parts: [{ type: 'text', text: 'hi' }] },
-        { timeoutMs: 0, signal: ac.signal }
-      )
-      ac.abort()
-      // Caller-initiated abort re-throws the AbortError verbatim — NOT the
-      // "timed out" wrapper (which is reserved for our own timer).
-      await expect(p).rejects.toThrow(/aborted/i)
+  it('encodes queries: scalars, skipped undefined, deepObject objects', () => {
+    expect(encodeQuery({ directory: '/a b', parentID: 'null', limit: undefined })).toBe(
+      '?directory=%2Fa+b&parentID=null'
+    )
+    expect(encodeQuery({ location: { directory: '/x', other: null } })).toBe(
+      '?location%5Bdirectory%5D=%2Fx'
+    )
+    expect(encodeQuery({ a: ['1', '2'] })).toBe('?a=1&a=2')
+    expect(encodeQuery({})).toBe('')
+    expect(encodeQuery(undefined)).toBe('')
+  })
+
+  it('createSession locates the session in the client directory unless told otherwise', async () => {
+    const { api, sent } = client(() => json({ data: session('ses_new') }))
+    const created = await api.createSession({ title: 't', permissions: [] })
+    expect(created.id).toBe('ses_new')
+    expect(sent[0]).toMatchObject({ method: 'POST', url: `${BASE}/api/session` })
+    expect(sent[0].headers['content-type']).toBe('application/json')
+    expect(sent[0].body).toEqual({ location: { directory: DIR }, title: 't', permissions: [] })
+    await api.createSession({ location: { directory: '/elsewhere' } })
+    expect(sent[1].body).toEqual({ location: { directory: '/elsewhere' } })
+  })
+
+  it('prompt posts the inbox item with the caller id and delivery, and returns it', async () => {
+    const item = {
+      id: 'msg_claudeui_1',
+      sessionID: 'ses_1',
+      time: { created: 1 },
+      type: 'user',
+      payload: { text: 'hi' },
+      delivery: 'queue'
+    }
+    const { api, sent } = client(() => json({ data: item }))
+    const result = await api.prompt('ses_1', {
+      id: 'msg_claudeui_1',
+      text: 'hi',
+      delivery: 'queue'
     })
-
-    it('passes an AbortSignal to fetch on every request', async () => {
-      const mock = mockFetch(200, [])
-      vi.stubGlobal('fetch', mock)
-      await client.listSessions()
-      const init = mock.mock.calls[0][1] as RequestInit
-      expect(init.signal).toBeInstanceOf(AbortSignal)
-    })
-
-    it('a fast response resolves normally (timeout never fires)', async () => {
-      const mock = mockFetch(200, [{ id: 'ses_1' }])
-      vi.stubGlobal('fetch', mock)
-      await expect(client.listSessions()).resolves.toEqual([{ id: 'ses_1' }])
+    expect(result).toEqual(item)
+    expect(sent[0]).toMatchObject({
+      method: 'POST',
+      url: `${BASE}/api/session/ses_1/prompt`,
+      body: { id: 'msg_claudeui_1', text: 'hi', delivery: 'queue' }
     })
   })
 
-  describe('promptAsync — reasoning variant', () => {
-    it('includes variant in POST body when present', async () => {
-      const mock = mockFetch(200, {})
-      vi.stubGlobal('fetch', mock)
+  it('inbox delivery, interrupt (with resume), session patch, agent/model switch, rpc', async () => {
+    const { api, sent } = client((s) =>
+      s.url.includes('/interrupt')
+        ? json({ interrupted: true })
+        : s.url.includes('/api/rpc/')
+          ? json({ output: ['claudeui_echo'] })
+          : empty()
+    )
+    await api.setInboxDelivery('ses_1', 'msg_1', 'steer')
+    expect(await api.interrupt('ses_1')).toBe(true)
+    await api.interrupt('ses_1', { resume: true })
+    await api.setSessionPermissions('ses_1', [{ action: 'shell', resource: '*', effect: 'ask' }])
+    await api.renameSession('ses_1', 'New title')
+    await api.switchAgent('ses_1', 'plan')
+    await api.switchModel('ses_1', { providerID: 'p', id: 'm' })
+    expect(await api.rpc('claudeui-xeng', 'tools', {})).toEqual(['claudeui_echo'])
+    expect(sent.map((s) => `${s.method} ${s.url.slice(BASE.length)}`)).toEqual([
+      'PATCH /api/session/ses_1/inbox/msg_1',
+      'POST /api/session/ses_1/interrupt',
+      'POST /api/session/ses_1/interrupt?resume=true',
+      'PATCH /api/session/ses_1',
+      'PATCH /api/session/ses_1',
+      'POST /api/session/ses_1/agent',
+      'POST /api/session/ses_1/model',
+      'POST /api/rpc/claudeui-xeng/tools'
+    ])
+    expect(sent.map((s) => s.body)).toEqual([
+      { delivery: 'steer' },
+      undefined,
+      undefined,
+      { permissions: [{ action: 'shell', resource: '*', effect: 'ask' }] },
+      { title: 'New title' },
+      { agent: 'plan' },
+      { model: { providerID: 'p', id: 'm' } },
+      { input: {} }
+    ])
+  })
 
-      const req = {
-        parts: [{ type: 'text' as const, text: 'Hello' }],
-        model: { providerID: 'minimax', modelID: 'minimax-01' },
-        variant: 'thinking'
-      }
-      await client.promptAsync('ses_abc', req)
+  it('credential CRUD + activate and location reload hit the v2 routes', async () => {
+    const entry = {
+      id: 'cred_claudeui_x_v1',
+      integrationID: 'x',
+      label: 'claudeui:x',
+      active: true,
+      value: { type: 'key', key: 'k' }
+    }
+    const { api, sent } = client((s) =>
+      s.method === 'POST' && s.url.endsWith('/api/credential') ? json({ data: entry }) : empty()
+    )
+    expect(
+      await api.createCredential({
+        id: 'cred_claudeui_x_v1',
+        integrationID: 'x',
+        label: 'claudeui:x',
+        value: { type: 'key', key: 'k' },
+        activate: true
+      })
+    ).toEqual(entry)
+    await api.updateCredentialLabel('cred_claudeui_x_v1', 'renamed')
+    await api.activateCredential('cred_claudeui_x_v1')
+    await api.removeCredential('cred_claudeui_x_v1')
+    await api.reloadLocation()
+    expect(sent.map((s) => `${s.method} ${s.url.slice(BASE.length)}`)).toEqual([
+      'POST /api/credential',
+      'PATCH /api/credential/cred_claudeui_x_v1',
+      'POST /api/credential/cred_claudeui_x_v1/activate',
+      'DELETE /api/credential/cred_claudeui_x_v1',
+      'POST /api/location/reload'
+    ])
+    expect(sent[1].body).toEqual({ label: 'renamed' })
+  })
 
-      expect(mock).toHaveBeenCalledWith(
-        `${BASE_URL}/session/ses_abc/prompt_async`,
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify(req)
-        })
-      )
-      const body = JSON.parse((mock.mock.calls[0][1] as RequestInit).body as string)
-      expect(body).toHaveProperty('variant', 'thinking')
+  it('form reply and cancel (the reason rides as ?message)', async () => {
+    const { api, sent } = client(() => empty())
+    await api.replyForm('ses_1', 'frm_1', { q0: 'Banana' })
+    await api.cancelForm('ses_1', 'frm_1', 'user dismissed')
+    expect(sent.map((s) => `${s.method} ${s.url.slice(BASE.length)}`)).toEqual([
+      'POST /api/session/ses_1/form/frm_1/reply',
+      'DELETE /api/session/ses_1/form/frm_1?message=user+dismissed'
+    ])
+    expect(sent[0].body).toEqual({ answer: { q0: 'Banana' } })
+  })
+
+  it('refuses a form cancel without a non-empty message, before sending anything (review #4c)', () => {
+    const { api, fetchFn } = client(() => empty())
+    // @ts-expect-error — the type makes the message mandatory
+    expect(() => api.cancelForm('ses_1', 'frm_2')).toThrow(/non-empty message/)
+    expect(() => api.cancelForm('ses_1', 'frm_2', '   ')).toThrow(/non-empty message/)
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+})
+
+describe('permission replies (ADR-097 §3)', () => {
+  it('refuses a reject without a non-empty message, before sending anything', async () => {
+    const { api, fetchFn } = client(() => empty())
+    // @ts-expect-error — the type makes the message mandatory on reject
+    expect(() => api.replyPermission('ses_1', 'per_1', { decision: 'reject' })).toThrow(
+      /non-empty message/
+    )
+    expect(() =>
+      api.replyPermission('ses_1', 'per_1', { decision: 'reject', message: '   ' })
+    ).toThrow(/non-empty message/)
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('sends reject with its message, once/always without one', async () => {
+    const { api, sent } = client(() => empty())
+    await api.replyPermission('ses_1', 'per_1', {
+      decision: 'reject',
+      message: 'Denied by your rule'
     })
+    await api.replyPermission('ses_1', 'per_2', { decision: 'once' })
+    await api.replyPermission('ses_1', 'per_3', { decision: 'always', message: '' })
+    expect(sent[0]).toMatchObject({
+      method: 'POST',
+      url: `${BASE}/api/session/ses_1/permission/per_1/reply`,
+      body: { decision: 'reject', message: 'Denied by your rule' }
+    })
+    expect(sent[1].body).toEqual({ decision: 'once' })
+    expect(sent[2].body).toEqual({ decision: 'always' })
+  })
+})
 
-    it('omits variant from POST body when not provided', async () => {
-      const mock = mockFetch(200, {})
-      vi.stubGlobal('fetch', mock)
+describe('responses', () => {
+  it('unwraps data envelopes; empty answers are undefined', async () => {
+    const agents = [
+      { id: 'build', name: 'build', mode: 'primary', hidden: false, request: {}, permissions: [] }
+    ]
+    const { api } = client((s) =>
+      s.url.endsWith('/api/agent')
+        ? json({ location: { directory: DIR }, data: agents })
+        : s.url.endsWith('/api/integration')
+          ? json({ location: { directory: DIR }, data: [] })
+          : empty()
+    )
+    expect(await api.agents()).toEqual(agents)
+    await expect(api.deleteSession('ses_1')).resolves.toBeUndefined()
+  })
 
-      const req = {
-        parts: [{ type: 'text' as const, text: 'Hello' }],
-        model: { providerID: 'openai', modelID: 'gpt-4o' }
+  it('reads binary answers as bytes', async () => {
+    const { api } = client(() => new Response(new Uint8Array([1, 2, 3]), { status: 200 }))
+    const bytes = await api.call('fs.read', {})
+    expect(bytes).toBeInstanceOf(Uint8Array)
+    expect([...bytes]).toEqual([1, 2, 3])
+  })
+
+  it('a 2xx that is not JSON where JSON is expected is an error', async () => {
+    const { api } = client(() => new Response('<html>', { status: 200 }))
+    await expect(api.getSession('ses_1')).rejects.toThrow(/session.get: response is not JSON/)
+  })
+
+  it('generate returns the text', async () => {
+    const { api, sent } = client(() => json({ data: { text: 'short answer' } }))
+    expect(await api.generate('ses_1', 'why?')).toBe('short answer')
+    expect(sent[0]).toMatchObject({
+      url: `${BASE}/api/session/ses_1/generate`,
+      body: { prompt: 'why?' }
+    })
+  })
+})
+
+describe('errors', () => {
+  it('a tagged error body becomes a typed OpencodeApiError', async () => {
+    const { api } = client(() =>
+      json(
+        { _tag: 'SessionNotFoundError', sessionID: 'ses_x', message: 'Session not found: ses_x' },
+        404
+      )
+    )
+    const err = await api.getSession('ses_x').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(OpencodeApiError)
+    if (!isOpencodeApiError(err, 'session.get')) throw new Error('not an api error')
+    expect(err.status).toBe(404)
+    expect(err.tag).toBe('SessionNotFoundError')
+    expect(err.message).toBe(
+      'opencode session.get (GET /api/session/{sessionID}) → 404 SessionNotFoundError: Session not found: ses_x'
+    )
+    expect(err.is('SessionNotFoundError')).toBe(true)
+    if (err.is('SessionNotFoundError')) expect(err.error.sessionID).toBe('ses_x')
+    expect(err.is('InvalidRequestError')).toBe(false)
+    expect(isOpencodeApiError(err, 'session.list')).toBe(false)
+  })
+
+  it('an inbox id owned by another session is a 409 ConflictError', async () => {
+    const { api } = client(() =>
+      json(
+        { _tag: 'ConflictError', message: 'Prompt message ID conflicts', resource: 'msg_1' },
+        409
+      )
+    )
+    const err = await api.prompt('ses_1', { id: 'msg_1', text: 'x' }).catch((e: unknown) => e)
+    expect(isOpencodeApiError(err, 'session.prompt') && err.is('ConflictError')).toBe(true)
+  })
+
+  it('an untagged body (plain-text 404) keeps the body and has no typed error', async () => {
+    const { api } = client(() => new Response('Not Found', { status: 404 }))
+    const err = (await api.getSession('ses_1').catch((e: unknown) => e)) as OpencodeApiError
+    expect(err.tag).toBeUndefined()
+    expect(err.error).toBeUndefined()
+    expect(err.body).toBe('Not Found')
+    expect(err.message).toContain('→ 404: Not Found')
+  })
+})
+
+describe('timeouts and abort', () => {
+  /** A fetch that only ever settles by its signal aborting. */
+  const hanging: FetchFn = (_url, init) =>
+    new Promise((_, reject) =>
+      init?.signal?.addEventListener('abort', () =>
+        reject(new DOMException('aborted', 'AbortError'))
+      )
+    )
+
+  it('times out control-plane calls with OpencodeTimeoutError', async () => {
+    const api = new OpencodeClient(
+      { baseUrl: BASE, authHeader: AUTH, directory: DIR },
+      { fetch: hanging }
+    )
+    const err = await api.getSession('ses_1', { timeoutMs: 20 }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(OpencodeTimeoutError)
+    expect(err).toMatchObject({ operation: 'session.get', timeoutMs: 20 })
+  })
+
+  it('uses 60 s by default and 240 s (under undici’s 300 s headersTimeout) for generate', async () => {
+    vi.useFakeTimers()
+    const api = new OpencodeClient(
+      { baseUrl: BASE, authHeader: AUTH, directory: DIR },
+      { fetch: hanging }
+    )
+    const control = api.getSession('ses_1').catch((e: unknown) => e)
+    const gen = api.generate('ses_1', 'q').catch((e: unknown) => e)
+    await vi.advanceTimersByTimeAsync(DEFAULT_REQUEST_TIMEOUT_MS)
+    expect(await control).toBeInstanceOf(OpencodeTimeoutError)
+    let settled = false
+    void gen.then(() => (settled = true))
+    await vi.advanceTimersByTimeAsync(GENERATE_TIMEOUT_MS - DEFAULT_REQUEST_TIMEOUT_MS - 1)
+    expect(settled).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(await gen).toMatchObject({
+      operation: 'session.generate',
+      timeoutMs: GENERATE_TIMEOUT_MS
+    })
+    expect(GENERATE_TIMEOUT_MS).toBeLessThan(300_000)
+  })
+
+  it('a caller abort propagates as the abort, not a timeout', async () => {
+    const api = new OpencodeClient(
+      { baseUrl: BASE, authHeader: AUTH, directory: DIR },
+      { fetch: hanging }
+    )
+    const ac = new AbortController()
+    const pending = api.listInbox('ses_1', { signal: ac.signal }).catch((e: unknown) => e)
+    ac.abort()
+    const err = await pending
+    expect(err).not.toBeInstanceOf(OpencodeTimeoutError)
+    expect((err as Error).name).toBe('AbortError')
+  })
+
+  it('an already-aborted signal never reaches the server', async () => {
+    const fetchFn = vi.fn<FetchFn>(hanging)
+    const api = new OpencodeClient(
+      { baseUrl: BASE, authHeader: AUTH, directory: DIR },
+      { fetch: fetchFn }
+    )
+    const ac = new AbortController()
+    ac.abort()
+    await expect(api.listInbox('ses_1', { signal: ac.signal })).rejects.toMatchObject({
+      name: 'AbortError'
+    })
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+})
+
+describe('cold-location barrier', () => {
+  const catalog = () => json({ location: { directory: DIR }, data: [] }, 200)
+
+  it('waits for plugin activation (integration.list) before the first catalog read, once per directory', async () => {
+    const { api, sent } = client(catalog)
+    await api.agents()
+    await api.skills()
+    await api.models()
+    await api.skills({ directory: '/other' })
+    expect(
+      sent.map(
+        (s) =>
+          `${new URL(s.url).pathname} @${decodeURIComponent(s.headers['x-opencode-directory'])}`
+      )
+    ).toEqual([
+      `/api/integration @${DIR}`,
+      `/api/agent @${DIR}`,
+      `/api/skill @${DIR}`,
+      `/api/model @${DIR}`,
+      '/api/integration @/other',
+      '/api/skill @/other'
+    ])
+  })
+
+  it('takes the barrier again after a location reload', async () => {
+    const { api, sent } = client((s) => (s.url.endsWith('/reload') ? empty() : catalog()))
+    await api.commands()
+    await api.reloadLocation()
+    await api.commands()
+    expect(sent.map((s) => new URL(s.url).pathname)).toEqual([
+      '/api/integration',
+      '/api/command',
+      '/api/location/reload',
+      '/api/integration',
+      '/api/command'
+    ])
+  })
+
+  it('does not memoize a failed barrier', async () => {
+    let failFirst = true
+    const { api, sent } = client((s) => {
+      if (s.url.endsWith('/api/integration') && failFirst) {
+        failFirst = false
+        return json({ _tag: 'UnknownError', message: 'boom' }, 500)
       }
-      await client.promptAsync('ses_abc', req)
+      return catalog()
+    })
+    await expect(api.providers()).rejects.toBeInstanceOf(OpencodeApiError)
+    await api.providers()
+    expect(sent.map((s) => new URL(s.url).pathname)).toEqual([
+      '/api/integration',
+      '/api/integration',
+      '/api/provider'
+    ])
+  })
+})
 
-      const body = JSON.parse((mock.mock.calls[0][1] as RequestInit).body as string)
-      expect(body).not.toHaveProperty('variant')
+describe('paging', () => {
+  it('listMessages reads oldest-first and follows cursors, re-sending the type filter', async () => {
+    const page = (ids: string[], next: string | null) =>
+      json({ data: ids.map((id) => ({ id, type: 'assistant' })), cursor: { previous: null, next } })
+    const full = Array.from({ length: 200 }, (_, i) => `msg_${i}`)
+    const { api, sent } = client((_, n) => (n === 0 ? page(full, 'c1') : page(['msg_200'], 'c2')))
+    const all = await api.listMessages('ses_1', { type: 'assistant' })
+    expect(all).toHaveLength(201)
+    const queries = sent.map((s) => new URL(s.url).searchParams)
+    expect(Object.fromEntries(queries[0])).toEqual({
+      type: 'assistant',
+      order: 'asc',
+      limit: '200'
+    })
+    expect(Object.fromEntries(queries[1])).toEqual({
+      type: 'assistant',
+      cursor: 'c1',
+      limit: '200'
+    })
+    // A short page is the end, even though the server sent a next cursor.
+    expect(sent).toHaveLength(2)
+  })
+
+  it('listRootSessions filters by directory and roots only, and stops on a null cursor', async () => {
+    const { api, sent } = client(() => json({ data: [session('ses_1')], cursor: { next: null } }))
+    expect((await api.listRootSessions()).map((s) => s.id)).toEqual(['ses_1'])
+    expect(Object.fromEntries(new URL(sent[0].url).searchParams)).toEqual({
+      directory: DIR,
+      parentID: 'null',
+      limit: '200'
     })
   })
 })

@@ -1,0 +1,1025 @@
+{
+ "scenario": "form-cancel",
+ "opencode": "2.0.24",
+ "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+ "events": [
+  {
+   "id": "evt_11128b2cb002WuLd6lZAthoRKj",
+   "created": 1791289242315,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "inboxID": "msg_11128b2cb00182hcobJpY8pufA",
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "item": {
+     "type": "user",
+     "payload": {
+      "text": "[question] skip-0cc20561"
+     },
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 1,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b2cc001K49S2n34h3Hmqw",
+   "created": 1791289242316,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 2,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b2ce001KNEYe0mceYH44o",
+   "created": 1791289242318,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "inboxID": "msg_11128b2cb00182hcobJpY8pufA"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 4,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b2d5002Fv8KQk1wCfaNJJ",
+   "created": 1791289242325,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b2d5003rCHqasJ2vbLDiL",
+   "created": 1791289242325,
+   "type": "session.renamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "title": "Fixture title"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 6,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b2fa001tjUD64KBDawdNo",
+   "created": 1791289242362,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "agent": "build",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_11128b2d1001JGEq2JCA676VdG",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289242360
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 7,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b2fa0024UlPQIy0tG6yBB",
+   "created": 1791289242362,
+   "type": "session.tool.input.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b2d1001JGEq2JCA676VdG",
+    "id": "call_fx_27_0",
+    "name": "question"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 8,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b2fb001FyUGYjHg5L42TS",
+   "created": 1791289242363,
+   "type": "session.tool.input.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b2d1001JGEq2JCA676VdG",
+    "id": "call_fx_27_0",
+    "text": "{\"questions\":[{\"question\":\"Pick a fruit?\",\"header\":\"Fruit\",\"options\":[{\"label\":\"Apple\",\"description\":\"red\"},{\"label\":\"Banana\",\"description\":\"yellow\"}]}]}"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 9,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b2fb002LoMQObbgIni1tu",
+   "created": 1791289242363,
+   "type": "session.tool.called",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b2d1001JGEq2JCA676VdG",
+    "id": "call_fx_27_0",
+    "input": {
+     "questions": [
+      {
+       "question": "Pick a fruit?",
+       "header": "Fruit",
+       "options": [
+        {
+         "label": "Apple",
+         "description": "red"
+        },
+        {
+         "label": "Banana",
+         "description": "yellow"
+        }
+       ]
+      }
+     ]
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 10,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b2fb003qreKoVNfK3uVx9",
+   "created": 1791289242363,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b2d1001JGEq2JCA676VdG"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 11,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b2fc002v9dkZFx8uPEpXm",
+   "created": 1791289242364,
+   "type": "form.created",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "form": {
+     "id": "frm_11128b2fc00135RyBx7WsravNv",
+     "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+     "title": "Questions",
+     "metadata": {
+      "kind": "question",
+      "tool": {
+       "messageID": "msg_11128b2d1001JGEq2JCA676VdG",
+       "id": "call_fx_27_0"
+      }
+     },
+     "fields": [
+      {
+       "key": "q0",
+       "title": "Fruit",
+       "description": "Pick a fruit?",
+       "type": "string",
+       "options": [
+        {
+         "value": "Apple",
+         "label": "Apple",
+         "description": "red"
+        },
+        {
+         "value": "Banana",
+         "label": "Banana",
+         "description": "yellow"
+        }
+       ],
+       "custom": true
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "evt_11128b2fd001w0kIS9utT4MtEZ",
+   "created": 1791289242365,
+   "type": "form.cancelled",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "id": "frm_11128b2fc00135RyBx7WsravNv",
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M"
+   }
+  },
+  {
+   "id": "evt_11128b2fd002l4CzPCfqJjOxrO",
+   "created": 1791289242365,
+   "type": "session.tool.failed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b2d1001JGEq2JCA676VdG",
+    "id": "call_fx_27_0",
+    "error": {
+     "type": "tool.execution",
+     "message": "The user skipped the question"
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 12,
+    "version": 2
+   }
+  },
+  {
+   "id": "evt_11128b324001WkEJd3GG2C7e1s",
+   "created": 1791289242404,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b2d1001JGEq2JCA676VdG",
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 13,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b3250015LpuEZjZBQkX4z",
+   "created": 1791289242405,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "cost": 0.00036,
+    "tokens": {
+     "input": 240,
+     "output": 60,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b350001Zmh7yUCdZ9ZYGP",
+   "created": 1791289242448,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "agent": "build",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_11128b327001PDxNmzc3n3Gqp4",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289242446
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 14,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b351001HMBBd7SKfLyNzI",
+   "created": 1791289242449,
+   "type": "session.text.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b327001PDxNmzc3n3Gqp4",
+    "ordinal": 0
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 15,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b352001nOkVBethbWcNrZ",
+   "created": 1791289242450,
+   "type": "session.text.delta",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b327001PDxNmzc3n3Gqp4",
+    "ordinal": 0,
+    "delta": "TOOL_RESULT_SEEN: {\"error\":{\"type\":\"tool.execution\",\"message\":\"The user skipped the question\"},\"content\":[]}"
+   }
+  },
+  {
+   "id": "evt_11128b352002CeYDMat3lKRng5",
+   "created": 1791289242450,
+   "type": "session.text.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b327001PDxNmzc3n3Gqp4",
+    "ordinal": 0,
+    "text": "TOOL_RESULT_SEEN: {\"error\":{\"type\":\"tool.execution\",\"message\":\"The user skipped the question\"},\"content\":[]}"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 16,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b352003ByKKDbcsUy4nI8",
+   "created": 1791289242450,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b327001PDxNmzc3n3Gqp4"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 17,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b378001J3J71Q0HxgOrcA",
+   "created": 1791289242488,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b327001PDxNmzc3n3Gqp4",
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 18,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b379001A21zgRcpi41kNc",
+   "created": 1791289242489,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "cost": 0.00054,
+    "tokens": {
+     "input": 360,
+     "output": 90,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b379002aF9ZcpefhL5PVt",
+   "created": 1791289242489,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 19,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b37b002STPFl6FdhCWVZD",
+   "created": 1791289242491,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "inboxID": "msg_11128b37b001oCG6SkSJ4MfmJx",
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "item": {
+     "type": "user",
+     "payload": {
+      "text": "[question] dismiss-31d6ddf7"
+     },
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 20,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b37c001ieIrDiDjGpCefC",
+   "created": 1791289242492,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 21,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b37e001ME9FHul00Gzgyt",
+   "created": 1791289242494,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "inboxID": "msg_11128b37b001oCG6SkSJ4MfmJx"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 22,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b39e001pwAO1ha20deNrs",
+   "created": 1791289242526,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "agent": "build",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_11128b37f0010IvmSH7ItnCZBd",
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "started": 1791289242524
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 23,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b39e002wI847CqqLRO3l0",
+   "created": 1791289242526,
+   "type": "session.tool.input.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b37f0010IvmSH7ItnCZBd",
+    "id": "call_fx_29_0",
+    "name": "question"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 24,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b39f001Dmkp1UkAU4APEX",
+   "created": 1791289242527,
+   "type": "session.tool.input.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b37f0010IvmSH7ItnCZBd",
+    "id": "call_fx_29_0",
+    "text": "{\"questions\":[{\"question\":\"Pick a fruit?\",\"header\":\"Fruit\",\"options\":[{\"label\":\"Apple\",\"description\":\"red\"},{\"label\":\"Banana\",\"description\":\"yellow\"}]}]}"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 25,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b39f002y1G7ZlcRklsBlP",
+   "created": 1791289242527,
+   "type": "session.tool.called",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b37f0010IvmSH7ItnCZBd",
+    "id": "call_fx_29_0",
+    "input": {
+     "questions": [
+      {
+       "question": "Pick a fruit?",
+       "header": "Fruit",
+       "options": [
+        {
+         "label": "Apple",
+         "description": "red"
+        },
+        {
+         "label": "Banana",
+         "description": "yellow"
+        }
+       ]
+      }
+     ]
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 26,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b3a0001jMJoX2ejqHS36Y",
+   "created": 1791289242528,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b37f0010IvmSH7ItnCZBd"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 27,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b3a0003tv4Lo6cUm1B1vn",
+   "created": 1791289242528,
+   "type": "form.created",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "form": {
+     "id": "frm_11128b3a0002Outu1oq4p7ri3u",
+     "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+     "title": "Questions",
+     "metadata": {
+      "kind": "question",
+      "tool": {
+       "messageID": "msg_11128b37f0010IvmSH7ItnCZBd",
+       "id": "call_fx_29_0"
+      }
+     },
+     "fields": [
+      {
+       "key": "q0",
+       "title": "Fruit",
+       "description": "Pick a fruit?",
+       "type": "string",
+       "options": [
+        {
+         "value": "Apple",
+         "label": "Apple",
+         "description": "red"
+        },
+        {
+         "value": "Banana",
+         "label": "Banana",
+         "description": "yellow"
+        }
+       ],
+       "custom": true
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "evt_11128b3a1001Y7HR5RF0Ja8PbK",
+   "created": 1791289242529,
+   "type": "form.cancelled",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "id": "frm_11128b3a0002Outu1oq4p7ri3u",
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M"
+   }
+  },
+  {
+   "id": "evt_11128b3a20012QxjA9kpB3Zbgh",
+   "created": 1791289242530,
+   "type": "session.tool.failed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b37f0010IvmSH7ItnCZBd",
+    "id": "call_fx_29_0",
+    "error": {
+     "type": "aborted",
+     "message": "The user dismissed this question"
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 28,
+    "version": 2
+   }
+  },
+  {
+   "id": "evt_11128b3bd001Sn88nKfeexVcA5",
+   "created": 1791289242557,
+   "type": "session.step.failed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "assistantMessageID": "msg_11128b37f0010IvmSH7ItnCZBd",
+    "error": {
+     "type": "aborted",
+     "message": "Step interrupted"
+    },
+    "rawFinish": "tool_calls",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "snapshot": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 29,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_11128b3be001WoagXK42TYktTy",
+   "created": 1791289242558,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "cost": 0.00072,
+    "tokens": {
+     "input": 480,
+     "output": 120,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_11128b3be002Jyqd5vGpvFnXlK",
+   "created": 1791289242558,
+   "type": "session.execution.interrupted",
+   "data": {
+    "sessionID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "reason": "shutdown"
+   },
+   "durable": {
+    "aggregateID": "ses_eeed74d5fffe5XK61Ihx29nb7M",
+    "seq": 30,
+    "version": 1
+   }
+  }
+ ],
+ "messages": [
+  {
+   "id": "msg_11128b2cb00182hcobJpY8pufA",
+   "time": {
+    "created": 1791289242318
+   },
+   "text": "[question] skip-0cc20561",
+   "type": "user"
+  },
+  {
+   "id": "msg_11128b2d1001JGEq2JCA676VdG",
+   "time": {
+    "created": 1791289242360,
+    "streamed": 1791289242363,
+    "completed": 1791289242404
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "fixture-model",
+    "providerID": "fixture"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_fx_27_0",
+     "name": "question",
+     "executed": false,
+     "state": {
+      "status": "error",
+      "input": {
+       "questions": [
+        {
+         "question": "Pick a fruit?",
+         "header": "Fruit",
+         "options": [
+          {
+           "label": "Apple",
+           "description": "red"
+          },
+          {
+           "label": "Banana",
+           "description": "yellow"
+          }
+         ]
+        }
+       ]
+      },
+      "error": {
+       "type": "tool.execution",
+       "message": "The user skipped the question"
+      }
+     },
+     "time": {
+      "created": 1791289242362,
+      "ran": 1791289242363,
+      "completed": 1791289242365
+     }
+    }
+   ],
+   "snapshot": {
+    "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_11128b327001PDxNmzc3n3Gqp4",
+   "time": {
+    "created": 1791289242446,
+    "streamed": 1791289242450,
+    "completed": 1791289242488
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "fixture-model",
+    "providerID": "fixture"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "TOOL_RESULT_SEEN: {\"error\":{\"type\":\"tool.execution\",\"message\":\"The user skipped the question\"},\"content\":[]}"
+    }
+   ],
+   "snapshot": {
+    "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_11128b379002aF9ZcpefhL5PVt",
+   "time": {
+    "created": 1791289242489
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  },
+  {
+   "id": "msg_11128b37b001oCG6SkSJ4MfmJx",
+   "time": {
+    "created": 1791289242494
+   },
+   "text": "[question] dismiss-31d6ddf7",
+   "type": "user"
+  },
+  {
+   "id": "msg_11128b37f0010IvmSH7ItnCZBd",
+   "time": {
+    "created": 1791289242524,
+    "streamed": 1791289242528,
+    "completed": 1791289242557
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "fixture-model",
+    "providerID": "fixture"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_fx_29_0",
+     "name": "question",
+     "executed": false,
+     "state": {
+      "status": "error",
+      "input": {
+       "questions": [
+        {
+         "question": "Pick a fruit?",
+         "header": "Fruit",
+         "options": [
+          {
+           "label": "Apple",
+           "description": "red"
+          },
+          {
+           "label": "Banana",
+           "description": "yellow"
+          }
+         ]
+        }
+       ]
+      },
+      "error": {
+       "type": "aborted",
+       "message": "The user dismissed this question"
+      }
+     },
+     "time": {
+      "created": 1791289242526,
+      "ran": 1791289242527,
+      "completed": 1791289242530
+     }
+    }
+   ],
+   "snapshot": {
+    "start": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "end": "085d1cde1f5a33c061baa671c02a1e6009ed1ce6",
+    "files": []
+   },
+   "finish": "error",
+   "rawFinish": "tool_calls",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   },
+   "error": {
+    "type": "aborted",
+    "message": "Step interrupted"
+   }
+  }
+ ],
+ "children": {},
+ "sessionTotals": {
+  "cost": 0.00072,
+  "tokens": {
+   "input": 480,
+   "output": 120,
+   "reasoning": 0,
+   "cache": {
+    "read": 0,
+    "write": 0
+   }
+  }
+ }
+}

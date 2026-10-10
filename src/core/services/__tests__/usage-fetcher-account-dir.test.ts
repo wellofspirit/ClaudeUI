@@ -7,8 +7,8 @@
  * `~/.claude.json` is one file for every account dir AND for the terminal
  * `claude`, and cli.js rewrites its `oauthAccount` only when it refetches the
  * profile — so the block names whichever cli.js process refetched last, which
- * on a machine with two accounts is routinely the wrong one. Under a set
- * `CLAUDE_SECURESTORAGE_CONFIG_DIR` the only trustworthy source is the
+ * on a machine with two accounts is routinely the wrong one. With an active
+ * multi-account credential dir the only trustworthy source is the
  * credential in THAT dir, read back through `/api/oauth/profile`.
  *
  * Everything here runs against a virtual filesystem keyed by FULL PATH, so the
