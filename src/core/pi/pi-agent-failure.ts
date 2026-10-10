@@ -12,7 +12,7 @@
  *
  * PORTED PATTERNS. The message patterns below are copied from pi's own
  * classifiers so the host agrees with pi on what "retryable" means. Source
- * tree: `vendor/pi-src/packages/ai/src/utils/`, ported from pi 1.0.4
+ * tree: `vendor/pi-src/packages/ai/src/utils/`, ported from pi 1.1.0
  * (`src/shared/harness-manifests/pi.json#tested`). A pin bump must re-diff
  * `overflow.ts` and `retry.ts` against the three blocks marked PORTED.
  *
@@ -33,7 +33,7 @@ export type PiAgentFailureInput =
   /** A `/cui-` prompt the runner refused to send. */
   | { kind: 'refused-command' }
 
-// ── PORTED from vendor/pi-src/packages/ai/src/utils/overflow.ts (pi 1.0.4) ──
+// ── PORTED from vendor/pi-src/packages/ai/src/utils/overflow.ts (pi 1.1.0) ──
 // OVERFLOW_PATTERNS, NON_OVERFLOW_PATTERNS and the Cerebras body-less case.
 // The silent-overflow cases (usage vs. context window) are not message
 // patterns and need the assistant message, so they are not ported.
@@ -75,7 +75,7 @@ const NON_OVERFLOW_PATTERNS: readonly RegExp[] = [
   /too many requests/i // Generic HTTP 429 style
 ]
 
-// ── PORTED from vendor/pi-src/packages/ai/src/utils/retry.ts (pi 1.0.4) ─────
+// ── PORTED from vendor/pi-src/packages/ai/src/utils/retry.ts (pi 1.1.0) ─────
 function buildProviderErrorPattern(patterns: readonly string[]): RegExp {
   return new RegExp(patterns.join('|'), 'i')
 }
@@ -108,6 +108,8 @@ const PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
 const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
   // Generic provider load, HTTP status, and server-side transient failures.
   'overloaded',
+  'server_busy',
+  'servers are currently busy',
   'currently experiencing high demand',
   'model is at capacity',
   'rate.?limit',

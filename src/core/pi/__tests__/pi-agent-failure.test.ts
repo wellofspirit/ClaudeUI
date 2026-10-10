@@ -94,6 +94,15 @@ describe('classifyPiAgentFailure (ADR-089 S1b) — one case per rule, first matc
     }
   })
 
+  it('follows the patterns pi 1.1.0 added (server_busy, "servers are currently busy")', () => {
+    for (const m of [
+      '{"error":{"code":"server_busy","message":"try later"}}',
+      'The servers are currently busy, please try again later'
+    ]) {
+      expect(classify(m), m).toBe('transient')
+    }
+  })
+
   it('5. a crashed child process is transient', () => {
     expect(classifyPiAgentFailure({ kind: 'process-exit' })).toBe('transient')
   })
