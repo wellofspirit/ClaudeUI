@@ -160,6 +160,15 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
   session ruleset ClaudeUI sends only tightens: mode gates (asks) → the user's compiled rules (no
   allows under auto; no mutating allows in plan) → plan enforcement → `{execute,*,deny}` → the
   `claudeui_dispatch_agent` ask, whole-category denies moved last.
+- `external_directory` (a tool target outside the session dir AND its git worktree; resource
+  `<dir>/*`, slashed, absolute): **since 2.0.25 no agent asks** (the baseline is `{*: allow}`;
+  `explore` ends with an explicit `{external_directory,*,allow}`; the old own-directory allows are
+  gone, `GET /api/agent` returns none). ClaudeUI's mode gates carry `{external_directory,*,ask}` in
+  every mode, followed by allows for opencode's own directories (`own-dirs.ts`: data
+  `shell/*/*` and `tool-output/*`, config, tmp from `GET /api/info` `paths.tmp` plus its
+  `realpath` — the server tells the model the canonical one), then the user's
+  `additionalDirectories` allows. The session rules follow the agent's, so the ask outranks
+  `explore`'s allow for it and its children. ADR-097 §3, 2026-10-10 amendment.
 - An ask is `permission.asked` (`Permission.Request`: `id`, `sessionID`, `action`, `resources`,
   `metadata`, `source:{type:'tool', messageID, id}` = the call, `save` = the "always" patterns).
   The reply is `POST …/permission/{id}/reply {decision:'once'|'always'|'reject', message?}`.
@@ -371,7 +380,8 @@ predate the 1.x removal and keep their names; there is no other opencode integra
 - The ChatGPT credential case needs `sandbox-exec`, so it runs on darwin only.
 
 What it covers, per file: the raw client and wire facts (`client`, `turn`, `inbox`, `permission`,
-`form`, `mcp-identity`, `credential`, `paths`, `ruleset`, `plugin-permissions`), the S4 mapper
+`form`, `mcp-identity`, `credential`, `paths`, `ruleset`, `plugin-permissions`,
+`external-directory`), the S4 mapper
 against recorded and live sequences (`mapper`), and the production stack end to end — the server
 manager (`server-manager`: readiness, `_meta` identity incl. a subagent child's, a second
 directory, stdin-EOF end), the chat (`session`), credentials (`credentials-s7`), config

@@ -153,9 +153,10 @@ session `ask` but never a `deny`; Code Mode's `execute` runtime has an ungated `
   configured workspace; plan: no edit/shell/subagent allows) → plan enforcement → `{execute,*,deny}` →
   `claudeui_dispatch_agent` ask, whole-category denies moved last. No `{*: allow}` baseline (each
   agent has one natively), so a subagent's own narrowing holds for every action the session does not
-  name. Consequences: `external_directory` keeps 2.x's default `ask` (opencode's own data/tmp/config
-  dirs allowed; `additionalDirectories` compile to `<dir>/*` allows), and the user's own opencode
-  config applies to the categories ClaudeUI does not gate.
+  name. Consequences: `external_directory` asks (opencode's own data/tmp/config dirs allowed;
+  `additionalDirectories` compile to `<dir>/*` allows) — since 2.0.25 ClaudeUI's own rule, see the
+  2026-10-10 amendment below — and the user's own opencode config applies to the categories
+  ClaudeUI does not gate.
 - Wholly-denied decisions: a user deny on a whole tool → hidden (Claude Code parity); a narrow user
   deny → a server-side deny per call, tool visible (no longer an ask: no dump to avoid, and only a
   deny resists the saved table); mode gates never hide; plan mode hides `edit`/`write`/`patch` and
@@ -226,11 +227,39 @@ session `ask` but never a `deny`; Code Mode's `execute` runtime has an ungated `
   `<server>_<tool>` (`tool/mcp.ts`), so auto mode carries a catch-all `{*_*, *, ask}`: a server
   unknown when the rules were sent (a late connect, or the user's own config made direct by the
   plugin) is judged too. After it: `claudeui_*` allowed (hosted tools; the dispatch ask comes later),
-  `external_directory` ask, and the agent's allows for opencode's own data/tmp/config directories,
-  which the host passes in (`opencodeOwnDirAllows(Agent_Info.permissions)`) — without them those
-  reads ask the judge. The `opencode_*` built-ins with `_` are Code Mode tools, unreachable while
+  `external_directory` ask, and the allows for opencode's own data/tmp/config directories, which the
+  host derives and passes in (`own-dirs.ts`, see the amendment below) — without them those reads
+  ask the judge. The `opencode_*` built-ins with `_` are Code Mode tools, unreachable while
   `execute` is hidden. Residual: under `explore` the catch-all overlaps its own `external_directory`
-  ask, so an MCP call there asks (judged) instead of being hidden.
+  rule, so an MCP call there asks (judged) instead of being hidden.
+
+**Amended (2026-10-10, opencode 2.0.26 bump).** The `external_directory` ask is no longer upstream's
+default. opencode 2.0.25 (#53585, `36a38058fb`, "stop asking for external directory access by
+default") took `{external_directory,*,ask}` out of every agent's baseline, took out the four
+own-directory allows (`<data>/shell/*/*`, `<data>/tool-output/*`, `<tmp>/*`, `<config>/*`) and the
+plan agent's plan-directory allow, and made `explore` end with `{external_directory,*,allow}`.
+Left alone, a 2.0.26 session read and (in acceptEdits) edited anywhere on disk without a prompt, and
+auto mode sent every read of opencode's own tool-output files to the judge. So ClaudeUI now states
+the ask itself, in every mode (it has no bypass for opencode, so no mode opted out of it):
+`{external_directory,*,ask}` is part of the mode gates (`externalDirectoryGates`), followed by allows
+for opencode's own directories, then the user's rules — so the `additionalDirectories` allows and the
+own-directory allows both outrank the ask (last match wins). The session rules sit after the agent's
+rules, so the ask also outranks `explore`'s allow, for `explore` as a primary-turn child and as a
+dispatch target's child; `childSessionRuleset` keeps it (`explore` does not wholly deny
+`external_directory`), and the contract suite proves it on the binary
+(`external-directory.contract.integration.test.ts`: the agent baseline carries no ask, an outside
+read asks in every mode, own directories do not, an `explore` child asks, and without the rule it
+reads silently). The own-directory allows are computed by ClaudeUI, not read from `GET /api/agent`
+(which now returns none): data `(XDG_DATA_HOME || ~/.local/share)/opencode` and config
+`OPENCODE_CONFIG_DIR ?? (XDG_CONFIG_HOME || ~/.config)/opencode` from the env the server was spawned
+with (ClaudeUI sets none of them, so its own env is the server's), tmp from `GET /api/info`
+`paths.tmp` plus its `realpath` — the server tells the model the canonicalised tmp path while
+`/api/info` reports the raw one (macOS `/var` vs `/private/var`, Windows short names). Resources are
+forward-slashed; 2.x's matcher folds `\` and, on Windows, case. A failed `/api/info` read falls back
+to `os.tmpdir()/opencode`; any miss only adds asks, never a silent read. Not restated: the plan
+directory (`<home>/.opencode/plan`) — plan mode denies `edit` session-wide, so ClaudeUI never writes
+there and a read of it asks like any outside read. `bun run check-opencode-protocol` and the
+`ruleset` contract file stay the canaries if a later 2.x moves the default again.
 
 ### 4. Caller identity (amends ADR-033)
 
