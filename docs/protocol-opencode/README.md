@@ -15,9 +15,16 @@ imported from `auth.json` (`credential-store.ts`).
 
 ## Pin
 
-- opencode **2.0.24**, tag `v2.0.24`, commit `e7a34f09bfd9134dfade5a8ddb843f7030bc9a69` (verified
-  against upstream's `refs/tags/v2.0.24`). Spec and event sources are byte-identical to 2.0.23, the
-  S0 pin; only the packages' `version` fields moved.
+- opencode **2.0.26**, tag `v2.0.26`, commit `9b4ec5714d481559990db0a816d5dec19541a814` (verified
+  against upstream's `refs/tags/v2.0.26`). The wire types come from the spec the 2.0.26 binary
+  SERVES, not from upstream's committed `packages/protocol/openapi.json` (see Generated types).
+  Since 2.0.24 the served spec gained `Credential.External` (a reference to a credential source
+  managed outside the store; upstream's migration turns the Azure CLI's OAuth rows into it),
+  `Integration.ExternalMethod` and `integration.connect.external`, the policy actions `tool.use` /
+  `integration.use` (the old `permission` action is gone), the `Model.Compatibility` flags
+  `supportsThinkingBlockBinding` / `supportsEffortUpdates`, and `LocationNotFoundError` on most
+  routes. The event sources changed only in `credential.ts` and `model.ts`, outside the transcribed
+  events.
 - **One pin.** The version is the harness manifest's `tested`
   (`src/shared/harness-manifests/opencode.json`); `scripts/generate-opencode-protocol.mjs` reads it
   and keeps only the reviewed commit (`PIN_COMMIT`), which it proves the tag still names. A unit
@@ -44,9 +51,9 @@ imported from `auth.json` (`credential-store.ts`).
 - Provenance (2.0.24): every package's `repository` is `anomalyco/opencode`, maintainer `thdxr`,
   published by GitHub Actions through npm trusted publishing (OIDC); the darwin binaries are signed
   `Developer ID Application: Anomaly Innovations, Inc. (5NZ4Q7NXJ4)`.
-- `--version` prints `opencode v2.0.24` (1.x printed the bare version; a source build without a
+- `--version` prints `opencode v2.0.26` (1.x printed the bare version; a source build without a
   version prints `opencode vlocal`). Detection reads both; a 1.x install is labelled too old
-  ("opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (2.0.24 or newer)"), and
+  ("opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (2.0.26 or newer)"), and
   `opencode2` is searched on PATH beside `opencode`. Homebrew's `opencode` formula is a 2.x source
   build with the version stamped in (`OPENCODE_VERSION`), found at `<prefix>/bin/opencode` as
   System and labelled by its version like any other.
@@ -284,17 +291,43 @@ deny}` and `{question,*,deny}`), agent (`plan` in plan mode) and model in the bo
 
 `src/core/opencode/protocol-v2/` (the directory keeps its `-v2` name; the 1.x `protocol/` is gone):
 
-| File                   | What                                                                                                                                                      |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `openapi.ts`           | GENERATED from `packages/protocol/openapi.json` at the pinned commit: every component schema as a type, plus `Operations` / `OPERATIONS` per operationId. |
-| `provenance.json`      | GENERATED: tag, commit, spec sha256, generator version, the sha256 of `openapi.ts`.                                                                       |
-| `events.ts`            | HAND-CURATED: the SSE events ClaudeUI consumes (see above).                                                                                               |
-| `events.reviewed.json` | The sha256 of every upstream file `events.ts` was transcribed from, at the commit it was reviewed against.                                                |
+| File                   | What                                                                                                                                                       |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `openapi.ts`           | GENERATED from the `GET /openapi.json` the pinned binary serves: every component schema as a type, plus `Operations` / `OPERATIONS` per operationId.       |
+| `provenance.json`      | GENERATED: tag, commit, served-spec sha256, the reviewed binary (sha256 + manifest platform) that served it, generator version, the sha256 of each output. |
+| `events.ts`            | HAND-CURATED: the SSE events ClaudeUI consumes (see above).                                                                                                |
+| `events.reviewed.json` | The sha256 of every upstream file `events.ts` was transcribed from, at the commit it was reviewed against.                                                 |
 
 ```sh
 bun run generate-opencode-protocol   # regenerate
 bun run check-opencode-protocol      # fail on drift; prints + / - / ~ per type and operation
 ```
+
+**Why the served spec.** Upstream stopped regenerating the committed
+`packages/protocol/openapi.json` at 2.0.25: the schema sources moved (`Credential.External`, the
+Compatibility flags, the policy actions) while the committed file did not. The binary's own
+`GET /openapi.json` is generated from the running schemas, and it is what the binary ClaudeUI ships
+actually speaks, so that is the input (owner ruling, 2026-10-10). The generator:
+
+- resolves the binary like the contract suite (`OPENCODE_V2_BIN`, else the managed store's copy of
+  `tested`, honouring `CLAUDEUI_HARNESS_STORE`), requires its SHA-256 to equal the manifest's
+  reviewed `binarySha256` for this host and `--version` to equal `tested` BEFORE running it, and
+  fails with "run `bun run ensure-opencode`" otherwise. `check-opencode-protocol` regenerates from
+  it too, so it needs the binary as well;
+- runs `serve --stdio` under a throwaway HOME/XDG, every proxy pointed at a refusing address,
+  models.dev fetch and autoupdate off, fetches `/openapi.json`, ends the server by closing stdin
+  (killed if it ignores that) and removes the home;
+- refuses a document that names anything host-specific (the temporary home, the binary's path,
+  this machine's home or temp directory, a drive-letter path, the user's name as a path segment);
+- digests the spec with its keys sorted (`servedSpecSha256`), but emits types in the order the
+  server wrote them, which matches upstream's source order, so a diff reads like the schema diff;
+- records the binary's digest and manifest platform in provenance only. The generated files depend
+  on the spec alone, so `--check` on another platform accepts a different reviewed binary that serves
+  the same spec, and rejects a recorded binary the manifest never reviewed;
+- prints an informational summary of component and operation names where upstream's committed spec
+  differs from the served one (never a failure).
+
+The event sources (below) are still read from the git checkout at `PIN_COMMIT`.
 
 **Why the events are curated.** The spec types the SSE payload as an opaque JSON string
 (`V2EventEncoded`; the server's own `/openapi.json` says the same). The payloads exist only as
@@ -306,8 +339,9 @@ the upstream diff (the failure prints the `git diff` command), updates `events.t
 `bun scripts/generate-opencode-protocol.mjs --accept-events`.
 
 The unit test `src/core/opencode/__tests__/opencode-protocol-v2.test.ts` runs everywhere: it pins the
-emitter, checks the committed `openapi.ts` against provenance, and regenerates byte-for-byte when
-the upstream checkout is present.
+emitter, the host-neutrality and binary checks, and the drift report, checks the committed
+`openapi.ts` against provenance, and regenerates byte-for-byte when the real managed store
+(`CLAUDEUI_TEST_HARNESS_STORE`) holds the tested binary.
 
 ## Contract suite (the per-bump gate, ADR-097 §8.1)
 
@@ -352,10 +386,12 @@ two directories in one global listing, the directory filter, delete, history).
    package's reviewed `integrity` and `binarySha256` (download, verify against npm, hash the binary).
 3. Set `PIN_COMMIT` in `scripts/generate-opencode-protocol.mjs` to the tag's commit (check it
    against `git ls-remote origin refs/tags/v<version>`).
-4. `bun run generate-opencode-protocol`: review the drift report; if an event source changed,
-   review its `git diff`, update `protocol-v2/events.ts`, then `--accept-events`. The generated
-   config schema (`src/shared/opencode-config-schema.json`) moves with it.
-5. `bun run ensure-opencode`, then the contract suite above (twice, and once with
-   `--maxWorkers=4`). Read the files the S4–S8 notes name as wire facts (mapper, credential
+4. `bun run update-opencode` (the new `tested` into the managed store: the generator reads the spec
+   from THAT binary, after proving its digest is the reviewed one), then
+   `bun run generate-opencode-protocol`: review the drift report and the informational difference
+   from upstream's committed spec; if an event source changed, review its `git diff`, update
+   `protocol-v2/events.ts`, then `--accept-events`. The generated config schema
+   (`src/shared/opencode-config-schema.json`) moves with it.
+5. The contract suite above (twice, and once with `--maxWorkers=4`). Read the files the S4–S8 notes name as wire facts (mapper, credential
    resolution, config normalization, plugin hooks) for the release's changes.
 6. Before a release: the Windows lifecycle/shell run (ADR-097 §8.2).

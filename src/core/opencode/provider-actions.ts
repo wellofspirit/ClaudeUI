@@ -105,6 +105,9 @@ function blockedReason(input: ProviderActionInput): string {
   if (input.isFree) {
     return 'Bundled and needs no credentials, so there is nothing to remove. Disable it to hide it.'
   }
+  if (input.source === 'external') {
+    return 'Connected through an external credential source (such as a CLI login) that opencode reads on its own, so there is nothing stored to remove. Disconnect it there, or disable this provider.'
+  }
   if (input.source === 'config') {
     return 'Declared in an opencode config file ClaudeUI does not write (a project config, .opencode directory, or managed profile). Disable it to hide it.'
   }

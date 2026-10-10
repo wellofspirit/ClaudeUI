@@ -654,6 +654,17 @@ theirs, ClaudeUI still writes only through its editors).
 - The generated file is committed with provenance (tag and spec SHA). CI fails on drift.
 - No `@opencode/client` dependency.
 
+**Amended (2026-10-10, owner).** The input is now the spec the pinned binary SERVES
+(`GET /openapi.json` of `serve --stdio`), not the committed `packages/protocol/openapi.json`.
+Upstream stopped regenerating that file at 2.0.25 while the schema sources moved on
+(`Credential.External`, the `Model.Compatibility` flags, the policy actions), so it no longer
+described the binary. The generator runs the binary only after its SHA-256 matches the manifest's
+reviewed digest and `--version` matches `tested`, under an isolated home with every proxy refused,
+and refuses a document that names anything host-specific. Provenance records the served spec's
+digest and the binary that served it. The SSE event sources are still pinned from the git checkout.
+`check-opencode-protocol` therefore needs the binary in the managed store. Details:
+`docs/protocol-opencode/README.md` (Generated types).
+
 **As built (S3, 2026-10-06).** `OpencodeClient` is a typed client over the generated
 `OPERATIONS`: Basic auth and a URI-encoded `x-opencode-directory` on every request, typed
 `OpencodeApiError` per operation, 60 s control-plane timeout, and `generate` at 240 s (under

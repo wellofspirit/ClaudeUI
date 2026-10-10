@@ -444,6 +444,36 @@ describe('discoverOpencodeProviderCatalog', () => {
     )
   })
 
+  it('names an external credential connection its own source, never `api`', async () => {
+    const external = {
+      type: 'credential',
+      id: 'cred_azure_cli',
+      label: 'Azure CLI',
+      method: 'external'
+    } as const
+    serve(
+      fakeClient({
+        integrations: [
+          ...INTEGRATIONS,
+          { id: 'azure', name: 'Azure', methods: [], connections: [external] },
+          {
+            id: 'azure-mixed',
+            name: 'Azure (also a key)',
+            methods: [],
+            connections: [
+              external,
+              { type: 'credential', id: 'cred_k', label: 'key', method: 'key' }
+            ]
+          }
+        ]
+      })
+    )
+    const byId = Object.fromEntries((await discoverOpencodeProviderCatalog()).map((e) => [e.id, e]))
+    expect(byId.azure).toMatchObject({ source: 'external' })
+    // A real key row beside it still reads as a stored credential.
+    expect(byId['azure-mixed']).toMatchObject({ source: 'api' })
+  })
+
   it('offers Remove for a credential only where ClaudeUI holds its own key row', async () => {
     const table = fakeCredentialTable()
     table.seed({

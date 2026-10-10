@@ -28,6 +28,8 @@ interface AuthEntryShape {
   key?: unknown
   access?: unknown
   accountId?: unknown
+  /** `external` entries (opencode 2.0.25+): the credential source's method id. */
+  methodId?: unknown
 }
 
 /**
@@ -39,6 +41,8 @@ interface AuthEntryShape {
  *   `accountId` when the engine persists one (opencode does) and the token's
  *   own `chatgpt_account_id` claim when it does not (pi);
  * - any entry carrying a key → the API-key digest;
+ * - an `external` entry (a reference to a credential source outside the
+ *   store) → the native key, labelled with its method;
  * - everything else, including an Anthropic oauth entry (which carries no
  *   account id in either place) → `<engine>:<vendor>:native`.
  */
@@ -71,6 +75,18 @@ export function accountIdentityFromAuthEntry(params: {
     if (!accountId) return native
     return chatgptAccountIdentity({ accountId, accessToken })
   }
+
+  // opencode 2.0.25+'s `external` entry: a reference to a credential source
+  // managed outside the store (the Azure CLI's own login). There is no secret
+  // to digest and no account claim to read, so it is the vendor's native
+  // account, labelled with the source that supplies it — never an API-key
+  // identity, which is what the rule below would make of an entry with a key.
+  if (e.type === 'external')
+    return {
+      accountKey: native.accountKey,
+      accountLabel:
+        typeof e.methodId === 'string' && e.methodId ? `${vendorId} (${e.methodId})` : vendorId
+    }
 
   // A non-oauth entry carrying a `key`: 'api' on opencode, 'api_key' on pi,
   // and whatever a future version calls it. The same "anything non-oauth is a

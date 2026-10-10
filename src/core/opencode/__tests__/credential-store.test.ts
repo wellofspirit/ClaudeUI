@@ -12,6 +12,7 @@ import { logger } from '../../services/logger'
 import {
   OpencodeCredentialStore,
   chatgptRealExpiry,
+  credentialTypes,
   credentialStem,
   isClaudeuiCredentialId,
   adoptedSigninLabel,
@@ -381,6 +382,30 @@ describe('snapshot', () => {
     expect(store.cachedSnapshot()).toBe(snapshot)
   })
 
+  it('an external credential (Azure CLI, opencode 2.0.25+) is neither an API key nor a sign-in', async () => {
+    const { table, store } = setup()
+    table.seed({
+      id: 'cred_azure_cli',
+      integrationID: 'azure',
+      label: 'Azure CLI',
+      activate: true,
+      value: { type: 'external', methodID: 'azure-cli', metadata: { resource: 'cognitive' } }
+    })
+    table.seed(userKey('cred_user', 'anthropic', 'sk-ant-secret'))
+    const snapshot = (await store.snapshot())!
+    expect(snapshot.integrations.get('azure')).toMatchObject({
+      activeType: 'external',
+      activeOwned: false,
+      ownKey: false,
+      ownOauth: false,
+      // The source's label, on the vendor's native key: no key to digest.
+      identity: { accountKey: 'opencode:azure:native', accountLabel: 'azure (azure-cli)' }
+    })
+    // The cross-engine kinds are 'api' | 'oauth' only: the external row is left out, not called a key.
+    expect(credentialTypes(snapshot)).toEqual({ anthropic: 'api' })
+    expect(store.recordedRemovableIntegrations().has('azure')).toBe(false)
+  })
+
   it('reads the active key on demand only', async () => {
     const { table, store } = setup()
     table.seed(userKey('cred_user', 'openrouter', 'sk-user'))
@@ -508,6 +533,32 @@ describe('L2: a corrupt record file never blocks a vend', () => {
       const records = JSON.parse(readFileSync(file, 'utf8')).slots
       expect(Object.keys(records).sort()).toEqual(['openai:oauth', 'openrouter:key'])
       expect(table.active('openai')?.id).toBe('cred_claudeui_acct-1_v1')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('L2b: a rebuilt record skips a row that fills no slot', () => {
+  it('an external row under a cred_claudeui_ id records nothing (and does not throw)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'slots-'))
+    const file = join(dir, 'opencode-credential-slots.json')
+    try {
+      const table = fakeCredentialTable()
+      table.seed({
+        id: 'cred_claudeui_azure_v1',
+        integrationID: 'azure',
+        label: 'x',
+        value: { type: 'external', methodID: 'azure-cli' }
+      })
+      writeFileSync(file, '{ not json')
+      const store = new OpencodeCredentialStore({
+        connect: table.connect,
+        memory: fileSlotMemory(file),
+        now: () => NOW
+      })
+      await store.vendKey('openrouter', 'sk-or-secret')
+      expect(Object.keys(JSON.parse(readFileSync(file, 'utf8')).slots)).toEqual(['openrouter:key'])
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

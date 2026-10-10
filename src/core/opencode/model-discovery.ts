@@ -283,8 +283,12 @@ function provenance(
 ): { source?: OpencodeProviderSource; envVarNames?: string[] } {
   const connections = integration?.connections ?? []
   const env = connections.flatMap((c) => (c.type === 'env' ? [c.name] : []))
-  if (connections.some((c) => c.type === 'credential')) return { source: 'api' }
+  const credentials = connections.filter((c) => c.type === 'credential')
+  if (credentials.some((c) => c.method !== 'external')) return { source: 'api' }
   if (env.length > 0) return { source: 'env', envVarNames: env }
+  // A credential that only references a source managed outside opencode's store
+  // (the Azure CLI's login): not an API key, and nothing ClaudeUI can remove.
+  if (credentials.length > 0) return { source: 'external' }
   return usable ? { source: 'custom' } : {}
 }
 

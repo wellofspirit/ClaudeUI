@@ -860,7 +860,7 @@ export interface PiModelsRaw {
  * models per provider.
  */
 /** Where opencode gets a usable provider's credential (`model-discovery.ts` `provenance`, from `/api/integration` connections). */
-export type OpencodeProviderSource = 'env' | 'config' | 'custom' | 'api'
+export type OpencodeProviderSource = 'env' | 'config' | 'custom' | 'api' | 'external'
 
 /** What Remove deletes; `settings` clears a disabled-only entry and picker curation. */
 export type ProviderRemoveKind = 'credential' | 'declaration' | 'both' | 'settings'

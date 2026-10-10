@@ -1,29 +1,43 @@
 // @vitest-environment node
 /**
  * The opencode 2.x protocol generator (`scripts/generate-opencode-protocol.mjs`)
- * and its committed output (`src/core/opencode/protocol-v2/`). The full drift
- * check needs the upstream checkout (`bun run check-opencode-protocol`); what
- * runs everywhere is the emitter itself, and that the committed files are the
- * ones provenance names.
+ * and its committed output (`src/core/opencode/protocol-v2/`). The generator's
+ * input is the spec the pinned binary SERVES; the full drift check needs that
+ * binary (`bun run check-opencode-protocol`, or the gated test below when the
+ * managed store has it) and the upstream checkout for the event sources. What
+ * runs everywhere is the emitter, the host-neutrality and binary checks, and
+ * that the committed files are the ones provenance names.
  */
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  acquireServedSpec,
+  assertHostNeutral,
   build,
+  canonicalize,
   componentNames,
+  declarations,
   driftReport,
+  hostMarkers,
   locateSource,
   PIN,
+  provenanceProblems,
+  servedBinaryPath,
+  servedPlatform,
   sourceCandidates,
-  pinnedReader,
   renderConfigSchema,
   renderProtocol,
-  schemaToTs
+  schemaToTs,
+  specDifferenceReport,
+  specDifferences,
+  specDigest,
+  verifyServedBinary
 } from '../../../../scripts/generate-opencode-protocol.mjs'
 import { harnessManifest } from '../../harness/manifests'
+import { installDir } from '../../harness/store'
 import provenance from '../protocol-v2/provenance.json'
 import configSchema from '../../../shared/opencode-config-schema.json'
 import reviewed from '../protocol-v2/events.reviewed.json'
@@ -65,6 +79,17 @@ describe('committed output', () => {
     expect(reviewed).toMatchObject({ version: PIN.version, commit: PIN.commit })
   })
 
+  it('records the served spec and the reviewed binary that served it', () => {
+    expect(provenance.spec).toBe('GET /openapi.json')
+    expect(provenance.servedSpecSha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(provenance).not.toHaveProperty('specSha256')
+    const reviewedBinary = harnessManifest('opencode').platforms[provenance.platform]?.binarySha256
+    expect(reviewedBinary).toBeTruthy()
+    expect(provenance.binarySha256).toBe(reviewedBinary)
+    expect(read('openapi.ts')).toContain(`Served spec sha256 ${provenance.servedSpecSha256}`)
+    expect(JSON.stringify(configSchema.$comment)).toContain(provenance.servedSpecSha256)
+  })
+
   it('describes the opencode the harness manifest installs (one pin, ADR-097 §1)', () => {
     const { tested } = harnessManifest('opencode')
     expect(PIN).toMatchObject({ version: tested, tag: `v${tested}` })
@@ -72,22 +97,30 @@ describe('committed output', () => {
     expect(reviewed.version).toBe(tested)
   })
 
-  // Runs where the upstream checkout exists (developer boxes), skips in CI.
-  const source = (() => {
-    try {
-      const dir = locateSource()
-      pinnedReader(dir)
-      return dir
-    } catch {
-      return null
-    }
-  })()
-  it.skipIf(!source)('regenerates byte-identically from the pinned checkout', () => {
-    const { generated, provenance: text, configSchema: schema } = build(pinnedReader(source!))
-    expect(generated).toBe(read('openapi.ts'))
-    expect(text).toBe(read('provenance.json'))
-    expect(JSON.parse(schema)).toEqual(configSchema)
-  })
+  // Runs where the REAL managed store holds the tested binary (the setup files
+  // move HOME, so `CLAUDEUI_TEST_HARNESS_STORE` names it: developer boxes, CI's
+  // setup-workspace) and skips elsewhere. `acquireServedSpec` itself fails closed on
+  // a binary that is not the reviewed one, so a wrong binary FAILS rather than skips.
+  const storeRoot = process.env.CLAUDEUI_TEST_HARNESS_STORE
+  const storedBinary = storeRoot
+    ? join(
+        storeRoot,
+        'opencode',
+        PIN.version,
+        process.platform === 'win32' ? 'opencode.exe' : 'opencode'
+      )
+    : null
+  it.skipIf(!storedBinary || !existsSync(storedBinary))(
+    'regenerates byte-identically from the spec the pinned binary serves',
+    async () => {
+      const served = await acquireServedSpec({ env: { OPENCODE_V2_BIN: storedBinary! } })
+      const { generated, provenanceData, configSchema: schema } = build(served)
+      expect(generated).toBe(read('openapi.ts'))
+      expect(JSON.parse(schema)).toEqual(configSchema)
+      expect(provenanceProblems(read('provenance.json'), provenanceData)).toEqual([])
+    },
+    90_000
+  )
 })
 
 describe('locating the upstream checkout', () => {
@@ -287,6 +320,8 @@ describe('renderProtocol', () => {
   it('is deterministic, sorted, and maps params, 204 and errors', () => {
     const text = renderProtocol(spec, meta)
     expect(renderProtocol(JSON.parse(JSON.stringify(spec)), meta)).toBe(text)
+    expect(text).toContain('Source: the /openapi.json served by opencode vX (c0ffee)')
+    expect(text).not.toContain('packages/protocol/openapi.json')
     expect(text.indexOf('export type A_Error')).toBeLessThan(text.indexOf('export type Z_Item'))
     expect(text.indexOf("  'a.get': {")).toBeLessThan(text.indexOf("  'z.remove': {"))
     expect(text).toContain('    readonly query: {\n      readonly limit?: string\n    }')
@@ -316,6 +351,225 @@ describe('renderProtocol', () => {
       '  + type N_New',
       '  ~ type Z_Item'
     ])
+  })
+})
+
+describe('the served spec as input', () => {
+  it('digests the canonical form: key order never matters, array order does', () => {
+    const a = { b: { y: 1, x: [1, 2] }, a: 'z' }
+    const b = { a: 'z', b: { x: [1, 2], y: 1 } }
+    expect(specDigest(a)).toBe(specDigest(b))
+    expect(specDigest(a)).not.toBe(specDigest({ ...a, b: { y: 1, x: [2, 1] } }))
+    expect(Object.keys(canonicalize(a) as object)).toEqual(['a', 'b'])
+  })
+
+  it('maps the manifest platform key the binary is reviewed under', () => {
+    expect(servedPlatform('win32', 'arm64')).toBe('win32-x64') // runs the x64 build emulated
+    expect(servedPlatform('linux', 'arm64')).toBe('linux-arm64')
+    expect(() => servedPlatform('linux', 'ia32')).toThrow('no reviewed release')
+  })
+
+  it('resolves OPENCODE_V2_BIN first, else the managed store’s copy of the tested version', () => {
+    expect(servedBinaryPath({ OPENCODE_V2_BIN: '/x/opencode' })).toBe(resolve('/x/opencode'))
+    expect(servedBinaryPath({})).toBe(
+      join(
+        installDir('opencode', PIN.version),
+        process.platform === 'win32' ? 'opencode.exe' : 'opencode'
+      )
+    )
+  })
+
+  describe('verifyServedBinary fails closed before anything runs the binary', () => {
+    const reviewed = (binarySha256?: string) => ({
+      tested: '9.9.9',
+      platforms: { 'linux-x64': binarySha256 ? { binarySha256 } : {} }
+    })
+    const withBinary = async (body: (file: string) => Promise<void>) => {
+      const dir = mkdtempSync(join(tmpdir(), 'oc-bin-'))
+      try {
+        const file = join(dir, 'opencode')
+        writeFileSync(file, 'pretend binary')
+        await body(file)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }
+
+    it('returns the digest of the reviewed binary', () =>
+      withBinary(async (file) => {
+        await expect(
+          verifyServedBinary(file, 'linux-x64', reviewed(sha256('pretend binary')))
+        ).resolves.toBe(sha256('pretend binary'))
+      }))
+
+    it('refuses any other binary, naming both digests and how to install the right one', () =>
+      withBinary(async (file) => {
+        const error = await verifyServedBinary(file, 'linux-x64', reviewed(sha256('other'))).catch(
+          (e: Error) => e
+        )
+        expect((error as Error).message).toContain(sha256('pretend binary'))
+        expect((error as Error).message).toContain(sha256('other'))
+        expect((error as Error).message).toMatch(/Refusing to run it.*bun run ensure-opencode/)
+      }))
+
+    it('refuses a platform the manifest has no digest for', () =>
+      withBinary(async (file) => {
+        await expect(verifyServedBinary(file, 'linux-x64', reviewed())).rejects.toThrow(
+          'no reviewed binarySha256 for linux-x64'
+        )
+      }))
+
+    it('says how to install a missing binary', async () => {
+      await expect(
+        verifyServedBinary(join(tmpdir(), 'oc-bin-missing', 'opencode'), 'linux-x64', reviewed('a'))
+      ).rejects.toThrow(/No opencode binary at .*bun run ensure-opencode/)
+    })
+  })
+
+  describe('host neutrality', () => {
+    const home = '/tmp/opencode-served-spec-ab12'
+    const binary = 'C:\\store\\opencode\\2.0.26\\opencode.exe'
+    const markers = hostMarkers({ paths: [home, binary], username: 'devuser' })
+    const check = (text: string) => () => assertHostNeutral(text, markers)
+
+    it('passes a document with URLs, route templates and a property called tmp', () => {
+      expect(
+        check(
+          JSON.stringify({
+            description: 'See https://example.com/a, file:///x and GET /api/session/{id}; a:b',
+            properties: { tmp: { type: 'string' } }
+          })
+        )
+      ).not.toThrow()
+    })
+
+    it('rejects the temporary home and the binary, in either slash style and JSON-escaped', () => {
+      for (const path of [home, binary]) {
+        for (const variant of [
+          path,
+          path.replaceAll('\\', '/'),
+          path.replaceAll('/', '\\'),
+          JSON.stringify(path.replaceAll('/', '\\')).slice(1, -1)
+        ]) {
+          expect(check(`{"description":"at ${variant} now"}`), variant).toThrow(/host-specific/)
+        }
+      }
+    })
+
+    it('rejects a drive-letter path and the user’s name as a path segment, not as a word', () => {
+      expect(check('{"d":"D:/x"}')).toThrow(/drive-letter/)
+      expect(check('{"d":"C:\\\\Users\\\\x"}')).toThrow(/drive-letter/)
+      expect(check('{"d":"/home/devuser/project"}')).toThrow(/devuser/)
+      expect(check('{"d":"\\\\Users\\\\DevUser\\\\x"}')).toThrow(/devuser/i)
+      expect(check('{"d":"devuser asked"}')).not.toThrow()
+    })
+
+    it('names what it found, with context', () => {
+      expect(check('{"d":"before /home/devuser/ after"}')).toThrow(/before \/home\/devuser\/ after/)
+    })
+  })
+
+  describe('provenance across platforms', () => {
+    const reviewedDigests = {
+      platforms: { 'win32-x64': { binarySha256: 'w' }, 'linux-x64': { binarySha256: 'l' } }
+    }
+    const built = { version: '1', servedSpecSha256: 's', binarySha256: 'l', platform: 'linux-x64' }
+    const committed = (patch: object) =>
+      JSON.stringify({ ...built, binarySha256: 'w', platform: 'win32-x64', ...patch })
+
+    it('lets another platform’s reviewed binary serve the same spec', () => {
+      expect(provenanceProblems(committed({}), built, reviewedDigests)).toEqual([])
+    })
+
+    it('flags a different spec, and a binary the manifest never reviewed', () => {
+      expect(
+        provenanceProblems(committed({ servedSpecSha256: 'other' }), built, reviewedDigests)
+      ).toEqual(['provenance.json differs from the generator output'])
+      expect(
+        provenanceProblems(committed({ binarySha256: 'forged' }), built, reviewedDigests)
+      ).toEqual([expect.stringContaining('did not review')])
+    })
+
+    it('flags a missing or unparseable file', () => {
+      expect(provenanceProblems(null, built, reviewedDigests)).toHaveLength(1)
+      expect(provenanceProblems('{', built, reviewedDigests)).toHaveLength(1)
+    })
+  })
+
+  describe('the informational difference from upstream’s committed spec', () => {
+    const schema = (type: string) => ({ type })
+    const upstream = {
+      components: {
+        schemas: { Same: schema('string'), Gone: schema('string'), Moved: schema('string') }
+      },
+      paths: {
+        '/a': { get: { operationId: 'a.get', responses: {} } },
+        '/b': { get: { operationId: 'b.get', responses: {} } }
+      }
+    }
+    const served = {
+      components: {
+        schemas: { Same: schema('string'), New: schema('number'), Moved: schema('number') }
+      },
+      paths: {
+        '/a': { get: { operationId: 'a.get', summary: 'now documented', responses: {} } },
+        '/c': { post: { operationId: 'c.post', responses: {} } }
+      }
+    }
+
+    it('lists component and operation names only, added / removed / changed', () => {
+      expect(specDifferences(upstream, served)).toEqual({
+        components: { added: ['New'], removed: ['Gone'], changed: ['Moved'] },
+        operations: { added: ['c.post'], removed: ['b.get'], changed: ['a.get'] }
+      })
+      expect(specDifferenceReport(specDifferences(upstream, served))).toEqual([
+        '  components + (1): New',
+        '  components - (1): Gone',
+        '  components ~ (1): Moved',
+        '  operations + (1): c.post',
+        '  operations - (1): b.get',
+        '  operations ~ (1): a.get'
+      ])
+    })
+
+    it('is empty when upstream’s spec matches, whatever the key order', () => {
+      const reordered = { paths: upstream.paths, components: upstream.components }
+      expect(specDifferenceReport(specDifferences(upstream, reordered))).toEqual([])
+    })
+  })
+})
+
+describe('the drift report credits a JSDoc change to the declaration it documents', () => {
+  const spec = (opSummary: string, typeDescription: string) => ({
+    components: { schemas: { A: { type: 'string', description: typeDescription } } },
+    paths: {
+      '/a': { get: { operationId: 'fs.list', summary: 'List', responses: { '204': {} } } },
+      '/b': { get: { operationId: 'fs.read', summary: opSummary, responses: { '204': {} } } },
+      '/c': { get: { operationId: 'fs.stat', summary: 'Stat', responses: { '204': {} } } }
+    }
+  })
+  const meta = { tag: 'vX', commit: 'c', specSha256: 's' }
+  const render = (opSummary: string, typeDescription: string) =>
+    renderProtocol(spec(opSummary, typeDescription), meta)
+
+  it('an operation’s summary change is that operation’s, not the one before it (2.0.25: fs.read reported as fs.list)', () => {
+    expect(driftReport(render('Serve one file', 'd'), render('Stream one file', 'd'))).toEqual([
+      '  ~ operation fs.read'
+    ])
+  })
+
+  it('a type’s description change is that type’s', () => {
+    expect(driftReport(render('r', 'old'), render('r', 'new'))).toEqual(['  ~ type A'])
+  })
+
+  it('holds a declaration’s JSDoc with it and ends an operation at its closing brace', () => {
+    const entries = declarations(render('Stream', 'd'))
+    expect(entries.get('operation fs.read')).toMatch(
+      /^ {2}\/\*\* Stream \*\/\n {2}'fs\.read': \{\n/
+    )
+    expect(entries.get('operation fs.read')).toMatch(/\n {2}\}\n$/)
+    expect(entries.get('operation fs.list')).not.toContain('Stream')
+    expect(entries.get('type A')).toMatch(/^\/\*\* d \*\/\nexport type A = /)
   })
 })
 

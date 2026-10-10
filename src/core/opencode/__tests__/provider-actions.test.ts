@@ -113,6 +113,14 @@ describe('resolveProviderActions — blocked classes', () => {
     expect(actions.blockedReason).toMatch(/no stored credential/i)
   })
 
+  it('explains an external credential source instead of claiming there is no stored credential', () => {
+    const actions = resolveProviderActions(input({ source: 'external' }))
+    expect(actions.canRemove).toBe(false)
+    expect(actions.blockedReason).toMatch(/external credential source/i)
+    expect(actions.blockedReason).toMatch(/disable/i)
+    expect(actions.blockedReason).not.toMatch(/no stored credential/i)
+  })
+
   it('prefers the env explanation over the generic one when both could apply', () => {
     const actions = resolveProviderActions(input({ source: 'env', envVarNames: ['FOO_KEY'] }))
     expect(actions.blockedReason).toContain('FOO_KEY')

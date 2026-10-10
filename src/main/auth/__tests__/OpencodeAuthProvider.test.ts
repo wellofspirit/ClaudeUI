@@ -100,6 +100,13 @@ const integrations = [
       }
     ],
     connections: []
+  },
+  {
+    // opencode 2.0.25+: signs in through a CLI's own login, nothing stored but a reference.
+    id: 'azure',
+    name: 'Azure',
+    methods: [{ id: 'azure-cli', type: 'external', label: 'Azure CLI' }],
+    connections: []
   }
 ]
 
@@ -144,6 +151,28 @@ describe('probe()', () => {
     expect(map.anthropic).toEqual({ authState: 'unauthenticated', billingType: 'unknown' })
     // Configured from the environment: no row, the methods decide.
     expect(map.groq).toEqual({ authState: 'authenticated', billingType: 'apiKey' })
+  })
+
+  it('an external credential is configured but neither a key nor a subscription', async () => {
+    table.seed({
+      id: 'cred_azure_cli',
+      integrationID: 'azure',
+      label: 'Azure CLI',
+      activate: true,
+      value: { type: 'external', methodID: 'azure-cli' }
+    })
+    const map = await provider.probe()
+    expect(map.azure).toEqual({ authState: 'authenticated', billingType: 'unknown' })
+    // The cross-engine credential kinds stay 'api' | 'oauth': the external row is no key.
+    expect(await provider.listVendorCredentialIds()).toEqual({})
+  })
+
+  it('an integration offering only an external method, configured without a row, is not an apiKey either', async () => {
+    client.providers.mockResolvedValue([
+      { id: 'azure', name: 'azure', activation: 'auto', package: 'x' }
+    ])
+    const map = await provider.probe()
+    expect(map.azure).toEqual({ authState: 'authenticated', billingType: 'unknown' })
   })
 
   it('caches, and a credential change ClaudeUI makes drops the cache', async () => {
@@ -206,6 +235,8 @@ describe('listVendorAuthOptions()', () => {
       { type: 'api', label: 'API key' },
       { type: 'oauth', label: 'Codex browser (legacy)' }
     ])
+    // An external method is not a sign-in ClaudeUI can drive: nothing is offered for it.
+    expect(options).not.toHaveProperty('azure')
     expect(options['github-copilot']).toEqual([
       {
         type: 'oauth',

@@ -127,6 +127,8 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
         const authState: AuthState = isFree || configured ? 'authenticated' : 'unauthenticated'
         let billingType: 'subscription' | 'apiKey' | 'free' | 'unknown'
         if (isFree) billingType = 'free'
+        else if (state?.activeType === 'external')
+          billingType = 'unknown' // an external credential source: neither a key nor a sign-in
         else if (state?.activeType)
           billingType = state.activeType === 'oauth' ? 'subscription' : 'apiKey'
         else if (!configured) billingType = 'unknown'
@@ -136,7 +138,9 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
           const methods = integration?.methods ?? []
           const oauth = methods.some((m) => m.type === 'oauth')
           const key = methods.some((m) => m.type === 'key' || m.type === 'env')
-          billingType = oauth && !key ? 'subscription' : 'apiKey'
+          const external = methods.some((m) => m.type === 'external')
+          billingType =
+            external && !oauth && !key ? 'unknown' : oauth && !key ? 'subscription' : 'apiKey'
         }
         map[vendorId] = { authState, billingType }
       }
