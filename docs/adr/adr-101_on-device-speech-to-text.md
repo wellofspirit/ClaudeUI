@@ -93,8 +93,10 @@ voice-worker`). The app still ships no native addon (ADR-098 §7, ADR-058).
 7. **Live preview, bounded.** While the button is held the server re-decodes only the audio after the
    last committed word, about once a second: words two consecutive decodes agree on, ending at least
    1 s behind the live edge, are committed (LocalAgreement-2 over Parakeet's word timestamps); no
-   preview before 1.5 s of audio. On release one full pass over the whole utterance produces the final
-   transcript, which replaces the preview. Measured on 55–65 s takes: an update every 1.0 s, ≤0.3 s per
+   preview before 1.5 s of audio. On release one full pass over the whole utterance produces the final transcript, which replaces the
+   preview; past 60 s the pass is cut into ≤ 60 s segments at the quietest moment near each cut (one
+   pass over 300 s peaks at 3.9 GB and 25 s, a 60 s segment at ~1.3 GB and ~2 s), and a capture stops
+   accepting audio at 5 minutes. Measured on 55–65 s takes: an update every 1.0 s, ≤0.3 s per
    preview decode, 8–15% CPU while held (vs 67–84% re-decoding everything), final 0.5 s after a 17 s
    take and ~2 s after a minute. Preview is on by default; a per-client setting turns it off
    (localStorage, ADR-098 §3), sent as `preview: false` in `voice_start`.

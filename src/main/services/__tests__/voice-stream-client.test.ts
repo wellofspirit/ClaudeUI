@@ -368,6 +368,34 @@ describe('VoiceStreamClient', () => {
   })
 })
 
+describe('VoiceStreamClient — startFields (ADR-101)', () => {
+  beforeEach(() => {
+    lastSocket = null
+    lastReadline = null
+  })
+
+  it('merges the owner-supplied fields into voice_start', async () => {
+    const client = new RecordingClient(4000, () => 'routing-A')
+    const startP = client.startRecording('en', [], { token: 'abc', preview: false })
+    fireConnect()
+    await startP
+    expect(sentMessages()[0]).toEqual({
+      type: 'voice_start',
+      language: 'en',
+      token: 'abc',
+      preview: false
+    })
+  })
+
+  it('never lets a field override type or language', async () => {
+    const client = new RecordingClient(4000, () => 'routing-A')
+    const startP = client.startRecording('en', [], { type: 'audio', language: 'xx', token: 't' })
+    fireConnect()
+    await startP
+    expect(sentMessages()[0]).toEqual({ type: 'voice_start', language: 'en', token: 't' })
+  })
+})
+
 // --- S2: lifecycle robustness -------------------------------------------------
 
 /** `ms` of 16 kHz i16LE mono at a constant sample value (0 = digital silence). */
@@ -578,7 +606,8 @@ describe('VoiceStreamClient — outcome messages (S2 item 5)', () => {
     line({ type: 'ready' })
     client.feed(pcm(2500, 0))
     await client.stopRecording()
-    vi.advanceTimersByTime(8000)
+    // 8 s floor + 250 ms per second relayed (2.5 s of audio → 625 ms).
+    vi.advanceTimersByTime(8625)
     expect(client.currentState()).toBe('idle')
     expect(errors(client)).toEqual([])
   })
@@ -618,5 +647,37 @@ describe('VoiceStreamClient — outcome messages (S2 item 5)', () => {
     expect(pcm16LevelLe(pcm(10, 2000))).toBeCloseTo(1)
     expect(pcm16LevelLe(pcm(10, 20))).toBeCloseTo(0.1)
     expect(pcm16LevelLe(Buffer.alloc(0))).toBe(0)
+  })
+})
+
+describe('VoiceStreamClient — the finalize timeout scales with the audio relayed (ADR-101)', () => {
+  afterEach(() => vi.useRealTimers())
+
+  /** Relay `seconds` of audio, release, and return the client waiting for `closed`. */
+  async function waitingForClosed(seconds: number): Promise<RecordingClient> {
+    const client = await connected()
+    line({ type: 'ready' })
+    for (let i = 0; i < seconds; i++) client.feed(pcm(1000, 1500))
+    await client.stopRecording()
+    expect(client.currentState()).toBe('processing')
+    return client
+  }
+
+  it('a minute of speech gets 23 s, not 8', async () => {
+    vi.useFakeTimers()
+    const client = await waitingForClosed(60)
+    vi.advanceTimersByTime(22_999)
+    expect(client.currentState()).toBe('processing')
+    vi.advanceTimersByTime(1)
+    expect(client.currentState()).toBe('idle')
+  })
+
+  it('a capture with no audio keeps the 8 s floor', async () => {
+    vi.useFakeTimers()
+    const client = await waitingForClosed(0)
+    vi.advanceTimersByTime(7_999)
+    expect(client.currentState()).toBe('processing')
+    vi.advanceTimersByTime(1)
+    expect(client.currentState()).toBe('idle')
   })
 })
