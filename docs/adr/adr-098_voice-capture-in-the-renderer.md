@@ -10,6 +10,8 @@ Code no longer ships with a loose `audio-capture.node`), [ADR-006](adr-006_rebun
 on an engine-authored string — voice notices carry their tone), [ADR-027](adr-027_test-data-attributes.md)
 (the new `data-testid`s), `docs/architecture/sync-core.md` phase 5 S3 (remote voice, which this
 generalizes). Resume/working notes: `docs/voice-input-handoff.md` on the branch.
+**Amended by:** [ADR-101](adr-101_on-device-speech-to-text.md) — §6's deferred speech-to-text for
+other engines is now an on-device recognizer (Parakeet via sherpa-onnx) in a local voice server.
 
 ## Context
 
@@ -73,6 +75,8 @@ What the investigation established:
    outside Claude Code's terms (Daniel, 2026-10-06). Speech-to-text for other engines is deferred;
    any future source must be sanctioned for that use (the user's own API key, an on-device
    recognizer, or an engine's own voice feature inside its own sessions).
+   _Amended by ADR-101 (2026-10-12): opencode, pi and Codex sessions now use an on-device
+   recognizer; Claude sessions are unchanged._
 7. **No loose native addons are extracted or shipped.** `scripts/extract-cli.mjs` stops writing
    `vendor/claude-cli/vendor/<addon>/…/*.node`, and `electron-builder.yml` stops packaging them
    (the server zips copy `vendor/claude-cli` whole, so they follow). cli.js loads its addons

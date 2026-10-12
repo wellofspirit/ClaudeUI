@@ -31,6 +31,13 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin({ exclude: ['electron-context-menu'] })],
     build: {
       rollupOptions: {
+        // Two entries. `voice-worker` is the on-device speech worker (ADR-101 §4):
+        // the host runs it as `electron.exe out/main/voice-worker.js` with
+        // `ELECTRON_RUN_AS_NODE=1`, so it must import nothing from Electron.
+        input: {
+          index: resolve('src/main/index.ts'),
+          'voice-worker': resolve('src/main/voice-worker.ts')
+        },
         external: ['node-pty', 'ws', 'better-sqlite3']
       }
     }

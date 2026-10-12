@@ -24,19 +24,50 @@
 
 import { create } from 'zustand'
 import { resolveRekeyed } from '../../stores/replica'
-import type { VoiceNoticeTone } from '../../../../shared/types'
+import type { VoiceNoticeAction, VoiceNoticeTone } from '../../../../shared/types'
 
 export interface VoiceNotice {
   /** Unique per notice, so a fade or a cleared warning removes only its own. */
   id: number
   text: string
   tone: VoiceNoticeTone
+  /**
+   * A step the speaker has to take, offered as a button in the pill (ADR-101 §6:
+   * `install-voice-pack`). Carried as data from main, never inferred from `text`
+   * (ADR-070). What the pill shows for it follows the speech pack's live status
+   * (`voice-pack-notice.ts`), not this notice's text.
+   */
+  action?: VoiceNoticeAction
+  /**
+   * The speaker pressed the action's button: the pill follows the pack from here
+   * to its outcome (progress, ready, failed, cancelled) instead of offering the
+   * step again.
+   */
+  following?: boolean
+  /**
+   * What a followed notice ended as (ready, failed, cancelled — see
+   * `voice-pack-notice.ts`), latched the moment it did: a later change of the
+   * pack's status (a Remove in Settings during the linger) must not rewrite a
+   * "ready" the speaker was just shown into "cancelled".
+   */
+  outcome?: VoiceNoticeOutcome
+}
+
+/** A latched outcome: exactly what the pill showed. */
+export interface VoiceNoticeOutcome {
+  text: string
+  tone: VoiceNoticeTone
+  phase: string
 }
 
 interface VoiceNoticeState {
   notices: Record<string, VoiceNotice>
   /** Show `text` for `routingId`, replacing whatever it showed. Returns the notice id. */
-  show(routingId: string, text: string, tone?: VoiceNoticeTone): number
+  show(routingId: string, text: string, tone?: VoiceNoticeTone, action?: VoiceNoticeAction): number
+  /** Mark notice `id` as acted on (see {@link VoiceNotice.following}) — only if it is still the one shown. */
+  follow(routingId: string, id: number): void
+  /** Latch notice `id`'s outcome (see {@link VoiceNotice.outcome}) — only if it is still the one shown and has none. */
+  latchOutcome(routingId: string, id: number, outcome: VoiceNoticeOutcome): void
   /**
    * Remove `routingId`'s notice — only if it is still notice `id`, when given, so
    * a stale timer or a cleared warning never removes a newer message.
@@ -55,15 +86,45 @@ function keysFor(notices: Record<string, VoiceNotice>, routingId: string): strin
 export const useVoiceNoticeStore = create<VoiceNoticeState>((set) => ({
   notices: {},
 
-  show(routingId, text, tone = 'warn') {
+  show(routingId, text, tone = 'warn', action) {
     const id = ++nextId
     set((state) => {
       const notices = { ...state.notices }
+      // A refusal that repeats the one on screen (the speaker pressed the mic
+      // again while the model downloads) must not lose what the speaker already
+      // did: the replacement keeps following the download. An outcome that was
+      // already latched is over — the repeat is a new offer.
+      const previous = keysFor(notices, routingId)
+        .map((key) => notices[key])
+        .find((notice) => action !== undefined && notice.action === action)
+      const following = previous?.following === true && previous.outcome === undefined
       for (const key of keysFor(notices, routingId)) delete notices[key]
-      notices[resolveRekeyed(routingId)] = { id, text, tone }
+      notices[resolveRekeyed(routingId)] = {
+        id,
+        text,
+        tone,
+        ...(action ? { action } : {}),
+        ...(following ? { following } : {})
+      }
       return { notices }
     })
     return id
+  },
+
+  follow(routingId, id) {
+    set((state) => {
+      const key = keysFor(state.notices, routingId).find((k) => state.notices[k].id === id)
+      if (key === undefined || state.notices[key].following) return state
+      return { notices: { ...state.notices, [key]: { ...state.notices[key], following: true } } }
+    })
+  },
+
+  latchOutcome(routingId, id, outcome) {
+    set((state) => {
+      const key = keysFor(state.notices, routingId).find((k) => state.notices[k].id === id)
+      if (key === undefined || state.notices[key].outcome) return state
+      return { notices: { ...state.notices, [key]: { ...state.notices[key], outcome } } }
+    })
   },
 
   dismiss(routingId, id) {
@@ -97,13 +158,40 @@ export function useVoiceNotice(routingId: string | null | undefined): VoiceNotic
 export function showVoiceNotice(
   routingId: string,
   text: string,
-  tone: VoiceNoticeTone = 'warn'
+  tone: VoiceNoticeTone = 'warn',
+  action?: VoiceNoticeAction
 ): number {
-  return useVoiceNoticeStore.getState().show(routingId, text, tone)
+  return useVoiceNoticeStore.getState().show(routingId, text, tone, action)
+}
+
+/** The pill's button was pressed: follow the pack from here (see {@link VoiceNotice.following}). */
+export function followVoiceNotice(routingId: string, id: number): void {
+  useVoiceNoticeStore.getState().follow(routingId, id)
 }
 
 export function dismissVoiceNotice(routingId: string, id?: number): void {
   useVoiceNoticeStore.getState().dismiss(routingId, id)
+}
+
+/** The pill showed `outcome` for notice `id`: keep it that way (see {@link VoiceNotice.outcome}). */
+export function latchVoiceNoticeOutcome(
+  routingId: string,
+  id: number,
+  outcome: VoiceNoticeOutcome
+): void {
+  useVoiceNoticeStore.getState().latchOutcome(routingId, id, outcome)
+}
+
+/**
+ * A fresh press settles an offer nobody took up: an un-pressed action notice is
+ * dropped (the start either works now — the step was done elsewhere — or is
+ * refused again with a new offer), while one the speaker pressed Download on is
+ * left, because its download is still the news. Other notices are not touched:
+ * a lingering outcome is held by the press, as it always was.
+ */
+export function dismissStaleVoiceOffer(routingId: string): void {
+  const notice = voiceNoticeFor(useVoiceNoticeStore.getState().notices, routingId)
+  if (notice?.action && !notice.following) dismissVoiceNotice(routingId, notice.id)
 }
 
 /** Drop every notice. Test seam only. */

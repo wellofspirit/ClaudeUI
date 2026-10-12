@@ -21,6 +21,15 @@ export class DownloadError extends Error {
 export interface HostPolicy {
   hosts: readonly string[]
   redirectHosts: readonly string[]
+  /**
+   * Domains whose every subdomain a redirect may land on (`hf.co` admits
+   * `us.aws.cdn.hf.co` but not `hf.co` itself, `evilhf.co` or `hf.co.evil.test`).
+   * For a CDN that picks the edge host per region, where pinning one name would
+   * fail for everyone elsewhere. Only ever applies to
+   * redirects: the request's first hop is always an exact `hosts` entry. Absent,
+   * redirects are exact-match as before.
+   */
+  redirectHostSuffixes?: readonly string[]
 }
 
 /** opencode: package metadata and tarballs. The registry does not redirect. */
@@ -35,6 +44,24 @@ export const NPM_REGISTRY: HostPolicy = { hosts: ['registry.npmjs.org'], redirec
 export const GITHUB_RELEASES: HostPolicy = {
   hosts: ['github.com'],
   redirectHosts: ['release-assets.githubusercontent.com']
+}
+
+/**
+ * The speech pack's model files (ADR-101 §5): `huggingface.co/<repo>/resolve/<rev>/<file>`
+ * answers 302 to a signed URL on one of Hugging Face's own CDN hosts for large
+ * files and 307 to `huggingface.co/api/resolve-cache/...` (the same host) for
+ * small ones. Which CDN host depends on the caller's region and on HF's storage
+ * generation of the day (`us.aws.cdn.hf.co` seen from Australia on 2026-10-12;
+ * `cas-bridge.xethub.hf.co`, `cdn-lfs*.hf.co` and `cdn-lfs.huggingface.co` have
+ * all been served), hence the suffixes: any subdomain of `hf.co` or
+ * `huggingface.co`. The request itself must start at exactly `huggingface.co`,
+ * and every byte is pinned by size and sha256 by the caller, so the policy is
+ * defence in depth. Any other target fails the download.
+ */
+export const HUGGING_FACE: HostPolicy = {
+  hosts: ['huggingface.co'],
+  redirectHosts: ['huggingface.co'],
+  redirectHostSuffixes: ['hf.co', 'huggingface.co']
 }
 
 /** Codex's LICENSE at the pinned source commit (the manifest's `license`). */
@@ -63,8 +90,24 @@ export function describeUrl(url: URL): string {
   return `${url.protocol}//${url.host}${url.pathname}`
 }
 
-/** `url` as a URL whose host is one of `hosts`, over HTTPS, without credentials or a port. */
-export function checkUrl(url: string | URL, hosts: readonly string[]): URL {
+/**
+ * `hostname` is a proper subdomain of `suffix` (`a.cdn.hf.co` of `hf.co`).
+ * The dot is part of the match, so `evilhf.co` and `xhf.co` do not pass;
+ * a trailing-dot hostname (`a.cdn.hf.co.`) does not either, since `URL` keeps it.
+ */
+function isSubdomainOf(hostname: string, suffix: string): boolean {
+  return hostname.endsWith(`.${suffix}`) && hostname.length > suffix.length + 1
+}
+
+/**
+ * `url` as a URL whose host is one of `hosts` (or a subdomain of one of
+ * `hostSuffixes`), over HTTPS, without credentials or a port.
+ */
+export function checkUrl(
+  url: string | URL,
+  hosts: readonly string[],
+  hostSuffixes: readonly string[] = []
+): URL {
   let parsed: URL
   try {
     parsed = new URL(url)
@@ -76,11 +119,15 @@ export function checkUrl(url: string | URL, hosts: readonly string[]): URL {
     parsed.username !== '' ||
     parsed.password !== '' ||
     parsed.port !== '' ||
-    !hosts.includes(parsed.hostname)
+    !(
+      hosts.includes(parsed.hostname) ||
+      hostSuffixes.some((suffix) => isSubdomainOf(parsed.hostname, suffix))
+    )
   ) {
+    const allowed = [...hosts, ...hostSuffixes.map((suffix) => `*.${suffix}`)]
     throw new DownloadError(
       `${parsed.protocol}//${parsed.host} is not an allowed download host (allowed: ${
-        hosts.length > 0 ? hosts.join(', ') : 'none'
+        allowed.length > 0 ? allowed.join(', ') : 'none'
       })`
     )
   }
@@ -151,7 +198,7 @@ async function open(url: string, opts: RequestOptions): Promise<Opened> {
           throw new DownloadError(`${describeUrl(current)} redirected to an invalid URL`)
         }
         try {
-          current = checkUrl(next, opts.policy.redirectHosts)
+          current = checkUrl(next, opts.policy.redirectHosts, opts.policy.redirectHostSuffixes)
         } catch {
           throw new DownloadError(
             `${describeUrl(current)} redirected to ${next.protocol}//${next.host}, which is not an allowed host`

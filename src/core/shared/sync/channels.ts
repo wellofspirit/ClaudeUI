@@ -441,6 +441,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: false,
     why: "ADR-082 §4: a managed install's phase and bytes (`HarnessInstallProgress`), at most four a second per install. Replicated, not the volatile lane: the lane is scoped to watched sessions and an install belongs to none. It rings, so a reconnecting client can replay stale progress; `harness:state`'s `installs` is the truth, and a `done`/`failed` phase is always the last event of an install. No snapshot field."
   },
+  'voice:pack-changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: false,
+    why: "ADR-101 §6: the on-device speech pack's status (`VoicePackStatus`: missing, installing with bytes, ready, failed with why) on every state change and, while a download runs, at most four a second. Replicated, not the volatile lane: the lane is scoped to watched sessions and the pack belongs to the host, and a phone must see the install the desktop started (and the other way round). It rings, so a reconnecting client can replay stale progress; `voice:pack-status` is the truth, and the last event of an install is always a `ready`, `failed` or `missing` state. No snapshot field."
+  },
   'engine:models-changed': {
     cls: 'replicated',
     ring: true,

@@ -52,21 +52,39 @@ export function isValidInstall(id: HarnessId, version: string): boolean {
   )
 }
 
-export async function beginStaging(id: HarnessId, version: string): Promise<Staging> {
-  installDir(id, version) // validates the version as a directory name
-  const root = path.join(harnessStoreRoot(), STAGING_DIR)
+/** Suffix of the sibling directory that holds a staging payload's archives. */
+const DOWNLOADS_SUFFIX = '.downloads'
+
+/**
+ * Make `<storeRoot>/.staging/<label>-<random>/` (the payload that becomes the
+ * installed directory) and its sibling `….downloads/`, both marked `busy` so the
+ * caller's own sweep leaves them alone. Shared by the harness store and the
+ * speech-pack store.
+ */
+export async function beginStagingIn(
+  storeRoot: string,
+  busy: Set<string>,
+  label: string
+): Promise<{ payloadDir: string; downloadsDir: string }> {
+  const root = path.join(storeRoot, STAGING_DIR)
   await fsp.mkdir(root, { recursive: true })
-  const name = `${id}-${version}-${suffix()}`
+  const name = `${label}-${suffix()}`
   const payloadDir = path.join(root, name)
-  const downloadsDir = path.join(root, `${name}.downloads`)
+  const downloadsDir = path.join(root, `${name}${DOWNLOADS_SUFFIX}`)
   busy.add(payloadDir)
   busy.add(downloadsDir)
   await fsp.mkdir(payloadDir)
   await fsp.mkdir(downloadsDir)
-  return { id, version, payloadDir, downloadsDir }
+  return { payloadDir, downloadsDir }
 }
 
-async function removeTree(dir: string): Promise<boolean> {
+export async function beginStaging(id: HarnessId, version: string): Promise<Staging> {
+  installDir(id, version) // validates the version as a directory name
+  const dirs = await beginStagingIn(harnessStoreRoot(), busy, `${id}-${version}`)
+  return { id, version, ...dirs }
+}
+
+export async function removeTree(dir: string): Promise<boolean> {
   try {
     await fsp.rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
     return true
@@ -75,14 +93,27 @@ async function removeTree(dir: string): Promise<boolean> {
   }
 }
 
-/** Remove a staging area that was not committed. Never throws. */
-export async function discardStaging(staging: Staging): Promise<void> {
-  for (const dir of [staging.downloadsDir, staging.payloadDir]) {
-    if (!(await removeTree(dir))) {
-      logger.warn('harness', `could not remove ${dir}; it is cleaned up later`)
-    }
+/**
+ * Remove a staging area that was not committed, releasing its `busy` marks.
+ * Never throws. A directory that will not go (an open handle) is left for the
+ * stale sweep, and `onStuck` says so.
+ */
+export async function discardStagingIn(
+  dirs: { payloadDir: string; downloadsDir: string },
+  busy: Set<string>,
+  onStuck: (dir: string) => void
+): Promise<void> {
+  for (const dir of [dirs.downloadsDir, dirs.payloadDir]) {
+    if (!(await removeTree(dir))) onStuck(dir)
     busy.delete(dir)
   }
+}
+
+/** Remove a staging area that was not committed. Never throws. */
+export function discardStaging(staging: Staging): Promise<void> {
+  return discardStagingIn(staging, busy, (dir) =>
+    logger.warn('harness', `could not remove ${dir}; it is cleaned up later`)
+  )
 }
 
 const RETRYABLE = new Set(['EPERM', 'EACCES', 'EBUSY'])
@@ -109,21 +140,57 @@ export async function renameWithRetry(
 }
 
 /**
- * Rename `dir` into `.trash/` and try to delete it there. Throws when the
- * rename fails (something holds a file in it); a failed delete is left for
- * `cleanStaleEntries`.
+ * Rename `dir` into `<storeRoot>/.trash/` and return where it went, WITHOUT
+ * deleting it: the rename is the only part that has to happen while something
+ * else (a running worker with the files open) is held off, and deleting a
+ * 650 MB tree can wait. Throws when the rename fails (something holds a file in
+ * it). The returned entry is marked `busy`; finish with {@link deleteTrashed}.
  */
-export async function moveToTrash(dir: string, label: string): Promise<void> {
-  const trash = path.join(harnessStoreRoot(), TRASH_DIR)
+export async function moveAsideIn(
+  storeRoot: string,
+  busy: Set<string>,
+  dir: string,
+  label: string
+): Promise<string> {
+  const trash = path.join(storeRoot, TRASH_DIR)
   await fsp.mkdir(trash, { recursive: true })
   const target = path.join(trash, `${label}-${suffix()}`)
   busy.add(target)
   try {
     await renameWithRetry(dir, target)
-    await removeTree(target)
-  } finally {
+  } catch (err) {
     busy.delete(target)
+    throw err
   }
+  return target
+}
+
+/** Delete what {@link moveAsideIn} moved; a failed delete is left for the stale sweep. Never throws. */
+export async function deleteTrashed(busy: Set<string>, trashed: string): Promise<void> {
+  try {
+    await removeTree(trashed)
+  } finally {
+    busy.delete(trashed)
+  }
+}
+
+/**
+ * {@link moveAsideIn} then delete. A failed delete is left for the stale sweep.
+ * `busy` is the caller's set of entries its sweep must skip (the harness store
+ * has one, the speech-pack store another).
+ */
+export async function moveToTrashIn(
+  storeRoot: string,
+  busy: Set<string>,
+  dir: string,
+  label: string
+): Promise<void> {
+  await deleteTrashed(busy, await moveAsideIn(storeRoot, busy, dir, label))
+}
+
+/** {@link moveToTrashIn} for the harness store. */
+export function moveToTrash(dir: string, label: string): Promise<void> {
+  return moveToTrashIn(harnessStoreRoot(), busy, dir, label)
 }
 
 export type CommitOutcome = 'installed' | 'satisfied'
@@ -206,13 +273,19 @@ function lastTouched(dir: string): number {
 }
 
 /**
- * Remove `.staging` and `.trash` entries untouched for `STALE_AFTER_MS`, other
- * than ones this process is using. Returns how many were removed. Never throws.
+ * Remove `<storeRoot>/.staging` and `.trash` entries untouched for
+ * `STALE_AFTER_MS` (an install's payload and downloads directories count as one),
+ * other than the `busy` ones (this process is using them).
+ * Returns how many were removed. Never throws.
  */
-export async function cleanStaleEntries(now: number = Date.now()): Promise<number> {
+export async function cleanStaleEntriesIn(
+  storeRoot: string,
+  busy: ReadonlySet<string>,
+  now: number = Date.now()
+): Promise<number> {
   let removed = 0
   for (const sub of [STAGING_DIR, TRASH_DIR]) {
-    const root = path.join(harnessStoreRoot(), sub)
+    const root = path.join(storeRoot, sub)
     let names: string[]
     try {
       names = fs.readdirSync(root)
@@ -221,9 +294,23 @@ export async function cleanStaleEntries(now: number = Date.now()): Promise<numbe
     }
     for (const name of names) {
       const entry = path.join(root, name)
-      if (busy.has(entry) || now - lastTouched(entry) < STALE_AFTER_MS) continue
+      // A staging payload and its `….downloads` sibling are ONE install: its big
+      // files stream into the downloads directory, so the payload can sit
+      // untouched for hours on a slow link while the install is alive. Each is
+      // fresh while the other is, and busy while the other is.
+      const partnerName = name.endsWith(DOWNLOADS_SUFFIX)
+        ? name.slice(0, -DOWNLOADS_SUFFIX.length)
+        : `${name}${DOWNLOADS_SUFFIX}`
+      const partner = path.join(root, partnerName)
+      if (busy.has(entry) || busy.has(partner)) continue
+      if (now - Math.max(lastTouched(entry), lastTouched(partner)) < STALE_AFTER_MS) continue
       if (await removeTree(entry)) removed++
     }
   }
   return removed
+}
+
+/** {@link cleanStaleEntriesIn} for the harness store. */
+export function cleanStaleEntries(now: number = Date.now()): Promise<number> {
+  return cleanStaleEntriesIn(harnessStoreRoot(), busy, now)
 }

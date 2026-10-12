@@ -11,6 +11,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { onHostPlatform } from '../../../test/helpers/host-platform'
 import { foldOutputs, normalizeTranscript } from '../../../test/helpers/opencode-v2-transcript'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { clearSyncSubscribersForTests } from '../../services/sync-host'
@@ -317,6 +318,13 @@ function makeSession(opts: Record<string, unknown> = {}): OpencodeSession {
   subscribeWindowToSync(win)
   return new OpencodeSession('route-1', null, CWD, { model: 'openai/gpt-x', ...opts })
 }
+
+describe('OpencodeSession voice capability (ADR-101 §8)', () => {
+  it('follows the host: on where the speech pack has a runtime, off where it has none', () => {
+    expect(onHostPlatform('linux', 'x64', () => makeSession().capabilities.voice)).toBe(true)
+    expect(onHostPlatform('freebsd', 'x64', () => makeSession().capabilities.voice)).toBe(false)
+  })
+})
 
 const flush = async (n = 30) => {
   for (let i = 0; i < n; i++) await new Promise((resolve) => setImmediate(resolve))

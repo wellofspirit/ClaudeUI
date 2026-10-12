@@ -138,8 +138,12 @@ export interface ISession {
    * Voice input (gated by capabilities.voice): the transcription server only.
    * Captures are owned by the client holding the microphone and relayed by
    * `services/voice-relay.ts`, which starts the server through this.
+   *
+   * `startFields` ride on `voice_start` beside the language: the on-device server
+   * (opencode, pi, Codex — ADR-101) needs its per-spawn `token` there; cli.js's
+   * own server (Claude) takes none.
    */
-  voiceStartServer?(): Promise<{ port: number }>
+  voiceStartServer?(): Promise<{ port: number; startFields?: Record<string, unknown> }>
   voiceStopServer?(): Promise<void>
 
   /**

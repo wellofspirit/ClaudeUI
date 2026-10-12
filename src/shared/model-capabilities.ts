@@ -939,7 +939,10 @@ export const CLAUDE_ENGINE_CAPABILITIES: EngineCapabilities = {
 }
 
 export const CODEX_ENGINE_CAPABILITIES: EngineCapabilities = {
-  voice: false,
+  // On-device speech-to-text (ADR-101). Static `true`; CodexSession ANDs the host's
+  // `voicePackPlatformKey() !== null` — a platform the speech runtime does not
+  // cover cannot offer the download.
+  voice: true,
   // ClaudeUI's three hosted UI tools (render_mermaid / create_mockup /
   // show_mockup) run over Codex's native dynamic-tool channel — declared on
   // `thread/start`, called back as `item/tool/call`
@@ -1165,7 +1168,9 @@ export function resolveClaudeCapabilities(
  * queue+steer:true — opencode 2.x's native inbox (ADR-097 §9): a prompt sent
  * while busy is posted at once under a ClaudeUI id as a `steer` (folded in at the
  * next step boundary, ADR-053 §1) and stays cancellable until delivered, so
- * take-back is a real dequeue. voice deferred.
+ * take-back is a real dequeue.
+ * voice:true — on-device speech-to-text (ADR-101), the same worker as pi and Codex;
+ * OpencodeSession ANDs the host's `voicePackPlatformKey() !== null`.
  * subagents:true (Phase 8d) — opencode's `task` tool spawns child sessions whose
  * transcripts stream on the shared SSE; the event-mapper routes them to
  * session:subagent-* events keyed by the parent task part's callID.
@@ -1176,7 +1181,7 @@ export function resolveClaudeCapabilities(
  * engine-hardening-plan.md Item 1 / ADR-030 (capability honesty).
  */
 export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
-  voice: false,
+  voice: true,
   hostedMcp: true,
   backgroundTasks: false,
   subagents: true,
@@ -1363,8 +1368,10 @@ export function resolveOpencodeCapabilitiesFromModel(m?: {
  *     a per-agent Stop (`PiSession.stopTask`). "Send to background" stays
  *     inert: it also needs `activeTasks[id].isBackgrounded === false`, which
  *     pi never sends. Background runs themselves arrive in S3.
- *   - voice → unwired; a dedicated follow-up once its RPC surface is wired the
- *     same way OpencodeSession's was.
+ *   - voice → true since ADR-101: pi has no transcription of its own, so the
+ *     session starts the host's on-device worker (`BaseSession.voiceStartServer`)
+ *     and PiSession's `capabilities` getter ANDs `voicePackPlatformKey() !== null`
+ *     (installed or not — the first press offers the download).
  *   - subagents → HOST-RUN (ADR-089, superseding M5b's in-pi extension): the
  *     bridge's own `agent` tool (pi-bridge-source.ts v9, gated on
  *     CLAUDEUI_PI_AGENT_TOOL) calls back over `/hosted-tool`, and PiSession's
@@ -1389,7 +1396,7 @@ export function resolveOpencodeCapabilitiesFromModel(m?: {
  *     OpencodeSession's identical AND at session build — ADR-030/033 M4-A).
  */
 export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
-  voice: false,
+  voice: true,
   hostedMcp: true,
   backgroundTasks: true,
   subagents: true,

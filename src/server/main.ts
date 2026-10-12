@@ -62,6 +62,8 @@ import {
   setHostPicker
 } from '../core/host'
 import { logger } from '../core/services/logger'
+import { localVoiceServer, setVoiceWorkerLauncher } from '../core/voice/local-voice-server'
+import { serverVoiceWorkerLauncher } from './voice-worker-launcher'
 import { CliError, HELP_TEXT, parseServerArgs, type ServerOptions } from './cli'
 import { runFirstBootChain } from './first-boot'
 import { PASSWORD_SET_CONFIRMATION, readNewPassword, stdinSecretIo } from './set-password'
@@ -236,6 +238,17 @@ async function main(): Promise<void> {
     return
   }
 
+  // The on-device speech worker (ADR-101 §4): this same executable, relaunched by
+  // the server's own `localVoiceServer`. It needs no database, no host adapter and
+  // no service graph, and must put exactly one line on stdout — so it runs before
+  // all of them, and the import is dynamic to keep the model-runtime code out of
+  // every other command's startup.
+  if (options.command === 'voice-worker') {
+    const { runVoiceWorker } = await import('../core/voice/worker/main')
+    await runVoiceWorker({ argv: options.workerArgs })
+    return
+  }
+
   // `set-password` reads the secret BEFORE anything else boots, and the ordering
   // is deliberate. A mismatch or an empty entry then costs nothing at all — not
   // even a database file, which is what makes "nothing was changed" literally
@@ -291,6 +304,10 @@ async function main(): Promise<void> {
   }
 
   installHostAdapters()
+  // opencode / pi / Codex voice input runs in a worker that is this executable
+  // again (ADR-101 §4); declared here, as the SQLite driver is, because the
+  // launch command depends on how THIS entrypoint was started.
+  setVoiceWorkerLauncher(serverVoiceWorkerLauncher())
 
   // Imported after the adapters are wired: these modules pull in the service
   // graph, and a static import would run their module bodies before
@@ -405,6 +422,10 @@ async function main(): Promise<void> {
     if (stopping) return
     stopping = true
     codexAuthProvider.dispose()
+    // The speech worker (~0.8 GB while loaded): it exits on its own when this
+    // process's pipe closes, but a signalled shutdown should not leave it to the
+    // OS. Fire-and-forget like `anchor.stop()`; the exit below is bounded.
+    void localVoiceServer.stop()
     // The usage hub's timers (ADR-072 §7) before anything slower: a push in
     // flight is idempotent on the hub, so nothing waits on it.
     core.usageHubClient.stop()

@@ -44,6 +44,7 @@ import { ModelPicker } from '../shared/InlinePickers'
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
 import { OpencodeAgentsSection } from './OpencodeAgents'
 import { MicrophoneSetting } from './MicrophoneSetting'
+import { VoicePackSetting, VoicePreviewSetting } from './VoicePackSetting'
 import { TrustListsSection } from './TrustLists'
 import {
   RemoteAccessSection,
@@ -2200,6 +2201,23 @@ export const SECTIONS: Section[] = [
         label: 'Microphone',
         keywords: 'voice microphone mic input device bluetooth headset airpods test level',
         render: (s) => <MicrophoneSetting enabled={s.voiceEnabled} />
+      },
+      {
+        // The HOST's, not a synced setting: one model per host serves every
+        // client (ADR-101 §6). Not dimmed when voice is off — removing 700 MB is
+        // a reasonable thing to do exactly then.
+        key: 'voiceModel',
+        label: 'On-device speech model',
+        keywords:
+          'voice speech model download install remove on-device local offline parakeet opencode pi codex',
+        render: () => <VoicePackSetting />
+      },
+      {
+        // Per client (localStorage) like the microphone: no appDefault / Reset.
+        key: 'voicePreview',
+        label: 'Live preview while speaking',
+        keywords: 'voice preview live interim words as you speak streaming on-device',
+        render: (s) => <VoicePreviewSetting enabled={s.voiceEnabled} />
       }
     ]
   },

@@ -18,7 +18,8 @@
  * finalize timeout to be got subtly wrong, and both were bugs here already.
  *
  * Protocol (client → server):
- *   {"type":"voice_start","language":"en"}
+ *   {"type":"voice_start","language":"en"}   (+ the owner's `startFields`, e.g. the
+ *                                             on-device server's token and preview flag)
  *   {"type":"audio","data":"<base64 PCM>"}
  *   {"type":"voice_stop"}
  *
@@ -56,7 +57,11 @@ import type { VoiceNoticeTone, VoiceState } from '../../shared/types'
 
 /** How long a connected voice socket may wait for the server's `ready`. */
 export const READY_TIMEOUT_MS = 10_000
-/** How long a stopped capture may wait for the server's `closed`. */
+/**
+ * How long a stopped capture may wait for the server's `closed`, before any
+ * allowance for the audio relayed (see {@link finalizeTimeoutMs}). cli.js's own
+ * server answers inside 5 s, so this is the floor.
+ */
 const FINALIZE_TIMEOUT_MS = 8_000
 /**
  * The shortest capture an empty result is worth explaining. A blip of a press
@@ -86,12 +91,37 @@ export function pcm16LevelLe(chunk: Buffer): number {
   return pcm16Level(samples)
 }
 
+/**
+ * The finalize safety net for a capture that relayed `relayedBytes` of audio: the
+ * 8 s floor plus 250 ms per second of speech. cli.js's server finalizes from a
+ * streaming transcript and answers in about a second whatever the length; the
+ * on-device server (ADR-101) decodes the WHOLE utterance on release, which takes
+ * ~0.5 s at 15 s of speech and ~2 s at a minute, and a fixed 8 s would eventually
+ * cut a long dictation off with its answer still coming. A minute gets 23 s.
+ */
+function finalizeTimeoutMs(relayedBytes: number): number {
+  return FINALIZE_TIMEOUT_MS + Math.ceil(relayedBytes / PCM_BYTES_PER_MS / 4)
+}
+
 /** Above this a chunk counts as signal (cli.js: `hadAudioSignal`). */
 const SIGNAL_LEVEL = 0.01
 
 interface VoiceServerConnection {
   socket: net.Socket
   rl: readline.Interface
+}
+
+/**
+ * Thrown by {@link VoiceStreamClient.reacquireEndpoint} once it has already told
+ * the owner why the start cannot go on (the speech model is missing, which is
+ * answered with the download offer). The client then ends quietly: no second,
+ * generic "failed to connect" on top of the real reason.
+ */
+export class VoiceStartReported extends Error {
+  constructor() {
+    super('voice start already reported to the owner')
+    this.name = 'VoiceStartReported'
+  }
 }
 
 export abstract class VoiceStreamClient {
@@ -170,6 +200,26 @@ export abstract class VoiceStreamClient {
    */
   protected abstract emitError(message: string, tone?: VoiceNoticeTone): void
 
+  /**
+   * A fresh endpoint for the server, or null when there is no second chance.
+   * Asked at most ONCE per start, only after a connect REFUSAL: the on-device
+   * server idle-exits ten minutes after its last capture, so the port a start was
+   * handed can be gone by the time the socket opens, and the next acquire spawns
+   * a worker (new port, new token). Retrying here — inside the connect step —
+   * keeps it invisible to the owner: a retry done above would have to start over
+   * after the failure had already reported `idle`. The default has no second chance.
+   *
+   * Rejecting reports THAT reason to the owner; rejecting with
+   * {@link VoiceStartReported} means the implementation already told the owner
+   * (the download offer) and the client just ends.
+   */
+  protected async reacquireEndpoint(): Promise<{
+    port: number
+    startFields?: Record<string, unknown>
+  } | null> {
+    return null
+  }
+
   // -- Lifecycle ---------------------------------------------------------------
 
   /** Update the voice server port (e.g., after the engine respawned). */
@@ -189,8 +239,16 @@ export abstract class VoiceStreamClient {
    * flushed in order ahead of live audio once the server reports `ready`. The
    * relay passes none: a renderer holds its own pre-arm queue until the start
    * resolves, and anything pushed after that is buffered here like live audio.
+   *
+   * `startFields` ride on `voice_start` beside the language: the on-device server
+   * reads a `token` and a `preview` flag there, and cli.js ignores unknown fields.
+   * They never override `type` or `language`.
    */
-  async startRecording(language: string, earlyBuffer: Buffer[] = []): Promise<void> {
+  async startRecording(
+    language: string,
+    earlyBuffer: Buffer[] = [],
+    startFields: Record<string, unknown> = {}
+  ): Promise<void> {
     // Only start from a clean idle state. Previously `connecting` was also
     // admitted, but a second startRecording during the connect window builds a
     // second socket that orphans the first; the first socket's eventual 'close'
@@ -213,7 +271,24 @@ export abstract class VoiceStreamClient {
 
     try {
       // Connect to the voice server in cli.js
-      const conn = await this.connect()
+      let conn: VoiceServerConnection
+      try {
+        conn = await this.connect()
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code !== 'ECONNREFUSED' || gen !== this.startGen) {
+          throw err
+        }
+        // A reacquire that FAILS reports its own reason (a missing speech pack, a
+        // worker that would not start), not the refusal that led here.
+        const next = await this.reacquireEndpoint()
+        // Cancelled while asking (a stop-and-release, a newer start): touch
+        // nothing — not the port, not a socket — the outer catch stays silent.
+        if (gen !== this.startGen) throw err
+        if (!next) throw err
+        this.port = next.port
+        startFields = next.startFields ?? {}
+        conn = await this.connect()
+      }
 
       // A cleanup during the connect window (owner death, a failure) already
       // reported idle. Adopting this socket would resurrect a capture nobody is
@@ -237,7 +312,7 @@ export abstract class VoiceStreamClient {
       })
 
       // Send voice_start command
-      this.sendToServer({ type: 'voice_start', language })
+      this.sendToServer({ ...startFields, type: 'voice_start', language })
 
       // A server that accepts the socket but never says `ready` (Deepgram never
       // answering) would otherwise leave the owner in `connecting` forever —
@@ -263,6 +338,11 @@ export abstract class VoiceStreamClient {
     } catch (err) {
       // A superseded start's failed connect is not this capture's failure.
       if (gen !== this.startGen) return
+      // The owner has already been told why (see VoiceStartReported).
+      if (err instanceof VoiceStartReported) {
+        this.cleanup()
+        return
+      }
       const msg = err instanceof Error ? err.message : String(err)
       logger.error(this.logSource, `Failed to start recording: ${msg}`)
       this.emitError(`Failed to connect to voice server: ${msg}`)
@@ -297,8 +377,9 @@ export abstract class VoiceStreamClient {
     this.setState('processing')
     this.sendToServer({ type: 'voice_stop' })
 
-    // Safety: if cli.js doesn't send 'closed' within 8s, force cleanup.
-    // hb8's safety timeout is 5s, so 8s gives plenty of margin.
+    // Safety: if the server doesn't send 'closed' in time, force cleanup. cli.js's
+    // own safety timeout is 5s, so the 8s floor gives plenty of margin; the audio
+    // allowance is for the on-device server's whole-utterance pass.
     //
     // CLEARED by cleanup(), which is what the normal path takes seconds
     // earlier when `closed` arrives. Left armed, it holds the event loop open
@@ -312,7 +393,7 @@ export abstract class VoiceStreamClient {
         logger.warn(this.logSource, 'Finalization timeout — forcing cleanup')
         this.cleanup()
       }
-    }, FINALIZE_TIMEOUT_MS)
+    }, finalizeTimeoutMs(this.relayedBytes))
     // The server will send remaining transcripts, then 'closed'
   }
 

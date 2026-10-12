@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 vi.mock('electron', async () => import('@test/stubs/electron-shim'))
 
 import { createElement } from 'react'
-import { render, cleanup } from '@testing-library/react'
+import { act, render, cleanup } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { useClaudeEvents } from '../useClaudeEvents'
 import { useSessionStore } from '../../stores/session-store'
@@ -37,6 +37,8 @@ import {
   voiceController,
   VOICE_OWNERSHIP_WINDOW_MS
 } from '../../lib/voice/voice-controller'
+import { resetVoicePackStoreForTests, useVoicePackStore } from '../../lib/voice/voice-pack-store'
+import type { VoicePackState, VoicePackStatus } from '../../../../shared/voice-pack'
 
 let app: TestApp
 
@@ -1362,6 +1364,120 @@ describe('useClaudeEvents extended component tests', () => {
 
       expect(noticeOf(routingId)).toMatchObject({ text: 'error 2' })
       expect(useSessionStore.getState().sessions[routingId].errors).toEqual([])
+    })
+
+    // ADR-101 §6: the action rides as data, like the tone — and the refusal that
+    // carries it ends the start quietly in main, so THIS client's microphone,
+    // opened before the start, has to be stopped here.
+    describe('the install-voice-pack action', () => {
+      const MODEL_TEXT = 'Voice input for this engine needs the on-device speech model (~700 MB)'
+
+      it('reaches the notice as data, with its tone', () => {
+        app.emit('voice:error', 'route-1', MODEL_TEXT, 'warn', 'install-voice-pack')
+        expect(noticeOf('route-1')).toMatchObject({
+          text: MODEL_TEXT,
+          tone: 'warn',
+          action: 'install-voice-pack'
+        })
+      })
+
+      it('stops this client’s live capture for that session, with no notice of its own', () => {
+        const stop = vi.spyOn(voiceController(), 'stopIfCapturing').mockResolvedValue()
+        app.emit('voice:error', 'route-1', MODEL_TEXT, 'warn', 'install-voice-pack')
+        expect(stop).toHaveBeenCalledTimes(1)
+        expect(stop).toHaveBeenCalledWith('route-1')
+        // The refusal IS the notice: nothing else was raised.
+        expect(noticeOf('route-1')).toMatchObject({ text: MODEL_TEXT })
+        expect(useVoiceNoticeStore.getState().notices).toEqual({
+          'route-1': expect.objectContaining({ text: MODEL_TEXT })
+        })
+      })
+
+      it('a failing stop does not surface (the capture is halted either way)', async () => {
+        vi.spyOn(voiceController(), 'stopIfCapturing').mockRejectedValue(
+          new Error('transport gone')
+        )
+        expect(() =>
+          app.emit('voice:error', 'route-1', MODEL_TEXT, 'warn', 'install-voice-pack')
+        ).not.toThrow()
+        await Promise.resolve()
+        expect(noticeOf('route-1')).toMatchObject({ text: MODEL_TEXT })
+      })
+
+      it('keys on the action, not the wording: a plain notice with the same text stops nothing', () => {
+        const stop = vi.spyOn(voiceController(), 'stopIfCapturing').mockResolvedValue()
+        app.emit('voice:error', 'route-1', MODEL_TEXT, 'warn')
+        app.emit('voice:error', 'route-1', 'No speech detected', 'info')
+        expect(stop).not.toHaveBeenCalled()
+        expect(noticeOf('route-1')).not.toHaveProperty('action')
+      })
+
+      it('a session this client never captured for shows nothing and stops nothing', () => {
+        const stop = vi.spyOn(voiceController(), 'stopIfCapturing').mockResolvedValue()
+        app.emit('voice:error', 'route-2', MODEL_TEXT, 'warn', 'install-voice-pack')
+        expect(noticeOf('route-2')).toBeNull()
+        expect(stop).not.toHaveBeenCalled()
+      })
+    })
+  })
+
+  // ADR-101 §6: the speech pack's status is replicated; the client store follows it.
+  describe('voice:pack-changed', () => {
+    it('lands in the voice pack store, replacing the last status', () => {
+      resetVoicePackStoreForTests()
+      const status = (state: VoicePackState): VoicePackStatus => ({
+        state,
+        packId: 'parakeet-tdt-0.6b-v2-int8',
+        label: 'Parakeet TDT 0.6B v2 (English)',
+        approxBytes: 700_000_000
+      })
+      app.emit('voice:pack-changed', status('installing'))
+      expect(useVoicePackStore.getState().status?.state).toBe('installing')
+      app.emit('voice:pack-changed', status('ready'))
+      expect(useVoicePackStore.getState().status?.state).toBe('ready')
+    })
+  })
+
+  // S3: events are lost to a full resync, a host restart or a ring overflow, and a
+  // pill that last heard "Downloading… 42%" would sit there for good. Every
+  // answered sync re-reads the status (which is also the first read).
+  describe('voice:pack-status after an answered sync', () => {
+    const status = (state: VoicePackState): VoicePackStatus => ({
+      state,
+      packId: 'parakeet-tdt-0.6b-v2-int8',
+      label: 'Parakeet TDT 0.6B v2 (English)',
+      approxBytes: 700_000_000
+    })
+
+    it('re-reads the status, replacing a stale one', async () => {
+      resetVoicePackStoreForTests()
+      const reads = vi.fn(() => status('missing'))
+      app.bridge.ipcMain.handle('voice:pack-status', reads)
+      app.emit('voice:pack-changed', {
+        ...status('installing'),
+        progress: { receivedBytes: 42, totalBytes: 100 }
+      })
+      expect(useVoicePackStore.getState().status?.state).toBe('installing')
+
+      // The host restarted: the install is gone, and no event said so.
+      act(() => {
+        app.syncClient.applyFullState({ seq: 1 } as never, 'epoch-2', 1)
+      })
+      await vi.waitFor(() => expect(useVoicePackStore.getState().status?.state).toBe('missing'))
+      expect(reads).toHaveBeenCalled()
+    })
+
+    it('a host that cannot answer leaves the last status alone', async () => {
+      resetVoicePackStoreForTests()
+      app.bridge.ipcMain.handle('voice:pack-status', () => {
+        throw new Error('No handler registered for voice:pack-status')
+      })
+      app.emit('voice:pack-changed', status('ready'))
+      act(() => {
+        app.syncClient.applyFullState({ seq: 1 } as never, 'epoch-3', 1)
+      })
+      await vi.waitFor(() => expect(useVoicePackStore.getState().readFailed).toBe(true))
+      expect(useVoicePackStore.getState().status?.state).toBe('ready')
     })
   })
 

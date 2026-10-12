@@ -63,6 +63,7 @@ import type { EngineSpawnOptions } from '../providers/ISession'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { AccountIdentity } from '../../shared/account-key'
 import { resolveOpencodeCapabilities } from '../../shared/model-capabilities'
+import { voicePackPlatformKey } from '../../shared/voice-pack'
 import type {
   AttachmentUpload,
   ChatMessage,
@@ -481,7 +482,9 @@ export class OpencodeSession extends BaseSession {
     const base = resolveOpencodeCapabilities(getOpencodeModelCapabilities(providerID, modelID))
     return {
       ...base,
-      crossEngineDispatch: base.crossEngineDispatch && crossEngineDispatchAvailable('opencode')
+      crossEngineDispatch: base.crossEngineDispatch && crossEngineDispatchAvailable('opencode'),
+      // ADR-101 §8: the static flag is true; the host must have a speech runtime.
+      voice: base.voice && voicePackPlatformKey() !== null
     }
   }
 

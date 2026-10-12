@@ -7,6 +7,7 @@ import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions } from '../providers/ISession'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import { resolvePiCapabilities } from '../../shared/model-capabilities'
+import { voicePackPlatformKey } from '../../shared/voice-pack'
 import type {
   AttachmentUpload,
   AutoModeConfig,
@@ -366,7 +367,9 @@ export class PiSession extends BaseSession {
     return {
       ...this._capabilities,
       crossEngineDispatch:
-        this._capabilities.crossEngineDispatch && crossEngineDispatchAvailable('pi')
+        this._capabilities.crossEngineDispatch && crossEngineDispatchAvailable('pi'),
+      // ADR-101 §8: the static flag is true; the host must have a speech runtime.
+      voice: this._capabilities.voice && voicePackPlatformKey() !== null
     }
   }
 

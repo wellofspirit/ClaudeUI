@@ -11,6 +11,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import {
   GITHUB_RELEASES,
+  HUGGING_FACE,
   NPM_REGISTRY,
   checkUrl,
   downloadToFile,
@@ -47,6 +48,109 @@ describe('checkUrl', () => {
     'not a url'
   ])('refuses %s', (url) => {
     expect(() => checkUrl(url, ['registry.npmjs.org'])).toThrow()
+  })
+})
+
+describe('checkUrl with host suffixes', () => {
+  const check = (url: string): unknown =>
+    checkUrl(url, HUGGING_FACE.redirectHosts, HUGGING_FACE.redirectHostSuffixes)
+
+  it.each([
+    'https://us.aws.cdn.hf.co/xet-bridge-us/abc',
+    'https://eu.cdn.hf.co/x',
+    'https://a.b.c.cdn.hf.co/x',
+    'https://cas-bridge.xethub.hf.co/xet-bridge-us/abc',
+    'https://cdn-lfs.hf.co/repos/x',
+    'https://cdn-lfs.huggingface.co/repos/x',
+    'https://huggingface.co/api/resolve-cache/x'
+  ])('accepts %s', (url) => {
+    expect(check(url)).toBeInstanceOf(URL)
+  })
+
+  it.each([
+    'https://evil.cdn.hf.co.attacker.com/x',
+    'https://hf.co.evil/x',
+    'https://evilhf.co/x',
+    'https://evilhuggingface.co/x',
+    'https://hf.co/x',
+    'https://huggingface.co.attacker.com/x',
+    'https://huggingface.co.evil.test/x',
+    'https://us.aws.cdn.hf.co./x',
+    'http://us.aws.cdn.hf.co/x',
+    'https://us.aws.cdn.hf.co:8443/x',
+    'https://user:pw@us.aws.cdn.hf.co/x'
+  ])('refuses %s', (url) => {
+    expect(() => check(url)).toThrow(/not an allowed download host/)
+  })
+
+  it('names the suffix as a wildcard in the refusal', () => {
+    expect(() => check('https://evil.test/x')).toThrow(
+      /huggingface\.co, \*\.hf\.co, \*\.huggingface\.co/
+    )
+  })
+
+  it('does not widen anything for a caller that passes no suffixes', () => {
+    expect(() => checkUrl('https://us.aws.cdn.hf.co/x', ['huggingface.co'])).toThrow()
+  })
+})
+
+describe('downloadToFile with a suffix policy', () => {
+  const MODEL = 'https://huggingface.co/org/repo/resolve/abc/model.onnx'
+  const get = (f: ReturnType<typeof fakeFetch>) =>
+    downloadToFile(MODEL, path.join(tmp, 'model'), {
+      fetch: f.fetch,
+      policy: HUGGING_FACE,
+      maxBytes: 64
+    })
+
+  it('follows a redirect chain through huggingface.co to a regional CDN host', async () => {
+    const edge = 'https://us.aws.cdn.hf.co/xet-bridge-us/abc?sig=secret'
+    const f = fakeFetch({
+      [MODEL]: {
+        redirect: 'https://huggingface.co/api/resolve-cache/models/org/repo/abc/model.onnx'
+      },
+      'https://huggingface.co/api/resolve-cache/models/org/repo/abc/model.onnx': { redirect: edge },
+      [edge]: { body: 'weights' }
+    })
+    const result = await get(f)
+    expect(result.bytes).toBe(7)
+    expect(f.calls).toHaveLength(3)
+  })
+
+  it.each([
+    'https://evil.cdn.hf.co.attacker.com/x',
+    'https://hf.co.evil/x',
+    'https://evilhf.co/x',
+    'https://huggingface.co.attacker.com/x'
+  ])('refuses a redirect to %s without requesting it', async (target) => {
+    const f = fakeFetch({ [MODEL]: { redirect: target }, [target]: { body: 'x' } })
+    await expect(get(f)).rejects.toThrow(/which is not an allowed host/)
+    expect(f.calls).toEqual([MODEL])
+  })
+
+  it('applies the suffix to redirects only: a request may not START at a CDN host', async () => {
+    const f = fakeFetch({ 'https://us.aws.cdn.hf.co/x': { body: 'x' } })
+    await expect(
+      downloadToFile('https://us.aws.cdn.hf.co/x', path.join(tmp, 'a'), {
+        fetch: f.fetch,
+        policy: HUGGING_FACE,
+        maxBytes: 64
+      })
+    ).rejects.toThrow(/not an allowed download host/)
+    expect(f.calls).toEqual([])
+  })
+
+  it('leaves exact-match policies exact: a subdomain of a redirect host is still refused', async () => {
+    const f = fakeFetch({
+      [ASSET]: { redirect: 'https://cdn.release-assets.githubusercontent.com/x' }
+    })
+    await expect(
+      downloadToFile(ASSET, path.join(tmp, 'a'), {
+        fetch: f.fetch,
+        policy: GITHUB_RELEASES,
+        maxBytes: 64
+      })
+    ).rejects.toThrow(/not an allowed host/)
   })
 })
 

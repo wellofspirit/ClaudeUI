@@ -26,7 +26,9 @@ import {
 import { MobileConfigSheet } from './MobileConfigSheet'
 import { formatCostOrUnknown } from '../../../utils/cost'
 import { AgentTab } from '../../agents/AgentTab'
-import type { VoiceNotice } from '../../../lib/voice/voice-notice'
+import type { VoiceNoticeView } from '../../../lib/voice/voice-pack-notice'
+import { effectiveZoom } from '../../../lib/effective-zoom'
+import { useCancelGuard } from '../../../lib/voice/use-cancel-guard'
 
 export type { ModelDisplay }
 
@@ -148,9 +150,13 @@ export interface InputBoxViewProps {
   /** The live microphone is digitally silent while recording — the mic dims. */
   voiceSilent?: boolean
   /** The one voice message to show above the mic, or null. */
-  voiceNotice?: VoiceNotice | null
+  voiceNotice?: VoiceNoticeView | null
   /** The notice's linger ran out: remove notice `id` (and nothing newer). */
   onVoiceNoticeExpire?: (id: number) => void
+  /** The pill's Download button (the speech model is not installed, ADR-101 §6). */
+  onVoiceNoticeAction?: () => void
+  /** The pill's Cancel button, while the speech model downloads. */
+  onVoiceNoticeCancel?: () => void
   /** Subscribe to the live microphone level (0..1) for the recording mic's ring. */
   subscribeVoiceLevel?: (listener: (level: number) => void) => () => void
   statusLine: StatusLineData | null
@@ -317,8 +323,14 @@ const VOICE_RING_GROWTH = 0.45
  * — or for a notice that arrives while not held — it lingers
  * {@link VOICE_NOTICE_LINGER_MS}, fading out over the last
  * {@link VOICE_NOTICE_FADE_MS}, and is then removed. Hovering holds it; leaving
- * restarts the linger. A replacement (new `id`) restarts it too. Reduced motion:
- * no fade or entrance, the same timing.
+ * restarts the linger. A replacement (new `id`) restarts it too, and so does the
+ * same notice moving to another `phase`. Reduced motion: no fade or entrance, the
+ * same timing.
+ *
+ * A notice that asks something of the speaker (`button`) does not fade on release
+ * like an outcome: its `lingerMs` is longer (the offer, 30 s) or `null` (a running
+ * download, which stays until it ends). Its buttons are small inline text, with a
+ * 32 px tall hit area carried by negative margins so the pill keeps its height.
  *
  * Mounted only while there is a notice, so the hover state never outlives one.
  * It lives on the input box (above its top edge, where it covers nothing being
@@ -330,11 +342,15 @@ function VoiceNoticePill({
   notice,
   held,
   onExpire,
+  onAction,
+  onCancel,
   micRef
 }: {
-  notice: VoiceNotice
+  notice: VoiceNoticeView
   held: boolean
   onExpire?: (id: number) => void
+  onAction?: () => void
+  onCancel?: () => void
   micRef: React.RefObject<HTMLButtonElement | null>
 }): React.JSX.Element {
   const pillRef = useRef<HTMLDivElement>(null)
@@ -345,18 +361,20 @@ function VoiceNoticePill({
   const [tailRight, setTailRight] = useState<number | null>(null)
   const onExpireRef = useRef(onExpire)
   onExpireRef.current = onExpire
-  const { id, text, tone } = notice
+  const { id, text, tone, button, phase, dismissible, liveText } = notice
+  const cancelArmed = useCancelGuard(button === 'cancel')
+  const lingerMs = notice.lingerMs === undefined ? VOICE_NOTICE_LINGER_MS : notice.lingerMs
 
   useEffect(() => {
     setFading(false)
-    if (held || hovered) return
-    const fade = setTimeout(() => setFading(true), VOICE_NOTICE_LINGER_MS - VOICE_NOTICE_FADE_MS)
-    const expire = setTimeout(() => onExpireRef.current?.(id), VOICE_NOTICE_LINGER_MS)
+    if (held || hovered || lingerMs === null) return
+    const fade = setTimeout(() => setFading(true), lingerMs - VOICE_NOTICE_FADE_MS)
+    const expire = setTimeout(() => onExpireRef.current?.(id), lingerMs)
     return () => {
       clearTimeout(fade)
       clearTimeout(expire)
     }
-  }, [id, held, hovered])
+  }, [id, phase, lingerMs, held, hovered])
 
   // The box is the pill's own parent — read through the pill's ref, which is
   // attached before this layout effect runs (a parent's ref is not yet, when
@@ -368,9 +386,11 @@ function VoiceNoticePill({
       const boxRect = box?.getBoundingClientRect()
       const micRect = micRef.current?.getBoundingClientRect()
       if (!boxRect || !micRect || boxRect.width === 0) return
+      // Rects are page px; `right` / `max-width` are in the box's own (zoomed) px.
+      const zoom = effectiveZoom(box!, boxRect)
       setPlace({
-        right: Math.max(0, boxRect.right - micRect.right),
-        maxWidth: micRect.right - boxRect.left
+        right: Math.max(0, (boxRect.right - micRect.right) / zoom),
+        maxWidth: (micRect.right - boxRect.left) / zoom
       })
     }
     measure()
@@ -396,7 +416,11 @@ function VoiceNoticePill({
     const mic = micRef.current?.getBoundingClientRect()
     if (!pill || !mic || mic.width === 0) return
     const micCentre = mic.left + mic.width / 2
-    setTailRight(Math.round(pill.right - micCentre - VOICE_NOTICE_TAIL_PX / 2))
+    setTailRight(
+      Math.round(
+        (pill.right - micCentre) / effectiveZoom(pillRef.current!, pill) - VOICE_NOTICE_TAIL_PX / 2
+      )
+    )
   }, [place, micRef])
 
   const toneClass =
@@ -409,6 +433,10 @@ function VoiceNoticePill({
       data-fading={fading || undefined}
       role="status"
       aria-live="polite"
+      // Escape puts away a notice that asks something of the speaker (from its buttons).
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && dismissible) onExpireRef.current?.(id)
+      }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
@@ -429,7 +457,55 @@ function VoiceNoticePill({
           aria-hidden
           className={`w-1.5 h-1.5 shrink-0 rounded-full ${tone === 'info' ? 'bg-text-muted' : 'bg-warning'}`}
         />
-        <span>{text}</span>
+        {/* A text that changes too often to read out (a download's percentage)
+            is hidden from the screen reader, which gets the phase's stable line. */}
+        <span aria-hidden={liveText !== undefined || undefined} className="min-w-0">
+          {text}
+        </span>
+        {liveText !== undefined && <span className="sr-only">{liveText}</span>}
+        {button && (
+          <button
+            // Distinct keys: the Download button turning into Cancel is a NEW
+            // element, so focus (and a held Enter) does not carry over to it.
+            key={button}
+            type="button"
+            data-testid={
+              button === 'download' ? 'InputBox.voiceNoticeAction' : 'InputBox.voiceNoticeCancel'
+            }
+            onClick={() => {
+              if (button === 'download') onAction?.()
+              else if (cancelArmed()) onCancel?.()
+            }}
+            // 18 px of text line in a 32 px hit area: -7 px top and bottom keeps
+            // the pill's own height.
+            className="-my-[7px] min-h-[32px] shrink-0 cursor-default px-1.5 font-medium text-accent hover:text-accent-hover transition-colors"
+          >
+            {button === 'download' ? 'Download' : 'Cancel'}
+          </button>
+        )}
+        {dismissible && (
+          <button
+            type="button"
+            aria-label="Dismiss"
+            data-testid="InputBox.voiceNoticeDismiss"
+            onClick={() => onExpireRef.current?.(id)}
+            // Same 32 px hit-area trick as the buttons beside it; the icon is 8 px.
+            className="-my-[7px] -mr-2.5 -ml-1 flex min-h-[32px] min-w-[32px] shrink-0 cursor-default items-center justify-center text-text-muted hover:text-text-primary transition-colors"
+          >
+            <svg
+              aria-hidden
+              width="8"
+              height="8"
+              viewBox="0 0 10 10"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+            >
+              <path d="M1 1l8 8M9 1L1 9" />
+            </svg>
+          </button>
+        )}
       </div>
       {/* The tail, centred over the mic. */}
       <div
@@ -794,6 +870,8 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
               notice={props.voiceNotice}
               held={props.voiceHeld ?? false}
               onExpire={props.onVoiceNoticeExpire}
+              onAction={props.onVoiceNoticeAction}
+              onCancel={props.onVoiceNoticeCancel}
               micRef={micRef}
             />
           )}

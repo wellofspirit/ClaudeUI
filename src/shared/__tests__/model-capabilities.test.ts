@@ -45,9 +45,27 @@ import {
   OPENCODE_ENGINE_CAPABILITIES,
   CLAUDE_ENGINE_CAPABILITIES,
   PI_ENGINE_CAPABILITIES,
+  CODEX_ENGINE_CAPABILITIES,
+  resolveCodexCapabilities,
   piModelCapabilities,
   resolvePiCapabilitiesFromModel
 } from '../model-capabilities'
+
+describe('engine voice capability (ADR-101 §8)', () => {
+  it('is on for every engine in the static table — the host narrows it per platform', () => {
+    // opencode, pi and Codex transcribe on-device; Claude uses cli.js's server.
+    expect(CLAUDE_ENGINE_CAPABILITIES.voice).toBe(true)
+    expect(OPENCODE_ENGINE_CAPABILITIES.voice).toBe(true)
+    expect(PI_ENGINE_CAPABILITIES.voice).toBe(true)
+    expect(CODEX_ENGINE_CAPABILITIES.voice).toBe(true)
+  })
+
+  it('reaches the resolved capabilities of the on-device engines', () => {
+    expect(resolveOpencodeCapabilitiesFromModel().voice).toBe(true)
+    expect(resolvePiCapabilitiesFromModel().voice).toBe(true)
+    expect(resolveCodexCapabilities().voice).toBe(true)
+  })
+})
 
 describe('supportsAdaptiveThinking', () => {
   it('is true for opus-5 / opus-4-8 / opus-4-7 / opus-4-6 / sonnet-4-6 / sonnet-5', () => {
