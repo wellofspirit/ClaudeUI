@@ -58,14 +58,23 @@
 
 import { emitEvent, sendToStreamConnection } from './sync-host'
 import { logger } from './logger'
-import { VoiceStreamClient } from './voice-stream-client'
+import { VoiceStartReported, VoiceStreamClient } from './voice-stream-client'
 import { VOICE_UNSUPPORTED, voiceRefusal } from './voice-gate'
+import { isVoicePackMissing } from '../voice/local-voice-server'
+import { VOICE_PACK_APPROX_BYTES } from '../../shared/voice-pack'
 import type { SessionManager } from './session-manager'
 import type { HostWindowHandle } from '../host'
 import type { StreamEventFrame } from '../shared/sync/stream'
-import type { VoiceNoticeTone, VoiceState } from '../../shared/types'
+import type { VoiceNoticeAction, VoiceNoticeTone, VoiceState } from '../../shared/types'
 
 const LOG_SOURCE = 'VoiceRelay'
+
+/**
+ * The notice that offers the speech-model download (ADR-101 §6). Words only for
+ * the human: the pill's button keys on the `install-voice-pack` action, never on
+ * this text.
+ */
+export const VOICE_PACK_MISSING_MESSAGE = `Voice input for this engine needs the on-device speech model (~${Math.round(VOICE_PACK_APPROX_BYTES / 1e6)} MB)`
 
 /**
  * Cap on ONE decoded audio frame.
@@ -89,8 +98,10 @@ export interface VoiceDelivery {
   /**
    * A voice message for the notice pill. The tone ALWAYS rides the wire as the
    * channel's third argument, so the renderer never infers it from the wording.
+   * `action` is the button the pill offers with it, the fourth — likewise data,
+   * never wording.
    */
-  error(routingId: string, message: string, tone: VoiceNoticeTone): void
+  error(routingId: string, message: string, tone: VoiceNoticeTone, action?: VoiceNoticeAction): void
 }
 
 export interface VoiceOwner {
@@ -125,7 +136,11 @@ export function remoteVoiceOwner(connectionId: string): VoiceOwner {
       state: (routingId, state) => deliver('voice:state', [routingId, state]),
       transcript: (routingId, text, isFinal) =>
         deliver('voice:transcript', [routingId, { text, isFinal }]),
-      error: (routingId, message, tone) => deliver('voice:error', [routingId, message, tone])
+      error: (routingId, message, tone, action) =>
+        deliver(
+          'voice:error',
+          action ? [routingId, message, tone, action] : [routingId, message, tone]
+        )
     }
   }
 }
@@ -173,7 +188,11 @@ export function desktopVoiceOwner(win: HostWindowHandle): VoiceOwner {
       state: (routingId, state) => host.send('voice:state', [routingId, state]),
       transcript: (routingId, text, isFinal) =>
         host.send('voice:transcript', [routingId, { text, isFinal }]),
-      error: (routingId, message, tone) => emitEvent('voice:error', [routingId, message, tone])
+      error: (routingId, message, tone, action) =>
+        emitEvent(
+          'voice:error',
+          action ? [routingId, message, tone, action] : [routingId, message, tone]
+        )
     }
   }
 }
@@ -202,7 +221,16 @@ class RelayVoiceClient extends VoiceStreamClient {
      */
     private readonly getRoutingId: () => string,
     /** Called on every transition to `idle`, so the registry can retire us. */
-    private readonly onIdle: () => void
+    private readonly onIdle: () => void,
+    /**
+     * A fresh server endpoint for the one retry after a refused connect; only
+     * given for the on-device server, whose worker idle-exits (see
+     * {@link RelayVoiceClient.reacquireEndpoint}).
+     */
+    private readonly reacquire?: () => Promise<{
+      port: number
+      startFields?: Record<string, unknown>
+    }>
   ) {
     super(port, owner.logSource)
   }
@@ -228,6 +256,13 @@ class RelayVoiceClient extends VoiceStreamClient {
    */
   protected audioSourceFailureMessage(): string {
     return 'Failed to start audio capture.'
+  }
+
+  protected override async reacquireEndpoint(): Promise<{
+    port: number
+    startFields?: Record<string, unknown>
+  } | null> {
+    return this.reacquire ? this.reacquire() : null
   }
 
   protected emitState(state: VoiceState): void {
@@ -273,16 +308,21 @@ export class VoiceRelayRegistry {
   /**
    * Bind this owner's audio to `routingId`'s voice server and start relaying.
    *
-   * Claude-engine only (`capabilities.voice` — the voice server is a cli.js
-   * patch, so there is nothing to talk to on opencode or pi, or on a Claude Code
-   * binary without the patch). Throws on refusal: unlike the audio frames, the
-   * control verb is a request the caller is entitled to an answer to.
+   * Gated by `capabilities.voice`: Claude's server is a cli.js patch (absent on a
+   * binary without it); opencode, pi and Codex use the host's on-device worker
+   * (ADR-101), which needs the speech pack — a start without it ends with the
+   * download offer, not a throw (see below). Throws on refusal: unlike the audio
+   * frames, the control verb is a request the caller is entitled to an answer to.
+   *
+   * `opts.preview: false` turns the on-device server's live preview off for this
+   * capture (the client's setting); cli.js ignores it.
    */
   async start(
     manager: SessionManager,
     owner: VoiceOwner,
     routingId: string,
-    language?: string
+    language?: string,
+    opts: { preview?: boolean } = {}
   ): Promise<void> {
     if (typeof routingId !== 'string' || routingId === '') {
       throw new Error('voice:start requires a session id')
@@ -317,13 +357,27 @@ export class VoiceRelayRegistry {
       owner.delivery.state(liveRoutingId(), 'connecting')
     }
 
-    let server: { port: number }
+    let server: { port: number; startFields?: Record<string, unknown> }
     try {
       server = await session.voiceStartServer()
     } catch (err) {
       // Cancelled while spawning: the stop already answered; this is not its failure.
       if (this.pendingStarts.get(key)?.gen !== gen) return
       this.pendingStarts.delete(key)
+      // The speech model is not installed: not a failure of the start but a step
+      // the user has to take. The pill explains it and offers the download, so
+      // there is nothing to throw (a rejected start would put a second, generic
+      // message on top of it).
+      if (isVoicePackMissing(err)) {
+        owner.delivery.error(
+          liveRoutingId(),
+          VOICE_PACK_MISSING_MESSAGE,
+          'warn',
+          'install-voice-pack'
+        )
+        owner.delivery.state(liveRoutingId(), 'idle')
+        return
+      }
       owner.delivery.state(liveRoutingId(), 'idle')
       throw err
     }
@@ -336,21 +390,62 @@ export class VoiceRelayRegistry {
       throw new Error('Voice server failed to return a port')
     }
 
-    const client = new RelayVoiceClient(port, owner, liveRoutingId, () => {
-      // Retire only if we are still the live entry: a stop-then-start in the same
-      // tick would otherwise have the OLD client's idle transition delete the new
-      // one's registration and silently drop every frame that follows.
-      if (this.entries.get(key)?.client === client) this.entries.delete(key)
-    })
+    // The on-device worker idle-exits, so the port just handed out can be dead by
+    // the time the socket opens; the client asks for ONE fresh endpoint then.
+    // Only that server has start fields (the token), which is how it is told
+    // apart from cli.js's, whose port the session caches and would hand back.
+    const reacquire = server.startFields
+      ? async () => {
+          try {
+            const next = await session.voiceStartServer!()
+            return { port: next.port, startFields: this.startFieldsFor(next, opts) }
+          } catch (err) {
+            // The pack was removed since the first answer: the same offer a first
+            // start gets, and the client ends without a generic error on top.
+            if (!isVoicePackMissing(err)) throw err
+            owner.delivery.error(
+              liveRoutingId(),
+              VOICE_PACK_MISSING_MESSAGE,
+              'warn',
+              'install-voice-pack'
+            )
+            throw new VoiceStartReported()
+          }
+        }
+      : undefined
+    const client = new RelayVoiceClient(
+      port,
+      owner,
+      liveRoutingId,
+      () => {
+        // Retire only if we are still the live entry: a stop-then-start in the same
+        // tick would otherwise have the OLD client's idle transition delete the new
+        // one's registration and silently drop every frame that follows.
+        if (this.entries.get(key)?.client === client) this.entries.delete(key)
+      },
+      reacquire
+    )
     this.entries.set(key, { client })
 
     try {
-      await client.startRecording(language && language !== '' ? language : 'en')
+      await client.startRecording(
+        language && language !== '' ? language : 'en',
+        [],
+        this.startFieldsFor(server, opts)
+      )
     } catch (err) {
       this.entries.delete(key)
       client.destroy()
       throw err
     }
+  }
+
+  /** The server's own start fields, plus `preview: false` when this capture opted out. */
+  private startFieldsFor(
+    server: { startFields?: Record<string, unknown> },
+    opts: { preview?: boolean }
+  ): Record<string, unknown> {
+    return { ...server.startFields, ...(opts.preview === false ? { preview: false } : {}) }
   }
 
   /**

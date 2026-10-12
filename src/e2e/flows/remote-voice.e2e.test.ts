@@ -70,7 +70,12 @@ import {
   type CommandConnection
 } from '../../core/ipc/command-registry'
 import { STREAM_WATCH_COMMAND } from '../../core/ipc/stream-watch'
-import { remoteVoiceOwner, voiceRelay } from '../../core/services/voice-relay'
+import {
+  remoteVoiceOwner,
+  voiceRelay,
+  VOICE_PACK_MISSING_MESSAGE
+} from '../../core/services/voice-relay'
+import { VoicePackMissingError } from '../../core/voice/local-voice-server'
 import { emitEvent, syncCore } from '../../core/services/sync-host'
 import type { SessionManager } from '../../core/services/session-manager'
 import type { WsServerMessage, StreamEventFrame } from '../../shared/remote-protocol'
@@ -134,12 +139,23 @@ async function startFakeEngine(): Promise<FakeEngine> {
   }
 }
 
+/**
+ * Which kind of server the fake session reaches: cli.js's (no start fields), the
+ * on-device worker's (a token), or the on-device worker without its speech pack.
+ */
+let serverKind: 'cli' | 'on-device' | 'pack-missing' = 'cli'
+
 function fakeManager(): SessionManager {
   return {
     get: (routingId: string) => ({
       routingId,
       capabilities: { voice: true },
-      voiceStartServer: async () => ({ port: engine.port })
+      voiceStartServer: async () => {
+        if (serverKind === 'pack-missing') throw new VoicePackMissingError()
+        return serverKind === 'on-device'
+          ? { port: engine.port, startFields: { token: 'e2e-token' } }
+          : { port: engine.port }
+      }
     })
   } as unknown as SessionManager
 }
@@ -158,12 +174,18 @@ beforeAll(async () => {
     transport: 'remote',
     sessionIdArg: 0,
     withConnection: true,
-    handler: async (connection: CommandConnection, routingId: string, language?: string) =>
+    handler: async (
+      connection: CommandConnection,
+      routingId: string,
+      language?: string,
+      opts?: { preview?: boolean } | null
+    ) =>
       voiceRelay.start(
         fakeManager(),
         remoteVoiceOwner(connection.connectionId),
         routingId,
-        language
+        language,
+        { preview: opts?.preview }
       )
   })
   registerCommand({
@@ -198,6 +220,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   engine.lines.length = 0
+  serverKind = 'cli'
 })
 
 async function connect(): Promise<{ client: RemoteClient; frames: WsServerMessage[] }> {
@@ -279,6 +302,43 @@ describe('E2E: remote voice input (phase 5 S3)', () => {
 
     await speaker.client.close()
     await bystander.client.close()
+  })
+
+  it('carries the on-device token and the preview opt-out on `voice_start` (ADR-101)', async () => {
+    serverKind = 'on-device'
+    const speaker = await connect()
+
+    await speaker.client.invoke('voice:start', ROUTING_ID, 'en', { preview: false })
+    await waitFor(() => engine.lines.some((l) => l.type === 'voice_start'))
+    expect(engine.lines[0]).toEqual({
+      token: 'e2e-token',
+      preview: false,
+      type: 'voice_start',
+      language: 'en'
+    })
+
+    await speaker.client.invoke('voice:stop')
+    await waitFor(() => laneFrames(speaker.frames, 'voice:state').some((f) => f.args[1] === 'idle'))
+    await speaker.client.close()
+  })
+
+  it('answers a start with no speech pack as a download offer on the lane, not an error', async () => {
+    serverKind = 'pack-missing'
+    const speaker = await connect()
+
+    await expect(speaker.client.invoke('voice:start', ROUTING_ID, 'en')).resolves.toBeUndefined()
+    await waitFor(() => laneFrames(speaker.frames, 'voice:error').length === 1)
+
+    // The action is the 4th argument — data, so the pill never keys on the words.
+    expect(laneFrames(speaker.frames, 'voice:error')[0].args).toEqual([
+      ROUTING_ID,
+      VOICE_PACK_MISSING_MESSAGE,
+      'warn',
+      'install-voice-pack'
+    ])
+    await waitFor(() => laneFrames(speaker.frames, 'voice:state').some((f) => f.args[1] === 'idle'))
+    expect(engine.lines).toEqual([])
+    await speaker.client.close()
   })
 
   it('refuses a stray audio frame from a connection with no capture — silently', async () => {

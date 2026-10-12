@@ -33,14 +33,33 @@
  */
 
 import * as os from 'node:os'
+import * as util from 'node:util'
+import { VOICE_TOKEN_ENV } from './protocol'
 import { loadSherpaRecognizer, type Recognizer } from './recognizer'
 import { createVoiceServer, realClock, type Clock } from './server'
 
-export const VOICE_TOKEN_ENV = 'CLAUDEUI_VOICE_TOKEN'
+// Defined in `protocol.ts` (import-free, shared with the host); re-exported here.
+export { VOICE_TOKEN_ENV }
 
 /** Half the cores, at least 2, at most 8: past that the int8 encoder stops scaling. */
 export function defaultThreads(parallelism: number = os.availableParallelism()): number {
   return Math.min(8, Math.max(2, Math.floor(parallelism / 2)))
+}
+
+/**
+ * Send `console.log` / `info` / `debug` to stderr. In the worker's real process
+ * stdout carries exactly one protocol line, and a stray log from any module
+ * (the server entry imports a large graph before this runs) must never become
+ * that line. `warn` and `error` already go to stderr.
+ */
+export function routeConsoleToStderr(
+  target: Pick<Console, 'log' | 'info' | 'debug'> = console,
+  stderr: { write(chunk: string): unknown } = process.stderr
+): void {
+  const toStderr = (...args: unknown[]): void => void stderr.write(util.format(...args) + '\n')
+  target.log = toStderr
+  target.info = toStderr
+  target.debug = toStderr
 }
 
 export interface VoiceWorkerOptions {
@@ -108,6 +127,9 @@ function parseArgs(rawArgv: string[]): ParsedArgs | string {
 }
 
 export async function runVoiceWorker(options: VoiceWorkerOptions = {}): Promise<VoiceWorkerResult> {
+  // First thing, before anything can log. Only in the real process: an injected
+  // stdout means a test, which must not rewrite the runner's console.
+  if (options.stdout === undefined) routeConsoleToStderr()
   const exit = options.exit ?? ((code: number) => process.exit(code))
   const stdout = options.stdout ?? process.stdout
   const stderr = options.stderr ?? process.stderr

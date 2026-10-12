@@ -97,6 +97,7 @@ vi.mock('readline', () => ({
 // --- Imports under test (after all mocks registered) ------------------------
 
 import {
+  VoiceStartReported,
   VoiceStreamClient,
   READY_TIMEOUT_MS,
   VOICE_NO_AUDIO_MESSAGE,
@@ -679,5 +680,168 @@ describe('VoiceStreamClient — the finalize timeout scales with the audio relay
     expect(client.currentState()).toBe('processing')
     vi.advanceTimersByTime(1)
     expect(client.currentState()).toBe('idle')
+  })
+})
+
+describe('VoiceStreamClient — the one retry after a refused connect (ADR-101)', () => {
+  type Endpoint = { port: number; startFields?: Record<string, unknown> }
+
+  /** A client whose reacquire is scripted by the test. */
+  class RetryClient extends RecordingClient {
+    reacquires = 0
+    constructor(
+      port: number,
+      private readonly answer: () => Promise<Endpoint | null>
+    ) {
+      super(port, () => 'routing-A')
+    }
+    protected override async reacquireEndpoint(): Promise<Endpoint | null> {
+      this.reacquires++
+      return this.answer()
+    }
+  }
+
+  const refuse = (): void => {
+    lastSocket!.emit(
+      'error',
+      Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })
+    )
+  }
+  const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+
+  beforeEach(() => {
+    lastSocket = null
+    lastReadline = null
+    connectMock.mockClear()
+  })
+
+  it('connects to the fresh endpoint with its fields, and the owner hears nothing in between', async () => {
+    const client = new RetryClient(1111, async () => ({
+      port: 2222,
+      startFields: { token: 'new' }
+    }))
+
+    const startP = client.startRecording('en', [], { token: 'old' })
+    refuse()
+    await tick()
+    expect(connectMock).toHaveBeenCalledTimes(2)
+    expect(connectMock).toHaveBeenLastCalledWith(2222, '127.0.0.1')
+    fireConnect()
+    await startP
+
+    expect(sentMessages()[0]).toEqual({ token: 'new', type: 'voice_start', language: 'en' })
+    expect(client.reacquires).toBe(1)
+    expect(client.states()).not.toContain('idle')
+    expect(client.emitted.filter(([channel]) => channel === 'voice:error')).toEqual([])
+  })
+
+  it('asks once: a second refusal is reported as it is', async () => {
+    const client = new RetryClient(1111, async () => ({ port: 2222 }))
+
+    const startP = client.startRecording('en')
+    refuse()
+    await tick()
+    refuse()
+    await startP
+
+    expect(client.reacquires).toBe(1)
+    expect(connectMock).toHaveBeenCalledTimes(2)
+    expect(client.emitted.filter(([channel]) => channel === 'voice:error')).toEqual([
+      ['voice:error', 'routing-A', 'Failed to connect to voice server: connect ECONNREFUSED']
+    ])
+    expect(client.states().at(-1)).toBe('idle')
+  })
+
+  it('does not ask without the hook, or for any failure but a refusal', async () => {
+    const plain = new RecordingClient(1111, () => 'routing-A')
+    const plainP = plain.startRecording('en')
+    refuse()
+    await plainP
+    expect(connectMock).toHaveBeenCalledTimes(1)
+
+    connectMock.mockClear()
+    const asked = vi.fn(async () => ({ port: 2222 }))
+    const client = new RetryClient(1111, asked)
+    const startP = client.startRecording('en')
+    lastSocket!.emit('error', Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' }))
+    await startP
+    expect(client.reacquires).toBe(0)
+    expect(connectMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports the reacquire failure, not the refusal that led to it', async () => {
+    const client = new RetryClient(1111, async () => {
+      throw new Error('The voice worker exited before it was ready (code 3)')
+    })
+
+    const startP = client.startRecording('en')
+    refuse()
+    await startP
+
+    expect(client.emitted.filter(([channel]) => channel === 'voice:error')).toEqual([
+      [
+        'voice:error',
+        'routing-A',
+        'Failed to connect to voice server: The voice worker exited before it was ready (code 3)'
+      ]
+    ])
+    expect(connectMock).toHaveBeenCalledTimes(1)
+    expect(client.states().at(-1)).toBe('idle')
+  })
+
+  it('ends quietly when the reacquire has already told the owner (VoiceStartReported)', async () => {
+    const client = new RetryClient(1111, async () => {
+      throw new VoiceStartReported()
+    })
+
+    const startP = client.startRecording('en')
+    refuse()
+    await startP
+
+    expect(client.emitted.filter(([channel]) => channel === 'voice:error')).toEqual([])
+    expect(client.states().at(-1)).toBe('idle')
+    expect(connectMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('a start cancelled during a slow reacquire opens no socket, moves no port, says nothing', async () => {
+    let answer!: (endpoint: Endpoint) => void
+    const client = new RetryClient(
+      1111,
+      () => new Promise<Endpoint>((resolve) => (answer = resolve))
+    )
+
+    const startP = client.startRecording('en')
+    refuse()
+    await tick()
+    expect(client.reacquires).toBe(1)
+
+    client.destroy()
+    const emittedAtCancel = client.emitted.length
+    answer({ port: 2222, startFields: { token: 'late' } })
+    await startP
+    await tick()
+
+    expect(connectMock).toHaveBeenCalledTimes(1)
+    expect((client as unknown as { port: number }).port).toBe(1111)
+    expect(client.emitted).toHaveLength(emittedAtCancel)
+    expect(client.states().at(-1)).toBe('idle')
+  })
+
+  it('a reacquire failing after the cancel is not reported either', async () => {
+    let fail!: (err: Error) => void
+    const client = new RetryClient(
+      1111,
+      () => new Promise<Endpoint>((_resolve, reject) => (fail = reject))
+    )
+    const startP = client.startRecording('en')
+    refuse()
+    await tick()
+
+    client.destroy()
+    const emittedAtCancel = client.emitted.length
+    fail(new Error('late failure'))
+    await startP
+
+    expect(client.emitted).toHaveLength(emittedAtCancel)
   })
 })

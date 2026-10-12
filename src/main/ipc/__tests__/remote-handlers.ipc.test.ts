@@ -307,6 +307,7 @@ import {
   SHELL_READ_VERBS
 } from '../../../core/services/step-up-tier'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
+import { voiceRelay } from '../../../core/services/voice-relay'
 import { sharedProviderService } from '../../../core/shared-providers'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import { resolveOpencodeSpawnModel } from '../../../core/opencode/model-discovery'
@@ -492,6 +493,48 @@ describe('registerRemoteHandlers', () => {
     await expect(
       dispatcher.handle(makeRequest('session:get-engine-models', 'gemini'), remoteConn)
     ).rejects.toThrow(/unknown engine/)
+  })
+
+  describe('voice:start (the REAL handler — the e2e flow declares its own copy)', () => {
+    const start = (...args: unknown[]) =>
+      dispatcher.handle(makeRequest('voice:start', ...args), remoteConn)
+
+    it("binds the calling connection's owner and passes the preview choice as the 5th relay argument", async () => {
+      const relay = vi.spyOn(voiceRelay, 'start').mockResolvedValue(undefined)
+      try {
+        await start('rid-1', 'en', { preview: false })
+
+        expect(relay).toHaveBeenCalledTimes(1)
+        const [manager, owner, routingId, language, opts] = relay.mock.calls[0]
+        expect(manager).toBe(sessionManagerStub)
+        expect(owner.key).toBe(remoteConn.connectionId)
+        expect([routingId, language]).toEqual(['rid-1', 'en'])
+        expect(opts).toEqual({ preview: false })
+      } finally {
+        relay.mockRestore()
+      }
+    })
+
+    it('leaves preview to the server when the argument is absent, null or malformed', async () => {
+      const relay = vi.spyOn(voiceRelay, 'start').mockResolvedValue(undefined)
+      try {
+        await start('rid-1', 'en')
+        await start('rid-1', null, null)
+        await start('rid-1', 'en', 'nope')
+        await start('rid-1', 'en', { preview: true })
+
+        expect(relay.mock.calls.map((call) => call[4])).toEqual([
+          { preview: undefined },
+          { preview: undefined },
+          { preview: undefined },
+          { preview: true }
+        ])
+        // null language is normalised the way it always was.
+        expect(relay.mock.calls[1][3]).toBeUndefined()
+      } finally {
+        relay.mockRestore()
+      }
+    })
   })
 
   // The model probe, title and commit message never run a turn that could use

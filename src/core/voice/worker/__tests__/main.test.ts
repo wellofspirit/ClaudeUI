@@ -10,7 +10,13 @@ import { EventEmitter } from 'node:events'
 import * as net from 'node:net'
 import type { Recognizer } from '../recognizer'
 import { IDLE_EXIT_MS, type Clock } from '../server'
-import { VOICE_TOKEN_ENV, defaultThreads, runVoiceWorker, type VoiceWorkerOptions } from '../main'
+import {
+  VOICE_TOKEN_ENV,
+  defaultThreads,
+  routeConsoleToStderr,
+  runVoiceWorker,
+  type VoiceWorkerOptions
+} from '../main'
 
 const TOKEN = 'c0ffee'.repeat(10)
 
@@ -274,5 +280,28 @@ describe('runVoiceWorker', () => {
     for (const text of [...bad.out, ...bad.err, ...ok.out, ...ok.err]) {
       expect(text).not.toContain(TOKEN)
     }
+  })
+})
+
+describe('stdout stays the protocol line (ADR-101)', () => {
+  it('routeConsoleToStderr sends log / info / debug to stderr, formatted', () => {
+    const written: string[] = []
+    const target = { log: console.log, info: console.info, debug: console.debug }
+
+    routeConsoleToStderr(target, { write: (chunk) => void written.push(chunk) })
+    target.log('loaded %s in %d ms', 'recognizer', 12)
+    target.info('info', { a: 1 })
+    target.debug('debug')
+
+    expect(written).toEqual(['loaded recognizer in 12 ms\n', 'info { a: 1 }\n', 'debug\n'])
+  })
+
+  it('runVoiceWorker with injected stdout leaves the process console alone (a test must not rewrite it)', async () => {
+    const before = [console.log, console.info, console.debug]
+    const h = harness()
+
+    await runVoiceWorker(h.options)
+
+    expect([console.log, console.info, console.debug]).toEqual(before)
   })
 })

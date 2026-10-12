@@ -46,6 +46,32 @@ describe('parseServerArgs', () => {
     expect(() => parseServerArgs(['set-password', '--tls'])).toThrow(/takes no options/)
   })
 
+  it('parses voice-worker and hands its arguments over UNPARSED (ADR-101)', () => {
+    // `--addon` / `--model` / `--threads` are the worker's, not the server's: run
+    // through the server's own option parser they would be rejected as unknown.
+    expect(
+      parseServerArgs([
+        'voice-worker',
+        '--addon',
+        'D:/store/sherpa',
+        '--model',
+        'D:/m',
+        '--threads',
+        '4'
+      ])
+    ).toEqual({
+      command: 'voice-worker',
+      disableAuth: false,
+      workerArgs: ['--addon', 'D:/store/sherpa', '--model', 'D:/m', '--threads', '4']
+    })
+    expect(parseServerArgs(['voice-worker']).workerArgs).toEqual([])
+  })
+
+  it('does not let a worker flag leak into the serve command', () => {
+    expect(() => parseServerArgs(['serve', '--addon', 'x'])).toThrow(CliError)
+    expect(() => parseServerArgs(['--addon', 'x'])).toThrow(CliError)
+  })
+
   it('refuses a password given as a POSITIONAL argument', () => {
     // The whole reason the secret is read from stdin: argv is world-readable in
     // the process list. `allowPositionals: false` is what makes this impossible,
@@ -150,7 +176,8 @@ describe('parseServerArgs', () => {
       '--disable-auth',
       '--help',
       'show-link',
-      'set-password'
+      'set-password',
+      'voice-worker'
     ]) {
       expect(HELP_TEXT).toContain(flag)
     }

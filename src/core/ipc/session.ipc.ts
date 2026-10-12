@@ -666,8 +666,9 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: async (routingId: string, mode: string) => setPermissionMode(manager, routingId, mode)
   })
 
-  // Voice input handlers (Claude-only, and only on a binary carrying the
-  // voice-server patch: capabilities.voice).
+  // Voice input handlers (gated by capabilities.voice: Claude on a binary
+  // carrying the voice-server patch; opencode, pi and Codex on a host the
+  // on-device speech pack supports, ADR-101).
   //
   // The microphone is the RENDERER's (`renderer/src/lib/voice/`): these two verbs
   // only bind the desktop window's pushed audio — the `voice:audio` IPC message,
@@ -686,15 +687,19 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'host',
     kind: 'command',
     sessionIdArg: 0,
-    handler: safeHandler(async (routingId: string, language: string) => {
-      const session = manager.get(routingId)
-      if (!session) throw new Error('No active session')
-      const refusal = voiceRefusal(session)
-      if (refusal) throw new Error(refusal)
-      const win = getHostWindow()
-      if (!win) throw new Error('No desktop window to capture for')
-      await voiceRelay.start(manager, desktopVoiceOwner(win), routingId, language)
-    })
+    handler: safeHandler(
+      async (routingId: string, language: string, opts?: { preview?: boolean }) => {
+        const session = manager.get(routingId)
+        if (!session) throw new Error('No active session')
+        const refusal = voiceRefusal(session)
+        if (refusal) throw new Error(refusal)
+        const win = getHostWindow()
+        if (!win) throw new Error('No desktop window to capture for')
+        await voiceRelay.start(manager, desktopVoiceOwner(win), routingId, language, {
+          preview: opts?.preview
+        })
+      }
+    )
   })
 
   handleIpc({

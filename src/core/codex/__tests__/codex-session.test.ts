@@ -17,6 +17,7 @@ import recordedElicitation from './fixtures/mcp-tool-approval-elicitation.json'
 import { codexItemId } from '../event-mapper'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 import { blobRefOf } from '../../../test/helpers/blob-refs'
+import { onHostPlatform } from '../../../test/helpers/host-platform'
 
 const events = vi.hoisted(() => vi.fn())
 const overrides = vi.hoisted(() => new Map<string, unknown>())
@@ -2481,6 +2482,11 @@ describe('Codex cross-engine dispatch', () => {
       required: ['engine', 'prompt'],
       additionalProperties: false
     })
+  })
+
+  it('voice follows the host: on where the speech pack has a runtime, off where it has none (ADR-101 §8)', () => {
+    expect(onHostPlatform('darwin', 'arm64', () => fixture().session.capabilities.voice)).toBe(true)
+    expect(onHostPlatform('freebsd', 'x64', () => fixture().session.capabilities.voice)).toBe(false)
   })
 
   it('does not offer the tool at all when no dispatch target is available', async () => {

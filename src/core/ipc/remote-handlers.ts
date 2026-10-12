@@ -1482,8 +1482,22 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     withConnection: true,
-    handler: async (connection: CommandConnection, routingId: string, language?: string | null) =>
-      voiceRelay.start(manager, remoteVoiceOwner(connection.connectionId), routingId, opt(language))
+    handler: async (
+      connection: CommandConnection,
+      routingId: string,
+      language?: string | null,
+      // `{ preview: false }` is the client's "no live preview" setting; anything
+      // else (absent, null, a stray shape) leaves preview on — the relay only
+      // reads an explicit `false`.
+      opts?: { preview?: boolean } | null
+    ) =>
+      voiceRelay.start(
+        manager,
+        remoteVoiceOwner(connection.connectionId),
+        routingId,
+        opt(language),
+        { preview: opts?.preview }
+      )
   })
 
   handleRemote({

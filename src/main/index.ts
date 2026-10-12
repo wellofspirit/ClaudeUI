@@ -55,6 +55,8 @@ import { accountManager } from './services/account-manager'
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
 import { credentialSync } from '../core/auth/vault/CredentialSync'
 import { opencodeServerManager } from '../core/opencode/OpencodeServerManager'
+import { localVoiceServer, setVoiceWorkerLauncher } from '../core/voice/local-voice-server'
+import { desktopVoiceWorkerLauncher } from './voice-worker-launcher'
 import { PluginManager } from './services/plugin-manager'
 import { LogViewer } from './services/log-viewer'
 import { logger } from '../core/services/logger'
@@ -94,6 +96,11 @@ setSqliteDriver(betterSqlite3Driver())
 // observe an unset provider on the spawn/serve path. A non-Electron entrypoint
 // wires its own (or none; core falls back to `process.cwd()`).
 setHostPaths({ getAppPath: () => app.getAppPath() })
+
+// How the host starts the on-device voice worker (ADR-101 §4): this binary run as
+// Node on the `voice-worker` entry built beside this file. The app path is read
+// per launch, like the host-paths provider above.
+setVoiceWorkerLauncher((workerArgs) => desktopVoiceWorkerLauncher(app.getAppPath())(workerArgs))
 
 // Single-instance lock (M-BT1). A second launch must NOT run a full second
 // instance: both would write ~/.claude/ui/*.json (last-writer-wins corruption),
@@ -763,6 +770,9 @@ app.whenReady().then(() => {
       // Reap any shared opencode servers (Windows tree-kill) so opencode.exe
       // children don't orphan on quit. Idempotent — safe to run on every invocation.
       opencodeServerManager.dispose()
+      // The on-device speech worker. Fire-and-forget: stdin EOF ends it anyway
+      // once this process is gone, which is the same outcome.
+      void localVoiceServer.stop()
     },
     quit: () => app.quit(),
     // opencode 2.x shares its credential table with the user's own opencode:

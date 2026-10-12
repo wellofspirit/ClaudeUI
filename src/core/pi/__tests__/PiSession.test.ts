@@ -428,6 +428,7 @@ import { piMcpName } from '../pi-mcp-bridge'
 import { PLAN_MODE_DENY_REASON } from '../permission-engine'
 import { loadPiAgentRegistry, type PiAgentDefinition } from '../pi-agent-registry'
 import { logger } from '../../services/logger'
+import { onHostPlatform } from '../../../test/helpers/host-platform'
 import { READ_ONLY_REVIEW_RATIONALE } from '../../automode/denial-tracker'
 /** The hold window the held-card tests set (`blockHoldSeconds: 120`). */
 const HOLD_MS = 120_000
@@ -4588,6 +4589,16 @@ describe('PiSession.status.account (M3 auth)', () => {
 })
 
 describe('PiSession.capabilities (M4a+b — hostedMcp / crossEngineDispatch)', () => {
+  it('voice follows the host: on where the speech pack has a runtime, off where it has none (ADR-101 §8)', () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-caps-voice', win as never, '/cwd', {})
+
+    onHostPlatform('win32', 'x64', () => expect(session.status.capabilities.voice).toBe(true))
+    onHostPlatform('linux', 'arm64', () => expect(session.status.capabilities.voice).toBe(true))
+    onHostPlatform('freebsd', 'x64', () => expect(session.status.capabilities.voice).toBe(false))
+    onHostPlatform('win32', 'arm64', () => expect(session.status.capabilities.voice).toBe(false))
+  })
+
   it('hostedMcp is true (M4a shipped)', () => {
     const win = new MockWindow()
     const session = new PiSession('rid-caps-hosted', win as never, '/cwd', {})

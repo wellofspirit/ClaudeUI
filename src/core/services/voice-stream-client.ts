@@ -111,6 +111,19 @@ interface VoiceServerConnection {
   rl: readline.Interface
 }
 
+/**
+ * Thrown by {@link VoiceStreamClient.reacquireEndpoint} once it has already told
+ * the owner why the start cannot go on (the speech model is missing, which is
+ * answered with the download offer). The client then ends quietly: no second,
+ * generic "failed to connect" on top of the real reason.
+ */
+export class VoiceStartReported extends Error {
+  constructor() {
+    super('voice start already reported to the owner')
+    this.name = 'VoiceStartReported'
+  }
+}
+
 export abstract class VoiceStreamClient {
   private port: number
   private conn: VoiceServerConnection | null = null
@@ -187,6 +200,26 @@ export abstract class VoiceStreamClient {
    */
   protected abstract emitError(message: string, tone?: VoiceNoticeTone): void
 
+  /**
+   * A fresh endpoint for the server, or null when there is no second chance.
+   * Asked at most ONCE per start, only after a connect REFUSAL: the on-device
+   * server idle-exits ten minutes after its last capture, so the port a start was
+   * handed can be gone by the time the socket opens, and the next acquire spawns
+   * a worker (new port, new token). Retrying here — inside the connect step —
+   * keeps it invisible to the owner: a retry done above would have to start over
+   * after the failure had already reported `idle`. The default has no second chance.
+   *
+   * Rejecting reports THAT reason to the owner; rejecting with
+   * {@link VoiceStartReported} means the implementation already told the owner
+   * (the download offer) and the client just ends.
+   */
+  protected async reacquireEndpoint(): Promise<{
+    port: number
+    startFields?: Record<string, unknown>
+  } | null> {
+    return null
+  }
+
   // -- Lifecycle ---------------------------------------------------------------
 
   /** Update the voice server port (e.g., after the engine respawned). */
@@ -238,7 +271,24 @@ export abstract class VoiceStreamClient {
 
     try {
       // Connect to the voice server in cli.js
-      const conn = await this.connect()
+      let conn: VoiceServerConnection
+      try {
+        conn = await this.connect()
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code !== 'ECONNREFUSED' || gen !== this.startGen) {
+          throw err
+        }
+        // A reacquire that FAILS reports its own reason (a missing speech pack, a
+        // worker that would not start), not the refusal that led here.
+        const next = await this.reacquireEndpoint()
+        // Cancelled while asking (a stop-and-release, a newer start): touch
+        // nothing — not the port, not a socket — the outer catch stays silent.
+        if (gen !== this.startGen) throw err
+        if (!next) throw err
+        this.port = next.port
+        startFields = next.startFields ?? {}
+        conn = await this.connect()
+      }
 
       // A cleanup during the connect window (owner death, a failure) already
       // reported idle. Adopting this socket would resurrect a capture nobody is
@@ -288,6 +338,11 @@ export abstract class VoiceStreamClient {
     } catch (err) {
       // A superseded start's failed connect is not this capture's failure.
       if (gen !== this.startGen) return
+      // The owner has already been told why (see VoiceStartReported).
+      if (err instanceof VoiceStartReported) {
+        this.cleanup()
+        return
+      }
       const msg = err instanceof Error ? err.message : String(err)
       logger.error(this.logSource, `Failed to start recording: ${msg}`)
       this.emitError(`Failed to connect to voice server: ${msg}`)

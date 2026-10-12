@@ -1,13 +1,58 @@
 /**
  * @vitest-environment node
  *
- * `wordsFromTokens` — the one pure piece of the sherpa adapter. The real loader
+ * `wordsFromTokens` and `addonEntry` — the pure pieces of the sherpa adapter. The real loader
  * needs the addon and a 650 MB model and is exercised by the gated real-model
  * check, not here.
  */
 
-import { describe, it, expect } from 'vitest'
-import { wordsFromTokens } from '../recognizer'
+import { afterAll, beforeAll, describe, it, expect } from 'vitest'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import { addonEntry, wordsFromTokens } from '../recognizer'
+
+describe('addonEntry', () => {
+  let dir: string
+
+  beforeAll(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claudeui-addon-entry-'))
+  })
+  afterAll(() => {
+    for (const name of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, name))
+    fs.rmdirSync(dir)
+  })
+
+  it('is the manifest main, as an absolute file path — a compiled bun executable cannot require a directory', () => {
+    const pkg = path.join(dir, 'package.json')
+    fs.writeFileSync(pkg, JSON.stringify({ name: 'sherpa-onnx-node', main: 'sherpa-onnx.js' }))
+
+    expect(addonEntry(dir)).toBe(path.join(dir, 'sherpa-onnx.js'))
+    fs.unlinkSync(pkg)
+  })
+
+  it('never leaves the addon directory: a main that climbs out falls back to index.js', () => {
+    const pkg = path.join(dir, 'package.json')
+    for (const main of ['../../x.js', '../x.js', path.resolve(dir, '..', 'x.js'), '.', './']) {
+      fs.writeFileSync(pkg, JSON.stringify({ main }))
+      expect(addonEntry(dir)).toBe(path.join(dir, 'index.js'))
+    }
+    fs.writeFileSync(pkg, JSON.stringify({ main: './lib/entry.js' }))
+    expect(addonEntry(dir)).toBe(path.join(dir, 'lib', 'entry.js'))
+    fs.unlinkSync(pkg)
+  })
+
+  it('falls back to index.js without a usable manifest, and lets the loader name what is missing', () => {
+    expect(addonEntry(path.join(dir, 'nowhere'))).toBe(path.join(dir, 'nowhere', 'index.js'))
+
+    const pkg = path.join(dir, 'package.json')
+    fs.writeFileSync(pkg, '{ not json')
+    expect(addonEntry(dir)).toBe(path.join(dir, 'index.js'))
+    fs.writeFileSync(pkg, JSON.stringify({ main: 42 }))
+    expect(addonEntry(dir)).toBe(path.join(dir, 'index.js'))
+    fs.unlinkSync(pkg)
+  })
+})
 
 describe('wordsFromTokens', () => {
   it('a token starting with a space starts a new word; others continue the last', () => {

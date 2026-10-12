@@ -54,6 +54,7 @@ import type {
   ToolReviewBlock,
   FileDiff,
   UISessionConfig,
+  VoiceNoticeAction,
   VoiceNoticeTone,
   WatchUpdate
 } from '../../../shared/types'
@@ -414,7 +415,12 @@ export interface SyncEventMap {
    * Optional on the wire so an older emitter's two-argument frame stays valid —
    * absent means `warn`.
    */
-  'voice:error': (routingId: string, error: string, tone?: VoiceNoticeTone) => void
+  'voice:error': (
+    routingId: string,
+    error: string,
+    tone?: VoiceNoticeTone,
+    action?: VoiceNoticeAction
+  ) => void
 }
 
 /** Every channel a client may subscribe to through the sync transport. */

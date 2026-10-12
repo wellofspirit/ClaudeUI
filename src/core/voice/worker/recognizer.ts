@@ -20,6 +20,12 @@
  * Electron run as Node, Node and bun all load the addon this way
  * (spike, ADR-101 Context).
  *
+ * What is required is the package's MAIN FILE, not its directory: a
+ * `bun build --compile` executable (the headless server's launcher) cannot
+ * resolve a directory specifier — "Cannot find module '<dir>'" — though it
+ * loads the same package by file. Electron and Node accept either, so the file
+ * is the form that works everywhere ({@link addonEntry}).
+ *
  * ## Buffers
  *
  * Electron's V8 sandbox forbids external buffers, so the worker hands sherpa only
@@ -30,6 +36,7 @@
  */
 
 import { createRequire } from 'node:module'
+import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { Word } from './preview'
 
@@ -97,6 +104,32 @@ interface SherpaModule {
 }
 
 /**
+ * The file `require(addonDir)` would load: the package.json `main`, else
+ * `index.js`, as an absolute path, and always inside `addonDir`. Resolved by
+ * hand because the directory form fails inside a compiled bun executable (see
+ * the module header).
+ */
+export function addonEntry(addonDir: string): string {
+  let main = 'index.js'
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(addonDir, 'package.json'), 'utf-8')) as {
+      main?: unknown
+    }
+    if (typeof manifest.main === 'string' && manifest.main !== '') main = manifest.main
+  } catch {
+    /* no readable manifest: the default entry, and the loader names what is missing */
+  }
+  const entry = path.resolve(addonDir, main)
+  // The manifest is data from a downloaded package: a `main` that climbs out of
+  // the addon directory is not an entry of it.
+  const inside = path.relative(path.resolve(addonDir), entry)
+  if (inside === '' || inside.startsWith('..') || path.isAbsolute(inside)) {
+    return path.join(addonDir, 'index.js')
+  }
+  return entry
+}
+
+/**
  * Load `sherpa-onnx-node` from `addonDir` and the Parakeet model from `modelDir`.
  * Slow (seconds) and memory-hungry (~0.8 GB resident); the worker calls it once.
  * Rejects with the loader's own error, which names the missing library.
@@ -107,7 +140,7 @@ export async function loadSherpaRecognizer(
   threads: number
 ): Promise<Recognizer> {
   const addon = path.resolve(addonDir)
-  const sherpa = createRequire(path.join(addon, 'package.json'))(addon) as SherpaModule
+  const sherpa = createRequire(path.join(addon, 'package.json'))(addonEntry(addon)) as SherpaModule
   const file = (name: string): string => path.join(modelDir, name)
 
   const recognizer = await sherpa.OfflineRecognizer.createAsync({

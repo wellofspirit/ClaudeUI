@@ -24,6 +24,7 @@ import { internAttachments } from '../services/blob-store'
 import { dispatchedCostsByRouting } from '../services/db'
 import { logger } from '../services/logger'
 import { emitEvent } from '../services/sync-host'
+import { localVoiceServer } from '../voice/local-voice-server'
 
 /**
  * Abstract base class holding engine-neutral plumbing shared by all session
@@ -149,6 +150,18 @@ export abstract class BaseSession implements ISession {
 
   getMessages(): ChatMessage[] {
     return this.messageHistory
+  }
+
+  /**
+   * Voice input for every engine without a transcription server of its own: the
+   * host's on-device worker (ADR-101). Claude overrides this — its server is the
+   * one inside cli.js. Gated by `capabilities.voice`, which is true for these
+   * engines only on a host the speech pack supports; the pack itself may still be
+   * missing, which `localVoiceServer.acquire()` reports as `VoicePackMissingError`
+   * for the relay to turn into the download offer.
+   */
+  async voiceStartServer(): Promise<{ port: number; startFields?: Record<string, unknown> }> {
+    return localVoiceServer.acquire()
   }
 
   /**

@@ -35,7 +35,7 @@
 import { parseArgs } from 'node:util'
 
 /** The subcommand, if any. `serve` is the default when none is given. */
-export type ServerCommand = 'serve' | 'show-link' | 'set-password' | 'help'
+export type ServerCommand = 'serve' | 'show-link' | 'set-password' | 'voice-worker' | 'help'
 
 export interface ServerOptions {
   command: ServerCommand
@@ -56,6 +56,12 @@ export interface ServerOptions {
    * disable on the next restart when someone edits the unit file.
    */
   disableAuth: boolean
+  /**
+   * `voice-worker` only: every argument after the subcommand, UNPARSED — they are
+   * the worker's own (`--addon`, `--model`, `--threads`) and `runVoiceWorker`
+   * parses them.
+   */
+  workerArgs?: string[]
 }
 
 export class CliError extends Error {}
@@ -72,6 +78,7 @@ USAGE
   claudeui-server [serve] [options]
   claudeui-server show-link
   claudeui-server set-password
+  claudeui-server voice-worker --addon <dir> --model <dir>
   claudeui-server --help
 
 COMMANDS
@@ -89,6 +96,13 @@ COMMANDS
                        both are readable from the process list. Takes no
                        options. To turn break-glass OFF, switch it off in
                        Settings; the console only provisions.
+  voice-worker         Internal: run the on-device speech-to-text worker
+                       (--addon <sherpa-onnx-node dir> --model <model dir>
+                       [--threads <n>], CLAUDEUI_VOICE_TOKEN in the
+                       environment). The server starts it itself when an
+                       opencode, pi or Codex session uses voice input; it
+                       exits when its stdin closes. Not meant to be run by
+                       hand.
 
 OPTIONS
   -p, --port <n>       Listen port. Omitted, the persisted setting is used
@@ -133,6 +147,7 @@ export function parseServerArgs(argv: readonly string[]): ServerOptions {
       candidate === 'serve' ||
       candidate === 'show-link' ||
       candidate === 'set-password' ||
+      candidate === 'voice-worker' ||
       candidate === 'help'
     ) {
       command = candidate
@@ -140,6 +155,10 @@ export function parseServerArgs(argv: readonly string[]): ServerOptions {
       throw new CliError(`Unknown command "${candidate}". Try --help.`)
     }
   }
+
+  // The worker's arguments are not server options: handing them to `parseArgs`
+  // would reject `--addon` as unknown. Everything after the subcommand is its own.
+  if (command === 'voice-worker') return { command, disableAuth: false, workerArgs: rest }
 
   let parsed: ReturnType<typeof parseArgs>
   try {

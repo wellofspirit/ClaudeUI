@@ -63,8 +63,13 @@ import {
   remoteVoiceOwner,
   desktopVoiceOwner,
   desktopVoiceOwnerKey,
-  MAX_VOICE_FRAME_BYTES
+  MAX_VOICE_FRAME_BYTES,
+  VOICE_PACK_MISSING_MESSAGE
 } from '../../../core/services/voice-relay'
+import {
+  VoicePackMissingError,
+  VoicePlatformUnsupportedError
+} from '../../../core/voice/local-voice-server'
 import {
   VOICE_NO_AUDIO_MESSAGE,
   VOICE_NO_SPEECH_MESSAGE
@@ -966,5 +971,248 @@ describe('voice relay — the desktop owner', () => {
       [ROUTING_ID, 'connecting'],
       [ROUTING_ID, 'idle']
     ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The on-device server (ADR-101): start fields, preview opt-out, the download
+// offer, and the one retry after a refused connect
+// ---------------------------------------------------------------------------
+
+describe('on-device voice server', () => {
+  // Its own owner, so a late frame from an earlier suite's capture cannot land in
+  // these assertions.
+  const OWNER_ID = 'conn-on-device'
+  let voiceServer: FakeVoiceServer
+
+  beforeEach(async () => {
+    deliveries.length = 0
+    emitted.length = 0
+    voiceServer = await startFakeVoiceServer()
+  })
+
+  afterEach(async () => {
+    voiceRelay.clearForTests()
+    await voiceServer.close()
+  })
+
+  /** A port nothing listens on: bind, note, close. */
+  async function deadPort(): Promise<number> {
+    const probe = net.createServer()
+    await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve))
+    const { port } = probe.address() as net.AddressInfo
+    await new Promise<void>((resolve) => probe.close(() => resolve()))
+    return port
+  }
+
+  /** A session whose `voiceStartServer` answers from `answers`, one per call. */
+  function scriptedManager(answers: Array<() => Promise<unknown>>): {
+    manager: SessionManager
+    calls: () => number
+  } {
+    let calls = 0
+    const session = {
+      routingId: ROUTING_ID,
+      capabilities: { voice: true },
+      voiceStartServer: () => answers[Math.min(calls++, answers.length - 1)]()
+    }
+    return { manager: { get: () => session } as unknown as SessionManager, calls: () => calls }
+  }
+
+  const remoteStart = (manager: SessionManager, opts?: { preview?: boolean }): Promise<void> =>
+    voiceRelay.start(manager, remoteVoiceOwner(OWNER_ID), ROUTING_ID, 'en', opts)
+
+  it("puts the server's start fields on `voice_start`, never overriding type or language", async () => {
+    const { manager } = scriptedManager([
+      async () => ({
+        port: voiceServer.port,
+        startFields: { token: 'tok-1', type: 'evil', language: 'xx' }
+      })
+    ])
+    await remoteStart(manager)
+    await waitFor(() => voiceServer.received.some((m) => m.type === 'voice_start'))
+
+    expect(voiceServer.received[0]).toEqual({ token: 'tok-1', type: 'voice_start', language: 'en' })
+  })
+
+  it('sends no start fields to a server that has none (cli.js)', async () => {
+    const { manager } = scriptedManager([async () => ({ port: voiceServer.port })])
+    await remoteStart(manager)
+    await waitFor(() => voiceServer.received.some((m) => m.type === 'voice_start'))
+
+    expect(voiceServer.received[0]).toEqual({ type: 'voice_start', language: 'en' })
+  })
+
+  it('`preview: false` rides on `voice_start`; anything else leaves preview to the server', async () => {
+    const answer = async () => ({ port: voiceServer.port, startFields: { token: 't' } })
+    for (const [opts, expected] of [
+      [{ preview: false }, { preview: false }],
+      [{ preview: true }, {}],
+      [{}, {}],
+      [undefined, {}]
+    ] as const) {
+      voiceServer.received.length = 0
+      await remoteStart(scriptedManager([answer]).manager, opts)
+      await waitFor(() => voiceServer.received.some((m) => m.type === 'voice_start'))
+      expect(voiceServer.received[0]).toEqual({
+        token: 't',
+        type: 'voice_start',
+        language: 'en',
+        ...expected
+      })
+      // Released, not stopped: a stopped capture lingers until the server says
+      // `closed`, and its late idle would land in the next test's frames.
+      voiceRelay.releaseOwner(OWNER_ID)
+    }
+  })
+
+  describe('speech model not installed', () => {
+    const missing = async (): Promise<never> => {
+      throw new VoicePackMissingError()
+    }
+
+    it('offers the download to a remote owner and ends the start quietly', async () => {
+      const { manager } = scriptedManager([missing])
+      await expect(remoteStart(manager)).resolves.toBeUndefined()
+
+      expect(framesFor(OWNER_ID, 'voice:error')).toEqual([
+        [ROUTING_ID, VOICE_PACK_MISSING_MESSAGE, 'warn', 'install-voice-pack']
+      ])
+      expect(VOICE_PACK_MISSING_MESSAGE).toBe(
+        'Voice input for this engine needs the on-device speech model (~700 MB)'
+      )
+      expect(framesFor(OWNER_ID, 'voice:state')).toEqual([
+        [ROUTING_ID, 'connecting'],
+        [ROUTING_ID, 'idle']
+      ])
+      expect(voiceRelay.isCapturing(OWNER_ID)).toBe(false)
+      expect(voiceServer.connections).toBe(0)
+    })
+
+    it('raises the offer through the funnel for the desktop owner, as a fourth argument', async () => {
+      const owner = makeWindow(7)
+      const { manager } = scriptedManager([missing])
+      await expect(
+        voiceRelay.start(manager, desktopVoiceOwner(owner.win), ROUTING_ID, 'en')
+      ).resolves.toBeUndefined()
+
+      expect(emitted).toEqual([
+        {
+          channel: 'voice:error',
+          args: [ROUTING_ID, VOICE_PACK_MISSING_MESSAGE, 'warn', 'install-voice-pack']
+        }
+      ])
+      expect(sentOn(owner, 'voice:state').at(-1)).toEqual([ROUTING_ID, 'idle'])
+    })
+
+    it('says nothing when the press was already cancelled', async () => {
+      let fail!: () => void
+      const { manager } = scriptedManager([
+        () =>
+          new Promise((_resolve, reject) => {
+            fail = () => reject(new VoicePackMissingError())
+          })
+      ])
+      const startP = remoteStart(manager)
+      await voiceRelay.stop(OWNER_ID)
+      fail()
+      await startP
+
+      expect(framesFor(OWNER_ID, 'voice:error')).toEqual([])
+    })
+
+    it('still throws for a platform with no speech runtime — nothing to download', async () => {
+      const { manager } = scriptedManager([
+        async () => {
+          throw new VoicePlatformUnsupportedError()
+        }
+      ])
+      await expect(remoteStart(manager)).rejects.toThrow(/not available on/)
+      expect(framesFor(OWNER_ID, 'voice:error')).toEqual([])
+      expect(framesFor(OWNER_ID, 'voice:state').at(-1)).toEqual([ROUTING_ID, 'idle'])
+    })
+  })
+
+  describe('a worker that exited between acquire and connect', () => {
+    it('asks for a fresh endpoint once, with its new token, and connects without a word to the owner', async () => {
+      const dead = await deadPort()
+      const { manager, calls } = scriptedManager([
+        async () => ({ port: dead, startFields: { token: 'old' } }),
+        async () => ({ port: voiceServer.port, startFields: { token: 'new' } })
+      ])
+      await remoteStart(manager, { preview: false })
+      await waitFor(() => voiceServer.received.some((m) => m.type === 'voice_start'))
+
+      expect(calls()).toBe(2)
+      // The respawned worker's token, and the capture's own preview choice.
+      expect(voiceServer.received[0]).toEqual({
+        token: 'new',
+        preview: false,
+        type: 'voice_start',
+        language: 'en'
+      })
+      // Invisible to the owner: no error, and never an `idle` between presses.
+      expect(framesFor(OWNER_ID, 'voice:error')).toEqual([])
+      expect(framesFor(OWNER_ID, 'voice:state').map((frame) => frame[1])).not.toContain('idle')
+      expect(voiceRelay.isCapturing(OWNER_ID)).toBe(true)
+    })
+
+    it('retries only once', async () => {
+      const dead = await deadPort()
+      const { manager, calls } = scriptedManager([
+        async () => ({ port: dead, startFields: { token: 'a' } })
+      ])
+      await remoteStart(manager)
+      await waitFor(() => framesFor(OWNER_ID, 'voice:error').length === 1)
+
+      expect(calls()).toBe(2)
+      expect(framesFor(OWNER_ID, 'voice:error')[0][1]).toMatch(/Failed to connect to voice server/)
+      expect(framesFor(OWNER_ID, 'voice:state').at(-1)).toEqual([ROUTING_ID, 'idle'])
+    })
+
+    it('a pack removed since the first answer gets the SAME download offer, and no generic error', async () => {
+      const dead = await deadPort()
+      const { manager, calls } = scriptedManager([
+        async () => ({ port: dead, startFields: { token: 'a' } }),
+        async () => {
+          throw new VoicePackMissingError()
+        }
+      ])
+      await remoteStart(manager)
+      await waitFor(() => framesFor(OWNER_ID, 'voice:state').some((f) => f[1] === 'idle'))
+
+      expect(calls()).toBe(2)
+      expect(framesFor(OWNER_ID, 'voice:error')).toEqual([
+        [ROUTING_ID, VOICE_PACK_MISSING_MESSAGE, 'warn', 'install-voice-pack']
+      ])
+      expect(voiceRelay.isCapturing(OWNER_ID)).toBe(false)
+    })
+
+    it('any other failure of the second acquire reports ITS message, not the refusal', async () => {
+      const dead = await deadPort()
+      const { manager } = scriptedManager([
+        async () => ({ port: dead, startFields: { token: 'a' } }),
+        async () => {
+          throw new Error('The voice worker exited before it was ready (code 3)')
+        }
+      ])
+      await remoteStart(manager)
+      await waitFor(() => framesFor(OWNER_ID, 'voice:error').length === 1)
+
+      const [, message, tone, action] = framesFor(OWNER_ID, 'voice:error')[0]
+      expect(message).toMatch(/The voice worker exited before it was ready \(code 3\)/)
+      expect(message).not.toMatch(/ECONNREFUSED/)
+      expect([tone, action]).toEqual(['warn', undefined])
+      expect(framesFor(OWNER_ID, 'voice:state').at(-1)).toEqual([ROUTING_ID, 'idle'])
+    })
+
+    it('does not retry a server without start fields — cli.js hands back the same port', async () => {
+      const dead = await deadPort()
+      const { manager, calls } = scriptedManager([async () => ({ port: dead })])
+      await remoteStart(manager)
+      await waitFor(() => framesFor(OWNER_ID, 'voice:error').length === 1)
+
+      expect(calls()).toBe(1)
+    })
   })
 })

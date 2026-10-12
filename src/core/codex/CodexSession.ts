@@ -51,6 +51,7 @@ import type { ThreadSettings } from './protocol/v2/ThreadSettings'
 import type { ThreadTokenUsage } from './protocol/v2/ThreadTokenUsage'
 import type { TokenUsageBreakdown } from './protocol/v2/TokenUsageBreakdown'
 import { resolveCodexCapabilities } from '../../shared/model-capabilities'
+import { voicePackPlatformKey } from '../../shared/voice-pack'
 import { logger } from '../services/logger'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
@@ -700,6 +701,10 @@ export class CodexSession extends BaseSession {
     // `capabilities` is a mutable field this class writes into as the native
     // model resolves — a getter would silently drop those writes.
     this.capabilities.crossEngineDispatch &&= crossEngineDispatchAvailable('codex')
+    // Voice likewise (ADR-101 §8): static `true`, ANDed with the host having a
+    // speech runtime. The platform cannot change under a running process, so one
+    // AND here is as live as a getter would be.
+    this.capabilities.voice &&= voicePackPlatformKey() !== null
     this.model = options.model
     this.effort = options.effort
     this.permissionMode = options.permissionMode ?? 'default'

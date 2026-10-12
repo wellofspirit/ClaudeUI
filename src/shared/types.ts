@@ -3244,6 +3244,13 @@ export type VoiceState = 'idle' | 'connecting' | 'recording' | 'processing'
 export type VoiceNoticeTone = 'info' | 'warn'
 
 /**
+ * A button the notice pill offers beside its message. Like the tone it rides the
+ * wire as data, so the renderer never keys on the wording (ADR-070).
+ * `install-voice-pack`: the on-device speech model is not installed (ADR-101 §6).
+ */
+export type VoiceNoticeAction = 'install-voice-pack'
+
+/**
  * The voice TRANSPORT. Capture is the renderer's (`renderer/src/lib/voice/`, one
  * implementation for the desktop window and the web client); these only bind its
  * pushed audio to a session's transcription server in the main process.

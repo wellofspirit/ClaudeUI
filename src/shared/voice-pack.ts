@@ -114,6 +114,17 @@ export function voicePackPlatformKey(
     : null
 }
 
+/**
+ * Why voice input is unavailable on a host with no speech runtime (ADR-101 §8) —
+ * the one wording for the refusal at the gate and the error from the worker host.
+ */
+export function voicePlatformUnsupportedMessage(
+  platform: string = process.platform,
+  arch: string = process.arch
+): string {
+  return `On-device voice input is not available on this host (${platform}-${arch})`
+}
+
 /** A model file's download URL at the pinned revision. */
 export function voicePackModelUrl(name: string): string {
   return `https://huggingface.co/${VOICE_PACK.model.repo}/resolve/${VOICE_PACK.model.revision}/${name}`
