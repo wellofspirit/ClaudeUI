@@ -53,6 +53,11 @@ src/
     shared/sync/       — the wire types both sides fold: channels.ts (the closed
                          channel set), reducer.ts, state.ts, stream.ts, sync-client.ts,
                          sync-decision.ts, client-registry.ts, events.ts
+    voice/             — on-device speech-to-text for opencode, pi and Codex (ADR-101):
+                         worker/ (the voice worker: protocol server, LocalAgreement preview,
+                         segmented final pass, sherpa loader), local-voice-server.ts (the
+                         host's one worker), pack-store.ts + pack-installer.ts (the speech
+                         pack in ~/.claude/ui/voice)
     services/          — ~65 service modules (key ones below)
   main/                — HOST 1: the Electron desktop
     index.ts           — app lifecycle, BrowserWindow setup, SQLite driver install
@@ -60,6 +65,8 @@ src/
                          adapters, the ten `remote:*` ipcMain registrations
     ipc/               — desktop-transport.ts (the ipcMain half of the binder),
                          voice-feed.ts (the desktop window's `voice:audio` feed)
+    voice-worker.ts    — the on-device voice worker's desktop entry (a second electron-vite
+                         main input, run as Electron-as-Node; ADR-101) + voice-worker-launcher.ts
     auth/              — ClaudeAuthProvider + EngineAuthRegistry (they stay here:
                          Claude sign-in opens the host browser) + register-auth-
                          providers.ts, side-effect-imported by boot-core.ts to
@@ -76,6 +83,8 @@ src/
     cli.ts             — argument surface (bootstrap + host anchor only)
     first-boot.ts      — the console enrollment chain (security.md §Headless
                          bootstrap chain)
+    voice-worker-launcher.ts — `claudeui-server voice-worker`: the server relaunching itself
+                         as the on-device voice worker (ADR-101)
   preload/             — context bridges: window.api (ClaudeAPI), plugin, log viewer
   renderer/src/
     stores/            — Zustand stores (session-store.ts + replica.ts, the reducer
@@ -89,7 +98,9 @@ src/
     lib/voice/         — microphone capture for desktop AND web: BrowserVoiceCapture,
                          the AudioWorklet (a `?url` asset), voice-controller.ts,
                          voice-notice.ts (the mic's notice pill), mic-devices.ts +
-                         mic-preference.ts (which microphone; per client, localStorage)
+                         mic-preference.ts (which microphone; per client, localStorage),
+                         preview-preference.ts (live preview; per client), voice-pack-store.ts +
+                         voice-pack-notice.ts (the speech pack's status and the pill's Download)
   renderer/log-viewer/ — standalone log viewer window
   web/                 — remote-access web client (WebSocket + E2E encryption)
   test/                — shared test infra: TestIpcBridge, electron/sdk/sqlite/pty
