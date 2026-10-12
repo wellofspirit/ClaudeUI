@@ -129,3 +129,42 @@ export function voicePlatformUnsupportedMessage(
 export function voicePackModelUrl(name: string): string {
   return `https://huggingface.co/${VOICE_PACK.model.repo}/resolve/${VOICE_PACK.model.revision}/${name}`
 }
+
+// ---------------------------------------------------------------------------
+// Pack status, commands and events (local-voice-spec C6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where the speech pack stands on this host. `unsupported` is a host with no
+ * speech runtime (nothing to install); `failed` is the last install's error,
+ * kept until the next install or removal so a client that connects afterwards
+ * still sees why there is no pack.
+ */
+export type VoicePackState = 'unsupported' | 'missing' | 'installing' | 'ready' | 'failed'
+
+export interface VoicePackStatus {
+  state: VoicePackState
+  packId: string
+  label: string
+  /** The download's size for UI copy. */
+  approxBytes: number
+  /** `installing` only. `totalBytes` can grow once, when a runtime tarball's size becomes known. */
+  progress?: { receivedBytes: number; totalBytes: number }
+  /** `failed` only. */
+  error?: string
+}
+
+/** `voice:pack-install`. No `ok` key: the transports' `unwrap` would take it for their envelope. */
+export interface VoicePackInstallResult {
+  status: 'installed' | 'satisfied' | 'cancelled' | 'failed'
+  /** `failed` only: why. */
+  message?: string
+}
+
+export interface VoicePackInstallCancelResult {
+  status: 'cancelled' | 'not-running'
+}
+
+export interface VoicePackRemoveResult {
+  status: 'removed' | 'not-installed'
+}

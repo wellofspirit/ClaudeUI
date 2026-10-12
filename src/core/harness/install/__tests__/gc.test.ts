@@ -14,7 +14,7 @@ import { fakeHarnessInstall } from '../../../../test/helpers/fake-harness'
 import { harnessManifest } from '../../manifests'
 import { HARNESS_STORE_ENV, LAST_USED_FILE } from '../../store'
 import { RETENTION_MS, collectHarnessGarbage } from '../gc'
-import { STAGING_DIR, STALE_AFTER_MS, TRASH_DIR } from '../store-writer'
+import { STAGING_DIR, STALE_AFTER_MS, TRASH_DIR, cleanStaleEntriesIn } from '../store-writer'
 
 const NOW = Date.parse('2026-10-01T00:00:00.000Z')
 const DAY = 24 * 60 * 60 * 1000
@@ -190,6 +190,52 @@ describe('collectHarnessGarbage', () => {
     expect(fs.existsSync(staleStage)).toBe(false)
     expect(fs.existsSync(staleTrash)).toBe(false)
     expect(fs.existsSync(freshStage)).toBe(true)
+  })
+
+  it('treats a staging payload and its .downloads sibling as ONE install, fresh while either is', async () => {
+    // A slow download streams into `.downloads`; the payload beside it can sit
+    // untouched for hours while the install is alive, and must not be swept (by
+    // another process sharing the store) out from under it.
+    const old = new Date(NOW - STALE_AFTER_MS - 1000)
+    const recent = new Date(NOW - 1000)
+    const stamp = (dir: string, at: Date): void => {
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(path.join(dir, 'part'), 'x')
+      fs.utimesSync(path.join(dir, 'part'), at, at)
+      fs.utimesSync(dir, at, at)
+    }
+    const pair = (name: string, payloadAt: Date, downloadsAt: Date): string[] => {
+      const payload = path.join(store, STAGING_DIR, name)
+      const downloads = path.join(store, STAGING_DIR, `${name}.downloads`)
+      stamp(payload, payloadAt)
+      stamp(downloads, downloadsAt)
+      return [payload, downloads]
+    }
+    const livePayloadStale = pair('pi-0.87.1-live1', old, recent)
+    const liveDownloadsStale = pair('pi-0.87.1-live2', recent, old)
+    const deadBoth = pair('pi-0.87.1-dead', old, old)
+
+    const result = await gc()
+
+    expect(result.stale).toBe(2)
+    for (const dir of [...livePayloadStale, ...liveDownloadsStale]) {
+      expect(fs.existsSync(dir), dir).toBe(true)
+    }
+    for (const dir of deadBoth) expect(fs.existsSync(dir), dir).toBe(false)
+  })
+
+  it('leaves a stale entry alone while its sibling is one this process is using', async () => {
+    const old = new Date(NOW - STALE_AFTER_MS - 1000)
+    const payload = path.join(store, STAGING_DIR, 'pi-0.87.1-mine')
+    const downloads = `${payload}.downloads`
+    for (const dir of [payload, downloads]) {
+      fs.mkdirSync(dir, { recursive: true })
+      fs.utimesSync(dir, old, old)
+    }
+    // Only the payload is marked busy (the downloads directory is not).
+    await expect(cleanStaleEntriesIn(store, new Set([payload]), NOW)).resolves.toBe(0)
+    expect(fs.existsSync(payload)).toBe(true)
+    expect(fs.existsSync(downloads)).toBe(true)
   })
 
   it('does nothing, without throwing, when the store does not exist', async () => {

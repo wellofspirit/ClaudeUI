@@ -580,7 +580,14 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   // The one-time upgrade sheet's answer (ADR-082 §8): shown only to an admin
   // connection, which installs from the same click. Relabelled `config`, any
   // connection could dismiss the offer for the host's operator.
-  'harness:answer-upgrade-prompt': 'admin'
+  'harness:answer-upgrade-prompt': 'admin',
+  // The speech pack's writes (ADR-101 §6), registered on BOTH transports: putting
+  // 650 MB and a native addon on the host, and taking voice away from every
+  // client of it. The read (`voice:pack-status`) declares `chat`, the capability
+  // of the capture that hits the missing pack, and is not pinned.
+  'voice:pack-install': 'admin',
+  'voice:pack-install-cancel': 'admin',
+  'voice:pack-remove': 'admin'
 }
 
 // ---------------------------------------------------------------------------

@@ -2154,6 +2154,26 @@ const HARNESS_ADMIN_CHANNELS = [
   'harness:answer-upgrade-prompt'
 ] as const
 
+/**
+ * The speech pack (ADR-101 §6). Restated rather than imported, for the reason
+ * {@link USAGE_HUB_CHANNELS} is. The status read is `chat` (every connection that
+ * can hold the mic can learn the model is missing); install, cancel and remove are
+ * `admin`, which a base connection never holds.
+ */
+const VOICE_PACK_CHANNELS = [
+  'voice:pack-status',
+  'voice:pack-install',
+  'voice:pack-install-cancel',
+  'voice:pack-remove'
+] as const
+
+/** The part of {@link VOICE_PACK_CHANNELS} that is gated by `admin`. */
+const VOICE_PACK_ADMIN_CHANNELS = [
+  'voice:pack-install',
+  'voice:pack-install-cancel',
+  'voice:pack-remove'
+] as const
+
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
   'webauthn:register-options': 'enroll',
@@ -2236,7 +2256,10 @@ describe('remote surface parity (phase 1 port)', () => {
         ...USAGE_HUB_CHANNELS,
         // ADR-082 arc 2: the Installed page is on every device (reads are
         // `config`); installing, re-sourcing and detecting are `admin`.
-        ...HARNESS_CHANNELS
+        ...HARNESS_CHANNELS,
+        // ADR-101 §6: the speech pack. Its status is `chat`; install, cancel and
+        // remove are `admin`.
+        ...VOICE_PACK_CHANNELS
       ].sort()
     )
   })
@@ -2412,7 +2435,9 @@ describe('remote surface parity (phase 1 port)', () => {
       // which is what makes the button able to explain itself.
       ...IDE_GATED_CHANNELS.map((c) => [c, 'ide'] as const),
       // ADR-082 §7: the harness manager's writes. The two reads are `config`.
-      ...HARNESS_ADMIN_CHANNELS.map((c) => [c, 'admin'] as const)
+      ...HARNESS_ADMIN_CHANNELS.map((c) => [c, 'admin'] as const),
+      // ADR-101 §6: the speech pack's writes. Its status read is `chat`.
+      ...VOICE_PACK_ADMIN_CHANNELS.map((c) => [c, 'admin'] as const)
     ].sort(([a], [b]) => a.localeCompare(b))
     expect(
       [...unreachable].sort(([a], [b]) => a.localeCompare(b)),
@@ -2584,13 +2609,14 @@ describe('remote surface parity (phase 1 port)', () => {
   })
 
   it('exposes no channel whose capability the old denylist stood for, except the sanctioned ones', () => {
-    // FIVE sanctioned widenings, each deliberate and each behind a proven
+    // SIX sanctioned widenings, each deliberate and each behind a proven
     // identity: the terminal set (ADR-052 decision 6), the passkey set
     // (decision 1), the `authcfg:*` settings namespace (ADR-054 §6, extended by
     // ADR-056 with the two LAN-channel verbs — which is also when the namespace
     // joined the pin table, `admin` having shrunk to exactly these two
     // families), the IDE mint (ADR-064), and the harness manager's writes
-    // (ADR-082 §7: `admin`, so a passkey or break-glass connection only).
+    // (ADR-082 §7: `admin`, so a passkey or break-glass connection only), and
+    // the speech pack's writes (ADR-101 §6: `admin`, the same reason).
     // Everything else in the pin table must still be absent from the remote
     // surface — which, for `remote:set-config`, is what makes the `off` master
     // switch structurally unreachable from a remote client now that a passkey
@@ -2604,7 +2630,9 @@ describe('remote surface parity (phase 1 port)', () => {
       // remote, and reachable only behind the toggle + a step-up. Same shape as
       // the terminal set above.
       ...IDE_GATED_CHANNELS,
-      ...HARNESS_ADMIN_CHANNELS
+      ...HARNESS_ADMIN_CHANNELS,
+      // ADR-101 §6: the speech pack's writes, `admin` like the harness manager's.
+      ...VOICE_PACK_ADMIN_CHANNELS
     ])
     for (const channel of Object.keys(PINNED_CAPABILITIES)) {
       if (sanctioned.has(channel)) continue

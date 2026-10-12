@@ -73,6 +73,8 @@ import { startDetectionScheduler } from '../harness/detect/scheduler'
 import { collectHarnessGarbage } from '../harness/install/gc'
 import { startHarnessUpdater } from '../harness/install/updater'
 import { evaluateUpgradePrompt, startHarnessEvents } from '../ipc/harness-commands'
+import { startVoicePackEvents } from '../ipc/voice-pack-commands'
+import { sweepVoicePackStore } from '../voice/pack-installer'
 import { harnessWritable } from '../harness/resolve'
 import { watchHarnessArrivals } from '../harness/arrivals'
 import { startCatalogInvalidation } from '../harness/catalog-invalidation'
@@ -341,6 +343,11 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // invalidations are not missed.
   startHarnessEvents(emitEvent)
 
+  // The speech pack's install progress and state (ADR-101 §6), to the desktop
+  // renderer and every remote client alike: a phone shows the download the
+  // desktop started. App-lifetime, like the harness events above.
+  startVoicePackEvents(emitEvent)
+
   // pi's model catalog came back after some client was answered a degraded
   // empty one (a failed probe at boot, its backoff, invalidations overtaking
   // it): no client asks again on its own, so the composer would keep showing a
@@ -373,9 +380,16 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     afterBoot: async () => {
       evaluateUpgradePrompt()
       await collectHarnessGarbage()
+      // The speech pack's store (ADR-101): an install a quit interrupted left its
+      // staging directory (up to ~650 MB) behind; once it is an hour old it goes.
+      // Never throws, so it cannot hold up the updater.
+      await sweepVoicePackStore()
       startHarnessUpdater()
     },
-    whenDisabled: () => evaluateUpgradePrompt()
+    whenDisabled: () => {
+      evaluateUpgradePrompt()
+      void sweepVoicePackStore()
+    }
   })
 
   // Learn what every Codex thread is a branch OF, once per launch, alongside the

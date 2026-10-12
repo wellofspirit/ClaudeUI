@@ -66,7 +66,8 @@ export function voiceInstallRecordPath(root: string = voiceStoreRoot()): string 
   return path.join(voicePackDir(root), 'install.json')
 }
 
-function isFile(file: string): boolean {
+/** Is `file` an existing regular file? */
+export function isFile(file: string): boolean {
   try {
     return fs.statSync(file).isFile()
   } catch {

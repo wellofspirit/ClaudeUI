@@ -139,7 +139,11 @@ const SHARED_DECLARATION_SOURCES = [
   'src/core/ipc/usage-hub-commands.ts',
   // ADR-082 arc 2 — the harness manager, one declaration spread by both
   // transports (`registerSessionIpc` on the desktop side).
-  'src/core/ipc/harness-commands.ts'
+  'src/core/ipc/harness-commands.ts',
+  // ADR-101 §6 — the speech pack (status `chat`, install/cancel/remove `admin`),
+  // one declaration spread by both transports. The web client invokes them from
+  // S4 on; the three `admin` ones then join UNGRANTED_AT_CONNECT_REMOTE_CHANNELS.
+  'src/core/ipc/voice-pack-commands.ts'
 ]
 
 /**

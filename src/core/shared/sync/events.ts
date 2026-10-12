@@ -59,6 +59,7 @@ import type {
   WatchUpdate
 } from '../../../shared/types'
 import type { HarnessId, HarnessInstallProgress } from '../../../shared/harness-types'
+import type { VoicePackStatus } from '../../../shared/voice-pack'
 import type { ItemStreamOpen, ItemStreamSeal } from './item-stream'
 
 export interface SyncEventMap {
@@ -353,6 +354,13 @@ export interface SyncEventMap {
   'harness:changed': (data: { id: HarnessId }) => void
   /** A managed install's progress (ADR-082 §4), at most four a second per install. */
   'harness:install-progress': (progress: HarnessInstallProgress) => void
+  /**
+   * The on-device speech pack's status moved (ADR-101 §6): an install started,
+   * its bytes advanced (at most four a second), it finished, failed, was
+   * cancelled, or the pack was removed. The whole status, so a client needs no
+   * second read; `voice:pack-status` is the shape a late joiner reads.
+   */
+  'voice:pack-changed': (status: VoicePackStatus) => void
   /**
    * An engine's model catalog became available after main had answered a
    * client with a degraded empty one (today: pi's probe failed, or boot's

@@ -109,6 +109,7 @@ import { configCommands } from './config-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { usageHubCommands, USAGE_HUB_CHANNELS } from './usage-hub-commands'
 import { harnessCommands, HARNESS_CHANNELS } from './harness-commands'
+import { voicePackCommands, VOICE_PACK_CHANNELS } from './voice-pack-commands'
 import {
   sendPrompt,
   getBlob,
@@ -419,7 +420,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     ...SESSION_IPC_CHANNELS,
     ...CODEX_CHANNELS,
     ...USAGE_HUB_CHANNELS,
-    ...HARNESS_CHANNELS
+    ...HARNESS_CHANNELS,
+    ...VOICE_PACK_CHANNELS
   ])
 
   const manager = new SessionManager()
@@ -1748,6 +1750,11 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // The harness manager (ADR-082 arc 2), from the same declarations the remote
   // transport spreads: reads are `config`, every write `admin` (§7).
   for (const cmd of harnessCommands()) {
+    handleIpc(cmd)
+  }
+
+  // The speech pack (ADR-101 §6): status is `chat`, install/cancel/remove `admin`.
+  for (const cmd of voicePackCommands()) {
     handleIpc(cmd)
   }
 
