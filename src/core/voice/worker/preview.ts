@@ -3,8 +3,12 @@
  *
  * Parakeet is an offline model: it has no streaming mode, so a preview is a
  * re-decode. Re-decoding the whole take every second costs 67–84% of a CPU core
- * on a minute of speech; re-decoding only the audio AFTER the last word we are
- * sure about costs 8–15%. "Sure about" is LocalAgreement-2 (Macháček et al.,
+ * on a minute of speech; re-decoding only the audio after the last word we are
+ * sure about (plus a short lead-in before it, see {@link LEAD_IN_S}) costs about
+ * 25%. A window that starts exactly at the commit point has the model begin
+ * mid-sentence with no left context, and its words are wrong far more often; the
+ * lead-in is decoded for context only and its words are discarded. "Sure about"
+ * is LocalAgreement-2 (Macháček et al.,
  * the whisper_streaming policy): a word is stable once two consecutive decodes
  * produce it in the same place. A word is committed — frozen, and its audio
  * dropped from the next window — only when it is stable AND ends at least
@@ -31,11 +35,19 @@ export const MIN_PREVIEW_AUDIO_S = 1.5
 export const GUARD_S = 1.0
 /** A window longer than this force-commits, so a never-agreeing hypothesis cannot grow unbounded. */
 export const MAX_WINDOW_S = 15
+/**
+ * Audio decoded BEFORE the commit point, for left context only; the words that
+ * fall before the commit point are discarded ({@link advancePreview}). Measured on
+ * the owner's recordings against the final pass: preview words wrong 10.5% of the
+ * time (18.1% without the lead-in), 3.0% of on-screen words rewritten per refresh
+ * (4.8%), last preview 4.9% from the final (12.5%), at ~25% CPU while held (~14%).
+ */
+export const LEAD_IN_S = 3
 
 export interface PreviewState {
   /** Words frozen so far, in order. */
   committed: string[]
-  /** Start of the audio the next preview decodes (see {@link advancePreview}). */
+  /** The commit point: words before it are settled (see {@link advancePreview}, {@link previewWindowStart}). */
   commitStart: number
   /** The previous hypothesis' still-open words, for the agreement check. */
   open: Word[]
@@ -61,6 +73,21 @@ export function previewDue(args: {
   return args.lastPreviewAt === null || args.now - args.lastPreviewAt >= PREVIEW_EVERY_MS
 }
 
+/** Where the next preview decode starts, in seconds: the commit point less the lead-in, never before the take. */
+export function previewWindowStart(state: PreviewState): number {
+  return Math.max(0, state.commitStart - LEAD_IN_S)
+}
+
+/**
+ * Drop the words of the lead-in: a word belongs to the lead-in when its midpoint
+ * is before the commit point. The midpoint, not the start or the end, because a
+ * word straddling the commit point is the one we cannot place: it is committed
+ * audio when most of it lies before the point, new audio when most lies after.
+ */
+function withoutLeadIn(state: PreviewState, hypothesis: Word[]): Word[] {
+  return hypothesis.filter((w) => (w.start + w.end) / 2 >= state.commitStart)
+}
+
 /** Words as decoded from a window that began at `offset` seconds, in take time. */
 export function shiftWords(words: Word[], offset: number): Word[] {
   return offset === 0
@@ -82,11 +109,12 @@ function agreementKey(word: string): string {
 export const BOUNDARY_ECHO_S = 0.3
 
 /**
- * A window starts where the last committed word ended, and the model can hear
- * that word's tail again as the window's first word ("the open Open code
- * adapter", seen in the real app). A first word that repeats the last committed
- * one and starts within {@link BOUNDARY_ECHO_S} of the window is that echo and is
- * dropped. A real repetition said later is untouched, and the final pass, which
+ * The commit point is where the last committed word ended, and the model can hear
+ * that word's tail again as the first word after it ("the open Open code
+ * adapter", seen in the real app). Words wholly in the lead-in are already gone
+ * ({@link withoutLeadIn}); this guards the one that straddles the point. A first
+ * word that repeats the last committed one and starts within
+ * {@link BOUNDARY_ECHO_S} of the commit point is that echo and is dropped. A real repetition said later is untouched, and the final pass, which
  * decodes the whole take, never sees a window at all.
  */
 function withoutBoundaryEcho(state: PreviewState, hypothesis: Word[]): Word[] {
@@ -115,12 +143,15 @@ function agreedPrefix(a: Word[], b: Word[]): number {
  * Fold one new hypothesis into the state.
  *
  * `hypothesis` is in take time (see {@link shiftWords}) and covers the audio from
- * `state.commitStart` to `edge`, the take's current length in seconds. Returns the
+ * {@link previewWindowStart} to `edge`, the take's current length in seconds; its
+ * words before `state.commitStart` (the lead-in, decoded for context only) are
+ * ignored here, so they never reach agreement, the display or a commit. Returns the
  * next state and the full preview text — committed plus open words, which is the
  * WHOLE interim: the renderer replaces its interim text with it, never appends.
  *
- * ## Where the next window starts
+ * ## Where the next commit point is
  *
+ * (The decode itself starts {@link LEAD_IN_S} earlier, see {@link previewWindowStart}.)
  * After a commit: at the END of the last committed word. Not at the next word's
  * start — TDT timestamps are the frame a token was emitted at, which can land
  * after the sound began, and a window starting there would clip the onset.
@@ -139,7 +170,7 @@ export function advancePreview(
   rawHypothesis: Word[],
   edge: number
 ): { state: PreviewState; text: string } {
-  const hypothesis = withoutBoundaryEcho(state, rawHypothesis)
+  const hypothesis = withoutBoundaryEcho(state, withoutLeadIn(state, rawHypothesis))
   const stable = agreedPrefix(hypothesis, state.open)
   const settled = (i: number): boolean => hypothesis[i].end <= edge - GUARD_S
 

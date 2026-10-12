@@ -22,7 +22,8 @@
  *
  * One capture per connection. Audio accumulates as `Float32Array`s the server
  * allocated itself (see `recognizer.ts` on external buffers). While the button is
- * held, {@link previewDue} paces re-decodes of the uncommitted tail and
+ * held, {@link previewDue} paces re-decodes of the uncommitted tail (with a short
+ * lead-in before it for context) and
  * `preview.ts` folds them into the interim text; on `voice_stop` ONE decode of
  * the whole utterance (segments cut at quiet points past 60 s) produces the final
  * transcript, which replaces the interim.
@@ -53,6 +54,7 @@ import {
   advancePreview,
   newPreviewState,
   previewDue,
+  previewWindowStart,
   shiftWords,
   type PreviewState,
   type Word
@@ -234,7 +236,8 @@ class Capture {
     const edge = this.samples / SAMPLE_RATE
     // The window starts on a sample boundary, and the hypothesis is shifted by
     // exactly that, so word times stay consistent from one window to the next.
-    const startSample = Math.floor(this.previewState.commitStart * SAMPLE_RATE)
+    // It starts a lead-in before the commit point; advancePreview drops those words.
+    const startSample = Math.floor(previewWindowStart(this.previewState) * SAMPLE_RATE)
     const window = this.audioFrom(startSample)
     try {
       const result = await this.decodeQueued(window)

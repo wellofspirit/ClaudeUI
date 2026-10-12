@@ -309,24 +309,44 @@ describe('voice server — a held capture', () => {
     expect(recognizer.calls.at(-1)).toBe(8 * BLOCK_SAMPLES)
   })
 
-  it('previews decode only the audio after the last committed word', async () => {
+  it('a preview window starts a lead-in before the commit point, clamped at the take start', async () => {
     const client = await startClient()
     client.feed(speech(8)) // 4 s
 
     // Preview 1 (whole take) → no agreement yet; preview 2 agrees and commits the
-    // words ending ≥ 1 s behind the edge (6 of 8), so preview 3 starts at 3.0 s.
+    // words ending ≥ 1 s behind the edge (6 of 8): the commit point is 2.9 s, less
+    // than the 3 s lead-in from the start, so preview 3 still decodes the whole take.
     await pump(() => recognizer.calls.length >= 3)
     expect(recognizer.calls[0]).toBe(8 * BLOCK_SAMPLES)
     expect(recognizer.calls[1]).toBe(8 * BLOCK_SAMPLES)
-    // …from where the last committed word ended (2.9 s), not from the next word.
-    expect(recognizer.calls[2]).toBe(8 * BLOCK_SAMPLES - Math.floor(2.9 * SAMPLE_RATE))
+    expect(recognizer.calls[2]).toBe(8 * BLOCK_SAMPLES)
 
-    // The interim is still the WHOLE preview text, committed + open words.
+    // The interim is still the WHOLE preview text, committed + open words, with
+    // the committed words decoded again in the lead-in not repeated.
     await vi.waitFor(() => expect(client.transcripts.length).toBeGreaterThanOrEqual(3))
     expect(client.transcripts.at(-1)).toEqual({
       text: 'b1 b2 b3 b4 b5 b6 b7 b8',
       isFinal: false
     })
+  })
+
+  it('previews decode the audio after the last committed word plus 3 s of lead-in', async () => {
+    const client = await startClient()
+    client.feed(speech(14)) // 7 s
+
+    // Preview 2 commits the words ending ≤ 6.0 s (b1 … b12), so the commit point is
+    // 5.9 s and preview 3 decodes from 5.9 − 3 = 2.9 s, on a sample boundary.
+    await pump(() => recognizer.calls.length >= 3)
+    expect(recognizer.calls[0]).toBe(14 * BLOCK_SAMPLES)
+    expect(recognizer.calls[1]).toBe(14 * BLOCK_SAMPLES)
+    expect(recognizer.calls[2]).toBe(14 * BLOCK_SAMPLES - Math.floor(2.9 * SAMPLE_RATE))
+    expect(recognizer.calls[2]).toBeLessThan(14 * BLOCK_SAMPLES)
+
+    // The window's words b7 … b12 are the lead-in's re-hearing of committed words:
+    // they are not shown twice.
+    await vi.waitFor(() => expect(client.transcripts.length).toBeGreaterThanOrEqual(3))
+    const all = Array.from({ length: 14 }, (_, i) => `b${i + 1}`).join(' ')
+    expect(client.transcripts.at(-1)).toEqual({ text: all, isFinal: false })
   })
 
   it('does not preview before 1.5 s of audio', async () => {

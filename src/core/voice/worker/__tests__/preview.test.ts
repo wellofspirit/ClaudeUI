@@ -8,12 +8,14 @@ import { describe, it, expect } from 'vitest'
 import {
   BOUNDARY_ECHO_S,
   GUARD_S,
+  LEAD_IN_S,
   MAX_WINDOW_S,
   MIN_PREVIEW_AUDIO_S,
   PREVIEW_EVERY_MS,
   advancePreview,
   newPreviewState,
   previewDue,
+  previewWindowStart,
   shiftWords,
   type Word
 } from '../preview'
@@ -248,6 +250,72 @@ describe('the echo of the last committed word at a window boundary', () => {
     const state = committedState()
     const hyp = shiftWords(say('code adapter'), state.commitStart)
     expect(advancePreview(state, hyp, 5).text).toBe('the open code adapter')
+  })
+})
+
+describe('the lead-in before the commit point', () => {
+  // "the open" committed, ending at 0.9; a preview window now decodes from 0 (the
+  // lead-in reaches back past the take's start), so it re-hears the committed words.
+  const committedState = (): ReturnType<typeof newPreviewState> => {
+    const hyp = say('the open') // 0–0.4, 0.5–0.9
+    const first = advancePreview(newPreviewState(), hyp, 3)
+    return advancePreview(first.state, hyp, 3).state
+  }
+
+  it('previewWindowStart is the commit point less the lead-in, clamped at 0', () => {
+    expect(previewWindowStart({ committed: [], commitStart: 0, open: [] })).toBe(0)
+    expect(previewWindowStart({ committed: [], commitStart: LEAD_IN_S - 0.5, open: [] })).toBe(0)
+    expect(previewWindowStart({ committed: [], commitStart: LEAD_IN_S, open: [] })).toBe(0)
+    expect(previewWindowStart({ committed: [], commitStart: 10, open: [] })).toBeCloseTo(
+      10 - LEAD_IN_S
+    )
+    expect(LEAD_IN_S).toBe(3)
+  })
+
+  it('ignores a hypothesis that repeats the committed words in its lead-in', () => {
+    const state = committedState()
+    expect(state.commitStart).toBeCloseTo(0.9)
+    // The lead-in re-hears "the open" (mid 0.2, 0.7 < 0.9), then new speech.
+    const hyp = say('the open code adapter') // code 1.0–1.4, adapter 1.5–1.9
+    const first = advancePreview(state, hyp, 5)
+    expect(first.text).toBe('the open code adapter')
+    expect(first.state.open.map((w) => w.word)).toEqual(['code', 'adapter'])
+    // A second agreeing decode commits only the new words — each once.
+    const second = advancePreview(first.state, hyp, 5)
+    expect(second.state.committed).toEqual(['the', 'open', 'code', 'adapter'])
+    expect(second.text).toBe('the open code adapter')
+  })
+
+  it('lead-in words that disagree between decodes do not block agreement', () => {
+    const state = committedState()
+    const first = advancePreview(state, say('a closed code adapter'), 5)
+    const second = advancePreview(first.state, say('the open code adapter'), 5)
+    expect(second.state.committed).toEqual(['the', 'open', 'code', 'adapter'])
+  })
+
+  it('keeps or drops a word straddling the commit point by its midpoint', () => {
+    const state = { committed: ['go'], commitStart: 10, open: [] as Word[] }
+    // Midpoint 10.1 ≥ 10: new audio, kept.
+    const kept = advancePreview(state, [{ word: 'now', start: 9.8, end: 10.4 }], 12)
+    expect(kept.text).toBe('go now')
+    // Midpoint 9.9 < 10: committed audio, dropped.
+    const dropped = advancePreview(state, [{ word: 'now', start: 9.4, end: 10.4 }], 12)
+    expect(dropped.text).toBe('go')
+    // Exactly on the point: kept.
+    const edgeCase = advancePreview(state, [{ word: 'now', start: 9.9, end: 10.1 }], 12)
+    expect(edgeCase.text).toBe('go now')
+  })
+
+  it('still drops the echo of the last committed word that starts at the commit point', () => {
+    const state = committedState()
+    // "Open" re-heard right at the commit point (mid 1.0 ≥ 0.9), then the real words.
+    const hyp = [
+      { word: 'the', start: 0, end: 0.4 },
+      { word: 'open', start: 0.5, end: 0.9 },
+      { word: 'Open', start: 0.9, end: 1.2 },
+      { word: 'code', start: 1.3, end: 1.7 }
+    ]
+    expect(advancePreview(state, hyp, 5).text).toBe('the open code')
   })
 })
 
