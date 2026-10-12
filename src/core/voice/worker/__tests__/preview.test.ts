@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest'
 import {
+  BOUNDARY_ECHO_S,
   GUARD_S,
   MAX_WINDOW_S,
   MIN_PREVIEW_AUDIO_S,
@@ -217,6 +218,36 @@ describe('the window follows a pause instead of growing through it', () => {
     // One second of new audio plus the guard margin, with room for the word.
     expect(widest).toBeLessThan(MAX_WINDOW_S / 2)
     expect(state.committed).toEqual(['word'])
+  })
+})
+
+describe('the echo of the last committed word at a window boundary', () => {
+  // "the open" committed, ending at 1.4; the next window starts there.
+  const committedState = (): ReturnType<typeof newPreviewState> => {
+    const hyp = say('the open') // 0–0.4, 0.5–0.9 … ends 0.9
+    const first = advancePreview(newPreviewState(), hyp, 3)
+    return advancePreview(first.state, hyp, 3).state
+  }
+
+  it('drops a first word that repeats the last committed one right at the window start', () => {
+    const state = committedState()
+    expect(state.committed).toEqual(['the', 'open'])
+    // The model re-hears "open"'s tail as "Open", then the real next words.
+    const hyp = shiftWords(say('Open code adapter', 0, 0.5), state.commitStart)
+    const { text } = advancePreview(state, hyp, 5)
+    expect(text).toBe('the open code adapter')
+  })
+
+  it('keeps a real repetition that starts later than the boundary', () => {
+    const state = committedState()
+    const hyp = shiftWords(say('open open', BOUNDARY_ECHO_S + 0.2, 0.5), state.commitStart)
+    expect(advancePreview(state, hyp, 5).text).toBe('the open open open')
+  })
+
+  it('keeps a first word that differs from the last committed one', () => {
+    const state = committedState()
+    const hyp = shiftWords(say('code adapter'), state.commitStart)
+    expect(advancePreview(state, hyp, 5).text).toBe('the open code adapter')
   })
 })
 

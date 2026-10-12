@@ -78,6 +78,31 @@ function agreementKey(word: string): string {
   return word.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
 }
 
+/** How close to the window's start a repeat of the last committed word counts as its echo. */
+export const BOUNDARY_ECHO_S = 0.3
+
+/**
+ * A window starts where the last committed word ended, and the model can hear
+ * that word's tail again as the window's first word ("the open Open code
+ * adapter", seen in the real app). A first word that repeats the last committed
+ * one and starts within {@link BOUNDARY_ECHO_S} of the window is that echo and is
+ * dropped. A real repetition said later is untouched, and the final pass, which
+ * decodes the whole take, never sees a window at all.
+ */
+function withoutBoundaryEcho(state: PreviewState, hypothesis: Word[]): Word[] {
+  const last = state.committed[state.committed.length - 1]
+  const first = hypothesis[0]
+  if (
+    last !== undefined &&
+    first !== undefined &&
+    first.start < state.commitStart + BOUNDARY_ECHO_S &&
+    agreementKey(first.word) === agreementKey(last)
+  ) {
+    return hypothesis.slice(1)
+  }
+  return hypothesis
+}
+
 /** Longest common prefix of two hypotheses, ignoring case and punctuation. */
 function agreedPrefix(a: Word[], b: Word[]): number {
   const max = Math.min(a.length, b.length)
@@ -111,9 +136,10 @@ function agreedPrefix(a: Word[], b: Word[]): number {
  */
 export function advancePreview(
   state: PreviewState,
-  hypothesis: Word[],
+  rawHypothesis: Word[],
   edge: number
 ): { state: PreviewState; text: string } {
+  const hypothesis = withoutBoundaryEcho(state, rawHypothesis)
   const stable = agreedPrefix(hypothesis, state.open)
   const settled = (i: number): boolean => hypothesis[i].end <= edge - GUARD_S
 
