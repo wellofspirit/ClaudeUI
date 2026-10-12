@@ -51,6 +51,24 @@ export interface ApprovalCardViewProps {
   target?: string[]
 }
 
+/** One labelled line of an approval card (a path beside another path). */
+function ApprovalRow({
+  label,
+  children
+}: {
+  label: string
+  children: React.ReactNode
+}): React.JSX.Element {
+  return (
+    <div className="flex gap-2 mt-1">
+      <span className="w-12 shrink-0 pt-px text-[10.5px] uppercase tracking-wide text-text-muted">
+        {label}
+      </span>
+      <div className="min-w-0 flex-1 leading-[18px]">{children}</div>
+    </div>
+  )
+}
+
 /** The agent an approval card names: a label (name, else task description) and its type. */
 export interface AskingAgent {
   label: string
@@ -102,6 +120,19 @@ export function ApprovalCardView({
       >
         $ {toolView.command}
       </pre>
+    )
+  } else if (filePath && hasTarget) {
+    // Beside a target the card shows two long paths: label which is the file and
+    // which is the folder Allow grants.
+    summary = (
+      <ApprovalRow label="File">
+        <span
+          data-testid="ApprovalCardView.summary"
+          className="block text-[12px] font-mono text-text-primary/80 break-all"
+        >
+          {filePath}
+        </span>
+      </ApprovalRow>
     )
   } else if (filePath) {
     summary = (
@@ -190,8 +221,9 @@ export function ApprovalCardView({
             data-testid="ApprovalCardView.agent"
             className="text-[11px] text-text-secondary mb-2 leading-relaxed"
           >
-            Agent {askingAgent.label}
-            {askingAgent.type ? ` (${askingAgent.type})` : ''}
+            {askingAgent.type && <span className="font-mono text-accent">{askingAgent.type}</span>}
+            {askingAgent.type && askingAgent.label !== askingAgent.type && ' · '}
+            {askingAgent.label !== askingAgent.type && askingAgent.label}
           </p>
         )}
         {approval.decisionReason && (
@@ -209,14 +241,16 @@ export function ApprovalCardView({
         )}
         {summary}
         {hasTarget && (
-          <ul
-            data-testid="ApprovalCardView.target"
-            className="text-[12px] font-mono text-text-secondary break-all mt-1"
-          >
-            {target!.map((t) => (
-              <li key={t}>{t}</li>
-            ))}
-          </ul>
+          <ApprovalRow label="Folder">
+            <ul
+              data-testid="ApprovalCardView.target"
+              className="text-[12px] font-mono text-text-secondary break-all"
+            >
+              {target!.map((t) => (
+                <li key={t}>{t}</li>
+              ))}
+            </ul>
+          </ApprovalRow>
         )}
         {isSandboxEscape && !heldBlock && (
           <label className="flex items-center gap-2 mt-2 cursor-default select-none">

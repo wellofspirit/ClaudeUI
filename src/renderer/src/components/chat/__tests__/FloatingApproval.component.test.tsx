@@ -454,8 +454,9 @@ describe('FloatingApproval rendered component', () => {
       agent: { agentId: 'a-1', label: 'Tidy the build', subagentType: 'general-purpose' }
     })
     render(<FloatingApproval />)
-    expect(screen.getByTestId('ApprovalCardView.agent')).toHaveTextContent(
-      'Agent Tidy the build (general-purpose)'
+    // The type first, then the agent's own label (design B, 2026-10-12).
+    expect(screen.getByTestId('ApprovalCardView.agent').textContent).toBe(
+      'general-purpose · Tidy the build'
     )
   })
 
@@ -1024,6 +1025,16 @@ describe('FloatingApproval — an ask raised inside a subagent', () => {
     expect(summary).toHaveTextContent('C:\\outside\\secret.txt')
     expect(summary.textContent).not.toContain('{')
     expect(screen.getByTestId('ApprovalCardView.target')).toHaveTextContent('C:/outside/*')
+    // Two long paths: each is labelled, the file and the folder Allow grants.
+    expect(
+      screen.getByTestId('ApprovalCardView.summary').parentElement?.previousSibling
+    ).toHaveTextContent('File')
+    expect(
+      screen.getByTestId('ApprovalCardView.target').parentElement?.previousSibling
+    ).toHaveTextContent('Folder')
+    expect(screen.getByTestId('ApprovalCardView.agent').textContent).toBe(
+      'explore · Find the secret word'
+    )
   })
 
   it('opencode external_directory with no call to read: still names the agent and the directory', () => {
@@ -1121,6 +1132,6 @@ describe('FloatingApproval — an ask raised inside a subagent', () => {
 
     const agents = screen.getAllByTestId('ApprovalCardView.agent')
     expect(agents).toHaveLength(1)
-    expect(agents[0]).toHaveTextContent('Agent Pi child (worker)')
+    expect(agents[0].textContent).toBe('worker · Pi child')
   })
 })
