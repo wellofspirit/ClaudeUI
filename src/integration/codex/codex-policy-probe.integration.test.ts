@@ -51,11 +51,11 @@ import type { SandboxPolicy } from '../../core/codex/protocol/v2/SandboxPolicy'
  *     the sandbox-enforcement dimension is NOT — `EXIT_NESTED_SANDBOX` marks
  *     those spots.
  *  2. AN APPROVAL DOES NOT MAKE THE FIRST ATTEMPT UNSANDBOXED
- *     (`core/src/tools/orchestrator.rs`, rust-v0.160.1: approval at 197-220,
- *     first attempt under the turn's sandbox at 223-326 unless
+ *     (`core/src/tools/orchestrator.rs`, rust-v0.162.1: approval at 140-224,
+ *     first attempt under the turn's sandbox at 226-382 unless
  *     `sandbox_override_for_first_attempt` in `core/src/tools/sandboxing.rs`
- *     239-268 sees `require_escalated` or an execpolicy `allow`). A plain
- *     approved command therefore reaches the unsandboxed RETRY (327-523) only
+ *     252-285 sees `require_escalated` or an execpolicy `allow`). A plain
+ *     approved command therefore reaches the unsandboxed RETRY (391-588) only
  *     if the failed first attempt is CLASSIFIED as a sandbox denial, and for
  *     `exec_command` that classification is a timing heuristic: it waits at
  *     most 20 ms for output, then keyword-matches whatever arrived
@@ -66,7 +66,7 @@ import type { SandboxPolicy } from '../../core/codex/protocol/v2/SandboxPolicy'
  *     settle it — and then no retry happens and the approved command reports
  *     71. `apply_patch` is NOT affected — its runtime collects
  *     the helper's whole output before classifying
- *     (`core/src/tools/runtimes/apply_patch.rs` 168-237). So:
+ *     (`core/src/tools/runtimes/apply_patch.rs` 168-236). So:
  *       - a test about approval ROUTING or EXECUTION uses either a command the
  *         model explicitly escalates (`sandbox_permissions: "require_escalated"`
  *         — first attempt unsandboxed, no heuristic involved), a sandbox-free

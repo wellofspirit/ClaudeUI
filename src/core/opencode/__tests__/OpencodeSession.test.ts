@@ -147,7 +147,8 @@ vi.mock('../../automode/ground-truth', async (importOriginal) => ({
 import { OpencodeSession, CLAUDEUI_INBOX_PREFIX } from '../OpencodeSession'
 import { OpencodePermissionGuardError } from '../OpencodeServerManager'
 import { OpencodeApiError } from '../OpencodeClient'
-import { buildSessionRuleset, THROWAWAY_RULESET } from '../permission-v2'
+import { buildSessionRuleset, THROWAWAY_RULESET, type V2Rule } from '../permission-v2'
+import { resolveOpencodeOwnDirAllows, type OwnDirClient } from '../own-dirs'
 import { childSessionRuleset } from '../subagent-permissions'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 import type { OpencodeMapperOutput } from '../event-mapper'
@@ -291,6 +292,7 @@ function freshClient(): Record<string, ReturnType<typeof vi.fn>> {
     mcpServers: vi.fn(async () => []),
     agents: vi.fn(async () => AGENTS),
     call: vi.fn(async (op: string) => {
+      if (op === 'server.info') return { paths: { tmp: '/srv/tmp/opencode' } }
       if (op === 'location.get')
         return { directory: CWD, project: { id: 'prj', directory: '/repo', canonical: '/repo' } }
       throw new OpencodeApiError('session.message.get', 404, { _tag: 'MessageNotFoundError' })
@@ -380,12 +382,23 @@ describe('lifecycle', () => {
       },
       mcpServers: ['claudeui'],
       cwd: CWD,
-      worktree: '/repo'
+      worktree: '/repo',
+      externalDirAllows: await resolveOpencodeOwnDirAllows({
+        call: h.client.call as OwnDirClient['call']
+      })
     })
     expect(body).toEqual({
       agent: 'build',
       model: { providerID: 'openai', id: 'gpt-x' },
       permissions: expected.rules
+    })
+    // 2.0.25+: the session states the external_directory ask itself, with the server's tmp dir allowed after it.
+    const external = body.permissions.filter((rule: V2Rule) => rule.action === 'external_directory')
+    expect(external[0]).toEqual({ action: 'external_directory', resource: '*', effect: 'ask' })
+    expect(external).toContainEqual({
+      action: 'external_directory',
+      resource: '/srv/tmp/opencode/*',
+      effect: 'allow'
     })
     expect(body.permissions).toContainEqual({ action: 'execute', resource: '*', effect: 'deny' })
     // The ruleset went on the create: no PATCH of the same rules again.

@@ -2827,6 +2827,26 @@ describe('InputBox FC — rendered', () => {
     expect(ipcCalls['session:create'][0][3]).toBe(FC_ROUTE)
   })
 
+  it('shows and resumes with the tier a reopened thread last ran at', async () => {
+    coldCodexSession('historical')
+    // What `loadSessionIntoStore` seeds from the thread's own record (`lastEffort`)
+    // while the model default is medium.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], effort: 'low' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.effort).toBe('low')
+    await sendFC()
+    // Codex ignores a thread's remembered tier once the resume names a model, so
+    // the tier has to ride the resume or the thread comes back on the default.
+    expect(ipcCalls['session:create'][0][2]).toBe('low')
+    expect(ipcCalls['session:create'][0][3]).toBe(FC_ROUTE)
+  })
+
   it('carries a tier picked on a DISCONNECTED codex session into the resume', async () => {
     coldCodexSession('disconnected', { acknowledged: 'low' })
     renderFC()

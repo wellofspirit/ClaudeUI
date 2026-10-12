@@ -64,12 +64,12 @@ import {
   asHostPrecheckRules,
   buildSessionRuleset,
   CLAUDEUI_MCP_SERVER,
-  opencodeOwnDirAllows,
   wireOrder,
   type V2Rule
 } from '../opencode/permission-v2'
 import type { OpencodePermissionRule } from '../opencode/permission-compiler'
 import { ChildRulesetKeeper } from '../opencode/child-rulesets'
+import { resolveOpencodeOwnDirAllows } from '../opencode/own-dirs'
 import {
   locationWorktree,
   stopOpencodeSessions,
@@ -785,12 +785,14 @@ interface PendingStop {
 interface TargetRuleInputs {
   client: DispatchTargetClient
   cwd: string
-  /** `GET /api/agent` — the default agent, plan, and auto mode's own-dir allows. */
+  /** `GET /api/agent` — the default agent. */
   agents: Agent_Info[] | null
   /** Bridged + `claudeui` + `GET /api/mcp` server names (MCP rule keys, the auto catch-all). */
   mcpServers: string[] | null
   /** The location's git worktree root; undefined = not read yet, null = none. */
   worktree: string | null | undefined
+  /** opencode's own-directory `external_directory` allows (`own-dirs.ts`); null = not resolved yet. */
+  ownDirAllows: V2Rule[] | null
 }
 
 /**
@@ -2914,7 +2916,8 @@ export class CrossEngineDispatcher {
         cwd: ctx.cwd,
         agents: null,
         mcpServers: null,
-        worktree: undefined
+        worktree: undefined,
+        ownDirAllows: null
       }
       // ADR-088 — the judge reads the target through `entry`, declared below
       // (it is only ever called once the target runs a turn).
@@ -3175,15 +3178,12 @@ export class CrossEngineDispatcher {
     autoMode: boolean,
     restriction: CallerRestriction | undefined
   ): Promise<{ rules: V2Rule[]; userRules: V2Rule[]; agent: string | undefined }> {
-    const [mcpServers, worktree, agents] = await Promise.all([
+    const [mcpServers, worktree, agents, externalDirAllows] = await Promise.all([
       this.targetMcpServers(inputs),
       this.targetWorktree(inputs),
-      this.targetAgents(inputs)
+      this.targetAgents(inputs),
+      this.targetOwnDirAllows(inputs)
     ])
-    const primary =
-      mode === 'plan'
-        ? agents?.find((agent) => agent.id === 'plan')
-        : agents?.find((agent) => agent.mode !== 'subagent')
     const built = buildSessionRuleset({
       mode,
       autoMode,
@@ -3191,9 +3191,7 @@ export class CrossEngineDispatcher {
       mcpServers,
       cwd: inputs.cwd,
       ...(worktree ? { worktree } : {}),
-      ...(autoMode && primary
-        ? { externalDirAllows: opencodeOwnDirAllows(primary.permissions) }
-        : {})
+      externalDirAllows
     })
     const first = agents?.[0]
     const defaultAgent = first && first.mode !== 'subagent' ? first.id : undefined
@@ -3324,6 +3322,24 @@ export class CrossEngineDispatcher {
       return undefined
     }
     return inputs.worktree ?? undefined
+  }
+
+  /**
+   * opencode's own directories as `external_directory` allows, in every mode
+   * (cached; an `/api/info` failure is not). The target's user rules carry no
+   * `additionalDirectories` (ADR-033), so these are the only allows under the ask.
+   */
+  private async targetOwnDirAllows(inputs: TargetRuleInputs): Promise<V2Rule[]> {
+    if (inputs.ownDirAllows) return inputs.ownDirAllows
+    let failed = false
+    const allows = await resolveOpencodeOwnDirAllows(inputs.client, {
+      onError: (message) => {
+        failed = true
+        logger.debug('CrossEngineDispatcher', `opencode target: ${message}`)
+      }
+    })
+    if (!failed) inputs.ownDirAllows = allows
+    return allows
   }
 
   /** `GET /api/agent` (cached; a failed read is not, and answers null). */

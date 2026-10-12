@@ -216,6 +216,12 @@ export interface PiAssistantMessage {
   stopReason: PiStopReason
   errorMessage?: string
   timestamp: number
+  /**
+   * Milliseconds from `timestamp` to the end of the response (monotonic clock; added
+   * 1.1.0, `packages/ai/src/types.ts`). Absent on older messages and on deferred results.
+   * Unconsumed.
+   */
+  durationMs?: number
 }
 
 export interface PiToolResultMessage {
@@ -228,6 +234,8 @@ export interface PiToolResultMessage {
   details?: { diff?: string; patch?: string; firstChangedLine?: number; [key: string]: unknown }
   isError: boolean
   timestamp: number
+  /** Milliseconds the tool's `execute()` took (monotonic; added 1.1.0). Absent on older results. Unconsumed. */
+  durationMs?: number
 }
 
 /**
@@ -328,7 +336,14 @@ export interface PiCompactionResult {
 export type PiEvent =
   | { type: 'agent_start' }
   | { type: 'agent_end'; messages: PiAgentMessage[]; willRetry: boolean }
-  | { type: 'agent_settled' }
+  | {
+      type: 'agent_settled'
+      /**
+       * Whether an abort was requested during the run (added 1.1.0,
+       * `agent-session.ts` `_emitAgentSettled`). Absent from older pi. Unconsumed.
+       */
+      aborted?: boolean
+    }
   | { type: 'turn_start' }
   | { type: 'turn_end'; message: PiAgentMessage; toolResults: PiToolResultMessage[] }
   | { type: 'message_start'; message: PiAgentMessage }
@@ -364,6 +379,8 @@ export type PiEvent =
       toolName: string
       result: unknown
       isError: boolean
+      /** Milliseconds `execute()` took (monotonic; added 1.1.0); absent when the tool did not run. Unconsumed. */
+      durationMs?: number
     }
   | { type: 'queue_update'; steering: string[]; followUp: string[] }
   | { type: 'compaction_start'; reason: 'manual' | 'threshold' | 'overflow' }

@@ -200,6 +200,17 @@ it('leaves a thread that never metered without a status line', async () => {
   expect((await loadCodexHistory('root')).statusLine).toBeNull()
 })
 
+it('hands back the tier the thread last ran at, so a cold reopen can show it', async () => {
+  const thread = { id: 'root', modelProvider: 'openai', name: null, createdAt: 1, turns: [] }
+  mocks.history.mockResolvedValue({ ...thread, reasoningEffort: 'low' })
+  expect((await loadCodexHistory('root')).lastEffort).toBe('low')
+  // A thread whose rollout names no tier says nothing, rather than inventing one.
+  mocks.history.mockResolvedValue({ ...thread, reasoningEffort: null })
+  expect((await loadCodexHistory('root')).lastEffort).toBeNull()
+  mocks.history.mockResolvedValue(thread)
+  expect((await loadCodexHistory('root')).lastEffort).toBeNull()
+})
+
 it('truncates a forked seed at the anchor turn and refuses an anchor it cannot find', async () => {
   const command = {
     type: 'commandExecution',

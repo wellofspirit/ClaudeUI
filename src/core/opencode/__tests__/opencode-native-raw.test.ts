@@ -181,6 +181,48 @@ describe('patchOpencodeNativeRaw (opencode 2.x schema, ADR-097 S8)', () => {
       expect(() => patchOpencodeNativeRaw([{ path, value }]), path.join('.')).not.toThrow()
   })
 
+  it('validates the 2.0.25 policy actions and Compatibility flags (the pinned schema knows them)', () => {
+    // `experimental.policies` is ClaudeUI's own to write, but a hand-written one
+    // sits in the file the editor validates whenever `experimental` is touched.
+    const p = writeConfig(
+      'opencode.json',
+      JSON.stringify({
+        experimental: {
+          policies: [
+            { action: 'provider.use', resource: '*', effect: 'deny' },
+            { action: 'tool.use', resource: 'bash', effect: 'deny' },
+            { action: 'integration.use', resource: 'azure', effect: 'allow' }
+          ]
+        }
+      })
+    )
+    patchOpencodeNativeRaw([
+      { path: ['experimental', 'subagent_depth'], value: 2 },
+      {
+        path: ['providers', 'x', 'models', 'm', 'compatibility'],
+        value: { supportsThinkingBlockBinding: true, supportsEffortUpdates: false }
+      }
+    ])
+    const written = jsoncParse(fs.readFileSync(p, 'utf8'))
+    expect(written.experimental.policies.map((rule: { action: string }) => rule.action)).toEqual([
+      'provider.use',
+      'tool.use',
+      'integration.use'
+    ])
+    expect(written.providers.x.models.m.compatibility).toEqual({
+      supportsThinkingBlockBinding: true,
+      supportsEffortUpdates: false
+    })
+    expect(() =>
+      patchOpencodeNativeRaw([
+        {
+          path: ['providers', 'x', 'models', 'm', 'compatibility', 'supportsEffortUpdates'],
+          value: 'yes'
+        }
+      ])
+    ).toThrow(/would be invalid|must be boolean/)
+  })
+
   it('rejects a schema-invalid result and writes nothing', () => {
     const p = writeConfig('opencode.json', `{ "providers": { "ec2": { "models": { "q": {} } } } }`)
     const before = fs.readFileSync(p, 'utf8')

@@ -3,6 +3,7 @@ import { CodexApprovalCard } from './CodexApprovalCard'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import type {
   ApprovalDecision,
+  ChatMessage,
   ContentBlock,
   EngineId,
   PendingApproval
@@ -12,6 +13,7 @@ import { engineToolMap } from './tool-registry/engine-tool-maps'
 import { AlwaysAllowSection } from './PermissionSuggestions'
 import { HoldCountdown } from './ApprovalButtons'
 import { AskUserQuestionBlock } from './AskUserQuestionBlock/AskUserQuestionBlock'
+import { agentRowLabel, useAgentRoster } from '../../hooks/useAgentRoster'
 
 // ---------------------------------------------------------------------------
 // View layer — pure render, zero business logic
@@ -34,6 +36,43 @@ export interface ApprovalCardViewProps {
    * Absent → the raw input.
    */
   toolView?: ToolView
+  /**
+   * The agent whose action this is, resolved from the transcript, when it is not
+   * the session's own. The approval's own `agent` (pi children, dispatch
+   * targets) takes precedence; with neither there is no line.
+   */
+  agent?: AskingAgent
+  /** The action, readable. Absent → the raw wire action (`approval.toolName`). */
+  actionLabel?: string
+  /**
+   * What the action reaches, when the call itself does not say (an
+   * `external_directory` ask names the directory glob). Absent → no line.
+   */
+  target?: string[]
+}
+
+/** One labelled line of an approval card (a path beside another path). */
+function ApprovalRow({
+  label,
+  children
+}: {
+  label: string
+  children: React.ReactNode
+}): React.JSX.Element {
+  return (
+    <div className="flex gap-2 mt-1">
+      <span className="w-12 shrink-0 pt-px text-[10.5px] uppercase tracking-wide text-text-muted">
+        {label}
+      </span>
+      <div className="min-w-0 flex-1 leading-[18px]">{children}</div>
+    </div>
+  )
+}
+
+/** The agent an approval card names: a label (name, else task description) and its type. */
+export interface AskingAgent {
+  label: string
+  type?: string
 }
 
 export function ApprovalCardView({
@@ -45,7 +84,10 @@ export function ApprovalCardView({
   onToggleSuggestion,
   onRespond,
   showAllowForSession = false,
-  toolView
+  toolView,
+  agent,
+  actionLabel,
+  target
 }: ApprovalCardViewProps): React.JSX.Element {
   // See ApprovalButtons: the codex card is the native-question surface only.
   if (approval.codex?.questions) return <CodexApprovalCard approval={approval} />
@@ -64,7 +106,12 @@ export function ApprovalCardView({
     (toolView.kind === 'fileEdit' || toolView.kind === 'fileWrite' || toolView.kind === 'fileRead')
       ? toolView.path
       : ''
-  let summary: React.JSX.Element
+  // The engine's own attribution (pi children, dispatch targets) outranks the resolved one.
+  const askingAgent: AskingAgent | undefined = approval.agent
+    ? { label: approval.agent.label, type: approval.agent.subagentType }
+    : agent
+  const hasTarget = !!target && target.length > 0
+  let summary: React.JSX.Element | null
   if (toolView?.kind === 'command' && toolView.command) {
     summary = (
       <pre
@@ -73,6 +120,19 @@ export function ApprovalCardView({
       >
         $ {toolView.command}
       </pre>
+    )
+  } else if (filePath && hasTarget) {
+    // Beside a target the card shows two long paths: label which is the file and
+    // which is the folder Allow grants.
+    summary = (
+      <ApprovalRow label="File">
+        <span
+          data-testid="ApprovalCardView.summary"
+          className="block text-[12px] font-mono text-text-primary/80 break-all"
+        >
+          {filePath}
+        </span>
+      </ApprovalRow>
     )
   } else if (filePath) {
     summary = (
@@ -83,6 +143,9 @@ export function ApprovalCardView({
         {filePath}
       </span>
     )
+  } else if (hasTarget) {
+    // The target line below says what is reached; the raw input would only repeat it as JSON.
+    summary = null
   } else {
     summary = (
       <pre
@@ -144,7 +207,7 @@ export function ApprovalCardView({
             data-testid="ApprovalCardView.toolName"
             className="font-mono text-[12px] text-accent"
           >
-            {toolName}
+            {actionLabel ?? toolName}
           </span>
           {heldBlock && (
             <HoldCountdown
@@ -153,12 +216,14 @@ export function ApprovalCardView({
             />
           )}
         </div>
-        {approval.agent && (
+        {askingAgent && (
           <p
             data-testid="ApprovalCardView.agent"
             className="text-[11px] text-text-secondary mb-2 leading-relaxed"
           >
-            Agent {approval.agent.label} ({approval.agent.subagentType})
+            {askingAgent.type && <span className="font-mono text-accent">{askingAgent.type}</span>}
+            {askingAgent.type && askingAgent.label !== askingAgent.type && ' · '}
+            {askingAgent.label !== askingAgent.type && askingAgent.label}
           </p>
         )}
         {approval.decisionReason && (
@@ -175,6 +240,18 @@ export function ApprovalCardView({
           </p>
         )}
         {summary}
+        {hasTarget && (
+          <ApprovalRow label="Folder">
+            <ul
+              data-testid="ApprovalCardView.target"
+              className="text-[12px] font-mono text-text-secondary break-all"
+            >
+              {target!.map((t) => (
+                <li key={t}>{t}</li>
+              ))}
+            </ul>
+          </ApprovalRow>
+        )}
         {isSandboxEscape && !heldBlock && (
           <label className="flex items-center gap-2 mt-2 cursor-default select-none">
             <input
@@ -258,6 +335,48 @@ export function approvalToolView(
   }
 }
 
+type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
+
+/** The wire action without the dispatch forward's `dispatch:` prefix. */
+const wireAction = (approval: PendingApproval): string =>
+  approval.toolName.replace(/^dispatch:/, '')
+
+/**
+ * Where an ask raised inside a subagent came from: the agent's spawn-call id
+ * (the key of its `subagentMessages` bucket and of its roster row) and, when its
+ * transcript already holds the call being asked about, that call.
+ *
+ * opencode marks a child ask itself (`subagent.parentToolUseId`); Claude, Codex
+ * and dispatched targets do not, so the bucket holding a `tool_use` with the
+ * ask's own `toolUseId` is the attribution (a call id is unique per session).
+ * Undefined for the session's own asks.
+ */
+export function findAskingBucket(
+  approval: PendingApproval,
+  subagentMessages: Readonly<Record<string, ChatMessage[]>> | undefined
+): { ownerToolUseId: string; call?: ToolUseBlock } | undefined {
+  const callIn = (messages: ChatMessage[] | undefined): ToolUseBlock | undefined => {
+    if (!approval.toolUseId || !messages) return undefined
+    for (const msg of messages) {
+      if (msg.role !== 'assistant') continue
+      for (const b of msg.content) {
+        if (b.type === 'tool_use' && b.toolUseId === approval.toolUseId) return b
+      }
+    }
+    return undefined
+  }
+  const marked = approval.subagent?.parentToolUseId
+  if (marked) return { ownerToolUseId: marked, call: callIn(subagentMessages?.[marked]) }
+  for (const [ownerToolUseId, messages] of Object.entries(subagentMessages ?? {})) {
+    const call = callIn(messages)
+    if (call) return { ownerToolUseId, call }
+  }
+  return undefined
+}
+
+/** opencode's permission category for a path outside the workspace (a category, not a tool). */
+const OUTSIDE_WORKSPACE = 'external_directory'
+
 /**
  * Every pending approval with no matching tool_use block in the session's
  * TOP-LEVEL transcript.
@@ -307,6 +426,8 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
   const sandboxSettings = engineConfig.sandbox
   const permissionMode = useActiveSession((s) => s.permissionMode)
   const engineId = useActiveSession((s) => s.status.engineId)
+  const subagentMessages = useActiveSession((s) => s.subagentMessages)
+  const roster = useAgentRoster()
   const [alwaysAllow, setAlwaysAllow] = useState(false)
   const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(() =>
     (approval.suggestions || []).map(() => false)
@@ -368,6 +489,28 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
     dismissApproval(activeSessionId, approval.requestId)
   }
 
+  // An ask raised inside a subagent floats detached from the agent's card: say
+  // whose it is, and read the call from the agent's own transcript when the ask
+  // is a permission CATEGORY rather than a tool (`external_directory`).
+  const asking = findAskingBucket(approval, subagentMessages)
+  const row = asking && roster.agents.find((r) => r.toolUseId === asking.ownerToolUseId)
+  const call = asking?.call
+  const toolView =
+    approvalToolView(approval, engineId) ??
+    (call
+      ? approvalToolView(
+          { ...approval, toolName: call.toolName, input: call.toolInput ?? {} },
+          engineId
+        )
+      : undefined)
+  const outside = wireAction(approval) === OUTSIDE_WORKSPACE
+  const callName = call ? engineToolMap(engineId).displayName(call.toolName) : undefined
+  const actionLabel = outside
+    ? callName
+      ? `${callName} outside workspace`
+      : 'Outside workspace'
+    : undefined
+
   return (
     <ApprovalCardView
       approval={approval}
@@ -379,12 +522,15 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
         setCheckedSuggestions((prev) => prev.map((v, j) => (j === i ? !v : v)))
       }
       onRespond={handleRespond}
-      toolView={approvalToolView(approval, engineId)}
+      toolView={toolView}
+      agent={
+        row ? { label: agentRowLabel(row), ...(row.type ? { type: row.type } : {}) } : undefined
+      }
+      actionLabel={actionLabel}
+      target={outside ? approval.patterns : undefined}
     />
   )
 }
-
-type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 
 /**
  * Renders an unmatched AskUserQuestion approval as a floating interactive

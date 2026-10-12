@@ -161,6 +161,10 @@ let directory: string | undefined
 let server: Server | undefined
 
 afterEach(async () => {
+  // First, and outside the teardown below: a case that fails before its own
+  // `mockRestore()` must not leave a `CodexClient.prototype.request` spy behind
+  // for the next one (`vi.spyOn` only — the hoisted `vi.fn()`s are untouched).
+  vi.restoreAllMocks()
   coreEvents.mockClear()
   sessionMeta.clear()
   const survivors: number[] = []
@@ -631,16 +635,18 @@ it.skipIf(!enabled)(
     // and therefore not something a config can switch off — so `browser_navigate`
     // never appears by name however long the wait. What IS observable, and is
     // the thing that matters, is that the desktop app's server PROCESS was
-    // started and asked for its tools (its own log), and that the binary added
-    // the `*_mcp_resource*` helpers it adds whenever a server is loaded.
+    // started and asked for its tools (its own log).
+    //
+    // The `*_mcp_resource*` helpers are NOT evidence either way since 0.162:
+    // `add_mcp_resource_tools` (`codex-rs/core/src/tools/spec_plan.rs`, ~:1201)
+    // registers `list_mcp_resources`, `list_mcp_resource_templates` and
+    // `read_mcp_resource` when the thread has an MCP server OR is in Code Mode
+    // Only (upstream #50546, "Keep MCP resource helpers available in code
+    // mode"), so they appear on a thread with no server at all.
     expect(
       leakedMcpLog.join('\n'),
       'the desktop MCP server was never asked for its tools'
     ).toContain('tools/list')
-    expect(
-      leakedTools.filter((name) => name.includes('mcp_resource')),
-      'no MCP server was loaded on the unsuppressed thread'
-    ).not.toEqual([])
     // The PLUGIN half is plain text in the prompt — the sentence the model acted on.
     expect(leakedPhrase, `no "${DESKTOP_PHRASE}" in the unsuppressed prompt`).not.toEqual([])
     // Cleared, so its reappearance below would mean the server started again.
@@ -671,16 +677,11 @@ it.skipIf(!enabled)(
         phraseMatches(request, DESKTOP_PHRASE),
         `${where}: the plugin's text is still in the prompt`
       ).toEqual([])
-      // The MCP half, twice over: the binary loaded no server on this thread
-      // (the `*_mcp_resource*` helpers it adds when one is configured are gone)
-      // and the desktop app's server process was never even started (its own log
-      // has not come back since it was cleared above). The second is the one
-      // that cannot be raced — a server merely slow to answer would still have
-      // been spawned and would still have written a line.
-      expect(
-        tools.filter((name) => name.includes('mcp_resource')),
-        `${where}: an MCP server is still configured on this thread`
-      ).toEqual([])
+      // The MCP half: the desktop app's server process was never even started
+      // (its own log has not come back since it was cleared above). That cannot
+      // be raced — a server merely slow to answer would still have been spawned
+      // and would still have written a line. (The `*_mcp_resource*` helpers say
+      // nothing about it since 0.162: they are registered without any server.)
       expect(readMcpLog(fixture), `${where}: the desktop MCP server was started`).toEqual([])
       expect(tools, `${where}: the tool list drifted between start, resume and fork`).toEqual(
         startTools
@@ -688,13 +689,12 @@ it.skipIf(!enabled)(
     }
     assertSuppressed(startRequest, 'thread/start')
     // The suppression is SURGICAL: every tool the unsuppressed run offered is
-    // still here except the MCP helpers that exist only because a server was
-    // loaded. (The hosted ClaudeUI tools — `render_mermaid`, `create_mockup`,
+    // still here. (The hosted ClaudeUI tools — `render_mermaid`, `create_mockup`,
     // `show_mockup`, `dispatch_agent` — go the other way: the bare client above
     // declares no `dynamicTools`, so they are in the suppressed list and not in
     // the leaked one.)
     expect(
-      leakedTools.filter((name) => !startTools.includes(name) && !name.includes('mcp_resource')),
+      leakedTools.filter((name) => !startTools.includes(name)),
       'the suppression removed a tool that was not the desktop app`s'
     ).toEqual([])
 

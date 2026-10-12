@@ -2,7 +2,7 @@
  * ClaudeUI's permission model compiled for opencode 2.x (ADR-097 §3, amending
  * ADR-022 and ADR-085 for the 2.x engine). Pure: no I/O, no logger.
  *
- * ## 2.x facts this module is built on (`vendor/opencode-src` @ v2.0.24)
+ * ## 2.x facts this module is built on (`vendor/opencode-src` @ v2.0.24; 2.0.26 differs in `external_directory`, below)
  *
  * - A rule is `{action, resource, effect}`. A call is checked against
  *   `agent.permissions ++ session.permissions` (`core/src/permission.ts`
@@ -39,6 +39,13 @@
  * - `execute` (Code Mode) is wholly denied in every mode: its runtime carries
  *   an UNGATED `fetch` (`core/src/codemode/web.ts`), which would bypass the
  *   `webfetch` gate and the auto-mode judge.
+ * - `external_directory` is ClaudeUI's own ask in EVERY mode ({@link
+ *   externalDirectoryGates}). Up to 2.0.24 every agent carried `{*: ask}` plus
+ *   allows for opencode's own directories; 2.0.25 removed both and made
+ *   `explore` allow everything (#53585, `36a38058fb`). The session rules follow
+ *   the agent's, so the ask outranks even `explore`'s allow; the own-dir allows
+ *   (`own-dirs.ts`) and the user's `additionalDirectories` allows come
+ *   after it and win.
  * - Plan mode wholly denies `edit` (hidden; plan mode wins, ADR-085 ruling 7,
  *   immune to saved allows) and denies the `general` subagent; shell stays an
  *   `ask` the host judges per command (`host-precheck.ts`).
@@ -238,8 +245,11 @@ export const THROWAWAY_RULESET: readonly V2Rule[] = [rule('*', 'deny')]
 
 /**
  * The mode's gates, sent BEFORE the user's rules (so a user rule outranks
- * them). Asks only: the agent's own `{*: allow}` is the baseline.
+ * them). Asks only (plus the own-directory allows under the `external_directory`
+ * ask, below): the agent's own `{*: allow}` is the baseline.
  *
+ * - EVERY mode: `external_directory` asks, opencode's own directories allowed
+ *   ({@link externalDirectoryGates}).
  * - default (also `ask`, `bypassPermissions` — ClaudeUI has no bypass for
  *   opencode — and auto with the classifier off): shell, edit, webfetch ask.
  * - acceptEdits / autoEdit: shell and webfetch ask; edits ask only on the
@@ -257,28 +267,48 @@ export function modeGates(
   opts: { autoMode?: boolean; externalDirAllows?: readonly V2Rule[] } = {}
 ): V2Rule[] {
   const shellWeb = [rule('shell', 'ask'), rule('webfetch', 'ask')]
+  const external = externalDirectoryGates(opts.externalDirAllows)
   switch (mode) {
     case 'plan':
-      return shellWeb
+      return [...shellWeb, ...external]
     case 'acceptEdits':
     case 'autoEdit':
-      return [...shellWeb, ...agentControlEditPatterns().map((p) => rule('edit', 'ask', p))]
+      return [
+        ...shellWeb,
+        ...agentControlEditPatterns().map((p) => rule('edit', 'ask', p)),
+        ...external
+      ]
     case 'auto':
     case 'full':
       if (opts.autoMode) return autoModeGates(opts.externalDirAllows ?? [])
-      return [rule('shell', 'ask'), rule('edit', 'ask'), rule('webfetch', 'ask')]
+      return [rule('shell', 'ask'), rule('edit', 'ask'), rule('webfetch', 'ask'), ...external]
     default:
-      return [rule('shell', 'ask'), rule('edit', 'ask'), rule('webfetch', 'ask')]
+      return [rule('shell', 'ask'), rule('edit', 'ask'), rule('webfetch', 'ask'), ...external]
   }
+}
+
+/**
+ * The `external_directory` ask every mode carries, then the allows for
+ * opencode's own directories (`own-dirs.ts` `opencodeOwnDirAllows`) so
+ * they stay silent. Placed in the mode gates — BEFORE the user's rules — so the
+ * `additionalDirectories` allows compiled from them still win, and AFTER the
+ * agent's own rules, so the ask outranks `explore`'s `{external_directory,*,allow}`
+ * (2.0.25+) for it and for its subagent children. Only allows for the action
+ * are taken from `ownDirAllows`.
+ */
+export function externalDirectoryGates(ownDirAllows: readonly V2Rule[] = []): V2Rule[] {
+  return [
+    rule('external_directory', 'ask'),
+    ...ownDirAllows.filter((r) => r.action === 'external_directory' && r.effect === 'allow')
+  ]
 }
 
 /**
  * Auto mode (classifier on): shell, webfetch and every edit ask; every MCP
  * tool asks ({@link AUTO_MCP_CATCH_ALL}) except ClaudeUI's hosted `claudeui_*`
  * tools (the dispatch tool keeps its own ask, appended later). The catch-all
- * also covers `external_directory`, so the agent's own allows for opencode's
- * data/tmp/config directories are re-stated after it (`externalDirAllows`,
- * from {@link opencodeOwnDirAllows}); without them those reads ask too.
+ * also covers `external_directory`; it is re-stated as the ordinary ask with
+ * opencode's own directories allowed after it ({@link externalDirectoryGates}).
  */
 export function autoModeGates(externalDirAllows: readonly V2Rule[] = []): V2Rule[] {
   return [
@@ -287,21 +317,8 @@ export function autoModeGates(externalDirAllows: readonly V2Rule[] = []): V2Rule
     rule('edit', 'ask'),
     AUTO_MCP_CATCH_ALL,
     rule(`${CLAUDEUI_MCP_SERVER}_*`, 'allow'),
-    rule('external_directory', 'ask'),
-    ...externalDirAllows.filter((r) => r.action === 'external_directory' && r.effect === 'allow')
+    ...externalDirectoryGates(externalDirAllows)
   ]
-}
-
-/**
- * The `external_directory` allows an agent carries for opencode's own
- * directories (shell output, tool output, tmp, config — `core/src/agent.ts`),
- * read from `GET /api/agent` (`Agent_Info.permissions`), for
- * {@link autoModeGates}. Wildcard-resource allows are left out.
- */
-export function opencodeOwnDirAllows(agentRules: readonly V2Rule[]): V2Rule[] {
-  return agentRules.filter(
-    (r) => r.action === 'external_directory' && r.effect === 'allow' && r.resource !== '*'
-  )
 }
 
 /**
@@ -343,7 +360,7 @@ export interface SessionRulesetInput {
   cwd?: string
   /** The session's git worktree root, when known (settings-relative `/x` rules). */
   worktree?: string
-  /** Auto mode: the agent's allows for opencode's own directories ({@link opencodeOwnDirAllows}). */
+  /** The allows for opencode's own directories (`own-dirs.ts` `resolveOpencodeOwnDirAllows`), every mode. */
   externalDirAllows?: readonly V2Rule[]
   /** Home for `~/` specifiers (tests). */
   home?: string

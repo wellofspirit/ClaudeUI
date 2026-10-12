@@ -10,6 +10,7 @@ import {
   renderAgentListing,
   type PiAgentDefinition
 } from '../pi-agent-registry'
+import { buildPiSubagentChildArgs } from '../pi-subagents'
 
 // Every file and directory this suite creates is recorded and removed by its
 // explicit name afterwards (files first, then directories deepest-first).
@@ -267,6 +268,36 @@ describe('parseAgentFile', () => {
       parse('name: a\ndescription: d\ntools: [read, "Bash(git *)"]', diagnostics).tools
     ).toEqual(['read'])
     expect(diagnostics).toEqual(['/x/a.md: tools: ignored an entry that is not a tool name'])
+  })
+
+  it('ignores a +name/-name tool entry (pi 1.1.0 --tools modifiers), so the generated --tools list never mixes', () => {
+    const diagnostics: string[] = []
+    const def = parse(
+      'name: a\ndescription: d\ntools: [read, -foo, +bar, "-", my-ext, mcp__gh__x]\ndisallowedTools: [-write, edit]',
+      diagnostics
+    )
+    expect(def.tools).toEqual(['read', 'my-ext', 'mcp__gh__x'])
+    expect(def.disallowedTools).toEqual(['edit'])
+    expect(diagnostics).toEqual([
+      '/x/a.md: tools: ignored an entry that is not a tool name',
+      '/x/a.md: tools: ignored an entry that is not a tool name',
+      '/x/a.md: tools: ignored an entry that is not a tool name',
+      '/x/a.md: disallowedTools: ignored an entry that is not a tool name'
+    ])
+    for (const childCanSpawn of [false, true]) {
+      const args = buildPiSubagentChildArgs({
+        dir: '/d',
+        agentId: 'ag',
+        promptFile: '/p.md',
+        definition: def,
+        childCanSpawn
+      })
+      const tools = args[args.indexOf('--tools') + 1].split(',')
+      expect(tools).toContain('send_message')
+      expect(tools.filter((t) => t.startsWith('+') || t.startsWith('-'))).toEqual([])
+      const exclude = args[args.indexOf('--exclude-tools') + 1].split(',')
+      expect(exclude.filter((t) => t.startsWith('+') || t.startsWith('-'))).toEqual([])
+    }
   })
 
   it('an unknown permissionMode fails safe to default, with a diagnostic', () => {

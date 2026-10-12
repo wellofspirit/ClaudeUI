@@ -225,6 +225,12 @@ export async function loadSessionIntoStore(
       history.statusLine,
       history.warnings
     )
+    // The tier the thread last ran at is the session's own until the user picks
+    // another (a pick made earlier in this run wins). It has to be the session's
+    // own and not just a label: a resume that names a model makes Codex ignore the
+    // thread's remembered tier, so only an effort carried on the spawn keeps it.
+    if (history.lastEffort && !isLive(routingId) && !store().sessions[routingId]?.effort)
+      store().setEffort(history.lastEffort, routingId)
     if (info.title) store().setCustomTitle(routingId, info.title)
     return 'loaded'
   }

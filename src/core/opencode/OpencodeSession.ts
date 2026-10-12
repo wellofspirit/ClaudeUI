@@ -115,12 +115,12 @@ import {
   buildSessionRuleset,
   CLAUDEUI_MCP_SERVER,
   compileClaudeRulesV2,
-  opencodeOwnDirAllows,
   THROWAWAY_RULESET,
   type V2Rule
 } from './permission-v2'
 import { isV2BuiltinAction } from './permission-keys'
 import { ChildRulesetKeeper } from './child-rulesets'
+import { resolveOpencodeOwnDirAllows } from './own-dirs'
 import { locationWorktree, stopOpencodeSessions } from './session-support'
 import { hostPrecheck, type HostPrecheckContext } from './host-precheck'
 import { OpencodeSessionAllows } from './session-allows'
@@ -369,6 +369,8 @@ export class OpencodeSession extends BaseSession {
   /** `GET /api/agent` (cached per connection; a failure is not cached). */
   private agentList: Agent_Info[] | null = null
   private agentsWarned = false
+  /** opencode's own-directory `external_directory` allows (cached per connection). */
+  private ownDirAllows: V2Rule[] | null = null
   /** The location's git worktree root (`GET /api/location` project directory); null = none/unknown. */
   private worktree: string | null | undefined = undefined
 
@@ -878,6 +880,7 @@ export class OpencodeSession extends BaseSession {
         // what is per server, and re-assert the session's rules.
         this.knownMcpServers = null
         this.agentList = null
+        this.ownDirAllows = null
         this.worktree = undefined
         this.applied = null
         this.disconnected = false
@@ -1816,7 +1819,7 @@ export class OpencodeSession extends BaseSession {
     const [mcpServers, worktree, externalDirAllows] = await Promise.all([
       this.resolveMcpServers(),
       this.resolveWorktree(),
-      autoMode ? this.primaryAgentDirAllows(mode) : Promise.resolve(undefined)
+      this.resolveOwnDirAllows()
     ])
     return buildSessionRuleset({
       mode,
@@ -1825,7 +1828,7 @@ export class OpencodeSession extends BaseSession {
       mcpServers,
       cwd: this.cwd,
       ...(worktree ? { worktree } : {}),
-      ...(externalDirAllows ? { externalDirAllows } : {})
+      externalDirAllows
     })
   }
 
@@ -1922,15 +1925,23 @@ export class OpencodeSession extends BaseSession {
     return id ? agents.find((agent) => agent.id === id) : agents[0]
   }
 
-  /** Auto mode: the primary agent's allows for opencode's own directories (S6). */
-  private async primaryAgentDirAllows(mode: string): Promise<V2Rule[]> {
-    const agents = await this.loadAgents()
-    if (!agents) return []
-    const agent =
-      mode === 'plan'
-        ? agents.find((a) => a.id === 'plan')
-        : agents.find((a) => a.mode !== 'subagent')
-    return agent ? opencodeOwnDirAllows(agent.permissions) : []
+  /**
+   * opencode's own directories as `external_directory` allows (every mode: the
+   * session states the ask itself since 2.0.25, `own-dirs.ts`). Cached per
+   * connection; an `/api/info` failure is not cached.
+   */
+  private async resolveOwnDirAllows(): Promise<V2Rule[]> {
+    if (this.ownDirAllows) return this.ownDirAllows
+    const client = this.client
+    let failed = false
+    const allows = await resolveOpencodeOwnDirAllows(client ?? undefined, {
+      onError: (message) => {
+        failed = true
+        logger.debug('OpencodeSession', message)
+      }
+    })
+    if (!failed && client === this.client) this.ownDirAllows = allows
+    return allows
   }
 
   // ── Subagent children (S6 seam; `child-rulesets.ts`) ───────────────────────

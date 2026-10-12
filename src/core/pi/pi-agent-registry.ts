@@ -97,8 +97,13 @@ const THINKING_LEVELS: readonly PiThinkingLevel[] = [
 ]
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._ -]*$/
-/** A tool name as pi spells built-in and extension tools (it travels in `--tools a,b`). */
-const TOOL_NAME_RE = /^[A-Za-z0-9_.:-]{1,64}$/
+/**
+ * A tool name as pi spells built-in and extension tools (it travels in `--tools a,b`).
+ * A leading `+`/`-` is never accepted: since pi 1.1.0 those are `--tools` modifier
+ * entries, and a list that mixes them with plain names (ClaudeUI always appends
+ * `send_message`) makes pi exit 1 at startup. `-` stays legal inside a name.
+ */
+const TOOL_NAME_RE = /^[A-Za-z0-9_.:][A-Za-z0-9_.:-]{0,63}$/
 const FENCE_RE = /^---[ \t]*$/
 
 /** Claude Code tool names → pi's (case-insensitive); anything else passes through as written. */

@@ -193,6 +193,58 @@ describe('a declined load that a newer click superseded', () => {
   })
 })
 
+describe('a Codex reopen', () => {
+  const CODEX: SessionInfo = { ...INFO, engineId: 'codex' }
+  const codexHistory = (lastEffort?: string | null): unknown => ({
+    ...(history('m1') as object),
+    ...(lastEffort === undefined ? {} : { lastEffort })
+  })
+
+  it('shows the tier the thread last ran at, not the model default', async () => {
+    loadSessionHistory.mockResolvedValue(codexHistory('low'))
+
+    expect(await loadSessionIntoStore(CODEX, { isCurrent: () => true })).toBe('loaded')
+
+    expect(store().sessions['sess'].effort).toBe('low')
+  })
+
+  it('leaves a thread that names no tier on the model default', async () => {
+    loadSessionHistory.mockResolvedValue(codexHistory(null))
+    await loadSessionIntoStore(CODEX, { isCurrent: () => true })
+    expect(store().sessions['sess'].effort).toBeNull()
+
+    loadSessionHistory.mockResolvedValue(codexHistory())
+    await loadSessionIntoStore(CODEX, { isCurrent: () => true, replace: true })
+    expect(store().sessions['sess'].effort).toBeNull()
+  })
+
+  it('keeps a tier the user picked in this run over the one the thread last ran at', async () => {
+    evictedEntry([], { effort: 'high' })
+    loadSessionHistory.mockResolvedValue(codexHistory('low'))
+
+    await loadSessionIntoStore(CODEX, { isCurrent: () => true, replace: true })
+
+    expect(store().sessions['sess'].effort).toBe('high')
+  })
+
+  it('does not rewrite the tier of a session that went live while the read was out', async () => {
+    patchLocalSession('sess', { cwd: '/p', sdkActive: true, effort: null }, { create: true })
+    loadSessionHistory.mockResolvedValue(codexHistory('low'))
+
+    await loadSessionIntoStore(CODEX, { isCurrent: () => true })
+
+    expect(store().sessions['sess'].effort).toBeNull()
+  })
+
+  it('does not touch a session whose read was superseded', async () => {
+    loadSessionHistory.mockResolvedValue(codexHistory('low'))
+
+    expect(await loadSessionIntoStore(CODEX, { isCurrent: () => false })).toBe('skipped')
+
+    expect(store().sessions['sess']).toBeUndefined()
+  })
+})
+
 describe('a replace that lands after the session went live', () => {
   it('click path: is declined, so a running session keeps its transcript and is not stamped historical', async () => {
     // Idle evicted entry holding a tail; the user clicks it and the read is slow.
