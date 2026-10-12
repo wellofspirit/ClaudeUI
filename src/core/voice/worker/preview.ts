@@ -4,12 +4,13 @@
  * Parakeet is an offline model: it has no streaming mode, so a preview is a
  * re-decode. Re-decoding the whole take every second costs 67–84% of a CPU core
  * on a minute of speech; re-decoding only the audio AFTER the last word we are
- * sure about costs 8–15%. "Sure about" is LocalAgreement-2 (Macháček et al.,
- * the whisper_streaming policy): a word is stable once two consecutive decodes
- * produce it in the same place. A word is committed — frozen, and its audio
- * dropped from the next window — only when it is stable AND ends at least
- * {@link GUARD_S} behind the live edge, because the model revises the last
- * second or so of any hypothesis as more context arrives.
+ * sure about costs 8–15%. "Sure about" is LocalAgreement-n (Macháček et al.,
+ * the whisper_streaming policy, there with n = 2): a word is stable once the
+ * latest {@link AGREEMENT_DECODES} decodes (this one and the previous ones of
+ * the same window lineage) all produce it in the same place. A word is committed
+ * — frozen, and its audio dropped from the next window — only when it is stable
+ * AND ends at least {@link GUARD_S} behind the live edge, because the model
+ * revises the last second or so of any hypothesis as more context arrives.
  *
  * Everything here is arithmetic over `{ word, start, end }` in seconds from the
  * start of the take. No sherpa, no sockets, no clock: the server owns those and
@@ -24,7 +25,15 @@ export interface Word {
 }
 
 /** Preview cadence: at most one preview decode per this many ms. */
-export const PREVIEW_EVERY_MS = 1000
+export const PREVIEW_EVERY_MS = 500
+/**
+ * How many consecutive decodes must agree on a word before it is stable (the n of
+ * LocalAgreement-n). Measured in a simulator on real recordings: at the 0.5 s
+ * cadence, 2-decode agreement makes 18–29% of preview words change in the final
+ * transcript (7–20% at the old 1 s cadence); 3-decode agreement brings that back
+ * to 11–19% at 13–19% CPU and ≤ 0.17 s per decode.
+ */
+export const AGREEMENT_DECODES = 3
 /** No preview until this much audio has arrived; shorter windows are mostly noise. */
 export const MIN_PREVIEW_AUDIO_S = 1.5
 /** Words ending closer than this to the live edge are never committed. */
@@ -37,12 +46,21 @@ export interface PreviewState {
   committed: string[]
   /** Start of the audio the next preview decodes (see {@link advancePreview}). */
   commitStart: number
-  /** The previous hypothesis' still-open words, for the agreement check. */
+  /** The latest hypothesis' still-open words: what the preview shows after the committed text. */
   open: Word[]
+  /**
+   * The still-open words of the latest hypotheses of this window lineage, oldest
+   * first, at most {@link AGREEMENT_DECODES} − 1 of them, the newest being
+   * {@link open}. The agreement check compares the next hypothesis with all of
+   * them. A commit shifts every one by the words committed (they all agreed on
+   * those), so index 0 of each stays the same place as index 0 of the next
+   * hypothesis.
+   */
+  history: Word[][]
 }
 
 export function newPreviewState(): PreviewState {
-  return { committed: [], commitStart: 0, open: [] }
+  return { committed: [], commitStart: 0, open: [], history: [] }
 }
 
 /**
@@ -103,11 +121,23 @@ function withoutBoundaryEcho(state: PreviewState, hypothesis: Word[]): Word[] {
   return hypothesis
 }
 
-/** Longest common prefix of two hypotheses, ignoring case and punctuation. */
-function agreedPrefix(a: Word[], b: Word[]): number {
-  const max = Math.min(a.length, b.length)
+/**
+ * How many leading words `hypothesis` and every one of `previous` agree on
+ * (ignoring case and punctuation). Zero until there are
+ * {@link AGREEMENT_DECODES} − 1 previous hypotheses: nothing is stable on fewer
+ * than {@link AGREEMENT_DECODES} decodes.
+ */
+function agreedPrefix(hypothesis: Word[], previous: Word[][]): number {
+  if (previous.length < AGREEMENT_DECODES - 1) return 0
+  let max = hypothesis.length
+  for (const p of previous) max = Math.min(max, p.length)
   let n = 0
-  while (n < max && agreementKey(a[n].word) === agreementKey(b[n].word)) n++
+  while (
+    n < max &&
+    previous.every((p) => agreementKey(p[n].word) === agreementKey(hypothesis[n].word))
+  ) {
+    n++
+  }
   return n
 }
 
@@ -127,12 +157,13 @@ function agreedPrefix(a: Word[], b: Word[]): number {
  *
  * With no commit it still moves, because otherwise a pause grows the window
  * without bound: a silent or one-word stretch commits nothing (agreement needs
- * two decodes to see the same word, and the force-commit needs two words), and
- * every preview would re-decode the whole pause on the shared queue. The window
- * start follows the first open word (or the edge, when the hypothesis is empty)
- * at {@link GUARD_S} + 0.2 s behind it: late enough that a pause never costs more
- * than about that, early enough that the open words — and speech just starting
- * that the model has not emitted yet — stay inside it.
+ * {@link AGREEMENT_DECODES} decodes to see the same word, and the force-commit
+ * needs two words), and every preview would re-decode the whole pause on the
+ * shared queue. The window start follows the first open word (or the edge, when
+ * the hypothesis is empty) at {@link GUARD_S} + 0.2 s behind it: late enough
+ * that a pause never costs more than about that, early enough that the open
+ * words — and speech just starting that the model has not emitted yet — stay
+ * inside it.
  */
 export function advancePreview(
   state: PreviewState,
@@ -140,7 +171,7 @@ export function advancePreview(
   edge: number
 ): { state: PreviewState; text: string } {
   const hypothesis = withoutBoundaryEcho(state, rawHypothesis)
-  const stable = agreedPrefix(hypothesis, state.open)
+  const stable = agreedPrefix(hypothesis, state.history)
   const settled = (i: number): boolean => hypothesis[i].end <= edge - GUARD_S
 
   let n = 0
@@ -157,12 +188,19 @@ export function advancePreview(
     ? [...state.committed, ...hypothesis.slice(0, n).map((w) => w.word)]
     : state.committed
   const open = hypothesis.slice(n)
+  // This hypothesis becomes the newest remembered one. Everything remembered is
+  // shifted by the n words committed, which all of them agreed on (that is what
+  // made those words stable), so positions stay aligned. A force-commit can pass
+  // `stable`: the remembered hypotheses disagreed somewhere inside the n words, so
+  // what follows them is misaligned and the memory restarts from this hypothesis.
+  const remembered = n <= stable ? state.history.map((h) => h.slice(n)) : []
+  const history = [...remembered, open].slice(-(AGREEMENT_DECODES - 1))
   const commitStart = n
     ? Math.min(hypothesis[n - 1].end, edge)
     : Math.max(state.commitStart, Math.min(open[0]?.start ?? edge, edge) - GUARD_S - 0.2)
 
   return {
-    state: { committed, commitStart, open },
+    state: { committed, commitStart, open, history },
     text: [...committed, ...open.map((w) => w.word)].join(' ')
   }
 }

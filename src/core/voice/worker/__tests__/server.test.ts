@@ -313,16 +313,20 @@ describe('voice server — a held capture', () => {
     const client = await startClient()
     client.feed(speech(8)) // 4 s
 
-    // Preview 1 (whole take) → no agreement yet; preview 2 agrees and commits the
-    // words ending ≥ 1 s behind the edge (6 of 8), so preview 3 starts at 3.0 s.
-    await pump(() => recognizer.calls.length >= 3)
-    expect(recognizer.calls[0]).toBe(8 * BLOCK_SAMPLES)
-    expect(recognizer.calls[1]).toBe(8 * BLOCK_SAMPLES)
+    // Previews 1-3 decode the whole take: nothing is stable until three decodes
+    // agree. Preview 3 commits the words ending >= 1 s behind the edge (6 of 8),
+    // so preview 4 starts at 2.9 s, where the last committed word ended.
+    await pump(() => recognizer.calls.length >= 4)
+    expect(recognizer.calls.slice(0, 3)).toEqual([
+      8 * BLOCK_SAMPLES,
+      8 * BLOCK_SAMPLES,
+      8 * BLOCK_SAMPLES
+    ])
     // …from where the last committed word ended (2.9 s), not from the next word.
-    expect(recognizer.calls[2]).toBe(8 * BLOCK_SAMPLES - Math.floor(2.9 * SAMPLE_RATE))
+    expect(recognizer.calls[3]).toBe(8 * BLOCK_SAMPLES - Math.floor(2.9 * SAMPLE_RATE))
 
     // The interim is still the WHOLE preview text, committed + open words.
-    await vi.waitFor(() => expect(client.transcripts.length).toBeGreaterThanOrEqual(3))
+    await vi.waitFor(() => expect(client.transcripts.length).toBeGreaterThanOrEqual(4))
     expect(client.transcripts.at(-1)).toEqual({
       text: 'b1 b2 b3 b4 b5 b6 b7 b8',
       isFinal: false
