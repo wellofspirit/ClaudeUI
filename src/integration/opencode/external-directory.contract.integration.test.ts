@@ -156,7 +156,7 @@ describeV2('opencode 2.x contract: the external_directory ask (2.0.25+ baseline)
     await r.feed.waitForTurnEnd(id, from)
   })
 
-  it('(c) opencode’s own tool-output, shell-output, tmp and config files read without an ask', async () => {
+  it('(c) opencode’s own tool-output, shell-output, tmp, config and plan files read without an ask', async () => {
     const r = rig()
     const { rules } = await ruleset(r, 'default')
     // Where the server writes: the isolated XDG dirs, and tmp as /api/info reports it.
@@ -167,7 +167,10 @@ describeV2('opencode 2.x contract: the external_directory ask (2.0.25+ baseline)
       'tool-output': join(data, 'tool-output', 'tool_contract.txt'),
       'shell output': join(data, 'shell', 'prj_contract', 'shell_contract.txt'),
       tmp: join(tmp, 'tmp_contract.txt'),
-      config: join(config, 'config_contract.txt')
+      config: join(config, 'config_contract.txt'),
+      // The plan agent's own directory (`plugin/plan.ts`, `<home>/.opencode/plan`): 2.0.24
+      // allowed it for the plan agent; ClaudeUI keeps it allowed.
+      plan: join(r.home.env.HOME, '.opencode', 'plan', 'plan_contract.md')
     }
     const id = await createWith(r, rules)
     for (const [label, file] of Object.entries(targets)) {

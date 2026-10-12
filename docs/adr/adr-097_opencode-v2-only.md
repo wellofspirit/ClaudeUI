@@ -256,9 +256,11 @@ with (ClaudeUI sets none of them, so its own env is the server's), tmp from `GET
 `paths.tmp` plus its `realpath` — the server tells the model the canonicalised tmp path while
 `/api/info` reports the raw one (macOS `/var` vs `/private/var`, Windows short names). Resources are
 forward-slashed; 2.x's matcher folds `\` and, on Windows, case. A failed `/api/info` read falls back
-to `os.tmpdir()/opencode`; any miss only adds asks, never a silent read. Not restated: the plan
-directory (`<home>/.opencode/plan`) — plan mode denies `edit` session-wide, so ClaudeUI never writes
-there and a read of it asks like any outside read. `bun run check-opencode-protocol` and the
+to `os.tmpdir()/opencode`; any miss only adds asks, never a silent read. The plan agent's own
+directory (`<home>/.opencode/plan`, home being `OPENCODE_TEST_HOME ?? os.homedir()`) is allowed too
+(owner, 2026-10-12), in every mode like the other own directories; plan mode still denies `edit`
+session-wide, so the allow only spares a prompt on reading or (outside plan mode) writing
+opencode's plan files. `bun run check-opencode-protocol` and the
 `ruleset` contract file stay the canaries if a later 2.x moves the default again.
 
 ### 4. Caller identity (amends ADR-033)

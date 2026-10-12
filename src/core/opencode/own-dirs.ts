@@ -16,6 +16,10 @@
  * - tmp    `os.tmpdir()/opencode`, CANONICALISED by the server (`realpath`)
  *          for the path it tells the model (`instructions/builtins.ts`), while
  *          `GET /api/info` `paths.tmp` is the raw one. Both are allowed.
+ * - plan   `<home>/.opencode/plan` (`core/src/plugin/plan.ts`; home is
+ *          `OPENCODE_TEST_HOME ?? os.homedir()`, `util/src/global.ts`) — the plan
+ *          agent's own directory, which 2.0.24 allowed for it (owner, 2026-10-12:
+ *          keep allowing it).
  *
  * The resources are forward-slashed: 2.x asks with slashed absolute resources
  * and its matcher folds `\` and (on Windows) case on both sides.
@@ -33,6 +37,8 @@ export interface OpencodeGlobalDirs {
   readonly config?: string
   /** `os.tmpdir()/opencode` — the raw (not canonicalised) one. */
   readonly tmp?: string
+  /** `<home>/.opencode/plan`, the plan agent's directory. */
+  readonly plan?: string
 }
 
 export interface OpencodeDirInputs {
@@ -55,20 +61,27 @@ export function opencodeGlobalDirs(input: OpencodeDirInputs): OpencodeGlobalDirs
   const data = xdg('XDG_DATA_HOME', '.local', 'share')
   const xdgConfig = xdg('XDG_CONFIG_HOME', '.config')
   const config = input.env.OPENCODE_CONFIG_DIR ?? (xdgConfig ? p.join(xdgConfig, APP) : undefined)
+  const home = input.env.OPENCODE_TEST_HOME ?? input.home
   return {
     ...(data ? { data: p.join(data, APP) } : {}),
     ...(config ? { config } : {}),
-    ...(input.tmpdir ? { tmp: p.join(input.tmpdir, APP) } : {})
+    ...(input.tmpdir ? { tmp: p.join(input.tmpdir, APP) } : {}),
+    ...(home ? { plan: p.join(home, '.opencode', 'plan') } : {})
   }
 }
 
 /**
  * The allows for opencode's own directories: data `shell/<project>/<file>` and
- * `tool-output/<file>`, tmp and config (`<dir>/*`). `tmp` takes every spelling
- * of the tmp dir (raw and canonical). Pure and deterministic.
+ * `tool-output/<file>`, tmp, config and the plan directory (`<dir>/*`). `tmp`
+ * takes every spelling of the tmp dir (raw and canonical). Pure and deterministic.
  */
 export function opencodeOwnDirAllows(
-  dirs: { readonly data?: string; readonly config?: string; readonly tmp?: readonly string[] },
+  dirs: {
+    readonly data?: string
+    readonly config?: string
+    readonly tmp?: readonly string[]
+    readonly plan?: string
+  },
   platform: NodeJS.Platform = process.platform
 ): V2Rule[] {
   const fold = (value: string) => (platform === 'win32' ? value.toLowerCase() : value)
@@ -86,6 +99,7 @@ export function opencodeOwnDirAllows(
   }
   for (const tmp of dirs.tmp ?? []) if (tmp) allow(tmp, '*')
   if (dirs.config) allow(dirs.config, '*')
+  if (dirs.plan) allow(dirs.plan, '*')
   return out
 }
 

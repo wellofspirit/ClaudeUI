@@ -166,7 +166,7 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
   gone, `GET /api/agent` returns none). ClaudeUI's mode gates carry `{external_directory,*,ask}` in
   every mode, followed by allows for opencode's own directories (`own-dirs.ts`: data
   `shell/*/*` and `tool-output/*`, config, tmp from `GET /api/info` `paths.tmp` plus its
-  `realpath` — the server tells the model the canonical one), then the user's
+  `realpath` — the server tells the model the canonical one — and the plan agent's `<home>/.opencode/plan`), then the user's
   `additionalDirectories` allows. The session rules follow the agent's, so the ask outranks
   `explore`'s allow for it and its children. ADR-097 §3, 2026-10-10 amendment.
 - An ask is `permission.asked` (`Permission.Request`: `id`, `sessionID`, `action`, `resources`,

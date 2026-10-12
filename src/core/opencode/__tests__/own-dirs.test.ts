@@ -15,14 +15,26 @@ import {
 const allow = (resource: string) => ({ action: 'external_directory', resource, effect: 'allow' })
 
 describe('opencodeGlobalDirs', () => {
-  it('defaults to ~/.local/share and ~/.config under the home, and os.tmpdir()/opencode', () => {
+  it('defaults to ~/.local/share and ~/.config under the home, os.tmpdir()/opencode and ~/.opencode/plan', () => {
     expect(
       opencodeGlobalDirs({ env: {}, home: '/home/u', tmpdir: '/tmp', platform: 'linux' })
     ).toEqual({
       data: '/home/u/.local/share/opencode',
       config: '/home/u/.config/opencode',
-      tmp: '/tmp/opencode'
+      tmp: '/tmp/opencode',
+      plan: '/home/u/.opencode/plan'
     })
+  })
+
+  it("OPENCODE_TEST_HOME moves the plan directory, like the server's Global.home", () => {
+    expect(
+      opencodeGlobalDirs({
+        env: { OPENCODE_TEST_HOME: '/t/home' },
+        home: '/home/u',
+        tmpdir: '/tmp',
+        platform: 'linux'
+      })
+    ).toMatchObject({ plan: '/t/home/.opencode/plan', data: '/home/u/.local/share/opencode' })
   })
 
   it('XDG_DATA_HOME / XDG_CONFIG_HOME move data and config; an empty one falls back', () => {
@@ -69,7 +81,8 @@ describe('opencodeGlobalDirs', () => {
     ).toEqual({
       data: 'C:\\Users\\Dev\\.local\\share\\opencode',
       config: 'C:\\Users\\Dev\\.config\\opencode',
-      tmp: 'C:\\Users\\Dev\\AppData\\Local\\Temp\\opencode'
+      tmp: 'C:\\Users\\Dev\\AppData\\Local\\Temp\\opencode',
+      plan: 'C:\\Users\\Dev\\.opencode\\plan'
     })
   })
 
@@ -135,7 +148,8 @@ describe('resolveOpencodeOwnDirAllows', () => {
       '/home/u/.local/share/opencode/tool-output/*',
       '/var/folders/T/opencode/*',
       '/private/var/folders/T/opencode/*',
-      '/home/u/.config/opencode/*'
+      '/home/u/.config/opencode/*',
+      '/home/u/.opencode/plan/*'
     ])
   })
 
