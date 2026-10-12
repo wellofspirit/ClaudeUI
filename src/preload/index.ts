@@ -641,13 +641,20 @@ const api: ClaudeAPI = {
 
   // Voice input — the transport only; the renderer owns the microphone. Audio is
   // a fire-and-forget `send`, not an invoke: ~7 a second, nothing to answer.
-  voiceStart: (routingId: string, language: string) =>
-    unwrap('voice:start-recording', routingId, language),
+  voiceStart: (routingId: string, language: string, opts?: { preview?: boolean }) =>
+    unwrap('voice:start-recording', routingId, language, opts),
   voiceAudio: (routingId: string, dataB64: string) =>
     ipcRenderer.send('voice:audio', routingId, dataB64),
   voiceStop: (routingId: string) => unwrap('voice:stop-recording', routingId),
   onVoiceTranscript: onEvent('voice:transcript'),
   onVoiceState: onEvent('voice:state'),
+  // The on-device speech pack (ADR-101 §6). Plain results (no safeHandler
+  // envelope, and no `ok` key in any of them), so `invoke` like the harness
+  // manager's. The three writes declare `admin`; the desktop holds it.
+  voicePackStatus: () => ipcRenderer.invoke('voice:pack-status'),
+  voicePackInstall: () => ipcRenderer.invoke('voice:pack-install'),
+  voicePackInstallCancel: () => ipcRenderer.invoke('voice:pack-install-cancel'),
+  voicePackRemove: () => ipcRenderer.invoke('voice:pack-remove'),
 
   // Renderer → main process log relay
   logRelay: (level: string, source: string, message: string) =>

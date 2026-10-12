@@ -63,6 +63,12 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  *    Check now), and the upgrade sheet's answer (§8). Putting a program on the host from a phone is close to remote
  *    code execution, so a base connection only SEES the Installed page:
  *    `harness:state` and `harness:versions` declare `config` and are absent here.
+ *  - `admin` (ADR-101 §6, `voice:pack-*` writes) — installing the on-device speech
+ *    pack (native code and 650 MB on the host), cancelling that install, and
+ *    removing the pack (which takes voice from every client of the host). The
+ *    sibling `voice:pack-status` declares `chat`, because every connection that
+ *    can hold the mic can hit the wall and must be able to read it, so it is
+ *    absent here.
  *
  * "Invoked but not grantable at connect time" is the POINT for all three, which
  * is why this list is an allowlist rather than an emptiness assertion: a new
@@ -90,6 +96,9 @@ const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
   'terminal:detach',
   'terminal:kill',
   'terminal:pool',
+  'voice:pack-install',
+  'voice:pack-install-cancel',
+  'voice:pack-remove',
   'webauthn:credentials',
   'webauthn:mint-enroll-token',
   'webauthn:register-options',
@@ -141,8 +150,8 @@ const SHARED_DECLARATION_SOURCES = [
   // transports (`registerSessionIpc` on the desktop side).
   'src/core/ipc/harness-commands.ts',
   // ADR-101 §6 — the speech pack (status `chat`, install/cancel/remove `admin`),
-  // one declaration spread by both transports. The web client invokes them from
-  // S4 on; the three `admin` ones then join UNGRANTED_AT_CONNECT_REMOTE_CHANNELS.
+  // one declaration spread by both transports. The web client invokes them since
+  // S4; the three `admin` ones are in UNGRANTED_AT_CONNECT_REMOTE_CHANNELS.
   'src/core/ipc/voice-pack-commands.ts'
 ]
 
@@ -553,6 +562,54 @@ describe('remote channel parity (R5)', () => {
       'webauthn:revoke'
     ])
     expect([...invoked].sort()).toEqual([...registered].sort())
+  })
+
+  it('the speech pack verbs reach exactly the declared channels on BOTH clients (ADR-101 section 6)', () => {
+    // The desktop preload and the web adapter are each a hand-written mirror of
+    // `voice-pack-commands.ts`; a verb that drifted would invoke a channel with
+    // no handler, discovered by whoever pressed Download.
+    const declared = new Set<string>()
+    const declRe = /channel:\s*['"](voice:pack-[^'"]+)['"]/g
+    const commands = read('src/core/ipc/voice-pack-commands.ts')
+    for (let m = declRe.exec(commands); m; m = declRe.exec(commands)) declared.add(m[1])
+    expect([...declared].sort()).toEqual([
+      'voice:pack-install',
+      'voice:pack-install-cancel',
+      'voice:pack-remove',
+      'voice:pack-status'
+    ])
+
+    const invokedBy = (file: string, call: RegExp): string[] => {
+      const src = read(file)
+      const found = new Set<string>()
+      for (let m = call.exec(src); m; m = call.exec(src)) found.add(m[1])
+      return [...found].sort()
+    }
+    expect(
+      invokedBy('src/preload/index.ts', /ipcRenderer\.invoke\(\s*['"](voice:pack-[^'"]+)['"]/g)
+    ).toEqual([...declared].sort())
+    expect(
+      invokedBy('src/web/api-adapter.ts', /connection\.invoke\(\s*['"](voice:pack-[^'"]+)['"]/g)
+    ).toEqual([...declared].sort())
+    // The test helper's preload copy must not lag the real one.
+    expect(
+      invokedBy(
+        'src/test/helpers/boot-test-app.ts',
+        /ipcRenderer\.invoke\(\s*['"](voice:pack-[^'"]+)['"]/g
+      )
+    ).toEqual([...declared].sort())
+  })
+
+  it('both clients pass the preview choice through as the start verb third argument', () => {
+    expect(read('src/preload/index.ts')).toMatch(
+      /unwrap\('voice:start-recording', routingId, language, opts\)/
+    )
+    expect(read('src/test/helpers/boot-test-app.ts')).toMatch(
+      /unwrap\('voice:start-recording', routingId, language, opts\)/
+    )
+    expect(read('src/web/api-adapter.ts')).toMatch(
+      /connection\.invoke\('voice:start', routingId, language, opts\)/
+    )
   })
 
   it('the web client subscribes only to CLASSIFIED event channels (4a)', () => {

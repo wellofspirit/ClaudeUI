@@ -38,6 +38,7 @@ import {
 } from './browser-voice-capture'
 import { resolveRekeyed } from '../../stores/replica'
 import { readMicPreference } from './mic-preference'
+import { readLivePreview } from './preview-preference'
 import type { MicPreference } from './mic-devices'
 
 /**
@@ -49,7 +50,12 @@ export const VOICE_OWNERSHIP_WINDOW_MS = 15_000
 
 /** The main-process side of a capture. */
 export interface VoiceTransport {
-  start(routingId: string, language: string): Promise<void>
+  /**
+   * `opts.preview: false`: no live preview for this capture (the on-device
+   * recognizer's). Passed ONLY when the preview is off, so the default is the
+   * two-argument frame it always was.
+   */
+  start(routingId: string, language: string, opts?: { preview: false }): Promise<void>
   /** One base64 PCM batch. Fire-and-forget. */
   audio(routingId: string, dataB64: string): void
   stop(routingId: string): Promise<void>
@@ -58,6 +64,14 @@ export interface VoiceTransport {
 export interface VoiceController {
   start(routingId: string, language: string): Promise<void>
   stop(routingId: string): Promise<void>
+  /**
+   * End this client's capture for `routingId` only if it is the one the microphone
+   * is bound to — otherwise nothing. For a refusal main reports AFTER the start
+   * (the speech model is not installed): the session ended the start quietly, so
+   * the live microphone would keep running — level ring, silence warning — into
+   * nothing until release. Quiet: no notice of its own (the refusal is the notice).
+   */
+  stopIfCapturing(routingId: string): Promise<void>
   /** A press is in flight or the microphone is open. */
   isActive(): boolean
   /**
@@ -125,6 +139,11 @@ export function createVoiceController(
     preference?: () => MicPreference | null
     /** Where a pre-rekey id went (`stores/replica`'s `resolveRekeyed`). Test seam. */
     resolveId?: (routingId: string) => string
+    /**
+     * Is the live preview wanted (`preview-preference.ts`)? Asked at every start
+     * and sent with it; absent = yes.
+     */
+    preview?: () => boolean
   } = {}
 ): VoiceController {
   const resolveId = options.resolveId ?? resolveRekeyed
@@ -203,7 +222,11 @@ export function createVoiceController(
         // so this press is simply cancelled.
         if (run.cancelled && !capture.isActive()) return
         try {
-          await transport.start(routingId, language)
+          if (options.preview?.() === false) {
+            await transport.start(routingId, language, { preview: false })
+          } else {
+            await transport.start(routingId, language)
+          }
         } catch (err) {
           await capture.stop()
           throw err
@@ -252,6 +275,11 @@ export function createVoiceController(
       }
     },
 
+    async stopIfCapturing(routingId) {
+      if (!controller.isActive() || resolveId(boundRoutingId) !== resolveId(routingId)) return
+      await controller.stop(routingId)
+    },
+
     isActive() {
       return (inflight !== null && !inflight.cancelled) || capture.isActive()
     },
@@ -282,11 +310,18 @@ export function voiceController(): VoiceController {
   if (!shared) {
     shared = createVoiceController(
       {
-        start: (routingId, language) => window.api.voiceStart(routingId, language),
+        start: (routingId, language, opts) =>
+          opts
+            ? window.api.voiceStart(routingId, language, opts)
+            : window.api.voiceStart(routingId, language),
         audio: (routingId, dataB64) => window.api.voiceAudio(routingId, dataB64),
         stop: (routingId) => window.api.voiceStop(routingId)
       },
-      { deniedMessage: micDeniedMessage(window.api?.platform), preference: readMicPreference }
+      {
+        deniedMessage: micDeniedMessage(window.api?.platform),
+        preference: readMicPreference,
+        preview: readLivePreview
+      }
     )
   }
   return shared
