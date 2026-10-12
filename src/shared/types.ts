@@ -1681,6 +1681,11 @@ interface SessionAPI {
      * fetched separately through {@link loadSubagentHistory}.
      */
     subagentMessages?: Record<string, ChatMessage[]>
+    /**
+     * Codex only: the native reasoning tier the thread last ran at, which a
+     * cold reopen shows and resumes with. `null` when the rollout names none.
+     */
+    lastEffort?: string | null
   }>
   loadSubagentHistory(
     sessionId: string,

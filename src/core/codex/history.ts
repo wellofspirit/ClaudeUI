@@ -545,6 +545,10 @@ export async function loadCodexHistory(
       // S1e: the ledger and the persisted context reading, not the wire — a
       // cold read never resumes, and a resume is the only way to see usage.
       statusLine: codexHistoryStatusLine(threadId),
+      // What the thread last ran at: Codex's own record (the newest turn context
+      // or settings update in the rollout), which survives an app restart. Not
+      // restored by a resume that names a model, so the client has to carry it.
+      lastEffort: thread.reasoningEffort ?? null,
       agentIdToToolUseId: {},
       subagentMessages: await readCodexChildren(service, childCards),
       warnings: turns.some((turn) => turn.status === 'interrupted')
