@@ -7,8 +7,10 @@
  *
  * `title` and `aria-label` carry the full type name (or `Dispatch → <engine> ·
  * <model>`), since the letter alone is not enough to tell two types apart.
- * Class names are written out whole: Tailwind reads source text, so a template
- * like `bg-agent-${id}/18` would emit nothing.
+ * A two-letter tile (`DR`) trims its side padding to 2px: two 6px mono glyphs
+ * plus that make exactly the 16px of the type column, so the labels of one-letter
+ * and two-letter rows still line up. Class names are written out whole: Tailwind
+ * reads source text, so a template like `bg-agent-${id}/18` would emit nothing.
  */
 import type { EngineId } from '../../../../shared/types'
 import {
@@ -19,7 +21,7 @@ import {
   isAgentColorId,
   hasTypeTile,
   resolveAgentTypeColor,
-  tileLetter,
+  agentTileLetter,
   type AgentColorId
 } from '../../../../shared/agent-type-colors'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
@@ -70,7 +72,9 @@ export function AgentTile({
       data-color={colorId}
       title={title}
       aria-label={title}
-      className={`inline-flex items-center justify-center h-4 min-w-4 px-[3px] rounded font-mono text-[10px] leading-none font-bold shrink-0 select-none ${
+      className={`inline-flex items-center justify-center h-4 min-w-4 ${
+        letter.length > 1 ? 'px-[2px]' : 'px-[3px]'
+      } rounded font-mono text-[10px] leading-none font-bold shrink-0 select-none ${
         colorId ? AGENT_TILE_CLASS[colorId] : 'bg-bg-tertiary text-text-muted'
       } ${className}`}
     >
@@ -94,11 +98,17 @@ export interface AgentTileSpec {
  * one configurable dispatch colour. Otherwise the colour is the user's override,
  * else the engine's native agent colour mapped to the nearest palette colour,
  * else a stable hash of the name.
+ *
+ * The letter is the type's initials, minus a prefix shared with another known
+ * type (`agentTileLetter`). The known types are the engine's catalog plus
+ * `knownTypes`, the types the calling surface shows: an empty catalog (a host
+ * that cannot list types) still tells `orch-reader` from `orch-verifier` there.
  */
 export function useAgentTile(
   engine: EngineId | undefined,
   type: string | undefined,
-  dispatch?: { engine: string; model?: string }
+  dispatch?: { engine: string; model?: string },
+  knownTypes?: readonly string[]
 ): AgentTileSpec | null {
   const overrides = useSessionStore((s) => s.settings.agentTypeColors)
   const dispatchColor = useSessionStore((s) => s.settings.dispatchTileColor)
@@ -116,7 +126,7 @@ export function useAgentTile(
   }
   if (!typed || !type) return null
   return {
-    letter: tileLetter(type),
+    letter: agentTileLetter(type, [...catalog.map((entry) => entry.type), ...(knownTypes ?? [])]),
     colorId: resolveAgentTypeColor(type, {
       override: agentColorOverride(overrides, engine, type),
       native: nativeColorOf(catalog, type)

@@ -115,7 +115,8 @@ export function AgentRow({
   selected,
   onOpen,
   isContext = false,
-  guide
+  guide,
+  knownTypes
 }: {
   row: AgentRosterRow
   selected: boolean
@@ -124,6 +125,8 @@ export function AgentRow({
   isContext?: boolean
   /** The tree guide for a nested row; computed by the list, which sees the siblings. */
   guide?: RowGuide
+  /** Every agent type the roster shows: a shared prefix is dropped from the tile letter. */
+  knownTypes?: readonly string[]
 }): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const stoppingTaskIds = useActiveSession((s) => s.stoppingTaskIds)
@@ -134,7 +137,7 @@ export function AgentRow({
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const engineId = useActiveSession((s) => s.status.engineId)
-  const tile = useAgentTile(engineId, row.type, row.dispatch)
+  const tile = useAgentTile(engineId, row.type, row.dispatch, knownTypes)
 
   const isStopping = stoppingTaskIds.includes(row.toolUseId)
 

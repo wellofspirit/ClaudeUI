@@ -597,8 +597,9 @@ describe('one line at every roster width (§10)', () => {
 })
 
 /**
- * Three rows of one roster: a custom type, the engine's default type (no tile)
- * and a cross-engine dispatch (an X). Settled running, so Stop shows.
+ * Four rows of one roster: a custom type, a two-initial type (`DR`), the engine's
+ * default type (no tile) and a cross-engine dispatch (an X). Settled running,
+ * so Stop shows.
  */
 function seedTypeRows(): void {
   const description = 'Scan fixed widths in the mobile surfaces'
@@ -613,6 +614,7 @@ function seedTypeRows(): void {
   })
   const rows = [
     mk('tu-custom', 'scan', { name: 'scan', subagent_type: 'Explore', description }),
+    mk('tu-two', 'two', { name: 'two', subagent_type: 'deep-review', description }),
     mk('tu-default', 'plain', { name: 'plain', subagent_type: 'general-purpose', description }),
     mk(
       'tu-dispatch',
@@ -675,6 +677,24 @@ describe('the type tile in the agent list (ADR-094)', () => {
     const dispatch = byTestId(rowOf(overlay, 'tu-dispatch'), 'AgentRow.typeTile')
     expect(dispatch.innerText.trim()).toBe('X')
     expect(dispatch.title).toBe('Dispatch → opencode · deepseek-v4')
+  })
+
+  it('keeps a two-letter tile in the 16px column, so its label lines up with a one-letter row', async () => {
+    // The 16px claim is about the bundled face: a fallback bold is wider.
+    await document.fonts.load('bold 10px "JetBrains Mono"')
+    const overlay = await openOverlay(1.1)
+    const two = rowOf(overlay, 'tu-two')
+    const tile = byTestId(two, 'AgentRow.typeTile')
+    expect(tile.innerText.trim()).toBe('DR')
+    expect(tile.scrollWidth).toBeLessThanOrEqual(tile.clientWidth + 1)
+    // The same box as the one-letter tile's (the overlay is zoomed, so not 16 itself).
+    const one = byTestId(rowOf(overlay, 'tu-custom'), 'AgentRow.typeTile')
+    expect(rectOf(tile).width).toBeCloseTo(rectOf(one).width, 0)
+    expect(rectOf(tile).height).toBeCloseTo(rectOf(one).height, 0)
+    expect(rectOf(byTestId(two, 'AgentRow.name')).left).toBeCloseTo(
+      rectOf(byTestId(rowOf(overlay, 'tu-custom'), 'AgentRow.name')).left,
+      0
+    )
   })
 
   it('takes the default dispatch colour, and the one in settings when set', async () => {

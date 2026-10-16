@@ -20,6 +20,16 @@ import type { AgentTypeInfo, EngineId } from '../../../../../shared/types'
 import { AgentColoursSection, DispatchTileColourSection } from '../AgentColours'
 import { pageOf } from '../settings-pages'
 
+/** The tile letter each non-default catalog type shows (no two types here share a prefix). */
+const LETTERS: Record<string, string> = {
+  Explore: 'E',
+  'migration-reviewer': 'MR',
+  explore: 'E',
+  Plan: 'P',
+  explorer: 'E',
+  worker: 'W'
+}
+
 const CATALOGS: Record<EngineId, AgentTypeInfo[]> = {
   claude: [
     { type: 'general-purpose', source: 'builtin' },
@@ -101,12 +111,27 @@ describe('Agent colours settings', () => {
           expect(tileOf(info.type).getAttribute('data-color')).toBeNull()
           expect(within(row).queryAllByTestId('AgentColours.swatch')).toHaveLength(0)
         } else {
-          expect(tileOf(info.type).textContent).toBe(info.type[0].toUpperCase())
+          expect(tileOf(info.type).textContent).toBe(LETTERS[info.type])
           expect(within(row).getAllByTestId('AgentColours.swatch')).toHaveLength(8)
         }
       }
     }
   )
+
+  it('drops the prefix a family of listed types shares from their tile letters', async () => {
+    Object.assign(window.api, {
+      listAgentTypes: vi.fn(async () => [
+        { type: 'orch-reader', source: 'user' },
+        { type: 'orch-verifier', source: 'user' },
+        { type: 'orch-design-reviewer', source: 'user' }
+      ])
+    })
+    render(<Section engine="claude" />)
+    await waitFor(() => expect(screen.getAllByTestId('AgentColours.row')).toHaveLength(3))
+    expect(tileOf('orch-reader').textContent).toBe('R')
+    expect(tileOf('orch-verifier').textContent).toBe('V')
+    expect(tileOf('orch-design-reviewer').textContent).toBe('DR')
+  })
 
   it('colours a type by its own agent colour, mapped to the palette, else a hash', async () => {
     render(<Section engine="claude" />)

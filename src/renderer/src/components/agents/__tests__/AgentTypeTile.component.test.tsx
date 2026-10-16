@@ -10,7 +10,7 @@ import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { resetAgentTypeCatalog } from '../../../hooks/useAgentTypeCatalog'
 import { stableHashColor } from '../../../../../shared/agent-type-colors'
 import type { EngineId } from '../../../../../shared/types'
-import { AgentTypeTile } from '../AgentTypeTile'
+import { AgentTypeTile, useAgentTile } from '../AgentTypeTile'
 
 const tile = (): HTMLElement => screen.getByTestId('tile')
 
@@ -37,9 +37,40 @@ describe('AgentTypeTile', () => {
 
   it('shows the initial, with the full name as tooltip and accessible name', () => {
     draw('claude', 'migration-reviewer')
-    expect(tile().textContent).toBe('M')
+    expect(tile().textContent).toBe('MR')
     expect(tile().title).toBe('migration-reviewer')
     expect(tile().getAttribute('aria-label')).toBe('migration-reviewer')
+  })
+
+  it('drops a prefix shared with the surface’s known types or the catalog', async () => {
+    listAgentTypes.mockResolvedValue([{ type: 'orch-verifier', source: 'user' }])
+    function Tile(): React.JSX.Element {
+      const spec = useAgentTile('claude', 'orch-reader', undefined, ['orch-implementer'])
+      return <span data-testid="tile">{spec?.letter}</span>
+    }
+    render(<Tile />)
+    // Known to the surface alone, before the catalog answers...
+    expect(tile().textContent).toBe('R')
+    await waitFor(() => expect(listAgentTypes).toHaveBeenCalled())
+    expect(tile().textContent).toBe('R')
+    cleanup()
+    // ...and to the catalog alone.
+    function CatalogOnly(): React.JSX.Element {
+      return (
+        <span data-testid="tile">{useAgentTile('claude', 'orch-reader', undefined)?.letter}</span>
+      )
+    }
+    render(<CatalogOnly />)
+    await waitFor(() => expect(tile().textContent).toBe('R'))
+  })
+
+  it('makes a two-letter tile a 16px column like a one-letter one', () => {
+    draw('claude', 'deep-review')
+    expect(tile().textContent).toBe('DR')
+    expect(tile().className).toContain('px-[2px]')
+    cleanup()
+    draw('claude', 'Explore')
+    expect(tile().className).toContain('px-[3px]')
   })
 
   it('draws nothing for the engine default, and does not even ask the host', () => {
@@ -55,7 +86,7 @@ describe('AgentTypeTile', () => {
     expect(listAgentTypes).not.toHaveBeenCalled()
     // ...and `general-purpose` is an ordinary type on opencode.
     draw('opencode', 'general-purpose')
-    expect(tile().textContent).toBe('G')
+    expect(tile().textContent).toBe('GP')
   })
 
   it('draws nothing for pi’s legacy parallel form, "scout, planner" is not one type', () => {

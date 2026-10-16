@@ -534,13 +534,13 @@ duration_ms: 135000
         const card = await mountCard(chatScale, { model: 'haiku' })
         const footer = footerOf(card, false)
         const tile = byTestId(footer, 'TaskCard.typeTile')
-        expect(tile.innerText.trim()).toBe('M')
+        expect(tile.innerText.trim()).toBe('MR')
         expect(tile.title).toBe('migration-reviewer')
         expect(tile.getAttribute('aria-label')).toBe('migration-reviewer')
         expect(tile.clientHeight).toBe(16)
         expectNarrowOrder(footer)
         // The name is the tile's tooltip below 480px, not text.
-        expect(byTestId(footer, 'TaskCard.type').innerText.trim()).toBe('M')
+        expect(byTestId(footer, 'TaskCard.type').innerText.trim()).toBe('MR')
         expect(visibleChildren(footer)[0]).toBe(byTestId(footer, 'TaskCard.type'))
         // One row at every chat scale for this common fixture.
         expect(rowCount(visibleChildren(footer))).toBe(1)
@@ -554,7 +554,7 @@ duration_ms: 135000
       const footer = footerOf(card, false)
       const chip = byTestId(footer, 'TaskCard.type')
       expect(visibleChildren(footer)[0]).toBe(chip)
-      expect(chip.innerText.replace(/\s+/g, ' ').trim()).toBe('M migration-reviewer')
+      expect(chip.innerText.replace(/\s+/g, ' ').trim()).toBe('MR migration-reviewer')
       const tile = byTestId(chip, 'TaskCard.typeTile')
       // The chip's own colour is the tile's colour; its tint shows (not transparent).
       expect(getComputedStyle(chip).color).toBe(getComputedStyle(tile).color)
@@ -676,7 +676,7 @@ duration_ms: 135000
           openButton(card, expanded)
         ]
         expect(chips.map((c) => c.innerText.replace(/\s+/g, ' ').trim())).toEqual([
-          'M migration-reviewer',
+          'MR migration-reviewer',
           'background',
           'resumed ×1',
           'Open in panel'

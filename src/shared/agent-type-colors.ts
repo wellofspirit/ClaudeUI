@@ -67,15 +67,45 @@ export function hasTypeTile(engine: EngineId | undefined, type: string | undefin
   return !!type && !type.includes(',') && !isDefaultSubagentType(engine, type)
 }
 
+/** The separators a type name is split on: `-`, `_`, `:` and whitespace. */
+const SEGMENT_SEPARATOR = /[-_:\s]+/
+
+const typeSegments = (type: string): string[] =>
+  type
+    .trim()
+    .split(SEGMENT_SEPARATOR)
+    .filter((segment) => segment !== '')
+
+/** A segment's initial: its first letter or digit, else its first character. */
+const segmentInitial = (segment: string): string =>
+  segment.match(/[\p{L}\p{N}]/u)?.[0] ?? [...segment][0] ?? ''
+
 /**
- * The tile's one character: the type's initial, uppercased. `Explore` is E,
- * `migration-reviewer` is M. Colour and the tooltip tell two types with the
- * same initial apart; a second letter would not fit a 16px tile.
+ * The tile's letters: the initials of the type's name segments, uppercased, at
+ * most two. `Explore` is E, `statusline-setup` is SS, `migration-reviewer` is MR.
+ *
+ * A family of types shares a prefix (`orch-reader`, `orch-verifier`, ...), and
+ * the prefix would make them all the same letter. So the FIRST segment is
+ * dropped when another known type, compared case-insensitively, starts with the
+ * same segment: `orch-reader` is R, `orch-design-reviewer` is DR. A type with a
+ * single segment keeps it, and alone in its family a type keeps its prefix
+ * (`orch-reader` with no `orch-*` sibling is OR).
+ *
+ * `knownTypes` is the engine's catalog plus whatever the calling surface shows;
+ * it may include `type` itself. Colour and the tooltip still tell two types with
+ * the same letters apart.
  */
-export function tileLetter(type: string): string {
-  const name = type.trim()
-  const letter = name.match(/[\p{L}\p{N}]/u)?.[0] ?? [...name][0]
-  return letter ? letter.toUpperCase() : '?'
+export function agentTileLetter(type: string, knownTypes: readonly string[] = []): string {
+  const segments = typeSegments(type)
+  if (segments.length === 0) return [...type.trim()][0] ?? '?'
+  const own = type.trim().toLowerCase()
+  const prefix = segments[0].toLowerCase()
+  const sharesPrefix = knownTypes.some((other) => {
+    if (other.trim().toLowerCase() === own) return false
+    return typeSegments(other)[0]?.toLowerCase() === prefix
+  })
+  const kept = sharesPrefix && segments.length > 1 ? segments.slice(1) : segments
+  return kept.slice(0, 2).map(segmentInitial).join('').toUpperCase()
 }
 
 /** The cross-engine dispatch tile's letter. */

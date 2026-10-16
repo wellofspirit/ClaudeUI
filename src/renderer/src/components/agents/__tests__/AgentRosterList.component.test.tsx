@@ -9,6 +9,7 @@ import React from 'react'
 import { render, screen, act, fireEvent } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { resetAgentTypeCatalog } from '../../../hooks/useAgentTypeCatalog'
 import { AgentRosterList } from '../AgentRosterList'
 import type { AgentRoster, AgentRosterRow } from '../../../hooks/useAgentRoster'
 import type { ActiveTask } from '../../../../../shared/types'
@@ -82,6 +83,53 @@ describe('AgentRosterList', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+  })
+
+  describe('type tile letters (ADR-094)', () => {
+    const tiles = (): string[] =>
+      screen.getAllByTestId('AgentRow.typeTile').map((tile) => tile.textContent ?? '')
+
+    beforeEach(() => {
+      // A host that cannot list agent types: the roster alone supplies the family.
+      resetAgentTypeCatalog()
+      Object.assign(window.api, { listAgentTypes: vi.fn(async () => []) })
+    })
+
+    it('tells a family of types apart with an empty catalog, by dropping their shared prefix', async () => {
+      await renderList(
+        roster({
+          agents: [
+            row({ toolUseId: 'a', type: 'orch-reader', isRunning: true }),
+            row({ toolUseId: 'b', type: 'orch-verifier', isRunning: true }),
+            row({ toolUseId: 'c', type: 'orch-design-reviewer', isRunning: true }),
+            row({ toolUseId: 'd', type: 'Explore', isRunning: true })
+          ]
+        })
+      )
+      expect(tiles()).toEqual(['R', 'V', 'DR', 'E'])
+    })
+
+    it('keeps a letter when the Running filter hides the siblings it was told apart from', async () => {
+      await renderList(
+        roster({
+          agents: [
+            row({ toolUseId: 'a', type: 'orch-reader', isRunning: true }),
+            row({ toolUseId: 'b', type: 'orch-verifier' })
+          ]
+        })
+      )
+      expect(screen.getAllByTestId('AgentRow')).toHaveLength(1)
+      expect(tiles()).toEqual(['R'])
+    })
+
+    it('keeps the prefix of a type that has no sibling in the roster', async () => {
+      await renderList(
+        roster({ agents: [row({ toolUseId: 'a', type: 'orch-reader' })] }),
+        vi.fn(),
+        ['a']
+      )
+      expect(tiles()).toEqual(['OR'])
+    })
   })
 
   it('counts running separately from the total', async () => {

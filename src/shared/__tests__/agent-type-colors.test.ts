@@ -5,6 +5,7 @@ import {
   AGENT_COLOR_IDS,
   DEFAULT_SUBAGENT_TYPE,
   agentColorOverride,
+  agentTileLetter,
   dispatchTileTitle,
   hasTypeTile,
   isAgentColorId,
@@ -12,7 +13,6 @@ import {
   nearestPaletteColor,
   resolveAgentTypeColor,
   stableHashColor,
-  tileLetter,
   withAgentColorOverride
 } from '../agent-type-colors'
 import type { EngineId } from '../types'
@@ -64,21 +64,80 @@ describe('hasTypeTile', () => {
   })
 })
 
-describe('tileLetter', () => {
-  it('is the initial, uppercased', () => {
-    expect(tileLetter('Explore')).toBe('E')
-    expect(tileLetter('migration-reviewer')).toBe('M')
-    expect(tileLetter('plan')).toBe('P')
+describe('agentTileLetter', () => {
+  const ORCH = [
+    'orch-reader',
+    'orch-verifier',
+    'orch-implementer',
+    'orch-design-reviewer',
+    'orch-pr-reviewer'
+  ]
+
+  it('drops a prefix the other known types share, so a family tells apart', () => {
+    expect(ORCH.map((t) => agentTileLetter(t, ORCH))).toEqual(['R', 'V', 'I', 'DR', 'PR'])
   })
 
-  it('skips leading punctuation and keeps digits', () => {
-    expect(tileLetter('  _scan')).toBe('S')
-    expect(tileLetter('9lives')).toBe('9')
+  it('is the initial of a single-segment name, whatever else is known', () => {
+    expect(agentTileLetter('Explore')).toBe('E')
+    expect(agentTileLetter('Plan', ['Explore', 'Plan'])).toBe('P')
+    // Never dropped when it is the only segment, even if another type starts with it.
+    expect(agentTileLetter('orch', [...ORCH, 'orch'])).toBe('O')
   })
 
-  it('falls back for an empty or symbol-only name', () => {
-    expect(tileLetter('')).toBe('?')
-    expect(tileLetter('--')).toBe('-')
+  it('keeps the prefix when no other known type shares it', () => {
+    expect(agentTileLetter('orch-reader')).toBe('OR')
+    expect(agentTileLetter('orch-reader', ['orch-reader', 'Explore', 'statusline-setup'])).toBe(
+      'OR'
+    )
+    expect(agentTileLetter('statusline-setup', ['Explore', 'Plan'])).toBe('SS')
+    expect(agentTileLetter('migration-reviewer')).toBe('MR')
+  })
+
+  it('does not count the type itself, or its own case variant, as a sibling', () => {
+    expect(agentTileLetter('orch-reader', ['orch-reader', 'orch-reader'])).toBe('OR')
+    expect(agentTileLetter('Orch-Reader', ['orch-reader'])).toBe('OR')
+  })
+
+  it('matches the shared prefix case-insensitively', () => {
+    expect(agentTileLetter('Orch-Reader', ['orch-verifier'])).toBe('R')
+    expect(agentTileLetter('orch-verifier', ['ORCH-Reader'])).toBe('V')
+  })
+
+  it('splits on _ : and whitespace as well as -', () => {
+    expect(agentTileLetter('orch_reader')).toBe('OR')
+    expect(agentTileLetter('orch:reader')).toBe('OR')
+    expect(agentTileLetter('orch reader')).toBe('OR')
+    expect(agentTileLetter('orch_reader', ['orch:verifier'])).toBe('R')
+    expect(agentTileLetter('orch:reader', ['orch verifier'])).toBe('R')
+    expect(agentTileLetter('orch reader', ['orch_verifier'])).toBe('R')
+    expect(agentTileLetter('a--b__c')).toBe('AB')
+  })
+
+  it('does not split camelCase', () => {
+    expect(agentTileLetter('codeReviewer')).toBe('C')
+  })
+
+  it('caps the initials at two, after the prefix is dropped', () => {
+    expect(agentTileLetter('deep-code-review')).toBe('DC')
+    expect(agentTileLetter('orch-deep-code-review', ['orch-reader'])).toBe('DC')
+  })
+
+  it('shares nothing with an unrelated type', () => {
+    expect(agentTileLetter('reader', ['writer', 'orch-reader'])).toBe('R')
+    expect(agentTileLetter('foo-bar', ['bar-foo', 'foobar-baz'])).toBe('FB')
+  })
+
+  it('ignores separators around the name and keeps digits and non-latin letters', () => {
+    expect(agentTileLetter('  _scan')).toBe('S')
+    expect(agentTileLetter('9lives')).toBe('9')
+    expect(agentTileLetter('审查-代理')).toBe('审代')
+  })
+
+  it('falls back for an empty, whitespace or symbol-only name', () => {
+    expect(agentTileLetter('')).toBe('?')
+    expect(agentTileLetter('   ')).toBe('?')
+    expect(agentTileLetter('--')).toBe('-')
+    expect(agentTileLetter('', ['orch-reader'])).toBe('?')
   })
 })
 

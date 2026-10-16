@@ -25,7 +25,7 @@ import {
   isAgentColorId,
   isDefaultSubagentType,
   resolveAgentTypeColor,
-  tileLetter,
+  agentTileLetter,
   withAgentColorOverride,
   type AgentColorId
 } from '../../../../shared/agent-type-colors'
@@ -135,11 +135,14 @@ function statusOf(override: AgentColorId | undefined, native: string | undefined
 function TypeRow({
   engine,
   info,
+  knownTypes,
   override,
   onPick
 }: {
   engine: EngineId
   info: AgentTypeInfo
+  /** Every type listed on the page: a shared prefix is dropped from the letter. */
+  knownTypes: readonly string[]
   override: AgentColorId | undefined
   onPick: (color: AgentColorId | undefined) => void
 }): React.JSX.Element {
@@ -170,7 +173,7 @@ function TypeRow({
       leading={
         <AgentTile
           testId="AgentColours.tile"
-          letter={tileLetter(info.type)}
+          letter={agentTileLetter(info.type, knownTypes)}
           colorId={colorId}
           title={info.type}
         />
@@ -208,6 +211,7 @@ export function AgentColoursSection({
   // `fresh`: the page is where a just-edited agent file is expected to show up.
   const types = useAgentTypeCatalog(engine, cwd || undefined, { fresh: true })
   const overrides = settings.agentTypeColors
+  const knownTypeNames = types.map((info) => info.type)
 
   return (
     <div
@@ -227,6 +231,7 @@ export function AgentColoursSection({
           key={info.type}
           engine={engine}
           info={info}
+          knownTypes={knownTypeNames}
           override={agentColorOverride(overrides, engine, info.type)}
           onPick={(color) =>
             update({
