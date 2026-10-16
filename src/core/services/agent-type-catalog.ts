@@ -133,7 +133,7 @@ function opencodeTypes(cwd?: string): AgentTypeInfo[] {
 function piTypes(cwd?: string): AgentTypeInfo[] {
   return loadPiAgentRegistry({ cwd: cwd ?? os.homedir() })
     .list()
-    .map((def) => ({ type: def.name, source: def.source }))
+    .map((def) => ({ type: def.name, source: def.scope }))
 }
 
 /** The agent types `engine` can spawn from `cwd` (user-level only when `cwd` is absent). */

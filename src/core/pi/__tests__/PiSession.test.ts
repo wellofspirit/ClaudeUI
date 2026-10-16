@@ -6125,7 +6125,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     const wide = (name: string, permissionMode: string): PiAgentDefinition => ({
       ...gp,
       name,
-      source: 'project',
+      scope: 'project',
       permissionMode
     })
 
