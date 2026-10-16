@@ -18,8 +18,9 @@ harness.
 
 - pi has no native subagents; ClaudeUI host-runs them (ADR-089) from a registry that already read Claude-shaped
   files from `~/.pi/agent/agents` and `.pi/agents`.
-- opencode 2.x reads agents from its own folders and from config; it does not read `~/.claude/agents`, and a
-  Claude-style file in its folders would be decoded as a 1.x agent and silently dropped. ClaudeUI already
+- opencode 2.x reads agents from its own folders and from config; it does not read `~/.claude/agents` (it uses discovered `.claude` folders for skills only), and a
+  Claude-style file in its own folders is decoded as a 1.x agent: dropped when `tools` is a string, otherwise loaded
+  as a legacy agent with the Claude-only keys passed through. ClaudeUI already
   injects config into every opencode server it spawns (`OPENCODE_CONFIG_CONTENT`, ADR-097 §2).
 
 ## Decision
@@ -51,6 +52,12 @@ harness sees another's choices.
   project directory from the root down, `.claude/agents` then `.pi/agents`. The harness's own folder wins at
   equal scope; a nearer directory beats a farther one; every override of a built-in or user agent is a
   diagnostic, and a project agent that shadows one is marked `(project)` in the listing.
+- **A project file can only narrow what it shadows** (owner ruling): the project definition supplies the prompt
+  and description, but the restrictions of both apply: `tools` intersect, `disallowedTools` add up, the stricter
+  permission mode and the stricter `canSpawn` win, and the shadowed agent's model is kept unless a project
+  `.pi/agents` file names one. A repository therefore cannot turn the user's read-only agent (or the read-only
+  `Explore`/`Plan`) into an all-tools one by shipping a file of the same name, nor move it onto the parent's
+  model. Between the user's own folders (`~/.claude/agents`, `~/.pi/agent/agents`) plain precedence applies.
 - `harness.pi.model` wins over `model`. A project `.claude/agents` file never picks a model (inherit + a
   diagnostic): a repository must not choose the user's vendor or spend. Project `.pi/agents` keeps ADR-089's
   rules.
@@ -62,31 +69,38 @@ harness sees another's choices.
 
 ### opencode (the injected config)
 
-- The same two folders are read with the same reader. A name opencode already has (an ADR-029 file on disk, or a
-  built-in) is not injected: the harness's own definition wins.
+- The same two folders are read with the same reader. A name opencode already has is not injected: the harness's
+  own definition wins. "Already has" mirrors opencode's own discovery, because the injected document is applied
+  last and would otherwise rewrite the native agent: built-ins, `agents.<name>` in every config document opencode
+  loads, and agent files in the global and every discovered `.opencode` folder (`agent`/`agents`, recursive, and
+  `mode`/`modes`).
 - Each agent is injected as a native 2.x subagent: `mode: "subagent"`, `description`, `system` = a short
   ClaudeUI preamble plus the body, `model` from `harness.opencode.model` (user scope only; a model outside
   ClaudeUI's opencode allowlist skips the agent rather than substitute one). opencode's `system` REPLACES its
   default prompt where pi's `--append-system-prompt` appends; the preamble carries the harness detail so the
   agent file does not have to.
 - Tools become **deny-only** permissions: a deny for every action the tools list does not name (and for every
-  live MCP server it does not name), plus the `disallowedTools`. Never an allow: an allow would widen the
+  MCP server it does not name), plus the `disallowedTools`. Never an allow: an allow would widen the
   default rules (e.g. turn the `.env` read asks into allows) and an all-deny would, through the child-session
   rules, cut the child off from paths outside the session directory.
   MCP follows Claude Code's rule that a tools allowlist without MCP names gets no MCP tools: every bridged
-  server and ClaudeUI's hosted `claudeui` server is denied unless the list names it at server level
+  server, every server in `mcp.servers` of the config documents opencode loads for the directory, and ClaudeUI's
+  hosted `claudeui` server is denied unless the list names it at server level
   (`mcp__<server>`), and a denied server's resources go with it (`opencode_list_mcp_resources` on the server name,
   `opencode_read_mcp_resource` on `<server>:*`); a tool-level entry (`mcp__github__issues`) cannot be expressed
-  deny-only, so it keeps the server denied, with a diagnostic.
-- ClaudeUI's own per-agent permission overlay (ADR-097 §3) for the same name is emitted after the agent's rules,
-  so the user's explicit rules win (last match wins); the user's global opencode rules come before both.
+  deny-only, so it keeps the server denied, with a diagnostic. A server that exists only at runtime (not in any
+  config document) is not known when the config is built and is not denied.
+- Rule order for an injected agent: the user's global opencode `permissions` first, then the agent's own denies,
+  then ClaudeUI's own per-agent overlay for that name (ADR-097 §3, e.g. `plan`'s); last match wins, so the
+  agent's denies beat the user's global allows.
 - A malformed `harness.opencode.model` skips the agent (never a silent substitute); a name that is not a safe
   opencode agent id (`My Agent`) is skipped; names compare case-insensitively with opencode's own agents.
 - Session rules sit after agent rules in opencode, so a parent's `*: allow` would beat an agent's denies until
   ClaudeUI applies the child-session ruleset (`subagent-permissions.ts`); the contract suite covers that path.
   opencode's browser plugin appends its own `browser` deny to every agent.
-- Project `.claude/agents` prompts are repository-supplied text the model sees; they cannot widen permissions
-  (deny-only) or pick a model, but they are prompt input like a repository's `CLAUDE.md`.
+- A project definition that shadows a user one narrows it as in pi: its rules are the union of both agents'
+  denies, and the user agent's model is kept. Project `.claude/agents` prompts are still repository-supplied text
+  the model sees, like a repository's `CLAUDE.md`; they cannot widen permissions or pick a model.
 - Size caps (8 KiB per agent, 24 KiB in all) keep the injection well inside one Windows environment variable
   (32,767 characters); a real Windows spawn with a 22 KB block became ready normally.
 - The injected block is part of the server identity, so an edited agent file starts a fresh server on the next
