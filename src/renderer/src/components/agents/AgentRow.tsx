@@ -45,6 +45,8 @@ import {
 } from './AgentTypeTile'
 import { StatusDot, type SessionDotState } from '../Sidebar/StatusDot'
 import { agentRowLabel, type AgentRosterRow } from '../../hooks/useAgentRoster'
+import { modelTier } from '../../../../shared/model-tier'
+import { MODEL_TIER_TEXT_CLASS } from '../../lib/model-tier-class'
 
 /** Indent per nesting level, on top of the row's own 10px (`px-2.5`). */
 const INDENT_PX = 14
@@ -180,6 +182,9 @@ export function AgentRow({
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const engineId = useActiveSession((s) => s.status.engineId)
   const tile = useAgentTile(engineId, row.type, row.dispatch, knownTypes)
+  // The agent's name takes the tier colour of the model it runs on (never a shell's).
+  const tierColors = useSessionStore((s) => s.settings.agentModelTierColors)
+  const tier = tierColors && row.kind === 'agent' ? modelTier(row.model) : undefined
 
   const isStopping = stoppingTaskIds.includes(row.toolUseId)
 
@@ -268,13 +273,18 @@ export function AgentRow({
       </span>
       <span
         data-testid="AgentRow.name"
+        data-model-tier={tier}
         title={row.description || undefined}
         className={`min-w-[4.5rem] @max-[300px]/roster:min-w-[3rem] grow-0 shrink basis-auto truncate ${
           isShell
             ? 'font-mono text-[11px] text-text-secondary'
-            : row.hasExplicitName
-              ? 'text-[12px] text-text-primary'
-              : 'text-[12px] text-text-secondary'
+            : `text-[12px] ${
+                tier
+                  ? MODEL_TIER_TEXT_CLASS[tier]
+                  : row.hasExplicitName
+                    ? 'text-text-primary'
+                    : 'text-text-secondary'
+              }`
         }`}
       >
         {agentRowLabel(row)}

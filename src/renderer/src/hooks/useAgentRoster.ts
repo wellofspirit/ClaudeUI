@@ -43,6 +43,7 @@ import {
   latestNotification
 } from '../components/chat/task-state'
 import { findTaskBlocks } from '../components/TaskDetailPanel/utils'
+import { latestMessageModel, resolveAgentModel, useParentModel } from '../lib/agent-model'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -100,6 +101,12 @@ export interface AgentRosterRow {
   runningDescendants?: number
   /** A shell's start (ms epoch, from its lifecycle record): what a running shell's clock counts from. */
   startedAt?: number
+  /**
+   * The model this agent runs on (`resolveAgentModel`): the newest model its own
+   * messages report, else the one its spawn asked for, else (Codex) the parent's.
+   * Absent for a shell and when nothing says.
+   */
+  model?: string
 }
 
 export interface AgentRoster {
@@ -145,6 +152,8 @@ export interface ScannedEntry {
   type?: string
   dispatch?: { engine: string; model?: string }
   description: string
+  /** The model the spawn asked for (`view.model`; pi: the host's result line). Agents only. */
+  requestedModel?: string
   hasResult: boolean
   resultIsError: boolean
   isBackground: boolean
@@ -159,6 +168,12 @@ export interface ScannedEntry {
 export interface RosterEntry extends ScannedEntry {
   depth: number
   parentToolUseId?: string
+  /**
+   * The newest model the agent's OWN transcript reports (`latestMessageModel`).
+   * Read from the agent's bucket here, not in the scan: the scan is cached on the
+   * PARENT's array and this changes with the agent's own.
+   */
+  latestModel?: string
 }
 
 type Buckets = Readonly<Record<string, ChatMessage[]>>
@@ -267,6 +282,7 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
         ...(view?.subagent ? { type: view.subagent } : {}),
         ...(view?.dispatch ? { dispatch: view.dispatch } : {}),
         description: view?.description || view?.prompt || '',
+        ...(view?.model ? { requestedModel: view.model } : {}),
         hasResult: !!result,
         resultIsError: !!result?.isError,
         // Since 2.1.219 an agent's input usually omits it — hence the lifecycle.
@@ -292,8 +308,14 @@ export function scanAgentTree(
     for (const entry of entries) {
       if (placed.has(entry.toolUseId)) continue
       placed.add(entry.toolUseId)
-      out.push({ ...entry, depth, ...(parent ? { parentToolUseId: parent } : {}) })
       const bucket = subagentMessages[entry.toolUseId]
+      const latestModel = latestMessageModel(bucket)
+      out.push({
+        ...entry,
+        depth,
+        ...(parent ? { parentToolUseId: parent } : {}),
+        ...(latestModel ? { latestModel } : {})
+      })
       if (bucket?.length) {
         walk(scanTranscriptCached(bucket, engineId), depth + 1, entry.toolUseId)
       }
@@ -396,6 +418,9 @@ function toRow(
       string,
       { elapsedTimeSeconds: number; lastToolName?: string; usage?: AgentRosterRow['usage'] }
     >
+    engineId: EngineId
+    /** The parent session's model, for Codex (`useParentModel`). */
+    parentModel?: string
   }
 ): AgentRosterRow {
   const notification = latestNotification(opts.notifications, entry.toolUseId)
@@ -409,6 +434,16 @@ function toRow(
     resultIsError: entry.resultIsError
   })
   const progress = opts.progress[entry.toolUseId]
+  const model =
+    entry.kind === 'agent'
+      ? resolveAgentModel({
+          latestModel: entry.latestModel,
+          requested: entry.requestedModel,
+          engine: opts.engineId,
+          parentModel: opts.parentModel,
+          dispatch: entry.dispatch
+        })
+      : undefined
 
   return {
     toolUseId: entry.toolUseId,
@@ -438,7 +473,8 @@ function toRow(
         }
       : {}),
     runIndex: active?.runIndex ?? notification?.runIndex ?? 1,
-    ...(entry.kind === 'shell' && active?.startedAt ? { startedAt: active.startedAt } : {})
+    ...(entry.kind === 'shell' && active?.startedAt ? { startedAt: active.startedAt } : {}),
+    ...(model ? { model } : {})
   }
 }
 
@@ -573,6 +609,7 @@ export function useAgentRoster(): AgentRoster {
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
   const openedTaskToolUseIds = useActiveSession((s) => s.openedTaskToolUseIds)
   const isHistorical = useActiveSession((s) => s.isHistorical)
+  const parentModel = useParentModel()
 
   // The tree — deliberately NOT dependent on the live maps. Each bucket's walk
   // is shared with the other surfaces through scanTranscriptCached.
@@ -603,7 +640,9 @@ export function useAgentRoster(): AgentRoster {
       isHistorical: !!isHistorical,
       activeTasks: activeTasks ?? {},
       notifications: taskNotifications ?? [],
-      progress: taskProgressMap ?? {}
+      progress: taskProgressMap ?? {},
+      engineId: engineId ?? 'claude',
+      parentModel
     }
     const agents = withRunningDescendants(settleOrphans(tree, (entry) => toRow(entry, opts), opts))
     const shellRows = shells.map((entry) => toRow({ ...entry, depth: 0 }, opts))
@@ -622,5 +661,14 @@ export function useAgentRoster(): AgentRoster {
       runningShellCount,
       totalCount: agents.length
     }
-  }, [tree, shells, activeTasks, taskNotifications, taskProgressMap, isHistorical])
+  }, [
+    tree,
+    shells,
+    activeTasks,
+    taskNotifications,
+    taskProgressMap,
+    isHistorical,
+    engineId,
+    parentModel
+  ])
 }

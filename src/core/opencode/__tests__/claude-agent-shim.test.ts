@@ -334,6 +334,24 @@ describe('loadClaudeAgentsForOpencode', () => {
       expect(JSON.stringify(out.agents)).not.toContain('green')
     })
 
+    it('carries the own model of an injected agent (variant included), and none when it inherits', () => {
+      const r = rig()
+      r.userFile(
+        'withmodel',
+        agentMd(
+          'name: withmodel\ndescription: d\nharness:\n  opencode:\n    model: openai/gpt-6-luna#high'
+        )
+      )
+      r.userFile('inherits', agentMd('name: inherits\ndescription: d'))
+      // A top-level `model` is the Claude and pi key, not opencode's.
+      r.userFile('claudeonly', agentMd('name: claudeonly\ndescription: d\nmodel: opus'))
+      expect(r.load().injected).toEqual([
+        { name: 'claudeonly', scope: 'user' },
+        { name: 'inherits', scope: 'user' },
+        { name: 'withmodel', scope: 'user', model: 'openai/gpt-6-luna#high' }
+      ])
+    })
+
     it('a project definition that overrides a user one is listed once, with the project scope', () => {
       const r = rig()
       r.userFile('twin', agentMd('name: twin\ndescription: user\ncolor: green'))

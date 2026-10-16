@@ -7,7 +7,9 @@
  *  - Claude Code: its built-in agents, then the definitions in
  *    `~/.claude/agents` and `<cwd>/.claude/agents` (recursive; later wins, so
  *    the project beats the user beats a built-in). `color` is its frontmatter
- *    key, one of red/blue/green/yellow/purple/orange/pink/cyan.
+ *    key, one of red/blue/green/yellow/purple/orange/pink/cyan. `model` is its
+ *    frontmatter key too (absent or `inherit` is no declared model); the
+ *    built-ins' models are fixed inside cli.js, so they list none.
  *  - opencode: the existing agent lister (`opencode-agents.ts`), minus the
  *    primary-only and hidden agents, which are never a spawn's type; then the
  *    Claude definitions ClaudeUI injects into every opencode server (the agent
@@ -18,6 +20,10 @@
  *    (codex-rs/core/src/agent/role.rs). User roles (`[agents.<name>]` in
  *    config.toml) are NOT listed: reading them means starting an app-server
  *    child, which is not a cheap read for a settings list.
+ *
+ * `model` is the type's DECLARED model, for the settings column: Claude's file
+ * key, pi's definition (`inherit` is none), opencode's native agent and the
+ * injected agents' `harness.opencode.model` (variant dropped). Codex roles list none.
  *
  * Frontmatter is parsed by `skill-scanner`'s reader (a line scanner: nothing is
  * evaluated). The files come from whatever repository the user opened, so the
@@ -52,6 +58,12 @@ const CLAUDE_BUILTIN_TYPES = [
 
 /** Codex's built-in roles (`built_in::configs`). */
 const CODEX_BUILTIN_ROLES = ['default', 'explorer', 'worker']
+
+/** A declared model, or undefined for none: absent and `inherit` both mean the parent's. */
+const declaredModel = (value: string | undefined): string | undefined => {
+  const model = value?.trim()
+  return model && model.toLowerCase() !== 'inherit' ? model : undefined
+}
 
 const unquote = (value: string): string => value.trim().replace(/^(['"])(.*)\1$/, '$2')
 
@@ -105,7 +117,13 @@ function claudeAgentDefinitions(dir: string, source: 'user' | 'project'): AgentT
       const name = plain(frontmatter.name)
       if (!name) continue
       const color = plain(frontmatter.color)
-      found.push({ type: name, source, ...(color ? { nativeColor: color } : {}) })
+      const model = declaredModel(plain(frontmatter.model))
+      found.push({
+        type: name,
+        source,
+        ...(color ? { nativeColor: color } : {}),
+        ...(model ? { model } : {})
+      })
     } catch {
       continue
     }
@@ -133,7 +151,8 @@ function opencodeTypes(cwd?: string): AgentTypeInfo[] {
     .map((agent) => ({
       type: agent.name,
       source: agent.scope === 'project' ? 'project' : agent.scope === 'global' ? 'user' : 'builtin',
-      ...(agent.color ? { nativeColor: agent.color } : {})
+      ...(agent.color ? { nativeColor: agent.color } : {}),
+      ...(agent.model ? { model: agent.model } : {})
     }))
   // The server manager injects the Claude definitions as subagents (ADR-103); list the
   // same set. Permissions do not matter for a name list, hence no MCP servers.
@@ -149,7 +168,8 @@ function opencodeTypes(cwd?: string): AgentTypeInfo[] {
       ...shim.injected.map((agent): AgentTypeInfo => ({
         type: agent.name,
         source: agent.scope,
-        ...(agent.color ? { nativeColor: agent.color } : {})
+        ...(agent.color ? { nativeColor: agent.color } : {}),
+        ...(agent.model ? { model: agent.model.split('#')[0] } : {})
       }))
     ]
   } catch {
@@ -160,7 +180,10 @@ function opencodeTypes(cwd?: string): AgentTypeInfo[] {
 function piTypes(cwd?: string): AgentTypeInfo[] {
   return loadPiAgentRegistry({ cwd: cwd ?? os.homedir() })
     .list()
-    .map((def) => ({ type: def.name, source: def.scope }))
+    .map((def): AgentTypeInfo => {
+      const model = declaredModel(def.model)
+      return { type: def.name, source: def.scope, ...(model ? { model } : {}) }
+    })
 }
 
 /** The agent types `engine` can spawn from `cwd` (user-level only when `cwd` is absent). */

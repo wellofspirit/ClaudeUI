@@ -70,6 +70,14 @@ pre .token.table {
   --color-agent-teal: #3fcfb4;
   --color-agent-pink: #ec82c8;
 
+  /* Model tiers (shared/model-tier.ts): the colour of an agent's name in the
+     roster and of the task card's model chip text. Each holds 4.5:1 on the panel
+     surfaces (shared/__tests__/model-tier.test.ts). Light and Monokai have their own. */
+  --color-model-tier-top: #ff8000;
+  --color-model-tier-high: #b866f5;
+  --color-model-tier-mid: #3d95ff;
+  --color-model-tier-low: #1eff00;
+
   --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
 }
 
@@ -105,6 +113,11 @@ pre .token.table {
   --color-agent-amber: #634500;
   --color-agent-teal: #065b50;
   --color-agent-pink: #8c2468;
+
+  --color-model-tier-top: #703800;
+  --color-model-tier-high: #6b0cb1;
+  --color-model-tier-mid: #004599;
+  --color-model-tier-low: #0a5700;
 }
 
 /* ── Monokai theme ── */
@@ -130,6 +143,13 @@ pre .token.table {
   --color-mode-plan-dim: #7aa31e;
   --color-mode-auto: #e6db74;
   --color-mode-auto-dim: #b8ad50;
+
+  /* Model tiers on Monokai's lighter surfaces (bg-hover is #4a493c): the same
+     hues, lifted until they hold 4.5:1 on all four surfaces. */
+  --color-model-tier-top: #ffa447;
+  --color-model-tier-high: #d7a9f9;
+  --color-model-tier-mid: #85bcff;
+  --color-model-tier-low: #1eff00;
 }
 
 body {

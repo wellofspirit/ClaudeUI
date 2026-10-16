@@ -74,6 +74,28 @@ describe('Claude Code', () => {
     expect(byType['scanner']).toEqual({ type: 'scanner', source: 'project', nativeColor: 'cyan' })
   })
 
+  it('reads the declared `model`: an alias or an id, none for absent or `inherit`, none for built-ins', () => {
+    const agent = (name: string, model?: string): string =>
+      `---\nname: ${name}\n${model === undefined ? '' : `model: ${model}\n`}---\nBody\n`
+    write(path.join(home, '.claude', 'agents', 'a.md'), agent('alias-agent', 'opus'))
+    write(path.join(home, '.claude', 'agents', 'b.md'), agent('id-agent', 'claude-haiku-4-5'))
+    write(path.join(home, '.claude', 'agents', 'c.md'), agent('quoted-agent', '"sonnet" # note'))
+    write(path.join(home, '.claude', 'agents', 'd.md'), agent('inherit-agent', 'inherit'))
+    write(path.join(home, '.claude', 'agents', 'e.md'), agent('none-agent'))
+    write(path.join(home, '.claude', 'agents', 'f.md'), agent('blank-agent', '""'))
+    const byType = Object.fromEntries(listAgentTypes('claude', project).map((t) => [t.type, t]))
+    expect(byType['alias-agent'].model).toBe('opus')
+    expect(byType['id-agent'].model).toBe('claude-haiku-4-5')
+    expect(byType['quoted-agent'].model).toBe('sonnet')
+    for (const name of ['inherit-agent', 'none-agent', 'blank-agent']) {
+      expect(byType[name]).toEqual({ type: name, source: 'user' })
+    }
+    // The built-ins' models are fixed inside cli.js: none is listed.
+    for (const name of ['general-purpose', 'Explore', 'Plan']) {
+      expect(byType[name]).toEqual({ type: name, source: 'builtin' })
+    }
+  })
+
   it('skips a file with no frontmatter `name`, as Claude Code does', () => {
     write(
       path.join(project, '.claude', 'agents', 'noname.md'),
@@ -184,7 +206,39 @@ describe('opencode', () => {
     expect(types.find((t) => t.type === 'general')?.source).toBe('builtin')
   })
 
+  it('lists the model of a native agent, variant dropped, and none when it has none', () => {
+    write(
+      path.join(home, 'opencode', 'agents', 'modelled.md'),
+      '---\nmode: subagent\nmodel: openai/gpt-6-luna#high\n---\nBody\n'
+    )
+    write(path.join(home, 'opencode', 'agents', 'bare.md'), '---\nmode: subagent\n---\nBody\n')
+    const types = listAgentTypes('opencode', project)
+    expect(types.find((t) => t.type === 'modelled')).toEqual({
+      type: 'modelled',
+      source: 'user',
+      model: 'openai/gpt-6-luna'
+    })
+    expect(types.find((t) => t.type === 'bare')).toEqual({ type: 'bare', source: 'user' })
+  })
+
   describe('Claude definitions injected by the agent shim (ADR-103)', () => {
+    it('lists the harness.opencode.model of an injected agent (no variant), not the Claude model', () => {
+      write(
+        path.join(home, '.claude', 'agents', 'pinned.md'),
+        '---\nname: pinned\ndescription: d\nmodel: opus\nharness:\n  opencode:\n    model: openai/gpt-6-sol#high\n---\nBody\n'
+      )
+      write(
+        path.join(home, '.claude', 'agents', 'claudeonly.md'),
+        '---\nname: claudeonly\ndescription: d\nmodel: opus\n---\nBody\n'
+      )
+      const types = listAgentTypes('opencode', project)
+      expect(types.find((t) => t.type === 'pinned')?.model).toBe('openai/gpt-6-sol')
+      expect(types.find((t) => t.type === 'claudeonly')).toEqual({
+        type: 'claudeonly',
+        source: 'user'
+      })
+    })
+
     const claudeAgent = (name: string, extra = ''): string =>
       `---\nname: ${name}\ndescription: Does ${name}\n${extra}---\nBody\n`
 
@@ -280,6 +334,30 @@ describe('pi', () => {
     expect(types.find((t) => t.type === 'general-purpose')?.source).toBe('builtin')
     expect(types.find((t) => t.type === 'helper')).toEqual({ type: 'helper', source: 'user' })
     expect(types.find((t) => t.type === 'local')).toEqual({ type: 'local', source: 'project' })
+  })
+})
+
+describe('pi models', () => {
+  it('lists the declared model of a definition, and none for `inherit` or the built-ins', () => {
+    write(
+      path.join(home, '.pi', 'agent', 'agents', 'pinned.md'),
+      '---\nname: pinned\ndescription: Pinned\nmodel: openai-codex/gpt-6-sol\n---\nDo it.\n'
+    )
+    write(
+      path.join(home, '.pi', 'agent', 'agents', 'follows.md'),
+      '---\nname: follows\ndescription: Follows\nmodel: inherit\n---\nDo it.\n'
+    )
+    const types = listAgentTypes('pi', project)
+    expect(types.find((t) => t.type === 'pinned')).toEqual({
+      type: 'pinned',
+      source: 'user',
+      model: 'openai-codex/gpt-6-sol'
+    })
+    expect(types.find((t) => t.type === 'follows')).toEqual({ type: 'follows', source: 'user' })
+    expect(types.find((t) => t.type === 'general-purpose')).toEqual({
+      type: 'general-purpose',
+      source: 'builtin'
+    })
   })
 })
 

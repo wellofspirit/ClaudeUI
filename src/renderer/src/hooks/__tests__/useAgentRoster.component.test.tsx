@@ -1042,6 +1042,144 @@ describe('useAgentRoster', () => {
     })
   })
 
+  // The model an agent runs on (`resolveAgentModel`): what its own messages report,
+  // else what the spawn asked for, else (Codex) the parent's.
+  describe('the model a row runs on', () => {
+    const assistant = (id: string, model?: string): ChatMessage =>
+      ({
+        id,
+        role: 'assistant',
+        content: [{ type: 'text', text: id }],
+        timestamp: Date.now(),
+        ...(model ? { model } : {})
+      }) as ChatMessage
+
+    it('is the model the spawn asked for until the agent reports one', async () => {
+      setSession({
+        messages: [
+          assistantWithTool('m1', 'tu-a', 'Agent', { name: 'scout', model: 'haiku' }),
+          assistantWithTool('m2', 'tu-b', 'Agent', { name: 'plain' })
+        ]
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.model)).toEqual(['haiku', undefined])
+    })
+
+    it('is the newest model the agent’s own messages report, over the requested one', async () => {
+      setSession({
+        messages: [assistantWithTool('m1', 'tu-a', 'Agent', { name: 'scout', model: 'haiku' })],
+        subagentMessages: {
+          'tu-a': [assistant('c1', 'claude-haiku-4-5-20251001'), assistant('c2', 'claude-opus-5-5')]
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents[0].model).toBe('claude-opus-5-5')
+    })
+
+    it('is not cleared by a newer message that carries no model (an error row)', async () => {
+      setSession({
+        messages: [assistantWithTool('m1', 'tu-a', 'Agent', { name: 'scout' })],
+        subagentMessages: { 'tu-a': [assistant('c1', 'claude-opus-5-5'), assistant('c2')] }
+      })
+      await renderProbe()
+      expect(seen?.agents[0].model).toBe('claude-opus-5-5')
+    })
+
+    it('follows the agent’s transcript as it grows, without a rescan of the parent’s', async () => {
+      const messages = [assistantWithTool('m1', 'tu-a', 'Agent', { name: 'scout' })]
+      setSession({ messages, subagentMessages: { 'tu-a': [assistant('c1', 'claude-haiku-4-5')] } })
+      await renderProbe()
+      expect(seen?.agents[0].model).toBe('claude-haiku-4-5')
+      const walks = rosterScanStats.walks
+      // A new array for the child's bucket only, as the reducer does.
+      setSession({
+        subagentMessages: {
+          'tu-a': [assistant('c1', 'claude-haiku-4-5'), assistant('c2', 'claude-sonnet-5-5')]
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents[0].model).toBe('claude-sonnet-5-5')
+      // The parent's array is unchanged: its walk is a cache hit; the child's bucket has no spawns.
+      expect(rosterScanStats.walks - walks).toBeLessThanOrEqual(1)
+    })
+
+    it('reads each nested agent from its own bucket', async () => {
+      setSession({
+        messages: nestedMessages(),
+        subagentMessages: {
+          ...nestedBuckets(),
+          [A]: [...nestedBuckets()[A], assistant('a-m', 'claude-opus-5-5')],
+          [B]: [...nestedBuckets()[B], assistant('b-m', 'claude-haiku-4-5')]
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.model)).toEqual(['claude-opus-5-5', 'claude-haiku-4-5'])
+    })
+
+    it('is the parent session’s model for Codex, below the requested one', async () => {
+      setSession({
+        ...withEngine('codex'),
+        messages: [
+          assistantWithTool('m1', 'tu-a', 'collab:spawnAgent', { receiverThreadIds: ['t1'] }),
+          assistantWithTool('m2', 'tu-b', 'collab:spawnAgent', {
+            model: 'gpt-6-luna',
+            receiverThreadIds: ['t2']
+          })
+        ]
+      })
+      setSession({
+        status: {
+          ...useSessionStore.getState().sessions[ROUTE].status,
+          model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-6-sol' }
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.model)).toEqual(['gpt-6-sol', 'gpt-6-luna'])
+    })
+
+    it('does not borrow the parent’s model on any other engine', async () => {
+      setSession({
+        messages: [assistantWithTool('m1', 'tu-a', 'Agent', { name: 'scout' })],
+        status: {
+          ...useSessionStore.getState().sessions[ROUTE].status,
+          model: { engineId: 'claude', vendorId: 'anthropic', modelId: 'claude-opus-5-5' }
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents[0].model).toBeUndefined()
+    })
+
+    it('is the model a dispatch ran on, else the one it asked for', async () => {
+      setSession({
+        messages: [
+          assistantWithTool('m1', 'tu-d1', 'mcp__claude-ui-collab__dispatch_agent', {
+            engine: 'opencode',
+            model: 'openai/gpt-6-luna',
+            prompt: 'one'
+          }),
+          assistantWithTool('m2', 'tu-d2', 'mcp__claude-ui-collab__dispatch_agent', {
+            engine: 'opencode',
+            model: 'openai/gpt-6-luna',
+            prompt: 'two'
+          })
+        ],
+        subagentMessages: { 'tu-d2': [assistant('d', 'openai/gpt-6-sol')] }
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.model)).toEqual(['openai/gpt-6-luna', 'openai/gpt-6-sol'])
+    })
+
+    it('is never a shell’s', async () => {
+      setSession({
+        messages: nestedMessages(),
+        subagentMessages: nestedBuckets(),
+        activeTasks: { [A_BG_BASH]: nestedActiveTasks()[A_BG_BASH] }
+      })
+      await renderProbe()
+      expect(seen?.shells.map((r) => r.model)).toEqual([undefined])
+    })
+  })
+
   it('takes running state from the lifecycle record when there is one', async () => {
     setSession({
       messages: [

@@ -15,10 +15,11 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
-import { useSessionStore } from '../../../stores/session-store'
+import { useSessionStore, DEFAULT_SETTINGS } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { makePendingApproval } from '@test/factories/messages'
 import type {
+  ChatMessage,
   ContentBlock,
   PermissionDenialBlock,
   ToolReviewBlock
@@ -527,6 +528,172 @@ describe('TaskCard — inline task approval', () => {
 // ---------------------------------------------------------------------------
 // The type chip (ADR-094): bot + letters, or the muted bot alone
 // ---------------------------------------------------------------------------
+
+describe('TaskCard — the model chip follows the model tier', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({
+      activeSessionId: ROUTE,
+      settings: { ...DEFAULT_SETTINGS },
+      availableModels: []
+    })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const assistant = (id: string, model?: string): ChatMessage => ({
+    id,
+    role: 'assistant',
+    content: [{ type: 'text', text: id }],
+    timestamp: Date.now(),
+    ...(model ? { model } : {})
+  })
+  const chip = (): HTMLElement => screen.getByTestId('TaskCard.model')
+  const withView = (over: Record<string, unknown>) => ({ ...defaultTaskView, ...over })
+
+  it('colours the chip by the requested model before the agent reports one', () => {
+    render(<TaskCard block={makeTaskBlock()} view={withView({ model: 'haiku' })} />)
+    expect(chip().textContent).toBe('Haiku')
+    expect(chip().getAttribute('data-model-tier')).toBe('low')
+    expect(chip().className).toContain('text-model-tier-low')
+    expect(chip().className).not.toContain('text-text-secondary')
+  })
+
+  it('shows the RESOLVED model: the newest one the agent’s messages report', () => {
+    seed.subagentMessage(ROUTE, 'call_task_1', assistant('c1', 'claude-haiku-4-5'))
+    seed.subagentMessage(ROUTE, 'call_task_1', assistant('c2', 'claude-opus-5-5'))
+    // A newer message with no model (an error row) does not clear it.
+    seed.subagentMessage(ROUTE, 'call_task_1', assistant('c3'))
+    render(<TaskCard block={makeTaskBlock()} view={withView({ model: 'haiku' })} />)
+    expect(chip().textContent).toBe('Opus 5.5')
+    expect(chip().title).toBe('claude-opus-5-5')
+    expect(chip().getAttribute('data-model-tier')).toBe('high')
+  })
+
+  it('shows the picker’s name for the resolved model when it has one', () => {
+    useSessionStore.setState({
+      availableModels: [
+        { value: 'claude-opus-5-5', displayName: 'Opus Five', description: '', engineId: 'claude' }
+      ]
+    })
+    seed.subagentMessage(ROUTE, 'call_task_1', assistant('c1', 'claude-opus-5-5'))
+    render(<TaskCard block={makeTaskBlock()} view={withView({})} />)
+    expect(chip().textContent).not.toBe('claude-opus-5-5')
+    expect(chip().title).toBe('claude-opus-5-5')
+  })
+
+  it('names a resolved concrete Claude id by its family when the picker has no name for it', () => {
+    seed.subagentMessage(ROUTE, 'call_task_1', assistant('c1', 'claude-opus-5-5'))
+    const { unmount } = render(<TaskCard block={makeTaskBlock()} view={withView({})} />)
+    expect(chip().textContent).toBe('Opus 5.5')
+    // The id stays on hover, and the chip is the sans label, not the mono id.
+    expect(chip().title).toBe('claude-opus-5-5')
+    expect(chip().className).not.toContain('font-mono')
+    unmount()
+    seed.subagentMessage(ROUTE, 'call_task_1', assistant('c2', 'claude-haiku-4-5-20251001'))
+    render(<TaskCard block={makeTaskBlock()} view={withView({})} />)
+    expect(chip().textContent).toBe('Haiku 4.5')
+  })
+
+  it('shows the raw id when no one names it (an unknown opencode id), never blank', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          status: { ...state.sessions[ROUTE].status, engineId: 'opencode' }
+        }
+      }
+    }))
+    seed.subagentMessage(ROUTE, 'call_task_1', assistant('c1', 'zen/mimo-v2.5-free'))
+    render(<TaskCard block={makeTaskBlock()} view={withView({})} />)
+    expect(chip().textContent).toBe('zen/mimo-v2.5-free')
+    expect(chip().className).toContain('font-mono')
+  })
+
+  it('leaves the chip plain with the setting off', () => {
+    useSessionStore.setState({
+      settings: { ...DEFAULT_SETTINGS, agentModelTierColors: false }
+    })
+    render(<TaskCard block={makeTaskBlock()} view={withView({ model: 'claude-opus-5-5' })} />)
+    expect(chip().textContent).toBe('Opus 5.5')
+    expect(chip().getAttribute('data-model-tier')).toBeNull()
+    expect(chip().className).toContain('text-text-secondary')
+  })
+
+  it('leaves the chip plain for a model with no tier', () => {
+    render(
+      <TaskCard block={makeTaskBlock()} view={withView({ model: 'deepseek/deepseek-v4-flash' })} />
+    )
+    expect(chip().getAttribute('data-model-tier')).toBeNull()
+    expect(chip().className).toContain('text-text-secondary')
+  })
+
+  it('uses the parent session’s model on Codex, below the requested one', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          status: {
+            ...state.sessions[ROUTE].status,
+            engineId: 'codex',
+            model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-6-sol' }
+          }
+        }
+      }
+    }))
+    const { unmount } = render(
+      <TaskCard
+        block={makeTaskBlock()}
+        view={withView({ subagent: undefined, model: undefined })}
+      />
+    )
+    expect(chip().textContent).toBe('gpt-6-sol')
+    expect(chip().getAttribute('data-model-tier')).toBe('high')
+    unmount()
+    render(
+      <TaskCard
+        block={makeTaskBlock()}
+        view={withView({ subagent: undefined, model: 'gpt-6-luna' })}
+      />
+    )
+    expect(chip().textContent).toBe('gpt-6-luna')
+    expect(chip().getAttribute('data-model-tier')).toBe('low')
+  })
+
+  describe('a cross-engine dispatch', () => {
+    const dispatchBlock = makeTaskBlock({
+      toolUseId: 'toolu_dispatch_tier',
+      toolName: 'mcp__claude-ui-collab__dispatch_agent',
+      toolInput: { engine: 'opencode', prompt: 'go', model: 'openai/gpt-6-luna' }
+    })
+    const dispatchView = {
+      kind: 'task' as const,
+      description: 'Dispatch: opencode',
+      prompt: 'go',
+      dispatch: { engine: 'opencode', model: 'openai/gpt-6-luna' }
+    }
+
+    it('is the requested model until a message reports the one it ran on', () => {
+      const { unmount } = render(<TaskCard block={dispatchBlock} view={dispatchView} />)
+      expect(chip().textContent).toBe('opencode · openai/gpt-6-luna')
+      expect(chip().getAttribute('data-model-tier')).toBe('low')
+      unmount()
+      seed.subagentMessage(ROUTE, 'toolu_dispatch_tier', assistant('d1', 'openai/gpt-6-sol'))
+      render(<TaskCard block={dispatchBlock} view={dispatchView} />)
+      expect(chip().textContent).toBe('opencode · openai/gpt-6-sol')
+      expect(chip().getAttribute('data-model-tier')).toBe('high')
+    })
+  })
+})
 
 describe('TaskCard — the type chip', () => {
   let app: TestApp

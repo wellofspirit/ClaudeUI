@@ -732,6 +732,13 @@ export interface AgentTypeInfo {
   type: string
   source: 'builtin' | 'user' | 'project'
   nativeColor?: string
+  /**
+   * The model the type's definition DECLARES for this engine, as the definition
+   * spells it (an alias or an id, `provider/id` on opencode and pi). Absent when
+   * the type inherits its parent's model, and for every built-in whose model the
+   * engine fixes elsewhere. Read-only; Settings shows it beside the type.
+   */
+  model?: string
 }
 
 export interface OpencodeAgentDetail extends OpencodeAgentSummary {

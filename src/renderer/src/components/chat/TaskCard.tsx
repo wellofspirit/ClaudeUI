@@ -16,8 +16,15 @@ import { ApprovalButtons } from './ApprovalButtons'
 import { PermissionDenialChip, PermissionDenialStrip } from './tool-registry/PermissionDenial'
 import { ToolReviewChip, ToolReviewStrip, canApproveBlock } from './tool-registry/ToolReview'
 import { deriveTaskState, latestNotification } from './task-state'
-import { modelDisplayName } from '../../lib/model-display-name'
 import { dispatchLabel } from '../../../../shared/tool-kinds'
+import { modelTier, type ModelTier } from '../../../../shared/model-tier'
+import {
+  agentModelShortName,
+  latestMessageModel,
+  resolveAgentModel,
+  useParentModel
+} from '../../lib/agent-model'
+import { MODEL_TIER_TEXT_CLASS } from '../../lib/model-tier-class'
 import {
   AGENT_CHIP_CLASS,
   AgentTile,
@@ -249,6 +256,7 @@ function TaskFooter({
   tile,
   model,
   modelName,
+  tier,
   isBackground,
   runIndex,
   usage,
@@ -262,6 +270,8 @@ function TaskFooter({
   model: string | null
   /** The model's catalog name, when the picker has one; the raw id otherwise. */
   modelName: string | undefined
+  /** The model's tier when tier colours are on and the model has one. */
+  tier: ModelTier | undefined
   isBackground: boolean
   runIndex: number
   usage: ParsedUsage | null | undefined
@@ -307,8 +317,11 @@ function TaskFooter({
       {model && (
         <span
           data-testid="TaskCard.model"
+          data-model-tier={tier}
           title={model}
-          className={`text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary ${
+          className={`text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary ${
+            tier ? MODEL_TIER_TEXT_CLASS[tier] : 'text-text-secondary'
+          } ${
             (modelName ?? model).length >= MODEL_FLOOR_MIN_CHARS
               ? 'min-w-[5rem] truncate @max-[480px]/taskcard:basis-[5rem] @max-[480px]/taskcard:grow @max-[480px]/taskcard:max-w-fit'
               : 'shrink-0 whitespace-nowrap'
@@ -394,6 +407,8 @@ export function TaskCard({
   const backgroundTasksEnabled = useActiveSession((s) => s.status.capabilities.backgroundTasks)
   const engineId = useActiveSession((s) => s.status.engineId)
   const availableModels = useSessionStore((s) => s.availableModels)
+  const tierColors = useSessionStore((s) => s.settings.agentModelTierColors)
+  const parentModel = useParentModel()
   const [expanded, setExpanded] = useState(false)
 
   const toolUseId = block.toolUseId
@@ -454,10 +469,26 @@ export function TaskCard({
   // and an untyped agent the bot alone. `view.subagent` is a TYPE on every engine, and
   // a Codex spawn has none.
   const tile = useAgentTile(engineId, view.subagent, view.dispatch)
-  // A dispatch has no model of its own to name: its chip says where it went.
-  const model = view.dispatch ? dispatchLabel(view.dispatch) : (view.model ?? null)
+  // The model the agent runs on (`resolveAgentModel`, the roster's rule): the newest
+  // one its own messages report, else the one the spawn asked for. A dispatch's chip
+  // says where it went, and the model it ran on once it reports one.
+  const resolvedModel = resolveAgentModel({
+    latestModel: latestMessageModel(msgs),
+    requested: view.model,
+    engine: engineId,
+    parentModel,
+    dispatch: view.dispatch
+  })
+  const model = view.dispatch
+    ? dispatchLabel({ engine: view.dispatch.engine, model: resolvedModel })
+    : (resolvedModel ?? null)
+  // The picker's name for it, else the family short name of a concrete Claude id
+  // ("Opus 5.5"), else the id itself (an id no one names).
   const modelName =
-    model && !view.dispatch ? modelDisplayName(availableModels, engineId, model) : undefined
+    resolvedModel && !view.dispatch
+      ? agentModelShortName(availableModels, engineId, resolvedModel)
+      : undefined
+  const tier = tierColors ? modelTier(resolvedModel) : undefined
 
   const progress = taskProgressMap[toolUseId]
   const startedAt = isRunning ? activeTasks[toolUseId]?.startedAt : undefined
@@ -595,6 +626,7 @@ export function TaskCard({
     tile,
     model,
     modelName,
+    tier,
     isBackground,
     runIndex,
     usage,

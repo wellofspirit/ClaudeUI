@@ -616,7 +616,12 @@ function seedTypeRows(): void {
     name
   })
   const rows = [
-    mk('tu-custom', 'scan', { name: 'scan', subagent_type: 'Explore', description }),
+    mk('tu-custom', 'scan', {
+      name: 'scan',
+      subagent_type: 'Explore',
+      description,
+      model: 'claude-opus-5-5'
+    }),
     mk('tu-two', 'two', { name: 'two', subagent_type: 'deep-review', description }),
     mk('tu-default', 'plain', { name: 'plain', subagent_type: 'general-purpose', description }),
     mk(
@@ -755,6 +760,18 @@ describe('the type tile in the agent list (ADR-094)', () => {
     const tops = rows.filter((r) => r.getAttribute('data-depth') === '0')
     const lefts = tops.map((r) => rectOf(byTestId(r, 'AgentRow.name')).left)
     for (const left of lefts) expect(Math.abs(left - lefts[0])).toBeLessThanOrEqual(1)
+  })
+
+  // Real Tailwind: the utility for the token exists, and the colour is the token's.
+  it('draws an agent name in its model tier colour, and a default-model one as before', async () => {
+    const overlay = await openOverlay(1.1)
+    const tiered = byTestId(rowOf(overlay, 'tu-custom'), 'AgentRow.name')
+    expect(tiered.getAttribute('data-model-tier')).toBe('high')
+    // --color-model-tier-high, #b866f5
+    expect(getComputedStyle(tiered).color).toBe('rgb(184, 102, 245)')
+    const plain = byTestId(rowOf(overlay, 'tu-default'), 'AgentRow.name')
+    expect(plain.getAttribute('data-model-tier')).toBeNull()
+    expect(getComputedStyle(plain).color).not.toBe('rgb(184, 102, 245)')
   })
 
   it('takes the default dispatch colour, and the one in settings when set', async () => {

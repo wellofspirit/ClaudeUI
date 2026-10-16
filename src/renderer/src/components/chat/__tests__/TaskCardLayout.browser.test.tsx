@@ -360,8 +360,9 @@ describe('Task card on the phone', () => {
         seed([], { engineId: 'claude' })
         const card = await mountCard(chatScale, { width, model: label })
         const chip = byTestId(card, 'TaskCard.model')
-        expect(chip.textContent).toBe(label)
-        expect(getComputedStyle(chip).fontFamily).toMatch(/mono/i)
+        // The alias reads as its family's short name ("Opus"), in the sans face.
+        expect(chip.textContent).toBe(label.charAt(0).toUpperCase() + label.slice(1))
+        expect(getComputedStyle(chip).fontFamily).not.toMatch(/mono/i)
         expect(chip.scrollWidth).toBeLessThanOrEqual(chip.clientWidth + 1)
         // Narrower than the floor, in page px: no blank space.
         expect(rectOf(chip).width).toBeLessThan(5 * 16 * chatScale)

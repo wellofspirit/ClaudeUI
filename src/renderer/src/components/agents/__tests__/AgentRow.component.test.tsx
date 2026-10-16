@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, screen, act, cleanup } from '@testing-library/react'
-import { useSessionStore } from '../../../stores/session-store'
+import { useSessionStore, DEFAULT_SETTINGS } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { AgentRow, rowStatus } from '../AgentRow'
 import type { AgentRosterRow } from '../../../hooks/useAgentRoster'
@@ -144,6 +144,79 @@ describe('AgentRow', () => {
     const tile = screen.getByTestId('AgentRow.typeTile')
     expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
     expect(tile.textContent).toBe('X')
+  })
+
+  describe('the name colour follows the model tier', () => {
+    const name = (): HTMLElement => screen.getByTestId('AgentRow.name')
+    const setTierColors = (on: boolean): void =>
+      useSessionStore.setState({ settings: { ...DEFAULT_SETTINGS, agentModelTierColors: on } })
+
+    beforeEach(() => setTierColors(true))
+
+    it('is on by default, and colours the name of an agent whose model has a tier', async () => {
+      expect(DEFAULT_SETTINGS.agentModelTierColors).toBe(true)
+      await renderRow(row({ toolUseId: 'a', model: 'claude-opus-5-5' }))
+      expect(name().getAttribute('data-model-tier')).toBe('high')
+      expect(name().className).toContain('text-model-tier-high')
+      expect(name().className).not.toContain('text-text-primary')
+    })
+
+    it.each([
+      ['claude-fable-5-1', 'top'],
+      ['claude-sonnet-5-5', 'mid'],
+      ['openai/gpt-6-luna', 'low']
+    ] as const)('%s is %s', async (model, tier) => {
+      await renderRow(row({ toolUseId: 'a', model }))
+      expect(name().getAttribute('data-model-tier')).toBe(tier)
+      expect(name().className).toContain(`text-model-tier-${tier}`)
+    })
+
+    it('colours an unnamed agent’s description label too', async () => {
+      await renderRow(
+        row({ toolUseId: 'a', hasExplicitName: false, name: 'Explore', model: 'claude-haiku-4-5' })
+      )
+      expect(name().textContent).toBe('Review the scroll bench code')
+      expect(name().className).toContain('text-model-tier-low')
+    })
+
+    it('keeps the usual colours with the setting off', async () => {
+      setTierColors(false)
+      await renderRow(row({ toolUseId: 'a', model: 'claude-opus-5-5' }))
+      expect(name().getAttribute('data-model-tier')).toBeNull()
+      expect(name().className).toContain('text-text-primary')
+      expect(name().className).not.toContain('text-model-tier')
+    })
+
+    it('keeps the usual colours for a model with no tier, and for no model', async () => {
+      await renderRow(row({ toolUseId: 'a', model: 'deepseek/deepseek-v4-flash' }))
+      expect(name().getAttribute('data-model-tier')).toBeNull()
+      expect(name().className).toContain('text-text-primary')
+      cleanup()
+      await renderRow(row({ toolUseId: 'b' }))
+      expect(name().getAttribute('data-model-tier')).toBeNull()
+    })
+
+    it('never colours a shell', async () => {
+      await renderRow(
+        row({ toolUseId: 'sh', kind: 'shell', hasExplicitName: false, model: 'claude-opus-5-5' })
+      )
+      expect(name().getAttribute('data-model-tier')).toBeNull()
+      expect(name().className).toContain('text-text-secondary')
+      expect(name().className).not.toContain('text-model-tier')
+    })
+
+    it('leaves the dimming of a finished context row where it was', async () => {
+      render(
+        React.createElement(AgentRow, {
+          row: row({ toolUseId: 'a', model: 'claude-opus-5-5' }),
+          selected: false,
+          onOpen: vi.fn(),
+          isContext: true
+        })
+      )
+      expect(screen.getByTestId('AgentRow').className).toContain('opacity-55')
+      expect(name().className).toContain('text-model-tier-high')
+    })
   })
 
   describe('the status dot is the session dot (status-dot)', () => {

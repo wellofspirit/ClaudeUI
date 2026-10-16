@@ -8,7 +8,9 @@
  * coloured by its engine's own agent colour (Claude Code's and opencode's agent
  * files name one), else by a stable hash of its name, which is what "Auto"
  * means. The engine's default type is the bot alone, muted and uncoloured, and
- * is listed greyed.
+ * is listed greyed. A type's DECLARED model (its definition's `model`) is shown
+ * on its second line, read-only, in its model tier's colour when the Appearance
+ * switch for tier colours (`agentModelTierColors`) is on.
  *
  * The overrides live in ClaudeUI's own settings (`agentTypeColors`,
  * `dispatchTileColor`) and travel through the normal `update` write, so they
@@ -16,7 +18,7 @@
  * vocabulary (`SettingRow`); the swatches wrap, so the same body serves the
  * phone's settings view.
  */
-import type { AgentTypeInfo, EngineId } from '../../../../shared/types'
+import type { AgentTypeInfo, EngineId, ModelInfo } from '../../../../shared/types'
 import {
   AGENT_COLOR_IDS,
   DEFAULT_DISPATCH_TILE_COLOR,
@@ -31,9 +33,12 @@ import {
   type AgentColorId
 } from '../../../../shared/agent-type-colors'
 import { engineMeta } from '../../../../shared/engine-meta'
-import { useActiveSession, type AppSettings } from '../../stores/session-store'
+import { useActiveSession, useSessionStore, type AppSettings } from '../../stores/session-store'
 import { useAgentTypeCatalog } from '../../hooks/useAgentTypeCatalog'
 import { AgentTile } from '../agents/AgentTypeTile'
+import { modelTier } from '../../../../shared/model-tier'
+import { agentModelShortName } from '../../lib/agent-model'
+import { MODEL_TIER_TEXT_CLASS } from '../../lib/model-tier-class'
 import { SettingRow } from './settings-controls'
 
 /** The swatch fill, per palette colour: whole class names, since Tailwind reads source text. */
@@ -133,10 +138,41 @@ function statusOf(override: AgentColorId | undefined, native: string | undefined
   return native ? "Auto, from the agent's own colour" : 'Auto'
 }
 
+/**
+ * The model a type declares, read-only: the picker's short name for it (the raw id
+ * when the picker has none), in its tier colour when the switch is on. A type that
+ * declares none shows nothing: it runs on its parent's model, and a built-in's is
+ * fixed inside the engine.
+ */
+function DeclaredModel({
+  engine,
+  model,
+  models,
+  tierColors
+}: {
+  engine: EngineId
+  model: string
+  models: readonly ModelInfo[]
+  tierColors: boolean
+}): React.JSX.Element {
+  const tier = tierColors ? modelTier(model) : undefined
+  return (
+    <span
+      data-testid="AgentColours.model"
+      data-model-tier={tier}
+      title={model}
+      className={tier ? MODEL_TIER_TEXT_CLASS[tier] : undefined}
+    >
+      {agentModelShortName(models, engine, model) ?? model}
+    </span>
+  )
+}
+
 function TypeRow({
   engine,
   info,
   knownTypes,
+  tierColors,
   override,
   onPick
 }: {
@@ -144,10 +180,13 @@ function TypeRow({
   info: AgentTypeInfo
   /** Every type listed on the page: a shared prefix is dropped from the letter. */
   knownTypes: readonly string[]
+  /** Colour the declared model by its tier (the page's switch). */
+  tierColors: boolean
   override: AgentColorId | undefined
   onPick: (color: AgentColorId | undefined) => void
 }): React.JSX.Element {
   const testid = 'AgentColours.row'
+  const availableModels = useSessionStore((s) => s.availableModels)
   if (isDefaultSubagentType(engine, info.type)) {
     return (
       <SettingRow
@@ -177,6 +216,17 @@ function TypeRow({
       description={
         <>
           {SOURCE_LABEL[info.source]} · {statusOf(override, info.nativeColor)}
+          {info.model && (
+            <>
+              {' · '}
+              <DeclaredModel
+                engine={engine}
+                model={info.model}
+                models={availableModels}
+                tierColors={tierColors}
+              />
+            </>
+          )}
           {override && <ResetLink testid="AgentColours" onReset={() => onPick(undefined)} />}
         </>
       }
@@ -207,6 +257,7 @@ export function AgentColoursSection({
   const types = useAgentTypeCatalog(engine, cwd || undefined, { fresh: true })
   const overrides = settings.agentTypeColors
   const knownTypeNames = types.map((info) => info.type)
+  const tierColors = settings.agentModelTierColors
 
   return (
     <div
@@ -227,6 +278,7 @@ export function AgentColoursSection({
           engine={engine}
           info={info}
           knownTypes={knownTypeNames}
+          tierColors={tierColors}
           override={agentColorOverride(overrides, engine, info.type)}
           onPick={(color) =>
             update({

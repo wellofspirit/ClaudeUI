@@ -193,6 +193,81 @@ describe('Agent colours settings', () => {
     expect(lastSaved.agentTypeColors).toBeUndefined()
   })
 
+  describe('model tiers', () => {
+    beforeEach(() => useSessionStore.setState({ availableModels: [] }))
+
+    const modelOf = (type: string): HTMLElement | null =>
+      within(rowOf(type)).queryByTestId('AgentColours.model')
+
+    it('shows the declared model of a type in its tier colour, and nothing for a type with none', async () => {
+      Object.assign(window.api, {
+        listAgentTypes: vi.fn(async () => [
+          { type: 'planner', source: 'user', model: 'opus' },
+          { type: 'scout', source: 'project', model: 'claude-haiku-4-5' },
+          { type: 'writer', source: 'user', model: 'deepseek/deepseek-v4-flash' },
+          { type: 'follower', source: 'user' }
+        ])
+      })
+      render(<Section engine="claude" />)
+      await waitFor(() => expect(screen.getAllByTestId('AgentColours.row')).toHaveLength(4))
+
+      expect(modelOf('planner')?.textContent).toBe('Opus')
+      expect(modelOf('planner')?.getAttribute('data-model-tier')).toBe('high')
+      expect(modelOf('planner')?.className).toContain('text-model-tier-high')
+      expect(modelOf('scout')?.getAttribute('data-model-tier')).toBe('low')
+      // An unlisted family is shown plain.
+      expect(modelOf('writer')?.textContent).toBe('deepseek/deepseek-v4-flash')
+      expect(modelOf('writer')?.getAttribute('data-model-tier')).toBeNull()
+      // Declaring none (inherit, or a built-in) shows nothing at all.
+      expect(modelOf('follower')).toBeNull()
+    })
+
+    it('shows the picker’s short name for a declared model that has one', async () => {
+      useSessionStore.setState({
+        availableModels: [
+          { value: 'opus', displayName: 'Opus 5.5', description: '', engineId: 'claude' }
+        ]
+      })
+      Object.assign(window.api, {
+        listAgentTypes: vi.fn(async () => [{ type: 'planner', source: 'user', model: 'opus' }])
+      })
+      render(<Section engine="claude" />)
+      await waitFor(() => expect(screen.getAllByTestId('AgentColours.row')).toHaveLength(1))
+      expect(modelOf('planner')?.textContent).not.toBe('opus')
+      expect(modelOf('planner')?.title).toBe('opus')
+    })
+
+    it('names a concrete Claude id by its family, and an id no one names by itself', async () => {
+      Object.assign(window.api, {
+        listAgentTypes: vi.fn(async () => [
+          { type: 'planner', source: 'user', model: 'claude-opus-5-5' },
+          { type: 'scout', source: 'user', model: 'claude-haiku-4-5-20251001' },
+          { type: 'writer', source: 'user', model: 'mimo-v2.5-free' }
+        ])
+      })
+      render(<Section engine="claude" />)
+      await waitFor(() => expect(screen.getAllByTestId('AgentColours.row')).toHaveLength(3))
+      expect(modelOf('planner')?.textContent).toBe('Opus 5.5')
+      expect(modelOf('planner')?.title).toBe('claude-opus-5-5')
+      expect(modelOf('scout')?.textContent).toBe('Haiku 4.5')
+      expect(modelOf('writer')?.textContent).toBe('mimo-v2.5-free')
+    })
+
+    it('draws the model plain with the switch off', async () => {
+      useSessionStore.setState({
+        settings: { ...DEFAULT_SETTINGS, agentModelTierColors: false }
+      })
+      Object.assign(window.api, {
+        listAgentTypes: vi.fn(async () => [{ type: 'planner', source: 'user', model: 'opus' }])
+      })
+      render(<Section engine="claude" />)
+      await waitFor(() => expect(screen.getAllByTestId('AgentColours.row')).toHaveLength(1))
+      expect(modelOf('planner')?.textContent).toBe('Opus')
+      expect(modelOf('planner')?.getAttribute('data-model-tier')).toBeNull()
+      expect(modelOf('planner')?.className).not.toContain('text-model-tier')
+    })
+  })
+
   it('keeps each engine’s overrides apart', async () => {
     useSessionStore.setState({
       settings: { ...DEFAULT_SETTINGS, agentTypeColors: { pi: { Plan: 'rose' } } }
