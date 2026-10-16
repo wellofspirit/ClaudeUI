@@ -70,6 +70,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { CHUNK_DELIM_PREFIX } from './lib/chunk-format.mjs'
+import { TRASH_DIR, clearDir, sweepTrash } from './lib/vendor-swap.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -453,11 +454,14 @@ async function main() {
       (named.slice(0, 8).join(', ') + (named.length > 8 ? `, … (${named.length})` : ''))
   )
 
-  // Wipe the vendor dir so stale artifacts (previous versions' chunk set,
+  // Empty the vendor dir so stale artifacts (previous versions' chunk set,
   // loose addon copies from before ADR-098, vendored ripgrep) don't leak into
-  // the build. Safe — the rebundle below regenerates what's needed.
-  if (existsSync(VENDOR_DIR)) rmSync(VENDOR_DIR, { recursive: true, force: true })
-  mkdirSync(VENDOR_DIR, { recursive: true })
+  // the build. Safe — the rebundle below regenerates what's needed. A
+  // `bun-claude` that a running session holds can't be deleted on Windows, so
+  // it is moved into the trash dir (and swept by a later run) rather than
+  // failing here with the dir already half-wiped.
+  sweepTrash(TRASH_DIR)
+  clearDir(VENDOR_DIR, TRASH_DIR)
   writeFileSync(OUT_CLI, concat)
   log(`wrote ${OUT_CLI}`)
 
