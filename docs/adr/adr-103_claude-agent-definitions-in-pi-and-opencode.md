@@ -52,15 +52,12 @@ harness sees another's choices.
   project directory from the root down, `.claude/agents` then `.pi/agents`. The harness's own folder wins at
   equal scope; a nearer directory beats a farther one; every override of a built-in or user agent is a
   diagnostic, and a project agent that shadows one is marked `(project)` in the listing.
-- **A project file can only narrow what it shadows** (owner ruling): the project definition supplies the prompt
-  and description, but the restrictions of both apply: `tools` intersect, `disallowedTools` add up, the stricter
-  permission mode and the stricter `canSpawn` win, and the shadowed agent's model is kept unless a project
-  `.pi/agents` file names one. A repository therefore cannot turn the user's read-only agent (or the read-only
-  `Explore`/`Plan`) into an all-tools one by shipping a file of the same name, nor move it onto the parent's
-  model. Between the user's own folders (`~/.claude/agents`, `~/.pi/agent/agents`) plain precedence applies.
-- `harness.pi.model` wins over `model`. A project `.claude/agents` file never picks a model (inherit + a
-  diagnostic): a repository must not choose the user's vendor or spend. Project `.pi/agents` keeps ADR-089's
-  rules.
+- **A project definition fully overrides** one of the same name, as in Claude Code (owner ruling, 2026-10-17): a
+  project owns its agents and may give one a different model, tools or prompt, e.g. `orch-implementer` on a
+  stronger model for a harder repository. The override is logged at info. Between the user's own folders plain
+  precedence applies too.
+- `harness.pi.model` wins over `model`, in every scope; a Claude alias (`sonnet`) is not a pi model and
+  inherits, with a warning. The child's model is still validated against the session's allowlisted catalog.
 - The `agent` tool's listing hides Claude Code built-in tools pi does not have (`WebFetch`, `WebSearch`, ...);
   extension and MCP tools still show. The names still reach `--tools`, which pi turns into a name matcher, so an
   unknown name matches nothing.
@@ -75,7 +72,7 @@ harness sees another's choices.
   loads, and agent files in the global and every discovered `.opencode` folder (`agent`/`agents`, recursive, and
   `mode`/`modes`).
 - Each agent is injected as a native 2.x subagent: `mode: "subagent"`, `description`, `system` = a short
-  ClaudeUI preamble plus the body, `model` from `harness.opencode.model` (user scope only; a model outside
+  ClaudeUI preamble plus the body, `model` from `harness.opencode.model` (in any scope; a model outside
   ClaudeUI's opencode allowlist skips the agent rather than substitute one). opencode's `system` REPLACES its
   default prompt where pi's `--append-system-prompt` appends; the preamble carries the harness detail so the
   agent file does not have to.
@@ -99,9 +96,9 @@ harness sees another's choices.
 - Session rules sit after agent rules in opencode, so a parent's `*: allow` would beat an agent's denies until
   ClaudeUI applies the child-session ruleset (`subagent-permissions.ts`); the contract suite covers that path.
   opencode's browser plugin appends its own `browser` deny to every agent.
-- A project definition that shadows a user one narrows it as in pi: its rules are the union of both agents'
-  denies, and the user agent's model is kept. Project `.claude/agents` prompts are still repository-supplied text
-  the model sees, like a repository's `CLAUDE.md`; they cannot widen permissions or pick a model.
+- A project definition overrides a user one of the same name whole, as in pi (logged at info). Project
+  `.claude/agents` files are repository-supplied input like a repository's own `.opencode` config, which can
+  already define agents, models and permissions; ClaudeUI's model allowlist still bounds the model.
 - Size caps (8 KiB per agent, 24 KiB in all) keep the injection well inside one Windows environment variable
   (32,767 characters); a real Windows spawn with a 22 KB block became ready normally.
 - The injected block is part of the server identity, so an edited agent file starts a fresh server on the next
@@ -125,3 +122,6 @@ harness sees another's choices.
 - **Flat `pi-model` / `opencode-model` keys.** Rejected for one nested `harness` key: one unknown key for Claude
   Code to ignore, and room for other per-harness fields later.
 - **A deny-all + allow-list permission mapping.** Rejected (see above): it both widened and broke access.
+- **Project files may only narrow, and never pick a model.** Built first (a repository could not widen a user's
+  read-only agent or choose its spend), then reversed by the owner: it diverged from Claude Code and from how pi
+  and opencode treat their own project config, and it took a legitimate per-project choice away from users.
