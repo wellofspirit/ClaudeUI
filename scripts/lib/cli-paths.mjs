@@ -58,7 +58,7 @@ export function cliTrashDir() {
 
 /** Everything the pipeline itself puts in a vendor dir (see `clearDir` in vendor-swap.mjs). */
 const PIPELINE_ENTRY =
-  /^(?:cli\.js|version\.json|bun-claude(?:\.exe)?|\.bun-claude\.tmp-.*|\.trash)$/
+  /^(?:cli\.js|version\.json|version\.json\.\d+\.tmp|bun-claude(?:\.exe)?|\.bun-claude\.tmp-.*|\.trash)$/
 
 /**
  * Refuse to empty an OVERRIDDEN vendor dir that holds anything else.

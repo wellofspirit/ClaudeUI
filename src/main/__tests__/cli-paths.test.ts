@@ -115,6 +115,7 @@ describe('assertVendorDirClearable', () => {
     for (const f of [
       'cli.js',
       'version.json',
+      'version.json.4242.tmp',
       'bun-claude',
       'bun-claude.exe',
       '.bun-claude.tmp-4242'
