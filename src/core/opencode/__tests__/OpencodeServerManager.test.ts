@@ -852,6 +852,7 @@ describe('OpencodeServerManager (2.x) — injected Claude agents', () => {
 
   const agent = (system: string): ClaudeAgentShim => ({
     agents: { reader: { description: 'd', mode: 'subagent', system } },
+    injected: [{ name: 'reader', scope: 'user' }],
     diagnostics: []
   })
 
@@ -859,7 +860,7 @@ describe('OpencodeServerManager (2.x) — injected Claude agents', () => {
     const seen: Array<[string, readonly string[]]> = []
     const { manager, calls } = makeShimRig((cwd, mcpServers) => {
       seen.push([cwd, mcpServers])
-      return cwd === dir('/proj/a') ? agent('v1') : { agents: {}, diagnostics: [] }
+      return cwd === dir('/proj/a') ? agent('v1') : { agents: {}, injected: [], diagnostics: [] }
     })
     await manager.acquire('/proj/a')
     await manager.acquire('/proj/b')

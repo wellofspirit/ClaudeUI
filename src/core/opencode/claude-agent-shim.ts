@@ -42,6 +42,12 @@
  * 32,767 characters and this travels in one). Between the user's and the
  * project's definitions of one name the project's wins, with a diagnostic.
  *
+ * The result also lists what was injected ({@link ClaudeAgentShim.injected}:
+ * name, scope and the file's `color`, in the order of `agents`) for the agent
+ * type catalog (`agent-type-catalog.ts`, ADR-094), which shows the agents the
+ * server will have, not only the ones opencode reads from disk. The colour is
+ * catalog data only: it is never put into an injected agent.
+ *
  * Parsing is the shared hostile-input reader (`../agents/agent-defs.ts`);
  * diagnostics are reasons, never file contents.
  */
@@ -98,6 +104,8 @@ interface ClaudeAgentDef {
   disallowedTools: string[]
   /** `harness.opencode.model`, user scope only, validated. */
   model?: string
+  /** The `color` frontmatter key (trimmed, non-empty); for the agent type catalog only. */
+  color?: string
 }
 
 function parseClaudeAgent(
@@ -140,6 +148,8 @@ function parseClaudeAgent(
     }
   }
 
+  const color = typeof doc.data.color === 'string' ? doc.data.color.trim() : ''
+
   return {
     name: head.name,
     description: head.description,
@@ -148,7 +158,8 @@ function parseClaudeAgent(
     filePath,
     tools,
     disallowedTools: disallowedRaw.kind === 'list' ? disallowedRaw.tools : [],
-    ...(model ? { model } : {})
+    ...(model ? { model } : {}),
+    ...(color ? { color } : {})
   }
 }
 
@@ -250,6 +261,13 @@ export function claudeAgentDenyRules(
 export interface ClaudeAgentShim {
   /** `agents.<name>`, in name order. */
   readonly agents: Readonly<Record<string, Config_AgentEncoded>>
+  /**
+   * The agents that ended up in `agents`, in the same (name) order: skipped ones
+   * (native-name clash, refused model, size caps, parse errors) are absent.
+   * `color` is the file's `color` frontmatter, for the agent type catalog; it is
+   * not part of the injected entry.
+   */
+  readonly injected: ReadonlyArray<{ name: string; scope: 'user' | 'project'; color?: string }>
   /** Skipped-file and ignored-field reasons, for a debug log line (never file contents). */
   readonly diagnostics: readonly string[]
 }
@@ -307,6 +325,7 @@ export function loadClaudeAgentsForOpencode(opts: ClaudeAgentShimOptions): Claud
 
   const native = new Set([...opts.nativeAgentNames].map((n) => n.toLowerCase()))
   const agents: Record<string, Config_AgentEncoded> = {}
+  const injected: Array<{ name: string; scope: 'user' | 'project'; color?: string }> = []
   let blockBytes = byteLength('{}')
   const defs = [...byName.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   for (const def of defs) {
@@ -346,6 +365,7 @@ export function loadClaudeAgentsForOpencode(opts: ClaudeAgentShimOptions): Claud
     }
     blockBytes = next
     agents[def.name] = agent
+    injected.push({ name: def.name, scope: def.scope, ...(def.color ? { color: def.color } : {}) })
   }
-  return { agents, diagnostics }
+  return { agents, injected, diagnostics }
 }

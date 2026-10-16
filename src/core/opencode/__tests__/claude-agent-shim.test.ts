@@ -290,6 +290,61 @@ describe('loadClaudeAgentsForOpencode', () => {
     expect(out.agents['orch-reader']).not.toHaveProperty('model')
   })
 
+  describe('injected (what the agent type catalog lists)', () => {
+    it('matches the agents keys and order, carries scope and colour, and never puts the colour into an agent', () => {
+      const r = rig()
+      r.userFile('zeta', agentMd('name: zeta\ndescription: d\ncolor: green'))
+      r.userFile('alpha', agentMd('name: alpha\ndescription: d\ncolor: "  cyan "'))
+      r.userFile('plain', agentMd('name: plain\ndescription: d\ncolor: ""'))
+      r.userFile('numeric', agentMd('name: numeric\ndescription: d\ncolor: 5'))
+      r.projectFile('proj', agentMd('name: proj\ndescription: d\ncolor: red'))
+      const out = r.load()
+      expect(out.injected.map((a) => a.name)).toEqual(Object.keys(out.agents))
+      expect(out.injected).toEqual([
+        { name: 'alpha', scope: 'user', color: 'cyan' },
+        { name: 'numeric', scope: 'user' },
+        { name: 'plain', scope: 'user' },
+        { name: 'proj', scope: 'project', color: 'red' },
+        { name: 'zeta', scope: 'user', color: 'green' }
+      ])
+      expect(JSON.stringify(out.agents)).not.toContain('green')
+    })
+
+    it('a project definition that overrides a user one is listed once, with the project scope', () => {
+      const r = rig()
+      r.userFile('twin', agentMd('name: twin\ndescription: user\ncolor: green'))
+      r.projectFile('twin', agentMd('name: twin\ndescription: project'))
+      expect(r.load().injected).toEqual([{ name: 'twin', scope: 'project' }])
+    })
+
+    it('leaves out every skipped agent: native clash, refused or malformed model, size cap, parse error', () => {
+      const r = rig()
+      r.userFile('kept', agentMd('name: kept\ndescription: d\ncolor: blue'))
+      r.userFile('Native', agentMd('name: Native\ndescription: d\ncolor: red'))
+      r.userFile(
+        'refused',
+        agentMd('name: refused\ndescription: d\nharness:\n  opencode:\n    model: openai/gpt-x')
+      )
+      r.userFile(
+        'malformed',
+        agentMd('name: malformed\ndescription: d\nharness:\n  opencode:\n    model: nonsense')
+      )
+      r.userFile('big', agentMd('name: big\ndescription: d', 'x'.repeat(MAX_INJECTED_AGENT_BYTES)))
+      r.userFile('broken', 'no front matter at all')
+      const out = r.load({ nativeAgentNames: ['native'], modelAllowlist: { openai: ['other'] } })
+      expect(Object.keys(out.agents)).toEqual(['kept'])
+      expect(out.injected).toEqual([{ name: 'kept', scope: 'user', color: 'blue' }])
+    })
+
+    it('leaves out the agents the 24 KiB block cap skips', () => {
+      const r = rig()
+      for (const n of ['f', 'e', 'd', 'c', 'b', 'a']) {
+        r.userFile(n, agentMd(`name: ${n}\ndescription: d`, n.repeat(6 * 1024)))
+      }
+      expect(r.load().injected.map((a) => a.name)).toEqual(['a', 'b', 'c'])
+    })
+  })
+
   it('no tools key: no permissions entry; an empty body is the preamble alone', () => {
     const r = rig()
     r.userFile('plain', agentMd('name: plain\ndescription: d', ''))
@@ -452,7 +507,7 @@ describe('loadClaudeAgentsForOpencode', () => {
         modelAllowlist: {},
         claudeUserAgentsDir: path.join(base, 'nope')
       })
-      expect(out).toEqual({ agents: {}, diagnostics: [] })
+      expect(out).toEqual({ agents: {}, injected: [], diagnostics: [] })
     })
   })
 

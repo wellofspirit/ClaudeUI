@@ -9,7 +9,10 @@
  *    the project beats the user beats a built-in). `color` is its frontmatter
  *    key, one of red/blue/green/yellow/purple/orange/pink/cyan.
  *  - opencode: the existing agent lister (`opencode-agents.ts`), minus the
- *    primary-only and hidden agents, which are never a spawn's type.
+ *    primary-only and hidden agents, which are never a spawn's type; then the
+ *    Claude definitions ClaudeUI injects into every opencode server (the agent
+ *    shim, ADR-103), exactly the ones it injects: a name opencode already has
+ *    (primary and hidden ones included) or a refused model leaves one out.
  *  - pi: `pi-agent-registry` (built-in, user, project). pi has no colour key.
  *  - Codex: the built-in roles `default`, `explorer`, `worker`
  *    (codex-rs/core/src/agent/role.rs). User roles (`[agents.<name>]` in
@@ -25,6 +28,8 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { AgentTypeInfo, EngineId } from '../../shared/types'
+import { loadClaudeAgentsForOpencode } from '../opencode/claude-agent-shim'
+import { loadOpencodeModelAllowlist } from '../opencode/model-allowlist'
 import { listAgents } from '../opencode/opencode-agents'
 import { loadPiAgentRegistry } from '../pi/pi-agent-registry'
 import { parseFrontmatter } from './skill-scanner'
@@ -121,13 +126,34 @@ function claudeTypes(cwd?: string): AgentTypeInfo[] {
 }
 
 function opencodeTypes(cwd?: string): AgentTypeInfo[] {
-  return listAgents(cwd)
+  const all = listAgents(cwd)
+  const native: AgentTypeInfo[] = all
     .filter((agent) => agent.mode !== 'primary' && !agent.hidden)
     .map((agent) => ({
       type: agent.name,
       source: agent.scope === 'project' ? 'project' : agent.scope === 'global' ? 'user' : 'builtin',
       ...(agent.color ? { nativeColor: agent.color } : {})
     }))
+  // The server manager injects the Claude definitions as subagents (ADR-103); list the
+  // same set. Permissions do not matter for a name list, hence no MCP servers.
+  try {
+    const shim = loadClaudeAgentsForOpencode({
+      cwd: cwd ?? os.homedir(),
+      mcpServers: [],
+      nativeAgentNames: all.map((agent) => agent.name),
+      modelAllowlist: loadOpencodeModelAllowlist()
+    })
+    return [
+      ...native,
+      ...shim.injected.map((agent): AgentTypeInfo => ({
+        type: agent.name,
+        source: agent.scope,
+        ...(agent.color ? { nativeColor: agent.color } : {})
+      }))
+    ]
+  } catch {
+    return native
+  }
 }
 
 function piTypes(cwd?: string): AgentTypeInfo[] {

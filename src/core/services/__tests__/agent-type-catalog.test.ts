@@ -182,6 +182,76 @@ describe('opencode', () => {
     })
     expect(types.find((t) => t.type === 'general')?.source).toBe('builtin')
   })
+
+  describe('Claude definitions injected by the agent shim (ADR-103)', () => {
+    const claudeAgent = (name: string, extra = ''): string =>
+      `---\nname: ${name}\ndescription: Does ${name}\n${extra}---\nBody\n`
+
+    it('lists a user and a project definition, with the same native colour Claude gets', () => {
+      write(
+        path.join(home, '.claude', 'agents', 'orch-reader.md'),
+        claudeAgent('orch-reader', 'color: green\n')
+      )
+      write(
+        path.join(project, '.claude', 'agents', 'local-check.md'),
+        claudeAgent('local-check', 'color: "cyan" # a comment\n')
+      )
+      const opencode = listAgentTypes('opencode', project)
+      const claude = listAgentTypes('claude', project)
+      for (const name of ['orch-reader', 'local-check']) {
+        expect(opencode.find((t) => t.type === name)).toEqual(claude.find((t) => t.type === name))
+      }
+      expect(opencode.find((t) => t.type === 'orch-reader')).toEqual({
+        type: 'orch-reader',
+        source: 'user',
+        nativeColor: 'green'
+      })
+      expect(opencode.find((t) => t.type === 'local-check')).toEqual({
+        type: 'local-check',
+        source: 'project',
+        nativeColor: 'cyan'
+      })
+      // The native entries stay, ahead of the injected ones.
+      const names = opencode.map((t) => t.type)
+      expect(names.indexOf('general')).toBeLessThan(names.indexOf('orch-reader'))
+    })
+
+    it('lists the user definitions when there is no cwd', () => {
+      write(path.join(home, '.claude', 'agents', 'solo.md'), claudeAgent('solo'))
+      expect(listAgentTypes('opencode').find((t) => t.type === 'solo')).toEqual({
+        type: 'solo',
+        source: 'user'
+      })
+    })
+
+    it('lists a name an opencode agent already has once, as the native entry', () => {
+      write(
+        path.join(home, 'opencode', 'agents', 'reviewer.md'),
+        '---\nmode: subagent\ncolor: "#22d3ee"\n---\nBody\n'
+      )
+      write(
+        path.join(home, '.claude', 'agents', 'reviewer.md'),
+        claudeAgent('reviewer', 'color: green\n')
+      )
+      write(
+        path.join(home, '.claude', 'agents', 'general.md'),
+        claudeAgent('general', 'color: red\n')
+      )
+      const types = listAgentTypes('opencode', project)
+      expect(types.filter((t) => t.type === 'reviewer')).toEqual([
+        { type: 'reviewer', source: 'user', nativeColor: '#22d3ee' }
+      ])
+      expect(types.filter((t) => t.type === 'general')).toEqual([
+        { type: 'general', source: 'builtin' }
+      ])
+    })
+
+    it('omits a name a primary-only opencode agent holds: the shim skips it too', () => {
+      write(path.join(home, 'opencode', 'agents', 'driver.md'), '---\nmode: primary\n---\nBody\n')
+      write(path.join(home, '.claude', 'agents', 'driver.md'), claudeAgent('driver'))
+      expect(listAgentTypes('opencode', project).some((t) => t.type === 'driver')).toBe(false)
+    })
+  })
 })
 
 describe('pi', () => {
