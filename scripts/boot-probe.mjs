@@ -31,12 +31,12 @@ import { spawn } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readSync, rmSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { detectFormat, isForeignFormat } from './lib/binary-format.mjs'
+import { cliVendorDir } from './lib/cli-paths.mjs'
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DEFAULT_TIMEOUT_MS = 30_000
 
 /** Parent env passed through (case-insensitively: Windows has `Path` / `PATH`). */
@@ -59,7 +59,7 @@ const ENV_ALLOWLIST = new Set(
 const CRASH_RE = /\b(TypeError|ReferenceError|SyntaxError|RangeError)\b/
 
 export function defaultBin(platform = process.platform) {
-  return join(ROOT, 'vendor', 'claude-cli', `bun-claude${platform === 'win32' ? '.exe' : ''}`)
+  return join(cliVendorDir(), `bun-claude${platform === 'win32' ? '.exe' : ''}`)
 }
 
 export function parseBootProbeArgs(argv) {

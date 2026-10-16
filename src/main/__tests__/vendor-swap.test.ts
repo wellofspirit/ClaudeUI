@@ -106,6 +106,20 @@ describe('vendor-swap: plain files (any platform)', () => {
     expect(existsSync(fresh)).toBe(true)
   })
 
+  it('clearDir leaves a trash dir that lives inside the dir alone', () => {
+    const root = tempDir()
+    const vendor = join(root, 'claude-cli')
+    const trash = join(vendor, '.trash')
+    mkdirSync(trash, { recursive: true })
+    writeFileSync(join(trash, 'held-1-2'), 'x')
+    writeFileSync(join(vendor, 'cli.js'), 'x')
+
+    clearDir(vendor, trash)
+
+    expect(readdirSync(vendor)).toEqual(['.trash'])
+    expect(readdirSync(trash)).toEqual(['held-1-2'])
+  })
+
   it('replaceFile swaps the content and leaves no temp file behind', () => {
     const root = tempDir()
     const target = join(root, 'bun-claude.exe')

@@ -24,15 +24,10 @@ import {
   writeFileSync
 } from 'node:fs'
 import { basename, dirname, extname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
-
-/**
- * Sibling of `vendor/claude-cli` on the same volume (rename needs that), and
- * outside electron-builder's `from: vendor/claude-cli` copy.
- */
-export const TRASH_DIR = join(ROOT, 'vendor', '.claude-cli-trash')
+// The trash dir is the caller's: `cliTrashDir()` in ./cli-paths.mjs for the
+// Claude Code vendor dir. It must be on the same volume as what it receives
+// (rename needs that).
 
 /** Errors that mean "a running process holds this" rather than "this is broken". */
 const LOCKED = new Set(['EPERM', 'EBUSY', 'EACCES'])
@@ -71,7 +66,11 @@ export function removeOrMoveAside(path, trashDir) {
  */
 export function clearDir(dir, trashDir) {
   if (existsSync(dir)) {
-    for (const entry of readdirSync(dir)) removeOrMoveAside(join(dir, entry), trashDir)
+    for (const entry of readdirSync(dir)) {
+      // A trash dir inside `dir` (an overridden vendor dir) is not content.
+      if (resolve(dir, entry) === resolve(trashDir)) continue
+      removeOrMoveAside(join(dir, entry), trashDir)
+    }
   }
   mkdirSync(dir, { recursive: true })
 }

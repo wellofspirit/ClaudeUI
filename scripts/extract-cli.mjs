@@ -53,7 +53,14 @@
  *   node scripts/extract-cli.mjs 2.1.114      # specific version
  *   node scripts/extract-cli.mjs --force      # re-download even if .cache/ has it
  *   node scripts/extract-cli.mjs --binary P   # use pre-downloaded binary P
+ *   node scripts/extract-cli.mjs --platform K # fetch platform K's binary instead of the
+ *                                             # host's (win32-x64, win32-arm64, darwin-arm64,
+ *                                             # darwin-x64, linux-x64, linux-arm64); same
+ *                                             # sha256 verification and .cache/ layout
  *   node scripts/extract-cli.mjs --quiet      # suppress info logs (errors still shown)
+ *
+ * Writes into vendor/claude-cli, or into CLAUDEUI_CLI_VENDOR_DIR (an absolute
+ * path) when set — see scripts/lib/cli-paths.mjs.
  */
 
 import { createHash } from 'node:crypto'
@@ -70,13 +77,22 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { CHUNK_DELIM_PREFIX } from './lib/chunk-format.mjs'
-import { TRASH_DIR, clearDir, sweepTrash } from './lib/vendor-swap.mjs'
+import {
+  CLI_PLATFORM_KEYS,
+  cliJsPath,
+  cliSourceBinName,
+  cliTrashDir,
+  cliVendorDir,
+  versionJsonPath
+} from './lib/cli-paths.mjs'
+import { clearDir, sweepTrash } from './lib/vendor-swap.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
-const VENDOR_DIR = join(ROOT, 'vendor', 'claude-cli')
-const OUT_CLI = join(VENDOR_DIR, 'cli.js')
-const OUT_VERSION = join(VENDOR_DIR, 'version.json')
+// Output location: vendor/claude-cli, or CLAUDEUI_CLI_VENDOR_DIR (cli-paths.mjs).
+const VENDOR_DIR = cliVendorDir()
+const OUT_CLI = cliJsPath()
+const OUT_VERSION = versionJsonPath()
 const DL_BASE = 'https://downloads.claude.ai/claude-code-releases'
 const UA = {
   'User-Agent': 'claude-ui-extract/2.0 (+https://github.com/wellofspirit/ClaudeUI)'
@@ -106,11 +122,22 @@ function parseArgs(argv) {
   } catch {
     /* fall through */
   }
-  const out = { version: defaultVersion, binaryPath: null, force: false, quiet: false }
+  const out = {
+    version: defaultVersion,
+    binaryPath: null,
+    force: false,
+    quiet: false,
+    platform: null
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--binary') out.binaryPath = argv[++i]
-    else if (a === '--force') out.force = true
+    else if (a === '--platform') {
+      out.platform = argv[++i]
+      if (!CLI_PLATFORM_KEYS.includes(out.platform)) {
+        throw new Error(`--platform must be one of ${CLI_PLATFORM_KEYS.join(', ')}`)
+      }
+    } else if (a === '--force') out.force = true
     else if (a === '--quiet') out.quiet = true
     else if (!a.startsWith('--')) out.version = a
   }
@@ -133,7 +160,8 @@ function mb(n) {
 // run the full pipeline and only cache the 200MB download.
 // ---------------------------------------------------------------------------
 
-function detectPlatform() {
+function detectPlatform(override) {
+  if (override) return { key: override, binName: cliSourceBinName(override) }
   const plat = process.platform
   const arch = process.arch
   const key =
@@ -221,7 +249,7 @@ async function resolveBinary(arg) {
   }
   let version = arg.version
   const isMovingTag = version === 'latest' || version === 'stable'
-  const { key, binName } = detectPlatform()
+  const { key, binName } = detectPlatform(arg.platform)
   const cachedBinPath = (v) =>
     join(
       ROOT,
@@ -460,8 +488,8 @@ async function main() {
   // `bun-claude` that a running session holds can't be deleted on Windows, so
   // it is moved into the trash dir (and swept by a later run) rather than
   // failing here with the dir already half-wiped.
-  sweepTrash(TRASH_DIR)
-  clearDir(VENDOR_DIR, TRASH_DIR)
+  sweepTrash(cliTrashDir())
+  clearDir(VENDOR_DIR, cliTrashDir())
   writeFileSync(OUT_CLI, concat)
   log(`wrote ${OUT_CLI}`)
 

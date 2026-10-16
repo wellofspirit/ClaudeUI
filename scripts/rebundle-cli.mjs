@@ -56,12 +56,15 @@ import { fileURLToPath } from 'node:url'
 
 import { detectFormat } from './lib/binary-format.mjs'
 import { CHUNK_DELIM_RE, isChunkConcat } from './lib/chunk-format.mjs'
-import { TRASH_DIR, replaceFile, sweepTrash } from './lib/vendor-swap.mjs'
+import { cliJsPath, cliTrashDir, cliVendorDir, versionJsonPath } from './lib/cli-paths.mjs'
+import { replaceFile, sweepTrash } from './lib/vendor-swap.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
 
-const CLI_VENDOR_DIR = join(ROOT, 'vendor', 'claude-cli')
+// vendor/claude-cli, or CLAUDEUI_CLI_VENDOR_DIR (cli-paths.mjs): the pipeline's
+// inputs and output, and the one dir whose locked binaries go to cliTrashDir().
+const CLI_VENDOR_DIR = cliVendorDir()
 
 /** True when `child` is `parent` or lives under it. */
 function isInside(parent, child) {
@@ -107,7 +110,7 @@ function parseArgs(argv) {
  * original Bun binary. Output is `bun-claude<ext>` in the vendor dir.
  */
 function resolvePipelineArgs() {
-  const versionPath = join(CLI_VENDOR_DIR, 'version.json')
+  const versionPath = versionJsonPath()
   let meta
   try {
     meta = JSON.parse(readFileSync(versionPath, 'utf8'))
@@ -121,7 +124,7 @@ function resolvePipelineArgs() {
   // absolute paths are preserved when passed via `extract-cli --binary`. `resolve()`
   // handles both: absolute input → returned as-is, relative → joined onto ROOT.
   const input = resolve(ROOT, meta.sourceBinary)
-  const newCli = join(CLI_VENDOR_DIR, 'cli.js')
+  const newCli = cliJsPath()
   const ext = process.platform === 'win32' ? '.exe' : ''
   const output = join(CLI_VENDOR_DIR, `bun-claude${ext}`)
   return { noop: false, input, newCli, output }
@@ -760,7 +763,7 @@ function main() {
   // killing a binary that was rewritten in place. chmod / codesign / xattr
   // below act on `args.output` after the rename.
   const insideVendor = isInside(CLI_VENDOR_DIR, args.output)
-  const trashDir = insideVendor ? TRASH_DIR : join(dirname(args.output), '.rebundle-trash')
+  const trashDir = insideVendor ? cliTrashDir() : join(dirname(args.output), '.rebundle-trash')
   replaceFile(args.output, out, trashDir)
   // Preserve executable bit on non-Windows (chmod on Windows is a no-op).
   if (process.platform !== 'win32') {
@@ -775,7 +778,7 @@ function main() {
   if (held > 0) {
     console.log(
       `rebundle-cli: ${held} old binaries still held by running processes in ` +
-        (insideVendor ? 'vendor/.claude-cli-trash' : trashDir)
+        (isInside(ROOT, trashDir) ? relative(ROOT, trashDir).replaceAll('\\', '/') : trashDir)
     )
   }
 

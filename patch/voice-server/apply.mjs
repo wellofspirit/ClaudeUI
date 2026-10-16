@@ -27,14 +27,11 @@
  */
 
 import { readFileSync, writeFileSync } from 'node:fs'
-import { resolve, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
+import { cliJsPath } from '../../scripts/lib/cli-paths.mjs'
 import { resolveSuccessResponseHelper } from './anchors.mjs'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const projectRoot = resolve(__dirname, '../..')
-const cliPath = resolve(projectRoot, 'vendor/claude-cli/cli.js')
+const cliPath = cliJsPath()
 
 // Regex shorthand for minified identifier (includes $ which is common in minified names)
 const V = '[\\w$]+'
