@@ -2,9 +2,10 @@
 
 **Status:** Accepted. Amended 2026-10-16 (Daniel): one workflow for every change — Opus orchestrates and
 makes every judgment call; Sonnet reads, implements and verifies; Fable is the design consultant and the
-PR's exit gate; work lands as a pull request. The step-by-step procedure and the brief templates moved to
-the owner's user-level `orchestrate` skill (shared across his projects); this ADR keeps the decision and
-what is specific to this repository. Replaces the driver pairings of 2026-09-17 (Fable → Opus, GPT-6 →
+PR's exit gate; work lands as a pull request. The step-by-step procedure lives in the owner's user-level
+`orchestrate` skill and the roles are his user-level custom agents (`orch-reader`, `orch-implementer`,
+`orch-verifier`, `orch-design-reviewer`, `orch-pr-reviewer`), shared across his projects and, through ClaudeUI,
+across Claude Code, pi and opencode; this ADR keeps the decision and what is specific to this repository. Replaces the driver pairings of 2026-09-17 (Fable → Opus, GPT-6 →
 GPT-5.6 Sol) and the 2026-10-01 Sonnet/Opus split. Kept from earlier amendments: the separate verifier
 (2026-09-16), delegated gates and the fresh reviewer for large diffs (2026-09-21).
 **Relates to:** ADR-027 (test data attributes — the structural-verification tier this workflow leans on)
@@ -70,12 +71,13 @@ after every slice; every instruction to an agent goes into it, never only into a
 - Engine work adds that engine's gated suite (`docs/testing-strategy.md`); a suite that only skipped has
   not passed.
 
-### This repository's additions to the brief constraints
+### This repository's additions to the agents' constraints
 
-Append to the skill's brief-constraint block in every reader, implementer and verifier brief:
-
-> Format with `bunx prettier --write <files you touched>` (`bun run format` is the repo-wide one).
-> `bun-claude.exe` also runs the agent sessions themselves: never kill it by image name.
+The role agents carry the generic constraints. The repository's own additions are in the "How work is done
+here" section of `CLAUDE.md`, which every agent receives: format with `bunx prettier --write <files you touched>`
+(`bun run format` is the repo-wide one), never kill `bun-claude` by process name (it also runs the agent sessions),
+and `scripts/gates.sh` is the commit gate. Keep that section free of model and harness names: every agent on every
+harness reads it.
 
 ### Rules for all work in this repository
 
@@ -136,8 +138,8 @@ Append to the skill's brief-constraint block in every reader, implementer and ve
   ADR binds the roles, the gates and the repository's own rules. `CLAUDE.md` points here.
 - Fable's cost is spent where it pays: a bad large design and a bad merge are the two most expensive
   mistakes. Small designs go straight from spec to Sonnet.
-- An agent without the owner's skills (another machine, another person) still gets the roles, gates and
-  rules from this ADR, but not the step-by-step procedure or the templates.
+- An agent without the owner's skills and agents (another machine, another person) still gets the roles,
+  gates and rules from this ADR and `CLAUDE.md`, but not the step-by-step procedure or the role agents.
 
 ## Alternatives considered
 

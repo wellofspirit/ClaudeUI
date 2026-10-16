@@ -8,15 +8,14 @@ A desktop client for coding agents, built with Electron + React 19 + TypeScript.
 
 ## How work is done here (read this first)
 
-Every non-trivial change follows the owner's **`orchestrate`** skill (the step-by-step procedure and brief templates) with this repository's roles, gates and rules from **ADR-026** (`docs/adr/adr-026_development-workflow.md`). In short:
+Every non-trivial change follows the owner's **`orchestrate`** skill, with this repository's gates and rules from **ADR-026** (`docs/adr/adr-026_development-workflow.md`). Trivial one-line edits and conversational answers are exempt.
 
-| Role                                                                                                                                                                              | Model                                                     |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| Orchestrator — makes every judgment call, writes the spec, reviews every line of each sub-agent's diff and the finished branch, runs the orchestrator test, commits, opens the PR | Opus (whichever model drives the session takes this role) |
-| Reader (evidence only) · implementer (+ developer test) · verifier (a separate agent, real app)                                                                                   | Sonnet                                                    |
-| Consultant for complicated / large-blast-radius designs · exit reviewer of the open PR                                                                                            | Fable                                                     |
+Rules for any agent working in this repository, whatever its role:
 
-Gates in order: developer test → verifier → orchestrator test + review → PR + CI → Fable exit review → the owner merges. A Fable finding the orchestrator disagrees with is argued with Fable, then put to the owner, who is the final judge. Implementers never commit, `git add`, branch, or run `bun install`/`add`/`remove`. Trivial one-line edits and conversational answers are exempt.
+- Never commit, `git add`, branch, stash, checkout, reset or switch unless you are the orchestrator; never run `bun install` / `bun add` / `bun remove`.
+- Format with `bunx prettier --write <files you touched>`; `bun run format` rewrites the whole repo.
+- `bun-claude.exe` / `bun-claude` also runs the agent sessions themselves: never kill it by process name.
+- Commit gate: `scripts/gates.sh`. Never judge a gate from output piped into `grep`/`tail`.
 
 Engine bumps (Claude Code, opencode, pi, Codex) follow the **`bump-harness`** skill (`.claude/skills/bump-harness/`).
 

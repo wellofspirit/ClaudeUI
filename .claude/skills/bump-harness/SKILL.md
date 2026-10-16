@@ -68,8 +68,8 @@ for that engine. Follow the linked procedure; the checklist is what past bumps f
 
 ## Briefs
 
-`references/kickoffs.md` says how to fill in the `orchestrate` skill's reader, implementer, verifier
-and Fable templates for a bump.
+`references/kickoffs.md` says what a bump adds to the brief for each role agent (`orch-reader`,
+`orch-implementer`, `orch-verifier`, `orch-design-reviewer`, `orch-pr-reviewer`).
 
 ## Reporting to the owner
 
