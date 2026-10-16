@@ -47,14 +47,14 @@ Issues and PRs are welcome. For anything non-trivial, open an issue first to dis
 
 ```bash
 bun run dev          # run the app
-bun run test         # unit + component + e2e (~15s)
+bun run test         # unit, unit-node, component, e2e, browser (~1 min)
 bun run test:ci      # + git-backed tests (what CI runs)
 bun run typecheck && bun run lint
 ```
 
 Two things that bite everyone once:
 
-- After any `bun install`/`add`/`remove`, run `bun run rebuild:native` — bun leaves `better-sqlite3` built for Node's ABI, which crashes the Electron app on boot.
+- `bun install` runs `postinstall`, which rebuilds node-pty for Electron and installs every engine; in an agent shell that sets `NoDefaultCurrentDirectoryInExePath`, it unsets the variable for the native rebuild (node-pty's `GetCommitHash.bat` fails otherwise).
 - UI changes should be verified against the real app, not just jsdom — `scripts/app-shot.mjs` launches the built app, asserts the live DOM by `data-testid`, and screenshots it.
 
 **Conventions.** Write tests alongside code (the suite is fast; keep it that way). Follow the two-tier `data-testid` convention for new components (ADR-027). One focused commit per change, with a descriptive message.

@@ -18,11 +18,14 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
 1. **Bump version and re-extract**
 
    ```bash
-   # Edit package.json, change claudeCliVersion
+   # Edit package.json#claudeCliVersion AND src/shared/harness-manifests/claude.json#tested
+   # (manifests.test.ts asserts they are equal); move `floor` too when the floor rule says so
    bun run ensure-cli
    ```
 
-   If any patch in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) fails with "cannot locate anchor", that patch needs updating. The `patches:` line `apply-all.mjs` prints lists the patches the new build carries; one missing from it applied nothing.
+   If any patch in `PATCH_REGISTRY` (`patch/lib/patch-registry.mjs`) fails with "cannot locate anchor", that patch needs updating. The `patches:` line `apply-all.mjs` prints lists the patches the new build carries; one missing from it applied nothing. `ensure-cli` ends with the boot probe (`scripts/boot-probe.mjs`): the patched binary must start with no login and get as far as the unreachable API. A patch that applied but crashes the bundle fails here in seconds. Grep the tests for the old version string too (`grep -rn "<old>" src --include=*.test.ts`).
+
+   **Then apply the patches to the other platforms' bundles:** `node scripts/check-patches-cross-platform.mjs` (win32-x64, darwin-arm64, linux-x64 into scratch directories; never touches `vendor/claude-cli`). cli.js differs per platform within one version, and macOS is otherwise only built after merge.
 
 2. **Check patches that failed**
 
