@@ -22,6 +22,8 @@
  *   [read]      `read` of `notes.txt`
  *   [readabs:<path>]  `read` of the ABSOLUTE path (no `]` in it) — outside-the-workspace reads
  *   [subexplore:<path>]  `subagent` call to the `explore` agent whose prompt is `[readabs:<path>]`
+ *   [subas:<agent>:<kind>]  `subagent` call to `<agent>` whose prompt is `[<kind>]` (read | edit | write);
+ *               `[subas:<agent>:readabs=<path>]` makes the child read that absolute path
  *   [edit]      `edit` of `notes.txt` (alpha → beta)
  *   [write]     `write` of `new.txt`
  *   [patch]     `patch` updating `notes.txt` (falls back to text when not offered)
@@ -302,6 +304,15 @@ export async function startFixtureProvider(
             agent: 'general',
             ...(sessionID ? { sessionID } : {})
           }
+        )
+      }
+      const subAs = /\[subas:([^:\]]+):(read|edit|write|readabs=[^\]]+)\]/.exec(text)
+      if (subAs) {
+        const kind = subAs[2].startsWith('readabs=') ? `readabs:${subAs[2].slice(8)}` : subAs[2]
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          { description: `contract ${subAs[1]}`, prompt: `child does [${kind}]`, agent: subAs[1] }
         )
       }
       if (text.includes('[subread]'))

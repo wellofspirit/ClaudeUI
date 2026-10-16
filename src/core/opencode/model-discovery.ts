@@ -21,7 +21,7 @@ import { modelListIsAuthoritative } from './opencode-server-readiness'
 import { opencodeCredentialStore } from './opencode-credentials'
 import type { Integration_Info, Model_Info, Provider_Info } from './protocol-v2/openapi'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
-import { loadEngineConfig } from '../services/ui-config'
+import { loadOpencodeModelAllowlist } from './model-allowlist'
 import {
   readOpencodeNativeConfig,
   readDeclaredProviderIds,
@@ -491,15 +491,6 @@ async function providerModelsAttempt(providerId: string): Promise<OpencodeCatalo
     })
 }
 
-/** The per-provider model allowlist from engine config (a present key restricts). */
-function loadModelAllowlist(): Record<string, string[]> {
-  try {
-    return loadEngineConfig('opencode').opencodeConfig?.modelAllowlist ?? {}
-  } catch {
-    return {}
-  }
-}
-
 /**
  * opencode's usable providers and their enabled models, filtered by the
  * per-provider allowlist and grouped. Value convention `"<providerID>/<modelID>"`.
@@ -517,7 +508,7 @@ export function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
 async function groupsAttempt(live: () => boolean): Promise<EngineModelGroup[]> {
   const { providers, models } = await fetchProbe()
   const publish = live()
-  const allowlist = loadModelAllowlist()
+  const allowlist = loadOpencodeModelAllowlist()
   const names = new Map(providers.map((p) => [p.id, p.name]))
   const byProvider = new Map<string, Model_Info[]>()
   for (const model of models) {

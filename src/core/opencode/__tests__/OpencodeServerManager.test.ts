@@ -23,6 +23,7 @@ import type {
 import { waitForPermissionGuard } from '../opencode-server-readiness'
 import type { McpHttpHost } from '../mcp-http-host'
 import type { OpencodeConfigInput } from '../opencode-server-config'
+import type { ClaudeAgentShim } from '../claude-agent-shim'
 import { logger } from '../../services/logger'
 
 // The manager `resolve`s every cwd (`/proj/a` becomes `D:\proj\a` on Windows), so
@@ -823,5 +824,77 @@ describe('ADR-097 §3 (S6) — fail closed without the plugin permission guard',
     await manager.acquire('/p')
     expect(probes).toEqual([dir('/p'), dir('/p')]) // the active result is memoized
     manager.dispose()
+  })
+})
+
+// ── Claude agent definitions injected as opencode agents (ADR-103) ──────────────
+
+describe('OpencodeServerManager (2.x) — injected Claude agents', () => {
+  function makeShimRig(shimFor: (cwd: string, mcpServers: readonly string[]) => ClaudeAgentShim): {
+    manager: OpencodeServerManager
+    calls: SpawnCall[]
+  } {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const manager = new OpencodeServerManager({
+      spawnFn,
+      locateBinaryFn: () => '/fake/opencode',
+      startMcpHostFn,
+      // No configInputFn: the default input (bridge + plugin + overlay + the shim) is under test.
+      claudeAgentsFn: shimFor,
+      waitReadyFn: async () => READY,
+      waitGuardFn: async () => ({ state: 'active', elapsedMs: 0 }),
+      endServerFn: (child) => child.kill(),
+      serverCwd: '/server-home'
+    })
+    return { manager, calls }
+  }
+
+  const agent = (system: string): ClaudeAgentShim => ({
+    agents: { reader: { description: 'd', mode: 'subagent', system } },
+    diagnostics: []
+  })
+
+  it('injects the shim result into agents.<name>, keyed by cwd', async () => {
+    const seen: Array<[string, readonly string[]]> = []
+    const { manager, calls } = makeShimRig((cwd, mcpServers) => {
+      seen.push([cwd, mcpServers])
+      return cwd === dir('/proj/a') ? agent('v1') : { agents: {}, diagnostics: [] }
+    })
+    await manager.acquire('/proj/a')
+    await manager.acquire('/proj/b')
+    expect(calls).toHaveLength(2)
+    expect(JSON.parse(calls[0].configContent).agents.reader).toEqual({
+      description: 'd',
+      mode: 'subagent',
+      system: 'v1'
+    })
+    expect(JSON.parse(calls[1].configContent).agents?.reader).toBeUndefined()
+    expect(seen.map(([cwd]) => cwd)).toContain(dir('/proj/a'))
+  })
+
+  it('an edited agent starts a new server at the next acquire; an unchanged one reuses the server', async () => {
+    let system = 'v1'
+    const { manager, calls } = makeShimRig(() => agent(system))
+    const first = await manager.acquire('/proj/a')
+    const again = await manager.acquire('/proj/a')
+    expect(calls).toHaveLength(1)
+    expect(again.baseUrl).toBe(first.baseUrl)
+    system = 'v2'
+    const fresh = await manager.acquire('/proj/a')
+    expect(calls).toHaveLength(2)
+    expect(fresh.baseUrl).not.toBe(first.baseUrl)
+    expect(JSON.parse(calls[1].configContent).agents.reader.system).toBe('v2')
+    // The old server keeps serving its holder until its last release.
+    expect(calls[0].child.killed).toBe(false)
+  })
+
+  it('a shim that throws injects nothing and never blocks the spawn', async () => {
+    const { manager, calls } = makeShimRig(() => {
+      throw new Error('boom')
+    })
+    await manager.acquire('/proj/a')
+    expect(calls).toHaveLength(1)
+    expect(JSON.parse(calls[0].configContent).agents?.reader).toBeUndefined()
   })
 })

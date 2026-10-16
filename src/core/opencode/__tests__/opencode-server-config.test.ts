@@ -156,3 +156,87 @@ describe('configIdentity', () => {
     expect(id).not.toContain('secret')
   })
 })
+
+describe('injected Claude agents (ADR-103)', () => {
+  const READER: NonNullable<OpencodeConfigInput['claudeAgents']>[string] = {
+    description: 'Collects evidence.',
+    mode: 'subagent',
+    system: 'preamble\n\nbody',
+    model: 'openai/gpt-6-luna',
+    permissions: [{ action: 'edit', resource: '*', effect: 'deny' }]
+  }
+
+  it('emits each as a whole subagent entry under agents.<name>', () => {
+    const out = buildOpencodeConfig({ claudeAgents: { 'orch-reader': READER } }, HOSTED)
+    expect(out.agents).toEqual({ 'orch-reader': READER })
+    expect(out.agents?.['orch-reader'].mode).toBe('subagent')
+  })
+
+  it('the overlay of the same name comes AFTER the agent own rules; overlay-only names stay', () => {
+    const out = buildOpencodeConfig(
+      {
+        claudeAgents: { reader: READER, plain: { description: 'd', mode: 'subagent' } },
+        agentPermissions: {
+          reader: [{ action: 'shell', resource: '*', effect: 'ask' }],
+          plain: [{ action: 'subagent', resource: 'general', effect: 'deny' }],
+          plan: [{ action: 'subagent', resource: 'general', effect: 'deny' }]
+        }
+      },
+      HOSTED
+    )
+    expect(out.agents?.reader.permissions).toEqual([
+      { action: 'edit', resource: '*', effect: 'deny' },
+      { action: 'shell', resource: '*', effect: 'ask' }
+    ])
+    // The overlay is the only rule source of an agent without its own.
+    expect(out.agents?.plain).toEqual({
+      description: 'd',
+      mode: 'subagent',
+      permissions: [{ action: 'subagent', resource: 'general', effect: 'deny' }]
+    })
+    expect(out.agents?.plan).toEqual({
+      permissions: [{ action: 'subagent', resource: 'general', effect: 'deny' }]
+    })
+  })
+
+  it('no injected agents and no overlay: no agents key; an injected agent alone creates it', () => {
+    expect(buildOpencodeConfig({ claudeAgents: {} }, HOSTED)).not.toHaveProperty('agents')
+    expect(
+      buildOpencodeConfig({ claudeAgents: { a: { description: 'd', mode: 'subagent' } } }, HOSTED)
+    ).toHaveProperty('agents.a')
+  })
+
+  it('configIdentity changes when an agent file changes, and not otherwise', () => {
+    const base = configIdentity({ pluginDir: '/p', claudeAgents: { reader: READER } })
+    // Equal content, any key order: the same server.
+    expect(
+      configIdentity({
+        claudeAgents: {
+          reader: {
+            permissions: READER.permissions,
+            model: READER.model,
+            system: READER.system,
+            mode: 'subagent',
+            description: READER.description
+          }
+        },
+        pluginDir: '/p'
+      })
+    ).toBe(base)
+    // Absent and empty are the same.
+    expect(configIdentity({ claudeAgents: {} })).toBe(configIdentity({}))
+    // Any edit starts a new server.
+    for (const edit of [
+      { system: 'preamble\n\nbody edited' },
+      { description: 'Other.' },
+      { model: 'openai/gpt-6-sol' },
+      { permissions: [] }
+    ]) {
+      expect(
+        configIdentity({ pluginDir: '/p', claudeAgents: { reader: { ...READER, ...edit } } })
+      ).not.toBe(base)
+    }
+    expect(configIdentity({ pluginDir: '/p', claudeAgents: { renamed: READER } })).not.toBe(base)
+    expect(configIdentity({ pluginDir: '/p' })).not.toBe(base)
+  })
+})

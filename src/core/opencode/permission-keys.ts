@@ -32,8 +32,20 @@
  * own migration map, `core/src/v1/config/migrate.ts` `normalizeAction`).
  */
 
-export type V2Action =
-  'shell' | 'read' | 'edit' | 'glob' | 'grep' | 'webfetch' | 'websearch' | 'subagent' | 'skill'
+/** The 2.x tool permission actions Claude tool names compile to, in the order rules are listed. */
+export const V2_TOOL_ACTIONS = [
+  'shell',
+  'read',
+  'edit',
+  'glob',
+  'grep',
+  'webfetch',
+  'websearch',
+  'subagent',
+  'skill'
+] as const
+
+export type V2Action = (typeof V2_TOOL_ACTIONS)[number]
 
 /** Claude tool name → the 2.x permission action its rules compile to. */
 export const CLAUDE_TOOL_TO_V2_ACTION: Readonly<Record<string, V2Action>> = {

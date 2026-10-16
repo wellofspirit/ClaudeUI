@@ -40,6 +40,9 @@ import {
   type ReadinessDeps
 } from './opencode-server-readiness'
 import { agentPermissionOverlay } from './permission-v2'
+import { loadClaudeAgentsForOpencode, type ClaudeAgentShim } from './claude-agent-shim'
+import { loadOpencodeModelAllowlist } from './model-allowlist'
+import { listAgents } from './opencode-agents'
 import { harnessAvailable, harnessUnavailableMessage, resolveHarness } from '../harness/resolve'
 import { toLaunch, type HarnessLaunch } from '../harness/launch'
 import { logger } from '../services/logger'
@@ -335,6 +338,13 @@ export interface OpencodeServerManagerOptions {
    * the located plugin and the agent-permission provider.
    */
   configInputFn?: (cwd: string) => OpencodeConfigInput
+  /**
+   * The Claude Code agent definitions injected for a cwd (ADR-103); `mcpServers`
+   * are the bridged server names. Defaults to `loadClaudeAgentsForOpencode`
+   * against the opencode agents on disk and ClaudeUI's model allowlist. Only
+   * the default `configInputFn` calls it.
+   */
+  claudeAgentsFn?: (cwd: string, mcpServers: readonly string[]) => ClaudeAgentShim
   /** Override the hosted-tools readiness wait (tests use a fake). */
   waitReadyFn?: WaitReadyFn
   /** Override the plugin permission-guard probe (tests use a fake). */
@@ -423,12 +433,24 @@ export class OpencodeServerManager {
     cwd: string,
     mcpServers: readonly string[]
   ) => AgentPermissionOverlay = () => agentPermissionOverlay()
+  private readonly claudeAgentsFn: (cwd: string, mcpServers: readonly string[]) => ClaudeAgentShim
+  /** The last shim diagnostics logged per cwd (a config input is built at every acquire). */
+  private readonly shimDiagnosticsLogged = new Map<string, string>()
 
   constructor(opts: OpencodeServerManagerOptions = {}) {
     this.spawnFn = opts.spawnFn ?? ((launch, options) => spawnStdioServer(launch, options))
     this.locateBinaryFn = opts.locateBinaryFn ?? locateLaunch
     this.startMcpHostFn = opts.startMcpHostFn ?? startMcpHttpHost
     this.configInputFn = opts.configInputFn ?? ((cwd) => this.defaultConfigInput(cwd))
+    this.claudeAgentsFn =
+      opts.claudeAgentsFn ??
+      ((cwd, mcpServers) =>
+        loadClaudeAgentsForOpencode({
+          cwd,
+          mcpServers,
+          nativeAgentNames: listAgents(cwd).map((a) => a.name),
+          modelAllowlist: loadOpencodeModelAllowlist()
+        }))
     this.waitReadyFn = opts.waitReadyFn ?? defaultWaitReady
     this.waitGuardFn = opts.waitGuardFn ?? defaultWaitGuard
     this.endServerFn = opts.endServerFn ?? ((child) => void endStdioServer(child))
@@ -459,11 +481,35 @@ export class OpencodeServerManager {
 
   private defaultConfigInput(cwd: string): OpencodeConfigInput {
     const bridgedMcp = collectClaudeMcpForOpencode(cwd)
+    const mcpServers = Object.keys(bridgedMcp)
     return {
       bridgedMcp,
       pluginDir: locatePluginDir(),
-      agentPermissions: this.agentPermissionsFn(cwd, Object.keys(bridgedMcp))
+      agentPermissions: this.agentPermissionsFn(cwd, mcpServers),
+      claudeAgents: this.claudeAgents(cwd, mcpServers)
     }
+  }
+
+  /** The injected Claude agents for a cwd; a failure injects none (the shim never blocks a spawn). */
+  private claudeAgents(cwd: string, mcpServers: readonly string[]): ClaudeAgentShim['agents'] {
+    let shim: ClaudeAgentShim
+    try {
+      shim = this.claudeAgentsFn(cwd, mcpServers)
+    } catch (err) {
+      logger.debug('OpencodeServerManager', `Claude agent shim failed: ${(err as Error).message}`)
+      return {}
+    }
+    const note = shim.diagnostics.join('; ')
+    if (this.shimDiagnosticsLogged.get(cwd) !== note) {
+      this.shimDiagnosticsLogged.set(cwd, note)
+      if (note) {
+        logger.debug(
+          'OpencodeServerManager',
+          `Claude agent shim for ${cwd}: ${Object.keys(shim.agents).length} injected, ${shim.diagnostics.length} note(s): ${note}`
+        )
+      }
+    }
+    return shim.agents
   }
 
   /** Resolved per spawn, never memoised here (the resolver caches and invalidates). */
