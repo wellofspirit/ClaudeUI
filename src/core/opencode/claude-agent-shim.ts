@@ -23,9 +23,11 @@
  *    inherits the parent's.
  *  - `permissions` are DENY-ONLY (never an allow, so an agent cannot open
  *    anything the user's rules or the parent's ruleset keep closed): a `tools`
- *    list denies every tool action (and `question`) it does not name, plus
- *    every live MCP server (the bridged ones and ClaudeUI's hosted `claudeui`)
- *    it does not name at server level; `disallowedTools` adds its own denies.
+ *    list denies every tool action (and `question`, unless it names
+ *    `AskUserQuestion`) it does not name, plus every live MCP server (the
+ *    bridged ones, those the user configured natively in opencode's own config,
+ *    and ClaudeUI's hosted `claudeui`) it does not name at server level;
+ *    `disallowedTools` adds its own denies (`AskUserQuestion` denies `question`).
  *    A server denied wholesale also loses its MCP resources: opencode's
  *    `list_mcp_resources` / `read_mcp_resource` have their own actions and
  *    check the server's configured name, so the shim adds
@@ -35,8 +37,9 @@
  *    agent wholly denies (`subagent-permissions.ts` `childSessionRuleset`).
  *    No `tools` key → no entry (the agent inherits the defaults).
  *
- * A definition whose name an opencode agent already has (on disk, or a
- * built-in) is skipped — harness-native wins — and so is one whose JSON is
+ * A definition whose name an opencode agent already has (a built-in, an agent
+ * file or a JSON `agents` entry, `opencode-config-sources.ts`) is skipped —
+ * harness-native wins: injecting over it would REWRITE the user's agent — and so is one whose JSON is
  * over {@link MAX_INJECTED_AGENT_BYTES}; the whole block is capped at
  * {@link MAX_INJECTED_BLOCK_BYTES} (Windows caps one environment variable at
  * 32,767 characters and this travels in one). Between the user's and the
@@ -87,6 +90,9 @@ const LOWER_TOOL_TO_V2_ACTION: Readonly<Record<string, V2Action>> = Object.fromE
   Object.entries(CLAUDE_TOOL_TO_V2_ACTION).map(([name, action]) => [name.toLowerCase(), action])
 )
 
+/** Claude's tool for asking the user; opencode spells it with its `question` action (not in the tool map). */
+const ASK_USER_QUESTION = 'askuserquestion'
+
 /** An MCP tool-id segment as opencode spells it (`permission-keys.ts`: `[^a-zA-Z0-9_-]` → `_`). */
 function sanitizeMcp(s: string): string {
   return s.replace(/[^a-zA-Z0-9_-]/g, '_')
@@ -106,6 +112,12 @@ interface ClaudeAgentDef {
   model?: string
   /** The `color` frontmatter key (trimmed, non-empty); for the agent type catalog only. */
   color?: string
+  /**
+   * The earlier definitions of this name a PROJECT definition shadowed, user's first
+   * (owner ruling C2): their limits still apply and the user's model is kept. Empty
+   * for any other definition.
+   */
+  narrows?: ClaudeAgentDef[]
 }
 
 function parseClaudeAgent(
@@ -182,6 +194,7 @@ export function claudeAgentDenyRules(
     void deny.set(`${action}\u0000${resource}`, { action, resource, effect: 'deny' })
   /** A whole MCP server: its tools (`<id>_*`, the sanitized tool-id segment) and its resources (the raw configured name). */
   const denyServer = (raw: string): void => {
+    // The wildcard also matches a server whose name merely starts with `<id>_` (an over-deny, accepted).
     denyRule(`${sanitizeMcp(raw)}_*`)
     denyRule('opencode_list_mcp_resources', raw)
     denyRule('opencode_read_mcp_resource', `${raw}:*`)
@@ -205,6 +218,7 @@ export function claudeAgentDenyRules(
 
   if (def.tools !== 'inherit') {
     const named = new Set<V2Action>()
+    let keepQuestion = false
     const namedServers = new Set<string>()
     for (const entry of def.tools) {
       if (entry.startsWith('mcp__')) {
@@ -218,12 +232,16 @@ export function claudeAgentDenyRules(
         }
         continue
       }
+      if (entry.toLowerCase() === ASK_USER_QUESTION) {
+        keepQuestion = true
+        continue
+      }
       const action = LOWER_TOOL_TO_V2_ACTION[entry.toLowerCase()]
       if (action) named.add(action)
       else warn(`tools: "${entry}" is not a tool opencode has; ignored`)
     }
     for (const action of V2_TOOL_ACTIONS) if (!named.has(action)) denyRule(action)
-    denyRule('question')
+    if (!keepQuestion) denyRule('question')
     // ClaudeUI's own hosted server is always injected (`buildOpencodeConfig`), so it is
     // one more live server: a tools list that does not name it gets no `claudeui_*`.
     for (const server of liveServers) {
@@ -241,17 +259,28 @@ export function claudeAgentDenyRules(
       } else denyRule(`${server}_${tool}`)
       continue
     }
+    if (entry.toLowerCase() === ASK_USER_QUESTION) {
+      denyRule('question')
+      continue
+    }
     const action = LOWER_TOOL_TO_V2_ACTION[entry.toLowerCase()]
     if (action) denyRule(action)
     else warn(`disallowedTools: "${entry}" is not a tool opencode has; ignored`)
   }
 
+  return orderedDenyRules(deny.values())
+}
+
+/** Deny rules deduplicated and in the fixed order (tool actions, `question`, then action and resource). */
+function orderedDenyRules(rules: Iterable<Permission_Rule>): Permission_Rule[] {
   const order = (a: string): number => {
     const i = (V2_TOOL_ACTIONS as readonly string[]).indexOf(a)
     return i >= 0 ? i : a === 'question' ? V2_TOOL_ACTIONS.length : V2_TOOL_ACTIONS.length + 1
   }
   const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
-  return [...deny.values()].sort(
+  const unique = new Map<string, Permission_Rule>()
+  for (const rule of rules) unique.set(`${rule.action}\u0000${rule.resource}`, rule)
+  return [...unique.values()].sort(
     (a, b) =>
       order(a.action) - order(b.action) || cmp(a.action, b.action) || cmp(a.resource, b.resource)
   )
@@ -274,9 +303,12 @@ export interface ClaudeAgentShim {
 
 export interface ClaudeAgentShimOptions {
   cwd: string
-  /** Live MCP servers (the manager's bridged servers): a `tools` list denies those it does not name. */
+  /**
+   * Live MCP servers (the manager's bridged servers plus the ones opencode's own config
+   * declares, `opencodeMcpServerNames`): a `tools` list denies those it does not name.
+   */
   mcpServers: readonly string[]
-  /** Names opencode already has for this cwd (on disk and built-in); case-insensitive, native wins. */
+  /** Names opencode already has for this cwd (`opencodeNativeAgentNames`); case-insensitive, native wins. */
   nativeAgentNames: Iterable<string>
   /** ClaudeUI's per-provider opencode model allowlist. */
   modelAllowlist: Readonly<Record<string, readonly string[]>>
@@ -315,9 +347,19 @@ export function loadClaudeAgentsForOpencode(opts: ClaudeAgentShimOptions): Claud
       const key = def.name.toLowerCase()
       const replaced = byName.get(key)
       if (replaced) {
+        // A project definition that shadows a user one may only NARROW it (owner ruling C2):
+        // the prompt and description are the project file's, the user's limits and model stay.
+        const chain = [...(replaced.narrows ?? []), replaced]
+        const narrows = def.scope === 'project' && chain.some((d) => d.scope === 'user')
         diagnostics.push(
-          `${def.scope} agent ${def.filePath} overrides the ${replaced.scope} agent "${replaced.name}" (${replaced.filePath})`
+          `${def.scope} agent ${def.filePath} overrides the ${replaced.scope} agent "${replaced.name}" (${replaced.filePath})` +
+            (narrows ? " and narrows it (that agent's tool limits and model stay)" : '')
         )
+        if (narrows) {
+          const user = chain.find((d) => d.scope === 'user')
+          byName.set(key, { ...def, narrows: chain, ...(user?.model ? { model: user.model } : {}) })
+          continue
+        }
       }
       byName.set(key, def)
     }
@@ -341,7 +383,12 @@ export function loadClaudeAgentsForOpencode(opts: ClaudeAgentShimOptions): Claud
       )
       continue
     }
-    const rules = claudeAgentDenyRules(def, opts.mcpServers, diagnostics)
+    // Its own limits plus those of every definition it narrows (a deny-only union).
+    const rules = orderedDenyRules(
+      [def, ...(def.narrows ?? [])].flatMap((d) =>
+        claudeAgentDenyRules(d, opts.mcpServers, diagnostics)
+      )
+    )
     const agent: Config_AgentEncoded = {
       description: def.description,
       mode: 'subagent',

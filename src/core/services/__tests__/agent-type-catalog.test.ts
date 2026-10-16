@@ -29,9 +29,10 @@ beforeEach(() => {
   project = path.join(root, 'project')
   fs.mkdirSync(home, { recursive: true })
   fs.mkdirSync(project, { recursive: true })
-  for (const key of ['HOME', 'USERPROFILE', 'OPENCODE_CONFIG_DIR']) {
+  for (const key of ['HOME', 'USERPROFILE', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG']) {
     saved[key] = process.env[key]
   }
+  delete process.env.OPENCODE_CONFIG // opencode would read this file too: never the real one
   process.env.HOME = home
   process.env.USERPROFILE = home
   process.env.OPENCODE_CONFIG_DIR = path.join(home, 'opencode')
@@ -250,6 +251,17 @@ describe('opencode', () => {
       write(path.join(home, 'opencode', 'agents', 'driver.md'), '---\nmode: primary\n---\nBody\n')
       write(path.join(home, '.claude', 'agents', 'driver.md'), claudeAgent('driver'))
       expect(listAgentTypes('opencode', project).some((t) => t.type === 'driver')).toBe(false)
+    })
+
+    it('omits a name opencode holds only as a mode/ file or a JSON agents entry: the shim skips it too', () => {
+      write(path.join(home, 'opencode', 'mode', 'planner.md'), 'Plan things.')
+      write(path.join(home, 'opencode', 'opencode.json'), '{ "agents": { "jsononly": {} } }')
+      for (const name of ['planner', 'jsononly']) {
+        write(path.join(home, '.claude', 'agents', `${name}.md`), claudeAgent(name))
+      }
+      const types = listAgentTypes('opencode', project)
+      expect(types.some((t) => t.type === 'planner')).toBe(false)
+      expect(types.some((t) => t.type === 'jsononly')).toBe(false)
     })
   })
 })

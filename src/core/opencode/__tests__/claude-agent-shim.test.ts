@@ -178,6 +178,30 @@ describe('claudeAgentDenyRules', () => {
     expect(rules(['Read', 'Edit'], ['Edit']).filter((r) => r.action === 'edit')).toHaveLength(1)
   })
 
+  it('AskUserQuestion in a tools list keeps question; in disallowedTools it denies question', () => {
+    const diagnostics: string[] = []
+    for (const name of ['AskUserQuestion', 'askuserquestion']) {
+      const out = rules(['Read', name], [], [], diagnostics)
+      expect(out).not.toContainEqual(deny('question'))
+      // The other tool actions are still denied as for any list.
+      expect(out).toContainEqual(deny('edit'))
+    }
+    expect(diagnostics).toEqual([]) // not "a tool opencode has"-style noise
+    expect(rules('inherit', ['AskUserQuestion'])).toEqual([deny('question')])
+    // Denying wins over a tools list that keeps it, with the one rule.
+    const both = rules(['Read', 'AskUserQuestion'], ['askuserquestion'])
+    expect(both.filter((r) => r.action === 'question')).toEqual([deny('question')])
+  })
+
+  it('a tools list denies natively configured servers handed in with the bridged ones', () => {
+    // The manager passes bridged ∪ opencodeMcpServerNames(cwd): all are live servers.
+    const out = rules(['Read'], [], ['bridged', 'github', 'github'])
+    for (const server of ['bridged', 'github']) {
+      for (const rule of denyServer(server)) expect(out).toContainEqual(rule)
+    }
+    expect(out.filter((r) => r.action === 'github_*')).toHaveLength(1)
+  })
+
   it('MCP: a live server the list does not name at server level is denied as <server>_*', () => {
     const servers = ['github', 'my.docs', 'lsphub']
     const out = rules(['Read', 'mcp__github', 'mcp__lsphub__*'], [], servers)
@@ -435,7 +459,95 @@ describe('loadClaudeAgentsForOpencode', () => {
       const out = r.load()
       expect(out.agents.A.description).toBe('project one')
       expect(Object.keys(out.agents)).toEqual(['A'])
-      expect(out.diagnostics).toEqual([`project agent ${p} overrides the user agent "a" (${u})`])
+      expect(out.diagnostics).toEqual([
+        `project agent ${p} overrides the user agent "a" (${u}) and narrows it (that agent's tool limits and model stay)`
+      ])
+    })
+
+    describe('a project definition only narrows the user one it shadows (owner ruling C2)', () => {
+      const userReader = agentMd(
+        `name: orch-reader\ndescription: user one\ntools: ${ORCH_READER_TOOLS}\nharness:\n  opencode:\n    model: openai/gpt-6-luna#high`,
+        'User prompt.'
+      )
+
+      it('with no tools key it still gets the user denies and the user model; prompt and description are the project file', () => {
+        const r = rig()
+        const user = r.userFile('orch-reader', userReader)
+        const alone = r.load().agents['orch-reader']
+        expect(alone.permissions?.length).toBeGreaterThan(0)
+        r.projectFile(
+          'orch-reader',
+          agentMd(
+            'name: orch-reader\ndescription: project one\nharness:\n  opencode:\n    model: openai/should-be-ignored',
+            'Project prompt.'
+          )
+        )
+        const out = r.load()
+        const merged = out.agents['orch-reader']
+        expect(merged.description).toBe('project one')
+        expect(merged.system).toContain('Project prompt.')
+        expect(merged.system).not.toContain('User prompt.')
+        expect(merged.permissions).toEqual(alone.permissions)
+        expect(merged.model).toBe('openai/gpt-6-luna#high')
+        expect(out.injected).toEqual([{ name: 'orch-reader', scope: 'project' }])
+        expect(out.diagnostics.some((d) => d.includes('narrows it') && d.includes(user))).toBe(true)
+      })
+
+      it("the user's model is still allowlist-checked: refused, the narrowed agent is skipped too", () => {
+        const r = rig()
+        r.userFile('orch-reader', userReader)
+        r.projectFile('orch-reader', agentMd('name: orch-reader\ndescription: project one'))
+        const out = r.load({ modelAllowlist: { openai: ['gpt-5'] } })
+        expect(out.agents).toEqual({})
+        expect(out.diagnostics.join('\n')).toContain('not in the opencode model allowlist')
+      })
+
+      it("a project disallowedTools adds its denies to the user's", () => {
+        const r = rig()
+        r.userFile('orch-reader', userReader)
+        const alone = r.load().agents['orch-reader'].permissions ?? []
+        r.projectFile(
+          'orch-reader',
+          agentMd('name: orch-reader\ndescription: project one\ndisallowedTools: Bash, mcp__github')
+        )
+        const merged = r.load().agents['orch-reader'].permissions ?? []
+        for (const rule of alone) expect(merged).toContainEqual(rule)
+        expect(merged).toContainEqual(deny('shell'))
+        expect(merged).toContainEqual(deny('github_*'))
+        // Deduplicated, and in the fixed order: tool actions first.
+        expect(new Set(merged.map((x) => `${x.action}|${x.resource}`)).size).toBe(merged.length)
+        expect(merged.findIndex((x) => x.action === 'shell')).toBeLessThan(
+          merged.findIndex((x) => x.action === 'question')
+        )
+      })
+
+      it('a project tools list cannot widen: what it names but the user list lacks is still denied, and vice versa', () => {
+        const r = rig()
+        r.userFile('orch-reader', userReader) // Read, Grep, Glob, Bash, WebFetch, WebSearch
+        r.projectFile(
+          'orch-reader',
+          agentMd('name: orch-reader\ndescription: p\ntools: Read, Edit')
+        )
+        const merged = r.load().agents['orch-reader'].permissions ?? []
+        // Edit is the project's, but the user list never had it; Grep and Bash are the user's, absent from the project's.
+        for (const action of ['edit', 'grep', 'glob', 'shell', 'subagent', 'skill', 'question'])
+          expect(merged).toContainEqual(deny(action))
+        expect(merged).not.toContainEqual(deny('read'))
+      })
+
+      it('a project definition with no user definition under it is plain precedence', () => {
+        const r = rig()
+        const near = mkdir(path.join(r.root, 'pkg'))
+        write(
+          path.join(r.root, '.claude', 'agents', 'a.md'),
+          agentMd('name: a\ndescription: root\ntools: Read')
+        )
+        write(path.join(near, '.claude', 'agents', 'a.md'), agentMd('name: a\ndescription: near'))
+        const out = r.load({ cwd: near })
+        expect(out.agents.a.description).toBe('near')
+        expect(out.agents.a.permissions).toBeUndefined()
+        expect(out.diagnostics.join('\n')).not.toContain('narrows')
+      })
     })
 
     it('the nearer project directory wins', () => {

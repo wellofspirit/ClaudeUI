@@ -31,6 +31,7 @@ import type { AgentTypeInfo, EngineId } from '../../shared/types'
 import { loadClaudeAgentsForOpencode } from '../opencode/claude-agent-shim'
 import { loadOpencodeModelAllowlist } from '../opencode/model-allowlist'
 import { listAgents } from '../opencode/opencode-agents'
+import { opencodeNativeAgentNames } from '../opencode/opencode-config-sources'
 import { loadPiAgentRegistry } from '../pi/pi-agent-registry'
 import { parseFrontmatter } from './skill-scanner'
 
@@ -140,7 +141,7 @@ function opencodeTypes(cwd?: string): AgentTypeInfo[] {
     const shim = loadClaudeAgentsForOpencode({
       cwd: cwd ?? os.homedir(),
       mcpServers: [],
-      nativeAgentNames: all.map((agent) => agent.name),
+      nativeAgentNames: opencodeNativeAgentNames(cwd ?? os.homedir()),
       modelAllowlist: loadOpencodeModelAllowlist()
     })
     return [

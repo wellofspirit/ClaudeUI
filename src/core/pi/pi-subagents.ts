@@ -58,6 +58,7 @@ import type {
   PiToolCallPayload
 } from './PiBridgeHost'
 import {
+  permissionModeRank,
   renderAgentListing,
   type PiAgentDefinition,
   type PiAgentRegistry
@@ -175,22 +176,9 @@ export const CANNOT_SPAWN_REASON = 'This agent cannot launch agents'
  */
 export function narrowMode(parentMode: string, definitionMode?: string): string {
   if (definitionMode === undefined) return parentMode
-  const rank = (m: string): number => {
-    switch (m) {
-      case 'plan':
-        return 0
-      case 'acceptEdits':
-        return 2
-      case 'auto':
-      case 'full':
-        return 3
-      case 'bypassPermissions':
-        return 4
-      default:
-        return 1
-    }
-  }
-  return rank(definitionMode) < rank(parentMode) ? definitionMode : parentMode
+  return permissionModeRank(definitionMode) < permissionModeRank(parentMode)
+    ? definitionMode
+    : parentMode
 }
 
 /**

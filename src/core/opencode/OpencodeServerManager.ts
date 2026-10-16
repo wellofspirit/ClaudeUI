@@ -42,7 +42,7 @@ import {
 import { agentPermissionOverlay } from './permission-v2'
 import { loadClaudeAgentsForOpencode, type ClaudeAgentShim } from './claude-agent-shim'
 import { loadOpencodeModelAllowlist } from './model-allowlist'
-import { listAgents } from './opencode-agents'
+import { opencodeMcpServerNames, opencodeNativeAgentNames } from './opencode-config-sources'
 import { harnessAvailable, harnessUnavailableMessage, resolveHarness } from '../harness/resolve'
 import { toLaunch, type HarnessLaunch } from '../harness/launch'
 import { logger } from '../services/logger'
@@ -436,6 +436,8 @@ export class OpencodeServerManager {
   private readonly claudeAgentsFn: (cwd: string, mcpServers: readonly string[]) => ClaudeAgentShim
   /** The last shim diagnostics logged per cwd (a config input is built at every acquire). */
   private readonly shimDiagnosticsLogged = new Map<string, string>()
+  /** Cwds remembered in {@link shimDiagnosticsLogged} at most; past it the map starts over (a repeat is one extra line). */
+  private static readonly MAX_SHIM_DIAGNOSTICS_CWDS = 256
 
   constructor(opts: OpencodeServerManagerOptions = {}) {
     this.spawnFn = opts.spawnFn ?? ((launch, options) => spawnStdioServer(launch, options))
@@ -448,7 +450,7 @@ export class OpencodeServerManager {
         loadClaudeAgentsForOpencode({
           cwd,
           mcpServers,
-          nativeAgentNames: listAgents(cwd).map((a) => a.name),
+          nativeAgentNames: opencodeNativeAgentNames(cwd),
           modelAllowlist: loadOpencodeModelAllowlist()
         }))
     this.waitReadyFn = opts.waitReadyFn ?? defaultWaitReady
@@ -486,7 +488,11 @@ export class OpencodeServerManager {
       bridgedMcp,
       pluginDir: locatePluginDir(),
       agentPermissions: this.agentPermissionsFn(cwd, mcpServers),
-      claudeAgents: this.claudeAgents(cwd, mcpServers)
+      // Only the shim sees the servers the user configured natively (opencode.json), so a
+      // `tools` list denies those too; the agent permission provider keeps the bridged list.
+      claudeAgents: this.claudeAgents(cwd, [
+        ...new Set([...mcpServers, ...opencodeMcpServerNames(cwd)])
+      ])
     }
   }
 
@@ -501,11 +507,23 @@ export class OpencodeServerManager {
     }
     const note = shim.diagnostics.join('; ')
     if (this.shimDiagnosticsLogged.get(cwd) !== note) {
+      if (this.shimDiagnosticsLogged.size >= OpencodeServerManager.MAX_SHIM_DIAGNOSTICS_CWDS) {
+        this.shimDiagnosticsLogged.clear()
+      }
       this.shimDiagnosticsLogged.set(cwd, note)
-      if (note) {
+      // A skipped agent is one the owner wrote that is not running: info. The rest is detail: debug.
+      const skipped = shim.diagnostics.filter((d) => d.includes('skipped'))
+      const rest = shim.diagnostics.filter((d) => !d.includes('skipped'))
+      if (skipped.length > 0) {
+        logger.info(
+          'OpencodeServerManager',
+          `Claude agent shim for ${cwd}: ${Object.keys(shim.agents).length} injected, ${skipped.length} skipped: ${skipped.join('; ')}`
+        )
+      }
+      if (rest.length > 0) {
         logger.debug(
           'OpencodeServerManager',
-          `Claude agent shim for ${cwd}: ${Object.keys(shim.agents).length} injected, ${shim.diagnostics.length} note(s): ${note}`
+          `Claude agent shim for ${cwd}: ${Object.keys(shim.agents).length} injected, ${rest.length} note(s): ${rest.join('; ')}`
         )
       }
     }

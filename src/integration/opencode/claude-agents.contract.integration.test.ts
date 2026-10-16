@@ -16,7 +16,11 @@
  *      write or patch — and an agent that names Edit still edits;
  *  (d) such a child can still read a path outside the workspace that the
  *      parent allows, even after the host's child ruleset is applied
- *      (`childSessionRuleset`): no deny-all, so `external_directory` stays.
+ *      (`childSessionRuleset`): no deny-all, so `external_directory` stays;
+ *  (e) through the production spawn, an MCP server the user configured natively
+ *      in opencode.json is denied to a tools-list agent, and a Claude agent that
+ *      shares a name with a JSON-only native agent is not injected, so the native
+ *      agent is not rewritten.
  */
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -28,6 +32,7 @@ import {
   CLAUDE_AGENT_PREAMBLE,
   loadClaudeAgentsForOpencode
 } from '../../core/opencode/claude-agent-shim'
+import { opencodeNativeAgentNames } from '../../core/opencode/opencode-config-sources'
 import { buildOpencodeConfig } from '../../core/opencode/opencode-server-config'
 import { childSessionRuleset } from '../../core/opencode/subagent-permissions'
 import type { Config_InfoEncoded } from '../../core/opencode/protocol-v2/openapi'
@@ -295,6 +300,7 @@ describeV2('opencode 2.x contract: a near-cap injected block through the product
   let proxy: RefusingProxy
   let fixture: FixtureProvider
   let manager: OpencodeServerManager
+  const savedEnv: Record<string, string | undefined> = {}
   const ends: Promise<{ forced: boolean }>[] = []
   const spawned: { configChars: number; agentsBytes: number }[] = []
 
@@ -304,7 +310,25 @@ describeV2('opencode 2.x contract: a near-cap injected block through the product
     fixture = await startFixtureProvider()
     const configDir = join(home.env.XDG_CONFIG_HOME, 'opencode')
     mkdirSync(configDir, { recursive: true })
-    writeFileSync(join(configDir, 'opencode.json'), JSON.stringify(fixtureConfig(fixture)))
+    // A natively configured MCP server (disabled: never started) and a JSON-only native agent.
+    writeFileSync(
+      join(configDir, 'opencode.json'),
+      JSON.stringify({
+        ...fixtureConfig(fixture),
+        mcp: {
+          servers: { ghost: { type: 'local', command: ['ghost-mcp-never-run'], disabled: true } }
+        },
+        agents: { 'native-one': { description: 'the user own agent', system: 'native prompt' } }
+      })
+    )
+    // The in-process helper finds the global config where the spawned server does.
+    // The manager's own reads (the Claude MCP bridge, ~/.claude.json) follow the home too.
+    for (const key of ['OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG', 'HOME', 'USERPROFILE'])
+      savedEnv[key] = process.env[key]
+    delete process.env.OPENCODE_CONFIG
+    process.env.OPENCODE_CONFIG_DIR = configDir
+    process.env.HOME = home.env.HOME
+    process.env.USERPROFILE = home.env.HOME
     // Three ~7 KiB definitions: the injected block is over 20 KiB, under the 24 KiB cap.
     const userDir = join(home.root, 'claude-home', 'agents')
     mkdirSync(userDir, { recursive: true })
@@ -320,6 +344,16 @@ ${name.repeat(1300)}
 `
       )
     }
+    writeFileSync(
+      join(userDir, 'native-one.md'),
+      `---
+name: native-one
+description: Clashes with a native agent.
+tools: Read
+---
+Shim body.
+`
+    )
     const env = isolatedEnv(home, proxy)
     const launch: HarnessLaunch = SANDBOX_AVAILABLE
       ? { command: '/usr/bin/sandbox-exec', args: ['-f', sandboxProfile(home), V2_BIN] }
@@ -341,7 +375,7 @@ ${name.repeat(1300)}
         loadClaudeAgentsForOpencode({
           cwd,
           mcpServers,
-          nativeAgentNames: [],
+          nativeAgentNames: opencodeNativeAgentNames(cwd),
           modelAllowlist: {},
           claudeUserAgentsDir: userDir
         }),
@@ -353,6 +387,10 @@ ${name.repeat(1300)}
   }, 60_000)
 
   afterAll(async () => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
     manager?.dispose()
     const results = await Promise.all(ends)
     await fixture?.close()
@@ -389,6 +427,24 @@ ${name.repeat(1300)}
         resource: 'claudeui:*',
         effect: 'deny'
       })
+      // (e) A server from the user's own opencode.json is live to the agent too: denied as well.
+      expect(bigA).toContainEqual({ action: 'ghost_*', resource: '*', effect: 'deny' })
+      expect(bigA).toContainEqual({
+        action: 'opencode_list_mcp_resources',
+        resource: 'ghost',
+        effect: 'deny'
+      })
+      expect(bigA).toContainEqual({
+        action: 'opencode_read_mcp_resource',
+        resource: 'ghost:*',
+        effect: 'deny'
+      })
+      // (e) The JSON-only native agent keeps its own description and prompt: the Claude
+      // agent of the same name was left out of the injection, not merged over it.
+      const native = listed.find((agent) => agent.id === 'native-one')
+      expect(native).toMatchObject({ description: 'the user own agent', system: 'native prompt' })
+      expect(native?.mode).not.toBe('subagent')
+      expect(native?.system).not.toContain('Shim body.')
     } finally {
       manager.releaseIfCurrent(ws, conn)
     }

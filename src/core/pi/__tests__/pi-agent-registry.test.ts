@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   loadPiAgentRegistry,
   MAX_AGENT_FILE_BYTES,
+  narrowAgent,
   normalizeAgentName,
   parseAgentFile,
   renderAgentListing,
@@ -142,7 +143,7 @@ describe('loadPiAgentRegistry', () => {
     })
     expect(reg.resolve('mine')?.overrides).toBeUndefined()
     expect(reg.diagnostics).toEqual([
-      `project agent ${file} overrides the built-in "general-purpose"`
+      `project agent ${file} overrides the built-in "general-purpose" and narrows it (that agent's limits stay)`
     ])
     const listing = renderAgentListing(reg)
     expect(listing).toContain('- general-purpose (project): the repo version')
@@ -314,7 +315,7 @@ describe('Claude agent definitions in pi', () => {
     expect(reg.diagnostics).toEqual([
       `user agent ${ex} overrides the built-in "Explore"`,
       `user agent ${a2} overrides the user claude agent "a" (${a1})`,
-      `project agent ${a3} overrides the user pi agent "a" (${a2})`
+      `project agent ${a3} overrides the user pi agent "a" (${a2}) and narrows it (that agent's limits stay)`
     ])
     const listing = renderAgentListing(reg)
     expect(listing).toContain('- a (project): a from claude')
@@ -717,5 +718,214 @@ describe('renderAgentListing', () => {
     const shown = lines.length - 1
     expect(lines.at(-1)).toBe(`…and ${33 - shown} more`)
     expect(lines.slice(0, -1).every((l) => l.startsWith('- '))).toBe(true)
+  })
+})
+
+describe('a project definition only narrows what it shadows (owner ruling C2)', () => {
+  let root: string
+  let claudeUser: string
+  let piUser: string
+  const md = (fields: string, body = 'The prompt.'): string => agentMd(fields, body)
+  const load = (): ReturnType<typeof loadPiAgentRegistry> =>
+    loadPiAgentRegistry({ cwd: root, userAgentsDir: piUser, claudeUserAgentsDir: claudeUser })
+
+  beforeEach(() => {
+    claudeUser = mkdir(path.join(base, 'claude-user'))
+    piUser = mkdir(path.join(base, 'pi-user'))
+    root = mkdir(path.join(base, 'repo'))
+    mkdir(path.join(root, '.git'))
+  })
+
+  it('a user agent with a tools list, shadowed by a project file with none: the user tools and model stay', () => {
+    write(
+      path.join(claudeUser, 'rev.md'),
+      md(
+        'name: rev\ndescription: user one\ntools: Read, Grep\npermissionMode: plan\nharness:\n  pi:\n    model: openai/gpt-6-luna',
+        'User prompt.'
+      )
+    )
+    const project = write(
+      path.join(root, '.claude', 'agents', 'rev.md'),
+      md('name: rev\ndescription: project one\nmodel: openai/ignored', 'Project prompt.')
+    )
+    const reg = load()
+    expect(reg.resolve('rev')).toMatchObject({
+      scope: 'project',
+      overrides: 'user',
+      description: 'project one',
+      prompt: 'Project prompt.',
+      tools: ['read', 'grep'],
+      model: 'openai/gpt-6-luna',
+      permissionMode: 'plan'
+    })
+    expect(reg.diagnostics.some((d) => d.includes(project) && d.includes('narrows it'))).toBe(true)
+    expect(renderAgentListing(reg)).toContain('- rev (project): project one (Tools: read, grep)')
+  })
+
+  it('disallowedTools are the union; tools intersect in pi spelling, case-insensitively', () => {
+    write(
+      path.join(claudeUser, 'rev.md'),
+      md(
+        'name: rev\ndescription: u\ntools: Read, Bash, Grep, mcp__gh, mcp__fs\ndisallowedTools: Edit'
+      )
+    )
+    write(
+      path.join(root, '.claude', 'agents', 'rev.md'),
+      md(
+        'name: rev\ndescription: p\ntools: READ, glob, grep, mcp__gh, mcp__fs__read, mcp__other\ndisallowedTools: Write, edit'
+      )
+    )
+    const rev = load().resolve('rev')!
+    // `glob` maps to pi's `find`, which the user list lacks; a server entry (`mcp__fs`) covers its tools (`mcp__fs__read`).
+    expect(rev.tools).toEqual(['read', 'grep', 'mcp__gh', 'mcp__fs__read'])
+    expect(rev.disallowedTools).toEqual(['edit', 'write'])
+  })
+
+  it('a project tools list over an inheriting user agent is the project list; disjoint lists refuse to spawn', () => {
+    write(path.join(claudeUser, 'wide.md'), md('name: wide\ndescription: u'))
+    write(
+      path.join(root, '.claude', 'agents', 'wide.md'),
+      md('name: wide\ndescription: p\ntools: Read')
+    )
+    write(path.join(claudeUser, 'split.md'), md('name: split\ndescription: u\ntools: Read'))
+    write(
+      path.join(root, '.claude', 'agents', 'split.md'),
+      md('name: split\ndescription: p\ntools: Bash')
+    )
+    const reg = load()
+    expect(reg.resolve('wide')?.tools).toEqual(['read'])
+    expect(reg.resolve('split')?.tools).toEqual([])
+    expect(renderAgentListing(reg)).not.toContain('- split')
+  })
+
+  it('a project Explore with no tools keeps its read-only tools, plan mode and no spawning', () => {
+    write(
+      path.join(root, '.claude', 'agents', 'explore.md'),
+      md('name: Explore\ndescription: the repo explorer', 'Repo prompt.')
+    )
+    const explore = load().resolve('Explore')!
+    expect(explore).toMatchObject({
+      scope: 'project',
+      overrides: 'builtin',
+      description: 'the repo explorer',
+      tools: ['read', 'bash', 'grep', 'find', 'ls'],
+      permissionMode: 'plan',
+      canSpawn: false
+    })
+    expect(
+      buildPiSubagentChildArgs({
+        dir: '/d',
+        agentId: 'a',
+        promptFile: '/p',
+        definition: explore,
+        childCanSpawn: false
+      })
+    ).toContain('--tools')
+  })
+
+  it('the stricter permission mode wins, whichever side has it; canSpawn is both', () => {
+    write(path.join(claudeUser, 'a.md'), md('name: a\ndescription: u\npermissionMode: acceptEdits'))
+    write(
+      path.join(root, '.claude', 'agents', 'a.md'),
+      md('name: a\ndescription: p\npermissionMode: plan')
+    )
+    write(path.join(claudeUser, 'b.md'), md('name: b\ndescription: u\npermissionMode: plan'))
+    write(
+      path.join(root, '.claude', 'agents', 'b.md'),
+      md('name: b\ndescription: p\npermissionMode: bypassPermissions')
+    )
+    write(path.join(claudeUser, 'c.md'), md('name: c\ndescription: u'))
+    write(
+      path.join(root, '.claude', 'agents', 'c.md'),
+      md('name: c\ndescription: p\npermissionMode: auto')
+    )
+    const reg = load()
+    expect(reg.resolve('a')?.permissionMode).toBe('plan')
+    expect(reg.resolve('b')?.permissionMode).toBe('plan')
+    expect(reg.resolve('c')?.permissionMode).toBe('auto')
+  })
+
+  it("a project .pi/agents file that names a model keeps it; one that names none inherits the shadowed agent's", () => {
+    write(
+      path.join(claudeUser, 'm1.md'),
+      md('name: m1\ndescription: u\nharness:\n  pi:\n    model: openai/user-model')
+    )
+    write(
+      path.join(root, '.pi', 'agents', 'm1.md'),
+      md('name: m1\ndescription: p\nharness:\n  pi:\n    model: openai/project-model')
+    )
+    write(
+      path.join(claudeUser, 'm2.md'),
+      md('name: m2\ndescription: u\nharness:\n  pi:\n    model: openai/user-model')
+    )
+    write(path.join(root, '.pi', 'agents', 'm2.md'), md('name: m2\ndescription: p'))
+    const reg = load()
+    expect(reg.resolve('m1')?.model).toBe('openai/project-model')
+    expect(reg.resolve('m2')?.model).toBe('openai/user-model')
+  })
+
+  it('two user-scope sources keep plain precedence: pi user replaces claude user whole', () => {
+    write(
+      path.join(claudeUser, 'a.md'),
+      md(
+        'name: a\ndescription: claude user\ntools: Read\npermissionMode: plan\ndisallowedTools: Bash'
+      )
+    )
+    write(path.join(piUser, 'a.md'), md('name: a\ndescription: pi user'))
+    const a = load().resolve('a')!
+    expect(a).toMatchObject({
+      scope: 'user',
+      origin: 'pi',
+      description: 'pi user',
+      tools: 'inherit',
+      disallowedTools: []
+    })
+    expect(a.permissionMode).toBeUndefined()
+    expect(load().diagnostics.join('\n')).not.toContain('narrows')
+  })
+
+  it('narrowAgent compares MCP spellings: mcp__s and mcp__s__* are equal, a server covers its tools', () => {
+    const template = load().resolve('general-purpose')!
+    const def = (tools: PiAgentDefinition['tools']): PiAgentDefinition => ({ ...template, tools })
+    expect(narrowAgent(def(['mcp__s']), def(['MCP__S__*'])).tools).toEqual(['MCP__S__*'])
+    expect(narrowAgent(def(['mcp__s__*']), def(['mcp__s'])).tools).toEqual(['mcp__s'])
+    expect(narrowAgent(def(['mcp__s__t']), def(['mcp__s'])).tools).toEqual(['mcp__s__t'])
+    expect(narrowAgent(def(['mcp__s']), def(['mcp__x'])).tools).toEqual([])
+    expect(narrowAgent(def('inherit'), def('inherit')).tools).toBe('inherit')
+  })
+
+  it('a project definition with no earlier definition under it is not narrowed', () => {
+    write(
+      path.join(root, '.claude', 'agents', 'p.md'),
+      md('name: p\ndescription: root\ntools: Read')
+    )
+    const nested = mkdir(path.join(root, 'pkg'))
+    write(path.join(nested, '.claude', 'agents', 'p.md'), md('name: p\ndescription: near'))
+    const reg = loadPiAgentRegistry({
+      cwd: nested,
+      userAgentsDir: piUser,
+      claudeUserAgentsDir: claudeUser
+    })
+    expect(reg.resolve('p')).toMatchObject({ description: 'near', tools: 'inherit' })
+  })
+
+  it('narrowing survives a second project directory shadowing the first', () => {
+    write(path.join(claudeUser, 'q.md'), md('name: q\ndescription: u\ntools: Read, Grep'))
+    write(
+      path.join(root, '.claude', 'agents', 'q.md'),
+      md('name: q\ndescription: root\ntools: Read')
+    )
+    const nested = mkdir(path.join(root, 'pkg'))
+    write(path.join(nested, '.claude', 'agents', 'q.md'), md('name: q\ndescription: near'))
+    const reg = loadPiAgentRegistry({
+      cwd: nested,
+      userAgentsDir: piUser,
+      claudeUserAgentsDir: claudeUser
+    })
+    expect(reg.resolve('q')).toMatchObject({
+      description: 'near',
+      tools: ['read'],
+      overrides: 'user'
+    })
   })
 })
