@@ -4,6 +4,7 @@
 **Amended by:** [ADR-091](adr-091_judge-blocks-hold-and-session-local-targets.md) (a child's judge reads parent, queued user turns and trajectory in time order; a block holds for the user).
 **Amended (2026-10-05):** [Messaging v2](#messaging-v2-2026-10-05) — a user-stopped agent is resumable once the user speaks, failed agents resume only after a temporary failure, children know their identity, `list_models` and model resolution, and the shared `dispatch_agent` description (also amends [ADR-033](adr-033_cross-engine-dispatch.md)).
 **Amended by:** [ADR-096](adr-096_pi-mcp-shared-catalog.md) (2026-10-06) — a child registers its parent's MCP catalog; `mcp__…` entries in an agent's `tools`/`disallowedTools` are spelled as pi names MCP tools.
+**Amended by:** [ADR-103](adr-103_claude-agent-definitions-in-pi-and-opencode.md) (2026-10-16) — the registry also reads `~/.claude/agents` and project `.claude/agents` (harness-native folders win at equal scope), honours `harness.pi.model`, never takes a model from a project `.claude/agents` file, hides Claude-only tools in the listing; `source` became `scope` + `origin` and `overridesBuiltin` became `overrides`.
 **Supersedes:** [ADR-035](adr-035_pi-engine-backend.md)'s M5b in-pi subagent extension
 (`pi-subagent-source.ts`).
 **Relates to:** [ADR-035](adr-035_pi-engine-backend.md) (the pi backend and its bridge),
@@ -52,7 +53,7 @@ by each consumer.
 Sources, later wins per normalized name (lowercase, `-`/`_`/spaces stripped): built-ins
 (`general-purpose`; `Explore` and `Plan` with `read,bash,grep,find,ls`, `permissionMode: plan`,
 `canSpawn: false`) < user `~/.pi/agent/agents/*.md` < project `.pi/agents/*.md` from the project root
-(nearest ancestor with a `.git` dir or file) down to the cwd, the nearer one winning.
+(nearest ancestor with a `.git` dir or file) down to the cwd, the nearer one winning. (Extended by ADR-103: `~/.claude/agents` before `~/.pi/agent/agents`, and in each project directory `.claude/agents` before `.pi/agents`.)
 
 The parser treats definition files as hostile input: front matter only when the first line is
 exactly `---` (so `---js` is never front matter and nothing is evaluated — gray-matter is not used),
