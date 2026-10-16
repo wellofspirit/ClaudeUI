@@ -74,9 +74,8 @@ after every slice; every instruction to an agent goes into it, never only into a
 
 Append to the skill's brief-constraint block in every reader, implementer and verifier brief:
 
-> Never run `bun install` / `bun add` / `bun remove`; never `bun run format` (it rewrites the whole
-> repo) — `bunx prettier --write <files you touched>`. Never kill `bun-claude.exe` by image name: it
-> also runs the agent sessions themselves.
+> Format with `bunx prettier --write <files you touched>` (`bun run format` is the repo-wide one).
+> `bun-claude.exe` also runs the agent sessions themselves: never kill it by image name.
 
 ### Rules for all work in this repository
 

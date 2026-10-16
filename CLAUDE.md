@@ -10,11 +10,11 @@ A desktop client for coding agents, built with Electron + React 19 + TypeScript.
 
 Every non-trivial change follows the owner's **`orchestrate`** skill (the step-by-step procedure and brief templates) with this repository's roles, gates and rules from **ADR-026** (`docs/adr/adr-026_development-workflow.md`). In short:
 
-| Role                                                                                                                                                                              | Model  |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
-| Orchestrator — makes every judgment call, writes the spec, reviews every line of each sub-agent's diff and the finished branch, runs the orchestrator test, commits, opens the PR | Opus   |
-| Reader (evidence only) · implementer (+ developer test) · verifier (a separate agent, real app)                                                                                   | Sonnet |
-| Consultant for complicated / large-blast-radius designs · exit reviewer of the open PR                                                                                            | Fable  |
+| Role                                                                                                                                                                              | Model                                                     |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| Orchestrator — makes every judgment call, writes the spec, reviews every line of each sub-agent's diff and the finished branch, runs the orchestrator test, commits, opens the PR | Opus (whichever model drives the session takes this role) |
+| Reader (evidence only) · implementer (+ developer test) · verifier (a separate agent, real app)                                                                                   | Sonnet                                                    |
+| Consultant for complicated / large-blast-radius designs · exit reviewer of the open PR                                                                                            | Fable                                                     |
 
 Gates in order: developer test → verifier → orchestrator test + review → PR + CI → Fable exit review → the owner merges. A Fable finding the orchestrator disagrees with is argued with Fable, then put to the owner, who is the final judge. Implementers never commit, `git add`, branch, or run `bun install`/`add`/`remove`. Trivial one-line edits and conversational answers are exempt.
 
