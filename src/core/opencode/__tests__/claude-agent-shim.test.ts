@@ -420,14 +420,27 @@ describe('loadClaudeAgentsForOpencode', () => {
       expect(out.diagnostics).toHaveLength(bad.length)
     })
 
-    it('project scope: the model is ignored with a diagnostic and the agent still loads', () => {
+    it('project scope: harness.opencode.model is honoured exactly as in user scope', () => {
       const r = rig()
-      const f = r.projectFile('m', file('openai/gpt-6-luna'))
+      r.projectFile('m', file('openai/gpt-6-luna#high'))
       const out = r.load()
-      expect(out.agents.m).not.toHaveProperty('model')
-      expect(out.diagnostics).toEqual([
-        `${f}: harness.opencode.model is ignored in a project agent file (the model stays the user's)`
-      ])
+      expect(out.agents.m.model).toBe('openai/gpt-6-luna#high')
+      expect(out.diagnostics).toEqual([])
+      expect(r.load({ modelAllowlist: { openai: ['gpt-6-luna'] } }).agents.m).toBeDefined()
+    })
+
+    it('project scope: a model outside the allowlist, or a malformed one, skips the agent with a diagnostic', () => {
+      const r = rig()
+      const refused = r.projectFile('refused', file('openai/gpt-6-luna', 'refused'))
+      const malformed = r.projectFile('malformed', file('nonsense', 'malformed'))
+      const out = r.load({ modelAllowlist: { openai: ['gpt-5'] } })
+      expect(out.agents).toEqual({})
+      expect([...out.diagnostics].sort()).toEqual(
+        [
+          `${refused}: skipped (model "openai/gpt-6-luna" is not in the opencode model allowlist)`,
+          `${malformed}: skipped (malformed: harness.opencode.model is not provider/id[#variant])`
+        ].sort()
+      )
     })
 
     it('a harness.pi.model or a top-level model is not an opencode model', () => {
@@ -459,94 +472,56 @@ describe('loadClaudeAgentsForOpencode', () => {
       const out = r.load()
       expect(out.agents.A.description).toBe('project one')
       expect(Object.keys(out.agents)).toEqual(['A'])
-      expect(out.diagnostics).toEqual([
-        `project agent ${p} overrides the user agent "a" (${u}) and narrows it (that agent's tool limits and model stay)`
-      ])
+      expect(out.diagnostics).toEqual([`project agent ${p} overrides the user agent "a" (${u})`])
     })
 
-    describe('a project definition only narrows the user one it shadows (owner ruling C2)', () => {
+    describe('a project definition fully replaces the user one it shadows (it owns the agent)', () => {
       const userReader = agentMd(
         `name: orch-reader\ndescription: user one\ntools: ${ORCH_READER_TOOLS}\nharness:\n  opencode:\n    model: openai/gpt-6-luna#high`,
         'User prompt.'
       )
 
-      it('with no tools key it still gets the user denies and the user model; prompt and description are the project file', () => {
+      it('with no tools key it gets no restrictions from the user file, and no model of the user either', () => {
         const r = rig()
-        const user = r.userFile('orch-reader', userReader)
-        const alone = r.load().agents['orch-reader']
-        expect(alone.permissions?.length).toBeGreaterThan(0)
+        r.userFile('orch-reader', userReader)
+        expect(r.load().agents['orch-reader'].permissions?.length).toBeGreaterThan(0)
         r.projectFile(
           'orch-reader',
-          agentMd(
-            'name: orch-reader\ndescription: project one\nharness:\n  opencode:\n    model: openai/should-be-ignored',
-            'Project prompt.'
-          )
+          agentMd('name: orch-reader\ndescription: project one', 'Project prompt.')
         )
-        const out = r.load()
-        const merged = out.agents['orch-reader']
+        const merged = r.load().agents['orch-reader']
         expect(merged.description).toBe('project one')
         expect(merged.system).toContain('Project prompt.')
         expect(merged.system).not.toContain('User prompt.')
-        expect(merged.permissions).toEqual(alone.permissions)
-        expect(merged.model).toBe('openai/gpt-6-luna#high')
-        expect(out.injected).toEqual([{ name: 'orch-reader', scope: 'project' }])
-        expect(out.diagnostics.some((d) => d.includes('narrows it') && d.includes(user))).toBe(true)
+        expect(merged).not.toHaveProperty('permissions')
+        expect(merged).not.toHaveProperty('model')
       })
 
-      it("the user's model is still allowlist-checked: refused, the narrowed agent is skipped too", () => {
+      it("the project file's model replaces the user's, and is allowlist-checked", () => {
         const r = rig()
         r.userFile('orch-reader', userReader)
-        r.projectFile('orch-reader', agentMd('name: orch-reader\ndescription: project one'))
-        const out = r.load({ modelAllowlist: { openai: ['gpt-5'] } })
-        expect(out.agents).toEqual({})
-        expect(out.diagnostics.join('\n')).toContain('not in the opencode model allowlist')
-      })
-
-      it("a project disallowedTools adds its denies to the user's", () => {
-        const r = rig()
-        r.userFile('orch-reader', userReader)
-        const alone = r.load().agents['orch-reader'].permissions ?? []
         r.projectFile(
           'orch-reader',
-          agentMd('name: orch-reader\ndescription: project one\ndisallowedTools: Bash, mcp__github')
+          agentMd(
+            'name: orch-reader\ndescription: project one\nharness:\n  opencode:\n    model: anthropic/opus'
+          )
         )
-        const merged = r.load().agents['orch-reader'].permissions ?? []
-        for (const rule of alone) expect(merged).toContainEqual(rule)
-        expect(merged).toContainEqual(deny('shell'))
-        expect(merged).toContainEqual(deny('github_*'))
-        // Deduplicated, and in the fixed order: tool actions first.
-        expect(new Set(merged.map((x) => `${x.action}|${x.resource}`)).size).toBe(merged.length)
-        expect(merged.findIndex((x) => x.action === 'shell')).toBeLessThan(
-          merged.findIndex((x) => x.action === 'question')
-        )
+        expect(r.load().agents['orch-reader'].model).toBe('anthropic/opus')
+        const refused = r.load({ modelAllowlist: { anthropic: ['sonnet'] } })
+        expect(refused.agents).toEqual({})
+        expect(refused.diagnostics.join('\n')).toContain('not in the opencode model allowlist')
       })
 
-      it('a project tools list cannot widen: what it names but the user list lacks is still denied, and vice versa', () => {
+      it("the project file's own tools list is the only one that applies", () => {
         const r = rig()
-        r.userFile('orch-reader', userReader) // Read, Grep, Glob, Bash, WebFetch, WebSearch
+        r.userFile('orch-reader', userReader)
         r.projectFile(
           'orch-reader',
           agentMd('name: orch-reader\ndescription: p\ntools: Read, Edit')
         )
-        const merged = r.load().agents['orch-reader'].permissions ?? []
-        // Edit is the project's, but the user list never had it; Grep and Bash are the user's, absent from the project's.
-        for (const action of ['edit', 'grep', 'glob', 'shell', 'subagent', 'skill', 'question'])
-          expect(merged).toContainEqual(deny(action))
-        expect(merged).not.toContainEqual(deny('read'))
-      })
-
-      it('a project definition with no user definition under it is plain precedence', () => {
-        const r = rig()
-        const near = mkdir(path.join(r.root, 'pkg'))
-        write(
-          path.join(r.root, '.claude', 'agents', 'a.md'),
-          agentMd('name: a\ndescription: root\ntools: Read')
-        )
-        write(path.join(near, '.claude', 'agents', 'a.md'), agentMd('name: a\ndescription: near'))
-        const out = r.load({ cwd: near })
-        expect(out.agents.a.description).toBe('near')
-        expect(out.agents.a.permissions).toBeUndefined()
-        expect(out.diagnostics.join('\n')).not.toContain('narrows')
+        const rules = r.load().agents['orch-reader'].permissions ?? []
+        expect(rules).not.toContainEqual(deny('edit'))
+        expect(rules).toContainEqual(deny('glob'))
       })
     })
 

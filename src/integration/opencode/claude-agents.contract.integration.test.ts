@@ -83,7 +83,7 @@ name: project-one
 description: A repository agent.
 harness:
   opencode:
-    model: openai/should-be-ignored
+    model: fixture/fixture-model
 ---
 You belong to the repository.
 `
@@ -104,7 +104,7 @@ function injectedConfig(fixture: Parameters<typeof fixtureConfig>[0], home: Test
     modelAllowlist: {},
     claudeUserAgentsDir: userDir
   })
-  expect(shim.diagnostics.join('\n')).toMatch(/harness.opencode.model is ignored/)
+  expect(shim.diagnostics).toEqual([]) // the project file's model is honoured, so nothing is said
   const agents = buildOpencodeConfig({ claudeAgents: shim.agents }, { port: 1, token: 'x' }).agents
   const config: Config_InfoEncoded = { ...fixtureConfig(fixture), agents }
   return config
@@ -169,10 +169,10 @@ describeV2('opencode 2.x contract: injected Claude agents (ADR-103)', () => {
       { action: 'browser', resource: '*', effect: 'deny' }
     ])
     expect(own.some((rule) => rule.effect !== 'deny' || rule.action === '*')).toBe(false)
-    // The repository's agent is there too, and inherits (its model was ignored).
+    // The repository's agent is there too, on the model its own file names.
     const project = agents.find((agent) => agent.id === 'project-one')
     expect(project).toMatchObject({ mode: 'subagent' })
-    expect(project?.model).not.toMatchObject({ id: 'should-be-ignored' })
+    expect(project?.model).toMatchObject({ providerID: 'fixture', id: 'fixture-model' })
     expect(
       project?.permissions.some((rule) => rule.effect === 'deny' && rule.action === 'edit')
     ).toBe(false)

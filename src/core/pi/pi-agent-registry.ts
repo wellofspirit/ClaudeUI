@@ -9,9 +9,7 @@
  *
  * so the owner's Claude Code definitions work in pi unchanged, the harness's
  * own directory wins at equal scope, and a repository's definitions beat the
- * user's. A repository's definition that shadows a built-in or a user agent
- * only NARROWS it (owner ruling C2, {@link narrowAgent}): the prompt and
- * description are the repository's, the limits combine. Modeled on Claude Code's subagent definitions (a Markdown file whose
+ * user's. Modeled on Claude Code's subagent definitions (a Markdown file whose
  * front matter names the agent and whose body is its system prompt).
  *
  * SAFE PARSING (these files are hostile input: alias bombs, `---js`, size and
@@ -19,14 +17,13 @@
  * `../agents/agent-defs.ts`; this module adds what is pi-specific: the
  * tool-name mapping, the model rules and the scope policy.
  *
- * MODEL. Vendor and cost stay the user's. A pi-origin file (`~/.pi/agent/agents`
- * or a project's `.pi/agents`, ADR-089) and a USER-scope Claude file may pick a
- * model: `harness.pi.model` (the per-harness block Claude Code ignores) wins
- * over `model`, and either must be `inherit` or a pi picker value
- * `provider/id` (a Claude alias such as `sonnet` inherits, with a diagnostic).
- * A PROJECT-scope CLAUDE file (a repository's `.claude/agents`, newly loaded
- * here) never picks one: `model` and `harness.*` are ignored (inherit + a
- * diagnostic).
+ * MODEL. Any definition file (user or project, Claude or pi) may pick a model:
+ * a project owns its agents and overrides the user's, as in Claude Code.
+ * `harness.pi.model` (the per-harness block Claude Code ignores) wins over
+ * `model`, and either must be `inherit` or a pi picker value `provider/id` (a
+ * Claude alias such as `sonnet` inherits, with a diagnostic). The value is
+ * checked against the allowlisted catalog when the agent is launched
+ * (`pi-agent-model.ts`).
  *
  * SCOPE. Supported fields: `name`, `description`, `tools`, `disallowedTools`,
  * `model`, `harness.pi.model`, `thinking` (or Claude Code's `effort`),
@@ -52,7 +49,6 @@ import {
 } from '../agents/agent-defs'
 import { logger } from '../services/logger'
 import { piAgentDir } from '../services/pi-session-list'
-import { piSubagentToolEntry } from './pi-mcp-bridge'
 
 // The caps live in the shared reader; pi callers import them from here.
 export { MAX_AGENT_FILE_BYTES, MAX_AGENT_FILES_PER_DIR } from '../agents/agent-defs'
@@ -218,126 +214,18 @@ const BUILTIN_AGENTS: readonly PiAgentDefinition[] = [
   }
 ]
 
-/**
- * A definition's `permissionMode` ranks plan 0 < default 1 < acceptEdits 2 <
- * auto 3 = full 3 < bypassPermissions 4; an unknown mode ranks as `default`
- * (ADR-089 D3: it only ever narrows). Lower is stricter.
- */
-export function permissionModeRank(mode: string): number {
-  switch (mode) {
-    case 'plan':
-      return 0
-    case 'acceptEdits':
-      return 2
-    case 'auto':
-    case 'full':
-      return 3
-    case 'bypassPermissions':
-      return 4
-    default:
-      return 1
-  }
-}
-
-/** A tool entry as compared: pi's spelling (`mcp__s` is `mcp__s__*`), case-insensitive. */
-function toolKey(entry: string): string {
-  return piSubagentToolEntry(entry).toLowerCase()
-}
-
-/** Whether tool pattern `pattern` (`*` is a wildcard, as in pi's `--tools`) matches `key`; both are {@link toolKey}s. */
-function toolCovers(pattern: string, key: string): boolean {
-  if (pattern === key) return true
-  if (!pattern.includes('*')) return false
-  const source = pattern
-    .split('*')
-    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'))
-    .join('.*')
-  return new RegExp(`^${source}$`).test(key)
-}
-
-/** The entries of `a` and `b` that the other side also allows, as written, deduplicated. */
-function intersectTools(a: readonly string[], b: readonly string[]): string[] {
-  const kept = new Map<string, string>()
-  const take = (from: readonly string[], other: readonly string[]): void => {
-    for (const entry of from) {
-      const key = toolKey(entry)
-      if (!kept.has(key) && other.some((o) => toolCovers(toolKey(o), key))) kept.set(key, entry)
-    }
-  }
-  take(a, b)
-  take(b, a)
-  return [...kept.values()]
-}
-
-function unionTools(a: readonly string[], b: readonly string[]): string[] {
-  const kept = new Map<string, string>()
-  for (const entry of [...a, ...b]) if (!kept.has(toolKey(entry))) kept.set(toolKey(entry), entry)
-  return [...kept.values()]
-}
-
-/**
- * A repository's definition `project` that shadows `shadowed` (a built-in or a
- * user agent; owner ruling C2) may only NARROW it. The prompt, description,
- * name, file and `thinking` / `background` are the repository's; the limits
- * combine:
- *  - `tools`: the intersection (`inherit` ∩ X = X; compared in pi's spelling,
- *    case-insensitively, `mcp__s` = `mcp__s__*`, and a `*` pattern covers what
- *    it matches), so an empty result refuses to spawn;
- *  - `disallowedTools`: the union;
- *  - `permissionMode`: the stricter one ({@link permissionModeRank});
- *  - `canSpawn`: both;
- *  - `model`: the shadowed agent's whenever the project file sets none
- *    (`inherit`); a model a project `.pi/agents` file names stands (pi's own
- *    project config, ADR-089).
- */
-export function narrowAgent(
-  project: PiAgentDefinition,
-  shadowed: PiAgentDefinition
-): PiAgentDefinition {
-  let tools: PiAgentDefinition['tools']
-  if (shadowed.tools === 'inherit') tools = project.tools
-  else if (project.tools === 'inherit') tools = shadowed.tools
-  else tools = intersectTools(shadowed.tools, project.tools)
-  const modes = [shadowed.permissionMode, project.permissionMode].filter(
-    (m): m is string => m !== undefined
-  )
-  const permissionMode = modes.sort((x, y) => permissionModeRank(x) - permissionModeRank(y))[0]
-  return {
-    ...project,
-    tools,
-    disallowedTools: unionTools(shadowed.disallowedTools, project.disallowedTools),
-    model: project.model === 'inherit' ? shadowed.model : project.model,
-    ...(permissionMode === undefined ? {} : { permissionMode }),
-    canSpawn: shadowed.canSpawn && project.canSpawn
-  }
-}
-
 /** Lowercase, strip `-`, `_` and whitespace (Claude Code matches agent types case/dash-insensitively). */
 export function normalizeAgentName(s: string): string {
   return s.toLowerCase().replace(/[-_\s]/g, '')
 }
 
-/**
- * The model a definition runs on. A project Claude file never chooses one
- * (vendor and cost stay the user's); otherwise `harness.pi.model` wins over
- * `model`.
- */
+/** The model a definition runs on: `harness.pi.model` wins over `model`. */
 function resolveModel(
   data: Record<string, unknown>,
-  scope: Exclude<AgentScope, 'builtin'>,
-  origin: AgentOrigin,
   warn: (msg: string) => void
 ): 'inherit' | string {
   const piModel = harnessField(data, 'pi', 'model', warn)
   const absent = (v: unknown): boolean => v === undefined || v === null
-  if (scope === 'project' && origin === 'claude') {
-    const declares = (v: unknown): boolean =>
-      !absent(v) && !(typeof v === 'string' && v.trim() === 'inherit')
-    if (declares(piModel) || declares(data.model)) {
-      warn("model is ignored in a project agent file (vendor and cost stay the user's); inheriting")
-    }
-    return 'inherit'
-  }
   const raw = absent(piModel) ? data.model : piModel
   if (absent(raw)) return 'inherit'
   if (typeof raw !== 'string' || raw.trim() === '') {
@@ -389,7 +277,7 @@ export function parseAgentFile(
     tools = []
   }
 
-  const model = resolveModel(data, scope, origin, warn)
+  const model = resolveModel(data, warn)
 
   let thinking: PiThinkingLevel | undefined
   const thinkingRaw = data.thinking ?? data.effort
@@ -460,24 +348,18 @@ export function loadPiAgentRegistry(opts: {
           : replaced.scope === 'project'
             ? replaced.overrides
             : replaced.scope
-      if (replaced === undefined || overrides === undefined) {
-        byName.set(key, def)
-        continue
+      if (replaced !== undefined && overrides !== undefined) {
+        // A later directory can redefine an earlier type under the same name.
+        // Allowed (the later definition wins), but said, with the file that did it.
+        const what =
+          replaced.scope === 'builtin'
+            ? `the built-in "${replaced.name}"`
+            : `the ${replaced.scope} ${replaced.origin} agent "${replaced.name}" (${replaced.filePath ?? 'unknown file'})`
+        const note = `${def.scope} agent ${def.filePath ?? '(unknown file)'} overrides ${what}`
+        diagnostics.push(note)
+        logger.info('PiAgentRegistry', note)
       }
-      // A later directory can redefine an earlier type under the same name.
-      // Allowed (the later definition wins), but said, with the file that did it.
-      // A repository's definition only narrows what it shadows (owner ruling C2).
-      const what =
-        replaced.scope === 'builtin'
-          ? `the built-in "${replaced.name}"`
-          : `the ${replaced.scope} ${replaced.origin} agent "${replaced.name}" (${replaced.filePath ?? 'unknown file'})`
-      const narrows = def.scope === 'project'
-      const note =
-        `${def.scope} agent ${def.filePath ?? '(unknown file)'} overrides ${what}` +
-        (narrows ? " and narrows it (that agent's limits stay)" : '')
-      diagnostics.push(note)
-      logger.info('PiAgentRegistry', note)
-      byName.set(key, { ...(narrows ? narrowAgent(def, replaced) : def), overrides })
+      byName.set(key, overrides === undefined ? def : { ...def, overrides })
     }
   }
 

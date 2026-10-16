@@ -1034,6 +1034,19 @@ Body.
       expect(shimLines(debug)).toHaveLength(1)
     })
 
+    it('a project definition overriding a user one is logged at info', async () => {
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+      const debug = vi.spyOn(logger, 'debug').mockImplementation(() => {})
+      const note = 'project agent /p/.claude/agents/a.md overrides the user agent "a" (/u/a.md)'
+      const { manager } = rigWith(() => [note])
+      await manager.acquire('/proj/a')
+      const lines = (spy: typeof info): string[] =>
+        spy.mock.calls.map((c) => String(c[1])).filter((l) => l.includes('Claude agent shim for'))
+      expect(lines(info)).toHaveLength(1)
+      expect(lines(info)[0]).toContain(note)
+      expect(lines(debug)).toHaveLength(0)
+    })
+
     it('a note with nothing skipped is debug only', async () => {
       const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
       const debug = vi.spyOn(logger, 'debug').mockImplementation(() => {})

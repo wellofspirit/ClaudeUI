@@ -511,13 +511,15 @@ export class OpencodeServerManager {
         this.shimDiagnosticsLogged.clear()
       }
       this.shimDiagnosticsLogged.set(cwd, note)
-      // A skipped agent is one the owner wrote that is not running: info. The rest is detail: debug.
-      const skipped = shim.diagnostics.filter((d) => d.includes('skipped'))
-      const rest = shim.diagnostics.filter((d) => !d.includes('skipped'))
+      // A skipped or overridden agent is a choice the owner should see (a file that is not
+      // running, a project file replacing a user one): info. The rest is detail: debug.
+      const notable = (d: string): boolean => d.includes('skipped') || d.includes(' overrides the ')
+      const skipped = shim.diagnostics.filter(notable)
+      const rest = shim.diagnostics.filter((d) => !notable(d))
       if (skipped.length > 0) {
         logger.info(
           'OpencodeServerManager',
-          `Claude agent shim for ${cwd}: ${Object.keys(shim.agents).length} injected, ${skipped.length} skipped: ${skipped.join('; ')}`
+          `Claude agent shim for ${cwd}: ${Object.keys(shim.agents).length} injected, ${skipped.length} skipped or overridden: ${skipped.join('; ')}`
         )
       }
       if (rest.length > 0) {
