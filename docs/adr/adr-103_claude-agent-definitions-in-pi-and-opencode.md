@@ -84,7 +84,8 @@ harness sees another's choices.
   default rules (e.g. turn the `.env` read asks into allows) and an all-deny would, through the child-session
   rules, cut the child off from paths outside the session directory.
   MCP follows Claude Code's rule that a tools allowlist without MCP names gets no MCP tools: every bridged
-  server, every server in `mcp.servers` of the config documents opencode loads for the directory, and ClaudeUI's
+  server, every server in `mcp.servers` (and the 1.x `mcp.<name>` form) of the config documents opencode loads
+  for the directory, and ClaudeUI's
   hosted `claudeui` server is denied unless the list names it at server level
   (`mcp__<server>`), and a denied server's resources go with it (`opencode_list_mcp_resources` on the server name,
   `opencode_read_mcp_resource` on `<server>:*`); a tool-level entry (`mcp__github__issues`) cannot be expressed
@@ -104,7 +105,10 @@ harness sees another's choices.
 - Size caps (8 KiB per agent, 24 KiB in all) keep the injection well inside one Windows environment variable
   (32,767 characters); a real Windows spawn with a 22 KB block became ready normally.
 - The injected block is part of the server identity, so an edited agent file starts a fresh server on the next
-  session; the old one ends when its last session releases it.
+  session; the old one ends when its last session releases it. The block also changes when the user edits opencode's own `mcp`
+  servers or agents (the denies and skips follow them), so that too starts a fresh server; a server added to a
+  config document while a server runs is hot-reloaded by opencode but is denied to a tools-list agent only from
+  the next server on.
 
 ## Consequences
 
