@@ -39,7 +39,7 @@ import type {
   PiUserMessage
 } from '../pi/pi-protocol'
 import { cwdToProjectKey } from '../../shared/project-key'
-import { piToolResultImages, piToolResultText } from '../pi/event-mapper'
+import { piModelLabel, piToolResultImages, piToolResultText } from '../pi/event-mapper'
 import { piCustomMessageToChat } from '../pi/pi-custom-message'
 import { piAgentDeliveryDetails } from '../pi/pi-delivery'
 import { piHistoryStatusLine, piLastModelRef } from '../pi/history-status-line'
@@ -363,7 +363,14 @@ export function convertPiEntryMessage(
       }
     }
     if (content.length === 0) return null
-    return { id: entryId, role: 'assistant', content, timestamp: message.timestamp }
+    const model = piModelLabel(message)
+    return {
+      id: entryId,
+      role: 'assistant',
+      content,
+      timestamp: message.timestamp,
+      ...(model ? { model } : {})
+    }
   }
 
   // toolResult (folded above) / bashExecution (out of scope) — no own message.

@@ -557,4 +557,75 @@ describe('ClaudeItemStreamLifecycle', () => {
       expect(core.getCanonicalState().sessions.s.itemStreams).toEqual({})
     })
   })
+
+  describe('the model the message ran on', () => {
+    const OWNER = 'toolu_agent'
+    // Every ChatMessage the sink was handed, whichever lane it went through.
+    const messages = (h: ReturnType<typeof harness>): ChatMessage[] =>
+      h.events.map((e) => (e.value as { message: ChatMessage }).message).filter(Boolean)
+
+    it('rides on the opened, published and sealed messages of a subagent', () => {
+      const h = harness()
+      h.lifecycle.handleEvent(
+        { type: 'message_start', message: { id: 'sub', model: 'claude-haiku-4-5-20251001' } },
+        OWNER
+      )
+      h.lifecycle.handleEvent(
+        { type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'hi' } },
+        OWNER
+      )
+      h.lifecycle.handleEvent(
+        {
+          type: 'content_block_start',
+          index: 1,
+          content_block: { type: 'tool_use', id: 'toolu_x', name: 'Read', input: {} }
+        },
+        OWNER
+      )
+      h.lifecycle.handleEvent({ type: 'content_block_stop', index: 0 }, OWNER)
+      h.lifecycle.handleEvent({ type: 'message_stop' }, OWNER)
+
+      expect(h.events.map((e) => e.kind)).toEqual(
+        expect.arrayContaining(['open', 'publish', 'seal', 'local'])
+      )
+      const all = messages(h)
+      expect(all.length).toBeGreaterThan(4)
+      expect(all.map((m) => m.model)).toEqual(all.map(() => 'claude-haiku-4-5-20251001'))
+    })
+
+    it('takes the model from an assistant snapshot when message_start carried none', () => {
+      const h = harness()
+      h.lifecycle.handleEvent({ type: 'message_start', message: { id: 'sub' } }, OWNER)
+      h.lifecycle.handleEvent(
+        { type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'hi' } },
+        OWNER
+      )
+      expect(
+        h.lifecycle.handleSnapshot(
+          {
+            id: 'sub',
+            role: 'assistant',
+            content: [{ type: 'text', text: 'hi' }],
+            timestamp: 1,
+            model: 'claude-opus-5-5'
+          },
+          OWNER
+        )
+      ).toBe('handled')
+      h.lifecycle.handleEvent({ type: 'message_stop' }, OWNER)
+      const seal = h.events.findLast((e) => e.kind === 'seal')!.value as { message: ChatMessage }
+      expect(seal.message.model).toBe('claude-opus-5-5')
+    })
+
+    it('leaves the field off when no model was ever reported', () => {
+      const h = harness()
+      h.lifecycle.handleEvent({ type: 'message_start', message: { id: 'm' } }, undefined)
+      h.lifecycle.handleEvent(
+        { type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'x' } },
+        undefined
+      )
+      h.lifecycle.handleEvent({ type: 'message_stop' }, undefined)
+      for (const m of messages(h)) expect(m).not.toHaveProperty('model')
+    })
+  })
 })

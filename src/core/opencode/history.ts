@@ -33,6 +33,7 @@ import type {
 } from './protocol-v2/openapi'
 import {
   compactionChatMessage,
+  modelLabel,
   subagentBackgrounded,
   subagentChildSession,
   SUBAGENT_TOOL_NAMES,
@@ -103,7 +104,8 @@ export function assistantChatMessage(row: Session_Message_Assistant): ChatMessag
     id: row.id,
     role: 'assistant',
     content: [...content, ...results],
-    timestamp: row.time.created
+    timestamp: row.time.created,
+    ...(row.model ? { model: modelLabel(row.model) } : {})
   }
 }
 

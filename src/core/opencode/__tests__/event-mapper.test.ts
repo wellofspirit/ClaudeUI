@@ -43,7 +43,11 @@ let mapper: OpencodeEventMapper
 const map = (...events: OpencodeEvent[]) => events.flatMap((event) => mapper.map(event))
 
 /** A step of the own session (or `session`), started. */
-function step(id = MSG, session = SID, model = MODEL): OpencodeEvent {
+function step(
+  id = MSG,
+  session = SID,
+  model: { providerID: string; id: string; variant?: string } = MODEL
+): OpencodeEvent {
   return ev('session.step.started', {
     sessionID: session,
     assistantMessageID: id,
@@ -1521,5 +1525,43 @@ describe('turn ends: cards, classification, background order, overhead', () => {
     expect(
       map(ev('session.usage.updated', { sessionID: SID, ...totals })).map((o) => o.kind)
     ).toEqual(['session-usage'])
+  })
+})
+
+describe('the model a step ran on', () => {
+  it('rides on every message the step produces, as providerID/id with the variant dropped', () => {
+    const out = map(
+      step(MSG, SID, {
+        providerID: 'openrouter',
+        id: 'anthropic/claude-haiku-4.5',
+        variant: 'high'
+      }),
+      ev('session.text.started', { sessionID: SID, assistantMessageID: MSG, ordinal: 0 }),
+      ev('session.text.delta', { sessionID: SID, assistantMessageID: MSG, ordinal: 0, delta: 'a' }),
+      ev('session.text.ended', { sessionID: SID, assistantMessageID: MSG, ordinal: 0, text: 'a' }),
+      ...tool('c1', 'shell', { command: 'ls' })
+    )
+    const messages = out.flatMap((o) =>
+      o.kind === 'item-open'
+        ? [o.open.message]
+        : o.kind === 'item-seal'
+          ? [o.seal.message]
+          : o.kind === 'message'
+            ? [o.message]
+            : []
+    )
+    expect(messages.length).toBeGreaterThanOrEqual(3)
+    expect(messages.map((m) => m.model)).toEqual(
+      messages.map(() => 'openrouter/anthropic/claude-haiku-4.5')
+    )
+  })
+
+  it('leaves the field off a message whose step never reported one', () => {
+    const out = map(
+      ev('session.text.started', { sessionID: SID, assistantMessageID: MSG, ordinal: 0 }),
+      ev('session.text.delta', { sessionID: SID, assistantMessageID: MSG, ordinal: 0, delta: 'a' })
+    )
+    const [open] = of(out, 'item-open')
+    expect(open.open.message).not.toHaveProperty('model')
   })
 })

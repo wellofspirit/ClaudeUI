@@ -65,6 +65,19 @@ const subagent = (id: string, state: Extract<Part, { type: 'tool' }>['state']): 
 })
 
 describe('convertOpencodeHistory', () => {
+  it('a step row carries the model it ran on as providerID/id, the variant dropped', () => {
+    const { messages } = convertOpencodeHistory([
+      user('msg_u', 1, 'go'),
+      assistant('msg_a', 2, [{ type: 'text', text: 'ok' }], {
+        model: { providerID: 'openrouter', id: 'anthropic/claude-haiku-4.5', variant: 'high' }
+      })
+    ])
+    expect(messages.find((m) => m.id === 'msg_a')?.model).toBe(
+      'openrouter/anthropic/claude-haiku-4.5'
+    )
+    expect(messages.find((m) => m.id === 'msg_u')).not.toHaveProperty('model')
+  })
+
   it('a step is one row: text / thinking / tool_use in order, then its results in call order', () => {
     const { messages } = convertOpencodeHistory([
       user('msg_u', 1, 'go'),
@@ -101,6 +114,7 @@ describe('convertOpencodeHistory', () => {
         id: 'msg_a',
         role: 'assistant',
         timestamp: 2,
+        model: 'openai/gpt-x',
         content: [
           { type: 'thinking', text: 'plan', durationMs: 5 },
           { type: 'text', text: 'ok' },
@@ -213,7 +227,13 @@ describe('convertOpencodeHistory', () => {
     })
     expect(history.subagentMessages).toEqual({
       call_1: [
-        { id: 'msg_c', role: 'assistant', content: [{ type: 'text', text: 'fine' }], timestamp: 3 }
+        {
+          id: 'msg_c',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'fine' }],
+          timestamp: 3,
+          model: 'openai/gpt-x'
+        }
       ]
     })
     expect(history.taskNotifications).toEqual([
