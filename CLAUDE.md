@@ -12,7 +12,7 @@ Every non-trivial change follows the owner's **`orchestrate`** skill, with this 
 
 Rules for any agent working in this repository, whatever its role:
 
-- Never commit, `git add`, branch, stash, checkout, reset or switch unless you are the orchestrator; never run `bun install` / `bun add` / `bun remove`.
+- Unless you are the orchestrator: never commit, `git add`, branch, stash, checkout, reset or switch, and never run `bun install` / `bun add` / `bun remove` (the orchestrator does that deliberately; `postinstall` then rebuilds natives and installs the engines).
 - Format with `bunx prettier --write <files you touched>`; `bun run format` rewrites the whole repo.
 - `bun-claude.exe` / `bun-claude` also runs the agent sessions themselves: never kill it by process name.
 - Commit gate: `scripts/gates.sh`. Never judge a gate from output piped into `grep`/`tail`.

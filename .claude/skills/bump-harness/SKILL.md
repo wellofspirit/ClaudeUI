@@ -8,7 +8,7 @@ description: Bump or adopt a new version of an engine ClaudeUI drives — Claude
 The owner's bump requests are one line ("bump cc cli to latest version and fix all tests and run
 test harness"). Everything below is what that line means. Do not ask the owner to restate it.
 
-The workflow (who reads, implements, verifies, reviews; the gates; the Fable consult and exit
+The workflow (who reads, implements, verifies, reviews; the gates; the design consult and the exit
 gate) is the `orchestrate` skill with ADR-026 (`docs/adr/adr-026_development-workflow.md`), which
 also holds the rules for all work in this repo — live evidence over source reading, real-provider
 testing on entry-level or free models with isolated homes, one worktree per arc, settled rulings
@@ -36,7 +36,7 @@ stay settled, reporting every gap. Read both first. This skill adds only what is
 
 ## Bump gates
 
-These come before ADR-026's own gates (developer test, verifier, orchestrator test, PR + CI, Fable):
+These come before ADR-026's own gates (developer test, verifier, orchestrator test, PR + CI, exit review):
 
 | #   | Gate                                  | How                                                                                  |
 | --- | ------------------------------------- | ------------------------------------------------------------------------------------ |

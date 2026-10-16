@@ -4,9 +4,10 @@
 makes every judgment call; Sonnet reads, implements and verifies; Fable is the design consultant and the
 PR's exit gate; work lands as a pull request. The step-by-step procedure lives in the owner's user-level
 `orchestrate` skill and the roles are his user-level custom agents (`orch-reader`, `orch-implementer`,
-`orch-verifier`, `orch-design-reviewer`, `orch-pr-reviewer`), shared across his projects and, through ClaudeUI,
-across Claude Code, pi and opencode; this ADR keeps the decision and what is specific to this repository. Replaces the driver pairings of 2026-09-17 (Fable → Opus, GPT-6 →
-GPT-5.6 Sol) and the 2026-10-01 Sonnet/Opus split. Kept from earlier amendments: the separate verifier
+`orch-verifier`, `orch-design-reviewer`, `orch-pr-reviewer`), shared across his projects (and, once ADR-103
+lands, loaded by ClaudeUI into pi and opencode too); this ADR keeps the decision and what is specific to this
+repository. Replaces the driver pairings of 2026-09-17 (Fable → Opus, GPT-6 → GPT-5.6 Sol) and the 2026-10-01
+Sonnet/Opus split. Kept from earlier amendments: the separate verifier
 (2026-09-16), delegated gates and the fresh reviewer for large diffs (2026-09-21).
 **Relates to:** ADR-027 (test data attributes — the structural-verification tier this workflow leans on)
 
@@ -33,7 +34,7 @@ roles, gates and repository rules below. Trivial edits and conversational answer
 
 ### Roles
 
-| Role              | Model                                                                               | Owns                                                                                                                                                                                               | Never                                                                                                                         |
+| Role              | Model (Claude Code; each agent file carries its model per harness)                  | Owns                                                                                                                                                                                               | Never                                                                                                                         |
 | ----------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | **Orchestrator**  | Opus (the default session driver; whichever model drives a session takes this role) | Scope, design, the spec, **every judgment call** within the owner's rulings, line-by-line review of each sub-agent's diff and of the finished branch, the orchestrator test, commits, push, the PR | Implements beyond docs, specs and trivial edits; drives the app by hand; decides a genuine product fork (that is the owner's) |
 | **Reader**        | Sonnet                                                                              | Collecting evidence — quotes with `path:line`, diffs, changelogs, logs, test counts                                                                                                                | Decides what the evidence means                                                                                               |
@@ -74,10 +75,11 @@ after every slice; every instruction to an agent goes into it, never only into a
 ### This repository's additions to the agents' constraints
 
 The role agents carry the generic constraints. The repository's own additions are in the "How work is done
-here" section of `CLAUDE.md`, which every agent receives: format with `bunx prettier --write <files you touched>`
+here" section of `CLAUDE.md`, which Claude Code and pi load for every agent (opencode loads only `AGENTS.md`:
+until ADR-103 covers it, the orchestrator appends that section to briefs for opencode agents): format with `bunx prettier --write <files you touched>`
 (`bun run format` is the repo-wide one), never kill `bun-claude` by process name (it also runs the agent sessions),
-and `scripts/gates.sh` is the commit gate. Keep that section free of model and harness names: every agent on every
-harness reads it.
+and `scripts/gates.sh` is the commit gate. Keep that section free of the names of the models and harnesses
+that run the agents: every agent reads it.
 
 ### Rules for all work in this repository
 
@@ -152,7 +154,8 @@ harness reads it.
 - **Fable orchestrates every change** (2026-07-30 to 2026-10-16). Superseded: Opus orchestrates as well
   for most work, and Fable's review is worth more at the design and exit points than spread across every
   step.
-- **Driver-specific pairings (GPT-6 → GPT-5.6 Sol).** Retired with the consolidation.
+- **Driver-specific pairings (GPT-6 → GPT-5.6 Sol).** Retired from this ADR with the consolidation; the agent
+  files carry any per-harness model.
 - **Keep the full step-by-step loop in this ADR.** Rejected (owner, 2026-10-16): the procedure is the
   owner's common work pattern across projects, so it lives in his user-level skill; a copy here would
   drift.
