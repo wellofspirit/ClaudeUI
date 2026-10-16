@@ -1,6 +1,6 @@
 # ADR-094: Agent type colour coding: a letter tile in one shared palette
 
-**Status:** Accepted (2026-10-06).
+**Status:** Accepted (2026-10-06). Amended 2026-10-17 by [§ Amendment](#amendment-2026-10-17-every-agent-has-a-tile-with-a-bot): every agent has a tile led by a bot, and the letters drop a shared prefix (supersedes "The default type has no tile" and the one-letter rule below).
 **Relates to:** [ADR-073](adr-073_agent-roster-and-task-run-identity.md) §9 (the roster and Task card on a narrow screen; the text badge this replaces), [ADR-065](adr-065_settings-ia-v2-pages-groups-row-vocabulary.md) (the settings page model the colour pickers live in), [ADR-093](adr-093_zoom-trap-no-viewport-units.md) (the zoom the layout tests run under), [ADR-033](adr-033_cross-engine-dispatch.md) (the dispatch card the X tile marks), [ADR-027](adr-027_test-data-attributes.md) (the test ids), mockup `e76a9d48`.
 
 ## Context
@@ -90,6 +90,28 @@ ordinary `updateSettings` path, so they sync to every client like any setting; b
   usage and "Open in panel". Test ids `TaskCard.type` (the chip), `TaskCard.typeTile`, `TaskCard.background`,
   `TaskCard.background.icon`. The narrow row is one line at chat scale 1, 1.1, 1.25 and 1.5 for the common fixtures;
   only a resumed chip at 1.5 wraps, as whole chips with the ↗ last.
+
+## Amendment (2026-10-17): every agent has a tile with a bot
+
+Owner rulings, from mockups `d1b54571` (the roster) and `d012aba0` (the Task card).
+
+**The letters.** A type's letters are the initials of its segments (split on `-`, `_`, `:` and whitespace), at
+most two, uppercased, minus a first segment the type shares with another known type: `orch-reader` R,
+`orch-verifier` V, `orch-design-reviewer` DR, `Explore` E; alone in its family a multi-word type keeps its prefix
+(`migration-reviewer` MR). The known types are the engine's catalog plus the types the surface shows, so the roster
+tells a family apart when the catalog is empty, and a letter does not change when the Running filter hides a
+sibling (`agentTileLetter`, `shared/agent-type-colors.ts`). This supersedes the one-initial rule: a family that
+shares a prefix read as one letter.
+
+**A bot on every agent.** The tile leads with a small bot icon, then the letters. A typed agent is the bot and its
+letters in its colour; a dispatch is the bot and an X in the dispatch colour; **the default type, and an agent
+with no type, is the bot alone, muted** (this supersedes "The default type has no tile": with most agents spawned
+untyped the column was mostly empty, and a letter tile next to an empty slot read as a different kind of thing). A
+shell keeps its `$`. The bot is optically centred and the letters trimmed to cap height (`text-box`), so both sit
+on the tile's centre line; a browser test pins it. The roster's type column is a fixed slot wide enough for the
+bot and two letters, so labels line up. On the Task card a typed agent keeps its tinted chip (name wide, tile
+alone below 480px) and the default type is the muted bot alone at every width; Settings › Agent colours shows the
+muted bot for the default type.
 
 ## Consequences
 
