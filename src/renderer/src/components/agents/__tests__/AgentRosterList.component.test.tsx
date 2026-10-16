@@ -292,7 +292,9 @@ describe('AgentRosterList', () => {
           // Killed with its process — not "done": it never got to answer.
           row({ toolUseId: 'd', isStopped: true }),
           // Transcript ends mid-run; dead or running elsewhere, it claims neither.
-          row({ toolUseId: 'e', isLoaded: true })
+          row({ toolUseId: 'e', isLoaded: true }),
+          // Its own run ended while an agent it launched still works.
+          row({ toolUseId: 'f', runningDescendants: 1 })
         ]
       })
     )
@@ -300,7 +302,7 @@ describe('AgentRosterList', () => {
     expect(screen.getAllByTestId('AgentRow.stop')).toHaveLength(1)
     expect(
       screen.getAllByTestId('AgentRow.status').map((e) => e.getAttribute('data-status'))
-    ).toEqual(['running', 'failed', 'done', 'stopped', 'loaded'])
+    ).toEqual(['running', 'failed', 'done', 'stopped', 'loaded', 'subagents'])
   })
 
   it('shows the resume count only for an agent that was resumed', async () => {

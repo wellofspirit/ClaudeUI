@@ -375,6 +375,81 @@ describe('useAgentRoster', () => {
       expect(seen?.runningAgentCount).toBe(1)
     })
 
+    it('stamps a finished agent with the running agents below it (the `subagents` signal)', async () => {
+      const finishedA = {
+        taskId: 'af110ad6ad039a313',
+        toolUseId: A,
+        status: 'completed' as const,
+        outputFile: '',
+        summary: ''
+      }
+      setSession({
+        messages: nestedMessages(),
+        subagentMessages: nestedBuckets(),
+        activeTasks: { [B]: nestedActiveTasks()[B] },
+        taskNotifications: [finishedA]
+      })
+      await renderProbe()
+      // A's own run ended; B, which A launched, has an armed record.
+      expect(seen?.agents.map((r) => [r.isRunning, r.runningDescendants])).toEqual([
+        [false, 1],
+        [true, undefined]
+      ])
+
+      // While A runs too the count is still there (the row just reads `running`).
+      setSession({ activeTasks: nestedActiveTasks(), taskNotifications: [] })
+      await renderProbe()
+      expect(seen?.agents[0].isRunning).toBe(true)
+
+      // B done as well: nothing below A is running.
+      setSession({
+        activeTasks: {},
+        taskNotifications: [finishedA, { ...finishedA, taskId: 'b', toolUseId: B }]
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.runningDescendants)).toEqual([undefined, undefined])
+    })
+
+    it('does not count a running shell below a finished agent', async () => {
+      setSession({
+        messages: nestedMessages(),
+        subagentMessages: nestedBuckets(),
+        activeTasks: { [A_BG_BASH]: nestedActiveTasks()[A_BG_BASH] },
+        taskNotifications: [
+          { taskId: 'a', toolUseId: A, status: 'completed', outputFile: '', summary: '' },
+          { taskId: 'b', toolUseId: B, status: 'completed', outputFile: '', summary: '' }
+        ]
+      })
+      await renderProbe()
+      expect(seen?.shells.map((r) => r.isRunning)).toEqual([true])
+      expect(seen?.agents.map((r) => r.runningDescendants)).toEqual([undefined, undefined])
+    })
+
+    it('counts every depth, and each ancestor once', async () => {
+      const buckets = nestedBuckets()
+      buckets[B] = [
+        ...buckets[B],
+        assistantWithTool('b-2', 'tu-c', 'Agent', { name: 'grandchild', description: 'deeper' })
+      ]
+      setSession({
+        messages: nestedMessages(),
+        subagentMessages: buckets,
+        activeTasks: {
+          'tu-c': { taskId: 'tc', taskType: 'local_agent', runIndex: 1, isBackgrounded: true }
+        },
+        taskNotifications: [
+          { taskId: 'a', toolUseId: A, status: 'completed', outputFile: '', summary: '' },
+          { taskId: 'b', toolUseId: B, status: 'completed', outputFile: '', summary: '' }
+        ]
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => [r.name, r.isRunning, r.runningDescendants])).toEqual([
+        ['probenesta', false, 1],
+        ['probenestb', false, 1],
+        ['grandchild', true, undefined]
+      ])
+    })
+
     it('terminates on a bucket that holds its own spawn, and on a cycle', async () => {
       const root = [assistantWithTool('s-1', 'tu-s', 'Agent', { name: 'self' })]
       setSession({
@@ -447,6 +522,26 @@ describe('useAgentRoster', () => {
         ['grandchild', 1, false, true]
       ])
       expect(seen?.runningCount).toBe(0)
+    })
+
+    it('never reads as "subagents only": with no record, nothing runs below a finished agent', async () => {
+      setSession({
+        ...withEngine('pi'),
+        messages: [
+          assistantWithTool('m1', 'tu-parent', 'subagent', { agent: 'scout', task: 'look' }),
+          toolResult('m2', 'tu-parent')
+        ],
+        subagentMessages: {
+          'tu-parent': [
+            assistantWithTool('p1', 'tu-nested', 'subagent', { agent: 'worker', task: 'dig' })
+          ]
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => [r.isRunning, r.runningDescendants])).toEqual([
+        [false, undefined],
+        [false, undefined]
+      ])
     })
 
     it('is not running once its parent is done (pi child aborted mid-call)', async () => {

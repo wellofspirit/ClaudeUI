@@ -525,6 +525,75 @@ describe('TaskCard — inline task approval', () => {
 })
 
 // ---------------------------------------------------------------------------
+// The type chip (ADR-094): bot + letters, or the muted bot alone
+// ---------------------------------------------------------------------------
+
+describe('TaskCard — the type chip', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  it('is the bot, the letter and the name, in the type colour, for a typed agent', () => {
+    render(<TaskCard block={makeTaskBlock()} view={{ ...defaultTaskView, subagent: 'Explore' }} />)
+    const chip = screen.getByTestId('TaskCard.type')
+    const tile = screen.getByTestId('TaskCard.typeTile')
+    expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
+    expect(tile).toHaveTextContent('E')
+    expect(tile.getAttribute('data-color')).not.toBeNull()
+    expect(chip).toHaveTextContent('EExplore')
+  })
+
+  it('is the muted bot alone, with no type text, for general-purpose', () => {
+    render(
+      <TaskCard
+        block={makeTaskBlock()}
+        view={{ ...defaultTaskView, subagent: 'general-purpose' }}
+      />
+    )
+    const chip = screen.getByTestId('TaskCard.type')
+    const tile = screen.getByTestId('TaskCard.typeTile')
+    expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
+    expect(tile.getAttribute('data-color')).toBeNull()
+    expect(tile.className).toContain('bg-bg-tertiary')
+    expect(chip.textContent).toBe('')
+    // Nothing of the chip is tinted: no padded, coloured pill around the bot.
+    expect(chip.className).not.toMatch(/bg-agent-|text-agent-/)
+  })
+
+  it('is the muted bot alone for an agent with no type (a Codex spawn)', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          status: { ...state.sessions[ROUTE].status, engineId: 'codex' }
+        }
+      }
+    }))
+    render(
+      <TaskCard
+        block={makeTaskBlock()}
+        view={{ ...defaultTaskView, subagent: undefined as unknown as string, model: 'gpt-6' }}
+      />
+    )
+    expect(screen.getByTestId('TaskCard.type').textContent).toBe('')
+    expect(
+      screen.getByTestId('TaskCard.typeTile').querySelector('[data-testid="AgentTile.bot"]')
+    ).not.toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Cross-engine dispatch (ADR-033 M3) — TaskCard reused for dispatch_agent
 // ---------------------------------------------------------------------------
 //
@@ -570,6 +639,7 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
     expect(screen.getByText('opencode · openai/gpt-5')).toBeInTheDocument()
     const tile = screen.getAllByTestId('TaskCard.typeTile')[0]
     expect(tile).toHaveTextContent('X')
+    expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
     expect(tile).toHaveAttribute('title', 'Dispatch → opencode · openai/gpt-5')
   })
 

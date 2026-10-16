@@ -7,7 +7,8 @@
  * palette every engine shares, and Auto / Reset. A type with no override is
  * coloured by its engine's own agent colour (Claude Code's and opencode's agent
  * files name one), else by a stable hash of its name, which is what "Auto"
- * means. The engine's default type has no tile and is listed greyed.
+ * means. The engine's default type is the bot alone, muted and uncoloured, and
+ * is listed greyed.
  *
  * The overrides live in ClaudeUI's own settings (`agentTypeColors`,
  * `dispatchTileColor`) and travel through the normal `update` write, so they
@@ -153,15 +154,9 @@ function TypeRow({
         testid={testid}
         dataId={info.type}
         dimmed
-        leading={
-          <AgentTile
-            testId="AgentColours.tile"
-            letter={'–'}
-            title={`${info.type}: default type, no tile`}
-          />
-        }
+        leading={<AgentTile testId="AgentColours.tile" title={`${info.type}: default type`} />}
         label={info.type}
-        description="Default type, no tile."
+        description="Default type, a plain bot with no colour."
       />
     )
   }

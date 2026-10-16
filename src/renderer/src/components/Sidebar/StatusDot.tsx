@@ -6,8 +6,13 @@ export const SESSION_DOT_STATES = [
   'subagents',
   'idle',
   'watching',
-  'inactive'
+  'inactive',
+  'failed'
 ] as const
+/**
+ * `failed` is not a session state (no session derives it): it is the agent
+ * roster's, which draws its rows' dots with this same element (see AgentRow).
+ */
 export type SessionDotState = (typeof SESSION_DOT_STATES)[number]
 
 export interface SessionDotInput {
@@ -42,7 +47,8 @@ const LABELS: Record<SessionDotState, string> = {
   subagents: 'Subagents working',
   idle: 'Idle',
   watching: 'Watching',
-  inactive: 'Not running'
+  inactive: 'Not running',
+  failed: 'Failed'
 }
 
 const RIPPLE: ReadonlySet<SessionDotState> = new Set(['attention', 'running', 'subagents'])
@@ -63,20 +69,27 @@ export function StatusDot({
   state,
   runningSubagents,
   testid = 'StatusDot',
-  className = ''
+  className = '',
+  label: labelOverride,
+  status
 }: {
   state: SessionDotState
   runningSubagents: number
   testid?: string
   className?: string
+  /** Replaces the state's own words, for a surface whose states mean something else (a roster row's "Done"). */
+  label?: string
+  /** The surface's own name for the state, as `data-status` (the roster's `done`, `stopped`, ...). */
+  status?: string
 }): React.JSX.Element {
   // A random phase per mount, so a list of busy sessions doesn't ripple in unison.
   const [phase] = useState(() => `-${(Math.random() * CYCLE_S).toFixed(2)}s`)
-  const label = statusDotLabel(state, runningSubagents)
+  const label = labelOverride ?? statusDotLabel(state, runningSubagents)
   return (
     <span
       data-testid={testid}
       data-state={state}
+      {...(status ? { 'data-status': status } : {})}
       data-subagents={runningSubagents}
       role="img"
       title={label}

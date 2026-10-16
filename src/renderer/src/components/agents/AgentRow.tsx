@@ -13,11 +13,14 @@
  * One line at every width (§10). Left to right: guide · status dot · type
  * column · label · resumed chip · spacer · Stop (running only) · metrics. The
  * row has no description line: it was a static summary written at spawn time,
- * and it lives in the label's tooltip. The type is a 16px letter tile (ADR-094),
- * not a text badge, so it costs 16px of the line where the badge cost 60-140px,
- * and that is what made one line possible in the 420px overlay. The column is
- * 16px on every row (a default-type agent leaves it empty, a shell has a `$`) so
- * the labels line up. Stop sits inline BEFORE the metrics rather than in a
+ * and it lives in the label's tooltip. The type is a 16px-high tile (ADR-094),
+ * not a text badge, so it costs 36px of the line where the badge cost 60-140px,
+ * and that is what made one line possible in the 420px overlay. Every agent has a
+ * tile (the bot, and the type's letters after it; a default or untyped agent is
+ * the bot alone), so the column is a fixed 36px slot, wide enough for the bot and
+ * two letters, with the tile (or a shell's `$`) left-aligned in it: the labels
+ * line up whatever the row shows. Under 300px it is 16px and a lettered tile
+ * drops its bot. Stop sits inline BEFORE the metrics rather than in a
  * reserved column, so finished rows lose no width and the metrics end at the
  * same x on every row. Nothing on the line is taller than its 16px line height
  * (`leading-4`; Stop and the resumed chip are trimmed to fit), so a running row is
@@ -33,7 +36,14 @@
 import { useEffect, useRef } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { formatElapsed, formatTokens, taskElapsedLabel, useTicker } from '../chat/TaskCard'
-import { AgentTile, useAgentTile } from './AgentTypeTile'
+import {
+  AGENT_TILE_COMPACT_CLASS,
+  AGENT_TILE_NO_BOT_COMPACT_CLASS,
+  AGENT_TYPE_SLOT_CLASS,
+  AgentTile,
+  useAgentTile
+} from './AgentTypeTile'
+import { StatusDot, type SessionDotState } from '../Sidebar/StatusDot'
 import { agentRowLabel, type AgentRosterRow } from '../../hooks/useAgentRoster'
 
 /** Indent per nesting level, on top of the row's own 10px (`px-2.5`). */
@@ -81,32 +91,64 @@ function TreeGuide({ depth, guide }: { depth: number; guide: RowGuide }): React.
   )
 }
 
-function StatusDot({ row }: { row: AgentRosterRow }): React.JSX.Element {
-  if (row.isRunning) {
-    return (
-      <span
-        data-testid="AgentRow.status"
-        data-status="running"
-        className="relative flex h-2 w-2 shrink-0"
-      >
-        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-60" />
-        <span className="relative inline-flex rounded-full h-2 w-2 bg-accent" />
-      </span>
-    )
-  }
-  const [status, color] = row.isError
-    ? ['failed', 'bg-danger']
-    : row.isStopped
-      ? ['stopped', 'bg-warning']
-      : row.isLoaded
-        ? ['loaded', 'bg-text-muted']
-        : ['done', 'bg-success']
+/** The roster's names for a row's state: `data-status`, and which state of the shared dot draws it. */
+export type RowStatus = 'running' | 'subagents' | 'failed' | 'stopped' | 'loaded' | 'done'
+
+/**
+ * A row's dot is the session dot's (`status-dot`, its ripple and colours), mapped:
+ * the agent's own work in progress ripples green (`running`); its own run ended
+ * but agents it launched still work, violet (`subagents`, from
+ * `runningDescendants`, shells not counted); done is steady green (`idle`);
+ * failed steady red; stopped by the user and loaded from history steady muted
+ * (`inactive`). There is no yellow: a stop is not a warning.
+ *
+ * A failed or stopped agent stays failed or stopped whatever runs below it:
+ * how it ended is the more useful thing to read.
+ */
+export function rowStatus(
+  row: Pick<
+    AgentRosterRow,
+    'isRunning' | 'isError' | 'isStopped' | 'isLoaded' | 'runningDescendants'
+  >
+): RowStatus {
+  if (row.isRunning) return 'running'
+  if (row.isError) return 'failed'
+  if (row.isStopped) return 'stopped'
+  if (row.isLoaded) return 'loaded'
+  if ((row.runningDescendants ?? 0) > 0) return 'subagents'
+  return 'done'
+}
+
+const DOT_STATE: Record<RowStatus, SessionDotState> = {
+  running: 'running',
+  subagents: 'subagents',
+  failed: 'failed',
+  stopped: 'inactive',
+  loaded: 'inactive',
+  done: 'idle'
+}
+
+const DOT_LABEL: Partial<Record<RowStatus, string>> = {
+  done: 'Done',
+  failed: 'Failed',
+  stopped: 'Stopped',
+  loaded: 'Loaded from history'
+}
+
+function RowStatusDot({ row }: { row: AgentRosterRow }): React.JSX.Element {
+  const status = rowStatus(row)
   return (
-    <span
-      data-testid="AgentRow.status"
-      data-status={status}
-      className={`h-2 w-2 rounded-full shrink-0 ${color}`}
-    />
+    // An 8px box, as before, around the 6px dot: its ripple ring is absolute, so the
+    // box is what the row's columns and the tree guides see.
+    <span className="inline-flex h-2 w-2 shrink-0 items-center justify-center">
+      <StatusDot
+        testid="AgentRow.status"
+        state={DOT_STATE[status]}
+        status={status}
+        runningSubagents={row.runningDescendants ?? 0}
+        label={DOT_LABEL[status]}
+      />
+    </span>
   )
 }
 
@@ -204,25 +246,26 @@ export function AgentRow({
       } ${isContext ? 'opacity-55' : !row.isRunning && row.isError ? 'opacity-80' : ''}`}
     >
       {row.depth > 0 && guide && <TreeGuide depth={row.depth} guide={guide} />}
-      <StatusDot row={row} />
-      {isShell ? (
-        <span
-          data-testid="AgentRow.shellGlyph"
-          title="Background shell"
-          className="inline-flex items-center justify-center h-4 w-4 shrink-0 rounded border border-border font-mono text-[10px] leading-none font-bold text-text-muted select-none"
-        >
-          $
-        </span>
-      ) : tile ? (
-        <AgentTile
-          testId="AgentRow.typeTile"
-          letter={tile.letter}
-          colorId={tile.colorId}
-          title={tile.title}
-        />
-      ) : (
-        <span aria-hidden className="h-4 w-4 shrink-0" />
-      )}
+      <RowStatusDot row={row} />
+      <span data-testid="AgentRow.typeSlot" className={AGENT_TYPE_SLOT_CLASS}>
+        {isShell ? (
+          <span
+            data-testid="AgentRow.shellGlyph"
+            title="Background shell"
+            className="inline-flex items-center justify-center h-4 w-4 shrink-0 rounded border border-border font-mono text-[10px] leading-none font-bold text-text-muted select-none"
+          >
+            $
+          </span>
+        ) : (
+          <AgentTile
+            testId="AgentRow.typeTile"
+            letter={tile.letter}
+            colorId={tile.colorId}
+            title={tile.title}
+            className={`${AGENT_TILE_COMPACT_CLASS} ${tile.letter ? AGENT_TILE_NO_BOT_COMPACT_CLASS : ''}`}
+          />
+        )}
+      </span>
       <span
         data-testid="AgentRow.name"
         title={row.description || undefined}

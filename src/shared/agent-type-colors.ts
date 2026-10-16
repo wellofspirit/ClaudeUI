@@ -36,8 +36,9 @@ export const DEFAULT_DISPATCH_TILE_COLOR: AgentColorId = 'orange'
 
 /**
  * The agent type each engine uses when a spawn call names none. Its card and
- * row carry no tile: the default is the unremarkable case, and a tile on every
- * agent would be noise that drowns the ones worth telling apart.
+ * row carry the bot alone, muted: the default is the unremarkable case, and a
+ * letter and a colour on every agent would be noise that drowns the ones worth
+ * telling apart.
  *
  * Claude Code: `general-purpose`. pi: ClaudeUI's own `general-purpose`
  * (`core/pi/pi-agent-registry.ts`). opencode: `general`. Codex: the role
@@ -59,9 +60,10 @@ export function isDefaultSubagentType(engine: EngineId | undefined, type: string
 }
 
 /**
- * Whether `type` gets a tile at all: it is a single type, and not the engine's
- * default. A comma means it is not one type: pi's legacy parallel `subagent` call
- * carries "scout, planner" as one card, and a tile for it would name neither.
+ * Whether `type` gets a letter and a colour: it is a single type, and not the
+ * engine's default (which, like no type at all, gets the bot alone). A comma
+ * means it is not one type: pi's legacy parallel `subagent` call carries
+ * "scout, planner" as one card, and a letter for it would name neither.
  */
 export function hasTypeTile(engine: EngineId | undefined, type: string | undefined): boolean {
   return !!type && !type.includes(',') && !isDefaultSubagentType(engine, type)

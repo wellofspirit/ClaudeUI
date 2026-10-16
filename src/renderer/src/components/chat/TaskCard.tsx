@@ -225,11 +225,12 @@ const MODEL_FLOOR_MIN_CHARS = 11
  * usage and Open in panel at the right. The collapsed card and the expanded card
  * both end in it; only the wrapper differs (`className`).
  *
- * The type (ADR-094) is its tile: the engine's default type has none, and
- * neither a chip nor a tile is drawn. Below 480px it is the 16px letter tile
- * alone; wide, one element draws a chip in the type's colour, led by that same
- * tile and followed by the name, so phone and desktop read alike. A dispatch is
- * the X tile.
+ * The type (ADR-094) is its tile, the bot and the type's letters. Below 480px
+ * it is that 16px tile alone; wide, one element draws a chip in the type's
+ * colour, led by that same tile and followed by the name, so phone and desktop
+ * read alike. A dispatch is the bot and an X. The engine's default type, and an
+ * agent with no type, is the muted bot tile alone at every width: it names
+ * nothing, so there is no name to show and no tint to draw.
  *
  * Every chip is `whitespace-nowrap shrink-0` except the model, the one that
  * gives way: at phone width a chip breaking mid-token is worse than a truncated
@@ -255,8 +256,8 @@ function TaskFooter({
   onOpenPanel
 }: {
   className: string
-  /** The type tile's spec; `null` for the default type (no tile, no chip). */
-  tile: AgentTileSpec | null
+  /** The type tile's spec: the bot alone (no `colorId`) for the default type and an untyped agent. */
+  tile: AgentTileSpec
   /** The raw model id, or a dispatch's "<engine> · <model>". */
   model: string | null
   /** The model's catalog name, when the picker has one; the raw id otherwise. */
@@ -269,22 +270,25 @@ function TaskFooter({
 }): React.JSX.Element {
   return (
     <div className={`${className} ${NARROW_WRAP}`}>
-      {tile && (
-        // One element, two faces (ADR-094): the tile alone below 480px, a chip in
-        // the type's colour wide. The chip's padding and tint drop away narrow.
-        <span
-          data-testid="TaskCard.type"
-          className={`inline-flex items-center gap-1 text-[10px] font-mono pl-0.5 pr-1.5 py-px rounded whitespace-nowrap shrink-0 @max-[480px]/taskcard:p-0 @max-[480px]/taskcard:bg-transparent ${AGENT_CHIP_CLASS[tile.colorId]}`}
-        >
-          <AgentTile
-            testId="TaskCard.typeTile"
-            letter={tile.letter}
-            colorId={tile.colorId}
-            title={tile.title}
-          />
-          <span className={NARROW_ONLY_HIDE}>{tile.label}</span>
-        </span>
-      )}
+      {/* One element, two faces (ADR-094): the tile alone below 480px, a chip in the
+          type's colour wide. The chip's padding and tint drop away narrow, and for
+          the muted bot (no colour, no name) at every width. */}
+      <span
+        data-testid="TaskCard.type"
+        className={`inline-flex items-center gap-1 text-[10px] font-mono rounded whitespace-nowrap shrink-0 ${
+          tile.colorId
+            ? `pl-0.5 pr-1.5 py-px @max-[480px]/taskcard:p-0 @max-[480px]/taskcard:bg-transparent ${AGENT_CHIP_CLASS[tile.colorId]}`
+            : ''
+        }`}
+      >
+        <AgentTile
+          testId="TaskCard.typeTile"
+          letter={tile.letter}
+          colorId={tile.colorId}
+          title={tile.title}
+        />
+        {tile.colorId && <span className={NARROW_ONLY_HIDE}>{tile.label}</span>}
+      </span>
       {isBackground && (
         // One chip, two faces: the word wide, the tray icon below 480px (a word-only chip
         // left the ↗ alone on row 2 at chat ~1.22). The glyph is shared with Send to
@@ -446,8 +450,9 @@ export function TaskCard({
   // Read display fields from the engine-neutral view (not block.toolInput)
   const description = (view.description || view.prompt || '').slice(0, 120)
   const prompt = view.prompt
-  // The type tile (ADR-094): a dispatch is an X, the engine's default type has
-  // none. `view.subagent` is a TYPE on every engine, and a Codex spawn has none.
+  // The type tile (ADR-094): a dispatch is the bot and an X, the engine's default type
+  // and an untyped agent the bot alone. `view.subagent` is a TYPE on every engine, and
+  // a Codex spawn has none.
   const tile = useAgentTile(engineId, view.subagent, view.dispatch)
   // A dispatch has no model of its own to name: its chip says where it went.
   const model = view.dispatch ? dispatchLabel(view.dispatch) : (view.model ?? null)

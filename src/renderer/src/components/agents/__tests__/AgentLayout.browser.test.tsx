@@ -299,13 +299,14 @@ function expectMetricsReadable(row: HTMLElement): void {
   expect(metrics.clientWidth).toBeGreaterThanOrEqual(Math.min(metrics.scrollWidth, 48) - 1)
 }
 
-/** The tile shows whole, a 16px square: a clipped letter is a broken tile. */
+/** The tile shows whole, 16px high: a clipped letter is a broken tile. */
 function expectTileWhole(row: HTMLElement): void {
   const tile = byTestId(row, 'AgentRow.typeTile')
   expect(tile.scrollWidth).toBeLessThanOrEqual(tile.clientWidth + 1)
   expect(tile.clientHeight).toBe(16)
   expect(tile.clientWidth).toBeGreaterThanOrEqual(16)
-  expect(tile.innerText.trim()).toMatch(/^[A-Z0-9]$/)
+  // The bot has no text: the tile reads as its letters (one or two).
+  expect(tile.innerText.trim()).toMatch(/^[A-Z0-9]{1,2}$/)
 }
 
 /**
@@ -561,7 +562,8 @@ describe('one line at every roster width (§10)', () => {
       (r) => r.getAttribute('data-depth') === '0'
     )
     // Typed agent (migration-reviewer), default type (general-purpose), a typed
-    // unnamed agent (Plan) and a shell: tile, empty column and `$` all take 16px.
+    // unnamed agent (Plan) and a shell: bot + 2 letters, bot + 1, bot alone and `$`
+    // all sit in the one 36px type slot.
     expect(rows.length).toBeGreaterThanOrEqual(4)
     const lefts = rows.map((r) => rectOf(byTestId(r, 'AgentRow.name')).left)
     for (const left of lefts) expect(Math.abs(left - lefts[0])).toBeLessThanOrEqual(1)
@@ -571,8 +573,9 @@ describe('one line at every roster width (§10)', () => {
     const rows = allByTestId(await mountPanel(600), 'AgentRow')
     const shell = rows.find((r) => r.getAttribute('data-tool-use-id') === SHELL)!
     const glyph = byTestId(shell, 'AgentRow.shellGlyph')
-    // Border box: the 16px type column, like a tile.
+    // Border box: 16px, left-aligned in the type slot.
     expect(rectOf(glyph).width).toBeCloseTo(16, 0)
+    expect(rectOf(glyph).left).toBeCloseTo(rectOf(byTestId(shell, 'AgentRow.typeSlot')).left, 0)
     expect(rectOf(glyph).height).toBeCloseTo(16, 0)
     const name = byTestId(shell, 'AgentRow.name')
     expect(name.textContent).toBe(LONG_COMMAND)
@@ -657,44 +660,101 @@ describe('the type tile in the agent list (ADR-094)', () => {
   const rowOf = (root: HTMLElement, toolUseId: string): HTMLElement =>
     root.querySelector<HTMLElement>(`[data-tool-use-id="${toolUseId}"]`)!
 
-  it('shows a letter tile for a custom type, none for the default, an X for a dispatch', async () => {
+  it('shows the bot and a letter for a custom type, the bot alone for the default, the bot and an X for a dispatch', async () => {
     const overlay = await openOverlay(1.1)
     const custom = rowOf(overlay, 'tu-custom')
     const tile = byTestId(custom, 'AgentRow.typeTile')
     expect(tile.innerText.trim()).toBe('E')
+    expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
     // The full type name for a hover and a screen reader.
     expect(tile.title).toBe('Explore')
     expect(tile.getAttribute('aria-label')).toBe('Explore')
-    // The default type has nothing to say: no tile, but its 16px column is kept,
-    // so the label starts where a tiled row's label does.
-    const plain = rowOf(overlay, 'tu-default')
-    expect(plain.querySelector('[data-testid="AgentRow.typeTile"]')).toBeNull()
-    expect(rectOf(byTestId(plain, 'AgentRow.name')).left).toBeCloseTo(
+    // The default type is the muted bot alone, in the same slot, so the label
+    // starts where a lettered row's label does.
+    const plain = byTestId(rowOf(overlay, 'tu-default'), 'AgentRow.typeTile')
+    expect(plain.innerText.trim()).toBe('')
+    expect(plain.getAttribute('data-color')).toBeNull()
+    expect(rectOf(byTestId(rowOf(overlay, 'tu-default'), 'AgentRow.name')).left).toBeCloseTo(
       rectOf(byTestId(custom, 'AgentRow.name')).left,
       0
     )
-    // A dispatch is an X, and says where it went.
+    // A dispatch is the bot and an X, and says where it went.
     const dispatch = byTestId(rowOf(overlay, 'tu-dispatch'), 'AgentRow.typeTile')
     expect(dispatch.innerText.trim()).toBe('X')
+    expect(dispatch.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
     expect(dispatch.title).toBe('Dispatch → opencode · deepseek-v4')
   })
 
-  it('keeps a two-letter tile in the 16px column, so its label lines up with a one-letter row', async () => {
-    // The 16px claim is about the bundled face: a fallback bold is wider.
+  it('lines the labels up across bot alone, bot + 1 letter and bot + 2 letters', async () => {
+    const overlay = await openOverlay(1.1)
+    const ids = ['tu-default', 'tu-custom', 'tu-two']
+    const lefts = ids.map((id) => rectOf(byTestId(rowOf(overlay, id), 'AgentRow.name')).left)
+    for (const left of lefts) expect(Math.abs(left - lefts[0])).toBeLessThanOrEqual(0.5)
+    // Each tile sits whole inside its slot, left-aligned.
+    for (const id of ids) {
+      const row = rowOf(overlay, id)
+      const slot = byTestId(row, 'AgentRow.typeSlot')
+      const tile = byTestId(row, 'AgentRow.typeTile')
+      expect(Math.abs(rectOf(tile).left - rectOf(slot).left)).toBeLessThanOrEqual(0.5)
+      expect(rectOf(tile).right).toBeLessThanOrEqual(rectOf(slot).right + 0.5)
+    }
+  })
+
+  // The owner caught the bot and the letter sitting low in the mockup. The bot's
+  // drawing is shifted inside its viewBox and the letters are trimmed to cap
+  // height (`text-box`), so both centre on the tile's own centre line.
+  it('centres the bot and the letters on the tile, for one letter and for two', async () => {
     await document.fonts.load('bold 10px "JetBrains Mono"')
     const overlay = await openOverlay(1.1)
-    const two = rowOf(overlay, 'tu-two')
-    const tile = byTestId(two, 'AgentRow.typeTile')
-    expect(tile.innerText.trim()).toBe('DR')
-    expect(tile.scrollWidth).toBeLessThanOrEqual(tile.clientWidth + 1)
-    // The same box as the one-letter tile's (the overlay is zoomed, so not 16 itself).
-    const one = byTestId(rowOf(overlay, 'tu-custom'), 'AgentRow.typeTile')
-    expect(rectOf(tile).width).toBeCloseTo(rectOf(one).width, 0)
-    expect(rectOf(tile).height).toBeCloseTo(rectOf(one).height, 0)
-    expect(rectOf(byTestId(two, 'AgentRow.name')).left).toBeCloseTo(
-      rectOf(byTestId(rowOf(overlay, 'tu-custom'), 'AgentRow.name')).left,
-      0
+    // The trim is what centres the letters; a Chromium without it needs a measured offset.
+    expect(CSS.supports('text-box', 'trim-both cap alphabetic')).toBe(true)
+    const ctx = document.createElement('canvas').getContext('2d')!
+    ctx.font = 'bold 10px "JetBrains Mono"'
+    for (const [id, letters] of [
+      ['tu-custom', 'E'],
+      ['tu-two', 'DR']
+    ] as const) {
+      const tile = byTestId(rowOf(overlay, id), 'AgentRow.typeTile')
+      expect(tile.innerText.trim()).toBe(letters)
+      const mid = centreY(tile)
+      const zoom = rectOf(tile).height / 16
+      // The bot's drawing (not its svg box): within half a pixel of the tile's centre.
+      const shape = byTestId(tile, 'AgentTile.bot.shape')
+      expect(Math.abs(centreY(shape) - mid)).toBeLessThanOrEqual(0.4)
+      // The letters' box is centred on the tile...
+      const letter = tile.querySelector<HTMLElement>('.agent-tile-letter')!
+      expect(letter.textContent).toBe(letters)
+      expect(Math.abs(centreY(letter) - mid)).toBeLessThanOrEqual(0.75)
+      // ...and it IS the capitals: as tall as their ink (canvas rounds the ink to
+      // whole pixels), not as tall as the 10px line, so centring the box centres the
+      // glyphs.
+      const box = rectOf(letter).height / zoom
+      expect(box).toBeLessThan(8.5)
+      expect(Math.abs(box - ctx.measureText(letters).actualBoundingBoxAscent)).toBeLessThanOrEqual(
+        1
+      )
+    }
+  })
+
+  it('drops the bot from a lettered tile under 300px, and keeps the labels aligned', async () => {
+    const root = await mountPanel(240)
+    const rows = allByTestId(root, 'AgentRow').filter((r) =>
+      r.querySelector('[data-testid="AgentRow.typeTile"]')
     )
+    const lettered = rows.filter((r) => byTestId(r, 'AgentRow.typeTile').textContent!.trim() !== '')
+    const botOnly = rows.filter((r) => byTestId(r, 'AgentRow.typeTile').textContent!.trim() === '')
+    expect(lettered.length).toBeGreaterThan(0)
+    expect(botOnly.length).toBeGreaterThan(0)
+    for (const row of lettered) {
+      expect(rectOf(byTestId(row, 'AgentTile.bot')).width).toBe(0)
+      expect(rectOf(byTestId(row, 'AgentRow.typeSlot')).width).toBeCloseTo(16, 0)
+    }
+    for (const row of botOnly) {
+      expect(rectOf(byTestId(row, 'AgentTile.bot')).width).toBeGreaterThan(0)
+    }
+    const tops = rows.filter((r) => r.getAttribute('data-depth') === '0')
+    const lefts = tops.map((r) => rectOf(byTestId(r, 'AgentRow.name')).left)
+    for (const left of lefts) expect(Math.abs(left - lefts[0])).toBeLessThanOrEqual(1)
   })
 
   it('takes the default dispatch colour, and the one in settings when set', async () => {

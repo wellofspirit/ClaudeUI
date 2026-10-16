@@ -51,6 +51,7 @@ describe('statusDotLabel', () => {
   it('names the state alone with no subagents', () => {
     expect(statusDotLabel('running', 0)).toBe('Working')
     expect(statusDotLabel('inactive', 0)).toBe('Not running')
+    expect(statusDotLabel('failed', 0)).toBe('Failed')
   })
 
   it('appends the subagent count, singular and plural', () => {
@@ -79,6 +80,12 @@ describe('the status-dot rules in app.css', () => {
       expect(css).toContain(`@keyframes ${name}`)
     }
   )
+
+  it('draws `failed` steady (no ripple) and in the themed danger colour', () => {
+    const rule = css.match(/\.status-dot\[data-state='failed'\]\s*\{([^}]*)\}/)
+    expect(rule?.[1]).toContain('--dot-color: var(--color-danger)')
+    expect(css).toContain('--color-danger:')
+  })
 
   it('every ripple animation runs one CYCLE_S-second cycle', () => {
     const durations: number[] = []

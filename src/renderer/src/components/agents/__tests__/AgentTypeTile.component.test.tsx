@@ -1,7 +1,8 @@
 /**
  * Layer 2: the type tile reads the user's override, the engine's native colour
  * (from the host's catalog) and the dispatch colour from the live store, and
- * draws nothing for the engine's default type (ADR-094).
+ * draws the bot alone, muted, for the engine's default type and for an untyped
+ * agent (ADR-094).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, waitFor } from '@testing-library/react'
@@ -31,7 +32,7 @@ describe('AgentTypeTile', () => {
     app.teardown()
   })
 
-  const draw = (engine: EngineId, type: string): void => {
+  const draw = (engine: EngineId, type: string | undefined): void => {
     render(<AgentTypeTile engine={engine} type={type} testId="tile" />)
   }
 
@@ -64,24 +65,31 @@ describe('AgentTypeTile', () => {
     await waitFor(() => expect(tile().textContent).toBe('R'))
   })
 
-  it('makes a two-letter tile a 16px column like a one-letter one', () => {
+  const hasBot = (): boolean => tile().querySelector('[data-testid="AgentTile.bot"]') !== null
+
+  it('draws a typed agent as the bot, then its letters', () => {
     draw('claude', 'deep-review')
     expect(tile().textContent).toBe('DR')
-    expect(tile().className).toContain('px-[2px]')
-    cleanup()
-    draw('claude', 'Explore')
-    expect(tile().className).toContain('px-[3px]')
+    expect(hasBot()).toBe(true)
+    // The bot comes first, then the letters.
+    expect(tile().firstElementChild?.getAttribute('data-testid')).toBe('AgentTile.bot')
+    expect(tile().lastElementChild?.textContent).toBe('DR')
   })
 
-  it('draws nothing for the engine default, and does not even ask the host', () => {
+  it('draws the bot alone, muted, for the engine default, and does not even ask the host', () => {
     for (const [engine, type] of [
       ['claude', 'general-purpose'],
       ['pi', 'general-purpose'],
       ['opencode', 'general'],
       ['codex', 'default']
     ] as const) {
-      const { container } = render(<AgentTypeTile engine={engine} type={type} testId="tile" />)
-      expect(container.innerHTML).toBe('')
+      const { unmount } = render(<AgentTypeTile engine={engine} type={type} testId="tile" />)
+      expect(hasBot()).toBe(true)
+      expect(tile().textContent).toBe('')
+      expect(tile().getAttribute('data-color')).toBeNull()
+      expect(tile().className).toContain('bg-bg-tertiary')
+      expect(tile().title).toBe(type)
+      unmount()
     }
     expect(listAgentTypes).not.toHaveBeenCalled()
     // ...and `general-purpose` is an ordinary type on opencode.
@@ -89,15 +97,20 @@ describe('AgentTypeTile', () => {
     expect(tile().textContent).toBe('GP')
   })
 
-  it('draws nothing for pi’s legacy parallel form, "scout, planner" is not one type', () => {
-    const { container } = render(<AgentTypeTile engine="pi" type="scout, planner" testId="tile" />)
-    expect(container.innerHTML).toBe('')
+  it('draws the bot alone for pi’s legacy parallel form, "scout, planner" is not one type', () => {
+    draw('pi', 'scout, planner')
+    expect(hasBot()).toBe(true)
+    expect(tile().textContent).toBe('')
+    expect(tile().getAttribute('data-color')).toBeNull()
     expect(listAgentTypes).not.toHaveBeenCalled()
   })
 
-  it('draws nothing for an agent with no type at all', () => {
-    const { container } = render(<AgentTypeTile engine="codex" type={undefined} testId="tile" />)
-    expect(container.innerHTML).toBe('')
+  it('draws the bot alone for an agent with no type at all', () => {
+    draw('codex', undefined)
+    expect(hasBot()).toBe(true)
+    expect(tile().textContent).toBe('')
+    expect(tile().getAttribute('data-color')).toBeNull()
+    expect(tile().title).toBe('Agent')
   })
 
   it('falls to the hash, then to the native colour once the catalog arrives, and the override wins', async () => {
@@ -148,6 +161,7 @@ describe('AgentTypeTile', () => {
       />
     )
     expect(tile().textContent).toBe('X')
+    expect(hasBot()).toBe(true)
     expect(tile().getAttribute('data-color')).toBe('teal')
     expect(tile().title).toBe('Dispatch → opencode · deepseek-v4')
     expect(listAgentTypes).not.toHaveBeenCalled()

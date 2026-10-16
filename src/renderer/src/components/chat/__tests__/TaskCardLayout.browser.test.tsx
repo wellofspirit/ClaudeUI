@@ -54,7 +54,7 @@ const view = {
   kind: 'task' as const,
   description: DESCRIPTION,
   prompt: 'Read every controller in the batch and report schema drift.',
-  // A custom type: the engine's default (`general-purpose`) has no tile (ADR-094).
+  // A custom type: the engine's default (`general-purpose`) is the bot alone (ADR-094).
   subagent: 'migration-reviewer',
   model: RAW_MODEL,
   background: true
@@ -334,10 +334,10 @@ describe('Task card on the phone', () => {
       expect(getComputedStyle(chip).fontFamily).toMatch(/mono/i)
       // It is the chip that gives way — and it still reads (floor). It takes the
       // leftover space of its line, but cannot claim a line of its own: the
-      // footer is one row at every scale. The 246px id fits whole at chat 1
-      // (a 355px card), and is cut from 1.1 on.
-      if (chatScale === 1) expect(chip.scrollWidth).toBeLessThanOrEqual(chip.clientWidth + 1)
-      else expect(chip.scrollWidth).toBeGreaterThan(chip.clientWidth)
+      // footer is one row at every scale. The 246px id is cut at every scale: it
+      // used to fit whole at chat 1 (a 355px card), but the type tile now holds
+      // the bot as well as its letters (about 17px more) and the id gives way.
+      expect(chip.scrollWidth).toBeGreaterThan(chip.clientWidth)
       expectModelReadable(chip)
       const footer = footerOf(card, false)
       expectFooterSound(footer)
@@ -572,7 +572,7 @@ duration_ms: 135000
       expect(rowCount(visibleChildren(footer))).toBe(1)
     })
 
-    it('has no chip and no tile for the default type, wide or narrow', async () => {
+    it('has the muted bot alone for the default type, with no name, wide or narrow', async () => {
       cleanup()
       seed([HAIKU], { engineId: 'claude' })
       for (const width of [undefined, '610px']) {
@@ -581,24 +581,37 @@ duration_ms: 135000
           model: 'haiku',
           view: { ...view, subagent: 'general-purpose' }
         })
-        expect(card.querySelector('[data-testid="TaskCard.type"]')).toBeNull()
-        expect(card.querySelector('[data-testid="TaskCard.typeTile"]')).toBeNull()
-        // The footer starts with the background chip, as it did.
-        expect(visibleChildren(footerOf(card, false))[0]).toBe(
-          byTestId(card, 'TaskCard.background')
+        const footer = footerOf(card, false)
+        const chip = byTestId(card, 'TaskCard.type')
+        const tile = byTestId(chip, 'TaskCard.typeTile')
+        expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
+        expect(tile.getAttribute('data-color')).toBeNull()
+        expect(tile.title).toBe('general-purpose')
+        // The bot names nothing: no type text at any width, no tint behind it.
+        expect(chip.innerText.trim()).toBe('')
+        expect(getComputedStyle(chip).backgroundColor).toBe('rgba(0, 0, 0, 0)')
+        expect(tile.clientHeight).toBe(16)
+        // It leads the footer, ahead of the background chip, which does not wrap.
+        expect(visibleChildren(footer)[0]).toBe(chip)
+        expect(rectOf(chip).right).toBeLessThanOrEqual(
+          rectOf(byTestId(card, 'TaskCard.background')).left + 1
         )
+        expect(rowCount(visibleChildren(footer))).toBe(1)
         cleanup()
         seed([HAIKU], { engineId: 'claude' })
       }
     })
 
-    it('never makes a Codex model a type: a spawn that carries only a model has no tile', async () => {
+    it('never makes a Codex model a type: a spawn that carries only a model gets the bot alone', async () => {
       cleanup()
       seed([], { engineId: 'claude' })
       const card = await mountCard(1, {
         view: { ...view, subagent: undefined as unknown as string, model: 'gpt-5.6-luna' }
       })
-      expect(card.querySelector('[data-testid="TaskCard.typeTile"]')).toBeNull()
+      const tile = byTestId(card, 'TaskCard.typeTile')
+      expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
+      expect(tile.getAttribute('data-color')).toBeNull()
+      expect(byTestId(card, 'TaskCard.type').innerText.trim()).toBe('')
       expect(byTestId(card, 'TaskCard.model').textContent).toBe('gpt-5.6-luna')
     })
 
@@ -663,7 +676,7 @@ duration_ms: 135000
       it(`keeps the chips whole under pressure (${expanded ? 'expanded' : 'collapsed'})`, async () => {
         cleanup()
         seed([], { runIndex: 2 })
-        const card = await mountCard(1, { width: '541px', expanded })
+        const card = await mountCard(1, { width: '551px', expanded })
         expect(rectOf(card).width).toBeGreaterThanOrEqual(480)
         const footer = footerOf(card, expanded)
         expectFooterSound(footer)

@@ -9,7 +9,7 @@ import React from 'react'
 import { render, screen, act, cleanup } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
-import { AgentRow } from '../AgentRow'
+import { AgentRow, rowStatus } from '../AgentRow'
 import type { AgentRosterRow } from '../../../hooks/useAgentRoster'
 
 const ROUTE = 'route-agent-row'
@@ -100,20 +100,108 @@ describe('AgentRow', () => {
     expect(name.title).toBe(command)
     expect(screen.getByTestId('AgentRow').getAttribute('data-kind')).toBe('shell')
     expect(screen.queryByTestId('AgentRow.typeTile')).toBeNull()
+    expect(screen.getByTestId('AgentRow.typeSlot').contains(glyph)).toBe(true)
   })
 
-  it('keeps the type column 16px wide on a default-type agent, with no tile in it', async () => {
+  it('draws a default-type agent as the muted bot alone, in the same type slot', async () => {
     await renderRow(row({ toolUseId: 'a', type: 'general-purpose' }))
-    expect(screen.queryByTestId('AgentRow.typeTile')).toBeNull()
+    const tile = screen.getByTestId('AgentRow.typeTile')
+    expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
+    expect(tile.textContent).toBe('')
+    expect(tile.title).toBe('general-purpose')
+    // Muted: no palette colour, the neutral tile.
+    expect(tile.getAttribute('data-color')).toBeNull()
+    expect(tile.className).toContain('bg-bg-tertiary')
+    expect(tile.className).toContain('text-text-muted')
     expect(screen.queryByTestId('AgentRow.shellGlyph')).toBeNull()
-    const name = screen.getByTestId('AgentRow.name')
-    const spacer = name.previousElementSibling as HTMLElement
-    expect(spacer.className).toContain('w-4')
+    // The slot is the same wide, left-aligned column a lettered tile sits in.
+    const slot = screen.getByTestId('AgentRow.typeSlot')
+    expect(slot.className).toContain('w-9')
+    expect(slot.contains(tile)).toBe(true)
+    expect(screen.getByTestId('AgentRow.name').previousElementSibling).toBe(slot)
   })
 
-  it('draws a typed agent as the tile', async () => {
-    await renderRow(row({ toolUseId: 'a', type: 'Explore' }))
-    expect(screen.getByTestId('AgentRow.typeTile').textContent).toBe('E')
+  it('draws an agent with no type at all (a Codex spawn) as the muted bot alone', async () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          status: { ...state.sessions[ROUTE].status, engineId: 'codex' }
+        }
+      }
+    }))
+    await renderRow(row({ toolUseId: 'a', type: undefined, name: 'gpt-6' }))
+    const tile = screen.getByTestId('AgentRow.typeTile')
+    expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
+    expect(tile.textContent).toBe('')
+    expect(tile.getAttribute('data-color')).toBeNull()
+    expect(tile.className).toContain('bg-bg-tertiary')
+  })
+
+  it('draws a dispatch as the bot and an X', async () => {
+    await renderRow(row({ toolUseId: 'a', dispatch: { engine: 'opencode', model: 'deepseek-v4' } }))
+    const tile = screen.getByTestId('AgentRow.typeTile')
+    expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
+    expect(tile.textContent).toBe('X')
+  })
+
+  describe('the status dot is the session dot (status-dot)', () => {
+    const dot = (): HTMLElement => screen.getByTestId('AgentRow.status')
+
+    it('ripples green while the agent itself works', async () => {
+      await renderRow(row({ toolUseId: 'a', isRunning: true }))
+      expect(dot().classList.contains('status-dot')).toBe(true)
+      expect(dot().classList.contains('status-dot--ripple')).toBe(true)
+      expect(dot().getAttribute('data-state')).toBe('running')
+      expect(dot().getAttribute('data-status')).toBe('running')
+      // A random phase per dot, as on the session list.
+      expect(dot().style.getPropertyValue('--dot-phase')).toMatch(/^-\d(\.\d+)?s$/)
+    })
+
+    it('ripples violet when its own run ended but agents it launched still work', async () => {
+      await renderRow(row({ toolUseId: 'a', runningDescendants: 2 }))
+      expect(dot().getAttribute('data-state')).toBe('subagents')
+      expect(dot().getAttribute('data-status')).toBe('subagents')
+      expect(dot().classList.contains('status-dot--ripple')).toBe(true)
+      expect(dot().title).toBe('2 subagents running')
+    })
+
+    it('is steady green when done, steady red when failed', async () => {
+      await renderRow(row({ toolUseId: 'a' }))
+      expect(dot().getAttribute('data-state')).toBe('idle')
+      expect(dot().getAttribute('data-status')).toBe('done')
+      expect(dot().classList.contains('status-dot--ripple')).toBe(false)
+      cleanup()
+      await renderRow(row({ toolUseId: 'b', isError: true }))
+      expect(dot().getAttribute('data-state')).toBe('failed')
+      expect(dot().getAttribute('data-status')).toBe('failed')
+      expect(dot().classList.contains('status-dot--ripple')).toBe(false)
+    })
+
+    it('is muted, never warning-coloured, when stopped by the user or loaded from history', async () => {
+      await renderRow(row({ toolUseId: 'a', isStopped: true }))
+      expect(dot().getAttribute('data-state')).toBe('inactive')
+      expect(dot().getAttribute('data-status')).toBe('stopped')
+      expect(dot().classList.contains('status-dot--ripple')).toBe(false)
+      expect(dot().className).not.toMatch(/warning|yellow|amber/)
+      expect(dot().title).toBe('Stopped')
+      cleanup()
+      await renderRow(row({ toolUseId: 'b', isLoaded: true }))
+      expect(dot().getAttribute('data-state')).toBe('inactive')
+      expect(dot().getAttribute('data-status')).toBe('loaded')
+    })
+
+    it('reads how an agent ended before what still runs below it', () => {
+      const base = { isRunning: false, isError: false, isStopped: false, isLoaded: false }
+      const below = { runningDescendants: 1 }
+      expect(rowStatus({ ...base, ...below })).toBe('subagents')
+      expect(rowStatus({ ...base, ...below, isRunning: true })).toBe('running')
+      expect(rowStatus({ ...base, ...below, isError: true })).toBe('failed')
+      expect(rowStatus({ ...base, ...below, isStopped: true })).toBe('stopped')
+      expect(rowStatus({ ...base, ...below, isLoaded: true })).toBe('loaded')
+      expect(rowStatus({ ...base, runningDescendants: 0 })).toBe('done')
+    })
   })
 
   it('puts Stop before the metrics in the DOM, and styles it red', async () => {

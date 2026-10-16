@@ -105,13 +105,15 @@ describe('Agent colours settings', () => {
         expect(row.textContent).toContain(info.type)
         const isDefault = ['general-purpose', 'general', 'default'].includes(info.type)
         if (isDefault) {
-          // Greyed: dimmed, a neutral tile, and nothing to pick.
-          expect(row.textContent).toContain('Default type, no tile.')
-          expect(tileOf(info.type).textContent).toBe('–')
+          // Greyed: dimmed, the muted bot alone, and nothing to pick.
+          expect(row.textContent).toContain('Default type, a plain bot with no colour.')
+          expect(tileOf(info.type).textContent).toBe('')
+          expect(tileOf(info.type).querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
           expect(tileOf(info.type).getAttribute('data-color')).toBeNull()
           expect(within(row).queryAllByTestId('AgentColours.swatch')).toHaveLength(0)
         } else {
           expect(tileOf(info.type).textContent).toBe(LETTERS[info.type])
+          expect(tileOf(info.type).querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
           expect(within(row).getAllByTestId('AgentColours.swatch')).toHaveLength(8)
         }
       }

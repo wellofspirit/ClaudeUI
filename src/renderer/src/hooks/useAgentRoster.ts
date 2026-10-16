@@ -91,6 +91,13 @@ export interface AgentRosterRow {
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
   /** 1 unless the agent was resumed (ADR-073). */
   runIndex: number
+  /**
+   * How many agents below this one (at any depth) are running. Shells do not
+   * count, as for the session dot. Absent when none are. An agent that is not
+   * running itself but has these is "subagents only": its own run ended while
+   * the agents it launched work on. See {@link withRunningDescendants}.
+   */
+  runningDescendants?: number
   /** A shell's start (ms epoch, from its lifecycle record): what a running shell's clock counts from. */
   startedAt?: number
 }
@@ -520,6 +527,40 @@ function unifyRows(
   return [...out, ...loose]
 }
 
+/**
+ * Stamp each agent with the running agents beneath it (`runningDescendants`).
+ *
+ * This is the roster's version of the session dot's `subagents` state, and the
+ * signal behind it is the engines' own lifecycle, not a guess: an agent row stops
+ * running when ITS terminal event arrives (`task_notification`), and a descendant
+ * is running only while ITS record is armed or, with no record at all, until
+ * `settleOrphans` settles it behind a non-running parent. So a running
+ * descendant under a non-running agent is always one with a record: Claude Code
+ * (a nested agent's `task_started` is top-level and outlives the spawner,
+ * protocol-cc 04 §4.5) and pi's host-run subagents (a grandchild outlives the
+ * child's run). opencode and Codex emit no records, so they never get here.
+ */
+function withRunningDescendants(agents: AgentRosterRow[]): AgentRosterRow[] {
+  const byId = new Map(agents.map((a) => [a.toolUseId, a]))
+  const counts = new Map<string, number>()
+  for (const agent of agents) {
+    if (!agent.isRunning) continue
+    const seen = new Set<string>()
+    for (
+      let parent = agent.parentToolUseId;
+      parent && !seen.has(parent);
+      parent = byId.get(parent)?.parentToolUseId
+    ) {
+      seen.add(parent)
+      counts.set(parent, (counts.get(parent) ?? 0) + 1)
+    }
+  }
+  if (counts.size === 0) return agents
+  return agents.map((a) =>
+    counts.has(a.toolUseId) ? { ...a, runningDescendants: counts.get(a.toolUseId) } : a
+  )
+}
+
 const NO_BUCKETS: Buckets = {}
 const NO_IDS: readonly string[] = []
 
@@ -564,7 +605,7 @@ export function useAgentRoster(): AgentRoster {
       notifications: taskNotifications ?? [],
       progress: taskProgressMap ?? {}
     }
-    const agents = settleOrphans(tree, (entry) => toRow(entry, opts), opts)
+    const agents = withRunningDescendants(settleOrphans(tree, (entry) => toRow(entry, opts), opts))
     const shellRows = shells.map((entry) => toRow({ ...entry, depth: 0 }, opts))
     const rows = unifyRows(
       agents,

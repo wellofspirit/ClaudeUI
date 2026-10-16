@@ -259,6 +259,20 @@ html[data-shell='web'] #root {
 .status-dot[data-state='inactive'] {
   --dot-color: color-mix(in srgb, var(--color-text-muted) 30%, transparent);
 }
+/* The letters of an agent tile (ADR-094), trimmed to cap height: the box is the
+   capitals themselves, so the flex centring of the tile centres the glyphs and
+   not the font's ascent and descent around them. */
+.agent-tile-letter {
+  display: block;
+  line-height: 1;
+  text-box: trim-both cap alphabetic;
+}
+
+/* An agent row that failed (the roster's dot, which is this element). Steady,
+   and red in both themes: --color-danger is themed. */
+.status-dot[data-state='failed'] {
+  --dot-color: var(--color-danger);
+}
 
 /* The busy ripple. Only transform and opacity animate, so it stays on the
    compositor (no main-thread paint per frame) however many rows are busy: the
