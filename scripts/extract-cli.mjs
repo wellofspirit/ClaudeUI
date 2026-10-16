@@ -79,6 +79,7 @@ import { fileURLToPath } from 'node:url'
 import { CHUNK_DELIM_PREFIX } from './lib/chunk-format.mjs'
 import {
   CLI_PLATFORM_KEYS,
+  assertVendorDirClearable,
   cliJsPath,
   cliSourceBinName,
   cliTrashDir,
@@ -467,6 +468,8 @@ function buildConcat(chunks) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2))
+  // Before the download: a refused override should cost nothing.
+  assertVendorDirClearable()
   const { binPath, version } = await resolveBinary(args)
 
   log(`reading ${binPath}`)

@@ -84,6 +84,22 @@ describe('vendor-swap: plain files (any platform)', () => {
     expect(existsSync(trash)).toBe(false) // nothing was locked: trash never created
   })
 
+  it('removeOrMoveAside rethrows a non-lock error unchanged, not as a lock message', () => {
+    const root = tempDir()
+    // A NUL in the path is rejected by rmSync itself, on every platform. (The
+    // natural provocation, a path below a regular file, is swallowed by
+    // rmSync's force:true on Windows.)
+    let thrown: any
+    try {
+      removeOrMoveAside(join(root, 'bad\u0000name'), join(root, '.trash'))
+    } catch (err) {
+      thrown = err
+    }
+    expect(thrown?.code).toBe('ERR_INVALID_ARG_VALUE')
+    expect(thrown.message).not.toMatch(/cannot replace|close the app/)
+    expect(existsSync(join(root, '.trash'))).toBe(false)
+  })
+
   it('removeOrMoveAside of a missing path is a no-op', () => {
     const root = tempDir()
     expect(() => removeOrMoveAside(join(root, 'nope'), join(root, '.trash'))).not.toThrow()

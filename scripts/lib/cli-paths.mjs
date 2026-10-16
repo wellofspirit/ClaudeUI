@@ -11,6 +11,7 @@
  * Read at call time, not import time, so a test (or a parent script) can set
  * it per child process.
  */
+import { existsSync, readdirSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -53,4 +54,30 @@ export function cliTrashDir() {
   return process.env.CLAUDEUI_CLI_VENDOR_DIR
     ? join(cliVendorDir(), '.trash')
     : join(ROOT, 'vendor', '.claude-cli-trash')
+}
+
+/** Everything the pipeline itself puts in a vendor dir (see `clearDir` in vendor-swap.mjs). */
+const PIPELINE_ENTRY =
+  /^(?:cli\.js|version\.json|bun-claude(?:\.exe)?|\.bun-claude\.tmp-.*|\.trash)$/
+
+/**
+ * Refuse to empty an OVERRIDDEN vendor dir that holds anything else.
+ *
+ * extract-cli empties the vendor dir before it writes, which is right for
+ * `vendor/claude-cli` and for a scratch dir, and a disaster if
+ * CLAUDEUI_CLI_VENDOR_DIR points at a real project. An empty or missing
+ * override passes; the default dir is never checked.
+ */
+export function assertVendorDirClearable() {
+  if (!process.env.CLAUDEUI_CLI_VENDOR_DIR) return
+  const dir = cliVendorDir()
+  if (!existsSync(dir)) return
+  const stray = readdirSync(dir).filter((e) => !PIPELINE_ENTRY.test(e))
+  if (stray.length > 0) {
+    throw new Error(
+      `refusing to empty CLAUDEUI_CLI_VENDOR_DIR=${dir}: it holds files that are not ` +
+        `Claude Code build output (${stray.slice(0, 5).join(', ')}${stray.length > 5 ? ', ...' : ''}). ` +
+        'Point it at an empty or scratch directory.'
+    )
+  }
 }

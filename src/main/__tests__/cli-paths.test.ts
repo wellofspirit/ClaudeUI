@@ -14,7 +14,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -25,7 +25,8 @@ const {
   versionJsonPath,
   cliTrashDir,
   CLI_PLATFORM_KEYS,
-  cliSourceBinName
+  cliSourceBinName,
+  assertVendorDirClearable
 } = mod
 const { defaultBin }: any = await import('../../../scripts/boot-probe.mjs')
 
@@ -95,6 +96,53 @@ describe('cli-paths', () => {
   })
 })
 
+describe('assertVendorDirClearable', () => {
+  it('never checks the default vendor dir', () => {
+    delete process.env.CLAUDEUI_CLI_VENDOR_DIR
+    expect(() => assertVendorDirClearable()).not.toThrow()
+  })
+
+  it('accepts a missing or empty override', () => {
+    const d = emptyDir()
+    process.env.CLAUDEUI_CLI_VENDOR_DIR = join(d, 'not-yet')
+    expect(() => assertVendorDirClearable()).not.toThrow()
+    process.env.CLAUDEUI_CLI_VENDOR_DIR = d
+    expect(() => assertVendorDirClearable()).not.toThrow()
+  })
+
+  it('accepts exactly what the pipeline itself leaves there', () => {
+    const d = emptyDir()
+    for (const f of [
+      'cli.js',
+      'version.json',
+      'bun-claude',
+      'bun-claude.exe',
+      '.bun-claude.tmp-4242'
+    ])
+      writeFileSync(join(d, f), 'x')
+    mkdirSync(join(d, '.trash'))
+    process.env.CLAUDEUI_CLI_VENDOR_DIR = d
+    expect(() => assertVendorDirClearable()).not.toThrow()
+  })
+
+  it('refuses a directory holding anything else, naming the dir and the stray entry', () => {
+    const d = emptyDir()
+    writeFileSync(join(d, 'cli.js'), 'x')
+    writeFileSync(join(d, 'package.json'), '{}')
+    mkdirSync(join(d, 'src'))
+    process.env.CLAUDEUI_CLI_VENDOR_DIR = d
+    expect(() => assertVendorDirClearable()).toThrow(d)
+    expect(() => assertVendorDirClearable()).toThrow(/package\.json/)
+  })
+
+  it('also refuses near-misses of the allowed names', () => {
+    const d = emptyDir()
+    writeFileSync(join(d, 'cli.js.bak'), 'x')
+    process.env.CLAUDEUI_CLI_VENDOR_DIR = d
+    expect(() => assertVendorDirClearable()).toThrow(/cli\.js\.bak/)
+  })
+})
+
 describe('every consumer follows the override', () => {
   /** Run `node <script>` with the override set to a fresh empty dir. */
   const run = (script: string, ...args: string[]) => {
@@ -128,6 +176,22 @@ describe('every consumer follows the override', () => {
     const r = run('scripts/rebundle-cli.mjs', '--quiet')
     expect(r.code).not.toBe(0)
     expect(r.out).toContain(join(r.dir, 'version.json'))
+  })
+
+  it('extract-cli refuses an override holding unrelated files, before downloading, leaving them', () => {
+    const d = emptyDir()
+    const stray = join(d, 'precious.txt')
+    writeFileSync(stray, 'keep me')
+    const r = spawnSync(process.execPath, [join(ROOT, 'scripts/extract-cli.mjs'), '--quiet'], {
+      cwd: ROOT,
+      env: { ...process.env, CLAUDEUI_CLI_VENDOR_DIR: d },
+      encoding: 'utf8',
+      timeout: 60000
+    })
+    expect(r.status).toBe(1)
+    expect(`${r.stdout}${r.stderr}`).toContain('refusing to empty')
+    expect(`${r.stdout}${r.stderr}`).toContain(d)
+    expect(existsSync(stray)).toBe(true)
   })
 
   it.runIf(process.platform !== 'linux')(

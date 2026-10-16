@@ -674,7 +674,7 @@ function main() {
     // platform-independently).
     console.log(
       'rebundle-cli: ELF (Linux) rebundle not implemented — skipping. ' +
-        'Patched cli.js remains at vendor/claude-cli/cli.js; no bun-claude binary was produced.'
+        `Patched cli.js remains at ${cliJsPath()}; no bun-claude binary was produced.`
     )
     process.exit(0)
   } else {

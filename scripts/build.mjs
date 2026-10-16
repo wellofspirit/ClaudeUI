@@ -29,7 +29,7 @@
 
 import { spawn } from 'node:child_process'
 
-import { targets } from './lib/build-targets.mjs'
+import { targets, vendorOverrideRefusal } from './lib/build-targets.mjs'
 
 const args = process.argv.slice(2)
 const verbose = args.includes('-v') || args.includes('--verbose')
@@ -71,6 +71,11 @@ if (!target) {
 const stages = TARGETS[target]
 if (!stages) {
   console.error(`build.mjs: unknown target "${target}" (run with -h for the target list)`)
+  process.exit(2)
+}
+const refusal = vendorOverrideRefusal(target, process.env)
+if (refusal) {
+  console.error(refusal)
   process.exit(2)
 }
 

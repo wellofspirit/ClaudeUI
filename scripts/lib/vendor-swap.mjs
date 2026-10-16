@@ -41,15 +41,15 @@ function lockedError(path, cause) {
 
 /**
  * Delete `path` (file or directory); if it is locked, rename it into
- * `trashDir/<basename>-<ms>-<pid>` instead. Anything else, or a rename that
- * fails too, throws naming the path.
+ * `trashDir/<basename>-<ms>-<pid>` instead. Any other error is rethrown as it
+ * came; a lock whose rename fails too throws naming the path.
  */
 export function removeOrMoveAside(path, trashDir) {
   try {
     rmSync(path, { recursive: true, force: true })
     return
   } catch (err) {
-    if (!LOCKED.has(err.code)) throw lockedError(path, err)
+    if (!LOCKED.has(err.code)) throw err
   }
   try {
     mkdirSync(trashDir, { recursive: true })

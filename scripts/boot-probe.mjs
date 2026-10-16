@@ -22,6 +22,10 @@
  * The turn therefore ends in an `api_error` result, which is the healthy
  * outcome — we are testing startup, not the API. Zero retries keep it fast.
  *
+ * The crash check scans the whole `--verbose` stderr, so an upstream log line
+ * that merely names TypeError / ReferenceError / SyntaxError / RangeError fails
+ * the probe too (deliberately strict: investigate it rather than relax it).
+ *
  * Skips (exit 0, one line): the default binary is absent on linux (rebundle
  * has no ELF writer, so there is none), or the file is not the host's
  * container (a cross-built PE/Mach-O cannot run here).

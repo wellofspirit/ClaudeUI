@@ -12,9 +12,12 @@
  */
 
 import { describe, it, expect } from 'vitest'
+import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 
 const mod: any = await import('../../../scripts/lib/build-targets.mjs')
-const { targets } = mod
+const { targets, vendorOverrideRefusal } = mod
 
 const childEnv = {
   PATH: '/bin',
@@ -133,5 +136,54 @@ describe('the other targets keep their shape', () => {
     const builder = build()['build:mac'][1].steps[0]
     expect(builder[2].env.CSC_IDENTITY_AUTO_DISCOVERY).toBe('false')
     expect(builder[2].env.PATH).toBe('/bin')
+  })
+})
+
+describe('vendorOverrideRefusal', () => {
+  const env = { CLAUDEUI_CLI_VENDOR_DIR: '/scratch/vendor' }
+
+  it.each(['build', 'build:win', 'build:mac', 'build:linux', 'build:unpack'])(
+    'refuses %s while the vendor dir is overridden, and says why',
+    (target) => {
+      const msg = vendorOverrideRefusal(target, env)
+      expect(msg).toContain(target)
+      expect(msg).toContain('vendor/claude-cli')
+      expect(msg).toContain('Unset')
+    }
+  )
+
+  it.each(['build', 'build:win', 'build:unpack'])('lets %s run without the variable', (target) => {
+    expect(vendorOverrideRefusal(target, {})).toBeNull()
+    expect(vendorOverrideRefusal(target, { CLAUDEUI_CLI_VENDOR_DIR: '' })).toBeNull()
+  })
+
+  it.each([
+    'ensure',
+    'ensure-cli',
+    'update-cli',
+    'postinstall',
+    'ensure-pi',
+    'update-codex',
+    'builder-thing'
+  ])('does not refuse %s', (target) => {
+    expect(vendorOverrideRefusal(target, env)).toBeNull()
+  })
+
+  it('build.mjs exits 2 before running any stage', () => {
+    const r = spawnSync(
+      process.execPath,
+      [resolve(__dirname, '../../../scripts/build.mjs'), 'build'],
+      {
+        env: {
+          ...process.env,
+          CLAUDEUI_CLI_VENDOR_DIR: join(tmpdir(), 'build-targets-test-never-created')
+        },
+        encoding: 'utf8',
+        timeout: 30000
+      }
+    )
+    expect(r.status).toBe(2)
+    expect(r.stderr).toContain('refusing "build"')
+    expect(r.stdout).not.toContain('[1/')
   })
 })

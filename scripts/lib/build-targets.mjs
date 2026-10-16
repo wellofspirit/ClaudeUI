@@ -14,6 +14,25 @@
  */
 
 /**
+ * Why a `build*` target must not run while CLAUDEUI_CLI_VENDOR_DIR is set, or
+ * null when it may. Packaging always copies `vendor/claude-cli`
+ * (electron-builder.yml), so an overridden dir would build a package around a
+ * DIFFERENT Claude Code than the one just prepared. `ensure*`, `update-*` and
+ * `postinstall` write wherever the variable says and are fine.
+ *
+ * @param {string} target
+ * @param {NodeJS.ProcessEnv} env
+ */
+export function vendorOverrideRefusal(target, env) {
+  if (!env.CLAUDEUI_CLI_VENDOR_DIR) return null
+  if (target !== 'build' && !target.startsWith('build:')) return null
+  return (
+    `build.mjs: refusing "${target}" with CLAUDEUI_CLI_VENDOR_DIR set: packaging always reads ` +
+    'vendor/claude-cli (electron-builder.yml), not the override. Unset the variable and retry.'
+  )
+}
+
+/**
  * @param {object} opts
  * @param {boolean} opts.quiet   quiet-by-default output: pass --quiet / --logLevel warn
  * @param {NodeJS.ProcessEnv} opts.childEnv  the env children inherit (FORCE_COLOR already set)
