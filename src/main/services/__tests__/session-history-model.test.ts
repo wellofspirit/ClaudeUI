@@ -1,9 +1,10 @@
 /**
  * @vitest-environment node
  *
- * A subagent transcript line carries `message.model`; the history parser puts
- * it on the assistant ChatMessage it builds (`loadSubagentHistory`), and the
- * newest-wins merge of a message's partial lines keeps it.
+ * A transcript line carries `message.model`; the history parser puts it on the
+ * assistant ChatMessage it builds, for a subagent transcript
+ * (`loadSubagentHistory`) and for the session's own (`loadSessionHistory`), and
+ * the newest-wins merge of a message's partial lines keeps it.
  *
  * `CLAUDE_PROJECTS_DIR` derives from os.homedir() at module load, so homedir is
  * mocked to a temp dir BEFORE importing session-history. Never the real one.
@@ -20,7 +21,7 @@ vi.mock('os', async (importOriginal) => {
   return { ...actual, homedir: (): string => home }
 })
 
-import { loadSubagentHistory } from '../../../core/services/session-history'
+import { loadSessionHistory, loadSubagentHistory } from '../../../core/services/session-history'
 
 const TMP_HOME = os.homedir()
 const PROJECT_KEY = 'test-project-model'
@@ -78,5 +79,34 @@ describe('loadSubagentHistory — model', () => {
     writeSubagentTranscript([assistantLine('msg_a', undefined, [{ type: 'text', text: 'hi' }])])
     const [message] = await loadSubagentHistory(SESSION_ID, PROJECT_KEY, AGENT_ID)
     expect(message).not.toHaveProperty('model')
+  })
+})
+
+describe('loadSessionHistory — model', () => {
+  function writeMainTranscript(lines: object[]): void {
+    const dir = path.join(TMP_HOME, '.claude', 'projects', PROJECT_KEY)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(
+      path.join(dir, `${SESSION_ID}.jsonl`),
+      lines.map((l) => JSON.stringify(l)).join('\n') + '\n'
+    )
+  }
+
+  it('puts message.model on the main transcript’s assistant message', async () => {
+    writeMainTranscript([
+      assistantLine('msg_a', 'claude-opus-5-5', [{ type: 'text', text: 'hello' }])
+    ])
+    const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+    expect(messages.filter((m) => m.role === 'assistant').map((m) => m.model)).toEqual([
+      'claude-opus-5-5'
+    ])
+  })
+
+  it('leaves the field off a line that names no model', async () => {
+    writeMainTranscript([assistantLine('msg_a', undefined, [{ type: 'text', text: 'hi' }])])
+    const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+    const assistant = messages.find((m) => m.role === 'assistant')
+    expect(assistant).toBeDefined()
+    expect(assistant).not.toHaveProperty('model')
   })
 })

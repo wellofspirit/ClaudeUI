@@ -135,19 +135,10 @@ export function AgentTile({
  * so labels line up across bot-only, bot + 1 and bot + 2 rows. The tile, a shell's
  * `$` glyph, whatever the row has, is left-aligned in it.
  *
- * Under 300px of roster width the column is 16px, what it was before the bot, and
- * the tile compacts (`AGENT_TILE_COMPACT_CLASS`): a lettered tile drops its bot,
- * and every tile trims to 16px. The 240px row (resumed chip, Stop, 3rem name and
- * metrics floors) has nothing left over, so it keeps fitting on one line only
- * with the column at 16px.
+ * The bot stays at every roster width: a narrow row gives the name less room
+ * (it truncates sooner), never the tile.
  */
-export const AGENT_TYPE_SLOT_CLASS = 'inline-flex w-9 @max-[300px]/roster:w-4 shrink-0 items-center'
-
-/** A tile in the roster's type column, under 300px of roster width: 16px wide, whatever it holds. */
-export const AGENT_TILE_COMPACT_CLASS = '@max-[300px]/roster:min-w-4 @max-[300px]/roster:px-[2px]'
-
-/** Added for a lettered tile: the letters carry the type, so the bot goes when there is no room. */
-export const AGENT_TILE_NO_BOT_COMPACT_CLASS = '@max-[300px]/roster:[&>svg]:hidden'
+export const AGENT_TYPE_SLOT_CLASS = 'inline-flex w-9 shrink-0 items-center'
 
 export interface AgentTileSpec {
   /** The type's letters or the dispatch X; empty for the bot alone (the default type, an untyped agent). */

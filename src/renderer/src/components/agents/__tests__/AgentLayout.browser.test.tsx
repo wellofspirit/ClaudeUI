@@ -284,11 +284,11 @@ const isNarrow = (row: HTMLElement): boolean =>
   byTestId(row.closest('[data-testid="AgentRoster"]')!.parentElement!, 'AgentRoster').clientWidth <
   300
 
-/** The name is readable: at least its floor (4.5rem, 3rem when narrow), or all of it if shorter. */
+/** The name is readable: at least its floor (4.5rem, 1rem when narrow), or all of it if shorter. */
 function expectNameReadable(row: HTMLElement): void {
   const name = byTestId(row, 'AgentRow.name')
   const floor =
-    (isNarrow(row) ? 3 : 4.5) * parseFloat(getComputedStyle(document.documentElement).fontSize)
+    (isNarrow(row) ? 1 : 4.5) * parseFloat(getComputedStyle(document.documentElement).fontSize)
   // Local (zoomed) px on both sides: scrollWidth is the whole text, clientWidth what shows.
   expect(name.clientWidth).toBeGreaterThanOrEqual(Math.min(name.scrollWidth, floor) - 1)
 }
@@ -741,22 +741,31 @@ describe('the type tile in the agent list (ADR-094)', () => {
     }
   })
 
-  it('drops the bot from a lettered tile under 300px, and keeps the labels aligned', async () => {
+  it('keeps the bot at 240px: nothing overflows and the name truncates, without a mid-token break', async () => {
     const root = await mountPanel(240)
-    const rows = allByTestId(root, 'AgentRow').filter((r) =>
-      r.querySelector('[data-testid="AgentRow.typeTile"]')
-    )
-    const lettered = rows.filter((r) => byTestId(r, 'AgentRow.typeTile').textContent!.trim() !== '')
-    const botOnly = rows.filter((r) => byTestId(r, 'AgentRow.typeTile').textContent!.trim() === '')
-    expect(lettered.length).toBeGreaterThan(0)
-    expect(botOnly.length).toBeGreaterThan(0)
-    for (const row of lettered) {
-      expect(rectOf(byTestId(row, 'AgentTile.bot')).width).toBe(0)
-      expect(rectOf(byTestId(row, 'AgentRow.typeSlot')).width).toBeCloseTo(16, 0)
+    const rows = allByTestId(root, 'AgentRow')
+    const tiled = rows.filter((r) => r.querySelector('[data-testid="AgentRow.typeTile"]'))
+    expect(tiled.length).toBeGreaterThan(0)
+    for (const row of tiled) {
+      // The bot is drawn, whole, at its 11px, in every tile (letters or none).
+      const bot = byTestId(row, 'AgentTile.bot')
+      expect(rectOf(bot).width).toBeGreaterThan(0)
+      expect(isInside(bot, byTestId(row, 'AgentRow.typeSlot'))).toBe(true)
+      const tile = byTestId(row, 'AgentRow.typeTile')
+      expect(tile.scrollWidth).toBeLessThanOrEqual(tile.clientWidth + 1)
+      expect(tile.clientHeight).toBe(16)
     }
-    for (const row of botOnly) {
-      expect(rectOf(byTestId(row, 'AgentTile.bot')).width).toBeGreaterThan(0)
+    for (const row of rows) {
+      expect(hasNoHorizontalOverflow(row)).toBe(true)
+      expectOneLine(row)
+      expectNameReadable(row)
+      // The name is one line, cut by an ellipsis rather than wrapped.
+      const name = byTestId(row, 'AgentRow.name')
+      expect(getComputedStyle(name).whiteSpace).toBe('nowrap')
+      expect(getComputedStyle(name).textOverflow).toBe('ellipsis')
+      expect(rectOf(name).height).toBeLessThanOrEqual(rectOf(row).height)
     }
+    // The slot is the same wide, left-aligned column for every row, so labels line up.
     const tops = rows.filter((r) => r.getAttribute('data-depth') === '0')
     const lefts = tops.map((r) => rectOf(byTestId(r, 'AgentRow.name')).left)
     for (const left of lefts) expect(Math.abs(left - lefts[0])).toBeLessThanOrEqual(1)

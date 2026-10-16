@@ -78,6 +78,9 @@ pre .token.table {
   --color-model-tier-mid: #3d95ff;
   --color-model-tier-low: #1eff00;
 
+  /* The steady grey of a status dot that is not running (--color-dot-inactive). */
+  --color-dot-inactive: #6b7280;
+
   --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
 }
 
@@ -118,6 +121,8 @@ pre .token.table {
   --color-model-tier-high: #6b0cb1;
   --color-model-tier-mid: #004599;
   --color-model-tier-low: #0a5700;
+
+  --color-dot-inactive: #6b7280;
 }
 
 /* ── Monokai theme ── */
@@ -150,6 +155,8 @@ pre .token.table {
   --color-model-tier-high: #d7a9f9;
   --color-model-tier-mid: #85bcff;
   --color-model-tier-low: #1eff00;
+
+  --color-dot-inactive: #8b8878;
 }
 
 body {
@@ -256,13 +263,18 @@ html[data-shell='web'] #root {
 
 /* Sidebar session status dot (SessionItem → StatusDot). Colour per `data-state`;
    geometry comes from Tailwind classes so `group-hover:hidden` still wins (these
-   rules are unlayered and would beat a utility's `display`). */
+   rules are unlayered and would beat a utility's `display`).
+
+   Every dot colour is themed and holds 3:1 (a graphic, not text) on the panel in
+   all three themes: the green and the red are the theme's success and danger, the
+   grey is --color-dot-inactive, and violet and blue have a light override
+   (shared/__tests__/status-dot-contrast.test.ts pins them). */
 .status-dot {
   background-color: var(--dot-color);
 }
 .status-dot[data-state='running'],
 .status-dot[data-state='idle'] {
-  --dot-color: #4ade80;
+  --dot-color: var(--color-success);
 }
 .status-dot[data-state='subagents'] {
   --dot-color: #a78bfa;
@@ -276,8 +288,11 @@ html[data-shell='web'] #root {
 .status-dot[data-state='watching'] {
   --dot-color: #60a5fa;
 }
+[data-theme='light'] .status-dot[data-state='watching'] {
+  --dot-color: #2563eb;
+}
 .status-dot[data-state='inactive'] {
-  --dot-color: color-mix(in srgb, var(--color-text-muted) 30%, transparent);
+  --dot-color: var(--color-dot-inactive);
 }
 /* The letters of an agent tile (ADR-094), trimmed to cap height: the box is the
    capitals themselves, so the flex centring of the tile centres the glyphs and

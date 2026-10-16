@@ -19,8 +19,8 @@
  * tile (the bot, and the type's letters after it; a default or untyped agent is
  * the bot alone), so the column is a fixed 36px slot, wide enough for the bot and
  * two letters, with the tile (or a shell's `$`) left-aligned in it: the labels
- * line up whatever the row shows. Under 300px it is 16px and a lettered tile
- * drops its bot. Stop sits inline BEFORE the metrics rather than in a
+ * line up whatever the row shows, at every roster width: a narrow row gives the
+ * name less room, never the tile. Stop sits inline BEFORE the metrics rather than in a
  * reserved column, so finished rows lose no width and the metrics end at the
  * same x on every row. Nothing on the line is taller than its 16px line height
  * (`leading-4`; Stop and the resumed chip are trimmed to fit), so a running row is
@@ -28,22 +28,18 @@
  *
  * When the line is too narrow, the stop button, dot, type column and resumed
  * chip never shrink; the metrics give way first (down to a 3rem floor), the
- * label last (down to 4.5rem, or 3rem under 300px of roster width, where a
- * deep row with a resumed chip and Stop does not fit otherwise). Below 360px of
+ * label last (down to 4.5rem, or 1rem under 300px of roster width, where a
+ * deep row with a resumed chip and Stop, and the bot, does not fit otherwise).
+ * Below 360px of
  * roster width, which is the roster's own width and never the viewport's, the
  * metrics also drop the current tool. All of it is CSS: no JS measures anything.
  */
 import { useEffect, useRef } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { formatElapsed, formatTokens, taskElapsedLabel, useTicker } from '../chat/TaskCard'
-import {
-  AGENT_TILE_COMPACT_CLASS,
-  AGENT_TILE_NO_BOT_COMPACT_CLASS,
-  AGENT_TYPE_SLOT_CLASS,
-  AgentTile,
-  useAgentTile
-} from './AgentTypeTile'
+import { AGENT_TYPE_SLOT_CLASS, AgentTile, useAgentTile } from './AgentTypeTile'
 import { StatusDot, type SessionDotState } from '../Sidebar/StatusDot'
+import { ResumedBadge } from './ResumedBadge'
 import { agentRowLabel, type AgentRosterRow } from '../../hooks/useAgentRoster'
 import { modelTier } from '../../../../shared/model-tier'
 import { MODEL_TIER_TEXT_CLASS } from '../../lib/model-tier-class'
@@ -267,7 +263,6 @@ export function AgentRow({
             letter={tile.letter}
             colorId={tile.colorId}
             title={tile.title}
-            className={`${AGENT_TILE_COMPACT_CLASS} ${tile.letter ? AGENT_TILE_NO_BOT_COMPACT_CLASS : ''}`}
           />
         )}
       </span>
@@ -275,7 +270,7 @@ export function AgentRow({
         data-testid="AgentRow.name"
         data-model-tier={tier}
         title={row.description || undefined}
-        className={`min-w-[4.5rem] @max-[300px]/roster:min-w-[3rem] grow-0 shrink basis-auto truncate ${
+        className={`min-w-[4.5rem] @max-[300px]/roster:min-w-[1rem] grow-0 shrink basis-auto truncate ${
           isShell
             ? 'font-mono text-[11px] text-text-secondary'
             : `text-[12px] ${
@@ -289,15 +284,7 @@ export function AgentRow({
       >
         {agentRowLabel(row)}
       </span>
-      {row.runIndex > 1 && (
-        <span
-          data-testid="AgentRow.resumed"
-          className="text-[10px] leading-3 font-mono px-1 py-px rounded bg-accent/10 text-accent border border-accent/25 shrink-0 whitespace-nowrap"
-          title="This agent was sent a message after it finished, and ran again"
-        >
-          ↻{row.runIndex - 1}
-        </span>
-      )}
+      <ResumedBadge runIndex={row.runIndex} testId="AgentRow.resumed" />
       <span aria-hidden className="grow shrink basis-0 min-w-0" />
       {row.isRunning && !isContext && (row.depth === 0 || hasLifecycle) && (
         <button

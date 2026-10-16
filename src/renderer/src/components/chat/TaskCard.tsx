@@ -9,6 +9,8 @@ import type {
 import type { ToolView } from '../../../../shared/tool-kinds'
 import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
+import { useSessionAgentTypes } from '../../hooks/useAgentRoster'
+import { ResumedBadge } from '../agents/ResumedBadge'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { SubagentOutputBody } from './SubagentOutputBody'
 import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
@@ -330,15 +332,7 @@ function TaskFooter({
           {modelName ?? model}
         </span>
       )}
-      {runIndex > 1 && (
-        <span
-          data-testid="TaskCard.resumed"
-          className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent whitespace-nowrap shrink-0"
-          title="This agent was sent a message after it finished, and ran again"
-        >
-          resumed ×{runIndex - 1}
-        </span>
-      )}
+      <ResumedBadge runIndex={runIndex} testId="TaskCard.resumed" />
       {usage && (
         <span
           {...TOOL_OUTPUT_SCOPE}
@@ -468,7 +462,8 @@ export function TaskCard({
   // The type tile (ADR-094): a dispatch is the bot and an X, the engine's default type
   // and an untyped agent the bot alone. `view.subagent` is a TYPE on every engine, and
   // a Codex spawn has none.
-  const tile = useAgentTile(engineId, view.subagent, view.dispatch)
+  const sessionTypes = useSessionAgentTypes()
+  const tile = useAgentTile(engineId, view.subagent, view.dispatch, sessionTypes)
   // The model the agent runs on (`resolveAgentModel`, the roster's rule): the newest
   // one its own messages report, else the one the spawn asked for. A dispatch's chip
   // says where it went, and the model it ran on once it reports one.

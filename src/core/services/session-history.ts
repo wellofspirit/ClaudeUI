@@ -1336,7 +1336,10 @@ export async function loadSessionHistory(
             id: messageId,
             role: 'assistant',
             content: blocks,
-            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now(),
+            ...(typeof betaMessage.model === 'string' && betaMessage.model
+              ? { model: betaMessage.model }
+              : {})
           }
 
           if (existingIdx >= 0) {

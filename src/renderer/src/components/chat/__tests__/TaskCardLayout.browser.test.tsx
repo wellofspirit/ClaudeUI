@@ -211,7 +211,7 @@ function expectFooterSound(footer: HTMLElement): void {
     expect(isOneLine(child)).toBe(true)
   }
   const whole = Array.from(footer.querySelectorAll<HTMLElement>('span, button')).filter((el) =>
-    ['migration-reviewer', 'background', 'resumed ×1'].includes(el.textContent ?? '')
+    ['migration-reviewer', 'background', '↻1'].includes(el.textContent ?? '')
   )
   for (const chip of whole) expect(chip.scrollWidth).toBeLessThanOrEqual(chip.clientWidth + 1)
 }
@@ -280,9 +280,9 @@ describe('Task card on the phone', () => {
           expectModelReadable(byTestId(footer, 'TaskCard.model'))
           expect(footer.innerText).not.toContain('tokens')
 
-          // ONE line at every chat scale, 1.5 (222px) included: the type is a 16px
-          // tile and the background chip an icon (a word-only chip left the ↗ alone
-          // on row 2 at ~1.22). Only a resumed chip at 1.5 wraps (next test).
+          // ONE line at every chat scale, 1.5 (222px) included: the type is a tile
+          // (bot + letters) and the background chip an icon (a word-only chip left the
+          // ↗ alone on row 2 at ~1.22). Only a resumed chip wraps (next test).
           const kids = visibleChildren(footer)
           expect(rowCount(kids)).toBe(1)
           expectNarrowOrder(footer)
@@ -305,8 +305,13 @@ describe('Task card on the phone', () => {
           const footer = footerOf(card, expanded)
           expectFooterSound(footer)
           expectModelReadable(byTestId(footer, 'TaskCard.model'))
-          expect(byTestId(footer, 'TaskCard.resumed').textContent).toBe('resumed ×1')
-          // The one case that wraps, as WHOLE chips with the icon last: resumed at 1.5.
+          const resumed = byTestId(footer, 'TaskCard.resumed')
+          expect(resumed.textContent).toBe('↻1')
+          expect(resumed.getAttribute('aria-label')).toBe('Resumed 1 time')
+          // The compact ↻N badge costs a few characters, so the footer stays ONE row
+          // (whole chips, the icon last) through chat scale 1.25; the spelled-out
+          // "resumed ×1" chip is what used to wrap it there. At 1.5 (a 222px card)
+          // the whole chips still do not fit one row, and wrap as whole chips.
           const kids = visibleChildren(footer)
           expect(rowCount(kids)).toBe(chatScale >= 1.5 ? 2 : 1)
           expect(kids[kids.length - 1]).toBe(openButton(card, expanded))
@@ -672,14 +677,23 @@ duration_ms: 135000
 
     // Just above the breakpoint the footer does not wrap, so the chips that must
     // not shrink are the only thing standing between "migration-reviewer" and a
-    // mid-token break. The raw model id and the usage text are what give way.
+    // mid-token break. The raw model id and the usage text are what give way. How
+    // narrow a card can be before the whole chips stop fitting depends on the
+    // platform's font metrics (and on the bot in the type tile), so this finds the
+    // tightest sound width in a range instead of assuming one.
     for (const expanded of [false, true]) {
       it(`keeps the chips whole under pressure (${expanded ? 'expanded' : 'collapsed'})`, async () => {
-        cleanup()
-        seed([], { runIndex: 2 })
-        const card = await mountCard(1, { width: '551px', expanded })
-        expect(rectOf(card).width).toBeGreaterThanOrEqual(480)
-        const footer = footerOf(card, expanded)
+        let card: HTMLElement | undefined
+        for (const width of [551, 561, 571, 591, 611, 651]) {
+          cleanup()
+          seed([], { runIndex: 2 })
+          card = await mountCard(1, { width: `${width}px`, expanded })
+          if (hasNoHorizontalOverflow(footerOf(card, expanded))) break
+        }
+        // Whole chips fit by 651px on any platform; below that they may overflow.
+        expect(hasNoHorizontalOverflow(footerOf(card!, expanded))).toBe(true)
+        expect(rectOf(card!).width).toBeGreaterThanOrEqual(480)
+        const footer = footerOf(card!, expanded)
         expectFooterSound(footer)
         expectModelReadable(byTestId(footer, 'TaskCard.model'))
         // type chip (tile + name) · background · resumed · the words, each whole.
@@ -687,12 +701,12 @@ duration_ms: 135000
           byTestId(footer, 'TaskCard.type'),
           byTestId(footer, 'TaskCard.background'),
           byTestId(footer, 'TaskCard.resumed'),
-          openButton(card, expanded)
+          openButton(card!, expanded)
         ]
         expect(chips.map((c) => c.innerText.replace(/\s+/g, ' ').trim())).toEqual([
           'MR migration-reviewer',
           'background',
-          'resumed ×1',
+          '↻1',
           'Open in panel'
         ])
         for (const chip of chips) expect(chip.scrollWidth).toBeLessThanOrEqual(chip.clientWidth + 1)

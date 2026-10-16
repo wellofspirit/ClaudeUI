@@ -30,6 +30,8 @@ vi.mock('../MarkdownRenderer', () => ({
 }))
 
 import { TaskCard } from '../TaskCard'
+import { resetAgentTypeCatalog } from '../../../hooks/useAgentTypeCatalog'
+import { rosterScanStats, useSessionAgentTypes } from '../../../hooks/useAgentRoster'
 import { PiEngineToolMap } from '../tool-registry/PiEngineToolMap'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
@@ -718,6 +720,136 @@ describe('TaskCard — the type chip', () => {
     expect(tile).toHaveTextContent('E')
     expect(tile.getAttribute('data-color')).not.toBeNull()
     expect(chip).toHaveTextContent('EExplore')
+  })
+
+  it('tells a family apart from the session’s other spawns when the catalog is empty (R, like the roster)', () => {
+    resetAgentTypeCatalog()
+    Object.assign(window.api, { listAgentTypes: vi.fn(async () => []) })
+    const spawn = (id: string, type: string): ChatMessage => ({
+      id: `m-${id}`,
+      role: 'assistant',
+      content: [
+        {
+          type: 'tool_use',
+          toolUseId: id,
+          toolName: 'Agent',
+          toolInput: { description: type, subagent_type: type }
+        }
+      ],
+      timestamp: Date.now()
+    })
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          messages: [spawn('tu-r', 'orch-reader'), spawn('tu-v', 'orch-verifier')]
+        }
+      }
+    }))
+    render(
+      <TaskCard
+        block={makeTaskBlock({ toolUseId: 'tu-r', toolName: 'Agent' })}
+        view={{ ...defaultTaskView, subagent: 'orch-reader' }}
+      />
+    )
+    expect(screen.getByTestId('TaskCard.typeTile').textContent).toBe('R')
+  })
+
+  it('builds the agent tree once per update however many cards are mounted, and keeps the types array stable', async () => {
+    resetAgentTypeCatalog()
+    Object.assign(window.api, { listAgentTypes: vi.fn(async () => []) })
+    const spawn = (id: string, type: string): ChatMessage => ({
+      id: `m-${id}`,
+      role: 'assistant',
+      content: [
+        {
+          type: 'tool_use',
+          toolUseId: id,
+          toolName: 'Agent',
+          toolInput: { description: type, subagent_type: type }
+        }
+      ],
+      timestamp: Date.now()
+    })
+    const ids = ['tu-a', 'tu-b', 'tu-c']
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          messages: [
+            spawn('tu-a', 'orch-reader'),
+            spawn('tu-b', 'orch-verifier'),
+            spawn('tu-c', 'Explore')
+          ]
+        }
+      }
+    }))
+    // The replica is what `seed` updates the store from: give it the same session.
+    mirrorStoreIntoReplica()
+    const seen: string[][] = []
+    function Probe(): null {
+      seen.push(useSessionAgentTypes())
+      return null
+    }
+    render(
+      <>
+        {ids.map((id) => (
+          <TaskCard
+            key={id}
+            block={makeTaskBlock({ toolUseId: id, toolName: 'Agent' })}
+            view={{ ...defaultTaskView, subagent: 'orch-reader' }}
+          />
+        ))}
+        <Probe />
+      </>
+    )
+    const reply = (n: number): ChatMessage => ({
+      id: `r${n}`,
+      role: 'assistant',
+      content: [{ type: 'text', text: `streaming ${n}` }],
+      timestamp: Date.now()
+    })
+    const before = rosterScanStats.trees
+    const first = seen[seen.length - 1]
+    expect(first).toEqual(['orch-reader', 'orch-verifier', 'Explore'])
+
+    // A subagent streams a message: three cards re-render, the tree is built once.
+    await act(async () => seed.subagentMessage(ROUTE, 'tu-a', reply(1)))
+    expect(rosterScanStats.trees - before).toBe(1)
+    // ...and the update spawned no new type, so every consumer holds the SAME array.
+    expect(seen[seen.length - 1]).toBe(first)
+    for (const types of seen) expect(types).toBe(first)
+
+    // Another update: one more build, still the same array.
+    await act(async () => seed.subagentMessage(ROUTE, 'tu-b', reply(2)))
+    expect(rosterScanStats.trees - before).toBe(2)
+    expect(seen[seen.length - 1]).toBe(first)
+
+    // A new type changes the set, and only then a new array.
+    await act(async () =>
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: {
+            ...state.sessions[ROUTE],
+            messages: [...state.sessions[ROUTE].messages, spawn('tu-d', 'Plan')]
+          }
+        }
+      }))
+    )
+    expect(seen[seen.length - 1]).not.toBe(first)
+    expect(seen[seen.length - 1]).toEqual(['orch-reader', 'orch-verifier', 'Explore', 'Plan'])
+  })
+
+  it('keeps the prefix of a type that has no sibling in the session', () => {
+    resetAgentTypeCatalog()
+    Object.assign(window.api, { listAgentTypes: vi.fn(async () => []) })
+    render(
+      <TaskCard block={makeTaskBlock()} view={{ ...defaultTaskView, subagent: 'orch-reader' }} />
+    )
+    expect(screen.getByTestId('TaskCard.typeTile').textContent).toBe('OR')
   })
 
   it('is the muted bot alone, with no type text, for general-purpose', () => {

@@ -192,7 +192,7 @@ const EMPTY: AgentRoster = {
  * Bucket walks performed so far. Read by the cache test only: it is how a test
  * proves that a new array for one bucket re-walks that bucket and no other.
  */
-export const rosterScanStats = { walks: 0 }
+export const rosterScanStats = { walks: 0, trees: 0 }
 
 /**
  * The bucket walk, shared across every mounted surface. The pill, the tab and
@@ -302,6 +302,7 @@ export function scanAgentTree(
   subagentMessages: Buckets,
   engineId: EngineId
 ): RosterEntry[] {
+  rosterScanStats.trees++
   const out: RosterEntry[] = []
   const placed = new Set<string>()
   const walk = (entries: ScannedEntry[], depth: number, parent?: string): void => {
@@ -598,6 +599,65 @@ function withRunningDescendants(agents: AgentRosterRow[]): AgentRosterRow[] {
 }
 
 const NO_BUCKETS: Buckets = {}
+const NO_TYPES: string[] = []
+
+/**
+ * The agent tree for a session's transcript, built ONCE per change however many
+ * surfaces ask: the roster's pill, tab and panel, and a Task card in every
+ * message. A single-entry cache keyed by the identities of its inputs (the store
+ * replaces `messages` / `subagentMessages` on every change), so N consumers cost
+ * one build per update and share the one array. The per-bucket scans under it are
+ * cached separately by `scanTranscriptCached`.
+ */
+let treeCache:
+  { messages: ChatMessage[]; buckets: Buckets; engineId: EngineId; tree: RosterEntry[] } | undefined
+
+export function agentTreeCached(
+  messages: ChatMessage[],
+  subagentMessages: Buckets | undefined,
+  engineId: EngineId | undefined
+): RosterEntry[] {
+  const buckets = subagentMessages ?? NO_BUCKETS
+  const engine = engineId ?? 'claude'
+  const hit = treeCache
+  if (hit && hit.messages === messages && hit.buckets === buckets && hit.engineId === engine) {
+    return hit.tree
+  }
+  const tree = scanAgentTree(messages, buckets, engine)
+  treeCache = { messages, buckets, engineId: engine, tree }
+  return tree
+}
+
+/** The last types array handed out: reused while the set of types is unchanged. */
+let typesCache: { tree: RosterEntry[]; types: string[] } | undefined
+
+/**
+ * The types of a tree's agents, as ONE array shared by every caller for that
+ * tree, and the SAME array as before when a new tree spawns no new type (a
+ * subagent streaming does not change which types the session has), so a consumer
+ * keyed on it does not re-render for nothing.
+ */
+function agentTypesOf(tree: RosterEntry[]): string[] {
+  if (typesCache?.tree === tree) return typesCache.types
+  const types = tree.flatMap((entry) => (entry.type ? [entry.type] : NO_TYPES))
+  const prev = typesCache?.types
+  const same = prev && prev.length === types.length && prev.every((t, i) => t === types[i])
+  typesCache = { tree, types: same ? prev : types }
+  return typesCache.types
+}
+
+/**
+ * Every agent type the session has spawned, at any depth: what a tile letter
+ * is told apart against when the catalog is empty (`agentTileLetter`). The same
+ * set the roster's rows give, from the same tree, so a Task card reads `R` where
+ * the roster does without building the tree again.
+ */
+export function useSessionAgentTypes(): string[] {
+  const messages = useActiveSession((s) => s.messages)
+  const subagentMessages = useActiveSession((s) => s.subagentMessages)
+  const engineId = useActiveSession((s) => s.status.engineId)
+  return messages ? agentTypesOf(agentTreeCached(messages, subagentMessages, engineId)) : NO_TYPES
+}
 const NO_IDS: readonly string[] = []
 
 export function useAgentRoster(): AgentRoster {
@@ -614,8 +674,7 @@ export function useAgentRoster(): AgentRoster {
   // The tree — deliberately NOT dependent on the live maps. Each bucket's walk
   // is shared with the other surfaces through scanTranscriptCached.
   const tree = useMemo(
-    () =>
-      messages ? scanAgentTree(messages, subagentMessages ?? NO_BUCKETS, engineId ?? 'claude') : [],
+    () => (messages ? agentTreeCached(messages, subagentMessages, engineId) : []),
     [messages, subagentMessages, engineId]
   )
 
