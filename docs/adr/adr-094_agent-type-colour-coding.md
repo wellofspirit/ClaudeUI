@@ -89,7 +89,9 @@ ordinary `updateSettings` path, so they sync to every client like any setting; b
   wide it is a chip in the type's colour led by the same tile, then the name, then the word "background", the model,
   usage and "Open in panel". Test ids `TaskCard.type` (the chip), `TaskCard.typeTile`, `TaskCard.background`,
   `TaskCard.background.icon`. The narrow row is one line at chat scale 1, 1.1, 1.25 and 1.5 for the common fixtures;
-  only a resumed chip at 1.5 wraps, as whole chips with the ↗ last.
+  a resumed agent shows the compact `↻N` badge (the roster's, one shared component, so the footer stays one line
+  through 1.25; at 1.5 the whole chips still wrap, the ↗ last). The bot stays at every width, in the roster as in the
+  card: a narrow row gives the name less room, never the tile.
 
 ## Amendment (2026-10-17): every agent has a tile with a bot
 
