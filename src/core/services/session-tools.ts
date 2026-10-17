@@ -47,6 +47,7 @@ import {
   type Proposal
 } from './session-proposals'
 import { deliver, type DeliveryResult } from './session-delivery'
+import { noteStopRequested } from './session-notes'
 import {
   awaitingClientPrompt,
   engineOfId,
@@ -1014,6 +1015,7 @@ export async function sessionStop(
     return finish(ok(`${target.ref} has no running turn to stop.`), target.ref, 'nothing to stop')
   }
   try {
+    noteStopRequested(target.id)
     await session.interrupt()
     return finish(
       ok(`stopped ${target.ref}'s running turn; the session stays open.`),

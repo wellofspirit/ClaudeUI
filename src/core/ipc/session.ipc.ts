@@ -10,6 +10,7 @@ import { claudeLoginSignal } from '../services/claude-login-state'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { detachSessionLink } from '../services/session-links'
+import { configureSessionNotes } from '../services/session-notes'
 import {
   configureSessionTools,
   dismissProposalFromClient,
@@ -445,6 +446,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     sendPrompt: (routingId, prompt, options) =>
       sendPrompt(manager, routingId, prompt, undefined, options)
   })
+  // Turn-end notes to a parent send through the same manager.
+  configureSessionNotes(manager)
   for (const command of codexCommands(manager)) handleIpc(command)
 
   // The volatile lane's subscription verb (phase 5 S1). Same declaration the
