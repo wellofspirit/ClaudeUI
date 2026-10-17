@@ -16,6 +16,7 @@ import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { ISession, NonUserItem } from './ISession'
 import { SessionQueue } from './session-queue'
 import { TurnOriginLedger } from './turn-origin-ledger'
+import { clientPromptReached } from './client-prompt-observer'
 import {
   BlockedCallLedger,
   blockedCallNudge,
@@ -132,7 +133,12 @@ export abstract class BaseSession implements ISession {
     this.cwd = cwd
     // The user's own queued prompt is what ends the "agent text since the user
     // spoke" stretch — when the engine takes it, not when it is typed.
-    this.queue.onConsumed = () => this.originLedger.userPrompt()
+    this.queue.onConsumed = (item) => {
+      const hostInstruction = item.origin === 'host-instruction'
+      const agentBrief = this.queue.isBrief(item)
+      this.originLedger.userPrompt({ hostInstruction, agentBrief })
+      if (!hostInstruction && !agentBrief) clientPromptReached(this.routingId)
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -238,7 +244,7 @@ export abstract class BaseSession implements ISession {
     text: string,
     attachments?: AttachmentUpload[],
     refs: AttachmentRef[] | undefined = internAttachments(attachments),
-    origin?: 'host-instruction'
+    origin?: 'host-instruction' | 'agent-brief'
   ): void {
     const item = this.queue.add(text, attachments, refs, origin)
     this.queue.emit()

@@ -1242,6 +1242,70 @@ describe('sendPrompt — origin and the held inbox (slice 1a)', () => {
     }
   })
 
+  it('the brief a session tool sends keeps the session "started by an agent"; a client prompt clears it (slice 1c)', () => {
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    session.originLedger.markAgentCreated()
+    sendPrompt(makeManager(session), rid, 'Background: …', undefined, {
+      origin: 'user',
+      agentBrief: true
+    })
+    expect(session.originLedger.agentCreated).toBe(true)
+    // …and the host's own instruction does not clear it either.
+    session.willQueue = false
+    sendPrompt(makeManager(session), rid, 'wrap up', undefined, { origin: 'host-instruction' })
+    expect(session.originLedger.agentCreated).toBe(true)
+    expect(session.originLedger.hostInstructionTurn).toBe(true)
+    session.willQueue = false
+    sendPrompt(makeManager(session), rid, 'typed by the user')
+    expect(session.originLedger.agentCreated).toBe(false)
+    expect(session.originLedger.hostInstructionTurn).toBe(false)
+  })
+
+  it('only a client prompt is recorded on the session’s link, so the wait survives a restart (slice 1c)', async () => {
+    const { insertSessionRef, upsertSessionLink, getSessionLink } =
+      await import('../../../core/services/db')
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    const ref = `s-hc${process.pid}-${n}`
+    insertSessionRef({ ref, engine: 'claude', sessionId: null, routingId: rid })
+    upsertSessionLink({
+      childRef: ref,
+      parentRef: 's-parent',
+      kind: 'started',
+      createdBy: 'agent',
+      wakeParent: false,
+      state: 'live'
+    })
+    const prompted = (): number | null | undefined => getSessionLink(ref)?.clientPromptedAt
+    sendPrompt(makeManager(session), rid, 'brief', undefined, { origin: 'user', agentBrief: true })
+    expect(prompted()).toBeNull()
+    session.willQueue = false
+    sendPrompt(makeManager(session), rid, 'wrap up', undefined, { origin: 'host-instruction' })
+    expect(prompted()).toBeNull()
+    session.willQueue = false
+    sendPrompt(makeManager(session), rid, 'typed by the user')
+    expect(prompted()).toEqual(expect.any(Number))
+  })
+
+  it('a brief sent while the child is busy is queued as a brief, not as a typed prompt (slice 1c)', () => {
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    session.willQueue = true
+    sendPrompt(makeManager(session), rid, 'Background: …', undefined, {
+      origin: 'user',
+      agentBrief: true
+    })
+    expect(session.enqueuePrompt).toHaveBeenLastCalledWith(
+      'Background: …',
+      undefined,
+      undefined,
+      'agent-brief'
+    )
+    sendPrompt(makeManager(session), rid, 'typed while busy')
+    expect(session.enqueuePrompt).toHaveBeenLastCalledWith('typed while busy', undefined, undefined)
+  })
+
   it('a typed prompt carries no marker', () => {
     const rid = ridOf()
     const session = liveSession(rid, { engineId: 'claude' })

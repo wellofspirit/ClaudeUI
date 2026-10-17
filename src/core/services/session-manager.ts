@@ -10,6 +10,7 @@ import { claudeProjectKeyFor } from './claude-transcript-locator'
 import { getSessionMeta, moveSessionInbox, moveSessionMeta, renameUsageEventParent } from './db'
 import { logger } from './logger'
 import { syncCore } from './sync-host'
+import { moveCustomTitle } from './ui-config'
 
 /**
  * Unsubscribe for whichever SessionManager currently owns core's rekeys.
@@ -144,6 +145,16 @@ export class SessionManager {
       logger.warn(
         'SessionManager',
         `moveSessionMeta failed (the engine row may stay under the old id): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    // A title set before the rekey (a session another session started is named
+    // before its engine reports an id) moves on disk with it, no client needed.
+    try {
+      moveCustomTitle(oldId, newId)
+    } catch (err) {
+      logger.warn(
+        'SessionManager',
+        `moveCustomTitle failed (the title may stay under the old id): ${err instanceof Error ? err.message : String(err)}`
       )
     }
   }

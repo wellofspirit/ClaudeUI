@@ -636,6 +636,11 @@ async function handleInbound(line: Record<string, unknown>, ctx: InboundCtx): Pr
     if (rid) ctx.control.cancelInbound(rid)
     return
   }
+  try {
+    ctx.options.onInboundFrame?.(line)
+  } catch {
+    /* an observer of the wire must never break it */
+  }
   // Everything else flows up to the consumer.
   ctx.queue.push(line as SDKMessage)
 }

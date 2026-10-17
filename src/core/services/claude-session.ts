@@ -60,6 +60,19 @@ import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
 import { createCollabServer } from './collab-tool'
+import { ToolUseOwners } from './tool-use-owners'
+import {
+  createSessionToolsServer,
+  SESSION_TOOLS_PREFIX,
+  SESSION_TOOLS_SERVER_NAME
+} from './session-tools-server'
+import {
+  auditSessionToolCall,
+  resolveTarget,
+  sessionToolsAvailable,
+  sessionToolsGate,
+  type SessionToolCaller
+} from './session-tools'
 import { crossEngineDispatcher, crossEngineDispatchAvailable } from './cross-engine-dispatcher'
 import { accountState, buildClaudeAccountRef, updateClaudeAuthSource } from '../host'
 import { equivalentCostUsd } from '../../shared/pricing'
@@ -133,6 +146,11 @@ import {
   dispatchAgentPromptSection,
   OWN_SUBAGENT_TOOL
 } from '../../shared/dispatch-agent-description'
+import {
+  ACTING_SESSION_TOOLS,
+  isSessionToolName,
+  sessionToolsGuidance
+} from '../../shared/session-tools-description'
 
 /**
  * The system-prompt section for the `claude-ui-collab` dispatch tool, from the
@@ -295,6 +313,12 @@ export class ClaudeSession extends BaseSession {
   private wasInterrupted = false
   private pendingApprovals = new Map<string, PendingApprovalEntry>()
   private taskIdMap = new Map<string, string>() // agentId → the CURRENT run's toolUseId
+  /**
+   * Who owns each tool call (root agent or a subagent), filled from the wire ahead
+   * of the message loop and from `canUseTool`. The session tools read it to refuse
+   * a subagent in modes that never call `canUseTool`.
+   */
+  private readonly toolUseOwners = new ToolUseOwners()
   /**
    * An agent's identity, and the three maps that keep it (ADR-073).
    *
@@ -853,6 +877,22 @@ export class ClaudeSession extends BaseSession {
           })
         : null
 
+      // The session tools (slice 1c): their own server for the same reason —
+      // outside the auto-allowed `claude-ui` prefix, every call through canUseTool
+      // and the session-tools gate. Registered only where the host has wired them
+      // (a ClaudeSession is always an interactive root session; dispatch targets,
+      // automations and side questions run on raw queries and never reach here).
+      const sessionCaller = (): SessionToolCaller => ({
+        routingId: this.routingId,
+        engine: this.engineId,
+        cwd: this.cwd,
+        permissionMode: this.permissionMode,
+        callOwner: (toolUseId) => this.toolUseOwners.ownerOf(toolUseId)
+      })
+      const sessionToolsServer = sessionToolsAvailable()
+        ? createSessionToolsServer({ getCaller: sessionCaller })
+        : null
+
       // Multi-account: renew the active account's token if it is about to
       // expire, or refuse the spawn (HostTokenUnavailableError, whose message
       // reaches the chat as session:error in the catch below) when there is no
@@ -903,6 +943,13 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
 
 ## Cross-Engine Agent Dispatch
 ${CROSS_ENGINE_DISPATCH_SECTION}`
+                : ''
+            }${
+              sessionToolsServer
+                ? `
+
+## ClaudeUI Sessions
+${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
                 : ''
             }`
           },
@@ -978,10 +1025,18 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
             'claude-ui-mockup': mockupMcpServer as never,
             // Deliberately NOT in allowedTools and NOT auto-allowed in
             // canUseTool — dispatch_agent must hit the normal approval path.
-            ...((collabServer ? { 'claude-ui-collab': collabServer } : {}) as Record<string, never>)
+            ...((collabServer ? { 'claude-ui-collab': collabServer } : {}) as Record<
+              string,
+              never
+            >),
+            // Same: never in allowedTools, never auto-allowed outside the gate.
+            ...((sessionToolsServer
+              ? { [SESSION_TOOLS_SERVER_NAME]: sessionToolsServer }
+              : {}) as Record<string, never>)
           },
           allowedTools: ['mcp__claude-ui__*', 'mcp__claude-ui-mockup__*'],
           abortController: this.abortController,
+          onInboundFrame: (frame) => this.toolUseOwners.noteFrame(frame),
           includePartialMessages: true,
           thinking: this.buildThinkingConfig(),
           effort: this.effort as 'low' | 'medium' | 'high',
@@ -1025,9 +1080,41 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
             ? { resumeSessionAt: this.resumeSessionAt, forkSession: true }
             : {}),
           canUseTool: async (toolName, input, opts) => {
+            // cli.js's own word on who is asking, for the session tools to read later.
+            if (opts.toolUseId) this.toolUseOwners.note(opts.toolUseId, !!opts.agentId)
             // Auto-allow our in-process UI tools (mermaid, etc.) — no user approval needed
             if (toolName.startsWith('mcp__claude-ui__')) {
               return { behavior: 'allow' as const, updatedInput: input }
+            }
+
+            // The session tools: the gate decides allow / ask / deny. 'ask' falls
+            // through to the ordinary approval card below.
+            if (toolName.startsWith(SESSION_TOOLS_PREFIX)) {
+              const bare = toolName.slice(SESSION_TOOLS_PREFIX.length)
+              if (isSessionToolName(bare)) {
+                const caller = sessionCaller()
+                const decision = sessionToolsGate(caller, bare, input, { agentId: opts.agentId })
+                if (decision.behavior === 'allow') {
+                  return { behavior: 'allow' as const, updatedInput: input }
+                }
+                if (decision.behavior === 'deny') {
+                  // The service never runs for a denied call, so the refusal is audited here.
+                  if (ACTING_SESSION_TOOLS.has(bare)) {
+                    const named =
+                      typeof input.session === 'string'
+                        ? resolveTarget(caller, input.session)
+                        : null
+                    auditSessionToolCall(
+                      caller,
+                      bare,
+                      named?.ok ? named.ref : null,
+                      'error',
+                      decision.message
+                    )
+                  }
+                  return { behavior: 'deny' as const, message: decision.message }
+                }
+              }
             }
 
             // A cancel/interrupt racing this callback's entry may have ALREADY
@@ -1039,6 +1126,7 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
               return { behavior: 'deny' as const, message: 'Cancelled' }
             }
 
+            const isSessionTool = toolName.startsWith(SESSION_TOOLS_PREFIX)
             const requestId = uuid()
             const approval: PendingApproval = {
               requestId,
@@ -1049,7 +1137,12 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
               toolUseId: opts.toolUseId,
               toolName,
               input,
-              suggestions: opts.suggestions as PendingApproval['suggestions'],
+              // No "always allow" for a session tool: the rule it would persist
+              // makes cli.js stop calling canUseTool for it, which silently removes
+              // the scope and mode-parity checks the gate makes (spec 7.3).
+              suggestions: isSessionTool
+                ? undefined
+                : (opts.suggestions as PendingApproval['suggestions']),
               decisionReason: opts.decisionReason,
               blockedPath: opts.blockedPath
             }
@@ -1085,7 +1178,7 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
               return {
                 behavior: 'allow' as const,
                 updatedInput,
-                ...(updatedPermissions?.length
+                ...(updatedPermissions?.length && !isSessionTool
                   ? {
                       updatedPermissions:
                         updatedPermissions as unknown as import('../sdk').PermissionUpdate[]

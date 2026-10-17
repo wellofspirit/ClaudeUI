@@ -40,6 +40,14 @@ export interface CreateSessionArgs {
    * omit it, and a WS client's JSON may carry `null` for it or for either field.
    */
   announce?: { effort?: string | null; thinkingMode?: string | null }
+  /**
+   * Who started the session, when it was not a client: `'agent'` for a session
+   * another session's tool started (session tools, spec §6.1). It rides the birth
+   * event so no client follows the new session; absent for every session a client
+   * or a resume creates, which behave exactly as before. Never read from a
+   * client's command — only the session tools set it.
+   */
+  createdBy?: 'agent'
 }
 
 /**
@@ -113,7 +121,8 @@ export async function prepareAndCreateSession(
     resumeSessionAt,
     forkSession,
     engineId,
-    announce
+    announce,
+    createdBy
   } = args
 
   // engineId ?? 'claude' is the legacy default at the IPC/WS boundary (old callers
@@ -235,7 +244,9 @@ export async function prepareAndCreateSession(
       // A real request that got swapped IS announced: converging the picker on
       // what actually spawned is the point.
       ...(model != null && resolvedModel != null ? { model: resolvedModel } : {}),
-      ...announcedConfig
+      ...announcedConfig,
+      // Only a session a tool started says so; clients that see it do not follow.
+      ...(createdBy ? { createdBy } : {})
     }
   ])
   // A resumed session may have had items held for it while it was cold (slice 1a,

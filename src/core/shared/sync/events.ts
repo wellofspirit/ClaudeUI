@@ -105,6 +105,13 @@ export interface SyncEventMap {
       model?: string
       effort?: string | null
       thinkingMode?: string | null
+      /**
+       * Present (`'agent'`) when another session's tool started this session:
+       * no client switches to it, whatever its "follow" setting says. Absent for
+       * every other session, which behaves as it always did. Not folded into
+       * canonical state — it only steers the clients' reaction to the event.
+       */
+      createdBy?: 'agent'
     }
   ) => void
   /**

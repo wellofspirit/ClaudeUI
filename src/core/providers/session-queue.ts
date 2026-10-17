@@ -40,6 +40,13 @@ export class SessionQueue {
    * item when {@link emit} prunes it.
    */
   private queuedAtMs = new Map<string, number>()
+  /**
+   * Items that are the brief a session tool gave a session it started: a user
+   * prompt on the wire but not a client typing. Private like {@link forwarded}: the
+   * broadcast item stays an ordinary one. Dropped with the item when {@link emit}
+   * prunes it.
+   */
+  private briefs = new Set<string>()
 
   /**
    * Called when an item becomes `consumed` — the engine took it. The one place
@@ -83,15 +90,21 @@ export class SessionQueue {
     text: string,
     uploads?: AttachmentUpload[],
     refs?: AttachmentRef[],
-    origin?: 'host-instruction'
+    origin?: 'host-instruction' | 'agent-brief'
   ): QueuedItem {
     const item: QueuedItem = { itemId: randomUUID(), text, state: 'queued' }
-    if (origin) item.origin = origin
+    if (origin === 'host-instruction') item.origin = origin
+    if (origin === 'agent-brief') this.briefs.add(item.itemId)
     if (refs && refs.length > 0) item.attachments = refs
     if (uploads && uploads.length > 0) this.uploads.set(item.itemId, uploads)
     this.queuedAtMs.set(item.itemId, this.now())
     this.items.push(item)
     return item
+  }
+
+  /** Is this item a session tool's brief rather than something a client typed? */
+  isBrief(item: QueuedItem): boolean {
+    return this.briefs.has(item.itemId)
   }
 
   /** When the item was queued (epoch ms); undefined once it has been pruned. */
@@ -163,6 +176,7 @@ export class SessionQueue {
       this.forwarded.delete(item.itemId)
       this.uploads.delete(item.itemId)
       this.queuedAtMs.delete(item.itemId)
+      this.briefs.delete(item.itemId)
     }
     this.items = this.items.filter((item) => item.state === 'queued')
   }

@@ -1459,6 +1459,17 @@ export const MIGRATIONS: Migration[] = [
           ON session_link (parent_ref);
       `)
     }
+  },
+  {
+    // Slice 1c (session tools): when a CLIENT first prompted the child. A session
+    // another session's tool started may not start sessions itself until a client
+    // has typed into it; that fact used to live in memory only, so a host restart
+    // forgot it. Null = no client prompt yet. Existing rows (written before any tool
+    // could create a link) stay null, which only matters for agent-created ones.
+    version: 32,
+    up(db) {
+      db.exec(`ALTER TABLE session_link ADD COLUMN client_prompted_at INTEGER;`)
+    }
   }
 ]
 
@@ -2106,6 +2117,8 @@ export interface SessionLinkRow {
   state: SessionLinkRowState
   createdAt: number
   updatedAt: number
+  /** When a client first prompted the child; null until one has. */
+  clientPromptedAt: number | null
 }
 
 interface SessionLinkDbRow {
@@ -2117,6 +2130,7 @@ interface SessionLinkDbRow {
   state: string
   created_at: number
   updated_at: number
+  client_prompted_at: number | null
 }
 
 function sessionLinkRow(row: SessionLinkDbRow): SessionLinkRow {
@@ -2129,13 +2143,14 @@ function sessionLinkRow(row: SessionLinkDbRow): SessionLinkRow {
     wakeParent: Number(row.wake_parent) === 1,
     state: row.state as SessionLinkRowState,
     createdAt: Number(row.created_at),
-    updatedAt: Number(row.updated_at)
+    updatedAt: Number(row.updated_at),
+    clientPromptedAt: row.client_prompted_at == null ? null : Number(row.client_prompted_at)
   }
 }
 
 /** Record (or replace) the child's link. A session has at most one parent. */
 export function upsertSessionLink(
-  link: Omit<SessionLinkRow, 'createdAt' | 'updatedAt'> & { now?: number },
+  link: Omit<SessionLinkRow, 'createdAt' | 'updatedAt' | 'clientPromptedAt'> & { now?: number },
   db: Db = getDb()
 ): void {
   const now = link.now ?? Date.now()
@@ -2179,6 +2194,27 @@ export function allSessionLinks(db: Db = getDb()): SessionLinkRow[] {
       .prepare('SELECT * FROM session_link ORDER BY created_at, child_ref')
       .all() as SessionLinkDbRow[]
   ).map(sessionLinkRow)
+}
+
+/**
+ * A client prompt reached the session known by `id` (its routing or durable id):
+ * if it is the child of a link and no client had prompted it yet, record when.
+ * One statement, so the prompt path pays one indexed lookup and nothing for a
+ * session with no link. Returns whether a link was marked.
+ */
+export function markSessionLinkClientPrompted(
+  id: string,
+  now = Date.now(),
+  db: Db = getDb()
+): boolean {
+  const info = db
+    .prepare(
+      `UPDATE session_link SET client_prompted_at = ?
+         WHERE client_prompted_at IS NULL
+           AND child_ref IN (SELECT ref FROM session_ref WHERE routing_id = ? OR session_id = ?)`
+    )
+    .run(now, id, id)
+  return Number(info.changes) > 0
 }
 
 /** Move a link to `state`. Returns false when there is no such link or it is already there. */
@@ -4444,7 +4480,8 @@ export interface AuditLogRow {
   connectionId: string
   /**
    * The `IdentityMethod` the connection was admitted under: 'password' |
-   * 'webauthn' | 'webauthn-resumed' | 'enroll-token' | 'none' | 'host'.
+   * 'webauthn' | 'webauthn-resumed' | 'enroll-token' | 'none' | 'host' | 'agent'
+   * ('agent': a session tool acting for an agent session, slice 1c).
    *
    * TEXT rather than an enum because it is a HISTORICAL record — rows written by
    * an older build keep whatever vocabulary that build had, and the retired

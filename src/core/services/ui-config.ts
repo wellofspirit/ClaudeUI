@@ -454,6 +454,24 @@ export function saveSessionConfig(config: UISessionConfig): void {
   writeJson(SESSIONS_FILE, { ...stored, ...rest })
 }
 
+/**
+ * A session's custom title follows its rekey (client-id → engine session id).
+ *
+ * The reducer renames the key in every replica, but sessions.json is written only
+ * by clients' saves, so a title set before the rekey (the session tools name a
+ * session they start) stayed under the old id on disk until some client happened
+ * to save the registry. This moves just that key, on the host, with no client
+ * needed. An existing title under the new id wins. Returns whether it moved one.
+ */
+export function moveCustomTitle(oldId: string, newId: string): boolean {
+  if (oldId === newId) return false
+  const titles = loadSessionConfig().customTitles
+  if (!titles || titles[oldId] === undefined) return false
+  const { [oldId]: moving, ...rest } = titles
+  saveSessionConfig({ customTitles: newId in rest ? rest : { ...rest, [newId]: moving } })
+  return true
+}
+
 export interface SlashCommandCache {
   name: string
   description?: string

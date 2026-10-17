@@ -20,6 +20,7 @@ import {
   moveSessionRef,
   runMigrations,
   sessionLinksByParent,
+  markSessionLinkClientPrompted,
   setSessionLinkState,
   upsertSessionLink,
   type Db
@@ -78,7 +79,7 @@ describe('session_ref / session_link tables', () => {
       runMigrations(older)
       expect(exists('session_ref')).toBe(true)
       expect(exists('session_link')).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(31)
+      expect(older.pragma('user_version', { simple: true })).toBe(32)
     } finally {
       older.close()
     }
@@ -188,5 +189,49 @@ describe('links', () => {
     expect(setSessionLinkState('s-child1', 'live', 6_000, db)).toBe(false)
     expect(getSessionLink('s-child1', db)?.updatedAt).toBe(5_000)
     expect(setSessionLinkState('s-nope', 'live', 6_000, db)).toBe(false)
+  })
+})
+
+describe('client_prompted_at (migration v32)', () => {
+  it('is added by its own migration to a profile that already has links, which keep their rows with it null', () => {
+    const older = new BetterSqlite3(':memory:') as unknown as Db
+    try {
+      runMigrations(
+        older,
+        MIGRATIONS.filter((m) => m.version < 32)
+      )
+      upsertSessionLink(link('s-child1', 's-parent'), older)
+      expect(
+        (older.prepare('PRAGMA table_info(session_link)').all() as Array<{ name: string }>).map(
+          (c) => c.name
+        )
+      ).not.toContain('client_prompted_at')
+      runMigrations(older)
+      expect(older.pragma('user_version', { simple: true })).toBe(32)
+      expect(getSessionLink('s-child1', older)).toMatchObject({
+        childRef: 's-child1',
+        clientPromptedAt: null
+      })
+    } finally {
+      older.close()
+    }
+  })
+
+  it('is set once by the first client prompt, found by either of the session ids', () => {
+    insertSessionRef(ref('s-kid111', { sessionId: 'd1', routingId: 'r1' }), db)
+    upsertSessionLink(link('s-kid111', 's-parent'), db)
+    expect(markSessionLinkClientPrompted('nobody', 100, db)).toBe(false)
+    expect(markSessionLinkClientPrompted('r1', 100, db)).toBe(true)
+    expect(getSessionLink('s-kid111', db)?.clientPromptedAt).toBe(100)
+    expect(markSessionLinkClientPrompted('d1', 200, db)).toBe(false)
+    expect(getSessionLink('s-kid111', db)?.clientPromptedAt).toBe(100)
+  })
+
+  it('is not reset when the link is recorded again (state moves, the prompt stays)', () => {
+    insertSessionRef(ref('s-kid222', { routingId: 'r2' }), db)
+    upsertSessionLink(link('s-kid222', 's-parent'), db)
+    markSessionLinkClientPrompted('r2', 100, db)
+    upsertSessionLink(link('s-kid222', 's-parent', { state: 'live' }), db)
+    expect(getSessionLink('s-kid222', db)).toMatchObject({ state: 'live', clientPromptedAt: 100 })
   })
 })

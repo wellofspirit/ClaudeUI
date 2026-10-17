@@ -127,4 +127,46 @@ describe('a session ref follows a rekey (host-side)', { timeout: 30_000 }, () =>
       db.closeDb()
     }
   })
+
+  it('moves the custom title to the new id on disk, with no client saving anything', async () => {
+    const { db, manager, emitEvent } = await fresh()
+    try {
+      const config = await import('../../../core/services/ui-config')
+      // A session another session's tool started is named before its engine reports an id.
+      config.saveSessionConfig({ customTitles: { 'temp-1': 'Fix the flaky test', other: 'Other' } })
+      emitEvent('session:created', ['temp-1', { cwd: '/x' }])
+
+      emitEvent('session:status', ['temp-1', status('thread-9')])
+
+      expect(config.loadSessionConfig().customTitles).toEqual({
+        'thread-9': 'Fix the flaky test',
+        other: 'Other'
+      })
+    } finally {
+      manager.disposeRekeyObserver()
+      db.closeDb()
+    }
+  })
+
+  it('keeps a title already under the new id, and does nothing for an untitled session', async () => {
+    const { db, manager, emitEvent } = await fresh()
+    try {
+      const config = await import('../../../core/services/ui-config')
+      config.saveSessionConfig({ customTitles: { 'temp-1': 'Old', 'thread-9': 'Chosen' } })
+      emitEvent('session:created', ['temp-1', { cwd: '/x' }])
+      emitEvent('session:status', ['temp-1', status('thread-9')])
+      expect(config.loadSessionConfig().customTitles).toEqual({ 'thread-9': 'Chosen' })
+
+      config.saveSessionConfig({ customTitles: { other: 'Other' } })
+      emitEvent('session:created', ['temp-2', { cwd: '/x' }])
+      ;(manager as unknown as { sessions: Map<string, unknown> }).sessions.set('temp-2', {
+        routingId: 'temp-2'
+      })
+      emitEvent('session:status', ['temp-2', status('thread-10')])
+      expect(config.loadSessionConfig().customTitles).toEqual({ other: 'Other' })
+    } finally {
+      manager.disposeRekeyObserver()
+      db.closeDb()
+    }
+  })
 })

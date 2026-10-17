@@ -17,13 +17,21 @@ import { fromSnapshot, toSnapshot } from '../../shared/sync/state'
 import { CommandRegistry, makeRemoteConnection } from '../../ipc/command-registry'
 import { RemoteDispatcher } from '../remote-dispatcher'
 import { addSyncSubscriber, emitEvent, syncCore } from '../sync-host'
-import { findSessionRef, getSessionLink, getSessionRef, upsertSessionLink } from '../db'
 import {
+  findSessionRef,
+  getSessionLink,
+  getSessionRef,
+  insertSessionRef,
+  upsertSessionLink
+} from '../db'
+import {
+  awaitingClientPrompt,
   detachLink,
   detachSessionLink,
   linkChild,
   linkPayload,
   linksOf,
+  noteClientPrompt,
   recordLink,
   refFor,
   resetSessionLinksForTests,
@@ -619,5 +627,91 @@ describe('detachSessionLink — the session:link:detach body', () => {
       makeRemoteConnection('password', null)
     )
     expect(viaDispatcher).toEqual(detachSessionLink(child))
+  })
+})
+
+describe('the first client prompt on a started session (slice 1c)', () => {
+  const agentChild = (): { parent: string; child: string; childRef: string; parentRef: string } => {
+    const parent = born(id('parent'))
+    const child = born(id('child'))
+    const { childRef, parentRef } = linkChild({
+      parent,
+      childRoutingId: child,
+      engine: 'claude',
+      kind: 'started',
+      createdBy: 'agent',
+      wakeParent: false
+    })
+    return { parent, child, childRef, parentRef }
+  }
+
+  it('is recorded on the link, once, and ends the wait', () => {
+    const { child, childRef } = agentChild()
+    expect(getSessionLink(childRef)?.clientPromptedAt).toBeNull()
+    expect(awaitingClientPrompt(childRef)).toBe(true)
+    noteClientPrompt(child)
+    const first = getSessionLink(childRef)?.clientPromptedAt
+    expect(first).toEqual(expect.any(Number))
+    expect(awaitingClientPrompt(childRef)).toBe(false)
+    noteClientPrompt(child)
+    expect(getSessionLink(childRef)?.clientPromptedAt).toBe(first)
+  })
+
+  it('survives the child’s rekey: the same row, found by the new id', () => {
+    const { child, childRef } = agentChild()
+    emitEvent('session:status', [child, status('thread-after')])
+    noteClientPrompt('thread-after')
+    expect(awaitingClientPrompt(childRef)).toBe(false)
+  })
+
+  it('a prompt to a session with no link records nothing and leaves nothing behind', () => {
+    const lone = born(id('lone'))
+    expect(() => noteClientPrompt(lone)).not.toThrow()
+    expect(() => noteClientPrompt(id('unknown'))).not.toThrow()
+  })
+
+  it('is not owed by a link the user made, or by a session with no link', () => {
+    const parent = born(id('p'))
+    const kid = born(id('k'))
+    const parentRef = refFor('claude', parent)
+    const kidRef = refFor('claude', kid)
+    recordLink({
+      parentRef,
+      childRef: kidRef,
+      kind: 'started',
+      createdBy: 'user',
+      wakeParent: false
+    })
+    expect(awaitingClientPrompt(kidRef)).toBe(false)
+    expect(awaitingClientPrompt(parentRef)).toBe(false)
+  })
+
+  it('a prompt on the temporary id of a resumed session is recorded when its engine id arrives', () => {
+    // A resumed session is bound to its link by the durable id alone; its first prompt
+    // arrives under a fresh routing id the link cannot yet match.
+    const durable = id('durable')
+    const parent = born(id('parent'))
+    const parentRef = refFor('claude', parent)
+    insertSessionRef({ ref: 's-resume', engine: 'claude', sessionId: durable, routingId: null })
+    recordLink({
+      parentRef,
+      childRef: 's-resume',
+      kind: 'started',
+      createdBy: 'agent',
+      wakeParent: false,
+      state: 'live'
+    })
+    const temp = born(id('temp'))
+    noteClientPrompt(temp)
+    expect(awaitingClientPrompt('s-resume')).toBe(true)
+    emitEvent('session:status', [temp, status(durable)])
+    expect(awaitingClientPrompt('s-resume')).toBe(false)
+    expect(getSessionLink('s-resume')?.clientPromptedAt).toEqual(expect.any(Number))
+  })
+
+  it('a prompt before the rekey that carries no link changes nothing at the rekey', () => {
+    const temp = born(id('temp'))
+    noteClientPrompt(temp)
+    expect(() => emitEvent('session:status', [temp, status(id('thread'))])).not.toThrow()
   })
 })

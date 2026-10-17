@@ -16,8 +16,8 @@
  *    a PARENT leaves its children in place with their links `ended`;
  *  - `detached` is the user's choice: the pair is no longer shown as related.
  *
- * Nothing creates links yet but the tests: the model-facing tools arrive with
- * slice 1c, which calls {@link linkChild} after it spawns the child.
+ * The session tools (`session-tools.ts`) create links with {@link linkChild} after
+ * they spawn the child.
  */
 import { randomInt } from 'node:crypto'
 import type { ChatMessage, EngineId } from '../../shared/types'
@@ -42,6 +42,7 @@ import {
   getSessionMeta,
   getSessionRef,
   insertSessionRef,
+  markSessionLinkClientPrompted,
   moveSessionRef,
   sessionLinksByParent,
   setSessionLinkState,
@@ -50,6 +51,7 @@ import {
   type SessionLinkRow,
   type SessionRefRow
 } from './db'
+import { setClientPromptObserver } from '../providers/client-prompt-observer'
 import { logger } from './logger'
 import { addHostObserver, emitEvent, syncCore } from './sync-host'
 
@@ -159,7 +161,7 @@ function resolved(row: SessionRefRow): ResolveResult {
 }
 
 /** The title the sidebar shows for a session canonical knows, by sidebar id. */
-function titleOf(id: string): string {
+export function titleOf(id: string): string {
   const state = syncCore.getCanonicalState()
   const custom = state.customTitles[id]
   if (custom) return custom
@@ -172,7 +174,7 @@ function titleOf(id: string): string {
   return text && text.type === 'text' ? text.text.slice(0, 80).replace(/\n/g, ' ').trim() : ''
 }
 
-function engineOfId(id: string): EngineId {
+export function engineOfId(id: string): EngineId {
   const state = syncCore.getCanonicalState()
   const live = state.sessions[id]
   // Canonical's status names the engine only once the session has reported one
@@ -187,7 +189,7 @@ function engineOfId(id: string): EngineId {
 }
 
 /** Every session id canonical knows: the live ones and the listed ones. */
-function knownSessionIds(): string[] {
+export function knownSessionIds(): string[] {
   const state = syncCore.getCanonicalState()
   const ids = new Set<string>(Object.keys(state.sessions))
   for (const group of state.directories) for (const s of group.sessions) ids.add(s.sessionId)
@@ -357,6 +359,43 @@ export function setLinkState(childRef: string, state: SessionLinkState): boolean
   return true
 }
 
+/**
+ * Client prompts that arrived while the session was still on its temporary routing
+ * id. A resumed session's first prompt spawns its engine, and only that engine's
+ * first status carries the durable id the link is bound to: until then the prompt
+ * cannot be matched to a link, so it is remembered here and recorded at the rekey.
+ */
+const promptedBeforeRekey = new Set<string>()
+const PROMPTED_BEFORE_REKEY_MAX = 1000
+
+/**
+ * A client prompt (not the brief a tool sent, not the host's own instruction)
+ * reached this session. Records it on the session's link, if it has one, so "no
+ * client has typed into this agent-created session yet" survives a restart.
+ * Best-effort: the prompt path never fails on bookkeeping.
+ */
+export function noteClientPrompt(id: string): void {
+  try {
+    if (markSessionLinkClientPrompted(id) || !isPendingRouting(id)) return
+    if (promptedBeforeRekey.size >= PROMPTED_BEFORE_REKEY_MAX) {
+      promptedBeforeRekey.delete(promptedBeforeRekey.values().next().value as string)
+    }
+    promptedBeforeRekey.add(id)
+  } catch (err) {
+    logger.warn(LOG, `could not record the client prompt for ${id}: ${String(err)}`)
+  }
+}
+
+/**
+ * Was this session started by an agent and not yet prompted by a client? Read from
+ * the link, so it holds across a host restart, when the in-memory ledger starts
+ * fresh. False for a session with no link or one the user or ClaudeUI itself started.
+ */
+export function awaitingClientPrompt(ref: string): boolean {
+  const link = getSessionLink(ref)
+  return link !== undefined && link.createdBy === 'agent' && link.clientPromptedAt === null
+}
+
 /** The user took the pair apart: the child is a top-level session again. */
 export function detachLink(childRef: string): boolean {
   return setLinkState(childRef, 'detached')
@@ -517,6 +556,7 @@ export function onSessionRekeyed(oldId: string, newId: string): void {
   const childRef = startingByRouting.get(oldId)
   startingByRouting.delete(oldId)
   moveSessionRef(oldId, newId)
+  if (promptedBeforeRekey.delete(oldId)) markSessionLinkClientPrompted(newId)
   if (childRef) setLinkState(childRef, 'live')
 }
 
@@ -530,6 +570,7 @@ function onSessionStatus(routingId: string, status: { state?: string } | undefin
 /** A session was deleted. Its own link ends (or fails, if it never started); its children's end. */
 function onSessionRemoved(id: string): void {
   startingByRouting.delete(id)
+  promptedBeforeRekey.delete(id)
   const row = findSessionRef(id)
   if (!row) return
   let changed = false
@@ -555,6 +596,9 @@ function observe(channel: string, args: unknown[]): void {
   }
 }
 
+// BaseSession reports the queued prompts the engine takes; this module is who records them.
+setClientPromptObserver(noteClientPrompt)
+
 syncCore.onRekey((oldId, newId) => {
   try {
     onSessionRekeyed(oldId, newId)
@@ -576,4 +620,5 @@ addHostObserver((channel, args) => {
 /** Test seam: forget the in-memory starting set. */
 export function resetSessionLinksForTests(): void {
   startingByRouting.clear()
+  promptedBeforeRekey.clear()
 }

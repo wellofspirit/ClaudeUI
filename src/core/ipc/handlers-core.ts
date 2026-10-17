@@ -48,6 +48,7 @@ import type { ISession } from '../providers/ISession'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
 import { deleteSessionMeta, getSessionMeta } from '../services/db'
 import { flushHeld, hasHeld } from '../services/session-delivery'
+import { noteClientPrompt } from '../services/session-links'
 import { describeJudgeModels } from '../automode/judge-route'
 
 // ---------------------------------------------------------------------------
@@ -148,6 +149,12 @@ export function sendPrompt(
  */
 export interface SendPromptOptions {
   origin?: PromptOrigin
+  /**
+   * The prompt is the brief a session tool gave a session it just started, not a
+   * client typing into it: the session stays "started by an agent" (it cannot
+   * start sessions itself) until a client prompt arrives.
+   */
+  agentBrief?: boolean
 }
 
 /**
@@ -226,10 +233,12 @@ function sendNow(
   if (session.willQueue) {
     // The origin is a fourth argument only when there is one to tell.
     if (hostInstruction) session.enqueuePrompt(prompt, attachments, refs, 'host-instruction')
+    else if (options.agentBrief) session.enqueuePrompt(prompt, attachments, refs, 'agent-brief')
     else session.enqueuePrompt(prompt, attachments, refs)
     return
   }
-  session.originLedger?.userPrompt()
+  session.originLedger?.userPrompt({ hostInstruction, agentBrief: options.agentBrief })
+  if (!hostInstruction && !options.agentBrief) noteClientPrompt(routingId)
   const id = `msg-${crypto.randomUUID()}`
   if (session.engineId !== 'codex') session.run(prompt, attachments)
   emitEvent('session:user-message', [

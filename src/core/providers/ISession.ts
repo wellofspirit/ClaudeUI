@@ -115,7 +115,7 @@ export interface ISession {
     text: string,
     attachments?: AttachmentUpload[],
     refs?: AttachmentRef[],
-    origin?: 'host-instruction'
+    origin?: 'host-instruction' | 'agent-brief'
   ): void
 
   /**

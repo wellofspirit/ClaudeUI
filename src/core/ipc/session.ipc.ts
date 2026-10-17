@@ -10,6 +10,7 @@ import { claudeLoginSignal } from '../services/claude-login-state'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { detachSessionLink } from '../services/session-links'
+import { configureSessionTools } from '../services/session-tools'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { emitEvent } from '../services/sync-host'
 import { STREAM_WATCH_COMMAND } from './stream-watch'
@@ -430,6 +431,14 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
 
   const manager = new SessionManager()
   sharedManager = manager
+  // The session tools create sessions and send prompts through the same functions
+  // the commands below use; the service sits under this layer, so it is handed them.
+  configureSessionTools({
+    manager,
+    createSession: (args) => prepareAndCreateSession(manager, getHostWindow(), args),
+    sendPrompt: (routingId, prompt, options) =>
+      sendPrompt(manager, routingId, prompt, undefined, options)
+  })
   for (const command of codexCommands(manager)) handleIpc(command)
 
   // The volatile lane's subscription verb (phase 5 S1). Same declaration the
