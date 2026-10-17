@@ -24,6 +24,11 @@
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kinds'
 import type { AskUserQuestion, ContentBlock } from '../../../../../shared/types'
+import {
+  SESSION_TOOL_NAMES,
+  sessionToolBareName,
+  sessionToolMcpFields
+} from '../../../../../shared/session-tools-description'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -34,6 +39,8 @@ function opencodeKindOf(toolName: string): ToolKind {
   // Real MCP tools (mcp__*) resolve engine-independently first.
   const mcpKind = hostedMcpKind(toolName)
   if (mcpKind !== null) return mcpKind
+  // The session tools (slice 2): `claudeui_session_*`, the generic MCP row.
+  if (toolName.startsWith('claudeui_') && sessionToolBareName(toolName)) return 'mcp'
 
   switch (toolName) {
     case 'bash':
@@ -222,7 +229,9 @@ function opencodeNormalize(
       }
 
     case 'mcp':
-      return { kind: 'mcp', input: inp }
+      // The server and tool of a session tool call; any other opencode MCP name is
+      // underscore-joined and cannot be split, so it keeps the JSON dump.
+      return { kind: 'mcp', input: inp, ...(toolName ? sessionToolMcpFields(toolName) : null) }
 
     case 'unknown':
     default:
@@ -264,7 +273,8 @@ const OPENCODE_DISPLAY_NAMES: Record<string, string> = {
   claudeui_render_mermaid: 'Mermaid',
   claudeui_create_mockup: 'Mockup',
   claudeui_show_mockup: 'Mockup',
-  claudeui_dispatch_agent: 'Dispatch'
+  claudeui_dispatch_agent: 'Dispatch',
+  ...Object.fromEntries(SESSION_TOOL_NAMES.map((name) => [`claudeui_${name}`, 'Sessions']))
 }
 
 function opencodeDisplayName(toolName: string): string {

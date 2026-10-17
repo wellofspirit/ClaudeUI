@@ -37,9 +37,11 @@ import {
   planModeOutranksRules,
   PLAN_MODE_DENY_REASON,
   PLAN_MODE_DENY_REASON_NO_EXIT_TOOL,
-  PLAN_EXIT_OUTSIDE_PLAN_REASON
+  PLAN_EXIT_OUTSIDE_PLAN_REASON,
+  sessionToolDenyRule
 } from '../permission-engine'
 import { piMcpRuleKey } from '../pi-mcp-bridge'
+import { SESSION_TOOL_NAMES } from '../../../shared/session-tools-description'
 
 function rules(partial: Partial<MergedClaudeRules> = {}): MergedClaudeRules {
   return {
@@ -1035,10 +1037,21 @@ describe('PI_HOSTED_TOOL_NAMES (A1)', () => {
         'list_models',
         'render_mermaid',
         'send_message',
+        'session_dismiss_proposal',
+        'session_get',
+        'session_hand_off',
+        'session_list',
+        'session_message',
+        'session_read',
+        'session_start',
+        'session_stop',
+        'session_usage',
         'show_mockup',
         'task_stop'
       ].sort()
     )
+    // The session tools (slice 2) get a grant too, and are never auto-allowed.
+    for (const name of SESSION_TOOL_NAMES) expect(PI_AUTO_ALLOW_HOSTED_TOOLS.has(name)).toBe(false)
     // `agent` (and S3b's two) get a one-shot grant like dispatch_agent, never auto-allow.
     expect(PI_AUTO_ALLOW_HOSTED_TOOLS.has('agent')).toBe(false)
     expect(PI_AUTO_ALLOW_HOSTED_TOOLS.has('send_message')).toBe(false)
@@ -1802,5 +1815,46 @@ describe('decide — MCP rules against pi-sanitized tool names (ADR-096)', () =>
 
   it('without the key the hyphenated rule stays inert (the gap this closes)', () => {
     expect(decide(TOOL, {}, ctx({ allow: ['mcp__my-server__get-issue'] }, false))).toBe('ask')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The session tools (slice 2)
+// ---------------------------------------------------------------------------
+
+describe('the session tools in the pi ladder', () => {
+  it('every session tool is the generic MCP kind (the renderer map mirrors this)', () => {
+    for (const name of SESSION_TOOL_NAMES) expect(piToolKind(name), name).toBe('mcp')
+    // The family stem alone is not enough: a tool that only looks like one stays unknown.
+    expect(piToolKind('session_nope')).toBe('unknown')
+    expect(piToolKind('claudeui_session_start')).toBe('unknown')
+  })
+
+  describe('sessionToolDenyRule — the user deny written in the Claude spelling holds on pi and Codex', () => {
+    it.each([
+      ['the tool', 'mcp__claude-ui-sessions__session_start'],
+      ['the server', 'mcp__claude-ui-sessions'],
+      ['the server, star form', 'mcp__claude-ui-sessions__*']
+    ])('a deny for %s names the rule', (_label, rule) => {
+      expect(sessionToolDenyRule('session_start', {}, rules({ deny: [rule] }))).toBe(rule)
+    })
+
+    it('only a deny counts: ask and allow rules, other tools and other servers do not', () => {
+      expect(
+        sessionToolDenyRule(
+          'session_start',
+          {},
+          rules({
+            ask: ['mcp__claude-ui-sessions'],
+            allow: ['mcp__claude-ui-sessions__session_start'],
+            deny: ['mcp__claude-ui-sessions__session_stop', 'mcp__other', 'Bash']
+          })
+        )
+      ).toBeUndefined()
+    })
+
+    it('is blind to the mode and to a plan-mode base: it reports user rules, nothing else', () => {
+      expect(sessionToolDenyRule('session_list', {}, rules())).toBeUndefined()
+    })
   })
 })

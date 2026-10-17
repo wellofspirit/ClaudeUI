@@ -19,6 +19,11 @@ import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 import { blobRefOf } from '../../../test/helpers/blob-refs'
 import { onHostPlatform } from '../../../test/helpers/host-platform'
 import { slimTranscript } from '../../automode/classifier'
+import {
+  SESSION_TOOL_NAMES,
+  sessionToolDescriptions,
+  sessionToolsGuidance
+} from '../../../shared/session-tools-description'
 
 const events = vi.hoisted(() => vi.fn())
 const overrides = vi.hoisted(() => new Map<string, unknown>())
@@ -32,6 +37,23 @@ const rules = vi.hoisted(() => ({
 }))
 const savedRules = vi.hoisted(() => vi.fn())
 vi.mock('../../services/sync-host', () => ({ emitEvent: events }))
+/**
+ * The session tools' service and gate (slice 2) — both have their own suites; the module is
+ * doubled here (it pulls in the whole canonical-state graph, which this file's `sync-host`
+ * double does not carry). `available` is what the host wiring reports.
+ */
+const sessionTools = vi.hoisted(() => ({
+  available: false,
+  gate: vi.fn(),
+  run: vi.fn(),
+  audit: vi.fn()
+}))
+vi.mock('../../services/session-tools', () => ({
+  sessionToolsAvailable: () => sessionTools.available,
+  sessionToolsGate: (...args: unknown[]) => sessionTools.gate(...args),
+  runSessionTool: (...args: unknown[]) => sessionTools.run(...args),
+  auditSessionToolDenial: (...args: unknown[]) => sessionTools.audit(...args)
+}))
 /**
  * The per-account ChatGPT rate-limit map (ADR-068 §2). Its real singleton builds
  * a `CodexService` against the vault; here only the CALL matters — which account
@@ -6007,5 +6029,330 @@ describe('a Codex user stop is not an error (ADR-090)', () => {
       turn: { id: 'turn-1', status: 'interrupted', items: [], error: null }
     })
     expect(banners()).toEqual([])
+  })
+})
+
+/**
+ * The session tools over the same dynamic-tool channel (slice 2). The service behind
+ * them (and its gate) has its own suite; `session-tools` is a double here, so what is
+ * asserted is the wiring: the specs and instructions on `thread/start`, the caller
+ * handed to the gate and the service, and what each verdict does to the request.
+ */
+describe('Codex session tools', () => {
+  const startParams = (request: ReturnType<typeof fixture>['request']) =>
+    request.mock.calls.find(([method]) => method === 'thread/start')![1] as Record<string, unknown>
+  const CARD = 'codex:["root","turn","st-1"]'
+
+  beforeEach(() => {
+    sessionTools.available = true
+    sessionTools.gate.mockReset().mockReturnValue({ behavior: 'allow' })
+    sessionTools.run.mockReset().mockResolvedValue({ text: 'the answer' })
+    sessionTools.audit.mockReset()
+  })
+  afterEach(() => {
+    sessionTools.available = false
+  })
+
+  /** Drive one session tool call over the dynamic-tool channel. */
+  const stCall = (
+    f: ReturnType<typeof fixture>,
+    tool: string,
+    args: Record<string, unknown> = {},
+    over: Record<string, unknown> = {}
+  ) => f.dynamicCall({ tool, callId: 'st-1', arguments: args, ...over })
+
+  describe('thread/start', () => {
+    it('declares the nine tools after the hosted ones: bare names, shared descriptions, closed schemas', async () => {
+      const { session, request } = fixture()
+      await session.run(null)
+      const specs = startParams(request).dynamicTools as Array<{
+        type: string
+        name: string
+        description: string
+        inputSchema: Record<string, unknown>
+      }>
+      expect(specs.map((spec) => spec.name)).toEqual([
+        'render_mermaid',
+        'create_mockup',
+        'show_mockup',
+        'dispatch_agent',
+        ...SESSION_TOOL_NAMES
+      ])
+      const descriptions = sessionToolDescriptions({})
+      for (const name of SESSION_TOOL_NAMES) {
+        const spec = specs.find((entry) => entry.name === name)!
+        expect(spec.type).toBe('function')
+        expect(spec.description).toBe(descriptions[name])
+        expect(spec.inputSchema).toMatchObject({ type: 'object', additionalProperties: false })
+        // Codex's rules for a dynamic tool's name.
+        expect(name).toMatch(/^[a-zA-Z0-9_-]+$/)
+        expect(name.startsWith('mcp')).toBe(false)
+      }
+      expect(specs.find((entry) => entry.name === 'session_message')!.inputSchema).toMatchObject({
+        required: ['session', 'message']
+      })
+    })
+
+    it('carries the guidance as developerInstructions on start only', async () => {
+      const { session, request } = fixture()
+      await session.run(null)
+      expect(startParams(request).developerInstructions).toBe(
+        sessionToolsGuidance({ toolPrefix: '' })
+      )
+      const resumed = fixture({ resumeSessionId: 'root' })
+      await resumed.session.run(null)
+      const resumeParams = resumed.request.mock.calls.find(
+        ([method]) => method === 'thread/resume'
+      )![1] as Record<string, unknown>
+      expect(resumeParams).not.toHaveProperty('developerInstructions')
+      expect(resumeParams).not.toHaveProperty('dynamicTools')
+    })
+
+    it('offers neither the tools nor instructions when the host wired no session tools', async () => {
+      sessionTools.available = false
+      const { session, request } = fixture()
+      await session.run(null)
+      const params = startParams(request)
+      expect((params.dynamicTools as Array<{ name: string }>).map((spec) => spec.name)).toEqual([
+        'render_mermaid',
+        'create_mockup',
+        'show_mockup',
+        'dispatch_agent'
+      ])
+      expect(params).not.toHaveProperty('developerInstructions')
+    })
+  })
+
+  describe('a call from the root thread', () => {
+    it("runs the service as this session's root agent and answers with its text", async () => {
+      const f = fixture({ permissionMode: 'acceptEdits' })
+      await f.session.run('hello')
+      await expect(stCall(f, 'session_list', { scope: 'project' }).result).resolves.toEqual({
+        contentItems: [{ type: 'inputText', text: 'the answer' }],
+        success: true
+      })
+      expect(f.cards()).toHaveLength(0)
+      const [caller, tool, input] = sessionTools.run.mock.calls[0]
+      expect(caller).toMatchObject({
+        routingId: 'temporary',
+        engine: 'codex',
+        cwd: '/isolated',
+        permissionMode: 'acceptEdits',
+        toolUseId: CARD
+      })
+      expect(await caller.callOwner!(CARD)).toBe('root')
+      expect(tool).toBe('session_list')
+      expect(input).toEqual({ scope: 'project' })
+      // The gate was asked as the same caller, with no agent id (the root agent).
+      const [gateCaller, gateTool, gateInput, ctx] = sessionTools.gate.mock.calls[0]
+      expect(gateCaller).toMatchObject({ routingId: 'temporary', engine: 'codex' })
+      expect(gateTool).toBe('session_list')
+      expect(gateInput).toEqual({ scope: 'project' })
+      expect(ctx).toEqual({})
+    })
+
+    it('reports a service error as an unsuccessful call, not a rejected request', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      sessionTools.run.mockResolvedValueOnce({ text: 'Refused: no', isError: true })
+      await expect(stCall(f, 'session_stop', { session: 's-a' }).result).resolves.toEqual({
+        contentItems: [{ type: 'inputText', text: 'Refused: no' }],
+        success: false
+      })
+    })
+
+    it('a gate deny refuses with its reason, runs nothing, raises no card, and audits an acting tool', async () => {
+      sessionTools.gate.mockReturnValue({ behavior: 'deny', message: 'Refused: plan mode' })
+      const f = fixture({ permissionMode: 'plan' })
+      await f.session.run('hello')
+      await expect(stCall(f, 'session_start', { prompt: 'x' }).result).resolves.toEqual({
+        contentItems: [{ type: 'inputText', text: 'Refused: plan mode' }],
+        success: false
+      })
+      expect(f.cards()).toHaveLength(0)
+      expect(sessionTools.run).not.toHaveBeenCalled()
+      expect(sessionTools.audit).toHaveBeenCalledTimes(1)
+      const [auditCaller, auditTool, auditInput, message] = sessionTools.audit.mock.calls[0]
+      expect(auditCaller).toMatchObject({ routingId: 'temporary', engine: 'codex' })
+      expect(auditTool).toBe('session_start')
+      expect(auditInput).toEqual({ prompt: 'x' })
+      expect(message).toBe('Refused: plan mode')
+    })
+
+    it('a gate ask parks a card and runs nothing until allow; the card offers no session allow or saved rule', async () => {
+      sessionTools.gate.mockReturnValue({ behavior: 'ask' })
+      const f = fixture()
+      await f.session.run('hello')
+      const { result } = stCall(f, 'session_read', { session: 's-other' })
+      const card = f.cards().at(-1)!
+      expect(card).toMatchObject({
+        toolUseId: CARD,
+        toolName: 'session_read',
+        input: { session: 's-other' }
+      })
+      expect(card).not.toHaveProperty('suggestions')
+      expect(sessionTools.run).not.toHaveBeenCalled()
+      f.session.resolveApproval(card.requestId, 'allowForSession', undefined, [
+        {
+          type: 'addRules',
+          behavior: 'allow',
+          destination: 'localSettings',
+          rules: [{ toolName: 'session_read' }]
+        }
+      ])
+      await expect(result).resolves.toMatchObject({ success: true })
+      expect(sessionTools.run).toHaveBeenCalledOnce()
+      // Neither the click's session allow nor its persisted rule stuck.
+      expect(savedRules).not.toHaveBeenCalled()
+      const before = f.cards().length
+      const again = f.dynamicCall({
+        tool: 'session_read',
+        callId: 'st-2',
+        arguments: { session: 's-other' }
+      })
+      expect(f.cards()).toHaveLength(before + 1)
+      f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+      await again.result
+      expect(sessionTools.run).toHaveBeenCalledTimes(2)
+    })
+
+    it('a declined card refuses without running or auditing a service refusal', async () => {
+      sessionTools.gate.mockReturnValue({ behavior: 'ask' })
+      const f = fixture()
+      await f.session.run('hello')
+      const { result } = stCall(f, 'session_stop', { session: 's-other' })
+      f.session.resolveApproval(f.cards().at(-1)!.requestId, 'deny')
+      await expect(result).resolves.toEqual({
+        contentItems: [{ type: 'inputText', text: 'session_stop was declined by the user.' }],
+        success: false
+      })
+      expect(sessionTools.run).not.toHaveBeenCalled()
+    })
+
+    it('asks under auto too: the native reviewer never sees a dynamic tool call', async () => {
+      sessionTools.gate.mockReturnValue({ behavior: 'ask' })
+      const f = fixture({ permissionMode: 'auto' })
+      await f.session.run('hello')
+      stCall(f, 'session_get', { session: 's-other' })
+      expect(f.cards().at(-1)).toMatchObject({ toolName: 'session_get' })
+      expect(sessionTools.run).not.toHaveBeenCalled()
+    })
+
+    it('a user deny rule in the Claude spelling holds before the gate, with the rule named', async () => {
+      rules.deny = ['mcp__claude-ui-sessions__session_start']
+      const f = fixture()
+      await f.session.run('hello')
+      await expect(stCall(f, 'session_start', { prompt: 'x' }).result).resolves.toEqual({
+        contentItems: [
+          {
+            type: 'inputText',
+            text: 'Denied by permission rule: mcp__claude-ui-sessions__session_start'
+          }
+        ],
+        success: false
+      })
+      expect(sessionTools.gate).not.toHaveBeenCalled()
+      expect(sessionTools.run).not.toHaveBeenCalled()
+      expect(sessionTools.audit).toHaveBeenCalledTimes(1)
+    })
+
+    it('refuses arguments that are not an object, before any rule or gate', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await expect(
+        stCall(f, 'session_list', undefined as never, { arguments: 'x' }).result
+      ).resolves.toEqual({
+        contentItems: [{ type: 'inputText', text: 'session_list arguments must be an object.' }],
+        success: false
+      })
+      expect(sessionTools.gate).not.toHaveBeenCalled()
+      expect(sessionTools.run).not.toHaveBeenCalled()
+    })
+
+    it('a replayed call id is refused, never run twice', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await stCall(f, 'session_list').result
+      await expect(stCall(f, 'session_list').result).rejects.toThrow(
+        'Duplicate Codex hosted tool call'
+      )
+      expect(sessionTools.run).toHaveBeenCalledOnce()
+    })
+  })
+
+  describe("a call that is not the root thread's", () => {
+    const spawnChild = (f: ReturnType<typeof fixture>): void => {
+      const collab = (status: string, states: Record<string, unknown>) =>
+        f.notify(status === 'inProgress' ? 'item/started' : 'item/completed', {
+          threadId: 'root',
+          turnId: 'turn',
+          item: {
+            id: 'collab-1',
+            type: 'collabAgentToolCall',
+            tool: 'spawnAgent',
+            status,
+            senderThreadId: 'root',
+            receiverThreadIds: status === 'inProgress' ? [] : ['child'],
+            prompt: 'go',
+            model: 'native',
+            reasoningEffort: 'ultra',
+            agentsStates: states
+          }
+        })
+      collab('inProgress', {})
+      collab('completed', { child: { status: 'running', message: null } })
+    }
+
+    it('a native child thread is refused (nothing runs) and the refusal is audited', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      spawnChild(f)
+      const { result } = stCall(
+        f,
+        'session_message',
+        { session: 's-a', message: 'hi' },
+        {
+          threadId: 'child',
+          callId: 'child-call'
+        }
+      )
+      await expect(result).rejects.toThrow('no live owning root turn')
+      expect(sessionTools.run).not.toHaveBeenCalled()
+      expect(sessionTools.gate).not.toHaveBeenCalled()
+      expect(sessionTools.audit).toHaveBeenCalledTimes(1)
+      const [auditCaller, auditTool, auditInput, message] = sessionTools.audit.mock.calls[0]
+      expect(auditCaller).toMatchObject({ routingId: 'temporary', engine: 'codex' })
+      expect(auditTool).toBe('session_message')
+      expect(auditInput).toEqual({ session: 's-a', message: 'hi' })
+      expect(message).toContain('not by a native subagent thread')
+      // The row is the root session's, so the detail names which child it was.
+      expect(message).toContain('(child)')
+    })
+
+    it('a call from a thread no session claimed never reaches this session (the host refuses it)', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await expect(
+        stCall(f, 'session_stop', { session: 's-a' }, { threadId: 'stranger' }).result
+      ).rejects.toThrow('Method not found')
+      expect(sessionTools.run).not.toHaveBeenCalled()
+      expect(sessionTools.gate).not.toHaveBeenCalled()
+    })
+
+    it('a session tool called on a stale turn is refused and runs nothing', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await expect(stCall(f, 'session_list', {}, { turnId: 'old-turn' }).result).rejects.toThrow(
+        'no live owning root turn'
+      )
+      expect(sessionTools.run).not.toHaveBeenCalled()
+    })
+
+    it('a tool that is not on the hosted list is still refused (the list is the boundary)', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await expect(stCall(f, 'session_nope', {}).result).rejects.toThrow('no live owning root turn')
+      expect(sessionTools.run).not.toHaveBeenCalled()
+    })
   })
 })

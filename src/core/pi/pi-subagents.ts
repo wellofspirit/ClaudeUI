@@ -213,6 +213,8 @@ export function buildPiSubagentChildEnv(
     CLAUDEUI_PI_HOSTED_TOOLS: '',
     CLAUDEUI_PI_DISPATCH_ENABLED: '',
     CLAUDEUI_PI_DISPATCH_DESCRIPTION: '',
+    // The session tools are for the root agent only (slice 2).
+    CLAUDEUI_PI_SESSION_TOOLS: '',
     CLAUDEUI_PI_PLAN_TOOLS: '',
     CLAUDEUI_PI_AGENT_TOOL: opts.childCanSpawn ? '1' : '',
     CLAUDEUI_PI_AGENT_LISTING: opts.childCanSpawn ? opts.listing : '',
@@ -1680,7 +1682,7 @@ export class PiSubagentManager {
       }
       const decision = await this.host.gateChild(scope, payload)
       if (decision.behavior === 'allow' && CHILD_HOSTED_TOOLS.has(payload.toolName)) {
-        scope.grants.mint(payload.toolCallId, payload.toolName)
+        scope.grants.mint(payload.toolCallId, payload.toolName, 'subagent')
       }
       return decision
     }

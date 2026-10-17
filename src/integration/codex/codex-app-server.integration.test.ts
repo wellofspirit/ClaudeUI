@@ -52,6 +52,11 @@ import {
 const containment = vi.hoisted(() => ({ profile: '', pids: [] as number[] }))
 const coreEvents = vi.hoisted(() => vi.fn())
 vi.mock('../../core/services/sync-host', () => ({ emitEvent: coreEvents }))
+// CodexSession imports the session tools' service, which this partial sync-host double cannot carry.
+vi.mock(
+  '../../core/services/session-tools',
+  async () => await import('../../test/stubs/session-tools-stub')
+)
 // The shared permission gate merges the USER's real ~/.claude rules. Pin them
 // empty so these probes measure the mode base, not this machine's settings.
 vi.mock('../../core/services/claude-settings', () => ({

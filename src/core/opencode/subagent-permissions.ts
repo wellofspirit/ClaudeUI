@@ -18,7 +18,7 @@
  */
 
 import type { OpencodeAction } from './permission-compiler'
-import { wireOrder, type V2Rule } from './permission-v2'
+import { SESSION_TOOLS_DENY_RULE, wireOrder, type V2Rule } from './permission-v2'
 import type { Permission_Ruleset } from './protocol-v2/openapi'
 import { wildcardMatch } from './wildcard'
 
@@ -134,7 +134,10 @@ export function childSessionRuleset(
   const own = agentDenyRulesThatHold(agentRules, platform).filter(
     (d) => !whole.some((w) => w.action === d.action && w.resource === d.resource)
   )
-  return wireOrder([...parentRules, ...own, ...whole])
+  // After everything the parent and the agent say, so nothing re-opens them: a subagent
+  // child never sees the session tools (the root agent only), whatever agent it runs and
+  // whatever the parent allows. Before the agent's whole-category denies, which stay last.
+  return wireOrder([...parentRules, ...own, SESSION_TOOLS_DENY_RULE, ...whole])
 }
 
 /**

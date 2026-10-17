@@ -113,8 +113,18 @@ import {
   PI_TOOL_TO_CLAUDE_TOOL,
   PI_HOSTED_TOOL_NAMES,
   PLAN_MODE_DENY_REASON,
-  PLAN_EXIT_OUTSIDE_PLAN_REASON
+  PLAN_EXIT_OUTSIDE_PLAN_REASON,
+  sessionToolDenyRule
 } from './permission-engine'
+import { isSessionToolName, type SessionToolName } from '../../shared/session-tools-description'
+import { piSessionToolsEnv } from '../services/session-tool-specs'
+import {
+  auditSessionToolDenial,
+  runSessionTool,
+  sessionToolsAvailable,
+  sessionToolsGate,
+  type SessionToolCaller
+} from '../services/session-tools'
 import type { MergedClaudeRules, PermissionVerdict } from './permission-engine'
 // Auto mode (`auto`/`full` autonomy) — the engine-neutral classifier core plus
 // ClaudeUI's own judge transport (docs/automode-rework-plan.md phase 4, ADR-081).
@@ -948,6 +958,11 @@ export class PiSession extends BaseSession {
           // the configs themselves come over the host channel, not from here.
           CLAUDEUI_PI_MCP: '1',
           ...(this.capabilities.hostedMcp ? { CLAUDEUI_PI_HOSTED_TOOLS: '1' } : {}),
+          // The session tools (bridge v15), on the same two conditions as the hosted
+          // tools above plus the host having wired the service.
+          ...(this.capabilities.hostedMcp && sessionToolsAvailable()
+            ? { CLAUDEUI_PI_SESSION_TOOLS: piSessionToolsEnv() }
+            : {}),
           ...(this.capabilities.crossEngineDispatch
             ? {
                 CLAUDEUI_PI_DISPATCH_ENABLED: '1',
@@ -2187,6 +2202,7 @@ export class PiSession extends BaseSession {
     scope: PiChildScope | null
   ): Promise<GateDecision> {
     const { toolName, input } = payload
+    if (isSessionToolName(toolName)) return this.decideSessionToolCall(payload, toolName, scope)
     const mode = this.gateMode(scope)
     const rules = this.currentRules()
     const autoMode = this.isAutoMode(mode)
@@ -2260,6 +2276,34 @@ export class PiSession extends BaseSession {
     }
 
     return this.askHuman(payload, undefined, scope)
+  }
+
+  /**
+   * A session tool's gate (slice 2): the user's deny rule written for Claude's spelling
+   * of the tool, then `sessionToolsGate` (allow / ask / deny; plan mode, the family and
+   * project scope, the mode class). Never the judge: an ask goes to the human, in auto
+   * mode too. A host-run child is not the root agent, so it is refused (it is not
+   * offered the tools either).
+   */
+  private decideSessionToolCall(
+    payload: PiToolCallPayload,
+    tool: SessionToolName,
+    scope: PiChildScope | null
+  ): Promise<GateDecision> | GateDecision {
+    const caller = this.sessionToolCaller(payload.toolCallId)
+    const deny = (reason: string): GateDecision => {
+      auditSessionToolDenial(caller, tool, payload.input, reason)
+      return { behavior: 'deny', reason }
+    }
+    if (scope) {
+      return deny(`${tool} can only be used by the session's main agent, not by a subagent.`)
+    }
+    const rule = sessionToolDenyRule(tool, payload.input, this.currentRules(), this.cwd)
+    if (rule) return deny(`Denied by permission rule: ${rule}`)
+    const decision = sessionToolsGate(caller, tool, payload.input, {})
+    if (decision.behavior === 'allow') return { behavior: 'allow' }
+    if (decision.behavior === 'deny') return deny(decision.message)
+    return this.askHuman(payload)
   }
 
   /** The mode a call is gated under: the session's, narrowed for a child (ADR-089 D3). */
@@ -2678,7 +2722,10 @@ export class PiSession extends BaseSession {
     }
 
     // allow / allowForSession
-    if (decision === 'allowForSession') {
+    // A session tool's click is for this one call: no session allow and no saved rule
+    // (either would skip the gate's scope and mode-parity checks next time).
+    const standing = !isSessionToolName(pending.toolName)
+    if (decision === 'allowForSession' && standing) {
       this.sessionAllows.add(sessionAllowKey(pending.toolName, pending.input))
     }
     pending.resolve({ behavior: 'allow' })
@@ -2699,7 +2746,7 @@ export class PiSession extends BaseSession {
       this.send('session:permission-mode', 'default')
     }
 
-    if (updatedPermissions && updatedPermissions.length > 0) {
+    if (standing && updatedPermissions && updatedPermissions.length > 0) {
       this.persistAllowRules(updatedPermissions)
     }
   }
@@ -3122,8 +3169,9 @@ export class PiSession extends BaseSession {
   ): Promise<PiHostedToolResult> => {
     const { toolName, input, toolCallId } = payload
 
-    // One-shot — consumed on first (matching) use.
-    if (!this.hostedGrants.consume(toolCallId, toolName)) return notApprovedHostedTool()
+    // One-shot — consumed on first (matching) use. The grant also says whose call it was.
+    const owner = this.hostedGrants.consumeOwner(toolCallId, toolName)
+    if (owner === null) return notApprovedHostedTool()
 
     switch (toolName) {
       case 'render_mermaid': {
@@ -3162,7 +3210,44 @@ export class PiSession extends BaseSession {
         return this.subagents.listModels(input)
 
       default:
+        // The session tools (slice 2): the root agent's, run by the shared service.
+        if (isSessionToolName(toolName))
+          return this.handleSessionTool(toolName, input, toolCallId, owner)
         return unknownHostedTool(toolName)
+    }
+  }
+
+  /**
+   * The calling session as the session tools see it. `owner` is whose call the gate's grant
+   * was minted for (the root bridge's gate mints `root`; a host-run child's grants say
+   * `subagent`), so the service refuses a subagent even if a child ever got the tools: the
+   * env lists that drop them are a second line, not the only one. The gate rung itself
+   * (`decideSessionToolCall`) is always the root agent's, hence the default.
+   */
+  private sessionToolCaller(
+    toolCallId?: string,
+    owner: 'root' | 'subagent' = 'root'
+  ): SessionToolCaller {
+    return {
+      routingId: this.routingId,
+      engine: this.engineId,
+      cwd: this.cwd,
+      permissionMode: this.permissionMode,
+      ...(toolCallId ? { toolUseId: toolCallId } : {}),
+      callOwner: async () => owner
+    }
+  }
+
+  private async handleSessionTool(
+    tool: SessionToolName,
+    input: Record<string, unknown>,
+    toolCallId: string,
+    owner: 'root' | 'subagent'
+  ): Promise<PiHostedToolResult> {
+    const result = await runSessionTool(this.sessionToolCaller(toolCallId, owner), tool, input)
+    return {
+      content: [{ type: 'text', text: result.text }],
+      ...(result.isError ? { isError: true } : {})
     }
   }
 

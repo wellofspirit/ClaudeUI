@@ -67,8 +67,7 @@ import {
   SESSION_TOOLS_SERVER_NAME
 } from './session-tools-server'
 import {
-  auditSessionToolCall,
-  resolveTarget,
+  auditSessionToolDenial,
   sessionToolsAvailable,
   sessionToolsGate,
   type SessionToolCaller
@@ -146,11 +145,7 @@ import {
   dispatchAgentPromptSection,
   OWN_SUBAGENT_TOOL
 } from '../../shared/dispatch-agent-description'
-import {
-  ACTING_SESSION_TOOLS,
-  isSessionToolName,
-  sessionToolsGuidance
-} from '../../shared/session-tools-description'
+import { isSessionToolName, sessionToolsGuidance } from '../../shared/session-tools-description'
 
 /**
  * The system-prompt section for the `claude-ui-collab` dispatch tool, from the
@@ -1099,19 +1094,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
                 }
                 if (decision.behavior === 'deny') {
                   // The service never runs for a denied call, so the refusal is audited here.
-                  if (ACTING_SESSION_TOOLS.has(bare)) {
-                    const named =
-                      typeof input.session === 'string'
-                        ? resolveTarget(caller, input.session)
-                        : null
-                    auditSessionToolCall(
-                      caller,
-                      bare,
-                      named?.ok ? named.ref : null,
-                      'error',
-                      decision.message
-                    )
-                  }
+                  auditSessionToolDenial(caller, bare, input, decision.message)
                   return { behavior: 'deny' as const, message: decision.message }
                 }
               }

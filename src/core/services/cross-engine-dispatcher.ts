@@ -64,6 +64,7 @@ import {
   asHostPrecheckRules,
   buildSessionRuleset,
   CLAUDEUI_MCP_SERVER,
+  SESSION_TOOLS_DENY_RULE,
   wireOrder,
   type V2Rule
 } from '../opencode/permission-v2'
@@ -744,6 +745,8 @@ const FEED_READY_WAIT_MS = 10_000
  */
 const TARGET_ONLY_RULES: readonly V2Rule[] = [
   { action: 'claudeui_dispatch_agent', resource: '*', effect: 'deny' },
+  // The session tools are for the root agent of an interactive session only (slice 2).
+  SESSION_TOOLS_DENY_RULE,
   { action: 'question', resource: '*', effect: 'deny' }
 ]
 /** A target's form (should one still come — `question` is hidden): cancelled WITH a message. */
@@ -2130,6 +2133,8 @@ export function buildPiTargetChildEnv(bridge: { url: string; token: string }): N
     CLAUDEUI_PI_HOSTED_TOOLS: '',
     CLAUDEUI_PI_DISPATCH_ENABLED: '',
     CLAUDEUI_PI_DISPATCH_DESCRIPTION: '',
+    // The session tools are for a session's root agent, never a dispatch target (slice 2).
+    CLAUDEUI_PI_SESSION_TOOLS: '',
     CLAUDEUI_PI_SKILL_DIRS: '',
     // ADR-089: a dispatch target never gets the host-run `agent` or
     // `send_message` tools (same leak argument as the three above).

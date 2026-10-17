@@ -208,6 +208,23 @@ export function auditSessionToolCall(
   }
 }
 
+/**
+ * The audit row for an acting call the gate denied. The service never runs for a
+ * denied call, so the engine's approval callback writes this one (Claude's
+ * `canUseTool`, opencode's permission ask, pi's `tool_call` gate, Codex's
+ * hosted-tool call); reads leave no row, as they do in the service.
+ */
+export function auditSessionToolDenial(
+  caller: SessionToolCaller,
+  tool: SessionToolName,
+  input: Record<string, unknown>,
+  message: string
+): void {
+  if (!ACTING_SESSION_TOOLS.has(tool)) return
+  const named = typeof input.session === 'string' ? resolveTarget(caller, input.session) : null
+  auditSessionToolCall(caller, tool, named?.ok ? named.ref : null, 'error', message)
+}
+
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }

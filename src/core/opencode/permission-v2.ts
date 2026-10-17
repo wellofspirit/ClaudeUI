@@ -225,6 +225,18 @@ export const CLAUDEUI_MCP_SERVER = 'claudeui'
 export const DISPATCH_ASK_RULE: V2Rule = rule('claudeui_dispatch_agent', 'ask')
 
 /**
+ * Every hosted session tool asks in every mode (session tools, slice 2), so opencode
+ * hands each call to ClaudeUI's `sessionToolsGate` (`OpencodeSession.routeSessionToolAsk`):
+ * the scope and mode-parity decisions live there, and a mode that approves everything
+ * (auto allows `claudeui_*`) must not skip them. After the user's rules, like the
+ * dispatch ask.
+ */
+export const SESSION_TOOLS_ASK_RULE: V2Rule = rule(`${CLAUDEUI_MCP_SERVER}_session_*`, 'ask')
+
+/** The session tools are hidden from a subagent child and a dispatch target: the root agent only. */
+export const SESSION_TOOLS_DENY_RULE: V2Rule = rule(`${CLAUDEUI_MCP_SERVER}_session_*`, 'deny')
+
+/**
  * Auto mode's catch-all for MCP tools. 2.x names an MCP tool's action
  * `<server>_<tool>` (`tool/mcp.ts` `name`), so every MCP action contains `_` —
  * whichever server, whenever it connected. The direct built-ins that contain
@@ -386,7 +398,7 @@ export interface SessionRuleset {
  * The ruleset a ClaudeUI opencode session runs with (and every subagent child
  * inherits): mode gates → the user's rules (auto: without allows; plan:
  * without edit/shell/subagent allows) → plan enforcement → Code Mode deny →
- * dispatch ask, in {@link wireOrder}. Deterministic (equal input, equal
+ * dispatch ask → session tools ask, in {@link wireOrder}. Deterministic (equal input, equal
  * output), so a caller can skip an unchanged PATCH.
  */
 export function buildSessionRuleset(input: SessionRulesetInput): SessionRuleset {
@@ -403,12 +415,18 @@ export function buildSessionRuleset(input: SessionRulesetInput): SessionRuleset 
     : input.mode === 'plan'
       ? withoutMutatingAllowRulesV2(userRules)
       : userRules
+  // ORDER IS LOAD-BEARING (last match wins on the wire): auto mode's gates carry
+  // `claudeui_*` allow ({@link autoModeGates}), and the two asks below are what outrank it.
+  // `SESSION_TOOLS_ASK_RULE` must stay the last non-deny rule: anything appended after it
+  // that could match `claudeui_session_*` would silently un-gate the family in auto mode
+  // (permission-v2.test pins this for every mode).
   const rules = wireOrder([
     ...modeGates(input.mode, { autoMode, externalDirAllows: input.externalDirAllows }),
     ...effective,
     ...(input.mode === 'plan' ? planEnforcement() : []),
     EXECUTE_DENY_RULE,
-    DISPATCH_ASK_RULE
+    DISPATCH_ASK_RULE,
+    SESSION_TOOLS_ASK_RULE
   ])
   return { rules, userRules, agent: input.mode === 'plan' ? 'plan' : undefined }
 }

@@ -27,6 +27,7 @@ import type { McpHttpHost } from '../mcp-http-host'
 import type { OpencodeConfigInput } from '../opencode-server-config'
 import type { ClaudeAgentShim } from '../claude-agent-shim'
 import { logger } from '../../services/logger'
+import { configureSessionTools } from '../../services/session-tools'
 
 // The manager `resolve`s every cwd (`/proj/a` becomes `D:\proj\a` on Windows), so
 // the rig's per-cwd config map is keyed, and every expected directory is spelled,
@@ -319,6 +320,28 @@ describe('OpencodeServerManager (2.x) — ref-counting', () => {
     const s2 = hosts[0].createServer()
     expect(s1).toBeInstanceOf(McpServer)
     expect(s1).not.toBe(s2)
+  })
+
+  // Session tools (slice 2): the hosted server offers them exactly when the host wired the service,
+  // read when each MCP session is built (the host is configured at boot, before any server spawns).
+  describe('the session tools on the hosted server', () => {
+    const toolNames = (server: McpServer): string[] =>
+      Object.keys(
+        (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools
+      )
+    afterEach(() => configureSessionTools(null))
+
+    it('are registered once the service is wired, and not before', async () => {
+      const { manager, hosts } = makeRig()
+      await manager.acquire('/p')
+      expect(toolNames(hosts[0].createServer())).not.toContain('session_start')
+      configureSessionTools({} as never)
+      const names = toolNames(hosts[0].createServer())
+      for (const tool of ['session_list', 'session_message', 'session_start', 'session_hand_off'])
+        expect(names).toContain(tool)
+      configureSessionTools(null)
+      expect(toolNames(hosts[0].createServer())).not.toContain('session_start')
+    })
   })
 })
 

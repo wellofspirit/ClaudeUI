@@ -126,6 +126,17 @@ import { ChildRulesetKeeper } from './child-rulesets'
 import { resolveOpencodeOwnDirAllows } from './own-dirs'
 import { locationWorktree, stopOpencodeSessions } from './session-support'
 import { hostPrecheck, type HostPrecheckContext } from './host-precheck'
+import { userDenyRule } from './wildcard'
+import {
+  auditSessionToolDenial,
+  sessionToolsGate,
+  type SessionToolCaller
+} from '../services/session-tools'
+import {
+  SESSION_TOOLS_SERVER_NAME,
+  sessionToolBareName,
+  type SessionToolName
+} from '../../shared/session-tools-description'
 import { OpencodeSessionAllows } from './session-allows'
 import { reviewRationale } from '../shared/tool-review'
 import {
@@ -259,6 +270,15 @@ function tokensOf(t: {
 }
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+/** The card's explanation when the call's input was not known yet (it could not be scoped). */
+const UNSCOPED_SESSION_TOOL_REASON =
+  "ClaudeUI could not see this call's arguments yet, so it cannot check which session it targets. Approve only if you expect it."
+
+/** The session tool an opencode permission ask (`claudeui_session_*`) is for, or null. */
+function sessionToolOfAsk(action: string): SessionToolName | null {
+  return action.startsWith('claudeui_') ? sessionToolBareName(action) : null
+}
 
 export class OpencodeSession extends BaseSession {
   readonly engineId = 'opencode' as const
@@ -1705,6 +1725,13 @@ export class OpencodeSession extends BaseSession {
       this.send('session:approval-request', approval)
       return
     }
+    // A session tool's card offers no "always allow" (neither a rule nor a session
+    // allow): either would skip the scope and mode-parity checks of the gate for
+    // every later call (spec 7.3).
+    if (sessionToolOfAsk(approval.toolName)) {
+      const { suggestions: _suggestions, always: _always, ...single } = approval
+      approval = single
+    }
     this.pendingApprovals.set(approval.requestId, {
       toolUseId: approval.toolUseId,
       approval,
@@ -2283,6 +2310,11 @@ export class OpencodeSession extends BaseSession {
    * ladder.
    */
   private routePermissionAsk(approval: PendingApproval): void {
+    const sessionTool = sessionToolOfAsk(approval.toolName)
+    if (sessionTool) {
+      this.routeSessionToolAsk(approval, sessionTool)
+      return
+    }
     const category = approval.toolName
     const autoMode = this.isAutoMode(this.permissionMode)
     const verdict = hostPrecheck(approval, this.precheckContext())
@@ -2339,6 +2371,62 @@ export class OpencodeSession extends BaseSession {
     }
     if (autoMode) void this.handleAutoModeApproval(approval)
     else this.send('session:approval-request', approval)
+  }
+
+  /** The calling session as the session tools see it: this chat, its root agent. */
+  private sessionToolCaller(): SessionToolCaller {
+    return {
+      routingId: this.routingId,
+      engine: this.engineId,
+      cwd: this.cwd,
+      permissionMode: this.permissionMode
+    }
+  }
+
+  /**
+   * An ask for one of the session tools (`claudeui_session_*`, `SESSION_TOOLS_ASK_RULE`
+   * makes every call ask in every mode): ClaudeUI's own gate decides, never the
+   * judge. allow → once; deny → rejected with the gate's reason and audited (acting
+   * tools); ask → the approval card. A user deny rule written for Claude's spelling
+   * of the tool holds first. An ask that arrives without the call's input (the tool
+   * part not seen yet) cannot be scoped, so it goes to the user.
+   */
+  private routeSessionToolAsk(approval: PendingApproval, tool: SessionToolName): void {
+    const caller = this.sessionToolCaller()
+    const input = (approval.input ?? {}) as Record<string, unknown>
+    const reject = (message: string): void => {
+      auditSessionToolDenial(caller, tool, input, message)
+      this.autoReply(approval.requestId, { decision: 'reject', message })
+      if (approval.toolUseId && !approval.subagent)
+        this.sendDenial(approval.toolUseId, 'rule', message)
+    }
+    const rule = userDenyRule(
+      this.userOriginRules(),
+      opencodeMcpKey(SESSION_TOOLS_SERVER_NAME, tool),
+      undefined
+    )
+    if (rule) {
+      reject(`Denied by permission rule: ${rule.permission}(${rule.pattern})`)
+      return
+    }
+    const unscoped =
+      tool !== 'session_list' && tool !== 'session_usage' && Object.keys(input).length === 0
+    const decision = unscoped
+      ? ({ behavior: 'ask' } as const)
+      : sessionToolsGate(caller, tool, input, { agentId: approval.subagent?.sessionId })
+    if (decision.behavior === 'allow') {
+      this.autoReply(approval.requestId, { decision: 'once' })
+    } else if (decision.behavior === 'deny') {
+      reject(decision.message)
+    } else {
+      const pending = this.pendingApprovals.get(approval.requestId)
+      if (pending) pending.sweepable = false
+      // An ask without the call's input must not read as an approval of a blank: say so on the card.
+      this.send(
+        'session:approval-request',
+        unscoped ? { ...approval, decisionReason: UNSCOPED_SESSION_TOOL_REASON } : approval
+      )
+    }
   }
 
   private precheckContext(): HostPrecheckContext {

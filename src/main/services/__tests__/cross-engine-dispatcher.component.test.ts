@@ -4167,12 +4167,14 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
     expect(env.CLAUDEUI_PI_AGENT_TOOL).toBe('')
     // ADR-089 S3b: nor `send_message`.
     expect(env.CLAUDEUI_PI_SEND_MESSAGE).toBe('')
+    // Session tools (slice 2): nor the nine `session_*` tools.
+    expect(env.CLAUDEUI_PI_SESSION_TOOLS).toBe('')
     // ADR-096: a dispatch target registers the shared MCP catalog (served by
     // its bridge host, never carried in this env).
     expect(env.CLAUDEUI_PI_MCP).toBe('1')
     expect(env.CLAUDEUI_PI_BRIDGE_URL).toBe('http://127.0.0.1:54321')
     expect(env.CLAUDEUI_PI_BRIDGE_TOKEN).toBe('test-token')
-    // Exactly these eight keys — nothing else sneaks in either.
+    // Exactly these ten keys — nothing else sneaks in either.
     expect(Object.keys(env).sort()).toEqual([
       'CLAUDEUI_PI_AGENT_TOOL',
       'CLAUDEUI_PI_BRIDGE_TOKEN',
@@ -4182,6 +4184,7 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
       'CLAUDEUI_PI_HOSTED_TOOLS',
       'CLAUDEUI_PI_MCP',
       'CLAUDEUI_PI_SEND_MESSAGE',
+      'CLAUDEUI_PI_SESSION_TOOLS',
       'CLAUDEUI_PI_SKILL_DIRS'
     ])
   })

@@ -42,11 +42,24 @@ import {
   mergedClaudeRulesFor,
   normalizeWhitespace,
   sessionAllowKey,
+  sessionToolDenyRule,
   type PermissionDecision,
   PI_TOOL_TO_CLAUDE_TOOL,
   PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
 } from '../pi/permission-engine'
 import { persistAllowSuggestions } from '../opencode/permission-compiler'
+import {
+  isSessionToolName,
+  sessionToolsGuidance,
+  type SessionToolName
+} from '../../shared/session-tools-description'
+import {
+  auditSessionToolDenial,
+  runSessionTool,
+  sessionToolsAvailable,
+  sessionToolsGate,
+  type SessionToolCaller
+} from '../services/session-tools'
 import type { CodexMethods } from './protocol/methods'
 import type { ThreadSettings } from './protocol/v2/ThreadSettings'
 import type { ThreadTokenUsage } from './protocol/v2/ThreadTokenUsage'
@@ -375,6 +388,8 @@ const GUARDIAN_BREAKER_WARNING =
 
 type Pending = {
   turnId: string
+  /** False for a card that offers no standing grant (no session allow, no saved rule). */
+  standing?: false
   choices: CodexApprovalDecision[]
   questions?: ToolRequestUserInputParams['questions']
   /** `sessionAllows` keys to add when a human answers `allowForSession`. */
@@ -1196,7 +1211,16 @@ export class CodexSession extends BaseSession {
               // at creation (`core/src/session/session.rs`, `CreateThreadParams
               // .dynamic_tools`) and a resume with an empty list restores them
               // from there (`core/src/session/mod.rs:721`).
-              dynamicTools: codexDynamicToolSpecs(this.capabilities.crossEngineDispatch)
+              dynamicTools: codexDynamicToolSpecs(
+                this.capabilities.crossEngineDispatch,
+                sessionToolsAvailable()
+              ),
+              // The session tools' guidance, as a developer message (slice 2). The tool
+              // descriptions are the primary carrier (they persist with the rollout); this
+              // is a bonus, and START ONLY like the specs.
+              ...(sessionToolsAvailable()
+                ? { developerInstructions: sessionToolsGuidance({ toolPrefix: '' }) }
+                : {})
             })
       if (this.closed) return
       assertCodexProvider(response.modelProvider)
@@ -3332,6 +3356,24 @@ export class CodexSession extends BaseSession {
     value: unknown,
     context: Parameters<NonNullable<CodexClientOptions['onServerRequest']>>[2]
   ): Promise<DynamicToolCallResponse> {
+    // A session tool asked for by a thread that is not this session's root (a native
+    // child): refused below like any other tool, and audited, since the service never
+    // sees it. The row is the root session's (a child has no identity of its own), so the
+    // detail names the thread. Host thread routing is what keeps this from firing for a
+    // thread no session claimed: those never reach any session (the host answers "Method
+    // not found"), so every call seen here comes from a thread this session owns.
+    if (
+      record(value) &&
+      typeof value.tool === 'string' &&
+      isSessionToolName(value.tool) &&
+      value.threadId !== this.threadId
+    )
+      auditSessionToolDenial(
+        this.sessionToolCaller(),
+        value.tool,
+        record(value.arguments) ? value.arguments : {},
+        `${value.tool} can only be used by the session's main agent, not by a native subagent thread (${String(value.threadId)}).`
+      )
     if (
       this.closed ||
       context.signal.aborted ||
@@ -3350,6 +3392,8 @@ export class CodexSession extends BaseSession {
     if (this.hostedCalls.has(id)) throw new Error('Duplicate Codex hosted tool call')
     this.hostedCalls.add(id)
     const args = record(value.arguments) ? value.arguments : undefined
+    if (isSessionToolName(value.tool))
+      return this.sessionTool(id, value.turnId, value.tool, args, context)
     const verdict = args
       ? this.gate([{ tool: value.tool, input: args }])
       : {
@@ -3372,6 +3416,65 @@ export class CodexSession extends BaseSession {
     if (this.closed || context.signal.aborted)
       throw new Error('Codex hosted tool call was cancelled before it finished')
     return { contentItems: hostedContentItems(result), success: !result.isError }
+  }
+
+  /** The calling session as the session tools see it: `hostedToolCall` already required this session's own root thread and a live root turn. */
+  private sessionToolCaller(toolUseId?: string): SessionToolCaller {
+    return {
+      routingId: this.routingId,
+      engine: this.engineId,
+      cwd: this.cwd,
+      permissionMode: this.permissionMode,
+      ...(toolUseId ? { toolUseId } : {}),
+      callOwner: async () => 'root'
+    }
+  }
+
+  /**
+   * One session tool call (slice 2): the user's deny rule written for Claude's spelling
+   * of the tool, then `sessionToolsGate` -- deny refuses with its reason, ask parks a
+   * card (no session allow and no saved rule: either would skip the gate's scope checks
+   * next time), allow runs. The service re-checks the rules the gate cannot enforce
+   * alone. Never the judge, in auto mode too.
+   */
+  private async sessionTool(
+    toolUseId: string,
+    turnId: string,
+    tool: SessionToolName,
+    args: Record<string, unknown> | undefined,
+    context: Parameters<NonNullable<CodexClientOptions['onServerRequest']>>[2]
+  ): Promise<DynamicToolCallResponse> {
+    const caller = this.sessionToolCaller(toolUseId)
+    const refuse = (text: string): DynamicToolCallResponse => ({
+      contentItems: [{ type: 'inputText', text }],
+      success: false
+    })
+    const deny = (text: string): DynamicToolCallResponse => {
+      auditSessionToolDenial(caller, tool, args ?? {}, text)
+      return refuse(text)
+    }
+    if (!args) return deny(`${tool} arguments must be an object.`)
+    const rule = sessionToolDenyRule(tool, args, mergedClaudeRulesFor(this.cwd), this.cwd)
+    if (rule) return deny(`Denied by permission rule: ${rule}`)
+    const decision = sessionToolsGate(caller, tool, args, {})
+    if (decision.behavior === 'deny') return deny(decision.message)
+    if (decision.behavior === 'ask') {
+      const card: PendingApproval = {
+        requestId: this.approvalRequestId(toolUseId, context.id),
+        toolUseId,
+        toolName: tool,
+        input: args
+      }
+      const answer = this.park(card, turnId, [], context)
+      const parked = this.pending.get(card.requestId)
+      if (parked) parked.standing = false
+      if (((await answer) as { decision?: string }).decision !== 'accept')
+        return refuse(`${tool} was declined by the user.`)
+    }
+    const result = await runSessionTool(caller, tool, args)
+    if (this.closed || context.signal.aborted)
+      throw new Error('Codex hosted tool call was cancelled before it finished')
+    return { contentItems: [{ type: 'inputText', text: result.text }], success: !result.isError }
   }
 
   /**
@@ -3970,7 +4073,7 @@ export class CodexSession extends BaseSession {
     pending.settle(pending.reply(decision !== 'deny'))
     // No rules cache to invalidate here: `gate()` re-reads the merged rules per
     // request, so a newly persisted rule is honoured on the very next approval.
-    if (updatedPermissions && updatedPermissions.length > 0)
+    if (pending.standing !== false && updatedPermissions && updatedPermissions.length > 0)
       persistAllowSuggestions(updatedPermissions, this.cwd, 'CodexSession')
   }
 }
