@@ -18,6 +18,7 @@ export function ResumedBadge({
   return (
     <span
       data-testid={testId}
+      role="img"
       className="text-[10px] leading-3 font-mono px-1 py-px rounded bg-accent/10 text-accent border border-accent/25 shrink-0 whitespace-nowrap"
       title="This agent was sent a message after it finished, and ran again"
       aria-label={`Resumed ${resumes} ${resumes === 1 ? 'time' : 'times'}`}
