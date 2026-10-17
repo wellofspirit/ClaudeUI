@@ -43,6 +43,7 @@ import { resetHistoryLoadForTests } from '../../renderer/src/lib/session-history
 import type { CanonicalSessionState } from '../../core/shared/sync/state'
 import type {
   ChatMessage,
+  EngineId,
   SessionStatus,
   PendingApproval,
   TodoItem,
@@ -262,8 +263,10 @@ export const seed = {
 
   directories: (directories: unknown[]) => emitSync('session:directories-changed', [directories]),
 
-  created: (routingId: string, data: { cwd?: string; resumeSessionId?: string } = {}) =>
-    emitSync('session:created', [routingId, data]),
+  created: (
+    routingId: string,
+    data: { cwd?: string; resumeSessionId?: string; engineId?: EngineId } = {}
+  ) => emitSync('session:created', [routingId, data]),
 
   userMessage: (
     routingId: string,

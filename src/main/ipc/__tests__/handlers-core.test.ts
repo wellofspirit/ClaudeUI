@@ -116,6 +116,7 @@ import {
   judgeModelSupport
 } from '../../../core/ipc/handlers-core'
 import { syncCore, addSyncSubscriber } from '../../../core/services/sync-host'
+import { getSessionMeta, setSessionMeta } from '../../../core/services/db'
 
 function makeSessionStub(overrides: Record<string, unknown> = {}): any {
   return {
@@ -236,6 +237,42 @@ describe('handlers-core', () => {
     expect(snap.recentSessionIds).toEqual(['rid-a'])
     expect(snap.pinnedSessionIds).toEqual(['rid-a'])
     expect(snap.customTitles).toEqual({ 'rid-a': 'Renamed' })
+  })
+
+  it("a client's saveSessions does not drop a session it does not know from canonical sessionEngines", () => {
+    // The host created `host-codex` (birth identity); the saving client's snapshot
+    // predates it. The DB write only upserts, so the echo must too — or every
+    // replica loses the entry while its row stays.
+    syncCore.resetCanonicalForTests()
+    saveSessions({
+      sessionEngines: { 'host-codex': { engineId: 'codex' } }
+    } as any)
+
+    saveSessions({
+      sessionEngines: { 'client-pi': { engineId: 'pi' } }
+    } as any)
+
+    expect(syncCore.getCanonicalState().sessionEngines).toEqual({
+      'host-codex': { engineId: 'codex' },
+      'client-pi': { engineId: 'pi' }
+    })
+    // Every other key of the payload is echoed as the client sent it.
+    const sink = vi.fn()
+    const off = addSyncSubscriber(sink)
+    try {
+      saveSessions({ recentSessions: ['x'], sessionEngines: {} } as any)
+      expect(sink).toHaveBeenCalledWith(expect.any(Number), 'config:sessions-changed', [
+        expect.objectContaining({ recentSessions: ['x'] })
+      ])
+    } finally {
+      off()
+    }
+    // An impoverished save (`{}`) cannot wipe either.
+    saveSessions({ sessionEngines: {} } as any)
+    expect(Object.keys(syncCore.getCanonicalState().sessionEngines).sort()).toEqual([
+      'client-pi',
+      'host-codex'
+    ])
   })
 
   it('listDirEntries returns the default empty shape for a nonexistent path', async () => {
@@ -428,6 +465,58 @@ describe('handlers-core', () => {
       } as any
       await deleteSession(manager, 'oc-1', '-repo', 'opencode')
       expect(refreshCanonicalDirectories).toHaveBeenCalled()
+    })
+
+    // `saveSessionConfig` no longer deletes the rows a client's map lacks, so the
+    // delete is what removes a session's engine/model row — host-side.
+    it("removes the session's engine row once the engine delete succeeded", async () => {
+      const manager = { cancel: vi.fn(), get: vi.fn(), has: vi.fn(() => false) } as any
+      setSessionMeta('oc-row', { engineId: 'opencode' })
+
+      await deleteSession(manager, 'oc-row', '-repo', 'opencode')
+
+      expect(getSessionMeta('oc-row')).toBeUndefined()
+    })
+
+    it('keeps the engine row when the engine refuses the delete (the session survives)', async () => {
+      const manager = { cancel: vi.fn(), get: vi.fn(), has: vi.fn(() => false) } as any
+      setSessionMeta('oc-keep', { engineId: 'opencode' })
+      deleteSessionByEngine.mockRejectedValueOnce(new Error('opencode server down'))
+
+      await expect(deleteSession(manager, 'oc-keep', '-repo', 'opencode')).rejects.toThrow(
+        /server down/
+      )
+
+      expect(getSessionMeta('oc-keep')?.engineId).toBe('opencode')
+    })
+
+    it('deleteProject removes the engine rows of what it deleted, and keeps the survivors', async () => {
+      const manager = { cancel: vi.fn(), get: vi.fn(), forEach: vi.fn() } as any
+      setSessionMeta('oc-live', { engineId: 'opencode' })
+      setSessionMeta('pi-gone', { engineId: 'pi' })
+      setSessionMeta('elsewhere', { engineId: 'pi' })
+      deleteSessionByEngine.mockImplementation(async (id: string) => {
+        if (id === 'oc-live') throw new Error('opencode server down')
+      })
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            { sessionId: 'oc-live', cwd: '/repo', projectKey: '-repo', engineId: 'opencode' },
+            { sessionId: 'pi-gone', cwd: '/repo', projectKey: '-repo', engineId: 'pi' }
+          ]
+        }
+      ] as never)
+
+      await deleteProject(manager, '-repo')
+
+      expect(getSessionMeta('pi-gone')).toBeUndefined()
+      // Survived the delete: it needs its row to reopen on the right engine.
+      expect(getSessionMeta('oc-live')?.engineId).toBe('opencode')
+      // Another project's session is untouched.
+      expect(getSessionMeta('elsewhere')?.engineId).toBe('pi')
     })
 
     it('sweeps every session on the project — on-disk group members AND live sessions', async () => {

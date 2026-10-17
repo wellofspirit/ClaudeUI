@@ -23,13 +23,15 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const { mockRenameUsageEventParent, mockCreateSession } = vi.hoisted(() => ({
+const { mockRenameUsageEventParent, mockMoveSessionMeta, mockCreateSession } = vi.hoisted(() => ({
   mockRenameUsageEventParent: vi.fn(),
+  mockMoveSessionMeta: vi.fn(),
   mockCreateSession: vi.fn()
 }))
 
 vi.mock('../../../core/services/db', () => ({
-  renameUsageEventParent: mockRenameUsageEventParent
+  renameUsageEventParent: mockRenameUsageEventParent,
+  moveSessionMeta: mockMoveSessionMeta
 }))
 
 vi.mock('../../../core/services/logger', () => ({
@@ -71,6 +73,7 @@ function makeFakeSession(routingId: string): {
 describe('SessionManager.rekey — the usage-row id chain', () => {
   beforeEach(() => {
     mockRenameUsageEventParent.mockReset()
+    mockMoveSessionMeta.mockReset()
     mockCreateSession.mockReset()
   })
 
@@ -84,6 +87,7 @@ describe('SessionManager.rekey — the usage-row id chain', () => {
     mgr.rekey('tmp-routing', 'sdk-session-uuid')
 
     expect(mockRenameUsageEventParent).toHaveBeenCalledWith('tmp-routing', 'sdk-session-uuid')
+    expect(mockMoveSessionMeta).toHaveBeenCalledWith('tmp-routing', 'sdk-session-uuid')
     expect(mgr.has('tmp-routing')).toBe(false)
     expect(mgr.has('sdk-session-uuid')).toBe(true)
   })
@@ -92,6 +96,7 @@ describe('SessionManager.rekey — the usage-row id chain', () => {
     const mgr = new SessionManager()
     mgr.rekey('nonexistent', 'new-id')
     expect(mockRenameUsageEventParent).not.toHaveBeenCalled()
+    expect(mockMoveSessionMeta).not.toHaveBeenCalled()
   })
 
   // M-CL3: create-over-existing must dispose() (permanently retire + fence) the

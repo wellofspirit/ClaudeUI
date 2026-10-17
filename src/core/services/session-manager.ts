@@ -7,7 +7,7 @@ import '../providers/register-engines'
 import { readSessionHistory as loadSessionHistory } from './engine-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { claudeProjectKeyFor } from './claude-transcript-locator'
-import { getSessionMeta, renameUsageEventParent } from './db'
+import { getSessionMeta, moveSessionMeta, renameUsageEventParent } from './db'
 import { logger } from './logger'
 import { syncCore } from './sync-host'
 
@@ -118,6 +118,20 @@ export class SessionManager {
       logger.warn(
         'SessionManager',
         `renameUsageEventParent failed (child usage rows may be orphaned): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+
+    // The persisted engine/model row follows the id HERE, on the host. It used to
+    // move only as a side effect of a client's full-map `saveSessionConfig`
+    // (the renamed map lacked the old id, so the host's delete-absent loop dropped
+    // it) — which is how a client that knew nothing of a session could delete or
+    // revert its row. That loop is gone; the rekey is the event that moves it.
+    try {
+      moveSessionMeta(oldId, newId)
+    } catch (err) {
+      logger.warn(
+        'SessionManager',
+        `moveSessionMeta failed (the engine row may stay under the old id): ${err instanceof Error ? err.message : String(err)}`
       )
     }
   }

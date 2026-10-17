@@ -1881,6 +1881,24 @@ export function renameSessionMeta(oldId: string, newId: string, fallback?: Sessi
   }
 }
 
+/**
+ * Move a session's metadata row to its post-rekey id, on the HOST (the rekey
+ * itself is core's — `SessionManager.rekey`). Unlike {@link renameSessionMeta} it
+ * never mints a default row, and it never overwrites one that already exists at
+ * `newId`: a row there was written by the engine under its stable id (Codex does,
+ * with the model it actually runs) and is the more specific of the two, so the
+ * old row is just dropped. A no-op when `oldId` has no row.
+ */
+export function moveSessionMeta(oldId: string, newId: string): void {
+  if (oldId === newId) return
+  const db = getDb()
+  const hasOld = db.prepare('SELECT 1 FROM session_meta WHERE session_id = ?').get(oldId)
+  if (!hasOld) return
+  const hasNew = db.prepare('SELECT 1 FROM session_meta WHERE session_id = ?').get(newId)
+  if (hasNew) deleteSessionMeta(oldId)
+  else renameSessionMeta(oldId, newId)
+}
+
 // ---------------------------------------------------------------------------
 // One-time import from sessions.json
 // ---------------------------------------------------------------------------

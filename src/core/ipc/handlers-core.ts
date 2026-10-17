@@ -45,7 +45,7 @@ import { planClaudeProjectDelete } from '../../shared/claude-project-delete'
 import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import type { ISession } from '../providers/ISession'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
-import { getSessionMeta } from '../services/db'
+import { deleteSessionMeta, getSessionMeta } from '../services/db'
 import { describeJudgeModels } from '../automode/judge-route'
 
 // ---------------------------------------------------------------------------
@@ -403,6 +403,11 @@ export async function deleteSession(
   manager.cancel(sessionId)
   syncCore.removeSession(sessionId)
   await deleteSessionByEngine(sessionId, projectKey, engineId ?? actualEngine)
+  // The engine/model row goes with the session, here and not on a client's say-so:
+  // `saveSessionConfig` no longer deletes rows absent from a client's map. After
+  // the engine delete, so a refusal (the throw above) keeps the identity a
+  // surviving session needs to reopen on the right engine.
+  deleteSessionMeta(sessionId)
   // opencode / pi deletes touch no watched path, so nothing else would tell the
   // other clients their sidebar row is stale until the next poll.
   void refreshCanonicalDirectories()
@@ -505,8 +510,10 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
   const results = await Promise.allSettled(
     foreign.map((s) => deleteSessionByEngine(s.sessionId, projectKey, s.engineId))
   )
+  const survivors = new Set<string>()
   results.forEach((result, i) => {
     if (result.status === 'rejected') {
+      survivors.add(foreign[i].sessionId)
       logger.warn(
         'IPC',
         `session:delete-project: ${foreign[i].engineId} session ${foreign[i].sessionId} survived the delete`,
@@ -514,6 +521,9 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
       )
     }
   })
+  // Their engine/model rows go too (see `deleteSession`) — except a survivor's,
+  // which it needs to reopen on the right engine.
+  for (const id of ids) if (!survivors.has(id)) deleteSessionMeta(id)
 
   // Claude files, and WHICH of them: the home dir wholesale, members relocated
   // into a worktree's project dir one by one, and — when this dir also holds
@@ -942,11 +952,21 @@ export function loadSkillDetails(manager: SessionManager, cwd: string) {
  * the delivery privilege in miniature: it meant the one client that could NOT be
  * corrected by the broadcast was the one whose optimistic write might be wrong.
  * The payload is a whole-config replace, so the echo is idempotent for the writer
- * and authoritative for everyone else.
+ * and authoritative for everyone else — except `sessionEngines`, which merges per
+ * key over canonical's map, exactly as the DB write does (`saveSessionConfig` only
+ * upserts). A client's map is its own snapshot: echoing it raw would drop a
+ * session another client or the host created a moment ago from every replica
+ * while its DB row stays, so the two would disagree until a restart.
  */
 export function saveSessions(config: UISessionConfig): void {
   saveSessionConfig(config)
-  emitEvent('config:sessions-changed', [config])
+  const echo = config.sessionEngines
+    ? {
+        ...config,
+        sessionEngines: { ...syncCore.getCanonicalState().sessionEngines, ...config.sessionEngines }
+      }
+    : config
+  emitEvent('config:sessions-changed', [echo])
 }
 
 /**

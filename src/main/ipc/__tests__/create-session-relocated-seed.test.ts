@@ -54,7 +54,10 @@ vi.mock('../../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: { dispatch: vi.fn(), stopDispatch: vi.fn(), disposeFor: vi.fn() },
   crossEngineDispatchAvailable: () => false
 }))
-vi.mock('../../../core/services/db', () => ({ getSessionMeta: () => undefined }))
+vi.mock('../../../core/services/db', () => ({
+  getSessionMeta: () => undefined,
+  setSessionMeta: vi.fn()
+}))
 const { readSessionHistory } = vi.hoisted(() => ({
   readSessionHistory: vi.fn(
     async (_id: string, _key: string, _anchor?: string, _engine?: string) => ({

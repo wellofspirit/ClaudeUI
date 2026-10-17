@@ -56,7 +56,10 @@ vi.mock('../../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: { dispatch: vi.fn(), stopDispatch: vi.fn(), disposeFor: vi.fn() },
   crossEngineDispatchAvailable: () => false
 }))
-vi.mock('../../../core/services/db', () => ({ getSessionMeta: () => undefined }))
+vi.mock('../../../core/services/db', () => ({
+  getSessionMeta: () => undefined,
+  setSessionMeta: vi.fn()
+}))
 vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))

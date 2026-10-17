@@ -15,6 +15,7 @@ import type { SessionStatus } from '../../../shared/types'
 
 vi.mock('../../../core/services/db', () => ({
   renameUsageEventParent: vi.fn(),
+  moveSessionMeta: vi.fn(),
   dispatchedCostsByRouting: vi.fn(() => []),
   appendAuditLog: vi.fn()
 }))
