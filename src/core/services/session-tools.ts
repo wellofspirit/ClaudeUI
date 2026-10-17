@@ -46,6 +46,7 @@ import {
   releaseProposal,
   type Proposal
 } from './session-proposals'
+import { noteHandedOff } from './context-pressure'
 import { deliver, type DeliveryResult } from './session-delivery'
 import { noteStopRequested } from './session-notes'
 import {
@@ -1746,6 +1747,8 @@ export async function sessionHandOff(
     detail: string
   ): SessionToolResult => {
     auditSessionToolCall(caller, 'session_hand_off', target, r.isError ? 'error' : 'ok', detail)
+    // The context-pressure watcher settles on this: a hand-off that happened ends its ask.
+    if (!r.isError) noteHandedOff(caller.routingId)
     return r
   }
   const notRoot = await rootAgentRefusal(caller, 'session_hand_off')

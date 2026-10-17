@@ -16,6 +16,10 @@ import type { AuthRequiredState } from '../../../shared/remote-protocol'
 import type { ItemStreams } from '../../../core/shared/sync/item-stream'
 import type { CanonicalState } from '../../../core/shared/sync/state'
 import type { SessionLinkInfo } from '../../../shared/session-links'
+import type {
+  ContextPressureBanner,
+  ContextPressureSetting
+} from '../../../shared/context-pressure'
 import {
   anthropicAuthState,
   chatgptAuthFromRegistry,
@@ -641,6 +645,12 @@ export interface AppSettings {
   /** The cross-engine dispatch tile's (the letter X) palette colour; unset is orange. */
   dispatchTileColor?: AgentColorId
   /**
+   * What to do when a session's context crosses a threshold (session tools, slice 4). Absent from
+   * {@link DEFAULT_SETTINGS}: unset is `off` with a 70 % threshold, and Reset deletes the key.
+   * `normalizeContextPressure` (shared) owns the rules; the host applies it on save and on read.
+   */
+  contextPressure?: ContextPressureSetting
+  /**
    * Colour an agent's name in the roster, and the task card's model chip, by the
    * tier of the model it runs on (`shared/model-tier.ts`). On by default.
    */
@@ -1104,6 +1114,9 @@ export interface PerSessionState {
   /** Items from other sessions or agents held for this session's next turn
    *  (slice 1a), replicated from main — `0` when none. */
   heldCount: number
+  /** The context-pressure banner above this session's composer (slice 4), replicated
+   *  from main — `null` when there is none. */
+  contextPressure: ContextPressureBanner | null
   draftText: string
   /** Per-session unsent attachments (mirrors draftText). Scoped so a file added
    *  in session A can never be sent from B, and is restored on return to A. */
@@ -1201,6 +1214,7 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   metering: null,
   queuedItems: [],
   heldCount: 0,
+  contextPressure: null,
   draftText: '',
   draftAttachments: [],
   selectedModel: 'default',

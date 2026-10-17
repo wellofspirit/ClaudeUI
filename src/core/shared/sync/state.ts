@@ -37,6 +37,7 @@ import type {
   PerSessionSnapshot
 } from '../../../shared/remote-protocol'
 import type { SessionLinkInfo } from '../../../shared/session-links'
+import type { ContextPressureBanner } from '../../../shared/context-pressure'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
 export interface CanonicalSessionState {
@@ -55,6 +56,11 @@ export interface CanonicalSessionState {
   queue: QueuedItem[]
   /** Items from other sessions or agents held for this session's next turn (slice 1a). */
   heldCount: number
+  /**
+   * The context-pressure banner above this session's composer (slice 4), or null. Canonical
+   * so that either answer clears it on every client and a late joiner sees it.
+   */
+  contextPressure: ContextPressureBanner | null
   taskNotifications: TaskNotification[]
   activeTasks: Record<string, ActiveTask>
   taskProgressMap: Record<string, TaskProgress>
@@ -157,6 +163,7 @@ export function emptySession(routingId: string, cwd = ''): CanonicalSessionState
     sentFiles: [],
     queue: [],
     heldCount: 0,
+    contextPressure: null,
     taskNotifications: [],
     activeTasks: {},
     taskProgressMap: {},
@@ -237,6 +244,7 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       sentFiles: s.sentFiles ?? [],
       queue: s.queue ?? [],
       heldCount: s.heldCount ?? 0,
+      contextPressure: s.contextPressure ?? null,
       taskNotifications: s.taskNotifications,
       activeTasks: s.activeTasks ?? {},
       taskProgressMap: s.taskProgressMap,
@@ -307,6 +315,7 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       sentFiles: s.sentFiles,
       queue: s.queue,
       heldCount: s.heldCount,
+      contextPressure: s.contextPressure,
       taskNotifications: s.taskNotifications,
       activeTasks: s.activeTasks,
       taskProgressMap: s.taskProgressMap,

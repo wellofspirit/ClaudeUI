@@ -22,6 +22,7 @@
 import type { SessionStatus } from '../../shared/types'
 import type { SessionLinkInfo } from '../../shared/session-links'
 import type { CanonicalSessionState, CanonicalState } from '../shared/sync/state'
+import { noteTurnStopped } from './context-pressure'
 import { deliver } from './session-delivery'
 import { resolveRef, titleOf } from './session-links'
 import type { SessionManager } from './session-manager'
@@ -321,6 +322,7 @@ function sweep(): void {
  * turn is running.
  */
 export function noteStopRequested(id: string): void {
+  noteTurnStopped(id)
   const ref = syncCore.getCanonicalState().sessionRefs[id]
   const watch = ref ? turns.get(ref) : undefined
   if (watch) watch.stopped = true

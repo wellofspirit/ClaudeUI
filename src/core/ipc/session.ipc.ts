@@ -10,6 +10,7 @@ import { claudeLoginSignal } from '../services/claude-login-state'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { detachSessionLink } from '../services/session-links'
+import { configureContextPressure, respondContextPressure } from '../services/context-pressure'
 import { configureSessionNotes } from '../services/session-notes'
 import {
   configureSessionTools,
@@ -283,6 +284,7 @@ const SESSION_IPC_CHANNELS = [
   'session:link:detach',
   'session:proposal:start',
   'session:proposal:dismiss',
+  'session:context-pressure:respond',
   'session:ask-side-question',
   'session:set-permission-mode',
   'session:set-model',
@@ -448,6 +450,12 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   })
   // Turn-end notes to a parent send through the same manager.
   configureSessionNotes(manager)
+  // So does the context-pressure watcher's hand-off instruction.
+  configureContextPressure({
+    manager,
+    sendPrompt: (routingId, prompt, options) =>
+      sendPrompt(manager, routingId, prompt, undefined, options)
+  })
   for (const command of codexCommands(manager)) handleIpc(command)
 
   // The volatile lane's subscription verb (phase 5 S1). Same declaration the
@@ -695,6 +703,15 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'chat',
     kind: 'command',
     handler: async (proposalId: string) => dismissProposalFromClient(proposalId)
+  })
+
+  // The user's answer to the context-pressure banner (slice 4): Hand off or Not now.
+  handleIpc({
+    channel: 'session:context-pressure:respond',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, answer: string) => respondContextPressure(routingId, answer)
   })
 
   // Deprecated (ADR-053): recall-all shim for cached `/remote` bundles.

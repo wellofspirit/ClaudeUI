@@ -46,6 +46,7 @@ import { planClaudeProjectDelete } from '../../shared/claude-project-delete'
 import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import type { ISession } from '../providers/ISession'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
+import { normalizeContextPressure } from '../../shared/context-pressure'
 import { deleteSessionMeta, getSessionMeta } from '../services/db'
 import { flushHeld, hasHeld } from '../services/session-delivery'
 import { noteClientPrompt } from '../services/session-links'
@@ -1070,6 +1071,12 @@ export function saveUiSettings(manager: SessionManager, incomingSettings: UISett
       ([k]) => !['sandbox', 'proxy', 'anthropicEndpoint', 'modelOverride'].includes(k)
     )
   )
+  // The context-pressure setting is checked here, at the one door every client writes
+  // through: a bad mode or threshold from a remote client or a hand-edit is replaced by a
+  // valid one, not stored (the watcher normalises on read as well).
+  if (settings.contextPressure !== undefined) {
+    settings.contextPressure = normalizeContextPressure(settings.contextPressure)
+  }
   saveSettings(settings)
   // Next mockup request re-reads settings to pick up CSP changes.
   invalidateMockupSecuritySettings()

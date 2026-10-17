@@ -55,6 +55,7 @@ import {
   SEND_USER_FILE_TOOL
 } from '../../../shared/derive-session'
 import { channelSpec } from './channels'
+import { parseContextPressureBanner } from '../../../shared/context-pressure'
 import { engineMeta } from '../../../shared/engine-meta'
 import { emptySession, type CanonicalSessionState, type CanonicalState } from './state'
 
@@ -1305,6 +1306,19 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
       const data = arg<{ count?: number }>(event, 1)
       if (!routingId || typeof data?.count !== 'number' || !state.sessions[routingId]) return state
       return withSession(state, routingId, () => ({ heldCount: Math.max(0, data.count!) }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Context pressure (slice 4)
+    // -----------------------------------------------------------------------
+    case 'session:context-pressure': {
+      const routingId = routingIdOf(event)
+      if (!routingId || !state.sessions[routingId]) return state
+      const data = arg<unknown>(event, 1)
+      // null clears; anything else must be a banner, or the event is ignored.
+      const banner = data === null ? null : parseContextPressureBanner(data)
+      if (data !== null && banner === null) return state
+      return withSession(state, routingId, () => ({ contextPressure: banner }))
     }
 
     // -----------------------------------------------------------------------

@@ -946,6 +946,7 @@ export interface WsVoiceAudio {
 export type { StreamEventFrame, StreamLaneFrame } from '../core/shared/sync/stream'
 import type { StreamEventFrame } from '../core/shared/sync/stream'
 import type { SessionLinkInfo } from './session-links'
+import type { ContextPressureBanner } from './context-pressure'
 import type { ItemStreamFrame, ItemStreams } from '../core/shared/sync/item-stream'
 
 export type WsClientMessage =
@@ -1036,6 +1037,9 @@ export interface PerSessionSnapshot {
   /** Items from other sessions or agents held for this session's next turn
    *  (slice 1a). Omitted when none, and by an older server. */
   heldCount?: number
+  /** The context-pressure banner above this session's composer (slice 4); `null` when none,
+   *  and absent from an older server. */
+  contextPressure?: ContextPressureBanner | null
   taskNotifications: TaskNotification[]
   /** Started-but-not-finished tasks (task_started with no task_notification
    *  yet) — without this a remote client that connects or resyncs mid-task

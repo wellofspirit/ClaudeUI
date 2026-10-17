@@ -86,9 +86,14 @@ import {
   type SessionToolCaller
 } from '../session-tools'
 import { createWorktree } from '../worktree'
+import { noteHandedOff } from '../context-pressure'
 
 vi.mock('../logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+}))
+vi.mock('../context-pressure', () => ({
+  noteHandedOff: vi.fn(),
+  noteTurnStopped: vi.fn()
 }))
 vi.mock('../worktree', () => ({
   createWorktree: vi.fn(),
@@ -1076,6 +1081,19 @@ describe('sessionHandOff', () => {
     const out = await sessionHandOff(p.caller, { title: 'Next', handoff: HANDOFF })
     expect(out.isError).toBeUndefined()
     expect(created).toHaveLength(1)
+  })
+
+  it('tells the context-pressure watcher when, and only when, the hand-off happened', async () => {
+    const p = born('hand-pressure')
+    expect((await sessionHandOff(p.caller, { title: 't', handoff: '  ' })).isError).toBe(true)
+    expect(noteHandedOff).not.toHaveBeenCalled()
+    p.fake.originLedger.nonUserDelivered()
+    expect((await sessionHandOff(p.caller, { title: 't', handoff: HANDOFF })).isError).toBe(true)
+    expect(noteHandedOff).not.toHaveBeenCalled()
+    p.fake.originLedger.userPrompt({ hostInstruction: true })
+    const out = await sessionHandOff(p.caller, { title: 'Next', handoff: HANDOFF })
+    expect(out.isError).toBeUndefined()
+    expect(noteHandedOff).toHaveBeenCalledExactlyOnceWith(p.caller.routingId)
   })
 
   it('names the file <ref>-<yyyymmdd-hhmm>.md', () => {

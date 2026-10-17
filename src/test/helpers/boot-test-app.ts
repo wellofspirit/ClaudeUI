@@ -177,6 +177,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     startSessionProposal: (proposalId) => ipcRenderer.invoke('session:proposal:start', proposalId),
     dismissSessionProposal: (proposalId) =>
       ipcRenderer.invoke('session:proposal:dismiss', proposalId),
+    respondContextPressure: (routingId, answer) =>
+      ipcRenderer.invoke('session:context-pressure:respond', routingId, answer),
     recallQueued: (routingId) => ipcRenderer.invoke('session:recall-queued', routingId),
     askSideQuestion: (routingId, question) =>
       ipcRenderer.invoke('session:ask-side-question', routingId, question),

@@ -61,6 +61,7 @@ import type {
 import type { HarnessId, HarnessInstallProgress } from '../../../shared/harness-types'
 import type { VoicePackStatus } from '../../../shared/voice-pack'
 import type { SessionLinksPayload } from '../../../shared/session-links'
+import type { ContextPressureBanner } from '../../../shared/context-pressure'
 import type { ItemStreamOpen, ItemStreamSeal } from './item-stream'
 
 export interface SyncEventMap {
@@ -243,6 +244,8 @@ export interface SyncEventMap {
    * inbox, waiting for its next turn (slice 1a). A replace, so idempotent.
    */
   'session:held-changed': (routingId: string, data: { count: number }) => void
+  /** The context-pressure banner of a session (slice 4): a replace; `null` clears it. */
+  'session:context-pressure': (routingId: string, banner: ContextPressureBanner | null) => void
 
   // -------------------------------------------------------------------------
   // Per-session config

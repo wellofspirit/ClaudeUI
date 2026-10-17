@@ -2398,6 +2398,66 @@ describe('reducer — session:held-changed (held inbox size)', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Slice 4 — the context-pressure banner
+// ---------------------------------------------------------------------------
+
+describe('reducer — session:context-pressure (the banner above the composer)', () => {
+  const ask = { kind: 'ask', percent: 72 } as const
+
+  it('replaces the banner, clears it on null, and replicates it in the snapshot', () => {
+    const shown = fold([created(), ['session:context-pressure', 'rid', ask]])
+    expect(shown.sessions['rid'].contextPressure).toEqual(ask)
+    expect(toSnapshot(shown, 1).sessions['rid'].contextPressure).toEqual(ask)
+    expect(fromSnapshot(toSnapshot(shown, 1)).sessions['rid'].contextPressure).toEqual(ask)
+
+    const failed = fold(
+      [['session:context-pressure', 'rid', { kind: 'failed', percent: 80 }]],
+      shown
+    )
+    expect(failed.sessions['rid'].contextPressure).toEqual({ kind: 'failed', percent: 80 })
+
+    const cleared = fold([['session:context-pressure', 'rid', null]], shown)
+    expect(cleared.sessions['rid'].contextPressure).toBeNull()
+    // `null` on the wire when there is none, and an older server's snapshot (no key) hydrates to none.
+    expect(toSnapshot(cleared, 1).sessions['rid'].contextPressure).toBeNull()
+    const { contextPressure: _omitted, ...older } = toSnapshot(cleared, 1).sessions['rid']
+    void _omitted
+    expect(
+      fromSnapshot({ ...toSnapshot(cleared, 1), sessions: { rid: older } }).sessions['rid']
+        .contextPressure
+    ).toBeNull()
+    expect(fromSnapshot(toSnapshot(cleared, 1)).sessions['rid'].contextPressure).toBeNull()
+  })
+
+  it('a late joiner reads the same banner from the snapshot as an earlier client folded', () => {
+    const live = fold([created(), ['session:context-pressure', 'rid', ask]])
+    const restored = fromSnapshot(toSnapshot(live, 7))
+    expect(restored.sessions['rid'].contextPressure).toEqual(live.sessions['rid'].contextPressure)
+  })
+
+  it('goes with a cleared conversation (its context is gone)', () => {
+    const shown = fold([created(), ['session:context-pressure', 'rid', ask]])
+    const cleared = fold([['session:conversation-cleared', 'rid', {}]], shown)
+    expect(cleared.sessions['rid'].contextPressure).toBeNull()
+  })
+
+  it('is a ringed replicated channel that canonical folds', () => {
+    expect(channelSpec('session:context-pressure')).toMatchObject({
+      cls: 'replicated',
+      ring: true,
+      canonical: true
+    })
+  })
+
+  it('ignores a malformed banner and a session it does not know', () => {
+    const base = fold([created(), ['session:context-pressure', 'rid', ask]])
+    expect(fold([['session:context-pressure', 'rid', { kind: 'ask' }]], base)).toBe(base)
+    expect(fold([['session:context-pressure', 'rid', 'ask']], base)).toBe(base)
+    expect(fold([['session:context-pressure', 'ghost', ask]], base)).toBe(base)
+  })
+})
+
 describe('reducer — host-instruction prompts (slice 1a)', () => {
   it('marks a user row built from a host-instruction, and only that one', () => {
     const s = fold([

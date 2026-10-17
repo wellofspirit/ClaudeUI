@@ -8,6 +8,7 @@ import { RemoteDispatcher } from '../services/remote-dispatcher'
 import { STREAM_WATCH_COMMAND } from './stream-watch'
 import { GIT_WATCH_COMMAND } from './git-watch'
 import { SessionManager } from '../services/session-manager'
+import { respondContextPressure } from '../services/context-pressure'
 import { detachSessionLink } from '../services/session-links'
 import { dismissProposalFromClient, startProposalFromClient } from '../services/session-tools'
 import {
@@ -563,6 +564,15 @@ export function registerRemoteHandlers(
     capability: 'chat',
     kind: 'command',
     handler: async (proposalId: string) => dismissProposalFromClient(proposalId)
+  })
+
+  // The user's answer to the context-pressure banner (slice 4): Hand off or Not now.
+  handleRemote({
+    channel: 'session:context-pressure:respond',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, answer: string) => respondContextPressure(routingId, answer)
   })
 
   // Deprecated (ADR-053): recall-all shim for cached `/remote` bundles.

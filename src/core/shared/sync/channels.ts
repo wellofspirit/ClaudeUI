@@ -203,6 +203,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: true,
     why: 'Held inbox size (slice 1a): items from other sessions waiting for the next turn of this session. A replace of one number, so a client that joins late reads it from the snapshot and an indicator never counts events.'
   },
+  'session:context-pressure': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'Context-pressure banner above a session’s composer (slice 4): a replace of one small object, null to clear. Canonical so that an answer on any client clears it on every client and a late joiner reads it from the snapshot; it is carried on PerSessionSnapshot as `contextPressure`.'
+  },
   'session:approval-request': {
     cls: 'replicated',
     ring: true,

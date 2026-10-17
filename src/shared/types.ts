@@ -1862,6 +1862,15 @@ interface SessionAPI {
   /** The Dismiss button on a proposal card. */
   dismissSessionProposal(proposalId: string): Promise<{ success: boolean; error?: string }>
   /**
+   * The user's answer to a session's context-pressure banner (slice 4): `handoff` tells the
+   * session to wrap up and hand off, `dismiss` is "Not now". Either clears the banner on
+   * every client.
+   */
+  respondContextPressure(
+    routingId: string,
+    answer: 'handoff' | 'dismiss'
+  ): Promise<{ success: boolean; error?: string }>
+  /**
    * Take back every still-recallable queued item (ADR-053). `recalled` carries
    * their texts in queue order for the client to join with `\n`; `notRecalled`
    * counts items the engine had already started consuming — those stay on the

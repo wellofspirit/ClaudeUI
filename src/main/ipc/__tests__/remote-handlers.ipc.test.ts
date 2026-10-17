@@ -1410,6 +1410,23 @@ describe('registerRemoteHandlers', () => {
       expect(persisted).not.toHaveProperty('modelOverride')
     })
 
+    it('stores the context-pressure setting only in its valid form, whoever sends it (slice 4)', async () => {
+      await dispatcher.handle(
+        makeRequest('config:save-settings', {
+          contextPressure: { mode: 'sometimes', thresholds: [95, 5, 40, 40, 'x', 120, 60] }
+        }),
+        remoteConn
+      )
+      expect(uiConfigMocks.saveSettings.mock.calls[0][0].contextPressure).toEqual({
+        mode: 'off',
+        thresholds: [40, 60, 95]
+      })
+      // Absent stays absent: the default is not written into every profile.
+      uiConfigMocks.saveSettings.mockClear()
+      await dispatcher.handle(makeRequest('config:save-settings', { theme: 'dark' }), remoteConn)
+      expect(uiConfigMocks.saveSettings.mock.calls[0][0]).not.toHaveProperty('contextPressure')
+    })
+
     it('applies endpoint/model env sourced from the vendor store (GUARD — fails pre-fix)', async () => {
       uiConfigMocks.loadEngineConfig.mockReturnValueOnce({})
       uiConfigMocks.loadVendorConfig.mockReturnValueOnce({
@@ -1589,6 +1606,9 @@ describe('registerRemoteHandlers', () => {
 //   - `session:proposal:start` / `session:proposal:dismiss` (session tools, slice 1c-b) — the
 //     Start and Dismiss buttons on a proposal card; `chat` commands naming a proposal, so the
 //     browser and phone clients can act on a card exactly as the desktop does.
+//   - `session:context-pressure:respond` (session tools, slice 4) — Hand off / Not now on the
+//     banner above the composer; a `chat` command naming the session, so the browser and
+//     phone clients answer exactly as the desktop does.
 // ---------------------------------------------------------------------------
 
 const PRE_PORT_REMOTE_CHANNELS = [
@@ -1641,6 +1661,7 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'session:background-task',
   'session:build-subagent-file-map',
   'session:cancel',
+  'session:context-pressure:respond',
   'session:create',
   'session:delete-project',
   'session:delete-session',

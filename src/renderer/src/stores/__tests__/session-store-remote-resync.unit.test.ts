@@ -318,6 +318,37 @@ describe('hydrateReplica — queue of record (ADR-053)', () => {
   })
 })
 
+describe('contextPressure — the banner state reaches every client (slice 4)', () => {
+  it('arrives as a session:context-pressure event, clears on null, and rides the snapshot', () => {
+    store().createNewSession('X', '/test')
+    useSessionStore.setState({ activeSessionId: 'X' })
+    expect(store().sessions['X'].contextPressure).toBeNull()
+
+    emitSync('session:context-pressure', ['X', { kind: 'ask', percent: 72 }])
+    expect(store().sessions['X'].contextPressure).toEqual({ kind: 'ask', percent: 72 })
+
+    // A client that joins late reads it from the snapshot.
+    const produced = toSnapshot(getReplicaState(), 0)
+    expect(produced.sessions['X'].contextPressure).toEqual({ kind: 'ask', percent: 72 })
+    hydrateReplica(
+      makeSnapshot(
+        {
+          X: { ...baseSnapshotSession('X'), contextPressure: { kind: 'failed', percent: 80 } }
+        },
+        'X'
+      ),
+      true
+    )
+    expect(store().sessions['X'].contextPressure).toEqual({ kind: 'failed', percent: 80 })
+
+    // The answer clears it, and an older server that omits it hydrates to none.
+    emitSync('session:context-pressure', ['X', null])
+    expect(store().sessions['X'].contextPressure).toBeNull()
+    hydrateReplica(makeSnapshot({ X: baseSnapshotSession('X') }, 'X'), true)
+    expect(store().sessions['X'].contextPressure).toBeNull()
+  })
+})
+
 describe('heldCount — the held inbox size reaches every client (slice 1a)', () => {
   it('arrives as a session:held-changed event and as a snapshot field', () => {
     store().createNewSession('X', '/test')

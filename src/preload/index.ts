@@ -217,6 +217,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:proposal:start', proposalId),
   dismissSessionProposal: (proposalId: string) =>
     ipcRenderer.invoke('session:proposal:dismiss', proposalId),
+  respondContextPressure: (routingId: string, answer: 'handoff' | 'dismiss') =>
+    ipcRenderer.invoke('session:context-pressure:respond', routingId, answer),
   recallQueued: (routingId: string) => ipcRenderer.invoke('session:recall-queued', routingId),
   askSideQuestion: (routingId: string, question: string) =>
     ipcRenderer.invoke('session:ask-side-question', routingId, question),
