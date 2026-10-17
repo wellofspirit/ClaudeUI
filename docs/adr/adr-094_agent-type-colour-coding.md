@@ -95,7 +95,7 @@ ordinary `updateSettings` path, so they sync to every client like any setting; b
 
 ## Amendment (2026-10-17): every agent has a tile with a bot
 
-Owner rulings, from mockups `d1b54571` (the roster) and `d012aba0` (the Task card).
+Designed in mockups `d1b54571` (the roster) and `d012aba0` (the Task card).
 
 **The letters.** A type's letters are the initials of its segments (split on `-`, `_`, `:` and whitespace), at
 most two, uppercased, minus a first segment the type shares with another known type: `orch-reader` R,

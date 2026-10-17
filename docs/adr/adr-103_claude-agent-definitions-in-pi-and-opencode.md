@@ -10,11 +10,10 @@ win), [ADR-026](adr-026_development-workflow.md) (the role agents this exists fo
 
 ## Context
 
-The owner's workflow (ADR-026) dispatches user-level role agents — `orch-reader`, `orch-implementer`,
-`orch-verifier`, `orch-design-reviewer`, `orch-pr-reviewer` — defined once, as Claude Code agent files in
-`~/.claude/agents` (synced from the owner's config repo). The owner runs pi and opencode only through ClaudeUI and
-wants the same agents there, each harness running them on its own models, without copies and without patching either
-harness.
+The ADR-026 workflow dispatches user-level role agents — `orch-reader`, `orch-implementer`, `orch-verifier`,
+`orch-design-reviewer`, `orch-pr-reviewer` — defined once, as Claude Code agent files in `~/.claude/agents`. The
+same agents are wanted in pi and opencode sessions run through ClaudeUI, each harness running them on its own models,
+without copies and without patching either harness.
 
 - pi has no native subagents; ClaudeUI host-runs them (ADR-089) from a registry that already read Claude-shaped
   files from `~/.pi/agent/agents` and `.pi/agents`.
@@ -52,7 +51,7 @@ harness sees another's choices.
   project directory from the root down, `.claude/agents` then `.pi/agents`. The harness's own folder wins at
   equal scope; a nearer directory beats a farther one; every override of a built-in or user agent is a
   diagnostic, and a project agent that shadows one is marked `(project)` in the listing.
-- **A project definition fully overrides** one of the same name, as in Claude Code (owner ruling, 2026-10-17): a
+- **A project definition fully overrides** one of the same name, as in Claude Code (2026-10-17): a
   project owns its agents and may give one a different model, tools or prompt, e.g. `orch-implementer` on a
   stronger model for a harder repository. The override is logged at info. Between the user's own folders plain
   precedence applies too.
@@ -117,11 +116,11 @@ harness sees another's choices.
 
 ## Alternatives considered
 
-- **Generate per-harness agent files from the config repo.** Rejected: the owner never runs pi or opencode
-  outside ClaudeUI, so a runtime shim keeps one source and nothing to re-sync.
+- **Generate per-harness agent files from the config repo.** Rejected: the agents are needed in pi and opencode
+  sessions run through ClaudeUI, so a runtime shim keeps one source and nothing to re-sync.
 - **Flat `pi-model` / `opencode-model` keys.** Rejected for one nested `harness` key: one unknown key for Claude
   Code to ignore, and room for other per-harness fields later.
 - **A deny-all + allow-list permission mapping.** Rejected (see above): it both widened and broke access.
 - **Project files may only narrow, and never pick a model.** Built first (a repository could not widen a user's
-  read-only agent or choose its spend), then reversed by the owner: it diverged from Claude Code and from how pi
+  read-only agent or choose its spend), then reversed: it diverged from Claude Code and from how pi
   and opencode treat their own project config, and it took a legitimate per-project choice away from users.
