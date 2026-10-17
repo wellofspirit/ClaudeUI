@@ -13,13 +13,11 @@
 
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 import { CHUNK_DELIM_PREFIX, isChunkConcat } from '../scripts/lib/chunk-format.mjs'
+import { cliJsPath, versionJsonPath } from '../scripts/lib/cli-paths.mjs'
 import { PATCH_REGISTRY, mergeIntoVersionJson, patchesPresent } from './lib/patch-registry.mjs'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
 const QUIET = process.argv.includes('--quiet')
 
 // Colour on a real terminal, or when the orchestrator told us to via
@@ -73,7 +71,7 @@ if (!QUIET) console.log('\nAll patches applied.')
 // What we check here is only that the delimiter structure survived patching.
 // ---------------------------------------------------------------------------
 
-const cliPath = resolve(__dirname, '..', 'vendor', 'claude-cli', 'cli.js')
+const cliPath = cliJsPath()
 const MIN_CHUNKS = 1000
 
 if (!QUIET) console.log('\n>>> Structure check: %s\n', cliPath)
@@ -112,7 +110,7 @@ console.log(`  ${green('OK')} Structure check passed (${chunkCount} chunks)`)
 // Anthropic's own binary, which has no version.json, reads as "no patches".
 // ---------------------------------------------------------------------------
 
-const versionPath = resolve(__dirname, '..', 'vendor', 'claude-cli', 'version.json')
+const versionPath = versionJsonPath()
 // Chunks are pure ASCII (extract-cli.mjs validates it), so latin1 is lossless.
 const present = patchesPresent(cliBytes.toString('latin1'))
 try {

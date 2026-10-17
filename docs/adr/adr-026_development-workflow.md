@@ -1,173 +1,160 @@
-# ADR-026 — Development workflow: main model orchestrates, sub-agent implements, review every line
+# ADR-026 — Development workflow: Opus orchestrates and decides, Sonnet builds, Fable advises and gates the PR
 
-**Status:** Accepted (amended 2026-09-17: driver-specific delegation: Fable uses Opus, GPT-6 uses GPT-5.6 Sol for implementation and verification; the main model orchestrates, reviews and commits. The separate-verifier requirement from 2026-09-16 remains. Amended 2026-09-21: gates and guard checks may be delegated, and a diff the main model cannot hold gets a fresh reviewer before the commit.)
+**Status:** Accepted. Amended 2026-10-16: one workflow for every change — Opus orchestrates and
+makes every judgment call; Sonnet reads, implements and verifies; Fable is the design consultant and the
+PR's exit gate; work lands as a pull request. The step-by-step procedure lives in a user-level `orchestrate`
+skill and the roles are user-level custom agents (`orch-reader`, `orch-implementer`, `orch-verifier`,
+`orch-design-reviewer`, `orch-pr-reviewer`), shared across projects (and, once ADR-103
+lands, loaded by ClaudeUI into pi and opencode too); this ADR keeps the decision and what is specific to this
+repository. Replaces the driver pairings of 2026-09-17 (Fable → Opus, GPT-6 → GPT-5.6 Sol) and the 2026-10-01
+Sonnet/Opus split. Kept from earlier amendments: the separate verifier
+(2026-09-16), delegated gates and the fresh reviewer for large diffs (2026-09-21).
 **Relates to:** ADR-027 (test data attributes — the structural-verification tier this workflow leans on)
-**Operational detail:** the loop + standing constraints below. (Originally mirrored from `docs/v2/ROADMAP.md` § "How we work"; the V2 docs were removed after V2 shipped, so this ADR is now the single home.)
 
 ## Context
 
-All of V2 (engine/vendor/account split, the opencode backend, persistence, metering, the
-interaction-parity series) was built with one division of labour, and it held up: **the main model
-is the orchestrator and reviewer; a cheaper sub-agent writes the code.** (Originally Opus
-orchestrating Sonnet; since 2026-07-30 **Fable orchestrates Opus**; on 2026-09-17 Daniel added **GPT-6 orchestrating GPT-5.6 Sol** while retaining the Fable/Opus pairing — the division of
-labour is the decision, the specific models track whatever the current tier pairing is.) Every phase that
-followed it surfaced at least one real bug _in review_ — a model-picker regression, dead persisted
-data, a vacuous migration test, an `acquire()` race, a per-frame token overcount, a wrong auth-source
-mapping — bugs that the implementing agent's own summary did not mention. The lesson, repeatedly
-confirmed: **the implementing agent must never self-certify; correctness is owned by the reviewer who
-reads every line and re-runs the gates independently.**
+Every phase built since V2 used one division of labour: **the main model orchestrates and reviews; a
+cheaper sub-agent writes the code.** Every phase surfaced at least one real bug _in review_ — a
+model-picker regression, dead persisted data, a vacuous migration test, an `acquire()` race, a per-frame
+token overcount, a wrong auth-source mapping — that the implementing agent's own summary did not mention.
+The lesson: **the implementing agent never self-certifies; correctness is owned by the reviewer who reads
+every line and re-runs the gates independently.**
 
-This was documented only inside `docs/v2/ROADMAP.md`, which a fresh session may not read. It needs to
-be a first-class, referenced decision so every session works this way by default — not just V2
-follow-ups but any non-trivial change.
+The models filling the roles changed several times (Opus → Sonnet, then Fable → Opus, then GPT-6 → Sol
+alongside it). On 2026-10-16 they were consolidated: Opus is strong enough to orchestrate every change,
+Sonnet does the volume work, and Fable is kept for the two places where a stronger second view pays for
+itself — a design with a large blast radius, and the finished pull request.
 
 ## Decision
 
-Adopt the orchestrate/implement/review loop below as the **default workflow for non-trivial changes**.
-"Non-trivial" = anything beyond a one-line/obvious edit: new features, refactors touching shared
-seams, anything with a native/external dependency (opencode binary, cli.js wire, DB ABI), anything
-user-visible. Trivial mechanical edits and pure conversational answers are exempt.
+Every non-trivial change in this repository (anything beyond a one-line or mechanical edit: features,
+refactors touching shared seams, anything with a native or external dependency — an engine binary, the
+cli.js wire, the DB driver — anything user-visible) follows the user-level `orchestrate` skill, with the
+roles, gates and repository rules below. Trivial edits and conversational answers are exempt.
 
 ### Roles
 
-- **Main model (Fable or GPT-6) — orchestrator + reviewer + committer.** Owns scope, design, the kickoff spec,
-  line-by-line review, the gates, the real-app verification, and the commit. The buck stops here.
-- **Implementer — Opus when the driver is Fable; GPT-5.6 Sol when the driver is GPT-6.** Writes code against the spec. **Never** commits, `git add`s,
-  creates branches, or runs `bun install`/`add`/`remove`. Leaves the working tree for review and
-  reports deltas, exact verify-gate output, and any deviation from the spec. **Never self-certifies.**
-- **Verifier — Opus when the driver is Fable; GPT-5.6 Sol when the driver is GPT-6 (separate role since 2026-09-16).** A SEPARATE agent from the implementer, dispatched
-  after code review is clean. Drives the real Electron app (`verifier-electron` skill /
-  `scripts/app-shot.mjs`) against a written verification brief, asserts the live DOM by `data-testid`
-  (ADR-027), and returns the evidence: the DOM assertions it ran with their output, and the absolute
-  paths of the screenshots it captured. It never edits source, never commits, and never certifies the
-  change; it reports what it saw. The main model reads the PNGs itself before committing.
+| Role              | Model (Claude Code; each agent file carries its model per harness)                  | Owns                                                                                                                                                                                               | Never                                                                                                                         |
+| ----------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| **Orchestrator**  | Opus (the default session driver; whichever model drives a session takes this role) | Scope, design, the spec, **every judgment call** within the owner's rulings, line-by-line review of each sub-agent's diff and of the finished branch, the orchestrator test, commits, push, the PR | Implements beyond docs, specs and trivial edits; drives the app by hand; decides a genuine product fork (that is the owner's) |
+| **Reader**        | Sonnet                                                                              | Collecting evidence — quotes with `path:line`, diffs, changelogs, logs, test counts                                                                                                                | Decides what the evidence means                                                                                               |
+| **Implementer**   | Sonnet                                                                              | Code against the written spec, and the developer test                                                                                                                                              | Commits, `git add`s, branches, installs dependencies, self-certifies                                                          |
+| **Verifier**      | Sonnet, a **separate** agent (fresh context, never the implementer)                 | The real-app drive (`verifier-electron` skill / `scripts/app-shot.mjs`, DOM assertions by `data-testid` first — ADR-027 — then screenshots) or a gated smoke for infra                             | Edits source, commits, certifies                                                                                              |
+| **Consultant**    | Fable                                                                               | Advice on complicated designs or designs with a large blast radius, before implementation                                                                                                          | Is overruled silently                                                                                                         |
+| **Exit reviewer** | Fable                                                                               | The final check and code review of the open PR                                                                                                                                                     | Merges — the owner does                                                                                                       |
 
-### The loop
+**Consult Fable** when a change alters a shared seam (session layer, IPC, persistence, sync), credentials
+or the security model, the build/install pipeline or CI, an engine's wire contract, or this workflow; or
+is hard to reverse; or the orchestrator is unsure between designs.
 
-1. **Scope & de-risk.** Read the relevant foundation doc(s) + ADR(s); recon the current code
-   (grep/read) to ground the change and gauge blast radius; **probe external/native dependencies
-   first** (the opencode binary, the cli.js wire, the DB ABI) — don't design around assumptions.
-2. **Decide the forks with the user.** For genuine forks (depth, behavior-preserving vs
-   structure-ready, library choice) use `AskUserQuestion` with a clear recommendation. Don't re-ask
-   settled things. The user has consistently chosen the fuller, structure-ready option.
-3. **Write a kickoff spec**: scope decisions with the chosen forks, a precise file/seam map,
-   verified facts so the agent doesn't re-discover, an explicit out-of-scope list, step-by-step,
-   verify gates, gotchas, a suggested commit message.
-4. **Dispatch the implementer selected by the driver:** Fable uses Opus (`model: opus`); GPT-6 uses GPT-5.6 Sol (explicit model `gpt-5.6-sol`, or the tool's equivalent identifier)
-   pointed at the spec, with the standing constraints (no commit / no branch / no `bun install`).
-5. **Review every single line** of the agent's diff (`git diff <base>`). Read the actual code, not the
-   agent's summary. Run independent checks (re-run gates, grep, probe the wire). Hunt subtle bugs.
-   **Verify the agent's tests actually test what they claim** — make a guard test prove it fails
-   against the pre-fix code.
-6. **Send fixes back** via `SendMessage` to the agent's id (it resumes with context). Categorize:
-   required / minor / accept-with-note. Re-review the fixes. Iterate until clean (1–3 rounds typical).
-7. **Verify against the real dev build.** All gates pass:
-   `bun run typecheck && bun run test && bun run test:ci && bun run lint && bun run build`
-   (0 lint errors; the handful of pre-existing `exhaustive-deps` warnings are OK). Then, for any
-   UI/behavior change, **dispatch a separate verifier using the same pairing (Fable → Opus; GPT-6 → GPT-5.6 Sol)** (since 2026-09-16; before that the main model
-   drove the app itself) with a verification brief: which build to run, the exact user-visible claims
-   to check, the `data-testid`s to assert, and the screenshots to capture. The verifier drives the
-   real Electron app via the `verifier-electron` skill (`scripts/app-shot.mjs`), asserts the live DOM
-   **before** reading any PNG, and reports back the assertions with their output plus the screenshot
-   paths. **The main model then reads every screenshot itself** and checks each claim in the brief
-   against what the PNG shows — the verifier's summary is not the proof, the PNGs are. A screenshot
-   that does not show the claim sends the item back to the implementer, not to the verifier.
-   Headless/infra changes get a gated or integration smoke instead. Tests passing is necessary but
-   not sufficient — confirm it works in the actual app.
-8. **Commit + push** — one commit per item, after review and real-build verification are both clean.
-   Stage **precisely** (never blind `git add -A` — agents and verifiers leave debris scripts);
-   descriptive multi-paragraph message (subject + body); **no AI attribution / no Co-Authored-By.**
-9. **Update memory** — record the result, capture any new gotcha, then `AskUserQuestion`
-   for the next step.
+**Disagreeing with Fable.** The orchestrator accepts a finding or argues it with Fable, with evidence. A
+disagreement that survives goes to the owner, who is the final judge. No Fable finding is dropped
+silently.
 
-**Cadence:** scope → forks → spec → dispatch → review↔fix loop → verify (gates + verifier's real-app
-drive + the main model's proof review) → commit+push → update. The implementing agent never commits;
-the main model commits only after the review loop and the real-build verification are both clean.
+**Gates, in order:** developer test (implementer) → verifier (separate agent) → orchestrator test and
+per-slice review → overall review of the branch → push + PR → CI → Fable exit review → the owner merges.
+CI runs on pull requests only (`.github/workflows/ci.yml`), so a change that skips the PR skips CI.
 
-**What the main model does, and only that (Daniel, 2026-09-16; reaffirmed 2026-09-17):** research, write the spec, delegate
-the build, review the code, delegate the end-to-end verification, review the proof, commit. It does
-not implement (beyond docs, specs and trivial edits) and it does not drive the app by hand any more:
-the verifier drives, the main model judges the screenshots.
+**Handoff docs.** Long arcs keep an untracked `docs/<arc>-handoff.md` with a RESUME HERE block, current
+after every slice; every instruction to an agent goes into it, never only into a message.
 
-### Delegated testing and the fresh reviewer (Daniel, 2026-09-21)
+### This repository's gates
 
-Both rules come from the metering arc (ADR-071), where one orchestrator session ran more than twenty
-slices and its context was the scarce resource.
+- `scripts/gates.sh` — typecheck, `eslint --cache`, `bun run test` (retried once for the known vitest
+  fork-pool teardown crash). It exists because `bun run test 2>&1 | grep … && git commit` takes grep's
+  exit code: **never pipe a gate into a filter before acting on its result.** The orchestrator runs it
+  itself before recording "gates green" anywhere; a tree was once handed over as green with five
+  typecheck errors in it.
+- Add `bun run test:ci` (the git project) after touching git-service or worktree code, `bun run build`
+  for anything the packaged app runs, and `bun run format:check` (CI enforces it).
+- `bun run test` includes the `browser` project, which needs Playwright's Chromium
+  (`bunx playwright install --only-shell chromium`).
+- Engine work adds that engine's gated suite (`docs/testing-strategy.md`); a suite that only skipped has
+  not passed.
 
-- **Gates and guard checks may go to the delegate** (Opus for Fable; GPT-5.6 Sol for GPT-6): the
-  full gate run of step 7, and step 5's proof that a new test fails against the pre-fix code. The
-  delegate reports exact command output, not a verdict. The main model still runs `bun run typecheck`
-  itself before it records "gates green" anywhere, and re-runs at least one guard check per slice. A
-  tree was once handed over as green with five typecheck errors in it.
-- **A diff the main model cannot hold gets a fresh reviewer before the commit.** Step 5 has no
-  exemption for context pressure. When the diff is too large to read in full (about 20 files was the
-  threshold in practice), a fresh agent of the delegate model, with no part in the implementation,
-  reads it line by line against a written checklist and reports findings. The main model reads every
-  finding and every hunk it flags, then rules. In that arc the fresh reviewer found defects in three
-  slices that the implementer and the main model had both missed: a rekey that skipped a column, a
-  bucket rule that understated partly-billed hours, and an unguarded token refresh that two
-  overlapping reads could replay.
-- **Long arcs keep a handoff document** current after every slice, and every pending instruction to
-  an agent goes into the written spec, never only into a `SendMessage`. A session can end while an
-  agent is mid-task, and the spec is what the next session resumes from.
+### This repository's additions to the agents' constraints
 
-### Parallelism
+The role agents carry the generic constraints. The repository's own additions are in the "How work is done
+here" section of `CLAUDE.md`, which Claude Code and pi load for every agent (opencode loads only `AGENTS.md`:
+until ADR-103 covers it, the orchestrator appends that section to briefs for opencode agents): format with `bunx prettier --write <files you touched>`
+(`bun run format` is the repo-wide one), never kill `bun-claude` by process name (it also runs the agent sessions),
+and `scripts/gates.sh` is the commit gate. Keep that section free of the names of the models and harnesses
+that run the agents: every agent reads it.
 
-Independent slices may be dispatched as **concurrent** implementer agents (one per area), but each diff is
-reviewed on its own and the gates run on the combined tree before any commit. Parallel dispatch never
-relaxes the review bar.
+### Rules for all work in this repository
+
+- **Live evidence over source reading.** A claim about how an engine, a binary or the app behaves is
+  settled by probing the real thing; source reading finds candidates, the probe decides.
+- **Real-provider testing.** Real model calls only on entry-level or free models (verify a "free" model
+  is free before using it); a failure is reported, never retried on a bigger model. Which providers and
+  accounts may be used is the owner's call and is never written into this public repository.
+  Credentials are read by a script from ClaudeUI's own store, never echoed and never refreshed by a
+  test. The owner's real profile only with explicit permission; otherwise an isolated home
+  (HOME/USERPROFILE/APPDATA and the engine's own directory variable), with a sha256 of any real
+  credential file taken before and after.
+- **One worktree per arc** (`.claude/worktrees/<name>`); never switch branches in the main checkout,
+  which other sessions and the owner's builds use. A fresh worktree has no `vendor/<engine>-src`; read
+  the main checkout's.
+- **Settled rulings stay settled.** Before reporting behaviour as a bug, check the relevant ADR and
+  handoff docs: several reported "bugs" were documented decisions.
+- **Report the gaps.** Lead with the answer; name every gate that did not run, every skip, every
+  platform not exercised.
+- **Unattended runs delete nothing** — a delete can wait hours on a permission prompt nobody sees.
+- **Engine bumps** follow the `bump-harness` skill (`.claude/skills/bump-harness/`).
 
 ### Standing constraints (they have bitten us)
 
-- **NEVER `bun install` / `bun add` / `bun remove` casually.** bun's postinstall leaves
-  `better-sqlite3` **Node-ABI**, which crashes the Electron app on boot (`ERR_DLOPEN_FAILED`). After
-  any dep change run **`bun run rebuild:native`** (`electron-builder install-app-deps`, rebuilds to
-  the Electron ABI).
-- **Dual-ABI testing.** vitest runs in plain Node and can't load the Electron-ABI `better-sqlite3`,
-  so `vitest.config.ts` aliases it → `src/test/stubs/better-sqlite3-stub.ts` (a `node:sqlite`
-  adapter). DB-touching code is tested through that. Never import `better-sqlite3` from
-  renderer/shared — main process only.
-- **Don't break Claude.** Claude is the daily driver and the live login path (the user is actively
-  logged in — an auth-detection bug = lockout). Every change touching shared seams must be confirmed
-  behavior-preserving for Claude via the real-app drive.
-- **opencode specifics.** Binary (~165 MB) lives in ClaudeUI's managed store
-  (`~/.claude/ui/harnesses/opencode/<version>/`), installed by `ensure-opencode` / the Installed
-  page and never packaged (ADR-082 §8). HTTP **Basic auth**
-  (`opencode:<generated-password>`). Target the **v1** API (`/session`, `/event`, `/auth/{id}`) —
-  NOT the `/api/*` v2 family. The shared `/event` stream multiplexes all sessions → filter by
-  `properties.sessionID`. Binary/plugin locators use `app.getAppPath()`, not `__dirname`.
-- **cli.js wire.** For any cli.js-integration question, consult `docs/protocol-cc/` first, then probe
-  the real `bun-claude` binary — cheaper and more reliable than reading minified cli.js. Use
-  `/bundle-analyzer` to navigate the bundle.
-- **pi wire (ADR-035).** For any pi-integration question, consult `docs/protocol-pi/` first (the
-  verified notes) + the version-exact docs at the pinned tag
-  (`vendor/pi-src/packages/coding-agent/docs/*.md`), then probe the real pi binary (the managed
-  store's `~/.claude/ui/harnesses/pi/<version>/pi`, ADR-082 §8). For source-level questions, read
-  the upstream checkout `vendor/pi-src` at the tested tag (CLAUDE.md's rule for engine sources).
-  The bridge extension (`pi-bridge-source.ts`) must stay
-  **import-free** and **fail-closed**; product code writes only `os.tmpdir()` (the bridge file) +
-  `PiAuthProvider`'s documented `~/.pi/agent/auth.json` api_key merge — never else under `~/.pi/**`.
-- **Commits.** One per item, no AI attribution, multi-paragraph body, stage precisely.
-- **Pre-existing lint.** 3 `exhaustive-deps` warnings (Sidebar / ExitPlanModeCard / ReviewBar) —
-  leave them.
+- **Implementers never run `bun install` / `bun add` / `bun remove`.** `postinstall`
+  (`scripts/build.mjs postinstall`) downloads Electron, rebuilds node-pty for the Electron ABI
+  (`electron-builder install-app-deps`), rebuilds the patched Claude Code binary and installs the tested
+  opencode, pi and Codex into the managed store — side effects an implementer must not trigger. (The old
+  "bun leaves a Node-ABI better-sqlite3" trap is gone: better-sqlite3 13 ships prebuilt binaries that load
+  under both Node and Electron.)
+- **Database code is tested through the driver seam.** vitest aliases `better-sqlite3` to a
+  `node:sqlite`-backed stub (`vitest.config.ts`); only the driver adapter
+  (`src/core/services/sqlite/better-sqlite3-driver.ts`) imports `better-sqlite3`.
+- **Don't break Claude.** Claude is the daily driver and the live login path — an auth-detection bug is a
+  lockout. Every change touching shared seams is confirmed behaviour-preserving for Claude in the
+  verifier's real-app drive.
+- **opencode (2.x only, ADR-097).** The binary lives in ClaudeUI's managed store
+  (`~/.claude/ui/harnesses/opencode/<version>/`) and is never packaged (ADR-082 §8). Every route is under
+  `/api/*`; one SSE feed per server (`/api/event`) carries every session — filter by the event's session
+  id. HTTP Basic auth, password via `OPENCODE_PASSWORD`. Wire facts: `docs/protocol-opencode/`.
+- **cli.js wire.** For any cli.js question consult `docs/protocol-cc/` first, then probe the real
+  `bun-claude` binary — cheaper and more reliable than reading minified cli.js. Navigate the bundle with
+  the bundle-analyzer tooling, not grep over the concat.
+- **pi wire (ADR-035).** Consult `docs/protocol-pi/` and the version-exact docs at the pinned tag
+  (`vendor/pi-src/packages/coding-agent/docs/`), then probe the managed store's pi binary. The bridge
+  extension (`pi-bridge-source.ts`) stays **import-free** and **fail-closed**; its file lives under
+  `~/.claude/ui/pi-ext`. Product code writes under `~/.pi/agent/` only through its documented writers
+  (`PiAuthProvider`'s `auth.json` api_key merge, the native settings editor's `settings.json`, the shared
+  provider adapter's `models.json`).
+- **Commits.** One per item, after review and verification; stage precisely; no AI attribution, no
+  Co-Authored-By; grep the staged diff for personal identifiers.
 
 ## Consequences
 
-- **Correctness is structurally owned by review**, not by the implementer's confidence. This is the
-  single most load-bearing rule — it has caught a real bug nearly every phase.
-- A fixed, referenced loop means a fresh session (or a teammate) works the same way without re-deriving
-  it. `CLAUDE.md` points here; the standing constraints above (the dual-ABI `better-sqlite3` trap,
-  "don't break Claude", opencode/cli.js specifics) travel with the loop.
-- Slight overhead on small changes — hence the trivial-edit exemption. The bar scales with risk.
+- **Correctness is structurally owned by review**, not by the implementer's confidence — the single most
+  load-bearing rule; it has caught a real bug nearly every phase.
+- The procedure lives once, in the user-level `orchestrate` skill, and serves every project; this
+  ADR binds the roles, the gates and the repository's own rules. `CLAUDE.md` points here.
+- Fable's cost is spent where it pays: a bad large design and a bad merge are the two most expensive
+  mistakes. Small designs go straight from spec to Sonnet.
+- An agent without the user-level skill and agents (another machine, another person) still gets the roles,
+  gates and rules from this ADR and `CLAUDE.md`, but not the step-by-step procedure or the role agents.
 
 ## Alternatives considered
 
-- **Let the implementing agent self-certify** (run its own gates and call it done). Rejected: every
-  phase proved the implementer misses its own bugs and its summary overstates correctness.
-- **Main model drives the real app itself** (the workflow until 2026-09-16). Rejected by Daniel: driving
-  the app burns the orchestrator's context on harness mechanics, and the evidence it produced was
-  read by the same model that produced it. A separate verifier agent produces the screenshots; the
-  main model only has to judge them.
-- **Main model implements directly, no sub-agent.** Viable for small changes (and used for the spec/ADRs/
-  tooling themselves), but burns the orchestrator's context on mechanical edits and loses the
-  fresh-eyes review separation on larger work.
+- **Let the implementing agent self-certify.** Rejected: every phase proved the implementer misses its
+  own bugs and its summary overstates correctness.
+- **The orchestrator drives the real app itself** (until 2026-09-16). Rejected: it burns the
+  orchestrator's context on harness mechanics, and the evidence was read by the model that produced it.
+- **The orchestrator implements directly.** Viable for small changes (and used for specs, ADRs and docs),
+  but it burns the orchestrator's context on mechanical edits and loses the fresh-eyes separation.
+- **Fable orchestrates every change** (2026-07-30 to 2026-10-16). Superseded: Opus orchestrates as well
+  for most work, and Fable's review is worth more at the design and exit points than spread across every
+  step.
+- **Driver-specific pairings (GPT-6 → GPT-5.6 Sol).** Retired from this ADR with the consolidation; the agent
+  files carry any per-harness model.
+- **Keep the full step-by-step loop in this ADR.** Rejected (2026-10-16): the procedure is a common work
+  pattern across projects, so it lives in a user-level skill; a copy here would drift.
