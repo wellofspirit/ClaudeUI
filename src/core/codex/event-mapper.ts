@@ -8,6 +8,7 @@ import type {
 } from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
 import { blobStore } from '../services/blob-store'
+import { wrappedUserRowAsNote } from '../services/agent-note'
 import type { PatchChangeKind } from './protocol/v2/PatchChangeKind'
 import type { ThreadItem } from './protocol/v2/ThreadItem'
 import type { SubAgentActivityKind } from './protocol/v2/SubAgentActivityKind'
@@ -116,7 +117,13 @@ export function mapCodexItem(
   turnId: string,
   item: ThreadItem,
   completed: boolean,
-  timestamp: number
+  timestamp: number,
+  /**
+   * Is this `clientId` one ClaudeUI minted for a session message? The LIVE path
+   * passes it, so only those user items become notes (a user can type the
+   * wrapper text). The cold history has no markers and omits it: text decides.
+   */
+  isDeliveredClientId?: (clientId: string | null | undefined) => boolean
 ): CodexMappedEvent[] {
   const id = codexItemId(threadId, turnId, item.id)
   const message = (
@@ -144,21 +151,25 @@ export function mapCodexItem(
       const text = unbold((item.summary.length ? item.summary : item.content).join('\n\n'))
       return text.length ? [message([{ type: 'thinking', text }])] : []
     }
-    case 'userMessage':
-      return completed
-        ? [
-            message(
-              item.content.flatMap((input): ContentBlock[] =>
-                input.type === 'text'
-                  ? [{ type: 'text', text: input.text }]
-                  : input.type === 'image'
-                    ? codexImage('url' in input ? input.url : '')
-                    : []
-              ),
-              'user'
-            )
-          ]
-        : []
+    case 'userMessage': {
+      if (!completed) return []
+      const row = message(
+        item.content.flatMap((input): ContentBlock[] =>
+          input.type === 'text'
+            ? [{ type: 'text', text: input.text }]
+            : input.type === 'image'
+              ? codexImage('url' in input ? input.url : '')
+              : []
+        ),
+        'user'
+      )
+      // A session message or agent note ClaudeUI delivered as a plain prompt:
+      // its native user item is a note (the core-minted row it would replace
+      // never existed — slice 1a), on this live path and in the cold history.
+      const ours = !isDeliveredClientId || isDeliveredClientId(item.clientId)
+      const note = ours && row.kind === 'message' ? wrappedUserRowAsNote(row.message) : null
+      return [note ? { kind: 'message', message: note } : row]
+    }
     case 'commandExecution': {
       const outputs: CodexMappedEvent[] = [
         message([

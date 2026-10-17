@@ -197,6 +197,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: true,
     why: 'Queue of record (ADR-053): the FULL item list, applied as a replace; consumed items synthesize a `steer-<itemId>` transcript message.'
   },
+  'session:held-changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'Held inbox size (slice 1a): items from other sessions waiting for the next turn of this session. A replace of one number, so a client that joins late reads it from the snapshot and an indicator never counts events.'
+  },
   'session:approval-request': {
     cls: 'replicated',
     ring: true,

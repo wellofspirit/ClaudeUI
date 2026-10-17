@@ -297,6 +297,11 @@ export const MessageBubble = memo(function MessageBubble({
           className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6]"
           data-markdown-source={userMarkdown || undefined}
         >
+          {message.hostInstruction && (
+            <div data-testid="MessageBubble.hostLabel" className="text-[11px] text-text-muted mb-1">
+              Sent by ClaudeUI for you
+            </div>
+          )}
           {hasAttachments && (
             <div className="flex gap-2 flex-wrap mb-2">
               {imageBlocks.map((block, i) => (

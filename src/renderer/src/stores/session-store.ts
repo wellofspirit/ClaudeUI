@@ -1100,6 +1100,9 @@ export interface PerSessionState {
   /** Queue of record, replicated from main (ADR-053). Only `queued` items live
    *  here — a consumed item has already become a chat message. */
   queuedItems: QueuedItem[]
+  /** Items from other sessions or agents held for this session's next turn
+   *  (slice 1a), replicated from main — `0` when none. */
+  heldCount: number
   draftText: string
   /** Per-session unsent attachments (mirrors draftText). Scoped so a file added
    *  in session A can never be sent from B, and is restored on return to A. */
@@ -1196,6 +1199,7 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   statusLine: null,
   metering: null,
   queuedItems: [],
+  heldCount: 0,
   draftText: '',
   draftAttachments: [],
   selectedModel: 'default',

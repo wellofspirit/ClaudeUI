@@ -4,7 +4,7 @@ import { join, delimiter } from 'node:path'
 import { homedir } from 'node:os'
 import { v4 as uuid } from 'uuid'
 import { BaseSession } from '../providers/BaseSession'
-import type { EngineSpawnOptions } from '../providers/ISession'
+import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import { resolvePiCapabilities } from '../../shared/model-capabilities'
 import { voicePackPlatformKey } from '../../shared/voice-pack'
@@ -75,6 +75,8 @@ import {
 import { loadPiAgentRegistry, type PiAgentRegistry } from './pi-agent-registry'
 import type { SpawnPiChildFn } from './pi-child-runner'
 import { deliveryCommand, isReservedPiCommandText, type PiAgentDelivery } from './pi-delivery'
+import { sessionMessageNoteTitle } from '../services/agent-note'
+import { buildSessionMessageWrapper } from '../../shared/session-message-wrapper'
 import { narrowMode, PiSubagentManager, type PiChildScope } from './pi-subagents'
 import type {
   GateDecision,
@@ -1533,7 +1535,9 @@ export class PiSession extends BaseSession {
    */
   deliverAgentMessage(payload: PiAgentDelivery): void {
     this.deliveryChain = this.deliveryChain
-      .then(() => this.sendDelivery(payload))
+      .then(async () => {
+        await this.sendDelivery(payload)
+      })
       .catch((err) => {
         logger.warn(
           'PiSession',
@@ -1542,13 +1546,19 @@ export class PiSession extends BaseSession {
       })
   }
 
-  private async sendDelivery(payload: PiAgentDelivery): Promise<void> {
+  /**
+   * What became of one delivery: `woke` (pi was idle and a turn began), `appended`
+   * (a running turn steers it, or an idle session just stores it) or `refused`
+   * (no process, or pi did not accept the command). Only
+   * {@link deliverNonUser} reads it.
+   */
+  private async sendDelivery(payload: PiAgentDelivery): Promise<'woke' | 'appended' | 'refused'> {
     const ids = `delivery ${payload.deliveryId} (agent ${payload.details.agentId})`
     // No process: its children are already gone with it (cancel/exit dispose
     // them), and respawning would open a fresh pi session. Dropped.
     if (!this.client || this._cancelled) {
       logger.info('PiSession', `${ids} dropped: the session has no pi process`)
-      return
+      return 'refused'
     }
     // Fact S8: a user prompt whose ack is not in yet may still be in pi's
     // pre-run awaits; once its ack is in, a delivery steers it.
@@ -1556,7 +1566,7 @@ export class PiSession extends BaseSession {
     const client = this.client
     if (!client || this._cancelled) {
       logger.info('PiSession', `${ids} dropped: the session has no pi process`)
-      return
+      return 'refused'
     }
     const waking = payload.wake && !this.isProcessing
     if (waking) {
@@ -1574,9 +1584,52 @@ export class PiSession extends BaseSession {
     } catch {
       ok = false
     }
-    if (ok) return
+    if (ok) return waking ? 'woke' : 'appended'
     logger.warn('PiSession', `${ids} was not accepted by pi`)
     if (waking && this.wakePending) this.undoWake()
+    return 'refused'
+  }
+
+  /** The pi process is up: a message does not respawn one. */
+  isEngineLive(): boolean {
+    return !!this.client && !this._cancelled
+  }
+
+  /**
+   * Slice 1a: a message from another session or an agent, through the same
+   * `/cui-deliver` path as every other agent-authored text (the marking rule,
+   * pi-delivery.ts). The row arrives as pi's own `custom` message, so nothing is
+   * recorded here. Resolves once pi has taken (or refused) the command, so the
+   * caller's next prompt sees `willQueue` already true when this woke the session.
+   */
+  async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
+    const payload: PiAgentDelivery = {
+      v: 1,
+      deliveryId: uuid(),
+      kind: 'session-message',
+      text: buildSessionMessageWrapper(item.from, item.text),
+      wake: item.wake || item.origin === 'session-message',
+      title: sessionMessageNoteTitle(item.from.title),
+      details: {
+        agentId: item.from.key,
+        toolUseId: '',
+        from: item.from.title,
+        fromId: item.from.key
+      }
+    }
+    let result: 'woke' | 'appended' | 'refused' = 'refused'
+    const delivered = this.deliveryChain.then(async () => {
+      result = await this.sendDelivery(payload)
+    })
+    this.deliveryChain = delivered.catch((err) => {
+      logger.warn(
+        'PiSession',
+        `delivery ${payload.deliveryId} failed: ${err instanceof Error ? err.constructor.name : 'Error'}`
+      )
+    })
+    await this.deliveryChain
+    if (result === 'refused') return 'unavailable'
+    return result === 'woke' ? 'started' : 'queued'
   }
 
   /** A woken delivery will start no run after all: back to idle (M-2). */

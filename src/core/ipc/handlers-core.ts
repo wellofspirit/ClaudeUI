@@ -20,7 +20,8 @@ import type {
   EngineId,
   JudgeModelSupport,
   ListPlacesResult,
-  PermissionScope
+  PermissionScope,
+  PromptOrigin
 } from '../../shared/types'
 import {
   saveSessionConfig,
@@ -46,6 +47,7 @@ import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/cla
 import type { ISession } from '../providers/ISession'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
 import { deleteSessionMeta, getSessionMeta } from '../services/db'
+import { flushHeld, hasHeld } from '../services/session-delivery'
 import { describeJudgeModels } from '../automode/judge-route'
 
 // ---------------------------------------------------------------------------
@@ -126,13 +128,26 @@ export function sendPrompt(
   manager: SessionManager,
   routingId: string,
   prompt: string,
-  attachments?: AttachmentUpload[]
+  attachments?: AttachmentUpload[],
+  options: SendPromptOptions = {}
 ): void | Promise<void> {
   const session = manager.get(routingId)
   if (!session) throw new Error(`No session for routingId: ${routingId}`)
   const seeding = syncCore.pendingSeed(routingId) ?? reseedAfterExit(session, routingId)
-  if (!seeding) return deliverPrompt(manager, routingId, prompt, attachments)
-  return seeding.then(() => deliverPrompt(manager, routingId, prompt, attachments))
+  if (!seeding) return deliverPrompt(manager, routingId, prompt, attachments, options)
+  return seeding.then(() => deliverPrompt(manager, routingId, prompt, attachments, options))
+}
+
+/**
+ * What a prompt speaks for (slice 1a). `user` is the default: text the user typed.
+ * `host-instruction` is the host acting on the user's standing setting or click
+ * (context pressure): still a user-role row, labelled "Sent by ClaudeUI for you".
+ * Both reset the session's taint and agent-turn budget — the user spoke. A message
+ * from another session or an agent is never sent here: `session-delivery` carries
+ * it as a note.
+ */
+export interface SendPromptOptions {
+  origin?: PromptOrigin
 }
 
 /**
@@ -173,23 +188,61 @@ function deliverPrompt(
   manager: SessionManager,
   routingId: string,
   prompt: string,
-  attachments?: AttachmentUpload[]
+  attachments?: AttachmentUpload[],
+  options: SendPromptOptions = {}
+): void | Promise<void> {
+  const session = manager.get(routingId)
+  if (!session) throw new Error(`No session for routingId: ${routingId}`)
+  // Items other sessions left for this one go ahead of the turn this prompt would
+  // start. The first starts it, so the prompt then queues behind it: an ordinary
+  // prompt sent to a session with a non-empty inbox lands as a queued item (queue
+  // card, then a steer row), not as an immediate turn.
+  //
+  // The taint/budget ledger is NOT reset here. The user speaking ends the "agent
+  // text since the user spoke" stretch only once the prompt starts a turn
+  // (`sendNow`, idle) or the engine takes it off the queue (`SessionQueue.
+  // onConsumed`): a prompt that merely queues behind an agent-started turn leaves
+  // that turn tainted.
+  if (!session.willQueue && hasHeld(session, routingId)) {
+    return flushHeld(manager, routingId).then(() =>
+      sendNow(manager, routingId, prompt, attachments, options)
+    )
+  }
+  return sendNow(manager, routingId, prompt, attachments, options)
+}
+
+function sendNow(
+  manager: SessionManager,
+  routingId: string,
+  prompt: string,
+  attachments: AttachmentUpload[] | undefined,
+  options: SendPromptOptions
 ): void | Promise<void> {
   const session = manager.get(routingId)
   if (!session) throw new Error(`No session for routingId: ${routingId}`)
   const refs = internAttachments(attachments)
+  const hostInstruction = options.origin === 'host-instruction'
   // Check before run() — if the session is already active this send queues.
   if (session.willQueue) {
-    session.enqueuePrompt(prompt, attachments, refs)
+    // The origin is a fourth argument only when there is one to tell.
+    if (hostInstruction) session.enqueuePrompt(prompt, attachments, refs, 'host-instruction')
+    else session.enqueuePrompt(prompt, attachments, refs)
     return
   }
+  session.originLedger?.userPrompt()
   const id = `msg-${crypto.randomUUID()}`
   if (session.engineId !== 'codex') session.run(prompt, attachments)
   emitEvent('session:user-message', [
     routingId,
     // `msg-` prefix + randomUUID mirrors what the renderer minted, so nothing
     // downstream (React keys, retraction bookkeeping) sees a new id SHAPE.
-    { id, timestamp: Date.now(), prompt, ...(refs ? { attachments: refs } : {}) }
+    {
+      id,
+      timestamp: Date.now(),
+      prompt,
+      ...(refs ? { attachments: refs } : {}),
+      ...(hostInstruction ? { origin: 'host-instruction' as const } : {})
+    }
   ])
   if (session.engineId === 'codex') return session.run(prompt, attachments, id)
 }

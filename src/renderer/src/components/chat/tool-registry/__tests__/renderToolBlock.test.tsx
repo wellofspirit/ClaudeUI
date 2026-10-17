@@ -92,6 +92,7 @@ beforeEach(() => {
         statusLine: null,
         metering: null,
         queuedItems: [],
+        heldCount: 0,
         draftText: '',
         draftAttachments: [],
         selectedModel: 'default',

@@ -194,7 +194,7 @@ export default defineConfig(
         'error',
         {
           selector:
-            "CallExpression[callee.name='updateSession'] Property[key.name=/^(cwd|messages|itemStreams|itemStreamRevision|status|pendingApprovals|todos|sentFiles|queuedItems|taskNotifications|activeTasks|taskProgressMap|subagentMessages|permissionMode|effort|thinkingMode|reasoningVariant|statusLine|metering|sdkActive|selectedEngineId|selectedModel|authRequired|worktreeInfo)$/]",
+            "CallExpression[callee.name='updateSession'] Property[key.name=/^(cwd|messages|itemStreams|itemStreamRevision|status|pendingApprovals|todos|sentFiles|queuedItems|heldCount|taskNotifications|activeTasks|taskProgressMap|subagentMessages|permissionMode|effort|thinkingMode|reasoningVariant|statusLine|metering|sdkActive|selectedEngineId|selectedModel|authRequired|worktreeInfo)$/]",
           message:
             'This per-session field is SEALED (SyncCore phase 4c): the replica fold is its ' +
             'only writer. Route the change through stores/replica.ts — the reducer branch for ' +
@@ -203,7 +203,7 @@ export default defineConfig(
         },
         {
           selector:
-            "Property[key.name='sessions'] Property[key.name=/^(cwd|messages|itemStreams|itemStreamRevision|status|pendingApprovals|todos|sentFiles|queuedItems|taskNotifications|activeTasks|taskProgressMap|subagentMessages|permissionMode|effort|thinkingMode|reasoningVariant|statusLine|metering|sdkActive|selectedEngineId|selectedModel|authRequired|worktreeInfo)$/]",
+            "Property[key.name='sessions'] Property[key.name=/^(cwd|messages|itemStreams|itemStreamRevision|status|pendingApprovals|todos|sentFiles|queuedItems|heldCount|taskNotifications|activeTasks|taskProgressMap|subagentMessages|permissionMode|effort|thinkingMode|reasoningVariant|statusLine|metering|sdkActive|selectedEngineId|selectedModel|authRequired|worktreeInfo)$/]",
           message:
             'This per-session field is SEALED (SyncCore phase 4c): the replica fold is its ' +
             'only writer. Route the change through stores/replica.ts — the reducer branch for ' +

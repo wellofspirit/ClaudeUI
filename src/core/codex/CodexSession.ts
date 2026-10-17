@@ -3,7 +3,8 @@ import path from 'node:path'
 import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import type { HostWindowHandle } from '../host'
 import { BaseSession } from '../providers/BaseSession'
-import type { EngineSpawnOptions } from '../providers/ISession'
+import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
+import { buildSessionMessageWrapper } from '../../shared/session-message-wrapper'
 import type {
   ApprovalDecision,
   FileDiff,
@@ -557,6 +558,10 @@ export class CodexSession extends BaseSession {
   private sending = false
   private interruptRequested = false
   private settingsUpdating = false
+  /** `clientUserMessageId`s of the session messages ClaudeUI sent: their native user items are notes. */
+  private readonly nonUserClientIds = new BoundedSet()
+  /** Callers of {@link deliverNonUser} waiting for a turn start or a settings update to settle. */
+  private settleWaiters: Array<() => void> = []
   private deltas = new Map<string, ChatMessage>()
   private deltaTargets = new Map<string, { target: ItemStreamTarget; turnId: string }>()
   /** Bounded: a thread can outlive thousands of turns (see {@link BoundedSet}). */
@@ -853,6 +858,60 @@ export class CodexSession extends BaseSession {
     if (this.queue.consumeById(item.itemId)) this.queue.emit()
   }
 
+  /** The app-server thread is open: a message does not reopen a closed session. */
+  isEngineLive(): boolean {
+    return !this.closed
+  }
+
+  /**
+   * Slice 1a: a message from another session or an agent, as a plain prompt
+   * whose text names its sender and says it is not the user's. Mid-turn it is
+   * `turn/steer` (never through the user queue: no queue card, no steer bubble),
+   * at idle `turn/start`. The native user item that follows is a note — see
+   * `mapCodexItem` — so no row is minted here. Anything not accepted is
+   * `unavailable` (the caller holds it); an ambiguous timeout may have landed,
+   * so it counts as queued and is never sent again.
+   */
+  async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
+    if (this.closed) return 'unavailable'
+    const text = buildSessionMessageWrapper(item.from, item.text)
+    const clientUserMessageId = `msg-${randomUUID()}`
+    this.nonUserClientIds.add(clientUserMessageId)
+    // A turn start or a settings update is in flight and there is no turn to
+    // steer yet: wait for it to settle (the turn id is known right after) rather
+    // than hold the item for a whole turn.
+    if (this.willQueue && !this.turnId) {
+      await this.untilSettled(15_000)
+      if (this.closed) return 'unavailable'
+    }
+    if (this.willQueue) {
+      const turnId = this.turnId
+      if (!this.busy || !turnId || !this.threadId) return 'unavailable'
+      try {
+        await this.wire.request('turn/steer', {
+          threadId: this.threadId,
+          expectedTurnId: turnId,
+          clientUserMessageId,
+          input: codexTurnInput(text)
+        })
+        return 'queued'
+      } catch (error) {
+        return error instanceof CodexTransportError &&
+          error.code === 'request-timeout' &&
+          error.ambiguousDelivery
+          ? 'queued'
+          : 'unavailable'
+      }
+    }
+    try {
+      await this.run(text, undefined, clientUserMessageId)
+      return 'started'
+    } catch {
+      // `run()` already surfaced the failure (and disposed if it was fatal).
+      return 'unavailable'
+    }
+  }
+
   /**
    * Ask the turn's own history whether an ambiguous steer landed. Consumes it
    * if so; otherwise parks it as unrecallable and unsent until the turn ends —
@@ -994,7 +1053,25 @@ export class CodexSession extends BaseSession {
       throw error
     } finally {
       if (prompt !== null) this.sending = false
+      this.wakeSettleWaiters()
     }
+  }
+
+  private wakeSettleWaiters(): void {
+    const waiters = this.settleWaiters
+    this.settleWaiters = []
+    for (const wake of waiters) wake()
+  }
+
+  /** Resolve once a turn start / settings update in flight has settled (or after `ms`). */
+  private untilSettled(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms)
+      this.settleWaiters.push(() => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
   }
 
   private async start(): Promise<void> {
@@ -1562,6 +1639,7 @@ export class CodexSession extends BaseSession {
         })
     } finally {
       this.settingsUpdating = false
+      this.wakeSettleWaiters()
       if (!this.closed) {
         this.status(this.busy ? 'running' : 'idle')
         if (!this.busy) this.resetInactivityTimer()
@@ -2979,7 +3057,8 @@ export class CodexSession extends BaseSession {
       turnId,
       this.withKnownAgents(item),
       completed,
-      timestamp
+      timestamp,
+      (clientId) => !!clientId && this.nonUserClientIds.has(clientId)
     ))
       if (!deferredRead || event.kind !== 'toolResult') this.dispatch(event)
     // Not awaited: the card is already on screen, the read is best-effort, and

@@ -16,8 +16,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 13 (ADR-096: registers the shared MCP catalog)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('13')
+  it('is version 14 (slice 1a: cui-deliver accepts the session-message kind)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('14')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -834,6 +834,31 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — cui-deliver command (bridge v10, ADR-08
         },
         expect.objectContaining({ options: { triggerTurn: false, deliverAs: 'steer' } })
       ])
+    })
+  })
+
+  it('accepts the session-message kind (bridge v14) and still refuses any other', async () => {
+    await withEnv({ ...BRIDGE_CREDS }, async () => {
+      const ext = runExtension()
+      const message = {
+        ...valid,
+        kind: 'session-message',
+        text: ['<session-message from="s" title="t">', 'hi', '</session-message>'].join('\n'),
+        details: { agentId: 's', toolUseId: '', from: 't', fromId: 's' }
+      }
+      await ext.commands.get('cui-deliver')!.handler(encode(message))
+      expect(ext.sendMessageCalls).toHaveLength(1)
+      expect(ext.sendMessageCalls[0]).toMatchObject({
+        message: {
+          customType: 'claudeui-agent-message',
+          details: { kind: 'session-message', deliveryId: 'd-1', from: 't', fromId: 's' }
+        },
+        options: { triggerTurn: true, deliverAs: 'steer' }
+      })
+      expect(() =>
+        ext.commands.get('cui-deliver')!.handler(encode({ ...message, kind: 'user-message' }))
+      ).toThrow('invalid delivery')
+      expect(ext.sendMessageCalls).toHaveLength(1)
     })
   })
 

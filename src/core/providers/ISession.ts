@@ -12,6 +12,35 @@ import type {
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { HostWindowHandle } from '../host'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
+import type { TurnOriginLedger } from './turn-origin-ledger'
+
+/** Where a non-user item comes from: another session's message, or an agent's note. */
+export type NonUserOrigin = 'session-message' | 'agent-note'
+
+/**
+ * One item another session or an agent puts into a session (slice 1a). Never
+ * the user's words: every engine delivers it marked as such and the transcript
+ * shows it as a note.
+ */
+export interface NonUserItem {
+  origin: NonUserOrigin
+  /** The body the model reads, unwrapped — each engine wraps it its own way. */
+  text: string
+  /** Who sent it: a stable key (a routing id) and a display name. */
+  from: { key: string; title: string }
+  /** Start a turn if the session is idle (a `session-message` always does). */
+  wake: boolean
+  /** The sender's permission class where known (recorded with a held item). */
+  senderModeClass?: 'bypass' | 'prompting'
+}
+
+/**
+ * What an engine did with a {@link NonUserItem}. `started`: the session was idle
+ * and a turn began. `queued`: it was busy and the item went into the running
+ * turn's queue. `unavailable`: the engine could not take it now (no process,
+ * a refused steer) — nothing was delivered, so the caller holds it.
+ */
+export type NonUserOutcome = 'started' | 'queued' | 'unavailable'
 
 /**
  * Engine-neutral session interface. All methods here are implemented by
@@ -82,7 +111,37 @@ export interface ISession {
    * item carries (ADR-087). `sendPrompt` interns once and passes both; a caller
    * that omits `refs` gets the uploads interned here.
    */
-  enqueuePrompt(text: string, attachments?: AttachmentUpload[], refs?: AttachmentRef[]): void
+  enqueuePrompt(
+    text: string,
+    attachments?: AttachmentUpload[],
+    refs?: AttachmentRef[],
+    origin?: 'host-instruction'
+  ): void
+
+  /**
+   * Deliver an item from another session or an agent (slice 1a): the model must
+   * read it as theirs, never the user's, ClaudeUI's judge and the engine's own
+   * classifier must not take it for consent, and it renders as a note. One
+   * adapter method per engine; the delivery rule (busy → queue, idle → wake or
+   * hold, budget) is `session-delivery`'s, not the engine's. Optional so a
+   * minimal test double need not carry it.
+   */
+  deliverNonUser?(item: NonUserItem): Promise<NonUserOutcome>
+
+  /**
+   * Is the engine process (or its connection) up right now? `session-delivery`
+   * holds a message for an idle session whose engine is gone instead of
+   * respawning it: only the user's own prompt brings a closed session back.
+   * Optional so a minimal test double need not carry it (absent = live).
+   */
+  isEngineLive?(): boolean
+
+  /**
+   * Taint and agent-turn budget (slice 1a) — read-only for the session tools
+   * (slice 1c); written by `session-delivery` and the prompt path. Implemented in
+   * BaseSession; optional so a minimal test double need not carry it.
+   */
+  readonly originLedger?: TurnOriginLedger
 
   /**
    * Take back every still-recallable queued item, oldest first. `recalled`

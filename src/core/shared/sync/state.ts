@@ -52,6 +52,8 @@ export interface CanonicalSessionState {
   sentFiles: SentFile[]
   /** Pending items only, mirroring the wire field (ADR-053). */
   queue: QueuedItem[]
+  /** Items from other sessions or agents held for this session's next turn (slice 1a). */
+  heldCount: number
   taskNotifications: TaskNotification[]
   activeTasks: Record<string, ActiveTask>
   taskProgressMap: Record<string, TaskProgress>
@@ -149,6 +151,7 @@ export function emptySession(routingId: string, cwd = ''): CanonicalSessionState
     todos: [],
     sentFiles: [],
     queue: [],
+    heldCount: 0,
     taskNotifications: [],
     activeTasks: {},
     taskProgressMap: {},
@@ -226,6 +229,7 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       todos: s.todos,
       sentFiles: s.sentFiles ?? [],
       queue: s.queue ?? [],
+      heldCount: s.heldCount ?? 0,
       taskNotifications: s.taskNotifications,
       activeTasks: s.activeTasks ?? {},
       taskProgressMap: s.taskProgressMap,
@@ -293,6 +297,7 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       todos: s.todos,
       sentFiles: s.sentFiles,
       queue: s.queue,
+      heldCount: s.heldCount,
       taskNotifications: s.taskNotifications,
       activeTasks: s.activeTasks,
       taskProgressMap: s.taskProgressMap,

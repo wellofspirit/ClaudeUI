@@ -842,6 +842,7 @@ function projectSession(
     todos: c.todos,
     sentFiles: c.sentFiles,
     queuedItems: c.queue,
+    heldCount: c.heldCount,
     taskNotifications: c.taskNotifications,
     activeTasks: c.activeTasks,
     taskProgressMap: c.taskProgressMap,

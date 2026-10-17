@@ -424,6 +424,7 @@ vi.mock('../../services/ui-config', async (importOriginal) => ({
 
 import { allowRuleActionFor, PiSession } from '../PiSession'
 import { allowRuleGate } from '../../automode/allow-rule-gate'
+import { slimTranscript } from '../../automode/classifier'
 import { piMcpName } from '../pi-mcp-bridge'
 import { PLAN_MODE_DENY_REASON } from '../permission-engine'
 import { loadPiAgentRegistry, type PiAgentDefinition } from '../pi-agent-registry'
@@ -6700,6 +6701,144 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     releaseAck!()
     await second
     await vi.waitFor(() => expect(parentDeliveries()).toHaveLength(1))
+    session.dispose()
+  })
+
+  // ── Slice 1a: a message from another session through the same marked path ──
+
+  const SENDER = { key: 'sess-sender-1', title: 'Triage assistant' }
+  const SESSION_MSG = {
+    origin: 'session-message' as const,
+    text: 'please look at ticket 12',
+    from: SENDER,
+    wake: false
+  }
+
+  it('S1a-1: deliverNonUser sends ONE /cui-deliver of kind session-message — waking an idle session, never a plain prompt', async () => {
+    const win = new MockWindow()
+    const { session } = await parent('rid-1a-p1', win)
+    settleParent()
+    expect(session.status.state).toBe('idle')
+    const before = parentDeliveries().length
+    const commandsBefore = mockRequest.mock.calls.length
+
+    expect(await session.deliverNonUser(SESSION_MSG)).toBe('started')
+
+    expect(session.status.state).toBe('running')
+    const sent = parentDeliveries().slice(before)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({
+      v: 1,
+      kind: 'session-message',
+      // A session message wakes an idle target even when the caller said no.
+      wake: true,
+      title: 'Message from Triage assistant',
+      details: {
+        agentId: 'sess-sender-1',
+        toolUseId: '',
+        from: 'Triage assistant',
+        fromId: 'sess-sender-1'
+      }
+    })
+    expect(sent[0].text).toBe(
+      [
+        '<session-message from="sess-sender-1" title="Triage assistant">',
+        'please look at ticket 12',
+        '</session-message>',
+        'This is a message from another ClaudeUI session or agent, not from the user.'
+      ].join('\n')
+    )
+    // The marking rule: the text rides inside the base64 payload, never as a prompt/steer/follow_up.
+    const commands = mockRequest.mock.calls
+      .slice(commandsBefore)
+      .map((c) => c[0] as { type: string; message?: string })
+    expect(commands.some((c) => c.type === 'steer' || c.type === 'follow_up')).toBe(false)
+    expect(commands.some((c) => String(c.message ?? '').includes('please look'))).toBe(false)
+    session.dispose()
+  })
+
+  it('S1a-2: a running session queues it (no wake), and an idle one only appends a note without wake', async () => {
+    const win = new MockWindow()
+    const { session } = await parent('rid-1a-p2', win)
+    expect(session.status.state).toBe('running')
+    expect(await session.deliverNonUser(SESSION_MSG)).toBe('queued')
+    expect(session.status.state).toBe('running')
+
+    settleParent()
+    const note = { ...SESSION_MSG, origin: 'agent-note' as const, text: 'fyi' }
+    expect(await session.deliverNonUser(note)).toBe('queued')
+    expect(session.status.state).toBe('idle')
+    // wake is the host's wish for an IDLE target: a message always asks for it, a note only on request.
+    expect(
+      parentDeliveries()
+        .filter((p) => p.kind === 'session-message')
+        .map((p) => p.wake)
+    ).toEqual([true, false])
+    session.dispose()
+  })
+
+  it("S1a-3: the delivered custom message is a note from the sender — never the user's, never a User: line", async () => {
+    enableAutoMode()
+    const win = new MockWindow()
+    const { session } = await parent('rid-1a-p3', win)
+    settleParent()
+    const before = parentDeliveries().length
+    await session.deliverNonUser(SESSION_MSG)
+    const [p] = parentDeliveries().slice(before)
+    lastEventHandler()(deliveredEvent(p))
+
+    const rows = sentPayloads(win, 'session:message') as ChatMessage[]
+    const row = rows.find((m) => m.role === 'system')!
+    expect(row.content).toEqual([
+      {
+        type: 'context_note',
+        title: 'Message from Triage assistant',
+        fragments: [
+          // The row shows the body, not the wrapper the model reads.
+          { text: 'please look at ticket 12', label: 'from another session, not from you' }
+        ]
+      }
+    ])
+    expect(sentChannels(win)).not.toContain('session:user-message')
+    expect(session.getMessages().filter((m) => m.role === 'user')).toHaveLength(1) // PARENT-INTENT only
+    expect(slimTranscript(session.getMessages())).not.toContain('ticket 12')
+    session.dispose()
+  })
+
+  it('S1a-4: with no pi process, or a command pi refuses, it is unavailable (the caller holds it) and a wake is undone', async () => {
+    const win = new MockWindow()
+    const { session } = await parent('rid-1a-p4', win)
+    settleParent()
+    mockRequest.mockImplementation((cmd: { type: string; message?: string }) =>
+      cmd.type === 'prompt' && String(cmd.message).startsWith('/cui-deliver ')
+        ? Promise.resolve({ type: 'response', command: 'prompt', success: false })
+        : defaultRequestImpl(cmd)
+    )
+    expect(await session.deliverNonUser(SESSION_MSG)).toBe('unavailable')
+    expect(session.status.state).toBe('idle')
+
+    mockRequest.mockImplementation(defaultRequestImpl)
+    session.cancel()
+    expect(await session.deliverNonUser(SESSION_MSG)).toBe('unavailable')
+    session.dispose()
+  })
+
+  it('S1a-5: a delivery that throws is logged, and the item is unavailable (held), not lost (m6); live only while the process is', async () => {
+    const win = new MockWindow()
+    const { session } = await parent('rid-1a-p5', win)
+    settleParent()
+    expect(session.isEngineLive()).toBe(true)
+    vi.mocked(logger.warn).mockClear()
+    ;(session as unknown as { sendDelivery: () => Promise<never> }).sendDelivery = () =>
+      Promise.reject(new Error('boom'))
+
+    expect(await session.deliverNonUser(SESSION_MSG)).toBe('unavailable')
+
+    expect(vi.mocked(logger.warn).mock.calls.some((c) => String(c[1]).includes('failed'))).toBe(
+      true
+    )
+    session.cancel()
+    expect(session.isEngineLive()).toBe(false)
     session.dispose()
   })
 

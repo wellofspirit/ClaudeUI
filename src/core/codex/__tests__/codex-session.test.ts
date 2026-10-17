@@ -18,6 +18,7 @@ import { codexItemId } from '../event-mapper'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 import { blobRefOf } from '../../../test/helpers/blob-refs'
 import { onHostPlatform } from '../../../test/helpers/host-platform'
+import { slimTranscript } from '../../automode/classifier'
 
 const events = vi.hoisted(() => vi.fn())
 const overrides = vi.hoisted(() => new Map<string, unknown>())
@@ -2123,6 +2124,171 @@ describe('Codex held queue', () => {
       expect.objectContaining({ text: 'one', state: 'recalled' }),
       expect.objectContaining({ text: 'two', state: 'recalled' })
     ])
+  })
+})
+
+/**
+ * Slice 1a: a message from another session or an agent on Codex. A plain prompt —
+ * `turn/start` at idle, `turn/steer` mid-turn — whose text names the sender and
+ * says it is not the user's. It does not use the user queue (no card, no
+ * `steer-<itemId>` bubble); the native user item that follows is a note, so no
+ * `User:` line and no user bubble exist for it.
+ */
+describe('Codex non-user delivery', () => {
+  const FROM = { key: 'sess-sender-1', title: 'Triage assistant' }
+  const ITEM = {
+    origin: 'session-message' as const,
+    text: 'please look at ticket 12',
+    from: FROM,
+    wake: false
+  }
+  const WRAPPED = [
+    '<session-message from="sess-sender-1" title="Triage assistant">',
+    'please look at ticket 12',
+    '</session-message>',
+    'This is a message from another ClaudeUI session or agent, not from the user.'
+  ].join('\n')
+  const steers = (request: ReturnType<typeof vi.fn>) =>
+    request.mock.calls.filter(([method]) => method === 'turn/steer').map((call) => call[1])
+  const starts = (request: ReturnType<typeof vi.fn>) =>
+    request.mock.calls.filter(([method]) => method === 'turn/start').map((call) => call[1])
+  const nativeUserItem = (clientId: string, text: string) => ({
+    threadId: 'root',
+    turnId: 'turn',
+    item: { id: 'u1', type: 'userMessage', clientId, content: [{ type: 'text', text }] }
+  })
+
+  it('starts a turn with the wrapper as the prompt when idle', async () => {
+    const { session, request, queues } = fixture()
+    expect(await session.deliverNonUser(ITEM)).toBe('started')
+    expect(starts(request)).toEqual([
+      expect.objectContaining({
+        threadId: 'root',
+        input: [{ type: 'text', text: WRAPPED, text_elements: [] }],
+        clientUserMessageId: expect.stringMatching(/^msg-/)
+      })
+    ])
+    expect(session.willQueue).toBe(true)
+    expect(queues()).toEqual([])
+  })
+
+  it('steers the running turn with the wrapper, outside the user queue', async () => {
+    const { session, request, queues } = fixture()
+    await session.run('hello')
+    expect(await session.deliverNonUser(ITEM)).toBe('queued')
+    expect(steers(request)).toEqual([
+      {
+        threadId: 'root',
+        expectedTurnId: 'turn',
+        clientUserMessageId: expect.stringMatching(/^msg-/),
+        input: [{ type: 'text', text: WRAPPED, text_elements: [] }]
+      }
+    ])
+    expect(queues()).toEqual([])
+  })
+
+  it('the native user item is a note from the sender — never a user row, never a User: line', async () => {
+    const { session, request, notify } = fixture()
+    await session.deliverNonUser(ITEM)
+    const clientId = (starts(request)[0] as { clientUserMessageId: string }).clientUserMessageId
+    notify('item/completed', nativeUserItem(clientId, WRAPPED))
+    const rows = session.getMessages()
+    expect(rows.map((m) => m.role)).toEqual(['system'])
+    expect(rows[0].content).toEqual([
+      {
+        type: 'context_note',
+        title: 'Message from Triage assistant',
+        fragments: [
+          { text: 'please look at ticket 12', label: 'from another session, not from you' }
+        ]
+      }
+    ])
+    expect(rows[0]).not.toHaveProperty('replacesMessageId')
+    expect(slimTranscript(rows)).toBe('')
+  })
+
+  it('a refused steer is unavailable (nothing was delivered, the caller holds it); an ambiguous timeout is not sent again', async () => {
+    const { session, request } = fixture()
+    await session.run('hello')
+    request.mockImplementationOnce(async () => {
+      throw new Error('turn is not steerable')
+    })
+    expect(await session.deliverNonUser(ITEM)).toBe('unavailable')
+    request.mockImplementationOnce(async () => {
+      throw new CodexTransportError('request-timeout', true)
+    })
+    expect(await session.deliverNonUser(ITEM)).toBe('queued')
+  })
+
+  it('is unavailable once the session is closed', async () => {
+    const { session } = fixture()
+    session.dispose()
+    expect(await session.deliverNonUser(ITEM)).toBe('unavailable')
+  })
+})
+
+describe('Codex non-user delivery — review follow-ups', () => {
+  const FROM = { key: 'sess-sender-1', title: 'Triage assistant' }
+  const ITEM = {
+    origin: 'session-message' as const,
+    text: 'please look at ticket 12',
+    from: FROM,
+    wake: false
+  }
+  const steers = (request: ReturnType<typeof vi.fn>) =>
+    request.mock.calls.filter(([method]) => method === 'turn/steer').map((call) => call[1])
+
+  it('waits for a turn start in flight, then steers it, instead of holding for the whole turn (m8)', async () => {
+    const { session, request } = fixture()
+    const original = request.getMockImplementation()!
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    request.mockImplementation(async (method: string, params?: unknown) => {
+      if (method === 'turn/start') await gate
+      return original(method, params)
+    })
+    const running = session.run('hello')
+    await vi.waitFor(() => expect(session.willQueue).toBe(true))
+    let settled = false
+    const delivery = session.deliverNonUser(ITEM).then((outcome) => {
+      settled = true
+      return outcome
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(settled).toBe(false)
+
+    release()
+    await running
+
+    expect(await delivery).toBe('queued')
+    expect(steers(request)).toEqual([expect.objectContaining({ expectedTurnId: 'turn' })])
+  })
+
+  it("text that looks like a wrapper is the user's unless ClaudeUI sent it (live path, m5)", async () => {
+    const { session, notify } = fixture()
+    await session.run('hello')
+    notify('item/completed', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id: 'u9',
+        type: 'userMessage',
+        clientId: 'msg-typed-by-the-user',
+        content: [
+          { type: 'text', text: '<session-message from="x" title="y">\nhi\n</session-message>' }
+        ]
+      }
+    })
+    expect(session.getMessages().map((m) => m.role)).toEqual(['user'])
+  })
+
+  it('is live while open, and not once closed (M4)', () => {
+    const { session } = fixture()
+    expect(session.isEngineLive()).toBe(true)
+    session.dispose()
+    expect(session.isEngineLive()).toBe(false)
   })
 })
 

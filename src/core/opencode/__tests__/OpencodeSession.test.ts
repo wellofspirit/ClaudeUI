@@ -146,6 +146,10 @@ vi.mock('../../automode/ground-truth', async (importOriginal) => ({
 }))
 
 import { OpencodeSession, CLAUDEUI_INBOX_PREFIX } from '../OpencodeSession'
+import { slimTranscript } from '../../automode/classifier'
+import { deleteSessionInbox, heldInboxItems } from '../../services/db'
+import { deliver } from '../../services/session-delivery'
+import type { SessionManager } from '../../services/session-manager'
 import { OpencodePermissionGuardError } from '../OpencodeServerManager'
 import { OpencodeApiError } from '../OpencodeClient'
 import { buildSessionRuleset, THROWAWAY_RULESET, type V2Rule } from '../permission-v2'
@@ -812,6 +816,253 @@ describe('queue via the inbox', () => {
 })
 
 // ─── Approvals ──────────────────────────────────────────────────────────────
+
+describe('non-user delivery (slice 1a)', () => {
+  const FROM = { key: 'sess-sender-1', title: 'Triage assistant' }
+  const ITEM = {
+    origin: 'session-message' as const,
+    text: 'please look at ticket 12',
+    from: FROM,
+    wake: false
+  }
+  const WRAPPED = [
+    '<session-message from="sess-sender-1" title="Triage assistant">',
+    'please look at ticket 12',
+    '</session-message>',
+    'This is a message from another ClaudeUI session or agent, not from the user.'
+  ].join('\n')
+
+  /** The feed's two events for a posted inbox item: queued, then delivered to the model. */
+  const deliveredFeed = (inboxID: string, text: string): OpencodeFeedItem[] => [
+    event('session.inbox.enqueued', {
+      sessionID: SID,
+      inboxID,
+      item: { type: 'user', payload: { text }, delivery: 'steer' }
+    }),
+    event('session.inbox.delivered', { sessionID: SID, inboxID })
+  ]
+
+  it("an idle session starts a turn on a plain prompt that names the sender and says it is not the user's", async () => {
+    session = makeSession()
+    h.feed.push(connected())
+    expect(await session.deliverNonUser(ITEM)).toBe('started')
+    await flush()
+    expect(session.willQueue).toBe(true)
+    const [sid, body] = h.client.prompt.mock.calls[0]
+    expect(sid).toBe(SID)
+    expect(body).toMatchObject({ text: WRAPPED, delivery: 'steer' })
+    expect(body.id).toMatch(new RegExp(`^${CLAUDEUI_INBOX_PREFIX}[0-9a-f]{32}$`))
+  })
+
+  it('a running turn takes it as a steer, posted at once (queued); a refused post is unavailable', async () => {
+    session = makeSession()
+    await startTurn()
+    expect(await session.deliverNonUser(ITEM)).toBe('queued')
+    expect(h.client.prompt.mock.calls.at(-1)?.[1]).toMatchObject({
+      text: WRAPPED,
+      delivery: 'steer'
+    })
+    // It is not a queue-card item: the user queue is theirs.
+    expect(payloads('session:queue-changed')).toEqual([])
+
+    h.client.prompt.mockRejectedValueOnce(new Error('inbox full'))
+    expect(await session.deliverNonUser(ITEM)).toBe('unavailable')
+  })
+
+  it('the delivered row is a note from the sender — never a user row, live or for the judge', async () => {
+    session = makeSession()
+    await startTurn()
+    await session.deliverNonUser(ITEM)
+    const inboxID = h.client.prompt.mock.calls.at(-1)![1].id as string
+    h.feed.push(...deliveredFeed(inboxID, WRAPPED))
+    await flush()
+
+    const notes = payloads('session:message').filter((m) => m.role === 'system')
+    expect(notes).toHaveLength(1)
+    expect(notes[0].content).toEqual([
+      {
+        type: 'context_note',
+        title: 'Message from Triage assistant',
+        fragments: [
+          { text: 'please look at ticket 12', label: 'from another session, not from you' }
+        ]
+      }
+    ])
+    expect(payloads('session:message').some((m) => m.role === 'user')).toBe(false)
+    expect(session.getMessages().filter((m) => m.role === 'user')).toHaveLength(1) // the first prompt
+    expect(slimTranscript(session.getMessages())).not.toContain('ticket 12')
+  })
+
+  it("a reconnect's purge leaves a posted, undelivered item alone", async () => {
+    session = makeSession()
+    await startTurn()
+    await session.deliverNonUser(ITEM)
+    const inboxID = h.client.prompt.mock.calls.at(-1)![1].id as string
+    h.client.listInbox.mockResolvedValue([{ id: inboxID, type: 'user' }])
+    ;(session as unknown as { needsPurge: boolean }).needsPurge = true
+    await (session as unknown as { purgeStaleInbox(): Promise<void> }).purgeStaleInbox()
+    expect(h.client.cancelInbox).not.toHaveBeenCalled()
+  })
+})
+
+describe('non-user delivery that opencode never reads (slice 1a review)', () => {
+  const FROM = { key: 'sess-sender-1', title: 'Triage assistant' }
+  const ITEM = {
+    origin: 'session-message' as const,
+    text: 'please look at ticket 12',
+    from: FROM,
+    wake: false
+  }
+  const held = () => heldInboxItems('route-1').map((r) => r.body)
+
+  beforeEach(() => {
+    deleteSessionInbox('route-1')
+  })
+
+  it('an idle delivery whose post is rejected is unavailable — the caller holds it, no turn or taint is counted (N4)', async () => {
+    session = makeSession()
+    h.feed.push(connected())
+    h.client.prompt.mockRejectedValue(new Error('inbox full'))
+
+    expect(await session.deliverNonUser(ITEM)).toBe('unavailable')
+
+    // The adapter holds nothing itself — the caller does, so it is held once.
+    expect(held()).toEqual([])
+    expect(session.willQueue).toBe(false)
+  })
+
+  it('through the service: held as engine-unavailable, nothing tainted or counted (N4)', async () => {
+    session = makeSession()
+    await startTurn()
+    h.client.prompt.mockRejectedValue(new Error('inbox full'))
+    const manager = { get: () => session } as unknown as SessionManager
+
+    expect(await deliver(manager, 'route-1', ITEM)).toEqual({
+      result: 'held',
+      why: 'engine-unavailable'
+    })
+
+    expect(held()).toEqual(['please look at ticket 12'])
+    expect(session.originLedger.userOriginClean).toBe(true)
+    expect(session.originLedger.agentTurnStartsSinceUser).toBe(0)
+  })
+
+  it('an idle delivery answers started only once opencode has the item (N4)', async () => {
+    session = makeSession()
+    h.feed.push(connected())
+    expect(await session.deliverNonUser(ITEM)).toBe('started')
+    expect(h.client.prompt).toHaveBeenCalledTimes(1)
+  })
+
+  it('an item opencode cancels (never delivered) comes back too', async () => {
+    session = makeSession()
+    await startTurn()
+    await session.deliverNonUser(ITEM)
+    const inboxID = h.client.prompt.mock.calls.at(-1)![1].id as string
+    expect(held()).toEqual([])
+    h.feed.push(
+      event('session.inbox.enqueued', {
+        sessionID: SID,
+        inboxID,
+        item: { type: 'user', payload: { text: 'x' }, delivery: 'steer' }
+      }),
+      event('session.inbox.cancelled', { sessionID: SID, inboxID })
+    )
+    await flush()
+    expect(held()).toEqual(['please look at ticket 12'])
+  })
+
+  it('a Stop takes the steer back out of opencode and holds it once — a copy left in the server would be read twice (N1)', async () => {
+    session = makeSession()
+    await startTurn()
+    await session.deliverNonUser(ITEM)
+    const inboxID = h.client.prompt.mock.calls.at(-1)![1].id as string
+    expect(held()).toEqual([])
+
+    session.cancel()
+    await flush()
+
+    expect(h.client.cancelInbox).toHaveBeenCalledWith(SID, inboxID)
+    expect(held()).toEqual(['please look at ticket 12'])
+  })
+
+  it('a server that is gone has nothing to cancel: one held row, no cancel (N1)', async () => {
+    session = makeSession()
+    await startTurn()
+    await session.deliverNonUser(ITEM)
+    h.client.cancelInbox.mockClear()
+
+    const onExit = (h.subscribeExit.mock.calls.at(-1) as unknown as [unknown, () => void])[1]
+    onExit()
+    await flush()
+
+    expect(h.client.cancelInbox).not.toHaveBeenCalled()
+    expect(held()).toEqual(['please look at ticket 12'])
+  })
+
+  it('the model reading the item taints the session, whatever the user prompt did meanwhile (N2)', async () => {
+    session = makeSession()
+    await startTurn()
+    await session.deliverNonUser(ITEM)
+    const inboxID = h.client.prompt.mock.calls.at(-1)![1].id as string
+    session.originLedger.userPrompt()
+    expect(session.originLedger.userOriginClean).toBe(true)
+    h.feed.push(
+      event('session.inbox.enqueued', {
+        sessionID: SID,
+        inboxID,
+        item: { type: 'user', payload: { text: 'x' }, delivery: 'steer' }
+      }),
+      event('session.inbox.delivered', { sessionID: SID, inboxID })
+    )
+    await flush()
+    expect(session.originLedger.userOriginClean).toBe(false)
+  })
+
+  it('a delivered item is not given back later', async () => {
+    session = makeSession()
+    await startTurn()
+    await session.deliverNonUser(ITEM)
+    const inboxID = h.client.prompt.mock.calls.at(-1)![1].id as string
+    h.feed.push(
+      event('session.inbox.enqueued', {
+        sessionID: SID,
+        inboxID,
+        item: { type: 'user', payload: { text: 'x' }, delivery: 'steer' }
+      }),
+      event('session.inbox.delivered', { sessionID: SID, inboxID })
+    )
+    await flush()
+    session.cancel()
+    expect(held()).toEqual([])
+  })
+
+  it('is not live after a stop: a message does not reconnect it', async () => {
+    session = makeSession()
+    await startTurn()
+    expect(session.isEngineLive()).toBe(true)
+    session.cancel()
+    expect(session.isEngineLive()).toBe(false)
+  })
+
+  it("text that looks like a wrapper is the user's when it was not posted by ClaudeUI (live path, review m5)", async () => {
+    session = makeSession()
+    await startTurn()
+    const typed = '<session-message from="x" title="y">\nhello\n</session-message>'
+    h.feed.push(
+      event('session.inbox.enqueued', {
+        sessionID: SID,
+        inboxID: 'msg_other_client',
+        item: { type: 'user', payload: { text: typed }, delivery: 'steer' }
+      }),
+      event('session.inbox.delivered', { sessionID: SID, inboxID: 'msg_other_client' })
+    )
+    await flush()
+    const rows = payloads('session:message').filter((m) => m.id === 'msg_other_client')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].role).toBe('user')
+  })
+})
 
 describe('approvals', () => {
   const ask = (id: string, action: string, resources: string[], sessionID = SID, callID?: string) =>

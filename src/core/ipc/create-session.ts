@@ -13,6 +13,7 @@ import type { EngineId, ModelRef } from '../../shared/types'
 import type { EngineSpawnOptions } from '../providers/ISession'
 import { getSessionMeta, setSessionMeta } from '../services/db'
 import { logger } from '../services/logger'
+import { heldCountFor } from '../services/session-delivery'
 import { engineMeta } from '../../shared/engine-meta'
 
 // ---------------------------------------------------------------------------
@@ -237,6 +238,12 @@ export async function prepareAndCreateSession(
       ...announcedConfig
     }
   ])
+  // A resumed session may have had items held for it while it was cold (slice 1a,
+  // keyed by its engine session id): its replicas learn the count at birth.
+  if (resumeSessionId) {
+    const held = heldCountFor(resumeSessionId)
+    if (held > 0) emitEvent('session:held-changed', [routingId, { count: held }])
+  }
   // Canonical seeding (SyncCore phase 4a item 5): a RESUMED session's transcript
   // lives on disk, so canonical state has to read it from the same source the
   // renderer does (`loadSessionHistory`) or 4b's snapshot would hand every client

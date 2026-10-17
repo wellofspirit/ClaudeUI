@@ -1032,6 +1032,9 @@ export interface PerSessionSnapshot {
    *  chat messages. Optional for the same older-server-compat reason as
    *  `sentFiles`: without it every resync silently emptied the queue card. */
   queue?: QueuedItem[]
+  /** Items from other sessions or agents held for this session's next turn
+   *  (slice 1a). Omitted when none, and by an older server. */
+  heldCount?: number
   taskNotifications: TaskNotification[]
   /** Started-but-not-finished tasks (task_started with no task_notification
    *  yet) — without this a remote client that connects or resyncs mid-task

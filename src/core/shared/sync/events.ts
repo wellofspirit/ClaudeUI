@@ -150,6 +150,12 @@ export interface SyncEventMap {
        * so the ring and the snapshot never carry an attachment's bytes.
        */
       attachments?: AttachmentRef[]
+      /**
+       * `host-instruction`: the host sent this on the user's behalf (a standing
+       * setting or click), so the row carries the "Sent by ClaudeUI for you"
+       * marker. Absent for text the user typed.
+       */
+      origin?: 'host-instruction'
     }
   ) => void
   'session:message': (routingId: string, msg: ChatMessage) => void
@@ -224,6 +230,11 @@ export interface SyncEventMap {
   // -------------------------------------------------------------------------
   /** Full queue list for a session — idempotent and replay-safe. */
   'session:queue-changed': (routingId: string, data: { items: QueuedItem[] }) => void
+  /**
+   * How many items from other sessions or agents sit in this session's held
+   * inbox, waiting for its next turn (slice 1a). A replace, so idempotent.
+   */
+  'session:held-changed': (routingId: string, data: { count: number }) => void
 
   // -------------------------------------------------------------------------
   // Per-session config

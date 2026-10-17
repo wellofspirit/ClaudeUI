@@ -113,10 +113,13 @@ import {
   deleteSession,
   deleteProject,
   clearConversation,
-  judgeModelSupport
+  judgeModelSupport,
+  sendPrompt
 } from '../../../core/ipc/handlers-core'
 import { syncCore, addSyncSubscriber } from '../../../core/services/sync-host'
 import { getSessionMeta, setSessionMeta } from '../../../core/services/db'
+import { deliver } from '../../../core/services/session-delivery'
+import { TurnOriginLedger } from '../../../core/providers/turn-origin-ledger'
 
 function makeSessionStub(overrides: Record<string, unknown> = {}): any {
   return {
@@ -1100,5 +1103,150 @@ describe('judgeModelSupport — the automode:judge-model-support body', () => {
     await expect(judgeModelSupport('opencode', 'openai/gpt-5')).rejects.toThrow(/array of strings/)
     await expect(judgeModelSupport('opencode', ['ok', 7])).rejects.toThrow(/array of strings/)
     expect(describeJudgeModels).not.toHaveBeenCalled()
+  })
+})
+
+describe('sendPrompt — origin and the held inbox (slice 1a)', () => {
+  const CWD = '/tmp/cwd'
+  let n = 0
+
+  /** A live session double that records what the engine was asked, in order. */
+  function liveSession(rid: string, over: Record<string, unknown> = {}): any {
+    const calls: string[] = []
+    const session: any = makeSessionStub({
+      engineId: 'opencode',
+      originLedger: new TurnOriginLedger(),
+      getSessionId: () => null,
+      calls,
+      run: vi.fn((prompt: string) => {
+        calls.push(`run:${prompt}`)
+        session.willQueue = true
+        return Promise.resolve()
+      }),
+      enqueuePrompt: vi.fn((text: string, _a: unknown, _r: unknown, origin?: string) => {
+        calls.push(`enqueue:${text}${origin ? `:${origin}` : ''}`)
+      }),
+      deliverNonUser: vi.fn(async (item: { text: string }) => {
+        calls.push(`deliver:${item.text}`)
+        session.willQueue = true
+        return 'started'
+      }),
+      ...over
+    })
+    syncCore.emit('session:created', [rid, { cwd: CWD }])
+    return session
+  }
+  const ridOf = (): string => `rid-send-${process.pid}-${++n}`
+
+  it('a user prompt resets taint and budget, then runs at once when nothing is held', async () => {
+    const rid = ridOf()
+    const session = liveSession(rid)
+    session.originLedger.nonUserDelivered()
+    session.originLedger.agentTurnStarted()
+    const out = sendPrompt(makeManager(session), rid, 'hello')
+    // Still synchronous: an inbox that is empty costs the prompt path nothing.
+    expect(out).toBeUndefined()
+    expect(session.calls).toEqual(['run:hello'])
+    expect(session.originLedger.userOriginClean).toBe(true)
+    expect(session.originLedger.agentTurnStartsSinceUser).toBe(0)
+  })
+
+  it('held items go out FIRST, in order, and the prompt then queues behind the turn they start', async () => {
+    const rid = ridOf()
+    const session = liveSession(rid)
+    const manager = makeManager(session)
+    // Held while it was idle and nothing woke it.
+    const held = { origin: 'agent-note' as const, from: { key: 'k', title: 'T' }, wake: false }
+    await deliver(manager, rid, { ...held, text: 'held one' })
+    await deliver(manager, rid, { ...held, text: 'held two' })
+    expect(session.calls).toEqual([])
+
+    await sendPrompt(manager, rid, 'user prompt')
+    expect(session.calls).toEqual(['deliver:held one', 'deliver:held two', 'enqueue:user prompt'])
+    expect(session.run).not.toHaveBeenCalled()
+    // The turn now carries agent text: the user speaking did not clean it.
+    expect(session.originLedger.userOriginClean).toBe(false)
+    expect(syncCore.getCanonicalState().sessions[rid].heldCount).toBe(0)
+  })
+
+  it('a busy session keeps its inbox: nothing flushes into a turn that is not starting', async () => {
+    const rid = ridOf()
+    const session = liveSession(rid)
+    const manager = makeManager(session)
+    await deliver(manager, rid, {
+      origin: 'agent-note',
+      from: { key: 'k', title: 'T' },
+      wake: false,
+      text: 'held'
+    })
+    session.willQueue = true
+    sendPrompt(manager, rid, 'while busy')
+    expect(session.calls).toEqual(['enqueue:while busy'])
+    expect(syncCore.getCanonicalState().sessions[rid].heldCount).toBe(1)
+  })
+
+  it('a prompt that only QUEUES behind an agent-started turn leaves taint and budget alone (review M1)', async () => {
+    const rid = ridOf()
+    const session = liveSession(rid)
+    const manager = makeManager(session)
+    // A message woke the session: the turn is running with agent text in it.
+    expect(
+      await deliver(manager, rid, {
+        origin: 'session-message',
+        from: { key: 'k', title: 'T' },
+        wake: false,
+        text: 'wake up'
+      })
+    ).toEqual({ result: 'delivered' })
+    expect(session.willQueue).toBe(true)
+    expect(session.originLedger.userOriginClean).toBe(false)
+
+    sendPrompt(manager, rid, 'ok')
+
+    expect(session.calls.at(-1)).toBe('enqueue:ok')
+    expect(session.originLedger.userOriginClean).toBe(false)
+    expect(session.originLedger.agentTurnStartsSinceUser).toBe(1)
+  })
+
+  it('a host-instruction is still a user row, marked; queued, it keeps the marker', () => {
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    const events: Array<[string, unknown]> = []
+    const off = addSyncSubscriber((_seq: number, channel: string, args: unknown[]) => {
+      if (channel === 'session:user-message') events.push([channel, args[1]])
+    })
+    try {
+      sendPrompt(makeManager(session), rid, 'wrap up now', undefined, {
+        origin: 'host-instruction'
+      })
+      expect(events).toEqual([
+        [
+          'session:user-message',
+          expect.objectContaining({ prompt: 'wrap up now', origin: 'host-instruction' })
+        ]
+      ])
+      const rows = syncCore.getCanonicalState().sessions[rid].messages
+      expect(rows).toEqual([expect.objectContaining({ role: 'user', hostInstruction: true })])
+
+      session.willQueue = true
+      sendPrompt(makeManager(session), rid, 'again', undefined, { origin: 'host-instruction' })
+      expect(session.enqueuePrompt).toHaveBeenLastCalledWith(
+        'again',
+        undefined,
+        undefined,
+        'host-instruction'
+      )
+    } finally {
+      off()
+    }
+  })
+
+  it('a typed prompt carries no marker', () => {
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    sendPrompt(makeManager(session), rid, 'typed')
+    const rows = syncCore.getCanonicalState().sessions[rid].messages
+    expect(rows).toEqual([expect.objectContaining({ role: 'user' })])
+    expect(rows[0]).not.toHaveProperty('hostInstruction')
   })
 })

@@ -7,7 +7,7 @@ import '../providers/register-engines'
 import { readSessionHistory as loadSessionHistory } from './engine-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { claudeProjectKeyFor } from './claude-transcript-locator'
-import { getSessionMeta, moveSessionMeta, renameUsageEventParent } from './db'
+import { getSessionMeta, moveSessionInbox, moveSessionMeta, renameUsageEventParent } from './db'
 import { logger } from './logger'
 import { syncCore } from './sync-host'
 
@@ -126,6 +126,18 @@ export class SessionManager {
     // (the renamed map lacked the old id, so the host's delete-absent loop dropped
     // it) — which is how a client that knew nothing of a session could delete or
     // revert its row. That loop is gone; the rekey is the event that moves it.
+    //
+    // The held inbox moves first: `moveSessionMeta` may drop the old id's rows
+    // (a row already at the new id wins), and deleting a session's meta deletes
+    // its inbox with it.
+    try {
+      moveSessionInbox(oldId, newId)
+    } catch (err) {
+      logger.warn(
+        'SessionManager',
+        `moveSessionInbox failed (held messages may stay under the old id): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
     try {
       moveSessionMeta(oldId, newId)
     } catch (err) {

@@ -41,6 +41,12 @@ export class SessionQueue {
    */
   private queuedAtMs = new Map<string, number>()
 
+  /**
+   * Called when an item becomes `consumed` — the engine took it. The one place
+   * "the user's queued prompt actually started or joined a turn" is known.
+   */
+  onConsumed: ((item: QueuedItem) => void) | undefined
+
   constructor(
     private readonly broadcast: (items: QueuedItem[]) => void,
     private readonly now: () => number = Date.now
@@ -73,8 +79,14 @@ export class SessionQueue {
    * Queue a prompt. `uploads` are what the engine will be handed
    * ({@link uploadsFor}); `refs` are what the broadcast item carries.
    */
-  add(text: string, uploads?: AttachmentUpload[], refs?: AttachmentRef[]): QueuedItem {
+  add(
+    text: string,
+    uploads?: AttachmentUpload[],
+    refs?: AttachmentRef[],
+    origin?: 'host-instruction'
+  ): QueuedItem {
     const item: QueuedItem = { itemId: randomUUID(), text, state: 'queued' }
+    if (origin) item.origin = origin
     if (refs && refs.length > 0) item.attachments = refs
     if (uploads && uploads.length > 0) this.uploads.set(item.itemId, uploads)
     this.queuedAtMs.set(item.itemId, this.now())
@@ -102,7 +114,7 @@ export class SessionQueue {
    */
   consumeByText(text: string): QueuedItem | undefined {
     const item = this.items.find((i) => i.state === 'queued' && i.text === text)
-    if (item) item.state = 'consumed'
+    if (item) this.setState(item, 'consumed')
     return item
   }
 
@@ -130,12 +142,13 @@ export class SessionQueue {
 
   private settleById(itemId: string, state: 'consumed' | 'recalled'): QueuedItem | undefined {
     const item = this.items.find((i) => i.state === 'queued' && i.itemId === itemId)
-    if (item) item.state = state
+    if (item) this.setState(item, state)
     return item
   }
 
   setState(item: QueuedItem, state: QueuedItem['state']): void {
     item.state = state
+    if (state === 'consumed') this.onConsumed?.(item)
   }
 
   /**

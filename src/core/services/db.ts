@@ -1396,6 +1396,33 @@ export const MIGRATIONS: Migration[] = [
         );
       `)
     }
+  },
+  {
+    // Slice 1a (session tools): the held inbox. An item another session or an
+    // agent sent to a session that could not take it now — idle with no wake, no
+    // live session object, or the agent-turn budget spent — waits here, oldest
+    // first, and is delivered ahead of the target's next turn. `target` is the
+    // routing id (moved on a rekey); `sender_mode_class` is the sender's
+    // permission class where it is known. `delivered_at` marks a row handed to
+    // the engine; undelivered rows are the inbox.
+    version: 30,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS session_inbox (
+          id                INTEGER PRIMARY KEY AUTOINCREMENT,
+          target            TEXT    NOT NULL,
+          origin            TEXT    NOT NULL,
+          from_key          TEXT    NOT NULL,
+          from_title        TEXT    NOT NULL,
+          sender_mode_class TEXT,
+          body              TEXT    NOT NULL,
+          created_at        INTEGER NOT NULL,
+          delivered_at      INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_inbox_target
+          ON session_inbox (target, delivered_at);
+      `)
+    }
   }
 ]
 
@@ -1791,6 +1818,111 @@ export function setSessionMeta(sessionId: string, meta: SessionMeta): void {
 export function deleteSessionMeta(sessionId: string): void {
   const db = getDb()
   db.prepare('DELETE FROM session_meta WHERE session_id = ?').run(sessionId)
+  // A held inbox belongs to the session as much as its engine row does.
+  deleteSessionInbox(sessionId, db)
+}
+
+// ---------------------------------------------------------------------------
+// Held inbox (slice 1a)
+// ---------------------------------------------------------------------------
+
+/** One item held for a session's next turn. */
+export interface InboxItem {
+  id: number
+  target: string
+  origin: 'session-message' | 'agent-note'
+  fromKey: string
+  fromTitle: string
+  senderModeClass: 'bypass' | 'prompting' | null
+  body: string
+  createdAt: number
+  deliveredAt: number | null
+}
+
+interface InboxRow {
+  id: number
+  target: string
+  origin: string
+  from_key: string
+  from_title: string
+  sender_mode_class: string | null
+  body: string
+  created_at: number
+  delivered_at: number | null
+}
+
+function inboxItem(row: InboxRow): InboxItem {
+  return {
+    id: row.id,
+    target: row.target,
+    origin: row.origin === 'agent-note' ? 'agent-note' : 'session-message',
+    fromKey: row.from_key,
+    fromTitle: row.from_title,
+    senderModeClass:
+      row.sender_mode_class === 'bypass' || row.sender_mode_class === 'prompting'
+        ? row.sender_mode_class
+        : null,
+    body: row.body,
+    createdAt: Number(row.created_at),
+    deliveredAt: row.delivered_at === null ? null : Number(row.delivered_at)
+  }
+}
+
+/** Hold an item for `target`'s next turn. Returns the row id. */
+export function addInboxItem(
+  item: Omit<InboxItem, 'id' | 'deliveredAt' | 'createdAt'> & { createdAt?: number },
+  db: Db = getDb()
+): number {
+  const info = db
+    .prepare(
+      `INSERT INTO session_inbox
+         (target, origin, from_key, from_title, sender_mode_class, body, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      item.target,
+      item.origin,
+      item.fromKey,
+      item.fromTitle,
+      item.senderModeClass,
+      item.body,
+      item.createdAt ?? Date.now()
+    )
+  return Number(info.lastInsertRowid)
+}
+
+/** Undelivered items for `target`, oldest first. */
+export function heldInboxItems(target: string, db: Db = getDb()): InboxItem[] {
+  const rows = db
+    .prepare('SELECT * FROM session_inbox WHERE target = ? AND delivered_at IS NULL ORDER BY id')
+    .all(target) as InboxRow[]
+  return rows.map(inboxItem)
+}
+
+export function heldInboxCount(target: string, db: Db = getDb()): number {
+  const row = db
+    .prepare('SELECT COUNT(*) AS n FROM session_inbox WHERE target = ? AND delivered_at IS NULL')
+    .get(target) as { n: number }
+  return Number(row.n)
+}
+
+/** Mark one held item as handed to the engine. */
+export function markInboxDelivered(id: number, now = Date.now(), db: Db = getDb()): void {
+  db.prepare('UPDATE session_inbox SET delivered_at = ? WHERE id = ?').run(now, id)
+}
+
+/**
+ * Re-key a session's inbox (rows, held and delivered) to its post-rekey id.
+ * `SessionManager.rekey` calls it beside {@link moveSessionMeta}.
+ */
+export function moveSessionInbox(oldId: string, newId: string, db: Db = getDb()): void {
+  if (oldId === newId) return
+  db.prepare('UPDATE session_inbox SET target = ? WHERE target = ?').run(newId, oldId)
+}
+
+/** Drop every row for `target` (the session was deleted). */
+export function deleteSessionInbox(target: string, db: Db = getDb()): void {
+  db.prepare('DELETE FROM session_inbox WHERE target = ?').run(target)
 }
 
 /**

@@ -687,6 +687,8 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         ...fresh,
         itemStreamRevision: event.seq ?? 0,
         sdkActive: s.sdkActive,
+        // The held inbox belongs to the session, not to its conversation.
+        heldCount: s.heldCount,
         // Carried, not reset. These per-session copies are vestigial — canonical
         // holds ONE app-level list and `toSnapshot` fans it into every entry, so
         // in practice both are always `[]` here — but the catalogs describe the
@@ -712,6 +714,7 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         timestamp?: number
         prompt?: string
         attachments?: AttachmentRef[]
+        origin?: 'host-instruction'
       }>(event, 1)
       if (!state.sessions[routingId]) return state
       // Identity comes from the EVENT as of phase 4b (`handlers-core.sendPrompt`
@@ -727,7 +730,8 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
             id,
             role: 'user' as const,
             content: buildUserContentBlocks(data?.prompt ?? '', data?.attachments),
-            timestamp
+            timestamp,
+            ...(data?.origin === 'host-instruction' ? { hostInstruction: true as const } : {})
           }
         ]
       }))
@@ -1271,13 +1275,24 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
           id,
           role: 'user',
           content: buildUserContentBlocks(item.text, item.attachments),
-          timestamp: 0
+          timestamp: 0,
+          ...(item.origin === 'host-instruction' ? { hostInstruction: true as const } : {})
         })
       }
       return withSession(state, routingId, (s) => ({
         queue: items.filter((item) => item.state === 'queued'),
         messages: synthesized.length > 0 ? [...s.messages, ...synthesized] : s.messages
       }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Held inbox (slice 1a)
+    // -----------------------------------------------------------------------
+    case 'session:held-changed': {
+      const routingId = routingIdOf(event)
+      const data = arg<{ count?: number }>(event, 1)
+      if (!routingId || typeof data?.count !== 'number' || !state.sessions[routingId]) return state
+      return withSession(state, routingId, () => ({ heldCount: Math.max(0, data.count!) }))
     }
 
     // -----------------------------------------------------------------------

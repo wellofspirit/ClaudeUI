@@ -59,7 +59,9 @@ import { reconcileAfterReconnect } from './reconnect'
 import { convertOpencodeHistory, readOpencodeHistory } from './history'
 import { ShellOutputPoller } from './shell-output-poller'
 import { BaseSession } from '../providers/BaseSession'
-import type { EngineSpawnOptions } from '../providers/ISession'
+import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
+import { buildSessionMessageWrapper } from '../../shared/session-message-wrapper'
+import { sessionMessageNote } from '../services/agent-note'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { AccountIdentity } from '../../shared/account-key'
 import { resolveOpencodeCapabilities } from '../../shared/model-capabilities'
@@ -557,6 +559,53 @@ export class OpencodeSession extends BaseSession {
   // ── Turns ──────────────────────────────────────────────────────────────────
 
   async run(prompt: string | null, attachments?: AttachmentUpload[]): Promise<void> {
+    return this.runPrompt(prompt, attachments)
+  }
+
+  /**
+   * Slice 1a: a message from another session or an agent, as a plain prompt
+   * whose text names its sender and says it is not the user's. A running turn
+   * takes it as a steer, posted at once so a refusal is known; an idle session
+   * starts a turn on it. The delivered row comes back through the feed as a
+   * user row of that wrapper, which `userChatMessage` turns into a note (live
+   * and on reload), and which is never put in `messageHistory` as the user's.
+   */
+  async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
+    const text = buildSessionMessageWrapper(item.from, item.text)
+    if (this.isProcessing && this.client && this.openSessionId) {
+      try {
+        await this.postNonUserPrompt(text, item)
+        return 'queued'
+      } catch (err) {
+        logger.warn('OpencodeSession', `non-user steer not posted: ${errText(err)}`)
+        return 'unavailable'
+      }
+    }
+    const busy = this.isProcessing
+    // Answer only once opencode has the item in its inbox: connecting, creating
+    // the session and the post can all fail, and then the caller holds it
+    // (`unavailable`) instead of counting a turn that never started.
+    const posted = await new Promise<boolean>((settle) => {
+      this.runPrompt(text, undefined, item, settle)
+        .catch((err) => logger.warn('OpencodeSession', `non-user turn failed: ${errText(err)}`))
+        .finally(() => settle(false))
+    })
+    if (!posted) return 'unavailable'
+    return busy ? 'queued' : 'started'
+  }
+
+  /** The opencode connection is up: a message does not reconnect a closed session. */
+  isEngineLive(): boolean {
+    return !!this.client && !!this.openSessionId && !this.disconnected
+  }
+
+  private async runPrompt(
+    prompt: string | null,
+    attachments?: AttachmentUpload[],
+    nonUser?: NonUserItem,
+    /** Non-user only: told once whether opencode took the item (first call wins). */
+    settle?: (posted: boolean) => void
+  ): Promise<void> {
     this.clearInactivityTimer()
     this._cancelled = false
     this.disconnected = false
@@ -573,16 +622,21 @@ export class OpencodeSession extends BaseSession {
       try {
         await this.establishingPromise
       } catch {
-        return // the first prompt already surfaced its error
+        // the first prompt already surfaced its error
+        settle?.(false)
+        return
       }
-      if (this._cancelled || !this.client || !this.openSessionId) return
-      return this.steer(prompt, attachments)
+      if (this._cancelled || !this.client || !this.openSessionId) {
+        settle?.(false)
+        return
+      }
+      return this.steer(prompt, attachments, nonUser, settle)
     }
 
     // A turn is running: the prompt goes into it (the inbox steers it at the
     // next step boundary). The send path normally queues instead.
     if (this.isProcessing && this.client && this.openSessionId) {
-      return this.steer(prompt, attachments)
+      return this.steer(prompt, attachments, nonUser, settle)
     }
 
     this.endUserStop()
@@ -609,16 +663,22 @@ export class OpencodeSession extends BaseSession {
         if (!this.conn) this.disconnected = true
         this.sendStatus()
         this.resetInactivityTimer()
+        settle?.(false)
         return
       }
       if (gate.notice !== null) {
         this.holdForAuth(gate.notice)
+        settle?.(false)
         return
       }
       this.startTimeMs = Date.now()
-      await this.postUserPrompt(prompt, attachments)
+      if (nonUser) {
+        await this.postNonUserPrompt(prompt, nonUser)
+        settle?.(true)
+      } else await this.postUserPrompt(prompt, attachments)
     } catch (err) {
       logger.error('OpencodeSession', `run() error: ${errText(err)}`)
+      settle?.(false)
       this.isProcessing = false
       if (!this.conn) this.disconnected = true
       this.send('session:error', errText(err))
@@ -633,11 +693,20 @@ export class OpencodeSession extends BaseSession {
   }
 
   /** A prompt into a running turn; a failed post is surfaced, never silently dropped. */
-  private async steer(prompt: string, attachments?: AttachmentUpload[]): Promise<void> {
+  private async steer(
+    prompt: string,
+    attachments?: AttachmentUpload[],
+    nonUser?: NonUserItem,
+    settle?: (posted: boolean) => void
+  ): Promise<void> {
     try {
-      await this.postUserPrompt(prompt, attachments)
+      if (nonUser) {
+        await this.postNonUserPrompt(prompt, nonUser)
+        settle?.(true)
+      } else await this.postUserPrompt(prompt, attachments)
     } catch (err) {
       logger.warn('OpencodeSession', `steer send failed: ${errText(err)}`)
+      settle?.(false)
       this.send('session:error', errText(err))
     }
   }
@@ -662,6 +731,28 @@ export class OpencodeSession extends BaseSession {
     } catch (err) {
       this.messageHistory = this.messageHistory.filter((m) => m !== userMsg)
       this.ownInboxIds.delete(inboxID)
+      throw err
+    }
+  }
+
+  /**
+   * Post a prompt that is NOT the user's (slice 1a). No `messageHistory` row of
+   * the user's: the delivered row returns through {@link onUserMessage} as a
+   * note, recognised by this inbox id being in {@link pendingNonUser} (the engine
+   * marker), not by its text. The id stays in `ownInboxIds` too, so a
+   * reconnect's purge does not cancel it. Posted as text only — a `/command` it
+   * might spell is not run (`knownCommandNames` is checked on the wrapper, which
+   * starts with `<`).
+   */
+  private async postNonUserPrompt(text: string, item: NonUserItem): Promise<void> {
+    const inboxID = newInboxId()
+    this.ownInboxIds.add(inboxID)
+    this.pendingNonUser.set(inboxID, item)
+    try {
+      await this.postPrompt(text, undefined, inboxID, 'steer')
+    } catch (err) {
+      this.ownInboxIds.delete(inboxID)
+      this.pendingNonUser.delete(inboxID)
       throw err
     }
   }
@@ -1213,6 +1304,26 @@ export class OpencodeSession extends BaseSession {
    * prompt another client posted into this session is painted here.
    */
   private onUserMessage(inboxID: string, message: ChatMessage): void {
+    // A session message or agent note ClaudeUI posted, recognised by its inbox id
+    // (never by its text, which a user can type): shown as a note from its
+    // sender, and no longer pending — the model has it.
+    const pending = this.pendingNonUser.get(inboxID)
+    if (pending) {
+      this.pendingNonUser.delete(inboxID)
+      this.ownInboxIds.delete(inboxID)
+      // The model has it now: tainted from here, whatever consumed order a queued
+      // user prompt of the same stretch took.
+      this.originLedger.nonUserDelivered()
+      this.rememberAndSend(
+        sessionMessageNote({
+          id: message.id,
+          fromTitle: pending.from.title,
+          text: pending.text,
+          timestamp: message.timestamp
+        })
+      )
+      return
+    }
     if (this.ownInboxIds.delete(inboxID) || this.inboxToItem.has(inboxID)) return
     if (inboxID.startsWith(CLAUDEUI_INBOX_PREFIX)) return
     if (this.pendingCommandEchoes > 0) {
@@ -1382,6 +1493,11 @@ export class OpencodeSession extends BaseSession {
   }
 
   private onInbox(o: Extract<OpencodeMapperOutput, { kind: 'inbox' }>): void {
+    // A message from another session that opencode cancelled never reaches the model.
+    if (o.change === 'cancelled' && this.pendingNonUser.has(o.inboxID)) {
+      this.reholdNonUser(o.inboxID, 'opencode cancelled it')
+      return
+    }
     const itemId = this.inboxToItem.get(o.inboxID)
     if (!itemId) return
     if (o.change === 'delivered') {
@@ -1529,7 +1645,12 @@ export class OpencodeSession extends BaseSession {
   private endLease(conn: ServerConnection, client: OpencodeClient | null): void {
     const release = () => opencodeServerManager.releaseIfCurrent(this.cwd, conn)
     const sessionID = this.openSessionId
-    const inboxIDs = [...this.inboxToItem.keys()]
+    // A message from another session still waiting in opencode's inbox is taken
+    // back here too: it is re-held by recallQueuedOnEngineLoss right after, and a
+    // copy left server-side would be read a second time at the next turn.
+    const pendingIDs = [...this.pendingNonUser.keys()]
+    for (const id of pendingIDs) this.ownInboxIds.delete(id)
+    const inboxIDs = [...this.inboxToItem.keys(), ...pendingIDs]
     this.inboxToItem.clear()
     this.itemToInbox.clear()
     if (!client || !sessionID) {
