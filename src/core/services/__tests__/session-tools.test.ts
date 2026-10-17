@@ -23,16 +23,42 @@ import { REF_PATTERN } from '../../../shared/session-links'
 import { TurnOriginLedger, STARTS_PER_USER_TURN } from '../../providers/turn-origin-ledger'
 import type { CreateSessionArgs } from '../../ipc/create-session'
 import type { SessionManager } from '../session-manager'
-import { addInboxItem, getSessionLink, listAuditLog } from '../db'
+import {
+  addInboxItem,
+  getSessionLink,
+  getSessionProposal,
+  listAuditLog,
+  sessionProposalsByParent,
+  transitionSessionProposal
+} from '../db'
 import { HELD_INBOX_CAP } from '../session-delivery'
 import { emitEvent, syncCore } from '../sync-host'
+import { CommandRegistry, makeRemoteConnection } from '../../ipc/command-registry'
+import { RemoteDispatcher } from '../remote-dispatcher'
+import {
+  MAX_PENDING_PROPOSALS,
+  MAX_STORED_PROPOSALS,
+  PROPOSAL_TTL_MS,
+  proposalDisplayState
+} from '../../../shared/session-proposals'
+import {
+  claimProposal,
+  createProposal,
+  dismissProposal,
+  finishProposal,
+  proposalCardId,
+  readProposal,
+  withProposalCards
+} from '../session-proposals'
 import {
   linksOf,
   noteClientPrompt,
   recordLink,
   refFor,
   resetSessionLinksForTests,
-  resolveRef
+  resolveRef,
+  sessionCardId,
+  withSessionCards
 } from '../session-links'
 import {
   configureSessionTools,
@@ -43,14 +69,18 @@ import {
   runSessionTool,
   sessionGet,
   sessionHandOff,
+  sessionDismissProposal,
   sessionList,
   sessionMessage,
   sessionRead,
   sessionStart,
+  uiPath,
   sessionStop,
   sessionToolsAvailable,
   sessionToolsGate,
   sessionUsage,
+  dismissProposalFromClient,
+  startProposalFromClient,
   type GateDecision,
   type SessionStartInput,
   type SessionToolCaller
@@ -60,7 +90,14 @@ import { createWorktree } from '../worktree'
 vi.mock('../logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
-vi.mock('../worktree', () => ({ createWorktree: vi.fn() }))
+vi.mock('../worktree', () => ({
+  createWorktree: vi.fn(),
+  validateWorktreeName: (name: string): void => {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
+      throw new Error(`Invalid worktree name: ${JSON.stringify(name)}`)
+    }
+  }
+}))
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -102,7 +139,9 @@ const prompts: Array<{
 const behaviour = {
   failCreate: null as string | null,
   failPrompt: null as string | null,
-  rejectPrompt: null as string | null
+  rejectPrompt: null as string | null,
+  /** Holds every createSession until it settles: a launch that is mid-spawn. */
+  holdCreate: null as Promise<void> | null
 }
 
 const manager = {
@@ -112,6 +151,7 @@ const manager = {
 } as unknown as SessionManager
 
 const createSession = vi.fn(async (args: CreateSessionArgs) => {
+  if (behaviour.holdCreate) await behaviour.holdCreate
   if (behaviour.failCreate) throw new Error(behaviour.failCreate)
   created.push(args)
   live.set(args.routingId, new Fake(args.routingId, args.engineId ?? 'claude'))
@@ -162,6 +202,7 @@ beforeEach(() => {
   prompts.length = 0
   for (const k of Object.keys(titles)) delete titles[k]
   behaviour.failCreate = behaviour.failPrompt = behaviour.rejectPrompt = null
+  behaviour.holdCreate = null
   vi.clearAllMocks()
   configureSessionTools({ manager, createSession, sendPrompt })
 })
@@ -237,6 +278,17 @@ function status(rid: string, state: 'idle' | 'running'): void {
     }
   ])
 }
+
+/** A session status carrying the engine's own id: the one that rekeys a session. */
+const statusOf = (sessionId: string): Record<string, unknown> => ({
+  state: 'idle',
+  sessionId,
+  model: null,
+  cwd: null,
+  totalCostUsd: 0,
+  engineId: 'claude',
+  account: null
+})
 
 const start = (over: Partial<SessionStartInput> = {}): SessionStartInput => ({
   title: 'Fix the flaky queue test',
@@ -356,51 +408,57 @@ describe('sessionToolsGate', () => {
       ).toBe('allow')
     })
 
-    it('refuses once the turn has taken in text from another session or an agent (taint)', () => {
+    it('refuses a hand-off, and turns a start into a proposal, once the turn has taken in text from another session or an agent (taint)', async () => {
       const p = born('gate-taint')
       p.fake.originLedger.nonUserDelivered()
-      for (const name of ['session_start', 'session_hand_off'] as const) {
-        expect(deny(sessionToolsGate(p.caller, name, start(), {}))).toMatch(
-          /did not come from the user/
-        )
-      }
+      expect(
+        deny(sessionToolsGate(p.caller, 'session_hand_off', { title: 't', handoff: 'h' }, {}))
+      ).toMatch(/did not come from the user/)
+      // A start is let through to the service, which makes a proposal of it.
+      expect(sessionToolsGate(p.caller, 'session_start', start(), {}).behavior).toBe('allow')
+      expect((await sessionStart(p.caller, start())).text).toMatch(
+        /^converted to a proposal: this turn includes text that did not come from the user/
+      )
+      expect(createSession).not.toHaveBeenCalled()
       // The user speaking again lifts it.
       p.fake.originLedger.userPrompt()
       expect(sessionToolsGate(p.caller, 'session_start', start(), {}).behavior).toBe('allow')
+      expect((await sessionStart(p.caller, start())).text).toMatch(/^started s-/)
     })
 
-    it('refuses in a session another session started until a client has typed into it', () => {
+    it('refuses in a session another session started until a client has typed into it', async () => {
       const p = born('gate-agent-created')
       p.fake.originLedger.markAgentCreated()
       // Its own brief is not the user typing.
       p.fake.originLedger.userPrompt({ agentBrief: true })
-      expect(deny(sessionToolsGate(p.caller, 'session_start', start(), {}))).toMatch(
-        /started by another session/
-      )
       expect(
         deny(sessionToolsGate(p.caller, 'session_hand_off', { title: 't', handoff: 'h' }, {}))
       ).toMatch(/started by another session/)
+      expect((await sessionStart(p.caller, start())).text).toMatch(
+        /^converted to a proposal: this session was started by another session/
+      )
       p.fake.originLedger.userPrompt()
       expect(sessionToolsGate(p.caller, 'session_start', start(), {}).behavior).toBe('allow')
+      expect((await sessionStart(p.caller, start())).text).toMatch(/^started s-/)
     })
 
-    it('exempts hand_off — and only hand_off — on a host-instruction turn of an agent-created session', () => {
+    it('exempts hand_off — and only hand_off — on a host-instruction turn of an agent-created session', async () => {
       const p = born('gate-host')
       p.fake.originLedger.markAgentCreated()
       p.fake.originLedger.userPrompt({ hostInstruction: true })
       expect(
         sessionToolsGate(p.caller, 'session_hand_off', { title: 't', handoff: 'h' }, {}).behavior
       ).toBe('allow')
-      expect(deny(sessionToolsGate(p.caller, 'session_start', start(), {}))).toMatch(
-        /started by another session/
+      expect((await sessionStart(p.caller, start())).text).toMatch(
+        /^converted to a proposal: this session was started by another session/
       )
     })
 
-    it('stops after ten starts in one user turn', () => {
+    it('stops after ten starts in one user turn: the eleventh is a proposal', async () => {
       const p = born('gate-ten')
       for (let i = 0; i < STARTS_PER_USER_TURN; i++) p.fake.originLedger.sessionStarted()
-      expect(deny(sessionToolsGate(p.caller, 'session_start', start(), {}))).toMatch(
-        /already started 10 sessions/
+      expect((await sessionStart(p.caller, start())).text).toMatch(
+        /^converted to a proposal: this turn has already started 10 sessions/
       )
       p.fake.originLedger.userPrompt()
       expect(sessionToolsGate(p.caller, 'session_start', start(), {}).behavior).toBe('allow')
@@ -436,7 +494,7 @@ describe('sessionToolsGate', () => {
       ).toMatch(/is not one of/)
     })
 
-    it("cwd must stay inside the caller's tree (or its worktree); outside is refused with the path", () => {
+    it("cwd outside the caller's tree (or its worktree) is not run: it becomes a proposal that names the path", async () => {
       const root = dir('cap-cwd')
       const inside = path.join(root, 'pkg')
       fs.mkdirSync(inside, { recursive: true })
@@ -448,19 +506,30 @@ describe('sessionToolsGate', () => {
       expect(gate(inside).behavior).toBe('allow')
       expect(gate('pkg').behavior).toBe('allow')
       expect(gate(root).behavior).toBe('allow')
-      expect(deny(gate(sibling))).toContain(sibling)
-      expect(deny(gate(path.join(root, '..')))).toMatch(/outside this session's working tree/)
-      expect(deny(gate(path.join(inside, '..', '..', 'elsewhere')))).toMatch(/outside/)
+      // A directory that does not exist is no proposal either.
       expect(deny(gate(path.join(root, 'nope')))).toMatch(/not an existing directory/)
+      // Outside: the gate lets the service turn it into a proposal, and nothing starts.
+      for (const outside of [
+        sibling,
+        path.join(root, '..'),
+        path.join(inside, '..', '..', 'elsewhere')
+      ]) {
+        expect(gate(outside).behavior).toBe('allow')
+      }
+      const out = await sessionStart(p.caller, start({ cwd: sibling }))
+      expect(out.text).toMatch(/^converted to a proposal: cwd /)
+      expect(out.text).toContain(uiPath(sibling))
+      expect(out.text).toContain("outside this session's working tree")
+      expect(createSession).not.toHaveBeenCalled()
     })
 
-    it('a caller in a worktree may start in the worktree root even from a subfolder', () => {
+    it('a caller in a worktree may start in the worktree root even from a subfolder', async () => {
       const wt = dir('cap-wt')
       const sub = path.join(wt, 'packages', 'a')
       fs.mkdirSync(sub, { recursive: true })
       const p = born('cap-wt', { cwd: sub })
-      expect(sessionToolsGate(p.caller, 'session_start', start({ cwd: wt }), {}).behavior).toBe(
-        'deny'
+      expect((await sessionStart(p.caller, start({ cwd: wt }))).text).toMatch(
+        /^converted to a proposal: cwd /
       )
       syncCore.setAppState({
         worktreeInfoMap: {
@@ -475,9 +544,7 @@ describe('sessionToolsGate', () => {
           }
         }
       })
-      expect(sessionToolsGate(p.caller, 'session_start', start({ cwd: wt }), {}).behavior).toBe(
-        'allow'
-      )
+      expect((await sessionStart(p.caller, start({ cwd: wt }))).text).toMatch(/^started s-/)
     })
   })
 })
@@ -528,21 +595,29 @@ function recordLinkForTests(parentRef: string, childRef: string): void {
 // ---------------------------------------------------------------------------
 
 describe('the service refuses without the gate (a mode that approves everything never calls it)', () => {
-  it('a tainted turn cannot start a session, nothing is created, and the refusal is audited', async () => {
+  it('a tainted turn cannot start a session even when nothing asks first: a proposal is made, nothing is created, and it is audited', async () => {
     const p = born('svc-taint', { mode: 'bypassPermissions' })
     p.fake.originLedger.nonUserDelivered()
     const out = await sessionStart(p.caller, start())
-    expect(out.isError).toBe(true)
-    expect(out.text).toMatch(/^Refused: this turn includes text that did not come from the user/)
+    expect(out.isError).toBeUndefined()
+    expect(out.text).toMatch(
+      /^converted to a proposal: this turn includes text that did not come from the user/
+    )
     expect(createSession).not.toHaveBeenCalled()
     const rows = auditFor(p.ref)
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({
       channel: 'session-tools:session_start',
-      outcome: 'error',
+      outcome: 'ok',
       method: 'agent'
     })
-    expect(rows[0].detail).toMatch(/^refused: this turn includes text/)
+    expect(rows[0].detail).toMatch(/^converted to proposal p-[0-9a-f]{8}: this turn includes text/)
+    // A hand-off has nothing to propose with: it stays a refusal.
+    const handoff = await sessionHandOff(p.caller, { title: 't', handoff: 'h' })
+    expect(handoff.isError).toBe(true)
+    expect(handoff.text).toMatch(
+      /^Refused: this turn includes text that did not come from the user/
+    )
   })
 
   it('plan mode, the agent-created rule and the cwd/mode caps hold in the service too', async () => {
@@ -558,14 +633,20 @@ describe('the service refuses without the gate (a mode that approves everything 
     expect((await sessionHandOff(ac.caller, { title: 't', handoff: 'h' })).text).toMatch(
       /started by another session/
     )
+    expect((await sessionStart(ac.caller, start())).text).toMatch(/^converted to a proposal/)
 
     const capped = born('svc-cap', { mode: 'default' })
     expect(
       (await sessionStart(capped.caller, start({ permission_mode: 'bypassPermissions' }))).text
     ).toMatch(/above this session's own mode/)
     expect((await sessionStart(capped.caller, start({ cwd: path.join(ROOT, '..') }))).text).toMatch(
-      /outside this session's working tree/
+      /^converted to a proposal: cwd .* outside this session's working tree/
     )
+    // A mode above the caller's stays a refusal even when something else would have converted.
+    capped.fake.originLedger.nonUserDelivered()
+    expect(
+      (await sessionStart(capped.caller, start({ permission_mode: 'bypassPermissions' }))).text
+    ).toMatch(/^Refused: permission_mode bypassPermissions is above/)
     expect(createSession).not.toHaveBeenCalled()
   })
 
@@ -576,10 +657,11 @@ describe('the service refuses without the gate (a mode that approves everything 
         sessionStart(p.caller, start({ title: `Task ${i}` }))
       )
     )
-    expect(results.filter((r) => !r.isError)).toHaveLength(STARTS_PER_USER_TURN)
-    expect(results.filter((r) => r.isError).every((r) => /already started 10/.test(r.text))).toBe(
-      true
-    )
+    expect(results.filter((r) => /^started s-/.test(r.text))).toHaveLength(STARTS_PER_USER_TURN)
+    // The two past the limit are proposals for the user to start, not starts and not errors.
+    const over = results.filter((r) => /^converted to a proposal/.test(r.text))
+    expect(over).toHaveLength(2)
+    expect(over.every((r) => /already started 10/.test(r.text) && !r.isError)).toBe(true)
     expect(created).toHaveLength(STARTS_PER_USER_TURN)
   })
 })
@@ -796,13 +878,16 @@ describe('sessionStart', () => {
       permissionMode: 'default'
     }
     const why = /started by another session and the user has not typed into it/
-    expect(deny(sessionToolsGate(childCaller, 'session_start', start(), {}))).toMatch(why)
-    expect((await sessionStart(childCaller, start({ title: 'Grandchild' }))).text).toMatch(why)
+    expect((await sessionStart(childCaller, start({ title: 'Grandchild' }))).text).toMatch(
+      /^converted to a proposal: this session was started by another session and the user has not typed into it/
+    )
     expect((await sessionHandOff(childCaller, { title: 'Next', handoff: 'h' })).text).toMatch(why)
     // ClaudeUI acting for the user's setting is not the user typing into it either…
     clientTypes(childId, { hostInstruction: true })
     expect(getSessionLink(childRef)?.clientPromptedAt).toBeNull()
-    expect(deny(sessionToolsGate(childCaller, 'session_start', start(), {}))).toMatch(why)
+    expect((await sessionStart(childCaller, start({ title: 'Grandchild' }))).text).toMatch(
+      /^converted to a proposal/
+    )
     // …but a hand-off on that host-instruction turn is allowed, as on a live session.
     expect(
       sessionToolsGate(childCaller, 'session_hand_off', { title: 'n', handoff: 'h' }, {}).behavior
@@ -811,11 +896,63 @@ describe('sessionStart', () => {
     // A client prompt after the restart is what lifts it, and it is recorded.
     clientTypes(childId)
     expect(getSessionLink(childRef)?.clientPromptedAt).toEqual(expect.any(Number))
-    expect(sessionToolsGate(childCaller, 'session_start', start(), {}).behavior).toBe('allow')
+    expect((await sessionStart(childCaller, start({ title: 'Grandchild' }))).text).toMatch(
+      /^started s-/
+    )
     // The first client prompt is the one recorded.
     const first = getSessionLink(childRef)?.clientPromptedAt
     clientTypes(childId)
     expect(getSessionLink(childRef)?.clientPromptedAt).toBe(first)
+  })
+
+  it('resume, first status, then a call before any client prompt: the persisted wait still holds (F1)', async () => {
+    const p = born('start-resume')
+    await sessionStart(p.caller, start())
+    const tempId = created[0].routingId
+    const durable = `thread-${randomUUID()}`
+    // The child reached its engine and was rekeyed to the engine's id, as in a normal run.
+    emitEvent('session:status', [tempId, statusOf(durable)])
+    live.set(durable, live.get(tempId) as Fake)
+    live.delete(tempId)
+    const childRef = refFor('claude', durable)
+    expect(getSessionLink(childRef)).toMatchObject({ createdBy: 'agent', clientPromptedAt: null })
+
+    // The host restarts and resumes the child: a NEW routing id, a fresh ledger, no prompt yet.
+    syncCore.resetCanonicalForTests()
+    live.clear()
+    const resumeId = `resume-${randomUUID()}`
+    emitEvent('session:created', [
+      resumeId,
+      { cwd: p.caller.cwd, engineId: 'claude', resumeSessionId: durable }
+    ])
+    live.set(resumeId, new Fake(resumeId))
+    // Its first status carries the durable id: core rekeys the resumed session onto it.
+    emitEvent('session:status', [resumeId, statusOf(durable)])
+    live.set(durable, live.get(resumeId) as Fake)
+    live.delete(resumeId)
+    expect(live.get(durable)?.originLedger.agentCreated).toBe(false)
+
+    const resumed: SessionToolCaller = {
+      routingId: durable,
+      engine: 'claude',
+      cwd: p.caller.cwd,
+      permissionMode: 'default'
+    }
+    // Same ref as before the restart, so the link's wait is found.
+    expect(refFor('claude', durable)).toBe(childRef)
+    expect((await sessionStart(resumed, start({ title: 'Grandchild' }))).text).toMatch(
+      /^converted to a proposal: this session was started by another session/
+    )
+    expect((await sessionHandOff(resumed, { title: 'Next', handoff: 'h' })).text).toMatch(
+      /started by another session/
+    )
+
+    // The user types into the resumed session: recorded under the durable id, and it lifts.
+    clientTypes(durable)
+    expect(getSessionLink(childRef)?.clientPromptedAt).toEqual(expect.any(Number))
+    expect((await sessionStart(resumed, start({ title: 'Grandchild' }))).text).toMatch(
+      /^started s-/
+    )
   })
 
   it('a session the user (or ClaudeUI itself) started is not held to it after a restart', () => {
@@ -1403,5 +1540,993 @@ describe('runSessionTool and the wiring', () => {
     expect(r).toMatchObject({ ok: true, ref: p.ref })
     const text = sessionList(p.caller, {}).text
     expect(text).not.toContain(p.caller.routingId)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Proposals (slice 1c-b)
+// ---------------------------------------------------------------------------
+
+const PROPOSAL_ID = /p-[0-9a-f]{8}/
+
+/** `session_start` with `mode: propose`; returns the result and the proposal id it names. */
+async function propose(
+  caller: SessionToolCaller,
+  over: Partial<SessionStartInput> = {}
+): Promise<{ text: string; id: string; isError?: boolean }> {
+  const out = await sessionStart(caller, start({ mode: 'propose', ...over }))
+  return { ...out, id: PROPOSAL_ID.exec(out.text)?.[0] ?? '' }
+}
+
+/** The proposal card a parent's transcript holds for `id`, as canonical has it. */
+function cardOf(parentRoutingId: string, id: string): Record<string, unknown> | undefined {
+  const msg = syncCore
+    .getCanonicalState()
+    .sessions[parentRoutingId].messages.find((m) => m.id === proposalCardId(id))
+  return msg?.content[0] as Record<string, unknown> | undefined
+}
+
+describe('session_start mode propose', () => {
+  it('makes a pending proposal with its placement resolved, a card in the parent transcript, and starts nothing', async () => {
+    const p = born('prop-ok', {
+      title: 'Assistant',
+      model: 'sonnet',
+      effort: 'high',
+      mode: 'acceptEdits'
+    })
+    const out = await propose(p.caller, {
+      permission_mode: 'default',
+      worktree: 'queue-fix',
+      wake_when_done: true
+    })
+    expect(out.isError).toBeUndefined()
+    expect(out.text).toBe(
+      `proposed ${out.id}: the user sees a card and nothing runs until they start it. ` +
+        'It expires in 7 days; session_dismiss_proposal withdraws it sooner.'
+    )
+    expect(createSession).not.toHaveBeenCalled()
+    expect(prompts).toEqual([])
+
+    const row = getSessionProposal(out.id)
+    expect(row).toMatchObject({
+      parentRef: p.ref,
+      title: 'Fix the flaky queue test',
+      state: 'pending',
+      startedRef: null
+    })
+    expect(row?.expiresAt).toBe((row?.createdAt ?? 0) + PROPOSAL_TTL_MS)
+    expect(JSON.parse(row?.placement ?? '{}')).toEqual({
+      engine: 'claude',
+      model: 'sonnet',
+      effort: 'high',
+      permission_mode: 'default',
+      cwd: p.caller.cwd,
+      worktree: 'queue-fix',
+      wake_when_done: true
+    })
+    expect(cardOf(p.caller.routingId, out.id)).toMatchObject({
+      type: 'proposal_card',
+      proposalId: out.id,
+      state: 'pending',
+      title: 'Fix the flaky queue test',
+      background: BACKGROUND,
+      parentCwd: p.caller.cwd,
+      placement: { engine: 'claude', permission_mode: 'default' }
+    })
+    expect(auditFor(p.ref)[0]).toMatchObject({
+      channel: 'session-tools:session_start',
+      sessionId: out.id,
+      outcome: 'ok',
+      detail: `proposed ${out.id}`
+    })
+  })
+
+  it('is allowed in plan mode, where starting is not', async () => {
+    const p = born('prop-plan', { mode: 'plan' })
+    expect(
+      sessionToolsGate(p.caller, 'session_start', start({ mode: 'propose' }), {}).behavior
+    ).toBe('allow')
+    expect((await propose(p.caller)).text).toMatch(/^proposed p-/)
+    expect(sessionToolsGate(p.caller, 'session_start', start(), {}).behavior).toBe('deny')
+    expect((await sessionStart(p.caller, start())).text).toMatch(/plan mode/)
+    expect(createSession).not.toHaveBeenCalled()
+  })
+
+  it('still caps the mode: above the proposer is a refusal, not a card', async () => {
+    const p = born('prop-cap', { mode: 'default' })
+    const out = await propose(p.caller, { permission_mode: 'bypassPermissions' })
+    expect(out.isError).toBe(true)
+    expect(out.text).toMatch(/^Refused: permission_mode bypassPermissions is above/)
+    expect(sessionProposalsByParent(p.ref)).toEqual([])
+  })
+
+  it('needs the same stand-alone brief as a start', async () => {
+    const p = born('prop-valid')
+    expect((await propose(p.caller, { background: 'short' })).text).toMatch(
+      /at least 80 characters/
+    )
+    expect((await propose(p.caller, { title: '' })).text).toMatch(/title is required/)
+    expect((await propose(p.caller, { cwd: path.join(ROOT, 'no-such-dir-x') })).text).toMatch(
+      /not an existing directory/
+    )
+    expect(sessionProposalsByParent(p.ref)).toEqual([])
+  })
+
+  it('keeps at most 20 pending: the 21st withdraws the oldest, reason evicted, and its card says so', async () => {
+    const p = born('prop-evict')
+    const ids: string[] = []
+    for (let i = 0; i <= MAX_PENDING_PROPOSALS; i++) {
+      // The user speaks between ideas: a turn may only make ten (see R3 below).
+      p.fake.originLedger.userPrompt()
+      ids.push((await propose(p.caller, { title: `Idea ${i}` })).id)
+    }
+    const pending = sessionProposalsByParent(p.ref, 'pending')
+    expect(pending).toHaveLength(MAX_PENDING_PROPOSALS)
+    expect(pending.map((r) => r.id)).not.toContain(ids[0])
+    expect(getSessionProposal(ids[0])).toMatchObject({
+      state: 'dismissed',
+      dismissReason: 'evicted'
+    })
+    expect(cardOf(p.caller.routingId, ids[0])).toMatchObject({
+      state: 'dismissed',
+      reason: 'evicted'
+    })
+    expect(cardOf(p.caller.routingId, ids[MAX_PENDING_PROPOSALS])).toMatchObject({
+      state: 'pending'
+    })
+  })
+})
+
+describe('a start that cannot run becomes a proposal', () => {
+  it('carries the requested placement, names the reason, and the proposal starts only by a click when its directory is outside the tree', async () => {
+    const root = dir('conv-root')
+    const outside = dir('conv-outside')
+    const p = born('conv-cwd', { cwd: root })
+    const out = await sessionStart(p.caller, start({ cwd: outside }))
+    const id = PROPOSAL_ID.exec(out.text)?.[0] ?? ''
+    expect(out.text).toMatch(/^converted to a proposal: cwd .* outside this session's working tree/)
+    expect(JSON.parse(getSessionProposal(id)?.placement ?? '{}').cwd).toBe(uiPath(outside))
+
+    // The agent cannot start it by id: the click is the consent for a directory outside its tree.
+    const byId = await sessionStart(p.caller, { proposal_id: id })
+    expect(byId.isError).toBe(true)
+    expect(byId.text).toMatch(
+      /outside this session's working tree, so only the user's click can start it/
+    )
+    expect(createSession).not.toHaveBeenCalled()
+    // The user can.
+    const clicked = await startProposalFromClient(id)
+    expect(clicked.success).toBe(true)
+    expect(created[0].cwd).toBe(uiPath(outside))
+  })
+})
+
+describe('session_start with a proposal_id', () => {
+  it('starts exactly the proposal on a clean user turn, as the agent', async () => {
+    const p = born('byid-ok', { title: 'Assistant', model: 'sonnet' })
+    const { id } = await propose(p.caller, { permission_mode: 'plan' })
+    // The parent changes mode afterwards: what starts is what the card showed.
+    const out = await sessionStart(p.caller, { proposal_id: id })
+    expect(out.isError).toBeUndefined()
+    const m = /^started (s-[0-9a-z]{6}) "Fix the flaky queue test"\. It is starting up/.exec(
+      out.text
+    )
+    expect(m).not.toBeNull()
+    const childRef = (m as RegExpExecArray)[1]
+    expect(created).toHaveLength(1)
+    expect(created[0]).toMatchObject({ permissionMode: 'plan', model: 'sonnet', cwd: p.caller.cwd })
+    expect(getSessionLink(childRef)).toMatchObject({ createdBy: 'agent', kind: 'started' })
+    expect(prompts[0].prompt).toBe(
+      `Background (from session ${p.ref} "Assistant" that started this one):\n${BACKGROUND}\n\nTask:\n${start().prompt}`
+    )
+    expect(getSessionProposal(id)).toMatchObject({ state: 'started', startedRef: childRef })
+    expect(cardOf(p.caller.routingId, id)).toMatchObject({ state: 'started', startedRef: childRef })
+    // It counts against the turn's starts, and the new session is held to the agent-created rule.
+    expect(p.fake.originLedger.sessionStartsSinceUser).toBe(1)
+    expect(live.get(created[0].routingId)?.originLedger.agentCreated).toBe(true)
+    // A second go is told where it went.
+    expect((await sessionStart(p.caller, { proposal_id: id })).text).toBe(
+      `Proposal ${id} already started as ${childRef}.`
+    )
+  })
+
+  it('is refused on a turn that took in text from another session, and the refusal points at the card', async () => {
+    const p = born('byid-taint')
+    const { id } = await propose(p.caller)
+    p.fake.originLedger.nonUserDelivered()
+    const gate = sessionToolsGate(p.caller, 'session_start', { proposal_id: id }, {})
+    expect(gate.behavior).toBe('deny')
+    const out = await sessionStart(p.caller, { proposal_id: id })
+    expect(out.isError).toBe(true)
+    expect(out.text).toMatch(/^Refused: this turn includes text that did not come from the user/)
+    expect(out.text).toMatch(/Ask the user to click Start on the card\.$/)
+    expect(createSession).not.toHaveBeenCalled()
+    expect(getSessionProposal(id)?.state).toBe('pending')
+    // The click still works.
+    expect((await startProposalFromClient(id)).success).toBe(true)
+  })
+
+  it('is refused in a session another session started until a client has typed into it', async () => {
+    const p = born('byid-agentcreated')
+    const { id } = await propose(p.caller)
+    p.fake.originLedger.markAgentCreated()
+    p.fake.originLedger.userPrompt({ agentBrief: true })
+    const out = await sessionStart(p.caller, { proposal_id: id })
+    expect(out.text).toMatch(/started by another session and the user has not typed into it/)
+    expect(out.text).toMatch(/Ask the user to click Start on the card\.$/)
+    expect(createSession).not.toHaveBeenCalled()
+  })
+
+  it('takes nothing but the id, only its own proposals, and only while they are pending', async () => {
+    const p = born('byid-args')
+    const other = born('byid-other')
+    const { id } = await propose(p.caller)
+    const theirs = (await propose(other.caller)).id
+    for (const extra of [
+      { title: 'x' },
+      { mode: 'start' as const },
+      { cwd: '.' },
+      { engine: 'pi' as const }
+    ]) {
+      const out = await sessionStart(p.caller, { proposal_id: id, ...extra })
+      expect(out.text).toMatch(/proposal_id is used on its own/)
+    }
+    expect((await sessionStart(p.caller, { proposal_id: theirs })).text).toMatch(
+      /belongs to another session/
+    )
+    expect((await sessionStart(p.caller, { proposal_id: 'p-00000000' })).text).toBe(
+      'No proposal p-00000000.'
+    )
+    expect((await sessionStart(p.caller, { proposal_id: 'nonsense' })).text).toMatch(/No proposal/)
+    dismissProposal(id, 'user')
+    expect((await sessionStart(p.caller, { proposal_id: id })).text).toBe(
+      `Proposal ${id} is closed (user).`
+    )
+    expect(createSession).not.toHaveBeenCalled()
+  })
+
+  it('is refused in plan mode, and for a mode the proposer has since lost', async () => {
+    const p = born('byid-mode', { mode: 'acceptEdits' })
+    const { id } = await propose(p.caller, { permission_mode: 'acceptEdits' })
+    // The session drops to default: the proposal asked for more than it now holds.
+    const lower: SessionToolCaller = { ...p.caller, permissionMode: 'default' }
+    expect((await sessionStart(lower, { proposal_id: id })).text).toMatch(
+      /above this session's own mode/
+    )
+    const plan: SessionToolCaller = { ...p.caller, permissionMode: 'plan' }
+    expect((await sessionStart(plan, { proposal_id: id })).text).toMatch(/plan mode/)
+    expect(createSession).not.toHaveBeenCalled()
+  })
+})
+
+describe('session_dismiss_proposal', () => {
+  it('withdraws its own pending proposal with the agent as the reason, and nobody else', async () => {
+    const p = born('dis-ok')
+    const other = born('dis-other')
+    const { id } = await propose(p.caller)
+    const theirs = (await propose(other.caller)).id
+    expect(
+      sessionToolsGate(p.caller, 'session_dismiss_proposal', { proposal_id: id }, {}).behavior
+    ).toBe('allow')
+    expect((await sessionDismissProposal(p.caller, { proposal_id: theirs })).text).toMatch(
+      /belongs to another session/
+    )
+    expect(getSessionProposal(theirs)?.state).toBe('pending')
+    const out = await sessionDismissProposal(p.caller, {
+      proposal_id: id,
+      reason: 'not needed\nany more'
+    })
+    expect(out.text).toBe(`dismissed ${id}.`)
+    expect(getSessionProposal(id)).toMatchObject({
+      state: 'dismissed',
+      dismissReason: 'agent: not needed any more'
+    })
+    expect(cardOf(p.caller.routingId, id)).toMatchObject({
+      state: 'dismissed',
+      reason: 'agent: not needed any more'
+    })
+    expect((await sessionDismissProposal(p.caller, { proposal_id: id })).text).toBe(
+      `${id} was already withdrawn.`
+    )
+    expect(auditFor(p.ref).map((r) => r.channel)).toContain(
+      'session-tools:session_dismiss_proposal'
+    )
+  })
+
+  it('works in plan mode, and is refused to a subagent like any acting tool', async () => {
+    const p = born('dis-plan', { mode: 'plan' })
+    const { id } = await propose(p.caller)
+    expect(
+      sessionToolsGate(p.caller, 'session_dismiss_proposal', { proposal_id: id }, {}).behavior
+    ).toBe('allow')
+    expect(
+      sessionToolsGate(p.caller, 'session_dismiss_proposal', { proposal_id: id }, { agentId: 'a1' })
+        .behavior
+    ).toBe('deny')
+    expect((await sessionDismissProposal(p.caller, { proposal_id: id })).text).toBe(
+      `dismissed ${id}.`
+    )
+  })
+
+  it('reports a proposal that already started or expired instead of touching it', async () => {
+    const p = born('dis-settled')
+    const started = (await propose(p.caller)).id
+    await startProposalFromClient(started)
+    expect((await sessionDismissProposal(p.caller, { proposal_id: started })).text).toMatch(
+      /already started as s-/
+    )
+    const old = createProposal({
+      parentRef: p.ref,
+      title: 'Old',
+      prompt: 'p',
+      background: BACKGROUND,
+      placement: { engine: 'claude', permission_mode: 'default', cwd: p.caller.cwd },
+      now: Date.now() - PROPOSAL_TTL_MS - 1000
+    })
+    expect((await sessionDismissProposal(p.caller, { proposal_id: old.id })).text).toBe(
+      `${old.id} has expired.`
+    )
+  })
+})
+
+describe('the Start and Dismiss clicks', () => {
+  it('Start runs the start flow as the user: placement as proposed, link by the user, no agent-created rule, card started', async () => {
+    const p = born('click-ok', { title: 'Assistant', model: 'sonnet', mode: 'acceptEdits' })
+    const { id } = await propose(p.caller, { permission_mode: 'default', effort: 'low' })
+    // The proposer has moved on; the click starts what the card showed.
+    p.caller.permissionMode = 'bypassPermissions'
+    const result = await startProposalFromClient(id)
+    expect(result).toEqual({ success: true, startedRef: expect.stringMatching(/^s-/) })
+    const childRef = result.startedRef as string
+    expect(created[0]).toMatchObject({
+      permissionMode: 'default',
+      effort: 'low',
+      model: 'sonnet',
+      createdBy: 'agent'
+    })
+    expect(getSessionLink(childRef)).toMatchObject({
+      createdBy: 'user',
+      kind: 'started',
+      parentRef: p.ref
+    })
+    // The link says the user chose it; the session is still held to the agent-created rule.
+    expect(live.get(created[0].routingId)?.originLedger.agentCreated).toBe(true)
+    expect(prompts).toEqual([
+      {
+        rid: created[0].routingId,
+        options: { origin: 'user', agentBrief: true },
+        prompt: `Background (from session ${p.ref} "Assistant" that started this one):\n${BACKGROUND}\n\nTask:\n${start().prompt}`
+      }
+    ])
+    expect(cardOf(p.caller.routingId, id)).toMatchObject({ state: 'started', startedRef: childRef })
+    // The click consented to ONE session: it cannot start more on its brief alone, and
+    // a client typing into it is what lifts that.
+    const childCaller: SessionToolCaller = {
+      routingId: created[0].routingId,
+      engine: 'claude',
+      cwd: p.caller.cwd,
+      permissionMode: 'default'
+    }
+    expect((await sessionStart(childCaller, start({ title: 'Grandchild' }))).text).toMatch(
+      /^converted to a proposal: this session was started by another session/
+    )
+    clientTypes(created[0].routingId)
+    expect((await sessionStart(childCaller, start({ title: 'Grandchild' }))).text).toMatch(
+      /^started s-/
+    )
+    // The click does not spend the proposer's turn budget.
+    expect(p.fake.originLedger.sessionStartsSinceUser).toBe(0)
+  })
+
+  it('a second click, or two at once, start one session', async () => {
+    const p = born('click-twice')
+    const { id } = await propose(p.caller)
+    const both = await Promise.all([startProposalFromClient(id), startProposalFromClient(id)])
+    expect(both.filter((r) => r.success)).toHaveLength(1)
+    expect(created).toHaveLength(1)
+    expect((await startProposalFromClient(id)).error).toMatch(/already started as s-/)
+  })
+
+  it('refuses unknown, expired and dismissed proposals with the reason', async () => {
+    const p = born('click-closed')
+    expect(await startProposalFromClient('p-ffffffff')).toEqual({
+      success: false,
+      error: 'That proposal no longer exists.'
+    })
+    expect((await startProposalFromClient('nonsense')).error).toBe('Unknown proposal')
+    const dismissed = (await propose(p.caller)).id
+    expect(dismissProposalFromClient(dismissed)).toEqual({ success: true })
+    expect((await startProposalFromClient(dismissed)).error).toBe(
+      'That proposal was withdrawn (user).'
+    )
+    expect(dismissProposalFromClient(dismissed).error).toBe('That proposal was withdrawn (user).')
+    expect(createSession).not.toHaveBeenCalled()
+  })
+
+  it('reports why a start that cannot happen cannot, and leaves the proposal pending', async () => {
+    const p = born('click-fail')
+    const { id } = await propose(p.caller)
+    behaviour.failCreate = 'Model "x" is not allowed'
+    const out = await startProposalFromClient(id)
+    expect(out).toEqual({
+      success: false,
+      error: 'Could not start the session: Model "x" is not allowed'
+    })
+    expect(getSessionProposal(id)?.state).toBe('pending')
+    behaviour.failCreate = null
+    expect((await startProposalFromClient(id)).success).toBe(true)
+  })
+
+  it('the commands go through the registry with the client identity and the chat capability', async () => {
+    const p = born('click-cmd')
+    const { id } = await propose(p.caller)
+    const registry = new CommandRegistry()
+    const dispatcher = new RemoteDispatcher(registry)
+    for (const [channel, handler] of [
+      ['session:proposal:start', (pid: string) => startProposalFromClient(pid)],
+      ['session:proposal:dismiss', async (pid: string) => dismissProposalFromClient(pid)]
+    ] as const) {
+      registry.register({
+        channel,
+        capability: 'chat',
+        kind: 'command',
+        transport: 'remote',
+        handler
+      })
+    }
+    const conn = makeRemoteConnection('password', 'phone')
+    const started = await dispatcher.handle(
+      { type: 'invoke', id: '1', channel: 'session:proposal:start', args: [id] },
+      conn
+    )
+    expect(JSON.stringify(started)).toContain('startedRef')
+    const rows = listAuditLog({ limit: 500 }).filter((r) => r.channel === 'session:proposal:start')
+    expect(rows[0]).toMatchObject({ method: 'password', capability: 'chat', outcome: 'ok' })
+    const again = await dispatcher.handle(
+      { type: 'invoke', id: '2', channel: 'session:proposal:dismiss', args: [id] },
+      conn
+    )
+    expect(JSON.stringify(again)).toContain('already started')
+  })
+})
+
+describe('proposal expiry is read from the clock, never from a timer', () => {
+  const stale = (parentRef: string, cwd: string): ReturnType<typeof createProposal> =>
+    createProposal({
+      parentRef,
+      title: 'Stale',
+      prompt: 'p',
+      background: BACKGROUND,
+      placement: { engine: 'claude', permission_mode: 'default', cwd },
+      now: Date.now() - PROPOSAL_TTL_MS - 5000
+    })
+
+  it('settles an overdue pending proposal as expired when it is read, and rewrites its card', () => {
+    const p = born('exp-read')
+    const old = stale(p.ref, p.caller.cwd)
+    // Nothing has run since it was made: the row still says pending.
+    expect(getSessionProposal(old.id)?.state).toBe('pending')
+    expect(cardOf(p.caller.routingId, old.id)).toMatchObject({ state: 'pending' })
+    const read = readProposal(old.id)
+    expect(read).toMatchObject({ state: 'dismissed', dismissReason: 'expired' })
+    expect(cardOf(p.caller.routingId, old.id)).toMatchObject({
+      state: 'dismissed',
+      reason: 'expired'
+    })
+    // And a live one is left alone.
+    const fresh = createProposal({
+      parentRef: p.ref,
+      title: 'Fresh',
+      prompt: 'p',
+      background: BACKGROUND,
+      placement: { engine: 'claude', permission_mode: 'default', cwd: p.caller.cwd }
+    })
+    expect(readProposal(fresh.id)?.state).toBe('pending')
+  })
+
+  it('refuses to start an expired proposal, by click or by the agent', async () => {
+    const p = born('exp-start')
+    const old = stale(p.ref, p.caller.cwd)
+    expect((await startProposalFromClient(old.id)).error).toBe('That proposal has expired.')
+    const old2 = stale(p.ref, p.caller.cwd)
+    expect((await sessionStart(p.caller, { proposal_id: old2.id })).text).toBe(
+      `Proposal ${old2.id} is closed (expired).`
+    )
+    expect(createSession).not.toHaveBeenCalled()
+  })
+
+  it('does not count an expired proposal against the cap of 20', () => {
+    const p = born('exp-cap')
+    for (let i = 0; i < MAX_PENDING_PROPOSALS; i++) stale(p.ref, p.caller.cwd)
+    const fresh = createProposal({
+      parentRef: p.ref,
+      title: 'Fresh',
+      prompt: 'p',
+      background: BACKGROUND,
+      placement: { engine: 'claude', permission_mode: 'default', cwd: p.caller.cwd }
+    })
+    expect(sessionProposalsByParent(p.ref, 'pending').map((r) => r.id)).toEqual([fresh.id])
+    expect(
+      sessionProposalsByParent(p.ref, 'dismissed').every((r) => r.dismissReason === 'expired')
+    ).toBe(true)
+  })
+
+  it('a card left open past its time shows expired without waiting for the host', () => {
+    const base = { state: 'pending' as const, expiresAt: 1000 }
+    expect(proposalDisplayState(base, 999)).toBe('pending')
+    expect(proposalDisplayState(base, 1000)).toBe('expired')
+    expect(proposalDisplayState({ state: 'dismissed', reason: 'expired', expiresAt: 1 }, 0)).toBe(
+      'expired'
+    )
+    expect(proposalDisplayState({ state: 'dismissed', reason: 'user', expiresAt: 1 }, 5)).toBe(
+      'dismissed'
+    )
+    expect(proposalDisplayState({ state: 'started', expiresAt: 1 }, 5)).toBe('started')
+  })
+
+  it('a cold read puts the card back with its current state, expired ones included', () => {
+    const p = born('exp-cold')
+    const pending = createProposal({
+      parentRef: p.ref,
+      title: 'Live',
+      prompt: 'p',
+      background: BACKGROUND,
+      placement: { engine: 'claude', permission_mode: 'default', cwd: p.caller.cwd }
+    })
+    const old = stale(p.ref, p.caller.cwd)
+    const history: ChatMessage[] = [
+      { id: 'a', role: 'user', content: [{ type: 'text', text: 'hi' }], timestamp: 1 },
+      {
+        id: 'z',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'bye' }],
+        timestamp: Date.now() + 1000
+      }
+    ]
+    const out = withProposalCards(p.caller.routingId, history)
+    expect(out.map((m) => m.id)).toEqual([
+      'a',
+      proposalCardId(old.id),
+      proposalCardId(pending.id),
+      'z'
+    ])
+    expect(out[1].content[0]).toMatchObject({ state: 'dismissed', reason: 'expired' })
+    expect(out[2].content[0]).toMatchObject({ state: 'pending', title: 'Live' })
+    // A session that proposed nothing reads exactly as the engine returned it.
+    const lone = born('exp-lone')
+    expect(withProposalCards(lone.caller.routingId, history)).toBe(history)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F2: a started session's directory (verify-1c)
+// ---------------------------------------------------------------------------
+
+describe('the directory a started session gets', () => {
+  it('is written in the style UI-created sessions use, and a relative one resolves under the parent', async () => {
+    const root = dir('f2-root')
+    fs.mkdirSync(path.join(root, 'sub', 'deeper'), { recursive: true })
+    const p = born('f2-parent', { cwd: uiPath(root) })
+    await sessionStart(p.caller, start({ cwd: 'sub' }))
+    await sessionStart(p.caller, start({ cwd: path.join(root, 'sub', 'deeper') }))
+    await sessionStart(p.caller, start({ cwd: '.' }))
+    expect(created.map((c) => c.cwd)).toEqual([
+      uiPath(path.join(root, 'sub')),
+      uiPath(path.join(root, 'sub', 'deeper')),
+      uiPath(root)
+    ])
+    // No backslash anywhere, on a platform whose own separator is one.
+    if (path.sep === '\\') for (const c of created) expect(c.cwd).not.toContain('\\')
+    // A started session carries no cwd the caller did not ask for.
+    await sessionStart(p.caller, start())
+    expect(created[3].cwd).toBe(p.caller.cwd)
+  })
+
+  it.runIf(path.sep === '\\')(
+    'uiPath turns Windows separators into the UI style and drops a trailing one',
+    () => {
+      expect(uiPath('D:\\WorkPlace\\proj\\sub\\')).toBe('D:/WorkPlace/proj/sub')
+      expect(uiPath('D:\\')).toBe('D:/')
+      expect(uiPath('D:/already/fine')).toBe('D:/already/fine')
+    }
+  )
+
+  it("keeps a session started in a subfolder in its parent's project (the list scope and the read gate)", async () => {
+    const root = dir('f2-project')
+    fs.mkdirSync(path.join(root, 'pkg'), { recursive: true })
+    const p = born('f2-proj-parent', { cwd: uiPath(root) })
+    const out = await sessionStart(p.caller, start({ cwd: 'pkg' }))
+    const childRef = /^started (s-[0-9a-z]{6})/.exec(out.text)?.[1] as string
+    const elsewhere = born('f2-proj-else', { cwd: dir('f2-elsewhere') })
+    const list = sessionList(p.caller, { scope: 'project' }).text
+    expect(list).toContain(childRef)
+    expect(list).not.toContain(elsewhere.ref)
+    // Going the other way it does not hold: the parent's directory CONTAINS the child's,
+    // and a session rooted above a project would otherwise be everyone's project.
+    const child = created[0].routingId
+    const fromChild = sessionList(
+      { ...p.caller, routingId: child, cwd: created[0].cwd },
+      { scope: 'project' }
+    ).text
+    // (The child's own row names its parent; the parent has no row of its own.)
+    expect(fromChild.split(/\r?\n/).some((line) => line.startsWith(p.ref))).toBe(false)
+    // Reading a session in the same tree is free; a sibling tree is not.
+    expect(sessionToolsGate(p.caller, 'session_read', { session: childRef }, {}).behavior).toBe(
+      'allow'
+    )
+    expect(
+      sessionToolsGate(p.caller, 'session_read', { session: elsewhere.ref }, {}).behavior
+    ).toBe('ask')
+  })
+
+  it('does not count a session rooted ABOVE the caller (the home folder, a drive root) as its project', async () => {
+    const top = dir('f2-above')
+    const repo = path.join(top, 'work', 'repo')
+    fs.mkdirSync(repo, { recursive: true })
+    const mine = born('f2-above-me', { cwd: uiPath(repo), title: 'Me' })
+    const home = born('f2-above-home', { cwd: uiPath(top), title: 'Home' })
+    const inside = born('f2-above-in', { cwd: uiPath(path.join(repo, 'pkg')), title: 'Inside' })
+    const listed = sessionList(mine.caller, { scope: 'project' }).text
+    expect(listed).toContain(inside.ref)
+    expect(listed).not.toContain(home.ref)
+    // Reads: a session in a subfolder is free, one that contains the caller asks.
+    expect(
+      sessionToolsGate(mine.caller, 'session_read', { session: inside.ref }, {}).behavior
+    ).toBe('allow')
+    expect(sessionToolsGate(mine.caller, 'session_read', { session: home.ref }, {}).behavior).toBe(
+      'ask'
+    )
+    expect(sessionToolsGate(mine.caller, 'session_get', { session: home.ref }, {}).behavior).toBe(
+      'ask'
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 1c-b review rulings
+// ---------------------------------------------------------------------------
+
+const tick = (): Promise<void> => new Promise((r) => setImmediate(r))
+
+describe('a click-started session is held to the agent-created rule (R1)', () => {
+  it('also after a host restart: the proposal that started it is the memory', async () => {
+    const p = born('r1-restart')
+    const { id } = await propose(p.caller)
+    const clicked = await startProposalFromClient(id)
+    const childId = created[0].routingId
+    // The link is the user's, so nothing in it says "agent"…
+    expect(getSessionLink(clicked.startedRef as string)).toMatchObject({
+      createdBy: 'user',
+      clientPromptedAt: null
+    })
+    // …and the host restarts: a fresh ledger knows nothing.
+    live.set(childId, new Fake(childId))
+    const childCaller: SessionToolCaller = {
+      routingId: childId,
+      engine: 'claude',
+      cwd: p.caller.cwd,
+      permissionMode: 'default'
+    }
+    expect((await sessionStart(childCaller, start({ title: 'Grandchild' }))).text).toMatch(
+      /^converted to a proposal: this session was started by another session/
+    )
+    expect((await sessionHandOff(childCaller, { title: 'Next', handoff: 'h' })).text).toMatch(
+      /started by another session/
+    )
+    clientTypes(childId)
+    expect((await sessionStart(childCaller, start({ title: 'Grandchild' }))).text).toMatch(
+      /^started s-/
+    )
+  })
+})
+
+describe('a Start racing a close (R2)', () => {
+  it('a dismissal that lands while the session is being made is refused, and the card ends started', async () => {
+    const p = born('r2-dismiss')
+    const { id } = await propose(p.caller)
+    let release!: () => void
+    behaviour.holdCreate = new Promise<void>((r) => (release = r))
+    const click = startProposalFromClient(id)
+    await tick()
+    expect(getSessionProposal(id)?.state).toBe('starting')
+    // Neither the user's Dismiss nor the agent's can close it now.
+    expect(dismissProposalFromClient(id)).toEqual({
+      success: false,
+      error: 'That proposal is starting right now.'
+    })
+    expect((await sessionDismissProposal(p.caller, { proposal_id: id })).text).toBe(
+      `${id} is starting right now.`
+    )
+    expect((await sessionStart(p.caller, { proposal_id: id })).text).toBe(
+      `Proposal ${id} is starting right now.`
+    )
+    // The card still offers nothing it has withdrawn.
+    expect(cardOf(p.caller.routingId, id)).toMatchObject({ state: 'pending' })
+    release()
+    const result = await click
+    expect(result.success).toBe(true)
+    expect(getSessionProposal(id)).toMatchObject({
+      state: 'started',
+      startedRef: result.startedRef
+    })
+    expect(cardOf(p.caller.routingId, id)).toMatchObject({
+      state: 'started',
+      startedRef: result.startedRef
+    })
+    expect(created).toHaveLength(1)
+  })
+
+  it('the clock cannot close a proposal that is already starting', async () => {
+    const p = born('r2-expiry')
+    // Made so that it expires 150 ms from now.
+    const old = createProposal({
+      parentRef: p.ref,
+      title: 'Almost out of time',
+      prompt: 'p',
+      background: BACKGROUND,
+      placement: { engine: 'claude', permission_mode: 'default', cwd: p.caller.cwd },
+      now: Date.now() - PROPOSAL_TTL_MS + 150
+    })
+    let release!: () => void
+    behaviour.holdCreate = new Promise<void>((r) => (release = r))
+    const click = startProposalFromClient(old.id)
+    await tick()
+    await new Promise((r) => setTimeout(r, 250))
+    // Past its time, and read from every direction: still the launch's.
+    expect(readProposal(old.id)?.state).toBe('starting')
+    expect(sessionProposalsByParent(p.ref, 'pending')).toEqual([])
+    release()
+    const result = await click
+    expect(result.success).toBe(true)
+    expect(getSessionProposal(old.id)?.state).toBe('started')
+  })
+
+  it('a launch that loses the claim spawns nothing: closed, expired or already starting', async () => {
+    const p = born('r2-lose')
+    const dismissed = (await propose(p.caller)).id
+    dismissProposal(dismissed, 'user')
+    expect((await startProposalFromClient(dismissed)).success).toBe(false)
+    const expired = createProposal({
+      parentRef: p.ref,
+      title: 'Old',
+      prompt: 'p',
+      background: BACKGROUND,
+      placement: { engine: 'claude', permission_mode: 'default', cwd: p.caller.cwd },
+      now: Date.now() - PROPOSAL_TTL_MS - 10
+    })
+    expect((await startProposalFromClient(expired.id)).success).toBe(false)
+    const mine = (await propose(p.caller)).id
+    expect(claimProposal(mine)?.state).toBe('starting')
+    expect(claimProposal(mine)).toBeUndefined()
+    expect((await startProposalFromClient(mine)).error).toBe('That proposal is starting right now.')
+    expect(created).toHaveLength(0)
+    expect(finishProposal(mine, 's-abcdef')).toBe(true)
+  })
+
+  it('a failed launch gives the claim back: offered again, not stuck', async () => {
+    const p = born('r2-fail')
+    const { id } = await propose(p.caller)
+    behaviour.failCreate = 'engine not installed'
+    expect((await startProposalFromClient(id)).success).toBe(false)
+    expect(getSessionProposal(id)?.state).toBe('pending')
+    expect(cardOf(p.caller.routingId, id)).toMatchObject({ state: 'pending' })
+    // And a missing directory, found after the claim, gives it back too.
+    behaviour.failCreate = null
+    const gone = dir('r2-gone')
+    const there = await propose(p.caller, { cwd: gone })
+    fs.rmSync(gone, { recursive: true, force: true })
+    expect((await startProposalFromClient(there.id)).error).toMatch(/no longer exists/)
+    expect(getSessionProposal(there.id)?.state).toBe('pending')
+  })
+
+  it('a starting row a dead process left behind reads as pending again', async () => {
+    const p = born('r2-dead')
+    const { id } = await propose(p.caller)
+    expect(transitionSessionProposal(id, 'pending', { state: 'starting' })).toBe(true)
+    expect(readProposal(id)?.state).toBe('pending')
+    expect((await startProposalFromClient(id)).success).toBe(true)
+  })
+})
+
+describe('proposals are bounded (R3)', () => {
+  it('a turn makes at most ten, a converted start counts, and the user speaking resets it', async () => {
+    const p = born('r3-turn')
+    for (let i = 0; i < 10; i++) {
+      expect((await propose(p.caller, { title: `Idea ${i}` })).text).toMatch(/^proposed p-/)
+    }
+    const over = await propose(p.caller, { title: 'One too many' })
+    expect(over.isError).toBe(true)
+    expect(over.text).toMatch(/^Refused: too many proposals this turn \(10\)/)
+    // A start that would have been converted is refused the same way.
+    p.fake.originLedger.nonUserDelivered()
+    expect((await sessionStart(p.caller, start())).text).toMatch(/too many proposals this turn/)
+    expect(sessionProposalsByParent(p.ref)).toHaveLength(10)
+    p.fake.originLedger.userPrompt()
+    expect((await propose(p.caller)).text).toMatch(/^proposed p-/)
+  })
+
+  it('keeps at most 50 rows: the oldest dismissed go, evicted first; pending and started never do', async () => {
+    const p = born('r3-rows')
+    const placement = { engine: 'claude' as const, permission_mode: 'default', cwd: p.caller.cwd }
+    const make = (title: string): ReturnType<typeof createProposal> =>
+      createProposal({ parentRef: p.ref, title, prompt: 'p', background: BACKGROUND, placement })
+    const started = make('Started early')
+    expect(claimProposal(started.id)).toBeDefined()
+    finishProposal(started.id, 's-early1')
+    const userDismissed = make('Dismissed by the user')
+    dismissProposal(userDismissed.id, 'user')
+    for (let i = 0; i < MAX_STORED_PROPOSALS + 10; i++) make(`Idea ${i}`)
+    const rows = sessionProposalsByParent(p.ref)
+    expect(rows).toHaveLength(MAX_STORED_PROPOSALS)
+    // The 20 newest are pending; the one a session came from is kept.
+    expect(rows.filter((r) => r.state === 'pending')).toHaveLength(MAX_PENDING_PROPOSALS)
+    expect(getSessionProposal(started.id)?.state).toBe('started')
+    // Evicted rows went before the one the user dismissed.
+    expect(getSessionProposal(userDismissed.id)?.state).toBe('dismissed')
+    expect(rows.filter((r) => r.dismissReason === 'evicted').length).toBeGreaterThan(0)
+  })
+
+  it('does not put an evicted proposal back on a cold read', () => {
+    const p = born('r3-cold')
+    const placement = { engine: 'claude' as const, permission_mode: 'default', cwd: p.caller.cwd }
+    const first = createProposal({
+      parentRef: p.ref,
+      title: 'First',
+      prompt: 'p',
+      background: BACKGROUND,
+      placement
+    })
+    for (let i = 0; i < MAX_PENDING_PROPOSALS; i++) {
+      createProposal({
+        parentRef: p.ref,
+        title: `Later ${i}`,
+        prompt: 'p',
+        background: BACKGROUND,
+        placement
+      })
+    }
+    expect(getSessionProposal(first.id)?.dismissReason).toBe('evicted')
+    const ids = withProposalCards(p.caller.routingId, []).map((m) => m.id)
+    expect(ids).not.toContain(proposalCardId(first.id))
+    expect(ids).toHaveLength(MAX_PENDING_PROPOSALS)
+  })
+})
+
+describe('the card tells the user when the directory is outside the tree (R4)', () => {
+  it('marks only an outside directory on the placement', async () => {
+    const root = dir('r4-root')
+    fs.mkdirSync(path.join(root, 'sub'), { recursive: true })
+    const outside = dir('r4-outside')
+    const p = born('r4-outside', { cwd: root })
+    const inside = await propose(p.caller, { cwd: 'sub' })
+    const out = await propose(p.caller, { cwd: outside })
+    expect(JSON.parse(getSessionProposal(inside.id)?.placement ?? '{}').outside).toBeUndefined()
+    expect(JSON.parse(getSessionProposal(out.id)?.placement ?? '{}')).toMatchObject({
+      outside: true,
+      cwd: uiPath(outside)
+    })
+    expect(cardOf(p.caller.routingId, out.id)).toMatchObject({ placement: { outside: true } })
+    // A conversion records it the same way.
+    const converted = await sessionStart(p.caller, start({ cwd: outside }))
+    const id = /p-[0-9a-f]{8}/.exec(converted.text)?.[0] ?? ''
+    expect(JSON.parse(getSessionProposal(id)?.placement ?? '{}').outside).toBe(true)
+  })
+})
+
+describe('proposal text is bounded (R5)', () => {
+  it('refuses a prompt or background past 20 000 characters, for a proposal and a start alike', async () => {
+    const p = born('r5')
+    const limit = SESSION_TOOL_LIMITS.proposalTextChars
+    for (const mode of ['propose', 'start'] as const) {
+      const longPrompt = await sessionStart(
+        p.caller,
+        start({ mode, prompt: 'x'.repeat(limit + 1) })
+      )
+      expect(longPrompt.isError).toBe(true)
+      expect(longPrompt.text).toMatch(/prompt is 20001 characters; the limit is 20000/)
+      const longBackground = await sessionStart(
+        p.caller,
+        start({ mode, background: 'y'.repeat(limit + 1) })
+      )
+      expect(longBackground.text).toMatch(/background is 20001 characters; the limit is 20000/)
+    }
+    expect(createSession).not.toHaveBeenCalled()
+    expect(sessionProposalsByParent(p.ref)).toEqual([])
+    // Exactly the limit is fine.
+    expect(
+      (await propose(p.caller, { prompt: 'x'.repeat(limit), background: 'y'.repeat(limit) })).text
+    ).toMatch(/^proposed p-/)
+  })
+})
+
+describe('the clicks leave an audit row of their own (N2)', () => {
+  const rowsFor = (channel: string, id: string): ReturnType<typeof listAuditLog> =>
+    listAuditLog({ limit: 500 }).filter(
+      (r) => r.channel === channel && r.connectionId === `proposal:${id}`
+    )
+
+  it('start: the proposal, the outcome, and the session it started; a refusal is an error row', async () => {
+    const p = born('n2-start')
+    const { id } = await propose(p.caller)
+    const result = await startProposalFromClient(id)
+    expect(rowsFor('session-proposal:start', id)).toMatchObject([
+      {
+        outcome: 'ok',
+        sessionId: result.startedRef,
+        detail: `started ${result.startedRef}`,
+        capability: 'chat'
+      }
+    ])
+    await startProposalFromClient(id)
+    const rows = rowsFor('session-proposal:start', id)
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({ outcome: 'error' })
+    expect(rows[0].detail).toMatch(/^refused: That proposal already started as s-/)
+    // The result carries no `ok` key (the preload unwraps one as an envelope).
+    expect(result).not.toHaveProperty('ok')
+  })
+
+  it('a failed spawn and an unknown proposal are error rows too; dismiss is audited', async () => {
+    const p = born('n2-more')
+    const { id } = await propose(p.caller)
+    behaviour.failCreate = 'engine not installed'
+    await startProposalFromClient(id)
+    expect(rowsFor('session-proposal:start', id)[0]).toMatchObject({ outcome: 'error' })
+    expect(rowsFor('session-proposal:start', id)[0].detail).toMatch(
+      /^failed: Could not start the session/
+    )
+    await startProposalFromClient('not-an-id')
+    expect(rowsFor('session-proposal:start', 'not-an-id')[0]).toMatchObject({ outcome: 'error' })
+
+    expect(dismissProposalFromClient(id)).toEqual({ success: true })
+    expect(rowsFor('session-proposal:dismiss', id)).toMatchObject([
+      { outcome: 'ok', detail: 'dismissed' }
+    ])
+    dismissProposalFromClient(id)
+    expect(rowsFor('session-proposal:dismiss', id)[0]).toMatchObject({ outcome: 'error' })
+  })
+})
+
+describe('a worktree name is checked when the proposal is made (N3)', () => {
+  it('refuses a name Start could never use, and accepts a good one', async () => {
+    const p = born('n3')
+    for (const bad of ['../evil', 'a b', '.hidden', '-x']) {
+      const out = await propose(p.caller, { worktree: bad })
+      expect(out.isError, bad).toBe(true)
+      expect(out.text).toContain('Invalid worktree name')
+    }
+    expect(sessionProposalsByParent(p.ref)).toEqual([])
+    expect((await propose(p.caller, { worktree: 'queue-fix' })).text).toMatch(/^proposed p-/)
+  })
+})
+
+describe('a proposal launch has one card (N4)', () => {
+  it('no session card for a session a proposal started, live or on a cold read; a plain start keeps its card', async () => {
+    const p = born('n4')
+    const { id } = await propose(p.caller)
+    const started = await startProposalFromClient(id)
+    const state = (): ChatMessage[] =>
+      syncCore.getCanonicalState().sessions[p.caller.routingId].messages
+    const cards = (): string[] =>
+      state().flatMap((m) =>
+        m.content.flatMap((b) => (b.type === 'session_card' ? [b.childRef] : []))
+      )
+    expect(cards()).toEqual([])
+    expect(cardOf(p.caller.routingId, id)).toMatchObject({
+      state: 'started',
+      startedRef: started.startedRef
+    })
+    expect(withSessionCards(p.caller.routingId, []).map((m) => m.id)).toEqual([])
+    // The agent's own proposal_id start is the same thing.
+    const second = (await propose(p.caller, { title: 'Second' })).id
+    await sessionStart(p.caller, { proposal_id: second })
+    expect(cards()).toEqual([])
+    // A start with no proposal behind it still gets its card.
+    const plain = await sessionStart(p.caller, start({ title: 'Plain' }))
+    const plainRef = /^started (s-[0-9a-z]{6})/.exec(plain.text)?.[1] as string
+    expect(cards()).toEqual([plainRef])
+    expect(withSessionCards(p.caller.routingId, []).map((m) => m.id)).toEqual([
+      sessionCardId(plainRef)
+    ])
   })
 })

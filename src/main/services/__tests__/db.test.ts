@@ -230,7 +230,7 @@ describe('migration framework — user_version guard', () => {
       //      (slice 1a)
       // v31: session_ref / session_link — short session refs and parent/child links
       //      (slice 1b)
-      expect(userVersion(db)).toBe(32)
+      expect(userVersion(db)).toBe(33)
       expect(db.prepare('SELECT * FROM session_inbox').all()).toEqual([])
       expect(db.prepare('SELECT * FROM session_ref').all()).toEqual([])
       expect(db.prepare('SELECT * FROM session_link').all()).toEqual([])
@@ -322,7 +322,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(32)
+      expect(userVersion(db)).toBe(33)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -466,7 +466,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(32)
+      expect(userVersion(db)).toBe(33)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',

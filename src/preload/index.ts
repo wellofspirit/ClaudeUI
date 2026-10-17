@@ -213,6 +213,10 @@ const api: ClaudeAPI = {
   allowPeerMessages: (routingId: string) =>
     ipcRenderer.invoke('session:allow-peer-messages', routingId),
   detachSessionLink: (routingId: string) => ipcRenderer.invoke('session:link:detach', routingId),
+  startSessionProposal: (proposalId: string) =>
+    ipcRenderer.invoke('session:proposal:start', proposalId),
+  dismissSessionProposal: (proposalId: string) =>
+    ipcRenderer.invoke('session:proposal:dismiss', proposalId),
   recallQueued: (routingId: string) => ipcRenderer.invoke('session:recall-queued', routingId),
   askSideQuestion: (routingId: string, question: string) =>
     ipcRenderer.invoke('session:ask-side-question', routingId, question),

@@ -1586,6 +1586,9 @@ describe('registerRemoteHandlers', () => {
 //   - `session:link:detach` (session tools, slice 1b) — the "Detach from parent" row
 //     menu action; a `chat` command naming the child session, so the browser and
 //     phone clients can take a session out from under its parent as the desktop can.
+//   - `session:proposal:start` / `session:proposal:dismiss` (session tools, slice 1c-b) — the
+//     Start and Dismiss buttons on a proposal card; `chat` commands naming a proposal, so the
+//     browser and phone clients can act on a card exactly as the desktop does.
 // ---------------------------------------------------------------------------
 
 const PRE_PORT_REMOTE_CHANNELS = [
@@ -1661,6 +1664,8 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'session:load-opencode-history',
   'session:load-pi-history',
   'session:load-subagent-history',
+  'session:proposal:dismiss',
+  'session:proposal:start',
   'session:read-background-range',
   'session:recall-queued',
   'session:rekey',

@@ -26,6 +26,9 @@ export const AGENT_TURN_BUDGET = 10
 /** Most sessions one user turn may start (session tools, spec §7.1). */
 export const STARTS_PER_USER_TURN = 10
 
+/** Most proposals one user turn may make (session tools, slice 1c-b): proposing is free of every gate, so it is bounded here. */
+export const PROPOSALS_PER_USER_TURN = STARTS_PER_USER_TURN
+
 /** What a prompt that reaches {@link TurnOriginLedger.userPrompt} speaks for. */
 export interface UserPromptKind {
   /** The host acting on the user's standing setting or click (context pressure). */
@@ -41,6 +44,7 @@ export class TurnOriginLedger {
   private hostTurn = false
   private createdByAgent = false
   private sessionStarts = 0
+  private proposalCount = 0
 
   constructor(readonly cap: number = AGENT_TURN_BUDGET) {}
 
@@ -79,6 +83,15 @@ export class TurnOriginLedger {
     return this.sessionStarts < STARTS_PER_USER_TURN
   }
 
+  /** Proposals this user turn has made (a converted start counts). */
+  get proposalsSinceUser(): number {
+    return this.proposalCount
+  }
+
+  get proposalsLeft(): boolean {
+    return this.proposalCount < PROPOSALS_PER_USER_TURN
+  }
+
   /**
    * A `user` or `host-instruction` prompt: the user spoke. The brief a session
    * tool sends a new session resets taint and budgets like any prompt but is not a
@@ -90,6 +103,7 @@ export class TurnOriginLedger {
     this.starts = 0
     this.budgetLogged = false
     this.sessionStarts = 0
+    this.proposalCount = 0
     this.hostTurn = kind.hostInstruction === true
     if (!kind.hostInstruction && !kind.agentBrief) this.createdByAgent = false
   }
@@ -102,6 +116,11 @@ export class TurnOriginLedger {
   /** This turn started a session. */
   sessionStarted(): void {
     this.sessionStarts++
+  }
+
+  /** This turn made a proposal. */
+  proposed(): void {
+    this.proposalCount++
   }
 
   /** True the first time the budget runs out since the user last spoke (log once, not per held item). */

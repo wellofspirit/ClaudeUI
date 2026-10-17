@@ -20,7 +20,14 @@ import {
   moveSessionRef,
   runMigrations,
   sessionLinksByParent,
+  getSessionProposal,
+  insertSessionProposal,
   markSessionLinkClientPrompted,
+  sessionProposalStartedRef,
+  sessionProposalsByParent,
+  settleSessionProposal,
+  transitionSessionProposal,
+  trimSessionProposals,
   setSessionLinkState,
   upsertSessionLink,
   type Db
@@ -79,7 +86,7 @@ describe('session_ref / session_link tables', () => {
       runMigrations(older)
       expect(exists('session_ref')).toBe(true)
       expect(exists('session_link')).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(32)
+      expect(older.pragma('user_version', { simple: true })).toBe(33)
     } finally {
       older.close()
     }
@@ -207,7 +214,7 @@ describe('client_prompted_at (migration v32)', () => {
         )
       ).not.toContain('client_prompted_at')
       runMigrations(older)
-      expect(older.pragma('user_version', { simple: true })).toBe(32)
+      expect(older.pragma('user_version', { simple: true })).toBe(33)
       expect(getSessionLink('s-child1', older)).toMatchObject({
         childRef: 's-child1',
         clientPromptedAt: null
@@ -233,5 +240,167 @@ describe('client_prompted_at (migration v32)', () => {
     markSessionLinkClientPrompted('r2', 100, db)
     upsertSessionLink(link('s-kid222', 's-parent', { state: 'live' }), db)
     expect(getSessionLink('s-kid222', db)).toMatchObject({ state: 'live', clientPromptedAt: 100 })
+  })
+})
+
+describe('session_proposal (migration v33)', () => {
+  const proposal = (
+    id: string,
+    over: Partial<Parameters<typeof insertSessionProposal>[0]> = {}
+  ): Parameters<typeof insertSessionProposal>[0] => ({
+    id,
+    parentRef: 's-parent',
+    title: 'T',
+    prompt: 'p',
+    background: 'b',
+    placement: '{}',
+    createdAt: 100,
+    expiresAt: 1000,
+    ...over
+  })
+
+  it('is created by its own migration on top of an existing profile', () => {
+    const older = new BetterSqlite3(':memory:') as unknown as Db
+    try {
+      runMigrations(
+        older,
+        MIGRATIONS.filter((m) => m.version < 33)
+      )
+      const exists = (): boolean =>
+        older.prepare('SELECT 1 FROM sqlite_master WHERE name = ?').get('session_proposal') !==
+        undefined
+      expect(exists()).toBe(false)
+      runMigrations(older)
+      expect(exists()).toBe(true)
+      expect(older.pragma('user_version', { simple: true })).toBe(33)
+    } finally {
+      older.close()
+    }
+  })
+
+  it('stores a pending proposal and reads it back; the id is unique', () => {
+    insertSessionProposal(proposal('p-00000001', { placement: '{"cwd":"/x"}' }), db)
+    expect(getSessionProposal('p-00000001', db)).toMatchObject({
+      id: 'p-00000001',
+      parentRef: 's-parent',
+      state: 'pending',
+      placement: '{"cwd":"/x"}',
+      createdAt: 100,
+      expiresAt: 1000,
+      startedRef: null,
+      dismissReason: null
+    })
+    expect(() => insertSessionProposal(proposal('p-00000001'), db)).toThrow()
+    expect(getSessionProposal('p-nope', db)).toBeUndefined()
+  })
+
+  it('lists a parent’s proposals oldest first, by state, even within one millisecond', () => {
+    insertSessionProposal(proposal('p-0000000b', { createdAt: 5 }), db)
+    insertSessionProposal(proposal('p-0000000a', { createdAt: 5 }), db)
+    insertSessionProposal(proposal('p-0000000c', { createdAt: 4 }), db)
+    insertSessionProposal(proposal('p-0000000d', { parentRef: 's-other' }), db)
+    expect(sessionProposalsByParent('s-parent', undefined, db).map((r) => r.id)).toEqual([
+      'p-0000000c',
+      'p-0000000b',
+      'p-0000000a'
+    ])
+    settleSessionProposal('p-0000000c', { state: 'dismissed', reason: 'user' }, db)
+    expect(sessionProposalsByParent('s-parent', 'pending', db).map((r) => r.id)).toEqual([
+      'p-0000000b',
+      'p-0000000a'
+    ])
+  })
+
+  it('settles a pending proposal exactly once, whichever way', () => {
+    insertSessionProposal(proposal('p-00000010'), db)
+    insertSessionProposal(proposal('p-00000011'), db)
+    expect(
+      settleSessionProposal('p-00000010', { state: 'started', startedRef: 's-child1' }, db)
+    ).toBe(true)
+    expect(getSessionProposal('p-00000010', db)).toMatchObject({
+      state: 'started',
+      startedRef: 's-child1'
+    })
+    // Neither a dismissal nor a second start can follow.
+    expect(settleSessionProposal('p-00000010', { state: 'dismissed', reason: 'user' }, db)).toBe(
+      false
+    )
+    expect(
+      settleSessionProposal('p-00000010', { state: 'started', startedRef: 's-other' }, db)
+    ).toBe(false)
+    expect(getSessionProposal('p-00000010', db)?.startedRef).toBe('s-child1')
+    expect(settleSessionProposal('p-00000011', { state: 'dismissed', reason: 'expired' }, db)).toBe(
+      true
+    )
+    expect(settleSessionProposal('p-00000011', { state: 'started', startedRef: 's-x' }, db)).toBe(
+      false
+    )
+    expect(getSessionProposal('p-00000011', db)).toMatchObject({
+      state: 'dismissed',
+      dismissReason: 'expired',
+      startedRef: null
+    })
+    expect(settleSessionProposal('p-nope', { state: 'dismissed', reason: 'x' }, db)).toBe(false)
+  })
+
+  it('claims a pending proposal once; only the claim can finish or give it back', () => {
+    insertSessionProposal(proposal('p-00000020'), db)
+    expect(transitionSessionProposal('p-00000020', 'pending', { state: 'starting' }, db)).toBe(true)
+    // Starting is nobody else's: not a dismissal, not a second claim, not an expiry settle.
+    expect(settleSessionProposal('p-00000020', { state: 'dismissed', reason: 'user' }, db)).toBe(
+      false
+    )
+    expect(transitionSessionProposal('p-00000020', 'pending', { state: 'starting' }, db)).toBe(
+      false
+    )
+    expect(getSessionProposal('p-00000020', db)?.state).toBe('starting')
+    expect(sessionProposalsByParent('s-parent', 'pending', db)).toEqual([])
+    // Given back, it is pending again; claimed again, it can finish.
+    expect(transitionSessionProposal('p-00000020', 'starting', { state: 'pending' }, db)).toBe(true)
+    expect(transitionSessionProposal('p-00000020', 'pending', { state: 'starting' }, db)).toBe(true)
+    expect(
+      transitionSessionProposal(
+        'p-00000020',
+        'starting',
+        { state: 'started', startedRef: 's-kid999' },
+        db
+      )
+    ).toBe(true)
+    expect(getSessionProposal('p-00000020', db)).toMatchObject({
+      state: 'started',
+      startedRef: 's-kid999'
+    })
+    expect(sessionProposalStartedRef('s-kid999', db)).toBe(true)
+    expect(sessionProposalStartedRef('s-other1', db)).toBe(false)
+  })
+
+  it('trims a parent to N rows: evicted first, then other dismissed, oldest first; never pending, starting or started', () => {
+    const make = (id: string, at: number): void =>
+      insertSessionProposal(proposal(id, { createdAt: at }), db)
+    make('p-00000030', 1) // dismissed by the user
+    make('p-00000031', 2) // evicted
+    make('p-00000032', 3) // started
+    make('p-00000033', 4) // evicted
+    make('p-00000034', 5) // pending
+    make('p-00000035', 6) // starting
+    settleSessionProposal('p-00000030', { state: 'dismissed', reason: 'user' }, db)
+    settleSessionProposal('p-00000031', { state: 'dismissed', reason: 'evicted' }, db)
+    settleSessionProposal('p-00000032', { state: 'started', startedRef: 's-kid300' }, db)
+    settleSessionProposal('p-00000033', { state: 'dismissed', reason: 'evicted' }, db)
+    transitionSessionProposal('p-00000035', 'pending', { state: 'starting' }, db)
+    expect(trimSessionProposals('s-parent', 10, db)).toBe(0)
+    expect(trimSessionProposals('s-parent', 5, db)).toBe(1)
+    expect(getSessionProposal('p-00000031', db)).toBeUndefined() // the oldest evicted
+    expect(getSessionProposal('p-00000033', db)).toBeDefined()
+    expect(trimSessionProposals('s-parent', 1, db)).toBe(2) // the other evicted, then the user's
+    expect(sessionProposalsByParent('s-parent', undefined, db).map((r) => r.id)).toEqual([
+      'p-00000032',
+      'p-00000034',
+      'p-00000035'
+    ])
+    // Another parent is untouched.
+    insertSessionProposal(proposal('p-00000036', { parentRef: 's-other' }), db)
+    expect(trimSessionProposals('s-parent', 0, db)).toBe(0)
+    expect(getSessionProposal('p-00000036', db)).toBeDefined()
   })
 })

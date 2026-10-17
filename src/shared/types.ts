@@ -327,6 +327,28 @@ export type ContentBlock =
       engineId: EngineId
     }
   /**
+   * A session an agent proposed for the user to start (session tools, slice 1c-b):
+   * rewritten in place on every state change, so the block carries all it shows.
+   * The host decides expiry lazily; the card shows a pending proposal past
+   * `expiresAt` as expired (`proposalDisplayState`).
+   */
+  | {
+      type: 'proposal_card'
+      proposalId: string
+      title: string
+      prompt: string
+      background: string
+      placement: import('./session-proposals').ProposalPlacement
+      /** The proposing session's own directory, so the card can say when the placement differs. */
+      parentCwd: string
+      state: 'pending' | 'started' | 'dismissed'
+      /** Why it was dismissed: `expired`, `evicted`, `user`, or the agent's own words. */
+      reason?: string
+      expiresAt: number
+      /** The started session's ref, once it has started. */
+      startedRef?: string
+    }
+  /**
    * The rendered output of a code review the engine ran (Codex's
    * `exitedReviewMode`). The one untrusted-text block that DOES go through
    * markdown, by decision (F20): it is the model's own structured review — a
@@ -1830,6 +1852,15 @@ interface SessionAPI {
    * in the sidebar on every client. The id is the child's.
    */
   detachSessionLink(routingId: string): Promise<{ success: boolean; error?: string }>
+  /**
+   * The Start button on a session proposal card (slice 1c-b): start the proposed
+   * session exactly as shown, as the user's own act. `startedRef` names the new session.
+   */
+  startSessionProposal(
+    proposalId: string
+  ): Promise<{ success: boolean; error?: string; startedRef?: string }>
+  /** The Dismiss button on a proposal card. */
+  dismissSessionProposal(proposalId: string): Promise<{ success: boolean; error?: string }>
   /**
    * Take back every still-recallable queued item (ADR-053). `recalled` carries
    * their texts in queue order for the client to join with `\n`; `notRecalled`

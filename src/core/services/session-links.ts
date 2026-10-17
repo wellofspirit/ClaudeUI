@@ -45,6 +45,7 @@ import {
   markSessionLinkClientPrompted,
   moveSessionRef,
   sessionLinksByParent,
+  sessionProposalStartedRef,
   setSessionLinkState,
   setSessionRefIds,
   upsertSessionLink,
@@ -387,13 +388,19 @@ export function noteClientPrompt(id: string): void {
 }
 
 /**
- * Was this session started by an agent and not yet prompted by a client? Read from
- * the link, so it holds across a host restart, when the in-memory ledger starts
- * fresh. False for a session with no link or one the user or ClaudeUI itself started.
+ * Was this session started by an agent — or by the user's click on an agent's
+ * proposal, whose brief the agent wrote — and not yet prompted by a client? Read from
+ * the link (and the proposal that started it), so it holds across a host restart, when
+ * the in-memory ledger starts fresh. False for a session with no link or one the user
+ * made a link for themselves.
  */
 export function awaitingClientPrompt(ref: string): boolean {
   const link = getSessionLink(ref)
-  return link !== undefined && link.createdBy === 'agent' && link.clientPromptedAt === null
+  return (
+    link !== undefined &&
+    link.clientPromptedAt === null &&
+    (link.createdBy === 'agent' || sessionProposalStartedRef(ref))
+  )
 }
 
 /** The user took the pair apart: the child is a top-level session again. */
@@ -444,6 +451,11 @@ export interface LinkChildInput {
   wakeParent: boolean
   /** The child's name for its card until the sidebar has a title for it. */
   title?: string
+  /**
+   * Put a session card in the parent's transcript (default). Off for a session a
+   * proposal started: the proposal card (Started, Open) is that session's one card.
+   */
+  card?: boolean
 }
 
 /**
@@ -466,6 +478,7 @@ export function linkChild(input: LinkChildInput): { parentRef: string; childRef:
     wakeParent: input.wakeParent
   })
   startingByRouting.set(input.childRoutingId, child.ref)
+  if (input.card === false) return { parentRef, childRef: child.ref }
   emitEvent('session:message', [
     input.parent,
     sessionCardMessage({
@@ -520,7 +533,10 @@ export function withSessionCards(sessionId: string, messages: ChatMessage[]): Ch
   try {
     const parent = findSessionRef(sessionId)
     if (!parent) return messages
-    const links = sessionLinksByParent(parent.ref)
+    // A session a proposal started has the proposal's card, not a session card of its own.
+    const links = sessionLinksByParent(parent.ref).filter(
+      (l) => !sessionProposalStartedRef(l.childRef)
+    )
     if (links.length === 0) return messages
     const out = messages.filter((m) => !links.some((l) => m.id === sessionCardId(l.childRef)))
     for (const link of links) {

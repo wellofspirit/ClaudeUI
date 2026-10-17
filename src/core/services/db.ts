@@ -1470,6 +1470,33 @@ export const MIGRATIONS: Migration[] = [
     up(db) {
       db.exec(`ALTER TABLE session_link ADD COLUMN client_prompted_at INTEGER;`)
     }
+  },
+  {
+    // Slice 1c-b (session tools): sessions an agent proposes for the user to start.
+    // `placement` is the resolved start configuration as JSON (engine, model, effort,
+    // permission_mode, cwd, worktree, wake_when_done), fixed at proposal time so a
+    // click starts exactly what the card showed. `expires_at` is checked when a
+    // proposal is read, never by a timer. `parent_ref` names the proposing session.
+    version: 33,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS session_proposal (
+          id             TEXT    PRIMARY KEY,
+          parent_ref     TEXT    NOT NULL,
+          title          TEXT    NOT NULL,
+          prompt         TEXT    NOT NULL,
+          background     TEXT    NOT NULL,
+          placement      TEXT    NOT NULL,
+          state          TEXT    NOT NULL,
+          created_at     INTEGER NOT NULL,
+          expires_at     INTEGER NOT NULL,
+          started_ref    TEXT,
+          dismiss_reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_proposal_parent
+          ON session_proposal (parent_ref, state);
+      `)
+    }
   }
 ]
 
@@ -2228,6 +2255,181 @@ export function setSessionLinkState(
     .prepare('UPDATE session_link SET state = ?, updated_at = ? WHERE child_ref = ? AND state <> ?')
     .run(state, now, childRef, state)
   return Number(info.changes) > 0
+}
+
+/**
+ * `starting` is the short window between a Start (the user's click, or the agent's
+ * `proposal_id`) winning the proposal and the new session existing: nothing else may
+ * settle it then, so a dismissal or an expiry cannot close a card whose session is
+ * already being made.
+ */
+export type SessionProposalRowState = 'pending' | 'starting' | 'started' | 'dismissed'
+
+/** One proposed session. `placement` is JSON the service parses; the table does not look inside. */
+export interface SessionProposalRow {
+  id: string
+  parentRef: string
+  title: string
+  prompt: string
+  background: string
+  placement: string
+  state: SessionProposalRowState
+  createdAt: number
+  expiresAt: number
+  startedRef: string | null
+  dismissReason: string | null
+}
+
+interface SessionProposalDbRow {
+  id: string
+  parent_ref: string
+  title: string
+  prompt: string
+  background: string
+  placement: string
+  state: string
+  created_at: number
+  expires_at: number
+  started_ref: string | null
+  dismiss_reason: string | null
+}
+
+function sessionProposalRow(row: SessionProposalDbRow): SessionProposalRow {
+  return {
+    id: row.id,
+    parentRef: row.parent_ref,
+    title: row.title,
+    prompt: row.prompt,
+    background: row.background,
+    placement: row.placement,
+    state:
+      row.state === 'started' || row.state === 'dismissed' || row.state === 'starting'
+        ? row.state
+        : 'pending',
+    createdAt: Number(row.created_at),
+    expiresAt: Number(row.expires_at),
+    startedRef: row.started_ref ?? null,
+    dismissReason: row.dismiss_reason ?? null
+  }
+}
+
+export function insertSessionProposal(
+  p: Omit<SessionProposalRow, 'startedRef' | 'dismissReason' | 'state'>,
+  db: Db = getDb()
+): void {
+  db.prepare(
+    `INSERT INTO session_proposal
+       (id, parent_ref, title, prompt, background, placement, state, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+  ).run(p.id, p.parentRef, p.title, p.prompt, p.background, p.placement, p.createdAt, p.expiresAt)
+}
+
+export function getSessionProposal(id: string, db: Db = getDb()): SessionProposalRow | undefined {
+  const row = db.prepare('SELECT * FROM session_proposal WHERE id = ?').get(id) as
+    SessionProposalDbRow | undefined
+  return row ? sessionProposalRow(row) : undefined
+}
+
+/** A parent's proposals, oldest first; `state` narrows them. */
+export function sessionProposalsByParent(
+  parentRef: string,
+  state?: SessionProposalRowState,
+  db: Db = getDb()
+): SessionProposalRow[] {
+  const rows = (
+    state
+      ? db
+          .prepare(
+            'SELECT * FROM session_proposal WHERE parent_ref = ? AND state = ? ORDER BY created_at, rowid'
+          )
+          .all(parentRef, state)
+      : db
+          .prepare('SELECT * FROM session_proposal WHERE parent_ref = ? ORDER BY created_at, rowid')
+          .all(parentRef)
+  ) as SessionProposalDbRow[]
+  return rows.map(sessionProposalRow)
+}
+
+/** Where a proposal can go from a state. */
+export type SessionProposalMove =
+  | { state: 'pending' }
+  | { state: 'starting' }
+  | { state: 'started'; startedRef: string }
+  | { state: 'dismissed'; reason: string }
+
+/**
+ * Move a proposal from `from` to `to`, only if it is still in `from`. Returns false
+ * when it is unknown or already elsewhere, so two clicks, a click and a dismissal,
+ * or a click and an expiry cannot both win.
+ */
+export function transitionSessionProposal(
+  id: string,
+  from: SessionProposalRowState,
+  to: SessionProposalMove,
+  db: Db = getDb()
+): boolean {
+  const info = db
+    .prepare(
+      `UPDATE session_proposal SET state = ?, started_ref = ?, dismiss_reason = ?
+         WHERE id = ? AND state = ?`
+    )
+    .run(
+      to.state,
+      to.state === 'started' ? to.startedRef : null,
+      to.state === 'dismissed' ? to.reason : null,
+      id,
+      from
+    )
+  return Number(info.changes) > 0
+}
+
+/** Move a PENDING proposal to `started` or `dismissed`; false if it is not pending (any longer). */
+export function settleSessionProposal(
+  id: string,
+  to: { state: 'started'; startedRef: string } | { state: 'dismissed'; reason: string },
+  db: Db = getDb()
+): boolean {
+  return transitionSessionProposal(id, 'pending', to, db)
+}
+
+/**
+ * Keep a parent's proposal rows to `keep`: past it, delete the dismissed ones,
+ * evicted first and oldest first. Pending, starting and started rows are never
+ * deleted (a started one is how its session is known to have come from a proposal).
+ * Returns how many were deleted.
+ */
+export function trimSessionProposals(parentRef: string, keep: number, db: Db = getDb()): number {
+  const rows = db
+    .prepare(
+      'SELECT id, state, dismiss_reason FROM session_proposal WHERE parent_ref = ? ORDER BY created_at, rowid'
+    )
+    .all(parentRef) as Array<{ id: string; state: string; dismiss_reason: string | null }>
+  let excess = rows.length - keep
+  if (excess <= 0) return 0
+  const doomed: string[] = []
+  const picks = [
+    (r: (typeof rows)[number]): boolean =>
+      r.state === 'dismissed' && r.dismiss_reason === 'evicted',
+    (r: (typeof rows)[number]): boolean => r.state === 'dismissed'
+  ]
+  for (const pick of picks) {
+    for (const r of rows) {
+      if (excess > 0 && pick(r) && !doomed.includes(r.id)) {
+        doomed.push(r.id)
+        excess--
+      }
+    }
+  }
+  for (const id of doomed) db.prepare('DELETE FROM session_proposal WHERE id = ?').run(id)
+  return doomed.length
+}
+
+/** Did this session come from a proposal? (Its ref is the `started_ref` of one.) */
+export function sessionProposalStartedRef(ref: string, db: Db = getDb()): boolean {
+  return (
+    db.prepare('SELECT 1 FROM session_proposal WHERE started_ref = ? LIMIT 1').get(ref) !==
+    undefined
+  )
 }
 
 /**

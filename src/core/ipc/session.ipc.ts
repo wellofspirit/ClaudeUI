@@ -10,7 +10,11 @@ import { claudeLoginSignal } from '../services/claude-login-state'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { detachSessionLink } from '../services/session-links'
-import { configureSessionTools } from '../services/session-tools'
+import {
+  configureSessionTools,
+  dismissProposalFromClient,
+  startProposalFromClient
+} from '../services/session-tools'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { emitEvent } from '../services/sync-host'
 import { STREAM_WATCH_COMMAND } from './stream-watch'
@@ -276,6 +280,8 @@ const SESSION_IPC_CHANNELS = [
   'session:dequeue-message',
   'session:allow-peer-messages',
   'session:link:detach',
+  'session:proposal:start',
+  'session:proposal:dismiss',
   'session:ask-side-question',
   'session:set-permission-mode',
   'session:set-model',
@@ -671,6 +677,21 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string) => detachSessionLink(routingId)
+  })
+
+  // The user's click on a proposal card (session tools, slice 1c-b). The argument is
+  // the proposal's id, not a session id; the audit row for the click is the registry's.
+  handleIpc({
+    channel: 'session:proposal:start',
+    capability: 'chat',
+    kind: 'command',
+    handler: async (proposalId: string) => startProposalFromClient(proposalId)
+  })
+  handleIpc({
+    channel: 'session:proposal:dismiss',
+    capability: 'chat',
+    kind: 'command',
+    handler: async (proposalId: string) => dismissProposalFromClient(proposalId)
   })
 
   // Deprecated (ADR-053): recall-all shim for cached `/remote` bundles.

@@ -36,6 +36,16 @@ import type { SendPromptOptions } from '../ipc/handlers-core'
 import type { CreateSessionArgs } from '../ipc/create-session'
 import type { SessionManager } from './session-manager'
 import { appendAuditLog } from './db'
+import { isProposalId, type ProposalPlacement } from '../../shared/session-proposals'
+import {
+  createProposal,
+  claimProposal,
+  dismissProposal,
+  finishProposal,
+  readProposal,
+  releaseProposal,
+  type Proposal
+} from './session-proposals'
 import { deliver, type DeliveryResult } from './session-delivery'
 import {
   awaitingClientPrompt,
@@ -50,7 +60,7 @@ import {
   type ResolvedSession
 } from './session-links'
 import { emitEvent, syncCore } from './sync-host'
-import { createWorktree } from './worktree'
+import { createWorktree, validateWorktreeName } from './worktree'
 import { recordWorktreeEntry } from './worktree-detect'
 import { loadSessionConfig, saveSessionConfig } from './ui-config'
 import { logger } from './logger'
@@ -277,6 +287,32 @@ export function projectKeyOf(id: string): string {
   return cwdToProjectKey(syncCore.getCanonicalState().sessions[id]?.cwd ?? '')
 }
 
+function cwdOfId(id: string): string {
+  return syncCore.getCanonicalState().sessions[id]?.cwd || listingOf(id)?.cwd || ''
+}
+
+/** Is `candidate` the same directory as `root` or inside it? Lexical: no filesystem reads, it runs per listed session. */
+function pathInside(root: string, candidate: string): boolean {
+  if (!root || !candidate) return false
+  const rel = path.relative(path.resolve(root), path.resolve(candidate))
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
+/**
+ * Is `targetId` in the caller's project? The sidebar groups by directory, so it is
+ * when the project keys match — and also when the target works INSIDE the caller's
+ * tree, which is where a session started in a subfolder of its parent lands.
+ *
+ * Only that direction. A target whose directory CONTAINS the caller's (a session
+ * rooted at the home folder or a drive root contains every repo) is not in the
+ * caller's project: counting it would let any session read it without asking.
+ */
+export function sameProject(callerId: string, targetId: string): boolean {
+  const key = projectKeyOf(callerId)
+  if (key !== '' && key === projectKeyOf(targetId)) return true
+  return pathInside(cwdOfId(callerId), cwdOfId(targetId))
+}
+
 function stateOf(id: string): SessionState {
   const live = syncCore.getCanonicalState().sessions[id]
   if (!live || live.status.state === 'disconnected') return 'cold'
@@ -374,8 +410,7 @@ export function sessionList(caller: SessionToolCaller, input: SessionListInput):
   } else {
     ids = knownSessionIds().filter((id) => !isDispatchTarget(id))
     if (scope === 'project') {
-      const mine = projectKeyOf(caller.routingId)
-      ids = ids.filter((id) => projectKeyOf(id) === mine)
+      ids = ids.filter((id) => id === caller.routingId || sameProject(caller.routingId, id))
     }
   }
   if (!input.include_archived) ids = ids.filter((id) => !hidden.has(id) || id === caller.routingId)
@@ -537,39 +572,72 @@ export function sessionUsage(
 // The start gate (§7.1) and the caps (§7.2)
 // ---------------------------------------------------------------------------
 
+/** Why a start is refused, what to tell the model to do instead, and whether a proposal can stand in for it. */
+export interface StartRefusal {
+  reason: string
+  advice: string
+  /** A gated start becomes a proposal the user can click; the others stay refusals. */
+  convertible: boolean
+}
+
+const refusalText = (r: StartRefusal): string => `${r.reason} ${r.advice}`.trim()
+
 /**
  * Why this session may not start or hand off right now, or null. Fails closed: a
  * session whose taint cannot be read (no ledger) cannot start anything.
  * `hand_off` on a host-instruction turn is exempt from the agent-created rule, so
  * an automatic hand-off chains.
  */
-export function startGateRefusal(
+export function startGateInfo(
   caller: SessionToolCaller,
   tool: 'session_start' | 'session_hand_off'
-): string | null {
+): StartRefusal | null {
   const ledger = need().manager.get(caller.routingId)?.originLedger
-  if (!ledger)
-    return 'ClaudeUI cannot tell where this turn came from, so it cannot start a session.'
+  if (!ledger) {
+    return {
+      reason: 'ClaudeUI cannot tell where this turn came from, so it cannot start a session.',
+      advice: '',
+      convertible: false
+    }
+  }
   if (!ledger.userOriginClean) {
-    return (
-      'this turn includes text that did not come from the user (a message from another session ' +
-      'or an agent), so a start cannot count as the user asking for it. Tell the user what you ' +
-      'would start and let them ask for it in chat.'
-    )
+    return {
+      reason:
+        'this turn includes text that did not come from the user (a message from another session ' +
+        'or an agent), so a start cannot count as the user asking for it.',
+      advice: 'Tell the user what you would start and let them ask for it in chat.',
+      convertible: true
+    }
   }
   if (
     agentCreatedAndUnprompted(caller, ledger.agentCreated) &&
     !(tool === 'session_hand_off' && ledger.hostInstructionTurn)
   ) {
-    return (
-      'this session was started by another session and the user has not typed into it yet, so it ' +
-      'cannot start sessions. Tell the user what you would start and let them ask for it.'
-    )
+    return {
+      reason:
+        'this session was started by another session and the user has not typed into it yet, so it ' +
+        'cannot start sessions.',
+      advice: 'Tell the user what you would start and let them ask for it.',
+      convertible: true
+    }
   }
   if (!ledger.startsLeft) {
-    return `this turn has already started ${ledger.sessionStartsSinceUser} sessions. Wait for the user's next message.`
+    return {
+      reason: `this turn has already started ${ledger.sessionStartsSinceUser} sessions.`,
+      advice: "Wait for the user's next message.",
+      convertible: true
+    }
   }
   return null
+}
+
+/** {@link startGateInfo} as the sentence a refusal carries. */
+export function startGateRefusal(
+  caller: SessionToolCaller,
+  tool: 'session_start' | 'session_hand_off'
+): string | null {
+  const info = startGateInfo(caller, tool)
+  return info ? refusalText(info) : null
 }
 
 /**
@@ -610,24 +678,42 @@ function withinOrEqual(root: string, candidate: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
 }
 
-/** The directory a started session runs in, or why it may not. */
+/**
+ * A path in the style UI-created sessions carry: forward slashes, even on Windows
+ * (the folder picker and the browse results are POSIX-normalised), no trailing
+ * slash. A started session's cwd is written this way so the sidebar, `session_list`
+ * and the project grouping see one style whoever created the session.
+ */
+export function uiPath(p: string): string {
+  const slashed = path.sep === '\\' ? p.replace(/\\/g, '/') : p
+  return /^([A-Za-z]:)?\/$/.test(slashed) ? slashed : slashed.replace(/\/+$/, '')
+}
+
+/** Where a requested `cwd` lands (relative paths resolve under the caller's own), and whether that is outside its tree. */
+function resolveCwd(
+  caller: SessionToolCaller,
+  requested: string | undefined
+): { cwd: string; outside: boolean } {
+  if (!requested) return { cwd: caller.cwd, outside: false }
+  const cwd = uiPath(path.resolve(caller.cwd, requested))
+  return { cwd, outside: !allowedRoots(caller).some((root) => withinOrEqual(root, cwd)) }
+}
+
+/** The directory a started session runs in, or why it may not. `outside` marks the one refusal a proposal can stand in for. */
 export function childCwdFor(
   caller: SessionToolCaller,
   requested: string | undefined
-): { ok: true; cwd: string } | { ok: false; reason: string } {
-  if (!requested) return { ok: true, cwd: caller.cwd }
-  const cwd = path.resolve(caller.cwd, requested)
-  const roots = allowedRoots(caller)
-  if (!roots.some((root) => withinOrEqual(root, cwd))) {
+): { ok: true; cwd: string } | { ok: false; reason: string; outside: boolean } {
+  const { cwd, outside } = resolveCwd(caller, requested)
+  if (outside) {
     return {
       ok: false,
-      reason:
-        `cwd ${cwd} is outside this session's working tree (${caller.cwd}). Starting there needs ` +
-        "the user's OK, which this version cannot ask for: start inside the tree, or tell the user."
+      outside: true,
+      reason: `cwd ${cwd} is outside this session's working tree (${caller.cwd}).`
     }
   }
-  if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
-    return { ok: false, reason: `cwd ${cwd} is not an existing directory.` }
+  if (requested && (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory())) {
+    return { ok: false, outside: false, reason: `cwd ${cwd} is not an existing directory.` }
   }
   return { ok: true, cwd }
 }
@@ -676,23 +762,42 @@ export async function rootAgentRefusal(
 }
 
 /** Everything that does not need a side effect to check, for the gate and the service alike. */
+export function startRefusalInfo(
+  caller: SessionToolCaller,
+  tool: 'session_start' | 'session_hand_off',
+  input: { permission_mode?: string; cwd?: string }
+): StartRefusal | null {
+  if (caller.permissionMode === 'plan') {
+    return { reason: PLAN_REFUSAL(tool), advice: '', convertible: false }
+  }
+  if (tool === 'session_start' && input.permission_mode) {
+    const mode = permissionModeRefusal(caller, input.permission_mode)
+    if (mode) return { reason: mode, advice: '', convertible: false }
+  }
+  const gate = startGateInfo(caller, tool)
+  if (gate) return gate
+  if (tool === 'session_start') {
+    const cwd = childCwdFor(caller, input.cwd)
+    if (!cwd.ok) {
+      return {
+        reason: cwd.reason,
+        advice: cwd.outside
+          ? "Start inside the tree, or let the user's click on a card decide."
+          : '',
+        convertible: cwd.outside
+      }
+    }
+  }
+  return null
+}
+
 export function startRefusal(
   caller: SessionToolCaller,
   tool: 'session_start' | 'session_hand_off',
   input: { permission_mode?: string; cwd?: string }
 ): string | null {
-  if (caller.permissionMode === 'plan') return PLAN_REFUSAL(tool)
-  const gate = startGateRefusal(caller, tool)
-  if (gate) return gate
-  if (tool === 'session_start') {
-    if (input.permission_mode) {
-      const mode = permissionModeRefusal(caller, input.permission_mode)
-      if (mode) return mode
-    }
-    const cwd = childCwdFor(caller, input.cwd)
-    if (!cwd.ok) return cwd.reason
-  }
-  return null
+  const info = startRefusalInfo(caller, tool, input)
+  return info ? refusalText(info) : null
 }
 
 const PLAN_REFUSAL = (tool: string): string =>
@@ -715,14 +820,21 @@ export interface GateContext {
  * engine's approval callback; the service re-checks what makes the call unsafe,
  * so skipping the callback (an approve-everything mode) skips only the asking.
  *
- *  - an acting tool from below the root agent, or in plan mode: refused;
- *  - `session_list`, `session_usage`: allowed;
+ *  - an acting tool from below the root agent: refused; in plan mode too, except
+ *    proposing and withdrawing a proposal, which start nothing;
+ *  - `session_list`, `session_usage`, `session_dismiss_proposal`: allowed;
  *  - `session_get` / `session_read`: allowed within the family or the same
  *    project, otherwise ask;
  *  - `session_message` / `session_stop`: allowed within the family when the
  *    target's mode class is not above the caller's, otherwise ask;
- *  - `session_start` / `session_hand_off`: allowed once the start gate and the
- *    caps pass, otherwise refused (slice 1c-b turns a refusal into a proposal).
+ *  - `session_start`: allowed — a start the gate or the cwd cap would refuse is
+ *    turned into a proposal by the service; refused here only for what stays a
+ *    refusal (plan mode, a mode above the caller's, an unreadable turn), and a
+ *    `proposal_id` start only on a clean user turn;
+ *  - `session_hand_off`: allowed once the start gate passes, otherwise refused.
+ *
+ * Reading a proposal for a `proposal_id` start is not free of effects: an overdue
+ * pending proposal is settled as expired there (a row write and a card rewrite).
  */
 export function sessionToolsGate(
   caller: SessionToolCaller,
@@ -737,12 +849,16 @@ export function sessionToolsGate(
       message: `${toolName} can only be used by the session's main agent, not by a subagent.`
     }
   }
-  if (acting && caller.permissionMode === 'plan') {
+  const startsNothing =
+    toolName === 'session_dismiss_proposal' ||
+    (toolName === 'session_start' && input.mode === 'propose' && input.proposal_id === undefined)
+  if (acting && !startsNothing && caller.permissionMode === 'plan') {
     return { behavior: 'deny', message: PLAN_REFUSAL(toolName) }
   }
   switch (toolName) {
     case 'session_list':
     case 'session_usage':
+    case 'session_dismiss_proposal':
       return { behavior: 'allow' }
     case 'session_get':
     case 'session_read': {
@@ -750,8 +866,7 @@ export function sessionToolsGate(
       // Nothing to read: the tool answers with why, and that leaks nothing.
       if (!target.ok) return { behavior: 'allow' }
       const mine = callerRef(caller)
-      return familyRefs(mine).has(target.ref) ||
-        projectKeyOf(target.id) === projectKeyOf(caller.routingId)
+      return familyRefs(mine).has(target.ref) || sameProject(caller.routingId, target.id)
         ? { behavior: 'allow' }
         : { behavior: 'ask' }
     }
@@ -765,13 +880,23 @@ export function sessionToolsGate(
         ? { behavior: 'allow' }
         : { behavior: 'ask' }
     }
-    case 'session_start':
-    case 'session_hand_off': {
-      const why = startRefusal(caller, toolName, {
+    case 'session_start': {
+      if (input.proposal_id !== undefined) {
+        const check = checkProposalStart(caller, input)
+        return check.ok ? { behavior: 'allow' } : { behavior: 'deny', message: check.text }
+      }
+      if (input.mode === 'propose') return { behavior: 'allow' }
+      const why = startRefusalInfo(caller, toolName, {
         permission_mode:
           typeof input.permission_mode === 'string' ? input.permission_mode : undefined,
         cwd: typeof input.cwd === 'string' ? input.cwd : undefined
       })
+      return why && !why.convertible
+        ? { behavior: 'deny', message: `Refused: ${refusalText(why)}` }
+        : { behavior: 'allow' }
+    }
+    case 'session_hand_off': {
+      const why = startRefusal(caller, toolName, {})
       return why ? { behavior: 'deny', message: `Refused: ${why}` } : { behavior: 'allow' }
     }
   }
@@ -909,10 +1034,12 @@ export async function sessionStop(
 // ---------------------------------------------------------------------------
 
 export type SessionStartInput = {
-  mode?: 'start'
-  title: string
-  prompt: string
-  background: string
+  mode?: 'start' | 'propose'
+  /** Start a proposal the user approved in chat; used on its own. */
+  proposal_id?: string
+  title?: string
+  prompt?: string
+  background?: string
   engine?: EngineId
   model?: string
   effort?: string
@@ -920,6 +1047,11 @@ export type SessionStartInput = {
   cwd?: string
   worktree?: string
   wake_when_done?: boolean
+}
+
+export type SessionDismissProposalInput = {
+  proposal_id: string
+  reason?: string
 }
 
 export type SessionHandOffInput = {
@@ -970,13 +1102,21 @@ function inheritedPlan(
   return { engine, model, effort, permissionMode, notes }
 }
 
-/** Create the session, record what the host records for a session a client creates, and link it. */
+/**
+ * Create the session, record what the host records for a session a client creates,
+ * and link it under `parent`. `by` is who the start is for: an agent's own start or
+ * the user's click on a proposal (the link says which, for the sidebar). Either way
+ * the new session is held to the agent-created rule until a client types into it.
+ * `viaProposal` leaves out the session card: the proposal's card is the one card.
+ */
 async function spawnChild(
-  caller: SessionToolCaller,
+  parent: { routingId: string },
   plan: NewSessionPlan,
   kind: 'started' | 'handoff',
   title: string,
-  wakeParent: boolean
+  wakeParent: boolean,
+  by: 'agent' | 'user' = 'agent',
+  viaProposal = false
 ): Promise<{ routingId: string; childRef: string } | { error: string }> {
   const h = need()
   const routingId = randomUUID()
@@ -990,11 +1130,15 @@ async function spawnChild(
       ...(plan.effort
         ? { effort: plan.effort, announce: { effort: plan.effort, thinkingMode: null } }
         : {}),
+      // The host, not a client, made it: no client follows it, whoever it was for.
       createdBy: 'agent'
     })
   } catch (err) {
     return { error: errText(err) }
   }
+  // Held to the agent-created rule until the user types into it — also when the user
+  // clicked Start on an agent's proposal: the click consents to ONE session, not to
+  // whatever the agent's brief then has it start.
   h.manager.get(routingId)?.originLedger?.markAgentCreated()
   if (plan.worktree) {
     try {
@@ -1005,13 +1149,14 @@ async function spawnChild(
   }
   recordCustomTitle(routingId, title)
   const { childRef } = linkChild({
-    parent: caller.routingId,
+    parent: parent.routingId,
     childRoutingId: routingId,
     engine: plan.engine,
     kind,
-    createdBy: 'agent',
+    createdBy: by,
     wakeParent,
-    title
+    title,
+    card: !viaProposal
   })
   return { routingId, childRef }
 }
@@ -1058,6 +1203,173 @@ function validTitle(title: unknown): string | null {
   return null
 }
 
+/** `auto` that settings have turned off starts as `default`, and says so. */
+function gateAutoMode(engine: EngineId, mode: string, notes: string[]): string {
+  if (
+    mode === 'auto' &&
+    engine === 'claude' &&
+    syncCore.getCanonicalState().autoModeDisabledBySettings
+  ) {
+    notes.push('auto mode is turned off in settings, so it started in default mode')
+    return 'default'
+  }
+  return mode
+}
+
+const PROPOSAL_TAIL =
+  'the user sees a card and nothing runs until they start it. It expires in 7 days; ' +
+  'session_dismiss_proposal withdraws it sooner.'
+
+/** Arguments that mean "start this new session"; none may accompany a `proposal_id`. */
+const NEW_SESSION_ARGS = [
+  'mode',
+  'title',
+  'prompt',
+  'background',
+  'engine',
+  'model',
+  'effort',
+  'permission_mode',
+  'cwd',
+  'worktree',
+  'wake_when_done'
+] as const
+
+type ProposalCheck = { ok: true; proposal: Proposal } | { ok: false; text: string }
+
+/**
+ * May this caller start the proposal it names, by id alone, now? Used by the gate
+ * and the service alike. The user telling the agent to start it is a clean user turn,
+ * so the whole start gate applies (a session another session started, still waiting
+ * for its user, is as unable to start from a proposal as from a fresh brief). The
+ * refusals all end the same way: the user can click Start on the card.
+ */
+function checkProposalStart(
+  caller: SessionToolCaller,
+  input: Record<string, unknown>
+): ProposalCheck {
+  const refuse = (why: string): ProposalCheck => ({
+    ok: false,
+    text: `Refused: ${why} Ask the user to click Start on the card.`
+  })
+  if (NEW_SESSION_ARGS.some((k) => input[k] !== undefined)) {
+    return {
+      ok: false,
+      text: 'Refused: proposal_id is used on its own: the proposal already holds everything it will start with.'
+    }
+  }
+  if (!isProposalId(input.proposal_id)) {
+    return { ok: false, text: `No proposal ${JSON.stringify(input.proposal_id)}.` }
+  }
+  const proposal = readProposal(input.proposal_id)
+  if (!proposal) return { ok: false, text: `No proposal ${input.proposal_id}.` }
+  if (proposal.parentRef !== callerRef(caller)) {
+    return { ok: false, text: 'Refused: that proposal belongs to another session.' }
+  }
+  if (proposal.state === 'started') {
+    return { ok: false, text: `Proposal ${proposal.id} already started as ${proposal.startedRef}.` }
+  }
+  if (proposal.state === 'starting') {
+    return { ok: false, text: `Proposal ${proposal.id} is starting right now.` }
+  }
+  if (proposal.state === 'dismissed') {
+    return { ok: false, text: `Proposal ${proposal.id} is closed (${proposal.dismissReason}).` }
+  }
+  if (caller.permissionMode === 'plan')
+    return { ok: false, text: `Refused: ${PLAN_REFUSAL('session_start')}` }
+  const gate = startGateInfo(caller, 'session_start')
+  if (gate) return refuse(gate.reason)
+  const mode = permissionModeRefusal(caller, proposal.placement.permission_mode)
+  if (mode) return refuse(mode)
+  if (resolveCwd(caller, proposal.placement.cwd).outside) {
+    return refuse(
+      `its directory ${proposal.placement.cwd} is outside this session's working tree, so only the user's click can start it.`
+    )
+  }
+  return { ok: true, proposal }
+}
+
+type Launched = { ok: true; childRef: string; notes: string[] } | { ok: false; error: string }
+
+/**
+ * Start a pending proposal exactly as it was shown: the placement was resolved when it
+ * was proposed. `by` is the agent (told to in chat) or the user (the click is consent
+ * for ONE session, so an out-of-tree directory is allowed; the new session is still
+ * held to the agent-created rule). The caller has already checked whatever gate
+ * applies to it.
+ *
+ * The proposal is CLAIMED first (`pending` → `starting`): a launch that loses the
+ * claim — closed, expired, already starting — aborts before anything is spawned, and
+ * while it holds the claim nothing else can close the card. A failure gives the claim
+ * back, so the proposal is offered again.
+ */
+async function launchProposal(proposal: Proposal, by: 'agent' | 'user'): Promise<Launched> {
+  const parent = resolveRef(proposal.parentRef)
+  if (!parent.ok) return { ok: false, error: 'The session that proposed this no longer exists.' }
+  const claimed = claimProposal(proposal.id)
+  if (!claimed) return { ok: false, error: proposalClosedText(readProposal(proposal.id)) }
+  let finished = false
+  try {
+    const pl = claimed.placement
+    const notes: string[] = []
+    const mode = gateAutoMode(pl.engine, pl.permission_mode, notes)
+    if (!fs.existsSync(pl.cwd) || !fs.statSync(pl.cwd).isDirectory()) {
+      return { ok: false, error: `The directory ${pl.cwd} no longer exists.` }
+    }
+    const plan: NewSessionPlan = {
+      engine: pl.engine,
+      model: pl.model,
+      effort: pl.effort,
+      permissionMode: mode,
+      cwd: pl.cwd,
+      notes
+    }
+    if (pl.worktree) {
+      try {
+        plan.worktree = await createWorktree(pl.cwd, pl.worktree)
+        plan.cwd = plan.worktree.worktreePath
+      } catch (err) {
+        return { ok: false, error: `Could not create the worktree: ${errText(err)}` }
+      }
+    }
+    const spawned = await spawnChild(
+      { routingId: parent.id },
+      plan,
+      'started',
+      claimed.title,
+      pl.wake_when_done === true,
+      by,
+      true
+    )
+    if ('error' in spawned)
+      return { ok: false, error: `Could not start the session: ${spawned.error}` }
+    finished = finishProposal(claimed.id, spawned.childRef)
+    const parentTitle = oneLine(titleOf(parent.id) || 'Untitled session')
+    const sendError = sendFirstPrompt(
+      spawned.routingId,
+      spawned.childRef,
+      `Background (from session ${claimed.parentRef} "${parentTitle}" that started this one):\n${claimed.background}\n\nTask:\n${claimed.prompt}`
+    )
+    if (sendError) {
+      return {
+        ok: false,
+        error: `The session ${spawned.childRef} was created but could not be given its task: ${sendError}`
+      }
+    }
+    return { ok: true, childRef: spawned.childRef, notes }
+  } finally {
+    if (!finished) releaseProposal(claimed.id)
+  }
+}
+
+function proposalClosedText(p: Proposal | undefined): string {
+  if (!p) return 'That proposal no longer exists.'
+  if (p.state === 'started') return `That proposal already started as ${p.startedRef}.`
+  if (p.state === 'starting') return 'That proposal is starting right now.'
+  if (p.dismissReason === 'expired') return 'That proposal has expired.'
+  return `That proposal was withdrawn (${p.dismissReason ?? 'dismissed'}).`
+}
+
 export async function sessionStart(
   caller: SessionToolCaller,
   input: SessionStartInput
@@ -1073,11 +1385,47 @@ export async function sessionStart(
   }
   const notRoot = await rootAgentRefusal(caller, 'session_start')
   if (notRoot) return finish(refused(notRoot), null, `refused: ${notRoot}`)
+
+  // A proposal the user approved in chat.
+  if (input.proposal_id !== undefined) {
+    const check = checkProposalStart(caller, input as Record<string, unknown>)
+    if (!check.ok) {
+      return finish(
+        { text: check.text, isError: true },
+        typeof input.proposal_id === 'string' ? input.proposal_id : null,
+        `refused: ${check.text}`
+      )
+    }
+    reserveStart(caller)
+    const launched = await launchProposal(check.proposal, 'agent')
+    if (!launched.ok) {
+      return finish(failed(launched.error), check.proposal.id, `error: ${launched.error}`)
+    }
+    const notes = launched.notes.length > 0 ? ` (${launched.notes.join('; ')})` : ''
+    return finish(
+      ok(
+        `started ${launched.childRef} ${JSON.stringify(check.proposal.title)}${notes}. It is starting up; if it fails to start, its card shows it.`
+      ),
+      launched.childRef,
+      `started proposal ${check.proposal.id}`
+    )
+  }
+
   const bad = validTitle(input.title)
   if (bad) return finish(failed(bad), null, `invalid: ${bad}`)
+  const title = (input.title as string).trim()
   const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : ''
   if (!prompt) return finish(failed('prompt is required: the task.'), null, 'invalid: no prompt')
   const background = typeof input.background === 'string' ? input.background.trim() : ''
+  for (const [name, text] of [
+    ['prompt', prompt],
+    ['background', background]
+  ] as const) {
+    if (text.length > L.proposalTextChars) {
+      const why = `${name} is ${text.length} characters; the limit is ${L.proposalTextChars}. Shorten it to what the new session needs.`
+      return finish(failed(why), null, `invalid: ${name} too long`)
+    }
+  }
   if (background.length < L.backgroundMin) {
     const why = `background must be at least ${L.backgroundMin} characters: the new session sees none of this conversation.`
     return finish(failed(why), null, `invalid: ${why}`)
@@ -1089,8 +1437,75 @@ export async function sessionStart(
     permissionMode: input.permission_mode
   })
   if (typeof base === 'string') return finish(failed(base), null, `invalid: ${base}`)
-  const refusal = startRefusal(caller, 'session_start', input)
-  if (refusal) return finish(refused(refusal), null, `refused: ${refusal}`)
+
+  const proposing = input.mode === 'propose'
+  let converted: string | null = null
+  if (proposing) {
+    // Proposing starts nothing, so plan mode allows it; the mode cap still applies.
+    if (input.permission_mode) {
+      const mode = permissionModeRefusal(caller, input.permission_mode)
+      if (mode) return finish(refused(mode), null, `refused: ${mode}`)
+    }
+  } else {
+    const refusal = startRefusalInfo(caller, 'session_start', input)
+    if (refusal && !refusal.convertible) {
+      const text = refusalText(refusal)
+      return finish(refused(text), null, `refused: ${text}`)
+    }
+    converted = refusal?.reason ?? null
+  }
+
+  if (proposing || converted !== null) {
+    const where = resolveCwd(caller, input.cwd)
+    if (!fs.existsSync(where.cwd) || !fs.statSync(where.cwd).isDirectory()) {
+      const why = `cwd ${where.cwd} is not an existing directory.`
+      return finish(failed(why), null, `invalid: ${why}`)
+    }
+    if (input.worktree) {
+      try {
+        validateWorktreeName(input.worktree)
+      } catch (err) {
+        return finish(failed(errText(err)), null, `invalid: ${errText(err)}`)
+      }
+    }
+    // Proposing is free of every other gate, so a turn gets a bounded number of them.
+    const ledger = need().manager.get(caller.routingId)?.originLedger
+    if (ledger && !ledger.proposalsLeft) {
+      const why = `too many proposals this turn (${ledger.proposalsSinceUser}). Wait for the user's next message.`
+      return finish(refused(why), null, `refused: ${why}`)
+    }
+    ledger?.proposed()
+    const placement: ProposalPlacement = {
+      engine: base.engine,
+      ...(base.model ? { model: base.model } : {}),
+      ...(base.effort ? { effort: base.effort } : {}),
+      permission_mode: base.permissionMode,
+      cwd: where.cwd,
+      ...(input.worktree ? { worktree: input.worktree } : {}),
+      ...(input.wake_when_done === true ? { wake_when_done: true } : {}),
+      ...(where.outside ? { outside: true } : {})
+    }
+    const proposal = createProposal({
+      parentRef: callerRef(caller),
+      title,
+      prompt,
+      background,
+      placement
+    })
+    const notes = base.notes.length > 0 ? ` (${base.notes.join('; ')})` : ''
+    const text =
+      converted !== null
+        ? `converted to a proposal: ${converted} The user sees a card (${proposal.id}) and nothing runs until they start it. It expires in 7 days; session_dismiss_proposal withdraws it sooner.${notes}`
+        : `proposed ${proposal.id}: ${PROPOSAL_TAIL}${notes}`
+    return finish(
+      ok(text),
+      proposal.id,
+      converted !== null
+        ? `converted to proposal ${proposal.id}: ${converted}`
+        : `proposed ${proposal.id}`
+    )
+  }
+
   reserveStart(caller)
   const cwd = childCwdFor(caller, input.cwd)
   if (!cwd.ok) return finish(refused(cwd.reason), null, `refused: ${cwd.reason}`)
@@ -1108,13 +1523,7 @@ export async function sessionStart(
     }
   }
 
-  const spawned = await spawnChild(
-    caller,
-    plan,
-    'started',
-    input.title.trim(),
-    input.wake_when_done === true
-  )
+  const spawned = await spawnChild(caller, plan, 'started', title, input.wake_when_done === true)
   if ('error' in spawned) {
     return finish(
       failed(`Could not start the session: ${spawned.error}`),
@@ -1140,11 +1549,160 @@ export async function sessionStart(
   const notes = plan.notes.length > 0 ? ` (${plan.notes.join('; ')})` : ''
   return finish(
     ok(
-      `started ${spawned.childRef} ${JSON.stringify(input.title.trim())}${notes}. It is starting up; if it fails to start, its card shows it.`
+      `started ${spawned.childRef} ${JSON.stringify(title)}${notes}. It is starting up; if it fails to start, its card shows it.`
     ),
     spawned.childRef,
     `started ${plan.engine}${plan.model ? `/${plan.model}` : ''} in ${plan.cwd}`
   )
+}
+
+/** `session_dismiss_proposal`: withdraw one of this session's own pending proposals. */
+export async function sessionDismissProposal(
+  caller: SessionToolCaller,
+  input: SessionDismissProposalInput
+): Promise<SessionToolResult> {
+  const finish = (
+    r: SessionToolResult,
+    target: string | null,
+    detail: string
+  ): SessionToolResult => {
+    auditSessionToolCall(
+      caller,
+      'session_dismiss_proposal',
+      target,
+      r.isError ? 'error' : 'ok',
+      detail
+    )
+    return r
+  }
+  const notRoot = await rootAgentRefusal(caller, 'session_dismiss_proposal')
+  if (notRoot) return finish(refused(notRoot), null, `refused: ${notRoot}`)
+  if (!isProposalId(input.proposal_id)) {
+    return finish(failed(`No proposal ${JSON.stringify(input.proposal_id)}.`), null, 'invalid id')
+  }
+  const proposal = readProposal(input.proposal_id)
+  if (!proposal)
+    return finish(failed(`No proposal ${input.proposal_id}.`), input.proposal_id, 'unknown')
+  if (proposal.parentRef !== callerRef(caller)) {
+    return finish(
+      refused('that proposal belongs to another session.'),
+      proposal.id,
+      'refused: not its proposer'
+    )
+  }
+  if (proposal.state === 'started') {
+    return finish(
+      ok(`${proposal.id} already started as ${proposal.startedRef}.`),
+      proposal.id,
+      'already started'
+    )
+  }
+  if (proposal.state === 'starting') {
+    return finish(ok(`${proposal.id} is starting right now.`), proposal.id, 'already starting')
+  }
+  if (proposal.state === 'dismissed') {
+    const why = proposal.dismissReason === 'expired' ? 'has expired' : 'was already withdrawn'
+    return finish(
+      ok(`${proposal.id} ${why}.`),
+      proposal.id,
+      `already closed (${proposal.dismissReason})`
+    )
+  }
+  const said = typeof input.reason === 'string' ? oneLine(input.reason, 200) : ''
+  dismissProposal(proposal.id, said ? `agent: ${said}` : 'agent')
+  return finish(ok(`dismissed ${proposal.id}.`), proposal.id, `dismissed${said ? `: ${said}` : ''}`)
+}
+
+/**
+ * One audit row for a click on a proposal card, written by the service so it can say
+ * what the registry's own row cannot: which proposal, whether it worked, and the
+ * session it started. The registry still writes the row that names the client's
+ * identity; this one is attributed to the host acting on that click.
+ */
+function auditProposalClick(
+  action: 'start' | 'dismiss',
+  proposalId: unknown,
+  target: string | null,
+  outcome: 'ok' | 'error',
+  detail: string
+): void {
+  try {
+    appendAuditLog({
+      ts: Date.now(),
+      connectionId: `proposal:${typeof proposalId === 'string' ? proposalId : 'unknown'}`,
+      method: 'host',
+      label: 'proposal click',
+      capability: 'chat',
+      kind: 'command',
+      channel: `session-proposal:${action}`,
+      sessionId: target,
+      outcome,
+      detail: cap(detail, 500)
+    })
+  } catch (err) {
+    logger.error(LOG, `audit append failed for the proposal ${action}: ${errText(err)}`)
+  }
+}
+
+/** `session:proposal:start`: the user's click on a card's Start. */
+export async function startProposalFromClient(
+  proposalId: unknown
+): Promise<{ success: boolean; error?: string; startedRef?: string }> {
+  const done = (
+    result: { success: boolean; error?: string; startedRef?: string },
+    detail: string
+  ): { success: boolean; error?: string; startedRef?: string } => {
+    auditProposalClick(
+      'start',
+      proposalId,
+      result.startedRef ?? null,
+      result.success ? 'ok' : 'error',
+      detail
+    )
+    return result
+  }
+  if (!isProposalId(proposalId))
+    return done({ success: false, error: 'Unknown proposal' }, 'unknown')
+  try {
+    const proposal = readProposal(proposalId)
+    if (!proposal || proposal.state !== 'pending') {
+      const error = proposalClosedText(proposal)
+      return done({ success: false, error }, `refused: ${error}`)
+    }
+    const launched = await launchProposal(proposal, 'user')
+    return launched.ok
+      ? done({ success: true, startedRef: launched.childRef }, `started ${launched.childRef}`)
+      : done({ success: false, error: launched.error }, `failed: ${launched.error}`)
+  } catch (err) {
+    logger.error(LOG, `starting proposal ${proposalId} failed: ${errText(err)}`)
+    return done({ success: false, error: errText(err) }, `error: ${errText(err)}`)
+  }
+}
+
+/** `session:proposal:dismiss`: the user's click on a card's Dismiss. */
+export function dismissProposalFromClient(proposalId: unknown): {
+  success: boolean
+  error?: string
+} {
+  const done = (
+    result: { success: boolean; error?: string },
+    detail: string
+  ): { success: boolean; error?: string } => {
+    auditProposalClick('dismiss', proposalId, null, result.success ? 'ok' : 'error', detail)
+    return result
+  }
+  if (!isProposalId(proposalId))
+    return done({ success: false, error: 'Unknown proposal' }, 'unknown')
+  const proposal = readProposal(proposalId)
+  if (!proposal)
+    return done({ success: false, error: 'That proposal no longer exists.' }, 'unknown')
+  if (proposal.state !== 'pending') {
+    const error = proposalClosedText(proposal)
+    return done({ success: false, error }, `refused: ${error}`)
+  }
+  return dismissProposal(proposalId, 'user')
+    ? done({ success: true }, 'dismissed')
+    : done({ success: false, error: 'That proposal has expired.' }, 'refused: expired')
 }
 
 /** `~/.claude/ui/handoffs`: ClaudeUI's own data, never an agent-chosen path. */
@@ -1270,6 +1828,8 @@ export async function runSessionTool(
         return await sessionMessage(caller, input as unknown as SessionMessageInput)
       case 'session_start':
         return await sessionStart(caller, input as unknown as SessionStartInput)
+      case 'session_dismiss_proposal':
+        return await sessionDismissProposal(caller, input as unknown as SessionDismissProposalInput)
       case 'session_hand_off':
         return await sessionHandOff(caller, input as unknown as SessionHandOffInput)
       case 'session_usage':

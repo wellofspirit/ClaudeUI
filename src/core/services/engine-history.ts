@@ -1,6 +1,7 @@
 import type { EngineId, SessionInfo, StatusLineData } from '../../shared/types'
 import { getSessionMeta } from './db'
 import { withSessionCards } from './session-links'
+import { withProposalCards } from './session-proposals'
 import {
   listDirectories,
   loadSessionHistory as loadClaudeHistory,
@@ -108,11 +109,14 @@ export function readSessionHistory(
   return historyFor(engineId ?? storedEngine)
     .read(sessionId, projectKey, anchor)
     .then((result) => {
-      // No engine writes anything for a session card, so a cold read puts the
-      // parent's cards back (slice 1b). Not for an anchored read: only a fork
-      // passes an anchor, and a fork is a new session that started none of the
-      // source's children.
-      const messages = anchor ? result.messages : withSessionCards(sessionId, result.messages)
+      // No engine writes anything for a session card or a proposal card, so a cold
+      // read puts the parent's cards back (slices 1b and 1c-b), proposals in the
+      // state they are in now. Not for an anchored read: only a fork passes an
+      // anchor, and a fork is a new session that started and proposed none of the
+      // source's.
+      const messages = anchor
+        ? result.messages
+        : withProposalCards(sessionId, withSessionCards(sessionId, result.messages))
       return messages === result.messages ? result : { ...result, messages }
     })
 }

@@ -268,6 +268,17 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         success: boolean
         error?: string
       }>,
+    startSessionProposal: (proposalId) =>
+      connection.invoke('session:proposal:start', proposalId) as Promise<{
+        success: boolean
+        error?: string
+        startedRef?: string
+      }>,
+    dismissSessionProposal: (proposalId) =>
+      connection.invoke('session:proposal:dismiss', proposalId) as Promise<{
+        success: boolean
+        error?: string
+      }>,
     recallQueued: (routingId) =>
       connection.invoke('session:recall-queued', routingId) as Promise<{
         recalled: string[]

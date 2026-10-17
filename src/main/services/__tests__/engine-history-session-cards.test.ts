@@ -11,6 +11,11 @@ import type { ChatMessage } from '../../../shared/types'
 import { readSessionHistory } from '../../../core/services/engine-history'
 import { linkChild, refFor, sessionCardId } from '../../../core/services/session-links'
 import { getSessionLink } from '../../../core/services/db'
+import {
+  createProposal,
+  dismissProposal,
+  proposalCardId
+} from '../../../core/services/session-proposals'
 import { emitEvent, syncCore } from '../../../core/services/sync-host'
 
 const mocks = vi.hoisted(() => ({ claude: vi.fn() }))
@@ -99,5 +104,81 @@ describe('readSessionHistory — session cards', () => {
     }
     mocks.claude.mockResolvedValue(raw)
     expect(await readSessionHistory(lonely, 'proj')).toBe(raw)
+  })
+})
+
+describe('readSessionHistory — proposal cards', () => {
+  const placement = { engine: 'claude' as const, permission_mode: 'default', cwd: '/x' }
+  const BACKGROUND = 'x'.repeat(90)
+
+  it('puts the proposer’s cards back where each was made, with the state they are in now', async () => {
+    syncCore.resetCanonicalForTests()
+    const parent = `eh-prop-${process.pid}`
+    emitEvent('session:created', [parent, { cwd: '/x' }])
+    const parentRef = refFor('claude', parent)
+    const t0 = Date.now()
+    const pending = createProposal({
+      parentRef,
+      title: 'Open',
+      prompt: 'p',
+      background: BACKGROUND,
+      placement,
+      now: t0
+    })
+    const gone = createProposal({
+      parentRef,
+      title: 'Gone',
+      prompt: 'p',
+      background: BACKGROUND,
+      placement,
+      now: t0 + 20
+    })
+    dismissProposal(gone.id, 'user', t0 + 21)
+    engineReturns([
+      message('before', t0 - 5),
+      message('between', t0 + 10),
+      message('after', t0 + 30)
+    ])
+
+    const result = await readSessionHistory(parent, 'proj')
+
+    expect(result.messages.map((m) => m.id)).toEqual([
+      'before',
+      proposalCardId(pending.id),
+      'between',
+      proposalCardId(gone.id),
+      'after'
+    ])
+    expect(result.messages[1].content[0]).toMatchObject({
+      type: 'proposal_card',
+      state: 'pending',
+      title: 'Open'
+    })
+    expect(result.messages[3].content[0]).toMatchObject({ state: 'dismissed', reason: 'user' })
+  })
+
+  it('adds none to an anchored read: a fork proposed nothing', async () => {
+    syncCore.resetCanonicalForTests()
+    const parent = `eh-prop-fork-${process.pid}`
+    emitEvent('session:created', [parent, { cwd: '/x' }])
+    createProposal({
+      parentRef: refFor('claude', parent),
+      title: 'T',
+      prompt: 'p',
+      background: BACKGROUND,
+      placement
+    })
+    engineReturns([message('only', 1)])
+    const result = await readSessionHistory(parent, 'proj', 'anchor-uuid')
+    expect(result.messages.map((m) => m.id)).toEqual(['only'])
+  })
+
+  it('reads a session that proposed nothing exactly as the engine returned it', async () => {
+    syncCore.resetCanonicalForTests()
+    const parent = `eh-prop-none-${process.pid}`
+    emitEvent('session:created', [parent, { cwd: '/x' }])
+    engineReturns([message('only', 1)])
+    const result = await readSessionHistory(parent, 'proj')
+    expect(result.messages.map((m) => m.id)).toEqual(['only'])
   })
 })

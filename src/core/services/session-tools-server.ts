@@ -103,11 +103,19 @@ export function createSessionToolsServer(ctx: SessionToolsServerContext): SdkMcp
         'session_start',
         d.session_start,
         {
-          mode: z.enum(['start']).optional(),
-          title: z.string().describe('A short name for the new session (under 60 characters)'),
-          prompt: z.string().describe('The task: the area, and what done looks like'),
+          mode: z.enum(['start', 'propose']).optional(),
+          proposal_id: z
+            .string()
+            .optional()
+            .describe('Start a proposal the user approved in chat; use it alone'),
+          title: z
+            .string()
+            .optional()
+            .describe('A short name for the new session (under 60 characters)'),
+          prompt: z.string().optional().describe('The task: the area, and what done looks like'),
           background: z
             .string()
+            .optional()
             .describe('Everything the new session cannot see and needs (at least 80 characters)'),
           engine: engine.optional(),
           model: z.string().optional(),
@@ -120,6 +128,16 @@ export function createSessionToolsServer(ctx: SessionToolsServerContext): SdkMcp
           wake_when_done: z.boolean().optional()
         },
         (input, extra) => run('session_start', input, extra),
+        load
+      ),
+      tool(
+        'session_dismiss_proposal',
+        d.session_dismiss_proposal,
+        {
+          proposal_id: z.string().describe('The id session_start returned (p-…)'),
+          reason: z.string().optional()
+        },
+        (input, extra) => run('session_dismiss_proposal', input, extra),
         load
       ),
       tool(

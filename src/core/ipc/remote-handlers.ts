@@ -9,6 +9,7 @@ import { STREAM_WATCH_COMMAND } from './stream-watch'
 import { GIT_WATCH_COMMAND } from './git-watch'
 import { SessionManager } from '../services/session-manager'
 import { detachSessionLink } from '../services/session-links'
+import { dismissProposalFromClient, startProposalFromClient } from '../services/session-tools'
 import {
   loadSubagentHistory,
   buildSubagentFileMap,
@@ -547,6 +548,21 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string) => detachSessionLink(routingId)
+  })
+
+  // The user's click on a proposal card (session tools, slice 1c-b). The argument is
+  // the proposal's id, not a session id; the audit row for the click is the registry's.
+  handleRemote({
+    channel: 'session:proposal:start',
+    capability: 'chat',
+    kind: 'command',
+    handler: async (proposalId: string) => startProposalFromClient(proposalId)
+  })
+  handleRemote({
+    channel: 'session:proposal:dismiss',
+    capability: 'chat',
+    kind: 'command',
+    handler: async (proposalId: string) => dismissProposalFromClient(proposalId)
   })
 
   // Deprecated (ADR-053): recall-all shim for cached `/remote` bundles.

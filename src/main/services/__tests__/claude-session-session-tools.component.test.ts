@@ -165,7 +165,7 @@ afterEach(() => {
 })
 
 describe('registration', () => {
-  it('registers claude-ui-sessions with the eight tools, outside allowedTools, with its guidance in the prompt', async () => {
+  it('registers claude-ui-sessions with the nine tools, outside allowedTools, with its guidance in the prompt', async () => {
     const { options } = await boot()
     const server = options.mcpServers['claude-ui-sessions']
     expect(server).toBeTruthy()
@@ -175,6 +175,7 @@ describe('registration', () => {
       'session_read',
       'session_message',
       'session_start',
+      'session_dismiss_proposal',
       'session_hand_off',
       'session_usage',
       'session_stop'
@@ -236,7 +237,7 @@ describe('the tools as Claude Code sees them', () => {
     const client = await connect(options.mcpServers['claude-ui-sessions'])
     try {
       const { tools } = await client.listTools()
-      expect(tools).toHaveLength(8)
+      expect(tools).toHaveLength(9)
       for (const t of tools) {
         expect((t as { _meta?: Record<string, unknown> })._meta, t.name).toEqual({
           'anthropic/alwaysLoad': true

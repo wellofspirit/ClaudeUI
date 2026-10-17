@@ -199,6 +199,8 @@ const PEER_HOLD_HELD = 84
 const PEER_HOLD_SETTLED = 36
 /** SessionCard: a kind line over one wrapping row (title, state, Open) in a bordered box. */
 const SESSION_CARD = 84
+/** ProposalCard: kind line, title row, placement line, brief toggle, expiry and the Start / Dismiss row. */
+const PROPOSAL_CARD = 168
 /** ReviewResultCard: expanded by default, `max-h-96` body under an h-9 header. */
 const REVIEW_BODY_MAX = 384
 /** Fallback for a role/shape this module does not know. */
@@ -693,6 +695,8 @@ function systemHeight(message: ChatMessage, columnPx: number): number {
       parts.push(block.state === 'held' ? PEER_HOLD_HELD : PEER_HOLD_SETTLED)
     } else if (block.type === 'session_card') {
       parts.push(SESSION_CARD)
+    } else if (block.type === 'proposal_card') {
+      parts.push(PROPOSAL_CARD)
     } else if (block.type === 'review_result') {
       parts.push(
         COLLAPSED_ROW +

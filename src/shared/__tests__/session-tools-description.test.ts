@@ -27,8 +27,9 @@ describe('session tool names', () => {
     expect(new Set(SESSION_TOOL_NAMES).size).toBe(SESSION_TOOL_NAMES.length)
   })
 
-  it('acting tools are exactly the four that change something', () => {
+  it('acting tools are exactly the five that change something', () => {
     expect([...ACTING_SESSION_TOOLS].sort()).toEqual([
+      'session_dismiss_proposal',
       'session_hand_off',
       'session_message',
       'session_start',

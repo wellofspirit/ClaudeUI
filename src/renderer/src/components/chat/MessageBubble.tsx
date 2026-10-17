@@ -18,6 +18,7 @@ import { ToolNoteRow } from './ToolNoteRow'
 import { ContextNoteBlock } from './ContextNoteBlock'
 import { PeerHoldRow } from './PeerHoldRow'
 import { SessionCard } from './SessionCard'
+import { ProposalCard } from './ProposalCard'
 import { ReviewResultCard } from './ReviewResultCard'
 import { TaskCard } from './TaskCard'
 import { hostedMcpKind } from '../../../../shared/tool-kinds'
@@ -241,6 +242,10 @@ export const MessageBubble = memo(function MessageBubble({
           // A session this one started or handed off to.
           if (block.type === 'session_card') {
             return <SessionCard key={i} block={block} />
+          }
+          // A session an agent proposed for the user to start.
+          if (block.type === 'proposal_card') {
+            return <ProposalCard key={i} block={block} />
           }
           // A code review's findings. The one untrusted-text block that DOES go
           // through markdown, by decision (F20) — see ReviewResultCard.
