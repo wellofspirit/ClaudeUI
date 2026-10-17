@@ -452,6 +452,13 @@ export function rekeyCanonical(
     sessionEngines[newId] = sessionEngines[oldId]
     delete sessionEngines[oldId]
   }
+  // The ref follows the session: links name refs, so this is the only id-keyed
+  // piece of the link state (the host moves the stored row in the same tick).
+  const sessionRefs = { ...state.sessionRefs }
+  if (sessionRefs[oldId] !== undefined) {
+    sessionRefs[newId] = sessionRefs[oldId]
+    delete sessionRefs[oldId]
+  }
 
   return {
     ...state,
@@ -462,7 +469,8 @@ export function rekeyCanonical(
     hiddenSessions: state.hiddenSessions.map((id) => (id === oldId ? newId : id)),
     customTitles,
     worktreeInfoMap,
-    sessionEngines
+    sessionEngines,
+    sessionRefs
   }
 }
 
@@ -619,13 +627,16 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
       const customTitles = { ...state.customTitles }
       const worktreeInfoMap = { ...state.worktreeInfoMap }
       const sessionEngines = { ...state.sessionEngines }
+      const sessionRefs = { ...state.sessionRefs }
       const hadRow =
         customTitles[routingId] !== undefined ||
         worktreeInfoMap[routingId] !== undefined ||
-        sessionEngines[routingId] !== undefined
+        sessionEngines[routingId] !== undefined ||
+        sessionRefs[routingId] !== undefined
       delete customTitles[routingId]
       delete worktreeInfoMap[routingId]
       delete sessionEngines[routingId]
+      delete sessionRefs[routingId]
 
       const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
       const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== routingId)
@@ -646,6 +657,7 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         customTitles,
         worktreeInfoMap,
         sessionEngines,
+        sessionRefs,
         recentSessionIds,
         pinnedSessionIds,
         hiddenSessions,
@@ -1420,6 +1432,21 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
       const directories = arg<unknown>(event, 0)
       if (!Array.isArray(directories)) return state
       return { ...state, directories: directories as CanonicalState['directories'] }
+    }
+
+    /**
+     * The parent/child link table and the id of each session it names, as a
+     * REPLACE (slice 1b). The host sends the whole table on every change, so an
+     * event is idempotent and a late joiner's snapshot is the same value. An
+     * absent or malformed payload is a no-op.
+     */
+    case 'session:link-changed': {
+      const data = arg<{
+        links?: CanonicalState['sessionLinks']
+        refs?: CanonicalState['sessionRefs']
+      }>(event, 0)
+      if (!isRecord(data) || !isRecord(data.links) || !isRecord(data.refs)) return state
+      return { ...state, sessionLinks: data.links, sessionRefs: data.refs }
     }
 
     // -----------------------------------------------------------------------

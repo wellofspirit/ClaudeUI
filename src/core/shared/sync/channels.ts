@@ -359,6 +359,13 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     why: 'The merged (claude + opencode + pi) sidebar listing, applied as a replace. Was a payload-less notify each client answered with its OWN three-query merge, while canonical held the claude-only subset every sync-full then force-projected back over it.'
   },
 
+  'session:link-changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'Parent/child links between sessions and the id of each session they name (slice 1b): the WHOLE table, applied as a replace, so a late joiner reads the same value from the snapshot and an event never depends on a previous one. Small by nature (one row per started session).'
+  },
+
   // -------------------------------------------------------------------------
   // Session domain — the volatile lane. Nothing here rings (phase 5 S1 + S2);
   // the flavor is what decides how a frame is interpreted.

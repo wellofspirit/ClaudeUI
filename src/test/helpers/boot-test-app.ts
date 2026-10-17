@@ -173,6 +173,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     dequeueMessage: (routingId, value) =>
       ipcRenderer.invoke('session:dequeue-message', routingId, value),
     allowPeerMessages: (routingId) => ipcRenderer.invoke('session:allow-peer-messages', routingId),
+    detachSessionLink: (routingId) => ipcRenderer.invoke('session:link:detach', routingId),
     recallQueued: (routingId) => ipcRenderer.invoke('session:recall-queued', routingId),
     askSideQuestion: (routingId, question) =>
       ipcRenderer.invoke('session:ask-side-question', routingId, question),

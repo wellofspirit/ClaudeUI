@@ -263,6 +263,11 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         success: boolean
         error?: string
       }>,
+    detachSessionLink: (routingId) =>
+      connection.invoke('session:link:detach', routingId) as Promise<{
+        success: boolean
+        error?: string
+      }>,
     recallQueued: (routingId) =>
       connection.invoke('session:recall-queued', routingId) as Promise<{
         recalled: string[]

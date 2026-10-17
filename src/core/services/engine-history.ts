@@ -1,5 +1,6 @@
 import type { EngineId, SessionInfo, StatusLineData } from '../../shared/types'
 import { getSessionMeta } from './db'
+import { withSessionCards } from './session-links'
 import {
   listDirectories,
   loadSessionHistory as loadClaudeHistory,
@@ -104,5 +105,14 @@ export function readSessionHistory(
   const storedEngine = getSessionMeta(sessionId)?.engineId
   if (engineId && storedEngine && engineId !== storedEngine)
     throw new Error('History engine does not match persisted session identity')
-  return historyFor(engineId ?? storedEngine).read(sessionId, projectKey, anchor)
+  return historyFor(engineId ?? storedEngine)
+    .read(sessionId, projectKey, anchor)
+    .then((result) => {
+      // No engine writes anything for a session card, so a cold read puts the
+      // parent's cards back (slice 1b). Not for an anchored read: only a fork
+      // passes an anchor, and a fork is a new session that started none of the
+      // source's children.
+      const messages = anchor ? result.messages : withSessionCards(sessionId, result.messages)
+      return messages === result.messages ? result : { ...result, messages }
+    })
 }

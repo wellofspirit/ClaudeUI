@@ -15,6 +15,7 @@ import type { ProviderRegistrySnapshot } from '../../../shared/provider-registry
 import type { AuthRequiredState } from '../../../shared/remote-protocol'
 import type { ItemStreams } from '../../../core/shared/sync/item-stream'
 import type { CanonicalState } from '../../../core/shared/sync/state'
+import type { SessionLinkInfo } from '../../../shared/session-links'
 import {
   anthropicAuthState,
   chatgptAuthFromRegistry,
@@ -1688,6 +1689,10 @@ export interface SessionState {
   hiddenProjectKeys: string[]
   /** Maps sessionId → { engineId, model? } for engine persistence across restarts. */
   sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
+  /** Parent/child links between sessions, keyed by the child's ref (slice 1b). Replicated. */
+  sessionLinks: Record<string, SessionLinkInfo>
+  /** sidebar id → ref for every session a link names (slice 1b). Replicated. */
+  sessionRefs: Record<string, string>
 
   /** Remembered engine choice — pre-fills engine for newly created sessions. */
   lastSelectedEngineId: EngineId
@@ -2168,6 +2173,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   hiddenSessionIds: [],
   hiddenProjectKeys: [],
   sessionEngines: {},
+  sessionLinks: {},
+  sessionRefs: {},
   lastSelectedEngineId:
     ((localStorage.getItem('lastSelectedEngineId') ??
       localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',

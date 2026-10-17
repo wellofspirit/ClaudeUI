@@ -34,6 +34,7 @@
 
 import { loadSettings, loadSessionConfig, loadSlashCommands } from './ui-config'
 import { pruneOrphanClaudeSessionMeta } from './session-meta-prune'
+import { seedLinkState } from './session-links'
 import { loadClaudePermissions } from './claude-settings'
 import { listDirectories } from './session-history'
 import { historyFor } from './engine-history'
@@ -288,6 +289,13 @@ export async function seedCanonicalAppState(): Promise<void> {
     })
   } catch (err) {
     logger.warn(LOG_SOURCE, 'session-config seed failed', err)
+  }
+
+  try {
+    // Parent/child links (session tools, slice 1b) live in SQLite, not the registry file.
+    seedLinkState()
+  } catch (err) {
+    logger.warn(LOG_SOURCE, 'session-link seed failed', err)
   }
 
   try {

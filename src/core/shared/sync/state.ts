@@ -36,6 +36,7 @@ import type {
   FullStateSnapshot,
   PerSessionSnapshot
 } from '../../../shared/remote-protocol'
+import type { SessionLinkInfo } from '../../../shared/session-links'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
 export interface CanonicalSessionState {
@@ -117,6 +118,10 @@ export interface CanonicalState {
   sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
   hiddenSessions: string[]
   hiddenProjects: string[]
+  /** Parent/child links between sessions, keyed by the child's ref (slice 1b). */
+  sessionLinks: Record<string, SessionLinkInfo>
+  /** sidebar id → ref for every session a link names (slice 1b). */
+  sessionRefs: Record<string, string>
   /**
    * App-level lists the wire snapshot replicates PER SESSION (every session
    * entry carries the same list). Held once here and fanned out by
@@ -186,6 +191,8 @@ export function emptyCanonicalState(): CanonicalState {
     sessionEngines: {},
     hiddenSessions: [],
     hiddenProjects: [],
+    sessionLinks: {},
+    sessionRefs: {},
     slashCommands: [],
     sdkSkillNames: []
   }
@@ -272,6 +279,8 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
     sessionEngines: snapshot.sessionEngines ?? {},
     hiddenSessions: snapshot.hiddenSessions ?? [],
     hiddenProjects: snapshot.hiddenProjects ?? [],
+    sessionLinks: snapshot.sessionLinks ?? {},
+    sessionRefs: snapshot.sessionRefs ?? {},
     slashCommands: first?.slashCommands ?? [],
     sdkSkillNames: first?.sdkSkillNames ?? []
   }
@@ -336,6 +345,8 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
     worktreeInfoMap: state.worktreeInfoMap,
     sessionEngines: state.sessionEngines,
     hiddenSessions: state.hiddenSessions,
-    hiddenProjects: state.hiddenProjects
+    hiddenProjects: state.hiddenProjects,
+    sessionLinks: state.sessionLinks,
+    sessionRefs: state.sessionRefs
   }
 }

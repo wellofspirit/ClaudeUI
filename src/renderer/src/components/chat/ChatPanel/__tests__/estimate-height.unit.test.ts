@@ -310,6 +310,25 @@ describe('system messages and the rest', () => {
     expect(est(sys(peer('released')))).toBeGreaterThan(0)
   })
 
+  it('a session card is a bordered box taller than a settled one-line row', () => {
+    const card = sys({
+      type: 'session_card',
+      childRef: 's-abcdef',
+      kind: 'started',
+      title: 'Fix the flaky test',
+      engineId: 'claude'
+    })
+    const settledPeer = sys({
+      type: 'peer_hold',
+      holdId: 'm',
+      state: 'released',
+      lane: 'socket',
+      fromName: 'a'
+    })
+    expect(est(card)).toBeGreaterThan(est(settledPeer))
+    expect(est(card)).toBeGreaterThanOrEqual(80)
+  })
+
   it('an unknown role falls back to 100', () => {
     expect(est({ ...assistant(text('x')), role: 'other' as never })).toBe(100)
   })

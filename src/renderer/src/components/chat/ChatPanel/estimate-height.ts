@@ -197,6 +197,8 @@ const CONTEXT_NOTE = 30
 /** A held peer message: a sentence that may wrap, then the Allow button; settled, just the sentence. */
 const PEER_HOLD_HELD = 84
 const PEER_HOLD_SETTLED = 36
+/** SessionCard: a kind line over one wrapping row (title, state, Open) in a bordered box. */
+const SESSION_CARD = 84
 /** ReviewResultCard: expanded by default, `max-h-96` body under an h-9 header. */
 const REVIEW_BODY_MAX = 384
 /** Fallback for a role/shape this module does not know. */
@@ -689,6 +691,8 @@ function systemHeight(message: ChatMessage, columnPx: number): number {
       parts.push(CONTEXT_NOTE)
     } else if (block.type === 'peer_hold') {
       parts.push(block.state === 'held' ? PEER_HOLD_HELD : PEER_HOLD_SETTLED)
+    } else if (block.type === 'session_card') {
+      parts.push(SESSION_CARD)
     } else if (block.type === 'review_result') {
       parts.push(
         COLLAPSED_ROW +

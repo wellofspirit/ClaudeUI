@@ -2433,3 +2433,70 @@ describe('reducer — host-instruction prompts (slice 1a)', () => {
     expect(typed).not.toHaveProperty('hostInstruction')
   })
 })
+
+describe('reducer — session:link-changed (parent/child links, slice 1b)', () => {
+  const payload = {
+    links: {
+      's-child1': {
+        parentRef: 's-parent',
+        kind: 'handoff',
+        state: 'live',
+        createdBy: 'agent',
+        wakeParent: false,
+        createdAt: 1
+      }
+    },
+    refs: { 'rid-child': 's-child1', 'rid-parent': 's-parent' }
+  }
+
+  it('replaces the link table and the ref map, and replicates both in the snapshot', () => {
+    const s = fold([['session:link-changed', payload]])
+    expect(s.sessionLinks).toEqual(payload.links)
+    expect(s.sessionRefs).toEqual(payload.refs)
+    const restored = fromSnapshot(toSnapshot(s, 1))
+    expect(restored.sessionLinks).toEqual(payload.links)
+    expect(restored.sessionRefs).toEqual(payload.refs)
+    // A replace: a later payload is the whole table, not an addition to the first.
+    const later = fold([['session:link-changed', { links: {}, refs: {} }]], s)
+    expect(later.sessionLinks).toEqual({})
+    expect(later.sessionRefs).toEqual({})
+  })
+
+  it('is a ringed replicated channel that canonical folds', () => {
+    expect(channelSpec('session:link-changed')).toMatchObject({
+      cls: 'replicated',
+      ring: true,
+      canonical: true
+    })
+  })
+
+  it('ignores a malformed payload', () => {
+    const base = fold([['session:link-changed', payload]])
+    expect(fold([['session:link-changed']], base)).toBe(base)
+    expect(fold([['session:link-changed', { links: {} }]], base)).toBe(base)
+    expect(fold([['session:link-changed', 'nope']], base)).toBe(base)
+  })
+
+  it('moves a session’s ref with it when the status rekeys it', () => {
+    let s = fold([
+      created('temp-1'),
+      ['session:link-changed', { links: {}, refs: { 'temp-1': 's-aaaaaa' } }]
+    ])
+    s = applyEvent(s, {
+      channel: 'session:status',
+      args: ['temp-1', status({ sessionId: 'uuid-9' })],
+      seq: 3
+    })
+    expect(s.sessionRefs).toEqual({ 'uuid-9': 's-aaaaaa' })
+  })
+
+  it('drops a deleted session’s ref, cold sessions included, and nothing else', () => {
+    const s = fold([
+      ['session:link-changed', payload],
+      ['session:removed', 'rid-child']
+    ])
+    expect(s.sessionRefs).toEqual({ 'rid-parent': 's-parent' })
+    // The link table is the host's to update; the reducer leaves it alone.
+    expect(s.sessionLinks).toEqual(payload.links)
+  })
+})

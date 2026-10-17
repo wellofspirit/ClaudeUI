@@ -60,6 +60,7 @@ import type {
 } from '../../../shared/types'
 import type { HarnessId, HarnessInstallProgress } from '../../../shared/harness-types'
 import type { VoicePackStatus } from '../../../shared/voice-pack'
+import type { SessionLinksPayload } from '../../../shared/session-links'
 import type { ItemStreamOpen, ItemStreamSeal } from './item-stream'
 
 export interface SyncEventMap {
@@ -328,6 +329,8 @@ export interface SyncEventMap {
    * the no-op notify it used to be rather than blanking the list.
    */
   'session:directories-changed': (directories?: DirectoryGroup[]) => void
+  /** The parent/child link table and the sidebar id of each session it names (slice 1b). A replace. */
+  'session:link-changed': (data: SessionLinksPayload) => void
   'config:settings-changed': (settings: Record<string, unknown>) => void
   'config:sessions-changed': (config: UISessionConfig) => void
   'git:status-update': (data: { cwd: string; status: GitStatusData }) => void

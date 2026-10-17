@@ -312,6 +312,21 @@ export type ContentBlock =
       outcome?: string
     }
   /**
+   * A session started from (or handed off to by) this one: its card in the
+   * parent's transcript (session tools, slice 1b). Only the stable part rides in
+   * the block: the child's ref, why it exists and the name and engine it was
+   * given. What the card SHOWS beyond that — the child's current title, whether
+   * it is working, waiting for the user or failed — is read from the replicated
+   * link and session state, so the card stays true without being rewritten.
+   */
+  | {
+      type: 'session_card'
+      childRef: string
+      kind: 'started' | 'handoff'
+      title: string
+      engineId: EngineId
+    }
+  /**
    * The rendered output of a code review the engine ran (Codex's
    * `exitedReviewMode`). The one untrusted-text block that DOES go through
    * markdown, by decision (F20): it is the model's own structured review — a
@@ -1809,6 +1824,12 @@ interface SessionAPI {
    * delivered. Claude only.
    */
   allowPeerMessages(routingId: string): Promise<{ success: boolean; error?: string }>
+  /**
+   * Take this session out from under the session that started it or handed off
+   * to it (slice 1b): its link becomes `detached` and it is a top-level session
+   * in the sidebar on every client. The id is the child's.
+   */
+  detachSessionLink(routingId: string): Promise<{ success: boolean; error?: string }>
   /**
    * Take back every still-recallable queued item (ADR-053). `recalled` carries
    * their texts in queue order for the client to join with `\n`; `notRecalled`

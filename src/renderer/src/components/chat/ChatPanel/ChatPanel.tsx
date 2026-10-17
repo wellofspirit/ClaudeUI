@@ -23,6 +23,7 @@ import {
 import { ImageGalleryProvider } from '../../shared/ImageViewer'
 import { DiagramGalleryProvider } from '../DiagramGallery'
 import { TopBar } from './TopBar'
+import { SessionLinkBar } from './SessionLinkBar'
 import { WelcomeState } from './WelcomeState'
 import { reloadActiveTranscript } from '../../../lib/session-history-load'
 import { QueuedMessageCard } from './QueuedMessageCard'
@@ -243,6 +244,7 @@ export function ChatPanel(): React.JSX.Element {
   return (
     <div data-testid="ChatPanel" className="flex-1 flex flex-col min-h-0 min-w-0 relative">
       <TopBar hasContent={hasContent} />
+      <SessionLinkBar />
 
       <div className="flex-1 flex flex-col min-h-0 relative">
         <ChatSearchOverlay

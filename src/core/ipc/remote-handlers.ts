@@ -8,6 +8,7 @@ import { RemoteDispatcher } from '../services/remote-dispatcher'
 import { STREAM_WATCH_COMMAND } from './stream-watch'
 import { GIT_WATCH_COMMAND } from './git-watch'
 import { SessionManager } from '../services/session-manager'
+import { detachSessionLink } from '../services/session-links'
 import {
   loadSubagentHistory,
   buildSubagentFileMap,
@@ -536,6 +537,16 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string) => allowPeerMessages(manager, routingId)
+  })
+
+  // Take a session out from under its parent in the sidebar (slice 1b). `routingId`
+  // is the CHILD's id, so the audit row names the session the user acted on.
+  handleRemote({
+    channel: 'session:link:detach',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string) => detachSessionLink(routingId)
   })
 
   // Deprecated (ADR-053): recall-all shim for cached `/remote` bundles.

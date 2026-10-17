@@ -1583,6 +1583,9 @@ describe('registerRemoteHandlers', () => {
 //     from other Claude sessions here" action on a held peer message; a `chat`
 //     command on the named session, so the browser client can answer the hold row
 //     exactly as the desktop does.
+//   - `session:link:detach` (session tools, slice 1b) — the "Detach from parent" row
+//     menu action; a `chat` command naming the child session, so the browser and
+//     phone clients can take a session out from under its parent as the desktop can.
 // ---------------------------------------------------------------------------
 
 const PRE_PORT_REMOTE_CHANNELS = [
@@ -1649,6 +1652,7 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'session:get-plan-content',
   'session:get-session-log-path',
   'session:interrupt',
+  'session:link:detach',
   'session:list-directories',
   'session:list-opencode',
   'session:list-pi',

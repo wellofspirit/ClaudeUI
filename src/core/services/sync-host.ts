@@ -96,6 +96,25 @@ export function clearSyncSubscribersForTests(): void {
   subscribers.clear()
 }
 
+/**
+ * Main-side observers: services that react to a replicated event BEFORE it fans
+ * out to the clients (like {@link observeWorktreeEntry} below, but registered by
+ * the service that owns the reaction, so this module needs no import of it).
+ * Their own emissions queue behind the event that caused them. A throwing
+ * observer is logged and skipped. Not cleared by
+ * {@link clearSyncSubscribersForTests}: it holds clients, these are the host.
+ */
+export type HostObserver = (channel: string, args: unknown[]) => void
+
+const hostObservers = new Set<HostObserver>()
+
+export function addHostObserver(observer: HostObserver): () => void {
+  hostObservers.add(observer)
+  return () => {
+    hostObservers.delete(observer)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Stream registry (SyncCore phase 5 S1)
 // ---------------------------------------------------------------------------
@@ -423,6 +442,16 @@ function hostDelivery(
   // SyncCore's reentrancy guard, so they land after this event and never take a
   // lower seq than the event that caused them.
   observeWorktreeEntry(channel, args)
+  for (const observer of [...hostObservers]) {
+    try {
+      observer(channel, args)
+    } catch (err) {
+      logger.error(
+        LOG_SOURCE,
+        `host observer threw on "${channel}": ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  }
   for (const sink of [...subscribers]) {
     try {
       sink(seq, channel, args)

@@ -1,0 +1,579 @@
+/**
+ * Session refs and parent/child links (session tools, slice 1b, spec §4/§5).
+ *
+ * A ref (`s-` + 6 characters) is the short handle a session keeps across the
+ * routing-id rekey and restarts; a link records that one session started, or
+ * was handed off to, another. This module is the RULE and the bridge to the
+ * replicated state: SQLite (`session_ref`, `session_link`, via `db.ts`) is the
+ * record, and every change re-emits `session:link-changed` carrying the whole
+ * (small) link table, so a client that joins late reads it from the snapshot and
+ * an applied event is a plain replace.
+ *
+ * State of a link follows its child's session:
+ *  - `starting` until the child's first status reaches canonical (`live`), or
+ *    its first status is a disconnect (`failed`);
+ *  - a session deleted while `starting` → `failed`, otherwise → `ended`; deleting
+ *    a PARENT leaves its children in place with their links `ended`;
+ *  - `detached` is the user's choice: the pair is no longer shown as related.
+ *
+ * Nothing creates links yet but the tests: the model-facing tools arrive with
+ * slice 1c, which calls {@link linkChild} after it spawns the child.
+ */
+import { randomInt } from 'node:crypto'
+import type { ChatMessage, EngineId } from '../../shared/types'
+import {
+  REF_ALPHABET,
+  REF_LENGTH,
+  RESERVED_SESSION_WORDS,
+  isRef,
+  isRefShaped,
+  type SessionLinkCreator,
+  type SessionLinkInfo,
+  type SessionLinkKind,
+  type SessionLinkState,
+  type SessionLinksPayload
+} from '../../shared/session-links'
+import {
+  allSessionLinks,
+  allSessionRefs,
+  clearSessionRefIds,
+  findSessionRef,
+  getSessionLink,
+  getSessionMeta,
+  getSessionRef,
+  insertSessionRef,
+  moveSessionRef,
+  sessionLinksByParent,
+  setSessionLinkState,
+  setSessionRefIds,
+  upsertSessionLink,
+  type SessionLinkRow,
+  type SessionRefRow
+} from './db'
+import { logger } from './logger'
+import { addHostObserver, emitEvent, syncCore } from './sync-host'
+
+const LOG = 'SessionLinks'
+
+// ---------------------------------------------------------------------------
+// Refs
+// ---------------------------------------------------------------------------
+
+function mintRef(): string {
+  let out = 's-'
+  for (let i = 0; i < REF_LENGTH; i++) out += REF_ALPHABET[randomInt(REF_ALPHABET.length)]
+  return out
+}
+
+interface RefIds {
+  engine: EngineId
+  sessionId?: string | null
+  routingId?: string | null
+}
+
+/**
+ * The ref of the session known by these ids, assigned on first use. An existing
+ * row found by either id learns the other, so a ref assigned to a routing id
+ * keeps working once the engine's session id is known.
+ */
+function ensureRef(ids: RefIds): SessionRefRow {
+  const found =
+    (ids.routingId ? findSessionRef(ids.routingId) : undefined) ??
+    (ids.sessionId ? findSessionRef(ids.sessionId) : undefined)
+  if (found) {
+    const learn: { sessionId?: string; routingId?: string } = {}
+    if (ids.sessionId && !found.sessionId) learn.sessionId = ids.sessionId
+    if (ids.routingId && !found.routingId) learn.routingId = ids.routingId
+    if (learn.sessionId !== undefined || learn.routingId !== undefined) {
+      setSessionRefIds(found.ref, learn)
+      return { ...found, ...learn }
+    }
+    return found
+  }
+  // Collisions on 30 bits are rare; a handful of retries makes a failure not worth modelling.
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const row = {
+      ref: mintRef(),
+      engine: ids.engine,
+      sessionId: ids.sessionId ?? null,
+      routingId: ids.routingId ?? null
+    }
+    if (insertSessionRef(row)) return { ...row, createdAt: Date.now() }
+  }
+  throw new Error('Could not assign a session ref')
+}
+
+/** A session canonical holds but whose engine has not yet reported its own id. */
+function isPendingRouting(id: string): boolean {
+  const session = syncCore.getCanonicalState().sessions[id]
+  return !!session && !session.status.sessionId
+}
+
+/**
+ * The ref of the session with this live routing id or durable session id,
+ * assigned the first time it is asked for. A routing id the engine has not yet
+ * replaced (a session still starting) is recorded as a routing id only, so the
+ * rekey can later bind it to the real one.
+ */
+export function refFor(engine: EngineId, id: string): string {
+  const pending = isPendingRouting(id)
+  return ensureRef({ engine, routingId: id, sessionId: pending ? null : id }).ref
+}
+
+/** The id the sidebar keys a session's row by: the live routing id, else the durable id. */
+function sidebarIdOf(row: SessionRefRow): string | null {
+  return row.routingId ?? row.sessionId
+}
+
+export interface ResolvedSession {
+  ref: string
+  engine: EngineId
+  /** The id the sidebar and the engines address the session by. */
+  id: string
+  sessionId: string | null
+  routingId: string | null
+}
+
+export type ResolveResult =
+  | ({ ok: true } & ResolvedSession)
+  | { ok: false; reason: 'not-found' }
+  /** `self` and `parent` are the caller's to resolve; they are not titles. */
+  | { ok: false; reason: 'reserved' }
+  | {
+      ok: false
+      reason: 'ambiguous'
+      candidates: { ref: string; title: string; engine: EngineId }[]
+    }
+
+function resolved(row: SessionRefRow): ResolveResult {
+  const id = sidebarIdOf(row)
+  if (!id) return { ok: false, reason: 'not-found' }
+  return {
+    ok: true,
+    ref: row.ref,
+    engine: row.engine,
+    id,
+    sessionId: row.sessionId,
+    routingId: row.routingId
+  }
+}
+
+/** The title the sidebar shows for a session canonical knows, by sidebar id. */
+function titleOf(id: string): string {
+  const state = syncCore.getCanonicalState()
+  const custom = state.customTitles[id]
+  if (custom) return custom
+  for (const group of state.directories) {
+    const info = group.sessions.find((s) => s.sessionId === id)
+    if (info) return info.title
+  }
+  const first = state.sessions[id]?.messages.find((m) => m.role === 'user')
+  const text = first?.content.find((b) => b.type === 'text')
+  return text && text.type === 'text' ? text.text.slice(0, 80).replace(/\n/g, ' ').trim() : ''
+}
+
+function engineOfId(id: string): EngineId {
+  const state = syncCore.getCanonicalState()
+  const live = state.sessions[id]
+  // Canonical's status names the engine only once the session has reported one
+  // (`DEFAULT_STATUS` says claude): a session that has not — Codex starts lazily —
+  // still has the engine it was born with, from `session:created`.
+  if (live) return live.status.sessionId ? live.status.engineId : live.selectedEngineId
+  for (const group of state.directories) {
+    const info = group.sessions.find((s) => s.sessionId === id)
+    if (info) return info.engineId ?? 'claude'
+  }
+  return getSessionMeta(id)?.engineId ?? state.sessionEngines[id]?.engineId ?? 'claude'
+}
+
+/** Every session id canonical knows: the live ones and the listed ones. */
+function knownSessionIds(): string[] {
+  const state = syncCore.getCanonicalState()
+  const ids = new Set<string>(Object.keys(state.sessions))
+  for (const group of state.directories) for (const s of group.sessions) ids.add(s.sessionId)
+  return [...ids]
+}
+
+/**
+ * What a tool's `session` argument names. In order: one of our refs; a live
+ * routing id or a durable session id (a ref is assigned if it has none yet); an
+ * exact, unique title. `self` and `parent` are refused as titles because the
+ * caller resolves them; so is anything shaped like a ref that is not one — an
+ * unknown `s-…` is "not found", never a title lookup. Two sessions sharing a
+ * title are ambiguous and come back as candidates.
+ */
+export function resolveRef(input: string): ResolveResult {
+  const text = input.trim()
+  if (!text) return { ok: false, reason: 'not-found' }
+  if (isRef(text)) {
+    const row = getSessionRef(text)
+    return row ? resolved(row) : { ok: false, reason: 'not-found' }
+  }
+  if (isRefShaped(text)) return { ok: false, reason: 'not-found' }
+
+  const byId = findSessionRef(text)
+  if (byId) return resolved(byId)
+  const state = syncCore.getCanonicalState()
+  const listed = state.sessions[text] !== undefined || knownSessionIds().includes(text)
+  if (listed) {
+    const engine = engineOfId(text)
+    return resolved(
+      ensureRef({ engine, routingId: text, sessionId: isPendingRouting(text) ? null : text })
+    )
+  }
+
+  if (RESERVED_SESSION_WORDS.has(text.toLowerCase())) return { ok: false, reason: 'reserved' }
+  const matches = knownSessionIds().filter((id) => titleOf(id) === text)
+  if (matches.length === 0) return { ok: false, reason: 'not-found' }
+  if (matches.length === 1) {
+    const id = matches[0]
+    return resolved(
+      ensureRef({
+        engine: engineOfId(id),
+        routingId: id,
+        sessionId: isPendingRouting(id) ? null : id
+      })
+    )
+  }
+  return {
+    ok: false,
+    reason: 'ambiguous',
+    candidates: matches.slice(0, 10).map((id) => {
+      const engine = engineOfId(id)
+      return {
+        ref: ensureRef({ engine, routingId: id, sessionId: isPendingRouting(id) ? null : id }).ref,
+        title: titleOf(id),
+        engine
+      }
+    })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Links
+// ---------------------------------------------------------------------------
+
+/** child routing id → child ref, for links still `starting` (so a status needs no DB read). */
+const startingByRouting = new Map<string, string>()
+
+function infoOf(row: SessionLinkRow): SessionLinkInfo {
+  return {
+    parentRef: row.parentRef,
+    kind: row.kind,
+    state: row.state,
+    createdBy: row.createdBy,
+    wakeParent: row.wakeParent,
+    createdAt: row.createdAt
+  }
+}
+
+/** The replicated link state, built from the tables. */
+export function linkPayload(): SessionLinksPayload {
+  const links: Record<string, SessionLinkInfo> = {}
+  const named = new Set<string>()
+  for (const row of allSessionLinks()) {
+    links[row.childRef] = infoOf(row)
+    named.add(row.childRef)
+    named.add(row.parentRef)
+  }
+  const refs: Record<string, string> = {}
+  for (const row of allSessionRefs()) {
+    if (!named.has(row.ref)) continue
+    const id = sidebarIdOf(row)
+    if (id) refs[id] = row.ref
+  }
+  return { links, refs }
+}
+
+function emitLinks(): void {
+  emitEvent('session:link-changed', [linkPayload()])
+}
+
+/** Seed canonical with the stored links at boot (the snapshot a first client reads). */
+export function seedLinkState(): void {
+  reconcileOnBoot()
+  const { links, refs } = linkPayload()
+  syncCore.setAppState({ sessionLinks: links, sessionRefs: refs })
+}
+
+/**
+ * Links still `starting` after a restart have no spawn to wait for: a child with
+ * a durable id reached its first status (`live`), one without never did (`failed`).
+ */
+function reconcileOnBoot(): void {
+  // A child this process is waiting for is not a leftover: the seed is async, so a
+  // link can legitimately start while it runs.
+  const waitingFor = new Set(startingByRouting.values())
+  for (const row of allSessionLinks()) {
+    if (row.state !== 'starting' || waitingFor.has(row.childRef)) continue
+    const child = getSessionRef(row.childRef)
+    setSessionLinkState(row.childRef, child?.sessionId ? 'live' : 'failed')
+  }
+}
+
+function ancestorsInclude(startRef: string, needle: string): boolean {
+  const seen = new Set<string>()
+  let cur: string | undefined = startRef
+  while (cur && !seen.has(cur)) {
+    if (cur === needle) return true
+    seen.add(cur)
+    cur = getSessionLink(cur)?.parentRef
+  }
+  return false
+}
+
+export interface RecordLinkInput {
+  childRef: string
+  parentRef: string
+  kind: SessionLinkKind
+  createdBy: SessionLinkCreator
+  wakeParent: boolean
+  state?: SessionLinkState
+}
+
+/**
+ * Record `parent → child`. A session has at most one parent (a second record
+ * replaces the first). Throws for a link that would make a session its own
+ * ancestor, which no flow produces and the sidebar could not draw.
+ */
+export function recordLink(input: RecordLinkInput): void {
+  if (input.childRef === input.parentRef || ancestorsInclude(input.parentRef, input.childRef)) {
+    throw new Error('A session cannot be linked under itself')
+  }
+  upsertSessionLink({ ...input, state: input.state ?? 'starting' })
+  emitLinks()
+}
+
+/** Move a link to `state` and tell the clients; a no-op when it is already there. */
+export function setLinkState(childRef: string, state: SessionLinkState): boolean {
+  const changed = setSessionLinkState(childRef, state)
+  if (!changed) return false
+  if (state !== 'starting') {
+    for (const [routingId, ref] of startingByRouting) {
+      if (ref === childRef) startingByRouting.delete(routingId)
+    }
+  }
+  emitLinks()
+  return true
+}
+
+/** The user took the pair apart: the child is a top-level session again. */
+export function detachLink(childRef: string): boolean {
+  return setLinkState(childRef, 'detached')
+}
+
+/**
+ * The body of `session:link:detach`: detach the link a session (named by the id
+ * its row is keyed by) has to its parent.
+ */
+export function detachSessionLink(sessionId: string): { success: boolean; error?: string } {
+  const ref = findSessionRef(sessionId)
+  const link = ref ? getSessionLink(ref.ref) : undefined
+  if (!ref || !link) return { success: false, error: 'This session has no parent session' }
+  if (link.state === 'detached') return { success: true }
+  detachLink(ref.ref)
+  return { success: true }
+}
+
+export interface LinkedSessions {
+  parent: SessionLinkRow | null
+  children: SessionLinkRow[]
+  siblings: SessionLinkRow[]
+}
+
+/** The sessions a ref is related to: its parent link, its children, and the parent's other children. Detached links are not related. */
+export function linksOf(ref: string): LinkedSessions {
+  const own = getSessionLink(ref)
+  const parent = own && own.state !== 'detached' ? own : null
+  const children = sessionLinksByParent(ref).filter((l) => l.state !== 'detached')
+  const siblings = parent
+    ? sessionLinksByParent(parent.parentRef).filter(
+        (l) => l.state !== 'detached' && l.childRef !== ref
+      )
+    : []
+  return { parent, children, siblings }
+}
+
+export interface LinkChildInput {
+  /** The parent's routing id (a live session). */
+  parent: string
+  /** The routing id the child was created under (not yet rekeyed). */
+  childRoutingId: string
+  engine: EngineId
+  kind: SessionLinkKind
+  createdBy: SessionLinkCreator
+  wakeParent: boolean
+  /** The child's name for its card until the sidebar has a title for it. */
+  title?: string
+}
+
+/**
+ * Record a freshly created child under its parent (`starting`) and put its
+ * session card in the parent's transcript. The slice 1c start flow calls this
+ * right after it spawns the child.
+ */
+export function linkChild(input: LinkChildInput): { parentRef: string; childRef: string } {
+  const parentRef = refFor(engineOfId(input.parent), input.parent)
+  const child = ensureRef({
+    engine: input.engine,
+    routingId: input.childRoutingId,
+    sessionId: null
+  })
+  recordLink({
+    childRef: child.ref,
+    parentRef,
+    kind: input.kind,
+    createdBy: input.createdBy,
+    wakeParent: input.wakeParent
+  })
+  startingByRouting.set(input.childRoutingId, child.ref)
+  emitEvent('session:message', [
+    input.parent,
+    sessionCardMessage({
+      childRef: child.ref,
+      kind: input.kind,
+      title: input.title ?? '',
+      engineId: input.engine,
+      timestamp: Date.now()
+    })
+  ])
+  return { parentRef, childRef: child.ref }
+}
+
+// ---------------------------------------------------------------------------
+// The session card
+// ---------------------------------------------------------------------------
+
+/** Id of the card row a child gets in its parent's transcript (one per child, so a replay replaces). */
+export const sessionCardId = (childRef: string): string => `session-card-${childRef}`
+
+export function sessionCardMessage(input: {
+  childRef: string
+  kind: SessionLinkKind
+  title: string
+  engineId: EngineId
+  timestamp: number
+}): ChatMessage {
+  return {
+    id: sessionCardId(input.childRef),
+    role: 'system',
+    content: [
+      {
+        type: 'session_card',
+        childRef: input.childRef,
+        kind: input.kind,
+        title: input.title,
+        engineId: input.engineId
+      }
+    ],
+    timestamp: input.timestamp
+  }
+}
+
+/**
+ * A cold-loaded transcript with the parent's session cards put back. cli.js and
+ * the other engines write nothing for a card, so the host adds one per child
+ * link, placed by when the link was made (before the first message that came
+ * after it; at the end if none did). Never throws: a history read must not fail
+ * because the link tables could not be read.
+ */
+export function withSessionCards(sessionId: string, messages: ChatMessage[]): ChatMessage[] {
+  try {
+    const parent = findSessionRef(sessionId)
+    if (!parent) return messages
+    const links = sessionLinksByParent(parent.ref)
+    if (links.length === 0) return messages
+    const out = messages.filter((m) => !links.some((l) => m.id === sessionCardId(l.childRef)))
+    for (const link of links) {
+      const child = getSessionRef(link.childRef)
+      const card = sessionCardMessage({
+        childRef: link.childRef,
+        kind: link.kind,
+        title: '',
+        engineId: child?.engine ?? 'claude',
+        timestamp: link.createdAt
+      })
+      const at = out.findIndex((m) => m.timestamp > link.createdAt)
+      out.splice(at === -1 ? out.length : at, 0, card)
+    }
+    return out
+  } catch (err) {
+    logger.warn(LOG, `could not add session cards to ${sessionId}: ${String(err)}`)
+    return messages
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Following the sessions
+// ---------------------------------------------------------------------------
+
+/**
+ * A rekey means a status carrying the engine's session id reached canonical,
+ * which is the child's arrival: the ref follows the id and a `starting` link goes
+ * `live`. Registered on core's rekey notifications below (not through
+ * `SessionManager`), so the stored row moves with canonical in every rekey.
+ */
+export function onSessionRekeyed(oldId: string, newId: string): void {
+  const childRef = startingByRouting.get(oldId)
+  startingByRouting.delete(oldId)
+  moveSessionRef(oldId, newId)
+  if (childRef) setLinkState(childRef, 'live')
+}
+
+function onSessionStatus(routingId: string, status: { state?: string } | undefined): void {
+  const childRef = startingByRouting.get(routingId)
+  if (!childRef) return
+  startingByRouting.delete(routingId)
+  setLinkState(childRef, status?.state === 'disconnected' ? 'failed' : 'live')
+}
+
+/** A session was deleted. Its own link ends (or fails, if it never started); its children's end. */
+function onSessionRemoved(id: string): void {
+  startingByRouting.delete(id)
+  const row = findSessionRef(id)
+  if (!row) return
+  let changed = false
+  const own = getSessionLink(row.ref)
+  if (own && own.state !== 'detached' && own.state !== 'ended' && own.state !== 'failed') {
+    changed = setSessionLinkState(row.ref, own.state === 'starting' ? 'failed' : 'ended') || changed
+  }
+  for (const child of sessionLinksByParent(row.ref)) {
+    if (child.state === 'live' || child.state === 'starting') {
+      changed = setSessionLinkState(child.childRef, 'ended') || changed
+    }
+  }
+  const named = own !== undefined || sessionLinksByParent(row.ref).length > 0
+  clearSessionRefIds(id)
+  if (changed || named) emitLinks()
+}
+
+function observe(channel: string, args: unknown[]): void {
+  if (channel === 'session:status' && typeof args[0] === 'string') {
+    onSessionStatus(args[0], args[1] as { state?: string } | undefined)
+  } else if (channel === 'session:removed' && typeof args[0] === 'string') {
+    onSessionRemoved(args[0])
+  }
+}
+
+syncCore.onRekey((oldId, newId) => {
+  try {
+    onSessionRekeyed(oldId, newId)
+  } catch (err) {
+    logger.warn(LOG, `session ref move failed (the ref may stay under the old id): ${String(err)}`)
+  }
+})
+
+addHostObserver((channel, args) => {
+  // The cheap test first: a status for a session with no link in flight reads nothing.
+  if (channel === 'session:status' && !startingByRouting.has(args[0] as string)) return
+  try {
+    observe(channel, args)
+  } catch (err) {
+    logger.warn(LOG, `link bookkeeping for "${channel}" failed: ${String(err)}`)
+  }
+})
+
+/** Test seam: forget the in-memory starting set. */
+export function resetSessionLinksForTests(): void {
+  startingByRouting.clear()
+}

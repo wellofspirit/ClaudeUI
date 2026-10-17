@@ -17,6 +17,7 @@ import { SleepRow } from './SleepRow'
 import { ToolNoteRow } from './ToolNoteRow'
 import { ContextNoteBlock } from './ContextNoteBlock'
 import { PeerHoldRow } from './PeerHoldRow'
+import { SessionCard } from './SessionCard'
 import { ReviewResultCard } from './ReviewResultCard'
 import { TaskCard } from './TaskCard'
 import { hostedMcpKind } from '../../../../shared/tool-kinds'
@@ -236,6 +237,10 @@ export const MessageBubble = memo(function MessageBubble({
           // Claude Code holding a message another Claude session sent.
           if (block.type === 'peer_hold') {
             return <PeerHoldTranscriptRow key={i} block={block} />
+          }
+          // A session this one started or handed off to.
+          if (block.type === 'session_card') {
+            return <SessionCard key={i} block={block} />
           }
           // A code review's findings. The one untrusted-text block that DOES go
           // through markdown, by decision (F20) — see ReviewResultCard.

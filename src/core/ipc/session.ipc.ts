@@ -9,6 +9,7 @@ import { ensureHostTokenFresh } from '../sdk/host-token'
 import { claudeLoginSignal } from '../services/claude-login-state'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
+import { detachSessionLink } from '../services/session-links'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { emitEvent } from '../services/sync-host'
 import { STREAM_WATCH_COMMAND } from './stream-watch'
@@ -273,6 +274,7 @@ const SESSION_IPC_CHANNELS = [
   'session:background-task',
   'session:dequeue-message',
   'session:allow-peer-messages',
+  'session:link:detach',
   'session:ask-side-question',
   'session:set-permission-mode',
   'session:set-model',
@@ -650,6 +652,16 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string) => allowPeerMessages(manager, routingId)
+  })
+
+  // Take a session out from under its parent in the sidebar (slice 1b). `routingId`
+  // is the CHILD's id, so the audit row names the session the user acted on.
+  handleIpc({
+    channel: 'session:link:detach',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string) => detachSessionLink(routingId)
   })
 
   // Deprecated (ADR-053): recall-all shim for cached `/remote` bundles.

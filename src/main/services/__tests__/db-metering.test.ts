@@ -49,9 +49,9 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v30 (the held
-      // inbox of non-user deliveries).
-      expect(userVersion(db)).toBe(30)
+      // Bump alongside MIGRATIONS in db.ts — currently v31 (session refs
+      // and parent/child links).
+      expect(userVersion(db)).toBe(31)
     } finally {
       db.close()
     }

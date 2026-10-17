@@ -25,6 +25,7 @@
 
 import { itemAppendFrame, itemStreamKey } from '../../core/shared/sync/item-stream'
 import { SyncClient } from '../../core/shared/sync/sync-client'
+import type { SessionLinksPayload } from '../../shared/session-links'
 import {
   getSyncClient,
   setSyncClient,
@@ -210,6 +211,8 @@ export function mirrorStoreIntoReplica(): void {
     customTitles: state.customTitles,
     worktreeInfoMap: state.worktreeInfoMap,
     sessionEngines: state.sessionEngines,
+    sessionLinks: state.sessionLinks,
+    sessionRefs: state.sessionRefs,
     hiddenSessions: state.hiddenSessionIds,
     hiddenProjects: state.hiddenProjectKeys,
     directories: state.directories,
@@ -262,6 +265,8 @@ export const seed = {
     emitSync('session:conversation-cleared', [routingId, { permissionMode }]),
 
   directories: (directories: unknown[]) => emitSync('session:directories-changed', [directories]),
+
+  links: (payload: SessionLinksPayload) => emitSync('session:link-changed', [payload]),
 
   created: (
     routingId: string,

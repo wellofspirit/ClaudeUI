@@ -1,7 +1,14 @@
-import { useEffect, useRef, useCallback, memo } from 'react'
+import { useEffect, useRef, useCallback, useMemo, memo } from 'react'
 import type { DirectoryGroup, SessionInfo } from '../../../../shared/types'
 import { SessionItem } from './SessionItem'
 import { useContextMenu } from '../../hooks/useContextMenu'
+import { useSessionStore } from '../../stores/session-store'
+import { ancestorIdsOf, nestSessions } from '../../lib/session-links'
+import {
+  expandParents,
+  toggleParentCollapsed,
+  useCollapsedParents
+} from '../../lib/collapsed-parents'
 
 export const DirectoryItem = memo(function DirectoryItem({
   group,
@@ -62,6 +69,36 @@ export const DirectoryItem = memo(function DirectoryItem({
 }): React.JSX.Element {
   const menu = useContextMenu()
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Parent/child links (slice 1b): a session started from, or handed off from,
+  // another in this project is drawn right under it.
+  const sessionLinks = useSessionStore((s) => s.sessionLinks)
+  const sessionRefs = useSessionStore((s) => s.sessionRefs)
+  const collapsedParents = useCollapsedParents()
+  // Opening a session (a card's Open, the continued-in bar, a click elsewhere)
+  // unfolds the parents above it, so the active row is never hidden in a fold.
+  // Keyed on the chain, not the links, so folding it again afterwards sticks.
+  const activeHere = group.sessions.some((s) => s.sessionId === activeSessionId)
+  const activeAncestors = useMemo(
+    () =>
+      activeHere && activeSessionId
+        ? ancestorIdsOf({ sessionLinks, sessionRefs }, activeSessionId)
+        : [],
+    [activeHere, activeSessionId, sessionLinks, sessionRefs]
+  )
+  const activeAncestorsKey = JSON.stringify(activeAncestors)
+  useEffect(() => {
+    expandParents(JSON.parse(activeAncestorsKey) as string[])
+  }, [activeAncestorsKey])
+  const rows = useMemo(
+    () =>
+      nestSessions(
+        group.sessions.filter((info) => showHidden || !hiddenSessionIds?.has(info.sessionId)),
+        { sessionLinks, sessionRefs },
+        collapsedParents
+      ),
+    [group.sessions, showHidden, hiddenSessionIds, sessionLinks, sessionRefs, collapsedParents]
+  )
 
   const handleClick = useCallback(() => {
     // Delay single-click to distinguish from double-click
@@ -128,38 +165,41 @@ export const DirectoryItem = memo(function DirectoryItem({
       </div>
       {expanded && (
         <div className="ml-3">
-          {group.sessions
-            .filter((info) => showHidden || !hiddenSessionIds?.has(info.sessionId))
-            .map((info) => {
-              const sessionHidden = !!hiddenSessionIds?.has(info.sessionId)
-              return (
-                <SessionItem
-                  key={info.sessionId}
-                  info={info}
-                  active={info.sessionId === activeSessionId}
-                  onClick={() => onSessionClick(info)}
-                  onDoubleClick={() => onSessionDoubleClick(info)}
-                  onToggleWatch={() => onToggleWatch(info)}
-                  isRenaming={renamingKey === `${renamePrefix}:${info.sessionId}`}
-                  onStartRename={() => onStartRename(`${renamePrefix}:${info.sessionId}`)}
-                  onFinishRename={(title) => onFinishRename(info.sessionId, title)}
-                  onAutoRename={() => onAutoRename(info.sessionId)}
-                  onCancelRename={onCancelRename}
-                  hidden={sessionHidden}
-                  onHide={
-                    !sessionHidden && onHideSession && info.projectKey
-                      ? () => onHideSession(info)
-                      : undefined
-                  }
-                  onUnhide={
-                    sessionHidden && onUnhideSession ? () => onUnhideSession(info) : undefined
-                  }
-                  onDelete={
-                    onDeleteSession && info.projectKey ? () => onDeleteSession(info) : undefined
-                  }
-                />
-              )
-            })}
+          {rows.map(({ info, depth, childCount, collapsed }) => {
+            const sessionHidden = !!hiddenSessionIds?.has(info.sessionId)
+            return (
+              <SessionItem
+                key={info.sessionId}
+                info={info}
+                depth={depth}
+                childCount={childCount}
+                childrenCollapsed={collapsed}
+                onToggleChildren={() => toggleParentCollapsed(info.sessionId)}
+                showParentHint={depth === 0}
+                active={info.sessionId === activeSessionId}
+                onClick={() => onSessionClick(info)}
+                onDoubleClick={() => onSessionDoubleClick(info)}
+                onToggleWatch={() => onToggleWatch(info)}
+                isRenaming={renamingKey === `${renamePrefix}:${info.sessionId}`}
+                onStartRename={() => onStartRename(`${renamePrefix}:${info.sessionId}`)}
+                onFinishRename={(title) => onFinishRename(info.sessionId, title)}
+                onAutoRename={() => onAutoRename(info.sessionId)}
+                onCancelRename={onCancelRename}
+                hidden={sessionHidden}
+                onHide={
+                  !sessionHidden && onHideSession && info.projectKey
+                    ? () => onHideSession(info)
+                    : undefined
+                }
+                onUnhide={
+                  sessionHidden && onUnhideSession ? () => onUnhideSession(info) : undefined
+                }
+                onDelete={
+                  onDeleteSession && info.projectKey ? () => onDeleteSession(info) : undefined
+                }
+              />
+            )
+          })}
         </div>
       )}
 

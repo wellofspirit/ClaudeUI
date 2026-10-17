@@ -7,6 +7,8 @@ import { useContextMenu } from '../../hooks/useContextMenu'
 import { EngineLogo } from '../shared/EngineLogo'
 import { countAutoContinuingTasks } from '../../lib/task-types'
 import { StatusDot, deriveSessionDotState } from './StatusDot'
+import { parentLinkOf, sessionTitleOf } from '../../lib/session-links'
+import { useIsMobile } from '../../hooks/useIsMobile'
 
 export const SessionItem = memo(function SessionItem({
   info,
@@ -30,7 +32,12 @@ export const SessionItem = memo(function SessionItem({
   onDragStart,
   onDragOver,
   onDragEnd,
-  onDrop
+  onDrop,
+  depth = 0,
+  childCount = 0,
+  childrenCollapsed = false,
+  onToggleChildren,
+  showParentHint = true
 }: {
   info: SessionInfo
   active: boolean
@@ -58,6 +65,15 @@ export const SessionItem = memo(function SessionItem({
   onDragOver?: (e: React.DragEvent) => void
   onDragEnd?: (e: React.DragEvent) => void
   onDrop?: (e: React.DragEvent) => void
+  /** How far this row is nested under its parent in the project list (slice 1b). */
+  depth?: number
+  /** Sessions nested directly under this one in the same list. */
+  childCount?: number
+  childrenCollapsed?: boolean
+  /** Fold or unfold this row's children (the toggle shows only with children). */
+  onToggleChildren?: () => void
+  /** Show "↳ parent" when this row has a parent: off for a row drawn under it. */
+  showParentHint?: boolean
 }): React.JSX.Element {
   // Self-subscribe to session status fields — avoids parent needing the full sessions map
   const { isRunning, isSdkActive, isWatching, needsAttention, runningSubagents } = useSessionStore(
@@ -74,6 +90,18 @@ export const SessionItem = memo(function SessionItem({
     })
   )
   const isWorktree = useSessionStore((s) => !!s.worktreeInfoMap[info.sessionId])
+  // The link to this session's parent, when it has one (slice 1b): the hint names
+  // the parent where the row is not drawn under it, and the menu can detach it.
+  const { hasParent, parentTitle } = useSessionStore(
+    useShallow((s) => {
+      const link = parentLinkOf(s, info.sessionId)
+      return {
+        hasParent: link !== null,
+        parentTitle: link?.parentId ? sessionTitleOf(s, link.parentId) : ''
+      }
+    })
+  )
+  const isMobile = useIsMobile()
   const menu = useContextMenu()
   const [renameValue, setRenameValue] = useState('')
   const renameRef = useRef<HTMLInputElement>(null)
@@ -95,6 +123,9 @@ export const SessionItem = memo(function SessionItem({
   const rightIconCount =
     (isWorktree ? 1 : 0) + (onPin || onUnpin ? 1 : 0) + (onToggleWatch && !isSdkActive ? 1 : 0)
   const blurWidthPx = rightIconCount * 20 + 45
+  // What the icons themselves take at the right edge (the 40px blur-in zone is
+  // only a fade): the room an in-flow control at the row's end must leave.
+  const stripWidthPx = rightIconCount > 0 ? rightIconCount * 20 + 5 : 0
   const blurTransitionPct = Math.round((40 / blurWidthPx) * 100)
 
   // Focus rename input when entering rename mode
@@ -129,7 +160,8 @@ export const SessionItem = memo(function SessionItem({
         onDragOver={onDragOver}
         onDragEnd={onDragEnd}
         onDrop={onDrop}
-        style={{ padding: '0 5px' }}
+        data-depth={depth}
+        style={{ padding: '0 5px', ...(depth > 0 ? { paddingLeft: 5 + depth * 14 } : {}) }}
         className={`
           group relative flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors
           ${active ? 'text-text-primary bg-bg-tertiary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'}
@@ -191,7 +223,9 @@ export const SessionItem = memo(function SessionItem({
                 'linear-gradient(to right, black calc(100% - 12px), transparent 100%)',
               maskImage: 'linear-gradient(to right, black calc(100% - 12px), transparent 100%)'
             }}
-            title={info.title}
+            title={
+              showParentHint && parentTitle ? `${info.title} (from ${parentTitle})` : info.title
+            }
           >
             <EngineLogo
               engineId={info.engineId ?? 'claude'}
@@ -199,7 +233,46 @@ export const SessionItem = memo(function SessionItem({
               className="shrink-0 opacity-80"
             />
             {info.title}
+            {showParentHint && parentTitle && (
+              <span
+                data-testid="SessionItem.parentHint"
+                className="ml-1.5 text-[10px] text-text-muted"
+              >
+                ↳ {parentTitle}
+              </span>
+            )}
           </span>
+        )}
+        {childCount > 0 && onToggleChildren && (
+          <button
+            type="button"
+            data-testid="SessionItem.toggleChildren"
+            data-collapsed={childrenCollapsed}
+            aria-expanded={!childrenCollapsed}
+            aria-label={`${childrenCollapsed ? 'Show' : 'Hide'} ${childCount} nested ${childCount === 1 ? 'session' : 'sessions'}`}
+            title={childrenCollapsed ? 'Show nested sessions' : 'Hide nested sessions'}
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleChildren()
+            }}
+            // Clear of the hover strip: it floats over the row's right edge and its
+            // icons (Watch, Pin) would take the clicks meant for the toggle's right half.
+            style={{ marginRight: isRenaming ? 0 : stripWidthPx }}
+            className={`shrink-0 h-8 flex items-center justify-center gap-0.5 text-[10px] text-text-muted hover:text-text-primary transition-colors cursor-pointer ${
+              isMobile ? 'min-w-[40px]' : 'min-w-[28px]'
+            }`}
+          >
+            <svg
+              width="9"
+              height="9"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              className={`transition-transform ${childrenCollapsed ? '' : 'rotate-90'}`}
+            >
+              <path d="M8 5l8 7-8 7z" />
+            </svg>
+            {childCount}
+          </button>
         )}
         {/* Backdrop blur underlay (hover-only) — width scales to the actual icon count so the
             tinted strip is no wider than needed. Progressively blurs + darkens the text so
@@ -218,7 +291,7 @@ export const SessionItem = memo(function SessionItem({
         )}
         {/* Icon overlay (hover-only) — floats over the blurred backdrop */}
         {!isRenaming && (
-          <div className="absolute right-[5px] top-0 h-full flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div className="absolute right-[5px] top-0 h-full flex items-center gap-1.5 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity">
             {isWorktree && (
               <span className="shrink-0 text-mode-edit opacity-100" title="Worktree session">
                 <svg
@@ -354,6 +427,18 @@ export const SessionItem = memo(function SessionItem({
           >
             Edit permissions
           </button>
+          {hasParent && (
+            <button
+              data-testid="SessionItem.detach"
+              onClick={() => {
+                menu.close()
+                void window.api.detachSessionLink(info.sessionId)
+              }}
+              className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+            >
+              Detach from parent session
+            </button>
+          )}
           {isSdkActive && (
             <button
               onClick={() => {

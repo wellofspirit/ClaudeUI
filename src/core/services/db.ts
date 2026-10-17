@@ -1423,6 +1423,42 @@ export const MIGRATIONS: Migration[] = [
           ON session_inbox (target, delivered_at);
       `)
     }
+  },
+  {
+    // Slice 1b (session tools): short stable refs for sessions, and the
+    // parent/child links between them. `session_id` is the engine's durable id
+    // (null until the first status carries it), `routing_id` the live id the
+    // sidebar and the engines address; after the rekey the two are equal. Both
+    // are unique where present, so one session has one ref. A removed session
+    // keeps its ref row with both ids cleared, because its links still name it.
+    version: 31,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS session_ref (
+          ref        TEXT    PRIMARY KEY,
+          engine     TEXT    NOT NULL,
+          session_id TEXT,
+          routing_id TEXT,
+          created_at INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_session_ref_session
+          ON session_ref (engine, session_id) WHERE session_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_session_ref_routing
+          ON session_ref (routing_id) WHERE routing_id IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS session_link (
+          child_ref   TEXT    PRIMARY KEY,
+          parent_ref  TEXT    NOT NULL,
+          kind        TEXT    NOT NULL,
+          created_by  TEXT    NOT NULL,
+          wake_parent INTEGER NOT NULL DEFAULT 0,
+          state       TEXT    NOT NULL,
+          created_at  INTEGER NOT NULL,
+          updated_at  INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_link_parent
+          ON session_link (parent_ref);
+      `)
+    }
   }
 ]
 
@@ -1923,6 +1959,239 @@ export function moveSessionInbox(oldId: string, newId: string, db: Db = getDb())
 /** Drop every row for `target` (the session was deleted). */
 export function deleteSessionInbox(target: string, db: Db = getDb()): void {
   db.prepare('DELETE FROM session_inbox WHERE target = ?').run(target)
+}
+
+// ---------------------------------------------------------------------------
+// Session refs and links (slice 1b)
+// ---------------------------------------------------------------------------
+
+/** One session's ref and the ids it is currently known by. */
+export interface SessionRefRow {
+  ref: string
+  engine: EngineId
+  /** The engine's durable session id; null until a status carries it. */
+  sessionId: string | null
+  /** The live routing id; after the rekey it equals {@link sessionId}. */
+  routingId: string | null
+  createdAt: number
+}
+
+interface SessionRefDbRow {
+  ref: string
+  engine: string
+  session_id: string | null
+  routing_id: string | null
+  created_at: number
+}
+
+function sessionRefRow(row: SessionRefDbRow): SessionRefRow {
+  return {
+    ref: row.ref,
+    engine: row.engine as EngineId,
+    sessionId: row.session_id,
+    routingId: row.routing_id,
+    createdAt: Number(row.created_at)
+  }
+}
+
+/** Insert a ref row. Returns false when the ref (or one of the ids) is taken. */
+export function insertSessionRef(
+  row: Omit<SessionRefRow, 'createdAt'> & { createdAt?: number },
+  db: Db = getDb()
+): boolean {
+  const info = db
+    .prepare(
+      `INSERT OR IGNORE INTO session_ref (ref, engine, session_id, routing_id, created_at)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .run(row.ref, row.engine, row.sessionId, row.routingId, row.createdAt ?? Date.now())
+  return Number(info.changes) > 0
+}
+
+export function getSessionRef(ref: string, db: Db = getDb()): SessionRefRow | undefined {
+  const row = db.prepare('SELECT * FROM session_ref WHERE ref = ?').get(ref) as
+    SessionRefDbRow | undefined
+  return row ? sessionRefRow(row) : undefined
+}
+
+/** The ref row a live routing id or a durable session id belongs to (the routing id wins a tie). */
+export function findSessionRef(id: string, db: Db = getDb()): SessionRefRow | undefined {
+  const row = db
+    .prepare(
+      `SELECT * FROM session_ref WHERE routing_id = ? OR session_id = ?
+       ORDER BY (routing_id = ?) DESC LIMIT 1`
+    )
+    .get(id, id, id) as SessionRefDbRow | undefined
+  return row ? sessionRefRow(row) : undefined
+}
+
+/** Record the ids a session is now known by; an omitted key keeps its value. */
+export function setSessionRefIds(
+  ref: string,
+  ids: { sessionId?: string | null; routingId?: string | null },
+  db: Db = getDb()
+): void {
+  db.prepare(
+    `UPDATE session_ref
+        SET session_id = CASE WHEN ? THEN ? ELSE session_id END,
+            routing_id = CASE WHEN ? THEN ? ELSE routing_id END
+      WHERE ref = ?`
+  ).run(
+    ids.sessionId !== undefined ? 1 : 0,
+    ids.sessionId ?? null,
+    ids.routingId !== undefined ? 1 : 0,
+    ids.routingId ?? null,
+    ref
+  )
+}
+
+/**
+ * A session's routing id changed (`SessionManager.rekey`): after the rekey the
+ * routing id IS the engine's session id, so both columns take the new id.
+ *
+ * A ref may already be bound to the new id — one assigned to the durable id of a
+ * session that was then resumed under a fresh routing id. There is one ref per
+ * session, so the two rows merge into the older binding: links that named the
+ * newcomer are pointed at it. A no-op when `oldId` has no row.
+ */
+export function moveSessionRef(oldId: string, newId: string, db: Db = getDb()): void {
+  if (oldId === newId) return
+  const moving = findSessionRef(oldId, db)
+  if (!moving) return
+  const existing = db
+    .prepare(
+      `SELECT * FROM session_ref WHERE ref <> ?
+         AND ((engine = ? AND session_id = ?) OR routing_id = ?) LIMIT 1`
+    )
+    .get(moving.ref, moving.engine, newId, newId) as SessionRefDbRow | undefined
+  if (!existing) {
+    setSessionRefIds(moving.ref, { sessionId: newId, routingId: newId }, db)
+    return
+  }
+  // OR IGNORE: a link already recorded for the surviving ref wins; the leftover is dropped.
+  db.prepare('UPDATE OR IGNORE session_link SET child_ref = ? WHERE child_ref = ?').run(
+    existing.ref,
+    moving.ref
+  )
+  db.prepare('DELETE FROM session_link WHERE child_ref = ?').run(moving.ref)
+  db.prepare('UPDATE session_link SET parent_ref = ? WHERE parent_ref = ?').run(
+    existing.ref,
+    moving.ref
+  )
+  db.prepare('DELETE FROM session_ref WHERE ref = ?').run(moving.ref)
+  setSessionRefIds(existing.ref, { sessionId: newId, routingId: newId }, db)
+}
+
+/** A session was deleted: its ref stays (links name it) but no id resolves to it any more. */
+export function clearSessionRefIds(id: string, db: Db = getDb()): string | undefined {
+  const row = findSessionRef(id, db)
+  if (!row) return undefined
+  setSessionRefIds(row.ref, { sessionId: null, routingId: null }, db)
+  return row.ref
+}
+
+export function allSessionRefs(db: Db = getDb()): SessionRefRow[] {
+  return (db.prepare('SELECT * FROM session_ref').all() as SessionRefDbRow[]).map(sessionRefRow)
+}
+
+export type SessionLinkRowState = 'starting' | 'live' | 'ended' | 'failed' | 'detached'
+
+/** One parent/child link, keyed by the child's ref. */
+export interface SessionLinkRow {
+  childRef: string
+  parentRef: string
+  kind: 'started' | 'handoff'
+  createdBy: 'agent' | 'user' | 'pressure'
+  wakeParent: boolean
+  state: SessionLinkRowState
+  createdAt: number
+  updatedAt: number
+}
+
+interface SessionLinkDbRow {
+  child_ref: string
+  parent_ref: string
+  kind: string
+  created_by: string
+  wake_parent: number
+  state: string
+  created_at: number
+  updated_at: number
+}
+
+function sessionLinkRow(row: SessionLinkDbRow): SessionLinkRow {
+  return {
+    childRef: row.child_ref,
+    parentRef: row.parent_ref,
+    kind: row.kind === 'handoff' ? 'handoff' : 'started',
+    createdBy:
+      row.created_by === 'user' || row.created_by === 'pressure' ? row.created_by : 'agent',
+    wakeParent: Number(row.wake_parent) === 1,
+    state: row.state as SessionLinkRowState,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at)
+  }
+}
+
+/** Record (or replace) the child's link. A session has at most one parent. */
+export function upsertSessionLink(
+  link: Omit<SessionLinkRow, 'createdAt' | 'updatedAt'> & { now?: number },
+  db: Db = getDb()
+): void {
+  const now = link.now ?? Date.now()
+  db.prepare(
+    `INSERT INTO session_link
+       (child_ref, parent_ref, kind, created_by, wake_parent, state, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(child_ref) DO UPDATE SET
+       parent_ref = excluded.parent_ref, kind = excluded.kind,
+       created_by = excluded.created_by, wake_parent = excluded.wake_parent,
+       state = excluded.state, updated_at = excluded.updated_at`
+  ).run(
+    link.childRef,
+    link.parentRef,
+    link.kind,
+    link.createdBy,
+    link.wakeParent ? 1 : 0,
+    link.state,
+    now,
+    now
+  )
+}
+
+export function getSessionLink(childRef: string, db: Db = getDb()): SessionLinkRow | undefined {
+  const row = db.prepare('SELECT * FROM session_link WHERE child_ref = ?').get(childRef) as
+    SessionLinkDbRow | undefined
+  return row ? sessionLinkRow(row) : undefined
+}
+
+export function sessionLinksByParent(parentRef: string, db: Db = getDb()): SessionLinkRow[] {
+  return (
+    db
+      .prepare('SELECT * FROM session_link WHERE parent_ref = ? ORDER BY created_at, child_ref')
+      .all(parentRef) as SessionLinkDbRow[]
+  ).map(sessionLinkRow)
+}
+
+export function allSessionLinks(db: Db = getDb()): SessionLinkRow[] {
+  return (
+    db
+      .prepare('SELECT * FROM session_link ORDER BY created_at, child_ref')
+      .all() as SessionLinkDbRow[]
+  ).map(sessionLinkRow)
+}
+
+/** Move a link to `state`. Returns false when there is no such link or it is already there. */
+export function setSessionLinkState(
+  childRef: string,
+  state: SessionLinkRowState,
+  now = Date.now(),
+  db: Db = getDb()
+): boolean {
+  const info = db
+    .prepare('UPDATE session_link SET state = ?, updated_at = ? WHERE child_ref = ? AND state <> ?')
+    .run(state, now, childRef, state)
+  return Number(info.changes) > 0
 }
 
 /**

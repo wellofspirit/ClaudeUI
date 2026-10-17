@@ -945,6 +945,7 @@ export interface WsVoiceAudio {
 // by snapshots and a tail is a lossy preview of a durable reliable event.
 export type { StreamEventFrame, StreamLaneFrame } from '../core/shared/sync/stream'
 import type { StreamEventFrame } from '../core/shared/sync/stream'
+import type { SessionLinkInfo } from './session-links'
 import type { ItemStreamFrame, ItemStreams } from '../core/shared/sync/item-stream'
 
 export type WsClientMessage =
@@ -1158,6 +1159,11 @@ export interface FullStateSnapshot {
   hiddenSessions?: string[]
   /** Hidden project keys — carried for the same non-destructive-save reason. */
   hiddenProjects?: string[]
+  /** Parent/child links between sessions, keyed by the child's ref (session tools, slice 1b).
+   *  Optional: an older server omits it, which reads as "no links". */
+  sessionLinks?: Record<string, SessionLinkInfo>
+  /** sidebar id → ref for every session a link names (slice 1b). */
+  sessionRefs?: Record<string, string>
 }
 
 // Re-export RemoteStatus / RemoteAuthMethod / StepUpIntent from the main types

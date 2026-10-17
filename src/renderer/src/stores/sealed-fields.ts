@@ -132,6 +132,8 @@ export const SEALED_APP_FIELDS = [
   'customTitles',
   'worktreeInfoMap',
   'sessionEngines',
+  'sessionLinks',
+  'sessionRefs',
   'hiddenSessionIds',
   'hiddenProjectKeys',
   'slashCommands',
@@ -148,6 +150,8 @@ export const SEALED_APP_FIELD_SOURCE: Readonly<Record<string, keyof FullStateSna
   customTitles: 'customTitles',
   worktreeInfoMap: 'worktreeInfoMap',
   sessionEngines: 'sessionEngines',
+  sessionLinks: 'sessionLinks',
+  sessionRefs: 'sessionRefs',
   hiddenSessionIds: 'hiddenSessions',
   hiddenProjectKeys: 'hiddenProjects',
   // Per-session on the wire, app-level in canonical AND in this store.
