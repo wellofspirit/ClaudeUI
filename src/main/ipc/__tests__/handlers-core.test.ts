@@ -114,7 +114,8 @@ import {
   deleteProject,
   clearConversation,
   judgeModelSupport,
-  sendPrompt
+  sendPrompt,
+  allowPeerMessages
 } from '../../../core/ipc/handlers-core'
 import { syncCore, addSyncSubscriber } from '../../../core/services/sync-host'
 import { getSessionMeta, setSessionMeta } from '../../../core/services/db'
@@ -1248,5 +1249,43 @@ describe('sendPrompt — origin and the held inbox (slice 1a)', () => {
     const rows = syncCore.getCanonicalState().sessions[rid].messages
     expect(rows).toEqual([expect.objectContaining({ role: 'user' })])
     expect(rows[0]).not.toHaveProperty('hostInstruction')
+  })
+})
+
+describe('allowPeerMessages — the session:allow-peer-messages body', () => {
+  it('hands the request to the session and returns its answer', async () => {
+    const allow = vi.fn(async () => ({ success: true }))
+    const manager = makeManager(makeSessionStub({ allowPeerMessages: allow }))
+    await expect(allowPeerMessages(manager, 'rid-1')).resolves.toEqual({ success: true })
+    expect(allow).toHaveBeenCalledTimes(1)
+  })
+
+  it('says no, rather than failing, for a session that holds no peer messages or none at all', async () => {
+    const refusal = { success: false, error: 'This session does not hold peer messages' }
+    await expect(allowPeerMessages(makeManager(makeSessionStub()), 'rid-1')).resolves.toEqual(
+      refusal
+    )
+    await expect(allowPeerMessages(makeManager(undefined), 'ghost')).resolves.toEqual(refusal)
+  })
+
+  it('is the same call over the remote dispatcher as directly (a chat command on the session)', async () => {
+    const manager = makeManager(
+      makeSessionStub({ allowPeerMessages: vi.fn(async () => ({ success: true })) })
+    )
+    const registry = new CommandRegistry()
+    const dispatcher = new RemoteDispatcher(registry)
+    registry.register({
+      channel: 'session:allow-peer-messages',
+      capability: 'chat',
+      kind: 'command',
+      sessionIdArg: 0,
+      transport: 'remote',
+      handler: (rid: string) => allowPeerMessages(manager, rid)
+    })
+    const viaDispatcher = await dispatcher.handle(
+      { type: 'invoke', id: '1', channel: 'session:allow-peer-messages', args: ['rid-1'] },
+      makeRemoteConnection('password', null)
+    )
+    expect(viaDispatcher).toEqual(await allowPeerMessages(manager, 'rid-1'))
   })
 })

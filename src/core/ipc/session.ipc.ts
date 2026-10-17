@@ -118,6 +118,7 @@ import {
   readBackgroundRange,
   stopTask,
   backgroundTask,
+  allowPeerMessages,
   dequeueMessage,
   recallQueued,
   askSideQuestion,
@@ -271,6 +272,7 @@ const SESSION_IPC_CHANNELS = [
   'session:stop-task',
   'session:background-task',
   'session:dequeue-message',
+  'session:allow-peer-messages',
   'session:ask-side-question',
   'session:set-permission-mode',
   'session:set-model',
@@ -640,6 +642,14 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string) => recallQueued(manager, routingId)
+  })
+
+  handleIpc({
+    channel: 'session:allow-peer-messages',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string) => allowPeerMessages(manager, routingId)
   })
 
   // Deprecated (ADR-053): recall-all shim for cached `/remote` bundles.

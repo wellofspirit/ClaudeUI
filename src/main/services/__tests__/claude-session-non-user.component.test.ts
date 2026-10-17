@@ -21,9 +21,15 @@ import { applyEvent } from '../../../core/shared/sync/reducer'
 import { emptyCanonicalState } from '../../../core/shared/sync/state'
 import { slimTranscript } from '../../../core/automode/classifier'
 
-const { mockQuery } = vi.hoisted(() => ({ mockQuery: vi.fn() }))
+const { mockQuery, mockFindPeerRow } = vi.hoisted(() => ({
+  mockQuery: vi.fn(),
+  mockFindPeerRow: vi.fn()
+}))
 
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
+
+// The transcript lookup behind a native peer message (claude-peer-row.test.ts covers the real one).
+vi.mock('../../../core/services/claude-peer-row', () => ({ findPeerRow: mockFindPeerRow }))
 
 vi.mock('../../../core/sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../core/sdk')>()
@@ -114,7 +120,8 @@ function makeControlledHandle(prompt: AsyncIterable<unknown>): {
     }),
     initializationResult: (): Promise<never> => new Promise<never>(() => {}),
     interrupt: vi.fn(async () => {}),
-    cancelAsyncMessage: vi.fn(async () => ({ cancelled: true }))
+    cancelAsyncMessage: vi.fn(async () => ({ cancelled: true })),
+    applyFlagSettings: vi.fn(async () => ({}))
   }
   return {
     handle,
@@ -148,6 +155,7 @@ const liveSessions: ClaudeSession[] = []
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mockFindPeerRow.mockReset().mockResolvedValue(null)
   handles.length = 0
   mockQuery.mockImplementation((params: { prompt: AsyncIterable<unknown> }) => {
     const h = makeControlledHandle(params.prompt)
@@ -427,11 +435,10 @@ describe('a frame cli.js never reads goes back to the held inbox', () => {
     expect(channelsOf(sent)).toContain('session:messages-retracted')
   })
 
-  it('a hold frame for a message ClaudeUI did not send is none of its business', async () => {
+  it('a hold frame for a message ClaudeUI did not send never touches the inbox or our own note', async () => {
     const { session, sent } = newSession()
     await session.deliverNonUser(item())
     await firstFrame()
-    const before = sent.length
     inside(session).handleSystemMessage({
       type: 'system',
       subtype: 'peer_message_hold',
@@ -439,8 +446,11 @@ describe('a frame cli.js never reads goes back to the held inbox', () => {
       message_uuid: 'someone-elses',
       lane: 'socket'
     })
-    expect(sent.length).toBe(before)
     expect(heldBodies(session)).toEqual([])
+    // Only its own hold row is new; our delivered note was not repainted.
+    expect(
+      sent.filter(([c]) => c === 'session:message').map(([, , m]) => (m as ChatMessage).id)
+    ).toEqual([expect.any(String), 'peer-hold-someone-elses'])
   })
 })
 
@@ -531,5 +541,251 @@ describe('a message never respawns a stopped session (review M4)', () => {
   it('a session that never started has no process to hand it to either', () => {
     const { session } = newSession()
     expect(session.isEngineLive()).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Native cross-session messages: another Claude Code process, over cli.js's socket
+// ---------------------------------------------------------------------------
+
+const NATIVE_UUID = '0f3a2110-77df-4b5b-88aa-5ade4eb8db1b'
+const noteRows = (sent: Array<[string, string, unknown]>): ChatMessage[] =>
+  sent.filter(([c]) => c === 'session:message').map(([, , m]) => m as ChatMessage)
+
+async function nativeSession(): Promise<{
+  session: ClaudeSession
+  sent: Array<[string, string, unknown]>
+}> {
+  const made = newSession()
+  // A running cli.js: the engine session id is what locates the transcript.
+  ;(made.session as unknown as { sessionId: string }).sessionId = 'sid-native'
+  return made
+}
+
+describe('a message another Claude Code process sent (native peer turn)', () => {
+  const started = (session: ClaudeSession, uuid = NATIVE_UUID): void =>
+    inside(session).handleCommandLifecycle({
+      type: 'command_lifecycle',
+      command_uuid: uuid,
+      state: 'started'
+    })
+
+  it('shows as a note from that Claude session, read off the transcript, and taints the ledger', async () => {
+    mockFindPeerRow.mockResolvedValue({ fromTitle: 'probe-A', body: 'ping', native: true })
+    const { session, sent } = await nativeSession()
+
+    started(session)
+
+    await vi.waitFor(() => expect(noteRows(sent)).toHaveLength(1))
+    const note = noteRows(sent)[0]
+    expect(note.id).toBe(NATIVE_UUID)
+    expect(note.role).toBe('system')
+    expect(note.content).toEqual([
+      {
+        type: 'context_note',
+        title: 'probe-A · another Claude session',
+        fragments: [{ text: 'ping', label: 'from another session, not from you' }]
+      }
+    ])
+    expect(mockFindPeerRow).toHaveBeenCalledWith(expect.stringContaining('sid-native'), NATIVE_UUID)
+    expect(channelsOf(sent)).not.toContain('session:user-message')
+    expect(session.originLedger.userOriginClean).toBe(false)
+    // It started the turn on an idle session: counted, though only informing.
+    expect(session.originLedger.agentTurnStartsSinceUser).toBe(1)
+    expect(slimTranscript(session.getMessages())).toBe('')
+  })
+
+  it('joining a running turn taints but does not count a started turn', async () => {
+    mockFindPeerRow.mockResolvedValue({ fromTitle: 'probe-A', body: 'ping', native: true })
+    const { session, sent } = await nativeSession()
+    ;(session as unknown as { isProcessing: boolean }).isProcessing = true
+
+    started(session)
+
+    await vi.waitFor(() => expect(noteRows(sent)).toHaveLength(1))
+    expect(session.originLedger.userOriginClean).toBe(false)
+    expect(session.originLedger.agentTurnStartsSinceUser).toBe(0)
+  })
+
+  it('retries while the row is not on disk yet, and looks up each command once', async () => {
+    mockFindPeerRow
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({ fromTitle: '', body: 'late', native: true })
+    const { session, sent } = await nativeSession()
+
+    started(session)
+    started(session)
+
+    await vi.waitFor(() => expect(noteRows(sent)).toHaveLength(1), { timeout: 3000 })
+    expect(noteRows(sent)[0].content[0]).toMatchObject({
+      title: 'Message from another Claude session'
+    })
+    expect(mockFindPeerRow).toHaveBeenCalledTimes(2)
+  })
+
+  it('a command that is not a peer message (a task notification, anything else) shows nothing', async () => {
+    vi.useFakeTimers()
+    try {
+      const { session, sent } = await nativeSession()
+      started(session)
+      await vi.advanceTimersByTimeAsync(7000)
+      // Every retry found nothing on disk: no note, no taint.
+      expect(mockFindPeerRow).toHaveBeenCalledTimes(4)
+      expect(noteRows(sent)).toEqual([])
+      expect(session.originLedger.userOriginClean).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("is not looked up for ClaudeUI's own frame or a queued user prompt", async () => {
+    const { session } = await nativeSession()
+    await session.deliverNonUser(item())
+    const frame = await firstFrame()
+    session.enqueuePrompt('user text')
+    const queued = session.queuedItems[0]
+
+    started(session, frame.uuid as string)
+    started(session, queued.itemId)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+
+    expect(mockFindPeerRow).not.toHaveBeenCalled()
+  })
+
+  it('a replayed peer user frame is a note too, once, without touching the ledger', async () => {
+    const { session, sent } = await nativeSession()
+    const frame = {
+      type: 'user',
+      uuid: NATIVE_UUID,
+      isReplay: true,
+      message: { role: 'user', content: 'Another Claude session sent a message:\n...' },
+      origin: { kind: 'peer', from: 'uds:x', name: 'probe-A', body: 'ping' }
+    }
+    const handle = (m: Record<string, unknown>): Promise<void> =>
+      (
+        session as unknown as { handleUserMessage(m: Record<string, unknown>): Promise<void> }
+      ).handleUserMessage(m)
+    await handle(frame)
+    await handle(frame)
+    expect(noteRows(sent)).toHaveLength(1)
+    expect(noteRows(sent)[0].content[0]).toMatchObject({
+      title: 'probe-A · another Claude session'
+    })
+    expect(session.originLedger.userOriginClean).toBe(true)
+  })
+})
+
+describe('Claude Code holding a message another Claude session sent', () => {
+  const hold = (session: ClaudeSession, state: string, extra: Record<string, unknown> = {}): void =>
+    inside(session).handleSystemMessage({
+      type: 'system',
+      subtype: 'peer_message_hold',
+      state,
+      message_uuid: NATIVE_UUID,
+      lane: 'socket',
+      ...extra
+    })
+  const holdBlock = (sent: Array<[string, string, unknown]>): Record<string, unknown> =>
+    noteRows(sent)
+      .filter((m) => m.id === `peer-hold-${NATIVE_UUID}`)
+      .at(-1)!.content[0] as unknown as Record<string, unknown>
+
+  it('is one system row, updated in place as the frames arrive', async () => {
+    const { session, sent } = await nativeSession()
+
+    hold(session, 'held', { from: 'uds:x', from_name: 'probe-A', cause: 'mode-mismatch' })
+    expect(holdBlock(sent)).toEqual({
+      type: 'peer_hold',
+      holdId: NATIVE_UUID,
+      state: 'held',
+      lane: 'socket',
+      fromName: 'probe-A',
+      cause: 'mode-mismatch'
+    })
+
+    // The later frames carry no sender: the row keeps what it knew.
+    hold(session, 'released')
+    expect(holdBlock(sent)).toMatchObject({ state: 'released', fromName: 'probe-A' })
+
+    hold(session, 'dropped', { outcome: 'discarded' })
+    expect(holdBlock(sent)).toMatchObject({
+      state: 'dropped',
+      fromName: 'probe-A',
+      outcome: 'discarded'
+    })
+    const ids = noteRows(sent).map((m) => m.id)
+    expect(new Set(ids)).toEqual(new Set([`peer-hold-${NATIVE_UUID}`]))
+    expect(session.getMessages().filter((m) => m.id.startsWith('peer-hold-'))).toHaveLength(1)
+  })
+
+  it('folds in the replicated state as a single row that shows the latest state', async () => {
+    const { session, sent } = await nativeSession()
+    hold(session, 'held', { from_name: 'probe-A', cause: 'mode-mismatch' })
+    hold(session, 'released')
+
+    let state = applyEvent(emptyCanonicalState(), {
+      channel: 'session:created',
+      args: [session.routingId, { cwd: '/tmp/proj' }],
+      seq: 1
+    })
+    let seq = 2
+    for (const [channel, routingId, data] of sent) {
+      if (channel === 'session:message')
+        state = applyEvent(state, { channel, args: [routingId, data], seq: seq++ })
+    }
+    const rows = state.sessions[session.routingId].messages
+    expect(rows).toHaveLength(1)
+    expect(rows[0].content).toEqual([
+      expect.objectContaining({ type: 'peer_hold', state: 'released' })
+    ])
+  })
+
+  it('a stdin-lane hold is shown the same way', async () => {
+    const { session, sent } = await nativeSession()
+    hold(session, 'held', { lane: 'stdin', cause: 'no-mode-asserted' })
+    expect(holdBlock(sent)).toMatchObject({ lane: 'stdin', cause: 'no-mode-asserted' })
+  })
+
+  it('ignores a state it does not know', async () => {
+    const { session, sent } = await nativeSession()
+    hold(session, 'expired?')
+    expect(noteRows(sent)).toEqual([])
+  })
+})
+
+describe('allowing peer messages (the action on a held row)', () => {
+  it('asks cli.js to accept them: apply_flag_settings crossSessionInbound accept', async () => {
+    const { session } = await nativeSession()
+    await session.deliverNonUser(item())
+    await firstFrame()
+    await vi.waitFor(async () =>
+      expect(await session.allowPeerMessages()).toEqual({ success: true })
+    )
+    expect(handles[0].handle.applyFlagSettings).toHaveBeenCalledWith({
+      crossSessionInbound: 'accept'
+    })
+  })
+
+  it('says so when there is no running cli.js to ask', async () => {
+    const { session } = await nativeSession()
+    expect(await session.allowPeerMessages()).toEqual({
+      success: false,
+      error: 'No active session'
+    })
+  })
+
+  it('reports cli.js refusing the change', async () => {
+    const { session } = await nativeSession()
+    await session.deliverNonUser(item())
+    await firstFrame()
+    ;(handles[0].handle.applyFlagSettings as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('settings are managed')
+    )
+    await vi.waitFor(async () =>
+      expect(await session.allowPeerMessages()).toEqual({
+        success: false,
+        error: 'settings are managed'
+      })
+    )
   })
 })

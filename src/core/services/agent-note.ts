@@ -14,7 +14,8 @@ import type { ChatMessage } from '../../shared/types'
 import {
   CROSS_SESSION_MESSAGE_TAG,
   SESSION_MESSAGE_TAG,
-  parseSessionMessageWrapper
+  parseSessionMessageWrapper,
+  unescapeClosingTag
 } from '../../shared/session-message-wrapper'
 
 export const AGENT_NOTE_FRAGMENT_LABEL = 'from an agent, not from you'
@@ -45,8 +46,16 @@ export function agentNoteMessage({
   }
 }
 
-/** The row title for a message from `fromTitle` (empty → a generic one). */
-export function sessionMessageNoteTitle(fromTitle: string): string {
+/**
+ * The row title for a message from `fromTitle` (empty → a generic one). `native`:
+ * from another Claude Code process rather than a ClaudeUI session.
+ */
+export function sessionMessageNoteTitle(fromTitle: string, native = false): string {
+  if (native)
+    return fromTitle
+      ? // The sender first: a narrow screen truncates the title's tail.
+        `${fromTitle} · another Claude session`
+      : 'Message from another Claude session'
   return fromTitle ? `Message from ${fromTitle}` : 'Message from another session'
 }
 
@@ -60,10 +69,11 @@ export function sessionMessageNote(input: {
   fromTitle: string
   text: string
   timestamp: number
+  native?: boolean
 }): ChatMessage {
   return agentNoteMessage({
     id: input.id,
-    title: sessionMessageNoteTitle(input.fromTitle),
+    title: sessionMessageNoteTitle(input.fromTitle, input.native),
     text: input.text,
     timestamp: input.timestamp,
     label: SESSION_MESSAGE_FRAGMENT_LABEL
@@ -83,10 +93,10 @@ export function sessionMessageNote(input: {
 export function peerRowParts(
   row: { origin?: unknown; turnOrigin?: unknown },
   content: unknown
-): { fromTitle: string; body: string } | null {
+): { fromTitle: string; body: string; native: boolean } | null {
   const origin =
     row.origin && typeof row.origin === 'object'
-      ? (row.origin as { kind?: unknown; name?: unknown; body?: unknown })
+      ? (row.origin as { kind?: unknown; name?: unknown; body?: unknown; hostInjected?: unknown })
       : undefined
   if (origin?.kind !== 'peer' && row.turnOrigin !== 'peer') return null
   const text =
@@ -100,10 +110,16 @@ export function peerRowParts(
             .join('')
         : ''
   const parsed = parseSessionMessageWrapper(text, CROSS_SESSION_MESSAGE_TAG)
-  const body = typeof origin?.body === 'string' ? origin.body : (parsed?.body ?? text)
+  const body =
+    typeof origin?.body === 'string'
+      ? unescapeClosingTag(CROSS_SESSION_MESSAGE_TAG, origin.body)
+      : (parsed?.body ?? text)
   if (!body) return null
   const fromTitle = typeof origin?.name === 'string' ? origin.name : (parsed?.fromTitle ?? '')
-  return { fromTitle, body }
+  // cli.js stamps `hostInjected` on a frame a host wrote to its stdin (ClaudeUI's
+  // own deliveries); a message another Claude Code process sent over cli.js's
+  // socket has none.
+  return { fromTitle, body, native: origin?.hostInjected !== true }
 }
 
 /**

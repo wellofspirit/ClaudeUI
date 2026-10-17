@@ -258,6 +258,11 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:dequeue-message', routingId, value) as Promise<{
         removed: number
       }>,
+    allowPeerMessages: (routingId) =>
+      connection.invoke('session:allow-peer-messages', routingId) as Promise<{
+        success: boolean
+        error?: string
+      }>,
     recallQueued: (routingId) =>
       connection.invoke('session:recall-queued', routingId) as Promise<{
         recalled: string[]

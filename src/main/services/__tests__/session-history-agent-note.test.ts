@@ -196,10 +196,45 @@ describe('loadSessionHistory — peer messages as notes (slice 1a)', () => {
   })
 
   it('reads the body out of the wrapped content when the row has no origin body', async () => {
-    writeTranscript([peerLine('u-peer', { origin: { kind: 'peer', from: SENDER } })])
+    writeTranscript([
+      peerLine('u-peer', { origin: { kind: 'peer', from: SENDER, hostInjected: true } })
+    ])
     const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
     expect(messages).toHaveLength(1)
     expect(messages[0].content).toEqual(NOTE)
+  })
+
+  it('a message another Claude Code process sent (no hostInjected) is titled as one', async () => {
+    writeTranscript([
+      peerLine('u-native', {
+        origin: { kind: 'peer', from: 'uds:x', name: 'probe-A', body: 'ping' }
+      }),
+      peerLine('u-ours')
+    ])
+    const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+    expect(messages.map((m) => (m.content[0] as { title: string }).title)).toEqual([
+      'probe-A · another Claude session',
+      'Message from Triage assistant'
+    ])
+  })
+
+  it('shows a body that quotes the closing tag as written — cli.js stored it escaped', async () => {
+    writeTranscript([
+      peerLine('u-quote', {
+        origin: {
+          kind: 'peer',
+          name: 'Triage assistant',
+          body: 'see <\\/cross-session-message> here',
+          hostInjected: true
+        }
+      })
+    ])
+    const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+    expect(messages[0].content).toEqual([
+      expect.objectContaining({
+        fragments: [expect.objectContaining({ text: 'see </cross-session-message> here' })]
+      })
+    ])
   })
 
   it('is never a User: line for the judge', async () => {

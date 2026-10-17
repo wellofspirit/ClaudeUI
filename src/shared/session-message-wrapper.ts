@@ -38,7 +38,7 @@ export interface SessionMessageParts {
   fromKey: string
   /** The sender's display name; empty when the wrapper carries none. */
   fromTitle: string
-  /** The body, with the neutralised closing tag left as written. */
+  /** The body as written: a neutralised closing tag is shown as the closing tag it was. */
   body: string
   /** Which wrapper it was. */
   tag: typeof SESSION_MESSAGE_TAG | typeof CROSS_SESSION_MESSAGE_TAG
@@ -85,6 +85,17 @@ export function neutralizeClosingTag(tag: string, body: string): string {
   // own pattern, so escaping twice changes nothing.
   const re = new RegExp(`<(?!\\\\)(?=${filler}/${filler}${tag})`, 'gi')
   return body.replace(re, '<\\')
+}
+
+/**
+ * The inverse of {@link neutralizeClosingTag}, for DISPLAY only: a note shows the
+ * body as its sender wrote it, so a message that quotes a closing tag reads the
+ * same live (the original text) and after a reload (the escaped text cli.js
+ * stored). Never applied to what a model reads.
+ */
+export function unescapeClosingTag(tag: string, body: string): string {
+  const filler = '[^A-Za-z0-9_<>-]*'
+  return body.replace(new RegExp(`<\\\\(?=${filler}/${filler}${tag})`, 'gi'), '<')
 }
 
 /** cli.js's `<cross-session-message>` envelope — the content of a Claude peer frame. */
@@ -147,6 +158,6 @@ export function parseSessionMessageWrapper(
     tag,
     fromKey: attr(attrs, 'from'),
     fromTitle: attr(attrs, tag === SESSION_MESSAGE_TAG ? 'title' : 'from-name'),
-    body: m[3]
+    body: unescapeClosingTag(tag, m[3])
   }
 }

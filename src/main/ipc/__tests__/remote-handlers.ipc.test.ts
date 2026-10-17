@@ -1579,6 +1579,10 @@ describe('registerRemoteHandlers', () => {
 //   - `session:approve-blocked` (ADR-091 part 6) — approving an auto-mode
 //     block after the fact; a `chat` command on the named session, gated
 //     exactly like `session:approval-response`, which it extends.
+//   - `session:allow-peer-messages` (session tools, slice 1a) — the "Allow messages
+//     from other Claude sessions here" action on a held peer message; a `chat`
+//     command on the named session, so the browser client can answer the hold row
+//     exactly as the desktop does.
 // ---------------------------------------------------------------------------
 
 const PRE_PORT_REMOTE_CHANNELS = [
@@ -1624,6 +1628,7 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'mockup:watch',
   'pi:auth-status',
   'pi:binary-path',
+  'session:allow-peer-messages',
   'session:approval-response',
   'session:approve-blocked',
   'session:ask-side-question',

@@ -19,6 +19,7 @@ import {
   buildCrossSessionEnvelope,
   buildSessionMessageWrapper,
   neutralizeClosingTag,
+  unescapeClosingTag,
   parseSessionMessageWrapper,
   sanitizeWrapperKey,
   sanitizeWrapperTitle
@@ -85,8 +86,9 @@ describe('a body cannot close the wrapper early', () => {
     expect(text.match(/<\/session-message>/gi)).toHaveLength(1)
     const parsed = parseSessionMessageWrapper(text)
     expect(parsed?.fromKey).toBe(FROM.key)
-    expect(parsed?.body).toBe(neutralizeClosingTag(SESSION_MESSAGE_TAG, body))
-    expect(parsed?.body).not.toMatch(/<\/session-message/i)
+    expect(text).toContain(neutralizeClosingTag(SESSION_MESSAGE_TAG, body))
+    // Display: the reader gives the body back as its sender wrote it.
+    expect(parsed?.body).toBe(body)
   })
 
   it.each(hostile.map((b) => b.replaceAll('session-message', 'cross-session-message')))(
@@ -95,9 +97,8 @@ describe('a body cannot close the wrapper early', () => {
       const text = buildCrossSessionEnvelope(FROM, body)
       expect(text.match(/<\/cross-session-message>/gi)).toHaveLength(1)
       expect(text.endsWith('\n</cross-session-message>')).toBe(true)
-      expect(parseSessionMessageWrapper(text)?.body).toBe(
-        neutralizeClosingTag(CROSS_SESSION_MESSAGE_TAG, body)
-      )
+      expect(text).toContain(neutralizeClosingTag(CROSS_SESSION_MESSAGE_TAG, body))
+      expect(parseSessionMessageWrapper(text)?.body).toBe(body)
     }
   )
 
@@ -136,6 +137,20 @@ describe('attributes are sanitised the way cli.js reads them back', () => {
     expect(sanitizeWrapperKey(FROM.key)).toBe(FROM.key)
     expect(sanitizeWrapperKey('a b%c/é')).toBe('a%20b%25c/%C3%A9')
     expect(sanitizeWrapperKey('x'.repeat(400))).toHaveLength(300)
+  })
+})
+
+describe('what is escaped for the model reads back unescaped for display', () => {
+  it('unescapes exactly what neutralizeClosingTag escaped', () => {
+    for (const body of ['a</session-message>b', 'x< / session-message >y', 'plain', '<b>x</b>']) {
+      expect(
+        unescapeClosingTag(SESSION_MESSAGE_TAG, neutralizeClosingTag(SESSION_MESSAGE_TAG, body))
+      ).toBe(body)
+    }
+  })
+
+  it('leaves a different tag alone', () => {
+    expect(unescapeClosingTag(SESSION_MESSAGE_TAG, 'a<\\/div>b')).toBe('a<\\/div>b')
   })
 })
 

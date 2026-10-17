@@ -180,6 +180,19 @@ an `isReplay: true` echo; a duplicate that was persisted but not received by thi
 gets a `command_lifecycle` `completed`. The one exception: a persisted message whose turn went
 unanswered is re-run when nothing else is queued. A host must therefore never reuse a uuid.
 
+### Native peer messages (another Claude Code process, over cli.js's socket)
+
+Without `--replay-user-messages` the peer's text never reaches stdout. What does (live probe,
+`docs/research/session-tools/V1-probes.md` §3.3): `command_lifecycle` `started` for a command uuid
+ClaudeUI neither queued nor sent, the turn's frames, and a `result` that carries the peer `origin`.
+The user row is on disk — `type:"user"`, `isMeta:true`, `turnOrigin:"peer"`,
+`origin:{kind:"peer", from, name, fromMode, body}` (no `hostInjected`: that marks a frame a host wrote to
+stdin) — a moment after the lifecycle frame, under the same uuid. ClaudeSession looks it up there
+(`claude-peer-row.ts`) and shows the note; with the replay flag the same fields arrive on the echo
+(`Case 3` of `handleUserMessage`). A message cli.js parks instead arrives as `system/peer_message_hold`
+(`state` held/released/dropped, `message_uuid` = the same uuid, `lane`, `cause`/`outcome`), rendered as
+a `peer_hold` row; `apply_flag_settings {crossSessionInbound:'accept'}` releases it.
+
 ### Subagent variant (`parent_tool_use_id`)
 
 ```jsonc

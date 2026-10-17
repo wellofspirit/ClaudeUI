@@ -129,6 +129,12 @@ export interface ISession {
   deliverNonUser?(item: NonUserItem): Promise<NonUserOutcome>
 
   /**
+   * Stop holding peer messages from other Claude Code processes on this session
+   * (Claude only; absent elsewhere).
+   */
+  allowPeerMessages?(): Promise<{ success: boolean; error?: string }>
+
+  /**
    * Is the engine process (or its connection) up right now? `session-delivery`
    * holds a message for an idle session whose engine is gone instead of
    * respawning it: only the user's own prompt brings a closed session back.

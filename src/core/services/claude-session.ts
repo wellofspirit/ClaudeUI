@@ -40,7 +40,8 @@ import {
   taskTerminalStatus,
   liveTaskNoteSummary
 } from './task-notification-xml'
-import { agentNoteMessage, sessionMessageNote } from './agent-note'
+import { agentNoteMessage, peerRowParts, sessionMessageNote } from './agent-note'
+import { findPeerRow, type PeerRow } from './claude-peer-row'
 import {
   buildCrossSessionEnvelope,
   sanitizeWrapperKey,
@@ -287,6 +288,10 @@ export class ClaudeSession extends BaseSession {
   })
   private abortController: AbortController | null = null
   private isProcessing = false
+  /** Commands cli.js started that ClaudeUI looked up on disk as native peer messages (by uuid). */
+  private readonly nativePeerTried = new Set<string>()
+  /** Native peer messages already shown as a note (by uuid). */
+  private readonly nativePeerNoted = new Set<string>()
   private wasInterrupted = false
   private pendingApprovals = new Map<string, PendingApprovalEntry>()
   private taskIdMap = new Map<string, string>() // agentId → the CURRENT run's toolUseId
@@ -1624,7 +1629,10 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
     switch (msg.state) {
       case 'started': {
         const item = this.queue.consumeById(itemId)
-        if (!item) return
+        if (!item) {
+          void this.noteNativePeerTurn(itemId)
+          return
+        }
         this.recordConsumedPrompt(item)
         this.queue.emit()
         return
@@ -2549,7 +2557,10 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
     const id = msg.message_uuid
     if (typeof id !== 'string') return
     const item = this.pendingNonUser.get(id)
-    if (!item) return
+    if (!item) {
+      this.noteNativePeerHold(id, msg)
+      return
+    }
     if (msg.state === 'dropped') {
       this.reholdNonUser(id, 'Claude Code dropped it')
     } else if (msg.state === 'held') {
@@ -2561,6 +2572,115 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
     } else if (msg.state === 'released') {
       this.paintNonUserNote(id, item)
     }
+  }
+
+  /**
+   * A hold frame for a message another Claude Code process sent over cli.js's
+   * socket (none of ClaudeUI's own): cli.js parked it (`held`), delivered it
+   * after all (`released`) or gave it up (`dropped`). One transcript row per
+   * message, updated as the frames arrive. The row is live state — cli.js writes
+   * nothing to the transcript for a message it never ran — so a reload shows no
+   * hold, which is right: the hold is over when the process is.
+   */
+  private noteNativePeerHold(id: string, msg: Record<string, unknown>): void {
+    const state = msg.state
+    if (state !== 'held' && state !== 'released' && state !== 'dropped') return
+    const rowId = `peer-hold-${id}`
+    const before = this.messageHistory.find((m) => m.id === rowId)?.content[0]
+    const prior = before?.type === 'peer_hold' ? before : undefined
+    const text = (value: unknown): string | undefined =>
+      typeof value === 'string' && value ? value : undefined
+    const cause = text(msg.cause) ?? prior?.cause
+    const outcome = text(msg.outcome) ?? prior?.outcome
+    const row: ChatMessage = {
+      id: rowId,
+      role: 'system',
+      content: [
+        {
+          type: 'peer_hold',
+          holdId: id,
+          state,
+          lane: (text(msg.lane) ?? prior?.lane) === 'stdin' ? 'stdin' : 'socket',
+          fromName: text(msg.from_name) ?? prior?.fromName ?? '',
+          ...(cause ? { cause } : {}),
+          ...(outcome ? { outcome } : {})
+        }
+      ],
+      timestamp: this.messageHistory.find((m) => m.id === rowId)?.timestamp ?? Date.now()
+    }
+    this.upsertMessage(row)
+    this.send('session:message', row)
+  }
+
+  /**
+   * `apply_flag_settings {crossSessionInbound:'accept'}`: cli.js stops holding
+   * peer messages whose permission class differs from this session's, and
+   * releases the ones it holds (live: V1-probes.md §2.3). It lasts as long as
+   * this cli.js process; a settings file may still tighten it.
+   */
+  async allowPeerMessages(): Promise<{ success: boolean; error?: string }> {
+    if (!this.activeQuery) return { success: false, error: 'No active session' }
+    try {
+      await this.activeQuery.applyFlagSettings({ crossSessionInbound: 'accept' })
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  /**
+   * A turn cli.js started for a command ClaudeUI did not queue and did not
+   * send: when it is a message another Claude Code process sent, show it as the
+   * note it is (the text comes off the transcript — see claude-peer-row.ts). A
+   * task notification or any other command finds no peer row and is ignored.
+   */
+  private async noteNativePeerTurn(uuid: string): Promise<void> {
+    if (this.nativePeerTried.has(uuid)) return
+    this.nativePeerTried.add(uuid)
+    const sessionId = this.sessionId
+    if (!sessionId) return
+    // Idle when the turn began? (An assistant frame has not flipped it yet.)
+    const wasIdle = !this.isProcessing
+    const file = this.transcriptPathFor(sessionId)
+    for (const delay of [150, 500, 1500, 4000]) {
+      await new Promise((resolve) => setTimeout(resolve, delay))
+      if (this.disposed || this.nativePeerNoted.has(uuid)) return
+      const row = await findPeerRow(file, uuid)
+      if (row) {
+        this.emitNativePeerNote(uuid, row, wasIdle)
+        return
+      }
+    }
+  }
+
+  /**
+   * The note for a native peer message, once per message. It is non-user for the
+   * ledger like any other: taint now. When it started a turn on an idle session
+   * it also counts toward the agent-turn budget — which here only INFORMS: cli.js
+   * has already delivered it, so unlike a ClaudeUI delivery nothing can hold it.
+   */
+  private emitNativePeerNote(
+    uuid: string,
+    row: PeerRow,
+    wasIdle: boolean,
+    countLedger = true
+  ): void {
+    if (this.nativePeerNoted.has(uuid)) return
+    this.nativePeerNoted.add(uuid)
+    const note = sessionMessageNote({
+      id: uuid,
+      fromTitle: sanitizeWrapperTitle(row.fromTitle),
+      text: row.body,
+      timestamp: Date.now(),
+      native: row.native
+    })
+    this.upsertMessage(note)
+    this.send('session:message', note)
+    // A replayed frame is not news: a resume re-yields old rows (protocol-cc 03,
+    // trigger 2), so only the live lifecycle path counts toward the ledger.
+    if (!countLedger) return
+    this.originLedger.nonUserDelivered()
+    if (wasIdle) this.originLedger.agentTurnStarted()
   }
 
   /** (Re)paint the note for a pending frame, with a delivery status line when it is not simply read. */
@@ -3284,6 +3404,17 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
     // Case 2: String content — check for task notification
     if (typeof content === 'string' && isTaskNotificationDelivery(msg.origin, content)) {
       await this.handleTaskNotificationUserMessage(msg, content)
+      return
+    }
+
+    // Case 3: a peer message another Claude Code process sent (never ClaudeUI's
+    // own: those are pending, already noted). cli.js puts this frame on stdout
+    // only with --replay-user-messages, which ClaudeUI does not pass; the live
+    // path is noteNativePeerTurn. Kept so a host that replays gets the same note.
+    const uuidOfFrame = typeof msg.uuid === 'string' ? msg.uuid : ''
+    if (uuidOfFrame && !this.pendingNonUser.has(uuidOfFrame)) {
+      const peer = peerRowParts({ origin: msg.origin }, content)
+      if (peer && msg.isReplay === true) this.emitNativePeerNote(uuidOfFrame, peer, false, false)
     }
   }
 

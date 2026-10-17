@@ -16,6 +16,7 @@ import { TodoToolBlock } from './TodoToolBlock'
 import { SleepRow } from './SleepRow'
 import { ToolNoteRow } from './ToolNoteRow'
 import { ContextNoteBlock } from './ContextNoteBlock'
+import { PeerHoldRow } from './PeerHoldRow'
 import { ReviewResultCard } from './ReviewResultCard'
 import { TaskCard } from './TaskCard'
 import { hostedMcpKind } from '../../../../shared/tool-kinds'
@@ -231,6 +232,10 @@ export const MessageBubble = memo(function MessageBubble({
           // third-party text).
           if (block.type === 'context_note') {
             return <ContextNoteBlock key={i} block={block} />
+          }
+          // Claude Code holding a message another Claude session sent.
+          if (block.type === 'peer_hold') {
+            return <PeerHoldTranscriptRow key={i} block={block} />
           }
           // A code review's findings. The one untrusted-text block that DOES go
           // through markdown, by decision (F20) — see ReviewResultCard.
@@ -653,6 +658,37 @@ function CliCommandBlock({
       </div>
     </div>
   )
+}
+
+/**
+ * The peer-hold row wired to its session: the transcript's own routing id (never
+ * the active one — a watched or background session's row acts on ITS session) and
+ * the one command, `allowPeerMessages`, which works the same from the desktop and
+ * from the browser client. The row itself updates when cli.js's release frame
+ * arrives; this only reports a refusal.
+ */
+function PeerHoldTranscriptRow({
+  block
+}: {
+  block: Extract<ContentBlock, { type: 'peer_hold' }>
+}): React.JSX.Element {
+  const routingId = useTranscriptSessionId()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const allow = routingId
+    ? (): void => {
+        setBusy(true)
+        setError(null)
+        window.api
+          .allowPeerMessages(routingId)
+          .then((result) => {
+            if (!result.success) setError(result.error ?? 'Claude Code did not accept the change.')
+          })
+          .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+          .finally(() => setBusy(false))
+      }
+    : undefined
+  return <PeerHoldRow block={block} onAllow={allow} busy={busy} error={error} />
 }
 
 function ApiErrorBlock({

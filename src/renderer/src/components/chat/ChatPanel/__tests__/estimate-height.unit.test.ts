@@ -297,6 +297,19 @@ describe('system messages and the rest', () => {
     expect(est(sys({ type: 'api_error', errorType: 'rate_limit', errorMessage: 'x' }))).toBe(38)
   })
 
+  it('a held peer message leaves room for its Allow button; a settled one is a sentence', () => {
+    const peer = (state: 'held' | 'released' | 'dropped'): ContentBlock => ({
+      type: 'peer_hold',
+      holdId: 'm',
+      state,
+      lane: 'socket',
+      fromName: 'a'
+    })
+    expect(est(sys(peer('held')))).toBeGreaterThan(est(sys(peer('released'))))
+    expect(est(sys(peer('released')))).toBe(est(sys(peer('dropped'))))
+    expect(est(sys(peer('released')))).toBeGreaterThan(0)
+  })
+
   it('an unknown role falls back to 100', () => {
     expect(est({ ...assistant(text('x')), role: 'other' as never })).toBe(100)
   })

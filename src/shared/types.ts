@@ -295,6 +295,23 @@ export type ContentBlock =
    */
   | { type: 'context_note'; title: string; fragments: { text: string; label?: string }[] }
   /**
+   * Claude Code holding (or having held) a message another Claude session sent
+   * this one over its own socket — `system/peer_message_hold`. One row per
+   * message (`holdId` is cli.js's message uuid), updated in place: `held` waits for
+   * the user (the row offers "Allow messages from other Claude sessions here"),
+   * `released` was delivered after all, `dropped` never will be. `cause` and
+   * `outcome` are cli.js's own words (`mode-mismatch`, `discarded`, …).
+   */
+  | {
+      type: 'peer_hold'
+      holdId: string
+      state: 'held' | 'released' | 'dropped'
+      lane: 'stdin' | 'socket'
+      fromName: string
+      cause?: string
+      outcome?: string
+    }
+  /**
    * The rendered output of a code review the engine ran (Codex's
    * `exitedReviewMode`). The one untrusted-text block that DOES go through
    * markdown, by decision (F20): it is the model's own structured review — a
@@ -1786,6 +1803,12 @@ interface SessionAPI {
    * host ignores `value` and recalls everything, reporting the count as `removed`.
    */
   dequeueMessage(routingId: string, value: string): Promise<{ removed: number }>
+  /**
+   * Stop Claude Code holding messages other Claude sessions send this one
+   * (`crossSessionInbound: 'accept'` on this process); the ones it holds are
+   * delivered. Claude only.
+   */
+  allowPeerMessages(routingId: string): Promise<{ success: boolean; error?: string }>
   /**
    * Take back every still-recallable queued item (ADR-053). `recalled` carries
    * their texts in queue order for the client to join with `\n`; `notRecalled`

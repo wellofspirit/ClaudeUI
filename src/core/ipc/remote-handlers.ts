@@ -127,6 +127,7 @@ import {
   readBackgroundRange,
   stopTask,
   backgroundTask,
+  allowPeerMessages,
   dequeueMessage,
   recallQueued,
   askSideQuestion,
@@ -527,6 +528,14 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string) => recallQueued(manager, routingId)
+  })
+
+  handleRemote({
+    channel: 'session:allow-peer-messages',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string) => allowPeerMessages(manager, routingId)
   })
 
   // Deprecated (ADR-053): recall-all shim for cached `/remote` bundles.

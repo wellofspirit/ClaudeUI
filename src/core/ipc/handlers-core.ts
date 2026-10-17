@@ -269,6 +269,22 @@ export function approveBlocked(
   return sendPrompt(manager, routingId, nudge.prompt)
 }
 
+/**
+ * `session:allow-peer-messages` — the "Allow messages from other Claude sessions
+ * here" action on a held peer message. Claude Code only; any other session (or
+ * none) answers `success: false` so the client can say so.
+ */
+export async function allowPeerMessages(
+  manager: SessionManager,
+  routingId: string
+): Promise<{ success: boolean; error?: string }> {
+  const session = manager.get(routingId)
+  if (!session?.allowPeerMessages) {
+    return { success: false, error: 'This session does not hold peer messages' }
+  }
+  return session.allowPeerMessages()
+}
+
 /** A blob id is a lowercase hex SHA-256 — anything else cannot name a blob. */
 const BLOB_ID_RE = /^[0-9a-f]{64}$/
 
