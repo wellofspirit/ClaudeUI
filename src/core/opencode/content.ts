@@ -37,6 +37,7 @@ import { blobStore } from '../services/blob-store'
 import type {
   Form_Field,
   Form_Info,
+  Model_Ref,
   Prompt_FileAttachment,
   Session_StructuredError,
   Tool_Content
@@ -234,6 +235,11 @@ function attachmentBlock(file: Prompt_FileAttachment): ContentBlock | null {
   return isImage
     ? { type: 'image', mediaType: file.mime as never, ...ref, ...fileName }
     : { type: 'document', mediaType: 'application/pdf', ...ref, ...fileName }
+}
+
+/** The model a step ran on, as `providerID/id`; the variant is a sampling preset, not an identity. */
+export function modelLabel(ref: Model_Ref): string {
+  return `${ref.providerID}/${ref.id}`
 }
 
 /**

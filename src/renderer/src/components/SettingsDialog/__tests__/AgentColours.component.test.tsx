@@ -20,6 +20,16 @@ import type { AgentTypeInfo, EngineId } from '../../../../../shared/types'
 import { AgentColoursSection, DispatchTileColourSection } from '../AgentColours'
 import { pageOf } from '../settings-pages'
 
+/** The tile letter each non-default catalog type shows (no two types here share a prefix). */
+const LETTERS: Record<string, string> = {
+  Explore: 'E',
+  'migration-reviewer': 'MR',
+  explore: 'E',
+  Plan: 'P',
+  explorer: 'E',
+  worker: 'W'
+}
+
 const CATALOGS: Record<EngineId, AgentTypeInfo[]> = {
   claude: [
     { type: 'general-purpose', source: 'builtin' },
@@ -95,18 +105,35 @@ describe('Agent colours settings', () => {
         expect(row.textContent).toContain(info.type)
         const isDefault = ['general-purpose', 'general', 'default'].includes(info.type)
         if (isDefault) {
-          // Greyed: dimmed, a neutral tile, and nothing to pick.
-          expect(row.textContent).toContain('Default type, no tile.')
-          expect(tileOf(info.type).textContent).toBe('–')
+          // Greyed: dimmed, the muted bot alone, and nothing to pick.
+          expect(row.textContent).toContain('Default type, a plain bot with no colour.')
+          expect(tileOf(info.type).textContent).toBe('')
+          expect(tileOf(info.type).querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
           expect(tileOf(info.type).getAttribute('data-color')).toBeNull()
           expect(within(row).queryAllByTestId('AgentColours.swatch')).toHaveLength(0)
         } else {
-          expect(tileOf(info.type).textContent).toBe(info.type[0].toUpperCase())
+          expect(tileOf(info.type).textContent).toBe(LETTERS[info.type])
+          expect(tileOf(info.type).querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
           expect(within(row).getAllByTestId('AgentColours.swatch')).toHaveLength(8)
         }
       }
     }
   )
+
+  it('drops the prefix a family of listed types shares from their tile letters', async () => {
+    Object.assign(window.api, {
+      listAgentTypes: vi.fn(async () => [
+        { type: 'orch-reader', source: 'user' },
+        { type: 'orch-verifier', source: 'user' },
+        { type: 'orch-design-reviewer', source: 'user' }
+      ])
+    })
+    render(<Section engine="claude" />)
+    await waitFor(() => expect(screen.getAllByTestId('AgentColours.row')).toHaveLength(3))
+    expect(tileOf('orch-reader').textContent).toBe('R')
+    expect(tileOf('orch-verifier').textContent).toBe('V')
+    expect(tileOf('orch-design-reviewer').textContent).toBe('DR')
+  })
 
   it('colours a type by its own agent colour, mapped to the palette, else a hash', async () => {
     render(<Section engine="claude" />)
@@ -164,6 +191,81 @@ describe('Agent colours settings', () => {
     expect(tileOf('migration-reviewer').getAttribute('data-color')).toBe('violet')
     const lastSaved = save.mock.calls[save.mock.calls.length - 1][0] as Record<string, unknown>
     expect(lastSaved.agentTypeColors).toBeUndefined()
+  })
+
+  describe('model tiers', () => {
+    beforeEach(() => useSessionStore.setState({ availableModels: [] }))
+
+    const modelOf = (type: string): HTMLElement | null =>
+      within(rowOf(type)).queryByTestId('AgentColours.model')
+
+    it('shows the declared model of a type in its tier colour, and nothing for a type with none', async () => {
+      Object.assign(window.api, {
+        listAgentTypes: vi.fn(async () => [
+          { type: 'planner', source: 'user', model: 'opus' },
+          { type: 'scout', source: 'project', model: 'claude-haiku-4-5' },
+          { type: 'writer', source: 'user', model: 'deepseek/deepseek-v4-flash' },
+          { type: 'follower', source: 'user' }
+        ])
+      })
+      render(<Section engine="claude" />)
+      await waitFor(() => expect(screen.getAllByTestId('AgentColours.row')).toHaveLength(4))
+
+      expect(modelOf('planner')?.textContent).toBe('Opus')
+      expect(modelOf('planner')?.getAttribute('data-model-tier')).toBe('high')
+      expect(modelOf('planner')?.className).toContain('text-model-tier-high')
+      expect(modelOf('scout')?.getAttribute('data-model-tier')).toBe('low')
+      // An unlisted family is shown plain.
+      expect(modelOf('writer')?.textContent).toBe('deepseek/deepseek-v4-flash')
+      expect(modelOf('writer')?.getAttribute('data-model-tier')).toBeNull()
+      // Declaring none (inherit, or a built-in) shows nothing at all.
+      expect(modelOf('follower')).toBeNull()
+    })
+
+    it('shows the picker’s short name for a declared model that has one', async () => {
+      useSessionStore.setState({
+        availableModels: [
+          { value: 'opus', displayName: 'Opus 5.5', description: '', engineId: 'claude' }
+        ]
+      })
+      Object.assign(window.api, {
+        listAgentTypes: vi.fn(async () => [{ type: 'planner', source: 'user', model: 'opus' }])
+      })
+      render(<Section engine="claude" />)
+      await waitFor(() => expect(screen.getAllByTestId('AgentColours.row')).toHaveLength(1))
+      expect(modelOf('planner')?.textContent).not.toBe('opus')
+      expect(modelOf('planner')?.title).toBe('opus')
+    })
+
+    it('names a concrete Claude id by its family, and an id no one names by itself', async () => {
+      Object.assign(window.api, {
+        listAgentTypes: vi.fn(async () => [
+          { type: 'planner', source: 'user', model: 'claude-opus-5-5' },
+          { type: 'scout', source: 'user', model: 'claude-haiku-4-5-20251001' },
+          { type: 'writer', source: 'user', model: 'mimo-v2.5-free' }
+        ])
+      })
+      render(<Section engine="claude" />)
+      await waitFor(() => expect(screen.getAllByTestId('AgentColours.row')).toHaveLength(3))
+      expect(modelOf('planner')?.textContent).toBe('Opus 5.5')
+      expect(modelOf('planner')?.title).toBe('claude-opus-5-5')
+      expect(modelOf('scout')?.textContent).toBe('Haiku 4.5')
+      expect(modelOf('writer')?.textContent).toBe('mimo-v2.5-free')
+    })
+
+    it('draws the model plain with the switch off', async () => {
+      useSessionStore.setState({
+        settings: { ...DEFAULT_SETTINGS, agentModelTierColors: false }
+      })
+      Object.assign(window.api, {
+        listAgentTypes: vi.fn(async () => [{ type: 'planner', source: 'user', model: 'opus' }])
+      })
+      render(<Section engine="claude" />)
+      await waitFor(() => expect(screen.getAllByTestId('AgentColours.row')).toHaveLength(1))
+      expect(modelOf('planner')?.textContent).toBe('Opus')
+      expect(modelOf('planner')?.getAttribute('data-model-tier')).toBeNull()
+      expect(modelOf('planner')?.className).not.toContain('text-model-tier')
+    })
   })
 
   it('keeps each engine’s overrides apart', async () => {

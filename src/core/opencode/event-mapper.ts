@@ -66,6 +66,7 @@ import {
   formQuestions,
   formToolCall,
   messageIdFromEvent,
+  modelLabel,
   type OpencodeFormField,
   type OpencodeToolResult,
   SHELL_TOOL_NAMES,
@@ -899,7 +900,8 @@ export class OpencodeEventMapper {
       id: message.id,
       role: 'assistant',
       content: message.blocks.map((block) => ({ ...block })),
-      timestamp: message.timestamp
+      timestamp: message.timestamp,
+      ...(message.model ? { model: modelLabel(message.model) } : {})
     }
   }
 

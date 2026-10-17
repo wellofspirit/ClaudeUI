@@ -639,6 +639,11 @@ export interface AppSettings {
   agentTypeColors?: AgentTypeColorOverrides
   /** The cross-engine dispatch tile's (the letter X) palette colour; unset is orange. */
   dispatchTileColor?: AgentColorId
+  /**
+   * Colour an agent's name in the roster, and the task card's model chip, by the
+   * tier of the model it runs on (`shared/model-tier.ts`). On by default.
+   */
+  agentModelTierColors: boolean
 }
 
 /** Exported for the replica's settings projection (one merge base, not two). */
@@ -646,6 +651,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
   showAgentPill: true,
   showAgentTab: true,
+  agentModelTierColors: true,
   expandToolCalls: true,
   expandReadResults: false,
   hideToolInput: false,

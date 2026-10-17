@@ -1764,6 +1764,71 @@ describe('reducer — subagents', () => {
     expect(s.sessions['rid'].subagentMessages['task-1'].map((m) => m.id)).toEqual(['s1'])
   })
 
+  describe('a subagent message keeps the model it ran on', () => {
+    const ran = (id: string, text: string): ChatMessage => ({
+      ...assistant(id, [{ type: 'text', text }]),
+      model: 'claude-opus-5-5'
+    })
+    const modelsOf = (s: CanonicalState): Array<string | undefined> =>
+      s.sessions['rid'].subagentMessages['task-1'].map((m) => m.model)
+
+    it('through a message upsert and a re-send', () => {
+      const s = fold([
+        created(),
+        ['session:subagent-message', 'rid', { toolUseId: 'task-1', message: ran('s1', 'a') }],
+        ['session:subagent-message', 'rid', { toolUseId: 'task-1', message: ran('s1', 'ab') }]
+      ])
+      expect(modelsOf(s)).toEqual(['claude-opus-5-5'])
+    })
+
+    it('through a batch', () => {
+      const s = fold([
+        created(),
+        [
+          'session:subagent-message-batch',
+          'rid',
+          { toolUseId: 'task-1', messages: [ran('s1', 'a'), ran('s2', 'b')] }
+        ]
+      ])
+      expect(modelsOf(s)).toEqual(['claude-opus-5-5', 'claude-opus-5-5'])
+    })
+
+    it('through item open and both seals', () => {
+      const target = { messageId: 's1', blockIndex: 0, kind: 'text', ownerToolUseId: 'task-1' }
+      const open = fold([
+        created(),
+        ['session:item-open', 'rid', { target, message: ran('s1', 'a') }]
+      ])
+      expect(modelsOf(open)).toEqual(['claude-opus-5-5'])
+      const targeted = fold(
+        [
+          [
+            'session:item-seal',
+            'rid',
+            { target, message: ran('s1', 'ab'), ownerToolUseId: 'task-1' }
+          ]
+        ],
+        open
+      )
+      expect(modelsOf(targeted)).toEqual(['claude-opus-5-5'])
+      const final = fold(
+        [['session:item-seal', 'rid', { message: ran('s1', 'ab'), ownerToolUseId: 'task-1' }]],
+        targeted
+      )
+      expect(modelsOf(final)).toEqual(['claude-opus-5-5'])
+    })
+
+    it('through toSnapshot and fromSnapshot', () => {
+      const s = fold([
+        created(),
+        ['session:subagent-message', 'rid', { toolUseId: 'task-1', message: ran('s1', 'a') }]
+      ])
+      const snapshot = toSnapshot(s, 5)
+      expect(snapshot.sessions['rid'].subagentMessages['task-1'][0].model).toBe('claude-opus-5-5')
+      expect(modelsOf(fromSnapshot(snapshot))).toEqual(['claude-opus-5-5'])
+    })
+  })
+
   it("a task start carries its run's clock; a re-reported start keeps it, a resume restarts it", () => {
     const start = (runIndex: number, startedAt: number): [string, string, unknown] => [
       'session:task-started',

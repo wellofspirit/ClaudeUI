@@ -104,12 +104,15 @@ describe('Agent colours on the phone', () => {
           if (type === 'Explore') {
             expect(isInside(byTestId(row, 'AgentColours.reset'), row)).toBe(true)
           }
-          // The tile keeps its 16px, and the name keeps a readable share of the row.
+          // The tile keeps its 16px height, and the name keeps a readable share of the
+          // row. The floor is 48px, down from 64: the tile holds the bot as well as its
+          // letters now (up to 33px wide, was 16), and the name gives way to it
+          // (52px measured at uiFontScale 1.5 for the long fixture name).
           expect(byTestId(row, 'AgentColours.tile').clientHeight).toBe(16)
           const label = Array.from(row.querySelectorAll<HTMLElement>('span')).find(
             (el) => el.textContent === type
           )!
-          expect(rectOf(label).width).toBeGreaterThanOrEqual(64 * scale - 1)
+          expect(rectOf(label).width).toBeGreaterThanOrEqual(48 * scale - 1)
         }
       })
 
