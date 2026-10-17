@@ -1,10 +1,10 @@
 # ADR-026 — Development workflow: Opus orchestrates and decides, Sonnet builds, Fable advises and gates the PR
 
-**Status:** Accepted. Amended 2026-10-16 (Daniel): one workflow for every change — Opus orchestrates and
+**Status:** Accepted. Amended 2026-10-16: one workflow for every change — Opus orchestrates and
 makes every judgment call; Sonnet reads, implements and verifies; Fable is the design consultant and the
-PR's exit gate; work lands as a pull request. The step-by-step procedure lives in the owner's user-level
-`orchestrate` skill and the roles are his user-level custom agents (`orch-reader`, `orch-implementer`,
-`orch-verifier`, `orch-design-reviewer`, `orch-pr-reviewer`), shared across his projects (and, once ADR-103
+PR's exit gate; work lands as a pull request. The step-by-step procedure lives in a user-level `orchestrate`
+skill and the roles are user-level custom agents (`orch-reader`, `orch-implementer`, `orch-verifier`,
+`orch-design-reviewer`, `orch-pr-reviewer`), shared across projects (and, once ADR-103
 lands, loaded by ClaudeUI into pi and opencode too); this ADR keeps the decision and what is specific to this
 repository. Replaces the driver pairings of 2026-09-17 (Fable → Opus, GPT-6 → GPT-5.6 Sol) and the 2026-10-01
 Sonnet/Opus split. Kept from earlier amendments: the separate verifier
@@ -21,7 +21,7 @@ The lesson: **the implementing agent never self-certifies; correctness is owned 
 every line and re-runs the gates independently.**
 
 The models filling the roles changed several times (Opus → Sonnet, then Fable → Opus, then GPT-6 → Sol
-alongside it). On 2026-10-16 Daniel consolidated them: Opus is strong enough to orchestrate every change,
+alongside it). On 2026-10-16 they were consolidated: Opus is strong enough to orchestrate every change,
 Sonnet does the volume work, and Fable is kept for the two places where a stronger second view pays for
 itself — a design with a large blast radius, and the finished pull request.
 
@@ -29,7 +29,7 @@ itself — a design with a large blast radius, and the finished pull request.
 
 Every non-trivial change in this repository (anything beyond a one-line or mechanical edit: features,
 refactors touching shared seams, anything with a native or external dependency — an engine binary, the
-cli.js wire, the DB driver — anything user-visible) follows the owner's `orchestrate` skill, with the
+cli.js wire, the DB driver — anything user-visible) follows the user-level `orchestrate` skill, with the
 roles, gates and repository rules below. Trivial edits and conversational answers are exempt.
 
 ### Roles
@@ -136,11 +136,11 @@ that run the agents: every agent reads it.
 
 - **Correctness is structurally owned by review**, not by the implementer's confidence — the single most
   load-bearing rule; it has caught a real bug nearly every phase.
-- The procedure lives once, in the owner's `orchestrate` skill, and serves every project of his; this
+- The procedure lives once, in the user-level `orchestrate` skill, and serves every project; this
   ADR binds the roles, the gates and the repository's own rules. `CLAUDE.md` points here.
 - Fable's cost is spent where it pays: a bad large design and a bad merge are the two most expensive
   mistakes. Small designs go straight from spec to Sonnet.
-- An agent without the owner's skills and agents (another machine, another person) still gets the roles,
+- An agent without the user-level skill and agents (another machine, another person) still gets the roles,
   gates and rules from this ADR and `CLAUDE.md`, but not the step-by-step procedure or the role agents.
 
 ## Alternatives considered
@@ -156,6 +156,5 @@ that run the agents: every agent reads it.
   step.
 - **Driver-specific pairings (GPT-6 → GPT-5.6 Sol).** Retired from this ADR with the consolidation; the agent
   files carry any per-harness model.
-- **Keep the full step-by-step loop in this ADR.** Rejected (owner, 2026-10-16): the procedure is the
-  owner's common work pattern across projects, so it lives in his user-level skill; a copy here would
-  drift.
+- **Keep the full step-by-step loop in this ADR.** Rejected (2026-10-16): the procedure is a common work
+  pattern across projects, so it lives in a user-level skill; a copy here would drift.
