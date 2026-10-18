@@ -26,6 +26,8 @@ Found by surveying the Claude Code changelog 2.1.100 → 2.1.302 (2026-10-17) ag
 | Touch affordance for session-row actions                       | Sidebar row actions (rename, hide, delete, pin, and since session-tools 1b Detach) live in the `contextmenu` row menu: Android Chrome opens it on long-press, iOS Safari never does, so they are unreachable on iPhone. Add a visible ⋯ button on mobile rows.                                                                           |
 | Started session's judge context                                | Let an agent-started session's judge also see the starting session's consenting user turn (ADR-104 consequence).                                                                                                                                                                                                                         |
 
+| Audit refusals while session tools are off | With Settings › Session tools off, `runSessionTool` refuses before writing an audit row, so an agent's attempted acting call leaves no trace (exit review of PR #77). Audit acting tools there like the catch path does. |
+
 ## Claude Desktop host-side features worth borrowing
 
 From Anthropic's Desktop docs and the Desktop 2.42304.0 host bundle (research notes in
