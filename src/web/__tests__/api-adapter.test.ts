@@ -108,6 +108,42 @@ describe('web api-adapter — voice transport', () => {
     connection.invoke.mockRejectedValueOnce(new Error('Provider does not support voice'))
     await expect(api.voiceStart('rid-1', 'en')).rejects.toThrow(/does not support voice/)
   })
+
+  it('voiceStart carries the client preview choice as the verb third argument (ADR-101 section 7)', async () => {
+    await api.voiceStart('rid-1', 'en', { preview: false })
+    expect(connection.invoke).toHaveBeenCalledWith('voice:start', 'rid-1', 'en', { preview: false })
+    connection.invoke.mockClear()
+    await api.voiceStart('rid-1', 'en', { preview: true })
+    expect(connection.invoke).toHaveBeenCalledWith('voice:start', 'rid-1', 'en', { preview: true })
+  })
+})
+
+describe('web api-adapter — the on-device speech pack (ADR-101 section 6)', () => {
+  it('maps all four verbs to their channels, with no arguments and the result untouched', async () => {
+    const status = { state: 'missing', packId: 'p', label: 'l', approxBytes: 7 }
+    connection.invoke.mockResolvedValueOnce(status)
+    await expect(api.voicePackStatus()).resolves.toBe(status)
+    expect(connection.invoke).toHaveBeenLastCalledWith('voice:pack-status')
+
+    connection.invoke.mockResolvedValueOnce({ status: 'installed' })
+    await expect(api.voicePackInstall()).resolves.toEqual({ status: 'installed' })
+    expect(connection.invoke).toHaveBeenLastCalledWith('voice:pack-install')
+
+    connection.invoke.mockResolvedValueOnce({ status: 'cancelled' })
+    await expect(api.voicePackInstallCancel()).resolves.toEqual({ status: 'cancelled' })
+    expect(connection.invoke).toHaveBeenLastCalledWith('voice:pack-install-cancel')
+
+    connection.invoke.mockResolvedValueOnce({ status: 'removed' })
+    await expect(api.voicePackRemove()).resolves.toEqual({ status: 'removed' })
+    expect(connection.invoke).toHaveBeenLastCalledWith('voice:pack-remove')
+  })
+
+  it('a registry refusal rejects as it came, so the callers can tell admin from a failure', async () => {
+    connection.invoke.mockRejectedValueOnce(
+      new Error('Permission denied: "voice:pack-install" requires the "admin" capability')
+    )
+    await expect(api.voicePackInstall()).rejects.toThrow(/^Permission denied/)
+  })
 })
 
 describe('web api-adapter — passkeys (ADR-052)', () => {

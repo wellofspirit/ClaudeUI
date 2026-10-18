@@ -370,7 +370,7 @@ describe('PiSubagentManager.run', () => {
     const custom: PiAgentDefinition = {
       ...builtins().resolve('general-purpose')!,
       name: 'pinned',
-      source: 'user',
+      scope: 'user',
       model: 'anthropic/def-model'
     }
     const cases: Array<[Record<string, unknown>, string]> = [
@@ -544,7 +544,7 @@ describe('PiSubagentManager.run', () => {
     const refuser: PiAgentDefinition = {
       ...builtins().resolve('general-purpose')!,
       name: 'refuser',
-      source: 'user',
+      scope: 'user',
       tools: []
     }
     const mgr = new PiSubagentManager(host, {
@@ -931,7 +931,7 @@ describe('PiSubagentManager — background runs (ADR-089 S3)', () => {
     const forced: PiAgentDefinition = {
       ...builtins().resolve('general-purpose')!,
       name: 'bg-only',
-      source: 'user',
+      scope: 'user',
       background: true
     }
     const mgr = new PiSubagentManager(host, {

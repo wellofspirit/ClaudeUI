@@ -28,9 +28,16 @@ import type { ModelInfo, QueuedItem } from '../../../../../../shared/types'
 import { InputBox } from '../InputBox'
 import {
   resetVoiceNoticesForTests,
+  showVoiceNotice,
   useVoiceNoticeStore,
   voiceNoticeFor
 } from '../../../../lib/voice/voice-notice'
+import {
+  applyVoicePackStatus,
+  resetVoicePackStoreForTests,
+  useVoicePackStore
+} from '../../../../lib/voice/voice-pack-store'
+import type { VoicePackState, VoicePackStatus } from '../../../../../../shared/voice-pack'
 import {
   resolveCodexCapabilities,
   type EffortLevel
@@ -47,10 +54,13 @@ import {
 // ---------------------------------------------------------------------------
 
 let viewProps: InputBoxViewProps
+/** Every pill the view was rendered with, in order (to prove what was NEVER shown). */
+const viewLog: Array<InputBoxViewProps['voiceNotice']> = []
 
 vi.mock('../View', () => ({
   InputBoxView: (props: InputBoxViewProps) => {
     viewProps = props
+    viewLog.push(props.voiceNotice ?? null)
     return null
   }
 }))
@@ -1760,6 +1770,368 @@ describe('InputBox FC — rendered', () => {
     })
   })
 
+  // ADR-101 §6: a start without the speech model ends with a notice that carries
+  // an action. The pill offers the download, follows it through the pack store,
+  // and a refused or broken COMMAND (not a failed install) replaces it.
+  describe('the speech model offer', () => {
+    const OFFER_TEXT = 'Voice input for this engine needs the on-device speech model (~700 MB)'
+    const packStatus = (
+      state: VoicePackState,
+      over: Partial<VoicePackStatus> = {}
+    ): VoicePackStatus => ({
+      state,
+      packId: 'parakeet-tdt-0.6b-v2-int8',
+      label: 'Parakeet TDT 0.6B v2 (English)',
+      approxBytes: 700_000_000,
+      ...over
+    })
+    const notice = (): ReturnType<typeof voiceNoticeFor> =>
+      voiceNoticeFor(useVoiceNoticeStore.getState().notices, FC_ROUTE)
+
+    /** What `voice:pack-status` answers: the host's truth, which the post-install re-read asks for. */
+    let hostStatus: VoicePackStatus
+    /** The install call, held open until the test lets it end. */
+    let finishInstall: (value: unknown) => void
+    let failInstall: (error: Error) => void
+
+    beforeEach(() => {
+      viewLog.length = 0
+      resetVoiceNoticesForTests()
+      resetVoicePackStoreForTests()
+      hostStatus = packStatus('missing')
+      app.bridge.ipcMain.handle('voice:pack-status', (_e: unknown, ...args: unknown[]) => {
+        ipcCalls['voice:pack-status'] = [...(ipcCalls['voice:pack-status'] ?? []), args]
+        return hostStatus
+      })
+      app.bridge.ipcMain.handle(
+        'voice:pack-install',
+        (_e: unknown, ...args: unknown[]) =>
+          new Promise((resolve, reject) => {
+            ipcCalls['voice:pack-install'] = [...(ipcCalls['voice:pack-install'] ?? []), args]
+            finishInstall = resolve
+            failInstall = reject
+          })
+      )
+      app.bridge.ipcMain.handle('voice:pack-install-cancel', (_e: unknown, ...args: unknown[]) => {
+        ipcCalls['voice:pack-install-cancel'] = [
+          ...(ipcCalls['voice:pack-install-cancel'] ?? []),
+          args
+        ]
+        return { status: 'cancelled' }
+      })
+    })
+
+    function offer(): void {
+      act(() => {
+        showVoiceNotice(FC_ROUTE, OFFER_TEXT, 'warn', 'install-voice-pack')
+      })
+    }
+
+    it('the pill gets a Download offer, and the pack status is read when it appears', async () => {
+      renderFC()
+      offer()
+      expect(viewProps.voiceNotice).toMatchObject({
+        text: OFFER_TEXT,
+        tone: 'warn',
+        button: 'download',
+        phase: 'offer'
+      })
+      await vi.waitFor(() => expect(ipcCalls['voice:pack-status']).toHaveLength(1))
+    })
+
+    it('Download installs, then the pill follows the pack: progress, then ready', async () => {
+      renderFC()
+      offer()
+
+      let pressed!: Promise<void>
+      await act(async () => {
+        pressed = viewProps.onVoiceNoticeAction!() as unknown as Promise<void>
+      })
+      expect(ipcCalls['voice:pack-install']).toHaveLength(1)
+      // Before the host has said anything: already downloading, with a Cancel.
+      expect(viewProps.voiceNotice).toMatchObject({
+        text: 'Downloading speech model…',
+        button: 'cancel',
+        lingerMs: null
+      })
+      expect(notice()).toMatchObject({ following: true, action: 'install-voice-pack' })
+
+      act(() => {
+        applyVoicePackStatus(
+          packStatus('installing', {
+            progress: { receivedBytes: 294_000_000, totalBytes: 700_000_000 }
+          })
+        )
+      })
+      expect(viewProps.voiceNotice).toMatchObject({ text: 'Downloading speech model… 42%' })
+
+      hostStatus = packStatus('ready')
+      act(() => applyVoicePackStatus(hostStatus))
+      await act(async () => {
+        finishInstall({ status: 'installed' })
+        await pressed
+      })
+      expect(viewProps.voiceNotice).toEqual({
+        id: notice()!.id,
+        text: 'Speech model ready — hold the mic to talk',
+        tone: 'info',
+        phase: 'ready'
+      })
+    })
+
+    it('a failed install shows the host error in warn, in place', async () => {
+      renderFC()
+      offer()
+      let pressed!: Promise<void>
+      await act(async () => {
+        pressed = viewProps.onVoiceNoticeAction!() as unknown as Promise<void>
+      })
+      hostStatus = packStatus('failed', { error: 'sha256 mismatch' })
+      act(() => applyVoicePackStatus(hostStatus))
+      await act(async () => {
+        finishInstall({ status: 'failed', message: 'sha256 mismatch' })
+        await pressed
+      })
+      expect(viewProps.voiceNotice).toMatchObject({ text: 'sha256 mismatch', tone: 'warn' })
+      expect(viewProps.voiceNotice?.button).toBeUndefined()
+    })
+
+    it('Cancel goes to voice:pack-install-cancel', async () => {
+      renderFC()
+      offer()
+      await act(async () => {
+        void viewProps.onVoiceNoticeAction!()
+      })
+      await act(async () => {
+        await viewProps.onVoiceNoticeCancel!()
+      })
+      expect(ipcCalls['voice:pack-install-cancel']).toHaveLength(1)
+    })
+
+    it('a refused Download never flashes an outcome (cancelled, an old failure) before the reason', async () => {
+      // The stale status says `failed`: it must not be shown as this press's outcome.
+      hostStatus = packStatus('failed', { error: 'an old failure' })
+      act(() => applyVoicePackStatus(hostStatus))
+      renderFC()
+      offer()
+      viewLog.length = 0
+      let pressed!: Promise<void>
+      await act(async () => {
+        pressed = viewProps.onVoiceNoticeAction!() as unknown as Promise<void>
+      })
+      await act(async () => {
+        failInstall(
+          new Error('Permission denied: "voice:pack-install" requires the "admin" capability')
+        )
+        await pressed
+      })
+      const phases = viewLog.map((view) => view?.phase)
+      expect(phases).not.toContain('cancelled')
+      expect(phases).not.toContain('failed')
+      expect(phases).not.toContain('ready')
+      expect(viewLog.map((view) => view?.text)).not.toContain('an old failure')
+      expect(viewProps.voiceNotice).toMatchObject({
+        text: 'Installing the speech model needs admin access on this host',
+        tone: 'warn'
+      })
+    })
+
+    it('a refused Cancel reads the managing sentence', async () => {
+      app.bridge.ipcMain.handle('voice:pack-install-cancel', () => {
+        throw new Error(
+          'Permission denied: "voice:pack-install-cancel" requires the "admin" capability'
+        )
+      })
+      renderFC()
+      offer()
+      act(() => applyVoicePackStatus(packStatus('installing')))
+      await act(async () => {
+        await viewProps.onVoiceNoticeCancel!()
+      })
+      expect(notice()).toMatchObject({
+        text: 'Managing the speech model needs admin access on this host',
+        tone: 'warn'
+      })
+    })
+
+    it('M1: a second press of the mic re-offers while the download runs — the pill still follows it to ready', async () => {
+      renderFC()
+      offer()
+      await act(async () => {
+        void viewProps.onVoiceNoticeAction!()
+      })
+      act(() => applyVoicePackStatus(packStatus('installing')))
+      expect(notice()).toMatchObject({ following: true })
+
+      // "Is it ready?" — main refuses again with a fresh action notice.
+      offer()
+      expect(notice()).toMatchObject({ following: true, action: 'install-voice-pack' })
+      expect(viewProps.voiceNotice).toMatchObject({ phase: 'installing' })
+
+      hostStatus = packStatus('ready')
+      act(() => applyVoicePackStatus(hostStatus))
+      expect(viewProps.voiceNotice).toMatchObject({
+        text: 'Speech model ready — hold the mic to talk',
+        phase: 'ready'
+      })
+      expect(viewProps.voiceNotice?.button).toBeUndefined()
+    })
+
+    it('M1: a repeat offer before the host has said anything keeps the pressed download in view', async () => {
+      renderFC()
+      offer()
+      await act(async () => {
+        void viewProps.onVoiceNoticeAction!()
+      })
+      // No `voice:pack-changed` yet: only this client's press is pending.
+      offer()
+      expect(notice()).toMatchObject({ following: true })
+      expect(viewProps.voiceNotice).toMatchObject({
+        text: 'Downloading speech model…',
+        phase: 'installing'
+      })
+    })
+
+    it('M1: an offer that only WATCHED another client’s install shows how it ended, not the offer again', async () => {
+      renderFC()
+      offer()
+      expect(viewProps.voiceNotice).toMatchObject({ phase: 'offer' })
+
+      act(() =>
+        applyVoicePackStatus(
+          packStatus('installing', { progress: { receivedBytes: 1, totalBytes: 2 } })
+        )
+      )
+      expect(viewProps.voiceNotice).toMatchObject({ phase: 'installing', button: 'cancel' })
+      // Seeing it run is what follows it.
+      expect(notice()).toMatchObject({ following: true })
+
+      act(() => applyVoicePackStatus(packStatus('failed', { error: 'sha256 mismatch' })))
+      expect(viewProps.voiceNotice).toMatchObject({ text: 'sha256 mismatch', tone: 'warn' })
+    })
+
+    it('M1: an offer that arrives while another session’s download is already running follows it at once', () => {
+      renderFC()
+      act(() =>
+        applyVoicePackStatus(
+          packStatus('installing', { progress: { receivedBytes: 1, totalBytes: 2 } })
+        )
+      )
+      offer()
+      expect(notice()).toMatchObject({ following: true })
+      act(() => applyVoicePackStatus(packStatus('ready')))
+      expect(viewProps.voiceNotice).toMatchObject({ phase: 'ready' })
+    })
+
+    it('N7: once ready, a Remove in Settings during the linger does not turn it into “cancelled”', async () => {
+      renderFC()
+      offer()
+      await act(async () => {
+        void viewProps.onVoiceNoticeAction!()
+      })
+      hostStatus = packStatus('ready')
+      act(() => applyVoicePackStatus(hostStatus))
+      expect(viewProps.voiceNotice).toMatchObject({ phase: 'ready' })
+      expect(notice()?.outcome).toMatchObject({ phase: 'ready' })
+
+      hostStatus = packStatus('missing')
+      act(() => applyVoicePackStatus(hostStatus))
+      expect(viewProps.voiceNotice).toMatchObject({
+        text: 'Speech model ready — hold the mic to talk',
+        phase: 'ready'
+      })
+    })
+
+    it('a dismissed notice that was following a download only hides the pill; the install carries on', async () => {
+      renderFC()
+      offer()
+      await act(async () => {
+        void viewProps.onVoiceNoticeAction!()
+      })
+      act(() => applyVoicePackStatus(packStatus('installing')))
+      act(() => viewProps.onVoiceNoticeExpire!(viewProps.voiceNotice!.id))
+      expect(viewProps.voiceNotice).toBeNull()
+      expect(ipcCalls['voice:pack-install-cancel']).toBeUndefined()
+      expect(useVoicePackStore.getState().status?.state).toBe('installing')
+    })
+
+    it('a remote client without admin: the pill becomes the plain admin sentence (warn, no button)', async () => {
+      renderFC()
+      offer()
+      let pressed!: Promise<void>
+      await act(async () => {
+        pressed = viewProps.onVoiceNoticeAction!() as unknown as Promise<void>
+      })
+      await act(async () => {
+        failInstall(
+          new Error('Permission denied: "voice:pack-install" requires the "admin" capability')
+        )
+        await pressed
+      })
+      expect(notice()).toMatchObject({
+        text: 'Installing the speech model needs admin access on this host',
+        tone: 'warn'
+      })
+      expect(notice()).not.toHaveProperty('action')
+      expect(viewProps.voiceNotice?.button).toBeUndefined()
+    })
+
+    it('an invoke timeout is an install still running on the host, not a failure', async () => {
+      hostStatus = packStatus('installing', { progress: { receivedBytes: 10, totalBytes: 100 } })
+      renderFC()
+      offer()
+      let pressed!: Promise<void>
+      await act(async () => {
+        pressed = viewProps.onVoiceNoticeAction!() as unknown as Promise<void>
+      })
+      await act(async () => {
+        failInstall(new Error('Timeout: voice:pack-install'))
+        await pressed
+      })
+      // Still the same followed notice, still downloading, nothing replaced it.
+      expect(notice()).toMatchObject({ following: true, action: 'install-voice-pack' })
+      expect(viewProps.voiceNotice).toMatchObject({
+        text: 'Downloading speech model… 10%',
+        button: 'cancel'
+      })
+    })
+
+    it('a fresh press drops an offer nobody took up; a download in progress stays', async () => {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: { ...state.sessions[FC_ROUTE], sdkActive: true }
+        }
+      }))
+      mirrorStoreIntoReplica()
+      renderFC()
+
+      offer()
+      await act(async () => {
+        await viewProps.onVoiceStart()
+      })
+      expect(notice()).toBeNull()
+
+      offer()
+      await act(async () => {
+        void viewProps.onVoiceNoticeAction!()
+      })
+      expect(notice()).toMatchObject({ following: true })
+      await act(async () => {
+        await viewProps.onVoiceStart()
+      })
+      expect(notice()).toMatchObject({ following: true, action: 'install-voice-pack' })
+    })
+
+    it('a plain notice that merely says the same thing gets no button (nothing keys on wording)', () => {
+      renderFC()
+      act(() => {
+        showVoiceNotice(FC_ROUTE, OFFER_TEXT, 'warn')
+      })
+      expect(viewProps.voiceNotice).toEqual({ id: notice()!.id, text: OFFER_TEXT, tone: 'warn' })
+    })
+  })
+
   it('onVoiceStop: sends voice:stop-recording with the active session id', async () => {
     renderFC()
 
@@ -2824,6 +3196,26 @@ describe('InputBox FC — rendered', () => {
     await sendFC()
     expect(ipcCalls['session:create'][0][2]).toBe('high')
     // ...and it is a RESUME: the thread id goes with it.
+    expect(ipcCalls['session:create'][0][3]).toBe(FC_ROUTE)
+  })
+
+  it('shows and resumes with the tier a reopened thread last ran at', async () => {
+    coldCodexSession('historical')
+    // What `loadSessionIntoStore` seeds from the thread's own record (`lastEffort`)
+    // while the model default is medium.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], effort: 'low' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.effort).toBe('low')
+    await sendFC()
+    // Codex ignores a thread's remembered tier once the resume names a model, so
+    // the tier has to ride the resume or the thread comes back on the default.
+    expect(ipcCalls['session:create'][0][2]).toBe('low')
     expect(ipcCalls['session:create'][0][3]).toBe(FC_ROUTE)
   })
 

@@ -103,6 +103,9 @@ export function AgentRosterList({
   )
   const shown = listed.filter((l) => !l.isContext).length
   const summary = rosterSummaryParts(roster)
+  // Every type in the roster, not just the filtered rows: a tile letter must not
+  // change when the Running filter hides a sibling of the same family.
+  const knownTypes = roster.rows.flatMap((r) => (r.type ? [r.type] : []))
 
   const filterButton = (running: boolean, label: string): React.JSX.Element => {
     const active = runningOnly === running
@@ -172,6 +175,7 @@ export function AgentRosterList({
             onOpen={onOpen}
             isContext={isContext}
             guide={guide}
+            knownTypes={knownTypes}
           />
         ))
       )}

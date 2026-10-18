@@ -1,23 +1,23 @@
 {
   "id": "codex",
-  "tested": "0.160.1",
-  "floor": "0.160.1",
+  "tested": "0.162.1",
+  "floor": "0.162.1",
   "ceiling": "1.0.0",
-  "sourceCommit": "d27764b82f7118f674371e6d6e76271d9d606edb",
-  "license": "https://raw.githubusercontent.com/openai/codex/d27764b82f7118f674371e6d6e76271d9d606edb/LICENSE",
+  "sourceCommit": "092d3acd6bec3e3a14bdc7e7a2810ab628ab759d",
+  "license": "https://raw.githubusercontent.com/openai/codex/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/LICENSE",
   "licenseSha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
   "platforms": {
     "darwin-arm64": {
       "binaries": {
         "codex": {
           "member": "codex-aarch64-apple-darwin",
-          "archiveSha256": "670af2b049d9c95afb74d7da385f30c5033d13a07175001dd8958c51944984d0",
-          "binarySha256": "09fa44fdc37a5fc70dc1ace31235f90468a2e193d0e85f7552eab068ea2582be"
+          "archiveSha256": "b293a0fcdd871900a44c0a4f40a1aa401b31e02854f790ebdb8bd5d1177fd1fe",
+          "binarySha256": "74c6a6d263f40d65f99c27a815275f5b4ed0bcc2baecc396b4cf3255498bdfc0"
         },
         "codex-code-mode-host": {
           "member": "codex-code-mode-host-aarch64-apple-darwin",
-          "archiveSha256": "6e502df69d9220fa305b0c3c7c17ba8f31ab1d4591fc140084dbb823e800c7db",
-          "binarySha256": "6ac432b170e2c30f90de5af0da584def5201497a0d3d988d37dc58b951236b2f"
+          "archiveSha256": "1f464a2894adbc916e431b6bf19bef2cb485cf7e13e636d42578c581962b3727",
+          "binarySha256": "0960435a104cf926e18bb938b8f6f8fcdf7e27be0c8d88e1911bc22a1de7d3e6"
         }
       }
     },
@@ -25,13 +25,13 @@
       "binaries": {
         "codex.exe": {
           "member": "codex-x86_64-pc-windows-msvc.exe",
-          "archiveSha256": "12cf8aa4f5e4ef3e6602f6c0e98838f8092f63357f01bd3c7379b216df27cc78",
-          "binarySha256": "9e7c59c05cc1ce5677b1f94e835b2ac038ca3be14504e78d558eacdb0ea3f55d"
+          "archiveSha256": "a97c427a033b08d58902af3e52e8586ad2013267212112d306100223e2b12ec7",
+          "binarySha256": "dd13bdb162a184fa04039488b234a8258ef9b76f84e926c505d5742b19249a6a"
         },
         "codex-code-mode-host.exe": {
           "member": "codex-code-mode-host-x86_64-pc-windows-msvc.exe",
-          "archiveSha256": "40f9fa92d6d1366d12b67c6668e3bf69324efae02bd5f58e069c8a6c5c161b15",
-          "binarySha256": "b905b5169bd758dbe3c31ca22c22ad0c24df0047ba7ae32652c706d3ac3ba78d"
+          "archiveSha256": "9fd8dbfd188fae23774081dc42297e85c87740697684ccae41c0e522b1d00382",
+          "binarySha256": "9f865a748c984492ca9b69aac75680e4954f31311c43ec33ddbdae0ed77bd4bd"
         }
       }
     },
@@ -39,13 +39,13 @@
       "binaries": {
         "codex": {
           "member": "codex-x86_64-unknown-linux-musl",
-          "archiveSha256": "9226581be592d18f7e7f740a352fdb63aa61e45e39f7eb9b09d3888c84bba33f",
-          "binarySha256": "f34a4d2301892ae96c90097786bfe5dc269f187b6f69faf42a7b357b8c081e35"
+          "archiveSha256": "86f268d81b898f3e144c5ecff2ad2fda2c5802e042d6195b72538fe0fa125057",
+          "binarySha256": "628e35487d888a28f0427fc37501da529dd3d81fcbad7a2c3421c1e8670d92e1"
         },
         "codex-code-mode-host": {
           "member": "codex-code-mode-host-x86_64-unknown-linux-musl",
-          "archiveSha256": "8a69207d97545ac753b6585974e1e67a4c51ae5deacf06517db512bb25e0e3c2",
-          "binarySha256": "b33e8a5283f3c65c2a0aca6d43a59cfe850f624d8fa16992e3cad4fcc27c14e1"
+          "archiveSha256": "458239ea45c1fc508d89695f180ab352f2834709a8a46929a4466f4f04399ada",
+          "binarySha256": "ec71830690a7c0024916ee0c99fbdc635bc6e747ff665ea4f03a8389bbcb6b30"
         }
       }
     },
@@ -53,13 +53,13 @@
       "binaries": {
         "codex": {
           "member": "codex-aarch64-unknown-linux-musl",
-          "archiveSha256": "f54dc5852042445bf41da3aa31156f3cb02f52c5a1a04074de73dc5598f7e1f7",
-          "binarySha256": "fbbaec80443919f86dd63648a0b62759cf6f1d0e09310602fde96885e0bceb3e"
+          "archiveSha256": "bf3ca2719f1143b1440fbd85c149379e696c782c50ad7991f8bfcec60b2600c1",
+          "binarySha256": "071cbe8d821cf1b02b6d8ba6c8b7991b228fcb8519dcb68a37d31222bb8cabe5"
         },
         "codex-code-mode-host": {
           "member": "codex-code-mode-host-aarch64-unknown-linux-musl",
-          "archiveSha256": "e5e027e6689efda2e3570aa600179f0ebb18632803350e152ed6c9b97dcf9741",
-          "binarySha256": "fbccde22982e3e679678e203a9c18eee8342fb04b096063d05159f1f80df4fd8"
+          "archiveSha256": "1395ce9367f8acd280674dff083edf25bf221d908b8351d5bd4f3fdde9181e9a",
+          "binarySha256": "f6477b0357a8cc2291d628962876ecb1a2beb872f71a1e2734363c81ff21700d"
         }
       }
     }

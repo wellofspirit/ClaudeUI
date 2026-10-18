@@ -81,10 +81,14 @@ describe('release workflows', () => {
 })
 
 describe('postinstall', () => {
-  it('installs the tested opencode, pi and Codex into the managed store', () => {
-    const postinstall = pkg.scripts.postinstall
+  it('runs the postinstall build target, which installs opencode, pi and Codex into the managed store', async () => {
+    expect(pkg.scripts.postinstall).toBe('node scripts/build.mjs postinstall')
+    const { targets }: any = await import('../../../../scripts/lib/build-targets.mjs')
+    const stages = targets({ quiet: true, childEnv: {} }).postinstall
+    const group = stages.find((s: any) => s.parallel)
     for (const id of ['opencode', 'pi', 'codex']) {
-      expect(postinstall).toContain(`npm run ensure-${id}`)
+      const member = group.parallel.find((m: any) => m.label === `ensure-${id}`)
+      expect(member.steps[0][1][0]).toBe(`scripts/ensure-${id}.mjs`)
       expect(pkg.scripts[`ensure-${id}` as keyof typeof pkg.scripts]).toBe(
         `node scripts/build.mjs ensure-${id}`
       )

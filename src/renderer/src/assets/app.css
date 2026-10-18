@@ -70,6 +70,17 @@ pre .token.table {
   --color-agent-teal: #3fcfb4;
   --color-agent-pink: #ec82c8;
 
+  /* Model tiers (shared/model-tier.ts): the colour of an agent's name in the
+     roster and of the task card's model chip text. Each holds 4.5:1 on the panel
+     surfaces (shared/__tests__/model-tier.test.ts). Light and Monokai have their own. */
+  --color-model-tier-top: #ff8000;
+  --color-model-tier-high: #b866f5;
+  --color-model-tier-mid: #3d95ff;
+  --color-model-tier-low: #1eff00;
+
+  /* The steady grey of a status dot that is not running (--color-dot-inactive). */
+  --color-dot-inactive: #6b7280;
+
   --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
 }
 
@@ -105,6 +116,13 @@ pre .token.table {
   --color-agent-amber: #634500;
   --color-agent-teal: #065b50;
   --color-agent-pink: #8c2468;
+
+  --color-model-tier-top: #703800;
+  --color-model-tier-high: #6b0cb1;
+  --color-model-tier-mid: #004599;
+  --color-model-tier-low: #0a5700;
+
+  --color-dot-inactive: #6b7280;
 }
 
 /* ── Monokai theme ── */
@@ -130,6 +148,15 @@ pre .token.table {
   --color-mode-plan-dim: #7aa31e;
   --color-mode-auto: #e6db74;
   --color-mode-auto-dim: #b8ad50;
+
+  /* Model tiers on Monokai's lighter surfaces (bg-hover is #4a493c): the same
+     hues, lifted until they hold 4.5:1 on all four surfaces. */
+  --color-model-tier-top: #ffa447;
+  --color-model-tier-high: #d7a9f9;
+  --color-model-tier-mid: #85bcff;
+  --color-model-tier-low: #1eff00;
+
+  --color-dot-inactive: #8b8878;
 }
 
 body {
@@ -236,13 +263,18 @@ html[data-shell='web'] #root {
 
 /* Sidebar session status dot (SessionItem → StatusDot). Colour per `data-state`;
    geometry comes from Tailwind classes so `group-hover:hidden` still wins (these
-   rules are unlayered and would beat a utility's `display`). */
+   rules are unlayered and would beat a utility's `display`).
+
+   Every dot colour is themed and holds 3:1 (a graphic, not text) on the panel in
+   all three themes: the green and the red are the theme's success and danger, the
+   grey is --color-dot-inactive, and violet and blue have a light override
+   (shared/__tests__/status-dot-contrast.test.ts pins them). */
 .status-dot {
   background-color: var(--dot-color);
 }
 .status-dot[data-state='running'],
 .status-dot[data-state='idle'] {
-  --dot-color: #4ade80;
+  --dot-color: var(--color-success);
 }
 .status-dot[data-state='subagents'] {
   --dot-color: #a78bfa;
@@ -256,8 +288,25 @@ html[data-shell='web'] #root {
 .status-dot[data-state='watching'] {
   --dot-color: #60a5fa;
 }
+[data-theme='light'] .status-dot[data-state='watching'] {
+  --dot-color: #2563eb;
+}
 .status-dot[data-state='inactive'] {
-  --dot-color: color-mix(in srgb, var(--color-text-muted) 30%, transparent);
+  --dot-color: var(--color-dot-inactive);
+}
+/* The letters of an agent tile (ADR-094), trimmed to cap height: the box is the
+   capitals themselves, so the flex centring of the tile centres the glyphs and
+   not the font's ascent and descent around them. */
+.agent-tile-letter {
+  display: block;
+  line-height: 1;
+  text-box: trim-both cap alphabetic;
+}
+
+/* An agent row that failed (the roster's dot, which is this element). Steady,
+   and red in both themes: --color-danger is themed. */
+.status-dot[data-state='failed'] {
+  --dot-color: var(--color-danger);
 }
 
 /* The busy ripple. Only transform and opacity animate, so it stays on the

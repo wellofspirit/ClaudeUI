@@ -44,6 +44,7 @@ import { ModelPicker } from '../shared/InlinePickers'
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
 import { OpencodeAgentsSection } from './OpencodeAgents'
 import { MicrophoneSetting } from './MicrophoneSetting'
+import { VoicePackSetting, VoicePreviewSetting } from './VoicePackSetting'
 import { TrustListsSection } from './TrustLists'
 import {
   RemoteAccessSection,
@@ -1606,6 +1607,21 @@ export const SECTIONS: Section[] = [
             onChange={(v) => u({ showAgentTab: v })}
           />
         )
+      },
+      {
+        key: 'agentModelTierColors',
+        label: 'Colour agents by model tier',
+        keywords: 'agents subagents roster task card model tier colour color name',
+        render: (s, u) => (
+          <SettingsToggle
+            testid="SettingsAgentModelTierColors"
+            label="Colour agents by model tier"
+            description="Colours an agent's name in the roster, and the model on its task card, by the tier of the model it runs on. Models outside the four tiers stay plain."
+            {...appDefault(s, u, 'agentModelTierColors')}
+            checked={s.agentModelTierColors}
+            onChange={(v) => u({ agentModelTierColors: v })}
+          />
+        )
       }
     ]
   },
@@ -2200,6 +2216,23 @@ export const SECTIONS: Section[] = [
         label: 'Microphone',
         keywords: 'voice microphone mic input device bluetooth headset airpods test level',
         render: (s) => <MicrophoneSetting enabled={s.voiceEnabled} />
+      },
+      {
+        // The HOST's, not a synced setting: one model per host serves every
+        // client (ADR-101 §6). Not dimmed when voice is off — removing 700 MB is
+        // a reasonable thing to do exactly then.
+        key: 'voiceModel',
+        label: 'On-device speech model',
+        keywords:
+          'voice speech model download install remove on-device local offline parakeet opencode pi codex',
+        render: () => <VoicePackSetting />
+      },
+      {
+        // Per client (localStorage) like the microphone: no appDefault / Reset.
+        key: 'voicePreview',
+        label: 'Live preview while speaking',
+        keywords: 'voice preview live interim words as you speak streaming on-device',
+        render: (s) => <VoicePreviewSetting enabled={s.voiceEnabled} />
       }
     ]
   },

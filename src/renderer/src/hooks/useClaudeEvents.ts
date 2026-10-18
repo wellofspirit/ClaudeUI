@@ -28,12 +28,17 @@
  */
 
 import { useEffect } from 'react'
-import { onSyncEvent, markSyncReady } from '../../../core/shared/sync/client-registry'
+import {
+  onSyncAnswered,
+  onSyncEvent,
+  markSyncReady
+} from '../../../core/shared/sync/client-registry'
 import { useSessionStore } from '../stores/session-store'
 import { onReplicaApplied, seedWatchedSession, getReplicaState } from '../stores/replica'
 import { loadResumedTranscript } from '../lib/session-history-load'
 import { showVoiceNotice } from '../lib/voice/voice-notice'
 import { voiceController } from '../lib/voice/voice-controller'
+import { applyVoicePackStatus, refreshVoicePackStatus } from '../lib/voice/voice-pack-store'
 import { hasAutoContinuingTask } from '../lib/task-types'
 import type { SessionStatus, TaskNotification, SlashCommandInfo } from '../../../shared/types'
 
@@ -361,10 +366,32 @@ export function useClaudeEvents(): void {
       // session hears it. Only the client whose microphone it was shows it — on
       // anyone else's mic it would read as a fault in THEIR microphone — so a
       // message for a session this client did not just capture for is dropped.
-      onSyncEvent('voice:error', (routingId, error, tone) => {
+      //
+      // The action (ADR-101 §6: `install-voice-pack`) rides as data, like the tone.
+      // That refusal ends the start quietly in main, but THIS client opened its
+      // microphone before the start — so the live capture would keep running (level
+      // ring, silence warning) into nothing until release. It is stopped here, with
+      // no notice of its own: the refusal is the notice.
+      onSyncEvent('voice:error', (routingId, error, tone, action) => {
         if (!voiceController().ownsRecentCapture(routingId)) return
-        showVoiceNotice(routingId, error, tone === 'info' ? 'info' : 'warn')
+        showVoiceNotice(routingId, error, tone === 'info' ? 'info' : 'warn', action)
+        if (action === 'install-voice-pack') {
+          void voiceController()
+            .stopIfCapturing(routingId)
+            .catch(() => {
+              /* the transport's stop failed; the capture is halted either way */
+            })
+        }
       }),
+      // The on-device speech pack's status (ADR-101 §6): replicated, so a phone
+      // sees the install the desktop started. The store is what the pill's
+      // Download/Cancel and Settings › Voice input read.
+      onSyncEvent('voice:pack-changed', (status) => applyVoicePackStatus(status)),
+      // The status can go stale behind the event stream: a full resync, a host
+      // restart or a ring overflow loses events, and a pill that last heard
+      // "Downloading… 42%" would sit there for good. Every answered sync re-reads
+      // it (which is also the first read).
+      onSyncAnswered(() => void refreshVoicePackStatus()),
 
       // -------------------------------------------------------------------
       // Host-local channels (targeted delivery, desktop only)

@@ -94,6 +94,7 @@ import { configCommands } from './config-commands'
 import { ideCommands, type IdeCommandHost } from './ide-commands'
 import { usageHubCommands } from './usage-hub-commands'
 import { harnessCommands } from './harness-commands'
+import { voicePackCommands } from './voice-pack-commands'
 import { remoteViewCommands, type RemoteStatusHost } from './remote-view-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { AUTOMATION_COMMANDS } from './automation-commands'
@@ -1482,8 +1483,22 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     withConnection: true,
-    handler: async (connection: CommandConnection, routingId: string, language?: string | null) =>
-      voiceRelay.start(manager, remoteVoiceOwner(connection.connectionId), routingId, opt(language))
+    handler: async (
+      connection: CommandConnection,
+      routingId: string,
+      language?: string | null,
+      // `{ preview: false }` is the client's "no live preview" setting; anything
+      // else (absent, null, a stray shape) leaves preview on — the relay only
+      // reads an explicit `false`.
+      opts?: { preview?: boolean } | null
+    ) =>
+      voiceRelay.start(
+        manager,
+        remoteVoiceOwner(connection.connectionId),
+        routingId,
+        opt(language),
+        { preview: opts?.preview }
+      )
   })
 
   handleRemote({
@@ -1546,6 +1561,18 @@ export function registerRemoteHandlers(
   // putting a program on the host from a phone is close to remote code
   // execution. A base connection is refused them by the registry.
   for (const cmd of harnessCommands()) {
+    handleRemote(cmd)
+  }
+
+  // -------------------------------------------------------------------------
+  // The speech pack (ADR-101 §6)
+  // -------------------------------------------------------------------------
+  //
+  // From the same declarations the desktop spreads. `voice:pack-status` is a
+  // `chat` query (any connection that can hold the mic can learn it needs the
+  // model); install, cancel and remove are `admin`, so a base connection is
+  // refused them by the registry.
+  for (const cmd of voicePackCommands()) {
     handleRemote(cmd)
   }
 

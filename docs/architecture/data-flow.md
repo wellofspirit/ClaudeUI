@@ -45,4 +45,4 @@ store actions this diagram used to name were deleted in SyncCore phase 4c.
 
 ## cli.js integration
 
-Everything about the wire — message shapes, control subtypes, MCP hosting, cancellation, the build pipeline, patches — is in **[`docs/protocol-cc/`](../protocol/README.md)**. Consult it before theorizing, and before touching `src/core/sdk/`, `scripts/extract-cli.mjs`, or `patch/`. cli.js itself is ~13 MB minified: use the `/bundle-analyzer` skill to navigate it (find by string literals, never by minified names).
+Everything about the wire — message shapes, control subtypes, MCP hosting, cancellation, the build pipeline, patches — is in **[`docs/protocol-cc/`](../protocol-cc/README.md)**. Consult it before theorizing, and before touching `src/core/sdk/`, `scripts/extract-cli.mjs`, or `patch/`. cli.js itself is ~13 MB minified: use the `/bundle-analyzer` skill to navigate it (find by string literals, never by minified names).

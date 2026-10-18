@@ -894,6 +894,15 @@ describe('session.ipc', () => {
       expect(language).toBe('en')
     })
 
+    it('voice:start-recording passes the preview choice of the client to the relay (ADR-101)', async () => {
+      await harness.call<any>('voice:start-recording', 'rid-1', 'en', { preview: false })
+      expect(voiceRelaySpies.start.mock.calls[0][4]).toEqual({ preview: false })
+
+      voiceRelaySpies.start.mockClear()
+      await harness.call<any>('voice:start-recording', 'rid-1', 'en')
+      expect(voiceRelaySpies.start.mock.calls[0][4]).toEqual({ preview: undefined })
+    })
+
     it('voice:stop-recording ends the host window owner', async () => {
       const res = await harness.call<any>('voice:stop-recording', 'rid-1')
       expect(res.ok).toBe(true)

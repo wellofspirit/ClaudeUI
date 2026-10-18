@@ -20,6 +20,10 @@
  *               (`sessionID="ses_…"` of an earlier result); its prompt is `[read]` too
  *   [reason]    `reasoning_content` deltas, then text
  *   [read]      `read` of `notes.txt`
+ *   [readabs:<path>]  `read` of the ABSOLUTE path (no `]` in it) — outside-the-workspace reads
+ *   [subexplore:<path>]  `subagent` call to the `explore` agent whose prompt is `[readabs:<path>]`
+ *   [subas:<agent>:<kind>]  `subagent` call to `<agent>` whose prompt is `[<kind>]` (read | edit | write);
+ *               `[subas:<agent>:readabs=<path>]` makes the child read that absolute path
  *   [edit]      `edit` of `notes.txt` (alpha → beta)
  *   [write]     `write` of `new.txt`
  *   [patch]     `patch` updating `notes.txt` (falls back to text when not offered)
@@ -302,6 +306,15 @@ export async function startFixtureProvider(
           }
         )
       }
+      const subAs = /\[subas:([^:\]]+):(read|edit|write|readabs=[^\]]+)\]/.exec(text)
+      if (subAs) {
+        const kind = subAs[2].startsWith('readabs=') ? `readabs:${subAs[2].slice(8)}` : subAs[2]
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          { description: `contract ${subAs[1]}`, prompt: `child does [${kind}]`, agent: subAs[1] }
+        )
+      }
       if (text.includes('[subread]'))
         return streamToolCall(
           res,
@@ -314,6 +327,24 @@ export async function startFixtureProvider(
         )
       if (text.includes('[reason]'))
         return streamReasoning(res, REASONING_TEXT, `reasoned: ${text.slice(0, 80)}`)
+      const readAbs = /\[readabs:([^\]]+)\]/.exec(text)
+      if (readAbs)
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'read'),
+          { path: readAbs[1] }
+        )
+      const subExplore = /\[subexplore:([^\]]+)\]/.exec(text)
+      if (subExplore)
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          {
+            description: 'contract explorer',
+            prompt: `child reads [readabs:${subExplore[1]}]`,
+            agent: 'explore'
+          }
+        )
       if (text.includes('[read]'))
         return streamToolCall(
           res,

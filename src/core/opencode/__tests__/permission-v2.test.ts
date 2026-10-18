@@ -19,12 +19,12 @@ import {
 import {
   AUTO_MCP_CATCH_ALL,
   agentPermissionOverlay,
-  opencodeOwnDirAllows,
   asHostPrecheckRules,
   buildSessionRuleset,
   compileClaudeRulesV2,
   DISPATCH_ASK_RULE,
   EXECUTE_DENY_RULE,
+  externalDirectoryGates,
   modeGates,
   THROWAWAY_RULESET,
   withoutAllowRulesV2,
@@ -33,7 +33,9 @@ import {
   type SessionRulesetInput,
   type V2Rule
 } from '../permission-v2'
+import { opencodeOwnDirAllows } from '../own-dirs'
 import { absoluteSpecifier, pathResources } from '../permission-paths'
+import { childSessionRuleset } from '../subagent-permissions'
 import { evaluateV2Call, lastMatchingV2Rule, v2ToolHidden } from '../wildcard'
 
 function perms(p: Partial<ClaudePermissions>): ClaudePermissions {
@@ -380,7 +382,12 @@ describe('wireOrder — whole-category denies last (re-verified for 2.x `whollyD
 
 describe('modeGates', () => {
   it('default (and ask / bypassPermissions / unknown / auto with the classifier off): shell, edit, webfetch ask', () => {
-    const gated = [r('shell', 'ask'), r('edit', 'ask'), r('webfetch', 'ask')]
+    const gated = [
+      r('shell', 'ask'),
+      r('edit', 'ask'),
+      r('webfetch', 'ask'),
+      r('external_directory', 'ask')
+    ]
     for (const mode of ['default', 'ask', 'bypassPermissions', 'whatever'])
       expect(modeGates(mode)).toEqual(gated)
     expect(modeGates('auto', { autoMode: false })).toEqual(gated)
@@ -391,9 +398,18 @@ describe('modeGates', () => {
     expect(modeGates('acceptEdits')).toEqual([
       r('shell', 'ask'),
       r('webfetch', 'ask'),
-      ...agentControlEditPatterns().map((p) => r('edit', 'ask', p))
+      ...agentControlEditPatterns().map((p) => r('edit', 'ask', p)),
+      r('external_directory', 'ask')
     ])
     expect(modeGates('autoEdit')).toEqual(modeGates('acceptEdits'))
+  })
+
+  it('plan: shell, webfetch and external_directory ask (edits are enforced after the user rules)', () => {
+    expect(modeGates('plan')).toEqual([
+      r('shell', 'ask'),
+      r('webfetch', 'ask'),
+      r('external_directory', 'ask')
+    ])
   })
 
   it('auto (classifier on): every edit asks, every MCP tool asks via the `*_*` catch-all, claudeui allowed', () => {
@@ -443,6 +459,7 @@ describe('buildSessionRuleset', () => {
       r('shell', 'ask'),
       r('edit', 'ask'),
       r('webfetch', 'ask'),
+      r('external_directory', 'ask'),
       r('shell', 'allow', 'npm test'),
       DISPATCH_ASK_RULE,
       EXECUTE_DENY_RULE
@@ -766,20 +783,153 @@ describe('auto mode (review #10)', () => {
     expect(evaluateV2Call(rules, 'read', ['a.ts'], 'linux')).toBe('allow') // the agent's baseline
   })
 
-  it("(b) opencode's own directories stay allowed when the agent's allows are passed in", () => {
-    const agent = [
-      r('*', 'allow'),
-      r('external_directory', 'ask'),
-      r('external_directory', 'allow', '/data/opencode/tool-output/*'),
-      r('external_directory', 'allow', '*')
-    ]
-    const own = opencodeOwnDirAllows(agent)
-    expect(own).toEqual([r('external_directory', 'allow', '/data/opencode/tool-output/*')])
+  it("(b) opencode's own directories stay allowed when their allows are passed in", () => {
+    const own = opencodeOwnDirAllows({ data: '/data/opencode', tmp: ['/tmp/opencode'] }, 'linux')
     const rules = auto({}, { externalDirAllows: own })
     expect(
       evaluateV2Call(rules, 'external_directory', ['/data/opencode/tool-output/*'], 'linux')
     ).toBe('allow')
     expect(evaluateV2Call(rules, 'external_directory', ['/etc/*'], 'linux')).toBe('ask')
+  })
+})
+
+describe('external_directory since opencode 2.0.25 (ADR-097 §3, 2026-10-10 amendment)', () => {
+  // 2.0.25+ agents carry NO external_directory rule (`{*: allow}` covers it); `explore` ends with an explicit allow.
+  const AGENT = [r('*', 'allow'), r('read', 'ask', '*.env')]
+  const EXPLORE = [
+    r('*', 'deny'),
+    r('read', 'allow'),
+    r('shell', 'allow'),
+    r('subagent', 'deny'),
+    r('external_directory', 'allow')
+  ]
+  const OWN = opencodeOwnDirAllows(
+    { data: '/h/.local/share/opencode', config: '/h/.config/opencode', tmp: ['/tmp/opencode'] },
+    'linux'
+  )
+  const OWN_CALLS = [
+    '/h/.local/share/opencode/shell/proj_1/*',
+    '/h/.local/share/opencode/tool-output/*',
+    '/tmp/opencode/*',
+    '/h/.config/opencode/*'
+  ]
+  const MODES: [string, boolean][] = [
+    ['default', false],
+    ['ask', false],
+    ['bypassPermissions', false],
+    ['acceptEdits', false],
+    ['autoEdit', false],
+    ['plan', false],
+    ['auto', false],
+    ['full', false],
+    ['auto', true],
+    ['full', true]
+  ]
+  const session = (mode: string, autoMode: boolean, p: Partial<ClaudePermissions> = {}) =>
+    buildSessionRuleset({
+      mode,
+      autoMode,
+      permissions: perms(p),
+      mcpServers: ['claudeui'],
+      home: HOME,
+      externalDirAllows: OWN
+    })
+
+  it.each(MODES)(
+    '%s (autoMode %s): an outside path asks; additionalDirectories and own dirs do not',
+    (mode, autoMode) => {
+      const { rules } = session(mode, autoMode, { additionalDirectories: ['/extra'] })
+      const engine = [...AGENT, ...rules]
+      expect(evaluateV2Call(engine, 'external_directory', ['/outside/*'], 'linux')).toBe('ask')
+      expect(evaluateV2Call(engine, 'external_directory', ['/extra/sub/*'], 'linux')).toBe('allow')
+      for (const call of OWN_CALLS)
+        expect(evaluateV2Call(engine, 'external_directory', [call], 'linux'), call).toBe('allow')
+      // One outside directory among several resources still asks.
+      expect(
+        evaluateV2Call(engine, 'external_directory', ['/extra/*', '/outside/*'], 'linux')
+      ).toBe('ask')
+    }
+  )
+
+  it.each(MODES)(
+    '%s (autoMode %s): ordering is ask, then the own-dir allows, then the additionalDirectories allows',
+    (mode, autoMode) => {
+      const { rules } = session(mode, autoMode, { additionalDirectories: ['/extra'] })
+      const at = (effect: string, resource: string) =>
+        rules.findIndex(
+          (x) => x.action === 'external_directory' && x.effect === effect && x.resource === resource
+        )
+      const ask = at('ask', '*')
+      expect(ask).toBeGreaterThanOrEqual(0)
+      const ownAt = OWN.map((o) => at('allow', o.resource))
+      for (const index of ownAt) expect(index).toBeGreaterThan(ask)
+      expect(at('allow', '/extra/*')).toBeGreaterThan(Math.max(...ownAt))
+    }
+  )
+
+  it('an explore agent allows everything itself: the session ask still wins, for it and for its child', () => {
+    const { rules } = session('default', false, { additionalDirectories: ['/extra'] })
+    const direct = [...EXPLORE, ...rules]
+    expect(evaluateV2Call(direct, 'external_directory', ['/outside/*'], 'linux')).toBe('ask')
+    expect(evaluateV2Call(direct, 'external_directory', ['/extra/x/*'], 'linux')).toBe('allow')
+    // What the host PATCHes onto the child: the parent's rules, then the agent's holding denies.
+    const child = childSessionRuleset(rules, EXPLORE, 'linux')
+    const engine = [...EXPLORE, ...child]
+    expect(evaluateV2Call(engine, 'external_directory', ['/outside/*'], 'linux')).toBe('ask')
+    expect(evaluateV2Call(engine, 'external_directory', ['/extra/x/*'], 'linux')).toBe('allow')
+    for (const call of OWN_CALLS)
+      expect(evaluateV2Call(engine, 'external_directory', [call], 'linux'), call).toBe('allow')
+  })
+
+  it('without the ask (the 2.0.26 agent baseline alone) an outside path is silent — the regression this restores', () => {
+    expect(evaluateV2Call(AGENT, 'external_directory', ['/outside/*'], 'linux')).toBe('allow')
+    expect(evaluateV2Call(EXPLORE, 'external_directory', ['/outside/*'], 'linux')).toBe('allow')
+  })
+
+  it('a user external_directory deny still wins over the ask and the own-dir allows', () => {
+    const { rules } = session('default', false, { deny: ['mcp__external__directory'] })
+    const engine = [...AGENT, ...rules]
+    expect(evaluateV2Call(engine, 'external_directory', ['/outside/*'], 'linux')).toBe('deny')
+  })
+
+  it('externalDirectoryGates keeps only external_directory allows after the ask', () => {
+    expect(
+      externalDirectoryGates([
+        r('external_directory', 'allow', '/a/*'),
+        r('shell', 'allow'),
+        r('external_directory', 'deny', '/b/*')
+      ])
+    ).toEqual([r('external_directory', 'ask'), r('external_directory', 'allow', '/a/*')])
+    expect(externalDirectoryGates()).toEqual([r('external_directory', 'ask')])
+  })
+
+  it('the Windows own-dir allows match the resources 2.x asks with (slashed, case-folded)', () => {
+    const own = opencodeOwnDirAllows(
+      {
+        data: 'C:\\Users\\Dev\\.local\\share\\opencode',
+        config: 'C:\\Users\\Dev\\.config\\opencode',
+        tmp: ['C:\\Users\\Dev\\AppData\\Local\\Temp\\opencode']
+      },
+      'win32'
+    )
+    const { rules } = buildSessionRuleset({
+      mode: 'default',
+      autoMode: false,
+      permissions: perms({}),
+      mcpServers: ['claudeui'],
+      home: HOME,
+      platform: 'win32',
+      externalDirAllows: own
+    })
+    const engine = [...AGENT, ...rules]
+    for (const call of [
+      'c:/users/dev/.local/share/opencode/shell/p/*',
+      'C:/Users/Dev/.local/share/opencode/tool-output/*',
+      'C:/Users/Dev/AppData/Local/Temp/opencode/*',
+      'C:/Users/Dev/.config/opencode/*'
+    ])
+      expect(evaluateV2Call(engine, 'external_directory', [call], 'win32'), call).toBe('allow')
+    expect(evaluateV2Call(engine, 'external_directory', ['D:/other/*'], 'win32')).toBe('ask')
   })
 })
 

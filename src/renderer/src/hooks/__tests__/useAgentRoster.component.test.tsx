@@ -375,6 +375,81 @@ describe('useAgentRoster', () => {
       expect(seen?.runningAgentCount).toBe(1)
     })
 
+    it('stamps a finished agent with the running agents below it (the `subagents` signal)', async () => {
+      const finishedA = {
+        taskId: 'af110ad6ad039a313',
+        toolUseId: A,
+        status: 'completed' as const,
+        outputFile: '',
+        summary: ''
+      }
+      setSession({
+        messages: nestedMessages(),
+        subagentMessages: nestedBuckets(),
+        activeTasks: { [B]: nestedActiveTasks()[B] },
+        taskNotifications: [finishedA]
+      })
+      await renderProbe()
+      // A's own run ended; B, which A launched, has an armed record.
+      expect(seen?.agents.map((r) => [r.isRunning, r.runningDescendants])).toEqual([
+        [false, 1],
+        [true, undefined]
+      ])
+
+      // While A runs too the count is still there (the row just reads `running`).
+      setSession({ activeTasks: nestedActiveTasks(), taskNotifications: [] })
+      await renderProbe()
+      expect(seen?.agents[0].isRunning).toBe(true)
+
+      // B done as well: nothing below A is running.
+      setSession({
+        activeTasks: {},
+        taskNotifications: [finishedA, { ...finishedA, taskId: 'b', toolUseId: B }]
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.runningDescendants)).toEqual([undefined, undefined])
+    })
+
+    it('does not count a running shell below a finished agent', async () => {
+      setSession({
+        messages: nestedMessages(),
+        subagentMessages: nestedBuckets(),
+        activeTasks: { [A_BG_BASH]: nestedActiveTasks()[A_BG_BASH] },
+        taskNotifications: [
+          { taskId: 'a', toolUseId: A, status: 'completed', outputFile: '', summary: '' },
+          { taskId: 'b', toolUseId: B, status: 'completed', outputFile: '', summary: '' }
+        ]
+      })
+      await renderProbe()
+      expect(seen?.shells.map((r) => r.isRunning)).toEqual([true])
+      expect(seen?.agents.map((r) => r.runningDescendants)).toEqual([undefined, undefined])
+    })
+
+    it('counts every depth, and each ancestor once', async () => {
+      const buckets = nestedBuckets()
+      buckets[B] = [
+        ...buckets[B],
+        assistantWithTool('b-2', 'tu-c', 'Agent', { name: 'grandchild', description: 'deeper' })
+      ]
+      setSession({
+        messages: nestedMessages(),
+        subagentMessages: buckets,
+        activeTasks: {
+          'tu-c': { taskId: 'tc', taskType: 'local_agent', runIndex: 1, isBackgrounded: true }
+        },
+        taskNotifications: [
+          { taskId: 'a', toolUseId: A, status: 'completed', outputFile: '', summary: '' },
+          { taskId: 'b', toolUseId: B, status: 'completed', outputFile: '', summary: '' }
+        ]
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => [r.name, r.isRunning, r.runningDescendants])).toEqual([
+        ['probenesta', false, 1],
+        ['probenestb', false, 1],
+        ['grandchild', true, undefined]
+      ])
+    })
+
     it('terminates on a bucket that holds its own spawn, and on a cycle', async () => {
       const root = [assistantWithTool('s-1', 'tu-s', 'Agent', { name: 'self' })]
       setSession({
@@ -447,6 +522,26 @@ describe('useAgentRoster', () => {
         ['grandchild', 1, false, true]
       ])
       expect(seen?.runningCount).toBe(0)
+    })
+
+    it('never reads as "subagents only": with no record, nothing runs below a finished agent', async () => {
+      setSession({
+        ...withEngine('pi'),
+        messages: [
+          assistantWithTool('m1', 'tu-parent', 'subagent', { agent: 'scout', task: 'look' }),
+          toolResult('m2', 'tu-parent')
+        ],
+        subagentMessages: {
+          'tu-parent': [
+            assistantWithTool('p1', 'tu-nested', 'subagent', { agent: 'worker', task: 'dig' })
+          ]
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => [r.isRunning, r.runningDescendants])).toEqual([
+        [false, undefined],
+        [false, undefined]
+      ])
     })
 
     it('is not running once its parent is done (pi child aborted mid-call)', async () => {
@@ -944,6 +1039,144 @@ describe('useAgentRoster', () => {
       await renderProbe()
       expect(shape()).toEqual([['tu-sh', 0, undefined]])
       expect(seen?.totalCount).toBe(0)
+    })
+  })
+
+  // The model an agent runs on (`resolveAgentModel`): what its own messages report,
+  // else what the spawn asked for, else (Codex) the parent's.
+  describe('the model a row runs on', () => {
+    const assistant = (id: string, model?: string): ChatMessage =>
+      ({
+        id,
+        role: 'assistant',
+        content: [{ type: 'text', text: id }],
+        timestamp: Date.now(),
+        ...(model ? { model } : {})
+      }) as ChatMessage
+
+    it('is the model the spawn asked for until the agent reports one', async () => {
+      setSession({
+        messages: [
+          assistantWithTool('m1', 'tu-a', 'Agent', { name: 'scout', model: 'haiku' }),
+          assistantWithTool('m2', 'tu-b', 'Agent', { name: 'plain' })
+        ]
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.model)).toEqual(['haiku', undefined])
+    })
+
+    it('is the newest model the agent’s own messages report, over the requested one', async () => {
+      setSession({
+        messages: [assistantWithTool('m1', 'tu-a', 'Agent', { name: 'scout', model: 'haiku' })],
+        subagentMessages: {
+          'tu-a': [assistant('c1', 'claude-haiku-4-5-20251001'), assistant('c2', 'claude-opus-5-5')]
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents[0].model).toBe('claude-opus-5-5')
+    })
+
+    it('is not cleared by a newer message that carries no model (an error row)', async () => {
+      setSession({
+        messages: [assistantWithTool('m1', 'tu-a', 'Agent', { name: 'scout' })],
+        subagentMessages: { 'tu-a': [assistant('c1', 'claude-opus-5-5'), assistant('c2')] }
+      })
+      await renderProbe()
+      expect(seen?.agents[0].model).toBe('claude-opus-5-5')
+    })
+
+    it('follows the agent’s transcript as it grows, without a rescan of the parent’s', async () => {
+      const messages = [assistantWithTool('m1', 'tu-a', 'Agent', { name: 'scout' })]
+      setSession({ messages, subagentMessages: { 'tu-a': [assistant('c1', 'claude-haiku-4-5')] } })
+      await renderProbe()
+      expect(seen?.agents[0].model).toBe('claude-haiku-4-5')
+      const walks = rosterScanStats.walks
+      // A new array for the child's bucket only, as the reducer does.
+      setSession({
+        subagentMessages: {
+          'tu-a': [assistant('c1', 'claude-haiku-4-5'), assistant('c2', 'claude-sonnet-5-5')]
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents[0].model).toBe('claude-sonnet-5-5')
+      // The parent's array is unchanged: its walk is a cache hit; the child's bucket has no spawns.
+      expect(rosterScanStats.walks - walks).toBeLessThanOrEqual(1)
+    })
+
+    it('reads each nested agent from its own bucket', async () => {
+      setSession({
+        messages: nestedMessages(),
+        subagentMessages: {
+          ...nestedBuckets(),
+          [A]: [...nestedBuckets()[A], assistant('a-m', 'claude-opus-5-5')],
+          [B]: [...nestedBuckets()[B], assistant('b-m', 'claude-haiku-4-5')]
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.model)).toEqual(['claude-opus-5-5', 'claude-haiku-4-5'])
+    })
+
+    it('is the parent session’s model for Codex, below the requested one', async () => {
+      setSession({
+        ...withEngine('codex'),
+        messages: [
+          assistantWithTool('m1', 'tu-a', 'collab:spawnAgent', { receiverThreadIds: ['t1'] }),
+          assistantWithTool('m2', 'tu-b', 'collab:spawnAgent', {
+            model: 'gpt-6-luna',
+            receiverThreadIds: ['t2']
+          })
+        ]
+      })
+      setSession({
+        status: {
+          ...useSessionStore.getState().sessions[ROUTE].status,
+          model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-6-sol' }
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.model)).toEqual(['gpt-6-sol', 'gpt-6-luna'])
+    })
+
+    it('does not borrow the parent’s model on any other engine', async () => {
+      setSession({
+        messages: [assistantWithTool('m1', 'tu-a', 'Agent', { name: 'scout' })],
+        status: {
+          ...useSessionStore.getState().sessions[ROUTE].status,
+          model: { engineId: 'claude', vendorId: 'anthropic', modelId: 'claude-opus-5-5' }
+        }
+      })
+      await renderProbe()
+      expect(seen?.agents[0].model).toBeUndefined()
+    })
+
+    it('is the model a dispatch ran on, else the one it asked for', async () => {
+      setSession({
+        messages: [
+          assistantWithTool('m1', 'tu-d1', 'mcp__claude-ui-collab__dispatch_agent', {
+            engine: 'opencode',
+            model: 'openai/gpt-6-luna',
+            prompt: 'one'
+          }),
+          assistantWithTool('m2', 'tu-d2', 'mcp__claude-ui-collab__dispatch_agent', {
+            engine: 'opencode',
+            model: 'openai/gpt-6-luna',
+            prompt: 'two'
+          })
+        ],
+        subagentMessages: { 'tu-d2': [assistant('d', 'openai/gpt-6-sol')] }
+      })
+      await renderProbe()
+      expect(seen?.agents.map((r) => r.model)).toEqual(['openai/gpt-6-luna', 'openai/gpt-6-sol'])
+    })
+
+    it('is never a shell’s', async () => {
+      setSession({
+        messages: nestedMessages(),
+        subagentMessages: nestedBuckets(),
+        activeTasks: { [A_BG_BASH]: nestedActiveTasks()[A_BG_BASH] }
+      })
+      await renderProbe()
+      expect(seen?.shells.map((r) => r.model)).toEqual([undefined])
     })
   })
 

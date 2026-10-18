@@ -15,10 +15,20 @@ import { awaitReloadBeforeSpawn } from '../../../lib/session-history-load'
 import { voiceController } from '../../../lib/voice/voice-controller'
 import { noSignalMessage, switchedMessage } from '../../../lib/voice/browser-voice-capture'
 import {
+  dismissStaleVoiceOffer,
   dismissVoiceNotice,
+  followVoiceNotice,
+  latchVoiceNoticeOutcome,
   showVoiceNotice,
   useVoiceNotice
 } from '../../../lib/voice/voice-notice'
+import { outcomeOf, voiceNoticeView } from '../../../lib/voice/voice-pack-notice'
+import {
+  cancelVoicePackInstall,
+  installVoicePack,
+  refreshVoicePackStatus,
+  useVoicePackStore
+} from '../../../lib/voice/voice-pack-store'
 import type {
   AttachmentUpload,
   FileAttachment,
@@ -853,6 +863,9 @@ export function InputBox(): React.JSX.Element {
       return
     }
     if (!voiceHeldRef.current || voicePressRef.current !== press) return
+    // An offer of the speech model nobody took up: this press either works now or
+    // is refused again with a fresh offer.
+    dismissStaleVoiceOffer(activeSessionId)
     try {
       await voiceController().start(activeSessionId, voiceLanguage)
     } catch (err) {
@@ -928,6 +941,68 @@ export function InputBox(): React.JSX.Element {
     },
     [activeSessionId]
   )
+
+  // A notice that offers the speech model follows the pack's live status: the
+  // pill reads the pack store, which `voice:pack-changed` keeps current. The
+  // status is re-read when such a notice appears — the event ring replays on
+  // reconnect, and a stale `installing` must not stand in for the truth.
+  const packStatus = useVoicePackStore((s) => s.status)
+  const packInstallPending = useVoicePackStore((s) => s.pending === 'install')
+  const voiceNoticeAction = voiceNotice?.action
+  const voiceNoticeId = voiceNotice?.id
+  useEffect(() => {
+    if (voiceNoticeAction) void refreshVoicePackStatus()
+  }, [voiceNoticeAction, voiceNoticeId])
+  const packCommandFailed = useVoicePackStore((s) => s.commandFailed)
+  const voiceNoticeShown = useMemo(
+    () =>
+      voiceNotice
+        ? voiceNoticeView(voiceNotice, {
+            status: packStatus,
+            installPending: packInstallPending,
+            commandFailed: packCommandFailed
+          })
+        : null,
+    [voiceNotice, packStatus, packInstallPending, packCommandFailed]
+  )
+
+  // A download in progress, by anyone, is what this pill is about: follow it, so
+  // that when it ends the pill shows how (ready, failed) instead of falling back
+  // to the offer — whether this pill was pressed, re-issued by a second press of
+  // the mic, or only watched another client's install.
+  const packInstalling = packStatus?.state === 'installing'
+  useEffect(() => {
+    if (packInstalling && activeSessionId && voiceNotice?.action && !voiceNotice.following) {
+      followVoiceNotice(activeSessionId, voiceNotice.id)
+    }
+  }, [packInstalling, activeSessionId, voiceNotice])
+
+  // And once it ended, it stays ended: the outcome shown is latched, so a later
+  // change of the pack (a Remove in Settings during the linger) cannot rewrite it.
+  const shownOutcome = voiceNoticeShown ? outcomeOf(voiceNoticeShown) : null
+  useEffect(() => {
+    if (shownOutcome && activeSessionId && voiceNotice && !voiceNotice.outcome) {
+      latchVoiceNoticeOutcome(activeSessionId, voiceNotice.id, shownOutcome)
+    }
+    // `shownOutcome` is rebuilt every render; its fields are what matter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shownOutcome?.phase, shownOutcome?.text, activeSessionId, voiceNotice])
+
+  // Download: the pill follows the pack from this press to its outcome. A refused
+  // or broken COMMAND (a remote client without `admin`) replaces the pill with
+  // that sentence; a failed INSTALL is the pack's own `failed` status, shown in
+  // place; and a remote invoke that times out is an install still running.
+  const handleVoiceNoticeAction = useCallback(async () => {
+    if (!activeSessionId || !voiceNotice) return
+    followVoiceNotice(activeSessionId, voiceNotice.id)
+    const error = await installVoicePack()
+    if (error) showVoiceNotice(activeSessionId, error, 'warn')
+  }, [activeSessionId, voiceNotice])
+  const handleVoiceNoticeCancel = useCallback(async () => {
+    if (!activeSessionId) return
+    const error = await cancelVoicePackInstall()
+    if (error) showVoiceNotice(activeSessionId, error, 'warn')
+  }, [activeSessionId])
 
   useEffect(() => {
     if (voiceInterimTranscript && voiceState === 'idle' && activeSessionId) {
@@ -1597,8 +1672,10 @@ export function InputBox(): React.JSX.Element {
       voiceState={voiceState}
       voiceHeld={voiceHeld}
       voiceSilent={voiceSilent && voiceState === 'recording'}
-      voiceNotice={voiceNotice}
+      voiceNotice={voiceNoticeShown}
       onVoiceNoticeExpire={handleVoiceNoticeExpire}
+      onVoiceNoticeAction={handleVoiceNoticeAction}
+      onVoiceNoticeCancel={handleVoiceNoticeCancel}
       subscribeVoiceLevel={subscribeVoiceLevel}
       statusLine={statusLine}
       onSend={handleSend}

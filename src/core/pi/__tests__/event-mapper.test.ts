@@ -180,7 +180,8 @@ describe('mapPiEvent — full happy turn', () => {
           { type: 'text', text: 'Hello' },
           { type: 'tool_use', toolUseId: 'call_1', toolName: 'bash', toolInput: { command: 'ls' } }
         ],
-        timestamp: expect.any(Number)
+        timestamp: expect.any(Number),
+        model: 'anthropic/claude-sonnet-4-6'
       }
     })
     expect(out[1]).toEqual({
@@ -391,7 +392,8 @@ describe('mapPiEvent — abort', () => {
         id: messageId,
         role: 'assistant',
         content: [{ type: 'text', text: 'partial output' }],
-        timestamp: expect.any(Number)
+        timestamp: expect.any(Number),
+        model: 'anthropic/claude-sonnet-4-6'
       }
     })
     expect(out[1].kind).toBe('usage')
@@ -1444,7 +1446,8 @@ describe('mapPiEvent — message_update block assembly (pi 0.84.x deltas-only wi
         id: messageId,
         role: 'assistant',
         content: [{ type: 'text', text: 'final answer' }],
-        timestamp: expect.any(Number)
+        timestamp: expect.any(Number),
+        model: 'anthropic/claude-sonnet-4-6'
       }
     })
   })
@@ -1677,5 +1680,88 @@ describe('mapPiEvent — extension_ui_request notify (ADR-096)', () => {
         state
       )
     ).toEqual([{ kind: 'ignore' }])
+  })
+})
+
+describe('mapPiEvent — the model a message ran on', () => {
+  const ran = { provider: 'openai-codex', model: 'gpt-6-sol' }
+  const label = 'openai-codex/gpt-6-sol'
+
+  it('message_start stashes provider/model; the mid-turn publish and message_end both carry it', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg(ran) }, state)
+    expect(state.currentMessageModel).toBe(label)
+
+    const mid = mapPiEvent(
+      messageUpdate({
+        type: 'toolcall_end',
+        contentIndex: 0,
+        toolCall: { type: 'toolCall', id: 'c1', name: 'read', arguments: { path: '/a.ts' } }
+      }),
+      state
+    )
+    expect(mid[0].kind).toBe('message')
+    if (mid[0].kind === 'message') expect(mid[0].message.model).toBe(label)
+
+    const end = mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({
+          ...ran,
+          content: [{ type: 'toolCall', id: 'c1', name: 'read', arguments: { path: '/a.ts' } }]
+        })
+      },
+      state
+    )
+    expect(end[0].kind).toBe('item_seal')
+    if (end[0].kind === 'item_seal') expect(end[0].message.model).toBe(label)
+    expect(state.currentMessageModel).toBeNull()
+  })
+
+  it('the in-flight fallback (message_end with no content) carries it too', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg(ran) }, state)
+    mapPiEvent(messageUpdate({ type: 'text_end', contentIndex: 0, content: 'draft' }), state)
+    const end = mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({ ...ran, content: [], stopReason: 'aborted' })
+      },
+      state
+    )
+    expect(end[0].kind).toBe('item_seal')
+    if (end[0].kind === 'item_seal') {
+      expect(end[0].message.content).toEqual([{ type: 'text', text: 'draft' }])
+      expect(end[0].message.model).toBe(label)
+    }
+  })
+
+  it('a cut stream (finishPiMessage) still seals with it', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg(ran) }, state)
+    mapPiEvent(messageUpdate({ type: 'text_end', contentIndex: 0, content: 'draft' }), state)
+    const [sealed] = finishPiMessage(state)
+    expect(sealed.kind).toBe('item_seal')
+    if (sealed.kind === 'item_seal') expect(sealed.message.model).toBe(label)
+  })
+
+  it('the next message does not inherit the previous message model', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg(ran) }, state)
+    mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({ ...ran, content: [{ type: 'text', text: 'a' }] })
+      },
+      state
+    )
+    mapPiEvent(
+      {
+        type: 'message_start',
+        message: assistantMsg({ provider: 'anthropic', model: 'claude-haiku-4-5' })
+      },
+      state
+    )
+    expect(state.currentMessageModel).toBe('anthropic/claude-haiku-4-5')
   })
 })

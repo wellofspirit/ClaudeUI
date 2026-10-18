@@ -34,7 +34,7 @@ bun run build        # produces out/main/index.js + out/renderer/index.html
 ```
 
 The harness launches the **built** app (not dev). `playwright` is a devDep; if a
-fresh clone lacks it: `bun add -d playwright`.
+fresh clone lacks it, ask the orchestrator to install dependencies — never add it yourself.
 
 ## Primitive: `scripts/app-shot.mjs`
 

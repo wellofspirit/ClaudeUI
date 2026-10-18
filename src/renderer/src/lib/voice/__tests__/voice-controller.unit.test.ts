@@ -535,3 +535,104 @@ describe('voice controller — microphone choice (S3b)', () => {
     expect(opened).toEqual(['pods', 'mac'])
   })
 })
+
+describe('voice controller — the on-device preview choice (ADR-101 §7)', () => {
+  it('sends { preview: false } only when the preview is OFF, read live at every start', async () => {
+    let preview = true
+    const transport = makeTransport()
+    const controller = createVoiceController(transport, { env: makeEnv(), preview: () => preview })
+
+    // The default path is the two-argument frame it always was.
+    await controller.start('rid-1', 'en')
+    expect(transport.start).toHaveBeenLastCalledWith('rid-1', 'en')
+    expect(transport.start.mock.calls[0]).toHaveLength(2)
+    await controller.stop('rid-1')
+
+    preview = false
+    await controller.start('rid-1', 'en')
+    expect(transport.start).toHaveBeenLastCalledWith('rid-1', 'en', { preview: false })
+    await controller.stop('rid-1')
+
+    preview = true
+    await controller.start('rid-1', 'en')
+    expect(transport.start.mock.calls[2]).toHaveLength(2)
+  })
+
+  it('has no preference wired: the two-argument frame', async () => {
+    const transport = makeTransport()
+    await createVoiceController(transport, { env: makeEnv() }).start('rid-1', 'en')
+    expect(transport.start.mock.calls[0]).toEqual(['rid-1', 'en'])
+  })
+})
+
+describe('voice controller — stopIfCapturing (the speech model refusal)', () => {
+  it('ends a live capture for that session: microphone closed, transport told, no fault', async () => {
+    const transport = makeTransport()
+    const controller = createVoiceController(transport, { env: makeEnv() })
+    const faults: string[] = []
+    controller.onFault((message) => faults.push(message))
+
+    await controller.start('rid-1', 'en')
+    expect(controller.isActive()).toBe(true)
+    await controller.stopIfCapturing('rid-1')
+
+    expect(controller.isActive()).toBe(false)
+    expect(log).toEqual([
+      'mic:open',
+      'transport:start rid-1 en',
+      'mic:close',
+      'context:close',
+      'transport:stop rid-1'
+    ])
+    expect(faults).toEqual([])
+  })
+
+  it('ends a press whose start is still in flight: what the microphone held is flushed to main (which drops it, no capture there), then the stop', async () => {
+    const gate = deferred()
+    const transport = makeTransport(() => gate.promise)
+    const controller = createVoiceController(transport, { env: makeEnv() })
+
+    const started = controller.start('rid-1', 'en')
+    await vi.waitFor(() => expect(transport.start).toHaveBeenCalled())
+    // Speech while the transport start is in flight is held by the capture.
+    pushBlock()
+    expect(transport.audio).not.toHaveBeenCalled()
+
+    const stopping = controller.stopIfCapturing('rid-1')
+    gate.resolve()
+    await Promise.all([started, stopping])
+
+    expect(controller.isActive()).toBe(false)
+    // The drain: the held audio goes out ahead of the stop, as for any release.
+    const sent = log.indexOf('transport:audio rid-1')
+    expect(sent).toBeGreaterThan(-1)
+    expect(sent).toBeLessThan(log.indexOf('transport:stop rid-1'))
+    expect(log).toContain('mic:close')
+    expect(transport.stop).toHaveBeenCalledWith('rid-1')
+  })
+
+  it('follows a rekey: the id main names is the session the microphone is bound to', async () => {
+    const rekeys = new Map<string, string>()
+    const controller = createVoiceController(makeTransport(), {
+      env: makeEnv(),
+      resolveId: (id) => rekeys.get(id) ?? id
+    })
+    await controller.start('pending-1', 'en')
+    rekeys.set('pending-1', 'sdk-1')
+    await controller.stopIfCapturing('sdk-1')
+    expect(controller.isActive()).toBe(false)
+  })
+
+  it('leaves a capture on ANOTHER session, and an idle controller, alone', async () => {
+    const transport = makeTransport()
+    const controller = createVoiceController(transport, { env: makeEnv() })
+
+    await controller.stopIfCapturing('rid-1')
+    expect(transport.stop).not.toHaveBeenCalled()
+
+    await controller.start('rid-1', 'en')
+    await controller.stopIfCapturing('rid-other')
+    expect(controller.isActive()).toBe(true)
+    expect(transport.stop).not.toHaveBeenCalled()
+  })
+})

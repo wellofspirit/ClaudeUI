@@ -341,7 +341,11 @@ function makeFakeOpencode(name = 'srv', sessionPrefix = 'oc-sess-') {
     ]),
     mcpServers: vi.fn(async () => []),
     call: vi.fn(async (operation: string) =>
-      operation === 'location.get' ? { project: { directory: '/' } } : undefined
+      operation === 'location.get'
+        ? { project: { directory: '/' } }
+        : operation === 'server.info'
+          ? { paths: { tmp: '/srv/tmp/opencode' } }
+          : undefined
     ),
     listMessages: vi.fn(async (id: string) => [...session(id).rows]),
     listPermissionRequests: vi.fn(async () => []),
@@ -691,10 +695,21 @@ describe('opencode target — lifecycle', () => {
     })
     // Default mode gates, then the target-only denies LAST (hidden tools):
     // no dispatch back (ADR-033 §4), no questions, no Code Mode.
-    expect(createdRules(client)).toEqual([
+    // 2.0.25+: the external_directory ask is the target's own (an agent no longer carries it);
+    // opencode's own directories (the server's tmp among them) are allowed right after it.
+    const rules = createdRules(client)
+    const ownDirs = rules.filter((r) => r.action === 'external_directory' && r.effect === 'allow')
+    expect(ownDirs.length).toBeGreaterThanOrEqual(4)
+    expect(ownDirs).toContainEqual({
+      action: 'external_directory',
+      resource: '/srv/tmp/opencode/*',
+      effect: 'allow'
+    })
+    expect(rules.filter((r) => r.action !== 'external_directory' || r.effect !== 'allow')).toEqual([
       { action: 'shell', resource: '*', effect: 'ask' },
       { action: 'edit', resource: '*', effect: 'ask' },
       { action: 'webfetch', resource: '*', effect: 'ask' },
+      { action: 'external_directory', resource: '*', effect: 'ask' },
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'ask' },
       { action: 'execute', resource: '*', effect: 'deny' },
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'deny' },
@@ -2351,7 +2366,8 @@ describe('opencode target — a restricted subagent caller (owner decision, opti
     const rules = createdRules(client)
     expect(rules).toContainEqual({ action: 'edit', resource: '*', effect: 'deny' })
     expect(rules).toContainEqual({ action: 'shell', resource: 'git push*', effect: 'ask' })
-    expect(rules.some((r) => r.effect === 'allow')).toBe(false)
+    // No user allow reaches a target; only opencode's own directories are allowed (under the ask).
+    expect(rules.some((r) => r.effect === 'allow' && r.action !== 'external_directory')).toBe(false)
   })
 
   it("the target's judge is told what the calling agent may not do", async () => {

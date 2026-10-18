@@ -21,7 +21,7 @@ import { modelListIsAuthoritative } from './opencode-server-readiness'
 import { opencodeCredentialStore } from './opencode-credentials'
 import type { Integration_Info, Model_Info, Provider_Info } from './protocol-v2/openapi'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
-import { loadEngineConfig } from '../services/ui-config'
+import { loadOpencodeModelAllowlist } from './model-allowlist'
 import {
   readOpencodeNativeConfig,
   readDeclaredProviderIds,
@@ -283,8 +283,12 @@ function provenance(
 ): { source?: OpencodeProviderSource; envVarNames?: string[] } {
   const connections = integration?.connections ?? []
   const env = connections.flatMap((c) => (c.type === 'env' ? [c.name] : []))
-  if (connections.some((c) => c.type === 'credential')) return { source: 'api' }
+  const credentials = connections.filter((c) => c.type === 'credential')
+  if (credentials.some((c) => c.method !== 'external')) return { source: 'api' }
   if (env.length > 0) return { source: 'env', envVarNames: env }
+  // A credential that only references a source managed outside opencode's store
+  // (the Azure CLI's login): not an API key, and nothing ClaudeUI can remove.
+  if (credentials.length > 0) return { source: 'external' }
   return usable ? { source: 'custom' } : {}
 }
 
@@ -487,15 +491,6 @@ async function providerModelsAttempt(providerId: string): Promise<OpencodeCatalo
     })
 }
 
-/** The per-provider model allowlist from engine config (a present key restricts). */
-function loadModelAllowlist(): Record<string, string[]> {
-  try {
-    return loadEngineConfig('opencode').opencodeConfig?.modelAllowlist ?? {}
-  } catch {
-    return {}
-  }
-}
-
 /**
  * opencode's usable providers and their enabled models, filtered by the
  * per-provider allowlist and grouped. Value convention `"<providerID>/<modelID>"`.
@@ -513,7 +508,7 @@ export function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
 async function groupsAttempt(live: () => boolean): Promise<EngineModelGroup[]> {
   const { providers, models } = await fetchProbe()
   const publish = live()
-  const allowlist = loadModelAllowlist()
+  const allowlist = loadOpencodeModelAllowlist()
   const names = new Map(providers.map((p) => [p.id, p.name]))
   const byProvider = new Map<string, Model_Info[]>()
   for (const model of models) {

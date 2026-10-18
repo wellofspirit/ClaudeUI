@@ -15,10 +15,11 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
-import { useSessionStore } from '../../../stores/session-store'
+import { useSessionStore, DEFAULT_SETTINGS } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { makePendingApproval } from '@test/factories/messages'
 import type {
+  ChatMessage,
   ContentBlock,
   PermissionDenialBlock,
   ToolReviewBlock
@@ -29,6 +30,8 @@ vi.mock('../MarkdownRenderer', () => ({
 }))
 
 import { TaskCard } from '../TaskCard'
+import { resetAgentTypeCatalog } from '../../../hooks/useAgentTypeCatalog'
+import { rosterScanStats, useSessionAgentTypes } from '../../../hooks/useAgentRoster'
 import { PiEngineToolMap } from '../tool-registry/PiEngineToolMap'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
@@ -525,6 +528,371 @@ describe('TaskCard — inline task approval', () => {
 })
 
 // ---------------------------------------------------------------------------
+// The type chip (ADR-094): bot + letters, or the muted bot alone
+// ---------------------------------------------------------------------------
+
+describe('TaskCard — the model chip follows the model tier', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({
+      activeSessionId: ROUTE,
+      settings: { ...DEFAULT_SETTINGS },
+      availableModels: []
+    })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const assistant = (id: string, model?: string): ChatMessage => ({
+    id,
+    role: 'assistant',
+    content: [{ type: 'text', text: id }],
+    timestamp: Date.now(),
+    ...(model ? { model } : {})
+  })
+  const chip = (): HTMLElement => screen.getByTestId('TaskCard.model')
+  const withView = (over: Record<string, unknown>) => ({ ...defaultTaskView, ...over })
+
+  it('colours the chip by the requested model before the agent reports one', () => {
+    render(<TaskCard block={makeTaskBlock()} view={withView({ model: 'haiku' })} />)
+    expect(chip().textContent).toBe('Haiku')
+    expect(chip().getAttribute('data-model-tier')).toBe('low')
+    expect(chip().className).toContain('text-model-tier-low')
+    expect(chip().className).not.toContain('text-text-secondary')
+  })
+
+  it('shows the RESOLVED model: the newest one the agent’s messages report', () => {
+    seed.subagentMessage(ROUTE, 'call_task_1', assistant('c1', 'claude-haiku-4-5'))
+    seed.subagentMessage(ROUTE, 'call_task_1', assistant('c2', 'claude-opus-5-5'))
+    // A newer message with no model (an error row) does not clear it.
+    seed.subagentMessage(ROUTE, 'call_task_1', assistant('c3'))
+    render(<TaskCard block={makeTaskBlock()} view={withView({ model: 'haiku' })} />)
+    expect(chip().textContent).toBe('Opus 5.5')
+    expect(chip().title).toBe('claude-opus-5-5')
+    expect(chip().getAttribute('data-model-tier')).toBe('high')
+  })
+
+  it('shows the picker’s name for the resolved model when it has one', () => {
+    useSessionStore.setState({
+      availableModels: [
+        { value: 'claude-opus-5-5', displayName: 'Opus Five', description: '', engineId: 'claude' }
+      ]
+    })
+    seed.subagentMessage(ROUTE, 'call_task_1', assistant('c1', 'claude-opus-5-5'))
+    render(<TaskCard block={makeTaskBlock()} view={withView({})} />)
+    expect(chip().textContent).not.toBe('claude-opus-5-5')
+    expect(chip().title).toBe('claude-opus-5-5')
+  })
+
+  it('names a resolved concrete Claude id by its family when the picker has no name for it', () => {
+    seed.subagentMessage(ROUTE, 'call_task_1', assistant('c1', 'claude-opus-5-5'))
+    const { unmount } = render(<TaskCard block={makeTaskBlock()} view={withView({})} />)
+    expect(chip().textContent).toBe('Opus 5.5')
+    // The id stays on hover, and the chip is the sans label, not the mono id.
+    expect(chip().title).toBe('claude-opus-5-5')
+    expect(chip().className).not.toContain('font-mono')
+    unmount()
+    seed.subagentMessage(ROUTE, 'call_task_1', assistant('c2', 'claude-haiku-4-5-20251001'))
+    render(<TaskCard block={makeTaskBlock()} view={withView({})} />)
+    expect(chip().textContent).toBe('Haiku 4.5')
+  })
+
+  it('shows the raw id when no one names it (an unknown opencode id), never blank', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          status: { ...state.sessions[ROUTE].status, engineId: 'opencode' }
+        }
+      }
+    }))
+    seed.subagentMessage(ROUTE, 'call_task_1', assistant('c1', 'zen/mimo-v2.5-free'))
+    render(<TaskCard block={makeTaskBlock()} view={withView({})} />)
+    expect(chip().textContent).toBe('zen/mimo-v2.5-free')
+    expect(chip().className).toContain('font-mono')
+  })
+
+  it('leaves the chip plain with the setting off', () => {
+    useSessionStore.setState({
+      settings: { ...DEFAULT_SETTINGS, agentModelTierColors: false }
+    })
+    render(<TaskCard block={makeTaskBlock()} view={withView({ model: 'claude-opus-5-5' })} />)
+    expect(chip().textContent).toBe('Opus 5.5')
+    expect(chip().getAttribute('data-model-tier')).toBeNull()
+    expect(chip().className).toContain('text-text-secondary')
+  })
+
+  it('leaves the chip plain for a model with no tier', () => {
+    render(
+      <TaskCard block={makeTaskBlock()} view={withView({ model: 'deepseek/deepseek-v4-flash' })} />
+    )
+    expect(chip().getAttribute('data-model-tier')).toBeNull()
+    expect(chip().className).toContain('text-text-secondary')
+  })
+
+  it('uses the parent session’s model on Codex, below the requested one', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          status: {
+            ...state.sessions[ROUTE].status,
+            engineId: 'codex',
+            model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-6-sol' }
+          }
+        }
+      }
+    }))
+    const { unmount } = render(
+      <TaskCard
+        block={makeTaskBlock()}
+        view={withView({ subagent: undefined, model: undefined })}
+      />
+    )
+    expect(chip().textContent).toBe('gpt-6-sol')
+    expect(chip().getAttribute('data-model-tier')).toBe('high')
+    unmount()
+    render(
+      <TaskCard
+        block={makeTaskBlock()}
+        view={withView({ subagent: undefined, model: 'gpt-6-luna' })}
+      />
+    )
+    expect(chip().textContent).toBe('gpt-6-luna')
+    expect(chip().getAttribute('data-model-tier')).toBe('low')
+  })
+
+  describe('a cross-engine dispatch', () => {
+    const dispatchBlock = makeTaskBlock({
+      toolUseId: 'toolu_dispatch_tier',
+      toolName: 'mcp__claude-ui-collab__dispatch_agent',
+      toolInput: { engine: 'opencode', prompt: 'go', model: 'openai/gpt-6-luna' }
+    })
+    const dispatchView = {
+      kind: 'task' as const,
+      description: 'Dispatch: opencode',
+      prompt: 'go',
+      dispatch: { engine: 'opencode', model: 'openai/gpt-6-luna' }
+    }
+
+    it('is the requested model until a message reports the one it ran on', () => {
+      const { unmount } = render(<TaskCard block={dispatchBlock} view={dispatchView} />)
+      expect(chip().textContent).toBe('opencode · openai/gpt-6-luna')
+      expect(chip().getAttribute('data-model-tier')).toBe('low')
+      unmount()
+      seed.subagentMessage(ROUTE, 'toolu_dispatch_tier', assistant('d1', 'openai/gpt-6-sol'))
+      render(<TaskCard block={dispatchBlock} view={dispatchView} />)
+      expect(chip().textContent).toBe('opencode · openai/gpt-6-sol')
+      expect(chip().getAttribute('data-model-tier')).toBe('high')
+    })
+  })
+})
+
+describe('TaskCard — the type chip', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  it('is the bot, the letter and the name, in the type colour, for a typed agent', () => {
+    render(<TaskCard block={makeTaskBlock()} view={{ ...defaultTaskView, subagent: 'Explore' }} />)
+    const chip = screen.getByTestId('TaskCard.type')
+    const tile = screen.getByTestId('TaskCard.typeTile')
+    expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
+    expect(tile).toHaveTextContent('E')
+    expect(tile.getAttribute('data-color')).not.toBeNull()
+    expect(chip).toHaveTextContent('EExplore')
+  })
+
+  it('tells a family apart from the session’s other spawns when the catalog is empty (R, like the roster)', () => {
+    resetAgentTypeCatalog()
+    Object.assign(window.api, { listAgentTypes: vi.fn(async () => []) })
+    const spawn = (id: string, type: string): ChatMessage => ({
+      id: `m-${id}`,
+      role: 'assistant',
+      content: [
+        {
+          type: 'tool_use',
+          toolUseId: id,
+          toolName: 'Agent',
+          toolInput: { description: type, subagent_type: type }
+        }
+      ],
+      timestamp: Date.now()
+    })
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          messages: [spawn('tu-r', 'orch-reader'), spawn('tu-v', 'orch-verifier')]
+        }
+      }
+    }))
+    render(
+      <TaskCard
+        block={makeTaskBlock({ toolUseId: 'tu-r', toolName: 'Agent' })}
+        view={{ ...defaultTaskView, subagent: 'orch-reader' }}
+      />
+    )
+    expect(screen.getByTestId('TaskCard.typeTile').textContent).toBe('R')
+  })
+
+  it('builds the agent tree once per update however many cards are mounted, and keeps the types array stable', async () => {
+    resetAgentTypeCatalog()
+    Object.assign(window.api, { listAgentTypes: vi.fn(async () => []) })
+    const spawn = (id: string, type: string): ChatMessage => ({
+      id: `m-${id}`,
+      role: 'assistant',
+      content: [
+        {
+          type: 'tool_use',
+          toolUseId: id,
+          toolName: 'Agent',
+          toolInput: { description: type, subagent_type: type }
+        }
+      ],
+      timestamp: Date.now()
+    })
+    const ids = ['tu-a', 'tu-b', 'tu-c']
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          messages: [
+            spawn('tu-a', 'orch-reader'),
+            spawn('tu-b', 'orch-verifier'),
+            spawn('tu-c', 'Explore')
+          ]
+        }
+      }
+    }))
+    // The replica is what `seed` updates the store from: give it the same session.
+    mirrorStoreIntoReplica()
+    const seen: string[][] = []
+    function Probe(): null {
+      seen.push(useSessionAgentTypes())
+      return null
+    }
+    render(
+      <>
+        {ids.map((id) => (
+          <TaskCard
+            key={id}
+            block={makeTaskBlock({ toolUseId: id, toolName: 'Agent' })}
+            view={{ ...defaultTaskView, subagent: 'orch-reader' }}
+          />
+        ))}
+        <Probe />
+      </>
+    )
+    const reply = (n: number): ChatMessage => ({
+      id: `r${n}`,
+      role: 'assistant',
+      content: [{ type: 'text', text: `streaming ${n}` }],
+      timestamp: Date.now()
+    })
+    const before = rosterScanStats.trees
+    const first = seen[seen.length - 1]
+    expect(first).toEqual(['orch-reader', 'orch-verifier', 'Explore'])
+
+    // A subagent streams a message: three cards re-render, the tree is built once.
+    await act(async () => seed.subagentMessage(ROUTE, 'tu-a', reply(1)))
+    expect(rosterScanStats.trees - before).toBe(1)
+    // ...and the update spawned no new type, so every consumer holds the SAME array.
+    expect(seen[seen.length - 1]).toBe(first)
+    for (const types of seen) expect(types).toBe(first)
+
+    // Another update: one more build, still the same array.
+    await act(async () => seed.subagentMessage(ROUTE, 'tu-b', reply(2)))
+    expect(rosterScanStats.trees - before).toBe(2)
+    expect(seen[seen.length - 1]).toBe(first)
+
+    // A new type changes the set, and only then a new array.
+    await act(async () =>
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: {
+            ...state.sessions[ROUTE],
+            messages: [...state.sessions[ROUTE].messages, spawn('tu-d', 'Plan')]
+          }
+        }
+      }))
+    )
+    expect(seen[seen.length - 1]).not.toBe(first)
+    expect(seen[seen.length - 1]).toEqual(['orch-reader', 'orch-verifier', 'Explore', 'Plan'])
+  })
+
+  it('keeps the prefix of a type that has no sibling in the session', () => {
+    resetAgentTypeCatalog()
+    Object.assign(window.api, { listAgentTypes: vi.fn(async () => []) })
+    render(
+      <TaskCard block={makeTaskBlock()} view={{ ...defaultTaskView, subagent: 'orch-reader' }} />
+    )
+    expect(screen.getByTestId('TaskCard.typeTile').textContent).toBe('OR')
+  })
+
+  it('is the muted bot alone, with no type text, for general-purpose', () => {
+    render(
+      <TaskCard
+        block={makeTaskBlock()}
+        view={{ ...defaultTaskView, subagent: 'general-purpose' }}
+      />
+    )
+    const chip = screen.getByTestId('TaskCard.type')
+    const tile = screen.getByTestId('TaskCard.typeTile')
+    expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
+    expect(tile.getAttribute('data-color')).toBeNull()
+    expect(tile.className).toContain('bg-bg-tertiary')
+    expect(chip.textContent).toBe('')
+    // Nothing of the chip is tinted: no padded, coloured pill around the bot.
+    expect(chip.className).not.toMatch(/bg-agent-|text-agent-/)
+  })
+
+  it('is the muted bot alone for an agent with no type (a Codex spawn)', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          status: { ...state.sessions[ROUTE].status, engineId: 'codex' }
+        }
+      }
+    }))
+    render(
+      <TaskCard
+        block={makeTaskBlock()}
+        view={{ ...defaultTaskView, subagent: undefined as unknown as string, model: 'gpt-6' }}
+      />
+    )
+    expect(screen.getByTestId('TaskCard.type').textContent).toBe('')
+    expect(
+      screen.getByTestId('TaskCard.typeTile').querySelector('[data-testid="AgentTile.bot"]')
+    ).not.toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Cross-engine dispatch (ADR-033 M3) — TaskCard reused for dispatch_agent
 // ---------------------------------------------------------------------------
 //
@@ -570,6 +938,7 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
     expect(screen.getByText('opencode · openai/gpt-5')).toBeInTheDocument()
     const tile = screen.getAllByTestId('TaskCard.typeTile')[0]
     expect(tile).toHaveTextContent('X')
+    expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
     expect(tile).toHaveAttribute('title', 'Dispatch → opencode · openai/gpt-5')
   })
 

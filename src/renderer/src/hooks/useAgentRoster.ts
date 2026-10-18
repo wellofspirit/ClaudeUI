@@ -43,6 +43,7 @@ import {
   latestNotification
 } from '../components/chat/task-state'
 import { findTaskBlocks } from '../components/TaskDetailPanel/utils'
+import { latestMessageModel, resolveAgentModel, useParentModel } from '../lib/agent-model'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -91,8 +92,21 @@ export interface AgentRosterRow {
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
   /** 1 unless the agent was resumed (ADR-073). */
   runIndex: number
+  /**
+   * How many agents below this one (at any depth) are running. Shells do not
+   * count, as for the session dot. Absent when none are. An agent that is not
+   * running itself but has these is "subagents only": its own run ended while
+   * the agents it launched work on. See {@link withRunningDescendants}.
+   */
+  runningDescendants?: number
   /** A shell's start (ms epoch, from its lifecycle record): what a running shell's clock counts from. */
   startedAt?: number
+  /**
+   * The model this agent runs on (`resolveAgentModel`): the newest model its own
+   * messages report, else the one its spawn asked for, else (Codex) the parent's.
+   * Absent for a shell and when nothing says.
+   */
+  model?: string
 }
 
 export interface AgentRoster {
@@ -138,6 +152,8 @@ export interface ScannedEntry {
   type?: string
   dispatch?: { engine: string; model?: string }
   description: string
+  /** The model the spawn asked for (`view.model`; pi: the host's result line). Agents only. */
+  requestedModel?: string
   hasResult: boolean
   resultIsError: boolean
   isBackground: boolean
@@ -152,6 +168,12 @@ export interface ScannedEntry {
 export interface RosterEntry extends ScannedEntry {
   depth: number
   parentToolUseId?: string
+  /**
+   * The newest model the agent's OWN transcript reports (`latestMessageModel`).
+   * Read from the agent's bucket here, not in the scan: the scan is cached on the
+   * PARENT's array and this changes with the agent's own.
+   */
+  latestModel?: string
 }
 
 type Buckets = Readonly<Record<string, ChatMessage[]>>
@@ -170,7 +192,7 @@ const EMPTY: AgentRoster = {
  * Bucket walks performed so far. Read by the cache test only: it is how a test
  * proves that a new array for one bucket re-walks that bucket and no other.
  */
-export const rosterScanStats = { walks: 0 }
+export const rosterScanStats = { walks: 0, trees: 0 }
 
 /**
  * The bucket walk, shared across every mounted surface. The pill, the tab and
@@ -260,6 +282,7 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
         ...(view?.subagent ? { type: view.subagent } : {}),
         ...(view?.dispatch ? { dispatch: view.dispatch } : {}),
         description: view?.description || view?.prompt || '',
+        ...(view?.model ? { requestedModel: view.model } : {}),
         hasResult: !!result,
         resultIsError: !!result?.isError,
         // Since 2.1.219 an agent's input usually omits it — hence the lifecycle.
@@ -279,14 +302,21 @@ export function scanAgentTree(
   subagentMessages: Buckets,
   engineId: EngineId
 ): RosterEntry[] {
+  rosterScanStats.trees++
   const out: RosterEntry[] = []
   const placed = new Set<string>()
   const walk = (entries: ScannedEntry[], depth: number, parent?: string): void => {
     for (const entry of entries) {
       if (placed.has(entry.toolUseId)) continue
       placed.add(entry.toolUseId)
-      out.push({ ...entry, depth, ...(parent ? { parentToolUseId: parent } : {}) })
       const bucket = subagentMessages[entry.toolUseId]
+      const latestModel = latestMessageModel(bucket)
+      out.push({
+        ...entry,
+        depth,
+        ...(parent ? { parentToolUseId: parent } : {}),
+        ...(latestModel ? { latestModel } : {})
+      })
       if (bucket?.length) {
         walk(scanTranscriptCached(bucket, engineId), depth + 1, entry.toolUseId)
       }
@@ -389,6 +419,9 @@ function toRow(
       string,
       { elapsedTimeSeconds: number; lastToolName?: string; usage?: AgentRosterRow['usage'] }
     >
+    engineId: EngineId
+    /** The parent session's model, for Codex (`useParentModel`). */
+    parentModel?: string
   }
 ): AgentRosterRow {
   const notification = latestNotification(opts.notifications, entry.toolUseId)
@@ -402,6 +435,16 @@ function toRow(
     resultIsError: entry.resultIsError
   })
   const progress = opts.progress[entry.toolUseId]
+  const model =
+    entry.kind === 'agent'
+      ? resolveAgentModel({
+          latestModel: entry.latestModel,
+          requested: entry.requestedModel,
+          engine: opts.engineId,
+          parentModel: opts.parentModel,
+          dispatch: entry.dispatch
+        })
+      : undefined
 
   return {
     toolUseId: entry.toolUseId,
@@ -431,7 +474,8 @@ function toRow(
         }
       : {}),
     runIndex: active?.runIndex ?? notification?.runIndex ?? 1,
-    ...(entry.kind === 'shell' && active?.startedAt ? { startedAt: active.startedAt } : {})
+    ...(entry.kind === 'shell' && active?.startedAt ? { startedAt: active.startedAt } : {}),
+    ...(model ? { model } : {})
   }
 }
 
@@ -520,7 +564,100 @@ function unifyRows(
   return [...out, ...loose]
 }
 
+/**
+ * Stamp each agent with the running agents beneath it (`runningDescendants`).
+ *
+ * This is the roster's version of the session dot's `subagents` state, and the
+ * signal behind it is the engines' own lifecycle, not a guess: an agent row stops
+ * running when ITS terminal event arrives (`task_notification`), and a descendant
+ * is running only while ITS record is armed or, with no record at all, until
+ * `settleOrphans` settles it behind a non-running parent. So a running
+ * descendant under a non-running agent is always one with a record: Claude Code
+ * (a nested agent's `task_started` is top-level and outlives the spawner,
+ * protocol-cc 04 §4.5) and pi's host-run subagents (a grandchild outlives the
+ * child's run). opencode and Codex emit no records, so they never get here.
+ */
+function withRunningDescendants(agents: AgentRosterRow[]): AgentRosterRow[] {
+  const byId = new Map(agents.map((a) => [a.toolUseId, a]))
+  const counts = new Map<string, number>()
+  for (const agent of agents) {
+    if (!agent.isRunning) continue
+    const seen = new Set<string>()
+    for (
+      let parent = agent.parentToolUseId;
+      parent && !seen.has(parent);
+      parent = byId.get(parent)?.parentToolUseId
+    ) {
+      seen.add(parent)
+      counts.set(parent, (counts.get(parent) ?? 0) + 1)
+    }
+  }
+  if (counts.size === 0) return agents
+  return agents.map((a) =>
+    counts.has(a.toolUseId) ? { ...a, runningDescendants: counts.get(a.toolUseId) } : a
+  )
+}
+
 const NO_BUCKETS: Buckets = {}
+const NO_TYPES: string[] = []
+
+/**
+ * The agent tree for a session's transcript, built ONCE per change however many
+ * surfaces ask: the roster's pill, tab and panel, and a Task card in every
+ * message. A single-entry cache keyed by the identities of its inputs (the store
+ * replaces `messages` / `subagentMessages` on every change), so N consumers cost
+ * one build per update and share the one array. The per-bucket scans under it are
+ * cached separately by `scanTranscriptCached`.
+ */
+let treeCache:
+  { messages: ChatMessage[]; buckets: Buckets; engineId: EngineId; tree: RosterEntry[] } | undefined
+
+export function agentTreeCached(
+  messages: ChatMessage[],
+  subagentMessages: Buckets | undefined,
+  engineId: EngineId | undefined
+): RosterEntry[] {
+  const buckets = subagentMessages ?? NO_BUCKETS
+  const engine = engineId ?? 'claude'
+  const hit = treeCache
+  if (hit && hit.messages === messages && hit.buckets === buckets && hit.engineId === engine) {
+    return hit.tree
+  }
+  const tree = scanAgentTree(messages, buckets, engine)
+  treeCache = { messages, buckets, engineId: engine, tree }
+  return tree
+}
+
+/** The last types array handed out: reused while the set of types is unchanged. */
+let typesCache: { tree: RosterEntry[]; types: string[] } | undefined
+
+/**
+ * The types of a tree's agents, as ONE array shared by every caller for that
+ * tree, and the SAME array as before when a new tree spawns no new type (a
+ * subagent streaming does not change which types the session has), so a consumer
+ * keyed on it does not re-render for nothing.
+ */
+function agentTypesOf(tree: RosterEntry[]): string[] {
+  if (typesCache?.tree === tree) return typesCache.types
+  const types = tree.flatMap((entry) => (entry.type ? [entry.type] : NO_TYPES))
+  const prev = typesCache?.types
+  const same = prev && prev.length === types.length && prev.every((t, i) => t === types[i])
+  typesCache = { tree, types: same ? prev : types }
+  return typesCache.types
+}
+
+/**
+ * Every agent type the session has spawned, at any depth: what a tile letter
+ * is told apart against when the catalog is empty (`agentTileLetter`). The same
+ * set the roster's rows give, from the same tree, so a Task card reads `R` where
+ * the roster does without building the tree again.
+ */
+export function useSessionAgentTypes(): string[] {
+  const messages = useActiveSession((s) => s.messages)
+  const subagentMessages = useActiveSession((s) => s.subagentMessages)
+  const engineId = useActiveSession((s) => s.status.engineId)
+  return messages ? agentTypesOf(agentTreeCached(messages, subagentMessages, engineId)) : NO_TYPES
+}
 const NO_IDS: readonly string[] = []
 
 export function useAgentRoster(): AgentRoster {
@@ -532,12 +669,12 @@ export function useAgentRoster(): AgentRoster {
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
   const openedTaskToolUseIds = useActiveSession((s) => s.openedTaskToolUseIds)
   const isHistorical = useActiveSession((s) => s.isHistorical)
+  const parentModel = useParentModel()
 
   // The tree — deliberately NOT dependent on the live maps. Each bucket's walk
   // is shared with the other surfaces through scanTranscriptCached.
   const tree = useMemo(
-    () =>
-      messages ? scanAgentTree(messages, subagentMessages ?? NO_BUCKETS, engineId ?? 'claude') : [],
+    () => (messages ? agentTreeCached(messages, subagentMessages, engineId) : []),
     [messages, subagentMessages, engineId]
   )
 
@@ -562,9 +699,11 @@ export function useAgentRoster(): AgentRoster {
       isHistorical: !!isHistorical,
       activeTasks: activeTasks ?? {},
       notifications: taskNotifications ?? [],
-      progress: taskProgressMap ?? {}
+      progress: taskProgressMap ?? {},
+      engineId: engineId ?? 'claude',
+      parentModel
     }
-    const agents = settleOrphans(tree, (entry) => toRow(entry, opts), opts)
+    const agents = withRunningDescendants(settleOrphans(tree, (entry) => toRow(entry, opts), opts))
     const shellRows = shells.map((entry) => toRow({ ...entry, depth: 0 }, opts))
     const rows = unifyRows(
       agents,
@@ -581,5 +720,14 @@ export function useAgentRoster(): AgentRoster {
       runningShellCount,
       totalCount: agents.length
     }
-  }, [tree, shells, activeTasks, taskNotifications, taskProgressMap, isHistorical])
+  }, [
+    tree,
+    shells,
+    activeTasks,
+    taskNotifications,
+    taskProgressMap,
+    isHistorical,
+    engineId,
+    parentModel
+  ])
 }

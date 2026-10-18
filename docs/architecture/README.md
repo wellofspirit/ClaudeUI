@@ -1,6 +1,6 @@
 # Architecture
 
-How ClaudeUI is put together. This directory splits the architecture by concern — read the file that matches your task. Design rationale lives in [`docs/adr/`](../adr/adr.md); the cli.js wire protocol in [`docs/protocol-cc/`](../protocol/README.md).
+How ClaudeUI is put together. This directory splits the architecture by concern — read the file that matches your task. Design rationale lives in [`docs/adr/`](../adr/adr.md); the cli.js wire protocol in [`docs/protocol-cc/`](../protocol-cc/README.md).
 
 | File                                 | Covers                                                                                                                                                                                                           |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -154,8 +154,13 @@ export type ClaudeuiTokenCheck = (refreshToken: string) => boolean | Promise<boo
 
 /** What one integration looks like from ClaudeUI — never a secret. */
 export interface IntegrationCredentialState {
-  /** The type of the row opencode uses (its active row), when there is one. */
-  readonly activeType?: 'api' | 'oauth'
+  /**
+   * The type of the row opencode uses (its active row), when there is one.
+   * `external` is a reference to a credential source managed outside the store
+   * (the Azure CLI's login, ...): it carries no key and no tokens, and is
+   * neither an API key nor a subscription sign-in.
+   */
+  readonly activeType?: 'api' | 'oauth' | 'external'
   /** That active row is ClaudeUI's. */
   readonly activeOwned: boolean
   /** ClaudeUI holds an API-key row here (removable by ClaudeUI). */
@@ -252,8 +257,14 @@ export function chatgptRealExpiry(access: string, fallback: number): number {
 
 const slotKey = (integrationID: string, kind: CredentialKind): string => `${integrationID}:${kind}`
 
-function kindOf(value: Credential_Value): CredentialKind {
-  return value.type === 'oauth' ? 'oauth' : 'key'
+/**
+ * The slot a value could fill. An `external` reference fills none: ClaudeUI
+ * only ever writes keys and ChatGPT sign-ins, so such a row is always the user's.
+ */
+function kindOf(value: Credential_Value): Exclude<CredentialKind, 'signin'> | null {
+  if (value.type === 'oauth') return 'oauth'
+  if (value.type === 'key') return 'key'
+  return null
 }
 
 function inSlot(
@@ -281,19 +292,28 @@ function identityOf(row: Credential_Entry | undefined, integrationID: string): A
     return { accountKey: nativeAccountKey('opencode', integrationID), accountLabel: integrationID }
   const value = row.value
   const accountID = value.type === 'oauth' ? value.metadata?.accountID : undefined
+  let entry: unknown
+  if (value.type === 'oauth')
+    entry = {
+      type: 'oauth',
+      access: value.access,
+      ...(typeof accountID === 'string' ? { accountId: accountID } : {})
+    }
+  else if (value.type === 'external') entry = { type: 'external', methodId: value.methodID }
+  else entry = { type: 'api', key: value.key }
   return accountIdentityFromAuthEntry({
     engineId: 'opencode',
     vendorId: integrationID,
     isChatgptVendor: integrationID === CHATGPT_INTEGRATION_ID,
-    entry:
-      value.type === 'oauth'
-        ? {
-            type: 'oauth',
-            access: value.access,
-            ...(typeof accountID === 'string' ? { accountId: accountID } : {})
-          }
-        : { type: 'api', key: value.key }
+    entry
   })
+}
+
+function activeTypeOf(
+  value: Credential_Value
+): NonNullable<IntegrationCredentialState['activeType']> {
+  if (value.type === 'oauth') return 'oauth'
+  return value.type === 'external' ? 'external' : 'api'
 }
 
 /** Reduce a credential list to what ClaudeUI may keep in memory: types, ownership, identities. */
@@ -312,7 +332,7 @@ export function snapshotOf(
   for (const [integrationID, list] of byIntegration) {
     const active = list.find((row) => row.active)
     integrations.set(integrationID, {
-      ...(active ? { activeType: active.value.type === 'oauth' ? 'oauth' : 'api' } : {}),
+      ...(active ? { activeType: activeTypeOf(active.value) } : {}),
       activeOwned: !!active && owned(active.id),
       ownKey: list.some((row) => inSlot(row, integrationID, 'key')),
       ownOauth: list.some((row) => inSlot(row, integrationID, 'oauth')),
@@ -322,13 +342,18 @@ export function snapshotOf(
   return { integrations, at }
 }
 
-/** `{integration: type of its active row}` — the row opencode uses, ClaudeUI's or the user's. */
+/**
+ * `{integration: type of its active row}` — the row opencode uses, ClaudeUI's or
+ * the user's. Only keys and sign-ins: an `external` reference is neither, so an
+ * integration on one is absent here (shown as configured outside ClaudeUI),
+ * never reported as an API key.
+ */
 export function credentialTypes(
   snapshot: CredentialSnapshot | null
 ): Record<string, 'api' | 'oauth'> {
   const out: Record<string, 'api' | 'oauth'> = {}
   for (const [id, state] of snapshot?.integrations ?? [])
-    if (state.activeType) out[id] = state.activeType
+    if (state.activeType === 'api' || state.activeType === 'oauth') out[id] = state.activeType
   return out
 }
 
@@ -938,8 +963,8 @@ export class OpencodeCredentialStore {
     const rows = await api.list()
     for (const row of rows) {
       if (!isClaudeuiCredentialId(row.id)) continue
-      const key = slotKey(row.integrationID, kindOf(row.value))
-      records[key] ??= {}
+      const kind = kindOf(row.value)
+      if (kind) records[slotKey(row.integrationID, kind)] ??= {}
     }
     // Sign-in rows: only from labels ClaudeUI remembers generating (their
     // sibling file survives the quarantine) — by the adopted id, or by the

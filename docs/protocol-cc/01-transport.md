@@ -56,7 +56,7 @@ Resolved by `locateBunClaude()` in `src/core/sdk/locate.ts`. `locateCliJs()` is 
 
 ### How the binary gets there
 
-`bun run ensure-cli` is the chained pipeline: `extract-cli.mjs` (download upstream Bun binary, concatenate the JS chunks out of its `__BUN`/`.bun` section) → `patch/apply-all.mjs` (the content-regex patches in `patch/`) → `rebundle-cli.mjs` (re-inject the patched chunks into the Bun binary + ad-hoc codesign + clear quarantine on macOS). Cache key: `package.json#claudeCliVersion`. Full details in §1.12 below.
+`bun run ensure-cli` is the chained pipeline: `extract-cli.mjs` (download upstream Bun binary, concatenate the JS chunks out of its `__BUN`/`.bun` section) → `patch/apply-all.mjs` (the content-regex patches in `patch/`) → `rebundle-cli.mjs` (re-inject the patched chunks into the Bun binary + ad-hoc codesign + clear quarantine on macOS) → `boot-probe.mjs` (the rebuilt binary must boot offline and print its init and result lines; warn-only on macOS for now). A binary a running process holds is renamed into `vendor/.claude-cli-trash/` instead of being overwritten, and swept by a later run. Cache key: `package.json#claudeCliVersion`. Full details in §1.12 below.
 
 ---
 
@@ -423,7 +423,7 @@ Native `.node` addons stay inside the Bun binary and get re-injected intact; cli
 
 The **source binary** is cached under `.cache/claude-cli/claude-<version>-<platform>[.exe]` and reused when its SHA256 matches the manifest. `extract-cli.mjs --force` ignores the cache and re-downloads. CI workflows (`pre-release.yml`, `release.yml`) persist this directory across runs keyed on `package.json#claudeCliVersion`.
 
-**No `vendor/` cache shortcut.** `ensure-cli` always runs the full extract → patch → rebundle chain. Patches often change while `claudeCliVersion` stays pinned, and patch application is idempotent, so caching intermediate artifacts buys nothing and invites staleness bugs (e.g. the version.json `sourceBinary` absolute path breaking after cache restore). Warm pipeline runs in ~4 s (`rebundle-cli.mjs` alone ~270 ms); cold adds the ~60 s binary download.
+**No `vendor/` cache shortcut.** `ensure-cli` always runs the full extract → patch → rebundle → boot-probe chain. Patches often change while `claudeCliVersion` stays pinned, and patch application is idempotent, so caching intermediate artifacts buys nothing and invites staleness bugs (e.g. the version.json `sourceBinary` absolute path breaking after cache restore). Warm pipeline runs in ~4 s (`rebundle-cli.mjs` alone ~270 ms, the boot probe ~1.5 s); cold adds the ~60 s binary download.
 
 ### Rebundling
 

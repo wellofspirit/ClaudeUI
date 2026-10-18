@@ -72,8 +72,10 @@ runs:
       shell: bash
       run: bun install
 
-    # bun can leave a Node-ABI better-sqlite3 behind; install-app-deps (run
-    # again explicitly, idempotent) rebuilds native modules for the Electron ABI.
+    # postinstall already runs install-app-deps; this explicit, idempotent re-run
+    # makes a native rebuild failure its own visible step. It rebuilds node-pty for
+    # the Electron ABI (better-sqlite3 13 ships prebuilt binaries that load under
+    # both Node and Electron).
     - name: Rebuild native modules
       shell: bash
       run: bun run rebuild:native

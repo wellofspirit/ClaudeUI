@@ -951,8 +951,13 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // audio rides the `voice-audio` lane frame, and the transcripts come back as
     // lane frames targeted at this socket — landing in `on('voice:transcript')`
     // below, the same listener the desktop's host-local send feeds.
-    voiceStart: async (routingId, language) => {
-      await connection.invoke('voice:start', routingId, language)
+    //
+    // `opts` rides only when given: the verb's third argument is the client's
+    // `{ preview: false }`, and a base call stays the two-argument frame it
+    // always was.
+    voiceStart: async (routingId, language, opts) => {
+      if (opts) await connection.invoke('voice:start', routingId, language, opts)
+      else await connection.invoke('voice:start', routingId, language)
     },
     // The lane frame carries no session id: the capture is the CONNECTION's, and
     // the server routes by that (core/services/voice-relay.ts).
@@ -962,6 +967,21 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     },
     onVoiceTranscript: on('voice:transcript') as ClaudeAPI['onVoiceTranscript'],
     onVoiceState: on('voice:state') as ClaudeAPI['onVoiceState'],
+    // The on-device speech pack (ADR-101 §6). Status is a `chat` query; the three
+    // writes are `admin`, so a base connection is refused them by the registry
+    // (and they sit in UNGRANTED_AT_CONNECT_REMOTE_CHANNELS). Install resolves
+    // only when the install does, so this client's invoke can time out while the
+    // host keeps installing — the callers treat that as running, not failed.
+    voicePackStatus: () =>
+      connection.invoke('voice:pack-status') as ReturnType<ClaudeAPI['voicePackStatus']>,
+    voicePackInstall: () =>
+      connection.invoke('voice:pack-install') as ReturnType<ClaudeAPI['voicePackInstall']>,
+    voicePackInstallCancel: () =>
+      connection.invoke('voice:pack-install-cancel') as ReturnType<
+        ClaudeAPI['voicePackInstallCancel']
+      >,
+    voicePackRemove: () =>
+      connection.invoke('voice:pack-remove') as ReturnType<ClaudeAPI['voicePackRemove']>,
 
     // Error logging — send to server
     logError: (source, message) => {

@@ -12,12 +12,10 @@
  */
 
 import { readFileSync, writeFileSync } from 'node:fs'
-import { resolve, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const projectRoot = resolve(__dirname, '../..')
-const cliPath = resolve(projectRoot, 'vendor/claude-cli/cli.js')
+import { cliJsPath } from '../../scripts/lib/cli-paths.mjs'
+
+const cliPath = cliJsPath()
 
 // Minified variable names can contain $ — use [\\w$] instead of \\w
 const V = '[\\w$]+'

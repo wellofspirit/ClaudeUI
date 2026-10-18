@@ -821,6 +821,14 @@ export interface SessionHistoryResult {
    */
   subagentMessages?: Record<string, ChatMessage[]>
   /**
+   * The engine-native reasoning tier the thread last ran at (or was last set
+   * to), for a COLD reopen to show and resume with. Codex only: its tiers are
+   * the engine's own, and the thread's rollout is the one place that remembers
+   * them across an app restart. `null` when the rollout names none; absent for
+   * every other engine.
+   */
+  lastEffort?: string | null
+  /**
    * Warnings worth resurfacing when the session is reopened — currently the
    * model_refusal_fallback / model_fallback system entries (the model swap is
    * sticky for the session, so the user should know which model answered).
@@ -1328,7 +1336,10 @@ export async function loadSessionHistory(
             id: messageId,
             role: 'assistant',
             content: blocks,
-            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now(),
+            ...(typeof betaMessage.model === 'string' && betaMessage.model
+              ? { model: betaMessage.model }
+              : {})
           }
 
           if (existingIdx >= 0) {
@@ -1804,7 +1815,10 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
             id: messageId,
             role: 'assistant',
             content: blocks,
-            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now(),
+            ...(typeof betaMessage.model === 'string' && betaMessage.model
+              ? { model: betaMessage.model }
+              : {})
           }
           if (existingIdx >= 0) {
             const oldBlocks = messages[existingIdx].content

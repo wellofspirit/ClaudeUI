@@ -109,6 +109,7 @@ import { configCommands } from './config-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { usageHubCommands, USAGE_HUB_CHANNELS } from './usage-hub-commands'
 import { harnessCommands, HARNESS_CHANNELS } from './harness-commands'
+import { voicePackCommands, VOICE_PACK_CHANNELS } from './voice-pack-commands'
 import {
   sendPrompt,
   getBlob,
@@ -419,7 +420,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     ...SESSION_IPC_CHANNELS,
     ...CODEX_CHANNELS,
     ...USAGE_HUB_CHANNELS,
-    ...HARNESS_CHANNELS
+    ...HARNESS_CHANNELS,
+    ...VOICE_PACK_CHANNELS
   ])
 
   const manager = new SessionManager()
@@ -666,8 +668,9 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: async (routingId: string, mode: string) => setPermissionMode(manager, routingId, mode)
   })
 
-  // Voice input handlers (Claude-only, and only on a binary carrying the
-  // voice-server patch: capabilities.voice).
+  // Voice input handlers (gated by capabilities.voice: Claude on a binary
+  // carrying the voice-server patch; opencode, pi and Codex on a host the
+  // on-device speech pack supports, ADR-101).
   //
   // The microphone is the RENDERER's (`renderer/src/lib/voice/`): these two verbs
   // only bind the desktop window's pushed audio — the `voice:audio` IPC message,
@@ -686,15 +689,19 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'host',
     kind: 'command',
     sessionIdArg: 0,
-    handler: safeHandler(async (routingId: string, language: string) => {
-      const session = manager.get(routingId)
-      if (!session) throw new Error('No active session')
-      const refusal = voiceRefusal(session)
-      if (refusal) throw new Error(refusal)
-      const win = getHostWindow()
-      if (!win) throw new Error('No desktop window to capture for')
-      await voiceRelay.start(manager, desktopVoiceOwner(win), routingId, language)
-    })
+    handler: safeHandler(
+      async (routingId: string, language: string, opts?: { preview?: boolean }) => {
+        const session = manager.get(routingId)
+        if (!session) throw new Error('No active session')
+        const refusal = voiceRefusal(session)
+        if (refusal) throw new Error(refusal)
+        const win = getHostWindow()
+        if (!win) throw new Error('No desktop window to capture for')
+        await voiceRelay.start(manager, desktopVoiceOwner(win), routingId, language, {
+          preview: opts?.preview
+        })
+      }
+    )
   })
 
   handleIpc({
@@ -1743,6 +1750,11 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // The harness manager (ADR-082 arc 2), from the same declarations the remote
   // transport spreads: reads are `config`, every write `admin` (§7).
   for (const cmd of harnessCommands()) {
+    handleIpc(cmd)
+  }
+
+  // The speech pack (ADR-101 §6): status is `chat`, install/cancel/remove `admin`.
+  for (const cmd of voicePackCommands()) {
     handleIpc(cmd)
   }
 

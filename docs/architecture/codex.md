@@ -229,7 +229,7 @@ Approving is a full-access grant on this wire in effect, but not on the first at
 command still runs first under the turn's sandbox, unless the model escalated it
 (`sandbox_permissions: "require_escalated"`) or an execpolicy `allow` matched
 (`core/src/tools/orchestrator.rs` and `sandbox_override_for_first_attempt` in
-`core/src/tools/sandboxing.rs`, rust-v0.160.1). When that attempt is denied by the sandbox, Codex
+`core/src/tools/sandboxing.rs`, rust-v0.162.1). When that attempt is denied by the sandbox, Codex
 re-runs it unsandboxed without asking again, but only if it CLASSIFIES the failure as a denial: for
 `exec_command` it waits at most 20 ms for output, then keyword-matches it
 (`core/src/unified_exec/process.rs` `check_for_sandbox_denial`, `sandboxing/src/denial.rs`; the exit

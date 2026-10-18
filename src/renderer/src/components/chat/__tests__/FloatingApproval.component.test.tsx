@@ -25,8 +25,17 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
 import { TestIpcBridge } from '@test/bridges/test-ipc-bridge'
 import { useSessionStore } from '../../../stores/session-store'
-import { makePendingApproval, resetFactoryCounter } from '@test/factories/messages'
-import type { EngineId, PendingApproval, PermissionSuggestion } from '../../../../../shared/types'
+import {
+  makePendingApproval,
+  makeSessionStatus,
+  resetFactoryCounter
+} from '@test/factories/messages'
+import type {
+  ChatMessage,
+  EngineId,
+  PendingApproval,
+  PermissionSuggestion
+} from '../../../../../shared/types'
 import { ApprovalCardView, FloatingApproval } from '../FloatingApproval'
 import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
@@ -445,8 +454,9 @@ describe('FloatingApproval rendered component', () => {
       agent: { agentId: 'a-1', label: 'Tidy the build', subagentType: 'general-purpose' }
     })
     render(<FloatingApproval />)
-    expect(screen.getByTestId('ApprovalCardView.agent')).toHaveTextContent(
-      'Agent Tidy the build (general-purpose)'
+    // The type first, then the agent's own label (design B, 2026-10-12).
+    expect(screen.getByTestId('ApprovalCardView.agent').textContent).toBe(
+      'general-purpose · Tidy the build'
     )
   })
 
@@ -934,5 +944,194 @@ describe('FloatingApproval — AskUserQuestion floating card (child question)', 
     expect(screen.getByText('Allow')).toBeInTheDocument()
     expect(screen.getByText('Deny')).toBeInTheDocument()
     expect(screen.queryByText('Question')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Subagent asks — the floating card names the asking agent and reads like the
+// main-thread card (the ask is bound to a call in `subagentMessages`, so it is
+// not matched inline and floats).
+// ---------------------------------------------------------------------------
+
+describe('FloatingApproval — an ask raised inside a subagent', () => {
+  const ROUTE = 'route-subagent-card'
+  const TASK_ID = 'task-explore-1'
+  const CHILD_CALL = 'child-call-1'
+
+  function assistantCall(
+    id: string,
+    toolUseId: string,
+    toolName: string,
+    toolInput: Record<string, unknown>
+  ): ChatMessage {
+    return {
+      id,
+      role: 'assistant',
+      content: [{ type: 'tool_use', toolUseId, toolName, toolInput }],
+      timestamp: Date.now()
+    } as ChatMessage
+  }
+
+  /** A session of `engineId` whose main transcript spawned one agent, whose bucket holds `childCall`. */
+  function seedSubagent(
+    engineId: EngineId,
+    spawn: { toolName: string; input: Record<string, unknown> },
+    childCall: { toolName: string; input: Record<string, unknown> }
+  ): void {
+    useSessionStore.getState().createNewSession(ROUTE, '/test')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+    seed.status(ROUTE, makeSessionStatus({ engineId }))
+    seed.message(ROUTE, assistantCall('m-spawn', TASK_ID, spawn.toolName, spawn.input))
+    seed.subagentMessage(
+      ROUTE,
+      TASK_ID,
+      assistantCall('m-child', CHILD_CALL, childCall.toolName, childCall.input)
+    )
+  }
+
+  const OPENCODE_SPAWN = {
+    toolName: 'subagent',
+    input: { agent: 'explore', description: 'Find the secret word', prompt: 'read it' }
+  }
+
+  it('opencode external_directory: names the agent and reads as an outside-workspace read of the path', () => {
+    seedSubagent('opencode', OPENCODE_SPAWN, {
+      toolName: 'read',
+      input: { path: 'C:\\outside\\secret.txt' }
+    })
+    seed.approvalRequest(
+      ROUTE,
+      makePendingApproval({
+        requestId: 'ask-ext-1',
+        toolUseId: CHILD_CALL,
+        toolName: 'external_directory',
+        input: { path: 'C:\\outside\\secret.txt' },
+        patterns: ['C:/outside/*'],
+        subagent: { sessionId: 'ses_child', parentToolUseId: TASK_ID }
+      })
+    )
+
+    render(<FloatingApproval />)
+
+    expect(screen.getByTestId('ApprovalCardView.agent')).toHaveTextContent('explore')
+    expect(screen.getByTestId('ApprovalCardView.agent')).toHaveTextContent('Find the secret word')
+    expect(screen.getByTestId('ApprovalCardView.toolName')).not.toHaveTextContent(
+      'external_directory'
+    )
+    expect(screen.getByTestId('ApprovalCardView.toolName')).toHaveTextContent(
+      'Read outside workspace'
+    )
+    const summary = screen.getByTestId('ApprovalCardView.summary')
+    expect(summary).toHaveTextContent('C:\\outside\\secret.txt')
+    expect(summary.textContent).not.toContain('{')
+    expect(screen.getByTestId('ApprovalCardView.target')).toHaveTextContent('C:/outside/*')
+    // Two long paths: each is labelled, the file and the folder Allow grants.
+    expect(
+      screen.getByTestId('ApprovalCardView.summary').parentElement?.previousSibling
+    ).toHaveTextContent('File')
+    expect(
+      screen.getByTestId('ApprovalCardView.target').parentElement?.previousSibling
+    ).toHaveTextContent('Folder')
+    expect(screen.getByTestId('ApprovalCardView.agent').textContent).toBe(
+      'explore · Find the secret word'
+    )
+  })
+
+  it('opencode external_directory with no call to read: still names the agent and the directory', () => {
+    useSessionStore.getState().createNewSession(ROUTE, '/test')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+    seed.status(ROUTE, makeSessionStatus({ engineId: 'opencode' }))
+    seed.message(ROUTE, assistantCall('m-spawn', TASK_ID, 'subagent', OPENCODE_SPAWN.input))
+    seed.approvalRequest(
+      ROUTE,
+      makePendingApproval({
+        requestId: 'ask-ext-2',
+        toolUseId: 'not-yet-streamed',
+        toolName: 'external_directory',
+        input: {},
+        patterns: ['C:/outside/*'],
+        subagent: { sessionId: 'ses_child', parentToolUseId: TASK_ID }
+      })
+    )
+
+    render(<FloatingApproval />)
+
+    expect(screen.getByTestId('ApprovalCardView.agent')).toHaveTextContent('explore')
+    expect(screen.getByTestId('ApprovalCardView.toolName')).toHaveTextContent('Outside workspace')
+    expect(screen.getByTestId('ApprovalCardView.target')).toHaveTextContent('C:/outside/*')
+    expect(screen.queryByTestId('ApprovalCardView.summary')).toBeNull()
+  })
+
+  it('opencode shell ask from a subagent: names the agent, summary is the command', () => {
+    seedSubagent('opencode', OPENCODE_SPAWN, {
+      toolName: 'shell',
+      input: { command: 'npm test' }
+    })
+    seed.approvalRequest(
+      ROUTE,
+      makePendingApproval({
+        requestId: 'ask-shell-1',
+        toolUseId: CHILD_CALL,
+        toolName: 'shell',
+        input: { command: 'npm test' },
+        subagent: { sessionId: 'ses_child', parentToolUseId: TASK_ID }
+      })
+    )
+
+    render(<FloatingApproval />)
+
+    expect(screen.getByTestId('ApprovalCardView.agent')).toHaveTextContent('explore')
+    expect(screen.getByTestId('ApprovalCardView.summary')).toHaveTextContent('$ npm test')
+    expect(screen.queryByTestId('ApprovalCardView.target')).toBeNull()
+  })
+
+  it('claude: an ask with no subagent marker is attributed by the bucket holding its call', () => {
+    seedSubagent(
+      'claude',
+      {
+        toolName: 'Task',
+        input: { description: 'Audit deps', prompt: 'p', subagent_type: 'reviewer' }
+      },
+      { toolName: 'Bash', input: { command: 'npm audit' } }
+    )
+    seed.approvalRequest(
+      ROUTE,
+      makePendingApproval({
+        requestId: 'ask-claude-1',
+        toolUseId: CHILD_CALL,
+        toolName: 'Bash',
+        input: { command: 'npm audit' }
+      })
+    )
+
+    render(<FloatingApproval />)
+
+    expect(screen.getByTestId('ApprovalCardView.agent')).toHaveTextContent('Audit deps')
+    expect(screen.getByTestId('ApprovalCardView.agent')).toHaveTextContent('reviewer')
+    expect(screen.getByTestId('ApprovalCardView.summary')).toHaveTextContent('$ npm audit')
+  })
+
+  it('a main-thread ask has no agent line, and an explicit approval.agent wins', () => {
+    seedSubagent('opencode', OPENCODE_SPAWN, { toolName: 'read', input: { path: '/x' } })
+    seed.approvalRequest(
+      ROUTE,
+      makePendingApproval({ requestId: 'ask-top-1', toolUseId: 'top-call', toolName: 'shell' })
+    )
+    seed.approvalRequest(
+      ROUTE,
+      makePendingApproval({
+        requestId: 'ask-pi-1',
+        toolUseId: CHILD_CALL,
+        toolName: 'shell',
+        agent: { agentId: 'a-1', label: 'Pi child', subagentType: 'worker' },
+        subagent: { sessionId: 'ses_child', parentToolUseId: TASK_ID }
+      })
+    )
+
+    render(<FloatingApproval />)
+
+    const agents = screen.getAllByTestId('ApprovalCardView.agent')
+    expect(agents).toHaveLength(1)
+    expect(agents[0].textContent).toBe('worker · Pi child')
   })
 })

@@ -34,7 +34,8 @@
  * digests (opencode: each `@opencode/cli-<os>-<arch>` package's npm `integrity`
  * and the SHA-256 of `package/bin/opencode[.exe]`, then the tag's commit as
  * `PIN_COMMIT` in `scripts/generate-opencode-protocol.mjs` and
- * `bun run generate-opencode-protocol`; pi: each asset's SHA-256 from the release's
+ * `bun run generate-opencode-protocol` once the new version is installed: it
+ * generates from the spec that installed binary serves; pi: each asset's SHA-256 from the release's
  * `SHA256SUMS`; Codex: every host's archive and binary digests, the source
  * commit and the LICENSE digest, then `bun run generate-codex-protocol`), and
  * run `bun run ensure-<id>`.

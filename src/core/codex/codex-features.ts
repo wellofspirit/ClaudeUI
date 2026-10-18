@@ -32,6 +32,22 @@
  * `docs/codex-spike.md` Q3), so the user's own `config.toml` and the USER layer
  * a settings page reads are untouched.
  *
+ * ALSO DELIBERATELY ABSENT: `instant_interrupt` (`Stage::UnderDevelopment`,
+ * `default_enabled: true` since 0.162, upstream #51812; `features/src/lib.rs`).
+ * ClaudeUI keeps upstream's default: a queued message's `turn/steer` then
+ * preempts the sampling request instead of waiting for it. How much that cuts
+ * depends on the transport (`core/src/session/turn.rs`, the preempt branch). On
+ * a websocket stream the response is interrupted only for a `use_responses_lite`
+ * model and otherwise drained to its end, so every item completes and the steer
+ * follows it (verified live: a ChatGPT-account essay ran to completion before the
+ * steer). On SSE the stream is DROPPED (`// TODO: Reconcile any response item
+ * already being presented to the client`), so the item already streaming never
+ * gets an `item/completed` and is not in the turn's final `items`. That needs
+ * no handling here: `CodexSession.finishTurn` seals every item still streaming
+ * at turn end (`flushItemStreams`), which `codex-session.test.ts`
+ * ("instant_interrupt: a stream the steer preempted is dropped") guards for
+ * both an agent message and a reasoning item.
+ *
  * DELIBERATELY ABSENT: `apps`, `plugins`, `remote_plugin`, `skill_search`,
  * `tool_suggest`, `mentions_v2`, `goals` and `codex_hooks`. The TUI has those
  * too, they read the user's own `~/.codex` state, and they stay exactly as the

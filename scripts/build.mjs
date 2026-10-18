@@ -16,50 +16,24 @@
  * finishes, so logs never interleave. Every member runs to completion (no
  * fail-fast), so a failed build reports all broken stages at once.
  *
+ * A stage flagged `keepGoing` does not stop the run when it fails: the failure
+ * is recorded, later stages still run, and the run exits non-zero at the end
+ * with a summary of every failed stage (quiet and -v alike).
+ *
  * Targets mirror the package.json scripts: build, build:mac, build:win,
- * build:linux, build:unpack, ensure-cli, update-cli,
- * ensure-opencode, update-opencode, ensure-pi, update-pi, ensure-codex,
- * update-codex.
+ * build:linux, build:unpack, ensure (the CLI and the three harnesses together),
+ * postinstall, ensure-cli, update-cli, ensure-opencode, update-opencode,
+ * ensure-pi, update-pi, ensure-codex, update-codex. The stage lists live in
+ * `scripts/lib/build-targets.mjs`; `-h` prints them.
  */
 
 import { spawn } from 'node:child_process'
 
+import { targets, vendorOverrideRefusal } from './lib/build-targets.mjs'
+
 const args = process.argv.slice(2)
 const verbose = args.includes('-v') || args.includes('--verbose')
 const target = args.find((a) => !a.startsWith('-'))
-
-if (args.includes('-h') || args.includes('--help')) {
-  console.log(
-    'usage: node scripts/build.mjs <target> [-v]\n\n' +
-      'targets: ' +
-      [
-        'build',
-        'build:mac',
-        'build:win',
-        'build:linux',
-        'build:unpack',
-        'ensure-cli',
-        'update-cli',
-        'ensure-opencode',
-        'update-opencode',
-        'ensure-pi',
-        'update-pi',
-        'ensure-codex',
-        'update-codex'
-      ].join(', ')
-  )
-  process.exit(0)
-}
-if (!target) {
-  console.error(
-    'usage: node scripts/build.mjs <target> [-v]\n       (run with -h for the target list)'
-  )
-  process.exit(2)
-}
-
-const quiet = !verbose
-const Q = quiet ? ['--quiet'] : []
-const LL = quiet ? ['--logLevel', 'warn'] : []
 
 // Colour when we're on a real terminal, or when the caller forced it via
 // FORCE_COLOR. Children get FORCE_COLOR so the tools themselves (vite,
@@ -79,119 +53,29 @@ const C = useColor
   : { green: (s) => s, red: (s) => s, dim: (s) => s }
 const CHILD_ENV = { ...process.env, FORCE_COLOR: useColor ? '1' : '0' }
 
-// Stage step: [cmd, args, extra?] — extra can carry { env } for spawn().
-// The two tsc projects are independent; calling the sub-scripts directly also
-// skips the `npm run` hop of the aggregate `typecheck` script.
-const typecheckStages = [
-  { label: 'typecheck:node', steps: [['bun', ['run', '--silent', 'typecheck:node']]] },
-  { label: 'typecheck:web', steps: [['bun', ['run', '--silent', 'typecheck:web']]] }
-]
-const electronViteBuild = [
-  { label: 'electron-vite build', steps: [['bunx', ['electron-vite', 'build', ...LL]]] }
-]
+const TARGETS = targets({ quiet: !verbose, childEnv: CHILD_ENV })
 
-const ensureCli = (update) => [
-  {
-    label: 'ensure-cli',
-    steps: [
-      ['node', ['scripts/extract-cli.mjs', ...Q, ...(update ? ['--force'] : [])]],
-      ['node', ['patch/apply-all.mjs', ...Q]],
-      ['node', ['scripts/rebundle-cli.mjs', ...Q]]
-    ]
-  }
-]
-// opencode, pi and Codex install into ClaudeUI's managed store through the
-// app's own installer (`scripts/ensure-harness.mjs`, ADR-082 §8), which is
-// TypeScript: bun runs it. A host without a reviewed Codex release exits 0 with
-// a skip line; real failures exit non-zero and stop the target. No build target
-// runs these: packages no longer carry opencode, pi or Codex, and development
-// gets them from `postinstall`.
-const ensureHarness = (id, update) => [
-  {
-    label: `ensure-${id}`,
-    steps: [['bun', [`scripts/ensure-${id}.mjs`, ...Q, ...(update ? ['--force'] : [])]]]
-  }
-]
-
-// Everything a package needs before electron-builder, as one parallel group.
-// The members share no outputs: typecheck is --noEmit, ensure-cli writes
-// vendor/claude-cli, and electron-vite writes out/{main,preload,renderer} (each
-// target empties only its own dir; the one renderer build is both the desktop
-// and the web client, and compresses its own assets).
-const prepare = ({ typecheck }) => [
-  {
-    parallel: [...(typecheck ? typecheckStages : []), ...ensureCli(false), ...electronViteBuild]
-  }
-]
-
-const TARGETS = {
-  // No typecheck: CI and the release workflows run `bun run typecheck` as their
-  // own step. ensure-cli writes only vendor/claude-cli, which electron-vite
-  // never reads, so the two run side by side.
-  build: [{ parallel: [...ensureCli(false), ...electronViteBuild] }],
-  'build:mac': [
-    ...prepare({ typecheck: true }),
-    {
-      label: 'electron-builder --mac --dir',
-      steps: [
-        [
-          'bunx',
-          ['electron-builder', '--mac', '--dir'],
-          { env: { ...CHILD_ENV, CSC_IDENTITY_AUTO_DISCOVERY: 'false' } }
-        ]
-      ]
-    },
-    {
-      label: 'codesign',
-      steps: [
-        [
-          'sh',
-          [
-            '-c',
-            'codesign --force --deep --sign "${MAC_SIGN_IDENTITY:--}" dist/mac-arm64/ClaudeUI.app'
-          ]
-        ]
-      ]
-    },
-    {
-      label: 'xattr -cr',
-      steps: [['sh', ['-c', 'xattr -cr dist/mac-arm64/ClaudeUI.app']]]
-    }
-  ],
-  'build:win': [
-    ...prepare({ typecheck: true }),
-    {
-      label: 'electron-builder --win --dir',
-      steps: [['bunx', ['electron-builder', '--win', '--dir']]]
-    }
-  ],
-  'build:linux': [
-    ...prepare({ typecheck: false }),
-    {
-      label: 'electron-builder --linux',
-      steps: [['bunx', ['electron-builder', '--linux']]]
-    }
-  ],
-  'build:unpack': [
-    ...prepare({ typecheck: true }),
-    {
-      label: 'electron-builder --dir',
-      steps: [['bunx', ['electron-builder', '--dir']]]
-    }
-  ],
-  'ensure-cli': [...ensureCli(false)],
-  'update-cli': [...ensureCli(true)],
-  'ensure-opencode': [...ensureHarness('opencode', false)],
-  'update-opencode': [...ensureHarness('opencode', true)],
-  'ensure-pi': [...ensureHarness('pi', false)],
-  'update-pi': [...ensureHarness('pi', true)],
-  'ensure-codex': [...ensureHarness('codex', false)],
-  'update-codex': [...ensureHarness('codex', true)]
+if (args.includes('-h') || args.includes('--help')) {
+  console.log(
+    'usage: node scripts/build.mjs <target> [-v]\n\ntargets: ' + Object.keys(TARGETS).join(', ')
+  )
+  process.exit(0)
+}
+if (!target) {
+  console.error(
+    'usage: node scripts/build.mjs <target> [-v]\n       (run with -h for the target list)'
+  )
+  process.exit(2)
 }
 
 const stages = TARGETS[target]
 if (!stages) {
   console.error(`build.mjs: unknown target "${target}" (run with -h for the target list)`)
+  process.exit(2)
+}
+const refusal = vendorOverrideRefusal(target, process.env)
+if (refusal) {
+  console.error(refusal)
   process.exit(2)
 }
 
@@ -209,7 +93,7 @@ function runStep(step, { buffered = false } = {}) {
     }
     const child = spawn(cmd, stepArgs, {
       stdio: buffered ? ['ignore', 'pipe', 'pipe'] : ['inherit', 'pipe', 'inherit'],
-      env: { ...CHILD_ENV, ...(extra.env ?? {}) }
+      env: extra.env ?? CHILD_ENV
     })
     const collect = (d) => {
       buf += d.toString()
@@ -274,13 +158,33 @@ async function runParallel(members) {
   return codes.find((c) => c !== 0) ?? 0
 }
 
+// `keepGoing` stages that failed. Reported before any exit, so a later hard
+// failure (or the end of the run) never buries them.
+const softFailures = []
+const reportSoftFailures = () => {
+  if (softFailures.length === 0) return
+  const list = softFailures.map((f) => `${f.label} (exit ${f.code})`).join(', ')
+  console.error(`\n${target} ${C.red('✗')} failed stage(s): ${list}`)
+}
+
 const started = Date.now()
 for (let i = 0; i < stages.length; i++) {
   const stage = stages[i]
   const label = stage.parallel ? stage.parallel.map((m) => m.label).join(' ‖ ') : stage.label
   console.log(`${C.dim(`[${i + 1}/${stages.length}]`)} ${label}`)
   const code = stage.parallel ? await runParallel(stage.parallel) : await runSequential(stage)
-  if (code !== 0) process.exit(code)
+  if (code === 0) continue
+  if (stage.keepGoing) {
+    softFailures.push({ label, code })
+    continue
+  }
+  reportSoftFailures()
+  process.exit(code)
+}
+
+if (softFailures.length > 0) {
+  reportSoftFailures()
+  process.exit(softFailures[0].code)
 }
 
 console.log(

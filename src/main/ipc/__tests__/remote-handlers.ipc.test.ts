@@ -307,6 +307,7 @@ import {
   SHELL_READ_VERBS
 } from '../../../core/services/step-up-tier'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
+import { voiceRelay } from '../../../core/services/voice-relay'
 import { sharedProviderService } from '../../../core/shared-providers'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import { resolveOpencodeSpawnModel } from '../../../core/opencode/model-discovery'
@@ -492,6 +493,48 @@ describe('registerRemoteHandlers', () => {
     await expect(
       dispatcher.handle(makeRequest('session:get-engine-models', 'gemini'), remoteConn)
     ).rejects.toThrow(/unknown engine/)
+  })
+
+  describe('voice:start (the REAL handler — the e2e flow declares its own copy)', () => {
+    const start = (...args: unknown[]) =>
+      dispatcher.handle(makeRequest('voice:start', ...args), remoteConn)
+
+    it("binds the calling connection's owner and passes the preview choice as the 5th relay argument", async () => {
+      const relay = vi.spyOn(voiceRelay, 'start').mockResolvedValue(undefined)
+      try {
+        await start('rid-1', 'en', { preview: false })
+
+        expect(relay).toHaveBeenCalledTimes(1)
+        const [manager, owner, routingId, language, opts] = relay.mock.calls[0]
+        expect(manager).toBe(sessionManagerStub)
+        expect(owner.key).toBe(remoteConn.connectionId)
+        expect([routingId, language]).toEqual(['rid-1', 'en'])
+        expect(opts).toEqual({ preview: false })
+      } finally {
+        relay.mockRestore()
+      }
+    })
+
+    it('leaves preview to the server when the argument is absent, null or malformed', async () => {
+      const relay = vi.spyOn(voiceRelay, 'start').mockResolvedValue(undefined)
+      try {
+        await start('rid-1', 'en')
+        await start('rid-1', null, null)
+        await start('rid-1', 'en', 'nope')
+        await start('rid-1', 'en', { preview: true })
+
+        expect(relay.mock.calls.map((call) => call[4])).toEqual([
+          { preview: undefined },
+          { preview: undefined },
+          { preview: undefined },
+          { preview: true }
+        ])
+        // null language is normalised the way it always was.
+        expect(relay.mock.calls[1][3]).toBeUndefined()
+      } finally {
+        relay.mockRestore()
+      }
+    })
   })
 
   // The model probe, title and commit message never run a turn that could use
@@ -2111,6 +2154,26 @@ const HARNESS_ADMIN_CHANNELS = [
   'harness:answer-upgrade-prompt'
 ] as const
 
+/**
+ * The speech pack (ADR-101 §6). Restated rather than imported, for the reason
+ * {@link USAGE_HUB_CHANNELS} is. The status read is `chat` (every connection that
+ * can hold the mic can learn the model is missing); install, cancel and remove are
+ * `admin`, which a base connection never holds.
+ */
+const VOICE_PACK_CHANNELS = [
+  'voice:pack-status',
+  'voice:pack-install',
+  'voice:pack-install-cancel',
+  'voice:pack-remove'
+] as const
+
+/** The part of {@link VOICE_PACK_CHANNELS} that is gated by `admin`. */
+const VOICE_PACK_ADMIN_CHANNELS = [
+  'voice:pack-install',
+  'voice:pack-install-cancel',
+  'voice:pack-remove'
+] as const
+
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
   'webauthn:register-options': 'enroll',
@@ -2193,7 +2256,10 @@ describe('remote surface parity (phase 1 port)', () => {
         ...USAGE_HUB_CHANNELS,
         // ADR-082 arc 2: the Installed page is on every device (reads are
         // `config`); installing, re-sourcing and detecting are `admin`.
-        ...HARNESS_CHANNELS
+        ...HARNESS_CHANNELS,
+        // ADR-101 §6: the speech pack. Its status is `chat`; install, cancel and
+        // remove are `admin`.
+        ...VOICE_PACK_CHANNELS
       ].sort()
     )
   })
@@ -2369,7 +2435,9 @@ describe('remote surface parity (phase 1 port)', () => {
       // which is what makes the button able to explain itself.
       ...IDE_GATED_CHANNELS.map((c) => [c, 'ide'] as const),
       // ADR-082 §7: the harness manager's writes. The two reads are `config`.
-      ...HARNESS_ADMIN_CHANNELS.map((c) => [c, 'admin'] as const)
+      ...HARNESS_ADMIN_CHANNELS.map((c) => [c, 'admin'] as const),
+      // ADR-101 §6: the speech pack's writes. Its status read is `chat`.
+      ...VOICE_PACK_ADMIN_CHANNELS.map((c) => [c, 'admin'] as const)
     ].sort(([a], [b]) => a.localeCompare(b))
     expect(
       [...unreachable].sort(([a], [b]) => a.localeCompare(b)),
@@ -2541,13 +2609,14 @@ describe('remote surface parity (phase 1 port)', () => {
   })
 
   it('exposes no channel whose capability the old denylist stood for, except the sanctioned ones', () => {
-    // FIVE sanctioned widenings, each deliberate and each behind a proven
+    // SIX sanctioned widenings, each deliberate and each behind a proven
     // identity: the terminal set (ADR-052 decision 6), the passkey set
     // (decision 1), the `authcfg:*` settings namespace (ADR-054 §6, extended by
     // ADR-056 with the two LAN-channel verbs — which is also when the namespace
     // joined the pin table, `admin` having shrunk to exactly these two
     // families), the IDE mint (ADR-064), and the harness manager's writes
-    // (ADR-082 §7: `admin`, so a passkey or break-glass connection only).
+    // (ADR-082 §7: `admin`, so a passkey or break-glass connection only), and
+    // the speech pack's writes (ADR-101 §6: `admin`, the same reason).
     // Everything else in the pin table must still be absent from the remote
     // surface — which, for `remote:set-config`, is what makes the `off` master
     // switch structurally unreachable from a remote client now that a passkey
@@ -2561,7 +2630,9 @@ describe('remote surface parity (phase 1 port)', () => {
       // remote, and reachable only behind the toggle + a step-up. Same shape as
       // the terminal set above.
       ...IDE_GATED_CHANNELS,
-      ...HARNESS_ADMIN_CHANNELS
+      ...HARNESS_ADMIN_CHANNELS,
+      // ADR-101 §6: the speech pack's writes, `admin` like the harness manager's.
+      ...VOICE_PACK_ADMIN_CHANNELS
     ])
     for (const channel of Object.keys(PINNED_CAPABILITIES)) {
       if (sanctioned.has(channel)) continue

@@ -28,6 +28,7 @@ function openPickerDropdown(triggerTitle: string) {
   if (!dropdown) throw new Error(`Dropdown not found after opening "${triggerTitle}"`)
   return within(dropdown as HTMLElement)
 }
+import { CANCEL_GUARD_MS } from '../../../../lib/voice/use-cancel-guard'
 import {
   InputBoxView,
   VOICE_NOTICE_FADE_MS,
@@ -577,6 +578,229 @@ describe('voice notice pill — the fade rule (S3a)', () => {
     expect(pill().className).not.toContain(' animate-fade-in')
     advance(VOICE_NOTICE_LINGER_MS - VOICE_NOTICE_FADE_MS)
     expect(pill().className).toContain('motion-reduce:opacity-100')
+  })
+})
+
+describe('voice notice pill — the action buttons (ADR-101 §6)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  const OFFER = {
+    id: 3,
+    text: 'Voice input for this engine needs the on-device speech model (~700 MB)',
+    tone: 'warn' as const,
+    button: 'download' as const,
+    phase: 'offer',
+    lingerMs: 30_000,
+    dismissible: true
+  }
+  const RUNNING = {
+    id: 3,
+    text: 'Downloading speech model… 42%',
+    tone: 'info' as const,
+    button: 'cancel' as const,
+    phase: 'installing',
+    lingerMs: null,
+    dismissible: true,
+    liveText: 'Downloading speech model…'
+  }
+  const READY = {
+    id: 3,
+    text: 'Speech model ready — hold the mic to talk',
+    tone: 'info' as const,
+    phase: 'ready'
+  }
+
+  function renderPill(overrides: Partial<InputBoxViewProps> = {}) {
+    const onVoiceNoticeExpire = vi.fn()
+    const onVoiceNoticeAction = vi.fn()
+    const onVoiceNoticeCancel = vi.fn()
+    const props = makeProps({
+      voiceEnabled: true,
+      voiceNotice: OFFER,
+      voiceHeld: false,
+      onVoiceNoticeExpire,
+      onVoiceNoticeAction,
+      onVoiceNoticeCancel,
+      ...overrides
+    })
+    const view = render(<InputBoxView {...props} />)
+    const rerender = (more: Partial<InputBoxViewProps>): void =>
+      view.rerender(<InputBoxView {...props} {...more} />)
+    return { onVoiceNoticeExpire, onVoiceNoticeAction, onVoiceNoticeCancel, rerender }
+  }
+  const pill = (): HTMLElement => screen.getByTestId('InputBox.voiceNotice')
+  const advance = (ms: number): void => {
+    act(() => {
+      vi.advanceTimersByTime(ms)
+    })
+  }
+
+  it('the offer has a Download button that calls the handler, and no Cancel', () => {
+    const { onVoiceNoticeAction, onVoiceNoticeCancel } = renderPill()
+    const button = screen.getByTestId('InputBox.voiceNoticeAction')
+    expect(button).toHaveTextContent('Download')
+    expect(screen.queryByTestId('InputBox.voiceNoticeCancel')).toBeNull()
+    fireEvent.click(button)
+    expect(onVoiceNoticeAction).toHaveBeenCalledTimes(1)
+    expect(onVoiceNoticeCancel).not.toHaveBeenCalled()
+  })
+
+  it('a running download has a Cancel button that calls its handler, and no Download', () => {
+    const { onVoiceNoticeAction, onVoiceNoticeCancel } = renderPill({ voiceNotice: RUNNING })
+    expect(pill()).toHaveTextContent('Downloading speech model… 42%')
+    expect(screen.queryByTestId('InputBox.voiceNoticeAction')).toBeNull()
+    advance(CANCEL_GUARD_MS)
+    fireEvent.click(screen.getByTestId('InputBox.voiceNoticeCancel'))
+    expect(onVoiceNoticeCancel).toHaveBeenCalledTimes(1)
+    expect(onVoiceNoticeAction).not.toHaveBeenCalled()
+  })
+
+  it('a Cancel press right after the button appeared is ignored (a double click on Download)', () => {
+    const { onVoiceNoticeAction, onVoiceNoticeCancel, rerender } = renderPill()
+    fireEvent.click(screen.getByTestId('InputBox.voiceNoticeAction'))
+    expect(onVoiceNoticeAction).toHaveBeenCalledTimes(1)
+    rerender({ voiceNotice: RUNNING })
+
+    // The second click of the double click, and an Enter auto-repeating.
+    fireEvent.click(screen.getByTestId('InputBox.voiceNoticeCancel'))
+    advance(CANCEL_GUARD_MS - 1)
+    fireEvent.click(screen.getByTestId('InputBox.voiceNoticeCancel'))
+    expect(onVoiceNoticeCancel).not.toHaveBeenCalled()
+
+    advance(1)
+    fireEvent.click(screen.getByTestId('InputBox.voiceNoticeCancel'))
+    expect(onVoiceNoticeCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('Download is not guarded', () => {
+    const { onVoiceNoticeAction } = renderPill()
+    fireEvent.click(screen.getByTestId('InputBox.voiceNoticeAction'))
+    expect(onVoiceNoticeAction).toHaveBeenCalledTimes(1)
+  })
+
+  it('Download turning into Cancel is a new element: focus does not carry over to it', () => {
+    const { rerender } = renderPill()
+    const download = screen.getByTestId('InputBox.voiceNoticeAction')
+    download.focus()
+    expect(document.activeElement).toBe(download)
+
+    rerender({ voiceNotice: RUNNING })
+    const cancel = screen.getByTestId('InputBox.voiceNoticeCancel')
+    expect(cancel).not.toBe(download)
+    expect(document.activeElement).not.toBe(cancel)
+  })
+
+  it('the dismiss control puts a notice that asks something away, and only that', () => {
+    const { onVoiceNoticeExpire, onVoiceNoticeAction } = renderPill()
+    const dismiss = screen.getByTestId('InputBox.voiceNoticeDismiss')
+    expect(dismiss).toHaveAttribute('aria-label', 'Dismiss')
+    expect(dismiss.className).toContain('min-h-[32px]')
+    expect(dismiss.className).toContain('min-w-[32px]')
+    fireEvent.click(dismiss)
+    expect(onVoiceNoticeExpire).toHaveBeenCalledWith(OFFER.id)
+    expect(onVoiceNoticeAction).not.toHaveBeenCalled()
+  })
+
+  it('a running download can be dismissed too (it only hides the pill)', () => {
+    const { onVoiceNoticeExpire, onVoiceNoticeCancel } = renderPill({ voiceNotice: RUNNING })
+    fireEvent.click(screen.getByTestId('InputBox.voiceNoticeDismiss'))
+    expect(onVoiceNoticeExpire).toHaveBeenCalledWith(RUNNING.id)
+    expect(onVoiceNoticeCancel).not.toHaveBeenCalled()
+  })
+
+  it('Escape in the pill dismisses it', () => {
+    const { onVoiceNoticeExpire } = renderPill()
+    fireEvent.keyDown(screen.getByTestId('InputBox.voiceNoticeAction'), { key: 'Escape' })
+    expect(onVoiceNoticeExpire).toHaveBeenCalledWith(OFFER.id)
+  })
+
+  it('outcomes and plain notices have no dismiss control, and Escape leaves them alone', () => {
+    const { onVoiceNoticeExpire } = renderPill({ voiceNotice: READY })
+    expect(screen.queryByTestId('InputBox.voiceNoticeDismiss')).toBeNull()
+    fireEvent.keyDown(pill(), { key: 'Escape' })
+    expect(onVoiceNoticeExpire).not.toHaveBeenCalled()
+  })
+
+  it('a download’s percentage is not read out: the screen reader gets the phase line only', () => {
+    renderPill({ voiceNotice: RUNNING })
+    expect(pill()).toHaveAttribute('aria-live', 'polite')
+    const visible = screen.getByText('Downloading speech model… 42%')
+    expect(visible).toHaveAttribute('aria-hidden', 'true')
+    const spoken = screen.getByText('Downloading speech model…', { exact: true })
+    expect(spoken).not.toHaveAttribute('aria-hidden')
+    expect(spoken.className).toContain('sr-only')
+  })
+
+  it('ticks of the percentage change only the hidden text, not what is announced', () => {
+    const { rerender } = renderPill({ voiceNotice: RUNNING })
+    const spoken = screen.getByText('Downloading speech model…', { exact: true })
+    rerender({ voiceNotice: { ...RUNNING, text: 'Downloading speech model… 43%' } })
+    expect(screen.getByText('Downloading speech model…', { exact: true })).toBe(spoken)
+    expect(screen.getByText('Downloading speech model… 43%')).toHaveAttribute('aria-hidden', 'true')
+  })
+
+  it('every other text is announced as before', () => {
+    renderPill({ voiceNotice: READY })
+    expect(screen.getByText(READY.text)).not.toHaveAttribute('aria-hidden')
+  })
+
+  it('a plain notice has no button at all', () => {
+    renderPill({ voiceNotice: { id: 9, text: 'No speech detected', tone: 'info' } })
+    expect(screen.queryByTestId('InputBox.voiceNoticeAction')).toBeNull()
+    expect(screen.queryByTestId('InputBox.voiceNoticeCancel')).toBeNull()
+  })
+
+  it('the buttons carry a 32 px hit area without growing the pill', () => {
+    renderPill()
+    expect(screen.getByTestId('InputBox.voiceNoticeAction').className).toContain('min-h-[32px]')
+    expect(screen.getByTestId('InputBox.voiceNoticeAction').className).toContain('-my-[7px]')
+  })
+
+  it('the offer does NOT fade 5 s after release: it stays 30 s, fading over the last stretch', () => {
+    const { onVoiceNoticeExpire } = renderPill()
+    advance(VOICE_NOTICE_LINGER_MS * 5)
+    expect(onVoiceNoticeExpire).not.toHaveBeenCalled()
+    expect(pill()).not.toHaveAttribute('data-fading')
+
+    advance(30_000 - VOICE_NOTICE_LINGER_MS * 5 - VOICE_NOTICE_FADE_MS - 1)
+    expect(pill()).not.toHaveAttribute('data-fading')
+    advance(1)
+    expect(pill()).toHaveAttribute('data-fading', 'true')
+    advance(VOICE_NOTICE_FADE_MS)
+    expect(onVoiceNoticeExpire).toHaveBeenCalledWith(OFFER.id)
+  })
+
+  it('the offer stays while the push-to-talk is held, however long', () => {
+    const { onVoiceNoticeExpire } = renderPill({ voiceHeld: true })
+    advance(120_000)
+    expect(onVoiceNoticeExpire).not.toHaveBeenCalled()
+  })
+
+  it('a running download never fades or expires, held or not', () => {
+    const { onVoiceNoticeExpire } = renderPill({ voiceNotice: RUNNING })
+    advance(10 * 60_000)
+    expect(onVoiceNoticeExpire).not.toHaveBeenCalled()
+    expect(pill()).not.toHaveAttribute('data-fading')
+  })
+
+  it('the same notice moving to its outcome restarts the usual 5 s (it then fades like an outcome)', () => {
+    const { onVoiceNoticeExpire, rerender } = renderPill({ voiceNotice: RUNNING })
+    advance(60_000)
+    rerender({ voiceNotice: READY })
+    expect(screen.queryByTestId('InputBox.voiceNoticeCancel')).toBeNull()
+    advance(VOICE_NOTICE_LINGER_MS - 1)
+    expect(onVoiceNoticeExpire).not.toHaveBeenCalled()
+    advance(1)
+    expect(onVoiceNoticeExpire).toHaveBeenCalledWith(READY.id)
+  })
+
+  it('the offer moving to a running download (same notice) stops its 30 s clock', () => {
+    const { onVoiceNoticeExpire, rerender } = renderPill()
+    advance(29_000)
+    rerender({ voiceNotice: RUNNING })
+    advance(5 * 60_000)
+    expect(onVoiceNoticeExpire).not.toHaveBeenCalled()
   })
 })
 

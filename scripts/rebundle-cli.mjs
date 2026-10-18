@@ -50,14 +50,27 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync, chmodSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { readFileSync, chmodSync } from 'node:fs'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { detectFormat } from './lib/binary-format.mjs'
 import { CHUNK_DELIM_RE, isChunkConcat } from './lib/chunk-format.mjs'
+import { cliJsPath, cliTrashDir, cliVendorDir, versionJsonPath } from './lib/cli-paths.mjs'
+import { replaceFile, sweepTrash } from './lib/vendor-swap.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
+
+// vendor/claude-cli, or CLAUDEUI_CLI_VENDOR_DIR (cli-paths.mjs): the pipeline's
+// inputs and output, and the one dir whose locked binaries go to cliTrashDir().
+const CLI_VENDOR_DIR = cliVendorDir()
+
+/** True when `child` is `parent` or lives under it. */
+function isInside(parent, child) {
+  const rel = relative(resolve(parent), resolve(child))
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
 
 const BUN_MAGIC = Buffer.from('\n---- Bun! ----\n', 'utf8')
 const ENTRY_SIZE = 52
@@ -97,7 +110,7 @@ function parseArgs(argv) {
  * original Bun binary. Output is `bun-claude<ext>` in the vendor dir.
  */
 function resolvePipelineArgs() {
-  const versionPath = join(ROOT, 'vendor', 'claude-cli', 'version.json')
+  const versionPath = versionJsonPath()
   let meta
   try {
     meta = JSON.parse(readFileSync(versionPath, 'utf8'))
@@ -111,9 +124,9 @@ function resolvePipelineArgs() {
   // absolute paths are preserved when passed via `extract-cli --binary`. `resolve()`
   // handles both: absolute input → returned as-is, relative → joined onto ROOT.
   const input = resolve(ROOT, meta.sourceBinary)
-  const newCli = join(ROOT, 'vendor', 'claude-cli', 'cli.js')
+  const newCli = cliJsPath()
   const ext = process.platform === 'win32' ? '.exe' : ''
-  const output = join(ROOT, 'vendor', 'claude-cli', `bun-claude${ext}`)
+  const output = join(CLI_VENDOR_DIR, `bun-claude${ext}`)
   return { noop: false, input, newCli, output }
 }
 
@@ -134,18 +147,10 @@ function alignUp(n, align) {
 }
 
 // ---------------------------------------------------------------------------
-// Format detection: first bytes tell us PE (MZ) vs Mach-O (0xfeedfacf LE) vs
-// ELF (0x7F E L F) vs universal Mach-O (0xcafebabe BE).
+// Format detection (`detectFormat`, ./lib/binary-format.mjs): first bytes tell
+// us PE (MZ) vs Mach-O (0xfeedfacf LE) vs ELF (0x7F E L F) vs universal Mach-O
+// (0xcafebabe BE).
 // ---------------------------------------------------------------------------
-
-function detectFormat(buf) {
-  if (buf.readUInt16LE(0) === 0x5a4d) return 'pe'
-  const m = buf.readUInt32LE(0)
-  if (m === 0xfeedfacf) return 'macho64'
-  if (buf.readUInt32BE(0) === 0xcafebabe || buf.readUInt32BE(0) === 0xcafebabf) return 'macho-fat'
-  if (buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46) return 'elf'
-  return 'unknown'
-}
 
 // ---------------------------------------------------------------------------
 // PE parser: locate `.bun` section, cert table, headers we need to update
@@ -669,7 +674,7 @@ function main() {
     // platform-independently).
     console.log(
       'rebundle-cli: ELF (Linux) rebundle not implemented — skipping. ' +
-        'Patched cli.js remains at vendor/claude-cli/cli.js; no bun-claude binary was produced.'
+        `Patched cli.js remains at ${cliJsPath()}; no bun-claude binary was produced.`
     )
     process.exit(0)
   } else {
@@ -752,7 +757,14 @@ function main() {
       : rewriteMachO(buf, container.macho, newBlob)
   log(`new file size: ${out.length} (was ${buf.length})`)
 
-  writeFileSync(args.output, out)
+  // Rename-replace, never overwrite in place: a running bun-claude.exe is
+  // locked on Windows (the old one is moved into a trash dir and swept by a
+  // later run), and a fresh inode also keeps macOS's code-signature cache from
+  // killing a binary that was rewritten in place. chmod / codesign / xattr
+  // below act on `args.output` after the rename.
+  const insideVendor = isInside(CLI_VENDOR_DIR, args.output)
+  const trashDir = insideVendor ? cliTrashDir() : join(dirname(args.output), '.rebundle-trash')
+  replaceFile(args.output, out, trashDir)
   // Preserve executable bit on non-Windows (chmod on Windows is a no-op).
   if (process.platform !== 'win32') {
     try {
@@ -762,6 +774,13 @@ function main() {
     }
   }
   log(`wrote ${args.output}`)
+  const held = sweepTrash(trashDir)
+  if (held > 0) {
+    console.log(
+      `rebundle-cli: ${held} old binaries still held by running processes in ` +
+        (isInside(ROOT, trashDir) ? relative(ROOT, trashDir).replaceAll('\\', '/') : trashDir)
+    )
+  }
 
   // Mach-O binaries need an ad-hoc signature to run on Apple Silicon (the
   // kernel rejects unsigned arm64 executables). Our bytewise edits invalidate

@@ -247,6 +247,16 @@ describe('hydrateReplica — new-session default mode (ADR-050)', () => {
     expect(store().defaultPermissionMode).toBe('auto')
   })
 
+  it('projects the model tier colours as on for a host whose settings predate the key', () => {
+    hydrateReplica({ ...makeSnapshot({}, null), settings: { theme: 'light' } })
+    expect(store().settings.agentModelTierColors).toBe(true)
+    hydrateReplica({
+      ...makeSnapshot({}, null),
+      settings: { theme: 'light', agentModelTierColors: false }
+    })
+    expect(store().settings.agentModelTierColors).toBe(false)
+  })
+
   it('respects a pinned non-auto pick from the host', () => {
     hydrateReplica({
       ...makeSnapshot({}, null),

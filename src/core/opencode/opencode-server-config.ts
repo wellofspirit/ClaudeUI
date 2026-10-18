@@ -13,6 +13,10 @@
  * - `agents.<name>.permissions` — the mode-less agent overlay (ADR-097 §3,
  *   `permission-v2.ts` `agentPermissionOverlay`); an empty overlay emits no
  *   `agents` key at all.
+ * - `agents.<name>` — the user's and the project's Claude Code agent
+ *   definitions as whole `subagent` agents (`claude-agent-shim.ts`, ADR-103).
+ *   A name the overlay also covers gets the agent's own rules first and the
+ *   overlay's after them.
  *
  * Not emitted any more: `experimental.continue_loop_on_deny` (2.x continues a
  * turn after a reject-with-message natively, ADR-097 §3) and `autoupdate`
@@ -23,7 +27,11 @@
  * a file, never a log line. `configIdentity` is a one-way digest, safe to log.
  */
 import { createHash } from 'node:crypto'
-import type { Config_InfoEncoded, Permission_Ruleset } from './protocol-v2/openapi'
+import type {
+  Config_AgentEncoded,
+  Config_InfoEncoded,
+  Permission_Ruleset
+} from './protocol-v2/openapi'
 import { HOSTED_MCP_SERVER } from './claude-mcp-bridge'
 import type { OpencodeMcpEntry, OpencodeMcpRemoteEntry } from './claude-mcp-bridge'
 
@@ -43,6 +51,13 @@ export interface OpencodeConfigInput {
   /** Absolute path of the `claudeui-xeng` plugin directory, or null when not found. */
   readonly pluginDir?: string | null
   readonly agentPermissions?: AgentPermissionOverlay
+  /**
+   * Claude Code agent definitions injected as `agents.<name>` entries
+   * (`loadClaudeAgentsForOpencode`). Part of the config identity: an edited
+   * agent file starts a new server at the next acquire (the old one ends at
+   * its last release).
+   */
+  readonly claudeAgents?: Readonly<Record<string, Config_AgentEncoded>>
 }
 
 /** The per-server hosted MCP endpoint (`mcp-http-host.ts`). */
@@ -81,15 +96,21 @@ export function buildOpencodeConfig(
     if (name !== HOSTED_MCP_SERVER) servers[name] = entry
   }
   servers[HOSTED_MCP_SERVER] = hostedMcpEntry(hosted)
-  const agents = Object.entries(input.agentPermissions ?? {}).filter(
-    ([, rules]) => rules.length > 0
+  const overlay = new Map(
+    Object.entries(input.agentPermissions ?? {}).filter(([, rules]) => rules.length > 0)
   )
+  const agents: Record<string, Config_AgentEncoded> = {}
+  for (const [name, agent] of Object.entries(input.claudeAgents ?? {})) {
+    // The agent's own (deny-only) rules first, the overlay's after: last match wins.
+    const permissions = [...(agent.permissions ?? []), ...(overlay.get(name) ?? [])]
+    overlay.delete(name)
+    agents[name] = permissions.length > 0 ? { ...agent, permissions } : agent
+  }
+  for (const [name, permissions] of overlay) agents[name] = { permissions }
   return {
     mcp: { servers },
     ...(input.pluginDir ? { plugins: [input.pluginDir] } : {}),
-    ...(agents.length > 0
-      ? { agents: Object.fromEntries(agents.map(([name, permissions]) => [name, { permissions }])) }
-      : {})
+    ...(Object.keys(agents).length > 0 ? { agents } : {})
   }
 }
 
@@ -117,7 +138,8 @@ function stableJson(value: unknown): string {
  * The server key (ADR-097 §2: one server per distinct config injection). Covers
  * exactly what `buildOpencodeConfig` injects except the hosted endpoint, which
  * is per server rather than per config. Equal inputs → equal identity,
- * whatever their key order. A sha256 prefix: safe to log, reveals no secret.
+ * whatever their key order (the injected Claude agents included, so an edited
+ * agent file is a new server). A sha256 prefix: safe to log, reveals no secret.
  */
 export function configIdentity(input: OpencodeConfigInput): string {
   const canonical = stableJson({
@@ -125,7 +147,8 @@ export function configIdentity(input: OpencodeConfigInput): string {
     pluginDir: input.pluginDir ?? null,
     agentPermissions: Object.fromEntries(
       Object.entries(input.agentPermissions ?? {}).filter(([, rules]) => rules.length > 0)
-    )
+    ),
+    claudeAgents: input.claudeAgents ?? {}
   })
   return createHash('sha256').update(canonical).digest('hex').slice(0, 16)
 }

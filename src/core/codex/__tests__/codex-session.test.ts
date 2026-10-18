@@ -17,6 +17,7 @@ import recordedElicitation from './fixtures/mcp-tool-approval-elicitation.json'
 import { codexItemId } from '../event-mapper'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 import { blobRefOf } from '../../../test/helpers/blob-refs'
+import { onHostPlatform } from '../../../test/helpers/host-platform'
 
 const events = vi.hoisted(() => vi.fn())
 const overrides = vi.hoisted(() => new Map<string, unknown>())
@@ -2481,6 +2482,11 @@ describe('Codex cross-engine dispatch', () => {
       required: ['engine', 'prompt'],
       additionalProperties: false
     })
+  })
+
+  it('voice follows the host: on where the speech pack has a runtime, off where it has none (ADR-101 §8)', () => {
+    expect(onHostPlatform('darwin', 'arm64', () => fixture().session.capabilities.voice)).toBe(true)
+    expect(onHostPlatform('freebsd', 'x64', () => fixture().session.capabilities.voice)).toBe(false)
   })
 
   it('does not offer the tool at all when no dispatch target is available', async () => {
@@ -5478,6 +5484,137 @@ describe('Codex item stream lifecycle', () => {
         .getMessages()
         .some((m) => m.content.some((b) => b.type === 'text' && b.text === 'before close'))
     ).toBe(true)
+  })
+
+  /**
+   * `instant_interrupt` (default ON since codex 0.162, upstream #51812) lets a
+   * `turn/steer` preempt the sampling request that is streaming. On the SSE
+   * transport the in-flight stream is DROPPED, not drained: the item already
+   * streaming never gets its `item/completed`
+   * (`codex-rs/core/src/session/turn.rs`, the preempt branch, with its
+   * "TODO: Reconcile any response item already being presented to the client"),
+   * and the turn's final `items` do not contain it either. The websocket path
+   * drains cleanly, so only SSE reaches this. ClaudeUI keeps upstream's default
+   * because `finishTurn` already seals whatever is still streaming.
+   */
+  describe('instant_interrupt: a stream the steer preempted is dropped, never completed', () => {
+    const CMD = {
+      id: 'cmd',
+      type: 'commandExecution',
+      command: 'sleep 1',
+      cwd: '/isolated',
+      exitCode: null,
+      aggregatedOutput: null
+    }
+    const DROPPED = {
+      agentMessage: { id: 'dropped', type: 'agentMessage', text: '' },
+      reasoning: { id: 'dropped', type: 'reasoning', summary: [], content: [] }
+    }
+    const droppedId = codexItemId('root', 'turn', 'dropped')
+    const scenario = async (kind: 'agentMessage' | 'reasoning', partial: string) => {
+      const f = fixture()
+      await f.session.run('hello')
+      f.notify('turn/started', {
+        threadId: 'root',
+        turn: { id: 'turn', status: 'inProgress', items: [] }
+      })
+      // A tool still in flight whose completion is the sub-turn boundary the
+      // held message is forwarded at, while the dropped item is streaming.
+      f.notify('item/started', {
+        threadId: 'root',
+        turnId: 'turn',
+        item: { ...CMD, status: 'inProgress' }
+      })
+      f.notify('item/started', { threadId: 'root', turnId: 'turn', item: DROPPED[kind] })
+      delta(f.notify, 'dropped', partial.slice(0, 7), kind)
+      delta(f.notify, 'dropped', partial.slice(7), kind)
+      f.session.enqueuePrompt('steer me')
+      const itemId = f.queues().at(-1)![0].itemId
+      f.notify('item/completed', {
+        threadId: 'root',
+        turnId: 'turn',
+        item: { ...CMD, status: 'completed', exitCode: 0, aggregatedOutput: '' }
+      })
+      await vi.waitFor(() =>
+        expect(f.queues().at(-1)).toEqual([expect.objectContaining({ itemId, state: 'consumed' })])
+      )
+      expect(
+        f.request.mock.calls.filter(([method]) => method === 'turn/steer').map((call) => call[1])
+      ).toEqual([
+        expect.objectContaining({ expectedTurnId: 'turn', clientUserMessageId: `steer-${itemId}` })
+      ])
+      // The stream was dropped: the steer's own user item, then the NEXT
+      // sampling request's item, and no `item/completed` for the dropped one.
+      const user = {
+        id: 'u1',
+        type: 'userMessage',
+        clientId: `steer-${itemId}`,
+        content: [{ type: 'text', text: 'steer me' }]
+      }
+      const next = { id: 'next', type: 'agentMessage', text: 'Answer after the steer' }
+      f.notify('item/started', { threadId: 'root', turnId: 'turn', item: user })
+      f.notify('item/completed', { threadId: 'root', turnId: 'turn', item: user })
+      f.notify('item/started', {
+        threadId: 'root',
+        turnId: 'turn',
+        item: { ...next, text: '' }
+      })
+      f.notify('item/completed', { threadId: 'root', turnId: 'turn', item: next })
+      // Still open, mid-turn: the turn end is what settles it, not an item event.
+      expect(sent('session:item-seal').map((d) => d.message.id)).not.toContain(droppedId)
+      f.notify('turn/completed', {
+        threadId: 'root',
+        turn: { id: 'turn', status: 'completed', items: [user, next] }
+      })
+      return { f, itemId, next }
+    }
+
+    it.each([
+      ['agentMessage', 'Partial answer', { type: 'text', text: 'Partial answer' }],
+      ['reasoning', 'Partial thought', { type: 'thinking', text: 'Partial thought' }]
+    ] as const)(
+      'seals the half-streamed %s at turn end and spins nothing',
+      async (kind, partial, block) => {
+        const { f, itemId, next } = await scenario(kind, partial)
+        const seals = sent('session:item-seal')
+        // The dropped item's partial text is kept, once, under its own id.
+        expect(seals.filter((d) => d.message.id === droppedId)).toEqual([
+          expect.objectContaining({ message: expect.objectContaining({ content: [block] }) })
+        ])
+        expect(
+          f.session.getMessages().find((message) => message.id === droppedId)?.content
+        ).toEqual([block])
+        // The post-steer item rendered normally.
+        expect(seals.map((d) => d.message.id)).toContain(codexItemId('root', 'turn', next.id))
+        expect(
+          f.session
+            .getMessages()
+            .find((message) => message.id === codexItemId('root', 'turn', next.id))?.content
+        ).toEqual([{ type: 'text', text: next.text }])
+        // Nothing is left streaming: every opened item has been sealed, and a
+        // straggling token for the dropped one is ignored.
+        expect(
+          sent('session:item-open')
+            .map((d) => d.message.id)
+            .sort()
+        ).toEqual(
+          [...new Set(seals.map((d) => d.message.id))]
+            .filter((id) => id !== codexItemId('root', 'turn', next.id))
+            .sort()
+        )
+        const chunks = sent('session:item-delta').length
+        delta(f.notify, 'dropped', 'late', kind)
+        expect(sent('session:item-delta')).toHaveLength(chunks)
+        // The steer was consumed, its native user item replaced the synthesized
+        // row, and the session is idle again rather than waiting on the turn.
+        expect(f.queues().at(-1)).toEqual([expect.objectContaining({ itemId, state: 'consumed' })])
+        expect(f.session.getMessages().find((message) => message.role === 'user')).toEqual(
+          expect.objectContaining({ replacesMessageId: `steer-${itemId}` })
+        )
+        expect(f.session.willQueue).toBe(false)
+        expect(sent('session:status').at(-1)).toEqual(expect.objectContaining({ state: 'idle' }))
+      }
+    )
   })
 })
 
