@@ -1274,7 +1274,7 @@ describe('sendPrompt — origin and the held inbox (slice 1a)', () => {
       parentRef: 's-parent',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false,
+      grouped: true,
       state: 'live'
     })
     const prompted = (): number | null | undefined => getSessionLink(ref)?.clientPromptedAt

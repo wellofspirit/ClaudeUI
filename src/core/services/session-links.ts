@@ -1,9 +1,11 @@
 /**
- * Session refs and parent/child links (session tools, slice 1b, spec §4/§5).
+ * Session refs and links (session tools, slice 1b, spec §4/§5; flat groups in slice 5).
  *
  * A ref (`s-` + 6 characters) is the short handle a session keeps across the
  * routing-id rekey and restarts; a link records that one session started, or
- * was handed off to, another. This module is the RULE and the bridge to the
+ * was handed off to, another — its ORIGIN — and whether the pair is `grouped` (shown
+ * as one piece of work). The lineage is always kept; grouping is the user's view and
+ * can be changed afterwards. This module is the RULE and the bridge to the
  * replicated state: SQLite (`session_ref`, `session_link`, via `db.ts`) is the
  * record, and every change re-emits `session:link-changed` carrying the whole
  * (small) link table, so a client that joins late reads it from the snapshot and
@@ -13,17 +15,17 @@
  *  - `starting` until the child's first status reaches canonical (`live`), or
  *    its first status is a disconnect (`failed`);
  *  - a session deleted while `starting` → `failed`, otherwise → `ended`; deleting
- *    a PARENT leaves its children in place with their links `ended`;
- *  - `detached` is the user's choice: the pair is no longer shown as related.
+ *    an ORIGIN leaves the sessions it started in place with their links `ended`.
  *
  * The session tools (`session-tools.ts`) create links with {@link linkChild} after
- * they spawn the child.
+ * they spawn the new session.
  */
 import { randomInt } from 'node:crypto'
 import type { ChatMessage, EngineId } from '../../shared/types'
 import {
   REF_ALPHABET,
   REF_LENGTH,
+  groupHeadRef,
   RESERVED_SESSION_WORDS,
   isRef,
   isRefShaped,
@@ -46,6 +48,7 @@ import {
   moveSessionRef,
   sessionLinksByParent,
   sessionProposalStartedRef,
+  setSessionLinkGrouped,
   setSessionLinkState,
   setSessionRefIds,
   upsertSessionLink,
@@ -140,7 +143,7 @@ export interface ResolvedSession {
 export type ResolveResult =
   | ({ ok: true } & ResolvedSession)
   | { ok: false; reason: 'not-found' }
-  /** `self` and `parent` are the caller's to resolve; they are not titles. */
+  /** `self` and `origin` (or `parent`) are the caller's to resolve; they are not titles. */
   | { ok: false; reason: 'reserved' }
   | {
       ok: false
@@ -200,7 +203,7 @@ export function knownSessionIds(): string[] {
 /**
  * What a tool's `session` argument names. In order: one of our refs; a live
  * routing id or a durable session id (a ref is assigned if it has none yet); an
- * exact, unique title. `self` and `parent` are refused as titles because the
+ * exact, unique title. `self`, `origin` and `parent` are refused as titles because the
  * caller resolves them; so is anything shaped like a ref that is not one — an
  * unknown `s-…` is "not found", never a title lookup. Two sessions sharing a
  * title are ambiguous and come back as candidates.
@@ -261,11 +264,11 @@ const startingByRouting = new Map<string, string>()
 
 function infoOf(row: SessionLinkRow): SessionLinkInfo {
   return {
-    parentRef: row.parentRef,
+    originRef: row.parentRef,
     kind: row.kind,
     state: row.state,
     createdBy: row.createdBy,
-    wakeParent: row.wakeParent,
+    grouped: row.grouped,
     createdAt: row.createdAt
   }
 }
@@ -330,13 +333,13 @@ export interface RecordLinkInput {
   parentRef: string
   kind: SessionLinkKind
   createdBy: SessionLinkCreator
-  wakeParent: boolean
+  grouped: boolean
   state?: SessionLinkState
 }
 
 /**
- * Record `parent → child`. A session has at most one parent (a second record
- * replaces the first). Throws for a link that would make a session its own
+ * Record `origin → started session`. A session has at most one origin (a second
+ * record replaces the first). Throws for a link that would make a session its own
  * ancestor, which no flow produces and the sidebar could not draw.
  */
 export function recordLink(input: RecordLinkInput): void {
@@ -403,41 +406,81 @@ export function awaitingClientPrompt(ref: string): boolean {
   )
 }
 
-/** The user took the pair apart: the child is a top-level session again. */
-export function detachLink(childRef: string): boolean {
-  return setLinkState(childRef, 'detached')
+/**
+ * Group or ungroup a session with the one that started it. The link (the lineage)
+ * stays either way.
+ */
+export function setLinkGrouped(childRef: string, grouped: boolean): boolean {
+  const changed = setSessionLinkGrouped(childRef, grouped)
+  if (changed) emitLinks()
+  return changed
 }
 
 /**
- * The body of `session:link:detach`: detach the link a session (named by the id
- * its row is keyed by) has to its parent.
+ * The body of `session:link:set-grouped`: "Detach from group" (`grouped: false`) and
+ * "Add to group" (`true`) on the session named by the id its row is keyed by.
  */
-export function detachSessionLink(sessionId: string): { success: boolean; error?: string } {
+export function setSessionGrouped(
+  sessionId: string,
+  grouped: boolean
+): { success: boolean; error?: string } {
   const ref = findSessionRef(sessionId)
   const link = ref ? getSessionLink(ref.ref) : undefined
-  if (!ref || !link) return { success: false, error: 'This session has no parent session' }
-  if (link.state === 'detached') return { success: true }
-  detachLink(ref.ref)
+  if (!ref || !link) return { success: false, error: 'This session was not started from another' }
+  setLinkGrouped(ref.ref, grouped === true)
   return { success: true }
 }
 
-export interface LinkedSessions {
-  parent: SessionLinkRow | null
-  children: SessionLinkRow[]
-  siblings: SessionLinkRow[]
+/** The group head of `ref`: the topmost session reached through grouped links. */
+export function groupHeadOf(ref: string): string {
+  return groupHeadRef((r) => {
+    const link = getSessionLink(r)
+    return link && { originRef: link.parentRef, grouped: link.grouped }
+  }, ref)
 }
 
-/** The sessions a ref is related to: its parent link, its children, and the parent's other children. Detached links are not related. */
-export function linksOf(ref: string): LinkedSessions {
-  const own = getSessionLink(ref)
-  const parent = own && own.state !== 'detached' ? own : null
-  const children = sessionLinksByParent(ref).filter((l) => l.state !== 'detached')
-  const siblings = parent
-    ? sessionLinksByParent(parent.parentRef).filter(
-        (l) => l.state !== 'detached' && l.childRef !== ref
-      )
-    : []
-  return { parent, children, siblings }
+export interface LinkedSessions {
+  /** The link to the session that started this one, grouped or not. */
+  origin: SessionLinkRow | null
+  /** The links of the sessions this one started directly, grouped or not. */
+  started: SessionLinkRow[]
+  /** This session's group: its head and every session grouped under it (this one included; just itself when alone). */
+  group: Set<string>
+}
+
+/** The whole link table by started session's ref: read once, then asked as often as needed. */
+export type LinkTable = ReadonlyMap<string, SessionLinkRow>
+
+/** One read of the link table. A caller that asks about many sessions reads it once and passes it on. */
+export function readLinkTable(): LinkTable {
+  return new Map(allSessionLinks().map((l) => [l.childRef, l]))
+}
+
+/** A link table seen as `groupHeadRef` reads links. */
+const originOf =
+  (table: LinkTable) =>
+  (ref: string): { originRef: string; grouped: boolean } | undefined => {
+    const link = table.get(ref)
+    return link && { originRef: link.parentRef, grouped: link.grouped }
+  }
+
+/** Every ref in the group `ref` belongs to. */
+export function groupOf(ref: string, table: LinkTable = readLinkTable()): Set<string> {
+  const head = groupHeadRef(originOf(table), ref)
+  const out = new Set<string>([head, ref])
+  for (const childRef of table.keys()) {
+    if (groupHeadRef(originOf(table), childRef) === head) out.add(childRef)
+  }
+  return out
+}
+
+/** The sessions a ref is tied to: where it came from, what it started, and its group. */
+export function linksOf(ref: string, table: LinkTable = readLinkTable()): LinkedSessions {
+  return {
+    origin: table.get(ref) ?? null,
+    started: [...table.values()].filter((l) => l.parentRef === ref),
+    group: groupOf(ref, table)
+  }
 }
 
 export interface LinkChildInput {
@@ -448,8 +491,9 @@ export interface LinkChildInput {
   engine: EngineId
   kind: SessionLinkKind
   createdBy: SessionLinkCreator
-  wakeParent: boolean
-  /** The child's name for its card until the sidebar has a title for it. */
+  /** Shown as part of the origin's group (always for a hand-off). */
+  grouped: boolean
+  /** The new session's name for its card until the sidebar has a title for it. */
   title?: string
   /**
    * Put a session card in the parent's transcript (default). Off for a session a
@@ -475,7 +519,7 @@ export function linkChild(input: LinkChildInput): { parentRef: string; childRef:
     parentRef,
     kind: input.kind,
     createdBy: input.createdBy,
-    wakeParent: input.wakeParent
+    grouped: input.grouped
   })
   startingByRouting.set(input.childRoutingId, child.ref)
   if (input.card === false) return { parentRef, childRef: child.ref }
@@ -591,7 +635,7 @@ function onSessionRemoved(id: string): void {
   if (!row) return
   let changed = false
   const own = getSessionLink(row.ref)
-  if (own && own.state !== 'detached' && own.state !== 'ended' && own.state !== 'failed') {
+  if (own && own.state !== 'ended' && own.state !== 'failed') {
     changed = setSessionLinkState(row.ref, own.state === 'starting' ? 'failed' : 'ended') || changed
   }
   for (const child of sessionLinksByParent(row.ref)) {

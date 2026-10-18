@@ -400,7 +400,7 @@ hydration:
 - **`settings`, the session registry (`recentSessionIds`/`pinnedSessionIds`/
   `customTitles`/`worktreeInfoMap`/`hiddenSessions`/`hiddenProjects`/`sessionEngines`),
   `autoModeDisabledBySettings`, `slashCommands`** — files every client used to read for
-  itself, plus the parent/child link tables (`sessionLinks`/`sessionRefs`, from SQLite via
+  itself, plus the session link tables (origin + `grouped`) (`sessionLinks`/`sessionRefs`, from SQLite via
   `seedLinkState`, slice 1b). `services/sync-seed.ts` seeds them from the same readers the renderer store
   uses, at the same point in boot. Without it, a phone connecting to a freshly-booted
   desktop got an empty sidebar, default theme and no recents until the first config save

@@ -91,7 +91,7 @@ describe('a session ref follows a rekey (host-side)', { timeout: 30_000 }, () =>
         engine: 'codex',
         kind: 'started',
         createdBy: 'agent',
-        wakeParent: false
+        grouped: true
       })
       expect(db.getSessionLink(childRef)?.state).toBe('starting')
       expect(db.getSessionRef(childRef)).toMatchObject({ routingId: 'temp-1', sessionId: null })

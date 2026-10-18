@@ -24,9 +24,22 @@ export const isProposalId = (input: unknown): input is string =>
   typeof input === 'string' && PROPOSAL_ID_PATTERN.test(input)
 
 /**
+ * How a proposed session relates to the one that proposed it: `same_work` continues
+ * it (the new session joins its group), `standalone` is separate work that only
+ * records where it came from. The click on the card can override it.
+ */
+export const PROPOSAL_RELATIONS = ['standalone', 'same_work'] as const
+export type ProposalRelation = (typeof PROPOSAL_RELATIONS)[number]
+
+/** Does a start with this relation join the proposer's group? A proposal from before relations existed is standalone. */
+export function proposalGrouped(relation: ProposalRelation | undefined): boolean {
+  return relation === 'same_work'
+}
+
+/**
  * Where and how the proposed session will run, resolved when it was proposed (the
- * parent's engine, model, effort and mode filled in), so a click starts exactly
- * what the card showed whatever the parent has done since.
+ * proposer's engine, model, effort and mode filled in), so a click starts exactly
+ * what the card showed whatever the proposer has done since.
  */
 export interface ProposalPlacement {
   engine: EngineId
@@ -39,7 +52,8 @@ export interface ProposalPlacement {
   worktree?: string
   /** The directory is outside the proposing session's own tree: starting it needs the click, and the card says so. */
   outside?: boolean
-  wake_when_done?: boolean
+  /** Absent on a proposal made before relations existed: read as `standalone`. */
+  relation?: ProposalRelation
 }
 
 export type ProposalState = 'pending' | 'started' | 'dismissed'

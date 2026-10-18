@@ -1,11 +1,11 @@
 # ADR-104: Session tools — agents start, hand off to and message other sessions
 
 **Status:** Accepted (2026-10-18). Implemented on branch `session-tools` (slices: registry fix, delivery and
-origin, native peer messages, links, the tools on Claude, proposals, child reports, the other engines,
-context pressure).
+origin, native peer messages, links, the tools on Claude, proposals, the other engines, context pressure,
+grouping).
 **Relates to:** [ADR-033](adr-033_cross-engine-dispatch.md) (cross-engine dispatch stays the subagent
 feature), [ADR-038](adr-038_event-driven-approval-lifecycle.md), [ADR-050](adr-050_auto-mode-as-the-default-autonomy.md)
-(auto availability gate on child modes), [ADR-059](adr-059_no-silent-model-fallback.md) (spawn errors),
+(auto availability gate on a started session's mode), [ADR-059](adr-059_no-silent-model-fallback.md) (spawn errors),
 [ADR-073](adr-073_agent-roster-and-task-run-identity.md) (in-session roster),
 [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md) and
 [ADR-088](adr-088_dispatch-autonomy-inheritance.md) (auto-mode judge), [ADR-093](adr-093_zoom-trap-no-viewport-units.md),
@@ -22,7 +22,7 @@ new session, pasting the old session's id, and having the new session re-read th
 Claude Desktop ships this as host-side tools rather than a Claude Code feature: two in-process MCP servers
 (`ccd_session`, `ccd_session_mgmt`) let Claude start a session, propose one as a card the user starts,
 hand a task off to a new session, list, read, message and stop sessions, and read a session's context use.
-Children nest under their parent and report each turn's outcome back to it. Suggestions are driven by
+Children nest under their parent and report each turn's outcome back to it (in Desktop). Suggestions are driven by
 system-prompt text, not by a host threshold. Claude Code itself contributes only a routing of its built-in
 `SendMessage` to a host server of that name, on desktop-class entrypoints.
 
@@ -52,23 +52,31 @@ each at the other. ClaudeUI does not host or override Claude Code's `SendMessage
 
 ### 2. Fresh briefs only
 
-A new session never receives a copy of its parent's conversation; it starts from a brief (task and at least
-80 characters of background) or, for a hand-off, from a handoff written by the parent. The purpose is to leave
+A new session never receives a copy of the starting session's conversation; it starts from a brief (task and at
+least 80 characters of background) or, for a hand-off, from a handoff written by the session handing off. The purpose is to leave
 an overgrown context behind, and agent reliability degrades well before a context window is full.
 
 ### 3. Hand-off as content, file written by ClaudeUI
 
 `session_hand_off` takes the handoff text as an argument. ClaudeUI saves it under its own data directory
-(`~/.claude/ui/handoffs/`) and inlines it into the child's first prompt. Agents get a tool, never a path the
+(`~/.claude/ui/handoffs/`) and inlines it into the new session's first prompt. Agents get a tool, never a path the
 host will read: no agent-chosen read path, no engine grant or sandbox exception, and no file in the user's
 repository.
 
-### 4. Parent and child
+### 4. Groups of sequential work, not parent and child
 
-A persisted link (`started` | `handoff`, with a lifecycle `starting → live → ended | failed | detached`) nests
-a child under its parent in the sidebar on every client, with a Detach action. The parent stays alive after a
-hand-off and shows "continued in →". On each child turn end the parent receives a short note quoting the
-child's final text as data; with `wake_when_done` an idle parent is woken once its children are idle.
+The session that starts or hands off to a new one stays alive and carries on; the new session works on its
+own and asks the user for anything it needs. Nothing flows back: no turn reports, no waking. (Reports and
+waking belong to a separate assistant-session feature; the code for them is kept but not wired.)
+
+The origin is recorded as a link (`started` | `handoff`, with a lifecycle `starting → live → ended | failed`)
+and drives a logical grouping of sequential work. A link is grouped or standalone: a hand-off is
+grouped by default, a started session is standalone unless the agent marks it the same work, and the user can
+change either from the row menu ("Detach from group", "Add to group"); a proposal card offers "Start as
+standalone work" next to starting it in the group. Groups are flat: the topmost grouped session is the group's
+head, and every grouped session sits one level under it in start order, with a "continued from" or "started
+from" hint, so a long chain of hand-offs stays one tidy group. The originating session's transcript keeps a
+card for each session it started; hand-offs keep their "continued in → / continued from ←" markers.
 Sessions are addressed by short refs that survive the routing-id rekey; routing ids are never shown to models.
 
 ### 5. Origin of every injected turn
@@ -86,11 +94,15 @@ ClaudeUI's gate is the approval surface, so the frame asserts the receiving sess
 - A session starts or hands off only on a clean user turn; otherwise the call becomes a proposal card. An
   agent-started session cannot start sessions until its user types into it (a hand-off requested by the
   user's context-pressure setting is exempt). At most 10 starts per user turn.
-- A child's permission mode is capped at its parent's; a working directory outside the parent's tree turns
-  the start into a proposal.
-- Reads are automatic within the session family and project; reading other projects needs approval.
-  Messages and stops are automatic within the family when the target's permission-mode class is not above
-  the sender's; otherwise they need approval.
+- A started session's permission mode is capped at the starting session's; a working directory outside the
+  starting session's tree turns the start into a proposal.
+- Reads are automatic within the group (or between a session and the one that directly started it) and the
+  project; reading other projects needs approval. Messages and stops are automatic within the group (or that
+  direct pair) when the target's permission-mode class is not above
+  the sender's; otherwise they need approval. Because the scope is the whole flat group, the last session of a
+  hand-off chain reaches the first without asking, and the user's "Add to group" is also a grant: it puts the
+  session in every member's automatic scope. A group can span projects only through the user (a click on an
+  out-of-folder proposal, or "Add to group"), and its members then read each other across those projects.
 - Turns started by other sessions are bounded (10 since the last user prompt); past that, and for idle,
   closed or out-of-budget targets, items wait in a persistent per-session inbox and are delivered at the
   target's next turn. Messages never resume a closed session.
@@ -98,7 +110,7 @@ ClaudeUI's gate is the approval surface, so the frame asserts the receiving sess
 - Every acting call is written to the audit log with the calling session as the actor.
 - Where the rules are enforced: the deny rules (root agent only, plan mode, the start gate, the caps) are
   re-checked by the tool service itself, so they hold in every permission mode. The rules that only ask
-  first (reads outside the family and project, messages and stops outside the family or into a higher mode
+  first (reads outside the group and project, messages and stops outside the group or into a higher mode
   class) go through the engine's approval step, so a session in `bypassPermissions` skips them, as it skips
   every other prompt; these tools offer no "always allow" rule that would remove them silently.
 - The caller is identified from the engine's own record of the tool call: on Claude, the frame that
@@ -113,7 +125,7 @@ ClaudeUI's gate is the approval surface, so the frame asserts the receiving sess
   desktop's native picker may still produce backslash paths, so comparisons normalise separators.
 - Mode classes for message parity: `plan` < `default`/`dontAsk` < `acceptEdits` < `auto` <
   `bypassPermissions`; `auto` counts as a prompting sender for Claude Code's own peer-message parity. A
-  child inherits its parent's mode as is; it can only request a mode at or below its parent's.
+  started session inherits its starter's mode as is; it can only request a mode at or below the starter's.
 
 ### 7. Context pressure is a user setting
 
@@ -155,9 +167,9 @@ decided them.
   (ADR-102), which can call these tools instead of defining its own.
 - The turn-origin field is a new shared seam across four engines, the reducer and the judge; it also closes
   the existing gap where host-injected prompts read as the user's words.
-- The child's first prompt is origin `user`: its judge treats the parent's brief as user intent. This is
-  accepted because a start only follows a clean user turn and the child's mode is capped; letting the child's
-  judge also see the parent's consenting turn is backlog.
+- A started session's first prompt is origin `user`: its judge treats the starter's brief as user intent.
+  This is accepted because a start only follows a clean user turn and the started session's mode is capped;
+  letting its judge also see the starter's consenting turn is backlog.
 - Codex threads started before this change do not get the tools.
 - The model-facing guidance contradicts Claude Code's own "no need to wrap up early or hand off" line when the
   user's setting asks for a hand-off; the guidance says the user's instruction wins.
@@ -169,7 +181,7 @@ decided them.
 - **Host Claude Code's `ccd_session_mgmt` to capture native `SendMessage`.** Rejected: an undocumented
   internal contract, and `SendMessage` is heavily used for subagents and teammates; a distinct tool avoids
   confusion.
-- **Copy the conversation into the child (fork).** Rejected: it defeats the purpose of leaving a heavy
+- **Copy the conversation into the new session (fork).** Rejected: it defeats the purpose of leaving a heavy
   context.
 - **Agent-written handoff file in the repository.** Rejected: an agent-chosen path the host reads is an
   injection surface, and the file pollutes every repository's working tree.

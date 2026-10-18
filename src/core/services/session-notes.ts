@@ -1,5 +1,13 @@
 /**
- * Child → parent notes and wake (session tools, slice 3, spec §6.4/§6.5).
+ * Child → parent turn notes (session tools, slice 3, spec §6.4/§6.5) — DORMANT.
+ *
+ * Reports back to the session that started a session are not part of the session
+ * tools (ruling 18, slice 5): the new session works on its own and asks the user, and
+ * nothing flows back. The module and its tests are kept for the future "assistant
+ * session" feature, which will want exactly this: nothing in production calls
+ * {@link enableSessionNotes} or {@link configureSessionNotes}, so the host observer
+ * below is never registered and no note is ever sent. Only {@link noteStopRequested}
+ * is live, and it does not need either (it feeds context pressure).
  *
  * When a session an agent started (or handed work off to) finishes a turn, its
  * parent hears about it without the user relaying anything: a note — origin
@@ -13,7 +21,8 @@
  * transcript, the pending approvals and the background tasks of the moment.
  *
  * The parent is told whoever prompted the child: the user may well have typed in
- * the child, and the parent still wants the outcome.
+ * the child, and the parent still wants the outcome. Notes never wake the parent
+ * (`wake_when_done` is gone with the tools; the link no longer carries it).
  *
  * Cost: a status for a session with no link is two object lookups in canonical
  * (`sessionRefs`, `sessionLinks`) — no DB read, no allocation. The DB is read only
@@ -39,7 +48,7 @@ export type TurnOutcome = 'finished' | 'failed' | 'stopped' | 'waiting'
 
 let manager: SessionManager | null = null
 
-/** Called once by the session IPC registration; notes are not sent before it. */
+/** Notes are not sent before this, nor before {@link enableSessionNotes}. */
 export function configureSessionNotes(next: SessionManager | null): void {
   manager = next
 }
@@ -157,39 +166,6 @@ export function noteText(input: NoteInput): string {
 }
 
 // ---------------------------------------------------------------------------
-// Wake
-// ---------------------------------------------------------------------------
-
-/**
- * May this note wake its parent? Only when the link asks for it, no other
- * `wake_when_done` child of that parent is still working (so the last of them
- * speaks), and the parent is idle with nothing waiting on the user. The
- * agent-turn budget bounds the rest, in `deliver`.
- */
-function shouldWake(
-  state: CanonicalState,
-  childRef: string,
-  link: SessionLinkInfo,
-  parentId: string
-): boolean {
-  if (!link.wakeParent) return false
-  const parent = state.sessions[parentId]
-  if (!parent || parent.status.state !== 'idle' || parent.pendingApprovals.length > 0) return false
-  for (const [ref, other] of Object.entries(state.sessionLinks)) {
-    if (ref === childRef || other.parentRef !== link.parentRef || !other.wakeParent) continue
-    // A child still starting has not done its work yet.
-    if (other.state === 'starting') return false
-    if (other.state !== 'live') continue
-    const resolved = resolveRef(ref)
-    const sibling = resolved.ok ? state.sessions[resolved.id] : undefined
-    // A sibling blocked on the user is not working: it cannot finish until someone
-    // answers, and the parent is the one who can tell the user.
-    if (sibling?.status.state === 'running' && sibling.pendingApprovals.length === 0) return false
-  }
-  return true
-}
-
-// ---------------------------------------------------------------------------
 // Observing
 // ---------------------------------------------------------------------------
 
@@ -232,11 +208,10 @@ function onStatus(id: string, status: SessionStatus | undefined): void {
       : found && found.session.pendingApprovals.length > 0
         ? 'waiting'
         : 'finished'
-  notifyParent(state, ref, link, found, outcome, watch.after)
+  notifyParent(ref, link, found, outcome, watch.after)
 }
 
 function notifyParent(
-  state: CanonicalState,
   childRef: string,
   link: SessionLinkInfo,
   found: ReturnType<typeof sessionOf>,
@@ -244,7 +219,7 @@ function notifyParent(
   after: string | undefined
 ): void {
   if (!manager) return
-  const parent = resolveRef(link.parentRef)
+  const parent = resolveRef(link.originRef)
   if (!parent.ok) return
   const title = (found && titleOf(found.key)) || 'Untitled session'
   const text = noteText({
@@ -258,7 +233,7 @@ function notifyParent(
     origin: 'agent-note',
     text,
     from: { key: childRef, title },
-    wake: shouldWake(state, childRef, link, parent.id)
+    wake: false
   }).catch((err) => {
     logger.warn(LOG, `could not deliver the turn note of ${childRef}: ${String(err)}`)
   })
@@ -280,7 +255,7 @@ function onApprovalRequest(id: string): void {
   const session = state.sessions[id]
   if (!ref || !watch || link?.state !== 'live' || !session) return
   if (session.pendingApprovals.length !== 1) return
-  notifyParent(state, ref, link, { key: id, session }, 'waiting', watch.after)
+  notifyParent(ref, link, { key: id, session }, 'waiting', watch.after)
 }
 
 // `session:error` and the approval events carry the id the session is keyed by now:
@@ -302,7 +277,7 @@ function onError(id: string): void {
 }
 
 /**
- * A link changed (a child was deleted, detached or failed): stop watching turns
+ * A link changed (a child was deleted or failed): stop watching turns
  * whose link is no longer one the parent hears from. Canonical has already dropped
  * a deleted session's id by then, so this is the one place its watch can be found.
  */
@@ -323,25 +298,37 @@ function sweep(): void {
  */
 export function noteStopRequested(id: string): void {
   noteTurnStopped(id)
+  // While notes are dormant `turns` never fills, so the lookup below is a no-op.
   const ref = syncCore.getCanonicalState().sessionRefs[id]
   const watch = ref ? turns.get(ref) : undefined
   if (watch) watch.stopped = true
 }
 
-addHostObserver((channel, args) => {
-  try {
-    if (channel === 'session:link-changed') return sweep()
-    if (typeof args[0] !== 'string') return
-    if (channel === 'session:status') onStatus(args[0], args[1] as SessionStatus | undefined)
-    else if (channel === 'session:error') onError(args[0])
-    else if (channel === 'session:approval-request') onApprovalRequest(args[0])
-  } catch (err) {
-    logger.warn(LOG, `turn-end bookkeeping for "${channel}" failed: ${String(err)}`)
-  }
-})
+let disableObserver: (() => void) | null = null
 
-/** Test seam: forget the watched turns. */
+/**
+ * Start watching turns. Nothing in production calls this (see the module comment);
+ * the tests do. Idempotent.
+ */
+export function enableSessionNotes(): void {
+  if (disableObserver) return
+  disableObserver = addHostObserver((channel, args) => {
+    try {
+      if (channel === 'session:link-changed') return sweep()
+      if (typeof args[0] !== 'string') return
+      if (channel === 'session:status') onStatus(args[0], args[1] as SessionStatus | undefined)
+      else if (channel === 'session:error') onError(args[0])
+      else if (channel === 'session:approval-request') onApprovalRequest(args[0])
+    } catch (err) {
+      logger.warn(LOG, `turn-end bookkeeping for "${channel}" failed: ${String(err)}`)
+    }
+  })
+}
+
+/** Test seam: stop watching and forget the watched turns. */
 export function resetSessionNotesForTests(): void {
+  disableObserver?.()
+  disableObserver = null
   turns.clear()
   manager = null
 }

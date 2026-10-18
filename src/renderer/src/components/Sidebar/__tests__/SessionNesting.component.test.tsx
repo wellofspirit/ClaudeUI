@@ -1,12 +1,13 @@
 /**
- * Layer 2: parent/child links in the sidebar (session tools, slice 1b).
+ * Layer 2: session groups in the sidebar (session tools, slice 1b; flat groups in slice 5).
  *
  * The links arrive the way they do in the app — a `session:link-changed` event
  * through the replica fold — and the real `DirectoryItem` / `PinnedSessionList`
- * draw them: a child under its parent in the Projects view with a fold toggle on
- * the parent; a child whose parent is elsewhere (another project, hidden) stays
- * top-level with a "↳ parent" hint; the flat lists carry the same hint; and
- * Detach is a command on the child.
+ * draw them: a grouped session one level under its group's head in the Projects view
+ * with a fold toggle and a count on the head; a standalone session, or one whose head is
+ * elsewhere (another project, hidden), stays a top-level row; every row that came from
+ * another session carries a "started from" / "continued from" hint, in the flat lists
+ * too; and Detach from group / Add to group are one command on the row.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
@@ -36,12 +37,12 @@ const group = (projectKey: string, sessions: SessionInfo[]): DirectoryGroup => (
   sessions
 })
 
-const link = (parentRef: string, over: Partial<SessionLinkInfo> = {}): SessionLinkInfo => ({
-  parentRef,
+const link = (originRef: string, over: Partial<SessionLinkInfo> = {}): SessionLinkInfo => ({
+  originRef,
   kind: 'started',
   state: 'live',
   createdBy: 'agent',
-  wakeParent: false,
+  grouped: true,
   createdAt: 1,
   ...over
 })
@@ -78,9 +79,9 @@ const ids = (): string[] =>
 const row = (id: string): HTMLElement =>
   screen.getAllByTestId('SessionItem').find((el) => el.getAttribute('data-id') === id)!
 
-describe('sidebar nesting', () => {
+describe('sidebar groups', () => {
   let app: TestApp
-  const A = group('proj-a', [info('x', 'Other'), info('c', 'Child'), info('p', 'Parent')])
+  const A = group('proj-a', [info('x', 'Other'), info('c', 'Member'), info('p', 'Head')])
 
   beforeEach(async () => {
     ;(window as unknown as { matchMedia: unknown }).matchMedia ??= (): MediaQueryList =>
@@ -117,33 +118,83 @@ describe('sidebar nesting', () => {
     })
   }
 
-  it('draws a child right under its parent, indented, with no hint (the parent is right above)', () => {
+  it('draws a grouped session right under its head, one level in, with the head’s count and its own hint', () => {
     link2()
     renderGroup(A)
     expect(ids()).toEqual(['x', 'p', 'c'])
     expect(row('p').getAttribute('data-depth')).toBe('0')
     expect(row('c').getAttribute('data-depth')).toBe('1')
-    expect(within(row('c')).queryByTestId('SessionItem.parentHint')).toBeNull()
-    expect(within(row('p')).getByTestId('SessionItem.toggleChildren').textContent).toContain('1')
-    expect(within(row('x')).queryByTestId('SessionItem.toggleChildren')).toBeNull()
+    expect(within(row('c')).getByTestId('SessionItem.originHint').textContent).toBe(
+      'started from Head'
+    )
+    expect(within(row('p')).getByTestId('SessionItem.toggleMembers').textContent).toContain('1')
+    expect(within(row('x')).queryByTestId('SessionItem.toggleMembers')).toBeNull()
+  })
+
+  it('says "continued from" for a hand-off and "started from" for a same-work start', () => {
+    link2({ kind: 'handoff' })
+    renderGroup(A)
+    expect(within(row('c')).getByTestId('SessionItem.originHint').textContent).toBe(
+      'continued from Head'
+    )
+    cleanup()
+    link2({ kind: 'started' })
+    renderGroup(A)
+    expect(within(row('c')).getByTestId('SessionItem.originHint').textContent).toBe(
+      'started from Head'
+    )
+  })
+
+  it('draws four hand-offs as the head and four members, all at depth 1, never deeper', () => {
+    const chain = group('proj-a', [
+      info('h4', 'H4'),
+      info('h3', 'H3'),
+      info('h2', 'H2'),
+      info('h1', 'H1'),
+      info('p', 'Head')
+    ])
+    useSessionStore.setState({ directories: [chain] })
+    mirrorStoreIntoReplica()
+    act(() => {
+      seed.links({
+        links: {
+          'r-h1': link('r-p', { kind: 'handoff', createdAt: 1 }),
+          'r-h2': link('r-h1', { kind: 'handoff', createdAt: 2 }),
+          'r-h3': link('r-h2', { kind: 'handoff', createdAt: 3 }),
+          'r-h4': link('r-h3', { kind: 'handoff', createdAt: 4 })
+        },
+        refs: { p: 'r-p', h1: 'r-h1', h2: 'r-h2', h3: 'r-h3', h4: 'r-h4' }
+      })
+    })
+    renderGroup(chain)
+    expect(ids()).toEqual(['p', 'h1', 'h2', 'h3', 'h4'])
+    expect(screen.getAllByTestId('SessionItem').map((el) => el.getAttribute('data-depth'))).toEqual(
+      ['0', '1', '1', '1', '1']
+    )
+    expect(within(row('p')).getByTestId('SessionItem.toggleMembers').textContent).toContain('4')
+    // Each member names the session it directly continued from.
+    expect(within(row('h3')).getByTestId('SessionItem.originHint').textContent).toBe(
+      'continued from H2'
+    )
   })
 
   it('leaves the list flat without links', () => {
     renderGroup(A)
     expect(ids()).toEqual(['x', 'c', 'p'])
-    expect(screen.queryByTestId('SessionItem.toggleChildren')).toBeNull()
+    expect(screen.queryByTestId('SessionItem.toggleMembers')).toBeNull()
+    expect(screen.queryByTestId('SessionItem.originHint')).toBeNull()
   })
 
-  it('folds and unfolds the children from the parent’s toggle, and remembers it', () => {
+  it('folds and unfolds the members from the head’s toggle, and remembers it', () => {
     link2()
     renderGroup(A)
-    const toggle = within(row('p')).getByTestId('SessionItem.toggleChildren')
+    const toggle = within(row('p')).getByTestId('SessionItem.toggleMembers')
     expect(toggle.getAttribute('aria-expanded')).toBe('true')
 
     fireEvent.click(toggle)
     expect(ids()).toEqual(['x', 'p'])
     expect(
-      within(row('p')).getByTestId('SessionItem.toggleChildren').getAttribute('data-collapsed')
+      within(row('p')).getByTestId('SessionItem.toggleMembers').getAttribute('data-collapsed')
     ).toBe('true')
     cleanup()
     // A new page load starts from what the client stored.
@@ -151,51 +202,59 @@ describe('sidebar nesting', () => {
     renderGroup(A)
     expect(ids()).toEqual(['x', 'p'])
 
-    fireEvent.click(within(row('p')).getByTestId('SessionItem.toggleChildren'))
+    fireEvent.click(within(row('p')).getByTestId('SessionItem.toggleMembers'))
     expect(ids()).toEqual(['x', 'p', 'c'])
   })
 
-  it('unfolds the parent when its child becomes the active session, so the active row is on screen', () => {
+  it('unfolds the group when a member becomes the active session, so the active row is on screen', () => {
     link2()
     const view = renderGroup(A)
-    fireEvent.click(within(row('p')).getByTestId('SessionItem.toggleChildren'))
+    fireEvent.click(within(row('p')).getByTestId('SessionItem.toggleMembers'))
     expect(ids()).toEqual(['x', 'p'])
 
-    // The user opens the child from a card or the continued-in bar.
+    // The user opens the member from a card or the continued-in bar.
     view.unmount()
     renderGroup(A, { active: 'c' })
     expect(ids()).toEqual(['x', 'p', 'c'])
     expect(row('c').className).toContain('bg-bg-tertiary')
 
-    // Folding it again while the child is active sticks until another session is opened.
-    fireEvent.click(within(row('p')).getByTestId('SessionItem.toggleChildren'))
+    // Folding it again while the member is active sticks until another session is opened.
+    fireEvent.click(within(row('p')).getByTestId('SessionItem.toggleMembers'))
     expect(ids()).toEqual(['x', 'p'])
   })
 
-  it('keeps a child whose parent is in another project at the top of its own, with a hint naming the parent', () => {
-    const other = group('proj-b', [info('pb', 'Parent in B', 'proj-b')])
+  it('keeps a member whose head is in another project at the top of its own, with a hint naming where it came from', () => {
+    const other = group('proj-b', [info('pb', 'Head in B', 'proj-b')])
     useSessionStore.setState({ directories: [A, other] })
     mirrorStoreIntoReplica()
     link2({}, 'pb')
-    const onlyChildren = group('proj-a', [info('c', 'Child'), info('x', 'Other')])
-    renderGroup(onlyChildren)
+    const onlyMembers = group('proj-a', [info('c', 'Member'), info('x', 'Other')])
+    renderGroup(onlyMembers)
     expect(ids()).toEqual(['c', 'x'])
     expect(row('c').getAttribute('data-depth')).toBe('0')
-    expect(within(row('c')).getByTestId('SessionItem.parentHint').textContent).toBe('↳ Parent in B')
+    expect(within(row('c')).getByTestId('SessionItem.originHint').textContent).toBe(
+      'started from Head in B'
+    )
   })
 
-  it('keeps a child under a hidden parent top-level, with the hint', () => {
+  it('keeps a member under a hidden head top-level, with the hint', () => {
     link2()
     renderGroup(A, { hidden: ['p'] })
     expect(ids()).toEqual(['x', 'c'])
-    expect(within(row('c')).getByTestId('SessionItem.parentHint').textContent).toBe('↳ Parent')
+    expect(within(row('c')).getByTestId('SessionItem.originHint').textContent).toBe(
+      'started from Head'
+    )
   })
 
-  it('draws a detached child top-level with no hint, and a failed one still nested', () => {
-    link2({ state: 'detached' })
+  it('draws a standalone session as an ordinary top-level row with a faint hint, and a failed member still in the group', () => {
+    link2({ grouped: false })
     renderGroup(A)
     expect(ids()).toEqual(['x', 'c', 'p'])
-    expect(within(row('c')).queryByTestId('SessionItem.parentHint')).toBeNull()
+    expect(row('c').getAttribute('data-depth')).toBe('0')
+    expect(screen.queryByTestId('SessionItem.toggleMembers')).toBeNull()
+    const hint = within(row('c')).getByTestId('SessionItem.originHint')
+    expect(hint.textContent).toBe('started from Head')
+    expect(hint.getAttribute('data-grouped')).toBe('false')
     cleanup()
 
     link2({ state: 'failed' })
@@ -203,11 +262,11 @@ describe('sidebar nesting', () => {
     expect(ids()).toEqual(['x', 'p', 'c'])
   })
 
-  it('carries the parent hint in the flat lists (Pinned, Recent and Watching draw the same row)', () => {
+  it('carries the hint in the flat lists (Pinned, Recent and Watching draw the same row), and never groups there', () => {
     link2()
     render(
       <PinnedSessionList
-        pinnedSessions={[info('c', 'Child'), info('p', 'Parent')]}
+        pinnedSessions={[info('c', 'Member'), info('p', 'Head')]}
         activeSessionId={null}
         onClickSession={noop}
         onToggleWatch={noop}
@@ -222,37 +281,68 @@ describe('sidebar nesting', () => {
       />
     )
     expect(ids()).toEqual(['c', 'p'])
-    expect(within(row('c')).getByTestId('SessionItem.parentHint').textContent).toBe('↳ Parent')
-    expect(within(row('p')).queryByTestId('SessionItem.parentHint')).toBeNull()
-    expect(screen.queryByTestId('SessionItem.toggleChildren')).toBeNull()
+    expect(within(row('c')).getByTestId('SessionItem.originHint').textContent).toBe(
+      'started from Head'
+    )
+    expect(within(row('p')).queryByTestId('SessionItem.originHint')).toBeNull()
+    expect(screen.queryByTestId('SessionItem.toggleMembers')).toBeNull()
     expect(row('c').getAttribute('data-depth')).toBe('0')
   })
 
-  it('follows the link the host replicates: a detach arriving from another client un-nests the child', () => {
+  it('follows the link the host replicates: a detach arriving from another client takes the member out of the group', () => {
     link2()
     renderGroup(A)
     expect(ids()).toEqual(['x', 'p', 'c'])
-    link2({ state: 'detached' })
+    link2({ grouped: false })
     expect(ids()).toEqual(['x', 'c', 'p'])
+    link2({ grouped: true })
+    expect(ids()).toEqual(['x', 'p', 'c'])
   })
 
-  it('offers Detach on a child only, as the session:link:detach command on the child', async () => {
-    const detach = vi.fn(async () => ({ success: true }))
-    app.bridge.ipcMain.handle('session:link:detach', detach)
+  it('offers Detach from group on a grouped session only, and Add to group on a standalone one with an origin: both are session:link:set-grouped on that session', async () => {
+    const setGrouped = vi.fn(async () => ({ success: true }))
+    app.bridge.ipcMain.handle('session:link:set-grouped', setGrouped)
     link2()
     renderGroup(A)
 
+    // The head and a session with no link offer neither.
     fireEvent.contextMenu(row('p'))
     expect(screen.queryByTestId('SessionItem.detach')).toBeNull()
+    expect(screen.queryByTestId('SessionItem.attach')).toBeNull()
     fireEvent.keyDown(document, { key: 'Escape' })
     cleanup()
     renderGroup(A)
 
     fireEvent.contextMenu(row('c'))
+    expect(screen.queryByTestId('SessionItem.attach')).toBeNull()
+    expect(screen.getByTestId('SessionItem.detach').textContent).toBe('Detach from group')
     await act(async () => {
       fireEvent.click(screen.getByTestId('SessionItem.detach'))
     })
-    expect(detach).toHaveBeenCalledTimes(1)
-    expect(detach.mock.calls[0].slice(1)).toEqual(['c'])
+    expect(setGrouped).toHaveBeenCalledTimes(1)
+    expect(setGrouped.mock.calls[0].slice(1)).toEqual(['c', false])
+    cleanup()
+
+    link2({ grouped: false })
+    renderGroup(A)
+    fireEvent.contextMenu(row('c'))
+    expect(screen.queryByTestId('SessionItem.detach')).toBeNull()
+    expect(screen.getByTestId('SessionItem.attach').textContent).toBe('Add to group')
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SessionItem.attach'))
+    })
+    expect(setGrouped).toHaveBeenCalledTimes(2)
+    expect(setGrouped.mock.calls[1].slice(1)).toEqual(['c', true])
+  })
+
+  it('does not offer Add to group when the session it came from is gone', () => {
+    // The ref of the origin names no session any more.
+    act(() => {
+      seed.links({ links: { 'r-c': link('r-gone', { grouped: false }) }, refs: { c: 'r-c' } })
+    })
+    renderGroup(A)
+    fireEvent.contextMenu(row('c'))
+    expect(screen.queryByTestId('SessionItem.attach')).toBeNull()
+    expect(screen.queryByTestId('SessionItem.detach')).toBeNull()
   })
 })

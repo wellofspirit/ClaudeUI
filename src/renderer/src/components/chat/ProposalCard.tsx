@@ -6,14 +6,16 @@
  * carries everything the card shows (the host rewrites it in place on every state
  * change), so the only live inputs are the clock — a pending proposal past its
  * expiry reads as expired without waiting for the host — and, once it has started,
- * the child's row to open. Start and Dismiss are the same two commands on desktop
- * and in the browser. Layout is flex-wrap with 32px-high targets and no viewport
+ * the new session's row to open. A pending card offers two starts, "Start in this
+ * group" and "Start as standalone work" (the proposal's own relation is the primary
+ * one; the click decides), and Dismiss: the same commands on desktop and in the browser. Layout is flex-wrap with 32px-high targets and no viewport
  * units, so it holds at phone width inside the zoom (ADR-093).
  */
 import { useEffect, useState } from 'react'
 import type { ContentBlock } from '../../../../shared/types'
 import {
   proposalDisplayState,
+  proposalGrouped,
   type ProposalDisplayState,
   type ProposalPlacement
 } from '../../../../shared/session-proposals'
@@ -90,6 +92,7 @@ export function ProposalCardView({
   expiresAt,
   now,
   busy,
+  startingGrouped,
   error,
   onStart,
   onDismiss,
@@ -106,11 +109,14 @@ export function ProposalCardView({
   reason?: string
   expiresAt: number
   now: number
-  /** A command is in flight: both buttons wait. */
+  /** A command is in flight: every button waits. */
   busy?: 'start' | 'dismiss' | null
+  /** Which Start is in flight (true: in this group), so only that button says "Starting…". */
+  startingGrouped?: boolean | null
   /** What the host said when a click did not work. */
   error?: string | null
-  onStart?: () => void
+  /** `grouped`: true joins the proposing session's group, false is standalone work. */
+  onStart?: (grouped: boolean) => void
   onDismiss?: () => void
   /** Opens the session this started; absent when it has not started or has no row. */
   onOpen?: () => void
@@ -118,6 +124,13 @@ export function ProposalCardView({
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const settledLabel = state === 'dismissed' ? dismissalText(reason) : STATE_LABEL[state]
+  const groupedPrimary = proposalGrouped(placement.relation)
+  const startButtons = [
+    { grouped: true, testid: 'ProposalCard.startGrouped', label: 'Start in this group' },
+    { grouped: false, testid: 'ProposalCard.startStandalone', label: 'Start as standalone work' }
+  ]
+    .map((b) => ({ ...b, primary: b.grouped === groupedPrimary }))
+    .sort((a, b) => Number(b.primary) - Number(a.primary))
   return (
     <div
       data-testid="ProposalCard"
@@ -208,15 +221,23 @@ export function ProposalCardView({
       <div className="mt-1 flex items-center gap-2 flex-wrap">
         {state === 'pending' && (
           <>
-            <button
-              type="button"
-              data-testid="ProposalCard.start"
-              disabled={busy != null || !onStart}
-              onClick={onStart}
-              className="shrink-0 min-h-8 text-[12px] font-medium rounded-md px-2.5 py-1 bg-accent text-bg-primary hover:bg-accent-hover transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default disabled:hover:bg-accent"
-            >
-              {busy === 'start' ? 'Starting…' : 'Start'}
-            </button>
+            {startButtons.map((b) => (
+              <button
+                key={b.testid}
+                type="button"
+                data-testid={b.testid}
+                data-primary={b.primary}
+                disabled={busy != null || !onStart}
+                onClick={() => onStart?.(b.grouped)}
+                className={
+                  b.primary
+                    ? 'shrink-0 min-h-8 text-[12px] font-medium rounded-md px-2.5 py-1 bg-accent text-bg-primary hover:bg-accent-hover transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default disabled:hover:bg-accent'
+                    : 'shrink-0 min-h-8 text-[12px] rounded-md px-2.5 py-1 border border-border text-text-secondary hover:text-text-primary transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default'
+                }
+              >
+                {busy === 'start' && startingGrouped === b.grouped ? 'Starting…' : b.label}
+              </button>
+            ))}
             <button
               type="button"
               data-testid="ProposalCard.dismiss"
@@ -249,6 +270,7 @@ export function ProposalCardView({
 export function ProposalCard({ block }: { block: ProposalBlock }): React.JSX.Element {
   const [now, setNow] = useState(() => Date.now())
   const [busy, setBusy] = useState<'start' | 'dismiss' | null>(null)
+  const [startingGrouped, setStartingGrouped] = useState<boolean | null>(null)
   const [error, setError] = useState<string | null>(null)
   // A refusal belongs to the state it was about: drop it once the card moves on.
   useEffect(() => setError(null), [block.state])
@@ -272,13 +294,14 @@ export function ProposalCard({ block }: { block: ProposalBlock }): React.JSX.Ele
   )
   const state = proposalDisplayState(block, now)
 
-  const run = async (which: 'start' | 'dismiss'): Promise<void> => {
+  const run = async (which: 'start' | 'dismiss', grouped = false): Promise<void> => {
     setBusy(which)
+    setStartingGrouped(which === 'start' ? grouped : null)
     setError(null)
     try {
       const result =
         which === 'start'
-          ? await window.api.startSessionProposal(block.proposalId)
+          ? await window.api.startSessionProposal(block.proposalId, grouped)
           : await window.api.dismissSessionProposal(block.proposalId)
       if (!result.success) setError(result.error ?? 'That did not work.')
     } catch (err) {
@@ -301,8 +324,9 @@ export function ProposalCard({ block }: { block: ProposalBlock }): React.JSX.Ele
       expiresAt={block.expiresAt}
       now={now}
       busy={busy}
+      startingGrouped={startingGrouped}
       error={error}
-      onStart={() => void run('start')}
+      onStart={(grouped) => void run('start', grouped)}
       onDismiss={() => void run('dismiss')}
       onOpen={childId && hasRow ? () => void openSessionById(childId) : undefined}
       openDisabledReason={

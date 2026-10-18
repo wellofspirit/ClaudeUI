@@ -207,7 +207,7 @@ describe('what the session tools’ start gate reads (slice 1c)', () => {
       parentRef: 's-parent',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false,
+      grouped: true,
       state: 'live'
     })
     const s = new Probe(rid, null, '/x')
@@ -249,7 +249,7 @@ describe('what the session tools’ start gate reads (slice 1c)', () => {
       parentRef: 's-parent',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false,
+      grouped: true,
       state: 'live'
     })
     const s = new Probe(rid, null, '/x')

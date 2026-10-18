@@ -9,7 +9,7 @@ import { STREAM_WATCH_COMMAND } from './stream-watch'
 import { GIT_WATCH_COMMAND } from './git-watch'
 import { SessionManager } from '../services/session-manager'
 import { respondContextPressure } from '../services/context-pressure'
-import { detachSessionLink } from '../services/session-links'
+import { setSessionGrouped } from '../services/session-links'
 import { dismissProposalFromClient, startProposalFromClient } from '../services/session-tools'
 import {
   loadSubagentHistory,
@@ -541,23 +541,27 @@ export function registerRemoteHandlers(
     handler: async (routingId: string) => allowPeerMessages(manager, routingId)
   })
 
-  // Take a session out from under its parent in the sidebar (slice 1b). `routingId`
-  // is the CHILD's id, so the audit row names the session the user acted on.
+  // "Detach from group" / "Add to group" in the sidebar (slice 1b, reworked in slice 5).
+  // `routingId` is the row's own session, so the audit row names the session the user
+  // acted on.
   handleRemote({
-    channel: 'session:link:detach',
+    channel: 'session:link:set-grouped',
     capability: 'chat',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string) => detachSessionLink(routingId)
+    handler: async (routingId: string, grouped: boolean) => setSessionGrouped(routingId, grouped)
   })
 
   // The user's click on a proposal card (session tools, slice 1c-b). The argument is
   // the proposal's id, not a session id; the audit row for the click is the registry's.
+  // `grouped` is which Start button was clicked; anything but a boolean (an older client) falls back
+  // to the proposal's own relation.
   handleRemote({
     channel: 'session:proposal:start',
     capability: 'chat',
     kind: 'command',
-    handler: async (proposalId: string) => startProposalFromClient(proposalId)
+    handler: async (proposalId: string, grouped?: boolean) =>
+      startProposalFromClient(proposalId, grouped)
   })
   handleRemote({
     channel: 'session:proposal:dismiss',

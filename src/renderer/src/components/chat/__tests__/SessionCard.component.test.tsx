@@ -31,11 +31,11 @@ const card: ChatMessage = {
 }
 
 const link = (over: Partial<SessionLinkInfo> = {}): SessionLinkInfo => ({
-  parentRef: 's-par111',
+  originRef: 's-par111',
   kind: 'started',
   state: 'live',
   createdBy: 'agent',
-  wakeParent: false,
+  grouped: true,
   createdAt: 1,
   ...over
 })
@@ -109,7 +109,7 @@ describe('SessionCard', () => {
     expect(state()).toBe('idle')
   })
 
-  it('says a child that never started failed, and one deleted or detached ended or detached', () => {
+  it('says a child that never started failed, and one that was deleted ended', () => {
     setWorld({ link: link({ state: 'failed' }), session: null })
     renderCard()
     expect(state()).toBe('failed')
@@ -117,7 +117,7 @@ describe('SessionCard', () => {
     // Nothing to open.
     expect(screen.queryByTestId('SessionCard.open')).toBeNull()
 
-    for (const linkState of ['ended', 'detached', 'starting'] as const) {
+    for (const linkState of ['ended', 'starting'] as const) {
       cleanup()
       setWorld({ link: link({ state: linkState }) })
       renderCard()
@@ -193,10 +193,17 @@ describe('SessionLinkBar — continued in / from', () => {
     kind: 'started' | 'handoff'
     active: 'parent' | 'child'
     state?: SessionLinkInfo['state']
+    grouped?: boolean
   }): void {
     useSessionStore.setState({
       activeSessionId: opts.active === 'parent' ? 'par-1' : 'kid-1',
-      sessionLinks: { 's-kid111': link({ kind: opts.kind, state: opts.state ?? 'live' }) },
+      sessionLinks: {
+        's-kid111': link({
+          kind: opts.kind,
+          state: opts.state ?? 'live',
+          grouped: opts.grouped ?? true
+        })
+      },
       sessionRefs: { 'kid-1': 's-kid111', 'par-1': 's-par111' },
       customTitles: { 'par-1': 'The long-running assistant', 'kid-1': 'Migration, part 2' },
       sessions: {},
@@ -228,19 +235,24 @@ describe('SessionLinkBar — continued in / from', () => {
     expect(switchSession).toHaveBeenCalledWith('par-1')
   })
 
-  it('shows nothing for a plain started child, a detached hand-off, or an unlinked session', () => {
+  it('shows nothing for a plain started child or an unlinked session', () => {
     world({ kind: 'started', active: 'parent' })
     const { container, unmount } = render(<SessionLinkBar />)
     expect(container.firstChild).toBeNull()
     unmount()
 
-    world({ kind: 'handoff', active: 'child', state: 'detached' })
-    const second = render(<SessionLinkBar />)
-    expect(second.container.firstChild).toBeNull()
-    second.unmount()
-
     useSessionStore.setState({ activeSessionId: 'nobody' })
     expect(render(<SessionLinkBar />).container.firstChild).toBeNull()
+  })
+
+  it('keeps the markers when the user takes a hand-off out of the group: the lineage stays', () => {
+    world({ kind: 'handoff', active: 'child', grouped: false })
+    const first = render(<SessionLinkBar />)
+    expect(screen.getByTestId('SessionLinkBar.from').textContent).toContain('Continued from')
+    first.unmount()
+    world({ kind: 'handoff', active: 'parent', grouped: false })
+    render(<SessionLinkBar />)
+    expect(screen.getByTestId('SessionLinkBar.into').textContent).toContain('Continued in')
   })
 
   it('keeps one marker per hand-off when the parent continued more than once', () => {

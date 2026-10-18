@@ -1,6 +1,7 @@
 /**
  * A session started from this one (or handed off to by it): its card in the
- * parent's transcript (session tools, slice 1b).
+ * originating session's transcript (session tools, slice 1b). It stays whether or not
+ * the new session is grouped with this one.
  *
  * `SessionCardView` is presentational. `SessionCard` is the container: the block
  * carries only what is fixed (the child's ref, why it exists, the name and engine
@@ -22,15 +23,7 @@ import { idOfRef, openSessionById, sessionTitleOf } from '../../lib/session-link
 type SessionCardBlock = Extract<ContentBlock, { type: 'session_card' }>
 
 export type SessionCardState =
-  | 'starting'
-  | 'working'
-  | 'idle'
-  | 'needs-you'
-  | 'failed'
-  | 'ended'
-  | 'detached'
-  | 'unavailable'
-  | 'unknown'
+  'starting' | 'working' | 'idle' | 'needs-you' | 'failed' | 'ended' | 'unavailable' | 'unknown'
 
 const STATE_LABEL: Record<SessionCardState, string> = {
   starting: 'Starting',
@@ -39,7 +32,6 @@ const STATE_LABEL: Record<SessionCardState, string> = {
   'needs-you': 'Needs you',
   failed: 'Failed to start',
   ended: 'Ended',
-  detached: 'Detached',
   unavailable: 'Not in the sidebar',
   unknown: 'Not available'
 }
@@ -51,7 +43,6 @@ const DOT: Record<SessionCardState, SessionDotState> = {
   'needs-you': 'attention',
   failed: 'failed',
   ended: 'inactive',
-  detached: 'inactive',
   unavailable: 'inactive',
   unknown: 'inactive'
 }

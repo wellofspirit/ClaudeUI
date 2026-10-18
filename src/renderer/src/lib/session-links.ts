@@ -1,12 +1,16 @@
 /**
- * Reading the replicated parent/child links (session tools, slice 1b).
+ * Reading the replicated session links (session tools, slice 1b; flat groups in slice 5).
  *
- * The store holds two replicated maps: `sessionLinks` (child ref → link) and
- * `sessionRefs` (a session's sidebar id → ref). Everything here is a pure read
- * over them, so the sidebar, the session card and the "continued in/from" bar
- * answer the same question the same way.
+ * The store holds two replicated maps: `sessionLinks` (a started session's ref →
+ * its link to the session that started it) and `sessionRefs` (a session's sidebar id
+ * → ref). Everything here is a pure read over them, so the sidebar, the session card
+ * and the "continued in/from" bar answer the same question the same way.
+ *
+ * A link always records the ORIGIN; `grouped` says whether the sidebar shows the pair
+ * as one piece of work. A group is flat: its head is the topmost session reached
+ * through grouped links, and every grouped session sits one level under it.
  */
-import { linkNests, type SessionLinkInfo } from '../../../shared/session-links'
+import { groupHeadRef, type SessionLinkInfo } from '../../../shared/session-links'
 import type { DirectoryGroup } from '../../../shared/types'
 import { useSessionStore } from '../stores/session-store'
 import {
@@ -22,12 +26,12 @@ export interface LinkState {
   sessionRefs: Record<string, string>
 }
 
-/** A session's link to its parent, with the parent's sidebar id when the parent is known. */
-export interface ParentLink {
+/** A session's link to the session that started it, with that session's sidebar id when known. */
+export interface OriginLink {
   childRef: string
   link: SessionLinkInfo
-  /** The parent's sidebar id; null when no session by that ref is known any more. */
-  parentId: string | null
+  /** The origin's sidebar id; null when no session by that ref is known any more. */
+  originId: string | null
 }
 
 // The ref → id inverse is rebuilt only when the refs object changes.
@@ -42,23 +46,23 @@ export function idOfRef(sessionRefs: Record<string, string>, ref: string): strin
   return inverse.get(ref) ?? null
 }
 
-/** The link that makes `sessionId` a child, unless it was detached. */
-export function parentLinkOf(state: LinkState, sessionId: string): ParentLink | null {
+/** The link to the session that started `sessionId`, grouped or not. */
+export function originLinkOf(state: LinkState, sessionId: string): OriginLink | null {
   const childRef = state.sessionRefs[sessionId]
   const link = childRef ? state.sessionLinks[childRef] : undefined
-  if (!childRef || !link || !linkNests(link)) return null
-  return { childRef, link, parentId: idOfRef(state.sessionRefs, link.parentRef) }
+  if (!childRef || !link) return null
+  return { childRef, link, originId: idOfRef(state.sessionRefs, link.originRef) }
 }
 
-/** The links under `sessionId`, with each child's sidebar id when it is known. */
-export function childLinksOf(
+/** The links of the sessions `sessionId` started directly, grouped or not, oldest first. */
+export function startedLinksOf(
   state: LinkState,
   sessionId: string
 ): { childRef: string; link: SessionLinkInfo; childId: string | null }[] {
   const ref = state.sessionRefs[sessionId]
   if (!ref) return []
   return Object.entries(state.sessionLinks)
-    .filter(([, link]) => link.parentRef === ref && linkNests(link))
+    .filter(([, link]) => link.originRef === ref)
     .sort(([, a], [, b]) => a.createdAt - b.createdAt)
     .map(([childRef, link]) => ({ childRef, link, childId: idOfRef(state.sessionRefs, childRef) }))
 }
@@ -85,86 +89,64 @@ export function sessionTitleOf(
 }
 
 /**
- * The sidebar ids above `sessionId`, nearest parent first, as far as the links
- * and refs reach. Stops at a cycle.
+ * The sidebar id of the head of `sessionId`'s group, or null when the session is its
+ * own head (alone, standalone, or the head of a group) or the head is not known.
  */
-export function ancestorIdsOf(state: LinkState, sessionId: string): string[] {
-  const out: string[] = []
-  const seen = new Set<string>([sessionId])
-  let cur = parentLinkOf(state, sessionId)?.parentId
-  while (cur && !seen.has(cur)) {
-    out.push(cur)
-    seen.add(cur)
-    cur = parentLinkOf(state, cur)?.parentId
-  }
-  return out
+export function groupHeadIdOf(state: LinkState, sessionId: string): string | null {
+  const ref = state.sessionRefs[sessionId]
+  if (!ref) return null
+  const head = groupHeadRef((r) => state.sessionLinks[r], ref)
+  return head === ref ? null : idOfRef(state.sessionRefs, head)
 }
 
-/** Deepest nesting drawn; a chain longer than this keeps its last indent. */
-export const MAX_NEST_DEPTH = 4
-
-export interface NestedRow<T> {
+export interface GroupedRow<T> {
   info: T
-  depth: number
-  /** Direct children placed under this row in the same list (shown or collapsed). */
-  childCount: number
+  /** 0 for a head or a standalone row, 1 for a member of the group above it. */
+  depth: 0 | 1
+  /** Members placed under this row in the same list (shown or folded). */
+  memberCount: number
   collapsed: boolean
 }
 
 /**
- * Lay a project's sessions out as a forest: a session whose parent is in the
- * same list sits right under it, in the order the list had. A session whose
- * parent is not in the list (another project, hidden, deleted) or whose link was
- * detached stays at the top level. A collapsed parent hides everything below it.
- * A link cycle (never recorded, but replicated data is not trusted) is cut, so
- * no row is lost and none repeats.
+ * Lay a project's sessions out in flat groups: a session whose group head is in the
+ * same list sits under that head, one level in, ordered by when each was started; the
+ * head carries the count and the fold. A session with no group head in the list —
+ * standalone, alone, or its head in another project, hidden or deleted — stays a
+ * top-level row in the order the list had. A folded head hides its members. Cycles
+ * (never recorded, but replicated data is not trusted) end the walk, so no row is lost
+ * and none repeats.
  */
-export function nestSessions<T extends { sessionId: string }>(
+export function groupSessions<T extends { sessionId: string }>(
   sessions: readonly T[],
   state: LinkState,
   collapsed: ReadonlySet<string>
-): NestedRow<T>[] {
+): GroupedRow<T>[] {
   const ids = new Set(sessions.map((s) => s.sessionId))
-  const parentOf = new Map<string, string>()
+  const members = new Map<string, T[]>()
+  const memberIds = new Set<string>()
   for (const s of sessions) {
-    const parent = parentLinkOf(state, s.sessionId)?.parentId
-    if (parent && parent !== s.sessionId && ids.has(parent)) parentOf.set(s.sessionId, parent)
-  }
-  // Cut cycles: walking up from a node must reach a root.
-  for (const start of [...parentOf.keys()]) {
-    const seen = new Set<string>([start])
-    let cur = parentOf.get(start)
-    while (cur !== undefined) {
-      if (seen.has(cur)) {
-        parentOf.delete(start)
-        break
-      }
-      seen.add(cur)
-      cur = parentOf.get(cur)
-    }
-  }
-  const children = new Map<string, T[]>()
-  for (const s of sessions) {
-    const parent = parentOf.get(s.sessionId)
-    if (parent === undefined) continue
-    const list = children.get(parent) ?? []
+    const head = groupHeadIdOf(state, s.sessionId)
+    // A head is its own head; one that is not (a cycle) heads nothing, so no row is lost.
+    if (head === null || !ids.has(head) || groupHeadIdOf(state, head) !== null) continue
+    const list = members.get(head) ?? []
     list.push(s)
-    children.set(parent, list)
+    members.set(head, list)
+    memberIds.add(s.sessionId)
   }
-  const out: NestedRow<T>[] = []
-  const emit = (info: T, depth: number): void => {
-    const kids = children.get(info.sessionId) ?? []
-    const isCollapsed = kids.length > 0 && collapsed.has(info.sessionId)
-    out.push({
-      info,
-      depth: Math.min(depth, MAX_NEST_DEPTH),
-      childCount: kids.length,
-      collapsed: isCollapsed
-    })
-    if (isCollapsed) return
-    for (const kid of kids) emit(kid, depth + 1)
+  const startedAt = (s: T): number => {
+    const ref = state.sessionRefs[s.sessionId]
+    return (ref ? state.sessionLinks[ref]?.createdAt : undefined) ?? 0
   }
-  for (const s of sessions) if (!parentOf.has(s.sessionId)) emit(s, 0)
+  const out: GroupedRow<T>[] = []
+  for (const s of sessions) {
+    if (memberIds.has(s.sessionId)) continue
+    const kids = [...(members.get(s.sessionId) ?? [])].sort((a, b) => startedAt(a) - startedAt(b))
+    const isCollapsed = kids.length > 0 && collapsed.has(s.sessionId)
+    out.push({ info: s, depth: 0, memberCount: kids.length, collapsed: isCollapsed })
+    if (isCollapsed) continue
+    for (const kid of kids) out.push({ info: kid, depth: 1, memberCount: 0, collapsed: false })
+  }
   return out
 }
 

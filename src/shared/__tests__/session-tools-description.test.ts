@@ -75,7 +75,7 @@ describe('sessionToolDescriptions', () => {
 
   it('session_stop says how a session is named and that it cannot stop itself', () => {
     const stop = sessionToolDescriptions({}).session_stop
-    expect(stop).toMatch(/`self` and `parent`/)
+    expect(stop).toMatch(/`self` and `origin`/)
     expect(stop).toMatch(/cannot stop itself/)
   })
 

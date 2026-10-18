@@ -1474,7 +1474,7 @@ export const MIGRATIONS: Migration[] = [
   {
     // Slice 1c-b (session tools): sessions an agent proposes for the user to start.
     // `placement` is the resolved start configuration as JSON (engine, model, effort,
-    // permission_mode, cwd, worktree, wake_when_done), fixed at proposal time so a
+    // permission_mode, cwd, worktree, relation), fixed at proposal time so a
     // click starts exactly what the card showed. `expires_at` is checked when a
     // proposal is read, never by a timer. `parent_ref` names the proposing session.
     version: 33,
@@ -1495,6 +1495,30 @@ export const MIGRATIONS: Migration[] = [
         );
         CREATE INDEX IF NOT EXISTS idx_session_proposal_parent
           ON session_proposal (parent_ref, state);
+      `)
+    }
+  },
+  {
+    // Slice 5 (session tools): grouping. A link always records where a session came
+    // from; `grouped` says whether the sidebar shows it as part of the origin's group.
+    // Until now every link was nested under its origin, so existing rows are grouped.
+    // The `detached` state (the user taking a session out from under its origin) is
+    // retired: it was a grouping choice, not a lifecycle state, so those rows become
+    // ungrouped and take the lifecycle state their session is in (`live` while a
+    // session still answers to the ref, otherwise `ended`). `wake_parent` stays in
+    // the table, unused.
+    version: 34,
+    up(db) {
+      db.exec(`
+        ALTER TABLE session_link ADD COLUMN grouped INTEGER NOT NULL DEFAULT 1;
+        UPDATE session_link
+           SET grouped = 0,
+               state = CASE WHEN EXISTS (
+                         SELECT 1 FROM session_ref r
+                          WHERE r.ref = session_link.child_ref
+                            AND (r.session_id IS NOT NULL OR r.routing_id IS NOT NULL)
+                       ) THEN 'live' ELSE 'ended' END
+         WHERE state = 'detached';
       `)
     }
   }
@@ -2132,15 +2156,16 @@ export function allSessionRefs(db: Db = getDb()): SessionRefRow[] {
   return (db.prepare('SELECT * FROM session_ref').all() as SessionRefDbRow[]).map(sessionRefRow)
 }
 
-export type SessionLinkRowState = 'starting' | 'live' | 'ended' | 'failed' | 'detached'
+export type SessionLinkRowState = 'starting' | 'live' | 'ended' | 'failed'
 
-/** One parent/child link, keyed by the child's ref. */
+/** One link from a session to the session that started it, keyed by the started session's ref. */
 export interface SessionLinkRow {
   childRef: string
   parentRef: string
   kind: 'started' | 'handoff'
   createdBy: 'agent' | 'user' | 'pressure'
-  wakeParent: boolean
+  /** Part of the origin's group in the sidebar (see `groupHeadRef`). */
+  grouped: boolean
   state: SessionLinkRowState
   createdAt: number
   updatedAt: number
@@ -2153,7 +2178,7 @@ interface SessionLinkDbRow {
   parent_ref: string
   kind: string
   created_by: string
-  wake_parent: number
+  grouped: number
   state: string
   created_at: number
   updated_at: number
@@ -2167,7 +2192,7 @@ function sessionLinkRow(row: SessionLinkDbRow): SessionLinkRow {
     kind: row.kind === 'handoff' ? 'handoff' : 'started',
     createdBy:
       row.created_by === 'user' || row.created_by === 'pressure' ? row.created_by : 'agent',
-    wakeParent: Number(row.wake_parent) === 1,
+    grouped: Number(row.grouped) === 1,
     state: row.state as SessionLinkRowState,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -2183,18 +2208,18 @@ export function upsertSessionLink(
   const now = link.now ?? Date.now()
   db.prepare(
     `INSERT INTO session_link
-       (child_ref, parent_ref, kind, created_by, wake_parent, state, created_at, updated_at)
+       (child_ref, parent_ref, kind, created_by, grouped, state, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(child_ref) DO UPDATE SET
        parent_ref = excluded.parent_ref, kind = excluded.kind,
-       created_by = excluded.created_by, wake_parent = excluded.wake_parent,
+       created_by = excluded.created_by, grouped = excluded.grouped,
        state = excluded.state, updated_at = excluded.updated_at`
   ).run(
     link.childRef,
     link.parentRef,
     link.kind,
     link.createdBy,
-    link.wakeParent ? 1 : 0,
+    link.grouped ? 1 : 0,
     link.state,
     now,
     now
@@ -2221,6 +2246,21 @@ export function allSessionLinks(db: Db = getDb()): SessionLinkRow[] {
       .prepare('SELECT * FROM session_link ORDER BY created_at, child_ref')
       .all() as SessionLinkDbRow[]
   ).map(sessionLinkRow)
+}
+
+/** Group or ungroup a link. Returns false when there is no such link or it is already there. */
+export function setSessionLinkGrouped(
+  childRef: string,
+  grouped: boolean,
+  now = Date.now(),
+  db: Db = getDb()
+): boolean {
+  const info = db
+    .prepare(
+      'UPDATE session_link SET grouped = ?, updated_at = ? WHERE child_ref = ? AND grouped <> ?'
+    )
+    .run(grouped ? 1 : 0, now, childRef, grouped ? 1 : 0)
+  return Number(info.changes) > 0
 }
 
 /**

@@ -83,7 +83,7 @@ function mount(
 
 describe('the proposal card, on the phone', () => {
   for (const scale of FONT_SCALES) {
-    it(`uiFontScale ${scale}: pending with the brief open and an error: everything wraps inside the card, Start and Dismiss are 32 px targets`, async () => {
+    it(`uiFontScale ${scale}: pending with the brief open and an error: everything wraps inside the card, both starts and Dismiss are 32 px targets`, async () => {
       expect(window.innerWidth).toBe(PROFILE.width)
       const root = mount('pending', scale, {
         error: 'Could not start the session: Model "a-model-that-is-not-allowed" is not allowed'
@@ -102,7 +102,8 @@ describe('the proposal card, on the phone', () => {
         'ProposalCard.prompt',
         'ProposalCard.background',
         'ProposalCard.error',
-        'ProposalCard.start',
+        'ProposalCard.startGrouped',
+        'ProposalCard.startStandalone',
         'ProposalCard.dismiss'
       ]) {
         const el = byTestId(root, id)
@@ -110,7 +111,8 @@ describe('the proposal card, on the phone', () => {
         expect(isInsideViewportX(el), id).toBe(true)
       }
       for (const id of [
-        'ProposalCard.start',
+        'ProposalCard.startGrouped',
+        'ProposalCard.startStandalone',
         'ProposalCard.dismiss',
         'ProposalCard.toggleDetails'
       ]) {
@@ -135,7 +137,8 @@ describe('the proposal card, on the phone', () => {
           reason: state === 'dismissed' ? 'agent: no longer needed' : 'expired'
         })
         await settle()
-        expect(root.querySelector('[data-testid="ProposalCard.start"]')).toBeNull()
+        expect(root.querySelector('[data-testid="ProposalCard.startGrouped"]')).toBeNull()
+        expect(root.querySelector('[data-testid="ProposalCard.startStandalone"]')).toBeNull()
         expect(hasNoHorizontalOverflow(byTestId(root, 'ProposalCard'))).toBe(true)
         cleanup()
       }
@@ -144,7 +147,7 @@ describe('the proposal card, on the phone', () => {
 })
 
 describe('the proposal card, on a desktop-width column', () => {
-  it('lays out in a 720 px column with the buttons side by side on one line', async () => {
+  it('lays out in a 720 px column with both starts and Dismiss side by side on one line', async () => {
     await page.viewport(1280, 800)
     const root = render(
       <div style={{ width: 720, padding: '0 12px' }}>
@@ -165,12 +168,15 @@ describe('the proposal card, on a desktop-width column', () => {
     ).container
     await settle()
     const card = byTestId(root, 'ProposalCard')
-    const start = byTestId(root, 'ProposalCard.start')
+    const start = byTestId(root, 'ProposalCard.startStandalone')
+    const grouped = byTestId(root, 'ProposalCard.startGrouped')
     const dismiss = byTestId(root, 'ProposalCard.dismiss')
     expect(hasNoHorizontalOverflow(card)).toBe(true)
-    expect(isInside(start, card)).toBe(true)
-    expect(isInside(dismiss, card)).toBe(true)
+    for (const button of [start, grouped, dismiss]) expect(isInside(button, card)).toBe(true)
     expect(Math.abs(rectOf(start).top - rectOf(dismiss).top)).toBeLessThan(2)
-    expect(rectOf(dismiss).left).toBeGreaterThan(rectOf(start).right - 1)
+    expect(Math.abs(rectOf(start).top - rectOf(grouped).top)).toBeLessThan(2)
+    // The primary (standalone, by default) first, then the other start, then Dismiss.
+    expect(rectOf(grouped).left).toBeGreaterThan(rectOf(start).right - 1)
+    expect(rectOf(dismiss).left).toBeGreaterThan(rectOf(grouped).right - 1)
   })
 })

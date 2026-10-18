@@ -75,7 +75,7 @@ const mount = (b: Block): ReturnType<typeof render> =>
 const state = (): string | null => screen.getByTestId('ProposalCard').getAttribute('data-state')
 
 describe('ProposalCard states', () => {
-  it('pending: title, placement summary with the directory only when it differs, expiry, Start and Dismiss', () => {
+  it('pending: title, placement summary with the directory only when it differs, expiry, two starts and Dismiss', () => {
     mount(block())
     expect(state()).toBe('pending')
     expect(screen.getByTestId('ProposalCard.title').textContent).toBe('Fix the flaky test')
@@ -84,9 +84,35 @@ describe('ProposalCard states', () => {
       'codex · model gpt-5 · effort high · acceptEdits mode · /work/demo/sub'
     )
     expect(screen.getByTestId('ProposalCard.expiry').textContent).toBe('Expires in 6 days')
-    expect(screen.getByTestId('ProposalCard.start')).not.toBeDisabled()
+    expect(screen.getByTestId('ProposalCard.startGrouped')).not.toBeDisabled()
+    expect(screen.getByTestId('ProposalCard.startStandalone')).not.toBeDisabled()
     expect(screen.getByTestId('ProposalCard.dismiss')).not.toBeDisabled()
     expect(screen.queryByTestId('ProposalCard.open')).toBeNull()
+  })
+
+  it('offers "Start in this group" and "Start as standalone work", the proposal’s own relation being the primary one and first', () => {
+    // No relation (a proposal from before relations existed) and `standalone` read the same.
+    for (const placement of [PLACEMENT, { ...PLACEMENT, relation: 'standalone' as const }]) {
+      mount(block({ placement }))
+      const grouped = screen.getByTestId('ProposalCard.startGrouped')
+      const standalone = screen.getByTestId('ProposalCard.startStandalone')
+      expect(grouped.textContent).toBe('Start in this group')
+      expect(standalone.textContent).toBe('Start as standalone work')
+      expect(standalone.getAttribute('data-primary')).toBe('true')
+      expect(grouped.getAttribute('data-primary')).toBe('false')
+      expect(
+        standalone.compareDocumentPosition(grouped) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy()
+      cleanup()
+    }
+    mount(block({ placement: { ...PLACEMENT, relation: 'same_work' } }))
+    const grouped = screen.getByTestId('ProposalCard.startGrouped')
+    const standalone = screen.getByTestId('ProposalCard.startStandalone')
+    expect(grouped.getAttribute('data-primary')).toBe('true')
+    expect(standalone.getAttribute('data-primary')).toBe('false')
+    expect(
+      grouped.compareDocumentPosition(standalone) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
   })
 
   it('the brief is collapsed until asked for', () => {
@@ -151,7 +177,8 @@ describe('ProposalCard states', () => {
     mount(block({ state: 'started', startedRef: 's-kid111' }))
     expect(state()).toBe('started')
     expect(screen.getByTestId('ProposalCard.state').textContent).toBe('Started')
-    expect(screen.queryByTestId('ProposalCard.start')).toBeNull()
+    expect(screen.queryByTestId('ProposalCard.startGrouped')).toBeNull()
+    expect(screen.queryByTestId('ProposalCard.startStandalone')).toBeNull()
     expect(screen.queryByTestId('ProposalCard.dismiss')).toBeNull()
     expect(screen.queryByTestId('ProposalCard.expiry')).toBeNull()
     expect(screen.getByTestId('ProposalCard.open')).not.toBeDisabled()
@@ -175,7 +202,8 @@ describe('ProposalCard states', () => {
     mount(block({ state: 'dismissed', reason }))
     expect(state()).toBe('dismissed')
     expect(screen.getByTestId('ProposalCard.state').textContent).toBe(text)
-    expect(screen.queryByTestId('ProposalCard.start')).toBeNull()
+    expect(screen.queryByTestId('ProposalCard.startGrouped')).toBeNull()
+    expect(screen.queryByTestId('ProposalCard.startStandalone')).toBeNull()
     expect(dismissalText(reason)).toBe(text)
   })
 
@@ -183,13 +211,15 @@ describe('ProposalCard states', () => {
     mount(block({ state: 'dismissed', reason: 'expired' }))
     expect(state()).toBe('expired')
     expect(screen.getByTestId('ProposalCard.state').textContent).toBe('Expired')
-    expect(screen.queryByTestId('ProposalCard.start')).toBeNull()
+    expect(screen.queryByTestId('ProposalCard.startGrouped')).toBeNull()
+    expect(screen.queryByTestId('ProposalCard.startStandalone')).toBeNull()
   })
 
   it('a pending card past its expiry shows expired at once, and one that expires while open flips by itself', () => {
     mount(block({ expiresAt: Date.now() - 1000 }))
     expect(state()).toBe('expired')
-    expect(screen.queryByTestId('ProposalCard.start')).toBeNull()
+    expect(screen.queryByTestId('ProposalCard.startGrouped')).toBeNull()
+    expect(screen.queryByTestId('ProposalCard.startStandalone')).toBeNull()
     cleanup()
 
     vi.useFakeTimers()
@@ -199,7 +229,8 @@ describe('ProposalCard states', () => {
       vi.advanceTimersByTime(5200)
     })
     expect(state()).toBe('expired')
-    expect(screen.queryByTestId('ProposalCard.start')).toBeNull()
+    expect(screen.queryByTestId('ProposalCard.startGrouped')).toBeNull()
+    expect(screen.queryByTestId('ProposalCard.startStandalone')).toBeNull()
   })
 
   it('says how long is left in the unit that fits', () => {
@@ -212,28 +243,45 @@ describe('ProposalCard states', () => {
 })
 
 describe('ProposalCard commands', () => {
-  it('Start sends the proposal id, waits, and shows no error on success', async () => {
+  it('each start button sends the proposal id and its own choice, whichever one is primary, and shows no error on success', async () => {
     mount(block())
     await act(async () => {
-      fireEvent.click(screen.getByTestId('ProposalCard.start'))
+      fireEvent.click(screen.getByTestId('ProposalCard.startGrouped'))
     })
-    expect(api.startSessionProposal).toHaveBeenCalledWith('p-0a1b2c3d')
+    expect(api.startSessionProposal).toHaveBeenLastCalledWith('p-0a1b2c3d', true)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('ProposalCard.startStandalone'))
+    })
+    expect(api.startSessionProposal).toHaveBeenLastCalledWith('p-0a1b2c3d', false)
+    expect(api.startSessionProposal).toHaveBeenCalledTimes(2)
     expect(api.dismissSessionProposal).not.toHaveBeenCalled()
     expect(screen.queryByTestId('ProposalCard.error')).toBeNull()
+    cleanup()
+
+    // The primary button follows the proposal, the choice follows the button.
+    mount(block({ placement: { ...PLACEMENT, relation: 'same_work' } }))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('ProposalCard.startStandalone'))
+    })
+    expect(api.startSessionProposal).toHaveBeenLastCalledWith('p-0a1b2c3d', false)
   })
 
   it('both buttons wait while a command is in flight, so a double tap sends one', async () => {
     let finish!: (v: { success: boolean }) => void
     api.startSessionProposal.mockReturnValue(new Promise((r) => (finish = r)))
     mount(block())
-    fireEvent.click(screen.getByTestId('ProposalCard.start'))
-    expect(screen.getByTestId('ProposalCard.start').textContent).toBe('Starting…')
-    expect(screen.getByTestId('ProposalCard.start')).toBeDisabled()
+    fireEvent.click(screen.getByTestId('ProposalCard.startStandalone'))
+    // Only the button that was clicked says it is starting; every button waits.
+    expect(screen.getByTestId('ProposalCard.startStandalone').textContent).toBe('Starting…')
+    expect(screen.getByTestId('ProposalCard.startGrouped').textContent).toBe('Start in this group')
+    expect(screen.getByTestId('ProposalCard.startStandalone')).toBeDisabled()
+    expect(screen.getByTestId('ProposalCard.startGrouped')).toBeDisabled()
     expect(screen.getByTestId('ProposalCard.dismiss')).toBeDisabled()
-    fireEvent.click(screen.getByTestId('ProposalCard.start'))
+    fireEvent.click(screen.getByTestId('ProposalCard.startStandalone'))
+    fireEvent.click(screen.getByTestId('ProposalCard.startGrouped'))
     expect(api.startSessionProposal).toHaveBeenCalledTimes(1)
     await act(async () => finish({ success: true }))
-    expect(screen.getByTestId('ProposalCard.start')).not.toBeDisabled()
+    expect(screen.getByTestId('ProposalCard.startStandalone')).not.toBeDisabled()
   })
 
   it('Dismiss sends the proposal id', async () => {
@@ -252,7 +300,7 @@ describe('ProposalCard commands', () => {
     })
     mount(block())
     await act(async () => {
-      fireEvent.click(screen.getByTestId('ProposalCard.start'))
+      fireEvent.click(screen.getByTestId('ProposalCard.startStandalone'))
     })
     expect(screen.getByTestId('ProposalCard.error').textContent).toBe('That proposal has expired.')
     api.dismissSessionProposal.mockRejectedValue(new Error('offline'))
@@ -276,7 +324,8 @@ describe('ProposalCard commands', () => {
         now={Date.now()}
       />
     )
-    expect(screen.getByTestId('ProposalCard.start')).toBeDisabled()
+    expect(screen.getByTestId('ProposalCard.startGrouped')).toBeDisabled()
+    expect(screen.getByTestId('ProposalCard.startStandalone')).toBeDisabled()
     expect(screen.getByTestId('ProposalCard.dismiss')).toBeDisabled()
   })
 })

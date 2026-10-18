@@ -1,21 +1,22 @@
 /**
  * "Continued in →" / "Continued from ←" under the top bar (session tools, slice 1b).
  *
- * A hand-off leaves the parent running and starts a fresh child, so each side of
- * the pair says where the other is: the parent names the session it continued
- * in, the child the one it continued from. Each name opens that session. A plain
- * `started` child is not a continuation (it has its card in the parent's
- * transcript and its row under the parent in the sidebar), and a detached link
- * shows nothing. Reads the replicated links only; renders nothing when the active
+ * A hand-off leaves the original session running and starts a fresh one, so each
+ * side of the pair says where the other is: the original names the session it
+ * continued in, the new one the session it continued from. Each name opens that
+ * session. A plain `started` session is not a continuation (the originating
+ * session's transcript has its card), and the markers stay whether or not the user
+ * has detached the pair from its group: the lineage is kept. Reads the replicated
+ * links only; renders nothing when the active
  * session has none. Flex-wrap, 32px targets, no viewport units (ADR-093).
  */
 import { useMemo } from 'react'
 import { useSessionStore } from '../../../stores/session-store'
 import {
-  childLinksOf,
   openSessionById,
-  parentLinkOf,
-  sessionTitleOf
+  originLinkOf,
+  sessionTitleOf,
+  startedLinksOf
 } from '../../../lib/session-links'
 
 export interface Continuation {
@@ -64,15 +65,15 @@ export function SessionLinkBar(): React.JSX.Element | null {
     const id = s.activeSessionId
     if (!id) return '[]'
     const items: Continuation[] = []
-    const parent = parentLinkOf(s, id)
-    if (parent?.link.kind === 'handoff' && parent.parentId) {
+    const origin = originLinkOf(s, id)
+    if (origin?.link.kind === 'handoff' && origin.originId) {
       items.push({
         direction: 'from',
-        id: parent.parentId,
-        title: sessionTitleOf(s, parent.parentId) || 'previous session'
+        id: origin.originId,
+        title: sessionTitleOf(s, origin.originId) || 'previous session'
       })
     }
-    for (const child of childLinksOf(s, id)) {
+    for (const child of startedLinksOf(s, id)) {
       if (child.link.kind === 'handoff' && child.childId) {
         items.push({
           direction: 'into',

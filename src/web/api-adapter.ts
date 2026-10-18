@@ -263,13 +263,13 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         success: boolean
         error?: string
       }>,
-    detachSessionLink: (routingId) =>
-      connection.invoke('session:link:detach', routingId) as Promise<{
+    setSessionGrouped: (routingId, grouped) =>
+      connection.invoke('session:link:set-grouped', routingId, grouped) as Promise<{
         success: boolean
         error?: string
       }>,
-    startSessionProposal: (proposalId) =>
-      connection.invoke('session:proposal:start', proposalId) as Promise<{
+    startSessionProposal: (proposalId, grouped) =>
+      connection.invoke('session:proposal:start', proposalId, grouped) as Promise<{
         success: boolean
         error?: string
         startedRef?: string

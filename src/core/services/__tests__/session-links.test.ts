@@ -1,10 +1,10 @@
 /**
  * @vitest-environment node
  *
- * Session refs and parent/child links (slice 1b, spec §4/§5): ref assignment and
+ * Session refs and links (slice 1b, spec §4/§5; groups in slice 5): ref assignment and
  * shape, `resolveRef`, the link state machine against the real funnel (status,
  * rekey, removal), the replicated payload and its snapshot round trip, the
- * session card, and the detach command.
+ * session card, grouping (the group head, detach / add), and the set-grouped command.
  *
  * The tables are the real ones (the node:sqlite-backed driver the suite aliases
  * `better-sqlite3` to) in a throwaway profile that outlives a test, so every case
@@ -26,8 +26,8 @@ import {
 } from '../db'
 import {
   awaitingClientPrompt,
-  detachLink,
-  detachSessionLink,
+  groupHeadOf,
+  groupOf,
   linkChild,
   linkPayload,
   linksOf,
@@ -38,7 +38,9 @@ import {
   resolveRef,
   seedLinkState,
   sessionCardId,
+  setLinkGrouped,
   setLinkState,
+  setSessionGrouped,
   withSessionCards
 } from '../session-links'
 
@@ -144,7 +146,7 @@ describe('the engine a ref records', () => {
       engine: 'claude',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false
+      grouped: true
     })
     expect(getSessionRef(parentRef)?.engine).toBe('opencode')
   })
@@ -210,10 +212,11 @@ describe('resolveRef', () => {
     for (const candidate of ambiguous.candidates) expect(candidate.ref).toMatch(REF_PATTERN)
   })
 
-  it('refuses the words the caller resolves (self, parent) even when a session is titled so', () => {
+  it('refuses the words the caller resolves (self, origin, parent) even when a session is titled so', () => {
     const a = born(id('a'))
     emitEvent('config:sessions-changed', [{ customTitles: { [a]: 'self' } }])
     expect(resolveRef('self')).toEqual({ ok: false, reason: 'reserved' })
+    expect(resolveRef('origin')).toEqual({ ok: false, reason: 'reserved' })
     expect(resolveRef('parent')).toEqual({ ok: false, reason: 'reserved' })
     expect(resolveRef('Parent')).toEqual({ ok: false, reason: 'reserved' })
   })
@@ -249,7 +252,7 @@ describe('linkChild', () => {
       engine: 'codex',
       kind: 'handoff',
       createdBy: 'agent',
-      wakeParent: true,
+      grouped: true,
       title: 'Fix the flaky test'
     })
 
@@ -259,11 +262,14 @@ describe('linkChild', () => {
       parentRef,
       kind: 'handoff',
       createdBy: 'agent',
-      wakeParent: true,
+      grouped: true,
       state: 'starting'
     })
     // Replicated: canonical holds the link and the id of each session it names.
-    expect(canonical().sessionLinks[childRef]).toMatchObject({ parentRef, state: 'starting' })
+    expect(canonical().sessionLinks[childRef]).toMatchObject({
+      originRef: parentRef,
+      state: 'starting'
+    })
     expect(canonical().sessionRefs[parent]).toBe(parentRef)
     expect(canonical().sessionRefs[child]).toBe(childRef)
     expect(linkEvents.at(-1)).toEqual(linkPayload())
@@ -292,7 +298,7 @@ describe('linkChild', () => {
       engine: 'claude' as const,
       kind: 'started' as const,
       createdBy: 'user' as const,
-      wakeParent: false
+      grouped: true
     }
     const { childRef } = linkChild(input)
     linkChild(input)
@@ -313,7 +319,7 @@ describe('the link state machine', () => {
       engine: 'claude',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false
+      grouped: true
     })
     return { parent, child, childRef, parentRef }
   }
@@ -374,14 +380,18 @@ describe('the link state machine', () => {
     expect(canonical().sessionLinks[childRef].state).toBe('ended')
   })
 
-  it('is detached by the user, and stays detached when the child later goes live or is removed', () => {
+  it('keeps its lifecycle state when the user ungroups the pair: grouping is not a state', () => {
     const { child, childRef } = started()
-    expect(detachLink(childRef)).toBe(true)
-    expect(detachLink(childRef)).toBe(false)
+    expect(getSessionLink(childRef)?.grouped).toBe(true)
+    expect(setLinkGrouped(childRef, false)).toBe(true)
+    expect(setLinkGrouped(childRef, false)).toBe(false)
+    expect(stateOf(childRef)).toBe('starting')
     emitEvent('session:status', [child, status(child)])
-    expect(stateOf(childRef)).toBe('detached')
+    expect(stateOf(childRef)).toBe('live')
     syncCore.removeSession(child)
-    expect(stateOf(childRef)).toBe('detached')
+    expect(stateOf(childRef)).toBe('ended')
+    // The link, with its lineage, is still there.
+    expect(getSessionLink(childRef)).toMatchObject({ grouped: false, state: 'ended' })
   })
 
   it('tells the clients once per real change, never for a no-op', () => {
@@ -397,15 +407,15 @@ describe('the link state machine', () => {
     const a = refFor('claude', id('a'))
     const b = refFor('claude', id('b'))
     const c = refFor('claude', id('c'))
-    recordLink({ childRef: b, parentRef: a, kind: 'started', createdBy: 'user', wakeParent: false })
-    recordLink({ childRef: c, parentRef: b, kind: 'started', createdBy: 'user', wakeParent: false })
+    recordLink({ childRef: b, parentRef: a, kind: 'started', createdBy: 'user', grouped: true })
+    recordLink({ childRef: c, parentRef: b, kind: 'started', createdBy: 'user', grouped: true })
     expect(() =>
       recordLink({
         childRef: a,
         parentRef: c,
         kind: 'started',
         createdBy: 'user',
-        wakeParent: false
+        grouped: true
       })
     ).toThrow(/under itself/)
     expect(() =>
@@ -414,7 +424,7 @@ describe('the link state machine', () => {
         parentRef: a,
         kind: 'started',
         createdBy: 'user',
-        wakeParent: false
+        grouped: true
       })
     ).toThrow(/under itself/)
   })
@@ -428,7 +438,7 @@ describe('the link state machine', () => {
       parentRef,
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false,
+      grouped: true,
       state: 'starting'
     })
     // A child still on its temporary routing id when the app went away.
@@ -438,7 +448,7 @@ describe('the link state machine', () => {
       engine: 'claude',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false
+      grouped: true
     }).childRef
     // The restart forgets the in-memory set of children being waited for.
     resetSessionLinksForTests()
@@ -462,7 +472,7 @@ describe('the boot settle', () => {
       engine: 'claude',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false
+      grouped: true
     })
     seedLinkState()
     expect(getSessionLink(childRef)?.state).toBe('starting')
@@ -472,29 +482,88 @@ describe('the boot settle', () => {
   })
 })
 
-describe('linksOf', () => {
-  it('names a ref’s parent, children and siblings, and leaves detached links out', () => {
-    const parent = refFor('claude', id('parent'))
-    const me = refFor('claude', id('me'))
-    const sibling = refFor('claude', id('sibling'))
-    const detachedSibling = refFor('claude', id('gone'))
-    const kid = refFor('claude', id('kid'))
-    const detachedKid = refFor('claude', id('gonekid'))
-    const r = { kind: 'started', createdBy: 'agent', wakeParent: false } as const
-    recordLink({ childRef: me, parentRef: parent, ...r })
-    recordLink({ childRef: sibling, parentRef: parent, ...r })
-    recordLink({ childRef: detachedSibling, parentRef: parent, ...r })
-    recordLink({ childRef: kid, parentRef: me, ...r })
-    recordLink({ childRef: detachedKid, parentRef: me, ...r })
-    detachLink(detachedSibling)
-    detachLink(detachedKid)
+describe('linksOf and the group head', () => {
+  const link = (
+    child: string,
+    origin: string,
+    over: { kind?: 'started' | 'handoff'; grouped?: boolean } = {}
+  ): void =>
+    recordLink({
+      childRef: child,
+      parentRef: origin,
+      kind: over.kind ?? 'handoff',
+      createdBy: 'agent',
+      grouped: over.grouped ?? true
+    })
+  const fresh = (label: string): string => refFor('claude', id(label))
+
+  it('keeps a chain of hand-offs in one flat group under the topmost session', () => {
+    const a = fresh('a')
+    const b = fresh('b')
+    const c = fresh('c')
+    const d = fresh('d')
+    link(b, a)
+    link(c, b)
+    link(d, c)
+    for (const ref of [a, b, c, d]) expect(groupHeadOf(ref)).toBe(a)
+    expect(groupOf(c)).toEqual(new Set([a, b, c, d]))
+    expect(groupOf(a)).toEqual(new Set([a, b, c, d]))
+  })
+
+  it('a standalone start breaks the chain: the started session heads a group of its own', () => {
+    const a = fresh('a')
+    const b = fresh('b')
+    const x = fresh('x')
+    const y = fresh('y')
+    link(b, a)
+    link(x, b, { kind: 'started', grouped: false })
+    link(y, x)
+    expect(groupHeadOf(x)).toBe(x)
+    expect(groupHeadOf(y)).toBe(x)
+    expect(groupOf(b)).toEqual(new Set([a, b]))
+    expect(groupOf(y)).toEqual(new Set([x, y]))
+    // The lineage is still recorded.
+    expect(linksOf(x).origin?.parentRef).toBe(b)
+    expect(linksOf(b).started.map((l) => l.childRef)).toEqual([x])
+  })
+
+  it('recomputes when the user detaches a member or adds one back', () => {
+    const a = fresh('a')
+    const b = fresh('b')
+    const c = fresh('c')
+    link(b, a)
+    link(c, b)
+    expect(groupHeadOf(c)).toBe(a)
+    // Detaching b: c, whose origin is b, forms its own group under b.
+    setLinkGrouped(b, false)
+    expect(groupHeadOf(b)).toBe(b)
+    expect(groupHeadOf(c)).toBe(b)
+    expect(groupOf(a)).toEqual(new Set([a]))
+    expect(groupOf(c)).toEqual(new Set([b, c]))
+    // Adding b back merges the groups.
+    setLinkGrouped(b, true)
+    expect(groupHeadOf(c)).toBe(a)
+    expect(groupOf(b)).toEqual(new Set([a, b, c]))
+  })
+
+  it('names a ref’s origin, the sessions it started and its group; a lone session is its own group', () => {
+    const origin = fresh('origin')
+    const me = fresh('me')
+    const sibling = fresh('sibling')
+    const standaloneKid = fresh('standalone')
+    const memberKid = fresh('member')
+    link(me, origin, { kind: 'started' })
+    link(sibling, origin, { kind: 'started' })
+    link(standaloneKid, me, { kind: 'started', grouped: false })
+    link(memberKid, me, { kind: 'started' })
 
     const related = linksOf(me)
-    expect(related.parent?.parentRef).toBe(parent)
-    expect(related.children.map((l) => l.childRef)).toEqual([kid])
-    expect(related.siblings.map((l) => l.childRef)).toEqual([sibling])
-    expect(linksOf(parent).parent).toBeNull()
-    expect(linksOf(detachedKid).parent).toBeNull()
+    expect(related.origin?.parentRef).toBe(origin)
+    expect(related.started.map((l) => l.childRef).sort()).toEqual([standaloneKid, memberKid].sort())
+    expect(related.group).toEqual(new Set([origin, me, sibling, memberKid]))
+    expect(linksOf(origin).origin).toBeNull()
+    const lone = fresh('lone')
+    expect(linksOf(lone).group).toEqual(new Set([lone]))
   })
 })
 
@@ -508,7 +577,7 @@ describe('the replicated state', () => {
       engine: 'claude',
       kind: 'handoff',
       createdBy: 'pressure',
-      wakeParent: false
+      grouped: true
     })
     const snapshot = toSnapshot(canonical(), 7)
     expect(snapshot.sessionLinks?.[childRef]).toMatchObject({
@@ -537,7 +606,7 @@ describe('the session card on a cold read', () => {
       engine: 'pi',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false
+      grouped: true
     })
     const madeAt = getSessionLink(childRef)!.createdAt
 
@@ -560,7 +629,7 @@ describe('the session card on a cold read', () => {
       engine: 'claude',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false
+      grouped: true
     })
     const live = canonical().sessions[parent].messages
     expect(
@@ -577,8 +646,8 @@ describe('the session card on a cold read', () => {
   })
 })
 
-describe('detachSessionLink — the session:link:detach body', () => {
-  it('detaches the link of the child it is given and says so otherwise', () => {
+describe('setSessionGrouped — the session:link:set-grouped body', () => {
+  it('detaches and re-adds the session it is given, replicating each change, and says so otherwise', () => {
     const parent = born(id('parent'))
     const child = born(id('child'))
     const { childRef } = linkChild({
@@ -587,21 +656,24 @@ describe('detachSessionLink — the session:link:detach body', () => {
       engine: 'claude',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false
+      grouped: true
     })
-    expect(detachSessionLink(child)).toEqual({ success: true })
-    expect(getSessionLink(childRef)?.state).toBe('detached')
-    expect(canonical().sessionLinks[childRef].state).toBe('detached')
-    // Already detached is fine; a session that was never a child is not.
-    expect(detachSessionLink(child)).toEqual({ success: true })
-    expect(detachSessionLink(parent)).toEqual({
+    expect(setSessionGrouped(child, false)).toEqual({ success: true })
+    expect(getSessionLink(childRef)?.grouped).toBe(false)
+    expect(canonical().sessionLinks[childRef].grouped).toBe(false)
+    // Idempotent; and the link is still the origin record.
+    expect(setSessionGrouped(child, false)).toEqual({ success: true })
+    expect(setSessionGrouped(child, true)).toEqual({ success: true })
+    expect(canonical().sessionLinks[childRef]).toMatchObject({ grouped: true, state: 'starting' })
+    // A session that was never started from another has nothing to group.
+    expect(setSessionGrouped(parent, true)).toEqual({
       success: false,
-      error: 'This session has no parent session'
+      error: 'This session was not started from another'
     })
-    expect(detachSessionLink(id('stranger')).success).toBe(false)
+    expect(setSessionGrouped(id('stranger'), true).success).toBe(false)
   })
 
-  it('is the same call over the remote dispatcher as directly (a chat command on the child)', async () => {
+  it('is the same call over the remote dispatcher as directly (a chat command on the session)', async () => {
     const parent = born(id('parent'))
     const child = born(id('child'))
     linkChild({
@@ -610,23 +682,24 @@ describe('detachSessionLink — the session:link:detach body', () => {
       engine: 'claude',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false
+      grouped: true
     })
     const registry = new CommandRegistry()
     const dispatcher = new RemoteDispatcher(registry)
     registry.register({
-      channel: 'session:link:detach',
+      channel: 'session:link:set-grouped',
       capability: 'chat',
       kind: 'command',
       sessionIdArg: 0,
       transport: 'remote',
-      handler: async (routingId: string) => detachSessionLink(routingId)
+      handler: async (routingId: string, grouped: boolean) => setSessionGrouped(routingId, grouped)
     })
     const viaDispatcher = await dispatcher.handle(
-      { type: 'invoke', id: '1', channel: 'session:link:detach', args: [child] },
+      { type: 'invoke', id: '1', channel: 'session:link:set-grouped', args: [child, false] },
       makeRemoteConnection('password', null)
     )
-    expect(viaDispatcher).toEqual(detachSessionLink(child))
+    expect(viaDispatcher).toEqual({ success: true })
+    expect(getSessionLink(refFor('claude', child))?.grouped).toBe(false)
   })
 })
 
@@ -640,7 +713,7 @@ describe('the first client prompt on a started session (slice 1c)', () => {
       engine: 'claude',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false
+      grouped: true
     })
     return { parent, child, childRef, parentRef }
   }
@@ -680,7 +753,7 @@ describe('the first client prompt on a started session (slice 1c)', () => {
       childRef: kidRef,
       kind: 'started',
       createdBy: 'user',
-      wakeParent: false
+      grouped: true
     })
     expect(awaitingClientPrompt(kidRef)).toBe(false)
     expect(awaitingClientPrompt(parentRef)).toBe(false)
@@ -698,7 +771,7 @@ describe('the first client prompt on a started session (slice 1c)', () => {
       childRef: 's-resume',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false,
+      grouped: true,
       state: 'live'
     })
     const temp = born(id('temp'))

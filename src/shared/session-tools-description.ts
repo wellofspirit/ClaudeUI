@@ -102,8 +102,8 @@ export const OWN_TEAMMATE_MESSAGE_TOOL: Partial<Record<'claude' | 'pi', string>>
 }
 
 const SESSION_REFS =
-  'Sessions are named by a short ref like `s-k3m9qx` (shown by session_list); `self` and `parent` ' +
-  'also work, and so does an exact, unique session title.'
+  'Sessions are named by a short ref like `s-k3m9qx` (shown by session_list); `self` and `origin` ' +
+  '(the session that started this one) also work, and so does an exact, unique session title.'
 
 export function sessionToolDescriptions(opts: {
   /** The calling engine's own subagent/teammate messaging tool, if it has one. */
@@ -117,8 +117,9 @@ export function sessionToolDescriptions(opts: {
     session_list:
       "List the user's ClaudeUI sessions (the conversations in their sidebar): ref, title, engine, " +
       'model, state (working / idle / needs-you / background-work / cold), working directory, ' +
-      `project, parent, last activity and context use. scope: linked (default: your parent, children ` +
-      `and siblings), project (this project) or all. limit ${L.listDefault} by default, at most ` +
+      `project, the session that started it, last activity and context use. scope: linked (default: ` +
+      `your group and the sessions that started you or that you started), project (this project) or ` +
+      `all. limit ${L.listDefault} by default, at most ` +
       `${L.listMax}. ${SESSION_REFS}`,
     session_get:
       'Show one ClaudeUI session: its row, the sessions started from it, and its last reply ' +
@@ -136,14 +137,18 @@ export function sessionToolDescriptions(opts: {
       'next turn; a closed session is never reopened for this) or refused.',
     session_start:
       'Start a new interactive ClaudeUI session, exactly as the user pressing New session would: it ' +
-      'appears in their sidebar under this one and runs on its own. Use it for a separate piece of ' +
+      'appears in their sidebar and runs on its own. Use it for a separate piece of ' +
       'work that deserves its own context — not for delegation you wait on (use your own subagent ' +
       'tool, or dispatch_agent for another engine). `prompt` is the task, the area and what done ' +
       `looks like; \`background\` (at least ${L.backgroundMin} characters) is everything the new ` +
       'session needs that it cannot see: it starts fresh and sees none of this conversation, so the ' +
       'brief must stand alone. `engine`, `model`, `effort`, `permission_mode` (never above your ' +
       'own), `cwd` (inside your working tree) and `worktree` are optional; by default the new ' +
-      'session uses your engine, model, effort and permission mode. Start one only when the user ' +
+      'session uses your engine, model, effort and permission mode. `relation` is `standalone` ' +
+      '(default: separate work, shown as its own row that notes where it came from) or ' +
+      '`same_work` (it continues this work and joins the group of this session in the sidebar). The new ' +
+      'session works independently and asks the user for input; nothing it does is reported back ' +
+      'to you. Start one only when the user ' +
       'asked for it. With `mode: "propose"` nothing starts: the user sees a card in this ' +
       'conversation and starts it with a click (use this for follow-up work worth doing later). A ' +
       'start that cannot run now — this turn took in text from another session or an agent, or ' +
@@ -159,7 +164,7 @@ export function sessionToolDescriptions(opts: {
       'Continue this work in a fresh session when your context is heavy or the user asks you to ' +
       'hand off: pass `handoff`, a complete write-up of the goal, current state, decisions made, ' +
       `the remaining plan, files touched and how to verify (at most ${L.handoffChars} characters). ` +
-      'ClaudeUI saves it, starts the new session from it and nests the new session under this one. ' +
+      'ClaudeUI saves it, starts the new session from it and groups the new session with this one. ' +
       'This session stays open. After a successful hand-off, stop this work here and answer the ' +
       'user.',
     session_usage:

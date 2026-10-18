@@ -52,7 +52,7 @@ describe('readSessionHistory — session cards', () => {
       engine: 'claude',
       kind: 'handoff',
       createdBy: 'agent',
-      wakeParent: false
+      grouped: true
     })
     const madeAt = getSessionLink(childRef)!.createdAt
     engineReturns([message('before', madeAt - 5), message('after', madeAt + 5)])
@@ -81,7 +81,7 @@ describe('readSessionHistory — session cards', () => {
       engine: 'claude',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false
+      grouped: true
     })
     engineReturns([message('kept', 1)])
 

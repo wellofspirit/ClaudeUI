@@ -9,9 +9,8 @@ import { ensureHostTokenFresh } from '../sdk/host-token'
 import { claudeLoginSignal } from '../services/claude-login-state'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
-import { detachSessionLink } from '../services/session-links'
+import { setSessionGrouped } from '../services/session-links'
 import { configureContextPressure, respondContextPressure } from '../services/context-pressure'
-import { configureSessionNotes } from '../services/session-notes'
 import {
   configureSessionTools,
   dismissProposalFromClient,
@@ -281,7 +280,7 @@ const SESSION_IPC_CHANNELS = [
   'session:background-task',
   'session:dequeue-message',
   'session:allow-peer-messages',
-  'session:link:detach',
+  'session:link:set-grouped',
   'session:proposal:start',
   'session:proposal:dismiss',
   'session:context-pressure:respond',
@@ -448,8 +447,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     sendPrompt: (routingId, prompt, options) =>
       sendPrompt(manager, routingId, prompt, undefined, options)
   })
-  // Turn-end notes to a parent send through the same manager.
-  configureSessionNotes(manager)
+  // No turn-end notes: a session that was started from another reports nothing back
+  // (session-notes.ts is dormant on purpose — nothing here enables it).
   // So does the context-pressure watcher's hand-off instruction.
   configureContextPressure({
     manager,
@@ -680,23 +679,27 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: async (routingId: string) => allowPeerMessages(manager, routingId)
   })
 
-  // Take a session out from under its parent in the sidebar (slice 1b). `routingId`
-  // is the CHILD's id, so the audit row names the session the user acted on.
+  // "Detach from group" / "Add to group" in the sidebar (slice 1b, reworked in slice 5).
+  // `routingId` is the row's own session, so the audit row names the session the user
+  // acted on.
   handleIpc({
-    channel: 'session:link:detach',
+    channel: 'session:link:set-grouped',
     capability: 'chat',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string) => detachSessionLink(routingId)
+    handler: async (routingId: string, grouped: boolean) => setSessionGrouped(routingId, grouped)
   })
 
   // The user's click on a proposal card (session tools, slice 1c-b). The argument is
   // the proposal's id, not a session id; the audit row for the click is the registry's.
+  // `grouped` is which Start button was clicked; anything but a boolean (an older client) falls back
+  // to the proposal's own relation.
   handleIpc({
     channel: 'session:proposal:start',
     capability: 'chat',
     kind: 'command',
-    handler: async (proposalId: string) => startProposalFromClient(proposalId)
+    handler: async (proposalId: string, grouped?: boolean) =>
+      startProposalFromClient(proposalId, grouped)
   })
   handleIpc({
     channel: 'session:proposal:dismiss',

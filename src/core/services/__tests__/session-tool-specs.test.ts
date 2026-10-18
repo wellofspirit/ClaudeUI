@@ -7,7 +7,8 @@ import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import {
   SESSION_TOOL_NAMES,
-  sessionToolDescriptions
+  sessionToolDescriptions,
+  sessionToolsGuidanceParts
 } from '../../../shared/session-tools-description'
 import {
   SESSION_TOOL_SHAPES,
@@ -72,13 +73,29 @@ describe('sessionToolJsonSchema', () => {
     expect(start.permission_mode).toMatchObject({
       enum: ['plan', 'default', 'acceptEdits', 'auto', 'bypassPermissions']
     })
-    expect(start.wake_when_done).toMatchObject({ type: 'boolean' })
+    expect(start.relation).toMatchObject({ type: 'string', enum: ['standalone', 'same_work'] })
     expect(start.cwd.description).toContain('working tree')
     const list = sessionToolJsonSchema('session_list').properties as Record<
       string,
       Record<string, unknown>
     >
     expect(list.limit).toEqual({ type: 'integer' })
+  })
+
+  it('has no wake_when_done and no parent/child wording anywhere a model reads: schemas, descriptions, guidance', () => {
+    const everything = JSON.stringify([
+      sessionToolJsonSpecs({ ownMessageTool: 'SendMessage' }),
+      sessionToolsGuidanceParts({ toolPrefix: '' }),
+      Object.values(SESSION_TOOL_SHAPES).map((shape) => Object.keys(shape))
+    ])
+    expect(everything).not.toMatch(/wake_when_done|wakeParent|wake/i)
+    expect(everything).not.toMatch(/\bparent\b|\bchild(ren)?\b|\bnest/i)
+    for (const name of SESSION_TOOL_NAMES) {
+      expect(Object.keys(SESSION_TOOL_SHAPES[name]), name).not.toContain('wake_when_done')
+      expect(Object.keys(sessionToolJsonSchema(name).properties), name).not.toContain(
+        'wake_when_done'
+      )
+    }
   })
 
   it('accepts and rejects the same arguments as the zod shape (spot check of the contract)', () => {

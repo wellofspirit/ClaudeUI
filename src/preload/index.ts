@@ -212,9 +212,10 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:dequeue-message', routingId, value),
   allowPeerMessages: (routingId: string) =>
     ipcRenderer.invoke('session:allow-peer-messages', routingId),
-  detachSessionLink: (routingId: string) => ipcRenderer.invoke('session:link:detach', routingId),
-  startSessionProposal: (proposalId: string) =>
-    ipcRenderer.invoke('session:proposal:start', proposalId),
+  setSessionGrouped: (routingId: string, grouped: boolean) =>
+    ipcRenderer.invoke('session:link:set-grouped', routingId, grouped),
+  startSessionProposal: (proposalId: string, grouped?: boolean) =>
+    ipcRenderer.invoke('session:proposal:start', proposalId, grouped),
   dismissSessionProposal: (proposalId: string) =>
     ipcRenderer.invoke('session:proposal:dismiss', proposalId),
   respondContextPressure: (routingId: string, answer: 'handoff' | 'dismiss') =>

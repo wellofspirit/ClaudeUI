@@ -1,10 +1,14 @@
 /**
- * Session refs and parent/child links (session tools, slice 1b, spec §4/§5).
+ * Session refs and the links between sessions (session tools, slice 1b, spec §4/§5;
+ * reworked in slice 5 into flat groups).
  *
  * A ref is the stable, short handle every session-tools surface uses for a
  * session: it outlives the routing-id rekey and a restart, and it is never
  * shaped like cli.js's `local_<hex>` ids (cli.js intercepts those). A link
- * records "this session was started by / handed off from that one".
+ * records "this session was started by / handed off from that one" — its ORIGIN —
+ * and whether the user sees the two as one piece of work (`grouped`). There is no
+ * parent/child relationship as such: the lineage is always kept, and a group is
+ * only a way of showing sequential work together.
  *
  * Shared by the host (`core/services/session-links.ts`), the canonical reducer
  * and the renderer, so the types and the ref shape have one definition.
@@ -28,20 +32,26 @@ export function isRefShaped(input: string): boolean {
   return REF_LIKE_PATTERN.test(input)
 }
 
-/** Words the tools resolve in the caller's context, so no session can be addressed by them as a title. */
-export const RESERVED_SESSION_WORDS: ReadonlySet<string> = new Set(['self', 'parent'])
+/**
+ * Words the tools resolve in the caller's context, so no session can be addressed by them
+ * as a title. `origin` is the session that started the caller; `parent` is the older
+ * spelling of it, still accepted.
+ */
+export const RESERVED_SESSION_WORDS: ReadonlySet<string> = new Set(['self', 'origin', 'parent'])
 
 export type SessionLinkKind = 'started' | 'handoff'
 export type SessionLinkCreator = 'agent' | 'user' | 'pressure'
-export type SessionLinkState = 'starting' | 'live' | 'ended' | 'failed' | 'detached'
+export type SessionLinkState = 'starting' | 'live' | 'ended' | 'failed'
 
-/** What a client needs of a link. Keyed by the child's ref. */
+/** What a client needs of a link. Keyed by the started session's ref. */
 export interface SessionLinkInfo {
-  parentRef: string
+  /** The session that started this one: the origin the lineage names. */
+  originRef: string
   kind: SessionLinkKind
   state: SessionLinkState
   createdBy: SessionLinkCreator
-  wakeParent: boolean
+  /** Shown as part of the origin's group (a hand-off always starts so; the user can change it). */
+  grouped: boolean
   createdAt: number
 }
 
@@ -57,7 +67,22 @@ export interface SessionLinksPayload {
   refs: Record<string, string>
 }
 
-/** A detached link nests nothing; every other state still names a relationship. */
-export function linkNests(link: Pick<SessionLinkInfo, 'state'>): boolean {
-  return link.state !== 'detached'
+/**
+ * The head of the group `ref` belongs to: the topmost session reached by following
+ * `grouped` links upward. A session whose own link is missing or standalone is its own
+ * head, and so is one whose chain reaches a cycle (never recorded, but replicated data
+ * is not trusted: the walk stops at the first repeat).
+ */
+export function groupHeadRef(
+  linkOf: (ref: string) => Pick<SessionLinkInfo, 'originRef' | 'grouped'> | undefined,
+  ref: string
+): string {
+  const seen = new Set<string>([ref])
+  let cur = ref
+  for (;;) {
+    const link = linkOf(cur)
+    if (!link || !link.grouped || seen.has(link.originRef)) return cur
+    seen.add(link.originRef)
+    cur = link.originRef
+  }
 }

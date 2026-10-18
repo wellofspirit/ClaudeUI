@@ -1600,11 +1600,12 @@ describe('registerRemoteHandlers', () => {
 //     from other Claude sessions here" action on a held peer message; a `chat`
 //     command on the named session, so the browser client can answer the hold row
 //     exactly as the desktop does.
-//   - `session:link:detach` (session tools, slice 1b) — the "Detach from parent" row
-//     menu action; a `chat` command naming the child session, so the browser and
-//     phone clients can take a session out from under its parent as the desktop can.
-//   - `session:proposal:start` / `session:proposal:dismiss` (session tools, slice 1c-b) — the
-//     Start and Dismiss buttons on a proposal card; `chat` commands naming a proposal, so the
+//   - `session:link:set-grouped` (session tools, slice 5; was `session:link:detach`) — the
+//     "Detach from group" / "Add to group" row menu action; a `chat` command naming the
+//     session, so the browser and phone clients can move a session in or out of its group as
+//     the desktop can.
+//   - `session:proposal:start` / `session:proposal:dismiss` (session tools, slice 1c-b, 5) — the
+//     two Start buttons (in this group / as standalone work) and Dismiss on a proposal card; `chat` commands naming a proposal, so the
 //     browser and phone clients can act on a card exactly as the desktop does.
 //   - `session:context-pressure:respond` (session tools, slice 4) — Hand off / Not now on the
 //     banner above the composer; a `chat` command naming the session, so the browser and
@@ -1676,7 +1677,7 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'session:get-plan-content',
   'session:get-session-log-path',
   'session:interrupt',
-  'session:link:detach',
+  'session:link:set-grouped',
   'session:list-directories',
   'session:list-opencode',
   'session:list-pi',

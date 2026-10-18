@@ -11,7 +11,7 @@
  * callback, which a mode that approves everything never reaches, so the service
  * refuses what the gate would deny. The start gate (§7.1), the caps (§7.2),
  * plan mode and the audit row are the service's; the gate only adds the
- * who-may-ask decisions (root agent, family/project scope, mode class).
+ * who-may-ask decisions (root agent, group/project scope, mode class).
  *
  * The app's moving parts (the session manager, creating a session, sending a
  * prompt) are injected once at boot ({@link configureSessionTools}): this module
@@ -36,7 +36,13 @@ import type { SendPromptOptions } from '../ipc/handlers-core'
 import type { CreateSessionArgs } from '../ipc/create-session'
 import type { SessionManager } from './session-manager'
 import { appendAuditLog } from './db'
-import { isProposalId, type ProposalPlacement } from '../../shared/session-proposals'
+import {
+  isProposalId,
+  proposalGrouped,
+  PROPOSAL_RELATIONS,
+  type ProposalPlacement,
+  type ProposalRelation
+} from '../../shared/session-proposals'
 import {
   createProposal,
   claimProposal,
@@ -55,10 +61,12 @@ import {
   knownSessionIds,
   linkChild,
   linksOf,
+  readLinkTable,
   refFor,
   resolveRef,
   setLinkState,
   titleOf,
+  type LinkTable,
   type ResolvedSession
 } from './session-links'
 import { emitEvent, syncCore } from './sync-host'
@@ -236,17 +244,17 @@ function errText(err: unknown): string {
 
 export type TargetResolution = ({ ok: true } & ResolvedSession) | { ok: false; message: string }
 
-/** `self`, `parent`, a ref, a routing/durable id or an exact unique title. */
+/** `self`, `origin` (`parent` too), a ref, a routing/durable id or an exact unique title. */
 export function resolveTarget(caller: SessionToolCaller, input: unknown): TargetResolution {
   const text = typeof input === 'string' ? input.trim() : ''
-  if (!text) return { ok: false, message: 'Name a session: a ref like s-k3m9qx, self or parent.' }
+  if (!text) return { ok: false, message: 'Name a session: a ref like s-k3m9qx, self or origin.' }
   const lower = text.toLowerCase()
   let ref = text
   if (lower === 'self') ref = callerRef(caller)
-  else if (lower === 'parent') {
-    const parent = linksOf(callerRef(caller)).parent
-    if (!parent) return { ok: false, message: 'This session has no parent session.' }
-    ref = parent.parentRef
+  else if (lower === 'origin' || lower === 'parent') {
+    const origin = linksOf(callerRef(caller)).origin
+    if (!origin) return { ok: false, message: 'No other session started this one.' }
+    ref = origin.parentRef
   }
   const found = resolveRef(ref)
   if (found.ok) {
@@ -286,7 +294,8 @@ interface SessionRow {
   state: SessionState
   cwd: string
   project: string
-  parentRef: string | null
+  /** The session that started this one, grouped or not. */
+  startedFrom: string | null
   lastActivity: number
   contextPercent: number | null
 }
@@ -341,13 +350,13 @@ function stateOf(id: string): SessionState {
   return 'idle'
 }
 
-function describeSession(id: string): SessionRow {
+function describeSession(id: string, table: LinkTable = readLinkTable()): SessionRow {
   const state = syncCore.getCanonicalState()
   const live = state.sessions[id]
   const listed = listingOf(id)
   const engine = engineOfId(id)
   const ref = refFor(engine, id)
-  const link = linksOf(ref).parent
+  const link = table.get(ref)
   const line = live?.statusLine
   const messages = live?.messages ?? []
   const lastMessageAt = messages.length > 0 ? messages[messages.length - 1].timestamp : 0
@@ -360,7 +369,7 @@ function describeSession(id: string): SessionRow {
     state: stateOf(id),
     cwd: live?.cwd || listed?.cwd || '',
     project: path.basename(live?.cwd || listed?.cwd || '') || projectKeyOf(id),
-    parentRef: link?.parentRef ?? null,
+    startedFrom: link?.parentRef ?? null,
     lastActivity: Math.max(listed?.lastActivityAt ?? 0, lastMessageAt),
     contextPercent:
       line && line.contextWindow.size > 0 && line.usedPercentage !== null
@@ -377,19 +386,22 @@ function rowLine(row: SessionRow, selfRef: string): string {
     row.state,
     `cwd=${oneLine(row.cwd, 300) || '?'}`,
     `project=${oneLine(row.project, 120) || '?'}`,
-    `parent=${row.parentRef ?? 'none'}`,
+    `started-from=${row.startedFrom ?? 'none'}`,
     `last=${row.lastActivity ? new Date(row.lastActivity).toISOString() : 'unknown'}`,
     `context=${row.contextPercent === null ? 'unknown' : `${row.contextPercent}%`}`
   ]
   return parts.join(' | ')
 }
 
-/** The sessions the caller is related to: its parent, children and siblings. */
-function familyRefs(ref: string): Set<string> {
-  const { parent, children, siblings } = linksOf(ref)
-  const out = new Set<string>([ref])
-  if (parent) out.add(parent.parentRef)
-  for (const link of [...children, ...siblings]) out.add(link.childRef)
+/**
+ * The sessions a call may reach without asking: the caller's own group, the session
+ * that directly started it, and the sessions it directly started (grouped or not).
+ */
+function scopeRefs(ref: string, table: LinkTable = readLinkTable()): Set<string> {
+  const { origin, started, group } = linksOf(ref, table)
+  const out = new Set<string>(group)
+  if (origin) out.add(origin.parentRef)
+  for (const link of started) out.add(link.childRef)
   return out
 }
 
@@ -420,9 +432,11 @@ export function sessionList(caller: SessionToolCaller, input: SessionListInput):
   const state = syncCore.getCanonicalState()
   const hidden = new Set(state.hiddenSessions)
 
+  // One read of the link table serves the scope and every row of the page.
+  const table = readLinkTable()
   let ids: string[]
   if (scope === 'linked') {
-    ids = [...familyRefs(selfRef)].flatMap((ref) => {
+    ids = [...scopeRefs(selfRef, table)].flatMap((ref) => {
       const r = resolveRef(ref)
       return r.ok ? [r.id] : []
     })
@@ -441,7 +455,7 @@ export function sessionList(caller: SessionToolCaller, input: SessionListInput):
   }))
   stamped.sort((a, b) => b.at - a.at)
   const page = stamped.slice(0, limit)
-  const rows = page.map((p) => describeSession(p.id))
+  const rows = page.map((p) => describeSession(p.id, table))
   const header = `${rows.length} of ${stamped.length} session(s), scope ${scope}${
     stamped.length > rows.length ? ` (raise limit, max ${L.listMax}, to see more)` : ''
   }:`
@@ -485,11 +499,11 @@ export async function sessionGet(
   const target = resolveTarget(caller, input.session)
   if (!target.ok) return failed(target.message)
   const row = describeSession(target.id)
-  const { children } = linksOf(row.ref)
+  const { started } = linksOf(row.ref)
   const lines = [rowLine(row, callerRef(caller))]
-  if (children.length > 0) {
+  if (started.length > 0) {
     lines.push(
-      `children: ${children.map((c) => `${c.childRef} (${c.kind}, ${c.state})`).join(', ')}`
+      `started: ${started.map((c) => `${c.childRef} (${c.kind}, ${c.state}${c.grouped ? '' : ', standalone'})`).join(', ')}`
     )
   }
   try {
@@ -842,10 +856,11 @@ export interface GateContext {
  *  - an acting tool from below the root agent: refused; in plan mode too, except
  *    proposing and withdrawing a proposal, which start nothing;
  *  - `session_list`, `session_usage`, `session_dismiss_proposal`: allowed;
- *  - `session_get` / `session_read`: allowed within the family or the same
+ *  - `session_get` / `session_read`: allowed within the caller's group, with the
+ *    session that directly started it or one it directly started, or within the same
  *    project, otherwise ask;
- *  - `session_message` / `session_stop`: allowed within the family when the
- *    target's mode class is not above the caller's, otherwise ask;
+ *  - `session_message` / `session_stop`: allowed within that same scope (group or
+ *    direct origin) when the target's mode class is not above the caller's, otherwise ask;
  *  - `session_start`: allowed — a start the gate or the cwd cap would refuse is
  *    turned into a proposal by the service; refused here only for what stays a
  *    refusal (plan mode, a mode above the caller's, an unreadable turn), and a
@@ -885,7 +900,7 @@ export function sessionToolsGate(
       // Nothing to read: the tool answers with why, and that leaks nothing.
       if (!target.ok) return { behavior: 'allow' }
       const mine = callerRef(caller)
-      return familyRefs(mine).has(target.ref) || sameProject(caller.routingId, target.id)
+      return scopeRefs(mine).has(target.ref) || sameProject(caller.routingId, target.id)
         ? { behavior: 'allow' }
         : { behavior: 'ask' }
     }
@@ -893,7 +908,7 @@ export function sessionToolsGate(
     case 'session_stop': {
       const target = resolveTarget(caller, input.session)
       if (!target.ok) return { behavior: 'allow' }
-      if (!familyRefs(callerRef(caller)).has(target.ref)) return { behavior: 'ask' }
+      if (!scopeRefs(callerRef(caller)).has(target.ref)) return { behavior: 'ask' }
       const theirs = modeClass(syncCore.getCanonicalState().sessions[target.id]?.permissionMode)
       return theirs !== null && theirs <= callerClass(caller)
         ? { behavior: 'allow' }
@@ -1066,7 +1081,8 @@ export type SessionStartInput = {
   permission_mode?: string
   cwd?: string
   worktree?: string
-  wake_when_done?: boolean
+  /** `same_work` puts the new session in this one's group; the default is standalone. */
+  relation?: ProposalRelation
 }
 
 export type SessionDismissProposalInput = {
@@ -1095,7 +1111,7 @@ interface NewSessionPlan {
   worktree?: Awaited<ReturnType<typeof createWorktree>>
 }
 
-/** The parent's own configuration, which a started session inherits unless told otherwise. */
+/** The caller's own configuration, which a started session inherits unless told otherwise. */
 function inheritedPlan(
   caller: SessionToolCaller,
   over: { engine?: EngineId; model?: string; effort?: string; permissionMode?: string }
@@ -1124,7 +1140,8 @@ function inheritedPlan(
 
 /**
  * Create the session, record what the host records for a session a client creates,
- * and link it under `parent`. `by` is who the start is for: an agent's own start or
+ * and link it to `parent`, the session that started it. `grouped` puts it in the
+ * parent's group. `by` is who the start is for: an agent's own start or
  * the user's click on a proposal (the link says which, for the sidebar). Either way
  * the new session is held to the agent-created rule until a client types into it.
  * `viaProposal` leaves out the session card: the proposal's card is the one card.
@@ -1134,7 +1151,7 @@ async function spawnChild(
   plan: NewSessionPlan,
   kind: 'started' | 'handoff',
   title: string,
-  wakeParent: boolean,
+  grouped: boolean,
   by: 'agent' | 'user' = 'agent',
   viaProposal = false
 ): Promise<{ routingId: string; childRef: string } | { error: string }> {
@@ -1174,7 +1191,7 @@ async function spawnChild(
     engine: plan.engine,
     kind,
     createdBy: by,
-    wakeParent,
+    grouped,
     title,
     card: !viaProposal
   })
@@ -1252,7 +1269,7 @@ const NEW_SESSION_ARGS = [
   'permission_mode',
   'cwd',
   'worktree',
-  'wake_when_done'
+  'relation'
 ] as const
 
 type ProposalCheck = { ok: true; proposal: Proposal } | { ok: false; text: string }
@@ -1309,23 +1326,33 @@ function checkProposalStart(
   return { ok: true, proposal }
 }
 
-type Launched = { ok: true; childRef: string; notes: string[] } | { ok: false; error: string }
+type Launched =
+  { ok: true; childRef: string; notes: string[]; grouped: boolean } | { ok: false; error: string }
+
+/** Where a new session landed, as the tool results say it. */
+const placedText = (grouped: boolean): string => (grouped ? '(in this group)' : '(standalone)')
 
 /**
  * Start a pending proposal exactly as it was shown: the placement was resolved when it
  * was proposed. `by` is the agent (told to in chat) or the user (the click is consent
  * for ONE session, so an out-of-tree directory is allowed; the new session is still
- * held to the agent-created rule). The caller has already checked whatever gate
- * applies to it.
+ * held to the agent-created rule). `grouped` is the click's choice (Start in this group /
+ * Start as standalone work); without one the proposal's own relation decides. The caller
+ * has already checked whatever gate applies to it.
  *
  * The proposal is CLAIMED first (`pending` → `starting`): a launch that loses the
  * claim — closed, expired, already starting — aborts before anything is spawned, and
  * while it holds the claim nothing else can close the card. A failure gives the claim
  * back, so the proposal is offered again.
  */
-async function launchProposal(proposal: Proposal, by: 'agent' | 'user'): Promise<Launched> {
+async function launchProposal(
+  proposal: Proposal,
+  by: 'agent' | 'user',
+  grouped?: boolean
+): Promise<Launched> {
   const parent = resolveRef(proposal.parentRef)
   if (!parent.ok) return { ok: false, error: 'The session that proposed this no longer exists.' }
+  const placedGrouped = grouped ?? proposalGrouped(proposal.placement.relation)
   const claimed = claimProposal(proposal.id)
   if (!claimed) return { ok: false, error: proposalClosedText(readProposal(proposal.id)) }
   let finished = false
@@ -1357,7 +1384,7 @@ async function launchProposal(proposal: Proposal, by: 'agent' | 'user'): Promise
       plan,
       'started',
       claimed.title,
-      pl.wake_when_done === true,
+      placedGrouped,
       by,
       true
     )
@@ -1376,7 +1403,7 @@ async function launchProposal(proposal: Proposal, by: 'agent' | 'user'): Promise
         error: `The session ${spawned.childRef} was created but could not be given its task: ${sendError}`
       }
     }
-    return { ok: true, childRef: spawned.childRef, notes }
+    return { ok: true, childRef: spawned.childRef, notes, grouped: placedGrouped }
   } finally {
     if (!finished) releaseProposal(claimed.id)
   }
@@ -1424,7 +1451,7 @@ export async function sessionStart(
     const notes = launched.notes.length > 0 ? ` (${launched.notes.join('; ')})` : ''
     return finish(
       ok(
-        `started ${launched.childRef} ${JSON.stringify(check.proposal.title)}${notes}. It is starting up; if it fails to start, its card shows it.`
+        `started ${launched.childRef} ${JSON.stringify(check.proposal.title)} ${placedText(launched.grouped)}${notes}. It is starting up; if it fails to start, its card shows it.`
       ),
       launched.childRef,
       `started proposal ${check.proposal.id}`
@@ -1437,6 +1464,11 @@ export async function sessionStart(
   const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : ''
   if (!prompt) return finish(failed('prompt is required: the task.'), null, 'invalid: no prompt')
   const background = typeof input.background === 'string' ? input.background.trim() : ''
+  const relation = input.relation ?? 'standalone'
+  if (!PROPOSAL_RELATIONS.includes(relation)) {
+    const why = `relation must be one of ${PROPOSAL_RELATIONS.join(', ')}.`
+    return finish(failed(why), null, `invalid: ${why}`)
+  }
   for (const [name, text] of [
     ['prompt', prompt],
     ['background', background]
@@ -1502,7 +1534,7 @@ export async function sessionStart(
       permission_mode: base.permissionMode,
       cwd: where.cwd,
       ...(input.worktree ? { worktree: input.worktree } : {}),
-      ...(input.wake_when_done === true ? { wake_when_done: true } : {}),
+      relation,
       ...(where.outside ? { outside: true } : {})
     }
     const proposal = createProposal({
@@ -1543,7 +1575,7 @@ export async function sessionStart(
     }
   }
 
-  const spawned = await spawnChild(caller, plan, 'started', title, input.wake_when_done === true)
+  const spawned = await spawnChild(caller, plan, 'started', title, proposalGrouped(relation))
   if ('error' in spawned) {
     return finish(
       failed(`Could not start the session: ${spawned.error}`),
@@ -1569,7 +1601,7 @@ export async function sessionStart(
   const notes = plan.notes.length > 0 ? ` (${plan.notes.join('; ')})` : ''
   return finish(
     ok(
-      `started ${spawned.childRef} ${JSON.stringify(title)}${notes}. It is starting up; if it fails to start, its card shows it.`
+      `started ${spawned.childRef} ${JSON.stringify(title)} ${placedText(proposalGrouped(relation))}${notes}. It is starting up; if it fails to start, its card shows it.`
     ),
     spawned.childRef,
     `started ${plan.engine}${plan.model ? `/${plan.model}` : ''} in ${plan.cwd}`
@@ -1664,9 +1696,10 @@ function auditProposalClick(
   }
 }
 
-/** `session:proposal:start`: the user's click on a card's Start. */
+/** `session:proposal:start`: the user's click on one of a card's Start buttons; `grouped` is which one (absent: the proposal's own relation decides). */
 export async function startProposalFromClient(
-  proposalId: unknown
+  proposalId: unknown,
+  grouped?: unknown
 ): Promise<{ success: boolean; error?: string; startedRef?: string }> {
   const done = (
     result: { success: boolean; error?: string; startedRef?: string },
@@ -1689,7 +1722,11 @@ export async function startProposalFromClient(
       const error = proposalClosedText(proposal)
       return done({ success: false, error }, `refused: ${error}`)
     }
-    const launched = await launchProposal(proposal, 'user')
+    const launched = await launchProposal(
+      proposal,
+      'user',
+      typeof grouped === 'boolean' ? grouped : undefined
+    )
     return launched.ok
       ? done({ success: true, startedRef: launched.childRef }, `started ${launched.childRef}`)
       : done({ success: false, error: launched.error }, `failed: ${launched.error}`)
@@ -1773,7 +1810,7 @@ export async function sessionHandOff(
   reserveStart(caller)
   const plan: NewSessionPlan = { ...base, cwd: caller.cwd }
 
-  const spawned = await spawnChild(caller, plan, 'handoff', input.title.trim(), false)
+  const spawned = await spawnChild(caller, plan, 'handoff', input.title.trim(), true)
   if ('error' in spawned) {
     return finish(
       failed(`Could not start the new session: ${spawned.error}`),
@@ -1821,7 +1858,7 @@ export async function sessionHandOff(
     : `the handoff could not be saved to a file (${saveError})`
   return finish(
     ok(
-      `handed off to ${spawned.childRef}; ${where}. The new session is starting up (if it fails to start, its card shows it) and carries this work on: stop the work here and answer the user.`
+      `handed off to ${spawned.childRef} ${placedText(true)}; ${where}. The new session is starting up (if it fails to start, its card shows it) and carries this work on: stop the work here and answer the user.`
     ),
     spawned.childRef,
     `handed off ${plan.engine}${plan.model ? `/${plan.model}` : ''} in ${plan.cwd}; ${saved ?? 'no file'}`

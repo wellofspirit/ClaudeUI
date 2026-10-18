@@ -1847,17 +1847,24 @@ interface SessionAPI {
    */
   allowPeerMessages(routingId: string): Promise<{ success: boolean; error?: string }>
   /**
-   * Take this session out from under the session that started it or handed off
-   * to it (slice 1b): its link becomes `detached` and it is a top-level session
-   * in the sidebar on every client. The id is the child's.
+   * "Add to group" (`true`) and "Detach from group" (`false`) on a session that was
+   * started from, or handed off from, another (slices 1b and 5): the link stays (it is
+   * the lineage), only whether the sidebar shows the pair as one group changes, on
+   * every client. The id is the started session's.
    */
-  detachSessionLink(routingId: string): Promise<{ success: boolean; error?: string }>
+  setSessionGrouped(
+    routingId: string,
+    grouped: boolean
+  ): Promise<{ success: boolean; error?: string }>
   /**
-   * The Start button on a session proposal card (slice 1c-b): start the proposed
-   * session exactly as shown, as the user's own act. `startedRef` names the new session.
+   * The Start buttons on a session proposal card (slice 1c-b, slice 5): start the
+   * proposed session exactly as shown, as the user's own act. `grouped` is which button:
+   * true joins the proposing session's group, false is standalone work; absent, the
+   * proposal's own relation decides. `startedRef` names the new session.
    */
   startSessionProposal(
-    proposalId: string
+    proposalId: string,
+    grouped?: boolean
   ): Promise<{ success: boolean; error?: string; startedRef?: string }>
   /** The Dismiss button on a proposal card. */
   dismissSessionProposal(proposalId: string): Promise<{ success: boolean; error?: string }>

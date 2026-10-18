@@ -23,15 +23,15 @@ export const SESSION_TOOL_SHAPES: Record<SessionToolName, Record<string, z.ZodTy
     include_archived: z.boolean().optional()
   },
   session_get: {
-    session: z.string().describe('A session ref, self, parent or an exact unique title')
+    session: z.string().describe('A session ref, self, origin or an exact unique title')
   },
   session_read: {
-    session: z.string().describe('A session ref, self, parent or an exact unique title'),
+    session: z.string().describe('A session ref, self, origin or an exact unique title'),
     before: z.number().int().optional().describe('A message number: return the ones before it'),
     limit: z.number().int().optional()
   },
   session_message: {
-    session: z.string().describe('A session ref, parent or an exact unique title'),
+    session: z.string().describe('A session ref, origin or an exact unique title'),
     message: z.string().describe('What to tell that session')
   },
   session_start: {
@@ -54,7 +54,12 @@ export const SESSION_TOOL_SHAPES: Record<SessionToolName, Record<string, z.ZodTy
       .optional(),
     cwd: z.string().optional().describe('Inside your own working tree'),
     worktree: z.string().optional().describe('A name: start it in a new git worktree'),
-    wake_when_done: z.boolean().optional()
+    relation: z
+      .enum(['standalone', 'same_work'])
+      .optional()
+      .describe(
+        'same_work: this continues the current work (the new session joins its group). Default standalone: separate work.'
+      )
   },
   session_dismiss_proposal: {
     proposal_id: z.string().describe('The id session_start returned (p-…)'),

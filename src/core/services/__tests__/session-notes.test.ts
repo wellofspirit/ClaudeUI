@@ -1,10 +1,12 @@
 /**
  * @vitest-environment node
  *
- * Child → parent notes and wake (slice 3, spec §6.4): the turn-end edge on the
- * child's canonical status (per engine shape), the final text, the outcome, the
- * note's wording, and where the note goes in the parent (queued, held and flushed
- * at its next turn, or a wake).
+ * Child → parent turn notes (slice 3, spec §6.4) — a DORMANT module since slice 5
+ * (nothing in production enables it; see session-notes-wiring.test.ts), kept with its
+ * tests for the future assistant-session feature, so these tests enable it. The
+ * turn-end edge on the child's canonical status (per engine shape), the final text,
+ * the outcome, the note's wording, and where the note goes in the parent (queued,
+ * held and flushed at its next turn).
  *
  * Everything runs through the real funnel, canonical state, link tables and held
  * inbox (the node:sqlite-backed driver the suite aliases `better-sqlite3` to);
@@ -21,6 +23,7 @@ import { linkChild, resetSessionLinksForTests, setLinkState } from '../session-l
 import {
   NOTE_QUOTE_MAX,
   configureSessionNotes,
+  enableSessionNotes,
   finalText,
   noteStopRequested,
   noteText,
@@ -104,7 +107,7 @@ function makeParent(busy = false): { id: string; session: FakeParent } {
 /** A child linked under `parent` and live (its first status has arrived). */
 function makeChild(
   parent: string,
-  opts: { wake?: boolean; engine?: EngineId; title?: string } = {}
+  opts: { engine?: EngineId; title?: string } = {}
 ): { id: string; ref: string; engine: EngineId } {
   const engine = opts.engine ?? 'claude'
   const temp = id('child-temp')
@@ -116,7 +119,7 @@ function makeChild(
     engine,
     kind: 'started',
     createdBy: 'agent',
-    wakeParent: opts.wake ?? false
+    grouped: true
   })
   emitEvent('session:status', [temp, status(real, 'idle', engine)])
   emitEvent('session:message', [
@@ -152,6 +155,7 @@ beforeEach(() => {
   syncCore.resetCanonicalForTests()
   resetSessionLinksForTests()
   resetSessionNotesForTests()
+  enableSessionNotes()
   configureSessionNotes(manager as unknown as SessionManager)
 })
 
@@ -219,7 +223,7 @@ describe('turn-end edge', () => {
       engine: 'claude',
       kind: 'started',
       createdBy: 'agent',
-      wakeParent: false
+      grouped: true
     })
     // The brief starts the turn: the first status is `running`, and it carries the real id.
     emitEvent('session:status', [temp, status(real, 'running')])
@@ -250,7 +254,7 @@ describe('turn-end edge', () => {
 })
 
 describe('no note', () => {
-  it.each(['detached', 'ended', 'failed'] as const)('for a %s link', async (linkState) => {
+  it.each(['ended', 'failed'] as const)('for a %s link', async (linkState) => {
     const p = makeParent(true)
     const c = makeChild(p.id)
     setLinkState(c.ref, linkState)
@@ -276,22 +280,22 @@ describe('no note', () => {
     expect(delivered(p.session)).toHaveLength(0)
   })
 
-  it('for a detach while the turn runs', async () => {
+  it('for a link that ends while the turn runs', async () => {
     const p = makeParent(true)
     const c = makeChild(p.id)
     run(c, 'running')
     say(c.id, 'done')
-    setLinkState(c.ref, 'detached')
+    setLinkState(c.ref, 'ended')
     run(c, 'idle')
     await settle()
     expect(delivered(p.session)).toHaveLength(0)
   })
 
-  it('for a turn that began before a detach, even if the link is restored before it ends', async () => {
+  it('for a turn that began before the link ended, even if the link is restored before it ends', async () => {
     const p = makeParent(true)
     const c = makeChild(p.id)
     run(c, 'running')
-    setLinkState(c.ref, 'detached')
+    setLinkState(c.ref, 'ended')
     setLinkState(c.ref, 'live')
     say(c.id, 'done')
     run(c, 'idle')
@@ -566,110 +570,10 @@ describe('where the note goes in the parent', () => {
   })
 })
 
-describe('wake', () => {
-  it('wakes an idle parent once its only wake child is done', async () => {
+describe('no wake', () => {
+  it('never wakes an idle parent: the note is held for its next turn', async () => {
     const p = makeParent(false)
-    const c = makeChild(p.id, { wake: true })
-    turn(c)
-    await settle()
-    expect(delivered(p.session)).toHaveLength(1)
-    expect(delivered(p.session)[0]).toMatchObject({ origin: 'agent-note', wake: true })
-    expect(heldInboxItems(p.id)).toHaveLength(0)
-  })
-
-  it('does not wake without wake_when_done on the link', async () => {
-    const p = makeParent(false)
-    const c = makeChild(p.id, { wake: false })
-    turn(c)
-    await settle()
-    expect(p.session.deliverNonUser).not.toHaveBeenCalled()
-    expect(heldInboxItems(p.id)).toHaveLength(1)
-  })
-
-  it('wakes only on the last of several wake children, with the earlier note flushed ahead of it', async () => {
-    const p = makeParent(false)
-    const a = makeChild(p.id, { wake: true })
-    const b = makeChild(p.id, { wake: true })
-    run(a, 'running')
-    run(b, 'running')
-    say(a.id, 'A is done')
-    run(a, 'idle')
-    await settle()
-    // B still works: A's note waits.
-    expect(p.session.deliverNonUser).not.toHaveBeenCalled()
-    expect(heldInboxItems(p.id)).toHaveLength(1)
-
-    say(b.id, 'B is done')
-    run(b, 'idle')
-    await settle()
-    const items = delivered(p.session)
-    expect(items.map((i) => i.from.key)).toEqual([a.ref, b.ref])
-    expect(items[1].wake).toBe(true)
-    expect(heldInboxItems(p.id)).toHaveLength(0)
-  })
-
-  it('a child that has not started its work counts as working', async () => {
-    const p = makeParent(false)
-    const a = makeChild(p.id, { wake: true })
-    const temp = id('starting')
-    emitEvent('session:created', [temp, { cwd: '/proj', engineId: 'claude' }])
-    linkChild({
-      parent: p.id,
-      childRoutingId: temp,
-      engine: 'claude',
-      kind: 'started',
-      createdBy: 'agent',
-      wakeParent: true
-    })
-    turn(a)
-    await settle()
-    expect(p.session.deliverNonUser).not.toHaveBeenCalled()
-  })
-
-  it('a non-wake sibling does not hold the wake back', async () => {
-    const p = makeParent(false)
-    const a = makeChild(p.id, { wake: true })
-    const b = makeChild(p.id, { wake: false })
-    run(b, 'running')
-    turn(a)
-    await settle()
-    expect(delivered(p.session)).toHaveLength(1)
-    expect(delivered(p.session)[0].wake).toBe(true)
-  })
-
-  it('a detached wake child no longer counts as working', async () => {
-    const p = makeParent(false)
-    const a = makeChild(p.id, { wake: true })
-    const b = makeChild(p.id, { wake: true })
-    run(b, 'running')
-    setLinkState(b.ref, 'detached')
-    turn(a)
-    await settle()
-    expect(delivered(p.session)).toHaveLength(1)
-  })
-
-  it('does not wake a parent with a pending approval', async () => {
-    const p = makeParent(false)
-    const c = makeChild(p.id, { wake: true })
-    emitEvent('session:approval-request', [p.id, { requestId: 'rp', toolName: 'Bash', input: {} }])
-    turn(c)
-    await settle()
-    expect(p.session.deliverNonUser).not.toHaveBeenCalled()
-    expect(heldInboxItems(p.id)).toHaveLength(1)
-  })
-
-  it('does not ask a busy parent to wake', async () => {
-    const p = makeParent(true)
-    const c = makeChild(p.id, { wake: true })
-    turn(c)
-    await settle()
-    expect(delivered(p.session)[0].wake).toBe(false)
-  })
-
-  it('holds the note when the parent’s agent-turn budget is spent', async () => {
-    const p = makeParent(false)
-    for (let i = 0; i < p.session.originLedger.cap; i++) p.session.originLedger.agentTurnStarted()
-    const c = makeChild(p.id, { wake: true })
+    const c = makeChild(p.id)
     turn(c)
     await settle()
     expect(p.session.deliverNonUser).not.toHaveBeenCalled()
@@ -728,30 +632,15 @@ describe('a child waiting on the user (status stays running)', () => {
     expect(texts[2]).toContain('Finished after all.')
   })
 
-  it('says nothing for an approval outside a running turn, or from a detached child', async () => {
+  it('says nothing for an approval outside a running turn, or from an ended child', async () => {
     const p = makeParent(true)
     const c = makeChild(p.id)
     ask(c.id, 'idle-ask')
     answer(c.id, 'idle-ask')
     run(c, 'running')
-    setLinkState(c.ref, 'detached')
-    ask(c.id, 'detached-ask')
+    setLinkState(c.ref, 'ended')
+    ask(c.id, 'ended-ask')
     await settle()
     expect(delivered(p.session)).toHaveLength(0)
-  })
-
-  it('a waiting child does not hold back the parent’s wake', async () => {
-    const p = makeParent(false)
-    const a = makeChild(p.id, { wake: true })
-    const b = makeChild(p.id, { wake: true })
-    run(b, 'running')
-    ask(b.id, 'b1')
-    await settle()
-    // B's own waiting note woke the parent (nothing else is working); drain that turn.
-    expect(delivered(p.session).map((i) => i.wake)).toEqual([true])
-    p.session.willQueue = false
-    turn(a)
-    await settle()
-    expect(delivered(p.session).map((i) => i.wake)).toEqual([true, true])
   })
 })

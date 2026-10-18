@@ -28,6 +28,7 @@ import {
   settleSessionProposal,
   transitionSessionProposal,
   trimSessionProposals,
+  setSessionLinkGrouped,
   setSessionLinkState,
   upsertSessionLink,
   type Db
@@ -66,7 +67,7 @@ const link = (
   parentRef: parent,
   kind: 'started',
   createdBy: 'agent',
-  wakeParent: false,
+  grouped: true,
   state: 'starting',
   ...over
 })
@@ -86,7 +87,7 @@ describe('session_ref / session_link tables', () => {
       runMigrations(older)
       expect(exists('session_ref')).toBe(true)
       expect(exists('session_link')).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(33)
+      expect(older.pragma('user_version', { simple: true })).toBe(34)
     } finally {
       older.close()
     }
@@ -160,10 +161,10 @@ describe('refs', () => {
 })
 
 describe('links', () => {
-  it('records one parent per child; a second record replaces the first', () => {
+  it('records one origin per session; a second record replaces the first', () => {
     upsertSessionLink(link('s-child1', 's-parent', { now: 1_000 }), db)
     upsertSessionLink(
-      link('s-child1', 's-other', { kind: 'handoff', createdBy: 'user', wakeParent: true }),
+      link('s-child1', 's-other', { kind: 'handoff', createdBy: 'user', grouped: false }),
       db
     )
     const row = getSessionLink('s-child1', db)
@@ -171,7 +172,7 @@ describe('links', () => {
       parentRef: 's-other',
       kind: 'handoff',
       createdBy: 'user',
-      wakeParent: true,
+      grouped: false,
       state: 'starting'
     })
     expect(allSessionLinks(db)).toHaveLength(1)
@@ -187,6 +188,17 @@ describe('links', () => {
       's-bbbbbb',
       's-aaaaaa'
     ])
+  })
+
+  it('groups and ungroups a link, reporting whether anything changed', () => {
+    upsertSessionLink(link('s-child1', 's-parent'), db)
+    expect(getSessionLink('s-child1', db)?.grouped).toBe(true)
+    expect(setSessionLinkGrouped('s-child1', false, 5_000, db)).toBe(true)
+    expect(getSessionLink('s-child1', db)).toMatchObject({ grouped: false, updatedAt: 5_000 })
+    expect(setSessionLinkGrouped('s-child1', false, 6_000, db)).toBe(false)
+    expect(setSessionLinkGrouped('s-child1', true, 7_000, db)).toBe(true)
+    expect(getSessionLink('s-child1', db)?.grouped).toBe(true)
+    expect(setSessionLinkGrouped('s-nope', true, 7_000, db)).toBe(false)
   })
 
   it('moves a link between states, reporting whether anything changed', () => {
@@ -207,14 +219,20 @@ describe('client_prompted_at (migration v32)', () => {
         older,
         MIGRATIONS.filter((m) => m.version < 32)
       )
-      upsertSessionLink(link('s-child1', 's-parent'), older)
+      // Raw SQL: `upsertSessionLink` writes columns this profile does not have yet.
+      older
+        .prepare(
+          `INSERT INTO session_link (child_ref, parent_ref, kind, created_by, state, created_at, updated_at)
+             VALUES ('s-child1', 's-parent', 'started', 'agent', 'starting', 1, 1)`
+        )
+        .run()
       expect(
         (older.prepare('PRAGMA table_info(session_link)').all() as Array<{ name: string }>).map(
           (c) => c.name
         )
       ).not.toContain('client_prompted_at')
       runMigrations(older)
-      expect(older.pragma('user_version', { simple: true })).toBe(33)
+      expect(older.pragma('user_version', { simple: true })).toBe(34)
       expect(getSessionLink('s-child1', older)).toMatchObject({
         childRef: 's-child1',
         clientPromptedAt: null
@@ -240,6 +258,50 @@ describe('client_prompted_at (migration v32)', () => {
     markSessionLinkClientPrompted('r2', 100, db)
     upsertSessionLink(link('s-kid222', 's-parent', { state: 'live' }), db)
     expect(getSessionLink('s-kid222', db)).toMatchObject({ state: 'live', clientPromptedAt: 100 })
+  })
+})
+
+describe('grouped (migration v34)', () => {
+  it('groups every existing link, hand-offs and starts alike, and retires the detached state', () => {
+    const older = new BetterSqlite3(':memory:') as unknown as Db
+    try {
+      runMigrations(
+        older,
+        MIGRATIONS.filter((m) => m.version < 34)
+      )
+      expect(
+        (older.prepare('PRAGMA table_info(session_link)').all() as Array<{ name: string }>).map(
+          (c) => c.name
+        )
+      ).not.toContain('grouped')
+      insertSessionRef(ref('s-hand01', { sessionId: 'h1', routingId: 'h1' }), older)
+      insertSessionRef(ref('s-start1', { sessionId: 'st1', routingId: 'st1' }), older)
+      insertSessionRef(ref('s-off001', { sessionId: 'o1', routingId: 'o1' }), older)
+      insertSessionRef(ref('s-gone01'), older)
+      // The old table has no `grouped`, so the rows go in as the previous build wrote them.
+      const insert = older.prepare(
+        `INSERT INTO session_link (child_ref, parent_ref, kind, created_by, state, created_at, updated_at)
+           VALUES (?, 's-head01', ?, 'agent', ?, 1, 1)`
+      )
+      insert.run('s-hand01', 'handoff', 'live')
+      insert.run('s-start1', 'started', 'starting')
+      insert.run('s-off001', 'started', 'detached')
+      insert.run('s-gone01', 'handoff', 'detached')
+      runMigrations(older)
+      expect(older.pragma('user_version', { simple: true })).toBe(34)
+      const row = (r: string): unknown => {
+        const l = getSessionLink(r, older)
+        return l && { grouped: l.grouped, state: l.state }
+      }
+      expect(row('s-hand01')).toEqual({ grouped: true, state: 'live' })
+      expect(row('s-start1')).toEqual({ grouped: true, state: 'starting' })
+      // A detached link is a grouping choice, not a lifecycle state: ungrouped, and live
+      // while a session still answers to the ref, ended once none does.
+      expect(row('s-off001')).toEqual({ grouped: false, state: 'live' })
+      expect(row('s-gone01')).toEqual({ grouped: false, state: 'ended' })
+    } finally {
+      older.close()
+    }
   })
 })
 
@@ -272,7 +334,7 @@ describe('session_proposal (migration v33)', () => {
       expect(exists()).toBe(false)
       runMigrations(older)
       expect(exists()).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(33)
+      expect(older.pragma('user_version', { simple: true })).toBe(34)
     } finally {
       older.close()
     }

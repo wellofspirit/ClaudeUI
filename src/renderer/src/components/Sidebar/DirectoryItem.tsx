@@ -3,7 +3,7 @@ import type { DirectoryGroup, SessionInfo } from '../../../../shared/types'
 import { SessionItem } from './SessionItem'
 import { useContextMenu } from '../../hooks/useContextMenu'
 import { useSessionStore } from '../../stores/session-store'
-import { ancestorIdsOf, nestSessions } from '../../lib/session-links'
+import { groupHeadIdOf, groupSessions } from '../../lib/session-links'
 import {
   expandParents,
   toggleParentCollapsed,
@@ -70,29 +70,28 @@ export const DirectoryItem = memo(function DirectoryItem({
   const menu = useContextMenu()
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Parent/child links (slice 1b): a session started from, or handed off from,
-  // another in this project is drawn right under it.
+  // Groups (slices 1b and 5): sessions grouped with the one they were started or
+  // handed off from sit one level under that group's head, in start order.
   const sessionLinks = useSessionStore((s) => s.sessionLinks)
   const sessionRefs = useSessionStore((s) => s.sessionRefs)
   const collapsedParents = useCollapsedParents()
   // Opening a session (a card's Open, the continued-in bar, a click elsewhere)
-  // unfolds the parents above it, so the active row is never hidden in a fold.
-  // Keyed on the chain, not the links, so folding it again afterwards sticks.
+  // unfolds its group, so the active row is never hidden in a fold. Keyed on the
+  // head, not the links, so folding it again afterwards sticks.
   const activeHere = group.sessions.some((s) => s.sessionId === activeSessionId)
-  const activeAncestors = useMemo(
+  const activeHead = useMemo(
     () =>
       activeHere && activeSessionId
-        ? ancestorIdsOf({ sessionLinks, sessionRefs }, activeSessionId)
-        : [],
+        ? groupHeadIdOf({ sessionLinks, sessionRefs }, activeSessionId)
+        : null,
     [activeHere, activeSessionId, sessionLinks, sessionRefs]
   )
-  const activeAncestorsKey = JSON.stringify(activeAncestors)
   useEffect(() => {
-    expandParents(JSON.parse(activeAncestorsKey) as string[])
-  }, [activeAncestorsKey])
+    if (activeHead) expandParents([activeHead])
+  }, [activeHead])
   const rows = useMemo(
     () =>
-      nestSessions(
+      groupSessions(
         group.sessions.filter((info) => showHidden || !hiddenSessionIds?.has(info.sessionId)),
         { sessionLinks, sessionRefs },
         collapsedParents
@@ -165,17 +164,16 @@ export const DirectoryItem = memo(function DirectoryItem({
       </div>
       {expanded && (
         <div className="ml-3">
-          {rows.map(({ info, depth, childCount, collapsed }) => {
+          {rows.map(({ info, depth, memberCount, collapsed }) => {
             const sessionHidden = !!hiddenSessionIds?.has(info.sessionId)
             return (
               <SessionItem
                 key={info.sessionId}
                 info={info}
                 depth={depth}
-                childCount={childCount}
-                childrenCollapsed={collapsed}
-                onToggleChildren={() => toggleParentCollapsed(info.sessionId)}
-                showParentHint={depth === 0}
+                memberCount={memberCount}
+                membersCollapsed={collapsed}
+                onToggleMembers={() => toggleParentCollapsed(info.sessionId)}
                 active={info.sessionId === activeSessionId}
                 onClick={() => onSessionClick(info)}
                 onDoubleClick={() => onSessionDoubleClick(info)}

@@ -7,7 +7,7 @@ import { useContextMenu } from '../../hooks/useContextMenu'
 import { EngineLogo } from '../shared/EngineLogo'
 import { countAutoContinuingTasks } from '../../lib/task-types'
 import { StatusDot, deriveSessionDotState } from './StatusDot'
-import { parentLinkOf, sessionTitleOf } from '../../lib/session-links'
+import { originLinkOf, sessionTitleOf } from '../../lib/session-links'
 import { useIsMobile } from '../../hooks/useIsMobile'
 
 export const SessionItem = memo(function SessionItem({
@@ -34,10 +34,9 @@ export const SessionItem = memo(function SessionItem({
   onDragEnd,
   onDrop,
   depth = 0,
-  childCount = 0,
-  childrenCollapsed = false,
-  onToggleChildren,
-  showParentHint = true
+  memberCount = 0,
+  membersCollapsed = false,
+  onToggleMembers
 }: {
   info: SessionInfo
   active: boolean
@@ -65,15 +64,13 @@ export const SessionItem = memo(function SessionItem({
   onDragOver?: (e: React.DragEvent) => void
   onDragEnd?: (e: React.DragEvent) => void
   onDrop?: (e: React.DragEvent) => void
-  /** How far this row is nested under its parent in the project list (slice 1b). */
+  /** 1 for a member drawn under its group's head in the project list, else 0 (slices 1b, 5). */
   depth?: number
-  /** Sessions nested directly under this one in the same list. */
-  childCount?: number
-  childrenCollapsed?: boolean
-  /** Fold or unfold this row's children (the toggle shows only with children). */
-  onToggleChildren?: () => void
-  /** Show "↳ parent" when this row has a parent: off for a row drawn under it. */
-  showParentHint?: boolean
+  /** Members of the group this row heads, in the same list. */
+  memberCount?: number
+  membersCollapsed?: boolean
+  /** Fold or unfold the group (the toggle shows only on a head with members). */
+  onToggleMembers?: () => void
 }): React.JSX.Element {
   // Self-subscribe to session status fields — avoids parent needing the full sessions map
   const { isRunning, isSdkActive, isWatching, needsAttention, runningSubagents } = useSessionStore(
@@ -90,17 +87,24 @@ export const SessionItem = memo(function SessionItem({
     })
   )
   const isWorktree = useSessionStore((s) => !!s.worktreeInfoMap[info.sessionId])
-  // The link to this session's parent, when it has one (slice 1b): the hint names
-  // the parent where the row is not drawn under it, and the menu can detach it.
-  const { hasParent, parentTitle } = useSessionStore(
+  // The link to the session that started this one, when there is one (slices 1b, 5):
+  // the hint names it on every row (grouped or not), and the menu moves the row in or
+  // out of the group.
+  const { grouped, kind, canGroup, originTitle } = useSessionStore(
     useShallow((s) => {
-      const link = parentLinkOf(s, info.sessionId)
+      const link = originLinkOf(s, info.sessionId)
       return {
-        hasParent: link !== null,
-        parentTitle: link?.parentId ? sessionTitleOf(s, link.parentId) : ''
+        grouped: link?.link.grouped === true,
+        kind: link?.link.kind ?? 'started',
+        // "Add to group" needs an origin that is still a session in the sidebar.
+        canGroup: link !== null && link.originId !== null,
+        originTitle: link?.originId ? sessionTitleOf(s, link.originId) : ''
       }
     })
   )
+  const originHint = originTitle
+    ? `${kind === 'handoff' ? 'continued from' : 'started from'} ${originTitle}`
+    : ''
   const isMobile = useIsMobile()
   const menu = useContextMenu()
   const [renameValue, setRenameValue] = useState('')
@@ -223,9 +227,7 @@ export const SessionItem = memo(function SessionItem({
                 'linear-gradient(to right, black calc(100% - 12px), transparent 100%)',
               maskImage: 'linear-gradient(to right, black calc(100% - 12px), transparent 100%)'
             }}
-            title={
-              showParentHint && parentTitle ? `${info.title} (from ${parentTitle})` : info.title
-            }
+            title={originHint ? `${info.title} (${originHint})` : info.title}
           >
             <EngineLogo
               engineId={info.engineId ?? 'claude'}
@@ -233,27 +235,28 @@ export const SessionItem = memo(function SessionItem({
               className="shrink-0 opacity-80"
             />
             {info.title}
-            {showParentHint && parentTitle && (
+            {originHint && (
               <span
-                data-testid="SessionItem.parentHint"
-                className="ml-1.5 text-[10px] text-text-muted"
+                data-testid="SessionItem.originHint"
+                data-grouped={grouped}
+                className={`ml-1.5 text-[10px] text-text-muted ${grouped ? '' : 'opacity-60'}`}
               >
-                ↳ {parentTitle}
+                {originHint}
               </span>
             )}
           </span>
         )}
-        {childCount > 0 && onToggleChildren && (
+        {memberCount > 0 && onToggleMembers && (
           <button
             type="button"
-            data-testid="SessionItem.toggleChildren"
-            data-collapsed={childrenCollapsed}
-            aria-expanded={!childrenCollapsed}
-            aria-label={`${childrenCollapsed ? 'Show' : 'Hide'} ${childCount} nested ${childCount === 1 ? 'session' : 'sessions'}`}
-            title={childrenCollapsed ? 'Show nested sessions' : 'Hide nested sessions'}
+            data-testid="SessionItem.toggleMembers"
+            data-collapsed={membersCollapsed}
+            aria-expanded={!membersCollapsed}
+            aria-label={`${membersCollapsed ? 'Show' : 'Hide'} ${memberCount} grouped ${memberCount === 1 ? 'session' : 'sessions'}`}
+            title={membersCollapsed ? 'Show grouped sessions' : 'Hide grouped sessions'}
             onClick={(e) => {
               e.stopPropagation()
-              onToggleChildren()
+              onToggleMembers()
             }}
             // Clear of the hover strip: it floats over the row's right edge and its
             // icons (Watch, Pin) would take the clicks meant for the toggle's right half.
@@ -267,11 +270,11 @@ export const SessionItem = memo(function SessionItem({
               height="9"
               viewBox="0 0 24 24"
               fill="currentColor"
-              className={`transition-transform ${childrenCollapsed ? '' : 'rotate-90'}`}
+              className={`transition-transform ${membersCollapsed ? '' : 'rotate-90'}`}
             >
               <path d="M8 5l8 7-8 7z" />
             </svg>
-            {childCount}
+            {memberCount}
           </button>
         )}
         {/* Backdrop blur underlay (hover-only) — width scales to the actual icon count so the
@@ -427,16 +430,28 @@ export const SessionItem = memo(function SessionItem({
           >
             Edit permissions
           </button>
-          {hasParent && (
+          {grouped && (
             <button
               data-testid="SessionItem.detach"
               onClick={() => {
                 menu.close()
-                void window.api.detachSessionLink(info.sessionId)
+                void window.api.setSessionGrouped(info.sessionId, false)
               }}
               className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
             >
-              Detach from parent session
+              Detach from group
+            </button>
+          )}
+          {!grouped && canGroup && (
+            <button
+              data-testid="SessionItem.attach"
+              onClick={() => {
+                menu.close()
+                void window.api.setSessionGrouped(info.sessionId, true)
+              }}
+              className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+            >
+              Add to group
             </button>
           )}
           {isSdkActive && (

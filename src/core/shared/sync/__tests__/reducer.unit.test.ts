@@ -2502,7 +2502,7 @@ describe('reducer — session:link-changed (parent/child links, slice 1b)', () =
         kind: 'handoff',
         state: 'live',
         createdBy: 'agent',
-        wakeParent: false,
+        grouped: true,
         createdAt: 1
       }
     },

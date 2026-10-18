@@ -173,8 +173,10 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     dequeueMessage: (routingId, value) =>
       ipcRenderer.invoke('session:dequeue-message', routingId, value),
     allowPeerMessages: (routingId) => ipcRenderer.invoke('session:allow-peer-messages', routingId),
-    detachSessionLink: (routingId) => ipcRenderer.invoke('session:link:detach', routingId),
-    startSessionProposal: (proposalId) => ipcRenderer.invoke('session:proposal:start', proposalId),
+    setSessionGrouped: (routingId, grouped) =>
+      ipcRenderer.invoke('session:link:set-grouped', routingId, grouped),
+    startSessionProposal: (proposalId, grouped) =>
+      ipcRenderer.invoke('session:proposal:start', proposalId, grouped),
     dismissSessionProposal: (proposalId) =>
       ipcRenderer.invoke('session:proposal:dismiss', proposalId),
     respondContextPressure: (routingId, answer) =>
