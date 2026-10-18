@@ -503,7 +503,7 @@ export async function sessionGet(
   const lines = [rowLine(row, callerRef(caller))]
   if (started.length > 0) {
     lines.push(
-      `started: ${started.map((c) => `${c.childRef} (${c.kind}, ${c.state}${c.grouped ? '' : ', standalone'})`).join(', ')}`
+      `started: ${started.map((c) => `${c.childRef} (${c.kind}, ${c.state}, ${c.grouped ? 'in this group' : 'standalone'})`).join(', ')}`
     )
   }
   try {
@@ -1545,10 +1545,12 @@ export async function sessionStart(
       placement
     })
     const notes = base.notes.length > 0 ? ` (${base.notes.join('; ')})` : ''
+    // What the card's primary Start would do; the user's click can still choose the other.
+    const would = proposalGrouped(relation) ? 'would start in this group' : 'would start standalone'
     const text =
       converted !== null
-        ? `converted to a proposal: ${converted} The user sees a card (${proposal.id}) and nothing runs until they start it. It expires in 7 days; session_dismiss_proposal withdraws it sooner.${notes}`
-        : `proposed ${proposal.id}: ${PROPOSAL_TAIL}${notes}`
+        ? `converted to a proposal: ${converted} The user sees a card (${proposal.id}, ${would}) and nothing runs until they start it. It expires in 7 days; session_dismiss_proposal withdraws it sooner.${notes}`
+        : `proposed ${proposal.id} (${would}): ${PROPOSAL_TAIL}${notes}`
     return finish(
       ok(text),
       proposal.id,
@@ -1728,7 +1730,10 @@ export async function startProposalFromClient(
       typeof grouped === 'boolean' ? grouped : undefined
     )
     return launched.ok
-      ? done({ success: true, startedRef: launched.childRef }, `started ${launched.childRef}`)
+      ? done(
+          { success: true, startedRef: launched.childRef },
+          `started ${launched.childRef} ${placedText(launched.grouped)}`
+        )
       : done({ success: false, error: launched.error }, `failed: ${launched.error}`)
   } catch (err) {
     logger.error(LOG, `starting proposal ${proposalId} failed: ${errText(err)}`)
