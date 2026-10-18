@@ -124,7 +124,7 @@ export interface CanonicalState {
   sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
   hiddenSessions: string[]
   hiddenProjects: string[]
-  /** Parent/child links between sessions, keyed by the child's ref (slice 1b). */
+  /** Origin links between sessions, keyed by the started session's ref (slice 1b). */
   sessionLinks: Record<string, SessionLinkInfo>
   /** sidebar id → ref for every session a link names (slice 1b). */
   sessionRefs: Record<string, string>

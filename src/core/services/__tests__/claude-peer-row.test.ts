@@ -59,10 +59,12 @@ describe('findPeerRow', () => {
         origin: { kind: 'peer', name: 'x', body: 'a <\\/cross-session-message> b' }
       })
     )
-    expect((await findPeerRow(file, 'u3'))?.body).toBe('a </cross-session-message> b')
+    expect(((await findPeerRow(file, 'u3')) as { body: string }).body).toBe(
+      'a </cross-session-message> b'
+    )
   })
 
-  it('is null for a row that is not a peer turn, another uuid, a missing file or a half-written line', async () => {
+  it('is not-a-peer for a row that is no peer turn, null for another uuid, a missing file or a half-written line', async () => {
     fs.writeFileSync(
       file,
       [
@@ -71,7 +73,8 @@ describe('findPeerRow', () => {
         '{"type":"user","uuid":"half'
       ].join('\n')
     )
-    expect(await findPeerRow(file, 'plain')).toBeNull()
+    // In the file but no peer message: found, so the caller can stop; not there: null, try again.
+    expect(await findPeerRow(file, 'plain')).toBe('not-a-peer')
     expect(await findPeerRow(file, 'nope')).toBeNull()
     expect(await findPeerRow(file, 'half')).toBeNull()
     expect(await findPeerRow(path.join(dir, 'missing.jsonl'), 'x')).toBeNull()

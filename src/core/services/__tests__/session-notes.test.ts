@@ -12,11 +12,11 @@
  * inbox (the node:sqlite-backed driver the suite aliases `better-sqlite3` to);
  * only the parent's engine session is a double.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatMessage, EngineId, SessionStatus } from '../../../shared/types'
 import type { NonUserItem, NonUserOutcome } from '../../providers/ISession'
 import { TurnOriginLedger } from '../../providers/turn-origin-ledger'
-import { SessionManager } from '../session-manager'
+import type { SessionManager } from '../session-manager'
 import { heldInboxItems } from '../db'
 import { flushHeld } from '../session-delivery'
 import { linkChild, resetSessionLinksForTests, setLinkState } from '../session-links'
@@ -29,7 +29,6 @@ import {
   noteText,
   resetSessionNotesForTests
 } from '../session-notes'
-import { configureSessionTools, sessionStop } from '../session-tools'
 import { emitEvent, syncCore } from '../sync-host'
 
 vi.mock('../logger', () => ({
@@ -146,10 +145,6 @@ function turn(c: { id: string; engine: EngineId }, reply = 'Done.'): void {
 
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 15))
 const delivered = (p: FakeParent): NonUserItem[] => p.deliverNonUser.mock.calls.map(([i]) => i)
-
-afterEach(() => {
-  configureSessionTools(null)
-})
 
 beforeEach(() => {
   syncCore.resetCanonicalForTests()
@@ -392,43 +387,6 @@ describe('outcome', () => {
       run(c, 'idle')
     })
     expect(text).toContain('had a turn stopped (stopped;')
-  })
-
-  it('stopped: SessionManager.interrupt (the Stop button, remote clients) marks the turn', async () => {
-    const real = new SessionManager()
-    try {
-      const [text] = await ended((_p, c) => {
-        run(c, 'running')
-        ;(real as unknown as { sessions: Map<string, unknown> }).sessions.set(c.id, {
-          interrupt: async () => {}
-        })
-        void real.interrupt(c.id)
-        run(c, 'idle')
-      })
-      expect(text).toContain('(stopped;')
-    } finally {
-      real.disposeRekeyObserver()
-    }
-  })
-
-  it('stopped: a parent’s session_stop marks the turn', async () => {
-    const p = makeParent(true)
-    const c = makeChild(p.id)
-    sessions[c.id] = { willQueue: true, interrupt: vi.fn(async () => {}) } as never
-    configureSessionTools({
-      manager: manager as unknown as SessionManager,
-      createSession: async () => {},
-      sendPrompt: () => {}
-    })
-    run(c, 'running')
-    const result = await sessionStop(
-      { routingId: p.id, engine: 'claude', cwd: '/proj', permissionMode: 'default' },
-      { session: c.ref }
-    )
-    expect(result.text).toMatch(/^stopped s-/)
-    run(c, 'idle')
-    await settle()
-    expect(delivered(p.session)[0].text).toContain('(stopped;')
   })
 
   it('a stop request with no turn running does not mark the next turn', async () => {

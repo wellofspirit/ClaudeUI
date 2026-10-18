@@ -34,6 +34,7 @@ import {
 } from '../../shared/dispatch-session'
 import type { SendPromptOptions } from '../ipc/handlers-core'
 import type { CreateSessionArgs } from '../ipc/create-session'
+import type { CommandConnection } from '../ipc/command-registry'
 import type { SessionManager } from './session-manager'
 import { appendAuditLog } from './db'
 import {
@@ -52,9 +53,8 @@ import {
   releaseProposal,
   type Proposal
 } from './session-proposals'
-import { noteHandedOff } from './context-pressure'
+import { noteHandedOff, noteTurnStopped } from './context-pressure'
 import { deliver, type DeliveryResult } from './session-delivery'
-import { noteStopRequested } from './session-notes'
 import {
   awaitingClientPrompt,
   engineOfId,
@@ -100,9 +100,21 @@ export function configureSessionTools(next: SessionToolsHost | null): void {
   host = next
 }
 
-/** Are the tools usable here? Adapters register nothing when they are not. */
+/**
+ * The host-wide "Session tools" setting (Settings › Sessions & autonomy). Absent means on;
+ * only an explicit `false` turns the family off.
+ */
+function sessionToolsEnabled(): boolean {
+  return syncCore.getCanonicalState().settings.sessionTools !== false
+}
+
+/**
+ * Are the tools usable here? Adapters register nothing (no tools, no guidance) when they are
+ * not: the host did not wire them, or the user turned them off. Read when a session spawns, so
+ * a change applies to sessions started after it; `runSessionTool` refuses in the open ones.
+ */
 export function sessionToolsAvailable(): boolean {
-  return host !== null
+  return host !== null && sessionToolsEnabled()
 }
 
 function need(): SessionToolsHost {
@@ -775,6 +787,11 @@ function reserveStart(caller: SessionToolCaller): void {
   need().manager.get(caller.routingId)?.originLedger?.sessionStarted()
 }
 
+/** Give a reservation back when the start failed before any session existed. */
+function releaseStart(caller: SessionToolCaller): void {
+  need().manager.get(caller.routingId)?.originLedger?.sessionStartReleased()
+}
+
 /**
  * Why this call may not act because of WHO made it, or null. Only the root agent
  * acts. Fails closed: a call the stream cannot attribute (no id, or the frame
@@ -1048,7 +1065,7 @@ export async function sessionStop(
     return finish(ok(`${target.ref} has no running turn to stop.`), target.ref, 'nothing to stop')
   }
   try {
-    noteStopRequested(target.id)
+    noteTurnStopped(target.id)
     await session.interrupt()
     return finish(
       ok(`stopped ${target.ref}'s running turn; the session stays open.`),
@@ -1253,9 +1270,8 @@ function gateAutoMode(engine: EngineId, mode: string, notes: string[]): string {
   return mode
 }
 
-const PROPOSAL_TAIL =
-  'the user sees a card and nothing runs until they start it. It expires in 7 days; ' +
-  'session_dismiss_proposal withdraws it sooner.'
+const PROPOSAL_EXPIRY = 'It expires in 7 days; session_dismiss_proposal withdraws it sooner.'
+const PROPOSAL_TAIL = `the user sees a card and nothing runs until they start it. ${PROPOSAL_EXPIRY}`
 
 /** Arguments that mean "start this new session"; none may accompany a `proposal_id`. */
 const NEW_SESSION_ARGS = [
@@ -1327,7 +1343,9 @@ function checkProposalStart(
 }
 
 type Launched =
-  { ok: true; childRef: string; notes: string[]; grouped: boolean } | { ok: false; error: string }
+  | { ok: true; childRef: string; notes: string[]; grouped: boolean }
+  /** `created`: the failure came after the session existed (its brief could not be sent). */
+  | { ok: false; error: string; created?: true }
 
 /** Where a new session landed, as the tool results say it. */
 const placedText = (grouped: boolean): string => (grouped ? '(in this group)' : '(standalone)')
@@ -1400,7 +1418,8 @@ async function launchProposal(
     if (sendError) {
       return {
         ok: false,
-        error: `The session ${spawned.childRef} was created but could not be given its task: ${sendError}`
+        error: `The session ${spawned.childRef} was created but could not be given its task: ${sendError}`,
+        created: true
       }
     }
     return { ok: true, childRef: spawned.childRef, notes, grouped: placedGrouped }
@@ -1446,6 +1465,8 @@ export async function sessionStart(
     reserveStart(caller)
     const launched = await launchProposal(check.proposal, 'agent')
     if (!launched.ok) {
+      // A lost claim or a spawn failure made no session: the start is not spent.
+      if (!launched.created) releaseStart(caller)
       return finish(failed(launched.error), check.proposal.id, `error: ${launched.error}`)
     }
     const notes = launched.notes.length > 0 ? ` (${launched.notes.join('; ')})` : ''
@@ -1549,7 +1570,7 @@ export async function sessionStart(
     const would = proposalGrouped(relation) ? 'would start in this group' : 'would start standalone'
     const text =
       converted !== null
-        ? `converted to a proposal: ${converted} The user sees a card (${proposal.id}, ${would}) and nothing runs until they start it. It expires in 7 days; session_dismiss_proposal withdraws it sooner.${notes}`
+        ? `converted to a proposal: ${converted} The user sees a card (${proposal.id}, ${would}) and nothing runs until they start it. ${PROPOSAL_EXPIRY}${notes}`
         : `proposed ${proposal.id} (${would}): ${PROPOSAL_TAIL}${notes}`
     return finish(
       ok(text),
@@ -1562,13 +1583,17 @@ export async function sessionStart(
 
   reserveStart(caller)
   const cwd = childCwdFor(caller, input.cwd)
-  if (!cwd.ok) return finish(refused(cwd.reason), null, `refused: ${cwd.reason}`)
+  if (!cwd.ok) {
+    releaseStart(caller)
+    return finish(refused(cwd.reason), null, `refused: ${cwd.reason}`)
+  }
   const plan: NewSessionPlan = { ...base, cwd: cwd.cwd }
   if (input.worktree) {
     try {
       plan.worktree = await createWorktree(cwd.cwd, input.worktree)
       plan.cwd = plan.worktree.worktreePath
     } catch (err) {
+      releaseStart(caller)
       return finish(
         failed(`Could not create the worktree: ${errText(err)}`),
         null,
@@ -1579,6 +1604,7 @@ export async function sessionStart(
 
   const spawned = await spawnChild(caller, plan, 'started', title, proposalGrouped(relation))
   if ('error' in spawned) {
+    releaseStart(caller)
     return finish(
       failed(`Could not start the session: ${spawned.error}`),
       null,
@@ -1667,6 +1693,9 @@ export async function sessionDismissProposal(
   return finish(ok(`dismissed ${proposal.id}.`), proposal.id, `dismissed${said ? `: ${said}` : ''}`)
 }
 
+/** Who clicked: the connection the command arrived on (identity + id), as the registry audits it. */
+export type ClickConnection = Pick<CommandConnection, 'connectionId' | 'identity'>
+
 /**
  * One audit row for a click on a proposal card, written by the service so it can say
  * what the registry's own row cannot: which proposal, whether it worked, and the
@@ -1678,20 +1707,24 @@ function auditProposalClick(
   proposalId: unknown,
   target: string | null,
   outcome: 'ok' | 'error',
-  detail: string
+  detail: string,
+  by?: ClickConnection
 ): void {
+  const id = typeof proposalId === 'string' ? proposalId : 'unknown'
   try {
     appendAuditLog({
       ts: Date.now(),
-      connectionId: `proposal:${typeof proposalId === 'string' ? proposalId : 'unknown'}`,
-      method: 'host',
-      label: 'proposal click',
+      // The calling connection's identity when the command handler passed it on (the
+      // click's own row), else the host acting on the proposal.
+      connectionId: by ? by.connectionId : `proposal:${id}`,
+      method: by ? by.identity.method : 'host',
+      label: by ? by.identity.label : 'proposal click',
       capability: 'chat',
       kind: 'command',
       channel: `session-proposal:${action}`,
       sessionId: target,
       outcome,
-      detail: cap(detail, 500)
+      detail: cap(by ? `${id}: ${detail}` : detail, 500)
     })
   } catch (err) {
     logger.error(LOG, `audit append failed for the proposal ${action}: ${errText(err)}`)
@@ -1701,7 +1734,8 @@ function auditProposalClick(
 /** `session:proposal:start`: the user's click on one of a card's Start buttons; `grouped` is which one (absent: the proposal's own relation decides). */
 export async function startProposalFromClient(
   proposalId: unknown,
-  grouped?: unknown
+  grouped?: unknown,
+  by?: ClickConnection
 ): Promise<{ success: boolean; error?: string; startedRef?: string }> {
   const done = (
     result: { success: boolean; error?: string; startedRef?: string },
@@ -1712,7 +1746,8 @@ export async function startProposalFromClient(
       proposalId,
       result.startedRef ?? null,
       result.success ? 'ok' : 'error',
-      detail
+      detail,
+      by
     )
     return result
   }
@@ -1742,7 +1777,10 @@ export async function startProposalFromClient(
 }
 
 /** `session:proposal:dismiss`: the user's click on a card's Dismiss. */
-export function dismissProposalFromClient(proposalId: unknown): {
+export function dismissProposalFromClient(
+  proposalId: unknown,
+  by?: ClickConnection
+): {
   success: boolean
   error?: string
 } {
@@ -1750,7 +1788,7 @@ export function dismissProposalFromClient(proposalId: unknown): {
     result: { success: boolean; error?: string },
     detail: string
   ): { success: boolean; error?: string } => {
-    auditProposalClick('dismiss', proposalId, null, result.success ? 'ok' : 'error', detail)
+    auditProposalClick('dismiss', proposalId, null, result.success ? 'ok' : 'error', detail, by)
     return result
   }
   if (!isProposalId(proposalId))
@@ -1817,6 +1855,7 @@ export async function sessionHandOff(
 
   const spawned = await spawnChild(caller, plan, 'handoff', input.title.trim(), true)
   if ('error' in spawned) {
+    releaseStart(caller)
     return finish(
       failed(`Could not start the new session: ${spawned.error}`),
       null,
@@ -1880,6 +1919,10 @@ export async function runSessionTool(
   tool: SessionToolName,
   input: Record<string, unknown>
 ): Promise<SessionToolResult> {
+  // A session spawned before the setting was turned off still has the tools registered.
+  if (!sessionToolsEnabled()) {
+    return failed('Session tools are turned off in ClaudeUI settings.')
+  }
   try {
     switch (tool) {
       case 'session_list':

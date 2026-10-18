@@ -118,6 +118,11 @@ export class TurnOriginLedger {
     this.sessionStarts++
   }
 
+  /** A start that was counted ahead of time made no session (it failed before one existed): give it back. */
+  sessionStartReleased(): void {
+    this.sessionStarts = Math.max(0, this.sessionStarts - 1)
+  }
+
   /** This turn made a proposal. */
   proposed(): void {
     this.proposalCount++

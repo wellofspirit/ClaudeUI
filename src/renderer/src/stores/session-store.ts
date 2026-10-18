@@ -651,6 +651,12 @@ export interface AppSettings {
    */
   contextPressure?: ContextPressureSetting
   /**
+   * The session tools (the agent-facing `session_*` family and its guidance) on every engine.
+   * Absent from {@link DEFAULT_SETTINGS}: unset is on, and Reset deletes the key. Read when a
+   * session spawns, so turning it off applies to new sessions.
+   */
+  sessionTools?: boolean
+  /**
    * Colour an agent's name in the roster, and the task card's model chip, by the
    * tier of the model it runs on (`shared/model-tier.ts`). On by default.
    */
@@ -1703,7 +1709,7 @@ export interface SessionState {
   hiddenProjectKeys: string[]
   /** Maps sessionId → { engineId, model? } for engine persistence across restarts. */
   sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
-  /** Parent/child links between sessions, keyed by the child's ref (slice 1b). Replicated. */
+  /** Origin links between sessions, keyed by the started session's ref (slice 1b). Replicated. */
   sessionLinks: Record<string, SessionLinkInfo>
   /** sidebar id → ref for every session a link names (slice 1b). Replicated. */
   sessionRefs: Record<string, string>

@@ -17,8 +17,8 @@
  * queue/steer carries them.
  *
  * Taint and budget live on the session (`originLedger`); nothing here keeps
- * per-session state of its own except the per-target work chain. Nothing calls
- * this yet but the tests: the model facing tools arrive with slice 1c.
+ * per-session state of its own except the per-target work chain. The session
+ * tools (`session-tools.ts`), context pressure and the prompt path call it.
  */
 import type { ISession, NonUserItem } from '../providers/ISession'
 import type { SessionManager } from './session-manager'

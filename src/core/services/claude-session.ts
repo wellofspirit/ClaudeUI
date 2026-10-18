@@ -41,6 +41,7 @@ import {
   liveTaskNoteSummary
 } from './task-notification-xml'
 import { agentNoteMessage, peerRowParts, sessionMessageNote } from './agent-note'
+import { BoundedSet } from './bounded-set'
 import { findPeerRow, type PeerRow } from './claude-peer-row'
 import {
   buildCrossSessionEnvelope,
@@ -302,9 +303,15 @@ export class ClaudeSession extends BaseSession {
   private abortController: AbortController | null = null
   private isProcessing = false
   /** Commands cli.js started that ClaudeUI looked up on disk as native peer messages (by uuid). */
-  private readonly nativePeerTried = new Set<string>()
+  private readonly nativePeerTried = new BoundedSet()
   /** Native peer messages already shown as a note (by uuid). */
-  private readonly nativePeerNoted = new Set<string>()
+  private readonly nativePeerNoted = new BoundedSet()
+  /**
+   * Uuids this session put on the wire itself (`run()`): cli.js answers them with
+   * `command_lifecycle` frames too, but they are the session's own prompts, never a
+   * peer message to look up on disk.
+   */
+  private readonly sentUuids = new BoundedSet()
   private wasInterrupted = false
   private pendingApprovals = new Map<string, PendingApprovalEntry>()
   private taskIdMap = new Map<string, string>() // agentId → the CURRENT run's toolUseId
@@ -703,6 +710,7 @@ export class ClaudeSession extends BaseSession {
       }
 
       const messageUuid = wireUuid ?? uuid()
+      this.sentUuids.add(messageUuid)
       sdkMessage = {
         type: 'user' as const,
         session_id: this.sessionId || '',
@@ -1706,7 +1714,8 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       case 'started': {
         const item = this.queue.consumeById(itemId)
         if (!item) {
-          void this.noteNativePeerTurn(itemId)
+          // A prompt this session sent directly is not a queue item either: it is no peer message.
+          if (!this.sentUuids.has(itemId)) void this.noteNativePeerTurn(itemId)
           return
         }
         this.recordConsumedPrompt(item)
@@ -2722,6 +2731,8 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       await new Promise((resolve) => setTimeout(resolve, delay))
       if (this.disposed || this.nativePeerNoted.has(uuid)) return
       const row = await findPeerRow(file, uuid)
+      // In the file but no peer message (a task notification, say): nothing more to find.
+      if (row === 'not-a-peer') return
       if (row) {
         this.emitNativePeerNote(uuid, row, wasIdle)
         return

@@ -1163,7 +1163,7 @@ export interface FullStateSnapshot {
   hiddenSessions?: string[]
   /** Hidden project keys — carried for the same non-destructive-save reason. */
   hiddenProjects?: string[]
-  /** Parent/child links between sessions, keyed by the child's ref (session tools, slice 1b).
+  /** Origin links between sessions, keyed by the started session's ref (session tools, slice 1b).
    *  Optional: an older server omits it, which reads as "no links". */
   sessionLinks?: Record<string, SessionLinkInfo>
   /** sidebar id → ref for every session a link names (slice 1b). */

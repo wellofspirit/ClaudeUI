@@ -2163,7 +2163,7 @@ export interface SessionLinkRow {
   childRef: string
   parentRef: string
   kind: 'started' | 'handoff'
-  createdBy: 'agent' | 'user' | 'pressure'
+  createdBy: 'agent' | 'user'
   /** Part of the origin's group in the sidebar (see `groupHeadRef`). */
   grouped: boolean
   state: SessionLinkRowState
@@ -2190,8 +2190,7 @@ function sessionLinkRow(row: SessionLinkDbRow): SessionLinkRow {
     childRef: row.child_ref,
     parentRef: row.parent_ref,
     kind: row.kind === 'handoff' ? 'handoff' : 'started',
-    createdBy:
-      row.created_by === 'user' || row.created_by === 'pressure' ? row.created_by : 'agent',
+    createdBy: row.created_by === 'user' ? 'user' : 'agent',
     grouped: Number(row.grouped) === 1,
     state: row.state as SessionLinkRowState,
     createdAt: Number(row.created_at),

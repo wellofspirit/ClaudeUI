@@ -254,6 +254,21 @@ describe('ChatPanel — an evicted active entry (ADR-087 §2)', () => {
     unmount()
   })
 
+  it('shows the held-messages notice above the composer for the active session, and not at 0', async () => {
+    const { unmount } = await renderChatPanel()
+    expect(screen.queryByTestId('HeldMessagesNotice')).toBeNull()
+    act(() => {
+      const s = useSessionStore.getState()
+      useSessionStore.setState({
+        sessions: { ...s.sessions, [ROUTE]: { ...s.sessions[ROUTE], heldCount: 2 } }
+      })
+    })
+    expect(screen.getByTestId('HeldMessagesNotice.text')).toHaveTextContent(
+      '2 messages waiting — delivered with your next prompt'
+    )
+    unmount()
+  })
+
   it('shows a loading state, never the welcome screen, while the transcript is not in memory', async () => {
     // An existing conversation whose transcript the snapshot did not carry: empty
     // and evicted, with a live composer beneath. A welcome screen here presents it

@@ -36,7 +36,11 @@ import {
 } from '../db'
 import { HELD_INBOX_CAP } from '../session-delivery'
 import { emitEvent, syncCore } from '../sync-host'
-import { CommandRegistry, makeRemoteConnection } from '../../ipc/command-registry'
+import {
+  CommandRegistry,
+  makeRemoteConnection,
+  type CommandConnection
+} from '../../ipc/command-registry'
 import { RemoteDispatcher } from '../remote-dispatcher'
 import {
   MAX_PENDING_PROPOSALS,
@@ -836,6 +840,50 @@ describe('sessionStart', () => {
     expect(auditFor(p.ref)[0]).toMatchObject({ outcome: 'error' })
   })
 
+  it('a start that fails before any session exists gives its reservation back; one that made a session keeps it', async () => {
+    const p = born('start-release')
+    const spent = (): number => p.fake.originLedger.sessionStartsSinceUser
+
+    // Spawn refusal (ADR-059).
+    behaviour.failCreate = 'Model "gpt-9" is not allowed for opencode'
+    expect(
+      (await sessionStart(p.caller, start({ engine: 'opencode', model: 'gpt-9' }))).isError
+    ).toBe(true)
+    expect(spent()).toBe(0)
+    // …in a hand-off too.
+    expect(
+      (await sessionHandOff(p.caller, { title: 'Continue', handoff: 'h'.repeat(40) })).isError
+    ).toBe(true)
+    expect(spent()).toBe(0)
+    behaviour.failCreate = null
+
+    // A worktree that cannot be made.
+    vi.mocked(createWorktree).mockRejectedValueOnce(new Error('not a git repository'))
+    expect((await sessionStart(p.caller, start({ worktree: 'again' }))).isError).toBe(true)
+    expect(spent()).toBe(0)
+
+    // A proposal started by id whose spawn fails (the claim is given back too).
+    const { id } = await propose(p.caller)
+    behaviour.failCreate = 'engine went away'
+    expect((await sessionStart(p.caller, { proposal_id: id })).isError).toBe(true)
+    expect(spent()).toBe(0)
+    behaviour.failCreate = null
+
+    // Ten failures in one turn do not lock the model out of a real start.
+    behaviour.failCreate = 'engine went away'
+    for (let i = 0; i < STARTS_PER_USER_TURN + 2; i++) await sessionStart(p.caller, start())
+    behaviour.failCreate = null
+    expect(spent()).toBe(0)
+    expect((await sessionStart(p.caller, start())).text).toMatch(/^started s-/)
+    expect(spent()).toBe(1)
+
+    // A session that was made but could not be briefed stays counted: it exists.
+    behaviour.failPrompt = 'engine went away'
+    expect((await sessionStart(p.caller, start({ title: 'Second' }))).isError).toBe(true)
+    expect(spent()).toBe(2)
+    behaviour.failPrompt = null
+  })
+
   it('a first prompt that cannot be sent marks the link failed, whether it throws or rejects', async () => {
     const p = born('start-prompt-fail')
     behaviour.failPrompt = 'engine went away'
@@ -1589,6 +1637,32 @@ describe('a listing row is one line', () => {
   })
 })
 
+describe('the host-wide Session tools setting', () => {
+  it('turns every engine adapter off (sessionToolsAvailable) and makes an open session’s call answer that the tools are off; unset or true is on', async () => {
+    const p = born('setting-off')
+    expect(sessionToolsAvailable()).toBe(true)
+    syncCore.setAppState({ settings: { sessionTools: true } })
+    expect(sessionToolsAvailable()).toBe(true)
+
+    syncCore.setAppState({ settings: { sessionTools: false } })
+    try {
+      expect(sessionToolsAvailable()).toBe(false)
+      const out = await runSessionTool(p.caller, 'session_list', {})
+      expect(out).toEqual({
+        text: 'Session tools are turned off in ClaudeUI settings.',
+        isError: true
+      })
+      const started = await runSessionTool(p.caller, 'session_start', start())
+      expect(started.isError).toBe(true)
+      expect(createSession).not.toHaveBeenCalled()
+    } finally {
+      syncCore.setAppState({ settings: {} })
+    }
+    expect(sessionToolsAvailable()).toBe(true)
+    expect((await runSessionTool(p.caller, 'session_list', {})).isError).toBeUndefined()
+  })
+})
+
 describe('runSessionTool and the wiring', () => {
   it('audits an acting tool that threw after it started, and says what happened', async () => {
     const p = born('run-throw')
@@ -2144,15 +2218,24 @@ describe('the Start and Dismiss clicks', () => {
     const { id } = await propose(p.caller)
     const registry = new CommandRegistry()
     const dispatcher = new RemoteDispatcher(registry)
+    // As remote-handlers.ts / session.ipc.ts register them: the connection rides in front.
     for (const [channel, handler] of [
-      ['session:proposal:start', (pid: string) => startProposalFromClient(pid)],
-      ['session:proposal:dismiss', async (pid: string) => dismissProposalFromClient(pid)]
+      [
+        'session:proposal:start',
+        (c: CommandConnection, pid: string, grouped?: boolean) =>
+          startProposalFromClient(pid, grouped, c)
+      ],
+      [
+        'session:proposal:dismiss',
+        async (c: CommandConnection, pid: string) => dismissProposalFromClient(pid, c)
+      ]
     ] as const) {
       registry.register({
         channel,
         capability: 'chat',
         kind: 'command',
         transport: 'remote',
+        withConnection: true,
         handler
       })
     }
@@ -2164,6 +2247,16 @@ describe('the Start and Dismiss clicks', () => {
     expect(JSON.stringify(started)).toContain('startedRef')
     const rows = listAuditLog({ limit: 500 }).filter((r) => r.channel === 'session:proposal:start')
     expect(rows[0]).toMatchObject({ method: 'password', capability: 'chat', outcome: 'ok' })
+    // The service's own row (which has the outcome and the started ref) names the same client.
+    const own = listAuditLog({ limit: 500 }).filter((r) => r.channel === 'session-proposal:start')
+    expect(own[0]).toMatchObject({
+      connectionId: conn.connectionId,
+      method: 'password',
+      label: conn.identity.label,
+      outcome: 'ok'
+    })
+    expect(own[0].detail).toMatch(new RegExp(`^${id}: started s-`))
+    expect(rows[0].connectionId).toBe(conn.connectionId)
     const again = await dispatcher.handle(
       { type: 'invoke', id: '2', channel: 'session:proposal:dismiss', args: [id] },
       conn

@@ -576,13 +576,13 @@ describe('the replicated state', () => {
       childRoutingId: child,
       engine: 'claude',
       kind: 'handoff',
-      createdBy: 'pressure',
+      createdBy: 'user',
       grouped: true
     })
     const snapshot = toSnapshot(canonical(), 7)
     expect(snapshot.sessionLinks?.[childRef]).toMatchObject({
       kind: 'handoff',
-      createdBy: 'pressure'
+      createdBy: 'user'
     })
     const restored = fromSnapshot(snapshot)
     expect(restored.sessionLinks).toEqual(canonical().sessionLinks)

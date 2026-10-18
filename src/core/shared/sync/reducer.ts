@@ -1449,7 +1449,7 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
     }
 
     /**
-     * The parent/child link table and the id of each session it names, as a
+     * The origin link table (with `grouped`) and the id of each session it names, as a
      * REPLACE (slice 1b). The host sends the whole table on every change, so an
      * event is idempotent and a late joiner's snapshot is the same value. An
      * absent or malformed payload is a no-op.

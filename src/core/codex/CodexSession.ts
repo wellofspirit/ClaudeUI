@@ -128,6 +128,7 @@ import { codexNativeIdentity } from '../auth/account-identity'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { UNKNOWN_ACCOUNT_KEY, type AccountIdentity } from '../../shared/account-key'
 import { equivalentCostUsd } from '../../shared/pricing'
+import { BOUNDED_SET_DEFAULT_CAP, BoundedSet } from '../services/bounded-set'
 import { BashStreamGate } from '../opencode/bash-stream-gate'
 import {
   setSessionMeta,
@@ -507,38 +508,10 @@ function hostedContentItems(result: ToolResultContent): DynamicToolCallOutputCon
 }
 
 /** Cap for the ended-turn guards below — generous, and still bounded. */
-export const ENDED_TURN_CAP = 512
+export const ENDED_TURN_CAP = BOUNDED_SET_DEFAULT_CAP
 
-/**
- * Insertion-ordered set that evicts its OLDEST member once `cap` is exceeded.
- *
- * The ended-turn guards only ever have to answer for the recent past: a turn
- * old enough to fall out of a 512-deep window cannot still be delivering
- * notifications, so eviction costs nothing and the set stops growing for the
- * life of a long-lived thread. Exported for the unit test — driving 513 real
- * turns through the session would test the fixture, not the eviction.
- */
-export class BoundedSet {
-  private readonly entries = new Set<string>()
-
-  constructor(private readonly cap: number = ENDED_TURN_CAP) {}
-
-  /** Re-adding an existing member keeps its ORIGINAL position (Set semantics). */
-  add(value: string): void {
-    this.entries.add(value)
-    while (this.entries.size > this.cap) {
-      this.entries.delete(this.entries.values().next().value!)
-    }
-  }
-
-  has(value: string): boolean {
-    return this.entries.has(value)
-  }
-
-  get size(): number {
-    return this.entries.size
-  }
-}
+// Exported from here too: the Codex unit test and its callers import it from this module.
+export { BoundedSet }
 
 /**
  * One root is one THREAD on its account's host (ADR-069 §2). No process of its

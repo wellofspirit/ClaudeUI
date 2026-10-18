@@ -369,7 +369,7 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     cls: 'replicated',
     ring: true,
     canonical: true,
-    why: 'Parent/child links between sessions and the id of each session they name (slice 1b): the WHOLE table, applied as a replace, so a late joiner reads the same value from the snapshot and an event never depends on a previous one. Small by nature (one row per started session).'
+    why: 'Origin links between sessions (with their `grouped` flag) and the id of each session they name (slice 1b): the WHOLE table, applied as a replace, so a late joiner reads the same value from the snapshot and an event never depends on a previous one. Small by nature (one row per started session).'
   },
 
   // -------------------------------------------------------------------------

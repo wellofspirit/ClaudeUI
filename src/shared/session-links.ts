@@ -40,7 +40,7 @@ export function isRefShaped(input: string): boolean {
 export const RESERVED_SESSION_WORDS: ReadonlySet<string> = new Set(['self', 'origin', 'parent'])
 
 export type SessionLinkKind = 'started' | 'handoff'
-export type SessionLinkCreator = 'agent' | 'user' | 'pressure'
+export type SessionLinkCreator = 'agent' | 'user'
 export type SessionLinkState = 'starting' | 'live' | 'ended' | 'failed'
 
 /** What a client needs of a link. Keyed by the started session's ref. */

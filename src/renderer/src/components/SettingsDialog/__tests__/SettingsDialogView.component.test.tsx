@@ -1079,6 +1079,7 @@ describe('a harness that does not run (ADR-082 §8)', () => {
       'autonomy',
       'permissions',
       'judge',
+      'session-tools',
       'context-pressure',
       'retention'
     ])
@@ -1088,7 +1089,13 @@ describe('a harness that does not run (ADR-082 §8)', () => {
     harnesses(['opencode', 'pi', 'codex'])
     renderView({ activePage: 'sessions' })
     await settle()
-    expect(groupIds()).toEqual(['autonomy', 'permissions', 'context-pressure', 'retention'])
+    expect(groupIds()).toEqual([
+      'autonomy',
+      'permissions',
+      'session-tools',
+      'context-pressure',
+      'retention'
+    ])
   })
 
   it('Dispatch: a target that does not run is greyed and unselectable, the next one shows', async () => {

@@ -24,8 +24,15 @@ export interface PeerRow {
   native: boolean
 }
 
-/** The peer row with this uuid, or null when it is not (yet) in the file's tail. */
-export async function findPeerRow(file: string, uuid: string): Promise<PeerRow | null> {
+/**
+ * The peer row with this uuid; `'not-a-peer'` when the row IS in the tail but is no
+ * peer message (a task notification, any other command), so the caller stops looking;
+ * null when it is not (yet) there, so the caller tries again.
+ */
+export async function findPeerRow(
+  file: string,
+  uuid: string
+): Promise<PeerRow | 'not-a-peer' | null> {
   let handle: fs.promises.FileHandle | undefined
   try {
     handle = await fs.promises.open(file, 'r')
@@ -47,7 +54,7 @@ export async function findPeerRow(file: string, uuid: string): Promise<PeerRow |
           message?: { content?: unknown }
         }
         if (row.type !== 'user' || row.uuid !== uuid) continue
-        return peerRowParts(row, row.message?.content)
+        return peerRowParts(row, row.message?.content) ?? 'not-a-peer'
       } catch {
         // a partial first line of the tail, or a row still being written
       }

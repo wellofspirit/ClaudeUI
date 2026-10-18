@@ -339,7 +339,7 @@ export interface SyncEventMap {
    * the no-op notify it used to be rather than blanking the list.
    */
   'session:directories-changed': (directories?: DirectoryGroup[]) => void
-  /** The parent/child link table and the sidebar id of each session it names (slice 1b). A replace. */
+  /** The origin link table (with `grouped`) and the sidebar id of each session it names (slice 1b). A replace. */
   'session:link-changed': (data: SessionLinksPayload) => void
   'config:settings-changed': (settings: Record<string, unknown>) => void
   'config:sessions-changed': (config: UISessionConfig) => void

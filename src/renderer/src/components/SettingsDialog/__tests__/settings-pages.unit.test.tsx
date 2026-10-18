@@ -120,7 +120,15 @@ describe('PAGES structure', () => {
     const expected: Record<string, string[]> = {
       appearance: ['theme', 'layout', 'agents', 'diff', 'status-line', 'git-panel'],
       chat: ['tool-output', 'thinking', 'voice', 'git-actions'],
-      sessions: ['autonomy', 'permissions', 'judge', 'trust', 'context-pressure', 'retention'],
+      sessions: [
+        'autonomy',
+        'permissions',
+        'judge',
+        'trust',
+        'session-tools',
+        'context-pressure',
+        'retention'
+      ],
       advanced: ['logging', 'usage'],
       about: ['about'],
       models: [
@@ -454,7 +462,9 @@ describe('inventory guard', () => {
       'codexAgentColours',
       'dispatchTileColour',
       // Session tools, slice 4: when a long session should hand off.
-      'contextPressure'
+      'contextPressure',
+      // Session tools, host-wide switch.
+      'sessionTools'
     ])
 
     expect([...reachable].sort()).toEqual([...fromSections, ...local].sort())
@@ -714,6 +724,7 @@ describe('harnesses that do not run', () => {
       'permissions',
       'judge',
       'trust',
+      'session-tools',
       'context-pressure',
       'retention'
     ])
@@ -722,6 +733,7 @@ describe('harnesses that do not run', () => {
       'autonomy',
       'permissions',
       'judge',
+      'session-tools',
       'context-pressure',
       'retention'
     ])
@@ -729,6 +741,7 @@ describe('harnesses that do not run', () => {
     expect(ids(except('opencode', 'pi', 'codex'))).toEqual([
       'autonomy',
       'permissions',
+      'session-tools',
       'context-pressure',
       'retention'
     ])

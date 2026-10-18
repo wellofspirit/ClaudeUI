@@ -31,7 +31,6 @@
 import type { SessionStatus } from '../../shared/types'
 import type { SessionLinkInfo } from '../../shared/session-links'
 import type { CanonicalSessionState, CanonicalState } from '../shared/sync/state'
-import { noteTurnStopped } from './context-pressure'
 import { deliver } from './session-delivery'
 import { resolveRef, titleOf } from './session-links'
 import type { SessionManager } from './session-manager'
@@ -294,10 +293,11 @@ function sweep(): void {
  * A stop was requested for this session (the user's Stop, a remote client's, or a
  * parent's `session_stop`). Engines hide the teardown error of a stopped turn, so
  * this is the only way the turn's end can say "stopped". Ignored when no watched
- * turn is running.
+ * turn is running. Production does not call this (the stop paths tell context
+ * pressure directly and nothing loads this module); whoever enables notes must call
+ * it from `SessionManager.interrupt` and `session_stop` again.
  */
 export function noteStopRequested(id: string): void {
-  noteTurnStopped(id)
   // While notes are dormant `turns` never fills, so the lookup below is a no-op.
   const ref = syncCore.getCanonicalState().sessionRefs[id]
   const watch = ref ? turns.get(ref) : undefined

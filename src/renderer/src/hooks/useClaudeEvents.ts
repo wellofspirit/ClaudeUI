@@ -528,7 +528,7 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
         // Another client created this session. Register it locally — recents +
         // engine map — and either follow it or flag it in the sidebar.
         // A session another session's tool started is never followed: the user did
-        // not ask for it, so it appears in the sidebar (nested) and does not take
+        // not ask for it, so it appears in the sidebar (in its group, or standalone) and does not take
         // the screen from what they are doing.
         const follow = store.settings.remoteFollowActions && data?.createdBy !== 'agent'
         store.registerRemoteSession(routingId, follow)

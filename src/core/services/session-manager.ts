@@ -9,7 +9,7 @@ import { cwdToProjectKey } from '../../shared/project-key'
 import { claudeProjectKeyFor } from './claude-transcript-locator'
 import { getSessionMeta, moveSessionInbox, moveSessionMeta, renameUsageEventParent } from './db'
 import { logger } from './logger'
-import { noteStopRequested } from './session-notes'
+import { noteTurnStopped } from './context-pressure'
 import { syncCore } from './sync-host'
 import { moveCustomTitle } from './ui-config'
 
@@ -170,7 +170,8 @@ export class SessionManager {
   async interrupt(routingId: string): Promise<void> {
     const session = this.sessions.get(routingId)
     if (session) {
-      noteStopRequested(routingId)
+      // Context pressure must see a stop (the engine hides the teardown error of a stopped turn).
+      noteTurnStopped(routingId)
       await session.interrupt()
     }
   }

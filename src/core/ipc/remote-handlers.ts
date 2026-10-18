@@ -560,14 +560,18 @@ export function registerRemoteHandlers(
     channel: 'session:proposal:start',
     capability: 'chat',
     kind: 'command',
-    handler: async (proposalId: string, grouped?: boolean) =>
-      startProposalFromClient(proposalId, grouped)
+    // The click's audit row carries the calling connection, so it needs it first.
+    withConnection: true,
+    handler: async (connection: CommandConnection, proposalId: string, grouped?: boolean) =>
+      startProposalFromClient(proposalId, grouped, connection)
   })
   handleRemote({
     channel: 'session:proposal:dismiss',
     capability: 'chat',
     kind: 'command',
-    handler: async (proposalId: string) => dismissProposalFromClient(proposalId)
+    withConnection: true,
+    handler: async (connection: CommandConnection, proposalId: string) =>
+      dismissProposalFromClient(proposalId, connection)
   })
 
   // The user's answer to the context-pressure banner (slice 4): Hand off or Not now.

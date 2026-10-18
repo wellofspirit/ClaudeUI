@@ -652,6 +652,36 @@ describe('a message another Claude Code process sent (native peer turn)', () => 
     expect(mockFindPeerRow).not.toHaveBeenCalled()
   })
 
+  it('is not looked up for a prompt the session sent directly (the ordinary case: it never touches the transcript)', async () => {
+    const { session } = await nativeSession()
+    void session.run('an ordinary prompt')
+    const frame = await firstFrame()
+
+    // cli.js answers every frame that has a uuid with queued + started.
+    started(session, frame.uuid as string)
+    await new Promise((resolve) => setTimeout(resolve, 800))
+
+    expect(mockFindPeerRow).not.toHaveBeenCalled()
+    // …while a uuid this session never sent still is.
+    started(session)
+    await vi.waitFor(() => expect(mockFindPeerRow).toHaveBeenCalledTimes(1), { timeout: 3000 })
+  })
+
+  it('stops looking at the first hit when the row is in the file but is no peer message', async () => {
+    vi.useFakeTimers()
+    try {
+      mockFindPeerRow.mockResolvedValue('not-a-peer')
+      const { session, sent } = await nativeSession()
+      started(session)
+      await vi.advanceTimersByTimeAsync(7000)
+      expect(mockFindPeerRow).toHaveBeenCalledTimes(1)
+      expect(noteRows(sent)).toEqual([])
+      expect(session.originLedger.userOriginClean).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('a replayed peer user frame is a note too, once, without touching the ledger', async () => {
     const { session, sent } = await nativeSession()
     const frame = {

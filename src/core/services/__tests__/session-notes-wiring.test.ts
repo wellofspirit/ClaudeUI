@@ -6,8 +6,7 @@
  * dormant until `enableSessionNotes()` — which nothing in production calls (the
  * session IPC registration's half of that is pinned in session.ipc.test.ts).
  *
- * `noteStopRequested` is the one live export: the Stop path and `session_stop` call it,
- * and it must keep feeding context pressure with notes off.
+ * The stop paths no longer go through this module at all (session-stop-wiring.test.ts).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionStatus } from '../../../shared/types'
@@ -18,7 +17,6 @@ import { linkChild, resetSessionLinksForTests } from '../session-links'
 import {
   configureSessionNotes,
   enableSessionNotes,
-  noteStopRequested,
   resetSessionNotesForTests
 } from '../session-notes'
 import { emitEvent, syncCore } from '../sync-host'
@@ -26,9 +24,6 @@ import { emitEvent, syncCore } from '../sync-host'
 vi.mock('../logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
-
-const pressure = vi.hoisted(() => ({ noteTurnStopped: vi.fn() }))
-vi.mock('../context-pressure', () => pressure)
 
 let n = 0
 const id = (label: string): string => `${label}-${process.pid}-${++n}`
@@ -98,7 +93,6 @@ beforeEach(() => {
   resetSessionNotesForTests()
   delivered.length = 0
   parentSession.deliverNonUser.mockClear()
-  pressure.noteTurnStopped.mockClear()
 })
 
 afterEach(() => {
@@ -150,14 +144,5 @@ describe('loading the module', () => {
       vi.doUnmock('../sync-host')
       vi.resetModules()
     }
-  })
-})
-
-describe('noteStopRequested with notes off', () => {
-  it('still tells context pressure the turn was stopped, and does nothing else', () => {
-    const { child } = startedPair()
-    expect(() => noteStopRequested(child)).not.toThrow()
-    expect(pressure.noteTurnStopped).toHaveBeenCalledExactlyOnceWith(child)
-    expect(delivered).toHaveLength(0)
   })
 })

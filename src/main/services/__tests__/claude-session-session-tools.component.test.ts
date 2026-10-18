@@ -198,6 +198,21 @@ describe('registration', () => {
     expect(options.systemPrompt.append).not.toContain('session_start')
   })
 
+  it('registers nothing, tools or guidance, while the host-wide Session tools setting is off; back on, it does again', async () => {
+    syncCore.setAppState({ settings: { sessionTools: false } })
+    const off = await boot()
+    expect(off.options.mcpServers['claude-ui-sessions']).toBeUndefined()
+    expect(off.options.systemPrompt.append).not.toContain('ClaudeUI Sessions')
+    expect(off.options.systemPrompt.append).not.toContain('session_start')
+    // The dispatch tools are a different family and stay.
+    expect(off.options.mcpServers['claude-ui-collab']).toBeTruthy()
+
+    syncCore.setAppState({ settings: {} })
+    const on = await boot()
+    expect(on.options.mcpServers['claude-ui-sessions']).toBeTruthy()
+    expect(on.options.systemPrompt.append).toContain('## ClaudeUI Sessions')
+  })
+
   it('only the interactive ClaudeSession builds the server: dispatch targets, automations and side questions never do', () => {
     // Those run on raw SDK queries (service-session, the dispatcher, the automation
     // manager), not on a ClaudeSession; a second call site would give them the tools.

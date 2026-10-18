@@ -27,7 +27,7 @@ import { EngineLogo } from '../shared/EngineLogo'
 import type { EngineCapabilities } from '../../../../shared/model-capabilities'
 import { engineMeta } from '../../../../shared/engine-meta'
 import { SECTIONS, type Section, type SettingItem } from './settings-sections'
-import { SettingRow, ActionRow, type AppliesOn } from './settings-controls'
+import { SettingRow, SettingsToggle, ActionRow, type AppliesOn } from './settings-controls'
 import type { SettingsPageId, SettingsTarget } from './settings-target'
 import { notInstalledTitle, type EngineRuns } from './harness-view'
 import { UsageHubSettings } from './UsageHubSettings'
@@ -321,6 +321,29 @@ const CONTEXT_PRESSURE: SettingItem = {
   render: (s, u) => <ContextPressureSettings settings={s} update={u} />
 }
 
+/**
+ * Session tools, host-wide switch: the `session_*` tools and their prompt guidance on all four
+ * engines. On by default; read at spawn, so off applies to sessions started afterwards.
+ */
+const SESSION_TOOLS: SettingItem = {
+  key: 'sessionTools',
+  label: 'Session tools',
+  keywords:
+    'session tools agents start hand off message sessions other sessions session_start session_list propose proposal disable off',
+  render: (s, u) => (
+    <SettingsToggle
+      testid="SettingsSessionTools"
+      label="Session tools"
+      description="Lets agents list, read, message, start and hand off to your other sessions (and see the tools' guidance in their prompt). Turn off to remove them from every engine. Applies to sessions started after the change; an open session's tools answer that they are off."
+      appliesOn="next-session"
+      modified={s.sessionTools === false}
+      onReset={() => u({ sessionTools: undefined })}
+      checked={s.sessionTools !== false}
+      onChange={(v) => u({ sessionTools: v ? undefined : false })}
+    />
+  )
+}
+
 export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   SANDBOX_CROSS_LINK,
   OTHER_ENGINE_PERMISSIONS,
@@ -334,7 +357,8 @@ export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   PI_AGENT_COLOURS,
   CODEX_AGENT_COLOURS,
   DISPATCH_TILE_COLOUR,
-  CONTEXT_PRESSURE
+  CONTEXT_PRESSURE,
+  SESSION_TOOLS
 ]
 
 // ── Icons (14px, stroke 1.8 — the rail size on the boards) ───────────
@@ -575,6 +599,12 @@ export const PAGES: SettingsPage[] = [
         harnesses: ['opencode', 'pi'],
         storage: 'automode.json',
         items: itemsOf('trust-lists')
+      },
+      {
+        id: 'session-tools',
+        label: 'Session tools',
+        note: 'Read when a session starts, so a change applies to sessions started after it.',
+        items: [SESSION_TOOLS]
       },
       {
         // The user's threshold for continuing a long session in a new one (session tools,

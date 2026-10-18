@@ -27,6 +27,7 @@ import { SessionLinkBar } from './SessionLinkBar'
 import { WelcomeState } from './WelcomeState'
 import { reloadActiveTranscript } from '../../../lib/session-history-load'
 import { ContextPressureBanner } from './ContextPressureBanner'
+import { HeldMessagesNotice } from './HeldMessagesNotice'
 import { QueuedMessageCard } from './QueuedMessageCard'
 import { ChatSearchOverlay } from '../ChatSearch'
 import { SEARCH_ANCHOR } from '../ChatSearch/search-scope'
@@ -373,6 +374,7 @@ export function ChatPanel(): React.JSX.Element {
               </button>
             </div>
           )}
+          <HeldMessagesNotice isMobile={isMobile} />
           <ContextPressureBanner isMobile={isMobile} />
           <QueuedMessageCard isMobile={isMobile} />
           <BtwCard isMobile={isMobile} />
