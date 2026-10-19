@@ -208,6 +208,9 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     }
   })
   opencodeServerManager.setDispatchAgent((req, ctx) => crossEngineDispatcher.dispatch(req, ctx))
+  opencodeServerManager.setHandBack((sessionId, report, callId) =>
+    crossEngineDispatcher.handBackFromOpencode(sessionId, report, callId)
+  )
   // A dispatch run outlives the call that launched it, so it reaches its dispatching
   // session through the manager and canonical state at each read, never through the
   // launching call's closures; its parent id follows re-keys.

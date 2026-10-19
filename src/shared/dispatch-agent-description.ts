@@ -104,7 +104,7 @@ export function dispatchAgentDescription(opts: {
   return (
     `Delegate a task to an agent on a DIFFERENT engine — ${targetBlurbs(opts.targets)}. ` +
     `${dispatchUsageGuidance(opts.ownSubagentTool)} ` +
-    'The agent runs headless in the same working directory and its final answer is returned as ' +
+    'The agent runs headless in the same working directory and the report it hands back is returned as ' +
     `this tool result. ${DISPATCH_SESSION_ID_GUIDANCE} ` +
     'The available model list is user-configured per target engine; omit `model` to use that ' +
     "engine's configured default." +
@@ -130,3 +130,68 @@ export function dispatchAgentPromptSection(opts: {
     `${DISPATCH_SESSION_ID_GUIDANCE} The model list is user-configured.`
   )
 }
+
+// ── hand_back (ADR-105 §3) ─────────────────────────────────────────────────────────────────────
+
+/** The tool every X-Agent is given to deliver its report (bare name; opencode prefixes `claudeui_`). */
+export const HAND_BACK_TOOL = 'hand_back'
+
+/** The one description of `hand_back`, for the four target engines' registrations. */
+export const HAND_BACK_DESCRIPTION =
+  'Deliver your final report to the agent that dispatched you. Call it once, as your last action; ' +
+  'your run ends when it returns. Use it for the result, not for questions or progress updates: ' +
+  'the report you pass is the only thing your dispatcher receives, and plain text you write at the ' +
+  'end of your run is NOT delivered. Put everything your dispatcher needs in that one report.'
+
+/** The `report` input's description. */
+export const HAND_BACK_REPORT_PARAM = 'Your full final report for the agent that dispatched you'
+
+/** The tool result of the call that delivered the report. */
+export const HAND_BACK_DONE_TEXT =
+  'Report delivered to your dispatcher. Your run is over: anything you write after this is not delivered.'
+
+/** The tool result of a second call in the same run. */
+export const HAND_BACK_REPEAT_TEXT = 'Your report was already delivered; your run has ended.'
+
+/** The tool result of a call after the run it belongs to is over. */
+export const HAND_BACK_ENDED_TEXT = 'Your run has ended; no report was taken.'
+
+/** The tool result of a call a subagent of the X-Agent made (only the X-Agent itself reports). */
+export const HAND_BACK_SUBAGENT_TEXT =
+  'hand_back is for the X-Agent itself: a subagent it started cannot deliver the report. Pass ' +
+  'what you found to the agent that started you.'
+
+/** The tool result of a call that could not be attributed to the X-Agent itself. */
+export const HAND_BACK_UNATTRIBUTED_TEXT =
+  'hand_back could not tell which agent made this call, so no report was taken. Call it again ' +
+  'from the main agent.'
+
+/** The tool result of a call from anything that is not a running X-Agent. */
+export const HAND_BACK_NOT_TARGET_TEXT =
+  'hand_back is for dispatched agents delivering their final report; this session is not running as one.'
+
+/** The tool result of a call with no report in it. */
+export const HAND_BACK_EMPTY_TEXT = 'The report must not be empty: pass your full final report.'
+
+/** The follow-up prompt a run that ended without a report gets (up to three times); `toolName` is what its engine calls the tool. */
+export function handBackNudge(toolName: string = HAND_BACK_TOOL): string {
+  return `[hand_back] Your report has not been delivered. Call ${toolName} with your final report now.`
+}
+
+/** Appended to the task an X-Agent is given, so it knows how to finish; `toolName` is what its engine calls the tool. */
+export function handBackTaskSuffix(toolName: string = HAND_BACK_TOOL): string {
+  return (
+    `\n\nWhen your work is complete, deliver your final report by calling the ${toolName} tool ` +
+    'with the whole report. The call ends your run; plain text at the end of your run is not delivered.'
+  )
+}
+
+/** What a run that never delivered a report ends as (the card, a waiting dispatcher). */
+export function handBackWithheldText(name: string): string {
+  return `X-Agent ${name} ended without delivering a report.`
+}
+
+/** The warning above a report taken from an agent's last message, because its run had no `hand_back` tool. */
+export const HAND_BACK_FALLBACK_WARNING =
+  'This X-Agent has no hand_back tool (it was started before reports were delivered that way), so ' +
+  'its last message is shown as the report. It is not a report the agent chose to hand over.'

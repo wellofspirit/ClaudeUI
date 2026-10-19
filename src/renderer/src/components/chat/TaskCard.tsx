@@ -855,6 +855,7 @@ export function TaskCard({
 
           <HandbackReport
             notification={bgNotification}
+            xAgent={isDispatch}
             className="border-t border-border px-3 py-2"
           />
 

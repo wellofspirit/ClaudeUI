@@ -68,6 +68,7 @@ function row(over: Partial<DispatchTargetRow> = {}): DispatchTargetRow {
     callerRestriction: null,
     name: null,
     description: null,
+    handBack: false,
     state: 'running',
     createdAt: 100,
     lastActiveAt: 100,
@@ -89,7 +90,7 @@ describe('dispatch_target (migration v35)', () => {
       expect(exists()).toBe(false)
       runMigrations(older)
       expect(exists()).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(35)
+      expect(older.pragma('user_version', { simple: true })).toBe(36)
       const columns = (
         older.prepare('PRAGMA table_info(dispatch_target)').all() as { name: string }[]
       ).map((c) => c.name)
@@ -110,7 +111,9 @@ describe('dispatch_target (migration v35)', () => {
         'description',
         'state',
         'created_at',
-        'last_active_at'
+        'last_active_at',
+        // v36 (the report store, ADR-105 §3): the target was started with `hand_back`.
+        'hand_back'
       ])
     } finally {
       older.close()

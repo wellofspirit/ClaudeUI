@@ -42,6 +42,7 @@ export function makeFakeDispatchLedger(): FakeDispatchLedger {
       const now = 1_000 + next
       const row: DispatchTargetRow = {
         ...input,
+        handBack: input.handBack ?? false,
         id: `s-${String(next).padStart(6, '0')}`,
         state: 'running',
         createdAt: now,

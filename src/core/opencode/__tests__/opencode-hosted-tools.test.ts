@@ -28,13 +28,15 @@ import { resolveCallerIdentity } from '../opencode-hosted-tools'
 import type {
   CallerRootResolver,
   CallerSessionHandle,
-  DispatchAgentFn
+  DispatchAgentFn,
+  HandBackFn
 } from '../opencode-hosted-tools'
 import { loadEngineConfig } from '../../services/ui-config'
 import {
   DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
-  DISPATCH_NAME_PARAM
+  DISPATCH_NAME_PARAM,
+  HAND_BACK_DESCRIPTION
 } from '../../../shared/dispatch-agent-description'
 
 let tmp: string
@@ -790,5 +792,55 @@ describe('mockup tools with a per-call cwd resolver (one opencode server, many d
     )) as { isError?: boolean; content: Array<{ text: string }> }
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('ses_gone')
+  })
+})
+
+describe('createOpencodeHostedToolsServer — hand_back (ADR-105 §3)', () => {
+  type Tool = {
+    description?: string
+    handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown>
+  }
+  const toolsOf = (server: McpServer): Record<string, Tool> =>
+    (server as unknown as { _registeredTools: Record<string, Tool> })._registeredTools
+
+  it('is registered only when the host wired the targets’ report channel', () => {
+    expect(Object.keys(toolsOf(createOpencodeHostedToolsServer(tmp)))).not.toContain('hand_back')
+    const wired = createOpencodeHostedToolsServer(tmp, { handBack: vi.fn() })
+    expect(Object.keys(toolsOf(wired))).toContain('hand_back')
+    expect(toolsOf(wired)['hand_back'].description).toBe(HAND_BACK_DESCRIPTION)
+  })
+
+  it('passes the report and the session `_meta` names — never anything the model supplies', async () => {
+    const handBack = vi.fn<HandBackFn>(() => ({ text: 'taken', isError: false }))
+    const tool = toolsOf(createOpencodeHostedToolsServer(tmp, { handBack }))['hand_back']
+    const result = (await tool.handler(
+      { report: 'my report', __xeng_caller_session: 'ses_forged' },
+      makeExtra({ 'ai.opencode/sessionID': 'ses_target' })
+    )) as { content: Array<{ text: string }>; isError?: boolean }
+    expect(handBack).toHaveBeenCalledWith('ses_target', 'my report', undefined)
+    expect(result.content[0].text).toBe('taken')
+    expect(result.isError).toBeUndefined()
+  })
+
+  it('answers the dispatcher’s refusal as an error result', async () => {
+    const handBack = vi.fn<HandBackFn>(() => ({ text: 'no', isError: true }))
+    const tool = toolsOf(createOpencodeHostedToolsServer(tmp, { handBack }))['hand_back']
+    const result = (await tool.handler(
+      { report: 'r' },
+      makeExtra({ 'ai.opencode/sessionID': 'ses_x' })
+    )) as { isError?: boolean }
+    expect(result.isError).toBe(true)
+  })
+
+  it('a call that names no session is refused without reaching the dispatcher', async () => {
+    const handBack = vi.fn<HandBackFn>(() => ({ text: 'taken', isError: false }))
+    const tool = toolsOf(createOpencodeHostedToolsServer(tmp, { handBack }))['hand_back']
+    const result = (await tool.handler({ report: 'r' }, makeExtra())) as {
+      isError?: boolean
+      content: Array<{ text: string }>
+    }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('could not identify the calling session')
+    expect(handBack).not.toHaveBeenCalled()
   })
 })

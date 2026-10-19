@@ -30,6 +30,7 @@ import {
 import provenance from '../../core/codex/protocol/provenance.json'
 import type { UsageTurnEvent } from '../../core/services/usage-recorder'
 import { makeFakeDispatchLedger } from '../../test/helpers/fake-dispatch-ledger'
+import { makeFakeDispatchReports } from '../../test/helpers/fake-dispatch-reports'
 
 /**
  * Codex as a cross-engine dispatch TARGET, against the REAL pinned binary and a
@@ -294,7 +295,8 @@ shell_snapshot = false
 function makeDispatcher(
   env: NodeJS.ProcessEnv,
   usage: UsageTurnEvent[],
-  forwarded: Array<Parameters<AttachCodexTargetFn>[0]>
+  forwarded: Array<Parameters<AttachCodexTargetFn>[0]>,
+  overrides: Partial<DispatcherDeps> = {}
 ): CrossEngineDispatcher {
   const attachCodexTarget: AttachCodexTargetFn = async (opts) => {
     forwarded.push(opts)
@@ -346,7 +348,8 @@ function makeDispatcher(
     // the dispatcher builds, not the table it lands in.
     recordUsageEvent: (row) => usage.push(row),
     // The X-Agent ledger (ADR-105) in memory: this test does not exercise the DB.
-    ledger: makeFakeDispatchLedger()
+    ledger: makeFakeDispatchLedger(),
+    ...overrides
   }
   const dispatcher = new CrossEngineDispatcher(deps)
   dispatchers.push(dispatcher)
@@ -469,6 +472,52 @@ it.runIf(enabled)(
     expect(result.sessionId).toMatch(/^[0-9a-f-]{36}$/)
     // A stopped turn records no usage row (ADR-033 M4-B).
     expect(usage).toHaveLength(0)
+  },
+  120_000
+)
+
+it.runIf(enabled)(
+  'hand_back: the thread is started with the tool, the model calls it, and the run is that report',
+  async () => {
+    const fixture = await setupFixture()
+    const usage: UsageTurnEvent[] = []
+    const dispatcher = makeDispatcher(fixture.env, usage, [], {
+      requireHandBack: true,
+      reports: makeFakeDispatchReports()
+    })
+    const emitted: Array<{ channel: string; data: unknown }> = []
+    const ctx: DispatchContext = {
+      fromEngine: 'claude',
+      fromRoutingId: ROUTING_ID,
+      cwd: fixture.cwd,
+      getAutonomyMode: () => 'default',
+      getMessages: () => [],
+      emit: (channel, data) => emitted.push({ channel, data }),
+      toolUseId: 'toolu_dispatch_hand_back'
+    }
+    // The model calls the dynamic tool, and — once it has its answer — would go on forever:
+    // the dispatcher has to end that turn itself.
+    fixture.script.current = (_request, index) =>
+      index === 0
+        ? {
+            type: 'function_call',
+            call_id: 'call_hand_back',
+            name: 'hand_back',
+            arguments: JSON.stringify({ report: 'fixture codex report' })
+          }
+        : 'hold'
+
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'Do the task, then hand your report back' },
+      ctx
+    )
+    expect(result.isError, `dispatch failed: ${result.text}`).toBeFalsy()
+    expect(result.text).toContain('[X-Agent report]')
+    expect(result.text).toContain('  fixture codex report')
+    // The real binary accepted `dynamicTools` on thread/start and offered the tool to the model.
+    expect(JSON.stringify(fixture.requests[0]?.tools)).toContain('hand_back')
+    const notification = emitted.find((entry) => entry.channel === 'session:task-notification')!
+    expect(notification.data).toMatchObject({ handback: 'send', summary: 'fixture codex report' })
   },
   120_000
 )

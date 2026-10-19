@@ -39,6 +39,7 @@ import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import { displayCostFromRow } from '../../shared/cost-rule'
 import { ENGINE_META, engineMeta } from '../../shared/engine-meta'
 import { logger } from './logger'
+import { capReport } from '../../shared/handback-frame'
 
 // ---------------------------------------------------------------------------
 // Metering types (Phase 7 — Pass 1)
@@ -1558,6 +1559,33 @@ export const MIGRATIONS: Migration[] = [
           ON dispatch_target (parent_session_id);
       `)
     }
+  },
+  {
+    // The X-Agent report store (ADR-105 §3, slice B-3a): how each run of an X-Agent ended, one
+    // row per run, keyed by the target's ledger id and the run's number (1-based, per target).
+    // `tool_use_id` is the dispatch_agent call that launched or continued that run (the card the
+    // outcome belongs to). `status`: `delivered` (the agent called `hand_back`), `withheld` (it
+    // ended without one), `fallback` (a target without the tool; `report` is its last message),
+    // `stopped`, `failed`, `timeout`; `report` is set for delivered and fallback only, as
+    // received: the sanitiser runs at render and delivery time. `delivered_at` stays null until
+    // B-3b delivers it into the parent. `dispatch_target.hand_back` says the target was started
+    // with the tool (0 = a row from before it existed: its final message is the report).
+    version: 36,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS dispatch_report (
+          target_id TEXT NOT NULL,
+          run INTEGER NOT NULL,
+          tool_use_id TEXT,
+          status TEXT NOT NULL,
+          report TEXT,
+          created_at INTEGER NOT NULL,
+          delivered_at INTEGER,
+          PRIMARY KEY (target_id, run)
+        );
+        ALTER TABLE dispatch_target ADD COLUMN hand_back INTEGER NOT NULL DEFAULT 0;
+      `)
+    }
   }
 ]
 
@@ -2545,6 +2573,8 @@ export interface DispatchTargetRow {
   callerRestriction: string | null
   name: string | null
   description: string | null
+  /** The target was started with the `hand_back` tool (ADR-105 §3); false = a row from before it. */
+  handBack: boolean
   state: DispatchTargetState
   createdAt: number
   lastActiveAt: number
@@ -2565,6 +2595,7 @@ interface DispatchTargetDbRow {
   caller_restriction: string | null
   name: string | null
   description: string | null
+  hand_back: number
   state: string
   created_at: number
   last_active_at: number
@@ -2594,6 +2625,7 @@ function dispatchTargetRow(row: DispatchTargetDbRow): DispatchTargetRow {
     callerRestriction: row.caller_restriction,
     name: row.name,
     description: row.description,
+    handBack: Number(row.hand_back) === 1,
     state: DISPATCH_TARGET_STATES.includes(row.state)
       ? (row.state as DispatchTargetState)
       : 'failed',
@@ -2609,8 +2641,8 @@ export function insertDispatchTarget(row: DispatchTargetRow, db: Db = getDb()): 
       `INSERT OR IGNORE INTO dispatch_target
          (id, engine, harness_ref, parent_session_id, parent_engine, parent_tool_use_id, cwd,
           model, launch_mode, account_key, codex_account_id, caller_restriction, name,
-          description, state, created_at, last_active_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          description, hand_back, state, created_at, last_active_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       row.id,
@@ -2627,6 +2659,7 @@ export function insertDispatchTarget(row: DispatchTargetRow, db: Db = getDb()): 
       row.callerRestriction,
       row.name,
       row.description,
+      row.handBack ? 1 : 0,
       row.state,
       row.createdAt,
       row.lastActiveAt
@@ -2789,6 +2822,123 @@ export function allDispatchTargetHarnessRefs(db: Db = getDb()): string[] {
   return (
     db.prepare('SELECT harness_ref FROM dispatch_target').all() as { harness_ref: string }[]
   ).map((r) => r.harness_ref)
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch reports — what an X-Agent run handed back (ADR-105 §3)
+// ---------------------------------------------------------------------------
+
+/** How a run ended: `delivered` (hand_back), `withheld`, `fallback` (no tool: its last message), or an end without a report. */
+export type DispatchReportStatus =
+  'delivered' | 'withheld' | 'fallback' | 'stopped' | 'failed' | 'timeout'
+
+const DISPATCH_REPORT_STATUSES: readonly string[] = [
+  'delivered',
+  'withheld',
+  'fallback',
+  'stopped',
+  'failed',
+  'timeout'
+]
+
+export interface DispatchReportRow {
+  targetId: string
+  /** 1-based, per target: the n-th run that ended. */
+  run: number
+  /** The dispatch_agent call that launched or continued this run (null: it carried none). */
+  toolUseId: string | null
+  status: DispatchReportStatus
+  /** As received; sanitised at render and delivery time. Null unless `delivered` or `fallback`. */
+  report: string | null
+  createdAt: number
+  /** Null until the report has been delivered into the parent (slice B-3b). */
+  deliveredAt: number | null
+}
+
+interface DispatchReportDbRow {
+  target_id: string
+  run: number
+  tool_use_id: string | null
+  status: string
+  report: string | null
+  created_at: number
+  delivered_at: number | null
+}
+
+function dispatchReportRow(row: DispatchReportDbRow): DispatchReportRow {
+  return {
+    targetId: row.target_id,
+    run: Number(row.run),
+    toolUseId: row.tool_use_id,
+    status: DISPATCH_REPORT_STATUSES.includes(row.status)
+      ? (row.status as DispatchReportStatus)
+      : 'failed',
+    report: row.report,
+    createdAt: Number(row.created_at),
+    deliveredAt: row.delivered_at === null ? null : Number(row.delivered_at)
+  }
+}
+
+/**
+ * Store how a run ended as the target's next run (one row per run: the primary key). Returns
+ * the row written, or undefined when a concurrent insert took the number. An over-long report
+ * is cut at `REPORT_MAX_CHARS`.
+ */
+export function insertDispatchReport(
+  input: {
+    targetId: string
+    toolUseId: string | null
+    status: DispatchReportStatus
+    report: string | null
+    createdAt: number
+  },
+  db: Db = getDb()
+): DispatchReportRow | undefined {
+  const report = input.report === null ? null : capReport(input.report)
+  const info = db
+    .prepare(
+      `INSERT OR IGNORE INTO dispatch_report
+         (target_id, run, tool_use_id, status, report, created_at, delivered_at)
+       SELECT ?, COALESCE(MAX(run), 0) + 1, ?, ?, ?, ?, NULL FROM dispatch_report WHERE target_id = ?`
+    )
+    .run(input.targetId, input.toolUseId, input.status, report, input.createdAt, input.targetId)
+  if (Number(info.changes) === 0) return undefined
+  return latestDispatchReport(input.targetId, db)
+}
+
+/** The target's newest report row (its last run that ended). */
+export function latestDispatchReport(
+  targetId: string,
+  db: Db = getDb()
+): DispatchReportRow | undefined {
+  const row = db
+    .prepare('SELECT * FROM dispatch_report WHERE target_id = ? ORDER BY run DESC LIMIT 1')
+    .get(targetId) as DispatchReportDbRow | undefined
+  return row ? dispatchReportRow(row) : undefined
+}
+
+/** Every run's row of each of these targets, oldest first (a history read joins a parent's cards in one query). */
+export function dispatchReportsOf(
+  targetIds: readonly string[],
+  db: Db = getDb()
+): DispatchReportRow[] {
+  if (targetIds.length === 0) return []
+  const marks = targetIds.map(() => '?').join(', ')
+  return (
+    db
+      .prepare(
+        `SELECT * FROM dispatch_report WHERE target_id IN (${marks}) ORDER BY target_id, run`
+      )
+      .all(...targetIds) as DispatchReportDbRow[]
+  ).map(dispatchReportRow)
+}
+
+/** How many runs of this target have ended with a row. */
+export function dispatchReportCount(targetId: string, db: Db = getDb()): number {
+  const row = db
+    .prepare('SELECT COUNT(*) AS n FROM dispatch_report WHERE target_id = ?')
+    .get(targetId) as { n: number }
+  return Number(row.n)
 }
 
 /**

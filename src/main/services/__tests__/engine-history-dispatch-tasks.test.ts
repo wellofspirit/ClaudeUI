@@ -11,6 +11,10 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ChatMessage, TaskNotification } from '../../../shared/types'
 import { readSessionHistory } from '../../../core/services/engine-history'
 import { dispatchLedger } from '../../../core/services/dispatch-target-ledger'
+import {
+  dispatchReports,
+  type DispatchReportStatus
+} from '../../../core/services/dispatch-report-store'
 import type {
   DispatchTargetRow,
   NewDispatchTarget
@@ -88,6 +92,7 @@ describe('withDispatchTasks — any engine’s read, and the run’s own start',
     callerRestriction: null,
     name: null,
     description: null,
+    handBack: false,
     state: 'running',
     createdAt: 100,
     lastActiveAt: 900,
@@ -213,5 +218,133 @@ describe('readSessionHistory — X-Agent cards (ADR-105 §5)', () => {
     engineReturns([use('toolu_fork', 1)])
     expect((await readSessionHistory(parent, 'proj', 'anchor-uuid')).taskNotifications).toEqual([])
     expect((await readSessionHistory(parent, 'proj')).taskNotifications).toHaveLength(1)
+  })
+})
+
+describe('readSessionHistory — how each run of an X-Agent ended (ADR-105 §3)', () => {
+  const finished = (parent: string, toolUseId: string, over: Partial<NewDispatchTarget> = {}) => {
+    const row = dispatchLedger.create(target(parent, { parentToolUseId: toolUseId, ...over }))
+    dispatchLedger.update(row.id, { state: 'idle' })
+    return row.id
+  }
+  const ended = (
+    targetId: string,
+    toolUseId: string,
+    status: DispatchReportStatus,
+    report: string | null = null
+  ): void => {
+    dispatchReports.add({ targetId, toolUseId, status, report, createdAt: 5 })
+  }
+  const load = async (parent: string, ...ids: string[]) => {
+    engineReturns(ids.flatMap((id, i) => [use(id, i * 10 + 1), result(id, i * 10 + 2)]))
+    return (await readSessionHistory(parent, 'proj')).taskNotifications
+  }
+  const byTool = (cards: TaskNotification[]): Map<string | null, TaskNotification> =>
+    new Map(cards.map((c) => [c.toolUseId, c]))
+
+  it('a reloaded card carries the report its own run stored, not "its result text is not kept"', async () => {
+    const parent = `dt-report-${process.pid}`
+    const id = finished(parent, 'toolu_r', { name: 'impl-e1' })
+    ended(id, 'toolu_r', 'delivered', 'Done.\n- changed a.ts')
+    const [card] = await load(parent, 'toolu_r')
+    expect(card).toMatchObject({
+      taskId: id,
+      status: 'completed',
+      handback: 'send',
+      summary: 'Done.\n- changed a.ts'
+    })
+    expect(card.summary).not.toContain('not kept')
+  })
+
+  it('a continuation’s report is on the continuation’s card; the first card keeps the first run’s', async () => {
+    const parent = `dt-report-latest-${process.pid}`
+    const id = finished(parent, 'toolu_1')
+    ended(id, 'toolu_1', 'delivered', 'first')
+    ended(id, 'toolu_2', 'delivered', 'second')
+    const cards = byTool(await load(parent, 'toolu_1', 'toolu_2'))
+    expect(cards.get('toolu_1')).toMatchObject({ summary: 'first', handback: 'send', runIndex: 1 })
+    expect(cards.get('toolu_2')).toMatchObject({
+      taskId: id,
+      summary: 'second',
+      handback: 'send',
+      runIndex: 2
+    })
+  })
+
+  it('a later run that was stopped shows stopped on its own card and does not make the earlier report reload as the latest', async () => {
+    const parent = `dt-report-stopped-${process.pid}`
+    const id = finished(parent, 'toolu_1')
+    ended(id, 'toolu_1', 'delivered', 'first')
+    ended(id, 'toolu_2', 'stopped')
+    const cards = byTool(await load(parent, 'toolu_1', 'toolu_2'))
+    expect(cards.get('toolu_1')).toMatchObject({ status: 'completed', summary: 'first' })
+    expect(cards.get('toolu_2')).toMatchObject({
+      status: 'stopped',
+      summary: 'The X-Agent was stopped.'
+    })
+    expect(cards.get('toolu_2')!.handback).toBeUndefined()
+  })
+
+  it('failed and timed-out runs reload as failed, with no report', async () => {
+    const parent = `dt-report-failed-${process.pid}`
+    const id = finished(parent, 'toolu_f')
+    ended(id, 'toolu_f', 'failed')
+    ended(id, 'toolu_t', 'timeout')
+    const cards = byTool(await load(parent, 'toolu_f', 'toolu_t'))
+    expect(cards.get('toolu_f')).toMatchObject({ status: 'failed', summary: 'The X-Agent failed.' })
+    expect(cards.get('toolu_t')).toMatchObject({ status: 'failed' })
+    expect(cards.get('toolu_t')!.summary).toContain('out of time')
+    expect(cards.get('toolu_f')!.handback).toBeUndefined()
+  })
+
+  it('a withheld run reloads as withheld, and a fallback one as flagged with its warning', async () => {
+    const parent = `dt-report-kinds-${process.pid}`
+    const w = finished(parent, 'toolu_w', { name: 'quiet' })
+    ended(w, 'toolu_w', 'withheld')
+    const f = finished(parent, 'toolu_f')
+    ended(f, 'toolu_f', 'fallback', 'last words')
+    const cards = byTool(await load(parent, 'toolu_w', 'toolu_f'))
+    expect(cards.get('toolu_w')).toMatchObject({
+      handback: 'withheld',
+      summary: 'X-Agent quiet ended without delivering a report.'
+    })
+    expect(cards.get('toolu_f')).toMatchObject({
+      handback: 'flagged',
+      summary: 'last words',
+      warning: expect.stringContaining('no hand_back tool')
+    })
+  })
+
+  it('a run with no stored end keeps its status text (an X-Agent from before reports)', async () => {
+    const parent = `dt-report-none-${process.pid}`
+    finished(parent, 'toolu_n')
+    const [card] = await load(parent, 'toolu_n')
+    expect(card.handback).toBeUndefined()
+    expect(card.summary).toContain('not kept')
+  })
+
+  it('a call that is not in the loaded transcript gets no card from its stored end', async () => {
+    const parent = `dt-report-absent-${process.pid}`
+    const id = finished(parent, 'toolu_1')
+    ended(id, 'toolu_1', 'delivered', 'first')
+    ended(id, 'toolu_elsewhere', 'delivered', 'other')
+    expect([...byTool(await load(parent, 'toolu_1')).keys()]).toEqual(['toolu_1'])
+  })
+
+  it('an unreadable report store costs the reports only, never the cards', async () => {
+    const parent = `dt-report-broken-${process.pid}`
+    finished(parent, 'toolu_b')
+    const raw = {
+      messages: [use('toolu_b', 1), result('toolu_b', 2)],
+      taskNotifications: []
+    }
+    const read = withDispatchTasks(parent, raw, dispatchLedger, {
+      rowsOf: () => {
+        throw new Error('db locked')
+      }
+    })
+    expect(read.taskNotifications).toEqual([
+      expect.objectContaining({ toolUseId: 'toolu_b', status: 'completed' })
+    ])
   })
 })

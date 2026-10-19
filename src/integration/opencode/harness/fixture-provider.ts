@@ -13,6 +13,7 @@
  *   [dispatch]  call ClaudeUI's hosted `claudeui_dispatch_agent`; then echo the result
  *   [subdispatch] `subagent` tool call whose child prompt is `[dispatch]`
  *   [mockup]    call ClaudeUI's hosted `claudeui_create_mockup`; then echo the result
+ *   [handback]  call ClaudeUI's hosted `claudeui_hand_back` (a dispatch target's report); then echo the result
  *   [sessiontool]  call ClaudeUI's hosted `claudeui_session_list`; then echo the result
  *   [subsession]   `subagent` tool call whose child prompt is `[sessiontool]`
  *   [question]  `question` tool call (one single-choice question)
@@ -77,6 +78,8 @@ export interface FixtureProvider {
 }
 
 export const SLOW_CHUNKS = 30
+/** What a `[handback]` prompt reports. */
+export const HAND_BACK_REPORT = 'contract report from the target'
 export const SHELL_COMMAND = 'echo contract-tool-ran'
 /** `[toolwrite]`'s command: a redirect into the workspace, which the read-only gate never vouches for. */
 export const WRITE_COMMAND = 'echo judged > judged.txt'
@@ -283,6 +286,12 @@ export async function startFixtureProvider(
           res,
           tools.find((tool) => tool === 'claudeui_dispatch_agent'),
           { engine: 'claude', prompt: 'contract dispatch' }
+        )
+      if (text.includes('[handback]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'claudeui_hand_back'),
+          { report: HAND_BACK_REPORT }
         )
       if (text.includes('[mockup]'))
         return streamToolCall(

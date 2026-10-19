@@ -41,6 +41,9 @@ import {
   DISPATCH_DESCRIPTION_PARAM,
   DISPATCH_NAME_PARAM,
   dispatchAgentDescription,
+  HAND_BACK_DESCRIPTION,
+  HAND_BACK_REPORT_PARAM,
+  HAND_BACK_TOOL,
   joinDispatchHints,
   OWN_SUBAGENT_TOOL
 } from '../../shared/dispatch-agent-description'
@@ -139,6 +142,17 @@ export interface HostedSessionTools {
 
 /** The `claudeui_` prefix opencode puts on this server's tool names. */
 const HOSTED_TOOL_PREFIX = 'claudeui_'
+
+/**
+ * `hand_back` (ADR-105 §3), injected like {@link DispatchAgentFn}: the dispatcher holds the
+ * targets. `sessionId` is the session `_meta` names; the dispatcher refuses anything that is
+ * not a dispatch target's own session.
+ */
+export type HandBackFn = (
+  sessionId: string,
+  report: unknown,
+  callId: string | undefined
+) => { text: string; isError: boolean }
 
 /** Same cycle-avoidance rationale as CallerSessionLookup above. */
 export type DispatchAgentFn = (
@@ -269,6 +283,8 @@ export function createOpencodeHostedToolsServer(
      */
     resolveCallerRoot?: CallerRootResolver
     dispatch?: DispatchAgentFn
+    /** The dispatch targets' report channel (ADR-105 §3); `hand_back` is not registered without it. */
+    handBack?: HandBackFn
     /** The session tools' service (slice 2); none registered without it. */
     sessionTools?: HostedSessionTools
     /** Called when `_meta` and the plugin stamp disagree (diagnostics). */
@@ -538,9 +554,47 @@ export function createOpencodeHostedToolsServer(
     }
   )
 
+  if (deps.handBack) registerHandBack(server, deps.handBack)
   if (deps.sessionTools) registerSessionTools(server, deps)
 
   return server
+}
+
+/**
+ * `claudeui_hand_back`: the report a dispatch target ends its run with (ADR-105 §3). It is on
+ * the shared server, so every session of the server is offered it; the interactive rulesets
+ * deny it (`HAND_BACK_DENY_RULE`, hidden from the model) and only a target's ruleset allows
+ * it. The caller is the session opencode's `_meta` names — never the model's say-so — and the
+ * dispatcher accepts only a dispatch target's own session, so a subagent child of a target,
+ * an interactive chat or an unidentified call is refused here as well.
+ */
+function registerHandBack(server: McpServer, handBack: HandBackFn): void {
+  server.registerTool(
+    HAND_BACK_TOOL,
+    {
+      description: HAND_BACK_DESCRIPTION,
+      inputSchema: { report: z.string().describe(HAND_BACK_REPORT_PARAM) }
+    },
+    async (
+      args: { report: string },
+      extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+    ) => {
+      const callerId = resolveCallerIdentity(
+        extra?._meta as Record<string, unknown> | undefined,
+        {}
+      ).sessionId
+      const answer = callerId
+        ? handBack(callerId, args.report, undefined)
+        : {
+            text: 'hand_back could not identify the calling session, so no report was taken.',
+            isError: true
+          }
+      return {
+        content: [{ type: 'text' as const, text: answer.text }],
+        ...(answer.isError ? { isError: true as const } : {})
+      }
+    }
+  )
 }
 
 /**

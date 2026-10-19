@@ -336,6 +336,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
             {/* The report a SubagentHandback subagent delivered (or didn't). */}
             <HandbackReport
               notification={bgNotification}
+              xAgent={dispatchChildEngine(taskView) !== undefined}
               className="mt-3 border-t border-border pt-3 shrink-0"
             />
           </div>

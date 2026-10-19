@@ -1149,6 +1149,62 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
     expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
   })
 
+  // ADR-105 §3: an X-Agent ends in the report it handed back, which is the terminal
+  // notification's summary: the card shows it (S6's HandbackReport), once.
+  describe('the report an X-Agent handed back', () => {
+    const notify = (extra: {
+      summary: string
+      handback: 'send' | 'flagged' | 'withheld'
+      warning?: string
+    }): void => {
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_1',
+        status: 'completed',
+        outputFile: '',
+        ...extra
+      })
+    }
+    const ended = {
+      type: 'tool_result' as const,
+      toolUseId: 'toolu_dispatch_1',
+      toolResult: '[X-Agent report] framed text the parent model reads',
+      isError: false
+    }
+
+    it('shows the whole report, not the framed text a blocking call returned', () => {
+      const report = `Done.\n${'long line '.repeat(30)}`
+      notify({ summary: report, handback: 'send' })
+      render(<TaskCard block={dispatchBlock} result={ended} view={dispatchView} />)
+      fireEvent.click(screen.getByTestId('TaskCard.expand'))
+      expect(screen.getByTestId('HandbackReport')).toHaveAttribute('data-handback', 'send')
+      expect(screen.getByTestId('HandbackReport.text').textContent).toContain('long line long line')
+      expect(screen.queryByText(/framed text the parent model reads/)).not.toBeInTheDocument()
+    })
+
+    it('a fallback report shows its warning above it', () => {
+      notify({
+        summary: 'last words',
+        handback: 'flagged',
+        warning: 'This X-Agent has no hand_back tool.'
+      })
+      render(<TaskCard block={dispatchBlock} result={ended} view={dispatchView} />)
+      fireEvent.click(screen.getByTestId('TaskCard.expand'))
+      expect(screen.getByTestId('HandbackReport.warning')).toHaveTextContent('no hand_back tool')
+      expect(screen.getByTestId('HandbackReport.text')).toHaveTextContent('last words')
+    })
+
+    it('withheld: the card says the X-Agent ended without a report', () => {
+      notify({ summary: 'X-Agent rev ended without delivering a report.', handback: 'withheld' })
+      render(<TaskCard block={dispatchBlock} result={ended} view={dispatchView} />)
+      fireEvent.click(screen.getByTestId('TaskCard.expand'))
+      expect(screen.getByTestId('HandbackReport.withheld')).toHaveTextContent(
+        'The X-Agent ended without delivering a report.'
+      )
+      expect(screen.queryByTestId('HandbackReport.text')).not.toBeInTheDocument()
+    })
+  })
+
   it('opencode-named dispatch card (claudeui_dispatch_agent) also hides "Send to background"', () => {
     const ocBlock = makeTaskBlock({
       toolUseId: 'call_oc_dispatch_1',

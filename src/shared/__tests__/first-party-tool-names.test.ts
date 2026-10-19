@@ -17,6 +17,7 @@ describe('firstPartyToolLabel', () => {
     ['render_mermaid', 'Diagram'],
     ['create_mockup', 'Mockup'],
     ['show_mockup', 'Mockup'],
+    ['hand_back', 'Hand back'],
     ['session_start', 'Session · start'],
     ['session_hand_off', 'Session · hand off'],
     ['session_dismiss_proposal', 'Session · dismiss proposal']
@@ -42,6 +43,8 @@ describe('firstPartyDisplayName: each engine strips its own prefix only', () => 
     )
     expect(firstPartyDisplayName('mcp__claude-ui__render_mermaid', 'mcp')).toBe('Diagram')
     expect(firstPartyDisplayName('mcp__claude-ui-mockup__show_mockup', 'mcp')).toBe('Mockup')
+    expect(firstPartyDisplayName('mcp__claude-ui-handback__hand_back', 'mcp')).toBe('Hand back')
+    expect(firstPartyDisplayName('mcp__github__hand_back', 'mcp')).toBeUndefined()
     // Third-party and wrong-server names are not ours.
     expect(firstPartyDisplayName('mcp__github__create_issue', 'mcp')).toBeUndefined()
     expect(firstPartyDisplayName('mcp__github__dispatch_agent', 'mcp')).toBeUndefined()
@@ -56,6 +59,7 @@ describe('firstPartyDisplayName: each engine strips its own prefix only', () => 
   it('claudeui_ (opencode): only the prefixed spelling', () => {
     expect(firstPartyDisplayName('claudeui_dispatch_agent', 'claudeui_')).toBe('X-Agent')
     expect(firstPartyDisplayName('claudeui_session_list', 'claudeui_')).toBe('Session · list')
+    expect(firstPartyDisplayName('claudeui_hand_back', 'claudeui_')).toBe('Hand back')
     expect(firstPartyDisplayName('dispatch_agent', 'claudeui_')).toBeUndefined()
     expect(firstPartyDisplayName('claudeui_bash', 'claudeui_')).toBeUndefined()
     expect(

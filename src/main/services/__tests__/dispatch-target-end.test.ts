@@ -39,6 +39,7 @@ const row = (over: Partial<DispatchTargetRow> = {}): DispatchTargetRow => ({
   callerRestriction: null,
   name: null,
   description: null,
+  handBack: false,
   state: 'idle',
   createdAt: 1,
   lastActiveAt: 1,

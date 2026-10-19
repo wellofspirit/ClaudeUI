@@ -7,8 +7,10 @@
  * X-Agent, keyed by the launching tool call. `readSessionHistory` — the one door every
  * cold read goes through — puts them back with {@link withDispatchTasks}.
  *
- * What the ledger does NOT hold is the run's result text (B-3's report store will), so a
- * finished card says that it ended, not what it said.
+ * The ledger does not hold what a run said; the report store (ADR-105 §3) does. A finished
+ * row with a stored report comes back as the report itself (`handback: 'send'`, the same
+ * fields the live notification carried), so a reloaded card shows what the X-Agent handed
+ * back; one without says that it ended.
  */
 import type { ActiveTask, ChatMessage, TaskNotification } from '../../shared/types'
 import {
@@ -16,6 +18,15 @@ import {
   type DispatchLedgerStore,
   type DispatchTargetRow
 } from './dispatch-target-ledger'
+import {
+  dispatchReports,
+  type DispatchReportRow,
+  type DispatchReportStore
+} from './dispatch-report-store'
+import {
+  HAND_BACK_FALLBACK_WARNING,
+  handBackWithheldText
+} from '../../shared/dispatch-agent-description'
 import { logger } from './logger'
 
 /**
@@ -49,6 +60,39 @@ function summaryOf(row: DispatchTargetRow): string {
   }
 }
 
+/**
+ * How one run ended, as its card's terminal notification says it: the stored outcome of the
+ * run that call launched or continued (ADR-105 §3), in the live notification's fields.
+ */
+function outcomeFields(
+  row: DispatchTargetRow,
+  report: DispatchReportRow
+): Pick<TaskNotification, 'status' | 'summary' | 'handback' | 'warning'> {
+  switch (report.status) {
+    case 'delivered':
+      return { status: 'completed', summary: report.report ?? '', handback: 'send' }
+    case 'fallback':
+      return {
+        status: 'completed',
+        summary: report.report ?? '',
+        handback: 'flagged',
+        warning: HAND_BACK_FALLBACK_WARNING
+      }
+    case 'withheld':
+      return {
+        status: 'completed',
+        summary: handBackWithheldText(row.name ?? row.id),
+        handback: 'withheld'
+      }
+    case 'stopped':
+      return { status: 'stopped', summary: 'The X-Agent was stopped.' }
+    case 'timeout':
+      return { status: 'failed', summary: 'The X-Agent ran out of time.' }
+    case 'failed':
+      return { status: 'failed', summary: 'The X-Agent failed.' }
+  }
+}
+
 function toolIds(messages: ChatMessage[]): { uses: Set<string>; results: Set<string> } {
   const uses = new Set<string>()
   const results = new Set<string>()
@@ -78,20 +122,36 @@ export interface DispatchHistoryRead {
 export function withDispatchTasks<T extends DispatchHistoryRead>(
   sessionId: string,
   result: T,
-  ledger: Pick<DispatchLedgerStore, 'byParent'> = dispatchLedger
+  ledger: Pick<DispatchLedgerStore, 'byParent'> = dispatchLedger,
+  reports: Pick<DispatchReportStore, 'rowsOf'> = dispatchReports
 ): T & DispatchHistoryRead {
   try {
     const rows = ledger.byParent(sessionId)
     if (rows.length === 0) return result
+    // One query for the parent's cards; a store that cannot be read costs the outcomes only.
+    // Each run's outcome is keyed by the call that launched or continued it, so a card shows
+    // its own run's end and not the target's latest.
+    const outcomes = new Map<string, DispatchReportRow>()
+    try {
+      for (const r of reports.rowsOf(rows.map((row) => row.id)))
+        if (r.toolUseId) outcomes.set(r.toolUseId, r)
+    } catch (err) {
+      logger.warn(
+        'DispatchHistory',
+        `could not read the X-Agent reports of ${sessionId}: ${String(err)}`
+      )
+    }
     const { uses, results } = toolIds(result.messages)
     const existing = result.taskNotifications ?? []
     const notified = new Set(existing.map((n) => n.toolUseId))
     const notifications: TaskNotification[] = []
     const activeTasks: Record<string, ActiveTask> = {}
+    const ledgerById = new Map(rows.map((row) => [row.id, row]))
     for (const row of rows) {
       const toolUseId = row.parentToolUseId
       if (!toolUseId || !uses.has(toolUseId)) continue
-      if (row.state === 'running') {
+      const own = outcomes.get(toolUseId)
+      if (row.state === 'running' && !own) {
         // The launch returned (its result is in the transcript) = a background run, which
         // wakes nothing until B-3 delivers; a call still waiting is a blocking one.
         const background = results.has(toolUseId)
@@ -108,13 +168,26 @@ export function withDispatchTasks<T extends DispatchHistoryRead>(
         continue
       }
       if (notified.has(toolUseId)) continue
+      notified.add(toolUseId)
       notifications.push({
         taskId: row.id,
         toolUseId,
-        status: terminalOf(row),
         outputFile: '',
-        summary: summaryOf(row),
-        runIndex: 1
+        runIndex: 1,
+        ...(own ? outcomeFields(row, own) : { status: terminalOf(row), summary: summaryOf(row) })
+      })
+    }
+    // A continuation's own card: the run it launched, with its own end.
+    for (const [toolUseId, outcome] of outcomes) {
+      const row = ledgerById.get(outcome.targetId)
+      if (!row || notified.has(toolUseId) || !uses.has(toolUseId)) continue
+      notified.add(toolUseId)
+      notifications.push({
+        taskId: row.id,
+        toolUseId,
+        outputFile: '',
+        runIndex: outcome.run,
+        ...outcomeFields(row, outcome)
       })
     }
     const hasActive = Object.keys(activeTasks).length > 0

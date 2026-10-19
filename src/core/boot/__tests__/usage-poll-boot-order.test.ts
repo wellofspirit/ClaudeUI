@@ -66,7 +66,8 @@ vi.mock('../../opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
     setServerStartedHook: vi.fn(),
     setCallerSessionLookup: vi.fn(),
-    setDispatchAgent: vi.fn()
+    setDispatchAgent: vi.fn(),
+    setHandBack: vi.fn()
   }
 }))
 vi.mock('../../services/cross-engine-dispatcher', () => ({

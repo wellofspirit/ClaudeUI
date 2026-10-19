@@ -14,7 +14,10 @@
  * markdown view every other subagent result uses.
  */
 import type { TaskNotification } from '../../../../shared/types'
-import { HANDBACK_WITHHELD_TEXT } from '../../../../shared/task-handback'
+import {
+  HANDBACK_WITHHELD_TEXT,
+  XAGENT_HANDBACK_WITHHELD_TEXT
+} from '../../../../shared/task-handback'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 
@@ -26,10 +29,13 @@ export function hasHandbackReport(notification: TaskNotification | undefined): b
 
 export function HandbackReport({
   notification,
-  className = ''
+  className = '',
+  xAgent = false
 }: {
   notification: TaskNotification | undefined
   className?: string
+  /** The task is a cross-engine dispatch: its withheld line says "X-Agent", not "subagent". */
+  xAgent?: boolean
 }): React.JSX.Element | null {
   if (!notification || !hasHandbackReport(notification)) return null
   const handback = notification.handback!
@@ -41,7 +47,9 @@ export function HandbackReport({
         data-handback="withheld"
         className={`text-[12px] text-text-muted italic ${className}`}
       >
-        <span data-testid="HandbackReport.withheld">{HANDBACK_WITHHELD_TEXT}</span>
+        <span data-testid="HandbackReport.withheld">
+          {xAgent ? XAGENT_HANDBACK_WITHHELD_TEXT : HANDBACK_WITHHELD_TEXT}
+        </span>
       </div>
     )
   }

@@ -49,6 +49,7 @@ import { locatePiBinary } from '../../core/pi/pi-locate'
 import { CrossEngineDispatcher } from '../../core/services/cross-engine-dispatcher'
 import type { DispatchContext } from '../../core/services/cross-engine-dispatcher'
 import { makeFakeDispatchLedger } from '../../test/helpers/fake-dispatch-ledger'
+import { makeFakeDispatchReports } from '../../test/helpers/fake-dispatch-reports'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 const ROUTING_ID = 'routing-pi-dispatch-target-integration'
@@ -144,6 +145,50 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
       expect(result.isError, `dispatch failed: ${result.text}`).toBeFalsy()
       expect(result.text.trim().toLowerCase()).toContain('hello')
       expect(result.sessionId).toBeTruthy()
+    }, 90_000)
+
+    it('hand_back: the real bridge extension registers the tool for a target, and its report ends the run', async () => {
+      const reporter = new CrossEngineDispatcher({
+        serverManager: {
+          acquire: async () => {
+            throw new Error('serverManager.acquire should never be called dispatching engine: "pi"')
+          },
+          releaseIfCurrent: () => {},
+          subscribeExit: () => () => {}
+        },
+        makeClient: () => {
+          throw new Error('makeClient should never be called dispatching engine: "pi"')
+        },
+        loadEngineConfig: () => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
+        }),
+        recordUsageEvent: () => {},
+        ledger: makeFakeDispatchLedger(),
+        reports: makeFakeDispatchReports(),
+        requireHandBack: true
+      })
+      const ctx: DispatchContext = {
+        fromEngine: 'claude',
+        fromRoutingId: ROUTING_ID,
+        cwd: tmpDir,
+        getAutonomyMode: () => 'default',
+        getMessages: () => [],
+        emit: () => {}
+      }
+      try {
+        const result = await reporter.dispatch(
+          {
+            engine: 'pi',
+            prompt: "Call the hand_back tool once with the report 'pi-report-ok'. Do nothing else."
+          },
+          ctx
+        )
+        expect(result.isError, `dispatch failed: ${result.text}`).toBeFalsy()
+        expect(result.text).toContain('[X-Agent report]')
+        expect(result.text).toContain('pi-report-ok')
+      } finally {
+        reporter.disposeFor(ROUTING_ID)
+      }
     }, 90_000)
   }
 )

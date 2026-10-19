@@ -14,7 +14,9 @@ import { SESSION_TOOL_NAMES } from '../../../shared/session-tools-description'
 import {
   DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
-  DISPATCH_NAME_PARAM
+  DISPATCH_NAME_PARAM,
+  HAND_BACK_DESCRIPTION,
+  HAND_BACK_REPORT_PARAM
 } from '../../../shared/dispatch-agent-description'
 
 describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
@@ -23,8 +25,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 17 (dispatch_agent takes run_in_background)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('17')
+  it('is version 18 (hand_back, ADR-105 §3)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('18')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -274,6 +276,7 @@ const BRIDGE_ENV_VARS = [
   'CLAUDEUI_PI_AGENT_TOOL',
   'CLAUDEUI_PI_AGENT_LISTING',
   'CLAUDEUI_PI_SEND_MESSAGE',
+  'CLAUDEUI_PI_HAND_BACK',
   'CLAUDEUI_PI_SESSION_TOOLS',
   'CLAUDEUI_PI_MCP'
 ] as const
@@ -1813,6 +1816,46 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — shared MCP catalog (bridge v13, ADR-096
       expect(notes).toEqual([
         'MCP servers from ClaudeUI could not be registered:\n  the server list could not be loaded (TypeError)'
       ])
+    })
+  })
+})
+
+describe('PI_BRIDGE_EXTENSION_SOURCE — hand_back (bridge v18, ADR-105 §3)', () => {
+  it('registers ONLY under CLAUDEUI_PI_HAND_BACK=1 with bridge creds, independently of every other tool', () => {
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HAND_BACK: '1' }, () => {
+      expect([...runExtension().tools.keys()]).toEqual(['hand_back'])
+    })
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HAND_BACK: '' }, () => {
+      expect(runExtension().tools.has('hand_back')).toBe(false)
+    })
+    withEnv({ CLAUDEUI_PI_HAND_BACK: '1', CLAUDEUI_PI_BRIDGE_TOKEN: 'tok' }, () => {
+      expect(runExtension().tools.has('hand_back')).toBe(false)
+    })
+    // The flags of the other tools never register it: an interactive session has none of them.
+    withEnv(
+      {
+        ...BRIDGE_CREDS,
+        CLAUDEUI_PI_HOSTED_TOOLS: '1',
+        CLAUDEUI_PI_DISPATCH_ENABLED: '1',
+        CLAUDEUI_PI_AGENT_TOOL: '1',
+        CLAUDEUI_PI_SEND_MESSAGE: '1',
+        CLAUDEUI_PI_SESSION_TOOLS: '[]'
+      },
+      () => {
+        expect(runExtension().tools.has('hand_back')).toBe(false)
+      }
+    )
+  })
+
+  it("carries ClaudeUI's one description and a required string report", () => {
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HAND_BACK: '1' }, () => {
+      const tool = runExtension().tools.get('hand_back')!
+      expect(tool.description).toBe(HAND_BACK_DESCRIPTION)
+      expect(tool.parameters).toEqual({
+        type: 'object',
+        properties: { report: { type: 'string', description: HAND_BACK_REPORT_PARAM } },
+        required: ['report']
+      })
     })
   })
 })

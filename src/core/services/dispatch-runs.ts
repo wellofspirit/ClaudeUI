@@ -63,6 +63,26 @@ export class DispatchRun {
   createdTarget = false
   /** The mode a parent with no session object is judged under; see `DispatchRunInit.launchMode`. */
   launchMode: string
+  /**
+   * This run ends in a report the X-Agent hands back (`hand_back`, ADR-105 §3) rather than in
+   * its last message. Set by the dispatcher when it creates the run.
+   */
+  handBackRequired = false
+  /** The report the agent handed back (the first call of the run); null until then. */
+  report: { text: string; callId: string | undefined } | null = null
+  /** Resolves when {@link report} is set: the turn bodies race it. */
+  readonly reported: Promise<void>
+  private markReported!: () => void
+  /** Follow-up prompts sent because a turn ended without a report (at most three). */
+  nudges = 0
+  /** What the run's turns (the first and each nudge) spent, for its one terminal notification. */
+  usage = { totalTokens: 0, toolUses: 0, durationMs: 0 }
+  /** How a run that reached its end through a report decision ended (set by the dispatcher); null otherwise. */
+  finishedAs: { status: 'delivered' | 'fallback' | 'withheld'; report: string | null } | null = null
+  /** The status of the terminal notification the run emitted. */
+  terminalStatus: 'completed' | 'failed' | 'stopped' | null = null
+  /** The run's turn hit a liveness cap (a `failed` end that was a timeout). */
+  timedOut = false
   /** The blocking form's MCP progress ping; unset for a background run. */
   onHeartbeat: ((beats: number) => void) | undefined
   /** Resolves with the run's result when it ends (the registry slot is already free). */
@@ -75,6 +95,18 @@ export class DispatchRun {
   constructor(readonly init: DispatchRunInit) {
     this.launchMode = init.launchMode
     this.launched = new Promise<void>((resolve) => (this.markLaunched = resolve))
+    this.reported = new Promise<void>((resolve) => (this.markReported = resolve))
+  }
+
+  /**
+   * Take the run's report. Only the first call of a run does; a later one is refused
+   * (`false`). Wakes whoever races {@link reported}.
+   */
+  acceptReport(text: string, callId: string | undefined): boolean {
+    if (this.report) return false
+    this.report = { text, callId }
+    this.markReported()
+    return true
   }
 
   get background(): boolean {

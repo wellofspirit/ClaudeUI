@@ -86,6 +86,14 @@ import {
   makeFakeDispatchLedger,
   type FakeDispatchLedger
 } from '../../../test/helpers/fake-dispatch-ledger'
+import { makeFakeDispatchReports } from '../../../test/helpers/fake-dispatch-reports'
+import {
+  HAND_BACK_DONE_TEXT,
+  HAND_BACK_ENDED_TEXT,
+  HAND_BACK_NOT_TARGET_TEXT,
+  HAND_BACK_REPEAT_TEXT,
+  handBackNudge
+} from '../../../shared/dispatch-agent-description'
 
 // ---------------------------------------------------------------------------
 // A fake opencode 2.x server
@@ -723,6 +731,8 @@ describe('opencode target — lifecycle', () => {
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'ask' },
       { action: 'claudeui_session_*', resource: '*', effect: 'ask' },
       { action: 'execute', resource: '*', effect: 'deny' },
+      // Without `requireHandBack` (the dispatcher's own suites) a target is an ordinary session of the server.
+      { action: 'claudeui_hand_back', resource: '*', effect: 'deny' },
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'deny' },
       // The session tools are the root agent's: hidden from a dispatch target (slice 2).
       { action: 'claudeui_session_*', resource: '*', effect: 'deny' },
@@ -2788,5 +2798,255 @@ describe('opencode target — name and description on the ledger row (ADR-105)',
     })
     expect(ledger.rowFor('opencode', 'oc-sess-2')).toMatchObject({ name: null, description: null })
     expect(ledger.rowFor('opencode', 'oc-sess-3')).toMatchObject({ name: null, description: null })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// hand_back — the report that ends a run (ADR-105 §3, slice B-3a)
+// ---------------------------------------------------------------------------
+
+describe('opencode target — hand_back', () => {
+  function setup(over: Partial<DispatcherDeps> = {}) {
+    const reports = makeFakeDispatchReports()
+    const h = makeHarness({ requireHandBack: true, reports, handBackSettleMs: 5, ...over })
+    const ctx = makeCtx({ toolUseId: 'toolu_parent' })
+    const prompts = (): string[] =>
+      h.client.prompt.mock.calls.map((c) => (c[1] as { text: string }).text)
+    const notes = (): Array<Record<string, unknown>> => emitted(ctx, 'session:task-notification')
+    return { ...h, reports, ctx, prompts, notes }
+  }
+
+  it('gives the target the tool in EVERY mode (an allow), and names it in the task', async () => {
+    for (const mode of ['default', 'acceptEdits', 'plan', 'auto']) {
+      const { dispatcher, client, fake, prompts } = setup()
+      fake.setDefault({ hold: true })
+      const pending = dispatcher.dispatch(
+        { engine: 'opencode', prompt: 'review it' },
+        makeCtx({ toolUseId: 'toolu_parent', autonomyMode: mode })
+      )
+      await tick()
+      const rules = createdRules(client)
+      expect(rules, mode).not.toContainEqual({
+        action: 'claudeui_hand_back',
+        resource: '*',
+        effect: 'deny'
+      })
+      expect(evaluateV2Call(rules, 'claudeui_hand_back', ['*'], 'linux'), mode).toBe('allow')
+      expect(v2ToolHidden(rules, 'claudeui_hand_back', 'linux'), mode).toBe(false)
+      // The tool a target must NOT have stays denied.
+      expect(evaluateV2Call(rules, 'claudeui_dispatch_agent', ['*'], 'linux'), mode).toBe('deny')
+      expect(prompts()[0]).toContain('review it')
+      expect(prompts()[0]).toContain('calling the claudeui_hand_back tool')
+      dispatcher.stopDispatch('toolu_parent')
+      await pending
+    }
+  })
+
+  it('a call stores the report, interrupts the turn after the tool result, and the run is the report', async () => {
+    const { dispatcher, client, fake, reports, ledger, notes, ctx } = setup()
+    fake.setDefault({ hold: true })
+    const pending = dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'review it', name: 'rev' },
+      ctx
+    )
+    await tick()
+    expect(dispatcher.handBackFromOpencode('oc-sess-1', 'oc report', undefined)).toEqual({
+      text: HAND_BACK_DONE_TEXT,
+      isError: false
+    })
+    // Not inside the call: the tool result gets to the agent first.
+    expect(client.interrupt).not.toHaveBeenCalled()
+    const result = await pending
+    expect(client.interrupt).toHaveBeenCalledWith('oc-sess-1')
+    expect(result.text).toContain('[X-Agent report]')
+    expect(result.text).toContain('  oc report')
+    expect(result.text).not.toContain('target answer')
+    expect(notes()[0]).toMatchObject({
+      status: 'completed',
+      handback: 'send',
+      summary: 'oc report'
+    })
+    expect(reports.rows).toEqual([
+      expect.objectContaining({
+        targetId: ledger.rowFor('opencode', 'oc-sess-1')!.id,
+        status: 'delivered',
+        report: 'oc report',
+        run: 1
+      })
+    ])
+    expect(ledger.rowFor('opencode', 'oc-sess-1')!.handBack).toBe(true)
+  })
+
+  it('a second call is refused with the session_message text; so is a call from any other session', async () => {
+    const { dispatcher, fake, reports, ctx } = setup()
+    fake.setDefault({ hold: true })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+    expect(dispatcher.handBackFromOpencode('oc-sess-1', 'first', undefined).isError).toBe(false)
+    expect(dispatcher.handBackFromOpencode('oc-sess-1', 'second', undefined)).toEqual({
+      text: HAND_BACK_REPEAT_TEXT,
+      isError: true
+    })
+    // An interactive chat, a subagent child of the target, an unknown session: not targets.
+    for (const id of ['routing-1', 'oc-child-1', 'ses_unknown'])
+      expect(dispatcher.handBackFromOpencode(id, 'r', undefined)).toEqual({
+        text: HAND_BACK_NOT_TARGET_TEXT,
+        isError: true
+      })
+    expect((await pending).text).toContain('  first')
+    expect(reports.rows).toHaveLength(1)
+    // …and once the run is over the target's own session is refused too.
+    expect(dispatcher.handBackFromOpencode('oc-sess-1', 'late', undefined).text).toBe(
+      HAND_BACK_ENDED_TEXT
+    )
+  })
+
+  it('a turn that ends without a report is nudged into the same session three times, then withheld', async () => {
+    const { dispatcher, fake, reports, ledger, prompts, notes, ctx } = setup()
+    fake.setDefault({ steps: [{ text: 'unsent text' }] })
+    const result = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'work', name: 'quiet' },
+      ctx
+    )
+    expect(prompts()).toHaveLength(4)
+    expect(prompts().slice(1)).toEqual([
+      handBackNudge('claudeui_hand_back'),
+      handBackNudge('claudeui_hand_back'),
+      handBackNudge('claudeui_hand_back')
+    ])
+    expect(fake.sessions.size).toBe(1)
+    expect(result.text).toBe('X-Agent quiet ended without delivering a report.')
+    expect(notes()).toHaveLength(1)
+    expect(notes()[0]).toMatchObject({ handback: 'withheld' })
+    expect(JSON.stringify(notes())).not.toContain('unsent text')
+    expect(reports.rows).toEqual([
+      expect.objectContaining({
+        targetId: ledger.rowFor('opencode', 'oc-sess-1')!.id,
+        status: 'withheld',
+        report: null
+      })
+    ])
+    // The target is idle again, ready to be messaged.
+    expect(ledger.rowFor('opencode', 'oc-sess-1')!.state).toBe('idle')
+  })
+
+  it('a report handed back in a nudge turn ends the run with it', async () => {
+    const { dispatcher, fake, prompts, notes, ctx, reports } = setup()
+    fake.next({ steps: [{ text: 'forgot' }] })
+    fake.next({ hold: true })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'work' }, ctx)
+    await tick(6)
+    expect(prompts()).toEqual([
+      expect.stringContaining('work'),
+      handBackNudge('claudeui_hand_back')
+    ])
+    expect(dispatcher.handBackFromOpencode('oc-sess-1', 'Here it is', undefined).isError).toBe(
+      false
+    )
+    expect((await pending).text).toContain('  Here it is')
+    expect(notes()[0]).toMatchObject({ handback: 'send' })
+    expect(reports.rows.map((r) => r.status)).toEqual(['delivered'])
+  })
+
+  /** The target's agent calls the tool, as the feed shows it (the call is running until a success arrives). */
+  function callsHandBack(fake: FakeOpencode, sessionID: string, id = 'call_hb'): void {
+    fake.push('session.step.started', {
+      sessionID,
+      assistantMessageID: `msg_${id}`,
+      agent: 'build',
+      model: MODEL,
+      started: 1
+    })
+    fake.push('session.tool.input.started', {
+      sessionID,
+      assistantMessageID: `msg_${id}`,
+      id,
+      name: 'claudeui_hand_back'
+    })
+    fake.push('session.tool.called', {
+      sessionID,
+      assistantMessageID: `msg_${id}`,
+      id,
+      input: { report: 'R' },
+      executed: false
+    })
+  }
+  const completes = (fake: FakeOpencode, sessionID: string, id: string): void =>
+    fake.push('session.tool.success', {
+      sessionID,
+      assistantMessageID: `msg_${id}`,
+      id,
+      content: [{ type: 'text', text: 'ok' }],
+      executed: true
+    })
+
+  it('the turn is interrupted when the hand_back call has COMPLETED on the feed, not on a timer', async () => {
+    const { dispatcher, client, fake, ctx } = setup({ handBackSettleMs: 5_000 })
+    fake.setDefault({ hold: true })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+    callsHandBack(fake, 'oc-sess-1')
+    await tick()
+    expect(dispatcher.handBackFromOpencode('oc-sess-1', 'R', undefined).isError).toBe(false)
+    await tick(6)
+    // The call is still running on the feed: an interrupt now would abort it.
+    expect(client.interrupt).not.toHaveBeenCalled()
+    fake.push('session.tool.success', {
+      sessionID: 'oc-sess-1',
+      assistantMessageID: 'msg_hb',
+      id: 'call_hb',
+      content: [{ type: 'text', text: 'ok' }],
+      executed: true
+    })
+    expect((await pending).text).toContain('  R')
+    expect(client.interrupt).toHaveBeenCalledWith('oc-sess-1')
+  })
+
+  it('a refused call that completes first does not stand for the accepted one', async () => {
+    const { dispatcher, client, fake, ctx } = setup({ handBackSettleMs: 5_000 })
+    fake.setDefault({ hold: true })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+    // An empty report is refused; that call completes on the feed.
+    callsHandBack(fake, 'oc-sess-1', 'call_refused')
+    await tick()
+    expect(dispatcher.handBackFromOpencode('oc-sess-1', '  ', undefined).isError).toBe(true)
+    completes(fake, 'oc-sess-1', 'call_refused')
+    await tick()
+    // The accepted call: the turn waits for ITS completion.
+    callsHandBack(fake, 'oc-sess-1', 'call_hb')
+    await tick()
+    expect(dispatcher.handBackFromOpencode('oc-sess-1', 'R', undefined).isError).toBe(false)
+    await tick(6)
+    expect(client.interrupt).not.toHaveBeenCalled()
+    completes(fake, 'oc-sess-1', 'call_hb')
+    expect((await pending).text).toContain('  R')
+    expect(client.interrupt).toHaveBeenCalledWith('oc-sess-1')
+  })
+
+  it('a turn that ends by itself right after the report needs no interrupt', async () => {
+    const { dispatcher, client, fake, ctx } = setup({ handBackSettleMs: 5_000 })
+    fake.setDefault({ hold: true })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+    dispatcher.handBackFromOpencode('oc-sess-1', 'R', undefined)
+    fake.finish('oc-sess-1')
+    const result = await pending
+    expect(result.text).toContain('  R')
+    expect(client.interrupt).not.toHaveBeenCalled()
+  })
+
+  it('without requireHandBack the target keeps the interactive deny and the task as written', async () => {
+    const { dispatcher, client, fake } = makeHarness()
+    fake.setDefault({ hold: true })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'plain' }, makeCtx())
+    await tick()
+    expect(evaluateV2Call(createdRules(client), 'claudeui_hand_back', ['*'], 'linux')).toBe('deny')
+    expect((client.prompt.mock.calls[0][1] as { text: string }).text).toBe('plain')
+    expect(dispatcher.handBackFromOpencode('oc-sess-1', 'r', undefined).text).toBe(
+      HAND_BACK_NOT_TARGET_TEXT
+    )
+    fake.finish('oc-sess-1')
+    expect((await pending).text).toBe('target answer')
   })
 })

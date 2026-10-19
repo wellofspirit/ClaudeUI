@@ -30,7 +30,7 @@ describe('dispatchAgentDescription', () => {
     ).toBe(
       "Delegate a task to an agent on a DIFFERENT engine — claude (Anthropic's models), pi (an alternative coding-agent harness) or codex (OpenAI's own coding agent). " +
         `${PREFER}task tool instead: it is cheaper, starts faster and stays inside this session. ` +
-        'The agent runs headless in the same working directory and its final answer is returned as this tool result. ' +
+        'The agent runs headless in the same working directory and the report it hands back is returned as this tool result. ' +
         'The result includes a session_id — pass it back as `session_id` to continue the same agent with its context intact. ' +
         "The available model list is user-configured per target engine; omit `model` to use that engine's configured default. " +
         'For claude: sonnet. For pi: x/y.'

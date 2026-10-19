@@ -21,7 +21,9 @@ const FIXED_LABELS: Readonly<Record<string, string>> = {
   dispatch_agent: DISPATCH_LABEL,
   render_mermaid: 'Diagram',
   create_mockup: 'Mockup',
-  show_mockup: 'Mockup'
+  show_mockup: 'Mockup',
+  // A dispatch target's report (ADR-105 §3), as Claude Code's own `SubagentHandback` is shown.
+  hand_back: 'Hand back'
 }
 
 /**
@@ -32,7 +34,8 @@ const FIRST_PARTY_MCP_SERVERS: Readonly<Record<string, (tool: string) => boolean
   'claude-ui-collab': (tool) => tool === 'dispatch_agent',
   [SESSION_TOOLS_SERVER_NAME]: isSessionToolName,
   'claude-ui': (tool) => tool === 'render_mermaid',
-  'claude-ui-mockup': (tool) => tool === 'create_mockup' || tool === 'show_mockup'
+  'claude-ui-mockup': (tool) => tool === 'create_mockup' || tool === 'show_mockup',
+  'claude-ui-handback': (tool) => tool === 'hand_back'
 }
 
 /** How an engine spells a first-party tool: Claude's MCP name, opencode's `claudeui_`, or bare (pi, Codex). */

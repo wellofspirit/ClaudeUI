@@ -65,6 +65,7 @@ import {
   asHostPrecheckRules,
   buildSessionRuleset,
   CLAUDEUI_MCP_SERVER,
+  HAND_BACK_ALLOW_RULE,
   SESSION_TOOLS_DENY_RULE,
   wireOrder,
   type V2Rule
@@ -119,7 +120,12 @@ import type { ItemStreamOpen, ItemStreamSeal, ItemStreamTarget } from '../shared
 // cycle. Reused verbatim, never reimplemented (per the M4c kickoff spec). The
 // process/transport half of a pi target lives in `PiChildRunner` (ADR-089),
 // shared with PiSession's host-run subagents; the gate policy stays here.
-import type { GateDecision, PiBridgeHandler, PiToolCallPayload } from '../pi/PiBridgeHost'
+import type {
+  GateDecision,
+  PiBridgeHandler,
+  PiHostedToolResult,
+  PiToolCallPayload
+} from '../pi/PiBridgeHost'
 import {
   defaultSpawnPiChild,
   PiChildRunner,
@@ -144,6 +150,7 @@ import {
   type CodexThreadOwner
 } from '../codex/CodexHost'
 import { harnessAvailable } from '../harness/resolve'
+import { codexHandBackSpec } from '../codex/codex-hand-back-spec'
 import { codexModePolicy, codexTurnInput, codexTurnPolicy } from '../codex/codex-turn-policy'
 import { assertCodexProvider, selectCodexModel } from '../codex/model-selection'
 import { codexItemId, mapCodexDelta, mapCodexItem } from '../codex/event-mapper'
@@ -175,6 +182,7 @@ import type {
   CanUseTool,
   CanUseToolContext,
   CanUseToolResult,
+  McpServerConfig,
   PermissionMode,
   QueryHandle,
   ResultMessage,
@@ -211,6 +219,34 @@ import { locateClaudeTranscript } from './claude-transcript-locator'
 import { stricterMode } from '../../shared/mode-class'
 import { removeHarnessState } from './dispatch-target-end'
 import { DispatchRun, DispatchRunRegistry } from './dispatch-runs'
+import {
+  CLAUDE_HAND_BACK_TOOL,
+  createHandBackServer,
+  HAND_BACK_SERVER_NAME,
+  type HandBackAnswer
+} from './dispatch-hand-back-server'
+import {
+  dispatchReports,
+  type DispatchReportStatus,
+  type DispatchReportStore
+} from './dispatch-report-store'
+import { capReport, frameHandBack } from '../../shared/handback-frame'
+import { ToolUseOwners } from './tool-use-owners'
+import { isHandbackPointerResult } from './task-notification-xml'
+import {
+  HAND_BACK_DONE_TEXT,
+  HAND_BACK_EMPTY_TEXT,
+  HAND_BACK_ENDED_TEXT,
+  HAND_BACK_FALLBACK_WARNING,
+  HAND_BACK_NOT_TARGET_TEXT,
+  HAND_BACK_REPEAT_TEXT,
+  HAND_BACK_SUBAGENT_TEXT,
+  HAND_BACK_UNATTRIBUTED_TEXT,
+  handBackNudge,
+  handBackTaskSuffix,
+  HAND_BACK_TOOL,
+  handBackWithheldText
+} from '../../shared/dispatch-agent-description'
 import { makeRunContext, type DispatchParentLookup, type RunContext } from './dispatch-parent'
 import type {
   ApprovalDecision,
@@ -222,6 +258,7 @@ import type {
   FileDiff,
   PendingApproval,
   PermissionSuggestion,
+  TaskHandback,
   ToolReviewBlock
 } from '../../shared/types'
 
@@ -436,6 +473,12 @@ export interface ClaudeQuerySpawnOpts {
    * `options.settings` as `--settings`).
    */
   settings?: Record<string, unknown>
+  /** In-process MCP servers for the target: its `hand_back` (ADR-105 §3). */
+  mcpServers?: Record<string, McpServerConfig>
+  /** Tools the process may call without asking (`--allowedTools`): `hand_back`, never a report to approve. */
+  allowedTools?: string[]
+  /** Every stream-json frame as it is read off the wire, before the dispatcher's own loop (who made a tool call). */
+  onInboundFrame?: (frame: Record<string, unknown>) => void
 }
 
 /**
@@ -664,6 +707,30 @@ export interface DispatcherDeps {
   removeHarnessState?: (
     row: Pick<DispatchTargetRow, 'id' | 'engine' | 'harnessRef'>
   ) => Promise<void>
+  /**
+   * End every run in a report the X-Agent hands back (ADR-105 §3): targets get the
+   * `hand_back` tool, a turn that ends without a report is nudged up to three times and
+   * then withheld, and a blocking call returns the framed report instead of the last
+   * message. Off by default, so the dispatcher's own suites keep asserting on a turn's
+   * text; the singleton below turns it on.
+   */
+  requireHandBack?: boolean
+  /** Where reports are kept (ADR-105 §3). Defaults to the operational-DB store. */
+  reports?: DispatchReportStore
+  /**
+   * The longest an opencode or Codex target's turn is left running after a `hand_back` call
+   * while the dispatcher waits for the call's own tool item to complete on the feed (an
+   * interrupt that landed first would cancel the call itself). The turn ends sooner when the
+   * item completes, or when the turn ends by itself. Defaults to {@link HAND_BACK_SETTLE_MS}.
+   */
+  handBackSettleMs?: number
+  /**
+   * The longest a Claude target's turn is waited for while it has background work of its own
+   * that will wake it, and the age at which such work is taken to be stale and forgotten;
+   * after it the run is nudged or withheld as if the work were gone. Defaults to
+   * {@link OWN_WORK_WAIT_MS}.
+   */
+  ownWorkWaitMs?: number
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
@@ -827,6 +894,25 @@ const PI_TIMEOUT_AFTERMATH =
   'the target agent was interrupted (the session survives; a fresh turn may still be dispatched against it).'
 const CODEX_TIMEOUT_AFTERMATH =
   'the target agent was interrupted (the thread survives; a fresh turn may still be dispatched against it).'
+/** Task kinds of a Claude target's own that wake it when they end (its agents and workflows). */
+const CLAUDE_OWN_WORK_TASK_TYPES: ReadonlySet<string> = new Set([
+  'local_agent',
+  'remote_agent',
+  'in_process_teammate',
+  'local_workflow'
+])
+const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
+  'completed',
+  'failed',
+  'killed',
+  'stopped'
+])
+/** See {@link DispatcherDeps.handBackSettleMs}. */
+const HAND_BACK_SETTLE_MS = 2_000
+/** See {@link DispatcherDeps.ownWorkWaitMs}. */
+const OWN_WORK_WAIT_MS = 30 * 60_000
+/** Follow-ups sent to a run that ended without a report before it is withheld (ADR-105 §3). */
+const MAX_HAND_BACK_NUDGES = 3
 /** How often a running opencode target turn checks the parent's live mode. */
 const MODE_WATCH_MS = 250
 /** The reject a target's ask gets while no turn of its own is running (a woken execution, a give-up winding down). */
@@ -897,6 +983,12 @@ interface TargetLedgerFields {
    * turn that was in flight when it happened must not overwrite that on its way out.
    */
   released: boolean
+  /**
+   * The target was started with the `hand_back` tool (ADR-105 §3). False for a Codex thread
+   * from before it existed (a thread keeps the tool set it was started with): its run ends
+   * in its last message, flagged as such.
+   */
+  handBack: boolean
 }
 
 /** What a target's ruleset is built from — cached per target (a failed read is not cached). */
@@ -920,6 +1012,10 @@ interface TargetRuleInputs {
  */
 interface OpencodeTargetEntry extends TargetRuleInputs, TargetLedgerFields {
   kind: 'opencode'
+  /** `claudeui_hand_back` tool calls the target made this turn (tool_use ids), to see them complete. */
+  reportToolIds: Set<string>
+  /** Resolves the turn's wait for the report's own tool call to complete on the feed. */
+  reportToolDone: (() => void) | null
   sessionId: string
   fromRoutingId: string
   cwd: string
@@ -928,7 +1024,7 @@ interface OpencodeTargetEntry extends TargetRuleInputs, TargetLedgerFields {
   /** The server's shared feed. */
   rec: ConnRecord
   /** Latest dispatching context — used to forward approvals mid-turn. */
-  ctx: DispatchContext
+  ctx: RunContext
   /**
    * True while a turn is in flight (from the turn's first await to its
    * return). Busy-rejects a concurrent continuation and gates the card's
@@ -1064,7 +1160,7 @@ interface ClaudeTargetEntry extends TargetLedgerFields {
    */
   busy: boolean
   /** Latest dispatching context — used to forward approvals mid-turn. */
-  ctx: DispatchContext
+  ctx: RunContext
   /**
    * The permission mode the target's cli.js process currently runs under
    * (ADR-088): the spawn's `permissionMode`, then whatever
@@ -1089,6 +1185,31 @@ interface ClaudeTargetEntry extends TargetLedgerFields {
    * turn the target was already running when the user switched accounts.
    */
   account: DispatchTurnAccount
+  /**
+   * Background work of the target's OWN that will wake it again (its agents and workflows,
+   * task id → when it started): a turn that ends while any runs is not nudged for its report
+   * (ADR-105 §3). An entry older than `ownWorkWaitMs` is taken to be stale and forgotten.
+   */
+  ownTasks: Map<string, number>
+  /**
+   * Own tasks that just ended (task id → when): cli.js starts a turn of its own to tell the
+   * model, which can begin after the turn we are reading ended. Cleared when the next
+   * main-agent model round starts (`system/status requesting`).
+   */
+  pendingWake: Map<string, number>
+  /** Who made each tool call (the report is the X-Agent's own, never one of its subagents'). */
+  toolUseOwners: ToolUseOwners
+  /** The uuids of the frames pushed into the target that cli.js has not yet reported `started`. */
+  pushedUuids: Set<string>
+  /**
+   * cli.js reported one of our frames `started` (it drained into a turn: a fresh one, or folded
+   * into a running one) and no result has ended that turn yet: the next result is OURS.
+   */
+  ownTurnStarted: boolean
+  /** The iterator's pending `next()`, kept so a read with a deadline loses no frame. */
+  nextFrame: Promise<IteratorResult<SDKMessage>> | null
+  /** The report whose tool result already went by and got the turn interrupted. */
+  interruptedReport: object | null
   /** Cumulative cost across every turn this target has run (ADR-033 M4-C). */
   cumulativeCostUsd: number
   /**
@@ -1195,7 +1316,7 @@ interface PiTargetEntry extends TargetLedgerFields {
    * `decideWithSource()` `mode`, except that a judged auto mode decides from
    * the `acceptEdits` base (see `gatePiTargetToolCall`).
    */
-  ctx: DispatchContext
+  ctx: RunContext
   /** True while a turn is being driven — same busy-reject rationale as
    *  ClaudeTargetEntry (a single ambient event stream per process; two
    *  concurrent turns would have no way to tell which `result` belongs to
@@ -1245,6 +1366,8 @@ interface PiTargetEntry extends TargetLedgerFields {
  */
 interface CodexTargetEntry extends TargetLedgerFields {
   kind: 'codex'
+  /** Resolves the turn's wait for the report's own tool call (`dynamicToolCall`) to complete. */
+  reportToolDone: (() => void) | null
   /**
    * The native thread id, from `thread/start`. Null only inside
    * `createCodexTarget` before that call returns — a successfully-created
@@ -1258,7 +1381,7 @@ interface CodexTargetEntry extends TargetLedgerFields {
   /** This target's view of the host it is a thread on (ADR-069 §2). */
   connection: CodexThreadConnection
   /** Latest dispatching context — used to forward approvals/stream events mid-turn. */
-  ctx: DispatchContext
+  ctx: RunContext
   /**
    * The mode the thread's NATIVE policy currently runs under (ADR-088): set
    * from `ctx.getAutonomyMode()` at creation (`thread/start`'s baseline) and
@@ -2093,18 +2216,46 @@ function emitDispatchNotification(
   targetSessionId: string,
   status: 'completed' | 'failed' | 'stopped',
   summary: string,
-  usage?: { totalTokens: number; toolUses: number; durationMs: number }
+  usage?: { totalTokens: number; toolUses: number; durationMs: number },
+  report?: { handback: TaskHandback; warning?: string }
 ): void {
   ctx.run.notified = true
+  ctx.run.terminalStatus = status
   if (!ctx.toolUseId) return
   ctx.emit('session:task-notification', {
     taskId: ctx.run.ledgerId ?? targetSessionId,
     toolUseId: ctx.toolUseId,
     status,
     outputFile: '',
-    summary: ctx.run.background ? summary : summary.slice(0, 100),
+    // A report is the card's body (S6's `HandbackReport`): whole, for a blocking run too.
+    summary: ctx.run.background || report ? summary : summary.slice(0, 100),
+    ...(report
+      ? { handback: report.handback, ...(report.warning ? { warning: report.warning } : {}) }
+      : {}),
     usage
   })
+}
+
+/**
+ * A turn's outcome as the run loop reads it. `needsReport`: the turn ended without a report
+ * from an agent that has the `hand_back` tool, so nothing was announced yet — the loop nudges
+ * it or withholds (ADR-105 §3).
+ */
+type TurnReturn = DispatchResult & { needsReport?: true; capNote?: string }
+
+/** Wait for `promise` for at most `ms`; undefined when it did not settle in time. */
+async function settledWithin<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), ms)
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 /**
@@ -2172,12 +2323,19 @@ export const DISPATCH_PROMPT_PREAMBLE =
  *  {@link DISPATCH_PROMPT_PREAMBLE} in front of the prompt. */
 function buildClaudeDispatchMessage(
   prompt: string,
-  sessionId: string | null
+  sessionId: string | null,
+  preamble = true,
+  /** The client uuid cli.js reports the frame's fate under (`command_lifecycle`, 03 §3.21); without one it reports nothing. */
+  uuid?: string
 ): Record<string, unknown> {
   return {
     type: 'user' as const,
+    ...(uuid ? { uuid } : {}),
     session_id: sessionId ?? '',
-    message: { role: 'user' as const, content: DISPATCH_PROMPT_PREAMBLE + prompt },
+    message: {
+      role: 'user' as const,
+      content: (preamble ? DISPATCH_PROMPT_PREAMBLE : '') + prompt
+    },
     parent_tool_use_id: null
   }
 }
@@ -2252,6 +2410,9 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
           : {}),
       settingSources: [],
       ...(opts.settings ? { settings: opts.settings } : {}),
+      ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {}),
+      ...(opts.allowedTools ? { allowedTools: opts.allowedTools } : {}),
+      ...(opts.onInboundFrame ? { onInboundFrame: opts.onInboundFrame } : {}),
       abortController: opts.abortController,
       canUseTool: opts.canUseTool,
       // ADR-033 M3: stream_event text/thinking deltas so driveClaudeTurn can
@@ -2317,7 +2478,10 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
  * both, so this reliably disables all three regardless of what the parent
  * process happens to have set.
  */
-export function buildPiTargetChildEnv(bridge: { url: string; token: string }): NodeJS.ProcessEnv {
+export function buildPiTargetChildEnv(
+  bridge: { url: string; token: string },
+  handBack = false
+): NodeJS.ProcessEnv {
   return {
     CLAUDEUI_PI_BRIDGE_URL: bridge.url,
     CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
@@ -2331,6 +2495,8 @@ export function buildPiTargetChildEnv(bridge: { url: string; token: string }): N
     // `send_message` tools (same leak argument as the three above).
     CLAUDEUI_PI_AGENT_TOOL: '',
     CLAUDEUI_PI_SEND_MESSAGE: '',
+    // ADR-105 §3: the one tool a target is for — the report that ends its run.
+    CLAUDEUI_PI_HAND_BACK: handBack ? '1' : '',
     // ADR-096: a dispatch target registers the shared MCP catalog, as an
     // opencode target does; the configs come from the target's own bridge
     // host (`mcpServers` at the spawn site), never from this env.
@@ -2346,13 +2512,14 @@ export function buildPiTargetChildEnv(bridge: { url: string; token: string }): N
  */
 function piTargetSpawnFlags(
   sessionDir: string,
-  sessionId: string
+  sessionId: string,
+  handBack: boolean
 ): Pick<PiTargetSpawnOpts, 'args' | 'env'> {
   return {
     // Persisted and hidden (ADR-105, the ADR-089 sub-agent precedent): the same two
     // flags create the session and resume it (pi opens the file when it exists).
     args: ['--session-dir', sessionDir, '--session-id', sessionId],
-    env: buildPiTargetChildEnv
+    env: (bridge) => buildPiTargetChildEnv(bridge, handBack)
   }
 }
 
@@ -2377,6 +2544,10 @@ export class CrossEngineDispatcher {
   private readonly codexResumeLockRetryMs: number
   private readonly codexHoldsThread: (threadId: string) => boolean
   private readonly piSessionDirExists: (dir: string) => boolean
+  private readonly requireHandBack: boolean
+  private readonly reports: DispatchReportStore
+  private readonly handBackSettleMs: number
+  private readonly ownWorkWaitMs: number
 
   /**
    * Monotonic per-dispatcher counter, one tick per ledger row — the tiebreak
@@ -2445,6 +2616,10 @@ export class CrossEngineDispatcher {
     this.codexHoldsThread =
       deps.codexHoldsThread ?? ((threadId) => codexHostRegistry.holdsThread(threadId))
     this.piSessionDirExists = deps.piSessionDirExists ?? existsSync
+    this.requireHandBack = deps.requireHandBack ?? false
+    this.reports = deps.reports ?? dispatchReports
+    this.handBackSettleMs = deps.handBackSettleMs ?? HAND_BACK_SETTLE_MS
+    this.ownWorkWaitMs = deps.ownWorkWaitMs ?? OWN_WORK_WAIT_MS
     this.parents = deps.parents
   }
 
@@ -2635,6 +2810,8 @@ export class CrossEngineDispatcher {
       accountKey: string | null
       codexAccountId?: string | null
       labels?: DispatchLabels
+      /** The target was started with the `hand_back` tool. */
+      handBack: boolean
     }
   ): DispatchTargetRow {
     const row = this.ledger.create({
@@ -2650,7 +2827,8 @@ export class CrossEngineDispatcher {
       codexAccountId: spec.codexAccountId ?? null,
       callerRestriction: ctx.callerRestriction ? JSON.stringify(ctx.callerRestriction) : null,
       name: labelOf(spec.labels?.name),
-      description: labelOf(spec.labels?.description)
+      description: labelOf(spec.labels?.description),
+      handBack: spec.handBack
     })
     ctx.run.createdTarget = true
     this.bindRun(ctx, row.id, row.harnessRef, row)
@@ -3087,6 +3265,7 @@ export class CrossEngineDispatcher {
       launchMode: liveMode(ctx),
       startedAt: this.now()
     })
+    run.handBackRequired = this.requireHandBack
     this.runs.add(run)
     if (ctx.toolUseId) {
       // Consume a durable stop-intent armed BEFORE this dispatch was invoked
@@ -3208,6 +3387,7 @@ export class CrossEngineDispatcher {
     } catch (err) {
       logger.warn('CrossEngineDispatcher', `dispatch run close failed: ${errText(err)}`)
     }
+    this.recordRunOutcome(run)
     // Its own try: a Stop on the card must still end the X-Agent when the close threw.
     try {
       this.settleTarget(run)
@@ -3488,6 +3668,247 @@ export class CrossEngineDispatcher {
     }
   }
 
+  // ── hand_back: the report that ends a run (ADR-105 §3) ─────────────────────
+
+  /** The task as the target is given it: with how to finish, when this run ends in a report. */
+  private taskText(
+    entry: Pick<TargetLedgerFields, 'handBack'>,
+    ctx: RunContext,
+    prompt: string,
+    toolName: string
+  ): string {
+    return ctx.run.handBackRequired && entry.handBack
+      ? prompt + handBackTaskSuffix(toolName)
+      : prompt
+  }
+
+  /** The X-Agent's name as a report says it: its label, else its id. */
+  private xAgentName(run: DispatchRun): string {
+    let row: DispatchTargetRow | undefined
+    try {
+      row = run.ledgerId ? this.ledger.get(run.ledgerId) : undefined
+    } catch {
+      row = undefined
+    }
+    return row?.name ?? run.init.name ?? run.ledgerId ?? 'unnamed'
+  }
+
+  /**
+   * Keep how a run ended (ADR-105 §3): one row per run, whatever the end — a report, a
+   * withhold, a fallback, a stop, a failure or a timeout — keyed by the call that launched
+   * or continued the run, so a reload puts each outcome on its own card. Written once, at
+   * the run's end: a report whose run was then stopped is a `stopped` row. Best effort: the
+   * row records the end, it never fails the run.
+   */
+  private recordRunOutcome(run: DispatchRun): void {
+    if (!run.handBackRequired || !run.ledgerId) return
+    let status: DispatchReportStatus
+    let report: string | null = null
+    if (run.finishedAs) {
+      status = run.finishedAs.status
+      report = run.finishedAs.report
+    } else if (run.terminalStatus === 'stopped') status = 'stopped'
+    else if (run.terminalStatus === 'failed') status = run.timedOut ? 'timeout' : 'failed'
+    else return
+    try {
+      this.reports.add({
+        targetId: run.ledgerId,
+        toolUseId: run.toolUseId ?? null,
+        status,
+        report,
+        createdAt: this.now()
+      })
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `dispatch report store failed: ${errText(err)}`)
+    }
+  }
+
+  /** A report as another model reads it: the sanitised, indented frame (never the raw text). */
+  private frameFor(
+    ctx: RunContext,
+    engine: EngineId,
+    model: string,
+    report: string,
+    warning?: string
+  ): string {
+    return frameHandBack({
+      name: this.xAgentName(ctx.run),
+      engine,
+      model,
+      report,
+      ...(warning ? { warning } : {})
+    })
+  }
+
+  /**
+   * THE door of every `hand_back` call, whatever the engine delivers it through: the Claude
+   * target's own MCP server, pi's bridge, the shared opencode server, Codex's dynamic tool.
+   * Each passes the target the call arrived on (resolved its own way, but never from the
+   * model's say-so); `undefined` is a caller that is not a dispatch target, and is refused.
+   *
+   * The first call of a run stores the report and answers that the run is over; the turn is
+   * then ended by its own body (a race arm on `run.reported`). A second call is refused.
+   */
+  private receiveHandBack(
+    entry: TargetEntry | undefined,
+    report: unknown,
+    callId: string | undefined
+  ): HandBackAnswer {
+    const run = entry?.ctx.run
+    if (!entry || !run || !run.handBackRequired || !entry.handBack)
+      return { text: HAND_BACK_NOT_TARGET_TEXT, isError: true }
+    // A target of this dispatcher whose run is over (or was replaced): its tool is still there.
+    if (this.runs.byLedgerId(entry.ledgerId) !== run)
+      return { text: HAND_BACK_ENDED_TEXT, isError: true }
+    if (typeof report !== 'string' || report.trim() === '')
+      return { text: HAND_BACK_EMPTY_TEXT, isError: true }
+    if (!run.acceptReport(capReport(report), callId))
+      return { text: HAND_BACK_REPEAT_TEXT, isError: true }
+    return { text: HAND_BACK_DONE_TEXT, isError: false }
+  }
+
+  /**
+   * `hand_back` from the shared opencode server (wired in `core-services.ts`). The caller is
+   * the session opencode's `_meta` names; only the dispatch target's OWN session may hand
+   * back (a subagent child of the target, an interactive chat or an unknown id is refused).
+   */
+  handBackFromOpencode(
+    sessionId: string,
+    report: unknown,
+    callId: string | undefined
+  ): HandBackAnswer {
+    const entry = this.targets.get(sessionId)
+    return this.receiveHandBack(entry?.kind === 'opencode' ? entry : undefined, report, callId)
+  }
+
+  /**
+   * A turn ended successfully: say how the RUN ends.
+   *  - Not a report run (the dispatcher's own suites): the turn's text, as always.
+   *  - A report was handed back: the report is the result, in the terminal notification
+   *    (`handback: 'send'`) and, framed, as a blocking call's answer. The turn's own last
+   *    text is dropped. The framed answer keeps the cost-cap note the turn appended.
+   *  - The target has no `hand_back` tool (a Codex thread from before it existed): its last
+   *    message stands in, flagged as such.
+   *  - Otherwise nothing is announced: the loop nudges the agent or withholds.
+   */
+  private finishTurn(
+    ctx: RunContext,
+    engine: EngineId,
+    model: string,
+    entry: Pick<TargetLedgerFields, 'handBack'>,
+    sessionId: string,
+    turn: {
+      finalText: string
+      outText: string
+      usage: { totalTokens: number; toolUses: number; durationMs: number }
+    }
+  ): TurnReturn {
+    const run = ctx.run
+    if (!run.handBackRequired) {
+      emitDispatchNotification(ctx, sessionId, 'completed', turn.finalText, turn.usage)
+      return { text: turn.outText, sessionId }
+    }
+    run.usage.totalTokens += turn.usage.totalTokens
+    run.usage.toolUses += turn.usage.toolUses
+    run.usage.durationMs += turn.usage.durationMs
+    const note = turn.outText.slice(turn.finalText.length)
+    if (run.report) {
+      const text = run.report.text
+      run.finishedAs = { status: 'delivered', report: text }
+      emitDispatchNotification(ctx, sessionId, 'completed', text, run.usage, { handback: 'send' })
+      return { text: this.frameFor(ctx, engine, model, text) + note, sessionId }
+    }
+    if (!entry.handBack) {
+      run.finishedAs = { status: 'fallback', report: capReport(turn.finalText) }
+      emitDispatchNotification(ctx, sessionId, 'completed', turn.finalText, run.usage, {
+        handback: 'flagged',
+        warning: HAND_BACK_FALLBACK_WARNING
+      })
+      return {
+        text: this.frameFor(ctx, engine, model, turn.finalText, HAND_BACK_FALLBACK_WARNING) + note,
+        sessionId
+      }
+    }
+    return { text: turn.outText, sessionId, needsReport: true, capNote: note }
+  }
+
+  /**
+   * After a `hand_back` call on an opencode or Codex target: how long to leave the turn
+   * running. The tool result has to reach the agent before the turn is interrupted (an
+   * interrupt that landed first would cancel the call), so this waits for the call's own tool
+   * item to COMPLETE on the feed (`tool`); the turn may end by itself first (`turn`: nothing
+   * to interrupt); and `handBackSettleMs` is only the ceiling for a feed that never says.
+   */
+  private async untilReportToolDone(
+    toolDone: Promise<unknown>,
+    turnEnded: Promise<unknown>
+  ): Promise<'tool' | 'turn' | 'ceiling'> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        toolDone.then(() => 'tool' as const),
+        turnEnded.then(() => 'turn' as const),
+        new Promise<'ceiling'>((resolve) => {
+          timer = setTimeout(() => resolve('ceiling'), this.handBackSettleMs)
+        })
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  /**
+   * The run ends with no report: nothing of the agent's unsent text is delivered. `note` is
+   * what the last turn appended for the caller (the cost-cap line: why no nudge came).
+   */
+  private withholdReport(ctx: RunContext, sessionId: string, note = ''): DispatchResult {
+    const run = ctx.run
+    const text = handBackWithheldText(this.xAgentName(run))
+    run.finishedAs = { status: 'withheld', report: null }
+    emitDispatchNotification(ctx, sessionId, 'completed', text, run.usage, {
+      handback: 'withheld'
+    })
+    return { text: text + note, sessionId }
+  }
+
+  /**
+   * Run turns until the run has its end (ADR-105 §3): the task's turn, then — while it
+   * ends without a report — a follow-up asking for it, at most three times, and then the
+   * run is withheld. A target that waits on background work of its own (Claude's own
+   * agents) is not nudged: the turn its work wakes is waited for instead. A target past
+   * its `dispatch.maxCostUsd` is not nudged either (a nudge is a paid turn). A turn that
+   * fails, is stopped or times out ends the run as it always did.
+   */
+  private async runWithNudges(
+    ctx: RunContext,
+    who: {
+      sessionId: () => string
+      engine: EngineId
+      /** What the engine calls the tool (the nudge names it). */
+      toolName: string
+      cumulativeCostUsd: () => number
+      waitingOnOwnWork?: () => boolean
+    },
+    first: string,
+    turn: (prompt: string | null, nudge: boolean) => Promise<TurnReturn>
+  ): Promise<DispatchResult> {
+    let result = await turn(first, false)
+    for (;;) {
+      if (!result.needsReport) return result
+      const run = ctx.run
+      if (who.waitingOnOwnWork?.()) {
+        result = await turn(null, false)
+        continue
+      }
+      const cap = this.deps.loadEngineConfig(who.engine).dispatch?.maxCostUsd
+      const overCap = cap !== undefined && who.cumulativeCostUsd() >= cap
+      if (run.nudges >= MAX_HAND_BACK_NUDGES || overCap)
+        return this.withholdReport(ctx, who.sessionId(), result.capNote)
+      run.nudges++
+      result = await turn(handBackNudge(who.toolName), true)
+    }
+  }
+
   // ── opencode direction (M1, opencode 2.x — ADR-097 S9) ────────────────────
 
   /** Everything past the guards for engine:'opencode' — runs with an
@@ -3612,7 +4033,24 @@ export class CrossEngineDispatcher {
       // The feed has no replay: follow it before the prompt goes out.
       await withinMs(entry.rec.ready, FEED_READY_WAIT_MS)
       started = true
-      return await this.runOpencodeTurn(entry, req, ctx, model, stopController)
+      return await this.runWithNudges(
+        ctx,
+        {
+          sessionId: () => entry.sessionId,
+          engine: 'opencode',
+          toolName: `${CLAUDEUI_MCP_SERVER}_${HAND_BACK_TOOL}`,
+          cumulativeCostUsd: () => entry.cumulativeCostUsd
+        },
+        this.taskText(entry, ctx, req.prompt, `${CLAUDEUI_MCP_SERVER}_${HAND_BACK_TOOL}`),
+        (prompt, nudge) => {
+          if (nudge) {
+            // The turn before it released the target: a nudge is a turn of the same run.
+            entry.busy = true
+            this.ledgerTurnState(entry, 'running')
+          }
+          return this.runOpencodeTurn(entry, req, ctx, model, stopController, prompt as string)
+        }
+      )
     } finally {
       if (!started) {
         entry.busy = false
@@ -3642,8 +4080,9 @@ export class CrossEngineDispatcher {
     req: DispatchRequest,
     ctx: RunContext,
     model: string,
-    stopController: AbortController
-  ): Promise<DispatchResult> {
+    stopController: AbortController,
+    prompt: string
+  ): Promise<TurnReturn> {
     const dispatchCfg = this.deps.loadEngineConfig(req.engine).dispatch
     const heartbeat = this.startHeartbeat(ctx)
 
@@ -3670,10 +4109,15 @@ export class CrossEngineDispatcher {
       | { kind: 'timeout'; reason: 'absolute' | 'inactivity' }
       | { kind: 'abort' }
       | { kind: 'stop' }
+      | { kind: 'report' }
 
     // Installed BEFORE the prompt goes out, so no terminal output can find it null.
     const settledPromise = new Promise<Raced>((resolve) => {
       entry.settled = (outcome): void => resolve(outcome)
+    })
+    entry.reportToolIds.clear()
+    const reportToolDone = new Promise<void>((resolve) => {
+      entry.reportToolDone = resolve
     })
     // The prompt answers at once with the inbox item; only a REFUSAL is a race
     // outcome (the turn itself ends on the feed). NEVER posted once the turn
@@ -3685,7 +4129,7 @@ export class CrossEngineDispatcher {
     if (!givenUp) {
       const posted = entry.client.prompt(entry.sessionId, {
         id: inboxID,
-        text: req.prompt,
+        text: prompt,
         delivery: 'steer'
       })
       entry.pendingPrompt = { posted, inboxID }
@@ -3717,6 +4161,8 @@ export class CrossEngineDispatcher {
             once: true
           })
         })
+    // The agent handed its report back (ADR-105 §3): the run is over, the turn is to end.
+    const reportPromise: Promise<Raced> = ctx.run.reported.then((): Raced => ({ kind: 'report' }))
 
     /** The ledger row + cap + breakdown for whatever this turn spent so far. */
     const account = (record: boolean): { costUsd: number | null; usage: OpencodeTurnUsage } => {
@@ -3752,10 +4198,22 @@ export class CrossEngineDispatcher {
         promptPromise,
         watchdog.promise,
         abortPromise,
-        stopPromise
+        stopPromise,
+        reportPromise
       ])
 
-      if (winner.kind === 'stop' || winner.kind === 'timeout' || winner.kind === 'abort') {
+      if (winner.kind === 'report') {
+        // Let the tool result reach the agent (an interrupt first would cancel the call
+        // itself), then end its turn: the report is the result, whatever it would say next.
+        // A turn that ended by itself meanwhile needs no interrupt.
+        const how = await this.untilReportToolDone(reportToolDone, settledPromise)
+        entry.settled = null
+        if (how !== 'turn') {
+          entry.draining = true
+          void this.stopTargetTurn(entry, entry.pendingPrompt)
+        }
+        this.dismissPendingForTarget(entry.sessionId)
+      } else if (winner.kind === 'stop' || winner.kind === 'timeout' || winner.kind === 'abort') {
         // The session survives for a continuation; only this turn is
         // interrupted. Drop the resolver FIRST: the interrupt's own
         // `stopped` output must find nothing to settle.
@@ -3770,6 +4228,7 @@ export class CrossEngineDispatcher {
               ? 'Dispatch cancelled.'
               : turnTimeoutText(winner.reason, caps, OPENCODE_TIMEOUT_AFTERMATH)
         const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
+        ctx.run.timedOut = winner.kind === 'timeout'
         // A timeout is a failed turn (always a row); a stop or cancel is a row
         // only when the turn already spent something (ADR-033 M4-B).
         account(status === 'failed' || entry.turnSteps.length > 0)
@@ -3821,14 +4280,18 @@ export class CrossEngineDispatcher {
         outText +=
           '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
       }
-      emitDispatchNotification(ctx, entry.sessionId, 'completed', finalText, {
-        totalTokens: usage.totalTokens,
-        toolUses: entry.turnToolUseIds.size,
-        durationMs: this.now() - turnStartedAt
+      return this.finishTurn(ctx, 'opencode', model, entry, entry.sessionId, {
+        finalText,
+        outText,
+        usage: {
+          totalTokens: usage.totalTokens,
+          toolUses: entry.turnToolUseIds.size,
+          durationMs: this.now() - turnStartedAt
+        }
       })
-      return { text: outText, sessionId: entry.sessionId }
     } finally {
       this.sealOpencodeTargetItems(entry)
+      entry.reportToolDone = null
       entry.busy = false
       this.ledgerTurnState(entry, endState)
       entry.pendingPrompt = null
@@ -3943,13 +4406,17 @@ export class CrossEngineDispatcher {
           harnessRef: session.id,
           model,
           accountKey: opencodeDispatchAccount(model).accountKey,
-          labels
+          labels,
+          handBack: this.requireHandBack
         }).id
       const entry: OpencodeTargetEntry = {
         kind: 'opencode',
+        reportToolIds: new Set(),
+        reportToolDone: null,
         sessionId: session.id,
         ledgerId,
         released: false,
+        handBack: this.requireHandBack,
         fromRoutingId: ctx.fromRoutingId,
         conn,
         rec,
@@ -4176,12 +4643,20 @@ export class CrossEngineDispatcher {
       mcpServers,
       cwd: inputs.cwd,
       ...(worktree ? { worktree } : {}),
-      externalDirAllows
+      externalDirAllows,
+      // The dispatch target is who `claudeui_hand_back` is for: it gets the allow in every
+      // mode (auto's classifier and the asking modes must never put the report behind an
+      // approval) instead of the deny every other session of the server has.
+      handBackTarget: this.requireHandBack
     })
     const first = agents?.[0]
     const defaultAgent = first && first.mode !== 'subagent' ? first.id : undefined
     return {
-      rules: wireOrder([...built.rules, ...TARGET_ONLY_RULES]),
+      rules: wireOrder([
+        ...built.rules,
+        ...TARGET_ONLY_RULES,
+        ...(this.requireHandBack ? [HAND_BACK_ALLOW_RULE] : [])
+      ]),
       userRules: built.userRules,
       agent: built.agent ?? defaultAgent
     }
@@ -4441,6 +4916,12 @@ export class CrossEngineDispatcher {
         return
       case 'message': {
         if (o.ownerToolUseId) return
+        for (const block of o.message.content)
+          if (
+            block.type === 'tool_use' &&
+            block.toolName === `${CLAUDEUI_MCP_SERVER}_${HAND_BACK_TOOL}`
+          )
+            entry.reportToolIds.add(block.toolUseId)
         this.noteTargetMessage(entry, o.message)
         const owner = streamOwner(entry)
         if (!owner) return
@@ -4449,6 +4930,15 @@ export class CrossEngineDispatcher {
         return
       }
       case 'tool-result': {
+        // The report's own call has completed: the agent has its answer, the turn may end. Only
+        // once the report was ACCEPTED (an earlier, refused call completing says nothing): the
+        // hosted call carries no id, so it is the first hand_back result after acceptance.
+        if (
+          !o.ownerToolUseId &&
+          entry.ctx.run.report &&
+          entry.reportToolIds.has(o.result.toolUseId)
+        )
+          entry.reportToolDone?.()
         const owner = streamOwner(entry)
         if (o.ownerToolUseId || !owner) return
         entry.ctx.emit('session:subagent-tool-result', {
@@ -4968,7 +5458,8 @@ export class CrossEngineDispatcher {
           harnessRef: harnessId,
           model,
           accountKey: account.accountKey,
-          labels: req
+          labels: req,
+          handBack: this.requireHandBack
         }).id
         const shell = this.createClaudeTargetShell(ctx, ledgerId, account, ctx.cwd)
         entry = shell.entry
@@ -4979,92 +5470,135 @@ export class CrossEngineDispatcher {
       }
     }
 
-    // Mark busy BEFORE the push: driveClaudeTurn registers the entry in
-    // this.targets as soon as session_id arrives (mid-turn), making it
-    // continuable — a concurrent same-session_id dispatch must already see
-    // busy=true at that point. Cleared in the finally below on EVERY path
-    // (success, turn error, timeout, abort) — including the paths that
-    // remove the entry, where it's harmless.
-    entry.busy = true
-    this.ledgerTurnState(entry, 'running')
-    // Per-turn distinct tool_use id set (ADR-033 M4-B) — fresh at the start of
-    // every turn, populated by forwardClaudeTargetMessage, .size read at turn end.
-    entry.turnToolUseIds = new Set()
-    const turnStartedAt = this.now()
-    entry.lastActivityAt = turnStartedAt
-    entry.channel.push(buildClaudeDispatchMessage(req.prompt, entry.sessionId))
+    const turn = async (prompt: string | null, nudge: boolean): Promise<TurnReturn> => {
+      // Mark busy BEFORE the push: driveClaudeTurn registers the entry in
+      // this.targets as soon as session_id arrives (mid-turn), making it
+      // continuable — a concurrent same-session_id dispatch must already see
+      // busy=true at that point. Cleared in the finally below on EVERY path
+      // (success, turn error, timeout, abort) — including the paths that
+      // remove the entry, where it's harmless.
+      entry.busy = true
+      this.ledgerTurnState(entry, 'running')
+      // Per-turn distinct tool_use id set (ADR-033 M4-B) — fresh at the start of
+      // every turn, populated by forwardClaudeTargetMessage, .size read at turn end.
+      entry.turnToolUseIds = new Set()
+      const turnStartedAt = this.now()
+      entry.lastActivityAt = turnStartedAt
+      // `null`: nothing to send — the target's own work woke it, and its next turn is awaited.
+      if (prompt !== null) {
+        // Named, so cli.js says when it consumed the frame: only the result of the turn that
+        // did is this turn's (`driveClaudeTurn`).
+        const uuid = uuidv4()
+        entry.pushedUuids.add(uuid)
+        entry.channel.push(buildClaudeDispatchMessage(prompt, entry.sessionId, !nudge, uuid))
+      }
 
-    // ── Run the turn ──────────────────────────────────────────────────────
-    const heartbeat = this.startHeartbeat(ctx)
+      // ── Run the turn ──────────────────────────────────────────────────────
+      const heartbeat = this.startHeartbeat(ctx)
 
-    const signal = ctx.run.cancelController.signal
-    let abortListener: (() => void) | undefined
+      const signal = ctx.run.cancelController.signal
+      let abortListener: (() => void) | undefined
 
-    type Raced =
-      | { kind: 'ok'; msg: ResultMessage }
-      | { kind: 'err'; err: unknown }
-      | TurnTimeout
-      | { kind: 'abort' }
-      | { kind: 'stop' }
+      type Raced =
+        | { kind: 'ok'; msg: ResultMessage | null }
+        | { kind: 'err'; err: unknown }
+        | TurnTimeout
+        | { kind: 'abort' }
+        | { kind: 'stop' }
 
-    const turnPromise: Promise<Raced> = this.driveClaudeTurn(entry).then(
-      (msg): Raced => ({ kind: 'ok', msg }),
-      (err): Raced => ({ kind: 'err', err })
-    )
-    // Turn liveness: the TARGET engine's two configured caps, unlimited unless
-    // the user set them (ADR-033's 2026-09-18 amendment) — the same watchdog
-    // the opencode direction runs, which is why `driveClaudeTurn` bumps
-    // `entry.lastActivityAt` on every message it reads off the iterator.
-    const caps = resolveTurnLiveness(dispatchCfg)
-    const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
-      this.hasPendingApprovalFor(entry.sessionId)
-    )
-    const timeoutPromise: Promise<Raced> = watchdog.promise
-    const abortPromise: Promise<Raced> = signal
-      ? signal.aborted
-        ? Promise.resolve({ kind: 'abort' })
+      // Waiting for the turn its own work wakes (`prompt === null`) is bounded: past the
+      // ceiling the work is taken to be gone (a stale entry must not park the run).
+      const turnPromise: Promise<Raced> = this.driveClaudeTurn(
+        entry,
+        prompt === null
+          ? { wake: true, deadlineAt: this.now() + this.ownWorkWaitMs }
+          : { wake: false }
+      ).then(
+        (msg): Raced => ({ kind: 'ok', msg }),
+        (err): Raced => ({ kind: 'err', err })
+      )
+      // Turn liveness: the TARGET engine's two configured caps, unlimited unless
+      // the user set them (ADR-033's 2026-09-18 amendment) — the same watchdog
+      // the opencode direction runs, which is why `driveClaudeTurn` bumps
+      // `entry.lastActivityAt` on every message it reads off the iterator.
+      const caps = resolveTurnLiveness(dispatchCfg)
+      const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
+        this.hasPendingApprovalFor(entry.sessionId)
+      )
+      const timeoutPromise: Promise<Raced> = watchdog.promise
+      const abortPromise: Promise<Raced> = signal
+        ? signal.aborted
+          ? Promise.resolve({ kind: 'abort' })
+          : new Promise((resolve) => {
+              abortListener = (): void => resolve({ kind: 'abort' })
+              signal.addEventListener('abort', abortListener, { once: true })
+            })
+        : new Promise(() => {})
+      const stopPromise: Promise<Raced> = stopController.signal.aborted
+        ? Promise.resolve({ kind: 'stop' })
         : new Promise((resolve) => {
-            abortListener = (): void => resolve({ kind: 'abort' })
-            signal.addEventListener('abort', abortListener, { once: true })
+            stopController.signal.addEventListener('abort', () => resolve({ kind: 'stop' }), {
+              once: true
+            })
           })
-      : new Promise(() => {})
-    const stopPromise: Promise<Raced> = stopController.signal.aborted
-      ? Promise.resolve({ kind: 'stop' })
-      : new Promise((resolve) => {
-          stopController.signal.addEventListener('abort', () => resolve({ kind: 'stop' }), {
-            once: true
-          })
-        })
 
-    // How this turn leaves the row. A killed process keeps its transcript, so the target
-    // is `interrupted` (resumable); a turn that failed to run is `failed`.
-    let endState: DispatchTargetState = 'idle'
-    try {
-      const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise, stopPromise])
+      // How this turn leaves the row. A killed process keeps its transcript, so the target
+      // is `interrupted` (resumable); a turn that failed to run is `failed`.
+      let endState: DispatchTargetState = 'idle'
+      try {
+        const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise, stopPromise])
 
-      if (winner.kind === 'timeout' || winner.kind === 'abort' || winner.kind === 'stop') {
-        // Unlike opencode (an interrupt stops the turn, session survives),
-        // aborting a Claude target's AbortController KILLS THE PROCESS — so the
-        // entry goes entirely. Its transcript stays (ADR-105): the NEXT
-        // continuation re-spawns it with `--resume`.
-        endState = 'interrupted'
-        entry.abortController.abort()
-        if (entry.sessionId) {
-          this.dismissPendingForTarget(entry.sessionId)
-          this.targets.delete(entry.sessionId)
+        if (winner.kind === 'timeout' || winner.kind === 'abort' || winner.kind === 'stop') {
+          // Unlike opencode (an interrupt stops the turn, session survives),
+          // aborting a Claude target's AbortController KILLS THE PROCESS — so the
+          // entry goes entirely. Its transcript stays (ADR-105): the NEXT
+          // continuation re-spawns it with `--resume`.
+          endState = 'interrupted'
+          entry.abortController.abort()
+          if (entry.sessionId) {
+            this.dismissPendingForTarget(entry.sessionId)
+            this.targets.delete(entry.sessionId)
+          }
+          const text =
+            winner.kind === 'timeout'
+              ? turnTimeoutText(winner.reason, caps, CLAUDE_TIMEOUT_AFTERMATH)
+              : winner.kind === 'stop'
+                ? 'Dispatch stopped by user.'
+                : 'Dispatch cancelled.'
+          const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
+          ctx.run.timedOut = winner.kind === 'timeout'
+          emitDispatchNotification(ctx, entry.sessionId ?? '', status, text)
+          // Recorded for 'failed' (timeout) only — 'stopped' (abort/user-stop)
+          // is never recorded (ADR-033 M4-B: no usage numbers exist for a turn
+          // that never returned a result).
+          if (status === 'failed') {
+            this.safeRecordUsage({
+              ts: this.now(),
+              fromRoutingId: ctx.fromRoutingId,
+              targetEngine: 'claude',
+              targetModel: model,
+              targetSessionId: entry.sessionId,
+              toolUseId: ctx.toolUseId ?? null,
+              account: entry.account,
+              engineCostIsEquivalent: true
+            })
+          }
+          return errorResult(text, entry.sessionId ?? '')
         }
-        const text =
-          winner.kind === 'timeout'
-            ? turnTimeoutText(winner.reason, caps, CLAUDE_TIMEOUT_AFTERMATH)
-            : winner.kind === 'stop'
-              ? 'Dispatch stopped by user.'
-              : 'Dispatch cancelled.'
-        const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
-        emitDispatchNotification(ctx, entry.sessionId ?? '', status, text)
-        // Recorded for 'failed' (timeout) only — 'stopped' (abort/user-stop)
-        // is never recorded (ADR-033 M4-B: no usage numbers exist for a turn
-        // that never returned a result).
-        if (status === 'failed') {
+        if (winner.kind === 'err') {
+          endState = 'failed'
+          entry.abortController.abort()
+          if (entry.sessionId) {
+            this.dismissPendingForTarget(entry.sessionId)
+            this.targets.delete(entry.sessionId)
+          }
+          const msg = winner.err instanceof Error ? winner.err.message : String(winner.err)
+          emitDispatchNotification(
+            ctx,
+            entry.sessionId ?? '',
+            'failed',
+            `Dispatched turn failed: ${msg}`
+          )
           this.safeRecordUsage({
             ts: this.now(),
             fromRoutingId: ctx.fromRoutingId,
@@ -5075,100 +5609,136 @@ export class CrossEngineDispatcher {
             account: entry.account,
             engineCostIsEquivalent: true
           })
+          return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId ?? '')
         }
-        return errorResult(text, entry.sessionId ?? '')
-      }
-      if (winner.kind === 'err') {
-        endState = 'failed'
-        entry.abortController.abort()
-        if (entry.sessionId) {
-          this.dismissPendingForTarget(entry.sessionId)
-          this.targets.delete(entry.sessionId)
-        }
-        const msg = winner.err instanceof Error ? winner.err.message : String(winner.err)
-        emitDispatchNotification(
-          ctx,
-          entry.sessionId ?? '',
-          'failed',
-          `Dispatched turn failed: ${msg}`
-        )
-        this.safeRecordUsage({
-          ts: this.now(),
-          fromRoutingId: ctx.fromRoutingId,
-          targetEngine: 'claude',
-          targetModel: model,
-          targetSessionId: entry.sessionId,
-          toolUseId: ctx.toolUseId ?? null,
-          account: entry.account,
-          engineCostIsEquivalent: true
-        })
-        return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId ?? '')
-      }
 
-      const result = winner.msg
-      // ── Usage capture (ADR-033 M4-B) ────────────────────────────────────
-      // VERIFIED WIRE FACT: `result.total_cost_usd` (and `modelUsage`) are
-      // CUMULATIVE within one cli.js process; only `usage` and `duration_ms`
-      // are per-turn (see claude-session.ts's costBaseUsd/liveTotalCostUsd
-      // doc — the naive `+=` over the running total was exactly Slice B's
-      // double-count bug). The dispatched target is a persistent process
-      // serving multiple turns, so convert the running total into a per-turn
-      // delta against the entry's baseline HERE, at the single point the
-      // result is received — the failed-subtype capture, cap accumulation,
-      // DB record, and Slice C fold-in below all consume the same delta.
-      // Math.max(0, …) guards against a pathological backwards total.
-      const usageFields = result.usage as
-        | {
-            input_tokens?: number
-            output_tokens?: number
-            cache_creation_input_tokens?: number
-            cache_read_input_tokens?: number
-            cache_creation?: { ephemeral_1h_input_tokens?: number }
+        const result = winner.msg
+        if (result === null) {
+          // The wait for the turn its own work was to wake ran out: forget that work, and let
+          // the loop nudge (or withhold) as if it had never been there.
+          entry.ownTasks.clear()
+          entry.pendingWake.clear()
+          return { text: '', sessionId: entry.sessionId ?? '', needsReport: true }
+        }
+        // ── Usage capture (ADR-033 M4-B) ────────────────────────────────────
+        // VERIFIED WIRE FACT: `result.total_cost_usd` (and `modelUsage`) are
+        // CUMULATIVE within one cli.js process; only `usage` and `duration_ms`
+        // are per-turn (see claude-session.ts's costBaseUsd/liveTotalCostUsd
+        // doc — the naive `+=` over the running total was exactly Slice B's
+        // double-count bug). The dispatched target is a persistent process
+        // serving multiple turns, so convert the running total into a per-turn
+        // delta against the entry's baseline HERE, at the single point the
+        // result is received — the failed-subtype capture, cap accumulation,
+        // DB record, and Slice C fold-in below all consume the same delta.
+        // Math.max(0, …) guards against a pathological backwards total.
+        const usageFields = result.usage as
+          | {
+              input_tokens?: number
+              output_tokens?: number
+              cache_creation_input_tokens?: number
+              cache_read_input_tokens?: number
+              cache_creation?: { ephemeral_1h_input_tokens?: number }
+            }
+          | undefined
+        const totalTokens = usageFields
+          ? (usageFields.input_tokens ?? 0) + (usageFields.output_tokens ?? 0)
+          : 0
+        // The LEDGER's split (ADR-071 §1). Anthropic's `usage` is disjoint —
+        // `input_tokens` already excludes both cache figures — so the fields map
+        // straight onto the ledger's shape. `totalTokens` above deliberately
+        // stays input+output: it is what the task notification shows.
+        //
+        // `cache_creation.ephemeral_1h_input_tokens` is the 1h-TTL SUBSET of
+        // `cache_creation_input_tokens`, billed at 2× input rather than 1.25×;
+        // block-usage reads it off the transcripts for exactly this reason, and
+        // dropping it here would underprice every dispatched Claude turn that
+        // used the 1h cache. An older cli.js omits the breakdown, which the
+        // recorder reads as all-5m — the same fallback block-usage makes.
+        const turnTokens: UsageTurnTokens = {
+          input: usageFields?.input_tokens ?? 0,
+          output: usageFields?.output_tokens ?? 0,
+          cacheWrite: usageFields?.cache_creation_input_tokens ?? 0,
+          cacheWrite1h: usageFields?.cache_creation?.ephemeral_1h_input_tokens ?? 0,
+          cacheRead: usageFields?.cache_read_input_tokens ?? 0
+        }
+        const reportedTotalCostUsd = result.total_cost_usd ?? entry.lastReportedTotalCostUsd
+        const turnCostUsd = Math.max(0, reportedTotalCostUsd - entry.lastReportedTotalCostUsd)
+        entry.lastReportedTotalCostUsd = reportedTotalCostUsd
+        const durationMs = result.duration_ms ?? null
+
+        // A turn-level error (see docs/protocol-cc/03-inbound-messages.md §result
+        // subtypes) does NOT kill the process — the target stays alive for
+        // continuation, parity with the opencode info.error handling above.
+        // (After a report the turn was interrupted, which cli.js ends with an error result.)
+        if (result.subtype && result.subtype !== 'success' && !ctx.run.report) {
+          const detail =
+            (result.errors && result.errors.length > 0 && result.errors.join('; ')) ||
+            result.subtype ||
+            'the dispatched agent reported an error'
+          emitDispatchNotification(
+            ctx,
+            entry.sessionId ?? '',
+            'failed',
+            `Dispatched turn failed: ${detail}`
+          )
+          // Best-effort: a failed-subtype result still carries real cost/usage
+          // fields (the turn ran, it just didn't finish cleanly) — capture them
+          // rather than fabricate nulls.
+          this.safeRecordUsage({
+            ts: this.now(),
+            fromRoutingId: ctx.fromRoutingId,
+            targetEngine: 'claude',
+            targetModel: model,
+            targetSessionId: entry.sessionId,
+            toolUseId: ctx.toolUseId ?? null,
+            tokens: turnTokens,
+            engineCostUsd: turnCostUsd,
+            account: entry.account,
+            // cli.js's `total_cost_usd` is an API-EQUIVALENT whatever plan is
+            // behind it (ADR-034), so the ledger must not read it as a bill.
+            engineCostIsEquivalent: true
+          })
+          // Slice C — fold-in parity with the DB record above: this row IS
+          // included by seedDispatchedCosts() on reload, so the live breakdown
+          // must include it too or live vs reloaded values disagree.
+          if (Number.isFinite(turnCostUsd) && turnCostUsd > 0) {
+            ctx.addDispatchedCost?.('claude', model, turnCostUsd)
           }
-        | undefined
-      const totalTokens = usageFields
-        ? (usageFields.input_tokens ?? 0) + (usageFields.output_tokens ?? 0)
-        : 0
-      // The LEDGER's split (ADR-071 §1). Anthropic's `usage` is disjoint —
-      // `input_tokens` already excludes both cache figures — so the fields map
-      // straight onto the ledger's shape. `totalTokens` above deliberately
-      // stays input+output: it is what the task notification shows.
-      //
-      // `cache_creation.ephemeral_1h_input_tokens` is the 1h-TTL SUBSET of
-      // `cache_creation_input_tokens`, billed at 2× input rather than 1.25×;
-      // block-usage reads it off the transcripts for exactly this reason, and
-      // dropping it here would underprice every dispatched Claude turn that
-      // used the 1h cache. An older cli.js omits the breakdown, which the
-      // recorder reads as all-5m — the same fallback block-usage makes.
-      const turnTokens: UsageTurnTokens = {
-        input: usageFields?.input_tokens ?? 0,
-        output: usageFields?.output_tokens ?? 0,
-        cacheWrite: usageFields?.cache_creation_input_tokens ?? 0,
-        cacheWrite1h: usageFields?.cache_creation?.ephemeral_1h_input_tokens ?? 0,
-        cacheRead: usageFields?.cache_read_input_tokens ?? 0
-      }
-      const reportedTotalCostUsd = result.total_cost_usd ?? entry.lastReportedTotalCostUsd
-      const turnCostUsd = Math.max(0, reportedTotalCostUsd - entry.lastReportedTotalCostUsd)
-      entry.lastReportedTotalCostUsd = reportedTotalCostUsd
-      const durationMs = result.duration_ms ?? null
+          // The cap is a SPEND limit, not a success limit (ADR-034): a failed
+          // turn burned real tokens, so it counts toward maxCostUsd like any
+          // other — otherwise a dispatch session whose turns keep erroring
+          // could spend past the cap without ever tripping it. (The crossing
+          // note is only appended on success turns; a failed turn that crosses
+          // simply causes the NEXT turn to be rejected by the cap check.)
+          entry.cumulativeCostUsd += turnCostUsd
+          return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId ?? '')
+        }
+        const finalText = result.result || '(the dispatched agent returned no text)'
 
-      // A turn-level error (see docs/protocol-cc/03-inbound-messages.md §result
-      // subtypes) does NOT kill the process — the target stays alive for
-      // continuation, parity with the opencode info.error handling above.
-      if (result.subtype && result.subtype !== 'success') {
-        const detail =
-          (result.errors && result.errors.length > 0 && result.errors.join('; ')) ||
-          result.subtype ||
-          'the dispatched agent reported an error'
-        emitDispatchNotification(
-          ctx,
-          entry.sessionId ?? '',
-          'failed',
-          `Dispatched turn failed: ${detail}`
-        )
-        // Best-effort: a failed-subtype result still carries real cost/usage
-        // fields (the turn ran, it just didn't finish cleanly) — capture them
-        // rather than fabricate nulls.
+        // ── Cost cap crossing note (ADR-033 M4-C) ───────────────────────────
+        const maxCostUsd = dispatchCfg?.maxCostUsd
+        const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
+        entry.cumulativeCostUsd += turnCostUsd
+        let outText = finalText
+        if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
+          outText +=
+            '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
+        }
+
+        // ── Fold into the dispatching session's own cost breakdown (Slice C) ──
+        if (Number.isFinite(turnCostUsd) && turnCostUsd > 0) {
+          ctx.addDispatchedCost?.('claude', model, turnCostUsd)
+        }
+
+        const done = this.finishTurn(ctx, 'claude', model, entry, entry.sessionId ?? '', {
+          finalText,
+          outText,
+          usage: {
+            totalTokens,
+            toolUses: entry.turnToolUseIds.size,
+            durationMs: durationMs ?? 0
+          }
+        })
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
@@ -5179,71 +5749,30 @@ export class CrossEngineDispatcher {
           tokens: turnTokens,
           engineCostUsd: turnCostUsd,
           account: entry.account,
-          // cli.js's `total_cost_usd` is an API-EQUIVALENT whatever plan is
-          // behind it (ADR-034), so the ledger must not read it as a bill.
           engineCostIsEquivalent: true
         })
-        // Slice C — fold-in parity with the DB record above: this row IS
-        // included by seedDispatchedCosts() on reload, so the live breakdown
-        // must include it too or live vs reloaded values disagree.
-        if (Number.isFinite(turnCostUsd) && turnCostUsd > 0) {
-          ctx.addDispatchedCost?.('claude', model, turnCostUsd)
-        }
-        // The cap is a SPEND limit, not a success limit (ADR-034): a failed
-        // turn burned real tokens, so it counts toward maxCostUsd like any
-        // other — otherwise a dispatch session whose turns keep erroring
-        // could spend past the cap without ever tripping it. (The crossing
-        // note is only appended on success turns; a failed turn that crosses
-        // simply causes the NEXT turn to be rejected by the cap check.)
-        entry.cumulativeCostUsd += turnCostUsd
-        return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId ?? '')
+        return done
+      } finally {
+        entry.itemStreams.sealAll()
+        entry.busy = false
+        this.ledgerTurnState(entry, endState)
+        clearInterval(heartbeat)
+        watchdog.dispose()
+        if (signal && abortListener) signal.removeEventListener('abort', abortListener)
       }
-      const finalText = result.result || '(the dispatched agent returned no text)'
-
-      // ── Cost cap crossing note (ADR-033 M4-C) ───────────────────────────
-      const maxCostUsd = dispatchCfg?.maxCostUsd
-      const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
-      entry.cumulativeCostUsd += turnCostUsd
-      let outText = finalText
-      if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
-        outText +=
-          '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
-      }
-
-      // ── Fold into the dispatching session's own cost breakdown (Slice C) ──
-      if (Number.isFinite(turnCostUsd) && turnCostUsd > 0) {
-        ctx.addDispatchedCost?.('claude', model, turnCostUsd)
-      }
-
-      emitDispatchNotification(ctx, entry.sessionId ?? '', 'completed', finalText, {
-        totalTokens,
-        toolUses: entry.turnToolUseIds.size,
-        durationMs: durationMs ?? 0
-      })
-      this.safeRecordUsage({
-        ts: this.now(),
-        fromRoutingId: ctx.fromRoutingId,
-        targetEngine: 'claude',
-        targetModel: model,
-        targetSessionId: entry.sessionId,
-        toolUseId: ctx.toolUseId ?? null,
-        tokens: turnTokens,
-        engineCostUsd: turnCostUsd,
-        account: entry.account,
-        engineCostIsEquivalent: true
-      })
-      return {
-        text: outText,
-        sessionId: entry.sessionId ?? ''
-      }
-    } finally {
-      entry.itemStreams.sealAll()
-      entry.busy = false
-      this.ledgerTurnState(entry, endState)
-      clearInterval(heartbeat)
-      watchdog.dispose()
-      if (signal && abortListener) signal.removeEventListener('abort', abortListener)
     }
+    return this.runWithNudges(
+      ctx,
+      {
+        sessionId: () => entry.sessionId ?? '',
+        engine: 'claude',
+        toolName: CLAUDE_HAND_BACK_TOOL,
+        cumulativeCostUsd: () => entry.cumulativeCostUsd,
+        waitingOnOwnWork: () => this.claudeWaitsOnOwnWork(entry)
+      },
+      this.taskText(entry, ctx, req.prompt, CLAUDE_HAND_BACK_TOOL),
+      turn
+    )
   }
 
   /**
@@ -5251,10 +5780,36 @@ export class CrossEngineDispatcher {
    * capturing session_id (and registering the entry in `this.targets`) the
    * first time it's seen. NEVER uses `for await` — see the `.return()`
    * hazard documented on `ClaudeTargetEntry`.
+   *
+   * cli.js writes results that are not the turn we asked for, and a run must not count them
+   * (ADR-105 §3): the zero-turn pointer result of a hand-back notification is skipped; and so
+   * is any result before cli.js has reported one of OUR frames `started` (`command_lifecycle`,
+   * named by the uuid the frame carried: 03 §3.21) — a stray turn an earlier run's work
+   * started, or a notification's turn that ends before our prompt is drained. A result AFTER
+   * that `started` is ours even when a notification led the turn and our prompt was folded
+   * into it. A read that waits for the turn own work wakes (`wake`) takes the next result.
+   * `deadlineAt` bounds a wait: past it nothing was read and `null` comes back (the pending
+   * `next()` is kept, no frame is lost).
    */
-  private async driveClaudeTurn(entry: ClaudeTargetEntry): Promise<ResultMessage> {
+  private async driveClaudeTurn(
+    entry: ClaudeTargetEntry,
+    opts: { wake?: boolean; deadlineAt?: number } = {}
+  ): Promise<ResultMessage | null> {
     for (;;) {
-      const { value, done } = await entry.iterator.next()
+      const pending = (entry.nextFrame ??= entry.iterator.next())
+      let read: IteratorResult<SDKMessage> | undefined
+      try {
+        read =
+          opts.deadlineAt === undefined
+            ? await pending
+            : await settledWithin(pending, Math.max(0, opts.deadlineAt - this.now()))
+      } catch (err) {
+        entry.nextFrame = null
+        throw err
+      }
+      if (read === undefined) return null
+      entry.nextFrame = null
+      const { value, done } = read
       if (done) {
         throw new Error('Claude target process ended unexpectedly')
       }
@@ -5276,10 +5831,113 @@ export class CrossEngineDispatcher {
         }
       }
       this.forwardClaudeTargetMessage(entry, msg)
+      this.trackClaudeHandBack(entry, msg)
+      if (msg.type === 'command_lifecycle') {
+        this.trackClaudeLifecycle(entry, msg)
+        continue
+      }
       if (msg.type === 'result') {
-        return msg as ResultMessage
+        const result = msg as ResultMessage
+        if (isHandbackPointerResult(result)) continue
+        // Not ours: no frame of ours has been consumed into the turn this result ends.
+        if (!opts.wake && entry.ctx.run.handBackRequired && !entry.ownTurnStarted) continue
+        if (!opts.wake) entry.ownTurnStarted = false
+        return result
       }
     }
+  }
+
+  /**
+   * What cli.js says became of one of our frames (03 §3.21): `started` — it was drained into a
+   * turn, so the result that ends that turn is ours; refused, discarded, or cancelled before it
+   * started — it never will be, so the turn fails instead of waiting for a result that is not
+   * coming. Frames named by other uuids (cli.js's own queue) are none of ours.
+   */
+  private trackClaudeLifecycle(entry: ClaudeTargetEntry, msg: SDKMessage): void {
+    const frame = msg as unknown as { command_uuid?: string; state?: string }
+    if (!frame.command_uuid || !entry.pushedUuids.has(frame.command_uuid)) return
+    if (frame.state === 'started') {
+      entry.pushedUuids.delete(frame.command_uuid)
+      entry.ownTurnStarted = true
+    } else if (
+      frame.state === 'refused' ||
+      frame.state === 'discarded' ||
+      frame.state === 'cancelled'
+    ) {
+      entry.pushedUuids.delete(frame.command_uuid)
+      throw new Error(`the Claude target did not take the message (${frame.state})`)
+    }
+  }
+
+  /** Does the target have own work whose end will start a turn of its own? Stale entries are forgotten. */
+  private claudeWaitsOnOwnWork(entry: ClaudeTargetEntry): boolean {
+    const cutoff = this.now() - this.ownWorkWaitMs
+    for (const tasks of [entry.ownTasks, entry.pendingWake])
+      for (const [id, since] of tasks) if (since < cutoff) tasks.delete(id)
+    return entry.ownTasks.size + entry.pendingWake.size > 0
+  }
+
+  /**
+   * Two things a Claude target's stream tells the run about its report (ADR-105 §3).
+   *
+   *  - Its own background work: a (backgrounded) task of a waking kind — an agent or workflow
+   *    of its own — will wake it again, so a turn that ends meanwhile is waited out rather
+   *    than nudged. When such a task ends it moves to `pendingWake` until the next
+   *    main-agent model round starts (`system/status requesting`): cli.js starts a turn of its
+   *    own to tell the model, and that turn can begin AFTER the one we are reading ended.
+   *    A task that was killed or stopped is simply dropped (nothing was promised).
+   *  - The end of the turn after the report: the `hand_back` call's tool_result is the frame
+   *    that says the agent has been told it is done, so that is when the turn is
+   *    interrupted (an interrupt inside the handler would cancel the call itself). The
+   *    process survives the interrupt; its turn ends with an `error_during_execution`
+   *    result that `resolveAndRunClaude` reads as the end it is.
+   */
+  private trackClaudeHandBack(entry: ClaudeTargetEntry, msg: SDKMessage): void {
+    if (msg.type === 'system') {
+      const task = msg as unknown as {
+        subtype?: string
+        status?: string
+        task_id?: string
+        task_type?: string
+        is_backgrounded?: boolean
+        parent_tool_use_id?: string | null
+        agent_id?: string
+        patch?: { status?: string }
+      }
+      if (task.subtype === 'status') {
+        if (task.status === 'requesting' && !task.parent_tool_use_id && !task.agent_id)
+          entry.pendingWake.clear()
+        return
+      }
+      if (!task.task_id) return
+      const ended = (status: string | undefined): void => {
+        if (!status || !TERMINAL_TASK_STATUSES.has(status)) return
+        const was = entry.ownTasks.delete(task.task_id!)
+        if (status === 'killed' || status === 'stopped') entry.pendingWake.delete(task.task_id!)
+        else if (was || entry.pendingWake.has(task.task_id!))
+          entry.pendingWake.set(task.task_id!, this.now())
+      }
+      if (task.subtype === 'task_started') {
+        if (CLAUDE_OWN_WORK_TASK_TYPES.has(task.task_type ?? '') && task.is_backgrounded !== false)
+          entry.ownTasks.set(task.task_id, this.now())
+      } else if (task.subtype === 'task_notification') ended(task.status)
+      else if (task.subtype === 'task_updated') ended(task.patch?.status)
+      return
+    }
+    const report = entry.ctx.run.report
+    if (!report || entry.interruptedReport === report || msg.type !== 'user') return
+    const content = (msg as { message?: { content?: unknown } }).message?.content
+    if (!Array.isArray(content)) return
+    const answered = (content as Array<Record<string, unknown>>).some(
+      (block) =>
+        block?.type === 'tool_result' &&
+        (report.callId === undefined || block.tool_use_id === report.callId)
+    )
+    if (!answered) return
+    entry.interruptedReport = report
+    void entry.query.interrupt().catch((err: unknown) => {
+      logger.warn('CrossEngineDispatcher', `could not end the turn after a report: ${errText(err)}`)
+    })
   }
 
   /**
@@ -5363,7 +6021,7 @@ export class CrossEngineDispatcher {
    */
   private async spawnClaudeTarget(
     shell: { entry: ClaudeTargetEntry; canUseTool: CanUseTool },
-    ctx: DispatchContext,
+    ctx: RunContext,
     model: string,
     cwd: string,
     ids: { sessionId: string } | { resume: string }
@@ -5382,7 +6040,26 @@ export class CrossEngineDispatcher {
       abortController: entry.abortController,
       prompt: entry.channel,
       ...ids,
-      ...(deny.length > 0 || ask.length > 0 ? { settings: { permissions: { deny, ask } } } : {})
+      ...(deny.length > 0 || ask.length > 0 ? { settings: { permissions: { deny, ask } } } : {}),
+      // The target's report channel (ADR-105 §3): a one-tool server of its own, in the
+      // process's `allowedTools` so cli.js never asks (a report is not an action to approve).
+      // Probed on cli.js 2.1.293, auto mode, Haiku: the call ran with no ask and no block.
+      ...(entry.handBack
+        ? {
+            mcpServers: {
+              [HAND_BACK_SERVER_NAME]: createHandBackServer(async (report, callId) => {
+                // cli.js hands a subagent the in-process MCP tools too: only the X-Agent's own
+                // call is its report (the owner comes from the stream, as for the session tools).
+                const owner = await entry.toolUseOwners.ownerOf(callId)
+                if (owner === 'subagent') return { text: HAND_BACK_SUBAGENT_TEXT, isError: true }
+                if (owner === 'unknown') return { text: HAND_BACK_UNATTRIBUTED_TEXT, isError: true }
+                return this.receiveHandBack(entry, report, callId)
+              })
+            },
+            allowedTools: [CLAUDE_HAND_BACK_TOOL]
+          }
+        : {}),
+      onInboundFrame: (frame) => entry.toolUseOwners.noteFrame(frame)
     })
     entry.iterator = entry.query[Symbol.asyncIterator]()
     entry.appliedPermissionMode = mode.permissionMode
@@ -5398,7 +6075,7 @@ export class CrossEngineDispatcher {
    * `query`/`iterator` fields are already populated by the caller.
    */
   private createClaudeTargetShell(
-    ctx: DispatchContext,
+    ctx: RunContext,
     ledgerId: string,
     account: DispatchTurnAccount,
     cwd: string
@@ -5413,6 +6090,7 @@ export class CrossEngineDispatcher {
       sessionId: null,
       ledgerId,
       released: false,
+      handBack: this.requireHandBack,
       fromRoutingId: ctx.fromRoutingId,
       cwd,
       channel,
@@ -5428,6 +6106,13 @@ export class CrossEngineDispatcher {
       autoRejectedReported: false,
       modeSync: null,
       account,
+      ownTasks: new Map(),
+      pendingWake: new Map(),
+      toolUseOwners: new ToolUseOwners(),
+      pushedUuids: new Set(),
+      ownTurnStarted: false,
+      nextFrame: null,
+      interruptedReport: null,
       cumulativeCostUsd: 0,
       lastReportedTotalCostUsd: 0,
       lastActivityAt: 0,
@@ -5591,6 +6276,9 @@ export class CrossEngineDispatcher {
     // decided below as usual (a human answers it; an ask already parked on
     // the human stays with the human).
     await this.syncClaudeTargetMode(entry)
+    if (opts.toolUseId) entry.toolUseOwners.note(opts.toolUseId, !!opts.agentId)
+    // The report is the run's end, never an action to approve (it is also in `allowedTools`).
+    if (toolName === CLAUDE_HAND_BACK_TOOL) return { behavior: 'allow', updatedInput: input }
     if (isShellToolName(toolName) && typeof input.command === 'string') {
       const hit = denyAskHit(
         input.command,
@@ -5991,112 +6679,183 @@ export class CrossEngineDispatcher {
     // The judge's subagent task is the LATEST dispatch prompt (ADR-088).
     entry.lastPrompt = req.prompt
 
-    // Mark busy BEFORE the prompt is sent — fresh per-turn accumulators.
-    entry.busy = true
-    this.ledgerTurnState(entry, 'running')
-    entry.turnEngineCostUsd = null
-    const turnStartedAt = this.now()
-    entry.runner.beginTurn(turnStartedAt)
+    const turn = async (prompt: string | null): Promise<TurnReturn> => {
+      // Mark busy BEFORE the prompt is sent — fresh per-turn accumulators.
+      entry.busy = true
+      this.ledgerTurnState(entry, 'running')
+      entry.turnEngineCostUsd = null
+      const turnStartedAt = this.now()
+      entry.runner.beginTurn(turnStartedAt)
 
-    // ── Run the turn ──────────────────────────────────────────────────────
-    const heartbeat = this.startHeartbeat(ctx)
+      // ── Run the turn ──────────────────────────────────────────────────────
+      const heartbeat = this.startHeartbeat(ctx)
 
-    const signal = ctx.run.cancelController.signal
-    let abortListener: (() => void) | undefined
+      const signal = ctx.run.cancelController.signal
+      let abortListener: (() => void) | undefined
 
-    type Raced =
-      | { kind: 'ok'; outcome: Extract<PiTurnOutcome, { kind: 'ok' }> }
-      | { kind: 'err'; message: string }
-      | TurnTimeout
-      | { kind: 'abort' }
-      | { kind: 'stop' }
+      type Raced =
+        | { kind: 'ok'; outcome: Extract<PiTurnOutcome, { kind: 'ok' }> }
+        | { kind: 'err'; message: string }
+        | TurnTimeout
+        | { kind: 'abort' }
+        | { kind: 'stop' }
+        | { kind: 'report' }
 
-    const turnPromise: Promise<Raced> = entry.runner
-      .runTurn(req.prompt)
-      .then((outcome): Raced =>
-        outcome.kind === 'ok' ? { kind: 'ok', outcome } : { kind: 'err', message: outcome.message }
+      const turnPromise: Promise<Raced> = entry.runner
+        .runTurn(prompt as string)
+        .then((outcome): Raced =>
+          outcome.kind === 'ok'
+            ? { kind: 'ok', outcome }
+            : { kind: 'err', message: outcome.message }
+        )
+      // Turn liveness: the TARGET engine's two configured caps, unlimited unless
+      // the user set them (ADR-033's 2026-09-18 amendment). The ambient `onEvent`
+      // callback `PiChildRunner.start` installs is what bumps
+      // `entry.runner.lastActivityAt`.
+      const caps = resolveTurnLiveness(dispatchCfg)
+      const watchdog = this.startTurnWatchdog(entry.runner, caps, turnStartedAt, () =>
+        this.hasPendingApprovalFor(entry.sessionId)
       )
-    // Turn liveness: the TARGET engine's two configured caps, unlimited unless
-    // the user set them (ADR-033's 2026-09-18 amendment). The ambient `onEvent`
-    // callback `PiChildRunner.start` installs is what bumps
-    // `entry.runner.lastActivityAt`.
-    const caps = resolveTurnLiveness(dispatchCfg)
-    const watchdog = this.startTurnWatchdog(entry.runner, caps, turnStartedAt, () =>
-      this.hasPendingApprovalFor(entry.sessionId)
-    )
-    const timeoutPromise: Promise<Raced> = watchdog.promise
-    const abortPromise: Promise<Raced> = signal
-      ? signal.aborted
-        ? Promise.resolve({ kind: 'abort' })
+      const timeoutPromise: Promise<Raced> = watchdog.promise
+      const abortPromise: Promise<Raced> = signal
+        ? signal.aborted
+          ? Promise.resolve({ kind: 'abort' })
+          : new Promise((resolve) => {
+              abortListener = (): void => resolve({ kind: 'abort' })
+              signal.addEventListener('abort', abortListener, { once: true })
+            })
+        : new Promise(() => {})
+      const stopPromise: Promise<Raced> = stopController.signal.aborted
+        ? Promise.resolve({ kind: 'stop' })
         : new Promise((resolve) => {
-            abortListener = (): void => resolve({ kind: 'abort' })
-            signal.addEventListener('abort', abortListener, { once: true })
+            stopController.signal.addEventListener('abort', () => resolve({ kind: 'stop' }), {
+              once: true
+            })
           })
-      : new Promise(() => {})
-    const stopPromise: Promise<Raced> = stopController.signal.aborted
-      ? Promise.resolve({ kind: 'stop' })
-      : new Promise((resolve) => {
-          stopController.signal.addEventListener('abort', () => resolve({ kind: 'stop' }), {
-            once: true
-          })
-        })
 
-    let endState: DispatchTargetState = 'idle'
-    try {
-      const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise, stopPromise])
+      // The agent handed its report back (ADR-105 §3): the run is over, the turn is to end.
+      const reportPromise: Promise<Raced> = ctx.run.reported.then((): Raced => ({ kind: 'report' }))
 
-      if (winner.kind === 'timeout' || winner.kind === 'abort' || winner.kind === 'stop') {
-        // `PiChildRunner.abortTurn`: `draining` FIRST, synchronously, before
-        // the `abort` RPC even sends, so no late 'ask' from this turn can
-        // possibly race ahead of it (see `PiChildRunner.draining`). DIVERGES
-        // FROM CLAUDE: pi's `abort` interrupts the CURRENT TURN only (session
-        // survives — verified; see PiTargetEntry's doc comment) — mirrors the
-        // OPENCODE target's survive-the-process pattern, so the entry is kept
-        // alive for continuation rather than torn down. RACE GUARD (see
-        // `PiChildRunner.settled`'s "RACE NOTE"): it waits, BOUNDED, for the
-        // ABANDONED turn's own terminal event sequence (still in flight —
-        // triggered by the abort just sent) to drain and settle the runner's
-        // `settled` back to null BEFORE `busy` is released in the `finally`
-        // below. Without this, a fast-enough continuation could install a NEW
-        // settle wrapper while the stale one is still pending delivery — pi's
-        // wire has no per-event turn correlation, so whichever wrapper is
-        // CURRENTLY installed receives the next settle-shaped event
-        // regardless of which turn actually produced it.
-        await entry.runner.abortTurn(this.piAbortSettleGraceMs)
-        // Read AFTER the grace-period wait, not before — the abandoned turn's
-        // own trailing cost-bearing events can still land during that window
-        // (see the RACE GUARD above), so this is the earliest point the
-        // mapper's running total can be trusted as final for this turn.
-        // Audit-residual C fix: ONLY the 'timeout' outcome reconciles against
-        // get_session_stats (a genuine failure — it gets a usage row below).
-        // 'stop'/'abort' deliberately do NOT — ADR-033 M4-B already records no
-        // usage row for either, and a follow-up RPC to a target the user just
-        // asked to stop would be pure latency for no observable benefit.
-        // Called for the ACCOUNTING, not for a figure: both fold the turn's
-        // spend into the cap and the dispatching session's breakdown, and the
-        // ledger row prices the split itself.
-        if (winner.kind === 'timeout') {
-          await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
-        } else {
-          this.accountPiNonSuccessCost(entry, ctx, model)
+      let endState: DispatchTargetState = 'idle'
+      try {
+        const raced = await Promise.race([
+          turnPromise,
+          timeoutPromise,
+          abortPromise,
+          stopPromise,
+          reportPromise
+        ])
+        // The report's tool result carries pi's `terminate`, so the turn ends by itself right
+        // after it; a model that kept going is aborted. Either way the turn's own outcome is
+        // read when it has one, else the turn is as long as the clock says.
+        let winner: Exclude<Raced, { kind: 'report' }>
+        if (raced.kind === 'report') {
+          const ended = await settledWithin(turnPromise, this.piAbortSettleGraceMs)
+          if (ended?.kind === 'ok') winner = ended
+          else {
+            if (!ended) await entry.runner.abortTurn(this.piAbortSettleGraceMs)
+            winner = {
+              kind: 'ok',
+              outcome: {
+                kind: 'ok',
+                totalCostUsd: entry.runner.mapperState.totalCostUsd,
+                durationMs: this.now() - turnStartedAt,
+                sessionId: entry.sessionId
+              }
+            }
+          }
+        } else winner = raced
+
+        if (winner.kind === 'timeout' || winner.kind === 'abort' || winner.kind === 'stop') {
+          // `PiChildRunner.abortTurn`: `draining` FIRST, synchronously, before
+          // the `abort` RPC even sends, so no late 'ask' from this turn can
+          // possibly race ahead of it (see `PiChildRunner.draining`). DIVERGES
+          // FROM CLAUDE: pi's `abort` interrupts the CURRENT TURN only (session
+          // survives — verified; see PiTargetEntry's doc comment) — mirrors the
+          // OPENCODE target's survive-the-process pattern, so the entry is kept
+          // alive for continuation rather than torn down. RACE GUARD (see
+          // `PiChildRunner.settled`'s "RACE NOTE"): it waits, BOUNDED, for the
+          // ABANDONED turn's own terminal event sequence (still in flight —
+          // triggered by the abort just sent) to drain and settle the runner's
+          // `settled` back to null BEFORE `busy` is released in the `finally`
+          // below. Without this, a fast-enough continuation could install a NEW
+          // settle wrapper while the stale one is still pending delivery — pi's
+          // wire has no per-event turn correlation, so whichever wrapper is
+          // CURRENTLY installed receives the next settle-shaped event
+          // regardless of which turn actually produced it.
+          await entry.runner.abortTurn(this.piAbortSettleGraceMs)
+          // Read AFTER the grace-period wait, not before — the abandoned turn's
+          // own trailing cost-bearing events can still land during that window
+          // (see the RACE GUARD above), so this is the earliest point the
+          // mapper's running total can be trusted as final for this turn.
+          // Audit-residual C fix: ONLY the 'timeout' outcome reconciles against
+          // get_session_stats (a genuine failure — it gets a usage row below).
+          // 'stop'/'abort' deliberately do NOT — ADR-033 M4-B already records no
+          // usage row for either, and a follow-up RPC to a target the user just
+          // asked to stop would be pure latency for no observable benefit.
+          // Called for the ACCOUNTING, not for a figure: both fold the turn's
+          // spend into the cap and the dispatching session's breakdown, and the
+          // ledger row prices the split itself.
+          if (winner.kind === 'timeout') {
+            await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
+          } else {
+            this.accountPiNonSuccessCost(entry, ctx, model)
+          }
+          if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
+          const text =
+            winner.kind === 'timeout'
+              ? turnTimeoutText(winner.reason, caps, PI_TIMEOUT_AFTERMATH)
+              : winner.kind === 'stop'
+                ? 'Dispatch stopped by user.'
+                : 'Dispatch cancelled.'
+          const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
+          ctx.run.timedOut = winner.kind === 'timeout'
+          emitDispatchNotification(ctx, entry.sessionId ?? '', status, text)
+          // Row vs spend accounting are DELIBERATELY split here: a 'stopped' turn
+          // gets no usage ROW (ADR-033 M4-B: no usage numbers for a turn that
+          // never returned) — but its cost/cap accounting above (`entry.
+          // cumulativeCostUsd` / `addDispatchedCost`) still applies regardless of
+          // status, via `accountPiNonSuccessCost` — a stopped turn can have
+          // burned real spend before the stop landed, and that spend counts
+          // toward the cap exactly like a timeout's or a success's does.
+          if (status === 'failed') {
+            this.safeRecordUsage({
+              ts: this.now(),
+              fromRoutingId: ctx.fromRoutingId,
+              targetEngine: 'pi',
+              targetModel: model,
+              targetSessionId: entry.sessionId,
+              toolUseId: ctx.toolUseId ?? null,
+              tokens: entry.runner.turnTokens,
+              engineCostUsd: entry.turnEngineCostUsd,
+              account: piDispatchAccount(model),
+              engineCostIsEquivalent: true
+            })
+          }
+          return errorResult(text, entry.sessionId ?? '')
         }
-        if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
-        const text =
-          winner.kind === 'timeout'
-            ? turnTimeoutText(winner.reason, caps, PI_TIMEOUT_AFTERMATH)
-            : winner.kind === 'stop'
-              ? 'Dispatch stopped by user.'
-              : 'Dispatch cancelled.'
-        const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
-        emitDispatchNotification(ctx, entry.sessionId ?? '', status, text)
-        // Row vs spend accounting are DELIBERATELY split here: a 'stopped' turn
-        // gets no usage ROW (ADR-033 M4-B: no usage numbers for a turn that
-        // never returned) — but its cost/cap accounting above (`entry.
-        // cumulativeCostUsd` / `addDispatchedCost`) still applies regardless of
-        // status, via `accountPiNonSuccessCost` — a stopped turn can have
-        // burned real spend before the stop landed, and that spend counts
-        // toward the cap exactly like a timeout's or a success's does.
-        if (status === 'failed') {
+
+        if (winner.kind === 'err') {
+          endState = 'failed'
+          // Also NOT torn down — pi's own error surface (a rejected prompt ack,
+          // an extension_error) mostly leaves the process alive; a genuinely
+          // dead process (the onExit case) self-diagnoses cleanly on the NEXT
+          // continuation attempt instead (PiRpcClient.request() already guards
+          // "process is not running"), so no extra liveness tracking is needed
+          // here — see the M4c report for the full rationale.
+          if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
+          // Audit-residual C fix: reconcile against get_session_stats — an
+          // extension_error/rejected-ack can land before ANY cost-bearing
+          // message_end streamed back, in which case entry.runner.mapperState.
+          // totalCostUsd is still the pre-turn value even though pi's backend
+          // may have genuinely spent something.
+          await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
+          emitDispatchNotification(
+            ctx,
+            entry.sessionId ?? '',
+            'failed',
+            `Dispatched turn failed: ${winner.message}`
+          )
           this.safeRecordUsage({
             ts: this.now(),
             fromRoutingId: ctx.fromRoutingId,
@@ -6109,31 +6868,48 @@ export class CrossEngineDispatcher {
             account: piDispatchAccount(model),
             engineCostIsEquivalent: true
           })
+          return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId ?? '')
         }
-        return errorResult(text, entry.sessionId ?? '')
-      }
 
-      if (winner.kind === 'err') {
-        endState = 'failed'
-        // Also NOT torn down — pi's own error surface (a rejected prompt ack,
-        // an extension_error) mostly leaves the process alive; a genuinely
-        // dead process (the onExit case) self-diagnoses cleanly on the NEXT
-        // continuation attempt instead (PiRpcClient.request() already guards
-        // "process is not running"), so no extra liveness tracking is needed
-        // here — see the M4c report for the full rationale.
-        if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
-        // Audit-residual C fix: reconcile against get_session_stats — an
-        // extension_error/rejected-ack can land before ANY cost-bearing
-        // message_end streamed back, in which case entry.runner.mapperState.
-        // totalCostUsd is still the pre-turn value even though pi's backend
-        // may have genuinely spent something.
-        await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
-        emitDispatchNotification(
-          ctx,
-          entry.sessionId ?? '',
-          'failed',
-          `Dispatched turn failed: ${winner.message}`
-        )
+        // ── Success ────────────────────────────────────────────────────────
+        const { outcome } = winner
+        const rawTurnCostUsd = entry.runner.takeCostDelta(outcome.totalCostUsd)
+
+        // get_last_assistant_text — simpler + more reliable than accumulating
+        // `message` MapperOutputs across the turn ourselves (see
+        // `PiChildRunner.runTurn`'s doc comment). Best-effort: a failure here
+        // still returns a result (with a placeholder text) rather than failing
+        // an otherwise-successful turn over a follow-up RPC call.
+        const finalText =
+          (await entry.runner.lastAssistantText()) ?? '(the dispatched agent returned no text)'
+
+        // ── Cost cap crossing note (ADR-033 M4-C) ───────────────────────────
+        // applyPiTurnCost does the fold into the cap AND the dispatching
+        // session's breakdown (Slice C), so the cap state is read before it.
+        const maxCostUsd = dispatchCfg?.maxCostUsd
+        const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
+        const turnCostUsd = this.applyPiTurnCost(entry, ctx, model, rawTurnCostUsd)
+        let outText = finalText
+        if (turnCostUsd === null) {
+          if (maxCostUsd !== undefined) outText += cannotCountNote(model)
+        } else if (
+          maxCostUsd !== undefined &&
+          wasUnderCap &&
+          entry.cumulativeCostUsd >= maxCostUsd
+        ) {
+          outText +=
+            '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
+        }
+
+        const done = this.finishTurn(ctx, 'pi', model, entry, entry.sessionId ?? '', {
+          finalText,
+          outText,
+          usage: {
+            totalTokens: entry.runner.turnTotalTokens,
+            toolUses: entry.runner.turnToolUseIds.size,
+            durationMs: outcome.durationMs
+          }
+        })
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
@@ -6142,67 +6918,33 @@ export class CrossEngineDispatcher {
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
           tokens: entry.runner.turnTokens,
+          // pi reports a LIST PRICE, not a charge (S1b) — the ledger must not
+          // read it as money that left a wallet.
           engineCostUsd: entry.turnEngineCostUsd,
           account: piDispatchAccount(model),
           engineCostIsEquivalent: true
         })
-        return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId ?? '')
+        return done
+      } finally {
+        entry.runner.flush()
+        entry.busy = false
+        this.ledgerTurnState(entry, endState)
+        clearInterval(heartbeat)
+        watchdog.dispose()
+        if (signal && abortListener) signal.removeEventListener('abort', abortListener)
       }
-
-      // ── Success ────────────────────────────────────────────────────────
-      const { outcome } = winner
-      const rawTurnCostUsd = entry.runner.takeCostDelta(outcome.totalCostUsd)
-
-      // get_last_assistant_text — simpler + more reliable than accumulating
-      // `message` MapperOutputs across the turn ourselves (see
-      // `PiChildRunner.runTurn`'s doc comment). Best-effort: a failure here
-      // still returns a result (with a placeholder text) rather than failing
-      // an otherwise-successful turn over a follow-up RPC call.
-      const finalText =
-        (await entry.runner.lastAssistantText()) ?? '(the dispatched agent returned no text)'
-
-      // ── Cost cap crossing note (ADR-033 M4-C) ───────────────────────────
-      // applyPiTurnCost does the fold into the cap AND the dispatching
-      // session's breakdown (Slice C), so the cap state is read before it.
-      const maxCostUsd = dispatchCfg?.maxCostUsd
-      const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
-      const turnCostUsd = this.applyPiTurnCost(entry, ctx, model, rawTurnCostUsd)
-      let outText = finalText
-      if (turnCostUsd === null) {
-        if (maxCostUsd !== undefined) outText += cannotCountNote(model)
-      } else if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
-        outText +=
-          '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
-      }
-
-      emitDispatchNotification(ctx, entry.sessionId ?? '', 'completed', finalText, {
-        totalTokens: entry.runner.turnTotalTokens,
-        toolUses: entry.runner.turnToolUseIds.size,
-        durationMs: outcome.durationMs
-      })
-      this.safeRecordUsage({
-        ts: this.now(),
-        fromRoutingId: ctx.fromRoutingId,
-        targetEngine: 'pi',
-        targetModel: model,
-        targetSessionId: entry.sessionId,
-        toolUseId: ctx.toolUseId ?? null,
-        tokens: entry.runner.turnTokens,
-        // pi reports a LIST PRICE, not a charge (S1b) — the ledger must not
-        // read it as money that left a wallet.
-        engineCostUsd: entry.turnEngineCostUsd,
-        account: piDispatchAccount(model),
-        engineCostIsEquivalent: true
-      })
-      return { text: outText, sessionId: entry.sessionId ?? '' }
-    } finally {
-      entry.runner.flush()
-      entry.busy = false
-      this.ledgerTurnState(entry, endState)
-      clearInterval(heartbeat)
-      watchdog.dispose()
-      if (signal && abortListener) signal.removeEventListener('abort', abortListener)
     }
+    return this.runWithNudges(
+      ctx,
+      {
+        sessionId: () => entry.sessionId ?? '',
+        engine: 'pi',
+        toolName: HAND_BACK_TOOL,
+        cumulativeCostUsd: () => entry.cumulativeCostUsd
+      },
+      this.taskText(entry, ctx, req.prompt, HAND_BACK_TOOL),
+      turn
+    )
   }
 
   /**
@@ -6229,7 +6971,8 @@ export class CrossEngineDispatcher {
         harnessRef: harnessId,
         model,
         accountKey: piDispatchAccount(model).accountKey,
-        labels
+        labels,
+        handBack: this.requireHandBack
       })
     const cwd = resume?.cwd ?? ctx.cwd
     const entry: PiTargetEntry = {
@@ -6237,6 +6980,7 @@ export class CrossEngineDispatcher {
       sessionId: null,
       ledgerId: row.id,
       released: false,
+      handBack: this.requireHandBack,
       fromRoutingId: ctx.fromRoutingId,
       cwd,
       // Populated below, once the runner has started — the gate handler and
@@ -6296,8 +7040,26 @@ export class CrossEngineDispatcher {
         // spells Claude MCP rules in pi's form (`mcpRuleKey`).
         spawnOpts: {
           gateHandler,
+          // The one hosted tool a target has: `hand_back` (ADR-105 §3). Anything else fails
+          // closed in the host. `terminate` ends pi's turn right after the report.
+          ...(entry.handBack
+            ? {
+                hostedToolHandler: async (payload) =>
+                  payload.toolName === HAND_BACK_TOOL
+                    ? this.piHandBackResult(entry, payload.input, payload.toolCallId)
+                    : {
+                        content: [
+                          {
+                            type: 'text' as const,
+                            text: `${payload.toolName} is not available here`
+                          }
+                        ],
+                        isError: true
+                      }
+              }
+            : {}),
           mcpServers: collectClaudeMcpForPi(cwd).servers,
-          ...piTargetSpawnFlags(dispatchPiSessionDir(row.id), harnessId)
+          ...piTargetSpawnFlags(dispatchPiSessionDir(row.id), harnessId, entry.handBack)
         },
         ownerToolUseId: () => entry.ctx.toolUseId,
         emit: () => entry.ctx.emit,
@@ -6315,6 +7077,19 @@ export class CrossEngineDispatcher {
     if (entry.sessionId !== harnessId) this.ledgerSet(row.id, { harnessRef: entry.sessionId })
     this.targets.set(entry.sessionId, entry)
     return entry
+  }
+
+  /** A pi target's `hand_back` call as its bridge host answers it (the one hosted tool a target has). */
+  private piHandBackResult(
+    entry: PiTargetEntry,
+    input: Record<string, unknown>,
+    toolCallId: string
+  ): PiHostedToolResult {
+    const answer = this.receiveHandBack(entry, input.report, toolCallId)
+    return {
+      content: [{ type: 'text', text: answer.text }],
+      ...(answer.isError ? { isError: true } : { terminate: true })
+    }
   }
 
   /**
@@ -6370,6 +7145,9 @@ export class CrossEngineDispatcher {
     entry: PiTargetEntry,
     payload: PiToolCallPayload
   ): Promise<GateDecision> {
+    // The report is the run's end, not an action: never judged, never asked (ADR-105 §3).
+    // (A call after the run ended is refused by the hosted-tool handler itself.)
+    if (payload.toolName === HAND_BACK_TOOL && entry.handBack) return { behavior: 'allow' }
     // See PiChildRunner.draining's doc comment — a late 'ask' from an already
     // stopped/timed-out/aborted turn must never register a pending approval.
     if (entry.runner.draining) return { behavior: 'deny', reason: 'Dispatch stopped' }
@@ -6648,76 +7426,149 @@ export class CrossEngineDispatcher {
     }
 
     const model = entry.model
-    entry.busy = true
-    this.ledgerTurnState(entry, 'running')
-    entry.turnToolUseIds = new Set()
-    const turnStartedAt = this.now()
-    entry.lastActivityAt = turnStartedAt
+    const turn = async (prompt: string | null): Promise<TurnReturn> => {
+      entry.busy = true
+      this.ledgerTurnState(entry, 'running')
+      entry.turnToolUseIds = new Set()
+      const turnStartedAt = this.now()
+      entry.lastActivityAt = turnStartedAt
 
-    // ── Run the turn ──────────────────────────────────────────────────────
-    const heartbeat = this.startHeartbeat(ctx)
+      // ── Run the turn ──────────────────────────────────────────────────────
+      const heartbeat = this.startHeartbeat(ctx)
 
-    const signal = ctx.run.cancelController.signal
-    let abortListener: (() => void) | undefined
+      const signal = ctx.run.cancelController.signal
+      let abortListener: (() => void) | undefined
 
-    type Raced =
-      | { kind: 'ok'; outcome: Extract<CodexTurnOutcome, { kind: 'ok' }> }
-      | { kind: 'err'; message: string }
-      | TurnTimeout
-      | { kind: 'abort' }
-      | { kind: 'stop' }
+      type Raced =
+        | { kind: 'ok'; outcome: Extract<CodexTurnOutcome, { kind: 'ok' }> }
+        | { kind: 'err'; message: string }
+        | TurnTimeout
+        | { kind: 'abort' }
+        | { kind: 'stop' }
+        | { kind: 'report' }
 
-    const turnPromise: Promise<Raced> = this.driveCodexTurn(entry, req.prompt).then(
-      (outcome): Raced =>
-        outcome.kind === 'ok' ? { kind: 'ok', outcome } : { kind: 'err', message: outcome.message }
-    )
-    // Turn liveness: the TARGET engine's two configured caps, unlimited unless
-    // the user set them (ADR-033's 2026-09-18 amendment).
-    // `handleCodexTargetNotification` is what bumps `entry.lastActivityAt`.
-    const caps = resolveTurnLiveness(dispatchCfg)
-    const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
-      this.hasPendingApprovalFor(entry.sessionId)
-    )
-    const timeoutPromise: Promise<Raced> = watchdog.promise
-    const abortPromise: Promise<Raced> = signal
-      ? signal.aborted
-        ? Promise.resolve({ kind: 'abort' })
+      const reportToolDone = new Promise<void>((resolve) => {
+        entry.reportToolDone = resolve
+      })
+      const turnPromise: Promise<Raced> = this.driveCodexTurn(entry, prompt as string).then(
+        (outcome): Raced =>
+          outcome.kind === 'ok'
+            ? { kind: 'ok', outcome }
+            : { kind: 'err', message: outcome.message }
+      )
+      // Turn liveness: the TARGET engine's two configured caps, unlimited unless
+      // the user set them (ADR-033's 2026-09-18 amendment).
+      // `handleCodexTargetNotification` is what bumps `entry.lastActivityAt`.
+      const caps = resolveTurnLiveness(dispatchCfg)
+      const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
+        this.hasPendingApprovalFor(entry.sessionId)
+      )
+      const timeoutPromise: Promise<Raced> = watchdog.promise
+      const abortPromise: Promise<Raced> = signal
+        ? signal.aborted
+          ? Promise.resolve({ kind: 'abort' })
+          : new Promise((resolve) => {
+              abortListener = (): void => resolve({ kind: 'abort' })
+              signal.addEventListener('abort', abortListener, { once: true })
+            })
+        : new Promise(() => {})
+      const stopPromise: Promise<Raced> = stopController.signal.aborted
+        ? Promise.resolve({ kind: 'stop' })
         : new Promise((resolve) => {
-            abortListener = (): void => resolve({ kind: 'abort' })
-            signal.addEventListener('abort', abortListener, { once: true })
+            stopController.signal.addEventListener('abort', () => resolve({ kind: 'stop' }), {
+              once: true
+            })
           })
-      : new Promise(() => {})
-    const stopPromise: Promise<Raced> = stopController.signal.aborted
-      ? Promise.resolve({ kind: 'stop' })
-      : new Promise((resolve) => {
-          stopController.signal.addEventListener('abort', () => resolve({ kind: 'stop' }), {
-            once: true
-          })
-        })
 
-    let endState: DispatchTargetState = 'idle'
-    try {
-      const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise, stopPromise])
+      // The agent handed its report back (ADR-105 §3): the run is over, the turn is to end.
+      const reportPromise: Promise<Raced> = ctx.run.reported.then((): Raced => ({ kind: 'report' }))
 
-      if (winner.kind === 'timeout' || winner.kind === 'abort' || winner.kind === 'stop') {
-        // FIRST and synchronously, before any RPC leaves: no approval request
-        // from this turn can then race ahead of the flag.
-        entry.draining = true
-        await this.interruptCodexTurn(entry)
-        const usage = this.accountCodexTurn(entry, ctx)
-        if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
-        const text =
-          winner.kind === 'timeout'
-            ? turnTimeoutText(winner.reason, caps, CODEX_TIMEOUT_AFTERMATH)
-            : winner.kind === 'stop'
-              ? 'Dispatch stopped by user.'
-              : 'Dispatch cancelled.'
-        const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
-        emitDispatchNotification(ctx, entry.sessionId ?? '', status, text)
-        // Same row-vs-spend split as the pi direction: a 'stopped' turn gets no
-        // usage ROW (ADR-033 M4-B), but whatever it spent before the stop is
-        // still folded into the cap and the caller's breakdown above.
-        if (status === 'failed') {
+      let endState: DispatchTargetState = 'idle'
+      try {
+        const raced = await Promise.race([
+          turnPromise,
+          timeoutPromise,
+          abortPromise,
+          stopPromise,
+          reportPromise
+        ])
+        let winner: Exclude<Raced, { kind: 'report' }>
+        if (raced.kind === 'report') {
+          // Let the tool result reach the agent (an interrupt first would cancel the call
+          // itself), then end the turn: the report is the result, whatever it would say next.
+          // A turn that ended by itself meanwhile needs no interrupt (and its own outcome stands).
+          const how = await this.untilReportToolDone(reportToolDone, turnPromise)
+          let ended: Raced | undefined
+          if (how === 'turn') ended = await turnPromise
+          else {
+            entry.draining = true
+            await this.interruptCodexTurn(entry)
+          }
+          winner =
+            ended?.kind === 'ok'
+              ? ended
+              : {
+                  kind: 'ok',
+                  outcome: {
+                    kind: 'ok',
+                    text: entry.lastAgentText || '(the dispatched agent returned no text)',
+                    durationMs: Math.max(0, Date.now() - entry.turnStartedAtMs)
+                  }
+                }
+        } else winner = raced
+
+        if (winner.kind === 'timeout' || winner.kind === 'abort' || winner.kind === 'stop') {
+          // FIRST and synchronously, before any RPC leaves: no approval request
+          // from this turn can then race ahead of the flag.
+          entry.draining = true
+          await this.interruptCodexTurn(entry)
+          const usage = this.accountCodexTurn(entry, ctx)
+          if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
+          const text =
+            winner.kind === 'timeout'
+              ? turnTimeoutText(winner.reason, caps, CODEX_TIMEOUT_AFTERMATH)
+              : winner.kind === 'stop'
+                ? 'Dispatch stopped by user.'
+                : 'Dispatch cancelled.'
+          const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
+          ctx.run.timedOut = winner.kind === 'timeout'
+          emitDispatchNotification(ctx, entry.sessionId ?? '', status, text)
+          // Same row-vs-spend split as the pi direction: a 'stopped' turn gets no
+          // usage ROW (ADR-033 M4-B), but whatever it spent before the stop is
+          // still folded into the cap and the caller's breakdown above.
+          if (status === 'failed') {
+            this.safeRecordUsage({
+              ts: this.now(),
+              fromRoutingId: ctx.fromRoutingId,
+              targetEngine: 'codex',
+              targetModel: model,
+              targetSessionId: entry.sessionId,
+              toolUseId: ctx.toolUseId ?? null,
+              ...(usage.tokens ? { tokens: usage.tokens } : {}),
+              account: entry.account,
+              // codexTurnCostUsd is OUR table's equivalent, not a charge
+              // (ADR-066: a ChatGPT-subscription charge is unknowable here),
+              // so the ledger derives the API cost from the split above.
+              engineCostIsEquivalent: true
+            })
+          }
+          return errorResult(text, entry.sessionId ?? '')
+        }
+
+        if (winner.kind === 'err') {
+          endState = 'failed'
+          // The thread is NOT torn down: a failed turn (a refused `turn/start`, a
+          // `turn/completed` carrying an error) leaves the app-server and the
+          // thread alive, and a genuinely dead process self-diagnoses on the next
+          // continuation (`CodexAppServerClient.request` rejects `not-ready`).
+          if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
+          const usage = this.accountCodexTurn(entry, ctx)
+          emitDispatchNotification(
+            ctx,
+            entry.sessionId ?? '',
+            'failed',
+            `Dispatched turn failed: ${winner.message}`
+          )
           this.safeRecordUsage({
             ts: this.now(),
             fromRoutingId: ctx.fromRoutingId,
@@ -6732,24 +7583,29 @@ export class CrossEngineDispatcher {
             // so the ledger derives the API cost from the split above.
             engineCostIsEquivalent: true
           })
+          return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId ?? '')
         }
-        return errorResult(text, entry.sessionId ?? '')
-      }
 
-      if (winner.kind === 'err') {
-        endState = 'failed'
-        // The thread is NOT torn down: a failed turn (a refused `turn/start`, a
-        // `turn/completed` carrying an error) leaves the app-server and the
-        // thread alive, and a genuinely dead process self-diagnoses on the next
-        // continuation (`CodexAppServerClient.request` rejects `not-ready`).
-        if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
+        // ── Success ────────────────────────────────────────────────────────
+        const { outcome } = winner
+        const maxCostUsd = dispatchCfg?.maxCostUsd
+        const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
         const usage = this.accountCodexTurn(entry, ctx)
-        emitDispatchNotification(
-          ctx,
-          entry.sessionId ?? '',
-          'failed',
-          `Dispatched turn failed: ${winner.message}`
-        )
+        let outText = outcome.text
+        if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
+          outText +=
+            '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
+        }
+
+        const done = this.finishTurn(ctx, 'codex', model, entry, entry.sessionId ?? '', {
+          finalText: outcome.text,
+          outText,
+          usage: {
+            totalTokens: usage.totalTokens ?? 0,
+            toolUses: entry.turnToolUseIds.size,
+            durationMs: outcome.durationMs
+          }
+        })
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
@@ -6764,48 +7620,28 @@ export class CrossEngineDispatcher {
           // so the ledger derives the API cost from the split above.
           engineCostIsEquivalent: true
         })
-        return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId ?? '')
+        return done
+      } finally {
+        if (ctx.toolUseId) this.sealCodexTargetItems(entry, ctx.toolUseId)
+        entry.reportToolDone = null
+        entry.busy = false
+        this.ledgerTurnState(entry, endState)
+        clearInterval(heartbeat)
+        watchdog.dispose()
+        if (signal && abortListener) signal.removeEventListener('abort', abortListener)
       }
-
-      // ── Success ────────────────────────────────────────────────────────
-      const { outcome } = winner
-      const maxCostUsd = dispatchCfg?.maxCostUsd
-      const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
-      const usage = this.accountCodexTurn(entry, ctx)
-      let outText = outcome.text
-      if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
-        outText +=
-          '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
-      }
-
-      emitDispatchNotification(ctx, entry.sessionId ?? '', 'completed', outcome.text, {
-        totalTokens: usage.totalTokens ?? 0,
-        toolUses: entry.turnToolUseIds.size,
-        durationMs: outcome.durationMs
-      })
-      this.safeRecordUsage({
-        ts: this.now(),
-        fromRoutingId: ctx.fromRoutingId,
-        targetEngine: 'codex',
-        targetModel: model,
-        targetSessionId: entry.sessionId,
-        toolUseId: ctx.toolUseId ?? null,
-        ...(usage.tokens ? { tokens: usage.tokens } : {}),
-        account: entry.account,
-        // codexTurnCostUsd is OUR table's equivalent, not a charge
-        // (ADR-066: a ChatGPT-subscription charge is unknowable here),
-        // so the ledger derives the API cost from the split above.
-        engineCostIsEquivalent: true
-      })
-      return { text: outText, sessionId: entry.sessionId ?? '' }
-    } finally {
-      if (ctx.toolUseId) this.sealCodexTargetItems(entry, ctx.toolUseId)
-      entry.busy = false
-      this.ledgerTurnState(entry, endState)
-      clearInterval(heartbeat)
-      watchdog.dispose()
-      if (signal && abortListener) signal.removeEventListener('abort', abortListener)
     }
+    return this.runWithNudges(
+      ctx,
+      {
+        sessionId: () => entry.sessionId ?? '',
+        engine: 'codex',
+        toolName: HAND_BACK_TOOL,
+        cumulativeCostUsd: () => entry.cumulativeCostUsd
+      },
+      this.taskText(entry, ctx, req.prompt, HAND_BACK_TOOL),
+      turn
+    )
   }
 
   /** Bounded wait — `promise`, or `undefined` once the grace period elapses. */
@@ -6969,9 +7805,9 @@ export class CrossEngineDispatcher {
    * mode must still be reviewed by someone, which is precisely what
    * `auto_review` is.
    *
-   * NO `dynamicTools`: the target has no `dispatch_agent` (no recursion) and no
-   * hosted tools. See `CODEX_TARGET_SERVER_METHODS` for the transport-level
-   * half of the same scrub.
+   * `dynamicTools`: only `hand_back` (ADR-105 §3) — the target has no `dispatch_agent`
+   * (no recursion) and no other hosted tools. See `CODEX_TARGET_SERVER_METHODS` for the
+   * transport-level half of the same scrub.
    */
   private async createCodexTarget(
     ctx: RunContext,
@@ -6987,10 +7823,13 @@ export class CrossEngineDispatcher {
     const cwd = resume?.cwd ?? ctx.cwd
     const entry: CodexTargetEntry = {
       kind: 'codex',
+      reportToolDone: null,
       sessionId: null,
       // Set once the thread exists (a new target's row needs its id).
       ledgerId: resume?.id ?? '',
       released: false,
+      // A thread keeps the tools it was started with: a resumed row has the tool only if it was started with it.
+      handBack: this.requireHandBack && (resume ? resume.handBack : true),
       fromRoutingId: ctx.fromRoutingId,
       cwd,
       // Filled in below, once the attach resolves. The notification and gate
@@ -7113,7 +7952,10 @@ export class CrossEngineDispatcher {
         sandbox: policy.sandbox,
         approvalsReviewer: policy.approvalsReviewer,
         allowProviderModelFallback: false,
-        historyMode: 'paginated'
+        historyMode: 'paginated',
+        // The target's one tool (ADR-105 §3): the report that ends its run. A thread keeps
+        // the tools it is started with, so only threads started with this have it.
+        ...(entry.handBack ? { dynamicTools: [codexHandBackSpec()] } : {})
       })
       assertCodexProvider(response.modelProvider)
       if (response.model !== model) throw new Error('Codex silently changed the requested model')
@@ -7129,7 +7971,8 @@ export class CrossEngineDispatcher {
         model: entry.model,
         accountKey: entry.account.accountKey,
         codexAccountId: accountId,
-        labels
+        labels,
+        handBack: this.requireHandBack
       }).id
       // Everything stamped with this thread id is this target's from here on,
       // and nothing else is (ADR-069 §2).
@@ -7379,6 +8222,15 @@ export class CrossEngineDispatcher {
     if (fingerprint !== undefined) entry.completedItems.set(id, fingerprint)
     // The turn's result text is the LAST completed `agentMessage`.
     if (item.type === 'agentMessage' && completed) entry.lastAgentText = item.text
+    // The report's own call has completed: the agent has its answer, the turn may end. Only the
+    // call that was ACCEPTED (an earlier, refused one completing says nothing).
+    if (
+      item.type === 'dynamicToolCall' &&
+      completed &&
+      item.tool === HAND_BACK_TOOL &&
+      item.id === entry.ctx.run.report?.callId
+    )
+      entry.reportToolDone?.()
     const timestamp = entry.itemTimestamps.get(id) ?? Date.now()
     entry.itemTimestamps.set(id, timestamp)
     const streamable =
@@ -7606,6 +8458,40 @@ export class CrossEngineDispatcher {
   }
 
   /**
+   * `item/tool/call` on a Codex target: the only tool it was started with is `hand_back`.
+   * The same guards as `CodexSession.hostedToolCall`: this target's own thread (a native
+   * child thread it spawned is refused), its live turn, a call id, no namespace. Anything
+   * else keeps getting the `-32601` the host answered before the target had a tool.
+   */
+  private async handBackFromCodex(
+    entry: CodexTargetEntry,
+    value: unknown,
+    context: { id: unknown; signal: AbortSignal }
+  ): Promise<unknown> {
+    if (
+      !entry.handBack ||
+      entry.draining ||
+      context.signal.aborted ||
+      !entry.sessionId ||
+      !isRecord(value) ||
+      value.tool !== HAND_BACK_TOOL ||
+      value.namespace != null
+    )
+      throw new CodexMethodNotFound()
+    if (
+      value.threadId !== entry.sessionId ||
+      typeof value.turnId !== 'string' ||
+      value.turnId !== entry.turnId ||
+      entry.endedTurns.has(value.turnId) ||
+      typeof value.callId !== 'string'
+    )
+      throw new Error('Codex hand_back call has no live owning dispatch turn')
+    const args = isRecord(value.arguments) ? value.arguments : {}
+    const answer = this.receiveHandBack(entry, args.report, value.callId)
+    return { contentItems: [{ type: 'inputText', text: answer.text }], success: !answer.isError }
+  }
+
+  /**
    * Answer one native approval request on behalf of a target that has no human
    * of its own — the Codex equivalent of `gatePiTargetToolCall`, and a
    * deliberately narrowed copy of `CodexSession.requestApproval`'s gating half.
@@ -7650,6 +8536,7 @@ export class CrossEngineDispatcher {
     value: unknown,
     context: { id: unknown; signal: AbortSignal }
   ): Promise<unknown> {
+    if (method === 'item/tool/call') return this.handBackFromCodex(entry, value, context)
     if (
       !CODEX_TARGET_SERVER_METHODS.includes(method as (typeof CODEX_TARGET_SERVER_METHODS)[number])
     )
@@ -7825,5 +8712,6 @@ export const crossEngineDispatcher = new CrossEngineDispatcher({
   serverManager: opencodeServerManager,
   makeClient: (conn) => new OpencodeClient(conn),
   loadEngineConfig,
-  codexVaultAccounts: true
+  codexVaultAccounts: true,
+  requireHandBack: true
 })

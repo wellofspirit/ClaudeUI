@@ -41,8 +41,11 @@ export type { DispatchTargetRow, DispatchTargetState, DispatchTargetPatch }
 /** What the dispatcher supplies when it creates a target; the store adds the id and the clocks. */
 export type NewDispatchTarget = Omit<
   DispatchTargetRow,
-  'id' | 'state' | 'createdAt' | 'lastActiveAt'
->
+  'id' | 'state' | 'createdAt' | 'lastActiveAt' | 'handBack'
+> & {
+  /** The target is started with the `hand_back` tool (ADR-105 §3); false when absent. */
+  handBack?: boolean
+}
 
 /**
  * The ledger as the dispatcher uses it — injectable (`DispatcherDeps.ledger`) so the
@@ -132,6 +135,7 @@ export const dispatchLedger: DispatchLedgerStore = {
       const id = mintRef()
       const row: DispatchTargetRow = {
         ...input,
+        handBack: input.handBack ?? false,
         id,
         state: 'running',
         createdAt: now,
