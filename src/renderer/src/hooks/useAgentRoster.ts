@@ -93,10 +93,10 @@ export interface AgentRosterRow {
   /** 1 unless the agent was resumed (ADR-073). */
   runIndex: number
   /**
-   * How many agents below this one (at any depth) are running. Shells do not
-   * count, as for the session dot. Absent when none are. An agent that is not
-   * running itself but has these is "subagents only": its own run ended while
-   * the agents it launched work on. See {@link withRunningDescendants}.
+   * How many rows below this one (at any depth) are running: its nested agents
+   * and the background shells under it (§10). Absent when none are. An agent that
+   * is not running itself but has these is finished yet alive in effect: its own
+   * run ended while what it launched works on. See {@link withRunningDescendants}.
    */
   runningDescendants?: number
   /** A shell's start (ms epoch, from its lifecycle record): what a running shell's clock counts from. */
@@ -565,7 +565,10 @@ function unifyRows(
 }
 
 /**
- * Stamp each agent with the running agents beneath it (`runningDescendants`).
+ * Stamp each row with the running rows beneath it (`runningDescendants`): agents
+ * at any depth and background shells (which nest under their owner, §10). Run on
+ * the unified list, so a shell counts for every ancestor of the agent that launched
+ * it.
  *
  * This is the roster's version of the session dot's `subagents` state, and the
  * signal behind it is the engines' own lifecycle, not a guess: an agent row stops
@@ -577,7 +580,7 @@ function unifyRows(
  * protocol-cc 04 §4.5) and pi's host-run subagents (a grandchild outlives the
  * child's run). opencode and Codex emit no records, so they never get here.
  */
-function withRunningDescendants(agents: AgentRosterRow[]): AgentRosterRow[] {
+function withRunningDescendants(agents: readonly AgentRosterRow[]): AgentRosterRow[] {
   const byId = new Map(agents.map((a) => [a.toolUseId, a]))
   const counts = new Map<string, number>()
   for (const agent of agents) {
@@ -592,7 +595,7 @@ function withRunningDescendants(agents: AgentRosterRow[]): AgentRosterRow[] {
       counts.set(parent, (counts.get(parent) ?? 0) + 1)
     }
   }
-  if (counts.size === 0) return agents
+  if (counts.size === 0) return [...agents]
   return agents.map((a) =>
     counts.has(a.toolUseId) ? { ...a, runningDescendants: counts.get(a.toolUseId) } : a
   )
@@ -703,12 +706,17 @@ export function useAgentRoster(): AgentRoster {
       engineId: engineId ?? 'claude',
       parentModel
     }
-    const agents = withRunningDescendants(settleOrphans(tree, (entry) => toRow(entry, opts), opts))
+    const settled = settleOrphans(tree, (entry) => toRow(entry, opts), opts)
     const shellRows = shells.map((entry) => toRow({ ...entry, depth: 0 }, opts))
-    const rows = unifyRows(
-      agents,
+    const unified = unifyRows(
+      settled,
       shellRows.map((row, i) => ({ row, owner: shells[i].ownerToolUseId ?? null }))
     )
+    // Counted over the unified list so a running shell counts for the agents above
+    // it, then stamped back on both views of the agents (`agents` and `rows`).
+    const rows = withRunningDescendants(unified)
+    const stamped = new Map(rows.map((r) => [r.toolUseId, r]))
+    const agents = settled.map((a) => stamped.get(a.toolUseId) ?? a)
     const runningAgentCount = agents.filter((r) => r.isRunning).length
     const runningShellCount = shellRows.filter((r) => r.isRunning).length
     return {

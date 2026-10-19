@@ -410,7 +410,7 @@ describe('useAgentRoster', () => {
       expect(seen?.agents.map((r) => r.runningDescendants)).toEqual([undefined, undefined])
     })
 
-    it('does not count a running shell below a finished agent', async () => {
+    it('counts a running shell below a finished agent, for it and every ancestor', async () => {
       setSession({
         messages: nestedMessages(),
         subagentMessages: nestedBuckets(),
@@ -422,7 +422,13 @@ describe('useAgentRoster', () => {
       })
       await renderProbe()
       expect(seen?.shells.map((r) => r.isRunning)).toEqual([true])
-      expect(seen?.agents.map((r) => r.runningDescendants)).toEqual([undefined, undefined])
+      // The shell was launched by A (B is a sibling of it, not an ancestor).
+      expect(seen?.agents.map((r) => r.runningDescendants)).toEqual([1, undefined])
+      expect(seen?.rows.map((r) => [r.toolUseId, r.runningDescendants])).toEqual([
+        [A, 1],
+        [B, undefined],
+        [A_BG_BASH, undefined]
+      ])
     })
 
     it('counts every depth, and each ancestor once', async () => {

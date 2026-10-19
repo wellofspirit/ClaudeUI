@@ -13,8 +13,8 @@
  * finished agent from someone who had forgotten they set it.
  *
  * A nested row sits under the agent that spawned it (ADR-073 §7). Under
- * Running, a finished ancestor of a running (or open) row is kept as dimmed
- * context, so an indented row never floats without its parent; context rows are
+ * Running, a finished ancestor of a running (or open) row is kept as context
+ * (drawn like any other row: nothing is dimmed for being finished), so an indented row never floats without its parent; context rows are
  * not counted. This is what keeps a shell reachable after the agent that
  * launched it has finished: the shell is running, so the agent stays. Every
  * listed shell is running or open, so the filter needs no rule of its own for

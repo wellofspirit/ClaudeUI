@@ -227,7 +227,7 @@ describe('AgentRow', () => {
       expect(name().className).not.toContain('text-model-tier')
     })
 
-    it('leaves the dimming of a finished context row where it was', async () => {
+    it('draws a finished context row, and a failed one, like any other row: no dimming', async () => {
       render(
         React.createElement(AgentRow, {
           row: row({ toolUseId: 'a', model: 'claude-opus-5-5' }),
@@ -236,8 +236,11 @@ describe('AgentRow', () => {
           isContext: true
         })
       )
-      expect(screen.getByTestId('AgentRow').className).toContain('opacity-55')
+      expect(screen.getByTestId('AgentRow').className).not.toMatch(/opacity/)
       expect(name().className).toContain('text-model-tier-high')
+      cleanup()
+      await renderRow(row({ toolUseId: 'b', isError: true }))
+      expect(screen.getByTestId('AgentRow').className).not.toMatch(/opacity/)
     })
   })
 
@@ -254,18 +257,19 @@ describe('AgentRow', () => {
       expect(dot().style.getPropertyValue('--dot-phase')).toMatch(/^-\d(\.\d+)?s$/)
     })
 
-    it('ripples violet when its own run ended but agents it launched still work', async () => {
+    it('is steady green when its own run ended but something it launched still runs', async () => {
       await renderRow(row({ toolUseId: 'a', runningDescendants: 2 }))
-      expect(dot().getAttribute('data-state')).toBe('subagents')
+      expect(dot().getAttribute('data-state')).toBe('idle')
       expect(dot().getAttribute('data-status')).toBe('subagents')
-      expect(dot().classList.contains('status-dot--ripple')).toBe(true)
-      expect(dot().title).toBe('2 subagents running')
+      expect(dot().classList.contains('status-dot--ripple')).toBe(false)
+      expect(dot().title).toBe('Done · 2 still running below')
     })
 
-    it('is steady green when done, steady red when failed', async () => {
+    it('is steady grey when done, steady red when failed', async () => {
       await renderRow(row({ toolUseId: 'a' }))
-      expect(dot().getAttribute('data-state')).toBe('idle')
+      expect(dot().getAttribute('data-state')).toBe('inactive')
       expect(dot().getAttribute('data-status')).toBe('done')
+      expect(dot().title).toBe('Done')
       expect(dot().classList.contains('status-dot--ripple')).toBe(false)
       cleanup()
       await renderRow(row({ toolUseId: 'b', isError: true }))

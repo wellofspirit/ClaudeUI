@@ -8,7 +8,8 @@
  * A nested row is indented 14px per level under the agent that spawned it (a
  * shell: the agent that launched it), with a file-tree guide (ADR-073 §7). A
  * context row is a finished ancestor the Running filter keeps so a running row
- * never floats without its parent: dimmed, no Stop, still opens on click.
+ * never floats without its parent: no Stop, still opens on click. No row is dimmed
+ * for being finished or for being context: only the dot says how a row stands.
  *
  * One line at every width (§10). Left to right: guide · status dot · type
  * column · label · resumed chip · spacer · Stop (running only) · metrics. The
@@ -96,10 +97,13 @@ export type RowStatus = 'running' | 'subagents' | 'failed' | 'stopped' | 'loaded
 /**
  * A row's dot is the session dot's (`status-dot`, its ripple and colours), mapped:
  * the agent's own work in progress ripples green (`running`); its own run ended
- * but agents it launched still work, violet (`subagents`, from
- * `runningDescendants`, shells not counted); done is steady green (`idle`);
- * failed steady red; stopped by the user and loaded from history steady muted
- * (`inactive`). There is no yellow: a stop is not a warning.
+ * but something it launched still runs (an agent, at any depth, or a background
+ * shell: `runningDescendants`), steady green (`subagents`, drawn as the dot's
+ * `idle`): it is alive in effect, and the title says how many; done, stopped by
+ * the user and loaded from history steady muted (`inactive`; the title and
+ * `data-status` tell them apart); failed steady red. A subagent is alive or dead,
+ * never "idle but connected" like a session, so steady green is reserved for
+ * "finished, but not yet over". There is no yellow: a stop is not a warning.
  *
  * A failed or stopped agent stays failed or stopped whatever runs below it:
  * how it ended is the more useful thing to read.
@@ -120,11 +124,11 @@ export function rowStatus(
 
 const DOT_STATE: Record<RowStatus, SessionDotState> = {
   running: 'running',
-  subagents: 'subagents',
+  subagents: 'idle',
   failed: 'failed',
   stopped: 'inactive',
   loaded: 'inactive',
-  done: 'idle'
+  done: 'inactive'
 }
 
 const DOT_LABEL: Partial<Record<RowStatus, string>> = {
@@ -136,6 +140,10 @@ const DOT_LABEL: Partial<Record<RowStatus, string>> = {
 
 function RowStatusDot({ row }: { row: AgentRosterRow }): React.JSX.Element {
   const status = rowStatus(row)
+  const below = row.runningDescendants ?? 0
+  // The dot's own `idle` words ("Idle") say nothing about an agent: it is done, and
+  // this is how much still runs below it.
+  const label = status === 'subagents' ? `Done · ${below} still running below` : DOT_LABEL[status]
   return (
     // An 8px box, as before, around the 6px dot: its ripple ring is absolute, so the
     // box is what the row's columns and the tree guides see.
@@ -144,8 +152,8 @@ function RowStatusDot({ row }: { row: AgentRosterRow }): React.JSX.Element {
         testid="AgentRow.status"
         state={DOT_STATE[status]}
         status={status}
-        runningSubagents={row.runningDescendants ?? 0}
-        label={DOT_LABEL[status]}
+        runningSubagents={below}
+        label={label}
       />
     </span>
   )
@@ -245,7 +253,7 @@ export function AgentRow({
       style={row.depth > 0 ? { paddingLeft: 10 + INDENT_PX * row.depth } : undefined}
       className={`relative flex items-center gap-1.5 px-2.5 py-1 leading-4 cursor-default border-l-2 transition-colors ${
         selected ? 'bg-bg-input border-accent' : 'border-transparent hover:bg-bg-hover'
-      } ${isContext ? 'opacity-55' : !row.isRunning && row.isError ? 'opacity-80' : ''}`}
+      }`}
     >
       {row.depth > 0 && guide && <TreeGuide depth={row.depth} guide={guide} />}
       <RowStatusDot row={row} />
