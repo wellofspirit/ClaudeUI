@@ -29,3 +29,6 @@ bin/
 
 /review.md
 .claude/worktrees/
+# Private working notes (wellofspirit/ClaudeUI-notes, cloned here): backlog,
+# housekeeping, handoffs, specs, research. Never part of this repo or a build.
+/.notes/

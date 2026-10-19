@@ -2577,7 +2577,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
    * Slice 1a: a message from another session or an agent as a cli.js PEER turn.
    * The model reads "Another Claude session sent a message … not typed by your
    * user" and cli.js's own auto-mode classifier files it as non-user (live wire
-   * evidence: docs/research/session-tools/V1-probes.md §2). `origin` alone does
+   * evidence: docs/protocol-cc/15-peer-sessions.md §15.2.1, §15.2.9). `origin` alone does
    * nothing on stdin — cli.js decides peer-ness from the content envelope — so
    * the content is the `<cross-session-message>` envelope and `origin` rides
    * beside it for the name and `fromMode`.
@@ -2700,7 +2700,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
   /**
    * `apply_flag_settings {crossSessionInbound:'accept'}`: cli.js stops holding
    * peer messages whose permission class differs from this session's, and
-   * releases the ones it holds (live: V1-probes.md §2.3). It lasts as long as
+   * releases the ones it holds (live: docs/protocol-cc/15-peer-sessions.md §15.2.5). It lasts as long as
    * this cli.js process; a settings file may still tighten it.
    */
   async allowPeerMessages(): Promise<{ success: boolean; error?: string }> {

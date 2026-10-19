@@ -55,8 +55,13 @@ silently.
 per-slice review → overall review of the branch → push + PR → CI → Fable exit review → the owner merges.
 CI runs on pull requests only (`.github/workflows/ci.yml`), so a change that skips the PR skips CI.
 
-**Handoff docs.** Long arcs keep an untracked `docs/<arc>-handoff.md` with a RESUME HERE block, current
-after every slice; every instruction to an agent goes into it, never only into a message.
+**Handoff docs.** Long arcs keep a handoff doc with a RESUME HERE block, current after every slice; every
+instruction to an agent goes into it, never only into a message. It lives outside this repository's history:
+in the maintainer's private notes clone, `.notes/handoffs/<arc>.md` (with specs in `.notes/specs/`, research
+in `.notes/research/<arc>/`, open items in `.notes/backlog.md` and `.notes/housekeeping.md`), which is
+gitignored and excluded from ESLint and electron-builder; without that clone, an untracked
+`docs/<arc>-handoff.md`. When the arc merges, what is still open moves into the backlog or housekeeping list
+and the handoff is deleted. Nothing is copied from the notes into this repository unscrubbed.
 
 ### This repository's gates
 
