@@ -1419,6 +1419,80 @@ describe('TaskCard — failure reason', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// A dispatch child's tool cards use the TARGET engine's tool map
+// ---------------------------------------------------------------------------
+
+describe("TaskCard - a dispatch child's tool cards use the target engine's tool map", () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const childRead = (
+    parentToolUseId: string,
+    toolName: string,
+    toolInput: Record<string, unknown>
+  ): void =>
+    seed.subagentMessage(ROUTE, parentToolUseId, {
+      id: `m-${parentToolUseId}`,
+      role: 'assistant',
+      content: [{ type: 'tool_use', toolUseId: 'child-read', toolName, toolInput }],
+      timestamp: Date.now()
+    })
+
+  // The child's cards only: the TaskCard header is not a ToolCard.
+  const childHeaders = (): string[] =>
+    screen.getAllByTestId('ToolCard.expand').map((el) => el.textContent ?? '')
+
+  it("a pi dispatch under the Claude session renders the child's `read` as a Read card", () => {
+    const block = makeTaskBlock({
+      toolUseId: 'toolu_dispatch_pi',
+      toolName: 'mcp__claude-ui-collab__dispatch_agent',
+      toolInput: { engine: 'pi', prompt: 'look' }
+    })
+    const view = {
+      kind: 'task' as const,
+      description: 'Dispatch: pi',
+      prompt: 'look',
+      dispatch: { engine: 'pi' }
+    }
+    childRead('toolu_dispatch_pi', 'read', { path: '/d/repo/a.ts' })
+    render(<TaskCard block={block} view={view} />)
+
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    const headers = childHeaders()
+    expect(headers).toHaveLength(1)
+    expect(headers[0]).toContain('Read')
+    expect(headers[0]).not.toContain('{"path"')
+  })
+
+  it("a native subagent (no dispatch) keeps the session's map: Claude `Read` as before", () => {
+    const block = makeTaskBlock({ toolUseId: 'toolu_native_claude' })
+    childRead('toolu_native_claude', 'Read', { file_path: '/d/repo/a.ts' })
+    render(<TaskCard block={block} view={defaultTaskView} />)
+
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    const headers = childHeaders()
+    expect(headers).toHaveLength(1)
+    expect(headers[0]).toContain('Read')
+    expect(headers[0]).toContain('a.ts')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The header word: a dispatch is an "X-Agent", any other task a "Task"
+// ---------------------------------------------------------------------------
+
 describe('TaskCard - header label', () => {
   let app: TestApp
 

@@ -12,7 +12,7 @@ import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { useSessionAgentTypes } from '../../hooks/useAgentRoster'
 import { ResumedBadge } from '../agents/ResumedBadge'
 import { MarkdownRenderer } from './MarkdownRenderer'
-import { SubagentOutputBody } from './SubagentOutputBody'
+import { SubagentOutputBody, dispatchChildEngine } from './SubagentOutputBody'
 import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 import { ApprovalButtons } from './ApprovalButtons'
 import { PermissionDenialChip, PermissionDenialStrip } from './tool-registry/PermissionDenial'
@@ -822,6 +822,7 @@ export function TaskCard({
                   isBackground={isBackground}
                   elapsedLabel={elapsed}
                   size="sm"
+                  engineId={dispatchChildEngine(view)}
                 />
               </div>
             ) : resultBody && !isBackground ? (

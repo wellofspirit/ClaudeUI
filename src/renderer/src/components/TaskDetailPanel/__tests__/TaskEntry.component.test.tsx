@@ -224,6 +224,103 @@ describe('TaskEntry — a nested agent', () => {
 })
 
 /**
+ * A dispatch's child (and anything nested in it) speaks the TARGET engine's tool
+ * names; the panel reads them through that engine's map, not the session's.
+ */
+describe("TaskEntry - a dispatch child's tool cards use the target engine's tool map", () => {
+  let app: TestApp
+  const DISPATCH = 'call_dispatch_pi'
+  const NESTED = 'call_pi_nested_agent'
+
+  const readUse = (id: string): ChatMessage => ({
+    id: `m-${id}`,
+    role: 'assistant',
+    content: [
+      {
+        type: 'tool_use',
+        toolUseId: id,
+        toolName: 'read',
+        toolInput: { path: '/d/repo/a.ts' }
+      } as ToolUseBlock
+    ],
+    timestamp: 0
+  })
+
+  const nestedAgent: ChatMessage = {
+    id: 'm-nested',
+    role: 'assistant',
+    content: [
+      {
+        type: 'tool_use',
+        toolUseId: NESTED,
+        toolName: 'agent',
+        toolInput: { description: 'inner', prompt: 'inner' }
+      } as ToolUseBlock
+    ],
+    timestamp: 0
+  }
+
+  const dispatchMsg: ChatMessage = {
+    id: 'assistant-d',
+    role: 'assistant',
+    content: [
+      {
+        type: 'tool_use',
+        toolUseId: DISPATCH,
+        toolName: 'mcp__claude-ui-collab__dispatch_agent',
+        toolInput: { engine: 'pi', prompt: 'look' }
+      } as ToolUseBlock
+    ],
+    timestamp: 0
+  }
+
+  const stage = (nested: boolean): void => {
+    const buckets: Record<string, ChatMessage[]> = nested
+      ? { [DISPATCH]: [nestedAgent], [NESTED]: [readUse('inner-read')] }
+      : { [DISPATCH]: [readUse('child-read')] }
+    useSessionStore.setState((state) => ({
+      activeSessionId: ROUTE,
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          messages: [dispatchMsg],
+          subagentMessages: buckets
+        }
+      }
+    }))
+    mirrorStoreIntoReplica()
+  }
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  it("renders the pi child's `read` as a Read card", () => {
+    stage(false)
+    render(<TaskEntry toolUseId={DISPATCH} />)
+    const header = screen.getByTestId('ToolCard.expand').textContent ?? ''
+    expect(header).toContain('Read')
+    expect(header).not.toContain('{"path"')
+  })
+
+  it("a task nested in that child inherits the child's engine", () => {
+    stage(true)
+    render(<TaskEntry toolUseId={NESTED} />)
+    const header = screen.getByTestId('ToolCard.expand').textContent ?? ''
+    expect(header).toContain('Read')
+    expect(header).not.toContain('{"path"')
+  })
+})
+
+/**
  * The detail panel's body must follow its content to the bottom. It used to pin
  * in a React effect on `[msgs, bashOutput, following]`, so growth that happens
  * AFTER the commit (a Bash card finishing its render, highlighting, a result

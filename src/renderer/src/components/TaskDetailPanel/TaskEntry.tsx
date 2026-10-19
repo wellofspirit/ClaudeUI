@@ -3,13 +3,14 @@ import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { useStickToBottom } from '../../hooks/useStickToBottom'
 import { MarkdownRenderer } from '../chat/MarkdownRenderer'
-import { SubagentOutputBody } from '../chat/SubagentOutputBody'
+import { SubagentOutputBody, dispatchChildEngine } from '../chat/SubagentOutputBody'
 import { TerminalView } from '../chat/TerminalView'
 import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
 import { deriveTaskState, latestNotification } from '../chat/task-state'
 import { findTaskBlocks } from './utils'
 import { taskElapsedLabel, useTicker } from '../chat/TaskCard'
 import type { ToolView } from '../../../../shared/tool-kinds'
+import type { EngineId } from '../../../../shared/types'
 
 type TaskView = Extract<ToolView, { kind: 'task' }>
 
@@ -42,6 +43,37 @@ function BashOutputPanel({
       <TerminalView text={output} maxHeight="none" />
     </div>
   )
+}
+
+/**
+ * The engine whose tool names fill `ownerToolUseId`'s transcript: a dispatch's
+ * target, else the engine of whoever spawned that owner (walked up the nesting).
+ * `fallback` is the active session's engine.
+ */
+function nestedCallEngine(
+  ownerToolUseId: string,
+  messages: Parameters<typeof findTaskBlocks>[0],
+  subagentMsgs: NonNullable<Parameters<typeof findTaskBlocks>[2]>,
+  fallback: EngineId,
+  depth = 0
+): EngineId {
+  if (depth > 8) return fallback
+  const {
+    taskBlock,
+    resultBlock,
+    ownerToolUseId: grand
+  } = findTaskBlocks(messages, ownerToolUseId, subagentMsgs)
+  if (!taskBlock) return fallback
+  const issuer = grand
+    ? nestedCallEngine(grand, messages, subagentMsgs, fallback, depth + 1)
+    : fallback
+  const view = engineToolMap(issuer).normalize(
+    'task',
+    taskBlock.toolInput || {},
+    resultBlock ?? undefined,
+    taskBlock.toolName
+  ) as TaskView
+  return dispatchChildEngine(view) ?? issuer
 }
 
 export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
@@ -91,19 +123,26 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const input = taskBlock.toolInput || {}
   const description = String(input.description || input.prompt || '')
   const hasSubagentOutput = msgs.length > 0
-  const isBash = engineToolMap(engineId).kindOf(taskBlock.toolName) === 'command'
+  // The engine that issued this task call: the session's, unless the call sits
+  // in a dispatch child's transcript (a nested entry), whose tool names are the
+  // child's engine's.
+  const callEngine = ownerToolUseId
+    ? nestedCallEngine(ownerToolUseId, messages, subagentMsgs, engineId)
+    : engineId
+  const isBash = engineToolMap(callEngine).kindOf(taskBlock.toolName) === 'command'
   // The engine's normalized view, with the result — the same reading TaskCard
   // and the roster use (pi decides background from the launch result), plus a
   // lifecycle record's own word.
-  const isBackground =
-    !!(
-      engineToolMap(engineId).normalize(
-        'task',
-        input,
-        resultBlock ?? undefined,
-        taskBlock.toolName
-      ) as TaskView
-    ).background || activeTasks[toolUseId]?.isBackgrounded === true
+  const taskView = engineToolMap(callEngine).normalize(
+    'task',
+    input,
+    resultBlock ?? undefined,
+    taskBlock.toolName
+  ) as TaskView
+  const isBackground = !!taskView.background || activeTasks[toolUseId]?.isBackgrounded === true
+  // The engine of THIS task's transcript: a dispatch's target, else the issuer's
+  // (a native subagent runs on the engine that spawned it).
+  const childEngine = dispatchChildEngine(taskView) ?? callEngine
   const progress = taskProgressMap[toolUseId]
   const hasResult = !!resultBlock
   const resultText =
@@ -270,6 +309,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
                   isBackground={isBackground}
                   elapsedLabel={elapsed}
                   size="md"
+                  engineId={childEngine}
                 />
               </div>
             ) : isBash && bashOutput ? (
