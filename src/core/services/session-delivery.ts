@@ -7,6 +7,8 @@
  *  - target busy → the engine's queue (it joins the running turn);
  *  - target idle, and the item is a `session-message` or carries `wake`, and the
  *    agent-turn budget has room → a turn starts on it;
+ *  - an X-Agent's result (`dispatch-result`, ADR-105 §3) wakes like a session message but
+ *    outside that budget: it has its own cap of wakes since the user last spoke;
  *  - target idle without wake / no live session object / engine process gone /
  *    budget spent / the engine could not take it → HELD in the `session_inbox`
  *    table, never lost.
@@ -21,12 +23,15 @@
  * tools (`session-tools.ts`), context pressure and the prompt path call it.
  */
 import type { ISession, NonUserItem } from '../providers/ISession'
+import { X_AGENT_KEY_PREFIX, wrapperSender } from '../../shared/session-message-wrapper'
+import { DISPATCH_WAKE_CAP } from '../providers/turn-origin-ledger'
 import type { SessionManager } from './session-manager'
 import {
   addInboxItem,
   heldInboxCount,
   heldInboxItems,
   markInboxDelivered,
+  markDispatchReportDelivered,
   type InboxItem
 } from './db'
 import { logger } from './logger'
@@ -34,7 +39,7 @@ import { emitEvent } from './sync-host'
 
 const LOG = 'SessionDelivery'
 
-/** Most undelivered items one target keeps. Past it, delivery is refused out loud. */
+/** Most undelivered items one target keeps. Past it, delivery is refused out loud (an X-Agent's result is never refused: see `hold`). */
 export const HELD_INBOX_CAP = 100
 /** Longest body kept or delivered; the rest is cut and says so. */
 export const ITEM_BODY_MAX = 20_000
@@ -42,7 +47,12 @@ const TRUNCATION_MARKER = '\n[... message truncated ...]'
 
 /** Why an item was held instead of delivered. */
 export type HeldWhy =
-  'idle-no-wake' | 'no-live-session' | 'engine-exited' | 'budget-exhausted' | 'engine-unavailable'
+  | 'idle-no-wake'
+  | 'no-live-session'
+  | 'engine-exited'
+  | 'budget-exhausted'
+  | 'dispatch-cap'
+  | 'engine-unavailable'
 
 export type DeliveryResult =
   | { result: 'delivered' }
@@ -113,7 +123,8 @@ export function deliver(
   item: NonUserItem
 ): Promise<DeliveryResult> {
   return serialized(target, () =>
-    deliverNow(manager, target, { ...item, text: cappedBody(item.text) })
+    // An X-Agent's result is always held and framed under its prefixed sender key.
+    deliverNow(manager, target, { ...item, from: wrapperSender(item), text: cappedBody(item.text) })
   )
 }
 
@@ -134,7 +145,19 @@ async function deliverNow(
     if (item.origin !== 'session-message' && !item.wake) {
       return hold(manager, target, item, 'idle-no-wake')
     }
-    if (ledger && !ledger.budgetLeft) {
+    if (item.origin === 'dispatch-result') {
+      // Its own cap, not the agent-turn budget: an X-Agent's result is the session's own
+      // work coming back. Past the cap it waits for the user's next prompt.
+      if (ledger && !ledger.dispatchWakesLeft) {
+        if (ledger.noteDispatchCapReached()) {
+          logger.warn(
+            LOG,
+            `dispatch-result cap (${DISPATCH_WAKE_CAP} wakes since the user last spoke) reached for ${target}: holding ${item.from.key}`
+          )
+        }
+        return hold(manager, target, item, 'dispatch-cap')
+      }
+    } else if (ledger && !ledger.budgetLeft) {
       if (ledger.noteBudgetExhausted()) {
         // The audited form (method `agent`) comes with the session tools.
         logger.warn(
@@ -146,8 +169,7 @@ async function deliverNow(
     }
     // Older held items lead: this item then joins the turn they start.
     if (hasHeld(session, target)) {
-      leadStarted = await flushNow(manager, target)
-      if (leadStarted) ledger?.agentTurnStarted()
+      leadStarted = await flushNow(manager, target, { countStart: true })
       // The flush stopped at a row the engine would not take: this item must not
       // overtake it.
       if (hasHeld(session, target)) return hold(manager, target, item, 'engine-unavailable')
@@ -158,7 +180,7 @@ async function deliverNow(
   if (outcome === 'unavailable') return hold(manager, target, item, 'engine-unavailable')
   ledger?.nonUserDelivered()
   if (outcome === 'started') {
-    ledger?.agentTurnStarted()
+    countStart(ledger, item.origin)
     return { result: 'delivered' }
   }
   return { result: leadStarted ? 'delivered' : 'queued' }
@@ -177,12 +199,35 @@ export function flushHeld(manager: SessionManager, routingId: string): Promise<b
   return serialized(routingId, () => flushNow(manager, routingId))
 }
 
-async function flushNow(manager: SessionManager, routingId: string): Promise<boolean> {
+/** A turn a non-user item started: an X-Agent's result counts against its own cap, the rest against the budget. */
+function countStart(ledger: ISession['originLedger'], origin: NonUserItem['origin']): void {
+  if (origin === 'dispatch-result') ledger?.dispatchWakeStarted()
+  else ledger?.agentTurnStarted()
+}
+
+interface FlushOptions {
+  /** Count a turn the flush starts (a delivery that leads with older items; not the user's own prompt). */
+  countStart?: boolean
+  /** Deliver only the rows of this origin, oldest first (the rest stay held, in order). */
+  only?: NonUserItem['origin']
+  /** Stop before a row the session's cap would not let start a turn (an X-Agent result flush). */
+  respectCap?: boolean
+}
+
+async function flushNow(
+  manager: SessionManager,
+  routingId: string,
+  options: FlushOptions = {}
+): Promise<boolean> {
   const session = manager.get(routingId)
   if (!session?.deliverNonUser) return false
   let started = false
   try {
     for (const row of heldFor(session, routingId)) {
+      if (options.only && row.origin !== options.only) continue
+      // A row that would start a turn past its cap stays held: the cap resets with the
+      // user's next prompt, and that prompt's own flush then takes it.
+      if (options.respectCap && !started && !capLeft(session, row.origin)) break
       const outcome = await session.deliverNonUser({
         origin: row.origin,
         text: row.body,
@@ -192,8 +237,12 @@ async function flushNow(manager: SessionManager, routingId: string): Promise<boo
       })
       if (outcome === 'unavailable') break
       markInboxDelivered(row.id)
+      if (row.origin === 'dispatch-result') stampReportDelivered(row)
       session.originLedger?.nonUserDelivered()
-      if (outcome === 'started') started = true
+      if (outcome === 'started') {
+        started = true
+        if (options.countStart) countStart(session.originLedger, row.origin)
+      }
     }
   } catch (err) {
     logger.warn(LOG, `flushing the held inbox of ${routingId} failed: ${errText(err)}`)
@@ -201,6 +250,53 @@ async function flushNow(manager: SessionManager, routingId: string): Promise<boo
     emitHeldCount(routingId, session)
   }
   return started
+}
+
+/**
+ * A held X-Agent result went out: the report row of exactly its run (the row carries the run
+ * number, the sender key is the X-Agent's ledger id) is stamped delivered. A row with no run
+ * (an interrupted-at-quit notice) stamps nothing.
+ */
+function stampReportDelivered(row: InboxItem): void {
+  if (row.reportRun === null) return
+  try {
+    const targetId = row.fromKey.startsWith(X_AGENT_KEY_PREFIX)
+      ? row.fromKey.slice(X_AGENT_KEY_PREFIX.length)
+      : row.fromKey
+    markDispatchReportDelivered(targetId, row.reportRun)
+  } catch (err) {
+    logger.warn(LOG, `could not stamp the report of ${row.fromKey} delivered: ${errText(err)}`)
+  }
+}
+
+function capLeft(session: ISession, origin: NonUserItem['origin']): boolean {
+  const ledger = session.originLedger
+  if (!ledger) return true
+  return origin === 'dispatch-result' ? ledger.dispatchWakesLeft : ledger.budgetLeft
+}
+
+/**
+ * Deliver the X-Agent results held for this session (ADR-105 §3), waking it: the flush a
+ * session coming back up triggers (`dispatch-result-flush.ts`). Other held items stay held
+ * for the user's next prompt, as before. Stops at the wake cap. Returns whether a turn
+ * was started.
+ */
+export function flushHeldDispatchResults(
+  manager: SessionManager,
+  routingId: string
+): Promise<boolean> {
+  return serialized(routingId, () =>
+    flushNow(manager, routingId, { only: 'dispatch-result', respectCap: true, countStart: true })
+  )
+}
+
+/** Does this session have X-Agent results waiting? (A fresh DB read; false when the DB is unavailable.) */
+export function hasHeldDispatchResults(session: ISession, routingId: string): boolean {
+  try {
+    return heldFor(session, routingId).some((row) => row.origin === 'dispatch-result')
+  } catch {
+    return false
+  }
 }
 
 /** Does this session have items waiting? (A fresh DB read; false when the DB is unavailable.) */
@@ -227,7 +323,8 @@ function inboxRow(target: string, item: NonUserItem): Parameters<typeof addInbox
     fromKey: item.from.key,
     fromTitle: item.from.title,
     senderModeClass: item.senderModeClass ?? null,
-    body: item.text
+    body: item.text,
+    ...(item.reportRun !== undefined ? { reportRun: item.reportRun } : {})
   }
 }
 
@@ -237,7 +334,9 @@ function hold(
   item: NonUserItem,
   why: HeldWhy
 ): DeliveryResult {
-  if (heldInboxCount(target) >= HELD_INBOX_CAP) {
+  // An X-Agent result is bounded by the number of runs and is the only trace of the run the
+  // parent model will ever get: it is never refused for capacity (as a given-back item is not).
+  if (item.origin !== 'dispatch-result' && heldInboxCount(target) >= HELD_INBOX_CAP) {
     logger.warn(
       LOG,
       `inbox of ${target} is full (${HELD_INBOX_CAP}): refusing ${item.origin} from ${item.from.key}`

@@ -1130,6 +1130,7 @@ export async function loadSessionHistory(
               sessionMessageNote({
                 id: obj.uuid || `peer-${messages.length}`,
                 fromTitle: peer.fromTitle,
+                fromKey: peer.fromKey,
                 native: peer.native,
                 text: peer.body,
                 timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()

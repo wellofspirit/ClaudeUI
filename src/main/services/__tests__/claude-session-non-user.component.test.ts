@@ -257,6 +257,42 @@ describe('ClaudeSession.deliverNonUser — the wire', () => {
   })
 })
 
+describe('ClaudeSession.deliverNonUser — an X-Agent result (origin dispatch-result, ADR-105 §3)', () => {
+  const RESULT = item({
+    origin: 'dispatch-result',
+    text: 'X-Agent impl-e1 finished: done.',
+    from: { key: 's-abc234', title: 'impl-e1' }
+  })
+
+  it('frames it as the X-Agent of this session, not another Claude session: key, name, note', async () => {
+    const { session, sent } = newSession()
+    expect(await session.deliverNonUser(RESULT)).toBe('started')
+    const frame = await firstFrame()
+    expect((frame.message as { content: string }).content).toBe(
+      '<cross-session-message from="x-agent:s-abc234" from-name="X-Agent impl-e1">\nX-Agent impl-e1 finished: done.\n</cross-session-message>'
+    )
+    expect(frame.origin).toEqual({
+      kind: 'peer',
+      from: 'x-agent:s-abc234',
+      name: 'X-Agent impl-e1',
+      fromMode: 'prompting'
+    })
+    const note = sent.find(([channel]) => channel === 'session:message')![2] as ChatMessage
+    expect(note.role).toBe('system')
+    expect(note.content).toEqual([
+      {
+        type: 'context_note',
+        title: 'Report from X-Agent impl-e1',
+        fragments: [
+          { text: 'X-Agent impl-e1 finished: done.', label: 'from an X-Agent, not from you' }
+        ]
+      }
+    ])
+    // Still a note for the judge: never a `User:` line.
+    expect(slimTranscript(session.getMessages())).toBe('')
+  })
+})
+
 describe('ClaudeSession.deliverNonUser — the transcript', () => {
   it('renders as a system note (never a user message) on every client and for the judge', async () => {
     const { session, sent } = newSession()

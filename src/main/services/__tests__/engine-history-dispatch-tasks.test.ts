@@ -110,6 +110,37 @@ describe('withDispatchTasks — any engine’s read, and the run’s own start',
       expect.objectContaining({ toolUseId: 'toolu_1', status: 'completed' })
     ])
   })
+
+  it('a finished card whose call result is the launch acknowledgement is marked background (its input says nothing); a blocking answer is not', () => {
+    const resultOf = (toolUseId: string, toolResult: string): ChatMessage => ({
+      id: `res-${toolUseId}`,
+      role: 'user',
+      content: [{ type: 'tool_result', toolUseId, toolResult }],
+      timestamp: 5
+    })
+    const ack =
+      'X-Agent rev launched on pi (id s-abc123, session_id h). It runs in the background and you can keep working.'
+    const background = withDispatchTasks(
+      'p',
+      { messages: [use('toolu_1', 1), resultOf('toolu_1', ack)], statusLine: null },
+      { byParent: () => [row({ state: 'failed' })] }
+    )
+    expect(background.taskNotifications).toEqual([
+      expect.objectContaining({ toolUseId: 'toolu_1', status: 'failed', isBackgrounded: true })
+    ])
+    const blocking = withDispatchTasks(
+      'p',
+      {
+        messages: [
+          use('toolu_1', 1),
+          resultOf('toolu_1', 'The answer. It runs in the background.')
+        ],
+        statusLine: null
+      },
+      { byParent: () => [row({ state: 'failed' })] }
+    )
+    expect(blocking.taskNotifications?.[0]).not.toHaveProperty('isBackgrounded')
+  })
 })
 
 describe('readSessionHistory — X-Agent cards (ADR-105 §5)', () => {
@@ -152,13 +183,13 @@ describe('readSessionHistory — X-Agent cards (ADR-105 §5)', () => {
       expect.objectContaining({ taskId: stopped, toolUseId: 'toolu_stopped', status: 'stopped' })
     ])
     for (const n of read.taskNotifications) expect(n).toMatchObject({ outputFile: '', runIndex: 1 })
-    // The launch returned (its result is in the transcript): a background run, which wakes nothing.
+    // The launch returned (its result is in the transcript): a background run, whose result wakes the parent.
     expect(read.activeTasks).toEqual({
       toolu_running: {
         taskId: running,
         taskType: 'dispatch',
         isBackgrounded: true,
-        wakesParent: false,
+        wakesParent: true,
         startedAt: expect.any(Number),
         description: 'Review the diff'
       }

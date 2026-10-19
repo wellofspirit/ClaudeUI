@@ -39,8 +39,33 @@ export interface LiveParentSession {
   rearmIdleTimer?(): void
 }
 
+/**
+ * An X-Agent's end as the dispatcher hands it to the parent's inbox (ADR-105 §3): the text the
+ * parent reads and who it is from. The wire is the host's (`session-delivery`): origin
+ * `dispatch-result`, waking, framed per engine.
+ */
+export interface DispatchResultItem {
+  /** The X-Agent's ledger id and its name. */
+  from: { key: string; title: string }
+  /** Already framed and capped by the dispatcher. */
+  text: string
+  /** The run's number in the report store (stamped delivered when the item goes out); absent: none was recorded. */
+  reportRun?: number
+}
+
+/** What delivering it came to: handed to the engine (`delivered`/`queued`), or waiting in the inbox (`held`), or refused (`refused`: the inbox is full). */
+export type DispatchResultOutcome =
+  | { result: 'delivered' | 'queued' }
+  | { result: 'held'; why: string }
+  | { result: 'refused'; why: string }
+
 /** How the dispatcher reaches the dispatching session. Wired once, from `core-services.ts`. */
 export interface DispatchParentLookup {
+  /**
+   * Put an X-Agent's end into the parent's inbox, by durable id (works with no live object:
+   * it is then held). Absent in a test double: nothing is delivered.
+   */
+  deliver?(parentId: string, item: DispatchResultItem): Promise<DispatchResultOutcome>
   /** The session object that answers to `parentId` now (it may be cancelled), or undefined. */
   session(parentId: string): LiveParentSession | undefined
   /** Emit under the parent's routing (`emitEvent(channel, [parentId, data])`). */

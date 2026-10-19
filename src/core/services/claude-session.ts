@@ -48,8 +48,10 @@ import { BoundedSet } from './bounded-set'
 import { findPeerRow, type PeerRow } from './claude-peer-row'
 import {
   buildCrossSessionEnvelope,
+  envelopeName,
   sanitizeWrapperKey,
-  sanitizeWrapperTitle
+  sanitizeWrapperTitle,
+  wrapperSender
 } from '../../shared/session-message-wrapper'
 import { classifyApiError } from './api-error'
 import { permissionDecisionBlock, readPermissionDecisionFrame } from './claude-permission-decision'
@@ -901,7 +903,9 @@ export class ClaudeSession extends BaseSession {
             blockedCalls: this.blockedCalls,
             emit: (channel, data) => this.send(channel, data),
             addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) =>
-              this.addDispatchedCost(engineId, modelId, costUsd)
+              this.addDispatchedCost(engineId, modelId, costUsd),
+            // The background default is the root agent's only (ADR-105 §2).
+            callOwner: (toolUseId) => this.toolUseOwners.ownerOf(toolUseId)
           })
         : null
 
@@ -2668,8 +2672,14 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
   async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
     const busy = this.isProcessing
     const id = uuid()
-    const key = sanitizeWrapperKey(item.from.key)
-    const name = sanitizeWrapperTitle(item.from.title)
+    // An X-Agent's result is named as one: the key sits behind `x-agent:` and the name reads
+    // "X-Agent <name>". Only `from` and `from-name` change: cli.js still wraps every peer
+    // envelope in its own lead ("Another Claude session sent a message:") and teammate trailer
+    // (protocol-cc 15.2.6). What marks the text as an untrusted X-Agent report is the
+    // `[X-Agent report]` header inside the body; the transcript row says "Report from X-Agent".
+    const from = wrapperSender(item)
+    const key = sanitizeWrapperKey(from.key)
+    const name = envelopeName(from)
     const origin = {
       kind: 'peer',
       from: key,
@@ -2679,6 +2689,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     const note = sessionMessageNote({
       id,
       fromTitle: name,
+      fromKey: key,
       text: item.text,
       timestamp: Date.now()
     })
@@ -2687,7 +2698,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     // puts it back in the held inbox (reholdNonUser) instead of losing it.
     this.pendingNonUser.set(id, item)
     const firstRun = !this.messageChannel || this.messageChannel.isEnded
-    const running = this.run(buildCrossSessionEnvelope(item.from, item.text), undefined, id, {
+    const running = this.run(buildCrossSessionEnvelope(from, item.text), undefined, id, {
       origin,
       note
     })
@@ -2848,7 +2859,8 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
   private paintNonUserNote(id: string, item: NonUserItem, status?: string): void {
     const note = sessionMessageNote({
       id,
-      fromTitle: sanitizeWrapperTitle(item.from.title),
+      fromTitle: envelopeName(wrapperSender(item)),
+      fromKey: wrapperSender(item).key,
       text: item.text,
       timestamp: this.messageHistory.find((m) => m.id === id)?.timestamp ?? Date.now()
     })

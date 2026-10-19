@@ -57,7 +57,7 @@ describe('session_inbox', () => {
       expect(exists()).toBe(false)
       runMigrations(older)
       expect(exists()).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(36)
+      expect(older.pragma('user_version', { simple: true })).toBe(37)
     } finally {
       older.close()
     }
@@ -73,8 +73,37 @@ describe('session_inbox', () => {
       'sender_mode_class',
       'body',
       'created_at',
-      'delivered_at'
+      'delivered_at',
+      'report_run'
     ])
+  })
+
+  it('v37 adds report_run to a v36 profile and keeps the run of a held X-Agent result', () => {
+    const older = new BetterSqlite3(':memory:') as unknown as Db
+    try {
+      runMigrations(
+        older,
+        MIGRATIONS.filter((m) => m.version < 37)
+      )
+      const columns = (): string[] =>
+        (older.prepare('PRAGMA table_info(session_inbox)').all() as Array<{ name: string }>).map(
+          (c) => c.name
+        )
+      expect(columns()).not.toContain('report_run')
+      older
+        .prepare(
+          "INSERT INTO session_inbox (target, origin, from_key, from_title, body, created_at) VALUES ('a', 'session-message', 'k', 't', 'old row', 1)"
+        )
+        .run()
+      runMigrations(older)
+      expect(columns()).toContain('report_run')
+      // A row from before the column reads as no run.
+      expect(heldInboxItems('a', older)[0].reportRun).toBeNull()
+      addInboxItem(item('a', 'result', { origin: 'dispatch-result', reportRun: 3 }), older)
+      expect(heldInboxItems('a', older).map((r) => r.reportRun)).toEqual([null, 3])
+    } finally {
+      older.close()
+    }
   })
 
   it('holds items per target, oldest first, with the sender and class intact', () => {
@@ -108,6 +137,20 @@ describe('session_inbox', () => {
       delivered_at: number
     }
     expect(Number(row.delivered_at)).toBe(99)
+  })
+
+  it('keeps the dispatch-result origin of a held X-Agent result (an unknown origin still reads as a session message)', () => {
+    addInboxItem(
+      item('a', 'result', { origin: 'dispatch-result', fromKey: 'x-agent:s-abc234' }),
+      db
+    )
+    db.prepare(
+      "INSERT INTO session_inbox (target, origin, from_key, from_title, body, created_at) VALUES ('a', 'bogus', 'k', 't', 'odd', 1)"
+    ).run()
+    expect(heldInboxItems('a', db).map((r) => [r.origin, r.fromKey])).toEqual([
+      ['dispatch-result', 'x-agent:s-abc234'],
+      ['session-message', 'k']
+    ])
   })
 
   it('follows a session to its post-rekey id', () => {

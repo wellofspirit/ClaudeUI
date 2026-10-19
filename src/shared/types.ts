@@ -1524,6 +1524,13 @@ export interface TaskNotification {
    * the task at terminal — this is what still knows "resumed ×2" afterwards.
    */
   runIndex?: number
+  /**
+   * The task ran in the background. Set by an emitter whose call input does not say so (a
+   * dispatched X-Agent that is background by default, ADR-105 §2); a card reads it like the
+   * input's `run_in_background`, so a failed or stopped one shows no launch acknowledgement
+   * as its body.
+   */
+  isBackgrounded?: boolean
 }
 
 export interface SubagentMessageData {

@@ -51,7 +51,7 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
       runMigrations(db)
       // Bump alongside MIGRATIONS in db.ts — currently v31 (session refs
       // and parent/child links).
-      expect(userVersion(db)).toBe(36)
+      expect(userVersion(db)).toBe(37)
     } finally {
       db.close()
     }

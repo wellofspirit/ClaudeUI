@@ -65,6 +65,7 @@ import { usageHubClient } from '../services/usage-hub/client'
 import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
 import { addHostObserver, emitEvent, syncCore } from '../services/sync-host'
 import { makeDispatchParentLookup } from '../services/dispatch-parent-lookup'
+import { deliverDispatchResult, watchDispatchResultFlush } from '../services/dispatch-result-flush'
 import { sharedProviderService } from '../shared-providers'
 import { logger } from '../services/logger'
 import { loadPersistedPrices, refreshPricesIfStale } from '../services/opencode-pricing'
@@ -214,7 +215,10 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // A dispatch run outlives the call that launched it, so it reaches its dispatching
   // session through the manager and canonical state at each read, never through the
   // launching call's closures; its parent id follows re-keys.
-  const releaseDispatchParents = crossEngineDispatcher.configureParents(
+  // A held X-Agent result is flushed when its parent's engine is up and idle again
+  // (dispatch-result-flush.ts); a hold arms that edge for the parent.
+  const dispatchFlush = watchDispatchResultFlush(sessionManager, addHostObserver)
+  const releaseDispatchRekeys = crossEngineDispatcher.configureParents(
     makeDispatchParentLookup({
       getSession: (id) => sessionManager.get(id),
       emitEvent,
@@ -223,12 +227,20 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
         return held
           ? { messages: held.messages, cwd: held.cwd, engineId: held.status.engineId }
           : undefined
-      }
+      },
+      // An X-Agent's end goes into its parent's inbox like any non-user item, with its own
+      // origin (wakes the parent, outside ADR-104's budget, its own cap).
+      deliverResult: (parentId, item) =>
+        deliverDispatchResult(sessionManager, dispatchFlush, parentId, item)
     }),
     (observer) => syncCore.onRekey(observer),
     // Its parent's disconnect (re-raise the cards it cleared) and deletion (end it).
     (observer) => addHostObserver(observer)
   )
+  const releaseDispatchParents = (): void => {
+    releaseDispatchRekeys()
+    dispatchFlush.stop()
+  }
   // ClaudeUI's opencode config writes (settings, raw editor, providers, tools,
   // agent files) reload the running servers' locations (ADR-097 S8).
   onOpencodeConfigWritten((reason) => void scheduleOpencodeConfigReload(reason))

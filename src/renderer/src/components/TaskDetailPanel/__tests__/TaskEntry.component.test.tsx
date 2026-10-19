@@ -311,6 +311,42 @@ describe("TaskEntry - a dispatch child's tool cards use the target engine's tool
     expect(header).not.toContain('{"path"')
   })
 
+  it('a default-background X-Agent that failed does not show the launch acknowledgement as its body (ADR-105 §2)', () => {
+    const ack = 'X-Agent rev launched on pi (id s-abc123). It runs in the background.'
+    const resultMsg: ChatMessage = {
+      id: 'result-d',
+      role: 'user',
+      content: [{ type: 'tool_result', toolUseId: DISPATCH, toolResult: ack, isError: false }],
+      timestamp: 1
+    }
+    useSessionStore.setState((state) => ({
+      activeSessionId: ROUTE,
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: { ...state.sessions[ROUTE], messages: [dispatchMsg, resultMsg] }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    const end = (isBackgrounded: boolean): void =>
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: DISPATCH,
+        status: 'failed',
+        outputFile: '',
+        summary: 'X-Agent rev failed: boom',
+        ...(isBackgrounded ? { isBackgrounded: true } : {})
+      })
+    // Without the run's own word the ack reads as an answer (the input has no flag)...
+    end(false)
+    const { unmount } = render(<TaskEntry toolUseId={DISPATCH} />)
+    expect(screen.queryByText(/It runs in the background/)).toBeInTheDocument()
+    unmount()
+    // ...with it, the ack is not the body.
+    end(true)
+    render(<TaskEntry toolUseId={DISPATCH} />)
+    expect(screen.queryByText(/It runs in the background/)).not.toBeInTheDocument()
+  })
+
   it("a task nested in that child inherits the child's engine", () => {
     stage(true)
     render(<TaskEntry toolUseId={NESTED} />)

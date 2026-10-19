@@ -14,8 +14,12 @@ import type { HostWindowHandle } from '../host'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
 import type { TurnOriginLedger } from './turn-origin-ledger'
 
-/** Where a non-user item comes from: another session's message, or an agent's note. */
-export type NonUserOrigin = 'session-message' | 'agent-note'
+/**
+ * Where a non-user item comes from: another session's message, an agent's note, or the
+ * result of an X-Agent the session launched (`dispatch-result`, ADR-105 §3: it wakes the
+ * session, has its own wake cap and is not counted in the agent-turn budget).
+ */
+export type NonUserOrigin = 'session-message' | 'agent-note' | 'dispatch-result'
 
 /**
  * One item another session or an agent puts into a session (slice 1a). Never
@@ -32,6 +36,8 @@ export interface NonUserItem {
   wake: boolean
   /** The sender's permission class where known (recorded with a held item). */
   senderModeClass?: 'bypass' | 'prompting'
+  /** An X-Agent result: the `dispatch_report` run it stands for, stamped delivered when it goes out. */
+  reportRun?: number
 }
 
 /**

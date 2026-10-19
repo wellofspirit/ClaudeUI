@@ -4,7 +4,8 @@ import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import type { HostWindowHandle } from '../host'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
-import { buildSessionMessageWrapper } from '../../shared/session-message-wrapper'
+import { buildSessionMessageWrapper, wrapperSender } from '../../shared/session-message-wrapper'
+import { runsInBackground } from '../../shared/dispatch-agent-description'
 import type {
   ApprovalDecision,
   FileDiff,
@@ -851,9 +852,15 @@ export class CodexSession extends BaseSession {
     if (this.queue.consumeById(item.itemId)) this.queue.emit()
   }
 
-  /** The app-server thread is open: a message does not reopen a closed session. */
+  /**
+   * The app-server host is connected and this session's thread is open: `threadId` is set
+   * only after `thread/start|resume|fork` was answered on the attached host, and `closed`
+   * covers a lost host or a disposed session. A session that has not started its thread yet
+   * (just constructed, a reopen before the first prompt) is not live: a message does not
+   * start or reopen one.
+   */
   isEngineLive(): boolean {
-    return !this.closed
+    return !this.closed && this.threadId !== null
   }
 
   /**
@@ -867,7 +874,7 @@ export class CodexSession extends BaseSession {
    */
   async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
     if (this.closed) return 'unavailable'
-    const text = buildSessionMessageWrapper(item.from, item.text)
+    const text = buildSessionMessageWrapper(wrapperSender(item), item.text)
     const clientUserMessageId = `msg-${randomUUID()}`
     this.nonUserClientIds.add(clientUserMessageId)
     // A turn start or a settings update is in flight and there is no turn to
@@ -3564,7 +3571,16 @@ export class CodexSession extends BaseSession {
       name: typeof args?.name === 'string' ? args.name : undefined,
       description: typeof args?.description === 'string' ? args.description : undefined,
       sessionId: typeof args?.session_id === 'string' ? args.session_id : undefined,
-      ...(args?.run_in_background === true ? { runInBackground: true } : {})
+      // The hosted tool call needs the root thread and a live root turn (a native child can
+      // never call it), so the caller is always the top-level agent: background unless it
+      // says otherwise (ADR-105 §2).
+      ...(runsInBackground(
+        typeof args?.run_in_background === 'boolean' ? args.run_in_background : undefined,
+        true,
+        toolUseId
+      )
+        ? { runInBackground: true }
+        : {})
     }
     if (verdict.decision === 'ask') {
       const card: PendingApproval = {

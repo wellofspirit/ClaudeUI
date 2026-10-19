@@ -1926,6 +1926,25 @@ describe('reducer — subagents', () => {
     expect(flipped.sessions['rid'].taskNotifications).toEqual([full])
   })
 
+  it('keeps isBackgrounded (a default-background dispatch) whichever terminal event arrives last', () => {
+    const base = { taskId: 'a', toolUseId: 't1', status: 'failed', outputFile: '', summary: 'boom' }
+    const flagged = { ...base, isBackgrounded: true }
+    const started: Array<[string, string, unknown]> = [
+      ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', taskType: 'dispatch' }]
+    ]
+    for (const order of [
+      [flagged, base],
+      [base, flagged]
+    ]) {
+      const state = fold([
+        created(),
+        ...started,
+        ...order.map((n): [string, string, unknown] => ['session:task-notification', 'rid', n])
+      ])
+      expect(state.sessions['rid'].taskNotifications).toEqual([flagged])
+    }
+  })
+
   it('keeps a hand-back report, its flag and its warning whichever terminal event arrives last', () => {
     const empty = {
       taskId: 'a',

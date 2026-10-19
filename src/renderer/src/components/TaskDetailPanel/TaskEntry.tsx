@@ -140,7 +140,10 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     resultBlock ?? undefined,
     taskBlock.toolName
   ) as TaskView
-  const isBackground = !!taskView.background || activeTasks[toolUseId]?.isBackgrounded === true
+  const isBackground =
+    !!taskView.background ||
+    activeTasks[toolUseId]?.isBackgrounded === true ||
+    latestNotification(taskNotifications, toolUseId)?.isBackgrounded === true
   // The engine of THIS task's transcript: a dispatch's target, else the issuer's
   // (a native subagent runs on the engine that spawned it).
   const childEngine = dispatchChildEngine(taskView) ?? callEngine

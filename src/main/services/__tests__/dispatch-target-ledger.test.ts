@@ -17,6 +17,7 @@ import {
   getDispatchTarget,
   getDispatchTargetByHarnessRef,
   getSessionRef,
+  heldInboxItems,
   insertDispatchTarget,
   insertDispatchTargetWithRef,
   insertUsageEvent,
@@ -90,7 +91,7 @@ describe('dispatch_target (migration v35)', () => {
       expect(exists()).toBe(false)
       runMigrations(older)
       expect(exists()).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(36)
+      expect(older.pragma('user_version', { simple: true })).toBe(37)
       const columns = (
         older.prepare('PRAGMA table_info(dispatch_target)').all() as { name: string }[]
       ).map((c) => c.name)
@@ -300,6 +301,37 @@ describe('the store and the hide predicate (singleton DB)', () => {
     const created = dispatchLedger.create(input('sess-a'))
     expect(interruptStaleDispatchTargets()).toBe(1)
     expect(dispatchLedger.get(created.id)?.state).toBe('interrupted')
+  })
+
+  it('the boot pass leaves the parent of each interrupted X-Agent a dispatch-result notice in its inbox (ADR-105 §3)', () => {
+    const parent = `parent-boot-${process.pid}`
+    const named = dispatchLedger.create({
+      ...input('sess-named'),
+      parentSessionId: parent,
+      name: 'rev'
+    })
+    const unnamed = dispatchLedger.create({ ...input('sess-unnamed'), parentSessionId: parent })
+    const done = dispatchLedger.create({ ...input('sess-idle'), parentSessionId: parent })
+    dispatchLedger.update(done.id, { state: 'idle' })
+
+    expect(interruptStaleDispatchTargets()).toBe(2)
+    expect(heldInboxItems(parent)).toMatchObject([
+      {
+        origin: 'dispatch-result',
+        fromKey: `x-agent:${named.id}`,
+        fromTitle: 'rev',
+        body: 'X-Agent rev was interrupted when ClaudeUI quit; continue it with dispatch_agent session_id sess-named.'
+      },
+      {
+        origin: 'dispatch-result',
+        fromKey: `x-agent:${unnamed.id}`,
+        fromTitle: unnamed.id,
+        body: `X-Agent ${unnamed.id} was interrupted when ClaudeUI quit; continue it with dispatch_agent session_id sess-unnamed.`
+      }
+    ])
+    // Once: the rows are `interrupted` now, so a second pass finds nothing running.
+    expect(interruptStaleDispatchTargets()).toBe(0)
+    expect(heldInboxItems(parent)).toHaveLength(2)
   })
 
   it('spend() sums the dispatch rows of one harness session and counts unpriced turns', () => {

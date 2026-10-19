@@ -51,7 +51,14 @@ shape applies.
 ### 2. Background by default
 
 - A root agent's dispatch runs in the background; a subagent's waits for the result; `run_in_background` overrides
-  either. The waiting form launches the same background run and awaits it: there is one run engine.
+  either. The waiting form launches the same background run and awaits it: there is one run engine. As built, the
+  default is decided by each engine's registration of the tool, never by the dispatcher (whose own default stays
+  waiting): an unspecified `run_in_background` means background for the top-level agent, provided the call carries a
+  tool-call id (the run is shown, stopped and reported through that call's card), and waiting for a subagent or for a
+  caller that cannot be told. Claude: the session attributes each call from the frames cli.js streams (the owner map
+  of ADR-104's session tools; a call that cannot be attributed waits). opencode: the chat's own agent is the caller;
+  a subagent child resolved to its chat is not. pi and Codex register `dispatch_agent` for the root agent only, so
+  every call is background. The model-facing text (the parameter, the tool description, the launch answer) says so.
 - A background launch validates synchronously, spawns asynchronously and returns at once with the X-Agent's id and
   name. Several dispatches in one message therefore return in turn without waiting on each other.
 - The run is registered by its ledger id for its whole life — stop, progress, liveness — and is never tied to the
@@ -109,12 +116,41 @@ shape applies.
   targets only, and a Claude or Codex target has no ClaudeUI judge to ask. The report is delivered unreviewed, behind
   the untrusted framing below. (Intended: under a judged auto mode the judge reviews it and never blocks it, a report
   it objects to or could not review being delivered with a warning above it, as Claude Code does.)
-- The report, status and cost line are delivered into the parent through each engine's host-delivery path (Claude
-  Code's peer envelope on stdin, opencode steer or prompt, pi `/cui-deliver`, Codex `turn/steer` or `turn/start`):
-  folded into a running turn at its next tool boundary, or starting a turn when the parent is idle.
-- This delivery has its own origin, `dispatch-result`: it wakes the parent and is not counted in ADR-104's budget of
-  ten agent-started turns since the user's last prompt. A separate cap on dispatch-result wakes since the user's
-  last prompt guards against a parent that re-dispatches on every result.
+- When a background run ends, ONE item is delivered into its parent (by the parent's durable id), through each
+  engine's host-delivery path (Claude Code's peer envelope on stdin, opencode steer or prompt, pi `/cui-deliver`,
+  Codex `turn/steer` or `turn/start`): folded into a running turn at its next tool boundary, or starting a turn when
+  the parent is idle. A blocking run delivers nothing: its framed report is its tool result. What each end says:
+  - a report: a status line (tool uses, tokens, time, and the X-Agent's cost so far) and the framed report below. The
+    report is cut at 16 000 characters before the frame and, when the frame's indent still pushes the whole past
+    19 000 (the host cuts a delivery at 20 000), cut further, and "(report truncated — the full report is on X-Agent
+    <name>'s card)" follows the frame, so the pointer is never the part that is lost;
+  - no report: "X-Agent <name> ended without delivering a report.";
+  - a thread without the tool: its last message, framed, with the warning above it;
+  - a failure: "X-Agent <name> failed: <first line of the reason>.";
+  - a stop from the card: "X-Agent <name> was stopped by the user." (the parent model should know);
+  - an X-Agent that was running when ClaudeUI quit: at the next start its parent's inbox gets "X-Agent <name> was
+    interrupted when ClaudeUI quit; continue it with dispatch_agent session_id <harness id>." (B-4 will point at
+    `session_message` instead).
+    The report's row in the store gets `delivered_at` when its result reaches the parent: a background run's when the
+    item is handed to the parent's engine (not when it is held; a held item carries its run number in the inbox row,
+    `session_inbox.report_run`, migration v37, and its flush stamps exactly that run), a blocking run's when its tool
+    result returns (not when the parent abandoned the call). An interrupted-at-quit notice has no run and stamps
+    nothing. An X-Agent result is held past the inbox cap, never refused for capacity: it is the only trace of the run
+    the parent model gets, and the attention signal below must stay true. A launch that failed before the X-Agent existed answered its
+    call with the error and delivers nothing, and neither does a run whose parent was deleted.
+- This delivery has its own origin, `dispatch-result`: it wakes the parent and is not counted in ADR-104's budget of ten agent-started turns since the user's
+  last prompt. Its own cap guards against a parent that re-dispatches on every result: 25 wakes since the user's last
+  prompt (a counter beside the budget, reset by the same prompt); past it the result is held. It is still non-user:
+  it taints the session exactly as any agent text does. The sender is named behind an `x-agent:` prefix on the
+  X-Agent's ledger id, which survives every engine's echo and cli.js's envelope round trip, so the result is known
+  as the session's own X-Agent's after a reload and in the transcript on all four engines: the row is "Report from
+  X-Agent <name>" (labelled "from an X-Agent, not from you"), never "Message from"; a native peer cannot take the
+  label by naming itself that way. What the MODEL reads differs by engine. opencode, Codex and pi get ClaudeUI's own
+  wrapper, which names the X-Agent and ends "This is the result of an X-Agent you launched with dispatch_agent, not a
+  message from the user". A Claude parent gets cli.js's fixed peer wrapper, whose lead ("Another Claude session sent a
+  message:") and teammate trailer (protocol-cc 15.2.6) ClaudeUI cannot change: only `from` and `from-name` ("X-Agent
+  <name>") differ, and the `[X-Agent report]` header inside the body is what marks the text as untrusted agent output
+  there.
 - The report is agent-authored, untrusted output with no user authority, and is delivered as such on every parent
   engine, the way Claude Code delivers a subagent's `SubagentHandback` report (cli.js 2.1.293): a header sentence
   saying so, every line of the report indented so a frame-like line inside it cannot pass for a real one, and
@@ -128,9 +164,34 @@ shape applies.
   matched. Invisible characters (zero-width, soft hyphen) hide none of this, and every pattern is bounded, so
   adversarial input costs linear time. The turn it starts is not a user turn: it cannot satisfy ADR-104's clean-user-turn gate, and the
   auto-mode judge reads the report as agent output.
-- When the parent is not live, the delivery waits in its inbox (ADR-104) and is delivered when the parent is live
-  again — a respawn after an account switch or effort change, a reconnect, or the user reopening it — and the card
-  and the sidebar show that a result is waiting.
+- When the parent is not live (no session object, its engine down, the wake cap reached, or an engine that refused
+  it), the delivery waits in its inbox (ADR-104). It is delivered, with wake, at one edge: the first `session:status`
+  `idle` of a session object whose engine is up, after the session was armed by a `disconnected` status, a
+  `session:created` or a hold. The status sequence was read off a real Claude session: a new object says `idle` in its
+  constructor with no engine behind it (not the edge), a spawn says `idle` again once cli.js answered `initialize`
+  (the edge), `cancel()` says `disconnected`, the respawn `idle` again. "The engine is up" is each engine's
+  `isEngineLive()`: Claude, an open stdin channel to a running cli.js; opencode, a connected client with its session
+  open and not disconnected; pi, the rpc process started (the client is set after its start returned); Codex, an
+  attached app-server host with the thread started or resumed (`threadId` set) and the session not closed. Each
+  engine says `idle` once it is up (Claude on `initialize`, pi at the end of its start, opencode at the end of its eager
+  connect when a session is open, Codex after `thread/start|resume`); an engine that had none would deliver at the
+  user's next prompt instead, which is always safe. Opening a disconnected session from the sidebar starts no engine
+  (only the transcript is shown), so for a parent the user disconnected the edge usually comes with the user's next
+  prompt, whose spawn delivers the held result in a wake turn of its own before the prompt's turn (live-verified
+  2026-10-20); a parent whose engine is respawned without a prompt (an account switch, an effort change on a live
+  session) gets it at that spawn. A replacement of the object sends no status, so
+  it flushes nothing; a turn end flushes nothing either (the session is armed only by those three events, and disarmed
+  by the first edge). The flush delivers the held results only (the rest of the inbox waits for the user's next
+  prompt, as before), oldest first and one chain with the prompt path's flush, so no row goes out twice; it stops at
+  the wake cap, and the user's prompt then takes what is left. ADR-104's rule that a message never resumes a closed
+  session stands: a reopened session spawns nothing until the user's prompt, which flushes the inbox itself before the
+  engine starts.
+- A result that had to wait raises the parent's attention: `session:dispatch-result-held` (a replicated signal, no
+  snapshot field) makes every client set the session's `needsAttention` and post "X-Agent <name> finished — result
+  waiting" as an OS notification, unless the user is looking at that session — the same rule as a turn end. Without it
+  the parent's record, which now carries `wakesParent: true` for a background run too, would swallow the turn-end
+  "Ready for input" with nothing to follow. The waiting count stays `session:held-changed`'s. A session the client has
+  not loaded (never opened this run) has no sidebar entry to mark; its held count shows when it is reopened.
 - A parent's idle timer is held while it owns running X-Agents.
 
 ### 4. Messages both ways go through `session_message`
@@ -192,8 +253,11 @@ shape applies.
 _Amended 2026-10-20 (slice B-2b): the re-raise trigger, the end paths, release after a run and the boot sweep._
 
 _Amended 2026-10-20 (slice B-3a): §3's report tool, its per-engine wiring, the end of a run, the report store, the
-sanitiser, the card and the blocking result. Delivery into the parent (the `dispatch-result` origin, the inbox, the
-wake cap, the background default) is slice B-3b._
+sanitiser, the card and the blocking result._
+
+_Amended 2026-10-20 (slice B-3b): §2's background default as built, and §3's delivery into the parent: the
+`dispatch-result` origin and its framing, what each end delivers, the wake cap of 25, the flush edge, the attention
+signal for a held result._
 
 ## Consequences
 

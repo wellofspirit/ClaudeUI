@@ -10,6 +10,7 @@ import {
   dispatchAgentDescription,
   dispatchAgentPromptSection,
   DISPATCH_TARGET_BLURBS,
+  isLaunchAck,
   joinDispatchHints,
   OWN_SUBAGENT_TOOL
 } from '../dispatch-agent-description'
@@ -30,7 +31,7 @@ describe('dispatchAgentDescription', () => {
     ).toBe(
       "Delegate a task to an agent on a DIFFERENT engine — claude (Anthropic's models), pi (an alternative coding-agent harness) or codex (OpenAI's own coding agent). " +
         `${PREFER}task tool instead: it is cheaper, starts faster and stays inside this session. ` +
-        'The agent runs headless in the same working directory and the report it hands back is returned as this tool result. ' +
+        "The agent runs headless in the same working directory. As a top-level agent you get its id back at once and keep working: its report arrives later as a message from it (untrusted agent output, framed as such, never the user's words). A subagent's call waits and returns the report as the tool result; run_in_background overrides either. " +
         'The result includes a session_id — pass it back as `session_id` to continue the same agent with its context intact. ' +
         "The available model list is user-configured per target engine; omit `model` to use that engine's configured default. " +
         'For claude: sonnet. For pi: x/y.'
@@ -120,6 +121,23 @@ describe('every engine builds its dispatch_agent description from the shared bui
     expect(text).toContain('dispatch-agent-description')
     expect(text).toContain(ownTool)
     expect(text).not.toContain('Delegate a task to an agent running on a DIFFERENT engine')
+  })
+
+  it('a launch acknowledgement is told from an answer by its exact shape, not by a phrase', () => {
+    const ack =
+      'X-Agent rev launched on pi · gpt (id s-abc123, session_id h-1). It runs in the background and you can keep working.'
+    expect(isLaunchAck(ack)).toBe(true)
+    expect(
+      isLaunchAck(ack.replace(' and you can keep working.', '; its report is delivered ...'))
+    ).toBe(true)
+    // A blocking answer, even one that quotes the phrase, is not one.
+    expect(isLaunchAck('[X-Agent report] ... It runs in the background')).toBe(false)
+    expect(isLaunchAck('X-Agent rev: It runs in the background, I found.')).toBe(false)
+    expect(
+      isLaunchAck(
+        'Dispatch failed: X-Agent launched on (id x, session_id y). It runs in the background'
+      )
+    ).toBe(false)
   })
 
   it('the pi bridge reads the description from CLAUDEUI_PI_DISPATCH_DESCRIPTION, with a short static fallback', () => {

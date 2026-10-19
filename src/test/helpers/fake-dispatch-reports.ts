@@ -31,6 +31,10 @@ export function makeFakeDispatchReports(): FakeDispatchReports {
       rows.push(row)
       return { ...row }
     },
+    markDelivered(targetId, run, at) {
+      const row = rows.find((r) => r.targetId === targetId && r.run === run)
+      if (row && row.deliveredAt === null) row.deliveredAt = at
+    },
     latest: (targetId) => of(targetId).at(-1),
     rowsOf: (targetIds) => rows.filter((r) => targetIds.includes(r.targetId)),
     count: (targetId) => of(targetId).length

@@ -369,6 +369,58 @@ describe('TaskCard — a dispatch run (task-started / task-notification)', () =>
     expect(screen.queryByTestId('md')).not.toBeInTheDocument()
   })
 
+  // A root agent's dispatch is background by default (ADR-105 §2): its input carries no
+  // `run_in_background`, so the card learns it from the run's own record and terminal notification.
+  describe('a default-background run (no run_in_background on the input)', () => {
+    const plainBlock = makeTaskBlock({
+      toolUseId: 'toolu_dispatch_run',
+      toolName: 'mcp__claude-ui-collab__dispatch_agent',
+      toolInput: { engine: 'pi', prompt: 'go' }
+    })
+    const launchAck = {
+      ...ack,
+      toolResult:
+        'X-Agent rev launched on pi (id s-abc123, session_id h-1). It runs in the background and you can keep working.'
+    }
+    const end = (status: 'failed' | 'stopped', isBackgrounded: boolean): void =>
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_run',
+        status,
+        outputFile: '',
+        summary: status === 'failed' ? 'X-Agent failed: boom' : 'stopped',
+        ...(isBackgrounded ? { isBackgrounded: true } : {})
+      })
+    const expand = (): void => {
+      fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    }
+
+    it.each(['failed', 'stopped'] as const)(
+      'a %s one does not show the launch acknowledgement as its body',
+      (status) => {
+        end(status, true)
+        render(<TaskCard block={plainBlock} result={launchAck} view={view} />)
+        expand()
+        expect(screen.queryByText(/It runs in the background/)).not.toBeInTheDocument()
+        expect(screen.queryByTestId('md')).not.toBeInTheDocument()
+      }
+    )
+
+    it('an explicit blocking card is unchanged: its result is the body', () => {
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_run',
+        status: 'completed',
+        outputFile: '',
+        summary: 'the answer'
+      })
+      const answer = { ...ack, toolResult: 'the answer the parent receives' }
+      render(<TaskCard block={plainBlock} result={answer} view={view} />)
+      expand()
+      expect(screen.getByText(/the answer the parent receives/)).toBeInTheDocument()
+    })
+  })
+
   // A reopened parent (sidebar click) is a historical session, but its X-Agent still runs: the
   // ledger rebuilt its record (ADR-105 §5), and the card must show it and offer Stop.
   describe('on a reopened (historical) parent', () => {

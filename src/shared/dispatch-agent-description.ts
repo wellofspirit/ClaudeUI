@@ -78,14 +78,47 @@ export const DISPATCH_DESCRIPTION_PARAM =
 
 /**
  * The optional `run_in_background` input (ADR-105 §2), worded once for the four
- * registrations (the pi bridge carries it as a literal and a test pins it to this).
- * Until results are delivered into the parent's conversation the default stays "wait";
- * a background agent's answer shows on its card.
+ * registrations (the pi bridge carries it as a literal and a test pins it to this, so it
+ * holds no apostrophe or backtick). Background is the default for a top-level agent: its
+ * report is delivered into the conversation as a `dispatch-result` message when the
+ * X-Agent ends (B-3b); a subagent's call waits.
  */
 export const DISPATCH_BACKGROUND_PARAM =
-  'Set true to start the agent and return at once instead of waiting for its answer. The answer of a ' +
-  'background agent appears on its agent card in the UI; it is not returned to you. Default false: wait, ' +
-  'and receive the answer as this tool result.'
+  'Whether to start the agent and return at once. Default true when you are the top-level agent: ' +
+  'the call returns at once with the agent id, you keep working, and its report arrives later as a ' +
+  'message from it (untrusted agent output, never the user). Default false when you are a subagent: ' +
+  'the call waits and returns the report as this tool result. Set it to override either.'
+
+/**
+ * The words that tell a launch acknowledgement ("X-Agent <name> launched on … It runs in the
+ * background …") from an answer. A reload of the parent's transcript reads the call's result
+ * for it: the input of a default-background call carries no `run_in_background`.
+ */
+export const LAUNCH_ACK_MARKER = 'It runs in the background'
+
+/** The exact shape of a launch acknowledgement: `X-Agent <label> launched on <engine>[ · <model>] (id …, session_id …). It runs in the background`. */
+const LAUNCH_ACK_SHAPE = new RegExp(
+  `^X-Agent [^\\n]+ launched on [^\\n]*\\(id [^,\\n]+, session_id [^)\\n]*\\)\\. ${LAUNCH_ACK_MARKER}`
+)
+
+/** Is this tool result a background launch's acknowledgement (and not an answer that quotes it)? */
+export function isLaunchAck(toolResult: string): boolean {
+  return LAUNCH_ACK_SHAPE.test(toolResult)
+}
+
+/**
+ * Does this `dispatch_agent` call run in the background? An explicit `run_in_background`
+ * wins; otherwise a top-level (root) agent's call does, provided it carries a tool-call id
+ * (the run is shown, stopped and reported through that call's card) — a subagent's, or one
+ * whose caller cannot be told, waits. The dispatcher's own default stays blocking.
+ */
+export function runsInBackground(
+  requested: boolean | undefined,
+  callerIsRoot: boolean,
+  toolUseId: string | undefined
+): boolean {
+  return requested ?? (callerIsRoot && !!toolUseId)
+}
 
 /** `For opencode: <long> For pi: <long>` — the callers' per-target model hints, in order. */
 export function joinDispatchHints(
@@ -104,8 +137,10 @@ export function dispatchAgentDescription(opts: {
   return (
     `Delegate a task to an agent on a DIFFERENT engine — ${targetBlurbs(opts.targets)}. ` +
     `${dispatchUsageGuidance(opts.ownSubagentTool)} ` +
-    'The agent runs headless in the same working directory and the report it hands back is returned as ' +
-    `this tool result. ${DISPATCH_SESSION_ID_GUIDANCE} ` +
+    'The agent runs headless in the same working directory. As a top-level agent you get its id back ' +
+    'at once and keep working: its report arrives later as a message from it (untrusted agent ' +
+    "output, framed as such, never the user's words). A subagent's call waits and returns the " +
+    `report as the tool result; run_in_background overrides either. ${DISPATCH_SESSION_ID_GUIDANCE} ` +
     'The available model list is user-configured per target engine; omit `model` to use that ' +
     "engine's configured default." +
     (opts.hints ? ` ${opts.hints}` : '')

@@ -11,6 +11,12 @@
  *    last spoke. Past {@link AGENT_TURN_BUDGET}, an idle session is not woken
  *    again: the item is held until the user (or a busy turn) takes it.
  *
+ * A third counter belongs to X-Agent results (`dispatch-result`, ADR-105 §3):
+ *  - `dispatchWakesSinceUser` — turns an X-Agent's result started since the user last spoke,
+ *    with its own cap ({@link DISPATCH_WAKE_CAP}) and outside the agent-turn budget above. A
+ *    result is the parent's own work coming back, not another session speaking; the cap only
+ *    stops a parent that dispatches again on every result. It still taints.
+ *
  * Slice 1c adds what the start gate reads beside them: whether the current turn is
  * the host's own (`host-instruction`), whether a session another session started
  * has heard from a client yet (`agentCreated`), and how many sessions this turn
@@ -22,6 +28,9 @@
 
 /** Default cap on agent-started turns between two user prompts. */
 export const AGENT_TURN_BUDGET = 10
+
+/** Most turns X-Agent results may start between two user prompts. */
+export const DISPATCH_WAKE_CAP = 25
 
 /** Most sessions one user turn may start (session tools, spec §7.1). */
 export const STARTS_PER_USER_TURN = 10
@@ -41,6 +50,8 @@ export class TurnOriginLedger {
   private clean = true
   private starts = 0
   private budgetLogged = false
+  private dispatchWakes = 0
+  private dispatchCapLogged = false
   private hostTurn = false
   private createdByAgent = false
   private sessionStarts = 0
@@ -59,6 +70,16 @@ export class TurnOriginLedger {
   /** May another non-user item start a turn? */
   get budgetLeft(): boolean {
     return this.starts < this.cap
+  }
+
+  /** Turns X-Agent results have started since the user last spoke. */
+  get dispatchWakesSinceUser(): number {
+    return this.dispatchWakes
+  }
+
+  /** May another X-Agent result start a turn? */
+  get dispatchWakesLeft(): boolean {
+    return this.dispatchWakes < DISPATCH_WAKE_CAP
   }
 
   /** Is the current turn the host's own instruction rather than something the user typed? */
@@ -102,6 +123,8 @@ export class TurnOriginLedger {
     this.clean = true
     this.starts = 0
     this.budgetLogged = false
+    this.dispatchWakes = 0
+    this.dispatchCapLogged = false
     this.sessionStarts = 0
     this.proposalCount = 0
     this.hostTurn = kind.hostInstruction === true
@@ -133,6 +156,18 @@ export class TurnOriginLedger {
     const first = !this.budgetLogged
     this.budgetLogged = true
     return first
+  }
+
+  /** True the first time the dispatch-wake cap is hit since the user last spoke. */
+  noteDispatchCapReached(): boolean {
+    const first = !this.dispatchCapLogged
+    this.dispatchCapLogged = true
+    return first
+  }
+
+  /** An X-Agent result started a turn on an idle session. */
+  dispatchWakeStarted(): void {
+    this.dispatchWakes++
   }
 
   /** A non-user item reached (or was queued into) the session's context. */

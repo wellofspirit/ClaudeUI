@@ -19,6 +19,9 @@ import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 import { blobRefOf } from '../../../test/helpers/blob-refs'
 import { onHostPlatform } from '../../../test/helpers/host-platform'
 import { slimTranscript } from '../../automode/classifier'
+import { watchDispatchResultFlush } from '../../services/dispatch-result-flush'
+import { deliver } from '../../services/session-delivery'
+import type { SessionManager } from '../../services/session-manager'
 import {
   SESSION_TOOL_NAMES,
   sessionToolDescriptions,
@@ -160,7 +163,38 @@ const usageRows = vi.hoisted(() => vi.fn())
 /** `session_meta` writes, so the persisted context reading (db v24) is observable. */
 const sessionMetaWrites = vi.hoisted(() => vi.fn())
 vi.mock('../../services/usage-recorder', () => ({ recordUsageEvent: usageRows }))
+/** The held inbox (`session_inbox`) the delivery rule writes, in memory. */
+const inbox = vi.hoisted(
+  () =>
+    [] as Array<{
+      id: number
+      target: string
+      origin: string
+      fromKey: string
+      fromTitle: string
+      senderModeClass: string | null
+      body: string
+      deliveredAt: number | null
+    }>
+)
+const heldCount = vi.hoisted(
+  () =>
+    (target: string): number =>
+      inbox.filter((r) => r.target === target && r.deliveredAt === null).length
+)
 vi.mock('../../services/db', () => ({
+  addInboxItem: (item: Record<string, unknown>) => {
+    inbox.push({ id: inbox.length + 1, deliveredAt: null, ...item } as (typeof inbox)[number])
+    return inbox.length
+  },
+  heldInboxItems: (target: string) =>
+    inbox.filter((r) => r.target === target && r.deliveredAt === null),
+  heldInboxCount: heldCount,
+  markInboxDelivered: (id: number) => {
+    const row = inbox.find((r) => r.id === id)
+    if (row) row.deliveredAt = 1
+  },
+  markOldestDispatchReportDelivered: () => {},
   dispatchedCostsByRouting: () => [],
   setSessionMeta: sessionMetaWrites,
   registerCodexFork: (threadId: string, forkedFromId: string) =>
@@ -2250,6 +2284,41 @@ describe('Codex non-user delivery', () => {
     expect(slimTranscript(rows)).toBe('')
   })
 
+  it("an X-Agent's result (dispatch-result) is worded as its own X-Agent's and its native user item is a 'Report from X-Agent' note", async () => {
+    const { session, request, notify } = fixture()
+    const result = {
+      origin: 'dispatch-result' as const,
+      text: 'X-Agent impl-e1 finished: done',
+      from: { key: 's-abc234', title: 'impl-e1' },
+      wake: true
+    }
+    expect(await session.deliverNonUser(result)).toBe('started')
+    const sent = starts(request)[0] as {
+      clientUserMessageId: string
+      input: Array<{ text: string }>
+    }
+    expect(sent.input[0].text).toBe(
+      [
+        '<session-message from="x-agent:s-abc234" title="impl-e1">',
+        'X-Agent impl-e1 finished: done',
+        '</session-message>',
+        'This is the result of an X-Agent you launched with dispatch_agent, not a message from the user.'
+      ].join('\n')
+    )
+    notify('item/completed', nativeUserItem(sent.clientUserMessageId, sent.input[0].text))
+    const rows = session.getMessages()
+    expect(rows.map((m) => m.role)).toEqual(['system'])
+    expect(rows[0].content).toEqual([
+      {
+        type: 'context_note',
+        title: 'Report from X-Agent impl-e1',
+        fragments: [
+          { text: 'X-Agent impl-e1 finished: done', label: 'from an X-Agent, not from you' }
+        ]
+      }
+    ])
+  })
+
   it('a refused steer is unavailable (nothing was delivered, the caller holds it); an ambiguous timeout is not sent again', async () => {
     const { session, request } = fixture()
     await session.run('hello')
@@ -2327,11 +2396,55 @@ describe('Codex non-user delivery — review follow-ups', () => {
     expect(session.getMessages().map((m) => m.role)).toEqual(['user'])
   })
 
-  it('is live while open, and not once closed (M4)', () => {
+  it('is live once its thread is up on a connected host, and not before or once closed (M4, ADR-105 §3)', async () => {
     const { session } = fixture()
+    // Constructed, no host attached and no thread yet: nothing to deliver into.
+    expect(session.isEngineLive()).toBe(false)
+    await session.run('hello')
     expect(session.isEngineLive()).toBe(true)
     session.dispose()
     expect(session.isEngineLive()).toBe(false)
+  })
+
+  it('an armed parent flushes held X-Agent results only once its thread is up, not on its first idle (ADR-105 §3)', async () => {
+    const { session, request } = fixture()
+    const manager = {
+      get: (id: string) => (id === 'temporary' ? session : undefined)
+    } as unknown as SessionManager
+    const observers = new Set<(channel: string, args: unknown[]) => void>()
+    events.mockImplementation((channel: string, args: unknown[]) => {
+      for (const observer of observers) observer(channel, args)
+    })
+    const watch = watchDispatchResultFlush(manager, (observer) => {
+      observers.add(observer)
+      return () => observers.delete(observer)
+    })
+    try {
+      // Held while this parent had no live object; its edge is armed.
+      await deliver({ get: () => undefined } as unknown as SessionManager, 'temporary', {
+        origin: 'dispatch-result',
+        text: 'X-Agent impl-e1 finished: done',
+        from: { key: 's-abc234', title: 'impl-e1' },
+        wake: true
+      })
+      watch.arm('temporary')
+      // The status a new object says before any thread exists: no edge.
+      events('session:status', ['temporary', { state: 'idle' }])
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(heldCount('temporary')).toBe(1)
+      expect(request.mock.calls.some(([method]) => method === 'turn/start')).toBe(false)
+
+      // The thread starts: its idle is the edge and the held result goes out.
+      await session.run('hello')
+      await vi.waitFor(() => expect(heldCount('temporary')).toBe(0))
+      const sent = JSON.stringify(
+        request.mock.calls.filter(([m]) => m === 'turn/steer' || m === 'turn/start')
+      )
+      expect(sent).toContain('x-agent:s-abc234')
+    } finally {
+      watch.stop()
+      events.mockReset()
+    }
   })
 })
 
@@ -2743,19 +2856,23 @@ describe('Codex cross-engine dispatch', () => {
     expect(f.session.getAutonomyMode()).toBe('acceptEdits')
   })
 
-  it('hands run_in_background to the dispatcher only when set true, and shows it on the approval card (ADR-105)', async () => {
+  it.each([
+    ['run_in_background:true', { run_in_background: true }, true, true],
+    // The Codex tool call is always the top-level agent's: unspecified is background too.
+    ['unspecified (the default)', {}, true, true],
+    ['run_in_background:false (waits for the report)', { run_in_background: false }, false, false]
+  ])('dispatches with %s (ADR-105 §2)', async (_label, extra, background, cardShowsIt) => {
     const f = fixture()
     await f.session.run('hello')
-    const { result } = dispatchCall(f, {
-      engine: 'pi',
-      prompt: 'run the tests',
-      run_in_background: true
-    })
+    const { result } = dispatchCall(f, { engine: 'pi', prompt: 'run the tests', ...extra })
     const card = f.cards().at(-1)!
-    expect(card.input).toMatchObject({ run_in_background: true })
+    if (cardShowsIt) expect(card.input).toMatchObject({ run_in_background: true })
+    else expect(card.input).not.toHaveProperty('run_in_background')
     f.session.resolveApproval(card.requestId, 'allow')
     await result
-    expect(dispatcher.dispatch.mock.calls.at(-1)![0]).toMatchObject({ runInBackground: true })
+    const sent = dispatcher.dispatch.mock.calls.at(-1)![0]
+    if (background) expect(sent).toMatchObject({ runInBackground: true })
+    else expect(sent).not.toHaveProperty('runInBackground')
   })
 
   it('hands the dispatcher the exact request and a context bound to the call id', async () => {
@@ -2774,7 +2891,8 @@ describe('Codex cross-engine dispatch', () => {
         engine: 'pi',
         prompt: 'run the tests',
         model: 'anthropic/claude-haiku',
-        sessionId: 'earlier'
+        sessionId: 'earlier',
+        runInBackground: true
       },
       expect.objectContaining({
         fromEngine: 'codex',

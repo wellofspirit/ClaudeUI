@@ -1586,6 +1586,15 @@ export const MIGRATIONS: Migration[] = [
         ALTER TABLE dispatch_target ADD COLUMN hand_back INTEGER NOT NULL DEFAULT 0;
       `)
     }
+  },
+  {
+    // Slice B-3b: the run an X-Agent result in the held inbox reports (origin `dispatch-result`),
+    // so the flush that finally delivers it stamps exactly that run's `dispatch_report` row.
+    // NULL for every other item and for an interrupted-at-quit notice (no run ended).
+    version: 37,
+    up(db) {
+      db.exec('ALTER TABLE session_inbox ADD COLUMN report_run INTEGER')
+    }
   }
 ]
 
@@ -1993,11 +2002,13 @@ export function deleteSessionMeta(sessionId: string): void {
 export interface InboxItem {
   id: number
   target: string
-  origin: 'session-message' | 'agent-note'
+  origin: 'session-message' | 'agent-note' | 'dispatch-result'
   fromKey: string
   fromTitle: string
   senderModeClass: 'bypass' | 'prompting' | null
   body: string
+  /** The `dispatch_report` run a held X-Agent result stands for (its row is stamped when it goes out). */
+  reportRun: number | null
   createdAt: number
   deliveredAt: number | null
 }
@@ -2010,6 +2021,7 @@ interface InboxRow {
   from_title: string
   sender_mode_class: string | null
   body: string
+  report_run: number | null
   created_at: number
   delivered_at: number | null
 }
@@ -2018,7 +2030,10 @@ function inboxItem(row: InboxRow): InboxItem {
   return {
     id: row.id,
     target: row.target,
-    origin: row.origin === 'agent-note' ? 'agent-note' : 'session-message',
+    origin:
+      row.origin === 'agent-note' || row.origin === 'dispatch-result'
+        ? row.origin
+        : 'session-message',
     fromKey: row.from_key,
     fromTitle: row.from_title,
     senderModeClass:
@@ -2026,6 +2041,8 @@ function inboxItem(row: InboxRow): InboxItem {
         ? row.sender_mode_class
         : null,
     body: row.body,
+    reportRun:
+      row.report_run === null || row.report_run === undefined ? null : Number(row.report_run),
     createdAt: Number(row.created_at),
     deliveredAt: row.delivered_at === null ? null : Number(row.delivered_at)
   }
@@ -2033,14 +2050,17 @@ function inboxItem(row: InboxRow): InboxItem {
 
 /** Hold an item for `target`'s next turn. Returns the row id. */
 export function addInboxItem(
-  item: Omit<InboxItem, 'id' | 'deliveredAt' | 'createdAt'> & { createdAt?: number },
+  item: Omit<InboxItem, 'id' | 'deliveredAt' | 'createdAt' | 'reportRun'> & {
+    createdAt?: number
+    reportRun?: number | null
+  },
   db: Db = getDb()
 ): number {
   const info = db
     .prepare(
       `INSERT INTO session_inbox
-         (target, origin, from_key, from_title, sender_mode_class, body, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+         (target, origin, from_key, from_title, sender_mode_class, body, report_run, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       item.target,
@@ -2049,6 +2069,7 @@ export function addInboxItem(
       item.fromTitle,
       item.senderModeClass,
       item.body,
+      item.reportRun ?? null,
       item.createdAt ?? Date.now()
     )
   return Number(info.lastInsertRowid)
@@ -2729,6 +2750,15 @@ export function dispatchTargetsNotStopped(db: Db = getDb()): DispatchTargetRow[]
   ).map(dispatchTargetRow)
 }
 
+/** Every target still marked `running` (at boot: the ones the last process left behind). */
+export function runningDispatchTargets(db: Db = getDb()): DispatchTargetRow[] {
+  return (
+    db
+      .prepare("SELECT * FROM dispatch_target WHERE state = 'running' ORDER BY created_at, id")
+      .all() as DispatchTargetDbRow[]
+  ).map(dispatchTargetRow)
+}
+
 /** The mutable columns of a target row; an omitted key keeps its value. */
 export type DispatchTargetPatch = Partial<
   Pick<
@@ -2851,7 +2881,7 @@ export interface DispatchReportRow {
   /** As received; sanitised at render and delivery time. Null unless `delivered` or `fallback`. */
   report: string | null
   createdAt: number
-  /** Null until the report has been delivered into the parent (slice B-3b). */
+  /** Null until the result was handed to the parent's engine (a held one stays null until its flush). */
   deliveredAt: number | null
 }
 
@@ -2931,6 +2961,18 @@ export function dispatchReportsOf(
       )
       .all(...targetIds) as DispatchReportDbRow[]
   ).map(dispatchReportRow)
+}
+
+/** A run's report was handed to its parent's engine (ADR-105 §3): stamp it, once. */
+export function markDispatchReportDelivered(
+  targetId: string,
+  run: number,
+  now = Date.now(),
+  db: Db = getDb()
+): void {
+  db.prepare(
+    'UPDATE dispatch_report SET delivered_at = ? WHERE target_id = ? AND run = ? AND delivered_at IS NULL'
+  ).run(now, targetId, run)
 }
 
 /** How many runs of this target have ended with a row. */

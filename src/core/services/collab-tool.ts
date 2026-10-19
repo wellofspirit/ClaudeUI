@@ -12,8 +12,10 @@ import {
   DISPATCH_NAME_PARAM,
   dispatchAgentDescription,
   joinDispatchHints,
-  OWN_SUBAGENT_TOOL
+  OWN_SUBAGENT_TOOL,
+  runsInBackground
 } from '../../shared/dispatch-agent-description'
+import type { ToolCallOwner } from './tool-use-owners'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
 
 export interface CollabServerContext {
@@ -35,6 +37,12 @@ export interface CollabServerContext {
   /** BaseSession.addDispatchedCost — folds a dispatched turn's spend into this
    *  session's own cost breakdown (ADR-033 Slice C). */
   addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) => void
+  /**
+   * Who made a tool call, from the session's stream (`ToolUseOwners.ownerOf`): the default
+   * for `run_in_background` is "background" for the root agent only (ADR-105 §2), and a
+   * subagent's call or one that cannot be attributed waits. Absent: every call waits.
+   */
+  callOwner?: (toolUseId: string | undefined) => Promise<ToolCallOwner>
 }
 
 /**
@@ -128,6 +136,16 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
           // undefined; the dispatcher gates every subagent/task emit on its
           // presence and never fails a dispatch over it.
           const toolUseId = extra?.meta?.['claudecode/toolUseId']
+          const callId = typeof toolUseId === 'string' ? toolUseId : undefined
+          // Only a call that may run in the background needs to know the caller (a wait of up to
+          // 250 ms on a call whose frame has not been seen yet): an unspecified one takes the
+          // default from it, and a subagent's explicit one is told its report goes to the root.
+          const owner =
+            run_in_background !== false && callId && ctx.callOwner
+              ? await ctx.callOwner(callId)
+              : undefined
+          const callerIsRoot = owner === 'root'
+          const background = runsInBackground(run_in_background, callerIsRoot, callId)
           const result = await crossEngineDispatcher.dispatch(
             {
               engine,
@@ -136,7 +154,8 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
               name,
               description,
               sessionId: session_id,
-              ...(run_in_background === true ? { runInBackground: true } : {})
+              ...(background ? { runInBackground: true } : {}),
+              ...(background && owner === 'subagent' ? { fromSubagent: true } : {})
             },
             {
               fromEngine: ctx.engineId,
@@ -148,7 +167,7 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
               ...(ctx.blockedCalls ? { blockedCalls: ctx.blockedCalls } : {}),
               emit: ctx.emit,
               addDispatchedCost: ctx.addDispatchedCost,
-              toolUseId: typeof toolUseId === 'string' ? toolUseId : undefined,
+              toolUseId: callId,
               extra
             }
           )

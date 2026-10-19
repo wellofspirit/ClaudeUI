@@ -60,7 +60,7 @@ import { convertOpencodeHistory, readOpencodeHistory } from './history'
 import { ShellOutputPoller } from './shell-output-poller'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
-import { buildSessionMessageWrapper } from '../../shared/session-message-wrapper'
+import { buildSessionMessageWrapper, wrapperSender } from '../../shared/session-message-wrapper'
 import { sessionMessageNote } from '../services/agent-note'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { AccountIdentity } from '../../shared/account-key'
@@ -592,7 +592,7 @@ export class OpencodeSession extends BaseSession {
    * and on reload), and which is never put in `messageHistory` as the user's.
    */
   async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
-    const text = buildSessionMessageWrapper(item.from, item.text)
+    const text = buildSessionMessageWrapper(wrapperSender(item), item.text)
     if (this.isProcessing && this.client && this.openSessionId) {
       try {
         await this.postNonUserPrompt(text, item)
@@ -1053,6 +1053,10 @@ export class OpencodeSession extends BaseSession {
       // is this very server (one per config, S2), and it lingers after reads.
       await discoverOpencodeModels().catch(() => [])
       this.adoptCatalogCaps()
+      // The engine is up (a connected client with a session open): say so. The held X-Agent
+      // results of a reopened or respawned parent are flushed on this `idle` (ADR-105 §3,
+      // dispatch-result-flush.ts); a chat that has no session yet is not live and says nothing.
+      if (this.isEngineLive() && !this._cancelled) this.sendStatus()
     } catch (err) {
       const detail =
         err instanceof OpencodePermissionGuardError
@@ -1339,6 +1343,7 @@ export class OpencodeSession extends BaseSession {
         sessionMessageNote({
           id: message.id,
           fromTitle: pending.from.title,
+          fromKey: wrapperSender(pending).key,
           text: pending.text,
           timestamp: message.timestamp
         })

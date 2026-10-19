@@ -25,8 +25,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 18 (hand_back, ADR-105 §3)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('18')
+  it('is version 20 (background by default, ADR-105 §2)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('20')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -398,6 +398,9 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
           expect(d).toContain('DIFFERENT engine')
           expect(d).toContain('use the agent tool')
           expect(d).toContain('session_id')
+          // The fallback tells the same background story as the shared description (v20).
+          expect(d).toContain('its report arrives later as a message from it')
+          expect(d).not.toContain('returned as this tool result. The result includes')
         }
       )
     }

@@ -66,7 +66,7 @@ describe('migration v36', () => {
         .run()
       runMigrations(older)
       expect(table()).toBeDefined()
-      expect(older.pragma('user_version', { simple: true })).toBe(36)
+      expect(older.pragma('user_version', { simple: true })).toBe(37)
       const columns = (
         older.prepare('PRAGMA table_info(dispatch_report)').all() as { name: string }[]
       ).map((c) => c.name)
@@ -87,7 +87,7 @@ describe('migration v36', () => {
 
   it('the version is the next free one: nothing else claims 36', () => {
     expect(MIGRATIONS.filter((m) => m.version === 36)).toHaveLength(1)
-    expect(Math.max(...MIGRATIONS.map((m) => m.version))).toBe(36)
+    expect(Math.max(...MIGRATIONS.map((m) => m.version))).toBe(37)
   })
 })
 

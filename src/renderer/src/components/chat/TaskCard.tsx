@@ -452,7 +452,12 @@ export function TaskCard({
   const canAct = !isHistorical || hasActiveTask
   // The input asked for the background, or cli.js reports the running task
   // there: from the start, or since a "Send to background" flip.
-  const isBackground = !!view.background || activeTask?.isBackgrounded === true
+  // ...or the run's own terminal notification says it was one (a dispatched X-Agent that is
+  // background by default has no flag on its input; once finished its record is gone).
+  const isBackground =
+    !!view.background ||
+    activeTask?.isBackgrounded === true ||
+    bgNotification?.isBackgrounded === true
   // cli.js has registered this task as running in the FOREGROUND — the only
   // state `background_tasks` can act on. Before task_started it answers "no
   // such task", and a background task has nothing to move.

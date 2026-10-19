@@ -18,6 +18,7 @@
 import { homedir } from 'node:os'
 import path from 'node:path'
 import {
+  addInboxItem,
   allDispatchTargetHarnessRefs,
   dispatchTargetSpend,
   dispatchTargetsByParent,
@@ -26,6 +27,7 @@ import {
   getDispatchTargetByHarnessRef,
   insertDispatchTargetWithRef,
   interruptRunningDispatchTargets,
+  runningDispatchTargets,
   updateDispatchTarget,
   type DispatchTargetPatch,
   type DispatchTargetRow,
@@ -34,6 +36,8 @@ import {
 import { mintRef } from './session-ref-mint'
 import { logger } from './logger'
 import { isRef } from '../../shared/session-links'
+import { X_AGENT_KEY_PREFIX } from '../../shared/session-message-wrapper'
+import { interruptedResultText } from './dispatch-result-text'
 import type { EngineId } from '../../shared/types'
 
 export type { DispatchTargetRow, DispatchTargetState, DispatchTargetPatch }
@@ -160,12 +164,41 @@ export const dispatchLedger: DispatchLedgerStore = {
 }
 
 /**
+ * The parent's inbox learns that an X-Agent it launched was cut off by the quit
+ * (ADR-105 §3, origin `dispatch-result`). No session object exists at boot, so the item goes
+ * straight into `session_inbox`: it is delivered ahead of the parent's next turn, like any
+ * held item. B-4 will point the model at `session_message` instead of `session_id`.
+ */
+function leaveInterruptedNotice(row: DispatchTargetRow): void {
+  if (!row.parentSessionId) return
+  try {
+    const name = row.name ?? row.id
+    addInboxItem({
+      target: row.parentSessionId,
+      origin: 'dispatch-result',
+      fromKey: `${X_AGENT_KEY_PREFIX}${row.id}`,
+      fromTitle: name,
+      senderModeClass: null,
+      body: interruptedResultText(name, row.harnessRef)
+    })
+  } catch (err) {
+    logger.warn(
+      'DispatchLedger',
+      `could not tell the parent of ${row.id} it was interrupted: ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+}
+
+/**
  * Boot, once per process: a row still `running` belongs to a process that no longer
  * exists (an app quit or a crash). Nothing resumes automatically (ADR-105 §5).
  */
 export function interruptStaleDispatchTargets(): number {
   try {
-    return interruptRunningDispatchTargets()
+    const running = runningDispatchTargets()
+    const changed = interruptRunningDispatchTargets()
+    for (const row of running) leaveInterruptedNotice(row)
+    return changed
   } catch (err) {
     logger.warn(
       'DispatchLedger',

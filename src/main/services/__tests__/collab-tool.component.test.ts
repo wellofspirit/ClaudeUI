@@ -304,6 +304,53 @@ describe('createCollabServer', () => {
     expect(dispatchSpy.mock.calls[1][0]).not.toHaveProperty('runInBackground')
   })
 
+  it('runs in the background by default for the ROOT agent only: a subagent, an unattributed call and a call with no id wait (ADR-105 §2)', async () => {
+    const owners: Record<string, 'root' | 'subagent' | 'unknown'> = {
+      toolu_root: 'root',
+      toolu_sub: 'subagent',
+      toolu_unseen: 'unknown'
+    }
+    const callOwner = vi.fn(async (id: string | undefined) => owners[id ?? ''] ?? 'unknown')
+    const server = createCollabServer(makeCtx({ callOwner }))
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'x', sessionId: 's' })
+    const call = async (
+      toolUseId: string | undefined,
+      args: Record<string, unknown> = {}
+    ): Promise<unknown> => {
+      const extra = { ...makeExtra(), meta: toolUseId ? { 'claudecode/toolUseId': toolUseId } : {} }
+      await server.tools[0].handler({ engine: 'opencode', prompt: 'p', ...args }, extra)
+      return dispatchSpy.mock.calls.at(-1)![0]
+    }
+    expect(await call('toolu_root')).toMatchObject({ runInBackground: true })
+    expect(await call('toolu_sub')).not.toHaveProperty('runInBackground')
+    expect(await call('toolu_unseen')).not.toHaveProperty('runInBackground')
+    expect(await call(undefined)).not.toHaveProperty('runInBackground')
+    // Explicit values win over the caller. An explicit false is not even asked who it is;
+    // an explicit true from a subagent is told its report goes to the top-level agent (N3).
+    callOwner.mockClear()
+    expect(await call('toolu_root', { run_in_background: false })).not.toHaveProperty(
+      'runInBackground'
+    )
+    expect(callOwner).not.toHaveBeenCalled()
+    const fromSub = await call('toolu_sub', { run_in_background: true })
+    expect(fromSub).toMatchObject({ runInBackground: true, fromSubagent: true })
+    expect(await call('toolu_root', { run_in_background: true })).not.toHaveProperty('fromSubagent')
+  })
+
+  it('without an owner lookup every call waits, as before', async () => {
+    const server = createCollabServer(makeCtx())
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'x', sessionId: 's' })
+    await server.tools[0].handler(
+      { engine: 'opencode', prompt: 'p' },
+      { ...makeExtra(), meta: { 'claudecode/toolUseId': 'toolu_1' } }
+    )
+    expect(dispatchSpy.mock.calls[0][0]).not.toHaveProperty('runInBackground')
+  })
+
   it("the engine param's schema accepts every OTHER engine and rejects both 'claude' (same-engine) and an unlisted value", () => {
     const server = createCollabServer(makeCtx())
     const engineSchema = server.tools[0].inputSchema.engine as unknown as {

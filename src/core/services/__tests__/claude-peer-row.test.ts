@@ -39,6 +39,7 @@ describe('findPeerRow', () => {
     fs.writeFileSync(file, [JSON.stringify({ type: 'user', uuid: 'u0' }), row('u1')].join('\n'))
     expect(await findPeerRow(file, 'u1')).toEqual({
       fromTitle: 'probe-A',
+      fromKey: 'uds:x',
       body: 'ping',
       native: true
     })

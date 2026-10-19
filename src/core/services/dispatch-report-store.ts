@@ -10,6 +10,7 @@ import {
   dispatchReportsOf,
   insertDispatchReport,
   latestDispatchReport,
+  markDispatchReportDelivered,
   type DispatchReportRow,
   type DispatchReportStatus
 } from './db'
@@ -27,6 +28,8 @@ export interface DispatchReportStore {
     report: string | null
     createdAt: number
   }): DispatchReportRow | undefined
+  /** The run's result was handed to its parent's engine (B-3b): stamp `deliveredAt`. */
+  markDelivered(targetId: string, run: number, at: number): void
   /** The target's newest row. */
   latest(targetId: string): DispatchReportRow | undefined
   /** Every run's row of these targets, oldest first. */
@@ -37,6 +40,7 @@ export interface DispatchReportStore {
 
 export const dispatchReports: DispatchReportStore = {
   add: (input) => insertDispatchReport(input),
+  markDelivered: (targetId, run, at) => markDispatchReportDelivered(targetId, run, at),
   latest: (targetId) => latestDispatchReport(targetId),
   rowsOf: (targetIds) => dispatchReportsOf(targetIds),
   count: (targetId) => dispatchReportCount(targetId)

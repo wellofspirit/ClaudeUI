@@ -81,6 +81,14 @@ export class DispatchRun {
   finishedAs: { status: 'delivered' | 'fallback' | 'withheld'; report: string | null } | null = null
   /** The status of the terminal notification the run emitted. */
   terminalStatus: 'completed' | 'failed' | 'stopped' | null = null
+  /** The text of that notification (a failure's reason, a legacy run's last message). */
+  terminalSummary: string | null = null
+  /** The parent session was deleted: nothing is left to tell, so no result is delivered. */
+  parentEnded = false
+  /** The run's end was delivered into the parent (or held for it): never twice. */
+  resultSent = false
+  /** The run's number in the report store (set when its end was recorded). */
+  reportRun: number | null = null
   /** The run's turn hit a liveness cap (a `failed` end that was a timeout). */
   timedOut = false
   /** The blocking form's MCP progress ping; unset for a background run. */

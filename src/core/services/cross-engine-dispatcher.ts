@@ -231,6 +231,13 @@ import {
   type DispatchReportStore
 } from './dispatch-report-store'
 import { capReport, frameHandBack } from '../../shared/handback-frame'
+import {
+  failedResultText,
+  reportResultText,
+  sentenceLabel,
+  statusLine,
+  stoppedResultText
+} from './dispatch-result-text'
 import { ToolUseOwners } from './tool-use-owners'
 import { isHandbackPointerResult } from './task-notification-xml'
 import {
@@ -238,6 +245,7 @@ import {
   HAND_BACK_EMPTY_TEXT,
   HAND_BACK_ENDED_TEXT,
   HAND_BACK_FALLBACK_WARNING,
+  LAUNCH_ACK_MARKER,
   HAND_BACK_NOT_TARGET_TEXT,
   HAND_BACK_REPEAT_TEXT,
   HAND_BACK_SUBAGENT_TEXT,
@@ -385,6 +393,12 @@ export interface DispatchRequest {
   name?: string
   /** The caller's short summary of the task (ADR-105); stored the same way. */
   description?: string
+  /**
+   * The call came from a SUBAGENT of the parent session (it asked for the background
+   * explicitly): the report goes to the parent's top-level agent, so the launch answer must
+   * not promise it to the caller. Set by the registration that knows who called.
+   */
+  fromSubagent?: boolean
   /**
    * Launch the run in the background (ADR-105 §2): the call returns at once with the
    * X-Agent's id, and the result arrives on its task record. Absent / false waits for
@@ -2186,10 +2200,11 @@ function dispatchTaskStartedRecord(
     taskType: 'dispatch',
     ...(run.init.description ? { description: run.init.description } : {}),
     isBackgrounded: run.background,
-    // A blocking run's end is its tool_result. A background run's end wakes nothing until
-    // B-3 delivers its result into the parent (and flips this to true): while the record
-    // is armed with `wakesParent`, the attention gate holds back "Ready for input".
-    wakesParent: !run.background,
+    // A blocking run's end is its tool_result; a background run's end is a `dispatch-result`
+    // delivered into the parent (ADR-105 §3), which starts a turn of its own. Either way the
+    // parent is not waiting on the user while the record is armed, so the attention gate
+    // holds back "Ready for input" (a result that has to wait raises its own attention).
+    wakesParent: true,
     startedAt: run.init.startedAt
   }
 }
@@ -2221,6 +2236,7 @@ function emitDispatchNotification(
 ): void {
   ctx.run.notified = true
   ctx.run.terminalStatus = status
+  ctx.run.terminalSummary = summary
   if (!ctx.toolUseId) return
   ctx.emit('session:task-notification', {
     taskId: ctx.run.ledgerId ?? targetSessionId,
@@ -2229,6 +2245,9 @@ function emitDispatchNotification(
     outputFile: '',
     // A report is the card's body (S6's `HandbackReport`): whole, for a blocking run too.
     summary: ctx.run.background || report ? summary : summary.slice(0, 100),
+    // The card cannot tell from the tool input: a root agent's call runs in the background
+    // without saying so (ADR-105 §2), and its result is only the launch acknowledgement.
+    ...(ctx.run.background ? { isBackgrounded: true } : {}),
     ...(report
       ? { handback: report.handback, ...(report.warning ? { warning: report.warning } : {}) }
       : {}),
@@ -2717,6 +2736,7 @@ export class CrossEngineDispatcher {
     const running = new Set<string>()
     for (const run of this.runs.ofParent(parent)) {
       run.endRequested = true
+      run.parentEnded = true
       try {
         run.stopController.abort()
       } catch (err) {
@@ -3374,28 +3394,42 @@ export class CrossEngineDispatcher {
     cleanup: () => void
   ): Promise<DispatchResult> {
     const { run } = ctx
-    let result: DispatchResult
+    let result: DispatchResult = errorResult('Dispatch failed.', req.sessionId ?? '')
     try {
-      result = await this.runBody(req, ctx)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      logger.warn('CrossEngineDispatcher', `dispatch run failed: ${msg}`)
-      result = errorResult(`Dispatch failed: ${msg}`, req.sessionId ?? '')
-    }
-    try {
-      this.closeRun(ctx, result)
-    } catch (err) {
-      logger.warn('CrossEngineDispatcher', `dispatch run close failed: ${errText(err)}`)
-    }
-    this.recordRunOutcome(run)
-    // Its own try: a Stop on the card must still end the X-Agent when the close threw.
-    try {
-      this.settleTarget(run)
-    } catch (err) {
-      logger.warn('CrossEngineDispatcher', `dispatch run settle failed: ${errText(err)}`)
+      try {
+        result = await this.runBody(req, ctx)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        logger.warn('CrossEngineDispatcher', `dispatch run failed: ${msg}`)
+        result = errorResult(`Dispatch failed: ${msg}`, req.sessionId ?? '')
+      }
+      try {
+        this.closeRun(ctx, result)
+      } catch (err) {
+        logger.warn('CrossEngineDispatcher', `dispatch run close failed: ${errText(err)}`)
+      }
+      try {
+        this.recordRunOutcome(run)
+      } catch (err) {
+        logger.warn('CrossEngineDispatcher', `dispatch run record failed: ${errText(err)}`)
+      }
+      // Its own try: a Stop on the card must still end the X-Agent when the close threw.
+      try {
+        this.settleTarget(run)
+      } catch (err) {
+        logger.warn('CrossEngineDispatcher', `dispatch run settle failed: ${errText(err)}`)
+      }
     } finally {
-      this.runs.remove(run)
-      cleanup()
+      // Whatever threw above, the slot is freed, the idle timer armed again and the run
+      // never rejects: a background run's `done` has nobody to catch it.
+      try {
+        this.runs.remove(run)
+        cleanup()
+      } catch (err) {
+        logger.warn('CrossEngineDispatcher', `dispatch run cleanup failed: ${errText(err)}`)
+      }
+      // Before the idle timer is armed again: a delivery that wakes the parent restarts it.
+      await this.deliverRunResult(run)
       this.rearmParentIdle(run)
     }
     return result
@@ -3439,11 +3473,16 @@ export class CrossEngineDispatcher {
       row = undefined
     }
     const label = row?.name ?? run.init.name ?? ledgerId
+    const head =
+      `X-Agent ${label} launched on ${req.engine}${row ? ` · ${row.model}` : ''} ` +
+      `(id ${ledgerId}, session_id ${harnessId}). ${LAUNCH_ACK_MARKER}`
     return {
-      text:
-        `X-Agent ${label} launched on ${req.engine}${row ? ` · ${row.model}` : ''} ` +
-        `(id ${ledgerId}, session_id ${harnessId}). It runs in the background; its result ` +
-        'appears on its agent card and is not returned to you here.',
+      text: req.fromSubagent
+        ? // Delivered to the root agent's conversation, never back to a subagent.
+          `${head}; its report is delivered to the top-level agent of this session, not to ` +
+          'you, so you will not receive it. Finish your own work without it.'
+        : `${head} and you can keep working: its report is not returned here, it arrives ` +
+          'later as a message from it (untrusted output, framed as such).',
       sessionId: harnessId
     }
   }
@@ -3711,15 +3750,145 @@ export class CrossEngineDispatcher {
     else if (run.terminalStatus === 'failed') status = run.timedOut ? 'timeout' : 'failed'
     else return
     try {
-      this.reports.add({
+      const row = this.reports.add({
         targetId: run.ledgerId,
         toolUseId: run.toolUseId ?? null,
         status,
         report,
         createdAt: this.now()
       })
+      run.reportRun = row?.run ?? null
     } catch (err) {
       logger.warn('CrossEngineDispatcher', `dispatch report store failed: ${errText(err)}`)
+    }
+  }
+
+  // ── delivery into the parent (ADR-105 §3, slice B-3b) ──────────────────────
+
+  /**
+   * A BACKGROUND run has ended: tell its parent, once. The result is one `dispatch-result`
+   * item through the parent's inbox (by durable id, so a parent with no live object holds it
+   * and a later flush delivers it). A blocking run's report is already its tool result, so it
+   * never comes here; a run whose launch failed before the target existed answered its call
+   * with the error and has nothing to deliver; a deleted parent has nobody to tell.
+   *
+   * A result that could not be delivered now (held, refused, a throw) raises the parent's
+   * attention instead (`session:dispatch-result-held`): its `wakesParent` record has just
+   * left, so without this the turn end it suppressed would never be announced.
+   */
+  private async deliverRunResult(run: DispatchRun): Promise<void> {
+    // Never throws (a sanitiser or ledger failure included): the run's end must not reject.
+    try {
+      await this.deliverRunResultNow(run)
+    } catch (err) {
+      logger.warn(
+        'CrossEngineDispatcher',
+        `delivering the result of run ${run.ledgerId ?? '?'} failed: ${errText(err)}`
+      )
+    }
+  }
+
+  private async deliverRunResultNow(run: DispatchRun): Promise<void> {
+    // A blocking run's report is its tool result, which goes back as this settles: its row
+    // is stamped now, unless the call was abandoned (the parent's Esc) and nobody gets it.
+    if (!run.background) {
+      if (!run.cancelController.signal.aborted) this.stampDelivered(run)
+      return
+    }
+    const parents = this.parents
+    if (!parents?.deliver || !run.bound || !run.ledgerId) return
+    if (run.parentEnded || run.resultSent) return
+    const text = this.resultTextFor(run)
+    if (text === null) return
+    run.resultSent = true
+    const parent = this.runs.parentOf(run.init.parentId)
+    const name = this.xAgentName(run)
+    let handed = false
+    try {
+      const outcome = await parents.deliver(parent, {
+        from: { key: run.ledgerId, title: name },
+        text,
+        ...(run.reportRun !== null ? { reportRun: run.reportRun } : {})
+      })
+      handed = outcome.result === 'delivered' || outcome.result === 'queued'
+      if (!handed)
+        logger.info(
+          'CrossEngineDispatcher',
+          `result of X-Agent ${run.ledgerId} is waiting in the inbox of ${parent}: ${outcome.result}${'why' in outcome ? ` (${outcome.why})` : ''}`
+        )
+    } catch (err) {
+      logger.warn(
+        'CrossEngineDispatcher',
+        `delivering the result of ${run.ledgerId} failed: ${errText(err)}`
+      )
+    }
+    if (handed) {
+      this.stampDelivered(run)
+      return
+    }
+    try {
+      parents.emit(parent, 'session:dispatch-result-held', { name: sentenceLabel(name) })
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `held-result event failed: ${errText(err)}`)
+    }
+  }
+
+  private stampDelivered(run: DispatchRun): void {
+    if (!run.ledgerId || run.reportRun === null) return
+    try {
+      this.reports.markDelivered(run.ledgerId, run.reportRun, this.now())
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `report delivery stamp failed: ${errText(err)}`)
+    }
+  }
+
+  /** What the parent reads for this run's end; null when the run ended without a recorded end. */
+  private resultTextFor(run: DispatchRun): string | null {
+    const name = this.xAgentName(run)
+    let row: DispatchTargetRow | undefined
+    try {
+      row = run.ledgerId ? this.ledger.get(run.ledgerId) : undefined
+    } catch {
+      row = undefined
+    }
+    const framed = (report: string, warning?: string): string =>
+      reportResultText({
+        name,
+        report,
+        status: statusLine({ name, usage: run.usage, ...this.spendOf(row) }),
+        frame: (body) =>
+          frameHandBack({
+            name,
+            engine: run.init.engine,
+            model: row?.model ?? '',
+            report: body,
+            ...(warning ? { warning } : {})
+          })
+      })
+    const done = run.finishedAs
+    if (done?.status === 'delivered' && done.report !== null) return framed(done.report)
+    if (done?.status === 'fallback' && done.report !== null)
+      return framed(done.report, HAND_BACK_FALLBACK_WARNING)
+    if (done?.status === 'withheld') return handBackWithheldText(sentenceLabel(name))
+    if (run.terminalStatus === 'stopped') return stoppedResultText(name)
+    if (run.terminalStatus === 'failed') return failedResultText(name, run.terminalSummary)
+    // A run that does not hand a report back (the dispatcher's own suites): its last message.
+    if (run.terminalStatus === 'completed' && run.terminalSummary !== null)
+      return framed(run.terminalSummary)
+    return null
+  }
+
+  /** What the X-Agent has spent in all its runs, from the usage rows; nothing when that cannot be read. */
+  private spendOf(row: DispatchTargetRow | undefined): {
+    costUsd?: number
+    unpricedTurns?: number
+  } {
+    if (!row?.harnessRef) return {}
+    try {
+      const spent = this.ledger.spend(row.harnessRef)
+      return { costUsd: spent.costUsd, unpricedTurns: spent.unpricedTurns }
+    } catch {
+      return {}
     }
   }
 

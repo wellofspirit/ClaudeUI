@@ -286,7 +286,14 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     )) as { content: Array<{ type: string; text: string }>; isError?: boolean }
 
     expect(dispatch).toHaveBeenCalledWith(
-      { engine: 'claude', prompt: 'review the diff', model: 'haiku', sessionId: undefined },
+      {
+        engine: 'claude',
+        prompt: 'review the diff',
+        model: 'haiku',
+        sessionId: undefined,
+        // A root caller with a call id runs in the background unless it says otherwise.
+        runInBackground: true
+      },
       expect.objectContaining({
         fromEngine: 'opencode',
         fromRoutingId: 'ses_caller',
@@ -309,40 +316,47 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     expect(result.content[0].text).toContain('session_id: claude-42')
   })
 
-  it('passes run_in_background through to the DispatchRequest only when it is true (ADR-105)', async () => {
+  it('run_in_background: explicit values win; unspecified is background for the root caller with a call id only (ADR-105 §2)', async () => {
     const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'claude-1' }))
+    const handle = callerHandle()
     const tool = getDispatchTool(tmp, {
-      lookupCallerSession: () => ({
-        cwd: '/proj',
-        getAutonomyMode: () => 'default',
-        getMessages: () => [],
-        emit: vi.fn(),
-        addDispatchedCost: vi.fn()
-      }),
+      lookupCallerSession: (id) => (id === 'ses_1' ? handle : undefined),
+      resolveCallerRoot: async (id) =>
+        id === 'ses_child' ? { root: 'ses_1', restriction: undefined } : undefined,
       dispatch
     })
-    await tool.handler(
-      {
-        engine: 'claude',
-        prompt: 'x',
+    const call = async (args: Record<string, unknown>): Promise<unknown> => {
+      await tool.handler({ engine: 'claude', prompt: 'x', ...args }, makeExtra())
+      return dispatch.mock.calls.at(-1)![0]
+    }
+    // explicit true / false
+    expect(
+      await call({ run_in_background: true, __xeng_caller_session: 'ses_1', __xeng_call_id: 'c1' })
+    ).toMatchObject({ runInBackground: true })
+    expect(
+      await call({ run_in_background: false, __xeng_caller_session: 'ses_1', __xeng_call_id: 'c2' })
+    ).not.toHaveProperty('runInBackground')
+    // unspecified: the chat's own agent (root) with a call id -> background
+    expect(await call({ __xeng_caller_session: 'ses_1', __xeng_call_id: 'c3' })).toMatchObject({
+      runInBackground: true
+    })
+    // unspecified, no call id: nowhere to show or report the run -> it waits
+    expect(await call({ __xeng_caller_session: 'ses_1' })).not.toHaveProperty('runInBackground')
+    // unspecified, a subagent child of the chat (resolved through resolveCallerRoot) -> it waits
+    expect(
+      await call({ __xeng_caller_session: 'ses_child', __xeng_call_id: 'c5' })
+    ).not.toHaveProperty('runInBackground')
+    // ...and a subagent can still ask for the background explicitly
+    expect(
+      await call({
         run_in_background: true,
-        __xeng_caller_session: 'ses_1',
-        __xeng_call_id: 'call_1'
-      },
-      makeExtra()
-    )
-    await tool.handler(
-      {
-        engine: 'claude',
-        prompt: 'x',
-        run_in_background: false,
-        __xeng_caller_session: 'ses_1',
-        __xeng_call_id: 'call_2'
-      },
-      makeExtra()
-    )
-    expect(dispatch.mock.calls[0][0]).toMatchObject({ runInBackground: true })
-    expect(dispatch.mock.calls[1][0]).not.toHaveProperty('runInBackground')
+        __xeng_caller_session: 'ses_child',
+        __xeng_call_id: 'c6'
+      })
+    ).toMatchObject({ runInBackground: true, fromSubagent: true })
+    expect(
+      await call({ run_in_background: true, __xeng_caller_session: 'ses_1', __xeng_call_id: 'c7' })
+    ).not.toHaveProperty('fromSubagent')
   })
 
   it('passes name and description through to the DispatchRequest (ADR-105)', async () => {
@@ -470,7 +484,8 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
         engine: 'pi',
         prompt: 'do a thing',
         model: 'openai-codex/gpt-5.6-luna',
-        sessionId: undefined
+        sessionId: undefined,
+        runInBackground: true
       },
       expect.objectContaining({
         fromEngine: 'opencode',

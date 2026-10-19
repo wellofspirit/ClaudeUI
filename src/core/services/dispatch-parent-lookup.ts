@@ -9,7 +9,12 @@ import type { ChatMessage, EngineId } from '../../shared/types'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { claudeProjectKeyFor } from './claude-transcript-locator'
 import { readSessionHistory } from './engine-history'
-import type { DispatchParentLookup, LiveParentSession } from './dispatch-parent'
+import type {
+  DispatchParentLookup,
+  DispatchResultItem,
+  DispatchResultOutcome,
+  LiveParentSession
+} from './dispatch-parent'
 
 export interface DispatchParentLookupDeps {
   /** The session object that answers to a routing id (`SessionManager.get`); it may be cancelled. */
@@ -22,6 +27,8 @@ export interface DispatchParentLookupDeps {
   ) => { messages: ChatMessage[]; cwd: string; engineId?: EngineId } | undefined
   /** Read a session's history cold. Defaults to the engines' `readSessionHistory`. */
   readHistory?: (routingId: string, cwd: string, engineId?: EngineId) => Promise<ChatMessage[]>
+  /** `deliver(manager, parentId, { origin: 'dispatch-result', wake: true, … })` of `session-delivery`. */
+  deliverResult?: (parentId: string, item: DispatchResultItem) => Promise<DispatchResultOutcome>
 }
 
 /** Read a parent's transcript the way a resume seeds canonical's: Claude's is located, the others' keyed by cwd. */
@@ -37,7 +44,9 @@ async function readParentHistory(
 
 export function makeDispatchParentLookup(deps: DispatchParentLookupDeps): DispatchParentLookup {
   const read = deps.readHistory ?? readParentHistory
+  const { deliverResult } = deps
   return {
+    ...(deliverResult ? { deliver: (parentId, item) => deliverResult(parentId, item) } : {}),
     session: (parentId) => deps.getSession(parentId),
     emit: (parentId, channel, data) => deps.emitEvent(channel, [parentId, data]),
     canonicalMessages: (parentId) => deps.canonical(parentId)?.messages ?? [],

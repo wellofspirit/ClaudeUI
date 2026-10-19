@@ -1622,6 +1622,69 @@ describe('useClaudeEvents extended component tests', () => {
       expect(notified).toHaveBeenCalledWith('Ready for input', expect.anything())
     })
 
+    describe('a background X-Agent (dispatch record with wakesParent) — ADR-105 §3', () => {
+      const dispatchRecord = {
+        toolUseId: 'tx',
+        taskId: 's-abc234',
+        taskType: 'dispatch',
+        isBackgrounded: true,
+        wakesParent: true
+      }
+      const status = (state: 'idle' | 'running'): void =>
+        app.emit('session:status', routingId, makeSessionStatus({ state, sessionId: routingId }))
+      const attention = (): boolean => useSessionStore.getState().sessions[routingId].needsAttention
+
+      it('holds the turn end back while it runs; its result is delivered as a turn whose own end claims the turn', () => {
+        seed.taskStarted(routingId, dispatchRecord)
+        app.emit('session:result', routingId)
+        // Violet, not yellow, and no "Ready for input": the X-Agent's result will wake the agent.
+        expect(attention()).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+
+        // The X-Agent ends: its record leaves and the delivery starts a turn on the parent.
+        seed.taskNotification(
+          routingId,
+          makeTaskNotification({ toolUseId: 'tx', status: 'completed' })
+        )
+        status('running')
+        expect(attention()).toBe(false)
+        app.emit('session:result', routingId)
+        expect(attention()).toBe(true)
+        expect(notified).toHaveBeenCalledWith('Ready for input', expect.anything())
+      })
+
+      it('a result that had to wait raises attention and a notification of its own', () => {
+        seed.taskStarted(routingId, dispatchRecord)
+        app.emit('session:result', routingId)
+        seed.taskNotification(
+          routingId,
+          makeTaskNotification({ toolUseId: 'tx', status: 'completed' })
+        )
+        expect(attention()).toBe(false)
+
+        app.emit('session:dispatch-result-held', routingId, { name: 'rev' })
+
+        expect(attention()).toBe(true)
+        // One notification per parent however many X-Agents are held: they share a tag.
+        expect(notified).toHaveBeenCalledWith(
+          'X-Agent rev finished — result waiting',
+          expect.objectContaining({ tag: `dispatch-result-held:${routingId}` })
+        )
+      })
+
+      it('says nothing to a user who is looking at that session', () => {
+        useSessionStore.setState({ activeSessionId: routingId })
+        const focus = vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+        try {
+          app.emit('session:dispatch-result-held', routingId, { name: 'rev' })
+          expect(attention()).toBe(false)
+          expect(notified).not.toHaveBeenCalled()
+        } finally {
+          focus.mockRestore()
+        }
+      })
+    })
+
     it('lets wakesParent: false override the type', () => {
       // The emitter's word wins over the type set in both directions.
       seed.taskStarted(routingId, {

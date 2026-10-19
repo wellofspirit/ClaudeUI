@@ -13,15 +13,20 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { NonUserItem, NonUserOutcome } from '../../providers/ISession'
-import { TurnOriginLedger, AGENT_TURN_BUDGET } from '../../providers/turn-origin-ledger'
+import {
+  TurnOriginLedger,
+  AGENT_TURN_BUDGET,
+  DISPATCH_WAKE_CAP
+} from '../../providers/turn-origin-ledger'
 import type { SessionManager } from '../session-manager'
-import { heldInboxCount, heldInboxItems } from '../db'
+import { dispatchReportsOf, heldInboxCount, heldInboxItems, insertDispatchReport } from '../db'
 import { syncCore } from '../sync-host'
 import {
   HELD_INBOX_CAP,
   ITEM_BODY_MAX,
   deliver,
   flushHeld,
+  flushHeldDispatchResults,
   reholdNonUserItem,
   sessionOriginState
 } from '../session-delivery'
@@ -378,5 +383,205 @@ describe('the inbox is bounded (review m2, m3)', () => {
     })
     expect(s.deliverNonUser.mock.calls.map(([item]) => item.text)).toEqual(['older'])
     expect(heldInboxItems(t).map((r) => r.body)).toEqual(['older', 'newer'])
+  })
+})
+
+describe('X-Agent results: origin dispatch-result (ADR-105 §3)', () => {
+  const XA = { key: 's-abc234', title: 'rev' }
+  const result = (text: string, over: Partial<NonUserItem> = {}): NonUserItem => ({
+    origin: 'dispatch-result',
+    text,
+    from: XA,
+    wake: true,
+    ...over
+  })
+
+  it('wakes an idle parent, is framed under the X-Agent prefix key, and does not spend the agent-turn budget', async () => {
+    const t = target()
+    const s = fake(['started'])
+    expect(await deliver(managerOf({ [t]: s }), t, result('done'))).toEqual({
+      result: 'delivered'
+    })
+    expect(s.deliverNonUser).toHaveBeenCalledWith(
+      expect.objectContaining({
+        origin: 'dispatch-result',
+        from: { key: 'x-agent:s-abc234', title: 'rev' },
+        wake: true
+      })
+    )
+    expect(s.originLedger.agentTurnStartsSinceUser).toBe(0)
+    expect(s.originLedger.dispatchWakesSinceUser).toBe(1)
+    // Still non-user: the turn it starts cannot satisfy the clean-user-turn gate.
+    expect(s.originLedger.userOriginClean).toBe(false)
+  })
+
+  it('an exhausted agent-turn budget does not hold it, and it does not hold the budget back either', async () => {
+    const t = target()
+    const s = fake(['started'])
+    for (let i = 0; i < AGENT_TURN_BUDGET; i++) s.originLedger.agentTurnStarted()
+    expect(await deliver(managerOf({ [t]: s }), t, result('still comes'))).toEqual({
+      result: 'delivered'
+    })
+    // ...and a plain session message is still refused a turn by that budget.
+    const u = target()
+    const full = fake(['started'])
+    for (let i = 0; i < AGENT_TURN_BUDGET; i++) full.originLedger.agentTurnStarted()
+    expect(await deliver(managerOf({ [u]: full }), u, msg('chat'))).toEqual({
+      result: 'held',
+      why: 'budget-exhausted'
+    })
+  })
+
+  it('past its own cap of 25 wakes since the user last spoke the result is held, and a user prompt resets it', async () => {
+    const t = target()
+    const s = fake(['started'])
+    const m = managerOf({ [t]: s })
+    for (let i = 0; i < DISPATCH_WAKE_CAP; i++) {
+      s.willQueue = false // each wake's turn ended
+      expect(await deliver(m, t, result(`r${i}`))).toEqual({ result: 'delivered' })
+    }
+    expect(s.originLedger.dispatchWakesSinceUser).toBe(DISPATCH_WAKE_CAP)
+    s.willQueue = false
+    expect(await deliver(m, t, result('the 26th'))).toEqual({ result: 'held', why: 'dispatch-cap' })
+    expect(heldInboxItems(t)).toMatchObject([{ origin: 'dispatch-result', body: 'the 26th' }])
+    expect(s.deliverNonUser).toHaveBeenCalledTimes(DISPATCH_WAKE_CAP)
+
+    s.originLedger.userPrompt()
+    s.willQueue = false
+    expect(await deliver(m, t, result('after the user spoke'))).toEqual({ result: 'delivered' })
+    // The older held result leads the woken turn.
+    expect(s.deliverNonUser.mock.calls.slice(-2).map(([item]) => item.text)).toEqual([
+      'the 26th',
+      'after the user spoke'
+    ])
+  })
+
+  it('a busy parent takes it in its queue (no wake counted)', async () => {
+    const t = target()
+    const s = fake(['queued'], true)
+    expect(await deliver(managerOf({ [t]: s }), t, result('mid-turn'))).toEqual({
+      result: 'queued'
+    })
+    expect(s.originLedger.dispatchWakesSinceUser).toBe(0)
+  })
+
+  it('is held while the parent is not live, with its origin and prefixed sender key intact', async () => {
+    const t = target()
+    expect(await deliver(managerOf({}), t, result('waits'))).toEqual({
+      result: 'held',
+      why: 'no-live-session'
+    })
+    expect(heldInboxItems(t)).toMatchObject([
+      { origin: 'dispatch-result', fromKey: 'x-agent:s-abc234', fromTitle: 'rev', body: 'waits' }
+    ])
+    const dead = fake(['started'])
+    dead.isEngineLive = () => false
+    const u = target()
+    expect(await deliver(managerOf({ [u]: dead }), u, result('engine down'))).toEqual({
+      result: 'held',
+      why: 'engine-exited'
+    })
+  })
+
+  it('flushHeldDispatchResults delivers only the held results, in order, and stamps their reports delivered', async () => {
+    const t = target()
+    const x = `s-flush${n}`
+    insertDispatchReport({
+      targetId: x,
+      toolUseId: 'toolu_1',
+      status: 'delivered',
+      report: 'R1',
+      createdAt: 1
+    })
+    insertDispatchReport({
+      targetId: x,
+      toolUseId: 'toolu_2',
+      status: 'delivered',
+      report: 'R2',
+      createdAt: 2
+    })
+    insertDispatchReport({
+      targetId: x,
+      toolUseId: 'toolu_3',
+      status: 'delivered',
+      report: 'R3',
+      createdAt: 3
+    })
+    // Held while the parent was down: results of runs 2 and 3 (run 1 blocked and was handed
+    // back as a tool result, so it is in no inbox) and an ordinary session message.
+    await deliver(
+      managerOf({}),
+      t,
+      result('first', { from: { key: x, title: 'rev' }, reportRun: 2 })
+    )
+    await deliver(managerOf({}), t, msg('a chat message'))
+    await deliver(
+      managerOf({}),
+      t,
+      result('second', { from: { key: x, title: 'rev' }, reportRun: 3 })
+    )
+    expect(heldInboxCount(t)).toBe(3)
+
+    const s = fake(['started', 'queued'])
+    expect(await flushHeldDispatchResults(managerOf({ [t]: s }), t)).toBe(true)
+    expect(s.deliverNonUser.mock.calls.map(([item]) => item.text)).toEqual(['first', 'second'])
+    // The chat message stays held for the user's next prompt.
+    expect(heldInboxItems(t).map((r) => r.body)).toEqual(['a chat message'])
+    expect(s.originLedger.dispatchWakesSinceUser).toBe(1)
+    // Exactly the runs that went out are stamped; run 1 (never held) is not touched.
+    expect(dispatchReportsOf([x]).map((r) => [r.run, r.deliveredAt !== null])).toEqual([
+      [1, false],
+      [2, true],
+      [3, true]
+    ])
+    // Nothing left to deliver: a second flush is a no-op (delivered once).
+    expect(await flushHeldDispatchResults(managerOf({ [t]: s }), t)).toBe(false)
+    expect(s.deliverNonUser).toHaveBeenCalledTimes(2)
+  })
+
+  it('an interrupted-at-quit notice (no run) stamps no report when it goes out', async () => {
+    const t = target()
+    const x = `s-notice${n}`
+    insertDispatchReport({
+      targetId: x,
+      toolUseId: 'toolu_1',
+      status: 'delivered',
+      report: 'R1',
+      createdAt: 1
+    })
+    await deliver(managerOf({}), t, result('interrupted', { from: { key: x, title: 'rev' } }))
+    const s = fake(['started'])
+    expect(await flushHeldDispatchResults(managerOf({ [t]: s }), t)).toBe(true)
+    expect(dispatchReportsOf([x])[0].deliveredAt).toBeNull()
+  })
+
+  it('an X-Agent result is held even past the inbox cap — never refused, so the notification stays true (R2)', async () => {
+    const t = target()
+    for (let i = 0; i < HELD_INBOX_CAP; i++) await deliver(managerOf({}), t, note(`n${i}`))
+    expect(heldInboxCount(t)).toBe(HELD_INBOX_CAP)
+    // An ordinary item is refused out loud at the cap...
+    expect(await deliver(managerOf({}), t, note('one too many'))).toEqual({
+      result: 'refused',
+      why: 'inbox-full'
+    })
+    // ...an X-Agent's result is the only trace of its run and is kept.
+    expect(await deliver(managerOf({}), t, result('the report'))).toEqual({
+      result: 'held',
+      why: 'no-live-session'
+    })
+    expect(heldInboxCount(t)).toBe(HELD_INBOX_CAP + 1)
+  })
+
+  it('a flush stops at the wake cap: the result stays held for the next prompt', async () => {
+    const t = target()
+    await deliver(managerOf({}), t, result('waiting'))
+    const s = fake(['started'])
+    for (let i = 0; i < DISPATCH_WAKE_CAP; i++) s.originLedger.dispatchWakeStarted()
+    expect(await flushHeldDispatchResults(managerOf({ [t]: s }), t)).toBe(false)
+    expect(s.deliverNonUser).not.toHaveBeenCalled()
+    expect(heldInboxCount(t)).toBe(1)
+    // The user's own prompt flush takes it, cap or not.
+    expect(await flushHeld(managerOf({ [t]: s }), t)).toBe(true)
+    expect(heldInboxCount(t)).toBe(0)
   })
 })

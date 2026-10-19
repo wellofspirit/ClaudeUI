@@ -45,7 +45,8 @@ import {
   HAND_BACK_REPORT_PARAM,
   HAND_BACK_TOOL,
   joinDispatchHints,
-  OWN_SUBAGENT_TOOL
+  OWN_SUBAGENT_TOOL,
+  runsInBackground
 } from '../../shared/dispatch-agent-description'
 import {
   SESSION_TOOL_NAMES,
@@ -477,6 +478,9 @@ export function createOpencodeHostedToolsServer(
       let routingId = callerId
       let callerRestriction: CallerRestriction | undefined
       let caller = deps.lookupCallerSession?.(callerId)
+      // The chat's own agent is the root caller; a subagent child resolves to its chat below.
+      // Only the root agent defaults to a background run (ADR-105 §2).
+      const callerIsRoot = !!caller
       if (!caller && deps.resolveCallerRoot) {
         const resolved = await deps.resolveCallerRoot(callerId).catch(() => undefined)
         if (resolved && 'refused' in resolved) {
@@ -517,6 +521,7 @@ export function createOpencodeHostedToolsServer(
         meta: extra._meta as Record<string, unknown> | undefined
       }
 
+      const background = runsInBackground(run_in_background, callerIsRoot, identity.callId)
       const result = await deps.dispatch(
         {
           engine,
@@ -525,7 +530,9 @@ export function createOpencodeHostedToolsServer(
           name,
           description,
           sessionId: session_id,
-          ...(run_in_background === true ? { runInBackground: true } : {})
+          ...(background ? { runInBackground: true } : {}),
+          // A subagent child asked for the background: its report goes to the chat's root agent.
+          ...(background && !callerIsRoot ? { fromSubagent: true } : {})
         },
         {
           fromEngine: 'opencode',

@@ -48,7 +48,7 @@ import type {
 } from '../../../shared/types'
 
 /** Send a system notification if the session is not currently focused */
-function notifyIfNeeded(routingId: string, title: string, body: string): void {
+function notifyIfNeeded(routingId: string, title: string, body: string, tag?: string): void {
   const state = useSessionStore.getState()
   // Don't notify if this session is currently active and window is focused
   if (state.activeSessionId === routingId && document.hasFocus()) return
@@ -57,7 +57,11 @@ function notifyIfNeeded(routingId: string, title: string, body: string): void {
 
   const session = state.sessions[routingId]
   const folderName = session?.cwd.split(/[\\/]/).pop() || 'Session'
-  new Notification(title, { body: `${folderName}: ${body}`, silent: false })
+  new Notification(title, {
+    body: `${folderName}: ${body}`,
+    silent: false,
+    ...(tag ? { tag } : {})
+  })
 }
 
 /**
@@ -290,6 +294,22 @@ export function useClaudeEvents(): void {
       }),
       onSyncEvent('session:warning', (routingId, warning) => {
         useSessionStore.getState().addWarning(routingId, warning)
+      }),
+      // An X-Agent finished but its result had to wait in the parent's inbox (ADR-105 §3):
+      // the parent's `wakesParent` record has left, so nothing else would tell the user.
+      // Same rule as a turn end — only when the user is not looking at that session.
+      onSyncEvent('session:dispatch-result-held', (routingId, data) => {
+        const store = useSessionStore.getState()
+        if (store.activeSessionId !== routingId || !document.hasFocus()) {
+          store.setNeedsAttention(routingId, true)
+        }
+        notifyIfNeeded(
+          routingId,
+          `X-Agent ${data?.name || 'agent'} finished — result waiting`,
+          'It is delivered with your next prompt, or when the session is live again',
+          // N held X-Agents of one parent coalesce into one notification.
+          `dispatch-result-held:${routingId}`
+        )
       }),
       onSyncEvent('session:sandbox-violation', (routingId, message) => {
         useSessionStore.getState().addSandboxViolation(routingId, message)

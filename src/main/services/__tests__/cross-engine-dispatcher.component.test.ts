@@ -131,6 +131,8 @@ import {
 } from '../../../test/helpers/fake-dispatch-ledger'
 import { makeFakeDispatchReports } from '../../../test/helpers/fake-dispatch-reports'
 import { REPORT_MAX_CHARS } from '../../../shared/handback-frame'
+import { RESULT_TEXT_MAX } from '../../../core/services/dispatch-result-text'
+import { ITEM_BODY_MAX } from '../../../core/services/session-delivery'
 import { codexHandBackSpec } from '../../../core/codex/codex-hand-back-spec'
 import {
   HAND_BACK_DONE_TEXT,
@@ -146,6 +148,8 @@ import type {
   NewDispatchTarget
 } from '../../../core/services/dispatch-target-ledger'
 import type {
+  DispatchResultItem,
+  DispatchResultOutcome,
   DispatchParentLookup,
   LiveParentSession
 } from '../../../core/services/dispatch-parent'
@@ -8577,8 +8581,8 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
           taskId: t.row.id,
           taskType: 'dispatch',
           isBackgrounded: true,
-          // Until B-3 delivers a background result into the parent nothing wakes it.
-          wakesParent: false,
+          // The result is delivered into the parent (B-3b), so the record wakes it.
+          wakesParent: true,
           description: 'bg-1',
           startedAt: expect.any(Number)
         })
@@ -10839,5 +10843,397 @@ describe('CrossEngineDispatcher — hand_back: Codex target', () => {
     expect(reports.rows).toEqual([
       expect.objectContaining({ targetId: old.id, status: 'fallback', report: 'last words' })
     ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Results delivered into the parent (ADR-105 §3, slice B-3b): a BACKGROUND run's end is one
+// `dispatch-result` item through the parent lookup; a blocking run's report is its tool result.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — results delivered into the parent (ADR-105 §3, B-3b)', () => {
+  const created: CrossEngineDispatcher[] = []
+  afterEach(async () => {
+    for (const d of created.splice(0))
+      for (const run of (d as unknown as { runs: DispatchRunRegistry }).runs.all())
+        run.stopController.abort()
+    await tick()
+  })
+
+  function setup(
+    opts: {
+      outcome?: DispatchResultOutcome | Error
+      deps?: Partial<DispatcherDeps>
+    } = {}
+  ) {
+    const target = makeFakePiTarget()
+    const reports = makeFakeDispatchReports()
+    const delivered: Array<{ parentId: string; item: DispatchResultItem }> = []
+    const emitted: Array<{ parentId: string; channel: string; data: unknown }> = []
+    const deliver = vi.fn(async (parentId: string, item: DispatchResultItem) => {
+      delivered.push({ parentId, item })
+      if (opts.outcome instanceof Error) throw opts.outcome
+      return opts.outcome ?? ({ result: 'delivered' } as DispatchResultOutcome)
+    })
+    const rearm = vi.fn()
+    const parents: DispatchParentLookup = {
+      session: () => ({
+        getAutonomyMode: () => 'default',
+        getMessages: () => [],
+        rearmIdleTimer: rearm
+      }),
+      emit: (parentId, channel, data) => emitted.push({ parentId, channel, data }),
+      deliver
+    }
+    const { dispatcher, ledger } = makeHarness({
+      requireHandBack: true,
+      reports,
+      parents,
+      heartbeatMs: 20,
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget,
+      ...opts.deps
+    })
+    created.push(dispatcher)
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_bgr' })
+    const hosted = (): NonNullable<PiTargetSpawnOpts['hostedToolHandler']> =>
+      target.spawnCalls[0].hostedToolHandler!
+    const launch = async (background = true) => {
+      const answer = await dispatcher.dispatch(
+        {
+          engine: 'pi',
+          prompt: 'review it',
+          name: 'rev',
+          ...(background ? { runInBackground: true } : {})
+        },
+        ctx
+      )
+      await tick()
+      return answer
+    }
+    const handBack = (report: string): Promise<unknown> =>
+      hosted()({ toolName: 'hand_back', input: { report }, toolCallId: 'hb-1' })
+    const events = (channel: string) => emitted.filter((e) => e.channel === channel)
+    return {
+      target,
+      reports,
+      dispatcher,
+      ledger,
+      ctx,
+      deliver,
+      delivered,
+      emitted,
+      events,
+      launch,
+      handBack,
+      rearm
+    }
+  }
+
+  it('a background run that ends with a report delivers exactly one framed item to its parent, and stamps the report delivered', async () => {
+    const { target, reports, ledger, deliver, delivered, launch, handBack, events } = setup()
+    const ack = await launch()
+    expect(ack.text).toContain('X-Agent rev launched')
+    // The model is told it keeps working and that the report arrives later, framed as untrusted.
+    expect(ack.text).toContain('you can keep working')
+    expect(ack.text).toContain('it arrives later as a message from it')
+    expect(ack.text).toContain('untrusted')
+    expect(ack.text).not.toContain('not returned to you here.')
+    await handBack('Reviewed 3 files; no defects.')
+    target.pushEvent(PI_AGENT_SETTLED)
+    await vi.waitFor(() => expect(deliver).toHaveBeenCalledTimes(1))
+    await tick()
+    expect(deliver).toHaveBeenCalledTimes(1)
+
+    const { parentId, item } = delivered[0]
+    expect(parentId).toBe('routing-1')
+    const row = [...ledger.rows.values()][0]
+    expect(item.from).toEqual({ key: row.id, title: 'rev' })
+    // Status line, then the untrusted frame (header + indented report).
+    expect(item.text).toMatch(/^X-Agent rev finished: 0 tool uses · .* tokens · \d+s/)
+    expect(item.text).toContain(
+      '[X-Agent report] The text below is the final report of X-Agent rev'
+    )
+    expect(item.text).toContain('\n  Reviewed 3 files; no defects.')
+    expect(item.text).not.toContain('truncated')
+    // The card learns the run was background from its terminal notification, not from the input.
+    expect(events('session:task-notification')[0].data).toMatchObject({ isBackgrounded: true })
+    expect(reports.rows).toEqual([
+      expect.objectContaining({ status: 'delivered', run: 1, deliveredAt: expect.any(Number) })
+    ])
+  })
+
+  it('a blocking run delivers nothing: its report is the tool result', async () => {
+    const { target, deliver, launch, handBack, events } = setup()
+    const waiting = launch(false)
+    await tick()
+    await handBack('blocking report')
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await waiting
+    expect(result.text).toContain('  blocking report')
+    await tick()
+    expect(deliver).not.toHaveBeenCalled()
+    // A blocking run's notification does not claim to be background.
+    expect(events('session:task-notification')[0].data).not.toHaveProperty('isBackgrounded')
+  })
+
+  it('cuts the body at 16 000 characters BEFORE deliver() and keeps the pointer to the card past the cut', async () => {
+    const { target, delivered, launch, handBack } = setup()
+    await launch()
+    await handBack('Q'.repeat(30_000))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    const text = delivered[0].item.text
+    expect(text.length).toBeLessThanOrEqual(RESULT_TEXT_MAX)
+    expect(RESULT_TEXT_MAX).toBeLessThan(ITEM_BODY_MAX) // deliver() never cuts it again
+    expect(text.endsWith("(report truncated — the full report is on X-Agent rev's card)")).toBe(
+      true
+    )
+    // 16 000 of the report, not 30 000 (and none of the cut-off tail).
+    expect(text.match(/Q+/g)!.reduce((n, run) => n + run.length, 0)).toBeLessThanOrEqual(16_000)
+  })
+
+  it('a report of many short lines (the frame indents each) is cut further so the pointer still survives', async () => {
+    const { target, delivered, launch, handBack } = setup()
+    await launch()
+    await handBack('a\n'.repeat(15_000))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    const text = delivered[0].item.text
+    expect(text.length).toBeLessThanOrEqual(RESULT_TEXT_MAX)
+    expect(text).toContain("(report truncated — the full report is on X-Agent rev's card)")
+  })
+
+  it('a run that ended without delivering a report says so', async () => {
+    const { target, reports, delivered, launch } = setup()
+    await launch()
+    for (let turn = 0; turn < 4; turn++) {
+      target.pushEvent(PI_AGENT_SETTLED)
+      await tick()
+    }
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    expect(delivered[0].item.text).toBe('X-Agent rev ended without delivering a report.')
+    expect(reports.rows.map((r) => r.status)).toEqual(['withheld'])
+    expect(reports.rows[0].deliveredAt).not.toBeNull()
+  })
+
+  it('a run that failed says why in one line', async () => {
+    const { target, delivered, launch } = setup()
+    await launch()
+    target.triggerExit()
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    expect(delivered[0].item.text).toMatch(/^X-Agent rev failed: .+\.$/)
+    expect(delivered[0].item.text.split('\n')).toHaveLength(1)
+  })
+
+  it('a run the user stopped from its card tells the parent so', async () => {
+    const { dispatcher, delivered, launch } = setup()
+    await launch()
+    expect(dispatcher.stopDispatch('toolu_bgr', 'routing-1')).toBe(true)
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    expect(delivered[0].item.text).toBe('X-Agent rev was stopped by the user.')
+  })
+
+  it('a thread with no hand_back tool: its last message, framed with the warning', async () => {
+    const target = makeFakeCodexTarget()
+    const reports = makeFakeDispatchReports()
+    const delivered: DispatchResultItem[] = []
+    const { dispatcher, ledger } = makeCodexHarness({
+      requireHandBack: true,
+      reports,
+      attachCodexTarget: target.spawnCodexTarget,
+      parents: {
+        session: () => undefined,
+        emit: () => {},
+        deliver: async (_id, item) => {
+          delivered.push(item)
+          return { result: 'delivered' }
+        }
+      }
+    })
+    created.push(dispatcher)
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_old' })
+    const old = ledger.create({
+      engine: 'codex',
+      harnessRef: CODEX_THREAD_ID,
+      parentSessionId: ctx.fromRoutingId,
+      parentEngine: 'claude',
+      parentToolUseId: null,
+      cwd: '/tmp/xeng-project',
+      model: 'gpt-5.6-luna',
+      launchMode: 'default',
+      accountKey: null,
+      codexAccountId: null,
+      callerRestriction: null,
+      name: 'old',
+      description: null,
+      handBack: false
+    })
+    ledger.update(old.id, { state: 'idle' })
+    // A background launch needs the harness installed (the suites default Codex to absent).
+    harnessInstalled.codex = true
+    let ack: DispatchResult
+    try {
+      ack = await dispatcher.dispatch(
+        { engine: 'codex', prompt: 'more', sessionId: CODEX_THREAD_ID, runInBackground: true },
+        ctx
+      )
+    } finally {
+      harnessInstalled.codex = false
+    }
+    expect(ack.text).toContain('launched')
+    await tick()
+    target.completeTurn({ text: 'last words' })
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    expect(delivered[0].text).toContain('no hand_back tool')
+    expect(delivered[0].text).toContain('  last words')
+    expect(delivered[0].text).toContain('[X-Agent report]')
+  })
+
+  it('a result that is held raises the parent attention event, and is not stamped delivered', async () => {
+    const { target, reports, events, delivered, launch, handBack } = setup({
+      outcome: { result: 'held', why: 'engine-exited' }
+    })
+    await launch()
+    await handBack('R')
+    target.pushEvent(PI_AGENT_SETTLED)
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    await tick()
+    expect(events('session:dispatch-result-held')).toEqual([
+      { parentId: 'routing-1', channel: 'session:dispatch-result-held', data: { name: 'rev' } }
+    ])
+    expect(reports.rows[0].deliveredAt).toBeNull()
+  })
+
+  it('a delivery that throws raises the same event (the parent must hear of it somehow)', async () => {
+    const { target, events, delivered, launch, handBack } = setup({
+      outcome: new Error('db is locked')
+    })
+    await launch()
+    await handBack('R')
+    target.pushEvent(PI_AGENT_SETTLED)
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    await tick()
+    expect(events('session:dispatch-result-held')).toHaveLength(1)
+  })
+
+  it('a delivered result raises no attention event', async () => {
+    const { target, events, delivered, launch, handBack } = setup({ outcome: { result: 'queued' } })
+    await launch()
+    await handBack('R')
+    target.pushEvent(PI_AGENT_SETTLED)
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    await tick()
+    expect(events('session:dispatch-result-held')).toHaveLength(0)
+  })
+
+  it('stamps each run its own report row: a blocking run when its result returns, a held background run only by its flush (R1)', async () => {
+    const { target, reports, dispatcher, delivered, launch, handBack } = setup({
+      outcome: { result: 'held', why: 'engine-exited' }
+    })
+    // Run 1 blocks: its report is the tool result, stamped as that returns.
+    const first = launch(false)
+    await tick()
+    await handBack('first report')
+    target.pushEvent(PI_AGENT_SETTLED)
+    const answer = await first
+    expect(reports.rows.map((r) => [r.run, r.deliveredAt !== null])).toEqual([[1, true]])
+
+    // Run 2 continues the same X-Agent in the background and is held for a parent that is not live.
+    const again = await dispatcher.dispatch(
+      {
+        engine: 'pi',
+        prompt: 'more',
+        sessionId: answer.sessionId,
+        runInBackground: true
+      },
+      makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_bgr_2' })
+    )
+    expect(again.text).toContain('launched')
+    await tick()
+    await handBack('second report')
+    target.pushEvent(PI_AGENT_SETTLED)
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+    // The held item names its run, so the flush stamps run 2 and nothing else.
+    expect(delivered[0].item.reportRun).toBe(2)
+    expect(reports.rows.map((r) => [r.run, r.deliveredAt !== null])).toEqual([
+      [1, true],
+      [2, false]
+    ])
+  })
+
+  it('a blocking call the parent abandoned (Esc) is not stamped: nobody got the result (R1)', async () => {
+    const { target, reports, dispatcher, launch, handBack } = setup()
+    const waiting = launch(false)
+    await tick()
+    await handBack('R')
+    const run = (dispatcher as unknown as { runs: DispatchRunRegistry }).runs.all()[0]
+    run.cancelController.abort()
+    target.pushEvent(PI_AGENT_SETTLED)
+    await waiting
+    expect(reports.rows[0].deliveredAt).toBeNull()
+  })
+
+  it('a throwing text helper neither rejects the run nor skips the idle re-arm (R5)', async () => {
+    const { target, dispatcher, launch, handBack, deliver, rearm } = setup()
+    ;(dispatcher as unknown as { resultTextFor: () => never }).resultTextFor = (): never => {
+      throw new Error('the sanitiser blew up')
+    }
+    await launch()
+    const run = (dispatcher as unknown as { runs: DispatchRunRegistry }).runs.all()[0]
+    await handBack('R')
+    target.pushEvent(PI_AGENT_SETTLED)
+    await expect(run.done).resolves.toBeTruthy()
+    expect(rearm).toHaveBeenCalled()
+    expect(deliver).not.toHaveBeenCalled()
+    expect(dispatcher.inFlightCount).toBe(0)
+  })
+
+  it("a subagent's explicit background launch is told its report goes to the top-level agent, not back to it (N3)", async () => {
+    const { dispatcher, ctx, target } = setup()
+    const ack = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x', name: 'sub', runInBackground: true, fromSubagent: true },
+      ctx
+    )
+    expect(ack.text).toContain('delivered to the top-level agent')
+    expect(ack.text).toContain('not to you')
+    expect(ack.text).not.toContain('arrives later as a message from it')
+    await tick()
+    dispatcher.stopDispatch('toolu_bgr')
+    void target
+  })
+
+  it('a deleted parent has nobody to tell: nothing is delivered', async () => {
+    const { dispatcher, deliver, launch } = setup()
+    await launch()
+    dispatcher.endParent('routing-1')
+    await vi.waitFor(() => expect(dispatcher.inFlightCount).toBe(0))
+    await tick()
+    expect(deliver).not.toHaveBeenCalled()
+  })
+
+  it('the run record wakes the parent (wakesParent), blocking or background', async () => {
+    const { events, launch, target, handBack, delivered } = setup()
+    await launch()
+    expect(events('session:task-started')[0].data).toMatchObject({
+      isBackgrounded: true,
+      wakesParent: true
+    })
+    await handBack('R')
+    target.pushEvent(PI_AGENT_SETTLED)
+    await vi.waitFor(() => expect(delivered).toHaveLength(1))
+  })
+
+  it('a launch that failed before the target existed answers its call with the error and delivers nothing', async () => {
+    const { deliver, dispatcher, ctx } = setup({
+      deps: { loadEngineConfig: vi.fn(() => ({ dispatch: {} })) }
+    })
+    const answer = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x', runInBackground: true },
+      ctx
+    )
+    expect(answer.isError).toBe(true)
+    await tick()
+    expect(deliver).not.toHaveBeenCalled()
   })
 })

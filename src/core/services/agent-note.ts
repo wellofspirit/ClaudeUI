@@ -14,13 +14,17 @@ import type { ChatMessage } from '../../shared/types'
 import {
   CROSS_SESSION_MESSAGE_TAG,
   SESSION_MESSAGE_TAG,
+  isXAgentSender,
   parseSessionMessageWrapper,
-  unescapeClosingTag
+  unescapeClosingTag,
+  xAgentBareName
 } from '../../shared/session-message-wrapper'
 
 export const AGENT_NOTE_FRAGMENT_LABEL = 'from an agent, not from you'
 /** The label of a message another session or agent sent (slice 1a). */
 export const SESSION_MESSAGE_FRAGMENT_LABEL = 'from another session, not from you'
+/** The label of an X-Agent's result delivered into its parent (ADR-105 §3). */
+export const X_AGENT_RESULT_FRAGMENT_LABEL = 'from an X-Agent, not from you'
 
 export interface AgentNoteInput {
   id: string
@@ -50,7 +54,16 @@ export function agentNoteMessage({
  * The row title for a message from `fromTitle` (empty → a generic one). `native`:
  * from another Claude Code process rather than a ClaudeUI session.
  */
-export function sessionMessageNoteTitle(fromTitle: string, native = false): string {
+export function sessionMessageNoteTitle(
+  fromTitle: string,
+  native = false,
+  fromKey?: string
+): string {
+  // An X-Agent's result is the parent's own agent reporting back, never "another session".
+  if (fromKey !== undefined && !native && isXAgentSender(fromKey)) {
+    const name = xAgentBareName(fromTitle)
+    return name ? `Report from X-Agent ${name}` : 'Report from an X-Agent'
+  }
   if (native)
     return fromTitle
       ? // The sender first: a narrow screen truncates the title's tail.
@@ -70,13 +83,16 @@ export function sessionMessageNote(input: {
   text: string
   timestamp: number
   native?: boolean
+  /** The sender's key as the wrapper names it; an X-Agent's (`x-agent:` prefix) makes this a result note. */
+  fromKey?: string
 }): ChatMessage {
+  const result = input.fromKey !== undefined && !input.native && isXAgentSender(input.fromKey)
   return agentNoteMessage({
     id: input.id,
-    title: sessionMessageNoteTitle(input.fromTitle, input.native),
+    title: sessionMessageNoteTitle(input.fromTitle, input.native, input.fromKey),
     text: input.text,
     timestamp: input.timestamp,
-    label: SESSION_MESSAGE_FRAGMENT_LABEL
+    label: result ? X_AGENT_RESULT_FRAGMENT_LABEL : SESSION_MESSAGE_FRAGMENT_LABEL
   })
 }
 
@@ -93,10 +109,16 @@ export function sessionMessageNote(input: {
 export function peerRowParts(
   row: { origin?: unknown; turnOrigin?: unknown },
   content: unknown
-): { fromTitle: string; body: string; native: boolean } | null {
+): { fromTitle: string; fromKey: string; body: string; native: boolean } | null {
   const origin =
     row.origin && typeof row.origin === 'object'
-      ? (row.origin as { kind?: unknown; name?: unknown; body?: unknown; hostInjected?: unknown })
+      ? (row.origin as {
+          kind?: unknown
+          from?: unknown
+          name?: unknown
+          body?: unknown
+          hostInjected?: unknown
+        })
       : undefined
   if (origin?.kind !== 'peer' && row.turnOrigin !== 'peer') return null
   const text =
@@ -116,10 +138,11 @@ export function peerRowParts(
       : (parsed?.body ?? text)
   if (!body) return null
   const fromTitle = typeof origin?.name === 'string' ? origin.name : (parsed?.fromTitle ?? '')
+  const fromKey = typeof origin?.from === 'string' ? origin.from : (parsed?.fromKey ?? '')
   // cli.js stamps `hostInjected` on a frame a host wrote to its stdin (ClaudeUI's
   // own deliveries); a message another Claude Code process sent over cli.js's
   // socket has none.
-  return { fromTitle, body, native: origin?.hostInjected !== true }
+  return { fromTitle, fromKey, body, native: origin?.hostInjected !== true }
 }
 
 /**
@@ -137,6 +160,7 @@ export function wrappedUserRowAsNote(message: ChatMessage): ChatMessage | null {
   return sessionMessageNote({
     id: message.id,
     fromTitle: parsed.fromTitle,
+    fromKey: parsed.fromKey,
     text: parsed.body,
     timestamp: message.timestamp
   })

@@ -25,6 +25,7 @@ import {
 } from './dispatch-report-store'
 import {
   HAND_BACK_FALLBACK_WARNING,
+  isLaunchAck,
   handBackWithheldText
 } from '../../shared/dispatch-agent-description'
 import { logger } from './logger'
@@ -93,16 +94,25 @@ function outcomeFields(
   }
 }
 
-function toolIds(messages: ChatMessage[]): { uses: Set<string>; results: Set<string> } {
+function toolIds(messages: ChatMessage[]): {
+  uses: Set<string>
+  results: Set<string>
+  /** Calls whose result is the background launch acknowledgement, not an answer. */
+  launched: Set<string>
+} {
   const uses = new Set<string>()
   const results = new Set<string>()
+  const launched = new Set<string>()
   for (const message of messages) {
     for (const block of message.content) {
       if (block.type === 'tool_use') uses.add(block.toolUseId)
-      else if (block.type === 'tool_result') results.add(block.toolUseId)
+      else if (block.type === 'tool_result') {
+        results.add(block.toolUseId)
+        if (isLaunchAck(block.toolResult)) launched.add(block.toolUseId)
+      }
     }
   }
-  return { uses, results }
+  return { uses, results, launched }
 }
 
 /** What a cold read returns that carries a transcript: every engine's history result has these. */
@@ -141,7 +151,7 @@ export function withDispatchTasks<T extends DispatchHistoryRead>(
         `could not read the X-Agent reports of ${sessionId}: ${String(err)}`
       )
     }
-    const { uses, results } = toolIds(result.messages)
+    const { uses, results, launched } = toolIds(result.messages)
     const existing = result.taskNotifications ?? []
     const notified = new Set(existing.map((n) => n.toolUseId))
     const notifications: TaskNotification[] = []
@@ -152,15 +162,16 @@ export function withDispatchTasks<T extends DispatchHistoryRead>(
       if (!toolUseId || !uses.has(toolUseId)) continue
       const own = outcomes.get(toolUseId)
       if (row.state === 'running' && !own) {
-        // The launch returned (its result is in the transcript) = a background run, which
-        // wakes nothing until B-3 delivers; a call still waiting is a blocking one.
+        // The launch returned (its result is in the transcript) = a background run, whose
+        // result is delivered into the parent (B-3b); a call still waiting is a blocking one.
+        // Either way it wakes the parent.
         const background = results.has(toolUseId)
         const description = row.description ?? row.name
         activeTasks[toolUseId] = {
           taskId: row.id,
           taskType: 'dispatch',
           isBackgrounded: background,
-          wakesParent: !background,
+          wakesParent: true,
           // This run's start: a continuation's clock counts from its own start, not the first launch.
           startedAt: row.lastActiveAt,
           ...(description ? { description } : {})
@@ -174,6 +185,9 @@ export function withDispatchTasks<T extends DispatchHistoryRead>(
         toolUseId,
         outputFile: '',
         runIndex: 1,
+        // The call's result is the launch acknowledgement: a background run, whose input
+        // need not say so (the default for a root agent).
+        ...(launched.has(toolUseId) ? { isBackgrounded: true } : {}),
         ...(own ? outcomeFields(row, own) : { status: terminalOf(row), summary: summaryOf(row) })
       })
     }
@@ -187,6 +201,7 @@ export function withDispatchTasks<T extends DispatchHistoryRead>(
         toolUseId,
         outputFile: '',
         runIndex: outcome.run,
+        ...(launched.has(toolUseId) ? { isBackgrounded: true } : {}),
         ...outcomeFields(row, outcome)
       })
     }
