@@ -34,6 +34,7 @@
  * testable without a session. {@link permissionDecisionBlock} owns ALL the
  * routing; `claude-session.ts` only narrows, logs and sends.
  */
+import type { ReportReview } from '../../shared/handback-review'
 import type {
   PermissionDenialBlock,
   PermissionDenialSource,
@@ -148,13 +149,13 @@ const CONTENT_FREE_DENY_REASONS = new Set(['Blocked by classifier', 'No reason p
  * `classifier` DENY that no judge weighed; cli.js itself tells it apart by this
  * exact string (its own `automode-unavailable` classification), so we do too.
  */
-const CLASSIFIER_UNAVAILABLE_REASON = 'Classifier unavailable'
+export const CLASSIFIER_UNAVAILABLE_REASON = 'Classifier unavailable'
 
 /**
  * cli.js's reason when the server-side classifier gave no usable verdict for
  * several responses in a row and it stopped the turn (`ptn`, 2.1.280).
  */
-const NO_VERDICT_STREAK_REASON =
+export const NO_VERDICT_STREAK_REASON =
   'Auto mode unavailable — stopped after repeated responses with no safety verdict'
 
 /**
@@ -162,7 +163,7 @@ const NO_VERDICT_STREAK_REASON =
  * transcript overflowed the classifier's context and it reached no verdict
  * (`qoe`: `noVerdict === true && reason === fVe`, 2.1.280).
  */
-const TRANSCRIPT_TOO_LONG_CODE = 'classifier_transcript_too_long'
+export const TRANSCRIPT_TOO_LONG_CODE = 'classifier_transcript_too_long'
 
 /**
  * A classifier block as the verdict that renders on the card it judged.
@@ -214,6 +215,76 @@ function isNoVerdictDenial(frame: PermissionDecisionFrame): boolean {
   if (frame.decisionReasonCode === TRANSCRIPT_TOO_LONG_CODE) return true
   const reason = frame.decisionReason?.trim()
   return reason === CLASSIFIER_UNAVAILABLE_REASON || reason === NO_VERDICT_STREAK_REASON
+}
+
+/**
+ * cli.js's reason when the classifier could not evaluate the action and blocked it for safety
+ * (`RHn`, 2.1.293).
+ */
+export const COULD_NOT_EVALUATE_REASON =
+  'Auto mode could not evaluate this action and is blocking it for safety'
+
+/**
+ * A refusal by the classifier's provider (`yGt(reason, {refused: true})`) says so in the MESSAGE the
+ * model gets; the frame has no other tell. cli.js's own text, 2.1.293.
+ */
+export const REFUSED_MESSAGE_TELL = 'Retrying it will hit the same refusal'
+
+/** Every no-verdict message (`yGt`, `Tvn`) says the block is not a judgment of the action. */
+export const NO_VERDICT_MESSAGE_TELL = 'This is not a judgment that the action is unsafe'
+
+/**
+ * What a `permission_denied` of the X-Agent's `hand_back` call means as a review of its report
+ * (ADR-105 §3, slice B-3c), read the way Claude Code reads its own hand-back verdicts: a
+ * classifier BLOCK flags the report, a classifier that refused the review request marks it
+ * unreviewed (also flagged), and a classifier that gave no verdict (unreachable, rate-limited,
+ * transcript too long) is "could not review" — not flagged. `null`: the denial is not the
+ * classifier's (a rule, a mode, a hook), so it says nothing about the report.
+ *
+ * `message` is the model-facing deny text (`message` on the frame), read only for the
+ * two tells above.
+ */
+export function handBackReviewOf(
+  frame: PermissionDecisionFrame,
+  message?: string
+): ReportReview | null {
+  if (!isClassifierDecision(frame)) return null
+  if (message?.includes(REFUSED_MESSAGE_TELL)) return { kind: 'refused' }
+  const reason = frame.decisionReason?.trim()
+  if (frame.decisionReasonCode === TRANSCRIPT_TOO_LONG_CODE)
+    return { kind: 'unavailable', why: 'the conversation was too long for the classifier' }
+  if (
+    isNoVerdictDenial(frame) ||
+    reason === COULD_NOT_EVALUATE_REASON ||
+    message?.includes(NO_VERDICT_MESSAGE_TELL)
+  )
+    return { kind: 'unavailable', why: 'the classifier gave no verdict' }
+  return { kind: 'block', reason: reason ?? '' }
+}
+
+/**
+ * What cli.js's ASK for the X-Agent's `hand_back` means as a review of its report, while the
+ * target runs in auto (ADR-105 §3, slice B-3c). In auto cli.js asks the host only when its
+ * classifier did NOT allow the call: the denial cap converted a block into an ask (a
+ * `classifier` reason that names a verdict: flagged, like a block), or the classifier gave no
+ * verdict (transcript too long, mode changed while it ran, …): nobody weighed the report, so
+ * a note, never a clean send.
+ */
+export function handBackReviewOfAsk(ask: {
+  decisionReason?: string
+  decisionReasonType?: string
+  decisionReasonCode?: string
+}): ReportReview {
+  const verdict = handBackReviewOf({
+    toolUseId: '',
+    frameUuid: '',
+    ...(ask.decisionReasonType !== undefined ? { decisionReasonType: ask.decisionReasonType } : {}),
+    ...(ask.decisionReason !== undefined ? { decisionReason: ask.decisionReason } : {}),
+    ...(ask.decisionReasonCode !== undefined ? { decisionReasonCode: ask.decisionReasonCode } : {})
+  })
+  return verdict?.kind === 'block'
+    ? verdict
+    : { kind: 'unavailable', why: 'auto mode asked instead of reviewing it' }
 }
 
 /**

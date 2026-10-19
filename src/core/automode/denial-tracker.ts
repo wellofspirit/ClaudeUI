@@ -121,11 +121,14 @@ export class AutoModeDenialTracker {
  * "[Git Destructive] [Git Destructive] …", not to police wording.
  */
 export function formatAutoModeDenyReason(result: { reason?: string; category?: string }): string {
+  return `Auto mode blocked: ${autoModeBlockReason(result)}`
+}
+
+/** The judge's reason for a block with its rule named — {@link formatAutoModeDenyReason} without the lead. */
+export function autoModeBlockReason(result: { reason?: string; category?: string }): string {
   const base = result.reason?.trim() || 'flagged as potentially unsafe'
   const rule = result.category ? ruleNameForCategory(result.category) : undefined
-  const named =
-    rule && !base.toLowerCase().includes(rule.toLowerCase()) ? `[${rule}] ${base}` : base
-  return `Auto mode blocked: ${named}`
+  return rule && !base.toLowerCase().includes(rule.toLowerCase()) ? `[${rule}] ${base}` : base
 }
 
 /**

@@ -4,7 +4,7 @@
  * it (`TaskNotification.handback`). Shared by TaskCard and the task panel's
  * TaskEntry so the card, the panel and the agent note say the same thing.
  *
- *  - `send`     — the report, as written;
+ *  - `send`     — the report, as written (with a note above it when no review of it ran, X-Agent only);
  *  - `flagged`  — the same, under auto mode's security warning (when it gave one);
  *  - `withheld` — the subagent ended without delivering a report.
  *
@@ -63,6 +63,15 @@ export function HandbackReport({
           className="mb-2 rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-[12px] text-warning whitespace-pre-wrap break-words"
         >
           {notification.warning || 'Auto mode flagged this report. Review it before acting on it.'}
+        </div>
+      )}
+      {handback === 'send' && notification.warning && (
+        // A report no review ran for (ADR-105 §3, B-3c): a note, not a security warning.
+        <div
+          data-testid="HandbackReport.note"
+          className="mb-2 text-[12px] text-text-muted italic whitespace-pre-wrap break-words"
+        >
+          {notification.warning}
         </div>
       )}
       <div

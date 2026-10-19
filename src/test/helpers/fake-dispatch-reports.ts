@@ -25,6 +25,7 @@ export function makeFakeDispatchReports(): FakeDispatchReports {
         toolUseId: input.toolUseId,
         status: input.status,
         report: input.report,
+        warning: input.warning ?? null,
         createdAt: input.createdAt,
         deliveredAt: null
       }

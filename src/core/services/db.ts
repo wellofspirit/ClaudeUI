@@ -1595,6 +1595,16 @@ export const MIGRATIONS: Migration[] = [
     up(db) {
       db.exec('ALTER TABLE session_inbox ADD COLUMN report_run INTEGER')
     }
+  },
+  {
+    // Slice B-3c: the words the review put above a report (ADR-105 §3). `dispatch_report.warning`
+    // is the SECURITY WARNING of a `flagged` report, or the "could not be reviewed" note of a
+    // `delivered` one; NULL when the report was not reviewed or passed. `status` gains `flagged`
+    // (a TEXT column: no schema change for the value).
+    version: 38,
+    up(db) {
+      db.exec('ALTER TABLE dispatch_report ADD COLUMN warning TEXT')
+    }
   }
 ]
 
@@ -2858,12 +2868,17 @@ export function allDispatchTargetHarnessRefs(db: Db = getDb()): string[] {
 // Dispatch reports — what an X-Agent run handed back (ADR-105 §3)
 // ---------------------------------------------------------------------------
 
-/** How a run ended: `delivered` (hand_back), `withheld`, `fallback` (no tool: its last message), or an end without a report. */
+/**
+ * How a run ended: `delivered` (hand_back), `flagged` (hand_back, and the review put a security
+ * warning above the report), `withheld`, `fallback` (no tool: its last message), or an end
+ * without a report.
+ */
 export type DispatchReportStatus =
-  'delivered' | 'withheld' | 'fallback' | 'stopped' | 'failed' | 'timeout'
+  'delivered' | 'flagged' | 'withheld' | 'fallback' | 'stopped' | 'failed' | 'timeout'
 
 const DISPATCH_REPORT_STATUSES: readonly string[] = [
   'delivered',
+  'flagged',
   'withheld',
   'fallback',
   'stopped',
@@ -2878,8 +2893,13 @@ export interface DispatchReportRow {
   /** The dispatch_agent call that launched or continued this run (null: it carried none). */
   toolUseId: string | null
   status: DispatchReportStatus
-  /** As received; sanitised at render and delivery time. Null unless `delivered` or `fallback`. */
+  /** As received; sanitised at render and delivery time. Null unless `delivered`, `flagged` or `fallback`. */
   report: string | null
+  /**
+   * What the review of the report put above it (B-3c): a flagged report's security warning, or a
+   * delivered one's "could not be reviewed" note. Null: not reviewed, or passed. Already defused.
+   */
+  warning: string | null
   createdAt: number
   /** Null until the result was handed to the parent's engine (a held one stays null until its flush). */
   deliveredAt: number | null
@@ -2891,6 +2911,7 @@ interface DispatchReportDbRow {
   tool_use_id: string | null
   status: string
   report: string | null
+  warning: string | null
   created_at: number
   delivered_at: number | null
 }
@@ -2904,6 +2925,7 @@ function dispatchReportRow(row: DispatchReportDbRow): DispatchReportRow {
       ? (row.status as DispatchReportStatus)
       : 'failed',
     report: row.report,
+    warning: row.warning ?? null,
     createdAt: Number(row.created_at),
     deliveredAt: row.delivered_at === null ? null : Number(row.delivered_at)
   }
@@ -2920,6 +2942,8 @@ export function insertDispatchReport(
     toolUseId: string | null
     status: DispatchReportStatus
     report: string | null
+    /** The review's words above the report (B-3c); omitted / null: none. */
+    warning?: string | null
     createdAt: number
   },
   db: Db = getDb()
@@ -2928,10 +2952,18 @@ export function insertDispatchReport(
   const info = db
     .prepare(
       `INSERT OR IGNORE INTO dispatch_report
-         (target_id, run, tool_use_id, status, report, created_at, delivered_at)
-       SELECT ?, COALESCE(MAX(run), 0) + 1, ?, ?, ?, ?, NULL FROM dispatch_report WHERE target_id = ?`
+         (target_id, run, tool_use_id, status, report, warning, created_at, delivered_at)
+       SELECT ?, COALESCE(MAX(run), 0) + 1, ?, ?, ?, ?, ?, NULL FROM dispatch_report WHERE target_id = ?`
     )
-    .run(input.targetId, input.toolUseId, input.status, report, input.createdAt, input.targetId)
+    .run(
+      input.targetId,
+      input.toolUseId,
+      input.status,
+      report,
+      input.warning ?? null,
+      input.createdAt,
+      input.targetId
+    )
   if (Number(info.changes) === 0) return undefined
   return latestDispatchReport(input.targetId, db)
 }

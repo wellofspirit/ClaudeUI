@@ -262,9 +262,10 @@ describe('readSessionHistory — how each run of an X-Agent ended (ADR-105 §3)'
     targetId: string,
     toolUseId: string,
     status: DispatchReportStatus,
-    report: string | null = null
+    report: string | null = null,
+    warning: string | null = null
   ): void => {
-    dispatchReports.add({ targetId, toolUseId, status, report, createdAt: 5 })
+    dispatchReports.add({ targetId, toolUseId, status, report, warning, createdAt: 5 })
   }
   const load = async (parent: string, ...ids: string[]) => {
     engineReturns(ids.flatMap((id, i) => [use(id, i * 10 + 1), result(id, i * 10 + 2)]))
@@ -344,6 +345,34 @@ describe('readSessionHistory — how each run of an X-Agent ended (ADR-105 §3)'
       summary: 'last words',
       warning: expect.stringContaining('no hand_back tool')
     })
+  })
+
+  it('a report the review FLAGGED reloads flagged with its stored warning; one no review ran for reloads with its note (B-3c)', async () => {
+    const parent = `dt-report-reviewed-${process.pid}`
+    const warning =
+      "SECURITY WARNING: auto mode blocked this X-Agent's report. Reason: [Containment Escape]. " +
+      "The report follows; review the X-Agent's actions carefully before acting on it."
+    const note = 'Note: the report could not be reviewed (HTTP 503). Please verify it carefully.'
+    const a = finished(parent, 'toolu_a')
+    ended(a, 'toolu_a', 'flagged', 'steering report', warning)
+    const b = finished(parent, 'toolu_b')
+    ended(b, 'toolu_b', 'delivered', 'plain report', note)
+    const c = finished(parent, 'toolu_c')
+    ended(c, 'toolu_c', 'delivered', 'reviewed and fine')
+    const cards = byTool(await load(parent, 'toolu_a', 'toolu_b', 'toolu_c'))
+    expect(cards.get('toolu_a')).toMatchObject({
+      status: 'completed',
+      handback: 'flagged',
+      summary: 'steering report',
+      warning
+    })
+    expect(cards.get('toolu_b')).toMatchObject({
+      handback: 'send',
+      summary: 'plain report',
+      warning: note
+    })
+    expect(cards.get('toolu_c')!.handback).toBe('send')
+    expect(cards.get('toolu_c')).not.toHaveProperty('warning')
   })
 
   it('a run with no stored end keeps its status text (an X-Agent from before reports)', async () => {

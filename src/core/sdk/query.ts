@@ -795,6 +795,8 @@ async function handleCanUseTool(
     suggestions: request.permission_suggestions as CanUseToolResult['updatedPermissions'],
     blockedPath: request.blocked_path as string | undefined,
     decisionReason: request.decision_reason as string | undefined,
+    decisionReasonType: request.decision_reason_type as string | undefined,
+    decisionReasonCode: request.decision_reason_code as string | undefined,
     title: request.title as string | undefined,
     displayName: request.display_name as string | undefined,
     description: request.description as string | undefined,

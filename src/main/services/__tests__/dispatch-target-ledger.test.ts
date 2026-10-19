@@ -91,7 +91,7 @@ describe('dispatch_target (migration v35)', () => {
       expect(exists()).toBe(false)
       runMigrations(older)
       expect(exists()).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(37)
+      expect(older.pragma('user_version', { simple: true })).toBe(38)
       const columns = (
         older.prepare('PRAGMA table_info(dispatch_target)').all() as { name: string }[]
       ).map((c) => c.name)

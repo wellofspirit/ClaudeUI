@@ -370,6 +370,10 @@ export interface CanUseToolContext {
   suggestions?: PermissionUpdate[]
   blockedPath?: string
   decisionReason?: string
+  /** cli.js's `decision_reason_type` for the ask (`classifier`, `rule`, `mode`, …). */
+  decisionReasonType?: string
+  /** cli.js's `decision_reason_code` (`classifier_transcript_too_long`, …), when it sends one. */
+  decisionReasonCode?: string
   title?: string
   displayName?: string
   description?: string

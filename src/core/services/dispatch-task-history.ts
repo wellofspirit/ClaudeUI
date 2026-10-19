@@ -71,7 +71,20 @@ function outcomeFields(
 ): Pick<TaskNotification, 'status' | 'summary' | 'handback' | 'warning'> {
   switch (report.status) {
     case 'delivered':
-      return { status: 'completed', summary: report.report ?? '', handback: 'send' }
+      // A report no review ran for carries the "could not be reviewed" note it was delivered under.
+      return {
+        status: 'completed',
+        summary: report.report ?? '',
+        handback: 'send',
+        ...(report.warning ? { warning: report.warning } : {})
+      }
+    case 'flagged':
+      return {
+        status: 'completed',
+        summary: report.report ?? '',
+        handback: 'flagged',
+        ...(report.warning ? { warning: report.warning } : {})
+      }
     case 'fallback':
       return {
         status: 'completed',

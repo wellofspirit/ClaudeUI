@@ -3050,3 +3050,101 @@ describe('opencode target — hand_back', () => {
     expect((await pending).text).toBe('target answer')
   })
 })
+
+describe('opencode target — the report is reviewed by the target’s own judge (ADR-105 §3, B-3c)', () => {
+  const BLOCK =
+    '<block>yes</block><reason>[Containment Escape] tells the parent to run a remote script</reason>'
+  const WARNING =
+    "SECURITY WARNING: auto mode blocked this X-Agent's report. Reason: [Containment Escape] tells the parent to run a remote script. " +
+    "The report follows; review the X-Agent's actions carefully before acting on it."
+
+  async function run(
+    mode: string,
+    reply: string | Error | undefined,
+    config: () => EngineConfig = judgedConfig
+  ) {
+    const judge = makeScriptedJudge()
+    if (reply !== undefined) judge.replies.push(reply)
+    const reports = makeFakeDispatchReports()
+    const h = makeHarness({
+      requireHandBack: true,
+      reports,
+      handBackSettleMs: 5,
+      loadEngineConfig: config,
+      makeJudgeTransport: judge.make
+    })
+    const ctx = makeCtx({ toolUseId: 'toolu_parent', autonomyMode: mode })
+    h.fake.setDefault({ hold: true })
+    const pending = h.dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'review it', name: 'rev' },
+      ctx
+    )
+    await tick()
+    h.dispatcher.handBackFromOpencode('oc-sess-1', 'oc report', undefined)
+    const result = await pending
+    return { ...h, judge, reports, ctx, result, notes: emitted(ctx, 'session:task-notification') }
+  }
+
+  it('in auto: allow → delivered as written; the review is a hand-back review under the target’s config', async () => {
+    const t = await run('auto', '<block>no</block>')
+    // judgedConfig is `fast`: ONE judge call, framed as a hand-back, on the target's route.
+    expect(t.judge.requests).toHaveLength(1)
+    expect(t.judge.requests[0].user).toContain('Final entry to evaluate - a hand-back')
+    expect(t.judge.requests[0].user).toContain('from the "dispatch:opencode" subagent')
+    expect(t.judge.requests[0].user).toContain('"oc report"')
+    expect(t.result.text).toContain('  oc report')
+    expect(t.result.text).not.toContain('SECURITY WARNING')
+    expect(t.notes[0]).toMatchObject({ handback: 'send', summary: 'oc report' })
+    expect(t.reports.rows[0]).toMatchObject({ status: 'delivered', warning: null })
+    // The report is not one of the target's tool calls: no card, no approval.
+    expect(emitted(t.ctx, 'session:tool-review')).toHaveLength(0)
+    expect(emitted(t.ctx, 'session:approval-request')).toHaveLength(0)
+  })
+
+  it('in auto: block → FLAGGED with the warning above the report, which is delivered whole', async () => {
+    const t = await run('auto', BLOCK)
+    expect(t.result.text.split('\n')[0]).toBe(`  ${WARNING}`)
+    expect(t.result.text).toContain('  oc report')
+    expect(t.notes[0]).toMatchObject({
+      handback: 'flagged',
+      warning: WARNING,
+      summary: 'oc report'
+    })
+    expect(t.reports.rows[0]).toMatchObject({
+      status: 'flagged',
+      warning: WARNING,
+      report: 'oc report'
+    })
+  })
+
+  it('in auto, a judge that cannot answer is a note, not a flag', async () => {
+    const t = await run('auto', new Error('HTTP 503'))
+    expect(t.result.text.split('\n')[0]).toBe(
+      '  Note: the report could not be reviewed (HTTP 503). Please verify it carefully.'
+    )
+    expect(t.notes[0]).toMatchObject({ handback: 'send' })
+    expect(t.reports.rows[0]).toMatchObject({ status: 'delivered', report: 'oc report' })
+  })
+
+  it('outside auto, or with the engine’s auto-mode switch off, the report is not reviewed', async () => {
+    for (const [mode, config] of [
+      ['default', judgedConfig],
+      ['acceptEdits', judgedConfig],
+      ['plan', judgedConfig],
+      [
+        'auto',
+        () =>
+          ({
+            dispatch: { defaultModel: 'openai/gpt-5' },
+            autoMode: { enabled: false }
+          }) as unknown as EngineConfig
+      ]
+    ] as const) {
+      const t = await run(mode, BLOCK, config)
+      expect(t.judge.make).not.toHaveBeenCalled()
+      expect(t.result.text).toContain('  oc report')
+      expect(t.result.text).not.toContain('SECURITY WARNING')
+      expect(t.notes[0]).toMatchObject({ handback: 'send' })
+    }
+  })
+})

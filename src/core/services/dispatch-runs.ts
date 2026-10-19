@@ -12,6 +12,7 @@
  * background form returns once `launched` fires (the target's ledger row exists).
  * This module is a LEAF: types only from the dispatcher, no runtime imports.
  */
+import type { ReportReview } from '../../shared/handback-review'
 import type { EngineId } from '../../shared/types'
 import type { DispatchResult } from './cross-engine-dispatcher'
 
@@ -73,12 +74,27 @@ export class DispatchRun {
   /** Resolves when {@link report} is set: the turn bodies race it. */
   readonly reported: Promise<void>
   private markReported!: () => void
+  /**
+   * The review of the report by the X-Agent's own judge (ADR-105 §3, B-3c), started when the report
+   * is accepted; null when the target is not judged. It never rejects. The turn bodies await it
+   * (bounded) before the run's end is decided.
+   */
+  review: Promise<ReportReview> | null = null
+  /** Cancels the judge request behind {@link review}: fired when the bodies stop waiting for it (deadline, Stop, abandon). */
+  reviewAbort: AbortController | null = null
+  /** What the review came to once the bodies stopped waiting for it (a Claude target's is known at the call); null: none ran. */
+  reviewed: ReportReview | null = null
   /** Follow-up prompts sent because a turn ended without a report (at most three). */
   nudges = 0
   /** What the run's turns (the first and each nudge) spent, for its one terminal notification. */
   usage = { totalTokens: 0, toolUses: 0, durationMs: 0 }
   /** How a run that reached its end through a report decision ended (set by the dispatcher); null otherwise. */
-  finishedAs: { status: 'delivered' | 'fallback' | 'withheld'; report: string | null } | null = null
+  finishedAs: {
+    status: 'delivered' | 'flagged' | 'fallback' | 'withheld'
+    report: string | null
+    /** What the review put above the report: a flagged one's security warning, or a delivered one's note. */
+    warning?: string
+  } | null = null
   /** The status of the terminal notification the run emitted. */
   terminalStatus: 'completed' | 'failed' | 'stopped' | null = null
   /** The text of that notification (a failure's reason, a legacy run's last message). */

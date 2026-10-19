@@ -1873,6 +1873,22 @@ describe('TaskCard - a SubagentHandback report', () => {
     expect(warning.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
+  it('send with a note (no review ran, B-3c): the note is above the report, and it is not a security warning', () => {
+    renderEnded({
+      summary: 'Found 3 files.',
+      handback: 'send',
+      warning: 'Note: the report could not be reviewed (HTTP 503). Please verify it carefully.'
+    })
+    const note = screen.getByTestId('HandbackReport.note')
+    expect(note).toHaveTextContent('Note: the report could not be reviewed (HTTP 503)')
+    expect(screen.queryByTestId('HandbackReport.warning')).not.toBeInTheDocument()
+    expect(
+      note.compareDocumentPosition(screen.getByTestId('HandbackReport.text')) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(screen.getByTestId('HandbackReport')).toHaveAttribute('data-handback', 'send')
+  })
+
   it('flagged without a warning text still says so', () => {
     renderEnded({ summary: 'Found 3 files.', handback: 'flagged' })
     expect(screen.getByTestId('HandbackReport.warning')).toHaveTextContent(/flagged/i)

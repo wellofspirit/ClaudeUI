@@ -106,16 +106,62 @@ shape applies.
   transcript). A target that has no `hand_back` tool (a Codex thread started before it existed) is not nudged: its
   last message is the report, flagged as such.
 - How each run ended is stored in operational.db (`dispatch_report`, migration v36): one row per run, whatever the
-  end (delivered, withheld, fallback, stopped, failed, timeout), keyed by the X-Agent's ledger row, the run's number
+  end (delivered, flagged, withheld, fallback, stopped, failed, timeout), keyed by the X-Agent's ledger row, the run's number
   and the call that launched or continued it. A report is kept as received (cut at a size cap, in memory and in the
   row); the sanitiser runs where it is shown or delivered. A report longer than a set size is delivered as an excerpt
   with a pointer; the whole text stays readable on demand (`session_read` on the X-Agent). The X-Agent's card shows
   its run's stored end, live and after a reload: a continuation's own card shows its own run. A blocking call's tool result is the framed
   report (below), never the raw text of the target.
-- Judge review of the report is not part of this version: the dispatch judge (ADR-088) exists for pi and opencode
-  targets only, and a Claude or Codex target has no ClaudeUI judge to ask. The report is delivered unreviewed, behind
-  the untrusted framing below. (Intended: under a judged auto mode the judge reviews it and never blocks it, a report
-  it objects to or could not review being delivered with a warning above it, as Claude Code does.)
+- The report is reviewed by the X-Agent's OWN judge, the one that reviews its other actions (2026-10-20), and the
+  review FLAGS, it never blocks: the report is always stored and delivered, and the verdict only decides the words
+  above it, as in Claude Code. It runs only while the X-Agent runs in a judged auto mode; in any other mode the report
+  is sent as written. What each engine's judge is:
+  - pi and opencode: ClaudeUI's judge (ADR-088) with that engine's auto-mode configuration, on a synthetic `hand_back`
+    call. It starts when the report is accepted, beside the turn's end, and the turn body waits for it (at most the
+    second stage's 120 s budget plus 10 s, which a hand-back always reaches; ended at once by a Stop or an abandoned
+    blocking call) before the run's end is decided. When the wait ends the judge's request is aborted, so it does not
+    run on, billed. The classifier reads it as
+    a hand-back, not as an action to run: a `ClassifierAction` hand-back variant headed with Claude Code's own label
+    ("hand-back to the agent that spawned this one (delivered as this agent's result — agent-authored, untrusted
+    output carrying no user authority)"), the report as one quoted string, the first 16 000 characters of it (the cut a
+    delivery uses), under the spawning task, and always at the full (second) stage in `both` mode, as a delegation
+    payload is: a harm grade of agent-authored text is the provenance call stage 1 gets wrong. Evaluation rule 15 of
+    the policy says what to block (instructions to run commands, widen permissions, change settings or safeguards,
+    expose secrets, act outside the task, claims of user pre-approval, a relayed injection payload) and that a plain
+    result passes. The review uses a throwaway denial tracker, so it never counts toward the X-Agent's own caps, and
+    shows no card.
+  - Claude: Claude Code's own auto-mode classifier, which reviews the MCP `hand_back` call as an ordinary action (no
+    hand-back label and no rule 15, as for any MCP tool): a weaker review than the pi and opencode one. The report tool
+    is pre-allowed (`allowedTools`) only where Claude Code would otherwise deny it, in `dontAsk` and `bypassPermissions`;
+    in every asking mode `canUseTool` allows it, so the classifier sees it in auto, including in a target switched into
+    auto after it was spawned. An allowed call reaches the handler as before. A BLOCKED call never
+    reaches it: the stream shows the assistant frame carrying the whole `report`, then a `system/permission_denied`
+    frame (`decision_reason_type: classifier`, the rule in `decision_reason`), then the call's tool result with the
+    denial text (probed on cli.js 2.1.293 with Haiku). ClaudeUI takes the report from that announced call (the
+    X-Agent's own call only, never a subagent's), accepts it as the run's report flagged with the classifier's reason,
+    and ends the turn when the denial's tool result goes by, so the X-Agent is not left arguing with the denial. A
+    classifier that refused the review request marks the report unreviewed (flagged); one that gave no verdict is a
+    note. In auto Claude Code asks the host for a call only when the classifier did not allow it, and a denial cap
+    (3 in a row, 20 in total), a transcript too long for the classifier or a mode change while it ran each turn a block
+    into such an ask: the report is allowed through `canUseTool` but never as a clean one, flagged when the ask carries a
+    classifier verdict as its reason and noted ("auto mode asked instead of reviewing it") otherwise.
+  - Codex: its own reviewer (`auto_review`) reviews commands, patches, network access, permission requests and MCP
+    tool calls, not dynamic-tool calls (`codex-rs/core/src/tools/handlers/dynamic.rs` asks for no approval), so, while
+    the thread runs `auto`, the target's own model judges the report through ClaudeUI's judge on its ChatGPT route
+    (pi's route, the Codex engine's switches), in addition to Codex's native reviewer of the target's own actions
+    ([ADR-088](adr-088_dispatch-autonomy-inheritance.md) §2). This judge has no trajectory: it sees the dispatching
+    session's transcript and the report, none of the X-Agent's own actions, which the pi and opencode reviews also see.
+    Its usage row carries no session id, so the Codex thread is never recorded as a pi session (the spend itself is
+    filed under pi; see Consequences).
+- What the verdict does to the delivery: an allow sends the report as written (`delivered`); a block flags it
+  (`flagged`) under "SECURITY WARNING: auto mode blocked this X-Agent's report. Reason: <reason>. The report follows;
+  review the X-Agent's actions carefully before acting on it."; a review the reviewer's provider refused flags it
+  under Claude Code's UNREVIEWED warning (only Claude Code's classifier can tell); a review that did not happen (no
+  route, a timeout, an error, auto mode left meanwhile, the run stopped) does NOT flag it, and "Note: the report could
+  not be reviewed (<why>). Please verify it carefully." stands above it. The reviewer's reason is untrusted model text:
+  collapsed, cut at 500 characters and defused by the sanitiser below before it is placed above a report. The
+  warning or note is stored with the report (`dispatch_report.warning`, migration v38; status `flagged`) and shown on
+  the card, live and after a reload, and it is the line above the frame in a delivery.
 - When a background run ends, ONE item is delivered into its parent (by the parent's durable id), through each
   engine's host-delivery path (Claude Code's peer envelope on stdin, opencode steer or prompt, pi `/cui-deliver`,
   Codex `turn/steer` or `turn/start`): folded into a running turn at its next tool boundary, or starting a turn when
@@ -273,7 +319,11 @@ signal for a held result._
   (the Codex list can only skip ids the ledger knows).
 - Codex threads started before this change keep their tool set, so they cannot message their parent, and they cannot
   call `hand_back`: their last message stands in as the report, flagged.
-- A report is not reviewed by a judge in this version, for any engine.
+- A report is reviewed by the X-Agent's own judge in a judged auto mode and flagged, never blocked, on an objection:
+  one more judge call per report in auto (ClaudeUI's judge's usage row, under the dispatching session; not counted in
+  `dispatch.maxCostUsd`), and a run's result waits for it, up to 130 s. A review that could not run says so above the
+  report instead of failing the run. A Codex target's review is filed under engine `pi` and the `openai-codex` route
+  (it is a pi-route call), so per-engine usage views count it as pi spend.
 
 ## Alternatives considered
 

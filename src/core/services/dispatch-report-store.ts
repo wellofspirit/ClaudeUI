@@ -24,8 +24,10 @@ export interface DispatchReportStore {
     /** The dispatch_agent call that launched or continued the run. */
     toolUseId: string | null
     status: DispatchReportStatus
-    /** The report text (delivered, fallback); null for an end without one. */
+    /** The report text (delivered, flagged, fallback); null for an end without one. */
     report: string | null
+    /** The review's words above the report (B-3c): a flagged report's warning, or a note. */
+    warning?: string | null
     createdAt: number
   }): DispatchReportRow | undefined
   /** The run's result was handed to its parent's engine (B-3b): stamp `deliveredAt`. */

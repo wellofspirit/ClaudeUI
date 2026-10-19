@@ -105,7 +105,7 @@ import {
   type BlockedCallLedger
 } from '../automode/blocked-calls'
 import { collectToolUseIds, recordTrajectoryMessage } from '../automode/trajectory'
-import type { JudgeTransport } from '../automode/classifier'
+import { STAGE2_TIMEOUT_MS, type JudgeTransport } from '../automode/classifier'
 import type { SessionJudgeOptions } from '../automode/session-judge'
 import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
 import { loadEngineConfig, loadSettings } from './ui-config'
@@ -231,6 +231,12 @@ import {
   type DispatchReportStore
 } from './dispatch-report-store'
 import { capReport, frameHandBack } from '../../shared/handback-frame'
+import { dispositionOf, type ReportReview } from '../../shared/handback-review'
+import {
+  handBackReviewOf,
+  handBackReviewOfAsk,
+  readPermissionDecisionFrame
+} from './claude-permission-decision'
 import {
   failedResultText,
   reportResultText,
@@ -745,6 +751,12 @@ export interface DispatcherDeps {
    * {@link OWN_WORK_WAIT_MS}.
    */
   ownWorkWaitMs?: number
+  /**
+   * The longest a turn body waits for the review of an X-Agent's report by its own judge before
+   * the run ends with a "could not be reviewed" note instead (ADR-105 §3, slice B-3c). Defaults
+   * to {@link HAND_BACK_REVIEW_MS}.
+   */
+  handBackReviewMs?: number
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
@@ -925,6 +937,15 @@ const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
 const HAND_BACK_SETTLE_MS = 2_000
 /** See {@link DispatcherDeps.ownWorkWaitMs}. */
 const OWN_WORK_WAIT_MS = 30 * 60_000
+/**
+ * See {@link DispatcherDeps.handBackReviewMs}: the report review's hard deadline. A hand-back
+ * always goes straight to stage 2 in `both` mode (stage 1 is skipped, `requiresFullReview`), whose
+ * budget is {@link STAGE2_TIMEOUT_MS} (120 s), and in `fast` mode stage 1 alone (60 s) decides. The
+ * deadline is the stage-2 budget plus 10 s for what runs outside the transport (loading the parent
+ * transcript, resolving the route), so a slow verdict is not cut by a shorter clock and the stage's
+ * own timeout, with its cause, fires first.
+ */
+export const HAND_BACK_REVIEW_MS = STAGE2_TIMEOUT_MS + 10_000
 /** Follow-ups sent to a run that ended without a report before it is withheld (ADR-105 §3). */
 const MAX_HAND_BACK_NUDGES = 3
 /** How often a running opencode target turn checks the parent's live mode. */
@@ -1213,6 +1234,18 @@ interface ClaudeTargetEntry extends TargetLedgerFields {
   pendingWake: Map<string, number>
   /** Who made each tool call (the report is the X-Agent's own, never one of its subagents'). */
   toolUseOwners: ToolUseOwners
+  /**
+   * The `report` input of the X-Agent's own `hand_back` calls as the stream announced them (call id →
+   * text), kept for the classifier's verdict: a BLOCKED call never reaches the handler, so this is
+   * where the report is taken from (ADR-105 §3, slice B-3c). Bounded, oldest out.
+   */
+  handBackCalls: Map<string, string>
+  /**
+   * The review of a `hand_back` call cli.js ASKED the host about while the target ran in auto
+   * (call id → review): in auto it asks only when its classifier did not allow the call, so the
+   * report must not go out as clean. Taken by the handler, cleared on release. Bounded, oldest out.
+   */
+  askedHandBacks: Map<string, ReportReview>
   /** The uuids of the frames pushed into the target that cli.js has not yet reported `started`. */
   pushedUuids: Set<string>
   /**
@@ -1415,6 +1448,14 @@ interface CodexTargetEntry extends TargetLedgerFields {
   autonomyMode: string
   /** Resolved native model id (`thread/start`'s echo), fixed for the target's life. */
   model: string
+  /** The latest dispatch prompt (set at every turn start) — the report review's subagent task. */
+  lastPrompt: string
+  /**
+   * ClaudeUI's judge for this target's REPORT (ADR-105 §3, slice B-3c), built on first use: Codex's own
+   * reviewer does not review dynamic-tool calls, so the report is judged by the target's own model
+   * on ClaudeUI's ChatGPT judge route. It judges nothing else.
+   */
+  reportJudge?: DispatchTargetJudge
   /**
    * The subscription this target's turns are billed to (ADR-071 §3), resolved
    * ONCE at creation. Unlike opencode and pi — whose credential is read per
@@ -2360,6 +2401,16 @@ function buildClaudeDispatchMessage(
 }
 
 /**
+ * Is the Claude target's `hand_back` in the process's `allowedTools`? Only in the modes where
+ * cli.js would deny it unasked: `dontAsk` turns every ask into a denial and `bypassPermissions`
+ * needs no ask. In every other mode `canUseTool` allows it, and an allow rule would skip the
+ * auto-mode classifier for a target that is, or later is switched, into auto (B-3c).
+ */
+function claudeHandBackPreAllowed(mode: PermissionMode): boolean {
+  return mode === 'dontAsk' || mode === 'bypassPermissions'
+}
+
+/**
  * Map the dispatching session's inherited autonomy (a Claude-style
  * permission-mode string) to the Claude TARGET's permissionMode (ADR-033 M2
  * item 5, amended by ADR-088).
@@ -2567,6 +2618,7 @@ export class CrossEngineDispatcher {
   private readonly reports: DispatchReportStore
   private readonly handBackSettleMs: number
   private readonly ownWorkWaitMs: number
+  private readonly handBackReviewMs: number
 
   /**
    * Monotonic per-dispatcher counter, one tick per ledger row — the tiebreak
@@ -2639,6 +2691,7 @@ export class CrossEngineDispatcher {
     this.reports = deps.reports ?? dispatchReports
     this.handBackSettleMs = deps.handBackSettleMs ?? HAND_BACK_SETTLE_MS
     this.ownWorkWaitMs = deps.ownWorkWaitMs ?? OWN_WORK_WAIT_MS
+    this.handBackReviewMs = deps.handBackReviewMs ?? HAND_BACK_REVIEW_MS
     this.parents = deps.parents
   }
 
@@ -3599,6 +3652,7 @@ export class CrossEngineDispatcher {
       this.teardownOpencodeTarget(entry)
     } else if (entry.kind === 'claude') {
       entry.itemStreams.sealAll()
+      entry.askedHandBacks.clear()
       // Killing the process is the only teardown a Claude target needs —
       // no server ref, no remote session to delete.
       entry.abortController.abort()
@@ -3743,9 +3797,12 @@ export class CrossEngineDispatcher {
     if (!run.handBackRequired || !run.ledgerId) return
     let status: DispatchReportStatus
     let report: string | null = null
+    let warning: string | null = null
     if (run.finishedAs) {
       status = run.finishedAs.status
       report = run.finishedAs.report
+      // A fallback's warning is a constant the reload derives; a review's words are stored.
+      if (status !== 'fallback') warning = run.finishedAs.warning ?? null
     } else if (run.terminalStatus === 'stopped') status = 'stopped'
     else if (run.terminalStatus === 'failed') status = run.timedOut ? 'timeout' : 'failed'
     else return
@@ -3755,6 +3812,7 @@ export class CrossEngineDispatcher {
         toolUseId: run.toolUseId ?? null,
         status,
         report,
+        ...(warning ? { warning } : {}),
         createdAt: this.now()
       })
       run.reportRun = row?.run ?? null
@@ -3866,7 +3924,8 @@ export class CrossEngineDispatcher {
           })
       })
     const done = run.finishedAs
-    if (done?.status === 'delivered' && done.report !== null) return framed(done.report)
+    if ((done?.status === 'delivered' || done?.status === 'flagged') && done.report !== null)
+      return framed(done.report, done.warning)
     if (done?.status === 'fallback' && done.report !== null)
       return framed(done.report, HAND_BACK_FALLBACK_WARNING)
     if (done?.status === 'withheld') return handBackWithheldText(sentenceLabel(name))
@@ -3921,7 +3980,8 @@ export class CrossEngineDispatcher {
   private receiveHandBack(
     entry: TargetEntry | undefined,
     report: unknown,
-    callId: string | undefined
+    callId: string | undefined,
+    observed?: ReportReview
   ): HandBackAnswer {
     const run = entry?.ctx.run
     if (!entry || !run || !run.handBackRequired || !entry.handBack)
@@ -3933,7 +3993,141 @@ export class CrossEngineDispatcher {
       return { text: HAND_BACK_EMPTY_TEXT, isError: true }
     if (!run.acceptReport(capReport(report), callId))
       return { text: HAND_BACK_REPEAT_TEXT, isError: true }
+    // The review runs beside the turn's end (the bodies await it before the run's end is decided):
+    // a Claude target's came with the call (Claude Code's own classifier blocked it), the others'
+    // is the target's own judge, started now.
+    if (observed) run.reviewed = observed
+    else this.startReview(entry, run)
     return { text: HAND_BACK_DONE_TEXT, isError: false }
+  }
+
+  // ── the review of a report by the X-Agent's own judge (ADR-105 §3, slice B-3c) ─────────
+
+  /**
+   * Who reviews THIS target's report, when anyone does: only a target running in a judged auto
+   * mode. pi and opencode: ClaudeUI's judge for that engine (`autoModeActive` reads the live
+   * mode and the engine's own switch). Codex: its native reviewer does not look at dynamic-tool
+   * calls (`codex-rs/core/src/tools/handlers/dynamic.rs` asks no approval), so, while the thread
+   * runs `auto` (`entry.autonomyMode`, as its other gates read it), the target's OWN model judges
+   * through ClaudeUI's judge on its ChatGPT route. Claude: cli.js's classifier decides inside the
+   * process and its verdict is read off the stream (`takeBlockedClaudeReport`), not asked here.
+   */
+  private reviewerFor(
+    entry: TargetEntry
+  ): ((report: string, signal: AbortSignal) => Promise<ReportReview>) | undefined {
+    const run = entry.ctx.run
+    const live = (): boolean =>
+      !run.stopController.signal.aborted && !run.cancelController.signal.aborted
+    const through =
+      (judge: DispatchTargetJudge, mode: () => string) =>
+      (report: string, signal: AbortSignal): Promise<ReportReview> =>
+        judge.reviewHandBack(report, {
+          currentMode: mode,
+          stillPending: live,
+          signal,
+          permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction)
+        })
+    switch (entry.kind) {
+      case 'opencode':
+      case 'pi':
+        return entry.judge.autoModeActive(liveMode(entry.ctx))
+          ? through(entry.judge, () => liveMode(entry.ctx))
+          : undefined
+      case 'codex': {
+        // The thread's own mode (as its other gates read it), under the Codex engine's switch.
+        const judge = this.codexReportJudge(entry)
+        return judge.autoModeActive(entry.autonomyMode)
+          ? through(judge, () => entry.autonomyMode)
+          : undefined
+      }
+      case 'claude':
+        return undefined
+    }
+  }
+
+  /** The judge of a Codex target's report: pi's ChatGPT route, the target's own model, the Codex engine's switches. */
+  private codexReportJudge(entry: CodexTargetEntry): DispatchTargetJudge {
+    entry.reportJudge ??= new DispatchTargetJudge({
+      engine: 'pi',
+      configEngine: 'codex',
+      fixedModel: () => entry.model,
+      cwd: entry.cwd,
+      routingId: () => entry.ctx.fromRoutingId,
+      // The usage row is a pi-route row: it must not name a Codex thread as a pi session.
+      sessionId: () => null,
+      model: () => entry.model,
+      emit: () => entry.ctx.emit,
+      messages: () => entry.ctx.getMessages(),
+      loadMessages: () => entry.ctx.loadMessages?.(),
+      queuedTurns: () => entry.ctx.getQueuedUserTurns?.() ?? [],
+      trajectory: () => [],
+      subagent: () => ({
+        type: 'dispatch:codex',
+        description: judgeDescription(entry.model, entry.ctx.callerRestriction),
+        prompt: entry.lastPrompt
+      }),
+      loadEngineConfig: this.deps.loadEngineConfig,
+      peekModels: () => null,
+      ...(this.deps.makeJudgeTransport ? { makeTransport: this.deps.makeJudgeTransport } : {})
+    })
+    return entry.reportJudge
+  }
+
+  /** Start the review of the report just accepted (a no-op for a target that is not judged). Never throws. */
+  private startReview(entry: TargetEntry, run: DispatchRun): void {
+    try {
+      const review = run.report ? this.reviewerFor(entry) : undefined
+      if (!review || !run.report) return
+      const text = run.report.text
+      // The judge request stops with the wait (`settleReview`: deadline, Stop, abandon).
+      const ctl = new AbortController()
+      run.reviewAbort = ctl
+      run.review = review(text, ctl.signal).catch((err: unknown): ReportReview => ({
+        kind: 'unavailable',
+        why: errText(err)
+      }))
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `report review could not start: ${errText(err)}`)
+      run.review = Promise.resolve({ kind: 'unavailable', why: errText(err) })
+    }
+  }
+
+  /**
+   * The turn bodies' wait for the review, just before the run's end is decided. Bounded by the
+   * review deadline; a Stop or an abandoned blocking call ends the wait at once. Whatever
+   * happens, the report is kept: the review only decides the words above it (`finishTurn`).
+   */
+  private async settleReview(run: DispatchRun): Promise<void> {
+    const pending = run.review
+    if (!pending || run.reviewed) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const detach: Array<() => void> = []
+    const aborted = (signal: AbortSignal, why: string): Promise<ReportReview> =>
+      new Promise((resolve) => {
+        const done = (): void => resolve({ kind: 'unavailable', why })
+        if (signal.aborted) return done()
+        signal.addEventListener('abort', done, { once: true })
+        detach.push(() => signal.removeEventListener('abort', done))
+      })
+    try {
+      run.reviewed = await Promise.race([
+        pending,
+        new Promise<ReportReview>((resolve) => {
+          timer = setTimeout(
+            () => resolve({ kind: 'unavailable', why: 'the review took too long' }),
+            this.handBackReviewMs
+          )
+        }),
+        aborted(run.stopController.signal, 'the run was stopped before the review finished'),
+        aborted(run.cancelController.signal, 'the call was abandoned before the review finished')
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+      for (const off of detach) off()
+      // Nobody waits for the judge any more: its request must not run on, billed (a no-op when
+      // the review has finished).
+      run.reviewAbort?.abort()
+    }
   }
 
   /**
@@ -3983,9 +4177,21 @@ export class CrossEngineDispatcher {
     const note = turn.outText.slice(turn.finalText.length)
     if (run.report) {
       const text = run.report.text
-      run.finishedAs = { status: 'delivered', report: text }
-      emitDispatchNotification(ctx, sessionId, 'completed', text, run.usage, { handback: 'send' })
-      return { text: this.frameFor(ctx, engine, model, text) + note, sessionId }
+      // The review's words above the report (B-3c): a flag or a note; the report itself always goes.
+      const disposition = dispositionOf(run.reviewed)
+      run.finishedAs = {
+        status: disposition.status,
+        report: text,
+        ...(disposition.warning ? { warning: disposition.warning } : {})
+      }
+      emitDispatchNotification(ctx, sessionId, 'completed', text, run.usage, {
+        handback: disposition.handback,
+        ...(disposition.warning ? { warning: disposition.warning } : {})
+      })
+      return {
+        text: this.frameFor(ctx, engine, model, text, disposition.warning) + note,
+        sessionId
+      }
     }
     if (!entry.handBack) {
       run.finishedAs = { status: 'fallback', report: capReport(turn.finalText) }
@@ -4449,6 +4655,7 @@ export class CrossEngineDispatcher {
         outText +=
           '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
       }
+      await this.settleReview(ctx.run)
       return this.finishTurn(ctx, 'opencode', model, entry, entry.sessionId, {
         finalText,
         outText,
@@ -5899,6 +6106,7 @@ export class CrossEngineDispatcher {
           ctx.addDispatchedCost?.('claude', model, turnCostUsd)
         }
 
+        await this.settleReview(ctx.run)
         const done = this.finishTurn(ctx, 'claude', model, entry, entry.sessionId ?? '', {
           finalText,
           outText,
@@ -6078,6 +6286,10 @@ export class CrossEngineDispatcher {
           entry.pendingWake.clear()
         return
       }
+      if (task.subtype === 'permission_denied') {
+        this.takeBlockedClaudeReport(entry, msg as unknown as Record<string, unknown>)
+        return
+      }
       if (!task.task_id) return
       const ended = (status: string | undefined): void => {
         if (!status || !TERMINAL_TASK_STATUSES.has(status)) return
@@ -6091,6 +6303,10 @@ export class CrossEngineDispatcher {
           entry.ownTasks.set(task.task_id, this.now())
       } else if (task.subtype === 'task_notification') ended(task.status)
       else if (task.subtype === 'task_updated') ended(task.patch?.status)
+      return
+    }
+    if (msg.type === 'assistant') {
+      this.noteClaudeHandBackCalls(entry, msg)
       return
     }
     const report = entry.ctx.run.report
@@ -6107,6 +6323,48 @@ export class CrossEngineDispatcher {
     void entry.query.interrupt().catch((err: unknown) => {
       logger.warn('CrossEngineDispatcher', `could not end the turn after a report: ${errText(err)}`)
     })
+  }
+
+  /** Remember the `report` of the X-Agent's own `hand_back` calls as the stream announces them (for a blocked one). */
+  private noteClaudeHandBackCalls(entry: ClaudeTargetEntry, msg: SDKMessage): void {
+    const frame = msg as unknown as {
+      parent_tool_use_id?: string | null
+      agent_id?: string
+      message?: { content?: unknown }
+    }
+    if (frame.parent_tool_use_id || frame.agent_id || !Array.isArray(frame.message?.content)) return
+    for (const block of frame.message.content as Array<Record<string, unknown>>) {
+      if (block?.type !== 'tool_use' || block.name !== CLAUDE_HAND_BACK_TOOL) continue
+      const input = block.input as { report?: unknown } | undefined
+      if (typeof block.id !== 'string' || typeof input?.report !== 'string') continue
+      entry.handBackCalls.set(block.id, input.report)
+      if (entry.handBackCalls.size > 8)
+        entry.handBackCalls.delete(entry.handBackCalls.keys().next().value as string)
+    }
+  }
+
+  /**
+   * Claude Code's own classifier BLOCKED the X-Agent's `hand_back` call (auto mode; the call never
+   * reaches its handler, and the model is told it was denied). The report is a flag, never a block
+   * (ADR-105 §3, slice B-3c): it is taken from the `report` the announcing assistant frame carried,
+   * accepted as the run's report with the classifier's verdict as its review, and the turn is ended
+   * when the call's tool_result goes by (`trackClaudeHandBack`), so the X-Agent is not left to argue
+   * with the denial. Only the X-Agent's own call and only a classifier decision count: a rule's
+   * denial of the tool, or a subagent's call, takes nothing.
+   */
+  private takeBlockedClaudeReport(entry: ClaudeTargetEntry, msg: Record<string, unknown>): void {
+    const frame = readPermissionDecisionFrame(msg)
+    if (!frame || frame.agentId) return
+    const report = entry.handBackCalls.get(frame.toolUseId)
+    if (report === undefined || entry.toolUseOwners.ownerNow(frame.toolUseId) !== 'root') return
+    const review = handBackReviewOf(
+      frame,
+      typeof msg.message === 'string' ? msg.message : undefined
+    )
+    if (!review) return
+    const answer = this.receiveHandBack(entry, report, frame.toolUseId, review)
+    if (answer.isError)
+      logger.info('CrossEngineDispatcher', `blocked hand_back report not taken: ${answer.text}`)
   }
 
   /**
@@ -6210,9 +6468,13 @@ export class CrossEngineDispatcher {
       prompt: entry.channel,
       ...ids,
       ...(deny.length > 0 || ask.length > 0 ? { settings: { permissions: { deny, ask } } } : {}),
-      // The target's report channel (ADR-105 §3): a one-tool server of its own, in the
-      // process's `allowedTools` so cli.js never asks (a report is not an action to approve).
-      // Probed on cli.js 2.1.293, auto mode, Haiku: the call ran with no ask and no block.
+      // The target's report channel (ADR-105 §3): a one-tool server of its own. It is in the
+      // process's `allowedTools` only where cli.js would otherwise DENY it: `dontAsk` (an ask is a
+      // denial there) and `bypassPermissions` (never asks). Every asking mode leaves it out:
+      // `canUseTool` allows it (a report is not an action to approve), and an allow rule would
+      // also skip the classifier in auto, which reviews the report (probed on cli.js 2.1.293 with
+      // Haiku: an allowed call runs with no ask and no frame, a blocked one is a
+      // `permission_denied` frame after the announcing assistant frame and before the tool_result).
       ...(entry.handBack
         ? {
             mcpServers: {
@@ -6222,10 +6484,14 @@ export class CrossEngineDispatcher {
                 const owner = await entry.toolUseOwners.ownerOf(callId)
                 if (owner === 'subagent') return { text: HAND_BACK_SUBAGENT_TEXT, isError: true }
                 if (owner === 'unknown') return { text: HAND_BACK_UNATTRIBUTED_TEXT, isError: true }
-                return this.receiveHandBack(entry, report, callId)
+                const asked = callId === undefined ? undefined : entry.askedHandBacks.get(callId)
+                if (callId !== undefined) entry.askedHandBacks.delete(callId)
+                return this.receiveHandBack(entry, report, callId, asked)
               })
             },
-            allowedTools: [CLAUDE_HAND_BACK_TOOL]
+            ...(claudeHandBackPreAllowed(mode.permissionMode)
+              ? { allowedTools: [CLAUDE_HAND_BACK_TOOL] }
+              : {})
           }
         : {}),
       onInboundFrame: (frame) => entry.toolUseOwners.noteFrame(frame)
@@ -6278,6 +6544,8 @@ export class CrossEngineDispatcher {
       ownTasks: new Map(),
       pendingWake: new Map(),
       toolUseOwners: new ToolUseOwners(),
+      handBackCalls: new Map(),
+      askedHandBacks: new Map(),
       pushedUuids: new Set(),
       ownTurnStarted: false,
       nextFrame: null,
@@ -6444,10 +6712,21 @@ export class CrossEngineDispatcher {
     // its next ask. The ask in hand was produced under the OLD mode and is
     // decided below as usual (a human answers it; an ask already parked on
     // the human stays with the human).
+    // Read BEFORE the sync: the mode the ask was produced under (an ask of auto's classifier).
+    const wasAuto = entry.appliedPermissionMode === 'auto'
     await this.syncClaudeTargetMode(entry)
     if (opts.toolUseId) entry.toolUseOwners.note(opts.toolUseId, !!opts.agentId)
-    // The report is the run's end, never an action to approve (it is also in `allowedTools`).
-    if (toolName === CLAUDE_HAND_BACK_TOOL) return { behavior: 'allow', updatedInput: input }
+    // The report is the run's end, never an action to approve. In auto, though, cli.js asks only
+    // when its classifier did not allow the call (a denial cap or a missing verdict turned the
+    // block into an ask): the report is allowed through but not as a clean one (B-3c).
+    if (toolName === CLAUDE_HAND_BACK_TOOL) {
+      if (wasAuto && opts.toolUseId && !opts.agentId) {
+        entry.askedHandBacks.set(opts.toolUseId, handBackReviewOfAsk(opts))
+        if (entry.askedHandBacks.size > 8)
+          entry.askedHandBacks.delete(entry.askedHandBacks.keys().next().value as string)
+      }
+      return { behavior: 'allow', updatedInput: input }
+    }
     if (isShellToolName(toolName) && typeof input.command === 'string') {
       const hit = denyAskHit(
         input.command,
@@ -7070,6 +7349,7 @@ export class CrossEngineDispatcher {
             '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
         }
 
+        await this.settleReview(ctx.run)
         const done = this.finishTurn(ctx, 'pi', model, entry, entry.sessionId ?? '', {
           finalText,
           outText,
@@ -7595,6 +7875,8 @@ export class CrossEngineDispatcher {
     }
 
     const model = entry.model
+    // The report review's subagent task is the LATEST dispatch prompt (ADR-088's rule for the judge).
+    entry.lastPrompt = req.prompt
     const turn = async (prompt: string | null): Promise<TurnReturn> => {
       entry.busy = true
       this.ledgerTurnState(entry, 'running')
@@ -7766,6 +8048,7 @@ export class CrossEngineDispatcher {
             '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
         }
 
+        await this.settleReview(ctx.run)
         const done = this.finishTurn(ctx, 'codex', model, entry, entry.sessionId ?? '', {
           finalText: outcome.text,
           outText,
@@ -8009,6 +8292,7 @@ export class CrossEngineDispatcher {
       ctx,
       autonomyMode: liveMode(ctx),
       model: '',
+      lastPrompt: '',
       // Replaced below, once the account behind the host is known.
       account: UNKNOWN_DISPATCH_ACCOUNT,
       busy: false,

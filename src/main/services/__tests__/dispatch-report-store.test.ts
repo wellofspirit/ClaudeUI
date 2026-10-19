@@ -2,7 +2,7 @@
  * @vitest-environment node
  *
  * The X-Agent report store (ADR-105 §3, slice B-3a): migration v36 (`dispatch_report` and
- * `dispatch_target.hand_back`) and its DAO in `db.ts`.
+ * `dispatch_target.hand_back`), v38 (`dispatch_report.warning`, slice B-3c) and its DAO in `db.ts`.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import BetterSqlite3 from 'better-sqlite3'
@@ -66,7 +66,7 @@ describe('migration v36', () => {
         .run()
       runMigrations(older)
       expect(table()).toBeDefined()
-      expect(older.pragma('user_version', { simple: true })).toBe(37)
+      expect(older.pragma('user_version', { simple: true })).toBe(38)
       const columns = (
         older.prepare('PRAGMA table_info(dispatch_report)').all() as { name: string }[]
       ).map((c) => c.name)
@@ -77,7 +77,8 @@ describe('migration v36', () => {
         'status',
         'report',
         'created_at',
-        'delivered_at'
+        'delivered_at',
+        'warning'
       ])
       expect(getDispatchTarget('s-old001', older)?.handBack).toBe(false)
     } finally {
@@ -87,7 +88,7 @@ describe('migration v36', () => {
 
   it('the version is the next free one: nothing else claims 36', () => {
     expect(MIGRATIONS.filter((m) => m.version === 36)).toHaveLength(1)
-    expect(Math.max(...MIGRATIONS.map((m) => m.version))).toBe(37)
+    expect(Math.max(...MIGRATIONS.map((m) => m.version))).toBe(38)
   })
 })
 
@@ -121,6 +122,54 @@ describe('dispatch_target.hand_back', () => {
   })
 })
 
+describe('migration v38', () => {
+  it('adds dispatch_report.warning to a v37 profile and keeps its rows', () => {
+    const older = new BetterSqlite3(':memory:') as unknown as Db
+    try {
+      runMigrations(
+        older,
+        MIGRATIONS.filter((m) => m.version < 38)
+      )
+      expect(older.pragma('user_version', { simple: true })).toBe(37)
+      older
+        .prepare(
+          `INSERT INTO dispatch_report (target_id, run, tool_use_id, status, report, created_at)
+           VALUES ('s-v37', 1, 'toolu_1', 'delivered', 'old report', 1)`
+        )
+        .run()
+      runMigrations(older)
+      expect(older.pragma('user_version', { simple: true })).toBe(38)
+      expect(latestDispatchReport('s-v37', older)).toMatchObject({
+        status: 'delivered',
+        report: 'old report',
+        warning: null
+      })
+      // The new status round-trips (a TEXT column: nothing else to migrate).
+      insertDispatchReport(
+        {
+          targetId: 's-v37',
+          toolUseId: null,
+          status: 'flagged',
+          report: 'r',
+          warning: 'w',
+          createdAt: 2
+        },
+        older
+      )
+      expect(latestDispatchReport('s-v37', older)).toMatchObject({
+        status: 'flagged',
+        warning: 'w'
+      })
+    } finally {
+      older.close()
+    }
+  })
+
+  it('the version is the next free one: nothing else claims 38', () => {
+    expect(MIGRATIONS.filter((m) => m.version === 38)).toHaveLength(1)
+  })
+})
+
 describe('dispatch_report DAO', () => {
   it('numbers a target’s reports 1, 2, 3 and each target from 1', () => {
     expect(add('s-a', 'one')?.run).toBe(1)
@@ -141,6 +190,7 @@ describe('dispatch_report DAO', () => {
       toolUseId: null,
       status: 'delivered',
       report: text,
+      warning: null,
       createdAt: 42,
       deliveredAt: null
     })
@@ -164,6 +214,41 @@ describe('dispatch_report DAO', () => {
       [6, 'toolu_6', 'timeout', null]
     ])
     expect(latestDispatchReport('s-a', db)).toMatchObject({ run: 6, status: 'timeout' })
+  })
+
+  it('keeps the words the review put above a report (B-3c): a flag, a note, or nothing', () => {
+    insertDispatchReport(
+      {
+        targetId: 's-a',
+        toolUseId: 'toolu_1',
+        status: 'flagged',
+        report: 'steer the parent',
+        warning: 'SECURITY WARNING: auto mode blocked this X-Agent’s report. Reason: x.',
+        createdAt: 1
+      },
+      db
+    )
+    insertDispatchReport(
+      {
+        targetId: 's-a',
+        toolUseId: 'toolu_2',
+        status: 'delivered',
+        report: 'plain',
+        warning: 'Note: the report could not be reviewed (no route). Please verify it carefully.',
+        createdAt: 2
+      },
+      db
+    )
+    add('s-a', 'unreviewed')
+    expect(dispatchReportsOf(['s-a'], db).map((r) => [r.run, r.status, r.warning])).toEqual([
+      [1, 'flagged', 'SECURITY WARNING: auto mode blocked this X-Agent’s report. Reason: x.'],
+      [
+        2,
+        'delivered',
+        'Note: the report could not be reviewed (no route). Please verify it carefully.'
+      ],
+      [3, 'delivered', null]
+    ])
   })
 
   it('reads many targets in one go, oldest run first', () => {

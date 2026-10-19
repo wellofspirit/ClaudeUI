@@ -59,6 +59,12 @@ export class ToolUseOwners {
     }
   }
 
+  /** Who made this call as far as the stream has said so (no waiting); `undefined`: not seen yet. */
+  ownerNow(toolUseId: string): ToolCallOwner | undefined {
+    const known = this.owners.get(toolUseId)
+    return known === undefined ? undefined : known ? 'subagent' : 'root'
+  }
+
   /** Who made this call, waiting up to `waitMs` for the frame that says. */
   async ownerOf(toolUseId: string | undefined, waitMs = OWNER_WAIT_MS): Promise<ToolCallOwner> {
     if (!toolUseId) return 'unknown'

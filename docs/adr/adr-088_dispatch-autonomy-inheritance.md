@@ -37,7 +37,9 @@ Owner rulings (2026-10-01):
 1. Auto-mode dispatch targets are **judged**, on every target engine.
 2. A Claude target keeps **cli.js's own judge** (`permissionMode: 'auto'`, never `bypassPermissions`).
    pi and opencode targets use **ClaudeUI's own judge** (ADR-081 transport). Codex targets keep
-   Codex's native **`auto_review`** guardian.
+   Codex's native **`auto_review`** guardian. The `hand_back` report of a Codex target is not one of
+   its reviewer's inputs (dynamic-tool calls are not reviewed), so it additionally gets a report-only
+   ClaudeUI judge on the target's own model ([ADR-105](adr-105_background-dispatch.md) §3).
 3. Everything spun off a parent in auto **inherits auto mode, read LIVE** from the parent.
 4. **No third copy** of the judge pipeline: the engine-neutral steps are one shared module.
 

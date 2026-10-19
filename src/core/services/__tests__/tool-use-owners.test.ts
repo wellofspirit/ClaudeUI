@@ -82,3 +82,21 @@ describe('ToolUseOwners', () => {
     expect(await rootPending).toBe('root')
   })
 })
+
+describe('ownerNow', () => {
+  it('answers from what the stream has said so far, without waiting', () => {
+    const owners = new ToolUseOwners()
+    expect(owners.ownerNow('toolu_x')).toBeUndefined()
+    owners.noteFrame({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id: 'toolu_x', name: 'a', input: {} }] }
+    })
+    owners.noteFrame({
+      type: 'assistant',
+      parent_tool_use_id: 'toolu_parent',
+      message: { content: [{ type: 'tool_use', id: 'toolu_y', name: 'a', input: {} }] }
+    })
+    expect(owners.ownerNow('toolu_x')).toBe('root')
+    expect(owners.ownerNow('toolu_y')).toBe('subagent')
+  })
+})
