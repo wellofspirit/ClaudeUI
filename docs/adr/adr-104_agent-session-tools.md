@@ -1,6 +1,6 @@
 # ADR-104: Session tools — agents start, hand off to and message other sessions
 
-**Status:** Accepted (2026-10-18). Implemented on branch `session-tools` (slices: registry fix, delivery and
+**Status:** Accepted (2026-10-18; §6's root-agent-only rule amended by [ADR-105](adr-105_background-dispatch.md): dispatch children may use `session_message` within their own family). Implemented on branch `session-tools` (slices: registry fix, delivery and
 origin, native peer messages, links, the tools on Claude, proposals, the other engines, context pressure,
 grouping).
 **Relates to:** [ADR-033](adr-033_cross-engine-dispatch.md) (cross-engine dispatch stays the subagent
