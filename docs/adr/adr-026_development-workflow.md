@@ -56,12 +56,18 @@ per-slice review → overall review of the branch → push + PR → CI → Fable
 CI runs on pull requests only (`.github/workflows/ci.yml`), so a change that skips the PR skips CI.
 
 **Handoff docs.** Long arcs keep a handoff doc with a RESUME HERE block, current after every slice; every
-instruction to an agent goes into it, never only into a message. It lives outside this repository's history:
-in the maintainer's private notes clone, `.notes/handoffs/<arc>.md` (with specs in `.notes/specs/`, research
-in `.notes/research/<arc>/`, open items in `.notes/backlog.md` and `.notes/housekeeping.md`), which is
-gitignored and excluded from ESLint and electron-builder; without that clone, an untracked
-`docs/<arc>-handoff.md`. When the arc merges, what is still open moves into the backlog or housekeeping list
-and the handoff is deleted. Nothing is copied from the notes into this repository unscrubbed.
+instruction to an agent goes into it, never only into a message. An arc's working files live outside this
+repository's history, in `.work/<arc>/` in the main checkout (worktrees are deleted at merge): the handoff
+`handoff.md`, specs in `specs/`, implementer and reviewer reports and live-drive evidence in `research/`. The
+folder is gitignored and excluded from ESLint and electron-builder, and stays on the machine that runs the arc.
+Open items (backlog features, housekeeping bugs) are GitHub issues on this repository, labelled `backlog` or
+`housekeeping`. Research that cannot be public (probe captures, reverse-engineering notes, third-party
+excerpts) is kept by the `claudeui-notes` skill where it is installed, otherwise in `.work/<arc>/`.
+
+Retiring an arc is part of its merge: lasting facts are promoted, rewritten and scrubbed, into ADRs,
+`docs/protocol-*/` and `docs/architecture/`; research a future arc would otherwise redo goes where the
+`claudeui-notes` skill says; what is still open becomes issues; then `.work/<arc>/` is deleted. Nothing is
+copied from working files into this repository unscrubbed.
 
 ### This repository's gates
 

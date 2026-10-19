@@ -64,7 +64,7 @@ for that engine. Follow the linked procedure; the checklist is what past bumps f
 - Read `references/traps.md`. Every item there cost a past bump hours.
 - Check out the new tag in `vendor/<engine>-src` before reading upstream code. The checkout is
   gitignored and per machine; the manifest pin is the contract.
-- Keep the ADR-026 handoff doc (`docs/<engine>-bump-handoff.md`).
+- Keep the ADR-026 handoff doc (`.work/<engine>-bump/handoff.md` in the main checkout).
 
 ## Briefs
 
