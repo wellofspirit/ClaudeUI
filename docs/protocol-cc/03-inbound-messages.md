@@ -401,7 +401,8 @@ Consequence for consumers: "the conversation is waiting for the user" must be de
 `task_started`/`task_notification` (§4.5/§4.4) and checking for active auto-continuing task types at
 `result` time. Because mid-turn completions are absorbed, that tracked state is always accurate at
 the moment a `result` is observed. cli.js's own interactive UI uses the same rule (busy predicate
-`S3e`/`rsi`, `cli.js@char3683025` in 2.1.241): active tasks of type `local_agent`, `remote_agent`
+`DCn`/`CF`, `cli.js@char6097665`/`@char6097331` in 2.1.293 — `S3e`/`rsi` in 2.1.241; the print loop's
+own check is `nl`/`o_`/`e_` near `@char34396201`): active tasks of type `local_agent`, `remote_agent`
 (unless `isLongRunning`), `in_process_teammate` (unless `isIdle`), or `local_workflow` ⇒ busy;
 `local_bash` shows as idle-with-shell; monitor types never count as busy. ClaudeUI mirrors this in
 the `session:result` observer (`useClaudeEvents.ts`) to gate the "Ready for input" notification.

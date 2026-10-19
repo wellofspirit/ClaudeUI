@@ -226,7 +226,8 @@ mid-turn it is absorbed into the current turn; between turns it starts a fresh a
 ### `task_id` format by task type
 
 - Background bash: `t` + 6 hex chars (e.g., `tabc123`)
-- Background agent (local_agent): `a` + 6 hex chars
+- Background agent (local_agent): `a` + 16 hex chars, optionally `a<label>-` + 16 hex (2.1.293, `yh()`;
+  e.g. `aec60e185d4e7eb6d`, 17 chars)
 - In-process teammate: `name@team` (e.g., `ts-advocate@lang-debate`)
 - Remote agent: `r` + 6 hex chars
 
@@ -309,13 +310,14 @@ with `isBackgrounded`, and re-sends that event for the same run with `isBackgrou
 when the `task_updated` flip arrives. `TaskCard` and `ToolCard` offer "Send to background" only
 for a record with `isBackgrounded === false`.
 
-### `task_type` values (2.1.241)
+### `task_type` values (2.1.293)
 
-The full enum grew past the four documented at 2.1.114 (`Wlv` map, `cli.js@char3683754`):
+The full enum grew past the four documented at 2.1.114 (id-prefix map, `cli.js@char6097917` in 2.1.293):
 `local_bash` (`t`/`b` ids), `local_agent` (`a`), `remote_agent` (`r`), `in_process_teammate` (`t`),
 `local_workflow` (`w`), `monitor_mcp` (`m`), `monitor_ws` (`s`), `mcp_task` (`k`), `dream` (`d`),
-`auto_mode_scan` (`e`). Of these, `local_agent`/`remote_agent`/`in_process_teammate`/`local_workflow`
-are the auto-continuing "agent-like" set (upstream busy predicate `S3e`, §3.7).
+`auto_mode_scan` (`e`), `local_memory_import` (`n`, new since 2.1.241). Of these,
+`local_agent`/`remote_agent`/`in_process_teammate`/`local_workflow` are the auto-continuing
+"agent-like" set (upstream busy predicate, §3.7).
 
 **Scoping gotcha (probed 2026-08-26):** a background Bash started INSIDE a subagent emits its own
 top-level `task_started`/`task_notification` (`task_type: "local_bash"`) with **no
