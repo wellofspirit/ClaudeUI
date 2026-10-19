@@ -10,6 +10,10 @@ import { selectCodexModel } from '../model-selection'
 import type { ThreadItem } from '../protocol/v2/ThreadItem'
 import type { Model } from '../protocol/v2/Model'
 import type { FileDiff } from '../../../shared/types'
+import {
+  buildCrossSessionEnvelope,
+  buildSessionMessageWrapper
+} from '../../../shared/session-message-wrapper'
 
 describe('Codex item mapping', () => {
   it('does not turn an interrupted in-progress command into a successful result', () => {
@@ -542,5 +546,88 @@ describe('Codex sub-agent activity (multi_agent_v2)', () => {
     expect(subAgentActivityResult('interrupted')).toBe('Agent was interrupted.')
     expect(subAgentActivityResult('started')).toBeUndefined()
     expect(subAgentActivityResult('interacted')).toBeUndefined()
+  })
+})
+
+describe('Codex userMessage items (slice 1a)', () => {
+  const userItem = (text: string, clientId?: string): ThreadItem =>
+    ({
+      type: 'userMessage',
+      id: 'u1',
+      ...(clientId ? { clientId } : {}),
+      content: [{ type: 'text', text }]
+    }) as unknown as ThreadItem
+
+  it('a typed prompt stays a user row that replaces the core-minted one by id', () => {
+    const [event] = mapCodexItem('root', 'turn', userItem('hello', 'msg-1'), true, 5)
+    expect(event).toEqual({
+      kind: 'message',
+      message: {
+        id: codexItemId('root', 'turn', 'u1'),
+        role: 'user',
+        content: [{ type: 'text', text: 'hello' }],
+        timestamp: 5,
+        replacesMessageId: 'msg-1'
+      }
+    })
+  })
+
+  it('a delivered session message — live and in the cold history, one mapper — is a note', () => {
+    const wrapped = buildSessionMessageWrapper(
+      { key: 'sess-sender-1', title: 'Triage assistant' },
+      'ticket 12 is yours'
+    )
+    const [event] = mapCodexItem('root', 'turn', userItem(wrapped, 'msg-2'), true, 7)
+    expect(event).toEqual({
+      kind: 'message',
+      message: {
+        id: codexItemId('root', 'turn', 'u1'),
+        role: 'system',
+        content: [
+          {
+            type: 'context_note',
+            title: 'Message from Triage assistant',
+            fragments: [{ text: 'ticket 12 is yours', label: 'from another session, not from you' }]
+          }
+        ],
+        timestamp: 7
+      }
+    })
+  })
+
+  it("a prompt that merely mentions the tag is still the user's", () => {
+    const [event] = mapCodexItem(
+      'root',
+      'turn',
+      userItem('what is <session-message from="x">\nhi\n</session-message> for?'),
+      true,
+      1
+    )
+    expect(event).toMatchObject({ kind: 'message', message: { role: 'user' } })
+  })
+})
+
+describe('Codex userMessage items — which readers recognise a delivered message (review m5)', () => {
+  const wrapped = buildSessionMessageWrapper({ key: 'k', title: 'T' }, 'body')
+  const item = (text: string, clientId: string): ThreadItem =>
+    ({
+      type: 'userMessage',
+      id: 'u1',
+      clientId,
+      content: [{ type: 'text', text }]
+    }) as unknown as ThreadItem
+  const roleOf = (events: CodexMappedEvent[]): string | undefined =>
+    events[0]?.kind === 'message' ? events[0].message.role : undefined
+
+  it('live: only the client ids ClaudeUI minted for a session message', () => {
+    const ours = (id: string | null | undefined): boolean => id === 'msg-ours'
+    expect(roleOf(mapCodexItem('r', 't', item(wrapped, 'msg-ours'), true, 1, ours))).toBe('system')
+    expect(roleOf(mapCodexItem('r', 't', item(wrapped, 'msg-typed'), true, 1, ours))).toBe('user')
+  })
+
+  it('cold history has no markers: the text decides, and only the ClaudeUI wrapper counts', () => {
+    expect(roleOf(mapCodexItem('r', 't', item(wrapped, 'msg-x'), true, 1))).toBe('system')
+    const cli = buildCrossSessionEnvelope({ key: 'k', title: 'T' }, 'body')
+    expect(roleOf(mapCodexItem('r', 't', item(cli, 'msg-x'), true, 1))).toBe('user')
   })
 })

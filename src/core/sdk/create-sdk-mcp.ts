@@ -32,7 +32,8 @@ export function createSdkMcpServer(opts: {
       t.name,
       {
         description: t.description,
-        inputSchema: t.inputSchema as unknown as Record<string, z.ZodTypeAny>
+        inputSchema: t.inputSchema as unknown as Record<string, z.ZodTypeAny>,
+        ...(t.alwaysLoad !== undefined ? { _meta: { 'anthropic/alwaysLoad': t.alwaysLoad } } : {})
       },
       // MCP's ToolCallback receives parsed-validated args as the first param,
       // and a RequestHandlerExtra (abort signal, progress notifications) as
@@ -68,6 +69,7 @@ export function createSdkMcpServer(opts: {
 /**
  * Build a tool definition. Signature matches upstream:
  *   tool(name, description, zodShape, handler)
+ * plus an optional trailing `{ alwaysLoad }` (see {@link SdkMcpTool.alwaysLoad}).
  *
  * `zodShape` is an object of field → Zod schema (NOT a wrapping z.object()).
  */
@@ -75,13 +77,15 @@ export function tool<Shape extends Record<string, z.ZodTypeAny>>(
   name: string,
   description: string,
   inputSchema: Shape,
-  handler: (input: ToolInput<Shape>, extra?: SdkToolExtra) => Promise<ToolResultContent>
+  handler: (input: ToolInput<Shape>, extra?: SdkToolExtra) => Promise<ToolResultContent>,
+  options: { alwaysLoad?: boolean } = {}
 ): SdkMcpTool {
   return {
     name,
     description,
     inputSchema: inputSchema as unknown as SdkMcpTool['inputSchema'],
-    handler: handler as unknown as SdkMcpTool['handler']
+    handler: handler as unknown as SdkMcpTool['handler'],
+    ...(options.alwaysLoad !== undefined ? { alwaysLoad: options.alwaysLoad } : {})
   }
 }
 

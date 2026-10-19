@@ -258,6 +258,32 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:dequeue-message', routingId, value) as Promise<{
         removed: number
       }>,
+    allowPeerMessages: (routingId) =>
+      connection.invoke('session:allow-peer-messages', routingId) as Promise<{
+        success: boolean
+        error?: string
+      }>,
+    setSessionGrouped: (routingId, grouped) =>
+      connection.invoke('session:link:set-grouped', routingId, grouped) as Promise<{
+        success: boolean
+        error?: string
+      }>,
+    startSessionProposal: (proposalId, grouped) =>
+      connection.invoke('session:proposal:start', proposalId, grouped) as Promise<{
+        success: boolean
+        error?: string
+        startedRef?: string
+      }>,
+    dismissSessionProposal: (proposalId) =>
+      connection.invoke('session:proposal:dismiss', proposalId) as Promise<{
+        success: boolean
+        error?: string
+      }>,
+    respondContextPressure: (routingId, answer) =>
+      connection.invoke('session:context-pressure:respond', routingId, answer) as Promise<{
+        success: boolean
+        error?: string
+      }>,
     recallQueued: (routingId) =>
       connection.invoke('session:recall-queued', routingId) as Promise<{
         recalled: string[]

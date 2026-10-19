@@ -560,6 +560,12 @@ export interface SdkMcpTool {
   description: string
   inputSchema: Record<string, ZodLike>
   handler: (input: Record<string, unknown>, extra?: SdkToolExtra) => Promise<ToolResultContent>
+  /**
+   * Keep this tool in the model's prompt from the first turn instead of letting
+   * Claude Code defer it behind its tool search (`_meta["anthropic/alwaysLoad"]`
+   * on the `tools/list` entry). Left unset, cli.js decides.
+   */
+  alwaysLoad?: boolean
 }
 
 /** Minimal Zod-shaped interface — we only need parsing and JSON schema conversion. */
@@ -639,6 +645,14 @@ export interface QueryOptions {
   abortController?: AbortController
   mcpServers?: Record<string, McpServerConfig>
   canUseTool?: CanUseTool
+  /**
+   * Called synchronously with every stream frame the child writes (assistant,
+   * stream_event, user, system, …), in wire order, before it is queued for the
+   * consumer — so a control request that follows a frame on the wire (an MCP
+   * `tools/call` after the assistant frame that announced it) finds the frame
+   * already seen. Must not throw; a throw is swallowed.
+   */
+  onInboundFrame?: (frame: Record<string, unknown>) => void
   settingSources?: SettingSource[]
   includePartialMessages?: boolean
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | string

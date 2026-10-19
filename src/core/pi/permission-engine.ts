@@ -16,6 +16,12 @@ import path from 'node:path'
 import { homedir } from 'node:os'
 import type { ToolKind } from '../../shared/tool-kinds'
 import { hostedMcpKind } from '../../shared/tool-kinds'
+import {
+  isSessionToolName,
+  SESSION_TOOL_NAMES,
+  SESSION_TOOLS_SERVER_NAME,
+  type SessionToolName
+} from '../../shared/session-tools-description'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { loadClaudePermissions } from '../services/claude-settings'
 import { parseClaudeRule } from '../opencode/permission-compiler'
@@ -168,7 +174,10 @@ export function piToolKind(toolName: string): ToolKind {
     case 'list_models':
       return 'note'
     default:
-      return 'unknown'
+      // The session tools (bridge v15) are bare-named hosted tools too; the generic
+      // MCP kind, as Claude's `mcp__claude-ui-sessions__*` take. Mirrored in
+      // PiEngineToolMap.kindOf. Their gate is `sessionToolsGate`, not this ladder.
+      return isSessionToolName(toolName) ? 'mcp' : 'unknown'
   }
 }
 
@@ -220,7 +229,10 @@ export const PI_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'agent',
   'send_message',
   'task_stop',
-  'list_models'
+  'list_models',
+  // The session tools (bridge v15): their gate is PiSession's `sessionToolsGate` rung,
+  // and the allow it gives mints the one-shot grant like any other hosted tool.
+  ...SESSION_TOOL_NAMES
 ])
 
 // ---------------------------------------------------------------------------
@@ -1172,6 +1184,29 @@ export function decideWithSource(
 
 function tierRule(hit: DenyAskHit | undefined, tier: 'deny' | 'ask'): string | undefined {
   return hit?.tier === tier ? hit.rule : undefined
+}
+
+/**
+ * The user's deny rule that names one of the session tools, if any. Their rules are
+ * written for Claude's spelling of the tool (`mcp__claude-ui-sessions__session_start`,
+ * or the whole server), so that is the name the rule list is asked about; the tools'
+ * own gate (`sessionToolsGate`) decides everything else. pi and Codex call this before
+ * it, so a deny the user wrote holds on their engines too. (No engine-specific rule
+ * spelling: the name asked about is already Claude's.)
+ */
+export function sessionToolDenyRule(
+  tool: SessionToolName,
+  input: Record<string, unknown>,
+  rules: MergedClaudeRules,
+  cwd?: string
+): string | undefined {
+  const verdict = decideWithSource(`mcp__${SESSION_TOOLS_SERVER_NAME}__${tool}`, input, {
+    mode: 'default',
+    rules,
+    sessionAllows: new Set(),
+    cwd
+  })
+  return verdict.source === 'deny-rule' ? verdict.rule : undefined
 }
 
 /**

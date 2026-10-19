@@ -30,8 +30,8 @@ describe('migration v29 — remote_credits', () => {
   it('is the latest migration', () => {
     const db = new BetterSqlite3(':memory:') as unknown as Db
     runMigrations(db)
-    // Bump alongside MIGRATIONS in db.ts — currently v29 (the credits relay cache).
-    expect(userVersion(db)).toBe(29)
+    // Bump alongside MIGRATIONS in db.ts — currently v31 (session refs and links).
+    expect(userVersion(db)).toBe(34)
   })
 
   it('keys the cache by the account alone — credits are not per window', () => {

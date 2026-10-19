@@ -40,7 +40,14 @@ import {
   taskTerminalStatus,
   liveTaskNoteSummary
 } from './task-notification-xml'
-import { agentNoteMessage } from './agent-note'
+import { agentNoteMessage, peerRowParts, sessionMessageNote } from './agent-note'
+import { BoundedSet } from './bounded-set'
+import { findPeerRow, type PeerRow } from './claude-peer-row'
+import {
+  buildCrossSessionEnvelope,
+  sanitizeWrapperKey,
+  sanitizeWrapperTitle
+} from '../../shared/session-message-wrapper'
 import { classifyApiError } from './api-error'
 import { permissionDecisionBlock, readPermissionDecisionFrame } from './claude-permission-decision'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
@@ -54,6 +61,18 @@ import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
 import { createCollabServer } from './collab-tool'
+import { ToolUseOwners } from './tool-use-owners'
+import {
+  createSessionToolsServer,
+  SESSION_TOOLS_PREFIX,
+  SESSION_TOOLS_SERVER_NAME
+} from './session-tools-server'
+import {
+  auditSessionToolDenial,
+  sessionToolsAvailable,
+  sessionToolsGate,
+  type SessionToolCaller
+} from './session-tools'
 import { crossEngineDispatcher, crossEngineDispatchAvailable } from './cross-engine-dispatcher'
 import { accountState, buildClaudeAccountRef, updateClaudeAuthSource } from '../host'
 import { equivalentCostUsd } from '../../shared/pricing'
@@ -122,11 +141,12 @@ import type {
 } from '../../shared/types'
 import { claudeModel } from '../../shared/types'
 import { BaseSession } from '../providers/BaseSession'
-import type { EngineSpawnOptions } from '../providers/ISession'
+import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
 import {
   dispatchAgentPromptSection,
   OWN_SUBAGENT_TOOL
 } from '../../shared/dispatch-agent-description'
+import { isSessionToolName, sessionToolsGuidance } from '../../shared/session-tools-description'
 
 /**
  * The system-prompt section for the `claude-ui-collab` dispatch tool, from the
@@ -282,9 +302,25 @@ export class ClaudeSession extends BaseSession {
   })
   private abortController: AbortController | null = null
   private isProcessing = false
+  /** Commands cli.js started that ClaudeUI looked up on disk as native peer messages (by uuid). */
+  private readonly nativePeerTried = new BoundedSet()
+  /** Native peer messages already shown as a note (by uuid). */
+  private readonly nativePeerNoted = new BoundedSet()
+  /**
+   * Uuids this session put on the wire itself (`run()`): cli.js answers them with
+   * `command_lifecycle` frames too, but they are the session's own prompts, never a
+   * peer message to look up on disk.
+   */
+  private readonly sentUuids = new BoundedSet()
   private wasInterrupted = false
   private pendingApprovals = new Map<string, PendingApprovalEntry>()
   private taskIdMap = new Map<string, string>() // agentId → the CURRENT run's toolUseId
+  /**
+   * Who owns each tool call (root agent or a subagent), filled from the wire ahead
+   * of the message loop and from `canUseTool`. The session tools read it to refuse
+   * a subagent in modes that never call `canUseTool`.
+   */
+  private readonly toolUseOwners = new ToolUseOwners()
   /**
    * An agent's identity, and the three maps that keep it (ADR-073).
    *
@@ -618,7 +654,8 @@ export class ClaudeSession extends BaseSession {
   async run(
     prompt: string | null,
     attachments?: AttachmentUpload[],
-    wireUuid?: string
+    wireUuid?: string,
+    nonUser?: { origin: Record<string, unknown>; note: ChatMessage }
   ): Promise<void> {
     this.clearInactivityTimer()
     // A fresh run reactivates a session a prior cancel() retired — re-enable the
@@ -673,6 +710,7 @@ export class ClaudeSession extends BaseSession {
       }
 
       const messageUuid = wireUuid ?? uuid()
+      this.sentUuids.add(messageUuid)
       sdkMessage = {
         type: 'user' as const,
         session_id: this.sessionId || '',
@@ -680,7 +718,9 @@ export class ClaudeSession extends BaseSession {
         parent_tool_use_id: null,
         // Without a uuid cli.js emits no command_lifecycle frames for the
         // message and cancel_async_message cannot name it (03 §3.21).
-        uuid: messageUuid
+        uuid: messageUuid,
+        // A message from another session (slice 1a): see deliverNonUser.
+        ...(nonUser ? { origin: nonUser.origin } : {})
       }
       // The user's own turn in this session's transcript (ADR-088 D1: the
       // judge of a target this session dispatches reads it as the only real
@@ -689,7 +729,15 @@ export class ClaudeSession extends BaseSession {
       const queued = wireUuid
         ? this.queue.pending().some((item) => item.itemId === wireUuid)
         : false
-      if (prompt !== null && !queued) this.recordUserPrompt(messageUuid, prompt, attachments)
+      if (nonUser) {
+        // Not the user's turn: a note, shown now (a busy session reads it at its
+        // next tool boundary), and a `system` row the judge never reads as a
+        // `User:` line.
+        this.upsertMessage(nonUser.note)
+        this.send('session:message', nonUser.note)
+      } else if (prompt !== null && !queued) {
+        this.recordUserPrompt(messageUuid, prompt, attachments)
+      }
     }
 
     if (this.messageChannel && !this.messageChannel.isEnded) {
@@ -832,6 +880,22 @@ export class ClaudeSession extends BaseSession {
           })
         : null
 
+      // The session tools (slice 1c): their own server for the same reason —
+      // outside the auto-allowed `claude-ui` prefix, every call through canUseTool
+      // and the session-tools gate. Registered only where the host has wired them
+      // (a ClaudeSession is always an interactive root session; dispatch targets,
+      // automations and side questions run on raw queries and never reach here).
+      const sessionCaller = (): SessionToolCaller => ({
+        routingId: this.routingId,
+        engine: this.engineId,
+        cwd: this.cwd,
+        permissionMode: this.permissionMode,
+        callOwner: (toolUseId) => this.toolUseOwners.ownerOf(toolUseId)
+      })
+      const sessionToolsServer = sessionToolsAvailable()
+        ? createSessionToolsServer({ getCaller: sessionCaller })
+        : null
+
       // Multi-account: renew the active account's token if it is about to
       // expire, or refuse the spawn (HostTokenUnavailableError, whose message
       // reaches the chat as session:error in the catch below) when there is no
@@ -882,6 +946,13 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
 
 ## Cross-Engine Agent Dispatch
 ${CROSS_ENGINE_DISPATCH_SECTION}`
+                : ''
+            }${
+              sessionToolsServer
+                ? `
+
+## ClaudeUI Sessions
+${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
                 : ''
             }`
           },
@@ -957,10 +1028,18 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
             'claude-ui-mockup': mockupMcpServer as never,
             // Deliberately NOT in allowedTools and NOT auto-allowed in
             // canUseTool — dispatch_agent must hit the normal approval path.
-            ...((collabServer ? { 'claude-ui-collab': collabServer } : {}) as Record<string, never>)
+            ...((collabServer ? { 'claude-ui-collab': collabServer } : {}) as Record<
+              string,
+              never
+            >),
+            // Same: never in allowedTools, never auto-allowed outside the gate.
+            ...((sessionToolsServer
+              ? { [SESSION_TOOLS_SERVER_NAME]: sessionToolsServer }
+              : {}) as Record<string, never>)
           },
           allowedTools: ['mcp__claude-ui__*', 'mcp__claude-ui-mockup__*'],
           abortController: this.abortController,
+          onInboundFrame: (frame) => this.toolUseOwners.noteFrame(frame),
           includePartialMessages: true,
           thinking: this.buildThinkingConfig(),
           effort: this.effort as 'low' | 'medium' | 'high',
@@ -1004,9 +1083,29 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
             ? { resumeSessionAt: this.resumeSessionAt, forkSession: true }
             : {}),
           canUseTool: async (toolName, input, opts) => {
+            // cli.js's own word on who is asking, for the session tools to read later.
+            if (opts.toolUseId) this.toolUseOwners.note(opts.toolUseId, !!opts.agentId)
             // Auto-allow our in-process UI tools (mermaid, etc.) — no user approval needed
             if (toolName.startsWith('mcp__claude-ui__')) {
               return { behavior: 'allow' as const, updatedInput: input }
+            }
+
+            // The session tools: the gate decides allow / ask / deny. 'ask' falls
+            // through to the ordinary approval card below.
+            if (toolName.startsWith(SESSION_TOOLS_PREFIX)) {
+              const bare = toolName.slice(SESSION_TOOLS_PREFIX.length)
+              if (isSessionToolName(bare)) {
+                const caller = sessionCaller()
+                const decision = sessionToolsGate(caller, bare, input, { agentId: opts.agentId })
+                if (decision.behavior === 'allow') {
+                  return { behavior: 'allow' as const, updatedInput: input }
+                }
+                if (decision.behavior === 'deny') {
+                  // The service never runs for a denied call, so the refusal is audited here.
+                  auditSessionToolDenial(caller, bare, input, decision.message)
+                  return { behavior: 'deny' as const, message: decision.message }
+                }
+              }
             }
 
             // A cancel/interrupt racing this callback's entry may have ALREADY
@@ -1018,6 +1117,7 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
               return { behavior: 'deny' as const, message: 'Cancelled' }
             }
 
+            const isSessionTool = toolName.startsWith(SESSION_TOOLS_PREFIX)
             const requestId = uuid()
             const approval: PendingApproval = {
               requestId,
@@ -1028,7 +1128,12 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
               toolUseId: opts.toolUseId,
               toolName,
               input,
-              suggestions: opts.suggestions as PendingApproval['suggestions'],
+              // No "always allow" for a session tool: the rule it would persist
+              // makes cli.js stop calling canUseTool for it, which silently removes
+              // the scope and mode-parity checks the gate makes (spec 7.3).
+              suggestions: isSessionTool
+                ? undefined
+                : (opts.suggestions as PendingApproval['suggestions']),
               decisionReason: opts.decisionReason,
               blockedPath: opts.blockedPath
             }
@@ -1064,7 +1169,7 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
               return {
                 behavior: 'allow' as const,
                 updatedInput,
-                ...(updatedPermissions?.length
+                ...(updatedPermissions?.length && !isSessionTool
                   ? {
                       updatedPermissions:
                         updatedPermissions as unknown as import('../sdk').PermissionUpdate[]
@@ -1515,6 +1620,10 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
       }
       return
     }
+    if ((msg.subtype as string) === 'peer_message_hold') {
+      this.handlePeerMessageHold(msg as unknown as Record<string, unknown>)
+      return
+    }
     if (msg.subtype === 'task_notification') {
       this.handleTaskNotification(msg)
       return
@@ -1588,10 +1697,27 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
   private handleCommandLifecycle(msg: CommandLifecycleMessage): void {
     const itemId = msg.command_uuid
     if (typeof itemId !== 'string') return
+    // A message from another session ClaudeUI delivered (slice 1a): `started` is
+    // the model reading it; refused / discarded / cancelled mean it never will.
+    if (this.pendingNonUser.has(itemId)) {
+      if (msg.state === 'started') {
+        this.pendingNonUser.delete(itemId)
+        // cli.js reads it now: tainted from here, even when the user's own queued
+        // prompt (consumed earlier) had just cleaned the ledger.
+        this.originLedger.nonUserDelivered()
+      } else if (msg.state === 'refused') this.reholdNonUser(itemId, 'Claude Code refused it')
+      else if (msg.state === 'discarded' || msg.state === 'cancelled')
+        this.reholdNonUser(itemId, 'the session ended before it could run')
+      return
+    }
     switch (msg.state) {
       case 'started': {
         const item = this.queue.consumeById(itemId)
-        if (!item) return
+        if (!item) {
+          // A prompt this session sent directly is not a queue item either: it is no peer message.
+          if (!this.sentUuids.has(itemId)) void this.noteNativePeerTurn(itemId)
+          return
+        }
         this.recordConsumedPrompt(item)
         this.queue.emit()
         return
@@ -2448,6 +2574,220 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
   }
 
   /**
+   * Slice 1a: a message from another session or an agent as a cli.js PEER turn.
+   * The model reads "Another Claude session sent a message … not typed by your
+   * user" and cli.js's own auto-mode classifier files it as non-user (live wire
+   * evidence: docs/research/session-tools/V1-probes.md §2). `origin` alone does
+   * nothing on stdin — cli.js decides peer-ness from the content envelope — so
+   * the content is the `<cross-session-message>` envelope and `origin` rides
+   * beside it for the name and `fromMode`.
+   *
+   * `fromMode` is the RECEIVER's class (only `bypassPermissions` is "bypass"):
+   * cli.js holds a peer turn whose asserted class differs from the receiver's
+   * and nothing on stdin ever releases it, so ClaudeUI — the approval surface,
+   * having already passed its own gate — asserts the class that delivers.
+   *
+   * The frame goes through {@link run} like any other: idle starts a turn, busy
+   * lands in cli.js's native queue. Not awaited — a first run lasts as long as
+   * the process.
+   */
+  async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
+    const busy = this.isProcessing
+    const id = uuid()
+    const key = sanitizeWrapperKey(item.from.key)
+    const name = sanitizeWrapperTitle(item.from.title)
+    const origin = {
+      kind: 'peer',
+      from: key,
+      ...(name ? { name } : {}),
+      fromMode: this.permissionMode === 'bypassPermissions' ? 'bypass' : 'prompting'
+    }
+    const note = sessionMessageNote({
+      id,
+      fromTitle: name,
+      text: item.text,
+      timestamp: Date.now()
+    })
+    // cli.js has not accepted it yet: until its `started` lifecycle frame the item
+    // is pending, and a refusal, a hold that expires, a stop or a failed spawn
+    // puts it back in the held inbox (reholdNonUser) instead of losing it.
+    this.pendingNonUser.set(id, item)
+    const firstRun = !this.messageChannel || this.messageChannel.isEnded
+    const running = this.run(buildCrossSessionEnvelope(item.from, item.text), undefined, id, {
+      origin,
+      note
+    })
+    if (firstRun) {
+      // A first run lasts as long as the process. If it ends with the frame still
+      // pending, the spawn was refused or the process died before reading it.
+      const lost = (): void => this.reholdNonUser(id, 'Claude Code stopped before it read it')
+      running.then(lost, lost)
+    }
+    return busy ? 'queued' : 'started'
+  }
+
+  /** The cli.js process is up and taking input — a message never respawns one. */
+  isEngineLive(): boolean {
+    return !!this.messageChannel && !this.messageChannel.isEnded
+  }
+
+  /**
+   * `system/peer_message_hold` for a frame ClaudeUI delivered (stdin lane): cli.js
+   * parked it instead of running it (its own `crossSessionInbound` setting or a
+   * permission-class check), released it later, or dropped it at exit. Only our
+   * pending frames are handled here; rendering the hold for native peers is the
+   * peer-message item.
+   */
+  private handlePeerMessageHold(msg: Record<string, unknown>): void {
+    const id = msg.message_uuid
+    if (typeof id !== 'string') return
+    const item = this.pendingNonUser.get(id)
+    if (!item) {
+      this.noteNativePeerHold(id, msg)
+      return
+    }
+    if (msg.state === 'dropped') {
+      this.reholdNonUser(id, 'Claude Code dropped it')
+    } else if (msg.state === 'held') {
+      this.paintNonUserNote(
+        id,
+        item,
+        'Held by Claude Code (its crossSessionInbound setting or a permission-mode check); the model has not read it.'
+      )
+    } else if (msg.state === 'released') {
+      this.paintNonUserNote(id, item)
+    }
+  }
+
+  /**
+   * A hold frame for a message another Claude Code process sent over cli.js's
+   * socket (none of ClaudeUI's own): cli.js parked it (`held`), delivered it
+   * after all (`released`) or gave it up (`dropped`). One transcript row per
+   * message, updated as the frames arrive. The row is live state — cli.js writes
+   * nothing to the transcript for a message it never ran — so a reload shows no
+   * hold, which is right: the hold is over when the process is.
+   */
+  private noteNativePeerHold(id: string, msg: Record<string, unknown>): void {
+    const state = msg.state
+    if (state !== 'held' && state !== 'released' && state !== 'dropped') return
+    const rowId = `peer-hold-${id}`
+    const before = this.messageHistory.find((m) => m.id === rowId)?.content[0]
+    const prior = before?.type === 'peer_hold' ? before : undefined
+    const text = (value: unknown): string | undefined =>
+      typeof value === 'string' && value ? value : undefined
+    const cause = text(msg.cause) ?? prior?.cause
+    const outcome = text(msg.outcome) ?? prior?.outcome
+    const row: ChatMessage = {
+      id: rowId,
+      role: 'system',
+      content: [
+        {
+          type: 'peer_hold',
+          holdId: id,
+          state,
+          lane: (text(msg.lane) ?? prior?.lane) === 'stdin' ? 'stdin' : 'socket',
+          fromName: text(msg.from_name) ?? prior?.fromName ?? '',
+          ...(cause ? { cause } : {}),
+          ...(outcome ? { outcome } : {})
+        }
+      ],
+      timestamp: this.messageHistory.find((m) => m.id === rowId)?.timestamp ?? Date.now()
+    }
+    this.upsertMessage(row)
+    this.send('session:message', row)
+  }
+
+  /**
+   * `apply_flag_settings {crossSessionInbound:'accept'}`: cli.js stops holding
+   * peer messages whose permission class differs from this session's, and
+   * releases the ones it holds (live: V1-probes.md §2.3). It lasts as long as
+   * this cli.js process; a settings file may still tighten it.
+   */
+  async allowPeerMessages(): Promise<{ success: boolean; error?: string }> {
+    if (!this.activeQuery) return { success: false, error: 'No active session' }
+    try {
+      await this.activeQuery.applyFlagSettings({ crossSessionInbound: 'accept' })
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  /**
+   * A turn cli.js started for a command ClaudeUI did not queue and did not
+   * send: when it is a message another Claude Code process sent, show it as the
+   * note it is (the text comes off the transcript — see claude-peer-row.ts). A
+   * task notification or any other command finds no peer row and is ignored.
+   */
+  private async noteNativePeerTurn(uuid: string): Promise<void> {
+    if (this.nativePeerTried.has(uuid)) return
+    this.nativePeerTried.add(uuid)
+    const sessionId = this.sessionId
+    if (!sessionId) return
+    // Idle when the turn began? (An assistant frame has not flipped it yet.)
+    const wasIdle = !this.isProcessing
+    const file = this.transcriptPathFor(sessionId)
+    for (const delay of [150, 500, 1500, 4000]) {
+      await new Promise((resolve) => setTimeout(resolve, delay))
+      if (this.disposed || this.nativePeerNoted.has(uuid)) return
+      const row = await findPeerRow(file, uuid)
+      // In the file but no peer message (a task notification, say): nothing more to find.
+      if (row === 'not-a-peer') return
+      if (row) {
+        this.emitNativePeerNote(uuid, row, wasIdle)
+        return
+      }
+    }
+  }
+
+  /**
+   * The note for a native peer message, once per message. It is non-user for the
+   * ledger like any other: taint now. When it started a turn on an idle session
+   * it also counts toward the agent-turn budget — which here only INFORMS: cli.js
+   * has already delivered it, so unlike a ClaudeUI delivery nothing can hold it.
+   */
+  private emitNativePeerNote(
+    uuid: string,
+    row: PeerRow,
+    wasIdle: boolean,
+    countLedger = true
+  ): void {
+    if (this.nativePeerNoted.has(uuid)) return
+    this.nativePeerNoted.add(uuid)
+    const note = sessionMessageNote({
+      id: uuid,
+      fromTitle: sanitizeWrapperTitle(row.fromTitle),
+      text: row.body,
+      timestamp: Date.now(),
+      native: row.native
+    })
+    this.upsertMessage(note)
+    this.send('session:message', note)
+    // A replayed frame is not news: a resume re-yields old rows (protocol-cc 03,
+    // trigger 2), so only the live lifecycle path counts toward the ledger.
+    if (!countLedger) return
+    this.originLedger.nonUserDelivered()
+    if (wasIdle) this.originLedger.agentTurnStarted()
+  }
+
+  /** (Re)paint the note for a pending frame, with a delivery status line when it is not simply read. */
+  private paintNonUserNote(id: string, item: NonUserItem, status?: string): void {
+    const note = sessionMessageNote({
+      id,
+      fromTitle: sanitizeWrapperTitle(item.from.title),
+      text: item.text,
+      timestamp: this.messageHistory.find((m) => m.id === id)?.timestamp ?? Date.now()
+    })
+    if (status) {
+      const block = note.content[0]
+      if (block.type === 'context_note')
+        block.fragments.push({ text: status, label: 'delivery status' })
+    }
+    this.upsertMessage(note)
+    this.send('session:message', note)
+  }
+
+  /**
    * Ask cli.js to drop this exact message from its queue, by id.
    * `cancelled: false` means cli.js no longer holds it — folded into the turn
    * or drained — so it stays put and its `started` will arrive, never a silent
@@ -2945,6 +3285,9 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
     this.messageChannel?.end()
     this.abortController?.abort()
     this.abortController = null
+    // Frames from other sessions still waiting in cli.js's queue die with it; a
+    // replaced object does this silently (it must not emit on the shared id).
+    if (this.disposed) this.reholdAllNonUser('the session was replaced', true)
     this.isProcessing = false
     this.turnStartedAtMs = null
     // M-CL3: a dispose()-driven cancel (object replaced under its routingId)
@@ -3148,6 +3491,17 @@ ${CROSS_ENGINE_DISPATCH_SECTION}`
     // Case 2: String content — check for task notification
     if (typeof content === 'string' && isTaskNotificationDelivery(msg.origin, content)) {
       await this.handleTaskNotificationUserMessage(msg, content)
+      return
+    }
+
+    // Case 3: a peer message another Claude Code process sent (never ClaudeUI's
+    // own: those are pending, already noted). cli.js puts this frame on stdout
+    // only with --replay-user-messages, which ClaudeUI does not pass; the live
+    // path is noteNativePeerTurn. Kept so a host that replays gets the same note.
+    const uuidOfFrame = typeof msg.uuid === 'string' ? msg.uuid : ''
+    if (uuidOfFrame && !this.pendingNonUser.has(uuidOfFrame)) {
+      const peer = peerRowParts({ origin: msg.origin }, content)
+      if (peer && msg.isReplay === true) this.emitNativePeerNote(uuidOfFrame, peer, false, false)
     }
   }
 

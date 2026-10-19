@@ -46,6 +46,7 @@ import { opencodeMcpServerNames, opencodeNativeAgentNames } from './opencode-con
 import { harnessAvailable, harnessUnavailableMessage, resolveHarness } from '../harness/resolve'
 import { toLaunch, type HarnessLaunch } from '../harness/launch'
 import { logger } from '../services/logger'
+import { runSessionTool, sessionToolsAvailable } from '../services/session-tools'
 import { OpencodeClient } from './OpencodeClient'
 
 export type { SpawnResult, SpawnServerFn }
@@ -650,6 +651,8 @@ export class OpencodeServerManager {
         lookupCallerSession: (sessionId) => this.callerSessionLookup(sessionId),
         resolveCallerRoot,
         dispatch: this.dispatchAgentFn && ((req, ctx) => this.dispatchAgentFn!(req, ctx)),
+        // The session tools (slice 2), when the host wired them (read per MCP session).
+        ...(sessionToolsAvailable() ? { sessionTools: { run: runSessionTool } } : {}),
         onIdentityMismatch: (identity) =>
           logger.warn(
             'OpencodeServerManager',

@@ -22,7 +22,7 @@ function getManagedWorktreesRoot(gitRoot: string): string {
 }
 
 /** Throw unless `name` is a safe worktree name (main-side enforcement of R2). */
-function validateWorktreeName(name: string): void {
+export function validateWorktreeName(name: string): void {
   if (
     typeof name !== 'string' ||
     name.length === 0 ||

@@ -20,6 +20,8 @@ type SidebarSessionData = {
   cwd: string
   isWatching: boolean
   firstUserText?: string
+  /** The engine the session was born with (the replicated birth event's). */
+  selectedEngineId: EngineId
 }
 
 function isCodexSession(sessionId: string): boolean {
@@ -39,6 +41,10 @@ function isCodexSession(sessionId: string): boolean {
  * `sessionEngines`, the record `createNewSession` writes: without it the row
  * reads as Claude (`SessionItem`'s fallback), which is how a pi session whose
  * first spawn failed showed Claude's logo in Recent (ADR-082 S7b).
+ *
+ * A session another client or the host created has no `sessionEngines` entry until
+ * a model-bearing status arrives (Codex sends none before its first prompt); its
+ * birth engine, replicated on `session:created`, stands in until then.
  */
 function inMemorySessionInfo(
   sessionId: string,
@@ -54,7 +60,7 @@ function inMemorySessionInfo(
     title: data.firstUserText || 'New session',
     timestamp: now,
     lastActivityAt: now,
-    engineId: engineId ?? 'claude'
+    engineId: engineId ?? data.selectedEngineId ?? 'claude'
   }
 }
 
@@ -73,7 +79,8 @@ function sidebarSessionsEqual(
     if (
       av.cwd !== bv.cwd ||
       av.isWatching !== bv.isWatching ||
-      av.firstUserText !== bv.firstUserText
+      av.firstUserText !== bv.firstUserText ||
+      av.selectedEngineId !== bv.selectedEngineId
     )
       return false
   }
@@ -103,6 +110,7 @@ export function Sidebar({
       result[id] = {
         cwd: sess.cwd,
         isWatching: !!sess.isWatching,
+        selectedEngineId: sess.selectedEngineId,
         firstUserText: firstUser?.content
           .find((b) => b.type === 'text')
           ?.text?.slice(0, 80)

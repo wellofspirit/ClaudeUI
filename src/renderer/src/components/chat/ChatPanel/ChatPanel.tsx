@@ -23,8 +23,11 @@ import {
 import { ImageGalleryProvider } from '../../shared/ImageViewer'
 import { DiagramGalleryProvider } from '../DiagramGallery'
 import { TopBar } from './TopBar'
+import { SessionLinkBar } from './SessionLinkBar'
 import { WelcomeState } from './WelcomeState'
 import { reloadActiveTranscript } from '../../../lib/session-history-load'
+import { ContextPressureBanner } from './ContextPressureBanner'
+import { HeldMessagesNotice } from './HeldMessagesNotice'
 import { QueuedMessageCard } from './QueuedMessageCard'
 import { ChatSearchOverlay } from '../ChatSearch'
 import { SEARCH_ANCHOR } from '../ChatSearch/search-scope'
@@ -243,6 +246,7 @@ export function ChatPanel(): React.JSX.Element {
   return (
     <div data-testid="ChatPanel" className="flex-1 flex flex-col min-h-0 min-w-0 relative">
       <TopBar hasContent={hasContent} />
+      <SessionLinkBar />
 
       <div className="flex-1 flex flex-col min-h-0 relative">
         <ChatSearchOverlay
@@ -370,6 +374,8 @@ export function ChatPanel(): React.JSX.Element {
               </button>
             </div>
           )}
+          <HeldMessagesNotice isMobile={isMobile} />
+          <ContextPressureBanner isMobile={isMobile} />
           <QueuedMessageCard isMobile={isMobile} />
           <BtwCard isMobile={isMobile} />
           <InputBox />

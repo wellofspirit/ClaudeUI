@@ -26,6 +26,8 @@ import {
   EXECUTE_DENY_RULE,
   externalDirectoryGates,
   modeGates,
+  SESSION_TOOLS_ASK_RULE,
+  SESSION_TOOLS_DENY_RULE,
   THROWAWAY_RULESET,
   withoutAllowRulesV2,
   withoutMutatingAllowRulesV2,
@@ -449,7 +451,7 @@ describe('buildSessionRuleset', () => {
     ...over
   })
 
-  it('default: gates, user rules, the Code Mode deny last, the dispatch ask after the user rules', () => {
+  it('default: gates, user rules, the Code Mode deny, the dispatch and session-tools asks after the user rules', () => {
     const { rules, userRules, agent } = buildSessionRuleset(
       input({ permissions: perms({ allow: ['Bash(npm test)'] }) })
     )
@@ -462,8 +464,84 @@ describe('buildSessionRuleset', () => {
       r('external_directory', 'ask'),
       r('shell', 'allow', 'npm test'),
       DISPATCH_ASK_RULE,
+      SESSION_TOOLS_ASK_RULE,
       EXECUTE_DENY_RULE
     ])
+  })
+
+  // Slice 2: every hosted session tool asks in EVERY mode (auto allows `claudeui_*`, and a user
+  // allow for the server must not un-gate them), so ClaudeUI's gate sees each call.
+  it.each([
+    ['default', false],
+    ['acceptEdits', false],
+    ['plan', false],
+    ['auto', true],
+    ['auto', false]
+  ] as const)(
+    '%s (classifier %s): every claudeui_session_* tool asks, whatever the user allowed',
+    (mode, autoMode) => {
+      const { rules } = buildSessionRuleset(
+        input({
+          mode,
+          autoMode,
+          permissions: perms({ allow: ['mcp__claudeui', 'mcp__claudeui__session_start'] })
+        })
+      )
+      for (const tool of [
+        'list',
+        'get',
+        'read',
+        'message',
+        'start',
+        'dismiss_proposal',
+        'hand_off',
+        'usage',
+        'stop'
+      ])
+        expect(evaluateV2Call(rules, `claudeui_session_${tool}`, ['*'], 'linux'), tool).toBe('ask')
+      // The other hosted tools are untouched by the glob.
+      expect(evaluateV2Call(rules, 'claudeui_render_mermaid', ['*'], 'linux')).not.toBe('deny')
+    }
+  )
+
+  // Auto mode's gates allow `claudeui_*`; only the ask being the LAST non-deny rule keeps the
+  // session tools gated there. A rule appended after it would un-gate them silently.
+  it.each([
+    ['default', false],
+    ['acceptEdits', false],
+    ['plan', false],
+    ['auto', true],
+    ['auto', false]
+  ] as const)(
+    '%s (classifier %s): the session tools ask is the last non-deny rule',
+    (mode, autoMode) => {
+      const { rules } = buildSessionRuleset(
+        input({
+          mode,
+          autoMode,
+          permissions: perms({ allow: ['Bash(npm test)', 'mcp__claudeui'] })
+        })
+      )
+      const nonDeny = rules.filter((rule) => rule.effect !== 'deny')
+      expect(nonDeny.at(-1)).toEqual(SESSION_TOOLS_ASK_RULE)
+      if (autoMode) {
+        // …and it sits after the allow it has to outrank.
+        expect(rules.indexOf(SESSION_TOOLS_ASK_RULE)).toBeGreaterThan(
+          rules.findIndex((rule) => rule.action === 'claudeui_*' && rule.effect === 'allow')
+        )
+      }
+    }
+  )
+
+  it('the session tools are hidden from a subagent child, whatever its agent and parent allow', () => {
+    const { rules } = buildSessionRuleset(input({ mode: 'auto', autoMode: true }))
+    const explore: V2Rule[] = [r('*', 'allow')]
+    const child = childSessionRuleset(rules, explore, 'linux')
+    expect(child.at(-1)).toEqual(SESSION_TOOLS_DENY_RULE)
+    expect(v2ToolHidden(child, 'claudeui_session_start', 'linux')).toBe(true)
+    expect(evaluateV2Call(child, 'claudeui_session_message', ['*'], 'linux')).toBe('deny')
+    // Its sibling hosted tools are not hidden with them.
+    expect(v2ToolHidden(child, 'claudeui_render_mermaid', 'linux')).toBe(false)
   })
 
   it('a user allow for the dispatch tool cannot un-gate it', () => {

@@ -455,4 +455,23 @@ describe('useClaudeEvents component tests', () => {
       expect(loadCalls[0][2]).toBe('-r-repo--claude-worktrees-wt')
     })
   })
+
+  describe('a session another client or another session’s tool created', () => {
+    it('another client’s new session is followed, as before', () => {
+      useSessionStore.setState({ activeSessionId: 'mine' })
+      app.emit('session:created', 'remote-new', { cwd: '/r/repo' })
+      expect(useSessionStore.getState().activeSessionId).toBe('remote-new')
+    })
+
+    it('a session a session tool started (createdBy agent) is registered but never followed', () => {
+      useSessionStore.setState({ activeSessionId: 'mine' })
+      expect(useSessionStore.getState().settings.remoteFollowActions).toBe(true)
+      app.emit('session:created', 'agent-new', { cwd: '/r/repo', createdBy: 'agent' })
+      const state = useSessionStore.getState()
+      // The user stays where they are, the session is in their recents, and it is flagged.
+      expect(state.activeSessionId).toBe('mine')
+      expect(state.recentSessionIds).toContain('agent-new')
+      expect(state.sessions['agent-new'].needsAttention).toBe(true)
+    })
+  })
 })

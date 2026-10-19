@@ -1075,14 +1075,27 @@ describe('a harness that does not run (ADR-082 §8)', () => {
     )
     expect(groupIds()).not.toContain('trust')
     expect(screen.queryByTestId('OtherEnginePermissionsRow')).toBeNull()
-    expect(groupIds()).toEqual(['autonomy', 'permissions', 'judge', 'retention'])
+    expect(groupIds()).toEqual([
+      'autonomy',
+      'permissions',
+      'judge',
+      'session-tools',
+      'context-pressure',
+      'retention'
+    ])
 
     cleanup()
     harnessStore.resetForTests()
     harnesses(['opencode', 'pi', 'codex'])
     renderView({ activePage: 'sessions' })
     await settle()
-    expect(groupIds()).toEqual(['autonomy', 'permissions', 'retention'])
+    expect(groupIds()).toEqual([
+      'autonomy',
+      'permissions',
+      'session-tools',
+      'context-pressure',
+      'retention'
+    ])
   })
 
   it('Dispatch: a target that does not run is greyed and unselectable, the next one shows', async () => {

@@ -9,6 +9,14 @@ import { ensureHostTokenFresh } from '../sdk/host-token'
 import { claudeLoginSignal } from '../services/claude-login-state'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
+import { setSessionGrouped } from '../services/session-links'
+import type { CommandConnection } from './command-registry'
+import { configureContextPressure, respondContextPressure } from '../services/context-pressure'
+import {
+  configureSessionTools,
+  dismissProposalFromClient,
+  startProposalFromClient
+} from '../services/session-tools'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { emitEvent } from '../services/sync-host'
 import { STREAM_WATCH_COMMAND } from './stream-watch'
@@ -118,6 +126,7 @@ import {
   readBackgroundRange,
   stopTask,
   backgroundTask,
+  allowPeerMessages,
   dequeueMessage,
   recallQueued,
   askSideQuestion,
@@ -271,6 +280,11 @@ const SESSION_IPC_CHANNELS = [
   'session:stop-task',
   'session:background-task',
   'session:dequeue-message',
+  'session:allow-peer-messages',
+  'session:link:set-grouped',
+  'session:proposal:start',
+  'session:proposal:dismiss',
+  'session:context-pressure:respond',
   'session:ask-side-question',
   'session:set-permission-mode',
   'session:set-model',
@@ -426,6 +440,22 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
 
   const manager = new SessionManager()
   sharedManager = manager
+  // The session tools create sessions and send prompts through the same functions
+  // the commands below use; the service sits under this layer, so it is handed them.
+  configureSessionTools({
+    manager,
+    createSession: (args) => prepareAndCreateSession(manager, getHostWindow(), args),
+    sendPrompt: (routingId, prompt, options) =>
+      sendPrompt(manager, routingId, prompt, undefined, options)
+  })
+  // No turn-end notes: a session that was started from another reports nothing back
+  // (session-notes.ts is dormant on purpose — nothing here enables it).
+  // So does the context-pressure watcher's hand-off instruction.
+  configureContextPressure({
+    manager,
+    sendPrompt: (routingId, prompt, options) =>
+      sendPrompt(manager, routingId, prompt, undefined, options)
+  })
   for (const command of codexCommands(manager)) handleIpc(command)
 
   // The volatile lane's subscription verb (phase 5 S1). Same declaration the
@@ -640,6 +670,56 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string) => recallQueued(manager, routingId)
+  })
+
+  handleIpc({
+    channel: 'session:allow-peer-messages',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string) => allowPeerMessages(manager, routingId)
+  })
+
+  // "Detach from group" / "Add to group" in the sidebar (slice 1b, reworked in slice 5).
+  // `routingId` is the row's own session, so the audit row names the session the user
+  // acted on.
+  handleIpc({
+    channel: 'session:link:set-grouped',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, grouped: boolean) => setSessionGrouped(routingId, grouped)
+  })
+
+  // The user's click on a proposal card (session tools, slice 1c-b). The argument is
+  // the proposal's id, not a session id; the audit row for the click is the registry's.
+  // `grouped` is which Start button was clicked; anything but a boolean (an older client) falls back
+  // to the proposal's own relation.
+  handleIpc({
+    channel: 'session:proposal:start',
+    capability: 'chat',
+    kind: 'command',
+    // The click's audit row carries the calling connection, so it needs it first.
+    withConnection: true,
+    handler: async (connection: CommandConnection, proposalId: string, grouped?: boolean) =>
+      startProposalFromClient(proposalId, grouped, connection)
+  })
+  handleIpc({
+    channel: 'session:proposal:dismiss',
+    capability: 'chat',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection, proposalId: string) =>
+      dismissProposalFromClient(proposalId, connection)
+  })
+
+  // The user's answer to the context-pressure banner (slice 4): Hand off or Not now.
+  handleIpc({
+    channel: 'session:context-pressure:respond',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, answer: string) => respondContextPressure(routingId, answer)
   })
 
   // Deprecated (ADR-053): recall-all shim for cached `/remote` bundles.

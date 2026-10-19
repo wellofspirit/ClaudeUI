@@ -197,6 +197,18 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: true,
     why: 'Queue of record (ADR-053): the FULL item list, applied as a replace; consumed items synthesize a `steer-<itemId>` transcript message.'
   },
+  'session:held-changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'Held inbox size (slice 1a): items from other sessions waiting for the next turn of this session. A replace of one number, so a client that joins late reads it from the snapshot and an indicator never counts events.'
+  },
+  'session:context-pressure': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'Context-pressure banner above a session’s composer (slice 4): a replace of one small object, null to clear. Canonical so that an answer on any client clears it on every client and a late joiner reads it from the snapshot; it is carried on PerSessionSnapshot as `contextPressure`.'
+  },
   'session:approval-request': {
     cls: 'replicated',
     ring: true,
@@ -351,6 +363,13 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     ring: true,
     canonical: true,
     why: 'The merged (claude + opencode + pi) sidebar listing, applied as a replace. Was a payload-less notify each client answered with its OWN three-query merge, while canonical held the claude-only subset every sync-full then force-projected back over it.'
+  },
+
+  'session:link-changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'Origin links between sessions (with their `grouped` flag) and the id of each session they name (slice 1b): the WHOLE table, applied as a replace, so a late joiner reads the same value from the snapshot and an event never depends on a previous one. Small by nature (one row per started session).'
   },
 
   // -------------------------------------------------------------------------

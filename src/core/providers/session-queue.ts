@@ -40,6 +40,19 @@ export class SessionQueue {
    * item when {@link emit} prunes it.
    */
   private queuedAtMs = new Map<string, number>()
+  /**
+   * Items that are the brief a session tool gave a session it started: a user
+   * prompt on the wire but not a client typing. Private like {@link forwarded}: the
+   * broadcast item stays an ordinary one. Dropped with the item when {@link emit}
+   * prunes it.
+   */
+  private briefs = new Set<string>()
+
+  /**
+   * Called when an item becomes `consumed` — the engine took it. The one place
+   * "the user's queued prompt actually started or joined a turn" is known.
+   */
+  onConsumed: ((item: QueuedItem) => void) | undefined
 
   constructor(
     private readonly broadcast: (items: QueuedItem[]) => void,
@@ -73,13 +86,25 @@ export class SessionQueue {
    * Queue a prompt. `uploads` are what the engine will be handed
    * ({@link uploadsFor}); `refs` are what the broadcast item carries.
    */
-  add(text: string, uploads?: AttachmentUpload[], refs?: AttachmentRef[]): QueuedItem {
+  add(
+    text: string,
+    uploads?: AttachmentUpload[],
+    refs?: AttachmentRef[],
+    origin?: 'host-instruction' | 'agent-brief'
+  ): QueuedItem {
     const item: QueuedItem = { itemId: randomUUID(), text, state: 'queued' }
+    if (origin === 'host-instruction') item.origin = origin
+    if (origin === 'agent-brief') this.briefs.add(item.itemId)
     if (refs && refs.length > 0) item.attachments = refs
     if (uploads && uploads.length > 0) this.uploads.set(item.itemId, uploads)
     this.queuedAtMs.set(item.itemId, this.now())
     this.items.push(item)
     return item
+  }
+
+  /** Is this item a session tool's brief rather than something a client typed? */
+  isBrief(item: QueuedItem): boolean {
+    return this.briefs.has(item.itemId)
   }
 
   /** When the item was queued (epoch ms); undefined once it has been pruned. */
@@ -102,7 +127,7 @@ export class SessionQueue {
    */
   consumeByText(text: string): QueuedItem | undefined {
     const item = this.items.find((i) => i.state === 'queued' && i.text === text)
-    if (item) item.state = 'consumed'
+    if (item) this.setState(item, 'consumed')
     return item
   }
 
@@ -130,12 +155,13 @@ export class SessionQueue {
 
   private settleById(itemId: string, state: 'consumed' | 'recalled'): QueuedItem | undefined {
     const item = this.items.find((i) => i.state === 'queued' && i.itemId === itemId)
-    if (item) item.state = state
+    if (item) this.setState(item, state)
     return item
   }
 
   setState(item: QueuedItem, state: QueuedItem['state']): void {
     item.state = state
+    if (state === 'consumed') this.onConsumed?.(item)
   }
 
   /**
@@ -150,6 +176,7 @@ export class SessionQueue {
       this.forwarded.delete(item.itemId)
       this.uploads.delete(item.itemId)
       this.queuedAtMs.delete(item.itemId)
+      this.briefs.delete(item.itemId)
     }
     this.items = this.items.filter((item) => item.state === 'queued')
   }

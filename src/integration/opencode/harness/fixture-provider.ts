@@ -13,6 +13,8 @@
  *   [dispatch]  call ClaudeUI's hosted `claudeui_dispatch_agent`; then echo the result
  *   [subdispatch] `subagent` tool call whose child prompt is `[dispatch]`
  *   [mockup]    call ClaudeUI's hosted `claudeui_create_mockup`; then echo the result
+ *   [sessiontool]  call ClaudeUI's hosted `claudeui_session_list`; then echo the result
+ *   [subsession]   `subagent` tool call whose child prompt is `[sessiontool]`
  *   [question]  `question` tool call (one single-choice question)
  *   [sub]       `subagent` tool call
  *   [subread]   `subagent` tool call whose child prompt is `[read]`
@@ -251,6 +253,22 @@ export async function startFixtureProvider(
             prompt: 'child dispatches [dispatch]',
             agent: 'general'
           }
+        )
+      if (text.includes('[subsession]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          {
+            description: 'contract session reader',
+            prompt: 'child lists sessions [sessiontool]',
+            agent: 'general'
+          }
+        )
+      if (text.includes('[sessiontool]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'claudeui_session_list'),
+          { scope: 'linked' }
         )
       if (text.includes('[mcp]'))
         return streamToolCall(

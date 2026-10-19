@@ -13,7 +13,11 @@ vi.mock('../../services/logger', () => ({
 }))
 vi.mock('../../services/ui-config', () => ({ loadEngineConfig: vi.fn(() => ({})) }))
 
-import { codexDynamicToolSpecs } from '../codex-hosted-tools'
+import { CODEX_HOSTED_TOOL_NAMES, codexDynamicToolSpecs } from '../codex-hosted-tools'
+import {
+  SESSION_TOOL_NAMES,
+  sessionToolDescriptions
+} from '../../../shared/session-tools-description'
 
 describe('codexDynamicToolSpecs — dispatch_agent (S4)', () => {
   it('steers Codex to spawn_agent first, names claude, opencode and pi as targets, keeps the per-target hints', () => {
@@ -29,5 +33,55 @@ describe('codexDynamicToolSpecs — dispatch_agent (S4)', () => {
     expect(spec.description).toContain('For opencode:')
     expect(spec.description).toContain('For pi:')
     expect(codexDynamicToolSpecs(false).some((s) => s.name === 'dispatch_agent')).toBe(false)
+  })
+})
+
+describe('codexDynamicToolSpecs — the session tools (slice 2)', () => {
+  const sessionSpecs = codexDynamicToolSpecs(true, true).filter((spec) =>
+    (SESSION_TOOL_NAMES as readonly string[]).includes(spec.name)
+  )
+
+  it('adds the nine, after the others, only when asked', () => {
+    expect(sessionSpecs.map((spec) => spec.name)).toEqual([...SESSION_TOOL_NAMES])
+    expect(codexDynamicToolSpecs(true, true).map((spec) => spec.name)).toEqual([
+      'render_mermaid',
+      'create_mockup',
+      'show_mockup',
+      'dispatch_agent',
+      ...SESSION_TOOL_NAMES
+    ])
+    for (const flags of [
+      [true, false],
+      [false, false]
+    ] as const) {
+      expect(
+        codexDynamicToolSpecs(flags[0], flags[1]).some((spec) => spec.name.startsWith('session_'))
+      ).toBe(false)
+    }
+    // The one-argument form every older caller uses is unchanged.
+    expect(codexDynamicToolSpecs(false).map((spec) => spec.name)).toEqual([
+      'render_mermaid',
+      'create_mockup',
+      'show_mockup'
+    ])
+  })
+
+  it('are canonical tagged functions with the shared descriptions and closed schemas', () => {
+    const descriptions = sessionToolDescriptions({})
+    for (const spec of sessionSpecs) {
+      expect(spec).toMatchObject({
+        type: 'function',
+        description: descriptions[spec.name as keyof typeof descriptions],
+        inputSchema: { type: 'object', additionalProperties: false }
+      })
+    }
+  })
+
+  it('every name is on the hosted list (the security boundary) and valid for a dynamic tool', () => {
+    for (const name of SESSION_TOOL_NAMES) {
+      expect(CODEX_HOSTED_TOOL_NAMES.has(name)).toBe(true)
+      expect(name).toMatch(/^[a-zA-Z0-9_-]+$/)
+      expect(name.startsWith('mcp')).toBe(false)
+    }
   })
 })

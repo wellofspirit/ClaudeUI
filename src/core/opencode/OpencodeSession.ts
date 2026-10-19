@@ -59,7 +59,9 @@ import { reconcileAfterReconnect } from './reconnect'
 import { convertOpencodeHistory, readOpencodeHistory } from './history'
 import { ShellOutputPoller } from './shell-output-poller'
 import { BaseSession } from '../providers/BaseSession'
-import type { EngineSpawnOptions } from '../providers/ISession'
+import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
+import { buildSessionMessageWrapper } from '../../shared/session-message-wrapper'
+import { sessionMessageNote } from '../services/agent-note'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { AccountIdentity } from '../../shared/account-key'
 import { resolveOpencodeCapabilities } from '../../shared/model-capabilities'
@@ -124,6 +126,17 @@ import { ChildRulesetKeeper } from './child-rulesets'
 import { resolveOpencodeOwnDirAllows } from './own-dirs'
 import { locationWorktree, stopOpencodeSessions } from './session-support'
 import { hostPrecheck, type HostPrecheckContext } from './host-precheck'
+import { userDenyRule } from './wildcard'
+import {
+  auditSessionToolDenial,
+  sessionToolsGate,
+  type SessionToolCaller
+} from '../services/session-tools'
+import {
+  SESSION_TOOLS_SERVER_NAME,
+  sessionToolBareName,
+  type SessionToolName
+} from '../../shared/session-tools-description'
 import { OpencodeSessionAllows } from './session-allows'
 import { reviewRationale } from '../shared/tool-review'
 import {
@@ -257,6 +270,15 @@ function tokensOf(t: {
 }
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+/** The card's explanation when the call's input was not known yet (it could not be scoped). */
+const UNSCOPED_SESSION_TOOL_REASON =
+  "ClaudeUI could not see this call's arguments yet, so it cannot check which session it targets. Approve only if you expect it."
+
+/** The session tool an opencode permission ask (`claudeui_session_*`) is for, or null. */
+function sessionToolOfAsk(action: string): SessionToolName | null {
+  return action.startsWith('claudeui_') ? sessionToolBareName(action) : null
+}
 
 export class OpencodeSession extends BaseSession {
   readonly engineId = 'opencode' as const
@@ -557,6 +579,53 @@ export class OpencodeSession extends BaseSession {
   // ── Turns ──────────────────────────────────────────────────────────────────
 
   async run(prompt: string | null, attachments?: AttachmentUpload[]): Promise<void> {
+    return this.runPrompt(prompt, attachments)
+  }
+
+  /**
+   * Slice 1a: a message from another session or an agent, as a plain prompt
+   * whose text names its sender and says it is not the user's. A running turn
+   * takes it as a steer, posted at once so a refusal is known; an idle session
+   * starts a turn on it. The delivered row comes back through the feed as a
+   * user row of that wrapper, which `userChatMessage` turns into a note (live
+   * and on reload), and which is never put in `messageHistory` as the user's.
+   */
+  async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
+    const text = buildSessionMessageWrapper(item.from, item.text)
+    if (this.isProcessing && this.client && this.openSessionId) {
+      try {
+        await this.postNonUserPrompt(text, item)
+        return 'queued'
+      } catch (err) {
+        logger.warn('OpencodeSession', `non-user steer not posted: ${errText(err)}`)
+        return 'unavailable'
+      }
+    }
+    const busy = this.isProcessing
+    // Answer only once opencode has the item in its inbox: connecting, creating
+    // the session and the post can all fail, and then the caller holds it
+    // (`unavailable`) instead of counting a turn that never started.
+    const posted = await new Promise<boolean>((settle) => {
+      this.runPrompt(text, undefined, item, settle)
+        .catch((err) => logger.warn('OpencodeSession', `non-user turn failed: ${errText(err)}`))
+        .finally(() => settle(false))
+    })
+    if (!posted) return 'unavailable'
+    return busy ? 'queued' : 'started'
+  }
+
+  /** The opencode connection is up: a message does not reconnect a closed session. */
+  isEngineLive(): boolean {
+    return !!this.client && !!this.openSessionId && !this.disconnected
+  }
+
+  private async runPrompt(
+    prompt: string | null,
+    attachments?: AttachmentUpload[],
+    nonUser?: NonUserItem,
+    /** Non-user only: told once whether opencode took the item (first call wins). */
+    settle?: (posted: boolean) => void
+  ): Promise<void> {
     this.clearInactivityTimer()
     this._cancelled = false
     this.disconnected = false
@@ -573,16 +642,21 @@ export class OpencodeSession extends BaseSession {
       try {
         await this.establishingPromise
       } catch {
-        return // the first prompt already surfaced its error
+        // the first prompt already surfaced its error
+        settle?.(false)
+        return
       }
-      if (this._cancelled || !this.client || !this.openSessionId) return
-      return this.steer(prompt, attachments)
+      if (this._cancelled || !this.client || !this.openSessionId) {
+        settle?.(false)
+        return
+      }
+      return this.steer(prompt, attachments, nonUser, settle)
     }
 
     // A turn is running: the prompt goes into it (the inbox steers it at the
     // next step boundary). The send path normally queues instead.
     if (this.isProcessing && this.client && this.openSessionId) {
-      return this.steer(prompt, attachments)
+      return this.steer(prompt, attachments, nonUser, settle)
     }
 
     this.endUserStop()
@@ -609,16 +683,22 @@ export class OpencodeSession extends BaseSession {
         if (!this.conn) this.disconnected = true
         this.sendStatus()
         this.resetInactivityTimer()
+        settle?.(false)
         return
       }
       if (gate.notice !== null) {
         this.holdForAuth(gate.notice)
+        settle?.(false)
         return
       }
       this.startTimeMs = Date.now()
-      await this.postUserPrompt(prompt, attachments)
+      if (nonUser) {
+        await this.postNonUserPrompt(prompt, nonUser)
+        settle?.(true)
+      } else await this.postUserPrompt(prompt, attachments)
     } catch (err) {
       logger.error('OpencodeSession', `run() error: ${errText(err)}`)
+      settle?.(false)
       this.isProcessing = false
       if (!this.conn) this.disconnected = true
       this.send('session:error', errText(err))
@@ -633,11 +713,20 @@ export class OpencodeSession extends BaseSession {
   }
 
   /** A prompt into a running turn; a failed post is surfaced, never silently dropped. */
-  private async steer(prompt: string, attachments?: AttachmentUpload[]): Promise<void> {
+  private async steer(
+    prompt: string,
+    attachments?: AttachmentUpload[],
+    nonUser?: NonUserItem,
+    settle?: (posted: boolean) => void
+  ): Promise<void> {
     try {
-      await this.postUserPrompt(prompt, attachments)
+      if (nonUser) {
+        await this.postNonUserPrompt(prompt, nonUser)
+        settle?.(true)
+      } else await this.postUserPrompt(prompt, attachments)
     } catch (err) {
       logger.warn('OpencodeSession', `steer send failed: ${errText(err)}`)
+      settle?.(false)
       this.send('session:error', errText(err))
     }
   }
@@ -662,6 +751,28 @@ export class OpencodeSession extends BaseSession {
     } catch (err) {
       this.messageHistory = this.messageHistory.filter((m) => m !== userMsg)
       this.ownInboxIds.delete(inboxID)
+      throw err
+    }
+  }
+
+  /**
+   * Post a prompt that is NOT the user's (slice 1a). No `messageHistory` row of
+   * the user's: the delivered row returns through {@link onUserMessage} as a
+   * note, recognised by this inbox id being in {@link pendingNonUser} (the engine
+   * marker), not by its text. The id stays in `ownInboxIds` too, so a
+   * reconnect's purge does not cancel it. Posted as text only — a `/command` it
+   * might spell is not run (`knownCommandNames` is checked on the wrapper, which
+   * starts with `<`).
+   */
+  private async postNonUserPrompt(text: string, item: NonUserItem): Promise<void> {
+    const inboxID = newInboxId()
+    this.ownInboxIds.add(inboxID)
+    this.pendingNonUser.set(inboxID, item)
+    try {
+      await this.postPrompt(text, undefined, inboxID, 'steer')
+    } catch (err) {
+      this.ownInboxIds.delete(inboxID)
+      this.pendingNonUser.delete(inboxID)
       throw err
     }
   }
@@ -1213,6 +1324,26 @@ export class OpencodeSession extends BaseSession {
    * prompt another client posted into this session is painted here.
    */
   private onUserMessage(inboxID: string, message: ChatMessage): void {
+    // A session message or agent note ClaudeUI posted, recognised by its inbox id
+    // (never by its text, which a user can type): shown as a note from its
+    // sender, and no longer pending — the model has it.
+    const pending = this.pendingNonUser.get(inboxID)
+    if (pending) {
+      this.pendingNonUser.delete(inboxID)
+      this.ownInboxIds.delete(inboxID)
+      // The model has it now: tainted from here, whatever consumed order a queued
+      // user prompt of the same stretch took.
+      this.originLedger.nonUserDelivered()
+      this.rememberAndSend(
+        sessionMessageNote({
+          id: message.id,
+          fromTitle: pending.from.title,
+          text: pending.text,
+          timestamp: message.timestamp
+        })
+      )
+      return
+    }
     if (this.ownInboxIds.delete(inboxID) || this.inboxToItem.has(inboxID)) return
     if (inboxID.startsWith(CLAUDEUI_INBOX_PREFIX)) return
     if (this.pendingCommandEchoes > 0) {
@@ -1382,6 +1513,11 @@ export class OpencodeSession extends BaseSession {
   }
 
   private onInbox(o: Extract<OpencodeMapperOutput, { kind: 'inbox' }>): void {
+    // A message from another session that opencode cancelled never reaches the model.
+    if (o.change === 'cancelled' && this.pendingNonUser.has(o.inboxID)) {
+      this.reholdNonUser(o.inboxID, 'opencode cancelled it')
+      return
+    }
     const itemId = this.inboxToItem.get(o.inboxID)
     if (!itemId) return
     if (o.change === 'delivered') {
@@ -1529,7 +1665,12 @@ export class OpencodeSession extends BaseSession {
   private endLease(conn: ServerConnection, client: OpencodeClient | null): void {
     const release = () => opencodeServerManager.releaseIfCurrent(this.cwd, conn)
     const sessionID = this.openSessionId
-    const inboxIDs = [...this.inboxToItem.keys()]
+    // A message from another session still waiting in opencode's inbox is taken
+    // back here too: it is re-held by recallQueuedOnEngineLoss right after, and a
+    // copy left server-side would be read a second time at the next turn.
+    const pendingIDs = [...this.pendingNonUser.keys()]
+    for (const id of pendingIDs) this.ownInboxIds.delete(id)
+    const inboxIDs = [...this.inboxToItem.keys(), ...pendingIDs]
     this.inboxToItem.clear()
     this.itemToInbox.clear()
     if (!client || !sessionID) {
@@ -1583,6 +1724,13 @@ export class OpencodeSession extends BaseSession {
       // A question is the human's, in every autonomy mode.
       this.send('session:approval-request', approval)
       return
+    }
+    // A session tool's card offers no "always allow" (neither a rule nor a session
+    // allow): either would skip the scope and mode-parity checks of the gate for
+    // every later call (spec 7.3).
+    if (sessionToolOfAsk(approval.toolName)) {
+      const { suggestions: _suggestions, always: _always, ...single } = approval
+      approval = single
     }
     this.pendingApprovals.set(approval.requestId, {
       toolUseId: approval.toolUseId,
@@ -2162,6 +2310,11 @@ export class OpencodeSession extends BaseSession {
    * ladder.
    */
   private routePermissionAsk(approval: PendingApproval): void {
+    const sessionTool = sessionToolOfAsk(approval.toolName)
+    if (sessionTool) {
+      this.routeSessionToolAsk(approval, sessionTool)
+      return
+    }
     const category = approval.toolName
     const autoMode = this.isAutoMode(this.permissionMode)
     const verdict = hostPrecheck(approval, this.precheckContext())
@@ -2218,6 +2371,62 @@ export class OpencodeSession extends BaseSession {
     }
     if (autoMode) void this.handleAutoModeApproval(approval)
     else this.send('session:approval-request', approval)
+  }
+
+  /** The calling session as the session tools see it: this chat, its root agent. */
+  private sessionToolCaller(): SessionToolCaller {
+    return {
+      routingId: this.routingId,
+      engine: this.engineId,
+      cwd: this.cwd,
+      permissionMode: this.permissionMode
+    }
+  }
+
+  /**
+   * An ask for one of the session tools (`claudeui_session_*`, `SESSION_TOOLS_ASK_RULE`
+   * makes every call ask in every mode): ClaudeUI's own gate decides, never the
+   * judge. allow → once; deny → rejected with the gate's reason and audited (acting
+   * tools); ask → the approval card. A user deny rule written for Claude's spelling
+   * of the tool holds first. An ask that arrives without the call's input (the tool
+   * part not seen yet) cannot be scoped, so it goes to the user.
+   */
+  private routeSessionToolAsk(approval: PendingApproval, tool: SessionToolName): void {
+    const caller = this.sessionToolCaller()
+    const input = (approval.input ?? {}) as Record<string, unknown>
+    const reject = (message: string): void => {
+      auditSessionToolDenial(caller, tool, input, message)
+      this.autoReply(approval.requestId, { decision: 'reject', message })
+      if (approval.toolUseId && !approval.subagent)
+        this.sendDenial(approval.toolUseId, 'rule', message)
+    }
+    const rule = userDenyRule(
+      this.userOriginRules(),
+      opencodeMcpKey(SESSION_TOOLS_SERVER_NAME, tool),
+      undefined
+    )
+    if (rule) {
+      reject(`Denied by permission rule: ${rule.permission}(${rule.pattern})`)
+      return
+    }
+    const unscoped =
+      tool !== 'session_list' && tool !== 'session_usage' && Object.keys(input).length === 0
+    const decision = unscoped
+      ? ({ behavior: 'ask' } as const)
+      : sessionToolsGate(caller, tool, input, { agentId: approval.subagent?.sessionId })
+    if (decision.behavior === 'allow') {
+      this.autoReply(approval.requestId, { decision: 'once' })
+    } else if (decision.behavior === 'deny') {
+      reject(decision.message)
+    } else {
+      const pending = this.pendingApprovals.get(approval.requestId)
+      if (pending) pending.sweepable = false
+      // An ask without the call's input must not read as an approval of a blank: say so on the card.
+      this.send(
+        'session:approval-request',
+        unscoped ? { ...approval, decisionReason: UNSCOPED_SESSION_TOOL_REASON } : approval
+      )
+    }
   }
 
   private precheckContext(): HostPrecheckContext {

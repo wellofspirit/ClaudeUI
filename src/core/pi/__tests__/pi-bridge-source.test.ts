@@ -9,6 +9,8 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from '../pi-bridge-source'
+import { piSessionToolsEnv } from '../../services/session-tool-specs'
+import { SESSION_TOOL_NAMES } from '../../../shared/session-tools-description'
 
 describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
   it('has a non-empty version string', () => {
@@ -16,8 +18,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 13 (ADR-096: registers the shared MCP catalog)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('13')
+  it('is version 15 (slice 2: the session tools)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('15')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -169,6 +171,7 @@ interface FakeToolDef {
   name: string
   label: string
   description: string
+  promptGuidelines?: string[]
   parameters: unknown
   execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>
 }
@@ -266,6 +269,7 @@ const BRIDGE_ENV_VARS = [
   'CLAUDEUI_PI_AGENT_TOOL',
   'CLAUDEUI_PI_AGENT_LISTING',
   'CLAUDEUI_PI_SEND_MESSAGE',
+  'CLAUDEUI_PI_SESSION_TOOLS',
   'CLAUDEUI_PI_MCP'
 ] as const
 
@@ -780,6 +784,120 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — send_message / task_stop (bridge v11, A
   })
 })
 
+describe('PI_BRIDGE_EXTENSION_SOURCE — session tools (bridge v15, slice 2)', () => {
+  const originalFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+  const ENV = piSessionToolsEnv()
+
+  it('registers the nine session_* tools from the host-built env, with its descriptions, schemas and guidance', () => {
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SESSION_TOOLS: ENV }, () => {
+      const { tools } = runExtension()
+      expect([...tools.keys()].sort()).toEqual([...SESSION_TOOL_NAMES].sort())
+      const specs = JSON.parse(ENV) as Array<{
+        name: string
+        description: string
+        parameters: unknown
+        promptGuidelines?: string[]
+      }>
+      for (const spec of specs) {
+        const tool = tools.get(spec.name)!
+        expect(tool.description).toBe(spec.description)
+        expect(tool.parameters).toEqual(spec.parameters)
+        expect(tool.promptGuidelines).toEqual(spec.promptGuidelines)
+      }
+      // The guidance rides one tool, as pi's Guidelines section (not nine copies).
+      expect(specs.filter((spec) => spec.promptGuidelines).map((spec) => spec.name)).toEqual([
+        'session_list'
+      ])
+      expect(tools.get('session_list')!.promptGuidelines![0]).toContain('session_start')
+    })
+  })
+
+  it('registers nothing without its own gate, without the bridge creds, or with an empty variable (a host-run child)', () => {
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1' }, () => {
+      expect(runExtension().tools.has('session_start')).toBe(false)
+    })
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SESSION_TOOLS: '' }, () => {
+      expect(runExtension().tools.size).toBe(0)
+    })
+    withEnv({ CLAUDEUI_PI_BRIDGE_TOKEN: 'tok', CLAUDEUI_PI_SESSION_TOOLS: ENV }, () => {
+      expect(runExtension().tools.size).toBe(0)
+    })
+    // Independent of the hosted-tools gate: the variable alone is enough.
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SESSION_TOOLS: ENV }, () => {
+      expect(runExtension().tools.size).toBe(SESSION_TOOL_NAMES.length)
+    })
+  })
+
+  it('fails closed: a variable that is not a JSON array registers nothing and does not throw', () => {
+    for (const bad of ['{not json', '{"name":"session_start"}', '"session_start"', 'null', '42']) {
+      withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SESSION_TOOLS: bad }, () => {
+        expect(() => runExtension()).not.toThrow()
+        expect(runExtension().tools.size, bad).toBe(0)
+      })
+    }
+  })
+
+  it('skips every entry that is not a well-formed session_* tool, and keeps the good ones', () => {
+    const good = {
+      name: 'session_list',
+      description: 'd',
+      parameters: { type: 'object', properties: {} }
+    }
+    const entries = [
+      null,
+      'session_start',
+      { name: 'bash', description: 'd', parameters: {} },
+      { name: 'dispatch_agent', description: 'd', parameters: {} },
+      { name: 'session_x', parameters: {} },
+      { name: 'session_x', description: 'd' },
+      { name: 'session_x', description: 'd', parameters: 'object' },
+      { name: 7, description: 'd', parameters: {} },
+      good
+    ]
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SESSION_TOOLS: JSON.stringify(entries) }, () => {
+      expect([...runExtension().tools.keys()]).toEqual(['session_list'])
+    })
+  })
+
+  it('execute() POSTs the bare tool name to /hosted-tool and returns the host answer; a network error fails closed', async () => {
+    const bodies: unknown[] = []
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ content: [{ type: 'text', text: 'delivered' }] })
+      } as Response
+    }) as typeof fetch
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SESSION_TOOLS: ENV }, async () => {
+      const { tools } = runExtension()
+      const out = await tools
+        .get('session_message')!
+        .execute('c-1', { session: 's-a', message: 'hi' })
+      expect(out).toEqual({ content: [{ type: 'text', text: 'delivered' }] })
+      globalThis.fetch = (async () => {
+        throw new TypeError('boom')
+      }) as typeof fetch
+      const failed = (await tools.get('session_stop')!.execute('c-2', { session: 's-a' })) as {
+        content: Array<{ text: string }>
+        isError?: boolean
+      }
+      expect(failed.isError).toBe(true)
+      expect(failed.content[0].text).toBe('ClaudeUI hosted-tool service unreachable (TypeError)')
+    })
+    expect(bodies).toEqual([
+      { toolName: 'session_message', input: { session: 's-a', message: 'hi' }, toolCallId: 'c-1' }
+    ])
+  })
+
+  it('the variable fits one environment entry with room to spare (Windows caps it at 32 767 characters)', () => {
+    expect(ENV.length).toBeLessThan(24_000)
+  })
+})
+
 describe('PI_BRIDGE_EXTENSION_SOURCE — cui-deliver command (bridge v10, ADR-089 S3)', () => {
   const encode = (p: unknown): string => Buffer.from(JSON.stringify(p), 'utf8').toString('base64')
   const valid = {
@@ -834,6 +952,31 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — cui-deliver command (bridge v10, ADR-08
         },
         expect.objectContaining({ options: { triggerTurn: false, deliverAs: 'steer' } })
       ])
+    })
+  })
+
+  it('accepts the session-message kind (bridge v14) and still refuses any other', async () => {
+    await withEnv({ ...BRIDGE_CREDS }, async () => {
+      const ext = runExtension()
+      const message = {
+        ...valid,
+        kind: 'session-message',
+        text: ['<session-message from="s" title="t">', 'hi', '</session-message>'].join('\n'),
+        details: { agentId: 's', toolUseId: '', from: 't', fromId: 's' }
+      }
+      await ext.commands.get('cui-deliver')!.handler(encode(message))
+      expect(ext.sendMessageCalls).toHaveLength(1)
+      expect(ext.sendMessageCalls[0]).toMatchObject({
+        message: {
+          customType: 'claudeui-agent-message',
+          details: { kind: 'session-message', deliveryId: 'd-1', from: 't', fromId: 's' }
+        },
+        options: { triggerTurn: true, deliverAs: 'steer' }
+      })
+      expect(() =>
+        ext.commands.get('cui-deliver')!.handler(encode({ ...message, kind: 'user-message' }))
+      ).toThrow('invalid delivery')
+      expect(ext.sendMessageCalls).toHaveLength(1)
     })
   })
 

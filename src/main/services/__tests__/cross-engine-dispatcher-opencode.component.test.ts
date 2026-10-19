@@ -80,6 +80,7 @@ import type { SdkToolExtra } from '../../../core/sdk'
 import type { ChatMessage, EngineConfig, PendingApproval } from '../../../shared/types'
 import { BlockedCallLedger } from '../../../core/automode/blocked-calls'
 import { loadSharedAutoModeConfig } from '../../../core/services/ui-config'
+import { evaluateV2Call, v2ToolHidden } from '../../../core/opencode/wildcard'
 
 // ---------------------------------------------------------------------------
 // A fake opencode 2.x server
@@ -711,10 +712,17 @@ describe('opencode target — lifecycle', () => {
       { action: 'webfetch', resource: '*', effect: 'ask' },
       { action: 'external_directory', resource: '*', effect: 'ask' },
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'ask' },
+      { action: 'claudeui_session_*', resource: '*', effect: 'ask' },
       { action: 'execute', resource: '*', effect: 'deny' },
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'deny' },
+      // The session tools are the root agent's: hidden from a dispatch target (slice 2).
+      { action: 'claudeui_session_*', resource: '*', effect: 'deny' },
       { action: 'question', resource: '*', effect: 'deny' }
     ])
+    // The session tools are hidden and denied for the target, the other hosted tools are not.
+    expect(v2ToolHidden(rules, 'claudeui_session_start', 'linux')).toBe(true)
+    expect(evaluateV2Call(rules, 'claudeui_session_message', ['*'], 'linux')).toBe('deny')
+    expect(v2ToolHidden(rules, 'claudeui_render_mermaid', 'linux')).toBe(false)
     // Unchanged rules at turn start → no PATCH; the prompt is an inbox item with a ClaudeUI id.
     expect(client.setSessionPermissions).not.toHaveBeenCalled()
     expect(client.prompt).toHaveBeenCalledWith('oc-sess-1', {

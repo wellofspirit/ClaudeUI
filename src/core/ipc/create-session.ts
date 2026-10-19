@@ -9,9 +9,12 @@ import { spawnPrepRegistry } from '../providers/SpawnPrepRegistry'
 // populated wherever session:create runs (mirrors session-manager.ts's own
 // register-engines import).
 import '../providers/register-engines'
-import type { EngineId } from '../../shared/types'
+import type { EngineId, ModelRef } from '../../shared/types'
 import type { EngineSpawnOptions } from '../providers/ISession'
-import { getSessionMeta } from '../services/db'
+import { getSessionMeta, setSessionMeta } from '../services/db'
+import { logger } from '../services/logger'
+import { heldCountFor } from '../services/session-delivery'
+import { engineMeta } from '../../shared/engine-meta'
 
 // ---------------------------------------------------------------------------
 // Shared session:create implementation (desktop IPC + remote WebSocket)
@@ -37,6 +40,57 @@ export interface CreateSessionArgs {
    * omit it, and a WS client's JSON may carry `null` for it or for either field.
    */
   announce?: { effort?: string | null; thinkingMode?: string | null }
+  /**
+   * Who started the session, when it was not a client: `'agent'` for a session
+   * another session's tool started (session tools, spec §6.1). It rides the birth
+   * event so no client follows the new session; absent for every session a client
+   * or a resume creates, which behave exactly as before. Never read from a
+   * client's command — only the session tools set it.
+   */
+  createdBy?: 'agent'
+}
+
+/**
+ * Record the engine (and model) a session is born with, on the host.
+ *
+ * Until now the registry row was written only by the CREATING client's own save,
+ * so a session created by anything else — a remote `session:create`, which has no
+ * `createNewSession` behind it — had no row until a model-bearing `session:status`
+ * (Codex starts lazily and sends none before the first prompt). Every other
+ * client then rendered it as Claude, and its next registry save could not tell
+ * "unknown to me" from "gone" (see `saveSessionConfig`).
+ *
+ * INSERT-if-absent: a respawn or a resume already has a row, and it may carry the
+ * user's own later model pick, which the spawn model must not overwrite. Codex's
+ * model is left off — `CodexSession` records the one it actually runs. The row
+ * reaches the clients through the registry broadcast, built on canonical's own map
+ * so only this session's entry is added. Best-effort, like the other host-side
+ * bookkeeping: a DB hiccup must never fail the spawn.
+ */
+function recordBirthIdentity(
+  routingId: string,
+  engineId: EngineId,
+  resolvedModel: string | undefined
+): void {
+  try {
+    let meta = getSessionMeta(routingId)
+    if (!meta) {
+      const model: ModelRef | undefined =
+        engineId !== 'codex' && resolvedModel
+          ? engineMeta(engineId).decodeModelValue(resolvedModel)
+          : undefined
+      meta = { engineId, ...(model ? { model } : {}) }
+      setSessionMeta(routingId, meta)
+    }
+    const known = syncCore.getCanonicalState().sessionEngines
+    if (!known[routingId])
+      emitEvent('config:sessions-changed', [{ sessionEngines: { ...known, [routingId]: meta } }])
+  } catch (err) {
+    logger.warn(
+      'CreateSession',
+      `could not record the birth engine for ${routingId}: ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
 }
 
 /**
@@ -67,7 +121,8 @@ export async function prepareAndCreateSession(
     resumeSessionAt,
     forkSession,
     engineId,
-    announce
+    announce,
+    createdBy
   } = args
 
   // engineId ?? 'claude' is the legacy default at the IPC/WS boundary (old callers
@@ -93,6 +148,7 @@ export async function prepareAndCreateSession(
   // engineId (not resolvedEngineId) — SessionManager.create()'s own `= 'claude'`
   // default preserves the legacy claude-default boundary at that layer.
   manager.create(routingId, win, cwd, spawnOpts, engineId)
+  recordBirthIdentity(routingId, resolvedEngineId, resolvedModel)
   // ONE emit, every subscriber (SyncCore phase 4c). The `notifyMainWindow`
   // asymmetry that lived here — desktop-originated creates skipped the initiating
   // renderer because it "already knew locally" — is deleted: the desktop renderer
@@ -188,9 +244,17 @@ export async function prepareAndCreateSession(
       // A real request that got swapped IS announced: converging the picker on
       // what actually spawned is the point.
       ...(model != null && resolvedModel != null ? { model: resolvedModel } : {}),
-      ...announcedConfig
+      ...announcedConfig,
+      // Only a session a tool started says so; clients that see it do not follow.
+      ...(createdBy ? { createdBy } : {})
     }
   ])
+  // A resumed session may have had items held for it while it was cold (slice 1a,
+  // keyed by its engine session id): its replicas learn the count at birth.
+  if (resumeSessionId) {
+    const held = heldCountFor(resumeSessionId)
+    if (held > 0) emitEvent('session:held-changed', [routingId, { count: held }])
+  }
   // Canonical seeding (SyncCore phase 4a item 5): a RESUMED session's transcript
   // lives on disk, so canonical state has to read it from the same source the
   // renderer does (`loadSessionHistory`) or 4b's snapshot would hand every client

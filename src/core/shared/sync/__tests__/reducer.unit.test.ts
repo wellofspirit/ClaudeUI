@@ -117,6 +117,7 @@ describe('reducer — session registry', () => {
     ['session:status-line', ['rid', { totalCostUsd: 1 }]],
     ['session:metering', ['rid', { contextWindow: null }]],
     ['session:queue-changed', ['rid', { items: [] }]],
+    ['session:held-changed', ['rid', { count: 2 }]],
     ['session:result', ['rid', {}]],
     ['session:messages-retracted', ['rid', { messageIds: ['m1'] }]],
     ['session:tool-uses-retracted', ['rid', { messageId: 'm1', toolUseIds: ['t1'] }]],
@@ -2359,5 +2360,203 @@ describe('provider:auth-resolved — the one resolution signal (ADR-070 §2)', (
     const resolved = fold([['provider:auth-resolved', { providerId: 'chatgpt' }]], owedByThree())
     const ran = fold([['session:status', 'r-chatgpt', status({ state: 'running' })]], resolved)
     expect(ran.sessions['r-chatgpt'].authRequired).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slice 1a — held inbox count, host-instruction marker
+// ---------------------------------------------------------------------------
+
+describe('reducer — session:held-changed (held inbox size)', () => {
+  it('replaces the count, replicates it in the snapshot, and survives a conversation clear', () => {
+    const held = fold([created(), ['session:held-changed', 'rid', { count: 2 }]])
+    expect(held.sessions['rid'].heldCount).toBe(2)
+    expect(toSnapshot(held, 1).sessions['rid'].heldCount).toBe(2)
+    expect(fromSnapshot(toSnapshot(held, 1)).sessions['rid'].heldCount).toBe(2)
+
+    // The inbox belongs to the session, not to its conversation.
+    const cleared = fold([['session:conversation-cleared', 'rid', {}]], held)
+    expect(cleared.sessions['rid'].heldCount).toBe(2)
+
+    expect(
+      fold([['session:held-changed', 'rid', { count: 0 }]], held).sessions['rid'].heldCount
+    ).toBe(0)
+  })
+
+  it('is a ringed replicated channel that canonical folds', () => {
+    expect(channelSpec('session:held-changed')).toMatchObject({
+      cls: 'replicated',
+      ring: true,
+      canonical: true
+    })
+  })
+
+  it('ignores a malformed count', () => {
+    const base = fold([created(), ['session:held-changed', 'rid', { count: 1 }]])
+    expect(fold([['session:held-changed', 'rid', { count: 'many' }]], base)).toBe(base)
+    expect(fold([['session:held-changed', 'rid', {}]], base)).toBe(base)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slice 4 — the context-pressure banner
+// ---------------------------------------------------------------------------
+
+describe('reducer — session:context-pressure (the banner above the composer)', () => {
+  const ask = { kind: 'ask', percent: 72 } as const
+
+  it('replaces the banner, clears it on null, and replicates it in the snapshot', () => {
+    const shown = fold([created(), ['session:context-pressure', 'rid', ask]])
+    expect(shown.sessions['rid'].contextPressure).toEqual(ask)
+    expect(toSnapshot(shown, 1).sessions['rid'].contextPressure).toEqual(ask)
+    expect(fromSnapshot(toSnapshot(shown, 1)).sessions['rid'].contextPressure).toEqual(ask)
+
+    const failed = fold(
+      [['session:context-pressure', 'rid', { kind: 'failed', percent: 80 }]],
+      shown
+    )
+    expect(failed.sessions['rid'].contextPressure).toEqual({ kind: 'failed', percent: 80 })
+
+    const cleared = fold([['session:context-pressure', 'rid', null]], shown)
+    expect(cleared.sessions['rid'].contextPressure).toBeNull()
+    // `null` on the wire when there is none, and an older server's snapshot (no key) hydrates to none.
+    expect(toSnapshot(cleared, 1).sessions['rid'].contextPressure).toBeNull()
+    const { contextPressure: _omitted, ...older } = toSnapshot(cleared, 1).sessions['rid']
+    void _omitted
+    expect(
+      fromSnapshot({ ...toSnapshot(cleared, 1), sessions: { rid: older } }).sessions['rid']
+        .contextPressure
+    ).toBeNull()
+    expect(fromSnapshot(toSnapshot(cleared, 1)).sessions['rid'].contextPressure).toBeNull()
+  })
+
+  it('a late joiner reads the same banner from the snapshot as an earlier client folded', () => {
+    const live = fold([created(), ['session:context-pressure', 'rid', ask]])
+    const restored = fromSnapshot(toSnapshot(live, 7))
+    expect(restored.sessions['rid'].contextPressure).toEqual(live.sessions['rid'].contextPressure)
+  })
+
+  it('goes with a cleared conversation (its context is gone)', () => {
+    const shown = fold([created(), ['session:context-pressure', 'rid', ask]])
+    const cleared = fold([['session:conversation-cleared', 'rid', {}]], shown)
+    expect(cleared.sessions['rid'].contextPressure).toBeNull()
+  })
+
+  it('is a ringed replicated channel that canonical folds', () => {
+    expect(channelSpec('session:context-pressure')).toMatchObject({
+      cls: 'replicated',
+      ring: true,
+      canonical: true
+    })
+  })
+
+  it('ignores a malformed banner and a session it does not know', () => {
+    const base = fold([created(), ['session:context-pressure', 'rid', ask]])
+    expect(fold([['session:context-pressure', 'rid', { kind: 'ask' }]], base)).toBe(base)
+    expect(fold([['session:context-pressure', 'rid', 'ask']], base)).toBe(base)
+    expect(fold([['session:context-pressure', 'ghost', ask]], base)).toBe(base)
+  })
+})
+
+describe('reducer — host-instruction prompts (slice 1a)', () => {
+  it('marks a user row built from a host-instruction, and only that one', () => {
+    const s = fold([
+      created(),
+      ['session:user-message', 'rid', { id: 'u1', timestamp: 1, prompt: 'typed' }],
+      [
+        'session:user-message',
+        'rid',
+        { id: 'u2', timestamp: 2, prompt: 'wrap up', origin: 'host-instruction' }
+      ]
+    ])
+    const [typed, hosted] = s.sessions['rid'].messages
+    expect(typed).not.toHaveProperty('hostInstruction')
+    expect(hosted).toMatchObject({ id: 'u2', role: 'user', hostInstruction: true })
+  })
+
+  it('keeps the marker on the row a consumed queue item becomes', () => {
+    const s = fold([
+      created(),
+      [
+        'session:queue-changed',
+        'rid',
+        {
+          items: [
+            { itemId: 'q1', text: 'wrap up', state: 'consumed', origin: 'host-instruction' },
+            { itemId: 'q2', text: 'typed', state: 'consumed' }
+          ]
+        }
+      ]
+    ])
+    const [hosted, typed] = s.sessions['rid'].messages
+    expect(hosted).toMatchObject({ id: 'steer-q1', hostInstruction: true })
+    expect(typed).not.toHaveProperty('hostInstruction')
+  })
+})
+
+describe('reducer — session:link-changed (parent/child links, slice 1b)', () => {
+  const payload = {
+    links: {
+      's-child1': {
+        parentRef: 's-parent',
+        kind: 'handoff',
+        state: 'live',
+        createdBy: 'agent',
+        grouped: true,
+        createdAt: 1
+      }
+    },
+    refs: { 'rid-child': 's-child1', 'rid-parent': 's-parent' }
+  }
+
+  it('replaces the link table and the ref map, and replicates both in the snapshot', () => {
+    const s = fold([['session:link-changed', payload]])
+    expect(s.sessionLinks).toEqual(payload.links)
+    expect(s.sessionRefs).toEqual(payload.refs)
+    const restored = fromSnapshot(toSnapshot(s, 1))
+    expect(restored.sessionLinks).toEqual(payload.links)
+    expect(restored.sessionRefs).toEqual(payload.refs)
+    // A replace: a later payload is the whole table, not an addition to the first.
+    const later = fold([['session:link-changed', { links: {}, refs: {} }]], s)
+    expect(later.sessionLinks).toEqual({})
+    expect(later.sessionRefs).toEqual({})
+  })
+
+  it('is a ringed replicated channel that canonical folds', () => {
+    expect(channelSpec('session:link-changed')).toMatchObject({
+      cls: 'replicated',
+      ring: true,
+      canonical: true
+    })
+  })
+
+  it('ignores a malformed payload', () => {
+    const base = fold([['session:link-changed', payload]])
+    expect(fold([['session:link-changed']], base)).toBe(base)
+    expect(fold([['session:link-changed', { links: {} }]], base)).toBe(base)
+    expect(fold([['session:link-changed', 'nope']], base)).toBe(base)
+  })
+
+  it('moves a session’s ref with it when the status rekeys it', () => {
+    let s = fold([
+      created('temp-1'),
+      ['session:link-changed', { links: {}, refs: { 'temp-1': 's-aaaaaa' } }]
+    ])
+    s = applyEvent(s, {
+      channel: 'session:status',
+      args: ['temp-1', status({ sessionId: 'uuid-9' })],
+      seq: 3
+    })
+    expect(s.sessionRefs).toEqual({ 'uuid-9': 's-aaaaaa' })
+  })
+
+  it('drops a deleted session’s ref, cold sessions included, and nothing else', () => {
+    const s = fold([
+      ['session:link-changed', payload],
+      ['session:removed', 'rid-child']
+    ])
+    expect(s.sessionRefs).toEqual({ 'rid-parent': 's-parent' })
+    // The link table is the host's to update; the reducer leaves it alone.
+    expect(s.sessionLinks).toEqual(payload.links)
   })
 })

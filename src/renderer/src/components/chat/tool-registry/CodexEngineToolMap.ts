@@ -2,6 +2,11 @@ import { presentShellCommand } from '../../../lib/present-shell-command'
 import type { EngineToolMap } from '../../../../../shared/tool-kinds'
 import { dispatchTaskView } from '../../../../../shared/tool-kinds'
 import type { AskUserQuestion, ContentBlock, FileDiff } from '../../../../../shared/types'
+import {
+  isSessionToolName,
+  SESSION_TOOL_NAMES,
+  sessionToolMcpFields
+} from '../../../../../shared/session-tools-description'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -17,7 +22,9 @@ const HOSTED_DISPLAY_NAMES: Record<string, string> = {
   render_mermaid: 'Mermaid',
   create_mockup: 'Mockup',
   show_mockup: 'Mockup',
-  dispatch_agent: 'Dispatch'
+  dispatch_agent: 'Dispatch',
+  // The session tools (slice 2), bare-named dynamic tools too.
+  ...Object.fromEntries(SESSION_TOOL_NAMES.map((name) => [name, 'Sessions']))
 }
 
 /**
@@ -70,6 +77,8 @@ export const CodexEngineToolMap: EngineToolMap = {
     // Cross-engine dispatch (ADR-033, slice E) — the engine-neutral TaskCard
     // kind, exactly as pi's identically-named bare tool takes.
     if (name === 'dispatch_agent') return 'task'
+    // The session tools: the generic MCP row, with the server and tool Claude's name carries.
+    if (isSessionToolName(name)) return 'mcp'
     // Native children (ADR-066 slice F): the spawn call is the card the child's
     // transcript hangs off, which is exactly what the shared TaskCard renders.
     if (name === 'collab:spawnAgent') return 'task'
@@ -220,6 +229,8 @@ export const CodexEngineToolMap: EngineToolMap = {
       return { kind, durationMs: typeof input?.durationMs === 'number' ? input.durationMs : 0 }
     if (kind === 'plan') return { kind, plan: String(input?.plan ?? '') }
     if (kind === 'mcp') {
+      const session = toolName ? sessionToolMcpFields(toolName) : null
+      if (session) return { kind, input, ...session }
       // `mcp__<server>__<tool>`, split on the FIRST `__` after the prefix: a
       // server name cannot contain `__` in Claude's rule vocabulary, but a tool
       // name can, so the remainder is the tool whole.

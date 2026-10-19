@@ -55,6 +55,7 @@ import {
   SEND_USER_FILE_TOOL
 } from '../../../shared/derive-session'
 import { channelSpec } from './channels'
+import { parseContextPressureBanner } from '../../../shared/context-pressure'
 import { engineMeta } from '../../../shared/engine-meta'
 import { emptySession, type CanonicalSessionState, type CanonicalState } from './state'
 
@@ -452,6 +453,13 @@ export function rekeyCanonical(
     sessionEngines[newId] = sessionEngines[oldId]
     delete sessionEngines[oldId]
   }
+  // The ref follows the session: links name refs, so this is the only id-keyed
+  // piece of the link state (the host moves the stored row in the same tick).
+  const sessionRefs = { ...state.sessionRefs }
+  if (sessionRefs[oldId] !== undefined) {
+    sessionRefs[newId] = sessionRefs[oldId]
+    delete sessionRefs[oldId]
+  }
 
   return {
     ...state,
@@ -462,7 +470,8 @@ export function rekeyCanonical(
     hiddenSessions: state.hiddenSessions.map((id) => (id === oldId ? newId : id)),
     customTitles,
     worktreeInfoMap,
-    sessionEngines
+    sessionEngines,
+    sessionRefs
   }
 }
 
@@ -619,13 +628,16 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
       const customTitles = { ...state.customTitles }
       const worktreeInfoMap = { ...state.worktreeInfoMap }
       const sessionEngines = { ...state.sessionEngines }
+      const sessionRefs = { ...state.sessionRefs }
       const hadRow =
         customTitles[routingId] !== undefined ||
         worktreeInfoMap[routingId] !== undefined ||
-        sessionEngines[routingId] !== undefined
+        sessionEngines[routingId] !== undefined ||
+        sessionRefs[routingId] !== undefined
       delete customTitles[routingId]
       delete worktreeInfoMap[routingId]
       delete sessionEngines[routingId]
+      delete sessionRefs[routingId]
 
       const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
       const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== routingId)
@@ -646,6 +658,7 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         customTitles,
         worktreeInfoMap,
         sessionEngines,
+        sessionRefs,
         recentSessionIds,
         pinnedSessionIds,
         hiddenSessions,
@@ -687,6 +700,8 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         ...fresh,
         itemStreamRevision: event.seq ?? 0,
         sdkActive: s.sdkActive,
+        // The held inbox belongs to the session, not to its conversation.
+        heldCount: s.heldCount,
         // Carried, not reset. These per-session copies are vestigial — canonical
         // holds ONE app-level list and `toSnapshot` fans it into every entry, so
         // in practice both are always `[]` here — but the catalogs describe the
@@ -712,6 +727,7 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         timestamp?: number
         prompt?: string
         attachments?: AttachmentRef[]
+        origin?: 'host-instruction'
       }>(event, 1)
       if (!state.sessions[routingId]) return state
       // Identity comes from the EVENT as of phase 4b (`handlers-core.sendPrompt`
@@ -727,7 +743,8 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
             id,
             role: 'user' as const,
             content: buildUserContentBlocks(data?.prompt ?? '', data?.attachments),
-            timestamp
+            timestamp,
+            ...(data?.origin === 'host-instruction' ? { hostInstruction: true as const } : {})
           }
         ]
       }))
@@ -1271,13 +1288,37 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
           id,
           role: 'user',
           content: buildUserContentBlocks(item.text, item.attachments),
-          timestamp: 0
+          timestamp: 0,
+          ...(item.origin === 'host-instruction' ? { hostInstruction: true as const } : {})
         })
       }
       return withSession(state, routingId, (s) => ({
         queue: items.filter((item) => item.state === 'queued'),
         messages: synthesized.length > 0 ? [...s.messages, ...synthesized] : s.messages
       }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Held inbox (slice 1a)
+    // -----------------------------------------------------------------------
+    case 'session:held-changed': {
+      const routingId = routingIdOf(event)
+      const data = arg<{ count?: number }>(event, 1)
+      if (!routingId || typeof data?.count !== 'number' || !state.sessions[routingId]) return state
+      return withSession(state, routingId, () => ({ heldCount: Math.max(0, data.count!) }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Context pressure (slice 4)
+    // -----------------------------------------------------------------------
+    case 'session:context-pressure': {
+      const routingId = routingIdOf(event)
+      if (!routingId || !state.sessions[routingId]) return state
+      const data = arg<unknown>(event, 1)
+      // null clears; anything else must be a banner, or the event is ignored.
+      const banner = data === null ? null : parseContextPressureBanner(data)
+      if (data !== null && banner === null) return state
+      return withSession(state, routingId, () => ({ contextPressure: banner }))
     }
 
     // -----------------------------------------------------------------------
@@ -1405,6 +1446,21 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
       const directories = arg<unknown>(event, 0)
       if (!Array.isArray(directories)) return state
       return { ...state, directories: directories as CanonicalState['directories'] }
+    }
+
+    /**
+     * The origin link table (with `grouped`) and the id of each session it names, as a
+     * REPLACE (slice 1b). The host sends the whole table on every change, so an
+     * event is idempotent and a late joiner's snapshot is the same value. An
+     * absent or malformed payload is a no-op.
+     */
+    case 'session:link-changed': {
+      const data = arg<{
+        links?: CanonicalState['sessionLinks']
+        refs?: CanonicalState['sessionRefs']
+      }>(event, 0)
+      if (!isRecord(data) || !isRecord(data.links) || !isRecord(data.refs)) return state
+      return { ...state, sessionLinks: data.links, sessionRefs: data.refs }
     }
 
     // -----------------------------------------------------------------------

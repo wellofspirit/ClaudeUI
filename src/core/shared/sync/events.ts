@@ -60,6 +60,8 @@ import type {
 } from '../../../shared/types'
 import type { HarnessId, HarnessInstallProgress } from '../../../shared/harness-types'
 import type { VoicePackStatus } from '../../../shared/voice-pack'
+import type { SessionLinksPayload } from '../../../shared/session-links'
+import type { ContextPressureBanner } from '../../../shared/context-pressure'
 import type { ItemStreamOpen, ItemStreamSeal } from './item-stream'
 
 export interface SyncEventMap {
@@ -104,6 +106,13 @@ export interface SyncEventMap {
       model?: string
       effort?: string | null
       thinkingMode?: string | null
+      /**
+       * Present (`'agent'`) when another session's tool started this session:
+       * no client switches to it, whatever its "follow" setting says. Absent for
+       * every other session, which behaves as it always did. Not folded into
+       * canonical state — it only steers the clients' reaction to the event.
+       */
+      createdBy?: 'agent'
     }
   ) => void
   /**
@@ -150,6 +159,12 @@ export interface SyncEventMap {
        * so the ring and the snapshot never carry an attachment's bytes.
        */
       attachments?: AttachmentRef[]
+      /**
+       * `host-instruction`: the host sent this on the user's behalf (a standing
+       * setting or click), so the row carries the "Sent by ClaudeUI for you"
+       * marker. Absent for text the user typed.
+       */
+      origin?: 'host-instruction'
     }
   ) => void
   'session:message': (routingId: string, msg: ChatMessage) => void
@@ -224,6 +239,13 @@ export interface SyncEventMap {
   // -------------------------------------------------------------------------
   /** Full queue list for a session — idempotent and replay-safe. */
   'session:queue-changed': (routingId: string, data: { items: QueuedItem[] }) => void
+  /**
+   * How many items from other sessions or agents sit in this session's held
+   * inbox, waiting for its next turn (slice 1a). A replace, so idempotent.
+   */
+  'session:held-changed': (routingId: string, data: { count: number }) => void
+  /** The context-pressure banner of a session (slice 4): a replace; `null` clears it. */
+  'session:context-pressure': (routingId: string, banner: ContextPressureBanner | null) => void
 
   // -------------------------------------------------------------------------
   // Per-session config
@@ -317,6 +339,8 @@ export interface SyncEventMap {
    * the no-op notify it used to be rather than blanking the list.
    */
   'session:directories-changed': (directories?: DirectoryGroup[]) => void
+  /** The origin link table (with `grouped`) and the sidebar id of each session it names (slice 1b). A replace. */
+  'session:link-changed': (data: SessionLinksPayload) => void
   'config:settings-changed': (settings: Record<string, unknown>) => void
   'config:sessions-changed': (config: UISessionConfig) => void
   'git:status-update': (data: { cwd: string; status: GitStatusData }) => void

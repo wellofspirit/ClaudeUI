@@ -4,7 +4,7 @@ import { join, delimiter } from 'node:path'
 import { homedir } from 'node:os'
 import { v4 as uuid } from 'uuid'
 import { BaseSession } from '../providers/BaseSession'
-import type { EngineSpawnOptions } from '../providers/ISession'
+import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import { resolvePiCapabilities } from '../../shared/model-capabilities'
 import { voicePackPlatformKey } from '../../shared/voice-pack'
@@ -75,6 +75,8 @@ import {
 import { loadPiAgentRegistry, type PiAgentRegistry } from './pi-agent-registry'
 import type { SpawnPiChildFn } from './pi-child-runner'
 import { deliveryCommand, isReservedPiCommandText, type PiAgentDelivery } from './pi-delivery'
+import { sessionMessageNoteTitle } from '../services/agent-note'
+import { buildSessionMessageWrapper } from '../../shared/session-message-wrapper'
 import { narrowMode, PiSubagentManager, type PiChildScope } from './pi-subagents'
 import type {
   GateDecision,
@@ -111,8 +113,18 @@ import {
   PI_TOOL_TO_CLAUDE_TOOL,
   PI_HOSTED_TOOL_NAMES,
   PLAN_MODE_DENY_REASON,
-  PLAN_EXIT_OUTSIDE_PLAN_REASON
+  PLAN_EXIT_OUTSIDE_PLAN_REASON,
+  sessionToolDenyRule
 } from './permission-engine'
+import { isSessionToolName, type SessionToolName } from '../../shared/session-tools-description'
+import { piSessionToolsEnv } from '../services/session-tool-specs'
+import {
+  auditSessionToolDenial,
+  runSessionTool,
+  sessionToolsAvailable,
+  sessionToolsGate,
+  type SessionToolCaller
+} from '../services/session-tools'
 import type { MergedClaudeRules, PermissionVerdict } from './permission-engine'
 // Auto mode (`auto`/`full` autonomy) — the engine-neutral classifier core plus
 // ClaudeUI's own judge transport (docs/automode-rework-plan.md phase 4, ADR-081).
@@ -946,6 +958,11 @@ export class PiSession extends BaseSession {
           // the configs themselves come over the host channel, not from here.
           CLAUDEUI_PI_MCP: '1',
           ...(this.capabilities.hostedMcp ? { CLAUDEUI_PI_HOSTED_TOOLS: '1' } : {}),
+          // The session tools (bridge v15), on the same two conditions as the hosted
+          // tools above plus the host having wired the service.
+          ...(this.capabilities.hostedMcp && sessionToolsAvailable()
+            ? { CLAUDEUI_PI_SESSION_TOOLS: piSessionToolsEnv() }
+            : {}),
           ...(this.capabilities.crossEngineDispatch
             ? {
                 CLAUDEUI_PI_DISPATCH_ENABLED: '1',
@@ -1533,7 +1550,9 @@ export class PiSession extends BaseSession {
    */
   deliverAgentMessage(payload: PiAgentDelivery): void {
     this.deliveryChain = this.deliveryChain
-      .then(() => this.sendDelivery(payload))
+      .then(async () => {
+        await this.sendDelivery(payload)
+      })
       .catch((err) => {
         logger.warn(
           'PiSession',
@@ -1542,13 +1561,19 @@ export class PiSession extends BaseSession {
       })
   }
 
-  private async sendDelivery(payload: PiAgentDelivery): Promise<void> {
+  /**
+   * What became of one delivery: `woke` (pi was idle and a turn began), `appended`
+   * (a running turn steers it, or an idle session just stores it) or `refused`
+   * (no process, or pi did not accept the command). Only
+   * {@link deliverNonUser} reads it.
+   */
+  private async sendDelivery(payload: PiAgentDelivery): Promise<'woke' | 'appended' | 'refused'> {
     const ids = `delivery ${payload.deliveryId} (agent ${payload.details.agentId})`
     // No process: its children are already gone with it (cancel/exit dispose
     // them), and respawning would open a fresh pi session. Dropped.
     if (!this.client || this._cancelled) {
       logger.info('PiSession', `${ids} dropped: the session has no pi process`)
-      return
+      return 'refused'
     }
     // Fact S8: a user prompt whose ack is not in yet may still be in pi's
     // pre-run awaits; once its ack is in, a delivery steers it.
@@ -1556,7 +1581,7 @@ export class PiSession extends BaseSession {
     const client = this.client
     if (!client || this._cancelled) {
       logger.info('PiSession', `${ids} dropped: the session has no pi process`)
-      return
+      return 'refused'
     }
     const waking = payload.wake && !this.isProcessing
     if (waking) {
@@ -1574,9 +1599,52 @@ export class PiSession extends BaseSession {
     } catch {
       ok = false
     }
-    if (ok) return
+    if (ok) return waking ? 'woke' : 'appended'
     logger.warn('PiSession', `${ids} was not accepted by pi`)
     if (waking && this.wakePending) this.undoWake()
+    return 'refused'
+  }
+
+  /** The pi process is up: a message does not respawn one. */
+  isEngineLive(): boolean {
+    return !!this.client && !this._cancelled
+  }
+
+  /**
+   * Slice 1a: a message from another session or an agent, through the same
+   * `/cui-deliver` path as every other agent-authored text (the marking rule,
+   * pi-delivery.ts). The row arrives as pi's own `custom` message, so nothing is
+   * recorded here. Resolves once pi has taken (or refused) the command, so the
+   * caller's next prompt sees `willQueue` already true when this woke the session.
+   */
+  async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
+    const payload: PiAgentDelivery = {
+      v: 1,
+      deliveryId: uuid(),
+      kind: 'session-message',
+      text: buildSessionMessageWrapper(item.from, item.text),
+      wake: item.wake || item.origin === 'session-message',
+      title: sessionMessageNoteTitle(item.from.title),
+      details: {
+        agentId: item.from.key,
+        toolUseId: '',
+        from: item.from.title,
+        fromId: item.from.key
+      }
+    }
+    let result: 'woke' | 'appended' | 'refused' = 'refused'
+    const delivered = this.deliveryChain.then(async () => {
+      result = await this.sendDelivery(payload)
+    })
+    this.deliveryChain = delivered.catch((err) => {
+      logger.warn(
+        'PiSession',
+        `delivery ${payload.deliveryId} failed: ${err instanceof Error ? err.constructor.name : 'Error'}`
+      )
+    })
+    await this.deliveryChain
+    if (result === 'refused') return 'unavailable'
+    return result === 'woke' ? 'started' : 'queued'
   }
 
   /** A woken delivery will start no run after all: back to idle (M-2). */
@@ -2134,6 +2202,7 @@ export class PiSession extends BaseSession {
     scope: PiChildScope | null
   ): Promise<GateDecision> {
     const { toolName, input } = payload
+    if (isSessionToolName(toolName)) return this.decideSessionToolCall(payload, toolName, scope)
     const mode = this.gateMode(scope)
     const rules = this.currentRules()
     const autoMode = this.isAutoMode(mode)
@@ -2207,6 +2276,34 @@ export class PiSession extends BaseSession {
     }
 
     return this.askHuman(payload, undefined, scope)
+  }
+
+  /**
+   * A session tool's gate (slice 2): the user's deny rule written for Claude's spelling
+   * of the tool, then `sessionToolsGate` (allow / ask / deny; plan mode, the family and
+   * project scope, the mode class). Never the judge: an ask goes to the human, in auto
+   * mode too. A host-run child is not the root agent, so it is refused (it is not
+   * offered the tools either).
+   */
+  private decideSessionToolCall(
+    payload: PiToolCallPayload,
+    tool: SessionToolName,
+    scope: PiChildScope | null
+  ): Promise<GateDecision> | GateDecision {
+    const caller = this.sessionToolCaller(payload.toolCallId)
+    const deny = (reason: string): GateDecision => {
+      auditSessionToolDenial(caller, tool, payload.input, reason)
+      return { behavior: 'deny', reason }
+    }
+    if (scope) {
+      return deny(`${tool} can only be used by the session's main agent, not by a subagent.`)
+    }
+    const rule = sessionToolDenyRule(tool, payload.input, this.currentRules(), this.cwd)
+    if (rule) return deny(`Denied by permission rule: ${rule}`)
+    const decision = sessionToolsGate(caller, tool, payload.input, {})
+    if (decision.behavior === 'allow') return { behavior: 'allow' }
+    if (decision.behavior === 'deny') return deny(decision.message)
+    return this.askHuman(payload)
   }
 
   /** The mode a call is gated under: the session's, narrowed for a child (ADR-089 D3). */
@@ -2625,7 +2722,10 @@ export class PiSession extends BaseSession {
     }
 
     // allow / allowForSession
-    if (decision === 'allowForSession') {
+    // A session tool's click is for this one call: no session allow and no saved rule
+    // (either would skip the gate's scope and mode-parity checks next time).
+    const standing = !isSessionToolName(pending.toolName)
+    if (decision === 'allowForSession' && standing) {
       this.sessionAllows.add(sessionAllowKey(pending.toolName, pending.input))
     }
     pending.resolve({ behavior: 'allow' })
@@ -2646,7 +2746,7 @@ export class PiSession extends BaseSession {
       this.send('session:permission-mode', 'default')
     }
 
-    if (updatedPermissions && updatedPermissions.length > 0) {
+    if (standing && updatedPermissions && updatedPermissions.length > 0) {
       this.persistAllowRules(updatedPermissions)
     }
   }
@@ -3069,8 +3169,9 @@ export class PiSession extends BaseSession {
   ): Promise<PiHostedToolResult> => {
     const { toolName, input, toolCallId } = payload
 
-    // One-shot — consumed on first (matching) use.
-    if (!this.hostedGrants.consume(toolCallId, toolName)) return notApprovedHostedTool()
+    // One-shot — consumed on first (matching) use. The grant also says whose call it was.
+    const owner = this.hostedGrants.consumeOwner(toolCallId, toolName)
+    if (owner === null) return notApprovedHostedTool()
 
     switch (toolName) {
       case 'render_mermaid': {
@@ -3109,7 +3210,44 @@ export class PiSession extends BaseSession {
         return this.subagents.listModels(input)
 
       default:
+        // The session tools (slice 2): the root agent's, run by the shared service.
+        if (isSessionToolName(toolName))
+          return this.handleSessionTool(toolName, input, toolCallId, owner)
         return unknownHostedTool(toolName)
+    }
+  }
+
+  /**
+   * The calling session as the session tools see it. `owner` is whose call the gate's grant
+   * was minted for (the root bridge's gate mints `root`; a host-run child's grants say
+   * `subagent`), so the service refuses a subagent even if a child ever got the tools: the
+   * env lists that drop them are a second line, not the only one. The gate rung itself
+   * (`decideSessionToolCall`) is always the root agent's, hence the default.
+   */
+  private sessionToolCaller(
+    toolCallId?: string,
+    owner: 'root' | 'subagent' = 'root'
+  ): SessionToolCaller {
+    return {
+      routingId: this.routingId,
+      engine: this.engineId,
+      cwd: this.cwd,
+      permissionMode: this.permissionMode,
+      ...(toolCallId ? { toolUseId: toolCallId } : {}),
+      callOwner: async () => owner
+    }
+  }
+
+  private async handleSessionTool(
+    tool: SessionToolName,
+    input: Record<string, unknown>,
+    toolCallId: string,
+    owner: 'root' | 'subagent'
+  ): Promise<PiHostedToolResult> {
+    const result = await runSessionTool(this.sessionToolCaller(toolCallId, owner), tool, input)
+    return {
+      content: [{ type: 'text', text: result.text }],
+      ...(result.isError ? { isError: true } : {})
     }
   }
 

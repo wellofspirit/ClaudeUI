@@ -318,6 +318,16 @@ vi.mock('../../../core/services/logger', () => ({
   }
 }))
 
+// The turn-end notes module is dormant (slice 5): the registration must never switch it on.
+const sessionNotesSpies = vi.hoisted(() => ({
+  configureSessionNotes: vi.fn(),
+  enableSessionNotes: vi.fn()
+}))
+vi.mock('../../../core/services/session-notes', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../core/services/session-notes')>()
+  return { ...actual, ...sessionNotesSpies }
+})
+
 // Import AFTER mocks.
 import { registerSessionIpc, resetLoginStatusReportedForTests } from '../../../core/ipc/session.ipc'
 import { setHostAuth } from '../../../core/host'
@@ -950,6 +960,11 @@ describe('session.ipc', () => {
   // -------------------------------------------------------------------------
 
   describe('misc channels', () => {
+    it('does not wire turn-end notes to the session that started a session (slice 5: nothing reports back)', () => {
+      expect(sessionNotesSpies.configureSessionNotes).not.toHaveBeenCalled()
+      expect(sessionNotesSpies.enableSessionNotes).not.toHaveBeenCalled()
+    })
+
     it('usage:fetch is registered', async () => {
       await expect(harness.call('usage:fetch')).resolves.toBeDefined()
     })

@@ -19,6 +19,10 @@
  * because it depends on TWO things this module must NOT import directly —
  * see the cycle note on `CallerSessionLookup`/`DispatchAgentFn` below.
  *
+ * The session tools (session tools, slice 2) are registered here too, as
+ * `claudeui_session_*`, when the host wired them (`deps.sessionTools`): see
+ * `registerSessionTools`. Root agent only.
+ *
  * Caller identity (ADR-097 §4, amends ADR-033): see `resolveCallerIdentity`.
  * One McpServer is built per MCP SESSION (mcp-http-host.ts): an opencode 2.x
  * server serves every directory and connects its MCP clients per directory, so
@@ -37,6 +41,14 @@ import {
   joinDispatchHints,
   OWN_SUBAGENT_TOOL
 } from '../../shared/dispatch-agent-description'
+import {
+  SESSION_TOOL_NAMES,
+  sessionToolDescriptions,
+  sessionToolsGuidance,
+  type SessionToolName
+} from '../../shared/session-tools-description'
+import { SESSION_TOOL_SHAPES } from '../services/session-tool-specs'
+import type { SessionToolCaller, SessionToolResult } from '../services/session-tools'
 import type { SdkMcpTool, SdkToolExtra } from '../sdk/types'
 import type { ChatMessage, EngineId } from '../../shared/types'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
@@ -109,6 +121,21 @@ export type CallerRootResolver = (
   | { readonly refused: string }
   | undefined
 >
+
+/**
+ * The session tools' service, injected like {@link DispatchAgentFn}; absent (the
+ * host did not wire them, or a test) registers none of the nine.
+ */
+export interface HostedSessionTools {
+  run: (
+    caller: SessionToolCaller,
+    tool: SessionToolName,
+    input: Record<string, unknown>
+  ) => Promise<SessionToolResult>
+}
+
+/** The `claudeui_` prefix opencode puts on this server's tool names. */
+const HOSTED_TOOL_PREFIX = 'claudeui_'
 
 /** Same cycle-avoidance rationale as CallerSessionLookup above. */
 export type DispatchAgentFn = (
@@ -236,13 +263,25 @@ export function createOpencodeHostedToolsServer(
      */
     resolveCallerRoot?: CallerRootResolver
     dispatch?: DispatchAgentFn
+    /** The session tools' service (slice 2); none registered without it. */
+    sessionTools?: HostedSessionTools
     /** Called when `_meta` and the plugin stamp disagree (diagnostics). */
     onIdentityMismatch?: (identity: CallerIdentity) => void
   } = {}
 ): McpServer {
   const server = new McpServer(
     { name: 'claudeui', version: '1.0.0' },
-    { capabilities: { tools: {} } }
+    {
+      capabilities: { tools: {} },
+      // The session tools' guidance rides the MCP server's own instructions, which
+      // opencode puts in the model's prompt (`core/src/mcp/instructions.ts`). Every
+      // session on the server reads it, subagents and dispatch targets too: they
+      // are not offered the tools (`SESSION_TOOLS_DENY_RULE`), so it costs them
+      // one short paragraph.
+      ...(deps.sessionTools
+        ? { instructions: sessionToolsGuidance({ toolPrefix: HOSTED_TOOL_PREFIX }) }
+        : {})
+    }
   )
 
   // Extract tool definitions from the canonical implementations.
@@ -472,5 +511,86 @@ export function createOpencodeHostedToolsServer(
     }
   )
 
+  if (deps.sessionTools) registerSessionTools(server, deps)
+
   return server
+}
+
+/**
+ * The nine session tools on the hosted server (`claudeui_session_*`). The caller is
+ * the session opencode names in `_meta` (the plugin's stamp exists for dispatch's
+ * call id only, and opencode 2.x sends `_meta` on every `tools/call`): a ClaudeUI
+ * chat is the root agent; a subagent child resolves to the chat it descends from and
+ * is attributed `subagent`, which the service refuses for every acting tool. Any
+ * other caller (a dispatch target, a session ClaudeUI never created, an agent whose
+ * rules cannot be read) gets a refusal and nothing runs: fail closed.
+ */
+function registerSessionTools(
+  server: McpServer,
+  deps: {
+    lookupCallerSession?: CallerSessionLookup
+    resolveCallerRoot?: CallerRootResolver
+    sessionTools?: HostedSessionTools
+  }
+): void {
+  // No `ownMessageTool`: opencode has no teammate-messaging tool to point `session_message`
+  // away from (pi passes `send_message`, Claude `SendMessage`).
+  const descriptions = sessionToolDescriptions({})
+  const refuse = (text: string): { content: { type: 'text'; text: string }[]; isError: true } => ({
+    content: [{ type: 'text' as const, text: `Refused: ${text}` }],
+    isError: true
+  })
+  for (const name of SESSION_TOOL_NAMES) {
+    server.registerTool(
+      name,
+      {
+        description: descriptions[name],
+        inputSchema: SESSION_TOOL_SHAPES[name] as unknown as Record<string, z.ZodTypeAny>
+      },
+      async (
+        args: Record<string, unknown>,
+        extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+      ) => {
+        const callerId = resolveCallerIdentity(
+          extra?._meta as Record<string, unknown> | undefined,
+          {}
+        ).sessionId
+        if (!callerId) {
+          return refuse(`${name} could not identify the calling session, so it is not run.`)
+        }
+        let routingId = callerId
+        let owner: 'root' | 'subagent' = 'root'
+        let handle = deps.lookupCallerSession?.(callerId)
+        if (!handle && deps.resolveCallerRoot) {
+          const resolved = await deps.resolveCallerRoot(callerId).catch(() => undefined)
+          if (resolved && 'refused' in resolved) return refuse(resolved.refused)
+          if (resolved) {
+            routingId = resolved.root
+            owner = 'subagent'
+            handle = deps.lookupCallerSession?.(resolved.root)
+          }
+        }
+        if (!handle) {
+          return refuse(
+            `${name} is for the main agent of a ClaudeUI session; the calling session (${callerId}) is not one.`
+          )
+        }
+        const result = await deps.sessionTools!.run(
+          {
+            routingId,
+            engine: 'opencode',
+            cwd: handle.cwd,
+            permissionMode: handle.getAutonomyMode(),
+            callOwner: async () => owner
+          },
+          name,
+          args
+        )
+        return {
+          content: [{ type: 'text' as const, text: result.text }],
+          ...(result.isError ? { isError: true as const } : {})
+        }
+      }
+    )
+  }
 }

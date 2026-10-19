@@ -509,7 +509,13 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
   switch (channel) {
     case 'session:created': {
       const data = args[1] as
-        { cwd?: string; resumeSessionId?: string; resumeSessionAt?: string } | undefined
+        | {
+            cwd?: string
+            resumeSessionId?: string
+            resumeSessionAt?: string
+            createdBy?: 'agent'
+          }
+        | undefined
       const resident = wasResidentAtCreate.get(routingId)
       wasResidentAtCreate.delete(routingId)
       // The reducer has already bootstrapped the entry (cwd, sdkActive, seeded);
@@ -521,7 +527,10 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
       if (!resident) {
         // Another client created this session. Register it locally — recents +
         // engine map — and either follow it or flag it in the sidebar.
-        const follow = store.settings.remoteFollowActions
+        // A session another session's tool started is never followed: the user did
+        // not ask for it, so it appears in the sidebar (in its group, or standalone) and does not take
+        // the screen from what they are doing.
+        const follow = store.settings.remoteFollowActions && data?.createdBy !== 'agent'
         store.registerRemoteSession(routingId, follow)
         if (!follow) store.setNeedsAttention(routingId, true)
       }
