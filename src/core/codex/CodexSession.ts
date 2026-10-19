@@ -2094,6 +2094,18 @@ export class CodexSession extends BaseSession {
     this.inFlightDispatchIds.clear()
   }
 
+  /**
+   * The session's headline cost: the API-rate equivalent the status line
+   * carries — see `equivalentCost` for why a priced model's $0 and an unpriced
+   * one's null are different statements.
+   */
+  private headlineCostUsd(): number | null {
+    return (
+      this.equivalentCostUsd ??
+      this.equivalentCost({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
+    )
+  }
+
   private status(state: SessionStatus['state']): void {
     if (state === 'idle' && this.settingsUpdating) state = 'running'
     this.send('session:status', {
@@ -2112,9 +2124,7 @@ export class CodexSession extends BaseSession {
       // known $0 so far (the zero-token equivalent), while an unpriced one —
       // or a thread whose model is not known yet — cannot be priced at all and
       // reports null, which the renderers show as "unknown" rather than free.
-      totalCostUsd:
-        this.equivalentCostUsd ??
-        this.equivalentCost({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+      totalCostUsd: this.headlineCostUsd(),
       account: this.account,
       ...(this.native
         ? {
@@ -3002,6 +3012,16 @@ export class CodexSession extends BaseSession {
           this.send('session:error', banner)
       }
       this.endUserStop()
+      // The turn boundary every other engine raises (the renderer's "Ready for
+      // input" / attention edge keys on it). Only the ROOT thread's turn gets
+      // here — a child's `turn/completed` goes through `routeChild` — and the
+      // `endedTurns` latch above keeps a replay from raising it twice.
+      this.send('session:result', {
+        totalCostUsd: this.headlineCostUsd(),
+        durationMs: turn.durationMs ?? 0,
+        result: '',
+        sessionId: this.threadId
+      })
       this.status('idle')
       this.resetInactivityTimer()
     }

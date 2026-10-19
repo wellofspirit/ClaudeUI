@@ -22,6 +22,7 @@ import type { HostWindowHandle } from '../host'
 import { computeTokenMetrics } from './session-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { backgroundBashOutputFile, backgroundBashTaskId } from '../../shared/claude-background-bash'
+import { taskWakesParent } from '../../shared/waking-task-types'
 import { locateClaudeTranscript } from './claude-transcript-locator'
 import { transformAssistantMessage } from './assistant-message'
 import { ClaudeItemStreamLifecycle, streamEventParent } from './claude-item-stream'
@@ -1915,6 +1916,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
         taskType,
         runIndex: 1,
         ...background,
+        wakesParent: taskWakesParent(taskType),
         startedAt: Date.now()
       })
       return
@@ -1933,6 +1935,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
         taskType,
         runIndex: this.runCountByOrigin.get(origin) ?? 1,
         ...background,
+        wakesParent: taskWakesParent(taskType),
         startedAt: Date.now()
       })
       return
@@ -1951,6 +1954,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       runToolUseId: toolUseId,
       runIndex,
       ...background,
+      wakesParent: taskWakesParent(taskType),
       startedAt: Date.now()
     })
   }
@@ -1973,6 +1977,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       taskType: live.taskType,
       runIndex: this.runCountByOrigin.get(live.owner) ?? 1,
       isBackgrounded: true,
+      wakesParent: taskWakesParent(live.taskType),
       // Read only when the record was dropped: a re-arm of the same run keeps
       // that run's clock in the reducer.
       startedAt: Date.now()

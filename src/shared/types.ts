@@ -1438,6 +1438,14 @@ export interface TaskStartedData {
    * use), so without it a running card had no clock at all.
    */
   startedAt?: number
+  /**
+   * Will this task's end wake the main agent with a turn of its own (so the
+   * conversation is NOT waiting on the user while it runs)? Decided by the
+   * EMITTER — {@link taskWakesParent} for Claude, `true` for a pi host-run
+   * subagent — so the renderer never has to know cli.js's task types. Absent on
+   * a record from before the field existed; readers fall back to a type set.
+   */
+  wakesParent?: boolean
 }
 
 /**
@@ -1447,7 +1455,7 @@ export interface TaskStartedData {
  */
 export type ActiveTask = Pick<
   TaskStartedData,
-  'taskId' | 'taskType' | 'runIndex' | 'isBackgrounded' | 'startedAt'
+  'taskId' | 'taskType' | 'runIndex' | 'isBackgrounded' | 'startedAt' | 'wakesParent'
 >
 
 /** The terminal states an engine reports for a task run. */

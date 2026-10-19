@@ -1845,6 +1845,20 @@ describe('reducer — subagents', () => {
     expect(clock([start(1, 1000), start(2, 9000)])).toBe(9000)
   })
 
+  it('a task start carries wakesParent into activeTasks, true or false, and omits it when unsent', () => {
+    const record = (data: Record<string, unknown>): unknown =>
+      fold([created(), ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', ...data }]])
+        .sessions['rid'].activeTasks['t1']
+    expect(record({ taskType: 'local_bash', wakesParent: true })).toMatchObject({
+      wakesParent: true
+    })
+    expect(record({ taskType: 'dream', wakesParent: false })).toMatchObject({
+      wakesParent: false
+    })
+    // An older emitter's start: no field written, so a reader falls back to the type set.
+    expect(record({ taskType: 'local_bash' })).not.toHaveProperty('wakesParent')
+  })
+
   it('a task notification drops the task from activeTasks', () => {
     const s = fold([
       created(),

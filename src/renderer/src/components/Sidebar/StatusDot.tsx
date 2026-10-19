@@ -21,7 +21,7 @@ export interface SessionDotInput {
   isRunning: boolean
   isSdkActive: boolean
   isWatching: boolean
-  /** Running auto-continuing tasks (see `countAutoContinuingTasks`). */
+  /** Running background tasks that will wake the agent (see `countWakingTasks`). */
   runningSubagents: number
 }
 

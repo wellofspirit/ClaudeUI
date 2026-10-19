@@ -39,7 +39,7 @@ import { loadResumedTranscript } from '../lib/session-history-load'
 import { showVoiceNotice } from '../lib/voice/voice-notice'
 import { voiceController } from '../lib/voice/voice-controller'
 import { applyVoicePackStatus, refreshVoicePackStatus } from '../lib/voice/voice-pack-store'
-import { hasAutoContinuingTask } from '../lib/task-types'
+import { hasWakingTask } from '../lib/task-types'
 import type { SessionStatus, TaskNotification, SlashCommandInfo } from '../../../shared/types'
 
 /** Send a system notification if the session is not currently focused */
@@ -532,7 +532,10 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
         // the screen from what they are doing.
         const follow = store.settings.remoteFollowActions && data?.createdBy !== 'agent'
         store.registerRemoteSession(routingId, follow)
-        if (!follow) store.setNeedsAttention(routingId, true)
+        // An agent-started session begins running at once and asks for what it
+        // needs through an approval, which raises attention by itself; it is not
+        // waiting on anyone at birth.
+        if (!follow && data?.createdBy !== 'agent') store.setNeedsAttention(routingId, true)
       }
       if (!data?.resumeSessionId) return
       // A resumed session's transcript lives on disk. The HOST seeds its own
@@ -610,13 +613,21 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
       // interpretation of the same fact, and a sealed field has one writer.
       // Mark attention + notify when the agent's turn ends (user's turn)
       if (!session?.sdkActive) return
-      // …unless it isn't: a `result` under a running delegated task is followed by
-      // an auto-continued turn, not by the user (see hasAutoContinuingTask).
-      if (hasAutoContinuingTask(session.activeTasks)) return
+      // …unless it isn't: a `result` under background work that will wake the agent
+      // (a subagent, a shell, a monitor) is followed by a turn of its own, not by the
+      // user (see hasWakingTask).
+      if (hasWakingTask(session.activeTasks)) return
+      // Nor is it when a prompt the user already queued goes out the moment this
+      // turn ends — every engine forwards the queue at its turn boundary
+      // (ADR-053), and the queue is still unconsumed when this event is observed
+      // (the consume broadcast follows it). A pending sign-in is the exception:
+      // the held queue is not going anywhere until the user acts.
+      if (!session.authRequired && session.queuedItems.some((item) => item.state === 'queued'))
+        return
       if (store.activeSessionId !== routingId || !document.hasFocus()) {
         store.setNeedsAttention(routingId, true)
       }
-      notifyIfNeeded(routingId, 'Ready for input', 'Claude has finished — your turn')
+      notifyIfNeeded(routingId, 'Ready for input', 'The agent has finished — your turn')
       return
     }
 

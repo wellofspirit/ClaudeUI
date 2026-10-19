@@ -47,13 +47,29 @@ describe('SessionItem status dot', () => {
     expect(dot.classList.contains('status-dot--ripple')).toBe(true)
   })
 
-  it('a background shell alone leaves the session idle', () => {
-    seedIdleLive({ 'tu-1': task('local_bash') })
+  it('a background shell that wakes the agent ripples violet', () => {
+    seedIdleLive({ 'tu-1': { ...task('local_bash'), wakesParent: true } })
+    render(<SessionItem info={info} active={false} onClick={() => {}} />)
+
+    const dot = screen.getByTestId('SessionItem.statusDot')
+    expect(dot.getAttribute('data-state')).toBe('subagents')
+    expect(dot.classList.contains('status-dot--ripple')).toBe(true)
+  })
+
+  it('a task that does not wake the agent leaves the session idle', () => {
+    seedIdleLive({ 'tu-1': { ...task('dream'), wakesParent: false } })
     render(<SessionItem info={info} active={false} onClick={() => {}} />)
 
     const dot = screen.getByTestId('SessionItem.statusDot')
     expect(dot.getAttribute('data-state')).toBe('idle')
     expect(dot.getAttribute('title')).toBe('Idle')
     expect(dot.classList.contains('status-dot--ripple')).toBe(false)
+  })
+
+  it('a shell record from before wakesParent existed stays idle (legacy type set)', () => {
+    seedIdleLive({ 'tu-1': task('local_bash') })
+    render(<SessionItem info={info} active={false} onClick={() => {}} />)
+
+    expect(screen.getByTestId('SessionItem.statusDot').getAttribute('data-state')).toBe('idle')
   })
 })

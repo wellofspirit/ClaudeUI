@@ -16,7 +16,7 @@
  * waits in the held inbox, or (with `wake`) starts a turn.
  *
  * A turn ends at the running → idle edge of the child's canonical `status.state`:
- * that is the one signal every engine gives (Codex emits no `session:result`).
+ * that is the one signal every engine gives.
  * The host observer below runs after the reducer, so canonical already holds the
  * transcript, the pending approvals and the background tasks of the moment.
  *

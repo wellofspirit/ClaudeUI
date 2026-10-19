@@ -855,6 +855,27 @@ describe('Codex first session', () => {
     expect(events.mock.calls.some(([channel]) => channel === 'session:stream')).toBe(false)
   })
 
+  it('raises session:result once per ROOT turn end, ahead of the idle status', async () => {
+    const { session, notify } = fixture()
+    await session.run('hello')
+    const channels = (): string[] => events.mock.calls.map(([channel]) => channel as string)
+    expect(channels()).not.toContain('session:result')
+    const done = { threadId: 'root', turn: { id: 'turn', status: 'completed', items: [] } }
+    notify('turn/completed', { ...done, turn: { ...done.turn, durationMs: 1234 } })
+    const results = events.mock.calls.filter(([channel]) => channel === 'session:result')
+    expect(results).toHaveLength(1)
+    expect(results[0][1][1]).toMatchObject({ durationMs: 1234, result: '', sessionId: 'root' })
+    // The same order every other engine uses: result first, then the idle status.
+    const idleAt = events.mock.calls.findLastIndex(
+      ([channel, args]) =>
+        channel === 'session:status' && (args as [string, { state: string }])[1].state === 'idle'
+    )
+    expect(channels().indexOf('session:result')).toBeLessThan(idleAt)
+    // A replayed `turn/completed` for the same turn is the latch's no-op, not a second result.
+    notify('turn/completed', done)
+    expect(channels().filter((channel) => channel === 'session:result')).toHaveLength(1)
+  })
+
   it('rejects a concurrent direct send after coalesced startup and holds a queued one', async () => {
     const { session, request } = fixture()
     const results = await Promise.allSettled([session.run('one'), session.run('two')])
@@ -2990,6 +3011,24 @@ describe('Codex native children', () => {
     f.notify('item/agentMessage/delta', { ...part, delta: ' late' })
     expect(sent('session:item-delta')).toHaveLength(2)
     expect(sent('session:item-open')).toHaveLength(1)
+  })
+
+  it("raises no session:result for a child thread's turn end", async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    f.notify('turn/started', { threadId: 'child', turn: { id: 'child-turn' } })
+    f.notify('turn/completed', {
+      threadId: 'child',
+      turn: { id: 'child-turn', status: 'completed', items: [] }
+    })
+    expect(sent('session:result')).toEqual([])
+    // The parent's own turn end still raises exactly one.
+    f.notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    expect(sent('session:result')).toHaveLength(1)
   })
 
   it('routes a child message into the subagent transcript under the spawning card', async () => {

@@ -404,8 +404,16 @@ the moment a `result` is observed. cli.js's own interactive UI uses the same rul
 `DCn`/`CF`, `cli.js@char6097665`/`@char6097331` in 2.1.293 — `S3e`/`rsi` in 2.1.241; the print loop's
 own check is `nl`/`o_`/`e_` near `@char34396201`): active tasks of type `local_agent`, `remote_agent`
 (unless `isLongRunning`), `in_process_teammate` (unless `isIdle`), or `local_workflow` ⇒ busy;
-`local_bash` shows as idle-with-shell; monitor types never count as busy. ClaudeUI mirrors this in
-the `session:result` observer (`useClaudeEvents.ts`) to gate the "Ready for input" notification.
+`local_bash` shows as idle-with-shell; monitor types never count as busy.
+
+ClaudeUI deliberately counts MORE than that predicate. Probed live on 2.1.293 (2026-10-19): a
+background Bash's terminal `task_notification` starts an auto-continued turn of its own, exactly like
+an agent's, and `task_started` always precedes the `result` of the turn that launched the task. So the
+emitter stamps `wakesParent` on every `session:task-started` record (`src/shared/waking-task-types.ts`:
+the four agent-like types plus `local_bash`, `monitor_mcp`, `monitor_ws`, `mcp_task`; not `dream`,
+`auto_mode_scan`, `local_memory_import` or an unknown type), and the `session:result` observer
+(`useClaudeEvents.ts`) skips attention and "Ready for input" while any such record is live. Accepted
+cost: a session that leaves a dev server or watcher running gets no turn-end yellow.
 
 ---
 

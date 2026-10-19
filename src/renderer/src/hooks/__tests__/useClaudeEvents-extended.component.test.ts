@@ -1589,9 +1589,91 @@ describe('useClaudeEvents extended component tests', () => {
       expect(notified).not.toHaveBeenCalled()
     })
 
-    it('still claims the turn while a background SHELL is running', () => {
-      // A dev server left running is the user's turn, not the agent's.
+    it.each(['local_bash', 'monitor_mcp', 'monitor_ws'])(
+      'does not claim the turn while a background %s that wakes the agent is running',
+      (taskType) => {
+        // 2.1.293: a finished shell or monitor starts a turn of its own, so the
+        // result under it is a pause, not the user's turn (owner ruling 2026-10-19).
+        seed.taskStarted(routingId, {
+          toolUseId: 't1',
+          taskId: 'a1',
+          taskType,
+          wakesParent: true
+        })
+
+        app.emit('session:result', routingId)
+
+        expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+      }
+    )
+
+    it('claims the turn while only a task that does not wake the agent is running', () => {
+      seed.taskStarted(routingId, {
+        toolUseId: 't1',
+        taskId: 'a1',
+        taskType: 'dream',
+        wakesParent: false
+      })
+
+      app.emit('session:result', routingId)
+
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(true)
+      expect(notified).toHaveBeenCalledWith('Ready for input', expect.anything())
+    })
+
+    it('lets wakesParent: false override the type', () => {
+      // The emitter's word wins over the type set in both directions.
+      seed.taskStarted(routingId, {
+        toolUseId: 't1',
+        taskId: 'a1',
+        taskType: 'local_agent',
+        wakesParent: false
+      })
+
+      app.emit('session:result', routingId)
+
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(true)
+    })
+
+    it('judges a record without wakesParent by the legacy type set', () => {
+      // An older replay: a shell record carries no field and stays "not working",
+      // an agent record carries none and still is.
       seed.taskStarted(routingId, { toolUseId: 't1', taskId: 'a1', taskType: 'local_bash' })
+      app.emit('session:result', routingId)
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(true)
+
+      useSessionStore.getState().setNeedsAttention(routingId, false)
+      seed.taskNotification(
+        routingId,
+        makeTaskNotification({ toolUseId: 't1', status: 'completed' })
+      )
+      seed.taskStarted(routingId, { toolUseId: 't2', taskId: 'a2', taskType: 'local_agent' })
+      app.emit('session:result', routingId)
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(false)
+    })
+
+    it('does not claim the turn while a queued prompt is about to go out', () => {
+      seed.queue(routingId, [{ itemId: 'q1', text: 'next', state: 'queued' }])
+
+      app.emit('session:result', routingId)
+
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(false)
+      expect(notified).not.toHaveBeenCalled()
+    })
+
+    it('claims the turn for a queued prompt that is held behind a sign-in', () => {
+      seed.queue(routingId, [{ itemId: 'q1', text: 'next', state: 'queued' }])
+      app.emit('session:auth-required', routingId, { providerId: 'chatgpt', message: 'sign in' })
+
+      app.emit('session:result', routingId)
+
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(true)
+    })
+
+    it('claims the turn again once the queue has drained', () => {
+      seed.queue(routingId, [{ itemId: 'q1', text: 'next', state: 'queued' }])
+      seed.queue(routingId, [{ itemId: 'q1', text: 'next', state: 'consumed' }])
 
       app.emit('session:result', routingId)
 

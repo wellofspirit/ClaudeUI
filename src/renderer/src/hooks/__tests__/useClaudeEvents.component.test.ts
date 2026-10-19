@@ -471,7 +471,15 @@ describe('useClaudeEvents component tests', () => {
       // The user stays where they are, the session is in their recents, and it is flagged.
       expect(state.activeSessionId).toBe('mine')
       expect(state.recentSessionIds).toContain('agent-new')
-      expect(state.sessions['agent-new'].needsAttention).toBe(true)
+      // It starts running at once, so it is not yellow at birth.
+      expect(state.sessions['agent-new'].needsAttention).toBe(false)
+    })
+
+    it('a session another client created for the user is flagged, as before', () => {
+      useSessionStore.setState({ activeSessionId: 'mine' })
+      useSessionStore.getState().updateSettings({ remoteFollowActions: false })
+      app.emit('session:created', 'remote-new', { cwd: '/r/repo' })
+      expect(useSessionStore.getState().sessions['remote-new'].needsAttention).toBe(true)
     })
   })
 })
