@@ -320,6 +320,7 @@ import { logger } from '../../../core/services/logger'
 import { blobStore } from '../../../core/services/blob-store'
 import { query } from '../../../core/sdk'
 import { discoverCodexModels } from '../../../core/codex/model-discovery'
+import { loadSessionHistory as loadClaudeHistoryMock } from '../../../core/services/session-history'
 import { engineInstalled } from '../../../core/harness/resolve'
 
 // ---------------------------------------------------------------------------
@@ -1180,6 +1181,24 @@ describe('registerRemoteHandlers', () => {
         dispatcher.handle(makeRequest('git:push', '/tmp/proj'), remoteConn)
       ).rejects.toThrow('remote rejected')
       expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
+    })
+
+    it('session:load-history declares withProgress and forwards the reporter to the Claude reader (ADR-102)', async () => {
+      expect(commandRegistry.declaration('session:load-history')?.withProgress).toBe(true)
+      const progress = vi.fn()
+      await dispatcher.handle(
+        makeRequest('session:load-history', 'sess-1', 'proj-key', null),
+        remoteConn,
+        progress
+      )
+      // The reporter LEADS the handler args (not the wire's), and the wire's
+      // null anchor is still normalised to undefined.
+      expect(loadClaudeHistoryMock).toHaveBeenLastCalledWith(
+        'sess-1',
+        'proj-key',
+        undefined,
+        progress
+      )
     })
 
     it('account:get returns the account-manager state', async () => {

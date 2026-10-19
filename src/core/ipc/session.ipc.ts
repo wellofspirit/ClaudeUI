@@ -110,6 +110,7 @@ import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { usageHubCommands, USAGE_HUB_CHANNELS } from './usage-hub-commands'
 import { harnessCommands, HARNESS_CHANNELS } from './harness-commands'
 import { voicePackCommands, VOICE_PACK_CHANNELS } from './voice-pack-commands'
+import type { ProgressReporter } from '../../shared/remote-protocol'
 import {
   sendPrompt,
   getBlob,
@@ -1023,8 +1024,15 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'session:load-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, resumeSessionAt?: string) => {
-      return await loadSessionHistory(sessionId, projectKey, resumeSessionAt)
+    // ADR-102: the reporter leads the args; a caller that sends none gets a no-op.
+    withProgress: true,
+    handler: async (
+      progress: ProgressReporter,
+      sessionId: string,
+      projectKey: string,
+      resumeSessionAt?: string
+    ) => {
+      return await loadSessionHistory(sessionId, projectKey, resumeSessionAt, undefined, progress)
     }
   })
 

@@ -36,6 +36,11 @@ client, `MessagePort` for the desktop renderer — no auth frames on the port, b
 port IS the trust):
 
 - `invoke` / `invoke-response` — client actions, RPC mirroring `ipcRenderer.invoke`.
+  `invoke-progress {id, done, total, phase}` (ADR-102) rides alongside for a `withProgress`
+  channel: sent only to the requesting socket, throttled to 4/s, ending with one `phase:'sending'`
+  frame just before the response; each frame slides the web client's 30 s invoke timeout. The
+  desktop renderer gets the same reports over the host-local `invoke:with-progress` /
+  `invoke:progress` IPC pair, because its invokes ride `ipcRenderer.invoke`, not the port.
 - `event {seq, channel, args}` — server pushes. The seq is the ring's, assigned once.
 - `sync {lastSeq, epoch}` → `sync-catchup {events}` or `sync-full {state}` — the
   reconnect protocol. The snapshot is canonical state in the main process

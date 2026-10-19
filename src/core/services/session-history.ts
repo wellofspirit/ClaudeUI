@@ -14,6 +14,7 @@ import type {
   EngineId
 } from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
+import type { InvokeProgress, SessionHistoryPhase } from '../../shared/remote-protocol'
 import { logger } from './logger'
 import { isPathInside } from './path-containment'
 import { getContextWindowSize } from './context-window'
@@ -192,6 +193,25 @@ interface ModelTokenAgg {
 }
 
 /**
+ * Report the raw bytes a read stream pulls from disk, as deltas, so a caller can
+ * drive a progress bar without a second pass. Reads `stream.bytesRead` (the
+ * counter for raw file bytes — the stream decodes to strings, so chunk lengths
+ * would be wrong for multi-byte text). A no-op without a callback, which keeps
+ * every progress-less read byte-for-byte what it was.
+ */
+function countBytes(stream: fs.ReadStream, onBytes?: (delta: number) => void): void {
+  if (!onBytes) return
+  let last = 0
+  stream.on('data', () => {
+    const now = stream.bytesRead
+    if (now > last) {
+      onBytes(now - last)
+      last = now
+    }
+  })
+}
+
+/**
  * Fold one parsed transcript line's assistant usage into the shared per-model
  * cost map (Slice B state) — factored out so the SAME accumulation (and the
  * same `seenMessageIds` dedup set) can be applied to both the main transcript
@@ -241,7 +261,8 @@ function foldAssistantCostLine(
 function foldSubagentFile(
   filePath: string,
   modelTokens: Map<string, ModelTokenAgg>,
-  seenMessageIds: Set<string>
+  seenMessageIds: Set<string>,
+  onBytes?: (delta: number) => void
 ): Promise<void> {
   return new Promise((resolve) => {
     let stream: fs.ReadStream
@@ -253,6 +274,7 @@ function foldSubagentFile(
       return
     }
     const rl = readline.createInterface({ input: stream })
+    countBytes(stream, onBytes)
     rl.on('line', (line) => {
       try {
         const data = JSON.parse(line)
@@ -289,7 +311,9 @@ async function foldSubagentCosts(
   modelTokens: Map<string, ModelTokenAgg>,
   seenMessageIds: Set<string>,
   /** Fold only these agents (a fork's anchor-truncated figures); absent = all. */
-  onlyAgentIds?: ReadonlySet<string>
+  onlyAgentIds?: ReadonlySet<string>,
+  /** Raw bytes read, as deltas (progress); see {@link countBytes}. */
+  onBytes?: (delta: number) => void
 ): Promise<void> {
   const subagentsDir = path.join(
     path.dirname(filePath),
@@ -312,7 +336,7 @@ async function foldSubagentCosts(
     .sort()
 
   for (const f of agentFiles) {
-    await foldSubagentFile(path.join(subagentsDir, f), modelTokens, seenMessageIds)
+    await foldSubagentFile(path.join(subagentsDir, f), modelTokens, seenMessageIds, onBytes)
   }
 }
 
@@ -331,7 +355,9 @@ async function foldSubagentCosts(
 export async function computeTokenMetrics(
   filePath: string,
   model?: string,
-  resumeSessionAt?: string
+  resumeSessionAt?: string,
+  /** Raw bytes read (this file, then each subagent file), as deltas — progress only. */
+  onBytes?: (delta: number) => void
 ): Promise<StatusLineData> {
   const empty: StatusLineData = {
     totalCostUsd: 0,
@@ -384,6 +410,7 @@ export async function computeTokenMetrics(
 
     const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     const rl = readline.createInterface({ input: stream })
+    countBytes(stream, onBytes)
 
     rl.on('line', (line) => {
       if (pastAnchor) return
@@ -470,7 +497,8 @@ export async function computeTokenMetrics(
         filePath,
         modelTokens,
         seenMessageIds,
-        anchorFound ? keptAgentIds : undefined
+        anchorFound ? keptAgentIds : undefined,
+        onBytes
       )
 
       const modelCosts: ModelCostEntry[] = []
@@ -829,6 +857,13 @@ export interface SessionHistoryResult {
    */
   lastEffort?: string | null
   /**
+   * Claude only: byte size of every `subagents/agent-<agentId>.jsonl` on disk
+   * when the read started, by agentId. The renderer fetches each agent's
+   * transcript separately and weights those fetches by this to keep the load's
+   * progress bar honest (see the plan on {@link loadSessionHistory}).
+   */
+  subagentFileBytes?: Record<string, number>
+  /**
    * Warnings worth resurfacing when the session is reopened — currently the
    * model_refusal_fallback / model_fallback system entries (the model swap is
    * sticky for the session, so the user should know which model answered).
@@ -993,6 +1028,75 @@ export async function resolveForkAnchor(
   return anchorUuid ? { anchorUuid } : { anchorUuid: null, reason: 'message-not-found' }
 }
 
+function statBytes(filePath: string): number {
+  try {
+    return fs.statSync(filePath).size
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * Sizes of the `agent-<id>.jsonl` files under `<session>/subagents/` — the same
+ * set {@link foldSubagentCosts} reads and the renderer then fetches, by agentId.
+ * Best-effort: an unreadable directory or file simply contributes nothing.
+ */
+function statSubagentFiles(filePath: string): Record<string, number> {
+  const out: Record<string, number> = {}
+  const dir = path.join(path.dirname(filePath), path.basename(filePath, '.jsonl'), 'subagents')
+  let files: string[]
+  try {
+    files = fs.readdirSync(dir)
+  } catch {
+    return out
+  }
+  for (const f of files) {
+    if (!f.startsWith('agent-') || !f.endsWith('.jsonl')) continue
+    const bytes = statBytes(path.join(dir, f))
+    out[f.slice('agent-'.length, -'.jsonl'.length)] = bytes
+  }
+  return out
+}
+
+/**
+ * The byte plan of one {@link loadSessionHistory} call (see its PROGRESS doc).
+ * `transcript` and `costs` take byte DELTAS from the read streams; each is
+ * clamped to its own budget and `done` only ever rises.
+ */
+function createHistoryProgress(
+  onProgress: (progress: InvokeProgress) => void,
+  mainBytes: number,
+  subagentBytes: number
+): {
+  start(): void
+  transcript(delta: number): void
+  costs(delta: number): void
+  finish(): void
+} {
+  const total = 2 * mainBytes + 2 * subagentBytes
+  const costBudget = mainBytes + subagentBytes
+  let transcriptDone = 0
+  let costsDone = 0
+  const emit = (phase: SessionHistoryPhase, next: number): void => {
+    const done = Math.min(total, next)
+    onProgress({ done, total, phase })
+  }
+  return {
+    start: () => emit('transcript', 0),
+    transcript(delta) {
+      transcriptDone = Math.min(mainBytes, transcriptDone + delta)
+      emit('transcript', transcriptDone)
+    },
+    costs(delta) {
+      costsDone = Math.min(costBudget, costsDone + delta)
+      emit('costs', mainBytes + costsDone)
+    },
+    // A fork-anchored read skips agents, and a vanished file under-reads: land
+    // exactly where the caller's own fetches take over.
+    finish: () => emit('costs', 2 * mainBytes + subagentBytes)
+  }
+}
+
 /**
  * Load full conversation history from a JSONL session file.
  * Converts SDK messages to ChatMessage[] and extracts TaskNotification[].
@@ -1010,13 +1114,42 @@ export async function resolveForkAnchor(
  * truncated prefix. An unknown anchor (not in this file) truncates nothing, which
  * is the pre-existing behavior and the only safe fallback: showing too much beats
  * showing an empty conversation.
+ *
+ * PROGRESS (ADR-102). With `onProgress`, the read reports raw bytes, planned
+ * over the WHOLE load including the caller's later per-agent fetches. With
+ * M = bytes of the main transcript and S = bytes of every
+ * `subagents/agent-*.jsonl`:
+ *
+ *   total = 2*M + 2*S
+ *     pass 1 over the main file ........ M   (phase `transcript`)
+ *     metrics pass over the main file ... M   (phase `costs`)
+ *     cost fold over the subagent files . S   (phase `costs`)
+ *     the caller's subagent fetches ..... S   (reported by the caller, using
+ *                                              `subagentFileBytes`)
+ *
+ * The first report is `done: 0` with the final `total`, so a bar never has to
+ * be re-scaled; this function's LAST report is `done = 2*M + S` (not `total`):
+ * the caller continues from there and reaches `total` as its fetches land. Each
+ * pass is clamped to its own budget (a live file can grow between the stat and
+ * the read), and `done` never decreases. The second S disappears when subagent
+ * loading goes lazy. The transport adds a `sending` phase after this returns.
  */
 export async function loadSessionHistory(
   sessionId: string,
   projectKey: string,
-  resumeSessionAt?: string
+  resumeSessionAt?: string,
+  onProgress?: (progress: InvokeProgress) => void
 ): Promise<SessionHistoryResult> {
   const filePath = path.join(CLAUDE_PROJECTS_DIR, projectKey, `${sessionId}.jsonl`)
+  const subagentFileBytes = statSubagentFiles(filePath)
+  const progress = onProgress
+    ? createHistoryProgress(
+        onProgress,
+        statBytes(filePath),
+        Object.values(subagentFileBytes).reduce((a, b) => a + b, 0)
+      )
+    : null
+  progress?.start()
 
   return new Promise((resolve) => {
     const messages: ChatMessage[] = []
@@ -1091,6 +1224,7 @@ export async function loadSessionHistory(
     }
 
     const rl = readline.createInterface({ input: stream })
+    countBytes(stream, progress?.transcript)
 
     rl.on('line', (line) => {
       if (pastAnchor) return
@@ -1488,7 +1622,12 @@ export async function loadSessionHistory(
       }
 
       // A fork's figures stop at its anchor, like the messages above.
-      const statusLine = await computeTokenMetrics(filePath, undefined, resumeSessionAt)
+      const statusLine = await computeTokenMetrics(
+        filePath,
+        undefined,
+        resumeSessionAt,
+        progress?.costs
+      )
       // Slice C — merge durable dispatched-cost rows into the history-loaded
       // status line. A reopened session that hasn't spawned a ClaudeSession
       // yet has no seedDispatchedCosts() run for it, and computeTokenMetrics
@@ -1511,13 +1650,15 @@ export async function loadSessionHistory(
       } catch (err) {
         logger.warn('SessionHistory', 'Failed to merge dispatched costs into status line', err)
       }
+      progress?.finish()
       resolve({
         messages,
         taskNotifications,
         customTitle,
         agentIdToToolUseId,
         statusLine,
-        warnings
+        warnings,
+        subagentFileBytes
       })
     })
     rl.on('error', () =>

@@ -157,13 +157,21 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         ClaudeAPI['loadPiHistory']
       >,
 
-    loadSessionHistory: (sessionId, projectKey, resumeSessionAt) =>
-      connection.invoke(
-        'session:load-history',
-        sessionId,
-        projectKey,
-        resumeSessionAt
-      ) as ReturnType<ClaudeAPI['loadSessionHistory']>,
+    // The progress path only when a callback is given (ADR-102); otherwise the
+    // plain invoke, so every other caller is unchanged.
+    loadSessionHistory: (sessionId, projectKey, resumeSessionAt, onProgress) =>
+      (onProgress
+        ? connection.invokeWithProgress(
+            'session:load-history',
+            [sessionId, projectKey, resumeSessionAt],
+            onProgress
+          )
+        : connection.invoke(
+            'session:load-history',
+            sessionId,
+            projectKey,
+            resumeSessionAt
+          )) as ReturnType<ClaudeAPI['loadSessionHistory']>,
 
     loadSubagentHistory: (sessionId, projectKey, agentId) =>
       connection.invoke(

@@ -1,4 +1,5 @@
 import type { EngineId, SessionInfo, StatusLineData } from '../../shared/types'
+import type { InvokeProgress } from '../../shared/remote-protocol'
 import { getSessionMeta } from './db'
 import {
   listDirectories,
@@ -18,7 +19,16 @@ import { deleteCodexThread } from '../codex/delete'
 import type { ForkAnchorResult } from '../../shared/types'
 
 interface EngineHistory {
-  read(sessionId: string, projectKey: string, anchor?: string): Promise<SessionHistoryResult>
+  /**
+   * `onProgress` is the Claude reader's byte progress (ADR-102); every other
+   * engine ignores it and the caller shows an indeterminate bar.
+   */
+  read(
+    sessionId: string,
+    projectKey: string,
+    anchor?: string,
+    onProgress?: (progress: InvokeProgress) => void
+  ): Promise<SessionHistoryResult>
   list(): Promise<SessionInfo[]>
   delete(sessionId: string, projectKey: string): Promise<void>
   forkAnchor(
@@ -99,10 +109,11 @@ export function readSessionHistory(
   sessionId: string,
   projectKey: string,
   anchor?: string,
-  engineId?: EngineId
+  engineId?: EngineId,
+  onProgress?: (progress: InvokeProgress) => void
 ): Promise<SessionHistoryResult> {
   const storedEngine = getSessionMeta(sessionId)?.engineId
   if (engineId && storedEngine && engineId !== storedEngine)
     throw new Error('History engine does not match persisted session identity')
-  return historyFor(engineId ?? storedEngine).read(sessionId, projectKey, anchor)
+  return historyFor(engineId ?? storedEngine).read(sessionId, projectKey, anchor, onProgress)
 }

@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import { engineInstalled } from '../harness/resolve'
 import { codexCommands } from './codex-commands'
 import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
+import type { ProgressReporter } from '../../shared/remote-protocol'
 import * as os from 'os'
 import * as path from 'path'
 import { RemoteDispatcher } from '../services/remote-dispatcher'
@@ -801,8 +802,21 @@ export function registerRemoteHandlers(
     channel: 'session:load-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, resumeSessionAt?: string | null) => {
-      return await loadSessionHistory(sessionId, projectKey, opt(resumeSessionAt))
+    // ADR-102: the reporter leads the args; the wire frames come from remote-server.
+    withProgress: true,
+    handler: async (
+      progress: ProgressReporter,
+      sessionId: string,
+      projectKey: string,
+      resumeSessionAt?: string | null
+    ) => {
+      return await loadSessionHistory(
+        sessionId,
+        projectKey,
+        opt(resumeSessionAt),
+        undefined,
+        progress
+      )
     }
   })
 

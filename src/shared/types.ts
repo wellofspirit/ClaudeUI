@@ -3,6 +3,7 @@ import type {
   IdeAvailability,
   IdeEntry,
   IdeThemeKind,
+  InvokeProgress,
   PublicKeyCredentialCreationOptionsJSON,
   RegistrationResponseJSON,
   RemoteKdfParams
@@ -1671,7 +1672,15 @@ interface SessionAPI {
      * Fork/branch anchor (a JSONL line uuid) to TRUNCATE the load at, inclusive
      * — the value the session was resumed with. Omit to load the whole file.
      */
-    resumeSessionAt?: string
+    resumeSessionAt?: string,
+    /**
+     * Progress of the read (ADR-102): byte-based and Claude-only (other engines
+     * report nothing, so a caller shows an indeterminate bar). Frames arrive
+     * throttled; see the planning contract on `loadSessionHistory` in
+     * `core/services/session-history.ts`. With the callback omitted this is the
+     * plain, non-streaming invoke.
+     */
+    onProgress?: (progress: InvokeProgress) => void
   ): Promise<{
     messages: ChatMessage[]
     taskNotifications: TaskNotification[]
@@ -1692,6 +1701,12 @@ interface SessionAPI {
      * cold reopen shows and resumes with. `null` when the rollout names none.
      */
     lastEffort?: string | null
+    /**
+     * Claude only: byte size of each `subagents/agent-<id>.jsonl` the reader
+     * found, by agentId. Lets the caller weight its per-agent fetches against
+     * the planned total of the progress stream.
+     */
+    subagentFileBytes?: Record<string, number>
   }>
   loadSubagentHistory(
     sessionId: string,

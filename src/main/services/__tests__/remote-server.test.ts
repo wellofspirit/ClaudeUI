@@ -20,6 +20,7 @@ import * as path from 'node:path'
 import * as zlib from 'node:zlib'
 import { connectRemoteClient, ephemeralPort } from '../../../test/helpers/ws-test-client'
 import { E2ECrypto } from '../../../shared/e2e-crypto'
+import type { ProgressReporter, WsServerMessage } from '../../../shared/remote-protocol'
 import { buildSentFileUrl } from '../../../shared/sent-file-url'
 
 // ---------------------------------------------------------------------------
@@ -166,7 +167,7 @@ import {
   originRequiresE2E
 } from '../../../core/services/remote-server'
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
-import { registerCommand } from '../../../core/ipc/command-registry'
+import { commandRegistry, registerCommand } from '../../../core/ipc/command-registry'
 import { GIT_WATCH_COMMAND } from '../../../core/ipc/git-watch'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
 import { emitEvent, syncCore } from '../../../core/services/sync-host'
@@ -4223,5 +4224,176 @@ describe('RemoteServer — auth-info identity section (Phase 3)', () => {
     await server.start(port, '127.0.0.1')
     const got = await httpGetJson(port, '/remote/auth-info', identityHeaders(TS_OWNER))
     expect(got.body).toEqual({ version: 1, methods: [] })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// invoke-progress (ADR-102): per-call progress frames, addressed to the
+// requesting socket only, ending with `sending` right before the response.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — invoke progress frames', () => {
+  beforeEach(useAuthDisabled)
+  const PROGRESS = 'test:progress-load'
+  const PLAIN = 'test:plain-load'
+  const FAILING = 'test:progress-fail'
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    const reporting = async (progress: ProgressReporter, arg: string): Promise<string> => {
+      progress({ done: 0, total: 100, phase: 'transcript' })
+      // Inside the throttle window: coalesced, then flushed by the transport.
+      progress({ done: 40, total: 100, phase: 'costs' })
+      progress({ done: 70, total: 100, phase: 'costs' })
+      return `loaded ${arg}`
+    }
+    registerCommand({
+      channel: PROGRESS,
+      capability: 'fs-read',
+      kind: 'query',
+      transport: 'remote',
+      withProgress: true,
+      handler: reporting
+    })
+    registerCommand({
+      channel: FAILING,
+      capability: 'fs-read',
+      kind: 'query',
+      transport: 'remote',
+      withProgress: true,
+      handler: async (progress: ProgressReporter) => {
+        progress({ done: 0, total: 100, phase: 'transcript' })
+        progress({ done: 50, total: 100, phase: 'transcript' })
+        throw new Error('boom')
+      }
+    })
+    // A channel that never declared `withProgress` still gets the same call shape.
+    registerCommand({
+      channel: PLAIN,
+      capability: 'fs-read',
+      kind: 'query',
+      transport: 'remote',
+      handler: async (arg: string) => `plain ${arg}`
+    })
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+  })
+
+  afterEach(async () => {
+    for (const channel of [PROGRESS, PLAIN, FAILING]) commandRegistry.unregister(channel, 'remote')
+    try {
+      await server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  /** Send one invoke and collect every frame up to and including its response. */
+  async function frames(
+    client: Awaited<ReturnType<typeof connectRemoteClient>>,
+    id: string,
+    channel: string
+  ): Promise<WsServerMessage[]> {
+    const seen: WsServerMessage[] = []
+    const done = new Promise<void>((resolve) => {
+      const off = client.onMessage((msg) => {
+        if ('id' in msg && msg.id === id) seen.push(msg)
+        if (msg.type === 'invoke-response' && msg.id === id) {
+          off()
+          resolve()
+        }
+      })
+    })
+    await client.send({ type: 'invoke', id, channel, args: ['x'] })
+    await done
+    return seen
+  }
+
+  it('emits invoke-progress frames with the request id, then `sending`, then the response', async () => {
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const got = await frames(client, 'req-7', PROGRESS)
+
+    const response = got.at(-1)
+    expect(response).toMatchObject({
+      type: 'invoke-response',
+      id: 'req-7',
+      ok: true,
+      data: 'loaded x'
+    })
+    const progress = got.slice(0, -1)
+    expect(progress.length).toBeGreaterThanOrEqual(2)
+    expect(progress.every((f) => f.type === 'invoke-progress' && f.id === 'req-7')).toBe(true)
+    // The first report is delivered at once; the throttled tail is flushed with
+    // the LATEST value (70, not 40) before the response.
+    expect(progress[0]).toEqual({
+      type: 'invoke-progress',
+      id: 'req-7',
+      done: 0,
+      total: 100,
+      phase: 'transcript'
+    })
+    // `sending` is the last progress frame, carrying the last reported done/total.
+    expect(progress.at(-1)).toEqual({
+      type: 'invoke-progress',
+      id: 'req-7',
+      done: 70,
+      total: 100,
+      phase: 'sending'
+    })
+    expect(
+      progress.some((f) => f.type === 'invoke-progress' && f.done === 70 && f.phase === 'costs')
+    ).toBe(true)
+    await client.close()
+  })
+
+  it('sends no progress frames for a channel that did not declare withProgress', async () => {
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const got = await frames(client, 'req-8', PLAIN)
+    expect(got).toEqual([{ type: 'invoke-response', id: 'req-8', ok: true, data: 'plain x' }])
+    await client.close()
+  })
+
+  it('a failing call sends no `sending` frame and no progress after its error response', async () => {
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const late: WsServerMessage[] = []
+    const got = await frames(client, 'req-9', FAILING)
+    client.onMessage((m) => late.push(m))
+    expect(got.at(-1)).toMatchObject({
+      type: 'invoke-response',
+      id: 'req-9',
+      ok: false,
+      error: 'boom'
+    })
+    expect(got.some((f) => f.type === 'invoke-progress' && f.phase === 'sending')).toBe(false)
+    // The throttled tail (done: 50) is dropped at close: wait out the interval.
+    await new Promise((r) => setTimeout(r, 400))
+    expect(late.filter((m) => m.type === 'invoke-progress')).toEqual([])
+    await client.close()
+  })
+
+  it('addresses progress to the requesting socket only', async () => {
+    await server.start(port, '127.0.0.1')
+    const a = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    const b = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await Promise.all([a.ready, b.ready])
+    const bFrames: WsServerMessage[] = []
+    b.onMessage((m) => bFrames.push(m))
+
+    await frames(a, 'only-a', PROGRESS)
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(bFrames.filter((m) => m.type === 'invoke-progress')).toEqual([])
+    await a.close()
+    await b.close()
   })
 })

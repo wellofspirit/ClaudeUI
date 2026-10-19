@@ -1,4 +1,4 @@
-import type { WsInvokeRequest } from '../../shared/remote-protocol'
+import type { ProgressReporter, WsInvokeRequest } from '../../shared/remote-protocol'
 import {
   commandRegistry,
   type Capability,
@@ -62,15 +62,37 @@ export class RemoteDispatcher {
   }
 
   /**
+   * Whether the channel's handler takes a progress reporter (ADR-102). Read from
+   * the channel-global declaration through the same accessor as {@link kindOf};
+   * only meaningful once {@link has} is true.
+   */
+  reportsProgress(channel: string): boolean {
+    return this.registry.declaration(channel)?.withProgress === true
+  }
+
+  /**
    * Dispatch an invoke request on behalf of an authenticated connection and
    * return the result. Throws `Channel not available: <channel>` for anything
    * this transport does not expose (unchanged wording — the web client's error
    * paths depend on it) and a permission error when the channel's capability
    * is not granted.
+   *
+   * `progress` is the per-call reporter bound to the requesting socket; only a
+   * `withProgress` channel's handler ever receives it.
    */
-  async handle(msg: WsInvokeRequest, connection: CommandConnection): Promise<unknown> {
+  async handle(
+    msg: WsInvokeRequest,
+    connection: CommandConnection,
+    progress?: ProgressReporter
+  ): Promise<unknown> {
     try {
-      return await this.registry.dispatch(msg.channel, 'remote', msg.args ?? [], connection)
+      return await this.registry.dispatch(
+        msg.channel,
+        'remote',
+        msg.args ?? [],
+        connection,
+        progress
+      )
     } catch (err) {
       logger.error('remote-dispatcher', `Error handling ${msg.channel}: ${err}`)
       throw err

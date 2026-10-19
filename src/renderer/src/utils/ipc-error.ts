@@ -24,10 +24,11 @@ export function isPermissionDenied(error: unknown): boolean {
 }
 
 /**
- * The web transport gave up waiting (`src/web/connection.ts`, 30 s): the call
- * may still be running on the host. Only the remote client produces this; the
- * desktop's `invoke` has no timeout.
+ * The web transport lost the answer (`src/web/connection.ts`): it gave up
+ * waiting (30 s, sliding while progress frames arrive) or the socket closed
+ * under the call. Either way the call may still be running on the host. Only
+ * the remote client produces this; the desktop's `invoke` has no timeout.
  */
 export function isInvokeTimeout(error: unknown): boolean {
-  return /^Timeout: /.test(ipcErrorMessage(error))
+  return /^(Timeout|Connection lost): /.test(ipcErrorMessage(error))
 }

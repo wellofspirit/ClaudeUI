@@ -28,6 +28,8 @@ import { randomUUID } from 'crypto'
 import { appendAuditLog } from '../services/db'
 import { logger } from '../services/logger'
 import type { StepUpTier } from '../../shared/types'
+import type { ProgressReporter } from '../../shared/remote-protocol'
+import { noopProgress } from '../../shared/progress-throttle'
 
 // ---------------------------------------------------------------------------
 // Capabilities, kinds, transports
@@ -396,6 +398,18 @@ export interface CommandRegistration {
    * row for a PTY's exit must name the identity that spawned it).
    */
   withConnection?: boolean
+  /**
+   * ADR-102: prepend a {@link ProgressReporter} to the handler's arguments, AFTER
+   * the connection when both are set (`handler(connection?, progress, ...args)`).
+   * Leading for the same reason as `withConnection`: the wire args are
+   * attacker-controlled, so a trailing slot could be shifted by padding.
+   *
+   * The transport supplies the (throttled) reporter bound to the REQUESTING
+   * caller; a transport with none supplies a no-op, so a handler can report
+   * unconditionally. Declared channel-global like `capability`/`kind`: it
+   * changes the handler's signature, so both transports must agree.
+   */
+  withProgress?: boolean
 }
 
 /** What {@link CommandRegistry.get} returns. */
@@ -406,6 +420,7 @@ export interface CommandEntry {
   handler: CommandHandler
   sessionIdArg: 0 | null
   withConnection: boolean
+  withProgress: boolean
 }
 
 /** The channel-global declaration, shared by every transport's handler. */
@@ -414,6 +429,7 @@ interface Declaration {
   kind: CommandKind
   sessionIdArg: 0 | null
   withConnection: boolean
+  withProgress: boolean
 }
 
 /**
@@ -641,6 +657,7 @@ export class CommandRegistry {
     }
     const sessionIdArg = reg.sessionIdArg ?? null
     const withConnection = reg.withConnection === true
+    const withProgress = reg.withProgress === true
 
     const existing = this.declarations.get(channel)
     if (existing) {
@@ -648,17 +665,25 @@ export class CommandRegistry {
         existing.capability !== capability ||
         existing.kind !== kind ||
         existing.sessionIdArg !== sessionIdArg ||
-        existing.withConnection !== withConnection
+        existing.withConnection !== withConnection ||
+        existing.withProgress !== withProgress
       ) {
         throw new Error(
           `registerCommand("${channel}"): declaration conflicts with the existing one ` +
             `(${existing.capability}/${existing.kind}/sessionIdArg=${existing.sessionIdArg}/` +
-            `withConnection=${existing.withConnection} vs ` +
-            `${capability}/${kind}/sessionIdArg=${sessionIdArg}/withConnection=${withConnection})`
+            `withConnection=${existing.withConnection}/withProgress=${existing.withProgress} vs ` +
+            `${capability}/${kind}/sessionIdArg=${sessionIdArg}/withConnection=${withConnection}/` +
+            `withProgress=${withProgress})`
         )
       }
     } else {
-      this.declarations.set(channel, { capability, kind, sessionIdArg, withConnection })
+      this.declarations.set(channel, {
+        capability,
+        kind,
+        sessionIdArg,
+        withConnection,
+        withProgress
+      })
     }
 
     this.handlers.set(CommandRegistry.key(transport, channel), handler)
@@ -710,7 +735,8 @@ export class CommandRegistry {
     channel: string,
     transport: Transport,
     args: unknown[],
-    connection: CommandConnection
+    connection: CommandConnection,
+    progress?: ProgressReporter
   ): Promise<unknown> {
     const entry = this.get(channel, transport)
     if (!entry) throw new Error(`Channel not available: ${channel}`)
@@ -723,7 +749,14 @@ export class CommandRegistry {
 
     // The connection rides in FRONT of the wire args — see
     // `CommandRegistration.withConnection` for why the position matters.
-    const callArgs = entry.withConnection ? [connection, ...args] : args
+    // A `withProgress` entry then gets the reporter right after it (a no-op when
+    // the transport supplied none); a reporter offered to any other entry is
+    // dropped, so the handler's arity is a function of the declaration alone.
+    const callArgs = [
+      ...(entry.withConnection ? [connection] : []),
+      ...(entry.withProgress ? [progress ?? noopProgress] : []),
+      ...args
+    ]
 
     // Queries are not audited (sync-core.md: reads have no state effect, and a
     // per-read row would bury the commands that matter).
