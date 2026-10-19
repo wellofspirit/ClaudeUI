@@ -52,6 +52,7 @@ Exception: `session_state_changed` has no `session_id`/`uuid` (raw emit, not thr
 | `per_turn_effort_changed`  | Server refused per-turn effort (2.1.285)         | Request retry path (§4.30)       |
 | `instruction_size_warning` | Instruction files exceed size limits (2.1.289)   | Main generator (§4.31)           |
 | `permission_check_status`  | Auto-mode permission check past ~4 s (2.1.293)   | SDK event queue (§4.32)          |
+| `peer_message_hold`        | Peer message parked/released/dropped             | Receive policy (15 §15.2.3)      |
 
 Subtypes that exist in the SDK schema union but are **not** emitted on the SDK stdout wire are cataloged in §4.27.
 

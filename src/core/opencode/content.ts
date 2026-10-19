@@ -34,9 +34,11 @@ import type {
 } from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
 import { blobStore } from '../services/blob-store'
+import { wrappedUserRowAsNote } from '../services/agent-note'
 import type {
   Form_Field,
   Form_Info,
+  Model_Ref,
   Prompt_FileAttachment,
   Session_StructuredError,
   Tool_Content
@@ -236,16 +238,27 @@ function attachmentBlock(file: Prompt_FileAttachment): ContentBlock | null {
     : { type: 'document', mediaType: 'application/pdf', ...ref, ...fileName }
 }
 
+/** The model a step ran on, as `providerID/id`; the variant is a sampling preset, not an identity. */
+export function modelLabel(ref: Model_Ref): string {
+  return `${ref.providerID}/${ref.id}`
+}
+
 /**
  * A delivered user prompt as the transcript row the live echo also builds:
  * attachments first, then the text (`buildUserContentBlocks` order). The id
  * is the inbox id, which is the stored `user` row's id (opencode projects
  * `session.inbox.delivered` into that row; `core/src/session/projector.ts`).
+ *
+ * `fromHistory`: a stored row whose text is a delivered session message is a
+ * note. Only the cold read may recognise it by text; the live feed recognises
+ * the items ClaudeUI posted by their inbox id (OpencodeSession.onUserMessage),
+ * so a user who types the wrapper is still the user.
  */
 export function userChatMessage(
   id: string,
   prompt: { readonly text: string; readonly files?: readonly Prompt_FileAttachment[] },
-  timestamp: number
+  timestamp: number,
+  fromHistory = false
 ): ChatMessage | null {
   const content: ContentBlock[] = []
   for (const file of prompt.files ?? []) {
@@ -253,7 +266,9 @@ export function userChatMessage(
     if (block) content.push(block)
   }
   if (prompt.text) content.push({ type: 'text', text: prompt.text })
-  return content.length > 0 ? { id, role: 'user', content, timestamp } : null
+  if (content.length === 0) return null
+  const row: ChatMessage = { id, role: 'user', content, timestamp }
+  return fromHistory ? (wrappedUserRowAsNote(row) ?? row) : row
 }
 
 // --- Compaction -------------------------------------------------------------

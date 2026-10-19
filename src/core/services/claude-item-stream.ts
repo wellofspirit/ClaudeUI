@@ -5,7 +5,7 @@ type Owner = string | undefined
 
 export interface ClaudeNativeStreamEvent {
   type?: string
-  message?: { id?: string; content?: unknown }
+  message?: { id?: string; model?: string; content?: unknown }
   index?: number
   content_block?: Record<string, unknown>
   delta?: Record<string, unknown>
@@ -22,6 +22,8 @@ interface MessageState {
   owner: Owner
   messageId: string
   timestamp: number
+  /** The model the message ran on, from `message_start` or a snapshot. */
+  model?: string
   blocks: BlockState[]
   terminalSealed?: boolean
   /** `message_delta`'s `stop_reason`; absent until one arrives (or never, when the stream is cut). */
@@ -125,6 +127,9 @@ export class ClaudeItemStreamLifecycle {
         owner,
         messageId,
         timestamp: Date.now(),
+        ...(typeof event.message?.model === 'string' && event.message.model
+          ? { model: event.message.model }
+          : {}),
         blocks: [],
         confirmedToolUseIds: new Set()
       })
@@ -233,6 +238,7 @@ export class ClaudeItemStreamLifecycle {
     if (this.invalidated.has(messageKey(owner, message.id))) return 'drop'
     const state = this.messages.get(ownerKey(owner))
     if (!state || state.messageId !== message.id) return 'none'
+    if (message.model) state.model = message.model
     // Before any placement can fail: a snapshot that falls through to the
     // caller's ordinary upsert still proves the call is real.
     for (const block of message.content) {
@@ -373,7 +379,8 @@ export class ClaudeItemStreamLifecycle {
       id: state.messageId,
       role: 'assistant',
       content: state.blocks.map((entry) => entry.block),
-      timestamp: state.timestamp
+      timestamp: state.timestamp,
+      ...(state.model ? { model: state.model } : {})
     }
   }
 

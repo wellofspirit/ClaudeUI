@@ -9,6 +9,8 @@ import type {
 import type { ToolView } from '../../../../shared/tool-kinds'
 import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
+import { useSessionAgentTypes } from '../../hooks/useAgentRoster'
+import { ResumedBadge } from '../agents/ResumedBadge'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { SubagentOutputBody } from './SubagentOutputBody'
 import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
@@ -16,10 +18,17 @@ import { ApprovalButtons } from './ApprovalButtons'
 import { PermissionDenialChip, PermissionDenialStrip } from './tool-registry/PermissionDenial'
 import { ToolReviewChip, ToolReviewStrip, canApproveBlock } from './tool-registry/ToolReview'
 import { deriveTaskState, latestNotification } from './task-state'
-import { modelDisplayName } from '../../lib/model-display-name'
 import { requestSubagentTranscript } from '../../lib/subagent-prefetch'
 import { useSubagentPending } from '../../hooks/useSubagentPending'
 import { dispatchLabel } from '../../../../shared/tool-kinds'
+import { modelTier, type ModelTier } from '../../../../shared/model-tier'
+import {
+  agentModelShortName,
+  latestMessageModel,
+  resolveAgentModel,
+  useParentModel
+} from '../../lib/agent-model'
+import { MODEL_TIER_TEXT_CLASS } from '../../lib/model-tier-class'
 import {
   AGENT_CHIP_CLASS,
   AgentTile,
@@ -227,11 +236,12 @@ const MODEL_FLOOR_MIN_CHARS = 11
  * usage and Open in panel at the right. The collapsed card and the expanded card
  * both end in it; only the wrapper differs (`className`).
  *
- * The type (ADR-094) is its tile: the engine's default type has none, and
- * neither a chip nor a tile is drawn. Below 480px it is the 16px letter tile
- * alone; wide, one element draws a chip in the type's colour, led by that same
- * tile and followed by the name, so phone and desktop read alike. A dispatch is
- * the X tile.
+ * The type (ADR-094) is its tile, the bot and the type's letters. Below 480px
+ * it is that 16px tile alone; wide, one element draws a chip in the type's
+ * colour, led by that same tile and followed by the name, so phone and desktop
+ * read alike. A dispatch is the bot and an X. The engine's default type, and an
+ * agent with no type, is the muted bot tile alone at every width: it names
+ * nothing, so there is no name to show and no tint to draw.
  *
  * Every chip is `whitespace-nowrap shrink-0` except the model, the one that
  * gives way: at phone width a chip breaking mid-token is worse than a truncated
@@ -250,6 +260,7 @@ function TaskFooter({
   tile,
   model,
   modelName,
+  tier,
   isBackground,
   runIndex,
   usage,
@@ -257,12 +268,14 @@ function TaskFooter({
   onOpenPanel
 }: {
   className: string
-  /** The type tile's spec; `null` for the default type (no tile, no chip). */
-  tile: AgentTileSpec | null
+  /** The type tile's spec: the bot alone (no `colorId`) for the default type and an untyped agent. */
+  tile: AgentTileSpec
   /** The raw model id, or a dispatch's "<engine> · <model>". */
   model: string | null
   /** The model's catalog name, when the picker has one; the raw id otherwise. */
   modelName: string | undefined
+  /** The model's tier when tier colours are on and the model has one. */
+  tier: ModelTier | undefined
   isBackground: boolean
   runIndex: number
   usage: ParsedUsage | null | undefined
@@ -271,22 +284,25 @@ function TaskFooter({
 }): React.JSX.Element {
   return (
     <div className={`${className} ${NARROW_WRAP}`}>
-      {tile && (
-        // One element, two faces (ADR-094): the tile alone below 480px, a chip in
-        // the type's colour wide. The chip's padding and tint drop away narrow.
-        <span
-          data-testid="TaskCard.type"
-          className={`inline-flex items-center gap-1 text-[10px] font-mono pl-0.5 pr-1.5 py-px rounded whitespace-nowrap shrink-0 @max-[480px]/taskcard:p-0 @max-[480px]/taskcard:bg-transparent ${AGENT_CHIP_CLASS[tile.colorId]}`}
-        >
-          <AgentTile
-            testId="TaskCard.typeTile"
-            letter={tile.letter}
-            colorId={tile.colorId}
-            title={tile.title}
-          />
-          <span className={NARROW_ONLY_HIDE}>{tile.label}</span>
-        </span>
-      )}
+      {/* One element, two faces (ADR-094): the tile alone below 480px, a chip in the
+          type's colour wide. The chip's padding and tint drop away narrow, and for
+          the muted bot (no colour, no name) at every width. */}
+      <span
+        data-testid="TaskCard.type"
+        className={`inline-flex items-center gap-1 text-[10px] font-mono rounded whitespace-nowrap shrink-0 ${
+          tile.colorId
+            ? `pl-0.5 pr-1.5 py-px @max-[480px]/taskcard:p-0 @max-[480px]/taskcard:bg-transparent ${AGENT_CHIP_CLASS[tile.colorId]}`
+            : ''
+        }`}
+      >
+        <AgentTile
+          testId="TaskCard.typeTile"
+          letter={tile.letter}
+          colorId={tile.colorId}
+          title={tile.title}
+        />
+        {tile.colorId && <span className={NARROW_ONLY_HIDE}>{tile.label}</span>}
+      </span>
       {isBackground && (
         // One chip, two faces: the word wide, the tray icon below 480px (a word-only chip
         // left the ↗ alone on row 2 at chat ~1.22). The glyph is shared with Send to
@@ -305,8 +321,11 @@ function TaskFooter({
       {model && (
         <span
           data-testid="TaskCard.model"
+          data-model-tier={tier}
           title={model}
-          className={`text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary ${
+          className={`text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary ${
+            tier ? MODEL_TIER_TEXT_CLASS[tier] : 'text-text-secondary'
+          } ${
             (modelName ?? model).length >= MODEL_FLOOR_MIN_CHARS
               ? 'min-w-[5rem] truncate @max-[480px]/taskcard:basis-[5rem] @max-[480px]/taskcard:grow @max-[480px]/taskcard:max-w-fit'
               : 'shrink-0 whitespace-nowrap'
@@ -315,15 +334,7 @@ function TaskFooter({
           {modelName ?? model}
         </span>
       )}
-      {runIndex > 1 && (
-        <span
-          data-testid="TaskCard.resumed"
-          className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent whitespace-nowrap shrink-0"
-          title="This agent was sent a message after it finished, and ran again"
-        >
-          resumed ×{runIndex - 1}
-        </span>
-      )}
+      <ResumedBadge runIndex={runIndex} testId="TaskCard.resumed" />
       {usage && (
         <span
           {...TOOL_OUTPUT_SCOPE}
@@ -392,6 +403,8 @@ export function TaskCard({
   const backgroundTasksEnabled = useActiveSession((s) => s.status.capabilities.backgroundTasks)
   const engineId = useActiveSession((s) => s.status.engineId)
   const availableModels = useSessionStore((s) => s.availableModels)
+  const tierColors = useSessionStore((s) => s.settings.agentModelTierColors)
+  const parentModel = useParentModel()
   const [expanded, setExpanded] = useState(false)
 
   const toolUseId = block.toolUseId
@@ -456,13 +469,31 @@ export function TaskCard({
   // Read display fields from the engine-neutral view (not block.toolInput)
   const description = (view.description || view.prompt || '').slice(0, 120)
   const prompt = view.prompt
-  // The type tile (ADR-094): a dispatch is an X, the engine's default type has
-  // none. `view.subagent` is a TYPE on every engine, and a Codex spawn has none.
-  const tile = useAgentTile(engineId, view.subagent, view.dispatch)
-  // A dispatch has no model of its own to name: its chip says where it went.
-  const model = view.dispatch ? dispatchLabel(view.dispatch) : (view.model ?? null)
+  // The type tile (ADR-094): a dispatch is the bot and an X, the engine's default type
+  // and an untyped agent the bot alone. `view.subagent` is a TYPE on every engine, and
+  // a Codex spawn has none.
+  const sessionTypes = useSessionAgentTypes()
+  const tile = useAgentTile(engineId, view.subagent, view.dispatch, sessionTypes)
+  // The model the agent runs on (`resolveAgentModel`, the roster's rule): the newest
+  // one its own messages report, else the one the spawn asked for. A dispatch's chip
+  // says where it went, and the model it ran on once it reports one.
+  const resolvedModel = resolveAgentModel({
+    latestModel: latestMessageModel(msgs),
+    requested: view.model,
+    engine: engineId,
+    parentModel,
+    dispatch: view.dispatch
+  })
+  const model = view.dispatch
+    ? dispatchLabel({ engine: view.dispatch.engine, model: resolvedModel })
+    : (resolvedModel ?? null)
+  // The picker's name for it, else the family short name of a concrete Claude id
+  // ("Opus 5.5"), else the id itself (an id no one names).
   const modelName =
-    model && !view.dispatch ? modelDisplayName(availableModels, engineId, model) : undefined
+    resolvedModel && !view.dispatch
+      ? agentModelShortName(availableModels, engineId, resolvedModel)
+      : undefined
+  const tier = tierColors ? modelTier(resolvedModel) : undefined
 
   const progress = taskProgressMap[toolUseId]
   const startedAt = isRunning ? activeTasks[toolUseId]?.startedAt : undefined
@@ -603,6 +634,7 @@ export function TaskCard({
     tile,
     model,
     modelName,
+    tier,
     isBackground,
     runIndex,
     usage,

@@ -892,7 +892,8 @@ Load-bearing sub-rules:
   they re-name it.
 - **Cross-session messages are never user intent** (`<cross-session-message>`,
   peer-session framing). Relaying an action a peer was blocked from is named
-  explicitly: _"cross-session permission laundering"_ → block.
+  explicitly: _"cross-session permission laundering"_ → block. How a peer turn
+  becomes a non-user frame in the transcript builder: 15 §15.2.9.
 - **Host-context lines**: only `host_context_live` may carry user intent, and
   only for SOFT rules (§5).
 - **Adversarial-pattern rules** invert the bar: the must-name item **is the

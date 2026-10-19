@@ -355,6 +355,24 @@ vi.mock('../../services/cross-engine-dispatcher', () => ({
   },
   crossEngineDispatchAvailable: mockCrossEngineDispatchAvailable
 }))
+// The session tools (slice 2). The service behind them has its own suite; here the real
+// `sessionToolsGate` answers unless a test replaces it, while running a tool and the audit
+// row are spies (this file mocks fs/os, which the real service reads).
+const sessionToolsDouble = vi.hoisted(() => ({
+  gate: null as null | ((...args: unknown[]) => unknown),
+  run: vi.fn(),
+  audit: vi.fn()
+}))
+vi.mock('../../services/session-tools', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/session-tools')>()
+  return {
+    ...actual,
+    sessionToolsGate: (...args: Parameters<typeof actual.sessionToolsGate>) =>
+      sessionToolsDouble.gate ? sessionToolsDouble.gate(...args) : actual.sessionToolsGate(...args),
+    runSessionTool: (...args: unknown[]) => sessionToolsDouble.run(...args),
+    auditSessionToolDenial: (...args: unknown[]) => sessionToolsDouble.audit(...args)
+  }
+})
 vi.mock('../PiBridgeHost', () => ({
   PiBridgeHost: MockPiBridgeHost,
   writeBridgeExtension: mockWriteBridgeExtension
@@ -424,10 +442,17 @@ vi.mock('../../services/ui-config', async (importOriginal) => ({
 
 import { allowRuleActionFor, PiSession } from '../PiSession'
 import { allowRuleGate } from '../../automode/allow-rule-gate'
+import { slimTranscript } from '../../automode/classifier'
 import { piMcpName } from '../pi-mcp-bridge'
 import { PLAN_MODE_DENY_REASON } from '../permission-engine'
 import { loadPiAgentRegistry, type PiAgentDefinition } from '../pi-agent-registry'
 import { logger } from '../../services/logger'
+import { configureSessionTools } from '../../services/session-tools'
+import {
+  SESSION_TOOL_NAMES,
+  sessionToolDescriptions,
+  sessionToolsGuidanceParts
+} from '../../../shared/session-tools-description'
 import { onHostPlatform } from '../../../test/helpers/host-platform'
 import { READ_ONLY_REVIEW_RATIONALE } from '../../automode/denial-tracker'
 /** The hold window the held-card tests set (`blockHoldSeconds: 120`). */
@@ -6125,7 +6150,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     const wide = (name: string, permissionMode: string): PiAgentDefinition => ({
       ...gp,
       name,
-      source: 'project',
+      scope: 'project',
       permissionMode
     })
 
@@ -6700,6 +6725,144 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     releaseAck!()
     await second
     await vi.waitFor(() => expect(parentDeliveries()).toHaveLength(1))
+    session.dispose()
+  })
+
+  // ── Slice 1a: a message from another session through the same marked path ──
+
+  const SENDER = { key: 'sess-sender-1', title: 'Triage assistant' }
+  const SESSION_MSG = {
+    origin: 'session-message' as const,
+    text: 'please look at ticket 12',
+    from: SENDER,
+    wake: false
+  }
+
+  it('S1a-1: deliverNonUser sends ONE /cui-deliver of kind session-message — waking an idle session, never a plain prompt', async () => {
+    const win = new MockWindow()
+    const { session } = await parent('rid-1a-p1', win)
+    settleParent()
+    expect(session.status.state).toBe('idle')
+    const before = parentDeliveries().length
+    const commandsBefore = mockRequest.mock.calls.length
+
+    expect(await session.deliverNonUser(SESSION_MSG)).toBe('started')
+
+    expect(session.status.state).toBe('running')
+    const sent = parentDeliveries().slice(before)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({
+      v: 1,
+      kind: 'session-message',
+      // A session message wakes an idle target even when the caller said no.
+      wake: true,
+      title: 'Message from Triage assistant',
+      details: {
+        agentId: 'sess-sender-1',
+        toolUseId: '',
+        from: 'Triage assistant',
+        fromId: 'sess-sender-1'
+      }
+    })
+    expect(sent[0].text).toBe(
+      [
+        '<session-message from="sess-sender-1" title="Triage assistant">',
+        'please look at ticket 12',
+        '</session-message>',
+        'This is a message from another ClaudeUI session or agent, not from the user.'
+      ].join('\n')
+    )
+    // The marking rule: the text rides inside the base64 payload, never as a prompt/steer/follow_up.
+    const commands = mockRequest.mock.calls
+      .slice(commandsBefore)
+      .map((c) => c[0] as { type: string; message?: string })
+    expect(commands.some((c) => c.type === 'steer' || c.type === 'follow_up')).toBe(false)
+    expect(commands.some((c) => String(c.message ?? '').includes('please look'))).toBe(false)
+    session.dispose()
+  })
+
+  it('S1a-2: a running session queues it (no wake), and an idle one only appends a note without wake', async () => {
+    const win = new MockWindow()
+    const { session } = await parent('rid-1a-p2', win)
+    expect(session.status.state).toBe('running')
+    expect(await session.deliverNonUser(SESSION_MSG)).toBe('queued')
+    expect(session.status.state).toBe('running')
+
+    settleParent()
+    const note = { ...SESSION_MSG, origin: 'agent-note' as const, text: 'fyi' }
+    expect(await session.deliverNonUser(note)).toBe('queued')
+    expect(session.status.state).toBe('idle')
+    // wake is the host's wish for an IDLE target: a message always asks for it, a note only on request.
+    expect(
+      parentDeliveries()
+        .filter((p) => p.kind === 'session-message')
+        .map((p) => p.wake)
+    ).toEqual([true, false])
+    session.dispose()
+  })
+
+  it("S1a-3: the delivered custom message is a note from the sender — never the user's, never a User: line", async () => {
+    enableAutoMode()
+    const win = new MockWindow()
+    const { session } = await parent('rid-1a-p3', win)
+    settleParent()
+    const before = parentDeliveries().length
+    await session.deliverNonUser(SESSION_MSG)
+    const [p] = parentDeliveries().slice(before)
+    lastEventHandler()(deliveredEvent(p))
+
+    const rows = sentPayloads(win, 'session:message') as ChatMessage[]
+    const row = rows.find((m) => m.role === 'system')!
+    expect(row.content).toEqual([
+      {
+        type: 'context_note',
+        title: 'Message from Triage assistant',
+        fragments: [
+          // The row shows the body, not the wrapper the model reads.
+          { text: 'please look at ticket 12', label: 'from another session, not from you' }
+        ]
+      }
+    ])
+    expect(sentChannels(win)).not.toContain('session:user-message')
+    expect(session.getMessages().filter((m) => m.role === 'user')).toHaveLength(1) // PARENT-INTENT only
+    expect(slimTranscript(session.getMessages())).not.toContain('ticket 12')
+    session.dispose()
+  })
+
+  it('S1a-4: with no pi process, or a command pi refuses, it is unavailable (the caller holds it) and a wake is undone', async () => {
+    const win = new MockWindow()
+    const { session } = await parent('rid-1a-p4', win)
+    settleParent()
+    mockRequest.mockImplementation((cmd: { type: string; message?: string }) =>
+      cmd.type === 'prompt' && String(cmd.message).startsWith('/cui-deliver ')
+        ? Promise.resolve({ type: 'response', command: 'prompt', success: false })
+        : defaultRequestImpl(cmd)
+    )
+    expect(await session.deliverNonUser(SESSION_MSG)).toBe('unavailable')
+    expect(session.status.state).toBe('idle')
+
+    mockRequest.mockImplementation(defaultRequestImpl)
+    session.cancel()
+    expect(await session.deliverNonUser(SESSION_MSG)).toBe('unavailable')
+    session.dispose()
+  })
+
+  it('S1a-5: a delivery that throws is logged, and the item is unavailable (held), not lost (m6); live only while the process is', async () => {
+    const win = new MockWindow()
+    const { session } = await parent('rid-1a-p5', win)
+    settleParent()
+    expect(session.isEngineLive()).toBe(true)
+    vi.mocked(logger.warn).mockClear()
+    ;(session as unknown as { sendDelivery: () => Promise<never> }).sendDelivery = () =>
+      Promise.reject(new Error('boom'))
+
+    expect(await session.deliverNonUser(SESSION_MSG)).toBe('unavailable')
+
+    expect(vi.mocked(logger.warn).mock.calls.some((c) => String(c[1]).includes('failed'))).toBe(
+      true
+    )
+    session.cancel()
+    expect(session.isEngineLive()).toBe(false)
     session.dispose()
   })
 
@@ -7739,5 +7902,267 @@ describe('allowRuleActionFor — auto-mode allow skip for pi MCP calls (ADR-096)
       rule: 'mcp__my-srv__get-issue'
     })
     expect(gateFor('mcp__my_srv__close_issue').allow).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The session tools (slice 2)
+// ---------------------------------------------------------------------------
+
+describe('PiSession — the session tools (slice 2)', () => {
+  const spawnEnv = (): NodeJS.ProcessEnv => {
+    const calls = MockPiRpcClient.mock.calls.filter((c) => !c[1]?.args?.includes('--no-session'))
+    return calls[calls.length - 1][1].env
+  }
+
+  beforeEach(() => {
+    configureSessionTools({} as never)
+    sessionToolsDouble.gate = null
+    sessionToolsDouble.run.mockReset().mockResolvedValue({ text: 'the answer' })
+    sessionToolsDouble.audit.mockReset()
+  })
+  afterEach(() => {
+    configureSessionTools(null)
+  })
+
+  async function started(mode?: string): Promise<{ win: MockWindow; session: PiSession }> {
+    const win = new MockWindow()
+    const session = new PiSession('rid-st', win as never, '/cwd', {})
+    await session.run('hi')
+    if (mode) await session.setPermissionMode(mode)
+    return { win, session }
+  }
+
+  describe('the bridge env', () => {
+    it('hands the bridge the nine tools (shared descriptions, closed schemas) and the guidance on session_list', async () => {
+      await started()
+      const specs = JSON.parse(spawnEnv().CLAUDEUI_PI_SESSION_TOOLS as string) as Array<{
+        name: string
+        description: string
+        parameters: { additionalProperties: boolean }
+        promptGuidelines?: string[]
+      }>
+      expect(specs.map((spec) => spec.name)).toEqual([...SESSION_TOOL_NAMES])
+      const descriptions = sessionToolDescriptions({ ownMessageTool: 'send_message' })
+      for (const spec of specs) {
+        expect(spec.description).toBe(descriptions[spec.name as keyof typeof descriptions])
+        expect(spec.parameters.additionalProperties).toBe(false)
+      }
+      // pi's own teammate tool is named in session_message, so the model cannot take one for the other.
+      expect(specs.find((spec) => spec.name === 'session_message')!.description).toContain(
+        'reached with send_message, not with this tool'
+      )
+      const { intro, bullets } = sessionToolsGuidanceParts({ toolPrefix: '' })
+      expect(specs.filter((spec) => spec.promptGuidelines).map((spec) => spec.name)).toEqual([
+        'session_list'
+      ])
+      expect(specs[0].promptGuidelines).toEqual([intro, ...bullets])
+    })
+
+    it('omits the variable when the host did not wire the session tools', async () => {
+      configureSessionTools(null)
+      await started()
+      expect(spawnEnv()).not.toHaveProperty('CLAUDEUI_PI_SESSION_TOOLS')
+    })
+  })
+
+  describe('/hosted-tool', () => {
+    it("runs the service as this session's root agent once the gate allowed the call; the grant is one-shot", async () => {
+      await started('acceptEdits')
+      expect(await gate('c-list', 'session_list', { scope: 'project' })).toEqual({
+        behavior: 'allow'
+      })
+      const out = await hostedTool('session_list', { scope: 'project' }, 'c-list')
+      expect(out).toEqual({ content: [{ type: 'text', text: 'the answer' }] })
+      expect(sessionToolsDouble.run).toHaveBeenCalledTimes(1)
+      const [caller, tool, input] = sessionToolsDouble.run.mock.calls[0]
+      expect(caller).toMatchObject({
+        routingId: 'rid-st',
+        engine: 'pi',
+        cwd: '/cwd',
+        permissionMode: 'acceptEdits',
+        toolUseId: 'c-list'
+      })
+      expect(await caller.callOwner!('c-list')).toBe('root')
+      expect(tool).toBe('session_list')
+      expect(input).toEqual({ scope: 'project' })
+      // A second execute with the same id has no grant left.
+      const again = await hostedTool('session_list', { scope: 'project' }, 'c-list')
+      expect(again.isError).toBe(true)
+      expect(sessionToolsDouble.run).toHaveBeenCalledTimes(1)
+    })
+
+    it('refuses a call the gate never saw — the bearer token alone cannot run a session tool', async () => {
+      await started()
+      const out = await hostedTool('session_message', { session: 's-a', message: 'hi' }, 'c-forged')
+      expect(out.isError).toBe(true)
+      expect(sessionToolsDouble.run).not.toHaveBeenCalled()
+    })
+
+    it('the service is told whose call the grant was minted for: a subagent-owned grant is run as a subagent', async () => {
+      const { session } = await started()
+      // The gate's own mint is always the root's; a host-run child's grants say `subagent`
+      // (pi-subagents childGate). The seam is the grant, not a constant.
+      const grants = (
+        session as unknown as {
+          hostedGrants: { mint: (id: string, tool: string, owner?: 'root' | 'subagent') => boolean }
+        }
+      ).hostedGrants
+      grants.mint('c-sub', 'session_message', 'subagent')
+      await hostedTool('session_message', { session: 's-a', message: 'hi' }, 'c-sub')
+      const [caller] = sessionToolsDouble.run.mock.calls[0]
+      expect(await caller.callOwner!('c-sub')).toBe('subagent')
+    })
+
+    it('a grant for one tool does not run another (same call id)', async () => {
+      await started()
+      await gate('c-x', 'session_list', {})
+      const out = await hostedTool('session_stop', { session: 's-a' }, 'c-x')
+      expect(out.isError).toBe(true)
+      expect(sessionToolsDouble.run).not.toHaveBeenCalled()
+    })
+
+    it('a service error comes back as an error result', async () => {
+      await started()
+      sessionToolsDouble.run.mockResolvedValue({ text: 'Refused: no', isError: true })
+      await gate('c-e', 'session_usage', {})
+      expect(await hostedTool('session_usage', {}, 'c-e')).toEqual({
+        content: [{ type: 'text', text: 'Refused: no' }],
+        isError: true
+      })
+    })
+  })
+
+  describe('the gate', () => {
+    it('a read the gate allows (session_list) needs no card', async () => {
+      const { win } = await started()
+      expect(await gate('c-1', 'session_list', {})).toEqual({ behavior: 'allow' })
+      expect(sentPayloads(win, 'session:approval-request')).toHaveLength(0)
+    })
+
+    it("plan mode refuses an acting tool with the gate's reason, audits it, and mints no grant", async () => {
+      const { win } = await started('plan')
+      const decision = await gate('c-p', 'session_start', { prompt: 'x', background: 'y' })
+      expect(decision).toMatchObject({
+        behavior: 'deny',
+        reason: expect.stringContaining('not available in plan mode')
+      })
+      expect(sentPayloads(win, 'session:approval-request')).toHaveLength(0)
+      expect(sessionToolsDouble.audit).toHaveBeenCalledTimes(1)
+      expect(sessionToolsDouble.audit.mock.calls[0][1]).toBe('session_start')
+      expect((await hostedTool('session_start', {}, 'c-p')).isError).toBe(true)
+      expect(sessionToolsDouble.run).not.toHaveBeenCalled()
+    })
+
+    it("calls the gate as this chat in its live mode, with the call's input and no agent id", async () => {
+      const seen = vi.fn(() => ({ behavior: 'allow' }))
+      sessionToolsDouble.gate = seen
+      await started('acceptEdits')
+      await gate('c-g', 'session_message', { session: 's-a', message: 'hi' })
+      const [caller, tool, input, ctx] = seen.mock.calls[0] as unknown as [
+        Record<string, unknown>,
+        string,
+        unknown,
+        unknown
+      ]
+      expect(caller).toMatchObject({
+        routingId: 'rid-st',
+        engine: 'pi',
+        cwd: '/cwd',
+        permissionMode: 'acceptEdits'
+      })
+      expect(tool).toBe('session_message')
+      expect(input).toEqual({ session: 's-a', message: 'hi' })
+      expect(ctx).toEqual({})
+    })
+
+    it('an "ask" is a card with no always-allow; a session-allow click remembers nothing; the call then runs', async () => {
+      sessionToolsDouble.gate = () => ({ behavior: 'ask' })
+      const { win, session } = await started()
+      const first = gate('c-a1', 'session_read', { session: 's-other' })
+      await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request')).toHaveLength(1))
+      const card = sentPayloads(win, 'session:approval-request')[0] as {
+        requestId: string
+        toolName: string
+        toolUseId: string
+      }
+      expect(card).toMatchObject({ toolName: 'session_read', toolUseId: 'c-a1' })
+      expect(card).not.toHaveProperty('suggestions')
+      session.resolveApproval(card.requestId, 'allowForSession', undefined, [
+        {
+          type: 'addRules',
+          behavior: 'allow',
+          destination: 'localSettings',
+          rules: [{ toolName: 'session_read' }]
+        }
+      ])
+      expect(await first).toEqual({ behavior: 'allow' })
+      // Nothing was persisted, and the next call asks again.
+      expect(mockSaveClaudePermissions).not.toHaveBeenCalled()
+      const second = gate('c-a2', 'session_read', { session: 's-other' })
+      await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request')).toHaveLength(2))
+      session.resolveApproval(
+        (sentPayloads(win, 'session:approval-request')[1] as { requestId: string }).requestId,
+        'deny'
+      )
+      expect((await second).behavior).toBe('deny')
+      // The approved call ran under its minted grant.
+      expect(
+        (await hostedTool('session_read', { session: 's-other' }, 'c-a1')).isError
+      ).toBeUndefined()
+      expect(sessionToolsDouble.run).toHaveBeenCalledTimes(1)
+    })
+
+    it('a user deny rule in the Claude spelling holds before the gate, with the rule named', async () => {
+      mockLoadClaudePermissions.mockReturnValue({
+        allow: [],
+        deny: ['mcp__claude-ui-sessions'],
+        ask: [],
+        additionalDirectories: [],
+        defaultMode: undefined
+      })
+      sessionToolsDouble.gate = () => {
+        throw new Error('the gate must not be asked')
+      }
+      await started()
+      expect(await gate('c-d', 'session_stop', { session: 's-a' })).toEqual({
+        behavior: 'deny',
+        reason: 'Denied by permission rule: mcp__claude-ui-sessions'
+      })
+      expect(sessionToolsDouble.audit).toHaveBeenCalledTimes(1)
+    })
+
+    it('auto mode never reaches the judge: an ask goes to the human', async () => {
+      mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true } })
+      sessionToolsDouble.gate = () => ({ behavior: 'ask' })
+      const { win } = await started('auto')
+      void gate('c-j', 'session_get', { session: 's-x' })
+      await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request')).toHaveLength(1))
+      expect(judgeCalls).toHaveLength(0)
+      expect(sentPayloads(win, 'session:tool-review')).toHaveLength(0)
+    })
+
+    it('a host-run subagent child is refused whatever the gate would say, and audited', async () => {
+      const seen = vi.fn(() => ({ behavior: 'allow' }))
+      sessionToolsDouble.gate = seen
+      const { session } = await started()
+      const decision = await (
+        session as unknown as {
+          gateChild: (
+            scope: unknown,
+            payload: unknown
+          ) => Promise<{ behavior: string; reason?: string }>
+        }
+      ).gateChild(
+        {},
+        { toolCallId: 'c-child', toolName: 'session_message', input: { session: 's-a' } }
+      )
+      expect(decision).toMatchObject({
+        behavior: 'deny',
+        reason: expect.stringContaining('main agent, not by a subagent')
+      })
+      expect(seen).not.toHaveBeenCalled()
+      expect(sessionToolsDouble.audit).toHaveBeenCalledTimes(1)
+    })
   })
 })

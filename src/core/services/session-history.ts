@@ -41,7 +41,7 @@ import {
   taskNotificationNoteTitle,
   type ParsedTaskNotification
 } from './task-notification-xml'
-import { agentNoteMessage } from './agent-note'
+import { agentNoteMessage, peerRowParts, sessionMessageNote } from './agent-note'
 import { queuedCommandText } from '../sdk/queued-command-text'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
@@ -1419,6 +1419,22 @@ export async function loadSessionHistory(
           const content = obj.message?.content
           if (!content) return
 
+          // A peer turn — another session's message — is `isMeta` too, but it is
+          // part of the conversation: a note, not dropped (slice 1a).
+          const peer = peerRowParts(obj, content)
+          if (peer) {
+            messages.push(
+              sessionMessageNote({
+                id: obj.uuid || `peer-${messages.length}`,
+                fromTitle: peer.fromTitle,
+                native: peer.native,
+                text: peer.body,
+                timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+              })
+            )
+            return
+          }
+
           // Meta messages (skill context injections, system reminders) are not human input.
           // Drop unless they carry tool_result blocks, which are real conversation data.
           const hasMetaToolResult =
@@ -1644,7 +1660,10 @@ export async function loadSessionHistory(
             id: messageId,
             role: 'assistant',
             content: blocks,
-            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now(),
+            ...(typeof betaMessage.model === 'string' && betaMessage.model
+              ? { model: betaMessage.model }
+              : {})
           }
 
           if (existingIdx >= 0) {
@@ -2103,7 +2122,10 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
             id: messageId,
             role: 'assistant',
             content: blocks,
-            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now(),
+            ...(typeof betaMessage.model === 'string' && betaMessage.model
+              ? { model: betaMessage.model }
+              : {})
           }
           if (existingIdx >= 0) {
             const oldBlocks = messages[existingIdx].content

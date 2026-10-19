@@ -1607,6 +1607,21 @@ export const SECTIONS: Section[] = [
             onChange={(v) => u({ showAgentTab: v })}
           />
         )
+      },
+      {
+        key: 'agentModelTierColors',
+        label: 'Colour agents by model tier',
+        keywords: 'agents subagents roster task card model tier colour color name',
+        render: (s, u) => (
+          <SettingsToggle
+            testid="SettingsAgentModelTierColors"
+            label="Colour agents by model tier"
+            description="Colours an agent's name in the roster, and the model on its task card, by the tier of the model it runs on. Models outside the four tiers stay plain."
+            {...appDefault(s, u, 'agentModelTierColors')}
+            checked={s.agentModelTierColors}
+            onChange={(v) => u({ agentModelTierColors: v })}
+          />
+        )
       }
     ]
   },

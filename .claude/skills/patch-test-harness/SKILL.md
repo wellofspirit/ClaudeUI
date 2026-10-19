@@ -291,15 +291,17 @@ No test. `voice_server_start` answers `{ port }` and opens a localhost TCP serve
 
 1. **Run the failing test directly:** `node patch/<name>/test.mjs`
 2. **Check message dump** — `dumpMessages()` shows all collected messages with types/subtypes/parent IDs/teammate IDs
-3. **No messages at all?** Check:
+3. **Every live test fails at its first "used the tool" check, or answers `authentication_failed` as plain text?** That is the login, not the patch: the suites authenticate as whatever login the spawned binary finds, and the default `~/.claude` login is often long expired on a machine where ClaudeUI manages the accounts. Hand the run the active ClaudeUI account's access token in `CLAUDE_CODE_OAUTH_TOKEN`, read by a script and never echoed (`docs/protocol-cc/12-maintenance.md` §12.1 step 7). Confirm with `CLAUDEUI_TEST_BIN=<Anthropic's official binary>`: if that fails the same way, the build is fine.
+4. **No messages at all?** Check:
    - Valid API key (ANTHROPIC_API_KEY env var)
    - Patches are applied: `node patch/apply-all.mjs`
    - Not running inside another Claude Code session (test-helpers.mjs deletes `CLAUDECODE` env var, but double-check)
-4. **Model not using tools?** Bump `effort` to `'high'`. Make the prompt more forceful. Check if the tool name has changed in the new SDK version.
-5. **MCP tool name mismatch?** MCP tools are prefixed as `mcp__<server-name>__<tool-name>`. Use `.includes()` or regex, never exact match on the bare tool name.
-6. **Control request returns unexpected shape?** The SDK wraps control_response in an envelope: `{ subtype, request_id, response: { ... } }`. Access the inner value with `result?.response?.fieldName` as fallback.
-7. **Timing issues with streaming tests?** The `onMessage` callback is not awaited, but this is OK because the SDK blocks on channel.next() between turns. If issues persist, add `await new Promise(r => setTimeout(r, N))` after toggle operations.
-8. **Verify the patch is in the build:**
+   - The child's stderr: the harness swallows it unless `DEBUG_HARNESS=1`
+5. **Model not using tools?** Bump `effort` to `'high'`. Make the prompt more forceful. Check if the tool name has changed in the new SDK version.
+6. **MCP tool name mismatch?** MCP tools are prefixed as `mcp__<server-name>__<tool-name>`. Use `.includes()` or regex, never exact match on the bare tool name.
+7. **Control request returns unexpected shape?** The SDK wraps control_response in an envelope: `{ subtype, request_id, response: { ... } }`. Access the inner value with `result?.response?.fieldName` as fallback.
+8. **Timing issues with streaming tests?** The `onMessage` callback is not awaited, but this is OK because the SDK blocks on channel.next() between turns. If issues persist, add `await new Promise(r => setTimeout(r, N))` after toggle operations.
+9. **Verify the patch is in the build:**
    ```bash
    grep -c "PATCHED:patch-name" vendor/claude-cli/cli.js
    ```

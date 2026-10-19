@@ -25,6 +25,7 @@
 
 import { itemAppendFrame, itemStreamKey } from '../../core/shared/sync/item-stream'
 import { SyncClient } from '../../core/shared/sync/sync-client'
+import type { SessionLinksPayload } from '../../shared/session-links'
 import {
   getSyncClient,
   setSyncClient,
@@ -43,6 +44,7 @@ import { resetHistoryLoadForTests } from '../../renderer/src/lib/session-history
 import type { CanonicalSessionState } from '../../core/shared/sync/state'
 import type {
   ChatMessage,
+  EngineId,
   SessionStatus,
   PendingApproval,
   TodoItem,
@@ -209,6 +211,8 @@ export function mirrorStoreIntoReplica(): void {
     customTitles: state.customTitles,
     worktreeInfoMap: state.worktreeInfoMap,
     sessionEngines: state.sessionEngines,
+    sessionLinks: state.sessionLinks,
+    sessionRefs: state.sessionRefs,
     hiddenSessions: state.hiddenSessionIds,
     hiddenProjects: state.hiddenProjectKeys,
     directories: state.directories,
@@ -262,8 +266,12 @@ export const seed = {
 
   directories: (directories: unknown[]) => emitSync('session:directories-changed', [directories]),
 
-  created: (routingId: string, data: { cwd?: string; resumeSessionId?: string } = {}) =>
-    emitSync('session:created', [routingId, data]),
+  links: (payload: SessionLinksPayload) => emitSync('session:link-changed', [payload]),
+
+  created: (
+    routingId: string,
+    data: { cwd?: string; resumeSessionId?: string; engineId?: EngineId } = {}
+  ) => emitSync('session:created', [routingId, data]),
 
   userMessage: (
     routingId: string,

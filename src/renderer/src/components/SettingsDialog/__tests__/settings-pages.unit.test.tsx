@@ -120,7 +120,15 @@ describe('PAGES structure', () => {
     const expected: Record<string, string[]> = {
       appearance: ['theme', 'layout', 'agents', 'diff', 'status-line', 'git-panel'],
       chat: ['tool-output', 'thinking', 'voice', 'git-actions'],
-      sessions: ['autonomy', 'permissions', 'judge', 'trust', 'retention'],
+      sessions: [
+        'autonomy',
+        'permissions',
+        'judge',
+        'trust',
+        'session-tools',
+        'context-pressure',
+        'retention'
+      ],
       advanced: ['logging', 'usage'],
       about: ['about'],
       models: [
@@ -452,7 +460,11 @@ describe('inventory guard', () => {
       'opencodeAgentColours',
       'piAgentColours',
       'codexAgentColours',
-      'dispatchTileColour'
+      'dispatchTileColour',
+      // Session tools, slice 4: when a long session should hand off.
+      'contextPressure',
+      // Session tools, host-wide switch.
+      'sessionTools'
     ])
 
     expect([...reachable].sort()).toEqual([...fromSections, ...local].sort())
@@ -707,10 +719,32 @@ describe('harnesses that do not run', () => {
   it('visibleGroups drops what serves only harnesses that do not run', () => {
     const ids = (runs: EngineRuns): string[] =>
       visibleGroups(pageOf('sessions'), undefined, runs).map((g) => g.id)
-    expect(ids(except())).toEqual(['autonomy', 'permissions', 'judge', 'trust', 'retention'])
+    expect(ids(except())).toEqual([
+      'autonomy',
+      'permissions',
+      'judge',
+      'trust',
+      'session-tools',
+      'context-pressure',
+      'retention'
+    ])
     // Trust & protection is read by the opencode and pi judges alone.
-    expect(ids(except('opencode', 'pi'))).toEqual(['autonomy', 'permissions', 'judge', 'retention'])
-    expect(ids(except('opencode', 'pi', 'codex'))).toEqual(['autonomy', 'permissions', 'retention'])
+    expect(ids(except('opencode', 'pi'))).toEqual([
+      'autonomy',
+      'permissions',
+      'judge',
+      'session-tools',
+      'context-pressure',
+      'retention'
+    ])
+    // Context pressure serves every harness, so it stays whatever runs.
+    expect(ids(except('opencode', 'pi', 'codex'))).toEqual([
+      'autonomy',
+      'permissions',
+      'session-tools',
+      'context-pressure',
+      'retention'
+    ])
     // The "opencode and pi" permissions row goes with them; the Claude rules stay.
     const permissions = group('sessions', 'permissions')
     expect(

@@ -13,6 +13,8 @@
  *   [dispatch]  call ClaudeUI's hosted `claudeui_dispatch_agent`; then echo the result
  *   [subdispatch] `subagent` tool call whose child prompt is `[dispatch]`
  *   [mockup]    call ClaudeUI's hosted `claudeui_create_mockup`; then echo the result
+ *   [sessiontool]  call ClaudeUI's hosted `claudeui_session_list`; then echo the result
+ *   [subsession]   `subagent` tool call whose child prompt is `[sessiontool]`
  *   [question]  `question` tool call (one single-choice question)
  *   [sub]       `subagent` tool call
  *   [subread]   `subagent` tool call whose child prompt is `[read]`
@@ -22,6 +24,8 @@
  *   [read]      `read` of `notes.txt`
  *   [readabs:<path>]  `read` of the ABSOLUTE path (no `]` in it) — outside-the-workspace reads
  *   [subexplore:<path>]  `subagent` call to the `explore` agent whose prompt is `[readabs:<path>]`
+ *   [subas:<agent>:<kind>]  `subagent` call to `<agent>` whose prompt is `[<kind>]` (read | edit | write);
+ *               `[subas:<agent>:readabs=<path>]` makes the child read that absolute path
  *   [edit]      `edit` of `notes.txt` (alpha → beta)
  *   [write]     `write` of `new.txt`
  *   [patch]     `patch` updating `notes.txt` (falls back to text when not offered)
@@ -250,6 +254,22 @@ export async function startFixtureProvider(
             agent: 'general'
           }
         )
+      if (text.includes('[subsession]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          {
+            description: 'contract session reader',
+            prompt: 'child lists sessions [sessiontool]',
+            agent: 'general'
+          }
+        )
+      if (text.includes('[sessiontool]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'claudeui_session_list'),
+          { scope: 'linked' }
+        )
       if (text.includes('[mcp]'))
         return streamToolCall(
           res,
@@ -302,6 +322,15 @@ export async function startFixtureProvider(
             agent: 'general',
             ...(sessionID ? { sessionID } : {})
           }
+        )
+      }
+      const subAs = /\[subas:([^:\]]+):(read|edit|write|readabs=[^\]]+)\]/.exec(text)
+      if (subAs) {
+        const kind = subAs[2].startsWith('readabs=') ? `readabs:${subAs[2].slice(8)}` : subAs[2]
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          { description: `contract ${subAs[1]}`, prompt: `child does [${kind}]`, agent: subAs[1] }
         )
       }
       if (text.includes('[subread]'))

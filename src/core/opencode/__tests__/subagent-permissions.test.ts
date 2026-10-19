@@ -7,7 +7,12 @@
  */
 import { describe, it, expect } from 'vitest'
 import { agentWhollyDenies, evaluateChildCall, childSessionRuleset } from '../subagent-permissions'
-import { buildSessionRuleset, wireOrder, type V2Rule } from '../permission-v2'
+import {
+  buildSessionRuleset,
+  SESSION_TOOLS_DENY_RULE,
+  wireOrder,
+  type V2Rule
+} from '../permission-v2'
 import { evaluateV2Call, v2ToolHidden } from '../wildcard'
 
 // ── opencode 2.x: the child's ruleset (ADR-097 §3, S6) ──────────────────────
@@ -100,10 +105,12 @@ describe('2.x subagent children — childSessionRuleset / agentWhollyDenies', ()
     expect(evaluateV2Call(rules, 'shell', ['git status'], 'linux')).toBe('deny')
   })
 
-  it('general (allow-all): only its own denies are restated after the parent; nothing else changes', () => {
+  it('general (allow-all): only its own denies (and the session tools hide) are restated after the parent; nothing else changes', () => {
     const session = parent('default')
     const child = childSessionRuleset(session, GENERAL_V2, 'linux')
-    expect(child).toEqual(wireOrder([...session, v('question', 'deny'), v('subagent', 'deny')]))
+    expect(child).toEqual(
+      wireOrder([...session, v('question', 'deny'), v('subagent', 'deny'), SESSION_TOOLS_DENY_RULE])
+    )
     expect(v2ToolHidden(effective(GENERAL_V2, child), 'question', 'linux')).toBe(true)
     expect(evaluateV2Call(effective(GENERAL_V2, child), 'edit', ['a.ts'], 'linux')).toBe('ask')
   })

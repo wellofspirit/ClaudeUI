@@ -60,6 +60,8 @@ export interface PiMapperState {
   sealedBlocks: Set<number>
   /** Stable presentation timestamp for the current synthesized message. */
   currentMessageTimestamp: number | null
+  /** `provider/model` the in-flight assistant message runs on, from its message_start. */
+  currentMessageModel: string | null
   /** Rejects late updates after a terminal message_end until the next message_start. */
   messageEnded: boolean
   /** Wall-clock run start (ms), set by the caller (PiSession) when a prompt is
@@ -95,6 +97,7 @@ export function createPiMapperState(): PiMapperState {
     openedBlocks: new Set(),
     sealedBlocks: new Set(),
     currentMessageTimestamp: null,
+    currentMessageModel: null,
     messageEnded: false,
     startTimeMs: 0,
     totalCostUsd: 0,
@@ -193,6 +196,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
         state.openedBlocks.clear()
         state.sealedBlocks.clear()
         state.currentMessageTimestamp = msg.timestamp ?? Date.now()
+        state.currentMessageModel = piModelLabel(msg)
         state.messageEnded = false
       }
       // user/bashExecution (and any other role) → ignore: the renderer already
@@ -295,7 +299,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
             kind: 'message',
             message: withThinkingDurations(
               {
-                ...buildPiChatMessage(messageId, content),
+                ...buildPiChatMessage(messageId, content, state.currentMessageModel),
                 timestamp: state.currentMessageTimestamp ?? Date.now()
               },
               state.thinkingDurationMs
@@ -335,7 +339,11 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
           : null
         const message = withThinkingDurations(
           {
-            ...buildPiChatMessage(messageId, msg.content),
+            ...buildPiChatMessage(
+              messageId,
+              msg.content,
+              piModelLabel(msg) ?? state.currentMessageModel
+            ),
             timestamp: state.currentMessageTimestamp ?? msg.timestamp ?? Date.now()
           },
           state.thinkingDurationMs
@@ -348,6 +356,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
         state.openedBlocks.clear()
         state.sealedBlocks.clear()
         state.currentMessageTimestamp = null
+        state.currentMessageModel = null
         state.messageEnded = true
         recordPiEditToolPaths(state, msg.content)
         // `usage` is guarded defensively: an errored/aborted turn (M-PI2) may
@@ -590,6 +599,7 @@ export function finishPiMessage(state: PiMapperState): PiMapperOutput[] {
   state.openedBlocks.clear()
   state.sealedBlocks.clear()
   state.currentMessageTimestamp = null
+  state.currentMessageModel = null
   state.messageEnded = true
   return message?.content.length ? [{ kind: 'item_seal', message }] : []
 }
@@ -630,7 +640,7 @@ function buildInFlightMessage(state: PiMapperState, messageId: string): ChatMess
   const visible = entries.map(([, block]) => block)
   return withThinkingDurations(
     {
-      ...buildPiChatMessage(messageId, visible),
+      ...buildPiChatMessage(messageId, visible, state.currentMessageModel),
       timestamp: state.currentMessageTimestamp ?? Date.now()
     },
     state.thinkingDurationMs
@@ -853,7 +863,8 @@ function extractPartialResultText(partialResult: PiToolExecutionPartialResult): 
  */
 export function buildPiChatMessage(
   messageId: string,
-  content: PiAssistantContentBlock[]
+  content: PiAssistantContentBlock[],
+  model?: string | null
 ): ChatMessage {
   const blocks: ContentBlock[] = content.map((block): ContentBlock => {
     if (block.type === 'text') return { type: 'text', text: block.text }
@@ -869,6 +880,12 @@ export function buildPiChatMessage(
     id: messageId,
     role: 'assistant',
     content: blocks,
-    timestamp: Date.now()
+    timestamp: Date.now(),
+    ...(model ? { model } : {})
   }
+}
+
+/** The model an assistant message ran on, as `provider/model`; null when pi reported neither. */
+export function piModelLabel(message: { provider?: string; model?: string }): string | null {
+  return message.provider && message.model ? `${message.provider}/${message.model}` : null
 }

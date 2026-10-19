@@ -13,8 +13,10 @@ import type {
   QueuedItem
 } from '../../shared/types'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
-import type { ISession } from './ISession'
+import type { ISession, NonUserItem } from './ISession'
 import { SessionQueue } from './session-queue'
+import { TurnOriginLedger } from './turn-origin-ledger'
+import { clientPromptReached } from './client-prompt-observer'
 import {
   BlockedCallLedger,
   blockedCallNudge,
@@ -23,6 +25,7 @@ import {
 import { internAttachments } from '../services/blob-store'
 import { dispatchedCostsByRouting } from '../services/db'
 import { logger } from '../services/logger'
+import { reholdNonUserItem } from '../services/session-delivery'
 import { emitEvent } from '../services/sync-host'
 import { localVoiceServer } from '../voice/local-voice-server'
 
@@ -101,6 +104,17 @@ export abstract class BaseSession implements ISession {
     this.send('session:tool-review', { toolUseId, review })
   )
 
+  /** Taint and agent-turn budget for non-user deliveries (slice 1a). */
+  readonly originLedger = new TurnOriginLedger()
+
+  /**
+   * Non-user items an engine took ("started"/"queued") that the model has not
+   * read yet, by the engine's own id for them (a Claude frame uuid, an opencode
+   * inbox id). If the engine then loses or refuses one, it goes back to the held
+   * inbox ({@link reholdNonUser}) instead of vanishing with the process.
+   */
+  protected readonly pendingNonUser = new Map<string, NonUserItem>()
+
   /** Serializes {@link flushQueuedItems} against overlapping boundary signals. */
   private flushingQueue = false
 
@@ -117,6 +131,14 @@ export abstract class BaseSession implements ISession {
     this.routingId = routingId
     this.win = win
     this.cwd = cwd
+    // The user's own queued prompt is what ends the "agent text since the user
+    // spoke" stretch — when the engine takes it, not when it is typed.
+    this.queue.onConsumed = (item) => {
+      const hostInstruction = item.origin === 'host-instruction'
+      const agentBrief = this.queue.isBrief(item)
+      this.originLedger.userPrompt({ hostInstruction, agentBrief })
+      if (!hostInstruction && !agentBrief) clientPromptReached(this.routingId)
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -221,9 +243,10 @@ export abstract class BaseSession implements ISession {
   enqueuePrompt(
     text: string,
     attachments?: AttachmentUpload[],
-    refs: AttachmentRef[] | undefined = internAttachments(attachments)
+    refs: AttachmentRef[] | undefined = internAttachments(attachments),
+    origin?: 'host-instruction' | 'agent-brief'
   ): void {
-    const item = this.queue.add(text, attachments, refs)
+    const item = this.queue.add(text, attachments, refs, origin)
     this.queue.emit()
     this.onPromptQueued(item)
   }
@@ -360,6 +383,42 @@ export abstract class BaseSession implements ISession {
   protected recallQueuedOnEngineLoss(): void {
     for (const item of this.queue.pending()) this.queue.setState(item, 'recalled')
     this.queue.emit()
+    this.reholdAllNonUser('the session ended')
+  }
+
+  /**
+   * Take a non-user item back from an engine that did not read it: out of
+   * {@link pendingNonUser}, its note (if one was painted) retracted, back in the
+   * held inbox, and the user told — like the user-queue path does. No-op for an
+   * id that is not pending, so every loss signal may call it. `quiet` is for an
+   * object that has already been replaced under its routing id (it must not
+   * emit there).
+   */
+  protected reholdNonUser(id: string, why: string, quiet = false): void {
+    const item = this.pendingNonUser.get(id)
+    if (!item) return
+    this.pendingNonUser.delete(id)
+    try {
+      reholdNonUserItem(this, item)
+    } catch (err) {
+      logger.warn(
+        'BaseSession',
+        `re-holding a message from ${item.from.key} failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    if (quiet) return
+    if (this.messageHistory.some((m) => m.id === id)) {
+      this.messageHistory = this.messageHistory.filter((m) => m.id !== id)
+      this.send('session:messages-retracted', { messageIds: [id] })
+    }
+    this.send(
+      'session:warning',
+      `A message from "${item.from.title || 'another session'}" was not delivered: ${why}. It is held for your next turn.`
+    )
+  }
+
+  protected reholdAllNonUser(why: string, quiet = false): void {
+    for (const id of [...this.pendingNonUser.keys()]) this.reholdNonUser(id, why, quiet)
   }
 
   /** Public wrapper over the protected send() — see ISession.emit doc comment. */

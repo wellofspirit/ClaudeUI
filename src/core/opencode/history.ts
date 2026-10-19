@@ -33,6 +33,7 @@ import type {
 } from './protocol-v2/openapi'
 import {
   compactionChatMessage,
+  modelLabel,
   subagentBackgrounded,
   subagentChildSession,
   SUBAGENT_TOOL_NAMES,
@@ -103,7 +104,8 @@ export function assistantChatMessage(row: Session_Message_Assistant): ChatMessag
     id: row.id,
     role: 'assistant',
     content: [...content, ...results],
-    timestamp: row.time.created
+    timestamp: row.time.created,
+    ...(row.model ? { model: modelLabel(row.model) } : {})
   }
 }
 
@@ -222,7 +224,7 @@ function convertInto(
   for (const row of rows) {
     if (row.type === 'user') {
       if (owner !== null) continue
-      const message = userChatMessage(row.id, row, row.time.created)
+      const message = userChatMessage(row.id, row, row.time.created, true)
       if (message) sink.push(message)
     } else if (row.type === 'compaction') {
       if (owner === null && row.status === 'completed')

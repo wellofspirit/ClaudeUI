@@ -58,6 +58,11 @@ import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kind
 import type { ContentBlock } from '../../../../../shared/types'
 import { isPiAsyncLaunchResult, piAgentResultModel } from '../../../../../shared/pi-agent-result'
 import { DEFAULT_SUBAGENT_TYPE } from '../../../../../shared/agent-type-colors'
+import {
+  isSessionToolName,
+  SESSION_TOOL_NAMES,
+  sessionToolMcpFields
+} from '../../../../../shared/session-tools-description'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -124,7 +129,9 @@ function piKindOf(toolName: string): ToolKind {
     case 'list_models':
       return 'note'
     default:
-      return 'unknown'
+      // The bridge's session tools (v15): the generic MCP row. Mirrors
+      // permission-engine.ts's piToolKind.
+      return isSessionToolName(toolName) ? 'mcp' : 'unknown'
   }
 }
 
@@ -136,7 +143,8 @@ interface PiEditEntry {
 function piNormalize(
   kind: ToolKind,
   input: Record<string, unknown> | undefined,
-  result?: ToolResultBlock
+  result?: ToolResultBlock,
+  toolName?: string
 ): ToolView {
   const inp = input ?? {}
 
@@ -350,7 +358,7 @@ function piNormalize(
     }
 
     case 'mcp':
-      return { kind: 'mcp', input: inp }
+      return { kind: 'mcp', input: inp, ...(toolName ? sessionToolMcpFields(toolName) : null) }
 
     case 'unknown':
     default:
@@ -380,7 +388,8 @@ const PI_DISPLAY_NAMES: Record<string, string> = {
   dispatch_agent: 'Dispatch',
   agent: 'Agent',
   subagent: 'Subagent',
-  list_models: 'Models'
+  list_models: 'Models',
+  ...Object.fromEntries(SESSION_TOOL_NAMES.map((name) => [name, 'Sessions']))
 }
 
 function piDisplayName(toolName: string): string {

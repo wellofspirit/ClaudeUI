@@ -17,6 +17,7 @@ files:
   # size and leaks local session data into any built distributable.
   - '!.cache/**'
   - '!.claude/**'
+  - '!.notes/**'
   - '!vendor/**'
   - '!docs/**'
   - '!patch/**'

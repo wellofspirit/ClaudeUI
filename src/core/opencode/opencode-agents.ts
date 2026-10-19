@@ -146,6 +146,9 @@ const BUILTIN_AGENTS: Record<string, { mode: OpencodeAgentMode; hidden?: boolean
   compaction: { mode: 'primary', hidden: true }
 }
 
+/** The built-in agent ids, for callers that only need to know which names opencode already holds. */
+export const OPENCODE_BUILTIN_AGENT_NAMES: readonly string[] = Object.keys(BUILTIN_AGENTS)
+
 // ─── Path helpers ─────────────────────────────────────────────────────────────
 
 /**

@@ -204,7 +204,7 @@ planned.
   opencode's copy; isolate a throwaway `~/.pi` for probes when possible.
 - **Gates (run from repo root):** `bun run typecheck && bun run lint && bun run test`, plus
   `PI_INTEGRATION_TESTS=1 bunx vitest run --project integration -t pi` (real binary; runs the
-  credential-gated tests on this machine). After any dep change: `bun run rebuild:native`.
+  credential-gated tests on this machine).
 - **Real-app drive** (verifier-electron / `scripts/app-shot.mjs`): `bun run build` then a Playwright
   `_electron` driver script in `.cache/verify/` (gitignored). Gotchas learned the hard way:
   sidebar `DirectoryItem`s are collapsed by default (click the group before asserting session rows);

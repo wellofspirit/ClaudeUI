@@ -4,7 +4,7 @@
  * Both surfaces are optional by owner ruling, so the two rows have to exist on
  * that page, write to the store, and actually take the surfaces off screen.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, act, fireEvent } from '@testing-library/react'
 import { useSessionStore, DEFAULT_SETTINGS } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
@@ -66,12 +66,17 @@ describe('agent surface settings', () => {
 
   it('lives in an Agents group on the Appearance page', () => {
     expect(agentsGroup().label).toBe('Agents')
-    expect(agentsGroup().items?.map((i) => i.key)).toEqual(['showAgentPill', 'showAgentTab'])
+    expect(agentsGroup().items?.map((i) => i.key)).toEqual([
+      'showAgentPill',
+      'showAgentTab',
+      'agentModelTierColors'
+    ])
   })
 
-  it('both default to on', () => {
+  it('all default to on', () => {
     expect(DEFAULT_SETTINGS.showAgentPill).toBe(true)
     expect(DEFAULT_SETTINGS.showAgentTab).toBe(true)
+    expect(DEFAULT_SETTINGS.agentModelTierColors).toBe(true)
   })
 
   it('each row writes its own key, and nothing else', async () => {
@@ -104,7 +109,35 @@ describe('agent surface settings', () => {
 
     fireEvent.click(screen.getByTestId('SettingsAgentPill'))
     fireEvent.click(screen.getByTestId('SettingsAgentTab'))
-    expect(patches).toEqual([{ showAgentPill: false }, { showAgentTab: false }])
+    fireEvent.click(screen.getByTestId('SettingsAgentModelTierColors'))
+    expect(patches).toEqual([
+      { showAgentPill: false },
+      { showAgentTab: false },
+      { agentModelTierColors: false }
+    ])
+  })
+
+  it('the model tier switch persists through the settings path every setting takes', async () => {
+    const save = vi.fn(async () => {})
+    Object.assign(window.api, { saveSettings: save })
+    const item = agentsGroup().items?.find((i) => i.key === 'agentModelTierColors')
+    if (!item) throw new Error('no model tier row in the Agents group')
+    const unused = {} as never
+    await act(async () => {
+      render(
+        item.render(
+          useSessionStore.getState().settings,
+          useSessionStore.getState().updateSettings,
+          unused,
+          unused,
+          unused,
+          unused
+        )
+      )
+    })
+    fireEvent.click(screen.getByTestId('SettingsAgentModelTierColors'))
+    expect(useSessionStore.getState().settings.agentModelTierColors).toBe(false)
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ agentModelTierColors: false }))
   })
 
   it('turning them off takes each surface off screen', async () => {

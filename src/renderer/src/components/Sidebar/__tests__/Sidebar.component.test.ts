@@ -1301,6 +1301,28 @@ describe('Sidebar FC', () => {
   })
 
   // -------------------------------------------------------------------------
+  // In-memory rows take their engine from the birth event
+  // -------------------------------------------------------------------------
+
+  it('shows a session with no sessionEngines entry as its BIRTH engine, not Claude', async () => {
+    // A session another client or the host created: `session:created` replicates
+    // its engine, but no model-bearing status has filled `sessionEngines` yet
+    // (Codex sends none before its first prompt).
+    await act(async () => {
+      await renderFC()
+    })
+    act(() => {
+      seed.created('remote-codex', { cwd: CWD, engineId: 'codex' })
+      seed.created('remote-claude', { cwd: CWD })
+    })
+
+    expect(useSessionStore.getState().sessionEngines['remote-codex']).toBeUndefined()
+    const rows = viewProps.augmentedDirs.flatMap((group) => group.sessions)
+    expect(rows.find((s) => s.sessionId === 'remote-codex')?.engineId).toBe('codex')
+    expect(rows.find((s) => s.sessionId === 'remote-claude')?.engineId).toBe('claude')
+  })
+
+  // -------------------------------------------------------------------------
   // 16. onDirectoriesChanged push event refreshes the sidebar
   // -------------------------------------------------------------------------
 

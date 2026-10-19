@@ -20,7 +20,8 @@ import type {
   EngineId,
   JudgeModelSupport,
   ListPlacesResult,
-  PermissionScope
+  PermissionScope,
+  PromptOrigin
 } from '../../shared/types'
 import {
   saveSessionConfig,
@@ -45,7 +46,10 @@ import { planClaudeProjectDelete } from '../../shared/claude-project-delete'
 import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import type { ISession } from '../providers/ISession'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
-import { getSessionMeta } from '../services/db'
+import { normalizeContextPressure } from '../../shared/context-pressure'
+import { deleteSessionMeta, getSessionMeta } from '../services/db'
+import { flushHeld, hasHeld } from '../services/session-delivery'
+import { noteClientPrompt } from '../services/session-links'
 import { describeJudgeModels } from '../automode/judge-route'
 
 // ---------------------------------------------------------------------------
@@ -126,13 +130,32 @@ export function sendPrompt(
   manager: SessionManager,
   routingId: string,
   prompt: string,
-  attachments?: AttachmentUpload[]
+  attachments?: AttachmentUpload[],
+  options: SendPromptOptions = {}
 ): void | Promise<void> {
   const session = manager.get(routingId)
   if (!session) throw new Error(`No session for routingId: ${routingId}`)
   const seeding = syncCore.pendingSeed(routingId) ?? reseedAfterExit(session, routingId)
-  if (!seeding) return deliverPrompt(manager, routingId, prompt, attachments)
-  return seeding.then(() => deliverPrompt(manager, routingId, prompt, attachments))
+  if (!seeding) return deliverPrompt(manager, routingId, prompt, attachments, options)
+  return seeding.then(() => deliverPrompt(manager, routingId, prompt, attachments, options))
+}
+
+/**
+ * What a prompt speaks for (slice 1a). `user` is the default: text the user typed.
+ * `host-instruction` is the host acting on the user's standing setting or click
+ * (context pressure): still a user-role row, labelled "Sent by ClaudeUI for you".
+ * Both reset the session's taint and agent-turn budget — the user spoke. A message
+ * from another session or an agent is never sent here: `session-delivery` carries
+ * it as a note.
+ */
+export interface SendPromptOptions {
+  origin?: PromptOrigin
+  /**
+   * The prompt is the brief a session tool gave a session it just started, not a
+   * client typing into it: the session stays "started by an agent" (it cannot
+   * start sessions itself) until a client prompt arrives.
+   */
+  agentBrief?: boolean
 }
 
 /**
@@ -173,23 +196,63 @@ function deliverPrompt(
   manager: SessionManager,
   routingId: string,
   prompt: string,
-  attachments?: AttachmentUpload[]
+  attachments?: AttachmentUpload[],
+  options: SendPromptOptions = {}
+): void | Promise<void> {
+  const session = manager.get(routingId)
+  if (!session) throw new Error(`No session for routingId: ${routingId}`)
+  // Items other sessions left for this one go ahead of the turn this prompt would
+  // start. The first starts it, so the prompt then queues behind it: an ordinary
+  // prompt sent to a session with a non-empty inbox lands as a queued item (queue
+  // card, then a steer row), not as an immediate turn.
+  //
+  // The taint/budget ledger is NOT reset here. The user speaking ends the "agent
+  // text since the user spoke" stretch only once the prompt starts a turn
+  // (`sendNow`, idle) or the engine takes it off the queue (`SessionQueue.
+  // onConsumed`): a prompt that merely queues behind an agent-started turn leaves
+  // that turn tainted.
+  if (!session.willQueue && hasHeld(session, routingId)) {
+    return flushHeld(manager, routingId).then(() =>
+      sendNow(manager, routingId, prompt, attachments, options)
+    )
+  }
+  return sendNow(manager, routingId, prompt, attachments, options)
+}
+
+function sendNow(
+  manager: SessionManager,
+  routingId: string,
+  prompt: string,
+  attachments: AttachmentUpload[] | undefined,
+  options: SendPromptOptions
 ): void | Promise<void> {
   const session = manager.get(routingId)
   if (!session) throw new Error(`No session for routingId: ${routingId}`)
   const refs = internAttachments(attachments)
+  const hostInstruction = options.origin === 'host-instruction'
   // Check before run() — if the session is already active this send queues.
   if (session.willQueue) {
-    session.enqueuePrompt(prompt, attachments, refs)
+    // The origin is a fourth argument only when there is one to tell.
+    if (hostInstruction) session.enqueuePrompt(prompt, attachments, refs, 'host-instruction')
+    else if (options.agentBrief) session.enqueuePrompt(prompt, attachments, refs, 'agent-brief')
+    else session.enqueuePrompt(prompt, attachments, refs)
     return
   }
+  session.originLedger?.userPrompt({ hostInstruction, agentBrief: options.agentBrief })
+  if (!hostInstruction && !options.agentBrief) noteClientPrompt(routingId)
   const id = `msg-${crypto.randomUUID()}`
   if (session.engineId !== 'codex') session.run(prompt, attachments)
   emitEvent('session:user-message', [
     routingId,
     // `msg-` prefix + randomUUID mirrors what the renderer minted, so nothing
     // downstream (React keys, retraction bookkeeping) sees a new id SHAPE.
-    { id, timestamp: Date.now(), prompt, ...(refs ? { attachments: refs } : {}) }
+    {
+      id,
+      timestamp: Date.now(),
+      prompt,
+      ...(refs ? { attachments: refs } : {}),
+      ...(hostInstruction ? { origin: 'host-instruction' as const } : {})
+    }
   ])
   if (session.engineId === 'codex') return session.run(prompt, attachments, id)
 }
@@ -214,6 +277,22 @@ export function approveBlocked(
   const nudge = session?.approveBlocked?.(toolUseId)
   if (!nudge?.prompt) return
   return sendPrompt(manager, routingId, nudge.prompt)
+}
+
+/**
+ * `session:allow-peer-messages` — the "Allow messages from other Claude sessions
+ * here" action on a held peer message. Claude Code only; any other session (or
+ * none) answers `success: false` so the client can say so.
+ */
+export async function allowPeerMessages(
+  manager: SessionManager,
+  routingId: string
+): Promise<{ success: boolean; error?: string }> {
+  const session = manager.get(routingId)
+  if (!session?.allowPeerMessages) {
+    return { success: false, error: 'This session does not hold peer messages' }
+  }
+  return session.allowPeerMessages()
 }
 
 /** A blob id is a lowercase hex SHA-256 — anything else cannot name a blob. */
@@ -403,6 +482,11 @@ export async function deleteSession(
   manager.cancel(sessionId)
   syncCore.removeSession(sessionId)
   await deleteSessionByEngine(sessionId, projectKey, engineId ?? actualEngine)
+  // The engine/model row goes with the session, here and not on a client's say-so:
+  // `saveSessionConfig` no longer deletes rows absent from a client's map. After
+  // the engine delete, so a refusal (the throw above) keeps the identity a
+  // surviving session needs to reopen on the right engine.
+  deleteSessionMeta(sessionId)
   // opencode / pi deletes touch no watched path, so nothing else would tell the
   // other clients their sidebar row is stale until the next poll.
   void refreshCanonicalDirectories()
@@ -505,8 +589,10 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
   const results = await Promise.allSettled(
     foreign.map((s) => deleteSessionByEngine(s.sessionId, projectKey, s.engineId))
   )
+  const survivors = new Set<string>()
   results.forEach((result, i) => {
     if (result.status === 'rejected') {
+      survivors.add(foreign[i].sessionId)
       logger.warn(
         'IPC',
         `session:delete-project: ${foreign[i].engineId} session ${foreign[i].sessionId} survived the delete`,
@@ -514,6 +600,9 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
       )
     }
   })
+  // Their engine/model rows go too (see `deleteSession`) — except a survivor's,
+  // which it needs to reopen on the right engine.
+  for (const id of ids) if (!survivors.has(id)) deleteSessionMeta(id)
 
   // Claude files, and WHICH of them: the home dir wholesale, members relocated
   // into a worktree's project dir one by one, and — when this dir also holds
@@ -942,11 +1031,21 @@ export function loadSkillDetails(manager: SessionManager, cwd: string) {
  * the delivery privilege in miniature: it meant the one client that could NOT be
  * corrected by the broadcast was the one whose optimistic write might be wrong.
  * The payload is a whole-config replace, so the echo is idempotent for the writer
- * and authoritative for everyone else.
+ * and authoritative for everyone else — except `sessionEngines`, which merges per
+ * key over canonical's map, exactly as the DB write does (`saveSessionConfig` only
+ * upserts). A client's map is its own snapshot: echoing it raw would drop a
+ * session another client or the host created a moment ago from every replica
+ * while its DB row stays, so the two would disagree until a restart.
  */
 export function saveSessions(config: UISessionConfig): void {
   saveSessionConfig(config)
-  emitEvent('config:sessions-changed', [config])
+  const echo = config.sessionEngines
+    ? {
+        ...config,
+        sessionEngines: { ...syncCore.getCanonicalState().sessionEngines, ...config.sessionEngines }
+      }
+    : config
+  emitEvent('config:sessions-changed', [echo])
 }
 
 /**
@@ -972,6 +1071,12 @@ export function saveUiSettings(manager: SessionManager, incomingSettings: UISett
       ([k]) => !['sandbox', 'proxy', 'anthropicEndpoint', 'modelOverride'].includes(k)
     )
   )
+  // The context-pressure setting is checked here, at the one door every client writes
+  // through: a bad mode or threshold from a remote client or a hand-edit is replaced by a
+  // valid one, not stored (the watcher normalises on read as well).
+  if (settings.contextPressure !== undefined) {
+    settings.contextPressure = normalizeContextPressure(settings.contextPressure)
+  }
   saveSettings(settings)
   // Next mockup request re-reads settings to pick up CSP changes.
   invalidateMockupSecuritySettings()

@@ -36,6 +36,8 @@ import type {
   FullStateSnapshot,
   PerSessionSnapshot
 } from '../../../shared/remote-protocol'
+import type { SessionLinkInfo } from '../../../shared/session-links'
+import type { ContextPressureBanner } from '../../../shared/context-pressure'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
 export interface CanonicalSessionState {
@@ -52,6 +54,13 @@ export interface CanonicalSessionState {
   sentFiles: SentFile[]
   /** Pending items only, mirroring the wire field (ADR-053). */
   queue: QueuedItem[]
+  /** Items from other sessions or agents held for this session's next turn (slice 1a). */
+  heldCount: number
+  /**
+   * The context-pressure banner above this session's composer (slice 4), or null. Canonical
+   * so that either answer clears it on every client and a late joiner sees it.
+   */
+  contextPressure: ContextPressureBanner | null
   taskNotifications: TaskNotification[]
   activeTasks: Record<string, ActiveTask>
   taskProgressMap: Record<string, TaskProgress>
@@ -115,6 +124,10 @@ export interface CanonicalState {
   sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
   hiddenSessions: string[]
   hiddenProjects: string[]
+  /** Origin links between sessions, keyed by the started session's ref (slice 1b). */
+  sessionLinks: Record<string, SessionLinkInfo>
+  /** sidebar id → ref for every session a link names (slice 1b). */
+  sessionRefs: Record<string, string>
   /**
    * App-level lists the wire snapshot replicates PER SESSION (every session
    * entry carries the same list). Held once here and fanned out by
@@ -149,6 +162,8 @@ export function emptySession(routingId: string, cwd = ''): CanonicalSessionState
     todos: [],
     sentFiles: [],
     queue: [],
+    heldCount: 0,
+    contextPressure: null,
     taskNotifications: [],
     activeTasks: {},
     taskProgressMap: {},
@@ -183,6 +198,8 @@ export function emptyCanonicalState(): CanonicalState {
     sessionEngines: {},
     hiddenSessions: [],
     hiddenProjects: [],
+    sessionLinks: {},
+    sessionRefs: {},
     slashCommands: [],
     sdkSkillNames: []
   }
@@ -226,6 +243,8 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       todos: s.todos,
       sentFiles: s.sentFiles ?? [],
       queue: s.queue ?? [],
+      heldCount: s.heldCount ?? 0,
+      contextPressure: s.contextPressure ?? null,
       taskNotifications: s.taskNotifications,
       activeTasks: s.activeTasks ?? {},
       taskProgressMap: s.taskProgressMap,
@@ -268,6 +287,8 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
     sessionEngines: snapshot.sessionEngines ?? {},
     hiddenSessions: snapshot.hiddenSessions ?? [],
     hiddenProjects: snapshot.hiddenProjects ?? [],
+    sessionLinks: snapshot.sessionLinks ?? {},
+    sessionRefs: snapshot.sessionRefs ?? {},
     slashCommands: first?.slashCommands ?? [],
     sdkSkillNames: first?.sdkSkillNames ?? []
   }
@@ -293,6 +314,8 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       todos: s.todos,
       sentFiles: s.sentFiles,
       queue: s.queue,
+      heldCount: s.heldCount,
+      contextPressure: s.contextPressure,
       taskNotifications: s.taskNotifications,
       activeTasks: s.activeTasks,
       taskProgressMap: s.taskProgressMap,
@@ -331,6 +354,8 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
     worktreeInfoMap: state.worktreeInfoMap,
     sessionEngines: state.sessionEngines,
     hiddenSessions: state.hiddenSessions,
-    hiddenProjects: state.hiddenProjects
+    hiddenProjects: state.hiddenProjects,
+    sessionLinks: state.sessionLinks,
+    sessionRefs: state.sessionRefs
   }
 }

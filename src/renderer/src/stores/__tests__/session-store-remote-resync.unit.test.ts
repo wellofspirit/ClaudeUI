@@ -34,7 +34,12 @@ import { toSnapshot } from '../../../../core/shared/sync/state'
 import { resetFactoryCounter, makeUserMessage } from '@test/factories/messages'
 import type { FullStateSnapshot } from '../../../../shared/remote-protocol'
 import type { QueuedItem } from '../../../../shared/types'
-import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import {
+  seed,
+  resetReplicaSeam,
+  mirrorStoreIntoReplica,
+  emitSync
+} from '@test/helpers/replica-seed'
 import { hydrateReplica } from '@renderer/stores/replica'
 
 const store = () => useSessionStore.getState()
@@ -247,6 +252,16 @@ describe('hydrateReplica — new-session default mode (ADR-050)', () => {
     expect(store().defaultPermissionMode).toBe('auto')
   })
 
+  it('projects the model tier colours as on for a host whose settings predate the key', () => {
+    hydrateReplica({ ...makeSnapshot({}, null), settings: { theme: 'light' } })
+    expect(store().settings.agentModelTierColors).toBe(true)
+    hydrateReplica({
+      ...makeSnapshot({}, null),
+      settings: { theme: 'light', agentModelTierColors: false }
+    })
+    expect(store().settings.agentModelTierColors).toBe(false)
+  })
+
   it('respects a pinned non-auto pick from the host', () => {
     hydrateReplica({
       ...makeSnapshot({}, null),
@@ -300,5 +315,57 @@ describe('hydrateReplica — queue of record (ADR-053)', () => {
   it('an older server that omits `queue` hydrates to an empty queue, not a crash', () => {
     hydrateReplica(makeSnapshot({ X: baseSnapshotSession('X') }, 'X'))
     expect(store().sessions['X'].queuedItems).toEqual([])
+  })
+})
+
+describe('contextPressure — the banner state reaches every client (slice 4)', () => {
+  it('arrives as a session:context-pressure event, clears on null, and rides the snapshot', () => {
+    store().createNewSession('X', '/test')
+    useSessionStore.setState({ activeSessionId: 'X' })
+    expect(store().sessions['X'].contextPressure).toBeNull()
+
+    emitSync('session:context-pressure', ['X', { kind: 'ask', percent: 72 }])
+    expect(store().sessions['X'].contextPressure).toEqual({ kind: 'ask', percent: 72 })
+
+    // A client that joins late reads it from the snapshot.
+    const produced = toSnapshot(getReplicaState(), 0)
+    expect(produced.sessions['X'].contextPressure).toEqual({ kind: 'ask', percent: 72 })
+    hydrateReplica(
+      makeSnapshot(
+        {
+          X: { ...baseSnapshotSession('X'), contextPressure: { kind: 'failed', percent: 80 } }
+        },
+        'X'
+      ),
+      true
+    )
+    expect(store().sessions['X'].contextPressure).toEqual({ kind: 'failed', percent: 80 })
+
+    // The answer clears it, and an older server that omits it hydrates to none.
+    emitSync('session:context-pressure', ['X', null])
+    expect(store().sessions['X'].contextPressure).toBeNull()
+    hydrateReplica(makeSnapshot({ X: baseSnapshotSession('X') }, 'X'), true)
+    expect(store().sessions['X'].contextPressure).toBeNull()
+  })
+})
+
+describe('heldCount — the held inbox size reaches every client (slice 1a)', () => {
+  it('arrives as a session:held-changed event and as a snapshot field', () => {
+    store().createNewSession('X', '/test')
+    useSessionStore.setState({ activeSessionId: 'X' })
+    expect(store().sessions['X'].heldCount).toBe(0)
+
+    emitSync('session:held-changed', ['X', { count: 3 }])
+    expect(store().sessions['X'].heldCount).toBe(3)
+
+    // A client that joins late reads it from the snapshot.
+    const produced = toSnapshot(getReplicaState(), 0)
+    expect(produced.sessions['X'].heldCount).toBe(3)
+    hydrateReplica(makeSnapshot({ X: { ...baseSnapshotSession('X'), heldCount: 5 } }, 'X'), true)
+    expect(store().sessions['X'].heldCount).toBe(5)
+
+    // An older server that omits it hydrates to none.
+    hydrateReplica(makeSnapshot({ X: baseSnapshotSession('X') }, 'X'), true)
+    expect(store().sessions['X'].heldCount).toBe(0)
   })
 })

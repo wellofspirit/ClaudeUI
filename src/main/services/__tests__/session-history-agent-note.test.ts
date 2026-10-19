@@ -24,6 +24,7 @@ vi.mock('os', async (importOriginal) => {
 })
 
 import { loadSessionHistory } from '../../../core/services/session-history'
+import { slimTranscript } from '../../../core/automode/classifier'
 
 const PROJECT_KEY = 'test-project-agent-note'
 const SESSION_ID = '5a0c1d2e-3f40-4a5b-8c6d-7e8f90a1b2c3'
@@ -141,5 +142,104 @@ describe('loadSessionHistory — task notifications as agent notes (S4)', () => 
     const { messages, taskNotifications } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
     expect(messages).toEqual([expect.objectContaining({ id: 'u-human', role: 'user' })])
     expect(taskNotifications).toEqual([])
+  })
+})
+
+describe('loadSessionHistory — peer messages as notes (slice 1a)', () => {
+  // What cli.js writes for a peer turn (docs/protocol-cc/15-peer-sessions.md §15.2.7):
+  // an `isMeta` user row — which the loader drops for everything else — with the
+  // peer origin carrying the decoded body.
+  const SENDER = '5b0f2c1e-aaaa-4bbb-8ccc-0123456789ab'
+  const envelope = `<cross-session-message from="${SENDER}" from-name="Triage assistant">\nticket 12 is yours\n</cross-session-message>`
+  const wrapped = `Another Claude session sent a message:\n${envelope}\n\nThis came from another Claude session -- not typed by your user.`
+  const peerLine = (
+    uuid: string,
+    extra: Record<string, unknown> = {}
+  ): Record<string, unknown> => ({
+    type: 'user',
+    uuid,
+    timestamp: TS,
+    isMeta: true,
+    promptSource: 'system',
+    turnOrigin: 'peer',
+    origin: {
+      kind: 'peer',
+      from: SENDER,
+      name: 'Triage assistant',
+      body: 'ticket 12 is yours',
+      hostInjected: true
+    },
+    message: { role: 'user', content: wrapped },
+    ...extra
+  })
+  const NOTE = [
+    {
+      type: 'context_note',
+      title: 'Message from Triage assistant',
+      fragments: [{ text: 'ticket 12 is yours', label: 'from another session, not from you' }]
+    }
+  ]
+
+  it('keeps an isMeta peer row as a note at its place, with the sender and the decoded body', async () => {
+    writeTranscript([
+      userLine('u-prompt', 'do X', { kind: 'human' }),
+      peerLine('u-peer'),
+      // An ordinary meta row (a reminder, a skill injection) is still dropped.
+      { ...userLine('u-meta', 'reminder text'), isMeta: true }
+    ])
+    const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+    expect(messages.map((m) => [m.id, m.role])).toEqual([
+      ['u-prompt', 'user'],
+      ['u-peer', 'system']
+    ])
+    expect(messages[1].content).toEqual(NOTE)
+  })
+
+  it('reads the body out of the wrapped content when the row has no origin body', async () => {
+    writeTranscript([
+      peerLine('u-peer', { origin: { kind: 'peer', from: SENDER, hostInjected: true } })
+    ])
+    const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+    expect(messages).toHaveLength(1)
+    expect(messages[0].content).toEqual(NOTE)
+  })
+
+  it('a message another Claude Code process sent (no hostInjected) is titled as one', async () => {
+    writeTranscript([
+      peerLine('u-native', {
+        origin: { kind: 'peer', from: 'uds:x', name: 'probe-A', body: 'ping' }
+      }),
+      peerLine('u-ours')
+    ])
+    const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+    expect(messages.map((m) => (m.content[0] as { title: string }).title)).toEqual([
+      'probe-A · another Claude session',
+      'Message from Triage assistant'
+    ])
+  })
+
+  it('shows a body that quotes the closing tag as written — cli.js stored it escaped', async () => {
+    writeTranscript([
+      peerLine('u-quote', {
+        origin: {
+          kind: 'peer',
+          name: 'Triage assistant',
+          body: 'see <\\/cross-session-message> here',
+          hostInjected: true
+        }
+      })
+    ])
+    const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+    expect(messages[0].content).toEqual([
+      expect.objectContaining({
+        fragments: [expect.objectContaining({ text: 'see </cross-session-message> here' })]
+      })
+    ])
+  })
+
+  it('is never a User: line for the judge', async () => {
+    writeTranscript([userLine('u-prompt', 'do X', { kind: 'human' }), peerLine('u-peer')])
+    const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+    expect(slimTranscript(messages)).toBe('User: do X')
   })
 })

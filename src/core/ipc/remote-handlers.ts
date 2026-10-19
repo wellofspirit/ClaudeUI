@@ -9,6 +9,9 @@ import { RemoteDispatcher } from '../services/remote-dispatcher'
 import { STREAM_WATCH_COMMAND } from './stream-watch'
 import { GIT_WATCH_COMMAND } from './git-watch'
 import { SessionManager } from '../services/session-manager'
+import { respondContextPressure } from '../services/context-pressure'
+import { setSessionGrouped } from '../services/session-links'
+import { dismissProposalFromClient, startProposalFromClient } from '../services/session-tools'
 import {
   loadSessionStatusLine,
   loadSubagentHistory,
@@ -134,6 +137,7 @@ import {
   readBackgroundRange,
   stopTask,
   backgroundTask,
+  allowPeerMessages,
   dequeueMessage,
   recallQueued,
   askSideQuestion,
@@ -534,6 +538,56 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string) => recallQueued(manager, routingId)
+  })
+
+  handleRemote({
+    channel: 'session:allow-peer-messages',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string) => allowPeerMessages(manager, routingId)
+  })
+
+  // "Detach from group" / "Add to group" in the sidebar (slice 1b, reworked in slice 5).
+  // `routingId` is the row's own session, so the audit row names the session the user
+  // acted on.
+  handleRemote({
+    channel: 'session:link:set-grouped',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, grouped: boolean) => setSessionGrouped(routingId, grouped)
+  })
+
+  // The user's click on a proposal card (session tools, slice 1c-b). The argument is
+  // the proposal's id, not a session id; the audit row for the click is the registry's.
+  // `grouped` is which Start button was clicked; anything but a boolean (an older client) falls back
+  // to the proposal's own relation.
+  handleRemote({
+    channel: 'session:proposal:start',
+    capability: 'chat',
+    kind: 'command',
+    // The click's audit row carries the calling connection, so it needs it first.
+    withConnection: true,
+    handler: async (connection: CommandConnection, proposalId: string, grouped?: boolean) =>
+      startProposalFromClient(proposalId, grouped, connection)
+  })
+  handleRemote({
+    channel: 'session:proposal:dismiss',
+    capability: 'chat',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection, proposalId: string) =>
+      dismissProposalFromClient(proposalId, connection)
+  })
+
+  // The user's answer to the context-pressure banner (slice 4): Hand off or Not now.
+  handleRemote({
+    channel: 'session:context-pressure:respond',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, answer: string) => respondContextPressure(routingId, answer)
   })
 
   // Deprecated (ADR-053): recall-all shim for cached `/remote` bundles.

@@ -241,6 +241,8 @@ describe('buildPiSubagentChildEnv', () => {
       CLAUDEUI_PI_AGENT_TOOL: '1',
       CLAUDEUI_PI_AGENT_LISTING: '- x: y',
       CLAUDEUI_PI_SEND_MESSAGE: '1',
+      // Slice 2: a host-run child never gets the session tools (root agent only).
+      CLAUDEUI_PI_SESSION_TOOLS: '',
       CLAUDEUI_PI_SKILL_DIRS: '/s',
       // ADR-096: the parent's MCP catalog, served by the child's own bridge host.
       CLAUDEUI_PI_MCP: '1'
@@ -370,7 +372,7 @@ describe('PiSubagentManager.run', () => {
     const custom: PiAgentDefinition = {
       ...builtins().resolve('general-purpose')!,
       name: 'pinned',
-      source: 'user',
+      scope: 'user',
       model: 'anthropic/def-model'
     }
     const cases: Array<[Record<string, unknown>, string]> = [
@@ -544,7 +546,7 @@ describe('PiSubagentManager.run', () => {
     const refuser: PiAgentDefinition = {
       ...builtins().resolve('general-purpose')!,
       name: 'refuser',
-      source: 'user',
+      scope: 'user',
       tools: []
     }
     const mgr = new PiSubagentManager(host, {
@@ -753,6 +755,33 @@ describe('PiSubagentManager.run', () => {
     await pending
   })
 
+  it('a grant minted at a child bridge is marked as the subagent call (the session tools read it as callOwner)', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeHost()
+    const mgr = new PiSubagentManager(host, {
+      spawn: fake.spawn,
+      registry: builtins(),
+      sessionsRoot: root
+    })
+    const pending = mgr.run(
+      { description: 'd', prompt: 'p', run_in_background: false },
+      'call-owner',
+      null
+    )
+    await vi.waitFor(() => expect(fake.children).toHaveLength(1))
+    await fake.children[0].opts.gateHandler({
+      toolCallId: 'owner-1',
+      toolName: 'agent',
+      input: { description: 'd', prompt: 'q' }
+    })
+    const scope = vi
+      .mocked(host.gateChild)
+      .mock.calls.find(([, p]) => p.toolCallId === 'owner-1')![0]
+    expect(scope.grants.consumeOwner('owner-1', 'agent')).toBe('subagent')
+    mgr.stop('call-owner')
+    await pending
+  })
+
   it('R1: a child that cannot spawn (Explore; depth 3) is refused on the HOST — its gate denies agent with no grant, and a forged grant is refused by run()', async () => {
     const fake = makeFakeSpawn()
     const { host } = makeHost()
@@ -931,7 +960,7 @@ describe('PiSubagentManager — background runs (ADR-089 S3)', () => {
     const forced: PiAgentDefinition = {
       ...builtins().resolve('general-purpose')!,
       name: 'bg-only',
-      source: 'user',
+      scope: 'user',
       background: true
     }
     const mgr = new PiSubagentManager(host, {

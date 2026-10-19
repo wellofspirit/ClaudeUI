@@ -1,5 +1,5 @@
 /**
- * The recognizer the voice worker decodes with — ADR-101 §1, local-voice-spec C3.
+ * The recognizer the voice worker decodes with — ADR-101 §1, docs/architecture/local-voice.md C3.
  *
  * {@link Recognizer} is the seam: the protocol server (`server.ts`) takes one and
  * never learns what is behind it, so its tests run against a fake that needs no

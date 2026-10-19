@@ -61,6 +61,9 @@ export function transformAssistantMessage(msg: Record<string, unknown>): ChatMes
     id: messageId,
     role: 'assistant',
     content: blocks,
-    timestamp: Date.now()
+    timestamp: Date.now(),
+    ...(typeof betaMessage.model === 'string' && betaMessage.model
+      ? { model: betaMessage.model }
+      : {})
   }
 }

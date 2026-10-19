@@ -1,5 +1,5 @@
 /**
- * The speech pack's installer — ADR-101 §5–6, local-voice-spec C1/C2/C6.
+ * The speech pack's installer — ADR-101 §5–6, docs/architecture/local-voice.md C1/C2/C6.
  *
  * Downloads the pinned pack (`shared/voice-pack.ts`) into the voice store
  * (`pack-store.ts` has the layout) with ADR-082's machinery: `download.ts` for

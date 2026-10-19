@@ -1,7 +1,7 @@
 # ADR-095: The sidebar status dot ripples for activity, and turns violet while only subagents work
 
 **Status:** Accepted (2026-10-06). Amended 2026-10-07: ripple retuned (softer dip, 2s cycle, 13px 2px
-ring, mockup `62a33e2c`); the rules live in the shared `app.css`, which the web client lacked until then.
+ring, mockup `62a33e2c`); the rules live in the shared `app.css`, which the web client lacked until then. Amended 2026-10-17: every dot colour is a theme token holding 3:1 on the panel in dark, light and Monokai (running and idle use `--color-success`, inactive is the solid grey `--color-dot-inactive`, light watching is darker), and the agent roster's rows use this same dot, with a `failed` state (ADR-073 §11).
 **Relates to:** [ADR-073](adr-073_agent-roster-and-task-run-identity.md) (the lifecycle records, `activeTasks`, this reads), [ADR-045](adr-045_engine-disconnect-status-contract.md) (a disconnect clears `activeTasks`, which is what keeps the violet state honest), [ADR-027](adr-027_test-data-attributes.md) (the test ids), mockups `97726c29` → `5dd637c3` → `28209383` → `2bbc3158` (the approved one) → `62a33e2c` (2026-10-07 retune).
 
 ## Context

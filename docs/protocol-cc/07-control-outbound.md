@@ -315,7 +315,7 @@ Full context-window breakdown. Slow (CPU-bound token counting).
   "agents": [...],
   "slashCommands": [...],
   "skills": [...],
-  "autoCompactThreshold": 0.92,
+  "autoCompactThreshold": 167000,   // an absolute token count (maxTokens − 33000), not a fraction; 15 §15.5
   "isAutoCompactEnabled": true,
   "messageBreakdown": [...],
   "apiUsage": {...}

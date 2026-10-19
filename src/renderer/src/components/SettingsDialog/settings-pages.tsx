@@ -27,13 +27,14 @@ import { EngineLogo } from '../shared/EngineLogo'
 import type { EngineCapabilities } from '../../../../shared/model-capabilities'
 import { engineMeta } from '../../../../shared/engine-meta'
 import { SECTIONS, type Section, type SettingItem } from './settings-sections'
-import { SettingRow, ActionRow, type AppliesOn } from './settings-controls'
+import { SettingRow, SettingsToggle, ActionRow, type AppliesOn } from './settings-controls'
 import type { SettingsPageId, SettingsTarget } from './settings-target'
 import { notInstalledTitle, type EngineRuns } from './harness-view'
 import { UsageHubSettings } from './UsageHubSettings'
 import { HarnessesInstalled, HarnessesPageActions } from './HarnessesInstalled'
 import { HarnessUpdateSettings } from './HarnessUpdateSettings'
 import { AgentColoursSection, DispatchTileColourSection } from './AgentColours'
+import { ContextPressureSettings } from './ContextPressureSettings'
 
 export type { SettingsPageId, SettingsTarget } from './settings-target'
 
@@ -308,6 +309,41 @@ const DISPATCH_TILE_COLOUR: SettingItem = {
   render: (s, u) => <DispatchTileColourSection settings={s} update={u} />
 }
 
+/**
+ * Session tools, slice 4: when a long session should hand off (mode + thresholds), with
+ * where each open model compacts. App-level, in ClaudeUI's own settings.json.
+ */
+const CONTEXT_PRESSURE: SettingItem = {
+  key: 'contextPressure',
+  label: 'Context pressure',
+  keywords:
+    'context pressure window full threshold percent hand off handoff new session continue compact auto ask banner',
+  render: (s, u) => <ContextPressureSettings settings={s} update={u} />
+}
+
+/**
+ * Session tools, host-wide switch: the `session_*` tools and their prompt guidance on all four
+ * engines. On by default; read at spawn, so off applies to sessions started afterwards.
+ */
+const SESSION_TOOLS: SettingItem = {
+  key: 'sessionTools',
+  label: 'Session tools',
+  keywords:
+    'session tools agents start hand off message sessions other sessions session_start session_list propose proposal disable off',
+  render: (s, u) => (
+    <SettingsToggle
+      testid="SettingsSessionTools"
+      label="Session tools"
+      description="Lets agents list, read, message, start and hand off to your other sessions (and see the tools' guidance in their prompt). Turn off to remove them from every engine. Applies to sessions started after the change; an open session's tools answer that they are off."
+      appliesOn="next-session"
+      modified={s.sessionTools === false}
+      onReset={() => u({ sessionTools: undefined })}
+      checked={s.sessionTools !== false}
+      onChange={(v) => u({ sessionTools: v ? undefined : false })}
+    />
+  )
+}
+
 export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   SANDBOX_CROSS_LINK,
   OTHER_ENGINE_PERMISSIONS,
@@ -320,7 +356,9 @@ export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   OPENCODE_AGENT_COLOURS,
   PI_AGENT_COLOURS,
   CODEX_AGENT_COLOURS,
-  DISPATCH_TILE_COLOUR
+  DISPATCH_TILE_COLOUR,
+  CONTEXT_PRESSURE,
+  SESSION_TOOLS
 ]
 
 // ── Icons (14px, stroke 1.8 — the rail size on the boards) ───────────
@@ -561,6 +599,20 @@ export const PAGES: SettingsPage[] = [
         harnesses: ['opencode', 'pi'],
         storage: 'automode.json',
         items: itemsOf('trust-lists')
+      },
+      {
+        id: 'session-tools',
+        label: 'Session tools',
+        note: 'Read when a session starts, so a change applies to sessions started after it.',
+        items: [SESSION_TOOLS]
+      },
+      {
+        // The user's threshold for continuing a long session in a new one (session tools,
+        // slice 4). Read at every turn end, so a change binds the next one.
+        id: 'context-pressure',
+        label: 'Context pressure',
+        note: 'Acted on at the end of a turn, so a change applies to the next one.',
+        items: [CONTEXT_PRESSURE]
       },
       { id: 'retention', label: 'Idle & retention', items: itemsOf('session') }
     ]

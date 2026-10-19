@@ -976,6 +976,8 @@ export interface WsVoiceAudio {
 // by snapshots and a tail is a lossy preview of a durable reliable event.
 export type { StreamEventFrame, StreamLaneFrame } from '../core/shared/sync/stream'
 import type { StreamEventFrame } from '../core/shared/sync/stream'
+import type { SessionLinkInfo } from './session-links'
+import type { ContextPressureBanner } from './context-pressure'
 import type { ItemStreamFrame, ItemStreams } from '../core/shared/sync/item-stream'
 
 export type WsClientMessage =
@@ -1064,6 +1066,12 @@ export interface PerSessionSnapshot {
    *  chat messages. Optional for the same older-server-compat reason as
    *  `sentFiles`: without it every resync silently emptied the queue card. */
   queue?: QueuedItem[]
+  /** Items from other sessions or agents held for this session's next turn
+   *  (slice 1a). Omitted when none, and by an older server. */
+  heldCount?: number
+  /** The context-pressure banner above this session's composer (slice 4); `null` when none,
+   *  and absent from an older server. */
+  contextPressure?: ContextPressureBanner | null
   taskNotifications: TaskNotification[]
   /** Started-but-not-finished tasks (task_started with no task_notification
    *  yet) — without this a remote client that connects or resyncs mid-task
@@ -1187,6 +1195,11 @@ export interface FullStateSnapshot {
   hiddenSessions?: string[]
   /** Hidden project keys — carried for the same non-destructive-save reason. */
   hiddenProjects?: string[]
+  /** Origin links between sessions, keyed by the started session's ref (session tools, slice 1b).
+   *  Optional: an older server omits it, which reads as "no links". */
+  sessionLinks?: Record<string, SessionLinkInfo>
+  /** sidebar id → ref for every session a link names (slice 1b). */
+  sessionRefs?: Record<string, string>
 }
 
 // Re-export RemoteStatus / RemoteAuthMethod / StepUpIntent from the main types

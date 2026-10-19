@@ -1,5 +1,7 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { EventEmitter } from 'node:events'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
 import type { ChildProcess } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -23,7 +25,9 @@ import type {
 import { waitForPermissionGuard } from '../opencode-server-readiness'
 import type { McpHttpHost } from '../mcp-http-host'
 import type { OpencodeConfigInput } from '../opencode-server-config'
+import type { ClaudeAgentShim } from '../claude-agent-shim'
 import { logger } from '../../services/logger'
+import { configureSessionTools } from '../../services/session-tools'
 
 // The manager `resolve`s every cwd (`/proj/a` becomes `D:\proj\a` on Windows), so
 // the rig's per-cwd config map is keyed, and every expected directory is spelled,
@@ -316,6 +320,28 @@ describe('OpencodeServerManager (2.x) — ref-counting', () => {
     const s2 = hosts[0].createServer()
     expect(s1).toBeInstanceOf(McpServer)
     expect(s1).not.toBe(s2)
+  })
+
+  // Session tools (slice 2): the hosted server offers them exactly when the host wired the service,
+  // read when each MCP session is built (the host is configured at boot, before any server spawns).
+  describe('the session tools on the hosted server', () => {
+    const toolNames = (server: McpServer): string[] =>
+      Object.keys(
+        (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools
+      )
+    afterEach(() => configureSessionTools(null))
+
+    it('are registered once the service is wired, and not before', async () => {
+      const { manager, hosts } = makeRig()
+      await manager.acquire('/p')
+      expect(toolNames(hosts[0].createServer())).not.toContain('session_start')
+      configureSessionTools({} as never)
+      const names = toolNames(hosts[0].createServer())
+      for (const tool of ['session_list', 'session_message', 'session_start', 'session_hand_off'])
+        expect(names).toContain(tool)
+      configureSessionTools(null)
+      expect(toolNames(hosts[0].createServer())).not.toContain('session_start')
+    })
   })
 })
 
@@ -823,5 +849,252 @@ describe('ADR-097 §3 (S6) — fail closed without the plugin permission guard',
     await manager.acquire('/p')
     expect(probes).toEqual([dir('/p'), dir('/p')]) // the active result is memoized
     manager.dispose()
+  })
+})
+
+// ── Claude agent definitions injected as opencode agents (ADR-103) ──────────────
+
+describe('OpencodeServerManager (2.x) — injected Claude agents', () => {
+  // The default config input reads the user's opencode config, ~/.claude.json and the Claude
+  // agents directory: every one of them is redirected to a temp dir, so no test sees the real ones.
+  const ISOLATED_ENV = [
+    'HOME',
+    'USERPROFILE',
+    'OPENCODE_CONFIG_DIR',
+    'XDG_CONFIG_HOME',
+    'OPENCODE_CONFIG',
+    'OPENCODE_CONFIG_PROJECT_DISABLE',
+    'OPENCODE_DISABLE_PROJECT_CONFIG'
+  ] as const
+  let isoRoot: string
+  let isoHome: string
+  let isoConfigDir: string
+  let isoSaved: Record<string, string | undefined>
+  beforeEach(() => {
+    isoRoot = fs.mkdtempSync(join(os.tmpdir(), 'oc-mgr-shim-'))
+    isoHome = join(isoRoot, 'home')
+    isoConfigDir = join(isoRoot, 'opencode-config')
+    fs.mkdirSync(isoHome, { recursive: true })
+    fs.mkdirSync(isoConfigDir, { recursive: true })
+    isoSaved = Object.fromEntries(ISOLATED_ENV.map((k) => [k, process.env[k]]))
+    for (const k of ISOLATED_ENV) delete process.env[k]
+    process.env.HOME = isoHome
+    process.env.USERPROFILE = isoHome
+    process.env.OPENCODE_CONFIG_DIR = isoConfigDir
+  })
+  afterEach(() => {
+    for (const k of ISOLATED_ENV) {
+      if (isoSaved[k] === undefined) delete process.env[k]
+      else process.env[k] = isoSaved[k]
+    }
+    fs.rmSync(isoRoot, { recursive: true, force: true })
+  })
+
+  function makeShimRig(shimFor: (cwd: string, mcpServers: readonly string[]) => ClaudeAgentShim): {
+    manager: OpencodeServerManager
+    calls: SpawnCall[]
+  } {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const manager = new OpencodeServerManager({
+      spawnFn,
+      locateBinaryFn: () => '/fake/opencode',
+      startMcpHostFn,
+      // No configInputFn: the default input (bridge + plugin + overlay + the shim) is under test.
+      claudeAgentsFn: shimFor,
+      waitReadyFn: async () => READY,
+      waitGuardFn: async () => ({ state: 'active', elapsedMs: 0 }),
+      endServerFn: (child) => child.kill(),
+      serverCwd: '/server-home'
+    })
+    return { manager, calls }
+  }
+
+  const agent = (system: string): ClaudeAgentShim => ({
+    agents: { reader: { description: 'd', mode: 'subagent', system } },
+    injected: [{ name: 'reader', scope: 'user' }],
+    diagnostics: []
+  })
+
+  it('injects the shim result into agents.<name>, keyed by cwd', async () => {
+    const seen: Array<[string, readonly string[]]> = []
+    const { manager, calls } = makeShimRig((cwd, mcpServers) => {
+      seen.push([cwd, mcpServers])
+      return cwd === dir('/proj/a') ? agent('v1') : { agents: {}, injected: [], diagnostics: [] }
+    })
+    await manager.acquire('/proj/a')
+    await manager.acquire('/proj/b')
+    expect(calls).toHaveLength(2)
+    expect(JSON.parse(calls[0].configContent).agents.reader).toEqual({
+      description: 'd',
+      mode: 'subagent',
+      system: 'v1'
+    })
+    expect(JSON.parse(calls[1].configContent).agents?.reader).toBeUndefined()
+    expect(seen.map(([cwd]) => cwd)).toContain(dir('/proj/a'))
+  })
+
+  it('an edited agent starts a new server at the next acquire; an unchanged one reuses the server', async () => {
+    let system = 'v1'
+    const { manager, calls } = makeShimRig(() => agent(system))
+    const first = await manager.acquire('/proj/a')
+    const again = await manager.acquire('/proj/a')
+    expect(calls).toHaveLength(1)
+    expect(again.baseUrl).toBe(first.baseUrl)
+    system = 'v2'
+    const fresh = await manager.acquire('/proj/a')
+    expect(calls).toHaveLength(2)
+    expect(fresh.baseUrl).not.toBe(first.baseUrl)
+    expect(JSON.parse(calls[1].configContent).agents.reader.system).toBe('v2')
+    // The old server keeps serving its holder until its last release.
+    expect(calls[0].child.killed).toBe(false)
+  })
+
+  it('a shim that throws injects nothing and never blocks the spawn', async () => {
+    const { manager, calls } = makeShimRig(() => {
+      throw new Error('boom')
+    })
+    await manager.acquire('/proj/a')
+    expect(calls).toHaveLength(1)
+    expect(JSON.parse(calls[0].configContent).agents?.reader).toBeUndefined()
+  })
+
+  it('hands the shim the servers opencode.json configures; the permission provider keeps the bridged list', async () => {
+    fs.writeFileSync(
+      join(isoConfigDir, 'opencode.json'),
+      JSON.stringify({ mcp: { servers: { 'native-gh': {} } } })
+    )
+    const shimSeen: Array<readonly string[]> = []
+    const { manager } = makeShimRig((_cwd, mcpServers) => {
+      shimSeen.push(mcpServers)
+      return { agents: {}, injected: [], diagnostics: [] }
+    })
+    const permSeen: Array<readonly string[]> = []
+    manager.setAgentPermissionProvider((_cwd, mcpServers) => {
+      permSeen.push(mcpServers)
+      return {}
+    })
+    await manager.acquire('/proj/a')
+    expect(shimSeen).toHaveLength(1)
+    expect(shimSeen[0]).toContain('native-gh')
+    expect(new Set(shimSeen[0]).size).toBe(shimSeen[0].length) // deduped
+    expect(permSeen).toHaveLength(1)
+    expect(permSeen[0]).not.toContain('native-gh')
+    // The shim sees the bridged servers too: nothing the provider has is missing from it.
+    for (const bridged of permSeen[0]) expect(shimSeen[0]).toContain(bridged)
+  })
+
+  it('the default shim never injects over a native agent that only a JSON agents entry holds', async () => {
+    const home = isoHome
+    const configDir = isoConfigDir
+    const project = join(isoRoot, 'project')
+    const write = (file: string, text: string): void => {
+      fs.mkdirSync(join(file, '..'), { recursive: true })
+      fs.writeFileSync(file, text)
+    }
+    const claudeAgent = (name: string): string =>
+      `---
+name: ${name}
+description: A role
+tools: Read
+---
+Body.
+`
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    write(join(configDir, 'opencode.json'), JSON.stringify({ agents: { reviewer: {} } }))
+    write(join(home, '.claude', 'agents', 'reviewer.md'), claudeAgent('reviewer'))
+    write(join(home, '.claude', 'agents', 'fresh.md'), claudeAgent('fresh'))
+    fs.mkdirSync(project, { recursive: true })
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const manager = new OpencodeServerManager({
+      spawnFn,
+      locateBinaryFn: () => '/fake/opencode',
+      startMcpHostFn,
+      // No configInputFn, no claudeAgentsFn: the production wiring is under test.
+      waitReadyFn: async () => READY,
+      waitGuardFn: async () => ({ state: 'active', elapsedMs: 0 }),
+      endServerFn: (child) => child.kill(),
+      serverCwd: '/server-home'
+    })
+    await manager.acquire(project)
+    const agents = JSON.parse(calls[0].configContent).agents as Record<string, unknown>
+    expect(agents.fresh).toMatchObject({ mode: 'subagent' })
+    expect(agents.reviewer).toBeUndefined()
+    const lines = info.mock.calls.map((c) => String(c[1])).filter((l) => l.includes('shim'))
+    expect(lines.some((l) => l.includes('reviewer.md') && l.includes('skipped'))).toBe(true)
+    manager.dispose()
+  })
+
+  describe('shim diagnostics logging', () => {
+    const skippedNote =
+      '/x/reader.md: skipped (opencode already has an agent "reader"; the native one wins)'
+    const rigWith = (diagnostics: () => string[]) =>
+      makeShimRig(() => ({ agents: {}, injected: [], diagnostics: diagnostics() }))
+
+    it('logs a skipped agent at info and other notes at debug, once per change', async () => {
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+      const debug = vi.spyOn(logger, 'debug').mockImplementation(() => {})
+      let notes = [skippedNote, '/x/a.md: tools: "LS" is not a tool opencode has; ignored']
+      const { manager } = rigWith(() => notes)
+      const shimLines = (spy: typeof info): string[] =>
+        spy.mock.calls.map((c) => String(c[1])).filter((l) => l.includes('Claude agent shim for'))
+      await manager.acquire('/proj/a')
+      expect(shimLines(info)).toHaveLength(1)
+      expect(shimLines(info)[0]).toContain(skippedNote)
+      expect(shimLines(info)[0]).not.toContain('is not a tool')
+      expect(shimLines(debug)).toHaveLength(1)
+      expect(shimLines(debug)[0]).toContain('is not a tool')
+      expect(shimLines(debug)[0]).not.toContain('skipped')
+      // Unchanged diagnostics for the cwd: silent.
+      await manager.acquire('/proj/a')
+      expect(shimLines(info)).toHaveLength(1)
+      expect(shimLines(debug)).toHaveLength(1)
+      // Changed: logged again.
+      notes = [skippedNote.replace('reader', 'writer')]
+      await manager.acquire('/proj/a')
+      expect(shimLines(info)).toHaveLength(2)
+      expect(shimLines(debug)).toHaveLength(1)
+    })
+
+    it('a project definition overriding a user one is logged at info', async () => {
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+      const debug = vi.spyOn(logger, 'debug').mockImplementation(() => {})
+      const note = 'project agent /p/.claude/agents/a.md overrides the user agent "a" (/u/a.md)'
+      const { manager } = rigWith(() => [note])
+      await manager.acquire('/proj/a')
+      const lines = (spy: typeof info): string[] =>
+        spy.mock.calls.map((c) => String(c[1])).filter((l) => l.includes('Claude agent shim for'))
+      expect(lines(info)).toHaveLength(1)
+      expect(lines(info)[0]).toContain(note)
+      expect(lines(debug)).toHaveLength(0)
+    })
+
+    it('a note with nothing skipped is debug only', async () => {
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+      const debug = vi.spyOn(logger, 'debug').mockImplementation(() => {})
+      const { manager } = rigWith(() => ['/x/a.md: disallowedTools "*" leaves no tools'])
+      await manager.acquire('/proj/a')
+      expect(
+        info.mock.calls.filter((c) => String(c[1]).includes('Claude agent shim'))
+      ).toHaveLength(0)
+      expect(
+        debug.mock.calls.filter((c) => String(c[1]).includes('Claude agent shim'))
+      ).toHaveLength(1)
+    })
+
+    it('remembers a bounded number of cwds: past the bound the memory starts over', async () => {
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+      const { manager } = rigWith(() => [skippedNote])
+      const logged = (): number =>
+        info.mock.calls.filter((c) => String(c[1]).includes('Claude agent shim for')).length
+      await manager.acquire('/proj/c0')
+      await manager.acquire('/proj/c0')
+      expect(logged()).toBe(1)
+      for (let i = 1; i <= 256; i++) await manager.acquire(`/proj/c${i}`)
+      const before = logged()
+      await manager.acquire('/proj/c0') // evicted by the reset: logged again
+      expect(logged()).toBe(before + 1)
+    })
   })
 })

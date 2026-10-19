@@ -2009,6 +2009,14 @@ describe('applyExternalSettings', () => {
     expect(store().settings.maxRecentSessions).toBe(5)
   })
 
+  it('defaults the model tier colours to on, and keeps an explicit off', () => {
+    // The `config:settings-changed` path: an old settings.json has no such key.
+    seed.settings({ theme: 'light' })
+    expect(store().settings.agentModelTierColors).toBe(true)
+    seed.settings({ theme: 'light', agentModelTierColors: false })
+    expect(store().settings.agentModelTierColors).toBe(false)
+  })
+
   it('keeps the per-engine starting-effort map a remote client wrote, and defaults it to {}', () => {
     const engineEffortDefaults = { pi: { 'anthropic/claude-opus-5-5': 'high' } }
     seed.settings({ theme: 'light', engineEffortDefaults })

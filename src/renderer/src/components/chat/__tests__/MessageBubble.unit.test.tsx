@@ -85,6 +85,8 @@ beforeEach(() => {
         statusLine: null,
         metering: null,
         queuedItems: [],
+        heldCount: 0,
+        contextPressure: null,
         draftText: '',
         draftAttachments: [],
         selectedModel: 'default',
@@ -131,6 +133,25 @@ describe('MessageBubble', () => {
       })
       render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
       expect(screen.getByText('Hello Claude')).toBeInTheDocument()
+    })
+
+    it('labels a prompt the host sent for the user, and only that one (slice 1a)', () => {
+      const typed = makeChatMessage({ role: 'user', content: [makeTextBlock('typed by you')] })
+      const { rerender } = render(
+        <MessageBubble message={typed} pendingApprovals={[]} isLastAssistant={false} />
+      )
+      expect(screen.queryByTestId('MessageBubble.hostLabel')).toBeNull()
+
+      const hosted = makeChatMessage({
+        role: 'user',
+        content: [makeTextBlock('wrap up and write the handoff')],
+        hostInstruction: true
+      })
+      rerender(<MessageBubble message={hosted} pendingApprovals={[]} isLastAssistant={false} />)
+      expect(screen.getByTestId('MessageBubble.hostLabel')).toHaveTextContent(
+        'Sent by ClaudeUI for you'
+      )
+      expect(screen.getByText('wrap up and write the handoff')).toBeInTheDocument()
     })
 
     it('renders plan content as ExitPlanModeCard', () => {

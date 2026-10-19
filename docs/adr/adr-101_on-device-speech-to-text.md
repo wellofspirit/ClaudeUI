@@ -1,7 +1,7 @@
 # ADR-101: On-device speech-to-text for opencode, pi and Codex sessions
 
-**Status:** Accepted (2026-10-12). Implementation on branch `local-voice`; resume notes in
-`docs/local-voice-handoff.md`.
+**Status:** Accepted (2026-10-12). Implemented in PR #74; the as-built contracts are in
+[architecture/local-voice.md](../architecture/local-voice.md).
 **Amends:** [ADR-098](adr-098_voice-capture-in-the-renderer.md) §6 (the deferred speech-to-text
 for other engines is now this on-device recognizer).
 **Relates to:** [ADR-082](adr-082_harness-sources-downloads-and-unbundling.md) (the download,

@@ -1,43 +1,57 @@
 /**
  * The agent types a pi session's `agent` tool can launch (ADR-089): ClaudeUI's
- * built-ins, then the user's `~/.pi/agent/agents/*.md`, then the project's
- * `.pi/agents/*.md` — later wins per normalized name. Modeled on Claude
- * Code's subagent definitions (a Markdown file whose front matter names the
- * agent and whose body is its system prompt).
+ * built-ins, then agent definition files from four directories, later wins per
+ * normalized name:
  *
- * SAFE PARSING. These files come from whatever repository the user opened, so
- * the parser treats them as hostile input:
- *  - front matter is recognised only when the FIRST line (after an optional
- *    BOM) is exactly `---`. An opener such as `---js` / `---yaml` is not
- *    front matter and the file is skipped: there are no language engines and
- *    nothing is ever evaluated (gray-matter's `---js` engine runs `eval`,
- *    which is why it is not used here);
- *  - the block is parsed by `yaml` with the core schema, aliases disallowed
- *    (`maxAliasCount: 0`, no alias bombs), duplicate keys refused, inside a
- *    try/catch; the result must be a plain object;
- *  - a file that is not a regular file once stat'd (symlinks are followed),
- *    or is larger than {@link MAX_AGENT_FILE_BYTES}, is skipped, at most
- *    {@link MAX_AGENT_FILES_PER_DIR} files are read per directory, and every
- *    fs error becomes a diagnostic — loading never throws;
- *  - tool names must look like tool names (they end up in pi's `--tools`
- *    argv and in the `agent` tool's description), and descriptions are
- *    whitespace-collapsed so a definition cannot add lines to the listing.
+ *   built-ins < `~/.claude/agents` (user, claude) < `~/.pi/agent/agents`
+ *   (user, pi) < project `.claude/agents` (project, claude) < project
+ *   `.pi/agents` (project, pi)
+ *
+ * so the owner's Claude Code definitions work in pi unchanged, the harness's
+ * own directory wins at equal scope, and a repository's definitions beat the
+ * user's. Modeled on Claude Code's subagent definitions (a Markdown file whose
+ * front matter names the agent and whose body is its system prompt).
+ *
+ * SAFE PARSING (these files are hostile input: alias bombs, `---js`, size and
+ * count caps, no evaluation) is the shared reader's job,
+ * `../agents/agent-defs.ts`; this module adds what is pi-specific: the
+ * tool-name mapping, the model rules and the scope policy.
+ *
+ * MODEL. Any definition file (user or project, Claude or pi) may pick a model:
+ * a project owns its agents and overrides the user's, as in Claude Code.
+ * `harness.pi.model` (the per-harness block Claude Code ignores) wins over
+ * `model`, and either must be `inherit` or a pi picker value `provider/id` (a
+ * Claude alias such as `sonnet` inherits, with a diagnostic). The value is
+ * checked against the allowlisted catalog when the agent is launched
+ * (`pi-agent-model.ts`).
  *
  * SCOPE. Supported fields: `name`, `description`, `tools`, `disallowedTools`,
- * `model`, `thinking` (or Claude Code's `effort`), `permissionMode`,
- * `background`. Claude Code's `mcpServers`, `skills`, `color`, `memory`,
- * `isolation`, `maxTurns` and `omitClaudeMd` are out of scope and ignored, as
- * is any other unknown key. `.pi/agents` is scanned non-recursively (as the
- * retired M5b extension did); Claude Code recurses, which is a later nicety.
+ * `model`, `harness.pi.model`, `thinking` (or Claude Code's `effort`),
+ * `permissionMode`, `background`. Claude Code's `mcpServers`, `skills`,
+ * `color`, `memory`, `isolation`, `maxTurns` and `omitClaudeMd` are out of
+ * scope and ignored, as is any other unknown key.
  *
- * A pure module (fs + `yaml` + the pi data-root helper): no session class, no
- * dispatcher.
+ * A pure module (fs via the shared reader + the pi data-root helper): no
+ * session class, no dispatcher.
  */
-import fs from 'node:fs'
 import path from 'node:path'
-import { parse as parseYaml } from 'yaml'
+import {
+  claudeUserAgentsDir as defaultClaudeUserAgentsDir,
+  harnessField,
+  parseAgentDocument,
+  parseToolList,
+  projectDirChain,
+  readNameAndDescription,
+  samePathKey,
+  scanAgentDir,
+  type AgentOrigin,
+  type AgentScope
+} from '../agents/agent-defs'
 import { logger } from '../services/logger'
 import { piAgentDir } from '../services/pi-session-list'
+
+// The caps live in the shared reader; pi callers import them from here.
+export { MAX_AGENT_FILE_BYTES, MAX_AGENT_FILES_PER_DIR } from '../agents/agent-defs'
 
 export type PiThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
@@ -48,7 +62,12 @@ export interface PiAgentDefinition {
   description: string
   /** The body: the agent's system prompt. */
   prompt: string
-  source: 'builtin' | 'user' | 'project'
+  scope: AgentScope
+  /**
+   * Which directory family it was read from. A built-in is ClaudeUI's own
+   * pi-side definition, so `'pi'`.
+   */
+  origin: AgentOrigin
   filePath?: string
   /** `'inherit'` = the session's tools; `[]` = refuse to spawn. */
   tools: 'inherit' | string[]
@@ -63,11 +82,12 @@ export interface PiAgentDefinition {
   /** False for Explore/Plan: they never get the `agent` tool. */
   canSpawn: boolean
   /**
-   * A project `.pi/agents` file that replaced a BUILT-IN type (e.g. a repo's
-   * own `general-purpose`): the listing marks it `(project)` so the model
-   * and the user can tell (ADR-089 review F7).
+   * What an earlier-scope definition of this name this one replaced was: a
+   * built-in type or a user's agent. A project definition carrying it is
+   * marked `(project)` in the listing so the model and the user can tell
+   * (ADR-089 review F7).
    */
-  overridesBuiltin?: boolean
+  overrides?: 'builtin' | 'user'
 }
 
 export interface PiAgentRegistry {
@@ -79,10 +99,6 @@ export interface PiAgentRegistry {
   diagnostics: string[]
 }
 
-export const MAX_AGENT_FILE_BYTES = 64 * 1024
-export const MAX_AGENT_FILES_PER_DIR = 200
-/** How far up from `cwd` the project-root (`.git`) search goes. */
-const MAX_PROJECT_WALK = 32
 const DESCRIPTION_LISTING_MAX = 300
 export const DEFAULT_AGENT_LISTING_MAX_CHARS = 12_000
 
@@ -96,15 +112,6 @@ const THINKING_LEVELS: readonly PiThinkingLevel[] = [
   'max'
 ]
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']
-const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._ -]*$/
-/**
- * A tool name as pi spells built-in and extension tools (it travels in `--tools a,b`).
- * A leading `+`/`-` is never accepted: since pi 1.1.0 those are `--tools` modifier
- * entries, and a list that mixes them with plain names (ClaudeUI always appends
- * `send_message`) makes pi exit 1 at startup. `-` stays legal inside a name.
- */
-const TOOL_NAME_RE = /^[A-Za-z0-9_.:][A-Za-z0-9_.:-]{0,63}$/
-const FENCE_RE = /^---[ \t]*$/
 
 /** Claude Code tool names → pi's (case-insensitive); anything else passes through as written. */
 const CC_TOOL_TO_PI: Record<string, string> = {
@@ -120,6 +127,37 @@ const CC_TOOL_TO_PI: Record<string, string> = {
   task: 'agent'
 }
 
+/**
+ * Claude Code built-in tools pi neither has nor maps (lowercase). A Claude
+ * definition may name them in `tools`; they stay in the child's argv (pi's
+ * `--tools` is a name matcher, an unknown entry is harmless) but are left out
+ * of the agent listing text, so the model is not told a child has a tool it
+ * cannot use. Any other name (a pi extension tool, `mcp__…`) is shown as written.
+ */
+const CLAUDE_ONLY_TOOLS: ReadonlySet<string> = new Set(
+  [
+    'WebFetch',
+    'WebSearch',
+    'NotebookEdit',
+    'NotebookRead',
+    'MultiEdit',
+    'TodoWrite',
+    'TodoRead',
+    'Skill',
+    'SlashCommand',
+    'ExitPlanMode',
+    'EnterPlanMode',
+    'AskUserQuestion',
+    'BashOutput',
+    'KillShell',
+    'KillBash',
+    'ListMcpResourcesTool',
+    'ReadMcpResourceTool',
+    'LSP',
+    'Monitor'
+  ].map((t) => t.toLowerCase())
+)
+
 const READ_ONLY_TOOLS = ['read', 'bash', 'grep', 'find', 'ls']
 
 /** Built-in definitions; the prompts are ClaudeUI's own wording. */
@@ -133,7 +171,8 @@ const BUILTIN_AGENTS: readonly PiAgentDefinition[] = [
       'search and read the code you need, make the changes the task asks for, and check your work ' +
       'where you can. Prefer editing existing files to creating new ones, and do not create ' +
       'documentation files unless the task asks for them.',
-    source: 'builtin',
+    scope: 'builtin',
+    origin: 'pi',
     tools: 'inherit',
     disallowedTools: [],
     model: 'inherit',
@@ -148,7 +187,8 @@ const BUILTIN_AGENTS: readonly PiAgentDefinition[] = [
       'first, then read the parts that matter. Never modify anything — no edits, no new files, no ' +
       'commands that change state. Report your findings concretely, citing file paths with line ' +
       'numbers (path:line).',
-    source: 'builtin',
+    scope: 'builtin',
+    origin: 'pi',
     tools: [...READ_ONLY_TOOLS],
     disallowedTools: [],
     model: 'inherit',
@@ -164,7 +204,8 @@ const BUILTIN_AGENTS: readonly PiAgentDefinition[] = [
       'and produce a step-by-step implementation plan with its trade-offs. Read only — do not ' +
       'change any file or run commands that change state. End your report with a "Critical files" ' +
       'list: the files the implementation will need to touch or understand.',
-    source: 'builtin',
+    scope: 'builtin',
+    origin: 'pi',
     tools: [...READ_ONLY_TOOLS],
     disallowedTools: [],
     model: 'inherit',
@@ -178,47 +219,24 @@ export function normalizeAgentName(s: string): string {
   return s.toLowerCase().replace(/[-_\s]/g, '')
 }
 
-function collapse(s: string): string {
-  return s.replace(/\s+/g, ' ').trim()
-}
-
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false
-  const proto = Object.getPrototypeOf(v)
-  return proto === Object.prototype || proto === null
-}
-
-type ToolList = { kind: 'absent' } | { kind: 'inherit' } | { kind: 'list'; tools: string[] }
-
-/**
- * A `tools`/`disallowedTools` value: a comma-separated string or a string
- * list. `*` means inherit; an explicitly empty value means an empty list.
- * Claude Code names are mapped; a name that does not look like a tool name is
- * dropped with a diagnostic. Null for a value of the wrong type.
- */
-function parseToolList(raw: unknown, field: string, warn: (msg: string) => void): ToolList | null {
-  if (raw === undefined || raw === null) return { kind: 'absent' }
-  let items: unknown[]
-  if (typeof raw === 'string') items = raw.split(',')
-  else if (Array.isArray(raw)) items = raw
-  else return null
-  const tools: string[] = []
-  for (const item of items) {
-    if (typeof item !== 'string') {
-      warn(`${field}: ignored a non-string entry`)
-      continue
-    }
-    const name = item.trim()
-    if (name === '') continue
-    if (name === '*') return { kind: 'inherit' }
-    if (!TOOL_NAME_RE.test(name)) {
-      warn(`${field}: ignored an entry that is not a tool name`)
-      continue
-    }
-    const mapped = CC_TOOL_TO_PI[name.toLowerCase()] ?? name
-    if (!tools.includes(mapped)) tools.push(mapped)
+/** The model a definition runs on: `harness.pi.model` wins over `model`. */
+function resolveModel(
+  data: Record<string, unknown>,
+  warn: (msg: string) => void
+): 'inherit' | string {
+  const piModel = harnessField(data, 'pi', 'model', warn)
+  const absent = (v: unknown): boolean => v === undefined || v === null
+  const raw = absent(piModel) ? data.model : piModel
+  if (absent(raw)) return 'inherit'
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    warn('model is not a string; inheriting')
+    return 'inherit'
   }
-  return { kind: 'list', tools }
+  const m = raw.trim()
+  if (m === 'inherit') return 'inherit'
+  if (m.includes('/')) return m
+  warn(`model "${m}" is not a pi model value (provider/id); inheriting`)
+  return 'inherit'
 }
 
 /**
@@ -228,60 +246,26 @@ function parseToolList(raw: unknown, field: string, warn: (msg: string) => void)
  */
 export function parseAgentFile(
   text: string,
-  source: PiAgentDefinition['source'],
+  scope: Exclude<AgentScope, 'builtin'>,
   filePath: string | undefined,
-  diagnostics: string[] = []
+  diagnostics: string[] = [],
+  origin: AgentOrigin = 'pi'
 ): PiAgentDefinition | { error: string } {
   const warn = (msg: string): void => {
     diagnostics.push(`${filePath ?? 'agent definition'}: ${msg}`)
   }
-  const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
-  const lines = src.split(/\r?\n/)
-  if (!FENCE_RE.test(lines[0] ?? '')) {
-    return { error: 'no front matter (the first line must be exactly ---)' }
-  }
-  let close = -1
-  for (let i = 1; i < lines.length; i++) {
-    if (FENCE_RE.test(lines[i])) {
-      close = i
-      break
-    }
-  }
-  if (close < 0) return { error: 'unterminated front matter' }
-  const block = lines.slice(1, close).join('\n')
-  const body = lines
-    .slice(close + 1)
-    .join('\n')
-    .trim()
+  const doc = parseAgentDocument(text)
+  if ('error' in doc) return doc
+  const { data, body } = doc
 
-  let data: unknown
-  try {
-    data = parseYaml(block, {
-      schema: 'core',
-      maxAliasCount: 0,
-      uniqueKeys: true,
-      prettyErrors: false,
-      // Warnings (an unknown tag, say) are not logged to the console; errors
-      // still throw and land in the catch below.
-      logLevel: 'error'
-    })
-  } catch (err) {
-    return {
-      error: `invalid front matter: ${err instanceof Error ? err.message.split('\n')[0] : 'parse error'}`
-    }
-  }
-  if (!isPlainObject(data)) return { error: 'front matter is not a key/value map' }
+  const head = readNameAndDescription(data)
+  if ('error' in head) return head
+  const { name, description } = head
 
-  const name = data.name
-  if (typeof name !== 'string' || name.length < 1 || name.length > 64 || !NAME_RE.test(name)) {
-    return { error: 'missing or invalid name' }
-  }
-  const description = typeof data.description === 'string' ? collapse(data.description) : ''
-  if (description === '') return { error: `${name}: missing description` }
-
-  const toolsRaw = parseToolList(data.tools, 'tools', warn)
+  const mapTool = (n: string): string => CC_TOOL_TO_PI[n.toLowerCase()] ?? n
+  const toolsRaw = parseToolList(data.tools, 'tools', warn, mapTool)
   if (toolsRaw === null) return { error: `${name}: tools must be a string or a list` }
-  const disallowedRaw = parseToolList(data.disallowedTools, 'disallowedTools', warn)
+  const disallowedRaw = parseToolList(data.disallowedTools, 'disallowedTools', warn, mapTool)
   if (disallowedRaw === null)
     return { error: `${name}: disallowedTools must be a string or a list` }
 
@@ -293,17 +277,7 @@ export function parseAgentFile(
     tools = []
   }
 
-  let model: string = 'inherit'
-  if (data.model !== undefined && data.model !== null) {
-    if (typeof data.model === 'string' && data.model.trim() !== '') {
-      const m = data.model.trim()
-      if (m === 'inherit') model = 'inherit'
-      else if (m.includes('/')) model = m
-      else warn(`model "${m}" is not a pi model value (provider/id); inheriting`)
-    } else {
-      warn('model is not a string; inheriting')
-    }
-  }
+  const model = resolveModel(data, warn)
 
   let thinking: PiThinkingLevel | undefined
   const thinkingRaw = data.thinking ?? data.effort
@@ -334,7 +308,8 @@ export function parseAgentFile(
     name,
     description,
     prompt: body,
-    source,
+    scope,
+    origin,
     ...(filePath ? { filePath } : {}),
     tools,
     disallowedTools,
@@ -346,88 +321,19 @@ export function parseAgentFile(
   }
 }
 
-/** Read every `*.md` definition in `dir` (non-recursive). Missing dir = nothing, silently. */
-function scanAgentDir(
-  dir: string,
-  source: 'user' | 'project',
-  diagnostics: string[]
-): PiAgentDefinition[] {
-  let names: string[]
-  try {
-    names = fs.readdirSync(dir)
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code
-    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
-      diagnostics.push(`${dir}: cannot list (${code ?? 'error'})`)
-    }
-    return []
-  }
-  const md = names.filter((n) => n.toLowerCase().endsWith('.md')).sort()
-  if (md.length > MAX_AGENT_FILES_PER_DIR) {
-    diagnostics.push(
-      `${dir}: ${md.length} definition files, only the first ${MAX_AGENT_FILES_PER_DIR} are read`
-    )
-  }
-  const out: PiAgentDefinition[] = []
-  for (const n of md.slice(0, MAX_AGENT_FILES_PER_DIR)) {
-    const file = path.join(dir, n)
-    try {
-      const st = fs.statSync(file)
-      if (!st.isFile()) {
-        diagnostics.push(`${file}: skipped (not a regular file)`)
-        continue
-      }
-      if (st.size > MAX_AGENT_FILE_BYTES) {
-        diagnostics.push(`${file}: skipped (larger than ${MAX_AGENT_FILE_BYTES} bytes)`)
-        continue
-      }
-      const parsed = parseAgentFile(fs.readFileSync(file, 'utf8'), source, file, diagnostics)
-      if ('error' in parsed) {
-        diagnostics.push(`${file}: skipped (${parsed.error})`)
-        continue
-      }
-      out.push(parsed)
-    } catch (err) {
-      diagnostics.push(`${file}: skipped (${(err as NodeJS.ErrnoException).code ?? 'unreadable'})`)
-    }
-  }
-  return out
-}
-
-/**
- * The project's `.pi/agents` directories, root first and `cwd` last (the one
- * nearer `cwd` wins). The project root is the nearest ancestor of `cwd`
- * (inclusive) containing `.git` — a directory or a file, so worktrees count;
- * with none, `cwd` alone. The walk is bounded to {@link MAX_PROJECT_WALK}.
- */
-function projectAgentDirs(cwd: string): string[] {
-  const start = path.resolve(cwd)
-  const chain: string[] = []
-  let dir = start
-  let root: string | null = null
-  for (let i = 0; i < MAX_PROJECT_WALK; i++) {
-    chain.push(dir)
-    let hasGit = false
-    try {
-      hasGit = fs.existsSync(path.join(dir, '.git'))
-    } catch {
-      hasGit = false
-    }
-    if (hasGit) {
-      root = dir
-      break
-    }
-    const parent = path.dirname(dir)
-    if (parent === dir) break
-    dir = parent
-  }
-  const dirs = root === null ? [start] : chain.reverse()
-  return dirs.map((d) => path.join(d, '.pi', 'agents'))
+/** One directory the registry reads, with the scope and origin its files get. */
+interface AgentSource {
+  dir: string
+  scope: Exclude<AgentScope, 'builtin'>
+  origin: AgentOrigin
 }
 
 export function loadPiAgentRegistry(opts: {
   cwd: string
+  /** pi's own user dir (default `~/.pi/agent/agents`). */
   userAgentsDir?: string
+  /** Claude Code's user dir (default `~/.claude/agents`). */
+  claudeUserAgentsDir?: string
 }): PiAgentRegistry {
   const diagnostics: string[] = []
   const byName = new Map<string, PiAgentDefinition>()
@@ -436,40 +342,75 @@ export function loadPiAgentRegistry(opts: {
     for (const def of defs) {
       const key = normalizeAgentName(def.name)
       const replaced = byName.get(key)
-      if (
-        def.source === 'project' &&
-        (replaced?.source === 'builtin' || replaced?.overridesBuiltin)
-      ) {
-        // A repo can redefine a built-in type under the same name. Allowed
-        // (the nearer definition wins), but said, with the file that did it.
-        const note = `project agent ${def.filePath ?? '(unknown file)'} overrides the built-in "${replaced.name}"`
+      const overrides: PiAgentDefinition['overrides'] =
+        replaced === undefined
+          ? undefined
+          : replaced.scope === 'project'
+            ? replaced.overrides
+            : replaced.scope
+      if (replaced !== undefined && overrides !== undefined) {
+        // A later directory can redefine an earlier type under the same name.
+        // Allowed (the later definition wins), but said, with the file that did it.
+        const what =
+          replaced.scope === 'builtin'
+            ? `the built-in "${replaced.name}"`
+            : `the ${replaced.scope} ${replaced.origin} agent "${replaced.name}" (${replaced.filePath ?? 'unknown file'})`
+        const note = `${def.scope} agent ${def.filePath ?? '(unknown file)'} overrides ${what}`
         diagnostics.push(note)
         logger.info('PiAgentRegistry', note)
-        byName.set(key, { ...def, overridesBuiltin: true })
-        continue
       }
-      byName.set(key, def)
+      byName.set(key, overrides === undefined ? def : { ...def, overrides })
     }
   }
 
-  // The same dir the retired M5b extension read, so existing definitions keep
-  // working. Resolving it cannot fail in practice; it is guarded anyway
-  // because loading must never throw.
-  let userDir = opts.userAgentsDir
-  if (userDir === undefined) {
+  // Resolving a home-relative dir cannot fail in practice; it is guarded
+  // anyway because loading must never throw.
+  const sources: AgentSource[] = []
+  let claudeUser = opts.claudeUserAgentsDir
+  if (claudeUser === undefined) {
     try {
-      userDir = path.join(piAgentDir(), 'agents')
+      claudeUser = defaultClaudeUserAgentsDir()
+    } catch {
+      diagnostics.push('claude user agents dir: unavailable')
+    }
+  }
+  if (claudeUser !== undefined) sources.push({ dir: claudeUser, scope: 'user', origin: 'claude' })
+  // The same dir the retired M5b extension read, so existing definitions keep working.
+  let piUser = opts.userAgentsDir
+  if (piUser === undefined) {
+    try {
+      piUser = path.join(piAgentDir(), 'agents')
     } catch {
       diagnostics.push('user agents dir: unavailable')
     }
   }
-  if (userDir !== undefined) put(scanAgentDir(userDir, 'user', diagnostics))
-  for (const dir of projectAgentDirs(opts.cwd)) put(scanAgentDir(dir, 'project', diagnostics))
+  if (piUser !== undefined) sources.push({ dir: piUser, scope: 'user', origin: 'pi' })
+  // Project directories, root first; in each, Claude's before pi's. A project
+  // folder that IS a user folder (cwd = the home directory) stays user scope.
+  const userKeys = new Set(sources.map((s) => samePathKey(s.dir)))
+  for (const dir of projectDirChain(opts.cwd)) {
+    for (const [sub, origin] of [
+      ['.claude', 'claude'],
+      ['.pi', 'pi']
+    ] as const) {
+      const agentsDir = path.join(dir, sub, 'agents')
+      if (!userKeys.has(samePathKey(agentsDir))) {
+        sources.push({ dir: agentsDir, scope: 'project', origin })
+      }
+    }
+  }
+  for (const src of sources) {
+    put(
+      scanAgentDir(src.dir, diagnostics, (text, file, diag) =>
+        parseAgentFile(text, src.scope, file, diag, src.origin)
+      )
+    )
+  }
 
   const builtinOrder = BUILTIN_AGENTS.map((d) => d.name)
   const sorted = [...byName.values()].sort((a, b) => {
-    const ai = a.source === 'builtin' ? builtinOrder.indexOf(a.name) : -1
-    const bi = b.source === 'builtin' ? builtinOrder.indexOf(b.name) : -1
+    const ai = a.scope === 'builtin' ? builtinOrder.indexOf(a.name) : -1
+    const bi = b.scope === 'builtin' ? builtinOrder.indexOf(b.name) : -1
     if (ai >= 0 || bi >= 0) {
       if (ai < 0) return 1
       if (bi < 0) return -1
@@ -493,13 +434,14 @@ export function loadPiAgentRegistry(opts: {
   }
 }
 
+const listed = (tool: string): boolean => !CLAUDE_ONLY_TOOLS.has(tool.toLowerCase())
+
 function toolsLabel(def: PiAgentDefinition): string {
+  const disallowed = def.disallowedTools.filter(listed)
   if (def.tools === 'inherit') {
-    return def.disallowedTools.length > 0
-      ? `All tools except ${def.disallowedTools.join(', ')}`
-      : 'All tools'
+    return disallowed.length > 0 ? `All tools except ${disallowed.join(', ')}` : 'All tools'
   }
-  const tools = def.tools.filter((t) => !def.disallowedTools.includes(t))
+  const tools = def.tools.filter((t) => !def.disallowedTools.includes(t) && listed(t))
   return tools.length > 0 ? tools.join(', ') : 'none'
 }
 
@@ -515,6 +457,10 @@ function launchable(defs: PiAgentDefinition[]): PiAgentDefinition[] {
  * (`tools: []`) is omitted: listing a type that can never launch only teaches
  * the model a failing call (`resolve` still finds it, so the refusal error
  * stays explicit).
+ *
+ * Claude Code built-in tools pi lacks ({@link CLAUDE_ONLY_TOOLS}, e.g.
+ * `WebFetch`) are left out of the tool lists shown here; the child's argv is
+ * unchanged.
  */
 export function renderAgentListing(
   reg: PiAgentRegistry,
@@ -525,7 +471,7 @@ export function renderAgentListing(
       def.description.length > DESCRIPTION_LISTING_MAX
         ? def.description.slice(0, DESCRIPTION_LISTING_MAX - 1) + '…'
         : def.description
-    const origin = def.overridesBuiltin ? ' (project)' : ''
+    const origin = def.scope === 'project' && def.overrides ? ' (project)' : ''
     return `- ${def.name}${origin}: ${desc} (Tools: ${toolsLabel(def)})`
   })
   const kept: string[] = []

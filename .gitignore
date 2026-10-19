@@ -14,6 +14,9 @@ bin/
 # scripts/extract-cli.mjs. Cached locally, rebuilt when claudeCliVersion
 # bumps in package.json.
 /vendor/claude-cli/
+# Old bun-claude binaries a running process held (renamed aside by ensure-cli,
+# swept by the next run) — scripts/lib/vendor-swap.mjs.
+/vendor/.claude-cli-trash/
 # Engine binaries vendored before ADR-082 §8 (opencode, pi and Codex now install
 # into ~/.claude/ui/harnesses); still ignored for older checkouts.
 /vendor/opencode-cli/
@@ -26,3 +29,6 @@ bin/
 
 /review.md
 .claude/worktrees/
+# Private working notes (wellofspirit/ClaudeUI-notes, cloned here): backlog,
+# housekeeping, handoffs, specs, research. Never part of this repo or a build.
+/.notes/

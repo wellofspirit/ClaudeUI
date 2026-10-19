@@ -54,7 +54,7 @@ const view = {
   kind: 'task' as const,
   description: DESCRIPTION,
   prompt: 'Read every controller in the batch and report schema drift.',
-  // A custom type: the engine's default (`general-purpose`) has no tile (ADR-094).
+  // A custom type: the engine's default (`general-purpose`) is the bot alone (ADR-094).
   subagent: 'migration-reviewer',
   model: RAW_MODEL,
   background: true
@@ -211,7 +211,7 @@ function expectFooterSound(footer: HTMLElement): void {
     expect(isOneLine(child)).toBe(true)
   }
   const whole = Array.from(footer.querySelectorAll<HTMLElement>('span, button')).filter((el) =>
-    ['migration-reviewer', 'background', 'resumed ×1'].includes(el.textContent ?? '')
+    ['migration-reviewer', 'background', '↻1'].includes(el.textContent ?? '')
   )
   for (const chip of whole) expect(chip.scrollWidth).toBeLessThanOrEqual(chip.clientWidth + 1)
 }
@@ -280,9 +280,9 @@ describe('Task card on the phone', () => {
           expectModelReadable(byTestId(footer, 'TaskCard.model'))
           expect(footer.innerText).not.toContain('tokens')
 
-          // ONE line at every chat scale, 1.5 (222px) included: the type is a 16px
-          // tile and the background chip an icon (a word-only chip left the ↗ alone
-          // on row 2 at ~1.22). Only a resumed chip at 1.5 wraps (next test).
+          // ONE line at every chat scale, 1.5 (222px) included: the type is a tile
+          // (bot + letters) and the background chip an icon (a word-only chip left the
+          // ↗ alone on row 2 at ~1.22). Only a resumed chip wraps (next test).
           const kids = visibleChildren(footer)
           expect(rowCount(kids)).toBe(1)
           expectNarrowOrder(footer)
@@ -305,8 +305,13 @@ describe('Task card on the phone', () => {
           const footer = footerOf(card, expanded)
           expectFooterSound(footer)
           expectModelReadable(byTestId(footer, 'TaskCard.model'))
-          expect(byTestId(footer, 'TaskCard.resumed').textContent).toBe('resumed ×1')
-          // The one case that wraps, as WHOLE chips with the icon last: resumed at 1.5.
+          const resumed = byTestId(footer, 'TaskCard.resumed')
+          expect(resumed.textContent).toBe('↻1')
+          expect(resumed.getAttribute('aria-label')).toBe('Resumed 1 time')
+          // The compact ↻N badge costs a few characters, so the footer stays ONE row
+          // (whole chips, the icon last) through chat scale 1.25; the spelled-out
+          // "resumed ×1" chip is what used to wrap it there. At 1.5 (a 222px card)
+          // the whole chips still do not fit one row, and wrap as whole chips.
           const kids = visibleChildren(footer)
           expect(rowCount(kids)).toBe(chatScale >= 1.5 ? 2 : 1)
           expect(kids[kids.length - 1]).toBe(openButton(card, expanded))
@@ -334,10 +339,10 @@ describe('Task card on the phone', () => {
       expect(getComputedStyle(chip).fontFamily).toMatch(/mono/i)
       // It is the chip that gives way — and it still reads (floor). It takes the
       // leftover space of its line, but cannot claim a line of its own: the
-      // footer is one row at every scale. The 246px id fits whole at chat 1
-      // (a 355px card), and is cut from 1.1 on.
-      if (chatScale === 1) expect(chip.scrollWidth).toBeLessThanOrEqual(chip.clientWidth + 1)
-      else expect(chip.scrollWidth).toBeGreaterThan(chip.clientWidth)
+      // footer is one row at every scale. The 246px id is cut at every scale: it
+      // used to fit whole at chat 1 (a 355px card), but the type tile now holds
+      // the bot as well as its letters (about 17px more) and the id gives way.
+      expect(chip.scrollWidth).toBeGreaterThan(chip.clientWidth)
       expectModelReadable(chip)
       const footer = footerOf(card, false)
       expectFooterSound(footer)
@@ -360,8 +365,9 @@ describe('Task card on the phone', () => {
         seed([], { engineId: 'claude' })
         const card = await mountCard(chatScale, { width, model: label })
         const chip = byTestId(card, 'TaskCard.model')
-        expect(chip.textContent).toBe(label)
-        expect(getComputedStyle(chip).fontFamily).toMatch(/mono/i)
+        // The alias reads as its family's short name ("Opus"), in the sans face.
+        expect(chip.textContent).toBe(label.charAt(0).toUpperCase() + label.slice(1))
+        expect(getComputedStyle(chip).fontFamily).not.toMatch(/mono/i)
         expect(chip.scrollWidth).toBeLessThanOrEqual(chip.clientWidth + 1)
         // Narrower than the floor, in page px: no blank space.
         expect(rectOf(chip).width).toBeLessThan(5 * 16 * chatScale)
@@ -534,13 +540,13 @@ duration_ms: 135000
         const card = await mountCard(chatScale, { model: 'haiku' })
         const footer = footerOf(card, false)
         const tile = byTestId(footer, 'TaskCard.typeTile')
-        expect(tile.innerText.trim()).toBe('M')
+        expect(tile.innerText.trim()).toBe('MR')
         expect(tile.title).toBe('migration-reviewer')
         expect(tile.getAttribute('aria-label')).toBe('migration-reviewer')
         expect(tile.clientHeight).toBe(16)
         expectNarrowOrder(footer)
         // The name is the tile's tooltip below 480px, not text.
-        expect(byTestId(footer, 'TaskCard.type').innerText.trim()).toBe('M')
+        expect(byTestId(footer, 'TaskCard.type').innerText.trim()).toBe('MR')
         expect(visibleChildren(footer)[0]).toBe(byTestId(footer, 'TaskCard.type'))
         // One row at every chat scale for this common fixture.
         expect(rowCount(visibleChildren(footer))).toBe(1)
@@ -554,7 +560,7 @@ duration_ms: 135000
       const footer = footerOf(card, false)
       const chip = byTestId(footer, 'TaskCard.type')
       expect(visibleChildren(footer)[0]).toBe(chip)
-      expect(chip.innerText.replace(/\s+/g, ' ').trim()).toBe('M migration-reviewer')
+      expect(chip.innerText.replace(/\s+/g, ' ').trim()).toBe('MR migration-reviewer')
       const tile = byTestId(chip, 'TaskCard.typeTile')
       // The chip's own colour is the tile's colour; its tint shows (not transparent).
       expect(getComputedStyle(chip).color).toBe(getComputedStyle(tile).color)
@@ -572,7 +578,7 @@ duration_ms: 135000
       expect(rowCount(visibleChildren(footer))).toBe(1)
     })
 
-    it('has no chip and no tile for the default type, wide or narrow', async () => {
+    it('has the muted bot alone for the default type, with no name, wide or narrow', async () => {
       cleanup()
       seed([HAIKU], { engineId: 'claude' })
       for (const width of [undefined, '610px']) {
@@ -581,24 +587,37 @@ duration_ms: 135000
           model: 'haiku',
           view: { ...view, subagent: 'general-purpose' }
         })
-        expect(card.querySelector('[data-testid="TaskCard.type"]')).toBeNull()
-        expect(card.querySelector('[data-testid="TaskCard.typeTile"]')).toBeNull()
-        // The footer starts with the background chip, as it did.
-        expect(visibleChildren(footerOf(card, false))[0]).toBe(
-          byTestId(card, 'TaskCard.background')
+        const footer = footerOf(card, false)
+        const chip = byTestId(card, 'TaskCard.type')
+        const tile = byTestId(chip, 'TaskCard.typeTile')
+        expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
+        expect(tile.getAttribute('data-color')).toBeNull()
+        expect(tile.title).toBe('general-purpose')
+        // The bot names nothing: no type text at any width, no tint behind it.
+        expect(chip.innerText.trim()).toBe('')
+        expect(getComputedStyle(chip).backgroundColor).toBe('rgba(0, 0, 0, 0)')
+        expect(tile.clientHeight).toBe(16)
+        // It leads the footer, ahead of the background chip, which does not wrap.
+        expect(visibleChildren(footer)[0]).toBe(chip)
+        expect(rectOf(chip).right).toBeLessThanOrEqual(
+          rectOf(byTestId(card, 'TaskCard.background')).left + 1
         )
+        expect(rowCount(visibleChildren(footer))).toBe(1)
         cleanup()
         seed([HAIKU], { engineId: 'claude' })
       }
     })
 
-    it('never makes a Codex model a type: a spawn that carries only a model has no tile', async () => {
+    it('never makes a Codex model a type: a spawn that carries only a model gets the bot alone', async () => {
       cleanup()
       seed([], { engineId: 'claude' })
       const card = await mountCard(1, {
         view: { ...view, subagent: undefined as unknown as string, model: 'gpt-5.6-luna' }
       })
-      expect(card.querySelector('[data-testid="TaskCard.typeTile"]')).toBeNull()
+      const tile = byTestId(card, 'TaskCard.typeTile')
+      expect(tile.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
+      expect(tile.getAttribute('data-color')).toBeNull()
+      expect(byTestId(card, 'TaskCard.type').innerText.trim()).toBe('')
       expect(byTestId(card, 'TaskCard.model').textContent).toBe('gpt-5.6-luna')
     })
 
@@ -658,14 +677,23 @@ duration_ms: 135000
 
     // Just above the breakpoint the footer does not wrap, so the chips that must
     // not shrink are the only thing standing between "migration-reviewer" and a
-    // mid-token break. The raw model id and the usage text are what give way.
+    // mid-token break. The raw model id and the usage text are what give way. How
+    // narrow a card can be before the whole chips stop fitting depends on the
+    // platform's font metrics (and on the bot in the type tile), so this finds the
+    // tightest sound width in a range instead of assuming one.
     for (const expanded of [false, true]) {
       it(`keeps the chips whole under pressure (${expanded ? 'expanded' : 'collapsed'})`, async () => {
-        cleanup()
-        seed([], { runIndex: 2 })
-        const card = await mountCard(1, { width: '541px', expanded })
-        expect(rectOf(card).width).toBeGreaterThanOrEqual(480)
-        const footer = footerOf(card, expanded)
+        let card: HTMLElement | undefined
+        for (const width of [551, 561, 571, 591, 611, 651]) {
+          cleanup()
+          seed([], { runIndex: 2 })
+          card = await mountCard(1, { width: `${width}px`, expanded })
+          if (hasNoHorizontalOverflow(footerOf(card, expanded))) break
+        }
+        // Whole chips fit by 651px on any platform; below that they may overflow.
+        expect(hasNoHorizontalOverflow(footerOf(card!, expanded))).toBe(true)
+        expect(rectOf(card!).width).toBeGreaterThanOrEqual(480)
+        const footer = footerOf(card!, expanded)
         expectFooterSound(footer)
         expectModelReadable(byTestId(footer, 'TaskCard.model'))
         // type chip (tile + name) · background · resumed · the words, each whole.
@@ -673,12 +701,12 @@ duration_ms: 135000
           byTestId(footer, 'TaskCard.type'),
           byTestId(footer, 'TaskCard.background'),
           byTestId(footer, 'TaskCard.resumed'),
-          openButton(card, expanded)
+          openButton(card!, expanded)
         ]
         expect(chips.map((c) => c.innerText.replace(/\s+/g, ' ').trim())).toEqual([
-          'M migration-reviewer',
+          'MR migration-reviewer',
           'background',
-          'resumed ×1',
+          '↻1',
           'Open in panel'
         ])
         for (const chip of chips) expect(chip.scrollWidth).toBeLessThanOrEqual(chip.clientWidth + 1)

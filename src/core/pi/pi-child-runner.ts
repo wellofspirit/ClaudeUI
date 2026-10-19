@@ -83,13 +83,16 @@ export interface PiChildPrimitives {
  */
 export type SpawnPiChildFn = (opts: PiChildSpawnOpts) => Promise<PiChildPrimitives>
 
-function defaultChildEnv(bridge: { url: string; token: string }): NodeJS.ProcessEnv {
+/** The env a child gets when its consumer names none (exported for the child-env table test). */
+export function defaultChildEnv(bridge: { url: string; token: string }): NodeJS.ProcessEnv {
   return {
     CLAUDEUI_PI_BRIDGE_URL: bridge.url,
     CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
     CLAUDEUI_PI_HOSTED_TOOLS: '',
     CLAUDEUI_PI_DISPATCH_ENABLED: '',
     CLAUDEUI_PI_DISPATCH_DESCRIPTION: '',
+    // The session tools are for a session's root agent only.
+    CLAUDEUI_PI_SESSION_TOOLS: '',
     // No bridged MCP catalog unless the consumer's env asks for it (ADR-096).
     CLAUDEUI_PI_MCP: ''
   }

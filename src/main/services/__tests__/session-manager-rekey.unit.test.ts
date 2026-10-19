@@ -15,6 +15,8 @@ import type { SessionStatus } from '../../../shared/types'
 
 vi.mock('../../../core/services/db', () => ({
   renameUsageEventParent: vi.fn(),
+  moveSessionMeta: vi.fn(),
+  moveSessionInbox: vi.fn(),
   dispatchedCostsByRouting: vi.fn(() => []),
   appendAuditLog: vi.fn()
 }))
@@ -24,6 +26,7 @@ vi.mock('../../../core/services/session-history', () => ({
 vi.mock('../../../core/providers/register-engines', () => ({}))
 
 const { SessionManager } = await import('../../../core/services/session-manager')
+const { moveSessionInbox, moveSessionMeta } = await import('../../../core/services/db')
 const { syncCore, emitEvent } = await import('../../../core/services/sync-host')
 
 function status(sessionId: string | null): SessionStatus {
@@ -65,6 +68,21 @@ describe('SessionManager — core-owned rekey', () => {
     // The session object's own routing id moves with it, so its next send is
     // addressed correctly without any re-registration.
     expect(stub.routingId).toBe('uuid-9')
+    manager.disposeRekeyObserver()
+  })
+
+  it('carries the held inbox to the new id, before the engine row moves (slice 1a)', () => {
+    const manager = new SessionManager()
+    emitEvent('session:created', ['temp-1', { cwd: '/x' }])
+    seat(manager, 'temp-1')
+
+    emitEvent('session:status', ['temp-1', status('uuid-9')])
+
+    expect(moveSessionInbox).toHaveBeenCalledWith('temp-1', 'uuid-9')
+    // moveSessionMeta may drop the old id's rows, and a deleted session's meta takes its inbox.
+    expect(vi.mocked(moveSessionInbox).mock.invocationCallOrder.at(-1)!).toBeLessThan(
+      vi.mocked(moveSessionMeta).mock.invocationCallOrder.at(-1)!
+    )
     manager.disposeRekeyObserver()
   })
 

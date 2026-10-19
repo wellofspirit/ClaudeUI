@@ -807,6 +807,8 @@ function buildPatch(
   if (force || prev.customTitles !== next.customTitles) patch.customTitles = next.customTitles
   if (force || prev.sessionEngines !== next.sessionEngines)
     patch.sessionEngines = next.sessionEngines
+  if (force || prev.sessionLinks !== next.sessionLinks) patch.sessionLinks = next.sessionLinks
+  if (force || prev.sessionRefs !== next.sessionRefs) patch.sessionRefs = next.sessionRefs
   if (force || prev.hiddenSessions !== next.hiddenSessions) {
     patch.hiddenSessionIds = next.hiddenSessions
   }
@@ -905,6 +907,8 @@ function projectSession(
     todos: c.todos,
     sentFiles: c.sentFiles,
     queuedItems: c.queue,
+    heldCount: c.heldCount,
+    contextPressure: c.contextPressure,
     taskNotifications: c.taskNotifications,
     activeTasks: c.activeTasks,
     taskProgressMap: c.taskProgressMap,

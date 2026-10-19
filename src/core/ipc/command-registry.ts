@@ -99,6 +99,11 @@ const CAPABILITY_SET: ReadonlySet<string> = new Set<string>(CAPABILITIES)
  * desktop on one of them. Pre-release, so old local audit rows keep whatever they
  * say and there is no migration.
  *
+ * `agent` is an agent session acting through the session tools (`session_start`,
+ * `session_message`, …): never a connection, only an audit row whose `label` names
+ * the calling session and engine and whose `connection_id` is `session:<ref>`.
+ * It holds no grants and cannot authenticate anything.
+ *
  * `webauthn` is a completed passkey assertion (the only method that proves a
  * human rather than a cached secret), `enroll-token` a one-time link that may do
  * nothing but register a credential, and `none` the `off` policy mode, where
@@ -122,7 +127,7 @@ const CAPABILITY_SET: ReadonlySet<string> = new Set<string>(CAPABILITIES)
  * vs the WebSocket), not who is on the far end of it.
  */
 export type IdentityMethod =
-  'password' | 'webauthn' | 'webauthn-resumed' | 'enroll-token' | 'none' | 'host'
+  'password' | 'webauthn' | 'webauthn-resumed' | 'enroll-token' | 'none' | 'host' | 'agent'
 
 export interface ConnectionIdentity {
   method: IdentityMethod
@@ -336,7 +341,7 @@ export function hostConnection(label: HostSurfaceLabel = 'desktop-renderer'): Co
  * it, every rejected handshake would be an orphan row.
  */
 export function makeRemoteConnection(
-  method: Exclude<IdentityMethod, 'host'>,
+  method: Exclude<IdentityMethod, 'host' | 'agent'>,
   login: string | null,
   grants: ReadonlySet<Capability> = AUTH_OFF_GRANTS,
   opts?: {

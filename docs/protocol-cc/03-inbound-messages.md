@@ -180,6 +180,13 @@ an `isReplay: true` echo; a duplicate that was persisted but not received by thi
 gets a `command_lifecycle` `completed`. The one exception: a persisted message whose turn went
 unanswered is re-run when nothing else is queued. A host must therefore never reuse a uuid.
 
+### Native peer messages (another Claude Code process, over cli.js's socket)
+
+Without `--replay-user-messages` the peer's text never reaches stdout: the host sees `command_lifecycle`
+`started` for a uuid it never sent, the turn's frames, and the user row on disk. A message cli.js parks
+arrives as `system/peer_message_hold`. The wire shapes, the receive policy, the on-disk row and the
+release levers are in 15 (§15.2, §15.3.6); how ClaudeUI reads them is 15 §15.6.
+
 ### Subagent variant (`parent_tool_use_id`)
 
 ```jsonc

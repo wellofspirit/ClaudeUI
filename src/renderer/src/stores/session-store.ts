@@ -16,6 +16,11 @@ import type { AuthRequiredState } from '../../../shared/remote-protocol'
 import type { ItemStreams } from '../../../core/shared/sync/item-stream'
 import type { TranscriptLoadProgress } from '../lib/transcript-load-progress'
 import type { CanonicalSessionState, CanonicalState } from '../../../core/shared/sync/state'
+import type { SessionLinkInfo } from '../../../shared/session-links'
+import type {
+  ContextPressureBanner,
+  ContextPressureSetting
+} from '../../../shared/context-pressure'
 import {
   anthropicAuthState,
   chatgptAuthFromRegistry,
@@ -642,6 +647,23 @@ export interface AppSettings {
   agentTypeColors?: AgentTypeColorOverrides
   /** The cross-engine dispatch tile's (the letter X) palette colour; unset is orange. */
   dispatchTileColor?: AgentColorId
+  /**
+   * What to do when a session's context crosses a threshold (session tools, slice 4). Absent from
+   * {@link DEFAULT_SETTINGS}: unset is `off` with a 70 % threshold, and Reset deletes the key.
+   * `normalizeContextPressure` (shared) owns the rules; the host applies it on save and on read.
+   */
+  contextPressure?: ContextPressureSetting
+  /**
+   * The session tools (the agent-facing `session_*` family and its guidance) on every engine.
+   * Absent from {@link DEFAULT_SETTINGS}: unset is on, and Reset deletes the key. Read when a
+   * session spawns, so turning it off applies to new sessions.
+   */
+  sessionTools?: boolean
+  /**
+   * Colour an agent's name in the roster, and the task card's model chip, by the
+   * tier of the model it runs on (`shared/model-tier.ts`). On by default.
+   */
+  agentModelTierColors: boolean
 }
 
 /** Exported for the replica's settings projection (one merge base, not two). */
@@ -649,6 +671,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
   showAgentPill: true,
   showAgentTab: true,
+  agentModelTierColors: true,
   expandToolCalls: true,
   expandReadResults: false,
   hideToolInput: false,
@@ -1212,6 +1235,12 @@ export interface PerSessionState {
   /** Queue of record, replicated from main (ADR-053). Only `queued` items live
    *  here — a consumed item has already become a chat message. */
   queuedItems: QueuedItem[]
+  /** Items from other sessions or agents held for this session's next turn
+   *  (slice 1a), replicated from main — `0` when none. */
+  heldCount: number
+  /** The context-pressure banner above this session's composer (slice 4), replicated
+   *  from main — `null` when there is none. */
+  contextPressure: ContextPressureBanner | null
   draftText: string
   /** Per-session unsent attachments (mirrors draftText). Scoped so a file added
    *  in session A can never be sent from B, and is restored on return to A. */
@@ -1313,6 +1342,8 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   statusLine: null,
   metering: null,
   queuedItems: [],
+  heldCount: 0,
+  contextPressure: null,
   draftText: '',
   draftAttachments: [],
   selectedModel: 'default',
@@ -1882,6 +1913,10 @@ export interface SessionState {
   hiddenProjectKeys: string[]
   /** Maps sessionId → { engineId, model? } for engine persistence across restarts. */
   sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
+  /** Origin links between sessions, keyed by the started session's ref (slice 1b). Replicated. */
+  sessionLinks: Record<string, SessionLinkInfo>
+  /** sidebar id → ref for every session a link names (slice 1b). Replicated. */
+  sessionRefs: Record<string, string>
 
   /** Remembered engine choice — pre-fills engine for newly created sessions. */
   lastSelectedEngineId: EngineId
@@ -2385,6 +2420,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   hiddenSessionIds: [],
   hiddenProjectKeys: [],
   sessionEngines: {},
+  sessionLinks: {},
+  sessionRefs: {},
   lastSelectedEngineId:
     ((localStorage.getItem('lastSelectedEngineId') ??
       localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',

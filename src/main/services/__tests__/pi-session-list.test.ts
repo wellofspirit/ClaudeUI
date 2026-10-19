@@ -40,6 +40,7 @@ vi.mock('../../../core/auth/PiAuthProvider', () => ({
 }))
 
 import {
+  convertPiEntryMessage,
   listPiSessionsGlobal,
   loadPiSessionHistory,
   findPiSessionFile,
@@ -1387,5 +1388,28 @@ describe('deletePiSession — host-run subagents (ADR-089)', () => {
     await deletePiSession('parent-e')
 
     expect(readdirSync(join(subagentsRoot(), AGENT_A))).toEqual(['notes.txt'])
+  })
+})
+
+describe('convertPiEntryMessage — the model a message ran on', () => {
+  const entry = (overrides: Record<string, unknown> = {}) =>
+    ({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'hi' }],
+      api: 'openai-codex-responses',
+      provider: 'openai-codex',
+      model: 'gpt-6-sol',
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      stopReason: 'stop',
+      timestamp: 5,
+      ...overrides
+    }) as never
+
+  it('names provider/model on an assistant message', () => {
+    expect(convertPiEntryMessage('e1', entry(), new Map())?.model).toBe('openai-codex/gpt-6-sol')
+  })
+
+  it('leaves the field off when the entry names no model', () => {
+    expect(convertPiEntryMessage('e1', entry({ model: '' }), new Map())).not.toHaveProperty('model')
   })
 })

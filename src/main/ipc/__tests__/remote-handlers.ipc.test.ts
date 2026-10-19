@@ -1494,6 +1494,23 @@ describe('registerRemoteHandlers', () => {
       expect(persisted).not.toHaveProperty('modelOverride')
     })
 
+    it('stores the context-pressure setting only in its valid form, whoever sends it (slice 4)', async () => {
+      await dispatcher.handle(
+        makeRequest('config:save-settings', {
+          contextPressure: { mode: 'sometimes', thresholds: [95, 5, 40, 40, 'x', 120, 60] }
+        }),
+        remoteConn
+      )
+      expect(uiConfigMocks.saveSettings.mock.calls[0][0].contextPressure).toEqual({
+        mode: 'off',
+        thresholds: [40, 60, 95]
+      })
+      // Absent stays absent: the default is not written into every profile.
+      uiConfigMocks.saveSettings.mockClear()
+      await dispatcher.handle(makeRequest('config:save-settings', { theme: 'dark' }), remoteConn)
+      expect(uiConfigMocks.saveSettings.mock.calls[0][0]).not.toHaveProperty('contextPressure')
+    })
+
     it('applies endpoint/model env sourced from the vendor store (GUARD — fails pre-fix)', async () => {
       uiConfigMocks.loadEngineConfig.mockReturnValueOnce({})
       uiConfigMocks.loadVendorConfig.mockReturnValueOnce({
@@ -1663,6 +1680,20 @@ describe('registerRemoteHandlers', () => {
 //   - `session:approve-blocked` (ADR-091 part 6) — approving an auto-mode
 //     block after the fact; a `chat` command on the named session, gated
 //     exactly like `session:approval-response`, which it extends.
+//   - `session:allow-peer-messages` (session tools, slice 1a) — the "Allow messages
+//     from other Claude sessions here" action on a held peer message; a `chat`
+//     command on the named session, so the browser client can answer the hold row
+//     exactly as the desktop does.
+//   - `session:link:set-grouped` (session tools, slice 5; was `session:link:detach`) — the
+//     "Detach from group" / "Add to group" row menu action; a `chat` command naming the
+//     session, so the browser and phone clients can move a session in or out of its group as
+//     the desktop can.
+//   - `session:proposal:start` / `session:proposal:dismiss` (session tools, slice 1c-b, 5) — the
+//     two Start buttons (in this group / as standalone work) and Dismiss on a proposal card; `chat` commands naming a proposal, so the
+//     browser and phone clients can act on a card exactly as the desktop does.
+//   - `session:context-pressure:respond` (session tools, slice 4) — Hand off / Not now on the
+//     banner above the composer; a `chat` command naming the session, so the browser and
+//     phone clients answer exactly as the desktop does.
 // ---------------------------------------------------------------------------
 
 const PRE_PORT_REMOTE_CHANNELS = [
@@ -1708,12 +1739,14 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'mockup:watch',
   'pi:auth-status',
   'pi:binary-path',
+  'session:allow-peer-messages',
   'session:approval-response',
   'session:approve-blocked',
   'session:ask-side-question',
   'session:background-task',
   'session:build-subagent-file-map',
   'session:cancel',
+  'session:context-pressure:respond',
   'session:create',
   'session:delete-project',
   'session:delete-session',
@@ -1728,6 +1761,7 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'session:get-plan-content',
   'session:get-session-log-path',
   'session:interrupt',
+  'session:link:set-grouped',
   'session:list-directories',
   'session:list-opencode',
   'session:list-pi',
@@ -1736,6 +1770,8 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'session:load-opencode-history',
   'session:load-pi-history',
   'session:load-subagent-history',
+  'session:proposal:dismiss',
+  'session:proposal:start',
   'session:read-background-range',
   'session:recall-queued',
   'session:rekey',

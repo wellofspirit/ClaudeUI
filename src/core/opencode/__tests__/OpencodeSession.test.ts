@@ -58,7 +58,9 @@ const h = vi.hoisted(() => {
     engineConfig: { autoMode: {} as Record<string, unknown> },
     recordUsageEvent: vi.fn(),
     shared: {} as Record<string, unknown>,
-    judge: vi.fn()
+    judge: vi.fn(),
+    /** Replaces `sessionToolsGate` for one test (the real gate answers when null). */
+    sessionGate: null as null | ((...args: unknown[]) => unknown)
   }
 })
 
@@ -123,6 +125,16 @@ vi.mock('../../auth/OpencodeAuthProvider', () => ({
   }
 }))
 vi.mock('../../services/usage-recorder', () => ({ recordUsageEvent: h.recordUsageEvent }))
+// The session tools' gate is REAL unless a test replaces it (the ask / scope matrix is the
+// service's own suite; here the subject is how opencode's asks are routed through it).
+vi.mock('../../services/session-tools', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/session-tools')>()
+  return {
+    ...actual,
+    sessionToolsGate: (...args: Parameters<typeof actual.sessionToolsGate>) =>
+      h.sessionGate ? h.sessionGate(...args) : actual.sessionToolsGate(...args)
+  }
+})
 vi.mock('../../services/block-usage', () => ({
   blockUsageService: { recalculate: vi.fn().mockResolvedValue(undefined) }
 }))
@@ -146,6 +158,11 @@ vi.mock('../../automode/ground-truth', async (importOriginal) => ({
 }))
 
 import { OpencodeSession, CLAUDEUI_INBOX_PREFIX } from '../OpencodeSession'
+import { slimTranscript } from '../../automode/classifier'
+import { deleteSessionInbox, heldInboxItems, listAuditLog } from '../../services/db'
+import { refFor } from '../../services/session-links'
+import { deliver } from '../../services/session-delivery'
+import type { SessionManager } from '../../services/session-manager'
 import { OpencodePermissionGuardError } from '../OpencodeServerManager'
 import { OpencodeApiError } from '../OpencodeClient'
 import { buildSessionRuleset, THROWAWAY_RULESET, type V2Rule } from '../permission-v2'
@@ -354,6 +371,7 @@ beforeEach(() => {
   h.engineConfig.autoMode = {}
   h.shared = {}
   h.judge.mockReset()
+  h.sessionGate = null
 })
 
 afterEach(() => {
@@ -812,6 +830,253 @@ describe('queue via the inbox', () => {
 })
 
 // ─── Approvals ──────────────────────────────────────────────────────────────
+
+describe('non-user delivery (slice 1a)', () => {
+  const FROM = { key: 'sess-sender-1', title: 'Triage assistant' }
+  const ITEM = {
+    origin: 'session-message' as const,
+    text: 'please look at ticket 12',
+    from: FROM,
+    wake: false
+  }
+  const WRAPPED = [
+    '<session-message from="sess-sender-1" title="Triage assistant">',
+    'please look at ticket 12',
+    '</session-message>',
+    'This is a message from another ClaudeUI session or agent, not from the user.'
+  ].join('\n')
+
+  /** The feed's two events for a posted inbox item: queued, then delivered to the model. */
+  const deliveredFeed = (inboxID: string, text: string): OpencodeFeedItem[] => [
+    event('session.inbox.enqueued', {
+      sessionID: SID,
+      inboxID,
+      item: { type: 'user', payload: { text }, delivery: 'steer' }
+    }),
+    event('session.inbox.delivered', { sessionID: SID, inboxID })
+  ]
+
+  it("an idle session starts a turn on a plain prompt that names the sender and says it is not the user's", async () => {
+    session = makeSession()
+    h.feed.push(connected())
+    expect(await session.deliverNonUser(ITEM)).toBe('started')
+    await flush()
+    expect(session.willQueue).toBe(true)
+    const [sid, body] = h.client.prompt.mock.calls[0]
+    expect(sid).toBe(SID)
+    expect(body).toMatchObject({ text: WRAPPED, delivery: 'steer' })
+    expect(body.id).toMatch(new RegExp(`^${CLAUDEUI_INBOX_PREFIX}[0-9a-f]{32}$`))
+  })
+
+  it('a running turn takes it as a steer, posted at once (queued); a refused post is unavailable', async () => {
+    session = makeSession()
+    await startTurn()
+    expect(await session.deliverNonUser(ITEM)).toBe('queued')
+    expect(h.client.prompt.mock.calls.at(-1)?.[1]).toMatchObject({
+      text: WRAPPED,
+      delivery: 'steer'
+    })
+    // It is not a queue-card item: the user queue is theirs.
+    expect(payloads('session:queue-changed')).toEqual([])
+
+    h.client.prompt.mockRejectedValueOnce(new Error('inbox full'))
+    expect(await session.deliverNonUser(ITEM)).toBe('unavailable')
+  })
+
+  it('the delivered row is a note from the sender — never a user row, live or for the judge', async () => {
+    session = makeSession()
+    await startTurn()
+    await session.deliverNonUser(ITEM)
+    const inboxID = h.client.prompt.mock.calls.at(-1)![1].id as string
+    h.feed.push(...deliveredFeed(inboxID, WRAPPED))
+    await flush()
+
+    const notes = payloads('session:message').filter((m) => m.role === 'system')
+    expect(notes).toHaveLength(1)
+    expect(notes[0].content).toEqual([
+      {
+        type: 'context_note',
+        title: 'Message from Triage assistant',
+        fragments: [
+          { text: 'please look at ticket 12', label: 'from another session, not from you' }
+        ]
+      }
+    ])
+    expect(payloads('session:message').some((m) => m.role === 'user')).toBe(false)
+    expect(session.getMessages().filter((m) => m.role === 'user')).toHaveLength(1) // the first prompt
+    expect(slimTranscript(session.getMessages())).not.toContain('ticket 12')
+  })
+
+  it("a reconnect's purge leaves a posted, undelivered item alone", async () => {
+    session = makeSession()
+    await startTurn()
+    await session.deliverNonUser(ITEM)
+    const inboxID = h.client.prompt.mock.calls.at(-1)![1].id as string
+    h.client.listInbox.mockResolvedValue([{ id: inboxID, type: 'user' }])
+    ;(session as unknown as { needsPurge: boolean }).needsPurge = true
+    await (session as unknown as { purgeStaleInbox(): Promise<void> }).purgeStaleInbox()
+    expect(h.client.cancelInbox).not.toHaveBeenCalled()
+  })
+})
+
+describe('non-user delivery that opencode never reads (slice 1a review)', () => {
+  const FROM = { key: 'sess-sender-1', title: 'Triage assistant' }
+  const ITEM = {
+    origin: 'session-message' as const,
+    text: 'please look at ticket 12',
+    from: FROM,
+    wake: false
+  }
+  const held = () => heldInboxItems('route-1').map((r) => r.body)
+
+  beforeEach(() => {
+    deleteSessionInbox('route-1')
+  })
+
+  it('an idle delivery whose post is rejected is unavailable — the caller holds it, no turn or taint is counted (N4)', async () => {
+    session = makeSession()
+    h.feed.push(connected())
+    h.client.prompt.mockRejectedValue(new Error('inbox full'))
+
+    expect(await session.deliverNonUser(ITEM)).toBe('unavailable')
+
+    // The adapter holds nothing itself — the caller does, so it is held once.
+    expect(held()).toEqual([])
+    expect(session.willQueue).toBe(false)
+  })
+
+  it('through the service: held as engine-unavailable, nothing tainted or counted (N4)', async () => {
+    session = makeSession()
+    await startTurn()
+    h.client.prompt.mockRejectedValue(new Error('inbox full'))
+    const manager = { get: () => session } as unknown as SessionManager
+
+    expect(await deliver(manager, 'route-1', ITEM)).toEqual({
+      result: 'held',
+      why: 'engine-unavailable'
+    })
+
+    expect(held()).toEqual(['please look at ticket 12'])
+    expect(session.originLedger.userOriginClean).toBe(true)
+    expect(session.originLedger.agentTurnStartsSinceUser).toBe(0)
+  })
+
+  it('an idle delivery answers started only once opencode has the item (N4)', async () => {
+    session = makeSession()
+    h.feed.push(connected())
+    expect(await session.deliverNonUser(ITEM)).toBe('started')
+    expect(h.client.prompt).toHaveBeenCalledTimes(1)
+  })
+
+  it('an item opencode cancels (never delivered) comes back too', async () => {
+    session = makeSession()
+    await startTurn()
+    await session.deliverNonUser(ITEM)
+    const inboxID = h.client.prompt.mock.calls.at(-1)![1].id as string
+    expect(held()).toEqual([])
+    h.feed.push(
+      event('session.inbox.enqueued', {
+        sessionID: SID,
+        inboxID,
+        item: { type: 'user', payload: { text: 'x' }, delivery: 'steer' }
+      }),
+      event('session.inbox.cancelled', { sessionID: SID, inboxID })
+    )
+    await flush()
+    expect(held()).toEqual(['please look at ticket 12'])
+  })
+
+  it('a Stop takes the steer back out of opencode and holds it once — a copy left in the server would be read twice (N1)', async () => {
+    session = makeSession()
+    await startTurn()
+    await session.deliverNonUser(ITEM)
+    const inboxID = h.client.prompt.mock.calls.at(-1)![1].id as string
+    expect(held()).toEqual([])
+
+    session.cancel()
+    await flush()
+
+    expect(h.client.cancelInbox).toHaveBeenCalledWith(SID, inboxID)
+    expect(held()).toEqual(['please look at ticket 12'])
+  })
+
+  it('a server that is gone has nothing to cancel: one held row, no cancel (N1)', async () => {
+    session = makeSession()
+    await startTurn()
+    await session.deliverNonUser(ITEM)
+    h.client.cancelInbox.mockClear()
+
+    const onExit = (h.subscribeExit.mock.calls.at(-1) as unknown as [unknown, () => void])[1]
+    onExit()
+    await flush()
+
+    expect(h.client.cancelInbox).not.toHaveBeenCalled()
+    expect(held()).toEqual(['please look at ticket 12'])
+  })
+
+  it('the model reading the item taints the session, whatever the user prompt did meanwhile (N2)', async () => {
+    session = makeSession()
+    await startTurn()
+    await session.deliverNonUser(ITEM)
+    const inboxID = h.client.prompt.mock.calls.at(-1)![1].id as string
+    session.originLedger.userPrompt()
+    expect(session.originLedger.userOriginClean).toBe(true)
+    h.feed.push(
+      event('session.inbox.enqueued', {
+        sessionID: SID,
+        inboxID,
+        item: { type: 'user', payload: { text: 'x' }, delivery: 'steer' }
+      }),
+      event('session.inbox.delivered', { sessionID: SID, inboxID })
+    )
+    await flush()
+    expect(session.originLedger.userOriginClean).toBe(false)
+  })
+
+  it('a delivered item is not given back later', async () => {
+    session = makeSession()
+    await startTurn()
+    await session.deliverNonUser(ITEM)
+    const inboxID = h.client.prompt.mock.calls.at(-1)![1].id as string
+    h.feed.push(
+      event('session.inbox.enqueued', {
+        sessionID: SID,
+        inboxID,
+        item: { type: 'user', payload: { text: 'x' }, delivery: 'steer' }
+      }),
+      event('session.inbox.delivered', { sessionID: SID, inboxID })
+    )
+    await flush()
+    session.cancel()
+    expect(held()).toEqual([])
+  })
+
+  it('is not live after a stop: a message does not reconnect it', async () => {
+    session = makeSession()
+    await startTurn()
+    expect(session.isEngineLive()).toBe(true)
+    session.cancel()
+    expect(session.isEngineLive()).toBe(false)
+  })
+
+  it("text that looks like a wrapper is the user's when it was not posted by ClaudeUI (live path, review m5)", async () => {
+    session = makeSession()
+    await startTurn()
+    const typed = '<session-message from="x" title="y">\nhello\n</session-message>'
+    h.feed.push(
+      event('session.inbox.enqueued', {
+        sessionID: SID,
+        inboxID: 'msg_other_client',
+        item: { type: 'user', payload: { text: typed }, delivery: 'steer' }
+      }),
+      event('session.inbox.delivered', { sessionID: SID, inboxID: 'msg_other_client' })
+    )
+    await flush()
+    const rows = payloads('session:message').filter((m) => m.id === 'msg_other_client')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].role).toBe('user')
+  })
+})
 
 describe('approvals', () => {
   const ask = (id: string, action: string, resources: string[], sessionID = SID, callID?: string) =>
@@ -1742,5 +2007,270 @@ describe('the ChatGPT credential gate and recovery', () => {
     expect(discover).toHaveBeenCalledTimes(1)
     expect(discover.mock.calls[0]).toEqual([])
     expect(h.client.forDirectory).not.toHaveBeenCalled()
+  })
+})
+
+// ─── The session tools' asks (slice 2) ──────────────────────────────────────
+
+describe('session tool asks (claudeui_session_*)', () => {
+  /** An ask for a hosted session tool, with the call's input known to the mapper first (as 2.x publishes it). */
+  const sessionAsk = (
+    id: string,
+    tool: string,
+    input: Record<string, unknown> | null,
+    sessionID = SID,
+    callID = `call_${id}`
+  ): OpencodeFeedItem[] => [
+    ...(input
+      ? [
+          event('session.tool.input.started', {
+            sessionID,
+            assistantMessageID: MSG,
+            id: callID,
+            name: `claudeui_${tool}`
+          }),
+          event('session.tool.called', {
+            sessionID,
+            assistantMessageID: MSG,
+            id: callID,
+            input,
+            executed: false
+          })
+        ]
+      : []),
+    event('permission.asked', {
+      id,
+      sessionID,
+      action: `claudeui_${tool}`,
+      resources: ['*'],
+      save: ['*'],
+      metadata: {},
+      source: { type: 'tool', messageID: MSG, id: callID }
+    })
+  ]
+  const replies = () => h.client.replyPermission.mock.calls.map(([, id, reply]) => [id, reply])
+  const auditRows = (sessionRef: string) =>
+    listAuditLog({ limit: 500 }).filter((row) => row.connectionId === `session:${sessionRef}`)
+
+  it('a read the gate allows (session_list) is answered once, silently — no card', async () => {
+    session = makeSession()
+    await startTurn()
+    h.feed.push(...sessionAsk('per_l', 'session_list', { scope: 'linked' }))
+    await flush()
+    expect(replies()).toEqual([['per_l', { decision: 'once' }]])
+    expect(payloads('session:approval-request')).toHaveLength(0)
+  })
+
+  it('a gate "ask" is a card; the card offers no always-allow, and an allow-for-session click does not stick', async () => {
+    h.sessionGate = () => ({ behavior: 'ask' })
+    session = makeSession()
+    await startTurn()
+    h.feed.push(...sessionAsk('per_a', 'session_read', { session: 's-other1' }))
+    await flush()
+    const cards = payloads('session:approval-request')
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toMatchObject({
+      requestId: 'per_a',
+      toolName: 'claudeui_session_read',
+      input: { session: 's-other1' }
+    })
+    // Neither a persisted-rule suggestion nor the session-allow key travels with it.
+    expect(cards[0]).not.toHaveProperty('suggestions')
+    expect(cards[0]).not.toHaveProperty('always')
+    session.resolveApproval('per_a', 'allowForSession')
+    expect(replies()).toEqual([['per_a', { decision: 'once' }]])
+    // The same tool asks again: the click remembered nothing.
+    h.feed.push(...sessionAsk('per_b', 'session_read', { session: 's-other1' }))
+    await flush()
+    expect(payloads('session:approval-request').map((card) => card.requestId)).toEqual([
+      'per_a',
+      'per_b'
+    ])
+    expect(replies()).toHaveLength(1)
+  })
+
+  it('a deny click rejects with a message, as for any card', async () => {
+    h.sessionGate = () => ({ behavior: 'ask' })
+    session = makeSession()
+    await startTurn()
+    h.feed.push(...sessionAsk('per_d', 'session_stop', { session: 's-other1' }))
+    await flush()
+    session.resolveApproval('per_d', 'deny')
+    expect(replies()).toEqual([['per_d', { decision: 'reject', message: expect.any(String) }]])
+  })
+
+  it('a gate "deny" rejects with its reason, shows the denial on the call, and audits an acting tool', async () => {
+    session = makeSession()
+    await startTurn()
+    await session.setPermissionMode('plan')
+    h.feed.push(...sessionAsk('per_p', 'session_start', { prompt: 'x', background: 'y' }))
+    await flush()
+    expect(replies()).toEqual([
+      [
+        'per_p',
+        { decision: 'reject', message: expect.stringContaining('not available in plan mode') }
+      ]
+    ])
+    expect(payloads('session:approval-request')).toHaveLength(0)
+    expect(payloads('session:permission-denial')).toMatchObject([
+      { toolUseId: 'call_per_p', denial: { source: 'rule' } }
+    ])
+    const rows = auditRows(refFor('opencode', session.routingId))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      channel: 'session-tools:session_start',
+      outcome: 'error',
+      method: 'agent'
+    })
+  })
+
+  it('a refused READ leaves no audit row (reads are not audited, as in the service)', async () => {
+    h.sessionGate = () => ({ behavior: 'deny', message: 'no' })
+    session = makeSession()
+    await startTurn()
+    h.feed.push(...sessionAsk('per_r', 'session_read', { session: 's-x' }))
+    await flush()
+    expect(replies()).toEqual([['per_r', { decision: 'reject', message: 'no' }]])
+    expect(auditRows(refFor('opencode', session.routingId))).toHaveLength(0)
+  })
+
+  it("the gate is called as this chat, in its live mode, with the ask's input", async () => {
+    const gate = vi.fn(() => ({ behavior: 'allow' }))
+    h.sessionGate = gate
+    session = makeSession({ permissionMode: 'acceptEdits' })
+    await startTurn()
+    h.feed.push(...sessionAsk('per_g', 'session_message', { session: 's-a', message: 'hi' }))
+    await flush()
+    expect(gate).toHaveBeenCalledTimes(1)
+    const [caller, tool, input, ctx] = gate.mock.calls[0] as unknown as [
+      Record<string, unknown>,
+      string,
+      unknown,
+      unknown
+    ]
+    expect(caller).toMatchObject({
+      routingId: session.routingId,
+      engine: 'opencode',
+      cwd: CWD,
+      permissionMode: 'acceptEdits'
+    })
+    expect(tool).toBe('session_message')
+    expect(input).toEqual({ session: 's-a', message: 'hi' })
+    expect(ctx).toEqual({ agentId: undefined })
+  })
+
+  it("an ask that arrives without the call's input (tool part not seen) cannot be scoped: it goes to the user, not to the gate", async () => {
+    const gate = vi.fn(() => ({ behavior: 'allow' }))
+    h.sessionGate = gate
+    session = makeSession()
+    await startTurn()
+    h.feed.push(...sessionAsk('per_n', 'session_message', null))
+    await flush()
+    expect(gate).not.toHaveBeenCalled()
+    expect(payloads('session:approval-request').map((card) => card.requestId)).toEqual(['per_n'])
+    // The card says it could not be scoped, so the user is not approving a blank input.
+    expect(payloads('session:approval-request')[0].decisionReason).toMatch(
+      /could not see this call.s arguments yet/
+    )
+    // The two tools the gate allows without looking at a target still go straight through.
+    h.feed.push(...sessionAsk('per_u', 'session_usage', null))
+    await flush()
+    expect(gate).toHaveBeenCalledTimes(1)
+    expect(replies()).toEqual([['per_u', { decision: 'once' }]])
+    // A scoped ask that goes to the user carries no such caveat.
+    h.sessionGate = () => ({ behavior: 'ask' })
+    h.feed.push(...sessionAsk('per_s', 'session_message', { session: 's-a', message: 'hi' }))
+    await flush()
+    const scoped = payloads('session:approval-request').find((card) => card.requestId === 'per_s')
+    expect(scoped).toBeDefined()
+    expect(scoped).not.toHaveProperty('decisionReason')
+  })
+
+  it('a user deny rule written for the Claude spelling holds first, with the rule as the reason', async () => {
+    h.permissions.deny = ['mcp__claude-ui-sessions__session_start']
+    h.sessionGate = () => {
+      throw new Error('the gate must not be asked')
+    }
+    session = makeSession()
+    await startTurn()
+    h.feed.push(...sessionAsk('per_x', 'session_start', { prompt: 'x' }))
+    await flush()
+    expect(replies()).toEqual([
+      [
+        'per_x',
+        { decision: 'reject', message: expect.stringContaining('Denied by permission rule') }
+      ]
+    ])
+    expect(auditRows(refFor('opencode', session.routingId))).toHaveLength(1)
+  })
+
+  it('auto mode: the judge is never asked about a session tool (an ask goes to the user, a deny is refused)', async () => {
+    h.sessionGate = () => ({ behavior: 'ask' })
+    session = makeSession({ permissionMode: 'auto' })
+    await startTurn()
+    h.feed.push(...sessionAsk('per_j', 'session_get', { session: 's-x' }))
+    await flush(60)
+    expect(h.judge).not.toHaveBeenCalled()
+    expect(payloads('session:approval-request').map((card) => card.requestId)).toEqual(['per_j'])
+    expect(payloads('session:tool-review')).toHaveLength(0)
+  })
+
+  it("a subagent child's ask reaches the gate as a subagent: an acting tool is refused, whatever the user would say", async () => {
+    session = makeSession()
+    await startTurn()
+    h.feed.push(
+      event('session.created', {
+        sessionID: CHILD,
+        parentID: SID,
+        agent: 'pusher',
+        projectID: 'prj',
+        location: { directory: CWD },
+        slug: CHILD,
+        version: '2'
+      }),
+      event('session.tool.input.started', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: 'call_sub',
+        name: 'subagent'
+      }),
+      event('session.tool.progress', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: 'call_sub',
+        metadata: { sessionID: CHILD }
+      })
+    )
+    await flush()
+    h.feed.push(
+      ...sessionAsk('per_c', 'session_message', { session: 's-a', message: 'hi' }, CHILD, 'call_c')
+    )
+    await flush()
+    expect(replies()).toEqual([
+      [
+        'per_c',
+        { decision: 'reject', message: expect.stringContaining('main agent, not by a subagent') }
+      ]
+    ])
+    expect(payloads('session:approval-request')).toHaveLength(0)
+  })
+
+  it('other asks are untouched: a shell ask still takes the ordinary card path', async () => {
+    session = makeSession()
+    await startTurn()
+    h.feed.push(
+      event('permission.asked', {
+        id: 'per_sh',
+        sessionID: SID,
+        action: 'shell',
+        resources: ['ls'],
+        save: ['ls'],
+        metadata: {}
+      })
+    )
+    await flush()
+    expect(payloads('session:approval-request')).toMatchObject([
+      { requestId: 'per_sh', always: ['ls'] }
+    ])
   })
 })

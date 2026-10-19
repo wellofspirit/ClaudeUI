@@ -1396,6 +1396,131 @@ export const MIGRATIONS: Migration[] = [
         );
       `)
     }
+  },
+  {
+    // Slice 1a (session tools): the held inbox. An item another session or an
+    // agent sent to a session that could not take it now — idle with no wake, no
+    // live session object, or the agent-turn budget spent — waits here, oldest
+    // first, and is delivered ahead of the target's next turn. `target` is the
+    // routing id (moved on a rekey); `sender_mode_class` is the sender's
+    // permission class where it is known. `delivered_at` marks a row handed to
+    // the engine; undelivered rows are the inbox.
+    version: 30,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS session_inbox (
+          id                INTEGER PRIMARY KEY AUTOINCREMENT,
+          target            TEXT    NOT NULL,
+          origin            TEXT    NOT NULL,
+          from_key          TEXT    NOT NULL,
+          from_title        TEXT    NOT NULL,
+          sender_mode_class TEXT,
+          body              TEXT    NOT NULL,
+          created_at        INTEGER NOT NULL,
+          delivered_at      INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_inbox_target
+          ON session_inbox (target, delivered_at);
+      `)
+    }
+  },
+  {
+    // Slice 1b (session tools): short stable refs for sessions, and the
+    // parent/child links between them. `session_id` is the engine's durable id
+    // (null until the first status carries it), `routing_id` the live id the
+    // sidebar and the engines address; after the rekey the two are equal. Both
+    // are unique where present, so one session has one ref. A removed session
+    // keeps its ref row with both ids cleared, because its links still name it.
+    version: 31,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS session_ref (
+          ref        TEXT    PRIMARY KEY,
+          engine     TEXT    NOT NULL,
+          session_id TEXT,
+          routing_id TEXT,
+          created_at INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_session_ref_session
+          ON session_ref (engine, session_id) WHERE session_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_session_ref_routing
+          ON session_ref (routing_id) WHERE routing_id IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS session_link (
+          child_ref   TEXT    PRIMARY KEY,
+          parent_ref  TEXT    NOT NULL,
+          kind        TEXT    NOT NULL,
+          created_by  TEXT    NOT NULL,
+          wake_parent INTEGER NOT NULL DEFAULT 0,
+          state       TEXT    NOT NULL,
+          created_at  INTEGER NOT NULL,
+          updated_at  INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_link_parent
+          ON session_link (parent_ref);
+      `)
+    }
+  },
+  {
+    // Slice 1c (session tools): when a CLIENT first prompted the child. A session
+    // another session's tool started may not start sessions itself until a client
+    // has typed into it; that fact used to live in memory only, so a host restart
+    // forgot it. Null = no client prompt yet. Existing rows (written before any tool
+    // could create a link) stay null, which only matters for agent-created ones.
+    version: 32,
+    up(db) {
+      db.exec(`ALTER TABLE session_link ADD COLUMN client_prompted_at INTEGER;`)
+    }
+  },
+  {
+    // Slice 1c-b (session tools): sessions an agent proposes for the user to start.
+    // `placement` is the resolved start configuration as JSON (engine, model, effort,
+    // permission_mode, cwd, worktree, relation), fixed at proposal time so a
+    // click starts exactly what the card showed. `expires_at` is checked when a
+    // proposal is read, never by a timer. `parent_ref` names the proposing session.
+    version: 33,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS session_proposal (
+          id             TEXT    PRIMARY KEY,
+          parent_ref     TEXT    NOT NULL,
+          title          TEXT    NOT NULL,
+          prompt         TEXT    NOT NULL,
+          background     TEXT    NOT NULL,
+          placement      TEXT    NOT NULL,
+          state          TEXT    NOT NULL,
+          created_at     INTEGER NOT NULL,
+          expires_at     INTEGER NOT NULL,
+          started_ref    TEXT,
+          dismiss_reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_proposal_parent
+          ON session_proposal (parent_ref, state);
+      `)
+    }
+  },
+  {
+    // Slice 5 (session tools): grouping. A link always records where a session came
+    // from; `grouped` says whether the sidebar shows it as part of the origin's group.
+    // Until now every link was nested under its origin, so existing rows are grouped.
+    // The `detached` state (the user taking a session out from under its origin) is
+    // retired: it was a grouping choice, not a lifecycle state, so those rows become
+    // ungrouped and take the lifecycle state their session is in (`live` while a
+    // session still answers to the ref, otherwise `ended`). `wake_parent` stays in
+    // the table, unused.
+    version: 34,
+    up(db) {
+      db.exec(`
+        ALTER TABLE session_link ADD COLUMN grouped INTEGER NOT NULL DEFAULT 1;
+        UPDATE session_link
+           SET grouped = 0,
+               state = CASE WHEN EXISTS (
+                         SELECT 1 FROM session_ref r
+                          WHERE r.ref = session_link.child_ref
+                            AND (r.session_id IS NOT NULL OR r.routing_id IS NOT NULL)
+                       ) THEN 'live' ELSE 'ended' END
+         WHERE state = 'detached';
+      `)
+    }
   }
 ]
 
@@ -1791,6 +1916,559 @@ export function setSessionMeta(sessionId: string, meta: SessionMeta): void {
 export function deleteSessionMeta(sessionId: string): void {
   const db = getDb()
   db.prepare('DELETE FROM session_meta WHERE session_id = ?').run(sessionId)
+  // A held inbox belongs to the session as much as its engine row does.
+  deleteSessionInbox(sessionId, db)
+}
+
+// ---------------------------------------------------------------------------
+// Held inbox (slice 1a)
+// ---------------------------------------------------------------------------
+
+/** One item held for a session's next turn. */
+export interface InboxItem {
+  id: number
+  target: string
+  origin: 'session-message' | 'agent-note'
+  fromKey: string
+  fromTitle: string
+  senderModeClass: 'bypass' | 'prompting' | null
+  body: string
+  createdAt: number
+  deliveredAt: number | null
+}
+
+interface InboxRow {
+  id: number
+  target: string
+  origin: string
+  from_key: string
+  from_title: string
+  sender_mode_class: string | null
+  body: string
+  created_at: number
+  delivered_at: number | null
+}
+
+function inboxItem(row: InboxRow): InboxItem {
+  return {
+    id: row.id,
+    target: row.target,
+    origin: row.origin === 'agent-note' ? 'agent-note' : 'session-message',
+    fromKey: row.from_key,
+    fromTitle: row.from_title,
+    senderModeClass:
+      row.sender_mode_class === 'bypass' || row.sender_mode_class === 'prompting'
+        ? row.sender_mode_class
+        : null,
+    body: row.body,
+    createdAt: Number(row.created_at),
+    deliveredAt: row.delivered_at === null ? null : Number(row.delivered_at)
+  }
+}
+
+/** Hold an item for `target`'s next turn. Returns the row id. */
+export function addInboxItem(
+  item: Omit<InboxItem, 'id' | 'deliveredAt' | 'createdAt'> & { createdAt?: number },
+  db: Db = getDb()
+): number {
+  const info = db
+    .prepare(
+      `INSERT INTO session_inbox
+         (target, origin, from_key, from_title, sender_mode_class, body, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      item.target,
+      item.origin,
+      item.fromKey,
+      item.fromTitle,
+      item.senderModeClass,
+      item.body,
+      item.createdAt ?? Date.now()
+    )
+  return Number(info.lastInsertRowid)
+}
+
+/** Undelivered items for `target`, oldest first. */
+export function heldInboxItems(target: string, db: Db = getDb()): InboxItem[] {
+  const rows = db
+    .prepare('SELECT * FROM session_inbox WHERE target = ? AND delivered_at IS NULL ORDER BY id')
+    .all(target) as InboxRow[]
+  return rows.map(inboxItem)
+}
+
+export function heldInboxCount(target: string, db: Db = getDb()): number {
+  const row = db
+    .prepare('SELECT COUNT(*) AS n FROM session_inbox WHERE target = ? AND delivered_at IS NULL')
+    .get(target) as { n: number }
+  return Number(row.n)
+}
+
+/** Mark one held item as handed to the engine. */
+export function markInboxDelivered(id: number, now = Date.now(), db: Db = getDb()): void {
+  db.prepare('UPDATE session_inbox SET delivered_at = ? WHERE id = ?').run(now, id)
+}
+
+/**
+ * Re-key a session's inbox (rows, held and delivered) to its post-rekey id.
+ * `SessionManager.rekey` calls it beside {@link moveSessionMeta}.
+ */
+export function moveSessionInbox(oldId: string, newId: string, db: Db = getDb()): void {
+  if (oldId === newId) return
+  db.prepare('UPDATE session_inbox SET target = ? WHERE target = ?').run(newId, oldId)
+}
+
+/** Drop every row for `target` (the session was deleted). */
+export function deleteSessionInbox(target: string, db: Db = getDb()): void {
+  db.prepare('DELETE FROM session_inbox WHERE target = ?').run(target)
+}
+
+// ---------------------------------------------------------------------------
+// Session refs and links (slice 1b)
+// ---------------------------------------------------------------------------
+
+/** One session's ref and the ids it is currently known by. */
+export interface SessionRefRow {
+  ref: string
+  engine: EngineId
+  /** The engine's durable session id; null until a status carries it. */
+  sessionId: string | null
+  /** The live routing id; after the rekey it equals {@link sessionId}. */
+  routingId: string | null
+  createdAt: number
+}
+
+interface SessionRefDbRow {
+  ref: string
+  engine: string
+  session_id: string | null
+  routing_id: string | null
+  created_at: number
+}
+
+function sessionRefRow(row: SessionRefDbRow): SessionRefRow {
+  return {
+    ref: row.ref,
+    engine: row.engine as EngineId,
+    sessionId: row.session_id,
+    routingId: row.routing_id,
+    createdAt: Number(row.created_at)
+  }
+}
+
+/** Insert a ref row. Returns false when the ref (or one of the ids) is taken. */
+export function insertSessionRef(
+  row: Omit<SessionRefRow, 'createdAt'> & { createdAt?: number },
+  db: Db = getDb()
+): boolean {
+  const info = db
+    .prepare(
+      `INSERT OR IGNORE INTO session_ref (ref, engine, session_id, routing_id, created_at)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .run(row.ref, row.engine, row.sessionId, row.routingId, row.createdAt ?? Date.now())
+  return Number(info.changes) > 0
+}
+
+export function getSessionRef(ref: string, db: Db = getDb()): SessionRefRow | undefined {
+  const row = db.prepare('SELECT * FROM session_ref WHERE ref = ?').get(ref) as
+    SessionRefDbRow | undefined
+  return row ? sessionRefRow(row) : undefined
+}
+
+/** The ref row a live routing id or a durable session id belongs to (the routing id wins a tie). */
+export function findSessionRef(id: string, db: Db = getDb()): SessionRefRow | undefined {
+  const row = db
+    .prepare(
+      `SELECT * FROM session_ref WHERE routing_id = ? OR session_id = ?
+       ORDER BY (routing_id = ?) DESC LIMIT 1`
+    )
+    .get(id, id, id) as SessionRefDbRow | undefined
+  return row ? sessionRefRow(row) : undefined
+}
+
+/** Record the ids a session is now known by; an omitted key keeps its value. */
+export function setSessionRefIds(
+  ref: string,
+  ids: { sessionId?: string | null; routingId?: string | null },
+  db: Db = getDb()
+): void {
+  db.prepare(
+    `UPDATE session_ref
+        SET session_id = CASE WHEN ? THEN ? ELSE session_id END,
+            routing_id = CASE WHEN ? THEN ? ELSE routing_id END
+      WHERE ref = ?`
+  ).run(
+    ids.sessionId !== undefined ? 1 : 0,
+    ids.sessionId ?? null,
+    ids.routingId !== undefined ? 1 : 0,
+    ids.routingId ?? null,
+    ref
+  )
+}
+
+/**
+ * A session's routing id changed (`SessionManager.rekey`): after the rekey the
+ * routing id IS the engine's session id, so both columns take the new id.
+ *
+ * A ref may already be bound to the new id — one assigned to the durable id of a
+ * session that was then resumed under a fresh routing id. There is one ref per
+ * session, so the two rows merge into the older binding: links that named the
+ * newcomer are pointed at it. A no-op when `oldId` has no row.
+ */
+export function moveSessionRef(oldId: string, newId: string, db: Db = getDb()): void {
+  if (oldId === newId) return
+  const moving = findSessionRef(oldId, db)
+  if (!moving) return
+  const existing = db
+    .prepare(
+      `SELECT * FROM session_ref WHERE ref <> ?
+         AND ((engine = ? AND session_id = ?) OR routing_id = ?) LIMIT 1`
+    )
+    .get(moving.ref, moving.engine, newId, newId) as SessionRefDbRow | undefined
+  if (!existing) {
+    setSessionRefIds(moving.ref, { sessionId: newId, routingId: newId }, db)
+    return
+  }
+  // OR IGNORE: a link already recorded for the surviving ref wins; the leftover is dropped.
+  db.prepare('UPDATE OR IGNORE session_link SET child_ref = ? WHERE child_ref = ?').run(
+    existing.ref,
+    moving.ref
+  )
+  db.prepare('DELETE FROM session_link WHERE child_ref = ?').run(moving.ref)
+  db.prepare('UPDATE session_link SET parent_ref = ? WHERE parent_ref = ?').run(
+    existing.ref,
+    moving.ref
+  )
+  db.prepare('DELETE FROM session_ref WHERE ref = ?').run(moving.ref)
+  setSessionRefIds(existing.ref, { sessionId: newId, routingId: newId }, db)
+}
+
+/** A session was deleted: its ref stays (links name it) but no id resolves to it any more. */
+export function clearSessionRefIds(id: string, db: Db = getDb()): string | undefined {
+  const row = findSessionRef(id, db)
+  if (!row) return undefined
+  setSessionRefIds(row.ref, { sessionId: null, routingId: null }, db)
+  return row.ref
+}
+
+export function allSessionRefs(db: Db = getDb()): SessionRefRow[] {
+  return (db.prepare('SELECT * FROM session_ref').all() as SessionRefDbRow[]).map(sessionRefRow)
+}
+
+export type SessionLinkRowState = 'starting' | 'live' | 'ended' | 'failed'
+
+/** One link from a session to the session that started it, keyed by the started session's ref. */
+export interface SessionLinkRow {
+  childRef: string
+  parentRef: string
+  kind: 'started' | 'handoff'
+  createdBy: 'agent' | 'user'
+  /** Part of the origin's group in the sidebar (see `groupHeadRef`). */
+  grouped: boolean
+  state: SessionLinkRowState
+  createdAt: number
+  updatedAt: number
+  /** When a client first prompted the child; null until one has. */
+  clientPromptedAt: number | null
+}
+
+interface SessionLinkDbRow {
+  child_ref: string
+  parent_ref: string
+  kind: string
+  created_by: string
+  grouped: number
+  state: string
+  created_at: number
+  updated_at: number
+  client_prompted_at: number | null
+}
+
+function sessionLinkRow(row: SessionLinkDbRow): SessionLinkRow {
+  return {
+    childRef: row.child_ref,
+    parentRef: row.parent_ref,
+    kind: row.kind === 'handoff' ? 'handoff' : 'started',
+    createdBy: row.created_by === 'user' ? 'user' : 'agent',
+    grouped: Number(row.grouped) === 1,
+    state: row.state as SessionLinkRowState,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+    clientPromptedAt: row.client_prompted_at == null ? null : Number(row.client_prompted_at)
+  }
+}
+
+/** Record (or replace) the child's link. A session has at most one parent. */
+export function upsertSessionLink(
+  link: Omit<SessionLinkRow, 'createdAt' | 'updatedAt' | 'clientPromptedAt'> & { now?: number },
+  db: Db = getDb()
+): void {
+  const now = link.now ?? Date.now()
+  db.prepare(
+    `INSERT INTO session_link
+       (child_ref, parent_ref, kind, created_by, grouped, state, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(child_ref) DO UPDATE SET
+       parent_ref = excluded.parent_ref, kind = excluded.kind,
+       created_by = excluded.created_by, grouped = excluded.grouped,
+       state = excluded.state, updated_at = excluded.updated_at`
+  ).run(
+    link.childRef,
+    link.parentRef,
+    link.kind,
+    link.createdBy,
+    link.grouped ? 1 : 0,
+    link.state,
+    now,
+    now
+  )
+}
+
+export function getSessionLink(childRef: string, db: Db = getDb()): SessionLinkRow | undefined {
+  const row = db.prepare('SELECT * FROM session_link WHERE child_ref = ?').get(childRef) as
+    SessionLinkDbRow | undefined
+  return row ? sessionLinkRow(row) : undefined
+}
+
+export function sessionLinksByParent(parentRef: string, db: Db = getDb()): SessionLinkRow[] {
+  return (
+    db
+      .prepare('SELECT * FROM session_link WHERE parent_ref = ? ORDER BY created_at, child_ref')
+      .all(parentRef) as SessionLinkDbRow[]
+  ).map(sessionLinkRow)
+}
+
+export function allSessionLinks(db: Db = getDb()): SessionLinkRow[] {
+  return (
+    db
+      .prepare('SELECT * FROM session_link ORDER BY created_at, child_ref')
+      .all() as SessionLinkDbRow[]
+  ).map(sessionLinkRow)
+}
+
+/** Group or ungroup a link. Returns false when there is no such link or it is already there. */
+export function setSessionLinkGrouped(
+  childRef: string,
+  grouped: boolean,
+  now = Date.now(),
+  db: Db = getDb()
+): boolean {
+  const info = db
+    .prepare(
+      'UPDATE session_link SET grouped = ?, updated_at = ? WHERE child_ref = ? AND grouped <> ?'
+    )
+    .run(grouped ? 1 : 0, now, childRef, grouped ? 1 : 0)
+  return Number(info.changes) > 0
+}
+
+/**
+ * A client prompt reached the session known by `id` (its routing or durable id):
+ * if it is the child of a link and no client had prompted it yet, record when.
+ * One statement, so the prompt path pays one indexed lookup and nothing for a
+ * session with no link. Returns whether a link was marked.
+ */
+export function markSessionLinkClientPrompted(
+  id: string,
+  now = Date.now(),
+  db: Db = getDb()
+): boolean {
+  const info = db
+    .prepare(
+      `UPDATE session_link SET client_prompted_at = ?
+         WHERE client_prompted_at IS NULL
+           AND child_ref IN (SELECT ref FROM session_ref WHERE routing_id = ? OR session_id = ?)`
+    )
+    .run(now, id, id)
+  return Number(info.changes) > 0
+}
+
+/** Move a link to `state`. Returns false when there is no such link or it is already there. */
+export function setSessionLinkState(
+  childRef: string,
+  state: SessionLinkRowState,
+  now = Date.now(),
+  db: Db = getDb()
+): boolean {
+  const info = db
+    .prepare('UPDATE session_link SET state = ?, updated_at = ? WHERE child_ref = ? AND state <> ?')
+    .run(state, now, childRef, state)
+  return Number(info.changes) > 0
+}
+
+/**
+ * `starting` is the short window between a Start (the user's click, or the agent's
+ * `proposal_id`) winning the proposal and the new session existing: nothing else may
+ * settle it then, so a dismissal or an expiry cannot close a card whose session is
+ * already being made.
+ */
+export type SessionProposalRowState = 'pending' | 'starting' | 'started' | 'dismissed'
+
+/** One proposed session. `placement` is JSON the service parses; the table does not look inside. */
+export interface SessionProposalRow {
+  id: string
+  parentRef: string
+  title: string
+  prompt: string
+  background: string
+  placement: string
+  state: SessionProposalRowState
+  createdAt: number
+  expiresAt: number
+  startedRef: string | null
+  dismissReason: string | null
+}
+
+interface SessionProposalDbRow {
+  id: string
+  parent_ref: string
+  title: string
+  prompt: string
+  background: string
+  placement: string
+  state: string
+  created_at: number
+  expires_at: number
+  started_ref: string | null
+  dismiss_reason: string | null
+}
+
+function sessionProposalRow(row: SessionProposalDbRow): SessionProposalRow {
+  return {
+    id: row.id,
+    parentRef: row.parent_ref,
+    title: row.title,
+    prompt: row.prompt,
+    background: row.background,
+    placement: row.placement,
+    state:
+      row.state === 'started' || row.state === 'dismissed' || row.state === 'starting'
+        ? row.state
+        : 'pending',
+    createdAt: Number(row.created_at),
+    expiresAt: Number(row.expires_at),
+    startedRef: row.started_ref ?? null,
+    dismissReason: row.dismiss_reason ?? null
+  }
+}
+
+export function insertSessionProposal(
+  p: Omit<SessionProposalRow, 'startedRef' | 'dismissReason' | 'state'>,
+  db: Db = getDb()
+): void {
+  db.prepare(
+    `INSERT INTO session_proposal
+       (id, parent_ref, title, prompt, background, placement, state, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+  ).run(p.id, p.parentRef, p.title, p.prompt, p.background, p.placement, p.createdAt, p.expiresAt)
+}
+
+export function getSessionProposal(id: string, db: Db = getDb()): SessionProposalRow | undefined {
+  const row = db.prepare('SELECT * FROM session_proposal WHERE id = ?').get(id) as
+    SessionProposalDbRow | undefined
+  return row ? sessionProposalRow(row) : undefined
+}
+
+/** A parent's proposals, oldest first; `state` narrows them. */
+export function sessionProposalsByParent(
+  parentRef: string,
+  state?: SessionProposalRowState,
+  db: Db = getDb()
+): SessionProposalRow[] {
+  const rows = (
+    state
+      ? db
+          .prepare(
+            'SELECT * FROM session_proposal WHERE parent_ref = ? AND state = ? ORDER BY created_at, rowid'
+          )
+          .all(parentRef, state)
+      : db
+          .prepare('SELECT * FROM session_proposal WHERE parent_ref = ? ORDER BY created_at, rowid')
+          .all(parentRef)
+  ) as SessionProposalDbRow[]
+  return rows.map(sessionProposalRow)
+}
+
+/** Where a proposal can go from a state. */
+export type SessionProposalMove =
+  | { state: 'pending' }
+  | { state: 'starting' }
+  | { state: 'started'; startedRef: string }
+  | { state: 'dismissed'; reason: string }
+
+/**
+ * Move a proposal from `from` to `to`, only if it is still in `from`. Returns false
+ * when it is unknown or already elsewhere, so two clicks, a click and a dismissal,
+ * or a click and an expiry cannot both win.
+ */
+export function transitionSessionProposal(
+  id: string,
+  from: SessionProposalRowState,
+  to: SessionProposalMove,
+  db: Db = getDb()
+): boolean {
+  const info = db
+    .prepare(
+      `UPDATE session_proposal SET state = ?, started_ref = ?, dismiss_reason = ?
+         WHERE id = ? AND state = ?`
+    )
+    .run(
+      to.state,
+      to.state === 'started' ? to.startedRef : null,
+      to.state === 'dismissed' ? to.reason : null,
+      id,
+      from
+    )
+  return Number(info.changes) > 0
+}
+
+/** Move a PENDING proposal to `started` or `dismissed`; false if it is not pending (any longer). */
+export function settleSessionProposal(
+  id: string,
+  to: { state: 'started'; startedRef: string } | { state: 'dismissed'; reason: string },
+  db: Db = getDb()
+): boolean {
+  return transitionSessionProposal(id, 'pending', to, db)
+}
+
+/**
+ * Keep a parent's proposal rows to `keep`: past it, delete the dismissed ones,
+ * evicted first and oldest first. Pending, starting and started rows are never
+ * deleted (a started one is how its session is known to have come from a proposal).
+ * Returns how many were deleted.
+ */
+export function trimSessionProposals(parentRef: string, keep: number, db: Db = getDb()): number {
+  const rows = db
+    .prepare(
+      'SELECT id, state, dismiss_reason FROM session_proposal WHERE parent_ref = ? ORDER BY created_at, rowid'
+    )
+    .all(parentRef) as Array<{ id: string; state: string; dismiss_reason: string | null }>
+  let excess = rows.length - keep
+  if (excess <= 0) return 0
+  const doomed: string[] = []
+  const picks = [
+    (r: (typeof rows)[number]): boolean =>
+      r.state === 'dismissed' && r.dismiss_reason === 'evicted',
+    (r: (typeof rows)[number]): boolean => r.state === 'dismissed'
+  ]
+  for (const pick of picks) {
+    for (const r of rows) {
+      if (excess > 0 && pick(r) && !doomed.includes(r.id)) {
+        doomed.push(r.id)
+        excess--
+      }
+    }
+  }
+  for (const id of doomed) db.prepare('DELETE FROM session_proposal WHERE id = ?').run(id)
+  return doomed.length
+}
+
+/** Did this session come from a proposal? (Its ref is the `started_ref` of one.) */
+export function sessionProposalStartedRef(ref: string, db: Db = getDb()): boolean {
+  return (
+    db.prepare('SELECT 1 FROM session_proposal WHERE started_ref = ? LIMIT 1').get(ref) !==
+    undefined
+  )
 }
 
 /**
@@ -1879,6 +2557,24 @@ export function renameSessionMeta(oldId: string, newId: string, fallback?: Sessi
   } else {
     setSessionMeta(newId, { engineId: 'claude' })
   }
+}
+
+/**
+ * Move a session's metadata row to its post-rekey id, on the HOST (the rekey
+ * itself is core's — `SessionManager.rekey`). Unlike {@link renameSessionMeta} it
+ * never mints a default row, and it never overwrites one that already exists at
+ * `newId`: a row there was written by the engine under its stable id (Codex does,
+ * with the model it actually runs) and is the more specific of the two, so the
+ * old row is just dropped. A no-op when `oldId` has no row.
+ */
+export function moveSessionMeta(oldId: string, newId: string): void {
+  if (oldId === newId) return
+  const db = getDb()
+  const hasOld = db.prepare('SELECT 1 FROM session_meta WHERE session_id = ?').get(oldId)
+  if (!hasOld) return
+  const hasNew = db.prepare('SELECT 1 FROM session_meta WHERE session_id = ?').get(newId)
+  if (hasNew) deleteSessionMeta(oldId)
+  else renameSessionMeta(oldId, newId)
 }
 
 // ---------------------------------------------------------------------------
@@ -4025,7 +4721,8 @@ export interface AuditLogRow {
   connectionId: string
   /**
    * The `IdentityMethod` the connection was admitted under: 'password' |
-   * 'webauthn' | 'webauthn-resumed' | 'enroll-token' | 'none' | 'host'.
+   * 'webauthn' | 'webauthn-resumed' | 'enroll-token' | 'none' | 'host' | 'agent'
+   * ('agent': a session tool acting for an agent session, slice 1c).
    *
    * TEXT rather than an enum because it is a HISTORICAL record — rows written by
    * an older build keep whatever vocabulary that build had, and the retired

@@ -113,9 +113,14 @@ import {
   deleteSession,
   deleteProject,
   clearConversation,
-  judgeModelSupport
+  judgeModelSupport,
+  sendPrompt,
+  allowPeerMessages
 } from '../../../core/ipc/handlers-core'
 import { syncCore, addSyncSubscriber } from '../../../core/services/sync-host'
+import { getSessionMeta, setSessionMeta } from '../../../core/services/db'
+import { deliver } from '../../../core/services/session-delivery'
+import { TurnOriginLedger } from '../../../core/providers/turn-origin-ledger'
 
 function makeSessionStub(overrides: Record<string, unknown> = {}): any {
   return {
@@ -236,6 +241,42 @@ describe('handlers-core', () => {
     expect(snap.recentSessionIds).toEqual(['rid-a'])
     expect(snap.pinnedSessionIds).toEqual(['rid-a'])
     expect(snap.customTitles).toEqual({ 'rid-a': 'Renamed' })
+  })
+
+  it("a client's saveSessions does not drop a session it does not know from canonical sessionEngines", () => {
+    // The host created `host-codex` (birth identity); the saving client's snapshot
+    // predates it. The DB write only upserts, so the echo must too — or every
+    // replica loses the entry while its row stays.
+    syncCore.resetCanonicalForTests()
+    saveSessions({
+      sessionEngines: { 'host-codex': { engineId: 'codex' } }
+    } as any)
+
+    saveSessions({
+      sessionEngines: { 'client-pi': { engineId: 'pi' } }
+    } as any)
+
+    expect(syncCore.getCanonicalState().sessionEngines).toEqual({
+      'host-codex': { engineId: 'codex' },
+      'client-pi': { engineId: 'pi' }
+    })
+    // Every other key of the payload is echoed as the client sent it.
+    const sink = vi.fn()
+    const off = addSyncSubscriber(sink)
+    try {
+      saveSessions({ recentSessions: ['x'], sessionEngines: {} } as any)
+      expect(sink).toHaveBeenCalledWith(expect.any(Number), 'config:sessions-changed', [
+        expect.objectContaining({ recentSessions: ['x'] })
+      ])
+    } finally {
+      off()
+    }
+    // An impoverished save (`{}`) cannot wipe either.
+    saveSessions({ sessionEngines: {} } as any)
+    expect(Object.keys(syncCore.getCanonicalState().sessionEngines).sort()).toEqual([
+      'client-pi',
+      'host-codex'
+    ])
   })
 
   it('listDirEntries returns the default empty shape for a nonexistent path', async () => {
@@ -428,6 +469,58 @@ describe('handlers-core', () => {
       } as any
       await deleteSession(manager, 'oc-1', '-repo', 'opencode')
       expect(refreshCanonicalDirectories).toHaveBeenCalled()
+    })
+
+    // `saveSessionConfig` no longer deletes the rows a client's map lacks, so the
+    // delete is what removes a session's engine/model row — host-side.
+    it("removes the session's engine row once the engine delete succeeded", async () => {
+      const manager = { cancel: vi.fn(), get: vi.fn(), has: vi.fn(() => false) } as any
+      setSessionMeta('oc-row', { engineId: 'opencode' })
+
+      await deleteSession(manager, 'oc-row', '-repo', 'opencode')
+
+      expect(getSessionMeta('oc-row')).toBeUndefined()
+    })
+
+    it('keeps the engine row when the engine refuses the delete (the session survives)', async () => {
+      const manager = { cancel: vi.fn(), get: vi.fn(), has: vi.fn(() => false) } as any
+      setSessionMeta('oc-keep', { engineId: 'opencode' })
+      deleteSessionByEngine.mockRejectedValueOnce(new Error('opencode server down'))
+
+      await expect(deleteSession(manager, 'oc-keep', '-repo', 'opencode')).rejects.toThrow(
+        /server down/
+      )
+
+      expect(getSessionMeta('oc-keep')?.engineId).toBe('opencode')
+    })
+
+    it('deleteProject removes the engine rows of what it deleted, and keeps the survivors', async () => {
+      const manager = { cancel: vi.fn(), get: vi.fn(), forEach: vi.fn() } as any
+      setSessionMeta('oc-live', { engineId: 'opencode' })
+      setSessionMeta('pi-gone', { engineId: 'pi' })
+      setSessionMeta('elsewhere', { engineId: 'pi' })
+      deleteSessionByEngine.mockImplementation(async (id: string) => {
+        if (id === 'oc-live') throw new Error('opencode server down')
+      })
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            { sessionId: 'oc-live', cwd: '/repo', projectKey: '-repo', engineId: 'opencode' },
+            { sessionId: 'pi-gone', cwd: '/repo', projectKey: '-repo', engineId: 'pi' }
+          ]
+        }
+      ] as never)
+
+      await deleteProject(manager, '-repo')
+
+      expect(getSessionMeta('pi-gone')).toBeUndefined()
+      // Survived the delete: it needs its row to reopen on the right engine.
+      expect(getSessionMeta('oc-live')?.engineId).toBe('opencode')
+      // Another project's session is untouched.
+      expect(getSessionMeta('elsewhere')?.engineId).toBe('pi')
     })
 
     it('sweeps every session on the project — on-disk group members AND live sessions', async () => {
@@ -1011,5 +1104,252 @@ describe('judgeModelSupport — the automode:judge-model-support body', () => {
     await expect(judgeModelSupport('opencode', 'openai/gpt-5')).rejects.toThrow(/array of strings/)
     await expect(judgeModelSupport('opencode', ['ok', 7])).rejects.toThrow(/array of strings/)
     expect(describeJudgeModels).not.toHaveBeenCalled()
+  })
+})
+
+describe('sendPrompt — origin and the held inbox (slice 1a)', () => {
+  const CWD = '/tmp/cwd'
+  let n = 0
+
+  /** A live session double that records what the engine was asked, in order. */
+  function liveSession(rid: string, over: Record<string, unknown> = {}): any {
+    const calls: string[] = []
+    const session: any = makeSessionStub({
+      engineId: 'opencode',
+      originLedger: new TurnOriginLedger(),
+      getSessionId: () => null,
+      calls,
+      run: vi.fn((prompt: string) => {
+        calls.push(`run:${prompt}`)
+        session.willQueue = true
+        return Promise.resolve()
+      }),
+      enqueuePrompt: vi.fn((text: string, _a: unknown, _r: unknown, origin?: string) => {
+        calls.push(`enqueue:${text}${origin ? `:${origin}` : ''}`)
+      }),
+      deliverNonUser: vi.fn(async (item: { text: string }) => {
+        calls.push(`deliver:${item.text}`)
+        session.willQueue = true
+        return 'started'
+      }),
+      ...over
+    })
+    syncCore.emit('session:created', [rid, { cwd: CWD }])
+    return session
+  }
+  const ridOf = (): string => `rid-send-${process.pid}-${++n}`
+
+  it('a user prompt resets taint and budget, then runs at once when nothing is held', async () => {
+    const rid = ridOf()
+    const session = liveSession(rid)
+    session.originLedger.nonUserDelivered()
+    session.originLedger.agentTurnStarted()
+    const out = sendPrompt(makeManager(session), rid, 'hello')
+    // Still synchronous: an inbox that is empty costs the prompt path nothing.
+    expect(out).toBeUndefined()
+    expect(session.calls).toEqual(['run:hello'])
+    expect(session.originLedger.userOriginClean).toBe(true)
+    expect(session.originLedger.agentTurnStartsSinceUser).toBe(0)
+  })
+
+  it('held items go out FIRST, in order, and the prompt then queues behind the turn they start', async () => {
+    const rid = ridOf()
+    const session = liveSession(rid)
+    const manager = makeManager(session)
+    // Held while it was idle and nothing woke it.
+    const held = { origin: 'agent-note' as const, from: { key: 'k', title: 'T' }, wake: false }
+    await deliver(manager, rid, { ...held, text: 'held one' })
+    await deliver(manager, rid, { ...held, text: 'held two' })
+    expect(session.calls).toEqual([])
+
+    await sendPrompt(manager, rid, 'user prompt')
+    expect(session.calls).toEqual(['deliver:held one', 'deliver:held two', 'enqueue:user prompt'])
+    expect(session.run).not.toHaveBeenCalled()
+    // The turn now carries agent text: the user speaking did not clean it.
+    expect(session.originLedger.userOriginClean).toBe(false)
+    expect(syncCore.getCanonicalState().sessions[rid].heldCount).toBe(0)
+  })
+
+  it('a busy session keeps its inbox: nothing flushes into a turn that is not starting', async () => {
+    const rid = ridOf()
+    const session = liveSession(rid)
+    const manager = makeManager(session)
+    await deliver(manager, rid, {
+      origin: 'agent-note',
+      from: { key: 'k', title: 'T' },
+      wake: false,
+      text: 'held'
+    })
+    session.willQueue = true
+    sendPrompt(manager, rid, 'while busy')
+    expect(session.calls).toEqual(['enqueue:while busy'])
+    expect(syncCore.getCanonicalState().sessions[rid].heldCount).toBe(1)
+  })
+
+  it('a prompt that only QUEUES behind an agent-started turn leaves taint and budget alone (review M1)', async () => {
+    const rid = ridOf()
+    const session = liveSession(rid)
+    const manager = makeManager(session)
+    // A message woke the session: the turn is running with agent text in it.
+    expect(
+      await deliver(manager, rid, {
+        origin: 'session-message',
+        from: { key: 'k', title: 'T' },
+        wake: false,
+        text: 'wake up'
+      })
+    ).toEqual({ result: 'delivered' })
+    expect(session.willQueue).toBe(true)
+    expect(session.originLedger.userOriginClean).toBe(false)
+
+    sendPrompt(manager, rid, 'ok')
+
+    expect(session.calls.at(-1)).toBe('enqueue:ok')
+    expect(session.originLedger.userOriginClean).toBe(false)
+    expect(session.originLedger.agentTurnStartsSinceUser).toBe(1)
+  })
+
+  it('a host-instruction is still a user row, marked; queued, it keeps the marker', () => {
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    const events: Array<[string, unknown]> = []
+    const off = addSyncSubscriber((_seq: number, channel: string, args: unknown[]) => {
+      if (channel === 'session:user-message') events.push([channel, args[1]])
+    })
+    try {
+      sendPrompt(makeManager(session), rid, 'wrap up now', undefined, {
+        origin: 'host-instruction'
+      })
+      expect(events).toEqual([
+        [
+          'session:user-message',
+          expect.objectContaining({ prompt: 'wrap up now', origin: 'host-instruction' })
+        ]
+      ])
+      const rows = syncCore.getCanonicalState().sessions[rid].messages
+      expect(rows).toEqual([expect.objectContaining({ role: 'user', hostInstruction: true })])
+
+      session.willQueue = true
+      sendPrompt(makeManager(session), rid, 'again', undefined, { origin: 'host-instruction' })
+      expect(session.enqueuePrompt).toHaveBeenLastCalledWith(
+        'again',
+        undefined,
+        undefined,
+        'host-instruction'
+      )
+    } finally {
+      off()
+    }
+  })
+
+  it('the brief a session tool sends keeps the session "started by an agent"; a client prompt clears it (slice 1c)', () => {
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    session.originLedger.markAgentCreated()
+    sendPrompt(makeManager(session), rid, 'Background: …', undefined, {
+      origin: 'user',
+      agentBrief: true
+    })
+    expect(session.originLedger.agentCreated).toBe(true)
+    // …and the host's own instruction does not clear it either.
+    session.willQueue = false
+    sendPrompt(makeManager(session), rid, 'wrap up', undefined, { origin: 'host-instruction' })
+    expect(session.originLedger.agentCreated).toBe(true)
+    expect(session.originLedger.hostInstructionTurn).toBe(true)
+    session.willQueue = false
+    sendPrompt(makeManager(session), rid, 'typed by the user')
+    expect(session.originLedger.agentCreated).toBe(false)
+    expect(session.originLedger.hostInstructionTurn).toBe(false)
+  })
+
+  it('only a client prompt is recorded on the session’s link, so the wait survives a restart (slice 1c)', async () => {
+    const { insertSessionRef, upsertSessionLink, getSessionLink } =
+      await import('../../../core/services/db')
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    const ref = `s-hc${process.pid}-${n}`
+    insertSessionRef({ ref, engine: 'claude', sessionId: null, routingId: rid })
+    upsertSessionLink({
+      childRef: ref,
+      parentRef: 's-parent',
+      kind: 'started',
+      createdBy: 'agent',
+      grouped: true,
+      state: 'live'
+    })
+    const prompted = (): number | null | undefined => getSessionLink(ref)?.clientPromptedAt
+    sendPrompt(makeManager(session), rid, 'brief', undefined, { origin: 'user', agentBrief: true })
+    expect(prompted()).toBeNull()
+    session.willQueue = false
+    sendPrompt(makeManager(session), rid, 'wrap up', undefined, { origin: 'host-instruction' })
+    expect(prompted()).toBeNull()
+    session.willQueue = false
+    sendPrompt(makeManager(session), rid, 'typed by the user')
+    expect(prompted()).toEqual(expect.any(Number))
+  })
+
+  it('a brief sent while the child is busy is queued as a brief, not as a typed prompt (slice 1c)', () => {
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    session.willQueue = true
+    sendPrompt(makeManager(session), rid, 'Background: …', undefined, {
+      origin: 'user',
+      agentBrief: true
+    })
+    expect(session.enqueuePrompt).toHaveBeenLastCalledWith(
+      'Background: …',
+      undefined,
+      undefined,
+      'agent-brief'
+    )
+    sendPrompt(makeManager(session), rid, 'typed while busy')
+    expect(session.enqueuePrompt).toHaveBeenLastCalledWith('typed while busy', undefined, undefined)
+  })
+
+  it('a typed prompt carries no marker', () => {
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    sendPrompt(makeManager(session), rid, 'typed')
+    const rows = syncCore.getCanonicalState().sessions[rid].messages
+    expect(rows).toEqual([expect.objectContaining({ role: 'user' })])
+    expect(rows[0]).not.toHaveProperty('hostInstruction')
+  })
+})
+
+describe('allowPeerMessages — the session:allow-peer-messages body', () => {
+  it('hands the request to the session and returns its answer', async () => {
+    const allow = vi.fn(async () => ({ success: true }))
+    const manager = makeManager(makeSessionStub({ allowPeerMessages: allow }))
+    await expect(allowPeerMessages(manager, 'rid-1')).resolves.toEqual({ success: true })
+    expect(allow).toHaveBeenCalledTimes(1)
+  })
+
+  it('says no, rather than failing, for a session that holds no peer messages or none at all', async () => {
+    const refusal = { success: false, error: 'This session does not hold peer messages' }
+    await expect(allowPeerMessages(makeManager(makeSessionStub()), 'rid-1')).resolves.toEqual(
+      refusal
+    )
+    await expect(allowPeerMessages(makeManager(undefined), 'ghost')).resolves.toEqual(refusal)
+  })
+
+  it('is the same call over the remote dispatcher as directly (a chat command on the session)', async () => {
+    const manager = makeManager(
+      makeSessionStub({ allowPeerMessages: vi.fn(async () => ({ success: true })) })
+    )
+    const registry = new CommandRegistry()
+    const dispatcher = new RemoteDispatcher(registry)
+    registry.register({
+      channel: 'session:allow-peer-messages',
+      capability: 'chat',
+      kind: 'command',
+      sessionIdArg: 0,
+      transport: 'remote',
+      handler: (rid: string) => allowPeerMessages(manager, rid)
+    })
+    const viaDispatcher = await dispatcher.handle(
+      { type: 'invoke', id: '1', channel: 'session:allow-peer-messages', args: ['rid-1'] },
+      makeRemoteConnection('password', null)
+    )
+    expect(viaDispatcher).toEqual(await allowPeerMessages(manager, 'rid-1'))
   })
 })
