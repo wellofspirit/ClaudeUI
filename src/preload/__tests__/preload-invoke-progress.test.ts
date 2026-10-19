@@ -39,6 +39,12 @@ type Api = {
     sessionId: string,
     projectKey: string,
     resumeSessionAt?: string,
+    onProgress?: (p: unknown) => void,
+    options?: { deferStatusLine?: boolean }
+  ) => Promise<unknown>
+  loadSessionStatusLine: (
+    sessionId: string,
+    projectKey: string,
     onProgress?: (p: unknown) => void
   ) => Promise<unknown>
 }
@@ -110,6 +116,56 @@ describe('preload — loadSessionHistory progress', () => {
     emitProgress(id, { done: 1, total: 2, phase: 'x' })
     emitProgress(42, { done: 1, total: 2, phase: 'x' })
     expect(onProgress).not.toHaveBeenCalled()
+  })
+
+  it('carries the Arc 2 options as a 4th wire arg ONLY when given (the 3-arg call stays exact)', async () => {
+    electron.ipcRenderer.invoke.mockResolvedValue({ messages: [] })
+    await api.loadSessionHistory('sid', 'pk', undefined, undefined, { deferStatusLine: true })
+    expect(electron.ipcRenderer.invoke).toHaveBeenLastCalledWith(
+      'session:load-history',
+      'sid',
+      'pk',
+      undefined,
+      { deferStatusLine: true }
+    )
+
+    await api.loadSessionHistory('sid', 'pk', 'anchor')
+    expect(electron.ipcRenderer.invoke.mock.lastCall).toEqual([
+      'session:load-history',
+      'sid',
+      'pk',
+      'anchor'
+    ])
+
+    // With a callback too: the options ride inside invoke:with-progress's wire args.
+    await api.loadSessionHistory('sid', 'pk', undefined, vi.fn(), { deferStatusLine: true })
+    const [channel, , inner, ...wire] = electron.ipcRenderer.invoke.mock.lastCall!
+    expect(channel).toBe('invoke:with-progress')
+    expect(inner).toBe('session:load-history')
+    expect(wire).toEqual(['sid', 'pk', undefined, { deferStatusLine: true }])
+  })
+
+  it('loadSessionStatusLine is a plain invoke, or invoke:with-progress with a callback', async () => {
+    electron.ipcRenderer.invoke.mockResolvedValue({ totalCostUsd: 1 })
+    await api.loadSessionStatusLine('sid', 'pk')
+    expect(electron.ipcRenderer.invoke.mock.lastCall).toEqual([
+      'session:load-status-line',
+      'sid',
+      'pk'
+    ])
+
+    let finish!: (v: unknown) => void
+    electron.ipcRenderer.invoke.mockReturnValue(new Promise((r) => (finish = r)))
+    const onProgress = vi.fn()
+    const p = api.loadSessionStatusLine('sid', 'pk', onProgress)
+    const [channel, callId, inner, ...wire] = electron.ipcRenderer.invoke.mock.lastCall!
+    expect(channel).toBe('invoke:with-progress')
+    expect(inner).toBe('session:load-status-line')
+    expect(wire).toEqual(['sid', 'pk'])
+    emitProgress(callId, { done: 2, total: 8, phase: 'costs' })
+    expect(onProgress).toHaveBeenCalledWith({ done: 2, total: 8, phase: 'costs' })
+    finish({ totalCostUsd: 1 })
+    await p
   })
 
   it('does not expose the raw progress channel on the context bridge (N3)', () => {

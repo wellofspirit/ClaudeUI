@@ -1,6 +1,6 @@
 # ADR-102: Per-call invoke progress, and opening a session before its transcript loads
 
-**Status:** Accepted (2026-10-19). Implementation on branch `feat/session-load-progress`; resume notes
+**Status:** Accepted (2026-10-19); amended the same day (content first, see below). Implementation on branch `feat/session-load-progress`; resume notes
 in `docs/session-load-progress-handoff.md`.
 **Relates to:** [ADR-051](adr-051_sync-core-replication-architecture.md) (the frame families both
 transports speak), [ADR-052](adr-052_remote-auth-passkeys-capabilities.md) (the command registry's
@@ -69,11 +69,42 @@ ride replicated broadcast events, and the volatile lane is session-scoped.
    `cleanupEmptySession` used to drop it on navigate-away and `forgetDroppedSession` then scrubbed its
    recents, pin, hidden flag and custom title.
 
+## Amendment: content first, the rest in the background (2026-10-19, same branch)
+
+Measured after Decision 1–6 shipped: the main transcript pass that builds every message takes
+46–82 ms; the cost/token status line (a second pass over the main file plus EVERY subagent file —
+387–834 MB on disk for the owner's sessions) takes 0.6–1.2 s; fetching all subagent transcripts
+takes 0.9–2 s. So the wait was never the conversation itself.
+
+- **Tail-first partial loading was rejected.** The Claude reader is order-dependent (a tool result
+  whose call precedes the cut is dropped, notifications lose their agent, run numbering and
+  "unfinished" detection need the whole file, assistant ids span lines); no prepend primitive exists
+  and the no-clobber rule refuses a second fill; a prompt sent after a tail commit spawns at once and
+  the older part could then never land; todos, sent files, galleries, roster and fork positions are
+  whole-transcript derivations.
+- **Content first.** `session:load-history` takes an optional options object (4th wire arg);
+  `{deferStatusLine: true}` skips the status pass and returns `statusLine: null`, plus a
+  `subagentIndex` (per origin tool_use id: agentId, parent, bytes, mtime order, sidecar name /
+  description / type) and `transcriptMtimeMs`. Its byte plan is the transcript pass alone
+  (total = M). The full-screen loader therefore covers ~60 ms plus transfer. Other callers (host
+  seed, watcher, automation) keep the full read.
+- **Background phase.** A new `session:load-status-line` (withProgress, total = M + S) and the
+  subagent transcripts load after the content, for the ACTIVE session only (started by activation,
+  cancelled on deactivation, generation-guarded against evictions and reloads), shown by a 2 px bar
+  under the chat TopBar. Subagent fetches: ≤ 2 in flight, parents of nested agents first, then
+  newest first; an expanded card or task-panel entry jumps the queue. Bucket fills are fill-only and
+  require the entry to hold its transcript; the status line replaces the previous one unless the
+  session is live (the live session seeds its own totals). `session:load-subagent-history` is
+  declared withProgress so the remote `sending` frame slides the 30 s timeout during a large transfer.
+- Decision 4's `2M + 2S` plan and `subagentFileBytes` are superseded by the two plans above; a send
+  waits only for the content load.
+
 ## Consequences
 
 - Any long query can opt in with `withProgress: true` on both registrations and a reporter call.
-- A new web bundle against an older desktop gets no frames: indeterminate bar, fixed 30 s timeout,
-  exactly as before.
+- Version skew is one-directional (ADR-060/099: the web bundle is served by the host it talks to):
+  an old bundle in a tab left open across an update ignores the frames and keeps its fixed 30 s
+  timeout until reloaded; a new bundle never meets an old host.
 - Engines whose readers are RPC or whole-file reads (Codex, opencode, pi) show an indeterminate bar.
 - The transfer of a single large response frame still shows no byte progress ("Receiving…"); that
   would need chunked responses, deferred until lazy subagents shrink the payload.

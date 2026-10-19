@@ -516,3 +516,391 @@ Claims:
    Installed harnesses page still renders its ProgressBar-using UI without console errors.
    Report: per claim the exact eval output, the screenshot paths, consoleErrors. Not in scope (gap):
    remote web client in a real browser, non-Claude engines (no such sessions in the clone).
+
+---
+
+# Arc 2 (same PR): content-first load, background status line, lazy + background subagents
+
+Decided by Daniel 2026-10-19 after the tail-first exploration (rejected: the main transcript parse is
+only ~60 ms; see "Measured" below). Amends ADR-102 (byte plan + phases).
+
+## Measured (Electron main, warm cache, current branch)
+
+| phase | 5bece358 (73 agents, 387 MB subagents on disk) | 1ae1d292 (42 agents, 834 MB) |
+|---|---|---|
+| main transcript pass (all messages) | 58–82 ms | 46–54 ms |
+| cost/status pass (main file again + EVERY subagent file) | 580–720 ms | 1120–1220 ms |
+| renderer fetch of all subagent transcripts | ~900 ms | ~1900–2000 ms |
+
+Tail-first rejected because (evidence pass, all FACT): the Claude reader is order-dependent
+(tool_results before the cut dropped, notifications lose toolUseId, unfinished/runIndex need the whole
+file, 230/325 assistant ids span lines); no prepend primitive exists (replica/reducer append/upsert
+only, `seedColdSession` refuses non-empty-over-non-empty); a send after a tail commit spawns at once
+and the older part can then never land (live guard + no-clobber); todos/sentFiles/galleries/roster/
+fork index are whole-array derivations; no scroll-anchor compensation.
+
+## Goal / acceptance
+
+1. Click → the conversation (ALL messages) paints after the transcript pass only (~60 ms + transfer),
+   with the context meter if cheaply derivable; the full-screen loader only covers that phase.
+2. A thin background bar directly under the chat TopBar (`ChatPanel.backgroundLoad`,
+   role=progressbar, 2 px, accent) shows the background phase: the status line (cost/tokens) and the
+   subagent transcripts loading. It disappears when both are done. Detail on hover (title attr), e.g.
+   "Loading usage and 73 subagents · 42%".
+3. Footer status line shows a pending state (not zeros) until the background status line lands.
+4. Subagent transcripts: background prefetch (≤ 2 in flight, newest agents first — by spawn position
+   in the main transcript, descending — but parents of nested agents BEFORE everything else so the
+   roster tree completes first). Expanding a TaskCard / opening a task-panel entry whose bucket is
+   missing requests it at top priority and shows a small "Loading…" body until it lands.
+5. Navigating away from the session cancels its remaining background queue (in-flight calls finish
+   but their results are still committed only if the bucket is still empty and the session still
+   resident); re-activating a resident session restarts the queue for missing buckets.
+6. Session start during the background phase: the late status line is applied only if the session is
+   not live (else dropped — the live session computes its own); subagent fills are fill-only (skip a
+   non-empty bucket, skip agents that are running per activeTasks/notifications) and never block a
+   send. `awaitReloadBeforeSpawn` waits only for the CONTENT phase.
+7. Remote web client: identical behavior. Version skew is ONE-directional (ADR-060/099: the web
+   bundle is served by the host it talks to): only an OLD bundle in a tab left open across a desktop
+   update can talk to a NEW host — it omits `deferStatusLine` and gets the full result, as today. A
+   new bundle never meets an old host, so there is NO old-server fallback path in the renderer.
+8. Non-Claude engines unchanged (their readers return buckets inline; no background phase).
+
+## Design
+
+Main / wire:
+- `session:load-history` gains an optional 4th wire arg `options?: { deferStatusLine?: boolean }`
+  (both registrations; old clients omit it → unchanged full behavior incl. statusLine). With
+  `deferStatusLine`, `loadSessionHistory` skips `computeTokenMetrics`/`foldSubagentCosts`/
+  `dispatchedCostsByRouting` and returns `statusLine: null` plus `statusLineDeferred: true`. Its byte
+  plan becomes `total = M` (transcript pass only, phase `transcript`; last report done = M).
+  Other callers (seed-canonical-transcript, session-watcher, session-manager, automation-manager)
+  are unchanged (full, with statusLine).
+- New query channel `session:load-history-status(sessionId, projectKey, resumeSessionAt?)`,
+  `capability:'fs-read'`, `withProgress:true`, both transports, preload + web adapter +
+  `ClaudeAPI.loadSessionStatusLine(sessionId, projectKey, resumeSessionAt?, onProgress?)`. Returns
+  the same `StatusLineData` loadSessionHistory computes today (metrics pass + subagent cost fold +
+  dispatched-cost merge — extract that block into one function used by both paths; byte plan
+  `total = M + S`, phase `costs`).
+- Replace `subagentFileBytes` with `subagentIndex: Record<toolUseId, { agentId: string;
+  parentToolUseId: string | null; bytes: number; order: number; name?: string; description?: string;
+  agentType?: string }>` built from `agentIdToToolUseId` + sidecars (`readAgentSidecar`:
+  `toolUseId`, `parentAgentId` → map to that parent's toolUseId, `name`, `description`,
+  `agentType`) + file sizes; `order` = spawn position in the main transcript (nested: parent's order
+  + fractional/child sequence — anything that sorts newest-first sensibly). Agents with no file:
+  bytes 0, still listed.
+
+Renderer:
+- `loadSessionIntoStore` (Claude): call with `deferStatusLine`; commit messages immediately
+  (`loadHistoricalSession` with `statusLine: null`) and mark the entry `statusLinePending: true`
+  (view-only field like transcriptLoadProgress). Then start the session's background job (do not
+  await it in the click path): (a) `loadSessionStatusLine` with progress → on land: if still resident
+  and not live, set the status line (through the sanctioned writer — check sealed-fields; statusLine
+  may be sealed → add a replica-side fill function next to `seedColdSession`), clear pending; if live,
+  just clear pending; (b) subagent prefetch queue per the ordering rules. (No old-server fallback — see
+  acceptance 7.)
+- Background progress: `backgroundLoadProgress: {fraction, label} | null` view-only per session;
+  total = statusTotal (first status frame) + Σ index bytes of agents queued; done = status done + Σ
+  bytes of fetched agents; monotonic; on-demand fetches count too.
+- Subagent bucket writes go through ONE new replica function (e.g. `fillSubagentBucket(routingId,
+  toolUseId, messages)`) — fill-only, no-op for an unknown session or a non-empty bucket. Do NOT write
+  sealed fields elsewhere (eslint enforces).
+- On-demand: TaskCard (expanded) and TaskEntry (panel) call `requestSubagentTranscript(routingId,
+  toolUseId)` when the bucket is missing and the index lists the agent; show a "Loading…" line
+  (`TaskCard.subagentLoading` / `TaskEntry.subagentLoading`). `hasSubagentOutput` for the
+  failure-summary logic: treat "index lists a transcript with bytes > 0 and bucket not yet loaded" as
+  pending, not as "no output" (do not flash the markdown result body then swap).
+- Content-phase loader: unchanged component; tracker plan now total = M (no subagents phase in the
+  content load). Keep 'receiving'.
+- Footer: while `statusLinePending`, render the status line as a muted "Loading usage…" (or the
+  template with placeholders) — find the footer renderer via `statusLineTemplate`.
+- The background job registry is separate from `loadsInFlight` (sends must not wait for it).
+- Watched sessions, ensureTranscriptLoaded (rename/watch), reloadActiveTranscript: content-first too;
+  background job only for the ACTIVE session.
+
+Out of scope: tail-first; caching the status line across opens (good follow-up: key by mtimes);
+host-side `seedCanonicalTranscript` still computes the status line on spawn (sendPrompt waits on it
+~1 s — note as follow-up); full-sync progress (next arc).
+
+Tests that must exist: main defer option returns identical messages/notifications/index with
+statusLine null and progress total = M; status channel equals today's statusLine (deep-equal vs the
+non-deferred call on the same fixture); index built from sidecars incl. nested parent mapping and
+missing-file agents; registry/transport registration of the new channel (both transports, progress
+frames); renderer: content commit before status/subagents; status line dropped when live; fill-only
+bucket writes; prefetch order (nested parents first, then newest first) and ≤ 2 concurrency;
+on-demand jumps the queue; cancel on navigate-away + restart on return; background bar monotonic and
+gone when done; footer pending state; TaskCard loading body + no failure-summary flash. Each must fail without the change.
+
+## Arc 2 design review resolutions (2026-10-19) — ALL accepted; these OVERRIDE the Arc 2 design above
+
+- **R1** Both replica fills (subagent bucket, status line) no-op unless the entry HOLDS its transcript:
+  `existing?.seeded && existing.messages.length > 0` (what `seedColdSession` reads, replica.ts:~527) —
+  a fetch landing after `switchSession` cold-evicted the entry must not write onto it. Test it.
+- **R2** The background job is started by ACTIVATION, not by the click: one reconciler on
+  `activeSessionId` (store subscriber/effect, e.g. near useClaudeEvents.ts:~212-218): active +
+  historical + not live + holds transcript + (status line pending OR buckets missing per index) →
+  ensure the job; otherwise cancel the job of the previously active session. The click path never
+  starts the job. Covers `ensureTranscriptLoaded` (rename/watch) commits and re-activation.
+- **R3** Status-line fill = REPLACE unless live (not fill-only). `loadHistoricalSession` keeps
+  `statusLine ?? base.statusLine` and eviction does not clear it, so a re-opened session shows its
+  previous status line at once; the footer shows it (not "Loading usage…"), and the fresh one replaces
+  it. Pending UI only when `statusLine === null && job.statusPending`. Live → drop (the live session
+  seeds its own accumulators incl. subagent costs, claude-session.ts:~510-526/2316-2347).
+- **R4** Generation token per session job: `Map<routingId, {generation, cancel}>`; bump on
+  `loadHistoricalSession`'s final set and in `evictedViewPatch`/`markViewEvicted` (which also drop the
+  index + background view state). Landing fills / progress no-op on a generation mismatch.
+- **R5** New channel registered completely on both transports: session.ipc.ts unbind list (~303),
+  remote parity pin (remote-handlers.ipc.test.ts ~1670), src/test/helpers/boot-test-app.ts (~140),
+  preload, web api-adapter, `ClaudeAPI` type, docs/architecture/remote.md. The options arg is validated
+  as `options?.deferStatusLine === true`; everything else ignored. Same `fs-read` capability.
+- **C1** No `statusLineDeferred` flag; no `resumeSessionAt` on the status channel (anchored callers —
+  `loadForkSeed`, `loadResumedTranscript`, host seed — stay on the full read).
+- **C2** `subagentFileBytes` → `subagentIndex` is safe (no released bundle has Arc 1). Fix ADR-102's
+  skew wording (done) and the stale C8 note above (superseded: a new bundle never meets an old host).
+- **C3** `order` = subagent file mtime, newest first (already stat'd); only override: parents of nested
+  agents first.
+- **C4** No activeTasks/notifications check — fill-only on a non-empty bucket covers running agents.
+- **C5** Background bar total planned up front: total = (M + S_idx) + S_idx (M = the content load's
+  total, S_idx = Σ index bytes); status frames mapped proportionally into the first (M + S_idx);
+  each fetch adds its index bytes. Monotonic without waiting for a frame.
+- **C6** Nested task-panel entries: request at the DESCRIPTOR level (TaskDetailPanel.tsx ~27-35 → `kind:
+  'missing'` today renders null): if `index[toolUseId]?.parentToolUseId` exists, request the PARENT
+  bucket (and its own) and render a loading entry. Requests in an effect keyed by toolUseId, deduped
+  by the job.
+- **C7** Roster: "nested parents first" only; no index-built rows; nested counts lag until the parent
+  bucket lands (document in code).
+- **C8** Declare `session:load-subagent-history` `withProgress` too (handler can report nothing;
+  the transport's `sending` frame re-arms the remote 30 s timer at transfer start). Treat fetch
+  timeouts (`isInvokeTimeout`) as retryable once in the job.
+- **C9** Extend `readAgentSidecar` with `name`/`description`/`agentType` via the existing
+  `stringField`; ~5% of sidecars lack `toolUseId` → index only agents the main transcript mapped;
+  build the index as a null-prototype object or Map → plain object on the wire.
+- **C10** One per-session view object `backgroundLoad: { fraction, label, statusPending } | null`
+  (not separate flags). Footer: `View.tsx` ~1087 renders zeros for null today; pending =
+  `statusLine === null && backgroundLoad?.statusPending`.
+- **N1** Options object through `readSessionHistory`/`loadSessionHistory` (`{ resumeSessionAt?,
+  onProgress?, deferStatusLine? }` or similar) instead of more positionals — update callers.
+  **N2** Return `transcriptMtimeMs` in the result. **N3** Channel name `session:load-status-line`,
+  API `loadSessionStatusLine`. **N4** One small `lib/subagent-prefetch.ts`, no generic scheduler.
+  **N5** Document: a session resumed before an old agent's bucket was prefetched shows only that
+  agent's new run until the next idle re-click. **N6** Tests: add R1, R4, C6, C3; no old-server test.
+
+## Arc 2 slices
+
+- **Slice C (main + wire):** defer option (N1), `session:load-status-line` (N3, withProgress, R5,
+  extracted status-line block shared with the full path), `subagentIndex` (C3, C9), `transcriptMtimeMs`
+  (N2), `session:load-subagent-history` withProgress (C8), byte plans (content: total = M; status:
+  total = M + S), ADR-102 amendment text left to the orchestrator.
+- **Slice D (renderer):** content-first commit, activation reconciler (R2), job + generation (R4),
+  replica fills (R1, R3), background bar under TopBar (C5, C10, testid `ChatPanel.backgroundLoad`),
+  prefetch module (N4, ≤ 2 in flight, C3 order), on-demand TaskCard / TaskEntry / descriptor (C6),
+  footer pending (C10), retry once on timeout (C8), remove the content-phase `subagents` phase.
+
+## Slice C implementer report (2026-10-19, not self-certified)
+
+Landed (main process + wire; no Slice D behaviour):
+
+- `core/services/session-history.ts`: `loadSessionHistory(sessionId, projectKey, resumeSessionAt?, options?: {onProgress?, deferStatusLine?})`.
+  The status-line block (metrics pass + subagent cost fold + dispatched-cost merge) is ONE function, `computeStatusLine`, used by the
+  full read and by the new `loadSessionStatusLine(sessionId, projectKey, onProgress?)`. Byte plans are one `createHistoryProgress(onProgress,
+  plan)` with three kinds: `full` (unchanged 2M+2S, last report 2M+S), `content` (deferred: total M, phase `transcript`, first 0, last M) and
+  `status` (total M+S, phase `costs`, first 0, last total). `subagentIndex` (null-prototype, keyed by origin tool_use id: `agentId,
+  parentToolUseId, bytes, order = file mtimeMs, name?, description?, agentType?`) replaces `subagentFileBytes`; `transcriptMtimeMs` is
+  stat'ed before the first byte is read.
+- `core/services/agent-identity.ts`: `readAgentSidecar` also returns `name`/`description`/`agentType` (via `stringField`).
+- `core/services/engine-history.ts`: `readSessionHistory(id, key, anchor?, engineId?, options?)`, `EngineHistory.read(id, key, anchor?, options?)`.
+- `core/ipc/session.ipc.ts` + `core/ipc/remote-handlers.ts`: `session:load-history` takes the options object as its 4th wire arg
+  (`options?.deferStatusLine === true`, everything else ignored); new `session:load-status-line` (`fs-read`, `query`, `withProgress`) on both
+  transports (+ the session.ipc unbind list); `session:load-subagent-history` declared `withProgress` (handler takes the reporter, reports nothing).
+- `preload/index.ts`, `web/api-adapter.ts`, `test/helpers/boot-test-app.ts`, `shared/types.ts`: `loadSessionHistory(..., onProgress?, options?)`,
+  `loadSessionStatusLine(sessionId, projectKey, onProgress?)`, `SubagentIndexEntry`, `LoadSessionHistoryOptions`; options ride as a 4th wire
+  arg only when given (the old 3-arg call is byte-identical on both clients).
+- `docs/architecture/remote.md`: one sentence listing the three `withProgress` channels.
+- Arc 1 renderer consumer adapted minimally: `lib/session-history-load.ts` sizes each fetch by `subagentIndex[toolUseId]?.bytes`
+  (`transcript-load-progress.ts` untouched, it never read the field).
+
+Deviations / judgement calls:
+
+1. N1 scope. The options object is used for the NEW knobs (and Slice A's `onProgress`, which moved into it) on `loadSessionHistory` /
+   `readSessionHistory` / `EngineHistory.read`; the older positionals (`resumeSessionAt`, `engineId`) stay. Moving them too would rewrite
+   ~25 call sites and mock assertions for no behaviour. `ClaudeAPI.loadSessionHistory` keeps `onProgress` as its 4th positional and adds
+   `options` as the 5th (Slice D's call site is the only caller that will pass it; the renderer-facing signature churn would have touched
+   Slice B's tests for nothing).
+2. `order` is the file mtime in ms (C3), 0 for a missing file; "newest first" is the consumer's sort (descending). "Nested parents first"
+   is the consumer's override, not encoded in `order`.
+3. A sidecar WITHOUT `toolUseId` makes `readAgentSidecar` return null (its existing contract, claude-session relies on it), so such an agent
+   is indexed (the main transcript mapped it) with `parentToolUseId: null` and no names even if the sidecar carries them.
+4. Two agents mapped to one origin id (not something cli.js writes): the newer transcript (`order`) wins the key.
+5. `statSubagentFiles` now returns agentId -> `{bytes, mtimeMs}` (a Map); a file that vanishes between readdir and stat is dropped (it used to
+   count 0). The full plan's S is still every `agent-*.jsonl` on disk, mapped or not (the cost fold reads them all).
+6. `loadSessionStatusLine` is Claude-only and not engine-dispatched (no `readSessionHistory` engine check); a missing transcript yields the
+   all-zero `StatusLineData`, never null. It has no `resumeSessionAt` (C1).
+7. `readAgentSidecar`'s existing test expectation changed (the 2.1.280 fixture carries `agentType`/`description`, now returned).
+8. The "remote-server test with progress frames for the new channel and load-subagent-history" is covered in two parts, not by booting the
+   real handlers inside `remote-server.test.ts` (that file registers stand-in channels and has none of the handler mocks): the real
+   declarations are pinned in `remote-handlers.ipc.test.ts` (`withProgress`, `dispatcher.reportsProgress(...)` — the exact predicate
+   `handleInvoke` gates its frames on), and `remote-server.test.ts` gained a case for a `withProgress` handler that reports NOTHING (the
+   load-subagent-history shape): exactly `sending {done:0,total:null}` then the response.
+
+Tests (new unless noted): `main/services/__tests__/session-history-deferred.test.ts` (19: deferred-vs-full deep-equal, plans, status
+deep-equal incl. dispatched merge, index from sidecars / nested parent / missing file / sidecar-less agent / unmapped file / mtime order /
+`__proto__` key, `transcriptMtimeMs`), `session-history-progress.test.ts` (moved to the options object; the `subagentFileBytes` test went to
+the index tests), `remote-handlers.ipc.test.ts` (+3, the parity pin gained `session:load-status-line`), `session.ipc.test.ts` (+5),
+`remote-server.test.ts` (+1), `preload-invoke-progress.test.ts` (+2), `api-adapter.test.ts` (+2), `agent-identity.test.ts` (+1, 1 updated),
+`engine-history.test.ts` (updated), `session-history-load-progress.unit.test.ts` (fixtures moved to `subagentIndex`).
+Red-proof: scratchpad `red_c.py`, 30 mutations, every one RED after two added tests (a shrinking-transcript test for the content plan's closing
+report; a removeHandler-count test for the unbind list); plus deleting the boot-test-app helper fails `bun run typecheck` (the object is typed
+`ClaudeAPI`).
+
+## Orchestrator review of Slice C (2026-10-19)
+
+Every source hunk reviewed (session-history.ts, agent-identity.ts, engine-history.ts, both
+registrations, preload, web adapter, renderer adaptation). typecheck exit 0; guard proven red
+independently (ignoring `deferStatusLine` → 4 deferred-read tests fail). Deviations 1–6 accepted
+(ClaudeAPI keeps `onProgress` 4th + `options` 5th; no real-handler server test needed — the
+declarations are pinned and the transport predicate is tested).
+
+## Slice D brief (dispatched 2026-10-19)
+
+Implement "Slice D (renderer)" from "Arc 2 slices", with every Arc 2 resolution (R1–R5, C1–C10,
+N4–N6). Orchestrator notes:
+- Content load: `loadSessionHistory(..., onProgress, { deferStatusLine: true })` for Claude; remove the
+  eager subagent fan-out from `loadSessionIntoStore` and the content tracker's `subagents` phase
+  (`TranscriptLoadPhase` = 'reading' | 'receiving'); content plan total = M.
+- Store the `subagentIndex` per session (view-only, NOT replicated; dropped on evict per R4) so
+  TaskCard/TaskEntry/descriptor and the prefetch job can read it.
+- Activation reconciler (R2) + per-session job with generation (R4) in ONE module
+  `lib/subagent-prefetch.ts` (N4) (it may also own the status-line fetch, or a sibling small function —
+  keep it small): status line first-or-concurrent, then buckets; ≤ 2 in flight; order: parents of
+  nested agents first, then `order` (mtime) desc; on-demand requests jump the queue; retry once on
+  `isInvokeTimeout`; cancel on deactivation; restart on reactivation for what is still missing.
+- Replica fills in `stores/replica.ts` only: `fillSubagentBucket` (fill-only + R1) and a status-line
+  replace (R3: replace unless live, + R1). Check eslint sealed-field rules.
+- Background bar: `backgroundLoad: { fraction, label, statusPending } | null` (C10) per session,
+  view-only; ChatPanel renders a 2 px bar directly under TopBar (`ChatPanel.backgroundLoad`,
+  role=progressbar, `title` = label e.g. "Loading usage and 73 subagents · 42%"), absolutely
+  positioned so it does not shift layout; hidden when null. Plan per C5.
+- Footer pending per C10 (find the renderer at InputBox `View.tsx` ~1087).
+- On-demand UI: `TaskCard.subagentLoading`, `TaskEntry.subagentLoading`, and a loading descriptor for
+  nested task-panel entries (C6). No markdown-result flash before the bucket lands for an agent the
+  index lists with bytes > 0.
+- `awaitReloadBeforeSpawn` must still wait only for the content load.
+- Update ADR-102? NO — the orchestrator amends it.
+- Tests per the Arc 2 list + N6 (R1, R4, C6, C3), each proven red. Gates: typecheck, lint, touched
+  tests in isolation, `bun run test` (browser project works here).
+
+## Slice D implementer report (2026-10-19, not self-certified)
+
+Landed (renderer half of Arc 2; Slice C files untouched):
+
+- `lib/session-history-load.ts`: the Claude path reads with `loadSessionHistory(id, key, undefined, onProgress, {deferStatusLine: true})` and commits as
+  soon as the main transcript is in memory. The per-agent fan-out (`MAX_SUBAGENT_FETCHES`, size sort, `subagentFileBytes`) is gone. The progress
+  callback is ALWAYS passed (its first frame's `total` = M is what the background bar's plan starts from). The commit hands `loadHistoricalSession`
+  the new 8th arg `{subagentIndex, statusPending, statusBytes: M + Σ index bytes}`.
+- `lib/transcript-load-progress.ts`: phases `'reading' | 'receiving'`; `subagentsStarted` / `subagentFetched` / `subagents` removed; `describeTranscriptLoad` is
+  "Reading transcript · N% · ~x s left" or "Receiving…".
+- `lib/subagent-prefetch.ts` (new, N4): the activation reconciler (`startBackgroundLoad`, one store subscriber on a tuple of what the decision reads) and the
+  per-session job. Job = status pass (concurrent) + bucket fetches, `MAX_BUCKET_FETCHES = 2`, order: parents of nested agents, then `order` (mtime) desc;
+  `requestSubagentTranscript(routingId, toolUseId)` jumps the queue (and makes a demand-only job when none runs); a timeout (`isInvokeTimeout`) is retried
+  once, any other failure / an empty read zeroes the index entry (`markSubagentUnavailable`) so cards stop waiting; cancel on deactivation stops NEW
+  fetches only (in-flight ones still land); a live session clears the wait and drops the late status line; bar planned up front (C5), monotonic.
+- `hooks/useClaudeEvents.ts`: mounts `startBackgroundLoad()` (desktop renderer and web client alike). `hooks/useSubagentPending.ts` (new): index lists bytes > 0 and the
+  bucket is absent.
+- `stores/replica.ts`: `fillSubagentBucket` (fill-only, R1) and `replaceStatusLine` (replace, not live, R1, R3) — the only new writers of sealed fields; `holdsOwnTranscript` =
+  `seeded && messages.length > 0`.
+- `stores/session-store.ts`: `PerSessionState.subagentIndex | backgroundLoad | backgroundGeneration` (view-only; in `EMPTY_SESSION_STATE`), `BackgroundLoadView`,
+  `setBackgroundLoad` and `markSubagentUnavailable` (both generation-guarded), `loadHistoricalSession(..., background?)` (final set replaces index / bar and bumps the
+  generation), `evictedViewPatch(session?)` clears index + bar and bumps the generation (covers `markViewEvicted`, `switchSession`'s cold eviction and `beginTranscriptLoad`).
+- UI: `ChatPanel` (`ChatPanel.backgroundLoad`: role=progressbar, 2 px bar in a 6 px hover strip, `title` = label, `absolute top-full` under the TopBar wrapper, so no layout shift);
+  `InputBox` / `View` (footer "Loading usage…" = `InputBox.statusLine.pending` only when `statusLine === null && backgroundLoad.statusPending`);
+  `TaskCard` (`TaskCard.subagentLoading`, request effect on expand, failure summary counts a pending transcript as output); `TaskEntry` (`TaskEntry.subagentLoading`, request effect);
+  `TaskDetailPanel` + `View` (descriptor kind `'loading'` for a nested agent whose parent bucket is pending, requests parent + own at the descriptor level, C6);
+  `useAgentRoster` comment (C7, nested rows lag until the parent lands).
+
+Deviations / judgement calls:
+
+1. R4's "generation" is a numeric `backgroundGeneration` on the entry (not a `Map<routingId,{generation,cancel}>`): the store bumps it at the two places the spec names (commit and eviction),
+   so the prefetch module holds no registry of its own beyond the live `jobs` map; every landing compares the entry's current generation with the job's.
+2. `BackgroundLoadView` carries one extra field, `statusBytes` (the status pass's planned bytes, M + S_idx), because a job restarted by reactivation has to rebuild the C5 plan and M is
+   only known to the content load. C10's shape otherwise.
+3. A failed / empty bucket zeroes its index entry (`bytes: 0`) instead of tracking failure elsewhere: "a transcript is on its way" is then simply `bytes > 0 && bucket absent` everywhere
+   (card, entry, panel, reconciler) and a transcript that cannot be read falls back to the markdown result.
+4. On-demand requests also work for a LIVE session (fill-only keeps a running agent's bucket safe); the reconciler's background job does not run for a live one.
+5. The watched-session refetch (`refetchWatchedSession`) and the other non-click readers (`loadResumedTranscript`, fork seed) stay FULL reads (status line included); only `loadSessionIntoStore` is content-first
+   (so click, rename / watch toggle via `ensureTranscriptLoaded`, and `reloadActiveTranscript` are).
+6. "Context meter if cheaply derivable" is not implemented: the footer shows "Loading usage…" until the status line lands (nothing in the deferred result carries the window).
+7. Because the progress callback is always passed, `ensureTranscriptLoaded` / rename now also ride `invokeWithProgress` (desktop) / progress frames (web) — harmless, the throttle is per call.
+8. Existing tests changed because their contract did: `replica-uncarried` (the call now carries the callback + options), `session-history-load-progress` (the fan-out / subagent-phase tests became content-first ones),
+   `transcript-load-progress` (subagent phase removed), ChatPanel's "follows the store" test (`receiving` instead of `subagents`), two `PerSessionState` literals (3 new fields).
+
+Tests (new unless noted): `lib/__tests__/subagent-prefetch.unit.test.ts` (21: reconciler, order, concurrency, on-demand, cancel / restart, R4 generation, R1 / R3 fills, retry / give-up, bar),
+`lib/__tests__/session-history-load-progress.unit.test.ts` (content-first load; updated), `stores/__tests__/session-store-transcript-load.component.test.ts` (+7 view state),
+`components/chat/__tests__/TaskCard-subagent-loading.component.test.tsx` (5), `TaskEntry.component.test.tsx` (+3), `TaskDetailPanel.component.test.ts` (+4, C6),
+`ChatPanel.component.test.tsx` (+3), `InputBox/__tests__/View.unit.test.tsx` (+3) and `InputBox.component.test.ts` (+3), `hooks/__tests__/useClaudeEvents-background-load.component.test.ts` (2).
+Red-proof: scratchpad `red_d.py`, 39 targeted mutations (generation, eviction, R1 / R3 fills, order, bounds, cancel, retry, bar, hook wiring, every UI surface, plus "the content load fetches subagents again"),
+all RED (D22 first vacuous, then a test for an on-demand job upgraded to the background phase made it red).
+
+## Orchestrator review of Slice D (2026-10-19)
+
+Core read by the orchestrator (subagent-prefetch.ts, replica fills, store fields + every
+`evictedViewPatch` caller, content-first path, ChatPanel bar, TaskCard, footer); full 29-file diff by a
+fresh reviewer (no REQUIRED; report kept in the session scratchpad). Change request (all REQUIRED for
+this round, small):
+1. `reconcile`: every "nothing should run" exit clears a non-null `backgroundLoad` (generation-guarded)
+   — incl. the `!isHistorical` branch (a session that went live while inactive and came back idle) and
+   the "nothing pending" early return. Test the went-live-while-inactive scenario.
+2. `runStatus`: when the status line lands with the generation intact but the job no longer
+   registered (cancelled by deactivation), still clear `statusPending` (generation-guarded write) so
+   reactivation does not re-run the 0.6–1.2 s status pass. Test it.
+3. No dependence on `directories` for a job: carry `projectKey` (and sessionId) on the commit's
+   `background` object / the store entry, so `newJob`/`requestSubagentTranscript` never need
+   `findSessionInfo` (a pinned/recents session absent from the listing would otherwise show
+   "Loading usage…" and a spinning card forever). Test with an empty `directories`.
+4. Remove the dead `cancelled` checks (cancel() unregisters).
+5. ChatPanel bar: the hover strip must not intercept clicks — `pointer-events-none` on the strip is
+   fine (drop the hover affordance; keep `aria-label`; `title` may stay on the visible bar). Use the
+   same rounding for `aria-valuenow` and the label (floor).
+6. One doc-comment line: the bar restarts at 0% on reactivation (by design).
+
+### Slice D follow-up (orchestrator review items 1–6, not self-certified)
+
+1. `reconcile`: every no-run exit (live, not historical / evicted / no index, empty transcript, nothing pending) clears a non-null `backgroundLoad` through one `clearWait()`
+   (generation-guarded). Test: a session that went live while inactive and came back idle; a stale bar on a session with nothing pending.
+2. `runStatus`: when the reading lands for a job that was cancelled meanwhile (generation intact), `clearStatusPending` ends the wait (bar kept, without the status flag, if buckets are
+   still missing) so a return does not run the pass again. Tests: the pass is read once across leave + return; the bar survives with `statusPending: false`.
+3. Jobs no longer touch `directories` / `findSessionInfo`: the commit records `transcriptSource {sessionId, projectKey}` on the entry (`loadHistoricalSession`'s `background.source`, cleared by
+   `evictedViewPatch`), and `newJob` / `requestSubagentTranscript` read it. Tests run with an empty `directories` (reconciler, on-demand request).
+4. `Job.cancelled` and its checks are gone (`cancel()` unregisters; `pump` returns for an unregistered job).
+5. ChatPanel bar: `pointer-events-none`, 2 px element (the 6 px hover strip is dropped; `title` stays), `Math.floor` for `aria-valuenow` and the width, matching the label.
+6. Header comment of `lib/subagent-prefetch.ts` says the bar restarts at 0% on reactivation (by design) and that a job needs nothing from the listing.
+
+Red-proof (scratchpad inline script): E1a, E1b, E2, E3a, E3b, E5a, E5b and "a cancelled job keeps pumping" all RED against targeted mutations. Gates: typecheck exit 0; lint exit 0;
+prettier --check on all touched files exit 0; 14 touched renderer test files `Tests 458 passed (458)`; `bun run test` exit 0, `Test Files 849 passed (849)`, `Tests 18495 passed | 8 skipped (18503)`.
+
+## Arc 2 verification brief (orch-verifier, 2026-10-19)
+
+Same isolation as Arc 1's brief (APFS-cloned vhome, never the real ~/.claude, never --with-remote, no
+prompts; delete vhome with `rm -rf` as its own command at the end — the verifier may ask the
+orchestrator to do it). Sessions: 5bece358 (73 agents, has depth-2 nested agents) and 1ae1d292.
+Claims:
+1. Content first: click 5bece358 → `MessageBubble` count reaches 398 within ~1 s of the click (record
+   the time), while `ChatPanel.backgroundLoad` is present (role=progressbar) and
+   `InputBox.statusLine.pending` reads "Loading usage…".
+2. Background: sample `ChatPanel.backgroundLoad` aria-valuenow + title every ~100 ms: monotonic,
+   title starts "Loading usage and N subagents", ends (bar removed) within ~5 s; afterwards the footer
+   shows the real status line (not zeros, no pending), and the store has buckets for ≥ 90% of the index
+   entries with bytes > 0 (`sessionStore.getState().sessions[id].subagentMessages` vs `subagentIndex`).
+3. On demand: click 1ae1d292 and immediately expand a TaskCard whose bucket is not yet loaded (pick
+   the LAST TaskCard in the DOM; expand via its header click) → `TaskCard.subagentLoading` appears
+   then is replaced by the subagent output; record timings.
+4. Deactivate mid-background (click the other session) → the first session's bar is gone and no
+   further `loadSubagentHistory` calls happen for it (count by wrapping `window.api.loadSubagentHistory`
+   in an eval before the clicks); reactivate → the job resumes only for what is missing and the status
+   line is NOT re-fetched (wrap `window.api.loadSessionStatusLine` and count).
+5. Roster: after the background phase, the agent roster (`AgentRosterList` / its testids) lists nested
+   (depth ≥ 1) rows for 5bece358 (compare with HEAD-less expectations: just assert some row has depth
+   > 0 via store or DOM).
+6. Regression: re-click an already-loaded session opens instantly; a send is not attempted.
+7. Mobile `--profile s25-ultra-edge --font-scale 1.5 --overflow-audit` during the background phase:
+   `OVERFLOW []`, bar visible under the TopBar.
+Report per claim with EVAL output, screenshots (desktop during background phase, after, mobile),
+consoleErrors.

@@ -7,7 +7,14 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { EMPTY_SESSION_STATE, setTranscriptLoadProgress, useSessionStore } from '../session-store'
+import {
+  EMPTY_SESSION_STATE,
+  markSubagentUnavailable,
+  markViewEvicted,
+  setBackgroundLoad,
+  setTranscriptLoadProgress,
+  useSessionStore
+} from '../session-store'
 import type { SessionInfo } from '../../../../shared/types'
 import { engineMeta } from '../../../../shared/engine-meta'
 import { patchLocalSession } from '../replica'
@@ -91,8 +98,7 @@ describe('beginTranscriptLoad — the loading placeholder', () => {
       phase: 'reading',
       doneBytes: 1,
       totalBytes: 2,
-      etaMs: null,
-      subagents: null
+      etaMs: null
     })
 
     store().loadHistoricalSession('oc', [], '/p')
@@ -201,8 +207,7 @@ describe('transcriptLoadProgress (view-only field)', () => {
     phase: 'reading' as const,
     doneBytes: 1,
     totalBytes: 4,
-    etaMs: null,
-    subagents: null
+    etaMs: null
   }
 
   it('defaults to null, on the template and on a fresh session', () => {
@@ -220,5 +225,116 @@ describe('transcriptLoadProgress (view-only field)', () => {
 
     setTranscriptLoadProgress('ghost', progress)
     expect(store().sessions['ghost']).toBeUndefined()
+  })
+})
+
+/**
+ * ADR-102 Arc 2 — the background phase's view state (R4). Every commit and every
+ * eviction of a transcript bumps `backgroundGeneration`; the bar and the index are
+ * written only against the generation they were planned in, and an eviction drops
+ * both.
+ */
+describe('background load view state (ADR-102 Arc 2, R4)', () => {
+  const entry = (bytes = 100): never =>
+    ({ agentId: 'agent-x', parentToolUseId: null, bytes, order: 1 }) as never
+  const bar = { fraction: 0.5, label: 'Loading usage · 50%', statusPending: true, statusBytes: 10 }
+  const commit = (): void =>
+    store().loadHistoricalSession('sess', [], '/p', [], undefined, null, undefined, {
+      subagentIndex: { t1: entry() },
+      source: { sessionId: 'sess', projectKey: '-p' },
+      statusPending: true,
+      statusBytes: 10
+    })
+
+  it('defaults to nothing on the template and a fresh session', () => {
+    expect(EMPTY_SESSION_STATE).toMatchObject({
+      subagentIndex: null,
+      transcriptSource: null,
+      backgroundLoad: null,
+      backgroundGeneration: 0
+    })
+    store().createNewSession('fresh', '/a')
+    expect(store().sessions['fresh']).toMatchObject({ subagentIndex: null, backgroundLoad: null })
+  })
+
+  it('a Claude commit stores the index, starts the bar pending, and bumps the generation', () => {
+    store().beginTranscriptLoad(info('sess'))
+    const before = store().sessions['sess'].backgroundGeneration
+    commit()
+    const after = store().sessions['sess']
+    expect(after.subagentIndex).toEqual({ t1: entry() })
+    expect(after.transcriptSource).toEqual({ sessionId: 'sess', projectKey: '-p' })
+    expect(after.backgroundLoad).toEqual({
+      fraction: 0,
+      label: 'Loading usage',
+      statusPending: true,
+      statusBytes: 10
+    })
+    expect(after.backgroundGeneration).toBeGreaterThan(before)
+  })
+
+  it('a commit without a background phase (another engine) leaves none', () => {
+    store().beginTranscriptLoad(info('sess'))
+    commit()
+    store().loadHistoricalSession('sess', [], '/p')
+    expect(store().sessions['sess']).toMatchObject({ subagentIndex: null, backgroundLoad: null })
+  })
+
+  it('an eviction drops the index and the bar and bumps the generation', () => {
+    store().beginTranscriptLoad(info('sess'))
+    commit()
+    const generation = store().sessions['sess'].backgroundGeneration
+    markViewEvicted(['sess'])
+    const evicted = store().sessions['sess']
+    expect(evicted).toMatchObject({
+      subagentIndex: null,
+      transcriptSource: null,
+      backgroundLoad: null,
+      evicted: true
+    })
+    expect(evicted.backgroundGeneration).toBeGreaterThan(generation)
+  })
+
+  it('beginTranscriptLoad on a resident entry also retires its background phase', () => {
+    store().beginTranscriptLoad(info('sess'))
+    commit()
+    const generation = store().sessions['sess'].backgroundGeneration
+    store().beginTranscriptLoad(info('sess'))
+    expect(store().sessions['sess'].subagentIndex).toBeNull()
+    expect(store().sessions['sess'].backgroundGeneration).toBeGreaterThan(generation)
+  })
+
+  it('writes to the bar only against the current generation, and ignores an unknown id', () => {
+    store().beginTranscriptLoad(info('sess'))
+    commit()
+    const generation = store().sessions['sess'].backgroundGeneration
+    setBackgroundLoad('sess', generation, bar)
+    expect(store().sessions['sess'].backgroundLoad).toEqual(bar)
+
+    setBackgroundLoad('sess', generation - 1, { ...bar, fraction: 0.9 }) // a stale plan
+    expect(store().sessions['sess'].backgroundLoad).toEqual(bar)
+    setBackgroundLoad('sess', generation - 1, null)
+    expect(store().sessions['sess'].backgroundLoad).toEqual(bar)
+
+    setBackgroundLoad('sess', generation, null)
+    expect(store().sessions['sess'].backgroundLoad).toBeNull()
+    setBackgroundLoad('ghost', 0, bar)
+    expect(store().sessions['ghost']).toBeUndefined()
+  })
+
+  it('markSubagentUnavailable zeroes one entry, only against the current generation', () => {
+    store().beginTranscriptLoad(info('sess'))
+    commit()
+    const generation = store().sessions['sess'].backgroundGeneration
+    markSubagentUnavailable('sess', generation - 1, 't1')
+    expect(store().sessions['sess'].subagentIndex?.['t1'].bytes).toBe(100)
+    markSubagentUnavailable('sess', generation, 'unlisted')
+    markSubagentUnavailable('sess', generation, 't1')
+    expect(store().sessions['sess'].subagentIndex?.['t1']).toMatchObject({
+      bytes: 0,
+      agentId: 'agent-x'
+    })
+    // The generation is untouched: other fetches planned against it still land.
+    expect(store().sessions['sess'].backgroundGeneration).toBe(generation)
   })
 })

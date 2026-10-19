@@ -96,6 +96,8 @@ export function ChatPanel(): React.JSX.Element {
   const transcriptLoadFailed = useActiveSession((s) => s.transcriptLoadFailed)
   // A field selector, not the whole session: progress changes four times a second.
   const transcriptLoadProgress = useActiveSession((s) => s.transcriptLoadProgress)
+  // The background phase (status line, subagent transcripts): also a field selector.
+  const backgroundLoad = useActiveSession((s) => s.backgroundLoad)
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -246,7 +248,29 @@ export function ChatPanel(): React.JSX.Element {
 
   return (
     <div data-testid="ChatPanel" className="flex-1 flex flex-col min-h-0 min-w-0 relative">
-      <TopBar hasContent={hasContent} />
+      {/* The bar hangs off the TopBar's lower edge (`top-full`, out of flow), so it
+          appears and disappears without moving anything. */}
+      <div className="relative shrink-0">
+        <TopBar hasContent={hasContent} />
+        {backgroundLoad && (
+          <div
+            data-testid="ChatPanel.backgroundLoad"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.floor(backgroundLoad.fraction * 100)}
+            aria-label={backgroundLoad.label}
+            title={backgroundLoad.label}
+            // Decoration over the chat's top edge: it must never take a click.
+            className="pointer-events-none absolute left-0 right-0 top-full z-[2] h-[2px] bg-bg-hover/60"
+          >
+            <div
+              className="h-full bg-accent transition-[width] duration-200"
+              style={{ width: `${Math.floor(backgroundLoad.fraction * 100)}%` }}
+            />
+          </div>
+        )}
+      </div>
 
       <div className="flex-1 flex flex-col min-h-0 relative">
         <ChatSearchOverlay

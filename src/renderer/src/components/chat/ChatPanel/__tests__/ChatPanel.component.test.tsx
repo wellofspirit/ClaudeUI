@@ -17,6 +17,7 @@ import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import {
   clearViewEvicted,
   markViewEvicted,
+  setBackgroundLoad,
   setTranscriptLoadProgress,
   useSessionStore
 } from '../../../../stores/session-store'
@@ -275,7 +276,6 @@ describe('ChatPanel — an evicted active entry (ADR-087 §2)', () => {
         doneBytes: 12.3 * 1024 * 1024,
         totalBytes: 40.1 * 1024 * 1024,
         etaMs: 2_400,
-        subagents: null,
         ...over
       }) as never
 
@@ -318,19 +318,14 @@ describe('ChatPanel — an evicted active entry (ADR-087 §2)', () => {
       )
 
       act(() => {
-        setTranscriptLoadProgress(
-          ROUTE,
-          progress({ fraction: 0.9, phase: 'subagents', subagents: 5 })
-        )
+        setTranscriptLoadProgress(ROUTE, progress({ fraction: 0.9, phase: 'receiving' }))
       })
 
       expect(screen.getByTestId('TranscriptLoading.progress')).toHaveAttribute(
         'aria-valuenow',
         '90'
       )
-      expect(screen.getByTestId('TranscriptLoading.detail')).toHaveTextContent(
-        'Loading 5 subagents'
-      )
+      expect(screen.getByTestId('TranscriptLoading.detail')).toHaveTextContent('Receiving…')
       unmount()
     })
 
@@ -420,6 +415,63 @@ describe('ChatPanel — an evicted active entry (ADR-087 §2)', () => {
 
     expect(screen.queryByTestId('TranscriptLoading')).toBeNull()
     unmount()
+  })
+
+  describe('background load bar (ADR-102 Arc 2)', () => {
+    const bar = (fraction: number, label: string): never =>
+      ({ fraction, label, statusPending: true, statusBytes: 0 }) as never
+    const generation = (): number => useSessionStore.getState().sessions[ROUTE].backgroundGeneration
+
+    it('hangs a thin progressbar off the TopBar, labelled for hover, without taking layout space', async () => {
+      setBackgroundLoad(ROUTE, generation(), bar(0.42, 'Loading usage and 73 subagents · 42%'))
+      const { unmount } = await renderChatPanel()
+
+      const el = screen.getByTestId('ChatPanel.backgroundLoad')
+      expect(el).toHaveAttribute('role', 'progressbar')
+      expect(el).toHaveAttribute('aria-valuenow', '42')
+      expect(el).toHaveAttribute('title', 'Loading usage and 73 subagents · 42%')
+      // Directly under the TopBar, out of flow: it can come and go without moving anything.
+      expect(el.previousElementSibling).toBe(screen.getByTestId('TopBar'))
+      expect(el.className).toMatch(/\babsolute\b/)
+      expect(el.className).toMatch(/\btop-full\b/)
+      // Decoration: it must never take a click meant for the chat beneath it.
+      expect(el.className).toMatch(/\bpointer-events-none\b/)
+      unmount()
+    })
+
+    it('follows the store and is gone once the background phase is done', async () => {
+      setBackgroundLoad(ROUTE, generation(), bar(0.1, 'Loading usage · 10%'))
+      const { unmount } = await renderChatPanel()
+      expect(screen.getByTestId('ChatPanel.backgroundLoad')).toHaveAttribute('aria-valuenow', '10')
+
+      await act(async () => {
+        setBackgroundLoad(ROUTE, generation(), bar(0.8, 'Loading 3 subagents · 80%'))
+      })
+      expect(screen.getByTestId('ChatPanel.backgroundLoad')).toHaveAttribute('aria-valuenow', '80')
+      expect(screen.getByTestId('ChatPanel.backgroundLoad')).toHaveAttribute(
+        'title',
+        'Loading 3 subagents · 80%'
+      )
+
+      await act(async () => {
+        setBackgroundLoad(ROUTE, generation(), null)
+      })
+      expect(screen.queryByTestId('ChatPanel.backgroundLoad')).toBeNull()
+      unmount()
+    })
+
+    it('rounds DOWN like its label does: 99.6% never reads as 100', async () => {
+      setBackgroundLoad(ROUTE, generation(), bar(0.996, 'Loading usage · 99%'))
+      const { unmount } = await renderChatPanel()
+      expect(screen.getByTestId('ChatPanel.backgroundLoad')).toHaveAttribute('aria-valuenow', '99')
+      unmount()
+    })
+
+    it('is absent by default', async () => {
+      const { unmount } = await renderChatPanel()
+      expect(screen.queryByTestId('ChatPanel.backgroundLoad')).toBeNull()
+      unmount()
+    })
   })
 })
 

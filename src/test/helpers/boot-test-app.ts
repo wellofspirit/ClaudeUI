@@ -138,6 +138,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     listOpencodeSessionsGlobal: () => ipcRenderer.invoke('session:list-opencode'),
     loadSessionHistory: (sessionId, projectKey, resumeSessionAt) =>
       ipcRenderer.invoke('session:load-history', sessionId, projectKey, resumeSessionAt),
+    loadSessionStatusLine: (sessionId, projectKey) =>
+      ipcRenderer.invoke('session:load-status-line', sessionId, projectKey),
     loadSubagentHistory: (sessionId, projectKey, agentId) =>
       ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
     getBlob: (blobId) => ipcRenderer.invoke('blob:get', blobId),

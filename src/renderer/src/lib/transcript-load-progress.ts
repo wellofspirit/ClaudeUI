@@ -2,29 +2,27 @@
  * Progress of loading a session's transcript, as the loading view shows it
  * (ADR-102).
  *
- * The Claude history read plans the WHOLE job in bytes (see
- * `loadSessionHistory` in `core/services/session-history.ts`): the first frame
- * carries `total = 2*M + 2*S`, the read's own last frame is `done = 2*M + S`,
- * and the renderer finishes the job by adding the size of each subagent
- * transcript it fetches until `done` reaches `total`. This module is that
- * renderer half — a small state machine that turns the frames and the fetch
- * completions into one monotonic {@link TranscriptLoadProgress}.
+ * The content-first Claude read (`deferStatusLine`, Arc 2) plans only the
+ * transcript pass in bytes: the first frame carries `total = M` (the main
+ * transcript's size) and the read's last frame is `done = M`. The status line and
+ * the subagent transcripts load afterwards, in the background (see
+ * `subagent-prefetch.ts`), and are not part of this bar. This module is a small
+ * state machine that turns the frames into one monotonic
+ * {@link TranscriptLoadProgress}.
  */
 
 import type { InvokeProgress } from '../../../shared/remote-protocol'
 
-export type TranscriptLoadPhase = 'reading' | 'subagents' | 'receiving'
+export type TranscriptLoadPhase = 'reading' | 'receiving'
 
 export interface TranscriptLoadProgress {
-  /** 0..1, or null when the total is unknown (an engine without byte progress, an old server). */
+  /** 0..1, or null when the total is unknown (an engine without byte progress). */
   fraction: number | null
   phase: TranscriptLoadPhase
   doneBytes: number
   totalBytes: number | null
   /** Estimated milliseconds left, or null while it would be a guess. */
   etaMs: number | null
-  /** How many subagent transcripts the load is fetching (the `subagents` phase), else null. */
-  subagents: number | null
 }
 
 /** The ETA is a guess until this fraction is done and this long has passed. */
@@ -36,10 +34,6 @@ export interface LoadProgressTracker {
   start(): void
   /** A progress frame from the history read. */
   history(frame: InvokeProgress): void
-  /** The history read is back and `count` subagent transcripts are being fetched. */
-  subagentsStarted(count: number): void
-  /** One subagent fetch finished; `bytes` is its file size (unknown counts as 0). */
-  subagentFetched(bytes: number | undefined): void
   /** Everything is in memory and about to be committed: 100% when the total is known. */
   finish(): void
 }
@@ -52,18 +46,17 @@ export function createLoadProgress(
   let total: number | null = null
   let done = 0
   let phase: TranscriptLoadPhase = 'reading'
-  let subagents: number | null = null
 
   const push = (etaAllowed = true): void => {
     // Monotonic by construction: `total` is fixed by the first frame and `done`
-    // only ever rises (max over frames, additions for fetches).
+    // only ever rises (max over frames).
     const f = total !== null && total > 0 ? Math.min(1, done / total) : null
     const elapsed = now() - startedAt
     const etaMs =
       etaAllowed && f !== null && f < 1 && f >= ETA_MIN_FRACTION && elapsed >= ETA_MIN_ELAPSED_MS
         ? (elapsed * (1 - f)) / f
         : null
-    emit({ fraction: f, phase, doneBytes: done, totalBytes: total, etaMs, subagents })
+    emit({ fraction: f, phase, doneBytes: done, totalBytes: total, etaMs })
   }
 
   return {
@@ -83,16 +76,6 @@ export function createLoadProgress(
       phase = 'reading'
       push()
     },
-    subagentsStarted(count) {
-      phase = 'subagents'
-      subagents = count
-      push()
-    },
-    subagentFetched(bytes) {
-      phase = 'subagents'
-      if (total !== null) done = Math.min(total, done + (bytes ?? 0))
-      push()
-    },
     finish() {
       if (total === null) return
       done = total
@@ -108,17 +91,12 @@ export function formatEta(etaMs: number): string {
   return `~${Math.ceil(seconds / 60)} min left`
 }
 
-/** The line under the bar: "Reading transcript · 12.3 of 40.1 MB · ~3 s left". */
+/** The line under the bar: "Reading transcript · 42% · ~3 s left". */
 export function describeTranscriptLoad(p: TranscriptLoadProgress): string {
   if (p.phase === 'receiving') return 'Receiving…'
-  const label =
-    p.phase === 'subagents' && p.subagents
-      ? `Loading ${p.subagents} subagent${p.subagents === 1 ? '' : 's'}`
-      : 'Reading transcript'
-  const parts = [label]
-  // A percentage, not bytes: the planned total counts the main transcript and the
-  // subagent files twice each (see the module doc), so "of N MB" would claim
-  // roughly double the session's real size.
+  const parts = ['Reading transcript']
+  // A percentage, not bytes: simpler to read than "of N MB", and it never claims
+  // 100% before the commit (floor).
   if (p.fraction !== null) {
     parts.push(`${Math.floor(p.fraction * 100)}%`)
     if (p.etaMs !== null) parts.push(formatEta(p.etaMs))

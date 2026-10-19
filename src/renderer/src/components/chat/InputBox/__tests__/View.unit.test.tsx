@@ -1024,3 +1024,45 @@ describe('StatusLine — {used} with no context meter', () => {
     expect(renderContext(true, 42)).toHaveTextContent('42% context used')
   })
 })
+
+// ---------------------------------------------------------------------------
+// ADR-102 Arc 2: the content-first load defers the status line. While it is on its
+// way the footer says so, instead of printing zeros that read as "this session
+// cost nothing"; a status line already held (a re-opened session) always wins.
+// ---------------------------------------------------------------------------
+
+describe('StatusLine — pending (ADR-102 Arc 2)', () => {
+  const held = {
+    totalCostUsd: 2,
+    totalDurationMs: 0,
+    totalApiDurationMs: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    cachedTokens: 0,
+    totalTokens: 0,
+    contextWindow: { used: 0, size: 0 },
+    usedPercentage: null,
+    remainingPercentage: null
+  }
+
+  it('shows a muted "Loading usage…" instead of the zeroed default while the status line is pending', () => {
+    render(<InputBoxView {...makeProps({ statusLine: null, statusLinePending: true })} />)
+    expect(screen.getByTestId('InputBox.statusLine.pending')).toHaveTextContent('Loading usage…')
+    expect(screen.queryByTestId('InputBox.statusLine')).toBeNull()
+  })
+
+  it('shows the zeroed default (as before) when nothing is pending', () => {
+    render(<InputBoxView {...makeProps({ statusLine: null })} />)
+    expect(screen.getByTestId('InputBox.statusLine')).toBeInTheDocument()
+    expect(screen.queryByTestId('InputBox.statusLine.pending')).toBeNull()
+  })
+
+  it('the pending placeholder disappears the moment the status line lands', () => {
+    const { rerender } = render(
+      <InputBoxView {...makeProps({ statusLine: null, statusLinePending: true })} />
+    )
+    rerender(<InputBoxView {...makeProps({ statusLine: held, statusLinePending: false })} />)
+    expect(screen.queryByTestId('InputBox.statusLine.pending')).toBeNull()
+    expect(screen.getByTestId('InputBox.statusLine')).toBeInTheDocument()
+  })
+})

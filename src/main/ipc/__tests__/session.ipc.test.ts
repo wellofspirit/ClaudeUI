@@ -130,6 +130,7 @@ vi.mock('../../../core/services/worktree', () => ({
 vi.mock('../../../core/services/session-history', () => ({
   listDirectories: vi.fn(async () => []),
   loadSessionHistory: vi.fn(async () => []),
+  loadSessionStatusLine: vi.fn(async () => ({ totalCostUsd: 2 })),
   loadSubagentHistory: vi.fn(async () => []),
   buildSubagentFileMap: vi.fn(() => ({})),
   loadBackgroundOutput: vi.fn(() => '')
@@ -333,6 +334,11 @@ import { addSyncSubscriber } from '../../../core/services/sync-host'
 import { setHostWindow } from '../../../core/services/host-window'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import { query } from '../../../core/sdk'
+import {
+  loadSessionHistory as loadClaudeHistoryMock,
+  loadSessionStatusLine as loadStatusLineMock,
+  loadSubagentHistory as loadSubagentHistoryMock
+} from '../../../core/services/session-history'
 
 // Fill in the stub's capabilities now that the top-level import is available
 // (it can't be referenced inside the vi.hoisted() factory above).
@@ -1279,6 +1285,79 @@ describe('session.ipc', () => {
         path.join(os.homedir(), '.claude', 'projects', '-d-proj', 'sess-1.jsonl')
       )
       expect(String(payload)).toContain('"customTitle":"My title"')
+    })
+  })
+
+  // ADR-102 Arc 2 — the desktop registrations of the session-load channels. The
+  // remote twins are pinned in remote-handlers.ipc.test.ts; the registry asserts
+  // the two agree on every declared attribute.
+  describe('session load channels (ADR-102 Arc 2)', () => {
+    it('session:load-history: the 3-arg call is the full read; options defer only on a literal true', async () => {
+      await harness.call('session:load-history', 'sess-1', 'proj-key', undefined)
+      expect(loadClaudeHistoryMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', undefined, {
+        onProgress: expect.any(Function),
+        deferStatusLine: false
+      })
+
+      await harness.call('session:load-history', 'sess-1', 'proj-key', 'anchor-1', {
+        deferStatusLine: true,
+        extra: 'ignored'
+      })
+      expect(loadClaudeHistoryMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', 'anchor-1', {
+        onProgress: expect.any(Function),
+        deferStatusLine: true
+      })
+
+      for (const bad of [null, 'deferStatusLine', 7, { deferStatusLine: 'true' }, ['x']]) {
+        await harness.call('session:load-history', 'sess-1', 'proj-key', undefined, bad)
+        expect(vi.mocked(loadClaudeHistoryMock).mock.lastCall?.[3]).toMatchObject({
+          deferStatusLine: false
+        })
+      }
+    })
+
+    it('session:load-status-line is an fs-read query with withProgress and forwards the reporter', async () => {
+      expect(commandRegistry.declaration('session:load-status-line')).toMatchObject({
+        capability: 'fs-read',
+        kind: 'query',
+        withProgress: true
+      })
+      await expect(harness.call('session:load-status-line', 'sess-1', 'proj-key')).resolves.toEqual(
+        {
+          totalCostUsd: 2
+        }
+      )
+      expect(loadStatusLineMock).toHaveBeenLastCalledWith(
+        'sess-1',
+        'proj-key',
+        expect.any(Function)
+      )
+    })
+
+    it('session:load-subagent-history declares withProgress and keeps its wire args', async () => {
+      expect(commandRegistry.declaration('session:load-subagent-history')?.withProgress).toBe(true)
+      await harness.call('session:load-subagent-history', 'sess-1', 'proj-key', 'agent-9')
+      expect(loadSubagentHistoryMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', 'agent-9')
+    })
+
+    it('registers session:load-status-line on the desktop transport', () => {
+      expect(commandRegistry.channels('desktop')).toContain('session:load-status-line')
+    })
+
+    it('session:load-status-line is on the registrar unbind list (R5)', () => {
+      const removed = vi.spyOn(harness.bridge.ipcMain, 'removeHandler')
+      registerSessionIpc({
+        requireEngineAuth: () => {
+          throw new Error('not stubbed')
+        },
+        setAccountEnabled: () => {
+          throw new Error('not stubbed')
+        }
+      })
+      // Twice: once by the registrar's up-front unbind list, once by the binder's
+      // own remove-before-handle. One means the channel fell off the list.
+      expect(removed.mock.calls.filter(([c]) => c === 'session:load-status-line')).toHaveLength(2)
+      removed.mockRestore()
     })
   })
 })

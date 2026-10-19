@@ -1,10 +1,10 @@
 import type { EngineId, SessionInfo, StatusLineData } from '../../shared/types'
-import type { InvokeProgress } from '../../shared/remote-protocol'
 import { getSessionMeta } from './db'
 import {
   listDirectories,
   loadSessionHistory as loadClaudeHistory,
   resolveForkAnchor,
+  type LoadHistoryOptions,
   type SessionHistoryResult
 } from './session-history'
 import { listPiSessionsGlobal, loadPiSessionHistory, deletePiSession } from './pi-session-list'
@@ -20,14 +20,15 @@ import type { ForkAnchorResult } from '../../shared/types'
 
 interface EngineHistory {
   /**
-   * `onProgress` is the Claude reader's byte progress (ADR-102); every other
-   * engine ignores it and the caller shows an indeterminate bar.
+   * `options` (byte progress, `deferStatusLine`) are the Claude reader's
+   * (ADR-102); every other engine ignores them — the caller shows an
+   * indeterminate bar, and their readers return the status line inline.
    */
   read(
     sessionId: string,
     projectKey: string,
     anchor?: string,
-    onProgress?: (progress: InvokeProgress) => void
+    options?: LoadHistoryOptions
   ): Promise<SessionHistoryResult>
   list(): Promise<SessionInfo[]>
   delete(sessionId: string, projectKey: string): Promise<void>
@@ -110,10 +111,10 @@ export function readSessionHistory(
   projectKey: string,
   anchor?: string,
   engineId?: EngineId,
-  onProgress?: (progress: InvokeProgress) => void
+  options?: LoadHistoryOptions
 ): Promise<SessionHistoryResult> {
   const storedEngine = getSessionMeta(sessionId)?.engineId
   if (engineId && storedEngine && engineId !== storedEngine)
     throw new Error('History engine does not match persisted session identity')
-  return historyFor(engineId ?? storedEngine).read(sessionId, projectKey, anchor, onProgress)
+  return historyFor(engineId ?? storedEngine).read(sessionId, projectKey, anchor, options)
 }

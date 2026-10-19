@@ -571,6 +571,69 @@ export function seedWatchedSession(routingId: string, content: WatchedContent): 
 }
 
 /**
+ * Does the replica HOLD this session's transcript — the condition `seedColdSession`
+ * reads before it fills? An entry that was cold-evicted since a background fetch
+ * began has `seeded: false` and no messages, and a late result must not land on it
+ * (R1): it would resurrect a bucket or a status line on a stripped entry.
+ */
+function holdsOwnTranscript(session: CanonicalSessionState | undefined): boolean {
+  return !!session && session.seeded && session.messages.length > 0
+}
+
+/**
+ * Fill ONE subagent transcript bucket from the background load (ADR-102 Arc 2) —
+ * the only writer of `subagentMessages` besides the reducer and the cold seed.
+ *
+ * Fill-only: a bucket that already holds anything (a live agent streaming into it,
+ * an earlier fetch) is left alone, which is also what keeps a running agent's events
+ * from being overwritten by the older run read from disk. A no-op for an unknown
+ * session, an entry that does not hold its transcript (R1), or an empty read.
+ * Returns whether the bucket was written.
+ */
+export function fillSubagentBucket(
+  routingId: string,
+  toolUseId: string,
+  messages: CanonicalSessionState['messages']
+): boolean {
+  const existing = canonical.sessions[routingId]
+  if (!existing || !holdsOwnTranscript(existing) || messages.length === 0) return false
+  if ((existing.subagentMessages[toolUseId]?.length ?? 0) > 0) return false
+  commit({
+    ...canonical,
+    sessions: {
+      ...canonical.sessions,
+      [routingId]: {
+        ...existing,
+        subagentMessages: { ...existing.subagentMessages, [toolUseId]: messages }
+      }
+    }
+  })
+  return true
+}
+
+/**
+ * Land the status line the content-first load deferred (ADR-102 Arc 2). A REPLACE,
+ * not a fill (R3): a re-opened session still shows the figures it had, and the fresh
+ * ones supersede them. Dropped for a LIVE session — it seeds and accumulates its own
+ * figures, subagent spend included, and a disk reading from before the resume would
+ * rewind them — and for an entry that does not hold its transcript (R1).
+ * Returns whether it was written.
+ */
+export function replaceStatusLine(
+  routingId: string,
+  statusLine: NonNullable<CanonicalSessionState['statusLine']>
+): boolean {
+  const existing = canonical.sessions[routingId]
+  if (!existing || !holdsOwnTranscript(existing)) return false
+  if (existing.sdkActive || existing.status.state === 'running') return false
+  commit({
+    ...canonical,
+    sessions: { ...canonical.sessions, [routingId]: { ...existing, statusLine } }
+  })
+  return true
+}
+
+/**
  * Write a session's replicated fields from a LOCAL origin — a session created
  * before it has spawned (so no `session:created` exists yet and the engine/model
  * pick lives nowhere else), a fork seeded from its parent, a conversation

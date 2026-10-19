@@ -1,7 +1,8 @@
 /**
- * ADR-102 — the renderer half of the load-progress plan: frames from the Claude
- * history read plus the subagent fetches fold into ONE monotonic fraction, with
- * the ETA withheld until it means something and the phases mapped for the UI.
+ * ADR-102 — the renderer half of the load-progress plan: frames from the
+ * content-first Claude history read (total = the main transcript, Arc 2) fold into
+ * ONE monotonic fraction, with the ETA withheld until it means something and the
+ * phases mapped for the UI. The subagent fetches are no part of this bar any more.
  */
 
 import { describe, it, expect } from 'vitest'
@@ -42,8 +43,7 @@ describe('createLoadProgress', () => {
         phase: 'reading',
         doneBytes: 0,
         totalBytes: null,
-        etaMs: null,
-        subagents: null
+        etaMs: null
       }
     ])
   })
@@ -51,11 +51,9 @@ describe('createLoadProgress', () => {
   it('stays indeterminate with no frames at all (old server / engine without byte progress)', () => {
     const { t, out } = setup()
     t.start()
-    t.subagentsStarted(3)
-    t.subagentFetched(100)
     t.finish()
     expect(out.every((p) => p.fraction === null && p.totalBytes === null)).toBe(true)
-    expect(out.at(-1)!.phase).toBe('subagents')
+    expect(out.at(-1)!.phase).toBe('reading')
   })
 
   it('takes the total from the FIRST frame and never re-scales to a later one', () => {
@@ -93,38 +91,10 @@ describe('createLoadProgress', () => {
     t.history(frame(40, 100))
     t.history(frame(30, 100)) // a stale frame must not move the bar back
     t.history(frame(70, 100))
-    t.subagentsStarted(2)
-    t.subagentFetched(10)
-    t.subagentFetched(10)
+    t.history(frame(100, 100))
     const fractions = out.map((p) => p.fraction as number)
     for (let i = 1; i < fractions.length; i++)
       expect(fractions[i]).toBeGreaterThanOrEqual(fractions[i - 1])
-  })
-
-  it("continues from the history read's last done through the subagent fetches up to the total", () => {
-    const { t, out } = setup()
-    // Plan: history reads 60 of 100, the remaining 40 are the subagent transcripts.
-    t.history(frame(0, 100))
-    t.history(frame(60, 100, 'costs'))
-    t.subagentsStarted(2)
-    expect(out.at(-1)).toMatchObject({ phase: 'subagents', subagents: 2, doneBytes: 60 })
-    t.subagentFetched(25)
-    expect(out.at(-1)!.doneBytes).toBe(85)
-    t.subagentFetched(15)
-    expect(out.at(-1)!.doneBytes).toBe(100)
-    expect(out.at(-1)!.fraction).toBe(1)
-  })
-
-  it('treats a missing subagent size as 0 and never exceeds the total', () => {
-    const { t, out } = setup()
-    t.history(frame(0, 100))
-    t.history(frame(90, 100))
-    t.subagentsStarted(3)
-    t.subagentFetched(undefined) // an agent with no file on disk
-    expect(out.at(-1)!.doneBytes).toBe(90)
-    t.subagentFetched(500) // sizes list EVERY file; more than the plan allows for
-    expect(out.at(-1)!.doneBytes).toBe(100)
-    expect(out.at(-1)!.fraction).toBe(1)
   })
 
   it('finish() lands on 100% when the total is known, and does nothing when it is not', () => {
@@ -159,39 +129,21 @@ describe('createLoadProgress', () => {
 })
 
 describe('describeTranscriptLoad', () => {
-  // The planned total is ~2x the real session size, so bytes are never printed.
+  // A percentage reads better than bytes, so bytes are never printed.
   const base: TranscriptLoadProgress = {
     fraction: 0.428,
     phase: 'reading',
     doneBytes: 34.2 * MB,
     totalBytes: 80.1 * MB,
-    etaMs: 2_400,
-    subagents: null
+    etaMs: 2_400
   }
 
   it('reading: a percentage and the ETA', () => {
     expect(describeTranscriptLoad(base)).toBe('Reading transcript · 42% · ~3 s left')
   })
 
-  it('subagents: names the count', () => {
-    expect(
-      describeTranscriptLoad({
-        ...base,
-        fraction: 0.87,
-        phase: 'subagents',
-        subagents: 73,
-        etaMs: 800
-      })
-    ).toBe('Loading 73 subagents · 87% · ~1 s left')
-    expect(describeTranscriptLoad({ ...base, phase: 'subagents', subagents: 1, etaMs: null })).toBe(
-      'Loading 1 subagent · 42%'
-    )
-  })
-
   it('never claims a byte size (the planned total is not the session size)', () => {
-    for (const phase of ['reading', 'subagents'] as const) {
-      expect(describeTranscriptLoad({ ...base, phase, subagents: 2 })).not.toMatch(/MB|KB|\bof\b/)
-    }
+    expect(describeTranscriptLoad(base)).not.toMatch(/MB|KB|\bof\b/)
   })
 
   it('never rounds up to 100% before the load is actually complete', () => {

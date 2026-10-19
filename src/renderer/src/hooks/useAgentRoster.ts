@@ -273,6 +273,12 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
  * followed by the spawns in its own bucket, recursively. A call is placed once
  * (the visited set), so a malformed bucket that repeats or contains its own
  * spawn cannot loop.
+ *
+ * Content-first loads (ADR-102 Arc 2) fetch the buckets in the background, parents
+ * of nested agents first: until a parent's bucket lands its children are simply not
+ * in the tree, so the nested rows and the roster totals LAG the first paint. That is
+ * deliberate — there are no rows built from the load's index instead, which would
+ * be a second source of the roster that could disagree with this scan.
  */
 export function scanAgentTree(
   messages: ChatMessage[],

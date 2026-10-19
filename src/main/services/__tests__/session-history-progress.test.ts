@@ -80,8 +80,10 @@ async function loadWithProgress(
   anchor?: string
 ): Promise<{ result: Awaited<ReturnType<typeof loadSessionHistory>>; reports: InvokeProgress[] }> {
   const reports: InvokeProgress[] = []
-  const result = await loadSessionHistory(SESSION_ID, PROJECT_KEY, anchor, (p) => {
-    reports.push({ ...p })
+  const result = await loadSessionHistory(SESSION_ID, PROJECT_KEY, anchor, {
+    onProgress: (p) => {
+      reports.push({ ...p })
+    }
   })
   return { result, reports }
 }
@@ -146,22 +148,11 @@ describe('loadSessionHistory — progress (ADR-102)', () => {
     expect(result.messages.length).toBeGreaterThan(50)
   })
 
-  it('subagentFileBytes matches the transcript files on disk (sidecars excluded)', async () => {
-    const { result } = await loadWithProgress()
-    expect(result.subagentFileBytes).toEqual({
-      aaa111: fs.statSync(path.join(subagentsDir(), 'agent-aaa111.jsonl')).size,
-      bbb222: fs.statSync(path.join(subagentsDir(), 'agent-bbb222.jsonl')).size
-    })
-    // Also present without a progress callback: the renderer weights by it either way.
-    const plain = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
-    expect(plain.subagentFileBytes).toEqual(result.subagentFileBytes)
-  })
-
   it('a session without subagents plans total = 2*M and ends at 2*M', async () => {
     fs.rmSync(path.join(projectDir(), SESSION_ID), { recursive: true, force: true })
     const M = fs.statSync(mainFile()).size
     const { result, reports } = await loadWithProgress()
-    expect(result.subagentFileBytes).toEqual({})
+    expect(result.subagentIndex).toEqual({})
     expect(reports[0]).toEqual({ done: 0, total: 2 * M, phase: 'transcript' })
     expect(reports.at(-1)).toEqual({ done: 2 * M, total: 2 * M, phase: 'costs' })
   })
@@ -189,17 +180,19 @@ describe('loadSessionHistory — progress (ADR-102)', () => {
       fs.statSync(path.join(subagentsDir(), 'agent-aaa111.jsonl')).size +
       fs.statSync(path.join(subagentsDir(), 'agent-bbb222.jsonl')).size
     const reports: InvokeProgress[] = []
-    await loadSessionHistory(SESSION_ID, PROJECT_KEY, undefined, (p) => {
-      // The plan is fixed by the first report; the session then keeps writing.
-      if (reports.length === 0) {
-        fs.appendFileSync(
-          mainFile(),
-          manyTurns(5000, 40)
-            .map((l) => JSON.stringify(l))
-            .join('\n') + '\n'
-        )
+    await loadSessionHistory(SESSION_ID, PROJECT_KEY, undefined, {
+      onProgress: (p) => {
+        // The plan is fixed by the first report; the session then keeps writing.
+        if (reports.length === 0) {
+          fs.appendFileSync(
+            mainFile(),
+            manyTurns(5000, 40)
+              .map((l) => JSON.stringify(l))
+              .join('\n') + '\n'
+          )
+        }
+        reports.push({ ...p })
       }
-      reports.push({ ...p })
     })
     expect(reports[0].total).toBe(2 * M + 2 * S)
     for (let i = 1; i < reports.length; i++) {

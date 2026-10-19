@@ -69,9 +69,6 @@ export interface HistoryLoadOptions {
   onProgress?: (progress: TranscriptLoadProgress) => void
 }
 
-/** Subagent transcripts fetched at once: a session can have dozens, each a structured clone. */
-const MAX_SUBAGENT_FETCHES = 4
-
 /**
  * Seed `sessionEngines` for a session reopened from another engine's own store,
  * before `loadHistoricalSession` reads it back.
@@ -279,14 +276,26 @@ export async function loadSessionIntoStore(
     return 'loaded'
   }
 
-  // Claude sessions: load from JSONL transcript
+  // Claude sessions: load from JSONL transcript — CONTENT FIRST (ADR-102 Arc 2). The
+  // read skips the cost pass (`deferStatusLine`) and the subagent transcripts are
+  // not fetched here: the conversation commits as soon as the main transcript is in
+  // memory, and the status line and the buckets follow in the background
+  // (`subagent-prefetch.ts`), started by ACTIVATION, never by this click path.
+  // The progress callback is always passed: its first frame carries the transcript's
+  // byte size, which the background bar's plan starts from.
+  let contentBytes = 0
   let claude: Awaited<ReturnType<typeof window.api.loadSessionHistory>>
   try {
-    claude = tracker
-      ? await window.api.loadSessionHistory(info.sessionId, info.projectKey, undefined, (p) =>
-          tracker.history(p)
-        )
-      : await window.api.loadSessionHistory(info.sessionId, info.projectKey)
+    claude = await window.api.loadSessionHistory(
+      info.sessionId,
+      info.projectKey,
+      undefined,
+      (p) => {
+        if (contentBytes === 0 && p.total) contentBytes = p.total
+        tracker?.history(p)
+      },
+      { deferStatusLine: true }
+    )
   } catch (err) {
     // Over a held transcript a failed read must not take the click down with it:
     // the entry opens as it is and stays evicted. Otherwise it propagates, as the
@@ -299,64 +308,32 @@ export async function loadSessionIntoStore(
     )
     return 'declined'
   }
-  const {
-    messages,
-    taskNotifications,
-    customTitle,
-    agentIdToToolUseId,
-    statusLine,
-    warnings,
-    subagentFileBytes
-  } = claude
+  const { messages, taskNotifications, customTitle, statusLine, warnings, subagentIndex } = claude
 
-  // Load subagent histories: at most MAX_SUBAGENT_FETCHES in flight, the biggest
-  // files first so a long tail of small ones does not trail one huge one. The
-  // result is assembled in listing order, so it is the same shape as ever.
-  const subagentMessages: Record<string, ChatMessage[]> = {}
-  const entries = Object.entries(agentIdToToolUseId)
-  if (entries.length > 0) {
-    tracker?.subagentsStarted(entries.length)
-    // A size is missing for an agent with no file on disk: last in line, counts 0.
-    const sizeOf = (index: number): number | undefined => subagentFileBytes?.[entries[index][0]]
-    const queue = entries
-      .map((_, index) => index)
-      .sort((a, b) => (sizeOf(b) ?? -1) - (sizeOf(a) ?? -1))
-    const fetched: ChatMessage[][] = entries.map(() => [])
-    const worker = async (): Promise<void> => {
-      for (let index = queue.shift(); index !== undefined; index = queue.shift()) {
-        const [agentId] = entries[index]
-        try {
-          fetched[index] = await window.api.loadSubagentHistory(
-            info.sessionId,
-            info.projectKey,
-            agentId
-          )
-        } catch {
-          // A subagent that cannot be read leaves its card without a body.
-        }
-        tracker?.subagentFetched(sizeOf(index))
-      }
-    }
-    await Promise.all(
-      Array.from({ length: Math.min(MAX_SUBAGENT_FETCHES, entries.length) }, () => worker())
-    )
-    entries.forEach(([, toolUseId], index) => {
-      if (fetched[index].length > 0) subagentMessages[toolUseId] = fetched[index]
-    })
-  }
-  // A newer click superseded this one while history + subagents loaded — discard.
+  // A newer click superseded this one while the history loaded — discard.
   if (!isCurrent()) return 'skipped'
   if (replace && isLive(routingId)) return 'declined'
   if (replace && !stripForReplace(routingId, messages)) return 'declined'
   tracker?.finish()
+  const index = subagentIndex ?? {}
+  let indexBytes = 0
+  for (const entry of Object.values(index)) indexBytes += entry.bytes
   store().loadHistoricalSession(
     routingId,
     messages,
     info.cwd,
     taskNotifications,
-    subagentMessages,
+    // The buckets arrive one by one, after the commit; an evicted entry's are empty.
+    undefined,
     statusLine,
-    warnings
+    warnings,
+    {
+      subagentIndex: index,
+      source: { sessionId: info.sessionId, projectKey: info.projectKey },
+      // `deferStatusLine` makes this null; a non-null one (not today) would need no wait.
+      statusPending: statusLine === null,
+      statusBytes: contentBytes + indexBytes
+    }
   )
   if (customTitle) store().setCustomTitle(routingId, customTitle)
   // todos + the Files widget are derived from the transcript INSIDE the cold-

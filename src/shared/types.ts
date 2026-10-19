@@ -1370,6 +1370,30 @@ export type ActiveTask = Pick<
   'taskId' | 'taskType' | 'runIndex' | 'isBackgrounded' | 'startedAt'
 >
 
+/**
+ * One Claude subagent transcript on disk, as `session:load-history` indexes it
+ * (ADR-102 Arc 2), keyed by the agent's ORIGIN tool_use id — the same key the
+ * subagent buckets use. Lets a client plan, order and request the per-agent
+ * fetches (`session:load-subagent-history`, by `agentId`) without reading them.
+ */
+export interface SubagentIndexEntry {
+  /** The id `session:load-subagent-history` takes. */
+  agentId: string
+  /** Origin tool_use id of the agent that spawned this one; null for a depth-1 agent. */
+  parentToolUseId: string | null
+  /** Size of `subagents/agent-<agentId>.jsonl` when the read ran; 0 when the file is missing. */
+  bytes: number
+  /**
+   * Recency of that file (its mtime in ms; 0 when missing): larger is newer, so a
+   * prefetcher sorts DESCENDING. Not a spawn position.
+   */
+  order: number
+  /** From the agent's `.meta.json` sidecar, when it names them. */
+  name?: string
+  description?: string
+  agentType?: string
+}
+
 /** The terminal states an engine reports for a task run. */
 export type TaskTerminalStatus = 'completed' | 'failed' | 'stopped'
 
@@ -1680,7 +1704,14 @@ interface SessionAPI {
      * `core/services/session-history.ts`. With the callback omitted this is the
      * plain, non-streaming invoke.
      */
-    onProgress?: (progress: InvokeProgress) => void
+    onProgress?: (progress: InvokeProgress) => void,
+    /**
+     * Claude only (ADR-102 Arc 2). `deferStatusLine: true` returns the transcript
+     * WITHOUT the cost/token pass: `statusLine` is `null` and the progress plan is
+     * the transcript pass alone. The status line then comes from
+     * {@link loadSessionStatusLine}. Anything but a literal `true` is ignored.
+     */
+    options?: LoadSessionHistoryOptions
   ): Promise<{
     messages: ChatMessage[]
     taskNotifications: TaskNotification[]
@@ -1702,12 +1733,30 @@ interface SessionAPI {
      */
     lastEffort?: string | null
     /**
-     * Claude only: byte size of each `subagents/agent-<id>.jsonl` the reader
-     * found, by agentId. Lets the caller weight its per-agent fetches against
-     * the planned total of the progress stream.
+     * Claude only: every subagent the main transcript (or a sidecar) mapped to
+     * an origin tool_use id, by that id. Sizes, ordering and names for the
+     * client's per-agent fetches; the transcripts themselves are fetched through
+     * {@link loadSubagentHistory}.
      */
-    subagentFileBytes?: Record<string, number>
+    subagentIndex?: Record<string, SubagentIndexEntry>
+    /**
+     * Claude only: mtime (ms) of the main transcript when the read STARTED, so
+     * a cache keyed on it can never claim a state newer than what was read.
+     */
+    transcriptMtimeMs?: number
   }>
+  /**
+   * Claude only: the status line (cost, tokens, context) of a transcript — the
+   * pass `loadSessionHistory` skips under `deferStatusLine`, with the SAME result
+   * the full read would have carried. Progress is `M + S` bytes (main transcript
+   * + every subagent file), phase `costs`. Always the whole transcript: no fork
+   * anchor, so anchored callers stay on the full read.
+   */
+  loadSessionStatusLine(
+    sessionId: string,
+    projectKey: string,
+    onProgress?: (progress: InvokeProgress) => void
+  ): Promise<StatusLineData>
   loadSubagentHistory(
     sessionId: string,
     projectKey: string,
@@ -3301,6 +3350,11 @@ interface VoiceAPI {
   voicePackInstallCancel(): Promise<VoicePackInstallCancelResult>
   /** Delete the installed pack (`admin`). */
   voicePackRemove(): Promise<VoicePackRemoveResult>
+}
+
+/** The options object of `session:load-history` (its 4th wire arg). */
+export interface LoadSessionHistoryOptions {
+  deferStatusLine?: boolean
 }
 
 export interface ClaudeAPI

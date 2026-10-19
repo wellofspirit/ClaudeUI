@@ -533,6 +533,11 @@ export function InputBox(): React.JSX.Element {
   )
 
   const statusLine = useActiveSession((s) => s.statusLine)
+  // The content-first load defers the status line (ADR-102 Arc 2): with none yet, the
+  // footer says so instead of showing zeros. A previous one stays on screen until replaced.
+  const statusLinePending = useActiveSession(
+    (s) => s.statusLine === null && !!s.backgroundLoad?.statusPending
+  )
   const billingType = useActiveSession((s) => s.status?.account?.billingType)
   const effort = useActiveSession((s) => s.effort)
   const setEffort = useSessionStore((s) => s.setEffort)
@@ -1678,6 +1683,7 @@ export function InputBox(): React.JSX.Element {
       onVoiceNoticeCancel={handleVoiceNoticeCancel}
       subscribeVoiceLevel={subscribeVoiceLevel}
       statusLine={statusLine}
+      statusLinePending={statusLinePending}
       onSend={handleSend}
       onCancel={handleCancel}
       onInput={handleInput}

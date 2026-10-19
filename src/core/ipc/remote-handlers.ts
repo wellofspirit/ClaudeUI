@@ -10,6 +10,7 @@ import { STREAM_WATCH_COMMAND } from './stream-watch'
 import { GIT_WATCH_COMMAND } from './git-watch'
 import { SessionManager } from '../services/session-manager'
 import {
+  loadSessionStatusLine,
   loadSubagentHistory,
   buildSubagentFileMap,
   loadBackgroundOutput
@@ -36,7 +37,12 @@ import { getPiModelCatalogGroups } from '../pi/model-discovery'
 import { listEngineModels } from './engine-models'
 import { locatePiDisplayPath } from '../pi/pi-locate'
 import { credentialSync } from '../auth/vault/CredentialSync'
-import type { EngineModelGroup, ModelInfo, ProviderRemoveKind } from '../../shared/types'
+import type {
+  EngineModelGroup,
+  LoadSessionHistoryOptions,
+  ModelInfo,
+  ProviderRemoveKind
+} from '../../shared/types'
 import { loadSettings, loadSessionConfig, loadSlashCommands } from '../services/ui-config'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
 import {
@@ -808,15 +814,24 @@ export function registerRemoteHandlers(
       progress: ProgressReporter,
       sessionId: string,
       projectKey: string,
-      resumeSessionAt?: string | null
+      resumeSessionAt?: string | null,
+      options?: LoadSessionHistoryOptions | null
     ) => {
-      return await loadSessionHistory(
-        sessionId,
-        projectKey,
-        opt(resumeSessionAt),
-        undefined,
-        progress
-      )
+      return await loadSessionHistory(sessionId, projectKey, opt(resumeSessionAt), undefined, {
+        onProgress: progress,
+        // Strictly a literal `true`: any other shape of the (client-supplied) options is ignored.
+        deferStatusLine: options?.deferStatusLine === true
+      })
+    }
+  })
+
+  handleRemote({
+    channel: 'session:load-status-line',
+    capability: 'fs-read',
+    kind: 'query',
+    withProgress: true,
+    handler: async (progress: ProgressReporter, sessionId: string, projectKey: string) => {
+      return await loadSessionStatusLine(sessionId, projectKey, progress)
     }
   })
 
@@ -824,7 +839,15 @@ export function registerRemoteHandlers(
     channel: 'session:load-subagent-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, agentId: string) => {
+    // Declared so the transport sends its `sending` frame before the (large)
+    // response and the web client's 30 s timeout slides; reports nothing itself.
+    withProgress: true,
+    handler: async (
+      _progress: ProgressReporter,
+      sessionId: string,
+      projectKey: string,
+      agentId: string
+    ) => {
       return await loadSubagentHistory(sessionId, projectKey, agentId)
     }
   })

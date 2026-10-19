@@ -20,6 +20,7 @@ import {
   listAllDirectories
 } from '../services/sync-seed'
 import {
+  loadSessionStatusLine,
   loadSubagentHistory,
   buildSubagentFileMap,
   loadBackgroundOutput
@@ -78,7 +79,8 @@ import type {
   OpencodeProviderCatalogEntry,
   ProviderRemoveKind,
   PermissionScope,
-  ClaudePermissions
+  ClaudePermissions,
+  LoadSessionHistoryOptions
 } from '../../shared/types'
 import {
   discoverOpencodeProviderCatalog,
@@ -301,6 +303,7 @@ const SESSION_IPC_CHANNELS = [
   'session:list-pi',
   'session:load-pi-history',
   'session:load-history',
+  'session:load-status-line',
   'session:load-subagent-history',
   'blob:get',
   'session:build-subagent-file-map',
@@ -1030,9 +1033,26 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       progress: ProgressReporter,
       sessionId: string,
       projectKey: string,
-      resumeSessionAt?: string
+      resumeSessionAt?: string,
+      options?: LoadSessionHistoryOptions | null
     ) => {
-      return await loadSessionHistory(sessionId, projectKey, resumeSessionAt, undefined, progress)
+      return await loadSessionHistory(sessionId, projectKey, resumeSessionAt, undefined, {
+        onProgress: progress,
+        // Strictly a literal `true`: any other shape of the (renderer-supplied) options is ignored.
+        deferStatusLine: options?.deferStatusLine === true
+      })
+    }
+  })
+
+  // The status line a `deferStatusLine` read left out (ADR-102 Arc 2): same
+  // result as the full read's, own progress plan (M + S, phase `costs`).
+  handleIpc({
+    channel: 'session:load-status-line',
+    capability: 'fs-read',
+    kind: 'query',
+    withProgress: true,
+    handler: async (progress: ProgressReporter, sessionId: string, projectKey: string) => {
+      return await loadSessionStatusLine(sessionId, projectKey, progress)
     }
   })
 
@@ -1040,7 +1060,15 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'session:load-subagent-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, agentId: string) => {
+    // Declared so a remote call gets the transport's `sending` frame (it slides
+    // the client's 30 s timeout while a large bucket transfers); reports nothing itself.
+    withProgress: true,
+    handler: async (
+      _progress: ProgressReporter,
+      sessionId: string,
+      projectKey: string,
+      agentId: string
+    ) => {
       return await loadSubagentHistory(sessionId, projectKey, agentId)
     }
   })

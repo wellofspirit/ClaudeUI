@@ -19,6 +19,9 @@ import type { ActiveTask, ChatMessage, ContentBlock } from '../../../../../share
 vi.mock('../../chat/MarkdownRenderer', () => ({
   MarkdownRenderer: (p: { content: string }) => <div data-testid="md">{p.content}</div>
 }))
+// ADR-102 Arc 2: the entry's on-demand request is the load's; asserted, not run.
+const { requestSubagentTranscript } = vi.hoisted(() => ({ requestSubagentTranscript: vi.fn() }))
+vi.mock('../../../lib/subagent-prefetch', () => ({ requestSubagentTranscript }))
 import { TaskEntry } from '../TaskEntry'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 import { B, nestedActiveTasks, nestedBuckets, nestedMessages } from '@test/factories/nested-agents'
@@ -353,5 +356,110 @@ describe('TaskEntry — following the bottom', () => {
     expect(distanceFromBottom(body())).toBe(0)
     growLayoutOnly(600)
     expect(distanceFromBottom(body())).toBe(0)
+  })
+})
+
+/**
+ * ADR-102 Arc 2: the content-first load leaves a subagent's transcript on disk until
+ * it is needed. The entry (expanded by default) asks for it at once and says
+ * "Loading…" in place of the result text it would otherwise flash.
+ */
+describe('TaskEntry — subagent transcript on its way (ADR-102 Arc 2)', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    requestSubagentTranscript.mockClear()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState((state) => ({
+      activeSessionId: ROUTE,
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          messages: [
+            taskMessage(),
+            {
+              id: 'user-1',
+              role: 'user',
+              content: [
+                {
+                  type: 'tool_result',
+                  toolUseId: TOOL_USE_ID,
+                  toolResult: 'The audit found 3 issues',
+                  isError: false
+                }
+              ],
+              timestamp: 1
+            } as ChatMessage
+          ],
+          subagentIndex: {
+            [TOOL_USE_ID]: { agentId: 'agent-x', parentToolUseId: null, bytes: 900, order: 1 }
+          }
+        }
+      }
+    }))
+    mirrorStoreIntoReplica()
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  it('requests its bucket and shows "Loading…", not the markdown result', () => {
+    render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+
+    expect(requestSubagentTranscript).toHaveBeenCalledWith(ROUTE, TOOL_USE_ID)
+    expect(screen.getByTestId('TaskEntry.subagentLoading')).toHaveTextContent('Loading…')
+    expect(screen.queryByTestId('md')).toBeNull()
+  })
+
+  it('shows the transcript once the bucket lands', async () => {
+    render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    await act(async () => {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: {
+            ...state.sessions[ROUTE],
+            subagentMessages: {
+              [TOOL_USE_ID]: [
+                {
+                  id: 'b1',
+                  role: 'assistant',
+                  content: [{ type: 'text', text: 'on it' }],
+                  timestamp: 1
+                }
+              ]
+            }
+          }
+        }
+      }))
+      mirrorStoreIntoReplica()
+    })
+
+    expect(screen.queryByTestId('TaskEntry.subagentLoading')).toBeNull()
+    expect(screen.getByText('on it')).toBeInTheDocument()
+  })
+
+  it('falls back to the result when the load gave the transcript up (entry zeroed)', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          subagentIndex: {
+            [TOOL_USE_ID]: { agentId: 'agent-x', parentToolUseId: null, bytes: 0, order: 1 }
+          }
+        }
+      }
+    }))
+    render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+
+    expect(requestSubagentTranscript).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('TaskEntry.subagentLoading')).toBeNull()
+    expect(screen.getByTestId('md')).toHaveTextContent('The audit found 3 issues')
   })
 })

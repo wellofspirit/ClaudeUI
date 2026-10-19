@@ -3,6 +3,7 @@ import type {
   ApprovalDecision,
   AttachmentUpload,
   ClaudeAPI,
+  LoadSessionHistoryOptions,
   PermissionSuggestion,
   ProxySettings
 } from '../shared/types'
@@ -206,15 +207,26 @@ const api: ClaudeAPI = {
     sessionId: string,
     projectKey: string,
     resumeSessionAt?: string,
+    onProgress?: (progress: InvokeProgress) => void,
+    options?: LoadSessionHistoryOptions
+  ) => {
+    // The options ride as a 4th wire arg only when given: a call without them is
+    // the exact 3-arg invoke an older host understands.
+    const wireArgs = options
+      ? [sessionId, projectKey, resumeSessionAt, options]
+      : [sessionId, projectKey, resumeSessionAt]
+    return onProgress
+      ? invokeWithProgress('session:load-history', wireArgs, onProgress)
+      : ipcRenderer.invoke('session:load-history', ...wireArgs)
+  },
+  loadSessionStatusLine: (
+    sessionId: string,
+    projectKey: string,
     onProgress?: (progress: InvokeProgress) => void
   ) =>
     onProgress
-      ? invokeWithProgress(
-          'session:load-history',
-          [sessionId, projectKey, resumeSessionAt],
-          onProgress
-        )
-      : ipcRenderer.invoke('session:load-history', sessionId, projectKey, resumeSessionAt),
+      ? invokeWithProgress('session:load-status-line', [sessionId, projectKey], onProgress)
+      : ipcRenderer.invoke('session:load-status-line', sessionId, projectKey),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>
     ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
   getBlob: (blobId: string) => ipcRenderer.invoke('blob:get', blobId),

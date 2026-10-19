@@ -4237,6 +4237,7 @@ describe('RemoteServer — invoke progress frames', () => {
   const PROGRESS = 'test:progress-load'
   const PLAIN = 'test:plain-load'
   const FAILING = 'test:progress-fail'
+  const SILENT = 'test:progress-silent'
   let server: RemoteServer
   let port: number
 
@@ -4268,6 +4269,16 @@ describe('RemoteServer — invoke progress frames', () => {
         throw new Error('boom')
       }
     })
+    // `session:load-subagent-history`'s shape (ADR-102 Arc 2, C8): declares
+    // `withProgress` and reports nothing; the transport's frames are the point.
+    registerCommand({
+      channel: SILENT,
+      capability: 'fs-read',
+      kind: 'query',
+      transport: 'remote',
+      withProgress: true,
+      handler: async (_progress: ProgressReporter, arg: string) => `silent ${arg}`
+    })
     // A channel that never declared `withProgress` still gets the same call shape.
     registerCommand({
       channel: PLAIN,
@@ -4281,7 +4292,8 @@ describe('RemoteServer — invoke progress frames', () => {
   })
 
   afterEach(async () => {
-    for (const channel of [PROGRESS, PLAIN, FAILING]) commandRegistry.unregister(channel, 'remote')
+    for (const channel of [PROGRESS, PLAIN, FAILING, SILENT])
+      commandRegistry.unregister(channel, 'remote')
     try {
       await server.stop()
     } catch {
@@ -4347,6 +4359,21 @@ describe('RemoteServer — invoke progress frames', () => {
     expect(
       progress.some((f) => f.type === 'invoke-progress' && f.done === 70 && f.phase === 'costs')
     ).toBe(true)
+    await client.close()
+  })
+
+  it('a withProgress handler that reports nothing still gets the `sending` frame, then the response', async () => {
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const got = await frames(client, 'req-6', SILENT)
+    // Indeterminate (`total: null`): it re-arms the web client's 30 s timer at the
+    // start of the transfer of a response that may be tens of MB.
+    expect(got).toEqual([
+      { type: 'invoke-progress', id: 'req-6', phase: 'sending', done: 0, total: null },
+      { type: 'invoke-response', id: 'req-6', ok: true, data: 'silent x' }
+    ])
     await client.close()
   })
 

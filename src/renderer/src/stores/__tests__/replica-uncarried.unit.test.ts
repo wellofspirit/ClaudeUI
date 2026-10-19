@@ -144,7 +144,9 @@ describe('hydrating a snapshot that dropped an exited session', () => {
     const loaded = await loadSessionIntoStore(GONE_INFO, { isCurrent: () => true })
 
     expect(loaded).toBe('loaded')
-    expect(loadSessionHistory).toHaveBeenCalledWith('gone', '-p')
+    expect(loadSessionHistory).toHaveBeenCalledWith('gone', '-p', undefined, expect.any(Function), {
+      deferStatusLine: true
+    })
     expect(store().sessions['gone'].messages.map((m) => m.id)).toEqual(['g1', 'g2'])
     expect(store().sessions['gone'].evicted).toBe(false)
   })

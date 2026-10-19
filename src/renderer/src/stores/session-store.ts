@@ -73,7 +73,8 @@ import type {
   ModelRef,
   EngineConfig,
   FileAttachment,
-  ChatgptRateLimits
+  ChatgptRateLimits,
+  SubagentIndexEntry
 } from '../../../shared/types'
 import { HARNESS_IDS } from '../../../shared/harness-types'
 // The harness snapshot (ADR-082 §8): whether a new session's harness runs.
@@ -1101,6 +1102,21 @@ function historicalIdentity(
   }
 }
 
+/**
+ * The background phase of a Claude load (ADR-102 Arc 2): the status line (cost and
+ * tokens) and the subagent transcripts, which load after the conversation paints.
+ */
+export interface BackgroundLoadView {
+  /** 0..1, monotonic within one job. */
+  fraction: number
+  /** "Loading usage and 73 subagents · 42%" — the bar's tooltip. */
+  label: string
+  /** The status line has not landed yet (the footer says "Loading usage…" while it is null). */
+  statusPending: boolean
+  /** Bytes the status pass is planned at (M + the index's S), so the bar's total is known up front. */
+  statusBytes: number
+}
+
 /** Per-session state — everything that varies between sessions */
 export interface PerSessionState {
   cwd: string
@@ -1126,6 +1142,23 @@ export interface PerSessionState {
   /** Progress of the read that fills this entry (ADR-102), or null when none is running.
    *  View-only and per client: never replicated, never sealed. */
   transcriptLoadProgress: TranscriptLoadProgress | null
+  /** Claude only (ADR-102 Arc 2): the subagent transcripts on disk, by origin tool_use
+   *  id, as the content-first history read listed them. What the background job, the
+   *  on-demand fetches and the cards' "loading" state plan from. View-only and per
+   *  client: never replicated, never sealed; null for an engine that returns its
+   *  buckets inline and for an entry that is not loaded. */
+  subagentIndex: Record<string, SubagentIndexEntry> | null
+  /** Where the background phase reads this entry's transcript files from (the commit
+   *  records it, so the load never depends on the sidebar listing still naming the
+   *  session). View-only; null whenever `subagentIndex` is. */
+  transcriptSource: { sessionId: string; projectKey: string } | null
+  /** The background phase of a load (the status line and the subagent buckets), or
+   *  null when none is running. View-only, per client. */
+  backgroundLoad: BackgroundLoadView | null
+  /** Bumped by every commit and every eviction of this entry's transcript: the token
+   *  a background fetch holds, so a result that lands after a reload or an eviction
+   *  (R4) can tell its plan is stale and write nothing. */
+  backgroundGeneration: number
   status: SessionStatus
   pendingApprovals: PendingApproval[]
   errors: string[]
@@ -1241,6 +1274,10 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   evicted: false,
   transcriptLoadFailed: false,
   transcriptLoadProgress: null,
+  subagentIndex: null,
+  transcriptSource: null,
+  backgroundLoad: null,
+  backgroundGeneration: 0,
   // Full caps assumed for new sessions before the first status event.
   status: {
     state: 'idle',
@@ -1616,13 +1653,20 @@ export function hasResumableTranscript(
  * that stays here, and the part the sidebar's click path reads — it reloads from
  * disk exactly when `evicted` is set (`Sidebar.tsx` `handleClickSession`).
  */
-export function evictedViewPatch(): Partial<PerSessionState> {
+export function evictedViewPatch(session?: PerSessionState): Partial<PerSessionState> {
   return {
     evicted: true,
     isHistorical: true,
     bashOutputs: {},
     backgroundOutputs: {},
-    backgroundWatcherCounts: {}
+    backgroundWatcherCounts: {},
+    // The background phase belongs to the transcript that is leaving (R4): its
+    // index and bar go with it, and the bumped generation tells any fetch still in
+    // flight that its plan is stale.
+    subagentIndex: null,
+    transcriptSource: null,
+    backgroundLoad: null,
+    backgroundGeneration: (session?.backgroundGeneration ?? 0) + 1
   }
 }
 
@@ -1666,6 +1710,60 @@ export function setTranscriptLoadProgress(
     return {
       sessions: updateSession(state.sessions, routingId, () => ({
         transcriptLoadProgress: progress
+      }))
+    }
+  })
+}
+
+/**
+ * Write the background-phase bar of `routingId` — only while `generation` is still
+ * the entry's current one (R4), so a fetch from before a reload or an eviction
+ * cannot draw on the entry that replaced it. `null` clears the bar. Unknown ids are
+ * skipped, and an unchanged value writes nothing.
+ */
+export function setBackgroundLoad(
+  routingId: string,
+  generation: number,
+  next: BackgroundLoadView | null
+): void {
+  useSessionStore.setState((state) => {
+    const session = state.sessions[routingId]
+    if (!session || session.backgroundGeneration !== generation) return state
+    const prev = session.backgroundLoad
+    if (next === null ? prev === null : prev !== null && sameBackgroundLoad(prev, next))
+      return state
+    return { sessions: updateSession(state.sessions, routingId, () => ({ backgroundLoad: next })) }
+  })
+}
+
+function sameBackgroundLoad(a: BackgroundLoadView, b: BackgroundLoadView): boolean {
+  return (
+    a.fraction === b.fraction &&
+    a.label === b.label &&
+    a.statusPending === b.statusPending &&
+    a.statusBytes === b.statusBytes
+  )
+}
+
+/**
+ * The index lists a transcript for `toolUseId` that could not be loaded (the read
+ * failed twice, or came back empty): zero its size, so "a transcript is on its way"
+ * stops being true for it and the card falls back to the result it already had.
+ * Generation-guarded like {@link setBackgroundLoad}.
+ */
+export function markSubagentUnavailable(
+  routingId: string,
+  generation: number,
+  toolUseId: string
+): void {
+  useSessionStore.setState((state) => {
+    const session = state.sessions[routingId]
+    const entry = session?.subagentIndex?.[toolUseId]
+    if (!session || !entry || session.backgroundGeneration !== generation || entry.bytes === 0)
+      return state
+    return {
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        subagentIndex: { ...s.subagentIndex, [toolUseId]: { ...entry, bytes: 0 } }
       }))
     }
   })
@@ -1977,7 +2075,17 @@ export interface SessionState {
     taskNotifications?: TaskNotification[],
     subagentMessages?: Record<string, ChatMessage[]>,
     statusLine?: StatusLineData | null,
-    warnings?: string[]
+    warnings?: string[],
+    /** Claude's content-first load (ADR-102 Arc 2): what is still to load in the background. */
+    background?: {
+      subagentIndex: Record<string, SubagentIndexEntry>
+      /** Where to read the transcript files from (`SessionInfo.sessionId` / `projectKey`). */
+      source: { sessionId: string; projectKey: string }
+      /** The status line was deferred: the footer waits for it. */
+      statusPending: boolean
+      /** The status pass's planned bytes (M + the index's S). */
+      statusBytes: number
+    }
   ) => void
   /**
    * The sidebar's click on a session that is not resident (ADR-102): create the
@@ -2660,7 +2768,8 @@ export const useSessionStore = create<SessionState>((set) => ({
     taskNotifications?,
     subagentMessages?,
     statusLine?,
-    warnings?
+    warnings?,
+    background?
   ) => {
     const state = useSessionStore.getState()
     // A disk read can finish after this session has resumed. Guard config as
@@ -2699,11 +2808,24 @@ export const useSessionStore = create<SessionState>((set) => ({
       // run after the seed has created the entry (a fresh sidebar click reaches
       // here with nothing resident).
       set((s) => ({
-        sessions: updateSession(s.sessions, routingId, () => ({
+        sessions: updateSession(s.sessions, routingId, (cur) => ({
           isHistorical: true,
           evicted: false,
           transcriptLoadFailed: false,
           transcriptLoadProgress: null,
+          // The background phase restarts with every commit (R4): a new index (or
+          // none, for an engine that returns its buckets inline), a new generation.
+          subagentIndex: background?.subagentIndex ?? null,
+          transcriptSource: background?.source ?? null,
+          backgroundLoad: background
+            ? {
+                fraction: 0,
+                label: 'Loading usage',
+                statusPending: background.statusPending,
+                statusBytes: background.statusBytes
+              }
+            : null,
+          backgroundGeneration: cur.backgroundGeneration + 1,
           warnings: warnings ?? base.warnings
         }))
       }))

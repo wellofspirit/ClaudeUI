@@ -108,6 +108,44 @@ describe('web api-adapter — loadSessionHistory progress (ADR-102)', () => {
   })
 })
 
+describe('web api-adapter — session load channels (ADR-102 Arc 2)', () => {
+  it('loadSessionHistory carries the options as a 4th wire arg only when given', async () => {
+    await api.loadSessionHistory('sid', 'pk', undefined, undefined, { deferStatusLine: true })
+    expect(connection.invoke).toHaveBeenLastCalledWith(
+      'session:load-history',
+      'sid',
+      'pk',
+      undefined,
+      { deferStatusLine: true }
+    )
+    // No options: the exact 3-arg call an old host understands.
+    await api.loadSessionHistory('sid', 'pk', 'anchor')
+    expect(connection.invoke.mock.lastCall).toEqual(['session:load-history', 'sid', 'pk', 'anchor'])
+
+    const onProgress = vi.fn()
+    await api.loadSessionHistory('sid', 'pk', undefined, onProgress, { deferStatusLine: true })
+    expect(connection.invokeWithProgress).toHaveBeenLastCalledWith(
+      'session:load-history',
+      ['sid', 'pk', undefined, { deferStatusLine: true }],
+      onProgress
+    )
+  })
+
+  it('loadSessionStatusLine is a plain invoke, or invokeWithProgress with a callback', async () => {
+    await api.loadSessionStatusLine('sid', 'pk')
+    expect(connection.invoke).toHaveBeenLastCalledWith('session:load-status-line', 'sid', 'pk')
+    expect(connection.invokeWithProgress).not.toHaveBeenCalled()
+
+    const onProgress = vi.fn()
+    await api.loadSessionStatusLine('sid', 'pk', onProgress)
+    expect(connection.invokeWithProgress).toHaveBeenLastCalledWith(
+      'session:load-status-line',
+      ['sid', 'pk'],
+      onProgress
+    )
+  })
+})
+
 describe('web api-adapter — voice transport', () => {
   // The microphone is the renderer's (lib/voice/voice-controller.ts); the adapter
   // is only the transport, and the capture's audio rides the lane frame rather
