@@ -132,6 +132,10 @@ export interface SystemMessage extends BaseSDKMessage {
    * 04-system-subtypes.md §4.5).
    */
   is_backgrounded?: boolean
+  /** task_started-only: the `task_id` of the SUBAGENT that launched this task; absent when the main thread did. */
+  parent_task_id?: string
+  /** task_started-only, `local_agent`: 1 for an agent the main thread launched, 2+ for one a subagent launched. */
+  spawn_depth?: number
   /** task_updated patch — the fields of the task's record that changed */
   patch?: {
     status?: string

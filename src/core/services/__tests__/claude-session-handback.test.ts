@@ -376,3 +376,218 @@ describe('ClaudeSession — the zero-turn pointer result is not a turn end (S6)'
     expect(results(sent)).toHaveLength(1)
   })
 })
+
+// F1: cli.js drains its queue (where the hand-back prompt waits) only at the START
+// of a main-agent model round. Frame orders below are the two live probes of
+// 2026-10-19 (.notes/research/async-dispatch/v5-handback-timing.md, cli.js 2.1.293),
+// reduced to the frames that matter.
+describe('ClaudeSession — a hand-back that will start an extra turn marks the result (F1)', () => {
+  const init = (): Record<string, unknown> => ({ type: 'system', subtype: 'init', model: 'm' })
+  const requesting = (): Record<string, unknown> => ({
+    type: 'system',
+    subtype: 'status',
+    status: 'requesting'
+  })
+  const mainText = (text: string): Record<string, unknown> => ({
+    type: 'assistant',
+    parent_tool_use_id: null,
+    message: { id: `msg-${text}`, role: 'assistant', content: [{ type: 'text', text }] }
+  })
+  const mainMessageStart = (id: string): Record<string, unknown> => ({
+    type: 'stream_event',
+    parent_tool_use_id: null,
+    event: {
+      type: 'message_start',
+      message: { id, role: 'assistant', content: [], usage: { input_tokens: 1, output_tokens: 0 } }
+    }
+  })
+  const result = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    num_turns: 2,
+    result: 'ok',
+    duration_ms: 10,
+    duration_api_ms: 8,
+    total_cost_usd: 0.02,
+    ...extra
+  })
+  const handbackEnd = (extra: Record<string, unknown> = {}): Record<string, unknown> =>
+    ended({ handback: 'send', handback_report: { text: 'done-b' }, ...extra })
+  const peerResult = (): Record<string, unknown> =>
+    result({ num_turns: 1, origin: { kind: 'peer', from: 'a1b2c3', name: 'general-purpose' } })
+  const pointerResult = (): Record<string, unknown> =>
+    result({
+      num_turns: 0,
+      result: '',
+      duration_api_ms: 0,
+      origin: { kind: 'task-notification', producer: 'session-task', runId: 'r1' }
+    })
+  const results = (sent: Array<[string, string, unknown]>): Array<Record<string, unknown>> =>
+    sent.filter(([c]) => c === 'session:result').map(([, , d]) => d as Record<string, unknown>)
+
+  it('H-a (folded): the notification comes before the next round starts, so no pendingWake', async () => {
+    const { sent } = await runWire('rid-f1-a', 'go', [
+      init(),
+      requesting(),
+      started(),
+      requesting(), // round 2
+      handbackEnd(),
+      requesting(), // round 3: drains the hand-back prompt
+      mainText('finished'),
+      result({ num_turns: 3 })
+    ])
+    expect(results(sent)).toHaveLength(1)
+    expect(results(sent)[0]).not.toHaveProperty('pendingWake')
+  })
+
+  it('H-b (pending): the notification trails the last round start, so result #1 is marked and #2 is not', async () => {
+    const { sent } = await runWire('rid-f1-b', 'go', [
+      init(),
+      requesting(),
+      started(),
+      requesting(), // round 2 = the final round
+      mainMessageStart('m2'),
+      handbackEnd(),
+      mainText('long final paragraph'),
+      result(), // #1
+      init(), // +17 ms, the extra turn
+      requesting(),
+      mainText('The subagent finished and reported done-b'),
+      peerResult(), // #2
+      init(),
+      pointerResult() // #3, ignored by S6
+    ])
+    const rs = results(sent)
+    expect(rs).toHaveLength(2)
+    expect(rs[0]).toMatchObject({ pendingWake: true })
+    expect(rs[1]).not.toHaveProperty('pendingWake')
+  })
+
+  it('a main-agent frame of the round already under way does not clear the flag', async () => {
+    // The parent's message_start can trail its request by seconds: a notification
+    // landing in that gap must still read as "not drained".
+    const { sent } = await runWire('rid-f1-gap', 'go', [
+      init(),
+      requesting(),
+      started(),
+      requesting(),
+      handbackEnd(),
+      mainMessageStart('m2'),
+      mainText('final'),
+      result()
+    ])
+    expect(results(sent)[0]).toMatchObject({ pendingWake: true })
+  })
+
+  it('flagged marks the result like send; withheld and a plain notification do not', async () => {
+    const wire = (end: Record<string, unknown>): Array<Record<string, unknown>> => [
+      init(),
+      requesting(),
+      started(),
+      requesting(),
+      end,
+      mainText('final'),
+      result()
+    ]
+    const flagged = await runWire(
+      'rid-f1-flagged',
+      'go',
+      wire(handbackEnd({ handback: 'flagged', handback_report: { text: 'r', warning: 'w' } }))
+    )
+    expect(results(flagged.sent)[0]).toMatchObject({ pendingWake: true })
+    const withheld = await runWire('rid-f1-withheld', 'go', wire(ended({ handback: 'withheld' })))
+    expect(results(withheld.sent)[0]).not.toHaveProperty('pendingWake')
+    const plain = await runWire('rid-f1-plain', 'go', wire(ended({ summary: 'done' })))
+    expect(results(plain.sent)[0]).not.toHaveProperty('pendingWake')
+  })
+
+  it.each([
+    ['parent_task_id', { parent_task_id: 'a-parent' }],
+    ['spawn_depth 2', { spawn_depth: 2 }]
+  ])('a nested child (%s) reports to its parent subagent, never to main', async (_l, extra) => {
+    const { sent } = await runWire('rid-f1-nested', 'go', [
+      init(),
+      requesting(),
+      { ...started(), ...extra },
+      requesting(),
+      handbackEnd(),
+      mainText('final'),
+      result()
+    ])
+    expect(results(sent)[0]).not.toHaveProperty('pendingWake')
+  })
+
+  it('a depth-1 child (spawn_depth 1) still counts', async () => {
+    const { sent } = await runWire('rid-f1-depth1', 'go', [
+      init(),
+      requesting(),
+      { ...started(), spawn_depth: 1 },
+      requesting(),
+      handbackEnd(),
+      mainText('final'),
+      result()
+    ])
+    expect(results(sent)[0]).toMatchObject({ pendingWake: true })
+  })
+
+  it('a plain turn with no hand-back is unchanged', async () => {
+    const { sent } = await runWire('rid-f1-plain-turn', 'go', [
+      init(),
+      requesting(),
+      mainText('hi'),
+      result({ num_turns: 1 })
+    ])
+    expect(results(sent)).toHaveLength(1)
+    expect(results(sent)[0]).not.toHaveProperty('pendingWake')
+  })
+
+  it('reports the session running at the extra turn’s first round, before any content frame', async () => {
+    const ctl = controllableHandle()
+    mockQuery.mockImplementation(() => ctl.handle)
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('rid-f1-running', win, '/tmp/proj', {})
+    liveSessions.push(session)
+    const done = session.run('go')
+    await vi.waitFor(() => expect(mockQuery).toHaveBeenCalled())
+
+    ctl.push(
+      init(),
+      requesting(),
+      started(),
+      requesting(),
+      handbackEnd(),
+      mainText('final'),
+      result()
+    )
+    await vi.waitFor(() => expect(results(sent)).toHaveLength(1))
+    await vi.waitFor(() => expect(session.status.state).toBe('idle'))
+    expect(results(sent)[0]).toMatchObject({ pendingWake: true })
+
+    // The extra turn: init, then its first round. No assistant / stream frame yet.
+    ctl.push(init(), requesting())
+    await vi.waitFor(() => expect(session.status.state).toBe('running'))
+    ctl.push(mainText('reply'), peerResult())
+    await vi.waitFor(() => expect(results(sent)).toHaveLength(2))
+    expect(results(sent)[1]).not.toHaveProperty('pendingWake')
+    ctl.end()
+    await done
+  })
+
+  it('a main-level round start does not flip an idle session when no hand-back is pending', async () => {
+    const ctl = controllableHandle()
+    mockQuery.mockImplementation(() => ctl.handle)
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('rid-f1-idle', win, '/tmp/proj', {})
+    liveSessions.push(session)
+    const done = session.run('go')
+    await vi.waitFor(() => expect(mockQuery).toHaveBeenCalled())
+    ctl.push(init(), requesting(), mainText('hi'), result({ num_turns: 1 }))
+    await vi.waitFor(() => expect(results(sent)).toHaveLength(1))
+    ctl.push(init(), requesting())
+    await new Promise((r) => setTimeout(r, 20))
+    expect(session.status.state).toBe('idle')
+    ctl.end()
+    await done
+  })
+})

@@ -4,7 +4,7 @@ vi.mock('electron', async () => import('@test/stubs/electron-shim'))
 import { createElement } from 'react'
 import { act, render, cleanup } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
-import { useClaudeEvents } from '../useClaudeEvents'
+import { useClaudeEvents, PENDING_WAKE_GRACE_MS } from '../useClaudeEvents'
 import { useSessionStore } from '../../stores/session-store'
 import {
   makeChatMessage,
@@ -1691,6 +1691,89 @@ describe('useClaudeEvents extended component tests', () => {
 
       expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(true)
       expect(notified).toHaveBeenCalledWith('Ready for input', expect.anything())
+    })
+
+    describe('a result that cli.js follows with a hand-back turn (pendingWake)', () => {
+      const wakeResult = { totalCostUsd: 0, durationMs: 1, result: 'ok', pendingWake: true }
+      const plainResult = { totalCostUsd: 0, durationMs: 1, result: 'ok' }
+      const status = (state: 'idle' | 'running'): void =>
+        app.emit('session:status', routingId, makeSessionStatus({ state, sessionId: routingId }))
+      const attention = (): boolean => useSessionStore.getState().sessions[routingId].needsAttention
+
+      beforeEach(() => {
+        vi.useFakeTimers()
+      })
+      afterEach(() => {
+        vi.useRealTimers()
+      })
+
+      it('raises nothing at the result; the hand-back turn’s own result decides', () => {
+        app.emit('session:result', routingId, wakeResult)
+        status('idle')
+        expect(attention()).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+
+        // The extra turn starts ~17 ms later: the timer must be gone.
+        status('running')
+        vi.advanceTimersByTime(PENDING_WAKE_GRACE_MS * 2)
+        expect(attention()).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+
+        app.emit('session:result', routingId, plainResult)
+        status('idle')
+        expect(attention()).toBe(true)
+        expect(notified).toHaveBeenCalledTimes(1)
+        expect(notified).toHaveBeenCalledWith('Ready for input', expect.anything())
+      })
+
+      it('falls back to the normal gate after 3 s when no turn follows', () => {
+        app.emit('session:result', routingId, wakeResult)
+        status('idle')
+
+        vi.advanceTimersByTime(PENDING_WAKE_GRACE_MS - 1)
+        expect(attention()).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+
+        vi.advanceTimersByTime(1)
+        expect(attention()).toBe(true)
+        expect(notified).toHaveBeenCalledTimes(1)
+        expect(notified).toHaveBeenCalledWith('Ready for input', expect.anything())
+      })
+
+      it('applies the full gate at the fallback — waking tasks, a queued prompt', () => {
+        seed.taskStarted(routingId, { toolUseId: 't1', taskId: 'a1', taskType: 'local_agent' })
+        app.emit('session:result', routingId, wakeResult)
+        vi.advanceTimersByTime(PENDING_WAKE_GRACE_MS)
+        expect(attention()).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+
+        seed.taskNotification(
+          routingId,
+          makeTaskNotification({ toolUseId: 't1', status: 'completed' })
+        )
+        seed.queue(routingId, [{ itemId: 'q1', text: 'next', state: 'queued' }])
+        app.emit('session:result', routingId, wakeResult)
+        vi.advanceTimersByTime(PENDING_WAKE_GRACE_MS)
+        expect(attention()).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+      })
+
+      it('a newer result replaces the pending timer instead of adding a second notification', () => {
+        app.emit('session:result', routingId, wakeResult)
+        vi.advanceTimersByTime(1000)
+        app.emit('session:result', routingId, plainResult)
+        expect(notified).toHaveBeenCalledTimes(1)
+
+        vi.advanceTimersByTime(PENDING_WAKE_GRACE_MS * 2)
+        expect(notified).toHaveBeenCalledTimes(1)
+      })
+
+      it('a removed session never fires the fallback', () => {
+        app.emit('session:result', routingId, wakeResult)
+        app.emit('session:removed', routingId)
+        vi.advanceTimersByTime(PENDING_WAKE_GRACE_MS * 2)
+        expect(notified).not.toHaveBeenCalled()
+      })
     })
   })
 

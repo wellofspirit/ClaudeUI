@@ -620,6 +620,13 @@ export interface SessionResult {
   durationMs: number
   result: string
   sessionId?: string | null
+  /**
+   * Claude only: cli.js is about to start ANOTHER turn on its own at this
+   * result, to deliver a subagent's `SubagentHandback` that reached its queue
+   * after the last model round began. Not a turn end for the user; the extra
+   * turn's own result decides (docs/protocol-cc/03-inbound-messages.md §3.7).
+   */
+  pendingWake?: boolean
 }
 
 // ---------------------------------------------------------------------------

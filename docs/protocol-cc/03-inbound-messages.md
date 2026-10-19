@@ -363,6 +363,30 @@ turn). It ends no turn, so ClaudeUI keeps the cost/`modelUsage` replace and noth
 `handleResultMessage`, `isHandbackPointerResult`). A background Bash's notification carries the same
 `origin` with `num_turns >= 1` and is a real turn.
 
+### A hand-back that starts an extra turn behind the parent's `result` (2.1.293, probed 2026-10-19, n=1 per case)
+
+cli.js drains its queue (where the hand-back prompt waits) only at the START of a main-agent model
+round. So when the subagent's `task_notification` (`handback` `send` / `flagged`) arrives:
+
+- BEFORE a round starts (`system/status` `requesting`, no `parent_tool_use_id`): the prompt is folded
+  into that round. One turn, one `result`, nothing after it.
+- AFTER the parent's last round began: the turn ends with the prompt still queued and cli.js starts
+  an EXTRA turn about 17 ms after the `result` (`system/init`, `status requesting`, the reply, a second
+  `result` with `origin.kind: "peer"`, `num_turns` 1), then the zero-turn pointer `result` above.
+
+Nothing in the first `result` tells the two apart (same keys; `queued_turn_count` counts user sends only;
+`post_turn_summary.status_detail` is model-written and misleading). Only frame order does. ClaudeUI sets
+`pendingHandbackWake` on a hand-back notification of a MAIN-agent task (a nested child's, `task_started`
+`parent_task_id` / `spawn_depth` > 1, reports to its parent subagent and never sets it), clears it on the
+next `system/status` `requesting`, and carries `pendingWake: true` on the `session:result` it is still set
+at. The renderer does not raise attention or "Ready for input" for that result; the extra turn's own result
+does. A `message_start` / assistant frame cannot be the clear point: they trail the round's request by
+seconds, and a notification landing in that gap would wrongly read as folded. The race between the
+notification frame (about 10 ms behind the enqueue) and a round start is untested, so the renderer also
+applies the normal gate 3 s after a `pendingWake` result if no turn has started
+(`useClaudeEvents.ts` `PENDING_WAKE_GRACE_MS`); the core reports the session running at the extra turn's
+`status requesting`, which cancels that timer.
+
 ### Cumulative vs per-turn fields (probed 2026-07-15 against the pinned binary)
 
 - **`total_cost_usd` and `modelUsage` are CUMULATIVE within one cli.js process** —

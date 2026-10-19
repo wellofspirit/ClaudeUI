@@ -305,6 +305,18 @@ export class ClaudeSession extends BaseSession {
   })
   private abortController: AbortController | null = null
   private isProcessing = false
+  /**
+   * A `SubagentHandback` for the MAIN agent reached cli.js's queue after the
+   * last model round began, so cli.js will start an extra turn right behind the
+   * next `result` to deliver it (it drains its queue only at the START of a
+   * round). Set by the hand-back `task_notification`, cleared by the next
+   * main-level `system/status requesting` (the round that drains the queue, or
+   * the extra turn's first), carried on that `result` as `pendingWake`
+   * (docs/protocol-cc/03-inbound-messages.md §3.7).
+   */
+  private pendingHandbackWake = false
+  /** Tasks a SUBAGENT launched (`parent_task_id` / `spawn_depth` > 1): their hand-back goes to that subagent, not to main. */
+  private readonly nestedTaskIds = new Set<string>()
   /** Commands cli.js started that ClaudeUI looked up on disk as native peer messages (by uuid). */
   private readonly nativePeerTried = new BoundedSet()
   /** Native peer messages already shown as a note (by uuid). */
@@ -1337,6 +1349,14 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
   // branch stays small and focused on a single wire event.
   // ---------------------------------------------------------------------------
 
+  /** The main agent is working: flip the idle session to running (status, turn clock, status line). */
+  private beginMainTurn(): void {
+    this.isProcessing = true
+    this.turnStartedAtMs = Date.now()
+    this.sendStatus()
+    this.send('session:status-line', this.buildStatusLineFromAccumulators())
+  }
+
   /** Route a single CLI stream-json message to the appropriate handler.
    *  The `SDKMessage` union is keyed on `type`, so each `case` below
    *  narrows the branch to the matching variant without hand-casting. */
@@ -1366,10 +1386,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       !msg.parent_tool_use_id &&
       !msg.agent_id
     ) {
-      this.isProcessing = true
-      this.turnStartedAtMs = Date.now()
-      this.sendStatus()
-      this.send('session:status-line', this.buildStatusLineFromAccumulators())
+      this.beginMainTurn()
     }
 
     switch (msg.type) {
@@ -1616,6 +1633,20 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
 
   private handleSystemMessage(msg: SystemMessage): void {
     if (msg.subtype === 'status') {
+      // `requesting` is emitted as a main-agent model round starts (a subagent's
+      // rounds emit none), and cli.js drains its queue only at that point — so a
+      // hand-back notification seen BEFORE it was folded into the round, and one
+      // seen after it is still waiting. Deliberately NOT the round's first
+      // `message_start` / assistant frame: those trail the request by seconds, and
+      // a notification landing in that gap would be cleared although the request
+      // (and the drain) were already past.
+      if (msg.status === 'requesting' && this.pendingHandbackWake) {
+        this.pendingHandbackWake = false
+        // The extra turn the flag promised has begun. Say so now rather than at
+        // its first content frame (seconds later), so the renderer's fallback timer
+        // for a turn that never comes is not racing a slow first token.
+        if (!this.isProcessing) this.beginMainTurn()
+      }
       const newMode = msg.permissionMode
       if (newMode && newMode !== this.permissionMode) {
         this.permissionMode = newMode
@@ -1897,6 +1928,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     this.taskIdMap.set(taskId, toolUseId)
 
     const taskType = msg.task_type || ''
+    if (msg.parent_task_id || (msg.spawn_depth ?? 1) > 1) this.nestedTaskIds.add(taskId)
     // Foreground or background, when cli.js says: only a foreground task can
     // be sent to the background, so this gates the card's button.
     const background =
@@ -2152,6 +2184,12 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     // A SubagentHandback subagent's `summary` is a pointer sentence; its report
     // (and the auto-mode warning on a flagged one) is `handback_report`.
     const report = handbackNotificationFields(msg)
+    // A hand-back to the MAIN agent that cli.js has not drained yet starts an
+    // extra turn after the parent's next `result` (see pendingHandbackWake). A
+    // nested child reports to the subagent that launched it, which is no turn of
+    // the main agent's.
+    if ((msg.handback === 'send' || msg.handback === 'flagged') && !this.nestedTaskIds.has(taskId))
+      this.pendingHandbackWake = true
     const runIndex = matchedToolUseId ? (this.runCountByOrigin.get(matchedToolUseId) ?? 1) : 1
     this.send('session:task-notification', {
       taskId,
@@ -2327,7 +2365,9 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       totalCostUsd: this.totalCostUsd,
       durationMs: resultDurationMs,
       result: msg.result || '',
-      sessionId: this.sessionId
+      sessionId: this.sessionId,
+      // The flag stays set: the extra turn's first round clears it.
+      ...(this.pendingHandbackWake ? { pendingWake: true } : undefined)
     })
     this.sendStatus()
     this.resetInactivityTimer()
@@ -3840,6 +3880,9 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       })
     }
     this.liveTasks.clear()
+    // The process is gone with whatever sat in its queue. nestedTaskIds stays,
+    // like the rest of the agent identity: a resumed run reports the same ids.
+    this.pendingHandbackWake = false
   }
 
   /**
