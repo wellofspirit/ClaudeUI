@@ -36,6 +36,7 @@ import {
 import { useSessionStore } from '../stores/session-store'
 import { onReplicaApplied, seedWatchedSession, getReplicaState } from '../stores/replica'
 import { loadResumedTranscript } from '../lib/session-history-load'
+import { startBackgroundLoad } from '../lib/subagent-prefetch'
 import { showVoiceNotice } from '../lib/voice/voice-notice'
 import { voiceController } from '../lib/voice/voice-controller'
 import { applyVoicePackStatus, refreshVoicePackStatus } from '../lib/voice/voice-pack-store'
@@ -222,6 +223,9 @@ export function useClaudeEvents(): void {
     }
 
     const cleanups = [
+      // The background phase of a Claude load (status line, subagent transcripts):
+      // started by which session is ACTIVE, not by the click (ADR-102 Arc 2, R2).
+      startBackgroundLoad(),
       // -------------------------------------------------------------------
       // Pre-fold capture (see wasResidentAtCreate)
       // -------------------------------------------------------------------

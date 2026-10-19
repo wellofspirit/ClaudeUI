@@ -350,3 +350,65 @@ describe('audit', () => {
     )
   })
 })
+
+describe('withProgress (ADR-102)', () => {
+  const p = { done: 1, total: 2, phase: 'x' }
+
+  it('prepends the transport reporter to the wire args', async () => {
+    const handler = vi.fn(async () => 'ok')
+    registry.register(reg({ withProgress: true, handler }))
+    const reporter = vi.fn()
+    await registry.dispatch('test:channel', 'remote', ['a', 'b'], remoteConn, reporter)
+    expect(handler).toHaveBeenCalledWith(reporter, 'a', 'b')
+  })
+
+  it('puts the reporter AFTER the connection when both are declared', async () => {
+    const handler = vi.fn(async () => 'ok')
+    registry.register(reg({ withConnection: true, withProgress: true, handler }))
+    const reporter = vi.fn()
+    await registry.dispatch('test:channel', 'remote', ['a'], remoteConn, reporter)
+    expect(handler).toHaveBeenCalledWith(remoteConn, reporter, 'a')
+  })
+
+  it('hands a no-op reporter to a handler when the transport supplied none', async () => {
+    let seen: unknown
+    registry.register(
+      reg({
+        withProgress: true,
+        handler: async (progress: (v: unknown) => void, arg: string) => {
+          seen = progress
+          expect(() => progress(p)).not.toThrow()
+          return arg
+        }
+      })
+    )
+    await expect(registry.dispatch('test:channel', 'remote', ['a'], remoteConn)).resolves.toBe('a')
+    expect(typeof seen).toBe('function')
+  })
+
+  it('drops a reporter offered to a channel that did not declare withProgress', async () => {
+    const handler = vi.fn(async () => 'ok')
+    registry.register(reg({ handler }))
+    await registry.dispatch('test:channel', 'remote', ['a'], remoteConn, vi.fn())
+    expect(handler).toHaveBeenCalledWith('a')
+  })
+
+  it('keeps sessionIdArg indexed against the wire args (audit)', async () => {
+    registry.register(
+      reg({ withProgress: true, sessionIdArg: 0, handler: vi.fn(async () => 'ok') })
+    )
+    await registry.dispatch('test:channel', 'remote', ['sess-1'], remoteConn, vi.fn())
+    expect(appendAuditLog).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'sess-1' }))
+  })
+
+  it('is channel-global: a second transport must agree on it', () => {
+    registry.register(reg({ channel: 'x:p', withProgress: true }))
+    expect(() => registry.register(reg({ channel: 'x:p', transport: 'desktop' }))).toThrow(
+      /declaration conflicts/
+    )
+    expect(() =>
+      registry.register(reg({ channel: 'x:p', transport: 'desktop', withProgress: true }))
+    ).not.toThrow()
+    expect(registry.get('x:p', 'desktop')?.withProgress).toBe(true)
+  })
+})

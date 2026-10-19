@@ -47,7 +47,24 @@ it('routes metadata-owned native reads without touching Claude files', async () 
 it('retains the explicit legacy-Claude rule only for missing metadata', async () => {
   mocks.claude.mockResolvedValue({ messages: [] })
   await readSessionHistory('legacy', 'project', 'anchor')
-  expect(mocks.claude).toHaveBeenCalledWith('legacy', 'project', 'anchor')
+  // The 4th slot is the optional read options (progress, deferStatusLine): absent here.
+  expect(mocks.claude).toHaveBeenCalledWith('legacy', 'project', 'anchor', undefined)
+})
+
+it('forwards the read options (progress, deferStatusLine) to the Claude reader and to no other engine (ADR-102)', async () => {
+  const onProgress = vi.fn()
+  const options = { onProgress, deferStatusLine: true }
+  mocks.claude.mockResolvedValue({ messages: [] })
+  await readSessionHistory('legacy', 'project', undefined, undefined, options)
+  expect(mocks.claude).toHaveBeenLastCalledWith('legacy', 'project', undefined, options)
+
+  mocks.codex.mockResolvedValue({ messages: [] })
+  await readSessionHistory('native', 'unused', undefined, undefined, options)
+  expect(mocks.codex).toHaveBeenLastCalledWith('native')
+  mocks.pi.mockResolvedValue({ messages: [], statusLine: null })
+  await historyFor('pi').read('pi-sess', 'unused', undefined, options)
+  expect(mocks.pi).toHaveBeenLastCalledWith('pi-sess')
+  expect(onProgress).not.toHaveBeenCalled()
 })
 
 it('routes the codex branch anchor to the native turn resolver', async () => {

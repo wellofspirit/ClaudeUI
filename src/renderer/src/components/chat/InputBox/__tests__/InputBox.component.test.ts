@@ -3801,6 +3801,52 @@ describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
     renderFC()
     expect(viewProps.showContextMeter).toBe(false)
   })
+
+  // ADR-102 Arc 2: the content-first load defers the status line.
+  function setBackgroundLoad(statusPending: boolean, statusLine: unknown): void {
+    const state = useSessionStore.getState()
+    const session = state.sessions[BT_ROUTE]
+    useSessionStore.setState({
+      sessions: {
+        ...state.sessions,
+        [BT_ROUTE]: {
+          ...session,
+          statusLine: statusLine as never,
+          backgroundLoad: { fraction: 0, label: 'Loading usage', statusPending, statusBytes: 1 }
+        }
+      }
+    })
+    mirrorStoreIntoReplica()
+  }
+
+  it('tells the footer the status line is pending only while there is none and one is on its way', () => {
+    setBackgroundLoad(true, null)
+    renderFC()
+    expect(viewProps.statusLinePending).toBe(true)
+  })
+
+  it('a status line the entry already holds stays on screen while the fresh one loads (R3)', () => {
+    setBackgroundLoad(true, {
+      totalCostUsd: 1,
+      totalDurationMs: 0,
+      totalApiDurationMs: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      cachedTokens: 0,
+      totalTokens: 0,
+      contextWindow: { used: 0, size: 0 },
+      usedPercentage: null,
+      remainingPercentage: null
+    })
+    renderFC()
+    expect(viewProps.statusLinePending).toBe(false)
+  })
+
+  it('is not pending once the load says the status line has landed', () => {
+    setBackgroundLoad(false, null)
+    renderFC()
+    expect(viewProps.statusLinePending).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------

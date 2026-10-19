@@ -46,6 +46,37 @@ export interface WsInvokeResponse {
   error?: string
 }
 
+/**
+ * Progress of one in-flight invoke (ADR-102). Handlers registered with
+ * `withProgress` report these; the transport throttles them and ships them to
+ * the ONE requesting connection (desktop: `invoke:progress` IPC to the calling
+ * window; remote: an `invoke-progress` frame). Additive: an old client ignores
+ * the frame and an old server never sends it.
+ */
+export interface InvokeProgress {
+  /** Units done so far (bytes for the Claude history read). Monotonic per call. */
+  done: number
+  /** Units in total, or null when unknown (indeterminate). */
+  total: number | null
+  /**
+   * Handler-defined phase label. The Claude history read uses the shared union
+   * {@link SessionHistoryPhase}; the transport adds `'sending'` itself.
+   */
+  phase: string
+}
+
+/** Phases of the Claude `session:load-history` read (the `phase` of its progress). */
+export type SessionHistoryPhase = 'transcript' | 'costs' | 'sending'
+
+/** What a `withProgress` handler (or the transport on its behalf) calls to report. */
+export type ProgressReporter = (progress: InvokeProgress) => void
+
+/** Server → Client: progress of an in-flight invoke, addressed by the request id. */
+export interface WsInvokeProgress extends InvokeProgress {
+  type: 'invoke-progress'
+  id: string
+}
+
 /** Server → Client: push event (mirrors webContents.send) */
 export interface WsEvent {
   type: 'event'
@@ -967,6 +998,7 @@ export type WsServerMessage =
   | WsAuthResponse
   | WsAuthWebauthnChallenge
   | WsInvokeResponse
+  | WsInvokeProgress
   | WsEvent
   | WsSyncCatchup
   | WsSyncFull

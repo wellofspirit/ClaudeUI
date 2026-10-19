@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import { engineInstalled } from '../harness/resolve'
 import { codexCommands } from './codex-commands'
 import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
+import type { ProgressReporter } from '../../shared/remote-protocol'
 import * as os from 'os'
 import * as path from 'path'
 import { RemoteDispatcher } from '../services/remote-dispatcher'
@@ -12,6 +13,7 @@ import { respondContextPressure } from '../services/context-pressure'
 import { setSessionGrouped } from '../services/session-links'
 import { dismissProposalFromClient, startProposalFromClient } from '../services/session-tools'
 import {
+  loadSessionStatusLine,
   loadSubagentHistory,
   buildSubagentFileMap,
   loadBackgroundOutput
@@ -38,7 +40,12 @@ import { getPiModelCatalogGroups } from '../pi/model-discovery'
 import { listEngineModels } from './engine-models'
 import { locatePiDisplayPath } from '../pi/pi-locate'
 import { credentialSync } from '../auth/vault/CredentialSync'
-import type { EngineModelGroup, ModelInfo, ProviderRemoveKind } from '../../shared/types'
+import type {
+  EngineModelGroup,
+  LoadSessionHistoryOptions,
+  ModelInfo,
+  ProviderRemoveKind
+} from '../../shared/types'
 import { loadSettings, loadSessionConfig, loadSlashCommands } from '../services/ui-config'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
 import {
@@ -855,8 +862,38 @@ export function registerRemoteHandlers(
     channel: 'session:load-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, resumeSessionAt?: string | null) => {
-      return await loadSessionHistory(sessionId, projectKey, opt(resumeSessionAt))
+    // ADR-102: the reporter leads the args; the wire frames come from remote-server.
+    withProgress: true,
+    handler: async (
+      progress: ProgressReporter,
+      sessionId: string,
+      projectKey: string,
+      resumeSessionAt?: string | null,
+      options?: LoadSessionHistoryOptions | null
+    ) => {
+      // Both identifiers are caller-supplied and joined into a ~/.claude/projects path
+      // by the Claude reader. Every engine's real id and projectKey is a single
+      // segment (uuid / `ses_…` ids; `cwdToProjectKey` is `[A-Za-z0-9-]*`), so one
+      // check serves the engine dispatch too.
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
+      return await loadSessionHistory(sessionId, projectKey, opt(resumeSessionAt), undefined, {
+        onProgress: progress,
+        // Strictly a literal `true`: any other shape of the (client-supplied) options is ignored.
+        deferStatusLine: options?.deferStatusLine === true
+      })
+    }
+  })
+
+  handleRemote({
+    channel: 'session:load-status-line',
+    capability: 'fs-read',
+    kind: 'query',
+    withProgress: true,
+    handler: async (progress: ProgressReporter, sessionId: string, projectKey: string) => {
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
+      return await loadSessionStatusLine(sessionId, projectKey, progress)
     }
   })
 
@@ -864,7 +901,18 @@ export function registerRemoteHandlers(
     channel: 'session:load-subagent-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, agentId: string) => {
+    // Declared so the transport sends its `sending` frame before the (large)
+    // response and the web client's 30 s timeout slides; reports nothing itself.
+    withProgress: true,
+    handler: async (
+      _progress: ProgressReporter,
+      sessionId: string,
+      projectKey: string,
+      agentId: string
+    ) => {
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
+      assertSafePathSegment(agentId, 'agentId')
       return await loadSubagentHistory(sessionId, projectKey, agentId)
     }
   })

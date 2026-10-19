@@ -43,6 +43,7 @@ vi.mock('../../../core/auth/CodexAuthProvider', () => ({
 vi.mock('../../../core/services/session-history', () => ({
   listDirectories: vi.fn(async () => [{ id: 'dir-1' }]),
   loadSessionHistory: vi.fn(async () => [{ id: 'm1' }]),
+  loadSessionStatusLine: vi.fn(async () => ({ totalCostUsd: 1 })),
   loadSubagentHistory: vi.fn(async () => []),
   buildSubagentFileMap: vi.fn(() => ({})),
   loadBackgroundOutput: vi.fn(() => '')
@@ -320,6 +321,11 @@ import { logger } from '../../../core/services/logger'
 import { blobStore } from '../../../core/services/blob-store'
 import { query } from '../../../core/sdk'
 import { discoverCodexModels } from '../../../core/codex/model-discovery'
+import {
+  loadSessionHistory as loadClaudeHistoryMock,
+  loadSessionStatusLine as loadStatusLineMock,
+  loadSubagentHistory as loadSubagentHistoryMock
+} from '../../../core/services/session-history'
 import { engineInstalled } from '../../../core/harness/resolve'
 
 // ---------------------------------------------------------------------------
@@ -1182,6 +1188,135 @@ describe('registerRemoteHandlers', () => {
       expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
     })
 
+    it('session:load-history declares withProgress and forwards the reporter to the Claude reader (ADR-102)', async () => {
+      expect(commandRegistry.declaration('session:load-history')?.withProgress).toBe(true)
+      const progress = vi.fn()
+      await dispatcher.handle(
+        makeRequest('session:load-history', 'sess-1', 'proj-key', null),
+        remoteConn,
+        progress
+      )
+      // The reporter LEADS the handler args (not the wire's), and the wire's
+      // null anchor is still normalised to undefined. No options on the wire
+      // (an old client's 3-arg call) means the full read.
+      expect(loadClaudeHistoryMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', undefined, {
+        onProgress: progress,
+        deferStatusLine: false
+      })
+    })
+
+    it('session:load-history validates its options arg: only a literal deferStatusLine === true defers (ADR-102 Arc 2)', async () => {
+      const progress = vi.fn()
+      const deferredOf = async (...options: unknown[]): Promise<unknown> => {
+        await dispatcher.handle(
+          makeRequest('session:load-history', 'sess-1', 'proj-key', null, ...options),
+          remoteConn,
+          progress
+        )
+        return (
+          vi.mocked(loadClaudeHistoryMock).mock.lastCall?.[3] as { deferStatusLine?: boolean }
+        ).deferStatusLine
+      }
+      expect(await deferredOf({ deferStatusLine: true })).toBe(true)
+      // Anything else is ignored, never coerced: non-objects, wrong types, extras.
+      expect(await deferredOf({ deferStatusLine: 'true' })).toBe(false)
+      expect(await deferredOf({ deferStatusLine: 1 })).toBe(false)
+      expect(await deferredOf({ deferStatusLine: false })).toBe(false)
+      expect(await deferredOf({})).toBe(false)
+      expect(await deferredOf(null)).toBe(false)
+      expect(await deferredOf('deferStatusLine')).toBe(false)
+      expect(await deferredOf(42)).toBe(false)
+      expect(await deferredOf(['deferStatusLine'])).toBe(false)
+      // Extra fields are ignored and are not forwarded.
+      expect(await deferredOf({ deferStatusLine: true, resumeSessionAt: 'x', onProgress: 1 })).toBe(
+        true
+      )
+      expect(vi.mocked(loadClaudeHistoryMock).mock.lastCall?.[3]).toEqual({
+        onProgress: progress,
+        deferStatusLine: true
+      })
+    })
+
+    it('session:load-status-line is an fs-read query that declares withProgress and forwards the reporter (ADR-102 Arc 2)', async () => {
+      expect(commandRegistry.declaration('session:load-status-line')).toMatchObject({
+        capability: 'fs-read',
+        kind: 'query',
+        withProgress: true
+      })
+      // The server sends its `sending` frame only for a channel this says reports.
+      expect(dispatcher.reportsProgress('session:load-status-line')).toBe(true)
+      const progress = vi.fn()
+      const res = await dispatcher.handle(
+        makeRequest('session:load-status-line', 'sess-1', 'proj-key'),
+        remoteConn,
+        progress
+      )
+      expect(res).toEqual({ totalCostUsd: 1 })
+      expect(loadStatusLineMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', progress)
+    })
+
+    it('session:load-subagent-history declares withProgress (the transport `sending` frame) and keeps its wire args (ADR-102 Arc 2, C8)', async () => {
+      expect(commandRegistry.declaration('session:load-subagent-history')?.withProgress).toBe(true)
+      expect(dispatcher.reportsProgress('session:load-subagent-history')).toBe(true)
+      await dispatcher.handle(
+        makeRequest('session:load-subagent-history', 'sess-1', 'proj-key', 'agent-9'),
+        remoteConn
+      )
+      // The reporter takes the leading slot, so the wire args land where they did.
+      expect(loadSubagentHistoryMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', 'agent-9')
+    })
+
+    // The three Claude history readers join sessionId / projectKey (/ agentId) into a
+    // ~/.claude/projects path, and these channels are reachable by any `fs-read`
+    // caller. A traversal value must be refused before the reader (the filesystem) runs.
+    describe.each([
+      ['session:load-history', () => loadClaudeHistoryMock, []],
+      ['session:load-status-line', () => loadStatusLineMock, []],
+      ['session:load-subagent-history', () => loadSubagentHistoryMock, ['agent-9']]
+    ] as const)('%s path-segment validation', (channel, reader, tail) => {
+      it.each([
+        ['sessionId', ['../x', 'proj-key']],
+        ['sessionId', ['a/b', 'proj-key']],
+        ['sessionId', ['a\\b', 'proj-key']],
+        ['sessionId', ['', 'proj-key']],
+        ['projectKey', ['sess-1', '../x']],
+        ['projectKey', ['sess-1', 'a/b']],
+        ['projectKey', ['sess-1', 'a\\b']],
+        ['projectKey', ['sess-1', '..']],
+        ['projectKey', ['sess-1', '']]
+      ])('refuses a bad %s (%j) before any read (GUARD — fails pre-fix)', async (label, ids) => {
+        vi.mocked(reader()).mockClear()
+        await expect(
+          dispatcher.handle(makeRequest(channel, ...ids, ...tail), remoteConn)
+        ).rejects.toThrow(new RegExp(`Invalid ${label}`))
+        expect(reader()).not.toHaveBeenCalled()
+      })
+
+      it('passes a valid call through unchanged', async () => {
+        vi.mocked(reader()).mockClear()
+        await dispatcher.handle(makeRequest(channel, 'sess-1', 'proj-key', ...tail), remoteConn)
+        expect(reader()).toHaveBeenCalledTimes(1)
+        expect(vi.mocked(reader()).mock.lastCall?.slice(0, 2 + tail.length)).toEqual([
+          'sess-1',
+          'proj-key',
+          ...tail
+        ])
+      })
+    })
+
+    it('session:load-subagent-history refuses a bad agentId before any read (GUARD — fails pre-fix)', async () => {
+      vi.mocked(loadSubagentHistoryMock).mockClear()
+      for (const agentId of ['../x', 'a/b', 'a\\b', '..', '']) {
+        await expect(
+          dispatcher.handle(
+            makeRequest('session:load-subagent-history', 'sess-1', 'proj-key', agentId),
+            remoteConn
+          )
+        ).rejects.toThrow(/Invalid agentId/)
+      }
+      expect(loadSubagentHistoryMock).not.toHaveBeenCalled()
+    })
+
     it('account:get returns the account-manager state', async () => {
       const res = await dispatcher.handle(makeRequest('account:get'), remoteConn)
       expect(res).toEqual({ enabled: false, accounts: [] })
@@ -1784,6 +1919,10 @@ const SHELL_GATED_CHANNELS = [
 const POST_PORT_CHANNELS = [
   'session:clear-conversation',
   'file:list-places',
+  // ADR-102 Arc 2: the status line a `deferStatusLine` history read left out.
+  // `fs-read`, the capability of the `session:load-history` it is the second half
+  // of — the same transcript bytes, summed instead of returned.
+  'session:load-status-line',
   // ADR-087: the bytes behind a transcript BlobRef. `chat`, the capability that
   // already read these exact bytes inside the snapshot — an invoke, not an HTTP
   // route, so on an E2E origin they stay inside the encrypted channel.

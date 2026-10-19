@@ -51,6 +51,7 @@ import {
   registerCommand,
   type CommandRegistration
 } from './command-registry'
+import type { ProgressReporter } from '../../shared/remote-protocol'
 
 /**
  * The host's channel-binding surface. Two operations, because the registrars
@@ -87,8 +88,12 @@ export function setDesktopTransportBinder(next: DesktopTransportBinder | null): 
  * default label — `desktop-renderer` — is the correct one here because a binder
  * only ever exists where a renderer does.
  */
-export function dispatchDesktop(channel: string, args: unknown[]): Promise<unknown> {
-  return commandRegistry.dispatch(channel, 'desktop', args, hostConnection())
+export function dispatchDesktop(
+  channel: string,
+  args: unknown[],
+  progress?: ProgressReporter
+): Promise<unknown> {
+  return commandRegistry.dispatch(channel, 'desktop', args, hostConnection(), progress)
 }
 
 /**

@@ -15,6 +15,7 @@ import { useSessionStore } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import type { TaskDetailPanelViewProps } from '../View'
 import {
+  A,
   A_BG_BASH,
   B,
   nestedActiveTasks,
@@ -29,6 +30,10 @@ vi.mock('../View', () => ({
     return null
   }
 }))
+
+// ADR-102 Arc 2 (C6): the on-demand requests this panel makes are the load's, asserted here.
+const { requestSubagentTranscript } = vi.hoisted(() => ({ requestSubagentTranscript: vi.fn() }))
+vi.mock('../../../lib/subagent-prefetch', () => ({ requestSubagentTranscript }))
 
 const ROUTE = 'route-task-panel'
 
@@ -113,6 +118,74 @@ describe('TaskDetailPanel FC', () => {
       { toolUseId: 'tu-task', kind: 'task' },
       { toolUseId: 'tu-gone', kind: 'missing' }
     ])
+  })
+
+  // ADR-102 Arc 2 (C6). The content-first load leaves buckets on disk; a nested
+  // agent's spawn lives in its PARENT's bucket, so until that lands the entry cannot
+  // find its own call. Before this it rendered NOTHING (`missing`).
+  describe('a nested agent whose parent transcript has not loaded (C6)', () => {
+    const index = (overrides: Record<string, { bytes: number }> = {}): Record<string, unknown> => ({
+      [A]: { agentId: 'agent-a', parentToolUseId: null, bytes: 500, order: 2 },
+      [B]: { agentId: 'agent-b', parentToolUseId: A, bytes: 300, order: 1 },
+      ...overrides
+    })
+    const open = (patch: Record<string, unknown>): void => {
+      useSessionStore.getState().openTaskPanel(ROUTE, B)
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: {
+            ...state.sessions[ROUTE],
+            openedTaskToolUseIds: [B],
+            messages: nestedMessages(),
+            ...patch
+          }
+        }
+      }))
+    }
+
+    it('is a loading entry, and asks for the parent bucket and its own at the descriptor level', async () => {
+      requestSubagentTranscript.mockClear()
+      open({ subagentIndex: index(), subagentMessages: {} })
+
+      await renderFC()
+
+      expect(viewProps?.entries).toEqual([{ toolUseId: B, kind: 'loading' }])
+      expect(requestSubagentTranscript).toHaveBeenCalledWith(ROUTE, A)
+      expect(requestSubagentTranscript).toHaveBeenCalledWith(ROUTE, B)
+    })
+
+    it('becomes an ordinary task entry once the parent bucket lands', async () => {
+      open({ subagentIndex: index(), subagentMessages: {} })
+      await renderFC()
+      expect(viewProps?.entries[0].kind).toBe('loading')
+
+      await act(async () => {
+        useSessionStore.setState((state) => ({
+          sessions: {
+            ...state.sessions,
+            [ROUTE]: { ...state.sessions[ROUTE], subagentMessages: nestedBuckets() }
+          }
+        }))
+      })
+
+      expect(viewProps?.entries).toEqual([{ toolUseId: B, kind: 'task' }])
+    })
+
+    it('stays missing (and requests nothing) when the index has no parent transcript to wait for', async () => {
+      requestSubagentTranscript.mockClear()
+      // The parent is listed with no file on disk: nothing is coming.
+      open({ subagentIndex: index({ [A]: { bytes: 0 } }), subagentMessages: {} })
+      await renderFC()
+      expect(viewProps?.entries).toEqual([{ toolUseId: B, kind: 'missing' }])
+      expect(requestSubagentTranscript).not.toHaveBeenCalled()
+    })
+
+    it('an agent the index does not know stays missing', async () => {
+      open({ subagentIndex: {}, subagentMessages: {} })
+      await renderFC()
+      expect(viewProps?.entries).toEqual([{ toolUseId: B, kind: 'missing' }])
+    })
   })
 
   it("opens a nested agent and a subagent's background Bash, not as missing (§7)", async () => {
