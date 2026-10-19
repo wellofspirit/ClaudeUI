@@ -146,6 +146,7 @@ import { harnessAvailable } from '../harness/resolve'
 import { codexModePolicy, codexTurnInput, codexTurnPolicy } from '../codex/codex-turn-policy'
 import { assertCodexProvider, selectCodexModel } from '../codex/model-selection'
 import { codexItemId, mapCodexDelta, mapCodexItem } from '../codex/event-mapper'
+import { readCodexImageView } from '../codex/codex-image-view'
 import { codexDisjointTokens } from '../codex/usage-ledger'
 import type { CodexMappedEvent } from '../codex/event-mapper'
 import { unwrapShellCommand } from '../codex/command-text'
@@ -6150,7 +6151,14 @@ export class CrossEngineDispatcher {
       this.appendCodexTargetItem(entry, id, { type: 'plan', text: item.text }, entry.ctx.toolUseId)
       return
     }
+    // `imageView` carries a PATH and no bytes: its (empty) mapped result is held
+    // back and replaced by ONE result carrying the file once it is read — the
+    // subagent-tool-result reducer appends rather than keeping the first, so
+    // forwarding both would show the empty one beside the picture. Mirrors
+    // `CodexSession.item`.
+    const deferredRead = completed && item.type === 'imageView'
     for (const event of mapCodexItem(entry.sessionId, turnId, item, completed, timestamp)) {
+      if (deferredRead && event.kind === 'toolResult') continue
       // Taken from the MAPPED block rather than re-deriving it from
       // `item.changes`, so the gate decides about exactly the paths the caller
       // was shown. `FileChangeRequestApprovalParams` carries no changes at all,
@@ -6167,6 +6175,27 @@ export class CrossEngineDispatcher {
       }
       this.forwardCodexTargetEvent(entry, event, undefined, streamable && completed)
     }
+    // Not awaited: the read is best-effort and must not stall the notification pump.
+    if (completed && item.type === 'imageView')
+      void this.attachCodexTargetImageView(entry, id, item.path)
+  }
+
+  /** The ONE result a Codex target's completed `imageView` gets — the bytes when the file could be read, none otherwise. */
+  private async attachCodexTargetImageView(
+    entry: CodexTargetEntry,
+    toolUseId: string,
+    path: string
+  ): Promise<void> {
+    const image = await readCodexImageView(path)
+    // Disposed while the file was read: nothing is listening for this target.
+    if (!entry.sessionId || this.targets.get(entry.sessionId) !== entry) return
+    this.forwardCodexTargetEvent(entry, {
+      kind: 'toolResult',
+      toolUseId,
+      result: '',
+      isError: false,
+      ...(image ? { images: [image] } : {})
+    })
   }
 
   /**
@@ -6209,7 +6238,8 @@ export class CrossEngineDispatcher {
           toolResultToolUseId: event.toolUseId,
           result: event.result,
           isError: event.isError,
-          ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {})
+          ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {}),
+          ...(event.images ? { images: event.images } : {})
         })
         break
       case 'commandDelta':

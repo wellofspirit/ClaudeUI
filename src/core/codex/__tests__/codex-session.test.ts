@@ -3057,6 +3057,61 @@ describe('Codex native children', () => {
     ])
   })
 
+  it("forwards a child's imageView as ONE subagent-tool-result carrying the bytes", async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codex-child-image-view-'))
+    try {
+      const png = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+        'base64'
+      )
+      const path = join(directory, 'shot.png')
+      writeFileSync(path, png)
+      const f = fixture()
+      await f.session.run('hello')
+      spawn(f)
+      f.notify('item/completed', {
+        threadId: 'child',
+        turnId: 'child-turn',
+        item: { type: 'imageView', id: 'iv', path }
+      })
+      // The read is not awaited by the notification pump.
+      await new Promise((done) => setTimeout(done, 50))
+      // Exactly one: the reducer appends subagent results, so a second (the
+      // mapper's empty one) would sit next to the one with the bytes.
+      expect(sent('session:subagent-tool-result')).toEqual([
+        {
+          toolUseId: PARENT_CARD,
+          toolResultToolUseId: codexItemId('child', 'child-turn', 'iv'),
+          result: '',
+          isError: false,
+          images: [{ mediaType: 'image/png', ...blobRefOf(png.toString('base64')) }]
+        }
+      ])
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("still resolves a child's imageView, without images, when the file cannot be read", async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    f.notify('item/completed', {
+      threadId: 'child',
+      turnId: 'child-turn',
+      item: { type: 'imageView', id: 'iv', path: join(tmpdir(), 'codex-child-absent.png') }
+    })
+    await new Promise((done) => setTimeout(done, 50))
+    expect(sent('session:subagent-tool-result')).toEqual([
+      {
+        toolUseId: PARENT_CARD,
+        toolResultToolUseId: codexItemId('child', 'child-turn', 'iv'),
+        result: '',
+        isError: false
+      }
+    ])
+  })
+
   it('holds a child notification that beats its spawn item, then replays it', async () => {
     const f = fixture()
     await f.session.run('hello')

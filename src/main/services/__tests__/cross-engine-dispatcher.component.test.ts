@@ -10,6 +10,10 @@
  * electron at runtime), so electron is shimmed.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 import { DEFAULT_MAX_CONCURRENT_DISPATCHES } from '../../../shared/dispatch-concurrency'
 
@@ -5056,6 +5060,49 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
     expect(deltas).toHaveLength(1)
     expect(result.text).toBe('all done')
     expect(result.sessionId).toBe(CODEX_THREAD_ID)
+  })
+
+  it("forwards a Codex target's imageView as ONE subagent-tool-result carrying the file's bytes", async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dispatch-codex-image-view-'))
+    try {
+      const png = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+        'base64'
+      )
+      const path = join(directory, 'shot.png')
+      writeFileSync(path, png)
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_img' })
+      const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+      await tick()
+
+      target.notify('item/completed', {
+        threadId: CODEX_THREAD_ID,
+        turnId: CODEX_TURN_ID,
+        item: { type: 'imageView', id: 'item-iv-1', path }
+      })
+      // The file read is not awaited by the notification pump.
+      await new Promise((done) => setTimeout(done, 50))
+      target.completeTurn({ text: 'seen' })
+      await pending
+
+      const itemId = `codex:${JSON.stringify([CODEX_THREAD_ID, CODEX_TURN_ID, 'item-iv-1'])}`
+      const results = ctx.emit.mock.calls.filter((c) => c[0] === 'session:subagent-tool-result')
+      // One, not two: the reducer appends subagent results, so the mapper's
+      // empty result must not be forwarded next to the one with the bytes.
+      expect(results.map((c) => c[1])).toEqual([
+        {
+          toolUseId: 'toolu_dispatch_img',
+          toolResultToolUseId: itemId,
+          result: '',
+          isError: false,
+          images: [{ mediaType: 'image/png', ...blobRefOf(png.toString('base64')) }]
+        }
+      ])
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 
   it('drops notifications for a native CHILD thread — one dispatch is one card, and a grandchild has no home in it', async () => {

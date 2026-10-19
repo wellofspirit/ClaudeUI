@@ -11,6 +11,7 @@ import type { PiBridgeHost } from '../PiBridgeHost'
 import type { PiAgentDelivery } from '../pi-delivery'
 import { slimTranscript } from '../../automode/classifier'
 import type { PiRpcClient } from '../PiRpcClient'
+import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 type Cmd = Record<string, unknown>
 type Handler = (cmd: Cmd) => Record<string, unknown> | Promise<Record<string, unknown>>
@@ -417,6 +418,55 @@ describe('PiChildRunner output handling', () => {
     })
     // `usage` never reaches the stream.
     expect(emit.mock.calls.some((c) => String(c[0]).includes('usage'))).toBe(false)
+  })
+
+  it('forwards an image a child tool returned on its subagent-tool-result (blob refs, as the main agent does)', async () => {
+    const child = makeFakeChild()
+    const emit = vi.fn()
+    const runner = await PiChildRunner.start(runnerOpts(child, { emit: () => emit }))
+    void runner.runTurn('x')
+    await tick()
+    // pi's `read` of a PNG: a text note plus a second `image` block.
+    child.push({
+      type: 'message_end',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'call-img',
+        toolName: 'read',
+        content: [
+          { type: 'text', text: 'Read image file [image/png]' },
+          { type: 'image', data: 'CHILDIMG', mimeType: 'image/png' }
+        ],
+        isError: false,
+        timestamp: Date.now()
+      }
+    })
+    const toolResultEmit = emit.mock.calls.find((c) => c[0] === 'session:subagent-tool-result')
+    expect(toolResultEmit?.[1]).toEqual({
+      toolUseId: 'toolu_owner',
+      toolResultToolUseId: 'call-img',
+      result: 'Read image file [image/png]',
+      isError: false,
+      images: [{ mediaType: 'image/png', ...blobRefOf('CHILDIMG') }]
+    })
+  })
+
+  it('forwards the file diffs of a child edit result', () => {
+    const emit = vi.fn()
+    const fileDiffs = [{ path: 'a.ts', patch: '@@ -1 +1 @@\n-a\n+b', additions: 1, deletions: 1 }]
+    forwardPiChildStream(
+      { kind: 'tool_result', toolUseId: 'call-e', result: 'ok', isError: false, fileDiffs },
+      'toolu_owner',
+      emit,
+      new Set()
+    )
+    expect(emit).toHaveBeenCalledWith('session:subagent-tool-result', {
+      toolUseId: 'toolu_owner',
+      toolResultToolUseId: 'call-e',
+      result: 'ok',
+      isError: false,
+      fileDiffs
+    })
   })
 })
 

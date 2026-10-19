@@ -810,7 +810,11 @@ export function forwardPiChildStream(
         toolUseId,
         toolResultToolUseId: out.toolUseId,
         result: out.result,
-        isError: out.isError
+        isError: out.isError,
+        // Same shape PiSession sends for the main agent's `session:tool-result`:
+        // the mapper's blob refs pass through untouched.
+        ...(out.fileDiffs ? { fileDiffs: out.fileDiffs } : {}),
+        ...(out.images ? { images: out.images } : {})
       })
       break
     case 'error':

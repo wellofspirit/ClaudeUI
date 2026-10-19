@@ -2665,7 +2665,13 @@ export class CodexSession extends BaseSession {
       if (item.type === 'agentMessage' && completed) child.summary = item.text
       return
     }
+    // A child's completed `imageView` is held back the same way the root's is
+    // (see {@link item}): the subagent-tool-result reducer appends rather than
+    // keeping the first, so the mapper's empty result and the one with the bytes
+    // would both land. {@link attachChildImageView} emits the single result.
+    const deferredRead = completed && item.type === 'imageView'
     for (const event of mapCodexItem(childThreadId, turnId, item, completed, timestamp)) {
+      if (deferredRead && event.kind === 'toolResult') continue
       if (event.kind === 'message') {
         const text = event.message.content.find((block) => block.type === 'text')
         if (item.type === 'agentMessage' && text?.type === 'text') child.summary = text.text
@@ -2683,6 +2689,25 @@ export class CodexSession extends BaseSession {
           ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {})
         })
     }
+    // Not awaited, for the reason {@link item} gives.
+    if (completed && item.type === 'imageView') void this.attachChildImageView(child, id, item.path)
+  }
+
+  /** The ONE result a child's completed `imageView` gets; see {@link attachImageView}. */
+  private async attachChildImageView(
+    child: CodexChild,
+    toolUseId: string,
+    path: string
+  ): Promise<void> {
+    const image = await readCodexImageView(path)
+    if (this.closed) return
+    this.send('session:subagent-tool-result', {
+      toolUseId: child.parentToolUseId,
+      toolResultToolUseId: toolUseId,
+      result: '',
+      isError: false,
+      ...(image ? { images: [image] } : {})
+    })
   }
 
   /**
