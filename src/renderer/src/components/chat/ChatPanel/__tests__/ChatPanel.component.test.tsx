@@ -17,6 +17,7 @@ import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import {
   clearViewEvicted,
   markViewEvicted,
+  setTranscriptLoadProgress,
   useSessionStore
 } from '../../../../stores/session-store'
 import { reloadActiveTranscript } from '../../../../lib/session-history-load'
@@ -264,6 +265,93 @@ describe('ChatPanel — an evicted active entry (ADR-087 §2)', () => {
     expect(screen.getByTestId('TranscriptLoading')).toHaveTextContent('Loading conversation')
     expect(screen.queryByTestId('WelcomeState')).toBeNull()
     unmount()
+  })
+
+  describe('load progress (ADR-102)', () => {
+    const progress = (over: Record<string, unknown> = {}): never =>
+      ({
+        fraction: 0.31,
+        phase: 'reading',
+        doneBytes: 12.3 * 1024 * 1024,
+        totalBytes: 40.1 * 1024 * 1024,
+        etaMs: 2_400,
+        subagents: null,
+        ...over
+      }) as never
+
+    it('draws a determinate bar and the detail line from transcriptLoadProgress', async () => {
+      markViewEvicted([ROUTE])
+      setTranscriptLoadProgress(ROUTE, progress())
+      const { unmount } = await renderChatPanel()
+
+      const bar = screen.getByTestId('TranscriptLoading.progress')
+      expect(bar).toHaveAttribute('role', 'progressbar')
+      expect(bar).toHaveAttribute('aria-valuenow', '31')
+      expect(screen.getByTestId('TranscriptLoading.detail')).toHaveTextContent(
+        'Reading transcript · 31% · ~3 s left'
+      )
+      // The existing label and testid are untouched.
+      expect(screen.getByTestId('TranscriptLoading')).toHaveTextContent('Loading conversation')
+      unmount()
+    })
+
+    it('is indeterminate when the fraction is unknown', async () => {
+      markViewEvicted([ROUTE])
+      setTranscriptLoadProgress(
+        ROUTE,
+        progress({ fraction: null, totalBytes: null, doneBytes: 0, etaMs: null })
+      )
+      const { unmount } = await renderChatPanel()
+
+      expect(screen.getByTestId('TranscriptLoading.progress')).not.toHaveAttribute('aria-valuenow')
+      expect(screen.getByTestId('TranscriptLoading.detail')).toHaveTextContent('Reading transcript')
+      unmount()
+    })
+
+    it('follows the store as progress advances', async () => {
+      markViewEvicted([ROUTE])
+      setTranscriptLoadProgress(ROUTE, progress({ fraction: 0.1 }))
+      const { unmount } = await renderChatPanel()
+      expect(screen.getByTestId('TranscriptLoading.progress')).toHaveAttribute(
+        'aria-valuenow',
+        '10'
+      )
+
+      act(() => {
+        setTranscriptLoadProgress(
+          ROUTE,
+          progress({ fraction: 0.9, phase: 'subagents', subagents: 5 })
+        )
+      })
+
+      expect(screen.getByTestId('TranscriptLoading.progress')).toHaveAttribute(
+        'aria-valuenow',
+        '90'
+      )
+      expect(screen.getByTestId('TranscriptLoading.detail')).toHaveTextContent(
+        'Loading 5 subagents'
+      )
+      unmount()
+    })
+
+    it('renders no bar without progress, and none once the transcript is on screen', async () => {
+      markViewEvicted([ROUTE])
+      const { unmount } = await renderChatPanel()
+      expect(screen.getByTestId('TranscriptLoading')).toBeInTheDocument()
+      expect(screen.queryByTestId('TranscriptLoading.progress')).toBeNull()
+      expect(screen.queryByTestId('TranscriptLoading.detail')).toBeNull()
+      unmount()
+    })
+
+    it('fits a phone: the block is capped to its container (no vw: the zoom trap) instead of a fixed width', async () => {
+      markViewEvicted([ROUTE])
+      setTranscriptLoadProgress(ROUTE, progress())
+      const { unmount } = await renderChatPanel()
+      const block = screen.getByTestId('TranscriptLoading.progress').parentElement!
+      expect(block.className).toMatch(/\bw-56\b/)
+      expect(block.className).toMatch(/max-w-\[90%\]/)
+      unmount()
+    })
   })
 
   it('shows Retry instead of a spinner once the reload failed, and Retry re-runs it', async () => {

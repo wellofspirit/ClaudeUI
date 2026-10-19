@@ -25,6 +25,8 @@ import { DiagramGalleryProvider } from '../DiagramGallery'
 import { TopBar } from './TopBar'
 import { WelcomeState } from './WelcomeState'
 import { reloadActiveTranscript } from '../../../lib/session-history-load'
+import { describeTranscriptLoad } from '../../../lib/transcript-load-progress'
+import { ProgressBar } from '../../shared/ProgressBar'
 import { QueuedMessageCard } from './QueuedMessageCard'
 import { ChatSearchOverlay } from '../ChatSearch'
 import { SEARCH_ANCHOR } from '../ChatSearch/search-scope'
@@ -92,6 +94,8 @@ export function ChatPanel(): React.JSX.Element {
   )
   const evicted = useActiveSession((s) => s.evicted)
   const transcriptLoadFailed = useActiveSession((s) => s.transcriptLoadFailed)
+  // A field selector, not the whole session: progress changes four times a second.
+  const transcriptLoadProgress = useActiveSession((s) => s.transcriptLoadProgress)
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -289,7 +293,28 @@ export function ChatPanel(): React.JSX.Element {
                 data-testid="TranscriptLoading"
                 className="h-full flex items-center justify-center"
               >
-                <LoadingState label="Loading conversation..." />
+                <LoadingState label="Loading conversation...">
+                  {transcriptLoadProgress && (
+                    <div className="mt-3 flex w-56 max-w-[90%] flex-col items-center gap-1.5">
+                      <ProgressBar
+                        percent={
+                          transcriptLoadProgress.fraction === null
+                            ? null
+                            : Math.round(transcriptLoadProgress.fraction * 100)
+                        }
+                        testid="TranscriptLoading.progress"
+                        className="w-full"
+                        smooth
+                      />
+                      <span
+                        data-testid="TranscriptLoading.detail"
+                        className="max-w-full text-center text-[12px] text-text-muted tabular-nums"
+                      >
+                        {describeTranscriptLoad(transcriptLoadProgress)}
+                      </span>
+                    </div>
+                  )}
+                </LoadingState>
               </div>
             )
           ) : !hasContent && status.state === 'running' ? (
@@ -451,19 +476,28 @@ export function ChatNoticeStack(): React.JSX.Element {
   )
 }
 
-function LoadingState({ label = 'Thinking...' }: { label?: string }): React.JSX.Element {
+function LoadingState({
+  label = 'Thinking...',
+  children
+}: {
+  label?: string
+  children?: React.ReactNode
+}): React.JSX.Element {
   return (
-    <div className="flex items-center gap-2.5 -mt-16 animate-fade-in">
-      <div className="flex gap-[3px]">
-        {[0, 200, 400].map((delay) => (
-          <span
-            key={delay}
-            className="w-[5px] h-[5px] rounded-full bg-accent"
-            style={{ animation: 'pulse-dot 1.4s infinite', animationDelay: `${delay}ms` }}
-          />
-        ))}
+    <div className="flex flex-col items-center -mt-16 animate-fade-in">
+      <div className="flex items-center gap-2.5">
+        <div className="flex gap-[3px]">
+          {[0, 200, 400].map((delay) => (
+            <span
+              key={delay}
+              className="w-[5px] h-[5px] rounded-full bg-accent"
+              style={{ animation: 'pulse-dot 1.4s infinite', animationDelay: `${delay}ms` }}
+            />
+          ))}
+        </div>
+        <span className="text-[13px] text-text-muted">{label}</span>
       </div>
-      <span className="text-[13px] text-text-muted">{label}</span>
+      {children}
     </div>
   )
 }
