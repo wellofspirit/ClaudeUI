@@ -428,7 +428,8 @@ function toRow(
   const active = opts.activeTasks[entry.toolUseId]
   const { isRunning, isError, isStopped, isLoaded } = deriveTaskState({
     isHistorical: opts.isHistorical,
-    hasActiveTask: !opts.isHistorical && !!active,
+    // A dispatched X-Agent's record survives a reopen (rebuilt from the ledger, ADR-105 §5).
+    hasActiveTask: !!active && (!opts.isHistorical || active.taskType === 'dispatch'),
     isBackground: entry.isBackground,
     hasResult: entry.hasResult,
     notification,

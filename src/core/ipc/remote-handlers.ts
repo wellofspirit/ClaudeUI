@@ -25,6 +25,7 @@ import {
   loadOpencodeSessionHistory
 } from '../services/opencode-session-list'
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
+import { withDispatchTasks } from '../services/dispatch-task-history'
 import {
   discoverOpencodeProviderCatalog,
   getOpencodeProviderModels
@@ -771,7 +772,8 @@ export function registerRemoteHandlers(
     channel: 'session:load-opencode-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string) => loadOpencodeSessionHistory(sessionId)
+    handler: async (sessionId: string) =>
+      withDispatchTasks(sessionId, await loadOpencodeSessionHistory(sessionId))
   })
   handleRemote({
     channel: 'session:list-pi',
@@ -783,7 +785,8 @@ export function registerRemoteHandlers(
     channel: 'session:load-pi-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string) => loadPiSessionHistory(sessionId)
+    handler: async (sessionId: string) =>
+      withDispatchTasks(sessionId, await loadPiSessionHistory(sessionId))
   })
 
   // Live transcript watching (drives the remote client's live history view).

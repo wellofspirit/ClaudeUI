@@ -560,6 +560,12 @@ export interface PendingApproval {
   codex?: import('./codex-types').CodexApprovalPayload
   requestId: string
   /**
+   * Set by the dispatcher when it puts back a card a parent's disconnect cleared (ADR-105
+   * §5): the user has been told about this ask already, so it raises no new attention and
+   * no notification.
+   */
+  reRaised?: true
+  /**
    * cli.js-assigned tool_use id for the invocation being prompted. The
    * correct binding key between an approval and its tool_use block —
    * matching on toolName+input alone is lossy (repeated identical calls
@@ -1817,6 +1823,11 @@ interface SessionAPI {
      * cold reopen shows and resumes with. `null` when the rollout names none.
      */
     lastEffort?: string | null
+    /**
+     * The X-Agents of this session that are running now (ADR-105 §5): their task
+     * records, which no transcript holds. Keyed by the launching tool_use id.
+     */
+    activeTasks?: Record<string, ActiveTask>
   }>
   loadSubagentHistory(
     sessionId: string,
@@ -4307,6 +4318,11 @@ export interface EngineHistoryLoad {
    * session ran no agents.
    */
   subagentMessages?: Record<string, ChatMessage[]>
+  /**
+   * The session's X-Agents that are running now (ADR-105 §5), keyed by the launching
+   * tool_use id: records no transcript holds, added from the dispatch ledger.
+   */
+  activeTasks?: Record<string, ActiveTask>
   /**
    * Host-run pi subagents' terminal events (ADR-089 S3), from the task
    * notifications ClaudeUI delivered into the parent and child files — read

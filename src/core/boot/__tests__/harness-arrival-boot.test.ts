@@ -127,13 +127,17 @@ describe('a harness arriving, at the boot seam', () => {
       authDeps: {} as never,
       autostart: false
     })
-    const [lookup, onRekey] = vi.mocked(crossEngineDispatcher.configureParents).mock.calls[0]
+    const [lookup, onRekey, onHostEvent] = vi.mocked(crossEngineDispatcher.configureParents).mock
+      .calls[0]
     expect(lookup).toMatchObject({
       session: expect.any(Function),
       emit: expect.any(Function),
       readMessages: expect.any(Function)
     })
     expect(onRekey).toEqual(expect.any(Function))
+    // ...and the host's event feed: a parent's disconnect re-raises its X-Agents' cards, its
+    // deletion ends them.
+    expect(onHostEvent).toEqual(expect.any(Function))
     // The host's teardown drops that subscription.
     expect(unsubscribe).not.toHaveBeenCalled()
     core.releaseDispatchParents()

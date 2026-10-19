@@ -161,6 +161,7 @@ import { OpencodeSession, CLAUDEUI_INBOX_PREFIX } from '../OpencodeSession'
 import { slimTranscript } from '../../automode/classifier'
 import { deleteSessionInbox, heldInboxItems, listAuditLog } from '../../services/db'
 import { refFor } from '../../services/session-links'
+import { startRunningDispatch } from '../../../test/helpers/running-dispatch'
 import { deliver } from '../../services/session-delivery'
 import type { SessionManager } from '../../services/session-manager'
 import { OpencodePermissionGuardError } from '../OpencodeServerManager'
@@ -2272,5 +2273,30 @@ describe('session tool asks (claudeui_session_*)', () => {
     expect(payloads('session:approval-request')).toMatchObject([
       { requestId: 'per_sh', always: ['ls'] }
     ])
+  })
+})
+
+describe('the idle timer holds for a running X-Agent (ADR-105 §3)', () => {
+  const IDLE_MS = 60_000
+  afterEach(() => vi.useRealTimers())
+
+  it('does not auto-disconnect while an X-Agent runs, and does once it has ended and the dispatcher re-arms it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    session = makeSession()
+    const endRun = startRunningDispatch('route-1')
+    const cancel = vi.spyOn(session, 'cancel').mockImplementation(() => {})
+    session.setInactivityTimeout(IDLE_MS)
+    // An idle, connected session (the connect itself is covered by the lifecycle suite).
+    vi.spyOn(session, 'isEngineLive').mockReturnValue(true)
+    await session.run(null)
+    await flush()
+
+    vi.advanceTimersByTime(5 * IDLE_MS)
+    expect(cancel).not.toHaveBeenCalled()
+
+    endRun()
+    session.rearmIdleTimer()
+    vi.advanceTimersByTime(IDLE_MS + 1)
+    expect(cancel).toHaveBeenCalledTimes(1)
   })
 })

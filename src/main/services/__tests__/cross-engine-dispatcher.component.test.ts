@@ -115,6 +115,7 @@ const HOLD_MS = 120_000
 import type { PiRpcClient } from '../../../core/pi/PiRpcClient'
 import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHost'
 import { SyncCore } from '../../../core/sync/sync-core'
+import { addHostObserver, emitEvent, syncCore } from '../../../core/services/sync-host'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../../core/pi/permission-engine'
 import type { MergedClaudeRules } from '../../../core/pi/permission-engine'
 import { callerRestrictionFromAgent } from '../../../core/opencode/caller-restriction'
@@ -122,12 +123,15 @@ import {
   makeFakeDispatchLedger,
   type FakeDispatchLedger
 } from '../../../test/helpers/fake-dispatch-ledger'
-import type { DispatchTargetRow } from '../../../core/services/dispatch-target-ledger'
+import type {
+  DispatchTargetRow,
+  NewDispatchTarget
+} from '../../../core/services/dispatch-target-ledger'
 import type {
   DispatchParentLookup,
   LiveParentSession
 } from '../../../core/services/dispatch-parent'
-import type { DispatchRunRegistry } from '../../../core/services/dispatch-runs'
+import { hasRunningDispatch, type DispatchRunRegistry } from '../../../core/services/dispatch-runs'
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -156,6 +160,19 @@ function userRules(r: Partial<MergedClaudeRules> = {}): MergedClaudeRules {
     ...r
   }
 }
+
+// A test may leave a run in flight (a parked target, a held gate). Registries are process-wide
+// to a session's idle timer (`hasRunningDispatch`), so none may outlive its test.
+const builtDispatchers: CrossEngineDispatcher[] = []
+afterEach(() => {
+  for (const dispatcher of builtDispatchers.splice(0)) {
+    const runs = (dispatcher as unknown as { runs: DispatchRunRegistry }).runs
+    for (const run of runs.all()) {
+      run.stopController.abort()
+      runs.remove(run)
+    }
+  }
+})
 
 function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
   dispatcher: CrossEngineDispatcher
@@ -195,7 +212,9 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
     piSessionDirExists: () => true,
     ...overrides
   }
-  return { dispatcher: new CrossEngineDispatcher(deps), deps: { serverManager }, ledger }
+  const dispatcher = new CrossEngineDispatcher(deps)
+  builtDispatchers.push(dispatcher)
+  return { dispatcher, deps: { serverManager }, ledger }
 }
 
 /**
@@ -2914,7 +2933,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
 
-    expect(dispatcher.stopDispatch('toolu_stop_1')).toBe(true)
+    expect(dispatcher.stopDispatch('toolu_stop_1', undefined, { blockingOnly: true })).toBe(true)
 
     const result = await pending
     expect(result.isError).toBe(true)
@@ -2954,7 +2973,9 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
 
-    expect(dispatcher.stopDispatch('toolu_draining_1')).toBe(true)
+    expect(dispatcher.stopDispatch('toolu_draining_1', undefined, { blockingOnly: true })).toBe(
+      true
+    )
     const result = await pending
     expect(result.isError).toBe(true)
     expect(result.text).toContain('stopped')
@@ -2987,7 +3008,9 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
-    expect(dispatcher.stopDispatch('toolu_draining_2')).toBe(true)
+    expect(dispatcher.stopDispatch('toolu_draining_2', undefined, { blockingOnly: true })).toBe(
+      true
+    )
     const result = await pending
     expect(result.isError).toBe(true)
 
@@ -3137,7 +3160,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_race_1' })
     const first = dispatcher.dispatch({ engine: 'pi', prompt: 'one' }, ctx)
     await tick()
-    expect(dispatcher.stopDispatch('toolu_race_1')).toBe(true)
+    expect(dispatcher.stopDispatch('toolu_race_1', undefined, { blockingOnly: true })).toBe(true)
     // `first` is now inside its grace-period wait — nothing settles it
     // naturally in this test, so it resolves once the 200ms grace elapses.
 
@@ -3195,7 +3218,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_race_2' })
     const first = dispatcher.dispatch({ engine: 'pi', prompt: 'one' }, ctx)
     await tick()
-    expect(dispatcher.stopDispatch('toolu_race_2')).toBe(true)
+    expect(dispatcher.stopDispatch('toolu_race_2', undefined, { blockingOnly: true })).toBe(true)
     await tick() // let the grace-period wait actually start
 
     // The stopped turn's own delayed terminal sequence arrives WHILE the
@@ -3644,7 +3667,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
     target.pushEvent(piAssistantMessageEnd({ text: 'partial', cost: 0.05 }))
-    expect(dispatcher.stopDispatch('toolu_stop_cost')).toBe(true)
+    expect(dispatcher.stopDispatch('toolu_stop_cost', undefined, { blockingOnly: true })).toBe(true)
     const result = await pending
     expect(result.isError).toBe(true)
     expect(result.text).toContain('stopped')
@@ -5462,7 +5485,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
     const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
     await tick()
 
-    expect(dispatcher.stopDispatch('toolu_stop_1', 'routing-1')).toBe(true)
+    expect(dispatcher.stopDispatch('toolu_stop_1', 'routing-1', { blockingOnly: true })).toBe(true)
     const result = await pending
     expect(result.isError).toBe(true)
     expect(result.text).toBe('Dispatch stopped by user.')
@@ -5487,6 +5510,29 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
     expect((await second).text).toBe('second')
   })
 
+  it('a Stop pressed on the card ENDS the thread’s X-Agent: detached, row stopped, the thread left on disk, never resumed', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher, ledger } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      codexAbortSettleGraceMs: 20
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_card' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+
+    expect(dispatcher.stopDispatch('toolu_stop_card', 'routing-1')).toBe(true)
+    const result = await pending
+    expect(result.text).toBe('Dispatch stopped by user.')
+    expect(target.client.detach).toHaveBeenCalled()
+    expect(ledger.rowFor('codex', CODEX_THREAD_ID)?.state).toBe('stopped')
+    const again = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'again', sessionId: result.sessionId },
+      ctx
+    )
+    expect(again.isError).toBe(true)
+    expect(again.text).toContain('Unknown dispatch session')
+  })
+
   it("a stopped turn's own late turn/completed cannot settle the NEXT turn (retired by id)", async () => {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({
@@ -5496,7 +5542,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_2' })
     const first = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
     await tick()
-    dispatcher.stopDispatch('toolu_stop_2', 'routing-1')
+    dispatcher.stopDispatch('toolu_stop_2', 'routing-1', { blockingOnly: true })
     const stopped = await first
 
     const second = dispatcher.dispatch(
@@ -7963,7 +8009,7 @@ describe('X-Agent ledger — resume review fixes (ADR-105)', () => {
       { ...ctx, toolUseId: 'tu-stop-me' }
     )
     await sleep(80)
-    expect(dispatcher.stopDispatch('tu-stop-me', 'parent-A')).toBe(true)
+    expect(dispatcher.stopDispatch('tu-stop-me', 'parent-A', { blockingOnly: true })).toBe(true)
     const started = Date.now()
     const result = await pending
 
@@ -9117,6 +9163,403 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
       await tick()
       expect(dispatcher.stopDispatch('toolu_fg_i', 'routing-1', { blockingOnly: true })).toBe(true)
       expect((await pending).text).toBe('Dispatch stopped by user.')
+    })
+  })
+
+  // ── Life around a run (ADR-105 §5, slice B-2b) ─────────────────────────────
+
+  describe('life around a run (B-2b)', () => {
+    /** The host event feed `configureParents` subscribes to, captured. */
+    function hostEvents(): {
+      subscribe: (observer: (channel: string, args: unknown[]) => void) => () => void
+      fire: (channel: string, args: unknown[]) => void
+      subscribed: () => number
+    } {
+      const observers = new Set<(channel: string, args: unknown[]) => void>()
+      return {
+        subscribe: (observer) => {
+          observers.add(observer)
+          return () => observers.delete(observer)
+        },
+        fire: (channel, args) => observers.forEach((o) => o(channel, args)),
+        subscribed: () => observers.size
+      }
+    }
+
+    const harnessRemoved = (): ReturnType<
+      typeof vi.fn<NonNullable<DispatcherDeps['removeHarnessState']>>
+    > => vi.fn<NonNullable<DispatcherDeps['removeHarnessState']>>(async () => {})
+
+    const askTool = (t: Awaited<ReturnType<typeof launchClaude>>): Promise<unknown> => {
+      const canUseTool = t.target.lastCanUseTool()!
+      return canUseTool('Bash', { command: 'ls' }, {
+        signal: new AbortController().signal
+      } as unknown as Parameters<typeof canUseTool>[2])
+    }
+
+    const rowOf = (parentSessionId: string, harnessRef: string): NewDispatchTarget => ({
+      engine: 'pi',
+      harnessRef,
+      parentSessionId,
+      parentEngine: 'opencode',
+      parentToolUseId: `toolu_${harnessRef}`,
+      cwd: '/x',
+      model: 'm',
+      launchMode: 'default',
+      accountKey: null,
+      codexAccountId: null,
+      callerRestriction: null,
+      name: null,
+      description: null
+    })
+
+    describe('re-raise on a parent’s disconnect', () => {
+      // The real funnel: the reducer clears a disconnected session's cards, THEN the host
+      // observers run, so the dispatcher's re-emission lands on the cleared state.
+      let release: () => void = () => {}
+      afterEach(() => release())
+
+      const canonical = (): ReturnType<typeof syncCore.getCanonicalState>['sessions'][string] =>
+        syncCore.getCanonicalState().sessions['routing-1']
+      const disconnect = (): void =>
+        emitEvent('session:status', ['routing-1', { state: 'disconnected' }])
+
+      async function launchOnRealFunnel(): Promise<
+        Awaited<ReturnType<typeof launchClaude>> & { requestId: string; gate: Promise<unknown> }
+      > {
+        syncCore.resetCanonicalForTests()
+        emitEvent('session:created', ['routing-1', { cwd: '/x', engineId: 'opencode' }])
+        const parents = makeParents()
+        const record = parents.parents.emit
+        parents.parents.emit = (parentId, channel, data) => {
+          record(parentId, channel, data)
+          emitEvent(channel, [parentId, data])
+        }
+        const t = await launchClaude({ parents })
+        release = t.dispatcher.configureParents(parents.parents, undefined, (observer) =>
+          addHostObserver(observer)
+        )
+        await tick()
+        t.target.push(initOf(t.row.harnessRef))
+        await tick()
+        const gate = askTool(t)
+        await vi.waitFor(() => expect(canonical().pendingApprovals).toHaveLength(1))
+        return { ...t, gate, requestId: canonical().pendingApprovals[0].requestId }
+      }
+
+      it('puts the task record and the pending approval back, exactly once, and the card still resolves the target’s gate', async () => {
+        const t = await launchOnRealFunnel()
+        expect(canonical().activeTasks['toolu_bg_1']).toMatchObject({ taskId: t.row.id })
+
+        disconnect() // the reducer drops both, then the dispatcher restores them
+        expect(canonical().activeTasks['toolu_bg_1']).toMatchObject({
+          taskId: t.row.id,
+          taskType: 'dispatch',
+          isBackgrounded: true,
+          description: 'bg-1'
+        })
+        expect(canonical().pendingApprovals.map((a) => a.requestId)).toEqual([t.requestId])
+        // The restored card is marked: the client does not announce an ask it announced before.
+        expect(canonical().pendingApprovals[0]).toMatchObject({ reRaised: true })
+        expect(t.parents.on('session:approval-request')[0].data).not.toHaveProperty('reRaised')
+
+        // Another disconnect clears and restores again — still one card, never two.
+        disconnect()
+        expect(canonical().pendingApprovals.map((a) => a.requestId)).toEqual([t.requestId])
+
+        expect(t.dispatcher.resolveApproval(t.requestId, 'allow')).toBe(true)
+        await expect(t.gate).resolves.toMatchObject({ behavior: 'allow' })
+      })
+
+      it('shows nothing twice when the parent object is merely replaced (no disconnect, nothing cleared)', async () => {
+        const t = await launchOnRealFunnel()
+        t.dispatcher.disposeFor('routing-1') // SessionManager.create over the old object
+        t.parents.sessions.set('routing-1', t.parents.session('default'))
+        expect(canonical().pendingApprovals).toHaveLength(1)
+        expect(t.parents.on('session:approval-request')).toHaveLength(1)
+        expect(t.parents.on('session:task-started')).toHaveLength(1)
+        void t.gate
+      })
+
+      it('restores only the disconnected parent’s own run, and never one that already ended', async () => {
+        const t = await launchOnRealFunnel()
+        emitEvent('session:created', ['routing-2', { cwd: '/x', engineId: 'opencode' }])
+        emitEvent('session:status', ['routing-2', { state: 'disconnected' }])
+        expect(t.parents.on('session:task-started')).toHaveLength(1)
+
+        t.dispatcher.resolveApproval(t.requestId, 'allow')
+        t.target.push(resultMsg({ result: 'done', session_id: t.row.harnessRef }))
+        await vi.waitFor(() => expect(t.ledger.rows.get(t.row.id)!.state).toBe('idle'))
+        disconnect()
+        expect(t.parents.on('session:task-started')).toHaveLength(1)
+        expect(canonical().activeTasks).toEqual({})
+      })
+
+      it('without the host observer a disconnect leaves the parent with no card (the gap this closes)', async () => {
+        const t = await launchOnRealFunnel()
+        release() // unsubscribe
+        disconnect()
+        expect(canonical().activeTasks).toEqual({})
+        expect(canonical().pendingApprovals).toEqual([])
+        void t.gate
+      })
+
+      it('releasing the wiring unsubscribes the host feed, and a reconfigure drops the previous one', () => {
+        const { dispatcher } = makeHarness()
+        const events = hostEvents()
+        const parents = makeParents().parents
+        const stop = dispatcher.configureParents(parents, undefined, events.subscribe)
+        expect(events.subscribed()).toBe(1)
+        dispatcher.configureParents(parents, undefined, events.subscribe)
+        expect(events.subscribed()).toBe(1)
+        stop()
+        expect(events.subscribed()).toBe(0)
+      })
+    })
+
+    describe('the user’s Stop on a card ends the X-Agent', () => {
+      it('Claude: row stopped, process released, approvals dismissed, never resumed again', async () => {
+        const removed = harnessRemoved()
+        const t = await launchClaude({ deps: { removeHarnessState: removed } })
+        await tick()
+        t.target.push(initOf(t.row.harnessRef))
+        await tick()
+        const gate = askTool(t)
+        await vi.waitFor(() => expect(t.parents.on('session:approval-request')).toHaveLength(1))
+
+        expect(t.dispatcher.stopDispatch('toolu_bg_1', 'routing-1')).toBe(true)
+        await vi.waitFor(() => expect(t.ledger.rows.get(t.row.id)!.state).toBe('stopped'))
+
+        expect(t.target.lastAbortController()!.signal.aborted).toBe(true)
+        expect(t.parents.on('session:approval-dismiss')).toHaveLength(1)
+        await expect(gate).resolves.toMatchObject({ behavior: 'deny' })
+        expect(removed).toHaveBeenCalledWith(
+          expect.objectContaining({ id: t.row.id, engine: 'claude' })
+        )
+        expect(t.parents.on('session:task-notification')[0].data).toMatchObject({
+          status: 'stopped'
+        })
+        const again = await t.dispatcher.dispatch(
+          { engine: 'claude', prompt: 'more', sessionId: t.row.harnessRef },
+          makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_again' })
+        )
+        expect(again.isError).toBe(true)
+        expect(again.text).toContain('Unknown dispatch session')
+      })
+
+      it('the same Stop on a BLOCKING run (a card the user stopped) ends it too', async () => {
+        const target = makeFakeClaudeTarget()
+        const removed = harnessRemoved()
+        const { dispatcher, ledger } = makeHarness({
+          loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+          spawnClaudeQuery: target.spawnClaudeQuery,
+          removeHarnessState: removed
+        })
+        const pending = dispatcher.dispatch(
+          { engine: 'claude', prompt: 'x' },
+          makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_fg_s' })
+        )
+        await tick()
+        target.push(initOf('c-fg-s'))
+        await tick()
+        dispatcher.stopDispatch('toolu_fg_s', 'routing-1')
+        expect((await pending).text).toBe('Dispatch stopped by user.')
+        expect(ledger.rowFor('claude', 'c-fg-s')!.state).toBe('stopped')
+        expect(removed).toHaveBeenCalled()
+      })
+
+      it('the parent’s interrupt of a blocking call leaves the target resumable', async () => {
+        const target = makeFakeClaudeTarget()
+        const removed = harnessRemoved()
+        const { dispatcher, ledger } = makeHarness({
+          loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+          spawnClaudeQuery: target.spawnClaudeQuery,
+          removeHarnessState: removed
+        })
+        const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_fg_i2' })
+        const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+        await tick()
+        target.push(initOf('c-int2'))
+        await tick()
+        dispatcher.stopDispatch('toolu_fg_i2', 'routing-1', { blockingOnly: true })
+        await pending
+        // Not `stopped`: nothing ended it, and a continuation resumes it.
+        expect(ledger.rowFor('claude', 'c-int2')!.state).toBe('interrupted')
+        expect(removed).not.toHaveBeenCalled()
+        const next = dispatcher.dispatch(
+          { engine: 'claude', prompt: 'again', sessionId: 'c-int2' },
+          makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_fg_i3' })
+        )
+        await tick()
+        target.push(resultMsg({ result: 'back', session_id: 'c-int2' }))
+        expect((await next).text).toBe('back')
+      })
+
+      it('pi: the child is disposed and its session directory removed (the row is stopped first)', async () => {
+        const target = makeFakePiTarget({ sessionId: 'pi-stop-1' })
+        const removed = harnessRemoved()
+        const { dispatcher, ledger } = makeHarness({
+          loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } }),
+          spawnPiTarget: target.spawnPiTarget,
+          removeHarnessState: removed
+        })
+        const ack = await dispatcher.dispatch(
+          { engine: 'pi', prompt: 'x', runInBackground: true },
+          makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_pi_bg' })
+        )
+        expect(ack.isError).toBeUndefined()
+        await tick()
+        expect(dispatcher.stopDispatch('toolu_pi_bg', 'routing-1')).toBe(true)
+        await vi.waitFor(() => expect(removed).toHaveBeenCalled())
+        const row = [...ledger.rows.values()][0]
+        expect(row.state).toBe('stopped')
+        expect(target.client.dispose).toHaveBeenCalled()
+        expect(removed).toHaveBeenCalledWith(
+          expect.objectContaining({ id: row.id, engine: 'pi', harnessRef: row.harnessRef })
+        )
+        expect(dispatcher.inFlightCount).toBe(0)
+      })
+    })
+
+    describe('a parent session’s deletion ends all its X-Agents', () => {
+      it('stops the running one, ends the idle ones, removes their harness state, and leaves other parents alone', async () => {
+        const removed = harnessRemoved()
+        const events = hostEvents()
+        const t = await launchClaude({ deps: { removeHarnessState: removed } })
+        t.dispatcher.configureParents(t.parents.parents, undefined, events.subscribe)
+        await tick()
+        t.target.push(initOf(t.row.harnessRef))
+        await tick()
+        const idleOwn = t.ledger.create(rowOf('routing-1', 'pi-old'))
+        t.ledger.update(idleOwn.id, { state: 'idle' })
+        const others = t.ledger.create(rowOf('routing-9', 'pi-other'))
+        t.ledger.update(others.id, { state: 'idle' })
+
+        // `session:removed` goes out before the engine has accepted the delete: it ends nothing.
+        events.fire('session:removed', ['routing-1'])
+        await tick()
+        expect(t.ledger.rows.get(t.row.id)!.state).toBe('running')
+        expect(t.ledger.rows.get(idleOwn.id)!.state).toBe('idle')
+        expect(removed).not.toHaveBeenCalled()
+
+        // The delete paths call this once the engine said yes.
+        t.dispatcher.endParent('routing-1')
+
+        await vi.waitFor(() => expect(t.ledger.rows.get(t.row.id)!.state).toBe('stopped'))
+        expect(t.ledger.rows.get(idleOwn.id)!.state).toBe('stopped')
+        expect(t.ledger.rows.get(others.id)!.state).toBe('idle')
+        expect(t.target.lastAbortController()!.signal.aborted).toBe(true)
+        expect(removed.mock.calls.map((c) => c[0].id).sort()).toEqual([t.row.id, idleOwn.id].sort())
+        await vi.waitFor(() => expect(t.dispatcher.inFlightCount).toBe(0))
+      })
+    })
+
+    describe('failure paths', () => {
+      it('a card Stop still ends the X-Agent when the run’s close throws', async () => {
+        const removed = harnessRemoved()
+        const t = await launchClaude({ deps: { removeHarnessState: removed } })
+        vi.spyOn(
+          t.dispatcher as unknown as { closeRun: () => void },
+          'closeRun'
+        ).mockImplementation(() => {
+          throw new Error('close blew up')
+        })
+        await tick()
+        t.target.push(initOf(t.row.harnessRef))
+        await tick()
+        t.dispatcher.stopDispatch('toolu_bg_1', 'routing-1')
+        await vi.waitFor(() => expect(t.ledger.rows.get(t.row.id)!.state).toBe('stopped'))
+        expect(removed).toHaveBeenCalledWith(expect.objectContaining({ id: t.row.id }))
+        expect(t.dispatcher.inFlightCount).toBe(0)
+      })
+
+      it('ending a parent’s X-Agents goes on past one that fails to end', async () => {
+        const removed = harnessRemoved()
+        removed.mockImplementationOnce(() => {
+          throw new Error('disk gone')
+        })
+        const { dispatcher, ledger } = makeHarness({ removeHarnessState: removed })
+        const a = ledger.create(rowOf('routing-1', 'pi-a'))
+        const b = ledger.create(rowOf('routing-1', 'pi-b'))
+        for (const row of [a, b]) ledger.update(row.id, { state: 'idle' })
+        dispatcher.endParent('routing-1')
+        expect(ledger.rows.get(a.id)!.state).toBe('stopped')
+        expect(ledger.rows.get(b.id)!.state).toBe('stopped')
+        expect(removed).toHaveBeenCalledTimes(2)
+      })
+    })
+
+    describe('after a background run', () => {
+      it('releases the process at once when the parent is not live (no object, or its engine down)', async () => {
+        for (const gone of ['no-object', 'engine-down'] as const) {
+          const parents = makeParents()
+          const t = await launchClaude({ parents })
+          await tick()
+          t.target.push(initOf(t.row.harnessRef))
+          await tick()
+          if (gone === 'no-object') parents.sessions.delete('routing-1')
+          else
+            parents.sessions.set('routing-1', {
+              ...parents.session('default'),
+              isEngineLive: () => false
+            })
+          t.target.push(resultMsg({ result: 'done', session_id: t.row.harnessRef }))
+          await vi.waitFor(() => expect(t.dispatcher.inFlightCount).toBe(0))
+          expect(t.target.lastAbortController()!.signal.aborted).toBe(true)
+          expect(t.ledger.rows.get(t.row.id)!.state).toBe('idle')
+          // ...and a later message resumes it from the row.
+          const again = t.dispatcher.dispatch(
+            { engine: 'claude', prompt: 'next', sessionId: t.row.harnessRef },
+            makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_next' })
+          )
+          await tick()
+          expect(t.target.spawnCalls).toHaveLength(2)
+          t.target.push(resultMsg({ result: 'resumed', session_id: t.row.harnessRef }))
+          expect((await again).text).toBe('resumed')
+        }
+      })
+
+      it('keeps the process for a live parent (a continuation is likely)', async () => {
+        const t = await launchClaude()
+        await tick()
+        t.target.push(initOf(t.row.harnessRef))
+        await tick()
+        t.target.push(resultMsg({ result: 'done', session_id: t.row.harnessRef }))
+        await vi.waitFor(() => expect(t.dispatcher.inFlightCount).toBe(0))
+        expect(t.target.lastAbortController()!.signal.aborted).toBe(false)
+      })
+
+      it('arms the parent’s idle timer again whenever a run ends (the session decides if anything still holds it)', async () => {
+        const PARENT = 'routing-1'
+        const parents = makeParents()
+        // What the session's idle timer sees at the moment it is asked to arm again.
+        const heldAtRearm: boolean[] = []
+        const rearm = vi.fn(() => void heldAtRearm.push(hasRunningDispatch(PARENT)))
+        parents.sessions.set(PARENT, { ...parents.session('default'), rearmIdleTimer: rearm })
+        const t = await launchClaude({ parents, ctx: { fromRoutingId: PARENT } })
+        await tick()
+        t.target.push(initOf(t.row.harnessRef))
+        await tick()
+        expect(rearm).not.toHaveBeenCalled()
+        // The dispatcher's own registry is what holds the timer while the run runs...
+        expect(hasRunningDispatch(PARENT)).toBe(true)
+        t.target.push(resultMsg({ result: 'done', session_id: t.row.harnessRef }))
+        await vi.waitFor(() => expect(rearm).toHaveBeenCalledTimes(1))
+        // ...and it has let go by the time the session is asked to arm it.
+        expect(heldAtRearm).toEqual([false])
+
+        // A Stop on the card ends the X-Agent: also a run's end.
+        const stopped = await launchClaude({
+          parents,
+          req: { name: 'bg-2' },
+          ctx: { toolUseId: 'toolu_bg_2', fromRoutingId: PARENT }
+        })
+        await tick()
+        stopped.target.push(initOf(stopped.row.harnessRef))
+        await tick()
+        stopped.dispatcher.stopDispatch('toolu_bg_2', PARENT)
+        await vi.waitFor(() => expect(rearm).toHaveBeenCalledTimes(2))
+      })
     })
   })
 })

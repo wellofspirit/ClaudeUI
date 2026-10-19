@@ -63,7 +63,7 @@ import { setOpencodeAuthHooks } from '../opencode/opencode-auth-hooks'
 import { OPENCODE_CODEX_VENDOR_ID } from '../auth/vault/CredentialSync'
 import { usageHubClient } from '../services/usage-hub/client'
 import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
-import { emitEvent, syncCore } from '../services/sync-host'
+import { addHostObserver, emitEvent, syncCore } from '../services/sync-host'
 import { makeDispatchParentLookup } from '../services/dispatch-parent-lookup'
 import { sharedProviderService } from '../shared-providers'
 import { logger } from '../services/logger'
@@ -222,7 +222,9 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
           : undefined
       }
     }),
-    (observer) => syncCore.onRekey(observer)
+    (observer) => syncCore.onRekey(observer),
+    // Its parent's disconnect (re-raise the cards it cleared) and deletion (end it).
+    (observer) => addHostObserver(observer)
   )
   // ClaudeUI's opencode config writes (settings, raw editor, providers, tools,
   // agent files) reload the running servers' locations (ADR-097 S8).

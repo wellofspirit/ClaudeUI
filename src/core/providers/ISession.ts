@@ -251,6 +251,13 @@ export interface ISession {
   setInactivityTimeout(ms: number): void
 
   /**
+   * Arm the idle timer again after something that held it ended: the dispatcher calls it
+   * when an X-Agent of this session ends (ADR-105 §3). A no-op for a busy session or one
+   * whose engine is down. Optional so a minimal test double need not carry it.
+   */
+  rearmIdleTimer?(): void
+
+  /**
    * Re-broadcast an IPC event under this session's routing (same wire shape
    * as the session's own internal `send()`). Used by cross-engine dispatch
    * (ADR-033 M2) to forward a dispatched Claude target's approval requests

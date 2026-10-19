@@ -93,9 +93,15 @@ describe('deriveTaskState', () => {
     expect(s.isRunning).toBe(true)
   })
 
-  it('nothing in a historical transcript is running', () => {
-    const s = deriveTaskState({ ...base, isHistorical: true, hasActiveTask: true })
-    expect(s.isRunning).toBe(false)
+  it('nothing in a historical transcript is running — unless its caller kept a record for it (a dispatched X-Agent, ADR-105 §5)', () => {
+    expect(deriveTaskState({ ...base, isHistorical: true }).isRunning).toBe(false)
+    expect(
+      deriveTaskState({ ...base, isHistorical: true, hasResult: true, notification: notif('t') })
+        .isRunning
+    ).toBe(false)
+    const kept = deriveTaskState({ ...base, isHistorical: true, hasActiveTask: true })
+    expect(kept.isRunning).toBe(true)
+    expect(kept.isLoaded).toBe(false)
   })
 
   it('marks an unfinished historical task as loaded, not running', () => {

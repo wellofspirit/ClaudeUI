@@ -209,6 +209,7 @@ import {
 } from './dispatch-target-ledger'
 import { locateClaudeTranscript } from './claude-transcript-locator'
 import { stricterMode } from '../../shared/mode-class'
+import { removeHarnessState } from './dispatch-target-end'
 import { DispatchRun, DispatchRunRegistry } from './dispatch-runs'
 import { makeRunContext, type DispatchParentLookup, type RunContext } from './dispatch-parent'
 import type {
@@ -656,6 +657,13 @@ export interface DispatcherDeps {
   codexHoldsThread?: (threadId: string) => boolean
   /** Does a pi target's session directory still exist? Defaults to `fs.existsSync`. */
   piSessionDirExists?: (dir: string) => boolean
+  /**
+   * Remove the harness-side state of an X-Agent that ended for good (opencode's session,
+   * pi's session directory). Defaults to `removeHarnessState`; tests inject a spy.
+   */
+  removeHarnessState?: (
+    row: Pick<DispatchTargetRow, 'id' | 'engine' | 'harnessRef'>
+  ) => Promise<void>
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
@@ -2044,24 +2052,28 @@ function emitDispatchProgress(ctx: DispatchContext, elapsedTimeSeconds: number):
  * background agents have, so the card, the roster and the attention gate read a
  * dispatch the way they read an agent. `taskId` is the X-Agent's ledger id.
  */
-function emitDispatchTaskStarted(
-  ctx: RunContext,
-  ledgerId: string,
-  description: string | undefined
-): void {
-  if (!ctx.toolUseId) return
-  ctx.emit('session:task-started', {
-    toolUseId: ctx.toolUseId,
+function dispatchTaskStartedRecord(
+  run: DispatchRun,
+  ledgerId: string
+): Record<string, unknown> | null {
+  if (!run.toolUseId) return null
+  return {
+    toolUseId: run.toolUseId,
     taskId: ledgerId,
     taskType: 'dispatch',
-    ...(description ? { description } : {}),
-    isBackgrounded: ctx.run.background,
+    ...(run.init.description ? { description: run.init.description } : {}),
+    isBackgrounded: run.background,
     // A blocking run's end is its tool_result. A background run's end wakes nothing until
     // B-3 delivers its result into the parent (and flips this to true): while the record
     // is armed with `wakesParent`, the attention gate holds back "Ready for input".
-    wakesParent: !ctx.run.background,
-    startedAt: ctx.run.init.startedAt
-  })
+    wakesParent: !run.background,
+    startedAt: run.init.startedAt
+  }
+}
+
+function emitDispatchTaskStarted(ctx: RunContext, ledgerId: string): void {
+  const record = dispatchTaskStartedRecord(ctx.run, ledgerId)
+  if (record) ctx.emit('session:task-started', record)
 }
 
 /**
@@ -2443,19 +2455,114 @@ export class CrossEngineDispatcher {
    */
   configureParents(
     parents: DispatchParentLookup,
-    onRekey?: (observer: (oldId: string, newId: string) => void) => () => void
+    onRekey?: (observer: (oldId: string, newId: string) => void) => () => void,
+    onHostEvent?: (observer: (channel: string, args: unknown[]) => void) => () => void
   ): () => void {
     this.releaseParents()
     this.parents = parents
-    this.unsubscribeRekey =
-      onRekey?.((oldId, newId) => this.runs.rekey(oldId, newId)) ?? ((): void => {})
+    const stopRekey = onRekey?.((oldId, newId) => this.runs.rekey(oldId, newId)) ?? ((): void => {})
+    // A parent's disconnect clears the task records and approval cards its X-Agents
+    // announced; its deletion ends them (ADR-105 §5).
+    const stopEvents =
+      onHostEvent?.((channel, args) => this.onHostEvent(channel, args)) ?? ((): void => {})
+    this.unsubscribeRekey = (): void => {
+      stopRekey()
+      stopEvents()
+    }
     return () => this.releaseParents()
   }
 
-  /** Stop following the previous wiring's rekeys (a reconfigure, or the host's teardown). */
+  /** Stop following the previous wiring's rekeys and events (a reconfigure, or the host's teardown). */
   private releaseParents(): void {
     this.unsubscribeRekey()
     this.unsubscribeRekey = (): void => {}
+  }
+
+  /**
+   * The two events of a parent's life that concern its X-Agents (a host observer: it runs
+   * after the reducer folded the event and before clients see it).
+   *
+   *  - `session:status` `disconnected`: the reducer has just cleared the session's
+   *    `activeTasks` and `pendingApprovals`, which are all the parent's cards of its
+   *    running X-Agents. {@link reRaiseFor} puts them back. This status — and not the
+   *    creation of a new session object — is the trigger: a `cancel()` on the SAME object
+   *    clears them with no re-creation, while a replacement by `SessionManager.create`
+   *    clears nothing (the old object's `dispose()` sends no status), so re-raising on
+   *    re-creation would double every approval card.
+   *
+   * A parent's DELETION is not read from `session:removed`: the delete paths announce it
+   * before the engine has accepted the delete, and a refused delete must leave the
+   * X-Agents alone. They call {@link endParent} once the engine said yes.
+   */
+  private onHostEvent(channel: string, args: unknown[]): void {
+    const parentId = args[0]
+    if (typeof parentId !== 'string') return
+    try {
+      if (
+        channel === 'session:status' &&
+        (args[1] as { state?: string } | undefined)?.state === 'disconnected'
+      )
+        this.reRaiseFor(parentId)
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `parent event "${channel}" failed: ${errText(err)}`)
+    }
+  }
+
+  /**
+   * Put back what a parent's disconnect cleared: the task record of every running run it
+   * launched, and every approval card a target of its still waits on. Only ever called
+   * right after such a clear (see {@link onHostEvent}), so nothing shows twice.
+   */
+  private reRaiseFor(parentId: string): void {
+    const parents = this.parents
+    if (!parents) return
+    const parent = this.runs.parentOf(parentId)
+    for (const run of this.runs.ofParent(parent)) {
+      if (!run.bound || !run.ledgerId) continue
+      const record = dispatchTaskStartedRecord(run, run.ledgerId)
+      if (record) parents.emit(parent, 'session:task-started', record)
+    }
+    for (const pending of this.pendingApprovals.values()) {
+      const target =
+        pending.targetSessionId === null ? undefined : this.targets.get(pending.targetSessionId)
+      if (target && this.ownedBy(target, parent)) {
+        parents.emit(parent, 'session:approval-request', { ...pending.card, reRaised: true })
+      }
+    }
+  }
+
+  /**
+   * A parent session was deleted — and its engine accepted the delete: every X-Agent it
+   * owns ends, running or not. A running one is stopped first and ends when its turn has
+   * settled (the run's own close); the rest end now. One that fails to end does not keep
+   * the others from it.
+   */
+  endParent(parentId: string): void {
+    const parent = this.runs.parentOf(parentId)
+    const running = new Set<string>()
+    for (const run of this.runs.ofParent(parent)) {
+      run.endRequested = true
+      try {
+        run.stopController.abort()
+      } catch (err) {
+        logger.warn('CrossEngineDispatcher', `could not stop a run of ${parent}: ${errText(err)}`)
+      }
+      if (run.ledgerId) running.add(run.ledgerId)
+    }
+    let rows: DispatchTargetRow[] = []
+    try {
+      rows = this.ledger.byParent(parent)
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `dispatch ledger lookup failed: ${errText(err)}`)
+    }
+    for (const row of rows) {
+      if (running.has(row.id) || row.state === 'stopped') continue
+      try {
+        this.endTarget(row.id, row)
+      } catch (err) {
+        logger.warn('CrossEngineDispatcher', `could not end X-Agent ${row.id}: ${errText(err)}`)
+      }
+    }
   }
 
   /** A re-keyed parent's old id now means its durable one (also what `configureParents` wires). */
@@ -2587,7 +2694,7 @@ export class CrossEngineDispatcher {
     // since the launch has just made: a continuation does not loosen it either way.
     if (row) run.launchMode = stricterMode(row.launchMode, run.init.launchMode)
     this.runs.bind(run, ledgerId, harnessId)
-    emitDispatchTaskStarted(ctx, ledgerId, run.init.description)
+    emitDispatchTaskStarted(ctx, ledgerId)
   }
 
   /**
@@ -2811,6 +2918,9 @@ export class CrossEngineDispatcher {
     }
     // The parent's own interrupt ends the calls it is waiting on, never a background run.
     if (opts?.blockingOnly && run.background) return false
+    // The user's Stop on the card ENDS the X-Agent (Claude Code does not resume a stopped
+    // agent either); the parent's interrupt of a blocking call leaves it resumable.
+    if (!opts?.blockingOnly) run.endRequested = true
     run.stopController.abort()
     return true
   }
@@ -2994,6 +3104,8 @@ export class CrossEngineDispatcher {
             'CrossEngineDispatcher',
             `consuming pending stop-intent for toolUseId=${ctx.toolUseId} — aborting at start`
           )
+          // Armed by the card's Stop (`armIfUnknown`), so it ends the X-Agent like one.
+          run.endRequested = true
           run.stopController.abort()
         }
       }
@@ -3095,9 +3207,16 @@ export class CrossEngineDispatcher {
       this.closeRun(ctx, result)
     } catch (err) {
       logger.warn('CrossEngineDispatcher', `dispatch run close failed: ${errText(err)}`)
+    }
+    // Its own try: a Stop on the card must still end the X-Agent when the close threw.
+    try {
+      this.settleTarget(run)
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `dispatch run settle failed: ${errText(err)}`)
     } finally {
       this.runs.remove(run)
       cleanup()
+      this.rearmParentIdle(run)
     }
     return result
   }
@@ -3230,55 +3349,142 @@ export class CrossEngineDispatcher {
     for (const [sessionId, entry] of [...this.targets]) {
       if (!this.ownedBy(entry, routingId)) continue
       if (entry.busy && this.runs.byLedgerId(entry.ledgerId)?.background) continue
-      this.targets.delete(sessionId)
-      this.dismissPendingForTarget(sessionId)
-      entry.released = true
-      this.ledgerSet(entry.ledgerId, { state: entry.busy ? 'interrupted' : 'idle' })
-      if (entry.kind === 'opencode') {
-        // A verdict still in flight sees the entry gone from `this.targets`
-        // (its `stillPending`), so it replies nothing (ADR-088).
-        this.sealOpencodeTargetItems(entry)
-        // Settle a turn still in flight (ADR-033's 2026-09-01 amendment): the
-        // entry has just left `this.targets`, so nothing else can.
-        const settle = entry.settled
-        entry.settled = null
-        settle?.({ kind: 'failed', message: 'the dispatching session was disposed' })
-        this.teardownOpencodeTarget(entry)
-      } else if (entry.kind === 'claude') {
-        entry.itemStreams.sealAll()
-        // Killing the process is the only teardown a Claude target needs —
-        // no server ref, no remote session to delete.
-        entry.abortController.abort()
-      } else if (entry.kind === 'pi') {
-        entry.runner.flush()
-        // pi (ADR-033 M4c): kill the child + its OWN per-target bridge host
-        // (mirrors PiSession.cancel()'s identical teardown order). Both calls
-        // are idempotent (PiRpcClient.dispose()/PiBridgeHost.dispose() no-op
-        // if already torn down), so this is safe even if the process already
-        // exited on its own (onExit already disposed the bridge host).
-        entry.runner.dispose()
-      } else {
-        if (entry.ctx.toolUseId) this.sealCodexTargetItems(entry, entry.ctx.toolUseId)
-        // codex (slice H, ADR-069 §7): a target is a THREAD on the caller's
-        // host, so teardown is an interrupt and a detach — never a kill, which
-        // would take every other session on that account down with it. The
-        // native thread is left on disk (a dispatch target's thread is an
-        // ordinary Codex thread; deleting it is the user's call, not a disposal
-        // side effect) and unsubscribed, which is what lets the binary unload it
-        // and release its writer lock.
-        //
-        // A turn still in flight has to be settled HERE: the process no longer
-        // dies, so no `onDisconnect` will do it, and the dispatch would hold its
-        // run slot until the watchdog fired.
-        if (entry.sessionId && entry.turnId)
-          void entry.connection
-            .request('turn/interrupt', { threadId: entry.sessionId, turnId: entry.turnId })
-            .catch(() => {})
-        entry.connection.detach()
-        const settle = entry.settled
-        entry.settled = null
-        settle?.({ kind: 'error', message: 'the dispatching session was disposed' })
+      this.releaseEntry(sessionId, entry, entry.busy ? 'interrupted' : 'idle')
+    }
+  }
+
+  /**
+   * Take a live target out of service: out of the table, its approvals dismissed, its
+   * row set to `state` (null leaves the row as the last turn wrote it), and its process
+   * or connection released per engine. The harness SESSION stays; ending it for good is
+   * {@link endTarget}'s.
+   */
+  private releaseEntry(
+    sessionId: string,
+    entry: TargetEntry,
+    state: DispatchTargetState | null
+  ): void {
+    this.targets.delete(sessionId)
+    this.dismissPendingForTarget(sessionId)
+    entry.released = true
+    if (state) this.ledgerSet(entry.ledgerId, { state })
+    if (entry.kind === 'opencode') {
+      // A verdict still in flight sees the entry gone from `this.targets`
+      // (its `stillPending`), so it replies nothing (ADR-088).
+      this.sealOpencodeTargetItems(entry)
+      // Settle a turn still in flight (ADR-033's 2026-09-01 amendment): the
+      // entry has just left `this.targets`, so nothing else can.
+      const settle = entry.settled
+      entry.settled = null
+      settle?.({ kind: 'failed', message: 'the dispatching session was disposed' })
+      this.teardownOpencodeTarget(entry)
+    } else if (entry.kind === 'claude') {
+      entry.itemStreams.sealAll()
+      // Killing the process is the only teardown a Claude target needs —
+      // no server ref, no remote session to delete.
+      entry.abortController.abort()
+    } else if (entry.kind === 'pi') {
+      entry.runner.flush()
+      // pi (ADR-033 M4c): kill the child + its OWN per-target bridge host
+      // (mirrors PiSession.cancel()'s identical teardown order). Both calls
+      // are idempotent (PiRpcClient.dispose()/PiBridgeHost.dispose() no-op
+      // if already torn down), so this is safe even if the process already
+      // exited on its own (onExit already disposed the bridge host).
+      entry.runner.dispose()
+    } else {
+      if (entry.ctx.toolUseId) this.sealCodexTargetItems(entry, entry.ctx.toolUseId)
+      // codex (slice H, ADR-069 §7): a target is a THREAD on the caller's
+      // host, so teardown is an interrupt and a detach — never a kill, which
+      // would take every other session on that account down with it. The
+      // native thread is left on disk (a dispatch target's thread is an
+      // ordinary Codex thread; deleting it is the user's call, not a disposal
+      // side effect) and unsubscribed, which is what lets the binary unload it
+      // and release its writer lock.
+      //
+      // A turn still in flight has to be settled HERE: the process no longer
+      // dies, so no `onDisconnect` will do it, and the dispatch would hold its
+      // run slot until the watchdog fired.
+      if (entry.sessionId && entry.turnId)
+        void entry.connection
+          .request('turn/interrupt', { threadId: entry.sessionId, turnId: entry.turnId })
+          .catch(() => {})
+      entry.connection.detach()
+      const settle = entry.settled
+      entry.settled = null
+      settle?.({ kind: 'error', message: 'the dispatching session was disposed' })
+    }
+  }
+
+  /** The live (not yet released) target a ledger row is, if the dispatcher holds one. */
+  private liveEntry(ledgerId: string): { sessionId: string; entry: TargetEntry } | undefined {
+    for (const [sessionId, entry] of this.targets) {
+      if (entry.ledgerId === ledgerId) return { sessionId, entry }
+    }
+    return undefined
+  }
+
+  /**
+   * End an X-Agent for good (ADR-105 §5): its process released and approvals dismissed,
+   * its row `stopped` (never resumed again) and the harness's own session removed where
+   * the engine allows (opencode's session, pi's directory; Claude's transcript and
+   * Codex's thread stay). The run, if there was one, has already settled.
+   */
+  private endTarget(ledgerId: string, known?: DispatchTargetRow): void {
+    let row = known
+    if (!row) {
+      try {
+        row = this.ledger.get(ledgerId)
+      } catch {
+        row = undefined
       }
+    }
+    const live = this.liveEntry(ledgerId)
+    if (live) this.releaseEntry(live.sessionId, live.entry, 'stopped')
+    else this.ledgerSet(ledgerId, { state: 'stopped' })
+    const target =
+      row ?? (live ? { id: ledgerId, engine: live.entry.kind, harnessRef: live.sessionId } : null)
+    if (!target?.harnessRef) return
+    // After the release: pi's process must be gone before its directory is.
+    void (this.deps.removeHarnessState ?? removeHarnessState)(target)
+  }
+
+  /**
+   * A run has settled (its body returned and its notification went out): decide what
+   * becomes of its target.
+   *  - The user stopped it from its card, or its parent was deleted: it ends.
+   *  - A background run whose parent session is not live: nothing will continue it soon,
+   *    and a parked process under a dead parent would never be released, so the process
+   *    goes now. The row is left as the turn wrote it (`idle`, or `failed`) and a later
+   *    message resumes it.
+   */
+  private settleTarget(run: DispatchRun): void {
+    if (!run.ledgerId) return
+    if (run.endRequested) {
+      this.endTarget(run.ledgerId)
+      return
+    }
+    if (!run.background || this.parentIsLive(run)) return
+    const live = this.liveEntry(run.ledgerId)
+    if (live) this.releaseEntry(live.sessionId, live.entry, null)
+  }
+
+  /** Is the run's parent session up? Unknown (no lookup wired) counts as up: nothing is released on a guess. */
+  private parentIsLive(run: DispatchRun): boolean {
+    const parents = this.parents
+    if (!parents) return true
+    const session = parents.session(this.runs.parentOf(run.init.parentId))
+    return session !== undefined && session.isEngineLive?.() !== false
+  }
+
+  /**
+   * A run is over: the parent's idle timer, held while it owned running X-Agents, is armed
+   * again (the session decides whether anything still holds it). Best effort.
+   */
+  private rearmParentIdle(run: DispatchRun): void {
+    try {
+      this.parents?.session(this.runs.parentOf(run.init.parentId))?.rearmIdleTimer?.()
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `idle timer re-arm failed: ${errText(err)}`)
     }
   }
 

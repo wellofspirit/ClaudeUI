@@ -7,10 +7,20 @@
  * `main/services/__tests__/cross-engine-dispatcher.component.test.ts`.
  */
 import { describe, expect, it, vi } from 'vitest'
+
+// An idle timer resets on many events: its question must never reach the database.
+const db = vi.hoisted(() => ({ touched: vi.fn() }))
+vi.mock('../db', () => {
+  db.touched()
+  throw new Error('the run registry must not touch the database')
+})
+
 import {
   DispatchRun,
   DispatchRunRegistry,
   MAX_RENAMED_PARENTS,
+  hasRunningDispatch,
+  registriesHoldingRunsForTests,
   type DispatchRunInit
 } from '../dispatch-runs'
 import {
@@ -327,5 +337,68 @@ describe('makeRunContext — the live parent', () => {
     })
     expect(ctx.emit).toBe(base.emit)
     expect(ctx.run).toBe(run)
+  })
+})
+
+describe('hasRunningDispatch — what a parent’s idle timer asks on every reset', () => {
+  it('answers from the registry in memory: holds while a run of that parent is registered, releases when it ends', () => {
+    const registry = new DispatchRunRegistry()
+    const run = makeRun({ parentId: 'idle-p1' })
+    expect(hasRunningDispatch('idle-p1')).toBe(false)
+    registry.add(run)
+    expect(hasRunningDispatch('idle-p1')).toBe(true)
+    // bound or not, background or not: the run is registered for its whole life
+    registry.bind(run, 's-abc123', 'harness-1')
+    expect(hasRunningDispatch('idle-p1')).toBe(true)
+    expect(hasRunningDispatch('someone-else')).toBe(false)
+    registry.remove(run)
+    expect(hasRunningDispatch('idle-p1')).toBe(false)
+  })
+
+  it('follows a re-key: a run launched under the temporary id holds the durable one', () => {
+    const registry = new DispatchRunRegistry()
+    const run = makeRun({ parentId: 'tmp-idle' })
+    registry.add(run)
+    expect(hasRunningDispatch('uuid-idle')).toBe(false)
+    registry.rekey('tmp-idle', 'uuid-idle')
+    expect(hasRunningDispatch('uuid-idle')).toBe(true)
+    registry.remove(run)
+    expect(hasRunningDispatch('uuid-idle')).toBe(false)
+  })
+
+  it('a registry that drained leaves the set the idle timers scan', () => {
+    const before = registriesHoldingRunsForTests()
+    const registry = new DispatchRunRegistry()
+    const runA = makeRun({ parentId: 'idle-p4', toolUseId: 'toolu_a' })
+    const runB = makeRun({ parentId: 'idle-p4', toolUseId: 'toolu_b' })
+    registry.add(runA)
+    registry.add(runB)
+    expect(registriesHoldingRunsForTests()).toBe(before + 1)
+    registry.remove(runA)
+    expect(registriesHoldingRunsForTests()).toBe(before + 1)
+    registry.remove(runB)
+    expect(registriesHoldingRunsForTests()).toBe(before)
+  })
+
+  it('sees the runs of every registry', () => {
+    const a = new DispatchRunRegistry()
+    const b = new DispatchRunRegistry()
+    const runA = makeRun({ parentId: 'idle-p2', toolUseId: 'toolu_a' })
+    const runB = makeRun({ parentId: 'idle-p2', toolUseId: 'toolu_b' })
+    a.add(runA)
+    b.add(runB)
+    a.remove(runA)
+    expect(hasRunningDispatch('idle-p2')).toBe(true)
+    b.remove(runB)
+    expect(hasRunningDispatch('idle-p2')).toBe(false)
+  })
+
+  it('never touches the database (the module is a leaf; the mock above throws on import)', () => {
+    const registry = new DispatchRunRegistry()
+    const run = makeRun({ parentId: 'idle-p3' })
+    registry.add(run)
+    expect(() => hasRunningDispatch('idle-p3')).not.toThrow()
+    expect(db.touched).not.toHaveBeenCalled()
+    registry.remove(run)
   })
 })

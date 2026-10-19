@@ -649,6 +649,7 @@ export class ClaudeSession extends BaseSession {
 
   protected override resetInactivityTimer(): void {
     this.clearInactivityTimer()
+    if (this.idleTimerHeld()) return
     if (this.inactivityTimeoutMs > 0) {
       this.inactivityTimer = setTimeout(() => {
         logger.info(

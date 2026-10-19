@@ -1109,7 +1109,7 @@ describe('opencode target — stop, timeout, abort', () => {
     fake.child('oc-sess-1', 'ses_child', 'call_sub')
     fake.start('ses_child')
     await tick()
-    expect(dispatcher.stopDispatch('tu-1', 'routing-1')).toBe(true)
+    expect(dispatcher.stopDispatch('tu-1', 'routing-1', { blockingOnly: true })).toBe(true)
     const result = await running
     expect(result).toMatchObject({ isError: true, text: 'Dispatch stopped by user.' })
     expect(emitted(ctx, 'session:task-notification').at(-1)).toMatchObject({ status: 'stopped' })
@@ -1123,6 +1123,35 @@ describe('opencode target — stop, timeout, abort', () => {
       makeCtx()
     )
     expect(next.text).toBe('target answer')
+  })
+
+  it('a Stop pressed on the card ENDS the X-Agent: row stopped, lease released, its opencode session deleted, never resumed', async () => {
+    const removed = vi.fn(async () => {})
+    const { dispatcher, client, fake, ledger, serverManager } = makeHarness({
+      removeHarnessState: removed
+    })
+    fake.next({ hold: true })
+    const running = dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'a' },
+      makeCtx({ toolUseId: 'tu-1' })
+    )
+    await tick()
+    expect(dispatcher.stopDispatch('tu-1', 'routing-1')).toBe(true) // the card: no blockingOnly
+    expect(await running).toMatchObject({ isError: true, text: 'Dispatch stopped by user.' })
+    await tick()
+
+    expect(ledger.rowFor('opencode', 'oc-sess-1')?.state).toBe('stopped')
+    expect(removed).toHaveBeenCalledWith(
+      expect.objectContaining({ engine: 'opencode', harnessRef: 'oc-sess-1' })
+    )
+    expect(client.interrupt).toHaveBeenCalledWith('oc-sess-1')
+    expect(serverManager.releaseIfCurrent).toHaveBeenCalled()
+    const again = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'b', sessionId: 'oc-sess-1' },
+      makeCtx()
+    )
+    expect(again.isError).toBe(true)
+    expect(again.text).toContain('Unknown dispatch session')
   })
 
   it("the caller's abort cancels the turn", async () => {
@@ -1333,7 +1362,7 @@ describe('opencode target — usage and the cost cap', () => {
     const ctx = makeCtx({ toolUseId: 'tu-1' })
     const r1 = dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, ctx)
     await tick()
-    dispatcher.stopDispatch('tu-1')
+    dispatcher.stopDispatch('tu-1', undefined, { blockingOnly: true })
     await r1
     expect(recorded).toHaveLength(0)
 
@@ -1931,7 +1960,7 @@ describe('opencode target — cards and their lifecycle', () => {
     const { dispatcher, fake, ctx, result } = await running()
     fake.ask('oc-sess-1', { id: 'per_1', action: 'edit', resources: ['a'] })
     await tick()
-    dispatcher.stopDispatch('tu-1')
+    dispatcher.stopDispatch('tu-1', undefined, { blockingOnly: true })
     await result
     expect(emitted(ctx, 'session:approval-dismiss')).toContainEqual({
       requestId: `${XENG_REQUEST_PREFIX}per_1`
@@ -2197,7 +2226,7 @@ describe('opencode target — a Stop before the turn starts (review S9 #1)', () 
     const running = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     await tick()
     expect(client.prompt).toHaveBeenCalledTimes(1)
-    dispatcher.stopDispatch('tu-1', 'routing-1')
+    dispatcher.stopDispatch('tu-1', 'routing-1', { blockingOnly: true })
     expect((await running).text).toBe('Dispatch stopped by user.')
     // Nothing is cancelled before the POST settles (its item may not exist yet).
     expect(client.cancelInbox).not.toHaveBeenCalled()
@@ -2222,6 +2251,36 @@ describe('opencode target — a Stop before the turn starts (review S9 #1)', () 
     fake.start('oc-sess-1')
     await tick()
     expect(client.interrupt).toHaveBeenCalledWith('oc-sess-1')
+  })
+
+  it('a CARD Stop while the prompt POST is in flight ends the X-Agent: its session is removed even though the POST has not settled', async () => {
+    const removed = vi.fn(async () => {})
+    const { dispatcher, client, ledger } = makeHarness({ removeHarnessState: removed })
+    let admit!: () => void
+    const admitted = new Promise<void>((resolve) => (admit = resolve))
+    const real = client.prompt.getMockImplementation()!
+    client.prompt.mockImplementationOnce(async (sessionID, input) => {
+      await admitted
+      return real(sessionID, input)
+    })
+    const running = dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'x' },
+      makeCtx({ toolUseId: 'tu-1' })
+    )
+    await tick()
+    expect(client.prompt).toHaveBeenCalledTimes(1)
+    dispatcher.stopDispatch('tu-1', 'routing-1') // the card
+    expect((await running).text).toBe('Dispatch stopped by user.')
+    await tick()
+
+    expect(ledger.rowFor('opencode', 'oc-sess-1')?.state).toBe('stopped')
+    expect(removed).toHaveBeenCalledWith(
+      expect.objectContaining({ engine: 'opencode', harnessRef: 'oc-sess-1' })
+    )
+    // The POST settling afterwards harms nothing (the session it names is going away).
+    admit()
+    await tick(6)
+    expect(ledger.rowFor('opencode', 'oc-sess-1')?.state).toBe('stopped')
   })
 
   it('an ask while the target is idle (no dispatch turn running) is refused with a message', async () => {

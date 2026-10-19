@@ -183,6 +183,27 @@ describe('a finished agent in the roster', () => {
         ]
       })
 
+    it('on a reopened (historical) parent the running X-Agent is still a running row (the card agrees)', async () => {
+      inFlight(true, true)
+      setSession({ isHistorical: true })
+      await renderList()
+      expect(screen.getByTestId('AgentRow').getAttribute('data-running')).toBe('true')
+    })
+
+    it('...but a native task record on a historical parent is not', async () => {
+      setSession({
+        isHistorical: true,
+        messages: [
+          spawn('tu-nat', 'Agent', { description: 'Wait', subagent_type: 'general-purpose' }),
+          result('tu-nat', 'Async agent launched successfully.')
+        ],
+        activeTasks: { 'tu-nat': { taskId: 'a1', taskType: 'local_agent', isBackgrounded: true } },
+        taskNotifications: []
+      })
+      await renderList()
+      expect(screen.queryAllByTestId('AgentRow')).toHaveLength(0)
+    })
+
     for (const [label, background, launched] of [
       ['a blocking run (record, no tool_result yet)', false, false],
       ['a background run (launch ack + record)', true, true]

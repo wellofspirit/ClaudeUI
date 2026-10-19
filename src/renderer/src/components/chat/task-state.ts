@@ -88,7 +88,9 @@ export function deriveTaskState({
   resultIsError = false
 }: TaskLifecycleInput): TaskLifecycleState {
   const isRunning = isHistorical
-    ? false
+    ? // A transcript knows no running task, except a record the caller kept for it: a
+      // dispatched X-Agent, rebuilt from the ledger on a reopen (ADR-105 §5).
+      hasActiveTask
     : // An armed lifecycle record outranks everything, INCLUDING an earlier
       // terminal event: that is exactly the state a resumed agent is in — run
       // 1 notified, then run 2 started (ADR-073).

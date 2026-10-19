@@ -3,6 +3,7 @@ import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
 import type {
+  ActiveTask,
   ChatMessage,
   ContentBlock,
   DirectoryGroup,
@@ -838,6 +839,12 @@ export interface SessionHistoryResult {
    * sticky for the session, so the user should know which model answered).
    */
   warnings: string[]
+  /**
+   * Tasks that are running RIGHT NOW although the transcript cannot say so: the running
+   * X-Agents of a dispatching session, from the ledger (ADR-105 §5). Added by
+   * `readSessionHistory`, never by an engine's reader; keyed by the launching tool_use id.
+   */
+  activeTasks?: Record<string, ActiveTask>
 }
 
 /**

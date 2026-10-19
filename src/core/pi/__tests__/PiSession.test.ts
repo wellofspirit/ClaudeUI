@@ -447,6 +447,7 @@ import { piMcpName } from '../pi-mcp-bridge'
 import { PLAN_MODE_DENY_REASON } from '../permission-engine'
 import { loadPiAgentRegistry, type PiAgentDefinition } from '../pi-agent-registry'
 import { logger } from '../../services/logger'
+import { startRunningDispatch } from '../../../test/helpers/running-dispatch'
 import { configureSessionTools } from '../../services/session-tools'
 import {
   SESSION_TOOL_NAMES,
@@ -6988,6 +6989,26 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
       bg.child.push({ type: 'agent_settled' })
       await vi.waitFor(() => expect(parentDeliveries()).toHaveLength(1))
       expect(session.status.state).toBe('idle')
+      vi.advanceTimersByTime(1_500)
+      expect(mockDispose).toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('B10: a running X-Agent holds the idle timer too; the dispatcher arms it again once the X-Agent has ended', async () => {
+    const win = new MockWindow()
+    const { session } = await parent('rid-s3-b10', win)
+    session.setInactivityTimeout(1_000)
+    const endRun = startRunningDispatch('rid-s3-b10')
+    vi.useFakeTimers()
+    try {
+      settleParent()
+      vi.advanceTimersByTime(5_000)
+      expect(mockDispose).not.toHaveBeenCalled()
+
+      endRun()
+      session.rearmIdleTimer()
       vi.advanceTimersByTime(1_500)
       expect(mockDispose).toHaveBeenCalled()
     } finally {

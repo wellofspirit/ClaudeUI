@@ -36,6 +36,7 @@ import { loadSettings, loadSessionConfig, loadSlashCommands } from './ui-config'
 import { pruneOrphanClaudeSessionMeta } from './session-meta-prune'
 import { seedLinkState } from './session-links'
 import { interruptStaleDispatchTargets } from './dispatch-target-ledger'
+import { sweepOrphanDispatchTargets } from './dispatch-target-end'
 import { loadClaudePermissions } from './claude-settings'
 import { listDirectories } from './session-history'
 import { historyFor } from './engine-history'
@@ -302,6 +303,9 @@ export async function seedCanonicalAppState(): Promise<void> {
   // ADR-105: an X-Agent still `running` after a restart belonged to a process that is
   // gone. `interruptStaleDispatchTargets` never throws.
   interruptStaleDispatchTargets()
+  // ...and one whose parent session no longer exists ends with it (ADR-105 §5). Only a
+  // parent that can be PROVEN gone counts; `sweepOrphanDispatchTargets` never throws.
+  sweepOrphanDispatchTargets()
 
   try {
     // ADR-050: the flag a remote client cannot derive, because it cannot read

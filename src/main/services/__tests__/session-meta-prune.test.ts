@@ -297,3 +297,38 @@ describe('pruneOrphanClaudeSessionMeta', () => {
     }
   })
 })
+
+// The same proof of "no record", asked by the X-Agent boot sweep (ADR-105 §5) about parent
+// sessions: it ends an X-Agent only for a parent that is provably gone, so every failure mode
+// must answer "none", never "all".
+describe('claudeSessionsWithNoRecord', () => {
+  it('answers with the ids that have no transcript and no mention in sessions.json', async () => {
+    const { prune } = await fresh()
+    transcript('-p', 'has-transcript')
+    writeSessionsJson({ recentSessions: ['mentioned'], customTitles: { titled: 'T' } })
+    expect(
+      prune.claudeSessionsWithNoRecord(['has-transcript', 'mentioned', 'titled', 'gone'])
+    ).toEqual(['gone'])
+  })
+
+  it('answers none when the store proves nothing (empty, unreadable registry, CLAUDE_CONFIG_DIR)', async () => {
+    const { prune } = await fresh()
+    // an empty transcript store
+    expect(prune.claudeSessionsWithNoRecord(['gone'])).toEqual([])
+    transcript('-p', 'anchor')
+    expect(prune.claudeSessionsWithNoRecord(['gone'])).toEqual(['gone'])
+    // a registry that does not parse
+    fs.writeFileSync(SESSIONS_FILE(), '{ "recentSessions": ["gone"')
+    expect(prune.claudeSessionsWithNoRecord(['gone'])).toEqual([])
+    fs.rmSync(SESSIONS_FILE())
+    // the user's own config dir
+    process.env.CLAUDE_CONFIG_DIR = nodePath.join(TEMP_HOME, 'elsewhere')
+    expect(prune.claudeSessionsWithNoRecord(['gone'])).toEqual([])
+  })
+
+  it('asks about nothing when given nothing', async () => {
+    const { prune } = await fresh()
+    transcript('-p', 'anchor')
+    expect(prune.claudeSessionsWithNoRecord([])).toEqual([])
+  })
+})

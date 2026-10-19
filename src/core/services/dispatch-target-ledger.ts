@@ -21,6 +21,7 @@ import {
   allDispatchTargetHarnessRefs,
   dispatchTargetSpend,
   dispatchTargetsByParent,
+  dispatchTargetsNotStopped,
   getDispatchTarget,
   getDispatchTargetByHarnessRef,
   insertDispatchTargetWithRef,
@@ -167,6 +168,19 @@ export function interruptStaleDispatchTargets(): number {
       `boot pass over the dispatch ledger failed: ${err instanceof Error ? err.message : String(err)}`
     )
     return 0
+  }
+}
+
+/** Every row that was not ended on purpose, for the boot sweep. Empty when the ledger cannot be read. */
+export function liveDispatchTargets(): DispatchTargetRow[] {
+  try {
+    return dispatchTargetsNotStopped()
+  } catch (err) {
+    logger.warn(
+      'DispatchLedger',
+      `could not list the dispatch ledger: ${err instanceof Error ? err.message : String(err)}`
+    )
+    return []
   }
 }
 

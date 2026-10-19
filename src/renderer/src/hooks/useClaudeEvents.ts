@@ -635,7 +635,10 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
     }
 
     case 'session:approval-request': {
-      const approval = args[1] as { toolName?: string } | undefined
+      const approval = args[1] as { toolName?: string; reRaised?: boolean } | undefined
+      // A card the host put back after the parent's disconnect (ADR-105 §5) was announced
+      // when it first came: the reducer lists it again, nothing else fires.
+      if (approval?.reRaised) return
       if (store.activeSessionId !== routingId || !document.hasFocus()) {
         store.setNeedsAttention(routingId, true)
       }

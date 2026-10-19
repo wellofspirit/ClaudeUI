@@ -2,6 +2,7 @@ import type { EngineId, SessionInfo, StatusLineData } from '../../shared/types'
 import { getSessionMeta } from './db'
 import { withSessionCards } from './session-links'
 import { withProposalCards } from './session-proposals'
+import { withDispatchTasks } from './dispatch-task-history'
 import {
   listDirectories,
   loadSessionHistory as loadClaudeHistory,
@@ -22,7 +23,8 @@ import type { ForkAnchorResult } from '../../shared/types'
 interface EngineHistory {
   read(sessionId: string, projectKey: string, anchor?: string): Promise<SessionHistoryResult>
   list(): Promise<SessionInfo[]>
-  delete(sessionId: string, projectKey: string): Promise<void>
+  /** Resolves `false` when the engine could not delete the session (best-effort deleters); a refusal throws. */
+  delete(sessionId: string, projectKey: string): Promise<boolean | void>
   forkAnchor(
     sessionId: string,
     cwd: string,
@@ -114,9 +116,13 @@ export function readSessionHistory(
       // state they are in now. Not for an anchored read: only a fork passes an
       // anchor, and a fork is a new session that started and proposed none of the
       // source's.
-      const messages = anchor
-        ? result.messages
-        : withProposalCards(sessionId, withSessionCards(sessionId, result.messages))
-      return messages === result.messages ? result : { ...result, messages }
+      if (anchor) return result
+      const messages = withProposalCards(sessionId, withSessionCards(sessionId, result.messages))
+      // ...and the cards of its X-Agents (ADR-105 §5), which the dispatcher emits and no
+      // transcript holds; they join on the launching tool call, so the messages come first.
+      return withDispatchTasks(
+        sessionId,
+        messages === result.messages ? result : { ...result, messages }
+      )
     })
 }

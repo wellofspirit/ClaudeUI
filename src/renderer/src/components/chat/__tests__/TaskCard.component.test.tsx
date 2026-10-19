@@ -369,6 +369,67 @@ describe('TaskCard — a dispatch run (task-started / task-notification)', () =>
     expect(screen.queryByTestId('md')).not.toBeInTheDocument()
   })
 
+  // A reopened parent (sidebar click) is a historical session, but its X-Agent still runs: the
+  // ledger rebuilt its record (ADR-105 §5), and the card must show it and offer Stop.
+  describe('on a reopened (historical) parent', () => {
+    const reopen = (): void => {
+      useSessionStore.setState((state) => ({
+        sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], isHistorical: true } }
+      }))
+      mirrorStoreIntoReplica()
+    }
+    const backgroundView = { ...view, background: true }
+
+    it('a running X-Agent reads running and Stop reaches the dispatcher (no live parent needed)', async () => {
+      started(true)
+      reopen()
+      const stopCalls: Array<{ routingId: string; toolUseId: string; isDispatch?: boolean }> = []
+      app.bridge.ipcMain.handle(
+        'session:stop-task',
+        async (_e, routingId: string, toolUseId: string, isDispatch?: boolean) => {
+          stopCalls.push({ routingId, toolUseId, isDispatch })
+          return { success: true }
+        }
+      )
+      render(<TaskCard block={block} result={ack} view={backgroundView} />)
+      expect(status()).toBe('running')
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('TaskCard.stop'))
+      })
+      expect(stopCalls).toEqual([
+        { routingId: ROUTE, toolUseId: 'toolu_dispatch_run', isDispatch: true }
+      ])
+    })
+
+    it('a finished X-Agent (the ledger’s terminal notification, no record) reads completed with no Stop', () => {
+      reopen()
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_run',
+        status: 'completed',
+        outputFile: '',
+        summary: 'The X-Agent finished.'
+      })
+      render(<TaskCard block={block} result={ack} view={backgroundView} />)
+      expect(status()).toBe('completed')
+      expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+    })
+
+    it('an interrupted X-Agent (neutral `unfinished`) reads loaded, not stopped', () => {
+      reopen()
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_run',
+        status: 'unfinished',
+        outputFile: '',
+        summary: 'interrupted; it can be resumed.'
+      })
+      render(<TaskCard block={block} result={ack} view={backgroundView} />)
+      expect(status()).toBe('loaded')
+      expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+    })
+  })
+
   it('a stopped run ends stopped, not running', () => {
     started(true)
     const backgroundView = { ...view, background: true }

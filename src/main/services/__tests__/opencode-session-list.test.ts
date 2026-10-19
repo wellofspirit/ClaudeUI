@@ -84,6 +84,8 @@ vi.mock('../../../core/services/session-history', () => ({
 import {
   __resetOpencodeSessionListForTests,
   deleteOpencodeSession,
+  deleteOpencodeSessionWhenServerUp,
+  refreshOpencodeSessionList,
   listOpencodeSessionsForReconcile,
   listOpencodeSessionsGlobal,
   __resetOpencodeSessionListThrottleForTests,
@@ -609,17 +611,92 @@ describe('deleteOpencodeSession (HTTP, global-by-id)', () => {
 
   it('resolves without throwing when the server is down (best-effort)', async () => {
     mockAcquireIfRunning.mockRejectedValueOnce(new Error('server down'))
-    await expect(deleteOpencodeSession('ses_del')).resolves.toBeUndefined()
+    await expect(deleteOpencodeSession('ses_del')).resolves.toBe(false)
+  })
+
+  it('says whether the session is gone: true on success and on a 404, false when the server is down or refuses', async () => {
+    mockDeleteSession.mockResolvedValueOnce(true)
+    await expect(deleteOpencodeSession('ses_ok')).resolves.toBe(true)
+    mockDeleteSession.mockRejectedValueOnce(Object.assign(new Error('gone'), { status: 404 }))
+    await expect(deleteOpencodeSession('ses_404')).resolves.toBe(true)
+    mockDeleteSession.mockRejectedValueOnce(new Error('boom'))
+    await expect(deleteOpencodeSession('ses_fail')).resolves.toBe(false)
+    mockAcquireIfRunning.mockRejectedValueOnce(new Error('server down'))
+    await expect(deleteOpencodeSession('ses_down')).resolves.toBe(false)
   })
 
   it('releases the server even when deleteSession rejects', async () => {
     mockDeleteSession.mockRejectedValueOnce(new Error('not found'))
-    await expect(deleteOpencodeSession('ses_del')).resolves.toBeUndefined()
+    await expect(deleteOpencodeSession('ses_del')).resolves.toBe(false)
     expect(mockReleaseIfCurrent).toHaveBeenCalledWith('/tmp/persisted', LEASE)
   })
 })
 
+describe('deleteOpencodeSessionWhenServerUp (the boot sweep’s deferred delete)', () => {
+  it('never starts a server: with none running, the session waits', async () => {
+    mockAcquireIfRunning.mockResolvedValue(null)
+    deleteOpencodeSessionWhenServerUp('ses_wait')
+    await vi.waitFor(() => expect(mockAcquireIfRunning).toHaveBeenCalled())
+    await Promise.resolve()
+    expect(mockAcquire).not.toHaveBeenCalled()
+    expect(mockDeleteSession).not.toHaveBeenCalled()
+  })
+
+  it('deletes at once through a server that is already running, and releases it', async () => {
+    deleteOpencodeSessionWhenServerUp('ses_now')
+    await vi.waitFor(() => expect(mockDeleteSession).toHaveBeenCalledWith('ses_now'))
+    expect(mockAcquire).not.toHaveBeenCalled()
+    await vi.waitFor(() =>
+      expect(mockReleaseIfCurrent).toHaveBeenCalledWith('/tmp/persisted', LEASE)
+    )
+  })
+
+  it('a waiting session is deleted when a server becomes reachable: the next list refresh delivers it', async () => {
+    mockAcquireIfRunning.mockResolvedValue(null)
+    deleteOpencodeSessionWhenServerUp('ses_later')
+    await vi.waitFor(() => expect(mockAcquireIfRunning).toHaveBeenCalled())
+    expect(mockDeleteSession).not.toHaveBeenCalled()
+
+    mockAcquireIfRunning.mockResolvedValue(LEASE) // a server is up now, for any reason
+    await refreshOpencodeSessionList('background')
+    expect(mockDeleteSession).toHaveBeenCalledTimes(1)
+    expect(mockDeleteSession).toHaveBeenCalledWith('ses_later')
+
+    // ...once: it is not asked again by the following refresh.
+    __resetOpencodeSessionListThrottleForTests()
+    await refreshOpencodeSessionList('background')
+    expect(mockDeleteSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('a delete that fails stays queued for the next server; a 404 means it is gone', async () => {
+    mockDeleteSession.mockRejectedValueOnce(new Error('busy'))
+    deleteOpencodeSessionWhenServerUp('ses_retry')
+    await vi.waitFor(() => expect(mockDeleteSession).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(mockReleaseIfCurrent).toHaveBeenCalled())
+
+    __resetOpencodeSessionListThrottleForTests()
+    mockDeleteSession.mockRejectedValueOnce(Object.assign(new Error('gone'), { status: 404 }))
+    await refreshOpencodeSessionList('background')
+    expect(mockDeleteSession).toHaveBeenCalledTimes(2)
+
+    __resetOpencodeSessionListThrottleForTests()
+    await refreshOpencodeSessionList('background')
+    expect(mockDeleteSession).toHaveBeenCalledTimes(2) // a 404 dropped it
+  })
+})
+
 describe('deleteSessionByEngine (engine-neutral dispatch)', () => {
+  it('resolves false for an opencode session the server could not delete (it survives), true otherwise', async () => {
+    mockDeleteSession.mockRejectedValueOnce(new Error('server down'))
+    await expect(
+      deleteSessionByEngine('ses_oc', 'D--WorkPlace-ClaudeUI', 'opencode')
+    ).resolves.toBe(false)
+    mockDeleteSession.mockResolvedValueOnce(true)
+    await expect(
+      deleteSessionByEngine('ses_oc', 'D--WorkPlace-ClaudeUI', 'opencode')
+    ).resolves.toBe(true)
+  })
+
   it('routes engineId=opencode → opencode HTTP delete; never touches the filesystem', async () => {
     mockDeleteSession.mockResolvedValueOnce(true)
     await deleteSessionByEngine('ses_oc', 'D--WorkPlace-ClaudeUI', 'opencode')

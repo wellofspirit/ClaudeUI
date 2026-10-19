@@ -1906,7 +1906,9 @@ export interface SessionState {
     taskNotifications?: TaskNotification[],
     subagentMessages?: Record<string, ChatMessage[]>,
     statusLine?: StatusLineData | null,
-    warnings?: string[]
+    warnings?: string[],
+    /** The X-Agents still running (ADR-105 §5): their records, which no transcript holds. */
+    activeTasks?: Record<string, ActiveTask>
   ) => void
   /** Fork ("branch off") a new session from an assistant message in `sourceRoutingId`.
    *  Resolves the disk anchor, seeds the new session with messages 1..N, and
@@ -2578,7 +2580,8 @@ export const useSessionStore = create<SessionState>((set) => ({
     taskNotifications?,
     subagentMessages?,
     statusLine?,
-    warnings?
+    warnings?,
+    activeTasks?
   ) => {
     const state = useSessionStore.getState()
     // A disk read can finish after this session has resumed. Guard config as
@@ -2653,6 +2656,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         messages,
         taskNotifications: taskNotifications ?? base.taskNotifications,
         subagentMessages: subagentMessages ?? base.subagentMessages,
+        ...(activeTasks ? { activeTasks } : {}),
         statusLine: statusLine ?? base.statusLine ?? null,
         // Derived from the transcript, with the same scanners the reducer uses —
         // which is what makes the todo widget and the Files widget survive

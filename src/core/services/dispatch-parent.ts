@@ -35,6 +35,8 @@ export interface LiveParentSession {
   queuedUserTurns?(): ChatMessage[]
   readonly blockedCalls?: BlockedCallLedger
   addDispatchedCost?(engineId: EngineId, modelId: string, costUsd: number): void
+  /** Arm the idle timer again after the session's last X-Agent ended (`ISession.rearmIdleTimer`). */
+  rearmIdleTimer?(): void
 }
 
 /** How the dispatcher reaches the dispatching session. Wired once, from `core-services.ts`. */

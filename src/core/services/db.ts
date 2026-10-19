@@ -2687,6 +2687,15 @@ export function dispatchTargetsByParent(
   ).map(dispatchTargetRow)
 }
 
+/** Every target that has not been ended on purpose (the boot sweep's candidates). */
+export function dispatchTargetsNotStopped(db: Db = getDb()): DispatchTargetRow[] {
+  return (
+    db
+      .prepare("SELECT * FROM dispatch_target WHERE state <> 'stopped' ORDER BY created_at, id")
+      .all() as DispatchTargetDbRow[]
+  ).map(dispatchTargetRow)
+}
+
 /** The mutable columns of a target row; an omitted key keeps its value. */
 export type DispatchTargetPatch = Partial<
   Pick<

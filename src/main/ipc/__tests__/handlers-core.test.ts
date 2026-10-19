@@ -11,7 +11,7 @@
  * holds end-to-end, not just by inspection of the wrapper code.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as os from 'os'
 import * as path from 'path'
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
@@ -42,7 +42,9 @@ const {
   deleteSessionFiles,
   refreshCanonicalDirectories
 } = vi.hoisted(() => ({
-  deleteSessionByEngine: vi.fn(async (_id: string, _key?: string, _engine?: string) => {}),
+  deleteSessionByEngine: vi.fn(
+    async (_id: string, _key?: string, _engine?: string): Promise<boolean | void> => {}
+  ),
   deleteProjectFiles: vi.fn(async () => {}),
   deleteSessionFiles: vi.fn(async (_id: string, _key: string) => {}),
   refreshCanonicalDirectories: vi.fn(async () => {})
@@ -118,6 +120,7 @@ import {
   allowPeerMessages
 } from '../../../core/ipc/handlers-core'
 import { syncCore, addSyncSubscriber } from '../../../core/services/sync-host'
+import { crossEngineDispatcher } from '../../../core/services/cross-engine-dispatcher'
 import { getSessionMeta, setSessionMeta } from '../../../core/services/db'
 import { deliver } from '../../../core/services/session-delivery'
 import { TurnOriginLedger } from '../../../core/providers/turn-origin-ledger'
@@ -952,6 +955,154 @@ describe('handlers-core', () => {
       await expect(deleteProject(manager, '-repo')).resolves.toBeUndefined()
       expect(deleteSessionByEngine).toHaveBeenCalledWith('pi-1', '-repo', 'pi')
       expect(deleteProjectFiles).toHaveBeenCalledWith('-repo')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // ADR-105 §5: a deleted session takes its X-Agents with it — but only once the ENGINE has
+  // accepted the delete. `session:removed` goes out before the engine is asked, so it cannot be
+  // the trigger: a refused delete leaves a surviving parent that must keep its X-Agents.
+  // -------------------------------------------------------------------------
+
+  describe('a deleted session’s X-Agents end after the engine accepted the delete', () => {
+    let endParent: ReturnType<typeof vi.spyOn>
+    beforeEach(() => {
+      vi.clearAllMocks()
+      syncCore.resetCanonicalForTests()
+      endParent = vi.spyOn(crossEngineDispatcher, 'endParent').mockImplementation(() => {})
+    })
+    afterEach(() => endParent.mockRestore())
+    const manager = (): any => ({
+      cancel: vi.fn(),
+      get: vi.fn(),
+      has: vi.fn(() => false),
+      forEach: vi.fn()
+    })
+
+    it('Claude/opencode/pi: after the engine delete, not before, and not at all when it refuses', async () => {
+      const order: string[] = []
+      deleteSessionByEngine.mockImplementationOnce(async () => void order.push('engine'))
+      endParent.mockImplementation(() => void order.push('end'))
+      syncCore.emit('session:created', ['rid-ok', { cwd: '/repo' }])
+      await deleteSession(manager(), 'rid-ok', '-repo', 'claude')
+      expect(order).toEqual(['engine', 'end'])
+      expect(endParent).toHaveBeenCalledWith('rid-ok')
+
+      endParent.mockClear()
+      deleteSessionByEngine.mockRejectedValueOnce(new Error('server down'))
+      await expect(deleteSession(manager(), 'rid-no', '-repo', 'opencode')).rejects.toThrow(
+        /server down/
+      )
+      expect(endParent).not.toHaveBeenCalled()
+    })
+
+    it('a best-effort engine that could not delete (`false`: opencode server down, pi file stuck) leaves the parent its X-Agents and its engine row', async () => {
+      for (const engine of ['opencode', 'pi'] as const) {
+        setSessionMeta(`${engine}-stuck`, { engineId: engine })
+        deleteSessionByEngine.mockResolvedValueOnce(false)
+        await deleteSession(manager(), `${engine}-stuck`, '-repo', engine)
+        expect(endParent).not.toHaveBeenCalled()
+        expect(getSessionMeta(`${engine}-stuck`)?.engineId).toBe(engine)
+
+        deleteSessionByEngine.mockResolvedValueOnce(true)
+        await deleteSession(manager(), `${engine}-stuck`, '-repo', engine)
+        expect(endParent).toHaveBeenCalledWith(`${engine}-stuck`)
+        endParent.mockClear()
+      }
+    })
+
+    it('deleteProject: an opencode and a pi session whose delete reported `false` are survivors too', async () => {
+      deleteSessionByEngine.mockImplementation(async (id: string) => id.endsWith('-ok'))
+      for (const id of ['oc-stuck', 'pi-stuck', 'oc-ok']) setSessionMeta(id, { engineId: 'pi' })
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            { sessionId: 'oc-stuck', cwd: '/repo', projectKey: '-repo', engineId: 'opencode' },
+            { sessionId: 'pi-stuck', cwd: '/repo', projectKey: '-repo', engineId: 'pi' },
+            { sessionId: 'oc-ok', cwd: '/repo', projectKey: '-repo', engineId: 'opencode' }
+          ]
+        }
+      ] as never)
+      await deleteProject(manager(), '-repo')
+      expect(endParent.mock.calls.map((c) => c[0])).toEqual(['oc-ok'])
+      expect(getSessionMeta('oc-stuck')).toBeDefined()
+      expect(getSessionMeta('oc-ok')).toBeUndefined()
+    })
+
+    it('deleteProject: when the whole project dir is removed, a Claude transcript that could not be deleted still keeps its X-Agents', async () => {
+      deleteSessionFiles.mockImplementation(async (id: string) => {
+        if (id === 'cl-stuck') throw new Error('EBUSY')
+      })
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            {
+              // relocated into a worktree's project dir: deleted one by one, dir or no dir
+              sessionId: 'cl-stuck',
+              cwd: '/repo',
+              projectKey: '-repo--claude-worktrees-wt',
+              engineId: 'claude'
+            },
+            { sessionId: 'cl-fine', cwd: '/repo', projectKey: '-repo', engineId: 'claude' }
+          ]
+        }
+      ] as never)
+      await deleteProject(manager(), '-repo')
+      expect(deleteProjectFiles).toHaveBeenCalledWith('-repo') // the dir goes either way
+      expect(endParent.mock.calls.map((c) => c[0])).toEqual(['cl-fine'])
+    })
+
+    it('Codex: each thread ends as the binary deletes it (the walk’s `deleted` hook), a refused one never', async () => {
+      await deleteSession(manager(), 'cx-root', '-repo', 'codex')
+      const hooks = deleteCodexSubtree.mock.calls[0][1] as any
+      // Replicating the removal is announced before the binary is asked: it ends nothing.
+      hooks.removeSession('cx-root')
+      expect(endParent).not.toHaveBeenCalled()
+      hooks.deleted('cx-root')
+      expect(endParent).toHaveBeenCalledWith('cx-root')
+    })
+
+    it('deleteProject: every session the engines deleted ends; a survivor keeps its X-Agents', async () => {
+      deleteSessionByEngine.mockImplementation(async (id: string) => {
+        if (id === 'oc-live') throw new Error('opencode server down')
+      })
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            { sessionId: 'oc-live', cwd: '/repo', projectKey: '-repo', engineId: 'opencode' },
+            { sessionId: 'pi-gone', cwd: '/repo', projectKey: '-repo', engineId: 'pi' },
+            { sessionId: 'cl-gone', cwd: '/repo', projectKey: '-repo', engineId: 'claude' }
+          ]
+        }
+      ] as never)
+      await deleteProject(manager(), '-repo')
+      expect(endParent.mock.calls.map((c) => c[0]).sort()).toEqual(['cl-gone', 'pi-gone'])
+    })
+
+    it('deleteProject: a refused Codex walk ends nothing after it', async () => {
+      deleteCodexSubtree.mockRejectedValueOnce(new Error('Codex refused to delete "b" (…)'))
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            { sessionId: 'cx-1', cwd: '/repo', projectKey: '-repo', engineId: 'codex' },
+            { sessionId: 'cl-1', cwd: '/repo', projectKey: '-repo', engineId: 'claude' }
+          ]
+        }
+      ] as never)
+      await expect(deleteProject(manager(), '-repo')).rejects.toThrow(/Codex refused/)
+      expect(endParent).not.toHaveBeenCalled()
     })
   })
 

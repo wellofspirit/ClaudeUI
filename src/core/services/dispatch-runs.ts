@@ -49,6 +49,14 @@ export class DispatchRun {
    * background run has no such owner, so nothing ever aborts this for it.
    */
   readonly cancelController = new AbortController()
+  /**
+   * The X-Agent is to END with this run (ADR-105 §5): the user pressed Stop on its card, or
+   * its parent session was deleted. Set before `stopController` aborts; when the run's body
+   * returns the dispatcher ends the target for good (row `stopped`, process released,
+   * harness state removed). A parent's own interrupt of a blocking call never sets it: that
+   * target stays resumable.
+   */
+  endRequested = false
   /** A terminal `task-notification` went out (a body's own, or the run-end closer's). */
   notified = false
   /** This run created its target (as opposed to continuing one). */
@@ -96,6 +104,32 @@ export class DispatchRun {
 /** How many re-keyed parents the registry remembers (see `rekey`). */
 export const MAX_RENAMED_PARENTS = 1024
 
+/**
+ * The registries that hold at least one run right now (a drained one leaves the set).
+ * Session objects, which cannot import the dispatcher, ask {@link hasRunningDispatch} on every idle-timer reset, so the answer
+ * comes from here, in memory, with no database in the way.
+ */
+const registriesWithRuns = new Set<DispatchRunRegistry>()
+
+/**
+ * Does this process run an X-Agent for `parentId` (its durable id; a re-key is followed)?
+ * A parent's idle timer must not fire under one (ADR-105 §3): the timer's `cancel()` would
+ * drop the session object the run reports into. A run of another process is not this
+ * process's concern. Registered for a run's whole life, so it holds from the launch until
+ * the run has ended and left the registry.
+ */
+export function hasRunningDispatch(parentId: string): boolean {
+  for (const registry of registriesWithRuns) {
+    if (registry.ofParent(parentId).length > 0) return true
+  }
+  return false
+}
+
+/** Test seam: how many registries hold a run right now (a drained one leaves the set). */
+export function registriesHoldingRunsForTests(): number {
+  return registriesWithRuns.size
+}
+
 export class DispatchRunRegistry {
   private readonly runs = new Set<DispatchRun>()
   private readonly byLedger = new Map<string, DispatchRun>()
@@ -114,6 +148,7 @@ export class DispatchRunRegistry {
 
   add(run: DispatchRun): void {
     this.runs.add(run)
+    registriesWithRuns.add(this)
     if (run.toolUseId) this.byToolUse.set(run.toolUseId, run)
   }
 
@@ -125,9 +160,16 @@ export class DispatchRunRegistry {
 
   remove(run: DispatchRun): void {
     this.runs.delete(run)
+    if (this.runs.size === 0) registriesWithRuns.delete(this)
     if (run.ledgerId && this.byLedger.get(run.ledgerId) === run) this.byLedger.delete(run.ledgerId)
     if (run.toolUseId && this.byToolUse.get(run.toolUseId) === run)
       this.byToolUse.delete(run.toolUseId)
+  }
+
+  /** Every run `parentId` launched (a re-keyed parent's old id is followed), bound or not. */
+  ofParent(parentId: string): DispatchRun[] {
+    const parent = this.parentOf(parentId)
+    return [...this.runs].filter((run) => this.parentOf(run.init.parentId) === parent)
   }
 
   /** A run by its ledger id or its launching tool_use id. */

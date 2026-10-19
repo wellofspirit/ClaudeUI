@@ -107,6 +107,7 @@ import {
   onOpencodeSessionListChanged
 } from '../services/opencode-session-list'
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
+import { withDispatchTasks } from '../services/dispatch-task-history'
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
 import { freshClaudeModels, queryClaudeModels } from '../services/claude-model-catalog'
@@ -1063,7 +1064,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'fs-read',
     kind: 'query',
     handler: async (sessionId: string) => {
-      return await loadOpencodeSessionHistory(sessionId)
+      return withDispatchTasks(sessionId, await loadOpencodeSessionHistory(sessionId))
     }
   })
 
@@ -1081,7 +1082,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'fs-read',
     kind: 'query',
     handler: async (sessionId: string) => {
-      return await loadPiSessionHistory(sessionId)
+      return withDispatchTasks(sessionId, await loadPiSessionHistory(sessionId))
     }
   })
 

@@ -13,6 +13,7 @@ import {
   closeDb,
   dispatchTargetSpend,
   dispatchTargetsByParent,
+  dispatchTargetsNotStopped,
   getDispatchTarget,
   getDispatchTargetByHarnessRef,
   getSessionRef,
@@ -179,6 +180,27 @@ describe('dispatch_target DAO', () => {
       ['s-000001', 's-000002', 's-000003', 's-000004'].map((id) => getDispatchTarget(id, db)?.state)
     ).toEqual(['interrupted', 'idle', 'failed', 'interrupted'])
     expect(interruptRunningDispatchTargets(db)).toBe(0)
+  })
+
+  it('lists every row not ended on purpose (the boot sweep’s candidates)', () => {
+    insertDispatchTarget(row({ id: 's-000001', harnessRef: 'a', state: 'running' }), db)
+    insertDispatchTarget(
+      row({ id: 's-000002', harnessRef: 'b', state: 'idle', parentSessionId: 'p2' }),
+      db
+    )
+    insertDispatchTarget(
+      row({ id: 's-000003', harnessRef: 'c', state: 'stopped', parentSessionId: 'p3' }),
+      db
+    )
+    insertDispatchTarget(
+      row({ id: 's-000004', harnessRef: 'd', state: 'interrupted', parentSessionId: 'p4' }),
+      db
+    )
+    expect(dispatchTargetsNotStopped(db).map((r) => r.id)).toEqual([
+      's-000001',
+      's-000002',
+      's-000004'
+    ])
   })
 
   it('lists every harness session id', () => {

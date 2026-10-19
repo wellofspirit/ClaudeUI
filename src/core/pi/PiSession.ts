@@ -729,12 +729,17 @@ export class PiSession extends BaseSession {
     return this.permissionMode
   }
 
+  protected override idleTimerHeld(): boolean {
+    return this.subagents.liveBackgroundCount > 0 || super.idleTimerHeld()
+  }
+
   protected override resetInactivityTimer(): void {
     this.clearInactivityTimer()
     // A live background agent keeps the session (ADR-089 S3): disposing would
     // kill it and lose its notification. backgroundWorkChanged re-arms this
-    // once the last one ends.
-    if (this.subagents.liveBackgroundCount > 0) return
+    // once the last one ends. A running X-Agent holds it the same way
+    // (`idleTimerHeld`; the dispatcher re-arms through `rearmIdleTimer`).
+    if (this.idleTimerHeld()) return
     if (this.inactivityTimeoutMs > 0) {
       this.inactivityTimer = setTimeout(() => {
         logger.info('PiSession', 'Idle timeout — auto-disconnecting')

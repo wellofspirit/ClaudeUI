@@ -187,6 +187,8 @@ export interface CodexDeleteHooks {
   stop: (threadId: string) => void
   /** Replicate the removal, so every client drops the row. */
   removeSession: (threadId: string) => void
+  /** The binary deleted the thread (not merely asked): what hangs off it can go too. */
+  deleted?: (threadId: string) => void
 }
 
 /**
@@ -326,6 +328,7 @@ export async function deleteCodexSubtree(
       }
       forgetThread(threadId)
       deleted.add(threadId)
+      hooks.deleted?.(threadId)
     }
     return [...deleted]
   } finally {

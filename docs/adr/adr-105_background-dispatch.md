@@ -117,14 +117,42 @@ shape applies.
 
 - A parent's restart or cancel no longer ends its X-Agents. A running X-Agent finishes its turn and delivers as
   above; an idle one's process is released and resumed on its next message; pending approvals stay pending.
-- When a parent session object is created again, the dispatcher re-emits `task-started` for its running X-Agents and
-  re-raises their pending approvals, so the card, the roster and the attention gate are right after a respawn.
-- History reload builds dispatch cards from the ledger (state and delivered text). Replaying the child's full stream
-  from its own transcript is later work.
+- When a parent session disconnects, the sync reducer clears the session's task records and pending approvals. The
+  dispatcher observes that status event and, after the clear, re-emits `task-started` for the parent's running
+  X-Agents and every approval card they still wait on, so the card, the roster and the attention gate stay right
+  while the parent is down. The trigger is the status, not the creation of a new session object: a cancel on the same
+  object clears the cards without any re-creation, while a replacement clears nothing, and re-emitting then would
+  show every approval twice. Approving a re-raised card resolves the target's gate as before. A re-raised approval
+  card is marked, and a client that sees the mark lists the card but raises no attention and no notification for it:
+  the user was told about that ask when it first came.
+- History reload builds dispatch cards from the ledger, for every engine's read and for the sidebar's cold load as
+  well as a resume: a finished row becomes a terminal task notification (idle is completed, failed is failed, stopped
+  is stopped; interrupted is the neutral `unfinished`, since `stopped` means never resumed, with a summary that says
+  it can be resumed), a running row an active task record that starts at the run's own start. A reopened parent is a
+  historical session, in which no task is running, with one exception: a dispatch record is kept, so the card and the
+  roster show the X-Agent running and the card's Stop reaches the dispatcher, which needs no live parent. The ledger
+  holds no result text, so a reloaded card says that the X-Agent ended; the delivered text joins it with the report
+  store. Replaying the child's full stream from its own transcript is later work.
 - App quit ends the processes. On the next start, running rows become `interrupted` and the parent's inbox gets a
   notice naming the X-Agent; nothing resumes automatically.
 - An X-Agent ends when the user stops it, when its parent session is deleted, or by a retention sweep of idle rows
-  whose parent is gone; harness-side state is removed where the engine allows it.
+  whose parent is gone; harness-side state is removed where the engine allows it. Ending means the run is stopped, the
+  process released, its pending approvals dismissed and the row set to `stopped`, which is never resumed (Claude Code
+  does not resume a stopped agent either). opencode's session is deleted and pi's session directory removed; Claude
+  Code's transcript and Codex's thread stay on disk.
+  - Stop on the X-Agent's card ends it, for a background run and for a blocking one alike. The parent's own interrupt
+    of a blocking call (Esc) does not: the target stays resumable (`interrupted` or `idle`).
+  - Deleting the parent session ends every X-Agent it owns, running or not, once the parent's engine has accepted
+    the delete (Codex: thread by thread as the binary deletes them). A delete the engine refuses leaves them alone.
+  - At start-up, rows whose parent session is provably gone are ended the same way. Only a Claude Code parent can be
+    proven gone (no transcript in any project directory and no mention in the session registry); a parent of another
+    engine, or any parent whose record store cannot be read completely, is left alone.
+- A background run that ends while its parent is not live (no session object, or its engine is down) releases the
+  X-Agent's process at once, leaving the row as the turn wrote it, instead of parking it for a continuation that may
+  never come. A running X-Agent also holds its parent's idle timer (§3); when a run ends, the dispatcher asks the
+  parent session to arm the timer again.
+
+_Amended 2026-10-20 (slice B-2b): the re-raise trigger, the end paths, release after a run and the boot sweep._
 
 ## Consequences
 

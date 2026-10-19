@@ -189,6 +189,39 @@ describe('useClaudeEvents component tests', () => {
       expect(session.pendingApprovals[0].toolName).toBe('Bash')
     })
 
+    it('a card the dispatcher re-raised after the parent’s disconnect is listed again but raises no attention and no notification (a new ask does)', () => {
+      const notified = vi.fn()
+      class FakeNotification {
+        static permission = 'granted'
+        constructor(title: string) {
+          notified(title)
+        }
+      }
+      vi.stubGlobal('Notification', FakeNotification)
+      try {
+        useSessionStore.getState().createNewSession('route-seen', '/test')
+        useSessionStore.getState().createNewSession('route-other', '/test')
+        useSessionStore.setState({ activeSessionId: 'route-other' })
+
+        const card = makePendingApproval({ requestId: 'xeng:p1', toolName: 'dispatch:bash' })
+        app.emit('session:approval-request', 'route-seen', { ...card, reRaised: true })
+        const session = useSessionStore.getState().sessions['route-seen']
+        expect(session.pendingApprovals.map((a) => a.requestId)).toEqual(['xeng:p1'])
+        expect(session.needsAttention).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+
+        app.emit(
+          'session:approval-request',
+          'route-seen',
+          makePendingApproval({ requestId: 'xeng:p2', toolName: 'dispatch:bash' })
+        )
+        expect(useSessionStore.getState().sessions['route-seen'].needsAttention).toBe(true)
+        expect(notified).toHaveBeenCalledWith('Permission required')
+      } finally {
+        vi.unstubAllGlobals()
+      }
+    })
+
     it('removes ONLY the dismissed approval on session:approval-dismiss (ADR-033)', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')

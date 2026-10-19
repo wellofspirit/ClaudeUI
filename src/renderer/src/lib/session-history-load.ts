@@ -185,7 +185,9 @@ export async function loadSessionIntoStore(
       info.cwd,
       taskNotifications,
       subagentMessages,
-      statusLine
+      statusLine,
+      undefined,
+      loaded && 'activeTasks' in loaded ? loaded.activeTasks : undefined
     )
     if (info.title && info.title !== 'Untitled') store().setCustomTitle(routingId, info.title)
     return 'loaded'
@@ -223,7 +225,8 @@ export async function loadSessionIntoStore(
       // there is no second fetch to make here as there is for Claude.
       history.subagentMessages,
       history.statusLine,
-      history.warnings
+      history.warnings,
+      history.activeTasks
     )
     // The tier the thread last ran at is the session's own until the user picks
     // another (a pick made earlier in this run wins). It has to be the session's
@@ -287,7 +290,8 @@ export async function loadSessionIntoStore(
     taskNotifications,
     subagentMessages,
     statusLine,
-    warnings
+    warnings,
+    claude.activeTasks
   )
   if (customTitle) store().setCustomTitle(routingId, customTitle)
   // todos + the Files widget are derived from the transcript INSIDE the cold-
@@ -512,7 +516,7 @@ export async function loadResumedTranscript(
     // The FORK anchor is passed straight through: without it a fork painted the
     // parent's post-anchor turns above an engine resumed from the truncated
     // prefix. Absent loads the whole transcript, as canonical's own seed does.
-    const { messages, taskNotifications, customTitle, statusLine, warnings } =
+    const { messages, taskNotifications, activeTasks, customTitle, statusLine, warnings } =
       await window.api.loadSessionHistory(
         resume.resumeSessionId,
         projectKey,
@@ -526,6 +530,7 @@ export async function loadResumedTranscript(
       cwd: resume.cwd ?? session.cwd,
       messages,
       taskNotifications,
+      ...(activeTasks ? { activeTasks } : {}),
       ...(statusLine ? { statusLine } : {})
     })
     if (warnings?.length) for (const w of warnings) state.addWarning(routingId, w)

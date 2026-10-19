@@ -440,8 +440,16 @@ export function TaskCard({
   // opencode/pi child sessions and historical transcripts never emit
   // task_started, so they have no activeTasks record and fall through to the
   // unchanged legacy heuristic below.
-  const activeTask = isHistorical ? undefined : activeTasks[toolUseId]
+  // A dispatched X-Agent outlives its parent's session object and is rebuilt from the
+  // ledger on a reopen (ADR-105 §5): its record stays in a historical session, so the
+  // card reads running and offers Stop. Every other task is dead with the process.
+  const activeTask =
+    isHistorical && activeTasks[toolUseId]?.taskType !== 'dispatch'
+      ? undefined
+      : activeTasks[toolUseId]
   const hasActiveTask = !!activeTask
+  // Stop reaches a dispatch through the dispatcher, which needs no live parent.
+  const canAct = !isHistorical || hasActiveTask
   // The input asked for the background, or cli.js reports the running task
   // there: from the start, or since a "Send to background" flip.
   const isBackground = !!view.background || activeTask?.isBackgrounded === true
@@ -758,7 +766,7 @@ export function TaskCard({
             <BackgroundIcon className="animate-pulse" />
           </span>
         )}
-        {isRunning && !isStopping && !isHistorical && !isPendingApproval && (
+        {isRunning && !isStopping && canAct && !isPendingApproval && (
           <button
             data-testid="TaskCard.stop"
             onClick={(e) => {
@@ -770,7 +778,7 @@ export function TaskCard({
             Stop
           </button>
         )}
-        {isStopping && !isHistorical && (
+        {isStopping && canAct && (
           <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning shrink-0">
             stopping...
           </span>

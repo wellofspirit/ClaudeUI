@@ -18,6 +18,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const {
   pruneOrphanClaudeSessionMeta,
+  claudeSessionsWithNoRecord,
   loadSettings,
   loadSessionConfig,
   loadSlashCommands,
@@ -28,6 +29,7 @@ const {
   listCodexSessions
 } = vi.hoisted(() => ({
   pruneOrphanClaudeSessionMeta: vi.fn(),
+  claudeSessionsWithNoRecord: vi.fn((_ids: readonly string[]): string[] => []),
   loadSettings: vi.fn(),
   loadSessionConfig: vi.fn(),
   loadSlashCommands: vi.fn(),
@@ -43,7 +45,10 @@ vi.mock('../../../core/services/ui-config', () => ({
   loadSessionConfig,
   loadSlashCommands
 }))
-vi.mock('../../../core/services/session-meta-prune', () => ({ pruneOrphanClaudeSessionMeta }))
+vi.mock('../../../core/services/session-meta-prune', () => ({
+  pruneOrphanClaudeSessionMeta,
+  claudeSessionsWithNoRecord
+}))
 vi.mock('../../../core/services/claude-settings', () => ({ loadClaudePermissions }))
 vi.mock('../../../core/services/session-history', () => ({ listDirectories }))
 // F6 moved the per-client three-query merge into this module, so both other
@@ -186,6 +191,45 @@ describe('seedCanonicalAppState', () => {
 
     expect(dispatchLedger.get(running.id)?.state).toBe('interrupted')
     expect(dispatchLedger.get(idle.id)?.state).toBe('idle')
+  })
+
+  // ADR-105 §5: an X-Agent ends with its parent session. A deletion that happened while the
+  // app was closed (or before this rule) is caught at boot — for a parent that is PROVEN gone.
+  it('ends the X-Agents of a Claude parent that no longer exists, and only those', async () => {
+    const input = {
+      engine: 'claude' as const,
+      parentEngine: 'claude' as const,
+      parentToolUseId: null,
+      cwd: '/repo',
+      model: 'haiku',
+      launchMode: 'default',
+      accountKey: null,
+      codexAccountId: null,
+      callerRestriction: null,
+      name: null,
+      description: null
+    }
+    const orphan = dispatchLedger.create({
+      ...input,
+      parentSessionId: 'deleted-parent',
+      harnessRef: 'boot-orphan'
+    })
+    const kept = dispatchLedger.create({
+      ...input,
+      parentSessionId: 'live-parent',
+      harnessRef: 'boot-kept'
+    })
+    dispatchLedger.update(orphan.id, { state: 'idle' })
+    dispatchLedger.update(kept.id, { state: 'idle' })
+    claudeSessionsWithNoRecord.mockImplementation((ids) =>
+      ids.filter((id) => id === 'deleted-parent')
+    )
+
+    await seedCanonicalAppState()
+
+    expect(dispatchLedger.get(orphan.id)?.state).toBe('stopped')
+    expect(dispatchLedger.get(kept.id)?.state).toBe('idle')
+    claudeSessionsWithNoRecord.mockImplementation(() => [])
   })
 
   it('leaves sdkSkillNames alone — the renderer does not seed it either', async () => {
