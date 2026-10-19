@@ -1266,6 +1266,57 @@ describe('registerRemoteHandlers', () => {
       expect(loadSubagentHistoryMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', 'agent-9')
     })
 
+    // The three Claude history readers join sessionId / projectKey (/ agentId) into a
+    // ~/.claude/projects path, and these channels are reachable by any `fs-read`
+    // caller. A traversal value must be refused before the reader (the filesystem) runs.
+    describe.each([
+      ['session:load-history', () => loadClaudeHistoryMock, []],
+      ['session:load-status-line', () => loadStatusLineMock, []],
+      ['session:load-subagent-history', () => loadSubagentHistoryMock, ['agent-9']]
+    ] as const)('%s path-segment validation', (channel, reader, tail) => {
+      it.each([
+        ['sessionId', ['../x', 'proj-key']],
+        ['sessionId', ['a/b', 'proj-key']],
+        ['sessionId', ['a\\b', 'proj-key']],
+        ['sessionId', ['', 'proj-key']],
+        ['projectKey', ['sess-1', '../x']],
+        ['projectKey', ['sess-1', 'a/b']],
+        ['projectKey', ['sess-1', 'a\\b']],
+        ['projectKey', ['sess-1', '..']],
+        ['projectKey', ['sess-1', '']]
+      ])('refuses a bad %s (%j) before any read (GUARD — fails pre-fix)', async (label, ids) => {
+        vi.mocked(reader()).mockClear()
+        await expect(
+          dispatcher.handle(makeRequest(channel, ...ids, ...tail), remoteConn)
+        ).rejects.toThrow(new RegExp(`Invalid ${label}`))
+        expect(reader()).not.toHaveBeenCalled()
+      })
+
+      it('passes a valid call through unchanged', async () => {
+        vi.mocked(reader()).mockClear()
+        await dispatcher.handle(makeRequest(channel, 'sess-1', 'proj-key', ...tail), remoteConn)
+        expect(reader()).toHaveBeenCalledTimes(1)
+        expect(vi.mocked(reader()).mock.lastCall?.slice(0, 2 + tail.length)).toEqual([
+          'sess-1',
+          'proj-key',
+          ...tail
+        ])
+      })
+    })
+
+    it('session:load-subagent-history refuses a bad agentId before any read (GUARD — fails pre-fix)', async () => {
+      vi.mocked(loadSubagentHistoryMock).mockClear()
+      for (const agentId of ['../x', 'a/b', 'a\\b', '..', '']) {
+        await expect(
+          dispatcher.handle(
+            makeRequest('session:load-subagent-history', 'sess-1', 'proj-key', agentId),
+            remoteConn
+          )
+        ).rejects.toThrow(/Invalid agentId/)
+      }
+      expect(loadSubagentHistoryMock).not.toHaveBeenCalled()
+    })
+
     it('account:get returns the account-manager state', async () => {
       const res = await dispatcher.handle(makeRequest('account:get'), remoteConn)
       expect(res).toEqual({ enabled: false, accounts: [] })

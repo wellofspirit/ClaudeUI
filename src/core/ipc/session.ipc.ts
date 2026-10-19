@@ -1116,6 +1116,12 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       resumeSessionAt?: string,
       options?: LoadSessionHistoryOptions | null
     ) => {
+      // Both identifiers are caller-supplied and joined into a ~/.claude/projects path
+      // by the Claude reader. Every engine's real id and projectKey is a single
+      // segment (uuid / `ses_…` ids; `cwdToProjectKey` is `[A-Za-z0-9-]*`), so one
+      // check serves the engine dispatch too.
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
       return await loadSessionHistory(sessionId, projectKey, resumeSessionAt, undefined, {
         onProgress: progress,
         // Strictly a literal `true`: any other shape of the (renderer-supplied) options is ignored.
@@ -1132,6 +1138,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'query',
     withProgress: true,
     handler: async (progress: ProgressReporter, sessionId: string, projectKey: string) => {
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
       return await loadSessionStatusLine(sessionId, projectKey, progress)
     }
   })
@@ -1149,6 +1157,9 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       projectKey: string,
       agentId: string
     ) => {
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
+      assertSafePathSegment(agentId, 'agentId')
       return await loadSubagentHistory(sessionId, projectKey, agentId)
     }
   })
