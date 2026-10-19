@@ -14,7 +14,10 @@ Worktree: `.claude/worktrees/session-load-progress`, branch `feat/session-load-p
 - [x] Slice A: committed 36e90044.
 - [x] Slice B: committed 2c2dea97.
 - [x] ADR-102, gates (typecheck/lint/test/test:ci/build all exit 0), real-app verification (claims 1–6 PASS, 7 partial).
-- [ ] NEXT: push + PR (owner's call); then the lazy-subagent arc (docs/lazy-subagents-audit.md).
+- [x] Arc 2 (content first + background status line + lazy/background subagents): committed 80ca7b03;
+      verified in the real app (content painted 323 ms after click; 72/72 buckets in background; roster 101
+      agents incl. nested).
+- [ ] NEXT: push + PR (owner's call); then full-sync progress (measure the host snapshot first).
 
 ## Goal
 
