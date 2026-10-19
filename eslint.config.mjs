@@ -57,6 +57,8 @@ export default defineConfig(
       // Agent worktrees (full repo copies) live under .claude/worktrees — four
       // of them once made a repo-wide lint OOM at the default heap size.
       '.claude/**',
+      // Private notes clone (a separate repo; see .gitignore).
+      '.notes/**',
       'coverage/**'
     ]
   },
