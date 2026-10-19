@@ -2,7 +2,7 @@
  * @vitest-environment node
  *
  * A message from another session, delivered into the REAL ClaudeSession (slice 1a,
- * docs/research/session-tools/V1-probes.md §2).
+ * docs/protocol-cc/15-peer-sessions.md §15.2).
  *
  * cli.js treats a stdin frame as a peer turn only when its CONTENT is the
  * `<cross-session-message>` envelope — `origin` alone is ignored, and the turn is

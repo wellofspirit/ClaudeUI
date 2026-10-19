@@ -146,7 +146,7 @@ describe('loadSessionHistory — task notifications as agent notes (S4)', () => 
 })
 
 describe('loadSessionHistory — peer messages as notes (slice 1a)', () => {
-  // What cli.js writes for a peer turn (docs/research/session-tools/V1-probes.md §2.5):
+  // What cli.js writes for a peer turn (docs/protocol-cc/15-peer-sessions.md §15.2.7):
   // an `isMeta` user row — which the loader drops for everything else — with the
   // peer origin carrying the decoded body.
   const SENDER = '5b0f2c1e-aaaa-4bbb-8ccc-0123456789ab'

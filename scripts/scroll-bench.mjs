@@ -2,7 +2,7 @@
 // transcripts through the real sidebar, synthesizes scroll input over CDP and records smoothness
 // (rAF frame sampler, Long Animation Frames, CDP Performance metrics, CDP Tracing frame verdicts)
 // and correctness (per-frame scroller geometry, TypingIndicator visibility, follow state).
-// Design: docs/chat-scroll-spec.md. It measures; it changes nothing in the app.
+// Design: PR #71 (chat-scroll). It measures; it changes nothing in the app.
 //
 // Usage:
 //   bun run build   # the bench drives <app>/out; rebuild after any renderer edit

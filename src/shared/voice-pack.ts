@@ -131,7 +131,7 @@ export function voicePackModelUrl(name: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Pack status, commands and events (local-voice-spec C6)
+// Pack status, commands and events (docs/architecture/local-voice.md C6)
 // ---------------------------------------------------------------------------
 
 /**

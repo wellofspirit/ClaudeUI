@@ -8,7 +8,7 @@
  * end of the turn, a `result` — never the text. The text and the sender are on
  * disk: cli.js writes the turn as a user row with that uuid, `isMeta: true` and
  * `origin: { kind: 'peer', from, name, body, … }`
- * (docs/research/session-tools/V1-probes.md §2.5). The row lands a moment after
+ * (docs/protocol-cc/15-peer-sessions.md §15.2.7). The row lands a moment after
  * the lifecycle frame, so the caller retries.
  */
 import * as fs from 'fs'

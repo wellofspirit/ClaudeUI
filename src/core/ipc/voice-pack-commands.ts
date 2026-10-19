@@ -1,5 +1,5 @@
 /**
- * The speech pack's channels (ADR-101 §6, local-voice-spec C6), declared ONCE and
+ * The speech pack's channels (ADR-101 §6, docs/architecture/local-voice.md C6), declared ONCE and
  * served by both transports: the notice pill's Download button and Settings ›
  * Voice input drive these from the desktop and from a phone alike.
  *

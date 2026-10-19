@@ -1,6 +1,6 @@
 /**
  * Where the speech pack lives on disk, and whether a usable one is there —
- * ADR-101 §5, local-voice-spec C2.
+ * ADR-101 §5, docs/architecture/local-voice.md C2.
  *
  *   ~/.claude/ui/voice/                      `CLAUDEUI_VOICE_STORE` moves the root
  *     <pack id>/                             one installed pack

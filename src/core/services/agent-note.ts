@@ -85,7 +85,7 @@ export function sessionMessageNote(input: {
  * message, whether ClaudeUI delivered it (slice 1a) or a native cross-session
  * `SendMessage` did. cli.js stores it as a user row with `isMeta: true`,
  * `turnOrigin: 'peer'` and `origin: { kind: 'peer', from, name, body, … }`
- * (docs/research/session-tools/V1-probes.md §2.5). The body is `origin.body`; the
+ * (docs/protocol-cc/15-peer-sessions.md §15.2.7). The body is `origin.body`; the
  * wrapped content is the fallback. Null for any other row — and for a peer row
  * with an empty body, which then falls into the loader's ordinary `isMeta`
  * discard (there is nothing to show).

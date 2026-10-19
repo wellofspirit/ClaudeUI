@@ -1,6 +1,6 @@
 /**
  * The on-device voice server — cli.js's voice-server protocol over loopback TCP,
- * answered by a local {@link Recognizer} (ADR-101 §2, local-voice-spec C4).
+ * answered by a local {@link Recognizer} (ADR-101 §2, docs/architecture/local-voice.md C4).
  *
  * Speaking cli.js's protocol is the whole point: `VoiceStreamClient`, the relay,
  * both capture owners, the pre-`ready` drain, the timeouts and the outcome

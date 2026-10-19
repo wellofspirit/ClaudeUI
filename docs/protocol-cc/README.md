@@ -53,6 +53,7 @@ The doc should be re-verified each time `package.json#claudeCliVersion` bumps. S
 | 12  | [Maintenance](12-maintenance.md)                   | How to keep the manual and harness in sync                     |
 | 13  | [Context window](13-context-window.md)             | How cli.js resolves model context windows + ClaudeUI's mirror  |
 | 14  | [Auto mode classifier](14-auto-mode-classifier.md) | `permissionMode: "auto"` — two-stage LLM permission classifier |
+| 15  | [Peer sessions](15-peer-sessions.md)               | Peer messages, cross-session socket, holds, context ceilings   |
 
 ---
 
