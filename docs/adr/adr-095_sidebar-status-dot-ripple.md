@@ -31,10 +31,11 @@ amber "needs attention" one, which is arguably the state that most needs to be s
 looking); only its look changes. When the main agent and subagents are both working, the main agent wins and
 the tooltip adds "· N subagents running".
 
-**A running subagent is a live `activeTasks` record of an auto-continuing type**: `local_agent`,
-`remote_agent`, `in_process_teammate`, `local_workflow`. That is the set the turn-end notification already
-uses, and upstream's own busy predicate. Background shells (`local_bash`) and monitors are excluded: a dev
-server would otherwise keep a session violet for its whole life. The records, not the transcript, are the
+**A running subagent is a live `activeTasks` record that will wake the main agent** (`wakesParent`, stamped
+by the emitter): `local_agent`, `remote_agent`, `in_process_teammate`, `local_workflow`, and — since
+2026-10-19 — background shells (`local_bash`), monitors and `mcp_task`, because a finished shell starts an
+auto-continued turn on cli.js 2.1.293 just as an agent does. Originally shells and monitors were excluded
+so a dev server would not keep a session violet for its whole life; that cost is now accepted. The records, not the transcript, are the
 source: they are exact for Claude and pi, cleared on disconnect (ADR-045), and cannot be fooled by a
 transcript that lost its terminal events (the fork bug fixed alongside this, where history-derived rows read
 "running").
