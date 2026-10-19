@@ -11,9 +11,10 @@ Worktree: `.claude/worktrees/session-load-progress`, branch `feat/session-load-p
 - [x] Evidence for this design — collected by a reader pass (key facts copied into "Verified facts").
 - [x] Design review (`orch-design-reviewer`) — ALL findings accepted;
       see "Design review resolutions" below — they OVERRIDE the sections they touch.
-- [ ] Slice A: invoke progress plumbing (wire + desktop + remote + registry) + Claude byte progress.
-- [ ] Slice B: navigate-first click, progress view, empty-evicted cleanup fix.
-- [ ] ADR-102, gates, real-app verification, commits.
+- [x] Slice A: committed 36e90044.
+- [x] Slice B: committed 2c2dea97.
+- [x] ADR-102, gates (typecheck/lint/test/test:ci/build all exit 0), real-app verification (claims 1–6 PASS, 7 partial).
+- [ ] NEXT: push + PR (owner's call); then the lazy-subagent arc (docs/lazy-subagents-audit.md).
 
 ## Goal
 
