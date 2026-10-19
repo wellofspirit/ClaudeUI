@@ -95,6 +95,11 @@ Dispatched turns are ledger rows. `cross-engine-dispatcher.ts` writes one per ta
 every dashboard total and can still be marked. The opencode reconciler skips the dispatcher's own
 throwaway sessions by their title (`OPENCODE_DISPATCH_SESSION_TITLE`), because their messages are
 already rows and a second copy under opencode's own message ids could never be deduplicated.
+Since 2026-10-19 (ADR-105) a Claude dispatch target keeps a transcript on disk, and block usage's
+per-file parse (`parseJsonlFile`, which also feeds the watcher, the scans and the usage
+reconciler) skips any session id in the dispatch ledger (`dispatch_target`, through
+`isDispatchTargetSession`) for the same reason, subagent files of that session included; the
+history lists skip the same ids.
 
 Judge calls are ledger rows too. ClaudeUI makes the opencode and pi auto-mode judge's model call
 itself (ADR-081), so no engine meters it; the transport hands each call's usage to

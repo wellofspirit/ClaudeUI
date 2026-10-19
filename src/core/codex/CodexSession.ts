@@ -3556,6 +3556,8 @@ export class CodexSession extends BaseSession {
       engine,
       prompt,
       model: typeof args?.model === 'string' ? args.model : undefined,
+      name: typeof args?.name === 'string' ? args.name : undefined,
+      description: typeof args?.description === 'string' ? args.description : undefined,
       sessionId: typeof args?.session_id === 'string' ? args.session_id : undefined
     }
     if (verdict.decision === 'ask') {

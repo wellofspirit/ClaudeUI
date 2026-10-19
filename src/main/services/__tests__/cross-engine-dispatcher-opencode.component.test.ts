@@ -75,12 +75,17 @@ import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../../core/pi/permission-
 import type { MergedClaudeRules } from '../../../core/pi/permission-engine'
 import type { SessionJudgeOptions } from '../../../core/automode/session-judge'
 import type { JudgeRequest } from '../../../core/automode/classifier'
+import { OpencodeApiError } from '../../../core/opencode/OpencodeClient'
 import type { UsageTurnEvent } from '../../../core/services/usage-recorder'
 import type { SdkToolExtra } from '../../../core/sdk'
 import type { ChatMessage, EngineConfig, PendingApproval } from '../../../shared/types'
 import { BlockedCallLedger } from '../../../core/automode/blocked-calls'
 import { loadSharedAutoModeConfig } from '../../../core/services/ui-config'
 import { evaluateV2Call, v2ToolHidden } from '../../../core/opencode/wildcard'
+import {
+  makeFakeDispatchLedger,
+  type FakeDispatchLedger
+} from '../../../test/helpers/fake-dispatch-ledger'
 
 // ---------------------------------------------------------------------------
 // A fake opencode 2.x server
@@ -507,6 +512,8 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}, fake = makeFakeOpe
     })
   }
   const recorded: UsageTurnEvent[] = []
+  // Hermetic: the production ledger is the operational DB (ADR-105).
+  const ledger = (overrides.ledger as FakeDispatchLedger | undefined) ?? makeFakeDispatchLedger()
   const deps: DispatcherDeps = {
     serverManager,
     makeClient: vi.fn(() => fake.client as unknown as DispatchTargetClient),
@@ -515,10 +522,12 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}, fake = makeFakeOpe
     resolveMaxConcurrent: () => DEFAULT_MAX_CONCURRENT_DISPATCHES,
     loadUserRules: () => userRules(),
     recordUsageEvent: (event) => recorded.push(event),
+    ledger,
     ...overrides
   }
   return {
     dispatcher: new CrossEngineDispatcher(deps),
+    ledger,
     fake,
     client: fake.client,
     serverManager,
@@ -827,8 +836,8 @@ describe('opencode target — lifecycle', () => {
     expect(client.createSession).toHaveBeenCalledTimes(1)
   })
 
-  it('disposeFor: settles a turn in flight, interrupts, deletes the session, releases THAT lease, ends the feed', async () => {
-    const { dispatcher, client, serverManager, fake } = makeHarness()
+  it('disposeFor: settles a turn in flight, interrupts, KEEPS the session (ADR-105), releases THAT lease, ends the feed', async () => {
+    const { dispatcher, client, serverManager, fake, ledger } = makeHarness()
     fake.next({ hold: true })
     const ctx = makeCtx({ toolUseId: 'tu-1' })
     const running = dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, ctx)
@@ -839,11 +848,14 @@ describe('opencode target — lifecycle', () => {
     expect(result.text).toContain('the dispatching session was disposed')
     await tick(5)
     expect(client.interrupt).toHaveBeenCalledWith('oc-sess-1')
-    expect(client.deleteSession).toHaveBeenCalledWith('oc-sess-1')
+    // The session stays: the ledger row resumes it. Its turn was in flight, so the
+    // row says it was interrupted.
+    expect(client.deleteSession).not.toHaveBeenCalled()
+    expect(ledger.rowFor('opencode', 'oc-sess-1')?.state).toBe('interrupted')
     const conn = await serverManager.acquire.mock.results[0].value
     expect(serverManager.releaseIfCurrent).toHaveBeenCalledWith('/tmp/xeng-project', conn)
     // The interrupt settled (not active) before the lease went.
-    expect(client.deleteSession.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(client.interrupt.mock.invocationCallOrder[0]).toBeLessThan(
       serverManager.releaseIfCurrent.mock.invocationCallOrder[0]
     )
     const subscribe = client.subscribeEvents.mock.calls[0][0] as SubscribeOptions
@@ -921,8 +933,8 @@ describe('opencode target — lifecycle', () => {
     expect(client.subscribeEvents).toHaveBeenCalledTimes(1)
   })
 
-  it('a server that dies fails the turn in flight and drops its targets', async () => {
-    const { dispatcher, fake, killServer } = makeHarness()
+  it('a server that dies fails the turn in flight and drops its targets; a continuation resumes the kept session', async () => {
+    const { dispatcher, client, fake, killServer, ledger } = makeHarness()
     fake.next({ hold: true })
     const running = dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
     await tick()
@@ -930,11 +942,17 @@ describe('opencode target — lifecycle', () => {
     const result = await running
     expect(result.isError).toBe(true)
     expect(result.text).toContain('the opencode server exited')
+    expect(ledger.rowFor('opencode', 'oc-sess-1')?.state).toBe('interrupted')
+    expect(client.deleteSession).not.toHaveBeenCalled()
+    // The entry is gone from memory, the session is not: the continuation re-reads
+    // it (`getSession`, never `createSession`) through a fresh lease.
     const again = await dispatcher.dispatch(
       { engine: 'opencode', prompt: 'b', sessionId: result.sessionId },
       makeCtx()
     )
-    expect(again.text).toContain('Unknown dispatch session')
+    expect(again).toEqual({ text: 'target answer', sessionId: 'oc-sess-1' })
+    expect(client.getSession).toHaveBeenCalledWith('oc-sess-1')
+    expect(client.createSession).toHaveBeenCalledTimes(1)
   })
 
   it('a failed session create gives the lease back exactly', async () => {
@@ -2343,18 +2361,18 @@ describe('opencode target — leaks (review S9 #6)', () => {
     expect(client.prompt).not.toHaveBeenCalled()
   })
 
-  it('targets dropped with their server are deleted once a server is reachable', async () => {
-    const { dispatcher, client, killServer } = makeHarness()
+  it('targets dropped with their server keep their sessions: nothing is deleted, nothing is orphaned for a later reap', async () => {
+    const { dispatcher, client, killServer, ledger } = makeHarness()
     await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
-    client.deleteSession.mockRejectedValueOnce(new Error('ECONNREFUSED'))
     killServer()
     await tick(6)
-    expect(client.deleteSession).toHaveBeenCalledWith('oc-sess-1')
-    client.deleteSession.mockClear()
-    // The next target, on a live server, deletes the orphan.
+    expect(client.deleteSession).not.toHaveBeenCalled()
+    // An idle target dropped with its server is resumable, not interrupted.
+    expect(ledger.rowFor('opencode', 'oc-sess-1')?.state).toBe('idle')
+    // The next target, on a live server, has no orphan to reap.
     await dispatcher.dispatch({ engine: 'opencode', prompt: 'b' }, makeCtx())
     await tick()
-    expect(client.deleteSession).toHaveBeenCalledWith('oc-sess-1')
+    expect(client.deleteSession).not.toHaveBeenCalled()
   })
 })
 
@@ -2426,5 +2444,226 @@ describe('opencode target — a restricted subagent caller (owner decision, opti
       makeCtx()
     )
     expect(again.isError).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-105 (B-1) — the X-Agent ledger: an opencode target's session is KEPT when its
+// lease goes, and a continuation re-reads it from the ledger row.
+// ---------------------------------------------------------------------------
+
+describe('opencode target — the X-Agent ledger (ADR-105)', () => {
+  it('records the row once the session exists: harness id, model, parent and launch mode', async () => {
+    const { dispatcher, ledger } = makeHarness()
+    const result = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'a' },
+      makeCtx({
+        fromEngine: 'claude',
+        fromRoutingId: 'parent-A',
+        autonomyMode: 'acceptEdits',
+        toolUseId: 'tu-1',
+        cwd: '/tmp/proj-a'
+      })
+    )
+
+    expect(result.sessionId).toBe('oc-sess-1')
+    expect(ledger.rowFor('opencode', 'oc-sess-1')).toMatchObject({
+      engine: 'opencode',
+      parentSessionId: 'parent-A',
+      parentEngine: 'claude',
+      parentToolUseId: 'tu-1',
+      cwd: '/tmp/proj-a',
+      model: 'openai/gpt-5',
+      launchMode: 'acceptEdits',
+      callerRestriction: null,
+      // The turn ended, the session is still there: resumable.
+      state: 'idle'
+    })
+  })
+
+  it('a creation rolled back leaves no row (the session is deleted, nothing to resume)', async () => {
+    const { dispatcher, client, ledger } = makeHarness()
+    client.createSession.mockImplementationOnce(async () => {
+      throw new Error('boom')
+    })
+    const failed = await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
+    expect(failed.isError).toBe(true)
+    expect(ledger.rows.size).toBe(0)
+  })
+
+  it('disposeFor on an idle target releases the lease and keeps the session; the next continuation re-reads it (getSession, never createSession) and re-applies the rules', async () => {
+    const { dispatcher, client, serverManager, ledger, fake } = makeHarness()
+    const ctx = makeCtx({ fromRoutingId: 'parent-A' })
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, ctx)
+    const conn = await serverManager.acquire.mock.results[0].value
+
+    dispatcher.disposeFor('parent-A')
+    await tick(5)
+
+    expect(client.deleteSession).not.toHaveBeenCalled()
+    expect(serverManager.releaseIfCurrent).toHaveBeenCalledWith('/tmp/xeng-project', conn)
+    expect(ledger.rowFor('opencode', 'oc-sess-1')?.state).toBe('idle')
+    client.setSessionPermissions.mockClear()
+
+    fake.next({ steps: [{ text: 'resumed answer' }] })
+    const again = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'b', sessionId: first.sessionId },
+      ctx
+    )
+
+    expect(again).toEqual({ text: 'resumed answer', sessionId: 'oc-sess-1' })
+    expect(client.getSession).toHaveBeenCalledWith('oc-sess-1')
+    expect(client.createSession).toHaveBeenCalledTimes(1)
+    // A second lease for the resumed target, and its ruleset goes out again (`applied: null`).
+    expect(serverManager.acquire).toHaveBeenCalledTimes(2)
+    expect(client.setSessionPermissions).toHaveBeenCalledWith('oc-sess-1', expect.any(Array))
+    expect(ledger.rowFor('opencode', 'oc-sess-1')?.state).toBe('idle')
+    expect(client.deleteSession).not.toHaveBeenCalled()
+  })
+
+  it("only the row's owner resumes it", async () => {
+    const { dispatcher, client } = makeHarness()
+    const first = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'a' },
+      makeCtx({ fromRoutingId: 'parent-A' })
+    )
+    dispatcher.disposeFor('parent-A')
+    await tick(5)
+
+    for (const [sessionId, parent] of [
+      [first.sessionId, 'parent-B'],
+      ['ses_somebody_elses', 'parent-A']
+    ]) {
+      const refused = await dispatcher.dispatch(
+        { engine: 'opencode', prompt: 'b', sessionId },
+        makeCtx({ fromRoutingId: parent })
+      )
+      expect(refused.isError).toBe(true)
+      expect(refused.text).toContain('Unknown dispatch session')
+    }
+    expect(client.getSession).not.toHaveBeenCalled()
+  })
+
+  it('a session opencode no longer has (404) fails the row; any other failure leaves it as it was — both give the lease back', async () => {
+    const { dispatcher, client, serverManager, ledger } = makeHarness()
+    const ctx = makeCtx({ fromRoutingId: 'parent-A' })
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, ctx)
+    dispatcher.disposeFor('parent-A')
+    await tick(5)
+    serverManager.releaseIfCurrent.mockClear()
+
+    client.getSession.mockRejectedValueOnce(new Error('connection reset'))
+    const transient = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'b', sessionId: first.sessionId },
+      ctx
+    )
+    expect(transient.isError).toBe(true)
+    expect(transient.text).toContain('Could not resume dispatch session "oc-sess-1"')
+    expect(ledger.rowFor('opencode', 'oc-sess-1')?.state).toBe('idle')
+
+    client.getSession.mockRejectedValueOnce(new OpencodeApiError('session.get', 404, {}))
+    const result = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'b', sessionId: first.sessionId },
+      ctx
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('Could not resume dispatch session "oc-sess-1"')
+    expect(ledger.rowFor('opencode', 'oc-sess-1')?.state).toBe('failed')
+    await tick()
+    expect(serverManager.releaseIfCurrent).toHaveBeenCalledTimes(2)
+    // A re-read that failed is not a session of ours to delete.
+    expect(client.deleteSession).not.toHaveBeenCalled()
+  })
+
+  it('a failed turn leaves the row failed (it may be retried)', async () => {
+    const { dispatcher, fake, ledger } = makeHarness()
+    fake.next({ steps: [], fail: { type: 'provider.other', message: 'Key limit exceeded' } })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
+    expect(result.isError).toBe(true)
+    expect(ledger.rowFor('opencode', 'oc-sess-1')?.state).toBe('failed')
+  })
+
+  it('a resumed model that left the allowlist is refused, with no session read', async () => {
+    const policy: { allowed?: string[] } = {}
+    const { dispatcher, client } = makeHarness({
+      loadEngineConfig: () => ({
+        dispatch: {
+          defaultModel: 'openai/gpt-5',
+          ...(policy.allowed ? { allowedModels: policy.allowed } : {})
+        }
+      })
+    })
+    const ctx = makeCtx({ fromRoutingId: 'parent-A' })
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, ctx)
+    dispatcher.disposeFor('parent-A')
+    await tick(5)
+
+    policy.allowed = ['anthropic/claude-x']
+    const refused = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'b', sessionId: first.sessionId, model: 'anthropic/claude-x' },
+      ctx
+    )
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toContain('is not in the user-configured allowlist for opencode dispatch')
+    expect(client.getSession).not.toHaveBeenCalled()
+  })
+
+  it('a resumed target starts the cost cap from what its recorded turns cost', async () => {
+    const { dispatcher, client, ledger } = makeHarness({
+      loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai/gpt-5', maxCostUsd: 1 } })
+    })
+    const ctx = makeCtx({ fromRoutingId: 'parent-A' })
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, ctx)
+    dispatcher.disposeFor('parent-A')
+    await tick(5)
+    ledger.spendByHarnessRef.set('oc-sess-1', { costUsd: 2, unpricedTurns: 0 })
+
+    const result = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'b', sessionId: first.sessionId },
+      ctx
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('Dispatch cost cap ($1) reached')
+    expect(client.getSession).not.toHaveBeenCalled()
+  })
+
+  it('the restriction the target was created with comes from the row for a released target', async () => {
+    const restricted = { agents: ['custom'], deny: ['Edit'], ask: [] as string[] }
+    const { dispatcher, client } = makeHarness()
+    const ctx = makeCtx({ fromRoutingId: 'parent-A', callerRestriction: restricted })
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, ctx)
+    dispatcher.disposeFor('parent-A')
+    await tick(5)
+
+    const again = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'b', sessionId: first.sessionId },
+      ctx
+    )
+
+    expect(again.isError).toBeUndefined()
+    expect(client.getSession).toHaveBeenCalledWith('oc-sess-1')
+  })
+})
+
+describe('opencode target — name and description on the ledger row (ADR-105)', () => {
+  it('stores them trimmed on a new target; blank or absent stays null', async () => {
+    const { dispatcher, ledger } = makeHarness()
+    await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'a', name: '  impl-e1 ', description: ' Review auth diff ' },
+      makeCtx()
+    )
+    await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'b', name: '  ', description: '' },
+      makeCtx()
+    )
+    await dispatcher.dispatch({ engine: 'opencode', prompt: 'c' }, makeCtx())
+    expect(ledger.rowFor('opencode', 'oc-sess-1')).toMatchObject({
+      name: 'impl-e1',
+      description: 'Review auth diff'
+    })
+    expect(ledger.rowFor('opencode', 'oc-sess-2')).toMatchObject({ name: null, description: null })
+    expect(ledger.rowFor('opencode', 'oc-sess-3')).toMatchObject({ name: null, description: null })
   })
 })

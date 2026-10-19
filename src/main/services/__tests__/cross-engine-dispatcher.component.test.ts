@@ -102,7 +102,7 @@ import type {
   AttachCodexTargetFn
 } from '../../../core/services/cross-engine-dispatcher'
 import { CodexMethodNotFound } from '../../../core/codex/CodexAppServerClient'
-import { codexTurnPolicy } from '../../../core/codex/codex-turn-policy'
+import { codexModePolicy, codexTurnPolicy } from '../../../core/codex/codex-turn-policy'
 import type { SessionJudgeOptions } from '../../../core/automode/session-judge'
 import type { JudgeRequest } from '../../../core/automode/classifier'
 import type { QueryHandle, ResultMessage, SDKMessage, SdkToolExtra } from '../../../core/sdk'
@@ -118,6 +118,11 @@ import { SyncCore } from '../../../core/sync/sync-core'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../../core/pi/permission-engine'
 import type { MergedClaudeRules } from '../../../core/pi/permission-engine'
 import { callerRestrictionFromAgent } from '../../../core/opencode/caller-restriction'
+import {
+  makeFakeDispatchLedger,
+  type FakeDispatchLedger
+} from '../../../test/helpers/fake-dispatch-ledger'
+import type { DispatchTargetRow } from '../../../core/services/dispatch-target-ledger'
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -150,7 +155,10 @@ function userRules(r: Partial<MergedClaudeRules> = {}): MergedClaudeRules {
 function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
   dispatcher: CrossEngineDispatcher
   deps: { serverManager: { acquire: ReturnType<typeof vi.fn> } }
+  /** The in-memory X-Agent ledger the dispatcher writes (ADR-105). */
+  ledger: FakeDispatchLedger
 } {
+  const ledger = (overrides.ledger as FakeDispatchLedger | undefined) ?? makeFakeDispatchLedger()
   const serverManager = {
     acquire: vi.fn(async () => unusedOpencode()),
     releaseIfCurrent: vi.fn(),
@@ -172,9 +180,17 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
     // Hermetic: the production default (`mergedClaudeRulesFor`) reads the
     // USER's settings files. Tests about the user's rules override it.
     loadUserRules: () => userRules(),
+    // Hermetic: the production ledger is the operational DB; a Claude transcript is
+    // "on disk" unless a test says otherwise.
+    ledger,
+    locateClaudeTranscript: (id) => `/projects/${id}.jsonl`,
+    // A resume that finds a held thread must not wait out the real lock window.
+    codexResumeLockWindowMs: 0,
+    // A pi target's session directory is "on disk" unless a test says otherwise.
+    piSessionDirExists: () => true,
     ...overrides
   }
-  return { dispatcher: new CrossEngineDispatcher(deps), deps: { serverManager } }
+  return { dispatcher: new CrossEngineDispatcher(deps), deps: { serverManager }, ledger }
 }
 
 /**
@@ -802,11 +818,11 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
   })
 
   describe('timeout / abort', () => {
-    it('the configured absolute cap aborts the target and removes the entry (no continuation possible)', async () => {
+    it('the configured absolute cap aborts the target and removes the entry; the transcript stays, so a continuation re-spawns it with --resume', async () => {
       vi.useFakeTimers()
       try {
         const target = makeFakeClaudeTarget()
-        const { dispatcher } = makeHarness({
+        const { dispatcher, ledger } = makeHarness({
           loadEngineConfig: vi.fn(() => ({
             dispatch: { defaultModel: 'haiku', turnTimeoutMs: 60_000 }
           })),
@@ -825,13 +841,21 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
         expect(result.text).toContain('1 minutes')
         expect(result.sessionId).toBe('claude-sess-1')
         expect(target.lastAbortController()?.signal.aborted).toBe(true)
+        // The process is dead, its transcript is not: the row says it is resumable.
+        expect(ledger.rowFor('claude', 'claude-sess-1')?.state).toBe('interrupted')
 
-        // The entry was removed — continuation now fails.
-        const cont = await dispatcher.dispatch(
+        // The entry was removed — the continuation rebuilds it from the ledger row.
+        const cont = dispatcher.dispatch(
           { engine: 'claude', prompt: 'y', sessionId: 'claude-sess-1' },
           ctx
         )
-        expect(cont.isError).toBe(true)
+        await settle()
+        expect(target.spawnCalls).toHaveLength(2)
+        expect(target.spawnCalls[1].resume).toBe('claude-sess-1')
+        expect(target.spawnCalls[1].sessionId).toBeUndefined()
+        target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+        target.push(resultMsg({ result: 'back again', session_id: 'claude-sess-1' }))
+        expect(await cont).toMatchObject({ text: 'back again', sessionId: 'claude-sess-1' })
       } finally {
         vi.useRealTimers()
       }
@@ -3041,7 +3065,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
 
   it('a rejected turn (extension_error) settles as isError but does NOT tear down the entry — a continuation can still be attempted', async () => {
     const target = makeFakePiTarget()
-    const { dispatcher } = makeHarness({
+    const { dispatcher, ledger } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget
     })
@@ -3057,6 +3081,8 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     const result = await pending
     expect(result.isError).toBe(true)
     expect(result.text).toContain('bridge crashed')
+    // The row says the last turn failed (it may be retried)…
+    expect(ledger.rowFor('pi', 'pi-target-1')?.state).toBe('failed')
 
     const cont = dispatcher.dispatch({ engine: 'pi', prompt: 'y', sessionId: 'pi-target-1' }, ctx)
     await tick()
@@ -3064,6 +3090,8 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     target.pushEvent(PI_AGENT_SETTLED)
     expect((await cont).isError).toBeUndefined()
     expect(target.spawnCalls).toHaveLength(1)
+    // …and the retry that worked clears it.
+    expect(ledger.rowFor('pi', 'pi-target-1')?.state).toBe('idle')
   })
 
   it('an unexpected process exit settles the in-flight turn as an error AND disposes the bridge host (port/socket hygiene)', async () => {
@@ -4098,7 +4126,7 @@ describe('CrossEngineDispatcher — pi direction: the cap follows the same cost 
 })
 
 describe('CrossEngineDispatcher — pi direction (M4c): disposeFor', () => {
-  it('tears down: client.dispose() + bridgeHost.dispose(); the dead continuation errors; other routings are untouched', async () => {
+  it('tears down: client.dispose() + bridgeHost.dispose(); the continuation respawns from the ledger; other routings are untouched', async () => {
     const targetA = makeFakePiTarget({ sessionId: 'pi-sess-A' })
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
@@ -4118,11 +4146,19 @@ describe('CrossEngineDispatcher — pi direction (M4c): disposeFor', () => {
     expect(targetA.client.dispose).toHaveBeenCalled()
     expect(targetA.bridgeDispose).toHaveBeenCalled()
 
-    const cont = await dispatcher.dispatch(
+    // The child is gone, its session directory is not: the continuation respawns it
+    // on the same session id (ADR-105) and the turn comes back.
+    const cont = dispatcher.dispatch(
       { engine: 'pi', prompt: 'again', sessionId: 'pi-sess-A' },
       makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-A' })
     )
-    expect(cont.isError).toBe(true)
+    await tick()
+    expect(targetA.spawnCalls).toHaveLength(2)
+    targetA.pushEvent(piAssistantMessageEnd({ text: 'second' }))
+    targetA.pushEvent(PI_AGENT_SETTLED)
+    const resumed = await cont
+    expect(resumed.isError).toBeUndefined()
+    expect(resumed.sessionId).toBe('pi-sess-A')
   })
 
   it('dismisses pending forwarded approvals for the disposed target', async () => {
@@ -4309,6 +4345,8 @@ function makeFakeCodexTarget(
     configModel?: string
     catalog?: Array<Record<string, unknown>>
     requestHandler?: CodexRequestHandler
+    /** Runs on every `thread/resume` before the canned answer (throw to refuse it). */
+    resumeHandler?: (params: Record<string, unknown>) => void
   } = {}
 ): {
   spawnCodexTarget: AttachCodexTargetFn
@@ -4365,6 +4403,14 @@ function makeFakeCodexTarget(
       case 'thread/start':
         return {
           thread: { id: threadId, parentThreadId: null, forkedFromId: null },
+          model: params.model,
+          modelProvider: 'openai',
+          reasoningEffort: null
+        }
+      case 'thread/resume':
+        overrides.resumeHandler?.(params)
+        return {
+          thread: { id: params.threadId, parentThreadId: null, forkedFromId: null },
           model: params.model,
           modelProvider: 'openai',
           reasoningEffort: null
@@ -4463,7 +4509,7 @@ function makeFakeCodexTarget(
  */
 function makeCodexHarness(
   overrides: Partial<DispatcherDeps> & { dispatch?: Record<string, unknown> } = {}
-): { dispatcher: CrossEngineDispatcher } {
+): { dispatcher: CrossEngineDispatcher; ledger: FakeDispatchLedger } {
   const { dispatch, ...rest } = overrides
   return makeHarness({
     loadEngineConfig: vi.fn(() => ({ dispatch: dispatch ?? {} }) as EngineConfig),
@@ -5221,7 +5267,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
 
   it('a turn/completed carrying an error is an isError result plus a "failed" notification', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const { dispatcher, ledger } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
     const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
     await tick()
@@ -5231,6 +5277,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
     expect(result.text).toContain('model overloaded')
     const notification = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')!
     expect((notification[1] as { status: string }).status).toBe('failed')
+    expect(ledger.rowFor('codex', CODEX_THREAD_ID)?.state).toBe('failed')
   })
 
   it('a turn that produced no agent message returns the placeholder rather than empty text', async () => {
@@ -5528,12 +5575,16 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
     expect(target.requests.some((entry) => entry.method === 'turn/interrupt')).toBe(true)
     expect(result.isError).toBe(true)
 
-    const dead = await dispatcher.dispatch(
+    // ADR-105: the thread stays on disk and the ledger row names it, so the owner's
+    // continuation reopens it with `thread/resume` instead of being refused.
+    const resumed = dispatcher.dispatch(
       { engine: 'codex', prompt: 'again', sessionId: CODEX_THREAD_ID },
       ctx
     )
-    expect(dead.isError).toBe(true)
-    expect(dead.text).toContain('Unknown dispatch session')
+    await tick()
+    expect(target.requests.filter((entry) => entry.method === 'thread/resume')).toHaveLength(1)
+    target.completeTurn({ text: 'resumed answer' })
+    expect(await resumed).toMatchObject({ text: 'resumed answer', sessionId: CODEX_THREAD_ID })
   })
 
   it('disposeFor leaves ANOTHER session’s codex target alone', async () => {
@@ -7079,5 +7130,1184 @@ describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
       target.pushEvent(PI_AGENT_SETTLED)
       await pending
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-105 (B-1) — the X-Agent ledger: every target is a durable row, its harness
+// session is persisted, and a continuation rebuilds a target the in-memory map no
+// longer holds from that row — for its owner only.
+// ---------------------------------------------------------------------------
+
+describe('X-Agent ledger — Claude targets (ADR-105)', () => {
+  const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+  const INIT = { type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage
+  const CFG =
+    (extra: Record<string, unknown> = {}) =>
+    (): EngineConfig => ({ dispatch: { defaultModel: 'haiku', ...extra } })
+
+  /** Drive one turn of a Claude target to its result. */
+  async function turn(
+    dispatcher: CrossEngineDispatcher,
+    target: ReturnType<typeof makeFakeClaudeTarget>,
+    req: Parameters<CrossEngineDispatcher['dispatch']>[0],
+    ctx: DispatchContext,
+    result = 'answer'
+  ): ReturnType<CrossEngineDispatcher['dispatch']> {
+    const pending = dispatcher.dispatch(req, ctx)
+    await tick()
+    target.push(INIT)
+    target.push(resultMsg({ result, session_id: 'claude-sess-1' }))
+    return pending
+  }
+
+  it('records the row BEFORE the spawn, under the uuid the process is started with', async () => {
+    const target = makeFakeClaudeTarget()
+    const ledger = makeFakeDispatchLedger()
+    const atSpawn: Array<{ sessionId?: string; row?: DispatchTargetRow }> = []
+    const { dispatcher } = makeHarness({
+      ledger,
+      loadEngineConfig: CFG(),
+      spawnClaudeQuery: async (opts) => {
+        atSpawn.push({
+          sessionId: opts.sessionId,
+          row: ledger.rowFor('claude', opts.sessionId ?? '')
+        })
+        return target.spawnClaudeQuery(opts)
+      }
+    })
+
+    const ctx = makeCtx({
+      fromEngine: 'opencode',
+      fromRoutingId: 'parent-A',
+      autonomyMode: 'acceptEdits',
+      toolUseId: 'tu-1'
+    })
+    const result = await turn(dispatcher, target, { engine: 'claude', prompt: 'x' }, ctx)
+
+    expect(atSpawn).toHaveLength(1)
+    expect(atSpawn[0].sessionId).toMatch(UUID_V4)
+    // The row existed when the spawn fake ran — the hide predicate knew the session
+    // before cli.js wrote a byte of its transcript.
+    expect(atSpawn[0].row).toMatchObject({
+      engine: 'claude',
+      harnessRef: atSpawn[0].sessionId,
+      parentSessionId: 'parent-A',
+      parentEngine: 'opencode',
+      parentToolUseId: 'tu-1',
+      cwd: '/tmp/xeng-project',
+      model: 'haiku',
+      launchMode: 'acceptEdits',
+      callerRestriction: null,
+      state: 'running'
+    })
+    expect(target.spawnCalls[0].resume).toBeUndefined()
+    // The model continues the target by the id it is told (init's): the row answers to it.
+    expect(result.sessionId).toBe('claude-sess-1')
+    const row = ledger.rowFor('claude', 'claude-sess-1')
+    expect(row).toMatchObject({ state: 'idle', id: atSpawn[0].row!.id })
+    expect(ledger.rowFor('claude', atSpawn[0].sessionId!)).toBeUndefined()
+  })
+
+  it('a parent that stops using it releases the process, keeps the row idle, and the next continuation --resume-s it', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: CFG(),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', fromRoutingId: 'parent-A' })
+    await turn(dispatcher, target, { engine: 'claude', prompt: 'one' }, ctx)
+
+    dispatcher.disposeFor('parent-A')
+    expect(target.spawnCalls[0].abortController.signal.aborted).toBe(true)
+    expect(ledger.rowFor('claude', 'claude-sess-1')?.state).toBe('idle')
+
+    // A model that names a different model on the continuation still gets the target's own.
+    const again = await turn(
+      dispatcher,
+      target,
+      { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1', model: 'sonnet' },
+      ctx,
+      'second answer'
+    )
+
+    expect(again).toEqual({ text: 'second answer', sessionId: 'claude-sess-1' })
+    expect(target.spawnCalls).toHaveLength(2)
+    expect(target.spawnCalls[1]).toMatchObject({
+      resume: 'claude-sess-1',
+      cwd: '/tmp/xeng-project',
+      model: 'haiku'
+    })
+    expect(target.spawnCalls[1].sessionId).toBeUndefined()
+    expect(ledger.rowFor('claude', 'claude-sess-1')?.state).toBe('idle')
+  })
+
+  it('a target released while its turn runs is left interrupted, not idle', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: CFG(),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const pending = dispatcher.dispatch(
+      { engine: 'claude', prompt: 'x' },
+      makeCtx({ fromEngine: 'opencode', fromRoutingId: 'parent-A' })
+    )
+    await tick()
+    target.push(INIT)
+    await tick()
+
+    dispatcher.disposeFor('parent-A')
+    expect(ledger.rowFor('claude', 'claude-sess-1')?.state).toBe('interrupted')
+    // The turn that was in flight must not overwrite it on its way out.
+    target.push(resultMsg({ session_id: 'claude-sess-1' }))
+    await pending
+    expect(ledger.rowFor('claude', 'claude-sess-1')?.state).toBe('interrupted')
+  })
+
+  it("only the row's owner resumes it: another parent, an unknown id and an id of another engine are the unknown-session error", async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: CFG(),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    await turn(
+      dispatcher,
+      target,
+      { engine: 'claude', prompt: 'one' },
+      makeCtx({ fromEngine: 'opencode', fromRoutingId: 'parent-A' })
+    )
+    dispatcher.disposeFor('parent-A')
+
+    for (const [sessionId, parent] of [
+      ['claude-sess-1', 'parent-B'],
+      ['not-a-session', 'parent-A']
+    ]) {
+      const refused = await dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', sessionId },
+        makeCtx({ fromEngine: 'opencode', fromRoutingId: parent })
+      )
+      expect(refused.isError).toBe(true)
+      expect(refused.text).toContain('Unknown dispatch session')
+    }
+    // The row is a Claude row: asking for it as a pi target is the same refusal.
+    const wrongEngine = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'two', sessionId: 'claude-sess-1' },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A' })
+    )
+    expect(wrongEngine.text).toContain('Unknown dispatch session')
+    expect(target.spawnCalls).toHaveLength(1)
+  })
+
+  it('a transcript that is gone is a clear error — never a fresh start — and the row is failed', async () => {
+    const target = makeFakeClaudeTarget()
+    let transcript = true
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: CFG(),
+      spawnClaudeQuery: target.spawnClaudeQuery,
+      locateClaudeTranscript: () => (transcript ? '/projects/x.jsonl' : null)
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', fromRoutingId: 'parent-A' })
+    await turn(dispatcher, target, { engine: 'claude', prompt: 'one' }, ctx)
+    dispatcher.disposeFor('parent-A')
+
+    transcript = false
+    const result = await dispatcher.dispatch(
+      { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+      ctx
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('transcript no longer exists')
+    expect(target.spawnCalls).toHaveLength(1)
+    expect(ledger.rowFor('claude', 'claude-sess-1')?.state).toBe('failed')
+  })
+
+  it('a spawn that fails on resume says so and leaves the row as it was (transient: retry later)', async () => {
+    const target = makeFakeClaudeTarget()
+    let failNext = false
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: CFG(),
+      spawnClaudeQuery: async (opts) => {
+        if (failNext) throw new Error('spawn blew up')
+        return target.spawnClaudeQuery(opts)
+      }
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', fromRoutingId: 'parent-A' })
+    await turn(dispatcher, target, { engine: 'claude', prompt: 'one' }, ctx)
+    dispatcher.disposeFor('parent-A')
+
+    failNext = true
+    const result = await dispatcher.dispatch(
+      { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+      ctx
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('Failed to resume dispatched Claude agent: spawn blew up')
+    expect(ledger.rowFor('claude', 'claude-sess-1')?.state).toBe('idle')
+  })
+
+  it('the restriction the target was created with comes from the row once the entry is gone — and stays on the resumed process', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: CFG(),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const restricted = { agents: ['custom'], deny: ['Edit'], ask: ['Bash(git push*)'] }
+    const ctx = makeCtx({
+      fromEngine: 'opencode',
+      fromRoutingId: 'parent-A',
+      callerRestriction: restricted
+    })
+    await turn(dispatcher, target, { engine: 'claude', prompt: 'one' }, ctx)
+    dispatcher.disposeFor('parent-A')
+
+    // The same restricted caller continues: refused as "looser than the target" if the
+    // held restriction were read from the (gone) entry instead of the row.
+    const again = await turn(
+      dispatcher,
+      target,
+      { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+      ctx
+    )
+    expect(again.isError).toBeUndefined()
+    expect(target.spawnCalls[1].settings).toEqual({
+      permissions: { deny: ['Edit'], ask: ['Bash(git push*)'] }
+    })
+
+    // And a caller WITHOUT the restriction cannot shed it from the released target.
+    dispatcher.disposeFor('parent-A')
+    const unrestricted = await turn(
+      dispatcher,
+      target,
+      { engine: 'claude', prompt: 'three', sessionId: 'claude-sess-1' },
+      makeCtx({ fromEngine: 'opencode', fromRoutingId: 'parent-A' })
+    )
+    expect(unrestricted.isError).toBeUndefined()
+    expect(target.spawnCalls[2].settings).toEqual({
+      permissions: { deny: ['Edit'], ask: ['Bash(git push*)'] }
+    })
+  })
+
+  it('a resumed target starts the cost cap from what its recorded turns cost', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: CFG({ maxCostUsd: 1 }),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', fromRoutingId: 'parent-A' })
+    await turn(dispatcher, target, { engine: 'claude', prompt: 'one' }, ctx)
+    dispatcher.disposeFor('parent-A')
+    ledger.spendByHarnessRef.set('claude-sess-1', { costUsd: 1.5, unpricedTurns: 0 })
+
+    const result = await dispatcher.dispatch(
+      { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+      ctx
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('Dispatch cost cap ($1) reached')
+    expect(result.text).toContain('spent $1.5000')
+    expect(target.spawnCalls).toHaveLength(1)
+  })
+
+  it('two continuations of one released target resume it once', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: CFG(),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', fromRoutingId: 'parent-A' })
+    await turn(dispatcher, target, { engine: 'claude', prompt: 'one' }, ctx)
+    dispatcher.disposeFor('parent-A')
+
+    const first = dispatcher.dispatch(
+      { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+      ctx
+    )
+    const second = await dispatcher.dispatch(
+      { engine: 'claude', prompt: 'three', sessionId: 'claude-sess-1' },
+      ctx
+    )
+    expect(second.isError).toBe(true)
+    expect(second.text).toContain('already running a turn')
+
+    await tick()
+    target.push(INIT)
+    target.push(resultMsg({ session_id: 'claude-sess-1' }))
+    expect((await first).isError).toBeUndefined()
+    expect(target.spawnCalls).toHaveLength(2)
+  })
+
+  it("follows the parent's rekey: the row moved to the durable id, so the live entry is still its owner's", async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: CFG(),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    await turn(
+      dispatcher,
+      target,
+      { engine: 'claude', prompt: 'one' },
+      makeCtx({ fromEngine: 'opencode', fromRoutingId: 'tmp-routing' })
+    )
+    // SessionManager.rekey → moveDispatchTargetParent: the row follows, the entry does not.
+    const row = ledger.rowFor('claude', 'claude-sess-1')!
+    ledger.rows.set(row.id, { ...row, parentSessionId: 'durable-id' })
+
+    const durable = makeCtx({ fromEngine: 'opencode', fromRoutingId: 'durable-id' })
+    const again = await turn(
+      dispatcher,
+      target,
+      { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+      durable
+    )
+    expect(again.isError).toBeUndefined()
+    // The live entry continued: no second process.
+    expect(target.spawnCalls).toHaveLength(1)
+    // …and disposing by the durable id releases it (the old id would match nothing).
+    dispatcher.disposeFor('durable-id')
+    expect(target.spawnCalls[0].abortController.signal.aborted).toBe(true)
+    expect(ledger.rowFor('claude', 'claude-sess-1')?.state).toBe('idle')
+  })
+})
+
+describe('X-Agent ledger — pi targets (ADR-105)', () => {
+  const PI_CFG = () => (): EngineConfig => ({
+    dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' }
+  })
+  const flag = (args: readonly string[] | undefined, name: string): string | undefined => {
+    const i = (args ?? []).indexOf(name)
+    return i >= 0 ? args![i + 1] : undefined
+  }
+
+  async function piTurn(
+    dispatcher: CrossEngineDispatcher,
+    target: ReturnType<typeof makeFakePiTarget>,
+    req: Parameters<CrossEngineDispatcher['dispatch']>[0],
+    ctx: DispatchContext
+  ): ReturnType<CrossEngineDispatcher['dispatch']> {
+    const pending = dispatcher.dispatch(req, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'answer' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    return pending
+  }
+
+  it('records the row before the child spawns and persists its session in a hidden directory', async () => {
+    const target = makeFakePiTarget({ sessionId: 'pi-sess-A' })
+    const ledger = makeFakeDispatchLedger()
+    const atSpawn: Array<{ args?: string[]; row?: DispatchTargetRow }> = []
+    const { dispatcher } = makeHarness({
+      ledger,
+      loadEngineConfig: PI_CFG(),
+      spawnPiTarget: async (opts) => {
+        atSpawn.push({
+          args: opts.args,
+          row: ledger.rowFor('pi', flag(opts.args, '--session-id') ?? '')
+        })
+        return target.spawnPiTarget(opts)
+      }
+    })
+
+    const result = await piTurn(
+      dispatcher,
+      target,
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A', toolUseId: 'tu-9' })
+    )
+
+    const { args, row } = atSpawn[0]
+    expect(row).toMatchObject({
+      engine: 'pi',
+      parentSessionId: 'parent-A',
+      parentEngine: 'claude',
+      parentToolUseId: 'tu-9',
+      cwd: '/tmp/xeng-project',
+      model: 'openai-codex/gpt-5.6-luna',
+      state: 'running'
+    })
+    expect(args).not.toContain('--no-session')
+    expect(flag(args, '--session-id')).toBe(row!.harnessRef)
+    expect(flag(args, '--session-dir')?.replace(/\\/g, '/')).toMatch(
+      new RegExp(`/\\.claude/ui/dispatch/pi/${row!.id}$`)
+    )
+    // pi reports its own id from get_state; the model continues by it, so the row answers to it.
+    expect(result.sessionId).toBe('pi-sess-A')
+    expect(ledger.get(row!.id)).toMatchObject({ harnessRef: 'pi-sess-A', state: 'idle' })
+  })
+
+  it('releases the child on dispose and respawns it on the same session directory and id', async () => {
+    const target = makeFakePiTarget({ sessionId: 'pi-sess-A' })
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: PI_CFG(),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A' })
+    await piTurn(dispatcher, target, { engine: 'pi', prompt: 'one' }, ctx)
+    const created = target.spawnCalls[0].args
+
+    dispatcher.disposeFor('parent-A')
+    expect(target.client.dispose).toHaveBeenCalled()
+    expect(ledger.rowFor('pi', 'pi-sess-A')?.state).toBe('idle')
+
+    const again = await piTurn(
+      dispatcher,
+      target,
+      { engine: 'pi', prompt: 'two', sessionId: 'pi-sess-A' },
+      ctx
+    )
+
+    expect(again.isError).toBeUndefined()
+    expect(target.spawnCalls).toHaveLength(2)
+    const resumed = target.spawnCalls[1].args
+    expect(flag(resumed, '--session-dir')).toBe(flag(created, '--session-dir'))
+    // The same two flags create and resume: pi opens the session file it finds there.
+    expect(flag(resumed, '--session-id')).toBe('pi-sess-A')
+    expect(resumed).not.toContain('--no-session')
+    expect(target.spawnCalls[1].cwd).toBe('/tmp/xeng-project')
+  })
+
+  it('refuses another parent’s pi session and spawns nothing', async () => {
+    const target = makeFakePiTarget({ sessionId: 'pi-sess-A' })
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: PI_CFG(),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    await piTurn(
+      dispatcher,
+      target,
+      { engine: 'pi', prompt: 'one' },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A' })
+    )
+    dispatcher.disposeFor('parent-A')
+
+    const refused = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'two', sessionId: 'pi-sess-A' },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-B' })
+    )
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toContain('Unknown dispatch session')
+    expect(target.spawnCalls).toHaveLength(1)
+  })
+})
+
+describe('X-Agent ledger — Codex targets (ADR-105)', () => {
+  async function codexTurn(
+    dispatcher: CrossEngineDispatcher,
+    target: ReturnType<typeof makeFakeCodexTarget>,
+    req: Parameters<CrossEngineDispatcher['dispatch']>[0],
+    ctx: DispatchContext,
+    text = 'answer'
+  ): ReturnType<CrossEngineDispatcher['dispatch']> {
+    const pending = dispatcher.dispatch(req, ctx)
+    await tick()
+    target.completeTurn({ text })
+    return pending
+  }
+
+  it('records the thread as soon as it exists, with the account that picked its host', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher, ledger } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+
+    const result = await codexTurn(
+      dispatcher,
+      target,
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({
+        fromEngine: 'claude',
+        fromRoutingId: 'parent-A',
+        autonomyMode: 'auto',
+        toolUseId: 'tu-3',
+        chatgptAccountId: 'acct-A'
+      })
+    )
+
+    expect(result.sessionId).toBe(CODEX_THREAD_ID)
+    expect(ledger.rowFor('codex', CODEX_THREAD_ID)).toMatchObject({
+      engine: 'codex',
+      parentSessionId: 'parent-A',
+      parentToolUseId: 'tu-3',
+      cwd: '/tmp/xeng-project',
+      model: 'gpt-5.6-luna',
+      launchMode: 'auto',
+      codexAccountId: 'acct-A',
+      state: 'idle'
+    })
+  })
+
+  it('releases the thread on dispose and reopens it with thread/resume — stored cwd, model and the live policy envelope', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher, ledger } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    await codexTurn(
+      dispatcher,
+      target,
+      { engine: 'codex', prompt: 'one' },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A', cwd: '/proj/a' })
+    )
+    dispatcher.disposeFor('parent-A')
+    expect(target.client.detach).toHaveBeenCalledTimes(1)
+    expect(ledger.rowFor('codex', CODEX_THREAD_ID)?.state).toBe('idle')
+
+    // The parent now runs elsewhere and in another mode: the thread goes back where it
+    // was created, under the envelope of the parent's mode NOW.
+    const again = await codexTurn(
+      dispatcher,
+      target,
+      { engine: 'codex', prompt: 'two', sessionId: CODEX_THREAD_ID },
+      makeCtx({
+        fromEngine: 'claude',
+        fromRoutingId: 'parent-A',
+        cwd: '/proj/elsewhere',
+        autonomyMode: 'plan'
+      }),
+      'resumed answer'
+    )
+
+    expect(again).toMatchObject({ text: 'resumed answer', sessionId: CODEX_THREAD_ID })
+    const resume = target.requests.find((r) => r.method === 'thread/resume')!
+    expect(resume.params).toMatchObject({
+      threadId: CODEX_THREAD_ID,
+      cwd: '/proj/a',
+      model: 'gpt-5.6-luna',
+      ...codexModePolicy('plan')
+    })
+    expect(target.spawnCalls[1].cwd).toBe('/proj/a')
+    // Not a second thread: no thread/start, no catalog reads.
+    expect(target.requests.filter((r) => r.method === 'thread/start')).toHaveLength(1)
+    expect(target.requests.filter((r) => r.method === 'model/list')).toHaveLength(1)
+    expect(ledger.rowFor('codex', CODEX_THREAD_ID)?.state).toBe('idle')
+  })
+
+  it("lands a resumed thread on the host of the account it was created under, not the caller's pin now", async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      codexVaultAccounts: true
+    })
+    await codexTurn(
+      dispatcher,
+      target,
+      { engine: 'codex', prompt: 'one' },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A', chatgptAccountId: 'acct-A' })
+    )
+    dispatcher.disposeFor('parent-A')
+    await codexTurn(
+      dispatcher,
+      target,
+      { engine: 'codex', prompt: 'two', sessionId: CODEX_THREAD_ID },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A', chatgptAccountId: 'acct-B' })
+    )
+
+    expect(target.spawnCalls.map((c) => c.identity)).toEqual([
+      { accountId: 'acct-A' },
+      { accountId: 'acct-A' }
+    ])
+  })
+
+  it('a resumed thread’s earlier turns are its baseline, not the next turn’s spend', async () => {
+    const target = makeFakeCodexTarget()
+    const recordUsageEvent = vi.fn()
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      recordUsageEvent
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A', toolUseId: 'tu-1' })
+    await codexTurn(dispatcher, target, { engine: 'codex', prompt: 'one' }, ctx)
+    dispatcher.disposeFor('parent-A')
+    recordUsageEvent.mockClear()
+
+    const usage = (total: number): Record<string, unknown> => ({
+      threadId: CODEX_THREAD_ID,
+      turnId: target.currentTurnId(),
+      tokenUsage: {
+        total: codexUsage({ totalTokens: total, inputTokens: total, outputTokens: 0 }),
+        last: codexUsage({ totalTokens: total }),
+        modelContextWindow: 400_000
+      }
+    })
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: CODEX_THREAD_ID },
+      ctx
+    )
+    await tick()
+    // What the thread already carried when it was reopened (4 000 tokens)…
+    target.notify('thread/tokenUsage/updated', usage(4_000))
+    // …then this turn's own work (1 000 more).
+    target.notify('thread/tokenUsage/updated', usage(5_000))
+    target.completeTurn()
+    await pending
+
+    const row = recordUsageEvent.mock.calls[0]![0] as UsageTurnEvent
+    expect(row.tokens).toMatchObject({ input: 1_000 })
+  })
+
+  it('waits out the writer lock of a process that has not let the thread go, then resumes', async () => {
+    let refusals = 0
+    const target = makeFakeCodexTarget({
+      resumeHandler: () => {
+        if (refusals-- > 0)
+          throw Object.assign(new Error('already has an active writer'), {
+            code: 'rpc-error--32600'
+          })
+      }
+    })
+    const { dispatcher } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      codexResumeLockWindowMs: 5_000,
+      codexResumeLockRetryMs: 1,
+      // A live host in this process still holds the thread: the refusal is its lock.
+      codexHoldsThread: () => true
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A' })
+    await codexTurn(dispatcher, target, { engine: 'codex', prompt: 'one' }, ctx)
+    dispatcher.disposeFor('parent-A')
+
+    refusals = 2
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: CODEX_THREAD_ID },
+      ctx
+    )
+    // The retries are real timers: the turn starts only once the lock let go.
+    for (let i = 0; i < 500; i++) {
+      if (target.requests.filter((r) => r.method === 'turn/start').length === 2) break
+      await new Promise((r) => setTimeout(r, 2))
+    }
+    target.completeTurn({ text: 'after the wait' })
+    const resumed = await pending
+
+    expect(resumed).toMatchObject({ text: 'after the wait' })
+    expect(target.requests.filter((r) => r.method === 'thread/resume')).toHaveLength(3)
+  })
+
+  it('a lock that outlasts the window fails the resume', async () => {
+    let locked = false
+    const target = makeFakeCodexTarget({
+      resumeHandler: () => {
+        if (locked)
+          throw Object.assign(new Error('already has an active writer'), {
+            code: 'rpc-error--32600'
+          })
+      }
+    })
+    const { dispatcher, ledger } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      codexResumeLockWindowMs: 20,
+      codexResumeLockRetryMs: 5,
+      codexHoldsThread: () => true
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A' })
+    await codexTurn(dispatcher, target, { engine: 'codex', prompt: 'one' }, ctx)
+    dispatcher.disposeFor('parent-A')
+
+    locked = true
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: CODEX_THREAD_ID },
+      ctx
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('Failed to resume dispatched codex agent')
+    expect(target.requests.filter((r) => r.method === 'thread/resume').length).toBeGreaterThan(1)
+    // A busy host is transient: the row keeps the state it had.
+    expect(ledger.rowFor('codex', CODEX_THREAD_ID)?.state).toBe('idle')
+  })
+
+  it('any other resume failure ends at once, leaves the row as it was and detaches the thread', async () => {
+    let failResume = false
+    const target = makeFakeCodexTarget({
+      resumeHandler: () => {
+        if (failResume) throw new Error('thread not found')
+      }
+    })
+    const { dispatcher, ledger } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      codexResumeLockWindowMs: 5_000,
+      codexResumeLockRetryMs: 1
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A' })
+    await codexTurn(dispatcher, target, { engine: 'codex', prompt: 'one' }, ctx)
+    dispatcher.disposeFor('parent-A')
+
+    failResume = true
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: CODEX_THREAD_ID },
+      ctx
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('Failed to resume dispatched codex agent: thread not found')
+    expect(target.requests.filter((r) => r.method === 'thread/resume')).toHaveLength(1)
+    expect(ledger.rowFor('codex', CODEX_THREAD_ID)?.state).toBe('idle')
+    // Once by the dispose, once by the failed resume.
+    expect(target.client.detach).toHaveBeenCalledTimes(2)
+  })
+
+  it('resumes only a thread this dispatcher recorded for THIS caller: another parent’s and a model-named one are refused', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    await codexTurn(
+      dispatcher,
+      target,
+      { engine: 'codex', prompt: 'one' },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A' })
+    )
+    dispatcher.disposeFor('parent-A')
+
+    for (const [sessionId, parent] of [
+      [CODEX_THREAD_ID, 'parent-B'],
+      ['a-users-own-thread', 'parent-A']
+    ]) {
+      const refused = await dispatcher.dispatch(
+        { engine: 'codex', prompt: 'two', sessionId },
+        makeCtx({ fromEngine: 'claude', fromRoutingId: parent })
+      )
+      expect(refused.isError).toBe(true)
+      expect(refused.text).toContain('Unknown dispatch session')
+    }
+    expect(target.requests.some((r) => r.method === 'thread/resume')).toBe(false)
+    expect(target.spawnCodexTarget).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('X-Agent ledger — resume review fixes (ADR-105)', () => {
+  const lock = (): Error =>
+    Object.assign(new Error('thread t already has an active writer'), { code: 'rpc-error--32600' })
+  const gone = (): Error =>
+    Object.assign(new Error('no rollout found for thread id codex-thread-1'), {
+      code: 'rpc-error--32600'
+    })
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+  async function releasedCodex(
+    resumeHandler: (params: Record<string, unknown>) => void,
+    deps: Partial<DispatcherDeps> = {}
+  ): Promise<{
+    dispatcher: CrossEngineDispatcher
+    target: ReturnType<typeof makeFakeCodexTarget>
+    ledger: FakeDispatchLedger
+    ctx: DispatchContext
+  }> {
+    const target = makeFakeCodexTarget({ resumeHandler: (p) => resumeHandler(p) })
+    const { dispatcher, ledger } = makeCodexHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      ...deps
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A', toolUseId: 'tu-resume' })
+    const first = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
+    await tick()
+    target.completeTurn()
+    await first
+    dispatcher.disposeFor('parent-A')
+    return { dispatcher, target, ledger, ctx }
+  }
+
+  it('Codex: a -32600 no live host explains is a missing thread — it fails at once, however long the window', async () => {
+    let refuse = false
+    const { dispatcher, target, ledger, ctx } = await releasedCodex(
+      () => {
+        if (refuse) throw gone()
+      },
+      { codexResumeLockWindowMs: 60_000, codexResumeLockRetryMs: 5, codexHoldsThread: () => false }
+    )
+    refuse = true
+    const started = Date.now()
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: CODEX_THREAD_ID },
+      ctx
+    )
+
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('no rollout found')
+    expect(target.requests.filter((r) => r.method === 'thread/resume')).toHaveLength(1)
+    // A thread Codex has no rollout for never resumes: that, and only that, is failed.
+    expect(ledger.rowFor('codex', CODEX_THREAD_ID)?.state).toBe('failed')
+  })
+
+  it('Codex: a lock refusal with no live holder also fails at once, but only a missing rollout fails the row', async () => {
+    let refuse = false
+    const { dispatcher, target, ledger, ctx } = await releasedCodex(
+      () => {
+        if (refuse) throw lock()
+      },
+      { codexResumeLockWindowMs: 60_000, codexResumeLockRetryMs: 5, codexHoldsThread: () => false }
+    )
+    refuse = true
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: CODEX_THREAD_ID },
+      ctx
+    )
+    expect(result.isError).toBe(true)
+    expect(target.requests.filter((r) => r.method === 'thread/resume')).toHaveLength(1)
+    expect(ledger.rowFor('codex', CODEX_THREAD_ID)?.state).toBe('idle')
+  })
+
+  it('Codex: the wait for a held thread ends the moment the dispatch is stopped', async () => {
+    let refuse = false
+    const { dispatcher, target, ledger, ctx } = await releasedCodex(
+      () => {
+        if (refuse) throw lock()
+      },
+      { codexResumeLockWindowMs: 60_000, codexResumeLockRetryMs: 25, codexHoldsThread: () => true }
+    )
+    refuse = true
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: CODEX_THREAD_ID },
+      { ...ctx, toolUseId: 'tu-stop-me' }
+    )
+    await sleep(80)
+    expect(dispatcher.stopDispatch('tu-stop-me', 'parent-A')).toBe(true)
+    const started = Date.now()
+    const result = await pending
+
+    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('stopped while waiting')
+    const attempts = target.requests.filter((r) => r.method === 'thread/resume').length
+    await sleep(100)
+    // No further attempt once it is over.
+    expect(target.requests.filter((r) => r.method === 'thread/resume')).toHaveLength(attempts)
+    expect(ledger.rowFor('codex', CODEX_THREAD_ID)?.state).toBe('idle')
+  })
+
+  it("Codex: the wait also ends on the caller's own abort", async () => {
+    let refuse = false
+    const { dispatcher, ctx } = await releasedCodex(
+      () => {
+        if (refuse) throw lock()
+      },
+      { codexResumeLockWindowMs: 60_000, codexResumeLockRetryMs: 25, codexHoldsThread: () => true }
+    )
+    refuse = true
+    const abort = new AbortController()
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: CODEX_THREAD_ID },
+      { ...ctx, toolUseId: undefined, extra: makeExtra({ signal: abort.signal }) }
+    )
+    await sleep(80)
+    abort.abort()
+    const started = Date.now()
+    const result = await pending
+    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(result.isError).toBe(true)
+  })
+
+  const claudeCfg = (extra: Record<string, unknown> = {}): (() => EngineConfig) => {
+    return () => ({ dispatch: { defaultModel: 'haiku', ...extra } })
+  }
+
+  it('Claude: a resumed target whose model left the allowlist is refused like a fresh dispatch, with no spawn', async () => {
+    const target = makeFakeClaudeTarget()
+    const policy: { allowed?: string[] } = {}
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: () => ({
+        dispatch: {
+          defaultModel: 'haiku',
+          ...(policy.allowed ? { allowedModels: policy.allowed } : {})
+        }
+      }),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', fromRoutingId: 'parent-A' })
+    const first = dispatcher.dispatch({ engine: 'claude', prompt: 'one' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push(resultMsg({ session_id: 'claude-sess-1' }))
+    await first
+    dispatcher.disposeFor('parent-A')
+
+    policy.allowed = ['sonnet']
+    const refused = await dispatcher.dispatch(
+      { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1', model: 'sonnet' },
+      ctx
+    )
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toBe(
+      'Model "haiku" is not in the user-configured allowlist for Claude dispatch. Allowed models: sonnet'
+    )
+    expect(target.spawnCalls).toHaveLength(1)
+  })
+
+  it('Codex and pi: a resumed model that left the allowlist is refused too', async () => {
+    const codex = makeFakeCodexTarget()
+    const pi = makeFakePiTarget({ sessionId: 'pi-sess-A' })
+    const policy: { allowed?: string[] } = {}
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: ((engine: string) => ({
+        dispatch: {
+          ...(engine === 'pi' ? { defaultModel: 'openai-codex/gpt-5.6-luna' } : {}),
+          ...(policy.allowed ? { allowedModels: policy.allowed } : {})
+        }
+      })) as DispatcherDeps['loadEngineConfig'],
+      attachCodexTarget: codex.spawnCodexTarget,
+      spawnPiTarget: pi.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A' })
+    const c = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
+    await tick()
+    codex.completeTurn()
+    await c
+    const p = dispatcher.dispatch({ engine: 'pi', prompt: 'one' }, ctx)
+    await tick()
+    pi.pushEvent(piAssistantMessageEnd({ text: 'x' }))
+    pi.pushEvent(PI_AGENT_SETTLED)
+    await p
+    dispatcher.disposeFor('parent-A')
+
+    policy.allowed = ['somebody-else']
+    const refusedCodex = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: CODEX_THREAD_ID },
+      ctx
+    )
+    const refusedPi = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'two', sessionId: 'pi-sess-A', model: 'somebody-else' },
+      ctx
+    )
+    expect(refusedCodex.text).toContain(
+      'is not in the user-configured allowlist for codex dispatch'
+    )
+    expect(refusedPi.text).toContain('is not in the user-configured allowlist for pi dispatch')
+    expect(codex.requests.some((r) => r.method === 'thread/resume')).toBe(false)
+    expect(pi.spawnCalls).toHaveLength(1)
+  })
+
+  it('a spend that cannot be read fails a capped continuation closed, and an uncapped one open', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: claudeCfg({ maxCostUsd: 1 }),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', fromRoutingId: 'parent-A' })
+    const first = dispatcher.dispatch({ engine: 'claude', prompt: 'one' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push(resultMsg({ session_id: 'claude-sess-1' }))
+    await first
+    dispatcher.disposeFor('parent-A')
+
+    ledger.spend = (): never => {
+      throw new Error('database is locked')
+    }
+    const refused = await dispatcher.dispatch(
+      { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+      ctx
+    )
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toContain('its recorded spend could not be read')
+    expect(refused.text).toContain('cost cap ($1)')
+    expect(target.spawnCalls).toHaveLength(1)
+
+    // No cap configured: nothing to be wrong about, so the continuation goes ahead.
+    const open = makeHarness({
+      ledger,
+      loadEngineConfig: claudeCfg(),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const allowed = open.dispatcher.dispatch(
+      { engine: 'claude', prompt: 'three', sessionId: 'claude-sess-1' },
+      ctx
+    )
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push(resultMsg({ session_id: 'claude-sess-1' }))
+    expect((await allowed).isError).toBeUndefined()
+  })
+
+  it('Claude: the resumed process asks the user rules for the ROW cwd, not the parent’s current one', async () => {
+    const target = makeFakeClaudeTarget()
+    const loadUserRules = vi.fn(() => ({
+      allow: [],
+      deny: [],
+      ask: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    }))
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: claudeCfg(),
+      loadUserRules,
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const first = dispatcher.dispatch(
+      { engine: 'claude', prompt: 'one' },
+      makeCtx({ fromEngine: 'opencode', fromRoutingId: 'parent-A', cwd: '/proj/original' })
+    )
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push(resultMsg({ session_id: 'claude-sess-1' }))
+    await first
+    dispatcher.disposeFor('parent-A')
+
+    const resumed = dispatcher.dispatch(
+      { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+      makeCtx({ fromEngine: 'opencode', fromRoutingId: 'parent-A', cwd: '/proj/elsewhere' })
+    )
+    await tick()
+    loadUserRules.mockClear()
+    void target.lastCanUseTool()!('Bash', { command: 'ls' }, {
+      signal: new AbortController().signal,
+      toolUseId: 'toolu_x'
+    } as never)
+    await tick()
+    expect(loadUserRules).toHaveBeenCalledWith('/proj/original')
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push(resultMsg({ session_id: 'claude-sess-1' }))
+    await resumed
+  })
+
+  it('pi: a session directory that is gone ends the target — pi would otherwise start an empty session under the id', async () => {
+    const target = makeFakePiTarget({ sessionId: 'pi-sess-A' })
+    let dirExists = true
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } }),
+      spawnPiTarget: target.spawnPiTarget,
+      piSessionDirExists: () => dirExists
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A' })
+    const first = dispatcher.dispatch({ engine: 'pi', prompt: 'one' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'x' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await first
+    dispatcher.disposeFor('parent-A')
+
+    dirExists = false
+    const result = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'two', sessionId: 'pi-sess-A' },
+      ctx
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('session directory no longer exists')
+    expect(target.spawnCalls).toHaveLength(1)
+    expect(ledger.rowFor('pi', 'pi-sess-A')?.state).toBe('failed')
+  })
+
+  it('pi: a respawn that fails to start leaves the row as it was', async () => {
+    const target = makeFakePiTarget({ sessionId: 'pi-sess-A' })
+    let failSpawn = false
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } }),
+      spawnPiTarget: async (opts) => {
+        if (failSpawn) throw new Error('pi would not start')
+        return target.spawnPiTarget(opts)
+      }
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A' })
+    const first = dispatcher.dispatch({ engine: 'pi', prompt: 'one' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'x' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await first
+    dispatcher.disposeFor('parent-A')
+
+    failSpawn = true
+    const result = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'two', sessionId: 'pi-sess-A' },
+      ctx
+    )
+    expect(result.text).toContain('Failed to resume dispatched pi agent')
+    expect(ledger.rowFor('pi', 'pi-sess-A')?.state).toBe('idle')
+  })
+})
+
+describe('X-Agent ledger — name and description (ADR-105)', () => {
+  const LABELLED = { name: '  impl-e1  ', description: ' Review auth diff ' }
+
+  it('Claude: a new target stores them trimmed; blank or absent stays null', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: () => ({ dispatch: { defaultModel: 'haiku' } }),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const run = async (extra: Record<string, unknown>, sid: string): Promise<void> => {
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x', ...extra },
+        makeCtx({ fromEngine: 'opencode' })
+      )
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: sid } as SDKMessage)
+      target.push(resultMsg({ session_id: sid }))
+      await pending
+    }
+    await run(LABELLED, 'c-1')
+    await run({ name: '   ', description: '' }, 'c-2')
+    await run({}, 'c-3')
+    expect(ledger.rowFor('claude', 'c-1')).toMatchObject({
+      name: 'impl-e1',
+      description: 'Review auth diff'
+    })
+    expect(ledger.rowFor('claude', 'c-2')).toMatchObject({ name: null, description: null })
+    expect(ledger.rowFor('claude', 'c-3')).toMatchObject({ name: null, description: null })
+  })
+
+  it('pi: a new target stores them trimmed; absent stays null', async () => {
+    const labelled = makeFakePiTarget({ sessionId: 'pi-l' })
+    const plain = makeFakePiTarget({ sessionId: 'pi-p' })
+    const spawns = [labelled, plain]
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } }),
+      spawnPiTarget: (opts) => spawns.shift()!.spawnPiTarget(opts)
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const a = dispatcher.dispatch({ engine: 'pi', prompt: 'x', ...LABELLED }, ctx)
+    await tick()
+    labelled.pushEvent(piAssistantMessageEnd({ text: 'x' }))
+    labelled.pushEvent(PI_AGENT_SETTLED)
+    await a
+    const b = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    plain.pushEvent(piAssistantMessageEnd({ text: 'x' }))
+    plain.pushEvent(PI_AGENT_SETTLED)
+    await b
+    expect(ledger.rowFor('pi', 'pi-l')).toMatchObject({
+      name: 'impl-e1',
+      description: 'Review auth diff'
+    })
+    expect(ledger.rowFor('pi', 'pi-p')).toMatchObject({ name: null, description: null })
+  })
+
+  it('Codex: a new target stores them trimmed; absent stays null', async () => {
+    const labelled = makeFakeCodexTarget({ threadId: 'cx-l' })
+    const plain = makeFakeCodexTarget({ threadId: 'cx-p' })
+    const attaches = [labelled, plain]
+    const { dispatcher, ledger } = makeCodexHarness({
+      attachCodexTarget: (opts) => attaches.shift()!.spawnCodexTarget(opts)
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const a = dispatcher.dispatch({ engine: 'codex', prompt: 'x', ...LABELLED }, ctx)
+    await tick()
+    labelled.completeTurn()
+    await a
+    const b = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    plain.completeTurn()
+    await b
+    expect(ledger.rowFor('codex', 'cx-l')).toMatchObject({
+      name: 'impl-e1',
+      description: 'Review auth diff'
+    })
+    expect(ledger.rowFor('codex', 'cx-p')).toMatchObject({ name: null, description: null })
+  })
+
+  it('a continuation never rewrites them', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: () => ({ dispatch: { defaultModel: 'haiku' } }),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode' })
+    const first = dispatcher.dispatch({ engine: 'claude', prompt: 'x', name: 'keep' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'c-k' } as SDKMessage)
+    target.push(resultMsg({ session_id: 'c-k' }))
+    await first
+    const again = dispatcher.dispatch(
+      { engine: 'claude', prompt: 'y', sessionId: 'c-k', name: 'other' },
+      ctx
+    )
+    await tick()
+    target.push(resultMsg({ session_id: 'c-k' }))
+    await again
+    expect(ledger.rowFor('claude', 'c-k')?.name).toBe('keep')
   })
 })

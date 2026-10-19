@@ -306,6 +306,34 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     expect(result.content[0].text).toContain('session_id: claude-42')
   })
 
+  it('passes name and description through to the DispatchRequest (ADR-105)', async () => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'claude-1' }))
+    const tool = getDispatchTool(tmp, {
+      lookupCallerSession: () => ({
+        cwd: '/proj',
+        getAutonomyMode: () => 'default',
+        getMessages: () => [],
+        emit: vi.fn(),
+        addDispatchedCost: vi.fn()
+      }),
+      dispatch
+    })
+    await tool.handler(
+      {
+        engine: 'claude',
+        prompt: 'x',
+        name: 'impl-e1',
+        description: 'Review auth diff',
+        __xeng_caller_session: 'ses_caller'
+      },
+      makeExtra()
+    )
+    expect(dispatch.mock.calls[0][0]).toMatchObject({
+      name: 'impl-e1',
+      description: 'Review auth diff'
+    })
+  })
+
   it('missing __xeng_call_id → dispatch still proceeds, ctx.toolUseId is undefined', async () => {
     const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'claude-1' }))
     const tool = getDispatchTool(tmp, {

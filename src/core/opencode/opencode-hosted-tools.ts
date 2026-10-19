@@ -411,10 +411,21 @@ export function createOpencodeHostedToolsServer(
       args: Record<string, unknown>,
       extra: RequestHandlerExtra<ServerRequest, ServerNotification>
     ) => {
-      const { engine, prompt, model, session_id, __xeng_caller_session, __xeng_call_id } = args as {
+      const {
+        engine,
+        prompt,
+        model,
+        name,
+        description,
+        session_id,
+        __xeng_caller_session,
+        __xeng_call_id
+      } = args as {
         engine: 'claude' | 'pi' | 'codex'
         prompt: string
         model?: string
+        name?: string
+        description?: string
         session_id?: string
         __xeng_caller_session?: string
         __xeng_call_id?: string
@@ -487,7 +498,7 @@ export function createOpencodeHostedToolsServer(
       }
 
       const result = await deps.dispatch(
-        { engine, prompt, model, sessionId: session_id },
+        { engine, prompt, model, name, description, sessionId: session_id },
         {
           fromEngine: 'opencode',
           fromRoutingId: routingId,

@@ -37,6 +37,7 @@ import type { CreateSessionArgs } from '../ipc/create-session'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { SessionManager } from './session-manager'
 import { appendAuditLog } from './db'
+import { isDispatchTargetSession } from './dispatch-target-ledger'
 import {
   isProposalId,
   proposalGrouped,
@@ -285,10 +286,19 @@ export function resolveTarget(caller: SessionToolCaller, input: unknown): Target
   return { ok: false, message: `No session matches ${JSON.stringify(text)}.` }
 }
 
-/** opencode dispatch targets (and ClaudeUI's other throwaway sessions) are not conversations. */
+/**
+ * Dispatch targets (and ClaudeUI's other throwaway sessions) are not conversations: an
+ * opencode target by its title, any other engine's by the X-Agent ledger (ADR-105),
+ * which is also what keeps the id a parent holds from the dispatch result suffix from
+ * resolving here. B-4 opens messaging to them deliberately.
+ */
 function isDispatchTarget(id: string): boolean {
   const title = titleOf(id).trim()
-  return title === OPENCODE_DISPATCH_SESSION_TITLE || HIDDEN_OPENCODE_SESSION_TITLES.includes(title)
+  return (
+    title === OPENCODE_DISPATCH_SESSION_TITLE ||
+    HIDDEN_OPENCODE_SESSION_TITLES.includes(title) ||
+    isDispatchTargetSession(id)
+  )
 }
 
 // ---------------------------------------------------------------------------

@@ -163,6 +163,22 @@ describe('createCollabServer', () => {
     )
   })
 
+  it('passes name and description through to the DispatchRequest (ADR-105)', async () => {
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'x', sessionId: 'oc-42' })
+    const server = createCollabServer(makeCtx())
+
+    await server.tools[0].handler(
+      { engine: 'opencode', prompt: 'go', name: 'impl-e1', description: 'Review auth diff' },
+      makeExtra()
+    )
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'impl-e1', description: 'Review auth diff' }),
+      expect.anything()
+    )
+  })
+
   it('passes session_id through as the continuation sessionId', async () => {
     const dispatchSpy = vi
       .spyOn(crossEngineDispatcher, 'dispatch')

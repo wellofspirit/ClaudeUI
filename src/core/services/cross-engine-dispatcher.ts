@@ -31,6 +31,7 @@
  * MCP boundary.
  */
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import {
   isAbsolute as isAbsolutePath,
   relative as relativePath,
@@ -156,6 +157,7 @@ import {
   PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
 } from '../pi/permission-engine'
 import type { MergedClaudeRules, PermissionDecision } from '../pi/permission-engine'
+import type { CodexMethods } from '../codex/protocol/methods'
 import type { Model } from '../codex/protocol/v2/Model'
 import type { ThreadItem } from '../codex/protocol/v2/ThreadItem'
 import type { Turn } from '../codex/protocol/v2/Turn'
@@ -198,6 +200,14 @@ import { credentialSync } from '../auth/vault/CredentialSync'
 import { codexNativeIdentity } from '../auth/account-identity'
 import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import { OPENCODE_DISPATCH_SESSION_TITLE } from '../../shared/dispatch-session'
+import {
+  dispatchLedger,
+  dispatchPiSessionDir,
+  type DispatchLedgerStore,
+  type DispatchTargetRow,
+  type DispatchTargetState
+} from './dispatch-target-ledger'
+import { locateClaudeTranscript } from './claude-transcript-locator'
 import type {
   ApprovalDecision,
   BillingType,
@@ -319,6 +329,18 @@ export interface DispatchRequest {
   prompt: string
   model?: string
   sessionId?: string
+  /** The caller's short handle for the agent (ADR-105); stored on the ledger row of a NEW target. */
+  name?: string
+  /** The caller's short summary of the task (ADR-105); stored the same way. */
+  description?: string
+}
+
+/** The two labels a dispatch may carry onto its ledger row. */
+type DispatchLabels = Pick<DispatchRequest, 'name' | 'description'>
+
+/** A label as the ledger keeps it: trimmed, and nothing at all when it is blank. */
+function labelOf(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null
 }
 
 /**
@@ -377,6 +399,14 @@ export interface ClaudeQuerySpawnOpts {
   canUseTool: CanUseTool
   abortController: AbortController
   prompt: AsyncIterable<Record<string, unknown>>
+  /**
+   * The harness session id a NEW target is created under (`--session-id`, a uuid v4).
+   * The dispatcher mints it and records the ledger row BEFORE the spawn, so the
+   * transcript is hidden (ADR-105) from its first byte.
+   */
+  sessionId?: string
+  /** The harness session a RESUMED target continues (`--resume`); exclusive with `sessionId`. */
+  resume?: string
   /**
    * `--settings <json>` for the target (ADR-085 §3): `{ permissions: { deny,
    * ask } }` when the user has any deny/ask rule, absent otherwise. It is
@@ -569,6 +599,35 @@ export interface DispatcherDeps {
    * turn stopped before it produced any usage (see the call sites).
    */
   recordUsageEvent?: (event: UsageTurnEvent) => void
+  /**
+   * The X-Agent ledger (ADR-105): one durable row per target, which is what a
+   * continuation resumes from once the in-memory entry is gone. Defaults to the
+   * operational-DB store; tests inject a fake to stay off the DB.
+   */
+  ledger?: DispatchLedgerStore
+  /**
+   * Where a Claude transcript lives (a resume must not `--resume` a missing one).
+   * Defaults to `locateClaudeTranscript`.
+   */
+  locateClaudeTranscript?: (sessionId: string, cwd: string) => string | null
+  /**
+   * How long a Codex resume waits out `-32600 already has an active writer` — a
+   * released target's thread stays loaded (and locked) in the process that held it
+   * until the binary unloads it, about a minute after the last subscriber left
+   * (ADR-069 §4) — and how often it retries. Defaults to the interactive session's
+   * 75 s and 2 s.
+   */
+  codexResumeLockWindowMs?: number
+  codexResumeLockRetryMs?: number
+  /**
+   * Does a live Codex host in this process still hold `threadId`? A resume refused with
+   * `-32600` is waited out ONLY while one does (the lock is then a normal step that ends
+   * about a minute after the holder lets go); the same code also means "no rollout
+   * found", which no wait can fix (ADR-069 §4). Defaults to `codexHostRegistry.holdsThread`.
+   */
+  codexHoldsThread?: (threadId: string) => boolean
+  /** Does a pi target's session directory still exist? Defaults to `fs.existsSync`. */
+  piSessionDirExists?: (dir: string) => boolean
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
@@ -762,6 +821,10 @@ const PENDING_STOP_TTL_MS = 60 * 1000
 const PI_ABORT_SETTLE_GRACE_MS = 3_000
 /** Default for `DispatcherDeps.codexAbortSettleGraceMs` — see that field's doc comment. */
 const CODEX_ABORT_SETTLE_GRACE_MS = 3_000
+/** `CodexSession`'s writer-lock wait on a resume (ADR-069 §4), for a released target's thread. */
+const CODEX_RESUME_LOCK_WINDOW_MS = 75_000
+const CODEX_RESUME_LOCK_RETRY_MS = 2_000
+const CODEX_RESUME_LOCK_REFUSAL = 'rpc-error--32600'
 /** Hard stop on `model/list` paging while building a Codex target's catalog
  *  (mirrors `CodexSession.start`'s identical guard against a server that pages
  *  forever). A real catalog is one page. */
@@ -785,6 +848,21 @@ interface PendingStop {
   expiresAt: number
 }
 
+/**
+ * What every live target entry carries of its ledger row (ADR-105). The entry is a
+ * cache of the row: when it leaves memory (a parent's restart, an idle release) the
+ * row is what a continuation rebuilds it from.
+ */
+interface TargetLedgerFields {
+  /** The ledger row's id (`s-xxxxxx`). */
+  ledgerId: string
+  /**
+   * `disposeFor` / a lost server released this entry and wrote its row's state: the
+   * turn that was in flight when it happened must not overwrite that on its way out.
+   */
+  released: boolean
+}
+
 /** What a target's ruleset is built from — cached per target (a failed read is not cached). */
 interface TargetRuleInputs {
   client: DispatchTargetClient
@@ -804,7 +882,7 @@ interface TargetRuleInputs {
  * turns for `session_id` continuation. It holds its OWN lease (released
  * exactly, `releaseIfCurrent`) and shares its server's feed record.
  */
-interface OpencodeTargetEntry extends TargetRuleInputs {
+interface OpencodeTargetEntry extends TargetRuleInputs, TargetLedgerFields {
   kind: 'opencode'
   sessionId: string
   fromRoutingId: string
@@ -913,10 +991,11 @@ type OpencodeTurnOutcome = { kind: 'done' } | { kind: 'failed'; message: string 
 
 /**
  * A live Claude dispatch target (ADR-033 M2). The `sdkQuery()` process stays
- * alive across turns (persistSession:false → no transcript, so re-spawning
- * would lose context — see the plan doc's M2-A analysis); `channel` feeds the
- * streaming-input mode and `iterator` is the ONE iterator obtained from the
- * query handle for its whole lifetime.
+ * alive across turns; since ADR-105 its session is persisted (a hidden transcript
+ * under a ledger-recorded `--session-id`), so a process that ended is re-spawned
+ * with `--resume` and loses no context. `channel` feeds the streaming-input mode
+ * and `iterator` is the ONE iterator obtained from the query handle for its whole
+ * lifetime.
  *
  * HAZARD: `QueryHandle[Symbol.asyncIterator]().return()` KILLS the child
  * process (see sdk/query.ts `makeHandle` — `return: async () => { killChild(); ... }`).
@@ -926,7 +1005,7 @@ type OpencodeTurnOutcome = { kind: 'done' } | { kind: 'failed'; message: string 
  * a plain loop, so ending a turn early (we stop as soon as we see `result`)
  * never closes the iterator or kills the process.
  */
-interface ClaudeTargetEntry {
+interface ClaudeTargetEntry extends TargetLedgerFields {
   kind: 'claude'
   /** Claude session UUID from `system/init` — null until the first turn's init arrives. */
   sessionId: string | null
@@ -986,8 +1065,9 @@ interface ClaudeTargetEntry {
    * Initialized to 0 at entry creation — safe because a ClaudeTargetEntry is
    * strictly one-process for its whole lifetime: every failure path
    * (timeout/abort/stop/err) kills the process AND deletes the entry, and a
-   * continuation with an unknown sessionId errors instead of respawning, so
-   * the cumulative counter can never restart under a live entry.
+   * continuation re-spawns a FRESH entry (`--resume`; cli.js reports only the
+   * post-resume spend, so a new baseline of 0 is the right one), so the
+   * cumulative counter can never restart under a live entry.
    */
   lastReportedTotalCostUsd: number
   /**
@@ -1050,7 +1130,7 @@ interface ClaudeTargetEntry {
  * with PiSession's host-run subagents); the gate, the cost rule and cap, the
  * ledger row and the busy-reject stay on this entry and in the dispatcher.
  */
-interface PiTargetEntry {
+interface PiTargetEntry extends TargetLedgerFields {
   kind: 'pi'
   /**
    * pi's own session id, from `get_state` — UNLIKE Claude (whose session_id
@@ -1127,7 +1207,7 @@ interface PiTargetEntry {
  * Like pi (and unlike Claude), an interrupt is TURN-scoped: the process and
  * thread survive, so the entry is kept alive for continuation.
  */
-interface CodexTargetEntry {
+interface CodexTargetEntry extends TargetLedgerFields {
   kind: 'codex'
   /**
    * The native thread id, from `thread/start`. Null only inside
@@ -1215,6 +1295,12 @@ interface CodexTargetEntry {
   /** `usageTotal` as of the END of the previous turn — the baseline this turn's
    *  delta is taken against. */
   usageBaseline: TokenUsageBreakdown | null
+  /**
+   * A thread resumed from its ledger row carries its earlier turns in the cumulative
+   * total: the first `tokenUsage/updated` it shows becomes the baseline, and writes no
+   * spend (`CodexSession`'s `observed` thread, ADR-071 §4).
+   */
+  observeUsageBaseline: boolean
   /** Cumulative API-rate-EQUIVALENT spend across every turn this target has run
    *  (ADR-033 M4-C's cap). Equivalent, not a charge: a ChatGPT-subscription
    *  turn's true cost is unknowable from here (ADR-066). */
@@ -1403,6 +1489,24 @@ function recordTargetBlock(
 
 function errorResult(text: string, sessionId = ''): DispatchResult {
   return { text, sessionId, isError: true }
+}
+
+/**
+ * A ledger row's stored caller restriction: undefined when it holds none, null when
+ * it holds something unreadable (the caller must refuse, never read that as "none").
+ */
+function parseCallerRestriction(json: string | null): CallerRestriction | undefined | null {
+  if (json === null) return undefined
+  try {
+    const value: unknown = JSON.parse(json)
+    const strings = (v: unknown): v is string[] =>
+      Array.isArray(v) && v.every((s) => typeof s === 'string')
+    if (isRecord(value) && strings(value.agents) && strings(value.deny) && strings(value.ask))
+      return { agents: value.agents, deny: value.deny, ask: value.ask }
+  } catch {
+    // fall through
+  }
+  return null
 }
 
 /** Narrow an unknown wire value to a plain object (mirrors CodexSession's own). */
@@ -2059,7 +2163,14 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
       model: opts.model,
       permissionMode: opts.permissionMode,
       ...(opts.allowDangerouslySkipPermissions ? { allowDangerouslySkipPermissions: true } : {}),
-      persistSession: false,
+      // Persisted (ADR-105), never `--no-session-persistence`: the transcript is what a
+      // later `--resume` continues. The ledger row naming this id exists BEFORE the
+      // spawn, so every transcript reader already skips it.
+      ...(opts.resume
+        ? { resume: opts.resume }
+        : opts.sessionId
+          ? { sessionId: opts.sessionId }
+          : {}),
       settingSources: [],
       ...(opts.settings ? { settings: opts.settings } : {}),
       abortController: opts.abortController,
@@ -2077,10 +2188,10 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
  * `PiSession.doStart()`'s spawn shape (bridge host first, then the version-
  * keyed extension file, then the child), with two deliberate differences for
  * a headless DISPATCH target:
- *  - `--no-session`: ephemeral — no `~/.pi/agent/sessions` write (verified:
- *    `get_state`/`set_model`/`prompt`/`get_last_assistant_text`/`abort` all
- *    work normally under `--no-session`, same as `model-discovery.ts`'s own
- *    ephemeral-probe precedent).
+ *  - a persisted but HIDDEN session (ADR-105; was `--no-session`): `--session-dir
+ *    ~/.claude/ui/dispatch/pi/<ledgerId> --session-id <id>`, outside the
+ *    `~/.pi/agent/sessions` the sidebar lists, so the target can be resumed
+ *    from its ledger row after its parent restarts.
  *  - NO `CLAUDEUI_PI_HOSTED_TOOLS` / `CLAUDEUI_PI_DISPATCH_ENABLED` /
  *    `CLAUDEUI_PI_SKILL_DIRS` in the target's env — `buildPiTargetChildEnv`
  *    both OMITS them from what it builds AND explicitly overrides them to
@@ -2154,9 +2265,16 @@ export function buildPiTargetChildEnv(bridge: { url: string; token: string }): N
  * Handed to whichever spawn is active (real or test-injected) in the spawn
  * opts, so the dispatcher states them once.
  */
-const PI_TARGET_SPAWN_FLAGS: Pick<PiTargetSpawnOpts, 'args' | 'env'> = {
-  args: ['--no-session'],
-  env: buildPiTargetChildEnv
+function piTargetSpawnFlags(
+  sessionDir: string,
+  sessionId: string
+): Pick<PiTargetSpawnOpts, 'args' | 'env'> {
+  return {
+    // Persisted and hidden (ADR-105, the ADR-089 sub-agent precedent): the same two
+    // flags create the session and resume it (pi opens the file when it exists).
+    args: ['--session-dir', sessionDir, '--session-id', sessionId],
+    env: buildPiTargetChildEnv
+  }
 }
 
 const defaultSpawnPiTarget: SpawnPiTargetFn = defaultSpawnPiChild
@@ -2173,6 +2291,13 @@ export class CrossEngineDispatcher {
   private readonly attachCodexTarget: AttachCodexTargetFn
   private readonly codexVaultAccounts: boolean
   private readonly recordLedgerEvent: (event: UsageTurnEvent) => void
+  /** The X-Agent ledger (ADR-105). */
+  private readonly ledger: DispatchLedgerStore
+  private readonly locateTranscript: (sessionId: string, cwd: string) => string | null
+  private readonly codexResumeLockWindowMs: number
+  private readonly codexResumeLockRetryMs: number
+  private readonly codexHoldsThread: (threadId: string) => boolean
+  private readonly piSessionDirExists: (dir: string) => boolean
 
   /**
    * Monotonic per-dispatcher counter, one tick per ledger row — the tiebreak
@@ -2189,6 +2314,11 @@ export class CrossEngineDispatcher {
   private orphanSessions = new Set<string>()
   /** Per dispatching session, bumped by `disposeFor`: a target created across one is disposed too. */
   private disposals = new Map<string, number>()
+  /**
+   * Harness session ids a continuation is rebuilding from the ledger right now: a
+   * second call naming one is busy-rejected instead of resuming the same session twice.
+   */
+  private resuming = new Set<string>()
   /** Keyed by prefixed requestId ('xeng:<id>'). */
   private pendingApprovals = new Map<string, PendingForwardedApproval>()
   private activeDispatches = 0
@@ -2230,6 +2360,13 @@ export class CrossEngineDispatcher {
     this.codexVaultAccounts = deps.codexVaultAccounts ?? false
     this.now = deps.now ?? Date.now
     this.recordLedgerEvent = deps.recordUsageEvent ?? recordUsageEvent
+    this.ledger = deps.ledger ?? dispatchLedger
+    this.locateTranscript = deps.locateClaudeTranscript ?? locateClaudeTranscript
+    this.codexResumeLockWindowMs = deps.codexResumeLockWindowMs ?? CODEX_RESUME_LOCK_WINDOW_MS
+    this.codexResumeLockRetryMs = deps.codexResumeLockRetryMs ?? CODEX_RESUME_LOCK_RETRY_MS
+    this.codexHoldsThread =
+      deps.codexHoldsThread ?? ((threadId) => codexHostRegistry.holdsThread(threadId))
+    this.piSessionDirExists = deps.piSessionDirExists ?? existsSync
   }
 
   /** For tests: current in-flight dispatch count. */
@@ -2278,6 +2415,194 @@ export class CrossEngineDispatcher {
         `dispatched usage_event failed (ledger row dropped): ${err instanceof Error ? err.message : String(err)}`
       )
     }
+  }
+
+  // ── The X-Agent ledger (ADR-105) ───────────────────────────────────────────
+
+  /**
+   * Record a NEW target before its harness session is used. The row is what makes
+   * every transcript reader skip the session, so it must exist before the first
+   * byte is written; a ledger that cannot take it fails the dispatch (an unrecorded
+   * target could neither be hidden nor resumed).
+   */
+  private recordTarget(
+    ctx: DispatchContext,
+    spec: {
+      engine: EngineId
+      harnessRef: string
+      model: string
+      accountKey: string | null
+      codexAccountId?: string | null
+      labels?: DispatchLabels
+    }
+  ): DispatchTargetRow {
+    return this.ledger.create({
+      engine: spec.engine,
+      harnessRef: spec.harnessRef,
+      parentSessionId: ctx.fromRoutingId,
+      parentEngine: ctx.fromEngine,
+      parentToolUseId: ctx.toolUseId ?? null,
+      cwd: ctx.cwd,
+      model: spec.model,
+      launchMode: liveMode(ctx),
+      accountKey: spec.accountKey,
+      codexAccountId: spec.codexAccountId ?? null,
+      callerRestriction: ctx.callerRestriction ? JSON.stringify(ctx.callerRestriction) : null,
+      name: labelOf(spec.labels?.name),
+      description: labelOf(spec.labels?.description)
+    })
+  }
+
+  /**
+   * Update a target's row. Best effort: the row records the target, it is never a
+   * reason to fail or abandon a turn that ran.
+   */
+  private ledgerSet(ledgerId: string, patch: Parameters<DispatchLedgerStore['update']>[1]): void {
+    try {
+      this.ledger.update(ledgerId, { lastActiveAt: this.now(), ...patch })
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `dispatch ledger update failed: ${errText(err)}`)
+    }
+  }
+
+  /** A live (not released) target's row takes the state its turn started or ended in. */
+  private ledgerTurnState(
+    entry: Pick<TargetLedgerFields, 'ledgerId' | 'released'>,
+    state: DispatchTargetState
+  ): void {
+    if (!entry.released) this.ledgerSet(entry.ledgerId, { state })
+  }
+
+  /**
+   * Does `routingId` own this target? Its in-memory owner id, else its ledger row's:
+   * `SessionManager.rekey` moves the row to the parent's durable id, not the entry.
+   */
+  private ownedBy(entry: TargetEntry, routingId: string): boolean {
+    if (entry.fromRoutingId === routingId) return true
+    try {
+      return this.ledger.get(entry.ledgerId)?.parentSessionId === routingId
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Where a continuation (`session_id`) goes: the live entry this caller owns, else the
+   * ledger row this caller owns (a target released by its parent's restart, or left by a
+   * restart of the app), else null — the "Unknown dispatch session" refusal.
+   *
+   * Only a row whose `parent_session_id` is the CALLER's resumes. `req.sessionId` is
+   * model-authored text: resuming whatever it names would let a dispatching agent reopen
+   * any Codex thread or Claude session on disk (the Codex rule, below), with no owner
+   * check to refuse it. A row with an unreadable caller restriction is refused too —
+   * reading it as "none" would loosen a restricted target.
+   */
+  private findContinuation<K extends TargetEntry['kind']>(
+    sessionId: string,
+    ctx: DispatchContext,
+    kind: K
+  ): { live: Extract<TargetEntry, { kind: K }> } | { row: DispatchTargetRow } | null {
+    const existing = this.targets.get(sessionId)
+    if (existing) {
+      if (existing.kind !== kind || !this.ownedBy(existing, ctx.fromRoutingId)) return null
+      existing.fromRoutingId = ctx.fromRoutingId
+      return { live: existing as Extract<TargetEntry, { kind: K }> }
+    }
+    let row: DispatchTargetRow | undefined
+    try {
+      row = this.ledger.getByHarnessRef(kind, sessionId)
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `dispatch ledger lookup failed: ${errText(err)}`)
+    }
+    if (!row || row.parentSessionId !== ctx.fromRoutingId || row.state === 'stopped') return null
+    if (row.callerRestriction !== null && parseCallerRestriction(row.callerRestriction) === null)
+      return null
+    return { row }
+  }
+
+  /**
+   * The restriction a continuation's target holds: its live entry's, else (a released
+   * target) its ledger row's — only for the owner; anyone else holds nothing here and is
+   * refused by the engine path. Null = a row whose restriction cannot be read.
+   */
+  private heldRestriction(
+    req: DispatchRequest & { sessionId: string },
+    ctx: DispatchContext
+  ): CallerRestriction | undefined {
+    const live = this.targets.get(req.sessionId)
+    if (live) return live.ctx.callerRestriction
+    const cont = this.findContinuation(req.sessionId, ctx, req.engine as TargetEntry['kind'])
+    if (!cont || !('row' in cont)) return undefined
+    return parseCallerRestriction(cont.row.callerRestriction) ?? undefined
+  }
+
+  /**
+   * What a continuation starts the cost cap from, or the refusal it gets (ADR-033 M4-C):
+   * a live entry's running figure, or — for a target rebuilt from its row — the
+   * API-equivalent sum of its recorded turns (the measure the live gate counts, ADR-071).
+   * A cap that is configured while that sum cannot be read FAILS CLOSED: seeding 0 would
+   * let a target past a limit it has already crossed.
+   */
+  private continuationSpend(
+    cont: { live: TargetEntry } | { row: DispatchTargetRow },
+    cfg: DispatchConfig | undefined,
+    sessionId: string,
+    engine: EngineId
+  ): { costUsd: number; unpricedTurns: number } | DispatchResult {
+    let spent: { costUsd: number; unpricedTurns: number }
+    if ('live' in cont) {
+      spent = {
+        costUsd: cont.live.cumulativeCostUsd,
+        unpricedTurns: (cont.live as { unpricedTurns?: number }).unpricedTurns ?? 0
+      }
+    } else {
+      try {
+        spent = this.ledger.spend(cont.row.harnessRef)
+      } catch (err) {
+        logger.warn('CrossEngineDispatcher', `dispatch spend lookup failed: ${errText(err)}`)
+        if (cfg?.maxCostUsd === undefined) return { costUsd: 0, unpricedTurns: 0 }
+        return errorResult(
+          `Dispatch session "${sessionId}" cannot be continued: its recorded spend could not be read, ` +
+            `and a cost cap ($${cfg.maxCostUsd}) is configured. Try again, or start a fresh dispatch.`,
+          sessionId
+        )
+      }
+    }
+    if (cfg?.maxCostUsd !== undefined && spent.costUsd >= cfg.maxCostUsd) {
+      return errorResult(
+        `Dispatch cost cap ($${cfg.maxCostUsd}) reached for this session ` +
+          `(spent $${spent.costUsd.toFixed(4)}) — further turns are rejected. ` +
+          `Raise dispatch.maxCostUsd in engines/${engine}.json, or start a fresh dispatch.` +
+          unpricedSuffix(spent.unpricedTurns),
+        sessionId
+      )
+    }
+    return spent
+  }
+
+  /**
+   * A target resumed from its row runs the model it was created with, which must still
+   * pass the engine's allowlist as a fresh dispatch's would (refused with the same text).
+   */
+  private resumeModelRefusal(
+    engine: 'claude' | 'opencode' | 'pi' | 'codex',
+    model: string,
+    cfg: DispatchConfig | undefined
+  ): DispatchResult | null {
+    const allowed = cfg?.allowedModels
+    if (!allowed || allowed.length === 0) return null
+    const canonical = engine === 'opencode' || engine === 'pi'
+    if (
+      canonical
+        ? allowed.some((a) => canonicalDispatchModel(engine, a) === model)
+        : allowed.includes(model)
+    )
+      return null
+    const label = engine === 'claude' ? 'Claude' : engine
+    return errorResult(
+      `Model "${model}" is not in the user-configured allowlist for ${label} dispatch. ` +
+        `Allowed models: ${allowed.join(', ')}`
+    )
   }
 
   /**
@@ -2373,7 +2698,8 @@ export class CrossEngineDispatcher {
     // may not loosen it: a caller restricted further than the target was
     // starts a fresh dispatch (ADR-097 S9, option a).
     if (req.sessionId) {
-      const held = this.targets.get(req.sessionId)?.ctx.callerRestriction
+      // A released target's restriction is its ledger row's (ADR-105).
+      const held = this.heldRestriction({ ...req, sessionId: req.sessionId }, ctx)
       if (held || ctx.callerRestriction) {
         if (!restrictionCovers(held, ctx.callerRestriction)) {
           return errorResult(
@@ -2396,6 +2722,20 @@ export class CrossEngineDispatcher {
           'or raise "Max concurrent dispatches" in Settings › Cross-engine dispatch ' +
           '(0 means no limit).'
       )
+    }
+
+    // A continuation of a target the ledger will rebuild (ADR-105) holds its name
+    // here, synchronously, until the call ends: a second call naming the same session
+    // meanwhile is busy-rejected rather than resuming it twice.
+    const resumingRef = req.sessionId && !this.targets.has(req.sessionId) ? req.sessionId : null
+    if (resumingRef) {
+      if (this.resuming.has(resumingRef)) {
+        return errorResult(
+          `Dispatch session "${resumingRef}" is already running a turn — wait for it to finish before continuing it.`,
+          resumingRef
+        )
+      }
+      this.resuming.add(resumingRef)
     }
 
     // Reserve the slot SYNCHRONOUSLY, before the first await: Claude can issue
@@ -2450,6 +2790,7 @@ export class CrossEngineDispatcher {
     } finally {
       this.activeDispatches--
       if (ctx.toolUseId) this.activeByToolUseId.delete(ctx.toolUseId)
+      if (resumingRef) this.resuming.delete(resumingRef)
     }
   }
 
@@ -2511,13 +2852,21 @@ export class CrossEngineDispatcher {
     return true
   }
 
-  /** Tear down every target (+ feeds / server leases) owned by a dispatching session. */
+  /**
+   * Release every target (+ feeds / server leases) a dispatching session owns
+   * (ADR-105). The process goes; the harness session stays, and the ledger row says
+   * how it was left: `idle` for a target between turns — its parent's next
+   * continuation resumes it — and `interrupted` for one whose turn was in flight (in B-1
+   * that turn still ends with its parent; running survival is B-2).
+   */
   disposeFor(routingId: string): void {
     this.disposals.set(routingId, (this.disposals.get(routingId) ?? 0) + 1)
     for (const [sessionId, entry] of [...this.targets]) {
-      if (entry.fromRoutingId !== routingId) continue
+      if (!this.ownedBy(entry, routingId)) continue
       this.targets.delete(sessionId)
       this.dismissPendingForTarget(sessionId)
+      entry.released = true
+      this.ledgerSet(entry.ledgerId, { state: entry.busy ? 'interrupted' : 'idle' })
       if (entry.kind === 'opencode') {
         // A verdict still in flight sees the entry gone from `this.targets`
         // (its `stillPending`), so it replies nothing (ADR-088).
@@ -2607,12 +2956,8 @@ export class CrossEngineDispatcher {
     // ── Target resolution ─────────────────────────────────────────────────
     let entry: OpencodeTargetEntry
     if (req.sessionId) {
-      const existing = this.targets.get(req.sessionId)
-      if (
-        !existing ||
-        existing.kind !== 'opencode' ||
-        existing.fromRoutingId !== ctx.fromRoutingId
-      ) {
+      const cont = this.findContinuation(req.sessionId, ctx, 'opencode')
+      if (!cont) {
         return errorResult(
           `Unknown dispatch session "${req.sessionId}" — it may have been disposed. ` +
             'Start a fresh dispatch without session_id.'
@@ -2621,7 +2966,7 @@ export class CrossEngineDispatcher {
       // M-XE1: busy-reject BEFORE touching entry state — two concurrent
       // same-session_id calls would both pass the cost cap and the first
       // finisher's `finally` would clear the second turn's state.
-      if (existing.busy) {
+      if ('live' in cont && cont.live.busy) {
         return errorResult(
           `Dispatch session "${req.sessionId}" is already running a turn — wait for it to finish before continuing it.`,
           req.sessionId
@@ -2630,29 +2975,42 @@ export class CrossEngineDispatcher {
       // ADR-033 M4-C: reject a continuation turn once this target's tracked
       // cumulative cost has met/exceeded the configured cap. The target stays
       // alive — raising dispatch.maxCostUsd or starting a fresh dispatch both
-      // recover. A brand-new target always starts at 0.
-      if (
-        dispatchCfg?.maxCostUsd !== undefined &&
-        existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd
-      ) {
-        return errorResult(
-          `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
-            `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
-            'Raise dispatch.maxCostUsd in engines/opencode.json, or start a fresh dispatch.' +
-            unpricedSuffix(existing.unpricedTurns),
-          existing.sessionId
-        )
+      // recover. A brand-new target always starts at 0; one rebuilt from its
+      // ledger row starts at what its recorded turns cost.
+      const spent = this.continuationSpend(cont, dispatchCfg, req.sessionId, 'opencode')
+      if ('text' in spent) return spent
+      if ('row' in cont) {
+        const refusal = this.resumeModelRefusal('opencode', cont.row.model, dispatchCfg)
+        if (refusal) return refusal
       }
-      existing.ctx = ctx
-      entry = existing
+      if ('live' in cont) {
+        cont.live.ctx = ctx
+        entry = cont.live
+      } else {
+        try {
+          entry = await this.createOpencodeTarget(ctx, cont.row.model, cont.row)
+        } catch (err) {
+          // A session opencode no longer has will never resume; any other failure (a
+          // server that would not start, a lost feed) is worth another try.
+          if (isOpencodeApiError(err) && err.status === 404)
+            this.ledgerSet(cont.row.id, { state: 'failed' })
+          return errorResult(
+            `Could not resume dispatch session "${req.sessionId}": ${errText(err)}`,
+            req.sessionId
+          )
+        }
+        entry.cumulativeCostUsd = spent.costUsd
+        entry.unpricedTurns = spent.unpricedTurns
+      }
     } else {
-      entry = await this.createOpencodeTarget(ctx, model)
+      entry = await this.createOpencodeTarget(ctx, model, undefined, req)
     }
     // The judge's subagent task is the LATEST dispatch prompt (ADR-088).
     entry.lastPrompt = req.prompt
     // Reserve the target before the first await below, so a concurrent
     // continuation is busy-rejected rather than racing this one.
     entry.busy = true
+    this.ledgerTurnState(entry, 'running')
     let started = false
     try {
       // A previous turn's give-up is still settling: a prompt now would steer
@@ -2682,7 +3040,10 @@ export class CrossEngineDispatcher {
       started = true
       return await this.runOpencodeTurn(entry, req, ctx, model, stopController)
     } finally {
-      if (!started) entry.busy = false
+      if (!started) {
+        entry.busy = false
+        this.ledgerTurnState(entry, 'idle')
+      }
     }
   }
 
@@ -2803,6 +3164,9 @@ export class CrossEngineDispatcher {
       return { costUsd: usage.costUsd, usage }
     }
 
+    // The last turn failed (a refused prompt, a server-side failure): the row says so, and
+    // a continuation may still retry it.
+    let endState: DispatchTargetState = 'idle'
     try {
       const winner = await Promise.race([
         settledPromise,
@@ -2835,6 +3199,7 @@ export class CrossEngineDispatcher {
       }
 
       if (winner.kind === 'err') {
+        endState = 'failed'
         // The server refused the prompt. ZOMBIE GUARD: a transport failure on
         // an accepted request is indistinguishable from a refusal out here,
         // and an interrupt of an idle session is a no-op upstream.
@@ -2849,6 +3214,7 @@ export class CrossEngineDispatcher {
       }
 
       if (winner.kind === 'failed') {
+        endState = 'failed'
         // The turn RAN and failed server-side; it already ended (no interrupt).
         // Its spend still counts toward the cap and the breakdown.
         this.dismissPendingForTarget(entry.sessionId)
@@ -2885,6 +3251,7 @@ export class CrossEngineDispatcher {
     } finally {
       this.sealOpencodeTargetItems(entry)
       entry.busy = false
+      this.ledgerTurnState(entry, endState)
       entry.pendingPrompt = null
       // Settle-once: no LATER output may resolve a turn that has returned.
       entry.settled = null
@@ -2904,12 +3271,16 @@ export class CrossEngineDispatcher {
    */
   private async createOpencodeTarget(
     ctx: DispatchContext,
-    model: string
+    model: string,
+    resume?: DispatchTargetRow,
+    labels?: DispatchLabels
   ): Promise<OpencodeTargetEntry> {
     // A dispose of the dispatching chat while this target is being created
     // disposes the new target too.
     const generation = this.disposals.get(ctx.fromRoutingId) ?? 0
-    const conn = await this.deps.serverManager.acquire(ctx.cwd)
+    // A resumed target runs where it was created (ADR-105): the stored directory.
+    const cwd = resume?.cwd ?? ctx.cwd
+    const conn = await this.deps.serverManager.acquire(cwd)
     let rec: ConnRecord | null = null
     let client: DispatchTargetClient | null = null
     let createdId: string | null = null
@@ -2919,7 +3290,7 @@ export class CrossEngineDispatcher {
       rec.creating++
       const inputs: TargetRuleInputs = {
         client,
-        cwd: ctx.cwd,
+        cwd,
         agents: null,
         mcpServers: null,
         worktree: undefined,
@@ -2929,7 +3300,7 @@ export class CrossEngineDispatcher {
       // (it is only ever called once the target runs a turn).
       const judge = new DispatchTargetJudge({
         engine: 'opencode',
-        cwd: ctx.cwd,
+        cwd,
         routingId: ctx.fromRoutingId,
         sessionId: () => entry.sessionId,
         model: () => entry.model,
@@ -2960,22 +3331,40 @@ export class CrossEngineDispatcher {
       // assistant message under it a SECOND time, as an ordinary `origin:
       // 'session'` row beside the `dispatch` row this dispatcher writes. It
       // skips sessions carrying this exact title — see the constant's doc.
-      const session = await client.createSession({
-        title: OPENCODE_DISPATCH_SESSION_TITLE,
-        model: { providerID, id: modelID },
-        permissions: built.rules,
-        ...(built.agent ? { agent: built.agent } : {})
-      })
-      createdId = session.id
+      // A resumed target re-reads its session (the one the ledger names) instead of
+      // creating one; its ruleset is re-applied at the next turn start (`applied: null`).
+      const session = resume
+        ? await client.getSession(resume.harnessRef)
+        : await client.createSession({
+            title: OPENCODE_DISPATCH_SESSION_TITLE,
+            model: { providerID, id: modelID },
+            permissions: built.rules,
+            ...(built.agent ? { agent: built.agent } : {})
+          })
+      // Only a session created here is this call's to roll back.
+      if (!resume) createdId = session.id
       // A feed lost meanwhile would never deliver this target's events, and a
       // chat disposed meanwhile owns no target any more: fail, roll back.
       if (rec.abort.signal.aborted) throw new Error('the opencode event feed was lost')
       if ((this.disposals.get(ctx.fromRoutingId) ?? 0) !== generation)
         throw new Error('the dispatching session was disposed')
       const targetClient = client
+      // The durable record (ADR-105): written once the session is known to be ours
+      // to keep — after the checks above, whose rollback deletes it instead.
+      const ledgerId =
+        resume?.id ??
+        this.recordTarget(ctx, {
+          engine: 'opencode',
+          harnessRef: session.id,
+          model,
+          accountKey: opencodeDispatchAccount(model).accountKey,
+          labels
+        }).id
       const entry: OpencodeTargetEntry = {
         kind: 'opencode',
         sessionId: session.id,
+        ledgerId,
+        released: false,
         fromRoutingId: ctx.fromRoutingId,
         conn,
         rec,
@@ -2987,7 +3376,7 @@ export class CrossEngineDispatcher {
         turnInboxId: null,
         pendingPrompt: null,
         draining: false,
-        appliedMode: mode,
+        appliedMode: resume ? null : mode,
         applying: null,
         stopping: null,
         turnStartedAt: 0,
@@ -3005,7 +3394,7 @@ export class CrossEngineDispatcher {
           logSource: 'CrossEngineDispatcher'
         }),
         agent: session.agent ?? built.agent ?? null,
-        applied: { rules: built.rules, key: JSON.stringify(built.rules) },
+        applied: resume ? null : { rules: built.rules, key: JSON.stringify(built.rules) },
         hostRules: asHostPrecheckRules(built.userRules),
         openItems: new Map(),
         turnSteps: [],
@@ -3033,7 +3422,7 @@ export class CrossEngineDispatcher {
       }
       const rollback =
         client && createdId ? this.deleteTargetSession(client, createdId) : Promise.resolve()
-      void rollback.finally(() => this.deps.serverManager.releaseIfCurrent(ctx.cwd, conn))
+      void rollback.finally(() => this.deps.serverManager.releaseIfCurrent(cwd, conn))
       throw err
     }
   }
@@ -3075,8 +3464,10 @@ export class CrossEngineDispatcher {
 
   /**
    * A server's feed or process is gone: every target on it fails its turn in
-   * flight and is dropped (nothing can be answered or continued on it), after
-   * a best-effort interrupt, and its lease is released exactly.
+   * flight and is dropped (nothing can be answered on it now), after a
+   * best-effort interrupt, and its lease is released exactly. The sessions stay
+   * (ADR-105): the ledger rows say how each was left, and a continuation
+   * re-reads the session through a fresh server.
    */
   private loseConnection(rec: ConnRecord, reason: string): void {
     if (this.connections.get(rec.key) === rec) this.connections.delete(rec.key)
@@ -3086,17 +3477,18 @@ export class CrossEngineDispatcher {
       rec.targets.delete(entry)
       if (this.targets.get(entry.sessionId) === entry) this.targets.delete(entry.sessionId)
       this.dismissPendingForTarget(entry.sessionId)
+      entry.released = true
+      this.ledgerSet(entry.ledgerId, { state: entry.busy ? 'interrupted' : 'idle' })
       const settle = entry.settled
       entry.settled = null
       settle?.({ kind: 'failed', message: reason })
       logger.warn('CrossEngineDispatcher', `opencode target ${entry.sessionId} dropped: ${reason}`)
       // A server still up (only its feed was lost) must not run on unwatched;
-      // against a dead one the requests fail at once, and the session is
-      // deleted through the next target's server.
+      // against a dead one the requests fail at once.
       entry.draining = true
-      void this.stopTargetTurn(entry, entry.pendingPrompt)
-        .then(() => this.deleteTargetSession(entry.client, entry.sessionId))
-        .finally(() => this.deps.serverManager.releaseIfCurrent(entry.cwd, entry.conn))
+      void this.stopTargetTurn(entry, entry.pendingPrompt).finally(() =>
+        this.deps.serverManager.releaseIfCurrent(entry.cwd, entry.conn)
+      )
     }
   }
 
@@ -3131,23 +3523,25 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * End a disposed target (already out of `this.targets`): stop what runs on
-   * it, delete its session (the data dir is shared with the user's own
-   * opencode), then release its lease exactly and its feed record.
+   * Release a disposed target (already out of `this.targets`): stop what runs on
+   * it, then release its lease exactly and its feed record. Its session is KEPT
+   * (ADR-105): the ledger row resumes it, and `deleteTargetSession` runs only for
+   * a session that never became a row (a creation rolled back).
    */
   private teardownOpencodeTarget(entry: OpencodeTargetEntry): void {
     entry.rec.targets.delete(entry)
     this.releaseRecord(entry.rec)
     entry.draining = true
-    void this.stopTargetTurn(entry, entry.pendingPrompt)
-      .then(() => this.deleteTargetSession(entry.client, entry.sessionId))
-      .finally(() => this.deps.serverManager.releaseIfCurrent(entry.cwd, entry.conn))
+    void this.stopTargetTurn(entry, entry.pendingPrompt).finally(() =>
+      this.deps.serverManager.releaseIfCurrent(entry.cwd, entry.conn)
+    )
   }
 
   /**
-   * Delete a target's session (the data dir is shared with the user's own
-   * opencode); one that cannot be deleted now (its server is gone) is
-   * remembered and deleted through the next target's server.
+   * Delete an opencode session this dispatcher created (the data dir is shared
+   * with the user's own opencode); one that cannot be deleted now (its server is
+   * gone) is remembered and deleted through the next target's server. The ONE
+   * place a target's session is ever deleted.
    */
   private async deleteTargetSession(
     client: DispatchTargetClient,
@@ -3879,8 +4273,8 @@ export class CrossEngineDispatcher {
   ): Promise<DispatchResult> {
     // ── Model resolution ──────────────────────────────────────────────────
     const dispatchCfg = this.deps.loadEngineConfig('claude').dispatch
-    const model = req.model ?? dispatchCfg?.defaultModel
-    if (!model) {
+    const requestedModel = req.model ?? dispatchCfg?.defaultModel
+    if (!requestedModel) {
       return errorResult(
         'No model is configured for cross-engine dispatch into Claude. Ask the user to set ' +
           'Settings › Cross-engine dispatch › Dispatch into › Claude (the `dispatch.defaultModel` field in ' +
@@ -3888,18 +4282,21 @@ export class CrossEngineDispatcher {
       )
     }
     const allowed = dispatchCfg?.allowedModels
-    if (allowed && allowed.length > 0 && !allowed.includes(model)) {
+    if (allowed && allowed.length > 0 && !allowed.includes(requestedModel)) {
       return errorResult(
-        `Model "${model}" is not in the user-configured allowlist for Claude dispatch. ` +
+        `Model "${requestedModel}" is not in the user-configured allowlist for Claude dispatch. ` +
           `Allowed models: ${allowed.join(', ')}`
       )
     }
+    // A target resumed from its ledger row runs (and is recorded) under the model it
+    // was created with, as a live one does; the request's only gates the allowlist.
+    let model: string = requestedModel
 
     // ── Target resolution ─────────────────────────────────────────────────
     let entry: ClaudeTargetEntry
     if (req.sessionId) {
-      const existing = this.targets.get(req.sessionId)
-      if (!existing || existing.kind !== 'claude' || existing.fromRoutingId !== ctx.fromRoutingId) {
+      const cont = this.findContinuation(req.sessionId, ctx, 'claude')
+      if (!cont) {
         return errorResult(
           `Unknown dispatch session "${req.sessionId}" — it may have been disposed. ` +
             'Start a fresh dispatch without session_id.'
@@ -3908,7 +4305,7 @@ export class CrossEngineDispatcher {
       // Busy-reject BEFORE pushing a prompt or touching entry state (see the
       // `busy` doc comment on ClaudeTargetEntry). The running turn is left
       // completely undisturbed — no abort, no entry removal, no ctx swap.
-      if (existing.busy) {
+      if ('live' in cont && cont.live.busy) {
         return errorResult(
           `Dispatch session "${req.sessionId}" is already running a turn — wait for it to finish before continuing it.`,
           req.sessionId
@@ -3917,47 +4314,72 @@ export class CrossEngineDispatcher {
       // ADR-033 M4-C: reject a continuation turn once this target's tracked
       // cumulative cost has met/exceeded the configured cap (same semantics
       // as the opencode direction above). A brand-new target always starts at
-      // cumulativeCostUsd 0.
-      if (
-        dispatchCfg?.maxCostUsd !== undefined &&
-        existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd
-      ) {
-        return errorResult(
-          `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
-            `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
-            'Raise dispatch.maxCostUsd in engines/claude.json, or start a fresh dispatch.',
-          req.sessionId
-        )
+      // cumulativeCostUsd 0; one rebuilt from its ledger row, at what its
+      // recorded turns cost.
+      const spent = this.continuationSpend(cont, dispatchCfg, req.sessionId, 'claude')
+      if ('text' in spent) return spent
+      const spentUsd = spent.costUsd
+      if ('row' in cont) {
+        const refusal = this.resumeModelRefusal('claude', cont.row.model, dispatchCfg)
+        if (refusal) return refusal
       }
-      existing.ctx = ctx
-      entry = existing
-      // ADR-088 ruling 3 — the parent's mode is read live: bring the process
-      // to it before the turn's prompt is pushed (and before `busy`).
-      await this.syncClaudeTargetMode(entry)
+      if ('live' in cont) {
+        cont.live.ctx = ctx
+        entry = cont.live
+        // ADR-088 ruling 3 — the parent's mode is read live: bring the process
+        // to it before the turn's prompt is pushed (and before `busy`).
+        await this.syncClaudeTargetMode(entry)
+      } else {
+        // The process is gone (its parent restarted, or the app did): `--resume` the
+        // transcript the ledger row names, in the directory it was created in. A
+        // missing transcript (its project was deleted) is a clear end, not a fresh start.
+        const { row } = cont
+        if (!this.locateTranscript(row.harnessRef, row.cwd)) {
+          this.ledgerSet(row.id, { state: 'failed' })
+          return errorResult(
+            `Dispatch session "${req.sessionId}" cannot be resumed — its transcript no longer exists. ` +
+              'Start a fresh dispatch without session_id.',
+            req.sessionId
+          )
+        }
+        model = row.model
+        const account = claudeDispatchAccount()
+        const shell = this.createClaudeTargetShell(ctx, row.id, account, row.cwd)
+        entry = shell.entry
+        entry.cumulativeCostUsd = spentUsd
+        try {
+          await this.spawnClaudeTarget(shell, ctx, model, row.cwd, { resume: row.harnessRef })
+        } catch (err) {
+          // Transient (the transcript was checked above): the row keeps the state it had.
+          return errorResult(
+            `Failed to resume dispatched Claude agent: ${errText(err)}`,
+            req.sessionId
+          )
+        }
+        // A fresh process reads the app's CURRENT credential: the row follows it.
+        this.ledgerSet(row.id, { accountKey: account.accountKey })
+      }
     } else {
-      const shell = this.createClaudeTargetShell(ctx)
-      entry = shell.entry
+      // The harness id is minted HERE and the ledger row written BEFORE the spawn: the
+      // transcript is hidden (ADR-105) from its first byte, so no watcher pass can
+      // read it before the readers know to skip it.
+      const harnessId = uuidv4()
+      const account = claudeDispatchAccount()
+      let ledgerId: string | null = null
       try {
-        const mode = mapAutonomyToClaudeTargetMode(liveMode(ctx))
-        // ADR-085 §3 — the user's deny/ask rules as the target's flag
-        // settings (never the allow tier); omitted when there are none.
-        const { deny, ask } = this.userDenyAsk(ctx.cwd, ctx.callerRestriction)
-        entry.query = await this.spawnClaudeQuery({
-          cwd: ctx.cwd,
+        ledgerId = this.recordTarget(ctx, {
+          engine: 'claude',
+          harnessRef: harnessId,
           model,
-          permissionMode: mode.permissionMode,
-          allowDangerouslySkipPermissions: mode.allowDangerouslySkipPermissions,
-          canUseTool: shell.canUseTool,
-          abortController: entry.abortController,
-          prompt: entry.channel,
-          ...(deny.length > 0 || ask.length > 0 ? { settings: { permissions: { deny, ask } } } : {})
-        })
-        entry.iterator = entry.query[Symbol.asyncIterator]()
-        entry.appliedPermissionMode = mode.permissionMode
-        entry.bypassSpawned = mode.allowDangerouslySkipPermissions
+          accountKey: account.accountKey,
+          labels: req
+        }).id
+        const shell = this.createClaudeTargetShell(ctx, ledgerId, account, ctx.cwd)
+        entry = shell.entry
+        await this.spawnClaudeTarget(shell, ctx, model, ctx.cwd, { sessionId: harnessId })
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        return errorResult(`Failed to start dispatched Claude agent: ${msg}`)
+        if (ledgerId) this.ledgerSet(ledgerId, { state: 'failed' })
+        return errorResult(`Failed to start dispatched Claude agent: ${errText(err)}`)
       }
     }
 
@@ -3968,6 +4390,7 @@ export class CrossEngineDispatcher {
     // (success, turn error, timeout, abort) — including the paths that
     // remove the entry, where it's harmless.
     entry.busy = true
+    this.ledgerTurnState(entry, 'running')
     // Per-turn distinct tool_use id set (ADR-033 M4-B) — fresh at the start of
     // every turn, populated by forwardClaudeTargetMessage, .size read at turn end.
     entry.turnToolUseIds = new Set()
@@ -4025,13 +4448,18 @@ export class CrossEngineDispatcher {
           })
         })
 
+    // How this turn leaves the row. A killed process keeps its transcript, so the target
+    // is `interrupted` (resumable); a turn that failed to run is `failed`.
+    let endState: DispatchTargetState = 'idle'
     try {
       const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise, stopPromise])
 
       if (winner.kind === 'timeout' || winner.kind === 'abort' || winner.kind === 'stop') {
         // Unlike opencode (an interrupt stops the turn, session survives),
-        // aborting a Claude target's AbortController KILLS THE PROCESS — so
-        // continuation is impossible either way. Remove the entry entirely.
+        // aborting a Claude target's AbortController KILLS THE PROCESS — so the
+        // entry goes entirely. Its transcript stays (ADR-105): the NEXT
+        // continuation re-spawns it with `--resume`.
+        endState = 'interrupted'
         entry.abortController.abort()
         if (entry.sessionId) {
           this.dismissPendingForTarget(entry.sessionId)
@@ -4063,6 +4491,7 @@ export class CrossEngineDispatcher {
         return errorResult(text, entry.sessionId ?? '')
       }
       if (winner.kind === 'err') {
+        endState = 'failed'
         entry.abortController.abort()
         if (entry.sessionId) {
           this.dismissPendingForTarget(entry.sessionId)
@@ -4222,6 +4651,7 @@ export class CrossEngineDispatcher {
     } finally {
       entry.itemStreams.sealAll()
       entry.busy = false
+      this.ledgerTurnState(entry, endState)
       clearInterval(heartbeat)
       watchdog.dispose()
       if (signal && abortListener) signal.removeEventListener('abort', abortListener)
@@ -4247,6 +4677,15 @@ export class CrossEngineDispatcher {
       if (msg.session_id && !entry.sessionId) {
         entry.sessionId = msg.session_id
         this.targets.set(msg.session_id, entry)
+        // The model continues this target by the id it is told — init's. The row is
+        // looked up by it, so it must answer to it (it already does when cli.js
+        // honoured `--session-id` / `--resume`, which it does).
+        try {
+          if (this.ledger.get(entry.ledgerId)?.harnessRef !== msg.session_id)
+            this.ledgerSet(entry.ledgerId, { harnessRef: msg.session_id })
+        } catch (err) {
+          logger.warn('CrossEngineDispatcher', `dispatch ledger read failed: ${errText(err)}`)
+        }
       }
       this.forwardClaudeTargetMessage(entry, msg)
       if (msg.type === 'result') {
@@ -4331,6 +4770,38 @@ export class CrossEngineDispatcher {
   }
 
   /**
+   * Spawn the process behind a Claude target shell — under a new `--session-id`, or
+   * `--resume` of the session its ledger row names — and wire its iterator.
+   */
+  private async spawnClaudeTarget(
+    shell: { entry: ClaudeTargetEntry; canUseTool: CanUseTool },
+    ctx: DispatchContext,
+    model: string,
+    cwd: string,
+    ids: { sessionId: string } | { resume: string }
+  ): Promise<void> {
+    const { entry } = shell
+    const mode = mapAutonomyToClaudeTargetMode(liveMode(ctx))
+    // ADR-085 §3 — the user's deny/ask rules as the target's flag
+    // settings (never the allow tier); omitted when there are none.
+    const { deny, ask } = this.userDenyAsk(cwd, ctx.callerRestriction)
+    entry.query = await this.spawnClaudeQuery({
+      cwd,
+      model,
+      permissionMode: mode.permissionMode,
+      allowDangerouslySkipPermissions: mode.allowDangerouslySkipPermissions,
+      canUseTool: shell.canUseTool,
+      abortController: entry.abortController,
+      prompt: entry.channel,
+      ...ids,
+      ...(deny.length > 0 || ask.length > 0 ? { settings: { permissions: { deny, ask } } } : {})
+    })
+    entry.iterator = entry.query[Symbol.asyncIterator]()
+    entry.appliedPermissionMode = mode.permissionMode
+    entry.bypassSpawned = mode.allowDangerouslySkipPermissions
+  }
+
+  /**
    * Build the entry shell + its canUseTool BEFORE spawning: canUseTool must
    * exist to pass into spawnClaudeQuery, but it needs to read the entry's
    * LIVE fields (sessionId, ctx) — which aren't known until after spawn. The
@@ -4338,7 +4809,12 @@ export class CrossEngineDispatcher {
    * time a real tool call fires (always after spawn completes), the shell's
    * `query`/`iterator` fields are already populated by the caller.
    */
-  private createClaudeTargetShell(ctx: DispatchContext): {
+  private createClaudeTargetShell(
+    ctx: DispatchContext,
+    ledgerId: string,
+    account: DispatchTurnAccount,
+    cwd: string
+  ): {
     entry: ClaudeTargetEntry
     canUseTool: CanUseTool
   } {
@@ -4347,8 +4823,10 @@ export class CrossEngineDispatcher {
     const entry: ClaudeTargetEntry = {
       kind: 'claude',
       sessionId: null,
+      ledgerId,
+      released: false,
       fromRoutingId: ctx.fromRoutingId,
-      cwd: ctx.cwd,
+      cwd,
       channel,
       // Populated by the caller immediately after spawnClaudeQuery resolves.
       query: undefined as unknown as QueryHandle,
@@ -4361,7 +4839,7 @@ export class CrossEngineDispatcher {
       bypassSpawned: false,
       autoRejectedReported: false,
       modeSync: null,
-      account: claudeDispatchAccount(),
+      account,
       cumulativeCostUsd: 0,
       lastReportedTotalCostUsd: 0,
       lastActivityAt: 0,
@@ -4856,14 +5334,15 @@ export class CrossEngineDispatcher {
           `Allowed models: ${allowed.join(', ')}`
       )
     }
-    // Canonical from here on — see canonicalDispatchModel.
-    const model = canonicalDispatchModel('pi', requestedModel)
+    // Canonical from here on — see canonicalDispatchModel. (A target resumed from its
+    // ledger row runs under the model it was created with.)
+    let model = canonicalDispatchModel('pi', requestedModel)
 
     // ── Target resolution ─────────────────────────────────────────────────
     let entry: PiTargetEntry
     if (req.sessionId) {
-      const existing = this.targets.get(req.sessionId)
-      if (!existing || existing.kind !== 'pi' || existing.fromRoutingId !== ctx.fromRoutingId) {
+      const cont = this.findContinuation(req.sessionId, ctx, 'pi')
+      if (!cont) {
         return errorResult(
           `Unknown dispatch session "${req.sessionId}" — it may have been disposed. ` +
             'Start a fresh dispatch without session_id.'
@@ -4872,29 +5351,46 @@ export class CrossEngineDispatcher {
       // Busy-reject BEFORE touching entry state — same rationale as the
       // Claude target (one ambient event stream per process; interleaving two
       // turns would have no way to tell which `result` belongs to which caller).
-      if (existing.busy) {
+      if ('live' in cont && cont.live.busy) {
         return errorResult(
           `Dispatch session "${req.sessionId}" is already running a turn — wait for it to finish before continuing it.`,
           req.sessionId
         )
       }
-      if (
-        dispatchCfg?.maxCostUsd !== undefined &&
-        existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd
-      ) {
-        return errorResult(
-          `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
-            `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
-            'Raise dispatch.maxCostUsd in engines/pi.json, or start a fresh dispatch.' +
-            unpricedSuffix(existing.unpricedTurns),
-          req.sessionId
-        )
+      const spent = this.continuationSpend(cont, dispatchCfg, req.sessionId, 'pi')
+      if ('text' in spent) return spent
+      if ('row' in cont) {
+        const refusal = this.resumeModelRefusal('pi', cont.row.model, dispatchCfg)
+        if (refusal) return refusal
       }
-      existing.ctx = ctx
-      entry = existing
+      if ('live' in cont) {
+        cont.live.ctx = ctx
+        entry = cont.live
+      } else {
+        // The child is gone: respawn it on the same session dir and id — pi opens the
+        // session file it finds there, in the directory the target was created in.
+        model = cont.row.model
+        // pi given an id it cannot find CREATES a session under it, silently dropping the
+        // conversation: a directory that is gone is the end of this target, not a fresh start.
+        if (!this.piSessionDirExists(dispatchPiSessionDir(cont.row.id))) {
+          this.ledgerSet(cont.row.id, { state: 'failed' })
+          return errorResult(
+            `Dispatch session "${req.sessionId}" cannot be resumed — its pi session directory no longer exists. ` +
+              'Start a fresh dispatch without session_id.',
+            req.sessionId
+          )
+        }
+        try {
+          entry = await this.createPiTarget(ctx, model, cont.row)
+        } catch (err) {
+          return errorResult(`Failed to resume dispatched pi agent: ${errText(err)}`, req.sessionId)
+        }
+        entry.cumulativeCostUsd = spent.costUsd
+        entry.unpricedTurns = spent.unpricedTurns
+      }
     } else {
       try {
-        entry = await this.createPiTarget(ctx, model)
+        entry = await this.createPiTarget(ctx, model, undefined, req)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         return errorResult(`Failed to start dispatched pi agent: ${msg}`)
@@ -4905,6 +5401,7 @@ export class CrossEngineDispatcher {
 
     // Mark busy BEFORE the prompt is sent — fresh per-turn accumulators.
     entry.busy = true
+    this.ledgerTurnState(entry, 'running')
     entry.turnEngineCostUsd = null
     const turnStartedAt = this.now()
     entry.runner.beginTurn(turnStartedAt)
@@ -4960,6 +5457,7 @@ export class CrossEngineDispatcher {
           })
         })
 
+    let endState: DispatchTargetState = 'idle'
     try {
       const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise, stopPromise])
 
@@ -5032,6 +5530,7 @@ export class CrossEngineDispatcher {
       }
 
       if (winner.kind === 'err') {
+        endState = 'failed'
         // Also NOT torn down — pi's own error surface (a rejected prompt ack,
         // an extension_error) mostly leaves the process alive; a genuinely
         // dead process (the onExit case) self-diagnoses cleanly on the NEXT
@@ -5115,6 +5614,7 @@ export class CrossEngineDispatcher {
     } finally {
       entry.runner.flush()
       entry.busy = false
+      this.ledgerTurnState(entry, endState)
       clearInterval(heartbeat)
       watchdog.dispose()
       if (signal && abortListener) signal.removeEventListener('abort', abortListener)
@@ -5129,12 +5629,32 @@ export class CrossEngineDispatcher {
    * whatever was already created and re-throws — `resolveAndRunPi` turns
    * that into a friendly isError.
    */
-  private async createPiTarget(ctx: DispatchContext, model: string): Promise<PiTargetEntry> {
+  private async createPiTarget(
+    ctx: DispatchContext,
+    model: string,
+    resume?: DispatchTargetRow,
+    labels?: DispatchLabels
+  ): Promise<PiTargetEntry> {
+    // The session id is minted here and the ledger row written BEFORE the child spawns
+    // (ADR-105); a resume reuses both, in the directory the target was created in.
+    const harnessId = resume?.harnessRef ?? uuidv4()
+    const row =
+      resume ??
+      this.recordTarget(ctx, {
+        engine: 'pi',
+        harnessRef: harnessId,
+        model,
+        accountKey: piDispatchAccount(model).accountKey,
+        labels
+      })
+    const cwd = resume?.cwd ?? ctx.cwd
     const entry: PiTargetEntry = {
       kind: 'pi',
       sessionId: null,
+      ledgerId: row.id,
+      released: false,
       fromRoutingId: ctx.fromRoutingId,
-      cwd: ctx.cwd,
+      cwd,
       // Populated below, once the runner has started — the gate handler and
       // stream closures capture `entry` BY REFERENCE (mirrors
       // createClaudeTargetShell), so it's safe to construct before this field
@@ -5154,7 +5674,7 @@ export class CrossEngineDispatcher {
     }
     entry.judge = new DispatchTargetJudge({
       engine: 'pi',
-      cwd: ctx.cwd,
+      cwd,
       routingId: ctx.fromRoutingId,
       sessionId: () => entry.sessionId,
       model: () => entry.model,
@@ -5181,25 +5701,33 @@ export class CrossEngineDispatcher {
     // `forwardClaudeTargetMessage`'s / `handleOpencodeTargetStream`'s payload
     // shapes, and accumulates the turn's tokens even with no tool_use to
     // stream to (see `PiChildRunner`'s output handler).
-    entry.runner = await PiChildRunner.start({
-      cwd: ctx.cwd,
-      model,
-      spawn: this.spawnPiTarget,
-      // The shared MCP catalog (ADR-096), read at target creation and served
-      // by the target's bridge host; its calls hit this target's gate, which
-      // spells Claude MCP rules in pi's form (`mcpRuleKey`).
-      spawnOpts: {
-        gateHandler,
-        mcpServers: collectClaudeMcpForPi(ctx.cwd).servers,
-        ...PI_TARGET_SPAWN_FLAGS
-      },
-      ownerToolUseId: () => entry.ctx.toolUseId,
-      emit: () => entry.ctx.emit,
-      exitMessage: 'pi target process exited unexpectedly',
-      logTag: 'CrossEngineDispatcher',
-      now: () => this.now()
-    })
+    try {
+      entry.runner = await PiChildRunner.start({
+        cwd,
+        model,
+        spawn: this.spawnPiTarget,
+        // The shared MCP catalog (ADR-096), read at target creation and served
+        // by the target's bridge host; its calls hit this target's gate, which
+        // spells Claude MCP rules in pi's form (`mcpRuleKey`).
+        spawnOpts: {
+          gateHandler,
+          mcpServers: collectClaudeMcpForPi(cwd).servers,
+          ...piTargetSpawnFlags(dispatchPiSessionDir(row.id), harnessId)
+        },
+        ownerToolUseId: () => entry.ctx.toolUseId,
+        emit: () => entry.ctx.emit,
+        exitMessage: 'pi target process exited unexpectedly',
+        logTag: 'CrossEngineDispatcher',
+        now: () => this.now()
+      })
+    } catch (err) {
+      // A new target that never started is over; a resume that failed to start is retried.
+      if (!resume) this.ledgerSet(row.id, { state: 'failed' })
+      throw err
+    }
     entry.sessionId = entry.runner.sessionId
+    // The model continues this target by the id pi reports; the row answers to it.
+    if (entry.sessionId !== harnessId) this.ledgerSet(row.id, { harnessRef: entry.sessionId })
     this.targets.set(entry.sessionId, entry)
     return entry
   }
@@ -5473,42 +6001,58 @@ export class CrossEngineDispatcher {
     // ── Target resolution ─────────────────────────────────────────────────
     let entry: CodexTargetEntry
     if (req.sessionId) {
-      const existing = this.targets.get(req.sessionId)
-      if (!existing || existing.kind !== 'codex' || existing.fromRoutingId !== ctx.fromRoutingId) {
-        // NOT a `thread/resume` of the named thread. `req.sessionId` is
-        // model-authored text: resuming whatever it names would let a
-        // dispatched-from agent reopen ANY Codex thread on disk — including
-        // the user's own interactive sessions — under a dispatch target's
-        // policy envelope, with no ownership check available to refuse it.
-        // Only a live entry this caller owns continues (ADR-066's caller-bound
-        // identity), exactly as every other target direction does.
+      // NOT a `thread/resume` of whatever the id names. `req.sessionId` is
+      // model-authored text: resuming it blindly would let a dispatched-from agent
+      // reopen ANY Codex thread on disk — including the user's own interactive
+      // sessions — under a dispatch target's policy envelope, with no ownership
+      // check available to refuse it. Only a live entry this caller owns, or a LEDGER
+      // row this caller owns (a thread this dispatcher created for it), continues
+      // (ADR-066's caller-bound identity); `findContinuation` refuses everything else.
+      const cont = this.findContinuation(req.sessionId, ctx, 'codex')
+      if (!cont) {
         return errorResult(
           `Unknown dispatch session "${req.sessionId}" — it may have been disposed. ` +
             'Start a fresh dispatch without session_id.'
         )
       }
-      if (existing.busy) {
+      if ('live' in cont && cont.live.busy) {
         return errorResult(
           `Dispatch session "${req.sessionId}" is already running a turn — wait for it to finish before continuing it.`,
           req.sessionId
         )
       }
-      if (
-        dispatchCfg?.maxCostUsd !== undefined &&
-        existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd
-      ) {
-        return errorResult(
-          `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
-            `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
-            'Raise dispatch.maxCostUsd in engines/codex.json, or start a fresh dispatch.',
-          req.sessionId
-        )
+      const spent = this.continuationSpend(cont, dispatchCfg, req.sessionId, 'codex')
+      if ('text' in spent) return spent
+      const spentUsd = spent.costUsd
+      if ('row' in cont) {
+        const refusal = this.resumeModelRefusal('codex', cont.row.model, dispatchCfg)
+        if (refusal) return refusal
       }
-      existing.ctx = ctx
-      entry = existing
+      if ('live' in cont) {
+        cont.live.ctx = ctx
+        entry = cont.live
+      } else {
+        try {
+          // The wait for the thread's lock ends at once on a Stop or the caller's abort.
+          entry = await this.createCodexTarget(ctx, undefined, undefined, cont.row, [
+            stopController.signal,
+            ctx.extra?.signal
+          ])
+        } catch (err) {
+          // A thread Codex has no rollout for will never resume; a busy host, a lost
+          // connection or a stop is worth another try.
+          if (/no rollout found/i.test(errText(err)))
+            this.ledgerSet(cont.row.id, { state: 'failed' })
+          return errorResult(
+            `Failed to resume dispatched codex agent: ${errText(err)}`,
+            req.sessionId
+          )
+        }
+        entry.cumulativeCostUsd = spentUsd
+      }
     } else {
       try {
-        entry = await this.createCodexTarget(ctx, requestedModel, allowed)
+        entry = await this.createCodexTarget(ctx, requestedModel, allowed, undefined, [], req)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         return errorResult(`Failed to start dispatched codex agent: ${msg}`)
@@ -5517,6 +6061,7 @@ export class CrossEngineDispatcher {
 
     const model = entry.model
     entry.busy = true
+    this.ledgerTurnState(entry, 'running')
     entry.turnToolUseIds = new Set()
     const turnStartedAt = this.now()
     entry.lastActivityAt = turnStartedAt
@@ -5570,6 +6115,7 @@ export class CrossEngineDispatcher {
           })
         })
 
+    let endState: DispatchTargetState = 'idle'
     try {
       const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise, stopPromise])
 
@@ -5611,6 +6157,7 @@ export class CrossEngineDispatcher {
       }
 
       if (winner.kind === 'err') {
+        endState = 'failed'
         // The thread is NOT torn down: a failed turn (a refused `turn/start`, a
         // `turn/completed` carrying an error) leaves the app-server and the
         // thread alive, and a genuinely dead process self-diagnoses on the next
@@ -5674,6 +6221,7 @@ export class CrossEngineDispatcher {
     } finally {
       if (ctx.toolUseId) this.sealCodexTargetItems(entry, ctx.toolUseId)
       entry.busy = false
+      this.ledgerTurnState(entry, endState)
       clearInterval(heartbeat)
       watchdog.dispose()
       if (signal && abortListener) signal.removeEventListener('abort', abortListener)
@@ -5791,10 +6339,10 @@ export class CrossEngineDispatcher {
    * API-equivalent figure into `billed_cost_usd` as though money had moved
    * (ADR-030 — unknown is never dressed up as a fact).
    */
-  private async codexDispatchAccount(ctx: DispatchContext): Promise<DispatchTurnAccount> {
+  private async codexDispatchAccount(accountId: string | null): Promise<DispatchTurnAccount> {
     if (!this.codexVaultAccounts) return { ...codexNativeIdentity(), billingType: 'unknown' }
     try {
-      const identity = await credentialSync.accountIdentity(ctx.chatgptAccountId ?? null)
+      const identity = await credentialSync.accountIdentity(accountId)
       return {
         ...identity,
         billingType: identity.accountKey.startsWith('chatgpt:') ? 'subscription' : 'unknown'
@@ -5848,13 +6396,23 @@ export class CrossEngineDispatcher {
   private async createCodexTarget(
     ctx: DispatchContext,
     requestedModel: string | undefined,
-    allowedModels: string[] | undefined
+    allowedModels: string[] | undefined,
+    resume?: DispatchTargetRow,
+    signals: ReadonlyArray<AbortSignal | undefined> = [],
+    labels?: DispatchLabels
   ): Promise<CodexTargetEntry> {
+    // A resumed thread lives on the host of the account it was created under (ADR-105):
+    // the row's vault account id, not the (possibly different) caller's pin now.
+    const accountId = resume ? resume.codexAccountId : (ctx.chatgptAccountId ?? null)
+    const cwd = resume?.cwd ?? ctx.cwd
     const entry: CodexTargetEntry = {
       kind: 'codex',
       sessionId: null,
+      // Set once the thread exists (a new target's row needs its id).
+      ledgerId: resume?.id ?? '',
+      released: false,
       fromRoutingId: ctx.fromRoutingId,
-      cwd: ctx.cwd,
+      cwd,
       // Filled in below, once the attach resolves. The notification and gate
       // closures capture `entry` BY REFERENCE (mirrors createPiTarget), so
       // building them first is safe: nothing is routed to this owner before it
@@ -5875,6 +6433,7 @@ export class CrossEngineDispatcher {
       turnToolUseIds: new Set(),
       usageTotal: null,
       usageBaseline: null,
+      observeUsageBaseline: !!resume,
       cumulativeCostUsd: 0,
       completedItems: new Map(),
       itemTimestamps: new Map(),
@@ -5887,11 +6446,11 @@ export class CrossEngineDispatcher {
     // A dispatch target bills the same subscription the caller runs on: the
     // caller's PIN when it has one, the ACTIVE account otherwise (ADR-068 §2).
     // Which is also which HOST it lands on, since a host IS one identity.
-    entry.account = await this.codexDispatchAccount(ctx)
+    entry.account = await this.codexDispatchAccount(accountId)
     entry.connection = await this.attachCodexTarget({
-      cwd: ctx.cwd,
+      cwd,
       label: 'dispatch-target',
-      ...(this.codexVaultAccounts ? { identity: { accountId: ctx.chatgptAccountId ?? null } } : {}),
+      ...(this.codexVaultAccounts ? { identity: { accountId } } : {}),
       onNotification: (method, params) => this.handleCodexTargetNotification(entry, method, params),
       onServerRequest: (method, params, context) =>
         this.gateCodexTargetRequest(entry, method, params, context),
@@ -5905,8 +6464,34 @@ export class CrossEngineDispatcher {
     })
 
     try {
+      if (resume) {
+        const policy = codexModePolicy(entry.autonomyMode)
+        const response = await this.resumeCodexThread(
+          entry.connection,
+          {
+            threadId: resume.harnessRef,
+            cwd,
+            model: resume.model,
+            approvalPolicy: policy.approvalPolicy,
+            sandbox: policy.sandbox,
+            approvalsReviewer: policy.approvalsReviewer,
+            excludeTurns: true
+          },
+          signals
+        )
+        assertCodexProvider(response.modelProvider)
+        if (response.thread.id !== resume.harnessRef)
+          throw new Error('Codex resumed a different native thread')
+        if (response.thread.parentThreadId)
+          throw new Error('Codex resumed a dispatch target as a native child thread')
+        entry.model = response.model
+        entry.sessionId = response.thread.id
+        entry.connection.claim(entry.sessionId)
+        this.targets.set(entry.sessionId, entry)
+        return entry
+      }
       const { config } = await entry.connection.request('config/read', {
-        cwd: ctx.cwd,
+        cwd,
         includeLayers: false
       })
       assertCodexProvider(config.model_provider)
@@ -5942,7 +6527,7 @@ export class CrossEngineDispatcher {
 
       const policy = codexModePolicy(entry.autonomyMode)
       const response = await entry.connection.request('thread/start', {
-        cwd: ctx.cwd,
+        cwd,
         model,
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
@@ -5956,6 +6541,16 @@ export class CrossEngineDispatcher {
         throw new Error('Codex opened a dispatch target as a native child thread')
       entry.model = response.model
       entry.sessionId = response.thread.id
+      // The durable record (ADR-105), as soon as the thread exists: the Codex history
+      // list skips ledger thread ids.
+      entry.ledgerId = this.recordTarget(ctx, {
+        engine: 'codex',
+        harnessRef: entry.sessionId,
+        model: entry.model,
+        accountKey: entry.account.accountKey,
+        codexAccountId: accountId,
+        labels
+      }).id
       // Everything stamped with this thread id is this target's from here on,
       // and nothing else is (ADR-069 §2).
       entry.connection.claim(entry.sessionId)
@@ -5967,6 +6562,61 @@ export class CrossEngineDispatcher {
     }
 
     return entry
+  }
+
+  /**
+   * `thread/resume` of a released target's thread, waiting out the writer lock of the
+   * process that has not let go of it yet (ADR-069 §4): the thread stays LOADED — and
+   * locked — until the binary unloads it, about a minute after its last subscriber
+   * left, and a refusal (`-32600`) meanwhile is a normal step, not a failure. Bounded
+   * by {@link DispatcherDeps.codexResumeLockWindowMs}; any other error fails at once.
+   */
+  private async resumeCodexThread(
+    connection: CodexThreadConnection,
+    params: CodexMethods['thread/resume']['params'],
+    signals: ReadonlyArray<AbortSignal | undefined>
+  ): Promise<CodexMethods['thread/resume']['result']> {
+    const deadline = Date.now() + this.codexResumeLockWindowMs
+    for (;;) {
+      try {
+        return await connection.request('thread/resume', params)
+      } catch (err) {
+        const code = isRecord(err) || err instanceof Error ? (err as { code?: unknown }).code : null
+        // `-32600` is also "no rollout found": only a live host that still holds the thread
+        // explains a lock, and only then is waiting worth it. Anything else fails at once.
+        if (
+          code !== CODEX_RESUME_LOCK_REFUSAL ||
+          !this.codexHoldsThread(params.threadId) ||
+          Date.now() >= deadline
+        )
+          throw err
+        await this.abortableDelay(this.codexResumeLockRetryMs, signals)
+      }
+    }
+  }
+
+  /** Wait `ms`, or throw the moment one of `signals` aborts (a Stop, the caller's cancel). */
+  private abortableDelay(
+    ms: number,
+    signals: ReadonlyArray<AbortSignal | undefined>
+  ): Promise<void> {
+    const live = signals.filter((signal): signal is AbortSignal => !!signal)
+    const stopped = (): Error => new Error('the dispatch was stopped while waiting for the thread')
+    if (live.some((signal) => signal.aborted)) return Promise.reject(stopped())
+    return new Promise<void>((resolve, reject) => {
+      const onAbort = (): void => {
+        clearTimeout(timer)
+        cleanup()
+        reject(stopped())
+      }
+      const cleanup = (): void =>
+        live.forEach((signal) => signal.removeEventListener('abort', onAbort))
+      const timer = setTimeout(() => {
+        cleanup()
+        resolve()
+      }, ms)
+      live.forEach((signal) => signal.addEventListener('abort', onAbort, { once: true }))
+    })
   }
 
   /**
@@ -6084,6 +6734,12 @@ export class CrossEngineDispatcher {
     }
     if (method === 'thread/tokenUsage/updated' && isRecord(value.tokenUsage)) {
       entry.usageTotal = (value.tokenUsage as ThreadTokenUsage).total
+      // A resumed thread shows its earlier turns' totals first: that is history, the
+      // baseline, not this turn's work.
+      if (entry.observeUsageBaseline) {
+        entry.observeUsageBaseline = false
+        entry.usageBaseline = entry.usageTotal
+      }
       return
     }
     if (method === 'turn/completed' && isRecord(value.turn)) {

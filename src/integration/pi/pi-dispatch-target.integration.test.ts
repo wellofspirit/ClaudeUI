@@ -9,8 +9,8 @@
  * against the real installed binary and a real model call. Unit-level coverage
  * for guards/model-resolution/gate/streaming/cost-cap/stop already lives in
  * cross-engine-dispatcher.component.test.ts (a FAKE spawnPiTarget) — this file
- * exists solely to prove the REAL wiring (bridge host transport, `--no-session`
- * spawn args, `get_state`/`set_model`/`prompt`/`get_last_assistant_text`/
+ * exists solely to prove the REAL wiring (bridge host transport, the
+ * `--session-dir`/`--session-id` spawn args, `get_state`/`set_model`/`prompt`/`get_last_assistant_text`/
  * `abort` RPC calls) actually works against the real binary, mirroring
  * pi-hosted-tools.integration.test.ts's identical "unit tests mock the seam,
  * this file proves the seam is real" rationale.
@@ -24,11 +24,11 @@
  *
  * Gated: PI_INTEGRATION_TESTS=1 AND a real openai-codex credential in
  * ~/.pi/agent/auth.json (read-only — never written here). Same
- * shared-refresh-token caveat as pi-hosted-tools.integration.test.ts. Session
- * files land nowhere (`--no-session` — verified during the M4c kickoff
- * investigation: get_state/set_model/prompt/get_last_assistant_text/abort all
- * work normally under it, and no `~/.pi/agent/sessions` entry is created).
- * cwd is an isolated tmpdir, never the real project tree or homedir.
+ * shared-refresh-token caveat as pi-hosted-tools.integration.test.ts. The target's
+ * session is persisted but hidden (ADR-105): `--session-dir
+ * ~/.claude/ui/dispatch/pi/<ledgerId> --session-id <uuid>`, so no
+ * `~/.pi/agent/sessions` entry is created. cwd is an isolated tmpdir, never the
+ * real project tree or homedir.
  *
  * Minimal by design (per the M4c kickoff spec): one dispatch, one short
  * prompt, generously timed. The bidirectional real-app drive (an actual
@@ -48,6 +48,7 @@ import { join } from 'node:path'
 import { locatePiBinary } from '../../core/pi/pi-locate'
 import { CrossEngineDispatcher } from '../../core/services/cross-engine-dispatcher'
 import type { DispatchContext } from '../../core/services/cross-engine-dispatcher'
+import { makeFakeDispatchLedger } from '../../test/helpers/fake-dispatch-ledger'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 const ROUTING_ID = 'routing-pi-dispatch-target-integration'
@@ -105,7 +106,9 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
         loadEngineConfig: () => ({
           dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
         }),
-        recordUsageEvent: () => {}
+        recordUsageEvent: () => {},
+        // The X-Agent ledger (ADR-105) in memory: this test does not exercise the DB.
+        ledger: makeFakeDispatchLedger()
         // spawnPiTarget intentionally OMITTED — exercises the REAL
         // defaultSpawnPiTarget (real PiRpcClient + PiBridgeHost).
       })

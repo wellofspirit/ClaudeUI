@@ -20,11 +20,8 @@
  * The session tools (`session-tools.ts`) create links with {@link linkChild} after
  * they spawn the new session.
  */
-import { randomInt } from 'node:crypto'
 import type { ChatMessage, EngineId } from '../../shared/types'
 import {
-  REF_ALPHABET,
-  REF_LENGTH,
   groupHeadRef,
   RESERVED_SESSION_WORDS,
   isRef,
@@ -55,6 +52,7 @@ import {
   type SessionLinkRow,
   type SessionRefRow
 } from './db'
+import { mintRef } from './session-ref-mint'
 import { setClientPromptObserver } from '../providers/client-prompt-observer'
 import { logger } from './logger'
 import { addHostObserver, emitEvent, syncCore } from './sync-host'
@@ -64,12 +62,6 @@ const LOG = 'SessionLinks'
 // ---------------------------------------------------------------------------
 // Refs
 // ---------------------------------------------------------------------------
-
-function mintRef(): string {
-  let out = 's-'
-  for (let i = 0; i < REF_LENGTH; i++) out += REF_ALPHABET[randomInt(REF_ALPHABET.length)]
-  return out
-}
 
 interface RefIds {
   engine: EngineId

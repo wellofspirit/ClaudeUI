@@ -115,6 +115,7 @@ import {
   WRITE_COMMAND,
   type FixtureProvider
 } from './harness/fixture-provider'
+import { makeFakeDispatchLedger } from '../../test/helpers/fake-dispatch-ledger'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 const MODEL = 'fixture/fixture-model'
@@ -182,7 +183,9 @@ describeV2('opencode 2.x contract: the dispatcher with an opencode target', () =
         judgeRequests.push(req)
         return judgeReplies.shift() ?? '<block>no</block>'
       },
-      recordUsageEvent: (event) => recorded.push(event)
+      recordUsageEvent: (event) => recorded.push(event),
+      // The X-Agent ledger (ADR-105) in memory: this suite does not exercise the DB.
+      ledger: makeFakeDispatchLedger()
     })
   }, 60_000)
 
@@ -290,18 +293,13 @@ describeV2('opencode 2.x contract: the dispatcher with an opencode target', () =
     expect(again).toMatchObject({ sessionId: result.sessionId })
     expect(again.text).toContain(`echo: second ${tag}`)
 
-    // Dispose: the session is deleted (the data dir is shared with the user's
-    // own opencode), then the target's lease is given back.
+    // Dispose: the target's lease is given back and its session STAYS (ADR-105) —
+    // the ledger row resumes it, so deleting it would defeat the point.
     const conn = await manager.acquire(cwd, { waitForHostedTools: false })
     const api = createApi(conn.baseUrl, conn.password, cwd)
     const released = vi.spyOn(manager, 'releaseIfCurrent')
     const endsBefore = ends.length
     dispatcher.disposeFor(ctx.fromRoutingId)
-    await until(
-      async () =>
-        (await api.call('session.get', { params: { sessionID: result.sessionId } })).status === 404,
-      'the target session deleted'
-    )
     // The target's own lease is given back (exactly, on that server)…
     await until(
       () =>
@@ -309,6 +307,9 @@ describeV2('opencode 2.x contract: the dispatcher with an opencode target', () =
       'the target lease released'
     )
     released.mockRestore()
+    expect(
+      (await api.call('session.get', { params: { sessionID: result.sessionId } })).status
+    ).toBe(200)
     // …so with ours released too, the server ends by stdin EOF.
     manager.releaseIfCurrent(cwd, conn)
     await until(() => manager.activeCount === 0 && ends.length > endsBefore, 'the server end')

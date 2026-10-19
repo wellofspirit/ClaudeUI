@@ -21,6 +21,7 @@ import { findForkAnchorUuid } from './fork-anchor'
 import { resolvePiForkAnchor } from './pi-session-list'
 import { calculateCostFromTokens, normalizeModelName } from './block-usage'
 import { dispatchedCostsByRouting } from './db'
+import { isDispatchTargetSession } from './dispatch-target-ledger'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { locateClaudeTranscript } from './claude-transcript-locator'
 import { extractToolResultContent } from './tool-result-content'
@@ -571,6 +572,9 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
     const staleFiles: typeof fileEntries = []
 
     for (const file of jsonlFiles) {
+      // A dispatch target's transcript (ADR-105) is not a session of its own: its work
+      // reaches the parent's card and the usage ledger, and it must never list.
+      if (isDispatchTargetSession(file.replace('.jsonl', ''))) continue
       const filePath = path.join(projectDir, file)
       let mtime: number
       try {

@@ -1521,6 +1521,43 @@ export const MIGRATIONS: Migration[] = [
          WHERE state = 'detached';
       `)
     }
+  },
+  {
+    // ADR-105 (B-1): the X-Agent ledger. One row per dispatch target — the harness
+    // session that stays on disk (hidden from the sidebar) so a target outlives its
+    // parent's restart: `id` is its ClaudeUI ref (`s-xxxxxx`, minted beside
+    // `session_ref`), `harness_ref` the engine's own session id, `parent_session_id`
+    // the dispatching session's durable id (moved by `SessionManager.rekey`). No cost
+    // columns: spend stays in `usage_event` (origin `dispatch`, session_id =
+    // harness_ref). `session_ledger` is the orchestrator branch's table, hence the name.
+    version: 35,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS dispatch_target (
+          id TEXT PRIMARY KEY,
+          engine TEXT NOT NULL,
+          harness_ref TEXT NOT NULL,
+          parent_session_id TEXT NOT NULL,
+          parent_engine TEXT NOT NULL,
+          parent_tool_use_id TEXT,
+          cwd TEXT NOT NULL,
+          model TEXT NOT NULL,
+          launch_mode TEXT NOT NULL,
+          account_key TEXT,
+          codex_account_id TEXT,
+          caller_restriction TEXT,
+          name TEXT,
+          description TEXT,
+          state TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          last_active_at INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_dispatch_target_harness
+          ON dispatch_target (engine, harness_ref);
+        CREATE INDEX IF NOT EXISTS idx_dispatch_target_parent
+          ON dispatch_target (parent_session_id);
+      `)
+    }
   }
 ]
 
@@ -2469,6 +2506,280 @@ export function sessionProposalStartedRef(ref: string, db: Db = getDb()): boolea
     db.prepare('SELECT 1 FROM session_proposal WHERE started_ref = ? LIMIT 1').get(ref) !==
     undefined
   )
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch targets — the X-Agent ledger (ADR-105)
+// ---------------------------------------------------------------------------
+
+/**
+ * `running` a turn is in flight; `idle` between turns (the process may be released);
+ * `interrupted` ended by its parent's cancel, a lost server or an app quit — resumable;
+ * `stopped` ended on purpose (a later slice); `failed` the last turn or resume failed —
+ * it may be retried, and only `stopped` is never resumed. A resume that failed for a
+ * transient reason (a busy host, a spawn error) leaves the previous state; only one that
+ * cannot succeed (the transcript, session directory, opencode session or Codex rollout
+ * is gone) writes `failed`.
+ */
+export type DispatchTargetState = 'running' | 'idle' | 'interrupted' | 'stopped' | 'failed'
+
+/** One dispatch target: a harness session the dispatcher can resume from this row. */
+export interface DispatchTargetRow {
+  /** Its ClaudeUI ref (`s-xxxxxx`). */
+  id: string
+  engine: EngineId
+  /** The engine's own session id (Claude's `--session-id` uuid, pi's, opencode's, Codex's thread). */
+  harnessRef: string
+  /** The dispatching session's durable id; moves with `SessionManager.rekey`. */
+  parentSessionId: string
+  parentEngine: EngineId
+  parentToolUseId: string | null
+  cwd: string
+  model: string
+  /** The parent's autonomy mode at launch. */
+  launchMode: string
+  accountKey: string | null
+  /** The vault account whose Codex host the thread lives on (null = the active one). */
+  codexAccountId: string | null
+  /** JSON of the ADR-097 S9 caller restriction the target was created with. */
+  callerRestriction: string | null
+  name: string | null
+  description: string | null
+  state: DispatchTargetState
+  createdAt: number
+  lastActiveAt: number
+}
+
+interface DispatchTargetDbRow {
+  id: string
+  engine: string
+  harness_ref: string
+  parent_session_id: string
+  parent_engine: string
+  parent_tool_use_id: string | null
+  cwd: string
+  model: string
+  launch_mode: string
+  account_key: string | null
+  codex_account_id: string | null
+  caller_restriction: string | null
+  name: string | null
+  description: string | null
+  state: string
+  created_at: number
+  last_active_at: number
+}
+
+const DISPATCH_TARGET_STATES: readonly string[] = [
+  'running',
+  'idle',
+  'interrupted',
+  'stopped',
+  'failed'
+]
+
+function dispatchTargetRow(row: DispatchTargetDbRow): DispatchTargetRow {
+  return {
+    id: row.id,
+    engine: row.engine as EngineId,
+    harnessRef: row.harness_ref,
+    parentSessionId: row.parent_session_id,
+    parentEngine: row.parent_engine as EngineId,
+    parentToolUseId: row.parent_tool_use_id,
+    cwd: row.cwd,
+    model: row.model,
+    launchMode: row.launch_mode,
+    accountKey: row.account_key,
+    codexAccountId: row.codex_account_id,
+    callerRestriction: row.caller_restriction,
+    name: row.name,
+    description: row.description,
+    state: DISPATCH_TARGET_STATES.includes(row.state)
+      ? (row.state as DispatchTargetState)
+      : 'failed',
+    createdAt: Number(row.created_at),
+    lastActiveAt: Number(row.last_active_at)
+  }
+}
+
+/** Insert a target row. Returns false when the id or the (engine, harness_ref) pair is taken. */
+export function insertDispatchTarget(row: DispatchTargetRow, db: Db = getDb()): boolean {
+  const info = db
+    .prepare(
+      `INSERT OR IGNORE INTO dispatch_target
+         (id, engine, harness_ref, parent_session_id, parent_engine, parent_tool_use_id, cwd,
+          model, launch_mode, account_key, codex_account_id, caller_restriction, name,
+          description, state, created_at, last_active_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      row.id,
+      row.engine,
+      row.harnessRef,
+      row.parentSessionId,
+      row.parentEngine,
+      row.parentToolUseId,
+      row.cwd,
+      row.model,
+      row.launchMode,
+      row.accountKey,
+      row.codexAccountId,
+      row.callerRestriction,
+      row.name,
+      row.description,
+      row.state,
+      row.createdAt,
+      row.lastActiveAt
+    )
+  return Number(info.changes) > 0
+}
+
+/**
+ * Insert a target row AND its `session_ref` row (engine, harness id) in one
+ * transaction, so a refused second insert leaves no orphan ref. Returns false, with
+ * nothing written, when the id, the ref or the (engine, harness_ref) pair is taken.
+ */
+export function insertDispatchTargetWithRef(row: DispatchTargetRow, db: Db = getDb()): boolean {
+  db.prepare('BEGIN').run()
+  try {
+    const ok =
+      insertSessionRef(
+        { ref: row.id, engine: row.engine, sessionId: row.harnessRef, routingId: null },
+        db
+      ) && insertDispatchTarget(row, db)
+    db.prepare(ok ? 'COMMIT' : 'ROLLBACK').run()
+    return ok
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+export function getDispatchTarget(id: string, db: Db = getDb()): DispatchTargetRow | undefined {
+  const row = db.prepare('SELECT * FROM dispatch_target WHERE id = ?').get(id) as
+    DispatchTargetDbRow | undefined
+  return row ? dispatchTargetRow(row) : undefined
+}
+
+/** The target the engine knows by this session id. */
+export function getDispatchTargetByHarnessRef(
+  engine: EngineId,
+  harnessRef: string,
+  db: Db = getDb()
+): DispatchTargetRow | undefined {
+  const row = db
+    .prepare('SELECT * FROM dispatch_target WHERE engine = ? AND harness_ref = ?')
+    .get(engine, harnessRef) as DispatchTargetDbRow | undefined
+  return row ? dispatchTargetRow(row) : undefined
+}
+
+/** The targets a parent session owns, newest first. */
+export function dispatchTargetsByParent(
+  parentSessionId: string,
+  db: Db = getDb()
+): DispatchTargetRow[] {
+  return (
+    db
+      .prepare(
+        'SELECT * FROM dispatch_target WHERE parent_session_id = ? ORDER BY created_at DESC, id'
+      )
+      .all(parentSessionId) as DispatchTargetDbRow[]
+  ).map(dispatchTargetRow)
+}
+
+/** The mutable columns of a target row; an omitted key keeps its value. */
+export type DispatchTargetPatch = Partial<
+  Pick<
+    DispatchTargetRow,
+    'state' | 'harnessRef' | 'accountKey' | 'lastActiveAt' | 'name' | 'description'
+  >
+>
+
+export function updateDispatchTarget(
+  id: string,
+  patch: DispatchTargetPatch,
+  db: Db = getDb()
+): void {
+  db.prepare(
+    `UPDATE dispatch_target
+        SET state = CASE WHEN ? THEN ? ELSE state END,
+            harness_ref = CASE WHEN ? THEN ? ELSE harness_ref END,
+            account_key = CASE WHEN ? THEN ? ELSE account_key END,
+            last_active_at = CASE WHEN ? THEN ? ELSE last_active_at END,
+            name = CASE WHEN ? THEN ? ELSE name END,
+            description = CASE WHEN ? THEN ? ELSE description END
+      WHERE id = ?`
+  ).run(
+    patch.state !== undefined ? 1 : 0,
+    patch.state ?? null,
+    patch.harnessRef !== undefined ? 1 : 0,
+    patch.harnessRef ?? null,
+    patch.accountKey !== undefined ? 1 : 0,
+    patch.accountKey ?? null,
+    patch.lastActiveAt !== undefined ? 1 : 0,
+    patch.lastActiveAt ?? null,
+    patch.name !== undefined ? 1 : 0,
+    patch.name ?? null,
+    patch.description !== undefined ? 1 : 0,
+    patch.description ?? null,
+    id
+  )
+}
+
+/** A parent's session id changed (`SessionManager.rekey`): its targets follow. */
+export function moveDispatchTargetParent(oldId: string, newId: string, db: Db = getDb()): void {
+  if (oldId === newId) return
+  db.prepare('UPDATE dispatch_target SET parent_session_id = ? WHERE parent_session_id = ?').run(
+    newId,
+    oldId
+  )
+}
+
+/**
+ * Boot pass: a row still `running` belongs to a process that no longer exists (an
+ * app quit or a crash), so it is `interrupted`. Returns how many rows changed.
+ */
+export function interruptRunningDispatchTargets(db: Db = getDb()): number {
+  const info = db
+    .prepare("UPDATE dispatch_target SET state = 'interrupted' WHERE state = 'running'")
+    .run()
+  return Number(info.changes)
+}
+
+/**
+ * What one target has spent, from the `origin = 'dispatch'` rows its turns wrote
+ * (`session_id` = the harness id). Seeds the `dispatch.maxCostUsd` check of a target
+ * resumed after its in-memory entry (and the running figure with it) was lost; a row
+ * whose cost cannot be resolved counts as an unpriced turn, as it does live.
+ */
+export function dispatchTargetSpend(
+  harnessRef: string,
+  db: Db = getDb()
+): { costUsd: number; unpricedTurns: number } {
+  const rows = db
+    .prepare(
+      `SELECT ${DISPATCH_LEDGER_COLUMNS}
+       FROM usage_event
+       WHERE origin = 'dispatch' AND session_id = ?`
+    )
+    .all(harnessRef) as DispatchLedgerDbRow[]
+  let costUsd = 0
+  let unpricedTurns = 0
+  for (const row of rows) {
+    // The API-equivalent figure, not the display cost: it is what the live `maxCostUsd`
+    // gate counts (ADR-071), so a subscription or free turn still moves the cap.
+    const cost = row.api_cost_usd
+    if (cost === null || cost === undefined || !Number.isFinite(cost)) unpricedTurns++
+    else costUsd += cost
+  }
+  return { costUsd, unpricedTurns }
+}
+
+/** Every harness session id in the ledger — what the history readers must skip. */
+export function allDispatchTargetHarnessRefs(db: Db = getDb()): string[] {
+  return (
+    db.prepare('SELECT harness_ref FROM dispatch_target').all() as { harness_ref: string }[]
+  ).map((r) => r.harness_ref)
 }
 
 /**

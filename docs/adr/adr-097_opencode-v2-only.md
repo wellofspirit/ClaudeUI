@@ -291,10 +291,12 @@ directory (`resources/opencode/claudeui-xeng/`), unpacked from the asar like the
   and releases it EXACTLY; the event feed is shared PER SERVER (`serverKey` = URL + password), so a
   config change while a target lives can no longer pair one server's client with another's lease
   (the S2 finding). A record outlives targets still being created on it, and a server exit or a lost
-  feed fails the turn in flight and drops that server's targets (after a best-effort interrupt);
-  their sessions are deleted through the next target's server when theirs is gone. A creation that
-  outlives its feed, or its dispatching chat (`disposeFor` meanwhile), fails and rolls back (session
-  deleted, lease released).
+  feed fails the turn in flight and drops that server's targets (after a best-effort interrupt).
+  A creation that outlives its feed, or its dispatching chat (`disposeFor` meanwhile), fails and
+  rolls back (session deleted, lease released). _Amended 2026-10-19 by
+  [ADR-105](adr-105_background-dispatch.md):_ a dropped or released target's session is no longer
+  deleted; its ledger row (`dispatch_target`) resumes it with `getSession` and a fresh lease. Only a
+  creation that rolled back deletes its session.
 - **A target** is created with its ruleset, agent and model in the body, titled `xeng-dispatch`.
   The ruleset is the session's `buildSessionRuleset` over the user's deny/ask rules only (ADR-085
   §3; never allows or additional directories), then `{claudeui_dispatch_agent,*,deny}` (ADR-033 §4)

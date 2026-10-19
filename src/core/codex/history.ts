@@ -18,6 +18,7 @@ import {
   listCodexLineage,
   recordCodexLineage
 } from '../services/db'
+import { isDispatchTargetSession } from '../services/dispatch-target-ledger'
 import { CodexTransportError } from './CodexAppServerClient'
 import { logger } from '../services/logger'
 import type { Thread } from './protocol/v2/Thread'
@@ -172,7 +173,9 @@ async function readThreads(
 
 /** A thread that belongs in the sidebar — a root, not a native child or a scratch thread. */
 function listable(thread: Thread): boolean {
-  return !thread.parentThreadId && !thread.ephemeral
+  // A dispatch target's thread (ADR-105) is an ordinary Codex thread on disk, so it is
+  // the ledger that keeps it out of the sidebar.
+  return !thread.parentThreadId && !thread.ephemeral && !isDispatchTargetSession(thread.id)
 }
 
 /**

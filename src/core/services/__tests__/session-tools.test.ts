@@ -30,10 +30,12 @@ import {
   addInboxItem,
   getSessionLink,
   getSessionProposal,
+  heldInboxItems,
   listAuditLog,
   sessionProposalsByParent,
   transitionSessionProposal
 } from '../db'
+import { dispatchLedger } from '../dispatch-target-ledger'
 import { HELD_INBOX_CAP } from '../session-delivery'
 import { emitEvent, syncCore } from '../sync-host'
 import {
@@ -1327,6 +1329,61 @@ describe('sessionMessage', () => {
     expect(dispatch.fake.deliverNonUser).not.toHaveBeenCalled()
     // Every attempt that got as far as a named target was audited, the self one included.
     expect(auditFor(p.ref).map((r) => r.detail)).toContain('refused: self')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-105 — a Claude/pi/Codex dispatch target is recorded in the X-Agent ledger and
+// registered in session_ref, so the ref resolver would find it by its ref AND by the
+// harness id the parent model holds from the dispatch result. The tools refuse both.
+// ---------------------------------------------------------------------------
+
+describe('X-Agent ledger targets are not addressable sessions (ADR-105)', () => {
+  const target = (engine: 'claude' | 'pi' | 'codex'): { id: string; harnessRef: string } => {
+    const harnessRef = `xagent-${engine}-${randomUUID()}`
+    const row = dispatchLedger.create({
+      engine,
+      harnessRef,
+      parentSessionId: 'some-parent',
+      parentEngine: 'opencode',
+      parentToolUseId: null,
+      cwd: '/repo',
+      model: 'm',
+      launchMode: 'default',
+      accountKey: null,
+      codexAccountId: null,
+      callerRestriction: null,
+      name: null,
+      description: null
+    })
+    return { id: row.id, harnessRef }
+  }
+
+  it.each(['claude', 'pi', 'codex'] as const)(
+    'all four tools refuse a %s target by its ledger ref and by its harness id',
+    async (engine) => {
+      const p = born(`ledger-${engine}`)
+      const { id, harnessRef } = target(engine)
+      for (const session of [id, harnessRef]) {
+        for (const out of [
+          await sessionMessage(p.caller, { session, message: 'hello' }),
+          await sessionRead(p.caller, { session }),
+          await sessionGet(p.caller, { session }),
+          await sessionStop(p.caller, { session })
+        ]) {
+          expect(out.isError).toBe(true)
+          expect(out.text).toMatch(/That is a dispatch target, not a session you can address/)
+        }
+      }
+      // Nothing was left behind for B-4 to flush later.
+      expect(heldInboxItems(harnessRef)).toEqual([])
+    }
+  )
+
+  it('an ordinary session still resolves beside them', async () => {
+    const p = born('ledger-normal')
+    const other = born('ledger-normal-other')
+    expect((await sessionGet(p.caller, { session: other.ref })).isError).toBeFalsy()
   })
 })
 

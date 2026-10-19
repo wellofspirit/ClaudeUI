@@ -63,6 +63,7 @@ import {
   resetDirectoryRefreshStateForTests
 } from '../../../core/services/sync-seed'
 import { syncCore } from '../../../core/services/sync-host'
+import { dispatchLedger } from '../../../core/services/dispatch-target-ledger'
 
 const CLAUDE_SESSION = {
   sessionId: 'cl-1',
@@ -158,6 +159,33 @@ describe('seedCanonicalAppState', () => {
     // seed that is also replicated state clients must see change live. Every
     // other field here is still a plain `setAppState`, so exactly ONE event.
     expect(ringedSince().map((e) => e.channel)).toEqual(['session:directories-changed'])
+  })
+
+  // ADR-105 §5: App quit ends the processes, so a row still `running` at the next start
+  // belongs to one that no longer exists. Nothing resumes by itself.
+  it('turns X-Agent rows a quit left running into interrupted, and touches no other state', async () => {
+    const input = {
+      engine: 'claude' as const,
+      parentSessionId: 'parent-1',
+      parentEngine: 'opencode' as const,
+      parentToolUseId: null,
+      cwd: '/repo',
+      model: 'haiku',
+      launchMode: 'default',
+      accountKey: null,
+      codexAccountId: null,
+      callerRestriction: null,
+      name: null,
+      description: null
+    }
+    const running = dispatchLedger.create({ ...input, harnessRef: 'boot-running' })
+    const idle = dispatchLedger.create({ ...input, harnessRef: 'boot-idle' })
+    dispatchLedger.update(idle.id, { state: 'idle' })
+
+    await seedCanonicalAppState()
+
+    expect(dispatchLedger.get(running.id)?.state).toBe('interrupted')
+    expect(dispatchLedger.get(idle.id)?.state).toBe('idle')
   })
 
   it('leaves sdkSkillNames alone — the renderer does not seed it either', async () => {

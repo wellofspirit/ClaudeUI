@@ -5182,6 +5182,27 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     expect(result.isError).toBeFalsy()
   })
 
+  it('passes name/description through to the DispatchRequest when the model supplies them (ADR-105)', async () => {
+    mockDispatch.mockResolvedValue({ text: 'ok', sessionId: 'prev-sess' })
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-labels', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const input = {
+      engine: 'opencode',
+      prompt: 'go',
+      name: 'impl-e1',
+      description: 'Review auth diff'
+    }
+    await grantViaApproval(win, session, 'call_dispatch_labels', input)
+    await hostedTool('dispatch_agent', input, 'call_dispatch_labels')
+
+    expect(mockDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'impl-e1', description: 'Review auth diff' }),
+      expect.anything()
+    )
+  })
+
   it('passes model/session_id through to the DispatchRequest when the model supplies them', async () => {
     mockDispatch.mockResolvedValue({ text: 'ok', sessionId: 'prev-sess' })
     const win = new MockWindow()

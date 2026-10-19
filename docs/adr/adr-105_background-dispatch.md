@@ -133,7 +133,11 @@ shape applies.
 - The dispatcher's target model changes from "call context" to "ledger row + live lookup"; most of the existing
   per-engine target code (spawn, gate, judge, streaming, cost) stays, re-keyed.
 - One more injected-message origin (`dispatch-result`) across four engines and the reducer.
-- Claude target transcripts now exist on disk; three readers must skip them.
+- Claude target transcripts now exist on disk; three readers must skip them. They live in the
+  project's own transcript directory, so Claude Code's `--continue` / `--resume` picker run in
+  that directory can see them.
+- A ledger insert that fails after Codex's `thread/start` leaves that thread listed in history
+  (the Codex list can only skip ids the ledger knows).
 - Codex threads started before this change keep their tool set, so they cannot message their parent.
 
 ## Alternatives considered

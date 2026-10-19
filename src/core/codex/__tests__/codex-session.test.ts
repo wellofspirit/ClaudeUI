@@ -2767,6 +2767,23 @@ describe('Codex cross-engine dispatch', () => {
     )
   })
 
+  it('hands the dispatcher the name and description the model gave (ADR-105)', async () => {
+    const f = fixture({ permissionMode: 'acceptEdits' })
+    await f.session.run('hello')
+    const { result } = dispatchCall(f, {
+      engine: 'pi',
+      prompt: 'run the tests',
+      name: 'impl-e1',
+      description: 'Review auth diff'
+    })
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+    await result
+    expect(dispatcher.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'impl-e1', description: 'Review auth diff' }),
+      expect.anything()
+    )
+  })
+
   it('maps the dispatch result onto the tool response, session_id suffix included', async () => {
     const f = fixture()
     await f.session.run('hello')

@@ -87,7 +87,7 @@ describe('session_ref / session_link tables', () => {
       runMigrations(older)
       expect(exists('session_ref')).toBe(true)
       expect(exists('session_link')).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(34)
+      expect(older.pragma('user_version', { simple: true })).toBe(35)
     } finally {
       older.close()
     }
@@ -232,7 +232,7 @@ describe('client_prompted_at (migration v32)', () => {
         )
       ).not.toContain('client_prompted_at')
       runMigrations(older)
-      expect(older.pragma('user_version', { simple: true })).toBe(34)
+      expect(older.pragma('user_version', { simple: true })).toBe(35)
       expect(getSessionLink('s-child1', older)).toMatchObject({
         childRef: 's-child1',
         clientPromptedAt: null
@@ -288,7 +288,7 @@ describe('grouped (migration v34)', () => {
       insert.run('s-off001', 'started', 'detached')
       insert.run('s-gone01', 'handoff', 'detached')
       runMigrations(older)
-      expect(older.pragma('user_version', { simple: true })).toBe(34)
+      expect(older.pragma('user_version', { simple: true })).toBe(35)
       const row = (r: string): unknown => {
         const l = getSessionLink(r, older)
         return l && { grouped: l.grouped, state: l.state }
@@ -334,7 +334,7 @@ describe('session_proposal (migration v33)', () => {
       expect(exists()).toBe(false)
       runMigrations(older)
       expect(exists()).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(34)
+      expect(older.pragma('user_version', { simple: true })).toBe(35)
     } finally {
       older.close()
     }

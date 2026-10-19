@@ -3304,6 +3304,8 @@ export class PiSession extends BaseSession {
       engine,
       prompt,
       model: typeof input.model === 'string' ? input.model : undefined,
+      name: typeof input.name === 'string' ? input.name : undefined,
+      description: typeof input.description === 'string' ? input.description : undefined,
       sessionId: typeof input.session_id === 'string' ? input.session_id : undefined
     }
     const ctx: DispatchContext = {

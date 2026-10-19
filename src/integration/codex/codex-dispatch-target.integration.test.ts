@@ -29,6 +29,7 @@ import {
 } from './integration-host'
 import provenance from '../../core/codex/protocol/provenance.json'
 import type { UsageTurnEvent } from '../../core/services/usage-recorder'
+import { makeFakeDispatchLedger } from '../../test/helpers/fake-dispatch-ledger'
 
 /**
  * Codex as a cross-engine dispatch TARGET, against the REAL pinned binary and a
@@ -343,7 +344,9 @@ function makeDispatcher(
     // A no-op rather than the real better-sqlite3 insert: this vitest context
     // has no Electron `app` for a userData path, and the point here is the ROW
     // the dispatcher builds, not the table it lands in.
-    recordUsageEvent: (row) => usage.push(row)
+    recordUsageEvent: (row) => usage.push(row),
+    // The X-Agent ledger (ADR-105) in memory: this test does not exercise the DB.
+    ledger: makeFakeDispatchLedger()
   }
   const dispatcher = new CrossEngineDispatcher(deps)
   dispatchers.push(dispatcher)
