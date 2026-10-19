@@ -1,7 +1,6 @@
 # ADR-102: Per-call invoke progress, and opening a session before its transcript loads
 
-**Status:** Accepted (2026-10-19); amended the same day (content first, see below). Implementation on branch `feat/session-load-progress`; resume notes
-in `docs/session-load-progress-handoff.md`.
+**Status:** Accepted (2026-10-19); amended the same day (content first, see below). Implemented on branch `feat/session-load-progress` (PR #80).
 **Relates to:** [ADR-051](adr-051_sync-core-replication-architecture.md) (the frame families both
 transports speak), [ADR-052](adr-052_remote-auth-passkeys-capabilities.md) (the command registry's
 capability check, which this keeps as the one choke point), [ADR-056](adr-056_headless-admission-model.md)
@@ -117,6 +116,8 @@ takes 0.9–2 s. So the wait was never the conversation itself.
   client and rings for replay — wrong scope for one client's read, and noisy.
 - **A `parts` hint on the frame** (send S separately so the client can plan its fetches): rejected in
   design review for C1 above; it puts handler-specific keys on a generic frame.
-- **Lazy subagent loading first:** cuts the remote payload from 30–40 MB to ~1.4 MB, and is the
-  next step, but needs a per-agent index for nested agents (audit in the handoff doc). Progress and
-  navigate-first are independent of it and help every engine.
+- **Lazy subagent loading first:** cuts the remote payload from 30–40 MB to ~1.4 MB, but needs a
+  per-agent index for nested agents (an audit of every `subagentMessages` consumer found the roster's
+  nested rows, the TaskCard body and the task panel depend on buckets; approvals, todos, sent files,
+  find-in-chat, rename and fork do not). Progress and navigate-first came first because they help every
+  engine; lazy loading followed in the Amendment, with the index built from the subagent sidecars.
