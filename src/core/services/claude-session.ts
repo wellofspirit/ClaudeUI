@@ -37,6 +37,8 @@ import {
   isTaskNotificationDelivery,
   parseTaskNotificationXml,
   taskNotificationNoteText,
+  handbackNotificationFields,
+  isHandbackPointerResult,
   taskNotificationNoteTitle,
   taskTerminalStatus,
   liveTaskNoteSummary
@@ -2147,13 +2149,16 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
         }
       : undefined
 
+    // A SubagentHandback subagent's `summary` is a pointer sentence; its report
+    // (and the auto-mode warning on a flagged one) is `handback_report`.
+    const report = handbackNotificationFields(msg)
     const runIndex = matchedToolUseId ? (this.runCountByOrigin.get(matchedToolUseId) ?? 1) : 1
     this.send('session:task-notification', {
       taskId,
       toolUseId: matchedToolUseId,
       status: msg.status || 'completed',
       outputFile,
-      summary: msg.summary || '',
+      ...report,
       usage,
       ...(matchedToolUseId ? { runIndex } : undefined)
     })
@@ -2167,7 +2172,10 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     const backgrounded = this.backgroundedTaskIds.delete(taskId)
     if (!taskId || !backgrounded || msg.skip_transcript === true || msg.ambient === true) return
     const status = taskTerminalStatus(msg.status) ?? 'completed'
-    const summary = msg.summary || ''
+    // A flagged report keeps its security warning above it, as on the card.
+    const summary = report.warning
+      ? `Security warning: ${report.warning}\n\n${report.summary}`
+      : report.summary
     // The title is cli.js's own `<summary>` line, rebuilt from task_started's
     // description — never this frame's `summary`, which for an agent is its
     // (model-authored) result. It stays in the note's text below.
@@ -2234,7 +2242,6 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
   }
 
   private handleResultMessage(msg: ResultMessage, stderrChunks: string[]): void {
-    this.itemStreams.sealOwner(undefined)
     // total_cost_usd / modelUsage are CUMULATIVE WITHIN this cli.js process —
     // REPLACE the live overlay, never add (see the field doc comment on
     // liveTotalCostUsd/liveModelCosts for the full explanation of why `+=`
@@ -2266,6 +2273,18 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       this.liveModelCosts = new Map([[this.resolvedModelId ?? this.model, cost]])
     }
 
+    // The pointer result of a SubagentHandback notification (zero turns, no
+    // model round) is NOT a turn end: the hand-back prompt that woke the parent
+    // is its own turn, with its own result. Treating this one as a turn end
+    // would flip a running parent to idle, flush its queue and raise "Ready for
+    // input" for nothing. The cost above is cumulative and identical to the
+    // previous result's, so only the status line needs the (unchanged) figure.
+    if (isHandbackPointerResult(msg)) {
+      this.sendStatus()
+      return
+    }
+
+    this.itemStreams.sealOwner(undefined)
     this.isProcessing = false
 
     // NOTE (Phase 7): Claude usage_event rows are NOT recorded live here.

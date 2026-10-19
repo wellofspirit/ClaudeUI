@@ -4,6 +4,7 @@ import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { useStickToBottom } from '../../hooks/useStickToBottom'
 import { MarkdownRenderer } from '../chat/MarkdownRenderer'
 import { SubagentOutputBody, dispatchChildEngine } from '../chat/SubagentOutputBody'
+import { HandbackReport, hasHandbackReport } from '../chat/HandbackReport'
 import { TerminalView } from '../chat/TerminalView'
 import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
 import { deriveTaskState, latestNotification } from '../chat/task-state'
@@ -321,7 +322,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
               />
             ) : isBash && hasResult && resultText ? (
               <TerminalView text={resultText} maxHeight="none" />
-            ) : hasResult && resultText && !isBackground ? (
+            ) : hasResult && resultText && !isBackground && !hasHandbackReport(bgNotification) ? (
               <div ref={contentRef} className="text-[12px] text-text-primary/80 leading-[1.6]">
                 <MarkdownRenderer content={resultText} />
               </div>
@@ -332,6 +333,11 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
                 {elapsed !== undefined && <span className="font-mono text-[11px]">{elapsed}</span>}
               </div>
             ) : null}
+            {/* The report a SubagentHandback subagent delivered (or didn't). */}
+            <HandbackReport
+              notification={bgNotification}
+              className="mt-3 border-t border-border pt-3 shrink-0"
+            />
           </div>
           {!following && (
             <button

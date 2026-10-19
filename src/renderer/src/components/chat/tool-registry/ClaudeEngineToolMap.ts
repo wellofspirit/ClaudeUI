@@ -293,9 +293,11 @@ function extractMockupDirectory(result?: ToolResultBlock): string | undefined {
  * ClaudeUI's own MCP tools (`mcp__claude-ui-collab__dispatch_agent`, the session
  * tools, diagrams, mockups), which get their product names. Any other MCP tool
  * and every built-in (Agent/Task/…) is returned as-is: byte-identical to the
- * old `block.toolName` header.
+ * old `block.toolName` header — except `SubagentHandback`, a subagent's final
+ * report to its parent, which reads "Hand back".
  */
 function claudeDisplayName(toolName: string): string {
+  if (toolName === 'SubagentHandback') return 'Hand back'
   return firstPartyDisplayName(toolName, 'mcp') ?? toolName
 }
 

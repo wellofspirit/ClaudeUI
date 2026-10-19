@@ -1461,6 +1461,14 @@ export type ActiveTask = Pick<
 /** The terminal states an engine reports for a task run. */
 export type TaskTerminalStatus = 'completed' | 'failed' | 'stopped'
 
+/**
+ * How a Claude subagent's report reached its parent when it ended through the
+ * `SubagentHandback` tool (auto mode): `send` — delivered as it was written;
+ * `flagged` — delivered with an auto-mode security warning; `withheld` — the
+ * subagent ended without delivering one.
+ */
+export type TaskHandback = 'send' | 'flagged' | 'withheld'
+
 export interface TaskNotification {
   taskId: string
   toolUseId: string | null
@@ -1474,7 +1482,16 @@ export interface TaskNotification {
    */
   status: TaskTerminalStatus | 'unfinished'
   outputFile: string
+  /**
+   * The run's result text. Under a hand-back it is the REPORT itself
+   * (`handback_report.text`), or the withheld text — never cli.js's pointer
+   * sentence, which only says where the report went.
+   */
   summary: string
+  /** Set when the subagent reported through `SubagentHandback`; see {@link TaskHandback}. */
+  handback?: TaskHandback
+  /** The auto-mode security warning of a `flagged` report, shown above it. */
+  warning?: string
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
   /**
    * Which run of the agent this terminal event ends (1-based). Kept on the

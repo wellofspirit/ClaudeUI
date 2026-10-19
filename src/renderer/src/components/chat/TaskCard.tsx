@@ -12,6 +12,7 @@ import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { useSessionAgentTypes } from '../../hooks/useAgentRoster'
 import { ResumedBadge } from '../agents/ResumedBadge'
 import { MarkdownRenderer } from './MarkdownRenderer'
+import { HandbackReport, hasHandbackReport } from './HandbackReport'
 import { SubagentOutputBody, dispatchChildEngine } from './SubagentOutputBody'
 import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 import { ApprovalButtons } from './ApprovalButtons'
@@ -424,6 +425,10 @@ export function TaskCard({
   )
   const bgNotification = latestNotification(taskNotifications, toolUseId)
   const hasSubagentOutput = msgs.length > 0
+  // The subagent reported through SubagentHandback: its report (or the fact that
+  // it delivered none) is shown below the output; the Agent tool_result would
+  // only repeat it.
+  const hasHandback = hasHandbackReport(bgNotification)
   // Has this task received a task_started wire event with no matching
   // task_notification yet? If so it is DEFINITELY still running, regardless
   // of tool_result/background-flag state — see PerSessionState.activeTasks.
@@ -825,7 +830,7 @@ export function TaskCard({
                   engineId={dispatchChildEngine(view)}
                 />
               </div>
-            ) : resultBody && !isBackground ? (
+            ) : resultBody && !isBackground && !hasHandback ? (
               <div className="px-3 py-2 text-[12px] text-text-primary/70">
                 <div className="leading-[1.5] max-h-[300px] overflow-y-auto">
                   <MarkdownRenderer content={resultBody} />
@@ -839,6 +844,11 @@ export function TaskCard({
               </div>
             ) : null}
           </div>
+
+          <HandbackReport
+            notification={bgNotification}
+            className="border-t border-border px-3 py-2"
+          />
 
           {failureSummary && (
             <div

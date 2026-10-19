@@ -247,3 +247,54 @@ describe('humanDelay', () => {
     expect(humanDelay(-5)).toBe('?')
   })
 })
+
+describe('SubagentHandback (a subagent’s final report to its parent)', () => {
+  const build = (input: Record<string, unknown>, result?: ToolResultBlock) =>
+    ClaudeEngineToolMap.normalize(
+      ClaudeEngineToolMap.kindOf('SubagentHandback'),
+      input,
+      result,
+      'SubagentHandback'
+    )
+
+  it('is a "Hand back" card, not a raw JSON one', () => {
+    expect(ClaudeEngineToolMap.kindOf('SubagentHandback')).toBe('detail')
+    expect(ClaudeEngineToolMap.displayName('SubagentHandback')).toBe('Hand back')
+  })
+
+  it('shows the report as the body, not the delivery receipt', () => {
+    const view = build(
+      { message: 'Found 3 files.' },
+      res('{"success":true,"message":"Report delivered to your caller."}')
+    )
+    expect(view).toEqual({ kind: 'detail', fields: [], text: 'Found 3 files.' })
+  })
+
+  it('says so when the report was NOT delivered', () => {
+    const view = build(
+      { message: 'Found 3 files.' },
+      res(
+        '{"success":false,"message":"Nothing was sent: your report was already delivered (SubagentHandback delivers one report). Use SendMessage for anything further, then stop."}'
+      )
+    )
+    expect(view).toMatchObject({
+      kind: 'detail',
+      fields: [{ label: 'not delivered', value: expect.stringContaining('Nothing was sent') }],
+      text: 'Found 3 files.'
+    })
+  })
+
+  it('tolerates a missing message and a plain-text error result', () => {
+    expect(build({})).toEqual({ kind: 'detail', fields: [] })
+    expect(build({ message: 'x' }, res('message must not be empty', true))).toMatchObject({
+      fields: [{ label: 'not delivered', value: 'message must not be empty' }]
+    })
+  })
+
+  it('leaves other built-ins and third-party MCP tools with their own names', () => {
+    expect(ClaudeEngineToolMap.displayName('Agent')).toBe('Agent')
+    expect(ClaudeEngineToolMap.displayName('mcp__x__SubagentHandback')).toBe(
+      'mcp__x__SubagentHandback'
+    )
+  })
+})

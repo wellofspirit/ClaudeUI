@@ -1533,3 +1533,107 @@ describe('TaskCard - header label', () => {
     expect(headerText()).not.toContain('X-Agent')
   })
 })
+
+// ---------------------------------------------------------------------------
+// A SubagentHandback subagent: the card shows its REPORT (S6)
+// ---------------------------------------------------------------------------
+
+describe('TaskCard - a SubagentHandback report', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const launched = {
+    type: 'tool_result' as const,
+    toolUseId: 'call_task_1',
+    toolResult: 'Async agent launched successfully. agentId: agent-abc123',
+    isError: false
+  }
+
+  function renderEnded(extra: {
+    summary: string
+    handback?: 'send' | 'flagged' | 'withheld'
+    warning?: string
+  }): void {
+    seed.subagentMessage(ROUTE, 'call_task_1', {
+      id: 'child_m1',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'looking around' }],
+      timestamp: Date.now()
+    })
+    seed.taskNotification(ROUTE, {
+      taskId: 'task-abc123',
+      toolUseId: 'call_task_1',
+      status: 'completed',
+      outputFile: '',
+      ...extra
+    })
+    render(<TaskCard block={makeTaskBlock()} result={launched} view={defaultTaskView} />)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+  }
+
+  it('send: the report text is on the card, and no warning', () => {
+    renderEnded({ summary: 'Found 3 files.', handback: 'send' })
+    expect(screen.getByTestId('HandbackReport')).toHaveAttribute('data-handback', 'send')
+    expect(screen.getByTestId('HandbackReport.text')).toHaveTextContent('Found 3 files.')
+    expect(screen.queryByTestId('HandbackReport.warning')).not.toBeInTheDocument()
+  })
+
+  it('flagged: the security warning is shown above the report', () => {
+    renderEnded({
+      summary: 'Found 3 files.',
+      handback: 'flagged',
+      warning: 'SECURITY WARNING: auto mode blocked this subagent’s report.'
+    })
+    const warning = screen.getByTestId('HandbackReport.warning')
+    const text = screen.getByTestId('HandbackReport.text')
+    expect(warning).toHaveTextContent('SECURITY WARNING: auto mode blocked')
+    expect(warning.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('flagged without a warning text still says so', () => {
+    renderEnded({ summary: 'Found 3 files.', handback: 'flagged' })
+    expect(screen.getByTestId('HandbackReport.warning')).toHaveTextContent(/flagged/i)
+  })
+
+  it('withheld: reads "ended without delivering a report", with no report text', () => {
+    renderEnded({
+      summary: 'The subagent ended without delivering a report.',
+      handback: 'withheld'
+    })
+    expect(screen.getByTestId('HandbackReport.withheld')).toHaveTextContent(
+      'ended without delivering a report'
+    )
+    expect(screen.queryByTestId('HandbackReport.text')).not.toBeInTheDocument()
+  })
+
+  it('a foreground agent’s tool_result is not repeated under its hand-back report', () => {
+    seed.taskNotification(ROUTE, {
+      taskId: 'task-abc123',
+      toolUseId: 'call_task_1',
+      status: 'completed',
+      outputFile: '',
+      summary: 'THE REPORT',
+      handback: 'send'
+    })
+    const result = { ...launched, toolResult: 'THE REPORT' }
+    render(<TaskCard block={makeTaskBlock()} result={result} view={defaultTaskView} />)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    expect(screen.getAllByText('THE REPORT')).toHaveLength(1)
+  })
+
+  it('no handback: nothing extra renders and the summary stays out of the card', () => {
+    renderEnded({ summary: 'Found 3 files.' })
+    expect(screen.queryByTestId('HandbackReport')).not.toBeInTheDocument()
+  })
+})

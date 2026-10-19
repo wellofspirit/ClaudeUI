@@ -20,6 +20,8 @@
  * Older binaries wrote `<usage>` as `total_tokens: N` lines; both parse.
  */
 import type { TaskNotification, TaskTerminalStatus } from '../../shared/types'
+import { HANDBACK_WITHHELD_TEXT } from '../../shared/task-handback'
+import type { ResultMessage, SystemMessage } from '../sdk/types'
 
 export interface ParsedTaskNotification {
   taskId: string
@@ -205,4 +207,55 @@ export function taskNotificationNoteTitle(parsed: ParsedTaskNotification | null)
     default:
       return 'Agent notification'
   }
+}
+
+/**
+ * The report fields of a `system/task_notification` whose subagent reported
+ * through `SubagentHandback` (auto mode, cli.js 2.1.293+). Under a hand-back
+ * cli.js's `summary` is only a pointer sentence ("This agent's report was
+ * delivered to you as a message from NAME … it is not repeated here") and the
+ * report lives in `handback_report.text`; its schema says to render that INSTEAD
+ * of `summary`, with the `warning` above it.
+ *
+ * - `send` / `flagged` with a report → `summary` is the report, `warning` rides
+ *   separately (flagged only);
+ * - `withheld` → `summary` is {@link HANDBACK_WITHHELD_TEXT}, not cli.js's
+ *   model-directed text;
+ * - no hand-back, an unknown value, or `send` / `flagged` with no report text →
+ *   `summary` is cli.js's own and nothing is claimed.
+ */
+export function handbackNotificationFields(
+  msg: Pick<SystemMessage, 'handback' | 'handback_report' | 'summary'>
+): Pick<TaskNotification, 'summary' | 'handback' | 'warning'> {
+  const summary = msg.summary || ''
+  const handback = msg.handback
+  if (handback === 'withheld') return { summary: HANDBACK_WITHHELD_TEXT, handback }
+  if (handback !== 'send' && handback !== 'flagged') return { summary }
+  const text = msg.handback_report?.text
+  if (typeof text !== 'string' || text === '') return { summary }
+  const warning = msg.handback_report?.warning
+  return {
+    summary: text,
+    handback,
+    ...(handback === 'flagged' && typeof warning === 'string' && warning ? { warning } : {})
+  }
+}
+
+/**
+ * cli.js's pointer `result` for a hand-back: after a `handbackPointer`
+ * notification it emits `system/init` then a `result` with `num_turns: 0`,
+ * `result: ''`, `duration_api_ms: 0` and `origin.kind: 'task-notification'` — the
+ * notification never queries the model (the hand-back prompt already woke the
+ * parent), so no turn ran and none ended. Verified on 2.1.293
+ * (docs/protocol-cc/03-inbound-messages.md §3.7). A notification that DOES wake
+ * the model (a background Bash) carries the same origin with `num_turns >= 1`.
+ */
+export function isHandbackPointerResult(
+  msg: Pick<ResultMessage, 'num_turns' | 'origin' | 'subtype'>
+): boolean {
+  return (
+    msg.num_turns === 0 &&
+    msg.origin?.kind === 'task-notification' &&
+    (msg.subtype === undefined || msg.subtype === 'success')
+  )
 }

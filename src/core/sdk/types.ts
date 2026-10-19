@@ -175,6 +175,15 @@ export interface SystemMessage extends BaseSDKMessage {
   skip_transcript?: boolean
   /** task_notification: an ambient (housekeeping) task the model never sees. */
   ambient?: boolean
+  /**
+   * task_notification of an Agent-tool subagent that reports through its
+   * `SubagentHandback` tool (auto mode, cli.js 2.1.293+): how its report
+   * reached the parent. Under it `summary` is a pointer sentence, not the
+   * report (docs/protocol-cc/04-system-subtypes.md §4.4).
+   */
+  handback?: 'send' | 'flagged' | 'withheld' | string
+  /** The report a `send` / `flagged` hand-back delivered, with the auto-mode warning on a flagged one. Absent for `withheld`. */
+  handback_report?: { text?: string; warning?: string }
   /** model_refusal_fallback / model_fallback fields (docs/protocol-cc/04-system-subtypes.md §4.20–4.21) */
   trigger?: string
   direction?: 'retry' | 'revert' | 'sticky'
@@ -211,6 +220,10 @@ export interface ResultMessage extends BaseSDKMessage {
   duration_api_ms?: number
   result?: string
   errors?: string[]
+  /** Model rounds the result covers; `0` on the pointer result of a hand-back (see `isHandbackPointerResult`). */
+  num_turns?: number
+  /** What started the turn this result ends: `{kind: 'task-notification', producer, runId}` for a notification-driven one. */
+  origin?: { kind?: string; [k: string]: unknown }
   /** Per-turn token usage — `{input_tokens, output_tokens, cache_creation_input_tokens,
    *  cache_read_input_tokens, ...}` (docs/protocol-cc/03-inbound-messages.md §3.7). */
   usage?: Record<string, unknown>

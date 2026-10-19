@@ -218,10 +218,38 @@ mid-turn it is absorbed into the current turn; between turns it starts a fresh a
     "duration_ms": 6789
   },                                        // may be omitted when no usage data
   "skip_transcript": false,                 // optional; true = don't record in transcript
+  "handback": "send"|"flagged"|"withheld",  // 2.1.293, @internal; SubagentHandback subagents only
+  "handback_report": { "text": "...", "warning": "..." },   // send|flagged only; see below
   "session_id": "...",
   "uuid": "..."
 }
 ```
+
+### `handback`, `handback_report` (2.1.293, auto mode)
+
+An Agent-tool subagent whose parent AND own permission mode are both `auto` reports through its
+`SubagentHandback` tool instead of final text (`docs/protocol-cc/14-auto-mode-classifier.md`; probed
+live 2026-10-19, `.notes/research/async-dispatch/r6-handback.md`). Its completed notification then reads:
+
+- `handback: "send"` — the report was delivered to the parent as a peer message. `handback_report.text`
+  is the whole report, never truncated, with a backslash inserted into text that imitates harness markup
+  (`<system-reminder>` → `<\system-reminder>`, `Human:` → `Human\:`).
+- `handback: "flagged"` — delivered, but auto mode's classifier blocked, refused or could not review it;
+  `handback_report.warning` carries the "SECURITY WARNING: …" text, to be shown ABOVE `text`.
+- `handback: "withheld"` — the subagent stopped without calling the tool (after up to three bounces);
+  no `handback_report`, and its plain text is deliberately not delivered. Omitted while the subagent is
+  merely waiting on its own background work (`summary` then says it has not reported yet).
+- **`summary` is a pointer sentence, not the report**: `This agent's report was delivered to you as a
+message from "NAME" (its SubagentHandback call). Read it there; it is not repeated here.` (flagged:
+  "… under a SECURITY WARNING from auto mode …"; withheld: cli.js's model-directed "ended without
+  delivering a report" text). The schema's own instruction: render `handback_report` instead of `summary`.
+
+The report text reaches ClaudeUI's wire ONLY here (the delivered peer message needs
+`--replay-user-messages`, which ClaudeUI does not pass). ClaudeUI forwards `handback_report.text` as
+`session:task-notification.summary`, `warning` as `warning`, and `handback` as `handback`; for `withheld`
+`summary` is its own "The subagent ended without delivering a report." (`claude-session.ts`
+`handleTaskNotification`, `task-notification-xml.ts` `handbackNotificationFields`). The same notification
+is followed by a ZERO-TURN `result` (§3.7) that is not a turn end.
 
 ### `task_id` format by task type
 
@@ -277,7 +305,8 @@ this process did not register. `parent_task_id` (optional, on `task_started` and
 `background_tasks_changed` entries) is the `task_id` of the subagent task that
 launched this one, absent when the main thread did. `background_tasks_changed`
 entries also carry `subagent_type`. `@internal`: `awaited`, and
-`task_notification.handback` / `handback_report`. ClaudeUI reads none of these yet.
+`task_notification.handback` / `handback_report` (§4.4 — ClaudeUI reads them). ClaudeUI reads none of
+the others yet.
 
 ### `is_backgrounded` — foreground or background (2.1.280)
 

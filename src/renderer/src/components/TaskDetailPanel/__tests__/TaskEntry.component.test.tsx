@@ -452,3 +452,63 @@ describe('TaskEntry — following the bottom', () => {
     expect(distanceFromBottom(body())).toBe(0)
   })
 })
+
+describe('TaskEntry — a SubagentHandback report (S6)', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState((state) => ({
+      activeSessionId: ROUTE,
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: { ...state.sessions[ROUTE], messages: [taskMessage()] }
+      }
+    }))
+    mirrorStoreIntoReplica()
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const ended = (extra: {
+    summary: string
+    handback?: 'send' | 'flagged' | 'withheld'
+    warning?: string
+  }): void => {
+    seed.taskNotification(ROUTE, {
+      taskId: 'task-abc123',
+      toolUseId: TOOL_USE_ID,
+      status: 'completed',
+      outputFile: '',
+      ...extra
+    })
+  }
+
+  it('shows the report, with a flagged warning above it', () => {
+    ended({ summary: 'Found 3 files.', handback: 'flagged', warning: 'SECURITY WARNING: x' })
+    render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    const warning = screen.getByTestId('HandbackReport.warning')
+    const text = screen.getByTestId('HandbackReport.text')
+    expect(text).toHaveTextContent('Found 3 files.')
+    expect(warning.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('shows a withheld hand-back as "ended without delivering a report"', () => {
+    ended({ summary: 'ignored', handback: 'withheld' })
+    render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    expect(screen.getByTestId('HandbackReport.withheld')).toHaveTextContent(
+      'ended without delivering a report'
+    )
+  })
+
+  it('shows nothing for a notification without a hand-back', () => {
+    ended({ summary: 'Found 3 files.' })
+    render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    expect(screen.queryByTestId('HandbackReport')).not.toBeInTheDocument()
+  })
+})

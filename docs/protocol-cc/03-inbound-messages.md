@@ -343,6 +343,26 @@ Emitted exactly once per turn, last message of the turn.
 }
 ```
 
+### The zero-turn pointer `result` of a hand-back (2.1.293, probed 2026-10-19)
+
+"Emitted exactly once per turn" has one exception. When a `SubagentHandback` subagent finishes (auto
+mode, §4.4), cli.js delivers its report to the parent as a prompt that starts the parent's turn, and
+ALSO emits the subagent's `task_notification` as a "pointer" (`shouldQuery: false` — it never queries
+the model). That pointer has no turn of its own, but cli.js still brackets it on the wire: `system/init`
+then
+
+```jsonc
+{ "type": "result", "subtype": "success", "num_turns": 0, "result": "", "duration_api_ms": 0,
+  "stop_reason": null, "total_cost_usd": <same cumulative figure as the previous result>,
+  "origin": { "kind": "task-notification", "producer": "session-task", "runId": "..." } }
+```
+
+It lands between turns (observed: after the hand-back prompt's turn was queued, before the next
+turn). It ends no turn, so ClaudeUI keeps the cost/`modelUsage` replace and nothing else: no
+`session:result`, no idle flip, no queue flush, no attention or "Ready for input" (`claude-session.ts`
+`handleResultMessage`, `isHandbackPointerResult`). A background Bash's notification carries the same
+`origin` with `num_turns >= 1` and is a real turn.
+
 ### Cumulative vs per-turn fields (probed 2026-07-15 against the pinned binary)
 
 - **`total_cost_usd` and `modelUsage` are CUMULATIVE within one cli.js process** —
