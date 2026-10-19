@@ -23,9 +23,9 @@
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kinds'
+import { firstPartyDisplayName } from '../../../../../shared/first-party-tool-names'
 import type { AskUserQuestion, ContentBlock } from '../../../../../shared/types'
 import {
-  SESSION_TOOL_NAMES,
   sessionToolBareName,
   sessionToolMcpFields
 } from '../../../../../shared/session-tools-description'
@@ -161,7 +161,13 @@ function opencodeNormalize(
       // note in ClaudeEngineToolMap.ts. `engine` is present only on the
       // dispatch tool's input, never on opencode's native task tool.
       if (typeof inp.engine === 'string')
-        return dispatchTaskView({ engine: inp.engine, prompt: inp.prompt, model: inp.model })
+        return dispatchTaskView({
+          engine: inp.engine,
+          prompt: inp.prompt,
+          model: inp.model,
+          name: inp.name,
+          description: inp.description
+        })
       // 2.x `subagent` names its agent `agent`; 1.x `task` named it `subagent_type`.
       const agent = inp.agent ?? inp.subagent_type
       return {
@@ -269,16 +275,14 @@ const OPENCODE_DISPLAY_NAMES: Record<string, string> = {
   websearch: 'WebSearch',
   todowrite: 'TodoWrite',
   task: 'Task',
-  question: 'AskUserQuestion',
-  claudeui_render_mermaid: 'Mermaid',
-  claudeui_create_mockup: 'Mockup',
-  claudeui_show_mockup: 'Mockup',
-  claudeui_dispatch_agent: 'Dispatch',
-  ...Object.fromEntries(SESSION_TOOL_NAMES.map((name) => [`claudeui_${name}`, 'Sessions']))
+  question: 'AskUserQuestion'
 }
 
 function opencodeDisplayName(toolName: string): string {
-  return OPENCODE_DISPLAY_NAMES[toolName] ?? toolName
+  // ClaudeUI's own hosted tools are `claudeui_<tool>` (first-party-tool-names.ts).
+  return (
+    firstPartyDisplayName(toolName, 'claudeui_') ?? OPENCODE_DISPLAY_NAMES[toolName] ?? toolName
+  )
 }
 
 export const OpencodeEngineToolMap: EngineToolMap = {

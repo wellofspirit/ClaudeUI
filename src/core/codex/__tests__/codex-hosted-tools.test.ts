@@ -15,6 +15,10 @@ vi.mock('../../services/ui-config', () => ({ loadEngineConfig: vi.fn(() => ({}))
 
 import { CODEX_HOSTED_TOOL_NAMES, codexDynamicToolSpecs } from '../codex-hosted-tools'
 import {
+  DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_NAME_PARAM
+} from '../../../shared/dispatch-agent-description'
+import {
   SESSION_TOOL_NAMES,
   sessionToolDescriptions
 } from '../../../shared/session-tools-description'
@@ -33,6 +37,22 @@ describe('codexDynamicToolSpecs — dispatch_agent (S4)', () => {
     expect(spec.description).toContain('For opencode:')
     expect(spec.description).toContain('For pi:')
     expect(codexDynamicToolSpecs(false).some((s) => s.name === 'dispatch_agent')).toBe(false)
+  })
+})
+
+describe('codexDynamicToolSpecs — dispatch_agent name and description', () => {
+  it('takes them as optional strings, worded by the shared description module', () => {
+    const spec = codexDynamicToolSpecs(true).find((s) => s.name === 'dispatch_agent')!
+    const schema = (spec as unknown as { inputSchema: unknown }).inputSchema as {
+      properties: Record<string, unknown>
+      required: string[]
+    }
+    expect(schema.properties.name).toEqual({ type: 'string', description: DISPATCH_NAME_PARAM })
+    expect(schema.properties.description).toEqual({
+      type: 'string',
+      description: DISPATCH_DESCRIPTION_PARAM
+    })
+    expect(schema.required).toEqual(['engine', 'prompt'])
   })
 })
 

@@ -862,6 +862,17 @@ describe('useAgentRoster', () => {
       expect(agentRowLabel(bare)).toBe('dig deeper')
     })
 
+    it('a named dispatch is listed under its name', async () => {
+      await spawnOn('claude', 'mcp__claude-ui-collab__dispatch_agent', {
+        engine: 'pi',
+        model: 'gpt-5',
+        prompt: 'review it',
+        name: 'impl-e1',
+        description: 'Review auth diff'
+      })
+      expect(labels()).toEqual([['impl-e1', true, 'impl-e1']])
+    })
+
     it('a dispatch is labelled by where it went', async () => {
       await spawnOn('claude', 'mcp__claude-ui-collab__dispatch_agent', {
         engine: 'opencode',

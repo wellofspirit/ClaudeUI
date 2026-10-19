@@ -1,31 +1,14 @@
 import { presentShellCommand } from '../../../lib/present-shell-command'
 import type { EngineToolMap } from '../../../../../shared/tool-kinds'
 import { dispatchTaskView } from '../../../../../shared/tool-kinds'
+import { firstPartyDisplayName } from '../../../../../shared/first-party-tool-names'
 import type { AskUserQuestion, ContentBlock, FileDiff } from '../../../../../shared/types'
 import {
   isSessionToolName,
-  SESSION_TOOL_NAMES,
   sessionToolMcpFields
 } from '../../../../../shared/session-tools-description'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
-
-/**
- * ClaudeUI's own hosted tools reach Codex over the native dynamic-tool channel
- * (`thread/start`'s `dynamicTools` + the `item/tool/call` server request — see
- * src/core/codex/codex-hosted-tools.ts). The wire name is the BARE tool name,
- * the same three strings pi's `pi.registerTool()` registrations use, so
- * `hostedMcpKind` (which only matches `mcp__*`) never catches them and they
- * need explicit cases here — mirroring PiEngineToolMap's identical ones.
- */
-const HOSTED_DISPLAY_NAMES: Record<string, string> = {
-  render_mermaid: 'Mermaid',
-  create_mockup: 'Mockup',
-  show_mockup: 'Mockup',
-  dispatch_agent: 'Dispatch',
-  // The session tools (slice 2), bare-named dynamic tools too.
-  ...Object.fromEntries(SESSION_TOOL_NAMES.map((name) => [name, 'Sessions']))
-}
 
 /**
  * Codex's native collaboration surface (`multi_agent_v1`), mapped by the
@@ -89,6 +72,9 @@ export const CodexEngineToolMap: EngineToolMap = {
     return 'unknown'
   },
   displayName(name) {
+    // ClaudeUI's own bare-named dynamic tools (first-party-tool-names.ts).
+    const firstParty = firstPartyDisplayName(name, 'bare')
+    if (firstParty) return firstParty
     // An MCP call's header is the KIND, not the rule-vocabulary name: the server
     // and the tool are the card's summary line (`summary.ts`), so repeating
     // `mcp__<server>__<tool>` above them says it twice and reads as machinery.
@@ -103,7 +89,6 @@ export const CodexEngineToolMap: EngineToolMap = {
         imageGeneration: 'Image',
         sleep: 'Sleep',
         plan: 'Plan',
-        ...HOSTED_DISPLAY_NAMES,
         ...COLLAB_DISPLAY_NAMES
       }[name] ?? name
     )
@@ -173,13 +158,15 @@ export const CodexEngineToolMap: EngineToolMap = {
           // or a path must never read as a type, so it is a `model` and nothing.
           ...(input?.model != null ? { model: String(input.model) } : {})
         }
-      // dispatch_agent args: { engine, prompt, model?, session_id? } — the same
+      // dispatch_agent args: { engine, prompt, model?, name?, description?, session_id? } — the same
       // field names on every engine, so this branch is Pi/Claude/Opencode's
       // dispatch normalizer verbatim.
       return dispatchTaskView({
         engine: String(input?.engine ?? ''),
         prompt: input?.prompt,
-        model: input?.model
+        model: input?.model,
+        name: input?.name,
+        description: input?.description
       })
     }
     // create_mockup args: { html, title? }; show_mockup args: { directory }.

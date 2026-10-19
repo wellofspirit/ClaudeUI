@@ -32,6 +32,8 @@ import type { DynamicToolSpec } from './protocol/v2/DynamicToolSpec'
 import type { JsonValue } from './protocol/serde_json/JsonValue'
 import type { ToolResultContent } from '../sdk/types'
 import {
+  DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_NAME_PARAM,
   dispatchAgentDescription,
   joinDispatchHints,
   OWN_SUBAGENT_TOOL,
@@ -204,6 +206,8 @@ function dispatchAgentSpec(): DynamicToolSpec {
               .map((hint) => `For ${hint.targetEngine}: ${hint.short}`)
               .join(' ')}`
         },
+        name: { type: 'string', description: DISPATCH_NAME_PARAM },
+        description: { type: 'string', description: DISPATCH_DESCRIPTION_PARAM },
         session_id: {
           type: 'string',
           description: 'session_id from a previous dispatch_agent result — continues that agent'

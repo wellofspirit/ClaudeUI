@@ -40,8 +40,13 @@ describe.each(ENGINES)('$label tool map: the session tools', ({ map, spell }) =>
     }
   )
 
-  it('has a header of its own', () => {
-    for (const name of SESSION_TOOL_NAMES) expect(map.displayName(spell(name))).toBe('Sessions')
+  it('has a header of its own: "Session · <verb>"', () => {
+    for (const name of SESSION_TOOL_NAMES) {
+      expect(map.displayName(spell(name))).toBe(
+        `Session · ${name.replace('session_', '').replace(/_/g, ' ')}`
+      )
+    }
+    expect(map.displayName(spell('session_start'))).toBe('Session · start')
   })
 
   it('does not capture a tool that only looks similar', () => {

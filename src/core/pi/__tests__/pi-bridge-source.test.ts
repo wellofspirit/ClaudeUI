@@ -11,6 +11,10 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from '../pi-bridge-source'
 import { piSessionToolsEnv } from '../../services/session-tool-specs'
 import { SESSION_TOOL_NAMES } from '../../../shared/session-tools-description'
+import {
+  DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_NAME_PARAM
+} from '../../../shared/dispatch-agent-description'
 
 describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
   it('has a non-empty version string', () => {
@@ -18,8 +22,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 15 (slice 2: the session tools)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('15')
+  it('is version 16 (dispatch_agent takes name and description)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('16')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -457,6 +461,24 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
           'render_mermaid',
           'show_mockup'
         ])
+      }
+    )
+  })
+
+  it('dispatch_agent takes optional name and description, worded exactly as the shared module does (the bridge cannot import it)', () => {
+    withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
+      () => {
+        const params = runExtension().tools.get('dispatch_agent')!.parameters as {
+          properties: Record<string, { type: string; description: string }>
+          required: string[]
+        }
+        expect(params.properties.name).toEqual({ type: 'string', description: DISPATCH_NAME_PARAM })
+        expect(params.properties.description).toEqual({
+          type: 'string',
+          description: DISPATCH_DESCRIPTION_PARAM
+        })
+        expect(params.required).toEqual(['engine', 'prompt'])
       }
     )
   })

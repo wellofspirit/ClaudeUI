@@ -31,6 +31,10 @@ import type {
   DispatchAgentFn
 } from '../opencode-hosted-tools'
 import { loadEngineConfig } from '../../services/ui-config'
+import {
+  DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_NAME_PARAM
+} from '../../../shared/dispatch-agent-description'
 
 let tmp: string
 
@@ -434,6 +438,12 @@ function getDispatchToolDef(t: string): {
 describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033 follow-up)', () => {
   afterEach(() => {
     vi.mocked(loadEngineConfig).mockReturnValue({})
+  })
+
+  it('takes an optional name and description, worded by the shared description module', () => {
+    const { shape } = getDispatchToolDef(tmp).inputSchema
+    expect(shape.name.description).toBe(DISPATCH_NAME_PARAM)
+    expect(shape.description.description).toBe(DISPATCH_DESCRIPTION_PARAM)
   })
 
   it('bakes the configured allowlist into both the tool description and the model param describe()', () => {

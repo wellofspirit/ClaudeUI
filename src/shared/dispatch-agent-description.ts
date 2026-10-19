@@ -64,6 +64,18 @@ export const DISPATCH_SESSION_ID_GUIDANCE =
   'The result includes a session_id — pass it back as `session_id` to continue the same agent ' +
   'with its context intact.'
 
+/**
+ * The optional `name` and `description` inputs, worded once for the four
+ * registrations (the pi bridge is import-free, so it carries these two strings as
+ * literals and a test pins them to these). Same meaning as Claude Code's Agent
+ * tool: `name` is a short handle, `description` a 3-5 word summary.
+ */
+export const DISPATCH_NAME_PARAM =
+  'Optional short handle for this agent, e.g. "impl-e1". It labels the agent in the agent list; ' +
+  'keep it short and distinct from your other agents.'
+export const DISPATCH_DESCRIPTION_PARAM =
+  'Optional 3-5 word summary of the task, shown on the agent card (e.g. "Review auth diff").'
+
 /** `For opencode: <long> For pi: <long>` — the callers' per-target model hints, in order. */
 export function joinDispatchHints(
   hints: readonly { targetEngine: string; long: string }[]

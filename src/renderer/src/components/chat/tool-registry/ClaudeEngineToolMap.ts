@@ -7,6 +7,7 @@
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kinds'
+import { firstPartyDisplayName } from '../../../../../shared/first-party-tool-names'
 import { isAgentTool } from '../../../../../shared/types'
 import { claudeToolSpec } from './claude-tool-specs'
 import type { AskUserQuestion, ContentBlock } from '../../../../../shared/types'
@@ -180,7 +181,13 @@ function claudeNormalize(
       // `engine` is the reliable discriminator (native Task never has it).
       // The view's structured `dispatch` field marks it (ADR-094).
       if (typeof inp.engine === 'string')
-        return dispatchTaskView({ engine: inp.engine, prompt: inp.prompt, model: inp.model })
+        return dispatchTaskView({
+          engine: inp.engine,
+          prompt: inp.prompt,
+          model: inp.model,
+          name: inp.name,
+          description: inp.description
+        })
       // `name` is what SendMessage addresses the agent by, and the only thing
       // that tells two siblings of the same type apart in a roster (ADR-073).
       const subagentType =
@@ -282,12 +289,14 @@ function extractMockupDirectory(result?: ToolResultBlock): string | undefined {
 }
 
 /**
- * Claude's tool names are already display-ready — passthrough.
- * For hosted MCP tools (mcp__*) and agent tools (Agent/Task/…), return as-is.
- * This must be byte-identical to the old `block.toolName` header for every Claude tool.
+ * Claude's tool names are already display-ready — passthrough — except
+ * ClaudeUI's own MCP tools (`mcp__claude-ui-collab__dispatch_agent`, the session
+ * tools, diagrams, mockups), which get their product names. Any other MCP tool
+ * and every built-in (Agent/Task/…) is returned as-is: byte-identical to the
+ * old `block.toolName` header.
  */
 function claudeDisplayName(toolName: string): string {
-  return toolName
+  return firstPartyDisplayName(toolName, 'mcp') ?? toolName
 }
 
 export const ClaudeEngineToolMap: EngineToolMap = {

@@ -423,10 +423,10 @@ describe('PiEngineToolMap.displayName', () => {
   })
 
   it('prettifies hosted tool bare names (M4a+b)', () => {
-    expect(PiEngineToolMap.displayName('render_mermaid')).toBe('Mermaid')
+    expect(PiEngineToolMap.displayName('render_mermaid')).toBe('Diagram')
     expect(PiEngineToolMap.displayName('create_mockup')).toBe('Mockup')
     expect(PiEngineToolMap.displayName('show_mockup')).toBe('Mockup')
-    expect(PiEngineToolMap.displayName('dispatch_agent')).toBe('Dispatch')
+    expect(PiEngineToolMap.displayName('dispatch_agent')).toBe('X-Agent')
     expect(PiEngineToolMap.displayName('subagent')).toBe('Subagent')
     expect(PiEngineToolMap.displayName('agent')).toBe('Agent')
   })

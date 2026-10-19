@@ -18,7 +18,7 @@ import { ApprovalButtons } from './ApprovalButtons'
 import { PermissionDenialChip, PermissionDenialStrip } from './tool-registry/PermissionDenial'
 import { ToolReviewChip, ToolReviewStrip, canApproveBlock } from './tool-registry/ToolReview'
 import { deriveTaskState, latestNotification } from './task-state'
-import { dispatchLabel } from '../../../../shared/tool-kinds'
+import { dispatchLabel, taskHeaderLabel } from '../../../../shared/tool-kinds'
 import { modelTier, type ModelTier } from '../../../../shared/model-tier'
 import {
   agentModelShortName,
@@ -699,7 +699,7 @@ export function TaskCard({
       >
         {statusIcon}
         <span className={`font-medium text-[13px] text-accent shrink-0 ${NARROW_ONLY_HIDE}`}>
-          Task
+          {taskHeaderLabel(view)}
         </span>
         <span className="text-text-secondary text-[12px] truncate flex-1 min-w-[3rem] @max-[300px]/taskcard:min-w-[2rem] text-left">
           {description}

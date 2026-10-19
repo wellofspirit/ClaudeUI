@@ -35,7 +35,7 @@ describe('CodexEngineToolMap.kindOf', () => {
 
 describe('CodexEngineToolMap — hosted tools', () => {
   it('names the hosted tools the way every other engine does', () => {
-    expect(CodexEngineToolMap.displayName('render_mermaid')).toBe('Mermaid')
+    expect(CodexEngineToolMap.displayName('render_mermaid')).toBe('Diagram')
     expect(CodexEngineToolMap.displayName('create_mockup')).toBe('Mockup')
     expect(CodexEngineToolMap.displayName('show_mockup')).toBe('Mockup')
   })
@@ -88,7 +88,7 @@ describe('CodexEngineToolMap — hosted tools', () => {
  */
 describe('CodexEngineToolMap — dispatch_agent', () => {
   it('names it the way every other engine does', () => {
-    expect(CodexEngineToolMap.displayName('dispatch_agent')).toBe('Dispatch')
+    expect(CodexEngineToolMap.displayName('dispatch_agent')).toBe('X-Agent')
   })
 
   it('task: the target engine is the discriminator, the model rides the dispatch field', () => {

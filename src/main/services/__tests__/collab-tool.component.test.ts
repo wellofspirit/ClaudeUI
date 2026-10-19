@@ -49,6 +49,10 @@ import { crossEngineDispatcher } from '../../../core/services/cross-engine-dispa
 import { loadEngineConfig } from '../../../core/services/ui-config'
 import { peekOpencodeModels } from '../../../core/opencode/model-discovery'
 import type { SdkToolExtra } from '../../../core/sdk'
+import {
+  DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_NAME_PARAM
+} from '../../../shared/dispatch-agent-description'
 
 function makeCtx(overrides: Partial<CollabServerContext> = {}): CollabServerContext & {
   emit: ReturnType<typeof vi.fn>
@@ -240,6 +244,22 @@ describe('createCollabServer', () => {
   // ADR-033 M4c — pi as a second dispatch target (engine enum widening)
   // ADR-033 slice H — codex as a third
   // -------------------------------------------------------------------------
+
+  it('takes an optional name and description, worded by the shared description module', () => {
+    const { inputSchema } = createCollabServer(makeCtx()).tools[0]
+    for (const [key, text] of [
+      ['name', DISPATCH_NAME_PARAM],
+      ['description', DISPATCH_DESCRIPTION_PARAM]
+    ] as const) {
+      const schema = inputSchema[key] as unknown as {
+        description?: string
+        safeParse: (v: unknown) => { success: boolean }
+      }
+      expect(schema.description).toBe(text)
+      expect(schema.safeParse(undefined).success).toBe(true)
+      expect(schema.safeParse('x').success).toBe(true)
+    }
+  })
 
   it("the engine param's schema accepts every OTHER engine and rejects both 'claude' (same-engine) and an unlisted value", () => {
     const server = createCollabServer(makeCtx())

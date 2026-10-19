@@ -41,6 +41,7 @@ import { AGENT_TYPE_SLOT_CLASS, AgentTile, useAgentTile } from './AgentTypeTile'
 import { StatusDot, type SessionDotState } from '../Sidebar/StatusDot'
 import { ResumedBadge } from './ResumedBadge'
 import { agentRowLabel, type AgentRosterRow } from '../../hooks/useAgentRoster'
+import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
 import { modelTier } from '../../../../shared/model-tier'
 import { MODEL_TIER_TEXT_CLASS } from '../../lib/model-tier-class'
 
@@ -303,7 +304,7 @@ export function AgentRow({
         >
           {row.lastToolName && (
             <span data-testid="AgentRow.metrics.tool" className="@max-[360px]/roster:hidden">
-              {row.lastToolName}
+              {engineToolMap(engineId).displayName(row.lastToolName)}
               {figures.length > 0 ? ' · ' : ''}
             </span>
           )}

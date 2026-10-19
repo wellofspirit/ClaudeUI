@@ -37,6 +37,8 @@ import { createMockupServer } from '../services/mockup-tool'
 import { loadEngineConfig } from '../services/ui-config'
 import { describeDispatchModels } from '../services/dispatch-model-hint'
 import {
+  DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_NAME_PARAM,
   dispatchAgentDescription,
   joinDispatchHints,
   OWN_SUBAGENT_TOOL
@@ -218,6 +220,8 @@ function buildDispatchAgentInputSchema(
           `that engine's configured default. For claude: a Claude alias (e.g. "haiku", "sonnet") — ` +
           `${modelHintShort} For pi: ${piModelHintShort} For codex: ${codexModelHintShort}`
       ),
+    name: z.string().optional().describe(DISPATCH_NAME_PARAM),
+    description: z.string().optional().describe(DISPATCH_DESCRIPTION_PARAM),
     session_id: z
       .string()
       .optional()

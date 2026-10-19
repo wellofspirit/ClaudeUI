@@ -7,6 +7,8 @@ import { peekOpencodeModels } from '../opencode/model-discovery'
 import { describeDispatchModels } from './dispatch-model-hint'
 import type { ChatMessage, EngineId } from '../../shared/types'
 import {
+  DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_NAME_PARAM,
   dispatchAgentDescription,
   joinDispatchHints,
   OWN_SUBAGENT_TOOL
@@ -107,6 +109,8 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
                 `that engine's configured default. For opencode: ${modelHint.short} ` +
                 `For pi: ${piModelHint.short} For codex: ${codexModelHint.short}`
             ),
+          name: z.string().optional().describe(DISPATCH_NAME_PARAM),
+          description: z.string().optional().describe(DISPATCH_DESCRIPTION_PARAM),
           session_id: z
             .string()
             .optional()

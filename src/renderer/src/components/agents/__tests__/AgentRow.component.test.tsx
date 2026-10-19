@@ -139,6 +139,28 @@ describe('AgentRow', () => {
     expect(tile.className).toContain('bg-bg-tertiary')
   })
 
+  it('shows a first-party last tool by its product name, not the wire name', async () => {
+    await renderRow(
+      row({
+        toolUseId: 'a',
+        isRunning: true,
+        lastToolName: 'mcp__claude-ui-collab__dispatch_agent',
+        elapsedSeconds: 5
+      })
+    )
+    expect(screen.getByTestId('AgentRow.metrics.tool').textContent).toBe('X-Agent · ')
+    expect(screen.getByTestId('AgentRow.metrics').textContent).not.toContain('mcp__')
+  })
+
+  it('leaves a third-party MCP last tool as the wire reported it', async () => {
+    await renderRow(
+      row({ toolUseId: 'a', isRunning: true, lastToolName: 'mcp__github__create_issue' })
+    )
+    expect(screen.getByTestId('AgentRow.metrics.tool').textContent).toBe(
+      'mcp__github__create_issue'
+    )
+  })
+
   it('draws a dispatch as the bot and an X', async () => {
     await renderRow(row({ toolUseId: 'a', dispatch: { engine: 'opencode', model: 'deepseek-v4' } }))
     const tile = screen.getByTestId('AgentRow.typeTile')

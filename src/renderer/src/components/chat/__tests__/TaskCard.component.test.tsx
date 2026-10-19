@@ -1418,3 +1418,44 @@ describe('TaskCard — failure reason', () => {
     expect(screen.queryByTestId('TaskCard.failureSummary')).not.toBeInTheDocument()
   })
 })
+
+describe('TaskCard - header label', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  // The label is the first text in the header button (the status icon has none).
+  const headerText = (): string => screen.getByTestId('TaskCard.expand').textContent ?? ''
+
+  it('a dispatch card reads "X-Agent"', () => {
+    const block = makeTaskBlock({
+      toolUseId: 'toolu_hdr_dispatch',
+      toolName: 'mcp__claude-ui-collab__dispatch_agent',
+      toolInput: { engine: 'pi', prompt: 'look' }
+    })
+    const view = {
+      kind: 'task' as const,
+      description: 'Dispatch: pi',
+      prompt: 'look',
+      dispatch: { engine: 'pi' }
+    }
+    render(<TaskCard block={block} view={view} />)
+    expect(headerText().startsWith('X-Agent')).toBe(true)
+  })
+
+  it('a native task card reads "Task"', () => {
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    expect(headerText().startsWith('Task')).toBe(true)
+    expect(headerText()).not.toContain('X-Agent')
+  })
+})
