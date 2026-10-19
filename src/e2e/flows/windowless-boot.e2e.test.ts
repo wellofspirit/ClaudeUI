@@ -231,6 +231,7 @@ vi.mock('../../core/codex/codex-locate', () => ({
 vi.mock('../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: {
     dispatch: vi.fn(),
+    configureParents: vi.fn(() => () => {}),
     resolveApproval: vi.fn(() => false),
     disposeFor: vi.fn(),
     stopDispatch: vi.fn(() => false)

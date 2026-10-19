@@ -70,7 +70,7 @@ vi.mock('../../opencode/OpencodeServerManager', () => ({
   }
 }))
 vi.mock('../../services/cross-engine-dispatcher', () => ({
-  crossEngineDispatcher: { dispatch: vi.fn() }
+  crossEngineDispatcher: { dispatch: vi.fn(), configureParents: vi.fn(() => () => {}) }
 }))
 vi.mock('../../auth/vault/CredentialSync', () => ({
   credentialSync: {

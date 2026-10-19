@@ -186,7 +186,8 @@ function claudeNormalize(
           prompt: inp.prompt,
           model: inp.model,
           name: inp.name,
-          description: inp.description
+          description: inp.description,
+          runInBackground: inp.run_in_background
         })
       // `name` is what SendMessage addresses the agent by, and the only thing
       // that tells two siblings of the same type apart in a roster (ADR-073).

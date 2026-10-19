@@ -80,8 +80,11 @@ export interface DispatchTargetJudgeOptions {
   /** The TARGET engine — which is also the judge engine. */
   engine: 'opencode' | 'pi'
   cwd: string
-  /** The DISPATCHING session's routing id (`fromRoutingId`) — judge usage rows land under it. */
-  routingId: string
+  /**
+   * The DISPATCHING session's routing id (`fromRoutingId`) — judge usage rows land under it.
+   * A thunk when the dispatcher can be re-keyed under a running target (ADR-105): read per call.
+   */
+  routingId: string | (() => string)
   /** The target's engine session id, read per call. */
   sessionId: () => string | null
   /** The target's model — the judge model when `autoMode.judgeModel` is unset. */
@@ -90,6 +93,12 @@ export interface DispatchTargetJudgeOptions {
   emit: () => (channel: string, data: unknown) => void
   /** `entry.ctx.getMessages()` — the dispatching session's transcript, read live. */
   messages: () => ChatMessage[]
+  /**
+   * The same transcript when it may have to be READ: a disconnected dispatching parent
+   * has no transcript in memory (ADR-105), so the run's facade reads the engine's history.
+   * Returns undefined for a plain call context — `messages()` then.
+   */
+  loadMessages?: () => Promise<ChatMessage[]> | undefined
   /** The dispatching session's still-queued user turns (ADR-091 §4), read live; omitted → none. */
   queuedTurns?: () => ChatMessage[]
   /**
@@ -189,7 +198,10 @@ export class DispatchTargetJudge {
       ...(subagent ? { subagent } : {}),
       judgeAvailable: () => this.judgeAvailable(),
       judgeTransport: () => this.transport(),
-      messages: () => this.judgeMessages(),
+      messages: () => {
+        const loading = this.opts.loadMessages?.()
+        return loading ? loading.then((parent) => this.mergeMessages(parent)) : this.judgeMessages()
+      },
       environment: () => this.environment(call.permissions()),
       captureActionMeta: (toolName, input) =>
         this.captureActionMeta(toolName, input, call.honoursWorkdir, call.permissions()),
@@ -212,8 +224,12 @@ export class DispatchTargetJudge {
    * assistant trajectory (ADR-088 D1), merged in time order (ADR-091 §4).
    */
   judgeMessages(): ChatMessage[] {
+    return this.mergeMessages(this.opts.messages())
+  }
+
+  private mergeMessages(parent: ChatMessage[]): ChatMessage[] {
     const own = [...this.opts.trajectory()].filter((m) => m.role === 'assistant')
-    return inTimeOrder(this.opts.messages(), this.opts.queuedTurns?.() ?? [], own)
+    return inTimeOrder(parent, this.opts.queuedTurns?.() ?? [], own)
   }
 
   /**
@@ -251,7 +267,8 @@ export class DispatchTargetJudge {
       engine: this.opts.engine,
       modelValue: () => this.autoMode.judgeModel ?? this.opts.model(),
       sessionId: this.opts.sessionId,
-      routingId: this.opts.routingId,
+      routingId:
+        typeof this.opts.routingId === 'function' ? this.opts.routingId() : this.opts.routingId,
       onUnavailable: (reason) => {
         if (this.routeUnavailableReported) return
         this.routeUnavailableReported = true

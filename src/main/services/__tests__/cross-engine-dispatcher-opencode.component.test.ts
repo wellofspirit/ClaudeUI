@@ -2361,6 +2361,70 @@ describe('opencode target — leaks (review S9 #6)', () => {
     expect(client.prompt).not.toHaveBeenCalled()
   })
 
+  it('a chat disposed during a BACKGROUND creation does not undo it: the run belongs to the parent id, and goes on', async () => {
+    const { dispatcher, client, serverManager, fake, ledger } = makeHarness()
+    fake.next({ hold: true })
+    const release = gateCreate(client)
+    const launching = dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'a', runInBackground: true },
+      makeCtx({ toolUseId: 'tu-bg' })
+    )
+    await tick()
+    dispatcher.disposeFor('routing-1')
+    release()
+    const ack = await launching
+    expect(ack.isError).toBeUndefined()
+    expect(ack.text).toContain('launched on opencode')
+    await tick()
+    expect(client.deleteSession).not.toHaveBeenCalled()
+    expect(serverManager.releaseIfCurrent).not.toHaveBeenCalled()
+    expect(ledger.rowFor('opencode', 'oc-sess-1')?.state).toBe('running')
+    // A parent's dispose while the run is in flight leaves it running too.
+    dispatcher.disposeFor('routing-1')
+    expect(client.interrupt).not.toHaveBeenCalled()
+    fake.finish('oc-sess-1', { steps: [{ text: 'background answer' }] })
+    await vi.waitFor(() => expect(ledger.rowFor('opencode', 'oc-sess-1')?.state).toBe('idle'))
+    expect(dispatcher.inFlightCount).toBe(0)
+  })
+
+  it('two launches of one name while the first is still creating its session: the second is refused (its row does not exist yet)', async () => {
+    const { dispatcher, client, fake, ledger } = makeHarness()
+    fake.next({ hold: true })
+    const release = gateCreate(client)
+    const first = dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'a', name: 'twin', runInBackground: true },
+      makeCtx({ toolUseId: 'tu-a' })
+    )
+    await tick()
+    expect(ledger.rows.size).toBe(0)
+    const second = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'b', name: 'twin', runInBackground: true },
+      makeCtx({ toolUseId: 'tu-b' })
+    )
+    expect(second.isError).toBe(true)
+    expect(second.text).toContain('still being launched')
+    release()
+    expect((await first).isError).toBeUndefined()
+    await tick()
+    fake.finish('oc-sess-1', { steps: [{ text: 'done' }] })
+    await vi.waitFor(() => expect(dispatcher.inFlightCount).toBe(0))
+  })
+
+  it('the dispose rollback follows the durable parent id: a dispose naming the old id still rolls back a creation read under the new one', async () => {
+    const { dispatcher, client } = makeHarness()
+    const release = gateCreate(client)
+    const running = dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'a' },
+      makeCtx({ fromRoutingId: 'tmp-1' })
+    )
+    await tick()
+    dispatcher.noteParentRekey('tmp-1', 'uuid-1')
+    dispatcher.disposeFor('tmp-1')
+    release()
+    const result = await running
+    expect(result.text).toContain('the dispatching session was disposed')
+  })
+
   it('targets dropped with their server keep their sessions: nothing is deleted, nothing is orphaned for a later reap', async () => {
     const { dispatcher, client, killServer, ledger } = makeHarness()
     await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())

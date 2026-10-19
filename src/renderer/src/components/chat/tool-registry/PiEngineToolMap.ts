@@ -237,7 +237,8 @@ function piNormalize(
           prompt: inp.prompt,
           model: inp.model,
           name: inp.name,
-          description: inp.description
+          description: inp.description,
+          runInBackground: inp.run_in_background
         })
       // Host-run subagents (ADR-089) — the `agent` tool: { description,
       // prompt, subagent_type?, name?, model?, run_in_background? }. Keyed on the shape (prompt +

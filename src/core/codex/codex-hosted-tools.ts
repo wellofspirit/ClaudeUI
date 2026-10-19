@@ -32,6 +32,7 @@ import type { DynamicToolSpec } from './protocol/v2/DynamicToolSpec'
 import type { JsonValue } from './protocol/serde_json/JsonValue'
 import type { ToolResultContent } from '../sdk/types'
 import {
+  DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
   DISPATCH_NAME_PARAM,
   dispatchAgentDescription,
@@ -211,7 +212,8 @@ function dispatchAgentSpec(): DynamicToolSpec {
         session_id: {
           type: 'string',
           description: 'session_id from a previous dispatch_agent result — continues that agent'
-        }
+        },
+        run_in_background: { type: 'boolean', description: DISPATCH_BACKGROUND_PARAM }
       },
       required: ['engine', 'prompt'],
       additionalProperties: false

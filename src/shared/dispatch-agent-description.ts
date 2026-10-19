@@ -76,6 +76,17 @@ export const DISPATCH_NAME_PARAM =
 export const DISPATCH_DESCRIPTION_PARAM =
   'Optional 3-5 word summary of the task, shown on the agent card (e.g. "Review auth diff").'
 
+/**
+ * The optional `run_in_background` input (ADR-105 §2), worded once for the four
+ * registrations (the pi bridge carries it as a literal and a test pins it to this).
+ * Until results are delivered into the parent's conversation the default stays "wait";
+ * a background agent's answer shows on its card.
+ */
+export const DISPATCH_BACKGROUND_PARAM =
+  'Set true to start the agent and return at once instead of waiting for its answer. The answer of a ' +
+  'background agent appears on its agent card in the UI; it is not returned to you. Default false: wait, ' +
+  'and receive the answer as this tool result.'
+
 /** `For opencode: <long> For pi: <long>` — the callers' per-target model hints, in order. */
 export function joinDispatchHints(
   hints: readonly { targetEngine: string; long: string }[]

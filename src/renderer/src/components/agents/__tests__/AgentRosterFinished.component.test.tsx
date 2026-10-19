@@ -72,8 +72,8 @@ describe('a finished agent in the roster', () => {
   })
 
   // Case A: a BLOCKING cross-engine dispatch. Its tool_result returned with the
-  // child's answer and the dispatcher sent its final notification. No lifecycle
-  // record was ever armed (dispatch children emit no task_started).
+  // child's answer and the dispatcher sent its final notification, which dropped
+  // the lifecycle record the run armed at its start (ADR-105).
   const dispatchSession = (): void =>
     setSession({
       messages: [
@@ -144,6 +144,63 @@ describe('a finished agent in the roster', () => {
       })
     })
   }
+
+  // A dispatch RUN in flight (ADR-105): the dispatcher arms a `dispatch` record at its
+  // start, blocking or background, and the final notification disarms it.
+  describe('a dispatch run in flight', () => {
+    const inFlight = (background: boolean, launched: boolean): void =>
+      setSession({
+        messages: [
+          spawn('tu-run', 'mcp__claude-ui-collab__dispatch_agent', {
+            engine: 'pi',
+            prompt: 'go',
+            name: 'runner',
+            ...(background ? { run_in_background: true } : {})
+          }),
+          ...(launched ? [result('tu-run', 'X-Agent runner launched on pi (id s-run).')] : [])
+        ],
+        activeTasks: {
+          'tu-run': {
+            taskId: 's-run',
+            taskType: 'dispatch',
+            isBackgrounded: background,
+            wakesParent: true
+          }
+        },
+        taskNotifications: []
+      })
+    const finish = (): void =>
+      setSession({
+        activeTasks: {},
+        taskNotifications: [
+          {
+            taskId: 's-run',
+            toolUseId: 'tu-run',
+            status: 'completed',
+            outputFile: '',
+            summary: 'all done'
+          } satisfies TaskNotification
+        ]
+      })
+
+    for (const [label, background, launched] of [
+      ['a blocking run (record, no tool_result yet)', false, false],
+      ['a background run (launch ack + record)', true, true]
+    ] as const) {
+      it(`${label} is a running row, and a grey DONE one once it notifies`, async () => {
+        inFlight(background, launched)
+        await renderList()
+        expect(screen.getAllByTestId('AgentRow')).toHaveLength(1)
+        expect(screen.getByTestId('AgentRow').getAttribute('data-running')).toBe('true')
+
+        cleanup()
+        finish()
+        await renderList(['tu-run'])
+        expect(screen.getByTestId('AgentRow').getAttribute('data-running')).toBe('false')
+        expect(screen.getByTestId('AgentRow.status').getAttribute('data-status')).toBe('done')
+      })
+    }
+  })
 
   // A finished agent is alive in effect while anything it launched still runs
   // (ADR-073 §11): steady green. Grey only once nothing below it runs. Never dimmed.

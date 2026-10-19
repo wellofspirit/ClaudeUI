@@ -298,3 +298,17 @@ describe('ClaudeSession — dispatch teardown', () => {
     expect(crossEngineSpies.disposeFor).toHaveBeenCalledWith('routing-1')
   })
 })
+
+// ---------------------------------------------------------------------------
+// The live mode a dispatch run reads through its parent facade (ADR-105)
+// ---------------------------------------------------------------------------
+
+describe('ClaudeSession — getAutonomyMode', () => {
+  it('answers the CURRENT permission mode, so a run launched earlier follows a later switch', async () => {
+    const { session } = await bootSession()
+    liveSessions.push(session)
+    expect(session.getAutonomyMode()).toBe('default')
+    await session.setPermissionMode('acceptEdits')
+    expect(session.getAutonomyMode()).toBe('acceptEdits')
+  })
+})

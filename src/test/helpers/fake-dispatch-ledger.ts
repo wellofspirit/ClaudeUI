@@ -59,6 +59,11 @@ export function makeFakeDispatchLedger(): FakeDispatchLedger {
       const row = rowFor(engine, harnessRef)
       return row ? { ...row } : undefined
     },
+    byParent: (parentSessionId) =>
+      [...rows.values()]
+        .filter((r) => r.parentSessionId === parentSessionId)
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .map((r) => ({ ...r })),
     update(id: string, patch: DispatchTargetPatch) {
       const row = rows.get(id)
       if (!row) return

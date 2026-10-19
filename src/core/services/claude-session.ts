@@ -638,6 +638,15 @@ export class ClaudeSession extends BaseSession {
     return this.sessionId
   }
 
+  /**
+   * The current permission mode, for a dispatch run to read AFTER the call that launched
+   * it (ADR-105): the run's parent facade asks whichever session object answers to this
+   * session's id, so a respawned session is read afresh.
+   */
+  getAutonomyMode(): string {
+    return this.permissionMode
+  }
+
   protected override resetInactivityTimer(): void {
     this.clearInactivityTimer()
     if (this.inactivityTimeoutMs > 0) {

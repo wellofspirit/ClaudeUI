@@ -8,7 +8,7 @@
 import type { EngineId } from '../../shared/types'
 
 /**
- * Every OTHER engine (ADR-033's same-engine guard, `dispatchInner`), plus Codex
+ * Every OTHER engine (ADR-033's same-engine guard, `launchRun`), plus Codex
  * into Codex, which ADR-069 §7 lifts the guard for (a target is one more thread
  * on the caller's host).
  */

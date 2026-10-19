@@ -12,6 +12,7 @@ import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from '../pi-bridge-sour
 import { piSessionToolsEnv } from '../../services/session-tool-specs'
 import { SESSION_TOOL_NAMES } from '../../../shared/session-tools-description'
 import {
+  DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
   DISPATCH_NAME_PARAM
 } from '../../../shared/dispatch-agent-description'
@@ -22,8 +23,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 16 (dispatch_agent takes name and description)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('16')
+  it('is version 17 (dispatch_agent takes run_in_background)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('17')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -479,6 +480,23 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
           description: DISPATCH_DESCRIPTION_PARAM
         })
         expect(params.required).toEqual(['engine', 'prompt'])
+      }
+    )
+  })
+
+  it('dispatch_agent takes an optional boolean run_in_background, worded exactly as the shared module does', () => {
+    withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
+      () => {
+        const params = runExtension().tools.get('dispatch_agent')!.parameters as {
+          properties: Record<string, { type: string; description: string }>
+          required: string[]
+        }
+        expect(params.properties.run_in_background).toEqual({
+          type: 'boolean',
+          description: DISPATCH_BACKGROUND_PARAM
+        })
+        expect(params.required).not.toContain('run_in_background')
       }
     )
   })

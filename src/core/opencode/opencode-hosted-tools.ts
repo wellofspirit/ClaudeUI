@@ -37,6 +37,7 @@ import { createMockupServer } from '../services/mockup-tool'
 import { loadEngineConfig } from '../services/ui-config'
 import { describeDispatchModels } from '../services/dispatch-model-hint'
 import {
+  DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
   DISPATCH_NAME_PARAM,
   dispatchAgentDescription,
@@ -226,6 +227,7 @@ function buildDispatchAgentInputSchema(
       .string()
       .optional()
       .describe('session_id from a previous dispatch_agent result — continues that agent'),
+    run_in_background: z.boolean().optional().describe(DISPATCH_BACKGROUND_PARAM),
     // Internal — see resources/opencode/claudeui-xeng/index.js. Declared
     // explicitly so our Zod validator does not STRIP it (z.object() drops
     // unknown keys by default); the handler reads then removes it before any
@@ -418,6 +420,7 @@ export function createOpencodeHostedToolsServer(
         name,
         description,
         session_id,
+        run_in_background,
         __xeng_caller_session,
         __xeng_call_id
       } = args as {
@@ -427,6 +430,7 @@ export function createOpencodeHostedToolsServer(
         name?: string
         description?: string
         session_id?: string
+        run_in_background?: boolean
         __xeng_caller_session?: string
         __xeng_call_id?: string
       }
@@ -498,7 +502,15 @@ export function createOpencodeHostedToolsServer(
       }
 
       const result = await deps.dispatch(
-        { engine, prompt, model, name, description, sessionId: session_id },
+        {
+          engine,
+          prompt,
+          model,
+          name,
+          description,
+          sessionId: session_id,
+          ...(run_in_background === true ? { runInBackground: true } : {})
+        },
         {
           fromEngine: 'opencode',
           fromRoutingId: routingId,

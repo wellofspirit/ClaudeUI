@@ -786,6 +786,11 @@ export class CodexSession extends BaseSession {
     return this.threadId
   }
 
+  /** The current permission mode; a dispatch run reads it through its parent facade (ADR-105). */
+  getAutonomyMode(): string {
+    return this.permissionMode
+  }
+
   /**
    * Hand ONE held item to Codex (ADR-053 on this engine's two transports).
    *
@@ -2090,7 +2095,7 @@ export class CodexSession extends BaseSession {
   /** Stop every dispatch this session still has in flight, scoped to it. */
   private stopInFlightDispatches(): void {
     for (const id of this.inFlightDispatchIds)
-      crossEngineDispatcher.stopDispatch(id, this.routingId)
+      crossEngineDispatcher.stopDispatch(id, this.routingId, { blockingOnly: true })
     this.inFlightDispatchIds.clear()
   }
 
@@ -3558,7 +3563,8 @@ export class CodexSession extends BaseSession {
       model: typeof args?.model === 'string' ? args.model : undefined,
       name: typeof args?.name === 'string' ? args.name : undefined,
       description: typeof args?.description === 'string' ? args.description : undefined,
-      sessionId: typeof args?.session_id === 'string' ? args.session_id : undefined
+      sessionId: typeof args?.session_id === 'string' ? args.session_id : undefined,
+      ...(args?.run_in_background === true ? { runInBackground: true } : {})
     }
     if (verdict.decision === 'ask') {
       const card: PendingApproval = {
@@ -3569,7 +3575,8 @@ export class CodexSession extends BaseSession {
           engine: req.engine,
           prompt: req.prompt,
           ...(req.model !== undefined ? { model: req.model } : {}),
-          ...(req.sessionId !== undefined ? { session_id: req.sessionId } : {})
+          ...(req.sessionId !== undefined ? { session_id: req.sessionId } : {}),
+          ...(req.runInBackground ? { run_in_background: true } : {})
         }
       }
       // `allowForSession` keys on the bare tool name, exactly as the shared

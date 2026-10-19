@@ -32,6 +32,7 @@ import type {
 } from '../opencode-hosted-tools'
 import { loadEngineConfig } from '../../services/ui-config'
 import {
+  DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
   DISPATCH_NAME_PARAM
 } from '../../../shared/dispatch-agent-description'
@@ -306,6 +307,42 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     expect(result.content[0].text).toContain('session_id: claude-42')
   })
 
+  it('passes run_in_background through to the DispatchRequest only when it is true (ADR-105)', async () => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'claude-1' }))
+    const tool = getDispatchTool(tmp, {
+      lookupCallerSession: () => ({
+        cwd: '/proj',
+        getAutonomyMode: () => 'default',
+        getMessages: () => [],
+        emit: vi.fn(),
+        addDispatchedCost: vi.fn()
+      }),
+      dispatch
+    })
+    await tool.handler(
+      {
+        engine: 'claude',
+        prompt: 'x',
+        run_in_background: true,
+        __xeng_caller_session: 'ses_1',
+        __xeng_call_id: 'call_1'
+      },
+      makeExtra()
+    )
+    await tool.handler(
+      {
+        engine: 'claude',
+        prompt: 'x',
+        run_in_background: false,
+        __xeng_caller_session: 'ses_1',
+        __xeng_call_id: 'call_2'
+      },
+      makeExtra()
+    )
+    expect(dispatch.mock.calls[0][0]).toMatchObject({ runInBackground: true })
+    expect(dispatch.mock.calls[1][0]).not.toHaveProperty('runInBackground')
+  })
+
   it('passes name and description through to the DispatchRequest (ADR-105)', async () => {
     const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'claude-1' }))
     const tool = getDispatchTool(tmp, {
@@ -472,6 +509,17 @@ describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033
     const { shape } = getDispatchToolDef(tmp).inputSchema
     expect(shape.name.description).toBe(DISPATCH_NAME_PARAM)
     expect(shape.description.description).toBe(DISPATCH_DESCRIPTION_PARAM)
+  })
+
+  it('takes an optional boolean run_in_background, worded by the shared description module', () => {
+    const { shape } = getDispatchToolDef(tmp).inputSchema
+    expect(shape.run_in_background.description).toBe(DISPATCH_BACKGROUND_PARAM)
+    const field = shape.run_in_background as unknown as {
+      safeParse: (v: unknown) => { success: boolean }
+    }
+    expect(field.safeParse(undefined).success).toBe(true)
+    expect(field.safeParse(true).success).toBe(true)
+    expect(field.safeParse('yes').success).toBe(false)
   })
 
   it('bakes the configured allowlist into both the tool description and the model param describe()', () => {

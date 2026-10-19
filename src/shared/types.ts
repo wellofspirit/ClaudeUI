@@ -1453,6 +1453,12 @@ export interface TaskStartedData {
    * a record from before the field existed; readers fall back to a type set.
    */
   wakesParent?: boolean
+  /**
+   * A short label for the task, when the emitter has one the tool input may not carry
+   * (a dispatched X-Agent's `description`, else its `name`; ADR-105). Cards still take
+   * theirs from the tool input; this is for readers that only see the record.
+   */
+  description?: string
 }
 
 /**
@@ -1462,7 +1468,13 @@ export interface TaskStartedData {
  */
 export type ActiveTask = Pick<
   TaskStartedData,
-  'taskId' | 'taskType' | 'runIndex' | 'isBackgrounded' | 'startedAt' | 'wakesParent'
+  | 'taskId'
+  | 'taskType'
+  | 'runIndex'
+  | 'isBackgrounded'
+  | 'startedAt'
+  | 'wakesParent'
+  | 'description'
 >
 
 /** The terminal states an engine reports for a task run. */

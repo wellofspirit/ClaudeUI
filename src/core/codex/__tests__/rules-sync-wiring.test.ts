@@ -118,7 +118,7 @@ vi.mock('../../opencode/OpencodeServerManager', () => ({
   }
 }))
 vi.mock('../../services/cross-engine-dispatcher', () => ({
-  crossEngineDispatcher: { dispatch: vi.fn() }
+  crossEngineDispatcher: { dispatch: vi.fn(), configureParents: vi.fn(() => () => {}) }
 }))
 // `startCoreServices` starts the real usage poll, whose first tick reads
 // `~/.claude.json` and APPENDS to the account log — fire-and-forget, so it

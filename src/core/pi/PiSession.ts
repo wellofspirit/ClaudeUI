@@ -1885,13 +1885,13 @@ export class PiSession extends BaseSession {
     // only abort the CURRENT turn, leaving the target alive for a later
     // continuation, same as a manual Stop click would). Idempotent: a
     // dispatch that already settled is simply absent from the map
-    // (dispatchInner's `activeByToolUseId` entry is deleted in its own
+    // (the run leaves the dispatcher's registry when it ends, in its own
     // `finally`), so `stopDispatch` harmlessly misses — see the doc comment
     // on `inFlightDispatchIds` and cancel()'s later disposeFor call, which
     // remains safe to run afterward regardless (PiRpcClient.dispose()/
     // PiBridgeHost.dispose() are both documented idempotent).
     for (const id of this.inFlightDispatchIds) {
-      crossEngineDispatcher.stopDispatch(id, this.routingId)
+      crossEngineDispatcher.stopDispatch(id, this.routingId, { blockingOnly: true })
     }
     this.inFlightDispatchIds.clear()
     // Host-run subagents (ADR-089 S3, Q9 — Claude Code's Esc spares
@@ -2574,7 +2574,7 @@ export class PiSession extends BaseSession {
     if (this.inFlightDispatchIds.has(info.toolCallId)) {
       // The same call interrupt() and TaskCard's Stop button make — the child
       // has no consumer left, so letting it run would only burn tokens.
-      crossEngineDispatcher.stopDispatch(info.toolCallId, this.routingId)
+      crossEngineDispatcher.stopDispatch(info.toolCallId, this.routingId, { blockingOnly: true })
     }
     // A host-run subagent (ADR-089) whose `agent` exchange pi stopped
     // waiting for has no consumer either.
@@ -3306,7 +3306,8 @@ export class PiSession extends BaseSession {
       model: typeof input.model === 'string' ? input.model : undefined,
       name: typeof input.name === 'string' ? input.name : undefined,
       description: typeof input.description === 'string' ? input.description : undefined,
-      sessionId: typeof input.session_id === 'string' ? input.session_id : undefined
+      sessionId: typeof input.session_id === 'string' ? input.session_id : undefined,
+      ...(input.run_in_background === true ? { runInBackground: true } : {})
     }
     const ctx: DispatchContext = {
       fromEngine: 'pi',

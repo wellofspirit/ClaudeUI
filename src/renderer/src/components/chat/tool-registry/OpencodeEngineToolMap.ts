@@ -166,7 +166,8 @@ function opencodeNormalize(
           prompt: inp.prompt,
           model: inp.model,
           name: inp.name,
-          description: inp.description
+          description: inp.description,
+          runInBackground: inp.run_in_background
         })
       // 2.x `subagent` names its agent `agent`; 1.x `task` named it `subagent_type`.
       const agent = inp.agent ?? inp.subagent_type

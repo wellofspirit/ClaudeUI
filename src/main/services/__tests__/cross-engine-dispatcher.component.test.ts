@@ -123,6 +123,11 @@ import {
   type FakeDispatchLedger
 } from '../../../test/helpers/fake-dispatch-ledger'
 import type { DispatchTargetRow } from '../../../core/services/dispatch-target-ledger'
+import type {
+  DispatchParentLookup,
+  LiveParentSession
+} from '../../../core/services/dispatch-parent'
+import type { DispatchRunRegistry } from '../../../core/services/dispatch-runs'
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -1387,7 +1392,7 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
 
   it('toolUseId set: forwards stream_event deltas + assistant messages + heartbeat progress + a final "completed" notification', async () => {
     const target = makeFakeClaudeTarget()
-    const { dispatcher } = makeHarness({
+    const { dispatcher, ledger } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
       spawnClaudeQuery: target.spawnClaudeQuery,
       heartbeatMs: 20
@@ -1436,8 +1441,9 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
     })
 
     const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    // The task is the X-Agent's LEDGER id (ADR-105), not the harness's session id.
     expect(notif?.[1]).toMatchObject({
-      taskId: 'claude-sess-1',
+      taskId: ledger.rowFor('claude', 'claude-sess-1')!.id,
       toolUseId: 'toolu_disp_1',
       status: 'completed',
       summary: 'final answer'
@@ -1550,7 +1556,7 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
   it('Stop DURING spawnClaudeQuery: handle registered before any await; dispatch still ends stopped', async () => {
     // Live-reproduced race: TaskCard's Stop is clickable the moment the tool
     // part shows "running", potentially seconds before the target finishes
-    // spawning. The handle must be in activeByToolUseId from dispatch entry —
+    // spawning. The handle must be in the run registry from dispatch entry —
     // a stop landing mid-spawn takes effect the moment the race starts (the
     // pre-resolved `signal.aborted` race arm).
     const target = makeFakeClaudeTarget()
@@ -1618,7 +1624,7 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
 // can arrive BEFORE dispatch() is even invoked (opencode marks the tool part
 // "running" milliseconds after ctx.ask resolves, while the MCP tools/call
 // round-trip takes longer). stopDispatch(…, {armIfUnknown:true}) records the
-// intent; dispatchInner consumes it at registration and aborts immediately.
+// intent; launchRun consumes it at registration and aborts immediately.
 // ---------------------------------------------------------------------------
 
 describe('CrossEngineDispatcher — durable stop-intent (armIfUnknown)', () => {
@@ -3219,7 +3225,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
 describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notification', () => {
   it('forwards item lifecycle/message/tool-result with the exact payload shapes; the final notification carries usage', async () => {
     const target = makeFakePiTarget()
-    const { dispatcher } = makeHarness({
+    const { dispatcher, ledger } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       heartbeatMs: 20,
       spawnPiTarget: target.spawnPiTarget
@@ -3294,7 +3300,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
 
     const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
     expect(notif?.[1]).toMatchObject({
-      taskId: 'pi-target-1',
+      taskId: ledger.rowFor('pi', 'pi-target-1')!.id,
       toolUseId: 'toolu_disp_1',
       status: 'completed'
     })
@@ -5678,7 +5684,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
  *
  * FINDING, recorded rather than worked around: today nothing can drive this end
  * to end. Only `CodexSession` sets `chatgptAccountId` (its own pin), and
- * `dispatchInner` refuses `req.engine === ctx.fromEngine`, so a Codex caller can
+ * `launchRun` refuses `req.engine === ctx.fromEngine`, so a Codex caller can
  * never reach a Codex target. The two halves are therefore pinned separately —
  * the caller half in `core/codex/__tests__/codex-session.test.ts` ("hands a
  * dispatch target the caller pin"), the target half here against a context that
@@ -8309,5 +8315,808 @@ describe('X-Agent ledger — name and description (ADR-105)', () => {
     target.push(resultMsg({ session_id: 'c-k' }))
     await again
     expect(ledger.rowFor('claude', 'c-k')?.name).toBe('keep')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Dispatch runs (ADR-105 §2, slice B-2a): registered by ledger id for their whole
+// life, reading their parent LIVE, background opt-in, one task lifecycle.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
+  // A background run outlives its test, and its heartbeat with it: stop whatever is left.
+  const created: CrossEngineDispatcher[] = []
+  afterEach(async () => {
+    for (const d of created.splice(0))
+      for (const run of (d as unknown as { runs: DispatchRunRegistry }).runs.all())
+        run.stopController.abort()
+    await tick()
+  })
+
+  /** A stand-in for the session manager + canonical state the facade resolves its parent through. */
+  function makeParents(): {
+    parents: DispatchParentLookup
+    sessions: Map<string, LiveParentSession>
+    emitted: Array<{ parentId: string; channel: string; data: unknown }>
+    canonical: Map<string, ChatMessage[]>
+    cold: Map<string, ChatMessage[]>
+    readMessages: ReturnType<typeof vi.fn<(id: string) => Promise<ChatMessage[]>>>
+    session: (mode: string, messages?: ChatMessage[]) => LiveParentSession
+    on: (channel: string) => Array<{ parentId: string; data: Record<string, unknown> }>
+  } {
+    const sessions = new Map<string, LiveParentSession>()
+    const emitted: Array<{ parentId: string; channel: string; data: unknown }> = []
+    const canonical = new Map<string, ChatMessage[]>()
+    const cold = new Map<string, ChatMessage[]>()
+    const readMessages = vi.fn(async (id: string) => cold.get(id) ?? [])
+    return {
+      parents: {
+        session: (id) => sessions.get(id),
+        emit: (parentId, channel, data) => {
+          emitted.push({ parentId, channel, data })
+        },
+        canonicalMessages: (id) => canonical.get(id) ?? [],
+        readMessages
+      },
+      sessions,
+      emitted,
+      canonical,
+      cold,
+      readMessages,
+      session: (mode, messages = []) => ({
+        getAutonomyMode: () => mode,
+        getMessages: () => messages
+      }),
+      on: (channel) =>
+        emitted
+          .filter((e) => e.channel === channel)
+          .map((e) => ({ parentId: e.parentId, data: e.data as Record<string, unknown> }))
+    }
+  }
+
+  /** Launch a Claude X-Agent in the background and return once it has been acknowledged. */
+  async function launchClaude(
+    opts: {
+      deps?: Partial<DispatcherDeps>
+      ctx?: Partial<DispatchContext> & { autonomyMode?: string }
+      req?: Partial<Parameters<CrossEngineDispatcher['dispatch']>[0]>
+      parents?: ReturnType<typeof makeParents>
+    } = {}
+  ) {
+    const target = makeFakeClaudeTarget()
+    const parents = opts.parents ?? makeParents()
+    if (!parents.sessions.has('routing-1'))
+      parents.sessions.set('routing-1', parents.session('default'))
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery,
+      heartbeatMs: 20,
+      parents: parents.parents,
+      ...opts.deps
+    })
+    created.push(dispatcher)
+    const ctx = makeCtx({
+      fromEngine: 'opencode',
+      toolUseId: 'toolu_bg_1',
+      extra: makeExtra(),
+      ...opts.ctx
+    })
+    const ack = await dispatcher.dispatch(
+      { engine: 'claude', prompt: 'work', name: 'bg-1', runInBackground: true, ...opts.req },
+      ctx
+    )
+    const row = [...ledger.rows.values()].at(-1)
+    return { target, parents, dispatcher, ledger, ctx, ack, row: row! }
+  }
+
+  const initOf = (harnessId: string): SDKMessage =>
+    ({ type: 'system', subtype: 'init', session_id: harnessId }) as SDKMessage
+
+  it('a background launch returns before the turn finishes; the run then tells the parent id started → progress → notification with the FULL text', async () => {
+    const t = await launchClaude()
+    expect(t.ack.isError).toBeUndefined()
+    expect(t.ack.text).toContain('X-Agent bg-1 launched on claude')
+    expect(t.ack.text).toContain(`id ${t.row.id}`)
+    expect(t.ack.text).toContain(`session_id ${t.row.harnessRef}`)
+    expect(t.ack.sessionId).toBe(t.row.harnessRef)
+    // The turn is still in flight: the slot is held and the row is `running`.
+    expect(t.dispatcher.inFlightCount).toBe(1)
+    expect(t.ledger.rows.get(t.row.id)!.state).toBe('running')
+    // Events go to the parent's id; the launching call's own emit is never used.
+    expect(t.parents.on('session:task-started')).toEqual([
+      {
+        parentId: 'routing-1',
+        data: expect.objectContaining({
+          toolUseId: 'toolu_bg_1',
+          taskId: t.row.id,
+          taskType: 'dispatch',
+          isBackgrounded: true,
+          // Until B-3 delivers a background result into the parent nothing wakes it.
+          wakesParent: false,
+          description: 'bg-1',
+          startedAt: expect.any(Number)
+        })
+      }
+    ])
+    await tick()
+    t.target.push(initOf(t.row.harnessRef))
+    await new Promise((r) => setTimeout(r, 70)) // let a heartbeat fire
+    const full = 'x'.repeat(250)
+    t.target.push(resultMsg({ result: full, session_id: t.row.harnessRef }))
+    await vi.waitFor(() => expect(t.ledger.rows.get(t.row.id)!.state).toBe('idle'))
+
+    const order = t.parents.emitted.map((e) => e.channel)
+    const started = order.indexOf('session:task-started')
+    const progress = order.indexOf('session:task-progress')
+    const done = order.indexOf('session:task-notification')
+    expect(started).toBeGreaterThanOrEqual(0)
+    expect(progress).toBeGreaterThan(started)
+    expect(done).toBeGreaterThan(progress)
+    expect(t.parents.on('session:task-notification')).toEqual([
+      {
+        parentId: 'routing-1',
+        data: expect.objectContaining({
+          taskId: t.row.id,
+          toolUseId: 'toolu_bg_1',
+          status: 'completed',
+          summary: full
+        })
+      }
+    ])
+    expect(t.dispatcher.inFlightCount).toBe(0)
+    expect(t.ctx.emit).not.toHaveBeenCalled()
+  })
+
+  it('the launching request ending after the ack (its abort, its progress) does not touch the run', async () => {
+    const abort = new AbortController()
+    const extra = makeExtra({ signal: abort.signal, progressToken: 'tok-bg' })
+    const t = await launchClaude({ ctx: { extra } })
+    await tick()
+    t.target.push(initOf(t.row.harnessRef))
+    abort.abort()
+    await new Promise((r) => setTimeout(r, 70))
+    expect(t.target.lastAbortController()!.signal.aborted).toBe(false)
+    expect(extra.sendNotification).not.toHaveBeenCalled()
+    t.target.push(resultMsg({ result: 'still here', session_id: t.row.harnessRef }))
+    await vi.waitFor(() =>
+      expect(t.parents.on('session:task-notification')[0]?.data).toMatchObject({
+        status: 'completed',
+        summary: 'still here'
+      })
+    )
+  })
+
+  it('the blocking form is the same run, awaited: it returns the result and still emits the task lifecycle', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery,
+      heartbeatMs: 20
+    })
+    const ctx = makeCtx({
+      fromEngine: 'opencode',
+      toolUseId: 'toolu_fg_1',
+      extra: makeExtra({ progressToken: 'tok-fg' })
+    })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'work' }, ctx)
+    await tick()
+    target.push(initOf('c-fg'))
+    await new Promise((r) => setTimeout(r, 70))
+    target.push(resultMsg({ result: 'the answer', session_id: 'c-fg' }))
+    const result = await pending
+    expect(result).toEqual({ text: 'the answer', sessionId: 'c-fg' })
+    const id = [...ledger.rows.values()][0].id
+    const calls = ctx.emit.mock.calls.map((c) => c[0])
+    expect(calls.indexOf('session:task-started')).toBeLessThan(
+      calls.indexOf('session:task-progress')
+    )
+    expect(ctx.emit).toHaveBeenCalledWith(
+      'session:task-started',
+      expect.objectContaining({
+        toolUseId: 'toolu_fg_1',
+        taskId: id,
+        taskType: 'dispatch',
+        isBackgrounded: false,
+        wakesParent: true
+      })
+    )
+    // The blocking call's progress token still gets its pings.
+    expect(ctx.extra!.sendNotification).toHaveBeenCalled()
+    expect(dispatcher.inFlightCount).toBe(0)
+  })
+
+  it('an abort of a BLOCKING call stops its run (Esc on the waiting call)', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const abort = new AbortController()
+    const ctx = makeCtx({
+      fromEngine: 'opencode',
+      toolUseId: 'toolu_fg_2',
+      extra: makeExtra({ signal: abort.signal })
+    })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'work' }, ctx)
+    await tick()
+    target.push(initOf('c-fg2'))
+    await tick()
+    abort.abort()
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('cancelled')
+    expect(target.lastAbortController()!.signal.aborted).toBe(true)
+    expect(dispatcher.inFlightCount).toBe(0)
+  })
+
+  describe('the live parent', () => {
+    it('a background run survives disposeFor(parent) and keeps emitting to the parent id; a respawned parent object is read afresh', async () => {
+      const t = await launchClaude()
+      await tick()
+      t.target.push(initOf(t.row.harnessRef))
+      await tick()
+
+      // The parent's session object is cancelled and replaced (an effort change, a respawn).
+      t.dispatcher.disposeFor('routing-1')
+      expect(t.target.lastAbortController()!.signal.aborted).toBe(false)
+      expect(t.ledger.rows.get(t.row.id)!.state).toBe('running')
+      expect(t.dispatcher.inFlightCount).toBe(1)
+      t.parents.sessions.set('routing-1', t.parents.session('acceptEdits'))
+
+      // The target asks for a tool: the gate reads the NEW object's mode, and the card goes to the parent id.
+      const canUseTool = t.target.lastCanUseTool()!
+      void canUseTool('Bash', { command: 'ls' }, {
+        signal: new AbortController().signal
+      } as unknown as Parameters<typeof canUseTool>[2])
+      await vi.waitFor(() => expect(t.parents.on('session:approval-request')).toHaveLength(1))
+      expect(t.target.setModeCalls).toEqual(['acceptEdits'])
+      expect(t.parents.on('session:approval-request')[0].parentId).toBe('routing-1')
+
+      const card = t.parents.on('session:approval-request')[0].data as { requestId: string }
+      t.dispatcher.resolveApproval(card.requestId, 'allow')
+      t.target.push(resultMsg({ result: 'done', session_id: t.row.harnessRef }))
+      await vi.waitFor(() => expect(t.parents.on('session:task-notification')).toHaveLength(1))
+      expect(t.parents.on('session:task-notification')[0].parentId).toBe('routing-1')
+    })
+
+    it('a BLOCKING run still ends with its parent: disposeFor settles it', async () => {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher, ledger } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'work' },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_fg_3' })
+      )
+      await tick()
+      target.push(initOf('c-fg3'))
+      await tick()
+      dispatcher.disposeFor('routing-1')
+      expect(target.lastAbortController()!.signal.aborted).toBe(true)
+      expect(ledger.rowFor('claude', 'c-fg3')!.state).toBe('interrupted')
+      target.push(resultMsg({ session_id: 'c-fg3' }))
+      await pending
+    })
+
+    it('an IDLE target is released by disposeFor, as before', async () => {
+      const t = await launchClaude()
+      await tick()
+      t.target.push(initOf(t.row.harnessRef))
+      t.target.push(resultMsg({ session_id: t.row.harnessRef }))
+      await vi.waitFor(() => expect(t.ledger.rows.get(t.row.id)!.state).toBe('idle'))
+      t.dispatcher.disposeFor('routing-1')
+      expect(t.target.lastAbortController()!.signal.aborted).toBe(true)
+      expect(t.ledger.rows.get(t.row.id)!.state).toBe('idle')
+    })
+
+    it('a parent re-keyed mid-run: later events go to the durable id, and a Stop from it still lands', async () => {
+      const parents = makeParents()
+      parents.sessions.set('tmp-1', parents.session('default'))
+      const t = await launchClaude({ parents, ctx: { fromRoutingId: 'tmp-1' } })
+      await tick()
+      t.target.push(initOf(t.row.harnessRef))
+      await tick()
+      expect(parents.on('session:task-started')[0].parentId).toBe('tmp-1')
+
+      parents.sessions.set('uuid-1', parents.session('default'))
+      t.dispatcher.noteParentRekey('tmp-1', 'uuid-1')
+      await new Promise((r) => setTimeout(r, 70))
+      expect(parents.on('session:task-progress').at(-1)!.parentId).toBe('uuid-1')
+      // The old id no longer owns it; the durable one does.
+      expect(t.dispatcher.stopDispatch(t.row.id, 'someone-else')).toBe(false)
+      expect(t.dispatcher.stopDispatch(t.row.id, 'uuid-1')).toBe(true)
+      await vi.waitFor(() => expect(parents.on('session:task-notification')).toHaveLength(1))
+      expect(parents.on('session:task-notification')[0]).toMatchObject({
+        parentId: 'uuid-1',
+        data: { status: 'stopped' }
+      })
+    })
+
+    it('the judge falls back to the row’s launch mode with no parent object, and reads the transcript cold', async () => {
+      const target = makeFakePiTarget()
+      const judge = makeScriptedJudge()
+      const parents = makeParents()
+      parents.cold.set('routing-1', [
+        {
+          id: 'parent-1',
+          role: 'user',
+          content: [{ type: 'text', text: 'please clean the build output' }],
+          timestamp: 0
+        }
+      ])
+      // No session object for the parent, and canonical holds no transcript (evicted on disconnect).
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+          autoMode: { twoStageMode: 'fast' as const }
+        })),
+        spawnPiTarget: target.spawnPiTarget,
+        makeJudgeTransport: judge.make,
+        parents: parents.parents
+      })
+      const ctx = makeCtx({
+        fromEngine: 'claude',
+        toolUseId: 'toolu_pi_cold',
+        autonomyMode: 'auto'
+      })
+      const ack = await dispatcher.dispatch(
+        { engine: 'pi', prompt: 'remove the build dir', runInBackground: true },
+        ctx
+      )
+      expect(ack.isError).toBeUndefined()
+      await tick()
+      // Judged: the mode was `auto` (the launch mode), not a looser default.
+      const decision = await target.gateHandler()({
+        toolCallId: 'pi-cold-1',
+        toolName: 'bash',
+        input: { command: 'rm -rf build' }
+      })
+      expect(decision).toEqual({ behavior: 'allow' })
+      expect(judge.requests).toHaveLength(1)
+      expect(judge.requests[0].user).toContain('User: please clean the build output')
+      expect(parents.readMessages).toHaveBeenCalledTimes(1)
+      target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      await vi.waitFor(() => expect(dispatcher.inFlightCount).toBe(0))
+    })
+  })
+
+  describe('slots, names and failures', () => {
+    it('the cap counts RUNS: a running background run holds its slot; both forms are refused over it', async () => {
+      const t = await launchClaude({ deps: { resolveMaxConcurrent: () => 1 } })
+      expect(t.ack.isError).toBeUndefined()
+      const bg = await t.dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', runInBackground: true },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_bg_2' })
+      )
+      expect(bg.isError).toBe(true)
+      expect(bg.text).toContain('Too many concurrent dispatches (max 1)')
+      const fg = await t.dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two' },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_fg_2' })
+      )
+      expect(fg.isError).toBe(true)
+      expect(fg.text).toContain('Too many concurrent dispatches (max 1)')
+      expect(t.dispatcher.inFlightCount).toBe(1)
+
+      // The run ends, the slot frees.
+      await tick()
+      t.target.push(initOf(t.row.harnessRef))
+      t.target.push(resultMsg({ session_id: t.row.harnessRef }))
+      await vi.waitFor(() => expect(t.dispatcher.inFlightCount).toBe(0))
+    })
+
+    it('a name held by a child that is not stopped is refused with its id; absent names and stopped holders are free', async () => {
+      const t = await launchClaude({ deps: { resolveMaxConcurrent: () => Infinity } })
+      const same = await t.dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', name: 'bg-1' },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_x' })
+      )
+      expect(same.isError).toBe(true)
+      expect(same.text).toContain(t.row.id)
+      expect(same.text).toContain('bg-1')
+      // Another parent's agent may use the name.
+      const other = await t.dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', name: 'bg-1', runInBackground: true },
+        makeCtx({ fromEngine: 'opencode', fromRoutingId: 'routing-2', toolUseId: 'toolu_y' })
+      )
+      expect(other.isError).toBeUndefined()
+      // No name, no check.
+      const unnamed = await t.dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', runInBackground: true },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_z' })
+      )
+      expect(unnamed.isError).toBeUndefined()
+      // Once the holder is stopped, the name is free again.
+      t.ledger.update(t.row.id, { state: 'stopped' })
+      const again = await t.dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', name: 'bg-1', runInBackground: true },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_w' })
+      )
+      expect(again.isError).toBeUndefined()
+    })
+
+    it('two launches of the same name in one tick: the second is refused before the first has a row', async () => {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const ctx = (id: string): DispatchContext =>
+        makeCtx({ fromEngine: 'opencode', toolUseId: id })
+      const first = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'a', name: 'twin', runInBackground: true },
+        ctx('toolu_a')
+      )
+      const second = await dispatcher.dispatch(
+        { engine: 'claude', prompt: 'b', name: 'twin', runInBackground: true },
+        ctx('toolu_b')
+      )
+      expect(second.isError).toBe(true)
+      expect(second.text).toContain('twin')
+      expect((await first).isError).toBeUndefined()
+    })
+
+    it('a launch into an engine whose harness is not installed is refused at once (background only)', async () => {
+      harnessInstalled.pi = false
+      try {
+        const target = makeFakePiTarget()
+        const { dispatcher } = makeHarness({
+          loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } }),
+          spawnPiTarget: target.spawnPiTarget
+        })
+        const result = await dispatcher.dispatch(
+          { engine: 'pi', prompt: 'x', runInBackground: true },
+          makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_nope' })
+        )
+        expect(result.isError).toBe(true)
+        expect(result.text).toContain('pi harness is not installed')
+        expect(target.spawnPiTarget).not.toHaveBeenCalled()
+        expect(dispatcher.inFlightCount).toBe(0)
+      } finally {
+        harnessInstalled.pi = true
+      }
+    })
+
+    it('a spawn that fails AFTER the ack ends the run failed: a failed notification, the row failed, the slot freed', async () => {
+      const spawnClaudeQuery = vi.fn<SpawnClaudeQueryFn>(async () => {
+        throw new Error('cannot start cli.js')
+      })
+      const parents = makeParents()
+      const t = await launchClaude({ parents, deps: { spawnClaudeQuery } })
+      // The launch was acknowledged (the row exists); the failure comes after.
+      expect(t.ack.isError).toBeUndefined()
+      expect(t.ack.text).toContain(`id ${t.row.id}`)
+      await vi.waitFor(() => expect(parents.on('session:task-notification')).toHaveLength(1))
+      expect(parents.on('session:task-notification')[0].data).toMatchObject({
+        taskId: t.row.id,
+        toolUseId: 'toolu_bg_1',
+        status: 'failed',
+        summary: expect.stringContaining('cannot start cli.js')
+      })
+      expect(t.ledger.rows.get(t.row.id)!.state).toBe('failed')
+      expect(t.dispatcher.inFlightCount).toBe(0)
+    })
+
+    it('a refusal before the target exists is the call’s own error, with no task record', async () => {
+      const parents = makeParents()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: () => ({
+          dispatch: { defaultModel: 'haiku', allowedModels: ['sonnet'] }
+        }),
+        parents: parents.parents
+      })
+      const result = await dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x', runInBackground: true },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_refused' })
+      )
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('allowlist')
+      expect(parents.emitted).toEqual([])
+      expect(dispatcher.inFlightCount).toBe(0)
+    })
+  })
+
+  describe('round 1 — modes, names, summaries', () => {
+    it('a blocking run keeps the short notification summary (its tool_result carries the text) and wakes the parent', async () => {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_fg_long' })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'work' }, ctx)
+      await tick()
+      target.push(initOf('c-long'))
+      const full = 'y'.repeat(250)
+      target.push(resultMsg({ result: full, session_id: 'c-long' }))
+      expect((await pending).text).toBe(full)
+      const notification = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+      expect((notification![1] as { summary: string }).summary).toBe('y'.repeat(100))
+      expect(ctx.emit).toHaveBeenCalledWith(
+        'session:task-started',
+        expect.objectContaining({ wakesParent: true, isBackgrounded: false })
+      )
+    })
+
+    it('a background launch with no tool_use id is refused: it would have no card, no record and no Stop', async () => {
+      const t = await launchClaude({ ctx: { toolUseId: undefined } })
+      expect(t.ack.isError).toBe(true)
+      expect(t.ack.text).toContain('needs the id of the tool call')
+      expect(t.ledger.rows.size).toBe(0)
+      expect(t.dispatcher.inFlightCount).toBe(0)
+      expect(t.target.spawnCalls).toHaveLength(0)
+    })
+
+    it('a failed launch frees its name for the retry; an interrupted (resumable) or idle agent keeps it', async () => {
+      const failing = vi.fn<SpawnClaudeQueryFn>(async () => {
+        throw new Error('cannot start cli.js')
+      })
+      const parents = makeParents()
+      const t = await launchClaude({ parents, deps: { spawnClaudeQuery: failing } })
+      await vi.waitFor(() => expect(t.ledger.rows.get(t.row.id)!.state).toBe('failed'))
+      // The model's natural retry with the same arguments.
+      const retry = await t.dispatcher.dispatch(
+        { engine: 'claude', prompt: 'work', name: 'bg-1', runInBackground: true },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_retry' })
+      )
+      expect(retry.text).not.toContain('already held')
+      expect(retry.isError).toBeUndefined()
+      await vi.waitFor(() => expect(t.dispatcher.inFlightCount).toBe(0))
+
+      for (const state of ['interrupted', 'idle', 'running'] as const) {
+        t.ledger.update(t.row.id, { state })
+        const refused = await t.dispatcher.dispatch(
+          { engine: 'claude', prompt: 'work', name: 'bg-1', runInBackground: true },
+          makeCtx({ fromEngine: 'opencode', toolUseId: `toolu_${state}` })
+        )
+        expect(refused.isError).toBe(true)
+        expect(refused.text).toContain(t.row.id)
+      }
+    })
+
+    it('a continuation under a tightened parent never runs looser than this call, even with the parent gone', async () => {
+      const target = makeFakeClaudeTarget()
+      const parents = makeParents() // no session object for the parent at all
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        parents: parents.parents
+      })
+      // Launched under auto (and finished).
+      const first = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'one' },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_c1', autonomyMode: 'auto' })
+      )
+      await tick()
+      target.push(initOf('c-mode'))
+      target.push(resultMsg({ session_id: 'c-mode' }))
+      await first
+      expect(target.setModeCalls).toEqual([])
+      // The parent is tightened to default; the continuation (background) runs under it.
+      const ack = await dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', sessionId: 'c-mode', runInBackground: true },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_c2', autonomyMode: 'default' })
+      )
+      expect(ack.isError).toBeUndefined()
+      expect(target.setModeCalls).toEqual(['default'])
+      target.push(resultMsg({ session_id: 'c-mode' }))
+      await vi.waitFor(() => expect(dispatcher.inFlightCount).toBe(0))
+    })
+
+    it('a continuation of a target recorded under full, with the parent now at ask, runs at ask', async () => {
+      const target = makeFakeClaudeTarget()
+      const parents = makeParents()
+      const { dispatcher, ledger } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        parents: parents.parents
+      })
+      const first = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'one' },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_f1', autonomyMode: 'auto' })
+      )
+      await tick()
+      target.push(initOf('c-full'))
+      target.push(resultMsg({ session_id: 'c-full' }))
+      await first
+      // A row written in the AutonomyMode vocabulary (`full` is `auto`, classifier-gated).
+      const row = ledger.rowFor('claude', 'c-full')!
+      ledger.rows.set(row.id, { ...row, launchMode: 'full' })
+      const ack = await dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', sessionId: 'c-full', runInBackground: true },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_f2', autonomyMode: 'ask' })
+      )
+      expect(ack.isError).toBeUndefined()
+      expect(target.setModeCalls).toEqual(['ask'])
+      target.push(resultMsg({ session_id: 'c-full' }))
+      await vi.waitFor(() => expect(dispatcher.inFlightCount).toBe(0))
+    })
+
+    it('a live Claude continuation is busy from the bind: a second continuation is refused and disposeFor spares it', async () => {
+      const target = makeFakeClaudeTarget()
+      let release!: () => void
+      const gate = new Promise<void>((r) => (release = r))
+      let hold = false
+      const spawn: SpawnClaudeQueryFn = async (opts) => {
+        const handle = await target.spawnClaudeQuery(opts)
+        return new Proxy(handle, {
+          get(h, prop, receiver) {
+            if (prop === 'setPermissionMode')
+              return async (mode: string): Promise<void> => {
+                if (hold) await gate
+                await h.setPermissionMode(mode as never)
+              }
+            return Reflect.get(h, prop, receiver)
+          }
+        })
+      }
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: spawn
+      })
+      const first = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'one' },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_b1' })
+      )
+      await tick()
+      target.push(initOf('c-busy'))
+      target.push(resultMsg({ session_id: 'c-busy' }))
+      await first
+      hold = true
+      // The parent loosened its mode: the continuation must sync it before pushing.
+      const ack = await dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', sessionId: 'c-busy', runInBackground: true },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_b2', autonomyMode: 'acceptEdits' })
+      )
+      expect(ack.isError).toBeUndefined()
+      const second = await dispatcher.dispatch(
+        { engine: 'claude', prompt: 'three', sessionId: 'c-busy' },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_b3' })
+      )
+      expect(second.text).toContain('already running a turn')
+      dispatcher.disposeFor('routing-1')
+      expect(target.lastAbortController()!.signal.aborted).toBe(false)
+      release()
+      await tick()
+      target.push(resultMsg({ session_id: 'c-busy' }))
+      await vi.waitFor(() => expect(dispatcher.inFlightCount).toBe(0))
+    })
+
+    it('judge usage rows follow the parent’s rekeyed id, not the id the target was created under', async () => {
+      const target = makeFakePiTarget()
+      const judge = makeScriptedJudge()
+      const parents = makeParents()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+          autoMode: { twoStageMode: 'fast' as const }
+        })),
+        spawnPiTarget: target.spawnPiTarget,
+        makeJudgeTransport: judge.make,
+        parents: parents.parents
+      })
+      const ctx = makeCtx({
+        fromEngine: 'claude',
+        fromRoutingId: 'tmp-1',
+        toolUseId: 'toolu_pi_rekey',
+        autonomyMode: 'auto'
+      })
+      await dispatcher.dispatch({ engine: 'pi', prompt: 'x', runInBackground: true }, ctx)
+      await tick()
+      const ask = (id: string) =>
+        target.gateHandler()({
+          toolCallId: id,
+          toolName: 'bash',
+          input: { command: 'rm -rf build' }
+        })
+      await ask('pi-r-1')
+      dispatcher.noteParentRekey('tmp-1', 'uuid-1')
+      await ask('pi-r-2')
+      expect(judge.opts.map((o) => o.routingId)).toEqual(['tmp-1', 'uuid-1'])
+      target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      await vi.waitFor(() => expect(dispatcher.inFlightCount).toBe(0))
+    })
+
+    it('configureParents hands back its unsubscribe, and a reconfigure drops the previous rekey feed', () => {
+      const { dispatcher } = makeHarness()
+      const subscribers: Array<(oldId: string, newId: string) => void> = []
+      const unsubscribed: number[] = []
+      const onRekey = (observer: (o: string, n: string) => void): (() => void) => {
+        subscribers.push(observer)
+        const n = subscribers.length
+        return () => unsubscribed.push(n)
+      }
+      const parents = makeParents().parents
+      const release = dispatcher.configureParents(parents, onRekey)
+      expect(unsubscribed).toEqual([])
+      dispatcher.configureParents(parents, onRekey)
+      expect(unsubscribed).toEqual([1])
+      release()
+      expect(unsubscribed).toEqual([1, 2])
+      release() // idempotent
+      expect(unsubscribed).toEqual([1, 2])
+    })
+  })
+
+  describe('stop', () => {
+    it('resolves a run by its tool_use id and by its ledger id, long after the launch call returned', async () => {
+      for (const key of ['toolu_bg_1', 'ledger'] as const) {
+        const t = await launchClaude()
+        await tick()
+        t.target.push(initOf(t.row.harnessRef))
+        await tick()
+        expect(t.dispatcher.stopDispatch(key === 'ledger' ? t.row.id : key, 'routing-1')).toBe(true)
+        await vi.waitFor(() => expect(t.parents.on('session:task-notification')).toHaveLength(1))
+        expect(t.parents.on('session:task-notification')[0].data).toMatchObject({
+          taskId: t.row.id,
+          status: 'stopped',
+          summary: 'Dispatch stopped by user.'
+        })
+        expect(t.target.lastAbortController()!.signal.aborted).toBe(true)
+        // Once the run has ended there is nothing to stop.
+        expect(t.dispatcher.stopDispatch(t.row.id, 'routing-1')).toBe(false)
+      }
+    })
+
+    it('another session cannot stop it', async () => {
+      const t = await launchClaude()
+      expect(t.dispatcher.stopDispatch(t.row.id, 'routing-2')).toBe(false)
+      expect(t.dispatcher.stopDispatch('toolu_bg_1', 'routing-2')).toBe(false)
+      expect(t.dispatcher.inFlightCount).toBe(1)
+      t.dispatcher.stopDispatch(t.row.id, 'routing-1')
+      await vi.waitFor(() => expect(t.dispatcher.inFlightCount).toBe(0))
+    })
+
+    it('a stop armed BEFORE the launch is consumed by a background run too', async () => {
+      const target = makeFakeClaudeTarget()
+      const parents = makeParents()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        parents: parents.parents
+      })
+      expect(dispatcher.stopDispatch('toolu_early', 'routing-1', { armIfUnknown: true })).toBe(true)
+      const ack = await dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x', runInBackground: true },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_early' })
+      )
+      expect(ack.isError).toBeUndefined()
+      await vi.waitFor(() => expect(parents.on('session:task-notification')).toHaveLength(1))
+      expect(parents.on('session:task-notification')[0].data).toMatchObject({ status: 'stopped' })
+    })
+
+    it('the parent’s own interrupt stops a blocking run it awaits, never a background run', async () => {
+      // background
+      const bg = await launchClaude()
+      await tick()
+      bg.target.push(initOf(bg.row.harnessRef))
+      await tick()
+      expect(bg.dispatcher.stopDispatch('toolu_bg_1', 'routing-1', { blockingOnly: true })).toBe(
+        false
+      )
+      expect(bg.target.lastAbortController()!.signal.aborted).toBe(false)
+      expect(bg.dispatcher.inFlightCount).toBe(1)
+      bg.dispatcher.stopDispatch(bg.row.id, 'routing-1')
+      await vi.waitFor(() => expect(bg.dispatcher.inFlightCount).toBe(0))
+
+      // blocking
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x' },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_fg_i' })
+      )
+      await tick()
+      target.push(initOf('c-int'))
+      await tick()
+      expect(dispatcher.stopDispatch('toolu_fg_i', 'routing-1', { blockingOnly: true })).toBe(true)
+      expect((await pending).text).toBe('Dispatch stopped by user.')
+    })
   })
 })

@@ -97,7 +97,7 @@ export interface JudgePipelineHooks {
   judgeAvailable: () => Promise<boolean> | boolean
   judgeTransport: () => JudgeTransport
   /** The transcript the judge reads the user's intent from. */
-  messages: () => ChatMessage[]
+  messages: () => ChatMessage[] | Promise<ChatMessage[]>
   environment: () => Promise<EnvironmentInfo>
   captureActionMeta: (
     toolName: string,
@@ -265,9 +265,11 @@ export async function runJudgePipeline(
     const actionMeta = await hooks.captureActionMeta(toolName, judgeInput)
     const environment = await hooks.environment()
     const outcomes = hooks.outcomes()
+    // A sync transcript costs no extra tick; a cold one (a disconnected dispatching parent) is awaited.
+    const transcript = hooks.messages()
     const result = await classify(
       {
-        messages: hooks.messages(),
+        messages: transcript instanceof Promise ? await transcript : transcript,
         action: {
           toolName,
           input: judgeInput,

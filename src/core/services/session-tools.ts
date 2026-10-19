@@ -75,6 +75,7 @@ import { createWorktree, validateWorktreeName } from './worktree'
 import { recordWorktreeEntry } from './worktree-detect'
 import { loadSessionConfig, saveSessionConfig } from './ui-config'
 import { logger } from './logger'
+import { DEFAULT_MODE_CLASS, modeClass } from '../../shared/mode-class'
 
 const LOG = 'SessionTools'
 
@@ -153,16 +154,6 @@ const ok = (text: string): SessionToolResult => ({ text })
 const refused = (text: string): SessionToolResult => ({ text: `Refused: ${text}`, isError: true })
 const failed = (text: string): SessionToolResult => ({ text, isError: true })
 
-/** plan < default < acceptEdits < auto < bypassPermissions (ADR-050's auto gate still applies). */
-const MODE_CLASS: Record<string, number> = {
-  plan: 0,
-  default: 1,
-  dontAsk: 1,
-  acceptEdits: 2,
-  auto: 3,
-  bypassPermissions: 4
-}
-
 /** The permission modes a started session may be given. */
 export const START_PERMISSION_MODES = [
   'plan',
@@ -172,13 +163,11 @@ export const START_PERMISSION_MODES = [
   'bypassPermissions'
 ] as const
 
-/** A mode's rank, or null for a mode this table does not know. */
-export function modeClass(mode: string | null | undefined): number | null {
-  return mode && Object.hasOwn(MODE_CLASS, mode) ? MODE_CLASS[mode] : null
-}
+// The ranking lives in a shared leaf (dispatch runs rank modes with it too).
+export { modeClass }
 
 function callerClass(caller: SessionToolCaller): number {
-  return modeClass(caller.permissionMode) ?? MODE_CLASS.default
+  return modeClass(caller.permissionMode) ?? DEFAULT_MODE_CLASS
 }
 
 function callerRef(caller: SessionToolCaller): string {

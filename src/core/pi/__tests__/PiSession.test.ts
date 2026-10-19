@@ -1257,7 +1257,9 @@ describe('PiSession — bridge abandonment cleanup', () => {
 
     abandon('hosted-tool', 'call_ab_disp', 'dispatch_agent')
 
-    expect(mockStopDispatch).toHaveBeenCalledWith('call_ab_disp', 'rid-abandon-5')
+    expect(mockStopDispatch).toHaveBeenCalledWith('call_ab_disp', 'rid-abandon-5', {
+      blockingOnly: true
+    })
 
     resolveDispatch!({ text: 'done', sessionId: 'oc-sess' })
     await hostedToolPromise
@@ -1345,7 +1347,10 @@ describe('PiSession.interrupt — propagates into an in-flight dispatch_agent tu
 
     await session.interrupt()
 
-    expect(mockStopDispatch).toHaveBeenCalledWith('call_di_1', 'rid-dispatch-interrupt-1')
+    // The parent's own interrupt ends the calls it awaits, never a background run (ADR-105).
+    expect(mockStopDispatch).toHaveBeenCalledWith('call_di_1', 'rid-dispatch-interrupt-1', {
+      blockingOnly: true
+    })
 
     // Let the dispatch settle so the test doesn't leave a dangling promise.
     resolveDispatch!({ text: 'done', sessionId: 'oc-sess' })
@@ -5222,6 +5227,23 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
       { engine: 'opencode', prompt: 'continue', model: 'openai/gpt-5', sessionId: 'prev-sess' },
       expect.anything()
     )
+  })
+
+  it('passes run_in_background through only when the model sets it true (ADR-105)', async () => {
+    mockDispatch.mockResolvedValue({ text: 'ok', sessionId: 'prev-sess' })
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-bg', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const input = { engine: 'opencode', prompt: 'go', run_in_background: true }
+    await grantViaApproval(win, session, 'call_dispatch_bg', input)
+    await hostedTool('dispatch_agent', input, 'call_dispatch_bg')
+    expect(mockDispatch.mock.calls.at(-1)![0]).toMatchObject({ runInBackground: true })
+
+    const plain = { engine: 'opencode', prompt: 'go', run_in_background: false }
+    await grantViaApproval(win, session, 'call_dispatch_fg', plain)
+    await hostedTool('dispatch_agent', plain, 'call_dispatch_fg')
+    expect(mockDispatch.mock.calls.at(-1)![0]).not.toHaveProperty('runInBackground')
   })
 
   it('an isError dispatch result passes through WITHOUT the session_id suffix', async () => {

@@ -274,9 +274,10 @@ export interface ISession {
   /**
    * Current permission-mode string (Claude-style — 'default'|'plan'|
    * 'acceptEdits'|'auto'|...). Optional: only engines whose sessions are a
-   * cross-engine dispatch CALLER need it (opencode, for ADR-033 M2 autonomy
-   * inheritance). Claude sessions build the dispatch context inline instead
-   * (see collab-tool.ts) and don't implement this.
+   * cross-engine dispatch CALLER need it (ADR-033 M2 autonomy inheritance). Since
+   * ADR-105 every caller engine implements it: a dispatch run reads its parent's
+   * mode through the session manager at each decision, not through the closure the
+   * launching call carried.
    */
   getAutonomyMode?(): string
 

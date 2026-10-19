@@ -2737,6 +2737,27 @@ describe('Codex cross-engine dispatch', () => {
     expect(dispatcher.dispatch).toHaveBeenCalledOnce()
   })
 
+  it('answers its CURRENT permission mode, for a dispatch run launched earlier to read (ADR-105)', async () => {
+    const f = fixture({ permissionMode: 'acceptEdits' })
+    await f.session.run('hello')
+    expect(f.session.getAutonomyMode()).toBe('acceptEdits')
+  })
+
+  it('hands run_in_background to the dispatcher only when set true, and shows it on the approval card (ADR-105)', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    const { result } = dispatchCall(f, {
+      engine: 'pi',
+      prompt: 'run the tests',
+      run_in_background: true
+    })
+    const card = f.cards().at(-1)!
+    expect(card.input).toMatchObject({ run_in_background: true })
+    f.session.resolveApproval(card.requestId, 'allow')
+    await result
+    expect(dispatcher.dispatch.mock.calls.at(-1)![0]).toMatchObject({ runInBackground: true })
+  })
+
   it('hands the dispatcher the exact request and a context bound to the call id', async () => {
     const f = fixture({ permissionMode: 'acceptEdits' })
     await f.session.run('hello')
@@ -2949,9 +2970,11 @@ describe('Codex cross-engine dispatch', () => {
     f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
     await vi.waitFor(() => expect(dispatcher.dispatch).toHaveBeenCalled())
     await f.session.interrupt()
+    // The parent's own interrupt ends the calls it awaits, never a background run (ADR-105).
     expect(dispatcher.stopDispatch).toHaveBeenCalledWith(
       'codex:["root","turn","dispatch-1"]',
-      'temporary'
+      'temporary',
+      { blockingOnly: true }
     )
     f.session.dispose()
     expect(dispatcher.disposeFor).toHaveBeenCalledWith('temporary')

@@ -203,6 +203,8 @@ export function dispatchTaskView(input: {
   model?: unknown
   name?: unknown
   description?: unknown
+  /** `run_in_background` (ADR-105): the card reads a background X-Agent like a background agent. */
+  runInBackground?: unknown
 }): Extract<ToolView, { kind: 'task' }> {
   const model = input.model != null ? String(input.model) : undefined
   const name = typeof input.name === 'string' ? input.name.trim() : ''
@@ -212,6 +214,7 @@ export function dispatchTaskView(input: {
     description: description || `Dispatch: ${input.engine}`,
     prompt: input.prompt != null ? String(input.prompt) : '',
     ...(name ? { name } : {}),
+    ...(input.runInBackground === true ? { background: true } : {}),
     dispatch: { engine: input.engine, ...(model ? { model } : {}) }
   }
 }

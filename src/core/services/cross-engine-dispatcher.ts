@@ -208,6 +208,9 @@ import {
   type DispatchTargetState
 } from './dispatch-target-ledger'
 import { locateClaudeTranscript } from './claude-transcript-locator'
+import { stricterMode } from '../../shared/mode-class'
+import { DispatchRun, DispatchRunRegistry } from './dispatch-runs'
+import { makeRunContext, type DispatchParentLookup, type RunContext } from './dispatch-parent'
 import type {
   ApprovalDecision,
   BillingType,
@@ -267,6 +270,12 @@ export interface DispatchContext {
    */
   getMessages: () => ChatMessage[]
   /**
+   * The same transcript for the judge, which may wait for it: a live-parent facade
+   * (ADR-105) reads the engine's own history when the parent is disconnected and its
+   * canonical copy was evicted. Absent on a plain call context: `getMessages()` then.
+   */
+  loadMessages?: () => Promise<ChatMessage[]>
+  /**
    * The DISPATCHING session's still-queued user turns
    * (`BaseSession.queuedUserTurns`), read live — merged in time order into
    * that judge's transcript (ADR-091 §4): a "go ahead" typed while the parent
@@ -321,6 +330,11 @@ export interface DispatchContext {
    * with; a continuation cannot loosen it.
    */
   callerRestriction?: CallerRestriction
+  /**
+   * The launching MCP request's handle. Only the BLOCKING form reads it: its abort stops
+   * the run (Esc on a waiting call) and its progress token gets the heartbeat. A run never
+   * holds it (ADR-105 §2): a background launch ignores it.
+   */
   extra?: SdkToolExtra
 }
 
@@ -333,6 +347,12 @@ export interface DispatchRequest {
   name?: string
   /** The caller's short summary of the task (ADR-105); stored the same way. */
   description?: string
+  /**
+   * Launch the run in the background (ADR-105 §2): the call returns at once with the
+   * X-Agent's id, and the result arrives on its task record. Absent / false waits for
+   * the result, as dispatch always did.
+   */
+  runInBackground?: boolean
 }
 
 /** The two labels a dispatch may carry onto its ledger row. */
@@ -605,6 +625,14 @@ export interface DispatcherDeps {
    * operational-DB store; tests inject a fake to stay off the DB.
    */
   ledger?: DispatchLedgerStore
+  /**
+   * How a run reaches its dispatching session (ADR-105 §1): events, the judge's mode and
+   * transcript, blocked calls and cost are resolved through it AT EACH READ, so a run
+   * outlives the call that launched it. Wired from `core-services.ts` (a service module
+   * cannot import the session manager); absent, a run uses the launching call's own
+   * context, which is what the unit suites' doubles are.
+   */
+  parents?: DispatchParentLookup
   /**
    * Where a Claude transcript lives (a resume must not `--resume` a missing one).
    * Defaults to `locateClaudeTranscript`.
@@ -1022,7 +1050,7 @@ interface ClaudeTargetEntry extends TargetLedgerFields {
    * `next()` (turn A could consume turn B's `result` — answers cross). A
    * model CAN issue two dispatch_agent calls with the same session_id in one
    * assistant turn (their MCP handlers run concurrently — the same race the
-   * activeDispatches slot reservation guards), so a busy target REJECTS the
+   * run registry's slot reservation guards), so a busy target REJECTS the
    * second call instead of interleaving (reject, don't queue: queueing hides
    * latency and muddies timeout attribution; the model can just retry).
    */
@@ -1421,13 +1449,21 @@ interface ForwardedBlockHold {
   toolUseId: string
   judge: DispatchTargetJudge
   /** The dispatching session's ledger the block is recorded in (ADR-091 part 6). */
-  ledger?: BlockedCallLedger
+  ledger: () => BlockedCallLedger | undefined
   cancel: () => void
 }
 
 type PendingForwardedApproval = (
   OpencodePendingApproval | ClaudePendingApproval | PiPendingApproval | CodexPendingApproval
-) & { hold?: ForwardedBlockHold }
+) & {
+  hold?: ForwardedBlockHold
+  /**
+   * The card exactly as the parent was shown it. A pending approval outlives its
+   * parent's session object (a background run's ask stays pending across a respawn), so
+   * the dispatcher has to be able to put the card back: it is kept, not rebuilt.
+   */
+  card: PendingApproval
+}
 
 /**
  * A pi/opencode target's judge block that stands — Keep blocked, its expiry,
@@ -2004,26 +2040,57 @@ function emitDispatchProgress(ctx: DispatchContext, elapsedTimeSeconds: number):
 }
 
 /**
+ * The run's `session:task-started` (ADR-105 §2): the same lifecycle the parent's own
+ * background agents have, so the card, the roster and the attention gate read a
+ * dispatch the way they read an agent. `taskId` is the X-Agent's ledger id.
+ */
+function emitDispatchTaskStarted(
+  ctx: RunContext,
+  ledgerId: string,
+  description: string | undefined
+): void {
+  if (!ctx.toolUseId) return
+  ctx.emit('session:task-started', {
+    toolUseId: ctx.toolUseId,
+    taskId: ledgerId,
+    taskType: 'dispatch',
+    ...(description ? { description } : {}),
+    isBackgrounded: ctx.run.background,
+    // A blocking run's end is its tool_result. A background run's end wakes nothing until
+    // B-3 delivers its result into the parent (and flips this to true): while the record
+    // is armed with `wakesParent`, the attention gate holds back "Ready for input".
+    wakesParent: !ctx.run.background,
+    startedAt: ctx.run.init.startedAt
+  })
+}
+
+/**
  * Final completion signal for a dispatch (ADR-033 M3) — mirrors
  * ClaudeSession's `session:task-notification` shape exactly (TaskCard reads
  * both identically). `usage` (ADR-033 M4-B) is populated only on paths that
  * have real per-turn numbers (success outcomes) — timeouts/stops/errors pass
  * it undefined rather than fabricate zeros for a turn that never returned.
+ *
+ * `taskId` is the run's ledger id (ADR-105). `summary` is the FULL text for a
+ * background run — this record is the only place its result appears until B-3
+ * delivers it into the parent. A blocking run keeps the short summary: its
+ * tool_result already carries the text, and the record rides every sync-full.
  */
 function emitDispatchNotification(
-  ctx: DispatchContext,
+  ctx: RunContext,
   targetSessionId: string,
   status: 'completed' | 'failed' | 'stopped',
   summary: string,
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
 ): void {
+  ctx.run.notified = true
   if (!ctx.toolUseId) return
   ctx.emit('session:task-notification', {
-    taskId: targetSessionId,
+    taskId: ctx.run.ledgerId ?? targetSessionId,
     toolUseId: ctx.toolUseId,
     status,
     outputFile: '',
-    summary: summary.slice(0, 100),
+    summary: ctx.run.background ? summary : summary.slice(0, 100),
     usage
   })
 }
@@ -2321,17 +2388,16 @@ export class CrossEngineDispatcher {
   private resuming = new Set<string>()
   /** Keyed by prefixed requestId ('xeng:<id>'). */
   private pendingApprovals = new Map<string, PendingForwardedApproval>()
-  private activeDispatches = 0
   /**
-   * One entry per turn currently in flight, keyed by the dispatching tool_use
-   * id (ADR-033 M3 — `stopDispatch`/TaskCard's Stop button). Populated for the
-   * duration of `resolveAndRunClaude`/`resolveAndRunOpencode` ONLY when
-   * `ctx.toolUseId` is set (an id-less dispatch cannot be targeted by Stop —
-   * there is no way to key it from the renderer either). Removed in that
-   * call's `finally`, so a stale id can never resolve to a dead turn.
-   * `fromRoutingId` scopes Stop to the OWNING session — see `stopDispatch`.
+   * Every run in flight (ADR-105 §2), by ledger id and by launching tool_use id, for
+   * the run's whole life: `stopDispatch` resolves a run through it, and the
+   * concurrency cap counts its size. Replaces the per-call `activeByToolUseId` /
+   * `activeDispatches` pair, which died with the call frame.
    */
-  private activeByToolUseId = new Map<string, { fromRoutingId: string; stop: () => void }>()
+  private readonly runs = new DispatchRunRegistry()
+  /** How runs reach their dispatching session; see {@link DispatcherDeps.parents}. */
+  private parents: DispatchParentLookup | undefined
+  private unsubscribeRekey: () => void = (): void => {}
   /**
    * Durable stop-intents (ADR-033 M3), keyed by dispatching tool_use id.
    * Closes the LAST stop race window — the one UPSTREAM of the dispatcher:
@@ -2340,7 +2406,7 @@ export class CrossEngineDispatcher {
    * tools/call HTTP round-trip + handler prelude can take much longer, so a
    * Stop click can arrive before `dispatch()` is even invoked and NO
    * registration timing inside the dispatcher can win it. `stopDispatch`
-   * with `armIfUnknown` records the intent here; `dispatchInner` consumes it
+   * with `armIfUnknown` records the intent here; `launchRun` consumes it
    * at stop-handle registration and aborts immediately. Entries lazy-expire
    * (checked on consume; purged whenever a new one is armed — no timer).
    */
@@ -2367,11 +2433,39 @@ export class CrossEngineDispatcher {
     this.codexHoldsThread =
       deps.codexHoldsThread ?? ((threadId) => codexHostRegistry.holdsThread(threadId))
     this.piSessionDirExists = deps.piSessionDirExists ?? existsSync
+    this.parents = deps.parents
   }
 
-  /** For tests: current in-flight dispatch count. */
+  /**
+   * Wire how runs reach their dispatching session (the singleton is built at module
+   * load, before the session manager exists) and follow its re-keys: a run's parent id
+   * is cached, never read from the ledger per event. Returns the unsubscribe.
+   */
+  configureParents(
+    parents: DispatchParentLookup,
+    onRekey?: (observer: (oldId: string, newId: string) => void) => () => void
+  ): () => void {
+    this.releaseParents()
+    this.parents = parents
+    this.unsubscribeRekey =
+      onRekey?.((oldId, newId) => this.runs.rekey(oldId, newId)) ?? ((): void => {})
+    return () => this.releaseParents()
+  }
+
+  /** Stop following the previous wiring's rekeys (a reconfigure, or the host's teardown). */
+  private releaseParents(): void {
+    this.unsubscribeRekey()
+    this.unsubscribeRekey = (): void => {}
+  }
+
+  /** A re-keyed parent's old id now means its durable one (also what `configureParents` wires). */
+  noteParentRekey(oldId: string, newId: string): void {
+    this.runs.rekey(oldId, newId)
+  }
+
+  /** For tests: current in-flight dispatch count (runs registered). */
   get inFlightCount(): number {
-    return this.activeDispatches
+    return this.runs.size
   }
 
   /**
@@ -2426,7 +2520,7 @@ export class CrossEngineDispatcher {
    * target could neither be hidden nor resumed).
    */
   private recordTarget(
-    ctx: DispatchContext,
+    ctx: RunContext,
     spec: {
       engine: EngineId
       harnessRef: string
@@ -2436,7 +2530,7 @@ export class CrossEngineDispatcher {
       labels?: DispatchLabels
     }
   ): DispatchTargetRow {
-    return this.ledger.create({
+    const row = this.ledger.create({
       engine: spec.engine,
       harnessRef: spec.harnessRef,
       parentSessionId: ctx.fromRoutingId,
@@ -2451,6 +2545,49 @@ export class CrossEngineDispatcher {
       name: labelOf(spec.labels?.name),
       description: labelOf(spec.labels?.description)
     })
+    ctx.run.createdTarget = true
+    this.bindRun(ctx, row.id, row.harnessRef, row)
+    return row
+  }
+
+  /** A continuation's target is known (and accepted): the run answers to its existing row. */
+  private bindContinuation(
+    ctx: RunContext,
+    cont: { live: TargetEntry } | { row: DispatchTargetRow }
+  ): void {
+    if ('row' in cont) {
+      this.bindRun(ctx, cont.row.id, cont.row.harnessRef, cont.row)
+      return
+    }
+    let row: DispatchTargetRow | undefined
+    try {
+      row = this.ledger.get(cont.live.ledgerId)
+    } catch {
+      row = undefined
+    }
+    this.bindRun(ctx, cont.live.ledgerId, cont.live.sessionId ?? '', row)
+  }
+
+  /**
+   * The run's target is known (its ledger row exists): the run answers to the row's id
+   * from here on, announces itself to the parent as a task, and a background launch may
+   * return. Called at the last point a launch can still be REFUSED synchronously — after
+   * that, a failure ends the run `failed` (a notification) instead of failing the call.
+   */
+  private bindRun(
+    ctx: RunContext,
+    ledgerId: string,
+    harnessId: string,
+    row?: Pick<DispatchTargetRow, 'launchMode'>
+  ): void {
+    const { run } = ctx
+    if (run.bound) return
+    // A parent whose engine is down is judged under the mode the target LAUNCHED under (the
+    // row's) — but never a looser one than this call's own, which a parent that tightened
+    // since the launch has just made: a continuation does not loosen it either way.
+    if (row) run.launchMode = stricterMode(row.launchMode, run.init.launchMode)
+    this.runs.bind(run, ledgerId, harnessId)
+    emitDispatchTaskStarted(ctx, ledgerId, run.init.description)
   }
 
   /**
@@ -2606,33 +2743,43 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * Stop a running dispatch by its dispatching tool_use id (ADR-033 M3 —
+   * Stop a running dispatch by its launching tool_use id OR its ledger id (ADR-033 M3 —
    * TaskCard's Stop button, routed here BEFORE the session's own stopTask by
-   * the `session:stop-task` IPC handler). Returns false for an unknown id
-   * (not a dispatch, or already finished) — the caller falls through to the
-   * session's normal stop path in that case.
+   * the `session:stop-task` IPC handler). The run is found in the registry for its
+   * whole life (ADR-105 §2), so a Stop lands on a background run long after its launch
+   * call returned. Returns false for an unknown id (not a dispatch, or already
+   * finished) — the caller falls through to the session's normal stop path in that case.
    *
    * `routingId`, when provided (both IPC call sites pass it), must match the
-   * DISPATCHING session that started the turn — the native stopTask path is
-   * implicitly session-scoped via `manager.get(routingId)`, and without this
-   * check any session (including a remote client on a different session)
-   * could stop a dispatch it doesn't own. On mismatch we return false; the
+   * DISPATCHING session that started the run (its durable id: a re-key is followed) —
+   * the native stopTask path is implicitly session-scoped via `manager.get(routingId)`,
+   * and without this check any session (including a remote client on a different
+   * session) could stop a dispatch it doesn't own. On mismatch we return false; the
    * caller falls through to the session path, which won't know the id either.
    *
    * `opts.armIfUnknown` (set when the RENDERER knows the card is a dispatch —
    * TaskCard's `isDispatch`): on a registry miss, record a durable stop-intent
    * in `pendingStops` and return true — the dispatch may not have been invoked
-   * yet (see the pendingStops field doc); `dispatchInner` consumes the intent
-   * at registration and aborts the turn immediately.
+   * yet (see the pendingStops field doc); `launchRun` consumes the intent
+   * at registration and aborts the run immediately.
+   *
+   * `opts.blockingOnly` is the parent's OWN interrupt (Esc, pi's and Codex's interrupt):
+   * it ends the blocking calls the parent is waiting on and never a background run,
+   * which is the user's to stop from its card.
    */
-  stopDispatch(toolUseId: string, routingId?: string, opts?: { armIfUnknown?: boolean }): boolean {
-    const active = this.activeByToolUseId.get(toolUseId)
-    if (!active) {
+  stopDispatch(
+    id: string,
+    routingId?: string,
+    opts?: { armIfUnknown?: boolean; blockingOnly?: boolean }
+  ): boolean {
+    const toolUseId = id
+    const run = this.runs.find(id)
+    if (!run) {
       // Not necessarily an error (most stop-task calls target native tasks) —
       // but when a dispatch stop misroutes, this is the breadcrumb.
       logger.debug(
         'CrossEngineDispatcher',
-        `stopDispatch miss: toolUseId=${toolUseId} not in [${[...this.activeByToolUseId.keys()].join(', ')}]`
+        `stopDispatch miss: id=${id} not among ${this.runs.size} run(s)`
       )
       if (opts?.armIfUnknown) {
         // Purge expired intents whenever a new one is armed (no timer).
@@ -2652,20 +2799,34 @@ export class CrossEngineDispatcher {
       }
       return false
     }
-    if (routingId !== undefined && active.fromRoutingId !== routingId) {
+    if (
+      routingId !== undefined &&
+      this.runs.parentOf(run.init.parentId) !== this.runs.parentOf(routingId)
+    ) {
       logger.debug(
         'CrossEngineDispatcher',
-        `stopDispatch ownership mismatch: routingId=${routingId} owner=${active.fromRoutingId}`
+        `stopDispatch ownership mismatch: routingId=${routingId} owner=${run.init.parentId}`
       )
       return false
     }
-    active.stop()
+    // The parent's own interrupt ends the calls it is waiting on, never a background run.
+    if (opts?.blockingOnly && run.background) return false
+    run.stopController.abort()
     return true
   }
 
   async dispatch(req: DispatchRequest, ctx: DispatchContext): Promise<DispatchResult> {
     try {
-      return await this.dispatchInner(req, ctx)
+      const launch = this.launchRun(req, ctx)
+      if ('refused' in launch) return launch.refused
+      const { run } = launch
+      // The blocking form waits for the run — the contract every caller had before.
+      if (!run.background) return await run.done
+      // A background launch returns as soon as the target's row exists and the run goes on
+      // by itself. A run that ends first (a refusal, a target that would not start) is its
+      // own answer: the call fails, nothing was launched.
+      await Promise.race([run.launched, run.done])
+      return run.bound ? this.launchAck(run, req) : await run.done
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       logger.warn('CrossEngineDispatcher', `dispatch failed: ${msg}`)
@@ -2673,7 +2834,17 @@ export class CrossEngineDispatcher {
     }
   }
 
-  private async dispatchInner(req: DispatchRequest, ctx: DispatchContext): Promise<DispatchResult> {
+  /**
+   * Validate a launch synchronously and start its run (ADR-105 §2): engine, guards,
+   * caller restriction, slot cap, name uniqueness, the harness being installed (a
+   * background launch). Returns the refusal, or the registered run; nothing past the
+   * registration awaits before the slot is held.
+   */
+  private launchRun(
+    req: DispatchRequest,
+    callCtx: DispatchContext
+  ): { run: DispatchRun } | { refused: DispatchResult } {
+    let ctx = callCtx
     // ── Guards ────────────────────────────────────────────────────────────
     // ADR-069 §7 lifts this for CODEX alone: a codex → codex dispatch is one more
     // `thread/start` on the process the caller is already running on, which is
@@ -2681,10 +2852,12 @@ export class CrossEngineDispatcher {
     // dispatch. Every other engine still pays a whole server or CLI for a
     // same-engine target and still has a native subagent of its own.
     if (req.engine === ctx.fromEngine && req.engine !== 'codex') {
-      return errorResult(
-        `dispatch_agent targets a different engine — this session already runs on "${ctx.fromEngine}". ` +
-          'Use your own tools (or a native subagent) for same-engine work.'
-      )
+      return {
+        refused: errorResult(
+          `dispatch_agent targets a different engine — this session already runs on "${ctx.fromEngine}". ` +
+            'Use your own tools (or a native subagent) for same-engine work.'
+        )
+      }
     }
     if (
       req.engine !== 'opencode' &&
@@ -2692,7 +2865,9 @@ export class CrossEngineDispatcher {
       req.engine !== 'pi' &&
       req.engine !== 'codex'
     ) {
-      return errorResult(`Dispatching into engine "${req.engine}" is not supported yet.`)
+      return {
+        refused: errorResult(`Dispatching into engine "${req.engine}" is not supported yet.`)
+      }
     }
     // A continuation keeps the restriction its target was created with, and
     // may not loosen it: a caller restricted further than the target was
@@ -2702,66 +2877,108 @@ export class CrossEngineDispatcher {
       const held = this.heldRestriction({ ...req, sessionId: req.sessionId }, ctx)
       if (held || ctx.callerRestriction) {
         if (!restrictionCovers(held, ctx.callerRestriction)) {
-          return errorResult(
-            `Dispatch session "${req.sessionId}" was started without the calling subagent's restrictions — ` +
-              'start a fresh dispatch without session_id.',
-            req.sessionId
-          )
+          return {
+            refused: errorResult(
+              `Dispatch session "${req.sessionId}" was started without the calling subagent's restrictions — ` +
+                'start a fresh dispatch without session_id.',
+              req.sessionId
+            )
+          }
         }
         ctx = { ...ctx, callerRestriction: mergeRestrictions(held, ctx.callerRestriction) }
+      }
+    }
+    const background = req.runInBackground === true
+    // A run is shown, stopped and reported through its launching tool call's card: with no
+    // call id there is no card, no record and nowhere for its result to go.
+    if (background && !ctx.toolUseId) {
+      return {
+        refused: errorResult(
+          'A background dispatch needs the id of the tool call that launches it, and this call ' +
+            'carries none. Call dispatch_agent without run_in_background to wait for the result.'
+        )
+      }
+    }
+    // A background launch returns before the harness has been touched, so the cheap
+    // "is it even installed" answer has to come now (a blocking call fails on its spawn).
+    if (background && !harnessAvailable(req.engine)) {
+      return {
+        refused: errorResult(
+          `Cannot launch a ${req.engine} X-Agent: the ${req.engine} harness is not installed or not usable. ` +
+            'Ask the user to check Settings › Harnesses.'
+        )
       }
     }
     // Read the cap HERE, not in the constructor: the user can raise it in
     // Settings mid-run and the next dispatch has to honour the new number.
     // `Infinity` (the "no limit" pick) can never satisfy the comparison, so the
-    // refusal text below never has to render it.
+    // refusal text below never has to render it. The cap counts RUNS (a background
+    // run holds its slot after its launch call has returned), and a launch over it is
+    // refused, never queued (ADR-105).
     const maxConcurrent = this.resolveMaxConcurrent()
-    if (this.activeDispatches >= maxConcurrent) {
-      return errorResult(
-        `Too many concurrent dispatches (max ${maxConcurrent}). Wait for one to finish and retry, ` +
-          'or raise "Max concurrent dispatches" in Settings › Cross-engine dispatch ' +
-          '(0 means no limit).'
-      )
+    if (this.runs.size >= maxConcurrent) {
+      return {
+        refused: errorResult(
+          `Too many concurrent dispatches (max ${maxConcurrent}). Wait for one to finish and retry, ` +
+            'or raise "Max concurrent dispatches" in Settings › Cross-engine dispatch ' +
+            '(0 means no limit).'
+        )
+      }
+    }
+    // A new X-Agent's name is unique among its parent's children that are not stopped
+    // (ADR-105 §1); an absent name is never checked.
+    const name = req.sessionId ? null : labelOf(req.name)
+    if (name) {
+      const held = this.nameHeldBy(ctx.fromRoutingId, name)
+      if (held) {
+        return {
+          refused: errorResult(
+            `The name "${name}" is already held by ${held.id ? `X-Agent ${held.id}` : 'an X-Agent still being launched'}` +
+              `${held.state ? ` (${held.state})` : ''}. Choose a different name.`
+          )
+        }
+      }
     }
 
     // A continuation of a target the ledger will rebuild (ADR-105) holds its name
-    // here, synchronously, until the call ends: a second call naming the same session
+    // here, synchronously, until the run ends: a second call naming the same session
     // meanwhile is busy-rejected rather than resuming it twice.
     const resumingRef = req.sessionId && !this.targets.has(req.sessionId) ? req.sessionId : null
     if (resumingRef) {
       if (this.resuming.has(resumingRef)) {
-        return errorResult(
-          `Dispatch session "${resumingRef}" is already running a turn — wait for it to finish before continuing it.`,
-          resumingRef
-        )
+        return {
+          refused: errorResult(
+            `Dispatch session "${resumingRef}" is already running a turn — wait for it to finish before continuing it.`,
+            resumingRef
+          )
+        }
       }
       this.resuming.add(resumingRef)
     }
 
-    // Reserve the slot SYNCHRONOUSLY, before the first await: Claude can issue
-    // several dispatch_agent calls in one assistant turn, whose handlers run
-    // concurrently — checking the cap without reserving would let them all
-    // pass. Every path from here on releases the slot via the finally below.
-    this.activeDispatches++
-
-    // Register the Stop handle IMMEDIATELY — before ANY await (ADR-033 M3).
-    // TaskCard's Stop button is clickable as soon as the dispatch tool part
-    // renders "running" (opencode marks it running when ctx.ask resolves),
-    // which is potentially SECONDS before model resolution + target creation
-    // finish (a cold opencode server spawn can take seconds). Registering
-    // inside resolveAndRun* left that whole window unstoppable — the stop
-    // missed the registry, fell through to the session path, and the dispatch
-    // ran to completion (live-reproduced). A stop landing during target
-    // creation aborts the controller PRE-race; both directions' race arms
-    // handle that via `signal.aborted ? Promise.resolve({kind:'stop'}) : …`,
-    // so the turn still ends in the 'stopped' branch (isError + notification)
-    // the moment the race starts. Deleted in the finally below on every path.
-    const stopController = new AbortController()
+    // Register the run SYNCHRONOUSLY, before the first await: Claude can issue several
+    // dispatch_agent calls in one assistant turn, whose handlers run concurrently —
+    // checking the cap without reserving would let them all pass. The registry entry
+    // is the slot, the Stop handle and the lookup by tool_use id at once (ADR-033 M3):
+    // TaskCard's Stop button is clickable as soon as the dispatch tool part renders
+    // "running", potentially SECONDS before target creation finishes (a cold opencode
+    // server spawn), and a stop landing then aborts the controller PRE-race — every
+    // direction's race arm handles that via `signal.aborted ? Promise.resolve({kind:
+    // 'stop'}) : …`, so the turn still ends in the 'stopped' branch (isError +
+    // notification) the moment the race starts. Removed when the run ends, on every path.
+    const run = new DispatchRun({
+      parentId: ctx.fromRoutingId,
+      toolUseId: ctx.toolUseId,
+      background,
+      engine: req.engine,
+      name,
+      description: labelOf(req.description) ?? name ?? undefined,
+      continuation: !!req.sessionId,
+      launchMode: liveMode(ctx),
+      startedAt: this.now()
+    })
+    this.runs.add(run)
     if (ctx.toolUseId) {
-      this.activeByToolUseId.set(ctx.toolUseId, {
-        fromRoutingId: ctx.fromRoutingId,
-        stop: () => stopController.abort()
-      })
       // Consume a durable stop-intent armed BEFORE this dispatch was invoked
       // (the renderer's Stop can be clicked before the MCP tools/call even
       // reaches us — see the pendingStops field doc). Consumed regardless of
@@ -2777,20 +2994,158 @@ export class CrossEngineDispatcher {
             'CrossEngineDispatcher',
             `consuming pending stop-intent for toolUseId=${ctx.toolUseId} — aborting at start`
           )
-          stopController.abort()
+          run.stopController.abort()
         }
       }
     }
 
     try {
-      if (req.engine === 'claude') return await this.resolveAndRunClaude(req, ctx, stopController)
-      if (req.engine === 'pi') return await this.resolveAndRunPi(req, ctx, stopController)
-      if (req.engine === 'codex') return await this.resolveAndRunCodex(req, ctx, stopController)
-      return await this.resolveAndRunOpencode(req, ctx, stopController)
-    } finally {
-      this.activeDispatches--
-      if (ctx.toolUseId) this.activeByToolUseId.delete(ctx.toolUseId)
+      const runCtx = makeRunContext({
+        base: ctx,
+        run,
+        registry: this.runs,
+        parents: this.parents,
+        launchMode: () => run.launchMode,
+        now: () => this.now()
+      })
+      // The request that launched a BLOCKING call is the only thing that may reach into the
+      // run: its abort ends the run, its progress token gets the heartbeat.
+      const release = background ? (): void => {} : this.followCaller(run, ctx.extra)
+      run.done = this.executeRun(req, runCtx, () => {
+        release()
+        if (resumingRef) this.resuming.delete(resumingRef)
+      })
+    } catch (err) {
+      // Nothing past here may leak the slot (the run's own end frees it otherwise).
+      this.runs.remove(run)
       if (resumingRef) this.resuming.delete(resumingRef)
+      throw err
+    }
+    return { run }
+  }
+
+  /** Is `name` held by one of the parent's children that is not stopped (or one being launched)? */
+  private nameHeldBy(
+    parentId: string,
+    name: string
+  ): { id: string | null; state: DispatchTargetState | null } | undefined {
+    const launching = this.runs.holdingName(parentId, name)
+    if (launching) return { id: launching.ledgerId, state: null }
+    let rows: DispatchTargetRow[] = []
+    try {
+      rows = this.ledger.byParent(this.runs.parentOf(parentId))
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `dispatch ledger lookup failed: ${errText(err)}`)
+    }
+    // A name belongs to a LIVE child: running, idle, or interrupted (still that agent, and
+    // resumable). A `failed` target never ran (or ended unusable) and a `stopped` one is
+    // over; either frees its name, so the retry of a launch that failed reuses it.
+    const row = rows.find(
+      (r) =>
+        r.name === name &&
+        (r.state === 'running' || r.state === 'idle' || r.state === 'interrupted')
+    )
+    return row ? { id: row.id, state: row.state } : undefined
+  }
+
+  /**
+   * Tie a BLOCKING run to the MCP request that is waiting on it: the request's abort
+   * (Esc on the waiting call, a cancelled tools/call, teardown) abandons the run, and
+   * the heartbeat pings the request's progress token so the caller's call timeout keeps
+   * resetting. Returns the detach.
+   */
+  private followCaller(run: DispatchRun, extra: SdkToolExtra | undefined): () => void {
+    if (!extra) return () => {}
+    run.onHeartbeat = (beats): void => {
+      void sendProgress(extra, {
+        progress: beats,
+        message: 'Dispatched agent is still working…'
+      }).catch(() => {})
+    }
+    const signal = extra.signal
+    if (!signal) return () => {}
+    if (signal.aborted) {
+      run.cancelController.abort()
+      return () => {}
+    }
+    const onAbort = (): void => run.cancelController.abort()
+    signal.addEventListener('abort', onAbort, { once: true })
+    return () => signal.removeEventListener('abort', onAbort)
+  }
+
+  /**
+   * Drive one run to its end and settle it: the target engine's body, then the task
+   * lifecycle's last word, then the slot. Never rejects.
+   */
+  private async executeRun(
+    req: DispatchRequest,
+    ctx: RunContext,
+    cleanup: () => void
+  ): Promise<DispatchResult> {
+    const { run } = ctx
+    let result: DispatchResult
+    try {
+      result = await this.runBody(req, ctx)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      logger.warn('CrossEngineDispatcher', `dispatch run failed: ${msg}`)
+      result = errorResult(`Dispatch failed: ${msg}`, req.sessionId ?? '')
+    }
+    try {
+      this.closeRun(ctx, result)
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `dispatch run close failed: ${errText(err)}`)
+    } finally {
+      this.runs.remove(run)
+      cleanup()
+    }
+    return result
+  }
+
+  private runBody(req: DispatchRequest, ctx: RunContext): Promise<DispatchResult> {
+    const stop = ctx.run.stopController
+    if (req.engine === 'claude') return this.resolveAndRunClaude(req, ctx, stop)
+    if (req.engine === 'pi') return this.resolveAndRunPi(req, ctx, stop)
+    if (req.engine === 'codex') return this.resolveAndRunCodex(req, ctx, stop)
+    return this.resolveAndRunOpencode(req, ctx, stop)
+  }
+
+  /**
+   * A run whose target was announced (the task record exists) must end its record. A turn
+   * body does that itself on every path it handles; one that failed before or between
+   * turns (a spawn that would not start, a resume that failed, an unexpected throw) did
+   * not, so the run ends `failed` here and a target it created is marked so in the ledger.
+   */
+  private closeRun(ctx: RunContext, result: DispatchResult): void {
+    const { run } = ctx
+    if (!run.bound || run.notified) return
+    emitDispatchNotification(
+      ctx,
+      run.harnessId ?? '',
+      result.isError ? 'failed' : 'completed',
+      result.text
+    )
+    if (result.isError && run.createdTarget && run.ledgerId)
+      this.ledgerSet(run.ledgerId, { state: 'failed' })
+  }
+
+  /** What a background launch answers: the X-Agent's identities, not its result. */
+  private launchAck(run: DispatchRun, req: DispatchRequest): DispatchResult {
+    const ledgerId = run.ledgerId ?? ''
+    const harnessId = run.harnessId ?? ''
+    let row: DispatchTargetRow | undefined
+    try {
+      row = this.ledger.get(ledgerId)
+    } catch {
+      row = undefined
+    }
+    const label = row?.name ?? run.init.name ?? ledgerId
+    return {
+      text:
+        `X-Agent ${label} launched on ${req.engine}${row ? ` · ${row.model}` : ''} ` +
+        `(id ${ledgerId}, session_id ${harnessId}). It runs in the background; its result ` +
+        'appears on its agent card and is not returned to you here.',
+      sessionId: harnessId
     }
   }
 
@@ -2826,7 +3181,7 @@ export class CrossEngineDispatcher {
       } else {
         hold.judge.recordHoldApproved()
         // The review reads "approved by you" (ADR-091 part 6).
-        hold.ledger?.approveHeld(hold.toolUseId)
+        hold.ledger()?.approveHeld(hold.toolUseId)
         answer = { decision: 'allow', answers: undefined }
       }
     }
@@ -2853,16 +3208,28 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * Release every target (+ feeds / server leases) a dispatching session owns
-   * (ADR-105). The process goes; the harness session stays, and the ledger row says
-   * how it was left: `idle` for a target between turns — its parent's next
-   * continuation resumes it — and `interrupted` for one whose turn was in flight (in B-1
-   * that turn still ends with its parent; running survival is B-2).
+   * A dispatching session's object is going away (cancel, respawn, Disconnect): split
+   * what it owns three ways (ADR-105 §5).
+   *
+   *  - A BACKGROUND run keeps running. It belongs to the parent's durable id, not to the
+   *    object that is dying; its facade finds the parent's next object by itself. Nothing
+   *    of it is dismissed, settled or killed here.
+   *  - An IDLE target is released (+ feeds / server leases). The process goes; the
+   *    harness session stays, and the ledger row says `idle` — its parent's next
+   *    continuation resumes it.
+   *  - A BLOCKING run (a call someone is waiting on) ends with its consumer: the
+   *    waiting MCP request or hosted-tool call is gone. Its row says `interrupted`.
+   *
+   * The generation bump only matters to blocking runs: a target created across a dispose
+   * is rolled back for them, never for a background run.
    */
   disposeFor(routingId: string): void {
-    this.disposals.set(routingId, (this.disposals.get(routingId) ?? 0) + 1)
+    // Keyed by the durable id: a creation reads it under the id its facade answers to.
+    const parent = this.runs.parentOf(routingId)
+    this.disposals.set(parent, (this.disposals.get(parent) ?? 0) + 1)
     for (const [sessionId, entry] of [...this.targets]) {
       if (!this.ownedBy(entry, routingId)) continue
+      if (entry.busy && this.runs.byLedgerId(entry.ledgerId)?.background) continue
       this.targets.delete(sessionId)
       this.dismissPendingForTarget(sessionId)
       entry.released = true
@@ -2902,7 +3269,7 @@ export class CrossEngineDispatcher {
         //
         // A turn still in flight has to be settled HERE: the process no longer
         // dies, so no `onDisconnect` will do it, and the dispatch would hold its
-        // `activeDispatches` slot until the watchdog fired.
+        // run slot until the watchdog fired.
         if (entry.sessionId && entry.turnId)
           void entry.connection
             .request('turn/interrupt', { threadId: entry.sessionId, turnId: entry.turnId })
@@ -2918,8 +3285,8 @@ export class CrossEngineDispatcher {
   // ── opencode direction (M1, opencode 2.x — ADR-097 S9) ────────────────────
 
   /** Everything past the guards for engine:'opencode' — runs with an
-   *  activeDispatches slot held and the Stop handle already registered
-   *  (`stopController` is created + registered in dispatchInner, BEFORE any
+   *  a run slot held and the Stop handle already registered
+   *  (the run, with its `stopController`, is registered in `launchRun`, BEFORE any
    *  await, so a Stop click during target creation is not lost).
    *
    *  The turn is an inbox prompt (`POST …/prompt`, answered at once) followed
@@ -2929,7 +3296,7 @@ export class CrossEngineDispatcher {
    *  waits header-silently on a model turn (ADR-033's 2026-09-01 amendment). */
   private async resolveAndRunOpencode(
     req: DispatchRequest,
-    ctx: DispatchContext,
+    ctx: RunContext,
     stopController: AbortController
   ): Promise<DispatchResult> {
     // ── Model resolution ──────────────────────────────────────────────────
@@ -2983,6 +3350,7 @@ export class CrossEngineDispatcher {
         const refusal = this.resumeModelRefusal('opencode', cont.row.model, dispatchCfg)
         if (refusal) return refusal
       }
+      this.bindContinuation(ctx, cont)
       if ('live' in cont) {
         cont.live.ctx = ctx
         entry = cont.live
@@ -3047,28 +3415,33 @@ export class CrossEngineDispatcher {
     }
   }
 
+  /**
+   * The run's progress heartbeat, turn-scoped: feeds TaskCard's elapsed clock under the
+   * run's launching tool_use id, and — for a BLOCKING run only — pings the waiting MCP
+   * request so the caller's call timeout keeps resetting (opencode as the source holds
+   * the call under a hard wall otherwise).
+   */
+  private startHeartbeat(ctx: RunContext): ReturnType<typeof setInterval> {
+    let beats = 0
+    return setInterval(() => {
+      beats++
+      ctx.run.heartbeat(beats)
+      emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
+    }, this.heartbeatMs)
+  }
+
   /** One dispatch turn on a ready target (`busy` already set; cleared here). */
   private async runOpencodeTurn(
     entry: OpencodeTargetEntry,
     req: DispatchRequest,
-    ctx: DispatchContext,
+    ctx: RunContext,
     model: string,
     stopController: AbortController
   ): Promise<DispatchResult> {
     const dispatchCfg = this.deps.loadEngineConfig(req.engine).dispatch
-    // Progress heartbeat: resets the caller's MCP callTool timeout (opencode as
-    // the source) and feeds TaskCard progress.
-    let beats = 0
-    const heartbeat = setInterval(() => {
-      beats++
-      void sendProgress(ctx.extra, {
-        progress: beats,
-        message: 'Dispatched agent is still working…'
-      }).catch(() => {})
-      emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
-    }, this.heartbeatMs)
+    const heartbeat = this.startHeartbeat(ctx)
 
-    const signal = ctx.extra?.signal
+    const signal = ctx.run.cancelController.signal
     let abortListener: (() => void) | undefined
 
     // Per-turn state. `turnStarted` gates the settle: a terminal output seen
@@ -3270,14 +3643,14 @@ export class CrossEngineDispatcher {
    * subagent children; the child keeper narrows those children (S6).
    */
   private async createOpencodeTarget(
-    ctx: DispatchContext,
+    ctx: RunContext,
     model: string,
     resume?: DispatchTargetRow,
     labels?: DispatchLabels
   ): Promise<OpencodeTargetEntry> {
     // A dispose of the dispatching chat while this target is being created
     // disposes the new target too.
-    const generation = this.disposals.get(ctx.fromRoutingId) ?? 0
+    const generation = this.disposals.get(this.runs.parentOf(ctx.fromRoutingId)) ?? 0
     // A resumed target runs where it was created (ADR-105): the stored directory.
     const cwd = resume?.cwd ?? ctx.cwd
     const conn = await this.deps.serverManager.acquire(cwd)
@@ -3301,11 +3674,12 @@ export class CrossEngineDispatcher {
       const judge = new DispatchTargetJudge({
         engine: 'opencode',
         cwd,
-        routingId: ctx.fromRoutingId,
+        routingId: () => entry.ctx.fromRoutingId,
         sessionId: () => entry.sessionId,
         model: () => entry.model,
         emit: () => entry.ctx.emit,
         messages: () => entry.ctx.getMessages(),
+        loadMessages: () => entry.ctx.loadMessages?.(),
         queuedTurns: () => entry.ctx.getQueuedUserTurns?.() ?? [],
         blockedCalls: () => entry.ctx.blockedCalls,
         trajectory: () => entry.trajectory.values(),
@@ -3346,7 +3720,12 @@ export class CrossEngineDispatcher {
       // A feed lost meanwhile would never deliver this target's events, and a
       // chat disposed meanwhile owns no target any more: fail, roll back.
       if (rec.abort.signal.aborted) throw new Error('the opencode event feed was lost')
-      if ((this.disposals.get(ctx.fromRoutingId) ?? 0) !== generation)
+      // A BACKGROUND run belongs to its parent's durable id, not to the session object that
+      // launched it (ADR-105): a dispose across its creation does not undo it.
+      if (
+        !ctx.run.background &&
+        (this.disposals.get(this.runs.parentOf(ctx.fromRoutingId)) ?? 0) !== generation
+      )
         throw new Error('the dispatching session was disposed')
       const targetClient = client
       // The durable record (ADR-105): written once the session is known to be ours
@@ -4112,6 +4491,7 @@ export class CrossEngineDispatcher {
       targetSessionId: entry.sessionId,
       client: entry.client,
       emit: entry.ctx.emit,
+      card,
       ...(held ? { hold: held.hold } : {})
     })
     // The dispatching session's emit puts its own routingId on the wire, so
@@ -4263,12 +4643,12 @@ export class CrossEngineDispatcher {
   // ── Claude direction (M2) ─────────────────────────────────────────────────
 
   /** Everything past the guards for engine:'claude' — runs with an
-   *  activeDispatches slot held and the Stop handle already registered
-   *  (`stopController` is created + registered in dispatchInner, BEFORE any
+   *  a run slot held and the Stop handle already registered
+   *  (the run, with its `stopController`, is registered in `launchRun`, BEFORE any
    *  await, so a Stop click during spawnClaudeQuery is not lost). */
   private async resolveAndRunClaude(
     req: DispatchRequest,
-    ctx: DispatchContext,
+    ctx: RunContext,
     stopController: AbortController
   ): Promise<DispatchResult> {
     // ── Model resolution ──────────────────────────────────────────────────
@@ -4324,11 +4704,20 @@ export class CrossEngineDispatcher {
         if (refusal) return refusal
       }
       if ('live' in cont) {
+        this.bindContinuation(ctx, cont)
         cont.live.ctx = ctx
         entry = cont.live
         // ADR-088 ruling 3 — the parent's mode is read live: bring the process
-        // to it before the turn's prompt is pushed (and before `busy`).
-        await this.syncClaudeTargetMode(entry)
+        // to it before the turn's prompt is pushed. The run is bound (a background launch
+        // is acknowledged) before this await, so the target is busy from here: a second
+        // continuation is refused and `disposeFor` cannot release it from under the run.
+        entry.busy = true
+        try {
+          await this.syncClaudeTargetMode(entry)
+        } catch (err) {
+          entry.busy = false
+          throw err
+        }
       } else {
         // The process is gone (its parent restarted, or the app did): `--resume` the
         // transcript the ledger row names, in the directory it was created in. A
@@ -4344,6 +4733,7 @@ export class CrossEngineDispatcher {
         }
         model = row.model
         const account = claudeDispatchAccount()
+        this.bindContinuation(ctx, cont)
         const shell = this.createClaudeTargetShell(ctx, row.id, account, row.cwd)
         entry = shell.entry
         entry.cumulativeCostUsd = spentUsd
@@ -4399,17 +4789,9 @@ export class CrossEngineDispatcher {
     entry.channel.push(buildClaudeDispatchMessage(req.prompt, entry.sessionId))
 
     // ── Run the turn ──────────────────────────────────────────────────────
-    let beats = 0
-    const heartbeat = setInterval(() => {
-      beats++
-      void sendProgress(ctx.extra, {
-        progress: beats,
-        message: 'Dispatched agent is still working…'
-      }).catch(() => {})
-      emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
-    }, this.heartbeatMs)
+    const heartbeat = this.startHeartbeat(ctx)
 
-    const signal = ctx.extra?.signal
+    const signal = ctx.run.cancelController.signal
     let abortListener: (() => void) | undefined
 
     type Raced =
@@ -5034,6 +5416,7 @@ export class CrossEngineDispatcher {
         kind: 'claude',
         targetSessionId: entry.sessionId,
         emit: entry.ctx.emit,
+        card: approval,
         resolve: (decision, answers) => {
           if (decision === 'allow' || decision === 'allowForSession') {
             resolve({ behavior: 'allow', updatedInput: input })
@@ -5086,7 +5469,7 @@ export class CrossEngineDispatcher {
     if (pending.hold) {
       pending.hold.cancel()
       // Approvable after the fact from here on (ADR-091 part 6).
-      pending.hold.ledger?.settle(pending.hold.toolUseId)
+      pending.hold.ledger()?.settle(pending.hold.toolUseId)
     }
     return pending
   }
@@ -5104,17 +5487,18 @@ export class CrossEngineDispatcher {
     toolUseId: string,
     block: { reason: string; ms: number }
   ): { hold: ForwardedBlockHold; autoModeBlock: { expiresAt: number } } {
-    const { emit } = ctx
+    // Both read the parent through the run's facade AT USE (ADR-105): a hold outlives the
+    // session object that was live when it was armed.
     const timer = armBlockHold(() => {
       this.resolveApproval(requestId, 'deny')
-      emit('session:approval-dismiss', { requestId })
+      ctx.emit('session:approval-dismiss', { requestId })
     }, block.ms)
     return {
       hold: {
         reason: block.reason,
         toolUseId,
         judge,
-        ...(ctx.blockedCalls ? { ledger: ctx.blockedCalls } : {}),
+        ledger: () => ctx.blockedCalls,
         cancel: timer.cancel
       },
       autoModeBlock: { expiresAt: timer.expiresAt }
@@ -5299,13 +5683,13 @@ export class CrossEngineDispatcher {
   // ── pi direction (M4c) ────────────────────────────────────────────────────
 
   /**
-   * Everything past the guards for engine:'pi' — runs with an activeDispatches
+   * Everything past the guards for engine:'pi' — runs with a run slot
    * slot held and the Stop handle already registered (mirrors
    * resolveAndRunClaude/resolveAndRunOpencode's identical preamble).
    */
   private async resolveAndRunPi(
     req: DispatchRequest,
-    ctx: DispatchContext,
+    ctx: RunContext,
     stopController: AbortController
   ): Promise<DispatchResult> {
     // ── Model resolution ──────────────────────────────────────────────────
@@ -5364,6 +5748,7 @@ export class CrossEngineDispatcher {
         if (refusal) return refusal
       }
       if ('live' in cont) {
+        this.bindContinuation(ctx, cont)
         cont.live.ctx = ctx
         entry = cont.live
       } else {
@@ -5380,6 +5765,7 @@ export class CrossEngineDispatcher {
             req.sessionId
           )
         }
+        this.bindContinuation(ctx, cont)
         try {
           entry = await this.createPiTarget(ctx, model, cont.row)
         } catch (err) {
@@ -5407,17 +5793,9 @@ export class CrossEngineDispatcher {
     entry.runner.beginTurn(turnStartedAt)
 
     // ── Run the turn ──────────────────────────────────────────────────────
-    let beats = 0
-    const heartbeat = setInterval(() => {
-      beats++
-      void sendProgress(ctx.extra, {
-        progress: beats,
-        message: 'Dispatched agent is still working…'
-      }).catch(() => {})
-      emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
-    }, this.heartbeatMs)
+    const heartbeat = this.startHeartbeat(ctx)
 
-    const signal = ctx.extra?.signal
+    const signal = ctx.run.cancelController.signal
     let abortListener: (() => void) | undefined
 
     type Raced =
@@ -5630,7 +6008,7 @@ export class CrossEngineDispatcher {
    * that into a friendly isError.
    */
   private async createPiTarget(
-    ctx: DispatchContext,
+    ctx: RunContext,
     model: string,
     resume?: DispatchTargetRow,
     labels?: DispatchLabels
@@ -5675,11 +6053,12 @@ export class CrossEngineDispatcher {
     entry.judge = new DispatchTargetJudge({
       engine: 'pi',
       cwd,
-      routingId: ctx.fromRoutingId,
+      routingId: () => entry.ctx.fromRoutingId,
       sessionId: () => entry.sessionId,
       model: () => entry.model,
       emit: () => entry.ctx.emit,
       messages: () => entry.ctx.getMessages(),
+      loadMessages: () => entry.ctx.loadMessages?.(),
       queuedTurns: () => entry.ctx.getQueuedUserTurns?.() ?? [],
       blockedCalls: () => entry.ctx.blockedCalls,
       trajectory: () => entry.runner.trajectory.values(),
@@ -5951,6 +6330,7 @@ export class CrossEngineDispatcher {
         kind: 'pi',
         targetSessionId: entry.sessionId,
         emit: entry.ctx.emit,
+        card: approval,
         ...(held ? { hold: held.hold } : {}),
         resolve: (decision, answers) => {
           if (decision === 'allow' || decision === 'allowForSession') {
@@ -5968,12 +6348,12 @@ export class CrossEngineDispatcher {
 
   /**
    * Everything past the guards for engine:'codex' — runs with an
-   * activeDispatches slot held and the Stop handle already registered (same
+   * run slot held and the Stop handle already registered (same
    * preamble as the other three directions).
    */
   private async resolveAndRunCodex(
     req: DispatchRequest,
-    ctx: DispatchContext,
+    ctx: RunContext,
     stopController: AbortController
   ): Promise<DispatchResult> {
     // ── Model resolution ──────────────────────────────────────────────────
@@ -6029,14 +6409,16 @@ export class CrossEngineDispatcher {
         if (refusal) return refusal
       }
       if ('live' in cont) {
+        this.bindContinuation(ctx, cont)
         cont.live.ctx = ctx
         entry = cont.live
       } else {
         try {
           // The wait for the thread's lock ends at once on a Stop or the caller's abort.
+          this.bindContinuation(ctx, cont)
           entry = await this.createCodexTarget(ctx, undefined, undefined, cont.row, [
             stopController.signal,
-            ctx.extra?.signal
+            ctx.run.cancelController.signal
           ])
         } catch (err) {
           // A thread Codex has no rollout for will never resume; a busy host, a lost
@@ -6067,17 +6449,9 @@ export class CrossEngineDispatcher {
     entry.lastActivityAt = turnStartedAt
 
     // ── Run the turn ──────────────────────────────────────────────────────
-    let beats = 0
-    const heartbeat = setInterval(() => {
-      beats++
-      void sendProgress(ctx.extra, {
-        progress: beats,
-        message: 'Dispatched agent is still working…'
-      }).catch(() => {})
-      emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
-    }, this.heartbeatMs)
+    const heartbeat = this.startHeartbeat(ctx)
 
-    const signal = ctx.extra?.signal
+    const signal = ctx.run.cancelController.signal
     let abortListener: (() => void) | undefined
 
     type Raced =
@@ -6394,7 +6768,7 @@ export class CrossEngineDispatcher {
    * half of the same scrub.
    */
   private async createCodexTarget(
-    ctx: DispatchContext,
+    ctx: RunContext,
     requestedModel: string | undefined,
     allowedModels: string[] | undefined,
     resume?: DispatchTargetRow,
@@ -7173,6 +7547,7 @@ export class CrossEngineDispatcher {
         kind: 'codex',
         targetSessionId: entry.sessionId,
         emit: entry.ctx.emit,
+        card: approval,
         resolve: (decision) => {
           const allow = decision === 'allow' || decision === 'allowForSession'
           // 'allowForSession' is treated as a one-off 'allow': a dispatch

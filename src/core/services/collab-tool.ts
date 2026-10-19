@@ -7,6 +7,7 @@ import { peekOpencodeModels } from '../opencode/model-discovery'
 import { describeDispatchModels } from './dispatch-model-hint'
 import type { ChatMessage, EngineId } from '../../shared/types'
 import {
+  DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
   DISPATCH_NAME_PARAM,
   dispatchAgentDescription,
@@ -114,9 +115,13 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
           session_id: z
             .string()
             .optional()
-            .describe('session_id from a previous dispatch_agent result — continues that agent')
+            .describe('session_id from a previous dispatch_agent result — continues that agent'),
+          run_in_background: z.boolean().optional().describe(DISPATCH_BACKGROUND_PARAM)
         },
-        async ({ engine, prompt, model, name, description, session_id }, extra) => {
+        async (
+          { engine, prompt, model, name, description, session_id, run_in_background },
+          extra
+        ) => {
           // cli.js stamps `_meta["claudecode/toolUseId"]` on EVERY MCP tools/call
           // (the calling assistant tool_use block's id) — the Claude-side source
           // of the dispatching tool_use id (ADR-033 M3). Missing/non-string →
@@ -124,7 +129,15 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
           // presence and never fails a dispatch over it.
           const toolUseId = extra?.meta?.['claudecode/toolUseId']
           const result = await crossEngineDispatcher.dispatch(
-            { engine, prompt, model, name, description, sessionId: session_id },
+            {
+              engine,
+              prompt,
+              model,
+              name,
+              description,
+              sessionId: session_id,
+              ...(run_in_background === true ? { runInBackground: true } : {})
+            },
             {
               fromEngine: ctx.engineId,
               fromRoutingId: ctx.getRoutingId(),

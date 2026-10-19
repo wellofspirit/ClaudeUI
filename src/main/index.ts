@@ -765,6 +765,7 @@ app.whenReady().then(() => {
       // push in flight is idempotent on the hub, so the worst a killed one
       // costs is a batch re-sent as duplicates on the next launch.
       core?.usageHubClient.stop()
+      core?.releaseDispatchParents()
       // Stop the service session (lightweight CLI subprocess for usage polling)
       serviceSession.stop()
       // Reap any shared opencode servers (Windows tree-kill) so opencode.exe

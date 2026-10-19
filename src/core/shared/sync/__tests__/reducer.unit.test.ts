@@ -1859,6 +1859,24 @@ describe('reducer — subagents', () => {
     expect(record({ taskType: 'local_bash' })).not.toHaveProperty('wakesParent')
   })
 
+  it('a task start carries its description into activeTasks, and omits it when unsent or empty (ADR-105)', () => {
+    const record = (data: Record<string, unknown>): unknown =>
+      fold([
+        created(),
+        [
+          'session:task-started',
+          'rid',
+          { toolUseId: 't1', taskId: 's-1', taskType: 'dispatch', ...data }
+        ]
+      ]).sessions['rid'].activeTasks['t1']
+    expect(record({ description: 'Review auth diff' })).toMatchObject({
+      taskType: 'dispatch',
+      description: 'Review auth diff'
+    })
+    expect(record({})).not.toHaveProperty('description')
+    expect(record({ description: '' })).not.toHaveProperty('description')
+  })
+
   it('a task notification drops the task from activeTasks', () => {
     const s = fold([
       created(),

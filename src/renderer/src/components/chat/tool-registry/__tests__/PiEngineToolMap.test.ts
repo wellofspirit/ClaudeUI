@@ -310,6 +310,14 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
     })
   })
 
+  it('run_in_background marks the dispatch card background; absent or false leaves it a waiting call', () => {
+    const view = (extra: Record<string, unknown>) =>
+      PiEngineToolMap.normalize('task', { engine: 'claude', prompt: 'x', ...extra })
+    expect(view({ run_in_background: true })).toMatchObject({ kind: 'task', background: true })
+    expect(view({ run_in_background: false })).not.toHaveProperty('background')
+    expect(view({})).not.toHaveProperty('background')
+  })
+
   it('task: dispatch_agent without a model -> the dispatch field is just the engine', () => {
     const view = PiEngineToolMap.normalize('task', { engine: 'claude', prompt: 'do X' })
     expect(view).toEqual({

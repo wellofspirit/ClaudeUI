@@ -15,6 +15,7 @@ vi.mock('../../services/ui-config', () => ({ loadEngineConfig: vi.fn(() => ({}))
 
 import { CODEX_HOSTED_TOOL_NAMES, codexDynamicToolSpecs } from '../codex-hosted-tools'
 import {
+  DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
   DISPATCH_NAME_PARAM
 } from '../../../shared/dispatch-agent-description'
@@ -53,6 +54,19 @@ describe('codexDynamicToolSpecs — dispatch_agent name and description', () => 
       description: DISPATCH_DESCRIPTION_PARAM
     })
     expect(schema.required).toEqual(['engine', 'prompt'])
+  })
+
+  it('takes run_in_background as an optional boolean, worded by the shared description module', () => {
+    const spec = codexDynamicToolSpecs(true).find((s) => s.name === 'dispatch_agent')!
+    const schema = (spec as unknown as { inputSchema: unknown }).inputSchema as {
+      properties: Record<string, unknown>
+      required: string[]
+    }
+    expect(schema.properties.run_in_background).toEqual({
+      type: 'boolean',
+      description: DISPATCH_BACKGROUND_PARAM
+    })
+    expect(schema.required).not.toContain('run_in_background')
   })
 })
 

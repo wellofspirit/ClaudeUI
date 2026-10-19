@@ -284,6 +284,109 @@ describe('TaskCard — "Send to background" gate', () => {
 })
 
 // ---------------------------------------------------------------------------
+// A dispatch run's lifecycle (ADR-105): the dispatcher emits task-started /
+// task-notification for every run, blocking or background
+// ---------------------------------------------------------------------------
+describe('TaskCard — a dispatch run (task-started / task-notification)', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const block = makeTaskBlock({
+    toolUseId: 'toolu_dispatch_run',
+    toolName: 'mcp__claude-ui-collab__dispatch_agent',
+    toolInput: { engine: 'pi', prompt: 'go', run_in_background: true }
+  })
+  const view = {
+    kind: 'task' as const,
+    description: 'Dispatch: pi',
+    prompt: 'go',
+    dispatch: { engine: 'pi' }
+  }
+  const ack = {
+    type: 'tool_result' as const,
+    toolUseId: 'toolu_dispatch_run',
+    toolResult: 'X-Agent s-abc123 launched on pi (id s-abc123, session_id h-1).',
+    isError: false
+  }
+  const status = (): string | undefined => screen.getByTestId('TaskCard').dataset.status
+  const started = (isBackgrounded: boolean): void =>
+    seed.taskStarted(ROUTE, {
+      toolUseId: 'toolu_dispatch_run',
+      taskId: 's-abc123',
+      taskType: 'dispatch',
+      isBackgrounded,
+      wakesParent: true
+    })
+
+  it('a BLOCKING run (record, no tool_result yet) reads as running with Stop, then completed', () => {
+    started(false)
+    const { rerender } = render(<TaskCard block={block} view={view} />)
+    expect(status()).toBe('running')
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+
+    seed.taskNotification(ROUTE, {
+      taskId: 's-abc123',
+      toolUseId: 'toolu_dispatch_run',
+      status: 'completed',
+      outputFile: '',
+      summary: 'the whole answer, well past a hundred characters '.repeat(4)
+    })
+    rerender(<TaskCard block={block} view={view} />)
+    expect(status()).toBe('completed')
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+  })
+
+  it('a BACKGROUND run (launch ack + record, view.background) reads as running, then completed without showing the ack as its result', () => {
+    started(true)
+    const backgroundView = { ...view, background: true }
+    const { rerender } = render(<TaskCard block={block} result={ack} view={backgroundView} />)
+    expect(status()).toBe('running')
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+
+    seed.taskNotification(ROUTE, {
+      taskId: 's-abc123',
+      toolUseId: 'toolu_dispatch_run',
+      status: 'completed',
+      outputFile: '',
+      summary: 'done'
+    })
+    rerender(<TaskCard block={block} result={ack} view={backgroundView} />)
+    expect(status()).toBe('completed')
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+    // The launch acknowledgement is not the agent's result.
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    expect(screen.queryByTestId('md')).not.toBeInTheDocument()
+  })
+
+  it('a stopped run ends stopped, not running', () => {
+    started(true)
+    const backgroundView = { ...view, background: true }
+    const { rerender } = render(<TaskCard block={block} result={ack} view={backgroundView} />)
+    seed.taskNotification(ROUTE, {
+      taskId: 's-abc123',
+      toolUseId: 'toolu_dispatch_run',
+      status: 'stopped',
+      outputFile: '',
+      summary: 'Dispatch stopped by user.'
+    })
+    rerender(<TaskCard block={block} result={ack} view={backgroundView} />)
+    expect(status()).toBe('stopped')
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // The header clock of a running task
 // ---------------------------------------------------------------------------
 //

@@ -166,7 +166,8 @@ export const CodexEngineToolMap: EngineToolMap = {
         prompt: input?.prompt,
         model: input?.model,
         name: input?.name,
-        description: input?.description
+        description: input?.description,
+        runInBackground: input?.run_in_background
       })
     }
     // create_mockup args: { html, title? }; show_mockup args: { directory }.

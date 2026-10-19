@@ -50,6 +50,7 @@ import { loadEngineConfig } from '../../../core/services/ui-config'
 import { peekOpencodeModels } from '../../../core/opencode/model-discovery'
 import type { SdkToolExtra } from '../../../core/sdk'
 import {
+  DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
   DISPATCH_NAME_PARAM
 } from '../../../shared/dispatch-agent-description'
@@ -275,6 +276,32 @@ describe('createCollabServer', () => {
       expect(schema.safeParse(undefined).success).toBe(true)
       expect(schema.safeParse('x').success).toBe(true)
     }
+  })
+
+  it('takes an optional boolean run_in_background, worded by the shared module, and tells the dispatcher only when true', async () => {
+    const server = createCollabServer(makeCtx())
+    const schema = server.tools[0].inputSchema.run_in_background as unknown as {
+      description?: string
+      safeParse: (v: unknown) => { success: boolean }
+    }
+    expect(schema.description).toBe(DISPATCH_BACKGROUND_PARAM)
+    expect(schema.safeParse(undefined).success).toBe(true)
+    expect(schema.safeParse(true).success).toBe(true)
+    expect(schema.safeParse('yes').success).toBe(false)
+
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'x', sessionId: 's' })
+    await server.tools[0].handler(
+      { engine: 'opencode', prompt: 'p', run_in_background: true },
+      makeExtra()
+    )
+    expect(dispatchSpy.mock.calls[0][0]).toMatchObject({ runInBackground: true })
+    await server.tools[0].handler(
+      { engine: 'opencode', prompt: 'p', run_in_background: false },
+      makeExtra()
+    )
+    expect(dispatchSpy.mock.calls[1][0]).not.toHaveProperty('runInBackground')
   })
 
   it("the engine param's schema accepts every OTHER engine and rejects both 'claude' (same-engine) and an unlisted value", () => {

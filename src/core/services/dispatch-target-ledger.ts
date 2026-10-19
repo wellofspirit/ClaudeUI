@@ -20,6 +20,7 @@ import path from 'node:path'
 import {
   allDispatchTargetHarnessRefs,
   dispatchTargetSpend,
+  dispatchTargetsByParent,
   getDispatchTarget,
   getDispatchTargetByHarnessRef,
   insertDispatchTargetWithRef,
@@ -51,6 +52,8 @@ export interface DispatchLedgerStore {
   create(input: NewDispatchTarget): DispatchTargetRow
   get(id: string): DispatchTargetRow | undefined
   getByHarnessRef(engine: EngineId, harnessRef: string): DispatchTargetRow | undefined
+  /** Every target a parent session owns, newest first. */
+  byParent(parentSessionId: string): DispatchTargetRow[]
   update(id: string, patch: DispatchTargetPatch): void
   /** What the target's turns have cost so far (the `dispatch` rows of `usage_event`). */
   spend(harnessRef: string): { costUsd: number; unpricedTurns: number }
@@ -144,6 +147,7 @@ export const dispatchLedger: DispatchLedgerStore = {
   get: (id) => getDispatchTarget(id),
   spend: (harnessRef) => dispatchTargetSpend(harnessRef),
   getByHarnessRef: (engine, harnessRef) => getDispatchTargetByHarnessRef(engine, harnessRef),
+  byParent: (parentSessionId) => dispatchTargetsByParent(parentSessionId),
   update(id, patch) {
     updateDispatchTarget(id, patch)
     if (patch.harnessRef !== undefined) hiddenSessions()?.add(patch.harnessRef)

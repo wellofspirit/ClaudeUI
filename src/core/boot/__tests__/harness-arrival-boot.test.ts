@@ -59,7 +59,7 @@ vi.mock('../../opencode/OpencodeServerManager', () => ({
   }
 }))
 vi.mock('../../services/cross-engine-dispatcher', () => ({
-  crossEngineDispatcher: { dispatch: vi.fn() }
+  crossEngineDispatcher: { dispatch: vi.fn(), configureParents: vi.fn(() => () => {}) }
 }))
 const arrivalMocks = vi.hoisted(() => {
   const order: string[] = []
@@ -115,6 +115,29 @@ describe('a harness arriving, at the boot seam', () => {
     await vi.waitFor(() => expect(arrivalMocks.order).toEqual(['providers:pi', 'feed:pi']))
     expect(arrivalMocks.sharedProviderService.harnessArrived).toHaveBeenCalledWith('pi')
     expect(arrivalMocks.credentialSync.harnessArrived).toHaveBeenCalledWith('pi')
+  })
+
+  it('hands the dispatcher its parent lookup and the re-key feed, so a run outlives its launching call (ADR-105)', async () => {
+    const { startCoreServices } = await import('../core-services')
+    const { crossEngineDispatcher } = await import('../../services/cross-engine-dispatcher')
+    const unsubscribe = vi.fn()
+    vi.mocked(crossEngineDispatcher.configureParents).mockReturnValueOnce(unsubscribe)
+    const core = startCoreServices({
+      remoteAccessDisabled: true,
+      authDeps: {} as never,
+      autostart: false
+    })
+    const [lookup, onRekey] = vi.mocked(crossEngineDispatcher.configureParents).mock.calls[0]
+    expect(lookup).toMatchObject({
+      session: expect.any(Function),
+      emit: expect.any(Function),
+      readMessages: expect.any(Function)
+    })
+    expect(onRekey).toEqual(expect.any(Function))
+    // The host's teardown drops that subscription.
+    expect(unsubscribe).not.toHaveBeenCalled()
+    core.releaseDispatchParents()
+    expect(unsubscribe).toHaveBeenCalledOnce()
   })
 
   it('a failed provider delivery still feeds the credential', async () => {
