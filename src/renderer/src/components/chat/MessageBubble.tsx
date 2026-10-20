@@ -21,6 +21,7 @@ import { SessionCard } from './SessionCard'
 import { ProposalCard } from './ProposalCard'
 import { ReviewResultCard } from './ReviewResultCard'
 import { TaskCard } from './TaskCard'
+import { isQueuedDispatchCall } from './task-state'
 import { hostedMcpKind } from '../../../../shared/tool-kinds'
 import type { EngineToolMap } from '../../../../shared/tool-kinds'
 import { engineToolMap } from './tool-registry/engine-tool-maps'
@@ -66,7 +67,10 @@ function renderToolBlock(
   // Whether this block is on the LAST assistant message — read only by the plan
   // card, whose no-approval action set (Codex, F20) belongs to the latest plan
   // and to no earlier one.
-  isLastAssistant = false
+  isLastAssistant = false,
+  // The call waits for an earlier call of its own message (cli.js runs a first-party MCP
+  // call exclusively): only the task card says so.
+  queued = false
 ): React.JSX.Element {
   const kind = hostedMcpKind(block.toolName) ?? toolMap.kindOf(block.toolName)
 
@@ -124,6 +128,7 @@ function renderToolBlock(
         approval={approval}
         denial={decision?.type === 'permission_denial' ? decision : undefined}
         review={decision?.type === 'tool_review' ? decision : undefined}
+        queued={queued}
       />
     )
   }
@@ -192,6 +197,7 @@ export const MessageBubble = memo(function MessageBubble({
   const forkFromMessage = useSessionStore((s) => s.forkFromMessage)
   const forkCapability = useActiveSession((s) => s.status.capabilities.forkFromMessage)
   const engineId = useActiveSession((s) => s.status.engineId)
+  const turnRunning = useActiveSession((s) => s.status.state === 'running')
   const [forking, setForking] = useState(false)
   // No-op + `enabled: false` when no ImageGalleryProvider is mounted above, so
   // an unwrapped MessageBubble still renders its thumbnails (just inert).
@@ -464,6 +470,12 @@ export const MessageBubble = memo(function MessageBubble({
     }
   }
 
+  // cli.js (Claude Code only) runs a first-party MCP call such as `dispatch_agent` only when
+  // nothing else of its assistant message is executing, so one behind an unanswered call has
+  // not started: the card says "queued", not "running" (task-state.ts).
+  const isQueuedCall = (block: ToolUseBlock): boolean =>
+    isQueuedDispatchCall({ engineId, turnRunning, content: message.content, block })
+
   return (
     <div
       data-testid="MessageBubble"
@@ -494,7 +506,16 @@ export const MessageBubble = memo(function MessageBubble({
           const result = resultMap.get(block.toolUseId)
           const approval = approvalMap.get(block.toolUseId)
           const decision = decisionMap.get(block.toolUseId)
-          return renderToolBlock(toolMap, block, result, approval, index, decision, isLastAssistant)
+          return renderToolBlock(
+            toolMap,
+            block,
+            result,
+            approval,
+            index,
+            decision,
+            isLastAssistant,
+            isQueuedCall(block)
+          )
         }
         // Multiple tool calls — wrap in bordered group
         return (
@@ -513,7 +534,8 @@ export const MessageBubble = memo(function MessageBubble({
                 approval,
                 index,
                 decision,
-                isLastAssistant
+                isLastAssistant,
+                isQueuedCall(block)
               )
             })}
           </div>

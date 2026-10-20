@@ -139,9 +139,13 @@ matter for maintenance are folded in below.)
   model badge in the subagent slot), streams live keyed by the dispatching tool_use id (Claude
   side: cli.js's `_meta["claudecode/toolUseId"]`, present on every MCP tools/call; opencode side:
   plugin-stamped `__xeng_call_id`), and is stoppable. Stop rides `session:stop-task` with an
-  `isDispatch` flag; a registry miss arms a 60s **pending stop-intent** consumed at dispatch
+  `isDispatch` flag; a registry miss arms a **pending stop-intent** consumed at dispatch
   registration — closes the live-verified race where the renderer's Stop is clickable before the
-  MCP call reaches the dispatcher (SSE beats the tools/call round-trip).
+  MCP call reaches the dispatcher (SSE beats the tools/call round-trip). The intent was originally
+  a 60 s clock; it now has none: Claude Code runs a first-party MCP call only when nothing else of
+  its assistant message is executing, so a second dispatch behind a blocking one can start minutes
+  later. The intent lives until it is consumed, or until the dispatching session's turn ends
+  (`session:result`), the session is disposed or it is deleted.
 
 ### As-built deltas (what differed from the plan)
 

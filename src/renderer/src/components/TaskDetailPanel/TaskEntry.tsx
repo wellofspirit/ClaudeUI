@@ -7,7 +7,13 @@ import { SubagentOutputBody, dispatchChildEngine } from '../chat/SubagentOutputB
 import { HandbackReport, hasHandbackReport } from '../chat/HandbackReport'
 import { TerminalView } from '../chat/TerminalView'
 import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
-import { deriveTaskState, latestNotification } from '../chat/task-state'
+import {
+  deriveTaskState,
+  isDispatchToolName,
+  isQueuedDispatchCall,
+  latestNotification
+} from '../chat/task-state'
+import { armStopPillFallback } from '../../lib/stop-pill'
 import { findTaskBlocks } from './utils'
 import { taskElapsedLabel, useTicker } from '../chat/TaskCard'
 import type { ToolView } from '../../../../shared/tool-kinds'
@@ -91,6 +97,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const activeTasks = useActiveSession((s) => s.activeTasks)
   const engineId = useActiveSession((s) => s.status.engineId)
+  const turnRunning = useActiveSession((s) => s.status.state === 'running')
   const [expanded, setExpanded] = useState(true)
   // The body is the scroller; the elements inside it are what grow. It only
   // exists while expanded, and which child holds the growing content depends on
@@ -99,7 +106,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
 
   // Nested-aware: a nested agent's call and result live in its parent's bucket,
   // while its own transcript is `subagentMsgs[toolUseId]` as for any agent.
-  const { taskBlock, resultBlock, ownerToolUseId } = findTaskBlocks(
+  const { taskBlock, resultBlock, ownerToolUseId, siblings } = findTaskBlocks(
     messages,
     toolUseId,
     subagentMsgs
@@ -163,13 +170,21 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   // immediate "launched successfully" tool_result (so `resultBlock.isError` is
   // false) — a FAILED one showed no failure badge in the panel at all.
   const hasActiveTask = !!activeTasks[toolUseId]
-  const { isRunning, isError, isStopped, isLoaded } = deriveTaskState({
+  // A dispatch call that has not started (the card says so too): not running, Stop kept.
+  const queued = isQueuedDispatchCall({
+    engineId: callEngine,
+    turnRunning,
+    content: siblings,
+    block: taskBlock
+  })
+  const { isRunning, isQueued, isError, isStopped, isLoaded } = deriveTaskState({
     isHistorical: false,
     hasActiveTask,
     isBackground,
     hasResult,
     notification: bgNotification,
-    resultIsError: resultBlock?.isError ?? false
+    resultIsError: resultBlock?.isError ?? false,
+    queued
   })
   const elapsed = taskElapsedLabel({
     isRunning,
@@ -182,6 +197,13 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const statusBadge = isError ? (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">
       failed
+    </span>
+  ) : isQueued ? (
+    <span
+      data-testid="TaskEntry.queued"
+      className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-bg-hover text-text-muted shrink-0"
+    >
+      queued
     </span>
   ) : !isRunning ? (
     isStopped ? (
@@ -212,16 +234,19 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     e.stopPropagation()
     if (!activeSessionId) return
     setTaskStopping(activeSessionId, toolUseId)
-    const result = await window.api.stopTask(activeSessionId, toolUseId)
+    // A dispatch is stopped through the dispatcher, which arms the stop for a call that has
+    // not started; without the flag Claude's stopTask finds no task and interrupts the turn.
+    const result = await window.api.stopTask(
+      activeSessionId,
+      toolUseId,
+      isDispatchToolName(taskBlock.toolName)
+    )
     if (!result.success) {
       window.api.logError('TaskDetailPanel', `Failed to stop task: ${result.error}`)
       clearTaskStopping(activeSessionId, toolUseId)
       return
     }
-    setTimeout(() => {
-      const rid = useSessionStore.getState().activeSessionId
-      if (rid) clearTaskStopping(rid, toolUseId)
-    }, 10000)
+    armStopPillFallback(activeSessionId, toolUseId)
   }
 
   return (
@@ -262,7 +287,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
             {elapsed}
           </span>
         )}
-        {isRunning && !isStopping && canStop && (
+        {(isRunning || isQueued) && !isStopping && canStop && (
           <button
             data-testid="TaskEntry.stop"
             onClick={handleStopTask}

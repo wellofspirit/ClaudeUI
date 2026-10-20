@@ -721,7 +721,7 @@ export interface DispatcherDeps {
    * can never hold the stop path open. Injectable for tests.
    */
   codexAbortSettleGraceMs?: number
-  /** Clock, injectable for the pendingStops TTL tests. Defaults to Date.now. */
+  /** Clock, injectable for tests. Defaults to Date.now. */
   now?: () => number
   /**
    * Persist the ledger row for one dispatched-agent turn (ADR-071 §1).
@@ -1070,9 +1070,6 @@ const TARGET_FORM_CANCEL_MESSAGE =
   'No user can answer questions in a dispatched agent — continue without asking, and state any assumption you make.'
 /** A target has no session allows (ADR-085 S2: 'allowForSession' replies `once`). Never added to. */
 const NO_SESSION_ALLOWS = new OpencodeSessionAllows()
-/** How long an armed stop-intent (see `pendingStops`) stays valid. Generous —
- *  it only needs to outlive the MCP tools/call round-trip + handler prelude. */
-const PENDING_STOP_TTL_MS = 60 * 1000
 /** Default for `DispatcherDeps.piAbortSettleGraceMs` — see that field's doc comment. */
 const PI_ABORT_SETTLE_GRACE_MS = 3_000
 /** Default for `DispatcherDeps.codexAbortSettleGraceMs` — see that field's doc comment. */
@@ -1101,7 +1098,6 @@ const GET_SESSION_STATS_RECONCILE_TIMEOUT_MS = 3_000
 interface PendingStop {
   /** Owning session at arm time — must match ctx.fromRoutingId to fire. */
   routingId?: string
-  expiresAt: number
 }
 
 /**
@@ -2815,8 +2811,19 @@ export class CrossEngineDispatcher {
    * Stop click can arrive before `dispatch()` is even invoked and NO
    * registration timing inside the dispatcher can win it. `stopDispatch`
    * with `armIfUnknown` records the intent here; `launchRun` consumes it
-   * at stop-handle registration and aborts immediately. Entries lazy-expire
-   * (checked on consume; purged whenever a new one is armed — no timer).
+   * first thing and refuses the call before any target, ledger row or run exists.
+   *
+   * An intent has no clock: the call it waits for may not start for as long as the
+   * calls before it run — cli.js runs a first-party MCP call such as `dispatch_agent`
+   * only when nothing else of its assistant message is executing, so a second dispatch
+   * behind a blocking one starts when that one ends, minutes later. It lives until it is
+   * consumed, or until the turn it was armed in is over ({@link dropPendingStops}: the
+   * parent's `session:result`, its disposal, its deletion), after which the call it was
+   * armed for can no longer start.
+   *
+   * Accepted residual: a queued dispatch call of a BACKGROUND subagent is armed under the main
+   * session too, so the main turn's end drops its intent, and a call that starts after that is
+   * not stopped (it runs, and the user can Stop it again from its card).
    */
   private pendingStops = new Map<string, PendingStop>()
   private readonly now: () => number
@@ -2906,8 +2913,21 @@ export class CrossEngineDispatcher {
         (args[1] as { state?: string } | undefined)?.state === 'disconnected'
       )
         this.reRaiseFor(parentId)
+      // A turn's end settles every call of it: one that never started (cli.js answers it
+      // with an error result) has nothing left to stop.
+      if (channel === 'session:result') this.dropPendingStops(parentId)
     } catch (err) {
       logger.warn('CrossEngineDispatcher', `parent event "${channel}" failed: ${errText(err)}`)
+    }
+  }
+
+  /** Forget the stop-intents armed in `parentId`'s turn: see the `pendingStops` field doc. */
+  private dropPendingStops(parentId: string): void {
+    const parent = this.runs.parentOf(parentId)
+    for (const [key, intent] of this.pendingStops) {
+      if (intent.routingId !== undefined && this.runs.parentOf(intent.routingId) === parent) {
+        this.pendingStops.delete(key)
+      }
     }
   }
 
@@ -2942,6 +2962,7 @@ export class CrossEngineDispatcher {
    */
   endParent(parentId: string): void {
     const parent = this.runs.parentOf(parentId)
+    this.dropPendingStops(parentId)
     const running = new Set<string>()
     for (const run of this.runs.ofParent(parent)) {
       run.endRequested = true
@@ -3275,7 +3296,7 @@ export class CrossEngineDispatcher {
    * TaskCard's `isDispatch`): on a registry miss, record a durable stop-intent
    * in `pendingStops` and return true — the dispatch may not have been invoked
    * yet (see the pendingStops field doc); `launchRun` consumes the intent
-   * at registration and aborts the run immediately.
+   * and refuses the call before it creates anything.
    *
    * `opts.blockingOnly` is the parent's OWN interrupt (Esc, pi's and Codex's interrupt):
    * it ends the blocking calls the parent is waiting on and never a background run,
@@ -3296,15 +3317,7 @@ export class CrossEngineDispatcher {
         `stopDispatch miss: id=${id} not among ${this.runs.size} run(s)`
       )
       if (opts?.armIfUnknown) {
-        // Purge expired intents whenever a new one is armed (no timer).
-        const now = this.now()
-        for (const [key, intent] of this.pendingStops) {
-          if (intent.expiresAt <= now) this.pendingStops.delete(key)
-        }
-        this.pendingStops.set(toolUseId, {
-          routingId,
-          expiresAt: now + PENDING_STOP_TTL_MS
-        })
+        this.pendingStops.set(toolUseId, { routingId })
         logger.debug(
           'CrossEngineDispatcher',
           `stopDispatch armed pending stop-intent for toolUseId=${toolUseId}`
@@ -3853,6 +3866,35 @@ export class CrossEngineDispatcher {
     callCtx: DispatchContext
   ): { run: DispatchRun } | { refused: DispatchResult } {
     let ctx = callCtx
+    // A Stop armed before this call started (the renderer's Stop is clickable while the call
+    // is still queued behind another, or in the MCP round-trip) is honoured FIRST, before any
+    // guard, ledger row or target: a target created only to be torn down is a process spawned
+    // for nothing (a pi RPC subprocess lives ~0.4 s). Consumed whatever the outcome, so a
+    // LATER dispatch reusing the id is never spuriously stopped; fires only when the same
+    // session armed it. A run a message starts reuses the origin card's id: a Stop armed on
+    // that card while nothing was registered is not meant for it.
+    if (callCtx.toolUseId && !req.message) {
+      const intent = this.pendingStops.get(callCtx.toolUseId)
+      if (intent) {
+        this.pendingStops.delete(callCtx.toolUseId)
+        if (intent.routingId === undefined || intent.routingId === callCtx.fromRoutingId) {
+          logger.debug(
+            'CrossEngineDispatcher',
+            `consuming pending stop-intent for toolUseId=${callCtx.toolUseId} - refused before any target`
+          )
+          const text = 'Dispatch stopped by user.'
+          callCtx.emit('session:task-notification', {
+            taskId: callCtx.toolUseId,
+            toolUseId: callCtx.toolUseId,
+            status: 'stopped',
+            outputFile: '',
+            summary: text,
+            ...(req.runInBackground === true ? { isBackgrounded: true } : {})
+          })
+          return { refused: errorResult(text, req.sessionId ?? '') }
+        }
+      }
+    }
     // ── Guards ────────────────────────────────────────────────────────────
     // ADR-069 §7 lifts this for CODEX alone: a codex → codex dispatch is one more
     // `thread/start` on the process the caller is already running on, which is
@@ -3996,31 +4038,6 @@ export class CrossEngineDispatcher {
     })
     run.handBackRequired = this.requireHandBack
     this.runs.add(run)
-    // A run a message starts reuses the origin card's id: a Stop armed on that card while nothing
-    // was registered is not meant for it (the user stops a running X-Agent from its card).
-    if (ctx.toolUseId && !req.message) {
-      // Consume a durable stop-intent armed BEFORE this dispatch was invoked
-      // (the renderer's Stop can be clicked before the MCP tools/call even
-      // reaches us — see the pendingStops field doc). Consumed regardless of
-      // outcome so a LATER dispatch reusing the id is never spuriously
-      // stopped; fires only when unexpired and owned by the same session.
-      const intent = this.pendingStops.get(ctx.toolUseId)
-      if (intent) {
-        this.pendingStops.delete(ctx.toolUseId)
-        const expired = intent.expiresAt <= this.now()
-        const owned = intent.routingId === undefined || intent.routingId === ctx.fromRoutingId
-        if (!expired && owned) {
-          logger.debug(
-            'CrossEngineDispatcher',
-            `consuming pending stop-intent for toolUseId=${ctx.toolUseId} — aborting at start`
-          )
-          // Armed by the card's Stop (`armIfUnknown`), so it ends the X-Agent like one.
-          run.endRequested = true
-          run.stopController.abort()
-        }
-      }
-    }
-
     try {
       const runCtx = makeRunContext({
         base: ctx,
@@ -4285,6 +4302,7 @@ export class CrossEngineDispatcher {
     // Keyed by the durable id: a creation reads it under the id its facade answers to.
     const parent = this.runs.parentOf(routingId)
     this.disposals.set(parent, (this.disposals.get(parent) ?? 0) + 1)
+    this.dropPendingStops(routingId)
     for (const [sessionId, entry] of [...this.targets]) {
       if (!this.ownedBy(entry, routingId)) continue
       if (entry.busy && this.runs.byLedgerId(entry.ledgerId)?.background) continue

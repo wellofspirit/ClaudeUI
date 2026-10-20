@@ -40,6 +40,8 @@ import { engineToolMap } from '../components/chat/tool-registry/engine-tool-maps
 import {
   bashMovedToBackground,
   deriveTaskState,
+  isBehindUnfinishedCall,
+  isDispatchToolName,
   latestNotification
 } from '../components/chat/task-state'
 import { findTaskBlocks } from '../components/TaskDetailPanel/utils'
@@ -82,6 +84,8 @@ export interface AgentRosterRow {
   /** The origin id of the agent whose transcript holds the spawn call (a shell: that launched it); absent at depth 0. */
   parentToolUseId?: string
   isRunning: boolean
+  /** A dispatch call that has not started: queued behind an earlier call of its message (never together with `isRunning`). */
+  isQueued?: boolean
   isError: boolean
   /** Ended by a stop rather than finishing — see `deriveTaskState`. */
   isStopped: boolean
@@ -157,6 +161,8 @@ export interface ScannedEntry {
   hasResult: boolean
   resultIsError: boolean
   isBackground: boolean
+  /** A Claude dispatch call behind an unanswered call of its own message (the session must also be running to read as queued). */
+  behindUnfinishedCall?: boolean
   /**
    * Shells only: the origin id of the agent whose transcript holds the Bash
    * call, or null for the main transcript (`findTaskBlocks`' bucket key).
@@ -225,6 +231,8 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
   rosterScanStats.walks++
   const map = engineToolMap(engineId)
   const spawns: ToolUseBlock[] = []
+  /** The assistant message content that holds each spawn, for the order of its calls. */
+  const contentOf = new Map<string, readonly ContentBlock[]>()
   const results = new Map<string, ToolResultBlock>()
   // Calls refused before they ran (a `permission_denial` block): the opencode
   // host's plan-mode refusal of a subagent spawn (ADR-085 §3), or a Claude
@@ -236,7 +244,10 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
   for (const msg of messages) {
     for (const block of msg.content) {
       if (block.type === 'tool_use' && msg.role === 'assistant') {
-        if (map.kindOf(block.toolName) === 'task') spawns.push(block)
+        if (map.kindOf(block.toolName) === 'task') {
+          spawns.push(block)
+          contentOf.set(block.toolUseId, msg.content)
+        }
       } else if (block.type === 'permission_denial' && msg.role === 'assistant') {
         refused.add(block.toolUseId)
       } else if (block.type === 'tool_result') {
@@ -286,7 +297,12 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
         hasResult: !!result,
         resultIsError: !!result?.isError,
         // Since 2.1.219 an agent's input usually omits it — hence the lifecycle.
-        isBackground: !!view?.background
+        isBackground: !!view?.background,
+        ...(engineId === 'claude' &&
+        isDispatchToolName(block.toolName) &&
+        isBehindUnfinishedCall(contentOf.get(block.toolUseId) ?? [], block.toolUseId)
+          ? { behindUnfinishedCall: true }
+          : {})
       }
     })
 }
@@ -422,18 +438,21 @@ function toRow(
     engineId: EngineId
     /** The parent session's model, for Codex (`useParentModel`). */
     parentModel?: string
+    /** The session's turn is running: a dispatch is held queued only inside one. */
+    turnRunning: boolean
   }
 ): AgentRosterRow {
   const notification = latestNotification(opts.notifications, entry.toolUseId)
   const active = opts.activeTasks[entry.toolUseId]
-  const { isRunning, isError, isStopped, isLoaded } = deriveTaskState({
+  const { isRunning, isQueued, isError, isStopped, isLoaded } = deriveTaskState({
     isHistorical: opts.isHistorical,
     // A dispatched X-Agent's record survives a reopen (rebuilt from the ledger, ADR-105 §5).
     hasActiveTask: !!active && (!opts.isHistorical || active.taskType === 'dispatch'),
     isBackground: entry.isBackground,
     hasResult: entry.hasResult,
     notification,
-    resultIsError: entry.resultIsError
+    resultIsError: entry.resultIsError,
+    queued: entry.behindUnfinishedCall === true && opts.turnRunning
   })
   const progress = opts.progress[entry.toolUseId]
   const model =
@@ -458,6 +477,7 @@ function toRow(
     depth: entry.depth,
     ...(entry.parentToolUseId ? { parentToolUseId: entry.parentToolUseId } : {}),
     isRunning,
+    ...(isQueued ? { isQueued: true } : {}),
     isError,
     isStopped,
     isLoaded,
@@ -673,6 +693,7 @@ export function useAgentRoster(): AgentRoster {
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
   const openedTaskToolUseIds = useActiveSession((s) => s.openedTaskToolUseIds)
   const isHistorical = useActiveSession((s) => s.isHistorical)
+  const turnRunning = useActiveSession((s) => s.status.state === 'running')
   const parentModel = useParentModel()
 
   // The tree — deliberately NOT dependent on the live maps. Each bucket's walk
@@ -705,7 +726,8 @@ export function useAgentRoster(): AgentRoster {
       notifications: taskNotifications ?? [],
       progress: taskProgressMap ?? {},
       engineId: engineId ?? 'claude',
-      parentModel
+      parentModel,
+      turnRunning
     }
     const settled = settleOrphans(tree, (entry) => toRow(entry, opts), opts)
     const shellRows = shells.map((entry) => toRow({ ...entry, depth: 0 }, opts))
@@ -737,6 +759,7 @@ export function useAgentRoster(): AgentRoster {
     taskProgressMap,
     isHistorical,
     engineId,
-    parentModel
+    parentModel,
+    turnRunning
   ])
 }

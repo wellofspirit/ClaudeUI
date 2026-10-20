@@ -13,25 +13,29 @@ export interface TaskBlocks {
    * ran, live in their parent agent's bucket (ADR-073 §7).
    */
   ownerToolUseId: string | null
+  /** The content of the assistant message that holds the call (its results too): empty without one. */
+  siblings: readonly ContentBlock[]
 }
 
 function scan(
   messages: readonly MessageLike[],
   toolUseId: string
-): Pick<TaskBlocks, 'taskBlock' | 'resultBlock'> {
+): Pick<TaskBlocks, 'taskBlock' | 'resultBlock' | 'siblings'> {
   let taskBlock: ToolUseBlock | null = null
   let resultBlock: ToolResultBlock | null = null
+  let siblings: readonly ContentBlock[] = []
   for (const msg of messages) {
     for (const b of msg.content) {
       if (b.type === 'tool_use' && msg.role === 'assistant' && b.toolUseId === toolUseId) {
         taskBlock = b
+        siblings = msg.content
       }
       if (b.type === 'tool_result' && b.toolUseId === toolUseId) {
         resultBlock = b
       }
     }
   }
-  return { taskBlock, resultBlock }
+  return { taskBlock, resultBlock, siblings }
 }
 
 /**

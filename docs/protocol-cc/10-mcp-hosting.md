@@ -281,6 +281,22 @@ query({
 
 ---
 
+### Tool calls of one assistant message run in order, MCP calls one at a time (2.1.293)
+
+cli.js's streaming tool executor starts a call only when `canExecuteTool` allows it: nothing else of the
+message is executing, or the call and everything executing are concurrency-safe. A first-party MCP tool
+is concurrency-safe only through `readOnlyHint` (ClaudeUI sends none), so it runs EXCLUSIVELY. The
+queue scan skips a concurrency-safe call it cannot start yet and goes on, but stops at the first call
+that is NOT concurrency-safe and cannot start, so every call after that one waits too. A second
+`dispatch_agent` of one message, or any call behind a blocking one, therefore has its `tool_use`
+streamed but starts — and so shows its permission ask, `task_started` and result — only when every
+earlier call of the message has returned. The wire marks no "waiting" state; ClaudeUI infers it from
+the message's own block order (`task-state.ts` `isBehindUnfinishedCall`) and shows the card as queued
+while the session's turn runs. (`.notes/research/async-dispatch/r1-clijs-subagents.md` G2: the
+executor; G3: what `readOnlyHint` changes.)
+
+---
+
 ## 10.8 `--permission-prompt-tool` variants
 
 Separate from SDK servers but related. Two modes:

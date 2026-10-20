@@ -1770,9 +1770,9 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
 // ---------------------------------------------------------------------------
 
 describe('CrossEngineDispatcher — durable stop-intent (armIfUnknown)', () => {
-  it('a pre-armed intent also stops a Claude-direction dispatch at start', async () => {
+  it('a pre-armed intent refuses a Claude-direction dispatch before it creates a target', async () => {
     const target = makeFakeClaudeTarget()
-    const { dispatcher } = makeHarness({
+    const { dispatcher, ledger } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
       spawnClaudeQuery: target.spawnClaudeQuery
     })
@@ -1788,7 +1788,10 @@ describe('CrossEngineDispatcher — durable stop-intent (armIfUnknown)', () => {
     const result = await dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
     expect(result.isError).toBe(true)
     expect(result.text).toContain('stopped')
-    expect(target.lastAbortController()?.signal.aborted).toBe(true)
+    // refused BEFORE anything exists: no process spawned, no ledger row, no run
+    expect(target.spawnCalls).toHaveLength(0)
+    expect(ledger.rows.size).toBe(0)
+    expect(dispatcher.inFlightCount).toBe(0)
 
     const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
     expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_pre_claude', status: 'stopped' })
@@ -9262,13 +9265,134 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
         parents: parents.parents
       })
       expect(dispatcher.stopDispatch('toolu_early', 'routing-1', { armIfUnknown: true })).toBe(true)
-      const ack = await dispatcher.dispatch(
+      const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_early' })
+      const answer = await dispatcher.dispatch(
         { engine: 'claude', prompt: 'x', runInBackground: true },
-        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_early' })
+        ctx
       )
-      expect(ack.isError).toBeUndefined()
-      await vi.waitFor(() => expect(parents.on('session:task-notification')).toHaveLength(1))
-      expect(parents.on('session:task-notification')[0].data).toMatchObject({ status: 'stopped' })
+      // the call answers stopped at once; the card gets its terminal event; nothing was created
+      expect(answer).toMatchObject({ isError: true, text: 'Dispatch stopped by user.' })
+      expect(
+        ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')?.[1]
+      ).toMatchObject({
+        toolUseId: 'toolu_early',
+        status: 'stopped',
+        isBackgrounded: true
+      })
+      expect(target.spawnCalls).toHaveLength(0)
+    })
+
+    // L2 — cli.js runs a first-party MCP call such as dispatch_agent only when nothing else of its
+    // assistant message is executing, so a dispatch behind a blocking one starts when that one ends:
+    // its card shows "queued" and a Stop on it is armed for as long as the wait lasts.
+    describe('a Stop armed on a call that has not started', () => {
+      const armedHarness = (clock: { now: number }) => {
+        const target = makeFakeClaudeTarget()
+        const parents = makeParents()
+        const feed = new Set<(channel: string, args: unknown[]) => void>()
+        const { dispatcher, ledger } = makeHarness({
+          loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+          spawnClaudeQuery: target.spawnClaudeQuery,
+          now: () => clock.now
+        })
+        const ctxs = new Map<string, ReturnType<typeof makeCtx>>()
+        dispatcher.configureParents(parents.parents, undefined, (observer) => {
+          feed.add(observer)
+          return () => feed.delete(observer)
+        })
+        return {
+          dispatcher,
+          target,
+          parents,
+          ledger,
+          ctxs,
+          fire: (channel: string, args: unknown[]): void => feed.forEach((o) => o(channel, args))
+        }
+      }
+      const launch = (
+        t: ReturnType<typeof armedHarness>,
+        toolUseId: string
+      ): ReturnType<CrossEngineDispatcher['dispatch']> => {
+        const ctx = makeCtx({ fromEngine: 'opencode', fromRoutingId: 'routing-1', toolUseId })
+        t.ctxs.set(toolUseId, ctx)
+        return t.dispatcher.dispatch({ engine: 'claude', prompt: 'x', runInBackground: true }, ctx)
+      }
+      /** The call was refused as stopped, before any target, row or run existed. */
+      const expectRefusedStopped = async (
+        t: ReturnType<typeof armedHarness>,
+        toolUseId: string
+      ): Promise<void> => {
+        const answer = await launch(t, toolUseId)
+        expect(answer).toMatchObject({ isError: true, text: 'Dispatch stopped by user.' })
+        expect(
+          t.ctxs
+            .get(toolUseId)!
+            .emit.mock.calls.find((c) => c[0] === 'session:task-notification')?.[1]
+        ).toMatchObject({ toolUseId, status: 'stopped' })
+        expect(t.target.spawnCalls).toHaveLength(0)
+        expect(t.ledger.rows.size).toBe(0)
+      }
+
+      it('still stops the call when it starts after more than the old 60 s window', async () => {
+        const clock = { now: 1_000_000 }
+        const t = armedHarness(clock)
+        expect(t.dispatcher.stopDispatch('toolu_q', 'routing-1', { armIfUnknown: true })).toBe(true)
+        clock.now += 10 * 60_000 // ten minutes behind a blocking call
+        await expectRefusedStopped(t, 'toolu_q')
+      })
+
+      it('is dropped when the parent’s turn ends: a call that starts later is not stopped', async () => {
+        const clock = { now: 1_000_000 }
+        const t = armedHarness(clock)
+        t.dispatcher.stopDispatch('toolu_q', 'routing-1', { armIfUnknown: true })
+        t.fire('session:result', ['routing-1', { subtype: 'success' }])
+        await launch(t, 'toolu_q')
+        await tick()
+        expect(t.target.lastAbortController()?.signal.aborted).toBe(false)
+        expect(t.parents.on('session:task-notification')).toEqual([])
+        t.dispatcher.stopDispatch('toolu_q', 'routing-1')
+      })
+
+      it('survives another session’s turn end, and a status change of its own', async () => {
+        const clock = { now: 1_000_000 }
+        const t = armedHarness(clock)
+        t.dispatcher.stopDispatch('toolu_q', 'routing-1', { armIfUnknown: true })
+        t.fire('session:result', ['routing-other', {}])
+        t.fire('session:status', ['routing-1', { state: 'running' }])
+        await expectRefusedStopped(t, 'toolu_q')
+      })
+
+      it('is dropped with the session that armed it', async () => {
+        const clock = { now: 1_000_000 }
+        const t = armedHarness(clock)
+        t.dispatcher.stopDispatch('toolu_q', 'routing-1', { armIfUnknown: true })
+        t.dispatcher.disposeFor('routing-1')
+        await launch(t, 'toolu_q')
+        await tick()
+        expect(t.target.lastAbortController()?.signal.aborted).toBe(false)
+        t.dispatcher.stopDispatch('toolu_q', 'routing-1')
+      })
+
+      it('is dropped when the session is deleted (endParent)', async () => {
+        const clock = { now: 1_000_000 }
+        const t = armedHarness(clock)
+        t.dispatcher.stopDispatch('toolu_q', 'routing-1', { armIfUnknown: true })
+        t.dispatcher.endParent('routing-1')
+        await launch(t, 'toolu_q')
+        await tick()
+        expect(t.target.lastAbortController()?.signal.aborted).toBe(false)
+        t.dispatcher.stopDispatch('toolu_q', 'routing-1')
+      })
+
+      it('a call that is not queued (no Stop armed) is untouched by a turn end', async () => {
+        const clock = { now: 1_000_000 }
+        const t = armedHarness(clock)
+        t.fire('session:result', ['routing-1', {}])
+        await launch(t, 'toolu_plain')
+        await tick()
+        expect(t.target.lastAbortController()?.signal.aborted).toBe(false)
+        t.dispatcher.stopDispatch('toolu_plain', 'routing-1')
+      })
     })
 
     it('the parent’s own interrupt stops a blocking run it awaits, never a background run', async () => {
@@ -13803,6 +13927,28 @@ describe('CrossEngineDispatcher — a message steered into a run is answered, or
         reason: 'Denied by permission rule: mcp__claude-ui-sessions__session_message'
       })
       await endRun(dispatcher, pending)
+    })
+
+    it('a Stop armed before the call starts: no pi target is spawned, no row is written', async () => {
+      const target = makeFakePiTarget()
+      const { dispatcher, ledger } = makeHarness({
+        requireHandBack: true,
+        reports: makeFakeDispatchReports(),
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' }
+        })),
+        spawnPiTarget: target.spawnPiTarget
+      })
+      created.push(dispatcher)
+      dispatcher.stopDispatch('toolu_q', 'routing-1', { armIfUnknown: true })
+      const answer = await dispatcher.dispatch(
+        { engine: 'pi', prompt: 'x', name: 'rev', runInBackground: true },
+        makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_q' })
+      )
+      expect(answer).toMatchObject({ isError: true, text: 'Dispatch stopped by user.' })
+      expect(target.spawnCalls).toHaveLength(0)
+      expect(ledger.rows.size).toBe(0)
+      expect(dispatcher.inFlightCount).toBe(0)
     })
 
     it('a Stop armed on the origin card while nothing ran does not abort the run a message starts', async () => {

@@ -41,7 +41,9 @@ export function keepRunning(
 ): { row: AgentRosterRow; isContext: boolean }[] {
   const byId = new Map(rows.map((r) => [r.toolUseId, r]))
   const kept = new Set(
-    rows.filter((r) => r.isRunning || selectedIds.includes(r.toolUseId)).map((r) => r.toolUseId)
+    rows
+      .filter((r) => r.isRunning || r.isQueued || selectedIds.includes(r.toolUseId))
+      .map((r) => r.toolUseId)
   )
   const context = new Set<string>()
   for (const id of kept) {

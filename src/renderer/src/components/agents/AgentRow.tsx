@@ -37,6 +37,7 @@
  */
 import { useEffect, useRef } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
+import { armStopPillFallback } from '../../lib/stop-pill'
 import { formatElapsed, formatTokens, taskElapsedLabel, useTicker } from '../chat/TaskCard'
 import { AGENT_TYPE_SLOT_CLASS, AgentTile, useAgentTile } from './AgentTypeTile'
 import { StatusDot, type SessionDotState } from '../Sidebar/StatusDot'
@@ -92,7 +93,8 @@ function TreeGuide({ depth, guide }: { depth: number; guide: RowGuide }): React.
 }
 
 /** The roster's names for a row's state: `data-status`, and which state of the shared dot draws it. */
-export type RowStatus = 'running' | 'subagents' | 'failed' | 'stopped' | 'loaded' | 'done'
+export type RowStatus =
+  'running' | 'queued' | 'subagents' | 'failed' | 'stopped' | 'loaded' | 'done'
 
 /**
  * A row's dot is the session dot's (`status-dot`, its ripple and colours), mapped:
@@ -111,10 +113,11 @@ export type RowStatus = 'running' | 'subagents' | 'failed' | 'stopped' | 'loaded
 export function rowStatus(
   row: Pick<
     AgentRosterRow,
-    'isRunning' | 'isError' | 'isStopped' | 'isLoaded' | 'runningDescendants'
+    'isRunning' | 'isQueued' | 'isError' | 'isStopped' | 'isLoaded' | 'runningDescendants'
   >
 ): RowStatus {
   if (row.isRunning) return 'running'
+  if (row.isQueued) return 'queued'
   if (row.isError) return 'failed'
   if (row.isStopped) return 'stopped'
   if (row.isLoaded) return 'loaded'
@@ -124,6 +127,7 @@ export function rowStatus(
 
 const DOT_STATE: Record<RowStatus, SessionDotState> = {
   running: 'running',
+  queued: 'inactive',
   subagents: 'idle',
   failed: 'failed',
   stopped: 'inactive',
@@ -132,6 +136,7 @@ const DOT_STATE: Record<RowStatus, SessionDotState> = {
 }
 
 const DOT_LABEL: Partial<Record<RowStatus, string>> = {
+  queued: 'Queued',
   done: 'Done',
   failed: 'Failed',
   stopped: 'Stopped',
@@ -209,13 +214,15 @@ export function AgentRow({
     const rid = activeSessionId
     if (!rid || isStopping) return
     setTaskStopping(rid, row.toolUseId)
-    const result = await window.api.stopTask(rid, row.toolUseId)
+    // A dispatch row is stopped through the dispatcher (it arms the stop for a call that has not
+    // started); without the flag Claude's stopTask finds no task and interrupts the whole turn.
+    const result = await window.api.stopTask(rid, row.toolUseId, row.dispatch !== undefined)
     if (!result.success) {
       window.api.logError('AgentRow', `Failed to stop task: ${result.error}`)
       clearTaskStopping(rid, row.toolUseId)
       return
     }
-    setTimeout(() => clearTaskStopping(rid, row.toolUseId), 10000)
+    armStopPillFallback(rid, row.toolUseId)
   }
 
   // A running shell's clock is live, counted from its lifecycle record's start:
@@ -295,16 +302,23 @@ export function AgentRow({
       </span>
       <ResumedBadge runIndex={row.runIndex} testId="AgentRow.resumed" />
       <span aria-hidden className="grow shrink basis-0 min-w-0" />
-      {row.isRunning && !isContext && (row.depth === 0 || hasLifecycle) && (
-        <button
-          data-testid="AgentRow.stop"
-          onClick={handleStop}
-          disabled={isStopping}
-          className="text-[11px] px-2 py-px leading-[14px] rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors cursor-default shrink-0 disabled:opacity-50"
-        >
-          {isStopping ? 'Stopping' : 'Stop'}
-        </button>
+      {row.isQueued && (
+        <span data-testid="AgentRow.queued" className="text-[10px] text-text-muted shrink-0">
+          queued
+        </span>
       )}
+      {(row.isRunning || row.isQueued) &&
+        !isContext &&
+        (row.depth === 0 || hasLifecycle || row.isQueued) && (
+          <button
+            data-testid="AgentRow.stop"
+            onClick={handleStop}
+            disabled={isStopping}
+            className="text-[11px] px-2 py-px leading-[14px] rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors cursor-default shrink-0 disabled:opacity-50"
+          >
+            {isStopping ? 'Stopping' : 'Stop'}
+          </button>
+        )}
       {hasMetrics && (
         <span
           data-testid="AgentRow.metrics"
