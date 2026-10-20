@@ -45,6 +45,7 @@ import { ResumedBadge } from './ResumedBadge'
 import { agentRowLabel, type AgentRosterRow } from '../../hooks/useAgentRoster'
 import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
 import { modelTier } from '../../../../shared/model-tier'
+import { dispatchLabel } from '../../../../shared/tool-kinds'
 import { MODEL_TIER_TEXT_CLASS } from '../../lib/model-tier-class'
 
 /** Indent per nesting level, on top of the row's own 10px (`px-2.5`). */
@@ -245,6 +246,7 @@ export function AgentRow({
   const hasMetrics = !!row.lastToolName || figures.length > 0
 
   const isShell = row.kind === 'shell'
+  const label = agentRowLabel(row)
 
   return (
     <div
@@ -298,8 +300,17 @@ export function AgentRow({
               }`
         }`}
       >
-        {agentRowLabel(row)}
+        {label}
       </span>
+      {row.dispatch && label !== dispatchLabel(row.dispatch) && (
+        <span
+          data-testid="AgentRow.engine"
+          title={dispatchLabel(row.dispatch)}
+          className="shrink-0 text-[11px] text-text-muted"
+        >
+          {row.dispatch.engine}
+        </span>
+      )}
       <ResumedBadge runIndex={row.runIndex} testId="AgentRow.resumed" />
       <span aria-hidden className="grow shrink basis-0 min-w-0" />
       {row.isQueued && (
