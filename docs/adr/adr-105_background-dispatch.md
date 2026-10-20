@@ -478,6 +478,8 @@ Each of these was found, ruled on and left as is.
   `running` (the boot id cannot be checked for a process that is not ours; only our own pid reused is detected)
   until a turn next sets it or the user stops it: Stop on its card ends the row (§5). A heartbeat would close this
   without the user. If the owner crashed and no second boot ever happens, the row stays `running` until the next boot.
+  A Stop on a row that another live instance runs does not reach that instance: its run continues, billed, until its
+  turn ends, and its report is not delivered (the row reads `stopped` and the parent was told so).
 - **An older build on a v39 database.** A build from before migration v39 that shares the database (the downgrade
   guard lets it open) writes `running` rows with no owner, and the next boot of any instance interrupts them, a live
   run of the older build included.

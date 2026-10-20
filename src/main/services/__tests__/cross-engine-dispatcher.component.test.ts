@@ -9438,6 +9438,23 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
         expect(t.parents.on('session:task-notification')).toEqual([])
       })
 
+      it('the parent own interrupt (blockingOnly) leaves it running; the card Stop still ends it', async () => {
+        const t = await phantom()
+        expect(
+          t.dispatcher.stopDispatch('toolu_phantom', 'routing-1', { blockingOnly: true })
+        ).toBe(false)
+        expect(
+          t.dispatcher.stopDispatch(t.phantom.id, 'routing-1', {
+            blockingOnly: true,
+            armIfUnknown: false
+          })
+        ).toBe(false)
+        expect(t.ledger.rows.get(t.phantom.id)!.state).toBe('running')
+        expect(t.parents.on('session:task-notification')).toEqual([])
+        expect(t.dispatcher.stopDispatch('toolu_phantom', 'routing-1')).toBe(true)
+        expect(t.ledger.rows.get(t.phantom.id)!.state).toBe('stopped')
+      })
+
       it('keeps the harness state while another live instance owns the row, removes it when none does', async () => {
         const live = await phantom(true)
         live.dispatcher.stopDispatch(live.phantom.id, 'routing-1')
@@ -11441,6 +11458,21 @@ describe('CrossEngineDispatcher — results delivered into the parent (ADR-105 �
     expect(delivered[0].item.text).toBe('X-Agent rev was stopped by the user.')
   })
 
+  it('a run whose row was stopped from another instance ends without delivering its report', async () => {
+    const { target, dispatcher, ledger, delivered, reports, launch, handBack } = setup()
+    await launch()
+    const row = [...ledger.rows.values()][0]
+    // A Stop given in a second instance sharing the DB (endPhantomRow) wrote `stopped` on the row.
+    ledger.update(row.id, { state: 'stopped' })
+    await handBack('a full report')
+    target.pushEvent(PI_AGENT_SETTLED)
+    await vi.waitFor(() => expect(dispatcher.inFlightCount).toBe(0))
+    await tick()
+    expect(delivered).toHaveLength(0)
+    expect(reports.rows.every((r) => r.deliveredAt === null)).toBe(true)
+    expect(ledger.rows.get(row.id)!.state).toBe('stopped')
+  })
+
   it('a thread with no hand_back tool: its last message, framed with the warning', async () => {
     const target = makeFakeCodexTarget()
     const reports = makeFakeDispatchReports()
@@ -12876,6 +12908,46 @@ describe('CrossEngineDispatcher — messages with X-Agents (ADR-105 §4, B-4)', 
         expect(target.spawnCalls).toHaveLength(0)
       }
     )
+
+    it.each([
+      ['name', { name: 'n'.repeat(65) }, /name is 65 characters/],
+      ['description', { description: 'd'.repeat(201) }, /description is 201 characters/]
+    ] as const)(
+      'refuses a %s over its limit at launch, creating nothing',
+      async (_k, labels, re) => {
+        const target = makeFakePiTarget()
+        const { dispatcher } = makeHarness({ spawnPiTarget: target.spawnPiTarget })
+        created.push(dispatcher)
+        const result = await dispatcher.dispatch(
+          { engine: 'pi', prompt: 'x', ...labels },
+          makeCtx({ toolUseId: 't' })
+        )
+        expect(result.isError).toBe(true)
+        expect(result.text).toMatch(re)
+        expect(target.spawnCalls).toHaveLength(0)
+      }
+    )
+
+    it('a name of 64 characters and a description of 200 are launched', async () => {
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        spawnPiTarget: target.spawnPiTarget,
+        requireHandBack: true,
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } }))
+      })
+      created.push(dispatcher)
+      const ack = await dispatcher.dispatch(
+        {
+          engine: 'pi',
+          prompt: 'x',
+          name: 'n'.repeat(64),
+          description: 'd'.repeat(200),
+          runInBackground: true
+        },
+        makeCtx({ toolUseId: 't' })
+      )
+      expect(ack.isError).toBeUndefined()
+    })
 
     it('an ordinary name is launched, and the acknowledgement names session_message with the name and the ref', async () => {
       const target = makeFakePiTarget()

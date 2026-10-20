@@ -97,9 +97,10 @@ export function dispatchResultSuffix(agentRef: string): string {
  */
 export const DISPATCH_NAME_PARAM =
   'Optional short handle for this agent, e.g. "impl-e1". It labels the agent in the agent list; ' +
-  'keep it short and distinct from your other agents.'
+  'keep it short (at most 64 characters) and distinct from your other agents.'
 export const DISPATCH_DESCRIPTION_PARAM =
-  'Optional 3-5 word summary of the task, shown on the agent card (e.g. "Review auth diff").'
+  'Optional 3-5 word summary of the task (at most 200 characters), shown on the agent card ' +
+  '(e.g. "Review auth diff").'
 
 /**
  * The optional `run_in_background` input (ADR-105 §2), worded once for the four

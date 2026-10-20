@@ -1217,7 +1217,8 @@ export async function sessionMessage(
     const result = await deliver(need().manager, target.id, {
       origin: 'session-message',
       // An X-Agent's text is untrusted model output, and a pi, opencode or Codex parent has no
-      // envelope handling of its own: it is defused as a report is (idempotent), with the marker.
+      // envelope handling of its own: it is defused as a report is, with the marker (applied once, here; a second pass would add
+      // another marker).
       text: caller.xAgent ? defusedXAgentMessage(text) : text,
       from,
       wake: false,

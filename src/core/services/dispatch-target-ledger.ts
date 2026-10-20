@@ -27,6 +27,7 @@ import {
   getDispatchTargetByHarnessRef,
   insertDispatchTargetWithRef,
   interruptDispatchTargets,
+  runningDispatchTarget,
   runningDispatchTargets,
   updateDispatchTarget,
   type DispatchTargetPatch,
@@ -177,7 +178,7 @@ export const dispatchLedger: DispatchLedgerStore = {
     if (patch.harnessRef !== undefined) hiddenSessions()?.add(patch.harnessRef)
   },
   ownedByOtherLiveInstance(id, alive) {
-    const owner = runningDispatchTargets().find((row) => row.id === id)?.owner
+    const owner = runningDispatchTarget(id)?.owner
     return (
       !!owner && owner.boot !== currentInstanceOwner().boot && !ownerIsGone(owner, undefined, alive)
     )

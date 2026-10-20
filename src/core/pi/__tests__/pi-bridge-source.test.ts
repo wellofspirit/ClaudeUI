@@ -26,8 +26,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 21 (dispatch_agent has no session_id, ADR-105 §4)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('21')
+  it('is version 22 (dispatch_agent states its name and description limits, ADR-105 §4)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('22')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {

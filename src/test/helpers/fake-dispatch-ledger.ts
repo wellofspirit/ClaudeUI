@@ -72,7 +72,9 @@ export function makeFakeDispatchLedger(): FakeDispatchLedger {
     update(id: string, patch: DispatchTargetPatch) {
       const row = rows.get(id)
       if (!row) return
-      rows.set(id, { ...row, ...patch })
+      // `stopped` is final, as in the store (db.ts updateDispatchTarget): a late turn state is dropped.
+      const { state: _late, ...kept } = patch
+      rows.set(id, { ...row, ...(row.state === 'stopped' ? kept : patch) })
       log.push(`update:${id}`)
     },
     ownedByOtherLiveInstance: (id) => foreignOwned.has(id) && rows.get(id)?.state === 'running',

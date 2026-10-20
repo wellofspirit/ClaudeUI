@@ -458,6 +458,10 @@ export interface DispatchRequest {
 /** The two labels a dispatch may carry onto its ledger row. */
 type DispatchLabels = Pick<DispatchRequest, 'name' | 'description'>
 
+/** The longest `name` and `description` a launch may carry (they reach the roster, the ledger and notification titles). */
+const MAX_XAGENT_NAME_CHARS = 64
+const MAX_XAGENT_DESCRIPTION_CHARS = 200
+
 /** A label as the ledger keeps it: trimmed, and nothing at all when it is blank. */
 function labelOf(value: unknown): string | null {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : null
@@ -3322,7 +3326,8 @@ export class CrossEngineDispatcher {
         'CrossEngineDispatcher',
         `stopDispatch miss: id=${id} not among ${this.runs.size} run(s)`
       )
-      if (routingId !== undefined && this.endPhantomRow(id, routingId)) return true
+      if (routingId !== undefined && !opts?.blockingOnly && this.endPhantomRow(id, routingId))
+        return true
       if (opts?.armIfUnknown) {
         this.pendingStops.set(toolUseId, { routingId })
         logger.debug(
@@ -4033,6 +4038,23 @@ export class CrossEngineDispatcher {
     // A new X-Agent's name is unique among its parent's children that are not stopped
     // (ADR-105 §1); an absent name is never checked.
     const name = req.sessionId ? null : labelOf(req.name)
+    if (name && name.length > MAX_XAGENT_NAME_CHARS) {
+      return {
+        refused: errorResult(
+          `The name is ${name.length} characters long; an X-Agent's name is at most ` +
+            `${MAX_XAGENT_NAME_CHARS}. Choose a shorter name.`
+        )
+      }
+    }
+    const description = labelOf(req.description)
+    if (description && description.length > MAX_XAGENT_DESCRIPTION_CHARS) {
+      return {
+        refused: errorResult(
+          `The description is ${description.length} characters long; an X-Agent's description is at most ` +
+            `${MAX_XAGENT_DESCRIPTION_CHARS}. Use a 3-5 word summary.`
+        )
+      }
+    }
     if (name && isReservedXAgentName(name)) {
       return {
         refused: errorResult(
@@ -4610,6 +4632,13 @@ export class CrossEngineDispatcher {
     const parents = this.parents
     if (!parents?.deliver || !run.bound || !run.ledgerId) return
     if (run.parentEnded || run.resultSent) return
+    if (this.stoppedElsewhere(run)) {
+      logger.info(
+        'CrossEngineDispatcher',
+        `X-Agent ${run.ledgerId} was stopped from another instance: its report is not delivered`
+      )
+      return
+    }
     const text = this.resultTextFor(run)
     if (text === null) return
     run.resultSent = true
@@ -4642,6 +4671,20 @@ export class CrossEngineDispatcher {
       parents.emit(parent, 'session:dispatch-result-held', { name: sentenceLabel(name) })
     } catch (err) {
       logger.warn('CrossEngineDispatcher', `held-result event failed: ${errText(err)}`)
+    }
+  }
+
+  /**
+   * The row reads `stopped` though this run was never asked to end: a Stop the user gave from
+   * another instance sharing the DB (`endPhantomRow`). The parent was told "stopped", so this
+   * run's report is not delivered or held.
+   */
+  private stoppedElsewhere(run: DispatchRun): boolean {
+    if (run.endRequested || !run.ledgerId) return false
+    try {
+      return this.ledger.get(run.ledgerId)?.state === 'stopped'
+    } catch {
+      return false
     }
   }
 

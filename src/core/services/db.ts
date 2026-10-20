@@ -2818,6 +2818,17 @@ export function runningDispatchTargets(db: Db = getDb()): RunningDispatchTarget[
   ).map((row) => ({ ...dispatchTargetRow(row), owner: dispatchTargetOwner(row) }))
 }
 
+/** One target, when it is still marked `running`: the row and the instance recorded as running it. */
+export function runningDispatchTarget(
+  id: string,
+  db: Db = getDb()
+): RunningDispatchTarget | undefined {
+  const row = db
+    .prepare("SELECT * FROM dispatch_target WHERE id = ? AND state = 'running'")
+    .get(id) as DispatchTargetDbRow | undefined
+  return row ? { ...dispatchTargetRow(row), owner: dispatchTargetOwner(row) } : undefined
+}
+
 /** The mutable columns of a target row; an omitted key keeps its value. */
 export type DispatchTargetPatch = Partial<
   Pick<
