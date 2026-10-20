@@ -304,6 +304,7 @@ import {
   AUTHCFG_CHANNELS as CLASSIFIED_AUTHCFG_CHANNELS,
   AUTHCFG_FREE_CHANNELS as CLASSIFIED_AUTHCFG_FREE_CHANNELS,
   SHELL_ACT_VERBS,
+  classifyDispatch,
   SHELL_READ_VERBS
 } from '../../../core/services/step-up-tier'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
@@ -737,6 +738,89 @@ describe('registerRemoteHandlers', () => {
     expect(decl?.kind).toBe('query')
     expect(AUTH_OFF_GRANTS.has(decl!.capability)).toBe(true)
     expect(commandRegistry.channels('remote')).toContain('blob:get')
+  })
+
+  describe('sync:report-timing', () => {
+    const REPORT = { frameBytes: 2048, decodeMs: 3.5, syncToFrameMs: 40, hydrateMs: 12.25 }
+
+    function syncStatsLines(): string[] {
+      return [...vi.mocked(logger.info).mock.calls, ...vi.mocked(logger.warn).mock.calls]
+        .filter(([source]) => source === 'SyncStats')
+        .map(([, message]) => message as string)
+    }
+
+    beforeEach(() => {
+      vi.mocked(logger.info).mockClear()
+      vi.mocked(logger.warn).mockClear()
+    })
+
+    it('is a base-reachable chat QUERY that takes the connection, registered for remote only', () => {
+      const decl = commandRegistry.declaration('sync:report-timing')
+      expect(decl).toMatchObject({ capability: 'chat', kind: 'query', withConnection: true })
+      // `chat` is in the base grant set, so every connection that can sync holds it.
+      expect(AUTH_OFF_GRANTS.has(decl!.capability)).toBe(true)
+      expect(commandRegistry.get('sync:report-timing', 'remote')).toBeDefined()
+      // A `query` is read-class: free on every step-up tier and never audited.
+      expect(
+        classifyDispatch({ channel: 'sync:report-timing', capability: 'chat', kind: 'query' })
+      ).toBe('read')
+    })
+
+    it('writes one host-formatted SyncStats line for a valid report', async () => {
+      await dispatcher.handle(
+        makeRequest('sync:report-timing', REPORT),
+        makeRemoteConnection('password', null)
+      )
+      expect(syncStatsLines()).toEqual([
+        'client sync-full applied: transport=web frameChars=2048 decodeMs=3.5 ' +
+          'syncToFrameMs=40.0 hydrateMs=12.3 totalMs=55.8'
+      ])
+    })
+
+    it('answers nothing for a malformed report and logs nothing', async () => {
+      const conn = makeRemoteConnection('password', null)
+      for (const bad of [
+        null,
+        'x',
+        [1, 2],
+        { ...REPORT, decodeMs: -1 },
+        { ...REPORT, hydrateMs: '1' }
+      ]) {
+        expect(
+          await dispatcher.handle(makeRequest('sync:report-timing', bad), conn)
+        ).toBeUndefined()
+      }
+      expect(await dispatcher.handle(makeRequest('sync:report-timing'), conn)).toBeUndefined()
+      expect(syncStatsLines()).toEqual([])
+    })
+
+    it('is refused for a connection without the chat class', async () => {
+      const enrollOnly = makeRemoteConnection('enroll-token', null, ENROLL_ONLY_GRANTS)
+      await expect(
+        dispatcher.handle(makeRequest('sync:report-timing', REPORT), enrollOnly)
+      ).rejects.toThrow(/Permission denied: "sync:report-timing" requires the "chat" capability/)
+      expect(syncStatsLines()).toEqual([])
+    })
+
+    it('rate-limits per connection (6 a minute) through the real dispatch path', async () => {
+      const noisy = makeRemoteConnection('password', null)
+      const quiet = makeRemoteConnection('password', null)
+      for (let i = 0; i < 9; i++) {
+        await dispatcher.handle(makeRequest('sync:report-timing', REPORT), noisy)
+      }
+      expect(syncStatsLines()).toHaveLength(6)
+      // Another connection's budget is its own: `withConnection` carries the right id.
+      await dispatcher.handle(makeRequest('sync:report-timing', REPORT), quiet)
+      expect(syncStatsLines()).toHaveLength(7)
+    })
+
+    it('ignores padded arguments: only the first is the report', async () => {
+      await dispatcher.handle(
+        makeRequest('sync:report-timing', REPORT, { frameBytes: 'evil' }, 'x'),
+        makeRemoteConnection('password', null)
+      )
+      expect(syncStatsLines()).toHaveLength(1)
+    })
   })
 
   it('session:send rejects when routingId not found', async () => {
@@ -2203,6 +2287,13 @@ const VOICE_PACK_CHANNELS = [
   'voice:pack-remove'
 ] as const
 
+/**
+ * The web client's full-sync timing report (`SyncStats`, sync-core.md § Measuring
+ * a full sync). REMOTE-only: the desktop renderer relays its own through
+ * `log:relay`. `chat` / `query` / `withConnection` — see its registration.
+ */
+const SYNC_TIMING_CHANNELS = ['sync:report-timing'] as const
+
 /** The part of {@link VOICE_PACK_CHANNELS} that is gated by `admin`. */
 const VOICE_PACK_ADMIN_CHANNELS = [
   'voice:pack-install',
@@ -2295,7 +2386,8 @@ describe('remote surface parity (phase 1 port)', () => {
         ...HARNESS_CHANNELS,
         // ADR-101 §6: the speech pack. Its status is `chat`; install, cancel and
         // remove are `admin`.
-        ...VOICE_PACK_CHANNELS
+        ...VOICE_PACK_CHANNELS,
+        ...SYNC_TIMING_CHANNELS
       ].sort()
     )
   })

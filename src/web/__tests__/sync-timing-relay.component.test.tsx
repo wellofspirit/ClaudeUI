@@ -3,8 +3,10 @@
  *
  * The web client's `SyncStats` timing relay: once per `sync-full`, carrying the
  * frame length, decode ms, `sync` → frame ms and the apply (`hydrateReplica`,
- * dynamic-import wait included), through `window.api.logRelay`. A catchup relays
- * nothing.
+ * dynamic-import wait included). Two copies leave the page: the console line
+ * (`window.api.logRelay`) and the HOST-log report, a fire-and-forget
+ * `sync:report-timing` invoke. A catchup relays and reports nothing, and a failing
+ * or unanswered report never holds hydrate back.
  *
  * Drives the real entry (`../main`) over a scripted socket — the apply timing is
  * measured inside `main.tsx`'s full-state handler and the frame timing inside
@@ -31,6 +33,8 @@ vi.mock('@renderer/stores/session-store', () => ({
 }))
 
 class FakeSocket {
+  // `connection.ts` compares `readyState` to `WebSocket.OPEN`, which is this class here.
+  static OPEN = 1
   static last: FakeSocket | null = null
   onopen: ((ev?: unknown) => void) | null = null
   onmessage: ((ev: { data: string }) => void) | null = null
@@ -46,6 +50,14 @@ class FakeSocket {
   }
   close(): void {
     this.readyState = 3
+  }
+  /** Every `sync:report-timing` invoke the page sent, parsed. */
+  reports(): Array<{ id: string; channel: string; args: unknown[] }> {
+    return this.sent
+      .map(
+        (raw) => JSON.parse(raw) as { type: string; id: string; channel: string; args: unknown[] }
+      )
+      .filter((m) => m.type === 'invoke' && m.channel === 'sync:report-timing')
   }
   /** Deliver one frame; returns its length on the wire. */
   deliver(msg: unknown): number {
@@ -145,5 +157,79 @@ describe('web client — SyncStats timing relay', () => {
     // A re-sync (background → foreground) is another full sync, reported again.
     await syncFull(ws)
     await waitFor(() => expect(relay).toHaveBeenCalledTimes(2))
+  }, 30_000)
+
+  it('reports to the HOST once per sync-full, numbers only, and never for a catchup', async () => {
+    const ws = await authenticate()
+    vi.spyOn(window.api, 'logRelay').mockImplementation(() => {})
+    expect(ws.reports()).toEqual([])
+
+    const length = await syncFull(ws)
+
+    await waitFor(() => expect(ws.reports()).toHaveLength(1))
+    const [report] = ws.reports()
+    // ONE object argument; exactly the four numeric fields, nothing else.
+    expect(report.args).toHaveLength(1)
+    const body = report.args[0] as Record<string, unknown>
+    expect(Object.keys(body).sort()).toEqual(
+      ['decodeMs', 'frameBytes', 'hydrateMs', 'syncToFrameMs'].sort()
+    )
+    expect(body.frameBytes).toBe(length)
+    for (const value of Object.values(body)) {
+      expect(typeof value).toBe('number')
+      expect(Number.isFinite(value)).toBe(true)
+      expect(value as number).toBeGreaterThanOrEqual(0)
+    }
+
+    // A catchup is not a full sync.
+    await act(async () => {
+      ws.deliver({ type: 'sync-catchup', epoch: 1, events: [] })
+    })
+    expect(ws.reports()).toHaveLength(1)
+
+    // A re-sync is another full sync, reported again.
+    await syncFull(ws)
+    await waitFor(() => expect(ws.reports()).toHaveLength(2))
+  }, 30_000)
+
+  it('does not hold hydrate back: an unanswered, refused or unsendable report leaves the app ready', async () => {
+    const ws = await authenticate()
+    vi.spyOn(window.api, 'logRelay').mockImplementation(() => {})
+
+    // Nobody answers the report (it would sit out its 30 s timeout): the app must
+    // already be rendered.
+    await syncFull(ws)
+    await waitFor(() => expect(screen.getByTestId('FakeApp')).toBeTruthy())
+    await waitFor(() => expect(ws.reports()).toHaveLength(1))
+
+    // The host refuses it (an older host: unknown channel, or the budget is spent):
+    // no unhandled rejection, no state change.
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      await act(async () => {
+        ws.deliver({
+          type: 'invoke-response',
+          id: ws.reports()[0].id,
+          ok: false,
+          error: 'Channel not available: sync:report-timing'
+        })
+      })
+      // And the socket itself cannot take the frame: still no throw into hydrate.
+      const send = ws.send.bind(ws)
+      ws.send = (data: string): void => {
+        if (data.includes('sync:report-timing')) throw new Error('socket closed')
+        send(data)
+      }
+      await syncFull(ws)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+    expect(unhandled).toEqual([])
+    expect(screen.getByTestId('FakeApp')).toBeTruthy()
   }, 30_000)
 })

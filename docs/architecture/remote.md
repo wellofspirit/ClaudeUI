@@ -36,6 +36,9 @@ client, `MessagePort` for the desktop renderer — no auth frames on the port, b
 port IS the trust):
 
 - `invoke` / `invoke-response` — client actions, RPC mirroring `ipcRenderer.invoke`.
+  The web client's one fire-and-forget diagnostic rides it too: `sync:report-timing` (a `chat`
+  query, remote-only) reports the cost of applying a `sync-full` into the host log — see
+  [security.md](security.md) §Capability grants.
 - `event {seq, channel, args}` — server pushes. The seq is the ring's, assigned once.
 - `sync {lastSeq, epoch}` → `sync-catchup {events}` or `sync-full {state}` — the
   reconnect protocol. The snapshot is canonical state in the main process

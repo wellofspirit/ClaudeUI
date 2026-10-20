@@ -1,7 +1,9 @@
 /**
  * The client half of the `SyncStats` measurement: what a `sync-full` cost the
- * RECEIVING side, relayed into the host's log through the existing renderer →
- * host relay (`window.api.logRelay`) so it lands beside the host's own lines.
+ * RECEIVING side, relayed into the host's log so it lands beside the host's own
+ * lines: the desktop renderer through the existing relay (`window.api.logRelay`),
+ * the web client through the remote `sync:report-timing` query (its `logRelay` only
+ * reaches the browser console), which the host formats with the same function.
  *
  * Both clients report once per `sync-full`, at `info` (so the same
  * `CLAUDE_UI_LOG=SyncStats:info` enablement shows it), escalating to `warn` when
@@ -34,9 +36,18 @@ export function syncTimingTotalMs(t: SyncTiming): number {
   return (t.syncToFrameMs ?? 0) + (t.decodeMs ?? 0) + t.hydrateMs
 }
 
-/** Relay one `sync-full` timing line. A missing relay (no host to log to) is a no-op. */
-export function relaySyncTiming(relay: Relay | undefined, t: SyncTiming): void {
-  if (!relay) return
+/** One timing line: the level it is logged at and its text. Numbers only. */
+export interface SyncTimingLine {
+  level: 'info' | 'warn'
+  message: string
+}
+
+/**
+ * Format the line for one `sync-full` timing. Shared by the renderer relay below
+ * and the HOST, which formats the web client's report itself (`sync:report-timing`)
+ * so both transports' lines have exactly one shape and no client string reaches a log.
+ */
+export function formatSyncTiming(t: SyncTiming): SyncTimingLine {
   const total = syncTimingTotalMs(t)
   const fields = [`transport=${t.transport}`]
   if (t.frameChars !== undefined) fields.push(`frameChars=${t.frameChars}`)
@@ -44,9 +55,44 @@ export function relaySyncTiming(relay: Relay | undefined, t: SyncTiming): void {
   if (t.syncToFrameMs !== undefined) fields.push(`syncToFrameMs=${t.syncToFrameMs.toFixed(1)}`)
   fields.push(`hydrateMs=${t.hydrateMs.toFixed(1)}`, `totalMs=${total.toFixed(1)}`)
   const slow = total > SYNC_TIMING_WARN_MS
-  relay(
-    slow ? 'warn' : 'info',
-    SYNC_STATS_SOURCE,
-    `${slow ? 'slow ' : ''}client sync-full applied: ${fields.join(' ')}`
-  )
+  return {
+    level: slow ? 'warn' : 'info',
+    message: `${slow ? 'slow ' : ''}client sync-full applied: ${fields.join(' ')}`
+  }
+}
+
+/** Relay one `sync-full` timing line. A missing relay (no host to log to) is a no-op. */
+export function relaySyncTiming(relay: Relay | undefined, t: SyncTiming): void {
+  if (!relay) return
+  const { level, message } = formatSyncTiming(t)
+  relay(level, SYNC_STATS_SOURCE, message)
+}
+
+/**
+ * The web client's report to the host (`sync:report-timing`): the one remote
+ * channel through which a browser's timing reaches the host log, because a web
+ * `logRelay` has no host to write to. Numbers only, by construction; the host
+ * re-validates every field ({@link parseSyncTimingReport} in
+ * `core/services/sync-timing-report.ts`) and formats the line itself.
+ */
+export const SYNC_REPORT_TIMING_CHANNEL = 'sync:report-timing'
+
+export interface SyncTimingReport {
+  /** Raw frame length as received (chars; the base64 length under E2E, where it is also the byte count). */
+  frameBytes: number
+  decodeMs: number
+  /** Absent when no `sync` was timed (the host then omits the field from its line). */
+  syncToFrameMs?: number
+  hydrateMs: number
+}
+
+/** The report a web client sends for one full sync; `null` when the frame length was not captured. */
+export function toSyncTimingReport(t: SyncTiming): SyncTimingReport | null {
+  if (t.frameChars === undefined || t.decodeMs === undefined) return null
+  return {
+    frameBytes: t.frameChars,
+    decodeMs: t.decodeMs,
+    ...(t.syncToFrameMs !== undefined ? { syncToFrameMs: t.syncToFrameMs } : {}),
+    hydrateMs: t.hydrateMs
+  }
 }

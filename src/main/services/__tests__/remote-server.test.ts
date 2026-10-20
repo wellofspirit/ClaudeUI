@@ -171,6 +171,7 @@ import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import { registerCommand } from '../../../core/ipc/command-registry'
 import { GIT_WATCH_COMMAND } from '../../../core/ipc/git-watch'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
+import { syncTimingReports } from '../../../core/services/sync-timing-report'
 import { emitEvent, syncCore } from '../../../core/services/sync-host'
 import { logger } from '../../../core/services/logger'
 import { LARGE_SYNC_FULL_BYTES } from '../../../core/services/sync-stats-log'
@@ -751,6 +752,54 @@ describe('RemoteServer — git watch release on disconnect', () => {
     await waitForTerminal(c1.ws)
     await waitUntil(() => server.getStatus().connectedClients === 0)
     expect(gitWatchRegistry.watchersOf('/anything')).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// `sync:report-timing` budget — one map entry per socket, dropped with the socket.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — sync:report-timing budget release on disconnect', () => {
+  beforeEach(useAuthDisabled)
+  let server: RemoteServer
+  let port: number
+  let releaseSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+    releaseSpy = vi.spyOn(syncTimingReports, 'releaseConnection')
+  })
+
+  afterEach(async () => {
+    releaseSpy.mockRestore()
+    try {
+      await server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  it('releases a connection as its own socket closes', async () => {
+    await server.start(port, '127.0.0.1')
+    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await c1.ready
+    releaseSpy.mockClear()
+
+    c1.close()
+    await waitForTerminal(c1.ws)
+    await waitUntil(() => releaseSpy.mock.calls.length === 1)
+    expect(typeof releaseSpy.mock.calls[0][0]).toBe('string')
+  })
+
+  it('releases every live connection on stop() without waiting for the sockets', async () => {
+    await server.start(port, '127.0.0.1')
+    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await c1.ready
+    releaseSpy.mockClear()
+
+    server.stop()
+    expect(releaseSpy).toHaveBeenCalledTimes(1)
   })
 })
 

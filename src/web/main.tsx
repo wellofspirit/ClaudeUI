@@ -6,7 +6,11 @@ import { RemoteConnection, type ConnectionState } from './connection'
 import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
 import { createWebSocketApi } from './api-adapter'
 import { setSyncClient } from '../core/shared/sync/client-registry'
-import { relaySyncTiming } from '../core/shared/sync/sync-timing'
+import {
+  SYNC_REPORT_TIMING_CHANNEL,
+  relaySyncTiming,
+  toSyncTimingReport
+} from '../core/shared/sync/sync-timing'
 import { ConnectionOverlay } from './components/ConnectionOverlay'
 import { PasswordLogin } from './components/PasswordLogin'
 import { PasskeyLogin } from './components/PasskeyLogin'
@@ -388,11 +392,24 @@ function RemoteApp(): React.JSX.Element {
       // hardest to notice and hardest to reproduce, so it audits here too.
       startProjectionAudit()
       const outcome = hydrateReplica(snapshot, isResync)
-      relaySyncTiming(api.logRelay, {
+      const timing = {
         transport: 'web',
         ...frameTiming,
         hydrateMs: performance.now() - hydrateStart
-      })
+      } as const
+      // The console copy, then the one that matters: the HOST log, through the
+      // remote `sync:report-timing` query. Fire-and-forget and never awaited — a
+      // refusal, an older host without the channel or a dead socket must not touch
+      // hydrate, so the sync part is guarded too and the rejection is swallowed.
+      relaySyncTiming(api.logRelay, timing)
+      const report = toSyncTimingReport(timing)
+      if (report) {
+        try {
+          connection.invoke(SYNC_REPORT_TIMING_CHANNEL, report).catch(() => {})
+        } catch {
+          /* diagnostic only */
+        }
+      }
       // Before the post-hydrate reads, so nothing they do can keep the app from
       // rendering.
       setReady(true)

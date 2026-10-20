@@ -65,6 +65,7 @@ import type { PtyRemoteSink } from './pty-manager'
 import { textToBase64, base64ToText } from '../../shared/base64-text'
 import { gitWatchRegistry } from './git-watch-registry'
 import { voiceRelay } from './voice-relay'
+import { syncTimingReports } from './sync-timing-report'
 import { STREAM_BACKPRESSURE_BYTES } from '../shared/sync/stream'
 import { logger } from './logger'
 import { TunnelManager } from './tunnel-manager'
@@ -1320,6 +1321,7 @@ export class RemoteServer {
       // And the microphone: a capture whose socket is gone has nowhere to send a
       // transcript, and it holds a Deepgram stream open inside the engine.
       voiceRelay.releaseOwner(client.connection.connectionId)
+      syncTimingReports.releaseConnection(client.connection.connectionId)
       closed.push(closeSocket(ws))
     }
 
@@ -3749,6 +3751,8 @@ export class RemoteServer {
       // so this is what guarantees a capture cannot outlive the authority that
       // started it. A phone that sleeps mid-sentence lands here too.
       voiceRelay.releaseOwner(connectionId)
+      // And the `sync:report-timing` budget, so the per-connection map cannot grow past the sockets.
+      syncTimingReports.releaseConnection(connectionId)
       this.clients.delete(ws)
       if (authenticated) {
         logger.info(
