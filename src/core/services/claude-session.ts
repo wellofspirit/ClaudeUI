@@ -1654,12 +1654,18 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       // `message_start` / assistant frame: those trail the request by seconds, and
       // a notification landing in that gap would be cleared although the request
       // (and the drain) were already past.
-      if (msg.status === 'requesting' && this.pendingHandbackWake) {
+      if (msg.status === 'requesting') {
         this.pendingHandbackWake = false
-        // The extra turn the flag promised has begun. Say so now rather than at
-        // its first content frame (seconds later), so the renderer's fallback timer
-        // for a turn that never comes is not racing a slow first token.
-        if (!this.isProcessing) this.beginMainTurn()
+        // A main-agent model round has begun, so the main agent is working: say so
+        // now rather than at the round's first content frame (seconds later). It is
+        // the extra turn a hand-back promised (so the renderer's fallback timer for
+        // a turn that never comes is not racing a slow first token), and any turn
+        // cli.js starts by itself behind an intermediate `result` — a background
+        // task's notification continuing the work — whose gap would otherwise read
+        // as `idle`: the dot blinking idle between two running stretches. A
+        // subagent's rounds emit no `requesting` (a frame that names an agent is
+        // ignored all the same), and the zero-turn pointer result emits none.
+        if (!this.isProcessing && !msg.parent_tool_use_id && !msg.agent_id) this.beginMainTurn()
       }
       const newMode = msg.permissionMode
       if (newMode && newMode !== this.permissionMode) {

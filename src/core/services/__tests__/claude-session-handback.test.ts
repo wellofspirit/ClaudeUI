@@ -574,19 +574,136 @@ describe('ClaudeSession — a hand-back that will start an extra turn marks the 
     await done
   })
 
-  it('a main-level round start does not flip an idle session when no hand-back is pending', async () => {
+  const statusStates = (sent: Array<[string, string, unknown]>): string[] =>
+    sent.filter(([c]) => c === 'session:status').map(([, , d]) => (d as { state: string }).state)
+  const errorResult = (): Record<string, unknown> =>
+    result({ subtype: 'error_during_execution', is_error: true, num_turns: 1, result: '' })
+  const subagentRequesting = (): Record<string, unknown> => ({
+    type: 'system',
+    subtype: 'status',
+    status: 'requesting',
+    parent_tool_use_id: 'toolu_agent'
+  })
+
+  it('L4: a continuation behind an intermediate result is running from its first round, with no idle after it', async () => {
     const ctl = controllableHandle()
     mockQuery.mockImplementation(() => ctl.handle)
     const { win, sent } = makeWin()
-    const session = new ClaudeSession('rid-f1-idle', win, '/tmp/proj', {})
+    const session = new ClaudeSession('rid-l4-seq', win, '/tmp/proj', {})
+    liveSessions.push(session)
+    const done = session.run('go')
+    await vi.waitFor(() => expect(mockQuery).toHaveBeenCalled())
+
+    // Turn 1 ends at a background launch (intermediate result); the task is still running.
+    ctl.push(init(), requesting(), mainText('launched'), result({ num_turns: 1 }))
+    await vi.waitFor(() => expect(results(sent)).toHaveLength(1))
+    await vi.waitFor(() => expect(session.status.state).toBe('idle'))
+    const before = statusStates(sent).length
+
+    // The task ends; cli.js continues the work by itself: notification, init, first round.
+    ctl.push(ended({ summary: 'done' }), init(), requesting())
+    await vi.waitFor(() => expect(session.status.state).toBe('running'))
+    ctl.push(mainText('continued'), result({ num_turns: 1 }))
+    await vi.waitFor(() => expect(results(sent)).toHaveLength(2))
+
+    // Idle once at result #1; running from the continuation's FIRST ROUND (not its first
+    // content frame); idle again only at result #2 — nothing idle in between.
+    expect(statusStates(sent).slice(before)).toEqual(['running', 'idle'])
+    ctl.end()
+    await done
+  })
+
+  it('L4: the idle session turns running at a main round start whether or not a hand-back is pending', async () => {
+    const ctl = controllableHandle()
+    mockQuery.mockImplementation(() => ctl.handle)
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('rid-l4-plain', win, '/tmp/proj', {})
+    liveSessions.push(session)
+    const done = session.run('go')
+    await vi.waitFor(() => expect(mockQuery).toHaveBeenCalled())
+    ctl.push(init(), requesting(), mainText('hi'), result({ num_turns: 1 }))
+    await vi.waitFor(() => expect(results(sent)).toHaveLength(1))
+    expect(session.status.state).toBe('idle')
+    ctl.push(init(), requesting())
+    await vi.waitFor(() => expect(session.status.state).toBe('running'))
+    ctl.end()
+    await done
+  })
+
+  it('L4: a subagent’s round start does not flip an idle session', async () => {
+    const ctl = controllableHandle()
+    mockQuery.mockImplementation(() => ctl.handle)
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('rid-l4-sub', win, '/tmp/proj', {})
+    liveSessions.push(session)
+    const done = session.run('go')
+    await vi.waitFor(() => expect(mockQuery).toHaveBeenCalled())
+    ctl.push(init(), requesting(), started(), mainText('launched'), result({ num_turns: 1 }))
+    await vi.waitFor(() => expect(results(sent)).toHaveLength(1))
+    const before = statusStates(sent).length
+    ctl.push(
+      subagentRequesting(),
+      { type: 'system', subtype: 'status', status: 'requesting', agent_id: 'a1b2c3' },
+      // and the background agent's own content frames
+      { ...mainText('child'), parent_tool_use_id: 'toolu_agent' }
+    )
+    await new Promise((r) => setTimeout(r, 20))
+    expect(session.status.state).toBe('idle')
+    expect(statusStates(sent).slice(before)).not.toContain('running')
+    ctl.end()
+    await done
+  })
+
+  it('L4: a round that fails before any frame ends idle at its error result', async () => {
+    const ctl = controllableHandle()
+    mockQuery.mockImplementation(() => ctl.handle)
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('rid-l4-fail', win, '/tmp/proj', {})
     liveSessions.push(session)
     const done = session.run('go')
     await vi.waitFor(() => expect(mockQuery).toHaveBeenCalled())
     ctl.push(init(), requesting(), mainText('hi'), result({ num_turns: 1 }))
     await vi.waitFor(() => expect(results(sent)).toHaveLength(1))
     ctl.push(init(), requesting())
-    await new Promise((r) => setTimeout(r, 20))
+    await vi.waitFor(() => expect(session.status.state).toBe('running'))
+    ctl.push(errorResult())
+    await vi.waitFor(() => expect(results(sent)).toHaveLength(2))
     expect(session.status.state).toBe('idle')
+    ctl.end()
+    await done
+  })
+
+  it('L4: a round cut short by the process ending does not leave the session running', async () => {
+    const ctl = controllableHandle()
+    mockQuery.mockImplementation(() => ctl.handle)
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('rid-l4-exit', win, '/tmp/proj', {})
+    liveSessions.push(session)
+    const done = session.run('go')
+    await vi.waitFor(() => expect(mockQuery).toHaveBeenCalled())
+    ctl.push(init(), requesting(), mainText('hi'), result({ num_turns: 1 }))
+    await vi.waitFor(() => expect(results(sent)).toHaveLength(1))
+    ctl.push(init(), requesting())
+    await vi.waitFor(() => expect(session.status.state).toBe('running'))
+    ctl.end()
+    await done
+    expect(session.status.state).not.toBe('running')
+  })
+
+  it('L4: a cancelled continuation (Stop) ends not-running', async () => {
+    const ctl = controllableHandle()
+    mockQuery.mockImplementation(() => ctl.handle)
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('rid-l4-cancel', win, '/tmp/proj', {})
+    liveSessions.push(session)
+    const done = session.run('go')
+    await vi.waitFor(() => expect(mockQuery).toHaveBeenCalled())
+    ctl.push(init(), requesting(), mainText('hi'), result({ num_turns: 1 }))
+    await vi.waitFor(() => expect(results(sent)).toHaveLength(1))
+    ctl.push(init(), requesting())
+    await vi.waitFor(() => expect(session.status.state).toBe('running'))
+    session.cancel()
+    expect(session.status.state).not.toBe('running')
     ctl.end()
     await done
   })

@@ -387,6 +387,14 @@ applies the normal gate 3 s after a `pendingWake` result if no turn has started
 (`useClaudeEvents.ts` `PENDING_WAKE_GRACE_MS`); the core reports the session running at the extra turn's
 `status requesting`, which cancels that timer.
 
+That `requesting` is also the signal for ANY turn cli.js starts by itself behind an intermediate
+`result` — a background task's notification continuing the work (`system/init`, `status requesting`, …),
+with no pending hand-back at all: a main-level `requesting` (no `parent_tool_use_id` / `agent_id`) on an
+idle session reports it running, so the sidebar dot does not read `idle` from the notification until the
+turn's first assistant frame, seconds later. A subagent's rounds emit none; neither does the zero-turn
+pointer `result`. A round that is cancelled or fails ends with its own `result` (or the process
+ending), which sets idle as for any turn.
+
 ### Cumulative vs per-turn fields (probed 2026-07-15 against the pinned binary)
 
 - **`total_cost_usd` and `modelUsage` are CUMULATIVE within one cli.js process** —
