@@ -4047,6 +4047,16 @@ export class CrossEngineDispatcher {
       }
     }
     const description = labelOf(req.description)
+    // Every registration marks `description` required, but an engine need not enforce its schema
+    // (a Codex dynamic tool may not): a NEW launch without one is refused here. A continuation or
+    // a message to an existing X-Agent keeps the description its row already has.
+    if (!description && !req.sessionId) {
+      return {
+        refused: errorResult(
+          'The description is required: give a 3-5 word summary of the task (e.g. "Review auth diff").'
+        )
+      }
+    }
     if (description && description.length > MAX_XAGENT_DESCRIPTION_CHARS) {
       return {
         refused: errorResult(

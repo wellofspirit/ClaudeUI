@@ -95,6 +95,7 @@ import {
   type FakeDispatchLedger
 } from '../../../test/helpers/fake-dispatch-ledger'
 import { makeFakeDispatchReports } from '../../../test/helpers/fake-dispatch-reports'
+import { withDefaultDescription } from '../../../test/helpers/default-dispatch-description'
 import {
   HAND_BACK_DONE_TEXT,
   HAND_BACK_NOT_TARGET_TEXT,
@@ -541,7 +542,7 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}, fake = makeFakeOpe
     ...overrides
   }
   return {
-    dispatcher: new CrossEngineDispatcher(deps),
+    dispatcher: withDefaultDescription(new CrossEngineDispatcher(deps)),
     ledger,
     fake,
     client: fake.client,
@@ -2804,23 +2805,24 @@ describe('opencode target — the X-Agent ledger (ADR-105)', () => {
 })
 
 describe('opencode target — name and description on the ledger row (ADR-105)', () => {
-  it('stores them trimmed on a new target; blank or absent stays null', async () => {
+  it('stores them trimmed on a new target; a blank name stays null', async () => {
     const { dispatcher, ledger } = makeHarness()
     await dispatcher.dispatch(
       { engine: 'opencode', prompt: 'a', name: '  impl-e1 ', description: ' Review auth diff ' },
       makeCtx()
     )
     await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'b', name: '  ', description: '' },
+      { engine: 'opencode', prompt: 'b', name: '  ', description: ' Second task ' },
       makeCtx()
     )
-    await dispatcher.dispatch({ engine: 'opencode', prompt: 'c' }, makeCtx())
     expect(ledger.rowFor('opencode', 'oc-sess-1')).toMatchObject({
       name: 'impl-e1',
       description: 'Review auth diff'
     })
-    expect(ledger.rowFor('opencode', 'oc-sess-2')).toMatchObject({ name: null, description: null })
-    expect(ledger.rowFor('opencode', 'oc-sess-3')).toMatchObject({ name: null, description: null })
+    expect(ledger.rowFor('opencode', 'oc-sess-2')).toMatchObject({
+      name: null,
+      description: 'Second task'
+    })
   })
 })
 

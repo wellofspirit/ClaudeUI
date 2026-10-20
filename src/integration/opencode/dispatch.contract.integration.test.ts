@@ -118,6 +118,7 @@ import {
 } from './harness/fixture-provider'
 import { makeFakeDispatchLedger } from '../../test/helpers/fake-dispatch-ledger'
 import { makeFakeDispatchReports } from '../../test/helpers/fake-dispatch-reports'
+import { withDefaultDescription } from '../../test/helpers/default-dispatch-description'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 const MODEL = 'fixture/fixture-model'
@@ -166,48 +167,52 @@ describeV2('opencode 2.x contract: the dispatcher with an opencode target', () =
       },
       serverCwd: home.workspace('server-cwd')
     })
-    dispatcher = new CrossEngineDispatcher({
-      serverManager: manager,
-      makeClient: (conn) => new OpencodeClient(conn),
-      loadEngineConfig: (engine): EngineConfig =>
-        engine === 'opencode'
-          ? ({
-              dispatch: { defaultModel: MODEL },
-              autoMode: { enabled: true, twoStageMode: 'fast' }
-            } as EngineConfig)
-          : {},
-      loadUserRules: () => ({
-        allow: [],
-        deny: [],
-        ask: [],
-        additionalDirectories: [],
-        defaultMode: undefined
-      }),
-      makeJudgeTransport: () => async (req) => {
-        judgeRequests.push(req)
-        return judgeReplies.shift() ?? '<block>no</block>'
-      },
-      recordUsageEvent: (event) => recorded.push(event),
-      // The X-Agent ledger (ADR-105) in memory: this suite does not exercise the DB.
-      ledger: makeFakeDispatchLedger()
-    })
-    reporter = new CrossEngineDispatcher({
-      serverManager: manager,
-      makeClient: (conn) => new OpencodeClient(conn),
-      loadEngineConfig: (engine): EngineConfig =>
-        engine === 'opencode' ? ({ dispatch: { defaultModel: MODEL } } as EngineConfig) : {},
-      loadUserRules: () => ({
-        allow: [],
-        deny: [],
-        ask: [],
-        additionalDirectories: [],
-        defaultMode: undefined
-      }),
-      recordUsageEvent: (event) => recorded.push(event),
-      ledger: makeFakeDispatchLedger(),
-      reports: makeFakeDispatchReports(),
-      requireHandBack: true
-    })
+    dispatcher = withDefaultDescription(
+      new CrossEngineDispatcher({
+        serverManager: manager,
+        makeClient: (conn) => new OpencodeClient(conn),
+        loadEngineConfig: (engine): EngineConfig =>
+          engine === 'opencode'
+            ? ({
+                dispatch: { defaultModel: MODEL },
+                autoMode: { enabled: true, twoStageMode: 'fast' }
+              } as EngineConfig)
+            : {},
+        loadUserRules: () => ({
+          allow: [],
+          deny: [],
+          ask: [],
+          additionalDirectories: [],
+          defaultMode: undefined
+        }),
+        makeJudgeTransport: () => async (req) => {
+          judgeRequests.push(req)
+          return judgeReplies.shift() ?? '<block>no</block>'
+        },
+        recordUsageEvent: (event) => recorded.push(event),
+        // The X-Agent ledger (ADR-105) in memory: this suite does not exercise the DB.
+        ledger: makeFakeDispatchLedger()
+      })
+    )
+    reporter = withDefaultDescription(
+      new CrossEngineDispatcher({
+        serverManager: manager,
+        makeClient: (conn) => new OpencodeClient(conn),
+        loadEngineConfig: (engine): EngineConfig =>
+          engine === 'opencode' ? ({ dispatch: { defaultModel: MODEL } } as EngineConfig) : {},
+        loadUserRules: () => ({
+          allow: [],
+          deny: [],
+          ask: [],
+          additionalDirectories: [],
+          defaultMode: undefined
+        }),
+        recordUsageEvent: (event) => recorded.push(event),
+        ledger: makeFakeDispatchLedger(),
+        reports: makeFakeDispatchReports(),
+        requireHandBack: true
+      })
+    )
     // The hosted `claudeui_hand_back` reaches the dispatcher that holds the targets (core-services).
     manager.setHandBack((sessionId, report, callId) =>
       reporter.handBackFromOpencode(sessionId, report, callId)

@@ -2805,7 +2805,7 @@ describe('Codex cross-engine dispatch', () => {
         prompt: { type: 'string' },
         model: { type: 'string' }
       },
-      required: ['engine', 'prompt'],
+      required: ['engine', 'prompt', 'description'],
       additionalProperties: false
     })
     // session_id left the tool (ADR-105 §4): a follow-up is a session_message.

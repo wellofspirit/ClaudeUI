@@ -242,7 +242,12 @@ describe('createCollabServer', () => {
       // A raw zod shape would strip the undeclared key before the handler: the tool is registered loose.
       const result = (await client.callTool({
         name: 'dispatch_agent',
-        arguments: { engine: 'opencode', prompt: 'continue', session_id: 'oc-42' }
+        arguments: {
+          engine: 'opencode',
+          prompt: 'continue',
+          description: 'Continue task',
+          session_id: 'oc-42'
+        }
       })) as { isError?: boolean; content: Array<{ text: string }> }
       expect(result.isError).toBe(true)
       expect(result.content[0].text).toBe(DISPATCH_SESSION_ID_REMOVED_TEXT)
@@ -307,10 +312,21 @@ describe('createCollabServer', () => {
     // No spy — exercise the genuine singleton. loadEngineConfig is mocked to {}
     // so model resolution fails before any server work.
     const server = createCollabServer(makeCtx())
-    const result = await server.tools[0].handler({ engine: 'opencode', prompt: 'x' }, makeExtra())
+    const result = await server.tools[0].handler(
+      { engine: 'opencode', prompt: 'x', description: 'Task' },
+      makeExtra()
+    )
     expect(result.isError).toBe(true)
     const text = (result.content[0] as { text: string }).text
     expect(text).toContain('dispatch.defaultModel')
+  })
+
+  it('REAL dispatcher path: a launch without a description is refused (the schema is not the only guard)', async () => {
+    const server = createCollabServer(makeCtx())
+    const result = await server.tools[0].handler({ engine: 'opencode', prompt: 'x' }, makeExtra())
+    expect(result.isError).toBe(true)
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('The description is required')
   })
 
   // -------------------------------------------------------------------------
@@ -318,18 +334,18 @@ describe('createCollabServer', () => {
   // ADR-033 slice H — codex as a third
   // -------------------------------------------------------------------------
 
-  it('takes an optional name and description, worded by the shared description module', () => {
+  it('takes an optional name and a required description, worded by the shared description module', () => {
     const { inputSchema } = createCollabServer(makeCtx()).tools[0]
-    for (const [key, text] of [
-      ['name', DISPATCH_NAME_PARAM],
-      ['description', DISPATCH_DESCRIPTION_PARAM]
+    for (const [key, text, optional] of [
+      ['name', DISPATCH_NAME_PARAM, true],
+      ['description', DISPATCH_DESCRIPTION_PARAM, false]
     ] as const) {
       const schema = inputSchema[key] as unknown as {
         description?: string
         safeParse: (v: unknown) => { success: boolean }
       }
       expect(schema.description).toBe(text)
-      expect(schema.safeParse(undefined).success).toBe(true)
+      expect(schema.safeParse(undefined).success).toBe(optional)
       expect(schema.safeParse('x').success).toBe(true)
     }
   })

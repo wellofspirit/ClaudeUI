@@ -55,7 +55,7 @@ describe('codexDynamicToolSpecs — dispatch_agent has no session_id (ADR-105 §
 })
 
 describe('codexDynamicToolSpecs — dispatch_agent name and description', () => {
-  it('takes them as optional strings, worded by the shared description module', () => {
+  it('takes an optional name and a required description, worded by the shared description module', () => {
     const spec = codexDynamicToolSpecs(true).find((s) => s.name === 'dispatch_agent')!
     const schema = (spec as unknown as { inputSchema: unknown }).inputSchema as {
       properties: Record<string, unknown>
@@ -66,7 +66,7 @@ describe('codexDynamicToolSpecs — dispatch_agent name and description', () => 
       type: 'string',
       description: DISPATCH_DESCRIPTION_PARAM
     })
-    expect(schema.required).toEqual(['engine', 'prompt'])
+    expect(schema.required).toEqual(['engine', 'prompt', 'description'])
   })
 
   it('takes run_in_background as an optional boolean, worded by the shared description module', () => {

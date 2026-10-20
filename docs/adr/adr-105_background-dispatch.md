@@ -54,8 +54,10 @@ shape applies.
   history list, block usage and the usage backfill skip ledger ids through one shared predicate, so cost is never
   counted twice); pi with its own session directory under `~/.claude/ui/dispatch/pi/`; opencode's session is no
   longer deleted (its `xeng-dispatch` title already hides it); Codex threads are filtered from the history list.
-- The product label is "X-Agent". `dispatch_agent` takes optional `name` (a short handle, unique among the parent's
-  live children) and `description` (a short summary), as Claude Code's Agent tool does.
+- The product label is "X-Agent". `dispatch_agent` takes an optional `name` (a short handle, unique among the parent's
+  live children) and a required `description` (a 3-5 word summary), as Claude Code's Agent tool does. All four
+  registrations list `description` as required, and the dispatcher refuses a new launch without one (a continuation
+  or a message keeps the row's), since not every engine enforces a tool's schema.
 
 ### 2. Background by default
 

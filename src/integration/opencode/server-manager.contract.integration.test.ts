@@ -191,11 +191,19 @@ describeV2('opencode 2.x contract: production server manager', () => {
     const started = feed.select('session.tool.input.started', { sessionID, after: from })
     expect(started.map((e) => e.data.name)).toEqual(['claudeui_dispatch_agent'])
     // Events keep the model's input: the stamp exists only on the wire.
-    expect(called[0].data.input).toEqual({ engine: 'claude', prompt: 'contract dispatch' })
+    expect(called[0].data.input).toEqual({
+      engine: 'claude',
+      prompt: 'contract dispatch',
+      description: 'Contract dispatch'
+    })
 
     expect(dispatched).toHaveLength(1)
     const { req, ctx } = dispatched[0]
-    expect(req).toMatchObject({ engine: 'claude', prompt: 'contract dispatch' })
+    expect(req).toMatchObject({
+      engine: 'claude',
+      prompt: 'contract dispatch',
+      description: 'Contract dispatch'
+    })
     expect(req).not.toHaveProperty('__xeng_caller_session')
     // Session from _meta (opencode's own signal)...
     expect(ctx.extra?.meta?.['ai.opencode/sessionID']).toBe(sessionID)

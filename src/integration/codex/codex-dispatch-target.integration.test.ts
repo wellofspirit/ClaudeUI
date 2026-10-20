@@ -31,6 +31,7 @@ import provenance from '../../core/codex/protocol/provenance.json'
 import type { UsageTurnEvent } from '../../core/services/usage-recorder'
 import { makeFakeDispatchLedger } from '../../test/helpers/fake-dispatch-ledger'
 import { makeFakeDispatchReports } from '../../test/helpers/fake-dispatch-reports'
+import { withDefaultDescription } from '../../test/helpers/default-dispatch-description'
 
 /**
  * Codex as a cross-engine dispatch TARGET, against the REAL pinned binary and a
@@ -351,7 +352,7 @@ function makeDispatcher(
     ledger: makeFakeDispatchLedger(),
     ...overrides
   }
-  const dispatcher = new CrossEngineDispatcher(deps)
+  const dispatcher = withDefaultDescription(new CrossEngineDispatcher(deps))
   dispatchers.push(dispatcher)
   return dispatcher
 }

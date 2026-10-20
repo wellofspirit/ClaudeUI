@@ -247,7 +247,7 @@ function buildDispatchAgentInputSchema(
           `${modelHintShort} For pi: ${piModelHintShort} For codex: ${codexModelHintShort}`
       ),
     name: z.string().optional().describe(DISPATCH_NAME_PARAM),
-    description: z.string().optional().describe(DISPATCH_DESCRIPTION_PARAM),
+    description: z.string().describe(DISPATCH_DESCRIPTION_PARAM),
     run_in_background: z.boolean().optional().describe(DISPATCH_BACKGROUND_PARAM),
     // Internal — see resources/opencode/claudeui-xeng/index.js. Declared
     // explicitly so our Zod validator does not STRIP it (z.object() drops

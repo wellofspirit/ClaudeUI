@@ -211,7 +211,7 @@ function dispatchAgentSpec(): DynamicToolSpec {
         description: { type: 'string', description: DISPATCH_DESCRIPTION_PARAM },
         run_in_background: { type: 'boolean', description: DISPATCH_BACKGROUND_PARAM }
       },
-      required: ['engine', 'prompt'],
+      required: ['engine', 'prompt', 'description'],
       additionalProperties: false
     }
   }
