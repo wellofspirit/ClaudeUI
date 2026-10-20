@@ -9,6 +9,7 @@ import {
   PASSWORD_REQUIRED_ERROR
 } from '../shared/remote-protocol'
 import type {
+  InvokeProgress,
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
   RegistrationResponseJSON,
@@ -19,6 +20,7 @@ import type {
   WsEvent,
   WsSyncCatchup,
   WsSyncFull,
+  WsInvokeProgress,
   WsInvokeResponse,
   WsStepUpRequest,
   WsStepUpResponse,
@@ -167,6 +169,9 @@ interface PendingInvoke {
   resolve: (data: unknown) => void
   reject: (err: Error) => void
   timer: ReturnType<typeof setTimeout>
+  channel: string
+  /** Progress callback of an {@link RemoteConnection.invokeWithProgress} call. */
+  onProgress?: (progress: InvokeProgress) => void
 }
 
 /**
@@ -601,6 +606,23 @@ export class RemoteConnection {
   }
 
   /**
+   * {@link invoke} for a channel that reports progress (ADR-102): the server
+   * sends `invoke-progress` frames for it, each calling `onProgress` AND sliding
+   * this call's timeout window (a long load must not die at a fixed 30 s while
+   * frames keep arriving). A step-up retry re-sends under a fresh id and keeps
+   * the same callback. Against an older server no frame ever arrives and this is
+   * exactly `invoke`, fixed timeout included.
+   */
+  invokeWithProgress(
+    channel: string,
+    args: unknown[],
+    onProgress: (progress: InvokeProgress) => void
+  ): Promise<unknown> {
+    const attempt = (): Promise<unknown> => this.sendInvoke(channel, args, onProgress)
+    return this.invokeGate ? this.invokeGate(channel, attempt) : attempt()
+  }
+
+  /**
    * Install the step-up gate (web client only — see `web/step-up-gate.ts`).
    *
    * The gate wraps every invoke: it forwards, and on a `needs-step-up` refusal
@@ -664,7 +686,11 @@ export class RemoteConnection {
     })
   }
 
-  private sendInvoke(channel: string, args: unknown[]): Promise<unknown> {
+  private sendInvoke(
+    channel: string,
+    args: unknown[],
+    onProgress?: (progress: InvokeProgress) => void
+  ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       // `'enrolling'` is an authenticated state that deliberately never syncs,
       // so it never reaches `'connected'` — but the enrollment screen has to be
@@ -677,14 +703,27 @@ export class RemoteConnection {
       }
 
       const id = String(++this.reqId)
-      const timer = setTimeout(() => {
-        this.pendingInvokes.delete(id)
-        reject(new Error(`Timeout: ${channel}`))
-      }, INVOKE_TIMEOUT_MS)
-
-      this.pendingInvokes.set(id, { resolve, reject, timer })
+      this.pendingInvokes.set(id, {
+        resolve,
+        reject,
+        timer: this.armInvokeTimer(id, reject, channel),
+        channel,
+        onProgress
+      })
       this.send({ type: 'invoke', id, channel, args })
     })
+  }
+
+  /** The timeout of one pending invoke; re-armed by every progress frame. */
+  private armInvokeTimer(
+    id: string,
+    reject: (err: Error) => void,
+    channel: string
+  ): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      this.pendingInvokes.delete(id)
+      reject(new Error(`Timeout: ${channel}`))
+    }, INVOKE_TIMEOUT_MS)
   }
 
   // ---------------------------------------------------------------------------
@@ -1141,6 +1180,7 @@ export class RemoteConnection {
 
     this.ws.onclose = (ev): void => {
       this.clearTimers()
+      this.failInvokesOnClose((ev as CloseEvent | undefined)?.code)
       // A socket that goes away takes its authentication with it — the method
       // described THAT connection, and leaving it set would have the app render
       // an `off`-mode banner (or offer a passkey step-up) for a dead socket.
@@ -1208,6 +1248,29 @@ export class RemoteConnection {
     this.ws.onerror = (): void => {
       // onclose will fire after this
     }
+  }
+
+  /**
+   * C5: a closed socket answers no invoke — reject them all now (the prefix is
+   * `isInvokeTimeout`'s, since a caller cannot tell whether the host finished the
+   * call either).
+   *
+   * Close 4008 is the exception in TIMING: `whenCredentialsChanged` races the
+   * `authcfg:set-password` invoke against this very close and the close is the
+   * success signal there, so the rejections are deferred past the microtask
+   * queue the waiters' resolution runs through. The entries are detached and
+   * their timers cleared immediately either way.
+   */
+  private failInvokesOnClose(code: number | undefined): void {
+    const lost = (channel: string): Error => new Error(`Connection lost: ${channel}`)
+    const pending = [...this.pendingInvokes.values()]
+    this.pendingInvokes.clear()
+    for (const p of pending) clearTimeout(p.timer)
+    const rejectAll = (): void => {
+      for (const p of pending) p.reject(lost(p.channel))
+    }
+    if (code === CLOSE_CREDENTIALS_CHANGED) setTimeout(rejectAll, 0)
+    else rejectAll()
   }
 
   /**
@@ -1393,6 +1456,25 @@ export class RemoteConnection {
         // The lane's pass-through flavor (phase 5 S2) — a tail, dispatched into
         // the ordinary per-channel listeners. Also cursor-free.
         this.sync.receiveStreamEvent(msg)
+        break
+
+      case 'invoke-progress':
+        {
+          const frame = msg as WsInvokeProgress
+          const pending = this.pendingInvokes.get(frame.id)
+          // An id nobody waits for (already settled, or from before a reconnect)
+          // is ignored. A live one slides its timeout window: the host is
+          // demonstrably working on it.
+          if (pending) {
+            clearTimeout(pending.timer)
+            pending.timer = this.armInvokeTimer(frame.id, pending.reject, pending.channel)
+            try {
+              pending.onProgress?.({ done: frame.done, total: frame.total, phase: frame.phase })
+            } catch (err) {
+              console.error('RemoteConnection: invoke progress callback failed', err)
+            }
+          }
+        }
         break
 
       case 'invoke-response':

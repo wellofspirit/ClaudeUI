@@ -13,9 +13,11 @@ import {
   clearViewEvicted,
   markViewEvicted,
   setTranscriptLoadFailed,
+  setTranscriptLoadProgress,
   useSessionStore,
   type PerSessionState
 } from '../stores/session-store'
+import { createLoadProgress, type TranscriptLoadProgress } from './transcript-load-progress'
 import {
   evictLocalSessions,
   getReplicaState,
@@ -57,6 +59,14 @@ export interface HistoryLoadOptions {
    * transcript changes nothing; over an EMPTY entry replace is the plain fill.
    */
   replace?: boolean
+  /**
+   * Progress of the load (ADR-102), for the loading view. Reported only while
+   * {@link isCurrent} holds, so a superseded load never writes progress over the
+   * session the user has since opened. Claude loads report a fraction; every other
+   * engine reports one indeterminate frame (`fraction: null`), and so does a Claude
+   * read against a server too old to send progress.
+   */
+  onProgress?: (progress: TranscriptLoadProgress) => void
 }
 
 /**
@@ -86,6 +96,36 @@ function seedHistoricalEngine(
   }
   useSessionStore.setState({ sessionEngines })
   window.api.saveSessionConfig({ sessionEngines })
+}
+
+/** Record that `routingId` is a Codex session, so its identity block reads the right engine. */
+function seedCodexEngine(routingId: string): void {
+  const state = useSessionStore.getState()
+  useSessionStore.setState({
+    sessionEngines: {
+      ...state.sessionEngines,
+      [routingId]: { ...state.sessionEngines[routingId], engineId: 'codex' as const }
+    }
+  })
+}
+
+/**
+ * The sidebar click on a session that is not resident (ADR-102): put an evicted
+ * placeholder in the store BEFORE the disk read, so the click can navigate at once
+ * and ChatPanel renders the loading view.
+ *
+ * The placeholder gets the identity the finished load will give it (R1), and for
+ * that the engine has to be in `sessionEngines` first — opencode / pi seeded
+ * idempotently here (the read's own call later adds the model it last answered
+ * on), Codex as its branch does. Claude needs nothing: it is the default.
+ */
+export function beginTranscriptPlaceholder(info: SessionInfo): void {
+  if (info.engineId === 'opencode' || info.engineId === 'pi') {
+    seedHistoricalEngine(info.sessionId, info.engineId, null)
+  } else if (info.engineId === 'codex') {
+    seedCodexEngine(info.sessionId)
+  }
+  useSessionStore.getState().beginTranscriptLoad(info)
 }
 
 /** Does the replica hold a transcript for this session right now? */
@@ -130,9 +170,15 @@ export async function loadSessionIntoStore(
   info: SessionInfo,
   options: HistoryLoadOptions
 ): Promise<HistoryLoadResult> {
-  const { isCurrent, onCodexError, replace = false } = options
+  const { isCurrent, onCodexError, replace = false, onProgress } = options
   const routingId = info.sessionId
   const store = (): ReturnType<typeof useSessionStore.getState> => useSessionStore.getState()
+  const tracker = onProgress
+    ? createLoadProgress((p) => {
+        if (isCurrent()) onProgress(p)
+      })
+    : null
+  tracker?.start()
 
   // opencode sessions: load the prior transcript from opencode's own store
   // (read-only, via the global session id) so the chat view paints immediately
@@ -192,12 +238,7 @@ export async function loadSessionIntoStore(
   }
 
   if (info.engineId === 'codex') {
-    const state = store()
-    const sessionEngines = {
-      ...state.sessionEngines,
-      [routingId]: { ...state.sessionEngines[routingId], engineId: 'codex' as const }
-    }
-    useSessionStore.setState({ sessionEngines })
+    seedCodexEngine(routingId)
     onCodexError?.(null)
     const history = await window.api
       .loadSessionHistory(info.sessionId, info.projectKey)
@@ -235,10 +276,26 @@ export async function loadSessionIntoStore(
     return 'loaded'
   }
 
-  // Claude sessions: load from JSONL transcript
+  // Claude sessions: load from JSONL transcript — CONTENT FIRST (ADR-102 Arc 2). The
+  // read skips the cost pass (`deferStatusLine`) and the subagent transcripts are
+  // not fetched here: the conversation commits as soon as the main transcript is in
+  // memory, and the status line and the buckets follow in the background
+  // (`subagent-prefetch.ts`), started by ACTIVATION, never by this click path.
+  // The progress callback is always passed: its first frame carries the transcript's
+  // byte size, which the background bar's plan starts from.
+  let contentBytes = 0
   let claude: Awaited<ReturnType<typeof window.api.loadSessionHistory>>
   try {
-    claude = await window.api.loadSessionHistory(info.sessionId, info.projectKey)
+    claude = await window.api.loadSessionHistory(
+      info.sessionId,
+      info.projectKey,
+      undefined,
+      (p) => {
+        if (contentBytes === 0 && p.total) contentBytes = p.total
+        tracker?.history(p)
+      },
+      { deferStatusLine: true }
+    )
   } catch (err) {
     // Over a held transcript a failed read must not take the click down with it:
     // the entry opens as it is and stays evicted. Otherwise it propagates, as the
@@ -251,43 +308,32 @@ export async function loadSessionIntoStore(
     )
     return 'declined'
   }
-  const { messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine, warnings } =
-    claude
+  const { messages, taskNotifications, customTitle, statusLine, warnings, subagentIndex } = claude
 
-  // Load subagent histories in parallel
-  const subagentMessages: Record<string, ChatMessage[]> = {}
-  const entries = Object.entries(agentIdToToolUseId)
-  if (entries.length > 0) {
-    const results = await Promise.all(
-      entries.map(async ([agentId, toolUseId]) => {
-        try {
-          const msgs = await window.api.loadSubagentHistory(
-            info.sessionId,
-            info.projectKey,
-            agentId
-          )
-          return { toolUseId, msgs }
-        } catch {
-          return { toolUseId, msgs: [] as ChatMessage[] }
-        }
-      })
-    )
-    for (const { toolUseId, msgs } of results) {
-      if (msgs.length > 0) subagentMessages[toolUseId] = msgs
-    }
-  }
-  // A newer click superseded this one while history + subagents loaded — discard.
+  // A newer click superseded this one while the history loaded — discard.
   if (!isCurrent()) return 'skipped'
   if (replace && isLive(routingId)) return 'declined'
   if (replace && !stripForReplace(routingId, messages)) return 'declined'
+  tracker?.finish()
+  const index = subagentIndex ?? {}
+  let indexBytes = 0
+  for (const entry of Object.values(index)) indexBytes += entry.bytes
   store().loadHistoricalSession(
     routingId,
     messages,
     info.cwd,
     taskNotifications,
-    subagentMessages,
+    // The buckets arrive one by one, after the commit; an evicted entry's are empty.
+    undefined,
     statusLine,
-    warnings
+    warnings,
+    {
+      subagentIndex: index,
+      source: { sessionId: info.sessionId, projectKey: info.projectKey },
+      // `deferStatusLine` makes this null; a non-null one (not today) would need no wait.
+      statusPending: statusLine === null,
+      statusBytes: contentBytes + indexBytes
+    }
   )
   if (customTitle) store().setCustomTitle(routingId, customTitle)
   // todos + the Files widget are derived from the transcript INSIDE the cold-
@@ -369,16 +415,44 @@ function warn(message: string): void {
   window.api?.logRelay?.('warn', 'SessionHistory', message)
 }
 
-/** Reloads in flight, by routing id — see {@link awaitTranscriptReload}. */
-const reloadsInFlight = new Map<string, Promise<void>>()
+/**
+ * Transcript loads in flight, by routing id — the sidebar click's and the active
+ * session's reload alike (see {@link awaitTranscriptReload}). One entry per id:
+ * a newer registration replaces the older, and only the registered load settles
+ * the entry and clears the progress it was showing.
+ */
+const loadsInFlight = new Map<string, Promise<void>>()
 
-/** Test seam: forget every reload in flight (module state outlives a test). */
+/** Test seam: forget every load in flight (module state outlives a test). */
 export function resetHistoryLoadForTests(): void {
-  reloadsInFlight.clear()
+  loadsInFlight.clear()
+}
+
+/** Is a transcript load for `routingId` already running? A second click must not start another. */
+export function isTranscriptLoadInFlight(routingId: string): boolean {
+  return loadsInFlight.has(routingId)
 }
 
 /**
- * The active-session reload in flight for `routingId`, or `undefined`.
+ * Register `body` as THE load for `routingId` until it settles. `body` must not
+ * reject (callers swallow into the failed flag). When it settles the entry goes and
+ * so does the progress it left on the session — unless a newer load has registered
+ * meanwhile, which owns both now. Clearing is by identity, not by the caller's
+ * `isCurrent`: a superseded load must also leave no progress behind.
+ */
+function trackTranscriptLoad(routingId: string, body: () => Promise<void>): Promise<void> {
+  const running: Promise<void> = body().finally(() => {
+    if (loadsInFlight.get(routingId) !== running) return
+    loadsInFlight.delete(routingId)
+    setTranscriptLoadProgress(routingId, null)
+  })
+  loadsInFlight.set(routingId, running)
+  return running
+}
+
+/**
+ * The load in flight for `routingId` (a sidebar click's or the active-session
+ * reload), or `undefined`.
  *
  * A prompt sent from an evicted, empty entry spawns the engine, and the host seeds
  * its own transcript from the same file as soon as it is created. If the client's
@@ -388,7 +462,7 @@ export function resetHistoryLoadForTests(): void {
  * awaited without a catch.
  */
 export function awaitTranscriptReload(routingId: string): Promise<void> | undefined {
-  return reloadsInFlight.get(routingId)
+  return loadsInFlight.get(routingId)
 }
 
 /**
@@ -425,11 +499,43 @@ export async function awaitReloadBeforeSpawn(routingId: string): Promise<void> {
  * flagged as failed, which is what turns an empty chat's spinner into a Retry.
  */
 export function reloadActiveTranscript(routingId: string): Promise<void> {
-  const running = runReload(routingId).finally(() => {
-    if (reloadsInFlight.get(routingId) === running) reloadsInFlight.delete(routingId)
+  return trackTranscriptLoad(routingId, () => runReload(routingId))
+}
+
+/**
+ * The sidebar click's load (ADR-102), after the placeholder is in the store and the
+ * view has navigated. Registered as the load in flight for the id, so a prompt sent
+ * meanwhile waits for it ({@link awaitReloadBeforeSpawn}) and a second click does
+ * not start another.
+ *
+ * Never rejects. A load that fails (rejects, or ends `skipped`) while it is still the
+ * user's selection flags the entry failed, which turns the loading view into Retry;
+ * a superseded one is silent. `declined` means the entry holds a transcript, and the
+ * click had already opened it.
+ *
+ * Note (C7): a full hydrate while this runs replaces `sessions` and can drop the
+ * placeholder or move the selection. The load then commits without navigating —
+ * rare, and the commit is still correct, so it is not handled.
+ */
+export function loadClickedSession(
+  info: SessionInfo,
+  options: Pick<HistoryLoadOptions, 'isCurrent' | 'onCodexError' | 'replace'>
+): Promise<void> {
+  const routingId = info.sessionId
+  return trackTranscriptLoad(routingId, async () => {
+    try {
+      const result = await loadSessionIntoStore(info, {
+        ...options,
+        onProgress: (p) => setTranscriptLoadProgress(routingId, p)
+      })
+      if (result === 'skipped' && options.isCurrent()) setTranscriptLoadFailed(routingId, true)
+    } catch (err) {
+      warn(
+        `loading the transcript of ${routingId} failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+      if (options.isCurrent()) setTranscriptLoadFailed(routingId, true)
+    }
   })
-  reloadsInFlight.set(routingId, running)
-  return running
 }
 
 async function runReload(routingId: string): Promise<void> {
@@ -452,6 +558,7 @@ async function runReload(routingId: string): Promise<void> {
           )
         },
         replace: true,
+        onProgress: (p) => setTranscriptLoadProgress(routingId, p),
         onCodexError: (message) => {
           if (message) warn(`${message} (session ${routingId})`)
         }

@@ -71,6 +71,7 @@ import { logger } from './logger'
 import { TunnelManager } from './tunnel-manager'
 import { E2ECrypto } from '../../shared/e2e-crypto'
 import { MOCKUP_HTTP_PREFIX } from '../../shared/mockup-url'
+import { createProgressThrottle } from '../../shared/progress-throttle'
 import { SENT_FILE_ROUTE, parseSentFileQuery } from '../../shared/sent-file-url'
 import { matchSentFilePath, sentFileDisposition } from '../sent-file-security'
 import { validateLocalFilePath } from '../shell-security'
@@ -3788,8 +3789,37 @@ export class RemoteServer {
       if (this.dispatcher.has(msg.channel)) {
         this.assertStepUp(client, msg.channel)
       }
-      const result = await this.dispatcher.handle(msg, client.connection)
+      // ADR-102: a `withProgress` channel gets a per-call reporter bound to THIS
+      // socket (progress is addressed to the requester, never broadcast).
+      // Other channels get none, so they emit no progress frames at all.
+      const throttle = this.dispatcher.reportsProgress(msg.channel)
+        ? createProgressThrottle((p) =>
+            this.sendTo(ws, { type: 'invoke-progress', id: msg.id, ...p })
+          )
+        : null
+      let result: unknown
+      try {
+        result = await this.dispatcher.handle(msg, client.connection, throttle?.report)
+      } catch (err) {
+        // A failed call sends no tail: the error response is the last word.
+        throttle?.close()
+        throw err
+      }
+      if (throttle) {
+        // C3 order: pending tail -> 'sending' (the response may be a large frame
+        // to encrypt and transfer) -> response -> close, so nothing trails it.
+        throttle.flush()
+        const last = throttle.last()
+        this.sendTo(ws, {
+          type: 'invoke-progress',
+          id: msg.id,
+          phase: 'sending',
+          done: last?.done ?? 0,
+          total: last?.total ?? null
+        })
+      }
       this.sendTo(ws, { type: 'invoke-response', id: msg.id, ok: true, data: result })
+      throttle?.close()
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)
       this.sendTo(ws, { type: 'invoke-response', id: msg.id, ok: false, error: errorMsg })

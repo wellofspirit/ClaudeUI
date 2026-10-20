@@ -51,6 +51,10 @@ describe('isInvokeTimeout', () => {
     expect(isInvokeTimeout(new Error('Timeout: harness:install'))).toBe(true)
   })
 
+  it('recognises a call cut off by a closed socket the same way: the host may have finished it', () => {
+    expect(isInvokeTimeout(new Error('Connection lost: harness:install'))).toBe(true)
+  })
+
   it('is false for a handler error that merely mentions a timeout', () => {
     expect(isInvokeTimeout(new Error('The download timed out'))).toBe(false)
   })
