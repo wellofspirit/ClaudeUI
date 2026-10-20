@@ -147,13 +147,15 @@ describe('SyncTimingReports.report', () => {
     expect(all[0][2]).toContain('frameChars=1234567')
   })
 
-  it('is info at a 2 s total and warn above it', () => {
+  it('always logs at info, even past 2 s: a client-controlled number must not choose the level', () => {
     const reports = new SyncTimingReports()
     reports.report('c1', { frameBytes: 1, decodeMs: 500, syncToFrameMs: 500, hydrateMs: 1000 })
     expect(lines().map(([level]) => level)).toEqual(['info'])
+    // 2001 ms total: the desktop relay would warn here; the host's web path must not.
     reports.report('c1', { frameBytes: 1, decodeMs: 500, syncToFrameMs: 500, hydrateMs: 1001 })
-    expect(lines().map(([level]) => level)).toEqual(['info', 'warn'])
+    expect(lines().map(([level]) => level)).toEqual(['info', 'info'])
     expect(lines()[1][2]).toMatch(/^slow client sync-full applied: transport=web /)
+    expect(vi.mocked(logger.warn)).not.toHaveBeenCalled()
   })
 
   it('drops a malformed report without a log line', () => {

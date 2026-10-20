@@ -799,8 +799,14 @@ describe('RemoteServer — sync:report-timing budget release on disconnect', () 
     await c1.ready
     releaseSpy.mockClear()
 
-    server.stop()
+    // The release is synchronous inside stop() — it must not wait for the sockets
+    // to close — so assert before awaiting, then await so teardown does not overlap
+    // afterEach. The late socket `close` handlers release the same id again (idempotent).
+    const stopped = server.stop()
     expect(releaseSpy).toHaveBeenCalledTimes(1)
+    const released = releaseSpy.mock.calls[0][0]
+    await stopped
+    for (const [id] of releaseSpy.mock.calls) expect(id).toBe(released)
   })
 })
 
@@ -4495,6 +4501,7 @@ describe('RemoteServer — SyncStats lines on sync-full', () => {
     syncCore.resetCanonicalForTests()
     vi.mocked(logger.info).mockClear()
     vi.mocked(logger.warn).mockClear()
+    vi.mocked(logger.error).mockClear()
     vi.mocked(logger.isEnabled).mockReset()
     vi.mocked(logger.isEnabled).mockReturnValue(false)
   })
@@ -4610,6 +4617,76 @@ describe('RemoteServer — SyncStats lines on sync-full', () => {
     expect(lines[0]).toContain('e2e=true')
     // The ciphertext is base64 text, so what crossed the wire is its length.
     expect(lines[0]).toContain(`frameBytes=${rawLength}`)
+    await client.close()
+  })
+
+  it('under E2E the breakdown runs only AFTER the frame was sent, and only while the source is on', async () => {
+    tunnelUrlRef.current = `https://${TUNNEL_HOST}`
+    const proof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    const e2eKey = (server as unknown as { tunnelE2eKey: string }).tunnelE2eKey
+    const client = await connectRemoteClient({
+      url: `ws://127.0.0.1:${port}/`,
+      pwProof: proof,
+      e2eKey,
+      headers: { Host: TUNNEL_HOST }
+    })
+    await client.ready
+
+    // The server-side socket for this client, spied so the order is observable.
+    const [serverWs] = [
+      ...(server as unknown as { clients: Map<WebSocket, unknown> }).clients.keys()
+    ]
+    const order: string[] = []
+    const realSend = serverWs.send.bind(serverWs) as (...a: unknown[]) => void
+    const sendSpy = vi.spyOn(serverWs, 'send').mockImplementation(((...a: unknown[]) => {
+      order.push('send')
+      realSend(...a)
+    }) as unknown as WebSocket['send'])
+    vi.mocked(logger.info).mockImplementation(((source: string, message: string) => {
+      if (source === 'SyncStats' && message.startsWith('snapshot breakdown'))
+        order.push('breakdown')
+    }) as unknown as typeof logger.info)
+
+    // Gate off: the frame goes out and no breakdown is built.
+    await sync(client, { lastSeq: 0 })
+    expect(order).toEqual(['send'])
+
+    // Gate on: the breakdown is built, and only after the frame reached `ws.send`.
+    order.length = 0
+    vi.mocked(logger.isEnabled).mockReturnValue(true)
+    await sync(client, { lastSeq: 0 })
+    await waitUntil(() => order.includes('breakdown'))
+    expect(order).toEqual(['send', 'breakdown'])
+
+    sendSpy.mockRestore()
+    vi.mocked(logger.info).mockReset()
+    await client.close()
+  })
+
+  it('a throwing SyncStats observer never strands later frames on an E2E socket', async () => {
+    tunnelUrlRef.current = `https://${TUNNEL_HOST}`
+    const proof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    const e2eKey = (server as unknown as { tunnelE2eKey: string }).tunnelE2eKey
+    const client = await connectRemoteClient({
+      url: `ws://127.0.0.1:${port}/`,
+      pwProof: proof,
+      e2eKey,
+      headers: { Host: TUNNEL_HOST }
+    })
+    await client.ready
+
+    // The breakdown runs inside the channel's send queue under E2E: if its throw
+    // rejected the queue, the second sync-full would never be encrypted or sent.
+    vi.mocked(logger.isEnabled).mockImplementation(() => {
+      throw new Error('breakdown blew up')
+    })
+    expect((await sync(client, { lastSeq: 0 })).msg.type).toBe('sync-full')
+    expect((await sync(client, { lastSeq: 0 })).msg.type).toBe('sync-full')
+    expect(vi.mocked(logger.error).mock.calls.some((c) => String(c[1]).includes('blew up'))).toBe(
+      true
+    )
     await client.close()
   })
 

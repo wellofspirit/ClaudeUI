@@ -97,6 +97,15 @@ takes 0.9–2 s. So the wait was never the conversation itself.
   declared withProgress so the remote `sending` frame slides the 30 s timeout during a large transfer.
 - Decision 4's `2M + 2S` plan and `subagentFileBytes` are superseded by the two plans above; a send
   waits only for the content load.
+- **The first prompt after reopening (2026-10-20, PR #111).** The engine spawns on the first send,
+  and its canonical seed was still a full read with the cost pass (~0.6–1.2 s on large sessions),
+  which `sendPrompt` waited on. A non-fork Claude seed now reads content-first too; the resumed
+  `ClaudeSession` already re-folds its own totals at spawn, and `sendPrompt` waits for that fold
+  (`ISession.resumeSeedReady`) instead, so a turn never starts on zeros or double-counts. The fold
+  is memoized in the main process (8-entry LRU keyed by path and fork anchor, valid while the main
+  file's inode/size/mtime and the subagent file set are unchanged), so the background status pass
+  warms it: first prompt ~0.93 s → ~48 ms on a 21 MB transcript with 817 MB of subagent files.
+  Forks keep the full anchored read.
 
 ## Consequences
 
