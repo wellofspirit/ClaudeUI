@@ -361,7 +361,13 @@ export async function computeTokenMetrics(
   /** Raw bytes read (this file, then each subagent file), as deltas — progress only. */
   onBytes?: (delta: number) => void
 ): Promise<StatusLineData> {
-  const empty: StatusLineData = {
+  if (!fs.existsSync(filePath)) return emptyStatusLine()
+  const fold = await memoizedTokenFold(filePath, resumeSessionAt, onBytes)
+  return fold ? deriveTokenMetrics(fold, model) : emptyStatusLine()
+}
+
+function emptyStatusLine(): StatusLineData {
+  return {
     totalCostUsd: 0,
     totalDurationMs: 0,
     totalApiDurationMs: 0,
@@ -374,9 +380,161 @@ export async function computeTokenMetrics(
     remainingPercentage: null,
     modelCosts: []
   }
+}
 
-  if (!fs.existsSync(filePath)) return empty
+/**
+ * Everything {@link computeTokenMetrics} folds out of a transcript BEFORE the
+ * caller's `model` matters: the token sums, the per-model token aggregate (main
+ * file plus every subagent file, message-id deduplicated), the turn-span total
+ * and the latest main-chain usage. The caller's `model` only sizes the context
+ * window when the transcript names no model, so this is the part worth caching;
+ * {@link deriveTokenMetrics} adds the model-dependent rest per call.
+ */
+interface TokenFold {
+  inputTokens: number
+  outputTokens: number
+  cachedTokens: number
+  /** Cost from `result` lines (dead in real transcripts; see the fold). */
+  resultCostUsd: number
+  apiDurationMs: number
+  contextLength: number
+  /** Resolved id of the latest main-chain assistant; wins over the caller's alias. */
+  transcriptModel: string | undefined
+  durationMs: number
+  modelTokens: Map<string, ModelTokenAgg>
+}
 
+function deriveTokenMetrics(fold: TokenFold, model?: string): StatusLineData {
+  const totalTokens = fold.inputTokens + fold.outputTokens + fold.cachedTokens
+  // Prefer the transcript's resolved id over the caller-supplied alias.
+  const effectiveModel = fold.transcriptModel ?? model
+  const ctxWindow = effectiveModel ? getContextWindowSize(effectiveModel) : 200_000
+  const usedPercentage =
+    fold.contextLength > 0 ? Math.round((fold.contextLength / ctxWindow) * 100) : null
+  const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
+
+  // Per-model cost reconstruction: real Claude transcripts carry no cost
+  // figure at all (see the dead `result` branch in the fold), so this
+  // pricing-table recompute is the effective source for both modelCosts and
+  // totalCostUsd. Acceptable imprecision: this is pricing-table math against
+  // historical tokens, while a live session's cost comes from cli.js's
+  // authoritative costUSD (see claude-session.ts's costBaseUsd/liveTotalCostUsd
+  // seam).
+  let totalCostUsd = fold.resultCostUsd
+  const modelCosts: ModelCostEntry[] = []
+  for (const [modelId, agg] of fold.modelTokens) {
+    const costUsd = calculateCostFromTokens(
+      modelId,
+      agg.input,
+      agg.output,
+      agg.cacheCreation,
+      agg.cacheCreation1h,
+      agg.cacheRead
+    )
+    modelCosts.push({ engineId: 'claude', modelId, costUsd })
+    totalCostUsd += costUsd
+  }
+
+  return {
+    totalCostUsd,
+    totalDurationMs: fold.durationMs,
+    totalApiDurationMs: fold.apiDurationMs,
+    totalInputTokens: fold.inputTokens,
+    totalOutputTokens: fold.outputTokens,
+    cachedTokens: fold.cachedTokens,
+    totalTokens,
+    contextWindow: { used: fold.contextLength, size: ctxWindow },
+    usedPercentage,
+    remainingPercentage,
+    modelCosts
+  }
+}
+
+// ─── Token-fold memo ─────────────────────────────────────────────────────────
+// A reopened session's transcript (and its subagent files) is folded up to three
+// times before anyone types: the ADR-102 background status pass, the spawn's
+// resume seed, and — on a respawn — again. On the owner's sessions each pass is
+// 0.6–1.2 s of re-reading hundreds of MB, so the memo makes the second and third
+// free. Entries are valid only while EVERY input file is byte-for-byte what it
+// was (size + mtime + inode, and the exact subagent set); anything else folds
+// again from scratch. cli.js was probed to append nothing between spawn and the
+// first prompt (it writes `mode` / `cost-state` lines at exit), so there is no
+// append-only case worth folding incrementally.
+
+const TOKEN_FOLD_MEMO_MAX = 8
+const tokenFoldMemo = new Map<string, { signature: string; fold: TokenFold }>()
+
+/** Test seam: drop every memoized fold. */
+export function clearTokenFoldMemo(): void {
+  tokenFoldMemo.clear()
+}
+
+/** Entry count, for the LRU bound test. */
+export function tokenFoldMemoSize(): number {
+  return tokenFoldMemo.size
+}
+
+/**
+ * Identity of a transcript's inputs: the main file and the sorted
+ * `subagents/agent-*.jsonl` set. A few stats — no content read. `bytes` is the
+ * size to report as progress on a hit; null when the main file cannot be stat'ed.
+ */
+function transcriptSignature(filePath: string): { signature: string; bytes: number } | null {
+  let st: fs.Stats
+  try {
+    st = fs.statSync(filePath)
+  } catch {
+    return null
+  }
+  const subagents = statSubagentFiles(filePath)
+  const parts = [...subagents]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([id, f]) => `${id}:${f.bytes}:${f.mtimeMs}`)
+  return {
+    signature: `${st.ino}:${st.size}:${st.mtimeMs}|${parts.join(',')}`,
+    bytes: st.size + sumBytes(subagents)
+  }
+}
+
+/**
+ * The fold, from the memo when the inputs are unchanged. Only a COMPLETE read is
+ * stored: a failed one resolves null (never cached), and a read whose inputs
+ * changed while it ran (a live transcript) is returned but not stored, since its
+ * signature would describe a file the fold did not see.
+ */
+async function memoizedTokenFold(
+  filePath: string,
+  resumeSessionAt: string | undefined,
+  onBytes?: (delta: number) => void
+): Promise<TokenFold | null> {
+  const key = `${filePath}\0${resumeSessionAt ?? ''}`
+  const before = transcriptSignature(filePath)
+  const hit = before ? tokenFoldMemo.get(key) : undefined
+  if (before && hit?.signature === before.signature) {
+    tokenFoldMemo.delete(key)
+    tokenFoldMemo.set(key, hit) // most recently used goes last
+    onBytes?.(before.bytes)
+    return hit.fold
+  }
+  tokenFoldMemo.delete(key)
+  const fold = await foldTranscriptTokens(filePath, resumeSessionAt, onBytes)
+  if (fold && before && transcriptSignature(filePath)?.signature === before.signature) {
+    tokenFoldMemo.set(key, { signature: before.signature, fold })
+    while (tokenFoldMemo.size > TOKEN_FOLD_MEMO_MAX) {
+      const oldest = tokenFoldMemo.keys().next().value
+      if (oldest === undefined) break
+      tokenFoldMemo.delete(oldest)
+    }
+  }
+  return fold
+}
+
+/** One uncached read of the main transcript and its subagent files; null on a read error. */
+function foldTranscriptTokens(
+  filePath: string,
+  resumeSessionAt: string | undefined,
+  onBytes?: (delta: number) => void
+): Promise<TokenFold | null> {
   return new Promise((resolve) => {
     let inputTokens = 0
     let outputTokens = 0
@@ -474,27 +632,9 @@ export async function computeTokenMetrics(
           (mostRecentMainChainUsage.cache_creation_input_tokens ?? 0)
       }
 
-      const totalTokens = inputTokens + outputTokens + cachedTokens
-      // Prefer the transcript's resolved id over the caller-supplied alias.
-      const effectiveModel = transcriptModel ?? model
-      const ctxWindow = effectiveModel ? getContextWindowSize(effectiveModel) : 200_000
-      const usedPercentage =
-        contextLength > 0 ? Math.round((contextLength / ctxWindow) * 100) : null
-      const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
-      // Turn-span reconstruction is the sole source for totalDurationMs — see
-      // the createTurnSpanAccumulator doc comment for why.
-      const totalDurationMs = turnSpanAcc.total()
-
-      // Per-model cost reconstruction: real Claude transcripts carry no cost
-      // figure at all (see the dead `result` branch above), so this pricing-table
-      // recompute is the effective source for both modelCosts and totalCostUsd.
-      // Acceptable imprecision: this is pricing-table math against historical
-      // tokens, while a live session's cost comes from cli.js's authoritative
-      // costUSD (see claude-session.ts's costBaseUsd/liveTotalCostUsd seam).
-      //
       // Task-tool subagent spend lives in separate transcript files (see
       // foldSubagentCosts's doc comment) — fold it into the same modelTokens
-      // map before deriving modelCosts/totalCostUsd below.
+      // map before the caller derives modelCosts/totalCostUsd from it.
       await foldSubagentCosts(
         filePath,
         modelTokens,
@@ -503,36 +643,22 @@ export async function computeTokenMetrics(
         onBytes
       )
 
-      const modelCosts: ModelCostEntry[] = []
-      for (const [modelId, agg] of modelTokens) {
-        const costUsd = calculateCostFromTokens(
-          modelId,
-          agg.input,
-          agg.output,
-          agg.cacheCreation,
-          agg.cacheCreation1h,
-          agg.cacheRead
-        )
-        modelCosts.push({ engineId: 'claude', modelId, costUsd })
-        totalCostUsd += costUsd
-      }
-
       resolve({
-        totalCostUsd,
-        totalDurationMs,
-        totalApiDurationMs,
-        totalInputTokens: inputTokens,
-        totalOutputTokens: outputTokens,
+        inputTokens,
+        outputTokens,
         cachedTokens,
-        totalTokens,
-        contextWindow: { used: contextLength, size: ctxWindow },
-        usedPercentage,
-        remainingPercentage,
-        modelCosts
+        resultCostUsd: totalCostUsd,
+        apiDurationMs: totalApiDurationMs,
+        contextLength,
+        transcriptModel,
+        // Turn-span reconstruction is the sole source for totalDurationMs — see
+        // the createTurnSpanAccumulator doc comment for why.
+        durationMs: turnSpanAcc.total(),
+        modelTokens
       })
     })
 
-    rl.on('error', () => resolve(empty))
+    rl.on('error', () => resolve(null))
   })
 }
 

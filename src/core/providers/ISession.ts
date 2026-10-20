@@ -61,6 +61,17 @@ export interface ISession {
   /** Whether a prompt sent now will be queued (session actively processing a turn) */
   readonly willQueue: boolean
 
+  /**
+   * The in-flight seed of a RESUMED session's own totals (tokens, cost, context)
+   * from its transcript, or `undefined` when there is nothing to wait for (a fresh
+   * session, a fork, or a seed that has landed). Never rejects. A prompt delivered
+   * before it starts the turn on zero accumulators, and a seed landing mid-turn
+   * double-counts the new turn's lines, so `sendPrompt` waits on it; returning
+   * `undefined` once settled keeps the send synchronous. Optional: only an engine
+   * that seeds from a transcript at spawn has anything to wait for (Claude).
+   */
+  resumeSeedReady?(): Promise<void> | undefined
+
   /** Get the backend session UUID (available after first message exchange). */
   getSessionId(): string | null
 
