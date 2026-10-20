@@ -50,6 +50,10 @@ import { MODEL_TIER_TEXT_CLASS } from '../../lib/model-tier-class'
 
 /** Indent per nesting level, on top of the row's own 10px (`px-2.5`). */
 const INDENT_PX = 14
+
+/** The label's slot in the row: a floor so a long name keeps some width, shrinking first. */
+const NAME_SLOT_CLASS = 'min-w-[4.5rem] @max-[300px]/roster:min-w-[1rem] grow-0 shrink basis-auto'
+
 /** The x of a level's guide: the dot column of the row one level up. */
 const guideLeft = (level: number): number => 13 + INDENT_PX * (level - 1)
 
@@ -247,6 +251,28 @@ export function AgentRow({
 
   const isShell = row.kind === 'shell'
   const label = agentRowLabel(row)
+  // An X-Agent listed under its name or description says which engine it runs on.
+  const engineWord = row.dispatch && label !== dispatchLabel(row.dispatch) ? row.dispatch : null
+  const nameSpan = (slotClass: string): React.JSX.Element => (
+    <span
+      data-testid="AgentRow.name"
+      data-model-tier={tier}
+      title={row.description || undefined}
+      className={`${slotClass} truncate ${
+        isShell
+          ? 'font-mono text-[11px] text-text-secondary'
+          : `text-[12px] ${
+              tier
+                ? MODEL_TIER_TEXT_CLASS[tier]
+                : row.hasExplicitName
+                  ? 'text-text-primary'
+                  : 'text-text-secondary'
+            }`
+      }`}
+    >
+      {label}
+    </span>
+  )
 
   return (
     <div
@@ -284,32 +310,20 @@ export function AgentRow({
           />
         )}
       </span>
-      <span
-        data-testid="AgentRow.name"
-        data-model-tier={tier}
-        title={row.description || undefined}
-        className={`min-w-[4.5rem] @max-[300px]/roster:min-w-[1rem] grow-0 shrink basis-auto truncate ${
-          isShell
-            ? 'font-mono text-[11px] text-text-secondary'
-            : `text-[12px] ${
-                tier
-                  ? MODEL_TIER_TEXT_CLASS[tier]
-                  : row.hasExplicitName
-                    ? 'text-text-primary'
-                    : 'text-text-secondary'
-              }`
-        }`}
-      >
-        {label}
-      </span>
-      {row.dispatch && label !== dispatchLabel(row.dispatch) && (
-        <span
-          data-testid="AgentRow.engine"
-          title={dispatchLabel(row.dispatch)}
-          className="shrink-0 text-[11px] text-text-muted"
-        >
-          {row.dispatch.engine}
+      {engineWord ? (
+        // The floor moves to the pair, so a short name sits right beside its engine word.
+        <span className={`flex items-baseline gap-1.5 ${NAME_SLOT_CLASS}`}>
+          {nameSpan('min-w-0')}
+          <span
+            data-testid="AgentRow.engine"
+            title={dispatchLabel(engineWord)}
+            className="shrink-0 text-[11px] text-text-muted"
+          >
+            {engineWord.engine}
+          </span>
         </span>
+      ) : (
+        nameSpan(NAME_SLOT_CLASS)
       )}
       <ResumedBadge runIndex={row.runIndex} testId="AgentRow.resumed" />
       <span aria-hidden className="grow shrink basis-0 min-w-0" />
