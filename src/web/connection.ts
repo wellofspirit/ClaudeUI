@@ -155,6 +155,16 @@ export function describeCeremonyError(err: unknown): string {
 type StateCallback = (state: ConnectionState, error?: string) => void
 type FullStateCallback = (state: FullStateSnapshot) => void
 
+/** What receiving one inbound frame cost — the `SyncStats` client timing (core/shared/sync/sync-timing.ts). */
+export interface FullFrameTiming {
+  /** Raw length as received (chars; the base64 length under E2E). */
+  frameChars: number
+  /** Decrypt + parse, ms. */
+  decodeMs: number
+  /** Last `sync` sent → this frame received, ms; undefined when no `sync` was timed. */
+  syncToFrameMs?: number
+}
+
 interface PendingInvoke {
   resolve: (data: unknown) => void
   reject: (err: Error) => void
@@ -361,6 +371,10 @@ export class RemoteConnection {
    * first.
    */
   private recvQueue: Promise<void> = Promise.resolve()
+  /** When the last `sync` frame left, for the `SyncStats` client timing; consumed by its `sync-full`. */
+  private syncSentAt: number | null = null
+  /** What receiving the latest `sync-full` frame cost, until `takeFullFrameTiming()` reads it. */
+  private fullFrameTiming: FullFrameTiming | null = null
 
   // E2E encryption
   private e2eKeyHex?: string
@@ -541,6 +555,18 @@ export class RemoteConnection {
    */
   getFileToken(): string | undefined {
     return this.fileTokenValue
+  }
+
+  /**
+   * The receive-side cost of the `sync-full` frame being applied (frame length,
+   * decode ms, `sync` → frame ms), for the `SyncStats` timing relay. Read it
+   * synchronously from inside the full-state handler — it is set just before the
+   * handler runs and cleared by this read, so each snapshot is reported once.
+   */
+  takeFullFrameTiming(): FullFrameTiming | null {
+    const timing = this.fullFrameTiming
+    this.fullFrameTiming = null
+    return timing
   }
 
   /**
@@ -1133,10 +1159,19 @@ export class RemoteConnection {
       // arrival order — see recvQueue. The `.catch` per link keeps a throw
       // from an app callback (via handleMessage) from poisoning the chain —
       // a rejected recvQueue would silently skip every later frame.
+      const receivedAt = performance.now()
       this.recvQueue = this.recvQueue
         .then(async () => {
-          const msg = await this.decodeIncoming(ev.data as string)
-          if (msg) this.handleMessage(msg)
+          const raw = ev.data as string
+          const decodeStart = performance.now()
+          const msg = await this.decodeIncoming(raw)
+          if (msg) {
+            this.handleMessage(msg, {
+              frameChars: raw.length,
+              decodeMs: performance.now() - decodeStart,
+              syncToFrameMs: this.syncSentAt === null ? undefined : receivedAt - this.syncSentAt
+            })
+          }
         })
         .catch((err) => {
           console.error('RemoteConnection: frame handler failed', err)
@@ -1257,7 +1292,7 @@ export class RemoteConnection {
     }
   }
 
-  private handleMessage(msg: WsServerMessage): void {
+  private handleMessage(msg: WsServerMessage, frame?: FullFrameTiming): void {
     switch (msg.type) {
       case 'auth-response':
         // ADR-063, BEFORE the branch chain below and deliberately not inside it:
@@ -1393,6 +1428,8 @@ export class RemoteConnection {
           const full = msg as WsSyncFull
           if (full.mockupToken) this.mockupTokenValue = full.mockupToken
           if (full.fileToken) this.fileTokenValue = full.fileToken
+          this.fullFrameTiming = frame ?? null
+          this.syncSentAt = null
           this.sync.applyFullState(full.state, full.epoch, full.state.seq)
           this.setState('connected')
           this.startPing()
@@ -1529,6 +1566,7 @@ export class RemoteConnection {
 
   /** Request a sync/catchup, echoing the epoch our lastSeq belongs to (R7). */
   private sendSync(): void {
+    this.syncSentAt = performance.now()
     this.send({ type: 'sync', lastSeq: this.sync.getLastSeq(), epoch: this.sync.getEpoch() })
   }
 

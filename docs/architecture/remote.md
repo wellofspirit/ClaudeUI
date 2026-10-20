@@ -36,6 +36,9 @@ client, `MessagePort` for the desktop renderer — no auth frames on the port, b
 port IS the trust):
 
 - `invoke` / `invoke-response` — client actions, RPC mirroring `ipcRenderer.invoke`.
+  The web client's one fire-and-forget diagnostic rides it too: `sync:report-timing` (a `chat`
+  query, remote-only) reports the cost of applying a `sync-full` into the host log — see
+  [security.md](security.md) §Capability grants.
   `invoke-progress {id, done, total, phase}` (ADR-102) rides alongside for a `withProgress`
   channel: sent only to the requesting socket, throttled to 4/s, ending with one `phase:'sending'`
   frame just before the response; each frame slides the web client's 30 s invoke timeout. The

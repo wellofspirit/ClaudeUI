@@ -19,6 +19,8 @@ import {
   loadBackgroundOutput
 } from '../services/session-history'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
+import { syncTimingReports } from '../services/sync-timing-report'
+import { SYNC_REPORT_TIMING_CHANNEL } from '../shared/sync/sync-timing'
 import { gitServiceManager } from '../services/git-service'
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { accountState, hostAppVersion } from '../host'
@@ -926,6 +928,22 @@ export function registerRemoteHandlers(
     capability: 'chat',
     kind: 'query',
     handler: async (blobId: string) => getBlob(blobId)
+  })
+
+  // The web client's cost of one full sync, into the host log (`SyncStats`). The
+  // desktop renderer relays its own through `log:relay`; a browser has no such
+  // channel, so this is the one narrow door: ONE object of numbers, validated and
+  // formatted by the host, rate-limited per connection (hence `withConnection`).
+  // `chat` because every connection that can sync holds it — the snapshot this
+  // reports on is chat-class data — and a `query`, so it is neither audited nor
+  // behind step-up. Remote-only on purpose: nothing on the desktop calls it.
+  handleRemote({
+    channel: SYNC_REPORT_TIMING_CHANNEL,
+    capability: 'chat',
+    kind: 'query',
+    withConnection: true,
+    handler: async (connection: CommandConnection, report: unknown) =>
+      syncTimingReports.report(connection.connectionId, report)
   })
 
   handleRemote({

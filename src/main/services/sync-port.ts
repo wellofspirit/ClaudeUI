@@ -38,6 +38,7 @@ import { MessageChannelMain, type BrowserWindow, type MessagePortMain } from 'el
 import { syncCore, addSyncSubscriber, addStreamSubscriber } from '../../core/services/sync-host'
 import { hostConnection } from '../../core/ipc/command-registry'
 import { logger } from '../../core/services/logger'
+import { logPortFullSync, logFullSyncBreakdown } from '../../core/services/sync-stats-log'
 
 const LOG_SOURCE = 'sync-port'
 
@@ -117,7 +118,16 @@ function handleFrame(session: PortSession, frame: unknown): void {
   // Same decision function the WebSocket server uses (shared/sync/sync-decision).
   const decision = syncCore.answerSync(lastSeq, epoch)
   if (decision.kind === 'full') {
-    post(session, { type: 'sync-full', state: decision.state, epoch: decision.epoch })
+    const started = performance.now()
+    const posted = post(session, {
+      type: 'sync-full',
+      state: decision.state,
+      epoch: decision.epoch
+    })
+    if (posted) {
+      logPortFullSync(decision, { lastSeq, epoch }, syncCore, performance.now() - started)
+      logFullSyncBreakdown(decision)
+    }
   } else {
     post(session, { type: 'sync-catchup', events: decision.events, epoch: decision.epoch })
   }
@@ -145,9 +155,11 @@ function handleFrame(session: PortSession, frame: unknown): void {
   }
 }
 
-function post(session: PortSession, frame: unknown): void {
+/** Post one frame; false when the renderer is gone (the subscriber is dropped). */
+function post(session: PortSession, frame: unknown): boolean {
   try {
     session.port.postMessage(frame)
+    return true
   } catch (err) {
     // The renderer went away between the fan-out and this post. Drop the sink
     // rather than logging once per event for the rest of the process's life.
@@ -159,5 +171,6 @@ function post(session: PortSession, frame: unknown): void {
     session.unsubscribe = null
     session.unsubscribeStream?.()
     session.unsubscribeStream = null
+    return false
   }
 }

@@ -29,6 +29,7 @@
 
 import { SyncClient } from '../../../core/shared/sync/sync-client'
 import { setSyncClient } from '../../../core/shared/sync/client-registry'
+import { relaySyncTiming } from '../../../core/shared/sync/sync-timing'
 import type { FullStateSnapshot, EventEntry } from '../../../shared/remote-protocol'
 
 /**
@@ -62,6 +63,8 @@ export function startDesktopSync(onFullState: FullStateHandler): SyncClient {
   /** Queued while the port has not arrived (only the initial `sync` can queue). */
   let pendingSync: { lastSeq: number; epoch?: string } | null = null
   let hasHydrated = false
+  /** When the last `sync` left, for the `SyncStats` timing relay; consumed by the answering `sync-full`. */
+  let syncSentAt: number | null = null
 
   const client = new SyncClient({ requestResync: () => sendSync() })
   client.setFullStateHandler((state) => {
@@ -76,6 +79,7 @@ export function startDesktopSync(onFullState: FullStateHandler): SyncClient {
       pendingSync = frame
       return
     }
+    syncSentAt = performance.now()
     port.postMessage({ type: 'sync', ...frame })
   }
 
@@ -83,7 +87,20 @@ export function startDesktopSync(onFullState: FullStateHandler): SyncClient {
     switch (frame.type) {
       case 'sync-full':
         if (frame.state && frame.epoch) {
+          // `SyncStats` (sync-core.md § Measuring a full sync): receive → hydrate
+          // return, relayed to the host log once per sync-full.
+          const received = performance.now()
+          const syncToFrameMs = syncSentAt === null ? undefined : received - syncSentAt
+          syncSentAt = null
           client.applyFullState(frame.state, frame.epoch, frame.state.seq)
+          relaySyncTiming(
+            (level, source, message) => window.api?.logRelay?.(level, source, message),
+            {
+              transport: 'desktop',
+              syncToFrameMs,
+              hydrateMs: performance.now() - received
+            }
+          )
         }
         return
       case 'sync-catchup':
@@ -127,6 +144,7 @@ export function startDesktopSync(onFullState: FullStateHandler): SyncClient {
     // keeps one code path for both.
     const frame = pendingSync ?? { lastSeq: client.getLastSeq(), epoch: client.getEpoch() }
     pendingSync = null
+    syncSentAt = performance.now()
     port.postMessage({ type: 'sync', ...frame })
   })
 
