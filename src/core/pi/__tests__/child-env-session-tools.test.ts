@@ -69,7 +69,18 @@ describe('every pi child env zeroes CLAUDEUI_PI_SESSION_TOOLS', () => {
     ])
     for (const file of builders)
       expect(readFileSync(file, 'utf8'), relative(root, file)).toMatch(
-        /CLAUDEUI_PI_SESSION_TOOLS:\s*''/
+        // `''` is the default arm; a dispatch target that may message its dispatcher gets the
+        // one-element array instead (the next test).
+        /CLAUDEUI_PI_SESSION_TOOLS:[^\n]*''/
       )
+  })
+
+  it('a dispatch target that may message its dispatcher gets that one tool and nothing else (ADR-105 §4)', () => {
+    const env = buildPiTargetChildEnv(BRIDGE, true, true)
+    const tools = JSON.parse(env.CLAUDEUI_PI_SESSION_TOOLS as string) as Array<{ name: string }>
+    expect(tools.map((t) => t.name)).toEqual(['session_message'])
+    // Still no gate for the root session's hosted tools, and the default arm stays zero.
+    expect(env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('')
+    expect(buildPiTargetChildEnv(BRIDGE, true).CLAUDEUI_PI_SESSION_TOOLS).toBe('')
   })
 })

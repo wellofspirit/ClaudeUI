@@ -14,6 +14,8 @@ import type { ChatMessage } from '../../shared/types'
 import {
   CROSS_SESSION_MESSAGE_TAG,
   SESSION_MESSAGE_TAG,
+  isAnyXAgentSender,
+  isXAgentMessageSender,
   isXAgentSender,
   parseSessionMessageWrapper,
   unescapeClosingTag,
@@ -64,6 +66,11 @@ export function sessionMessageNoteTitle(
     const name = xAgentBareName(fromTitle)
     return name ? `Report from X-Agent ${name}` : 'Report from an X-Agent'
   }
+  // A message it sent while it ran is not its report (ADR-105 §4).
+  if (fromKey !== undefined && !native && isXAgentMessageSender(fromKey)) {
+    const name = xAgentBareName(fromTitle)
+    return name ? `Message from X-Agent ${name}` : 'Message from an X-Agent'
+  }
   if (native)
     return fromTitle
       ? // The sender first: a narrow screen truncates the title's tail.
@@ -83,10 +90,10 @@ export function sessionMessageNote(input: {
   text: string
   timestamp: number
   native?: boolean
-  /** The sender's key as the wrapper names it; an X-Agent's (`x-agent:` prefix) makes this a result note. */
+  /** The sender's key as the wrapper names it; an X-Agent's (`x-agent:` or `x-agent-message:` prefix) makes this an X-Agent note. */
   fromKey?: string
 }): ChatMessage {
-  const result = input.fromKey !== undefined && !input.native && isXAgentSender(input.fromKey)
+  const result = input.fromKey !== undefined && !input.native && isAnyXAgentSender(input.fromKey)
   return agentNoteMessage({
     id: input.id,
     title: sessionMessageNoteTitle(input.fromTitle, input.native, input.fromKey),

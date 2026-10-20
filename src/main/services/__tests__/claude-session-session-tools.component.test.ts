@@ -215,7 +215,9 @@ describe('registration', () => {
 
   it('only the interactive ClaudeSession builds the server: dispatch targets, automations and side questions never do', () => {
     // Those run on raw SDK queries (service-session, the dispatcher, the automation
-    // manager), not on a ClaudeSession; a second call site would give them the tools.
+    // manager), not on a ClaudeSession; a second call site would give them the tools. The one
+    // exception is the dispatcher's, which builds the X-Agent subset (`xAgent: true`): the single
+    // `session_message` tool to its dispatcher (ADR-105 §4); its test is in the dispatcher suite.
     const callers: string[] = []
     const walk = (dir: string): void => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -233,8 +235,16 @@ describe('registration', () => {
     const rel = callers.map((p) => path.relative(process.cwd(), p).split(path.sep).join('/'))
     expect(rel.sort()).toEqual([
       'src/core/services/claude-session.ts',
+      'src/core/services/cross-engine-dispatcher.ts',
       'src/core/services/session-tools-server.ts'
     ])
+    // …and the dispatcher builds nothing but that subset.
+    const dispatcher = fs.readFileSync(
+      path.join(process.cwd(), 'src/core/services/cross-engine-dispatcher.ts'),
+      'utf8'
+    )
+    expect(dispatcher.match(/createSessionToolsServer\(/g)).toHaveLength(1)
+    expect(dispatcher).toMatch(/createSessionToolsServer\(\{\s*xAgent: true/)
   })
 })
 

@@ -46,6 +46,28 @@ export function isXAgentSender(key: string): boolean {
 }
 
 /**
+ * The sender key of a MESSAGE an X-Agent sent its parent through `session_message` (ADR-105 §4):
+ * the X-Agent's ledger id behind this prefix. A key of its own, not {@link X_AGENT_KEY_PREFIX}
+ * (that one says "result"), so a note, the trailer and the envelope name tell a mid-run message
+ * from a run's report, live and on reload, on every engine and through cli.js's envelope round trip
+ * (`-` and `:` are in its `from` class). The service builds it only for a caller that IS an X-Agent.
+ */
+export const X_AGENT_MESSAGE_KEY_PREFIX = 'x-agent-message:'
+
+/** The sentence after the closing tag of a {@link SESSION_MESSAGE_TAG} wrapper that carries an X-Agent's message. */
+export const X_AGENT_MESSAGE_TRAILER =
+  'This is a message from an X-Agent you launched with dispatch_agent, not from the user.'
+
+export function isXAgentMessageSender(key: string): boolean {
+  return key.startsWith(X_AGENT_MESSAGE_KEY_PREFIX)
+}
+
+/** Is this key an X-Agent's, whether it carries a result or a message? */
+export function isAnyXAgentSender(key: string): boolean {
+  return isXAgentSender(key) || isXAgentMessageSender(key)
+}
+
+/**
  * Who a delivered item is from, as the wrapper names it: an X-Agent's result (origin
  * `dispatch-result`) always behind {@link X_AGENT_KEY_PREFIX}, whatever key the producer used.
  */
@@ -137,7 +159,7 @@ export function unescapeClosingTag(tag: string, body: string): string {
  */
 export function envelopeName(from: { key: string; title: string }): string {
   return sanitizeWrapperTitle(
-    isXAgentSender(from.key) ? `X-Agent ${xAgentBareName(from.title)}` : from.title
+    isAnyXAgentSender(from.key) ? `X-Agent ${xAgentBareName(from.title)}` : from.title
   )
 }
 
@@ -152,6 +174,12 @@ export function buildCrossSessionEnvelope(
   return `<${CROSS_SESSION_MESSAGE_TAG} ${attrs.join(' ')}>\n${neutralizeClosingTag(CROSS_SESSION_MESSAGE_TAG, text)}\n</${CROSS_SESSION_MESSAGE_TAG}>`
 }
 
+/** The sentence that closes a wrapper, by who sent it. */
+function trailerFor(key: string): string {
+  if (isXAgentSender(key)) return X_AGENT_RESULT_TRAILER
+  return isXAgentMessageSender(key) ? X_AGENT_MESSAGE_TRAILER : SESSION_MESSAGE_TRAILER
+}
+
 /** ClaudeUI's own wrapper — the prompt text for opencode and Codex. */
 export function buildSessionMessageWrapper(
   from: { key: string; title: string },
@@ -160,7 +188,7 @@ export function buildSessionMessageWrapper(
   const attrs = [`from="${sanitizeWrapperKey(from.key)}"`]
   const title = sanitizeWrapperTitle(from.title)
   if (title) attrs.push(`title="${title}"`)
-  return `<${SESSION_MESSAGE_TAG} ${attrs.join(' ')}>\n${neutralizeClosingTag(SESSION_MESSAGE_TAG, text)}\n</${SESSION_MESSAGE_TAG}>\n${isXAgentSender(from.key) ? X_AGENT_RESULT_TRAILER : SESSION_MESSAGE_TRAILER}`
+  return `<${SESSION_MESSAGE_TAG} ${attrs.join(' ')}>\n${neutralizeClosingTag(SESSION_MESSAGE_TAG, text)}\n</${SESSION_MESSAGE_TAG}>\n${trailerFor(from.key)}`
 }
 
 /**

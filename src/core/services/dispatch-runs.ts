@@ -33,6 +33,11 @@ export interface DispatchRunInit {
   /** The parent's autonomy mode when the call was made (the target row's, once it is bound). */
   launchMode: string
   startedAt: number
+  /**
+   * Which run of the X-Agent's card this is, when a message started it after the first (ADR-105 §4):
+   * the card's records carry it, as a resumed Claude Code agent's do. Absent for the launch.
+   */
+  runIndex?: number
 }
 
 export class DispatchRun {
@@ -58,6 +63,8 @@ export class DispatchRun {
    * target stays resumable.
    */
   endRequested = false
+  /** The run's turns are over and its messages were decided: a later message starts the next run. */
+  steersSettled = false
   /** A terminal `task-notification` went out (a body's own, or the run-end closer's). */
   notified = false
   /** This run created its target (as opposed to continuing one). */

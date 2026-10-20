@@ -14,6 +14,7 @@ import { SESSION_TOOL_NAMES } from '../../../shared/session-tools-description'
 import {
   DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_FOLLOW_UP_GUIDANCE,
   DISPATCH_NAME_PARAM,
   HAND_BACK_DESCRIPTION,
   HAND_BACK_REPORT_PARAM
@@ -25,8 +26,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 20 (background by default, ADR-105 §2)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('20')
+  it('is version 21 (dispatch_agent has no session_id, ADR-105 §4)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('21')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -397,7 +398,10 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
           const d = runExtension().tools.get('dispatch_agent')!.description
           expect(d).toContain('DIFFERENT engine')
           expect(d).toContain('use the agent tool')
-          expect(d).toContain('session_id')
+          // The fallback carries the shared follow-up sentence (the bridge cannot import it, and a
+          // backtick would end its template literal, so it is the same words without them).
+          expect(d).toContain(DISPATCH_FOLLOW_UP_GUIDANCE.replaceAll('`', ''))
+          expect(d).not.toContain('session_id')
           // The fallback tells the same background story as the shared description (v20).
           expect(d).toContain('its report arrives later as a message from it')
           expect(d).not.toContain('returned as this tool result. The result includes')
@@ -503,6 +507,19 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
           description: DISPATCH_BACKGROUND_PARAM
         })
         expect(params.required).not.toContain('run_in_background')
+      }
+    )
+  })
+
+  it('dispatch_agent declares no session_id parameter (a follow-up is a session_message)', () => {
+    withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
+      () => {
+        const params = runExtension().tools.get('dispatch_agent')!.parameters as {
+          properties: Record<string, unknown>
+        }
+        expect(Object.keys(params.properties)).not.toContain('session_id')
+        expect(JSON.stringify(params)).not.toContain('session_id')
       }
     )
   })

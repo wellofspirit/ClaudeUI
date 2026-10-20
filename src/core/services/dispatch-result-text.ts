@@ -114,10 +114,15 @@ export function stoppedResultText(name: string): string {
   return `X-Agent ${sentenceLabel(name)} was stopped by the user.`
 }
 
-/** The notice the next start leaves for an X-Agent that was running when ClaudeUI quit. */
-export function interruptedResultText(name: string, harnessId: string): string {
+/**
+ * The notice the next start leaves for an X-Agent that was running when ClaudeUI quit: `ref` is
+ * its ledger ref (what `session_message` takes), alongside the name when it has one.
+ */
+export function interruptedResultText(name: string, ref: string): string {
+  const label = sentenceLabel(name)
+  const addressed = label === ref ? `"${ref}"` : `"${label}" or "${ref}"`
   return (
-    `X-Agent ${sentenceLabel(name)} was interrupted when ClaudeUI quit; continue it with ` +
-    `dispatch_agent session_id ${harnessId}.`
+    `X-Agent ${label} was interrupted when ClaudeUI quit; continue it by messaging it with ` +
+    `session_message (session: ${addressed}).`
   )
 }

@@ -4,8 +4,7 @@
 **Amends:** [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch was a blocking tool call whose targets lived only
 in memory: §3 "no lifecycle coupling" is kept for the sidebar, M2's `persistSession: false` and the
 continuation-by-`session_id` contract are replaced), [ADR-104](adr-104_agent-session-tools.md) (§6 "only a
-session's root agent can act" gains one exception: `session_message` for dispatch children, within their own
-family).
+session's root agent can act" gains one exception: `session_message` between a session and its own X-Agents).
 **Relates to:** [ADR-038](adr-038_event-driven-approval-lifecycle.md), [ADR-073](adr-073_agent-roster-and-task-run-identity.md),
 [ADR-087](adr-087_transcript-blobs-off-the-ring-and-host-eviction.md), [ADR-088](adr-088_dispatch-autonomy-inheritance.md),
 [ADR-089](adr-089_pi-subagents-host-run.md) (the model this generalises), [ADR-095](adr-095_sidebar-status-dot-ripple.md),
@@ -90,7 +89,7 @@ shape applies.
     A call from anything that is not a running dispatch target is refused.
 - One report per run — a run being the launch, or a resume by a parent message. The call ends the run: the tool
   result tells the agent it is done and output after it is not delivered. A second call in the same run is refused
-  (the run has ended; a target has no `session_message` before §4). The turn is ended where the engine has no native
+  (the run has ended). The turn is ended where the engine has no native
   way to: pi's result carries its own `terminate` hint (an abort follows a model that goes on anyway); a Claude target
   is interrupted when the call's tool result goes by on its stream; an opencode or Codex turn is interrupted when the
   call's own tool item has completed on the engine's feed (a short ceiling covers a feed that never says), and not at
@@ -175,8 +174,8 @@ shape applies.
   - a failure: "X-Agent <name> failed: <first line of the reason>.";
   - a stop from the card: "X-Agent <name> was stopped by the user." (the parent model should know);
   - an X-Agent that was running when ClaudeUI quit: at the next start its parent's inbox gets "X-Agent <name> was
-    interrupted when ClaudeUI quit; continue it with dispatch_agent session_id <harness id>." (B-4 will point at
-    `session_message` instead).
+    interrupted when ClaudeUI quit; continue it by messaging it with session_message (session: "<name>" or
+    "<ref>")."; §4).
     The report's row in the store gets `delivered_at` when its result reaches the parent: a background run's when the
     item is handed to the parent's engine (not when it is held; a held item carries its run number in the inbox row,
     `session_inbox.report_run`, migration v37, and its flush stamps exactly that run), a blocking run's when its tool
@@ -242,20 +241,97 @@ shape applies.
 
 ### 4. Messages both ways go through `session_message`
 
-- X-Agents are addressable sessions: by id, and by name within their parent's family. ClaudeUI's `session_message`
-  is the one messaging tool (never Claude Code's `SendMessage`).
-- Parent to X-Agent: a running X-Agent receives the message as a steer; an idle or released one is resumed through
-  its harness (`--resume`, pi's session directory, opencode's session, Codex `thread/resume`) and the message starts
-  a turn as that X-Agent's user input — the parent is its user.
-- X-Agent to parent: dispatch targets get `session_message` and no other session tool. ADR-104 §6's root-agent rule
-  stands for every other tool, because a subagent never has a clean user turn and starting sessions from one could
-  run away. The message reaches the parent as a peer message (counted in ADR-104's budget, marking the turn
-  non-user) and waits in the inbox when the parent is not live.
-- Ownership is a refusal enforced by the tool service in every permission mode, `bypassPermissions` included:
-  parent to its own X-Agents and their descendants, X-Agent to its parent; anything else is refused. Names resolve
-  only within the parent's family; `main`, `origin` and ref-shaped names are reserved. An X-Agent's caller class is
-  its own effective mode. Every message an X-Agent sends is audited with the X-Agent as the actor.
-- `dispatch_agent` no longer takes `session_id`; a call that still passes one is told to use `session_message`.
+- X-Agents are addressable for `session_message` and for nothing else: `session_get`, `session_read`,
+  `session_usage` and `session_stop` keep refusing them (one resolver serves the five verbs, so the ownership rule is
+  applied per verb). An X-Agent is addressed by its ref (`s-xxxxxx`, in every launch answer and in `session_list`) or
+  by its `name`, resolved only among its parent's own X-Agents that are not stopped, never as a global title. `main`,
+  `origin`, `parent`, `self` and ref-shaped strings are reserved: `dispatch_agent` refuses them as names, and they
+  never resolve as one. ClaudeUI's `session_message` is the one messaging tool (never Claude Code's `SendMessage`).
+  `session_list` shows a session's own X-Agents, marked as such (ref, name, engine and model, state), so a parent that
+  lost the launch answer can still address them, and nobody else's.
+- Ownership is a refusal enforced by the tool service in every permission mode, `bypassPermissions` included: a
+  session messages its own X-Agents, an X-Agent messages its parent (`session: "origin"`, `"parent"` or the parent's
+  ref), and anything else is refused. (An X-Agent cannot dispatch, so there are no descendants, and siblings do not
+  message each other.) An X-Agent's caller class is its own effective mode; every message it sends is audited with its
+  ref as the actor. An X-Agent runs `session_message` and no other session tool (the service refuses the rest, and
+  each engine offers only that one), and not once its run is over.
+- Parent to X-Agent. The message is framed for the X-Agent as a message from the session that dispatched it, acting
+  for the user (the provenance a Claude target's delegation preamble gives, so another agent's words are not read as
+  the user's own). A running X-Agent takes it as a steer into its running turn, on each engine's own path: Claude
+  pushes a frame under a uuid of its own into the target's channel, which the turn accounting of §3 ignores (a
+  pushed uuid's `started` is what marks a turn as the run's); pi delivers it through `/cui-deliver`, marked as agent
+  text and appended without a wake (pi defers it to the end of the current step, so it starts no turn of its own);
+  opencode posts a steer prompt under an inbox id of its own; Codex sends `turn/steer` on the live turn id with a
+  `clientUserMessageId` of its own. An X-Agent that is still starting up (its process not yet live, or between two
+  turns of the run) is waited for, for a bounded time. An idle, released, interrupted or ended X-Agent is resumed
+  through the one run engine of §2 (the harness's own resume, the cost cap, the model allowlist) as a background run
+  with the message as its input, so its report, the hand-back nudges, the review, the delivery of §3 and its slot work
+  as for a launch. A run that cannot take a steer any more (its report was taken, a Stop is pending, the engine
+  refused the steer) is waited out, for a bounded time, and the message then starts the next run. Messages to one
+  X-Agent are taken one after another.
+- A steer is not an answer. The engine's acceptance says only that the message is queued: the model may be writing
+  its `hand_back` call, and the turn the report ends is interrupted. So each steer is tracked on the wire until the
+  report is accepted. It is ANSWERED if the engine took it into the turn before the report call (the model wrote its
+  report with it in view): Claude, a `command_lifecycle` `started` for its uuid (read off the stream in wire order,
+  `docs/protocol-cc/03` §3.21); pi, the custom message carrying its `deliveryId` has been seen arriving (an accepted command is not that, and a delivery pi refuses is not reported as steered); opencode, its inbox
+  item was delivered (`session.inbox.delivered`); Codex, the `userMessage` item carrying its `clientUserMessageId`.
+  Anything else is UNANSWERED (a run that ends without a report decides its steers the same way, when its last turn
+  ends and before its result is delivered to the parent), and when the report is accepted what the engine still holds is taken back, before the
+  tool result goes out: Claude `cancel_async_message` (`docs/protocol-cc/07`: the message is removed and its
+  `cancelled` is emitted; a cancel that answers "not held" means the fold is under way, and the interrupt that
+  follows aborts that turn), opencode `DELETE /api/session/:id/inbox/:inboxID`, Codex nothing (the interrupt clears
+  the thread's pending input), pi nothing (the deferred copy is context only). When the run has settled, the
+  unanswered messages start the X-Agent's next run, once, in the order they were sent, through the same path as a
+  message to an idle X-Agent (also after a run that ended without a report); not after a Stop, a deleted parent or a
+  failed run, and a launch that is refused tells the parent why, who can resend. As a backstop, a turn that starts on
+  such a message while no run is in flight (Claude: a `started` for its uuid; opencode: an execution start; Codex: a
+  turn start; pi cannot, its message never triggers a turn) is interrupted at once, so no turn runs unobserved and
+  unrecorded; the message is sent again as a run. The result of the `session_message` call therefore says the message
+  went into the X-Agent's current turn, that it replies by message or in its report, and that a message it had not
+  read by then is sent again as a new run. A message-started run is run n+1 of the card the X-Agent was launched from
+  (ADR-073's resume: the card's records carry `runIndex`, counted as the newest stored run of the X-Agent plus one, live
+  and after a reload, and a reload shows every run of the card). The card's child stream shows the incoming message
+  as a framed input row, live only, like the rest of a dispatch child stream (the replay of which is later work, §5);
+  the parent's `session_message` tool card, which names the X-Agent, is the persisted record of it. A Stop armed on the
+  origin card while nothing ran does not abort the run a message starts.
+  The input of a message-started run (and of the run that sends messages again) opens by saying that it is a new run
+  to which the X-Agent's earlier `hand_back` does not apply, and asks for a new report: the X-Agent still carries the
+  tool result of its earlier report, and without that sentence an engine's model reads "stop here" as a refusal of any
+  later work. The `hand_back` result itself says to stop for this run and that a later message starts a new one. The
+  card shows one row per incoming message (the dispatcher's own, with the message as sent); pi's echo of the framed
+  text is not forwarded.
+- X-Agent to parent. The message reaches the parent as a peer message through ADR-104's delivery: counted in its
+  budget of agent-started turns, marking the turn non-user, held in the inbox when the parent is not live, and
+  carrying the X-Agent's mode class for Claude Code's peer-message parity. Its sender key is the X-Agent's own
+  (`x-agent-message:<ref>`, beside §3's `x-agent:` for a result), which survives every engine's echo and cli.js's
+  envelope round trip, so the row reads "Message from X-Agent <name>" (not "Report from") and the wrapper's last
+  sentence says it is a message from an X-Agent, not from the user. A held message is delivered ahead of a later held result of the same X-Agent when a result flush
+  runs, while the parent has agent-turn budget.
+- An X-Agent's outgoing message is judged as the X-Agent's own action. In a judged auto mode its own judge reviews it
+  and a block REFUSES the send: the X-Agent gets the denial with the reason as its tool result, nothing reaches the
+  parent, no inbox row is written and no turn budget is spent (unlike a report, which §3 flags and always delivers: a
+  message is not terminal, so the X-Agent can rephrase it or put it in its report). Outside a judged auto mode it is
+  sent without asking, as `hand_back` is. Claude: the tool is in the process's `allowedTools` only where Claude Code
+  would otherwise deny it (`dontAsk`, `bypassPermissions`), exactly like the report; in the asking modes `canUseTool`
+  allows it, and in auto Claude Code's classifier reviews it (a block is its denial: the handler never runs), while an
+  ask for it in auto (a denial cap, no verdict) goes to the human through the parent's approval surface like any
+  other tool's. pi and opencode: it goes through the target's normal gate, ClaudeUI's judge with the target's own
+  denial tracker (so it counts toward its caps, and grants apply as for other tools), classified as a message to the
+  agent that spawned it (the hand-back's framing adapted: agent-authored, untrusted output carrying no user authority),
+  under evaluation rule 15, which covers a message to the spawning agent as well as a hand-back. Codex: its reviewer
+  does not see dynamic tools, so, while the thread runs `auto`, the report judge of §3 (the target's own model on pi's
+  ChatGPT route) reviews the message before delivery, and an unavailable review (no route, a timeout, an error) fails
+  closed: the send is refused with "this message could not be reviewed; include it in your hand_back report instead";
+  the judge's request is aborted when the call is abandoned.
+- Per engine, the tool is offered to dispatch targets only, and only while the session tools are on: Claude gets a
+  `claude-ui-sessions` server holding that one tool (so its name, label and the user's deny rules are a root session's);
+  pi a one-element `CLAUDEUI_PI_SESSION_TOOLS` array; opencode denies the other eight by name, and allows this one
+  (or asks, in a judged auto mode); Codex adds it to the `dynamicTools` of `thread/start`, so a Codex thread started
+  before this slice cannot message.
+- `dispatch_agent` no longer takes `session_id` (the dispatcher keeps it as its internal resume field); a call that
+  still passes one is told "dispatch_agent no longer continues an agent; message it with session_message (session:
+  '<name or ref>')." The launch answer names `session_message` with the X-Agent's name and ref, a blocking answer
+  carries the ref, and the boot notice of §3 points at `session_message`.
 
 ### 5. Lifetime is the X-Agent's own
 
@@ -305,6 +381,9 @@ _Amended 2026-10-20 (slice B-3b): §2's background default as built, and §3's d
 `dispatch-result` origin and its framing, what each end delivers, the wake cap of 25, the flush edge, the attention
 signal for a held result._
 
+_Amended 2026-10-20 (slice B-4): §4 — messages both ways, ownership, the judged outgoing message, per-engine
+delivery and the removal of `session_id`._
+
 ## Consequences
 
 - The parent keeps serving the user while its X-Agents work, and several dispatches run side by side.
@@ -318,7 +397,13 @@ signal for a held result._
 - A ledger insert that fails after Codex's `thread/start` leaves that thread listed in history
   (the Codex list can only skip ids the ledger knows).
 - Codex threads started before this change keep their tool set, so they cannot message their parent, and they cannot
-  call `hand_back`: their last message stands in as the report, flagged.
+  call `hand_back`: their last message stands in as the report, flagged. A thread started before `session_message`
+  existed can be messaged (it is a resume) but never messages.
+- A message to an idle X-Agent starts a paid run: it counts against `dispatch.maxCostUsd` and the concurrency limit
+  like any resume, and no cap limits how many messages a session sends one X-Agent in a turn.
+- On opencode the "delivered" event of a steer travels on the server's event feed and the X-Agent's `hand_back` on the
+  hosted tool's HTTP route, and nothing orders the two: a lagging feed can make a message the model did read look
+  unanswered, which costs a duplicate run n+1, never a lost message.
 - A report is reviewed by the X-Agent's own judge in a judged auto mode and flagged, never blocked, on an objection:
   one more judge call per report in auto (ClaudeUI's judge's usage row, under the dispatching session; not counted in
   `dispatch.maxCostUsd`), and a run's result waits for it, up to 130 s. A review that could not run says so above the

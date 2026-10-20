@@ -17,6 +17,8 @@ import { TerminalView } from '../../TerminalView'
 import { ExpandableText } from './ExpandableText'
 import { TOOL_OUTPUT_SCOPE } from '../../ChatSearch/search-scope'
 import type { KindBodyProps } from './types'
+import { xAgentOfMessageResult } from '../../../../../../shared/x-agent-message'
+import { SESSION_TOOLS_SERVER_NAME } from '../../../../../../shared/session-tools-description'
 
 const DEFAULT_MAX_CHARS = 5000
 
@@ -33,6 +35,12 @@ export function McpBody({
   const showResult = !!result && !!text
   const resultIsError = !!result?.isError
   const args = view.input ?? block.toolInput
+  // A `session_message` to one of the session's own X-Agents says who it reached (ADR-105 §4): the
+  // call's own result names the X-Agent, so the card reads "To X-Agent worker" and not an id.
+  const xAgent =
+    view.server === SESSION_TOOLS_SERVER_NAME && view.tool === 'session_message'
+      ? xAgentOfMessageResult(text)
+      : null
 
   return (
     <>
@@ -73,6 +81,16 @@ export function McpBody({
           <pre className="text-[12px] text-text-primary/70 font-mono whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-[1.3] bg-bg-primary rounded-md p-2 border border-border">
             {JSON.stringify(args, null, 2)}
           </pre>
+        </div>
+      )}
+
+      {/* Who the message reached is part of the outcome, so it shows with the input hidden too. */}
+      {xAgent && (
+        <div
+          data-testid="McpBody.xAgent"
+          className={`px-3 py-2 text-[12px] text-text-primary ${hideToolInput ? '' : 'border-t border-border'}`}
+        >
+          To X-Agent <span className="font-mono">{xAgent}</span>
         </div>
       )}
 

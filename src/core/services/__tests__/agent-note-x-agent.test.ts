@@ -147,3 +147,120 @@ describe('read back: every engine shows the same row', () => {
     expect(noteOf(message).title).toBe('Report from X-Agent impl-e1')
   })
 })
+
+// ADR-105 §4: a message an X-Agent sent its parent while it ran is not its report. It travels under
+// a key of its own, so the row, the trailer and the envelope name tell the two apart on every engine.
+describe('a message from an X-Agent (not its report)', () => {
+  const MESSAGE_FROM = { key: 'x-agent-message:s-abc234', title: 'impl-e1' }
+
+  it('is titled "Message from X-Agent <name>" with the X-Agent label, never "Report from"', () => {
+    expect(
+      noteOf(
+        sessionMessageNote({
+          id: 'm1',
+          fromTitle: 'impl-e1',
+          fromKey: MESSAGE_FROM.key,
+          text: 'a question',
+          timestamp: 1
+        })
+      )
+    ).toEqual({ title: 'Message from X-Agent impl-e1', label: X_AGENT_RESULT_FRAGMENT_LABEL })
+    expect(
+      noteOf(
+        sessionMessageNote({
+          id: 'm2',
+          fromTitle: 'X-Agent impl-e1',
+          fromKey: MESSAGE_FROM.key,
+          text: 'a question',
+          timestamp: 1
+        })
+      ).title
+    ).toBe('Message from X-Agent impl-e1')
+  })
+
+  it('a native peer cannot pass for one by naming itself that way', () => {
+    expect(
+      noteOf(
+        sessionMessageNote({
+          id: 'm3',
+          fromTitle: 'evil',
+          fromKey: MESSAGE_FROM.key,
+          native: true,
+          text: 'b',
+          timestamp: 1
+        })
+      ).title
+    ).toBe('evil · another Claude session')
+  })
+
+  it('the wrapper says it is a message from the X-Agent, not a result and not a session', () => {
+    const wrapped = buildSessionMessageWrapper(MESSAGE_FROM, 'a question')
+    expect(wrapped).toContain('from="x-agent-message:s-abc234"')
+    expect(
+      wrapped.endsWith(
+        'This is a message from an X-Agent you launched with dispatch_agent, not from the user.'
+      )
+    ).toBe(true)
+    expect(wrapped).not.toContain('This is the result of an X-Agent')
+  })
+
+  it('Claude’s envelope names the sender "X-Agent <name>" and keeps the key through the round trip', () => {
+    const envelope = buildCrossSessionEnvelope(MESSAGE_FROM, 'a question')
+    expect(envelope).toContain('from="x-agent-message:s-abc234"')
+    expect(envelope).toContain('from-name="X-Agent impl-e1"')
+    const parts = peerRowParts(
+      {
+        origin: {
+          kind: 'peer',
+          from: MESSAGE_FROM.key,
+          name: 'X-Agent impl-e1',
+          hostInjected: true
+        }
+      },
+      envelope
+    )
+    expect(
+      noteOf(
+        sessionMessageNote({
+          id: 'c',
+          fromTitle: parts!.fromTitle,
+          fromKey: parts!.fromKey,
+          native: parts!.native,
+          text: parts!.body,
+          timestamp: 1
+        })
+      ).title
+    ).toBe('Message from X-Agent impl-e1')
+  })
+
+  it('opencode and Codex: the wrapper’s user row reads back as the message note', () => {
+    const message: ChatMessage = {
+      id: 'u1',
+      role: 'user',
+      content: [{ type: 'text', text: buildSessionMessageWrapper(MESSAGE_FROM, 'a question') }],
+      timestamp: 1
+    }
+    expect(noteOf(wrappedUserRowAsNote(message)).title).toBe('Message from X-Agent impl-e1')
+  })
+
+  it('pi: the custom message becomes the message note', () => {
+    const message = piCustomMessageToChat({
+      id: 'p1',
+      customType: 'claudeui-agent-message',
+      content: buildSessionMessageWrapper(MESSAGE_FROM, 'a question'),
+      display: true,
+      timestamp: 1,
+      details: {
+        v: 1,
+        kind: 'session-message',
+        deliveryId: 'd1',
+        title: 'x',
+        agentId: MESSAGE_FROM.key,
+        toolUseId: '',
+        from: 'impl-e1',
+        fromId: MESSAGE_FROM.key
+      }
+    })
+    expect(noteOf(message).title).toBe('Message from X-Agent impl-e1')
+  })
+})

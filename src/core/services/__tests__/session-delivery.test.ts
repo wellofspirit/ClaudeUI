@@ -539,6 +539,49 @@ describe('X-Agent results: origin dispatch-result (ADR-105 §3)', () => {
     expect(s.deliverNonUser).toHaveBeenCalledTimes(2)
   })
 
+  describe('a flush of held results keeps an X-Agent’s earlier message ahead of its later result (ADR-105 §4)', () => {
+    const fromMessage = (id: string): NonUserItem['from'] => ({
+      key: `x-agent-message:${id}`,
+      title: 'rev'
+    })
+
+    it('the question the X-Agent asked before it reported is delivered first; another sender’s message waits', async () => {
+      const t = target()
+      const x = `s-order${n}`
+      await deliver(managerOf({}), t, msg('question', { from: fromMessage(x) }))
+      await deliver(managerOf({}), t, msg('somebody else'))
+      await deliver(managerOf({}), t, result('report', { from: { key: x, title: 'rev' } }))
+      const s = fake(['started', 'queued'])
+      expect(await flushHeldDispatchResults(managerOf({ [t]: s }), t)).toBe(true)
+      expect(s.deliverNonUser.mock.calls.map(([item]) => item.text)).toEqual(['question', 'report'])
+      expect(heldInboxItems(t).map((r) => r.body)).toEqual(['somebody else'])
+    })
+
+    it('a message sent AFTER the result is not carried ahead of it, nor one of another X-Agent', async () => {
+      const t = target()
+      const x = `s-after${n}`
+      await deliver(managerOf({}), t, msg('other agent', { from: fromMessage('s-other0') }))
+      await deliver(managerOf({}), t, result('report', { from: { key: x, title: 'rev' } }))
+      await deliver(managerOf({}), t, msg('later question', { from: fromMessage(x) }))
+      const s = fake(['started'])
+      await flushHeldDispatchResults(managerOf({ [t]: s }), t)
+      expect(s.deliverNonUser.mock.calls.map(([item]) => item.text)).toEqual(['report'])
+      expect(heldInboxItems(t).map((r) => r.body)).toEqual(['other agent', 'later question'])
+    })
+
+    it('without agent-turn budget the message stays held and the result still goes (its own cap)', async () => {
+      const t = target()
+      const x = `s-budget${n}`
+      await deliver(managerOf({}), t, msg('question', { from: fromMessage(x) }))
+      await deliver(managerOf({}), t, result('report', { from: { key: x, title: 'rev' } }))
+      const s = fake(['started'])
+      for (let i = 0; i < AGENT_TURN_BUDGET; i++) s.originLedger.agentTurnStarted()
+      await flushHeldDispatchResults(managerOf({ [t]: s }), t)
+      expect(s.deliverNonUser.mock.calls.map(([item]) => item.text)).toEqual(['report'])
+      expect(heldInboxItems(t).map((r) => r.body)).toEqual(['question'])
+    })
+  })
+
   it('an interrupted-at-quit notice (no run) stamps no report when it goes out', async () => {
     const t = target()
     const x = `s-notice${n}`

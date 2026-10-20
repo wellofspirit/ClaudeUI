@@ -167,7 +167,7 @@ export const dispatchLedger: DispatchLedgerStore = {
  * The parent's inbox learns that an X-Agent it launched was cut off by the quit
  * (ADR-105 §3, origin `dispatch-result`). No session object exists at boot, so the item goes
  * straight into `session_inbox`: it is delivered ahead of the parent's next turn, like any
- * held item. B-4 will point the model at `session_message` instead of `session_id`.
+ * held item. The notice names the X-Agent's ledger ref, which `session_message` takes (ADR-105 §4).
  */
 function leaveInterruptedNotice(row: DispatchTargetRow): void {
   if (!row.parentSessionId) return
@@ -179,7 +179,7 @@ function leaveInterruptedNotice(row: DispatchTargetRow): void {
       fromKey: `${X_AGENT_KEY_PREFIX}${row.id}`,
       fromTitle: name,
       senderModeClass: null,
-      body: interruptedResultText(name, row.harnessRef)
+      body: interruptedResultText(name, row.id)
     })
   } catch (err) {
     logger.warn(

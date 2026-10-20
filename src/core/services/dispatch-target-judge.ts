@@ -22,6 +22,7 @@
  */
 import { v4 as uuid } from 'uuid'
 import { HAND_BACK_TOOL } from '../../shared/dispatch-agent-description'
+import { X_AGENT_MESSAGE_TOOL } from '../../shared/x-agent-message'
 import type { ReportReview } from '../../shared/handback-review'
 import type {
   AutoModeConfig,
@@ -268,6 +269,42 @@ export class DispatchTargetJudge {
    * still stored and delivered. Never throws.
    */
   async reviewHandBack(report: string, call: HandBackReviewCall): Promise<ReportReview> {
+    return this.reviewText(
+      { toolName: HAND_BACK_TOOL, input: (shown) => ({ report: shown }), handBack: true },
+      report,
+      call
+    )
+  }
+
+  /**
+   * Review a message an X-Agent sends the agent that spawned it (`session_message`, ADR-105 §4) before
+   * it is delivered: the hand-back review applied to a message (the pipeline, framing, throwaway
+   * tracker and cut are the same, the label and rule 15's wording are a message's). For a target
+   * whose own gate cannot see the call (Codex's dynamic tools); a pi or opencode target is gated by
+   * {@link judge} like any other action.
+   */
+  async reviewAgentMessage(message: string, call: HandBackReviewCall): Promise<ReportReview> {
+    return this.reviewText(
+      {
+        toolName: X_AGENT_MESSAGE_TOOL,
+        input: (shown) => ({ message: shown }),
+        agentMessage: true
+      },
+      message,
+      call
+    )
+  }
+
+  private async reviewText(
+    kind: {
+      toolName: string
+      input: (shown: string) => Record<string, unknown>
+      handBack?: boolean
+      agentMessage?: boolean
+    },
+    report: string,
+    call: HandBackReviewCall
+  ): Promise<ReportReview> {
     let routeReason: string | undefined
     try {
       const shown =
@@ -275,7 +312,13 @@ export class DispatchTargetJudge {
           ? `${report.slice(0, RESULT_REPORT_MAX)}\n[the report continues; only its first ${RESULT_REPORT_MAX} characters are shown here]`
           : report
       const { detail } = await runJudgePipelineDetailed(
-        { toolUseId: '', toolName: HAND_BACK_TOOL, input: { report: shown }, handBack: true },
+        {
+          toolUseId: '',
+          toolName: kind.toolName,
+          input: kind.input(shown),
+          ...(kind.handBack ? { handBack: true } : {}),
+          ...(kind.agentMessage ? { agentMessage: true } : {})
+        },
         this.hooks(
           {
             currentMode: call.currentMode,

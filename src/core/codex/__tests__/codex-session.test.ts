@@ -18,6 +18,11 @@ import { codexItemId } from '../event-mapper'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 import { blobRefOf } from '../../../test/helpers/blob-refs'
 import { onHostPlatform } from '../../../test/helpers/host-platform'
+import {
+  DISPATCH_FOLLOW_UP_GUIDANCE,
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
+  dispatchResultSuffix
+} from '../../../shared/dispatch-agent-description'
 import { slimTranscript } from '../../automode/classifier'
 import { watchDispatchResultFlush } from '../../services/dispatch-result-flush'
 import { deliver } from '../../services/session-delivery'
@@ -2798,12 +2803,15 @@ describe('Codex cross-engine dispatch', () => {
       properties: {
         engine: { type: 'string', enum: ['claude', 'opencode', 'pi'] },
         prompt: { type: 'string' },
-        model: { type: 'string' },
-        session_id: { type: 'string' }
+        model: { type: 'string' }
       },
       required: ['engine', 'prompt'],
       additionalProperties: false
     })
+    // session_id left the tool (ADR-105 §4): a follow-up is a session_message.
+    expect(spec.inputSchema.properties).not.toHaveProperty('session_id')
+    expect(spec.description).not.toContain('session_id')
+    expect(spec.description).toContain(DISPATCH_FOLLOW_UP_GUIDANCE)
   })
 
   it('voice follows the host: on where the speech pack has a runtime, off where it has none (ADR-101 §8)', () => {
@@ -2830,8 +2838,7 @@ describe('Codex cross-engine dispatch', () => {
     const { result } = dispatchCall(f, {
       engine: 'claude',
       prompt: 'summarise the repo',
-      model: 'haiku',
-      session_id: 'prior'
+      model: 'haiku'
     })
     const card = f.cards().at(-1)!
     expect(card).toMatchObject({
@@ -2840,8 +2847,7 @@ describe('Codex cross-engine dispatch', () => {
       input: {
         engine: 'claude',
         prompt: 'summarise the repo',
-        model: 'haiku',
-        session_id: 'prior'
+        model: 'haiku'
       }
     })
     expect(dispatcher.dispatch).not.toHaveBeenCalled()
@@ -2881,8 +2887,7 @@ describe('Codex cross-engine dispatch', () => {
     const { result } = dispatchCall(f, {
       engine: 'pi',
       prompt: 'run the tests',
-      model: 'anthropic/claude-haiku',
-      session_id: 'earlier'
+      model: 'anthropic/claude-haiku'
     })
     f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
     await result
@@ -2891,7 +2896,6 @@ describe('Codex cross-engine dispatch', () => {
         engine: 'pi',
         prompt: 'run the tests',
         model: 'anthropic/claude-haiku',
-        sessionId: 'earlier',
         runInBackground: true
       },
       expect.objectContaining({
@@ -2923,22 +2927,50 @@ describe('Codex cross-engine dispatch', () => {
     )
   })
 
-  it('maps the dispatch result onto the tool response, session_id suffix included', async () => {
+  it('maps the dispatch result onto the tool response, agent ref suffix included', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    dispatcher.dispatch.mockResolvedValueOnce({
+      text: 'target answer',
+      sessionId: 'target-session',
+      agentRef: 's-abc123'
+    } as never)
+    const { result } = dispatchCall(f)
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+    await expect(result).resolves.toEqual({
+      contentItems: [
+        { type: 'inputText', text: `target answer${dispatchResultSuffix('s-abc123')}` }
+      ],
+      success: true
+    })
+  })
+
+  it('a result without an agent ref gets no suffix', async () => {
     const f = fixture()
     await f.session.run('hello')
     const { result } = dispatchCall(f)
     f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
     await expect(result).resolves.toEqual({
-      contentItems: [
-        {
-          type: 'inputText',
-          text:
-            'target answer\n\n[dispatch session_id: target-session — pass it as session_id to ' +
-            'continue this agent]'
-        }
-      ],
+      contentItems: [{ type: 'inputText', text: 'target answer' }],
       success: true
     })
+  })
+
+  it('a call from a thread started before the removal that still sends session_id gets the guiding error, no card and no dispatch', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    const before = f.cards().length
+    const { result } = dispatchCall(f, {
+      engine: 'claude',
+      prompt: 'continue',
+      session_id: 'prior'
+    })
+    await expect(result).resolves.toEqual({
+      contentItems: [{ type: 'inputText', text: DISPATCH_SESSION_ID_REMOVED_TEXT }],
+      success: false
+    })
+    expect(f.cards()).toHaveLength(before)
+    expect(dispatcher.dispatch).not.toHaveBeenCalled()
   })
 
   it('reports a failed dispatch as an unsuccessful call carrying the dispatcher text', async () => {

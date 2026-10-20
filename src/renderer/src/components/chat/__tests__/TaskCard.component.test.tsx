@@ -316,7 +316,7 @@ describe('TaskCard — a dispatch run (task-started / task-notification)', () =>
   const ack = {
     type: 'tool_result' as const,
     toolUseId: 'toolu_dispatch_run',
-    toolResult: 'X-Agent s-abc123 launched on pi (id s-abc123, session_id h-1).',
+    toolResult: 'X-Agent s-abc123 launched on pi (id s-abc123).',
     isError: false
   }
   const status = (): string | undefined => screen.getByTestId('TaskCard').dataset.status
@@ -380,7 +380,7 @@ describe('TaskCard — a dispatch run (task-started / task-notification)', () =>
     const launchAck = {
       ...ack,
       toolResult:
-        'X-Agent rev launched on pi (id s-abc123, session_id h-1). It runs in the background and you can keep working.'
+        'X-Agent rev launched on pi (id s-abc123). It runs in the background and you can keep working.'
     }
     const end = (status: 'failed' | 'stopped', isBackgrounded: boolean): void =>
       seed.taskNotification(ROUTE, {

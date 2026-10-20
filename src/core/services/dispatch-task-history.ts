@@ -152,12 +152,19 @@ export function withDispatchTasks<T extends DispatchHistoryRead>(
     const rows = ledger.byParent(sessionId)
     if (rows.length === 0) return result
     // One query for the parent's cards; a store that cannot be read costs the outcomes only.
-    // Each run's outcome is keyed by the call that launched or continued it, so a card shows
-    // its own run's end and not the target's latest.
-    const outcomes = new Map<string, DispatchReportRow>()
+    // Each run's outcome is keyed by the call that launched it, so a card shows its own run's end
+    // and not the target's latest. A run a message started (ADR-105 §4) is run n+1 of the card the
+    // X-Agent was launched from, so one call id can hold several runs, oldest first.
+    const outcomes = new Map<string, DispatchReportRow[]>()
+    // The newest run each X-Agent has a stored end for, on any card: a run still going is the one
+    // after it, counted as the dispatcher counts it live (`reports.count`), so the badge reads the
+    // same before and after a reload.
+    const lastRun = new Map<string, number>()
     try {
-      for (const r of reports.rowsOf(rows.map((row) => row.id)))
-        if (r.toolUseId) outcomes.set(r.toolUseId, r)
+      for (const r of reports.rowsOf(rows.map((row) => row.id))) {
+        lastRun.set(r.targetId, Math.max(lastRun.get(r.targetId) ?? 0, r.run))
+        if (r.toolUseId) outcomes.set(r.toolUseId, [...(outcomes.get(r.toolUseId) ?? []), r])
+      }
     } catch (err) {
       logger.warn(
         'DispatchHistory',
@@ -173,8 +180,27 @@ export function withDispatchTasks<T extends DispatchHistoryRead>(
     for (const row of rows) {
       const toolUseId = row.parentToolUseId
       if (!toolUseId || !uses.has(toolUseId)) continue
-      const own = outcomes.get(toolUseId)
-      if (row.state === 'running' && !own) {
+      const runs = (outcomes.get(toolUseId) ?? []).filter((r) => r.targetId === row.id)
+      // One terminal notification per run the card holds (run n's `runIndex` is the report's own
+      // number). A finished row with no stored outcome says how the X-Agent stands, as run 1.
+      if (!notified.has(toolUseId) && (runs.length > 0 || row.state !== 'running')) {
+        notified.add(toolUseId)
+        for (const own of runs.length > 0 ? runs : [undefined]) {
+          notifications.push({
+            taskId: row.id,
+            toolUseId,
+            outputFile: '',
+            runIndex: own ? own.run : 1,
+            // The call's result is the launch acknowledgement: a background run, whose input
+            // need not say so (the default for a root agent).
+            ...(launched.has(toolUseId) ? { isBackgrounded: true } : {}),
+            ...(own
+              ? outcomeFields(row, own)
+              : { status: terminalOf(row), summary: summaryOf(row) })
+          })
+        }
+      }
+      if (row.state === 'running') {
         // The launch returned (its result is in the transcript) = a background run, whose
         // result is delivered into the parent (B-3b); a call still waiting is a blocking one.
         // Either way it wakes the parent.
@@ -185,38 +211,31 @@ export function withDispatchTasks<T extends DispatchHistoryRead>(
           taskType: 'dispatch',
           isBackgrounded: background,
           wakesParent: true,
-          // This run's start: a continuation's clock counts from its own start, not the first launch.
+          // This run's start: a later run's clock counts from its own start, not the first launch.
           startedAt: row.lastActiveAt,
+          // A run a message started is run n+1 of this card; the launch carries none.
+          ...((lastRun.get(row.id) ?? 0) >= 1 ? { runIndex: (lastRun.get(row.id) ?? 0) + 1 } : {}),
           ...(description ? { description } : {})
         }
-        continue
       }
-      if (notified.has(toolUseId)) continue
-      notified.add(toolUseId)
-      notifications.push({
-        taskId: row.id,
-        toolUseId,
-        outputFile: '',
-        runIndex: 1,
-        // The call's result is the launch acknowledgement: a background run, whose input
-        // need not say so (the default for a root agent).
-        ...(launched.has(toolUseId) ? { isBackgrounded: true } : {}),
-        ...(own ? outcomeFields(row, own) : { status: terminalOf(row), summary: summaryOf(row) })
-      })
     }
-    // A continuation's own card: the run it launched, with its own end.
-    for (const [toolUseId, outcome] of outcomes) {
-      const row = ledgerById.get(outcome.targetId)
-      if (!row || notified.has(toolUseId) || !uses.has(toolUseId)) continue
-      notified.add(toolUseId)
-      notifications.push({
-        taskId: row.id,
-        toolUseId,
-        outputFile: '',
-        runIndex: outcome.run,
-        ...(launched.has(toolUseId) ? { isBackgrounded: true } : {}),
-        ...outcomeFields(row, outcome)
-      })
+    // A continuation's own card (one `dispatch_agent` continued by `session_id`, before B-4): the run
+    // it launched, with its own end.
+    for (const [toolUseId, outcomesOfCall] of outcomes) {
+      for (const outcome of outcomesOfCall) {
+        const row = ledgerById.get(outcome.targetId)
+        if (!row || row.parentToolUseId === toolUseId) continue
+        if (notified.has(toolUseId) || !uses.has(toolUseId)) continue
+        notified.add(toolUseId)
+        notifications.push({
+          taskId: row.id,
+          toolUseId,
+          outputFile: '',
+          runIndex: outcome.run,
+          ...(launched.has(toolUseId) ? { isBackgrounded: true } : {}),
+          ...outcomeFields(row, outcome)
+        })
+      }
     }
     const hasActive = Object.keys(activeTasks).length > 0
     if (notifications.length === 0 && !hasActive) return result

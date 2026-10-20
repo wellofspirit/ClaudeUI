@@ -190,3 +190,39 @@ describe('createSdkMcpServer — alwaysLoad (session tools, slice 1c)', () => {
     }
   })
 })
+
+describe('createSdkMcpServer — passthrough', () => {
+  it('strips an undeclared input key by default; passthrough hands it to the handler without listing it', async () => {
+    const seen: Record<string, Record<string, unknown>> = {}
+    const make = (name: string, passthrough: boolean): SdkMcpTool =>
+      tool(
+        name,
+        'Records the input it was given.',
+        { x: z.string() },
+        async (input) => {
+          seen[name] = input as Record<string, unknown>
+          return { content: [{ type: 'text' as const, text: 'ok' }] }
+        },
+        passthrough ? { passthrough: true } : {}
+      )
+    const server = createSdkMcpServer({
+      name: 'passthrough-server',
+      tools: [make('plain', false), make('loose', true)]
+    })
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()
+    await server.instance!.connect(serverTransport)
+    const client = new Client({ name: 'test-client', version: '0.0.0' }, {})
+    await client.connect(clientTransport)
+    try {
+      await client.callTool({ name: 'plain', arguments: { x: 'a', extra: 'z' } })
+      await client.callTool({ name: 'loose', arguments: { x: 'a', extra: 'z' } })
+      expect(seen.plain).toEqual({ x: 'a' })
+      expect(seen.loose).toEqual({ x: 'a', extra: 'z' })
+      // The model-facing schema lists the declared keys only, either way.
+      const { tools } = await client.listTools()
+      for (const t of tools) expect(Object.keys(t.inputSchema.properties ?? {})).toEqual(['x'])
+    } finally {
+      await client.close()
+    }
+  })
+})

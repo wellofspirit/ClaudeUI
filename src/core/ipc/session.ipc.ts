@@ -445,6 +445,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // the commands below use; the service sits under this layer, so it is handed them.
   configureSessionTools({
     manager,
+    // A message to an X-Agent steers its running turn or starts a run of it (ADR-105 §4).
+    xAgents: { message: (request) => crossEngineDispatcher.messageXAgent(request) },
     createSession: (args) => prepareAndCreateSession(manager, getHostWindow(), args),
     sendPrompt: (routingId, prompt, options) =>
       sendPrompt(manager, routingId, prompt, undefined, options)

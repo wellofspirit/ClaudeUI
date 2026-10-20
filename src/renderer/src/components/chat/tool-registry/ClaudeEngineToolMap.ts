@@ -9,6 +9,7 @@ import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/to
 import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kinds'
 import { firstPartyDisplayName } from '../../../../../shared/first-party-tool-names'
 import { isAgentTool } from '../../../../../shared/types'
+import { sessionToolMcpFields } from '../../../../../shared/session-tools-description'
 import { claudeToolSpec } from './claude-tool-specs'
 import type { AskUserQuestion, ContentBlock } from '../../../../../shared/types'
 
@@ -265,7 +266,9 @@ function claudeNormalize(
       }
 
     case 'mcp':
-      return { kind: 'mcp', input: inp }
+      // The session tools' calls carry their server and tool in the name; McpBody reads them off
+      // the view (the "To X-Agent <name>" line of a session_message), as the other engines' maps give.
+      return { kind: 'mcp', input: inp, ...(toolName ? sessionToolMcpFields(toolName) : null) }
 
     case 'detail':
     case 'findings':

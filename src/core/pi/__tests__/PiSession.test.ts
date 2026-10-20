@@ -455,6 +455,11 @@ import {
   sessionToolsGuidanceParts
 } from '../../../shared/session-tools-description'
 import { onHostPlatform } from '../../../test/helpers/host-platform'
+import {
+  DISPATCH_FOLLOW_UP_GUIDANCE,
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
+  dispatchResultSuffix
+} from '../../../shared/dispatch-agent-description'
 import { READ_ONLY_REVIEW_RATIONALE } from '../../automode/denial-tracker'
 /** The hold window the held-card tests set (`blockHoldSeconds: 120`). */
 const HOLD_MS = 120_000
@@ -4692,6 +4697,9 @@ describe('PiSession — hosted-tools/dispatch env vars at spawn (M4a+b)', () => 
     expect(description).not.toContain('pi (an alternative')
     expect(description).toContain('For claude:')
     expect(description).toContain('For codex:')
+    // A follow-up is a session_message; the description no longer offers a session_id.
+    expect(description).toContain(DISPATCH_FOLLOW_UP_GUIDANCE)
+    expect(description).not.toContain('session_id')
   })
 
   it('omits CLAUDEUI_PI_DISPATCH_ENABLED (but keeps CLAUDEUI_PI_HOSTED_TOOLS) when crossEngineDispatchAvailable("pi") is false', async () => {
@@ -5175,8 +5183,12 @@ describe('PiSession.handleHostedTool — unknown toolName (M4a+b)', () => {
 })
 
 describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
-  it('builds a DispatchContext mirroring collab-tool.ts (fromEngine:"pi", fromRoutingId, cwd, autonomyMode, toolUseId=payload.toolCallId) and formats the session_id suffix on success', async () => {
-    mockDispatch.mockResolvedValue({ text: 'The answer is 42.', sessionId: 'oc-sess-1' })
+  it('builds a DispatchContext mirroring collab-tool.ts (fromEngine:"pi", fromRoutingId, cwd, autonomyMode, toolUseId=payload.toolCallId) and appends the agent ref on a blocking success', async () => {
+    mockDispatch.mockResolvedValue({
+      text: 'The answer is 42.',
+      sessionId: 'oc-sess-1',
+      agentRef: 's-abc123'
+    })
     const win = new MockWindow()
     const session = new PiSession('rid-dispatch-1', win as never, '/cwd', {})
     await session.setPermissionMode('acceptEdits')
@@ -5197,7 +5209,6 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
         engine: 'opencode',
         prompt: 'what is the answer',
         model: undefined,
-        sessionId: undefined,
         // pi's dispatch_agent is always the root agent's: background by default (ADR-105 §2).
         runInBackground: true
       },
@@ -5212,10 +5223,20 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     const dispatchCtx = mockDispatch.mock.calls[0][1] as DispatchContext
     expect(dispatchCtx.getAutonomyMode()).toBe('acceptEdits')
     expect(dispatchCtx.getMessages()).toBe(session.getMessages())
-    expect(result.content[0].text).toBe(
-      'The answer is 42.\n\n[dispatch session_id: oc-sess-1 — pass it as session_id to continue this agent]'
-    )
+    expect(result.content[0].text).toBe(`The answer is 42.${dispatchResultSuffix('s-abc123')}`)
     expect(result.isError).toBeFalsy()
+  })
+
+  it('no agent ref on a success → no suffix', async () => {
+    mockDispatch.mockResolvedValue({ text: 'The answer is 42.', sessionId: 'oc-sess-1' })
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-noref', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const input = { engine: 'opencode', prompt: 'what is the answer' }
+    await grantViaApproval(win, session, 'call_dispatch_noref', input)
+    const result = await hostedTool('dispatch_agent', input, 'call_dispatch_noref')
+    expect(result.content[0].text).toBe('The answer is 42.')
   })
 
   it('passes name/description through to the DispatchRequest when the model supplies them (ADR-105)', async () => {
@@ -5239,31 +5260,40 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     )
   })
 
-  it('passes model/session_id through to the DispatchRequest when the model supplies them', async () => {
+  it('passes model through to the DispatchRequest when the model supplies it', async () => {
     mockDispatch.mockResolvedValue({ text: 'ok', sessionId: 'prev-sess' })
     const win = new MockWindow()
     const session = new PiSession('rid-dispatch-2', win as never, '/cwd', {})
     await session.run('hi')
 
-    const input = {
-      engine: 'opencode',
-      prompt: 'continue',
-      model: 'openai/gpt-5',
-      session_id: 'prev-sess'
-    }
+    const input = { engine: 'opencode', prompt: 'go', model: 'openai/gpt-5' }
     await grantViaApproval(win, session, 'call_dispatch_2', input)
     await hostedTool('dispatch_agent', input, 'call_dispatch_2')
 
     expect(mockDispatch).toHaveBeenCalledWith(
       {
         engine: 'opencode',
-        prompt: 'continue',
+        prompt: 'go',
         model: 'openai/gpt-5',
-        sessionId: 'prev-sess',
         runInBackground: true
       },
       expect.anything()
     )
+  })
+
+  it('a call that still passes session_id gets the guiding error and dispatches nothing', async () => {
+    mockDispatch.mockResolvedValue({ text: 'ok', sessionId: 'prev-sess' })
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-sid', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const input = { engine: 'opencode', prompt: 'continue', session_id: 'prev-sess' }
+    await grantViaApproval(win, session, 'call_dispatch_sid', input)
+    const result = await hostedTool('dispatch_agent', input, 'call_dispatch_sid')
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toBe(DISPATCH_SESSION_ID_REMOVED_TEXT)
+    expect(mockDispatch).not.toHaveBeenCalled()
   })
 
   it("runs in the background unless run_in_background is false (pi's tool is always the root agent's; ADR-105 §2)", async () => {
@@ -5288,7 +5318,7 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     expect(mockDispatch.mock.calls.at(-1)![0]).not.toHaveProperty('runInBackground')
   })
 
-  it('an isError dispatch result passes through WITHOUT the session_id suffix', async () => {
+  it('an isError dispatch result passes through WITHOUT the agent suffix', async () => {
     mockDispatch.mockResolvedValue({ text: 'Dispatch failed: boom', sessionId: '', isError: true })
     const win = new MockWindow()
     const session = new PiSession('rid-dispatch-3', win as never, '/cwd', {})
@@ -5366,7 +5396,6 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
         engine: 'codex',
         prompt: 'x',
         model: undefined,
-        sessionId: undefined,
         runInBackground: true
       },
       expect.objectContaining({ fromEngine: 'pi' })

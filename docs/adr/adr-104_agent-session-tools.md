@@ -1,6 +1,6 @@
 # ADR-104: Session tools — agents start, hand off to and message other sessions
 
-**Status:** Accepted (2026-10-18; §6's root-agent-only rule amended by [ADR-105](adr-105_background-dispatch.md): dispatch children may use `session_message` within their own family). Implemented on branch `session-tools` (slices: registry fix, delivery and
+**Status:** Accepted (2026-10-18; §6's root-agent-only rule amended by [ADR-105](adr-105_background-dispatch.md): a dispatch target (X-Agent) may use `session_message` to its dispatching session, and that session to it). Implemented on branch `session-tools` (slices: registry fix, delivery and
 origin, native peer messages, links, the tools on Claude, proposals, the other engines, context pressure,
 grouping).
 **Relates to:** [ADR-033](adr-033_cross-engine-dispatch.md) (cross-engine dispatch stays the subagent
@@ -106,7 +106,7 @@ ClaudeUI's gate is the approval surface, so the frame asserts the receiving sess
 - Turns started by other sessions are bounded (10 since the last user prompt); past that, and for idle,
   closed or out-of-budget targets, items wait in a persistent per-session inbox and are delivered at the
   target's next turn. Messages never resume a closed session.
-- Only a session's root agent can act; subagents, dispatch targets, automations and side questions cannot.
+- Only a session's root agent can act; subagents, dispatch targets, automations and side questions cannot (one exception: an X-Agent and its dispatching session message each other with `session_message`, [ADR-105](adr-105_background-dispatch.md) §4).
 - Every acting call is written to the audit log with the calling session as the actor.
 - Where the rules are enforced: the deny rules (root agent only, plan mode, the start gate, the caps) are
   re-checked by the tool service itself, so they hold in every permission mode. The rules that only ask

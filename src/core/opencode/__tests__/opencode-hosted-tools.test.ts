@@ -14,6 +14,8 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 
 // createOpencodeHostedToolsServer reads engines/claude.json (via loadEngineConfig)
 // on EVERY call to resolve the dispatch_agent model hint (ADR-033 follow-up) —
@@ -35,7 +37,10 @@ import { loadEngineConfig } from '../../services/ui-config'
 import {
   DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_FOLLOW_UP_GUIDANCE,
   DISPATCH_NAME_PARAM,
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
+  dispatchResultSuffix,
   HAND_BACK_DESCRIPTION
 } from '../../../shared/dispatch-agent-description'
 
@@ -251,14 +256,15 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     expect(result.isError).toBe(true)
   })
 
-  it('happy path: strips the internal arg, dispatches with fromRoutingId = caller id, appends session_id', async () => {
+  it('happy path: strips the internal arg, dispatches with fromRoutingId = caller id, appends the agent ref', async () => {
     const emit = vi.fn()
     const getAutonomyMode = (): string => 'acceptEdits'
     const getMessages = (): [] => []
     const addDispatchedCost = vi.fn()
     const dispatch = vi.fn<DispatchAgentFn>(async () => ({
       text: 'the review',
-      sessionId: 'claude-42'
+      sessionId: 'claude-42',
+      agentRef: 's-abc123'
     }))
     const tool = getDispatchTool(tmp, {
       lookupCallerSession: (id) => {
@@ -290,7 +296,6 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
         engine: 'claude',
         prompt: 'review the diff',
         model: 'haiku',
-        sessionId: undefined,
         // A root caller with a call id runs in the background unless it says otherwise.
         runInBackground: true
       },
@@ -312,8 +317,58 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     expect(reqArg).not.toHaveProperty('__xeng_call_id')
 
     expect(result.isError).toBeUndefined()
-    expect(result.content[0].text).toContain('the review')
-    expect(result.content[0].text).toContain('session_id: claude-42')
+    expect(result.content[0].text).toBe(`the review${dispatchResultSuffix('s-abc123')}`)
+    expect(result.content[0].text).not.toContain('session_id')
+  })
+
+  it('no agent ref → no suffix', async () => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'the review', sessionId: 'c-1' }))
+    const tool = getDispatchTool(tmp, { lookupCallerSession: () => callerHandle(), dispatch })
+    const result = (await tool.handler(
+      { engine: 'claude', prompt: 'x', __xeng_caller_session: 'ses_1' },
+      makeExtra()
+    )) as { content: Array<{ type: string; text: string }> }
+    expect(result.content[0].text).toBe('the review')
+  })
+
+  it('a call that still passes session_id gets the guiding error and dispatches nothing', async () => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'c-1' }))
+    const tool = getDispatchTool(tmp, { lookupCallerSession: () => callerHandle(), dispatch })
+    const result = (await tool.handler(
+      { engine: 'claude', prompt: 'x', session_id: 'claude-42', __xeng_caller_session: 'ses_1' },
+      makeExtra()
+    )) as { content: Array<{ type: string; text: string }>; isError?: boolean }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toBe(DISPATCH_SESSION_ID_REMOVED_TEXT)
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
+  it('over the real MCP protocol: tools/list does not list session_id, and a call that sends one still reaches the handler', async () => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'c-1' }))
+    const server = createOpencodeHostedToolsServer(tmp, {
+      lookupCallerSession: () => callerHandle(),
+      dispatch
+    })
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()
+    await server.connect(serverTransport)
+    const client = new Client({ name: 'test-client', version: '0.0.0' }, {})
+    await client.connect(clientTransport)
+    try {
+      const { tools } = await client.listTools()
+      const listed = tools.find((t) => t.name === 'dispatch_agent')!
+      expect(JSON.stringify(listed)).not.toContain('session_id')
+      expect(listed.description).toContain(DISPATCH_FOLLOW_UP_GUIDANCE)
+      // The MCP SDK strips keys a raw shape does not declare: the schema is loose so this one survives.
+      const result = (await client.callTool({
+        name: 'dispatch_agent',
+        arguments: { engine: 'claude', prompt: 'x', session_id: 'claude-42' }
+      })) as { isError?: boolean; content: Array<{ text: string }> }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toBe(DISPATCH_SESSION_ID_REMOVED_TEXT)
+      expect(dispatch).not.toHaveBeenCalled()
+    } finally {
+      await client.close()
+    }
   })
 
   it('run_in_background: explicit values win; unspecified is background for the root caller with a call id only (ADR-105 §2)', async () => {
@@ -410,7 +465,7 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     )
   })
 
-  it('propagates dispatch isError as an isError tool result without a session_id suffix', async () => {
+  it('propagates dispatch isError as an isError tool result without an agent suffix', async () => {
     const dispatch = vi.fn<DispatchAgentFn>(async () => ({
       text: 'something broke',
       sessionId: '',
@@ -456,7 +511,8 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     const addDispatchedCost = vi.fn()
     const dispatch = vi.fn<DispatchAgentFn>(async () => ({
       text: 'pi says hi',
-      sessionId: 'pi-sess-1'
+      sessionId: 'pi-sess-1',
+      agentRef: 's-pi0001'
     }))
     const tool = getDispatchTool(tmp, {
       lookupCallerSession: () => ({
@@ -484,7 +540,6 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
         engine: 'pi',
         prompt: 'do a thing',
         model: 'openai-codex/gpt-5.6-luna',
-        sessionId: undefined,
         runInBackground: true
       },
       expect.objectContaining({
@@ -495,7 +550,7 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     )
     expect(result.isError).toBeUndefined()
     expect(result.content[0].text).toContain('pi says hi')
-    expect(result.content[0].text).toContain('session_id: pi-sess-1')
+    expect(result.content[0].text).toContain(dispatchResultSuffix('s-pi0001'))
   })
 })
 

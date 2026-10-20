@@ -10,6 +10,7 @@
 
 import { shorten } from '../ToolCallBlock/utils'
 import type { ToolKind, ToolView } from '../../../../../shared/tool-kinds'
+import { SESSION_TOOLS_SERVER_NAME } from '../../../../../shared/session-tools-description'
 
 /**
  * Claude's `SendUserFile` has no ToolKind of its own (it lands on 'unknown',
@@ -107,6 +108,10 @@ export function summarizeTool(kind: ToolKind, view: ToolView, toolName?: string)
       // `mcp__<server>__<tool>`, F20). Engines whose MCP names carry neither —
       // opencode's underscore-joined `server_tool`, and any caller that
       // normalized without a tool name — keep today's JSON dump.
+      // A session tool (first-party) is named by the card's own header ("Session · message"), so the
+      // summary is what it was asked, as on every engine, not the server and tool again.
+      if (view.kind === 'mcp' && view.server === SESSION_TOOLS_SERVER_NAME)
+        return JSON.stringify(view.input)
       if (view.kind === 'mcp' && view.server)
         return view.tool ? `${view.server} / ${view.tool}` : view.server
       return view.kind === 'mcp' ? JSON.stringify(view.input) : ''

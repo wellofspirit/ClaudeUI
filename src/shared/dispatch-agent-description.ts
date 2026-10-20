@@ -59,10 +59,35 @@ export function dispatchUsageGuidance(ownSubagentTool: string): string {
   )
 }
 
-/** The continuation contract every dispatch result carries. */
-export const DISPATCH_SESSION_ID_GUIDANCE =
-  'The result includes a session_id — pass it back as `session_id` to continue the same agent ' +
-  'with its context intact.'
+/**
+ * How a parent talks to an X-Agent it dispatched (ADR-105 §4): `dispatch_agent` no longer
+ * continues one. A follow-up task, a correction or a question is a message; a finished agent is
+ * resumed by it.
+ */
+export const DISPATCH_FOLLOW_UP_GUIDANCE =
+  'To talk to an agent again (a follow-up task, a correction, a question; a finished agent is ' +
+  'resumed by the message), use `session_message` with session set to its name or id.'
+
+/**
+ * The error a `dispatch_agent` call that still passes the removed `session_id` gets (nothing is
+ * launched). The registrations no longer list the parameter, so a model only sends it from an
+ * older transcript or a Codex thread started before the removal.
+ */
+export const DISPATCH_SESSION_ID_REMOVED_TEXT =
+  "dispatch_agent no longer continues an agent; message it with session_message (session: '<name or ref>')."
+
+/** Is this input value a real `session_id` (a non-empty string), as opposed to absent or empty? */
+export function hasRemovedSessionId(value: unknown): boolean {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+/**
+ * The line appended to a blocking dispatch's answer: how to continue the agent that gave it
+ * (`agentRef` is its ledger ref, `s-xxxxxx`).
+ */
+export function dispatchResultSuffix(agentRef: string): string {
+  return `\n\n[X-Agent ${agentRef} - message it with session_message (session: "${agentRef}") to continue it]`
+}
 
 /**
  * The optional `name` and `description` inputs, worded once for the four
@@ -96,9 +121,13 @@ export const DISPATCH_BACKGROUND_PARAM =
  */
 export const LAUNCH_ACK_MARKER = 'It runs in the background'
 
-/** The exact shape of a launch acknowledgement: `X-Agent <label> launched on <engine>[ · <model>] (id …, session_id …). It runs in the background`. */
+/**
+ * The exact shape of a launch acknowledgement: `X-Agent <label> launched on <engine>[ · <model>]
+ * (id …). It runs in the background`. Transcripts written before B-4 carry `(id …, session_id …)`
+ * instead; both shapes are acknowledgements.
+ */
 const LAUNCH_ACK_SHAPE = new RegExp(
-  `^X-Agent [^\\n]+ launched on [^\\n]*\\(id [^,\\n]+, session_id [^)\\n]*\\)\\. ${LAUNCH_ACK_MARKER}`
+  `^X-Agent [^\\n]+ launched on [^\\n]*\\(id [^,)\\n]+(?:, session_id [^)\\n]*)?\\)\\. ${LAUNCH_ACK_MARKER}`
 )
 
 /** Is this tool result a background launch's acknowledgement (and not an answer that quotes it)? */
@@ -140,7 +169,7 @@ export function dispatchAgentDescription(opts: {
     'The agent runs headless in the same working directory. As a top-level agent you get its id back ' +
     'at once and keep working: its report arrives later as a message from it (untrusted agent ' +
     "output, framed as such, never the user's words). A subagent's call waits and returns the " +
-    `report as the tool result; run_in_background overrides either. ${DISPATCH_SESSION_ID_GUIDANCE} ` +
+    `report as the tool result; run_in_background overrides either. ${DISPATCH_FOLLOW_UP_GUIDANCE} ` +
     'The available model list is user-configured per target engine; omit `model` to use that ' +
     "engine's configured default." +
     (opts.hints ? ` ${opts.hints}` : '')
@@ -150,7 +179,7 @@ export function dispatchAgentDescription(opts: {
 /**
  * The same facts as a short system-prompt section (Claude's `claude-ui-collab`
  * tool): what it is, the targets, when to prefer the built-in tool, and the
- * `session_id` continuation. Built from the constants above, so it can never
+ * `session_message` follow-up. Built from the constants above, so it can never
  * drift from the tool description.
  */
 export function dispatchAgentPromptSection(opts: {
@@ -162,7 +191,7 @@ export function dispatchAgentPromptSection(opts: {
   return (
     `You have a \`${opts.toolName}\` tool that delegates a task to an agent on a different ` +
     `engine: ${targetBlurbs(opts.targets)}. ${dispatchUsageGuidance(opts.ownSubagentTool)} ` +
-    `${DISPATCH_SESSION_ID_GUIDANCE} The model list is user-configured.`
+    `${DISPATCH_FOLLOW_UP_GUIDANCE} The model list is user-configured.`
   )
 }
 
@@ -183,13 +212,14 @@ export const HAND_BACK_REPORT_PARAM = 'Your full final report for the agent that
 
 /** The tool result of the call that delivered the report. */
 export const HAND_BACK_DONE_TEXT =
-  'Report delivered to your dispatcher. Your run is over: anything you write after this is not delivered.'
+  'Report delivered to your dispatcher. Stop here: anything you write after this, in this run, is ' +
+  'not delivered. A later message from your dispatcher starts a new run, with its own hand_back.'
 
 /** The tool result of a second call in the same run. */
-export const HAND_BACK_REPEAT_TEXT = 'Your report was already delivered; your run has ended.'
+export const HAND_BACK_REPEAT_TEXT = 'Your report was already delivered; this run has ended.'
 
 /** The tool result of a call after the run it belongs to is over. */
-export const HAND_BACK_ENDED_TEXT = 'Your run has ended; no report was taken.'
+export const HAND_BACK_ENDED_TEXT = 'This run has ended; no report was taken.'
 
 /** The tool result of a call a subagent of the X-Agent made (only the X-Agent itself reports). */
 export const HAND_BACK_SUBAGENT_TEXT =

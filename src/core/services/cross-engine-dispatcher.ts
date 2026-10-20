@@ -150,7 +150,7 @@ import {
   type CodexThreadOwner
 } from '../codex/CodexHost'
 import { harnessAvailable } from '../harness/resolve'
-import { codexHandBackSpec } from '../codex/codex-hand-back-spec'
+import { codexHandBackSpec, codexXAgentMessageSpec } from '../codex/codex-hand-back-spec'
 import { codexModePolicy, codexTurnInput, codexTurnPolicy } from '../codex/codex-turn-policy'
 import { assertCodexProvider, selectCodexModel } from '../codex/model-selection'
 import { codexItemId, mapCodexDelta, mapCodexItem } from '../codex/event-mapper'
@@ -160,6 +160,7 @@ import type { CodexMappedEvent } from '../codex/event-mapper'
 import { unwrapShellCommand } from '../codex/command-text'
 import {
   decideWithSource,
+  sessionToolDenyRule,
   mergedClaudeRulesFor,
   PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
 } from '../pi/permission-engine'
@@ -245,6 +246,33 @@ import {
   stoppedResultText
 } from './dispatch-result-text'
 import { ToolUseOwners } from './tool-use-owners'
+import {
+  runSessionTool,
+  sessionToolsAvailable,
+  type SessionToolCaller,
+  type XAgentMessageOutcome,
+  type XAgentMessageRequest
+} from './session-tools'
+import {
+  createSessionToolsServer,
+  SESSION_TOOLS_PREFIX,
+  SESSION_TOOLS_SERVER_NAME
+} from './session-tools-server'
+import { xAgentSessionToolsEnv } from './session-tool-specs'
+import { agentNoteMessage } from './agent-note'
+import { isReservedXAgentName } from '../../shared/session-links'
+import {
+  MESSAGE_RUN_ENDED_TEXT,
+  messageNotTakenText,
+  MESSAGE_UNREVIEWED_TEXT,
+  messageBlockedText,
+  X_AGENT_INPUT_FRAGMENT_LABEL,
+  X_AGENT_MESSAGE_TOOL,
+  xAgentInputNoteTitle,
+  xAgentMessageFrame,
+  xAgentNewRunPrompt
+} from '../../shared/x-agent-message'
+import { SESSION_TOOL_NAMES } from '../../shared/session-tools-description'
 import { isHandbackPointerResult } from './task-notification-xml'
 import {
   HAND_BACK_DONE_TEXT,
@@ -261,7 +289,12 @@ import {
   HAND_BACK_TOOL,
   handBackWithheldText
 } from '../../shared/dispatch-agent-description'
-import { makeRunContext, type DispatchParentLookup, type RunContext } from './dispatch-parent'
+import {
+  makeRunContext,
+  type DispatchParentLookup,
+  type LiveParentSession,
+  type RunContext
+} from './dispatch-parent'
 import type {
   ApprovalDecision,
   BillingType,
@@ -411,6 +444,14 @@ export interface DispatchRequest {
    * the result, as dispatch always did.
    */
   runInBackground?: boolean
+  /**
+   * Internal, set by {@link CrossEngineDispatcher.messageXAgent}: this run is started by a
+   * `session_message` to an X-Agent that was not running (ADR-105 §4), through the same continuation
+   * path (`sessionId` is the X-Agent's harness id). The prompt arrives already framed, so a Claude target
+   * gets no delegation preamble; the run is a background run even when the origin card has no tool-call
+   * id (its result is delivered to the parent either way); and it is run `runIndex` of that card.
+   */
+  message?: { runIndex: number }
 }
 
 /** The two labels a dispatch may carry onto its ledger row. */
@@ -437,6 +478,12 @@ export interface DispatchResult {
   text: string
   sessionId: string
   isError?: boolean
+  /**
+   * The X-Agent's ledger ref (`s-xxxxxx`) on the answer of a BLOCKING run whose target exists:
+   * the id `session_message` takes to talk to it again (ADR-105 §4). `sessionId` stays the
+   * harness's own id, which nothing addresses an X-Agent by any more.
+   */
+  agentRef?: string
 }
 
 /**
@@ -530,18 +577,20 @@ export type SpawnPiTargetFn = SpawnPiChildFn
 
 /**
  * The four native server-request methods a Codex dispatch TARGET answers
- * (ADR-033 slice H) — the same approval surface `CodexSession` handles, MINUS
- * `item/tool/call`.
+ * (ADR-033 slice H) — the same approval surface `CodexSession` handles. Its
+ * `item/tool/call` is answered apart (`toolCallFromCodex`): the two tools a target is
+ * started with (`hand_back`, ADR-105 §3, and `session_message` to its dispatcher, §4) and
+ * nothing else.
  *
- * That omission is half the recursion scrub. Until ADR-069 the TRANSPORT
+ * That narrowing is half the recursion scrub. Until ADR-069 the TRANSPORT
  * enforced it — the target owned its own process and registered only these four
  * methods, so `item/tool/call` was answered `-32601` before any handler ran. A
  * target is a thread on a SHARED host now, and the host's registered list is the
  * union its owners need, so this list is enforced by
  * `gateCodexTargetRequest` instead, which answers anything outside it with the
- * very same `-32601`. The other half is `thread/start` being sent with NO
- * `dynamicTools`, so the target has neither `dispatch_agent` nor a hosted tool
- * to call in the first place — belt (no tool offered) and braces (no route to
+ * very same `-32601`. The other half is `thread/start` being sent with only
+ * those `dynamicTools`, so the target has neither `dispatch_agent` nor any other hosted
+ * tool to call in the first place — belt (no tool offered) and braces (no route to
  * run one if it somehow were).
  */
 const CODEX_TARGET_SERVER_METHODS = [
@@ -757,6 +806,18 @@ export interface DispatcherDeps {
    * to {@link HAND_BACK_REVIEW_MS}.
    */
   handBackReviewMs?: number
+  /**
+   * The longest a message to an X-Agent waits for its running run to end when the run can no longer
+   * take a steer (its report was taken, a Stop is pending), before the message starts the next run
+   * (ADR-105 §4). Defaults to {@link MESSAGE_RUN_END_WAIT_MS}.
+   */
+  messageRunEndWaitMs?: number
+  /**
+   * The longest a message waits for an X-Agent whose run is still starting up (its process not yet
+   * live, or between two turns of the run) before it is told to send the message again. Defaults to
+   * {@link MESSAGE_START_WAIT_MS}.
+   */
+  messageStartWaitMs?: number
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
@@ -946,6 +1007,18 @@ const OWN_WORK_WAIT_MS = 30 * 60_000
  * own timeout, with its cause, fires first.
  */
 export const HAND_BACK_REVIEW_MS = STAGE2_TIMEOUT_MS + 10_000
+/** See {@link DispatcherDeps.messageRunEndWaitMs}. */
+const MESSAGE_RUN_END_WAIT_MS = 20_000
+/** See {@link DispatcherDeps.messageStartWaitMs}. */
+const MESSAGE_START_WAIT_MS = 10_000
+/** How often a message polls an X-Agent that is starting up. */
+const MESSAGE_START_POLL_MS = 25
+/** Steer records kept (answered and requeued ones are forgotten first once past it). */
+const MAX_STEER_RECORDS = 64
+/** How long after its run ended a message the X-Agent still holds can start a turn we end as a stray one. */
+const STRAY_STEER_WINDOW_MS = 60_000
+/** Times a message looks for a run to steer before it starts one (a run can end, and another begin, in between). */
+const MESSAGE_RUN_ATTEMPTS = 3
 /** Follow-ups sent to a run that ended without a report before it is withheld (ADR-105 §3). */
 const MAX_HAND_BACK_NUDGES = 3
 /** How often a running opencode target turn checks the parent's live mode. */
@@ -960,12 +1033,38 @@ const FEED_READY_WAIT_MS = 10_000
  * dispatch tool back (ADR-033 §4), and it asks no questions — a headless
  * target has nobody to answer them (both hidden: whole-category denies).
  */
-const TARGET_ONLY_RULES: readonly V2Rule[] = [
-  { action: 'claudeui_dispatch_agent', resource: '*', effect: 'deny' },
-  // The session tools are for the root agent of an interactive session only (slice 2).
-  SESSION_TOOLS_DENY_RULE,
-  { action: 'question', resource: '*', effect: 'deny' }
-]
+const TARGET_DISPATCH_DENY: V2Rule = {
+  action: 'claudeui_dispatch_agent',
+  resource: '*',
+  effect: 'deny'
+}
+const TARGET_QUESTION_DENY: V2Rule = { action: 'question', resource: '*', effect: 'deny' }
+
+/** `claudeui_session_message`, the one session tool a dispatch target has (ADR-105 §4). */
+const SESSION_MESSAGE_RULE_ACTION = `${CLAUDEUI_MCP_SERVER}_${X_AGENT_MESSAGE_TOOL}`
+
+/**
+ * What a target's ruleset says of the session tools. They are for the root agent of an interactive
+ * session (slice 2), so a target that has none gets the whole family denied. One that has
+ * `session_message` (ADR-105 §4) gets the other eight denied by name (hidden from the model, and the
+ * service refuses them anyway) and that one allowed, so a message to its dispatcher needs no card, as
+ * its `hand_back` needs none, outside a judged auto mode. In one, no allow is written: the family's
+ * ask rule then makes opencode ask, and the ask goes to ClaudeUI's judge like any other action of the
+ * target (`judgeOpencodeTargetAsk`; a block refuses the send).
+ */
+function targetSessionToolRules(canMessage: boolean, judgedAuto: boolean): V2Rule[] {
+  if (!canMessage) return [SESSION_TOOLS_DENY_RULE]
+  return [
+    ...SESSION_TOOL_NAMES.filter((name) => name !== X_AGENT_MESSAGE_TOOL).map((name): V2Rule => ({
+      action: `${CLAUDEUI_MCP_SERVER}_${name}`,
+      resource: '*',
+      effect: 'deny'
+    })),
+    ...(judgedAuto
+      ? []
+      : [{ action: SESSION_MESSAGE_RULE_ACTION, resource: '*', effect: 'allow' } as V2Rule])
+  ]
+}
 /** A target's form (should one still come — `question` is hidden): cancelled WITH a message. */
 const TARGET_FORM_CANCEL_MESSAGE =
   'No user can answer questions in a dispatched agent — continue without asking, and state any assumption you make.'
@@ -1024,6 +1123,12 @@ interface TargetLedgerFields {
    * in its last message, flagged as such.
    */
   handBack: boolean
+  /**
+   * The target was offered `session_message` to the session that dispatched it (ADR-105 §4): the session
+   * tools were on when it was created. The ledger does not record it, so a Codex thread resumed from its
+   * row is taken to have it when they are on now (a thread from before B-4 has no such tool to call).
+   */
+  canMessage: boolean
 }
 
 /** What a target's ruleset is built from — cached per target (a failed read is not cached). */
@@ -1550,6 +1655,30 @@ interface CodexTargetEntry extends TargetLedgerFields {
   turnStartedAtMs: number
 }
 
+/**
+ * A message accepted as a steer into a running turn (ADR-105 §4). The engine's acceptance is not an
+ * answer: the model may be writing its `hand_back` call, after which the turn is ended and the
+ * message was never read (or was read and never answered). The record tracks it from the wire until
+ * the run's report is accepted (or the run ends), when it is decided: `consumed` (the engine took it
+ * into the turn BEFORE the report call, so the model wrote its report with it in view) is answered;
+ * anything else is unanswered, taken back from the engine where it can be, and sent again as the
+ * next run's input (`requeueSteers`).
+ */
+interface SteerRecord {
+  /** The engine's id for it: Claude's frame uuid, pi's `deliveryId`, opencode's inbox id, Codex's `clientUserMessageId`. */
+  token: string
+  ledgerId: string
+  run: DispatchRun
+  /** The message as the X-Agent was sent it (already framed). */
+  framed: string
+  from: { routingId: string; title: string }
+  /** The engine reported it taken into the turn. */
+  consumed: boolean
+  fate: 'pending' | 'answered' | 'unanswered' | 'requeued' | 'dropped'
+  /** When its run ended with it unanswered (it is sent again, or dropped): a turn it starts afterwards is a stray one. */
+  endedAt?: number
+}
+
 /** What a Codex dispatch turn settles with — see `CodexTargetEntry.settled`. */
 type CodexTurnOutcome =
   { kind: 'ok'; text: string; durationMs: number } | { kind: 'error'; message: string }
@@ -1682,7 +1811,8 @@ function recordTargetBlock(
     engine: 'pi' | 'opencode'
     label: string
     cwd: string
-    sessionId: string | null
+    /** The X-Agent's ledger ref: what `session_message` addresses it by. */
+    xAgentRef: string
     held: boolean
     deliver?: (call: BlockedCall) => string | null
   }
@@ -1702,7 +1832,7 @@ function recordTargetBlock(
         target.engine === 'opencode'
       ),
       agentLabel: target.label,
-      ...(target.sessionId ? { dispatchSessionId: target.sessionId } : {}),
+      xAgentRef: target.xAgentRef,
       ...(target.deliver ? { deliver: target.deliver } : {})
     },
     target.held
@@ -2239,6 +2369,8 @@ function dispatchTaskStartedRecord(
     toolUseId: run.toolUseId,
     taskId: ledgerId,
     taskType: 'dispatch',
+    // A run a message started is run n of the card the X-Agent was launched from (ADR-073's resume).
+    ...runIndexField(run),
     ...(run.init.description ? { description: run.init.description } : {}),
     isBackgrounded: run.background,
     // A blocking run's end is its tool_result; a background run's end is a `dispatch-result`
@@ -2248,6 +2380,12 @@ function dispatchTaskStartedRecord(
     wakesParent: true,
     startedAt: run.init.startedAt
   }
+}
+
+/** `runIndex` on the card's records for run 2 and later; the first run carries none. */
+function runIndexField(run: DispatchRun): { runIndex?: number } {
+  const index = run.init.runIndex
+  return index !== undefined && index > 1 ? { runIndex: index } : {}
 }
 
 function emitDispatchTaskStarted(ctx: RunContext, ledgerId: string): void {
@@ -2282,6 +2420,7 @@ function emitDispatchNotification(
   ctx.emit('session:task-notification', {
     taskId: ctx.run.ledgerId ?? targetSessionId,
     toolUseId: ctx.toolUseId,
+    ...runIndexField(ctx.run),
     status,
     outputFile: '',
     // A report is the card's body (S6's `HandbackReport`): whole, for a blocking run too.
@@ -2401,14 +2540,19 @@ function buildClaudeDispatchMessage(
 }
 
 /**
- * Is the Claude target's `hand_back` in the process's `allowedTools`? Only in the modes where
- * cli.js would deny it unasked: `dontAsk` turns every ask into a denial and `bypassPermissions`
- * needs no ask. In every other mode `canUseTool` allows it, and an allow rule would skip the
- * auto-mode classifier for a target that is, or later is switched, into auto (B-3c).
+ * Are the Claude target's own tools (`hand_back`, `session_message`) in the process's
+ * `allowedTools`? Only in the modes where cli.js would deny them unasked: `dontAsk` turns every ask
+ * into a denial and `bypassPermissions` needs no ask. In every other mode `canUseTool` allows them
+ * (in auto only the report; a message there is reviewed like any other action), and an allow rule
+ * would skip the auto-mode classifier for a target that is, or later is switched, into auto (B-3c,
+ * B-4). One function for both tools, so they cannot disagree.
  */
-function claudeHandBackPreAllowed(mode: PermissionMode): boolean {
+function claudeOwnToolsPreAllowed(mode: PermissionMode): boolean {
   return mode === 'dontAsk' || mode === 'bypassPermissions'
 }
+
+/** The Claude target's `session_message`, as cli.js names it: `mcp__claude-ui-sessions__session_message`. */
+const CLAUDE_SESSION_MESSAGE_TOOL = `${SESSION_TOOLS_PREFIX}${X_AGENT_MESSAGE_TOOL}`
 
 /**
  * Map the dispatching session's inherited autonomy (a Claude-style
@@ -2516,11 +2660,11 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
  *    is impossible at the wire level, not just by policy (mirrors ADR-033
  *    §4's "dispatcher-created targets never get the collab server"). Belt-
  *    and-suspenders even if a hosted tool were somehow still registered: the
- *    target's `PiBridgeHost` is constructed with ONLY `opts.gateHandler` (no
- *    `hostedToolHandler`), so any `/hosted-tool` execute against this target
- *    fails closed with an isError result — never actually runs anything (see
- *    `PiBridgeHost.processHostedToolBody`'s own documented no-handler
- *    fail-closed default). The approval gate (the extension's `tool_call`
+ *    target's `PiBridgeHost` has a `hostedToolHandler` for its two tools only
+ *    (`hand_back`, ADR-105 §3, and `session_message` to its dispatcher, §4 — both
+ *    registered under their own gates), so a `/hosted-tool` execute of any other
+ *    tool fails closed with an isError result — never actually runs anything. The
+ *    approval gate (the extension's `tool_call`
  *    hook) still activates normally — it depends ONLY on
  *    `CLAUDEUI_PI_BRIDGE_URL`/`TOKEN`, independent of the hosted-tools gate
  *    (verified against pi-bridge-source.ts's own independence design).
@@ -2550,7 +2694,8 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
  */
 export function buildPiTargetChildEnv(
   bridge: { url: string; token: string },
-  handBack = false
+  handBack = false,
+  messaging = false
 ): NodeJS.ProcessEnv {
   return {
     CLAUDEUI_PI_BRIDGE_URL: bridge.url,
@@ -2558,8 +2703,10 @@ export function buildPiTargetChildEnv(
     CLAUDEUI_PI_HOSTED_TOOLS: '',
     CLAUDEUI_PI_DISPATCH_ENABLED: '',
     CLAUDEUI_PI_DISPATCH_DESCRIPTION: '',
-    // The session tools are for a session's root agent, never a dispatch target (slice 2).
-    CLAUDEUI_PI_SESSION_TOOLS: '',
+    // The session tools are for a session's root agent (slice 2); a target gets the one tool that
+    // reaches its dispatcher (ADR-105 §4), as a one-element array: the bridge registers exactly
+    // what the array holds, so there is no gate of its own.
+    CLAUDEUI_PI_SESSION_TOOLS: messaging ? xAgentSessionToolsEnv() : '',
     CLAUDEUI_PI_SKILL_DIRS: '',
     // ADR-089: a dispatch target never gets the host-run `agent` or
     // `send_message` tools (same leak argument as the three above).
@@ -2583,13 +2730,14 @@ export function buildPiTargetChildEnv(
 function piTargetSpawnFlags(
   sessionDir: string,
   sessionId: string,
-  handBack: boolean
+  handBack: boolean,
+  messaging: boolean
 ): Pick<PiTargetSpawnOpts, 'args' | 'env'> {
   return {
     // Persisted and hidden (ADR-105, the ADR-089 sub-agent precedent): the same two
     // flags create the session and resume it (pi opens the file when it exists).
     args: ['--session-dir', sessionDir, '--session-id', sessionId],
-    env: (bridge) => buildPiTargetChildEnv(bridge, handBack)
+    env: (bridge) => buildPiTargetChildEnv(bridge, handBack, messaging)
   }
 }
 
@@ -2619,6 +2767,8 @@ export class CrossEngineDispatcher {
   private readonly handBackSettleMs: number
   private readonly ownWorkWaitMs: number
   private readonly handBackReviewMs: number
+  private readonly messageRunEndWaitMs: number
+  private readonly messageStartWaitMs: number
 
   /**
    * Monotonic per-dispatcher counter, one tick per ledger row — the tiebreak
@@ -2627,6 +2777,10 @@ export class CrossEngineDispatcher {
    */
   private ledgerSeq = 0
 
+  /** The steers accepted into running turns and not yet forgotten (bounded; see {@link SteerRecord}). */
+  private readonly steers = new Map<string, SteerRecord>()
+  /** The messages to each X-Agent in flight, one after another (see {@link messageXAgent}). */
+  private readonly messageChains = new Map<string, Promise<unknown>>()
   /** Keyed by target session id (opencode session id, or Claude session UUID). */
   private targets = new Map<string, TargetEntry>()
   /** opencode feed records, keyed by SERVER (`serverKey`), never by cwd. */
@@ -2692,6 +2846,8 @@ export class CrossEngineDispatcher {
     this.handBackSettleMs = deps.handBackSettleMs ?? HAND_BACK_SETTLE_MS
     this.ownWorkWaitMs = deps.ownWorkWaitMs ?? OWN_WORK_WAIT_MS
     this.handBackReviewMs = deps.handBackReviewMs ?? HAND_BACK_REVIEW_MS
+    this.messageRunEndWaitMs = deps.messageRunEndWaitMs ?? MESSAGE_RUN_END_WAIT_MS
+    this.messageStartWaitMs = deps.messageStartWaitMs ?? MESSAGE_START_WAIT_MS
     this.parents = deps.parents
   }
 
@@ -3182,7 +3338,10 @@ export class CrossEngineDispatcher {
       if ('refused' in launch) return launch.refused
       const { run } = launch
       // The blocking form waits for the run — the contract every caller had before.
-      if (!run.background) return await run.done
+      if (!run.background) {
+        const done = await run.done
+        return run.ledgerId && !done.isError ? { ...done, agentRef: run.ledgerId } : done
+      }
       // A background launch returns as soon as the target's row exists and the run goes on
       // by itself. A run that ends first (a refusal, a target that would not start) is its
       // own answer: the call fails, nothing was launched.
@@ -3193,6 +3352,494 @@ export class CrossEngineDispatcher {
       logger.warn('CrossEngineDispatcher', `dispatch failed: ${msg}`)
       return errorResult(`Dispatch failed: ${msg}`, req.sessionId ?? '')
     }
+  }
+
+  // ── session_message to an X-Agent (ADR-105 §4) ─────────────────────────────
+
+  /**
+   * A message from the session that dispatched an X-Agent, once the tool service has decided that
+   * it may send it (ownership is the service's refusal, in every mode; this re-checks only that the
+   * row is the sender's). Never throws.
+   *
+   *  - A RUNNING X-Agent takes it as a steer into its running turn, on each engine's own path
+   *    (Claude: a frame pushed into its channel under a uuid of its own, which the turn accounting
+   *    ignores; pi: `/cui-deliver`, marked as agent text, appended, never woken; opencode: a steer
+   *    prompt; Codex: `turn/steer` on the live turn id).
+   *  - An idle, released, interrupted or ended-with-a-report one is resumed through the one run
+   *    engine: a new run of its harness session (`findContinuation`, the cost cap, the model
+   *    allowlist), in the background, with the message as its input, run n+1 of the card the X-Agent
+   *    was launched from. Its report goes to the parent like any other run's.
+   *  - A run that cannot take a steer any more (its report was taken, a Stop is pending, the engine
+   *    refused the steer) is waited out, bounded, and the message then starts a new run.
+   *
+   * Messages to one X-Agent are serialised, so two in a row see the run the first one started.
+   */
+  async messageXAgent(request: XAgentMessageRequest): Promise<XAgentMessageOutcome> {
+    const previous = this.messageChains.get(request.ledgerId) ?? Promise.resolve()
+    const work = previous.then(() => this.messageXAgentNow(request))
+    const tail = work.catch(() => undefined)
+    this.messageChains.set(request.ledgerId, tail)
+    void tail.then(() => {
+      if (this.messageChains.get(request.ledgerId) === tail)
+        this.messageChains.delete(request.ledgerId)
+    })
+    try {
+      return await work
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `message to X-Agent failed: ${errText(err)}`)
+      return { kind: 'refused', text: `Could not deliver the message: ${errText(err)}` }
+    }
+  }
+
+  private async messageXAgentNow(request: XAgentMessageRequest): Promise<XAgentMessageOutcome> {
+    const refuse = (text: string): XAgentMessageOutcome => ({ kind: 'refused', text })
+    const read = (): DispatchTargetRow | undefined => {
+      try {
+        return this.ledger.get(request.ledgerId)
+      } catch (err) {
+        logger.warn('CrossEngineDispatcher', `dispatch ledger lookup failed: ${errText(err)}`)
+        return undefined
+      }
+    }
+    let row = read()
+    if (!row) return refuse(`There is no X-Agent ${request.ledgerId}.`)
+    if (this.runs.parentOf(row.parentSessionId) !== this.runs.parentOf(request.from.routingId))
+      return refuse('That X-Agent belongs to another session; you can message only your own.')
+    const framed = xAgentMessageFrame(request.from.title, request.text)
+    const ctx = this.contextForRow(row)
+    const stopped = (r: DispatchTargetRow): string =>
+      `X-Agent ${r.name ?? r.id} was stopped; it cannot be messaged.`
+    const delivered = (
+      r: DispatchTargetRow,
+      outcome: XAgentMessageOutcome
+    ): XAgentMessageOutcome => {
+      this.noteXAgentInput(ctx, r, request.from.title, request.text)
+      return outcome
+    }
+    for (let attempt = 0; attempt < MESSAGE_RUN_ATTEMPTS; attempt++) {
+      row = read()
+      if (!row) return refuse(`There is no X-Agent ${request.ledgerId}.`)
+      if (row.state === 'stopped') return refuse(stopped(row))
+      const run = this.runs.byLedgerId(row.id)
+      if (!run) break
+      const steered = await this.steerWhenReady(row, run, framed, request.from)
+      if (steered === 'steered') return delivered(row, { kind: 'steered' })
+      if (steered === 'not-ready') {
+        return refuse(
+          `X-Agent ${row.name ?? row.id} is starting up; send the message again in a moment.`
+        )
+      }
+      // Its run is over or ending (or the engine refused the steer): the message starts the next
+      // run, once this one has settled.
+      if ((await settledWithin(run.done, this.messageRunEndWaitMs)) === undefined) {
+        return refuse(
+          `X-Agent ${row.name ?? row.id} is still finishing its run; send the message again in a moment.`
+        )
+      }
+    }
+    row = read()
+    if (!row) return refuse(`There is no X-Agent ${request.ledgerId}.`)
+    if (row.state === 'stopped') return refuse(stopped(row))
+    if (this.runs.byLedgerId(row.id))
+      return refuse(`X-Agent ${row.name ?? row.id} is busy; send the message again in a moment.`)
+    const outcome = await this.launchMessageRun(row, framed, ctx)
+    return outcome.kind === 'refused' ? outcome : delivered(row, outcome)
+  }
+
+  /**
+   * Start the X-Agent's next run on a message (its harness session resumed, in the background, run
+   * n+1 of the origin card). Refused with the launch's own reason (cap, cost, allowlist, a resume the
+   * harness cannot do).
+   */
+  private async launchMessageRun(
+    row: DispatchTargetRow,
+    framed: string,
+    ctx: DispatchContext
+  ): Promise<XAgentMessageOutcome> {
+    const description = row.description ?? row.name
+    const launch = this.launchRun(
+      {
+        engine: row.engine,
+        prompt: xAgentNewRunPrompt(framed),
+        sessionId: row.harnessRef,
+        runInBackground: true,
+        ...(description ? { description } : {}),
+        message: { runIndex: this.runsOf(row.id) + 1 }
+      },
+      ctx
+    )
+    if ('refused' in launch) return { kind: 'refused', text: launch.refused.text }
+    // The launch answers once the run is bound to the X-Agent (a refusal of the resume itself ends
+    // the run first and is the answer).
+    await Promise.race([launch.run.launched, launch.run.done])
+    if (launch.run.bound) return { kind: 'started' }
+    return { kind: 'refused', text: (await launch.run.done).text }
+  }
+
+  /** How many runs of this X-Agent ended with a stored outcome: the next run is the one after. */
+  private runsOf(ledgerId: string): number {
+    try {
+      return this.reports.count(ledgerId)
+    } catch {
+      return 0
+    }
+  }
+
+  /**
+   * The dispatching context of a run a message starts, from the X-Agent's row alone: there is no
+   * tool call. With a live-parent lookup wired (`makeRunContext` replaces these accessors by reads
+   * of whatever session answers to the parent now) they are only the fallback of a unit double.
+   */
+  private contextForRow(row: DispatchTargetRow): DispatchContext {
+    const parentId = (): string => this.runs.parentOf(row.parentSessionId)
+    const live = (): LiveParentSession | undefined => this.parents?.session(parentId())
+    return {
+      fromEngine: row.parentEngine,
+      fromRoutingId: row.parentSessionId,
+      cwd: row.cwd,
+      getAutonomyMode: () => live()?.getAutonomyMode?.() ?? row.launchMode,
+      getMessages: () => live()?.getMessages() ?? [],
+      emit: (channel, data) => this.parents?.emit(parentId(), channel, data),
+      addDispatchedCost: (engineId, modelId, costUsd) =>
+        live()?.addDispatchedCost?.(engineId, modelId, costUsd),
+      ...(row.parentToolUseId ? { toolUseId: row.parentToolUseId } : {}),
+      chatgptAccountId: row.codexAccountId
+    }
+  }
+
+  /** The message as the X-Agent's card shows it: a framed input row in the child stream (no one typed it there). */
+  private noteXAgentInput(
+    ctx: DispatchContext,
+    row: DispatchTargetRow,
+    fromTitle: string,
+    text: string
+  ): void {
+    const toolUseId = row.parentToolUseId
+    if (!toolUseId) return
+    try {
+      ctx.emit('session:subagent-message', {
+        toolUseId,
+        message: agentNoteMessage({
+          id: `xagent-input-${uuidv4()}`,
+          title: xAgentInputNoteTitle(fromTitle),
+          text,
+          timestamp: this.now(),
+          label: X_AGENT_INPUT_FRAGMENT_LABEL
+        })
+      })
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `could not show a message on the card: ${errText(err)}`)
+    }
+  }
+
+  /**
+   * Steer a message into the X-Agent's running turn, waiting (bounded) for one that is starting up:
+   * a run whose process is not live yet, or that is between two turns of its own nudges, has nothing
+   * to steer into for a moment. `ending`: the run can take no steer (its report was taken, a Stop is
+   * pending, the engine refused it) and the message starts the next run once this one has ended.
+   * `not-ready`: it did not become live in time.
+   */
+  private async steerWhenReady(
+    row: DispatchTargetRow,
+    run: DispatchRun,
+    framed: string,
+    from: { routingId: string; title: string }
+  ): Promise<'steered' | 'ending' | 'not-ready'> {
+    const deadline = this.now() + this.messageStartWaitMs
+    for (;;) {
+      // The run it waited on ended meanwhile (a launch that failed, a run that finished): there is
+      // nothing to start up, the caller starts or refuses the next run with the real reason.
+      if (this.runs.byLedgerId(row.id) !== run) return 'ending'
+      const outcome = await this.steerXAgent(row, run, framed, from)
+      if (outcome !== 'not-ready') return outcome
+      if (this.now() >= deadline) return 'not-ready'
+      await new Promise<void>((resolve) => setTimeout(resolve, MESSAGE_START_POLL_MS))
+    }
+  }
+
+  /** Can this run no longer take a message into its turn? (Its report was taken, a Stop or an abandoned call is pending.) */
+  private runIsEnding(run: DispatchRun): boolean {
+    return (
+      !!run.report ||
+      run.steersSettled ||
+      run.endRequested ||
+      run.stopController.signal.aborted ||
+      run.cancelController.signal.aborted
+    )
+  }
+
+  /**
+   * Put a message into the turn an X-Agent is running, if it has one that can take it now. The
+   * steer is recorded first (the engine's signals can beat its own acknowledgement), and dropped
+   * again when the engine refuses it. See {@link SteerRecord} for how it is decided.
+   */
+  private async steerXAgent(
+    row: DispatchTargetRow,
+    run: DispatchRun,
+    framed: string,
+    from: { routingId: string; title: string }
+  ): Promise<'steered' | 'not-ready' | 'ending'> {
+    if (this.runIsEnding(run)) return 'ending'
+    const entry = this.liveEntry(row.id)?.entry
+    if (!entry || entry.released || !entry.busy || entry.ctx.run !== run) return 'not-ready'
+    const token = uuidv4()
+    const record: SteerRecord = {
+      token,
+      ledgerId: row.id,
+      run,
+      framed,
+      from,
+      consumed: false,
+      fate: 'pending'
+    }
+    this.rememberSteer(record)
+    const refused = (): 'ending' => {
+      this.steers.delete(token)
+      return 'ending'
+    }
+    switch (entry.kind) {
+      case 'claude':
+        // A frame of its own uuid, kept out of `pushedUuids`: cli.js folds it into the running turn
+        // at a tool boundary or runs it as a turn of its own, and neither is the run's turn, so the
+        // turn accounting (`ownTurnStarted`, which a pushed uuid's `started` sets) must not see it.
+        entry.channel.push(buildClaudeDispatchMessage(framed, entry.sessionId, false, token))
+        return 'steered'
+      case 'pi': {
+        // `/cui-deliver`: pi marks the text as an agent's, never a plain prompt. Appended without a
+        // wake (`triggerTurn: false`): pi defers it to the end of the current step
+        // (agent-session.ts `sendCustomMessage`, "Defer to the end of the turn"), so it reaches the
+        // model only if the loop goes on, and it starts no turn of its own.
+        // Quiet: the card's one row for it is the dispatcher's own (`noteXAgentInput`), not pi's echo
+        // of the framed text.
+        const accepted = await entry.runner.deliver(
+          {
+            v: 1,
+            deliveryId: token,
+            kind: 'agent-message',
+            text: framed,
+            wake: false,
+            title: xAgentInputNoteTitle(from.title),
+            details: {
+              agentId: entry.sessionId ?? '',
+              toolUseId: row.parentToolUseId ?? '',
+              from: from.title,
+              fromId: from.routingId
+            }
+          },
+          { quiet: true }
+        )
+        // A delivery pi refused (or a dead transport) is lost: not reported as steered.
+        return accepted ? 'steered' : refused()
+      }
+      case 'opencode':
+        try {
+          await entry.client.prompt(entry.sessionId, { id: token, text: framed, delivery: 'steer' })
+          return 'steered'
+        } catch (err) {
+          logger.info('CrossEngineDispatcher', `opencode steer refused: ${errText(err)}`)
+          return refused()
+        }
+      case 'codex': {
+        // `turn/steer` names the turn it expects; one that has not announced its id yet is waited for.
+        const turnId = entry.turnId ?? (await this.withinCodexGrace(entry.turnStarted)) ?? null
+        if (!turnId || !entry.sessionId || entry.draining || entry.endedTurns.has(turnId)) {
+          this.steers.delete(token)
+          return 'not-ready'
+        }
+        try {
+          await entry.connection.request('turn/steer', {
+            threadId: entry.sessionId,
+            expectedTurnId: turnId,
+            clientUserMessageId: token,
+            input: codexTurnInput(framed)
+          })
+          return 'steered'
+        } catch (err) {
+          logger.info('CrossEngineDispatcher', `codex steer refused: ${errText(err)}`)
+          return refused()
+        }
+      }
+    }
+  }
+
+  // ── steers: answered, or sent again (ADR-105 §4) ───────────────────────────
+
+  /** Forget the records whose run ended longer ago than the stray window: nothing can start a turn on them now. */
+  private sweepSteers(): void {
+    for (const [token, record] of this.steers)
+      if (record.endedAt !== undefined && this.now() - record.endedAt >= STRAY_STEER_WINDOW_MS)
+        this.steers.delete(token)
+  }
+
+  private rememberSteer(record: SteerRecord): void {
+    this.sweepSteers()
+    this.steers.set(record.token, record)
+    if (this.steers.size <= MAX_STEER_RECORDS) return
+    for (const [token, old] of this.steers) {
+      if (old.fate === 'answered' || old.fate === 'requeued') this.steers.delete(token)
+      if (this.steers.size <= MAX_STEER_RECORDS) return
+    }
+  }
+
+  /** The engine took a steer into the turn it was sent to (its own signal, by the id we gave it). */
+  private noteSteerConsumed(token: string): void {
+    const record = this.steers.get(token)
+    if (record) record.consumed = true
+  }
+
+  /**
+   * Is this a message the X-Agent was sent for a run that is over, and that its engine may still
+   * start a turn on? (Recent enough: an idle X-Agent's later, legitimate wake-up is not a stray.)
+   */
+  private isStraySteer(record: SteerRecord): boolean {
+    return (
+      (record.fate === 'unanswered' || record.fate === 'requeued' || record.fate === 'dropped') &&
+      record.endedAt !== undefined &&
+      this.now() - record.endedAt < STRAY_STEER_WINDOW_MS
+    )
+  }
+
+  /** A turn that starts with NO run in flight, while the X-Agent holds such a message, is a stray one. */
+  private hasStraySteers(ledgerId: string): boolean {
+    if (this.runs.byLedgerId(ledgerId)) return false
+    for (const record of this.steers.values())
+      if (record.ledgerId === ledgerId && this.isStraySteer(record)) return true
+    return false
+  }
+
+  /**
+   * What cli.js says of a frame we sent as a steer (wire order, off the stream's reader): `started`
+   * is it taken into a turn. One taken into a turn after its run was over, with nothing running, is
+   * a turn nobody observes: it is ended at once and the message is sent again as a run.
+   */
+  private noteSteerFrame(entry: ClaudeTargetEntry, frame: Record<string, unknown>): void {
+    if (frame.type !== 'command_lifecycle' || typeof frame.command_uuid !== 'string') return
+    const record = this.steers.get(frame.command_uuid)
+    if (!record || frame.state !== 'started') return
+    record.consumed = true
+    if (this.isStraySteer(record) && !this.runs.byLedgerId(entry.ledgerId)) {
+      logger.info(
+        'CrossEngineDispatcher',
+        'claude target: stray turn on a sent-again message ended'
+      )
+      void entry.query.interrupt().catch(() => {})
+    }
+  }
+
+  /**
+   * Decide the pending steers of a run whose report was just accepted (or whose turn ended without
+   * one): the engine took it into the turn first → ANSWERED (the model had it in view when it wrote
+   * the report); otherwise → unanswered, and, at the report, taken back from the engine so the turn
+   * the report ends does not fold it in or run it afterwards. pi's deferred copy cannot be taken back
+   * (it is context only); Codex clears it on the interrupt that follows the report.
+   */
+  private settleSteers(run: DispatchRun, entry: TargetEntry | undefined, takeBack: boolean): void {
+    for (const record of this.steers.values()) {
+      if (record.run !== run || record.fate !== 'pending') continue
+      const consumed =
+        record.consumed ||
+        (entry?.kind === 'pi' && entry.runner.arrivedDeliveries.has(record.token))
+      if (consumed) {
+        record.fate = 'answered'
+        continue
+      }
+      record.fate = 'unanswered'
+      if (takeBack && entry) this.takeBackSteer(entry, record)
+    }
+  }
+
+  private takeBackSteer(entry: TargetEntry, record: SteerRecord): void {
+    try {
+      if (entry.kind === 'claude') void entry.query.cancelAsyncMessage(record.token).catch(() => {})
+      else if (entry.kind === 'opencode')
+        void entry.client.cancelInbox(entry.sessionId, record.token).catch(() => {})
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `could not take a message back: ${errText(err)}`)
+    }
+  }
+
+  /**
+   * The run's last turn is over (before its result is delivered): decide its pending steers, take back
+   * from the engine what it still holds and stamp when they ended, which arms the stray-turn backstop.
+   * Whether they are sent again is decided later, by {@link requeueSteers}.
+   */
+  private endRunSteers(run: DispatchRun): void {
+    run.steersSettled = true
+    try {
+      this.settleSteers(run, run.ledgerId ? this.liveEntry(run.ledgerId)?.entry : undefined, true)
+      for (const record of this.steers.values())
+        if (record.run === run && record.fate === 'unanswered' && record.endedAt === undefined)
+          record.endedAt = this.now()
+    } catch (err) {
+      logger.warn(
+        'CrossEngineDispatcher',
+        `could not settle the messages of a run: ${errText(err)}`
+      )
+    }
+  }
+
+  /**
+   * The run has settled: a message it never answered starts the X-Agent's next run, once, with the
+   * messages in the order they were sent. Not after a Stop, a deleted parent or a failed run (those
+   * end or break the X-Agent; the message would be sent into nothing). A launch that is refused says
+   * so to the parent, which is the only one who can resend.
+   */
+  private requeueSteers(run: DispatchRun): void {
+    try {
+      this.sweepSteers()
+      const mine = [...this.steers.values()].filter((record) => record.run === run)
+      const lost = mine.filter((record) => record.fate === 'unanswered')
+      const ledgerId = run.ledgerId
+      let row: DispatchTargetRow | undefined
+      try {
+        row = ledgerId ? this.ledger.get(ledgerId) : undefined
+      } catch {
+        row = undefined
+      }
+      // Nothing to send again after a Stop, a deleted parent, a failed run or a stopped X-Agent: the
+      // messages are dropped with their records (the run ended for a reason the message cannot fix).
+      const sendAgain =
+        lost.length > 0 &&
+        !!row &&
+        row.state !== 'stopped' &&
+        run.terminalStatus === 'completed' &&
+        !run.endRequested &&
+        !run.parentEnded &&
+        !run.stopController.signal.aborted
+      for (const record of mine) {
+        if (record.fate === 'unanswered') {
+          // Sent again as a run, or dropped: either way the engine may still hold it for a moment.
+          record.fate = sendAgain ? 'requeued' : 'dropped'
+          record.endedAt ??= this.now()
+        } else this.steers.delete(record.token)
+      }
+      if (!sendAgain || !row) return
+      const framed = lost.map((record) => record.framed).join('\n\n')
+      const target = row
+      void this.launchMessageRun(target, framed, this.contextForRow(target)).then(
+        (outcome) => {
+          if (outcome.kind === 'refused') this.tellParentMessageLost(run, target, outcome.text)
+        },
+        (err: unknown) => this.tellParentMessageLost(run, target, errText(err))
+      )
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `could not send a message again: ${errText(err)}`)
+    }
+  }
+
+  /** The X-Agent could not take a message it was sent while it finished: the parent hears why (it can resend). */
+  private tellParentMessageLost(run: DispatchRun, row: DispatchTargetRow, reason: string): void {
+    const parents = this.parents
+    if (!parents?.deliver) return
+    const name = row.name ?? row.id
+    void parents
+      .deliver(this.runs.parentOf(run.init.parentId), {
+        from: { key: row.id, title: name },
+        text: messageNotTakenText(name, reason)
+      })
+      .catch((err: unknown) =>
+        logger.warn('CrossEngineDispatcher', `could not tell the parent: ${errText(err)}`)
+      )
   }
 
   /**
@@ -3241,7 +3888,7 @@ export class CrossEngineDispatcher {
           return {
             refused: errorResult(
               `Dispatch session "${req.sessionId}" was started without the calling subagent's restrictions — ` +
-                'start a fresh dispatch without session_id.',
+                'start a new X-Agent with dispatch_agent.',
               req.sessionId
             )
           }
@@ -3252,7 +3899,7 @@ export class CrossEngineDispatcher {
     const background = req.runInBackground === true
     // A run is shown, stopped and reported through its launching tool call's card: with no
     // call id there is no card, no record and nowhere for its result to go.
-    if (background && !ctx.toolUseId) {
+    if (background && !ctx.toolUseId && !req.message) {
       return {
         refused: errorResult(
           'A background dispatch needs the id of the tool call that launches it, and this call ' +
@@ -3289,6 +3936,14 @@ export class CrossEngineDispatcher {
     // A new X-Agent's name is unique among its parent's children that are not stopped
     // (ADR-105 §1); an absent name is never checked.
     const name = req.sessionId ? null : labelOf(req.name)
+    if (name && isReservedXAgentName(name)) {
+      return {
+        refused: errorResult(
+          `The name "${name}" is reserved: main, origin, parent, self and ids like s-k3m9qx address ` +
+            'sessions, so an X-Agent cannot carry them. Choose a different name.'
+        )
+      }
+    }
     if (name) {
       const held = this.nameHeldBy(ctx.fromRoutingId, name)
       if (held) {
@@ -3336,11 +3991,14 @@ export class CrossEngineDispatcher {
       description: labelOf(req.description) ?? name ?? undefined,
       continuation: !!req.sessionId,
       launchMode: liveMode(ctx),
-      startedAt: this.now()
+      startedAt: this.now(),
+      ...(req.message ? { runIndex: req.message.runIndex } : {})
     })
     run.handBackRequired = this.requireHandBack
     this.runs.add(run)
-    if (ctx.toolUseId) {
+    // A run a message starts reuses the origin card's id: a Stop armed on that card while nothing
+    // was registered is not meant for it (the user stops a running X-Agent from its card).
+    if (ctx.toolUseId && !req.message) {
       // Consume a durable stop-intent armed BEFORE this dispatch was invoked
       // (the renderer's Stop can be clicked before the MCP tools/call even
       // reaches us — see the pendingStops field doc). Consumed regardless of
@@ -3456,6 +4114,11 @@ export class CrossEngineDispatcher {
         logger.warn('CrossEngineDispatcher', `dispatch run failed: ${msg}`)
         result = errorResult(`Dispatch failed: ${msg}`, req.sessionId ?? '')
       }
+      // The run's turns are over: what the X-Agent was sent and had not read is decided NOW, before the
+      // result is delivered to the parent (which can take a while), so a turn the engine starts
+      // meanwhile on such a message is a stray one, ended by the backstop, and nothing it consumes
+      // after this point is counted as read.
+      this.endRunSteers(run)
       try {
         this.closeRun(ctx, result)
       } catch (err) {
@@ -3483,6 +4146,8 @@ export class CrossEngineDispatcher {
       }
       // Before the idle timer is armed again: a delivery that wakes the parent restarts it.
       await this.deliverRunResult(run)
+      // Messages the run never answered start its next run (before the idle timer is re-armed).
+      this.requeueSteers(run)
       this.rearmParentIdle(run)
     }
     return result
@@ -3528,14 +4193,16 @@ export class CrossEngineDispatcher {
     const label = row?.name ?? run.init.name ?? ledgerId
     const head =
       `X-Agent ${label} launched on ${req.engine}${row ? ` · ${row.model}` : ''} ` +
-      `(id ${ledgerId}, session_id ${harnessId}). ${LAUNCH_ACK_MARKER}`
+      `(id ${ledgerId}). ${LAUNCH_ACK_MARKER}`
     return {
       text: req.fromSubagent
         ? // Delivered to the root agent's conversation, never back to a subagent.
           `${head}; its report is delivered to the top-level agent of this session, not to ` +
           'you, so you will not receive it. Finish your own work without it.'
         : `${head} and you can keep working: its report is not returned here, it arrives ` +
-          'later as a message from it (untrusted output, framed as such).',
+          'later as a message from it (untrusted output, framed as such). To talk to it meanwhile ' +
+          `or afterwards, message it with session_message (session: ${JSON.stringify(label)} or ` +
+          `"${ledgerId}").`,
       sessionId: harnessId
     }
   }
@@ -3993,6 +4660,9 @@ export class CrossEngineDispatcher {
       return { text: HAND_BACK_EMPTY_TEXT, isError: true }
     if (!run.acceptReport(capReport(report), callId))
       return { text: HAND_BACK_REPEAT_TEXT, isError: true }
+    // The report is in: a message the model had not read when it wrote it is taken back from the
+    // engine now, before this answer goes out, and sent again as the next run's input.
+    this.settleSteers(run, entry, true)
     // The review runs beside the turn's end (the bodies await it before the run's end is decided):
     // a Claude target's came with the call (Claude Code's own classifier blocked it), the others'
     // is the target's own judge, started now.
@@ -4142,6 +4812,72 @@ export class CrossEngineDispatcher {
   ): HandBackAnswer {
     const entry = this.targets.get(sessionId)
     return this.receiveHandBack(entry?.kind === 'opencode' ? entry : undefined, report, callId)
+  }
+
+  // ── session_message: an X-Agent talks to its dispatcher (ADR-105 §4) ───────────────────────
+
+  /**
+   * The permission mode an X-Agent runs under right now, which is its caller class for the session
+   * tools: a Claude target's process mode, a Codex thread's native-policy mode, the parent's live
+   * mode for pi and opencode (their gates read it live).
+   */
+  private targetMode(entry: TargetEntry): string {
+    if (entry.kind === 'claude') return entry.appliedPermissionMode
+    if (entry.kind === 'codex') return entry.autonomyMode
+    return liveMode(entry.ctx)
+  }
+
+  /**
+   * An X-Agent as the session tools' caller: its harness id is the routing id, its ledger id is the
+   * actor of every audit row, and the service lets it run `session_message` to its dispatcher only.
+   * A Claude target's calls carry the stream's owner map (a subagent of the target is refused); the
+   * other engines' hosted paths only ever reach this with the X-Agent's own calls.
+   */
+  private xAgentCaller(entry: TargetEntry, toolUseId?: string): SessionToolCaller {
+    return {
+      routingId: entry.sessionId ?? '',
+      engine: entry.kind,
+      cwd: entry.cwd,
+      permissionMode: this.targetMode(entry),
+      xAgent: { ledgerId: entry.ledgerId, refuse: () => this.xAgentMessageRefusal(entry) },
+      ...(toolUseId ? { toolUseId } : {}),
+      ...(entry.kind === 'claude'
+        ? { callOwner: (id: string | undefined) => entry.toolUseOwners.ownerOf(id) }
+        : {})
+    }
+  }
+
+  /** Why this X-Agent may not speak now: its run is over (the report was taken, or it was stopped). */
+  private xAgentMessageRefusal(entry: TargetEntry): string | null {
+    const run = entry.ctx.run
+    return this.runs.byLedgerId(entry.ledgerId) !== run || run.report
+      ? MESSAGE_RUN_ENDED_TEXT
+      : null
+  }
+
+  /** `session_message` from a pi or Codex target, answered as the engine's tool result. */
+  private async xAgentMessage(
+    entry: TargetEntry,
+    input: Record<string, unknown>,
+    toolUseId?: string
+  ): Promise<{ text: string; isError: boolean }> {
+    const result = await runSessionTool(
+      this.xAgentCaller(entry, toolUseId),
+      X_AGENT_MESSAGE_TOOL,
+      input
+    )
+    return { text: result.text, isError: result.isError === true }
+  }
+
+  /**
+   * The caller of `claudeui_session_message` for an opencode session that is a dispatch target's
+   * own (wired in `core-services.ts`, like `handBackFromOpencode`); undefined for anything else, so a
+   * subagent child of the target, an interactive chat or an unknown id is not an X-Agent.
+   */
+  xAgentCallerFromOpencode(sessionId: string): SessionToolCaller | undefined {
+    const entry = this.targets.get(sessionId)
+    if (entry?.kind !== 'opencode' || !entry.canMessage) return undefined
+    return this.xAgentCaller(entry)
   }
 
   /**
@@ -4329,7 +5065,7 @@ export class CrossEngineDispatcher {
       if (!cont) {
         return errorResult(
           `Unknown dispatch session "${req.sessionId}" — it may have been disposed. ` +
-            'Start a fresh dispatch without session_id.'
+            'Start a new X-Agent with dispatch_agent.'
         )
       }
       // M-XE1: busy-reject BEFORE touching entry state — two concurrent
@@ -4742,7 +5478,8 @@ export class CrossEngineDispatcher {
         inputs,
         mode,
         judge.autoModeActive(mode),
-        ctx.callerRestriction
+        ctx.callerRestriction,
+        sessionToolsAvailable()
       )
       const { providerID, modelID } = parseModelString(model)
       // The title is load-bearing, not cosmetic: this is a real top-level
@@ -4793,6 +5530,7 @@ export class CrossEngineDispatcher {
         ledgerId,
         released: false,
         handBack: this.requireHandBack,
+        canMessage: sessionToolsAvailable(),
         fromRoutingId: ctx.fromRoutingId,
         conn,
         rec,
@@ -4997,14 +5735,15 @@ export class CrossEngineDispatcher {
    * The target's ruleset for `mode`: the interactive session's
    * `buildSessionRuleset` over the user's deny/ask rules ONLY (ADR-085 §3,
    * ADR-033: never their allow rules or additional directories), then
-   * {@link TARGET_ONLY_RULES} — no dispatch back (ADR-033 §4) and no questions
+   * the target-only rules (`TARGET_DISPATCH_DENY`, `targetSessionToolRules`, `TARGET_QUESTION_DENY`) — no dispatch back (ADR-033 §4) and no questions
    * (nobody to answer them). Whole-category denies go last (hidden tools).
    */
   private async buildTargetRuleset(
     inputs: TargetRuleInputs,
     mode: string,
     autoMode: boolean,
-    restriction: CallerRestriction | undefined
+    restriction: CallerRestriction | undefined,
+    canMessage: boolean
   ): Promise<{ rules: V2Rule[]; userRules: V2Rule[]; agent: string | undefined }> {
     const [mcpServers, worktree, agents, externalDirAllows] = await Promise.all([
       this.targetMcpServers(inputs),
@@ -5030,7 +5769,9 @@ export class CrossEngineDispatcher {
     return {
       rules: wireOrder([
         ...built.rules,
-        ...TARGET_ONLY_RULES,
+        TARGET_DISPATCH_DENY,
+        ...targetSessionToolRules(canMessage, autoMode),
+        TARGET_QUESTION_DENY,
         ...(this.requireHandBack ? [HAND_BACK_ALLOW_RULE] : [])
       ]),
       userRules: built.userRules,
@@ -5062,7 +5803,8 @@ export class CrossEngineDispatcher {
       entry,
       mode,
       entry.judge.autoModeActive(mode),
-      entry.ctx.callerRestriction
+      entry.ctx.callerRestriction,
+      entry.canMessage
     )
     entry.hostRules = asHostPrecheckRules(built.userRules)
     const key = JSON.stringify(built.rules)
@@ -5273,12 +6015,25 @@ export class CrossEngineDispatcher {
         // An execution starting while a give-up winds down is interrupted
         // again (nobody is waiting for it).
         if (entry.draining) void this.stopTargetTurn(entry)
+        // A turn nobody asked for, started by a message the X-Agent was sent for a run that is over:
+        // not observed, not recorded, so it is ended at once (the message is sent again as a run).
+        else if (this.hasStraySteers(entry.ledgerId)) {
+          logger.info(
+            'CrossEngineDispatcher',
+            `opencode target ${entry.sessionId}: stray turn ended`
+          )
+          void this.stopTargetTurn(entry)
+        }
         return
       case 'inbox':
-        if (o.change === 'delivered') this.markTurnDelivered(entry, o.inboxID)
+        if (o.change === 'delivered') {
+          this.markTurnDelivered(entry, o.inboxID)
+          this.noteSteerConsumed(o.inboxID)
+        }
         return
       case 'user-message':
         this.markTurnDelivered(entry, o.inboxID)
+        this.noteSteerConsumed(o.inboxID)
         return
       case 'item-open':
         if (!o.open.target.ownerToolUseId) this.openOpencodeTargetItem(entry, o.open)
@@ -5610,9 +6365,12 @@ export class CrossEngineDispatcher {
     const toolUseId = approval.toolUseId ?? id
     entry.judging.add(id)
     let outcome: Awaited<ReturnType<DispatchTargetJudge['judge']>>
+    // The X-Agent's message to its dispatcher is the target's own action, judged as the
+    // agent-authored message to the spawning agent it is (ADR-105 §4).
+    const isMessage = permission === SESSION_MESSAGE_RULE_ACTION && entry.canMessage
     try {
       outcome = await entry.judge.judge(
-        { toolUseId, toolName: permission, input },
+        { toolUseId, toolName: permission, input, ...(isMessage ? { agentMessage: true } : {}) },
         {
           currentMode: () => liveMode(entry.ctx),
           stillPending: () => entry.judging.has(id) && this.targets.get(entry.sessionId) === entry,
@@ -5638,7 +6396,7 @@ export class CrossEngineDispatcher {
           engine: 'opencode',
           label: entry.model,
           cwd: entry.cwd,
-          sessionId: entry.sessionId,
+          xAgentRef: entry.ledgerId,
           held: ms > 0
         })
         if (ms === 0) {
@@ -5751,7 +6509,7 @@ export class CrossEngineDispatcher {
       if (!cont) {
         return errorResult(
           `Unknown dispatch session "${req.sessionId}" — it may have been disposed. ` +
-            'Start a fresh dispatch without session_id.'
+            'Start a new X-Agent with dispatch_agent.'
         )
       }
       // Busy-reject BEFORE pushing a prompt or touching entry state (see the
@@ -5799,7 +6557,7 @@ export class CrossEngineDispatcher {
           this.ledgerSet(row.id, { state: 'failed' })
           return errorResult(
             `Dispatch session "${req.sessionId}" cannot be resumed — its transcript no longer exists. ` +
-              'Start a fresh dispatch without session_id.',
+              'Start a new X-Agent with dispatch_agent.',
             req.sessionId
           )
         }
@@ -5866,7 +6624,10 @@ export class CrossEngineDispatcher {
         // did is this turn's (`driveClaudeTurn`).
         const uuid = uuidv4()
         entry.pushedUuids.add(uuid)
-        entry.channel.push(buildClaudeDispatchMessage(prompt, entry.sessionId, !nudge, uuid))
+        // A message from the dispatching session is framed as one already (no delegation preamble).
+        entry.channel.push(
+          buildClaudeDispatchMessage(prompt, entry.sessionId, !nudge && !req.message, uuid)
+        )
       }
 
       // ── Run the turn ──────────────────────────────────────────────────────
@@ -6475,26 +7236,54 @@ export class CrossEngineDispatcher {
       // also skip the classifier in auto, which reviews the report (probed on cli.js 2.1.293 with
       // Haiku: an allowed call runs with no ask and no frame, a blocked one is a
       // `permission_denied` frame after the announcing assistant frame and before the tool_result).
-      ...(entry.handBack
+      // `session_message` (ADR-105 §4) rides a `claude-ui-sessions` server of its own with that one
+      // tool, so its name, label and the user's deny rules are a root session's. Under the same
+      // pre-allow rule as the report (see `claudeOwnToolsPreAllowed`); in the asking modes
+      // `awaitClaudeTargetApproval` allows it, and in auto cli.js's classifier reviews it as the
+      // X-Agent's own action (a block is cli.js's denial: the handler never runs).
+      ...(entry.handBack || entry.canMessage
         ? {
             mcpServers: {
-              [HAND_BACK_SERVER_NAME]: createHandBackServer(async (report, callId) => {
-                // cli.js hands a subagent the in-process MCP tools too: only the X-Agent's own
-                // call is its report (the owner comes from the stream, as for the session tools).
-                const owner = await entry.toolUseOwners.ownerOf(callId)
-                if (owner === 'subagent') return { text: HAND_BACK_SUBAGENT_TEXT, isError: true }
-                if (owner === 'unknown') return { text: HAND_BACK_UNATTRIBUTED_TEXT, isError: true }
-                const asked = callId === undefined ? undefined : entry.askedHandBacks.get(callId)
-                if (callId !== undefined) entry.askedHandBacks.delete(callId)
-                return this.receiveHandBack(entry, report, callId, asked)
-              })
+              ...(entry.handBack
+                ? {
+                    [HAND_BACK_SERVER_NAME]: createHandBackServer(async (report, callId) => {
+                      // cli.js hands a subagent the in-process MCP tools too: only the X-Agent's own
+                      // call is its report (the owner comes from the stream, as for the session tools).
+                      const owner = await entry.toolUseOwners.ownerOf(callId)
+                      if (owner === 'subagent')
+                        return { text: HAND_BACK_SUBAGENT_TEXT, isError: true }
+                      if (owner === 'unknown')
+                        return { text: HAND_BACK_UNATTRIBUTED_TEXT, isError: true }
+                      const asked =
+                        callId === undefined ? undefined : entry.askedHandBacks.get(callId)
+                      if (callId !== undefined) entry.askedHandBacks.delete(callId)
+                      return this.receiveHandBack(entry, report, callId, asked)
+                    })
+                  }
+                : {}),
+              ...(entry.canMessage
+                ? {
+                    [SESSION_TOOLS_SERVER_NAME]: createSessionToolsServer({
+                      xAgent: true,
+                      getCaller: () => this.xAgentCaller(entry)
+                    })
+                  }
+                : {})
             },
-            ...(claudeHandBackPreAllowed(mode.permissionMode)
-              ? { allowedTools: [CLAUDE_HAND_BACK_TOOL] }
+            ...(claudeOwnToolsPreAllowed(mode.permissionMode)
+              ? {
+                  allowedTools: [
+                    ...(entry.handBack ? [CLAUDE_HAND_BACK_TOOL] : []),
+                    ...(entry.canMessage ? [CLAUDE_SESSION_MESSAGE_TOOL] : [])
+                  ]
+                }
               : {})
           }
         : {}),
-      onInboundFrame: (frame) => entry.toolUseOwners.noteFrame(frame)
+      onInboundFrame: (frame) => {
+        entry.toolUseOwners.noteFrame(frame)
+        this.noteSteerFrame(entry, frame)
+      }
     })
     entry.iterator = entry.query[Symbol.asyncIterator]()
     entry.appliedPermissionMode = mode.permissionMode
@@ -6526,6 +7315,7 @@ export class CrossEngineDispatcher {
       ledgerId,
       released: false,
       handBack: this.requireHandBack,
+      canMessage: sessionToolsAvailable(),
       fromRoutingId: ctx.fromRoutingId,
       cwd,
       channel,
@@ -6725,6 +7515,13 @@ export class CrossEngineDispatcher {
         if (entry.askedHandBacks.size > 8)
           entry.askedHandBacks.delete(entry.askedHandBacks.keys().next().value as string)
       }
+      return { behavior: 'allow', updatedInput: input }
+    }
+    // The X-Agent's message to its dispatcher (ADR-105 §4): the service enforces who it may reach, so
+    // the asking modes need no card for it. In auto it is not allowed here: cli.js asks only when its
+    // classifier did not allow the call (a denial cap, no verdict), and that ask is the human's, like
+    // any other tool's (it is not stashed or waved through as the report is).
+    if (toolName === CLAUDE_SESSION_MESSAGE_TOOL && entry.canMessage && !wasAuto) {
       return { behavior: 'allow', updatedInput: input }
     }
     if (isShellToolName(toolName) && typeof input.command === 'string') {
@@ -7071,7 +7868,7 @@ export class CrossEngineDispatcher {
       if (!cont) {
         return errorResult(
           `Unknown dispatch session "${req.sessionId}" — it may have been disposed. ` +
-            'Start a fresh dispatch without session_id.'
+            'Start a new X-Agent with dispatch_agent.'
         )
       }
       // Busy-reject BEFORE touching entry state — same rationale as the
@@ -7103,7 +7900,7 @@ export class CrossEngineDispatcher {
           this.ledgerSet(cont.row.id, { state: 'failed' })
           return errorResult(
             `Dispatch session "${req.sessionId}" cannot be resumed — its pi session directory no longer exists. ` +
-              'Start a fresh dispatch without session_id.',
+              'Start a new X-Agent with dispatch_agent.',
             req.sessionId
           )
         }
@@ -7430,6 +8227,7 @@ export class CrossEngineDispatcher {
       ledgerId: row.id,
       released: false,
       handBack: this.requireHandBack,
+      canMessage: sessionToolsAvailable(),
       fromRoutingId: ctx.fromRoutingId,
       cwd,
       // Populated below, once the runner has started — the gate handler and
@@ -7489,26 +8287,37 @@ export class CrossEngineDispatcher {
         // spells Claude MCP rules in pi's form (`mcpRuleKey`).
         spawnOpts: {
           gateHandler,
-          // The one hosted tool a target has: `hand_back` (ADR-105 §3). Anything else fails
-          // closed in the host. `terminate` ends pi's turn right after the report.
-          ...(entry.handBack
+          // The hosted tools a target has: `hand_back` (ADR-105 §3), whose result carries pi's
+          // `terminate` (the turn ends right after the report), and `session_message` to its
+          // dispatcher (§4; the extension's gate has judged it first). Anything else fails closed.
+          ...(entry.handBack || entry.canMessage
             ? {
-                hostedToolHandler: async (payload) =>
-                  payload.toolName === HAND_BACK_TOOL
-                    ? this.piHandBackResult(entry, payload.input, payload.toolCallId)
-                    : {
-                        content: [
-                          {
-                            type: 'text' as const,
-                            text: `${payload.toolName} is not available here`
-                          }
-                        ],
-                        isError: true
-                      }
+                hostedToolHandler: async (payload) => {
+                  if (entry.handBack && payload.toolName === HAND_BACK_TOOL)
+                    return this.piHandBackResult(entry, payload.input, payload.toolCallId)
+                  if (entry.canMessage && payload.toolName === X_AGENT_MESSAGE_TOOL) {
+                    const sent = await this.xAgentMessage(entry, payload.input, payload.toolCallId)
+                    return {
+                      content: [{ type: 'text' as const, text: sent.text }],
+                      ...(sent.isError ? { isError: true } : {})
+                    }
+                  }
+                  return {
+                    content: [
+                      { type: 'text' as const, text: `${payload.toolName} is not available here` }
+                    ],
+                    isError: true
+                  }
+                }
               }
             : {}),
           mcpServers: collectClaudeMcpForPi(cwd).servers,
-          ...piTargetSpawnFlags(dispatchPiSessionDir(row.id), harnessId, entry.handBack)
+          ...piTargetSpawnFlags(
+            dispatchPiSessionDir(row.id),
+            harnessId,
+            entry.handBack,
+            entry.canMessage
+          )
         },
         ownerToolUseId: () => entry.ctx.toolUseId,
         emit: () => entry.ctx.emit,
@@ -7602,6 +8411,24 @@ export class CrossEngineDispatcher {
     if (entry.runner.draining) return { behavior: 'deny', reason: 'Dispatch stopped' }
     const mode = liveMode(entry.ctx)
     const auto = entry.judge.autoModeActive(mode)
+    // The X-Agent's message to its dispatcher (ADR-105 §4) is the X-Agent's own action. Outside a
+    // judged auto mode it needs no card (the service enforces who it may reach), as `hand_back`
+    // needs none; in one it goes through the ladder below and its judge like any other tool, as the
+    // agent-authored message to the spawning agent it is (a block refuses the send: nothing is
+    // delivered, and the denial counts toward the target's caps).
+    const isMessage = payload.toolName === X_AGENT_MESSAGE_TOOL && entry.canMessage
+    if (isMessage) {
+      // The user's deny rule for the tool (written for Claude's spelling of it) holds here as it
+      // does for the other engines' targets, whatever the mode.
+      const denied = sessionToolDenyRule(
+        X_AGENT_MESSAGE_TOOL,
+        payload.input,
+        this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction),
+        entry.cwd
+      )
+      if (denied) return { behavior: 'deny', reason: `Denied by permission rule: ${denied}` }
+      if (!auto) return { behavior: 'allow' }
+    }
     // `userDenyAsk` carries no allow tier, so PiSession's `withoutAllowRules`
     // step would be a no-op here — not called.
     const verdict = decideWithSource(payload.toolName, payload.input, {
@@ -7638,7 +8465,12 @@ export class CrossEngineDispatcher {
       return this.forwardPiTargetAsk(entry, payload)
     }
     const outcome = await entry.judge.judge(
-      { toolUseId: payload.toolCallId, toolName: payload.toolName, input: payload.input },
+      {
+        toolUseId: payload.toolCallId,
+        toolName: payload.toolName,
+        input: payload.input,
+        ...(isMessage ? { agentMessage: true } : {})
+      },
       {
         currentMode: () => liveMode(entry.ctx),
         stillPending: () =>
@@ -7668,7 +8500,7 @@ export class CrossEngineDispatcher {
             engine: 'pi',
             label: entry.model,
             cwd: entry.cwd,
-            sessionId: entry.sessionId,
+            xAgentRef: entry.ledgerId,
             held: ms > 0,
             deliver: (call) => this.deliverToPiTarget(entry, call)
           }
@@ -7825,7 +8657,7 @@ export class CrossEngineDispatcher {
       if (!cont) {
         return errorResult(
           `Unknown dispatch session "${req.sessionId}" — it may have been disposed. ` +
-            'Start a fresh dispatch without session_id.'
+            'Start a new X-Agent with dispatch_agent.'
         )
       }
       if ('live' in cont && cont.live.busy) {
@@ -8282,6 +9114,7 @@ export class CrossEngineDispatcher {
       released: false,
       // A thread keeps the tools it was started with: a resumed row has the tool only if it was started with it.
       handBack: this.requireHandBack && (resume ? resume.handBack : true),
+      canMessage: sessionToolsAvailable(),
       fromRoutingId: ctx.fromRoutingId,
       cwd,
       // Filled in below, once the attach resolves. The notification and gate
@@ -8406,9 +9239,17 @@ export class CrossEngineDispatcher {
         approvalsReviewer: policy.approvalsReviewer,
         allowProviderModelFallback: false,
         historyMode: 'paginated',
-        // The target's one tool (ADR-105 §3): the report that ends its run. A thread keeps
-        // the tools it is started with, so only threads started with this have it.
-        ...(entry.handBack ? { dynamicTools: [codexHandBackSpec()] } : {})
+        // The target's tools: the report that ends its run (ADR-105 §3) and `session_message` to its
+        // dispatcher (§4). A thread keeps the tools it is started with, so only threads started with
+        // them have them.
+        ...(entry.handBack || entry.canMessage
+          ? {
+              dynamicTools: [
+                ...(entry.handBack ? [codexHandBackSpec()] : []),
+                ...(entry.canMessage ? [codexXAgentMessageSpec()] : [])
+              ]
+            }
+          : {})
       })
       assertCodexProvider(response.modelProvider)
       if (response.model !== model) throw new Error('Codex silently changed the requested model')
@@ -8587,7 +9428,7 @@ export class CrossEngineDispatcher {
    * The target's single ambient notification callback.
    *
    * Notifications for ANY other thread id are dropped. A dispatch target is
-   * offered no `dispatch_agent` and no hosted tools, but Codex's collaboration
+   * offered no `dispatch_agent` and no hosted tools beyond its own two, but Codex's collaboration
    * tools are NATIVE, so a target can still spawn a child thread of its own;
    * its items would arrive here stamped with the CHILD's `threadId`. Rendering
    * a grandchild's transcript inside the caller's TaskCard has no home in the
@@ -8606,6 +9447,14 @@ export class CrossEngineDispatcher {
     entry.lastActivityAt = this.now()
     if (method === 'turn/started' && isRecord(value.turn) && typeof value.turn.id === 'string') {
       if (!entry.endedTurns.has(value.turn.id)) entry.turnId = value.turn.id
+      // A turn nobody asked for (no run in flight) after a message was sent for a run that is over:
+      // ended at once, the message is sent again as a run.
+      if (this.hasStraySteers(entry.ledgerId) && entry.sessionId) {
+        logger.info('CrossEngineDispatcher', `codex target ${entry.sessionId}: stray turn ended`)
+        void entry.connection
+          .request('turn/interrupt', { threadId: entry.sessionId, turnId: value.turn.id })
+          .catch(() => {})
+      }
       return
     }
     if (method === 'thread/tokenUsage/updated' && isRecord(value.tokenUsage)) {
@@ -8663,6 +9512,8 @@ export class CrossEngineDispatcher {
     authoritative = false
   ): void {
     if (!entry.sessionId) return
+    // A steer the thread took into the turn comes back as the user message that carries its id.
+    if (item.type === 'userMessage' && item.clientId) this.noteSteerConsumed(item.clientId)
     const id = codexItemId(entry.sessionId, turnId, item.id)
     const fingerprint = completed
       ? createHash('sha256').update(JSON.stringify(item)).digest('hex')
@@ -8911,7 +9762,76 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * `item/tool/call` on a Codex target: the only tool it was started with is `hand_back`.
+   * `item/tool/call` on a Codex target: it was started with `hand_back` and `session_message` (to its
+   * dispatcher), nothing else. Anything else keeps getting the `-32601` the host answered before the
+   * target had a tool.
+   */
+  private async toolCallFromCodex(
+    entry: CodexTargetEntry,
+    value: unknown,
+    context: { id: unknown; signal: AbortSignal }
+  ): Promise<unknown> {
+    if (isRecord(value) && value.tool === X_AGENT_MESSAGE_TOOL && entry.canMessage)
+      return this.messageFromCodex(entry, value, context)
+    return this.handBackFromCodex(entry, value, context)
+  }
+
+  /**
+   * A Codex target's `session_message`. Codex's own reviewer does not see dynamic-tool calls
+   * (`codex-rs/core/src/tools/handlers/dynamic.rs` asks no approval), so, while the thread runs `auto`,
+   * the target's own model judges the message through ClaudeUI's judge on its ChatGPT route BEFORE
+   * it is delivered (the report judge, framed as a message to the spawning agent): allow delivers,
+   * a block refuses the send with the reason, and a review that could not run refuses it too (fail
+   * closed: the report path, `hand_back`, is reviewed or noted). Outside auto it is delivered unasked.
+   * The judge's request is aborted when the call is abandoned or the run stops.
+   */
+  private async messageFromCodex(
+    entry: CodexTargetEntry,
+    value: Record<string, unknown>,
+    context: { id: unknown; signal: AbortSignal }
+  ): Promise<unknown> {
+    // The guards of `handBackFromCodex`: this thread's own live turn, a call id, no namespace.
+    if (entry.draining || context.signal.aborted || !entry.sessionId || value.namespace != null)
+      throw new CodexMethodNotFound()
+    if (
+      value.threadId !== entry.sessionId ||
+      typeof value.turnId !== 'string' ||
+      value.turnId !== entry.turnId ||
+      entry.endedTurns.has(value.turnId) ||
+      typeof value.callId !== 'string'
+    )
+      throw new Error('Codex session_message call has no live owning dispatch turn')
+    const args = isRecord(value.arguments) ? value.arguments : {}
+    const answer = (text: string, isError: boolean): unknown => ({
+      contentItems: [{ type: 'inputText', text }],
+      success: !isError
+    })
+    const message = typeof args.message === 'string' ? args.message : ''
+    const judge = this.codexReportJudge(entry)
+    if (message.trim() !== '' && judge.autoModeActive(entry.autonomyMode)) {
+      const run = entry.ctx.run
+      const review = await judge.reviewAgentMessage(message, {
+        currentMode: () => entry.autonomyMode,
+        stillPending: () =>
+          !context.signal.aborted &&
+          !run.stopController.signal.aborted &&
+          !run.cancelController.signal.aborted,
+        signal: AbortSignal.any([
+          context.signal,
+          run.stopController.signal,
+          run.cancelController.signal
+        ]),
+        permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction)
+      })
+      if (review.kind === 'block') return answer(messageBlockedText(review.reason), true)
+      if (review.kind !== 'allow') return answer(MESSAGE_UNREVIEWED_TEXT, true)
+    }
+    const sent = await this.xAgentMessage(entry, args, value.callId)
+    return answer(sent.text, sent.isError)
+  }
+
+  /**
+   * `item/tool/call` for `hand_back` on a Codex target.
    * The same guards as `CodexSession.hostedToolCall`: this target's own thread (a native
    * child thread it spawned is refused), its live turn, a call id, no namespace. Anything
    * else keeps getting the `-32601` the host answered before the target had a tool.
@@ -8989,7 +9909,7 @@ export class CrossEngineDispatcher {
     value: unknown,
     context: { id: unknown; signal: AbortSignal }
   ): Promise<unknown> {
-    if (method === 'item/tool/call') return this.handBackFromCodex(entry, value, context)
+    if (method === 'item/tool/call') return this.toolCallFromCodex(entry, value, context)
     if (
       !CODEX_TARGET_SERVER_METHODS.includes(method as (typeof CODEX_TARGET_SERVER_METHODS)[number])
     )
@@ -8997,8 +9917,9 @@ export class CrossEngineDispatcher {
       // registered these four methods and nothing else). On a shared host the
       // registered list is the union its owners need, so the scrub is made here
       // — with the SAME `-32601` an unregistered method earns, which is what
-      // `item/tool/call` must keep getting: a dispatch target has no hosted
-      // tools and no `dispatch_agent`.
+      // `item/tool/call` must keep getting outside the two tools of a target
+      // (`toolCallFromCodex`): a dispatch target has no other hosted tool and no
+      // `dispatch_agent`.
       return Promise.reject(new CodexMethodNotFound())
     if (entry.draining) return Promise.resolve(codexRefusal(method))
     if (

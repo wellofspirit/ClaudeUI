@@ -92,8 +92,12 @@ describe('the sentences of the other ends', () => {
 
   it('stopped and interrupted', () => {
     expect(stoppedResultText('rev')).toBe('X-Agent rev was stopped by the user.')
-    expect(interruptedResultText('rev', 'sess-1')).toBe(
-      'X-Agent rev was interrupted when ClaudeUI quit; continue it with dispatch_agent session_id sess-1.'
+    expect(interruptedResultText('rev', 's-abc123')).toBe(
+      'X-Agent rev was interrupted when ClaudeUI quit; continue it by messaging it with session_message (session: "rev" or "s-abc123").'
+    )
+    // An unnamed X-Agent is called by its ref: say it once.
+    expect(interruptedResultText('s-abc123', 's-abc123')).toBe(
+      'X-Agent s-abc123 was interrupted when ClaudeUI quit; continue it by messaging it with session_message (session: "s-abc123").'
     )
   })
 

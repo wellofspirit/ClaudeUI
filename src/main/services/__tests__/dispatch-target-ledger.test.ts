@@ -320,13 +320,13 @@ describe('the store and the hide predicate (singleton DB)', () => {
         origin: 'dispatch-result',
         fromKey: `x-agent:${named.id}`,
         fromTitle: 'rev',
-        body: 'X-Agent rev was interrupted when ClaudeUI quit; continue it with dispatch_agent session_id sess-named.'
+        body: `X-Agent rev was interrupted when ClaudeUI quit; continue it by messaging it with session_message (session: "rev" or "${named.id}").`
       },
       {
         origin: 'dispatch-result',
         fromKey: `x-agent:${unnamed.id}`,
         fromTitle: unnamed.id,
-        body: `X-Agent ${unnamed.id} was interrupted when ClaudeUI quit; continue it with dispatch_agent session_id sess-unnamed.`
+        body: `X-Agent ${unnamed.id} was interrupted when ClaudeUI quit; continue it by messaging it with session_message (session: "${unnamed.id}").`
       }
     ])
     // Once: the rows are `interrupted` now, so a second pass finds nothing running.

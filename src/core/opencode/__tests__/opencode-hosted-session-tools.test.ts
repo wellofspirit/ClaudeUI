@@ -53,12 +53,14 @@ async function connect(
     lookupCallerSession?: (id: string) => CallerSessionHandle | undefined
     resolveCallerRoot?: CallerRootResolver
     sessionTools?: boolean
+    xAgentCaller?: (id: string) => SessionToolCaller | undefined
   } = {}
 ): Promise<Rig> {
   const run = vi.fn<HostedSessionTools['run']>(async () => ({ text: 'the answer' }))
   const server: McpServer = createOpencodeHostedToolsServer('/proj', {
     lookupCallerSession: deps.lookupCallerSession,
     resolveCallerRoot: deps.resolveCallerRoot,
+    ...(deps.xAgentCaller ? { xAgentCaller: deps.xAgentCaller } : {}),
     ...(deps.sessionTools === false ? {} : { sessionTools: { run } })
   })
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
@@ -238,6 +240,70 @@ describe('the session tools on the hosted claudeui server', () => {
     const rig = await connect({ lookupCallerSession: () => handle() })
     // `__xeng_caller_session` is dispatch_agent's stamp; zod strips it from these tools' args.
     const out = await call(rig, 'session_start', { prompt: 'x', __xeng_caller_session: 'ses_root' })
+    expect(out.isError).toBe(true)
+    expect(rig.run).not.toHaveBeenCalled()
+  })
+})
+
+describe('session_message from a dispatch target (ADR-105 §4)', () => {
+  const xAgent: SessionToolCaller = {
+    routingId: 'ses_target',
+    engine: 'opencode',
+    cwd: '/repo',
+    permissionMode: 'acceptEdits',
+    xAgent: { ledgerId: 's-abc123' }
+  }
+  const xAgentCaller = (id: string): SessionToolCaller | undefined =>
+    id === 'ses_target' ? xAgent : undefined
+
+  it('a call from the target’s own session reaches the service as the X-Agent, whatever else the lookups say', async () => {
+    const rig = await connect({
+      xAgentCaller,
+      // Not a ClaudeUI chat: without the X-Agent branch this call would be refused.
+      lookupCallerSession: () => undefined
+    })
+    const out = await call(
+      rig,
+      'session_message',
+      { session: 'origin', message: 'hi' },
+      'ses_target'
+    )
+    expect(out.isError).toBeFalsy()
+    expect(rig.run).toHaveBeenCalledTimes(1)
+    expect(rig.run.mock.calls[0]).toEqual([
+      xAgent,
+      'session_message',
+      { session: 'origin', message: 'hi' }
+    ])
+  })
+
+  it('only session_message: another session tool from the target’s session is refused, nothing runs', async () => {
+    const rig = await connect({ xAgentCaller, lookupCallerSession: () => undefined })
+    const out = await call(rig, 'session_start', { title: 't' }, 'ses_target')
+    expect(out.isError).toBe(true)
+    expect(rig.run).not.toHaveBeenCalled()
+  })
+
+  it('a subagent child of the target, or any other session, is not an X-Agent', async () => {
+    const rig = await connect({ xAgentCaller, lookupCallerSession: () => undefined })
+    const out = await call(
+      rig,
+      'session_message',
+      { session: 'origin', message: 'hi' },
+      'ses_child'
+    )
+    expect(out.isError).toBe(true)
+    expect(rig.run).not.toHaveBeenCalled()
+  })
+
+  it('without the injected lookup nothing changes: the target’s call is refused', async () => {
+    const rig = await connect({ lookupCallerSession: () => undefined })
+    const out = await call(
+      rig,
+      'session_message',
+      { session: 'origin', message: 'hi' },
+      'ses_target'
+    )
     expect(out.isError).toBe(true)
     expect(rig.run).not.toHaveBeenCalled()
   })

@@ -40,7 +40,10 @@ import {
   DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
   DISPATCH_NAME_PARAM,
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
   dispatchAgentDescription,
+  dispatchResultSuffix,
+  hasRemovedSessionId,
   HAND_BACK_DESCRIPTION,
   HAND_BACK_REPORT_PARAM,
   HAND_BACK_TOOL,
@@ -155,6 +158,13 @@ export type HandBackFn = (
   callId: string | undefined
 ) => { text: string; isError: boolean }
 
+/**
+ * The session tools' caller when the opencode session is a dispatch target (an X-Agent, ADR-105
+ * §4), or undefined for any other session. Injected like {@link HandBackFn}: the dispatcher holds
+ * the targets. Only `session_message` is ever run for it (the service refuses the rest).
+ */
+export type XAgentCallerFn = (sessionId: string) => SessionToolCaller | undefined
+
 /** Same cycle-avoidance rationale as CallerSessionLookup above. */
 export type DispatchAgentFn = (
   req: DispatchRequest,
@@ -238,10 +248,6 @@ function buildDispatchAgentInputSchema(
       ),
     name: z.string().optional().describe(DISPATCH_NAME_PARAM),
     description: z.string().optional().describe(DISPATCH_DESCRIPTION_PARAM),
-    session_id: z
-      .string()
-      .optional()
-      .describe('session_id from a previous dispatch_agent result — continues that agent'),
     run_in_background: z.boolean().optional().describe(DISPATCH_BACKGROUND_PARAM),
     // Internal — see resources/opencode/claudeui-xeng/index.js. Declared
     // explicitly so our Zod validator does not STRIP it (z.object() drops
@@ -288,6 +294,8 @@ export function createOpencodeHostedToolsServer(
     handBack?: HandBackFn
     /** The session tools' service (slice 2); none registered without it. */
     sessionTools?: HostedSessionTools
+    /** An X-Agent's session as a session-tools caller (`session_message` only, ADR-105 §4). */
+    xAgentCaller?: XAgentCallerFn
     /** Called when `_meta` and the plugin stamp disagree (diagnostics). */
     onIdentityMismatch?: (identity: CallerIdentity) => void
   } = {}
@@ -420,10 +428,11 @@ export function createOpencodeHostedToolsServer(
           { targetEngine: 'codex', long: codexModelHint.long }
         ])
       }),
-      inputSchema: buildDispatchAgentInputSchema(
-        modelHint.short,
-        piModelHint.short,
-        codexModelHint.short
+      // Loose: the removed `session_id` is not declared (the model must not see it) but a call
+      // that still sends one must reach the handler for its guiding error; a plain raw shape
+      // would strip it. `tools/list` shows only the declared keys either way.
+      inputSchema: z.looseObject(
+        buildDispatchAgentInputSchema(modelHint.short, piModelHint.short, codexModelHint.short)
       )
     },
     async (
@@ -436,7 +445,6 @@ export function createOpencodeHostedToolsServer(
         model,
         name,
         description,
-        session_id,
         run_in_background,
         __xeng_caller_session,
         __xeng_call_id
@@ -446,10 +454,17 @@ export function createOpencodeHostedToolsServer(
         model?: string
         name?: string
         description?: string
-        session_id?: string
         run_in_background?: boolean
         __xeng_caller_session?: string
         __xeng_call_id?: string
+      }
+
+      // `session_id` left `dispatch_agent` (ADR-105 §4): a call that still sends one launches nothing.
+      if (hasRemovedSessionId(args.session_id)) {
+        return {
+          content: [{ type: 'text' as const, text: DISPATCH_SESSION_ID_REMOVED_TEXT }],
+          isError: true
+        }
       }
 
       const identity = resolveCallerIdentity(extra?._meta as Record<string, unknown> | undefined, {
@@ -529,7 +544,6 @@ export function createOpencodeHostedToolsServer(
           model,
           name,
           description,
-          sessionId: session_id,
           ...(background ? { runInBackground: true } : {}),
           // A subagent child asked for the background: its report goes to the chat's root agent.
           ...(background && !callerIsRoot ? { fromSubagent: true } : {})
@@ -550,9 +564,10 @@ export function createOpencodeHostedToolsServer(
         }
       )
 
-      const text = result.isError
-        ? result.text
-        : `${result.text}\n\n[dispatch session_id: ${result.sessionId} — pass it as session_id to continue this agent]`
+      const text =
+        result.isError || !result.agentRef
+          ? result.text
+          : `${result.text}${dispatchResultSuffix(result.agentRef)}`
 
       return {
         content: [{ type: 'text' as const, text }],
@@ -619,6 +634,7 @@ function registerSessionTools(
     lookupCallerSession?: CallerSessionLookup
     resolveCallerRoot?: CallerRootResolver
     sessionTools?: HostedSessionTools
+    xAgentCaller?: XAgentCallerFn
   }
 ): void {
   // No `ownMessageTool`: opencode has no teammate-messaging tool to point `session_message`
@@ -645,6 +661,16 @@ function registerSessionTools(
         ).sessionId
         if (!callerId) {
           return refuse(`${name} could not identify the calling session, so it is not run.`)
+        }
+        // A dispatch target's own session may message its dispatcher, and nothing else (the
+        // service refuses every other tool for it, the target's ruleset hides them).
+        const xAgent = name === 'session_message' ? deps.xAgentCaller?.(callerId) : undefined
+        if (xAgent) {
+          const sent = await deps.sessionTools!.run(xAgent, name, args)
+          return {
+            content: [{ type: 'text' as const, text: sent.text }],
+            ...(sent.isError ? { isError: true as const } : {})
+          }
         }
         let routingId = callerId
         let owner: 'root' | 'subagent' = 'root'

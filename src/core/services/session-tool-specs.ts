@@ -6,6 +6,11 @@ import {
   SESSION_TOOL_NAMES,
   type SessionToolName
 } from '../../shared/session-tools-description'
+import {
+  X_AGENT_MESSAGE_TOOL,
+  X_AGENT_SESSION_MESSAGE_DESCRIPTION,
+  X_AGENT_SESSION_PARAM
+} from '../../shared/x-agent-message'
 
 /**
  * The session tools' input schemas, once (session tools, slice 2). Claude's
@@ -140,4 +145,41 @@ export function piSessionToolsEnv(): string {
       spec.name === 'session_list' ? { ...spec, promptGuidelines: [intro, ...bullets] } : spec
     )
   )
+}
+
+/**
+ * `session_message` as an X-Agent (a dispatch target) is offered it (ADR-105 §4): the one session tool
+ * a target has, with its own description and a `session` that names the dispatcher. The tool name (and,
+ * on Claude, the server) is a root session's, so the service, the renderer's label and the user's deny
+ * rules know it.
+ */
+export const X_AGENT_SESSION_MESSAGE_SHAPE: Record<string, z.ZodType> = {
+  session: z.string().describe(X_AGENT_SESSION_PARAM),
+  message: z.string().describe('What to tell that session')
+}
+
+/** The X-Agent's `session_message` as pi's `registerTool` and Codex's `DynamicToolSpec` take it. */
+export function xAgentSessionMessageSpec(): SessionToolJsonSpec {
+  const { properties, required } = z.toJSONSchema(z.object(X_AGENT_SESSION_MESSAGE_SHAPE), {
+    io: 'input'
+  }) as { properties: Record<string, Record<string, unknown>>; required?: string[] }
+  return {
+    name: X_AGENT_MESSAGE_TOOL,
+    description: X_AGENT_SESSION_MESSAGE_DESCRIPTION,
+    parameters: {
+      type: 'object',
+      properties,
+      ...(required && required.length > 0 ? { required } : {}),
+      additionalProperties: false
+    }
+  }
+}
+
+/**
+ * A pi dispatch target's `CLAUDEUI_PI_SESSION_TOOLS` (ADR-105 §4): the array holds the one tool, so
+ * the bridge (which registers exactly what is in it) needs no gate of its own. No guidance rides it:
+ * the guidance is for the nine tools of a root session.
+ */
+export function xAgentSessionToolsEnv(): string {
+  return JSON.stringify([xAgentSessionMessageSpec()])
 }

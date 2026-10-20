@@ -12,7 +12,8 @@ import type {
   CallerRootResolver,
   CallerSessionLookup,
   DispatchAgentFn,
-  HandBackFn
+  HandBackFn,
+  XAgentCallerFn
 } from './opencode-hosted-tools'
 import {
   callerRestrictionFromAgent,
@@ -427,6 +428,7 @@ export class OpencodeServerManager {
   private callerSessionLookup: CallerSessionLookup = () => undefined
   private dispatchAgentFn: DispatchAgentFn | undefined
   private handBackFn: HandBackFn | undefined
+  private xAgentCallerFn: XAgentCallerFn | undefined
   private serverStartedHook: ((endpoint: Endpoint) => Promise<void>) | undefined
   /**
    * `agents.<name>.permissions` per cwd (ADR-097 §3). Default: the mode-less
@@ -476,6 +478,11 @@ export class OpencodeServerManager {
   /** Wire the dispatch targets' report channel behind the hosted `hand_back` (ADR-105 §3). */
   setHandBack(fn: HandBackFn): void {
     this.handBackFn = fn
+  }
+
+  /** Wire the dispatch targets' caller identity behind their hosted `session_message` (ADR-105 §4). */
+  setXAgentCaller(fn: XAgentCallerFn): void {
+    this.xAgentCallerFn = fn
   }
 
   /**
@@ -660,7 +667,14 @@ export class OpencodeServerManager {
         dispatch: this.dispatchAgentFn && ((req, ctx) => this.dispatchAgentFn!(req, ctx)),
         handBack: this.handBackFn && ((id, report, callId) => this.handBackFn!(id, report, callId)),
         // The session tools (slice 2), when the host wired them (read per MCP session).
-        ...(sessionToolsAvailable() ? { sessionTools: { run: runSessionTool } } : {}),
+        ...(sessionToolsAvailable()
+          ? {
+              sessionTools: { run: runSessionTool },
+              ...(this.xAgentCallerFn
+                ? { xAgentCaller: (id: string) => this.xAgentCallerFn!(id) }
+                : {})
+            }
+          : {}),
         onIdentityMismatch: (identity) =>
           logger.warn(
             'OpencodeServerManager',

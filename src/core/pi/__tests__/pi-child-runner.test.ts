@@ -553,6 +553,70 @@ describe('PiChildRunner deliveries (ADR-089 S3)', () => {
     expect(slimTranscript([...root, ...runner.trajectory.values()])).toBe('User: do X')
   })
 
+  it('a QUIET delivery (the host shows its own row) streams no echo of its custom message, but is still confirmed; a later plain one streams', async () => {
+    const child = makeFakeChild()
+    const emit = vi.fn()
+    const runner = await PiChildRunner.start(runnerOpts(child, { emit: () => emit }))
+    const quiet = deliveryPayload('d-quiet')
+    expect(await runner.deliver(quiet, { quiet: true })).toBe(true)
+    child.push(deliveredEnd(quiet))
+    expect(runner.arrivedDeliveries.has('d-quiet')).toBe(true)
+    expect(emit.mock.calls.filter((c) => c[0] === 'session:subagent-message')).toHaveLength(0)
+    // The mark is gone once the delivery arrived: the same kind of message, delivered plainly, shows.
+    const plain = deliveryPayload('d-plain')
+    await runner.deliver(plain)
+    child.push(deliveredEnd(plain))
+    expect(emit.mock.calls.filter((c) => c[0] === 'session:subagent-message')).toHaveLength(1)
+  })
+
+  it('deliver says whether pi ACCEPTED the command; arrival is the custom message, not the ack (steers rely on both)', async () => {
+    const child = makeFakeChild()
+    const runner = await PiChildRunner.start(runnerOpts(child))
+    const p = deliveryPayload('d-pos')
+    expect(await runner.deliver(p)).toBe(true)
+    // Accepted is not arrived: the id waits in pending and is not in the arrived set.
+    expect(runner.pendingDeliveries.has('d-pos')).toBe(true)
+    expect(runner.arrivedDeliveries.has('d-pos')).toBe(false)
+    child.push(deliveredEnd(p))
+    expect(runner.pendingDeliveries.has('d-pos')).toBe(false)
+    expect(runner.arrivedDeliveries.has('d-pos')).toBe(true)
+  })
+
+  it('a refused ack answers false and never counts as arrived; neither does an id a runtime error dropped', async () => {
+    const refusing = makeFakeChild((cmd) =>
+      cmd.type === 'prompt'
+        ? { type: 'response', command: 'prompt', success: false, error: 'busy' }
+        : defaultHandler(cmd)
+    )
+    const runner = await PiChildRunner.start(runnerOpts(refusing))
+    expect(await runner.deliver(deliveryPayload('d-no'))).toBe(false)
+    expect(runner.arrivedDeliveries.has('d-no')).toBe(false)
+
+    const child = makeFakeChild()
+    const other = await PiChildRunner.start(runnerOpts(child))
+    expect(await other.deliver(deliveryPayload('d-err'))).toBe(true)
+    child.push({
+      type: 'extension_error',
+      extensionPath: '<runtime>',
+      event: 'send_message',
+      error: 'boom'
+    })
+    // Gone from pending, but pi never took it in.
+    expect(other.pendingDeliveries.has('d-err')).toBe(false)
+    expect(other.arrivedDeliveries.has('d-err')).toBe(false)
+  })
+
+  it('a dead transport (the request rejects) answers false too, with the pending id dropped', async () => {
+    const child = makeFakeChild((cmd) => {
+      if (cmd.type === 'prompt') throw new Error('stdin closed')
+      return defaultHandler(cmd)
+    })
+    const runner = await PiChildRunner.start(runnerOpts(child))
+    expect(await runner.deliver(deliveryPayload('d-dead'))).toBe(false)
+    expect(runner.pendingDeliveries.has('d-dead')).toBe(false)
+    expect(runner.arrivedDeliveries.has('d-dead')).toBe(false)
+  })
+
   it('a refused ack drops the pending delivery', async () => {
     const child = makeFakeChild((cmd) =>
       cmd.type === 'prompt'

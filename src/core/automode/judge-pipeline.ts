@@ -66,6 +66,11 @@ export interface JudgePipelineAction {
    * output rather than as an action to run (`ClassifierAction.handBack`, ADR-105 §3).
    */
   handBack?: boolean
+  /**
+   * The text is a message an X-Agent sends the agent that spawned it (`input.message`), reviewed as
+   * agent-authored output (`ClassifierAction.agentMessage`, ADR-105 §4).
+   */
+  agentMessage?: boolean
 }
 
 /** What a judged review looks like on the card (see the callers' `sendToolReview`). */
@@ -325,7 +330,8 @@ async function runPipeline(
           toolName,
           input: judgeInput,
           ...(hooks.subagent ? { subagent: hooks.subagent } : {}),
-          ...(action.handBack ? { handBack: true } : {})
+          ...(action.handBack ? { handBack: true } : {}),
+          ...(action.agentMessage ? { agentMessage: true } : {})
         },
         environment,
         ...(actionMeta ? { actionMeta } : {}),

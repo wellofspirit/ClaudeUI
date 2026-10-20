@@ -23,7 +23,12 @@
  * tools (`session-tools.ts`), context pressure and the prompt path call it.
  */
 import type { ISession, NonUserItem } from '../providers/ISession'
-import { X_AGENT_KEY_PREFIX, wrapperSender } from '../../shared/session-message-wrapper'
+import {
+  X_AGENT_KEY_PREFIX,
+  X_AGENT_MESSAGE_KEY_PREFIX,
+  isXAgentMessageSender,
+  wrapperSender
+} from '../../shared/session-message-wrapper'
 import { DISPATCH_WAKE_CAP } from '../providers/turn-origin-ledger'
 import type { SessionManager } from './session-manager'
 import {
@@ -223,11 +228,16 @@ async function flushNow(
   if (!session?.deliverNonUser) return false
   let started = false
   try {
-    for (const row of heldFor(session, routingId)) {
-      if (options.only && row.origin !== options.only) continue
+    const held = heldFor(session, routingId)
+    const carried = options.only
+      ? messagesBeforeResults(session, held, options.only)
+      : new Set<number>()
+    for (const row of held) {
+      if (options.only && row.origin !== options.only && !carried.has(row.id)) continue
       // A row that would start a turn past its cap stays held: the cap resets with the
       // user's next prompt, and that prompt's own flush then takes it.
-      if (options.respectCap && !started && !capLeft(session, row.origin)) break
+      if (options.respectCap && !started && !carried.has(row.id) && !capLeft(session, row.origin))
+        break
       const outcome = await session.deliverNonUser({
         origin: row.origin,
         text: row.body,
@@ -250,6 +260,32 @@ async function flushNow(
     emitHeldCount(routingId, session)
   }
   return started
+}
+
+/**
+ * The held messages an X-Agent sent BEFORE a held result of its own (ADR-105 §4): a flush that
+ * delivers only results must not put the result ahead of the question that preceded it. They ride
+ * along in arrival order, only while the session still has agent-turn budget (a message counts in it,
+ * and the result's own cap does not lift that); the rest of the inbox waits for the user's prompt.
+ */
+function messagesBeforeResults(
+  session: ISession,
+  held: InboxItem[],
+  only: NonUserItem['origin']
+): Set<number> {
+  const lastResult = new Map<string, number>()
+  for (const row of held) {
+    if (row.origin !== only || !row.fromKey.startsWith(X_AGENT_KEY_PREFIX)) continue
+    lastResult.set(row.fromKey.slice(X_AGENT_KEY_PREFIX.length), row.id)
+  }
+  const out = new Set<number>()
+  if (lastResult.size === 0 || !capLeft(session, 'session-message')) return out
+  for (const row of held) {
+    if (row.origin !== 'session-message' || !isXAgentMessageSender(row.fromKey)) continue
+    const last = lastResult.get(row.fromKey.slice(X_AGENT_MESSAGE_KEY_PREFIX.length))
+    if (last !== undefined && row.id < last) out.add(row.id)
+  }
+  return out
 }
 
 /**

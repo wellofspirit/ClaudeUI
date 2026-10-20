@@ -162,7 +162,10 @@ import { buildClassifierEnvironment } from '../automode/environment'
 import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
 import { describeDispatchModels } from '../services/dispatch-model-hint'
 import {
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
   dispatchAgentDescription,
+  dispatchResultSuffix,
+  hasRemovedSessionId,
   joinDispatchHints,
   OWN_SUBAGENT_TOOL,
   runsInBackground,
@@ -3276,8 +3279,8 @@ export class PiSession extends BaseSession {
    * DispatchContext construction verbatim (fromEngine/fromRoutingId/cwd/
    * getAutonomyMode/getMessages/emit/addDispatchedCost/toolUseId), NOT via MCP — pi has no
    * MCP client of its own, so this calls crossEngineDispatcher.dispatch()
-   * directly. Result text formatting (the `[dispatch session_id: …]` success
-   * suffix) is copied verbatim from collab-tool.ts too, so a pi-sourced
+   * directly. Result text formatting (the shared `dispatchResultSuffix` on a
+   * blocking answer) is the same as collab-tool.ts's, so a pi-sourced
    * dispatch reads identically to a Claude-sourced one.
    *
    * `extra` (SdkToolExtra) is intentionally OMITTED — DispatchContext.extra is
@@ -3315,13 +3318,21 @@ export class PiSession extends BaseSession {
       }
     }
 
+    // `session_id` left `dispatch_agent` (ADR-105 §4); the bridge no longer declares it, but a model
+    // working from an older transcript may still send one. Nothing is launched.
+    if (hasRemovedSessionId(input.session_id)) {
+      return {
+        content: [{ type: 'text', text: DISPATCH_SESSION_ID_REMOVED_TEXT }],
+        isError: true
+      }
+    }
+
     const req: DispatchRequest = {
       engine,
       prompt,
       model: typeof input.model === 'string' ? input.model : undefined,
       name: typeof input.name === 'string' ? input.name : undefined,
       description: typeof input.description === 'string' ? input.description : undefined,
-      sessionId: typeof input.session_id === 'string' ? input.session_id : undefined,
       // Only the root session registers dispatch_agent (a host-run subagent's gate is empty),
       // so the caller is always the top-level agent: background unless it says otherwise.
       ...(runsInBackground(
@@ -3358,9 +3369,10 @@ export class PiSession extends BaseSession {
     } finally {
       this.inFlightDispatchIds.delete(toolCallId)
     }
-    const text = result.isError
-      ? result.text
-      : `${result.text}\n\n[dispatch session_id: ${result.sessionId} — pass it as session_id to continue this agent]`
+    const text =
+      result.isError || !result.agentRef
+        ? result.text
+        : `${result.text}${dispatchResultSuffix(result.agentRef)}`
     return {
       content: [{ type: 'text', text }],
       ...(result.isError ? { isError: true } : {})

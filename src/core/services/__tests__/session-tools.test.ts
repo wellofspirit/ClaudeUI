@@ -23,6 +23,7 @@ import {
   type SessionToolName
 } from '../../../shared/session-tools-description'
 import { REF_PATTERN } from '../../../shared/session-links'
+import { xAgentOfMessageResult } from '../../../shared/x-agent-message'
 import { TurnOriginLedger, STARTS_PER_USER_TURN } from '../../providers/turn-origin-ledger'
 import type { CreateSessionArgs } from '../../ipc/create-session'
 import type { SessionManager } from '../session-manager'
@@ -1333,56 +1334,413 @@ describe('sessionMessage', () => {
 })
 
 // ---------------------------------------------------------------------------
-// ADR-105 — a Claude/pi/Codex dispatch target is recorded in the X-Agent ledger and
-// registered in session_ref, so the ref resolver would find it by its ref AND by the
-// harness id the parent model holds from the dispatch result. The tools refuse both.
+// ADR-105 §4 — X-Agents (dispatch targets) are recorded in the X-Agent ledger and registered in
+// session_ref, so the ref resolver finds one by its ref AND by the harness id the parent model holds.
+// Only `session_message` opens them, and only between a parent and its OWN X-Agents; get, read, usage and
+// stop keep refusing them.
 // ---------------------------------------------------------------------------
 
-describe('X-Agent ledger targets are not addressable sessions (ADR-105)', () => {
-  const target = (engine: 'claude' | 'pi' | 'codex'): { id: string; harnessRef: string } => {
+describe('X-Agents and session_message (ADR-105 §4)', () => {
+  const messenger = {
+    message: vi.fn(
+      async (
+        _request: unknown
+      ): Promise<
+        { kind: 'steered' } | { kind: 'started' } | { kind: 'refused'; text: string }
+      > => ({
+        kind: 'steered'
+      })
+    )
+  }
+
+  beforeEach(() => {
+    messenger.message.mockClear()
+    configureSessionTools({ manager, createSession, sendPrompt, xAgents: messenger })
+  })
+
+  /** An X-Agent the parent `p` launched (a ledger row, hence a session_ref) and its tool caller. */
+  const xAgent = (
+    p: Born,
+    over: {
+      name?: string | null
+      engine?: 'claude' | 'pi' | 'codex'
+      mode?: string
+      state?: 'running' | 'idle' | 'stopped'
+    } = {}
+  ): { id: string; harnessRef: string; caller: SessionToolCaller } => {
+    const engine = over.engine ?? 'claude'
     const harnessRef = `xagent-${engine}-${randomUUID()}`
     const row = dispatchLedger.create({
       engine,
       harnessRef,
-      parentSessionId: 'some-parent',
-      parentEngine: 'opencode',
-      parentToolUseId: null,
+      parentSessionId: p.caller.routingId,
+      parentEngine: p.caller.engine,
+      parentToolUseId: 'toolu_origin',
       cwd: '/repo',
-      model: 'm',
+      model: 'm-x',
       launchMode: 'default',
       accountKey: null,
       codexAccountId: null,
       callerRestriction: null,
-      name: null,
-      description: null
+      name: over.name === undefined ? 'worker' : over.name,
+      description: 'review the diff'
     })
-    return { id: row.id, harnessRef }
+    if (over.state && over.state !== 'running') dispatchLedger.update(row.id, { state: over.state })
+    return {
+      id: row.id,
+      harnessRef,
+      caller: {
+        routingId: harnessRef,
+        engine,
+        cwd: '/repo',
+        permissionMode: over.mode ?? 'default',
+        xAgent: { ledgerId: row.id }
+      }
+    }
   }
 
-  it.each(['claude', 'pi', 'codex'] as const)(
-    'all four tools refuse a %s target by its ledger ref and by its harness id',
-    async (engine) => {
-      const p = born(`ledger-${engine}`)
-      const { id, harnessRef } = target(engine)
-      for (const session of [id, harnessRef]) {
+  describe('a parent messages its own X-Agent', () => {
+    it.each([
+      ['its ledger ref', (x: { id: string }) => x.id],
+      ['its name', () => 'worker'],
+      ['the harness id an old launch answer printed', (x: { harnessRef: string }) => x.harnessRef]
+    ])('by %s', async (_label, pick) => {
+      const p = born('xa-own')
+      const x = xAgent(p)
+      const out = await sessionMessage(p.caller, {
+        session: pick(x),
+        message: 'please also check docs'
+      })
+      expect(out.isError).toBeFalsy()
+      expect(out.text).toMatch(/^delivered to X-Agent worker \(it is running/)
+      // It does not promise an answer: the X-Agent may answer by message or in its report, and a
+      // message it had not read when it reported is sent again as a new run.
+      expect(out.text).not.toMatch(/answer comes/)
+      expect(out.text).toContain('sent again as a new run')
+      // The card reads who it reached from these very words.
+      expect(xAgentOfMessageResult(out.text)).toBe('worker')
+      expect(messenger.message).toHaveBeenCalledTimes(1)
+      expect(messenger.message).toHaveBeenCalledWith({
+        ledgerId: x.id,
+        text: 'please also check docs',
+        from: { routingId: p.caller.routingId, engine: 'claude', title: 'Untitled session' }
+      })
+      // It never goes through the inbox: an X-Agent is no session object, a held row would wait for ever.
+      expect(heldInboxItems(x.harnessRef)).toEqual([])
+      expect(auditFor(p.ref).map((r) => [r.channel, r.sessionId, r.outcome])).toEqual([
+        ['session-tools:session_message', x.id, 'ok']
+      ])
+    })
+
+    it('says what became of it: steered, a new run, or refused with the reason', async () => {
+      const p = born('xa-outcome')
+      const x = xAgent(p)
+      messenger.message.mockResolvedValueOnce({ kind: 'started' })
+      expect((await sessionMessage(p.caller, { session: x.id, message: 'a' })).text).toMatch(
+        /^delivered to X-Agent worker \(it was not running: a new run started on your message; its report arrives later as a message from it\) \(message m-/
+      )
+      messenger.message.mockResolvedValueOnce({ kind: 'refused', text: 'the cost cap is reached' })
+      const refused = await sessionMessage(p.caller, { session: x.id, message: 'b' })
+      expect(refused.isError).toBe(true)
+      expect(refused.text).toBe('Refused: the cost cap is reached')
+      expect(
+        auditFor(p.ref)
+          .map((r) => r.outcome)
+          .sort()
+      ).toEqual(['error', 'ok'])
+    })
+
+    it('is refused for a stopped X-Agent, and with no messenger wired', async () => {
+      const p = born('xa-stopped')
+      const stopped = xAgent(p, { state: 'stopped' })
+      const out = await sessionMessage(p.caller, { session: stopped.id, message: 'a' })
+      expect(out.isError).toBe(true)
+      expect(out.text).toMatch(/was stopped; it cannot be messaged/)
+      expect(messenger.message).not.toHaveBeenCalled()
+      configureSessionTools({ manager, createSession, sendPrompt })
+      const live = xAgent(p)
+      expect((await sessionMessage(p.caller, { session: live.id, message: 'a' })).text).toMatch(
+        /not available in this process/
+      )
+    })
+
+    it('is allowed by the gate without asking, in a mode that would ask about another session', () => {
+      const p = born('xa-gate', { mode: 'default' })
+      const x = xAgent(p)
+      expect(
+        sessionToolsGate(p.caller, 'session_message', { session: x.id, message: 'a' }, {})
+      ).toEqual({
+        behavior: 'allow'
+      })
+      expect(
+        sessionToolsGate(p.caller, 'session_message', { session: 'worker', message: 'a' }, {})
+      ).toEqual({
+        behavior: 'allow'
+      })
+      // A subagent of the parent is still refused, as for every acting tool.
+      expect(
+        deny(
+          sessionToolsGate(
+            p.caller,
+            'session_message',
+            { session: x.id, message: 'a' },
+            { agentId: 'sub' }
+          )
+        )
+      ).toMatch(/not by a subagent/)
+    })
+  })
+
+  describe('ownership is a refusal, in every mode', () => {
+    it.each(['default', 'acceptEdits', 'auto', 'bypassPermissions'])(
+      'a parent cannot message another parent’s X-Agent (%s), by ref or by name',
+      async (mode) => {
+        const owner = born('xa-owner')
+        const other = born('xa-other', { mode })
+        const x = xAgent(owner)
+        const byRef = await sessionMessage(other.caller, { session: x.id, message: 'hi' })
+        expect(byRef.isError).toBe(true)
+        expect(byRef.text).toMatch(/belongs to another session/)
+        // A name is looked up among the caller's OWN X-Agents only, never as a global title.
+        const byName = await sessionMessage(other.caller, { session: 'worker', message: 'hi' })
+        expect(byName.isError).toBe(true)
+        expect(byName.text).toMatch(/No session matches "worker"/)
+        const byHarness = await sessionMessage(other.caller, {
+          session: x.harnessRef,
+          message: 'hi'
+        })
+        expect(byHarness.text).toMatch(/belongs to another session/)
+        expect(messenger.message).not.toHaveBeenCalled()
+        expect(heldInboxItems(x.harnessRef)).toEqual([])
+      }
+    )
+
+    it('get, read, usage and stop still refuse an X-Agent, owned or not', async () => {
+      const p = born('xa-verbs')
+      const x = xAgent(p)
+      for (const session of [x.id, x.harnessRef]) {
         for (const out of [
-          await sessionMessage(p.caller, { session, message: 'hello' }),
           await sessionRead(p.caller, { session }),
           await sessionGet(p.caller, { session }),
-          await sessionStop(p.caller, { session })
+          await sessionStop(p.caller, { session }),
+          sessionUsage(p.caller, { session })
         ]) {
           expect(out.isError).toBe(true)
           expect(out.text).toMatch(/That is a dispatch target, not a session you can address/)
         }
       }
-      // Nothing was left behind for B-4 to flush later.
-      expect(heldInboxItems(harnessRef)).toEqual([])
-    }
-  )
+      expect(messenger.message).not.toHaveBeenCalled()
+    })
+
+    it('an X-Agent messages its parent, by origin, parent or the parent’s ref, and nobody else', async () => {
+      const p = born('xa-up', { title: 'Boss' })
+      const stranger = born('xa-stranger', { title: 'Stranger' })
+      const x = xAgent(p)
+      const sibling = xAgent(p, { name: 'sibling' })
+      for (const session of ['origin', 'parent', p.ref, p.caller.routingId]) {
+        const out = await sessionMessage(x.caller, { session, message: 'question for you' })
+        expect(out.isError).toBeFalsy()
+        expect(out.text).toMatch(/^delivered \(it started a turn on your message\)/)
+      }
+      expect(p.fake.deliverNonUser).toHaveBeenCalledTimes(4)
+      for (const session of [stranger.ref, 'Stranger', sibling.id, 'sibling', 'self', x.id]) {
+        const out = await sessionMessage(x.caller, { session, message: 'nope' })
+        expect(out.isError).toBe(true)
+        expect(out.text).toMatch(
+          /can message only the session that dispatched it|cannot message itself/
+        )
+      }
+      expect(stranger.fake.deliverNonUser).not.toHaveBeenCalled()
+      expect(p.fake.deliverNonUser).toHaveBeenCalledTimes(4)
+    })
+
+    it.each(['default', 'bypassPermissions'])(
+      'an X-Agent running in %s still reaches only its parent',
+      async (mode) => {
+        const p = born('xa-modes')
+        const stranger = born('xa-modes-stranger', { mode: 'default' })
+        const x = xAgent(p, { mode })
+        expect(
+          (await sessionMessage(x.caller, { session: stranger.ref, message: 'x' })).isError
+        ).toBe(true)
+        expect(stranger.fake.deliverNonUser).not.toHaveBeenCalled()
+        expect(
+          (await sessionMessage(x.caller, { session: 'origin', message: 'x' })).isError
+        ).toBeFalsy()
+      }
+    )
+
+    it('an X-Agent runs session_message and no other session tool', async () => {
+      const p = born('xa-tools')
+      const x = xAgent(p)
+      const calls: Array<[SessionToolName, Record<string, unknown>]> = [
+        ['session_list', {}],
+        ['session_get', { session: 'origin' }],
+        ['session_read', { session: 'origin' }],
+        ['session_start', start()],
+        ['session_hand_off', { title: 't', handoff: 'h' }],
+        ['session_usage', {}],
+        ['session_stop', { session: 'origin' }],
+        ['session_dismiss_proposal', { proposal_id: 'p-x' }]
+      ]
+      for (const [tool, input] of calls) {
+        const out = await runSessionTool(x.caller, tool, input)
+        expect(out.isError).toBe(true)
+        expect(out.text).toMatch(/not available to an X-Agent/)
+      }
+      expect(created).toEqual([])
+      // The acting ones left an audit row each, with the X-Agent as the actor.
+      expect(
+        auditFor(x.id)
+          .map((r) => r.channel)
+          .sort()
+      ).toEqual([
+        'session-tools:session_dismiss_proposal',
+        'session-tools:session_hand_off',
+        'session-tools:session_start',
+        'session-tools:session_stop'
+      ])
+    })
+
+    it('does not run once the X-Agent’s run is over (its refuse hook)', async () => {
+      const p = born('xa-ended')
+      const x = xAgent(p)
+      const caller: SessionToolCaller = {
+        ...x.caller,
+        xAgent: { ledgerId: x.id, refuse: () => 'Refused: your run has ended.' }
+      }
+      const out = await runSessionTool(caller, 'session_message', {
+        session: 'origin',
+        message: 'late'
+      })
+      expect(out).toEqual({ text: 'Refused: your run has ended.', isError: true })
+      expect(p.fake.deliverNonUser).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('a message from an X-Agent reaches its parent as the X-Agent’s', () => {
+    it('is delivered as a session-message under the X-Agent’s own key, with its mode class, and audited by its ref', async () => {
+      const p = born('xa-deliver', { title: 'Boss' })
+      const x = xAgent(p, { mode: 'bypassPermissions' })
+      const out = await sessionMessage(x.caller, { session: 'origin', message: 'half way there' })
+      expect(out.isError).toBeFalsy()
+      expect(p.fake.deliverNonUser).toHaveBeenCalledTimes(1)
+      expect(p.fake.deliverNonUser).toHaveBeenCalledWith(
+        expect.objectContaining({
+          origin: 'session-message',
+          text: 'half way there',
+          from: { key: `x-agent-message:${x.id}`, title: 'worker' },
+          senderModeClass: 'bypass'
+        })
+      )
+      const [row] = auditFor(x.id)
+      expect(row).toMatchObject({
+        method: 'agent',
+        label: `${x.id} (claude X-Agent)`,
+        channel: 'session-tools:session_message',
+        sessionId: p.ref,
+        outcome: 'ok'
+      })
+    })
+
+    it('counts in the parent’s agent-turn budget and taints it', async () => {
+      const p = born('xa-budget')
+      const x = xAgent(p)
+      expect(p.fake.originLedger.userOriginClean).toBe(true)
+      await sessionMessage(x.caller, { session: 'origin', message: 'one' })
+      expect(p.fake.originLedger.agentTurnStartsSinceUser).toBe(1)
+      expect(p.fake.originLedger.userOriginClean).toBe(false)
+    })
+
+    it('is held in the parent’s inbox when the parent is not live, framed as the X-Agent’s', async () => {
+      const p = born('xa-held')
+      const x = xAgent(p)
+      live.delete(p.caller.routingId)
+      const out = await sessionMessage(x.caller, { session: 'origin', message: 'for later' })
+      expect(out.text).toMatch(/^held \(the session is closed/)
+      expect(heldInboxItems(p.caller.routingId)).toEqual([
+        expect.objectContaining({
+          origin: 'session-message',
+          fromKey: `x-agent-message:${x.id}`,
+          fromTitle: 'worker',
+          body: 'for later'
+        })
+      ])
+    })
+  })
+
+  describe('names', () => {
+    it('resolve among the caller’s own X-Agents only, before a global title', async () => {
+      const a = born('xa-name-a')
+      const b = born('xa-name-b')
+      born('xa-name-title', { title: 'worker' })
+      const xa = xAgent(a)
+      const xb = xAgent(b)
+      expect(resolveTarget(a.caller, 'worker', { xAgents: true })).toMatchObject({
+        ok: true,
+        ref: xa.id,
+        xAgent: expect.objectContaining({ id: xa.id })
+      })
+      expect(resolveTarget(b.caller, 'worker', { xAgents: true })).toMatchObject({
+        ok: true,
+        ref: xb.id
+      })
+    })
+
+    it('a stopped X-Agent frees its name', () => {
+      const a = born('xa-free')
+      xAgent(a, { state: 'stopped' })
+      expect(resolveTarget(a.caller, 'worker', { xAgents: true }).ok).toBe(false)
+    })
+
+    it('reserved words and ref-shaped strings never resolve as an X-Agent’s name', () => {
+      const a = born('xa-reserved')
+      for (const name of ['main', 'origin', 'parent', 'self', 's-abc123']) {
+        xAgent(a, { name })
+        const found = resolveTarget(a.caller, name, { xAgents: true })
+        expect(found.ok ? found.xAgent : undefined).toBeUndefined()
+      }
+    })
+
+    it('two X-Agents with one name (a row from before the launch check) are ambiguous, not guessed', () => {
+      const a = born('xa-twin')
+      const one = xAgent(a)
+      const two = xAgent(a)
+      const found = resolveTarget(a.caller, 'worker', { xAgents: true })
+      expect(found.ok).toBe(false)
+      expect(found.ok ? '' : found.message).toMatch(
+        new RegExp(`${one.id}.*${two.id}|${two.id}.*${one.id}`)
+      )
+    })
+  })
+
+  describe('session_list', () => {
+    it('shows the caller’s own X-Agents, marked as such, and no one else’s', () => {
+      const a = born('xa-list-a')
+      const b = born('xa-list-b')
+      const mine = xAgent(a, { name: 'mine' })
+      const theirs = xAgent(b, { name: 'theirs' })
+      const stopped = xAgent(a, { name: 'gone', state: 'stopped' })
+      const text = sessionList(a.caller, {}).text
+      expect(text).toContain('1 X-Agent(s) you launched with dispatch_agent')
+      expect(text).toContain(
+        `${mine.id} | X-Agent "mine" | claude/m-x | running | task="review the diff"`
+      )
+      expect(text).not.toContain(theirs.id)
+      expect(text).not.toContain(stopped.id)
+      expect(sessionList(b.caller, { scope: 'all' }).text).toContain(
+        `${theirs.id} | X-Agent "theirs"`
+      )
+      expect(sessionList(born('xa-list-c').caller, { scope: 'all' }).text).not.toContain(
+        'X-Agent(s)'
+      )
+    })
+  })
 
   it('an ordinary session still resolves beside them', async () => {
-    const p = born('ledger-normal')
-    const other = born('ledger-normal-other')
+    const p = born('xa-normal')
+    const other = born('xa-normal-other')
+    xAgent(p)
     expect((await sessionGet(p.caller, { session: other.ref })).isError).toBeFalsy()
   })
 })

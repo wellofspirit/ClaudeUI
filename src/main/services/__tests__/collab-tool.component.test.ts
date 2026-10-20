@@ -47,12 +47,17 @@ import { createCollabServer } from '../../../core/services/collab-tool'
 import type { CollabServerContext } from '../../../core/services/collab-tool'
 import { crossEngineDispatcher } from '../../../core/services/cross-engine-dispatcher'
 import { loadEngineConfig } from '../../../core/services/ui-config'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { peekOpencodeModels } from '../../../core/opencode/model-discovery'
 import type { SdkToolExtra } from '../../../core/sdk'
 import {
   DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
-  DISPATCH_NAME_PARAM
+  DISPATCH_FOLLOW_UP_GUIDANCE,
+  DISPATCH_NAME_PARAM,
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
+  dispatchResultSuffix
 } from '../../../shared/dispatch-agent-description'
 
 function makeCtx(overrides: Partial<CollabServerContext> = {}): CollabServerContext & {
@@ -88,8 +93,10 @@ describe('createCollabServer', () => {
     expect(server.name).toBe('claude-ui-collab')
     expect(server.tools).toHaveLength(1)
     expect(server.tools[0].name).toBe('dispatch_agent')
-    // The description must teach the model the continuation contract.
-    expect(server.tools[0].description).toContain('session_id')
+    // A follow-up is a session_message now; the description no longer offers a session_id.
+    expect(server.tools[0].description).toContain(DISPATCH_FOLLOW_UP_GUIDANCE)
+    expect(server.tools[0].description).not.toContain('session_id')
+    expect(server.tools[0].inputSchema.session_id).toBeUndefined()
     expect(server.tools[0].description).toContain('user-configured')
     // S4: Claude is steered to its own Agent tool for ordinary delegation.
     expect(server.tools[0].description).toContain(
@@ -98,10 +105,10 @@ describe('createCollabServer', () => {
     expect(server.tools[0].description).toContain('use your own Agent tool instead')
   })
 
-  it('happy path: delegates to the dispatcher with the full context and appends the session_id', async () => {
+  it('happy path: delegates to the dispatcher with the full context and appends the agent ref', async () => {
     const dispatchSpy = vi
       .spyOn(crossEngineDispatcher, 'dispatch')
-      .mockResolvedValue({ text: 'the review', sessionId: 'oc-42' })
+      .mockResolvedValue({ text: 'the review', sessionId: 'oc-42', agentRef: 's-abc123' })
     const ctx = makeCtx()
     const server = createCollabServer(ctx)
     const extra = makeExtra()
@@ -115,8 +122,7 @@ describe('createCollabServer', () => {
       {
         engine: 'opencode',
         prompt: 'review the diff',
-        model: 'openai/gpt-5',
-        sessionId: undefined
+        model: 'openai/gpt-5'
       },
       {
         fromEngine: 'claude',
@@ -132,8 +138,20 @@ describe('createCollabServer', () => {
     )
     expect(result.isError).toBeUndefined()
     const text = (result.content[0] as { text: string }).text
-    expect(text).toContain('the review')
-    expect(text).toContain('session_id: oc-42')
+    expect(text).toBe(`the review${dispatchResultSuffix('s-abc123')}`)
+    expect(text).not.toContain('session_id')
+  })
+
+  it('no agent ref (a failure, or a run the dispatcher kept no ledger row for) gets no suffix', async () => {
+    vi.spyOn(crossEngineDispatcher, 'dispatch').mockResolvedValue({
+      text: 'the review',
+      sessionId: 'oc-42'
+    })
+    const result = await createCollabServer(makeCtx()).tools[0].handler(
+      { engine: 'opencode', prompt: 'x' },
+      makeExtra()
+    )
+    expect((result.content[0] as { text: string }).text).toBe('the review')
   })
 
   it("threads extra.meta['claudecode/toolUseId'] into ctx.toolUseId (cli.js's per-mcp-call _meta stamp)", async () => {
@@ -180,20 +198,58 @@ describe('createCollabServer', () => {
     )
   })
 
-  it('passes session_id through as the continuation sessionId', async () => {
+  it('a call that still passes session_id gets the guiding error and launches nothing', async () => {
     const dispatchSpy = vi
       .spyOn(crossEngineDispatcher, 'dispatch')
       .mockResolvedValue({ text: 'more', sessionId: 'oc-42' })
     const server = createCollabServer(makeCtx())
 
-    await server.tools[0].handler(
+    const result = await server.tools[0].handler(
       { engine: 'opencode', prompt: 'continue', session_id: 'oc-42' },
       makeExtra()
     )
-    expect(dispatchSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionId: 'oc-42' }),
-      expect.anything()
+    expect(result.isError).toBe(true)
+    expect((result.content[0] as { text: string }).text).toBe(DISPATCH_SESSION_ID_REMOVED_TEXT)
+    expect(dispatchSpy).not.toHaveBeenCalled()
+  })
+
+  it('an empty session_id is no session_id', async () => {
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'ok', sessionId: 'oc-42' })
+    const result = await createCollabServer(makeCtx()).tools[0].handler(
+      { engine: 'opencode', prompt: 'go', session_id: '' },
+      makeExtra()
     )
+    expect(result.isError).toBeUndefined()
+    expect(dispatchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('over the real MCP protocol: tools/list does not list session_id, and a call that sends one still reaches the handler', async () => {
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'more', sessionId: 'oc-42' })
+    const server = createCollabServer(makeCtx())
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()
+    await server.instance!.connect(serverTransport)
+    const client = new Client({ name: 'test-client', version: '0.0.0' }, {})
+    await client.connect(clientTransport)
+    try {
+      const { tools } = await client.listTools()
+      const dispatch = tools.find((t) => t.name === 'dispatch_agent')!
+      expect(Object.keys(dispatch.inputSchema.properties ?? {})).not.toContain('session_id')
+      expect(JSON.stringify(dispatch)).not.toContain('session_id')
+      // A raw zod shape would strip the undeclared key before the handler: the tool is registered loose.
+      const result = (await client.callTool({
+        name: 'dispatch_agent',
+        arguments: { engine: 'opencode', prompt: 'continue', session_id: 'oc-42' }
+      })) as { isError?: boolean; content: Array<{ text: string }> }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toBe(DISPATCH_SESSION_ID_REMOVED_TEXT)
+      expect(dispatchSpy).not.toHaveBeenCalled()
+    } finally {
+      await client.close()
+    }
   })
 
   it('reads routingId and autonomy mode LIVE at call time (rekey / mode-switch safety)', async () => {
@@ -234,7 +290,7 @@ describe('createCollabServer', () => {
     )
   })
 
-  it('propagates dispatcher isError as an isError tool result without a session_id suffix', async () => {
+  it('propagates dispatcher isError as an isError tool result without an agent suffix', async () => {
     vi.spyOn(crossEngineDispatcher, 'dispatch').mockResolvedValue({
       text: 'something broke',
       sessionId: '',
@@ -370,7 +426,7 @@ describe('createCollabServer', () => {
   it("accepts engine: 'pi' and delegates to the dispatcher with the full context (ADR-033 M4c)", async () => {
     const dispatchSpy = vi
       .spyOn(crossEngineDispatcher, 'dispatch')
-      .mockResolvedValue({ text: 'pi says hi', sessionId: 'pi-sess-1' })
+      .mockResolvedValue({ text: 'pi says hi', sessionId: 'pi-sess-1', agentRef: 's-pi0001' })
     const ctx = makeCtx()
     const server = createCollabServer(ctx)
     const extra = makeExtra()
@@ -384,8 +440,7 @@ describe('createCollabServer', () => {
       {
         engine: 'pi',
         prompt: 'do a thing',
-        model: 'openai-codex/gpt-5.6-luna',
-        sessionId: undefined
+        model: 'openai-codex/gpt-5.6-luna'
       },
       {
         fromEngine: 'claude',
@@ -402,7 +457,7 @@ describe('createCollabServer', () => {
     expect(result.isError).toBeUndefined()
     const text = (result.content[0] as { text: string }).text
     expect(text).toContain('pi says hi')
-    expect(text).toContain('session_id: pi-sess-1')
+    expect(text).toContain(dispatchResultSuffix('s-pi0001'))
   })
 })
 

@@ -111,6 +111,90 @@ describe('withDispatchTasks — any engine’s read, and the run’s own start',
     ])
   })
 
+  describe('several runs on one card (a message started run n+1, ADR-105 §4)', () => {
+    const report = (run: number, status: DispatchReportStatus, text: string | null): never =>
+      ({
+        targetId: 's-abc123',
+        run,
+        toolUseId: 'toolu_1',
+        status,
+        report: text,
+        warning: null,
+        createdAt: run,
+        deliveredAt: null
+      }) as never
+    const load = { messages: [use('toolu_1', 1)], statusLine: null }
+
+    it('every run of the card keeps its own terminal notification, numbered by the run', () => {
+      const read = withDispatchTasks(
+        'p',
+        load,
+        { byParent: () => [row({ state: 'idle' })] },
+        { rowsOf: () => [report(1, 'delivered', 'first'), report(2, 'flagged', 'second')] }
+      )
+      expect(read.taskNotifications).toEqual([
+        expect.objectContaining({ toolUseId: 'toolu_1', runIndex: 1, summary: 'first' }),
+        expect.objectContaining({ toolUseId: 'toolu_1', runIndex: 2, summary: 'second' })
+      ])
+    })
+
+    it('a run still going shows as an active run n+1 beside the finished ones', () => {
+      const read = withDispatchTasks(
+        'p',
+        load,
+        { byParent: () => [row({ state: 'running' })] },
+        { rowsOf: () => [report(1, 'delivered', 'first')] }
+      )
+      expect(read.activeTasks).toEqual({
+        toolu_1: expect.objectContaining({ taskId: 's-abc123', runIndex: 2 })
+      })
+      expect(read.taskNotifications).toEqual([
+        expect.objectContaining({ toolUseId: 'toolu_1', runIndex: 1, summary: 'first' })
+      ])
+    })
+
+    it('a running run is numbered as the dispatcher numbers it live: after the newest stored run of the X-Agent, on any card', () => {
+      const elsewhere = Object.assign({}, report(1, 'delivered', 'older'), {
+        toolUseId: 'toolu_old'
+      }) as never
+      const read = withDispatchTasks(
+        'p',
+        load,
+        { byParent: () => [row({ state: 'running' })] },
+        { rowsOf: () => [elsewhere, report(2, 'delivered', 'second')] }
+      )
+      expect(read.activeTasks).toEqual({
+        toolu_1: expect.objectContaining({ taskId: 's-abc123', runIndex: 3 })
+      })
+    })
+
+    it('a stored end of ANOTHER X-Agent that carries this card’s call id is not this card’s run', () => {
+      const foreign = Object.assign({}, report(1, 'delivered', 'not mine'), {
+        targetId: 's-other1'
+      }) as never
+      const read = withDispatchTasks(
+        'p',
+        load,
+        { byParent: () => [row({ state: 'running' })] },
+        { rowsOf: () => [foreign] }
+      )
+      expect(read.taskNotifications ?? []).toEqual([])
+      expect(read.activeTasks?.toolu_1).not.toHaveProperty('runIndex')
+    })
+
+    it('a launch still going carries no run index', () => {
+      const read = withDispatchTasks(
+        'p',
+        load,
+        { byParent: () => [row({ state: 'running' })] },
+        {
+          rowsOf: () => []
+        }
+      )
+      expect(read.activeTasks?.toolu_1).not.toHaveProperty('runIndex')
+    })
+  })
+
   it('a finished card whose call result is the launch acknowledgement is marked background (its input says nothing); a blocking answer is not', () => {
     const resultOf = (toolUseId: string, toolResult: string): ChatMessage => ({
       id: `res-${toolUseId}`,
@@ -119,15 +203,20 @@ describe('withDispatchTasks — any engine’s read, and the run’s own start',
       timestamp: 5
     })
     const ack =
+      'X-Agent rev launched on pi (id s-abc123). It runs in the background and you can keep working.'
+    // A transcript written before B-4 carries the harness session_id in the acknowledgement.
+    const oldAck =
       'X-Agent rev launched on pi (id s-abc123, session_id h). It runs in the background and you can keep working.'
-    const background = withDispatchTasks(
-      'p',
-      { messages: [use('toolu_1', 1), resultOf('toolu_1', ack)], statusLine: null },
-      { byParent: () => [row({ state: 'failed' })] }
-    )
-    expect(background.taskNotifications).toEqual([
-      expect.objectContaining({ toolUseId: 'toolu_1', status: 'failed', isBackgrounded: true })
-    ])
+    for (const text of [ack, oldAck]) {
+      const background = withDispatchTasks(
+        'p',
+        { messages: [use('toolu_1', 1), resultOf('toolu_1', text)], statusLine: null },
+        { byParent: () => [row({ state: 'failed' })] }
+      )
+      expect(background.taskNotifications).toEqual([
+        expect.objectContaining({ toolUseId: 'toolu_1', status: 'failed', isBackgrounded: true })
+      ])
+    }
     const blocking = withDispatchTasks(
       'p',
       {

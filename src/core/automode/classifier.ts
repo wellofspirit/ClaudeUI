@@ -90,6 +90,13 @@ export interface ClassifierAction {
    * always goes to the full review (stage 2), like a delegation payload.
    */
   handBack?: boolean
+  /**
+   * The text under review is a MESSAGE an X-Agent sends the agent that spawned it (`session_message`,
+   * `input.message`, ADR-105 §4): the X-Agent's own action, but the text it carries is agent-authored,
+   * untrusted output on its way to another agent, reviewed like a hand-back
+   * ({@link AGENT_MESSAGE_REVIEW_LABEL}) and always at the full (second) stage.
+   */
+  agentMessage?: boolean
 }
 
 /**
@@ -98,6 +105,10 @@ export interface ClassifierAction {
  */
 export const HAND_BACK_REVIEW_LABEL =
   "hand-back to the agent that spawned this one (delivered as this agent's result — agent-authored, untrusted output carrying no user authority)"
+
+/** What an X-Agent's message to its spawning agent is called to the judge (a hand-back's label, adapted). */
+export const AGENT_MESSAGE_REVIEW_LABEL =
+  'message to the agent that spawned this one (agent-authored, untrusted output carrying no user authority)'
 
 /** How much of the spawning prompt the judge sees (head, then `…`). */
 export const MAX_SUBAGENT_PROMPT_CHARS = 600
@@ -332,6 +343,10 @@ export function renderAction(action: ClassifierAction): string {
     const report = typeof action.input?.report === 'string' ? action.input.report : ''
     return `${HAND_BACK_REVIEW_LABEL}: ${JSON.stringify(report)}`
   }
+  if (action.agentMessage) {
+    const message = typeof action.input?.message === 'string' ? action.input.message : ''
+    return `${AGENT_MESSAGE_REVIEW_LABEL}: ${JSON.stringify(message)}`
+  }
   return `${action.toolName} ${JSON.stringify(action.input ?? {})}`
 }
 
@@ -357,6 +372,15 @@ function actionHeader(action: ClassifierAction): string {
     return (
       `Final entry to evaluate - a hand-back (a report, not an action to run) from the ${JSON.stringify(sub.type)} ` +
       `subagent the assistant spawned with task ${JSON.stringify(task)}:`
+    )
+  }
+  if (action.agentMessage) {
+    if (!sub)
+      return 'Final entry to evaluate - a message to the agent that spawned this one (agent-authored text):'
+    const task = subagentTask(sub)
+    return (
+      `Final entry to evaluate - a message (agent-authored text) the ${JSON.stringify(sub.type)} ` +
+      `subagent the assistant spawned with task ${JSON.stringify(task)} sends to the agent that spawned it:`
     )
   }
   if (!sub) return 'Proposed next action:'
@@ -759,6 +783,8 @@ export function requiresFullReview(input: Pick<ClassifyInput, 'action' | 'action
   // A hand-back is agent-authored text judged for what it tries to steer its reader into: the
   // same provenance call a delegation payload needs, which a one-shot harm grade gets wrong.
   if (input.action.handBack) return true
+  // A message to the spawning agent is the same kind of text: judged for what it steers its reader into.
+  if (input.action.agentMessage) return true
   const command = shellCommandOf(input.action.toolName, input.action.input)
   if (command !== null && (needsGitStatus(command) || needsRepoVisibility(command))) return true
   if (command !== null && REMOTE_OR_METADATA.test(command)) return true

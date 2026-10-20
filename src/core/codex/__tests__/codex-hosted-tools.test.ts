@@ -17,6 +17,7 @@ import { CODEX_HOSTED_TOOL_NAMES, codexDynamicToolSpecs } from '../codex-hosted-
 import {
   DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_FOLLOW_UP_GUIDANCE,
   DISPATCH_NAME_PARAM
 } from '../../../shared/dispatch-agent-description'
 import {
@@ -38,6 +39,18 @@ describe('codexDynamicToolSpecs — dispatch_agent (S4)', () => {
     expect(spec.description).toContain('For opencode:')
     expect(spec.description).toContain('For pi:')
     expect(codexDynamicToolSpecs(false).some((s) => s.name === 'dispatch_agent')).toBe(false)
+  })
+})
+
+describe('codexDynamicToolSpecs — dispatch_agent has no session_id (ADR-105 §4)', () => {
+  it('neither the schema nor the description offers it; a follow-up is a session_message', () => {
+    const spec = codexDynamicToolSpecs(true).find((s) => s.name === 'dispatch_agent')!
+    const schema = (spec as unknown as { inputSchema: unknown }).inputSchema as {
+      properties: Record<string, unknown>
+    }
+    expect(schema.properties).not.toHaveProperty('session_id')
+    expect(JSON.stringify(spec)).not.toContain('session_id')
+    expect(spec.description).toContain(DISPATCH_FOLLOW_UP_GUIDANCE)
   })
 })
 

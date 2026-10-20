@@ -5,7 +5,12 @@ import type { HostWindowHandle } from '../host'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
 import { buildSessionMessageWrapper, wrapperSender } from '../../shared/session-message-wrapper'
-import { runsInBackground } from '../../shared/dispatch-agent-description'
+import {
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
+  dispatchResultSuffix,
+  hasRemovedSessionId,
+  runsInBackground
+} from '../../shared/dispatch-agent-description'
 import type {
   ApprovalDecision,
   FileDiff,
@@ -3514,8 +3519,8 @@ export class CodexSession extends BaseSession {
    * codex → codex, which is same-engine besides).
    *
    * Mirrors `PiSession.handleDispatchAgent` in spirit — identical validation,
-   * identical `DispatchContext` construction, identical `[dispatch session_id:
-   * …]` success suffix, so a Codex-sourced dispatch reads exactly like a
+   * identical `DispatchContext` construction, identical blocking-result
+   * suffix (`dispatchResultSuffix`), so a Codex-sourced dispatch reads exactly like a
    * pi-sourced or Claude-sourced one — but imports nothing from pi and differs
    * in two ways the transport forces:
    *
@@ -3564,13 +3569,16 @@ export class CodexSession extends BaseSession {
       return refuse(
         'dispatch_agent requires "engine" (one of "claude"|"opencode"|"pi") and a string "prompt".'
       )
+    // `session_id` left `dispatch_agent` (ADR-105 §4), but a thread started before that keeps the
+    // static spec it was given and can still send one: refuse it, with nothing launched and no
+    // approval card raised.
+    if (hasRemovedSessionId(args?.session_id)) return refuse(DISPATCH_SESSION_ID_REMOVED_TEXT)
     const req: DispatchRequest = {
       engine,
       prompt,
       model: typeof args?.model === 'string' ? args.model : undefined,
       name: typeof args?.name === 'string' ? args.name : undefined,
       description: typeof args?.description === 'string' ? args.description : undefined,
-      sessionId: typeof args?.session_id === 'string' ? args.session_id : undefined,
       // The hosted tool call needs the root thread and a live root turn (a native child can
       // never call it), so the caller is always the top-level agent: background unless it
       // says otherwise (ADR-105 §2).
@@ -3591,7 +3599,6 @@ export class CodexSession extends BaseSession {
           engine: req.engine,
           prompt: req.prompt,
           ...(req.model !== undefined ? { model: req.model } : {}),
-          ...(req.sessionId !== undefined ? { session_id: req.sessionId } : {}),
           ...(req.runInBackground ? { run_in_background: true } : {})
         }
       }
@@ -3639,9 +3646,10 @@ export class CodexSession extends BaseSession {
       contentItems: [
         {
           type: 'inputText',
-          text: result.isError
-            ? result.text
-            : `${result.text}\n\n[dispatch session_id: ${result.sessionId} — pass it as session_id to continue this agent]`
+          text:
+            result.isError || !result.agentRef
+              ? result.text
+              : `${result.text}${dispatchResultSuffix(result.agentRef)}`
         }
       ],
       success: !result.isError

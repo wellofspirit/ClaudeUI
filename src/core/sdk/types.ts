@@ -587,6 +587,13 @@ export interface SdkMcpTool {
    * on the `tools/list` entry). Left unset, cli.js decides.
    */
   alwaysLoad?: boolean
+  /**
+   * Let the handler see input keys the `inputSchema` does not declare. By default the shape is
+   * validated as a stripping object, so an undeclared key never reaches the handler; the tool's
+   * `tools/list` schema lists only the declared keys either way. For a handler that must answer
+   * a removed parameter without advertising it.
+   */
+  passthrough?: boolean
 }
 
 /** Minimal Zod-shaped interface — we only need parsing and JSON schema conversion. */

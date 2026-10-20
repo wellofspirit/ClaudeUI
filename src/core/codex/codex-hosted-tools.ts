@@ -209,10 +209,6 @@ function dispatchAgentSpec(): DynamicToolSpec {
         },
         name: { type: 'string', description: DISPATCH_NAME_PARAM },
         description: { type: 'string', description: DISPATCH_DESCRIPTION_PARAM },
-        session_id: {
-          type: 'string',
-          description: 'session_id from a previous dispatch_agent result — continues that agent'
-        },
         run_in_background: { type: 'boolean', description: DISPATCH_BACKGROUND_PARAM }
       },
       required: ['engine', 'prompt'],
