@@ -539,6 +539,29 @@ describe('X-Agent results: origin dispatch-result (ADR-105 §3)', () => {
     expect(s.deliverNonUser).toHaveBeenCalledTimes(2)
   })
 
+  it('flushHeldDispatchResults waits for the resumed session’s totals seed before it starts a turn (as a user prompt does)', async () => {
+    const t = target()
+    await deliver(managerOf({}), t, result('report', { from: { key: `s-seed${n}`, title: 'rev' } }))
+    const s = fake(['started'])
+    let folded = false
+    let release!: () => void
+    const seed = new Promise<void>((resolve) => (release = resolve)).then(() => {
+      folded = true
+    })
+    let startedBeforeFold: boolean | undefined
+    s.deliverNonUser.mockImplementation(async () => {
+      startedBeforeFold = !folded
+      return 'started'
+    })
+    ;(s as unknown as { resumeSeedReady: () => Promise<void> }).resumeSeedReady = () => seed
+    const flushed = flushHeldDispatchResults(managerOf({ [t]: s }), t)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(s.deliverNonUser).not.toHaveBeenCalled()
+    release()
+    expect(await flushed).toBe(true)
+    expect(startedBeforeFold).toBe(false)
+  })
+
   describe('a flush of held results keeps an X-Agent’s earlier message ahead of its later result (ADR-105 §4)', () => {
     const fromMessage = (id: string): NonUserItem['from'] => ({
       key: `x-agent-message:${id}`,

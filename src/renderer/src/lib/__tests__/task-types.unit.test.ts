@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { countWakingTasks, hasWakingTask } from '../task-types'
+import { countDotTasks, countWakingTasks, hasWakingTask } from '../task-types'
 
 const tasks = (...types: string[]): Record<string, { taskType: string; wakesParent?: boolean }> =>
   Object.fromEntries(types.map((taskType, i) => [`tu-${i}`, { taskType }]))
@@ -40,5 +40,26 @@ describe('hasWakingTask', () => {
     expect(hasWakingTask(tasks('local_bash', 'in_process_teammate'))).toBe(true)
     expect(hasWakingTask({ a: { taskType: 'local_bash', wakesParent: true } })).toBe(true)
     expect(hasWakingTask({ a: { taskType: 'local_agent', wakesParent: false } })).toBe(false)
+  })
+})
+
+describe('countDotTasks', () => {
+  const mixed = {
+    agent: { taskType: 'local_agent', wakesParent: true },
+    shell: { taskType: 'local_bash', wakesParent: true },
+    xagent: { taskType: 'dispatch', wakesParent: true }
+  }
+
+  it('a live engine counts every waking task', () => {
+    expect(countDotTasks(mixed, true)).toBe(3)
+  })
+
+  it('an engine that is not live counts only the dispatched X-Agents the dispatcher re-raised', () => {
+    expect(countDotTasks(mixed, false)).toBe(1)
+    expect(countDotTasks({ a: mixed.agent, b: mixed.shell }, false)).toBe(0)
+  })
+
+  it('a dispatch record that does not wake the parent is not counted', () => {
+    expect(countDotTasks({ x: { taskType: 'dispatch', wakesParent: false } }, false)).toBe(0)
   })
 })

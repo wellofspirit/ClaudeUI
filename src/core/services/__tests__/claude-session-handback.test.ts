@@ -5,8 +5,7 @@
  * `task_notification` carries the REPORT in `handback_report` (its `summary` is a
  * pointer sentence), and the pointer notification is followed by a zero-turn
  * `result` that is not a turn end. docs/protocol-cc/04-system-subtypes.md §4.4,
- * 03-inbound-messages.md §3.7; frames copied from the live probe
- * (.notes/research/async-dispatch/r6-handback.md).
+ * 03-inbound-messages.md §3.7; frames copied from the live probe of 2026-10-19.
  *
  * Mock scaffold mirrors `claude-session-agent-note.test.ts`.
  */
@@ -379,7 +378,7 @@ describe('ClaudeSession — the zero-turn pointer result is not a turn end (S6)'
 
 // F1: cli.js drains its queue (where the hand-back prompt waits) only at the START
 // of a main-agent model round. Frame orders below are the two live probes of
-// 2026-10-19 (.notes/research/async-dispatch/v5-handback-timing.md, cli.js 2.1.293),
+// 2026-10-19 (docs/protocol-cc/03 §3.7, "A hand-back that starts an extra turn ..."; cli.js 2.1.293),
 // reduced to the frames that matter.
 describe('ClaudeSession — a hand-back that will start an extra turn marks the result (F1)', () => {
   const init = (): Record<string, unknown> => ({ type: 'system', subtype: 'init', model: 'm' })

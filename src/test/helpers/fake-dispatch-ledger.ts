@@ -17,6 +17,8 @@ export interface FakeDispatchLedger extends DispatchLedgerStore {
   readonly rows: Map<string, DispatchTargetRow>
   /** `create:<harnessRef>` and `update:<id>` in call order. */
   readonly log: string[]
+  /** Ids of `running` rows another live instance owns (what `ownedByOtherLiveInstance` answers). */
+  readonly foreignOwned: Set<string>
   /** What `spend` answers for a harness id (default none). */
   spendByHarnessRef: Map<string, { costUsd: number; unpricedTurns: number }>
   /** The row recorded for this harness id, if any. */
@@ -26,6 +28,7 @@ export interface FakeDispatchLedger extends DispatchLedgerStore {
 export function makeFakeDispatchLedger(): FakeDispatchLedger {
   const rows = new Map<string, DispatchTargetRow>()
   const log: string[] = []
+  const foreignOwned = new Set<string>()
   const spendByHarnessRef = new Map<string, { costUsd: number; unpricedTurns: number }>()
   let next = 0
   const rowFor = (engine: EngineId, harnessRef: string): DispatchTargetRow | undefined =>
@@ -33,6 +36,7 @@ export function makeFakeDispatchLedger(): FakeDispatchLedger {
   return {
     rows,
     log,
+    foreignOwned,
     spendByHarnessRef,
     rowFor,
     create(input) {
@@ -71,6 +75,7 @@ export function makeFakeDispatchLedger(): FakeDispatchLedger {
       rows.set(id, { ...row, ...patch })
       log.push(`update:${id}`)
     },
+    ownedByOtherLiveInstance: (id) => foreignOwned.has(id) && rows.get(id)?.state === 'running',
     spend: (harnessRef) => spendByHarnessRef.get(harnessRef) ?? { costUsd: 0, unpricedTurns: 0 }
   }
 }

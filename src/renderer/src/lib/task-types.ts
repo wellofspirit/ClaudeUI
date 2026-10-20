@@ -52,3 +52,19 @@ export function hasWakingTask(activeTasks: TaskRecords): boolean {
 export function countWakingTasks(activeTasks: TaskRecords): number {
   return Object.values(activeTasks).filter(wakes).length
 }
+
+/**
+ * How many background tasks the sidebar dot counts for a session. A live engine counts
+ * every task that will wake it. A session whose engine is not live (disconnected, or
+ * reopened from history) counts only dispatched X-Agents: they run in the dispatcher, not
+ * in the dead process, and it re-raises their records after a disconnect (ADR-105 §5) —
+ * a native subagent, shell or monitor record there is stale (the reducer clears them on
+ * disconnect), so it must not keep the dot violet.
+ */
+export function countDotTasks(activeTasks: TaskRecords, engineLive: boolean): number {
+  return engineLive
+    ? countWakingTasks(activeTasks)
+    : countWakingTasks(
+        Object.fromEntries(Object.entries(activeTasks).filter(([, t]) => t.taskType === 'dispatch'))
+      )
+}

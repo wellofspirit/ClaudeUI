@@ -19,7 +19,13 @@ import { ApprovalButtons } from './ApprovalButtons'
 import { PermissionDenialChip, PermissionDenialStrip } from './tool-registry/PermissionDenial'
 import { ToolReviewChip, ToolReviewStrip, canApproveBlock } from './tool-registry/ToolReview'
 import { armStopPillFallback } from '../../lib/stop-pill'
-import { deriveTaskState, isDispatchToolName, latestNotification } from './task-state'
+import {
+  deriveTaskState,
+  dispatchEndNote,
+  isDispatchToolName,
+  latestNotification,
+  taskFailureText
+} from './task-state'
 import { requestSubagentTranscript } from '../../lib/subagent-prefetch'
 import { useSubagentPending } from '../../hooks/useSubagentPending'
 import { dispatchLabel, taskHeaderLabel } from '../../../../shared/tool-kinds'
@@ -180,7 +186,7 @@ export function formatTokens(n: number): string {
 
 /**
  * Narrow card: below this container width the header and footer shed what they
- * can — the review chip's reviewer prefix, the word "Task", the usage text — and
+ * can — the review chip's reviewer prefix, the word "Task" (not a dispatch's "X-Agent"), the usage text — and
  * "Open in panel" becomes an icon. The header sheds, it never wraps (one row,
  * always); a clock under 300px goes too (`@max-[300px]/taskcard:hidden`).
  */
@@ -585,9 +591,15 @@ export function TaskCard({
   // context read as a bare "failed"), so show it alongside that output.
   // `isError` is already false for a stopped task (task-state.ts).
   // A transcript that is on its way counts as output: the failure text must not
-  // pop in after the body lands.
-  const failureSummary =
-    isError && (hasSubagentOutput || subagentPending) && result?.isError ? resultBody : ''
+  // pop in after the body lands. A background task's result body is hidden, so its
+  // error shows here too: a refused X-Agent launch says why in nothing else.
+  const failureSummary = taskFailureText({
+    isError,
+    resultIsError: result?.isError ?? false,
+    resultText: resultBody,
+    showsOutput: hasSubagentOutput || subagentPending,
+    isBackground
+  })
   const isStopping = stoppingTaskIds.includes(toolUseId)
   // Cross-engine dispatch cards (ADR-033 M3, M4b) reuse this component via the
   // 'task' kind but have no backgrounding concept — cli.js's backgroundTask
@@ -599,6 +611,17 @@ export function TaskCard({
   // prefix to sanitize) — safe to match unconditionally since only pi ever
   // emits that exact bare name (Claude/opencode use their own prefixed names).
   const isDispatch = isDispatchToolName(block.toolName)
+  // How a settled X-Agent ended, when only the notification says it (a failed or stopped
+  // run, a reload's "interrupted"): the body above is the launch acknowledgement or empty.
+  const endNote = dispatchEndNote({
+    isDispatch,
+    notification: bgNotification,
+    settled: !isRunning && !isQueued,
+    hasHandback,
+    isBackground,
+    resultText: resultBody,
+    failureShown: failureSummary !== ''
+  })
   // Gated on capabilities.backgroundTasks — engines without background execution
   // never offer "Send to background" — and on a registered foreground task:
   // an agent launched in the background (the 2.1.219+ default) and a task
@@ -754,7 +777,12 @@ export function TaskCard({
         className="w-full flex items-center gap-2 @max-[300px]/taskcard:gap-1.5 px-3 h-9 border-b border-border hover:bg-bg-hover transition-colors cursor-pointer"
       >
         {statusIcon}
-        <span className={`font-medium text-[13px] text-accent shrink-0 ${NARROW_ONLY_HIDE}`}>
+        {/* "Task" sheds on a narrow card; "X-Agent" stays: with it gone a dispatch's header is
+            only its description ("Dispatch: pi" when the call gave none) and reads as a plain tool. */}
+        <span
+          data-testid="TaskCard.label"
+          className={`font-medium text-[13px] text-accent shrink-0 ${view.dispatch ? '' : NARROW_ONLY_HIDE}`}
+        >
           {taskHeaderLabel(view)}
         </span>
         <span className="text-text-secondary text-[12px] truncate flex-1 min-w-[3rem] @max-[300px]/taskcard:min-w-[2rem] text-left">
@@ -928,6 +956,15 @@ export function TaskCard({
               className="border-t border-border px-3 py-2 text-[12px] text-danger whitespace-pre-wrap break-words"
             >
               {failureSummary}
+            </div>
+          )}
+
+          {endNote && (
+            <div
+              data-testid="TaskCard.endNote"
+              className="border-t border-border px-3 py-2 text-[12px] text-text-muted whitespace-pre-wrap break-words max-h-[200px] overflow-y-auto"
+            >
+              {endNote}
             </div>
           )}
 

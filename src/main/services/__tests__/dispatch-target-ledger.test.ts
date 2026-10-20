@@ -21,8 +21,9 @@ import {
   insertDispatchTarget,
   insertDispatchTargetWithRef,
   insertUsageEvent,
-  interruptRunningDispatchTargets,
+  interruptDispatchTargets,
   moveDispatchTargetParent,
+  runningDispatchTargets,
   runMigrations,
   updateDispatchTarget,
   type Db,
@@ -36,6 +37,7 @@ import {
   isDispatchTargetSession,
   resetDispatchTargetSessions
 } from '../../../core/services/dispatch-target-ledger'
+import { currentInstanceOwner, type InstanceOwner } from '../../../core/services/instance-owner'
 import { isRef } from '../../../shared/session-links'
 
 let db: Db
@@ -91,7 +93,7 @@ describe('dispatch_target (migration v35)', () => {
       expect(exists()).toBe(false)
       runMigrations(older)
       expect(exists()).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(38)
+      expect(older.pragma('user_version', { simple: true })).toBe(39)
       const columns = (
         older.prepare('PRAGMA table_info(dispatch_target)').all() as { name: string }[]
       ).map((c) => c.name)
@@ -114,8 +116,46 @@ describe('dispatch_target (migration v35)', () => {
         'created_at',
         'last_active_at',
         // v36 (the report store, ADR-105 §3): the target was started with `hand_back`.
-        'hand_back'
+        'hand_back',
+        // v39: the instance that runs a `running` target.
+        'owner_pid',
+        'owner_boot'
       ])
+    } finally {
+      older.close()
+    }
+  })
+})
+
+describe('migration v39 (the owner of a running target)', () => {
+  it('upgrades a v38 profile and keeps its rows, with no owner (they keep the old boot rule)', () => {
+    const older = new BetterSqlite3(':memory:') as unknown as Db
+    try {
+      runMigrations(
+        older,
+        MIGRATIONS.filter((m) => m.version < 39)
+      )
+      expect(older.pragma('user_version', { simple: true })).toBe(38)
+      older
+        .prepare(
+          `INSERT INTO dispatch_target
+             (id, engine, harness_ref, parent_session_id, parent_engine, cwd, model, launch_mode,
+              state, created_at, last_active_at, hand_back)
+           VALUES ('s-aaaaaa', 'claude', 'h-1', 'p-1', 'claude', '/proj', 'haiku', 'default',
+                   'running', 5, 6, 1)`
+        )
+        .run()
+      runMigrations(older)
+      expect(older.pragma('user_version', { simple: true })).toBe(39)
+      const [kept] = runningDispatchTargets(older)
+      expect(kept).toMatchObject({
+        id: 's-aaaaaa',
+        harnessRef: 'h-1',
+        handBack: true,
+        state: 'running',
+        createdAt: 5,
+        owner: null
+      })
     } finally {
       older.close()
     }
@@ -179,11 +219,50 @@ describe('dispatch_target DAO', () => {
     insertDispatchTarget(row({ id: 's-000002', harnessRef: 'b', state: 'idle' }), db)
     insertDispatchTarget(row({ id: 's-000003', harnessRef: 'c', state: 'failed' }), db)
     insertDispatchTarget(row({ id: 's-000004', harnessRef: 'd', state: 'running' }), db)
-    expect(interruptRunningDispatchTargets(db)).toBe(2)
-    expect(
-      ['s-000001', 's-000002', 's-000003', 's-000004'].map((id) => getDispatchTarget(id, db)?.state)
-    ).toEqual(['interrupted', 'idle', 'failed', 'interrupted'])
-    expect(interruptRunningDispatchTargets(db)).toBe(0)
+    const ids = ['s-000001', 's-000002', 's-000003', 's-000004']
+    expect(interruptDispatchTargets(ids, db)).toEqual(['s-000001', 's-000004'])
+    expect(ids.map((id) => getDispatchTarget(id, db)?.state)).toEqual([
+      'interrupted',
+      'idle',
+      'failed',
+      'interrupted'
+    ])
+    expect(interruptDispatchTargets(ids, db)).toEqual([])
+  })
+
+  it('records the owner of a running row and clears it when the boot pass interrupts it', () => {
+    const owner = { pid: 4242, boot: 'boot-a' }
+    insertDispatchTarget(row({ id: 's-000001', harnessRef: 'a' }), db, owner)
+    insertDispatchTarget(row({ id: 's-000002', harnessRef: 'b' }), db) // no owner
+    expect(runningDispatchTargets(db).map((r) => [r.id, r.owner])).toEqual([
+      ['s-000001', owner],
+      ['s-000002', null]
+    ])
+    // The row type stays what it was: the owner rides beside it.
+    expect(getDispatchTarget('s-000001', db)).toEqual(row({ id: 's-000001', harnessRef: 'a' }))
+    updateDispatchTarget('s-000001', { owner: { pid: 1, boot: 'boot-b' } }, db)
+    expect(runningDispatchTargets(db)[0].owner).toEqual({ pid: 1, boot: 'boot-b' })
+    updateDispatchTarget('s-000001', { lastActiveAt: 9 }, db) // an omitted owner keeps its value
+    expect(runningDispatchTargets(db)[0].owner).toEqual({ pid: 1, boot: 'boot-b' })
+    interruptDispatchTargets(['s-000001'], db)
+    expect(runningDispatchTargets(db).map((r) => r.id)).toEqual(['s-000002'])
+    const raw = db
+      .prepare('SELECT owner_pid, owner_boot FROM dispatch_target WHERE id = ?')
+      .get('s-000001')
+    expect(raw).toEqual({ owner_pid: null, owner_boot: null })
+  })
+
+  it('stopped is final: a later state or owner write (a run ending in another instance) is ignored', () => {
+    insertDispatchTarget(row({ id: 's-000001', harnessRef: 'a', state: 'stopped' }), db)
+    updateDispatchTarget('s-000001', { state: 'idle', lastActiveAt: 9 }, db)
+    expect(getDispatchTarget('s-000001', db)).toMatchObject({ state: 'stopped', lastActiveAt: 9 })
+    updateDispatchTarget('s-000001', { state: 'running', owner: { pid: 1, boot: 'b' } }, db)
+    expect(getDispatchTarget('s-000001', db)?.state).toBe('stopped')
+    expect(runningDispatchTargets(db)).toEqual([])
+    const raw = db
+      .prepare('SELECT owner_pid, owner_boot FROM dispatch_target WHERE id = ?')
+      .get('s-000001')
+    expect(raw).toEqual({ owner_pid: null, owner_boot: null })
   })
 
   it('lists every row not ended on purpose (the boot sweep’s candidates)', () => {
@@ -215,6 +294,8 @@ describe('dispatch_target DAO', () => {
 })
 
 describe('the store and the hide predicate (singleton DB)', () => {
+  // A process that boots after the one that wrote the rows: another pid and boot id.
+  const OTHER_BOOT: InstanceOwner = { pid: process.pid + 1, boot: 'a-later-boot' }
   const input = (harnessRef: string): Parameters<typeof dispatchLedger.create>[0] => {
     const { id: _id, state: _state, createdAt: _c, lastActiveAt: _l, ...rest } = row()
     return { ...rest, harnessRef }
@@ -299,8 +380,109 @@ describe('the store and the hide predicate (singleton DB)', () => {
 
   it('the boot pass interrupts running rows through the store module', () => {
     const created = dispatchLedger.create(input('sess-a'))
-    expect(interruptStaleDispatchTargets()).toBe(1)
+    // The process that wrote the row is gone (the one booting now is another).
+    expect(interruptStaleDispatchTargets(OTHER_BOOT, () => false)).toBe(1)
     expect(dispatchLedger.get(created.id)?.state).toBe('interrupted')
+  })
+
+  describe('which instance owns a running row (migration v39)', () => {
+    const ownerOf = (id: string): InstanceOwner | null =>
+      runningDispatchTargets().find((r) => r.id === id)?.owner ?? null
+
+    it('create() and every update to running record this instance; any other state clears it', () => {
+      const created = dispatchLedger.create(input('sess-a'))
+      expect(ownerOf(created.id)).toEqual(currentInstanceOwner())
+      dispatchLedger.update(created.id, { state: 'idle' })
+      // `runningDispatchTargets` leaves out the idle row, so make it `running` again without
+      // touching the owner (the db-level update): what it holds now is what the idle update left.
+      updateDispatchTarget(created.id, { state: 'running' })
+      expect(ownerOf(created.id)).toBeNull()
+      // A resume or a continuation sets it running again: the owner follows.
+      updateDispatchTarget(created.id, { owner: { pid: 1, boot: 'stale' } })
+      dispatchLedger.update(created.id, { state: 'running' })
+      expect(ownerOf(created.id)).toEqual(currentInstanceOwner())
+      // An update that does not touch the state keeps the owner.
+      dispatchLedger.update(created.id, { lastActiveAt: 5 })
+      expect(ownerOf(created.id)).toEqual(currentInstanceOwner())
+    })
+
+    it('a second instance booting on the same DB leaves the first one running rows alone', () => {
+      const parent = `parent-shared-${process.pid}`
+      const mine = dispatchLedger.create({ ...input('sess-a'), parentSessionId: parent })
+      // The second instance: another pid and boot id, while this process (the first) is alive.
+      expect(interruptStaleDispatchTargets(OTHER_BOOT)).toBe(0)
+      expect(dispatchLedger.get(mine.id)?.state).toBe('running')
+      expect(ownerOf(mine.id)).toEqual(currentInstanceOwner())
+      expect(heldInboxItems(parent)).toEqual([])
+    })
+
+    it('interrupts, and tells the parent of, a row whose owner is gone', () => {
+      const parent = `parent-dead-${process.pid}`
+      const dead = dispatchLedger.create({ ...input('sess-dead'), parentSessionId: parent })
+      const alive = dispatchLedger.create({ ...input('sess-alive'), parentSessionId: parent })
+      updateDispatchTarget(dead.id, { owner: { pid: 777_001, boot: 'crashed-boot' } })
+      updateDispatchTarget(alive.id, { owner: { pid: 777_002, boot: 'sibling-boot' } })
+      expect(interruptStaleDispatchTargets(OTHER_BOOT, (pid) => pid === 777_002)).toBe(1)
+      expect(dispatchLedger.get(dead.id)?.state).toBe('interrupted')
+      expect(dispatchLedger.get(alive.id)?.state).toBe('running')
+      expect(heldInboxItems(parent)).toMatchObject([{ fromKey: `x-agent:${dead.id}` }])
+    })
+
+    it('a live pid that is this process under another boot id is a reused pid: the row is interrupted', () => {
+      const reused = dispatchLedger.create(input('sess-reused'))
+      updateDispatchTarget(reused.id, { owner: { pid: process.pid, boot: 'an-earlier-boot' } })
+      expect(interruptStaleDispatchTargets()).toBe(1)
+      expect(dispatchLedger.get(reused.id)?.state).toBe('interrupted')
+    })
+
+    it('tells the parent only of the rows this pass changed (another instance got there first)', () => {
+      const parent = `parent-race-${process.pid}`
+      const raced = dispatchLedger.create({ ...input('sess-raced'), parentSessionId: parent })
+      updateDispatchTarget(raced.id, { owner: { pid: 777_003, boot: 'crashed-boot' } })
+      // The liveness probe is where the other instance's boot pass lands: it interrupts the row (and
+      // tells the parent itself) between this pass reading it and updating it.
+      const other = (pid: number): boolean => {
+        expect(pid).toBe(777_003)
+        interruptDispatchTargets([raced.id])
+        return false
+      }
+      expect(interruptStaleDispatchTargets(OTHER_BOOT, other)).toBe(0)
+      expect(dispatchLedger.get(raced.id)?.state).toBe('interrupted')
+      expect(heldInboxItems(parent)).toEqual([])
+    })
+
+    it('ownedByOtherLiveInstance: only a running row another instance, still alive, owns', () => {
+      const mine = dispatchLedger.create(input('sess-mine'))
+      expect(dispatchLedger.ownedByOtherLiveInstance(mine.id, () => true)).toBe(false)
+      const theirs = dispatchLedger.create(input('sess-theirs'))
+      updateDispatchTarget(theirs.id, { owner: { pid: 777_004, boot: 'sibling-boot' } })
+      expect(dispatchLedger.ownedByOtherLiveInstance(theirs.id, (pid) => pid === 777_004)).toBe(
+        true
+      )
+      expect(dispatchLedger.ownedByOtherLiveInstance(theirs.id, () => false)).toBe(false)
+      // Our pid under another boot id is a reused pid, not a second instance.
+      updateDispatchTarget(theirs.id, { owner: { pid: process.pid, boot: 'an-earlier-boot' } })
+      expect(dispatchLedger.ownedByOtherLiveInstance(theirs.id, () => true)).toBe(false)
+      updateDispatchTarget(theirs.id, { owner: { pid: 777_004, boot: 'sibling-boot' } })
+      dispatchLedger.update(theirs.id, { state: 'idle' })
+      expect(dispatchLedger.ownedByOtherLiveInstance(theirs.id, () => true)).toBe(false)
+      expect(dispatchLedger.ownedByOtherLiveInstance('s-nothing', () => true)).toBe(false)
+    })
+
+    it('a Stop is not written over by a late turn state from another instance', () => {
+      const created = dispatchLedger.create(input('sess-a'))
+      dispatchLedger.update(created.id, { state: 'stopped' })
+      dispatchLedger.update(created.id, { state: 'idle' })
+      dispatchLedger.update(created.id, { state: 'running' })
+      expect(dispatchLedger.get(created.id)?.state).toBe('stopped')
+      expect(ownerOf(created.id)).toBeNull()
+    })
+
+    it('a row with no owner (written before v39) is interrupted, as before', () => {
+      insertDispatchTarget(row({ id: 's-0b0b0b', harnessRef: 'legacy' }))
+      expect(interruptStaleDispatchTargets(OTHER_BOOT, () => true)).toBe(1)
+      expect(getDispatchTarget('s-0b0b0b')?.state).toBe('interrupted')
+    })
   })
 
   it('the boot pass leaves the parent of each interrupted X-Agent a dispatch-result notice in its inbox (ADR-105 §3)', () => {
@@ -314,7 +496,7 @@ describe('the store and the hide predicate (singleton DB)', () => {
     const done = dispatchLedger.create({ ...input('sess-idle'), parentSessionId: parent })
     dispatchLedger.update(done.id, { state: 'idle' })
 
-    expect(interruptStaleDispatchTargets()).toBe(2)
+    expect(interruptStaleDispatchTargets(OTHER_BOOT, () => false)).toBe(2)
     expect(heldInboxItems(parent)).toMatchObject([
       {
         origin: 'dispatch-result',
@@ -330,7 +512,7 @@ describe('the store and the hide predicate (singleton DB)', () => {
       }
     ])
     // Once: the rows are `interrupted` now, so a second pass finds nothing running.
-    expect(interruptStaleDispatchTargets()).toBe(0)
+    expect(interruptStaleDispatchTargets(OTHER_BOOT, () => false)).toBe(0)
     expect(heldInboxItems(parent)).toHaveLength(2)
   })
 

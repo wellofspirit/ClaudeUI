@@ -321,9 +321,20 @@ export function flushHeldDispatchResults(
   manager: SessionManager,
   routingId: string
 ): Promise<boolean> {
-  return serialized(routingId, () =>
-    flushNow(manager, routingId, { only: 'dispatch-result', respectCap: true, countStart: true })
-  )
+  return serialized(routingId, async () => {
+    // As a user prompt waits (`sendPrompt`): a resumed session's turn must not start on totals
+    // that are not folded in yet (a respawn without a prompt, then a cold fold of a long transcript).
+    try {
+      await manager.get(routingId)?.resumeSeedReady?.()
+    } catch (err) {
+      logger.warn(LOG, `resume seed for ${routingId} failed: ${errText(err)}`)
+    }
+    return flushNow(manager, routingId, {
+      only: 'dispatch-result',
+      respectCap: true,
+      countStart: true
+    })
+  })
 }
 
 /** Does this session have X-Agent results waiting? (A fresh DB read; false when the DB is unavailable.) */

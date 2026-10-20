@@ -4,7 +4,8 @@
  * A report is agent-authored, untrusted output with no user authority, and on a pi,
  * opencode or Codex parent no engine-side defence sits between it and the model. This is
  * ClaudeUI's port of what Claude Code does to a subagent's `SubagentHandback` report
- * (cli.js 2.1.293, `.notes/research/async-dispatch/r6-handback.md` Q3):
+ * (cli.js 2.1.293, `cli.js@char7716976` / `@char7721535`;
+ * `docs/protocol-cc/04-system-subtypes.md` §4.4):
  *
  *  1. every exotic line break becomes LF, so the indent below cannot be bypassed;
  *  2. text that imitates harness markup is DEFUSED: a `<` that opens a system-reminder,

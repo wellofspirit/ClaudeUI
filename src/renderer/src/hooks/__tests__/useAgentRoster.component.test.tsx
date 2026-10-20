@@ -473,6 +473,27 @@ describe('useAgentRoster', () => {
       ])
     })
 
+    it("reads a dispatch child's bucket with the child engine's tool map, and what nests in it", () => {
+      // A Codex X-Agent under a Claude session: its `collab:spawnAgent` is no Claude call.
+      const root = [
+        assistantWithTool('d-1', 'tu-d', 'mcp__claude-ui-collab__dispatch_agent', {
+          engine: 'codex',
+          prompt: 'go'
+        })
+      ]
+      const buckets = {
+        'tu-d': [assistantWithTool('d-2', 'tu-sp', 'collab:spawnAgent', { prompt: 'inner' })],
+        'tu-sp': [assistantWithTool('d-3', 'tu-sp2', 'collab:spawnAgent', { prompt: 'deeper' })]
+      }
+      expect(scanAgentTree(root, buckets, 'claude').map((r) => [r.toolUseId, r.depth])).toEqual([
+        ['tu-d', 0],
+        ['tu-sp', 1],
+        ['tu-sp2', 2]
+      ])
+      // The same buckets under a native Codex-less reading would list nothing below the dispatch.
+      expect(scanAgentTree(root, {}, 'claude').map((r) => r.toolUseId)).toEqual(['tu-d'])
+    })
+
     it('re-walks only the bucket whose array changed', () => {
       const messages = nestedMessages()
       const buckets = nestedBuckets()

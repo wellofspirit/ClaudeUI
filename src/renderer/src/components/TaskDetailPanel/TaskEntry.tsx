@@ -9,16 +9,18 @@ import { TerminalView } from '../chat/TerminalView'
 import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
 import {
   deriveTaskState,
+  dispatchEndNote,
   isDispatchToolName,
   isQueuedDispatchCall,
-  latestNotification
+  latestNotification,
+  taskFailureText
 } from '../chat/task-state'
 import { armStopPillFallback } from '../../lib/stop-pill'
 import { findTaskBlocks } from './utils'
 import { taskElapsedLabel, useTicker } from '../chat/TaskCard'
 import { requestSubagentTranscript } from '../../lib/subagent-prefetch'
 import { useSubagentPending } from '../../hooks/useSubagentPending'
-import type { ToolView } from '../../../../shared/tool-kinds'
+import { taskHeaderLabel, type ToolView } from '../../../../shared/tool-kinds'
 import type { EngineId } from '../../../../shared/types'
 
 type TaskView = Extract<ToolView, { kind: 'task' }>
@@ -152,7 +154,6 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   if (!taskBlock) return null
 
   const input = taskBlock.toolInput || {}
-  const description = String(input.description || input.prompt || '')
   const hasSubagentOutput = msgs.length > 0
   // The engine that issued this task call: the session's, unless the call sits
   // in a dispatch child's transcript (a nested entry), whose tool names are the
@@ -170,6 +171,11 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     resultBlock ?? undefined,
     taskBlock.toolName
   ) as TaskView
+  // The name the card shows: a dispatch's description is the X-Agent's own (its name or
+  // "Dispatch: <engine>"), not the raw prompt the input carries.
+  const description = isBash
+    ? String(input.command || input.description || input.prompt || '')
+    : taskView.description || taskView.prompt
   const isBackground =
     !!taskView.background ||
     activeTasks[toolUseId]?.isBackgrounded === true ||
@@ -208,6 +214,26 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     notification: bgNotification,
     resultIsError: resultBlock?.isError ?? false,
     queued
+  })
+  // The shared X-Agent test of the card (a tool name, so an engine this build does not know
+  // is one too), and the two lines the body below cannot show for a background call.
+  const isDispatch = isDispatchToolName(taskBlock.toolName)
+  const hasHandback = hasHandbackReport(bgNotification)
+  const failureSummary = taskFailureText({
+    isError,
+    resultIsError: resultBlock?.isError ?? false,
+    resultText,
+    showsOutput: hasSubagentOutput || subagentPending,
+    isBackground
+  })
+  const endNote = dispatchEndNote({
+    isDispatch,
+    notification: bgNotification,
+    settled: !isRunning && !isQueued,
+    hasHandback,
+    isBackground,
+    resultText,
+    failureShown: failureSummary !== ''
   })
   const elapsed = taskElapsedLabel({
     isRunning,
@@ -259,11 +285,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     setTaskStopping(activeSessionId, toolUseId)
     // A dispatch is stopped through the dispatcher, which arms the stop for a call that has
     // not started; without the flag Claude's stopTask finds no task and interrupts the turn.
-    const result = await window.api.stopTask(
-      activeSessionId,
-      toolUseId,
-      isDispatchToolName(taskBlock.toolName)
-    )
+    const result = await window.api.stopTask(activeSessionId, toolUseId, isDispatch)
     if (!result.success) {
       window.api.logError('TaskDetailPanel', `Failed to stop task: ${result.error}`)
       clearTaskStopping(activeSessionId, toolUseId)
@@ -296,10 +318,10 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
           <polyline points="6 9 12 15 18 9" />
         </svg>
         <span className="text-[13px] text-accent font-medium shrink-0">
-          {isBash ? 'Bash' : 'Task'}
+          {isBash ? 'Bash' : taskHeaderLabel(taskView)}
         </span>
         <span className="text-[12px] text-text-primary truncate flex-1 text-left">
-          {isBash ? String(input.command || description) : description}
+          {description}
         </span>
         {statusBadge}
         {elapsed !== undefined && (
@@ -381,7 +403,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
               />
             ) : isBash && hasResult && resultText ? (
               <TerminalView text={resultText} maxHeight="none" />
-            ) : hasResult && resultText && !isBackground && !hasHandbackReport(bgNotification) ? (
+            ) : hasResult && resultText && !isBackground && !hasHandback ? (
               <div ref={contentRef} className="text-[12px] text-text-primary/80 leading-[1.6]">
                 <MarkdownRenderer content={resultText} />
               </div>
@@ -395,9 +417,25 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
             {/* The report a SubagentHandback subagent delivered (or didn't). */}
             <HandbackReport
               notification={bgNotification}
-              xAgent={dispatchChildEngine(taskView) !== undefined}
+              xAgent={isDispatch}
               className="mt-3 border-t border-border pt-3 shrink-0"
             />
+            {failureSummary && (
+              <div
+                data-testid="TaskEntry.failureSummary"
+                className="mt-3 border-t border-border pt-3 shrink-0 text-[12px] text-danger whitespace-pre-wrap break-words"
+              >
+                {failureSummary}
+              </div>
+            )}
+            {endNote && (
+              <div
+                data-testid="TaskEntry.endNote"
+                className="mt-3 border-t border-border pt-3 shrink-0 text-[12px] text-text-muted whitespace-pre-wrap break-words"
+              >
+                {endNote}
+              </div>
+            )}
           </div>
           {!following && (
             <button

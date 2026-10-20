@@ -79,7 +79,7 @@ const NATIVE = 'native'
  * `-32601` by `CodexAppServerClient` itself and never reaches the demultiplexer.
  * The refresh is the host's own (ADR-069 §8); the rest belong to whichever owner
  * claimed the request's thread, and a dispatch TARGET's narrower surface
- * (`CODEX_TARGET_SERVER_METHODS`, no `item/tool/call`) is enforced by that owner
+ * (`CODEX_TARGET_SERVER_METHODS`; `item/tool/call` answered only for the target's two tools) is enforced by that owner
  * rather than by the transport now that it shares a process with sessions.
  */
 const SERVER_METHODS = [

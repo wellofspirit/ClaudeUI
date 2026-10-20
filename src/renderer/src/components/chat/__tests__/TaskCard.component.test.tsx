@@ -33,6 +33,7 @@ import { TaskCard } from '../TaskCard'
 import { resetAgentTypeCatalog } from '../../../hooks/useAgentTypeCatalog'
 import { rosterScanStats, useSessionAgentTypes } from '../../../hooks/useAgentRoster'
 import { PiEngineToolMap } from '../tool-registry/PiEngineToolMap'
+import { dispatchTaskView } from '../../../../../shared/tool-kinds'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -405,6 +406,152 @@ describe('TaskCard — a dispatch run (task-started / task-notification)', () =>
         expect(screen.queryByTestId('md')).not.toBeInTheDocument()
       }
     )
+
+    // The card never hid these before the background became the default: why a run
+    // failed, and how one that sent no report ended, were in the result body.
+    it('a refused background launch (an error result) shows its reason', () => {
+      const refused = {
+        ...ack,
+        toolResult: 'X-Agent refused: 4 X-Agents are already running (the limit).',
+        isError: true
+      }
+      const refusedBlock = makeTaskBlock({
+        toolUseId: 'toolu_dispatch_run',
+        toolName: 'mcp__claude-ui-collab__dispatch_agent',
+        toolInput: { engine: 'pi', prompt: 'go', run_in_background: true }
+      })
+      render(
+        <TaskCard block={refusedBlock} result={refused} view={{ ...view, background: true }} />
+      )
+      expect(status()).toBe('failed')
+      expand()
+      expect(screen.getByTestId('TaskCard.failureSummary')).toHaveTextContent(
+        'X-Agent refused: 4 X-Agents are already running (the limit).'
+      )
+    })
+
+    it('a refused launch keeps the X-Agent label on a narrow card; a native Task sheds its word', () => {
+      const refused = { ...ack, toolResult: 'X-Agent refused: over the limit.', isError: true }
+      const { unmount } = render(
+        <TaskCard
+          block={plainBlock}
+          result={refused}
+          view={dispatchTaskView({ engine: 'pi', prompt: 'go', runInBackground: true })}
+        />
+      )
+      expect(status()).toBe('failed')
+      // No description was given, so the header text is the fallback: the label must say what it is.
+      expect(screen.getByTestId('TaskCard.expand')).toHaveTextContent('X-AgentDispatch: pi')
+      expect(screen.getByTestId('TaskCard.label')).not.toHaveClass('@max-[480px]/taskcard:hidden')
+      unmount()
+      render(<TaskCard block={makeTaskBlock()} result={refused} view={defaultTaskView} />)
+      expect(screen.getByTestId('TaskCard.label')).toHaveTextContent('Task')
+      expect(screen.getByTestId('TaskCard.label')).toHaveClass('@max-[480px]/taskcard:hidden')
+    })
+
+    it.each([
+      ['failed', 'The X-Agent ran out of time.'],
+      ['failed', 'Dispatched turn failed: boom'],
+      ['stopped', 'The X-Agent was stopped.']
+    ] as const)('a %s run with no report says how it ended: "%s"', (endStatus, summary) => {
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_run',
+        status: endStatus,
+        outputFile: '',
+        summary,
+        isBackgrounded: true
+      })
+      render(<TaskCard block={plainBlock} result={launchAck} view={view} />)
+      expand()
+      expect(screen.getByTestId('TaskCard.endNote')).toHaveTextContent(summary)
+    })
+
+    it('a reloaded run the ledger found interrupted says it can be resumed (neutral card)', () => {
+      useSessionStore.setState((state) => ({
+        sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], isHistorical: true } }
+      }))
+      mirrorStoreIntoReplica()
+      const summary =
+        'The X-Agent was interrupted before it finished (the app closed or its parent session cancelled). It can be resumed.'
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_run',
+        status: 'unfinished',
+        outputFile: '',
+        summary,
+        isBackgrounded: true
+      })
+      render(<TaskCard block={plainBlock} result={launchAck} view={view} />)
+      expect(status()).toBe('loaded')
+      expand()
+      expect(screen.getByTestId('TaskCard.endNote')).toHaveTextContent(summary)
+    })
+
+    it('says nothing twice: a hand-back report, or the result body of a blocking call, is the card’s words', () => {
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_run',
+        status: 'completed',
+        outputFile: '',
+        summary: 'the report',
+        handback: 'send',
+        isBackgrounded: true
+      })
+      const { unmount } = render(<TaskCard block={plainBlock} result={launchAck} view={view} />)
+      expand()
+      expect(screen.queryByTestId('TaskCard.endNote')).not.toBeInTheDocument()
+      expect(screen.getByTestId('HandbackReport.text')).toHaveTextContent('the report')
+      unmount()
+
+      // A blocking call: the tool result carries the answer (the notification's is a 100-char cut).
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc124',
+        toolUseId: 'toolu_blocking',
+        status: 'failed',
+        outputFile: '',
+        summary: 'Dispatched turn failed: boom'
+      })
+      const blockingBlock = makeTaskBlock({
+        toolUseId: 'toolu_blocking',
+        toolName: 'mcp__claude-ui-collab__dispatch_agent',
+        toolInput: { engine: 'pi', prompt: 'go' }
+      })
+      render(
+        <TaskCard
+          block={blockingBlock}
+          result={{
+            ...ack,
+            toolUseId: 'toolu_blocking',
+            toolResult: 'Dispatched turn failed: boom'
+          }}
+          view={view}
+        />
+      )
+      expand()
+      expect(screen.queryByTestId('TaskCard.endNote')).not.toBeInTheDocument()
+    })
+
+    it('a native background agent’s notification summary is not drawn (only an X-Agent’s)', () => {
+      const nativeBlock = makeTaskBlock({ toolUseId: 'toolu_native' })
+      seed.taskNotification(ROUTE, {
+        taskId: 'a1',
+        toolUseId: 'toolu_native',
+        status: 'failed',
+        outputFile: '',
+        summary: 'Agent "x" failed',
+        isBackgrounded: true
+      })
+      render(
+        <TaskCard
+          block={nativeBlock}
+          result={{ ...ack, toolUseId: 'toolu_native', toolResult: 'Async agent launched' }}
+          view={{ ...defaultTaskView, background: true }}
+        />
+      )
+      expand()
+      expect(screen.queryByTestId('TaskCard.endNote')).not.toBeInTheDocument()
+    })
 
     it('an explicit blocking card is unchanged: its result is the body', () => {
       seed.taskNotification(ROUTE, {
@@ -1202,7 +1349,7 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
   })
 
   // ADR-105 §3: an X-Agent ends in the report it handed back, which is the terminal
-  // notification's summary: the card shows it (S6's HandbackReport), once.
+  // notification's summary: the card shows it (the HandbackReport component), once.
   describe('the report an X-Agent handed back', () => {
     const notify = (extra: {
       summary: string

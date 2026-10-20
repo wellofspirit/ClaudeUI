@@ -1,7 +1,6 @@
 import type { ChatMessage, EngineId } from '../../../../shared/types'
+import { ENGINE_META } from '../../../../shared/engine-meta'
 import { SubagentMessages } from './SubagentMessages'
-
-const ENGINE_IDS: Record<EngineId, true> = { claude: true, opencode: true, pi: true, codex: true }
 
 /**
  * The engine a dispatch card's child runs on — `view.dispatch.engine`, when it
@@ -10,7 +9,7 @@ const ENGINE_IDS: Record<EngineId, true> = { claude: true, opencode: true, pi: t
  */
 export function dispatchChildEngine(view: { dispatch?: { engine: string } }): EngineId | undefined {
   const engine = view.dispatch?.engine
-  return engine && Object.hasOwn(ENGINE_IDS, engine) ? (engine as EngineId) : undefined
+  return engine && Object.hasOwn(ENGINE_META, engine) ? (engine as EngineId) : undefined
 }
 
 interface Props {

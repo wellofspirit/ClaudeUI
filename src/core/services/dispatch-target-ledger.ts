@@ -26,7 +26,7 @@ import {
   getDispatchTarget,
   getDispatchTargetByHarnessRef,
   insertDispatchTargetWithRef,
-  interruptRunningDispatchTargets,
+  interruptDispatchTargets,
   runningDispatchTargets,
   updateDispatchTarget,
   type DispatchTargetPatch,
@@ -34,6 +34,7 @@ import {
   type DispatchTargetState
 } from './db'
 import { mintRef } from './session-ref-mint'
+import { currentInstanceOwner, ownerIsGone, type InstanceOwner } from './instance-owner'
 import { logger } from './logger'
 import { isRef } from '../../shared/session-links'
 import { X_AGENT_KEY_PREFIX } from '../../shared/session-message-wrapper'
@@ -63,6 +64,11 @@ export interface DispatchLedgerStore {
   /** Every target a parent session owns, newest first. */
   byParent(parentSessionId: string): DispatchTargetRow[]
   update(id: string, patch: DispatchTargetPatch): void
+  /**
+   * Does ANOTHER ClaudeUI instance, still running, own this `running` row (a second app sharing
+   * the DB)? Then it may be running the X-Agent right now. `alive` is for tests.
+   */
+  ownedByOtherLiveInstance(id: string, alive?: (pid: number) => boolean): boolean
   /** What the target's turns have cost so far (the `dispatch` rows of `usage_event`). */
   spend(harnessRef: string): { costUsd: number; unpricedTurns: number }
 }
@@ -147,7 +153,8 @@ export const dispatchLedger: DispatchLedgerStore = {
       }
       // One transaction: the ref, or this harness session, may already be taken. A taken
       // harness id cannot be fixed by another ref, so that case ends in the throw below.
-      if (!insertDispatchTargetWithRef(row)) continue
+      // A new target is `running`: this instance owns it (the boot pass of another leaves it alone).
+      if (!insertDispatchTargetWithRef(row, undefined, currentInstanceOwner())) continue
       hiddenSessions()?.add(row.harnessRef)
       return row
     }
@@ -158,8 +165,22 @@ export const dispatchLedger: DispatchLedgerStore = {
   getByHarnessRef: (engine, harnessRef) => getDispatchTargetByHarnessRef(engine, harnessRef),
   byParent: (parentSessionId) => dispatchTargetsByParent(parentSessionId),
   update(id, patch) {
-    updateDispatchTarget(id, patch)
+    // Whoever sets a row `running` owns it; a row in any other state owns nothing. Done here, not by
+    // each caller, so no place that starts a turn (a launch, a resume, a continue) can forget it.
+    const owner =
+      patch.state === undefined
+        ? undefined
+        : patch.state === 'running'
+          ? currentInstanceOwner()
+          : null
+    updateDispatchTarget(id, owner === undefined ? patch : { ...patch, owner })
     if (patch.harnessRef !== undefined) hiddenSessions()?.add(patch.harnessRef)
+  },
+  ownedByOtherLiveInstance(id, alive) {
+    const owner = runningDispatchTargets().find((row) => row.id === id)?.owner
+    return (
+      !!owner && owner.boot !== currentInstanceOwner().boot && !ownerIsGone(owner, undefined, alive)
+    )
   }
 }
 
@@ -190,15 +211,22 @@ function leaveInterruptedNotice(row: DispatchTargetRow): void {
 }
 
 /**
- * Boot, once per process: a row still `running` belongs to a process that no longer
- * exists (an app quit or a crash). Nothing resumes automatically (ADR-105 §5).
+ * Boot, once per process: a row still `running` whose owner is gone (an app quit or a crash)
+ * is `interrupted`, and its parent is told. A row owned by another instance that is still alive
+ * (a second ClaudeUI sharing this DB) is left alone, as is one this boot already owns; a row
+ * written before the owner column has no owner and is interrupted, as it always was. Nothing
+ * resumes automatically (ADR-105 §5). `me` and `alive` are for tests.
  */
-export function interruptStaleDispatchTargets(): number {
+export function interruptStaleDispatchTargets(
+  me: InstanceOwner = currentInstanceOwner(),
+  alive?: (pid: number) => boolean
+): number {
   try {
-    const running = runningDispatchTargets()
-    const changed = interruptRunningDispatchTargets()
-    for (const row of running) leaveInterruptedNotice(row)
-    return changed
+    const stale = runningDispatchTargets().filter((row) => ownerIsGone(row.owner, me, alive))
+    const changed = new Set(interruptDispatchTargets(stale.map((row) => row.id)))
+    // Only the rows this pass changed: another instance booting over the same dead owner tells the parent once.
+    for (const row of stale) if (changed.has(row.id)) leaveInterruptedNotice(row)
+    return changed.size
   } catch (err) {
     logger.warn(
       'DispatchLedger',

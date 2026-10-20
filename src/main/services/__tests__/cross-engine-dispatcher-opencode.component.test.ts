@@ -97,7 +97,6 @@ import {
 import { makeFakeDispatchReports } from '../../../test/helpers/fake-dispatch-reports'
 import {
   HAND_BACK_DONE_TEXT,
-  HAND_BACK_ENDED_TEXT,
   HAND_BACK_NOT_TARGET_TEXT,
   HAND_BACK_REPEAT_TEXT,
   handBackNudge
@@ -902,9 +901,12 @@ describe('opencode target — lifecycle', () => {
       directory: cwd
     }))
 
-    await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx({ cwd: '/proj/one' }))
-    await dispatcher.dispatch({ engine: 'opencode', prompt: 'b' }, makeCtx({ cwd: '/proj/two' }))
-    // One server, one feed — whatever the cwd.
+    // Both live at once (a run releases its target when it ends, and the last target of a
+    // server takes its feed with it): one server, one feed — whatever the cwd.
+    await Promise.all([
+      dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx({ cwd: '/proj/one' })),
+      dispatcher.dispatch({ engine: 'opencode', prompt: 'b' }, makeCtx({ cwd: '/proj/two' }))
+    ])
     expect(fakeA.client.subscribeEvents).toHaveBeenCalledTimes(1)
 
     // A config change: the next lease (same cwd as the first) is another server.
@@ -930,11 +932,14 @@ describe('opencode target — lifecycle', () => {
   })
 
   it("disposing the server's last target while another is being created keeps the feed for the new one", async () => {
-    const { dispatcher, client } = makeHarness()
-    await dispatcher.dispatch(
+    const { dispatcher, client, fake } = makeHarness()
+    // chat-a's target is the server's last one and stays live (a finished run releases its target).
+    fake.next({ hold: true })
+    const first = dispatcher.dispatch(
       { engine: 'opencode', prompt: 'a' },
       makeCtx({ fromRoutingId: 'chat-a' })
     )
+    await tick()
     let releaseCreate!: () => void
     const gate = new Promise<void>((resolve) => (releaseCreate = resolve))
     const real = client.createSession.getMockImplementation()!
@@ -951,6 +956,7 @@ describe('opencode target — lifecycle', () => {
     await tick()
     releaseCreate()
     const result = await second
+    await first
     expect(result).toEqual({
       text: 'target answer',
       sessionId: 'oc-sess-2',
@@ -1357,12 +1363,15 @@ describe('opencode target — usage and the cost cap', () => {
     vi.spyOn(opencodeAuthProvider, 'buildAccountRef').mockReturnValue({
       billingType: 'apiKey'
     } as never)
-    const { dispatcher, fake } = makeHarness({
+    const { dispatcher, fake, ledger } = makeHarness({
       loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai/gpt-5', maxCostUsd: 1 } })
     })
     fake.next({ steps: [{ text: 'pricey', cost: 1.5, tokens: { ...ZERO, input: 1 } }] })
     const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
     expect(first.text).toContain('dispatch cost cap reached')
+    // The run released the session: the continuation reads what it spent from its rows (the fake
+    // ledger is told what the first turn recorded).
+    ledger.spendByHarnessRef.set(first.sessionId!, { costUsd: 1.5, unpricedTurns: 0 })
     const refused = await dispatcher.dispatch(
       { engine: 'opencode', prompt: 'b', sessionId: first.sessionId },
       makeCtx()
@@ -2250,7 +2259,7 @@ describe('opencode target — a Stop before the turn starts (review S9 #1)', () 
     expect(client.prompt).not.toHaveBeenCalled()
   })
 
-  it('a stop while the prompt POST is in flight: the item is cancelled once admitted, the started execution interrupted, a late ask refused WITH a message', async () => {
+  it('a stop while the prompt POST is in flight: the item is cancelled once admitted and the started execution interrupted', async () => {
     const { dispatcher, client, fake } = makeHarness()
     let admit!: () => void
     const admitted = new Promise<void>((resolve) => (admit = resolve))
@@ -2273,22 +2282,10 @@ describe('opencode target — a Stop before the turn starts (review S9 #1)', () 
     const inboxID = (client.prompt.mock.calls[0][1] as { id: string }).id
     expect(client.cancelInbox).toHaveBeenCalledWith('oc-sess-1', inboxID)
     expect(client.interrupt).toHaveBeenCalledWith('oc-sess-1')
-
-    // An ask of whatever still runs is refused, never judged or carded.
+    // The run is over and its session released: an ask of whatever still runs is never carded.
     fake.ask('oc-sess-1', { id: 'per_late', action: 'edit', resources: ['a.txt'] })
     await tick()
-    expect(client.replyPermission).toHaveBeenCalledWith('oc-sess-1', 'per_late', {
-      decision: 'reject',
-      message: expect.stringContaining('not running')
-    })
     expect(emitted(ctx, 'session:approval-request')).toHaveLength(0)
-
-    // An execution that starts while the give-up winds down is interrupted again.
-    client.interrupt.mockClear()
-    fake.sessions.get('oc-sess-1')!.running = false
-    fake.start('oc-sess-1')
-    await tick()
-    expect(client.interrupt).toHaveBeenCalledWith('oc-sess-1')
   })
 
   it('a CARD Stop while the prompt POST is in flight ends the X-Agent: its session is removed even though the POST has not settled', async () => {
@@ -2321,15 +2318,13 @@ describe('opencode target — a Stop before the turn starts (review S9 #1)', () 
     expect(ledger.rowFor('opencode', 'oc-sess-1')?.state).toBe('stopped')
   })
 
-  it('an ask while the target is idle (no dispatch turn running) is refused with a message', async () => {
-    const { dispatcher, client, fake } = makeHarness()
-    await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
+  it('an ask from a session whose run is over is never carded or judged', async () => {
+    const { dispatcher, fake } = makeHarness()
+    const ctx = makeCtx()
+    await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, ctx)
     fake.ask('oc-sess-1', { id: 'per_idle', action: 'shell', resources: ['ls'] })
     await tick()
-    expect(client.replyPermission).toHaveBeenCalledWith('oc-sess-1', 'per_idle', {
-      decision: 'reject',
-      message: expect.stringContaining('not running')
-    })
+    expect(emitted(ctx, 'session:approval-request')).toHaveLength(0)
   })
 })
 
@@ -2351,7 +2346,7 @@ describe('opencode target — turns that join a running execution (review S9 #2)
     expect((await second).text).toBe('joined answer')
   })
 
-  it('steps outside any dispatch turn are metered: a ledger row, the cap and the breakdown', async () => {
+  it('steps of a released session are no longer metered: its run is over and its feed is gone', async () => {
     vi.spyOn(opencodeAuthProvider, 'buildAccountRef').mockReturnValue({
       billingType: 'apiKey'
     } as never)
@@ -2359,17 +2354,13 @@ describe('opencode target — turns that join a running execution (review S9 #2)
     const ctx = makeCtx()
     await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, ctx)
     expect(recorded).toHaveLength(1)
+    // A woken execution of the session (an opencode background subagent finished): the dispatcher
+    // released the session when the run ended, so it does not watch it. A message resumes it.
     fake.start('oc-sess-1')
     fake.step('oc-sess-1', { text: 'woken', cost: 0.4, tokens: { ...ZERO, input: 30 } })
     await tick()
-    expect(recorded).toHaveLength(2)
-    expect(recorded[1]).toMatchObject({
-      origin: 'dispatch',
-      sessionId: 'oc-sess-1',
-      engineCostUsd: 0.4,
-      tokens: { input: 30 }
-    })
-    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.4)
+    expect(recorded).toHaveLength(1)
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.4)
   })
 })
 
@@ -2927,9 +2918,9 @@ describe('opencode target — hand_back', () => {
       })
     expect((await pending).text).toContain('  first')
     expect(reports.rows).toHaveLength(1)
-    // …and once the run is over the target's own session is refused too.
+    // …and once the run is over its session is released: it is not a target any more.
     expect(dispatcher.handBackFromOpencode('oc-sess-1', 'late', undefined).text).toBe(
-      HAND_BACK_ENDED_TEXT
+      HAND_BACK_NOT_TARGET_TEXT
     )
   })
 
@@ -3065,7 +3056,8 @@ describe('opencode target — hand_back', () => {
     fake.finish('oc-sess-1')
     const result = await pending
     expect(result.text).toContain('  R')
-    expect(client.interrupt).not.toHaveBeenCalled()
+    // The one interrupt is the release's, when the run ends; none ended the turn.
+    expect(client.interrupt).toHaveBeenCalledTimes(1)
   })
 
   it('without requireHandBack the target keeps the interactive deny and the task as written', async () => {
@@ -3559,21 +3551,26 @@ describe('opencode target — a steered message is answered or sent again', () =
     expect(events.filter((e) => e.channel === 'session:task-started')).toHaveLength(2)
   })
 
-  it('backstop: an execution that starts on a message with NO run in flight is interrupted at once', async () => {
+  it('after the LAST run the target is released: the held message was taken back at the report, and nothing watches the session any more', async () => {
     const t = await launched()
     t.fake.next({ silent: true })
     await t.message('stray')
+    const steer = t.client.prompt.mock.calls.at(-1)![1] as { id: string }
     t.dispatcher.handBackFromOpencode('oc-sess-1', 'the report', undefined)
+    // The report took the unread steer back from the server…
+    expect(t.client.cancelInbox).toHaveBeenCalledWith('oc-sess-1', steer.id)
     t.fake.next({ hold: true })
     t.fake.finish('oc-sess-1')
     await vi.waitFor(() => expect(t.prompts()).toHaveLength(3))
+    // …and run 2 (the message sent again) reports; that run was the last. Run 1 was not the last: the
+    // target stayed live for run 2, so nothing was released yet.
+    expect(t.serverManager.releaseIfCurrent).not.toHaveBeenCalled()
     t.dispatcher.handBackFromOpencode('oc-sess-1', 'second', undefined)
     t.fake.finish('oc-sess-1')
     await vi.waitFor(() => expect(t.dispatcher.inFlightCount).toBe(0))
-    t.client.interrupt.mockClear()
-    // opencode's coordinator wakes for a message it still holds: nobody asked for this turn.
-    t.fake.start('oc-sess-1')
-    await tick(6)
-    expect(t.client.interrupt).toHaveBeenCalledWith('oc-sess-1')
+    // Released after the run's delivery: the server lease is given back and the row is idle.
+    await vi.waitFor(() => expect(t.serverManager.releaseIfCurrent).toHaveBeenCalledTimes(1))
+    expect(t.ledger.rows.get(t.id)!.state).toBe('idle')
+    // (the backstop for an execution during the delivery is the test above)
   })
 })

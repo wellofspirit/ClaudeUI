@@ -148,6 +148,51 @@ export function isDispatchToolName(toolName: string): boolean {
 }
 
 /**
+ * Why a failed task failed, for a card whose body does not already say: the tool_result's
+ * error text. It stays in the result body of a foreground task with no streamed output; it
+ * is a line of its own beside the output of one that streamed some (the output hid the
+ * reason), and for a BACKGROUND task, whose result body is hidden altogether (a refused
+ * background launch is an error result carrying the reason, nothing else).
+ */
+export function taskFailureText(i: {
+  isError: boolean
+  /** `tool_result.isError`: a failure the notification alone (which has no reason) cannot explain. */
+  resultIsError: boolean
+  resultText: string
+  /** The body shows the agent's streamed output (or is about to). */
+  showsOutput: boolean
+  isBackground: boolean
+}): string {
+  return i.isError && i.resultIsError && (i.showsOutput || i.isBackground) ? i.resultText : ''
+}
+
+/**
+ * How a settled X-Agent ended, when the notification says it in words and no hand-back
+ * report does: "The X-Agent ran out of time.", "Dispatched turn failed: …", a stop, a run
+ * a reload found unfinished ("It can be resumed."), or a background result that came with
+ * no report (ADR-105 §5). The card and the panel draw it as a muted line.
+ *
+ * Empty when the card already says it: a hand-back report, the failure line
+ * ({@link taskFailureText}), or the tool_result body (which a foreground call shows).
+ */
+export function dispatchEndNote(i: {
+  isDispatch: boolean
+  notification: TaskNotification | undefined
+  /** Neither running nor queued. */
+  settled: boolean
+  /** The notification carries a hand-back report the card draws (`hasHandbackReport`). */
+  hasHandback: boolean
+  isBackground: boolean
+  /** The tool_result text. */
+  resultText: string
+  failureShown: boolean
+}): string {
+  const summary = i.notification?.summary.trim() ?? ''
+  if (!i.isDispatch || !i.settled || i.hasHandback || i.failureShown || !summary) return ''
+  return i.isBackground || !i.resultText ? summary : ''
+}
+
+/**
  * Whether a tool call has not started because an EARLIER call of its own assistant message
  * has no result yet (cli.js 2.1.293, the streaming tool executor):
  * `canExecuteTool` lets a call that is not concurrency-safe run only when nothing else of
@@ -171,6 +216,21 @@ export function isBehindUnfinishedCall(
   const answered = new Set<string>()
   for (const block of content) if (block.type === 'tool_result') answered.add(block.toolUseId)
   return content.slice(0, own).some((b) => b.type === 'tool_use' && !answered.has(b.toolUseId))
+}
+
+/**
+ * Whether a message holds a dispatch call that follows another tool call: the only shape
+ * {@link isQueuedDispatchCall} can ever answer yes for. A bubble without one need not follow
+ * the turn's state.
+ */
+export function hasDispatchBehindCall(content: readonly ContentBlock[]): boolean {
+  let seenCall = false
+  for (const block of content) {
+    if (block.type !== 'tool_use') continue
+    if (seenCall && isDispatchToolName(block.toolName)) return true
+    seenCall = true
+  }
+  return false
 }
 
 /**

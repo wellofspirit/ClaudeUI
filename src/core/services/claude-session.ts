@@ -317,7 +317,7 @@ export class ClaudeSession extends BaseSession {
    * (docs/protocol-cc/03-inbound-messages.md §3.7).
    */
   private pendingHandbackWake = false
-  /** Tasks a SUBAGENT launched (`parent_task_id` / `spawn_depth` > 1): their hand-back goes to that subagent, not to main. */
+  /** Tasks a SUBAGENT launched (`parent_task_id` / `spawn_depth` > 1) and not yet reported: their hand-back goes to that subagent, not to main. */
   private readonly nestedTaskIds = new Set<string>()
   /** Commands cli.js started that ClaudeUI looked up on disk as native peer messages (by uuid). */
   private readonly nativePeerTried = new BoundedSet()
@@ -2220,7 +2220,8 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     // extra turn after the parent's next `result` (see pendingHandbackWake). A
     // nested child reports to the subagent that launched it, which is no turn of
     // the main agent's.
-    if ((msg.handback === 'send' || msg.handback === 'flagged') && !this.nestedTaskIds.has(taskId))
+    const nested = this.nestedTaskIds.delete(taskId)
+    if ((msg.handback === 'send' || msg.handback === 'flagged') && !nested)
       this.pendingHandbackWake = true
     const runIndex = matchedToolUseId ? (this.runCountByOrigin.get(matchedToolUseId) ?? 1) : 1
     this.send('session:task-notification', {
@@ -3920,8 +3921,8 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       })
     }
     this.liveTasks.clear()
-    // The process is gone with whatever sat in its queue. nestedTaskIds stays,
-    // like the rest of the agent identity: a resumed run reports the same ids.
+    // The process is gone with whatever sat in its queue. (nestedTaskIds is pruned as each task
+    // reports; a task still open here is stopped above and a resumed run starts it again.)
     this.pendingHandbackWake = false
   }
 

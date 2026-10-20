@@ -35,6 +35,7 @@ import type {
   TaskNotification
 } from '../../../shared/types'
 import { dispatchLabel, type ToolView } from '../../../shared/tool-kinds'
+import { ENGINE_META } from '../../../shared/engine-meta'
 import { useActiveSession } from '../stores/session-store'
 import { engineToolMap } from '../components/chat/tool-registry/engine-tool-maps'
 import {
@@ -327,7 +328,15 @@ export function scanAgentTree(
   rosterScanStats.trees++
   const out: RosterEntry[] = []
   const placed = new Set<string>()
-  const walk = (entries: ScannedEntry[], depth: number, parent?: string): void => {
+  // A dispatch child's transcript speaks the TARGET engine's tool names (a Codex X-Agent's
+  // `collab:spawnAgent` is no `Agent` call), and so does everything nested in it: each bucket
+  // is read with the map of the engine that wrote it.
+  const walk = (
+    entries: ScannedEntry[],
+    depth: number,
+    engine: EngineId,
+    parent?: string
+  ): void => {
     for (const entry of entries) {
       if (placed.has(entry.toolUseId)) continue
       placed.add(entry.toolUseId)
@@ -340,11 +349,15 @@ export function scanAgentTree(
         ...(latestModel ? { latestModel } : {})
       })
       if (bucket?.length) {
-        walk(scanTranscriptCached(bucket, engineId), depth + 1, entry.toolUseId)
+        const childEngine =
+          entry.dispatch && Object.hasOwn(ENGINE_META, entry.dispatch.engine)
+            ? (entry.dispatch.engine as EngineId)
+            : engine
+        walk(scanTranscriptCached(bucket, childEngine), depth + 1, childEngine, entry.toolUseId)
       }
     }
   }
-  walk(scanTranscriptCached(messages, engineId), 0)
+  walk(scanTranscriptCached(messages, engineId), 0, engineId)
   return out
 }
 

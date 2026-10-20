@@ -21,7 +21,7 @@ import { SessionCard } from './SessionCard'
 import { ProposalCard } from './ProposalCard'
 import { ReviewResultCard } from './ReviewResultCard'
 import { TaskCard } from './TaskCard'
-import { isQueuedDispatchCall } from './task-state'
+import { hasDispatchBehindCall, isQueuedDispatchCall } from './task-state'
 import { hostedMcpKind } from '../../../../shared/tool-kinds'
 import type { EngineToolMap } from '../../../../shared/tool-kinds'
 import { engineToolMap } from './tool-registry/engine-tool-maps'
@@ -197,7 +197,11 @@ export const MessageBubble = memo(function MessageBubble({
   const forkFromMessage = useSessionStore((s) => s.forkFromMessage)
   const forkCapability = useActiveSession((s) => s.status.capabilities.forkFromMessage)
   const engineId = useActiveSession((s) => s.status.engineId)
-  const turnRunning = useActiveSession((s) => s.status.state === 'running')
+  // Only a dispatch call behind another tool call of its own message can read "queued"
+  // (isQueuedDispatchCall), so only such a bubble follows the turn: every other one would
+  // re-render at each turn start and end for nothing.
+  const mayBeQueued = engineId === 'claude' && hasDispatchBehindCall(message.content)
+  const turnRunning = useActiveSession((s) => mayBeQueued && s.status.state === 'running')
   const [forking, setForking] = useState(false)
   // No-op + `enabled: false` when no ImageGalleryProvider is mounted above, so
   // an unwrapped MessageBubble still renders its thumbnails (just inert).

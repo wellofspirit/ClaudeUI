@@ -338,3 +338,37 @@ describe('background load view state (ADR-102 Arc 2, R4)', () => {
     expect(store().sessions['sess'].backgroundGeneration).toBe(generation)
   })
 })
+
+/**
+ * ADR-105 §5 — a reopened parent keeps the running X-Agent records the ledger gave it. The
+ * read is authoritative for them: a reload that finds the row finished carries none, and the
+ * stale record (its end missed in a gap, or a read that raced the event) must go with it.
+ */
+describe('loadHistoricalSession — dispatch records', () => {
+  const running = {
+    'tu-x': { taskId: 'ledger-1', taskType: 'dispatch', isBackgrounded: true, wakesParent: true }
+  }
+  const call = (activeTasks?: typeof running): void =>
+    store().loadHistoricalSession(
+      'sess',
+      [],
+      '/p',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      activeTasks
+    )
+
+  it('seeds the running record the read returned', () => {
+    call(running)
+    expect(store().sessions['sess'].activeTasks).toEqual(running)
+  })
+
+  it('a replace reload that finds the row finished clears the stale running record', () => {
+    call(running)
+    call(undefined)
+    expect(store().sessions['sess'].activeTasks).toEqual({})
+  })
+})

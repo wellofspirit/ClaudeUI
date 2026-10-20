@@ -2835,7 +2835,10 @@ export const useSessionStore = create<SessionState>((set) => ({
         messages,
         taskNotifications: taskNotifications ?? base.taskNotifications,
         subagentMessages: subagentMessages ?? base.subagentMessages,
-        ...(activeTasks ? { activeTasks } : {}),
+        // The read is authoritative for records: only a dispatched X-Agent the ledger still
+        // shows running comes back (ADR-105 §5), so a replace reload over an entry that holds
+        // a stale one (its end missed in a gap) must clear it, not keep it.
+        activeTasks: activeTasks ?? {},
         statusLine: statusLine ?? base.statusLine ?? null,
         // Derived from the transcript, with the same scanners the reducer uses —
         // which is what makes the todo widget and the Files widget survive

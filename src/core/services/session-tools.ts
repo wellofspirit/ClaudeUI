@@ -44,6 +44,7 @@ import {
 } from './dispatch-target-ledger'
 import { isReservedXAgentName } from '../../shared/session-links'
 import { X_AGENT_MESSAGE_KEY_PREFIX } from '../../shared/session-message-wrapper'
+import { handBackMarker, sanitizeReport } from '../../shared/handback-frame'
 import {
   isProposalId,
   proposalGrouped,
@@ -1215,7 +1216,9 @@ export async function sessionMessage(
       : { key: mine, title: titleOf(caller.routingId) || 'Untitled session' }
     const result = await deliver(need().manager, target.id, {
       origin: 'session-message',
-      text,
+      // An X-Agent's text is untrusted model output, and a pi, opencode or Codex parent has no
+      // envelope handling of its own: it is defused as a report is (idempotent), with the marker.
+      text: caller.xAgent ? defusedXAgentMessage(text) : text,
       from,
       wake: false,
       senderModeClass: caller.permissionMode === 'bypassPermissions' ? 'bypass' : 'prompting'
@@ -1235,6 +1238,12 @@ export async function sessionMessage(
       `error: ${errText(err)}`
     )
   }
+}
+
+/** An X-Agent's message to its parent as the parent reads it: defused like a report, and marked when something matched. */
+function defusedXAgentMessage(text: string): string {
+  const { text: defused, matched } = sanitizeReport(text)
+  return matched.length > 0 ? `${handBackMarker(matched)}\n\n${defused}` : defused
 }
 
 /**

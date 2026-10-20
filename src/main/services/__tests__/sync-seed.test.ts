@@ -69,6 +69,7 @@ import {
 } from '../../../core/services/sync-seed'
 import { syncCore } from '../../../core/services/sync-host'
 import { dispatchLedger } from '../../../core/services/dispatch-target-ledger'
+import { updateDispatchTarget } from '../../../core/services/db'
 
 const CLAUDE_SESSION = {
   sessionId: 'cl-1',
@@ -186,11 +187,40 @@ describe('seedCanonicalAppState', () => {
     const running = dispatchLedger.create({ ...input, harnessRef: 'boot-running' })
     const idle = dispatchLedger.create({ ...input, harnessRef: 'boot-idle' })
     dispatchLedger.update(idle.id, { state: 'idle' })
+    // The row a quit left behind names an owner that is gone: this pid under an earlier boot id
+    // (a pid is reused; the boot id tells the process that wrote the row from this one).
+    updateDispatchTarget(running.id, { owner: { pid: process.pid, boot: 'a-previous-boot' } })
 
     await seedCanonicalAppState()
 
     expect(dispatchLedger.get(running.id)?.state).toBe('interrupted')
     expect(dispatchLedger.get(idle.id)?.state).toBe('idle')
+  })
+
+  // The same DB can be shared by a second instance (a dev build beside the packaged app): its
+  // boot must not cut off the first one's runs (ADR-105 §5).
+  it('leaves a running X-Agent row alone while its owner instance is alive', async () => {
+    const input = {
+      engine: 'claude' as const,
+      parentSessionId: 'parent-1',
+      parentEngine: 'opencode' as const,
+      parentToolUseId: null,
+      cwd: '/repo',
+      model: 'haiku',
+      launchMode: 'default',
+      accountKey: null,
+      codexAccountId: null,
+      callerRestriction: null,
+      name: null,
+      description: null
+    }
+    const running = dispatchLedger.create({ ...input, harnessRef: 'boot-owned' })
+    // Another live process owns it: the test runner's parent stands in (alive, a different boot id).
+    updateDispatchTarget(running.id, { owner: { pid: process.ppid, boot: 'another-boot' } })
+
+    await seedCanonicalAppState()
+
+    expect(dispatchLedger.get(running.id)?.state).toBe('running')
   })
 
   // ADR-105 §5: an X-Agent ends with its parent session. A deletion that happened while the

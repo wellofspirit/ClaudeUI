@@ -9,6 +9,7 @@ import {
   RESULT_TEXT_MAX,
   failedResultText,
   interruptedResultText,
+  recordSummary,
   reportResultText,
   sentenceLabel,
   statusLine,
@@ -52,6 +53,23 @@ describe('the delivery stays under the host cap', () => {
     expect(truncationPointer('a\nb  c')).toBe(
       "(report truncated — the full report is on X-Agent a b c's card)"
     )
+  })
+})
+
+describe('recordSummary (the live task-notification record)', () => {
+  it('leaves a report within the cap alone', () => {
+    expect(recordSummary('short')).toBe('short')
+    const edge = 'x'.repeat(RESULT_REPORT_MAX)
+    expect(recordSummary(edge)).toBe(edge)
+  })
+
+  it('cuts a longer one at the cap and says where the rest is; cutting again changes nothing', () => {
+    const cut = recordSummary('y'.repeat(RESULT_REPORT_MAX + 5_000))
+    expect(cut.startsWith('y'.repeat(RESULT_REPORT_MAX))).toBe(true)
+    expect(cut.slice(RESULT_REPORT_MAX)).toBe(
+      '\n\n(report truncated here — the full report is kept and shows when the session is reopened)'
+    )
+    expect(recordSummary(cut)).toBe(cut)
   })
 })
 

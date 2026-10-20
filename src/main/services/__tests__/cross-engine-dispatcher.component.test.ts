@@ -141,7 +141,7 @@ import {
 } from '../../../test/helpers/fake-dispatch-ledger'
 import { makeFakeDispatchReports } from '../../../test/helpers/fake-dispatch-reports'
 import { REPORT_MAX_CHARS } from '../../../shared/handback-frame'
-import { RESULT_TEXT_MAX } from '../../../core/services/dispatch-result-text'
+import { RESULT_REPORT_MAX, RESULT_TEXT_MAX } from '../../../core/services/dispatch-result-text'
 import { ITEM_BODY_MAX } from '../../../core/services/session-delivery'
 import { codexHandBackSpec } from '../../../core/codex/codex-hand-back-spec'
 import {
@@ -153,6 +153,7 @@ import {
   HAND_BACK_UNATTRIBUTED_TEXT,
   handBackNudge
 } from '../../../shared/dispatch-agent-description'
+import { MESSAGE_RUN_ENDED_TEXT } from '../../../shared/x-agent-message'
 import type {
   DispatchTargetRow,
   NewDispatchTarget
@@ -616,7 +617,7 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
     expect(target.spawnCalls[0].cwd).toBe('/tmp/xeng-project')
   })
 
-  it('continuation: session_id reuses the SAME fake handle (no second spawn)', async () => {
+  it('continuation: session_id resumes the released target (a second spawn on the same session)', async () => {
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
@@ -636,13 +637,16 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
       ctx
     )
     await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
     target.push(resultMsg({ result: 'second answer' }))
     const secondResult = await second
 
     expect(secondResult.isError).toBeUndefined()
     expect(secondResult.text).toBe('second answer')
     expect(secondResult.sessionId).toBe('claude-sess-1')
-    expect(target.spawnCalls).toHaveLength(1) // no re-spawn
+    // The first run released the process when it ended: the second resumes it.
+    expect(target.spawnCalls).toHaveLength(2)
+    expect(target.spawnCalls[1].resume).toBe('claude-sess-1')
   })
 
   it('continuation with an unknown sessionId → isError, no spawn', async () => {
@@ -679,12 +683,13 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
     target.push(resultMsg({ result: 'first answer' }))
     expect((await first).sessionId).toBe('claude-sess-1')
 
-    // Turn 2: continuation, left in flight (no result pushed yet).
+    // Turn 2: continuation (the first run released the process, so it resumes), left in flight.
     const second = dispatcher.dispatch(
       { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
       ctx
     )
     await tick()
+    expect(target.spawnCalls).toHaveLength(2)
 
     // Turn 3: concurrent continuation while turn 2 is mid-flight → busy-reject.
     const third = await dispatcher.dispatch(
@@ -695,8 +700,8 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
     expect(third.text).toContain('already running')
     expect(third.sessionId).toBe('claude-sess-1')
 
-    // The busy-reject did NOT abort/remove the target…
-    expect(target.spawnCalls).toHaveLength(1)
+    // The busy-reject did NOT abort/remove the target (and spawned nothing)…
+    expect(target.spawnCalls).toHaveLength(2)
     expect(target.lastAbortController()?.signal.aborted).toBe(false)
 
     // …and the in-flight turn still completes normally with ITS OWN result.
@@ -705,7 +710,7 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
     expect(secondResult.isError).toBeUndefined()
     expect(secondResult.text).toBe('second answer')
 
-    // The target remains continuable after the busy window closes.
+    // The target remains continuable after the busy window closes (the second run released it).
     const fourth = dispatcher.dispatch(
       { engine: 'claude', prompt: 'four', sessionId: 'claude-sess-1' },
       ctx
@@ -713,10 +718,10 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
     await tick()
     target.push(resultMsg({ result: 'fourth answer' }))
     expect((await fourth).text).toBe('fourth answer')
-    expect(target.spawnCalls).toHaveLength(1)
+    expect(target.spawnCalls).toHaveLength(3)
   })
 
-  it('a result with a non-success subtype → isError with the error detail; target stays alive for continuation', async () => {
+  it('a result with a non-success subtype → isError with the error detail; the target stays continuable', async () => {
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
@@ -734,7 +739,7 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
     expect(result.text).toContain('Reached maximum number of turns (3)')
     expect(result.sessionId).toBe('claude-sess-1')
 
-    // The process was NOT aborted — a fresh continuation call still works.
+    // The run released the process: a fresh continuation call resumes it from its row.
     const cont = dispatcher.dispatch(
       { engine: 'claude', prompt: 'retry', sessionId: 'claude-sess-1' },
       ctx
@@ -742,7 +747,8 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
     await tick()
     target.push(resultMsg({ result: 'recovered' }))
     expect((await cont).text).toBe('recovered')
-    expect(target.spawnCalls).toHaveLength(1)
+    expect(target.spawnCalls).toHaveLength(2)
+    expect(target.spawnCalls[1].resume).toBe('claude-sess-1')
   })
 
   describe('model resolution', () => {
@@ -869,18 +875,54 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
         target.push(resultMsg())
         expect((await next).isError).toBeUndefined()
       }
-      return { target, ctx, turn, setMode: (m: string) => (mode = m) }
+      // The first run released the process, so a continuation resumes it: a second turn in flight.
+      const inFlight = async (prompt: string) => {
+        const next = dispatcher.dispatch(
+          { engine: 'claude', prompt, sessionId: 'claude-sess-1' },
+          ctx
+        )
+        await tick()
+        return {
+          spawn: target.spawnCalls[target.spawnCalls.length - 1],
+          finish: async (): Promise<void> => {
+            target.push(resultMsg())
+            expect((await next).isError).toBeUndefined()
+          }
+        }
+      }
+      const ask = (spawn: ClaudeQuerySpawnOpts, id: string): void => {
+        void spawn.canUseTool('Bash', { command: 'ls' }, {
+          signal: new AbortController().signal,
+          toolUseId: id
+        } as never)
+      }
+      return { target, ctx, turn, inFlight, ask, setMode: (m: string) => (mode = m) }
     }
 
-    it('T11: a continuation after the parent switched default → auto applies auto ONCE; the same mode again sends nothing', async () => {
+    it('T11: a parent that switched default → auto reaches the resumed continuation at its spawn, so nothing is sent', async () => {
       const live = await liveClaude()
       expect(live.target.spawnCalls[0].permissionMode).toBe('default')
       live.setMode('auto')
-      await live.turn('two')
+      const run = await live.inFlight('two')
+      expect(live.target.spawnCalls).toHaveLength(2)
+      expect(run.spawn.permissionMode).toBe('auto')
+      live.ask(run.spawn, 'toolu_a')
+      await tick()
+      expect(live.target.setModeCalls).toEqual([])
+      await run.finish()
+    })
+
+    it('T11: a switch DURING the resumed turn is applied ONCE at the next ask; the same mode again sends nothing', async () => {
+      const live = await liveClaude()
+      const run = await live.inFlight('two')
+      live.setMode('auto')
+      live.ask(run.spawn, 'toolu_a')
+      await tick()
       expect(live.target.setModeCalls).toEqual(['auto'])
-      await live.turn('three')
+      live.ask(run.spawn, 'toolu_b')
+      await tick()
       expect(live.target.setModeCalls).toEqual(['auto'])
-      expect(live.target.spawnCalls).toHaveLength(1)
+      await run.finish()
     })
 
     it('F9: spawn bookkeeping — an auto-spawned target continuing in auto sends NO set_permission_mode', async () => {
@@ -929,11 +971,15 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
 
     it('T11: a rejected auto falls back to default with ONE warning, and is not retried', async () => {
       const live = await liveClaude(true)
+      const run = await live.inFlight('two')
       live.setMode('auto')
-      await live.turn('two')
+      live.ask(run.spawn, 'toolu_a')
+      await tick()
       expect(live.target.setModeCalls).toEqual(['auto', 'default'])
-      await live.turn('three')
+      live.ask(run.spawn, 'toolu_b')
+      await tick()
       expect(live.target.setModeCalls).toEqual(['auto', 'default'])
+      await run.finish()
       const warnings = live.ctx.emit.mock.calls.filter((c) => c[0] === 'session:warning')
       expect(warnings).toHaveLength(1)
       expect(warnings[0][1]).toContain('auto mode was rejected')
@@ -956,11 +1002,15 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
 
     it('a bypass parent switching a non-bypass process applies default (the skip flag is spawn-only)', async () => {
       const live = await liveClaude()
+      const run = await live.inFlight('two')
       live.setMode('acceptEdits')
-      await live.turn('two')
+      live.ask(run.spawn, 'toolu_a')
+      await tick()
       live.setMode('bypassPermissions')
-      await live.turn('three')
+      live.ask(run.spawn, 'toolu_b')
+      await tick()
       expect(live.target.setModeCalls).toEqual(['acceptEdits', 'default'])
+      await run.finish()
     })
   })
 
@@ -1995,18 +2045,70 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     }
   })
 
-  it('turn 2+ converts the CUMULATIVE total_cost_usd into a per-turn delta (record, fold-in, cap)', async () => {
+  it('turn 2+ of one process converts the CUMULATIVE total_cost_usd into a per-turn delta (record, fold-in, cap)', async () => {
     // VERIFIED WIRE FACT: result.total_cost_usd is cumulative within one
     // cli.js process. Two turns reporting 0.02 then 0.05 (a running total)
     // spent 0.02 and 0.03 respectively — the pre-fix code recorded/folded/
     // capped 0.02 and 0.05 (over-counting turn 2 by the whole turn-1 spend).
+    // A run releases its process when it ends, so the turns of ONE process are
+    // the ones inside a run: the dispatcher's follow-ups to a missing report.
     const recordUsageEvent = vi.fn()
-    const target = makeFakeClaudeTarget()
+    const target = makeFakeClaudeTarget({ lifecycle: true })
     const { dispatcher } = makeHarness({
+      requireHandBack: true,
+      reports: makeFakeDispatchReports(),
+      handBackSettleMs: 5,
       // maxCostUsd 0.06 discriminates: true per-turn accumulation is
       // 0.02 + 0.03 = 0.05 < 0.06 (turn 3 allowed); the buggy cumulative
       // `+=` reaches 0.02 + 0.05 = 0.07 ≥ 0.06 (turn 3 cap-rejected).
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku', maxCostUsd: 0.06 } })),
+      spawnClaudeQuery: target.spawnClaudeQuery,
+      recordUsageEvent
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_parent' })
+
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'work' }, ctx)
+    await tick()
+    await target.nextSent()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push(resultMsg({ result: 'first', total_cost_usd: 0.02 }))
+    expect(await target.nextSent()).toBe(CLAUDE_NUDGE)
+    target.push(resultMsg({ result: 'second', total_cost_usd: 0.05 }))
+
+    // Cap accumulation: 0.05 total → still under the 0.06 cap, so turn 3 is asked for.
+    expect(await target.nextSent()).toBe(CLAUDE_NUDGE)
+    // An UNCHANGED cumulative total (turn 3 cost the process nothing new) is a zero delta.
+    target.push(resultMsg({ result: 'third', total_cost_usd: 0.05 }))
+    expect(await target.nextSent()).toBe(CLAUDE_NUDGE)
+    target.push(resultMsg({ result: 'fourth', total_cost_usd: 0.05 }))
+    expect((await pending).sessionId).toBe('claude-sess-1')
+
+    // DB rows: per-turn deltas, never the running total.
+    expect(recordUsageEvent.mock.calls.map((c) => c[0].engineCostUsd)).toEqual([
+      0.02,
+      expect.closeTo(0.03, 10),
+      0,
+      0
+    ])
+
+    // Live fold-in: same deltas, and none for a zero delta (the >0 guard).
+    expect(ctx.addDispatchedCost).toHaveBeenCalledTimes(2)
+    expect(ctx.addDispatchedCost).toHaveBeenNthCalledWith(1, 'claude', 'haiku', 0.02)
+    expect(ctx.addDispatchedCost).toHaveBeenNthCalledWith(
+      2,
+      'claude',
+      'haiku',
+      expect.closeTo(0.03, 10)
+    )
+  })
+
+  it('a resumed process starts a new cost baseline: its total is the spend since the resume', async () => {
+    // cli.js reports only the post-resume spend, and a run releases its process: turn 2's
+    // total_cost_usd (0.03) is that process's whole spend, not a running total over turn 1's 0.02.
+    const recordUsageEvent = vi.fn()
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
       spawnClaudeQuery: target.spawnClaudeQuery,
       recordUsageEvent
     })
@@ -2023,46 +2125,13 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
       ctx
     )
     await tick()
-    target.push(resultMsg({ result: 'second', total_cost_usd: 0.05 }))
+    expect(target.spawnCalls).toHaveLength(2)
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push(resultMsg({ result: 'second', total_cost_usd: 0.03 }))
     expect((await second).isError).toBeUndefined()
 
-    // DB rows: per-turn deltas, never the running total.
-    expect(recordUsageEvent).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ engineCostUsd: 0.02 })
-    )
-    expect(recordUsageEvent).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({ engineCostUsd: expect.closeTo(0.03, 10) })
-    )
-
-    // Live fold-in: same deltas.
-    expect(ctx.addDispatchedCost).toHaveBeenNthCalledWith(1, 'claude', 'haiku', 0.02)
-    expect(ctx.addDispatchedCost).toHaveBeenNthCalledWith(
-      2,
-      'claude',
-      'haiku',
-      expect.closeTo(0.03, 10)
-    )
-
-    // Cap accumulation: 0.05 total → still under the 0.06 cap, turn 3 allowed.
-    const third = dispatcher.dispatch(
-      { engine: 'claude', prompt: 'three', sessionId: 'claude-sess-1' },
-      ctx
-    )
-    await tick()
-    target.push(resultMsg({ result: 'third', total_cost_usd: 0.05 }))
-    const thirdResult = await third
-    expect(thirdResult.isError).toBeUndefined()
-    expect(thirdResult.text).toBe('third')
-    // An UNCHANGED cumulative total (turn 3 cost the same process nothing
-    // new) is a zero delta — the row records costUsd 0 and there is no
-    // fold-in (the >0 guard).
-    expect(recordUsageEvent).toHaveBeenNthCalledWith(
-      3,
-      expect.objectContaining({ engineCostUsd: 0 })
-    )
-    expect(ctx.addDispatchedCost).toHaveBeenCalledTimes(2)
+    expect(recordUsageEvent.mock.calls.map((c) => c[0].engineCostUsd)).toEqual([0.02, 0.03])
+    expect(ctx.addDispatchedCost).toHaveBeenNthCalledWith(2, 'claude', 'haiku', 0.03)
   })
 
   it('a failed-subtype turn with real cost folds in too — parity with its DB record (seed-on-reload includes it)', async () => {
@@ -2089,7 +2158,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
 
   it('a failed-subtype turn counts toward the cost cap — the cap is a spend limit, not a success limit (ADR-034)', async () => {
     const target = makeFakeClaudeTarget()
-    const { dispatcher } = makeHarness({
+    const { dispatcher, ledger } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku', maxCostUsd: 0.05 } })),
       spawnClaudeQuery: target.spawnClaudeQuery
     })
@@ -2103,6 +2172,9 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     )
     const firstResult = await first
     expect(firstResult.isError).toBe(true)
+    // The run released its process: the continuation reads what the target spent from its rows
+    // (the fake ledger is told what the first turn recorded).
+    ledger.spendByHarnessRef.set('claude-sess-1', { costUsd: 0.05, unpricedTurns: 0 })
 
     // Pre-fix, failed-turn spend was invisible to the cap and this
     // continuation ran; now it must be rejected before spawning a turn.
@@ -2221,9 +2293,9 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
 // ---------------------------------------------------------------------------
 
 describe('CrossEngineDispatcher — M4-C cost cap (Claude direction)', () => {
-  it('a continuation turn is rejected once cumulative cost meets the cap; target survives', async () => {
+  it('a continuation turn is rejected once cumulative cost meets the cap; the target stays resumable', async () => {
     const target = makeFakeClaudeTarget()
-    const { dispatcher } = makeHarness({
+    const { dispatcher, ledger } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku', maxCostUsd: 0.05 } })),
       spawnClaudeQuery: target.spawnClaudeQuery
     })
@@ -2234,6 +2306,9 @@ describe('CrossEngineDispatcher — M4-C cost cap (Claude direction)', () => {
     target.push(resultMsg({ result: 'first answer', total_cost_usd: 0.05 }))
     const firstResult = await first
     expect(firstResult.isError).toBeUndefined()
+    // The run released its process: the continuation reads what the target spent from its rows
+    // (the fake ledger is told what the first turn recorded).
+    ledger.spendByHarnessRef.set('claude-sess-1', { costUsd: 0.05, unpricedTurns: 0 })
 
     const second = await dispatcher.dispatch(
       { engine: 'claude', prompt: 'two', sessionId: firstResult.sessionId },
@@ -2242,8 +2317,9 @@ describe('CrossEngineDispatcher — M4-C cost cap (Claude direction)', () => {
     expect(second.isError).toBe(true)
     expect(second.text).toContain('cost cap')
     expect(second.sessionId).toBe(firstResult.sessionId)
-    // Rejected before spawning a second turn on the iterator.
+    // Rejected before spawning a second process.
     expect(target.spawnCalls).toHaveLength(1)
+    expect(ledger.rowFor('claude', 'claude-sess-1')?.state).toBe('idle')
   })
 
   it('a completing turn that crosses the cap appends the warning note to the returned text', async () => {
@@ -2527,7 +2603,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): target lifecycle', () =>
     expect(target.spawnCalls).toHaveLength(0)
   })
 
-  it('continuation: session_id reuses the SAME target (no second spawn, no second set_model)', async () => {
+  it('continuation: session_id resumes the released target (a second spawn on the same session)', async () => {
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
@@ -2553,12 +2629,8 @@ describe('CrossEngineDispatcher — pi direction (M4c): target lifecycle', () =>
 
     expect(secondResult.isError).toBeUndefined()
     expect(secondResult.sessionId).toBe('pi-target-1')
-    expect(target.spawnCalls).toHaveLength(1)
-    expect(
-      target.client.request.mock.calls.filter(
-        (c: unknown[]) => (c[0] as { type?: string }).type === 'set_model'
-      )
-    ).toHaveLength(1)
+    // The first run released the process when it ended: the second respawns it on its session.
+    expect(target.spawnCalls).toHaveLength(2)
     expect(
       target.client.request.mock.calls.filter(
         (c: unknown[]) => (c[0] as { type?: string }).type === 'prompt'
@@ -2629,7 +2701,8 @@ describe('CrossEngineDispatcher — pi direction (M4c): target lifecycle', () =>
     )
     expect(third.isError).toBe(true)
     expect(third.text).toContain('already running')
-    expect(target.spawnCalls).toHaveLength(1)
+    // The first run released the process, so the second call resumed it; the busy call spawned nothing.
+    expect(target.spawnCalls).toHaveLength(2)
 
     target.pushEvent(piAssistantMessageEnd({ text: 'second' }))
     target.pushEvent(PI_AGENT_SETTLED)
@@ -3048,8 +3121,8 @@ describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage app
   })
 })
 
-describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (process SURVIVES — unlike Claude)', () => {
-  it('stopDispatch sends the abort RPC, emits a "stopped" notification, resolves isError — the entry is KEPT ALIVE for continuation', async () => {
+describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop', () => {
+  it('stopDispatch sends the abort RPC, emits a "stopped" notification, resolves isError — the target stays resumable', async () => {
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
@@ -3074,15 +3147,15 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
     expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_stop_1', status: 'stopped' })
 
-    // DIVERGES FROM CLAUDE: the process survives — a fresh turn on the SAME
-    // session_id works with NO re-spawn.
+    // The stopped call leaves the target resumable: a fresh turn on the SAME
+    // session_id respawns the process the run released.
     const cont = dispatcher.dispatch({ engine: 'pi', prompt: 'y', sessionId: 'pi-target-1' }, ctx)
     await tick()
     target.pushEvent(piAssistantMessageEnd({ text: 'recovered' }))
     target.pushEvent(PI_AGENT_SETTLED)
     const contResult = await cont
     expect(contResult.isError).toBeUndefined()
-    expect(target.spawnCalls).toHaveLength(1)
+    expect(target.spawnCalls).toHaveLength(2) // the run released the process; the continuation respawned it
   })
 
   it("a late 'ask' arriving after stop has already reported — the entry is draining — is denied immediately with NO approval registered/emitted (see PiTargetEntry.draining's doc comment; the bug this closes: an orphaned approval card no manual action could otherwise clear)", async () => {
@@ -3194,7 +3267,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
       target.pushEvent(PI_AGENT_SETTLED)
       await settle()
       expect((await cont).isError).toBeUndefined()
-      expect(target.spawnCalls).toHaveLength(1)
+      expect(target.spawnCalls).toHaveLength(2) // the run released the process; the continuation respawned it
     } finally {
       vi.useRealTimers()
     }
@@ -3244,7 +3317,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     target.pushEvent(piAssistantMessageEnd({ text: 'recovered' }))
     target.pushEvent(PI_AGENT_SETTLED)
     expect((await cont).isError).toBeUndefined()
-    expect(target.spawnCalls).toHaveLength(1)
+    expect(target.spawnCalls).toHaveLength(2) // the run released the process; the continuation respawned it
     // …and the retry that worked clears it.
     expect(ledger.rowFor('pi', 'pi-target-1')?.state).toBe('idle')
   })
@@ -3311,7 +3384,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     target.pushEvent(PI_AGENT_SETTLED)
     const secondResult = await second
     expect(secondResult.isError).toBeUndefined()
-    expect(target.spawnCalls).toHaveLength(1) // still the same process throughout
+    expect(target.spawnCalls).toHaveLength(2) // the continuation respawned the released process
   })
 
   it('the post-stop grace-period drain is bounded — resolves on its own if the target never settles (does not hang forever)', async () => {
@@ -3367,7 +3440,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     target.pushEvent(PI_AGENT_SETTLED)
     const secondResult = await second
     expect(secondResult.isError).toBeUndefined()
-    expect(target.spawnCalls).toHaveLength(1)
+    expect(target.spawnCalls).toHaveLength(2) // the run released the process; the continuation respawned it
   })
 })
 
@@ -3664,7 +3737,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
   it('an errored turn that streamed cost still advances cumulativeCostUsd/addDispatchedCost and records the spend+tokens on the usage row; a later successful turn does NOT double-count it', async () => {
     const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget()
-    const { dispatcher } = makeHarness({
+    const { dispatcher, ledger } = makeHarness({
       loadEngineConfig: vi.fn(() => ({
         dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', maxCostUsd: 0.05 }
       })),
@@ -3694,6 +3767,9 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
       })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.04)
+    // The run released the target: the continuation seeds what it spent from the rows the
+    // failed turn wrote (the fake ledger is told what that row holds).
+    ledger.spendByHarnessRef.set('pi-target-1', { costUsd: 0.04, unpricedTurns: 0 })
 
     // KEY REGRESSION ASSERTION: cumulativeCostUsd/lastReportedTotalCostUsd
     // were advanced by the FAILED turn's 0.04 — a continuation that streams
@@ -3779,7 +3855,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
     }
   })
 
-  it('a stopped turn that streamed cost advances cumulativeCostUsd/addDispatchedCost but records NO usage row (ADR-033 M4-B: no usage numbers for a turn that never returned) — cap accounting still applies', async () => {
+  it('a stopped turn that streamed cost is folded in live (addDispatchedCost) but records NO usage row (ADR-033 M4-B: no usage numbers for a turn that never returned)', async () => {
     const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
@@ -3801,16 +3877,10 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
     // No usage ROW for the stopped turn (row ≠ spend accounting — see the
     // resolveAndRunPi comment)...
     expect(recordUsageEvent).not.toHaveBeenCalled()
-    // ...but the fold-in and cap accounting still ran: proven directly via
-    // addDispatchedCost, and via a fresh continuation now being rejected
-    // outright (cumulativeCostUsd already meets the 0.05 cap).
+    // ...but the fold-in still ran: proven directly via addDispatchedCost. (The run releases
+    // the target, so a continuation seeds its cap from the usage rows, and a stopped turn
+    // wrote none: that spend is not carried across the release.)
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.05)
-    const cont = await dispatcher.dispatch(
-      { engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' },
-      ctx
-    )
-    expect(cont.isError).toBe(true)
-    expect(cont.text).toContain('cost cap')
   })
 })
 
@@ -4027,9 +4097,9 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
 })
 
 describe('CrossEngineDispatcher — pi direction (M4c): cost cap (ADR-033 M4-C)', () => {
-  it('a continuation turn is rejected once cumulative cost meets the cap; target survives; no second prompt is sent', async () => {
+  it('a continuation turn is rejected once cumulative cost meets the cap; the target stays resumable; no second prompt is sent', async () => {
     const target = makeFakePiTarget()
-    const { dispatcher } = makeHarness({
+    const { dispatcher, ledger } = makeHarness({
       loadEngineConfig: vi.fn(() => ({
         dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', maxCostUsd: 0.05 }
       })),
@@ -4042,6 +4112,9 @@ describe('CrossEngineDispatcher — pi direction (M4c): cost cap (ADR-033 M4-C)'
     target.pushEvent(PI_AGENT_SETTLED)
     const firstResult = await first
     expect(firstResult.isError).toBeUndefined()
+    // The run released the target: the continuation reads what it spent from its rows (the fake
+    // ledger is told what the first turn recorded).
+    ledger.spendByHarnessRef.set(firstResult.sessionId!, { costUsd: 0.05, unpricedTurns: 0 })
 
     const second = await dispatcher.dispatch(
       { engine: 'pi', prompt: 'two', sessionId: firstResult.sessionId },
@@ -5361,12 +5434,23 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
     })
 
     // A SECOND turn on the same thread reports the CUMULATIVE total; the row
-    // must carry the delta, not the running total.
+    // must carry the delta, not the running total. The first run released the
+    // thread, so the resumed one shows its earlier turns' total first (history:
+    // the baseline), then its own.
     const second = dispatcher.dispatch(
       { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
       ctx
     )
     await tick()
+    target.notify('thread/tokenUsage/updated', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      tokenUsage: {
+        total: codexUsage({ totalTokens: 120, inputTokens: 100, outputTokens: 20 }),
+        last: codexUsage({ totalTokens: 120 }),
+        modelContextWindow: 400000
+      }
+    })
     target.notify('thread/tokenUsage/updated', {
       threadId: CODEX_THREAD_ID,
       turnId: CODEX_TURN_ID,
@@ -5462,7 +5546,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
 })
 
 describe('CrossEngineDispatcher — codex direction (slice H): continuation, model, stop, dispose', () => {
-  it('continuation: session_id reuses the live entry — no second thread/start, no second spawn', async () => {
+  it('continuation: session_id resumes the released thread — a thread/resume, no second thread/start', async () => {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const ctx = makeCtx({ fromEngine: 'claude' })
@@ -5480,8 +5564,9 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
     const secondResult = await second
 
     expect(secondResult.text).toBe('second')
-    expect(target.spawnCodexTarget).toHaveBeenCalledTimes(1)
+    // The first run released the thread when it ended: the second resumes it.
     expect(target.requests.filter((entry) => entry.method === 'thread/start')).toHaveLength(1)
+    expect(target.requests.filter((entry) => entry.method === 'thread/resume')).toHaveLength(1)
     expect(target.requests.filter((entry) => entry.method === 'turn/start')).toHaveLength(2)
   })
 
@@ -5605,9 +5690,9 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
     expect(result.text).toContain('only the native OpenAI provider')
   })
 
-  it('stopDispatch interrupts the native turn, settles as stopped, and KEEPS the thread alive for continuation', async () => {
+  it('stopDispatch interrupts the native turn, settles as stopped, and leaves the thread resumable', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({
+    const { dispatcher, ledger } = makeCodexHarness({
       attachCodexTarget: target.spawnCodexTarget,
       codexAbortSettleGraceMs: 20
     })
@@ -5625,17 +5710,19 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
       turnId: CODEX_TURN_ID
     })
     expect(target.client.abortServerRequests).toHaveBeenCalledWith(CODEX_THREAD_ID, CODEX_TURN_ID)
-    // Turn-scoped: the thread (and the host under it) survive for a continuation.
-    expect(target.client.detach).not.toHaveBeenCalled()
+    // Turn-scoped: the thread is not ended (the row stays resumable); the run's end releases it.
+    expect(ledger.rowFor('codex', CODEX_THREAD_ID)?.state).not.toBe('stopped')
+    expect(target.client.detach).toHaveBeenCalled()
     const notification = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')!
     expect((notification[1] as { status: string }).status).toBe('stopped')
 
-    // The entry survives: a continuation runs a fresh turn on the same thread.
+    // A continuation resumes the thread and runs a fresh turn on it.
     const second = dispatcher.dispatch(
       { engine: 'codex', prompt: 'again', sessionId: result.sessionId },
       ctx
     )
     await tick()
+    expect(target.requests.filter((e) => e.method === 'thread/resume')).toHaveLength(1)
     target.completeTurn({ text: 'second' })
     expect((await second).text).toBe('second')
   })
@@ -5663,7 +5750,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
     expect(again.text).toContain('Unknown dispatch session')
   })
 
-  it("a stopped turn's own late turn/completed cannot settle the NEXT turn (retired by id)", async () => {
+  it("a stopped turn's own late turn/completed changes nothing, and the resumed turn gets its own result", async () => {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({
       attachCodexTarget: target.spawnCodexTarget,
@@ -5674,14 +5761,14 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
     await tick()
     dispatcher.stopDispatch('toolu_stop_2', 'routing-1', { blockingOnly: true })
     const stopped = await first
+    // The ABANDONED turn's terminal event, arriving late (after the run released the thread).
+    target.completeTurn({ text: 'stale', turnId: CODEX_TURN_ID })
 
     const second = dispatcher.dispatch(
       { engine: 'codex', prompt: 'again', sessionId: stopped.sessionId },
       ctx
     )
     await tick()
-    // The ABANDONED turn's terminal event, arriving late.
-    target.completeTurn({ text: 'stale', turnId: CODEX_TURN_ID })
     const sentinel = Symbol('still running')
     expect(await Promise.race([second, Promise.resolve(sentinel)])).toBe(sentinel)
     target.completeTurn({ text: 'fresh' })
@@ -5777,15 +5864,15 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
       makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-a' })
     )
     await tick()
-    a.completeTurn()
-    await pending
     dispatcher.disposeFor('routing-other')
     expect(a.client.detach).not.toHaveBeenCalled()
+    a.completeTurn()
+    expect((await pending).isError).toBeUndefined()
   })
 
   it('the cumulative cost cap rejects a continuation once it is reached', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({
+    const { dispatcher, ledger } = makeCodexHarness({
       attachCodexTarget: target.spawnCodexTarget,
       dispatch: { maxCostUsd: 0.0000001 }
     })
@@ -5805,6 +5892,9 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
     const firstResult = await first
     expect(firstResult.text).toContain('dispatch cost cap reached')
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('codex', 'gpt-5.6-luna', expect.any(Number))
+    // The run released the target: the continuation reads what it spent from its rows (the fake
+    // ledger is told what the first turn recorded).
+    ledger.spendByHarnessRef.set(firstResult.sessionId!, { costUsd: 0.01, unpricedTurns: 0 })
 
     const second = await dispatcher.dispatch(
       { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
@@ -6617,10 +6707,11 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
     }
   })
 
-  it('a Claude target resolves its account ONCE, at creation, not per turn', async () => {
+  it('a Claude process resolves its account ONCE, at spawn, not per turn; a resumed process takes the current one', async () => {
     // The spawned cli.js holds the credential it was given at spawn, so a
-    // sign-in change mid-target cannot move which account its turns billed —
-    // and a second read would record the wrong one.
+    // sign-in change mid-process cannot move which account its turns billed —
+    // and a second read would record the wrong one. A run releases its process
+    // when it ends: the turns of ONE process are the follow-ups inside a run.
     const activeAccount = vi.spyOn(usageFetcher, 'getActiveAccount').mockReturnValue({
       uuid: 'acct-uuid-1',
       email: 'first@example.test',
@@ -6628,17 +6719,22 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
       billingType: 'subscription'
     })
     try {
-      const target = makeFakeClaudeTarget()
+      const target = makeFakeClaudeTarget({ lifecycle: true })
       const { dispatcher, recordUsageEvent } = ledgerHarness({
+        requireHandBack: true,
+        reports: makeFakeDispatchReports(),
+        handBackSettleMs: 5,
         loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
         spawnClaudeQuery: target.spawnClaudeQuery
       })
       const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_pinned' })
       const first = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
       await tick()
+      await target.nextSent()
       target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
       target.push(resultMsg({ result: 'one', total_cost_usd: 0.01 }))
-      await first
+      // No report: the dispatcher's follow-up is the process's second turn.
+      await target.nextSent()
 
       // The user switches accounts between the two turns.
       activeAccount.mockReturnValue({
@@ -6647,16 +6743,32 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
         organizationUuid: 'org-uuid-2',
         billingType: 'apiKey'
       })
-      const second = dispatcher.dispatch(
+      target.push(resultMsg({ result: 'two', total_cost_usd: 0.02 }))
+      await target.nextSent()
+      dispatcher.stopDispatch('toolu_pinned', undefined, { blockingOnly: true })
+      await first
+
+      const keys = (): Array<string | undefined> =>
+        recordUsageEvent.mock.calls.map((c) => (c[0] as UsageTurnEvent).accountKey)
+      expect(keys()).toEqual([
+        'anthropic:org-uuid-1:acct-uuid-1',
+        'anthropic:org-uuid-1:acct-uuid-1'
+      ])
+
+      // The run released the process: a resume is a fresh spawn, which reads the current credential.
+      const resumed = dispatcher.dispatch(
         { engine: 'claude', prompt: 'y', sessionId: 'claude-sess-1' },
         ctx
       )
       await tick()
-      target.push(resultMsg({ result: 'two', total_cost_usd: 0.02 }))
-      await second
-
-      const keys = recordUsageEvent.mock.calls.map((c) => (c[0] as UsageTurnEvent).accountKey)
-      expect(keys).toEqual(['anthropic:org-uuid-1:acct-uuid-1', 'anthropic:org-uuid-1:acct-uuid-1'])
+      expect(target.spawnCalls).toHaveLength(2)
+      await target.nextSent()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg({ result: 'three', total_cost_usd: 0.01 }))
+      await target.nextSent()
+      dispatcher.stopDispatch('toolu_pinned', undefined, { blockingOnly: true })
+      await resumed
+      expect(keys().at(-1)).toBe('anthropic:org-uuid-2:acct-uuid-2')
     } finally {
       activeAccount.mockRestore()
     }
@@ -7625,7 +7737,7 @@ describe('X-Agent ledger — Claude targets (ADR-105)', () => {
     expect(target.spawnCalls).toHaveLength(2)
   })
 
-  it("follows the parent's rekey: the row moved to the durable id, so the live entry is still its owner's", async () => {
+  it("follows the parent's rekey: the row moved to the durable id, so the continuation is still its owner's", async () => {
     const target = makeFakeClaudeTarget()
     const { dispatcher, ledger } = makeHarness({
       loadEngineConfig: CFG(),
@@ -7649,11 +7761,11 @@ describe('X-Agent ledger — Claude targets (ADR-105)', () => {
       durable
     )
     expect(again.isError).toBeUndefined()
-    // The live entry continued: no second process.
-    expect(target.spawnCalls).toHaveLength(1)
-    // …and disposing by the durable id releases it (the old id would match nothing).
-    dispatcher.disposeFor('durable-id')
-    expect(target.spawnCalls[0].abortController.signal.aborted).toBe(true)
+    // The continuation found the row under the durable id: it resumed the released process.
+    expect(target.spawnCalls).toHaveLength(2)
+    expect(target.spawnCalls[1].resume).toBe('claude-sess-1')
+    // …and the run's end released that process too.
+    expect(target.spawnCalls[1].abortController.signal.aborted).toBe(true)
     expect(ledger.rowFor('claude', 'claude-sess-1')?.state).toBe('idle')
   })
 })
@@ -9086,7 +9198,12 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
         makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_c2', autonomyMode: 'default' })
       )
       expect(ack.isError).toBeUndefined()
-      expect(target.setModeCalls).toEqual(['default'])
+      // The first run released the process: the continuation resumes it, under the stricter mode
+      // from its spawn (no set_permission_mode on a fresh process).
+      expect(target.spawnCalls).toHaveLength(2)
+      expect(target.spawnCalls[0].permissionMode).toBe('auto')
+      expect(target.spawnCalls[1].permissionMode).toBe('default')
+      expect(target.setModeCalls).toEqual([])
       target.push(resultMsg({ session_id: 'c-mode' }))
       await vi.waitFor(() => expect(dispatcher.inFlightCount).toBe(0))
     })
@@ -9115,7 +9232,9 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
         makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_f2', autonomyMode: 'ask' })
       )
       expect(ack.isError).toBeUndefined()
-      expect(target.setModeCalls).toEqual(['ask'])
+      expect(target.spawnCalls).toHaveLength(2)
+      expect(target.spawnCalls[1].permissionMode).toBe('ask')
+      expect(target.setModeCalls).toEqual([])
       target.push(resultMsg({ session_id: 'c-full' }))
       await vi.waitFor(() => expect(dispatcher.inFlightCount).toBe(0))
     })
@@ -9254,6 +9373,84 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
       expect(t.dispatcher.inFlightCount).toBe(1)
       t.dispatcher.stopDispatch(t.row.id, 'routing-1')
       await vi.waitFor(() => expect(t.dispatcher.inFlightCount).toBe(0))
+    })
+
+    describe('a `running` row nothing in this process runs (a crash left it, its pid was reused)', () => {
+      /** The row a crash left: `running`, owned by a pid that is alive, with no run in this process. */
+      async function phantom(foreign = true) {
+        const removed = vi.fn<NonNullable<DispatcherDeps['removeHarnessState']>>(async () => {})
+        const t = await launchClaude({ deps: { removeHarnessState: removed } })
+        // The launched run is over and its row is released: only a row remains.
+        t.dispatcher.stopDispatch(t.row.id, 'routing-1')
+        await vi.waitFor(() => expect(t.dispatcher.inFlightCount).toBe(0))
+        removed.mockClear()
+        t.parents.emitted.length = 0
+        const { id: _i, state: _s, createdAt: _c, lastActiveAt: _l, ...input } = t.row
+        const row = t.ledger.create({
+          ...input,
+          harnessRef: 'phantom-harness',
+          parentToolUseId: 'toolu_phantom',
+          name: 'ghost'
+        })
+        if (foreign) t.ledger.foreignOwned.add(row.id)
+        return { ...t, phantom: row, removed }
+      }
+
+      it.each(['card', 'ledger'] as const)(
+        'Stop from the %s id ends the row, clears the parent and arms nothing',
+        async (via) => {
+          const t = await phantom()
+          const id = via === 'card' ? 'toolu_phantom' : t.phantom.id
+          expect(t.dispatcher.stopDispatch(id, 'routing-1', { armIfUnknown: true })).toBe(true)
+          expect(t.ledger.rows.get(t.phantom.id)!.state).toBe('stopped')
+          expect(t.parents.on('session:task-notification')).toEqual([
+            {
+              parentId: 'routing-1',
+              data: {
+                taskId: t.phantom.id,
+                toolUseId: 'toolu_phantom',
+                status: 'stopped',
+                outputFile: '',
+                summary: 'Dispatch stopped by user.',
+                isBackgrounded: true
+              }
+            }
+          ])
+          // Stopped for good: a second Stop finds nothing to end.
+          expect(t.dispatcher.stopDispatch('toolu_phantom', 'routing-1')).toBe(false)
+          // No intent is armed: a later dispatch reusing the card id is not refused.
+          const again = await t.dispatcher.dispatch(
+            { engine: 'claude', prompt: 'next', runInBackground: true },
+            makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_phantom', extra: makeExtra() })
+          )
+          expect(again.isError).toBeUndefined()
+        }
+      )
+
+      it('another session cannot stop it, and a row that is not running is not one', async () => {
+        const t = await phantom()
+        expect(
+          t.dispatcher.stopDispatch('toolu_phantom', 'routing-2', { armIfUnknown: false })
+        ).toBe(false)
+        expect(t.ledger.rows.get(t.phantom.id)!.state).toBe('running')
+        t.ledger.update(t.phantom.id, { state: 'idle' })
+        expect(t.dispatcher.stopDispatch(t.phantom.id, 'routing-1')).toBe(false)
+        expect(t.parents.on('session:task-notification')).toEqual([])
+      })
+
+      it('keeps the harness state while another live instance owns the row, removes it when none does', async () => {
+        const live = await phantom(true)
+        live.dispatcher.stopDispatch(live.phantom.id, 'routing-1')
+        expect(live.ledger.rows.get(live.phantom.id)!.state).toBe('stopped')
+        expect(live.removed).not.toHaveBeenCalled()
+
+        const gone = await phantom(false)
+        gone.dispatcher.stopDispatch(gone.phantom.id, 'routing-1')
+        expect(gone.ledger.rows.get(gone.phantom.id)!.state).toBe('stopped')
+        expect(gone.removed).toHaveBeenCalledWith(
+          expect.objectContaining({ id: gone.phantom.id, harnessRef: 'phantom-harness' })
+        )
+      })
     })
 
     it('a stop armed BEFORE the launch is consumed by a background run too', async () => {
@@ -9766,7 +9963,7 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
             })
           t.target.push(resultMsg({ result: 'done', session_id: t.row.harnessRef }))
           await vi.waitFor(() => expect(t.dispatcher.inFlightCount).toBe(0))
-          expect(t.target.lastAbortController()!.signal.aborted).toBe(true)
+          await vi.waitFor(() => expect(t.target.lastAbortController()!.signal.aborted).toBe(true))
           expect(t.ledger.rows.get(t.row.id)!.state).toBe('idle')
           // ...and a later message resumes it from the row.
           const again = t.dispatcher.dispatch(
@@ -9780,14 +9977,62 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
         }
       })
 
-      it('keeps the process for a live parent (a continuation is likely)', async () => {
+      it('releases the process when the run ends even for a live parent; a message then resumes it and the next run is released too', async () => {
         const t = await launchClaude()
         await tick()
         t.target.push(initOf(t.row.harnessRef))
         await tick()
         t.target.push(resultMsg({ result: 'done', session_id: t.row.harnessRef }))
         await vi.waitFor(() => expect(t.dispatcher.inFlightCount).toBe(0))
+        await vi.waitFor(() => expect(t.target.lastAbortController()!.signal.aborted).toBe(true))
+        expect(t.ledger.rows.get(t.row.id)!.state).toBe('idle')
+        expect(t.target.spawnCalls).toHaveLength(1)
+        // The next message resumes the released X-Agent from its row, as run 2.
+        const from = { routingId: 'routing-1', engine: 'opencode' as EngineId, title: 'Boss' }
+        expect(
+          await t.dispatcher.messageXAgent({ ledgerId: t.row.id, text: 'next', from })
+        ).toEqual({
+          kind: 'started'
+        })
+        expect(t.target.spawnCalls).toHaveLength(2)
         expect(t.target.lastAbortController()!.signal.aborted).toBe(false)
+        t.target.push(resultMsg({ result: 'resumed', session_id: t.row.harnessRef }))
+        await vi.waitFor(() => expect(t.dispatcher.inFlightCount).toBe(0))
+        // Run 2 is a background run too: it is released when it ends.
+        await vi.waitFor(() => expect(t.target.lastAbortController()!.signal.aborted).toBe(true))
+        expect(t.ledger.rows.get(t.row.id)!.state).toBe('idle')
+      })
+
+      it('a BLOCKING run releases its process when it ends too (a subagent caller, run_in_background: false): a message resumes it', async () => {
+        const target = makeFakeClaudeTarget()
+        const parents = makeParents()
+        parents.sessions.set('routing-1', parents.session('default'))
+        const { dispatcher, ledger } = makeHarness({
+          loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+          spawnClaudeQuery: target.spawnClaudeQuery,
+          parents: parents.parents
+        })
+        created.push(dispatcher)
+        const pending = dispatcher.dispatch(
+          { engine: 'claude', prompt: 'work', name: 'blk', runInBackground: false },
+          makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_blk', extra: makeExtra() })
+        )
+        await tick()
+        target.push(initOf('claude-blk-1'))
+        target.push(resultMsg({ result: 'done', session_id: 'claude-blk-1' }))
+        expect((await pending).text).toBe('done')
+        // Nothing continues a target but a message, and that resumes a released one just as well.
+        expect(target.lastAbortController()!.signal.aborted).toBe(true)
+        const row = [...ledger.rows.values()][0]
+        expect(row.state).toBe('idle')
+        const from = { routingId: 'routing-1', engine: 'opencode' as EngineId, title: 'Boss' }
+        expect(await dispatcher.messageXAgent({ ledgerId: row.id, text: 'next', from })).toEqual({
+          kind: 'started'
+        })
+        expect(target.spawnCalls).toHaveLength(2)
+        expect(target.spawnCalls[1].resume).toBe('claude-blk-1')
+        target.push(resultMsg({ result: 'again', session_id: 'claude-blk-1' }))
+        await vi.waitFor(() => expect(dispatcher.inFlightCount).toBe(0))
       })
 
       it('arms the parent’s idle timer again whenever a run ends (the session decides if anything still holds it)', async () => {
@@ -10529,7 +10774,7 @@ describe('CrossEngineDispatcher — hand_back: Claude target', () => {
       }
     })
 
-    it('a report past the size cap is cut in memory too: the card, the notification and the caller get the cut text', async () => {
+    it('a report past the size cap is cut in memory too: the store and the caller get the cut text, the live card record a shorter one', async () => {
       const { target, reports, dispatcher, ctx, handBack, toolResultFrame } = setup()
       const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
       await tick()
@@ -10540,10 +10785,14 @@ describe('CrossEngineDispatcher — hand_back: Claude target', () => {
       target.push(resultMsg({ subtype: 'error_during_execution' }))
       const result = await pending
       const summary = (notificationsOf(ctx)[0] as { summary: string }).summary
-      expect(summary).toContain('[report cut at')
-      expect(summary.length).toBeLessThan(REPORT_MAX_CHARS + 100)
+      // The store keeps the report cut at the memory cap; the card's live record is cut shorter,
+      // at the delivery cap, with a pointer (the reload reads the stored one).
+      expect(reports.rows[0].report).toContain('[report cut at')
+      expect(reports.rows[0].report!.length).toBeLessThan(REPORT_MAX_CHARS + 100)
+      expect(summary.startsWith('y'.repeat(RESULT_REPORT_MAX))).toBe(true)
+      expect(summary).toContain('(report truncated here')
+      expect(summary.length).toBeLessThan(RESULT_REPORT_MAX + 200)
       expect(result.text.length).toBeLessThan(REPORT_MAX_CHARS + 1_000)
-      expect(reports.rows[0].report).toBe(summary)
     })
 
     it('a run that never got a target (refused at launch) leaves no row', async () => {
@@ -11053,8 +11302,9 @@ describe('CrossEngineDispatcher — results delivered into the parent (ADR-105 �
     })
     created.push(dispatcher)
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_bgr' })
+    // The latest spawn: a run releases its process when it ends, so a continuation respawns it.
     const hosted = (): NonNullable<PiTargetSpawnOpts['hostedToolHandler']> =>
-      target.spawnCalls[0].hostedToolHandler!
+      target.spawnCalls[target.spawnCalls.length - 1].hostedToolHandler!
     const launch = async (background = true) => {
       const answer = await dispatcher.dispatch(
         {
@@ -12329,6 +12579,8 @@ describe('CrossEngineDispatcher — messages with X-Agents (ADR-105 §4, B-4)', 
         await hosted()({ toolName: 'hand_back', input: { report }, toolCallId: callId })
         target.pushEvent(PI_AGENT_SETTLED)
         await vi.waitFor(() => expect(dispatcher.inFlightCount).toBe(0))
+        // The result is delivered and the process released (the last step of the run).
+        await tick()
       }
       const message = (id: string, text = 'also check the docs') =>
         dispatcher.messageXAgent({ ledgerId: id, text, from: FROM })
@@ -12353,6 +12605,38 @@ describe('CrossEngineDispatcher — messages with X-Agents (ADR-105 §4, B-4)', 
         hosted
       }
     }
+
+    it('a report beyond the delivery cap rides the live notification cut with a pointer; the stored report is whole', async () => {
+      const t = setup()
+      await t.launch()
+      const long = 'r'.repeat(RESULT_REPORT_MAX + 4_000)
+      await t.finishRun(long)
+      const [note] = t.events('session:task-notification')
+      const summary = (note.data as { summary: string }).summary
+      expect(summary.startsWith('r'.repeat(RESULT_REPORT_MAX))).toBe(true)
+      expect(summary).toContain('(report truncated here')
+      expect(summary.length).toBeLessThan(RESULT_REPORT_MAX + 200)
+      // Nothing is lost: the store keeps the whole report for the reload.
+      expect(t.reports.rows[0].report).toBe(long)
+    })
+
+    it('a run whose body ends badly aborts the report review it left in flight (no billed judge call nobody reads)', async () => {
+      const t = setup()
+      const review = new AbortController()
+      const body = t.dispatcher as unknown as {
+        runBody: (req: unknown, ctx: { run: { reviewAbort?: AbortController } }) => Promise<unknown>
+      }
+      vi.spyOn(body, 'runBody').mockImplementation(async (_req, ctx) => {
+        // The report was accepted and its review started; then the turn failed before it was awaited.
+        ctx.run.reviewAbort = review
+        throw new Error('the turn failed')
+      })
+      await t.dispatcher.dispatch(
+        { engine: 'pi', prompt: 'x', name: 'rev', runInBackground: true },
+        t.ctx
+      )
+      await vi.waitFor(() => expect(review.signal.aborted).toBe(true))
+    })
 
     it('a running X-Agent takes the message as a steer: /cui-deliver, marked as an agent’s, never woken, never a new run', async () => {
       const t = setup()
@@ -12424,10 +12708,11 @@ describe('CrossEngineDispatcher — messages with X-Agents (ADR-105 §4, B-4)', 
       await t.finishRun('first report')
       t.delivered.length = 0
       expect(await t.message(id, 'now do the second part')).toEqual({ kind: 'started' })
-      // One run in flight again, the same target process, the message as a plain pi prompt (the
-      // parent is its user), after the task suffix machinery that tells it how to finish.
+      // One run in flight again, on a respawn (run 1's process was released when it ended), the
+      // message as a plain pi prompt (the parent is its user), after the task suffix machinery that
+      // tells it how to finish.
       expect(t.dispatcher.inFlightCount).toBe(1)
-      expect(t.target.spawnCalls).toHaveLength(1)
+      expect(t.target.spawnCalls).toHaveLength(2)
       const last = t.prompts().at(-1)!
       expect(last).toContain(
         'Message from "Boss", the session that dispatched you, acting for the user:\n\nnow do the second part'
@@ -13194,6 +13479,54 @@ describe('CrossEngineDispatcher — messages with X-Agents (ADR-105 §4, B-4)', 
       await endRun(t.dispatcher, pending)
     })
 
+    it.each(['default', 'acceptEdits', 'auto', 'bypassPermissions'])(
+      'the user’s deny rule for the tool holds for a Codex target in %s, before the judge and the service',
+      async (mode) => {
+        const t = setup({
+          mode,
+          deps: {
+            loadUserRules: () => userRules({ deny: ['mcp__claude-ui-sessions__session_message'] })
+          }
+        })
+        const pending = t.dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, t.ctx)
+        await tick()
+        expect(await t.call('hello')).toEqual(
+          answerOf('Denied by permission rule: mcp__claude-ui-sessions__session_message', false)
+        )
+        // Not judged (a paid call), not delivered.
+        expect(t.judge.make).not.toHaveBeenCalled()
+        expect(sessionToolsMock.run).not.toHaveBeenCalled()
+        await endRun(t.dispatcher, pending)
+      }
+    )
+
+    it('a deny rule on the whole claude-ui-sessions server holds too', async () => {
+      const t = setup({
+        deps: { loadUserRules: () => userRules({ deny: ['mcp__claude-ui-sessions'] }) }
+      })
+      const pending = t.dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, t.ctx)
+      await tick()
+      expect(await t.call('hello')).toEqual(
+        answerOf('Denied by permission rule: mcp__claude-ui-sessions', false)
+      )
+      expect(sessionToolsMock.run).not.toHaveBeenCalled()
+      await endRun(t.dispatcher, pending)
+    })
+
+    it('in auto a message from a run that is over is refused BEFORE the paid review', async () => {
+      const t = setup({ mode: 'auto' })
+      const pending = t.dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, t.ctx)
+      await tick()
+      // The run is over (its report was taken) while the thread's turn is still the live one.
+      const run = (t.dispatcher as unknown as { runs: DispatchRunRegistry }).runs.all()[0]
+      run.report = { text: 'r', callId: undefined }
+      expect(await t.call('too late')).toEqual(answerOf(MESSAGE_RUN_ENDED_TEXT, false))
+      expect(t.judge.make).not.toHaveBeenCalled()
+      expect(sessionToolsMock.run).not.toHaveBeenCalled()
+      run.report = null
+      await endRun(t.dispatcher, pending)
+    })
+
     it('the judge request is aborted when the call is abandoned', async () => {
       const t = setup({ mode: 'auto' })
       const pending = t.dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, t.ctx)
@@ -13264,8 +13597,11 @@ describe('CrossEngineDispatcher — messages with X-Agents (ADR-105 §4, B-4)', 
         arguments: { report: 'first part' }
       })
       expect(await pending).toEqual({ kind: 'started' })
-      const starts = t.target.requests.filter((r) => r.method === 'turn/start')
-      expect(starts).toHaveLength(2)
+      // Run 1's thread was released when it ended (detached), so run 2 resumes it first.
+      const startsOf = (): Array<{ params: Record<string, unknown> }> =>
+        t.target.requests.filter((r) => r.method === 'turn/start')
+      await vi.waitFor(() => expect(startsOf()).toHaveLength(2))
+      const starts = startsOf()
       const second = (starts[1].params.input as Array<{ text: string }>)[0].text
       expect(second).toContain('second part')
       expect(second).toContain(NEW_RUN_SENTENCE + '\n\nMessage from "Boss"')
@@ -13413,6 +13749,41 @@ describe('CrossEngineDispatcher — a message steered into a run is answered, or
       await t.endTurn('toolu_hb2')
       await vi.waitFor(() => expect(t.dispatcher.inFlightCount).toBe(0))
       expect(await t.target.sentIdle()).toBe(true)
+      // Run 2 went to the process run 1 left running (the message was sent again before the
+      // release); run 2 was the last run, and its end released the process.
+      expect(t.target.spawnCalls).toHaveLength(1)
+      await vi.waitFor(() => expect(t.target.lastAbortController()!.signal.aborted).toBe(true))
+      expect(t.ledger.rowFor('claude', 'c-1')!.state).toBe('idle')
+    })
+
+    it('a message that arrives while the result is being delivered continues on the live process; the release waits for that run', async () => {
+      const gate = deferred<void>()
+      const rec = recorder()
+      const t = setup({
+        parents: {
+          ...rec.parents,
+          deliver: vi.fn(async () => {
+            await gate.promise
+            return { result: 'delivered' } as DispatchResultOutcome
+          })
+        }
+      })
+      const id = await t.launch()
+      await t.report('the report')
+      await t.endTurn()
+      // The run has left the registry; its result is still on its way to the parent.
+      await vi.waitFor(() => expect(t.dispatcher.inFlightCount).toBe(0))
+      expect(await t.message(id, 'one more thing')).toEqual({ kind: 'started' })
+      expect(await t.target.nextSent()).toContain(`${FRAME}one more thing`)
+      // The delivery completes: run 1 does NOT release the process run 2 is using.
+      gate.resolve()
+      await tick()
+      expect(t.dispatcher.inFlightCount).toBe(1)
+      expect(t.target.spawnCalls).toHaveLength(1)
+      expect(t.target.lastAbortController()!.signal.aborted).toBe(false)
+      await t.report('second report', 'toolu_hb2')
+      await t.endTurn('toolu_hb2')
+      await vi.waitFor(() => expect(t.target.lastAbortController()!.signal.aborted).toBe(true))
       expect(t.target.spawnCalls).toHaveLength(1)
     })
 
@@ -13602,6 +13973,34 @@ describe('CrossEngineDispatcher — a message steered into a run is answered, or
       expect(
         t.rec.emitted.filter((e) => e.channel === 'session:task-started').at(-1)!.data
       ).toMatchObject({ runIndex: 2 })
+    })
+
+    it('a message sent again resumes a target that was released before the requeue (the process is gone, the row is idle)', async () => {
+      const t = setup()
+      const id = await t.launch()
+      expect(await t.message(id, 'unread by pi')).toEqual({ kind: 'steered' })
+      // The target's process goes between the run's end and the requeue (a crash, a dispose).
+      const d = t.dispatcher as unknown as {
+        requeueSteers: (run: { ledgerId?: string }) => void
+        liveEntry: (id: string) => { sessionId: string; entry: unknown } | undefined
+        releaseEntry: (sessionId: string, entry: unknown, state: null) => void
+      }
+      const requeue = d.requeueSteers.bind(d)
+      vi.spyOn(d, 'requeueSteers').mockImplementation((run) => {
+        const live = run.ledgerId ? d.liveEntry(run.ledgerId) : undefined
+        if (live) d.releaseEntry(live.sessionId, live.entry, null)
+        requeue(run)
+      })
+      await t.report('the report')
+      t.target.pushEvent(PI_AGENT_SETTLED)
+      await vi.waitFor(() => expect(t.prompts().at(-1)).toContain(`${FRAME}unread by pi`))
+      // A respawn on the session directory carried it as run 2.
+      expect(t.target.spawnCalls).toHaveLength(2)
+      expect(t.dispatcher.inFlightCount).toBe(1)
+      expect(
+        t.rec.emitted.filter((e) => e.channel === 'session:task-started').at(-1)!.data
+      ).toMatchObject({ runIndex: 2 })
+      expect(steersOf(t.dispatcher).map((x) => x.fate)).toEqual(['requeued'])
     })
 
     it('a message whose custom message pi appended before the report call is ANSWERED: no run 2', async () => {

@@ -350,6 +350,97 @@ describe("TaskEntry - a dispatch child's tool cards use the target engine's tool
     expect(screen.queryByText(/It runs in the background/)).not.toBeInTheDocument()
   })
 
+  describe('an X-Agent call, as the panel names and ends it', () => {
+    const call = (input: Record<string, unknown>, result?: Partial<ContentBlock>): void => {
+      const messages: ChatMessage[] = [
+        {
+          ...dispatchMsg,
+          content: [
+            { ...(dispatchMsg.content[0] as ToolUseBlock), toolInput: input } as ToolUseBlock
+          ]
+        }
+      ]
+      if (result)
+        messages.push({
+          id: 'result-d',
+          role: 'user',
+          content: [
+            { type: 'tool_result', toolUseId: DISPATCH, toolResult: '', isError: false, ...result }
+          ] as ContentBlock[],
+          timestamp: 1
+        })
+      useSessionStore.setState((state) => ({
+        activeSessionId: ROUTE,
+        sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], messages } }
+      }))
+      mirrorStoreIntoReplica()
+    }
+    const toggleText = (): string => screen.getByTestId('TaskEntry.toggle').textContent ?? ''
+
+    it('the header says X-Agent and the description is the X-Agent’s, not the raw prompt', () => {
+      call({ engine: 'pi', prompt: 'a very long instruction nobody wants in a header' })
+      const { unmount } = render(<TaskEntry toolUseId={DISPATCH} />)
+      expect(toggleText()).toContain('X-Agent')
+      expect(toggleText()).toContain('Dispatch: pi')
+      expect(toggleText()).not.toContain('very long instruction')
+      unmount()
+
+      call({ engine: 'pi', prompt: 'long', description: 'Review the auth change' })
+      render(<TaskEntry toolUseId={DISPATCH} />)
+      expect(toggleText()).toContain('Review the auth change')
+    })
+
+    it('a refused background launch shows the reason it was refused', () => {
+      call(
+        { engine: 'pi', prompt: 'go', run_in_background: true },
+        {
+          toolResult: 'X-Agent refused: 4 X-Agents are already running (the limit).',
+          isError: true
+        }
+      )
+      render(<TaskEntry toolUseId={DISPATCH} />)
+      expect(screen.getByTestId('TaskEntry.failureSummary')).toHaveTextContent(
+        'X-Agent refused: 4 X-Agents are already running (the limit).'
+      )
+    })
+
+    it.each([
+      ['failed', 'The X-Agent ran out of time.'],
+      ['stopped', 'The X-Agent was stopped.']
+    ] as const)('a %s run with no report says how it ended: "%s"', (status, summary) => {
+      call(
+        { engine: 'pi', prompt: 'go' },
+        { toolResult: 'X-Agent launched on pi. It runs in the background.' }
+      )
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: DISPATCH,
+        status,
+        outputFile: '',
+        summary,
+        isBackgrounded: true
+      })
+      render(<TaskEntry toolUseId={DISPATCH} />)
+      expect(screen.getByTestId('TaskEntry.endNote')).toHaveTextContent(summary)
+    })
+
+    it('a withheld report of an X-Agent to an engine this build does not know still says X-Agent', () => {
+      call({ engine: 'gemini', prompt: 'go' }, { toolResult: 'X-Agent launched.' })
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: DISPATCH,
+        status: 'completed',
+        outputFile: '',
+        summary: 'ignored',
+        handback: 'withheld',
+        isBackgrounded: true
+      })
+      render(<TaskEntry toolUseId={DISPATCH} />)
+      expect(screen.getByTestId('HandbackReport.withheld')).toHaveTextContent('The X-Agent ended')
+      expect(screen.queryByTestId('TaskEntry.endNote')).not.toBeInTheDocument()
+    })
+  })
+
   it("a task nested in that child inherits the child's engine", () => {
     stage(true)
     render(<TaskEntry toolUseId={NESTED} />)

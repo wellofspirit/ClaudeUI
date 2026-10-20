@@ -24,7 +24,8 @@ import type {
   PluginViewWithOwner,
   VoiceState,
   WorktreeInfo,
-  FileDiff
+  FileDiff,
+  EngineId
 } from '../../../../shared/types'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 import {
@@ -1672,6 +1673,13 @@ describe('useClaudeEvents extended component tests', () => {
         )
       })
 
+      it('a held result with no X-Agent name does not read "X-Agent agent finished"', () => {
+        app.emit('session:dispatch-result-held', routingId, {})
+
+        const [title] = notified.mock.calls[0]
+        expect(title).toBe('An X-Agent finished — result waiting')
+      })
+
       it('says nothing to a user who is looking at that session', () => {
         useSessionStore.setState({ activeSessionId: routingId })
         const focus = vi.spyOn(document, 'hasFocus').mockReturnValue(true)
@@ -1682,6 +1690,69 @@ describe('useClaudeEvents extended component tests', () => {
         } finally {
           focus.mockRestore()
         }
+      })
+    })
+
+    // The OS notification of an approval names the action as the card does, not the wire
+    // spelling of a first-party tool (owner ask #5, ADR-105).
+    describe('the "Permission required" notification names the action, not its wire spelling', () => {
+      const ask = (toolName: string, subagentType?: string, engineId?: EngineId): string => {
+        // The replica owns the status the notification reads the session's engine from.
+        if (engineId) seed.status(routingId, makeSessionStatus({ sessionId: routingId, engineId }))
+        app.emit('session:approval-request', routingId, {
+          requestId: `req-${toolName}`,
+          toolName,
+          input: {},
+          ...(subagentType ? { agent: { agentId: 'a', label: 'pi', subagentType } } : {})
+        })
+        expect(notified).toHaveBeenCalledWith('Permission required', expect.anything())
+        return notified.mock.calls[0][1]?.body ?? ''
+      }
+
+      it("a Claude parent's own dispatch_agent ask", () => {
+        const body = ask('mcp__claude-ui-collab__dispatch_agent')
+        expect(body).toContain('X-Agent needs approval')
+        expect(body).not.toContain('mcp__')
+      })
+
+      it('an X-Agent session_message ask forwarded with the dispatch: prefix, in the target engine', () => {
+        const body = ask('dispatch:session_message', 'dispatch:pi')
+        expect(body).toContain('Session · message needs approval')
+        expect(body).not.toContain('dispatch:')
+      })
+
+      it('an X-Agent hand_back ask', () => {
+        const body = ask('dispatch:hand_back', 'dispatch:codex')
+        expect(body).toContain('Hand back needs approval')
+      })
+
+      it('a Claude X-Agent’s mcp__ ask is read by the Claude map', () => {
+        const body = ask('dispatch:mcp__claude-ui-sessions__session_message', 'dispatch:claude')
+        expect(body).toContain('Session · message needs approval')
+        expect(body).not.toContain('mcp__')
+      })
+
+      // Codex's map collapses every `mcp__…` name to the kind word "MCP": a first-party tool
+      // keeps its label, a third-party one must still say which tool it asks to run.
+      it('a third-party MCP tool names its server and tool, on every engine', () => {
+        for (const engine of ['claude', 'codex', 'pi', 'opencode'] as const) {
+          notified.mockClear()
+          const body = ask('mcp__github__create_issue', undefined, engine)
+          expect(body).toContain('github / create_issue needs approval')
+        }
+      })
+
+      it('a Codex parent’s first-party tool keeps its label, in either spelling', () => {
+        for (const wire of ['dispatch_agent', 'mcp__claude-ui-collab__dispatch_agent']) {
+          notified.mockClear()
+          expect(ask(wire, undefined, 'codex')).toContain('X-Agent needs approval')
+        }
+      })
+
+      it('a Codex X-Agent’s forwarded third-party MCP ask names its server and tool', () => {
+        const body = ask('dispatch:mcp__github__create_issue', 'dispatch:codex', 'claude')
+        expect(body).toContain('github / create_issue needs approval')
+        expect(body).not.toContain('dispatch:')
       })
     })
 

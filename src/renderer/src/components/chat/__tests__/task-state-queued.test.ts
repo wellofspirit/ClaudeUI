@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { ContentBlock, TaskNotification } from '../../../../../shared/types'
 import {
   deriveTaskState,
+  hasDispatchBehindCall,
   isBehindUnfinishedCall,
   isDispatchToolName,
   isQueuedDispatchCall
@@ -53,6 +54,41 @@ describe('isBehindUnfinishedCall — a call that has not started (L2)', () => {
 
   it('is false for an id the message does not hold', () => {
     expect(isBehindUnfinishedCall([use('a')], 'nope')).toBe(false)
+  })
+})
+
+// MessageBubble subscribes to the turn's state only for a message this admits: it must
+// admit every message `isQueuedDispatchCall` can say yes to.
+describe('hasDispatchBehindCall — the only shape that can read queued', () => {
+  it('is true for a dispatch after another tool call, false for the rest', () => {
+    expect(hasDispatchBehindCall([use('r', 'Read'), use('d')])).toBe(true)
+    expect(hasDispatchBehindCall([use('a'), text('x'), use('b')])).toBe(true)
+    expect(hasDispatchBehindCall([use('d'), use('r', 'Read')])).toBe(false)
+    expect(hasDispatchBehindCall([text('go'), use('d')])).toBe(false)
+    expect(hasDispatchBehindCall([use('r', 'Read'), use('w', 'Write')])).toBe(false)
+    expect(hasDispatchBehindCall([])).toBe(false)
+  })
+
+  it('admits every content for which a call reads queued', () => {
+    const shapes = [
+      [use('a'), use('b')],
+      [use('r', 'Read'), use('d'), use('e')],
+      [use('r', 'Read'), use('d'), result('r')],
+      [text('x'), use('d')],
+      [use('d')]
+    ]
+    for (const content of shapes) {
+      for (const block of content) {
+        if (block.type !== 'tool_use') continue
+        const queued = isQueuedDispatchCall({
+          engineId: 'claude',
+          turnRunning: true,
+          content,
+          block
+        })
+        if (queued) expect(hasDispatchBehindCall(content)).toBe(true)
+      }
+    }
   })
 })
 

@@ -240,6 +240,7 @@ import {
 } from './claude-permission-decision'
 import {
   failedResultText,
+  recordSummary,
   reportResultText,
   sentenceLabel,
   statusLine,
@@ -542,7 +543,7 @@ export interface ClaudeQuerySpawnOpts {
   settings?: Record<string, unknown>
   /** In-process MCP servers for the target: its `hand_back` (ADR-105 §3). */
   mcpServers?: Record<string, McpServerConfig>
-  /** Tools the process may call without asking (`--allowedTools`): `hand_back`, never a report to approve. */
+  /** Tools the process may call without asking (`--allowedTools`): `hand_back` and `session_message`, only in `dontAsk`/`bypassPermissions`. */
   allowedTools?: string[]
   /** Every stream-json frame as it is read off the wire, before the dispatcher's own loop (who made a tool call). */
   onInboundFrame?: (frame: Record<string, unknown>) => void
@@ -2396,10 +2397,11 @@ function emitDispatchTaskStarted(ctx: RunContext, ledgerId: string): void {
  * have real per-turn numbers (success outcomes) — timeouts/stops/errors pass
  * it undefined rather than fabricate zeros for a turn that never returned.
  *
- * `taskId` is the run's ledger id (ADR-105). `summary` is the FULL text for a
- * background run — this record is the only place its result appears until B-3
- * delivers it into the parent. A blocking run keeps the short summary: its
- * tool_result already carries the text, and the record rides every sync-full.
+ * `taskId` is the run's ledger id (ADR-105). `summary` is the run's text for a
+ * background run, cut at the delivery cap (`recordSummary`): the card draws it, and
+ * §3's delivery puts the same words (framed) into the parent. A blocking run keeps the
+ * short summary: its tool_result already carries the text, and the record rides every
+ * sync-full.
  */
 function emitDispatchNotification(
   ctx: RunContext,
@@ -2419,8 +2421,9 @@ function emitDispatchNotification(
     ...runIndexField(ctx.run),
     status,
     outputFile: '',
-    // A report is the card's body (S6's `HandbackReport`): whole, for a blocking run too.
-    summary: ctx.run.background || report ? summary : summary.slice(0, 100),
+    // A report is the card's body (the `HandbackReport` component): whole, for a blocking run too, up to the
+    // delivery cap (the record rides every sync-full; the full report is in `dispatch_report`).
+    summary: recordSummary(ctx.run.background || report ? summary : summary.slice(0, 100)),
     // The card cannot tell from the tool input: a root agent's call runs in the background
     // without saying so (ADR-105 §2), and its result is only the launch acknowledgement.
     ...(ctx.run.background ? { isBackgrounded: true } : {}),
@@ -3298,6 +3301,9 @@ export class CrossEngineDispatcher {
    * yet (see the pendingStops field doc); `launchRun` consumes the intent
    * and refuses the call before it creates anything.
    *
+   * A registry miss on the card (or ledger) id of a `running` row the caller owns is a row nothing
+   * here runs: see {@link endPhantomRow} (it is ended, no intent is armed).
+   *
    * `opts.blockingOnly` is the parent's OWN interrupt (Esc, pi's and Codex's interrupt):
    * it ends the blocking calls the parent is waiting on and never a background run,
    * which is the user's to stop from its card.
@@ -3316,6 +3322,7 @@ export class CrossEngineDispatcher {
         'CrossEngineDispatcher',
         `stopDispatch miss: id=${id} not among ${this.runs.size} run(s)`
       )
+      if (routingId !== undefined && this.endPhantomRow(id, routingId)) return true
       if (opts?.armIfUnknown) {
         this.pendingStops.set(toolUseId, { routingId })
         logger.debug(
@@ -3342,6 +3349,54 @@ export class CrossEngineDispatcher {
     // agent either); the parent's interrupt of a blocking call leaves it resumable.
     if (!opts?.blockingOnly) run.endRequested = true
     run.stopController.abort()
+    return true
+  }
+
+  /**
+   * Stop on an X-Agent the ledger says is `running` and nothing in this process runs: a row a crash
+   * left behind whose recorded owner pid was then handed to an unrelated process (the boot pass
+   * reads that as a live owner and leaves it), or one a second instance sharing the DB is running.
+   * Nothing would ever end it, so the user's Stop does: the row is `stopped` and the parent gets
+   * the terminal notification (the card, the roster and the dot clear). It arms no intent.
+   *
+   * The harness's own state (pi's directory, opencode's session) goes only when no other live
+   * instance owns the row: a real second instance may be running the agent on it. `stopped` is
+   * final in the store, so that instance's run end cannot write over the Stop.
+   */
+  private endPhantomRow(id: string, routingId: string): boolean {
+    let row: DispatchTargetRow | undefined
+    try {
+      row = this.ledger
+        .byParent(this.runs.parentOf(routingId))
+        .find((r) => r.state === 'running' && (r.parentToolUseId === id || r.id === id))
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `dispatch ledger lookup failed: ${errText(err)}`)
+      return false
+    }
+    if (!row || this.runs.byLedgerId(row.id)) return false
+    let foreign = false
+    try {
+      foreign = this.ledger.ownedByOtherLiveInstance(row.id)
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `dispatch owner lookup failed: ${errText(err)}`)
+    }
+    try {
+      if (foreign) this.ledgerSet(row.id, { state: 'stopped' })
+      else this.endTarget(row.id, row)
+    } catch (err) {
+      logger.warn('CrossEngineDispatcher', `could not end X-Agent ${row.id}: ${errText(err)}`)
+    }
+    // A row with no launching call has no card to clear (the notification is keyed by that call).
+    if (row.parentToolUseId) {
+      this.parents?.emit(this.runs.parentOf(routingId), 'session:task-notification', {
+        taskId: row.id,
+        toolUseId: row.parentToolUseId,
+        status: 'stopped',
+        outputFile: '',
+        summary: 'Dispatch stopped by user.',
+        isBackgrounded: true
+      })
+    }
     return true
   }
 
@@ -4131,6 +4186,10 @@ export class CrossEngineDispatcher {
         logger.warn('CrossEngineDispatcher', `dispatch run failed: ${msg}`)
         result = errorResult(`Dispatch failed: ${msg}`, req.sessionId ?? '')
       }
+      // Nobody waits for the report's review any more, whichever way the body ended (a failure, a
+      // timeout or a Stop can land after the report was accepted and before `settleReview` ran): its
+      // judge request must not run on, billed. A no-op once the review has finished.
+      run.reviewAbort?.abort()
       // The run's turns are over: what the X-Agent was sent and had not read is decided NOW, before the
       // result is delivered to the parent (which can take a while), so a turn the engine starts
       // meanwhile on such a message is a stray one, ended by the backstop, and nothing it consumes
@@ -4165,6 +4224,12 @@ export class CrossEngineDispatcher {
       await this.deliverRunResult(run)
       // Messages the run never answered start its next run (before the idle timer is re-armed).
       this.requeueSteers(run)
+      // Nothing continues the target now: its process is released (a message resumes it).
+      try {
+        this.releaseAfterRun(run)
+      } catch (err) {
+        logger.warn('CrossEngineDispatcher', `dispatch run release failed: ${errText(err)}`)
+      }
       this.rearmParentIdle(run)
     }
     return result
@@ -4410,28 +4475,32 @@ export class CrossEngineDispatcher {
    * A run has settled (its body returned and its notification went out): decide what
    * becomes of its target.
    *  - The user stopped it from its card, or its parent was deleted: it ends.
-   *  - A background run whose parent session is not live: nothing will continue it soon,
-   *    and a parked process under a dead parent would never be released, so the process
-   *    goes now. The row is left as the turn wrote it (`idle`, or `failed`) and a later
-   *    message resumes it.
+   *  - Otherwise it stays for now: the process is released later, by {@link releaseAfterRun}, once the
+   *    result is delivered. (Nothing continues a target but a message, `session_message`, and that
+   *    resumes a released one from its row just as well, so a blocking run parks nothing either.)
    */
   private settleTarget(run: DispatchRun): void {
     if (!run.ledgerId) return
-    if (run.endRequested) {
-      this.endTarget(run.ledgerId)
-      return
-    }
-    if (!run.background || this.parentIsLive(run)) return
-    const live = this.liveEntry(run.ledgerId)
-    if (live) this.releaseEntry(live.sessionId, live.entry, null)
+    if (run.endRequested) this.endTarget(run.ledgerId)
   }
 
-  /** Is the run's parent session up? Unknown (no lookup wired) counts as up: nothing is released on a guess. */
-  private parentIsLive(run: DispatchRun): boolean {
-    const parents = this.parents
-    if (!parents) return true
-    const session = parents.session(this.runs.parentOf(run.init.parentId))
-    return session !== undefined && session.isEngineLive?.() !== false
+  /**
+   * The last step of a run, background or blocking, after its result is delivered and its unanswered
+   * messages are sent again: its target's process goes, whether or not the parent is live (ADR-105 §5 —
+   * nothing else bounds the parked processes of a long session, and a message is the only thing
+   * that continues an X-Agent). The row stays as the turn wrote it (`idle`, or `failed`) and the
+   * next message resumes it from the row, through the one run engine, like any released target.
+   *
+   * Not while another run holds the target: a message that arrived while the result was being
+   * delivered, or the run `requeueSteers` just launched, is already registered (launching is
+   * synchronous) and continues on the live process; that run's own end releases it. A run that is
+   * stopped from its card has been ended by {@link settleTarget} already (nothing live to find).
+   */
+  private releaseAfterRun(run: DispatchRun): void {
+    if (!run.ledgerId || run.endRequested) return
+    if (this.runs.byLedgerId(run.ledgerId)) return
+    const live = this.liveEntry(run.ledgerId)
+    if (live) this.releaseEntry(live.sessionId, live.entry, null)
   }
 
   /**
@@ -9107,8 +9176,8 @@ export class CrossEngineDispatcher {
    * mode must still be reviewed by someone, which is precisely what
    * `auto_review` is.
    *
-   * `dynamicTools`: only `hand_back` (ADR-105 §3) — the target has no `dispatch_agent`
-   * (no recursion) and no other hosted tools. See `CODEX_TARGET_SERVER_METHODS` for the
+   * `dynamicTools`: only `hand_back` (ADR-105 §3) and `session_message` (§4) — the target has no
+   * `dispatch_agent` (no recursion) and no other hosted tools. See `CODEX_TARGET_SERVER_METHODS` for the
    * transport-level half of the same scrub.
    */
   private async createCodexTarget(
@@ -9824,6 +9893,20 @@ export class CrossEngineDispatcher {
       contentItems: [{ type: 'inputText', text }],
       success: !isError
     })
+    // The user's deny rule for the tool (written for Claude's spelling of it) holds here as it does
+    // for the other engines' targets, in every mode and BEFORE the judge: a Codex target's dynamic
+    // tool call never reaches the approval ladder (ADR-085 §3, ADR-105 §4).
+    const denied = sessionToolDenyRule(
+      X_AGENT_MESSAGE_TOOL,
+      args,
+      this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction),
+      entry.cwd
+    )
+    if (denied) return answer(`Denied by permission rule: ${denied}`, true)
+    // A run that is over takes no message: refused here, before a paid review of it (the service
+    // refuses it too, with the same words, for the engines that have no judge in front).
+    const over = this.xAgentMessageRefusal(entry)
+    if (over) return answer(over, true)
     const message = typeof args.message === 'string' ? args.message : ''
     const judge = this.codexReportJudge(entry)
     if (message.trim() !== '' && judge.autoModeActive(entry.autonomyMode)) {

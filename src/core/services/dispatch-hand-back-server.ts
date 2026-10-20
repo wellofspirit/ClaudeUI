@@ -21,8 +21,8 @@ export interface HandBackAnswer {
  * the way the agent delivers its final report. Built per spawn by the dispatcher, with
  * the target's entry in its closure, so a call needs no identity lookup: the process IS
  * the X-Agent. A SEPARATE server from `claude-ui-collab` / `claude-ui-sessions` for the
- * same reason they are separate: the prefix is the target's alone (it is the only tool
- * the dispatcher lists in `allowedTools`), and `alwaysLoad` keeps the tool in the prompt
+ * same reason they are separate: the prefix is the target's alone (it is listed in
+ * `allowedTools` only in `dontAsk`/`bypassPermissions`, `claudeOwnToolsPreAllowed`), and `alwaysLoad` keeps the tool in the prompt
  * from the first turn instead of behind tool search.
  */
 export function createHandBackServer(

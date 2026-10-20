@@ -1568,8 +1568,9 @@ export const MIGRATIONS: Migration[] = [
     // ended without one), `fallback` (a target without the tool; `report` is its last message),
     // `stopped`, `failed`, `timeout`; `report` is set for delivered and fallback only, as
     // received: the sanitiser runs at render and delivery time. `delivered_at` stays null until
-    // B-3b delivers it into the parent. `dispatch_target.hand_back` says the target was started
-    // with the tool (0 = a row from before it existed: its final message is the report).
+    // the result reaches the parent (v37's `report_run` carries a held one's run).
+    // `dispatch_target.hand_back` says the target was started with the tool (0 = a row from before it
+    // existed: its final message is the report).
     version: 36,
     up(db) {
       db.exec(`
@@ -1604,6 +1605,20 @@ export const MIGRATIONS: Migration[] = [
     version: 38,
     up(db) {
       db.exec('ALTER TABLE dispatch_report ADD COLUMN warning TEXT')
+    }
+  },
+  {
+    // ADR-105 §5: which ClaudeUI instance runs a `running` target. Two
+    // instances can share one operational.db (a dev or verifier build beside the packaged app,
+    // `claudeui-server` beside the desktop); the boot pass interrupts a `running` row only when its
+    // owner (pid + a per-boot id) is gone. Set while the row is `running`, NULL otherwise and on every
+    // row written before this version (those keep the old rule: a `running` row at boot is interrupted).
+    version: 39,
+    up(db) {
+      db.exec(`
+        ALTER TABLE dispatch_target ADD COLUMN owner_pid INTEGER;
+        ALTER TABLE dispatch_target ADD COLUMN owner_boot TEXT;
+      `)
     }
   }
 ]
@@ -2574,7 +2589,7 @@ export function sessionProposalStartedRef(ref: string, db: Db = getDb()): boolea
 /**
  * `running` a turn is in flight; `idle` between turns (the process may be released);
  * `interrupted` ended by its parent's cancel, a lost server or an app quit — resumable;
- * `stopped` ended on purpose (a later slice); `failed` the last turn or resume failed —
+ * `stopped` ended on purpose (a card Stop, a deleted parent); `failed` the last turn or resume failed —
  * it may be retried, and only `stopped` is never resumed. A resume that failed for a
  * transient reason (a busy host, a spawn error) leaves the previous state; only one that
  * cannot succeed (the transcript, session directory, opencode session or Codex rollout
@@ -2611,6 +2626,15 @@ export interface DispatchTargetRow {
   lastActiveAt: number
 }
 
+/**
+ * The ClaudeUI instance that runs a `running` target: its pid and a per-boot id (a pid alone
+ * is reused). Kept beside the row, not in it: only the ledger store and the boot pass read it.
+ */
+export interface DispatchTargetOwner {
+  pid: number
+  boot: string
+}
+
 interface DispatchTargetDbRow {
   id: string
   engine: string
@@ -2630,6 +2654,8 @@ interface DispatchTargetDbRow {
   state: string
   created_at: number
   last_active_at: number
+  owner_pid: number | null
+  owner_boot: string | null
 }
 
 const DISPATCH_TARGET_STATES: readonly string[] = [
@@ -2665,15 +2691,29 @@ function dispatchTargetRow(row: DispatchTargetDbRow): DispatchTargetRow {
   }
 }
 
-/** Insert a target row. Returns false when the id or the (engine, harness_ref) pair is taken. */
-export function insertDispatchTarget(row: DispatchTargetRow, db: Db = getDb()): boolean {
+/** The owner a row records, if it has one (a row written before v39, or one that is not `running`, has none). */
+function dispatchTargetOwner(row: DispatchTargetDbRow): DispatchTargetOwner | null {
+  return row.owner_pid !== null && row.owner_pid !== undefined && row.owner_boot
+    ? { pid: Number(row.owner_pid), boot: row.owner_boot }
+    : null
+}
+
+/**
+ * Insert a target row. Returns false when the id or the (engine, harness_ref) pair is taken.
+ * `owner`: the instance that runs it (the row is inserted `running`).
+ */
+export function insertDispatchTarget(
+  row: DispatchTargetRow,
+  db: Db = getDb(),
+  owner: DispatchTargetOwner | null = null
+): boolean {
   const info = db
     .prepare(
       `INSERT OR IGNORE INTO dispatch_target
          (id, engine, harness_ref, parent_session_id, parent_engine, parent_tool_use_id, cwd,
           model, launch_mode, account_key, codex_account_id, caller_restriction, name,
-          description, hand_back, state, created_at, last_active_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          description, hand_back, state, created_at, last_active_at, owner_pid, owner_boot)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       row.id,
@@ -2693,7 +2733,9 @@ export function insertDispatchTarget(row: DispatchTargetRow, db: Db = getDb()): 
       row.handBack ? 1 : 0,
       row.state,
       row.createdAt,
-      row.lastActiveAt
+      row.lastActiveAt,
+      owner?.pid ?? null,
+      owner?.boot ?? null
     )
   return Number(info.changes) > 0
 }
@@ -2703,14 +2745,18 @@ export function insertDispatchTarget(row: DispatchTargetRow, db: Db = getDb()): 
  * transaction, so a refused second insert leaves no orphan ref. Returns false, with
  * nothing written, when the id, the ref or the (engine, harness_ref) pair is taken.
  */
-export function insertDispatchTargetWithRef(row: DispatchTargetRow, db: Db = getDb()): boolean {
+export function insertDispatchTargetWithRef(
+  row: DispatchTargetRow,
+  db: Db = getDb(),
+  owner: DispatchTargetOwner | null = null
+): boolean {
   db.prepare('BEGIN').run()
   try {
     const ok =
       insertSessionRef(
         { ref: row.id, engine: row.engine, sessionId: row.harnessRef, routingId: null },
         db
-      ) && insertDispatchTarget(row, db)
+      ) && insertDispatchTarget(row, db, owner)
     db.prepare(ok ? 'COMMIT' : 'ROLLBACK').run()
     return ok
   } catch (err) {
@@ -2760,13 +2806,16 @@ export function dispatchTargetsNotStopped(db: Db = getDb()): DispatchTargetRow[]
   ).map(dispatchTargetRow)
 }
 
-/** Every target still marked `running` (at boot: the ones the last process left behind). */
-export function runningDispatchTargets(db: Db = getDb()): DispatchTargetRow[] {
+/** A `running` row and the instance it records as running it (null: written before v39). */
+export type RunningDispatchTarget = DispatchTargetRow & { owner: DispatchTargetOwner | null }
+
+/** Every target still marked `running` (at boot: the candidates the last process may have left behind). */
+export function runningDispatchTargets(db: Db = getDb()): RunningDispatchTarget[] {
   return (
     db
       .prepare("SELECT * FROM dispatch_target WHERE state = 'running' ORDER BY created_at, id")
       .all() as DispatchTargetDbRow[]
-  ).map(dispatchTargetRow)
+  ).map((row) => ({ ...dispatchTargetRow(row), owner: dispatchTargetOwner(row) }))
 }
 
 /** The mutable columns of a target row; an omitted key keeps its value. */
@@ -2775,8 +2824,15 @@ export type DispatchTargetPatch = Partial<
     DispatchTargetRow,
     'state' | 'harnessRef' | 'accountKey' | 'lastActiveAt' | 'name' | 'description'
   >
->
+> & {
+  /** The instance that runs the row; `null` clears it (the row is not `running`). */
+  owner?: DispatchTargetOwner | null
+}
 
+/**
+ * `stopped` is final: a stopped row keeps its state and owns nothing, whatever a later update says (a
+ * run that ends in another instance, a late turn state), so the user's Stop is never written over.
+ */
 export function updateDispatchTarget(
   id: string,
   patch: DispatchTargetPatch,
@@ -2784,12 +2840,14 @@ export function updateDispatchTarget(
 ): void {
   db.prepare(
     `UPDATE dispatch_target
-        SET state = CASE WHEN ? THEN ? ELSE state END,
+        SET state = CASE WHEN ? AND state <> 'stopped' THEN ? ELSE state END,
             harness_ref = CASE WHEN ? THEN ? ELSE harness_ref END,
             account_key = CASE WHEN ? THEN ? ELSE account_key END,
             last_active_at = CASE WHEN ? THEN ? ELSE last_active_at END,
             name = CASE WHEN ? THEN ? ELSE name END,
-            description = CASE WHEN ? THEN ? ELSE description END
+            description = CASE WHEN ? THEN ? ELSE description END,
+            owner_pid = CASE WHEN ? AND state <> 'stopped' THEN ? ELSE owner_pid END,
+            owner_boot = CASE WHEN ? AND state <> 'stopped' THEN ? ELSE owner_boot END
       WHERE id = ?`
   ).run(
     patch.state !== undefined ? 1 : 0,
@@ -2804,6 +2862,10 @@ export function updateDispatchTarget(
     patch.name ?? null,
     patch.description !== undefined ? 1 : 0,
     patch.description ?? null,
+    patch.owner !== undefined ? 1 : 0,
+    patch.owner?.pid ?? null,
+    patch.owner !== undefined ? 1 : 0,
+    patch.owner?.boot ?? null,
     id
   )
 }
@@ -2818,14 +2880,18 @@ export function moveDispatchTargetParent(oldId: string, newId: string, db: Db = 
 }
 
 /**
- * Boot pass: a row still `running` belongs to a process that no longer exists (an
- * app quit or a crash), so it is `interrupted`. Returns how many rows changed.
+ * Boot pass: these rows were `running` under an owner that is gone (an app quit or a crash), so
+ * they are `interrupted` and own nothing. Only rows still `running` change. Returns the ids that did (a
+ * row another instance interrupted first is not among them).
  */
-export function interruptRunningDispatchTargets(db: Db = getDb()): number {
-  const info = db
-    .prepare("UPDATE dispatch_target SET state = 'interrupted' WHERE state = 'running'")
-    .run()
-  return Number(info.changes)
+export function interruptDispatchTargets(ids: readonly string[], db: Db = getDb()): string[] {
+  const stmt = db.prepare(
+    `UPDATE dispatch_target SET state = 'interrupted', owner_pid = NULL, owner_boot = NULL
+      WHERE id = ? AND state = 'running'`
+  )
+  const changed: string[] = []
+  for (const id of ids) if (Number(stmt.run(id).changes) > 0) changed.push(id)
+  return changed
 }
 
 /**

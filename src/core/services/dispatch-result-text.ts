@@ -37,6 +37,17 @@ export function truncationPointer(name: string): string {
   return `(report truncated — the full report is on X-Agent ${sentenceLabel(name)}'s card)`
 }
 
+/**
+ * A run's end as the live task-notification record carries it (and so every sync-full, ADR-087): the
+ * report up to {@link RESULT_REPORT_MAX} characters, then a pointer. The whole report stays in
+ * `dispatch_report`; a reopened session builds the card's record from it (`dispatch-task-history`).
+ */
+export function recordSummary(summary: string): string {
+  return summary.length > RESULT_REPORT_MAX
+    ? `${summary.slice(0, RESULT_REPORT_MAX)}\n\n(report truncated here — the full report is kept and shows when the session is reopened)`
+    : summary
+}
+
 /** `1.2k` / `34k` / `812` */
 function compactCount(n: number): string {
   if (n < 1000) return String(n)

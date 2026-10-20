@@ -41,6 +41,7 @@ import { showVoiceNotice } from '../lib/voice/voice-notice'
 import { voiceController } from '../lib/voice/voice-controller'
 import { applyVoicePackStatus, refreshVoicePackStatus } from '../lib/voice/voice-pack-store'
 import { hasWakingTask } from '../lib/task-types'
+import { approvalActionName } from '../components/chat/tool-registry/approval-action'
 import type {
   SessionResult,
   SessionStatus,
@@ -309,7 +310,9 @@ export function useClaudeEvents(): void {
         }
         notifyIfNeeded(
           routingId,
-          `X-Agent ${data?.name || 'agent'} finished — result waiting`,
+          data?.name
+            ? `X-Agent ${data.name} finished — result waiting`
+            : 'An X-Agent finished — result waiting',
           'It is delivered with your next prompt, or when the session is live again',
           // N held X-Agents of one parent coalesce into one notification.
           `dispatch-result-held:${routingId}`
@@ -659,18 +662,27 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
     }
 
     case 'session:approval-request': {
-      const approval = args[1] as { toolName?: string; reRaised?: boolean } | undefined
+      const approval = args[1] as
+        | {
+            toolName?: string
+            reRaised?: boolean
+            agent?: { subagentType?: string }
+          }
+        | undefined
       // A card the host put back after the parent's disconnect (ADR-105 §5) was announced
       // when it first came: the reducer lists it again, nothing else fires.
       if (approval?.reRaised) return
       if (store.activeSessionId !== routingId || !document.hasFocus()) {
         store.setNeedsAttention(routingId, true)
       }
-      notifyIfNeeded(
-        routingId,
-        'Permission required',
-        `${approval?.toolName || 'Tool'} needs approval`
-      )
+      // The action as the card names it, not the wire spelling (`mcp__claude-ui-collab__…`,
+      // `dispatch:hand_back`): in the target engine's map for a forwarded X-Agent ask.
+      const sessionEngine = store.sessions[routingId]?.status.engineId
+      const action =
+        approval?.toolName && sessionEngine
+          ? approvalActionName({ ...approval, toolName: approval.toolName }, sessionEngine)
+          : approval?.toolName
+      notifyIfNeeded(routingId, 'Permission required', `${action || 'Tool'} needs approval`)
       return
     }
 
