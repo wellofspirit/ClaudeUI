@@ -6,8 +6,9 @@
  * reaches the browser console), which the host formats with the same function.
  *
  * Both clients report once per `sync-full`, at `info` (so the same
- * `CLAUDE_UI_LOG=SyncStats:info` enablement shows it), escalating to `warn` when
- * the client's total passes {@link SYNC_TIMING_WARN_MS}. Pure and Electron-free: the
+ * `CLAUDE_UI_LOG=SyncStats:info` enablement shows it). The desktop relay escalates
+ * to `warn` when the total passes {@link SYNC_TIMING_WARN_MS}; the host's web path
+ * never does (a client-controlled number must not choose the level). Pure and Electron-free: the
  * caller hands in the relay, which keeps it testable and keeps `window` out of the
  * shared tree. Numbers only — never snapshot content.
  */

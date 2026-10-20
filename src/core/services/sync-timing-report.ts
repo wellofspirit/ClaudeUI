@@ -25,7 +25,7 @@ import { formatSyncTiming, type SyncTimingReport } from '../shared/sync/sync-tim
 /** Reports one connection may make per {@link WINDOW_MS}; a sync-full is rare, so 6 is generous. */
 export const MAX_REPORTS_PER_MINUTE = 6
 const WINDOW_MS = 60_000
-/** A frame is never larger than the largest string a WebSocket will carry (2^31). */
+/** An upper bound no real frame reaches (ws's maxPayload is 100 MiB, V8's string limit is below 2^31). */
 export const MAX_FRAME_BYTES = 2 ** 31
 /** No timing is believable past ten minutes; a larger value is clamped, not trusted. */
 export const MAX_REPORT_MS = 10 * 60 * 1000
@@ -95,15 +95,17 @@ export class SyncTimingReports {
     if (!this.allow(connectionId, now)) return
     const parsed = parseSyncTimingReport(raw)
     if (!parsed) return
-    const { level, message } = formatSyncTiming({
+    // Always `info`, whatever the numbers: the desktop relay escalates a slow sync to
+    // `warn` itself, but here the numbers are client-controlled, so letting them pick
+    // the level would let a client write past the logger's level gate.
+    const { message } = formatSyncTiming({
       transport: 'web',
       frameChars: Math.floor(parsed.frameBytes),
       decodeMs: parsed.decodeMs,
       syncToFrameMs: parsed.syncToFrameMs,
       hydrateMs: parsed.hydrateMs
     })
-    if (level === 'warn') logger.warn(SYNC_STATS_SOURCE, message)
-    else logger.info(SYNC_STATS_SOURCE, message)
+    logger.info(SYNC_STATS_SOURCE, message)
   }
 
   /** The socket is gone: forget its budget. Called from the remote server's close paths. */

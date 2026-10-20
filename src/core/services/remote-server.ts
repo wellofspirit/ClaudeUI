@@ -677,6 +677,22 @@ interface AuthenticatedClient {
 }
 
 /**
+ * Run a send observer (the `SyncStats` lines). Diagnostics must never break the
+ * send path: under E2E the observer runs inside the channel's `sendQueue` chain,
+ * where a throw would reject the queue and strand every later frame on the socket.
+ */
+function observeSent(onSent: (sent: FrameSent) => void, sent: FrameSent): void {
+  try {
+    onSent(sent)
+  } catch (err) {
+    logger.error(
+      'remote-server',
+      `send observer failed: ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+}
+
+/**
  * Per-key failed-credential record: one counter and one window start.
  *
  * It carried a second, independent pair until ADR-056 (review F2), so that
@@ -5038,9 +5054,10 @@ export class RemoteServer {
     if (decision.kind === 'full') {
       // `SyncStats` measurement (sync-core.md § Measuring a full sync): the frame
       // line comes from the send callback, because under E2E the size is only
-      // known after the async encrypt. The opt-in breakdown runs right after the
-      // send is queued: on plaintext the frame is already out, under E2E its extra
-      // serialization runs before the queued encrypt (diagnostic-only cost).
+      // known after the async encrypt. The opt-in breakdown runs from the same
+      // callback, AFTER the line: its extra serialization must never precede the
+      // frame on either path (under E2E the encrypt is queued, so running it right
+      // after `sendTo` would delay the frame and skew the client's `syncToFrameMs`).
       this.sendTo(
         ws,
         {
@@ -5050,9 +5067,11 @@ export class RemoteServer {
           mockupToken: this.mockupToken || undefined,
           fileToken: this.fileToken || undefined
         },
-        (sent) => logWsFullSync(decision, { lastSeq, epoch }, this.core, sent)
+        (sent) => {
+          logWsFullSync(decision, { lastSeq, epoch }, this.core, sent)
+          logFullSyncBreakdown(decision)
+        }
       )
-      logFullSyncBreakdown(decision)
       return
     }
     this.sendTo(ws, { type: 'sync-catchup', events: decision.events, epoch: decision.epoch })
@@ -5150,12 +5169,14 @@ export class RemoteServer {
       const payload = JSON.stringify(msg)
       const encodeMs = performance.now() - started
       ws.send(payload)
-      onSent?.({
-        bytes: Buffer.byteLength(payload),
-        encodeMs,
-        e2e: false,
-        bufferedAmount: ws.bufferedAmount
-      })
+      if (onSent) {
+        observeSent(onSent, {
+          bytes: Buffer.byteLength(payload),
+          encodeMs,
+          e2e: false,
+          bufferedAmount: ws.bufferedAmount
+        })
+      }
       return Promise.resolve()
     }
     const queued = channel.sendQueue.then(async () => {
@@ -5166,7 +5187,9 @@ export class RemoteServer {
         const payload = await e2e.encrypt(msg)
         const encodeMs = performance.now() - started
         ws.send(payload)
-        sent = { bytes: payload.length, encodeMs, e2e: true, bufferedAmount: ws.bufferedAmount }
+        if (onSent) {
+          sent = { bytes: payload.length, encodeMs, e2e: true, bufferedAmount: ws.bufferedAmount }
+        }
       } catch (err) {
         logger.error(
           'remote-server',
@@ -5174,7 +5197,7 @@ export class RemoteServer {
         )
       }
       // Outside the try: a throwing observer is not an "encrypt failure".
-      if (sent) onSent?.(sent)
+      if (sent && onSent) observeSent(onSent, sent)
     })
     channel.sendQueue = queued
     return queued
