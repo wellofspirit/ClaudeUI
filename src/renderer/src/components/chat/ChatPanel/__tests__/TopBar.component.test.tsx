@@ -299,7 +299,7 @@ describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => 
     mirrorStoreIntoReplica()
   })
 
-  it('marks a dispatched row with data-dispatched + a "· dispatched" suffix, own-engine rows unmarked', () => {
+  it('marks a dispatched row with data-dispatched (no suffix: the sub-header says it), own-engine rows unmarked', () => {
     seed.statusLine(
       ROUTE,
       makeStatusLine({
@@ -323,8 +323,105 @@ describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => 
 
     const dispatchedRow = rows.find((r) => r.getAttribute('data-model') === 'openai/gpt-5')!
     expect(dispatchedRow).toHaveAttribute('data-dispatched', 'true')
-    expect(dispatchedRow).toHaveTextContent('dispatched')
+    expect(dispatchedRow).toHaveTextContent('gpt-5')
+    expect(dispatchedRow).not.toHaveTextContent('dispatched')
     expect(dispatchedRow).toHaveTextContent('$0.31')
+
+    unmount()
+  })
+
+  it('lists dispatched rows after every own-engine row, under a Dispatched sub-header, even when one costs more', () => {
+    seed.statusLine(
+      ROUTE,
+      makeStatusLine({
+        totalCostUsd: 1.45,
+        modelCosts: [
+          // The dispatched row is the most expensive and listed first: a plain
+          // cost sort would put it on top.
+          { engineId: 'opencode', modelId: 'openai/gpt-5', costUsd: 5, dispatched: true },
+          { engineId: 'claude', modelId: 'claude-haiku-4-5', costUsd: 0.2 },
+          { engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 1.25 },
+          { engineId: 'pi', modelId: 'acme/small-1', costUsd: 0.5, dispatched: true }
+        ]
+      })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    const rows = screen.getAllByTestId('TopBar.costBreakdownRow')
+    expect(rows.map((r) => r.getAttribute('data-model'))).toEqual([
+      'claude-sonnet-4-6',
+      'claude-haiku-4-5',
+      'openai/gpt-5',
+      'acme/small-1'
+    ])
+    // The header sits between the two groups, and the dispatched rows are indented.
+    const header = screen.getByTestId('TopBar.costDispatchedHeader')
+    expect(header).toHaveTextContent('Dispatched')
+    expect(header.compareDocumentPosition(rows[1]) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
+    expect(header.compareDocumentPosition(rows[2]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(rows[2].className).toContain('pl-2')
+    expect(rows[0].className).not.toContain('pl-2')
+
+    unmount()
+  })
+
+  it('renders no Dispatched sub-header when nothing was dispatched', () => {
+    seed.statusLine(
+      ROUTE,
+      makeStatusLine({
+        totalCostUsd: 1.68,
+        modelCosts: [
+          { engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 0.45 },
+          { engineId: 'claude', modelId: 'claude-fable-5', costUsd: 1.23 }
+        ]
+      })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getAllByTestId('TopBar.costBreakdownRow')).toHaveLength(2)
+    expect(screen.queryByTestId('TopBar.costDispatchedHeader')).toBeNull()
+
+    unmount()
+  })
+
+  it('keeps Session time / API time and the cost breakdown as siblings, not nested in the cost stat', () => {
+    seed.statusLine(
+      ROUTE,
+      makeStatusLine({
+        totalCostUsd: 1.0,
+        totalDurationMs: 65_000,
+        totalApiDurationMs: 40_000,
+        modelCosts: [
+          { engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 1.0 },
+          { engineId: 'opencode', modelId: 'openai/gpt-5', costUsd: 0.31, dispatched: true }
+        ]
+      })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    const costStat = screen.getByTestId('TopBar.cost').parentElement!
+    const statsRow = costStat.parentElement!
+    const session = screen.getByTestId('TopBar.sessionTime')
+    const api = screen.getByTestId('TopBar.apiTime')
+    const breakdown = screen.getByTestId('TopBar.costBreakdown')
+    // The three stats share one row; the time stats are not inside the cost stat.
+    expect(session.parentElement).toBe(statsRow)
+    expect(api.parentElement).toBe(statsRow)
+    expect(costStat.contains(session)).toBe(false)
+    expect(costStat.contains(api)).toBe(false)
+    // The breakdown lives below the stats row, not inside it or the cost stat.
+    expect(statsRow.contains(breakdown)).toBe(false)
+    expect(breakdown.parentElement).toBe(statsRow.parentElement)
+    // Each stat stays on one line.
+    expect(session.className).toContain('whitespace-nowrap')
+    expect(api.className).toContain('whitespace-nowrap')
+    expect(screen.getByTestId('TopBar.cost').className).toContain('whitespace-nowrap')
 
     unmount()
   })
