@@ -479,6 +479,8 @@ export class ClaudeSession extends BaseSession {
   private lastContextLength = 0
   /** Epoch ms when the currently in-flight turn started; null while idle. */
   private turnStartedAtMs: number | null = null
+  /** The spawn-time seed of the accumulators from the resume transcript; null once settled. */
+  private resumeSeed: Promise<void> | null = null
 
   constructor(
     routingId: string,
@@ -554,11 +556,16 @@ export class ClaudeSession extends BaseSession {
     // post-anchor turns the fork truncates away, and the max() guard would
     // make that over-count permanent — a fork's fresh transcript reconciles
     // normally after its first result instead.
+    // `sendPrompt` waits on this (`resumeSeedReady`): the seed used to finish well
+    // before any prompt only because the canonical read it also waited on was slow.
     if (this.resumeSessionId && !this.forkSession) {
-      void this.reconcileAccumulatorsFromTranscript(
+      const seed: Promise<void> = this.reconcileAccumulatorsFromTranscript(
         this.transcriptPathFor(this.resumeSessionId),
         true
-      )
+      ).finally(() => {
+        if (this.resumeSeed === seed) this.resumeSeed = null
+      })
+      this.resumeSeed = seed
     }
 
     // The agents this conversation already spawned (ADR-073 §5). Forks too,
@@ -571,6 +578,11 @@ export class ClaudeSession extends BaseSession {
 
   get willQueue(): boolean {
     return this.isProcessing
+  }
+
+  /** See {@link ISession.resumeSeedReady}. */
+  resumeSeedReady(): Promise<void> | undefined {
+    return this.resumeSeed ?? undefined
   }
 
   /** costBaseUsd + liveTotalCostUsd (see the field doc comment for the split). */

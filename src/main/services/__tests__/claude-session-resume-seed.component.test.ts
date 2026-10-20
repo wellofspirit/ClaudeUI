@@ -106,6 +106,7 @@ vi.mock('../../auth/ClaudeAuthProvider', () => ({
 
 // Import AFTER mocks.
 import { ClaudeSession } from '../../../core/services/claude-session'
+import { query } from '../../../core/sdk'
 import type { BrowserWindow } from 'electron'
 
 // Every `makeWin()` registers a funnel subscriber; drop them per test so a long
@@ -240,5 +241,145 @@ describe('ClaudeSession — resume seeding of accumulators', () => {
     // status-line emission from the seed path.
     expect(mockComputeTokenMetrics).toHaveBeenCalledTimes(1)
     expect(sent.filter(([c]) => c === 'session:status-line')).toHaveLength(0)
+  })
+})
+
+/** `query()` hands back a handle whose stream parks: cli.js "alive", no output. */
+function parkQuery(): void {
+  vi.mocked(query).mockImplementation(
+    () =>
+      ({
+        // eslint-disable-next-line require-yield
+        async *[Symbol.asyncIterator]() {
+          await new Promise<void>(() => {})
+        },
+        initializationResult: () => new Promise<never>(() => {}),
+        interrupt: vi.fn(async () => {})
+      }) as never
+  )
+}
+
+describe('ClaudeSession — resumeSeedReady (what the first prompt waits for)', () => {
+  /** A computeTokenMetrics the test settles by hand. */
+  function holdMetrics(): { land: (m?: StatusLineData) => void } {
+    let land!: (m?: StatusLineData) => void
+    mockComputeTokenMetrics.mockReturnValue(
+      new Promise((r) => (land = (m) => r(m ?? FIXTURE_METRICS)))
+    )
+    return { land }
+  }
+
+  it('is pending while the transcript fold is in flight and gone once it lands', async () => {
+    seedTranscript('-tmp-proj', 'sess-wait')
+    const { land } = holdMetrics()
+    const { win } = makeWin()
+    const session = new ClaudeSession('routing-wait', win, '/tmp/proj', {
+      resumeSessionId: 'sess-wait'
+    })
+    const ready = session.resumeSeedReady()
+    expect(ready).toBeInstanceOf(Promise)
+
+    let settled = false
+    void ready!.then(() => (settled = true))
+    await tick()
+    expect(settled).toBe(false)
+
+    land()
+    await ready
+    // Settled for good: the next send is synchronous again.
+    expect(session.resumeSeedReady()).toBeUndefined()
+  })
+
+  it('has nothing to wait for on a fresh session, a fork, or a resume whose transcript is gone', () => {
+    const { win } = makeWin()
+    expect(new ClaudeSession('routing-f', win, '/tmp/proj').resumeSeedReady()).toBeUndefined()
+    expect(
+      new ClaudeSession('routing-k', win, '/tmp/proj', {
+        resumeSessionId: 'sess-src',
+        resumeSessionAt: 'uuid-anchor',
+        forkSession: true
+      }).resumeSeedReady()
+    ).toBeUndefined()
+    // No transcript on disk: the session starts fresh, so there is nothing to seed.
+    expect(
+      new ClaudeSession('routing-g', win, '/tmp/proj', {
+        resumeSessionId: 'sess-nowhere'
+      }).resumeSeedReady()
+    ).toBeUndefined()
+  })
+
+  it('a seed that finds nothing still settles (a prompt is never wedged behind it)', async () => {
+    seedTranscript('-tmp-proj', 'sess-empty')
+    mockComputeTokenMetrics.mockResolvedValue({
+      ...FIXTURE_METRICS,
+      totalCostUsd: 0,
+      totalTokens: 0
+    })
+    const { win } = makeWin()
+    const session = new ClaudeSession('routing-e', win, '/tmp/proj', {
+      resumeSessionId: 'sess-empty'
+    })
+    await session.resumeSeedReady()
+    expect(session.resumeSeedReady()).toBeUndefined()
+  })
+
+  it('a failing fold still settles', async () => {
+    seedTranscript('-tmp-proj', 'sess-boom')
+    mockComputeTokenMetrics.mockRejectedValue(new Error('disk gone'))
+    const { win } = makeWin()
+    const session = new ClaudeSession('routing-b', win, '/tmp/proj', {
+      resumeSessionId: 'sess-boom'
+    })
+    await expect(session.resumeSeedReady()).resolves.toBeUndefined()
+  })
+
+  it('no zeros: the turn-start status line carries the seeded totals once the seed is awaited', async () => {
+    // The first prompt of a reopened session is held on `resumeSeedReady` (handlers-core),
+    // so the turn starts only after this resolves. The line it then emits must be the
+    // seeded one — the pre-wait failure mode was a zeros line landing over the history's.
+    seedTranscript('-tmp-proj', 'sess-nozero')
+    const { land } = holdMetrics()
+    parkQuery()
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-nozero', win, '/tmp/proj', {
+      resumeSessionId: 'sess-nozero'
+    })
+    // The fold lands LATER than the await starts: only a wait that is really tied to
+    // it sees the seeded accumulators (a seed already settled would pass either way).
+    setImmediate(() => land())
+    await session.resumeSeedReady()
+
+    void session.run('first prompt')
+    const turnLine = sent
+      .filter(([c]) => c === 'session:status-line')
+      .map(([, , d]) => d as StatusLineData)
+      .find((d) => d.turnStartedAtMs != null)
+    expect(turnLine).toBeDefined()
+    expect(turnLine).toMatchObject({
+      totalInputTokens: 100,
+      totalOutputTokens: 200,
+      cachedTokens: 300,
+      totalDurationMs: 123_000
+    })
+    expect(turnLine!.contextWindow.used).toBe(5_000)
+    session.cancel()
+  })
+
+  it('without the wait the same turn would start on zeros (what the gate prevents)', async () => {
+    seedTranscript('-tmp-proj', 'sess-zero')
+    holdMetrics() // the fold never lands before the prompt
+    parkQuery()
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-zero', win, '/tmp/proj', {
+      resumeSessionId: 'sess-zero'
+    })
+    void session.run('too early')
+    const turnLine = sent
+      .filter(([c]) => c === 'session:status-line')
+      .map(([, , d]) => d as StatusLineData)
+      .find((d) => d.turnStartedAtMs != null)
+    expect(turnLine?.totalInputTokens).toBe(0)
+    expect(session.resumeSeedReady()).toBeInstanceOf(Promise) // so a gated send would still be waiting
+    session.cancel()
   })
 })

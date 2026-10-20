@@ -136,8 +136,15 @@ export function sendPrompt(
   const session = manager.get(routingId)
   if (!session) throw new Error(`No session for routingId: ${routingId}`)
   const seeding = syncCore.pendingSeed(routingId) ?? reseedAfterExit(session, routingId)
-  if (!seeding) return deliverPrompt(manager, routingId, prompt, attachments, options)
-  return seeding.then(() => deliverPrompt(manager, routingId, prompt, attachments, options))
+  // The resumed session's own totals seed (tokens, cost, context) is the second
+  // thing a first prompt waits for. Canonical's read no longer includes the cost
+  // pass, so without this the turn could start on zero accumulators.
+  const totals = session.resumeSeedReady?.()
+  if (!seeding && !totals) return deliverPrompt(manager, routingId, prompt, attachments, options)
+  const waits = [seeding, totals].filter((p): p is Promise<void> => p !== undefined)
+  return Promise.all(waits).then(() =>
+    deliverPrompt(manager, routingId, prompt, attachments, options)
+  )
 }
 
 /**
