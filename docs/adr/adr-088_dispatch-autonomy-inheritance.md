@@ -2,6 +2,7 @@
 
 **Status:** Accepted (2026-10-01). Built on branch `pi-subagents-dispatch-judge`.
 **Amended by:** [ADR-091](adr-091_judge-blocks-hold-and-session-local-targets.md) (a target's judge reads parent, queued user turns and trajectory in time order; a block holds for the user).
+**Amended by:** [ADR-105](adr-105_background-dispatch.md) (2026-10-20: a Codex X-Agent's `hand_back` report and outgoing `session_message` are reviewed by ClaudeUI's judge on the target's own model, since `auto_review` does not review dynamic tools; a message review that cannot run refuses the send).
 **Amends:** [ADR-033](adr-033_cross-engine-dispatch.md) §5 and its "M2 shipped" note (a target's
 auto mode is no longer allow-all, and its mode is no longer fixed at creation).
 **Relates to:** [ADR-081](adr-081_claudeui-owned-judge-transport.md) (the judge transport),
@@ -37,9 +38,7 @@ Owner rulings (2026-10-01):
 1. Auto-mode dispatch targets are **judged**, on every target engine.
 2. A Claude target keeps **cli.js's own judge** (`permissionMode: 'auto'`, never `bypassPermissions`).
    pi and opencode targets use **ClaudeUI's own judge** (ADR-081 transport). Codex targets keep
-   Codex's native **`auto_review`** guardian. The `hand_back` report of a Codex target is not one of
-   its reviewer's inputs (dynamic-tool calls are not reviewed), so it additionally gets a report-only
-   ClaudeUI judge on the target's own model ([ADR-105](adr-105_background-dispatch.md) §3).
+   Codex's native **`auto_review`** guardian.
 3. Everything spun off a parent in auto **inherits auto mode, read LIVE** from the parent.
 4. **No third copy** of the judge pipeline: the engine-neutral steps are one shared module.
 
@@ -192,6 +191,14 @@ gate is what it ESCALATED, and escalations belong to the human. (Before this ADR
 
 The dispatcher reads the live mode through one helper that normalises the legacy `full` to `auto`
 (`CODEX_TURN_POLICY` has no `full` row, and `full` is not a cli.js mode).
+
+_Amended 2026-10-20 by [ADR-105](adr-105_background-dispatch.md):_ the thread's `auto_review` does not
+review dynamic-tool calls (`vendor/codex-src/codex-rs/core/src/tools/handlers/dynamic.rs` asks for no
+approval), and a Codex X-Agent's `hand_back` and `session_message` are dynamic tools. While the thread
+runs `auto`, ClaudeUI's judge on the target's own model (pi's ChatGPT route) therefore reviews the
+report, which it flags and always delivers, and the outgoing `session_message`, which it refuses on a
+block and, when the review cannot run, refuses to send (ADR-105 §3, §4). Native `auto_review` of the
+target's own actions is unchanged.
 
 ### Residuals, accepted
 

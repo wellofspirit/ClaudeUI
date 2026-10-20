@@ -279,8 +279,6 @@ query({
 8. Next turn feeds the tool_result back to the model.
 ```
 
----
-
 ### Tool calls of one assistant message run in order, MCP calls one at a time (2.1.293)
 
 cli.js's streaming tool executor starts a call only when `canExecuteTool` allows it: nothing else of the
@@ -292,8 +290,9 @@ that is NOT concurrency-safe and cannot start, so every call after that one wait
 streamed but starts — and so shows its permission ask, `task_started` and result — only when every
 earlier call of the message has returned. The wire marks no "waiting" state; ClaudeUI infers it from
 the message's own block order (`task-state.ts` `isBehindUnfinishedCall`) and shows the card as queued
-while the session's turn runs. (`.notes/research/async-dispatch/r1-clijs-subagents.md` G2: the
-executor; G3: what `readOnlyHint` changes.)
+while the session's turn runs. (cli.js 2.1.293: `canExecuteTool` / `processQueue` at
+`@char16731791`; the MCP tool's `isConcurrencySafe(){return X.mayOverlap||(annotations?.readOnlyHint??!1)}` at
+`@char36851904`, where nothing in the bundle sets `mayOverlap`.)
 
 ---
 

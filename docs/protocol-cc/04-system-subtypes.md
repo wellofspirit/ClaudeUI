@@ -229,7 +229,8 @@ mid-turn it is absorbed into the current turn; between turns it starts a fresh a
 
 An Agent-tool subagent whose parent AND own permission mode are both `auto` reports through its
 `SubagentHandback` tool instead of final text (`docs/protocol-cc/14-auto-mode-classifier.md`; probed
-live 2026-10-19, `.notes/research/async-dispatch/r6-handback.md`). Its completed notification then reads:
+live 2026-10-19 on 2.1.293 with Haiku; the frame `[Subagent hand-back]` is at `cli.js@char7716976` and the
+sanitiser marker "subagent output matched" at `@char7721535`). Its completed notification then reads:
 
 - `handback: "send"` — the report was delivered to the parent as a peer message. `handback_report.text`
   is the whole report, never truncated, with a backslash inserted into text that imitates harness markup
@@ -285,7 +286,10 @@ the max-turns note, a `⚠` line); a result that is the model's own text may quo
 is not read. A sidechain call stands in for an unreadable frame only when its row's `timestamp` lies after
 the task's previous notification and at or before this one (a resumed agent makes one call per run), and a
 peer row pairs with the first notification of its task that it does not lie beyond. The row of a hand-back
-is no "another Claude session" note live either (`findPeerRow` skips `origin.handback`).
+is no "another Claude session" note live either (`findPeerRow` skips `origin.handback`). The sidechain
+fallback (`handback-history.ts`) reads one subagent file inside the history load's transcript pass, only when
+a peer frame is unreadable (rare), so ADR-102's content-first byte plan, which counts the main transcript
+alone, is exceeded by that one file in that case.
 
 ### `task_id` format by task type
 
@@ -341,8 +345,9 @@ this process did not register. `parent_task_id` (optional, on `task_started` and
 `background_tasks_changed` entries) is the `task_id` of the subagent task that
 launched this one, absent when the main thread did. `background_tasks_changed`
 entries also carry `subagent_type`. `@internal`: `awaited`, and
-`task_notification.handback` / `handback_report` (§4.4 — ClaudeUI reads them). ClaudeUI reads none of
-the others yet.
+`task_notification.handback` / `handback_report` (§4.4 — ClaudeUI reads them). ClaudeUI also reads
+`parent_task_id` and `spawn_depth` (on `task_started`) to tell a nested subagent's hand-back apart from the main
+agent's (`claude-session.ts`, `nestedTaskIds`), and none of the other `@internal` fields yet.
 
 ### `is_backgrounded` — foreground or background (2.1.280)
 

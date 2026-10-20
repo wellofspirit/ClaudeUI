@@ -92,14 +92,16 @@ one that never resolves are written as `unknown` after 24 hours.
 
 Dispatched turns are ledger rows. `cross-engine-dispatcher.ts` writes one per target turn with
 `origin: 'dispatch'` and the dispatching session as `parent_routing_id`, so delegated work is inside
-every dashboard total and can still be marked. The opencode reconciler skips the dispatcher's own
-throwaway sessions by their title (`OPENCODE_DISPATCH_SESSION_TITLE`), because their messages are
+every dashboard total and can still be marked. The opencode reconciler skips the dispatcher's
+target sessions (kept since ADR-105) by their title (`OPENCODE_DISPATCH_SESSION_TITLE`), because their messages are
 already rows and a second copy under opencode's own message ids could never be deduplicated.
 Since 2026-10-19 (ADR-105) a Claude dispatch target keeps a transcript on disk, and block usage's
 per-file parse (`parseJsonlFile`, which also feeds the watcher, the scans and the usage
 reconciler) skips any session id in the dispatch ledger (`dispatch_target`, through
 `isDispatchTargetSession`) for the same reason, subagent files of that session included; the
-history lists skip the same ids.
+history lists skip the same ids. The judge's review of an X-Agent's `hand_back` report is a judge row under the
+dispatching session (not counted in `dispatch.maxCostUsd`); a Codex target's review is filed under engine `pi`,
+route `openai-codex`, with no session id.
 
 Judge calls are ledger rows too. ClaudeUI makes the opencode and pi auto-mode judge's model call
 itself (ADR-081), so no engine meters it; the transport hands each call's usage to
