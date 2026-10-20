@@ -458,9 +458,10 @@ function deriveTokenMetrics(fold: TokenFold, model?: string): StatusLineData {
 // free. Entries are valid only while EVERY input file looks unchanged (size +
 // mtime + inode, and the exact subagent set) — a stat signature, not a content
 // hash: a same-size rewrite that restores the mtime would be served stale, which
-// cli.js (it only appends) never does; anything else folds again from scratch. cli.js was probed to append nothing between spawn and the
-// first prompt (it writes `mode` / `cost-state` lines at exit), so there is no
-// append-only case worth folding incrementally.
+// cli.js (it only appends) never does; anything else folds again from scratch.
+// cli.js was probed to append nothing between spawn and the first prompt (it
+// writes `mode` / `cost-state` lines at exit), so there is no append-only case
+// worth folding incrementally.
 
 const TOKEN_FOLD_MEMO_MAX = 8
 const tokenFoldMemo = new Map<string, { signature: string; fold: TokenFold }>()
