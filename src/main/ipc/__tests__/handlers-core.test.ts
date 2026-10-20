@@ -1467,6 +1467,97 @@ describe('sendPrompt — origin and the held inbox (slice 1a)', () => {
   })
 })
 
+describe('sendPrompt — a resumed session waits for its own totals seed', () => {
+  let n = 0
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+  }
+
+  /** A Claude-shaped double whose `resumeSeedReady` the test controls. */
+  function resumed(
+    seed: () => Promise<void> | undefined,
+    engineId = 'claude'
+  ): { rid: string; session: any } {
+    const rid = `rid-seedready-${process.pid}-${++n}`
+    const calls: string[] = []
+    const session: any = makeSessionStub({
+      engineId,
+      originLedger: new TurnOriginLedger(),
+      getSessionId: () => null,
+      calls,
+      run: vi.fn((prompt: string) => {
+        calls.push(`run:${prompt}`)
+        session.willQueue = true
+        return Promise.resolve()
+      }),
+      enqueuePrompt: vi.fn((text: string) => calls.push(`enqueue:${text}`)),
+      resumeSeedReady: seed
+    })
+    syncCore.emit('session:created', [rid, { cwd: '/tmp/cwd' }])
+    return { rid, session }
+  }
+
+  it('a seed that never settles holds the prompt back; settling releases it', async () => {
+    let release!: () => void
+    const pending = new Promise<void>((r) => (release = r))
+    const { rid, session } = resumed(() => pending)
+    const out = sendPrompt(makeManager(session), rid, 'hello')
+    expect(out).toBeInstanceOf(Promise)
+    await flush()
+    expect(session.run).not.toHaveBeenCalled() // PRE-FIX: delivered at once, onto zero totals
+
+    release()
+    await out
+    expect(session.calls).toEqual(['run:hello'])
+  })
+
+  it('two sends during the wait go out in the order they arrived', async () => {
+    let release!: () => void
+    const pending = new Promise<void>((r) => (release = r))
+    const { rid, session } = resumed(() => pending)
+    const manager = makeManager(session)
+    const a = sendPrompt(manager, rid, 'one')
+    const b = sendPrompt(manager, rid, 'two')
+    release()
+    await Promise.all([a, b])
+    // The first starts the turn; the second finds it running and queues behind it.
+    expect(session.calls).toEqual(['run:one', 'enqueue:two'])
+  })
+
+  it("also waits for canonical's own read (both gates, not either)", async () => {
+    let releaseSeed!: () => void
+    let releaseRead!: () => void
+    const totals = new Promise<void>((r) => (releaseSeed = r))
+    const { rid, session } = resumed(() => totals)
+    syncCore.trackSeed(rid, new Promise<void>((r) => (releaseRead = r)))
+    const out = sendPrompt(makeManager(session), rid, 'hello')
+
+    releaseSeed()
+    await flush()
+    expect(session.run).not.toHaveBeenCalled() // totals landed, canonical's read has not
+    releaseRead()
+    await out
+    expect(session.calls).toEqual(['run:hello'])
+  })
+
+  it('stays synchronous when the seed has nothing to wait for (undefined)', () => {
+    const { rid, session } = resumed(() => undefined)
+    const out = sendPrompt(makeManager(session), rid, 'hello')
+    expect(out).toBeUndefined()
+    expect(session.calls).toEqual(['run:hello'])
+  })
+
+  it('an engine without the hook (opencode, pi, codex) is unaffected', () => {
+    for (const engineId of ['opencode', 'pi']) {
+      const { rid, session } = resumed(() => new Promise<void>(() => {}), engineId)
+      delete session.resumeSeedReady
+      const out = sendPrompt(makeManager(session), rid, 'hi')
+      expect(out).toBeUndefined()
+      expect(session.calls).toEqual(['run:hi'])
+    }
+  })
+})
+
 describe('allowPeerMessages — the session:allow-peer-messages body', () => {
   it('hands the request to the session and returns its answer', async () => {
     const allow = vi.fn(async () => ({ success: true }))

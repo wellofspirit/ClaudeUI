@@ -707,6 +707,12 @@ run again, so Codex always respawns through `createSession`). `sendPrompt` there
 holds nothing for the session, did not drop an empty one, and the engine has a session id to
 resume — through the same `seedCanonicalTranscript` (`ipc/seed-canonical-transcript.ts`) and
 `trackSeed`, and waits on it. A prompt that would only queue behind a running turn does not.
+For a resumed Claude session `sendPrompt` waits on a second thing alongside the read: the
+session's own re-fold of its totals from the transcript (`ISession.resumeSeedReady`,
+undefined once settled so a later send stays synchronous). The canonical read itself is
+content-first for a non-fork Claude resume (no status line — the fold's
+`session:status-line` supplies it), so the first prompt waits only for the transcript pass
+plus a usually memoized fold, not for a second cost pass (ADR-102 amendment).
 
 **Bounds.** A resumed session re-reads its transcript from disk on the host, once per
 respawn. A client resyncing onto an exited session shows its

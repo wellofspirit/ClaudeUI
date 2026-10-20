@@ -7,6 +7,7 @@ import * as fs from 'node:fs'
 import { WebSocketServer, WebSocket } from 'ws'
 import { getAppPath, serveHostMockup, type HostWindowHandle } from '../host'
 import { syncCore, addSyncSubscriber, addStreamSubscriber } from './sync-host'
+import { logWsFullSync, logFullSyncBreakdown, type FrameSent } from './sync-stats-log'
 import { RemoteDispatcher } from './remote-dispatcher'
 import {
   AUTH_OFF_GRANTS,
@@ -64,11 +65,13 @@ import type { PtyRemoteSink } from './pty-manager'
 import { textToBase64, base64ToText } from '../../shared/base64-text'
 import { gitWatchRegistry } from './git-watch-registry'
 import { voiceRelay } from './voice-relay'
+import { syncTimingReports } from './sync-timing-report'
 import { STREAM_BACKPRESSURE_BYTES } from '../shared/sync/stream'
 import { logger } from './logger'
 import { TunnelManager } from './tunnel-manager'
 import { E2ECrypto } from '../../shared/e2e-crypto'
 import { MOCKUP_HTTP_PREFIX } from '../../shared/mockup-url'
+import { createProgressThrottle } from '../../shared/progress-throttle'
 import { SENT_FILE_ROUTE, parseSentFileQuery } from '../../shared/sent-file-url'
 import { matchSentFilePath, sentFileDisposition } from '../sent-file-security'
 import { validateLocalFilePath } from '../shell-security'
@@ -671,6 +674,22 @@ interface AuthenticatedClient {
    * frame — thousands of them, about a condition that is one fact.
    */
   streamCongested?: boolean
+}
+
+/**
+ * Run a send observer (the `SyncStats` lines). Diagnostics must never break the
+ * send path: under E2E the observer runs inside the channel's `sendQueue` chain,
+ * where a throw would reject the queue and strand every later frame on the socket.
+ */
+function observeSent(onSent: (sent: FrameSent) => void, sent: FrameSent): void {
+  try {
+    onSent(sent)
+  } catch (err) {
+    logger.error(
+      'remote-server',
+      `send observer failed: ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
 }
 
 /**
@@ -1319,6 +1338,7 @@ export class RemoteServer {
       // And the microphone: a capture whose socket is gone has nowhere to send a
       // transcript, and it holds a Deepgram stream open inside the engine.
       voiceRelay.releaseOwner(client.connection.connectionId)
+      syncTimingReports.releaseConnection(client.connection.connectionId)
       closed.push(closeSocket(ws))
     }
 
@@ -3748,6 +3768,8 @@ export class RemoteServer {
       // so this is what guarantees a capture cannot outlive the authority that
       // started it. A phone that sleeps mid-sentence lands here too.
       voiceRelay.releaseOwner(connectionId)
+      // And the `sync:report-timing` budget, so the per-connection map cannot grow past the sockets.
+      syncTimingReports.releaseConnection(connectionId)
       this.clients.delete(ws)
       if (authenticated) {
         logger.info(
@@ -3783,8 +3805,37 @@ export class RemoteServer {
       if (this.dispatcher.has(msg.channel)) {
         this.assertStepUp(client, msg.channel)
       }
-      const result = await this.dispatcher.handle(msg, client.connection)
+      // ADR-102: a `withProgress` channel gets a per-call reporter bound to THIS
+      // socket (progress is addressed to the requester, never broadcast).
+      // Other channels get none, so they emit no progress frames at all.
+      const throttle = this.dispatcher.reportsProgress(msg.channel)
+        ? createProgressThrottle((p) =>
+            this.sendTo(ws, { type: 'invoke-progress', id: msg.id, ...p })
+          )
+        : null
+      let result: unknown
+      try {
+        result = await this.dispatcher.handle(msg, client.connection, throttle?.report)
+      } catch (err) {
+        // A failed call sends no tail: the error response is the last word.
+        throttle?.close()
+        throw err
+      }
+      if (throttle) {
+        // C3 order: pending tail -> 'sending' (the response may be a large frame
+        // to encrypt and transfer) -> response -> close, so nothing trails it.
+        throttle.flush()
+        const last = throttle.last()
+        this.sendTo(ws, {
+          type: 'invoke-progress',
+          id: msg.id,
+          phase: 'sending',
+          done: last?.done ?? 0,
+          total: last?.total ?? null
+        })
+      }
       this.sendTo(ws, { type: 'invoke-response', id: msg.id, ok: true, data: result })
+      throttle?.close()
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)
       this.sendTo(ws, { type: 'invoke-response', id: msg.id, ok: false, error: errorMsg })
@@ -5001,13 +5052,26 @@ export class RemoteServer {
     // fetch, and the desktop reads those files through IPC.
     const decision = this.core.answerSync(lastSeq, epoch)
     if (decision.kind === 'full') {
-      this.sendTo(ws, {
-        type: 'sync-full',
-        state: decision.state,
-        epoch: decision.epoch,
-        mockupToken: this.mockupToken || undefined,
-        fileToken: this.fileToken || undefined
-      })
+      // `SyncStats` measurement (sync-core.md § Measuring a full sync): the frame
+      // line comes from the send callback, because under E2E the size is only
+      // known after the async encrypt. The opt-in breakdown runs from the same
+      // callback, AFTER the line: its extra serialization must never precede the
+      // frame on either path (under E2E the encrypt is queued, so running it right
+      // after `sendTo` would delay the frame and skew the client's `syncToFrameMs`).
+      this.sendTo(
+        ws,
+        {
+          type: 'sync-full',
+          state: decision.state,
+          epoch: decision.epoch,
+          mockupToken: this.mockupToken || undefined,
+          fileToken: this.fileToken || undefined
+        },
+        (sent) => {
+          logWsFullSync(decision, { lastSeq, epoch }, this.core, sent)
+          logFullSyncBreakdown(decision)
+        }
+      )
       return
     }
     this.sendTo(ws, { type: 'sync-catchup', events: decision.events, epoch: decision.epoch })
@@ -5092,23 +5156,48 @@ export class RemoteServer {
    * matters for every refusal on an E2E origin: the frame is encrypted
    * asynchronously, and a synchronous close beside it would drop the reason.
    */
-  private sendOn(ws: WebSocket, channel: SocketChannel, msg: WsServerMessage): Promise<void> {
+  private sendOn(
+    ws: WebSocket,
+    channel: SocketChannel,
+    msg: WsServerMessage,
+    onSent?: (sent: FrameSent) => void
+  ): Promise<void> {
     if (ws.readyState !== WebSocket.OPEN) return Promise.resolve()
     const e2e = channel.e2e
     if (!e2e?.isReady) {
-      ws.send(JSON.stringify(msg))
+      const started = performance.now()
+      const payload = JSON.stringify(msg)
+      const encodeMs = performance.now() - started
+      ws.send(payload)
+      if (onSent) {
+        observeSent(onSent, {
+          bytes: Buffer.byteLength(payload),
+          encodeMs,
+          e2e: false,
+          bufferedAmount: ws.bufferedAmount
+        })
+      }
       return Promise.resolve()
     }
     const queued = channel.sendQueue.then(async () => {
       if (ws.readyState !== WebSocket.OPEN) return
+      let sent: FrameSent | null = null
       try {
-        ws.send(await e2e.encrypt(msg))
+        const started = performance.now()
+        const payload = await e2e.encrypt(msg)
+        const encodeMs = performance.now() - started
+        ws.send(payload)
+        if (onSent) {
+          sent = { bytes: payload.length, encodeMs, e2e: true, bufferedAmount: ws.bufferedAmount }
+        }
       } catch (err) {
         logger.error(
           'remote-server',
           `E2E encrypt failed: ${err instanceof Error ? err.message : String(err)}`
         )
       }
+      // Outside the try: a throwing observer is not an "encrypt failure".
+      if (sent && onSent) observeSent(onSent, sent)
     })
     channel.sendQueue = queued
     return queued
@@ -5122,10 +5211,10 @@ export class RemoteServer {
    * so the plaintext fallback here is only ever reached for a frame racing a
    * socket that just went away.
    */
-  private sendTo(ws: WebSocket, msg: WsServerMessage): void {
+  private sendTo(ws: WebSocket, msg: WsServerMessage, onSent?: (sent: FrameSent) => void): void {
     const client = this.clients.get(ws)
     if (client) {
-      void this.sendOn(ws, client.channel, msg)
+      void this.sendOn(ws, client.channel, msg, onSent)
       return
     }
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))

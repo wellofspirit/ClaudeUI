@@ -57,6 +57,11 @@ export class EventRing {
     return this.seq
   }
 
+  /** Seq of the oldest retained entry, or null while the ring is empty. Diagnostic only. */
+  oldestSeq(): number | null {
+    return this.buffer.length === 0 ? null : this.buffer[0].seq
+  }
+
   /**
    * All events after the given sequence number.
    * Returns null when the requested seq has been evicted from the buffer.

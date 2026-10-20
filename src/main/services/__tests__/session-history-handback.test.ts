@@ -410,6 +410,29 @@ describe('loadSessionHistory — a native subagent hand-back (L3)', () => {
     expect(JSON.stringify(messages)).not.toContain('persisted-output')
   })
 
+  it('the content-first read (deferStatusLine, ADR-102 Arc 2) still reads the sidechain call itself, no subagent fetch needed', async () => {
+    const pointer =
+      '<persisted-output>\nOutput too large (52.8KB). Full output saved to: /x.txt\n</persisted-output>'
+    writeSidechain('agentH', 'the child’s own words')
+    writeTranscript([
+      peerRow('u-peer', 'agentH', nativeFrame(pointer, BLOCKED_WARNING), { flagged: true }),
+      absorbed('u-note', notificationXml('agentH', POINTER_FLAGGED('worker')))
+    ])
+    const { messages, taskNotifications, statusLine } = await loadSessionHistory(
+      SESSION_ID,
+      PROJECT_KEY,
+      undefined,
+      { deferStatusLine: true }
+    )
+    expect(statusLine).toBeNull()
+    expect(taskNotifications[0]).toMatchObject({
+      summary: 'the child’s own words',
+      handback: 'flagged',
+      warning: BLOCKED_WARNING
+    })
+    expect(messages.map((m) => m.id)).toEqual(['u-note'])
+  })
+
   it('a frame that cannot be read falls back to the sidechain call, never to the framed text', async () => {
     writeSidechain('agentH', 'the child’s own words')
     writeTranscript([

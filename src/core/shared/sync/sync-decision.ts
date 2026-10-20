@@ -22,6 +22,9 @@ export interface SyncDecisionSource {
   getSnapshot(): FullStateSnapshot
 }
 
+/** Why a `sync` was answered with a full snapshot — diagnostic (the `SyncStats` log), never branched on. */
+export type FullSyncReason = 'fresh' | 'epoch-mismatch' | 'ring-miss'
+
 /**
  * What to send back. `full` carries the snapshot itself so the caller never has
  * to re-read it (a second `getSnapshot()` would be a different tick, and the
@@ -29,7 +32,7 @@ export interface SyncDecisionSource {
  * happening together).
  */
 export type SyncDecision =
-  | { kind: 'full'; state: FullStateSnapshot; epoch: string }
+  | { kind: 'full'; state: FullStateSnapshot; epoch: string; reason: FullSyncReason }
   | { kind: 'catchup'; events: EventEntry[]; epoch: string }
 
 /**
@@ -50,11 +53,16 @@ export function decideSync(
 ): SyncDecision {
   const currentEpoch = source.epoch()
   if (lastSeq === 0 || epoch !== currentEpoch) {
-    return { kind: 'full', state: source.getSnapshot(), epoch: currentEpoch }
+    return {
+      kind: 'full',
+      state: source.getSnapshot(),
+      epoch: currentEpoch,
+      reason: lastSeq === 0 ? 'fresh' : 'epoch-mismatch'
+    }
   }
   const events = source.getAfter(lastSeq)
   if (events === null) {
-    return { kind: 'full', state: source.getSnapshot(), epoch: currentEpoch }
+    return { kind: 'full', state: source.getSnapshot(), epoch: currentEpoch, reason: 'ring-miss' }
   }
   return { kind: 'catchup', events, epoch: currentEpoch }
 }

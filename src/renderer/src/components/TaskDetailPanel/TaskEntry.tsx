@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { useStickToBottom } from '../../hooks/useStickToBottom'
@@ -16,6 +16,8 @@ import {
 import { armStopPillFallback } from '../../lib/stop-pill'
 import { findTaskBlocks } from './utils'
 import { taskElapsedLabel, useTicker } from '../chat/TaskCard'
+import { requestSubagentTranscript } from '../../lib/subagent-prefetch'
+import { useSubagentPending } from '../../hooks/useSubagentPending'
 import type { ToolView } from '../../../../shared/tool-kinds'
 import type { EngineId } from '../../../../shared/types'
 
@@ -83,6 +85,19 @@ function nestedCallEngine(
   return dispatchChildEngine(view) ?? issuer
 }
 
+/** The stand-in for a nested agent's entry while its parent's transcript is fetched (ADR-102 Arc 2). */
+export function TaskEntryLoading(): React.JSX.Element {
+  return (
+    <div
+      data-testid="TaskEntry.subagentLoading"
+      className="flex items-center gap-2 px-4 py-3 text-[13px] text-text-muted"
+    >
+      <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin-slow" />
+      <span>Loading…</span>
+    </div>
+  )
+}
+
 export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const messages = useActiveSession((s) => s.messages)
@@ -118,6 +133,14 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     () => overlayItemStreams(subagentMsgs[toolUseId] || [], itemStreams, toolUseId),
     [subagentMsgs, itemStreams, toolUseId]
   )
+
+  // The content-first load leaves this agent's transcript on disk until it is needed
+  // (ADR-102 Arc 2): the entry asks for it at once, and shows "Loading…" until it lands.
+  const subagentPending = useSubagentPending(toolUseId) && msgs.length === 0
+  useEffect(() => {
+    if (expanded && subagentPending && activeSessionId)
+      requestSubagentTranscript(activeSessionId, toolUseId)
+  }, [expanded, subagentPending, activeSessionId, toolUseId])
 
   // A live record is running by construction here (isHistorical is false), so
   // its start alone decides whether the clock ticks.
@@ -340,6 +363,14 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
                   size="md"
                   engineId={childEngine}
                 />
+              </div>
+            ) : subagentPending ? (
+              <div
+                data-testid="TaskEntry.subagentLoading"
+                className="flex items-center gap-2 text-[13px] text-text-muted"
+              >
+                <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin-slow" />
+                <span>Loading…</span>
               </div>
             ) : isBash && bashOutput ? (
               <BashOutputPanel

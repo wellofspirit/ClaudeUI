@@ -16,6 +16,7 @@ import type { RemoteConnection } from '../connection'
 
 type FakeConnection = {
   invoke: ReturnType<typeof vi.fn>
+  invokeWithProgress: ReturnType<typeof vi.fn>
   on: RemoteConnection['on']
   passkeyAvailable: ReturnType<typeof vi.fn>
   stepUpWithPasskey: ReturnType<typeof vi.fn>
@@ -39,6 +40,7 @@ function makeConnection(): FakeConnection {
   const credentialsChangedWaiters: (() => void)[] = []
   return {
     invoke: vi.fn(async () => undefined),
+    invokeWithProgress: vi.fn(async () => undefined),
     on: (channel) => sync.on(channel),
     passkeyAvailable: vi.fn(() => false),
     stepUpWithPasskey: vi.fn(async () => ({ type: 'step-up-response', ok: true })),
@@ -82,6 +84,66 @@ describe('web api-adapter — git live watching', () => {
   // (`shared/sync/client-registry` does, for both clients), so asserting it here
   // would only be re-testing `SyncClient.on`. What remains in this file is the
   // INVOKE surface, which 4c did not touch.
+})
+
+describe('web api-adapter — loadSessionHistory progress (ADR-102)', () => {
+  it('uses the plain invoke when no callback is given (every other caller unchanged)', async () => {
+    await api.loadSessionHistory('sid', 'pk', 'anchor')
+    expect(connection.invoke).toHaveBeenCalledWith('session:load-history', 'sid', 'pk', 'anchor')
+    expect(connection.invokeWithProgress).not.toHaveBeenCalled()
+  })
+
+  it('passes the callback through to invokeWithProgress with the same wire args', async () => {
+    const onProgress = vi.fn()
+    connection.invokeWithProgress.mockResolvedValueOnce({ messages: [] })
+    await expect(api.loadSessionHistory('sid', 'pk', undefined, onProgress)).resolves.toEqual({
+      messages: []
+    })
+    expect(connection.invokeWithProgress).toHaveBeenCalledWith(
+      'session:load-history',
+      ['sid', 'pk', undefined],
+      onProgress
+    )
+    expect(connection.invoke).not.toHaveBeenCalled()
+  })
+})
+
+describe('web api-adapter — session load channels (ADR-102 Arc 2)', () => {
+  it('loadSessionHistory carries the options as a 4th wire arg only when given', async () => {
+    await api.loadSessionHistory('sid', 'pk', undefined, undefined, { deferStatusLine: true })
+    expect(connection.invoke).toHaveBeenLastCalledWith(
+      'session:load-history',
+      'sid',
+      'pk',
+      undefined,
+      { deferStatusLine: true }
+    )
+    // No options: the exact 3-arg call an old host understands.
+    await api.loadSessionHistory('sid', 'pk', 'anchor')
+    expect(connection.invoke.mock.lastCall).toEqual(['session:load-history', 'sid', 'pk', 'anchor'])
+
+    const onProgress = vi.fn()
+    await api.loadSessionHistory('sid', 'pk', undefined, onProgress, { deferStatusLine: true })
+    expect(connection.invokeWithProgress).toHaveBeenLastCalledWith(
+      'session:load-history',
+      ['sid', 'pk', undefined, { deferStatusLine: true }],
+      onProgress
+    )
+  })
+
+  it('loadSessionStatusLine is a plain invoke, or invokeWithProgress with a callback', async () => {
+    await api.loadSessionStatusLine('sid', 'pk')
+    expect(connection.invoke).toHaveBeenLastCalledWith('session:load-status-line', 'sid', 'pk')
+    expect(connection.invokeWithProgress).not.toHaveBeenCalled()
+
+    const onProgress = vi.fn()
+    await api.loadSessionStatusLine('sid', 'pk', onProgress)
+    expect(connection.invokeWithProgress).toHaveBeenLastCalledWith(
+      'session:load-status-line',
+      ['sid', 'pk'],
+      onProgress
+    )
+  })
 })
 
 describe('web api-adapter — voice transport', () => {

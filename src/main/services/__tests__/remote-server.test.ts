@@ -20,6 +20,7 @@ import * as path from 'node:path'
 import * as zlib from 'node:zlib'
 import { connectRemoteClient, ephemeralPort } from '../../../test/helpers/ws-test-client'
 import { E2ECrypto } from '../../../shared/e2e-crypto'
+import type { ProgressReporter, WsServerMessage } from '../../../shared/remote-protocol'
 import { buildSentFileUrl } from '../../../shared/sent-file-url'
 
 // ---------------------------------------------------------------------------
@@ -116,7 +117,9 @@ vi.mock('../../../core/services/logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn()
+    error: vi.fn(),
+    // `SyncStats` breakdown gate: off unless a test turns the source on.
+    isEnabled: vi.fn(() => false)
   }
 }))
 
@@ -166,10 +169,13 @@ import {
   originRequiresE2E
 } from '../../../core/services/remote-server'
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
-import { registerCommand } from '../../../core/ipc/command-registry'
+import { commandRegistry, registerCommand } from '../../../core/ipc/command-registry'
 import { GIT_WATCH_COMMAND } from '../../../core/ipc/git-watch'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
+import { syncTimingReports } from '../../../core/services/sync-timing-report'
 import { emitEvent, syncCore } from '../../../core/services/sync-host'
+import { logger } from '../../../core/services/logger'
+import { LARGE_SYNC_FULL_BYTES } from '../../../core/services/sync-stats-log'
 import { makeTempGitRepo, type TempGitRepo } from '../../../test/helpers/temp-git-repo'
 import type { WsEvent } from '../../../shared/remote-protocol'
 import type { GitStatusData } from '../../../shared/types'
@@ -747,6 +753,60 @@ describe('RemoteServer — git watch release on disconnect', () => {
     await waitForTerminal(c1.ws)
     await waitUntil(() => server.getStatus().connectedClients === 0)
     expect(gitWatchRegistry.watchersOf('/anything')).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// `sync:report-timing` budget — one map entry per socket, dropped with the socket.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — sync:report-timing budget release on disconnect', () => {
+  beforeEach(useAuthDisabled)
+  let server: RemoteServer
+  let port: number
+  let releaseSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+    releaseSpy = vi.spyOn(syncTimingReports, 'releaseConnection')
+  })
+
+  afterEach(async () => {
+    releaseSpy.mockRestore()
+    try {
+      await server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  it('releases a connection as its own socket closes', async () => {
+    await server.start(port, '127.0.0.1')
+    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await c1.ready
+    releaseSpy.mockClear()
+
+    c1.close()
+    await waitForTerminal(c1.ws)
+    await waitUntil(() => releaseSpy.mock.calls.length === 1)
+    expect(typeof releaseSpy.mock.calls[0][0]).toBe('string')
+  })
+
+  it('releases every live connection on stop() without waiting for the sockets', async () => {
+    await server.start(port, '127.0.0.1')
+    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await c1.ready
+    releaseSpy.mockClear()
+
+    // The release is synchronous inside stop() — it must not wait for the sockets
+    // to close — so assert before awaiting, then await so teardown does not overlap
+    // afterEach. The late socket `close` handlers release the same id again (idempotent).
+    const stopped = server.stop()
+    expect(releaseSpy).toHaveBeenCalledTimes(1)
+    const released = releaseSpy.mock.calls[0][0]
+    await stopped
+    for (const [id] of releaseSpy.mock.calls) expect(id).toBe(released)
   })
 })
 
@@ -4223,5 +4283,470 @@ describe('RemoteServer — auth-info identity section (Phase 3)', () => {
     await server.start(port, '127.0.0.1')
     const got = await httpGetJson(port, '/remote/auth-info', identityHeaders(TS_OWNER))
     expect(got.body).toEqual({ version: 1, methods: [] })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// invoke-progress (ADR-102): per-call progress frames, addressed to the
+// requesting socket only, ending with `sending` right before the response.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — invoke progress frames', () => {
+  beforeEach(useAuthDisabled)
+  const PROGRESS = 'test:progress-load'
+  const PLAIN = 'test:plain-load'
+  const FAILING = 'test:progress-fail'
+  const SILENT = 'test:progress-silent'
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    const reporting = async (progress: ProgressReporter, arg: string): Promise<string> => {
+      progress({ done: 0, total: 100, phase: 'transcript' })
+      // Inside the throttle window: coalesced, then flushed by the transport.
+      progress({ done: 40, total: 100, phase: 'costs' })
+      progress({ done: 70, total: 100, phase: 'costs' })
+      return `loaded ${arg}`
+    }
+    registerCommand({
+      channel: PROGRESS,
+      capability: 'fs-read',
+      kind: 'query',
+      transport: 'remote',
+      withProgress: true,
+      handler: reporting
+    })
+    registerCommand({
+      channel: FAILING,
+      capability: 'fs-read',
+      kind: 'query',
+      transport: 'remote',
+      withProgress: true,
+      handler: async (progress: ProgressReporter) => {
+        progress({ done: 0, total: 100, phase: 'transcript' })
+        progress({ done: 50, total: 100, phase: 'transcript' })
+        throw new Error('boom')
+      }
+    })
+    // `session:load-subagent-history`'s shape (ADR-102 Arc 2, C8): declares
+    // `withProgress` and reports nothing; the transport's frames are the point.
+    registerCommand({
+      channel: SILENT,
+      capability: 'fs-read',
+      kind: 'query',
+      transport: 'remote',
+      withProgress: true,
+      handler: async (_progress: ProgressReporter, arg: string) => `silent ${arg}`
+    })
+    // A channel that never declared `withProgress` still gets the same call shape.
+    registerCommand({
+      channel: PLAIN,
+      capability: 'fs-read',
+      kind: 'query',
+      transport: 'remote',
+      handler: async (arg: string) => `plain ${arg}`
+    })
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+  })
+
+  afterEach(async () => {
+    for (const channel of [PROGRESS, PLAIN, FAILING, SILENT])
+      commandRegistry.unregister(channel, 'remote')
+    try {
+      await server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  /** Send one invoke and collect every frame up to and including its response. */
+  async function frames(
+    client: Awaited<ReturnType<typeof connectRemoteClient>>,
+    id: string,
+    channel: string
+  ): Promise<WsServerMessage[]> {
+    const seen: WsServerMessage[] = []
+    const done = new Promise<void>((resolve) => {
+      const off = client.onMessage((msg) => {
+        if ('id' in msg && msg.id === id) seen.push(msg)
+        if (msg.type === 'invoke-response' && msg.id === id) {
+          off()
+          resolve()
+        }
+      })
+    })
+    await client.send({ type: 'invoke', id, channel, args: ['x'] })
+    await done
+    return seen
+  }
+
+  it('emits invoke-progress frames with the request id, then `sending`, then the response', async () => {
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const got = await frames(client, 'req-7', PROGRESS)
+
+    const response = got.at(-1)
+    expect(response).toMatchObject({
+      type: 'invoke-response',
+      id: 'req-7',
+      ok: true,
+      data: 'loaded x'
+    })
+    const progress = got.slice(0, -1)
+    expect(progress.length).toBeGreaterThanOrEqual(2)
+    expect(progress.every((f) => f.type === 'invoke-progress' && f.id === 'req-7')).toBe(true)
+    // The first report is delivered at once; the throttled tail is flushed with
+    // the LATEST value (70, not 40) before the response.
+    expect(progress[0]).toEqual({
+      type: 'invoke-progress',
+      id: 'req-7',
+      done: 0,
+      total: 100,
+      phase: 'transcript'
+    })
+    // `sending` is the last progress frame, carrying the last reported done/total.
+    expect(progress.at(-1)).toEqual({
+      type: 'invoke-progress',
+      id: 'req-7',
+      done: 70,
+      total: 100,
+      phase: 'sending'
+    })
+    expect(
+      progress.some((f) => f.type === 'invoke-progress' && f.done === 70 && f.phase === 'costs')
+    ).toBe(true)
+    await client.close()
+  })
+
+  it('a withProgress handler that reports nothing still gets the `sending` frame, then the response', async () => {
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const got = await frames(client, 'req-6', SILENT)
+    // Indeterminate (`total: null`): it re-arms the web client's 30 s timer at the
+    // start of the transfer of a response that may be tens of MB.
+    expect(got).toEqual([
+      { type: 'invoke-progress', id: 'req-6', phase: 'sending', done: 0, total: null },
+      { type: 'invoke-response', id: 'req-6', ok: true, data: 'silent x' }
+    ])
+    await client.close()
+  })
+
+  it('sends no progress frames for a channel that did not declare withProgress', async () => {
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const got = await frames(client, 'req-8', PLAIN)
+    expect(got).toEqual([{ type: 'invoke-response', id: 'req-8', ok: true, data: 'plain x' }])
+    await client.close()
+  })
+
+  it('a failing call sends no `sending` frame and no progress after its error response', async () => {
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const late: WsServerMessage[] = []
+    const got = await frames(client, 'req-9', FAILING)
+    client.onMessage((m) => late.push(m))
+    expect(got.at(-1)).toMatchObject({
+      type: 'invoke-response',
+      id: 'req-9',
+      ok: false,
+      error: 'boom'
+    })
+    expect(got.some((f) => f.type === 'invoke-progress' && f.phase === 'sending')).toBe(false)
+    // The throttled tail (done: 50) is dropped at close: wait out the interval.
+    await new Promise((r) => setTimeout(r, 400))
+    expect(late.filter((m) => m.type === 'invoke-progress')).toEqual([])
+    await client.close()
+  })
+
+  it('addresses progress to the requesting socket only', async () => {
+    await server.start(port, '127.0.0.1')
+    const a = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    const b = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await Promise.all([a.ready, b.ready])
+    const bFrames: WsServerMessage[] = []
+    b.onMessage((m) => bFrames.push(m))
+
+    await frames(a, 'only-a', PROGRESS)
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(bFrames.filter((m) => m.type === 'invoke-progress')).toEqual([])
+    await a.close()
+    await b.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// `SyncStats` — what a full sync costs on the wire (sync-core.md § Measuring a
+// full sync). One line per sync-full carrying the decision and the frame as
+// actually sent; none for a catchup; the breakdown only while the source is on.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — SyncStats lines on sync-full', () => {
+  beforeEach(useAuthDisabled)
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+    syncCore.resetCanonicalForTests()
+    vi.mocked(logger.info).mockClear()
+    vi.mocked(logger.warn).mockClear()
+    vi.mocked(logger.error).mockClear()
+    vi.mocked(logger.isEnabled).mockReset()
+    vi.mocked(logger.isEnabled).mockReturnValue(false)
+  })
+
+  afterEach(async () => {
+    try {
+      await server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  /** Every `SyncStats` message the logger was handed at `level`, in order. */
+  const stats = (level: 'info' | 'warn'): string[] =>
+    vi
+      .mocked(logger[level])
+      .mock.calls.filter((c) => c[0] === 'SyncStats')
+      .map((c) => c[1] as string)
+
+  type TestClient = Awaited<ReturnType<typeof connectRemoteClient>>
+
+  /** Send one `sync` and resolve with the answering frame and its raw size on the wire. */
+  async function sync(
+    client: TestClient,
+    frame: { lastSeq: number; epoch?: string }
+  ): Promise<{ msg: Record<string, unknown>; rawLength: number }> {
+    return new Promise((resolve) => {
+      let rawLength = 0
+      // Registered BEFORE the client's own listener could consume the frame; `ws`
+      // calls listeners in registration order, so `rawLength` is set first.
+      const onRaw = (raw: WebSocket.RawData): void => {
+        rawLength = (raw as Buffer).length
+      }
+      client.ws.on('message', onRaw)
+      const off = client.onMessage((m) => {
+        if (m.type === 'sync-full' || m.type === 'sync-catchup') {
+          off()
+          client.ws.off('message', onRaw)
+          resolve({ msg: m as unknown as Record<string, unknown>, rawLength })
+        }
+      })
+      void client.send({ type: 'sync', ...frame })
+    })
+  }
+
+  it('logs ONE line for a plaintext sync-full, with the decision and the exact frame bytes', async () => {
+    await server.start(port, '127.0.0.1')
+    emitEvent('session:created', ['stats-1', { cwd: '/repo' }])
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const { msg, rawLength } = await sync(client, { lastSeq: 0 })
+    expect(msg.type).toBe('sync-full')
+
+    const lines = stats('info')
+    expect(lines).toHaveLength(1)
+    const line = lines[0]
+    expect(line).toMatch(/^sync-full sent: transport=ws reason=fresh lastSeq=0 seq=\d+ /)
+    expect(line).toContain(`seq=${(msg.state as { seq: number }).seq} `)
+    expect(line).toMatch(/ringOldest=(\d+|none) epochMatch=false e2e=false /)
+    expect(line).toContain(`frameBytes=${rawLength}`)
+    expect(line).toMatch(/encodeMs=\d+\.\d bufferedAmount=\d+$/)
+    expect(stats('warn')).toEqual([])
+    await client.close()
+  })
+
+  it('logs the reason for each way a sync becomes full, and the epoch comparison', async () => {
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    await sync(client, { lastSeq: 5, epoch: 'epoch-from-a-previous-process' })
+    expect(stats('info').at(-1)).toMatch(/reason=epoch-mismatch lastSeq=5 .* epochMatch=false/)
+    await client.close()
+  })
+
+  it('logs nothing for a catchup', async () => {
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const full = await sync(client, { lastSeq: 0 })
+    expect(stats('info')).toHaveLength(1)
+    const caught = await sync(client, {
+      lastSeq: (full.msg.state as { seq: number }).seq,
+      epoch: full.msg.epoch as string
+    })
+    expect(caught.msg.type).toBe('sync-catchup')
+    // Still just the first line: a catchup is not a full sync.
+    expect(stats('info')).toHaveLength(1)
+    expect(stats('warn')).toEqual([])
+    await client.close()
+  })
+
+  it('logs the base64 length under E2E, with e2e=true', async () => {
+    tunnelUrlRef.current = `https://${TUNNEL_HOST}`
+    const proof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    const e2eKey = (server as unknown as { tunnelE2eKey: string }).tunnelE2eKey
+    const client = await connectRemoteClient({
+      url: `ws://127.0.0.1:${port}/`,
+      pwProof: proof,
+      e2eKey,
+      headers: { Host: TUNNEL_HOST }
+    })
+    await client.ready
+
+    const { msg, rawLength } = await sync(client, { lastSeq: 0 })
+    expect(msg.type).toBe('sync-full')
+    const lines = stats('info')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain('transport=ws reason=fresh')
+    expect(lines[0]).toContain('e2e=true')
+    // The ciphertext is base64 text, so what crossed the wire is its length.
+    expect(lines[0]).toContain(`frameBytes=${rawLength}`)
+    await client.close()
+  })
+
+  it('under E2E the breakdown runs only AFTER the frame was sent, and only while the source is on', async () => {
+    tunnelUrlRef.current = `https://${TUNNEL_HOST}`
+    const proof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    const e2eKey = (server as unknown as { tunnelE2eKey: string }).tunnelE2eKey
+    const client = await connectRemoteClient({
+      url: `ws://127.0.0.1:${port}/`,
+      pwProof: proof,
+      e2eKey,
+      headers: { Host: TUNNEL_HOST }
+    })
+    await client.ready
+
+    // The server-side socket for this client, spied so the order is observable.
+    const [serverWs] = [
+      ...(server as unknown as { clients: Map<WebSocket, unknown> }).clients.keys()
+    ]
+    const order: string[] = []
+    const realSend = serverWs.send.bind(serverWs) as (...a: unknown[]) => void
+    const sendSpy = vi.spyOn(serverWs, 'send').mockImplementation(((...a: unknown[]) => {
+      order.push('send')
+      realSend(...a)
+    }) as unknown as WebSocket['send'])
+    vi.mocked(logger.info).mockImplementation(((source: string, message: string) => {
+      if (source === 'SyncStats' && message.startsWith('snapshot breakdown'))
+        order.push('breakdown')
+    }) as unknown as typeof logger.info)
+
+    // Gate off: the frame goes out and no breakdown is built.
+    await sync(client, { lastSeq: 0 })
+    expect(order).toEqual(['send'])
+
+    // Gate on: the breakdown is built, and only after the frame reached `ws.send`.
+    order.length = 0
+    vi.mocked(logger.isEnabled).mockReturnValue(true)
+    await sync(client, { lastSeq: 0 })
+    await waitUntil(() => order.includes('breakdown'))
+    expect(order).toEqual(['send', 'breakdown'])
+
+    sendSpy.mockRestore()
+    vi.mocked(logger.info).mockReset()
+    await client.close()
+  })
+
+  it('a throwing SyncStats observer never strands later frames on an E2E socket', async () => {
+    tunnelUrlRef.current = `https://${TUNNEL_HOST}`
+    const proof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    const e2eKey = (server as unknown as { tunnelE2eKey: string }).tunnelE2eKey
+    const client = await connectRemoteClient({
+      url: `ws://127.0.0.1:${port}/`,
+      pwProof: proof,
+      e2eKey,
+      headers: { Host: TUNNEL_HOST }
+    })
+    await client.ready
+
+    // The breakdown runs inside the channel's send queue under E2E: if its throw
+    // rejected the queue, the second sync-full would never be encrypted or sent.
+    vi.mocked(logger.isEnabled).mockImplementation(() => {
+      throw new Error('breakdown blew up')
+    })
+    expect((await sync(client, { lastSeq: 0 })).msg.type).toBe('sync-full')
+    expect((await sync(client, { lastSeq: 0 })).msg.type).toBe('sync-full')
+    expect(vi.mocked(logger.error).mock.calls.some((c) => String(c[1]).includes('blew up'))).toBe(
+      true
+    )
+    await client.close()
+  })
+
+  it('escalates a frame of 5 MB or more to warn', async () => {
+    await server.start(port, '127.0.0.1')
+    emitEvent('session:created', ['stats-big', { cwd: '/repo' }])
+    emitEvent('session:message', [
+      'stats-big',
+      {
+        id: 'big',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'x'.repeat(LARGE_SYNC_FULL_BYTES + 1024) }],
+        timestamp: 0
+      }
+    ])
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const { rawLength } = await sync(client, { lastSeq: 0 })
+    expect(rawLength).toBeGreaterThanOrEqual(LARGE_SYNC_FULL_BYTES)
+    const warned = stats('warn')
+    expect(warned).toHaveLength(1)
+    expect(warned[0]).toMatch(/^large sync-full sent: transport=ws reason=fresh /)
+    expect(warned[0]).toContain(`frameBytes=${rawLength}`)
+    // The same frame is not also logged at info.
+    expect(stats('info')).toEqual([])
+    await client.close()
+  })
+
+  it('builds the breakdown ONLY while the source is enabled at info', async () => {
+    await server.start(port, '127.0.0.1')
+    emitEvent('session:created', ['stats-2', { cwd: '/repo' }])
+    emitEvent('session:message', [
+      'stats-2',
+      {
+        id: 'secret',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'TRANSCRIPT-SECRET-do-not-log' }],
+        timestamp: 0
+      }
+    ])
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    // Off (the default): the frame line only — no extra serialization at all.
+    await sync(client, { lastSeq: 0 })
+    expect(stats('info').filter((l) => l.startsWith('snapshot breakdown'))).toEqual([])
+
+    // On: one breakdown line per sync-full, ids and numbers only.
+    vi.mocked(logger.isEnabled).mockReturnValue(true)
+    await sync(client, { lastSeq: 0 })
+    expect(logger.isEnabled).toHaveBeenCalledWith('SyncStats', 'info')
+    const breakdowns = stats('info').filter((l) => l.startsWith('snapshot breakdown'))
+    expect(breakdowns).toHaveLength(1)
+    expect(breakdowns[0]).toContain('sessions[total=1 ')
+    expect(breakdowns[0]).toContain('stats-2:')
+    for (const line of [...stats('info'), ...stats('warn')]) {
+      expect(line).not.toContain('TRANSCRIPT-SECRET')
+      expect(line).not.toContain('/repo')
+    }
+    await client.close()
   })
 })

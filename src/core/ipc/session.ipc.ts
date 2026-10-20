@@ -28,6 +28,7 @@ import {
   listAllDirectories
 } from '../services/sync-seed'
 import {
+  loadSessionStatusLine,
   loadSubagentHistory,
   buildSubagentFileMap,
   loadBackgroundOutput
@@ -86,7 +87,8 @@ import type {
   OpencodeProviderCatalogEntry,
   ProviderRemoveKind,
   PermissionScope,
-  ClaudePermissions
+  ClaudePermissions,
+  LoadSessionHistoryOptions
 } from '../../shared/types'
 import {
   discoverOpencodeProviderCatalog,
@@ -119,6 +121,7 @@ import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { usageHubCommands, USAGE_HUB_CHANNELS } from './usage-hub-commands'
 import { harnessCommands, HARNESS_CHANNELS } from './harness-commands'
 import { voicePackCommands, VOICE_PACK_CHANNELS } from './voice-pack-commands'
+import type { ProgressReporter } from '../../shared/remote-protocol'
 import {
   sendPrompt,
   getBlob,
@@ -315,6 +318,7 @@ const SESSION_IPC_CHANNELS = [
   'session:list-pi',
   'session:load-pi-history',
   'session:load-history',
+  'session:load-status-line',
   'session:load-subagent-history',
   'blob:get',
   'session:build-subagent-file-map',
@@ -1106,8 +1110,40 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'session:load-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, resumeSessionAt?: string) => {
-      return await loadSessionHistory(sessionId, projectKey, resumeSessionAt)
+    // ADR-102: the reporter leads the args; a caller that sends none gets a no-op.
+    withProgress: true,
+    handler: async (
+      progress: ProgressReporter,
+      sessionId: string,
+      projectKey: string,
+      resumeSessionAt?: string,
+      options?: LoadSessionHistoryOptions | null
+    ) => {
+      // Both identifiers are caller-supplied and joined into a ~/.claude/projects path
+      // by the Claude reader. Every engine's real id and projectKey is a single
+      // segment (uuid / `ses_…` ids; `cwdToProjectKey` is `[A-Za-z0-9-]*`), so one
+      // check serves the engine dispatch too.
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
+      return await loadSessionHistory(sessionId, projectKey, resumeSessionAt, undefined, {
+        onProgress: progress,
+        // Strictly a literal `true`: any other shape of the (renderer-supplied) options is ignored.
+        deferStatusLine: options?.deferStatusLine === true
+      })
+    }
+  })
+
+  // The status line a `deferStatusLine` read left out (ADR-102 Arc 2): same
+  // result as the full read's, own progress plan (M + S, phase `costs`).
+  handleIpc({
+    channel: 'session:load-status-line',
+    capability: 'fs-read',
+    kind: 'query',
+    withProgress: true,
+    handler: async (progress: ProgressReporter, sessionId: string, projectKey: string) => {
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
+      return await loadSessionStatusLine(sessionId, projectKey, progress)
     }
   })
 
@@ -1115,7 +1151,18 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'session:load-subagent-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, agentId: string) => {
+    // Declared so a remote call gets the transport's `sending` frame (it slides
+    // the client's 30 s timeout while a large bucket transfers); reports nothing itself.
+    withProgress: true,
+    handler: async (
+      _progress: ProgressReporter,
+      sessionId: string,
+      projectKey: string,
+      agentId: string
+    ) => {
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
+      assertSafePathSegment(agentId, 'agentId')
       return await loadSubagentHistory(sessionId, projectKey, agentId)
     }
   })

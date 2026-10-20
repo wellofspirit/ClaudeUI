@@ -18,7 +18,7 @@
  *    and a phone cannot answer the same frame differently.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 /** A `MessagePortMain` pair, minimal but with real two-way plumbing. */
 class FakePort {
@@ -64,6 +64,7 @@ vi.mock('electron', () => ({
 }))
 
 import { attachSyncPort, SYNC_PORT_CHANNEL } from '../sync-port'
+import { logger } from '../../../core/services/logger'
 import {
   syncCore,
   emitEvent,
@@ -263,5 +264,85 @@ describe('attachSyncPort', () => {
 
     port.deliver({ type: 'sync', lastSeq: 0 })
     expect(framesOfType(port, 'sync-full')).toHaveLength(1)
+  })
+})
+
+// `SyncStats` (sync-core.md § Measuring a full sync): the desktop's host-side line.
+describe('SyncStats lines on the port', () => {
+  let info: ReturnType<typeof vi.spyOn>
+  let enabled: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    enabled = vi.spyOn(logger, 'isEnabled').mockReturnValue(false)
+  })
+
+  afterEach(() => {
+    info.mockRestore()
+    enabled.mockRestore()
+  })
+
+  const stats = (): string[] =>
+    info.mock.calls.filter((c) => c[0] === 'SyncStats').map((c) => c[1] as string)
+
+  function ready(): FakePort {
+    const win = fakeWin()
+    attachSyncPort(win as never)
+    win.finishLoad()
+    return latestPort1()
+  }
+
+  it('logs ONE line for a full decision: transport, reason, seqs, post time', () => {
+    const port = ready()
+    port.deliver({ type: 'sync', lastSeq: 0 })
+
+    expect(framesOfType(port, 'sync-full')).toHaveLength(1)
+    const lines = stats()
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatch(
+      /^sync-full sent: transport=port reason=fresh lastSeq=0 seq=\d+ ringOldest=(\d+|none) epochMatch=false postMs=\d+\.\d$/
+    )
+  })
+
+  it('names the reason when a stale epoch forces the full', () => {
+    const port = ready()
+    emitEvent('git:status-update', [{ cwd: '/x' }])
+    port.deliver({ type: 'sync', lastSeq: syncCore.currentSeq(), epoch: 'epoch-from-a-past-run' })
+
+    expect(stats()).toHaveLength(1)
+    expect(stats()[0]).toContain('reason=epoch-mismatch')
+  })
+
+  it('logs nothing for a catchup', () => {
+    const port = ready()
+    const before = syncCore.currentSeq()
+    emitEvent('git:status-update', [{ cwd: '/x' }])
+    port.deliver({ type: 'sync', lastSeq: before, epoch: syncCore.epoch() })
+
+    expect(framesOfType(port, 'sync-catchup')).toHaveLength(1)
+    expect(stats()).toEqual([])
+  })
+
+  it('logs nothing when the post itself failed (the renderer is gone)', () => {
+    const port = ready()
+    port.closed = true
+    port.deliver({ type: 'sync', lastSeq: 0 })
+    expect(stats()).toEqual([])
+  })
+
+  it('adds the breakdown line only while SyncStats is enabled at info', () => {
+    const port = ready()
+    emitEvent('session:created', ['port-stats', { cwd: '/repo' }])
+
+    port.deliver({ type: 'sync', lastSeq: 0 })
+    expect(stats().filter((l) => l.startsWith('snapshot breakdown'))).toEqual([])
+
+    enabled.mockReturnValue(true)
+    port.deliver({ type: 'sync', lastSeq: 0 })
+    expect(enabled).toHaveBeenCalledWith('SyncStats', 'info')
+    const breakdowns = stats().filter((l) => l.startsWith('snapshot breakdown'))
+    expect(breakdowns).toHaveLength(1)
+    expect(breakdowns[0]).toContain('port-stats:')
+    expect(breakdowns[0]).not.toContain('/repo')
   })
 })

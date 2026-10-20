@@ -5,7 +5,7 @@
  * Crypto is needed; the real crypto is covered in shared/e2e-crypto.test.ts.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { webcrypto } from 'node:crypto'
 import { RemoteConnection } from '../connection'
 import { E2ECrypto } from '../../shared/e2e-crypto'
@@ -669,5 +669,230 @@ describe('RemoteConnection', () => {
       expect(FakeWebSocket.instances).toHaveLength(2)
       conn.destroy()
     })
+  })
+})
+
+// ADR-102 — invoke progress: the callback, the sliding 30 s window, the step-up
+// retry that must keep both, and the close that must not leave a caller hanging.
+describe('RemoteConnection — invoke progress (ADR-102)', () => {
+  interface ProgressInternals {
+    handleMessage(msg: unknown): void
+    state: string
+    pendingInvokes: Map<string, { timer: unknown }>
+  }
+
+  /** A connected instance whose socket records what it is asked to send. */
+  function openConn(): {
+    conn: RemoteConnection
+    internals: ProgressInternals
+    ws: FakeWebSocket
+    sent: Array<{ type: string; id: string; channel: string; args: unknown[] }>
+  } {
+    const conn = new RemoteConnection('http://host:1/remote', {})
+    conn.connect()
+    const ws = FakeWebSocket.instances.at(-1)!
+    const sent: Array<{ type: string; id: string; channel: string; args: unknown[] }> = []
+    ws.readyState = 1
+    ws.send = ((payload: string) => sent.push(JSON.parse(payload))) as never
+    const internals = conn as unknown as ProgressInternals
+    internals.state = 'connected'
+    return { conn, internals, ws, sent }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('sends an ordinary invoke frame and hands each progress frame to the callback', () => {
+    const { conn, internals, sent } = openConn()
+    const onProgress = vi.fn()
+    void conn.invokeWithProgress('session:load-history', ['s', 'p'], onProgress).catch(() => {})
+    expect(sent).toEqual([
+      { type: 'invoke', id: sent[0].id, channel: 'session:load-history', args: ['s', 'p'] }
+    ])
+
+    internals.handleMessage({
+      type: 'invoke-progress',
+      id: sent[0].id,
+      done: 5,
+      total: 20,
+      phase: 'transcript'
+    })
+    // Only the payload: the frame's `type` / `id` are transport detail.
+    expect(onProgress).toHaveBeenCalledWith({ done: 5, total: 20, phase: 'transcript' })
+    conn.destroy()
+  })
+
+  it('progress frames slide the 30 s window; without them the call still times out at 30 s', async () => {
+    const { conn, internals, sent } = openConn()
+    const settled = vi.fn()
+    const quiet = conn.invoke('quiet:channel')
+    quiet.catch(settled)
+    const live = conn.invokeWithProgress('session:load-history', [], () => {})
+    const liveSettled = vi.fn()
+    live.then(liveSettled, liveSettled)
+    const liveId = sent[1].id
+
+    // A frame every 20 s for 60 s: the call outlives the fixed 30 s window.
+    for (let t = 0; t < 3; t++) {
+      await vi.advanceTimersByTimeAsync(20_000)
+      internals.handleMessage({
+        type: 'invoke-progress',
+        id: liveId,
+        done: t,
+        total: 10,
+        phase: 'transcript'
+      })
+    }
+    expect(liveSettled).not.toHaveBeenCalled()
+    // The quiet call (no frames) died at 30 s, exactly as before.
+    expect(settled).toHaveBeenCalledTimes(1)
+    expect(settled.mock.calls[0][0]).toEqual(new Error('Timeout: quiet:channel'))
+
+    // 30 s after the LAST frame it does time out.
+    await vi.advanceTimersByTimeAsync(29_999)
+    expect(liveSettled).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(liveSettled).toHaveBeenCalledWith(new Error('Timeout: session:load-history'))
+    conn.destroy()
+  })
+
+  it('resolves with the response and drops later progress for the settled id', async () => {
+    const { conn, internals, sent } = openConn()
+    const onProgress = vi.fn()
+    const p = conn.invokeWithProgress('session:load-history', [], onProgress)
+    const id = sent[0].id
+    internals.handleMessage({ type: 'invoke-response', id, ok: true, data: { messages: [] } })
+    await expect(p).resolves.toEqual({ messages: [] })
+    internals.handleMessage({ type: 'invoke-progress', id, done: 1, total: 2, phase: 'sending' })
+    expect(onProgress).not.toHaveBeenCalled()
+    conn.destroy()
+  })
+
+  it('ignores a progress frame for an id nobody is waiting on', () => {
+    const { conn, internals, sent } = openConn()
+    const onProgress = vi.fn()
+    void conn.invokeWithProgress('session:load-history', [], onProgress).catch(() => {})
+    expect(() =>
+      internals.handleMessage({
+        type: 'invoke-progress',
+        id: 'does-not-exist',
+        done: 1,
+        total: 2,
+        phase: 'costs'
+      })
+    ).not.toThrow()
+    expect(onProgress).not.toHaveBeenCalled()
+    expect(internals.pendingInvokes.size).toBe(1)
+    expect(sent).toHaveLength(1)
+    conn.destroy()
+  })
+
+  it('a throwing callback does not break the connection or the call', async () => {
+    const { conn, internals, sent } = openConn()
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const p = conn.invokeWithProgress('session:load-history', [], () => {
+      throw new Error('ui bug')
+    })
+    internals.handleMessage({
+      type: 'invoke-progress',
+      id: sent[0].id,
+      done: 1,
+      total: 2,
+      phase: 'x'
+    })
+    internals.handleMessage({ type: 'invoke-response', id: sent[0].id, ok: true, data: 1 })
+    await expect(p).resolves.toBe(1)
+    errors.mockRestore()
+    conn.destroy()
+  })
+
+  it('a step-up retry (fresh id) keeps the progress callback', async () => {
+    const { conn, internals, sent } = openConn()
+    // The real gate's contract: on a refusal, run the ceremony and attempt again.
+    conn.setInvokeGate(async (_channel, attempt) => {
+      try {
+        return await attempt()
+      } catch (err) {
+        if (!/needs-step-up/.test(String(err))) throw err
+        return attempt()
+      }
+    })
+    const onProgress = vi.fn()
+    const p = conn.invokeWithProgress('session:load-history', ['s'], onProgress)
+    const firstId = sent[0].id
+    internals.handleMessage({
+      type: 'invoke-response',
+      id: firstId,
+      ok: false,
+      error: 'needs-step-up'
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(sent).toHaveLength(2)
+    const retryId = sent[1].id
+    expect(retryId).not.toBe(firstId)
+
+    internals.handleMessage({
+      type: 'invoke-progress',
+      id: retryId,
+      done: 3,
+      total: 9,
+      phase: 'costs'
+    })
+    expect(onProgress).toHaveBeenCalledWith({ done: 3, total: 9, phase: 'costs' })
+    // ...and the retry's window slides too.
+    await vi.advanceTimersByTimeAsync(20_000)
+    internals.handleMessage({
+      type: 'invoke-progress',
+      id: retryId,
+      done: 4,
+      total: 9,
+      phase: 'costs'
+    })
+    await vi.advanceTimersByTimeAsync(20_000)
+    internals.handleMessage({ type: 'invoke-response', id: retryId, ok: true, data: 'done' })
+    await expect(p).resolves.toBe('done')
+    conn.destroy()
+  })
+
+  it('a closed socket rejects every pending invoke and clears their timers (C5)', async () => {
+    const { conn, internals, ws } = openConn()
+    const clear = vi.spyOn(globalThis, 'clearTimeout')
+    const a = conn.invoke('a:channel')
+    const b = conn.invokeWithProgress('session:load-history', [], () => {})
+    const timers = [...internals.pendingInvokes.values()].map((p) => p.timer)
+    const results = Promise.allSettled([a, b])
+
+    ;(ws.onclose as (ev: { code: number }) => void)({ code: 1006 })
+
+    const [ra, rb] = await results
+    expect(ra).toMatchObject({ status: 'rejected' })
+    expect((ra as PromiseRejectedResult).reason.message).toBe('Connection lost: a:channel')
+    expect((rb as PromiseRejectedResult).reason.message).toBe(
+      'Connection lost: session:load-history'
+    )
+    expect(internals.pendingInvokes.size).toBe(0)
+    for (const timer of timers) expect(clear).toHaveBeenCalledWith(timer)
+    clear.mockRestore()
+    conn.destroy()
+  })
+
+  it('close 4008 still lets whenCredentialsChanged win the authcfg:set-password race (GUARD)', async () => {
+    const { conn, ws } = openConn()
+    // api-adapter.authcfgSetPassword, verbatim: the close IS the success signal.
+    const rotated = conn.whenCredentialsChanged().then(() => ({ ok: true }) as const)
+    const answered = conn.invoke('authcfg:set-password', 'new-pw')
+    const outcome = Promise.race([answered, rotated])
+
+    ;(ws.onclose as (ev: { code: number }) => void)({ code: 4008 })
+
+    await expect(outcome).resolves.toEqual({ ok: true })
+    // The pending call is not left dangling either: it settles (rejected) after.
+    await vi.advanceTimersByTimeAsync(0)
+    await expect(answered).rejects.toThrow('Connection lost: authcfg:set-password')
+    conn.destroy()
   })
 })

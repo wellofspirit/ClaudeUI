@@ -20,6 +20,8 @@ import { PermissionDenialChip, PermissionDenialStrip } from './tool-registry/Per
 import { ToolReviewChip, ToolReviewStrip, canApproveBlock } from './tool-registry/ToolReview'
 import { armStopPillFallback } from '../../lib/stop-pill'
 import { deriveTaskState, isDispatchToolName, latestNotification } from './task-state'
+import { requestSubagentTranscript } from '../../lib/subagent-prefetch'
+import { useSubagentPending } from '../../hooks/useSubagentPending'
 import { dispatchLabel, taskHeaderLabel } from '../../../../shared/tool-kinds'
 import { modelTier, type ModelTier } from '../../../../shared/model-tier'
 import {
@@ -438,6 +440,14 @@ export function TaskCard({
   // it delivered none) is shown below the output; the Agent tool_result would
   // only repeat it.
   const hasHandback = hasHandbackReport(bgNotification)
+  // The content-first load leaves a card's transcript on disk until it is needed
+  // (ADR-102 Arc 2): opening the card asks for it at once, and until it lands the
+  // body says so instead of flashing the markdown result and swapping it.
+  const subagentPending = useSubagentPending(toolUseId) && !hasSubagentOutput
+  useEffect(() => {
+    if (expanded && subagentPending && activeSessionId)
+      requestSubagentTranscript(activeSessionId, toolUseId)
+  }, [expanded, subagentPending, activeSessionId, toolUseId])
   // Has this task received a task_started wire event with no matching
   // task_notification yet? If so it is DEFINITELY still running, regardless
   // of tool_result/background-flag state — see PerSessionState.activeTasks.
@@ -574,7 +584,10 @@ export function TaskCard({
   // usual case — which hid the reason (an opencode subagent that ran out of
   // context read as a bare "failed"), so show it alongside that output.
   // `isError` is already false for a stopped task (task-state.ts).
-  const failureSummary = isError && hasSubagentOutput && result?.isError ? resultBody : ''
+  // A transcript that is on its way counts as output: the failure text must not
+  // pop in after the body lands.
+  const failureSummary =
+    isError && (hasSubagentOutput || subagentPending) && result?.isError ? resultBody : ''
   const isStopping = stoppingTaskIds.includes(toolUseId)
   // Cross-engine dispatch cards (ADR-033 M3, M4b) reuse this component via the
   // 'task' kind but have no backgrounding concept — cli.js's backgroundTask
@@ -872,6 +885,14 @@ export function TaskCard({
                   size="sm"
                   engineId={dispatchChildEngine(view)}
                 />
+              </div>
+            ) : subagentPending ? (
+              <div
+                data-testid="TaskCard.subagentLoading"
+                className="px-3 py-2 flex items-center gap-2 text-[12px] text-text-muted"
+              >
+                <span className="w-2.5 h-2.5 rounded-full border-[1.5px] border-accent border-t-transparent animate-spin-slow" />
+                <span>Loading…</span>
               </div>
             ) : resultBody && !isBackground && !hasHandback ? (
               <div className="px-3 py-2 text-[12px] text-text-primary/70">

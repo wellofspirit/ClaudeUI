@@ -43,6 +43,7 @@ vi.mock('../../../core/auth/CodexAuthProvider', () => ({
 vi.mock('../../../core/services/session-history', () => ({
   listDirectories: vi.fn(async () => [{ id: 'dir-1' }]),
   loadSessionHistory: vi.fn(async () => [{ id: 'm1' }]),
+  loadSessionStatusLine: vi.fn(async () => ({ totalCostUsd: 1 })),
   loadSubagentHistory: vi.fn(async () => []),
   buildSubagentFileMap: vi.fn(() => ({})),
   loadBackgroundOutput: vi.fn(() => '')
@@ -306,6 +307,7 @@ import {
   AUTHCFG_CHANNELS as CLASSIFIED_AUTHCFG_CHANNELS,
   AUTHCFG_FREE_CHANNELS as CLASSIFIED_AUTHCFG_FREE_CHANNELS,
   SHELL_ACT_VERBS,
+  classifyDispatch,
   SHELL_READ_VERBS
 } from '../../../core/services/step-up-tier'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
@@ -322,6 +324,11 @@ import { logger } from '../../../core/services/logger'
 import { blobStore } from '../../../core/services/blob-store'
 import { query } from '../../../core/sdk'
 import { discoverCodexModels } from '../../../core/codex/model-discovery'
+import {
+  loadSessionHistory as loadClaudeHistoryMock,
+  loadSessionStatusLine as loadStatusLineMock,
+  loadSubagentHistory as loadSubagentHistoryMock
+} from '../../../core/services/session-history'
 import { engineInstalled } from '../../../core/harness/resolve'
 
 // ---------------------------------------------------------------------------
@@ -739,6 +746,89 @@ describe('registerRemoteHandlers', () => {
     expect(decl?.kind).toBe('query')
     expect(AUTH_OFF_GRANTS.has(decl!.capability)).toBe(true)
     expect(commandRegistry.channels('remote')).toContain('blob:get')
+  })
+
+  describe('sync:report-timing', () => {
+    const REPORT = { frameBytes: 2048, decodeMs: 3.5, syncToFrameMs: 40, hydrateMs: 12.25 }
+
+    function syncStatsLines(): string[] {
+      return [...vi.mocked(logger.info).mock.calls, ...vi.mocked(logger.warn).mock.calls]
+        .filter(([source]) => source === 'SyncStats')
+        .map(([, message]) => message as string)
+    }
+
+    beforeEach(() => {
+      vi.mocked(logger.info).mockClear()
+      vi.mocked(logger.warn).mockClear()
+    })
+
+    it('is a base-reachable chat QUERY that takes the connection, registered for remote only', () => {
+      const decl = commandRegistry.declaration('sync:report-timing')
+      expect(decl).toMatchObject({ capability: 'chat', kind: 'query', withConnection: true })
+      // `chat` is in the base grant set, so every connection that can sync holds it.
+      expect(AUTH_OFF_GRANTS.has(decl!.capability)).toBe(true)
+      expect(commandRegistry.get('sync:report-timing', 'remote')).toBeDefined()
+      // A `query` is read-class: free on every step-up tier and never audited.
+      expect(
+        classifyDispatch({ channel: 'sync:report-timing', capability: 'chat', kind: 'query' })
+      ).toBe('read')
+    })
+
+    it('writes one host-formatted SyncStats line for a valid report', async () => {
+      await dispatcher.handle(
+        makeRequest('sync:report-timing', REPORT),
+        makeRemoteConnection('password', null)
+      )
+      expect(syncStatsLines()).toEqual([
+        'client sync-full applied: transport=web frameChars=2048 decodeMs=3.5 ' +
+          'syncToFrameMs=40.0 hydrateMs=12.3 totalMs=55.8'
+      ])
+    })
+
+    it('answers nothing for a malformed report and logs nothing', async () => {
+      const conn = makeRemoteConnection('password', null)
+      for (const bad of [
+        null,
+        'x',
+        [1, 2],
+        { ...REPORT, decodeMs: -1 },
+        { ...REPORT, hydrateMs: '1' }
+      ]) {
+        expect(
+          await dispatcher.handle(makeRequest('sync:report-timing', bad), conn)
+        ).toBeUndefined()
+      }
+      expect(await dispatcher.handle(makeRequest('sync:report-timing'), conn)).toBeUndefined()
+      expect(syncStatsLines()).toEqual([])
+    })
+
+    it('is refused for a connection without the chat class', async () => {
+      const enrollOnly = makeRemoteConnection('enroll-token', null, ENROLL_ONLY_GRANTS)
+      await expect(
+        dispatcher.handle(makeRequest('sync:report-timing', REPORT), enrollOnly)
+      ).rejects.toThrow(/Permission denied: "sync:report-timing" requires the "chat" capability/)
+      expect(syncStatsLines()).toEqual([])
+    })
+
+    it('rate-limits per connection (6 a minute) through the real dispatch path', async () => {
+      const noisy = makeRemoteConnection('password', null)
+      const quiet = makeRemoteConnection('password', null)
+      for (let i = 0; i < 9; i++) {
+        await dispatcher.handle(makeRequest('sync:report-timing', REPORT), noisy)
+      }
+      expect(syncStatsLines()).toHaveLength(6)
+      // Another connection's budget is its own: `withConnection` carries the right id.
+      await dispatcher.handle(makeRequest('sync:report-timing', REPORT), quiet)
+      expect(syncStatsLines()).toHaveLength(7)
+    })
+
+    it('ignores padded arguments: only the first is the report', async () => {
+      await dispatcher.handle(
+        makeRequest('sync:report-timing', REPORT, { frameBytes: 'evil' }, 'x'),
+        makeRemoteConnection('password', null)
+      )
+      expect(syncStatsLines()).toHaveLength(1)
+    })
   })
 
   it('session:send rejects when routingId not found', async () => {
@@ -1222,6 +1312,135 @@ describe('registerRemoteHandlers', () => {
         dispatcher.handle(makeRequest('git:push', '/tmp/proj'), remoteConn)
       ).rejects.toThrow('remote rejected')
       expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
+    })
+
+    it('session:load-history declares withProgress and forwards the reporter to the Claude reader (ADR-102)', async () => {
+      expect(commandRegistry.declaration('session:load-history')?.withProgress).toBe(true)
+      const progress = vi.fn()
+      await dispatcher.handle(
+        makeRequest('session:load-history', 'sess-1', 'proj-key', null),
+        remoteConn,
+        progress
+      )
+      // The reporter LEADS the handler args (not the wire's), and the wire's
+      // null anchor is still normalised to undefined. No options on the wire
+      // (an old client's 3-arg call) means the full read.
+      expect(loadClaudeHistoryMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', undefined, {
+        onProgress: progress,
+        deferStatusLine: false
+      })
+    })
+
+    it('session:load-history validates its options arg: only a literal deferStatusLine === true defers (ADR-102 Arc 2)', async () => {
+      const progress = vi.fn()
+      const deferredOf = async (...options: unknown[]): Promise<unknown> => {
+        await dispatcher.handle(
+          makeRequest('session:load-history', 'sess-1', 'proj-key', null, ...options),
+          remoteConn,
+          progress
+        )
+        return (
+          vi.mocked(loadClaudeHistoryMock).mock.lastCall?.[3] as { deferStatusLine?: boolean }
+        ).deferStatusLine
+      }
+      expect(await deferredOf({ deferStatusLine: true })).toBe(true)
+      // Anything else is ignored, never coerced: non-objects, wrong types, extras.
+      expect(await deferredOf({ deferStatusLine: 'true' })).toBe(false)
+      expect(await deferredOf({ deferStatusLine: 1 })).toBe(false)
+      expect(await deferredOf({ deferStatusLine: false })).toBe(false)
+      expect(await deferredOf({})).toBe(false)
+      expect(await deferredOf(null)).toBe(false)
+      expect(await deferredOf('deferStatusLine')).toBe(false)
+      expect(await deferredOf(42)).toBe(false)
+      expect(await deferredOf(['deferStatusLine'])).toBe(false)
+      // Extra fields are ignored and are not forwarded.
+      expect(await deferredOf({ deferStatusLine: true, resumeSessionAt: 'x', onProgress: 1 })).toBe(
+        true
+      )
+      expect(vi.mocked(loadClaudeHistoryMock).mock.lastCall?.[3]).toEqual({
+        onProgress: progress,
+        deferStatusLine: true
+      })
+    })
+
+    it('session:load-status-line is an fs-read query that declares withProgress and forwards the reporter (ADR-102 Arc 2)', async () => {
+      expect(commandRegistry.declaration('session:load-status-line')).toMatchObject({
+        capability: 'fs-read',
+        kind: 'query',
+        withProgress: true
+      })
+      // The server sends its `sending` frame only for a channel this says reports.
+      expect(dispatcher.reportsProgress('session:load-status-line')).toBe(true)
+      const progress = vi.fn()
+      const res = await dispatcher.handle(
+        makeRequest('session:load-status-line', 'sess-1', 'proj-key'),
+        remoteConn,
+        progress
+      )
+      expect(res).toEqual({ totalCostUsd: 1 })
+      expect(loadStatusLineMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', progress)
+    })
+
+    it('session:load-subagent-history declares withProgress (the transport `sending` frame) and keeps its wire args (ADR-102 Arc 2, C8)', async () => {
+      expect(commandRegistry.declaration('session:load-subagent-history')?.withProgress).toBe(true)
+      expect(dispatcher.reportsProgress('session:load-subagent-history')).toBe(true)
+      await dispatcher.handle(
+        makeRequest('session:load-subagent-history', 'sess-1', 'proj-key', 'agent-9'),
+        remoteConn
+      )
+      // The reporter takes the leading slot, so the wire args land where they did.
+      expect(loadSubagentHistoryMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', 'agent-9')
+    })
+
+    // The three Claude history readers join sessionId / projectKey (/ agentId) into a
+    // ~/.claude/projects path, and these channels are reachable by any `fs-read`
+    // caller. A traversal value must be refused before the reader (the filesystem) runs.
+    describe.each([
+      ['session:load-history', () => loadClaudeHistoryMock, []],
+      ['session:load-status-line', () => loadStatusLineMock, []],
+      ['session:load-subagent-history', () => loadSubagentHistoryMock, ['agent-9']]
+    ] as const)('%s path-segment validation', (channel, reader, tail) => {
+      it.each([
+        ['sessionId', ['../x', 'proj-key']],
+        ['sessionId', ['a/b', 'proj-key']],
+        ['sessionId', ['a\\b', 'proj-key']],
+        ['sessionId', ['', 'proj-key']],
+        ['projectKey', ['sess-1', '../x']],
+        ['projectKey', ['sess-1', 'a/b']],
+        ['projectKey', ['sess-1', 'a\\b']],
+        ['projectKey', ['sess-1', '..']],
+        ['projectKey', ['sess-1', '']]
+      ])('refuses a bad %s (%j) before any read (GUARD — fails pre-fix)', async (label, ids) => {
+        vi.mocked(reader()).mockClear()
+        await expect(
+          dispatcher.handle(makeRequest(channel, ...ids, ...tail), remoteConn)
+        ).rejects.toThrow(new RegExp(`Invalid ${label}`))
+        expect(reader()).not.toHaveBeenCalled()
+      })
+
+      it('passes a valid call through unchanged', async () => {
+        vi.mocked(reader()).mockClear()
+        await dispatcher.handle(makeRequest(channel, 'sess-1', 'proj-key', ...tail), remoteConn)
+        expect(reader()).toHaveBeenCalledTimes(1)
+        expect(vi.mocked(reader()).mock.lastCall?.slice(0, 2 + tail.length)).toEqual([
+          'sess-1',
+          'proj-key',
+          ...tail
+        ])
+      })
+    })
+
+    it('session:load-subagent-history refuses a bad agentId before any read (GUARD — fails pre-fix)', async () => {
+      vi.mocked(loadSubagentHistoryMock).mockClear()
+      for (const agentId of ['../x', 'a/b', 'a\\b', '..', '']) {
+        await expect(
+          dispatcher.handle(
+            makeRequest('session:load-subagent-history', 'sess-1', 'proj-key', agentId),
+            remoteConn
+          )
+        ).rejects.toThrow(/Invalid agentId/)
+      }
+      expect(loadSubagentHistoryMock).not.toHaveBeenCalled()
     })
 
     it('account:get returns the account-manager state', async () => {
@@ -1826,6 +2045,10 @@ const SHELL_GATED_CHANNELS = [
 const POST_PORT_CHANNELS = [
   'session:clear-conversation',
   'file:list-places',
+  // ADR-102 Arc 2: the status line a `deferStatusLine` history read left out.
+  // `fs-read`, the capability of the `session:load-history` it is the second half
+  // of — the same transcript bytes, summed instead of returned.
+  'session:load-status-line',
   // ADR-087: the bytes behind a transcript BlobRef. `chat`, the capability that
   // already read these exact bytes inside the snapshot — an invoke, not an HTTP
   // route, so on an E2E origin they stay inside the encrypted channel.
@@ -2245,6 +2468,13 @@ const VOICE_PACK_CHANNELS = [
   'voice:pack-remove'
 ] as const
 
+/**
+ * The web client's full-sync timing report (`SyncStats`, sync-core.md § Measuring
+ * a full sync). REMOTE-only: the desktop renderer relays its own through
+ * `log:relay`. `chat` / `query` / `withConnection` — see its registration.
+ */
+const SYNC_TIMING_CHANNELS = ['sync:report-timing'] as const
+
 /** The part of {@link VOICE_PACK_CHANNELS} that is gated by `admin`. */
 const VOICE_PACK_ADMIN_CHANNELS = [
   'voice:pack-install',
@@ -2337,7 +2567,8 @@ describe('remote surface parity (phase 1 port)', () => {
         ...HARNESS_CHANNELS,
         // ADR-101 §6: the speech pack. Its status is `chat`; install, cancel and
         // remove are `admin`.
-        ...VOICE_PACK_CHANNELS
+        ...VOICE_PACK_CHANNELS,
+        ...SYNC_TIMING_CHANNELS
       ].sort()
     )
   })

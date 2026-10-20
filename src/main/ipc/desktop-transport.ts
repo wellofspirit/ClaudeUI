@@ -29,6 +29,11 @@ import {
   dispatchDesktop,
   setDesktopTransportBinder
 } from '../../core/ipc/desktop-transport-binding'
+import {
+  createProgressThrottle,
+  INVOKE_PROGRESS_EVENT,
+  INVOKE_WITH_PROGRESS_CHANNEL
+} from '../../shared/progress-throttle'
 
 /**
  * Install the ipcMain binder. Called once from `bootCore()`, BEFORE any
@@ -37,6 +42,7 @@ import {
  * see "no handler for '<channel>'".
  */
 export function installDesktopTransport(): void {
+  bindInvokeWithProgress()
   setDesktopTransportBinder({
     bind(channel) {
       ipcMain.removeHandler(channel)
@@ -46,4 +52,43 @@ export function installDesktopTransport(): void {
       ipcMain.removeHandler(channel)
     }
   })
+}
+
+/**
+ * `invoke:with-progress` — `ipcRenderer.invoke` cannot stream, so a call that
+ * wants progress (ADR-102) goes through this one extra channel instead:
+ * `(callId, channel, ...args)`. It still dispatches through `dispatchDesktop`, so
+ * the capability check and audit are the registry's, unchanged; only a
+ * `withProgress` entry ever sees the reporter.
+ *
+ * Progress goes back to the CALLING window as `invoke:progress (callId, p)` —
+ * `event.sender`, never a broadcast. Lifecycle: the pending tail is flushed and
+ * the reporter closed BEFORE this handler's promise settles, so no progress
+ * message can trail the invoke's resolution (the renderer drops its listener at
+ * that point). A destroyed sender (window reload mid-load) just stops reporting.
+ *
+ * Installed once with the binder; `removeHandler` first so a second boot (tests,
+ * macOS dock re-open) does not hit Electron's duplicate-handler throw.
+ */
+function bindInvokeWithProgress(): void {
+  ipcMain.removeHandler(INVOKE_WITH_PROGRESS_CHANNEL)
+  ipcMain.handle(
+    INVOKE_WITH_PROGRESS_CHANNEL,
+    async (event, callId: unknown, channel: unknown, ...args: unknown[]) => {
+      if (typeof callId !== 'string' || typeof channel !== 'string') {
+        throw new Error(`${INVOKE_WITH_PROGRESS_CHANNEL}: callId and channel must be strings`)
+      }
+      const sender = event.sender
+      const throttle = createProgressThrottle((progress) => {
+        if (!sender.isDestroyed()) sender.send(INVOKE_PROGRESS_EVENT, callId, progress)
+      })
+      try {
+        const result = await dispatchDesktop(channel, args, throttle.report)
+        throttle.flush()
+        return result
+      } finally {
+        throttle.close()
+      }
+    }
+  )
 }

@@ -24,7 +24,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { HarnessUpdatesView } from '../../../../shared/harness-types'
 import { useConnectionHoldsAdmin } from '../SettingsDialog/connection-admin'
-import { ProgressBar } from '../SettingsDialog/HarnessesInstalled'
+import { ProgressBar } from '../shared/ProgressBar'
 import {
   harnessStore,
   useHarnessStore,

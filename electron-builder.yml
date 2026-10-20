@@ -18,6 +18,7 @@ files:
   - '!.cache/**'
   - '!.claude/**'
   - '!.notes/**'
+  - '!.work/**'
   - '!vendor/**'
   - '!docs/**'
   - '!patch/**'

@@ -9,7 +9,10 @@ import { SidebarView, type DeleteTarget } from './View'
 import { cwdToProjectKey } from '../../../../shared/project-key'
 import { planClaudeProjectDelete } from '../../../../shared/claude-project-delete'
 import {
+  beginTranscriptPlaceholder,
   ensureTranscriptLoaded,
+  isTranscriptLoadInFlight,
+  loadClickedSession,
   loadSessionIntoStore,
   opensResident,
   replaceOnClick
@@ -157,7 +160,7 @@ export function Sidebar({
   // Monotonic token guarding async session selection: clicking slow-loading A
   // then fast-loading B must land on B. Each click bumps the token; a load only
   // commits if it's still the latest (gpt#18 / xhigh#14).
-  const selectionSeq = useRef(0)
+  const selectionTarget = useRef<string | null>(null)
   const [expandedDir, setExpandedDir] = useState<string | null>(null)
   const [worktreesModalCwd, setWorktreesModalCwd] = useState<string | null>(null)
   const [cleanupWorktree, setCleanupWorktree] = useState<{
@@ -330,33 +333,39 @@ export function Sidebar({
 
   const handleClickSession = async (info: SessionInfo): Promise<void> => {
     const routingId = info.sessionId
-    // Bump the selection token first, so any in-flight slower load for a prior
-    // click sees a newer token after its awaits and bails before committing.
-    const seq = ++selectionSeq.current
+    // Name the selection first, so any in-flight slower load for a prior click sees
+    // it moved on after its awaits and bails before committing. A target (not a
+    // counter): clicking back to a session whose load is still running re-adopts
+    // that load instead of restarting it.
+    selectionTarget.current = routingId
     // Already loaded and still resident? An evicted entry that is idle is
     // re-hydrated from disk below, exactly like a never-loaded session. An evicted
     // one that is LIVE is resident: the live fold and `loadResumedTranscript` own it,
-    // and a load here would stamp it historical.
+    // and a load here would stamp it historical. One whose load is already running
+    // counts as resident too: it opens on its loading view and the load lands in it.
     const inMemory = useSessionStore.getState().sessions[routingId]
-    if (opensResident(inMemory)) {
+    if (opensResident(inMemory) || isTranscriptLoadInFlight(routingId)) {
       switchSession(routingId)
       if (isMobile && onToggleCollapse) onToggleCollapse()
       return
     }
 
-    // The per-engine load (opencode / pi / codex / Claude + subagent files) is
-    // shared with the post-hydrate reload of the active session.
-    const result = await loadSessionIntoStore(info, {
-      isCurrent: () => seq === selectionSeq.current,
-      onCodexError: setHistoryError,
-      replace: replaceOnClick(inMemory)
-    })
-    // `declined` kept the held transcript (the read failed or came back empty):
-    // the click still opens it, and the entry stays evicted so the next click retries.
-    if (result === 'skipped') return
+    // Navigate first (ADR-102): a placeholder entry renders the loading view while
+    // the transcript is read, instead of the sidebar sitting dead for seconds. The
+    // per-engine load (opencode / pi / codex / Claude + subagent files) is shared
+    // with the post-hydrate reload of the active session.
+    const replace = replaceOnClick(inMemory)
+    beginTranscriptPlaceholder(info)
     switchSession(routingId)
     // Close drawer on mobile after selecting a session
     if (isMobile && onToggleCollapse) onToggleCollapse()
+    // `declined` kept the held transcript (the read failed or came back empty): the
+    // entry stays evicted so the next click retries. A failure shows Retry.
+    await loadClickedSession(info, {
+      isCurrent: () => selectionTarget.current === routingId,
+      onCodexError: setHistoryError,
+      replace
+    })
   }
 
   const handleDirClick = (projectKey: string): void => {

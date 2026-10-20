@@ -3,11 +3,14 @@ import type {
   ApprovalDecision,
   AttachmentUpload,
   ClaudeAPI,
+  LoadSessionHistoryOptions,
   PermissionSuggestion,
   ProxySettings
 } from '../shared/types'
 import { buildMockupUrl } from '../shared/mockup-url'
 import { verifierHooksEnabled } from '../shared/verifier-hooks'
+import { INVOKE_PROGRESS_EVENT, INVOKE_WITH_PROGRESS_CHANNEL } from '../shared/progress-throttle'
+import type { InvokeProgress } from '../shared/remote-protocol'
 
 /**
  * Factory for IPC event handler registration.
@@ -72,6 +75,42 @@ async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
     return result.data as T
   }
   return result as T
+}
+
+// ---------------------------------------------------------------------------
+// Invoke with progress (ADR-102)
+// ---------------------------------------------------------------------------
+//
+// `ipcRenderer.invoke` resolves once, so a call that reports progress rides the
+// `invoke:with-progress` channel and gets `invoke:progress (callId, p)` messages
+// from main, routed here to the call's own callback. INTERNAL: deliberately NOT a
+// member of `api` / not exposed on contextBridge — only the named wrappers below
+// (`loadSessionHistory`) are, so the main world cannot pick the channel.
+
+const progressListeners = new Map<string, (progress: InvokeProgress) => void>()
+let progressCallSeq = 0
+
+ipcRenderer.on(INVOKE_PROGRESS_EVENT, (_event, callId: unknown, progress: InvokeProgress) => {
+  if (typeof callId !== 'string') return
+  try {
+    progressListeners.get(callId)?.(progress)
+  } catch {
+    // A throwing listener must not break the router for every other call.
+  }
+})
+
+async function invokeWithProgress<T>(
+  channel: string,
+  args: unknown[],
+  onProgress: (progress: InvokeProgress) => void
+): Promise<T> {
+  const callId = `${++progressCallSeq}`
+  progressListeners.set(callId, onProgress)
+  try {
+    return (await ipcRenderer.invoke(INVOKE_WITH_PROGRESS_CHANNEL, callId, channel, ...args)) as T
+  } finally {
+    progressListeners.delete(callId)
+  }
 }
 
 const api: ClaudeAPI = {
@@ -164,8 +203,30 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:load-opencode-history', sessionId),
   listPiSessionsGlobal: () => ipcRenderer.invoke('session:list-pi'),
   loadPiHistory: (sessionId: string) => ipcRenderer.invoke('session:load-pi-history', sessionId),
-  loadSessionHistory: (sessionId: string, projectKey: string, resumeSessionAt?: string) =>
-    ipcRenderer.invoke('session:load-history', sessionId, projectKey, resumeSessionAt),
+  loadSessionHistory: (
+    sessionId: string,
+    projectKey: string,
+    resumeSessionAt?: string,
+    onProgress?: (progress: InvokeProgress) => void,
+    options?: LoadSessionHistoryOptions
+  ) => {
+    // The options ride as a 4th wire arg only when given: a call without them is
+    // the exact 3-arg invoke an older host understands.
+    const wireArgs = options
+      ? [sessionId, projectKey, resumeSessionAt, options]
+      : [sessionId, projectKey, resumeSessionAt]
+    return onProgress
+      ? invokeWithProgress('session:load-history', wireArgs, onProgress)
+      : ipcRenderer.invoke('session:load-history', ...wireArgs)
+  },
+  loadSessionStatusLine: (
+    sessionId: string,
+    projectKey: string,
+    onProgress?: (progress: InvokeProgress) => void
+  ) =>
+    onProgress
+      ? invokeWithProgress('session:load-status-line', [sessionId, projectKey], onProgress)
+      : ipcRenderer.invoke('session:load-status-line', sessionId, projectKey),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>
     ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
   getBlob: (blobId: string) => ipcRenderer.invoke('blob:get', blobId),

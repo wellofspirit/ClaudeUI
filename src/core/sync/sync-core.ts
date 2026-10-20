@@ -235,6 +235,11 @@ export class SyncCore {
     return this.ring.currentSeq()
   }
 
+  /** Seq of the oldest event the ring still holds (null when empty) — the `SyncStats` log line reads it. */
+  oldestSeq(): number | null {
+    return this.ring.oldestSeq()
+  }
+
   getAfter(seq: number): EventEntry[] | null {
     return this.ring.getAfter(seq)
   }

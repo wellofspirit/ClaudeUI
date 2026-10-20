@@ -157,13 +157,30 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         ClaudeAPI['loadPiHistory']
       >,
 
-    loadSessionHistory: (sessionId, projectKey, resumeSessionAt) =>
-      connection.invoke(
-        'session:load-history',
-        sessionId,
-        projectKey,
-        resumeSessionAt
-      ) as ReturnType<ClaudeAPI['loadSessionHistory']>,
+    // The progress path only when a callback is given (ADR-102); otherwise the
+    // plain invoke, so every other caller is unchanged. The options ride as a
+    // 4th wire arg only when given: no options is the exact 3-arg call.
+    loadSessionHistory: (sessionId, projectKey, resumeSessionAt, onProgress, options) => {
+      const wireArgs = options
+        ? [sessionId, projectKey, resumeSessionAt, options]
+        : [sessionId, projectKey, resumeSessionAt]
+      return (
+        onProgress
+          ? connection.invokeWithProgress('session:load-history', wireArgs, onProgress)
+          : connection.invoke('session:load-history', ...wireArgs)
+      ) as ReturnType<ClaudeAPI['loadSessionHistory']>
+    },
+
+    loadSessionStatusLine: (sessionId, projectKey, onProgress) =>
+      (onProgress
+        ? connection.invokeWithProgress(
+            'session:load-status-line',
+            [sessionId, projectKey],
+            onProgress
+          )
+        : connection.invoke('session:load-status-line', sessionId, projectKey)) as ReturnType<
+        ClaudeAPI['loadSessionStatusLine']
+      >,
 
     loadSubagentHistory: (sessionId, projectKey, agentId) =>
       connection.invoke(

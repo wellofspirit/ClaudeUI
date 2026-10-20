@@ -12,9 +12,11 @@ import type {
   StatusLineData,
   ForkAnchorResult,
   ModelCostEntry,
-  EngineId
+  EngineId,
+  SubagentIndexEntry
 } from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
+import type { InvokeProgress, SessionHistoryPhase } from '../../shared/remote-protocol'
 import { logger } from './logger'
 import { isPathInside } from './path-containment'
 import { getContextWindowSize } from './context-window'
@@ -30,6 +32,7 @@ import { blobStore } from './blob-store'
 import {
   agentIdOf,
   foldAgentIdentity,
+  readAgentSidecar,
   readNestedAgentOrigins,
   type TranscriptAgentEvent,
   type TranscriptTerminal
@@ -201,6 +204,25 @@ interface ModelTokenAgg {
 }
 
 /**
+ * Report the raw bytes a read stream pulls from disk, as deltas, so a caller can
+ * drive a progress bar without a second pass. Reads `stream.bytesRead` (the
+ * counter for raw file bytes — the stream decodes to strings, so chunk lengths
+ * would be wrong for multi-byte text). A no-op without a callback, which keeps
+ * every progress-less read byte-for-byte what it was.
+ */
+function countBytes(stream: fs.ReadStream, onBytes?: (delta: number) => void): void {
+  if (!onBytes) return
+  let last = 0
+  stream.on('data', () => {
+    const now = stream.bytesRead
+    if (now > last) {
+      onBytes(now - last)
+      last = now
+    }
+  })
+}
+
+/**
  * Fold one parsed transcript line's assistant usage into the shared per-model
  * cost map (Slice B state) — factored out so the SAME accumulation (and the
  * same `seenMessageIds` dedup set) can be applied to both the main transcript
@@ -250,7 +272,8 @@ function foldAssistantCostLine(
 function foldSubagentFile(
   filePath: string,
   modelTokens: Map<string, ModelTokenAgg>,
-  seenMessageIds: Set<string>
+  seenMessageIds: Set<string>,
+  onBytes?: (delta: number) => void
 ): Promise<void> {
   return new Promise((resolve) => {
     let stream: fs.ReadStream
@@ -262,6 +285,7 @@ function foldSubagentFile(
       return
     }
     const rl = readline.createInterface({ input: stream })
+    countBytes(stream, onBytes)
     rl.on('line', (line) => {
       try {
         const data = JSON.parse(line)
@@ -298,7 +322,9 @@ async function foldSubagentCosts(
   modelTokens: Map<string, ModelTokenAgg>,
   seenMessageIds: Set<string>,
   /** Fold only these agents (a fork's anchor-truncated figures); absent = all. */
-  onlyAgentIds?: ReadonlySet<string>
+  onlyAgentIds?: ReadonlySet<string>,
+  /** Raw bytes read, as deltas (progress); see {@link countBytes}. */
+  onBytes?: (delta: number) => void
 ): Promise<void> {
   const subagentsDir = path.join(
     path.dirname(filePath),
@@ -321,7 +347,7 @@ async function foldSubagentCosts(
     .sort()
 
   for (const f of agentFiles) {
-    await foldSubagentFile(path.join(subagentsDir, f), modelTokens, seenMessageIds)
+    await foldSubagentFile(path.join(subagentsDir, f), modelTokens, seenMessageIds, onBytes)
   }
 }
 
@@ -340,9 +366,17 @@ async function foldSubagentCosts(
 export async function computeTokenMetrics(
   filePath: string,
   model?: string,
-  resumeSessionAt?: string
+  resumeSessionAt?: string,
+  /** Raw bytes read (this file, then each subagent file), as deltas — progress only. */
+  onBytes?: (delta: number) => void
 ): Promise<StatusLineData> {
-  const empty: StatusLineData = {
+  if (!fs.existsSync(filePath)) return emptyStatusLine()
+  const fold = await memoizedTokenFold(filePath, resumeSessionAt, onBytes)
+  return fold ? deriveTokenMetrics(fold, model) : emptyStatusLine()
+}
+
+function emptyStatusLine(): StatusLineData {
+  return {
     totalCostUsd: 0,
     totalDurationMs: 0,
     totalApiDurationMs: 0,
@@ -355,9 +389,194 @@ export async function computeTokenMetrics(
     remainingPercentage: null,
     modelCosts: []
   }
+}
 
-  if (!fs.existsSync(filePath)) return empty
+/**
+ * Everything {@link computeTokenMetrics} folds out of a transcript BEFORE the
+ * caller's `model` matters: the token sums, the per-model token aggregate (main
+ * file plus every subagent file, message-id deduplicated), the turn-span total
+ * and the latest main-chain usage. The caller's `model` only sizes the context
+ * window when the transcript names no model, so this is the part worth caching;
+ * {@link deriveTokenMetrics} adds the model-dependent rest per call.
+ */
+interface TokenFold {
+  inputTokens: number
+  outputTokens: number
+  cachedTokens: number
+  /** Cost from `result` lines (dead in real transcripts; see the fold). */
+  resultCostUsd: number
+  apiDurationMs: number
+  contextLength: number
+  /** Resolved id of the latest main-chain assistant; wins over the caller's alias. */
+  transcriptModel: string | undefined
+  durationMs: number
+  modelTokens: Map<string, ModelTokenAgg>
+}
 
+function deriveTokenMetrics(fold: TokenFold, model?: string): StatusLineData {
+  const totalTokens = fold.inputTokens + fold.outputTokens + fold.cachedTokens
+  // Prefer the transcript's resolved id over the caller-supplied alias.
+  const effectiveModel = fold.transcriptModel ?? model
+  const ctxWindow = effectiveModel ? getContextWindowSize(effectiveModel) : 200_000
+  const usedPercentage =
+    fold.contextLength > 0 ? Math.round((fold.contextLength / ctxWindow) * 100) : null
+  const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
+
+  // Per-model cost reconstruction: real Claude transcripts carry no cost
+  // figure at all (see the dead `result` branch in the fold), so this
+  // pricing-table recompute is the effective source for both modelCosts and
+  // totalCostUsd. Acceptable imprecision: this is pricing-table math against
+  // historical tokens, while a live session's cost comes from cli.js's
+  // authoritative costUSD (see claude-session.ts's costBaseUsd/liveTotalCostUsd
+  // seam).
+  let totalCostUsd = fold.resultCostUsd
+  const modelCosts: ModelCostEntry[] = []
+  for (const [modelId, agg] of fold.modelTokens) {
+    const costUsd = calculateCostFromTokens(
+      modelId,
+      agg.input,
+      agg.output,
+      agg.cacheCreation,
+      agg.cacheCreation1h,
+      agg.cacheRead
+    )
+    modelCosts.push({ engineId: 'claude', modelId, costUsd })
+    totalCostUsd += costUsd
+  }
+
+  return {
+    totalCostUsd,
+    totalDurationMs: fold.durationMs,
+    totalApiDurationMs: fold.apiDurationMs,
+    totalInputTokens: fold.inputTokens,
+    totalOutputTokens: fold.outputTokens,
+    cachedTokens: fold.cachedTokens,
+    totalTokens,
+    contextWindow: { used: fold.contextLength, size: ctxWindow },
+    usedPercentage,
+    remainingPercentage,
+    modelCosts
+  }
+}
+
+// ─── Token-fold memo ─────────────────────────────────────────────────────────
+// A reopened session's transcript (and its subagent files) is folded up to three
+// times before anyone types: the ADR-102 background status pass, the spawn's
+// resume seed, and — on a respawn — again. On the owner's sessions each pass is
+// 0.6–1.2 s of re-reading hundreds of MB, so the memo makes the second and third
+// free. Entries are valid only while EVERY input file looks unchanged (size +
+// mtime + inode, and the exact subagent set) — a stat signature, not a content
+// hash: a same-size rewrite that restores the mtime would be served stale, which
+// cli.js (it only appends) never does; anything else folds again from scratch.
+// cli.js was probed to append nothing between spawn and the first prompt (it
+// writes `mode` / `cost-state` lines at exit), so there is no append-only case
+// worth folding incrementally.
+
+const TOKEN_FOLD_MEMO_MAX = 8
+const tokenFoldMemo = new Map<string, { signature: string; fold: TokenFold }>()
+/**
+ * Folds still reading, so a second caller for the same key joins instead of
+ * re-reading the same hundreds of MB: the status pass can still be folding when
+ * the user sends and the resume reconcile folds the same files. Cleared when the
+ * fold settles.
+ */
+const tokenFoldInFlight = new Map<
+  string,
+  { signature: string; promise: Promise<TokenFold | null> }
+>()
+
+/** @internal Test seam: drop every memoized and in-flight fold. */
+export function clearTokenFoldMemo(): void {
+  tokenFoldMemo.clear()
+  tokenFoldInFlight.clear()
+}
+
+/** @internal Entry count, for the LRU bound test. */
+export function tokenFoldMemoSize(): number {
+  return tokenFoldMemo.size
+}
+
+/**
+ * Identity of a transcript's inputs: the main file and the sorted
+ * `subagents/agent-*.jsonl` set. A few stats — no content read. `bytes` is the
+ * size to report as progress on a hit; null when the main file cannot be stat'ed.
+ */
+function transcriptSignature(filePath: string): { signature: string; bytes: number } | null {
+  let st: fs.Stats
+  try {
+    st = fs.statSync(filePath)
+  } catch {
+    return null
+  }
+  const subagents = statSubagentFiles(filePath)
+  const parts = [...subagents]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([id, f]) => `${id}:${f.bytes}:${f.mtimeMs}`)
+  return {
+    signature: `${st.ino}:${st.size}:${st.mtimeMs}|${parts.join(',')}`,
+    bytes: st.size + sumBytes(subagents)
+  }
+}
+
+/**
+ * The fold, from the memo when the inputs are unchanged, or by joining the fold
+ * already reading them (same key AND same signature; a different signature means
+ * the files moved, so that caller folds for itself). A joiner reports the total
+ * bytes to its own `onBytes` once, on completion — exactly like a hit — and shares
+ * the leader's outcome, including a failed read (null: the caller falls back to the
+ * empty line). Only a COMPLETE read is stored: a failed one resolves null (never
+ * cached), and a read whose inputs changed while it ran (a live transcript) is
+ * returned but not stored, since its signature would describe a file the fold did
+ * not see.
+ */
+async function memoizedTokenFold(
+  filePath: string,
+  resumeSessionAt: string | undefined,
+  onBytes?: (delta: number) => void
+): Promise<TokenFold | null> {
+  const key = `${filePath}\0${resumeSessionAt ?? ''}`
+  const before = transcriptSignature(filePath)
+  const hit = before ? tokenFoldMemo.get(key) : undefined
+  if (before && hit?.signature === before.signature) {
+    tokenFoldMemo.delete(key)
+    tokenFoldMemo.set(key, hit) // most recently used goes last
+    onBytes?.(before.bytes)
+    return hit.fold
+  }
+  const flying = before ? tokenFoldInFlight.get(key) : undefined
+  if (before && flying?.signature === before.signature) {
+    const joined = await flying.promise
+    if (joined) onBytes?.(before.bytes)
+    return joined
+  }
+  tokenFoldMemo.delete(key)
+  const promise = foldTranscriptTokens(filePath, resumeSessionAt, onBytes)
+  const entry = before ? { signature: before.signature, promise } : null
+  if (entry) tokenFoldInFlight.set(key, entry)
+  let fold: TokenFold | null
+  try {
+    fold = await promise
+  } finally {
+    // Only our own entry: a caller with a different signature may have replaced it.
+    if (entry && tokenFoldInFlight.get(key) === entry) tokenFoldInFlight.delete(key)
+  }
+  if (fold && before && transcriptSignature(filePath)?.signature === before.signature) {
+    tokenFoldMemo.set(key, { signature: before.signature, fold })
+    while (tokenFoldMemo.size > TOKEN_FOLD_MEMO_MAX) {
+      const oldest = tokenFoldMemo.keys().next().value
+      if (oldest === undefined) break
+      tokenFoldMemo.delete(oldest)
+    }
+  }
+  return fold
+}
+
+/** One uncached read of the main transcript and its subagent files; null on a read error. */
+function foldTranscriptTokens(
+  filePath: string,
+  resumeSessionAt: string | undefined,
+  onBytes?: (delta: number) => void
+): Promise<TokenFold | null> {
   return new Promise((resolve) => {
     let inputTokens = 0
     let outputTokens = 0
@@ -393,6 +612,7 @@ export async function computeTokenMetrics(
 
     const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     const rl = readline.createInterface({ input: stream })
+    countBytes(stream, onBytes)
 
     rl.on('line', (line) => {
       if (pastAnchor) return
@@ -454,64 +674,33 @@ export async function computeTokenMetrics(
           (mostRecentMainChainUsage.cache_creation_input_tokens ?? 0)
       }
 
-      const totalTokens = inputTokens + outputTokens + cachedTokens
-      // Prefer the transcript's resolved id over the caller-supplied alias.
-      const effectiveModel = transcriptModel ?? model
-      const ctxWindow = effectiveModel ? getContextWindowSize(effectiveModel) : 200_000
-      const usedPercentage =
-        contextLength > 0 ? Math.round((contextLength / ctxWindow) * 100) : null
-      const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
-      // Turn-span reconstruction is the sole source for totalDurationMs — see
-      // the createTurnSpanAccumulator doc comment for why.
-      const totalDurationMs = turnSpanAcc.total()
-
-      // Per-model cost reconstruction: real Claude transcripts carry no cost
-      // figure at all (see the dead `result` branch above), so this pricing-table
-      // recompute is the effective source for both modelCosts and totalCostUsd.
-      // Acceptable imprecision: this is pricing-table math against historical
-      // tokens, while a live session's cost comes from cli.js's authoritative
-      // costUSD (see claude-session.ts's costBaseUsd/liveTotalCostUsd seam).
-      //
       // Task-tool subagent spend lives in separate transcript files (see
       // foldSubagentCosts's doc comment) — fold it into the same modelTokens
-      // map before deriving modelCosts/totalCostUsd below.
+      // map before the caller derives modelCosts/totalCostUsd from it.
       await foldSubagentCosts(
         filePath,
         modelTokens,
         seenMessageIds,
-        anchorFound ? keptAgentIds : undefined
+        anchorFound ? keptAgentIds : undefined,
+        onBytes
       )
 
-      const modelCosts: ModelCostEntry[] = []
-      for (const [modelId, agg] of modelTokens) {
-        const costUsd = calculateCostFromTokens(
-          modelId,
-          agg.input,
-          agg.output,
-          agg.cacheCreation,
-          agg.cacheCreation1h,
-          agg.cacheRead
-        )
-        modelCosts.push({ engineId: 'claude', modelId, costUsd })
-        totalCostUsd += costUsd
-      }
-
       resolve({
-        totalCostUsd,
-        totalDurationMs,
-        totalApiDurationMs,
-        totalInputTokens: inputTokens,
-        totalOutputTokens: outputTokens,
+        inputTokens,
+        outputTokens,
         cachedTokens,
-        totalTokens,
-        contextWindow: { used: contextLength, size: ctxWindow },
-        usedPercentage,
-        remainingPercentage,
-        modelCosts
+        resultCostUsd: totalCostUsd,
+        apiDurationMs: totalApiDurationMs,
+        contextLength,
+        transcriptModel,
+        // Turn-span reconstruction is the sole source for totalDurationMs — see
+        // the createTurnSpanAccumulator doc comment for why.
+        durationMs: turnSpanAcc.total(),
+        modelTokens
       })
     })
 
-    rl.on('error', () => resolve(empty))
+    rl.on('error', () => resolve(null))
   })
 }
 
@@ -814,6 +1003,14 @@ function parseSessionMeta(filePath: string): Promise<SessionMeta | null> {
   })
 }
 
+/** Knobs of one {@link loadSessionHistory} read (everything but the fork anchor). */
+export interface LoadHistoryOptions {
+  /** Byte progress of the read (ADR-102); the plan is on {@link loadSessionHistory}. */
+  onProgress?: (progress: InvokeProgress) => void
+  /** Skip the cost/token pass: `statusLine` is `null` (see {@link loadSessionStatusLine}). */
+  deferStatusLine?: boolean
+}
+
 export interface SessionHistoryResult {
   messages: ChatMessage[]
   taskNotifications: TaskNotification[]
@@ -840,6 +1037,22 @@ export interface SessionHistoryResult {
    * every other engine.
    */
   lastEffort?: string | null
+  /**
+   * Claude only: every subagent the main transcript (or a sidecar) mapped to an
+   * origin tool_use id, BY that id — size, recency, parent and sidecar names
+   * (see {@link SubagentIndexEntry}) for the renderer's per-agent fetches, which
+   * it plans and weights without reading them. Built when the read finishes
+   * (sidecars + file stats), so it is null-prototype: an id is data, never a key
+   * that could shadow `__proto__`.
+   */
+  subagentIndex?: Record<string, SubagentIndexEntry>
+  /**
+   * Claude only: mtime (ms) of the main transcript when the read STARTED —
+   * before any byte was read, so a cache keyed on it can only be too old, never
+   * claim a state newer than the one it holds. Absent when the file could not be
+   * stat'ed.
+   */
+  transcriptMtimeMs?: number
   /**
    * Warnings worth resurfacing when the session is reopened — currently the
    * model_refusal_fallback / model_fallback system entries (the model swap is
@@ -1017,6 +1230,214 @@ export async function resolveForkAnchor(
   return anchorUuid ? { anchorUuid } : { anchorUuid: null, reason: 'message-not-found' }
 }
 
+function statBytes(filePath: string): number {
+  try {
+    return fs.statSync(filePath).size
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * Size and mtime of the `agent-<id>.jsonl` files under `<session>/subagents/` —
+ * the same set {@link foldSubagentCosts} reads and the renderer then fetches, by
+ * agentId. Best-effort: an unreadable directory or file simply contributes
+ * nothing.
+ */
+function statSubagentFiles(filePath: string): Map<string, { bytes: number; mtimeMs: number }> {
+  const out = new Map<string, { bytes: number; mtimeMs: number }>()
+  const dir = path.join(path.dirname(filePath), path.basename(filePath, '.jsonl'), 'subagents')
+  let files: string[]
+  try {
+    files = fs.readdirSync(dir)
+  } catch {
+    return out
+  }
+  for (const f of files) {
+    if (!f.startsWith('agent-') || !f.endsWith('.jsonl')) continue
+    try {
+      const st = fs.statSync(path.join(dir, f))
+      out.set(f.slice('agent-'.length, -'.jsonl'.length), { bytes: st.size, mtimeMs: st.mtimeMs })
+    } catch {
+      // vanished between the readdir and the stat: contributes nothing
+    }
+  }
+  return out
+}
+
+const sumBytes = (files: Map<string, { bytes: number }>): number => {
+  let n = 0
+  for (const f of files.values()) n += f.bytes
+  return n
+}
+
+/**
+ * The subagent index of one read: every agent the main transcript (or a nested
+ * agent's sidecar, already folded into `agentIdToToolUseId`) mapped to an origin
+ * tool_use id, keyed by that id. An agent whose files are missing is still
+ * listed (`bytes: 0`, `order: 0`); an agent no mapping names is not (its
+ * transcript has no bucket to fill). A sidecar without a `toolUseId` (older CLIs,
+ * ~5% of real ones) reads as none: the agent keeps its mapping but has no parent
+ * or names. Null-prototype: the keys are transcript data.
+ */
+function buildSubagentIndex(
+  filePath: string,
+  agentIdToToolUseId: Record<string, string>,
+  files: Map<string, { bytes: number; mtimeMs: number }>
+): Record<string, SubagentIndexEntry> {
+  const index: Record<string, SubagentIndexEntry> = Object.create(null)
+  for (const [agentId, toolUseId] of Object.entries(agentIdToToolUseId)) {
+    const file = files.get(agentId)
+    const sidecar = readAgentSidecar(filePath, agentId)
+    const parentToolUseId = sidecar?.parentAgentId
+      ? (agentIdToToolUseId[sidecar.parentAgentId] ?? null)
+      : null
+    const entry: SubagentIndexEntry = {
+      agentId,
+      parentToolUseId,
+      bytes: file?.bytes ?? 0,
+      order: file?.mtimeMs ?? 0,
+      ...(sidecar?.name ? { name: sidecar.name } : {}),
+      ...(sidecar?.description ? { description: sidecar.description } : {}),
+      ...(sidecar?.agentType ? { agentType: sidecar.agentType } : {})
+    }
+    // Two agents under one origin id is not something cli.js writes; if it ever
+    // happens the newer transcript speaks for the bucket.
+    const existing = index[toolUseId]
+    if (!existing || entry.order > existing.order) index[toolUseId] = entry
+  }
+  return index
+}
+
+/**
+ * The byte plan of one history read (see the PROGRESS docs on
+ * {@link loadSessionHistory} and {@link loadSessionStatusLine}). The stream
+ * callbacks take byte DELTAS; each pass is clamped to its own budget and `done`
+ * only ever rises.
+ *
+ *  - `full`    total 2M + 2S: pass 1, metrics pass, cost fold, the client's fetches
+ *  - `content` total M: the transcript pass alone (`deferStatusLine`)
+ *  - `status`  total M + S: the metrics pass and the cost fold alone
+ */
+type HistoryPlan =
+  | { kind: 'full'; mainBytes: number; subagentBytes: number }
+  | { kind: 'content'; mainBytes: number }
+  | { kind: 'status'; mainBytes: number; subagentBytes: number }
+
+function createHistoryProgress(
+  onProgress: (progress: InvokeProgress) => void,
+  plan: HistoryPlan
+): {
+  start(): void
+  transcript(delta: number): void
+  costs(delta: number): void
+  finish(): void
+} {
+  const main = plan.mainBytes
+  const sub = plan.kind === 'content' ? 0 : plan.subagentBytes
+  const total =
+    plan.kind === 'full' ? 2 * main + 2 * sub : plan.kind === 'status' ? main + sub : main
+  // Where the cost passes start on the bar, and the phase the plan opens in.
+  const costBase = plan.kind === 'full' ? main : 0
+  const startPhase: SessionHistoryPhase = plan.kind === 'status' ? 'costs' : 'transcript'
+  const costBudget = main + sub
+  let transcriptDone = 0
+  let costsDone = 0
+  const emit = (phase: SessionHistoryPhase, next: number): void => {
+    const done = Math.min(total, next)
+    onProgress({ done, total, phase })
+  }
+  return {
+    start: () => emit(startPhase, 0),
+    transcript(delta) {
+      transcriptDone = Math.min(main, transcriptDone + delta)
+      emit('transcript', transcriptDone)
+    },
+    costs(delta) {
+      costsDone = Math.min(costBudget, costsDone + delta)
+      emit('costs', costBase + costsDone)
+    },
+    // A fork-anchored read skips agents, and a vanished file under-reads: land
+    // exactly where this call's own work ends (`full`: where the caller's own
+    // fetches take over; `content`/`status`: the end of the bar).
+    finish: () =>
+      plan.kind === 'full'
+        ? emit('costs', 2 * main + sub)
+        : plan.kind === 'status'
+          ? emit('costs', total)
+          : emit('transcript', total)
+  }
+}
+
+/**
+ * The status line of a transcript: its token / cost / duration / context
+ * figures (`computeTokenMetrics`, which also folds every subagent file's spend)
+ * plus the durable dispatched-cost rows. ONE function behind both the full
+ * {@link loadSessionHistory} and {@link loadSessionStatusLine}, so a deferred
+ * read followed by the status channel is exactly the read it replaces.
+ */
+async function computeStatusLine(
+  filePath: string,
+  sessionId: string,
+  resumeSessionAt?: string,
+  onBytes?: (delta: number) => void
+): Promise<StatusLineData> {
+  // A fork's figures stop at its anchor, like the messages.
+  const statusLine = await computeTokenMetrics(filePath, undefined, resumeSessionAt, onBytes)
+  // Slice C — merge durable dispatched-cost rows into the history-loaded
+  // status line. A reopened session that hasn't spawned a ClaudeSession
+  // yet has no seedDispatchedCosts() run for it, and computeTokenMetrics
+  // only knows the transcript — without this merge the tooltip would show
+  // dispatched spend only after the first prompt. Best-effort: a DB
+  // failure must never break history loading.
+  try {
+    const dispatched = dispatchedCostsByRouting(sessionId)
+    if (dispatched.length > 0) {
+      statusLine.modelCosts = [
+        ...(statusLine.modelCosts ?? []),
+        ...dispatched.map((d) => ({
+          engineId: d.targetEngine as EngineId,
+          modelId: d.targetModel,
+          costUsd: d.costUsd,
+          dispatched: true as const
+        }))
+      ]
+    }
+  } catch (err) {
+    logger.warn('SessionHistory', 'Failed to merge dispatched costs into status line', err)
+  }
+  return statusLine
+}
+
+/**
+ * The status line of a Claude session by itself (`session:load-status-line`) —
+ * the pass a `deferStatusLine` read skips, with the result the full read would
+ * have returned. Always the whole transcript (no fork anchor: anchored callers
+ * stay on the full read).
+ *
+ * PROGRESS (ADR-102). With `onProgress`, total = M + S (M = main transcript
+ * bytes, the metrics pass; S = bytes of every `subagents/agent-*.jsonl`, the cost
+ * fold), phase `costs`; first report `done: 0`, last `done = total`.
+ */
+export async function loadSessionStatusLine(
+  sessionId: string,
+  projectKey: string,
+  onProgress?: (progress: InvokeProgress) => void
+): Promise<StatusLineData> {
+  const filePath = path.join(CLAUDE_PROJECTS_DIR, projectKey, `${sessionId}.jsonl`)
+  const progress = onProgress
+    ? createHistoryProgress(onProgress, {
+        kind: 'status',
+        mainBytes: statBytes(filePath),
+        subagentBytes: sumBytes(statSubagentFiles(filePath))
+      })
+    : null
+  progress?.start()
+  const statusLine = await computeStatusLine(filePath, sessionId, undefined, progress?.costs)
+  progress?.finish()
+  return statusLine
+}
+
 /**
  * Load full conversation history from a JSONL session file.
  * Converts SDK messages to ChatMessage[] and extracts TaskNotification[].
@@ -1034,13 +1455,58 @@ export async function resolveForkAnchor(
  * truncated prefix. An unknown anchor (not in this file) truncates nothing, which
  * is the pre-existing behavior and the only safe fallback: showing too much beats
  * showing an empty conversation.
+ *
+ * PROGRESS (ADR-102). With `options.onProgress`, the read reports raw bytes,
+ * planned over the WHOLE load including the caller's later per-agent fetches.
+ * With M = bytes of the main transcript and S = bytes of every
+ * `subagents/agent-*.jsonl`:
+ *
+ *   total = 2*M + 2*S
+ *     pass 1 over the main file ........ M   (phase `transcript`)
+ *     metrics pass over the main file ... M   (phase `costs`)
+ *     cost fold over the subagent files . S   (phase `costs`)
+ *     the caller's subagent fetches ..... S   (reported by the caller, sized by
+ *                                              `subagentIndex[...].bytes`)
+ *
+ * The first report is `done: 0` with the final `total`, so a bar never has to
+ * be re-scaled; this function's LAST report is `done = 2*M + S` (not `total`):
+ * the caller continues from there and reaches `total` as its fetches land. Each
+ * pass is clamped to its own budget (a live file can grow between the stat and
+ * the read), and `done` never decreases. The transport adds a `sending` phase
+ * after this returns.
+ *
+ * `options.deferStatusLine` (ADR-102 Arc 2) skips the cost/token pass entirely
+ * and returns `statusLine: null`; {@link loadSessionStatusLine} computes it
+ * later, identically. The plan is then the transcript pass alone: total = M,
+ * phase `transcript`, last report `done = M`. Everything else in the result —
+ * messages, notifications, the index — is what the full read returns.
  */
 export async function loadSessionHistory(
   sessionId: string,
   projectKey: string,
-  resumeSessionAt?: string
+  resumeSessionAt?: string,
+  options: LoadHistoryOptions = {}
 ): Promise<SessionHistoryResult> {
+  const { onProgress, deferStatusLine = false } = options
   const filePath = path.join(CLAUDE_PROJECTS_DIR, projectKey, `${sessionId}.jsonl`)
+  // Both stat'ed BEFORE the first byte is read (see `transcriptMtimeMs`).
+  const subagentFiles = statSubagentFiles(filePath)
+  let transcriptMtimeMs: number | undefined
+  try {
+    transcriptMtimeMs = fs.statSync(filePath).mtimeMs
+  } catch {
+    // missing file: the read below resolves empty
+  }
+  const mainBytes = statBytes(filePath)
+  const progress = onProgress
+    ? createHistoryProgress(
+        onProgress,
+        deferStatusLine
+          ? { kind: 'content', mainBytes }
+          : { kind: 'full', mainBytes, subagentBytes: sumBytes(subagentFiles) }
+      )
+    : null
+  progress?.start()
 
   return new Promise((resolve) => {
     const messages: ChatMessage[] = []
@@ -1133,6 +1599,7 @@ export async function loadSessionHistory(
     }
 
     const rl = readline.createInterface({ input: stream })
+    countBytes(stream, progress?.transcript)
 
     rl.on('line', (line) => {
       if (pastAnchor) return
@@ -1593,37 +2060,20 @@ export async function loadSessionHistory(
         })
       }
 
-      // A fork's figures stop at its anchor, like the messages above.
-      const statusLine = await computeTokenMetrics(filePath, undefined, resumeSessionAt)
-      // Slice C — merge durable dispatched-cost rows into the history-loaded
-      // status line. A reopened session that hasn't spawned a ClaudeSession
-      // yet has no seedDispatchedCosts() run for it, and computeTokenMetrics
-      // only knows the transcript — without this merge the tooltip would show
-      // dispatched spend only after the first prompt. Best-effort: a DB
-      // failure must never break history loading.
-      try {
-        const dispatched = dispatchedCostsByRouting(sessionId)
-        if (dispatched.length > 0) {
-          statusLine.modelCosts = [
-            ...(statusLine.modelCosts ?? []),
-            ...dispatched.map((d) => ({
-              engineId: d.targetEngine as EngineId,
-              modelId: d.targetModel,
-              costUsd: d.costUsd,
-              dispatched: true as const
-            }))
-          ]
-        }
-      } catch (err) {
-        logger.warn('SessionHistory', 'Failed to merge dispatched costs into status line', err)
-      }
+      const statusLine = deferStatusLine
+        ? null
+        : await computeStatusLine(filePath, sessionId, resumeSessionAt, progress?.costs)
+      const subagentIndex = buildSubagentIndex(filePath, agentIdToToolUseId, subagentFiles)
+      progress?.finish()
       resolve({
         messages,
         taskNotifications,
         customTitle,
         agentIdToToolUseId,
         statusLine,
-        warnings
+        warnings,
+        subagentIndex,
+        ...(transcriptMtimeMs !== undefined ? { transcriptMtimeMs } : {})
       })
     })
     rl.on('error', () =>
