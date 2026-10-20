@@ -7,6 +7,7 @@ import * as fs from 'node:fs'
 import { WebSocketServer, WebSocket } from 'ws'
 import { getAppPath, serveHostMockup, type HostWindowHandle } from '../host'
 import { syncCore, addSyncSubscriber, addStreamSubscriber } from './sync-host'
+import { logWsFullSync, logFullSyncBreakdown, type FrameSent } from './sync-stats-log'
 import { RemoteDispatcher } from './remote-dispatcher'
 import {
   AUTH_OFF_GRANTS,
@@ -5001,13 +5002,23 @@ export class RemoteServer {
     // fetch, and the desktop reads those files through IPC.
     const decision = this.core.answerSync(lastSeq, epoch)
     if (decision.kind === 'full') {
-      this.sendTo(ws, {
-        type: 'sync-full',
-        state: decision.state,
-        epoch: decision.epoch,
-        mockupToken: this.mockupToken || undefined,
-        fileToken: this.fileToken || undefined
-      })
+      // `SyncStats` measurement (sync-core.md § Measuring a full sync): the frame
+      // line comes from the send callback, because under E2E the size is only
+      // known after the async encrypt. The opt-in breakdown runs right after the
+      // send is queued: on plaintext the frame is already out, under E2E its extra
+      // serialization runs before the queued encrypt (diagnostic-only cost).
+      this.sendTo(
+        ws,
+        {
+          type: 'sync-full',
+          state: decision.state,
+          epoch: decision.epoch,
+          mockupToken: this.mockupToken || undefined,
+          fileToken: this.fileToken || undefined
+        },
+        (sent) => logWsFullSync(decision, { lastSeq, epoch }, this.core, sent)
+      )
+      logFullSyncBreakdown(decision)
       return
     }
     this.sendTo(ws, { type: 'sync-catchup', events: decision.events, epoch: decision.epoch })
@@ -5092,23 +5103,44 @@ export class RemoteServer {
    * matters for every refusal on an E2E origin: the frame is encrypted
    * asynchronously, and a synchronous close beside it would drop the reason.
    */
-  private sendOn(ws: WebSocket, channel: SocketChannel, msg: WsServerMessage): Promise<void> {
+  private sendOn(
+    ws: WebSocket,
+    channel: SocketChannel,
+    msg: WsServerMessage,
+    onSent?: (sent: FrameSent) => void
+  ): Promise<void> {
     if (ws.readyState !== WebSocket.OPEN) return Promise.resolve()
     const e2e = channel.e2e
     if (!e2e?.isReady) {
-      ws.send(JSON.stringify(msg))
+      const started = performance.now()
+      const payload = JSON.stringify(msg)
+      const encodeMs = performance.now() - started
+      ws.send(payload)
+      onSent?.({
+        bytes: Buffer.byteLength(payload),
+        encodeMs,
+        e2e: false,
+        bufferedAmount: ws.bufferedAmount
+      })
       return Promise.resolve()
     }
     const queued = channel.sendQueue.then(async () => {
       if (ws.readyState !== WebSocket.OPEN) return
+      let sent: FrameSent | null = null
       try {
-        ws.send(await e2e.encrypt(msg))
+        const started = performance.now()
+        const payload = await e2e.encrypt(msg)
+        const encodeMs = performance.now() - started
+        ws.send(payload)
+        sent = { bytes: payload.length, encodeMs, e2e: true, bufferedAmount: ws.bufferedAmount }
       } catch (err) {
         logger.error(
           'remote-server',
           `E2E encrypt failed: ${err instanceof Error ? err.message : String(err)}`
         )
       }
+      // Outside the try: a throwing observer is not an "encrypt failure".
+      if (sent) onSent?.(sent)
     })
     channel.sendQueue = queued
     return queued
@@ -5122,10 +5154,10 @@ export class RemoteServer {
    * so the plaintext fallback here is only ever reached for a frame racing a
    * socket that just went away.
    */
-  private sendTo(ws: WebSocket, msg: WsServerMessage): void {
+  private sendTo(ws: WebSocket, msg: WsServerMessage, onSent?: (sent: FrameSent) => void): void {
     const client = this.clients.get(ws)
     if (client) {
-      void this.sendOn(ws, client.channel, msg)
+      void this.sendOn(ws, client.channel, msg, onSent)
       return
     }
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))

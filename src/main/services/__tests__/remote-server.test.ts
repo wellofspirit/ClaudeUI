@@ -116,7 +116,9 @@ vi.mock('../../../core/services/logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn()
+    error: vi.fn(),
+    // `SyncStats` breakdown gate: off unless a test turns the source on.
+    isEnabled: vi.fn(() => false)
   }
 }))
 
@@ -170,6 +172,8 @@ import { registerCommand } from '../../../core/ipc/command-registry'
 import { GIT_WATCH_COMMAND } from '../../../core/ipc/git-watch'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
 import { emitEvent, syncCore } from '../../../core/services/sync-host'
+import { logger } from '../../../core/services/logger'
+import { LARGE_SYNC_FULL_BYTES } from '../../../core/services/sync-stats-log'
 import { makeTempGitRepo, type TempGitRepo } from '../../../test/helpers/temp-git-repo'
 import type { WsEvent } from '../../../shared/remote-protocol'
 import type { GitStatusData } from '../../../shared/types'
@@ -4223,5 +4227,201 @@ describe('RemoteServer — auth-info identity section (Phase 3)', () => {
     await server.start(port, '127.0.0.1')
     const got = await httpGetJson(port, '/remote/auth-info', identityHeaders(TS_OWNER))
     expect(got.body).toEqual({ version: 1, methods: [] })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// `SyncStats` — what a full sync costs on the wire (sync-core.md § Measuring a
+// full sync). One line per sync-full carrying the decision and the frame as
+// actually sent; none for a catchup; the breakdown only while the source is on.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — SyncStats lines on sync-full', () => {
+  beforeEach(useAuthDisabled)
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+    syncCore.resetCanonicalForTests()
+    vi.mocked(logger.info).mockClear()
+    vi.mocked(logger.warn).mockClear()
+    vi.mocked(logger.isEnabled).mockReset()
+    vi.mocked(logger.isEnabled).mockReturnValue(false)
+  })
+
+  afterEach(async () => {
+    try {
+      await server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  /** Every `SyncStats` message the logger was handed at `level`, in order. */
+  const stats = (level: 'info' | 'warn'): string[] =>
+    vi
+      .mocked(logger[level])
+      .mock.calls.filter((c) => c[0] === 'SyncStats')
+      .map((c) => c[1] as string)
+
+  type TestClient = Awaited<ReturnType<typeof connectRemoteClient>>
+
+  /** Send one `sync` and resolve with the answering frame and its raw size on the wire. */
+  async function sync(
+    client: TestClient,
+    frame: { lastSeq: number; epoch?: string }
+  ): Promise<{ msg: Record<string, unknown>; rawLength: number }> {
+    return new Promise((resolve) => {
+      let rawLength = 0
+      // Registered BEFORE the client's own listener could consume the frame; `ws`
+      // calls listeners in registration order, so `rawLength` is set first.
+      const onRaw = (raw: WebSocket.RawData): void => {
+        rawLength = (raw as Buffer).length
+      }
+      client.ws.on('message', onRaw)
+      const off = client.onMessage((m) => {
+        if (m.type === 'sync-full' || m.type === 'sync-catchup') {
+          off()
+          client.ws.off('message', onRaw)
+          resolve({ msg: m as unknown as Record<string, unknown>, rawLength })
+        }
+      })
+      void client.send({ type: 'sync', ...frame })
+    })
+  }
+
+  it('logs ONE line for a plaintext sync-full, with the decision and the exact frame bytes', async () => {
+    await server.start(port, '127.0.0.1')
+    emitEvent('session:created', ['stats-1', { cwd: '/repo' }])
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const { msg, rawLength } = await sync(client, { lastSeq: 0 })
+    expect(msg.type).toBe('sync-full')
+
+    const lines = stats('info')
+    expect(lines).toHaveLength(1)
+    const line = lines[0]
+    expect(line).toMatch(/^sync-full sent: transport=ws reason=fresh lastSeq=0 seq=\d+ /)
+    expect(line).toContain(`seq=${(msg.state as { seq: number }).seq} `)
+    expect(line).toMatch(/ringOldest=(\d+|none) epochMatch=false e2e=false /)
+    expect(line).toContain(`frameBytes=${rawLength}`)
+    expect(line).toMatch(/encodeMs=\d+\.\d bufferedAmount=\d+$/)
+    expect(stats('warn')).toEqual([])
+    await client.close()
+  })
+
+  it('logs the reason for each way a sync becomes full, and the epoch comparison', async () => {
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    await sync(client, { lastSeq: 5, epoch: 'epoch-from-a-previous-process' })
+    expect(stats('info').at(-1)).toMatch(/reason=epoch-mismatch lastSeq=5 .* epochMatch=false/)
+    await client.close()
+  })
+
+  it('logs nothing for a catchup', async () => {
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const full = await sync(client, { lastSeq: 0 })
+    expect(stats('info')).toHaveLength(1)
+    const caught = await sync(client, {
+      lastSeq: (full.msg.state as { seq: number }).seq,
+      epoch: full.msg.epoch as string
+    })
+    expect(caught.msg.type).toBe('sync-catchup')
+    // Still just the first line: a catchup is not a full sync.
+    expect(stats('info')).toHaveLength(1)
+    expect(stats('warn')).toEqual([])
+    await client.close()
+  })
+
+  it('logs the base64 length under E2E, with e2e=true', async () => {
+    tunnelUrlRef.current = `https://${TUNNEL_HOST}`
+    const proof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    const e2eKey = (server as unknown as { tunnelE2eKey: string }).tunnelE2eKey
+    const client = await connectRemoteClient({
+      url: `ws://127.0.0.1:${port}/`,
+      pwProof: proof,
+      e2eKey,
+      headers: { Host: TUNNEL_HOST }
+    })
+    await client.ready
+
+    const { msg, rawLength } = await sync(client, { lastSeq: 0 })
+    expect(msg.type).toBe('sync-full')
+    const lines = stats('info')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain('transport=ws reason=fresh')
+    expect(lines[0]).toContain('e2e=true')
+    // The ciphertext is base64 text, so what crossed the wire is its length.
+    expect(lines[0]).toContain(`frameBytes=${rawLength}`)
+    await client.close()
+  })
+
+  it('escalates a frame of 5 MB or more to warn', async () => {
+    await server.start(port, '127.0.0.1')
+    emitEvent('session:created', ['stats-big', { cwd: '/repo' }])
+    emitEvent('session:message', [
+      'stats-big',
+      {
+        id: 'big',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'x'.repeat(LARGE_SYNC_FULL_BYTES + 1024) }],
+        timestamp: 0
+      }
+    ])
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const { rawLength } = await sync(client, { lastSeq: 0 })
+    expect(rawLength).toBeGreaterThanOrEqual(LARGE_SYNC_FULL_BYTES)
+    const warned = stats('warn')
+    expect(warned).toHaveLength(1)
+    expect(warned[0]).toMatch(/^large sync-full sent: transport=ws reason=fresh /)
+    expect(warned[0]).toContain(`frameBytes=${rawLength}`)
+    // The same frame is not also logged at info.
+    expect(stats('info')).toEqual([])
+    await client.close()
+  })
+
+  it('builds the breakdown ONLY while the source is enabled at info', async () => {
+    await server.start(port, '127.0.0.1')
+    emitEvent('session:created', ['stats-2', { cwd: '/repo' }])
+    emitEvent('session:message', [
+      'stats-2',
+      {
+        id: 'secret',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'TRANSCRIPT-SECRET-do-not-log' }],
+        timestamp: 0
+      }
+    ])
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    // Off (the default): the frame line only — no extra serialization at all.
+    await sync(client, { lastSeq: 0 })
+    expect(stats('info').filter((l) => l.startsWith('snapshot breakdown'))).toEqual([])
+
+    // On: one breakdown line per sync-full, ids and numbers only.
+    vi.mocked(logger.isEnabled).mockReturnValue(true)
+    await sync(client, { lastSeq: 0 })
+    expect(logger.isEnabled).toHaveBeenCalledWith('SyncStats', 'info')
+    const breakdowns = stats('info').filter((l) => l.startsWith('snapshot breakdown'))
+    expect(breakdowns).toHaveLength(1)
+    expect(breakdowns[0]).toContain('sessions[total=1 ')
+    expect(breakdowns[0]).toContain('stats-2:')
+    for (const line of [...stats('info'), ...stats('warn')]) {
+      expect(line).not.toContain('TRANSCRIPT-SECRET')
+      expect(line).not.toContain('/repo')
+    }
+    await client.close()
   })
 })

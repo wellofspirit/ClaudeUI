@@ -358,6 +358,49 @@ describe('logger — buffered file writes, subscribers, pruning', () => {
   })
 })
 
+describe('logger.isEnabled — the gate for log lines that are costly to build', () => {
+  let mod: LoggerModule
+  let savedLogEnv: string | undefined
+
+  beforeAll(async () => {
+    savedLogEnv = process.env.CLAUDE_UI_LOG
+    delete process.env.CLAUDE_UI_LOG
+    vi.resetModules()
+    mod = await import('../../../core/services/logger')
+  })
+
+  afterAll(() => {
+    if (savedLogEnv !== undefined) process.env.CLAUDE_UI_LOG = savedLogEnv
+  })
+
+  it('is off for info at the default level, on for warn', () => {
+    mod.logger.applyFilter('')
+    expect(mod.logger.isEnabled('SyncStats', 'info')).toBe(false)
+    expect(mod.logger.isEnabled('SyncStats', 'warn')).toBe(true)
+  })
+
+  it('turns on for exactly the source a filter names (SyncStats:info)', () => {
+    mod.logger.applyFilter('SyncStats:info')
+    expect(mod.logger.isEnabled('SyncStats', 'info')).toBe(true)
+    expect(mod.logger.isEnabled('SyncStats', 'debug')).toBe(false)
+    // Another source at the same level stays off.
+    expect(mod.logger.isEnabled('OtherSource', 'info')).toBe(false)
+  })
+
+  it('a bare source name means debug, which includes info', () => {
+    mod.logger.applyFilter('SyncStats')
+    expect(mod.logger.isEnabled('SyncStats', 'info')).toBe(true)
+    expect(mod.logger.isEnabled('SyncStats', 'debug')).toBe(true)
+  })
+
+  it('follows the global level when the source has no override', () => {
+    mod.logger.applyFilter('', 'info')
+    expect(mod.logger.isEnabled('SyncStats', 'info')).toBe(true)
+    expect(mod.logger.isEnabled('SyncStats', 'debug')).toBe(false)
+    mod.logger.applyFilter('')
+  })
+})
+
 describe('logger — per-day size cap', () => {
   let mod: LoggerModule
   let home = ''

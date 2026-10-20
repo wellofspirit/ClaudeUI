@@ -81,6 +81,16 @@ describe('EventRing', () => {
     expect(DEFAULT_RING_CAPACITY).toBe(5000)
   })
 
+  it('reports the oldest retained seq (null while empty) — the SyncStats ring floor', () => {
+    const ring = new EventRing(3)
+    expect(ring.oldestSeq()).toBeNull()
+    for (let i = 0; i < 5; i++) ring.append('c', [])
+    // Seqs 1-2 were pruned; the floor moved with them.
+    expect(ring.oldestSeq()).toBe(3)
+    ring.clear()
+    expect(ring.oldestSeq()).toBeNull()
+  })
+
   it('carries args and a timestamp through verbatim', () => {
     const ring = new EventRing()
     ring.append('session:message', ['rid', { id: 'm1' }], 1234)

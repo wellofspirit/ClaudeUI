@@ -6,6 +6,7 @@ import { RemoteConnection, type ConnectionState } from './connection'
 import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
 import { createWebSocketApi } from './api-adapter'
 import { setSyncClient } from '../core/shared/sync/client-registry'
+import { relaySyncTiming } from '../core/shared/sync/sync-timing'
 import { ConnectionOverlay } from './components/ConnectionOverlay'
 import { PasswordLogin } from './components/PasswordLogin'
 import { PasskeyLogin } from './components/PasskeyLogin'
@@ -365,6 +366,12 @@ function RemoteApp(): React.JSX.Element {
     // isResync=true from the second sync-full onward — see hasHydratedRef.
     const isResync = hasHydratedRef.current
     hasHydratedRef.current = true
+    // `SyncStats` client timing (sync-core.md § Measuring a full sync): the frame's
+    // receive-side cost from the connection, plus the apply time measured here —
+    // dynamic-import wait included, since on a first load that wait is part of what
+    // the user sits through.
+    const frameTiming = connection.takeFullFrameTiming()
+    const hydrateStart = performance.now()
     Promise.all([
       import('@renderer/stores/replica'),
       import('@renderer/utils/projection-audit'),
@@ -381,6 +388,11 @@ function RemoteApp(): React.JSX.Element {
       // hardest to notice and hardest to reproduce, so it audits here too.
       startProjectionAudit()
       const outcome = hydrateReplica(snapshot, isResync)
+      relaySyncTiming(api.logRelay, {
+        transport: 'web',
+        ...frameTiming,
+        hydrateMs: performance.now() - hydrateStart
+      })
       // Before the post-hydrate reads, so nothing they do can keep the app from
       // rendering.
       setReady(true)
