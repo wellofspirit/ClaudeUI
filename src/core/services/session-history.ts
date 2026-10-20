@@ -455,21 +455,33 @@ function deriveTokenMetrics(fold: TokenFold, model?: string): StatusLineData {
 // times before anyone types: the ADR-102 background status pass, the spawn's
 // resume seed, and — on a respawn — again. On the owner's sessions each pass is
 // 0.6–1.2 s of re-reading hundreds of MB, so the memo makes the second and third
-// free. Entries are valid only while EVERY input file is byte-for-byte what it
-// was (size + mtime + inode, and the exact subagent set); anything else folds
-// again from scratch. cli.js was probed to append nothing between spawn and the
+// free. Entries are valid only while EVERY input file looks unchanged (size +
+// mtime + inode, and the exact subagent set) — a stat signature, not a content
+// hash: a same-size rewrite that restores the mtime would be served stale, which
+// cli.js (it only appends) never does; anything else folds again from scratch. cli.js was probed to append nothing between spawn and the
 // first prompt (it writes `mode` / `cost-state` lines at exit), so there is no
 // append-only case worth folding incrementally.
 
 const TOKEN_FOLD_MEMO_MAX = 8
 const tokenFoldMemo = new Map<string, { signature: string; fold: TokenFold }>()
+/**
+ * Folds still reading, so a second caller for the same key joins instead of
+ * re-reading the same hundreds of MB: the status pass can still be folding when
+ * the user sends and the resume reconcile folds the same files. Cleared when the
+ * fold settles.
+ */
+const tokenFoldInFlight = new Map<
+  string,
+  { signature: string; promise: Promise<TokenFold | null> }
+>()
 
-/** Test seam: drop every memoized fold. */
+/** @internal Test seam: drop every memoized and in-flight fold. */
 export function clearTokenFoldMemo(): void {
   tokenFoldMemo.clear()
+  tokenFoldInFlight.clear()
 }
 
-/** Entry count, for the LRU bound test. */
+/** @internal Entry count, for the LRU bound test. */
 export function tokenFoldMemoSize(): number {
   return tokenFoldMemo.size
 }
@@ -497,10 +509,15 @@ function transcriptSignature(filePath: string): { signature: string; bytes: numb
 }
 
 /**
- * The fold, from the memo when the inputs are unchanged. Only a COMPLETE read is
- * stored: a failed one resolves null (never cached), and a read whose inputs
- * changed while it ran (a live transcript) is returned but not stored, since its
- * signature would describe a file the fold did not see.
+ * The fold, from the memo when the inputs are unchanged, or by joining the fold
+ * already reading them (same key AND same signature; a different signature means
+ * the files moved, so that caller folds for itself). A joiner reports the total
+ * bytes to its own `onBytes` once, on completion — exactly like a hit — and shares
+ * the leader's outcome, including a failed read (null: the caller falls back to the
+ * empty line). Only a COMPLETE read is stored: a failed one resolves null (never
+ * cached), and a read whose inputs changed while it ran (a live transcript) is
+ * returned but not stored, since its signature would describe a file the fold did
+ * not see.
  */
 async function memoizedTokenFold(
   filePath: string,
@@ -516,8 +533,23 @@ async function memoizedTokenFold(
     onBytes?.(before.bytes)
     return hit.fold
   }
+  const flying = before ? tokenFoldInFlight.get(key) : undefined
+  if (before && flying?.signature === before.signature) {
+    const joined = await flying.promise
+    if (joined) onBytes?.(before.bytes)
+    return joined
+  }
   tokenFoldMemo.delete(key)
-  const fold = await foldTranscriptTokens(filePath, resumeSessionAt, onBytes)
+  const promise = foldTranscriptTokens(filePath, resumeSessionAt, onBytes)
+  const entry = before ? { signature: before.signature, promise } : null
+  if (entry) tokenFoldInFlight.set(key, entry)
+  let fold: TokenFold | null
+  try {
+    fold = await promise
+  } finally {
+    // Only our own entry: a caller with a different signature may have replaced it.
+    if (entry && tokenFoldInFlight.get(key) === entry) tokenFoldInFlight.delete(key)
+  }
   if (fold && before && transcriptSignature(filePath)?.signature === before.signature) {
     tokenFoldMemo.set(key, { signature: before.signature, fold })
     while (tokenFoldMemo.size > TOKEN_FOLD_MEMO_MAX) {

@@ -263,3 +263,74 @@ describe('token fold memo — bounded', () => {
     expect(folds()).toBe(n + 1) // evicted
   })
 })
+
+describe('token fold memo — concurrent callers share one read', () => {
+  it('a second caller joins the in-flight fold: one read, equal output, its bytes reported once', async () => {
+    const main = writeMain()
+    const sub = writeSub(main, 'agent-a.jsonl', [subLine('s1', 200_000)])
+    const total = fs.statSync(main).size + fs.statSync(sub).size
+    const leaderDeltas: number[] = []
+    const joinerDeltas: number[] = []
+
+    // Both start before either read can finish: the second sees the first in flight.
+    const [first, second] = await Promise.all([
+      computeTokenMetrics(main, 'default', undefined, (d) => leaderDeltas.push(d)),
+      computeTokenMetrics(main, 'opus', undefined, (d) => joinerDeltas.push(d))
+    ])
+
+    expect(folds()).toBe(1)
+    // The joiner's own `model` still applies to the shared fold.
+    expect(first.contextWindow.size).toBe(200_000)
+    expect(second.contextWindow.size).toBe(1_000_000)
+    expect(first).toEqual(await fresh(main, 'default'))
+    expect(second).toEqual(await fresh(main, 'opus'))
+    // Progress is not starved: the leader streams the bytes, the joiner gets the
+    // whole total once, on completion (like a hit).
+    expect(leaderDeltas.reduce((a, b) => a + b, 0)).toBe(total)
+    expect(joinerDeltas).toEqual([total])
+  })
+
+  it('a caller whose signature differs from the in-flight fold folds for itself', async () => {
+    const main = writeMain()
+    const a = computeTokenMetrics(main)
+    // The transcript moves after the first caller took its signature (and before
+    // the second takes its own): joining would hand back a fold of the old file.
+    fs.appendFileSync(main, toJsonl([mainTurn(40, 1_000_000)]))
+    const b = computeTokenMetrics(main)
+    await Promise.all([a, b])
+    expect(folds()).toBe(2)
+  })
+
+  it('the in-flight entry is cleared once settled: a later call hits the memo, not a stale promise', async () => {
+    const main = writeMain()
+    await Promise.all([computeTokenMetrics(main), computeTokenMetrics(main)])
+    expect(folds()).toBe(1)
+    await computeTokenMetrics(main)
+    expect(folds()).toBe(1) // memo hit
+    // And after a change it folds again rather than joining anything left behind.
+    fs.appendFileSync(main, toJsonl([mainTurn(40, 1)]))
+    await computeTokenMetrics(main)
+    expect(folds()).toBe(2)
+  })
+
+  it('a failed in-flight fold fails its joiner too (null → the empty line), caches nothing, and the next call reads again', async () => {
+    // A directory where the transcript should be: it exists and stats, but the read errors.
+    const bad = path.join(ROOT, `sess-dir-${seq++}.jsonl`)
+    fs.mkdirSync(bad)
+    const joinerDeltas: number[] = []
+    const [a, b] = await Promise.all([
+      computeTokenMetrics(bad),
+      computeTokenMetrics(bad, undefined, undefined, (d) => joinerDeltas.push(d))
+    ])
+    expect(a.totalTokens).toBe(0)
+    expect(b).toEqual(a)
+    expect(joinerDeltas).toEqual([]) // nothing was read, so no bytes to claim
+    expect(tokenFoldMemoSize()).toBe(0)
+
+    // Becomes a real transcript: nothing failed was left in flight or memoized.
+    fs.rmdirSync(bad)
+    fs.writeFileSync(bad, toJsonl([{ type: 'user', timestamp: ts(0) }, mainTurn(5, 100_000)]))
+    const ok = await computeTokenMetrics(bad)
+    expect(ok.totalInputTokens).toBe(100_000)
+  })
+})
