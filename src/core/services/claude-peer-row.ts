@@ -13,6 +13,7 @@
  */
 import * as fs from 'fs'
 import { peerRowParts } from './agent-note'
+import { handbackPeerOrigin } from './task-notification-xml'
 
 /** How much of the file's tail is searched: the row is among the last things written. */
 const TAIL_BYTES = 512 * 1024
@@ -28,6 +29,11 @@ export interface PeerRow {
  * The peer row with this uuid; `'not-a-peer'` when the row IS in the tail but is no
  * peer message (a task notification, any other command), so the caller stops looking;
  * null when it is not (yet) there, so the caller tries again.
+ *
+ * A subagent's hand-back (`origin.handback`) is a peer row too, but not a message from
+ * another session: its report is the notification's, which the agent note carries (and a
+ * reopened session pairs it with the notification, handback-history.ts), so it is no peer
+ * here either - live and reload show the same rows.
  */
 export async function findPeerRow(
   file: string,
@@ -54,6 +60,7 @@ export async function findPeerRow(
           message?: { content?: unknown }
         }
         if (row.type !== 'user' || row.uuid !== uuid) continue
+        if (handbackPeerOrigin(row.origin)) return 'not-a-peer'
         return peerRowParts(row, row.message?.content) ?? 'not-a-peer'
       } catch {
         // a partial first line of the tail, or a row still being written

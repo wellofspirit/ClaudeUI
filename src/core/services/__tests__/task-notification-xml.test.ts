@@ -23,6 +23,7 @@ describe('parseTaskNotificationXml', () => {
       taskId: 'a63d5f10b49aadaff',
       status: 'completed',
       summary: 'Agent "regression done" finished',
+      result: 'ONE',
       outputFile: '/tmp/tasks/a63d5f10b49aadaff.output',
       usage: { totalTokens: 22020, toolUses: 0, durationMs: 1191 },
       runToolUseId: 'toolu_01NYVUkgGupR264LhrUXu1Dp',

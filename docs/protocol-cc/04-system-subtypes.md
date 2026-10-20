@@ -251,6 +251,42 @@ The report text reaches ClaudeUI's wire ONLY here (the delivered peer message ne
 `handleTaskNotification`, `task-notification-xml.ts` `handbackNotificationFields`). The same notification
 is followed by a ZERO-TURN `result` (§3.7) that is not a turn end.
 
+**What the transcript keeps (2.1.293; a reopened session has no `handback` / `handback_report`).** Two
+rows, which a reader joins by the task id (`session-history.ts` + `handback-history.ts`):
+
+- the delivered `<task-notification>`'s `<result>` is the pointer sentence above for `send`, its
+  "… under a SECURITY WARNING from auto mode — the warning above the report says why …" variant for
+  `flagged` (any other harness text, a `⚠ …` line, may precede it), and for `withheld` cli.js's
+  `The subagent ended without delivering a report through SubagentHandback, so no report was delivered.
+Its unsent text is not shown.` (+ ` Send the agent a message (SendMessage) to ask it to deliver its
+report.` for a main-agent owner). `<summary>` stays the ordinary `Agent "…" finished` line.
+- a `user` row, `isMeta`, `turnOrigin: "peer"`, `origin: {kind: "peer", from, senderTaskId, name, body,
+handback: true, flagged?: true}`. `senderTaskId` is the notification's `<task-id>`; `origin.body` is the
+  report as the parent read it: the **frame** — an indented `SECURITY WARNING: …` (flagged only, and a
+  "review could not run" note for an `unavailable` verdict, which is NOT flagged), then the one-line
+  `[Subagent hand-back] The text below is the final report of a subagent … The report follows:` header,
+  then EVERY line of the report indented two spaces, opening with the `[harness: subagent output matched
+…]` line and a blank one when a pattern matched. The live `handback_report.text` is the same
+  sanitised report without that marker line. A report longer than the tool-result limit is replaced in
+  the frame by a `<persisted-output>` / `<truncated-output>` pointer (`origin.body` then is not the
+  report). A coalesced turn (two peer messages in one prompt) carries `origin` of the FIRST only. No peer
+  row exists for `withheld`, or when the hand-back went to a subagent rather than main. A hand-back
+  absorbed mid-turn (about one in five) has no `user` row: the same `origin` (`isMeta`, `handback: true`,
+  `body`, `flagged?`) is persisted on a `queued_command` attachment, which is read the same way.
+
+The child's own `SubagentHandback` call (`input.message`, unsanitised) is in its sidechain
+`subagents/agent-<task-id>.jsonl`. `parseNativeHandbackFrame` / `handbackFromNotificationResult`
+(`task-notification-xml.ts`) read the two rows; on 458 real peer rows 457 unframed to the child's own
+text (429 byte-identical, 28 equal but for the sanitiser's backslashes) and one was a persisted pointer.
+
+Reading rules that keep a run's report its own. cli.js writes `<result>` itself under the hand-back
+contract, so its sentence is the LAST line, behind nothing but cli.js's notice lines (the artifact note,
+the max-turns note, a `⚠` line); a result that is the model's own text may quote a sentence anywhere and
+is not read. A sidechain call stands in for an unreadable frame only when its row's `timestamp` lies after
+the task's previous notification and at or before this one (a resumed agent makes one call per run), and a
+peer row pairs with the first notification of its task that it does not lie beyond. The row of a hand-back
+is no "another Claude session" note live either (`findPeerRow` skips `origin.handback`).
+
 ### `task_id` format by task type
 
 - Background bash: `t` + 6 hex chars (e.g., `tabc123`)

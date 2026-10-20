@@ -12,3 +12,11 @@ export const HANDBACK_WITHHELD_TEXT = 'The subagent ended without delivering a r
  * "X-Agent" where a Claude subagent's says "subagent".
  */
 export const XAGENT_HANDBACK_WITHHELD_TEXT = 'The X-Agent ended without delivering a report.'
+
+/**
+ * The warning above a FLAGGED hand-back's report when the reason is not at hand: a reopened
+ * session whose transcript marks the report flagged without keeping auto mode's reason. A
+ * flagged report never reads as an unflagged one.
+ */
+export const HANDBACK_FLAGGED_GENERIC_WARNING =
+  'Auto mode flagged this report. Review it before acting on it.'

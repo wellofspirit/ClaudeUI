@@ -53,6 +53,31 @@ describe('findPeerRow', () => {
     expect(await findPeerRow(file, 'u2')).toMatchObject({ native: false })
   })
 
+  it('is not-a-peer for a subagent hand-back row: its report is the notification note, as on reload', async () => {
+    fs.writeFileSync(
+      file,
+      row('u4', {
+        origin: {
+          kind: 'peer',
+          from: 'worker',
+          senderTaskId: 'a1b2c3',
+          name: 'worker',
+          body: 'framed report',
+          handback: true
+        }
+      })
+    )
+    expect(await findPeerRow(file, 'u4')).toBe('not-a-peer')
+    // the same sender's ordinary message is still a peer
+    fs.writeFileSync(
+      file,
+      row('u5', {
+        origin: { kind: 'peer', from: 'worker', senderTaskId: 'a1b2c3', name: 'worker', body: 'hi' }
+      })
+    )
+    expect(await findPeerRow(file, 'u5')).toMatchObject({ fromTitle: 'worker', body: 'hi' })
+  })
+
   it('shows a body that quotes the closing tag as it was written', async () => {
     fs.writeFileSync(
       file,

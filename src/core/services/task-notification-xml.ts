@@ -19,8 +19,11 @@
  *
  * Older binaries wrote `<usage>` as `total_tokens: N` lines; both parse.
  */
-import type { TaskNotification, TaskTerminalStatus } from '../../shared/types'
-import { HANDBACK_WITHHELD_TEXT } from '../../shared/task-handback'
+import type { TaskHandback, TaskNotification, TaskTerminalStatus } from '../../shared/types'
+import {
+  HANDBACK_FLAGGED_GENERIC_WARNING,
+  HANDBACK_WITHHELD_TEXT
+} from '../../shared/task-handback'
 import type { ResultMessage, SystemMessage } from '../sdk/types'
 
 export interface ParsedTaskNotification {
@@ -28,6 +31,12 @@ export interface ParsedTaskNotification {
   /** Absent when the XML carries none (or one this reader does not know). */
   status?: TaskTerminalStatus
   summary: string
+  /**
+   * The `<result>` body: the run's final text, or cli.js's own sentence under a
+   * hand-back. Always set by {@link parseTaskNotificationXml}; optional so a
+   * note title can be built from the live frame's fields alone.
+   */
+  result?: string
   outputFile: string
   usage?: TaskNotification['usage']
   /** The `<tool-use-id>` of the run it ends — the reap of an orphan on --resume has none. */
@@ -67,6 +76,7 @@ export function parseTaskNotificationXml(text: string): ParsedTaskNotification |
     taskId,
     ...(status ? { status } : {}),
     summary: get('summary'),
+    result: get('result'),
     outputFile: get('output-file'),
     ...(usage ? { usage } : {}),
     ...(runToolUseId ? { runToolUseId } : {}),
@@ -238,6 +248,161 @@ export function handbackNotificationFields(
     summary: text,
     handback,
     ...(handback === 'flagged' && typeof warning === 'string' && warning ? { warning } : {})
+  }
+}
+
+/**
+ * How a hand-back reads in a TRANSCRIPT (cli.js 2.1.293), where the live frame's
+ * `handback` / `handback_report` do not exist. Two rows carry it:
+ *
+ * - the notification XML's `<result>`: under a hand-back that was delivered it holds
+ *   cli.js's pointer sentence (`Nns`), NEVER the report — `This agent's report was
+ *   delivered to you as a message from "NAME" (its SubagentHandback call)` plus `, under
+ *   a SECURITY WARNING from auto mode — the warning above the report says why` when
+ *   flagged, then `Read it there; it is not repeated here.`; a subagent that ended
+ *   without delivering gets `The subagent ended without delivering a report through
+ *   SubagentHandback, so no report was delivered.` (`GOn`, and ` Send the agent a
+ *   message (SendMessage) ...` after it for a main-agent owner). A line of other
+ *   harness text (`⚠ ...`, the max-turns note) can precede either;
+ * - a `user` row, `isMeta`, `turnOrigin: 'peer'`, `origin: {kind: 'peer', from,
+ *   senderTaskId, name, body, handback: true, flagged?: true}` — the report as the
+ *   parent model read it (`origin.body`, see {@link parseNativeHandbackFrame}).
+ *
+ * `unavailable` review verdicts mark the report neither flagged nor unflagged in the
+ * XML (the pointer is the plain one) and carry a note, not a warning, in the body.
+ */
+const HANDBACK_POINTER =
+  /^This agent's report was delivered to you as a message from "[^\n]*" \(its SubagentHandback call\)(, under a SECURITY WARNING from auto mode \u2014 the warning above the report says why)?\. Read it there; it is not repeated here\.$/
+const HANDBACK_WITHHELD_SENTENCE =
+  /^The subagent ended without delivering a report through SubagentHandback, so no report was delivered\. Its unsent text is not shown\.(?: Send the agent a message \(SendMessage\) to ask it to deliver its report\.)?$/
+/**
+ * The harness's own lines that cli.js puts BEFORE its hand-back sentence in `<result>`
+ * (`k6n`: the artifact note - in real transcripts an entity-escaped
+ * `<artifact-content-authored-by-others/>` line and its sentence - the max-turns note, and
+ * `\u26a0 <notice>`; the sentence is pushed after them and, with no report to follow,
+ * last). Any other line is model text.
+ */
+const HANDBACK_NOTICE_LINE =
+  /^(?:\u26a0 |.*-turn limit before finishing\.|(?:&lt;|<)artifact-content-authored-by-others\/(?:&gt;|>)|This agent read Artifact content written by people other than you)/
+
+/** The fields of a `withheld` hand-back, as live ({@link handbackNotificationFields}). */
+export const HANDBACK_WITHHELD_FIELDS: Pick<TaskNotification, 'summary' | 'handback'> = {
+  summary: HANDBACK_WITHHELD_TEXT,
+  handback: 'withheld'
+}
+
+/**
+ * What a notification's `<result>` says about a hand-back: `send` / `flagged` for the
+ * pointer sentence (the report is in the peer row), `withheld` for the "ended without
+ * delivering" sentence, undefined for anything else (an ordinary result — also the
+ * interim "has not reported yet" sentence, which claims nothing, as live).
+ */
+export function handbackFromNotificationResult(
+  result: string | undefined
+): TaskHandback | undefined {
+  if (!result) return undefined
+  // The sentence is the LAST line of the result, behind nothing but cli.js's own notice
+  // lines. Where cli.js writes the result itself (the hand-back contract) that is exactly
+  // its shape; a result that is a model's own text (no contract) can quote a sentence
+  // anywhere in it, and a quoted one must not turn an ordinary result into a hand-back.
+  const lines = result.split('\n')
+  const last = lines[lines.length - 1].trim()
+  const before = lines.slice(0, -1)
+  if (!before.every((line) => line.trim() === '' || HANDBACK_NOTICE_LINE.test(line.trim()))) {
+    return undefined
+  }
+  const pointer = HANDBACK_POINTER.exec(last)
+  if (pointer) return pointer[1] ? 'flagged' : 'send'
+  return HANDBACK_WITHHELD_SENTENCE.test(last) ? 'withheld' : undefined
+}
+
+/** The peer-row `origin` of a delivered hand-back; null for any other origin. */
+export function handbackPeerOrigin(
+  origin: unknown
+): { taskId: string; flagged: boolean; body: string } | null {
+  if (!origin || typeof origin !== 'object') return null
+  const o = origin as {
+    kind?: unknown
+    handback?: unknown
+    senderTaskId?: unknown
+    flagged?: unknown
+    body?: unknown
+  }
+  if (o.kind !== 'peer' || o.handback !== true) return null
+  if (typeof o.senderTaskId !== 'string' || !o.senderTaskId) return null
+  if (typeof o.body !== 'string') return null
+  return { taskId: o.senderTaskId, flagged: o.flagged === true, body: o.body }
+}
+
+/** The hand-back frame's header line, up to the part that varies between cli.js versions. */
+const HANDBACK_FRAME_HEADER_START = '[Subagent hand-back] The text below is the final report'
+const HANDBACK_FRAME_HEADER_END = 'The report follows:'
+/** The line cli.js prepends when the report matched a reportable pattern, and the blank line after it. */
+const HANDBACK_MARKER =
+  /^\[harness: subagent output matched instruction-shaped pattern\(s\): [^\n]*to you\.\]\n\n/
+/** A report cli.js persisted to a file because it was too long: only a pointer is in the frame. */
+const HANDBACK_PERSISTED_POINTER = /^<\\?(?:persisted|truncated)-output>/
+
+/**
+ * Read a delivered hand-back's `origin.body` back into the report and the warning
+ * above it — the inverse of cli.js's frame (`bcr` / `fkt` in cli.js 2.1.293):
+ *
+ *     [indented warning lines]            ← only when auto mode flagged it (or a review note)
+ *     [Subagent hand-back] The text below is the final report of a subagent ... The report follows:
+ *       [harness: subagent output matched ...]   ← only when a reportable pattern matched
+ *       <blank>
+ *       <report line>                     ← EVERY line indented two spaces
+ *
+ * The report was sanitised (`<` -> `<\` on harness-markup look-alikes, `Human\:`) before
+ * it was framed; that is what the live `handback_report.text` carries too, minus the
+ * marker, which is removed here. `exact` is false when cli.js replaced a too-long
+ * report with a pointer to a file, so the text is not the report. Null when the body is
+ * not in this shape (another cli.js version, a line out of the indent), so the caller
+ * never shows framed text as a report.
+ */
+export function parseNativeHandbackFrame(
+  body: string
+): { report: string; warning?: string; exact: boolean } | null {
+  const lines = body.split('\n')
+  const header = lines.findIndex(
+    (line) =>
+      line.startsWith(HANDBACK_FRAME_HEADER_START) && line.endsWith(HANDBACK_FRAME_HEADER_END)
+  )
+  if (header < 0 || header === lines.length - 1) return null
+  const indented = (line: string): boolean => line.startsWith('  ')
+  const before = lines.slice(0, header)
+  const after = lines.slice(header + 1)
+  if (!before.every(indented) || !after.every(indented)) return null
+  const warning = before.map((line) => line.slice(2)).join('\n')
+  const report = after
+    .map((line) => line.slice(2))
+    .join('\n')
+    .replace(HANDBACK_MARKER, '')
+  if (report.trim() === '') return null
+  return {
+    report,
+    ...(warning ? { warning } : {}),
+    exact: !HANDBACK_PERSISTED_POINTER.test(report)
+  }
+}
+
+/**
+ * The fields a reopened session gives a notification whose subagent reported through
+ * `SubagentHandback` — the same ones the live frame gives it
+ * ({@link handbackNotificationFields}): the report as `summary`, `handback`, and a
+ * flagged report's `warning` (a generic one when the transcript kept no reason). A
+ * `send` report keeps no warning, as live: a review that could not run is a note.
+ */
+export function handbackTranscriptFields(
+  handback: 'send' | 'flagged',
+  report: { text: string; warning?: string }
+): Pick<TaskNotification, 'summary' | 'handback' | 'warning'> {
+  return {
+    summary: report.text,
+    handback,
+    ...(handback === 'flagged'
+      ? { warning: report.warning || HANDBACK_FLAGGED_GENERIC_WARNING }
+      : {})
   }
 }
 

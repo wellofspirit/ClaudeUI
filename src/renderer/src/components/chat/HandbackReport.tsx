@@ -15,6 +15,7 @@
  */
 import type { TaskNotification } from '../../../../shared/types'
 import {
+  HANDBACK_FLAGGED_GENERIC_WARNING,
   HANDBACK_WITHHELD_TEXT,
   XAGENT_HANDBACK_WITHHELD_TEXT
 } from '../../../../shared/task-handback'
@@ -62,7 +63,7 @@ export function HandbackReport({
           role="alert"
           className="mb-2 rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-[12px] text-warning whitespace-pre-wrap break-words"
         >
-          {notification.warning || 'Auto mode flagged this report. Review it before acting on it.'}
+          {notification.warning || HANDBACK_FLAGGED_GENERIC_WARNING}
         </div>
       )}
       {handback === 'send' && notification.warning && (
