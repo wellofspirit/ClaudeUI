@@ -113,6 +113,7 @@ interface CapturedOptions {
   mcpServers: Record<string, SdkMcpServer>
   allowedTools: string[]
   systemPrompt: { append: string }
+  onInboundFrame: (frame: Record<string, unknown>) => void
   canUseTool: (
     toolName: string,
     input: Record<string, unknown>,
@@ -296,5 +297,58 @@ describe('ClaudeSession — dispatch teardown', () => {
     const { session } = await bootSession()
     session.cancel()
     expect(crossEngineSpies.disposeFor).toHaveBeenCalledWith('routing-1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The live mode a dispatch run reads through its parent facade (ADR-105)
+// ---------------------------------------------------------------------------
+
+describe('ClaudeSession — getAutonomyMode', () => {
+  it('answers the CURRENT permission mode, so a run launched earlier follows a later switch', async () => {
+    const { session } = await bootSession()
+    liveSessions.push(session)
+    expect(session.getAutonomyMode()).toBe('default')
+    await session.setPermissionMode('acceptEdits')
+    expect(session.getAutonomyMode()).toBe('acceptEdits')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The background default is the root agent's (ADR-105 §2): the session tells the collab
+// tool who made a call from the frames cli.js streams (the owner map of the session tools)
+// ---------------------------------------------------------------------------
+
+describe('ClaudeSession — who called dispatch_agent decides its default (ADR-105 §2)', () => {
+  const useBlock = (id: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    type: 'assistant',
+    ...extra,
+    message: { content: [{ type: 'tool_use', id, name: 'mcp__claude-ui-collab__dispatch_agent' }] }
+  })
+
+  it('a root call goes to the background, a subagent call and an unattributed one wait, an explicit value wins', async () => {
+    const { session, options } = await bootSession()
+    liveSessions.push(session)
+    crossEngineSpies.dispatch.mockResolvedValue({ text: 'x', sessionId: 's' })
+    options.onInboundFrame(useBlock('toolu_root'))
+    options.onInboundFrame(useBlock('toolu_sub', { parent_tool_use_id: 'toolu_task' }))
+    const handler = options.mcpServers['claude-ui-collab'].tools[0].handler
+    const call = async (id: string, args: Record<string, unknown> = {}): Promise<unknown> => {
+      await handler({ engine: 'opencode', prompt: 'p', ...args }, {
+        signal: new AbortController().signal,
+        meta: { 'claudecode/toolUseId': id }
+      } as never)
+      return crossEngineSpies.dispatch.mock.calls.at(-1)![0]
+    }
+    expect(await call('toolu_root')).toMatchObject({ runInBackground: true })
+    expect(await call('toolu_sub')).not.toHaveProperty('runInBackground')
+    expect(await call('toolu_sub', { run_in_background: true })).toMatchObject({
+      runInBackground: true
+    })
+    expect(await call('toolu_root', { run_in_background: false })).not.toHaveProperty(
+      'runInBackground'
+    )
+    // A call whose frame never arrived cannot be attributed: it waits, as before B-3.
+    expect(await call('toolu_unseen')).not.toHaveProperty('runInBackground')
   })
 })

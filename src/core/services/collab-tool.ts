@@ -7,10 +7,18 @@ import { peekOpencodeModels } from '../opencode/model-discovery'
 import { describeDispatchModels } from './dispatch-model-hint'
 import type { ChatMessage, EngineId } from '../../shared/types'
 import {
+  DISPATCH_BACKGROUND_PARAM,
+  DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_NAME_PARAM,
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
   dispatchAgentDescription,
+  dispatchResultSuffix,
+  hasRemovedSessionId,
   joinDispatchHints,
-  OWN_SUBAGENT_TOOL
+  OWN_SUBAGENT_TOOL,
+  runsInBackground
 } from '../../shared/dispatch-agent-description'
+import type { ToolCallOwner } from './tool-use-owners'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
 
 export interface CollabServerContext {
@@ -32,6 +40,12 @@ export interface CollabServerContext {
   /** BaseSession.addDispatchedCost — folds a dispatched turn's spend into this
    *  session's own cost breakdown (ADR-033 Slice C). */
   addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) => void
+  /**
+   * Who made a tool call, from the session's stream (`ToolUseOwners.ownerOf`): the default
+   * for `run_in_background` is "background" for the root agent only (ADR-105 §2), and a
+   * subagent's call or one that cannot be attributed waits. Absent: every call waits.
+   */
+  callOwner?: (toolUseId: string | undefined) => Promise<ToolCallOwner>
 }
 
 /**
@@ -107,20 +121,47 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
                 `that engine's configured default. For opencode: ${modelHint.short} ` +
                 `For pi: ${piModelHint.short} For codex: ${codexModelHint.short}`
             ),
-          session_id: z
-            .string()
-            .optional()
-            .describe('session_id from a previous dispatch_agent result — continues that agent')
+          name: z.string().optional().describe(DISPATCH_NAME_PARAM),
+          description: z.string().optional().describe(DISPATCH_DESCRIPTION_PARAM),
+          run_in_background: z.boolean().optional().describe(DISPATCH_BACKGROUND_PARAM)
         },
-        async ({ engine, prompt, model, session_id }, extra) => {
+        async (input, extra) => {
+          const { engine, prompt, model, name, description, run_in_background } = input
+          // `session_id` is no longer a parameter (ADR-105 §4) and is not in the schema the model
+          // sees; the tool is registered `passthrough`, so a call that still sends one (an older
+          // transcript) reaches us and gets the guiding error, with nothing launched.
+          if (hasRemovedSessionId((input as Record<string, unknown>).session_id)) {
+            return {
+              content: [{ type: 'text' as const, text: DISPATCH_SESSION_ID_REMOVED_TEXT }],
+              isError: true
+            }
+          }
           // cli.js stamps `_meta["claudecode/toolUseId"]` on EVERY MCP tools/call
           // (the calling assistant tool_use block's id) — the Claude-side source
           // of the dispatching tool_use id (ADR-033 M3). Missing/non-string →
           // undefined; the dispatcher gates every subagent/task emit on its
           // presence and never fails a dispatch over it.
           const toolUseId = extra?.meta?.['claudecode/toolUseId']
+          const callId = typeof toolUseId === 'string' ? toolUseId : undefined
+          // Only a call that may run in the background needs to know the caller (a wait of up to
+          // 250 ms on a call whose frame has not been seen yet): an unspecified one takes the
+          // default from it, and a subagent's explicit one is told its report goes to the root.
+          const owner =
+            run_in_background !== false && callId && ctx.callOwner
+              ? await ctx.callOwner(callId)
+              : undefined
+          const callerIsRoot = owner === 'root'
+          const background = runsInBackground(run_in_background, callerIsRoot, callId)
           const result = await crossEngineDispatcher.dispatch(
-            { engine, prompt, model, sessionId: session_id },
+            {
+              engine,
+              prompt,
+              model,
+              name,
+              description,
+              ...(background ? { runInBackground: true } : {}),
+              ...(background && owner === 'subagent' ? { fromSubagent: true } : {})
+            },
             {
               fromEngine: ctx.engineId,
               fromRoutingId: ctx.getRoutingId(),
@@ -131,18 +172,20 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
               ...(ctx.blockedCalls ? { blockedCalls: ctx.blockedCalls } : {}),
               emit: ctx.emit,
               addDispatchedCost: ctx.addDispatchedCost,
-              toolUseId: typeof toolUseId === 'string' ? toolUseId : undefined,
+              toolUseId: callId,
               extra
             }
           )
-          const text = result.isError
-            ? result.text
-            : `${result.text}\n\n[dispatch session_id: ${result.sessionId} — pass it as session_id to continue this agent]`
+          const text =
+            result.isError || !result.agentRef
+              ? result.text
+              : `${result.text}${dispatchResultSuffix(result.agentRef)}`
           return {
             content: [{ type: 'text' as const, text }],
             ...(result.isError ? { isError: true } : {})
           }
-        }
+        },
+        { passthrough: true }
       )
     ]
   })

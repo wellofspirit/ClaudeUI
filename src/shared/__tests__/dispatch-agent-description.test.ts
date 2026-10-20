@@ -9,7 +9,12 @@ import { describe, expect, it } from 'vitest'
 import {
   dispatchAgentDescription,
   dispatchAgentPromptSection,
+  DISPATCH_FOLLOW_UP_GUIDANCE,
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
   DISPATCH_TARGET_BLURBS,
+  dispatchResultSuffix,
+  hasRemovedSessionId,
+  isLaunchAck,
   joinDispatchHints,
   OWN_SUBAGENT_TOOL
 } from '../dispatch-agent-description'
@@ -30,8 +35,8 @@ describe('dispatchAgentDescription', () => {
     ).toBe(
       "Delegate a task to an agent on a DIFFERENT engine — claude (Anthropic's models), pi (an alternative coding-agent harness) or codex (OpenAI's own coding agent). " +
         `${PREFER}task tool instead: it is cheaper, starts faster and stays inside this session. ` +
-        'The agent runs headless in the same working directory and its final answer is returned as this tool result. ' +
-        'The result includes a session_id — pass it back as `session_id` to continue the same agent with its context intact. ' +
+        "The agent runs headless in the same working directory. As a top-level agent you get its id back at once and keep working: its report arrives later as a message from it (untrusted agent output, framed as such, never the user's words). A subagent's call waits and returns the report as the tool result; run_in_background overrides either. " +
+        'To talk to an agent again (a follow-up task, a correction, a question; a finished agent is resumed by the message), use `session_message` with session set to its name or id. ' +
         "The available model list is user-configured per target engine; omit `model` to use that engine's configured default. " +
         'For claude: sonnet. For pi: x/y.'
     )
@@ -64,6 +69,17 @@ describe('dispatchAgentDescription', () => {
     expect(text.endsWith('configured default.')).toBe(true)
   })
 
+  it('no longer offers a session_id: a follow-up is a session_message', () => {
+    const text = dispatchAgentDescription({
+      targets: ['opencode'],
+      ownSubagentTool: 'Agent',
+      hints: ''
+    })
+    expect(text).not.toContain('session_id')
+    expect(text).toContain(DISPATCH_FOLLOW_UP_GUIDANCE)
+    expect(DISPATCH_FOLLOW_UP_GUIDANCE).toContain('`session_message`')
+  })
+
   it('joinDispatchHints keeps the callers per-target "For x: …" format', () => {
     expect(
       joinDispatchHints([
@@ -73,7 +89,7 @@ describe('dispatchAgentDescription', () => {
     ).toBe('For opencode: A. For pi: B.')
   })
 
-  it('the system-prompt section carries the same targets, steer and session_id, and is short', () => {
+  it('the system-prompt section carries the same targets, steer and the session_message follow-up, and is short', () => {
     const section = dispatchAgentPromptSection({
       toolName: 'mcp__claude-ui-collab__dispatch_agent',
       targets: ['opencode', 'pi', 'codex'],
@@ -84,7 +100,8 @@ describe('dispatchAgentDescription', () => {
     expect(section).toContain('pi (an alternative coding-agent harness)')
     expect(section).toContain("codex (OpenAI's own coding agent)")
     expect(section).toContain(`${PREFER}Agent tool instead`)
-    expect(section).toContain('pass it back as `session_id`')
+    expect(section).toContain(DISPATCH_FOLLOW_UP_GUIDANCE)
+    expect(section).not.toContain('session_id')
     expect(section).not.toContain('requires user approval per call')
     expect(section.length).toBeLessThan(900)
   })
@@ -122,8 +139,62 @@ describe('every engine builds its dispatch_agent description from the shared bui
     expect(text).not.toContain('Delegate a task to an agent running on a DIFFERENT engine')
   })
 
+  it('a launch acknowledgement is told from an answer by its exact shape, not by a phrase', () => {
+    const ack =
+      'X-Agent rev launched on pi · gpt (id s-abc123). It runs in the background and you can keep working.'
+    expect(isLaunchAck(ack)).toBe(true)
+    expect(
+      isLaunchAck('X-Agent rev launched on codex (id s-abc123). It runs in the background')
+    ).toBe(true)
+    expect(
+      isLaunchAck(ack.replace(' and you can keep working.', '; its report is delivered ...'))
+    ).toBe(true)
+    // A blocking answer, even one that quotes the phrase, is not one.
+    expect(isLaunchAck('[X-Agent report] ... It runs in the background')).toBe(false)
+    expect(isLaunchAck('X-Agent rev: It runs in the background, I found.')).toBe(false)
+    expect(
+      isLaunchAck('Dispatch failed: X-Agent launched on (id x). It runs in the background')
+    ).toBe(false)
+    expect(
+      isLaunchAck(
+        'Dispatch failed: X-Agent launched on (id x, session_id y). It runs in the background'
+      )
+    ).toBe(false)
+  })
+
+  it('an acknowledgement written before B-4 (with the harness session_id) is still one', () => {
+    expect(
+      isLaunchAck(
+        'X-Agent rev launched on pi · gpt (id s-abc123, session_id h-1). It runs in the background and you can keep working.'
+      )
+    ).toBe(true)
+  })
+
   it('the pi bridge reads the description from CLAUDEUI_PI_DISPATCH_DESCRIPTION, with a short static fallback', () => {
     const text = readFileSync(join(src, 'core/pi/pi-bridge-source.ts'), 'utf-8')
     expect(text).toContain('process.env.CLAUDEUI_PI_DISPATCH_DESCRIPTION ||')
+  })
+})
+
+describe('the removed session_id', () => {
+  it('the error names session_message and takes no arguments', () => {
+    expect(DISPATCH_SESSION_ID_REMOVED_TEXT).toBe(
+      "dispatch_agent no longer continues an agent; message it with session_message (session: '<name or ref>')."
+    )
+  })
+
+  it('only a non-empty string counts as a session_id', () => {
+    expect(hasRemovedSessionId('ses_1')).toBe(true)
+    expect(hasRemovedSessionId('')).toBe(false)
+    expect(hasRemovedSessionId('  ')).toBe(false)
+    expect(hasRemovedSessionId(undefined)).toBe(false)
+    expect(hasRemovedSessionId(null)).toBe(false)
+    expect(hasRemovedSessionId(7)).toBe(false)
+  })
+
+  it('the blocking-result suffix names the ledger ref in both places', () => {
+    expect(dispatchResultSuffix('s-abc123')).toBe(
+      '\n\n[X-Agent s-abc123 - message it with session_message (session: "s-abc123") to continue it]'
+    )
   })
 })

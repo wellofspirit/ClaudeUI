@@ -109,6 +109,7 @@ import {
   onOpencodeSessionListChanged
 } from '../services/opencode-session-list'
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
+import { withDispatchTasks } from '../services/dispatch-task-history'
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
 import { freshClaudeModels, queryClaudeModels } from '../services/claude-model-catalog'
@@ -448,6 +449,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // the commands below use; the service sits under this layer, so it is handed them.
   configureSessionTools({
     manager,
+    // A message to an X-Agent steers its running turn or starts a run of it (ADR-105 §4).
+    xAgents: { message: (request) => crossEngineDispatcher.messageXAgent(request) },
     createSession: (args) => prepareAndCreateSession(manager, getHostWindow(), args),
     sendPrompt: (routingId, prompt, options) =>
       sendPrompt(manager, routingId, prompt, undefined, options)
@@ -1067,7 +1070,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'fs-read',
     kind: 'query',
     handler: async (sessionId: string) => {
-      return await loadOpencodeSessionHistory(sessionId)
+      return withDispatchTasks(sessionId, await loadOpencodeSessionHistory(sessionId))
     }
   })
 
@@ -1085,7 +1088,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'fs-read',
     kind: 'query',
     handler: async (sessionId: string) => {
-      return await loadPiSessionHistory(sessionId)
+      return withDispatchTasks(sessionId, await loadPiSessionHistory(sessionId))
     }
   })
 

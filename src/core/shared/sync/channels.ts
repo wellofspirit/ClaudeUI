@@ -334,6 +334,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: false,
     why: 'Same as session:error — no snapshot field.'
   },
+  'session:dispatch-result-held': {
+    cls: 'replicated',
+    ring: true,
+    canonical: false,
+    why: 'An X-Agent finished but its result had to wait in the parent’s inbox (ADR-105 §3): a signal for the sidebar attention and an OS notification, no snapshot field (the waiting count is held-changed).'
+  },
   'session:sandbox-violation': {
     cls: 'replicated',
     ring: true,

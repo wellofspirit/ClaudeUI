@@ -237,6 +237,16 @@ export const SESSION_TOOLS_ASK_RULE: V2Rule = rule(`${CLAUDEUI_MCP_SERVER}_sessi
 export const SESSION_TOOLS_DENY_RULE: V2Rule = rule(`${CLAUDEUI_MCP_SERVER}_session_*`, 'deny')
 
 /**
+ * `hand_back` (ADR-105 §3) lives on the shared hosted server, so every session of the server is
+ * offered it. Only a dispatch target is meant to have it: an interactive session and its
+ * subagents get this whole-category deny (hidden from the model), a target's ruleset gets
+ * {@link HAND_BACK_ALLOW_RULE} instead, in every mode (auto's classifier and the asking modes
+ * must never put the report behind an approval).
+ */
+export const HAND_BACK_DENY_RULE: V2Rule = rule(`${CLAUDEUI_MCP_SERVER}_hand_back`, 'deny')
+export const HAND_BACK_ALLOW_RULE: V2Rule = rule(`${CLAUDEUI_MCP_SERVER}_hand_back`, 'allow')
+
+/**
  * Auto mode's catch-all for MCP tools. 2.x names an MCP tool's action
  * `<server>_<tool>` (`tool/mcp.ts` `name`), so every MCP action contains `_` —
  * whichever server, whenever it connected. The direct built-ins that contain
@@ -378,6 +388,11 @@ export interface SessionRulesetInput {
   home?: string
   /** The platform path rules are read for (tests; default `process.platform`). */
   platform?: NodeJS.Platform
+  /**
+   * The ruleset is a dispatch target's (the dispatcher adds the `hand_back` allow after it):
+   * leave out the deny every other session gets. Default false.
+   */
+  handBackTarget?: boolean
 }
 
 /** The compiled session ruleset and what the host keeps beside it. */
@@ -426,7 +441,8 @@ export function buildSessionRuleset(input: SessionRulesetInput): SessionRuleset 
     ...(input.mode === 'plan' ? planEnforcement() : []),
     EXECUTE_DENY_RULE,
     DISPATCH_ASK_RULE,
-    SESSION_TOOLS_ASK_RULE
+    SESSION_TOOLS_ASK_RULE,
+    ...(input.handBackTarget ? [] : [HAND_BACK_DENY_RULE])
   ])
   return { rules, userRules, agent: input.mode === 'plan' ? 'plan' : undefined }
 }

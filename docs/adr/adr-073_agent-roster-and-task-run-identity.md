@@ -1,6 +1,6 @@
 # ADR-073: An agent is a `task_id`, a run is a `tool_use_id` — and the roster that reads them
 
-**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended 2026-10-01 by §8: an opencode run's terminal status comes from its `task` part, and a `session.error` is never terminal. Amended 2026-10-06 by §9: the overlay is bounded by the composer, not the viewport, and a roster narrower than 480px lays its rows out on two lines, and the type badge becomes a letter tile ([ADR-094](adr-094_agent-type-colour-coding.md)). Amended 2026-10-07 by §10: the list is one tree with the background shells nested under the agent that launched them, and every row is one line at every width (superseding §9's two shapes and the separate shells section). Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`. Amended 2026-10-17 by §11: a row's dot is the session dot (no yellow, a violet state when only its subagents run), and a row resolves the model its agent ran on.
+**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended 2026-10-01 by §8: an opencode run's terminal status comes from its `task` part, and a `session.error` is never terminal. Amended 2026-10-06 by §9: the overlay is bounded by the composer, not the viewport, and a roster narrower than 480px lays its rows out on two lines, and the type badge becomes a letter tile ([ADR-094](adr-094_agent-type-colour-coding.md)). Amended 2026-10-07 by §10: the list is one tree with the background shells nested under the agent that launched them, and every row is one line at every width (superseding §9's two shapes and the separate shells section). Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`. Amended 2026-10-17 by §11: a row's dot is the session dot (no yellow), and a row resolves the model its agent ran on. Amended 2026-10-19 by §10/§11: a finished agent with work still running below it is steady green, finished, stopped and loaded rows are grey, and rows are never dimmed.
 **Amends:** [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) — `activeTasks` is no longer keyed only by the spawning tool call, and the `taskId → toolUseId` mapping is no longer evicted on a terminal notification.
 **Relates to:** [ADR-027](adr-027_test-data-attributes.md) (the `data-testid` tiers the new surfaces carry), [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch cards share the `task` ToolView), [ADR-035](adr-035_pi-engine-backend.md) / [ADR-036](adr-036_unified-auth-vault.md) (pi subagents), [ADR-070](adr-070_one-auth-surface.md) (the measured top-bar tiers this adds a control to), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5/§4.6 (the wire shapes, amended by the probe below)
 
@@ -311,7 +311,7 @@ that spawned it, in the parent's spawn order, indented 14px per level with a fil
 Top-level rows keep transcript order. There is no per-parent fold.
 
 **Context ancestors.** Under the Running filter, a finished ancestor of a running (or open) row is
-kept, dimmed (`data-context="true"`), so an indented row never floats without its parent. The whole
+kept (`data-context="true"`; drawn like any other row, amended 2026-10-19), so an indented row never floats without its parent. The whole
 chain is kept. A context row is not counted as running, not counted in the section's number _(§10: the header's
 running count)_, and offers no Stop, but still opens on click.
 
@@ -523,7 +523,7 @@ while it has a lifecycle record or a notification.
 
 A shell can outlive the agent that launched it, which is the case the tree has to survive. Under Running,
 `keepRunning` works over the unified list, so a running shell under a finished agent keeps that agent, and
-its ancestors, as dimmed context rows. The shell stays reachable and a row never floats without its parent.
+its ancestors, as context rows. The shell stays reachable and a row never floats without its parent.
 The header counts running rows only, and context rows are not counted.
 
 **The label.** An agent's label is its `name` when the spawn call gave one (or it is a dispatch, whose label
@@ -590,12 +590,17 @@ list needs the context-row rule rather than two lists.
 ### 11. The row's dot is the session dot, and a row knows its model (amendment, 2026-10-17)
 
 **Dot.** A row's status dot is the session's (`Sidebar/StatusDot.tsx`, the `status-dot` element, its ripple and
-colours), mapped: the agent's own work in progress ripples green; its own run has ended but agents it launched
-still run, a violet ripple (`subagents`, from `runningDescendants`, shells not counted, as for the session); done
-is steady green; failed steady red; stopped by the user and loaded from history steady muted. There is no yellow:
-a stop is not a warning, and a permission ask raises its own prompt. A failed or stopped agent keeps its own dot
-whatever still runs below it. The `subagents` state needs lifecycle records, so it appears for Claude Code and pi;
-opencode and Codex rows, which have none, stay green while anything under them runs.
+colours), mapped (amended 2026-10-19): the agent's own work in progress ripples green; a finished agent with
+something still running below it (a nested agent at any depth, or a background shell nested under it, §10;
+`runningDescendants`) is steady green, because it is alive in effect, and its title says how many rows still run;
+a finished agent with nothing running below it is steady grey (`inactive`), since a subagent is alive or dead and
+a steady green on a finished row would say nothing; failed is steady red; stopped by the user and loaded from
+history are steady grey too, told apart by the title and `data-status`. There is no yellow: a stop is not a
+warning, and a permission ask raises its own prompt. A failed or stopped agent keeps its own dot whatever still
+runs below it. A dispatch whose call is queued behind an earlier unfinished call of the same assistant
+message (Claude Code runs MCP calls one at a time) is a `queued` row with a grey dot. Rows are never dimmed for being finished or for being context rows kept under the Running filter;
+the dot is the only thing that says how a row stands. Running descendants need lifecycle records, so they appear
+for Claude Code and pi; opencode and Codex rows, which have none, stay green while anything under them runs.
 
 **Model.** A subagent's assistant messages carry the model they ran on (`ChatMessage.model`, as the engine reports
 it: Claude's concrete id, opencode `providerID/id`, pi `provider/model`; Codex children report none). Every builder

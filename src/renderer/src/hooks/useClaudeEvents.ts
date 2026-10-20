@@ -40,11 +40,17 @@ import { startBackgroundLoad } from '../lib/subagent-prefetch'
 import { showVoiceNotice } from '../lib/voice/voice-notice'
 import { voiceController } from '../lib/voice/voice-controller'
 import { applyVoicePackStatus, refreshVoicePackStatus } from '../lib/voice/voice-pack-store'
-import { hasAutoContinuingTask } from '../lib/task-types'
-import type { SessionStatus, TaskNotification, SlashCommandInfo } from '../../../shared/types'
+import { hasWakingTask } from '../lib/task-types'
+import { approvalActionName } from '../components/chat/tool-registry/approval-action'
+import type {
+  SessionResult,
+  SessionStatus,
+  TaskNotification,
+  SlashCommandInfo
+} from '../../../shared/types'
 
 /** Send a system notification if the session is not currently focused */
-function notifyIfNeeded(routingId: string, title: string, body: string): void {
+function notifyIfNeeded(routingId: string, title: string, body: string, tag?: string): void {
   const state = useSessionStore.getState()
   // Don't notify if this session is currently active and window is focused
   if (state.activeSessionId === routingId && document.hasFocus()) return
@@ -53,7 +59,57 @@ function notifyIfNeeded(routingId: string, title: string, body: string): void {
 
   const session = state.sessions[routingId]
   const folderName = session?.cwd.split(/[\\/]/).pop() || 'Session'
-  new Notification(title, { body: `${folderName}: ${body}`, silent: false })
+  new Notification(title, {
+    body: `${folderName}: ${body}`,
+    silent: false,
+    ...(tag ? { tag } : {})
+  })
+}
+
+/**
+ * How long a `result` that carries `pendingWake` waits for the extra turn it
+ * announced before it is treated as a plain turn end. cli.js starts that turn
+ * ~17 ms after the result and the core reports it running on its first round
+ * (`system/status requesting`), so this only elapses when the flag was a false
+ * positive: a hand-back that was folded into a round already under way.
+ */
+export const PENDING_WAKE_GRACE_MS = 3000
+const pendingWakeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function cancelPendingWake(routingId: string): void {
+  const timer = pendingWakeTimers.get(routingId)
+  if (timer === undefined) return
+  clearTimeout(timer)
+  pendingWakeTimers.delete(routingId)
+}
+
+/**
+ * The agent's turn ended with nothing that will wake it again: raise attention
+ * and notify, unless work it will resume on is outstanding. The one gate for a
+ * `session:result` and for the grace timer of a `pendingWake` one.
+ */
+function claimTurnEnd(routingId: string): void {
+  const store = useSessionStore.getState()
+  const session = store.sessions[routingId]
+  // The owed sign-in is the REDUCER's now (cleared on the next running
+  // status, ADR-068 §4) — a second clear here would be a second
+  // interpretation of the same fact, and a sealed field has one writer.
+  // Mark attention + notify when the agent's turn ends (user's turn)
+  if (!session?.sdkActive) return
+  // …unless it isn't: a `result` under background work that will wake the agent
+  // (a subagent, a shell, a monitor) is followed by a turn of its own, not by the
+  // user (see hasWakingTask).
+  if (hasWakingTask(session.activeTasks)) return
+  // Nor is it when a prompt the user already queued goes out the moment this
+  // turn ends — every engine forwards the queue at its turn boundary
+  // (ADR-053), and the queue is still unconsumed when this event is observed
+  // (the consume broadcast follows it). A pending sign-in is the exception:
+  // the held queue is not going anywhere until the user acts.
+  if (!session.authRequired && session.queuedItems.some((item) => item.state === 'queued')) return
+  if (store.activeSessionId !== routingId || !document.hasFocus()) {
+    store.setNeedsAttention(routingId, true)
+  }
+  notifyIfNeeded(routingId, 'Ready for input', 'The agent has finished — your turn')
 }
 
 /**
@@ -243,6 +299,24 @@ export function useClaudeEvents(): void {
       }),
       onSyncEvent('session:warning', (routingId, warning) => {
         useSessionStore.getState().addWarning(routingId, warning)
+      }),
+      // An X-Agent finished but its result had to wait in the parent's inbox (ADR-105 §3):
+      // the parent's `wakesParent` record has left, so nothing else would tell the user.
+      // Same rule as a turn end — only when the user is not looking at that session.
+      onSyncEvent('session:dispatch-result-held', (routingId, data) => {
+        const store = useSessionStore.getState()
+        if (store.activeSessionId !== routingId || !document.hasFocus()) {
+          store.setNeedsAttention(routingId, true)
+        }
+        notifyIfNeeded(
+          routingId,
+          data?.name
+            ? `X-Agent ${data.name} finished — result waiting`
+            : 'An X-Agent finished — result waiting',
+          'It is delivered with your next prompt, or when the session is live again',
+          // N held X-Agents of one parent coalesce into one notification.
+          `dispatch-result-held:${routingId}`
+        )
       }),
       onSyncEvent('session:sandbox-violation', (routingId, message) => {
         useSessionStore.getState().addSandboxViolation(routingId, message)
@@ -536,7 +610,10 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
         // the screen from what they are doing.
         const follow = store.settings.remoteFollowActions && data?.createdBy !== 'agent'
         store.registerRemoteSession(routingId, follow)
-        if (!follow) store.setNeedsAttention(routingId, true)
+        // An agent-started session begins running at once and asks for what it
+        // needs through an approval, which raises attention by itself; it is not
+        // waiting on anyone at birth.
+        if (!follow && data?.createdBy !== 'agent') store.setNeedsAttention(routingId, true)
       }
       if (!data?.resumeSessionId) return
       // A resumed session's transcript lives on disk. The HOST seeds its own
@@ -573,6 +650,7 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
       // An in-flight refetch must not re-mint a deleted session (F7). The seed
       // itself no-ops on an unknown id; this stops the read from even starting.
       cancelWatchedRefetch(routingId)
+      cancelPendingWake(routingId)
       return
     }
 
@@ -584,15 +662,27 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
     }
 
     case 'session:approval-request': {
-      const approval = args[1] as { toolName?: string } | undefined
+      const approval = args[1] as
+        | {
+            toolName?: string
+            reRaised?: boolean
+            agent?: { subagentType?: string }
+          }
+        | undefined
+      // A card the host put back after the parent's disconnect (ADR-105 §5) was announced
+      // when it first came: the reducer lists it again, nothing else fires.
+      if (approval?.reRaised) return
       if (store.activeSessionId !== routingId || !document.hasFocus()) {
         store.setNeedsAttention(routingId, true)
       }
-      notifyIfNeeded(
-        routingId,
-        'Permission required',
-        `${approval?.toolName || 'Tool'} needs approval`
-      )
+      // The action as the card names it, not the wire spelling (`mcp__claude-ui-collab__…`,
+      // `dispatch:hand_back`): in the target engine's map for a forwarded X-Agent ask.
+      const sessionEngine = store.sessions[routingId]?.status.engineId
+      const action =
+        approval?.toolName && sessionEngine
+          ? approvalActionName({ ...approval, toolName: approval.toolName }, sessionEngine)
+          : approval?.toolName
+      notifyIfNeeded(routingId, 'Permission required', `${action || 'Tool'} needs approval`)
       return
     }
 
@@ -603,24 +693,34 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
       // status edge (ADR-038): approvals and queue transitions are event-driven,
       // and the disconnect handling — idle + drop approvals + sdkActive false —
       // is the reducer's.
-      if (status?.state === 'running') store.setNeedsAttention(id, false)
+      if (status?.state === 'running') {
+        store.setNeedsAttention(id, false)
+        // The extra turn a pending wake promised has started.
+        cancelPendingWake(routingId)
+        cancelPendingWake(id)
+      }
       return
     }
 
     case 'session:result': {
-      const session = store.sessions[routingId]
-      // The owed sign-in is the REDUCER's now (cleared on the next running
-      // status, ADR-068 §4) — a second clear here would be a second
-      // interpretation of the same fact, and a sealed field has one writer.
-      // Mark attention + notify when the agent's turn ends (user's turn)
-      if (!session?.sdkActive) return
-      // …unless it isn't: a `result` under a running delegated task is followed by
-      // an auto-continued turn, not by the user (see hasAutoContinuingTask).
-      if (hasAutoContinuingTask(session.activeTasks)) return
-      if (store.activeSessionId !== routingId || !document.hasFocus()) {
-        store.setNeedsAttention(routingId, true)
+      // A newer result supersedes a pending wake's grace timer.
+      cancelPendingWake(routingId)
+      // A result cli.js follows with an extra turn of its own (it delivers a
+      // subagent's hand-back) is not the user's turn: that turn's result decides.
+      // The timer is the net for a flag with no turn behind it (see
+      // PENDING_WAKE_GRACE_MS); the next running status cancels it.
+      if ((args[1] as SessionResult | undefined)?.pendingWake) {
+        pendingWakeTimers.set(
+          routingId,
+          setTimeout(() => {
+            pendingWakeTimers.delete(routingId)
+            if (useSessionStore.getState().sessions[routingId]?.status.state === 'running') return
+            claimTurnEnd(routingId)
+          }, PENDING_WAKE_GRACE_MS)
+        )
+        return
       }
-      notifyIfNeeded(routingId, 'Ready for input', 'Claude has finished — your turn')
+      claimTurnEnd(routingId)
       return
     }
 

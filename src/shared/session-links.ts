@@ -39,6 +39,21 @@ export function isRefShaped(input: string): boolean {
  */
 export const RESERVED_SESSION_WORDS: ReadonlySet<string> = new Set(['self', 'origin', 'parent'])
 
+/**
+ * Names an X-Agent may not be given (ADR-105 §4): a name is how its parent addresses it through
+ * `session_message`, so it must never read as one of the words the tools resolve in the caller's
+ * context (`main` is the main session in pi's own `send_message`), nor as a ref. Case-insensitive.
+ */
+export const RESERVED_XAGENT_NAMES: ReadonlySet<string> = new Set([
+  ...RESERVED_SESSION_WORDS,
+  'main'
+])
+
+export function isReservedXAgentName(name: string): boolean {
+  const text = name.trim()
+  return RESERVED_XAGENT_NAMES.has(text.toLowerCase()) || isRefShaped(text)
+}
+
 export type SessionLinkKind = 'started' | 'handoff'
 export type SessionLinkCreator = 'agent' | 'user'
 export type SessionLinkState = 'starting' | 'live' | 'ended' | 'failed'

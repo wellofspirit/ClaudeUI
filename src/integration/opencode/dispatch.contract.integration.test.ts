@@ -109,12 +109,15 @@ import {
   type TestHome
 } from './harness/host'
 import {
+  HAND_BACK_REPORT,
   messageText,
   NOTES_FILE,
   startFixtureProvider,
   WRITE_COMMAND,
   type FixtureProvider
 } from './harness/fixture-provider'
+import { makeFakeDispatchLedger } from '../../test/helpers/fake-dispatch-ledger'
+import { makeFakeDispatchReports } from '../../test/helpers/fake-dispatch-reports'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 const MODEL = 'fixture/fixture-model'
@@ -127,6 +130,8 @@ describeV2('opencode 2.x contract: the dispatcher with an opencode target', () =
   let fixture: FixtureProvider
   let manager: OpencodeServerManager
   let dispatcher: CrossEngineDispatcher
+  /** The same engine with reports required (ADR-105 §3): its targets get `hand_back`. */
+  let reporter: CrossEngineDispatcher
   let cwd: string
   const ends: Promise<{ forced: boolean }>[] = []
   const judgeRequests: JudgeRequest[] = []
@@ -182,8 +187,31 @@ describeV2('opencode 2.x contract: the dispatcher with an opencode target', () =
         judgeRequests.push(req)
         return judgeReplies.shift() ?? '<block>no</block>'
       },
-      recordUsageEvent: (event) => recorded.push(event)
+      recordUsageEvent: (event) => recorded.push(event),
+      // The X-Agent ledger (ADR-105) in memory: this suite does not exercise the DB.
+      ledger: makeFakeDispatchLedger()
     })
+    reporter = new CrossEngineDispatcher({
+      serverManager: manager,
+      makeClient: (conn) => new OpencodeClient(conn),
+      loadEngineConfig: (engine): EngineConfig =>
+        engine === 'opencode' ? ({ dispatch: { defaultModel: MODEL } } as EngineConfig) : {},
+      loadUserRules: () => ({
+        allow: [],
+        deny: [],
+        ask: [],
+        additionalDirectories: [],
+        defaultMode: undefined
+      }),
+      recordUsageEvent: (event) => recorded.push(event),
+      ledger: makeFakeDispatchLedger(),
+      reports: makeFakeDispatchReports(),
+      requireHandBack: true
+    })
+    // The hosted `claudeui_hand_back` reaches the dispatcher that holds the targets (core-services).
+    manager.setHandBack((sessionId, report, callId) =>
+      reporter.handBackFromOpencode(sessionId, report, callId)
+    )
   }, 60_000)
 
   let emitted: Emitted[] = []
@@ -206,7 +234,10 @@ describeV2('opencode 2.x contract: the dispatcher with an opencode target', () =
   })
 
   afterAll(async () => {
-    for (let i = 1; i <= routeCount; i++) dispatcher?.disposeFor(`dispatching-${i}`)
+    for (let i = 1; i <= routeCount; i++) {
+      dispatcher?.disposeFor(`dispatching-${i}`)
+      reporter?.disposeFor(`dispatching-${i}`)
+    }
     // A target's teardown releases after its interrupt settles.
     await new Promise((done) => setTimeout(done, 1_000))
     manager?.dispose()
@@ -290,18 +321,13 @@ describeV2('opencode 2.x contract: the dispatcher with an opencode target', () =
     expect(again).toMatchObject({ sessionId: result.sessionId })
     expect(again.text).toContain(`echo: second ${tag}`)
 
-    // Dispose: the session is deleted (the data dir is shared with the user's
-    // own opencode), then the target's lease is given back.
+    // Dispose: the target's lease is given back and its session STAYS (ADR-105) —
+    // the ledger row resumes it, so deleting it would defeat the point.
     const conn = await manager.acquire(cwd, { waitForHostedTools: false })
     const api = createApi(conn.baseUrl, conn.password, cwd)
     const released = vi.spyOn(manager, 'releaseIfCurrent')
     const endsBefore = ends.length
     dispatcher.disposeFor(ctx.fromRoutingId)
-    await until(
-      async () =>
-        (await api.call('session.get', { params: { sessionID: result.sessionId } })).status === 404,
-      'the target session deleted'
-    )
     // The target's own lease is given back (exactly, on that server)…
     await until(
       () =>
@@ -309,10 +335,44 @@ describeV2('opencode 2.x contract: the dispatcher with an opencode target', () =
       'the target lease released'
     )
     released.mockRestore()
+    expect(
+      (await api.call('session.get', { params: { sessionID: result.sessionId } })).status
+    ).toBe(200)
     // …so with ours released too, the server ends by stdin EOF.
     manager.releaseIfCurrent(cwd, conn)
     await until(() => manager.activeCount === 0 && ends.length > endsBefore, 'the server end')
     await expect(ends.at(-1)).resolves.toEqual({ forced: false })
+  })
+
+  it('hand_back: only a dispatch target is offered the tool, it reports with it, and the run is that report', async () => {
+    // An ordinary dispatch (reports not required): the target is a plain session of the server, so
+    // the hosted tool is denied and hidden from its model.
+    const plainTag = nonce('plain')
+    const plain = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: `just answer ${plainTag}` },
+      dispatchingChat('default')
+    )
+    expect(plain.isError).toBeUndefined()
+    const plainRequests = fixture.mentioning(plainTag)
+    expect(plainRequests.length).toBeGreaterThan(0)
+    for (const request of plainRequests) expect(request.tools).not.toContain('claudeui_hand_back')
+
+    // A dispatch that requires a report: the model is offered the tool, calls it, and the
+    // dispatcher ends the turn with the report as the result (the model's next round is cut).
+    const ctx = dispatchingChat('default')
+    const tag = nonce('report')
+    const result = await reporter.dispatch({ engine: 'opencode', prompt: `[handback] ${tag}` }, ctx)
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toContain('[X-Agent report]')
+    expect(result.text).toContain(`  ${HAND_BACK_REPORT}`)
+    expect(fixture.mentioning(tag)[0].tools).toContain('claudeui_hand_back')
+    expect(of('session:task-notification').at(-1)).toMatchObject({
+      status: 'completed',
+      handback: 'send',
+      summary: HAND_BACK_REPORT
+    })
+    // No approval card: the report is allowed, not asked.
+    expect(of('session:approval-request')).toEqual([])
   })
 
   it("a restricted subagent's deny holds on the opencode target: no edit tool, the file untouched (S9, option a)", async () => {

@@ -1845,6 +1845,38 @@ describe('reducer — subagents', () => {
     expect(clock([start(1, 1000), start(2, 9000)])).toBe(9000)
   })
 
+  it('a task start carries wakesParent into activeTasks, true or false, and omits it when unsent', () => {
+    const record = (data: Record<string, unknown>): unknown =>
+      fold([created(), ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', ...data }]])
+        .sessions['rid'].activeTasks['t1']
+    expect(record({ taskType: 'local_bash', wakesParent: true })).toMatchObject({
+      wakesParent: true
+    })
+    expect(record({ taskType: 'dream', wakesParent: false })).toMatchObject({
+      wakesParent: false
+    })
+    // An older emitter's start: no field written, so a reader falls back to the type set.
+    expect(record({ taskType: 'local_bash' })).not.toHaveProperty('wakesParent')
+  })
+
+  it('a task start carries its description into activeTasks, and omits it when unsent or empty (ADR-105)', () => {
+    const record = (data: Record<string, unknown>): unknown =>
+      fold([
+        created(),
+        [
+          'session:task-started',
+          'rid',
+          { toolUseId: 't1', taskId: 's-1', taskType: 'dispatch', ...data }
+        ]
+      ]).sessions['rid'].activeTasks['t1']
+    expect(record({ description: 'Review auth diff' })).toMatchObject({
+      taskType: 'dispatch',
+      description: 'Review auth diff'
+    })
+    expect(record({})).not.toHaveProperty('description')
+    expect(record({ description: '' })).not.toHaveProperty('description')
+  })
+
   it('a task notification drops the task from activeTasks', () => {
     const s = fold([
       created(),
@@ -1892,6 +1924,54 @@ describe('reducer — subagents', () => {
       ['session:task-notification', 'rid', empty]
     ])
     expect(flipped.sessions['rid'].taskNotifications).toEqual([full])
+  })
+
+  it('keeps isBackgrounded (a default-background dispatch) whichever terminal event arrives last', () => {
+    const base = { taskId: 'a', toolUseId: 't1', status: 'failed', outputFile: '', summary: 'boom' }
+    const flagged = { ...base, isBackgrounded: true }
+    const started: Array<[string, string, unknown]> = [
+      ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', taskType: 'dispatch' }]
+    ]
+    for (const order of [
+      [flagged, base],
+      [base, flagged]
+    ]) {
+      const state = fold([
+        created(),
+        ...started,
+        ...order.map((n): [string, string, unknown] => ['session:task-notification', 'rid', n])
+      ])
+      expect(state.sessions['rid'].taskNotifications).toEqual([flagged])
+    }
+  })
+
+  it('keeps a hand-back report, its flag and its warning whichever terminal event arrives last', () => {
+    const empty = {
+      taskId: 'a',
+      toolUseId: 't1',
+      status: 'completed',
+      outputFile: '',
+      summary: '',
+      runIndex: 1
+    }
+    const full = {
+      ...empty,
+      summary: 'the report',
+      handback: 'flagged',
+      warning: 'SECURITY WARNING: x',
+      usage: { totalTokens: 9, toolUses: 2, durationMs: 300 }
+    }
+    for (const order of [
+      [empty, full],
+      [full, empty]
+    ]) {
+      const s = fold([
+        created(),
+        ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', taskType: 'local_agent' }],
+        ...order.map((n): [string, string, unknown] => ['session:task-notification', 'rid', n])
+      ])
+      expect(s.sessions['rid'].taskNotifications).toEqual([full])
+    }
   })
 
   it('appends a later run instead of folding it, so the runs stay distinguishable', () => {

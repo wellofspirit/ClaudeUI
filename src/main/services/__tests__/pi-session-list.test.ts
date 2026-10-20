@@ -15,6 +15,7 @@ import {
   existsSync,
   readdirSync
 } from 'node:fs'
+import { promises as fsPromises } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -821,8 +822,31 @@ describe('deletePiSession', () => {
     expect(readdirSync(projectDir)).toEqual(['a_keep-me.jsonl'])
   })
 
-  it('resolves without throwing when the session does not exist (best-effort)', async () => {
-    await expect(deletePiSession('never-existed')).resolves.toBeUndefined()
+  it('resolves without throwing when the session does not exist (best-effort), and that counts as deleted', async () => {
+    await expect(deletePiSession('never-existed')).resolves.toBe(true)
+  })
+
+  it('says whether the session is gone: true when it was deleted, false when the file could not be unlinked (the session survives)', async () => {
+    const file = writeSessionFile('--proj-stuck--', '2024-01-01T00-00-00_stuck-me.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'stuck-me',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/stuck'
+      }
+    ])
+    const unlink = vi
+      .spyOn(fsPromises, 'unlink')
+      .mockRejectedValueOnce(Object.assign(new Error('EBUSY: file in use'), { code: 'EBUSY' }))
+    try {
+      await expect(deletePiSession('stuck-me')).resolves.toBe(false)
+      expect(existsSync(file)).toBe(true)
+    } finally {
+      unlink.mockRestore()
+    }
+    await expect(deletePiSession('stuck-me')).resolves.toBe(true)
+    expect(existsSync(file)).toBe(false)
   })
 })
 

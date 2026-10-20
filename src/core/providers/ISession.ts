@@ -14,8 +14,12 @@ import type { HostWindowHandle } from '../host'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
 import type { TurnOriginLedger } from './turn-origin-ledger'
 
-/** Where a non-user item comes from: another session's message, or an agent's note. */
-export type NonUserOrigin = 'session-message' | 'agent-note'
+/**
+ * Where a non-user item comes from: another session's message, an agent's note, or the
+ * result of an X-Agent the session launched (`dispatch-result`, ADR-105 §3: it wakes the
+ * session, has its own wake cap and is not counted in the agent-turn budget).
+ */
+export type NonUserOrigin = 'session-message' | 'agent-note' | 'dispatch-result'
 
 /**
  * One item another session or an agent puts into a session (slice 1a). Never
@@ -32,6 +36,8 @@ export interface NonUserItem {
   wake: boolean
   /** The sender's permission class where known (recorded with a held item). */
   senderModeClass?: 'bypass' | 'prompting'
+  /** An X-Agent result: the `dispatch_report` run it stands for, stamped delivered when it goes out. */
+  reportRun?: number
 }
 
 /**
@@ -262,6 +268,13 @@ export interface ISession {
   setInactivityTimeout(ms: number): void
 
   /**
+   * Arm the idle timer again after something that held it ended: the dispatcher calls it
+   * when an X-Agent of this session ends (ADR-105 §3). A no-op for a busy session or one
+   * whose engine is down. Optional so a minimal test double need not carry it.
+   */
+  rearmIdleTimer?(): void
+
+  /**
    * Re-broadcast an IPC event under this session's routing (same wire shape
    * as the session's own internal `send()`). Used by cross-engine dispatch
    * (ADR-033 M2) to forward a dispatched Claude target's approval requests
@@ -285,9 +298,10 @@ export interface ISession {
   /**
    * Current permission-mode string (Claude-style — 'default'|'plan'|
    * 'acceptEdits'|'auto'|...). Optional: only engines whose sessions are a
-   * cross-engine dispatch CALLER need it (opencode, for ADR-033 M2 autonomy
-   * inheritance). Claude sessions build the dispatch context inline instead
-   * (see collab-tool.ts) and don't implement this.
+   * cross-engine dispatch CALLER need it (ADR-033 M2 autonomy inheritance). Since
+   * ADR-105 every caller engine implements it: a dispatch run reads its parent's
+   * mode through the session manager at each decision, not through the closure the
+   * launching call carried.
    */
   getAutonomyMode?(): string
 

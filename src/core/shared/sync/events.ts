@@ -244,6 +244,12 @@ export interface SyncEventMap {
    * inbox, waiting for its next turn (slice 1a). A replace, so idempotent.
    */
   'session:held-changed': (routingId: string, data: { count: number }) => void
+  /**
+   * An X-Agent's result could not be delivered now and waits in this session's inbox
+   * (ADR-105 §3): the parent is not live, its wake cap is reached or the engine refused it.
+   * A signal only — the client raises attention and notifies; `name` is the X-Agent's.
+   */
+  'session:dispatch-result-held': (routingId: string, data: { name: string }) => void
   /** The context-pressure banner of a session (slice 4): a replace; `null` clears it. */
   'session:context-pressure': (routingId: string, banner: ContextPressureBanner | null) => void
 

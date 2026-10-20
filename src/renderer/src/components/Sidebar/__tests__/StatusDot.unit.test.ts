@@ -32,9 +32,11 @@ describe('deriveSessionDotState', () => {
     expect(derive({ isSdkActive: true, runningSubagents: 0 })).toBe('idle')
   })
 
-  it('stale task records on a dead process are not `subagents`', () => {
-    expect(derive({ runningSubagents: 1 })).toBe('inactive')
-    expect(derive({ isWatching: true, runningSubagents: 1 })).toBe('watching')
+  it('work that outlives a dead process (a dispatched X-Agent) is `subagents`, not `inactive`', () => {
+    // The caller counts by liveness (`countDotTasks`): a count here is work that is really running.
+    expect(derive({ runningSubagents: 1 })).toBe('subagents')
+    expect(derive({ isWatching: true, runningSubagents: 1 })).toBe('subagents')
+    expect(derive({ isWatching: true })).toBe('watching')
   })
 
   it('the active session does not show attention', () => {
@@ -48,20 +50,20 @@ describe('deriveSessionDotState', () => {
 })
 
 describe('statusDotLabel', () => {
-  it('names the state alone with no subagents', () => {
+  it('names the state alone with no background tasks', () => {
     expect(statusDotLabel('running', 0)).toBe('Working')
     expect(statusDotLabel('inactive', 0)).toBe('Not running')
     expect(statusDotLabel('failed', 0)).toBe('Failed')
   })
 
-  it('appends the subagent count, singular and plural', () => {
-    expect(statusDotLabel('running', 1)).toBe('Working · 1 subagent running')
-    expect(statusDotLabel('attention', 3)).toBe('Needs attention · 3 subagents running')
+  it('appends the background-task count, singular and plural (X-Agents, shells and monitors too)', () => {
+    expect(statusDotLabel('running', 1)).toBe('Working · 1 background task running')
+    expect(statusDotLabel('attention', 3)).toBe('Needs attention · 3 background tasks running')
   })
 
   it('the subagents state reads as just the count', () => {
-    expect(statusDotLabel('subagents', 1)).toBe('1 subagent running')
-    expect(statusDotLabel('subagents', 2)).toBe('2 subagents running')
+    expect(statusDotLabel('subagents', 1)).toBe('1 background task running')
+    expect(statusDotLabel('subagents', 2)).toBe('2 background tasks running')
   })
 })
 

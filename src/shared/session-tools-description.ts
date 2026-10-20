@@ -134,7 +134,10 @@ export function sessionToolDescriptions(opts: {
       `not one of your own subagents or teammates.${own} The receiving session sees it labelled as ` +
       'coming from another session, not from the user. The result says delivered (it started a ' +
       'turn), queued (it is busy and takes it into its current turn), held (it will see it at its ' +
-      'next turn; a closed session is never reopened for this) or refused.',
+      'next turn; a closed session is never reopened for this) or refused. To talk to an X-Agent ' +
+      'you launched with dispatch_agent, pass its name or ref (session_list shows them): a running ' +
+      'one takes the message into its current turn, and one that is not running is resumed and ' +
+      'runs on it (its report comes back as a message from it).',
     session_start:
       'Start a new interactive ClaudeUI session, exactly as the user pressing New session would: it ' +
       'appears in their sidebar and runs on its own. Use it for a separate piece of ' +

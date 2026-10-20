@@ -343,7 +343,7 @@ describe('AgentRosterList', () => {
         '1 agent running · 3 agents'
       )
       const [lead, impl] = screen.getAllByTestId('AgentRow')
-      expect(lead.className).toContain('opacity-55')
+      expect(lead.className).not.toMatch(/opacity/)
       expect(impl.getAttribute('data-depth')).toBe('1')
       expect(impl.getAttribute('data-context')).toBeNull()
       expect(lead.querySelector('[data-testid="AgentRow.stop"]')).toBeNull()
@@ -395,12 +395,12 @@ describe('AgentRosterList', () => {
       expect(ids()).toEqual(['lead', 'sh'])
       expect(context()).toEqual(['lead'])
       const [lead, sh] = screen.getAllByTestId('AgentRow')
-      expect(lead.className).toContain('opacity-55')
+      expect(lead.className).not.toMatch(/opacity/)
       expect(lead.querySelector('[data-testid="AgentRow.stop"]')).toBeNull()
       expect(sh.getAttribute('data-kind')).toBe('shell')
       expect(sh.getAttribute('data-depth')).toBe('1')
       expect(sh.getAttribute('data-context')).toBeNull()
-      // Stop is on the shell, not on the dimmed context row above it.
+      // Stop is on the shell, not on the context row above it.
       expect(sh.querySelector('[data-testid="AgentRow.stop"]')).not.toBeNull()
       expect(screen.getAllByTestId('AgentRow.stop')).toHaveLength(1)
       expect(screen.getByTestId('AgentRoster.summary').textContent).toBe(

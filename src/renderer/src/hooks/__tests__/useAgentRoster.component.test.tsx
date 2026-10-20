@@ -410,7 +410,7 @@ describe('useAgentRoster', () => {
       expect(seen?.agents.map((r) => r.runningDescendants)).toEqual([undefined, undefined])
     })
 
-    it('does not count a running shell below a finished agent', async () => {
+    it('counts a running shell below a finished agent, for it and every ancestor', async () => {
       setSession({
         messages: nestedMessages(),
         subagentMessages: nestedBuckets(),
@@ -422,7 +422,13 @@ describe('useAgentRoster', () => {
       })
       await renderProbe()
       expect(seen?.shells.map((r) => r.isRunning)).toEqual([true])
-      expect(seen?.agents.map((r) => r.runningDescendants)).toEqual([undefined, undefined])
+      // The shell was launched by A (B is a sibling of it, not an ancestor).
+      expect(seen?.agents.map((r) => r.runningDescendants)).toEqual([1, undefined])
+      expect(seen?.rows.map((r) => [r.toolUseId, r.runningDescendants])).toEqual([
+        [A, 1],
+        [B, undefined],
+        [A_BG_BASH, undefined]
+      ])
     })
 
     it('counts every depth, and each ancestor once', async () => {
@@ -465,6 +471,27 @@ describe('useAgentRoster', () => {
         ['self', 0],
         ['child', 1]
       ])
+    })
+
+    it("reads a dispatch child's bucket with the child engine's tool map, and what nests in it", () => {
+      // A Codex X-Agent under a Claude session: its `collab:spawnAgent` is no Claude call.
+      const root = [
+        assistantWithTool('d-1', 'tu-d', 'mcp__claude-ui-collab__dispatch_agent', {
+          engine: 'codex',
+          prompt: 'go'
+        })
+      ]
+      const buckets = {
+        'tu-d': [assistantWithTool('d-2', 'tu-sp', 'collab:spawnAgent', { prompt: 'inner' })],
+        'tu-sp': [assistantWithTool('d-3', 'tu-sp2', 'collab:spawnAgent', { prompt: 'deeper' })]
+      }
+      expect(scanAgentTree(root, buckets, 'claude').map((r) => [r.toolUseId, r.depth])).toEqual([
+        ['tu-d', 0],
+        ['tu-sp', 1],
+        ['tu-sp2', 2]
+      ])
+      // The same buckets under a native Codex-less reading would list nothing below the dispatch.
+      expect(scanAgentTree(root, {}, 'claude').map((r) => r.toolUseId)).toEqual(['tu-d'])
     })
 
     it('re-walks only the bucket whose array changed', () => {
@@ -860,6 +887,17 @@ describe('useAgentRoster', () => {
       ])
       expect(bare.hasExplicitName).toBe(false)
       expect(agentRowLabel(bare)).toBe('dig deeper')
+    })
+
+    it('a named dispatch is listed under its name', async () => {
+      await spawnOn('claude', 'mcp__claude-ui-collab__dispatch_agent', {
+        engine: 'pi',
+        model: 'gpt-5',
+        prompt: 'review it',
+        name: 'impl-e1',
+        description: 'Review auth diff'
+      })
+      expect(labels()).toEqual([['impl-e1', true, 'impl-e1']])
     })
 
     it('a dispatch is labelled by where it went', async () => {

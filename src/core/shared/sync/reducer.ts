@@ -1196,6 +1196,8 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         runIndex?: number
         isBackgrounded?: boolean
         startedAt?: number
+        wakesParent?: boolean
+        description?: string
       }>(event, 1)
       if (!routingId || !data?.toolUseId) return state
       const toolUseId = data.toolUseId
@@ -1219,6 +1221,8 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
               taskType: data.taskType ?? '',
               ...(data.runIndex !== undefined ? { runIndex: data.runIndex } : {}),
               ...(data.isBackgrounded !== undefined ? { isBackgrounded: data.isBackgrounded } : {}),
+              ...(data.wakesParent !== undefined ? { wakesParent: data.wakesParent } : {}),
+              ...(data.description ? { description: data.description } : {}),
               ...(startedAt !== undefined ? { startedAt } : {})
             }
           }

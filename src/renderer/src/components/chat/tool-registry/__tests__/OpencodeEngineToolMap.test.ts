@@ -268,6 +268,14 @@ describe('OpencodeEngineToolMap.normalize', () => {
       })
     })
 
+    it('run_in_background marks the dispatch card background; absent or false leaves it a waiting call', () => {
+      const view = (extra: Record<string, unknown>) =>
+        OpencodeEngineToolMap.normalize('task', { engine: 'claude', prompt: 'x', ...extra })
+      expect(view({ run_in_background: true })).toMatchObject({ kind: 'task', background: true })
+      expect(view({ run_in_background: false })).not.toHaveProperty('background')
+      expect(view({})).not.toHaveProperty('background')
+    })
+
     it('the dispatch field has no model when none is given', () => {
       const view = OpencodeEngineToolMap.normalize('task', { engine: 'claude', prompt: 'x' })
       expect(view).toMatchObject({ kind: 'task', dispatch: { engine: 'claude' } })

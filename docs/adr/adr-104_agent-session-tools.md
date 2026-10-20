@@ -2,7 +2,12 @@
 
 **Status:** Accepted (2026-10-18). Implemented on branch `session-tools` (slices: registry fix, delivery and
 origin, native peer messages, links, the tools on Claude, proposals, the other engines, context pressure,
-grouping).
+grouping). Amended by [ADR-105](adr-105_background-dispatch.md): §6's root-agent-only rule has one exception (a
+dispatch target, an X-Agent, may use `session_message` to its dispatching session, and that session to it);
+§5/§6 an X-Agent's result is delivered under its own origin `dispatch-result`, outside the ten-turn budget with a
+cap of 25 wakes, and a held one is flushed with a wake when the parent's engine comes up; a message to an idle
+X-Agent starts its next run (ADR-105 §3, §4), where "messages never resume a closed session" still holds for
+every other session.
 **Relates to:** [ADR-033](adr-033_cross-engine-dispatch.md) (cross-engine dispatch stays the subagent
 feature), [ADR-038](adr-038_event-driven-approval-lifecycle.md), [ADR-050](adr-050_auto-mode-as-the-default-autonomy.md)
 (auto availability gate on a started session's mode), [ADR-059](adr-059_no-silent-model-fallback.md) (spawn errors),
@@ -106,7 +111,7 @@ ClaudeUI's gate is the approval surface, so the frame asserts the receiving sess
 - Turns started by other sessions are bounded (10 since the last user prompt); past that, and for idle,
   closed or out-of-budget targets, items wait in a persistent per-session inbox and are delivered at the
   target's next turn. Messages never resume a closed session.
-- Only a session's root agent can act; subagents, dispatch targets, automations and side questions cannot.
+- Only a session's root agent can act; subagents, dispatch targets, automations and side questions cannot (one exception: an X-Agent and its dispatching session message each other with `session_message`, [ADR-105](adr-105_background-dispatch.md) §4).
 - Every acting call is written to the audit log with the calling session as the actor.
 - Where the rules are enforced: the deny rules (root agent only, plan mode, the start gate, the caps) are
   re-checked by the tool service itself, so they hold in every permission mode. The rules that only ask

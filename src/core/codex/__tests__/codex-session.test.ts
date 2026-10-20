@@ -18,7 +18,15 @@ import { codexItemId } from '../event-mapper'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 import { blobRefOf } from '../../../test/helpers/blob-refs'
 import { onHostPlatform } from '../../../test/helpers/host-platform'
+import {
+  DISPATCH_FOLLOW_UP_GUIDANCE,
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
+  dispatchResultSuffix
+} from '../../../shared/dispatch-agent-description'
 import { slimTranscript } from '../../automode/classifier'
+import { watchDispatchResultFlush } from '../../services/dispatch-result-flush'
+import { deliver } from '../../services/session-delivery'
+import type { SessionManager } from '../../services/session-manager'
 import {
   SESSION_TOOL_NAMES,
   sessionToolDescriptions,
@@ -160,7 +168,38 @@ const usageRows = vi.hoisted(() => vi.fn())
 /** `session_meta` writes, so the persisted context reading (db v24) is observable. */
 const sessionMetaWrites = vi.hoisted(() => vi.fn())
 vi.mock('../../services/usage-recorder', () => ({ recordUsageEvent: usageRows }))
+/** The held inbox (`session_inbox`) the delivery rule writes, in memory. */
+const inbox = vi.hoisted(
+  () =>
+    [] as Array<{
+      id: number
+      target: string
+      origin: string
+      fromKey: string
+      fromTitle: string
+      senderModeClass: string | null
+      body: string
+      deliveredAt: number | null
+    }>
+)
+const heldCount = vi.hoisted(
+  () =>
+    (target: string): number =>
+      inbox.filter((r) => r.target === target && r.deliveredAt === null).length
+)
 vi.mock('../../services/db', () => ({
+  addInboxItem: (item: Record<string, unknown>) => {
+    inbox.push({ id: inbox.length + 1, deliveredAt: null, ...item } as (typeof inbox)[number])
+    return inbox.length
+  },
+  heldInboxItems: (target: string) =>
+    inbox.filter((r) => r.target === target && r.deliveredAt === null),
+  heldInboxCount: heldCount,
+  markInboxDelivered: (id: number) => {
+    const row = inbox.find((r) => r.id === id)
+    if (row) row.deliveredAt = 1
+  },
+  markOldestDispatchReportDelivered: () => {},
   dispatchedCostsByRouting: () => [],
   setSessionMeta: sessionMetaWrites,
   registerCodexFork: (threadId: string, forkedFromId: string) =>
@@ -853,6 +892,27 @@ describe('Codex first session', () => {
     expect(session.getMessages()).toHaveLength(1)
     expect(session.getMessages()[0].content).toEqual([{ type: 'text', text: 'final' }])
     expect(events.mock.calls.some(([channel]) => channel === 'session:stream')).toBe(false)
+  })
+
+  it('raises session:result once per ROOT turn end, ahead of the idle status', async () => {
+    const { session, notify } = fixture()
+    await session.run('hello')
+    const channels = (): string[] => events.mock.calls.map(([channel]) => channel as string)
+    expect(channels()).not.toContain('session:result')
+    const done = { threadId: 'root', turn: { id: 'turn', status: 'completed', items: [] } }
+    notify('turn/completed', { ...done, turn: { ...done.turn, durationMs: 1234 } })
+    const results = events.mock.calls.filter(([channel]) => channel === 'session:result')
+    expect(results).toHaveLength(1)
+    expect(results[0][1][1]).toMatchObject({ durationMs: 1234, result: '', sessionId: 'root' })
+    // The same order every other engine uses: result first, then the idle status.
+    const idleAt = events.mock.calls.findLastIndex(
+      ([channel, args]) =>
+        channel === 'session:status' && (args as [string, { state: string }])[1].state === 'idle'
+    )
+    expect(channels().indexOf('session:result')).toBeLessThan(idleAt)
+    // A replayed `turn/completed` for the same turn is the latch's no-op, not a second result.
+    notify('turn/completed', done)
+    expect(channels().filter((channel) => channel === 'session:result')).toHaveLength(1)
   })
 
   it('rejects a concurrent direct send after coalesced startup and holds a queued one', async () => {
@@ -2229,6 +2289,41 @@ describe('Codex non-user delivery', () => {
     expect(slimTranscript(rows)).toBe('')
   })
 
+  it("an X-Agent's result (dispatch-result) is worded as its own X-Agent's and its native user item is a 'Report from X-Agent' note", async () => {
+    const { session, request, notify } = fixture()
+    const result = {
+      origin: 'dispatch-result' as const,
+      text: 'X-Agent impl-e1 finished: done',
+      from: { key: 's-abc234', title: 'impl-e1' },
+      wake: true
+    }
+    expect(await session.deliverNonUser(result)).toBe('started')
+    const sent = starts(request)[0] as {
+      clientUserMessageId: string
+      input: Array<{ text: string }>
+    }
+    expect(sent.input[0].text).toBe(
+      [
+        '<session-message from="x-agent:s-abc234" title="impl-e1">',
+        'X-Agent impl-e1 finished: done',
+        '</session-message>',
+        'This is the result of an X-Agent you launched with dispatch_agent, not a message from the user.'
+      ].join('\n')
+    )
+    notify('item/completed', nativeUserItem(sent.clientUserMessageId, sent.input[0].text))
+    const rows = session.getMessages()
+    expect(rows.map((m) => m.role)).toEqual(['system'])
+    expect(rows[0].content).toEqual([
+      {
+        type: 'context_note',
+        title: 'Report from X-Agent impl-e1',
+        fragments: [
+          { text: 'X-Agent impl-e1 finished: done', label: 'from an X-Agent, not from you' }
+        ]
+      }
+    ])
+  })
+
   it('a refused steer is unavailable (nothing was delivered, the caller holds it); an ambiguous timeout is not sent again', async () => {
     const { session, request } = fixture()
     await session.run('hello')
@@ -2306,11 +2401,55 @@ describe('Codex non-user delivery — review follow-ups', () => {
     expect(session.getMessages().map((m) => m.role)).toEqual(['user'])
   })
 
-  it('is live while open, and not once closed (M4)', () => {
+  it('is live once its thread is up on a connected host, and not before or once closed (M4, ADR-105 §3)', async () => {
     const { session } = fixture()
+    // Constructed, no host attached and no thread yet: nothing to deliver into.
+    expect(session.isEngineLive()).toBe(false)
+    await session.run('hello')
     expect(session.isEngineLive()).toBe(true)
     session.dispose()
     expect(session.isEngineLive()).toBe(false)
+  })
+
+  it('an armed parent flushes held X-Agent results only once its thread is up, not on its first idle (ADR-105 §3)', async () => {
+    const { session, request } = fixture()
+    const manager = {
+      get: (id: string) => (id === 'temporary' ? session : undefined)
+    } as unknown as SessionManager
+    const observers = new Set<(channel: string, args: unknown[]) => void>()
+    events.mockImplementation((channel: string, args: unknown[]) => {
+      for (const observer of observers) observer(channel, args)
+    })
+    const watch = watchDispatchResultFlush(manager, (observer) => {
+      observers.add(observer)
+      return () => observers.delete(observer)
+    })
+    try {
+      // Held while this parent had no live object; its edge is armed.
+      await deliver({ get: () => undefined } as unknown as SessionManager, 'temporary', {
+        origin: 'dispatch-result',
+        text: 'X-Agent impl-e1 finished: done',
+        from: { key: 's-abc234', title: 'impl-e1' },
+        wake: true
+      })
+      watch.arm('temporary')
+      // The status a new object says before any thread exists: no edge.
+      events('session:status', ['temporary', { state: 'idle' }])
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(heldCount('temporary')).toBe(1)
+      expect(request.mock.calls.some(([method]) => method === 'turn/start')).toBe(false)
+
+      // The thread starts: its idle is the edge and the held result goes out.
+      await session.run('hello')
+      await vi.waitFor(() => expect(heldCount('temporary')).toBe(0))
+      const sent = JSON.stringify(
+        request.mock.calls.filter(([m]) => m === 'turn/steer' || m === 'turn/start')
+      )
+      expect(sent).toContain('x-agent:s-abc234')
+    } finally {
+      watch.stop()
+      events.mockReset()
+    }
   })
 })
 
@@ -2664,12 +2803,15 @@ describe('Codex cross-engine dispatch', () => {
       properties: {
         engine: { type: 'string', enum: ['claude', 'opencode', 'pi'] },
         prompt: { type: 'string' },
-        model: { type: 'string' },
-        session_id: { type: 'string' }
+        model: { type: 'string' }
       },
       required: ['engine', 'prompt'],
       additionalProperties: false
     })
+    // session_id left the tool (ADR-105 §4): a follow-up is a session_message.
+    expect(spec.inputSchema.properties).not.toHaveProperty('session_id')
+    expect(spec.description).not.toContain('session_id')
+    expect(spec.description).toContain(DISPATCH_FOLLOW_UP_GUIDANCE)
   })
 
   it('voice follows the host: on where the speech pack has a runtime, off where it has none (ADR-101 §8)', () => {
@@ -2696,8 +2838,7 @@ describe('Codex cross-engine dispatch', () => {
     const { result } = dispatchCall(f, {
       engine: 'claude',
       prompt: 'summarise the repo',
-      model: 'haiku',
-      session_id: 'prior'
+      model: 'haiku'
     })
     const card = f.cards().at(-1)!
     expect(card).toMatchObject({
@@ -2706,8 +2847,7 @@ describe('Codex cross-engine dispatch', () => {
       input: {
         engine: 'claude',
         prompt: 'summarise the repo',
-        model: 'haiku',
-        session_id: 'prior'
+        model: 'haiku'
       }
     })
     expect(dispatcher.dispatch).not.toHaveBeenCalled()
@@ -2716,14 +2856,38 @@ describe('Codex cross-engine dispatch', () => {
     expect(dispatcher.dispatch).toHaveBeenCalledOnce()
   })
 
+  it('answers its CURRENT permission mode, for a dispatch run launched earlier to read (ADR-105)', async () => {
+    const f = fixture({ permissionMode: 'acceptEdits' })
+    await f.session.run('hello')
+    expect(f.session.getAutonomyMode()).toBe('acceptEdits')
+  })
+
+  it.each([
+    ['run_in_background:true', { run_in_background: true }, true, true],
+    // The Codex tool call is always the top-level agent's: unspecified is background too.
+    ['unspecified (the default)', {}, true, true],
+    ['run_in_background:false (waits for the report)', { run_in_background: false }, false, false]
+  ])('dispatches with %s (ADR-105 §2)', async (_label, extra, background, cardShowsIt) => {
+    const f = fixture()
+    await f.session.run('hello')
+    const { result } = dispatchCall(f, { engine: 'pi', prompt: 'run the tests', ...extra })
+    const card = f.cards().at(-1)!
+    if (cardShowsIt) expect(card.input).toMatchObject({ run_in_background: true })
+    else expect(card.input).not.toHaveProperty('run_in_background')
+    f.session.resolveApproval(card.requestId, 'allow')
+    await result
+    const sent = dispatcher.dispatch.mock.calls.at(-1)![0]
+    if (background) expect(sent).toMatchObject({ runInBackground: true })
+    else expect(sent).not.toHaveProperty('runInBackground')
+  })
+
   it('hands the dispatcher the exact request and a context bound to the call id', async () => {
     const f = fixture({ permissionMode: 'acceptEdits' })
     await f.session.run('hello')
     const { result } = dispatchCall(f, {
       engine: 'pi',
       prompt: 'run the tests',
-      model: 'anthropic/claude-haiku',
-      session_id: 'earlier'
+      model: 'anthropic/claude-haiku'
     })
     f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
     await result
@@ -2732,7 +2896,7 @@ describe('Codex cross-engine dispatch', () => {
         engine: 'pi',
         prompt: 'run the tests',
         model: 'anthropic/claude-haiku',
-        sessionId: 'earlier'
+        runInBackground: true
       },
       expect.objectContaining({
         fromEngine: 'codex',
@@ -2746,22 +2910,67 @@ describe('Codex cross-engine dispatch', () => {
     )
   })
 
-  it('maps the dispatch result onto the tool response, session_id suffix included', async () => {
+  it('hands the dispatcher the name and description the model gave (ADR-105)', async () => {
+    const f = fixture({ permissionMode: 'acceptEdits' })
+    await f.session.run('hello')
+    const { result } = dispatchCall(f, {
+      engine: 'pi',
+      prompt: 'run the tests',
+      name: 'impl-e1',
+      description: 'Review auth diff'
+    })
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+    await result
+    expect(dispatcher.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'impl-e1', description: 'Review auth diff' }),
+      expect.anything()
+    )
+  })
+
+  it('maps the dispatch result onto the tool response, agent ref suffix included', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    dispatcher.dispatch.mockResolvedValueOnce({
+      text: 'target answer',
+      sessionId: 'target-session',
+      agentRef: 's-abc123'
+    } as never)
+    const { result } = dispatchCall(f)
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+    await expect(result).resolves.toEqual({
+      contentItems: [
+        { type: 'inputText', text: `target answer${dispatchResultSuffix('s-abc123')}` }
+      ],
+      success: true
+    })
+  })
+
+  it('a result without an agent ref gets no suffix', async () => {
     const f = fixture()
     await f.session.run('hello')
     const { result } = dispatchCall(f)
     f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
     await expect(result).resolves.toEqual({
-      contentItems: [
-        {
-          type: 'inputText',
-          text:
-            'target answer\n\n[dispatch session_id: target-session — pass it as session_id to ' +
-            'continue this agent]'
-        }
-      ],
+      contentItems: [{ type: 'inputText', text: 'target answer' }],
       success: true
     })
+  })
+
+  it('a call from a thread started before the removal that still sends session_id gets the guiding error, no card and no dispatch', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    const before = f.cards().length
+    const { result } = dispatchCall(f, {
+      engine: 'claude',
+      prompt: 'continue',
+      session_id: 'prior'
+    })
+    await expect(result).resolves.toEqual({
+      contentItems: [{ type: 'inputText', text: DISPATCH_SESSION_ID_REMOVED_TEXT }],
+      success: false
+    })
+    expect(f.cards()).toHaveLength(before)
+    expect(dispatcher.dispatch).not.toHaveBeenCalled()
   })
 
   it('reports a failed dispatch as an unsuccessful call carrying the dispatcher text', async () => {
@@ -2911,9 +3120,11 @@ describe('Codex cross-engine dispatch', () => {
     f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
     await vi.waitFor(() => expect(dispatcher.dispatch).toHaveBeenCalled())
     await f.session.interrupt()
+    // The parent's own interrupt ends the calls it awaits, never a background run (ADR-105).
     expect(dispatcher.stopDispatch).toHaveBeenCalledWith(
       'codex:["root","turn","dispatch-1"]',
-      'temporary'
+      'temporary',
+      { blockingOnly: true }
     )
     f.session.dispose()
     expect(dispatcher.disposeFor).toHaveBeenCalledWith('temporary')
@@ -2992,6 +3203,24 @@ describe('Codex native children', () => {
     expect(sent('session:item-open')).toHaveLength(1)
   })
 
+  it("raises no session:result for a child thread's turn end", async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    f.notify('turn/started', { threadId: 'child', turn: { id: 'child-turn' } })
+    f.notify('turn/completed', {
+      threadId: 'child',
+      turn: { id: 'child-turn', status: 'completed', items: [] }
+    })
+    expect(sent('session:result')).toEqual([])
+    // The parent's own turn end still raises exactly one.
+    f.notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    expect(sent('session:result')).toHaveLength(1)
+  })
+
   it('routes a child message into the subagent transcript under the spawning card', async () => {
     const f = fixture()
     await f.session.run('hello')
@@ -3052,6 +3281,61 @@ describe('Codex native children', () => {
         toolUseId: PARENT_CARD,
         toolResultToolUseId: 'codex:["child","child-turn","c1"]',
         result: '/isolated',
+        isError: false
+      }
+    ])
+  })
+
+  it("forwards a child's imageView as ONE subagent-tool-result carrying the bytes", async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codex-child-image-view-'))
+    try {
+      const png = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+        'base64'
+      )
+      const path = join(directory, 'shot.png')
+      writeFileSync(path, png)
+      const f = fixture()
+      await f.session.run('hello')
+      spawn(f)
+      f.notify('item/completed', {
+        threadId: 'child',
+        turnId: 'child-turn',
+        item: { type: 'imageView', id: 'iv', path }
+      })
+      // The read is not awaited by the notification pump.
+      await new Promise((done) => setTimeout(done, 50))
+      // Exactly one: the reducer appends subagent results, so a second (the
+      // mapper's empty one) would sit next to the one with the bytes.
+      expect(sent('session:subagent-tool-result')).toEqual([
+        {
+          toolUseId: PARENT_CARD,
+          toolResultToolUseId: codexItemId('child', 'child-turn', 'iv'),
+          result: '',
+          isError: false,
+          images: [{ mediaType: 'image/png', ...blobRefOf(png.toString('base64')) }]
+        }
+      ])
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("still resolves a child's imageView, without images, when the file cannot be read", async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    f.notify('item/completed', {
+      threadId: 'child',
+      turnId: 'child-turn',
+      item: { type: 'imageView', id: 'iv', path: join(tmpdir(), 'codex-child-absent.png') }
+    })
+    await new Promise((done) => setTimeout(done, 50))
+    expect(sent('session:subagent-tool-result')).toEqual([
+      {
+        toolUseId: PARENT_CARD,
+        toolResultToolUseId: codexItemId('child', 'child-turn', 'iv'),
+        result: '',
         isError: false
       }
     ])

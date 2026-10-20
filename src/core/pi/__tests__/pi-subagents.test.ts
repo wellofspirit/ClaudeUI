@@ -922,6 +922,8 @@ describe('PiSubagentManager — background runs (ADR-089 S3)', () => {
     const child = fake.children[0]
     const started = sent.find(([c]) => c === 'session:task-started')![1] as Record<string, unknown>
     expect(started).toMatchObject({ toolUseId: 'bg-1', runIndex: 1, isBackgrounded: true })
+    // A finished background child wakes its owner, so the record says it is work.
+    expect(started.wakesParent).toBe(true)
     expect(result.isError).toBeUndefined()
     expect(result.content[0].text).toBe(
       'Async agent launched successfully.\n' +
@@ -1605,6 +1607,7 @@ describe('PiSubagentManager — messaging (ADR-089 S3b)', () => {
       unknown
     >
     expect(firstStart.isBackgrounded).toBe(false)
+    expect(firstStart.wakesParent).toBe(true)
 
     expect(mgr.background('call-s')).toEqual({ success: true })
     const r = await pending
@@ -1615,7 +1618,8 @@ describe('PiSubagentManager — messaging (ADR-089 S3b)', () => {
       toolUseId: 'call-s',
       runIndex: 1,
       startedAt: firstStart.startedAt,
-      isBackgrounded: true
+      isBackgrounded: true,
+      wakesParent: true
     })
     expect(mgr.liveBackgroundCount).toBe(1)
     expect(mgr.background('call-s')).toMatchObject({ success: false })

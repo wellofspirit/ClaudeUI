@@ -112,6 +112,13 @@ export interface PiHostedToolResult {
    * put anything here that must not be stored.
    */
   details?: Record<string, unknown>
+  /**
+   * pi's own end-of-turn hint (`AgentToolResult.terminate`): pi skips its automatic follow-up
+   * after a tool batch whose every result says so. `hand_back` (ADR-105 §3) sets it, so a
+   * dispatch target's turn ends right after its report. Like `details`, it reaches pi
+   * verbatim.
+   */
+  terminate?: boolean
 }
 
 export type PiHostedToolHandler = (payload: PiHostedToolPayload) => Promise<PiHostedToolResult>

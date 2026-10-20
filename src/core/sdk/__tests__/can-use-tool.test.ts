@@ -152,6 +152,41 @@ describe('can_use_tool control_response shape', () => {
     expect(inner).not.toHaveProperty('permitted')
   })
 
+  it('hands the callback the ask’s decision reason, its type and its code', async () => {
+    const seen: Array<Record<string, unknown>> = []
+    const canUseTool: CanUseTool = async (_name, input, ctx) => {
+      seen.push({ ...ctx })
+      return { behavior: 'allow', updatedInput: input }
+    }
+    const { stdinLines, emitLine } = await runWith(canUseTool)
+    emitLine({
+      type: 'control_request',
+      request_id: 'r-reason',
+      request: {
+        subtype: 'can_use_tool',
+        tool_name: 'mcp__s__t',
+        input: {},
+        tool_use_id: 'toolu_r',
+        decision_reason: '3 consecutive actions were blocked.',
+        decision_reason_type: 'classifier',
+        decision_reason_code: 'classifier_transcript_too_long'
+      }
+    })
+    await waitFor(() =>
+      stdinLines.find(
+        (l) =>
+          l.type === 'control_response' &&
+          (l.response as { request_id?: string } | undefined)?.request_id === 'r-reason'
+      )
+    )
+    expect(seen[0]).toMatchObject({
+      decisionReason: '3 consecutive actions were blocked.',
+      decisionReasonType: 'classifier',
+      decisionReasonCode: 'classifier_transcript_too_long',
+      toolUseId: 'toolu_r'
+    })
+  })
+
   it('deny-branch response uses behavior:"deny" with message (not permitted:false)', async () => {
     const canUseTool: CanUseTool = async () => ({
       behavior: 'deny',

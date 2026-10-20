@@ -192,6 +192,8 @@ vi.mock('../../core/opencode/OpencodeServerManager', () => ({
     isBinaryAvailable: vi.fn(() => false),
     setCallerSessionLookup: vi.fn(),
     setDispatchAgent: vi.fn(),
+    setHandBack: vi.fn(),
+    setXAgentCaller: vi.fn(),
     dispose: vi.fn()
   }
 }))
@@ -231,6 +233,7 @@ vi.mock('../../core/codex/codex-locate', () => ({
 vi.mock('../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: {
     dispatch: vi.fn(),
+    configureParents: vi.fn(() => () => {}),
     resolveApproval: vi.fn(() => false),
     disposeFor: vi.fn(),
     stopDispatch: vi.fn(() => false)

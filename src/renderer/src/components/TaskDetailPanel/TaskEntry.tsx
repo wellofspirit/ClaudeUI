@@ -3,15 +3,25 @@ import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { useStickToBottom } from '../../hooks/useStickToBottom'
 import { MarkdownRenderer } from '../chat/MarkdownRenderer'
-import { SubagentOutputBody } from '../chat/SubagentOutputBody'
+import { SubagentOutputBody, dispatchChildEngine } from '../chat/SubagentOutputBody'
+import { HandbackReport, hasHandbackReport } from '../chat/HandbackReport'
 import { TerminalView } from '../chat/TerminalView'
 import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
-import { deriveTaskState, latestNotification } from '../chat/task-state'
+import {
+  deriveTaskState,
+  dispatchEndNote,
+  isDispatchToolName,
+  isQueuedDispatchCall,
+  latestNotification,
+  taskFailureText
+} from '../chat/task-state'
+import { armStopPillFallback } from '../../lib/stop-pill'
 import { findTaskBlocks } from './utils'
 import { taskElapsedLabel, useTicker } from '../chat/TaskCard'
 import { requestSubagentTranscript } from '../../lib/subagent-prefetch'
 import { useSubagentPending } from '../../hooks/useSubagentPending'
-import type { ToolView } from '../../../../shared/tool-kinds'
+import { taskHeaderLabel, type ToolView } from '../../../../shared/tool-kinds'
+import type { EngineId } from '../../../../shared/types'
 
 type TaskView = Extract<ToolView, { kind: 'task' }>
 
@@ -46,6 +56,37 @@ function BashOutputPanel({
   )
 }
 
+/**
+ * The engine whose tool names fill `ownerToolUseId`'s transcript: a dispatch's
+ * target, else the engine of whoever spawned that owner (walked up the nesting).
+ * `fallback` is the active session's engine.
+ */
+function nestedCallEngine(
+  ownerToolUseId: string,
+  messages: Parameters<typeof findTaskBlocks>[0],
+  subagentMsgs: NonNullable<Parameters<typeof findTaskBlocks>[2]>,
+  fallback: EngineId,
+  depth = 0
+): EngineId {
+  if (depth > 8) return fallback
+  const {
+    taskBlock,
+    resultBlock,
+    ownerToolUseId: grand
+  } = findTaskBlocks(messages, ownerToolUseId, subagentMsgs)
+  if (!taskBlock) return fallback
+  const issuer = grand
+    ? nestedCallEngine(grand, messages, subagentMsgs, fallback, depth + 1)
+    : fallback
+  const view = engineToolMap(issuer).normalize(
+    'task',
+    taskBlock.toolInput || {},
+    resultBlock ?? undefined,
+    taskBlock.toolName
+  ) as TaskView
+  return dispatchChildEngine(view) ?? issuer
+}
+
 /** The stand-in for a nested agent's entry while its parent's transcript is fetched (ADR-102 Arc 2). */
 export function TaskEntryLoading(): React.JSX.Element {
   return (
@@ -73,6 +114,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const activeTasks = useActiveSession((s) => s.activeTasks)
   const engineId = useActiveSession((s) => s.status.engineId)
+  const turnRunning = useActiveSession((s) => s.status.state === 'running')
   const [expanded, setExpanded] = useState(true)
   // The body is the scroller; the elements inside it are what grow. It only
   // exists while expanded, and which child holds the growing content depends on
@@ -81,7 +123,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
 
   // Nested-aware: a nested agent's call and result live in its parent's bucket,
   // while its own transcript is `subagentMsgs[toolUseId]` as for any agent.
-  const { taskBlock, resultBlock, ownerToolUseId } = findTaskBlocks(
+  const { taskBlock, resultBlock, ownerToolUseId, siblings } = findTaskBlocks(
     messages,
     toolUseId,
     subagentMsgs
@@ -112,21 +154,35 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   if (!taskBlock) return null
 
   const input = taskBlock.toolInput || {}
-  const description = String(input.description || input.prompt || '')
   const hasSubagentOutput = msgs.length > 0
-  const isBash = engineToolMap(engineId).kindOf(taskBlock.toolName) === 'command'
+  // The engine that issued this task call: the session's, unless the call sits
+  // in a dispatch child's transcript (a nested entry), whose tool names are the
+  // child's engine's.
+  const callEngine = ownerToolUseId
+    ? nestedCallEngine(ownerToolUseId, messages, subagentMsgs, engineId)
+    : engineId
+  const isBash = engineToolMap(callEngine).kindOf(taskBlock.toolName) === 'command'
   // The engine's normalized view, with the result — the same reading TaskCard
   // and the roster use (pi decides background from the launch result), plus a
   // lifecycle record's own word.
+  const taskView = engineToolMap(callEngine).normalize(
+    'task',
+    input,
+    resultBlock ?? undefined,
+    taskBlock.toolName
+  ) as TaskView
+  // The name the card shows: a dispatch's description is the X-Agent's own (its name or
+  // "Dispatch: <engine>"), not the raw prompt the input carries.
+  const description = isBash
+    ? String(input.command || input.description || input.prompt || '')
+    : taskView.description || taskView.prompt
   const isBackground =
-    !!(
-      engineToolMap(engineId).normalize(
-        'task',
-        input,
-        resultBlock ?? undefined,
-        taskBlock.toolName
-      ) as TaskView
-    ).background || activeTasks[toolUseId]?.isBackgrounded === true
+    !!taskView.background ||
+    activeTasks[toolUseId]?.isBackgrounded === true ||
+    latestNotification(taskNotifications, toolUseId)?.isBackgrounded === true
+  // The engine of THIS task's transcript: a dispatch's target, else the issuer's
+  // (a native subagent runs on the engine that spawned it).
+  const childEngine = dispatchChildEngine(taskView) ?? callEngine
   const progress = taskProgressMap[toolUseId]
   const hasResult = !!resultBlock
   const resultText =
@@ -143,13 +199,41 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   // immediate "launched successfully" tool_result (so `resultBlock.isError` is
   // false) — a FAILED one showed no failure badge in the panel at all.
   const hasActiveTask = !!activeTasks[toolUseId]
-  const { isRunning, isError, isStopped, isLoaded } = deriveTaskState({
+  // A dispatch call that has not started (the card says so too): not running, Stop kept.
+  const queued = isQueuedDispatchCall({
+    engineId: callEngine,
+    turnRunning,
+    content: siblings,
+    block: taskBlock
+  })
+  const { isRunning, isQueued, isError, isStopped, isLoaded } = deriveTaskState({
     isHistorical: false,
     hasActiveTask,
     isBackground,
     hasResult,
     notification: bgNotification,
-    resultIsError: resultBlock?.isError ?? false
+    resultIsError: resultBlock?.isError ?? false,
+    queued
+  })
+  // The shared X-Agent test of the card (a tool name, so an engine this build does not know
+  // is one too), and the two lines the body below cannot show for a background call.
+  const isDispatch = isDispatchToolName(taskBlock.toolName)
+  const hasHandback = hasHandbackReport(bgNotification)
+  const failureSummary = taskFailureText({
+    isError,
+    resultIsError: resultBlock?.isError ?? false,
+    resultText,
+    showsOutput: hasSubagentOutput || subagentPending,
+    isBackground
+  })
+  const endNote = dispatchEndNote({
+    isDispatch,
+    notification: bgNotification,
+    settled: !isRunning && !isQueued,
+    hasHandback,
+    isBackground,
+    resultText,
+    failureShown: failureSummary !== ''
   })
   const elapsed = taskElapsedLabel({
     isRunning,
@@ -162,6 +246,13 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const statusBadge = isError ? (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">
       failed
+    </span>
+  ) : isQueued ? (
+    <span
+      data-testid="TaskEntry.queued"
+      className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-bg-hover text-text-muted shrink-0"
+    >
+      queued
     </span>
   ) : !isRunning ? (
     isStopped ? (
@@ -192,16 +283,15 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     e.stopPropagation()
     if (!activeSessionId) return
     setTaskStopping(activeSessionId, toolUseId)
-    const result = await window.api.stopTask(activeSessionId, toolUseId)
+    // A dispatch is stopped through the dispatcher, which arms the stop for a call that has
+    // not started; without the flag Claude's stopTask finds no task and interrupts the turn.
+    const result = await window.api.stopTask(activeSessionId, toolUseId, isDispatch)
     if (!result.success) {
       window.api.logError('TaskDetailPanel', `Failed to stop task: ${result.error}`)
       clearTaskStopping(activeSessionId, toolUseId)
       return
     }
-    setTimeout(() => {
-      const rid = useSessionStore.getState().activeSessionId
-      if (rid) clearTaskStopping(rid, toolUseId)
-    }, 10000)
+    armStopPillFallback(activeSessionId, toolUseId)
   }
 
   return (
@@ -228,10 +318,10 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
           <polyline points="6 9 12 15 18 9" />
         </svg>
         <span className="text-[13px] text-accent font-medium shrink-0">
-          {isBash ? 'Bash' : 'Task'}
+          {isBash ? 'Bash' : taskHeaderLabel(taskView)}
         </span>
         <span className="text-[12px] text-text-primary truncate flex-1 text-left">
-          {isBash ? String(input.command || description) : description}
+          {description}
         </span>
         {statusBadge}
         {elapsed !== undefined && (
@@ -242,7 +332,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
             {elapsed}
           </span>
         )}
-        {isRunning && !isStopping && canStop && (
+        {(isRunning || isQueued) && !isStopping && canStop && (
           <button
             data-testid="TaskEntry.stop"
             onClick={handleStopTask}
@@ -293,6 +383,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
                   isBackground={isBackground}
                   elapsedLabel={elapsed}
                   size="md"
+                  engineId={childEngine}
                 />
               </div>
             ) : subagentPending ? (
@@ -312,7 +403,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
               />
             ) : isBash && hasResult && resultText ? (
               <TerminalView text={resultText} maxHeight="none" />
-            ) : hasResult && resultText && !isBackground ? (
+            ) : hasResult && resultText && !isBackground && !hasHandback ? (
               <div ref={contentRef} className="text-[12px] text-text-primary/80 leading-[1.6]">
                 <MarkdownRenderer content={resultText} />
               </div>
@@ -323,6 +414,28 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
                 {elapsed !== undefined && <span className="font-mono text-[11px]">{elapsed}</span>}
               </div>
             ) : null}
+            {/* The report a SubagentHandback subagent delivered (or didn't). */}
+            <HandbackReport
+              notification={bgNotification}
+              xAgent={isDispatch}
+              className="mt-3 border-t border-border pt-3 shrink-0"
+            />
+            {failureSummary && (
+              <div
+                data-testid="TaskEntry.failureSummary"
+                className="mt-3 border-t border-border pt-3 shrink-0 text-[12px] text-danger whitespace-pre-wrap break-words"
+              >
+                {failureSummary}
+              </div>
+            )}
+            {endNote && (
+              <div
+                data-testid="TaskEntry.endNote"
+                className="mt-3 border-t border-border pt-3 shrink-0 text-[12px] text-text-muted whitespace-pre-wrap break-words"
+              >
+                {endNote}
+              </div>
+            )}
           </div>
           {!following && (
             <button

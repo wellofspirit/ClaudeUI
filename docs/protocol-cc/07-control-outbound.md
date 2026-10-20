@@ -476,10 +476,14 @@ Kill a running task by ID.
 
 **Response (success):** empty `{}`.
 
-**Side effects:** Calls `yi8(task_id, ...)`:
+**Side effects (2.1.293):** the handler (`Tt`, `cli.js@char34307421`) goes through the shared stop path
+used by the model-side `TaskStop` tool (`fSe`, `@char16445532`), which calls the task type's `kill`
+(`qC`, `@char12454656` for agents): abort the task's controller, mark the record killed, and notify its
+owner ("was stopped by …"). On the wire: `task_updated` (status `killed`) then `task_notification`
+(status `stopped`).
 
-- `local_bash` task → SIGTERM the shell process.
-- `local_agent` task → resolve its stop-signal Promise.
+- `local_bash` task → the shell process is terminated.
+- `local_agent` task → its abort controller fires.
 
 **Timing:** fast.
 

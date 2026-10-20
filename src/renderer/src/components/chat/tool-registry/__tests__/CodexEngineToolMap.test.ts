@@ -35,7 +35,7 @@ describe('CodexEngineToolMap.kindOf', () => {
 
 describe('CodexEngineToolMap — hosted tools', () => {
   it('names the hosted tools the way every other engine does', () => {
-    expect(CodexEngineToolMap.displayName('render_mermaid')).toBe('Mermaid')
+    expect(CodexEngineToolMap.displayName('render_mermaid')).toBe('Diagram')
     expect(CodexEngineToolMap.displayName('create_mockup')).toBe('Mockup')
     expect(CodexEngineToolMap.displayName('show_mockup')).toBe('Mockup')
   })
@@ -88,7 +88,7 @@ describe('CodexEngineToolMap — hosted tools', () => {
  */
 describe('CodexEngineToolMap — dispatch_agent', () => {
   it('names it the way every other engine does', () => {
-    expect(CodexEngineToolMap.displayName('dispatch_agent')).toBe('Dispatch')
+    expect(CodexEngineToolMap.displayName('dispatch_agent')).toBe('X-Agent')
   })
 
   it('task: the target engine is the discriminator, the model rides the dispatch field', () => {
@@ -104,6 +104,14 @@ describe('CodexEngineToolMap — dispatch_agent', () => {
       prompt: 'summarise the repo',
       dispatch: { engine: 'claude', model: 'haiku' }
     })
+  })
+
+  it('run_in_background marks the dispatch card background; absent or false leaves it a waiting call', () => {
+    const view = (extra: Record<string, unknown>) =>
+      CodexEngineToolMap.normalize('task', { engine: 'claude', prompt: 'x', ...extra })
+    expect(view({ run_in_background: true })).toMatchObject({ kind: 'task', background: true })
+    expect(view({ run_in_background: false })).not.toHaveProperty('background')
+    expect(view({})).not.toHaveProperty('background')
   })
 
   it('task: no model means the engine alone', () => {

@@ -3,6 +3,7 @@ import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
 import type {
+  ActiveTask,
   ChatMessage,
   ContentBlock,
   DirectoryGroup,
@@ -23,6 +24,7 @@ import { findForkAnchorUuid } from './fork-anchor'
 import { resolvePiForkAnchor } from './pi-session-list'
 import { calculateCostFromTokens, normalizeModelName } from './block-usage'
 import { dispatchedCostsByRouting } from './db'
+import { isDispatchTargetSession } from './dispatch-target-ledger'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { locateClaudeTranscript } from './claude-transcript-locator'
 import { extractToolResultContent } from './tool-result-content'
@@ -36,11 +38,18 @@ import {
   type TranscriptTerminal
 } from './agent-identity'
 import {
+  handbackPeerOrigin,
   isTaskNotificationDelivery,
   parseTaskNotificationXml,
   taskNotificationNoteTitle,
   type ParsedTaskNotification
 } from './task-notification-xml'
+import {
+  applyHandbacks,
+  readSidechainHandbackCalls,
+  type HandbackNotice,
+  type HandbackPeerRow
+} from './handback-history'
 import { agentNoteMessage, peerRowParts, sessionMessageNote } from './agent-note'
 import { queuedCommandText } from '../sdk/queued-command-text'
 
@@ -760,6 +769,9 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
     const staleFiles: typeof fileEntries = []
 
     for (const file of jsonlFiles) {
+      // A dispatch target's transcript (ADR-105) is not a session of its own: its work
+      // reaches the parent's card and the usage ledger, and it must never list.
+      if (isDispatchTargetSession(file.replace('.jsonl', ''))) continue
       const filePath = path.join(projectDir, file)
       let mtime: number
       try {
@@ -1047,6 +1059,12 @@ export interface SessionHistoryResult {
    * sticky for the session, so the user should know which model answered).
    */
   warnings: string[]
+  /**
+   * Tasks that are running RIGHT NOW although the transcript cannot say so: the running
+   * X-Agents of a dispatching session, from the ledger (ADR-105 §5). Added by
+   * `readSessionHistory`, never by an engine's reader; keyed by the launching tool_use id.
+   */
+  activeTasks?: Record<string, ActiveTask>
 }
 
 /**
@@ -1090,6 +1108,12 @@ function parseCliCommand(
   // local-command-caveat — skip, just noise
   if (text.includes('<local-command-caveat>')) return null
   return null
+}
+
+/** A transcript row's `timestamp` in ms; undefined when it carries none. */
+function rowTime(row: { timestamp?: unknown }): number | undefined {
+  const ms = typeof row.timestamp === 'string' ? Date.parse(row.timestamp) : NaN
+  return Number.isFinite(ms) ? ms : undefined
 }
 
 const UNFINISHED_SUMMARY = 'The transcript ends before this agent reported back.'
@@ -1502,7 +1526,13 @@ export async function loadSessionHistory(
     // Each entry with the terminal event it came from: the run it ends is only
     // known once the whole transcript has been folded.
     const unstamped: Array<[TaskNotification, TranscriptTerminal]> = []
-    const pushNotification = (notif: ParsedTaskNotification): void => {
+    // A subagent's hand-back is read back from two rows that arrive in either
+    // order — the peer row holding the report, and the notification — so both are
+    // kept and joined once the transcript is read (applyHandbacks).
+    const handbackPeers: HandbackPeerRow[] = []
+    const handbackNotices: HandbackNotice[] = []
+    const deliveredNotes = new Map<string, ChatMessage>()
+    const pushNotification = (notif: ParsedTaskNotification, timestamp?: number): void => {
       if (seenNotifications.has(notif.raw)) return
       seenNotifications.add(notif.raw)
       const entry: TaskNotification = {
@@ -1521,6 +1551,11 @@ export async function loadSessionHistory(
       taskNotifications.push(entry)
       agentEvents.push(event)
       unstamped.push([entry, event])
+      handbackNotices.push({
+        entry,
+        parsed: notif,
+        ...(timestamp !== undefined ? { timestamp } : {})
+      })
     }
     /**
      * A notification cli.js DELIVERED (a turn-starting user line, or a
@@ -1532,10 +1567,17 @@ export async function loadSessionHistory(
      */
     const pushDeliveredNotification = (text: string, id: string, timestamp: number): void => {
       const parsed = parseTaskNotificationXml(text)
-      messages.push(
-        agentNoteMessage({ id, title: taskNotificationNoteTitle(parsed), text, timestamp })
-      )
-      if (parsed?.status) pushNotification(parsed)
+      const note = agentNoteMessage({
+        id,
+        title: taskNotificationNoteTitle(parsed),
+        text,
+        timestamp
+      })
+      messages.push(note)
+      if (parsed?.status) {
+        deliveredNotes.set(parsed.raw, note)
+        pushNotification(parsed, timestamp)
+      }
     }
     /** Set once the anchor line has been READ — every LATER line is dropped. */
     let pastAnchor = false
@@ -1582,15 +1624,25 @@ export async function loadSessionHistory(
           // part of the conversation: a note, not dropped (slice 1a).
           const peer = peerRowParts(obj, content)
           if (peer) {
-            messages.push(
-              sessionMessageNote({
-                id: obj.uuid || `peer-${messages.length}`,
-                fromTitle: peer.fromTitle,
-                native: peer.native,
-                text: peer.body,
-                timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+            const note = sessionMessageNote({
+              id: obj.uuid || `peer-${messages.length}`,
+              fromTitle: peer.fromTitle,
+              fromKey: peer.fromKey,
+              native: peer.native,
+              text: peer.body,
+              timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+            })
+            messages.push(note)
+            // A subagent's hand-back: the notification that ends it takes this row's place.
+            const handback = handbackPeerOrigin(obj.origin)
+            const timestamp = rowTime(obj)
+            if (handback) {
+              handbackPeers.push({
+                ...handback,
+                note,
+                ...(timestamp !== undefined ? { timestamp } : {})
               })
-            )
+            }
             return
           }
 
@@ -1863,7 +1915,7 @@ export async function loadSessionHistory(
           const content = obj.content as string | undefined
           if (content) {
             const notif = readTaskNotification(content)
-            if (notif) pushNotification(notif)
+            if (notif) pushNotification(notif, rowTime(obj))
           }
         } else if (type === 'attachment') {
           // A message cli.js folded into a RUNNING turn at a tool boundary — a
@@ -1878,6 +1930,16 @@ export async function loadSessionHistory(
           // carried, which for a ClaudeUI send IS the itemId.
           const att = obj.attachment as Record<string, unknown> | undefined
           if (att?.type !== 'queued_command') return
+          // A hand-back absorbed mid-turn (about one in five) is persisted only as this
+          // attachment - `isMeta`, `origin: {kind: 'peer', handback: true, ...}` - with no
+          // peer `user` row. It holds the report like that row does, so it pairs with its
+          // notification too (there is no note of it to drop: it was never a row).
+          const folded = handbackPeerOrigin(att.origin)
+          if (att.isMeta === true && folded) {
+            const timestamp = rowTime(obj)
+            handbackPeers.push({ ...folded, ...(timestamp !== undefined ? { timestamp } : {}) })
+            return
+          }
           // cli.js's own injections (forwarded intent, peer notes) are meta.
           if (att.isMeta === true) return
           const text = queuedCommandText(att.prompt)
@@ -1959,6 +2021,31 @@ export async function loadSessionHistory(
       for (const [entry, event] of unstamped) {
         const runIndex = lifecycle.closedRun.get(event)
         if (runIndex !== undefined && entry.toolUseId) entry.runIndex = runIndex
+      }
+      // A hand-back's report, flagged warning or withheld line, from the rows above.
+      try {
+        await applyHandbacks({
+          notices: handbackNotices.map((notice) => {
+            const note = deliveredNotes.get(notice.parsed.raw)
+            return note ? { ...notice, note } : notice
+          }),
+          peers: handbackPeers,
+          messages,
+          sidechainCalls: (taskId) =>
+            /^[\w-]{1,128}$/.test(taskId)
+              ? readSidechainHandbackCalls(
+                  path.join(
+                    CLAUDE_PROJECTS_DIR,
+                    projectKey,
+                    sessionId,
+                    'subagents',
+                    `agent-${taskId}.jsonl`
+                  )
+                )
+              : Promise.resolve([])
+        })
+      } catch (err) {
+        logger.warn('SessionHistory', 'Failed to read back subagent hand-backs', err)
       }
       for (const taskId of lifecycle.unfinished) {
         const origin = lifecycle.origins.get(taskId)

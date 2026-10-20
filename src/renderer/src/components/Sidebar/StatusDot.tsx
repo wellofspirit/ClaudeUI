@@ -21,7 +21,11 @@ export interface SessionDotInput {
   isRunning: boolean
   isSdkActive: boolean
   isWatching: boolean
-  /** Running auto-continuing tasks (see `countAutoContinuingTasks`). */
+  /**
+   * Running background tasks that will wake the agent: subagents, shells, monitors and
+   * dispatched X-Agents (see `countDotTasks`, which also decides what a session whose engine
+   * is not live counts).
+   */
   runningSubagents: number
 }
 
@@ -29,13 +33,14 @@ export interface SessionDotInput {
  * First match wins. `subagents` exists because cli.js 2.1.219+ runs agents in
  * the background by default: the main turn ends at the launch ack while the
  * agents keep working, so `running` alone would show a busy session as idle.
- * It needs `isSdkActive` — `activeTasks` is only cleared on disconnect, and a
- * dead process has no agents running whatever its last records say.
+ * The count is already judged by liveness (`countDotTasks`): a dead process has no
+ * native agents running whatever its last records say, but a dispatched X-Agent outlives
+ * its parent's process (ADR-105 §5), so a disconnected or reopened parent still shows it.
  */
 export function deriveSessionDotState(i: SessionDotInput): SessionDotState {
   if (i.needsAttention && !i.active) return 'attention'
   if (i.isRunning) return 'running'
-  if (i.isSdkActive && i.runningSubagents > 0) return 'subagents'
+  if (i.runningSubagents > 0) return 'subagents'
   if (i.isSdkActive) return 'idle'
   if (i.isWatching) return 'watching'
   return 'inactive'
@@ -44,7 +49,7 @@ export function deriveSessionDotState(i: SessionDotInput): SessionDotState {
 const LABELS: Record<SessionDotState, string> = {
   attention: 'Needs attention',
   running: 'Working',
-  subagents: 'Subagents working',
+  subagents: 'Background tasks working',
   idle: 'Idle',
   watching: 'Watching',
   inactive: 'Not running',
@@ -61,7 +66,7 @@ export const CYCLE_S = 2
 
 export function statusDotLabel(state: SessionDotState, runningSubagents: number): string {
   if (runningSubagents <= 0) return LABELS[state]
-  const count = `${runningSubagents} subagent${runningSubagents === 1 ? '' : 's'} running`
+  const count = `${runningSubagents} background task${runningSubagents === 1 ? '' : 's'} running`
   return state === 'subagents' ? count : `${LABELS[state]} · ${count}`
 }
 

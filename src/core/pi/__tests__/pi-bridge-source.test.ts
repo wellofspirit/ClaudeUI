@@ -11,6 +11,14 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from '../pi-bridge-source'
 import { piSessionToolsEnv } from '../../services/session-tool-specs'
 import { SESSION_TOOL_NAMES } from '../../../shared/session-tools-description'
+import {
+  DISPATCH_BACKGROUND_PARAM,
+  DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_FOLLOW_UP_GUIDANCE,
+  DISPATCH_NAME_PARAM,
+  HAND_BACK_DESCRIPTION,
+  HAND_BACK_REPORT_PARAM
+} from '../../../shared/dispatch-agent-description'
 
 describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
   it('has a non-empty version string', () => {
@@ -18,8 +26,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 15 (slice 2: the session tools)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('15')
+  it('is version 22 (dispatch_agent states its name and description limits, ADR-105 §4)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('22')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -269,6 +277,7 @@ const BRIDGE_ENV_VARS = [
   'CLAUDEUI_PI_AGENT_TOOL',
   'CLAUDEUI_PI_AGENT_LISTING',
   'CLAUDEUI_PI_SEND_MESSAGE',
+  'CLAUDEUI_PI_HAND_BACK',
   'CLAUDEUI_PI_SESSION_TOOLS',
   'CLAUDEUI_PI_MCP'
 ] as const
@@ -389,7 +398,13 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
           const d = runExtension().tools.get('dispatch_agent')!.description
           expect(d).toContain('DIFFERENT engine')
           expect(d).toContain('use the agent tool')
-          expect(d).toContain('session_id')
+          // The fallback carries the shared follow-up sentence (the bridge cannot import it, and a
+          // backtick would end its template literal, so it is the same words without them).
+          expect(d).toContain(DISPATCH_FOLLOW_UP_GUIDANCE.replaceAll('`', ''))
+          expect(d).not.toContain('session_id')
+          // The fallback tells the same background story as the shared description (v20).
+          expect(d).toContain('its report arrives later as a message from it')
+          expect(d).not.toContain('returned as this tool result. The result includes')
         }
       )
     }
@@ -457,6 +472,54 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
           'render_mermaid',
           'show_mockup'
         ])
+      }
+    )
+  })
+
+  it('dispatch_agent takes optional name and description, worded exactly as the shared module does (the bridge cannot import it)', () => {
+    withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
+      () => {
+        const params = runExtension().tools.get('dispatch_agent')!.parameters as {
+          properties: Record<string, { type: string; description: string }>
+          required: string[]
+        }
+        expect(params.properties.name).toEqual({ type: 'string', description: DISPATCH_NAME_PARAM })
+        expect(params.properties.description).toEqual({
+          type: 'string',
+          description: DISPATCH_DESCRIPTION_PARAM
+        })
+        expect(params.required).toEqual(['engine', 'prompt'])
+      }
+    )
+  })
+
+  it('dispatch_agent takes an optional boolean run_in_background, worded exactly as the shared module does', () => {
+    withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
+      () => {
+        const params = runExtension().tools.get('dispatch_agent')!.parameters as {
+          properties: Record<string, { type: string; description: string }>
+          required: string[]
+        }
+        expect(params.properties.run_in_background).toEqual({
+          type: 'boolean',
+          description: DISPATCH_BACKGROUND_PARAM
+        })
+        expect(params.required).not.toContain('run_in_background')
+      }
+    )
+  })
+
+  it('dispatch_agent declares no session_id parameter (a follow-up is a session_message)', () => {
+    withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
+      () => {
+        const params = runExtension().tools.get('dispatch_agent')!.parameters as {
+          properties: Record<string, unknown>
+        }
+        expect(Object.keys(params.properties)).not.toContain('session_id')
+        expect(JSON.stringify(params)).not.toContain('session_id')
       }
     )
   })
@@ -1773,6 +1836,46 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — shared MCP catalog (bridge v13, ADR-096
       expect(notes).toEqual([
         'MCP servers from ClaudeUI could not be registered:\n  the server list could not be loaded (TypeError)'
       ])
+    })
+  })
+})
+
+describe('PI_BRIDGE_EXTENSION_SOURCE — hand_back (bridge v18, ADR-105 §3)', () => {
+  it('registers ONLY under CLAUDEUI_PI_HAND_BACK=1 with bridge creds, independently of every other tool', () => {
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HAND_BACK: '1' }, () => {
+      expect([...runExtension().tools.keys()]).toEqual(['hand_back'])
+    })
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HAND_BACK: '' }, () => {
+      expect(runExtension().tools.has('hand_back')).toBe(false)
+    })
+    withEnv({ CLAUDEUI_PI_HAND_BACK: '1', CLAUDEUI_PI_BRIDGE_TOKEN: 'tok' }, () => {
+      expect(runExtension().tools.has('hand_back')).toBe(false)
+    })
+    // The flags of the other tools never register it: an interactive session has none of them.
+    withEnv(
+      {
+        ...BRIDGE_CREDS,
+        CLAUDEUI_PI_HOSTED_TOOLS: '1',
+        CLAUDEUI_PI_DISPATCH_ENABLED: '1',
+        CLAUDEUI_PI_AGENT_TOOL: '1',
+        CLAUDEUI_PI_SEND_MESSAGE: '1',
+        CLAUDEUI_PI_SESSION_TOOLS: '[]'
+      },
+      () => {
+        expect(runExtension().tools.has('hand_back')).toBe(false)
+      }
+    )
+  })
+
+  it("carries ClaudeUI's one description and a required string report", () => {
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HAND_BACK: '1' }, () => {
+      const tool = runExtension().tools.get('hand_back')!
+      expect(tool.description).toBe(HAND_BACK_DESCRIPTION)
+      expect(tool.parameters).toEqual({
+        type: 'object',
+        properties: { report: { type: 'string', description: HAND_BACK_REPORT_PARAM } },
+        required: ['report']
+      })
     })
   })
 })

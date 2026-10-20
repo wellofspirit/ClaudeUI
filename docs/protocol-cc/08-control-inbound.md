@@ -83,6 +83,8 @@ Permission prompt for a tool invocation. The most common inbound subtype. Races 
   ],
   "blocked_path": "/abs/path",                  // optional — path that triggered denial
   "decision_reason": "...",                     // optional — stringified reason
+  "decision_reason_type": "classifier",         // optional — 'classifier' | 'rule' | 'mode' | … (2.1.293)
+  "decision_reason_code": "...",                // optional — the 04 §4.25 reason code (2.1.293)
   "title": "...",                               // from MCP _meta['anthropic/permissionDisplay'].title
   "description": "...",                         // from MCP _meta or synthetic
   "tool_use_id": "toolu_xxx",                   // REQUIRED (2.1.114)

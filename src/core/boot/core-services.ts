@@ -63,7 +63,9 @@ import { setOpencodeAuthHooks } from '../opencode/opencode-auth-hooks'
 import { OPENCODE_CODEX_VENDOR_ID } from '../auth/vault/CredentialSync'
 import { usageHubClient } from '../services/usage-hub/client'
 import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
-import { emitEvent } from '../services/sync-host'
+import { addHostObserver, emitEvent, syncCore } from '../services/sync-host'
+import { makeDispatchParentLookup } from '../services/dispatch-parent-lookup'
+import { deliverDispatchResult, watchDispatchResultFlush } from '../services/dispatch-result-flush'
 import { sharedProviderService } from '../shared-providers'
 import { logger } from '../services/logger'
 import { loadPersistedPrices, refreshPricesIfStale } from '../services/opencode-pricing'
@@ -109,6 +111,8 @@ export interface CoreServices {
    * half-finished push at exit is a push the cursor never advanced over.
    */
   usageHubClient: typeof usageHubClient
+  /** Drop the dispatcher's rekey subscription (a host's teardown). Idempotent. */
+  releaseDispatchParents: () => void
 }
 
 export interface CoreServicesOptions {
@@ -205,6 +209,42 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     }
   })
   opencodeServerManager.setDispatchAgent((req, ctx) => crossEngineDispatcher.dispatch(req, ctx))
+  opencodeServerManager.setHandBack((sessionId, report, callId) =>
+    crossEngineDispatcher.handBackFromOpencode(sessionId, report, callId)
+  )
+  // A dispatch target's own opencode session may message its dispatcher (ADR-105 §4).
+  opencodeServerManager.setXAgentCaller((sessionId) =>
+    crossEngineDispatcher.xAgentCallerFromOpencode(sessionId)
+  )
+  // A dispatch run outlives the call that launched it, so it reaches its dispatching
+  // session through the manager and canonical state at each read, never through the
+  // launching call's closures; its parent id follows re-keys.
+  // A held X-Agent result is flushed when its parent's engine is up and idle again
+  // (dispatch-result-flush.ts); a hold arms that edge for the parent.
+  const dispatchFlush = watchDispatchResultFlush(sessionManager, addHostObserver)
+  const releaseDispatchRekeys = crossEngineDispatcher.configureParents(
+    makeDispatchParentLookup({
+      getSession: (id) => sessionManager.get(id),
+      emitEvent,
+      canonical: (id) => {
+        const held = syncCore.getCanonicalState().sessions[id]
+        return held
+          ? { messages: held.messages, cwd: held.cwd, engineId: held.status.engineId }
+          : undefined
+      },
+      // An X-Agent's end goes into its parent's inbox like any non-user item, with its own
+      // origin (wakes the parent, outside ADR-104's budget, its own cap).
+      deliverResult: (parentId, item) =>
+        deliverDispatchResult(sessionManager, dispatchFlush, parentId, item)
+    }),
+    (observer) => syncCore.onRekey(observer),
+    // Its parent's disconnect (re-raise the cards it cleared) and deletion (end it).
+    (observer) => addHostObserver(observer)
+  )
+  const releaseDispatchParents = (): void => {
+    releaseDispatchRekeys()
+    dispatchFlush.stop()
+  }
   // ClaudeUI's opencode config writes (settings, raw editor, providers, tools,
   // agent files) reload the running servers' locations (ADR-097 S8).
   onOpencodeConfigWritten((reason) => void scheduleOpencodeConfigReload(reason))
@@ -560,6 +600,7 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     automationManager,
     vscodeWebService,
     hostAnchor,
-    usageHubClient
+    usageHubClient,
+    releaseDispatchParents
   }
 }

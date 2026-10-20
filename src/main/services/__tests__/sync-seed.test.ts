@@ -18,6 +18,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const {
   pruneOrphanClaudeSessionMeta,
+  claudeSessionsWithNoRecord,
   loadSettings,
   loadSessionConfig,
   loadSlashCommands,
@@ -28,6 +29,7 @@ const {
   listCodexSessions
 } = vi.hoisted(() => ({
   pruneOrphanClaudeSessionMeta: vi.fn(),
+  claudeSessionsWithNoRecord: vi.fn((_ids: readonly string[]): string[] => []),
   loadSettings: vi.fn(),
   loadSessionConfig: vi.fn(),
   loadSlashCommands: vi.fn(),
@@ -43,7 +45,10 @@ vi.mock('../../../core/services/ui-config', () => ({
   loadSessionConfig,
   loadSlashCommands
 }))
-vi.mock('../../../core/services/session-meta-prune', () => ({ pruneOrphanClaudeSessionMeta }))
+vi.mock('../../../core/services/session-meta-prune', () => ({
+  pruneOrphanClaudeSessionMeta,
+  claudeSessionsWithNoRecord
+}))
 vi.mock('../../../core/services/claude-settings', () => ({ loadClaudePermissions }))
 vi.mock('../../../core/services/session-history', () => ({ listDirectories }))
 // F6 moved the per-client three-query merge into this module, so both other
@@ -63,6 +68,8 @@ import {
   resetDirectoryRefreshStateForTests
 } from '../../../core/services/sync-seed'
 import { syncCore } from '../../../core/services/sync-host'
+import { dispatchLedger } from '../../../core/services/dispatch-target-ledger'
+import { updateDispatchTarget } from '../../../core/services/db'
 
 const CLAUDE_SESSION = {
   sessionId: 'cl-1',
@@ -158,6 +165,101 @@ describe('seedCanonicalAppState', () => {
     // seed that is also replicated state clients must see change live. Every
     // other field here is still a plain `setAppState`, so exactly ONE event.
     expect(ringedSince().map((e) => e.channel)).toEqual(['session:directories-changed'])
+  })
+
+  // ADR-105 §5: App quit ends the processes, so a row still `running` at the next start
+  // belongs to one that no longer exists. Nothing resumes by itself.
+  it('turns X-Agent rows a quit left running into interrupted, and touches no other state', async () => {
+    const input = {
+      engine: 'claude' as const,
+      parentSessionId: 'parent-1',
+      parentEngine: 'opencode' as const,
+      parentToolUseId: null,
+      cwd: '/repo',
+      model: 'haiku',
+      launchMode: 'default',
+      accountKey: null,
+      codexAccountId: null,
+      callerRestriction: null,
+      name: null,
+      description: null
+    }
+    const running = dispatchLedger.create({ ...input, harnessRef: 'boot-running' })
+    const idle = dispatchLedger.create({ ...input, harnessRef: 'boot-idle' })
+    dispatchLedger.update(idle.id, { state: 'idle' })
+    // The row a quit left behind names an owner that is gone: this pid under an earlier boot id
+    // (a pid is reused; the boot id tells the process that wrote the row from this one).
+    updateDispatchTarget(running.id, { owner: { pid: process.pid, boot: 'a-previous-boot' } })
+
+    await seedCanonicalAppState()
+
+    expect(dispatchLedger.get(running.id)?.state).toBe('interrupted')
+    expect(dispatchLedger.get(idle.id)?.state).toBe('idle')
+  })
+
+  // The same DB can be shared by a second instance (a dev build beside the packaged app): its
+  // boot must not cut off the first one's runs (ADR-105 §5).
+  it('leaves a running X-Agent row alone while its owner instance is alive', async () => {
+    const input = {
+      engine: 'claude' as const,
+      parentSessionId: 'parent-1',
+      parentEngine: 'opencode' as const,
+      parentToolUseId: null,
+      cwd: '/repo',
+      model: 'haiku',
+      launchMode: 'default',
+      accountKey: null,
+      codexAccountId: null,
+      callerRestriction: null,
+      name: null,
+      description: null
+    }
+    const running = dispatchLedger.create({ ...input, harnessRef: 'boot-owned' })
+    // Another live process owns it: the test runner's parent stands in (alive, a different boot id).
+    updateDispatchTarget(running.id, { owner: { pid: process.ppid, boot: 'another-boot' } })
+
+    await seedCanonicalAppState()
+
+    expect(dispatchLedger.get(running.id)?.state).toBe('running')
+  })
+
+  // ADR-105 §5: an X-Agent ends with its parent session. A deletion that happened while the
+  // app was closed (or before this rule) is caught at boot — for a parent that is PROVEN gone.
+  it('ends the X-Agents of a Claude parent that no longer exists, and only those', async () => {
+    const input = {
+      engine: 'claude' as const,
+      parentEngine: 'claude' as const,
+      parentToolUseId: null,
+      cwd: '/repo',
+      model: 'haiku',
+      launchMode: 'default',
+      accountKey: null,
+      codexAccountId: null,
+      callerRestriction: null,
+      name: null,
+      description: null
+    }
+    const orphan = dispatchLedger.create({
+      ...input,
+      parentSessionId: 'deleted-parent',
+      harnessRef: 'boot-orphan'
+    })
+    const kept = dispatchLedger.create({
+      ...input,
+      parentSessionId: 'live-parent',
+      harnessRef: 'boot-kept'
+    })
+    dispatchLedger.update(orphan.id, { state: 'idle' })
+    dispatchLedger.update(kept.id, { state: 'idle' })
+    claudeSessionsWithNoRecord.mockImplementation((ids) =>
+      ids.filter((id) => id === 'deleted-parent')
+    )
+
+    await seedCanonicalAppState()
+
+    expect(dispatchLedger.get(orphan.id)?.state).toBe('stopped')
+    expect(dispatchLedger.get(kept.id)?.state).toBe('idle')
+    claudeSessionsWithNoRecord.mockImplementation(() => [])
   })
 
   it('leaves sdkSkillNames alone — the renderer does not seed it either', async () => {

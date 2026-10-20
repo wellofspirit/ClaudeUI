@@ -150,6 +150,18 @@ describe('deleteCodexSubtree', () => {
     expect(db.deleteSessionMeta.mock.calls.map((call) => call[0])).toEqual(['fork-a', 'root'])
   })
 
+  it('announces a thread as deleted only once the binary has deleted it (ADR-105 §5: its X-Agents end then)', async () => {
+    const { service } = fakeService({ root: 'Codex transport: rpc-error--32600' })
+    const h = hooks()
+    const ended: string[] = []
+    const withEnd = { ...h.hooks, deleted: (id: string) => ended.push(id) }
+    const plan = buildCodexDeletePlan('root', [{ threadId: 'fork-a', forkedFromId: 'root' }], cold)
+    await expect(deleteCodexSubtree(plan, withEnd, { service })).rejects.toThrow(/refused/)
+    // fork-a was deleted; root was replicated as removed, then REFUSED: it survives, so it is not announced.
+    expect(h.order).toContain('remove:root')
+    expect(ended).toEqual(['fork-a'])
+  })
+
   it('stops a live node before deleting it', async () => {
     const { service } = fakeService()
     const h = hooks()

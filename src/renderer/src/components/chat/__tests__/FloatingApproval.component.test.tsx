@@ -668,6 +668,107 @@ describe('FloatingApproval rendered component', () => {
     })
   })
 
+  // Owner ask #5 (ADR-105): the header names the action, never the wire spelling of a
+  // first-party tool (`mcp__claude-ui-*`, the `dispatch:` forward's prefix, a bare `hand_back`).
+  describe('header — the action as a person reads it', () => {
+    const header = (): string => screen.getByTestId('ApprovalCardView.toolName').textContent ?? ''
+
+    it("a Claude parent's own dispatch_agent ask reads X-Agent", () => {
+      setup({ toolName: 'mcp__claude-ui-collab__dispatch_agent', input: { engine: 'pi' } })
+      render(<FloatingApproval />)
+      expect(header()).toBe('X-Agent')
+    })
+
+    it('an X-Agent ask forwarded with the dispatch: prefix reads in the target engine’s map', () => {
+      setup({
+        toolName: 'dispatch:hand_back',
+        input: {},
+        agent: { agentId: 't1', label: 'x/y', subagentType: 'dispatch:pi' }
+      })
+      render(<FloatingApproval />)
+      expect(header()).toBe('Hand back')
+    })
+
+    it('a Claude X-Agent’s mcp__ session tool reads as the session tool', () => {
+      setup({
+        toolName: 'dispatch:mcp__claude-ui-sessions__session_message',
+        input: {},
+        agent: { agentId: 't1', label: 'x/y', subagentType: 'dispatch:claude' }
+      })
+      render(<FloatingApproval />)
+      expect(header()).toBe('Session · message')
+    })
+
+    it('an ordinary tool keeps its name', () => {
+      setup({ toolName: 'Bash', input: { command: 'ls' } })
+      render(<FloatingApproval />)
+      expect(header()).toBe('Bash')
+    })
+
+    // Codex's map collapses every `mcp__…` name to the kind word "MCP", which on an approval
+    // (no summary line to carry the server and tool) would not say what is being allowed.
+    it.each(['claude', 'codex', 'pi', 'opencode'] as const)(
+      'a third-party MCP tool reads server / tool in a %s session',
+      (engine) => {
+        setup({ toolName: 'mcp__github__create_issue', input: { title: 'x' } })
+        useSessionStore.setState((state) => ({
+          sessions: {
+            ...state.sessions,
+            [ROUTE]: {
+              ...state.sessions[ROUTE],
+              status: { ...state.sessions[ROUTE].status, engineId: engine }
+            }
+          }
+        }))
+        render(<FloatingApproval />)
+        expect(header()).toBe('github / create_issue')
+      }
+    )
+
+    it('a tool name with a double underscore keeps the whole tool after the first split', () => {
+      setup({ toolName: 'mcp__srv__do__thing', input: {} })
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: {
+            ...state.sessions[ROUTE],
+            status: { ...state.sessions[ROUTE].status, engineId: 'codex' }
+          }
+        }
+      }))
+      render(<FloatingApproval />)
+      expect(header()).toBe('srv / do__thing')
+    })
+
+    it.each(['dispatch_agent', 'mcp__claude-ui-collab__dispatch_agent'])(
+      'a Codex parent’s own %s ask still reads X-Agent',
+      (toolName) => {
+        setup({ toolName, input: { engine: 'pi' } })
+        useSessionStore.setState((state) => ({
+          sessions: {
+            ...state.sessions,
+            [ROUTE]: {
+              ...state.sessions[ROUTE],
+              status: { ...state.sessions[ROUTE].status, engineId: 'codex' }
+            }
+          }
+        }))
+        render(<FloatingApproval />)
+        expect(header()).toBe('X-Agent')
+      }
+    )
+
+    it('a Codex X-Agent’s forwarded third-party MCP ask reads server / tool', () => {
+      setup({
+        toolName: 'dispatch:mcp__github__create_issue',
+        input: {},
+        agent: { agentId: 't1', label: 'x/y', subagentType: 'dispatch:codex' }
+      })
+      render(<FloatingApproval />)
+      expect(header()).toBe('github / create_issue')
+    })
+  })
+
   it('renders nothing when there are no pending approvals', () => {
     useSessionStore.getState().createNewSession(ROUTE, '/test')
     useSessionStore.setState({ activeSessionId: ROUTE })

@@ -61,6 +61,8 @@ export interface CoreBoot {
   automationManager: AutomationManager
   /** The usage hub client (ADR-072 §7) — stopped by the before-quit teardown. */
   usageHubClient: CoreServices['usageHubClient']
+  /** Drops the dispatcher's rekey subscription: the before-quit teardown. */
+  releaseDispatchParents: CoreServices['releaseDispatchParents']
 }
 
 export interface BootCoreOptions {
@@ -233,6 +235,7 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
     remoteServer: core.remoteServer,
     remoteDispatcher: core.remoteDispatcher,
     automationManager: core.automationManager,
-    usageHubClient: core.usageHubClient
+    usageHubClient: core.usageHubClient,
+    releaseDispatchParents: core.releaseDispatchParents
   }
 }

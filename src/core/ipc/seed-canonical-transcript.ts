@@ -49,7 +49,7 @@ export async function seedCanonicalTranscript(
         ? claudeProjectKeyFor(resumeSessionId, cwd)
         : cwdToProjectKey(cwd)
     const contentFirst = (engineId ?? 'claude') === 'claude' && !resumeSessionAt
-    const { messages, taskNotifications, statusLine } = await loadSessionHistory(
+    const { messages, taskNotifications, statusLine, activeTasks } = await loadSessionHistory(
       resumeSessionId,
       projectKey,
       resumeSessionAt,
@@ -60,6 +60,8 @@ export async function seedCanonicalTranscript(
       cwd,
       messages,
       taskNotifications,
+      // The X-Agents still running (ADR-105 §5): a resumed parent's cards and roster.
+      ...(activeTasks ? { activeTasks } : {}),
       ...(statusLine ? { statusLine } : {}),
       // Derived fields follow from the transcript, so derive them here rather
       // than leaving canonical to wait for the next live message.

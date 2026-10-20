@@ -38,6 +38,14 @@ import type { CommandConnection } from '../ipc/command-registry'
 import type { SessionManager } from './session-manager'
 import { appendAuditLog } from './db'
 import {
+  dispatchLedger,
+  isDispatchTargetSession,
+  type DispatchTargetRow
+} from './dispatch-target-ledger'
+import { isReservedXAgentName } from '../../shared/session-links'
+import { X_AGENT_MESSAGE_KEY_PREFIX } from '../../shared/session-message-wrapper'
+import { handBackMarker, sanitizeReport } from '../../shared/handback-frame'
+import {
   isProposalId,
   proposalGrouped,
   PROPOSAL_RELATIONS,
@@ -74,6 +82,7 @@ import { createWorktree, validateWorktreeName } from './worktree'
 import { recordWorktreeEntry } from './worktree-detect'
 import { loadSessionConfig, saveSessionConfig } from './ui-config'
 import { logger } from './logger'
+import { DEFAULT_MODE_CLASS, modeClass } from '../../shared/mode-class'
 
 const LOG = 'SessionTools'
 
@@ -81,8 +90,35 @@ const LOG = 'SessionTools'
 // Wiring
 // ---------------------------------------------------------------------------
 
+/** How a message to an X-Agent was taken (ADR-105 §4). */
+export type XAgentMessageOutcome =
+  /** It joined the X-Agent's running turn. */
+  | { kind: 'steered' }
+  /** The X-Agent was not running: a new run started on it. */
+  | { kind: 'started' }
+  | { kind: 'refused'; text: string }
+
+/**
+ * The dispatcher's side of `session_message` to an X-Agent, injected like the rest of the host
+ * (the dispatcher cannot be imported here: its engines import this module). The service has
+ * already decided who may message whom; the dispatcher steers the running turn or starts a run.
+ */
+export interface XAgentMessenger {
+  message(request: XAgentMessageRequest): Promise<XAgentMessageOutcome>
+}
+
+export interface XAgentMessageRequest {
+  /** The X-Agent's ledger ref. */
+  ledgerId: string
+  text: string
+  /** The parent that sends it. */
+  from: { routingId: string; engine: EngineId; title: string }
+}
+
 export interface SessionToolsHost {
   manager: SessionManager
+  /** Messaging an X-Agent; absent, a message to one is refused. */
+  xAgents?: XAgentMessenger
   /** `prepareAndCreateSession` bound to the host's window. */
   createSession: (args: CreateSessionArgs) => Promise<void>
   /** `handlers-core.sendPrompt` bound to the manager. */
@@ -141,6 +177,16 @@ export interface SessionToolCaller {
    * an acting tool runs only for `root` (see {@link rootAgentRefusal}).
    */
   callOwner?: (toolUseId: string | undefined) => Promise<'root' | 'subagent' | 'unknown'>
+  /**
+   * Set when the caller is an X-Agent (a dispatch target, ADR-105 §4): `routingId` is then its
+   * harness session id and the actor of every audit row is its ledger ref. An X-Agent runs
+   * `session_message` to its parent and nothing else ({@link runSessionTool} refuses the rest).
+   */
+  xAgent?: {
+    ledgerId: string
+    /** Why it may not speak right now (its run is over), or null. Read at every call. */
+    refuse?: () => string | null
+  }
 }
 
 export interface SessionToolResult {
@@ -152,16 +198,6 @@ const ok = (text: string): SessionToolResult => ({ text })
 const refused = (text: string): SessionToolResult => ({ text: `Refused: ${text}`, isError: true })
 const failed = (text: string): SessionToolResult => ({ text, isError: true })
 
-/** plan < default < acceptEdits < auto < bypassPermissions (ADR-050's auto gate still applies). */
-const MODE_CLASS: Record<string, number> = {
-  plan: 0,
-  default: 1,
-  dontAsk: 1,
-  acceptEdits: 2,
-  auto: 3,
-  bypassPermissions: 4
-}
-
 /** The permission modes a started session may be given. */
 export const START_PERMISSION_MODES = [
   'plan',
@@ -171,17 +207,15 @@ export const START_PERMISSION_MODES = [
   'bypassPermissions'
 ] as const
 
-/** A mode's rank, or null for a mode this table does not know. */
-export function modeClass(mode: string | null | undefined): number | null {
-  return mode && Object.hasOwn(MODE_CLASS, mode) ? MODE_CLASS[mode] : null
-}
+// The ranking lives in a shared leaf (dispatch runs rank modes with it too).
+export { modeClass }
 
 function callerClass(caller: SessionToolCaller): number {
-  return modeClass(caller.permissionMode) ?? MODE_CLASS.default
+  return modeClass(caller.permissionMode) ?? DEFAULT_MODE_CLASS
 }
 
 function callerRef(caller: SessionToolCaller): string {
-  return refFor(caller.engine, caller.routingId)
+  return caller.xAgent ? caller.xAgent.ledgerId : refFor(caller.engine, caller.routingId)
 }
 
 /** A title on one line, safe to put inside quotes in a prompt. */
@@ -216,7 +250,7 @@ export function auditSessionToolCall(
       ts: Date.now(),
       connectionId: `session:${ref}`,
       method: 'agent',
-      label: `${ref} (${caller.engine})`,
+      label: caller.xAgent ? `${ref} (${caller.engine} X-Agent)` : `${ref} (${caller.engine})`,
       capability: 'chat',
       kind: 'command',
       channel: `session-tools:${tool}`,
@@ -242,7 +276,10 @@ export function auditSessionToolDenial(
   message: string
 ): void {
   if (!ACTING_SESSION_TOOLS.has(tool)) return
-  const named = typeof input.session === 'string' ? resolveTarget(caller, input.session) : null
+  const named =
+    typeof input.session === 'string'
+      ? resolveTarget(caller, input.session, { xAgents: tool === 'session_message' })
+      : null
   auditSessionToolCall(caller, tool, named?.ok ? named.ref : null, 'error', message)
 }
 
@@ -254,12 +291,79 @@ function errText(err: unknown): string {
 // Resolving a `session` argument
 // ---------------------------------------------------------------------------
 
-export type TargetResolution = ({ ok: true } & ResolvedSession) | { ok: false; message: string }
+export type TargetResolution =
+  ({ ok: true; xAgent?: DispatchTargetRow } & ResolvedSession) | { ok: false; message: string }
 
-/** `self`, `origin` (`parent` too), a ref, a routing/durable id or an exact unique title. */
-export function resolveTarget(caller: SessionToolCaller, input: unknown): TargetResolution {
+/** What {@link resolveTarget} may resolve beyond conversations. */
+export interface ResolveOptions {
+  /**
+   * Resolve an X-Agent the caller owns (ADR-105 §4). Only `session_message` opens X-Agents:
+   * `session_get`, `session_read`, `session_usage` and `session_stop` keep refusing them, because
+   * one resolver serves all five verbs and the ownership rule is enforced per verb.
+   */
+  xAgents?: boolean
+}
+
+/** The ledger row of an X-Agent, or undefined (an unreadable ledger is no row). */
+function xAgentRow(id: string): DispatchTargetRow | undefined {
+  try {
+    return dispatchLedger.get(id)
+  } catch (err) {
+    logger.warn(LOG, `could not read the dispatch ledger: ${errText(err)}`)
+    return undefined
+  }
+}
+
+/** The ref of the session that dispatched an X-Agent. */
+function parentRefOf(row: DispatchTargetRow): string {
+  return refFor(row.parentEngine, row.parentSessionId)
+}
+
+/** Does this (root) caller own the X-Agent? Its parent id, or the same session under another id (a re-key). */
+function ownsXAgent(caller: SessionToolCaller, row: DispatchTargetRow): boolean {
+  if (caller.xAgent) return false
+  return row.parentSessionId === caller.routingId || parentRefOf(row) === callerRef(caller)
+}
+
+/** The row as the resolver returns a session: its ref is the ledger id, its id the harness's. */
+function xAgentResolution(row: DispatchTargetRow): TargetResolution {
+  const found = resolveRef(row.id)
+  const base: ResolvedSession = found.ok
+    ? found
+    : {
+        ref: row.id,
+        engine: row.engine,
+        id: row.harnessRef,
+        sessionId: row.harnessRef,
+        routingId: null
+      }
+  return { ...base, ok: true, xAgent: row }
+}
+
+/** The X-Agents of `caller` that can still be messaged (any state but stopped), newest first. */
+function ownXAgents(caller: SessionToolCaller): DispatchTargetRow[] {
+  if (caller.xAgent) return []
+  try {
+    return dispatchLedger.byParent(caller.routingId).filter((row) => row.state !== 'stopped')
+  } catch (err) {
+    logger.warn(LOG, `could not list the dispatch ledger: ${errText(err)}`)
+    return []
+  }
+}
+
+/**
+ * `self`, `origin` (`parent` too), a ref, a routing/durable id or an exact unique title. With
+ * `opts.xAgents` also an X-Agent the caller owns, by its ledger ref or by its `name` among the
+ * caller's own X-Agents (never a global title); an X-Agent caller resolves its parent only.
+ */
+export function resolveTarget(
+  caller: SessionToolCaller,
+  input: unknown,
+  opts: ResolveOptions = {}
+): TargetResolution {
   const text = typeof input === 'string' ? input.trim() : ''
   if (!text) return { ok: false, message: 'Name a session: a ref like s-k3m9qx, self or origin.' }
+  if (caller.xAgent) return resolveForXAgent(caller, text)
   const lower = text.toLowerCase()
   let ref = text
   if (lower === 'self') ref = callerRef(caller)
@@ -267,10 +371,31 @@ export function resolveTarget(caller: SessionToolCaller, input: unknown): Target
     const origin = linksOf(callerRef(caller)).origin
     if (!origin) return { ok: false, message: 'No other session started this one.' }
     ref = origin.parentRef
+  } else if (opts.xAgents && !isReservedXAgentName(text)) {
+    // A name is resolved among the caller's own X-Agents first, so it never competes with a title.
+    const named = ownXAgents(caller).filter((row) => row.name === text)
+    if (named.length === 1) return xAgentResolution(named[0])
+    if (named.length > 1) {
+      const lines = named.map((row) => `${row.id} (${row.engine}, ${row.state})`)
+      return {
+        ok: false,
+        message: `More than one of your X-Agents is named ${JSON.stringify(text)}; use a ref: ${lines.join('; ')}`
+      }
+    }
   }
   const found = resolveRef(ref)
   if (found.ok) {
     if (isDispatchTarget(found.id)) {
+      const row = opts.xAgents ? xAgentRow(found.ref) : undefined
+      if (row && row.state !== 'stopped' && ownsXAgent(caller, row)) return xAgentResolution(row)
+      if (row) {
+        return {
+          ok: false,
+          message: ownsXAgent(caller, row)
+            ? `X-Agent ${row.name ?? row.id} was stopped; it cannot be messaged.`
+            : 'That X-Agent belongs to another session; you can message only the X-Agents you launched.'
+        }
+      }
       return { ok: false, message: 'That is a dispatch target, not a session you can address.' }
     }
     return found
@@ -285,10 +410,38 @@ export function resolveTarget(caller: SessionToolCaller, input: unknown): Target
   return { ok: false, message: `No session matches ${JSON.stringify(text)}.` }
 }
 
-/** opencode dispatch targets (and ClaudeUI's other throwaway sessions) are not conversations. */
+/** An X-Agent may message the session that dispatched it and no one else (ADR-105 §4). */
+function resolveForXAgent(caller: SessionToolCaller, text: string): TargetResolution {
+  const row = caller.xAgent ? xAgentRow(caller.xAgent.ledgerId) : undefined
+  if (!row)
+    return { ok: false, message: 'Your X-Agent record could not be read, so nothing was sent.' }
+  const lower = text.toLowerCase()
+  if (lower === 'self') return { ok: false, message: 'A session cannot message itself.' }
+  const parentRef = parentRefOf(row)
+  const ref = lower === 'origin' || lower === 'parent' ? parentRef : text
+  const found = resolveRef(ref)
+  if (found.ok && found.ref === parentRef) return found
+  return {
+    ok: false,
+    message:
+      "An X-Agent can message only the session that dispatched it (session: 'origin'); " +
+      `${JSON.stringify(text)} is not that session.`
+  }
+}
+
+/**
+ * Dispatch targets (and ClaudeUI's other throwaway sessions) are not conversations: an
+ * opencode target by its title, any other engine's by the X-Agent ledger (ADR-105), which
+ * is also what keeps the id a parent holds from an old dispatch result from resolving as a
+ * session. {@link resolveTarget} opens an X-Agent the caller owns to `session_message` alone.
+ */
 function isDispatchTarget(id: string): boolean {
   const title = titleOf(id).trim()
-  return title === OPENCODE_DISPATCH_SESSION_TITLE || HIDDEN_OPENCODE_SESSION_TITLES.includes(title)
+  return (
+    title === OPENCODE_DISPATCH_SESSION_TITLE ||
+    HIDDEN_OPENCODE_SESSION_TITLES.includes(title) ||
+    isDispatchTargetSession(id)
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -471,7 +624,28 @@ export function sessionList(caller: SessionToolCaller, input: SessionListInput):
   const header = `${rows.length} of ${stamped.length} session(s), scope ${scope}${
     stamped.length > rows.length ? ` (raise limit, max ${L.listMax}, to see more)` : ''
   }:`
-  return ok([header, ...rows.map((r) => rowLine(r, selfRef))].join('\n'))
+  return ok([header, ...rows.map((r) => rowLine(r, selfRef)), ...xAgentLines(caller)].join('\n'))
+}
+
+/**
+ * The caller's own X-Agents, marked as such, so a parent that lost the launch answer (a compacted
+ * context) can still address them (ADR-105 §4). Nobody else's: the list is the caller's alone.
+ */
+function xAgentLines(caller: SessionToolCaller): string[] {
+  const rows = ownXAgents(caller)
+  if (rows.length === 0) return []
+  return [
+    `${rows.length} X-Agent(s) you launched with dispatch_agent (message one with session_message; session: its name or ref):`,
+    ...rows.map((row) =>
+      [
+        row.id,
+        `X-Agent ${JSON.stringify(row.name ?? row.id)}`,
+        row.engine + (row.model ? `/${oneLine(row.model, 120)}` : ''),
+        row.state,
+        ...(row.description ? [`task=${JSON.stringify(oneLine(row.description, 120))}`] : [])
+      ].join(' | ')
+    )
+  ]
 }
 
 function lastMessageAtOf(id: string): number {
@@ -923,8 +1097,13 @@ export function sessionToolsGate(
     }
     case 'session_message':
     case 'session_stop': {
-      const target = resolveTarget(caller, input.session)
+      const target = resolveTarget(caller, input.session, {
+        xAgents: toolName === 'session_message'
+      })
       if (!target.ok) return { behavior: 'allow' }
+      // An X-Agent the caller launched: the resolver has established ownership, and it runs in
+      // the caller's own mode, so there is nothing to ask the user about.
+      if (target.xAgent) return { behavior: 'allow' }
       if (!scopeRefs(callerRef(caller)).has(target.ref)) return { behavior: 'ask' }
       const theirs = modeClass(syncCore.getCanonicalState().sessions[target.id]?.permissionMode)
       return theirs !== null && theirs <= callerClass(caller)
@@ -983,6 +1162,22 @@ export function describeDelivery(result: DeliveryResult): string {
   }
 }
 
+/** What a message to an X-Agent came to, for the model that sent it. */
+export function describeXAgentDelivery(
+  outcome: XAgentMessageOutcome,
+  row: Pick<DispatchTargetRow, 'id' | 'name'>
+): string {
+  const who = `X-Agent ${row.name ?? row.id}`
+  switch (outcome.kind) {
+    case 'steered':
+      return `delivered to ${who} (it is running: the message goes into its current turn; if it has not read it by the time it reports, it is sent again as a new run; it replies by message or in its report)`
+    case 'started':
+      return `delivered to ${who} (it was not running: a new run started on your message; its report arrives later as a message from it)`
+    case 'refused':
+      return `refused: ${outcome.text}`
+  }
+}
+
 export async function sessionMessage(
   caller: SessionToolCaller,
   input: SessionMessageInput
@@ -1002,18 +1197,30 @@ export async function sessionMessage(
   }
   const text = typeof input.message === 'string' ? input.message.trim() : ''
   if (!text) return finish(failed('The message is empty.'), null, 'refused: empty message')
-  const target = resolveTarget(caller, input.session)
+  const target = resolveTarget(caller, input.session, { xAgents: true })
   if (!target.ok) return finish(failed(target.message), null, `unresolved: ${target.message}`)
   const mine = callerRef(caller)
   if (target.ref === mine) {
     return finish(refused('a session cannot message itself.'), target.ref, 'refused: self')
   }
   const id = `m-${randomUUID().slice(0, 8)}`
+  if (target.xAgent) return await messageXAgent(caller, target.xAgent, text, id, finish)
   try {
+    // An X-Agent's message to its parent is framed as the X-Agent's (its own key prefix), never as
+    // a session's: the parent reads, labels and stores it as an X-Agent's, live and after a reload.
+    const from = caller.xAgent
+      ? {
+          key: `${X_AGENT_MESSAGE_KEY_PREFIX}${caller.xAgent.ledgerId}`,
+          title: xAgentRow(caller.xAgent.ledgerId)?.name ?? caller.xAgent.ledgerId
+        }
+      : { key: mine, title: titleOf(caller.routingId) || 'Untitled session' }
     const result = await deliver(need().manager, target.id, {
       origin: 'session-message',
-      text,
-      from: { key: mine, title: titleOf(caller.routingId) || 'Untitled session' },
+      // An X-Agent's text is untrusted model output, and a pi, opencode or Codex parent has no
+      // envelope handling of its own: it is defused as a report is, with the marker (applied once, here; a second pass would add
+      // another marker).
+      text: caller.xAgent ? defusedXAgentMessage(text) : text,
+      from,
       wake: false,
       senderModeClass: caller.permissionMode === 'bypassPermissions' ? 'bypass' : 'prompting'
     })
@@ -1031,6 +1238,53 @@ export async function sessionMessage(
       target.ref,
       `error: ${errText(err)}`
     )
+  }
+}
+
+/** An X-Agent's message to its parent as the parent reads it: defused like a report, and marked when something matched. */
+function defusedXAgentMessage(text: string): string {
+  const { text: defused, matched } = sanitizeReport(text)
+  return matched.length > 0 ? `${handBackMarker(matched)}\n\n${defused}` : defused
+}
+
+/**
+ * A message from a session to an X-Agent it launched (ADR-105 §4): the dispatcher steers the
+ * running turn, or starts a new run of the X-Agent on it. It never goes through the inbox: an
+ * X-Agent is not a session object, so a held row would wait for ever.
+ */
+async function messageXAgent(
+  caller: SessionToolCaller,
+  row: DispatchTargetRow,
+  text: string,
+  id: string,
+  finish: (r: SessionToolResult, target: string | null, detail: string) => SessionToolResult
+): Promise<SessionToolResult> {
+  const xAgents = need().xAgents
+  if (!xAgents) {
+    return finish(
+      failed('Messaging an X-Agent is not available in this process.'),
+      row.id,
+      'error: no X-Agent messenger'
+    )
+  }
+  try {
+    const outcome = await xAgents.message({
+      ledgerId: row.id,
+      text,
+      from: {
+        routingId: caller.routingId,
+        engine: caller.engine,
+        title: titleOf(caller.routingId) || 'Untitled session'
+      }
+    })
+    const said = describeXAgentDelivery(outcome, row)
+    return finish(
+      outcome.kind === 'refused' ? refused(outcome.text) : ok(`${said} (message ${id})`),
+      row.id,
+      `${id}: ${said}`
+    )
+  } catch (err) {
+    return finish(failed(`Could not deliver: ${errText(err)}`), row.id, `error: ${errText(err)}`)
   }
 }
 
@@ -1922,6 +2176,16 @@ export async function runSessionTool(
   // A session spawned before the setting was turned off still has the tools registered.
   if (!sessionToolsEnabled()) {
     return failed('Session tools are turned off in ClaudeUI settings.')
+  }
+  // An X-Agent runs `session_message` to its parent and nothing else: the other eight are for a
+  // session's root agent (ADR-105 §4). Refused here for every engine, whatever it offered the model.
+  const silenced = caller.xAgent?.refuse?.()
+  if (silenced) return { text: silenced, isError: true }
+  if (caller.xAgent && tool !== 'session_message') {
+    const why = `${tool} is not available to an X-Agent: it can use session_message to its dispatcher only.`
+    if (ACTING_SESSION_TOOLS.has(tool))
+      auditSessionToolCall(caller, tool, null, 'error', `refused: ${why}`)
+    return refused(why)
   }
   try {
     switch (tool) {

@@ -13,8 +13,8 @@
  * finished agent from someone who had forgotten they set it.
  *
  * A nested row sits under the agent that spawned it (ADR-073 §7). Under
- * Running, a finished ancestor of a running (or open) row is kept as dimmed
- * context, so an indented row never floats without its parent; context rows are
+ * Running, a finished ancestor of a running (or open) row is kept as context
+ * (drawn like any other row: nothing is dimmed for being finished), so an indented row never floats without its parent; context rows are
  * not counted. This is what keeps a shell reachable after the agent that
  * launched it has finished: the shell is running, so the agent stays. Every
  * listed shell is running or open, so the filter needs no rule of its own for
@@ -41,7 +41,9 @@ export function keepRunning(
 ): { row: AgentRosterRow; isContext: boolean }[] {
   const byId = new Map(rows.map((r) => [r.toolUseId, r]))
   const kept = new Set(
-    rows.filter((r) => r.isRunning || selectedIds.includes(r.toolUseId)).map((r) => r.toolUseId)
+    rows
+      .filter((r) => r.isRunning || r.isQueued || selectedIds.includes(r.toolUseId))
+      .map((r) => r.toolUseId)
   )
   const context = new Set<string>()
   for (const id of kept) {

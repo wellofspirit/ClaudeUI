@@ -197,6 +197,8 @@ vi.mock('../../core/opencode/OpencodeServerManager', () => ({
     isBinaryAvailable: vi.fn(() => false),
     setCallerSessionLookup: vi.fn(),
     setDispatchAgent: vi.fn(),
+    setHandBack: vi.fn(),
+    setXAgentCaller: vi.fn(),
     dispose: vi.fn()
   }
 }))

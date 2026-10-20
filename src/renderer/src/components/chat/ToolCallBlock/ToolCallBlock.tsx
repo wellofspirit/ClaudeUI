@@ -15,6 +15,7 @@
 import { memo, useEffect, useState } from 'react'
 import type {
   ContentBlock,
+  EngineId,
   PendingApproval,
   PermissionSuggestion,
   ToolReviewBlock,
@@ -37,6 +38,14 @@ interface Props {
   review?: ToolReviewBlock
   /** A pre-ask refusal no judge made — same pairing, different block. */
   denial?: PermissionDenialBlock
+  /**
+   * The engine whose tool names `block` carries — a dispatch child's TARGET
+   * engine, whose transcript is rendered inside the parent's session. Read only
+   * by the tool-map lookup (kind / view / display name); everything session-scoped
+   * (capabilities, permission mode, approvals, stop) stays the active session's.
+   * Defaults to the active session's engine.
+   */
+  engineId?: EngineId
 }
 
 export const ToolCallBlock = memo(function ToolCallBlock({
@@ -44,7 +53,8 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   result,
   approval,
   review,
-  denial
+  denial,
+  engineId: toolEngineId
 }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const dismissApproval = useSessionStore((s) => s.dismissApproval)
@@ -54,7 +64,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const isHistorical = useActiveSession((s) => s.isHistorical)
   const permissionMode = useActiveSession((s) => s.permissionMode)
-  const engineId = useActiveSession((s) => s.status.engineId)
+  const sessionEngineId = useActiveSession((s) => s.status.engineId)
   const backgroundTasksEnabled = useActiveSession((s) => s.status.capabilities.backgroundTasks)
   const expandToolCalls = useSessionStore((s) => s.settings.expandToolCalls)
   const expandReadResults = useSessionStore((s) => s.settings.expandReadResults)
@@ -86,9 +96,10 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const isStopping = stoppingTaskIds.includes(toolUseId)
   const [isBackgrounding, setIsBackgrounding] = useState(false)
 
-  // Compute the semantic kind + neutral view from the session's engine tool map.
+  // Compute the semantic kind + neutral view from the engine tool map of whoever
+  // issued the call (the session's engine unless a dispatch child's, see `engineId`).
   // hostedMcpKind (mermaid/mockup/mcp) is engine-independent and resolves first.
-  const toolMap = engineToolMap(engineId)
+  const toolMap = engineToolMap(toolEngineId ?? sessionEngineId)
   const kind = hostedMcpKind(block.toolName) ?? toolMap.kindOf(block.toolName)
   const view = toolMap.normalize(kind, block.toolInput, result, block.toolName)
   const toolDisplayName = toolMap.displayName(block.toolName)

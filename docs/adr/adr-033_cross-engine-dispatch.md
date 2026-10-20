@@ -2,11 +2,13 @@
 
 **Status:** Accepted (M4 claude-target usage-capture cost semantics amended by ADR-034; M1's
 synchronous opencode turn transport superseded by the 2026-09-01 amendment below; that amendment's
-per-direction liveness split superseded by the 2026-09-18 amendment below)
+per-direction liveness split superseded by the 2026-09-18 amendment below; blocking-only dispatch, in-memory targets,
+M2's `persistSession: false` and continuation by `session_id` superseded by [ADR-105](adr-105_background-dispatch.md))
 **Amendment proposed:** [ADR-071](adr-071_metering-ledger-and-window-value.md) §1–§2 moves dispatched usage into `usage_event` and gates `dispatch.maxCostUsd` on the API-equivalent cost for every target.
 **Date:** 2026-07-14
 **Relates to:** ADR-018/019 (engine model), ADR-020 (config plane), ADR-022/023 (opencode permissions), ADR-026 (workflow), ADR-030 (capability honesty), ADR-032 (non-fatal denials)
 **Amended by:** [ADR-088](adr-088_dispatch-autonomy-inheritance.md) (§5 and the M2 note: auto-mode targets are judged and follow the parent's mode live); [ADR-089 messaging v2](adr-089_pi-subagents-host-run.md#messaging-v2-2026-10-05) (2026-10-05: one shared `dispatch_agent` description, `src/shared/dispatch-agent-description.ts`, that steers each engine to its own subagent tool for ordinary delegation)
+**Amended by:** [ADR-105](adr-105_background-dispatch.md) (2026-10-19: dispatch is a background run of a durable X-Agent, not a blocking call over in-memory targets; blocking remains as a mode for a subagent caller)
 **Amended by:** [ADR-097](adr-097_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — caller identity. As built: ADR-097 §4 "As built (S2)" (`_meta["ai.opencode/sessionID"]` wins over the plugin stamp) and "As built (S9)" (opencode TARGETS on the 2.x client, per-server feed, exact leases, the session's host pre-check; a subagent child's call resolved to its chat through `parentID`).
 
 ## Context
@@ -138,9 +140,13 @@ matter for maintenance are folded in below.)
   model badge in the subagent slot), streams live keyed by the dispatching tool_use id (Claude
   side: cli.js's `_meta["claudecode/toolUseId"]`, present on every MCP tools/call; opencode side:
   plugin-stamped `__xeng_call_id`), and is stoppable. Stop rides `session:stop-task` with an
-  `isDispatch` flag; a registry miss arms a 60s **pending stop-intent** consumed at dispatch
+  `isDispatch` flag; a registry miss arms a **pending stop-intent** consumed at dispatch
   registration — closes the live-verified race where the renderer's Stop is clickable before the
-  MCP call reaches the dispatcher (SSE beats the tools/call round-trip).
+  MCP call reaches the dispatcher (SSE beats the tools/call round-trip). _Amended 2026-10-20:_ the intent
+  was originally a 60 s clock; it now has none: Claude Code runs a first-party MCP call only when nothing else of
+  its assistant message is executing, so a second dispatch behind a blocking one can start minutes
+  later. The intent lives until it is consumed, or until the dispatching session's turn ends
+  (`session:result`), the session is disposed or it is deleted.
 
 ### As-built deltas (what differed from the plan)
 

@@ -12,15 +12,23 @@ import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { useSessionAgentTypes } from '../../hooks/useAgentRoster'
 import { ResumedBadge } from '../agents/ResumedBadge'
 import { MarkdownRenderer } from './MarkdownRenderer'
-import { SubagentOutputBody } from './SubagentOutputBody'
+import { HandbackReport, hasHandbackReport } from './HandbackReport'
+import { SubagentOutputBody, dispatchChildEngine } from './SubagentOutputBody'
 import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 import { ApprovalButtons } from './ApprovalButtons'
 import { PermissionDenialChip, PermissionDenialStrip } from './tool-registry/PermissionDenial'
 import { ToolReviewChip, ToolReviewStrip, canApproveBlock } from './tool-registry/ToolReview'
-import { deriveTaskState, latestNotification } from './task-state'
+import { armStopPillFallback } from '../../lib/stop-pill'
+import {
+  deriveTaskState,
+  dispatchEndNote,
+  isDispatchToolName,
+  latestNotification,
+  taskFailureText
+} from './task-state'
 import { requestSubagentTranscript } from '../../lib/subagent-prefetch'
 import { useSubagentPending } from '../../hooks/useSubagentPending'
-import { dispatchLabel } from '../../../../shared/tool-kinds'
+import { dispatchLabel, taskHeaderLabel } from '../../../../shared/tool-kinds'
 import { modelTier, type ModelTier } from '../../../../shared/model-tier'
 import {
   agentModelShortName,
@@ -69,6 +77,13 @@ interface Props {
    * (ADR-091 part 6): a blocked delegation is the commonest subagent block.
    */
   review?: ToolReviewBlock
+  /**
+   * The call has not started: an earlier call of its own assistant message has no result
+   * and cli.js runs a first-party MCP call such as `dispatch_agent` only when nothing else
+   * of the message is executing (task-state.ts `isBehindUnfinishedCall`). Shown as queued,
+   * not running; Stop stays, and lands when the call starts.
+   */
+  queued?: boolean
 }
 
 export interface ParsedUsage {
@@ -171,7 +186,7 @@ export function formatTokens(n: number): string {
 
 /**
  * Narrow card: below this container width the header and footer shed what they
- * can — the review chip's reviewer prefix, the word "Task", the usage text — and
+ * can — the review chip's reviewer prefix, the word "Task" (not a dispatch's "X-Agent"), the usage text — and
  * "Open in panel" becomes an icon. The header sheds, it never wraps (one row,
  * always); a clock under 300px goes too (`@max-[300px]/taskcard:hidden`).
  */
@@ -386,7 +401,8 @@ export function TaskCard({
   view,
   approval,
   denial,
-  review
+  review,
+  queued = false
 }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
@@ -426,6 +442,10 @@ export function TaskCard({
   )
   const bgNotification = latestNotification(taskNotifications, toolUseId)
   const hasSubagentOutput = msgs.length > 0
+  // The subagent reported through SubagentHandback: its report (or the fact that
+  // it delivered none) is shown below the output; the Agent tool_result would
+  // only repeat it.
+  const hasHandback = hasHandbackReport(bgNotification)
   // The content-first load leaves a card's transcript on disk until it is needed
   // (ADR-102 Arc 2): opening the card asks for it at once, and until it lands the
   // body says so instead of flashing the markdown result and swapping it.
@@ -445,11 +465,24 @@ export function TaskCard({
   // opencode/pi child sessions and historical transcripts never emit
   // task_started, so they have no activeTasks record and fall through to the
   // unchanged legacy heuristic below.
-  const activeTask = isHistorical ? undefined : activeTasks[toolUseId]
+  // A dispatched X-Agent outlives its parent's session object and is rebuilt from the
+  // ledger on a reopen (ADR-105 §5): its record stays in a historical session, so the
+  // card reads running and offers Stop. Every other task is dead with the process.
+  const activeTask =
+    isHistorical && activeTasks[toolUseId]?.taskType !== 'dispatch'
+      ? undefined
+      : activeTasks[toolUseId]
   const hasActiveTask = !!activeTask
+  // Stop reaches a dispatch through the dispatcher, which needs no live parent.
+  const canAct = !isHistorical || hasActiveTask
   // The input asked for the background, or cli.js reports the running task
   // there: from the start, or since a "Send to background" flip.
-  const isBackground = !!view.background || activeTask?.isBackgrounded === true
+  // ...or the run's own terminal notification says it was one (a dispatched X-Agent that is
+  // background by default has no flag on its input; once finished its record is gone).
+  const isBackground =
+    !!view.background ||
+    activeTask?.isBackgrounded === true ||
+    bgNotification?.isBackgrounded === true
   // cli.js has registered this task as running in the FOREGROUND — the only
   // state `background_tasks` can act on. Before task_started it answers "no
   // such task", and a background task has nothing to move.
@@ -457,13 +490,14 @@ export function TaskCard({
   // Background tasks get a tool_result immediately ("agent launched") but keep
   // running until task_notification. In historical mode, tasks without results
   // show as "loaded" (neutral state) rather than running.
-  const { isRunning, isError, isStopped, isLoaded } = deriveTaskState({
+  const { isRunning, isQueued, isError, isStopped, isLoaded } = deriveTaskState({
     isHistorical,
     hasActiveTask,
     isBackground,
     hasResult,
     notification: bgNotification,
-    resultIsError: result?.isError ?? false
+    resultIsError: result?.isError ?? false,
+    queued
   })
 
   // Read display fields from the engine-neutral view (not block.toolInput)
@@ -529,33 +563,43 @@ export function TaskCard({
     ? 'border-warning/40'
     : isRunning
       ? 'border-accent/30'
-      : isError
-        ? 'border-danger/30'
-        : isStopped
-          ? 'border-warning/30'
-          : isLoaded
-            ? 'border-border'
-            : 'border-success/30'
+      : isQueued
+        ? 'border-border'
+        : isError
+          ? 'border-danger/30'
+          : isStopped
+            ? 'border-warning/30'
+            : isLoaded
+              ? 'border-border'
+              : 'border-success/30'
   const status = isRunning
     ? 'running'
-    : isError
-      ? 'failed'
-      : isStopped
-        ? 'stopped'
-        : isLoaded
-          ? 'loaded'
-          : 'completed'
+    : isQueued
+      ? 'queued'
+      : isError
+        ? 'failed'
+        : isStopped
+          ? 'stopped'
+          : isLoaded
+            ? 'loaded'
+            : 'completed'
 
-  const isCompleted = !isRunning && !isError
+  const isCompleted = !isRunning && !isQueued && !isError
   // Why the task failed. The tool_result's error text is the result body, but
   // the body shows the subagent's own output whenever it streamed any — the
   // usual case — which hid the reason (an opencode subagent that ran out of
   // context read as a bare "failed"), so show it alongside that output.
   // `isError` is already false for a stopped task (task-state.ts).
   // A transcript that is on its way counts as output: the failure text must not
-  // pop in after the body lands.
-  const failureSummary =
-    isError && (hasSubagentOutput || subagentPending) && result?.isError ? resultBody : ''
+  // pop in after the body lands. A background task's result body is hidden, so its
+  // error shows here too: a refused X-Agent launch says why in nothing else.
+  const failureSummary = taskFailureText({
+    isError,
+    resultIsError: result?.isError ?? false,
+    resultText: resultBody,
+    showsOutput: hasSubagentOutput || subagentPending,
+    isBackground
+  })
   const isStopping = stoppingTaskIds.includes(toolUseId)
   // Cross-engine dispatch cards (ADR-033 M3, M4b) reuse this component via the
   // 'task' kind but have no backgrounding concept — cli.js's backgroundTask
@@ -566,10 +610,18 @@ export function TaskCard({
   // 'dispatch_agent' name is pi's (pi.registerTool() has no mcp__/claudeui_
   // prefix to sanitize) — safe to match unconditionally since only pi ever
   // emits that exact bare name (Claude/opencode use their own prefixed names).
-  const isDispatch =
-    block.toolName === 'mcp__claude-ui-collab__dispatch_agent' ||
-    block.toolName === 'claudeui_dispatch_agent' ||
-    block.toolName === 'dispatch_agent'
+  const isDispatch = isDispatchToolName(block.toolName)
+  // How a settled X-Agent ended, when only the notification says it (a failed or stopped
+  // run, a reload's "interrupted"): the body above is the launch acknowledgement or empty.
+  const endNote = dispatchEndNote({
+    isDispatch,
+    notification: bgNotification,
+    settled: !isRunning && !isQueued,
+    hasHandback,
+    isBackground,
+    resultText: resultBody,
+    failureShown: failureSummary !== ''
+  })
   // Gated on capabilities.backgroundTasks — engines without background execution
   // never offer "Send to background" — and on a registered foreground task:
   // an agent launched in the background (the 2.1.219+ default) and a task
@@ -623,10 +675,9 @@ export function TaskCard({
       return
     }
 
-    // Set timeout to clear state if notification doesn't arrive within 10s
-    setTimeout(() => {
-      clearTaskStopping(rid, toolUseId)
-    }, 10000)
+    // The fallback for a notification that never comes - held while the call is still queued,
+    // and the same for every surface that offers Stop (lib/stop-pill.ts).
+    armStopPillFallback(rid, toolUseId)
   }
 
   // Both footers (collapsed, expanded) say the same thing; only the wrapper differs.
@@ -641,7 +692,22 @@ export function TaskCard({
     onOpenPanel: () => activeSessionId && openTaskPanel(activeSessionId, toolUseId)
   }
 
-  const statusIcon = isError ? (
+  const statusIcon = isQueued ? (
+    <svg
+      data-testid="TaskCard.queued.icon"
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      className="text-text-muted shrink-0"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 7 12 12 15 14" />
+    </svg>
+  ) : isError ? (
     <svg
       width="12"
       height="12"
@@ -711,8 +777,13 @@ export function TaskCard({
         className="w-full flex items-center gap-2 @max-[300px]/taskcard:gap-1.5 px-3 h-9 border-b border-border hover:bg-bg-hover transition-colors cursor-pointer"
       >
         {statusIcon}
-        <span className={`font-medium text-[13px] text-accent shrink-0 ${NARROW_ONLY_HIDE}`}>
-          Task
+        {/* "Task" sheds on a narrow card; "X-Agent" stays: with it gone a dispatch's header is
+            only its description ("Dispatch: pi" when the call gave none) and reads as a plain tool. */}
+        <span
+          data-testid="TaskCard.label"
+          className={`font-medium text-[13px] text-accent shrink-0 ${view.dispatch ? '' : NARROW_ONLY_HIDE}`}
+        >
+          {taskHeaderLabel(view)}
         </span>
         <span className="text-text-secondary text-[12px] truncate flex-1 min-w-[3rem] @max-[300px]/taskcard:min-w-[2rem] text-left">
           {description}
@@ -766,7 +837,12 @@ export function TaskCard({
             <BackgroundIcon className="animate-pulse" />
           </span>
         )}
-        {isRunning && !isStopping && !isHistorical && !isPendingApproval && (
+        {isQueued && (
+          <span data-testid="TaskCard.queued" className="text-[10px] text-text-muted shrink-0">
+            queued
+          </span>
+        )}
+        {(isRunning || isQueued) && !isStopping && canAct && !isPendingApproval && (
           <button
             data-testid="TaskCard.stop"
             onClick={(e) => {
@@ -778,7 +854,7 @@ export function TaskCard({
             Stop
           </button>
         )}
-        {isStopping && !isHistorical && (
+        {isStopping && canAct && (
           <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning shrink-0">
             stopping...
           </span>
@@ -798,7 +874,7 @@ export function TaskCard({
       </button>
 
       {/* Collapsed footer */}
-      {!expanded && (hasResult || isRunning) && (
+      {!expanded && (hasResult || isRunning || isQueued) && (
         <TaskFooter
           {...footerProps}
           className="flex items-center px-3 py-1.5 gap-1.5"
@@ -835,6 +911,7 @@ export function TaskCard({
                   isBackground={isBackground}
                   elapsedLabel={elapsed}
                   size="sm"
+                  engineId={dispatchChildEngine(view)}
                 />
               </div>
             ) : subagentPending ? (
@@ -845,11 +922,18 @@ export function TaskCard({
                 <span className="w-2.5 h-2.5 rounded-full border-[1.5px] border-accent border-t-transparent animate-spin-slow" />
                 <span>Loading…</span>
               </div>
-            ) : resultBody && !isBackground ? (
+            ) : resultBody && !isBackground && !hasHandback ? (
               <div className="px-3 py-2 text-[12px] text-text-primary/70">
                 <div className="leading-[1.5] max-h-[300px] overflow-y-auto">
                   <MarkdownRenderer content={resultBody} />
                 </div>
+              </div>
+            ) : isQueued ? (
+              <div
+                data-testid="TaskCard.queuedNote"
+                className="px-3 py-2 text-[12px] text-text-muted"
+              >
+                Queued — it starts when the call before it has finished.
               </div>
             ) : isRunning ? (
               <div className="px-3 py-2 flex items-center gap-2 text-[12px] text-text-muted">
@@ -860,6 +944,12 @@ export function TaskCard({
             ) : null}
           </div>
 
+          <HandbackReport
+            notification={bgNotification}
+            xAgent={isDispatch}
+            className="border-t border-border px-3 py-2"
+          />
+
           {failureSummary && (
             <div
               data-testid="TaskCard.failureSummary"
@@ -869,8 +959,17 @@ export function TaskCard({
             </div>
           )}
 
+          {endNote && (
+            <div
+              data-testid="TaskCard.endNote"
+              className="border-t border-border px-3 py-2 text-[12px] text-text-muted whitespace-pre-wrap break-words max-h-[200px] overflow-y-auto"
+            >
+              {endNote}
+            </div>
+          )}
+
           {/* Footer — badges + usage + open in panel */}
-          {(hasResult || isRunning) && (
+          {(hasResult || isRunning || isQueued) && (
             <TaskFooter
               {...footerProps}
               className="border-t border-border px-3 py-1.5 flex items-center gap-1.5"

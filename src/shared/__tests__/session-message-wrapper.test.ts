@@ -16,7 +16,12 @@ import {
   CROSS_SESSION_MESSAGE_TAG,
   SESSION_MESSAGE_TAG,
   SESSION_MESSAGE_TRAILER,
+  X_AGENT_RESULT_TRAILER,
   buildCrossSessionEnvelope,
+  envelopeName,
+  isXAgentSender,
+  wrapperSender,
+  xAgentBareName,
   buildSessionMessageWrapper,
   neutralizeClosingTag,
   unescapeClosingTag,
@@ -187,5 +192,58 @@ describe('review follow-ups', () => {
 
   it('keeps a backslash in a key (cli.js allows it) and still encodes a percent sign', () => {
     expect(sanitizeWrapperKey('a\\b%c')).toBe('a\\b%25c')
+  })
+})
+
+describe('X-Agent results (origin dispatch-result, ADR-105 §3)', () => {
+  const XA = { key: 's-abc234', title: 'impl-e1' }
+
+  it('the sender is named behind the x-agent: prefix whatever key the producer used, once', () => {
+    const item = { origin: 'dispatch-result', from: XA }
+    expect(wrapperSender(item)).toEqual({ key: 'x-agent:s-abc234', title: 'impl-e1' })
+    expect(wrapperSender({ ...item, from: wrapperSender(item) }).key).toBe('x-agent:s-abc234')
+    // Any other origin keeps its sender as it is.
+    expect(wrapperSender({ origin: 'session-message', from: XA })).toBe(XA)
+    expect(isXAgentSender('x-agent:s-abc234')).toBe(true)
+    expect(isXAgentSender('s-abc234')).toBe(false)
+  })
+
+  it('the ClaudeUI wrapper says the text is an X-Agent result, not another session message, and the reader keeps the key', () => {
+    const text = buildSessionMessageWrapper(
+      wrapperSender({ origin: 'dispatch-result', from: XA }),
+      'body'
+    )
+    expect(text).toContain('from="x-agent:s-abc234"')
+    expect(text.endsWith(X_AGENT_RESULT_TRAILER)).toBe(true)
+    expect(text).not.toContain(SESSION_MESSAGE_TRAILER)
+    expect(parseSessionMessageWrapper(text)).toMatchObject({
+      fromKey: 'x-agent:s-abc234',
+      fromTitle: 'impl-e1',
+      body: 'body'
+    })
+  })
+
+  it('a session message keeps the session trailer', () => {
+    expect(buildSessionMessageWrapper(XA, 'x').endsWith(SESSION_MESSAGE_TRAILER)).toBe(true)
+  })
+
+  it('cli.js sees "X-Agent <name>" as the sender name, not another Claude session', () => {
+    const from = wrapperSender({ origin: 'dispatch-result', from: XA })
+    expect(envelopeName(from)).toBe('X-Agent impl-e1')
+    expect(buildCrossSessionEnvelope(from, 'r')).toBe(
+      '<cross-session-message from="x-agent:s-abc234" from-name="X-Agent impl-e1">\nr\n</cross-session-message>'
+    )
+    // The name is not doubled when it already carries the lead.
+    expect(envelopeName({ key: 'x-agent:s-abc234', title: 'X-Agent impl-e1' })).toBe(
+      'X-Agent impl-e1'
+    )
+    // Other senders are unchanged.
+    expect(envelopeName(FROM)).toBe('Triage assistant')
+  })
+
+  it("the prefixed key passes cli.js's own key class unchanged (the envelope round trip)", () => {
+    expect(sanitizeWrapperKey('x-agent:s-abc234')).toBe('x-agent:s-abc234')
+    expect(xAgentBareName('X-Agent impl-e1')).toBe('impl-e1')
+    expect(xAgentBareName('impl-e1')).toBe('impl-e1')
   })
 })

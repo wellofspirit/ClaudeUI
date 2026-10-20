@@ -39,6 +39,7 @@ import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import { displayCostFromRow } from '../../shared/cost-rule'
 import { ENGINE_META, engineMeta } from '../../shared/engine-meta'
 import { logger } from './logger'
+import { capReport } from '../../shared/handback-frame'
 
 // ---------------------------------------------------------------------------
 // Metering types (Phase 7 — Pass 1)
@@ -1521,6 +1522,104 @@ export const MIGRATIONS: Migration[] = [
          WHERE state = 'detached';
       `)
     }
+  },
+  {
+    // ADR-105 (B-1): the X-Agent ledger. One row per dispatch target — the harness
+    // session that stays on disk (hidden from the sidebar) so a target outlives its
+    // parent's restart: `id` is its ClaudeUI ref (`s-xxxxxx`, minted beside
+    // `session_ref`), `harness_ref` the engine's own session id, `parent_session_id`
+    // the dispatching session's durable id (moved by `SessionManager.rekey`). No cost
+    // columns: spend stays in `usage_event` (origin `dispatch`, session_id =
+    // harness_ref). `session_ledger` is the orchestrator branch's table, hence the name.
+    version: 35,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS dispatch_target (
+          id TEXT PRIMARY KEY,
+          engine TEXT NOT NULL,
+          harness_ref TEXT NOT NULL,
+          parent_session_id TEXT NOT NULL,
+          parent_engine TEXT NOT NULL,
+          parent_tool_use_id TEXT,
+          cwd TEXT NOT NULL,
+          model TEXT NOT NULL,
+          launch_mode TEXT NOT NULL,
+          account_key TEXT,
+          codex_account_id TEXT,
+          caller_restriction TEXT,
+          name TEXT,
+          description TEXT,
+          state TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          last_active_at INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_dispatch_target_harness
+          ON dispatch_target (engine, harness_ref);
+        CREATE INDEX IF NOT EXISTS idx_dispatch_target_parent
+          ON dispatch_target (parent_session_id);
+      `)
+    }
+  },
+  {
+    // The X-Agent report store (ADR-105 §3, slice B-3a): how each run of an X-Agent ended, one
+    // row per run, keyed by the target's ledger id and the run's number (1-based, per target).
+    // `tool_use_id` is the dispatch_agent call that launched or continued that run (the card the
+    // outcome belongs to). `status`: `delivered` (the agent called `hand_back`), `withheld` (it
+    // ended without one), `fallback` (a target without the tool; `report` is its last message),
+    // `stopped`, `failed`, `timeout`; `report` is set for delivered and fallback only, as
+    // received: the sanitiser runs at render and delivery time. `delivered_at` stays null until
+    // the result reaches the parent (v37's `report_run` carries a held one's run).
+    // `dispatch_target.hand_back` says the target was started with the tool (0 = a row from before it
+    // existed: its final message is the report).
+    version: 36,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS dispatch_report (
+          target_id TEXT NOT NULL,
+          run INTEGER NOT NULL,
+          tool_use_id TEXT,
+          status TEXT NOT NULL,
+          report TEXT,
+          created_at INTEGER NOT NULL,
+          delivered_at INTEGER,
+          PRIMARY KEY (target_id, run)
+        );
+        ALTER TABLE dispatch_target ADD COLUMN hand_back INTEGER NOT NULL DEFAULT 0;
+      `)
+    }
+  },
+  {
+    // Slice B-3b: the run an X-Agent result in the held inbox reports (origin `dispatch-result`),
+    // so the flush that finally delivers it stamps exactly that run's `dispatch_report` row.
+    // NULL for every other item and for an interrupted-at-quit notice (no run ended).
+    version: 37,
+    up(db) {
+      db.exec('ALTER TABLE session_inbox ADD COLUMN report_run INTEGER')
+    }
+  },
+  {
+    // Slice B-3c: the words the review put above a report (ADR-105 §3). `dispatch_report.warning`
+    // is the SECURITY WARNING of a `flagged` report, or the "could not be reviewed" note of a
+    // `delivered` one; NULL when the report was not reviewed or passed. `status` gains `flagged`
+    // (a TEXT column: no schema change for the value).
+    version: 38,
+    up(db) {
+      db.exec('ALTER TABLE dispatch_report ADD COLUMN warning TEXT')
+    }
+  },
+  {
+    // ADR-105 §5: which ClaudeUI instance runs a `running` target. Two
+    // instances can share one operational.db (a dev or verifier build beside the packaged app,
+    // `claudeui-server` beside the desktop); the boot pass interrupts a `running` row only when its
+    // owner (pid + a per-boot id) is gone. Set while the row is `running`, NULL otherwise and on every
+    // row written before this version (those keep the old rule: a `running` row at boot is interrupted).
+    version: 39,
+    up(db) {
+      db.exec(`
+        ALTER TABLE dispatch_target ADD COLUMN owner_pid INTEGER;
+        ALTER TABLE dispatch_target ADD COLUMN owner_boot TEXT;
+      `)
+    }
   }
 ]
 
@@ -1928,11 +2027,13 @@ export function deleteSessionMeta(sessionId: string): void {
 export interface InboxItem {
   id: number
   target: string
-  origin: 'session-message' | 'agent-note'
+  origin: 'session-message' | 'agent-note' | 'dispatch-result'
   fromKey: string
   fromTitle: string
   senderModeClass: 'bypass' | 'prompting' | null
   body: string
+  /** The `dispatch_report` run a held X-Agent result stands for (its row is stamped when it goes out). */
+  reportRun: number | null
   createdAt: number
   deliveredAt: number | null
 }
@@ -1945,6 +2046,7 @@ interface InboxRow {
   from_title: string
   sender_mode_class: string | null
   body: string
+  report_run: number | null
   created_at: number
   delivered_at: number | null
 }
@@ -1953,7 +2055,10 @@ function inboxItem(row: InboxRow): InboxItem {
   return {
     id: row.id,
     target: row.target,
-    origin: row.origin === 'agent-note' ? 'agent-note' : 'session-message',
+    origin:
+      row.origin === 'agent-note' || row.origin === 'dispatch-result'
+        ? row.origin
+        : 'session-message',
     fromKey: row.from_key,
     fromTitle: row.from_title,
     senderModeClass:
@@ -1961,6 +2066,8 @@ function inboxItem(row: InboxRow): InboxItem {
         ? row.sender_mode_class
         : null,
     body: row.body,
+    reportRun:
+      row.report_run === null || row.report_run === undefined ? null : Number(row.report_run),
     createdAt: Number(row.created_at),
     deliveredAt: row.delivered_at === null ? null : Number(row.delivered_at)
   }
@@ -1968,14 +2075,17 @@ function inboxItem(row: InboxRow): InboxItem {
 
 /** Hold an item for `target`'s next turn. Returns the row id. */
 export function addInboxItem(
-  item: Omit<InboxItem, 'id' | 'deliveredAt' | 'createdAt'> & { createdAt?: number },
+  item: Omit<InboxItem, 'id' | 'deliveredAt' | 'createdAt' | 'reportRun'> & {
+    createdAt?: number
+    reportRun?: number | null
+  },
   db: Db = getDb()
 ): number {
   const info = db
     .prepare(
       `INSERT INTO session_inbox
-         (target, origin, from_key, from_title, sender_mode_class, body, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+         (target, origin, from_key, from_title, sender_mode_class, body, report_run, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       item.target,
@@ -1984,6 +2094,7 @@ export function addInboxItem(
       item.fromTitle,
       item.senderModeClass,
       item.body,
+      item.reportRun ?? null,
       item.createdAt ?? Date.now()
     )
   return Number(info.lastInsertRowid)
@@ -2469,6 +2580,516 @@ export function sessionProposalStartedRef(ref: string, db: Db = getDb()): boolea
     db.prepare('SELECT 1 FROM session_proposal WHERE started_ref = ? LIMIT 1').get(ref) !==
     undefined
   )
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch targets — the X-Agent ledger (ADR-105)
+// ---------------------------------------------------------------------------
+
+/**
+ * `running` a turn is in flight; `idle` between turns (the process may be released);
+ * `interrupted` ended by its parent's cancel, a lost server or an app quit — resumable;
+ * `stopped` ended on purpose (a card Stop, a deleted parent); `failed` the last turn or resume failed —
+ * it may be retried, and only `stopped` is never resumed. A resume that failed for a
+ * transient reason (a busy host, a spawn error) leaves the previous state; only one that
+ * cannot succeed (the transcript, session directory, opencode session or Codex rollout
+ * is gone) writes `failed`.
+ */
+export type DispatchTargetState = 'running' | 'idle' | 'interrupted' | 'stopped' | 'failed'
+
+/** One dispatch target: a harness session the dispatcher can resume from this row. */
+export interface DispatchTargetRow {
+  /** Its ClaudeUI ref (`s-xxxxxx`). */
+  id: string
+  engine: EngineId
+  /** The engine's own session id (Claude's `--session-id` uuid, pi's, opencode's, Codex's thread). */
+  harnessRef: string
+  /** The dispatching session's durable id; moves with `SessionManager.rekey`. */
+  parentSessionId: string
+  parentEngine: EngineId
+  parentToolUseId: string | null
+  cwd: string
+  model: string
+  /** The parent's autonomy mode at launch. */
+  launchMode: string
+  accountKey: string | null
+  /** The vault account whose Codex host the thread lives on (null = the active one). */
+  codexAccountId: string | null
+  /** JSON of the ADR-097 S9 caller restriction the target was created with. */
+  callerRestriction: string | null
+  name: string | null
+  description: string | null
+  /** The target was started with the `hand_back` tool (ADR-105 §3); false = a row from before it. */
+  handBack: boolean
+  state: DispatchTargetState
+  createdAt: number
+  lastActiveAt: number
+}
+
+/**
+ * The ClaudeUI instance that runs a `running` target: its pid and a per-boot id (a pid alone
+ * is reused). Kept beside the row, not in it: only the ledger store and the boot pass read it.
+ */
+export interface DispatchTargetOwner {
+  pid: number
+  boot: string
+}
+
+interface DispatchTargetDbRow {
+  id: string
+  engine: string
+  harness_ref: string
+  parent_session_id: string
+  parent_engine: string
+  parent_tool_use_id: string | null
+  cwd: string
+  model: string
+  launch_mode: string
+  account_key: string | null
+  codex_account_id: string | null
+  caller_restriction: string | null
+  name: string | null
+  description: string | null
+  hand_back: number
+  state: string
+  created_at: number
+  last_active_at: number
+  owner_pid: number | null
+  owner_boot: string | null
+}
+
+const DISPATCH_TARGET_STATES: readonly string[] = [
+  'running',
+  'idle',
+  'interrupted',
+  'stopped',
+  'failed'
+]
+
+function dispatchTargetRow(row: DispatchTargetDbRow): DispatchTargetRow {
+  return {
+    id: row.id,
+    engine: row.engine as EngineId,
+    harnessRef: row.harness_ref,
+    parentSessionId: row.parent_session_id,
+    parentEngine: row.parent_engine as EngineId,
+    parentToolUseId: row.parent_tool_use_id,
+    cwd: row.cwd,
+    model: row.model,
+    launchMode: row.launch_mode,
+    accountKey: row.account_key,
+    codexAccountId: row.codex_account_id,
+    callerRestriction: row.caller_restriction,
+    name: row.name,
+    description: row.description,
+    handBack: Number(row.hand_back) === 1,
+    state: DISPATCH_TARGET_STATES.includes(row.state)
+      ? (row.state as DispatchTargetState)
+      : 'failed',
+    createdAt: Number(row.created_at),
+    lastActiveAt: Number(row.last_active_at)
+  }
+}
+
+/** The owner a row records, if it has one (a row written before v39, or one that is not `running`, has none). */
+function dispatchTargetOwner(row: DispatchTargetDbRow): DispatchTargetOwner | null {
+  return row.owner_pid !== null && row.owner_pid !== undefined && row.owner_boot
+    ? { pid: Number(row.owner_pid), boot: row.owner_boot }
+    : null
+}
+
+/**
+ * Insert a target row. Returns false when the id or the (engine, harness_ref) pair is taken.
+ * `owner`: the instance that runs it (the row is inserted `running`).
+ */
+export function insertDispatchTarget(
+  row: DispatchTargetRow,
+  db: Db = getDb(),
+  owner: DispatchTargetOwner | null = null
+): boolean {
+  const info = db
+    .prepare(
+      `INSERT OR IGNORE INTO dispatch_target
+         (id, engine, harness_ref, parent_session_id, parent_engine, parent_tool_use_id, cwd,
+          model, launch_mode, account_key, codex_account_id, caller_restriction, name,
+          description, hand_back, state, created_at, last_active_at, owner_pid, owner_boot)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      row.id,
+      row.engine,
+      row.harnessRef,
+      row.parentSessionId,
+      row.parentEngine,
+      row.parentToolUseId,
+      row.cwd,
+      row.model,
+      row.launchMode,
+      row.accountKey,
+      row.codexAccountId,
+      row.callerRestriction,
+      row.name,
+      row.description,
+      row.handBack ? 1 : 0,
+      row.state,
+      row.createdAt,
+      row.lastActiveAt,
+      owner?.pid ?? null,
+      owner?.boot ?? null
+    )
+  return Number(info.changes) > 0
+}
+
+/**
+ * Insert a target row AND its `session_ref` row (engine, harness id) in one
+ * transaction, so a refused second insert leaves no orphan ref. Returns false, with
+ * nothing written, when the id, the ref or the (engine, harness_ref) pair is taken.
+ */
+export function insertDispatchTargetWithRef(
+  row: DispatchTargetRow,
+  db: Db = getDb(),
+  owner: DispatchTargetOwner | null = null
+): boolean {
+  db.prepare('BEGIN').run()
+  try {
+    const ok =
+      insertSessionRef(
+        { ref: row.id, engine: row.engine, sessionId: row.harnessRef, routingId: null },
+        db
+      ) && insertDispatchTarget(row, db, owner)
+    db.prepare(ok ? 'COMMIT' : 'ROLLBACK').run()
+    return ok
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+export function getDispatchTarget(id: string, db: Db = getDb()): DispatchTargetRow | undefined {
+  const row = db.prepare('SELECT * FROM dispatch_target WHERE id = ?').get(id) as
+    DispatchTargetDbRow | undefined
+  return row ? dispatchTargetRow(row) : undefined
+}
+
+/** The target the engine knows by this session id. */
+export function getDispatchTargetByHarnessRef(
+  engine: EngineId,
+  harnessRef: string,
+  db: Db = getDb()
+): DispatchTargetRow | undefined {
+  const row = db
+    .prepare('SELECT * FROM dispatch_target WHERE engine = ? AND harness_ref = ?')
+    .get(engine, harnessRef) as DispatchTargetDbRow | undefined
+  return row ? dispatchTargetRow(row) : undefined
+}
+
+/** The targets a parent session owns, newest first. */
+export function dispatchTargetsByParent(
+  parentSessionId: string,
+  db: Db = getDb()
+): DispatchTargetRow[] {
+  return (
+    db
+      .prepare(
+        'SELECT * FROM dispatch_target WHERE parent_session_id = ? ORDER BY created_at DESC, id'
+      )
+      .all(parentSessionId) as DispatchTargetDbRow[]
+  ).map(dispatchTargetRow)
+}
+
+/** Every target that has not been ended on purpose (the boot sweep's candidates). */
+export function dispatchTargetsNotStopped(db: Db = getDb()): DispatchTargetRow[] {
+  return (
+    db
+      .prepare("SELECT * FROM dispatch_target WHERE state <> 'stopped' ORDER BY created_at, id")
+      .all() as DispatchTargetDbRow[]
+  ).map(dispatchTargetRow)
+}
+
+/** A `running` row and the instance it records as running it (null: written before v39). */
+export type RunningDispatchTarget = DispatchTargetRow & { owner: DispatchTargetOwner | null }
+
+/** Every target still marked `running` (at boot: the candidates the last process may have left behind). */
+export function runningDispatchTargets(db: Db = getDb()): RunningDispatchTarget[] {
+  return (
+    db
+      .prepare("SELECT * FROM dispatch_target WHERE state = 'running' ORDER BY created_at, id")
+      .all() as DispatchTargetDbRow[]
+  ).map((row) => ({ ...dispatchTargetRow(row), owner: dispatchTargetOwner(row) }))
+}
+
+/** One target, when it is still marked `running`: the row and the instance recorded as running it. */
+export function runningDispatchTarget(
+  id: string,
+  db: Db = getDb()
+): RunningDispatchTarget | undefined {
+  const row = db
+    .prepare("SELECT * FROM dispatch_target WHERE id = ? AND state = 'running'")
+    .get(id) as DispatchTargetDbRow | undefined
+  return row ? { ...dispatchTargetRow(row), owner: dispatchTargetOwner(row) } : undefined
+}
+
+/** The mutable columns of a target row; an omitted key keeps its value. */
+export type DispatchTargetPatch = Partial<
+  Pick<
+    DispatchTargetRow,
+    'state' | 'harnessRef' | 'accountKey' | 'lastActiveAt' | 'name' | 'description'
+  >
+> & {
+  /** The instance that runs the row; `null` clears it (the row is not `running`). */
+  owner?: DispatchTargetOwner | null
+}
+
+/**
+ * `stopped` is final: a stopped row keeps its state and owns nothing, whatever a later update says (a
+ * run that ends in another instance, a late turn state), so the user's Stop is never written over.
+ */
+export function updateDispatchTarget(
+  id: string,
+  patch: DispatchTargetPatch,
+  db: Db = getDb()
+): void {
+  db.prepare(
+    `UPDATE dispatch_target
+        SET state = CASE WHEN ? AND state <> 'stopped' THEN ? ELSE state END,
+            harness_ref = CASE WHEN ? THEN ? ELSE harness_ref END,
+            account_key = CASE WHEN ? THEN ? ELSE account_key END,
+            last_active_at = CASE WHEN ? THEN ? ELSE last_active_at END,
+            name = CASE WHEN ? THEN ? ELSE name END,
+            description = CASE WHEN ? THEN ? ELSE description END,
+            owner_pid = CASE WHEN ? AND state <> 'stopped' THEN ? ELSE owner_pid END,
+            owner_boot = CASE WHEN ? AND state <> 'stopped' THEN ? ELSE owner_boot END
+      WHERE id = ?`
+  ).run(
+    patch.state !== undefined ? 1 : 0,
+    patch.state ?? null,
+    patch.harnessRef !== undefined ? 1 : 0,
+    patch.harnessRef ?? null,
+    patch.accountKey !== undefined ? 1 : 0,
+    patch.accountKey ?? null,
+    patch.lastActiveAt !== undefined ? 1 : 0,
+    patch.lastActiveAt ?? null,
+    patch.name !== undefined ? 1 : 0,
+    patch.name ?? null,
+    patch.description !== undefined ? 1 : 0,
+    patch.description ?? null,
+    patch.owner !== undefined ? 1 : 0,
+    patch.owner?.pid ?? null,
+    patch.owner !== undefined ? 1 : 0,
+    patch.owner?.boot ?? null,
+    id
+  )
+}
+
+/** A parent's session id changed (`SessionManager.rekey`): its targets follow. */
+export function moveDispatchTargetParent(oldId: string, newId: string, db: Db = getDb()): void {
+  if (oldId === newId) return
+  db.prepare('UPDATE dispatch_target SET parent_session_id = ? WHERE parent_session_id = ?').run(
+    newId,
+    oldId
+  )
+}
+
+/**
+ * Boot pass: these rows were `running` under an owner that is gone (an app quit or a crash), so
+ * they are `interrupted` and own nothing. Only rows still `running` change. Returns the ids that did (a
+ * row another instance interrupted first is not among them).
+ */
+export function interruptDispatchTargets(ids: readonly string[], db: Db = getDb()): string[] {
+  const stmt = db.prepare(
+    `UPDATE dispatch_target SET state = 'interrupted', owner_pid = NULL, owner_boot = NULL
+      WHERE id = ? AND state = 'running'`
+  )
+  const changed: string[] = []
+  for (const id of ids) if (Number(stmt.run(id).changes) > 0) changed.push(id)
+  return changed
+}
+
+/**
+ * What one target has spent, from the `origin = 'dispatch'` rows its turns wrote
+ * (`session_id` = the harness id). Seeds the `dispatch.maxCostUsd` check of a target
+ * resumed after its in-memory entry (and the running figure with it) was lost; a row
+ * whose cost cannot be resolved counts as an unpriced turn, as it does live.
+ */
+export function dispatchTargetSpend(
+  harnessRef: string,
+  db: Db = getDb()
+): { costUsd: number; unpricedTurns: number } {
+  const rows = db
+    .prepare(
+      `SELECT ${DISPATCH_LEDGER_COLUMNS}
+       FROM usage_event
+       WHERE origin = 'dispatch' AND session_id = ?`
+    )
+    .all(harnessRef) as DispatchLedgerDbRow[]
+  let costUsd = 0
+  let unpricedTurns = 0
+  for (const row of rows) {
+    // The API-equivalent figure, not the display cost: it is what the live `maxCostUsd`
+    // gate counts (ADR-071), so a subscription or free turn still moves the cap.
+    const cost = row.api_cost_usd
+    if (cost === null || cost === undefined || !Number.isFinite(cost)) unpricedTurns++
+    else costUsd += cost
+  }
+  return { costUsd, unpricedTurns }
+}
+
+/** Every harness session id in the ledger — what the history readers must skip. */
+export function allDispatchTargetHarnessRefs(db: Db = getDb()): string[] {
+  return (
+    db.prepare('SELECT harness_ref FROM dispatch_target').all() as { harness_ref: string }[]
+  ).map((r) => r.harness_ref)
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch reports — what an X-Agent run handed back (ADR-105 §3)
+// ---------------------------------------------------------------------------
+
+/**
+ * How a run ended: `delivered` (hand_back), `flagged` (hand_back, and the review put a security
+ * warning above the report), `withheld`, `fallback` (no tool: its last message), or an end
+ * without a report.
+ */
+export type DispatchReportStatus =
+  'delivered' | 'flagged' | 'withheld' | 'fallback' | 'stopped' | 'failed' | 'timeout'
+
+const DISPATCH_REPORT_STATUSES: readonly string[] = [
+  'delivered',
+  'flagged',
+  'withheld',
+  'fallback',
+  'stopped',
+  'failed',
+  'timeout'
+]
+
+export interface DispatchReportRow {
+  targetId: string
+  /** 1-based, per target: the n-th run that ended. */
+  run: number
+  /** The dispatch_agent call that launched or continued this run (null: it carried none). */
+  toolUseId: string | null
+  status: DispatchReportStatus
+  /** As received; sanitised at render and delivery time. Null unless `delivered`, `flagged` or `fallback`. */
+  report: string | null
+  /**
+   * What the review of the report put above it (B-3c): a flagged report's security warning, or a
+   * delivered one's "could not be reviewed" note. Null: not reviewed, or passed. Already defused.
+   */
+  warning: string | null
+  createdAt: number
+  /** Null until the result was handed to the parent's engine (a held one stays null until its flush). */
+  deliveredAt: number | null
+}
+
+interface DispatchReportDbRow {
+  target_id: string
+  run: number
+  tool_use_id: string | null
+  status: string
+  report: string | null
+  warning: string | null
+  created_at: number
+  delivered_at: number | null
+}
+
+function dispatchReportRow(row: DispatchReportDbRow): DispatchReportRow {
+  return {
+    targetId: row.target_id,
+    run: Number(row.run),
+    toolUseId: row.tool_use_id,
+    status: DISPATCH_REPORT_STATUSES.includes(row.status)
+      ? (row.status as DispatchReportStatus)
+      : 'failed',
+    report: row.report,
+    warning: row.warning ?? null,
+    createdAt: Number(row.created_at),
+    deliveredAt: row.delivered_at === null ? null : Number(row.delivered_at)
+  }
+}
+
+/**
+ * Store how a run ended as the target's next run (one row per run: the primary key). Returns
+ * the row written, or undefined when a concurrent insert took the number. An over-long report
+ * is cut at `REPORT_MAX_CHARS`.
+ */
+export function insertDispatchReport(
+  input: {
+    targetId: string
+    toolUseId: string | null
+    status: DispatchReportStatus
+    report: string | null
+    /** The review's words above the report (B-3c); omitted / null: none. */
+    warning?: string | null
+    createdAt: number
+  },
+  db: Db = getDb()
+): DispatchReportRow | undefined {
+  const report = input.report === null ? null : capReport(input.report)
+  const info = db
+    .prepare(
+      `INSERT OR IGNORE INTO dispatch_report
+         (target_id, run, tool_use_id, status, report, warning, created_at, delivered_at)
+       SELECT ?, COALESCE(MAX(run), 0) + 1, ?, ?, ?, ?, ?, NULL FROM dispatch_report WHERE target_id = ?`
+    )
+    .run(
+      input.targetId,
+      input.toolUseId,
+      input.status,
+      report,
+      input.warning ?? null,
+      input.createdAt,
+      input.targetId
+    )
+  if (Number(info.changes) === 0) return undefined
+  return latestDispatchReport(input.targetId, db)
+}
+
+/** The target's newest report row (its last run that ended). */
+export function latestDispatchReport(
+  targetId: string,
+  db: Db = getDb()
+): DispatchReportRow | undefined {
+  const row = db
+    .prepare('SELECT * FROM dispatch_report WHERE target_id = ? ORDER BY run DESC LIMIT 1')
+    .get(targetId) as DispatchReportDbRow | undefined
+  return row ? dispatchReportRow(row) : undefined
+}
+
+/** Every run's row of each of these targets, oldest first (a history read joins a parent's cards in one query). */
+export function dispatchReportsOf(
+  targetIds: readonly string[],
+  db: Db = getDb()
+): DispatchReportRow[] {
+  if (targetIds.length === 0) return []
+  const marks = targetIds.map(() => '?').join(', ')
+  return (
+    db
+      .prepare(
+        `SELECT * FROM dispatch_report WHERE target_id IN (${marks}) ORDER BY target_id, run`
+      )
+      .all(...targetIds) as DispatchReportDbRow[]
+  ).map(dispatchReportRow)
+}
+
+/** A run's report was handed to its parent's engine (ADR-105 §3): stamp it, once. */
+export function markDispatchReportDelivered(
+  targetId: string,
+  run: number,
+  now = Date.now(),
+  db: Db = getDb()
+): void {
+  db.prepare(
+    'UPDATE dispatch_report SET delivered_at = ? WHERE target_id = ? AND run = ? AND delivered_at IS NULL'
+  ).run(now, targetId, run)
+}
+
+/** How many runs of this target have ended with a row. */
+export function dispatchReportCount(targetId: string, db: Db = getDb()): number {
+  const row = db
+    .prepare('SELECT COUNT(*) AS n FROM dispatch_report WHERE target_id = ?')
+    .get(targetId) as { n: number }
+  return Number(row.n)
 }
 
 /**

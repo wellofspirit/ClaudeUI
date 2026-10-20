@@ -67,6 +67,18 @@ export function humanDelay(seconds: number): string {
 /** The last path segment, for a header that would otherwise be all directory. */
 const basename = (path: string): string => path.split(/[\\/]/).filter(Boolean).pop() || path
 
+/** The `message` of a `{success:false,…}` SubagentHandback result; undefined for a delivered one. */
+function handbackRefusal(result?: ToolResultBlock): string | undefined {
+  if (!result?.toolResult) return undefined
+  try {
+    const parsed = JSON.parse(result.toolResult) as { success?: unknown; message?: unknown }
+    if (parsed.success === false) return str(parsed.message) ?? 'Nothing was sent'
+  } catch {
+    // A plain-text result (an error string): nothing to read a refusal from.
+  }
+  return result.isError ? result.toolResult : undefined
+}
+
 // ---------------------------------------------------------------------------
 // The specs
 // ---------------------------------------------------------------------------
@@ -235,6 +247,18 @@ export const CLAUDE_TOOL_SPECS: Record<string, ClaudeToolSpec> = {
         Object.entries(input).map(([k, v]) => [k, str(v)]),
         result?.toolResult
       )
+  },
+
+  // The subagent's final report to the agent that spawned it (auto mode). The
+  // body is the report it wrote; the result is `{"success":true,"message":"Report
+  // delivered to your caller."}` or a refusal ("Nothing was sent: …"), which only
+  // earns a row when the report did NOT go out.
+  SubagentHandback: {
+    kind: 'detail',
+    build: (input, result) => {
+      const refusal = handbackRefusal(result)
+      return detail([['not delivered', refusal]], str(input.message))
+    }
   },
 
   // --- structured review output --------------------------------------------

@@ -37,6 +37,7 @@ import { logger } from '../services/logger'
 import { emitEvent, syncCore } from '../services/sync-host'
 import { blobStore, internAttachments } from '../services/blob-store'
 import { deleteSessionByEngine } from '../services/session-delete'
+import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
 import { deleteProjectFiles, deleteSessionFiles } from '../services/delete-session-files'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { seedCanonicalTranscript } from './seed-canonical-transcript'
@@ -413,7 +414,9 @@ function codexDeleteHooks(manager: SessionManager): CodexDeleteHooks {
   return {
     unwatch: unwatchForDelete,
     stop: (threadId) => manager.cancel(threadId),
-    removeSession: (threadId) => syncCore.removeSession(threadId)
+    removeSession: (threadId) => syncCore.removeSession(threadId),
+    // Only once the binary has deleted the thread: its X-Agents end with it (ADR-105 §5).
+    deleted: (threadId) => crossEngineDispatcher.endParent(threadId)
   }
 }
 
@@ -488,12 +491,16 @@ export async function deleteSession(
   unwatchForDelete(sessionId)
   manager.cancel(sessionId)
   syncCore.removeSession(sessionId)
-  await deleteSessionByEngine(sessionId, projectKey, engineId ?? actualEngine)
+  const deleted = await deleteSessionByEngine(sessionId, projectKey, engineId ?? actualEngine)
+  // The engine accepted the delete: the session's X-Agents end with it (ADR-105 §5). A
+  // refusal (the throw above), or a best-effort engine saying it could not (`false`: the
+  // opencode server is down, the pi file is stuck), leaves a surviving parent its X-Agents.
+  if (deleted !== false) crossEngineDispatcher.endParent(sessionId)
   // The engine/model row goes with the session, here and not on a client's say-so:
   // `saveSessionConfig` no longer deletes rows absent from a client's map. After
   // the engine delete, so a refusal (the throw above) keeps the identity a
   // surviving session needs to reopen on the right engine.
-  deleteSessionMeta(sessionId)
+  if (deleted !== false) deleteSessionMeta(sessionId)
   // opencode / pi deletes touch no watched path, so nothing else would tell the
   // other clients their sidebar row is stale until the next poll.
   void refreshCanonicalDirectories()
@@ -605,6 +612,13 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
         `session:delete-project: ${foreign[i].engineId} session ${foreign[i].sessionId} survived the delete`,
         result.reason
       )
+    } else if (result.value === false) {
+      // opencode and pi swallow their own failures and say so this way.
+      survivors.add(foreign[i].sessionId)
+      logger.warn(
+        'IPC',
+        `session:delete-project: ${foreign[i].engineId} session ${foreign[i].sessionId} survived the delete`
+      )
     }
   })
   // Their engine/model rows go too (see `deleteSession`) — except a survivor's,
@@ -632,6 +646,14 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
   })
 
   if (removeDir) await deleteProjectFiles(projectKey)
+  // Every session the engines accepted the delete of: its X-Agents end with it (ADR-105 §5).
+  // A survivor, or a Claude transcript that could not be removed, keeps them. (The Codex
+  // threads ended one by one as the walk deleted them.)
+  const stuck = new Set(survivors)
+  fileResults.forEach((result, i) => {
+    if (result.status === 'rejected') stuck.add(sessionFiles[i].sessionId)
+  })
+  for (const id of ids) if (!stuck.has(id)) crossEngineDispatcher.endParent(id)
   void refreshCanonicalDirectories()
 }
 

@@ -4,7 +4,13 @@ import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import type { HostWindowHandle } from '../host'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
-import { buildSessionMessageWrapper } from '../../shared/session-message-wrapper'
+import { buildSessionMessageWrapper, wrapperSender } from '../../shared/session-message-wrapper'
+import {
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
+  dispatchResultSuffix,
+  hasRemovedSessionId,
+  runsInBackground
+} from '../../shared/dispatch-agent-description'
 import type {
   ApprovalDecision,
   FileDiff,
@@ -786,6 +792,11 @@ export class CodexSession extends BaseSession {
     return this.threadId
   }
 
+  /** The current permission mode; a dispatch run reads it through its parent facade (ADR-105). */
+  getAutonomyMode(): string {
+    return this.permissionMode
+  }
+
   /**
    * Hand ONE held item to Codex (ADR-053 on this engine's two transports).
    *
@@ -846,9 +857,15 @@ export class CodexSession extends BaseSession {
     if (this.queue.consumeById(item.itemId)) this.queue.emit()
   }
 
-  /** The app-server thread is open: a message does not reopen a closed session. */
+  /**
+   * The app-server host is connected and this session's thread is open: `threadId` is set
+   * only after `thread/start|resume|fork` was answered on the attached host, and `closed`
+   * covers a lost host or a disposed session. A session that has not started its thread yet
+   * (just constructed, a reopen before the first prompt) is not live: a message does not
+   * start or reopen one.
+   */
   isEngineLive(): boolean {
-    return !this.closed
+    return !this.closed && this.threadId !== null
   }
 
   /**
@@ -862,7 +879,7 @@ export class CodexSession extends BaseSession {
    */
   async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
     if (this.closed) return 'unavailable'
-    const text = buildSessionMessageWrapper(item.from, item.text)
+    const text = buildSessionMessageWrapper(wrapperSender(item), item.text)
     const clientUserMessageId = `msg-${randomUUID()}`
     this.nonUserClientIds.add(clientUserMessageId)
     // A turn start or a settings update is in flight and there is no turn to
@@ -2090,8 +2107,20 @@ export class CodexSession extends BaseSession {
   /** Stop every dispatch this session still has in flight, scoped to it. */
   private stopInFlightDispatches(): void {
     for (const id of this.inFlightDispatchIds)
-      crossEngineDispatcher.stopDispatch(id, this.routingId)
+      crossEngineDispatcher.stopDispatch(id, this.routingId, { blockingOnly: true })
     this.inFlightDispatchIds.clear()
+  }
+
+  /**
+   * The session's headline cost: the API-rate equivalent the status line
+   * carries — see `equivalentCost` for why a priced model's $0 and an unpriced
+   * one's null are different statements.
+   */
+  private headlineCostUsd(): number | null {
+    return (
+      this.equivalentCostUsd ??
+      this.equivalentCost({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
+    )
   }
 
   private status(state: SessionStatus['state']): void {
@@ -2112,9 +2141,7 @@ export class CodexSession extends BaseSession {
       // known $0 so far (the zero-token equivalent), while an unpriced one —
       // or a thread whose model is not known yet — cannot be priced at all and
       // reports null, which the renderers show as "unknown" rather than free.
-      totalCostUsd:
-        this.equivalentCostUsd ??
-        this.equivalentCost({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+      totalCostUsd: this.headlineCostUsd(),
       account: this.account,
       ...(this.native
         ? {
@@ -2665,7 +2692,13 @@ export class CodexSession extends BaseSession {
       if (item.type === 'agentMessage' && completed) child.summary = item.text
       return
     }
+    // A child's completed `imageView` is held back the same way the root's is
+    // (see {@link item}): the subagent-tool-result reducer appends rather than
+    // keeping the first, so the mapper's empty result and the one with the bytes
+    // would both land. {@link attachChildImageView} emits the single result.
+    const deferredRead = completed && item.type === 'imageView'
     for (const event of mapCodexItem(childThreadId, turnId, item, completed, timestamp)) {
+      if (deferredRead && event.kind === 'toolResult') continue
       if (event.kind === 'message') {
         const text = event.message.content.find((block) => block.type === 'text')
         if (item.type === 'agentMessage' && text?.type === 'text') child.summary = text.text
@@ -2683,6 +2716,25 @@ export class CodexSession extends BaseSession {
           ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {})
         })
     }
+    // Not awaited, for the reason {@link item} gives.
+    if (completed && item.type === 'imageView') void this.attachChildImageView(child, id, item.path)
+  }
+
+  /** The ONE result a child's completed `imageView` gets; see {@link attachImageView}. */
+  private async attachChildImageView(
+    child: CodexChild,
+    toolUseId: string,
+    path: string
+  ): Promise<void> {
+    const image = await readCodexImageView(path)
+    if (this.closed) return
+    this.send('session:subagent-tool-result', {
+      toolUseId: child.parentToolUseId,
+      toolResultToolUseId: toolUseId,
+      result: '',
+      isError: false,
+      ...(image ? { images: [image] } : {})
+    })
   }
 
   /**
@@ -2977,6 +3029,16 @@ export class CodexSession extends BaseSession {
           this.send('session:error', banner)
       }
       this.endUserStop()
+      // The turn boundary every other engine raises (the renderer's "Ready for
+      // input" / attention edge keys on it). Only the ROOT thread's turn gets
+      // here — a child's `turn/completed` goes through `routeChild` — and the
+      // `endedTurns` latch above keeps a replay from raising it twice.
+      this.send('session:result', {
+        totalCostUsd: this.headlineCostUsd(),
+        durationMs: turn.durationMs ?? 0,
+        result: '',
+        sessionId: this.threadId
+      })
       this.status('idle')
       this.resetInactivityTimer()
     }
@@ -3457,8 +3519,8 @@ export class CodexSession extends BaseSession {
    * codex → codex, which is same-engine besides).
    *
    * Mirrors `PiSession.handleDispatchAgent` in spirit — identical validation,
-   * identical `DispatchContext` construction, identical `[dispatch session_id:
-   * …]` success suffix, so a Codex-sourced dispatch reads exactly like a
+   * identical `DispatchContext` construction, identical blocking-result
+   * suffix (`dispatchResultSuffix`), so a Codex-sourced dispatch reads exactly like a
    * pi-sourced or Claude-sourced one — but imports nothing from pi and differs
    * in two ways the transport forces:
    *
@@ -3507,11 +3569,26 @@ export class CodexSession extends BaseSession {
       return refuse(
         'dispatch_agent requires "engine" (one of "claude"|"opencode"|"pi") and a string "prompt".'
       )
+    // `session_id` left `dispatch_agent` (ADR-105 §4), but a thread started before that keeps the
+    // static spec it was given and can still send one: refuse it, with nothing launched and no
+    // approval card raised.
+    if (hasRemovedSessionId(args?.session_id)) return refuse(DISPATCH_SESSION_ID_REMOVED_TEXT)
     const req: DispatchRequest = {
       engine,
       prompt,
       model: typeof args?.model === 'string' ? args.model : undefined,
-      sessionId: typeof args?.session_id === 'string' ? args.session_id : undefined
+      name: typeof args?.name === 'string' ? args.name : undefined,
+      description: typeof args?.description === 'string' ? args.description : undefined,
+      // The hosted tool call needs the root thread and a live root turn (a native child can
+      // never call it), so the caller is always the top-level agent: background unless it
+      // says otherwise (ADR-105 §2).
+      ...(runsInBackground(
+        typeof args?.run_in_background === 'boolean' ? args.run_in_background : undefined,
+        true,
+        toolUseId
+      )
+        ? { runInBackground: true }
+        : {})
     }
     if (verdict.decision === 'ask') {
       const card: PendingApproval = {
@@ -3522,7 +3599,7 @@ export class CodexSession extends BaseSession {
           engine: req.engine,
           prompt: req.prompt,
           ...(req.model !== undefined ? { model: req.model } : {}),
-          ...(req.sessionId !== undefined ? { session_id: req.sessionId } : {})
+          ...(req.runInBackground ? { run_in_background: true } : {})
         }
       }
       // `allowForSession` keys on the bare tool name, exactly as the shared
@@ -3569,9 +3646,10 @@ export class CodexSession extends BaseSession {
       contentItems: [
         {
           type: 'inputText',
-          text: result.isError
-            ? result.text
-            : `${result.text}\n\n[dispatch session_id: ${result.sessionId} — pass it as session_id to continue this agent]`
+          text:
+            result.isError || !result.agentRef
+              ? result.text
+              : `${result.text}${dispatchResultSuffix(result.agentRef)}`
         }
       ],
       success: !result.isError

@@ -166,6 +166,22 @@ describe('loadSessionIntoStore — content-first Claude load (ADR-102 Arc 2)', (
     })
   })
 
+  it('a parent with running X-Agents commits their records AND the background phase (ADR-105 §5 + ADR-102)', async () => {
+    const record = { taskId: 's-abc123', taskType: 'dispatch', isBackgrounded: true, startedAt: 5 }
+    loadSessionHistory.mockResolvedValue(
+      claudeResult({
+        subagentIndex: indexOf({ a1: 't1' }, { a1: 250 }),
+        activeTasks: { toolu_x: record }
+      })
+    )
+    await loadSessionIntoStore(INFO, { isCurrent: () => true })
+
+    const entry = store().sessions['sess']
+    expect(entry.activeTasks).toEqual({ toolu_x: record })
+    expect(Object.keys(entry.subagentIndex ?? {})).toEqual(['t1'])
+    expect(entry.backgroundLoad).toMatchObject({ statusPending: true })
+  })
+
   it('a re-opened session keeps the status line it had until the fresh one replaces it (R3)', async () => {
     const previous = { totalCostUsd: 3, totalTokens: 9 } as never
     store().loadHistoricalSession('sess', [message('m0')], '/p', [], undefined, previous)

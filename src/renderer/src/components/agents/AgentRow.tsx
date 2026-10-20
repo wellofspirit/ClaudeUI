@@ -8,7 +8,8 @@
  * A nested row is indented 14px per level under the agent that spawned it (a
  * shell: the agent that launched it), with a file-tree guide (ADR-073 §7). A
  * context row is a finished ancestor the Running filter keeps so a running row
- * never floats without its parent: dimmed, no Stop, still opens on click.
+ * never floats without its parent: no Stop, still opens on click. No row is dimmed
+ * for being finished or for being context: only the dot says how a row stands.
  *
  * One line at every width (§10). Left to right: guide · status dot · type
  * column · label · resumed chip · spacer · Stop (running only) · metrics. The
@@ -36,11 +37,13 @@
  */
 import { useEffect, useRef } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
+import { armStopPillFallback } from '../../lib/stop-pill'
 import { formatElapsed, formatTokens, taskElapsedLabel, useTicker } from '../chat/TaskCard'
 import { AGENT_TYPE_SLOT_CLASS, AgentTile, useAgentTile } from './AgentTypeTile'
 import { StatusDot, type SessionDotState } from '../Sidebar/StatusDot'
 import { ResumedBadge } from './ResumedBadge'
 import { agentRowLabel, type AgentRosterRow } from '../../hooks/useAgentRoster'
+import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
 import { modelTier } from '../../../../shared/model-tier'
 import { MODEL_TIER_TEXT_CLASS } from '../../lib/model-tier-class'
 
@@ -90,15 +93,19 @@ function TreeGuide({ depth, guide }: { depth: number; guide: RowGuide }): React.
 }
 
 /** The roster's names for a row's state: `data-status`, and which state of the shared dot draws it. */
-export type RowStatus = 'running' | 'subagents' | 'failed' | 'stopped' | 'loaded' | 'done'
+export type RowStatus =
+  'running' | 'queued' | 'subagents' | 'failed' | 'stopped' | 'loaded' | 'done'
 
 /**
  * A row's dot is the session dot's (`status-dot`, its ripple and colours), mapped:
  * the agent's own work in progress ripples green (`running`); its own run ended
- * but agents it launched still work, violet (`subagents`, from
- * `runningDescendants`, shells not counted); done is steady green (`idle`);
- * failed steady red; stopped by the user and loaded from history steady muted
- * (`inactive`). There is no yellow: a stop is not a warning.
+ * but something it launched still runs (an agent, at any depth, or a background
+ * shell: `runningDescendants`), steady green (`subagents`, drawn as the dot's
+ * `idle`): it is alive in effect, and the title says how many; done, stopped by
+ * the user and loaded from history steady muted (`inactive`; the title and
+ * `data-status` tell them apart); failed steady red. A subagent is alive or dead,
+ * never "idle but connected" like a session, so steady green is reserved for
+ * "finished, but not yet over". There is no yellow: a stop is not a warning.
  *
  * A failed or stopped agent stays failed or stopped whatever runs below it:
  * how it ended is the more useful thing to read.
@@ -106,10 +113,11 @@ export type RowStatus = 'running' | 'subagents' | 'failed' | 'stopped' | 'loaded
 export function rowStatus(
   row: Pick<
     AgentRosterRow,
-    'isRunning' | 'isError' | 'isStopped' | 'isLoaded' | 'runningDescendants'
+    'isRunning' | 'isQueued' | 'isError' | 'isStopped' | 'isLoaded' | 'runningDescendants'
   >
 ): RowStatus {
   if (row.isRunning) return 'running'
+  if (row.isQueued) return 'queued'
   if (row.isError) return 'failed'
   if (row.isStopped) return 'stopped'
   if (row.isLoaded) return 'loaded'
@@ -119,14 +127,16 @@ export function rowStatus(
 
 const DOT_STATE: Record<RowStatus, SessionDotState> = {
   running: 'running',
-  subagents: 'subagents',
+  queued: 'inactive',
+  subagents: 'idle',
   failed: 'failed',
   stopped: 'inactive',
   loaded: 'inactive',
-  done: 'idle'
+  done: 'inactive'
 }
 
 const DOT_LABEL: Partial<Record<RowStatus, string>> = {
+  queued: 'Queued',
   done: 'Done',
   failed: 'Failed',
   stopped: 'Stopped',
@@ -135,6 +145,10 @@ const DOT_LABEL: Partial<Record<RowStatus, string>> = {
 
 function RowStatusDot({ row }: { row: AgentRosterRow }): React.JSX.Element {
   const status = rowStatus(row)
+  const below = row.runningDescendants ?? 0
+  // The dot's own `idle` words ("Idle") say nothing about an agent: it is done, and
+  // this is how much still runs below it.
+  const label = status === 'subagents' ? `Done · ${below} still running below` : DOT_LABEL[status]
   return (
     // An 8px box, as before, around the 6px dot: its ripple ring is absolute, so the
     // box is what the row's columns and the tree guides see.
@@ -143,8 +157,8 @@ function RowStatusDot({ row }: { row: AgentRosterRow }): React.JSX.Element {
         testid="AgentRow.status"
         state={DOT_STATE[status]}
         status={status}
-        runningSubagents={row.runningDescendants ?? 0}
-        label={DOT_LABEL[status]}
+        runningSubagents={below}
+        label={label}
       />
     </span>
   )
@@ -200,13 +214,15 @@ export function AgentRow({
     const rid = activeSessionId
     if (!rid || isStopping) return
     setTaskStopping(rid, row.toolUseId)
-    const result = await window.api.stopTask(rid, row.toolUseId)
+    // A dispatch row is stopped through the dispatcher (it arms the stop for a call that has not
+    // started); without the flag Claude's stopTask finds no task and interrupts the whole turn.
+    const result = await window.api.stopTask(rid, row.toolUseId, row.dispatch !== undefined)
     if (!result.success) {
       window.api.logError('AgentRow', `Failed to stop task: ${result.error}`)
       clearTaskStopping(rid, row.toolUseId)
       return
     }
-    setTimeout(() => clearTaskStopping(rid, row.toolUseId), 10000)
+    armStopPillFallback(rid, row.toolUseId)
   }
 
   // A running shell's clock is live, counted from its lifecycle record's start:
@@ -244,7 +260,7 @@ export function AgentRow({
       style={row.depth > 0 ? { paddingLeft: 10 + INDENT_PX * row.depth } : undefined}
       className={`relative flex items-center gap-1.5 px-2.5 py-1 leading-4 cursor-default border-l-2 transition-colors ${
         selected ? 'bg-bg-input border-accent' : 'border-transparent hover:bg-bg-hover'
-      } ${isContext ? 'opacity-55' : !row.isRunning && row.isError ? 'opacity-80' : ''}`}
+      }`}
     >
       {row.depth > 0 && guide && <TreeGuide depth={row.depth} guide={guide} />}
       <RowStatusDot row={row} />
@@ -286,16 +302,23 @@ export function AgentRow({
       </span>
       <ResumedBadge runIndex={row.runIndex} testId="AgentRow.resumed" />
       <span aria-hidden className="grow shrink basis-0 min-w-0" />
-      {row.isRunning && !isContext && (row.depth === 0 || hasLifecycle) && (
-        <button
-          data-testid="AgentRow.stop"
-          onClick={handleStop}
-          disabled={isStopping}
-          className="text-[11px] px-2 py-px leading-[14px] rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors cursor-default shrink-0 disabled:opacity-50"
-        >
-          {isStopping ? 'Stopping' : 'Stop'}
-        </button>
+      {row.isQueued && (
+        <span data-testid="AgentRow.queued" className="text-[10px] text-text-muted shrink-0">
+          queued
+        </span>
       )}
+      {(row.isRunning || row.isQueued) &&
+        !isContext &&
+        (row.depth === 0 || hasLifecycle || row.isQueued) && (
+          <button
+            data-testid="AgentRow.stop"
+            onClick={handleStop}
+            disabled={isStopping}
+            className="text-[11px] px-2 py-px leading-[14px] rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors cursor-default shrink-0 disabled:opacity-50"
+          >
+            {isStopping ? 'Stopping' : 'Stop'}
+          </button>
+        )}
       {hasMetrics && (
         <span
           data-testid="AgentRow.metrics"
@@ -303,7 +326,7 @@ export function AgentRow({
         >
           {row.lastToolName && (
             <span data-testid="AgentRow.metrics.tool" className="@max-[360px]/roster:hidden">
-              {row.lastToolName}
+              {engineToolMap(engineId).displayName(row.lastToolName)}
               {figures.length > 0 ? ' · ' : ''}
             </span>
           )}

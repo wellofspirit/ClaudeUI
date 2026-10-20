@@ -1012,6 +1012,8 @@ export class PiSubagentManager {
       toolUseId,
       taskId: record.agentId,
       taskType: 'local_agent',
+      // A finished background child wakes its owner (ADR-089), so it is work, not a pause.
+      wakesParent: true,
       runIndex: record.runIndex,
       startedAt: entry.startedAt,
       // Q7: a foreground run says so, so its card can offer "Send to background".
@@ -1528,6 +1530,7 @@ export class PiSubagentManager {
       toolUseId,
       taskId: entry.record.agentId,
       taskType: 'local_agent',
+      wakesParent: true,
       runIndex: entry.record.runIndex,
       startedAt: entry.startedAt,
       isBackgrounded: true

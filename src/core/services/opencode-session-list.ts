@@ -203,10 +203,13 @@ export function refreshOpencodeSessionList(
       if (!conn && mayStart)
         conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, LIST_LEASE)
       if (!conn) return null
-      const sessions = await readOpencodeSessions(new OpencodeClient(conn))
+      const client = new OpencodeClient(conn)
+      const sessions = await readOpencodeSessions(client)
       failures = 0
       backoffUntil = 0
       publish(sessions)
+      // A server is reachable right now: the deletions that were waiting for one go through it.
+      await drainPendingDeletes(client)
       return sessions
     } catch (err) {
       failures++
@@ -224,6 +227,53 @@ export function refreshOpencodeSessionList(
     refreshing = null
   })
   return refreshing
+}
+
+// ── Deletions that wait for a server ────────────────────────────────────────
+
+/** Sessions to delete the next time a server is reachable (in memory; a quit forgets them). */
+const pendingDeletes = new Set<string>()
+
+/** Delete every queued session through `client`; a failure keeps it queued, a 404 means it is gone. */
+async function drainPendingDeletes(client: Pick<OpencodeClient, 'deleteSession'>): Promise<void> {
+  for (const sessionId of [...pendingDeletes]) {
+    try {
+      await client.deleteSession(sessionId)
+      pendingDeletes.delete(sessionId)
+    } catch (err) {
+      if ((err as { status?: number } | null)?.status === 404) pendingDeletes.delete(sessionId)
+      else
+        logger.debug(
+          'OpencodeSessionList',
+          `deferred delete of ${sessionId} postponed: ${err instanceof Error ? err.message : String(err)}`
+        )
+    }
+  }
+}
+
+/**
+ * Delete an opencode session once a server is reachable, WITHOUT starting one — for the
+ * boot sweep, which must not spin up opencode just to tidy a session (the dispatch
+ * session is hidden by its title meanwhile). Goes through a server that is already
+ * running now, else waits: every successful list refresh (the sidebar's first listing
+ * included) delivers the queue. Never throws.
+ */
+export function deleteOpencodeSessionWhenServerUp(sessionId: string): void {
+  pendingDeletes.add(sessionId)
+  void (async () => {
+    let conn: ServerConnection | null = null
+    try {
+      conn = await opencodeServerManager.acquireIfRunning(PERSISTED_SESSIONS_DIR, {
+        ...LIST_LEASE,
+        anyConfig: true
+      })
+      if (conn) await drainPendingDeletes(new OpencodeClient(conn))
+    } catch (err) {
+      logger.debug('OpencodeSessionList', `deferred delete not attempted: ${String(err)}`)
+    } finally {
+      if (conn) opencodeServerManager.releaseIfCurrent(PERSISTED_SESSIONS_DIR, conn)
+    }
+  })()
 }
 
 /**
@@ -269,6 +319,7 @@ export function __resetOpencodeSessionListForTests(): void {
   failures = 0
   backoffUntil = 0
   listeners.clear()
+  pendingDeletes.clear()
 }
 
 /**
@@ -361,9 +412,10 @@ export async function loadOpencodeSessionHistory(sessionId: string): Promise<Eng
  * loadOpencodeSessionHistory.
  *
  * Best-effort: logs + swallows on any error (server may be down). Never throws
- * to the IPC layer.
+ * to the IPC layer; resolves `false` when the session was not deleted (a 404 — already
+ * gone — counts as deleted).
  */
-export async function deleteOpencodeSession(sessionId: string): Promise<void> {
+export async function deleteOpencodeSession(sessionId: string): Promise<boolean> {
   let conn: ServerConnection | null = null
   try {
     conn = await readLease()
@@ -374,11 +426,13 @@ export async function deleteOpencodeSession(sessionId: string): Promise<void> {
         cache.sessions.filter((session) => session.sessionId !== sessionId),
         cache.at
       )
+    return true
   } catch (err) {
     logger.debug(
       'OpencodeSessionList',
       `deleteOpencodeSession(${sessionId}) skipped: ${err instanceof Error ? err.message : String(err)}`
     )
+    return (err as { status?: number } | null)?.status === 404
   } finally {
     if (conn) opencodeServerManager.releaseIfCurrent(PERSISTED_SESSIONS_DIR, conn)
   }

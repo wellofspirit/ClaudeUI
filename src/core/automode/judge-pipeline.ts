@@ -61,6 +61,16 @@ export interface JudgePipelineAction {
   toolUseId: string
   toolName: string
   input: Record<string, unknown>
+  /**
+   * The text is a hand-back (a delegated agent's report, `input.report`), reviewed as agent-authored
+   * output rather than as an action to run (`ClassifierAction.handBack`, ADR-105 §3).
+   */
+  handBack?: boolean
+  /**
+   * The text is a message an X-Agent sends the agent that spawned it (`input.message`), reviewed as
+   * agent-authored output (`ClassifierAction.agentMessage`, ADR-105 §4).
+   */
+  agentMessage?: boolean
 }
 
 /** What a judged review looks like on the card (see the callers' `sendToolReview`). */
@@ -97,7 +107,7 @@ export interface JudgePipelineHooks {
   judgeAvailable: () => Promise<boolean> | boolean
   judgeTransport: () => JudgeTransport
   /** The transcript the judge reads the user's intent from. */
-  messages: () => ChatMessage[]
+  messages: () => ChatMessage[] | Promise<ChatMessage[]>
   environment: () => Promise<EnvironmentInfo>
   captureActionMeta: (
     toolName: string,
@@ -166,6 +176,29 @@ export type JudgePipelineOutcome =
   | { kind: 'human'; reason?: string }
   | { kind: 'settled' }
 
+/**
+ * What the outcome drops: WHY a `human` came back and the verdict behind an `allow`/`hold`.
+ * The sessions and the dispatch tool-call gate do not need it; a caller that must tell a block
+ * from "no verdict" (the X-Agent report review, ADR-105 §3) reads it from
+ * {@link runJudgePipelineDetailed}.
+ */
+export type JudgePipelineDetail =
+  /** The judge answered. `capped` = a denial cap's sentence (the block stands, the human decides). */
+  | { kind: 'verdict'; result: ClassifyResult; capped?: string }
+  /**
+   * No verdict was obtained: `judge` — the judge or its route could not answer (`error`: the cause),
+   * `model` — the configured judge model no longer exists, `mode` — auto mode was left while it ran,
+   * `error` — the pipeline itself threw.
+   */
+  | { kind: 'unavailable'; cause: 'judge' | 'model' | 'mode' | 'error'; error?: string }
+  /** The judge was never consulted (a fast path, a static gate, a grant) or the ask was settled. */
+  | { kind: 'none' }
+
+export interface JudgePipelineResult {
+  outcome: JudgePipelineOutcome
+  detail: JudgePipelineDetail
+}
+
 const ALLOW: JudgePipelineOutcome = { kind: 'allow' }
 const HUMAN: JudgePipelineOutcome = { kind: 'human' }
 const SETTLED: JudgePipelineOutcome = { kind: 'settled' }
@@ -177,6 +210,26 @@ const SETTLED: JudgePipelineOutcome = { kind: 'settled' }
 export async function runJudgePipeline(
   action: JudgePipelineAction,
   hooks: JudgePipelineHooks
+): Promise<JudgePipelineOutcome> {
+  return (await runJudgePipelineDetailed(action, hooks)).outcome
+}
+
+/** {@link runJudgePipeline} with the verdict detail the outcome drops (one implementation, ADR-088 ruling 4). */
+export async function runJudgePipelineDetailed(
+  action: JudgePipelineAction,
+  hooks: JudgePipelineHooks
+): Promise<JudgePipelineResult> {
+  let detail: JudgePipelineDetail = { kind: 'none' }
+  const outcome = await runPipeline(action, hooks, (d) => {
+    detail = d
+  })
+  return { outcome, detail }
+}
+
+async function runPipeline(
+  action: JudgePipelineAction,
+  hooks: JudgePipelineHooks,
+  note: (detail: JudgePipelineDetail) => void
 ): Promise<JudgePipelineOutcome> {
   const { toolUseId, toolName, input } = action
   const settled = (stage: JudgePipelineStage): boolean => hooks.stillPending?.(stage) === false
@@ -256,7 +309,10 @@ export async function runJudgePipeline(
   // A configured judge model that no longer exists fails CLOSED — never judged
   // by a stand-in. Checked after the static paths so a stale judge does not
   // start prompting for reads.
-  if (!(await hooks.judgeAvailable())) return HUMAN
+  if (!(await hooks.judgeAvailable())) {
+    note({ kind: 'unavailable', cause: 'model' })
+    return HUMAN
+  }
 
   try {
     // Ground truth. actionMeta FIRST: it is what resolves repo visibility, and
@@ -265,13 +321,17 @@ export async function runJudgePipeline(
     const actionMeta = await hooks.captureActionMeta(toolName, judgeInput)
     const environment = await hooks.environment()
     const outcomes = hooks.outcomes()
+    // A sync transcript costs no extra tick; a cold one (a disconnected dispatching parent) is awaited.
+    const transcript = hooks.messages()
     const result = await classify(
       {
-        messages: hooks.messages(),
+        messages: transcript instanceof Promise ? await transcript : transcript,
         action: {
           toolName,
           input: judgeInput,
-          ...(hooks.subagent ? { subagent: hooks.subagent } : {})
+          ...(hooks.subagent ? { subagent: hooks.subagent } : {}),
+          ...(action.handBack ? { handBack: true } : {}),
+          ...(action.agentMessage ? { agentMessage: true } : {})
         },
         environment,
         ...(actionMeta ? { actionMeta } : {}),
@@ -294,6 +354,7 @@ export async function runJudgePipeline(
         hooks.logSource,
         `auto-mode verdict discarded — permission mode changed to "${hooks.currentMode()}" while the judge ran`
       )
+      note({ kind: 'unavailable', cause: 'mode' })
       return HUMAN
     }
 
@@ -312,14 +373,25 @@ export async function runJudgePipeline(
       logger.debug(hooks.logSource, formatUnparseableJudgeReply(result))
     }
 
-    if (result.unavailable) return HUMAN
+    if (result.unavailable) {
+      note({
+        kind: 'unavailable',
+        cause: 'judge',
+        ...(result.error ? { error: result.error } : {})
+      })
+      return HUMAN
+    }
 
     if (result.block) {
       // Denial caps (3 consecutive / 2 on the same rule / 20 total) — too many
       // blocks → the human decides, with the cap's own sentence as the card's
       // decisionReason.
       const capped = hooks.denials.recordBlock(result.category)
-      if (capped) return { kind: 'human', reason: capped }
+      if (capped) {
+        note({ kind: 'verdict', result, capped })
+        return { kind: 'human', reason: capped }
+      }
+      note({ kind: 'verdict', result })
       // ADR-091 §3 — the block holds for the user rather than going straight
       // back to the engine. The review goes out now, so the verdict shows on
       // the card the hold raises. No `automode-blocked` yet: the caller
@@ -334,6 +406,7 @@ export async function runJudgePipeline(
     }
 
     hooks.denials.recordAllow()
+    note({ kind: 'verdict', result })
     hooks.sendReview(toolUseId, result)
     return ALLOW
   } catch (err) {
@@ -344,6 +417,11 @@ export async function runJudgePipeline(
     // A throw after the ask was answered elsewhere (a stop, opencode's
     // cascade) must not forward a card for an already-answered ask.
     if (settled('error')) return SETTLED
+    note({
+      kind: 'unavailable',
+      cause: 'error',
+      error: err instanceof Error ? err.message : String(err)
+    })
     return HUMAN
   }
 }

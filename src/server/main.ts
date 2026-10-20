@@ -429,6 +429,7 @@ async function main(): Promise<void> {
     // The usage hub's timers (ADR-072 §7) before anything slower: a push in
     // flight is idempotent on the hub, so nothing waits on it.
     core.usageHubClient.stop()
+    core.releaseDispatchParents()
     core.sessionManager.forEach((session) => {
       if (session.engineId === 'codex') session.dispose()
     })

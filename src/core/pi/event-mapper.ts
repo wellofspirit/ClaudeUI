@@ -123,7 +123,12 @@ export type PiMapperOutput =
   | { kind: 'item_open'; target: ItemStreamTarget; message: ChatMessage; startedAt?: number }
   | { kind: 'item_delta'; target: ItemStreamTarget; chunk: string; message: ChatMessage }
   | { kind: 'item_seal'; target?: ItemStreamTarget; message: ChatMessage }
-  | { kind: 'message'; message: ChatMessage }
+  | {
+      kind: 'message'
+      message: ChatMessage
+      /** Set when the message IS one of ClaudeUI's own deliveries (its custom message_end). */
+      deliveryId?: string
+    }
   | {
       kind: 'tool_result'
       toolUseId: string
@@ -475,7 +480,12 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
         })
         const ours = piAgentDeliveryDetails(msg.customType, msg.details)
         const outputs: PiMapperOutput[] = []
-        if (message) outputs.push({ kind: 'message', message })
+        if (message)
+          outputs.push({
+            kind: 'message',
+            message,
+            ...(ours ? { deliveryId: ours.deliveryId } : {})
+          })
         if (ours) outputs.push({ kind: 'agent_delivery', deliveryId: ours.deliveryId })
         return outputs.length > 0 ? outputs : [{ kind: 'ignore' }]
       }

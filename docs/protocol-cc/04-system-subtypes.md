@@ -218,15 +218,84 @@ mid-turn it is absorbed into the current turn; between turns it starts a fresh a
     "duration_ms": 6789
   },                                        // may be omitted when no usage data
   "skip_transcript": false,                 // optional; true = don't record in transcript
+  "handback": "send"|"flagged"|"withheld",  // 2.1.293, @internal; SubagentHandback subagents only
+  "handback_report": { "text": "...", "warning": "..." },   // send|flagged only; see below
   "session_id": "...",
   "uuid": "..."
 }
 ```
 
+### `handback`, `handback_report` (2.1.293, auto mode)
+
+An Agent-tool subagent whose parent AND own permission mode are both `auto` reports through its
+`SubagentHandback` tool instead of final text (`docs/protocol-cc/14-auto-mode-classifier.md`; probed
+live 2026-10-19 on 2.1.293 with Haiku; the frame `[Subagent hand-back]` is at `cli.js@char7716976` and the
+sanitiser marker "subagent output matched" at `@char7721535`). Its completed notification then reads:
+
+- `handback: "send"` — the report was delivered to the parent as a peer message. `handback_report.text`
+  is the whole report, never truncated, with a backslash inserted into text that imitates harness markup
+  (`<system-reminder>` → `<\system-reminder>`, `Human:` → `Human\:`).
+- `handback: "flagged"` — delivered, but auto mode's classifier blocked, refused or could not review it;
+  `handback_report.warning` carries the "SECURITY WARNING: …" text, to be shown ABOVE `text`.
+- `handback: "withheld"` — the subagent stopped without calling the tool (after up to three bounces);
+  no `handback_report`, and its plain text is deliberately not delivered. Omitted while the subagent is
+  merely waiting on its own background work (`summary` then says it has not reported yet).
+- **`summary` is a pointer sentence, not the report**: `This agent's report was delivered to you as a
+message from "NAME" (its SubagentHandback call). Read it there; it is not repeated here.` (flagged:
+  "… under a SECURITY WARNING from auto mode …"; withheld: cli.js's model-directed "ended without
+  delivering a report" text). The schema's own instruction: render `handback_report` instead of `summary`.
+
+The report text reaches ClaudeUI's wire ONLY here (the delivered peer message needs
+`--replay-user-messages`, which ClaudeUI does not pass). ClaudeUI forwards `handback_report.text` as
+`session:task-notification.summary`, `warning` as `warning`, and `handback` as `handback`; for `withheld`
+`summary` is its own "The subagent ended without delivering a report." (`claude-session.ts`
+`handleTaskNotification`, `task-notification-xml.ts` `handbackNotificationFields`). The same notification
+is followed by a ZERO-TURN `result` (§3.7) that is not a turn end.
+
+**What the transcript keeps (2.1.293; a reopened session has no `handback` / `handback_report`).** Two
+rows, which a reader joins by the task id (`session-history.ts` + `handback-history.ts`):
+
+- the delivered `<task-notification>`'s `<result>` is the pointer sentence above for `send`, its
+  "… under a SECURITY WARNING from auto mode — the warning above the report says why …" variant for
+  `flagged` (any other harness text, a `⚠ …` line, may precede it), and for `withheld` cli.js's
+  `The subagent ended without delivering a report through SubagentHandback, so no report was delivered.
+Its unsent text is not shown.` (+ ` Send the agent a message (SendMessage) to ask it to deliver its
+report.` for a main-agent owner). `<summary>` stays the ordinary `Agent "…" finished` line.
+- a `user` row, `isMeta`, `turnOrigin: "peer"`, `origin: {kind: "peer", from, senderTaskId, name, body,
+handback: true, flagged?: true}`. `senderTaskId` is the notification's `<task-id>`; `origin.body` is the
+  report as the parent read it: the **frame** — an indented `SECURITY WARNING: …` (flagged only, and a
+  "review could not run" note for an `unavailable` verdict, which is NOT flagged), then the one-line
+  `[Subagent hand-back] The text below is the final report of a subagent … The report follows:` header,
+  then EVERY line of the report indented two spaces, opening with the `[harness: subagent output matched
+…]` line and a blank one when a pattern matched. The live `handback_report.text` is the same
+  sanitised report without that marker line. A report longer than the tool-result limit is replaced in
+  the frame by a `<persisted-output>` / `<truncated-output>` pointer (`origin.body` then is not the
+  report). A coalesced turn (two peer messages in one prompt) carries `origin` of the FIRST only. No peer
+  row exists for `withheld`, or when the hand-back went to a subagent rather than main. A hand-back
+  absorbed mid-turn (about one in five) has no `user` row: the same `origin` (`isMeta`, `handback: true`,
+  `body`, `flagged?`) is persisted on a `queued_command` attachment, which is read the same way.
+
+The child's own `SubagentHandback` call (`input.message`, unsanitised) is in its sidechain
+`subagents/agent-<task-id>.jsonl`. `parseNativeHandbackFrame` / `handbackFromNotificationResult`
+(`task-notification-xml.ts`) read the two rows; on 458 real peer rows 457 unframed to the child's own
+text (429 byte-identical, 28 equal but for the sanitiser's backslashes) and one was a persisted pointer.
+
+Reading rules that keep a run's report its own. cli.js writes `<result>` itself under the hand-back
+contract, so its sentence is the LAST line, behind nothing but cli.js's notice lines (the artifact note,
+the max-turns note, a `⚠` line); a result that is the model's own text may quote a sentence anywhere and
+is not read. A sidechain call stands in for an unreadable frame only when its row's `timestamp` lies after
+the task's previous notification and at or before this one (a resumed agent makes one call per run), and a
+peer row pairs with the first notification of its task that it does not lie beyond. The row of a hand-back
+is no "another Claude session" note live either (`findPeerRow` skips `origin.handback`). The sidechain
+fallback (`handback-history.ts`) reads one subagent file inside the history load's transcript pass, only when
+a peer frame is unreadable (rare), so ADR-102's content-first byte plan, which counts the main transcript
+alone, is exceeded by that one file in that case.
+
 ### `task_id` format by task type
 
 - Background bash: `t` + 6 hex chars (e.g., `tabc123`)
-- Background agent (local_agent): `a` + 6 hex chars
+- Background agent (local_agent): `a` + 16 hex chars, optionally `a<label>-` + 16 hex (2.1.293, `yh()`;
+  e.g. `aec60e185d4e7eb6d`, 17 chars)
 - In-process teammate: `name@team` (e.g., `ts-advocate@lang-debate`)
 - Remote agent: `r` + 6 hex chars
 
@@ -276,7 +345,9 @@ this process did not register. `parent_task_id` (optional, on `task_started` and
 `background_tasks_changed` entries) is the `task_id` of the subagent task that
 launched this one, absent when the main thread did. `background_tasks_changed`
 entries also carry `subagent_type`. `@internal`: `awaited`, and
-`task_notification.handback` / `handback_report`. ClaudeUI reads none of these yet.
+`task_notification.handback` / `handback_report` (§4.4 — ClaudeUI reads them). ClaudeUI also reads
+`parent_task_id` and `spawn_depth` (on `task_started`) to tell a nested subagent's hand-back apart from the main
+agent's (`claude-session.ts`, `nestedTaskIds`), and none of the other `@internal` fields yet.
 
 ### `is_backgrounded` — foreground or background (2.1.280)
 
@@ -309,13 +380,14 @@ with `isBackgrounded`, and re-sends that event for the same run with `isBackgrou
 when the `task_updated` flip arrives. `TaskCard` and `ToolCard` offer "Send to background" only
 for a record with `isBackgrounded === false`.
 
-### `task_type` values (2.1.241)
+### `task_type` values (2.1.293)
 
-The full enum grew past the four documented at 2.1.114 (`Wlv` map, `cli.js@char3683754`):
+The full enum grew past the four documented at 2.1.114 (id-prefix map, `cli.js@char6097917` in 2.1.293):
 `local_bash` (`t`/`b` ids), `local_agent` (`a`), `remote_agent` (`r`), `in_process_teammate` (`t`),
 `local_workflow` (`w`), `monitor_mcp` (`m`), `monitor_ws` (`s`), `mcp_task` (`k`), `dream` (`d`),
-`auto_mode_scan` (`e`). Of these, `local_agent`/`remote_agent`/`in_process_teammate`/`local_workflow`
-are the auto-continuing "agent-like" set (upstream busy predicate `S3e`, §3.7).
+`auto_mode_scan` (`e`), `local_memory_import` (`n`, new since 2.1.241). Of these,
+`local_agent`/`remote_agent`/`in_process_teammate`/`local_workflow` are the auto-continuing
+"agent-like" set (upstream busy predicate, §3.7).
 
 **Scoping gotcha (probed 2026-08-26):** a background Bash started INSIDE a subagent emits its own
 top-level `task_started`/`task_notification` (`task_type: "local_bash"`) with **no

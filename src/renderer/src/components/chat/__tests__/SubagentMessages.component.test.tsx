@@ -139,3 +139,39 @@ describe('SubagentMessages — tool-result image thumbnails', () => {
     expect(screen.queryAllByTestId('ImageViewerOverlay.tab')).toHaveLength(0)
   })
 })
+
+/**
+ * A dispatch child's tool calls carry the TARGET engine's tool names (a pi child
+ * says `read`, lowercase). They render through that engine's tool map, not the
+ * session's: under a Claude session the lowercase `read` is unknown, so the
+ * header was the raw JSON input.
+ */
+describe('SubagentMessages - tool cards use the child engine tool map', () => {
+  const readMsg = (toolName: string, toolInput: Record<string, unknown>): ChatMessage => ({
+    id: 'm-read',
+    role: 'assistant',
+    content: [{ type: 'tool_use', toolUseId: 'tu-read', toolName, toolInput }],
+    timestamp: Date.now()
+  })
+  const headerText = (): string => screen.getByTestId('ToolCard.expand').textContent ?? ''
+
+  it('a pi child under a Claude session renders `read` as a Read card', () => {
+    render(
+      <SubagentMessages messages={[readMsg('read', { path: '/d/repo/a.ts' })]} engineId="pi" />
+    )
+    expect(headerText()).toContain('Read')
+    expect(headerText()).toContain('a.ts')
+    expect(headerText()).not.toContain('{"path"')
+  })
+
+  it('without an engine the session map reads it (pins the default)', () => {
+    render(<SubagentMessages messages={[readMsg('read', { path: '/d/repo/a.ts' })]} />)
+    expect(headerText()).toContain('{"path"')
+  })
+
+  it('a native Claude subagent `Read` renders as before', () => {
+    render(<SubagentMessages messages={[readMsg('Read', { file_path: '/d/repo/a.ts' })]} />)
+    expect(headerText()).toContain('Read')
+    expect(headerText()).toContain('a.ts')
+  })
+})

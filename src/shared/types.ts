@@ -561,6 +561,12 @@ export interface PendingApproval {
   codex?: import('./codex-types').CodexApprovalPayload
   requestId: string
   /**
+   * Set by the dispatcher when it puts back a card a parent's disconnect cleared (ADR-105
+   * §5): the user has been told about this ask already, so it raises no new attention and
+   * no notification.
+   */
+  reRaised?: true
+  /**
    * cli.js-assigned tool_use id for the invocation being prompted. The
    * correct binding key between an approval and its tool_use block —
    * matching on toolName+input alone is lossy (repeated identical calls
@@ -621,6 +627,13 @@ export interface SessionResult {
   durationMs: number
   result: string
   sessionId?: string | null
+  /**
+   * Claude only: cli.js is about to start ANOTHER turn on its own at this
+   * result, to deliver a subagent's `SubagentHandback` that reached its queue
+   * after the last model round began. Not a turn end for the user; the extra
+   * turn's own result decides (docs/protocol-cc/03-inbound-messages.md §3.7).
+   */
+  pendingWake?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -1439,6 +1452,20 @@ export interface TaskStartedData {
    * use), so without it a running card had no clock at all.
    */
   startedAt?: number
+  /**
+   * Will this task's end wake the main agent with a turn of its own (so the
+   * conversation is NOT waiting on the user while it runs)? Decided by the
+   * EMITTER — {@link taskWakesParent} for Claude, `true` for a pi host-run
+   * subagent — so the renderer never has to know cli.js's task types. Absent on
+   * a record from before the field existed; readers fall back to a type set.
+   */
+  wakesParent?: boolean
+  /**
+   * A short label for the task, when the emitter has one the tool input may not carry
+   * (a dispatched X-Agent's `description`, else its `name`; ADR-105). Cards still take
+   * theirs from the tool input; this is for readers that only see the record.
+   */
+  description?: string
 }
 
 /**
@@ -1448,7 +1475,13 @@ export interface TaskStartedData {
  */
 export type ActiveTask = Pick<
   TaskStartedData,
-  'taskId' | 'taskType' | 'runIndex' | 'isBackgrounded' | 'startedAt'
+  | 'taskId'
+  | 'taskType'
+  | 'runIndex'
+  | 'isBackgrounded'
+  | 'startedAt'
+  | 'wakesParent'
+  | 'description'
 >
 
 /**
@@ -1478,6 +1511,14 @@ export interface SubagentIndexEntry {
 /** The terminal states an engine reports for a task run. */
 export type TaskTerminalStatus = 'completed' | 'failed' | 'stopped'
 
+/**
+ * How a Claude subagent's report reached its parent when it ended through the
+ * `SubagentHandback` tool (auto mode): `send` — delivered as it was written;
+ * `flagged` — delivered with an auto-mode security warning; `withheld` — the
+ * subagent ended without delivering one.
+ */
+export type TaskHandback = 'send' | 'flagged' | 'withheld'
+
 export interface TaskNotification {
   taskId: string
   toolUseId: string | null
@@ -1491,7 +1532,16 @@ export interface TaskNotification {
    */
   status: TaskTerminalStatus | 'unfinished'
   outputFile: string
+  /**
+   * The run's result text. Under a hand-back it is the REPORT itself
+   * (`handback_report.text`), or the withheld text — never cli.js's pointer
+   * sentence, which only says where the report went.
+   */
   summary: string
+  /** Set when the subagent reported through `SubagentHandback`; see {@link TaskHandback}. */
+  handback?: TaskHandback
+  /** The auto-mode security warning of a `flagged` report, shown above it. */
+  warning?: string
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
   /**
    * Which run of the agent this terminal event ends (1-based). Kept on the
@@ -1499,6 +1549,13 @@ export interface TaskNotification {
    * the task at terminal — this is what still knows "resumed ×2" afterwards.
    */
   runIndex?: number
+  /**
+   * The task ran in the background. Set by an emitter whose call input does not say so (a
+   * dispatched X-Agent that is background by default, ADR-105 §2); a card reads it like the
+   * input's `run_in_background`, so a failed or stopped one shows no launch acknowledgement
+   * as its body.
+   */
+  isBackgrounded?: boolean
 }
 
 export interface SubagentMessageData {
@@ -1813,6 +1870,11 @@ interface SessionAPI {
      * cold reopen shows and resumes with. `null` when the rollout names none.
      */
     lastEffort?: string | null
+    /**
+     * The X-Agents of this session that are running now (ADR-105 §5): their task
+     * records, which no transcript holds. Keyed by the launching tool_use id.
+     */
+    activeTasks?: Record<string, ActiveTask>
     /**
      * Claude only: every subagent the main transcript (or a sidecar) mapped to
      * an origin tool_use id, by that id. Sizes, ordering and names for the
@@ -4332,6 +4394,11 @@ export interface EngineHistoryLoad {
    * session ran no agents.
    */
   subagentMessages?: Record<string, ChatMessage[]>
+  /**
+   * The session's X-Agents that are running now (ADR-105 §5), keyed by the launching
+   * tool_use id: records no transcript holds, added from the dispatch ledger.
+   */
+  activeTasks?: Record<string, ActiveTask>
   /**
    * Host-run pi subagents' terminal events (ADR-089 S3), from the task
    * notifications ClaudeUI delivered into the parent and child files — read

@@ -21,6 +21,9 @@
  * automode leaves and type-only shared types.
  */
 import { v4 as uuid } from 'uuid'
+import { HAND_BACK_TOOL } from '../../shared/dispatch-agent-description'
+import { X_AGENT_MESSAGE_TOOL } from '../../shared/x-agent-message'
+import type { ReportReview } from '../../shared/handback-review'
 import type {
   AutoModeConfig,
   ChatMessage,
@@ -34,6 +37,7 @@ import type { ClassifierAction, EnvironmentInfo, JudgeTransport } from '../autom
 import {
   allowRuleReviewBlock,
   AutoModeDenialTracker,
+  autoModeBlockReason,
   autoModeReviewBlock,
   readOnlyReviewBlock
 } from '../automode/denial-tracker'
@@ -56,7 +60,10 @@ import {
 } from '../automode/ground-truth'
 import {
   runJudgePipeline,
+  runJudgePipelineDetailed,
   type JudgePipelineAction,
+  type JudgePipelineDetail,
+  type JudgePipelineHooks,
   type JudgePipelineOutcome,
   type JudgePipelineReview,
   type JudgePipelineStage
@@ -69,6 +76,7 @@ import {
 } from '../automode/session-judge'
 import { inTimeOrder } from '../automode/trajectory'
 import { blockGrantKey, type BlockedCallLedger } from '../automode/blocked-calls'
+import { RESULT_REPORT_MAX } from './dispatch-result-text'
 import { loadSharedAutoModeConfig } from './ui-config'
 
 // The trajectory helper moved to a leaf (`automode/trajectory.ts`, ADR-089) so
@@ -77,11 +85,26 @@ import { loadSharedAutoModeConfig } from './ui-config'
 export { recordTrajectoryMessage, TARGET_TRAJECTORY_MAX } from '../automode/trajectory'
 
 export interface DispatchTargetJudgeOptions {
-  /** The TARGET engine — which is also the judge engine. */
+  /** The TARGET engine — which is also the judge engine (except for a Codex target's report review, below). */
   engine: 'opencode' | 'pi'
+  /**
+   * Whose `autoMode` block applies, when that is not the judge engine's: a Codex target has no
+   * judge of its own, so its REPORT is reviewed through pi's route (`engine: 'pi'`, the ChatGPT
+   * subscription) under the Codex engine's switches (ADR-105 §3, slice B-3c).
+   */
+  configEngine?: string
+  /**
+   * The judge model for every call, whatever `autoMode.judgeModel` says: a Codex target's own
+   * model (no judge picker exists for Codex, and a model id of another engine's namespace would
+   * not route). Read per call.
+   */
+  fixedModel?: () => string
   cwd: string
-  /** The DISPATCHING session's routing id (`fromRoutingId`) — judge usage rows land under it. */
-  routingId: string
+  /**
+   * The DISPATCHING session's routing id (`fromRoutingId`) — judge usage rows land under it.
+   * A thunk when the dispatcher can be re-keyed under a running target (ADR-105): read per call.
+   */
+  routingId: string | (() => string)
   /** The target's engine session id, read per call. */
   sessionId: () => string | null
   /** The target's model — the judge model when `autoMode.judgeModel` is unset. */
@@ -90,6 +113,12 @@ export interface DispatchTargetJudgeOptions {
   emit: () => (channel: string, data: unknown) => void
   /** `entry.ctx.getMessages()` — the dispatching session's transcript, read live. */
   messages: () => ChatMessage[]
+  /**
+   * The same transcript when it may have to be READ: a disconnected dispatching parent
+   * has no transcript in memory (ADR-105), so the run's facade reads the engine's history.
+   * Returns undefined for a plain call context — `messages()` then.
+   */
+  loadMessages?: () => Promise<ChatMessage[]> | undefined
   /** The dispatching session's still-queued user turns (ADR-091 §4), read live; omitted → none. */
   queuedTurns?: () => ChatMessage[]
   /**
@@ -125,6 +154,49 @@ export interface DispatchTargetJudgeCall {
   permissions: () => Pick<ClaudePermissions, 'allow' | 'ask' | 'deny' | 'additionalDirectories'>
 }
 
+/** What {@link DispatchTargetJudge.reviewHandBack} needs of its caller. */
+export interface HandBackReviewCall {
+  /** The mode the report is judged under (auto mode left meanwhile: no verdict). */
+  currentMode: () => string
+  /** False once the run was stopped or abandoned: no verdict. */
+  stillPending?: (stage: JudgePipelineStage) => boolean
+  /** Aborts the in-flight judge request once nobody is waiting for the review any more. */
+  signal?: AbortSignal
+  permissions: () => Pick<ClaudePermissions, 'allow' | 'ask' | 'deny' | 'additionalDirectories'>
+}
+
+/**
+ * The pipeline's detail as a report review (ADR-105 §3): a block is a block, an allow an allow,
+ * and everything else (no route, a timeout, a transport error, a stale judge model, auto mode
+ * left meanwhile, a reply that could not be read, a cancelled review) is "could not review".
+ * `routeReason` is the route resolver's sentence when the judge model had no route.
+ */
+export function reviewFromPipeline(
+  detail: JudgePipelineDetail,
+  routeReason?: string
+): ReportReview {
+  switch (detail.kind) {
+    case 'verdict':
+      // Only an unparseable reply carries `raw`: no verdict, whatever its fail-closed `block` says.
+      if (detail.result.raw !== undefined)
+        return { kind: 'unavailable', why: "the reviewer's answer could not be read" }
+      return detail.result.block
+        ? { kind: 'block', reason: autoModeBlockReason(detail.result) }
+        : { kind: 'allow' }
+    case 'unavailable':
+      if (detail.cause === 'model')
+        return { kind: 'unavailable', why: 'the configured judge model is no longer available' }
+      if (detail.cause === 'mode')
+        return { kind: 'unavailable', why: 'auto mode was switched off while it was reviewed' }
+      return {
+        kind: 'unavailable',
+        why: routeReason ?? detail.error ?? 'the reviewer gave no answer'
+      }
+    case 'none':
+      return { kind: 'unavailable', why: 'the review was cancelled' }
+  }
+}
+
 export class DispatchTargetJudge {
   private readonly autoMode: AutoModeConfig
   private readonly denials = new AutoModeDenialTracker()
@@ -142,7 +214,7 @@ export class DispatchTargetJudge {
     // (a mid-dispatch config edit is not hot-reloaded).
     let autoMode: AutoModeConfig = {}
     try {
-      autoMode = opts.loadEngineConfig(opts.engine).autoMode ?? {}
+      autoMode = opts.loadEngineConfig(opts.configEngine ?? opts.engine).autoMode ?? {}
     } catch {
       autoMode = {}
     }
@@ -177,8 +249,112 @@ export class DispatchTargetJudge {
    * gate never runs (no `allowRuleAction` hook).
    */
   judge(action: JudgePipelineAction, call: DispatchTargetJudgeCall): Promise<JudgePipelineOutcome> {
+    return runJudgePipeline(
+      action,
+      this.hooks(call, this.denials, () => this.transport(), true)
+    )
+  }
+
+  /**
+   * Review the report an X-Agent hands back (ADR-105 §3, slice B-3c): the same pipeline as a
+   * tool call, run on a synthetic `hand_back` call framed as agent-authored output (the
+   * classifier's hand-back variant, evaluation rule 15). It FLAGS, never blocks, so the
+   * result is a {@link ReportReview}, not an outcome.
+   *
+   * Differences from {@link judge}: a THROWAWAY denial tracker (a review is not one of the
+   * target's own actions, so it never counts toward its caps, and a one-block tracker never
+   * trips them), no card (`toolUseId: ''`), no grant, no read-only gate, and a route problem
+   * becomes the report's note instead of the target's one-per-target banner. The judge sees the
+   * first {@link RESULT_REPORT_MAX} characters, the cut a delivery uses; the whole report is
+   * still stored and delivered. Never throws.
+   */
+  async reviewHandBack(report: string, call: HandBackReviewCall): Promise<ReportReview> {
+    return this.reviewText(
+      { toolName: HAND_BACK_TOOL, input: (shown) => ({ report: shown }), handBack: true },
+      report,
+      call
+    )
+  }
+
+  /**
+   * Review a message an X-Agent sends the agent that spawned it (`session_message`, ADR-105 §4) before
+   * it is delivered: the hand-back review applied to a message (the pipeline, framing, throwaway
+   * tracker and cut are the same, the label and rule 15's wording are a message's). For a target
+   * whose own gate cannot see the call (Codex's dynamic tools); a pi or opencode target is gated by
+   * {@link judge} like any other action.
+   */
+  async reviewAgentMessage(message: string, call: HandBackReviewCall): Promise<ReportReview> {
+    return this.reviewText(
+      {
+        toolName: X_AGENT_MESSAGE_TOOL,
+        input: (shown) => ({ message: shown }),
+        agentMessage: true
+      },
+      message,
+      call
+    )
+  }
+
+  private async reviewText(
+    kind: {
+      toolName: string
+      input: (shown: string) => Record<string, unknown>
+      handBack?: boolean
+      agentMessage?: boolean
+    },
+    report: string,
+    call: HandBackReviewCall
+  ): Promise<ReportReview> {
+    let routeReason: string | undefined
+    try {
+      const shown =
+        report.length > RESULT_REPORT_MAX
+          ? `${report.slice(0, RESULT_REPORT_MAX)}\n[the report continues; only its first ${RESULT_REPORT_MAX} characters are shown here]`
+          : report
+      const { detail } = await runJudgePipelineDetailed(
+        {
+          toolUseId: '',
+          toolName: kind.toolName,
+          input: kind.input(shown),
+          ...(kind.handBack ? { handBack: true } : {}),
+          ...(kind.agentMessage ? { agentMessage: true } : {})
+        },
+        this.hooks(
+          {
+            currentMode: call.currentMode,
+            honoursWorkdir: false,
+            skipReadOnlyGate: true,
+            permissions: call.permissions,
+            ...(call.stillPending ? { stillPending: call.stillPending } : {})
+          },
+          new AutoModeDenialTracker(),
+          () => {
+            const judge = this.transport((reason) => {
+              routeReason ??= reason
+            })
+            const { signal } = call
+            if (!signal) return judge
+            return (req) =>
+              judge({ ...req, signal: req.signal ? AbortSignal.any([req.signal, signal]) : signal })
+          },
+          false
+        )
+      )
+      return reviewFromPipeline(detail, routeReason)
+    } catch (err) {
+      return { kind: 'unavailable', why: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  /** The pipeline's hooks for one call; `grants` — whether a user's approved block clears it (tool calls only). */
+  private hooks(
+    call: DispatchTargetJudgeCall,
+    denials: AutoModeDenialTracker,
+    transport: () => JudgeTransport,
+    grants: boolean
+  ): JudgePipelineHooks {
     const subagent = this.opts.subagent()
-    return runJudgePipeline(action, {
+    return {
       logSource: 'CrossEngineDispatcher',
       cwd: this.opts.cwd,
       currentMode: call.currentMode,
@@ -188,23 +364,36 @@ export class DispatchTargetJudge {
       ...(call.skipReadOnlyGate ? { skipReadOnlyGate: true } : {}),
       ...(subagent ? { subagent } : {}),
       judgeAvailable: () => this.judgeAvailable(),
-      judgeTransport: () => this.transport(),
-      messages: () => this.judgeMessages(),
+      judgeTransport: transport,
+      messages: () => {
+        const loading = this.opts.loadMessages?.()
+        return loading ? loading.then((parent) => this.mergeMessages(parent)) : this.judgeMessages()
+      },
       environment: () => this.environment(call.permissions()),
       captureActionMeta: (toolName, input) =>
         this.captureActionMeta(toolName, input, call.honoursWorkdir, call.permissions()),
       outcomes: () => (this.outcomes.size ? Object.fromEntries(this.outcomes) : undefined),
-      denials: this.denials,
+      denials,
       twoStageMode: () => this.autoMode.twoStageMode ?? 'both',
       sendReview: (id, review) => this.sendReview(id, review),
-      consumeGrant: (toolName, input) =>
-        this.opts
-          .blockedCalls?.()
-          ?.consumeGrant(
-            blockGrantKey(this.opts.engine, toolName, input, this.opts.cwd, call.honoursWorkdir)
-          ) ?? false,
+      ...(grants
+        ? {
+            consumeGrant: (toolName: string, input: Record<string, unknown>): boolean =>
+              this.opts
+                .blockedCalls?.()
+                ?.consumeGrant(
+                  blockGrantKey(
+                    this.opts.engine,
+                    toolName,
+                    input,
+                    this.opts.cwd,
+                    call.honoursWorkdir
+                  )
+                ) ?? false
+          }
+        : {}),
       ...(call.stillPending ? { stillPending: call.stillPending } : {})
-    })
+    }
   }
 
   /**
@@ -212,8 +401,12 @@ export class DispatchTargetJudge {
    * assistant trajectory (ADR-088 D1), merged in time order (ADR-091 §4).
    */
   judgeMessages(): ChatMessage[] {
+    return this.mergeMessages(this.opts.messages())
+  }
+
+  private mergeMessages(parent: ChatMessage[]): ChatMessage[] {
     const own = [...this.opts.trajectory()].filter((m) => m.role === 'assistant')
-    return inTimeOrder(this.opts.messages(), this.opts.queuedTurns?.() ?? [], own)
+    return inTimeOrder(parent, this.opts.queuedTurns?.() ?? [], own)
   }
 
   /**
@@ -223,7 +416,7 @@ export class DispatchTargetJudge {
    * configured but missing → the human decides, with ONE banner per target.
    */
   judgeAvailable(): boolean {
-    const configured = this.autoMode.judgeModel
+    const configured = this.opts.fixedModel ? undefined : this.autoMode.judgeModel
     if (!configured) return true
     const all = (this.opts.peekModels() ?? []).flatMap((g) => g.models)
     if (all.length === 0) return true
@@ -245,18 +438,23 @@ export class DispatchTargetJudge {
    * resolved per call; every call is a `judge` usage row under the
    * DISPATCHING session's routing id (the target has no routing of its own).
    */
-  private transport(): JudgeTransport {
+  private transport(onUnavailable?: (reason: string) => void): JudgeTransport {
     const make = this.opts.makeTransport ?? makeSessionJudgeTransport
     return make({
       engine: this.opts.engine,
-      modelValue: () => this.autoMode.judgeModel ?? this.opts.model(),
+      modelValue: () => this.opts.fixedModel?.() ?? this.autoMode.judgeModel ?? this.opts.model(),
       sessionId: this.opts.sessionId,
-      routingId: this.opts.routingId,
-      onUnavailable: (reason) => {
-        if (this.routeUnavailableReported) return
-        this.routeUnavailableReported = true
-        this.opts.emit()('session:error', judgeRouteUnavailableMessage(this.opts.engine, reason))
-      }
+      routingId:
+        typeof this.opts.routingId === 'function' ? this.opts.routingId() : this.opts.routingId,
+      // A report review tells the REPORT why it was not reviewed (its note); the target's
+      // one banner is for the target's own gated actions.
+      onUnavailable:
+        onUnavailable ??
+        ((reason) => {
+          if (this.routeUnavailableReported) return
+          this.routeUnavailableReported = true
+          this.opts.emit()('session:error', judgeRouteUnavailableMessage(this.opts.engine, reason))
+        })
     })
   }
 

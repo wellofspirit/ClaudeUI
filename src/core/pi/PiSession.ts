@@ -76,7 +76,7 @@ import { loadPiAgentRegistry, type PiAgentRegistry } from './pi-agent-registry'
 import type { SpawnPiChildFn } from './pi-child-runner'
 import { deliveryCommand, isReservedPiCommandText, type PiAgentDelivery } from './pi-delivery'
 import { sessionMessageNoteTitle } from '../services/agent-note'
-import { buildSessionMessageWrapper } from '../../shared/session-message-wrapper'
+import { buildSessionMessageWrapper, wrapperSender } from '../../shared/session-message-wrapper'
 import { narrowMode, PiSubagentManager, type PiChildScope } from './pi-subagents'
 import type {
   GateDecision,
@@ -162,9 +162,13 @@ import { buildClassifierEnvironment } from '../automode/environment'
 import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
 import { describeDispatchModels } from '../services/dispatch-model-hint'
 import {
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
   dispatchAgentDescription,
+  dispatchResultSuffix,
+  hasRemovedSessionId,
   joinDispatchHints,
   OWN_SUBAGENT_TOOL,
+  runsInBackground,
   type DispatchTargetEngine
 } from '../../shared/dispatch-agent-description'
 import { persistAllowSuggestions } from '../opencode/permission-compiler'
@@ -729,12 +733,17 @@ export class PiSession extends BaseSession {
     return this.permissionMode
   }
 
+  protected override idleTimerHeld(): boolean {
+    return this.subagents.liveBackgroundCount > 0 || super.idleTimerHeld()
+  }
+
   protected override resetInactivityTimer(): void {
     this.clearInactivityTimer()
     // A live background agent keeps the session (ADR-089 S3): disposing would
     // kill it and lose its notification. backgroundWorkChanged re-arms this
-    // once the last one ends.
-    if (this.subagents.liveBackgroundCount > 0) return
+    // once the last one ends. A running X-Agent holds it the same way
+    // (`idleTimerHeld`; the dispatcher re-arms through `rearmIdleTimer`).
+    if (this.idleTimerHeld()) return
     if (this.inactivityTimeoutMs > 0) {
       this.inactivityTimer = setTimeout(() => {
         logger.info('PiSession', 'Idle timeout — auto-disconnecting')
@@ -1271,6 +1280,12 @@ export class PiSession extends BaseSession {
     if (this.resumeSessionId && !this.forkSession) {
       await this.replayStoredHistory(this.resumeSessionId)
     }
+
+    // The engine is up: say so. `isEngineLive()` turned true when the client was assigned
+    // above, but no status followed unless the model or effort needed correcting; the held
+    // X-Agent results of a respawned parent are flushed on exactly this `idle` (ADR-105 §3,
+    // dispatch-result-flush.ts). A turn already running reports `running` as ever.
+    if (!this._cancelled && this.client === client) this.sendStatus()
   }
 
   /**
@@ -1618,18 +1633,21 @@ export class PiSession extends BaseSession {
    * caller's next prompt sees `willQueue` already true when this woke the session.
    */
   async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
+    const from = wrapperSender(item)
     const payload: PiAgentDelivery = {
       v: 1,
       deliveryId: uuid(),
       kind: 'session-message',
-      text: buildSessionMessageWrapper(item.from, item.text),
+      text: buildSessionMessageWrapper(from, item.text),
+      // A `dispatch-result` carries its own `wake: true` (an item that wakes nothing is held
+      // by the delivery rule, never sent); only a session message wakes unasked.
       wake: item.wake || item.origin === 'session-message',
-      title: sessionMessageNoteTitle(item.from.title),
+      title: sessionMessageNoteTitle(from.title, false, from.key),
       details: {
-        agentId: item.from.key,
+        agentId: from.key,
         toolUseId: '',
-        from: item.from.title,
-        fromId: item.from.key
+        from: from.title,
+        fromId: from.key
       }
     }
     let result: 'woke' | 'appended' | 'refused' = 'refused'
@@ -1885,13 +1903,13 @@ export class PiSession extends BaseSession {
     // only abort the CURRENT turn, leaving the target alive for a later
     // continuation, same as a manual Stop click would). Idempotent: a
     // dispatch that already settled is simply absent from the map
-    // (dispatchInner's `activeByToolUseId` entry is deleted in its own
+    // (the run leaves the dispatcher's registry when it ends, in its own
     // `finally`), so `stopDispatch` harmlessly misses — see the doc comment
     // on `inFlightDispatchIds` and cancel()'s later disposeFor call, which
     // remains safe to run afterward regardless (PiRpcClient.dispose()/
     // PiBridgeHost.dispose() are both documented idempotent).
     for (const id of this.inFlightDispatchIds) {
-      crossEngineDispatcher.stopDispatch(id, this.routingId)
+      crossEngineDispatcher.stopDispatch(id, this.routingId, { blockingOnly: true })
     }
     this.inFlightDispatchIds.clear()
     // Host-run subagents (ADR-089 S3, Q9 — Claude Code's Esc spares
@@ -2574,7 +2592,7 @@ export class PiSession extends BaseSession {
     if (this.inFlightDispatchIds.has(info.toolCallId)) {
       // The same call interrupt() and TaskCard's Stop button make — the child
       // has no consumer left, so letting it run would only burn tokens.
-      crossEngineDispatcher.stopDispatch(info.toolCallId, this.routingId)
+      crossEngineDispatcher.stopDispatch(info.toolCallId, this.routingId, { blockingOnly: true })
     }
     // A host-run subagent (ADR-089) whose `agent` exchange pi stopped
     // waiting for has no consumer either.
@@ -3261,8 +3279,8 @@ export class PiSession extends BaseSession {
    * DispatchContext construction verbatim (fromEngine/fromRoutingId/cwd/
    * getAutonomyMode/getMessages/emit/addDispatchedCost/toolUseId), NOT via MCP — pi has no
    * MCP client of its own, so this calls crossEngineDispatcher.dispatch()
-   * directly. Result text formatting (the `[dispatch session_id: …]` success
-   * suffix) is copied verbatim from collab-tool.ts too, so a pi-sourced
+   * directly. Result text formatting (the shared `dispatchResultSuffix` on a
+   * blocking answer) is the same as collab-tool.ts's, so a pi-sourced
    * dispatch reads identically to a Claude-sourced one.
    *
    * `extra` (SdkToolExtra) is intentionally OMITTED — DispatchContext.extra is
@@ -3300,11 +3318,30 @@ export class PiSession extends BaseSession {
       }
     }
 
+    // `session_id` left `dispatch_agent` (ADR-105 §4); the bridge no longer declares it, but a model
+    // working from an older transcript may still send one. Nothing is launched.
+    if (hasRemovedSessionId(input.session_id)) {
+      return {
+        content: [{ type: 'text', text: DISPATCH_SESSION_ID_REMOVED_TEXT }],
+        isError: true
+      }
+    }
+
     const req: DispatchRequest = {
       engine,
       prompt,
       model: typeof input.model === 'string' ? input.model : undefined,
-      sessionId: typeof input.session_id === 'string' ? input.session_id : undefined
+      name: typeof input.name === 'string' ? input.name : undefined,
+      description: typeof input.description === 'string' ? input.description : undefined,
+      // Only the root session registers dispatch_agent (a host-run subagent's gate is empty),
+      // so the caller is always the top-level agent: background unless it says otherwise.
+      ...(runsInBackground(
+        typeof input.run_in_background === 'boolean' ? input.run_in_background : undefined,
+        true,
+        toolCallId
+      )
+        ? { runInBackground: true }
+        : {})
     }
     const ctx: DispatchContext = {
       fromEngine: 'pi',
@@ -3332,9 +3369,10 @@ export class PiSession extends BaseSession {
     } finally {
       this.inFlightDispatchIds.delete(toolCallId)
     }
-    const text = result.isError
-      ? result.text
-      : `${result.text}\n\n[dispatch session_id: ${result.sessionId} — pass it as session_id to continue this agent]`
+    const text =
+      result.isError || !result.agentRef
+        ? result.text
+        : `${result.text}${dispatchResultSuffix(result.agentRef)}`
     return {
       content: [{ type: 'text', text }],
       ...(result.isError ? { isError: true } : {})

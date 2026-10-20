@@ -24,6 +24,7 @@ import {
 } from '../automode/blocked-calls'
 import { internAttachments } from '../services/blob-store'
 import { dispatchedCostsByRouting } from '../services/db'
+import { hasRunningDispatch } from '../services/dispatch-runs'
 import { logger } from '../services/logger'
 import { reholdNonUserItem } from '../services/session-delivery'
 import { emitEvent } from '../services/sync-host'
@@ -148,6 +149,8 @@ export abstract class BaseSession implements ISession {
   abstract readonly engineId: EngineId
   abstract readonly capabilities: ResolvedCapabilities
   abstract readonly willQueue: boolean
+  /** Is the engine process (or connection) up? Engines that can tell implement it (`ISession`). */
+  isEngineLive?(): boolean
   abstract getSessionId(): string | null
   abstract run(
     prompt: string | null,
@@ -507,8 +510,30 @@ export abstract class BaseSession implements ISession {
   // Protected helpers
   // ---------------------------------------------------------------------------
 
+  /**
+   * Is something running for this session that its idle timer must outlast? A running
+   * X-Agent (ADR-105 §3): the timer's `cancel()` would drop the session object the run
+   * reports into. The engines' `resetInactivityTimer` overrides all consult this; pi adds
+   * its own background agents.
+   */
+  protected idleTimerHeld(): boolean {
+    return hasRunningDispatch(this.routingId)
+  }
+
+  /**
+   * The last X-Agent of this session ended: arm the idle timer that was held for it.
+   * Does nothing for a session that is busy (its turn's end arms the timer) or whose
+   * engine is down (there is nothing to time out).
+   */
+  rearmIdleTimer(): void {
+    if (this.willQueue) return
+    if (this.isEngineLive?.() === false) return
+    this.resetInactivityTimer()
+  }
+
   protected resetInactivityTimer(): void {
     this.clearInactivityTimer()
+    if (this.idleTimerHeld()) return
     if (this.inactivityTimeoutMs > 0) {
       this.inactivityTimer = setTimeout(() => {
         this.cancel()

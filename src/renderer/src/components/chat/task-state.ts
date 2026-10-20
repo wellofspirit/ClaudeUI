@@ -8,7 +8,7 @@
  * third copy — three places to keep in step every time the wire moves. It is
  * one function now; the views decide how to render the answer, not what it is.
  */
-import type { TaskNotification } from '../../../../shared/types'
+import type { ContentBlock, TaskNotification } from '../../../../shared/types'
 import { backgroundBashTaskId } from '../../../../shared/claude-background-bash'
 
 /**
@@ -52,10 +52,22 @@ export interface TaskLifecycleInput {
   notification?: TaskNotification
   /** `tool_result.isError` — only consulted when there is no notification. */
   resultIsError?: boolean
+  /**
+   * The call has not started: see {@link isBehindUnfinishedCall}. Only a call that is
+   * still all the card knows of the task counts — a lifecycle record, a terminal event
+   * or a result means it has started (or been settled), whatever the heuristic says.
+   */
+  queued?: boolean
 }
 
 export interface TaskLifecycleState {
   isRunning: boolean
+  /**
+   * The call is waiting for an earlier call of its own assistant message to finish, so it
+   * has not started: not running (no spinner, no clock), yet a Stop on it is meant and
+   * lands when it does start. Never set together with `isRunning`.
+   */
+  isQueued: boolean
   isError: boolean
   /**
    * Ended by a stop — the user's, or the process dying under it — rather than
@@ -85,10 +97,14 @@ export function deriveTaskState({
   isBackground,
   hasResult,
   notification,
-  resultIsError = false
+  resultIsError = false,
+  queued = false
 }: TaskLifecycleInput): TaskLifecycleState {
-  const isRunning = isHistorical
-    ? false
+  const isQueued = queued && !isHistorical && !hasActiveTask && !notification && !hasResult
+  const isRunningOtherwise = isHistorical
+    ? // A transcript knows no running task, except a record the caller kept for it: a
+      // dispatched X-Agent, rebuilt from the ledger on a reopen (ADR-105 §5).
+      hasActiveTask
     : // An armed lifecycle record outranks everything, INCLUDING an earlier
       // terminal event: that is exactly the state a resumed agent is in — run
       // 1 notified, then run 2 started (ADR-073).
@@ -106,14 +122,139 @@ export function deriveTaskState({
           isBackground
           ? !(hasResult && resultIsError)
           : !hasResult
+  const isRunning = isRunningOtherwise && !isQueued
 
   const unfinished = notification?.status === 'unfinished'
   return {
     isRunning,
+    isQueued,
     isError: notification ? notification.status === 'failed' : resultIsError,
     isStopped: !isRunning && notification?.status === 'stopped',
     isLoaded: !isRunning && ((isHistorical && !hasResult && !notification) || unfinished)
   }
+}
+
+/**
+ * A cross-engine dispatch tool call (ADR-033), by the name each engine gives it. The bare
+ * `dispatch_agent` is pi's (`pi.registerTool()` has no mcp__/claudeui_ prefix to sanitize),
+ * safe to match unconditionally since only pi emits that exact bare name.
+ */
+export function isDispatchToolName(toolName: string): boolean {
+  return (
+    toolName === 'mcp__claude-ui-collab__dispatch_agent' ||
+    toolName === 'claudeui_dispatch_agent' ||
+    toolName === 'dispatch_agent'
+  )
+}
+
+/**
+ * Why a failed task failed, for a card whose body does not already say: the tool_result's
+ * error text. It stays in the result body of a foreground task with no streamed output; it
+ * is a line of its own beside the output of one that streamed some (the output hid the
+ * reason), and for a BACKGROUND task, whose result body is hidden altogether (a refused
+ * background launch is an error result carrying the reason, nothing else).
+ */
+export function taskFailureText(i: {
+  isError: boolean
+  /** `tool_result.isError`: a failure the notification alone (which has no reason) cannot explain. */
+  resultIsError: boolean
+  resultText: string
+  /** The body shows the agent's streamed output (or is about to). */
+  showsOutput: boolean
+  isBackground: boolean
+}): string {
+  return i.isError && i.resultIsError && (i.showsOutput || i.isBackground) ? i.resultText : ''
+}
+
+/**
+ * How a settled X-Agent ended, when the notification says it in words and no hand-back
+ * report does: "The X-Agent ran out of time.", "Dispatched turn failed: …", a stop, a run
+ * a reload found unfinished ("It can be resumed."), or a background result that came with
+ * no report (ADR-105 §5). The card and the panel draw it as a muted line.
+ *
+ * Empty when the card already says it: a hand-back report, the failure line
+ * ({@link taskFailureText}), or the tool_result body (which a foreground call shows).
+ */
+export function dispatchEndNote(i: {
+  isDispatch: boolean
+  notification: TaskNotification | undefined
+  /** Neither running nor queued. */
+  settled: boolean
+  /** The notification carries a hand-back report the card draws (`hasHandbackReport`). */
+  hasHandback: boolean
+  isBackground: boolean
+  /** The tool_result text. */
+  resultText: string
+  failureShown: boolean
+}): string {
+  const summary = i.notification?.summary.trim() ?? ''
+  if (!i.isDispatch || !i.settled || i.hasHandback || i.failureShown || !summary) return ''
+  return i.isBackground || !i.resultText ? summary : ''
+}
+
+/**
+ * Whether a tool call has not started because an EARLIER call of its own assistant message
+ * has no result yet (cli.js 2.1.293, the streaming tool executor):
+ * `canExecuteTool` lets a call that is not concurrency-safe run only when nothing else of
+ * the message is executing, and its scan stops at the first such call it cannot start, so
+ * every call after it waits too. A first-party MCP tool carries no `readOnlyHint`
+ * (`isConcurrencySafe` reads nothing else), so `dispatch_agent` is exclusive: the second of
+ * two in one message — or one behind a blocking call, a foreground Agent, a question —
+ * starts only when everything before it has returned (docs/protocol-cc/10-mcp-hosting.md).
+ *
+ * The wire marks no such state: the card sees a tool_use with no `task_started`, no result
+ * and no notification, exactly as for a call that has started and not yet answered. The
+ * order of the message's own blocks is the evidence. Claude Code only: pi runs a message's
+ * tool calls in parallel by default, and the other engines announce a call when it starts.
+ */
+export function isBehindUnfinishedCall(
+  content: readonly ContentBlock[],
+  toolUseId: string
+): boolean {
+  const own = content.findIndex((b) => b.type === 'tool_use' && b.toolUseId === toolUseId)
+  if (own < 0) return false
+  const answered = new Set<string>()
+  for (const block of content) if (block.type === 'tool_result') answered.add(block.toolUseId)
+  return content.slice(0, own).some((b) => b.type === 'tool_use' && !answered.has(b.toolUseId))
+}
+
+/**
+ * Whether a message holds a dispatch call that follows another tool call: the only shape
+ * {@link isQueuedDispatchCall} can ever answer yes for. A bubble without one need not follow
+ * the turn's state.
+ */
+export function hasDispatchBehindCall(content: readonly ContentBlock[]): boolean {
+  let seenCall = false
+  for (const block of content) {
+    if (block.type !== 'tool_use') continue
+    if (seenCall && isDispatchToolName(block.toolName)) return true
+    seenCall = true
+  }
+  return false
+}
+
+/**
+ * Whether a dispatch call is queued, for every surface that shows one (the card, the task
+ * panel, the agent roster): a `dispatch_agent` call of a Claude session, behind an unanswered
+ * call of its own assistant message ({@link isBehindUnfinishedCall}), while the session's turn
+ * is running. cli.js can hold a call queued only inside a live turn: in a session whose turn is
+ * over (a crash cut it, a reopened session sent a prompt) the same block order is stale, and a
+ * card reading "queued" for it would never settle.
+ */
+export function isQueuedDispatchCall(opts: {
+  engineId: string
+  /** The session's turn is running (`status.state === 'running'`). */
+  turnRunning: boolean
+  content: readonly ContentBlock[]
+  block: { toolUseId: string; toolName: string }
+}): boolean {
+  return (
+    opts.engineId === 'claude' &&
+    opts.turnRunning &&
+    isDispatchToolName(opts.block.toolName) &&
+    !!opts.block.toolUseId &&
+    isBehindUnfinishedCall(opts.content, opts.block.toolUseId)
+  )
 }
 
 /**

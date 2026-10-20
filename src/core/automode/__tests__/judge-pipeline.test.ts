@@ -15,7 +15,11 @@ vi.mock('../../services/logger', () => ({ logger: mockLogger }))
 vi.mock('../read-only-gate', () => ({ readOnlyGate: mockReadOnlyGate }))
 vi.mock('../allow-rule-gate', () => ({ allowRuleGate: mockAllowRuleGate }))
 
-import { runJudgePipeline, type JudgePipelineHooks } from '../judge-pipeline'
+import {
+  runJudgePipeline,
+  runJudgePipelineDetailed,
+  type JudgePipelineHooks
+} from '../judge-pipeline'
 import { AutoModeDenialTracker } from '../denial-tracker'
 import type { JudgeRequest } from '../classifier'
 import type { ChatMessage } from '../../../shared/types'
@@ -430,5 +434,105 @@ describe('runJudgePipeline — staged input and settle checks (S4, opencode on t
     })
     expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'settled' })
     expect(sendReview).not.toHaveBeenCalled()
+  })
+})
+
+describe('runJudgePipelineDetailed — the verdict detail the outcome drops (ADR-105 §3, slice B-3c)', () => {
+  const handBack = {
+    toolUseId: '',
+    toolName: 'hand_back',
+    input: { report: 'Done.' },
+    handBack: true
+  }
+
+  it('an allow carries the verdict; a block carries the reason and rule behind the hold', async () => {
+    const a = await runJudgePipelineDetailed(bash, setup({}, ['<block>no</block>']).hooks)
+    expect(a.outcome).toEqual({ kind: 'allow' })
+    expect(a.detail).toMatchObject({ kind: 'verdict', result: { block: false } })
+
+    const b = await runJudgePipelineDetailed(
+      bash,
+      setup({}, ['<block>yes</block><reason>[Containment Escape] runs a remote script</reason>'])
+        .hooks
+    )
+    expect(b.outcome.kind).toBe('hold')
+    expect(b.detail).toMatchObject({
+      kind: 'verdict',
+      result: { block: true, reason: '[Containment Escape] runs a remote script' }
+    })
+  })
+
+  it('tells a judge that could not answer apart from a block, and says why', async () => {
+    const down = await runJudgePipelineDetailed(bash, setup({}, [new Error('HTTP 503')]).hooks)
+    expect(down.outcome).toEqual({ kind: 'human' })
+    expect(down.detail).toEqual({ kind: 'unavailable', cause: 'judge', error: 'HTTP 503' })
+
+    const stale = await runJudgePipelineDetailed(bash, setup({ judgeAvailable: () => false }).hooks)
+    expect(stale.detail).toEqual({ kind: 'unavailable', cause: 'model' })
+
+    const ctl = setup()
+    ctl.hooks.judgeTransport = () => async () => {
+      ctl.setMode('default')
+      return '<block>no</block>'
+    }
+    expect((await runJudgePipelineDetailed(bash, ctl.hooks)).detail).toEqual({
+      kind: 'unavailable',
+      cause: 'mode'
+    })
+
+    const threw = await runJudgePipelineDetailed(
+      bash,
+      setup({
+        environment: async () => {
+          throw new Error('boom')
+        }
+      }).hooks
+    )
+    expect(threw.detail).toEqual({ kind: 'unavailable', cause: 'error', error: 'boom' })
+  })
+
+  it('a denial cap is reported with the block that tripped it; gates and settled ask say nothing', async () => {
+    const { hooks } = setup({}, ['<block>yes</block>', '<block>yes</block>', '<block>yes</block>'])
+    await runJudgePipelineDetailed(bash, hooks)
+    await runJudgePipelineDetailed(bash, hooks)
+    const third = await runJudgePipelineDetailed(bash, hooks)
+    expect(third.outcome.kind).toBe('human')
+    expect(third.detail).toMatchObject({
+      kind: 'verdict',
+      result: { block: true },
+      capped: 'Auto mode blocked 3 actions in a row — asking you instead.'
+    })
+
+    expect(
+      (await runJudgePipelineDetailed({ ...bash, toolName: 'read' }, setup().hooks)).detail
+    ).toEqual({ kind: 'none' })
+    let pending = true
+    const settled = setup({ stillPending: () => pending })
+    settled.hooks.judgeTransport = () => async () => {
+      pending = false
+      return '<block>no</block>'
+    }
+    expect((await runJudgePipelineDetailed(bash, settled.hooks)).detail).toEqual({ kind: 'none' })
+  })
+
+  it('judges a hand-back as the hand-back it is: framed as one, sent to stage 2 even in both mode', async () => {
+    const { hooks, judge } = setup({ skipReadOnlyGate: true, twoStageMode: () => 'both' }, [
+      '<thinking>ok</thinking><block>no</block>'
+    ])
+    const r = await runJudgePipelineDetailed(handBack, hooks)
+    expect(r.outcome).toEqual({ kind: 'allow' })
+    expect(judge).toHaveBeenCalledTimes(1)
+    const req = judge.mock.calls[0][0]
+    expect(req.stage).toBe('thinking')
+    expect(req.user).toContain('Final entry to evaluate - a hand-back')
+    expect(req.user).toContain('"Done."')
+    expect(req.user).not.toContain('Proposed next action')
+  })
+
+  it('runJudgePipeline is the same pipeline minus the detail', async () => {
+    const replies = ['<block>yes</block><reason>[X] y</reason>']
+    const plain = await runJudgePipeline(bash, setup({}, [...replies]).hooks)
+    const detailed = await runJudgePipelineDetailed(bash, setup({}, [...replies]).hooks)
+    expect(plain).toEqual(detailed.outcome)
   })
 })

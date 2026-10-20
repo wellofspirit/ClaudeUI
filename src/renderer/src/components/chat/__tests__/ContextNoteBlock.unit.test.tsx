@@ -77,4 +77,24 @@ describe('ContextNoteBlock', () => {
     expect(root.textContent).toContain('# heading')
     expect(root.textContent).toContain('[link](https://evil.test)')
   })
+
+  it("shows an X-Agent's delivered report as 'Report from X-Agent <name>' with the report as its fragment (ADR-105 §3)", () => {
+    const report = '  Reviewed 3 files.\n  Nothing to fix.'
+    render(
+      <ContextNoteBlock
+        block={{
+          type: 'context_note',
+          title: 'Report from X-Agent impl-e1',
+          fragments: [{ text: report, label: 'from an X-Agent, not from you' }]
+        }}
+      />
+    )
+    expect(screen.getByTestId('ContextNoteBlock.title').textContent).toBe(
+      'Report from X-Agent impl-e1'
+    )
+    fireEvent.click(screen.getByTestId('ContextNoteBlock.toggle'))
+    const fragment = screen.getByTestId('ContextNoteBlock.fragment')
+    expect(fragment.textContent).toContain('from an X-Agent, not from you')
+    expect(fragment.textContent).toContain('Reviewed 3 files.')
+  })
 })

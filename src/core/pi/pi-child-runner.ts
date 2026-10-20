@@ -191,6 +191,9 @@ function zeroTurnTokens(): UsageTurnTokens {
  * pi's `abort` command is TURN-scoped — the process and session survive an
  * abort, then happily serve a fresh `prompt`.
  */
+/** Delivery ids remembered as arrived (see `PiChildRunner.arrivedDeliveries`). */
+const MAX_ARRIVED_DELIVERIES = 256
+
 export class PiChildRunner {
   readonly client: PiRpcClient
   /** This child's OWN loopback approval-gate host (ADR-033 §4 — a dispatch
@@ -232,6 +235,17 @@ export class PiChildRunner {
    * landed while pi was settling starts a deferred run, see `awaitTurn`).
    */
   readonly pendingDeliveries = new Set<string>()
+  /**
+   * The ids of deliveries whose own `custom` message_end DID arrive (newest last, bounded): the positive
+   * proof that pi took the message into the session. `pendingDeliveries` cannot be it: an id also
+   * leaves that set when the ack failed or a `send_message` error dropped it, with the message lost.
+   */
+  readonly arrivedDeliveries = new Set<string>()
+  /**
+   * Deliveries whose row the host shows itself (`deliver`'s `quiet`): the child's stream does not
+   * echo their custom message, so the card shows the one row and not two.
+   */
+  private readonly quietDeliveries = new Set<string>()
   /**
    * pi is inside a run: set by `agent_start`, cleared by `agent_settled`. A run
    * pi started on its own after the settle we consumed (a deferred delivery)
@@ -495,25 +509,33 @@ export class PiChildRunner {
    * `follow_up` (pi-delivery.ts, the marking rule). pi steers a running turn
    * or, idle and `wake`, starts one; the id stays in `pendingDeliveries` until
    * the custom message itself arrives (the ack does not confirm it, P-S4).
-   * Never rejects; a failed ack is logged with ids only.
+   * Never rejects: resolves whether pi ACCEPTED the command (`false`: it refused it, or the
+   * transport failed, so the message is lost); a failed ack is logged with ids only. Acceptance is
+   * not arrival: that is `arrivedDeliveries`.
    */
-  async deliver(payload: PiAgentDelivery): Promise<void> {
+  async deliver(payload: PiAgentDelivery, opts?: { quiet?: boolean }): Promise<boolean> {
     this.pendingDeliveries.add(payload.deliveryId)
+    if (opts?.quiet) this.quietDeliveries.add(payload.deliveryId)
     try {
       const resp = await this.client.request({ type: 'prompt', message: deliveryCommand(payload) })
       if (!resp.success) {
         this.pendingDeliveries.delete(payload.deliveryId)
+        this.quietDeliveries.delete(payload.deliveryId)
         logger.warn(
           this.logTag,
           `delivery ${payload.deliveryId} (agent ${payload.details.agentId}) was not accepted`
         )
+        return false
       }
+      return true
     } catch (err) {
       this.pendingDeliveries.delete(payload.deliveryId)
+      this.quietDeliveries.delete(payload.deliveryId)
       logger.warn(
         this.logTag,
         `delivery ${payload.deliveryId} (agent ${payload.details.agentId}) failed: ${err instanceof Error ? err.constructor.name : 'Error'}`
       )
+      return false
     }
   }
 
@@ -691,6 +713,10 @@ export class PiChildRunner {
     if (out.kind === 'agent_delivery') {
       // The delivery's own custom message_end: THIS is delivery (the ack is not, P-S4).
       this.pendingDeliveries.delete(out.deliveryId)
+      this.quietDeliveries.delete(out.deliveryId)
+      this.arrivedDeliveries.add(out.deliveryId)
+      if (this.arrivedDeliveries.size > MAX_ARRIVED_DELIVERIES)
+        this.arrivedDeliveries.delete(this.arrivedDeliveries.values().next().value as string)
       return
     }
     if (out.kind === 'result') {
@@ -750,6 +776,8 @@ export class PiChildRunner {
       recordTrajectoryMessage(this.trajectory, out.message)
     }
     if (out.kind === 'tool_result') this.opts.onToolResult?.(out)
+    // A delivery the host shows itself (it comes before its `agent_delivery`, which clears the mark).
+    if (out.kind === 'message' && out.deliveryId && this.quietDeliveries.has(out.deliveryId)) return
 
     forwardPiChildStream(out, this.opts.ownerToolUseId(), this.opts.emit(), this.turnToolUseIds)
   }
@@ -810,7 +838,11 @@ export function forwardPiChildStream(
         toolUseId,
         toolResultToolUseId: out.toolUseId,
         result: out.result,
-        isError: out.isError
+        isError: out.isError,
+        // Same shape PiSession sends for the main agent's `session:tool-result`:
+        // the mapper's blob refs pass through untouched.
+        ...(out.fileDiffs ? { fileDiffs: out.fileDiffs } : {}),
+        ...(out.images ? { images: out.images } : {})
       })
       break
     case 'error':

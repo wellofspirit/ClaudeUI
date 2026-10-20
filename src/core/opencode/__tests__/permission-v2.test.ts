@@ -25,6 +25,8 @@ import {
   DISPATCH_ASK_RULE,
   EXECUTE_DENY_RULE,
   externalDirectoryGates,
+  HAND_BACK_ALLOW_RULE,
+  HAND_BACK_DENY_RULE,
   modeGates,
   SESSION_TOOLS_ASK_RULE,
   SESSION_TOOLS_DENY_RULE,
@@ -465,8 +467,47 @@ describe('buildSessionRuleset', () => {
       r('shell', 'allow', 'npm test'),
       DISPATCH_ASK_RULE,
       SESSION_TOOLS_ASK_RULE,
-      EXECUTE_DENY_RULE
+      EXECUTE_DENY_RULE,
+      HAND_BACK_DENY_RULE
     ])
+  })
+
+  // ADR-105 §3: `hand_back` is on the shared hosted server, so every session of the server is
+  // offered it; only a dispatch target may keep it. The interactive ruleset hides it from the
+  // model in every mode (a whole-category deny), whatever the user allowed.
+  it.each([
+    ['default', false],
+    ['acceptEdits', false],
+    ['plan', false],
+    ['auto', true],
+    ['auto', false]
+  ] as const)(
+    '%s (classifier %s): claudeui_hand_back is denied and hidden for an interactive session',
+    (mode, autoMode) => {
+      const { rules } = buildSessionRuleset(
+        input({ mode, autoMode, permissions: perms({ allow: ['mcp__claudeui'] }) })
+      )
+      expect(rules.at(-1)).toEqual(HAND_BACK_DENY_RULE)
+      expect(evaluateV2Call(rules, 'claudeui_hand_back', ['*'], 'linux')).toBe('deny')
+      expect(v2ToolHidden(rules, 'claudeui_hand_back', 'linux')).toBe(true)
+      // The rest of the hosted server is untouched.
+      expect(evaluateV2Call(rules, 'claudeui_render_mermaid', ['*'], 'linux')).not.toBe('deny')
+    }
+  )
+
+  it("a dispatch target's ruleset (handBackTarget) carries no hand_back deny, and the allow wins in every mode", () => {
+    for (const [mode, autoMode] of [
+      ['default', false],
+      ['acceptEdits', false],
+      ['plan', false],
+      ['auto', true]
+    ] as const) {
+      const { rules } = buildSessionRuleset(input({ mode, autoMode, handBackTarget: true }))
+      expect(rules).not.toContainEqual(HAND_BACK_DENY_RULE)
+      const withAllow = wireOrder([...rules, HAND_BACK_ALLOW_RULE])
+      expect(evaluateV2Call(withAllow, 'claudeui_hand_back', ['*'], 'linux'), mode).toBe('allow')
+      expect(v2ToolHidden(withAllow, 'claudeui_hand_back', 'linux')).toBe(false)
+    }
   })
 
   // Slice 2: every hosted session tool asks in EVERY mode (auto allows `claudeui_*`, and a user

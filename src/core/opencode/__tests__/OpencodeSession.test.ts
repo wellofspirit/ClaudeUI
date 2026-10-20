@@ -161,6 +161,7 @@ import { OpencodeSession, CLAUDEUI_INBOX_PREFIX } from '../OpencodeSession'
 import { slimTranscript } from '../../automode/classifier'
 import { deleteSessionInbox, heldInboxItems, listAuditLog } from '../../services/db'
 import { refFor } from '../../services/session-links'
+import { startRunningDispatch } from '../../../test/helpers/running-dispatch'
 import { deliver } from '../../services/session-delivery'
 import type { SessionManager } from '../../services/session-manager'
 import { OpencodePermissionGuardError } from '../OpencodeServerManager'
@@ -520,6 +521,30 @@ describe('lifecycle', () => {
     expect(payloads('session:message').filter((m) => m.id === 'msg_u1')).toHaveLength(1)
     expect(h.client.subscribeEvents).toHaveBeenCalledTimes(1)
     expect(h.client.prompt).toHaveBeenCalledTimes(1)
+  })
+
+  it('a resumed chat reports an idle status once its connection and session are up (the flush edge, ADR-105 §3)', async () => {
+    session = makeSession({ resumeSessionId: SID })
+    const seen: string[] = []
+    const send = session.sendStatus.bind(session)
+    session.sendStatus = (): void => {
+      seen.push(`${session.status.state}:${session.isEngineLive() ? 'live' : 'down'}`)
+      send()
+    }
+    h.feed.push(connected())
+    await session.run(null)
+    await flush()
+    expect(session.isEngineLive()).toBe(true)
+    expect(seen.at(-1)).toBe('idle:live')
+
+    // A respawn after the connection was dropped says it again once the client is back.
+    session.cancel()
+    seen.length = 0
+    h.feed.push(connected())
+    await session.run(null)
+    await flush()
+    expect(session.isEngineLive()).toBe(true)
+    expect(seen).toContain('idle:live')
   })
 
   it('a reconnect re-reads state and shows what the gap hid (a pending ask)', async () => {
@@ -905,6 +930,40 @@ describe('non-user delivery (slice 1a)', () => {
     expect(payloads('session:message').some((m) => m.role === 'user')).toBe(false)
     expect(session.getMessages().filter((m) => m.role === 'user')).toHaveLength(1) // the first prompt
     expect(slimTranscript(session.getMessages())).not.toContain('ticket 12')
+  })
+
+  it("an X-Agent's result (dispatch-result) is worded as its own X-Agent's, and its row is a 'Report from X-Agent' note", async () => {
+    session = makeSession()
+    await startTurn()
+    const RESULT = {
+      origin: 'dispatch-result' as const,
+      text: 'X-Agent impl-e1 finished: done',
+      from: { key: 's-abc234', title: 'impl-e1' },
+      wake: true
+    }
+    expect(await session.deliverNonUser(RESULT)).toBe('queued')
+    const [, body] = h.client.prompt.mock.calls.at(-1)!
+    expect(body.text).toBe(
+      [
+        '<session-message from="x-agent:s-abc234" title="impl-e1">',
+        'X-Agent impl-e1 finished: done',
+        '</session-message>',
+        'This is the result of an X-Agent you launched with dispatch_agent, not a message from the user.'
+      ].join('\n')
+    )
+    h.feed.push(...deliveredFeed(body.id as string, body.text as string))
+    await flush()
+    const notes = payloads('session:message').filter((m) => m.role === 'system')
+    expect(notes).toHaveLength(1)
+    expect(notes[0].content).toEqual([
+      {
+        type: 'context_note',
+        title: 'Report from X-Agent impl-e1',
+        fragments: [
+          { text: 'X-Agent impl-e1 finished: done', label: 'from an X-Agent, not from you' }
+        ]
+      }
+    ])
   })
 
   it("a reconnect's purge leaves a posted, undelivered item alone", async () => {
@@ -2272,5 +2331,30 @@ describe('session tool asks (claudeui_session_*)', () => {
     expect(payloads('session:approval-request')).toMatchObject([
       { requestId: 'per_sh', always: ['ls'] }
     ])
+  })
+})
+
+describe('the idle timer holds for a running X-Agent (ADR-105 §3)', () => {
+  const IDLE_MS = 60_000
+  afterEach(() => vi.useRealTimers())
+
+  it('does not auto-disconnect while an X-Agent runs, and does once it has ended and the dispatcher re-arms it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    session = makeSession()
+    const endRun = startRunningDispatch('route-1')
+    const cancel = vi.spyOn(session, 'cancel').mockImplementation(() => {})
+    session.setInactivityTimeout(IDLE_MS)
+    // An idle, connected session (the connect itself is covered by the lifecycle suite).
+    vi.spyOn(session, 'isEngineLive').mockReturnValue(true)
+    await session.run(null)
+    await flush()
+
+    vi.advanceTimersByTime(5 * IDLE_MS)
+    expect(cancel).not.toHaveBeenCalled()
+
+    endRun()
+    session.rearmIdleTimer()
+    vi.advanceTimersByTime(IDLE_MS + 1)
+    expect(cancel).toHaveBeenCalledTimes(1)
   })
 })

@@ -9,7 +9,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js'
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js'
-import type { z } from 'zod'
+import { z } from 'zod'
 import type { SdkMcpServer, SdkMcpTool, SdkToolExtra, ToolResultContent } from './types'
 
 type ToolInput<Shape extends Record<string, z.ZodTypeAny>> = {
@@ -27,12 +27,16 @@ export function createSdkMcpServer(opts: {
   )
 
   for (const t of opts.tools) {
-    // registerTool uses the Zod raw shape object directly for input schema.
+    // registerTool uses the Zod raw shape object directly for input schema. A raw shape is
+    // validated as a strict-by-stripping z.object (undeclared keys are dropped before the
+    // handler runs); `passthrough` makes it a loose object, so the handler also sees keys the
+    // model-facing schema does not list.
+    const shape = t.inputSchema as unknown as Record<string, z.ZodTypeAny>
     instance.registerTool(
       t.name,
       {
         description: t.description,
-        inputSchema: t.inputSchema as unknown as Record<string, z.ZodTypeAny>,
+        inputSchema: t.passthrough ? z.looseObject(shape) : shape,
         ...(t.alwaysLoad !== undefined ? { _meta: { 'anthropic/alwaysLoad': t.alwaysLoad } } : {})
       },
       // MCP's ToolCallback receives parsed-validated args as the first param,
@@ -69,7 +73,8 @@ export function createSdkMcpServer(opts: {
 /**
  * Build a tool definition. Signature matches upstream:
  *   tool(name, description, zodShape, handler)
- * plus an optional trailing `{ alwaysLoad }` (see {@link SdkMcpTool.alwaysLoad}).
+ * plus an optional trailing `{ alwaysLoad, passthrough }` (see {@link SdkMcpTool.alwaysLoad} and
+ * {@link SdkMcpTool.passthrough}).
  *
  * `zodShape` is an object of field → Zod schema (NOT a wrapping z.object()).
  */
@@ -78,14 +83,15 @@ export function tool<Shape extends Record<string, z.ZodTypeAny>>(
   description: string,
   inputSchema: Shape,
   handler: (input: ToolInput<Shape>, extra?: SdkToolExtra) => Promise<ToolResultContent>,
-  options: { alwaysLoad?: boolean } = {}
+  options: { alwaysLoad?: boolean; passthrough?: boolean } = {}
 ): SdkMcpTool {
   return {
     name,
     description,
     inputSchema: inputSchema as unknown as SdkMcpTool['inputSchema'],
     handler: handler as unknown as SdkMcpTool['handler'],
-    ...(options.alwaysLoad !== undefined ? { alwaysLoad: options.alwaysLoad } : {})
+    ...(options.alwaysLoad !== undefined ? { alwaysLoad: options.alwaysLoad } : {}),
+    ...(options.passthrough ? { passthrough: true } : {})
   }
 }
 

@@ -310,6 +310,14 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
     })
   })
 
+  it('run_in_background marks the dispatch card background; absent or false leaves it a waiting call', () => {
+    const view = (extra: Record<string, unknown>) =>
+      PiEngineToolMap.normalize('task', { engine: 'claude', prompt: 'x', ...extra })
+    expect(view({ run_in_background: true })).toMatchObject({ kind: 'task', background: true })
+    expect(view({ run_in_background: false })).not.toHaveProperty('background')
+    expect(view({})).not.toHaveProperty('background')
+  })
+
   it('task: dispatch_agent without a model -> the dispatch field is just the engine', () => {
     const view = PiEngineToolMap.normalize('task', { engine: 'claude', prompt: 'do X' })
     expect(view).toEqual({
@@ -423,10 +431,10 @@ describe('PiEngineToolMap.displayName', () => {
   })
 
   it('prettifies hosted tool bare names (M4a+b)', () => {
-    expect(PiEngineToolMap.displayName('render_mermaid')).toBe('Mermaid')
+    expect(PiEngineToolMap.displayName('render_mermaid')).toBe('Diagram')
     expect(PiEngineToolMap.displayName('create_mockup')).toBe('Mockup')
     expect(PiEngineToolMap.displayName('show_mockup')).toBe('Mockup')
-    expect(PiEngineToolMap.displayName('dispatch_agent')).toBe('Dispatch')
+    expect(PiEngineToolMap.displayName('dispatch_agent')).toBe('X-Agent')
     expect(PiEngineToolMap.displayName('subagent')).toBe('Subagent')
     expect(PiEngineToolMap.displayName('agent')).toBe('Agent')
   })

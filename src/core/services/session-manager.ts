@@ -7,7 +7,13 @@ import '../providers/register-engines'
 import { readSessionHistory as loadSessionHistory } from './engine-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { claudeProjectKeyFor } from './claude-transcript-locator'
-import { getSessionMeta, moveSessionInbox, moveSessionMeta, renameUsageEventParent } from './db'
+import {
+  getSessionMeta,
+  moveDispatchTargetParent,
+  moveSessionInbox,
+  moveSessionMeta,
+  renameUsageEventParent
+} from './db'
 import { logger } from './logger'
 import { noteTurnStopped } from './context-pressure'
 import { syncCore } from './sync-host'
@@ -146,6 +152,16 @@ export class SessionManager {
       logger.warn(
         'SessionManager',
         `moveSessionMeta failed (the engine row may stay under the old id): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    // The X-Agents this session dispatched (ADR-105) are owned by its durable id, so
+    // a continuation after the rekey still finds them.
+    try {
+      moveDispatchTargetParent(oldId, newId)
+    } catch (err) {
+      logger.warn(
+        'SessionManager',
+        `moveDispatchTargetParent failed (dispatch targets may stay under the old id): ${err instanceof Error ? err.message : String(err)}`
       )
     }
     // A title set before the rekey (a session another session started is named

@@ -22,6 +22,7 @@ import type { HostWindowHandle } from '../host'
 import { computeTokenMetrics } from './session-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { backgroundBashOutputFile, backgroundBashTaskId } from '../../shared/claude-background-bash'
+import { taskWakesParent } from '../../shared/waking-task-types'
 import { locateClaudeTranscript } from './claude-transcript-locator'
 import { transformAssistantMessage } from './assistant-message'
 import { ClaudeItemStreamLifecycle, streamEventParent } from './claude-item-stream'
@@ -36,6 +37,8 @@ import {
   isTaskNotificationDelivery,
   parseTaskNotificationXml,
   taskNotificationNoteText,
+  handbackNotificationFields,
+  isHandbackPointerResult,
   taskNotificationNoteTitle,
   taskTerminalStatus,
   liveTaskNoteSummary
@@ -45,8 +48,10 @@ import { BoundedSet } from './bounded-set'
 import { findPeerRow, type PeerRow } from './claude-peer-row'
 import {
   buildCrossSessionEnvelope,
+  envelopeName,
   sanitizeWrapperKey,
-  sanitizeWrapperTitle
+  sanitizeWrapperTitle,
+  wrapperSender
 } from '../../shared/session-message-wrapper'
 import { classifyApiError } from './api-error'
 import { permissionDecisionBlock, readPermissionDecisionFrame } from './claude-permission-decision'
@@ -302,6 +307,18 @@ export class ClaudeSession extends BaseSession {
   })
   private abortController: AbortController | null = null
   private isProcessing = false
+  /**
+   * A `SubagentHandback` for the MAIN agent reached cli.js's queue after the
+   * last model round began, so cli.js will start an extra turn right behind the
+   * next `result` to deliver it (it drains its queue only at the START of a
+   * round). Set by the hand-back `task_notification`, cleared by the next
+   * main-level `system/status requesting` (the round that drains the queue, or
+   * the extra turn's first), carried on that `result` as `pendingWake`
+   * (docs/protocol-cc/03-inbound-messages.md §3.7).
+   */
+  private pendingHandbackWake = false
+  /** Tasks a SUBAGENT launched (`parent_task_id` / `spawn_depth` > 1) and not yet reported: their hand-back goes to that subagent, not to main. */
+  private readonly nestedTaskIds = new Set<string>()
   /** Commands cli.js started that ClaudeUI looked up on disk as native peer messages (by uuid). */
   private readonly nativePeerTried = new BoundedSet()
   /** Native peer messages already shown as a note (by uuid). */
@@ -635,8 +652,18 @@ export class ClaudeSession extends BaseSession {
     return this.sessionId
   }
 
+  /**
+   * The current permission mode, for a dispatch run to read AFTER the call that launched
+   * it (ADR-105): the run's parent facade asks whichever session object answers to this
+   * session's id, so a respawned session is read afresh.
+   */
+  getAutonomyMode(): string {
+    return this.permissionMode
+  }
+
   protected override resetInactivityTimer(): void {
     this.clearInactivityTimer()
+    if (this.idleTimerHeld()) return
     if (this.inactivityTimeoutMs > 0) {
       this.inactivityTimer = setTimeout(() => {
         logger.info(
@@ -888,7 +915,9 @@ export class ClaudeSession extends BaseSession {
             blockedCalls: this.blockedCalls,
             emit: (channel, data) => this.send(channel, data),
             addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) =>
-              this.addDispatchedCost(engineId, modelId, costUsd)
+              this.addDispatchedCost(engineId, modelId, costUsd),
+            // The background default is the root agent's only (ADR-105 §2).
+            callOwner: (toolUseId) => this.toolUseOwners.ownerOf(toolUseId)
           })
         : null
 
@@ -1346,6 +1375,14 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
   // branch stays small and focused on a single wire event.
   // ---------------------------------------------------------------------------
 
+  /** The main agent is working: flip the idle session to running (status, turn clock, status line). */
+  private beginMainTurn(): void {
+    this.isProcessing = true
+    this.turnStartedAtMs = Date.now()
+    this.sendStatus()
+    this.send('session:status-line', this.buildStatusLineFromAccumulators())
+  }
+
   /** Route a single CLI stream-json message to the appropriate handler.
    *  The `SDKMessage` union is keyed on `type`, so each `case` below
    *  narrows the branch to the matching variant without hand-casting. */
@@ -1375,10 +1412,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       !msg.parent_tool_use_id &&
       !msg.agent_id
     ) {
-      this.isProcessing = true
-      this.turnStartedAtMs = Date.now()
-      this.sendStatus()
-      this.send('session:status-line', this.buildStatusLineFromAccumulators())
+      this.beginMainTurn()
     }
 
     switch (msg.type) {
@@ -1625,6 +1659,26 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
 
   private handleSystemMessage(msg: SystemMessage): void {
     if (msg.subtype === 'status') {
+      // `requesting` is emitted as a main-agent model round starts (a subagent's
+      // rounds emit none), and cli.js drains its queue only at that point — so a
+      // hand-back notification seen BEFORE it was folded into the round, and one
+      // seen after it is still waiting. Deliberately NOT the round's first
+      // `message_start` / assistant frame: those trail the request by seconds, and
+      // a notification landing in that gap would be cleared although the request
+      // (and the drain) were already past.
+      if (msg.status === 'requesting') {
+        this.pendingHandbackWake = false
+        // A main-agent model round has begun, so the main agent is working: say so
+        // now rather than at the round's first content frame (seconds later). It is
+        // the extra turn a hand-back promised (so the renderer's fallback timer for
+        // a turn that never comes is not racing a slow first token), and any turn
+        // cli.js starts by itself behind an intermediate `result` — a background
+        // task's notification continuing the work — whose gap would otherwise read
+        // as `idle`: the dot blinking idle between two running stretches. A
+        // subagent's rounds emit no `requesting` (a frame that names an agent is
+        // ignored all the same), and the zero-turn pointer result emits none.
+        if (!this.isProcessing && !msg.parent_tool_use_id && !msg.agent_id) this.beginMainTurn()
+      }
       const newMode = msg.permissionMode
       if (newMode && newMode !== this.permissionMode) {
         this.permissionMode = newMode
@@ -1906,6 +1960,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     this.taskIdMap.set(taskId, toolUseId)
 
     const taskType = msg.task_type || ''
+    if (msg.parent_task_id || (msg.spawn_depth ?? 1) > 1) this.nestedTaskIds.add(taskId)
     // Foreground or background, when cli.js says: only a foreground task can
     // be sent to the background, so this gates the card's button.
     const background =
@@ -1927,6 +1982,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
         taskType,
         runIndex: 1,
         ...background,
+        wakesParent: taskWakesParent(taskType),
         startedAt: Date.now()
       })
       return
@@ -1945,6 +2001,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
         taskType,
         runIndex: this.runCountByOrigin.get(origin) ?? 1,
         ...background,
+        wakesParent: taskWakesParent(taskType),
         startedAt: Date.now()
       })
       return
@@ -1963,6 +2020,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       runToolUseId: toolUseId,
       runIndex,
       ...background,
+      wakesParent: taskWakesParent(taskType),
       startedAt: Date.now()
     })
   }
@@ -1985,6 +2043,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       taskType: live.taskType,
       runIndex: this.runCountByOrigin.get(live.owner) ?? 1,
       isBackgrounded: true,
+      wakesParent: taskWakesParent(live.taskType),
       // Read only when the record was dropped: a re-arm of the same run keeps
       // that run's clock in the reducer.
       startedAt: Date.now()
@@ -2154,13 +2213,23 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
         }
       : undefined
 
+    // A SubagentHandback subagent's `summary` is a pointer sentence; its report
+    // (and the auto-mode warning on a flagged one) is `handback_report`.
+    const report = handbackNotificationFields(msg)
+    // A hand-back to the MAIN agent that cli.js has not drained yet starts an
+    // extra turn after the parent's next `result` (see pendingHandbackWake). A
+    // nested child reports to the subagent that launched it, which is no turn of
+    // the main agent's.
+    const nested = this.nestedTaskIds.delete(taskId)
+    if ((msg.handback === 'send' || msg.handback === 'flagged') && !nested)
+      this.pendingHandbackWake = true
     const runIndex = matchedToolUseId ? (this.runCountByOrigin.get(matchedToolUseId) ?? 1) : 1
     this.send('session:task-notification', {
       taskId,
       toolUseId: matchedToolUseId,
       status: msg.status || 'completed',
       outputFile,
-      summary: msg.summary || '',
+      ...report,
       usage,
       ...(matchedToolUseId ? { runIndex } : undefined)
     })
@@ -2174,7 +2243,10 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     const backgrounded = this.backgroundedTaskIds.delete(taskId)
     if (!taskId || !backgrounded || msg.skip_transcript === true || msg.ambient === true) return
     const status = taskTerminalStatus(msg.status) ?? 'completed'
-    const summary = msg.summary || ''
+    // A flagged report keeps its security warning above it, as on the card.
+    const summary = report.warning
+      ? `Security warning: ${report.warning}\n\n${report.summary}`
+      : report.summary
     // The title is cli.js's own `<summary>` line, rebuilt from task_started's
     // description — never this frame's `summary`, which for an agent is its
     // (model-authored) result. It stays in the note's text below.
@@ -2241,7 +2313,6 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
   }
 
   private handleResultMessage(msg: ResultMessage, stderrChunks: string[]): void {
-    this.itemStreams.sealOwner(undefined)
     // total_cost_usd / modelUsage are CUMULATIVE WITHIN this cli.js process —
     // REPLACE the live overlay, never add (see the field doc comment on
     // liveTotalCostUsd/liveModelCosts for the full explanation of why `+=`
@@ -2273,6 +2344,18 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       this.liveModelCosts = new Map([[this.resolvedModelId ?? this.model, cost]])
     }
 
+    // The pointer result of a SubagentHandback notification (zero turns, no
+    // model round) is NOT a turn end: the hand-back prompt that woke the parent
+    // is its own turn, with its own result. Treating this one as a turn end
+    // would flip a running parent to idle, flush its queue and raise "Ready for
+    // input" for nothing. The cost above is cumulative and identical to the
+    // previous result's, so only the status line needs the (unchanged) figure.
+    if (isHandbackPointerResult(msg)) {
+      this.sendStatus()
+      return
+    }
+
+    this.itemStreams.sealOwner(undefined)
     this.isProcessing = false
 
     // NOTE (Phase 7): Claude usage_event rows are NOT recorded live here.
@@ -2315,7 +2398,9 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       totalCostUsd: this.totalCostUsd,
       durationMs: resultDurationMs,
       result: msg.result || '',
-      sessionId: this.sessionId
+      sessionId: this.sessionId,
+      // The flag stays set: the extra turn's first round clears it.
+      ...(this.pendingHandbackWake ? { pendingWake: true } : undefined)
     })
     this.sendStatus()
     this.resetInactivityTimer()
@@ -2606,8 +2691,14 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
   async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
     const busy = this.isProcessing
     const id = uuid()
-    const key = sanitizeWrapperKey(item.from.key)
-    const name = sanitizeWrapperTitle(item.from.title)
+    // An X-Agent's result is named as one: the key sits behind `x-agent:` and the name reads
+    // "X-Agent <name>". Only `from` and `from-name` change: cli.js still wraps every peer
+    // envelope in its own lead ("Another Claude session sent a message:") and teammate trailer
+    // (protocol-cc 15.2.6). What marks the text as an untrusted X-Agent report is the
+    // `[X-Agent report]` header inside the body; the transcript row says "Report from X-Agent".
+    const from = wrapperSender(item)
+    const key = sanitizeWrapperKey(from.key)
+    const name = envelopeName(from)
     const origin = {
       kind: 'peer',
       from: key,
@@ -2617,6 +2708,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     const note = sessionMessageNote({
       id,
       fromTitle: name,
+      fromKey: key,
       text: item.text,
       timestamp: Date.now()
     })
@@ -2625,7 +2717,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     // puts it back in the held inbox (reholdNonUser) instead of losing it.
     this.pendingNonUser.set(id, item)
     const firstRun = !this.messageChannel || this.messageChannel.isEnded
-    const running = this.run(buildCrossSessionEnvelope(item.from, item.text), undefined, id, {
+    const running = this.run(buildCrossSessionEnvelope(from, item.text), undefined, id, {
       origin,
       note
     })
@@ -2786,7 +2878,8 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
   private paintNonUserNote(id: string, item: NonUserItem, status?: string): void {
     const note = sessionMessageNote({
       id,
-      fromTitle: sanitizeWrapperTitle(item.from.title),
+      fromTitle: envelopeName(wrapperSender(item)),
+      fromKey: wrapperSender(item).key,
       text: item.text,
       timestamp: this.messageHistory.find((m) => m.id === id)?.timestamp ?? Date.now()
     })
@@ -3828,6 +3921,9 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       })
     }
     this.liveTasks.clear()
+    // The process is gone with whatever sat in its queue. (nestedTaskIds is pruned as each task
+    // reports; a task still open here is stopped above and a resumed run starts it again.)
+    this.pendingHandbackWake = false
   }
 
   /**

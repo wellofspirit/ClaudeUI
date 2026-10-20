@@ -1,3 +1,4 @@
+import type { ZodType } from 'zod'
 import { createSdkMcpServer, tool } from '../sdk'
 import type { SdkMcpServer } from '../sdk'
 import {
@@ -8,7 +9,8 @@ import {
   type SessionToolName
 } from '../../shared/session-tools-description'
 import { runSessionTool, type SessionToolCaller } from './session-tools'
-import { SESSION_TOOL_SHAPES } from './session-tool-specs'
+import { SESSION_TOOL_SHAPES, X_AGENT_SESSION_MESSAGE_SHAPE } from './session-tool-specs'
+import { X_AGENT_SESSION_MESSAGE_DESCRIPTION } from '../../shared/x-agent-message'
 import type { SdkToolExtra } from '../sdk'
 
 /** The server's name (shared with the other engines' renderers); its tools are `mcp__claude-ui-sessions__session_*`. */
@@ -18,6 +20,12 @@ export const SESSION_TOOLS_PREFIX = `mcp__${SESSION_TOOLS_SERVER_NAME}__`
 export interface SessionToolsServerContext {
   /** The calling session, read live at every call (the routing id is rekeyed after init). */
   getCaller: () => SessionToolCaller
+  /**
+   * The server of a dispatch target (ADR-105 §4): `session_message` alone, worded for an X-Agent
+   * (the dispatcher is the only session it can reach). The same server name as a root session's,
+   * so labels, the user's deny rules and the service all recognise the tool.
+   */
+  xAgent?: boolean
 }
 
 /**
@@ -33,6 +41,11 @@ export interface SessionToolsServerContext {
  */
 export function createSessionToolsServer(ctx: SessionToolsServerContext): SdkMcpServer {
   const d = sessionToolDescriptions({ ownMessageTool: OWN_TEAMMATE_MESSAGE_TOOL.claude })
+  const names: readonly SessionToolName[] = ctx.xAgent ? ['session_message'] : SESSION_TOOL_NAMES
+  const description = (name: SessionToolName): string =>
+    ctx.xAgent ? X_AGENT_SESSION_MESSAGE_DESCRIPTION : d[name]
+  const shape = (name: SessionToolName): Record<string, ZodType> =>
+    ctx.xAgent ? X_AGENT_SESSION_MESSAGE_SHAPE : SESSION_TOOL_SHAPES[name]
   const run = async (
     name: SessionToolName,
     input: Record<string, unknown>,
@@ -56,14 +69,8 @@ export function createSessionToolsServer(ctx: SessionToolsServerContext): SdkMcp
   return createSdkMcpServer({
     name: SESSION_TOOLS_SERVER_NAME,
     version: '1.0.0',
-    tools: SESSION_TOOL_NAMES.map((name) =>
-      tool(
-        name,
-        d[name],
-        SESSION_TOOL_SHAPES[name],
-        (input, extra) => run(name, input, extra),
-        load
-      )
+    tools: names.map((name) =>
+      tool(name, description(name), shape(name), (input, extra) => run(name, input, extra), load)
     )
   })
 }

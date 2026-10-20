@@ -5,7 +5,7 @@ import type { SessionInfo } from '../../../../shared/types'
 import { PermissionsDialog } from '../PermissionsDialog'
 import { useContextMenu } from '../../hooks/useContextMenu'
 import { EngineLogo } from '../shared/EngineLogo'
-import { countAutoContinuingTasks } from '../../lib/task-types'
+import { countDotTasks } from '../../lib/task-types'
 import { StatusDot, deriveSessionDotState } from './StatusDot'
 import { originLinkOf, sessionTitleOf } from '../../lib/session-links'
 import { useIsMobile } from '../../hooks/useIsMobile'
@@ -82,7 +82,7 @@ export const SessionItem = memo(function SessionItem({
         isWatching: !!sess?.isWatching,
         needsAttention: !!sess?.needsAttention,
         // A count, not the record map, so useShallow skips the rows whose tasks didn't change.
-        runningSubagents: sess ? countAutoContinuingTasks(sess.activeTasks) : 0
+        runningSubagents: sess ? countDotTasks(sess.activeTasks, !!sess.sdkActive) : 0
       }
     })
   )

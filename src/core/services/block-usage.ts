@@ -62,6 +62,7 @@ import { claudeTranscriptRow } from './usage-recorder'
 import { recomputeUsageWindows } from './usage-window-ledger'
 import { ANTHROPIC_MODEL_PRICING, type ModelPricing } from '../../shared/pricing'
 import { emitEvent } from './sync-host'
+import { isDispatchTargetSession } from './dispatch-target-ledger'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1489,6 +1490,12 @@ export class BlockUsageService {
    * parse cost is offset by parsing each file at most once instead of twice.
    */
   private parseJsonlFile(filePath: string): Promise<ParsedEntry[]> {
+    // A dispatch target's transcript (ADR-105; its own subagent files derive the same
+    // session id) is skipped here, the one choke point of the watcher, the scans and the
+    // reconciler: its spend is already in the blocks through the dispatcher's
+    // `usage_event` rows, so reading it too would count every turn twice.
+    const fileSessionId = deriveSessionIdFromPath(filePath)
+    if (fileSessionId && isDispatchTargetSession(fileSessionId)) return Promise.resolve([])
     return new Promise((resolve) => {
       const entries: ParsedEntry[] = []
 

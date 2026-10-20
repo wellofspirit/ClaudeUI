@@ -64,6 +64,7 @@ export function piCustomMessageToChat(input: PiCustomMessageInput): ChatMessage 
     return sessionMessageNote({
       id: input.id,
       fromTitle: parsed?.fromTitle || (typeof ours.from === 'string' ? ours.from : ''),
+      fromKey: parsed?.fromKey || (typeof ours.fromId === 'string' ? ours.fromId : ''),
       text: parsed ? parsed.body : text,
       timestamp: input.timestamp
     })

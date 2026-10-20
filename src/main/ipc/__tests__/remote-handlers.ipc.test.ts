@@ -285,6 +285,8 @@ import {
   resetCachedClaudeModels
 } from '../../../core/services/claude-model-catalog'
 import { hostAppVersion } from '../../../core/host'
+import { loadOpencodeSessionHistory } from '../../../core/services/opencode-session-list'
+import { dispatchLedger } from '../../../core/services/dispatch-target-ledger'
 import { getCliVersion } from '../../../core/sdk/harness'
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import {
@@ -1254,6 +1256,46 @@ describe('registerRemoteHandlers', () => {
       ]) {
         expect(channels).toContain(ch)
       }
+    })
+
+    it('an opencode/pi history read carries the ledger’s X-Agent cards (ADR-105 §5), as the sidebar’s cold load needs', async () => {
+      const parent = `oc-parent-${process.pid}`
+      const row = dispatchLedger.create({
+        engine: 'pi',
+        harnessRef: `h-${parent}`,
+        parentSessionId: parent,
+        parentEngine: 'opencode',
+        parentToolUseId: 'call_dispatch',
+        cwd: '/x',
+        model: 'm',
+        launchMode: 'default',
+        accountKey: null,
+        codexAccountId: null,
+        callerRestriction: null,
+        name: null,
+        description: null
+      })
+      const messages = [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', toolUseId: 'call_dispatch', toolName: 'claudeui_dispatch_agent' }
+          ],
+          timestamp: 1
+        }
+      ]
+      vi.mocked(loadOpencodeSessionHistory).mockResolvedValueOnce({
+        messages,
+        statusLine: null
+      } as never)
+      const res = (await dispatcher.handle(
+        makeRequest('session:load-opencode-history', parent),
+        remoteConn
+      )) as { activeTasks?: Record<string, { taskId: string }> }
+      expect(res.activeTasks).toEqual({
+        call_dispatch: expect.objectContaining({ taskId: row.id, taskType: 'dispatch' })
+      })
     })
 
     it('git:commit dispatches to the service with get/release bracketing', async () => {

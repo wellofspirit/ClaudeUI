@@ -1370,6 +1370,30 @@ performed actions that may violate security policy. …` prefix; a model refusal
 is its own `refused` kind. The asymmetry is deliberate — blocking an action is
 cheap, blocking a completed sub-agent's entire output is not.
 
+**An in-process MCP tool named `hand_back` is NOT this path.** The flag-not-block
+behaviour belongs to cli.js's own `SubagentHandback` tool (`classifierOnly`,
+`onBlock: "flag"`). ClaudeUI's dispatch targets report through their own MCP tool,
+which cli.js treats as any other tool: in `auto` without an allow rule the classifier
+reviews the call as an action, and a BLOCK is a plain deny. Probed on 2.1.293 with
+Haiku (2026-10-20): an allowed call runs the handler with no frame and no `canUseTool`
+ask; a blocked one shows, in order, the assistant frame carrying the full `input.report`,
+`system/permission_denied` (`tool_use_id`, `decision_reason_type: "classifier"`,
+`decision_reason: "[Containment Escape]"` — a rule name, no sentence — and the
+model-facing deny text in `message`), then the `user` tool_result (`is_error`) with that
+text; the handler never ran. ClaudeUI reads that sequence to flag a blocked report
+instead of letting the X-Agent argue with the denial (ADR-105 §3).
+
+In `auto`, cli.js asks the host (`can_use_tool`) for a call only when the classifier did NOT
+allow it and the call is not refused outright: a block that trips the denial cap (`_7n`: 3 in a
+row or 20 in total, outside headless) becomes `{kind: "no_verdict"}` and an ask whose
+`decision_reason_type` is `classifier` (the cap sentence in `decision_reason`); a transcript too
+long for the classifier (`hat`, `decision_reason_code: classifier_transcript_too_long`) and a mode
+change while it ran fall back to an ask too. ClaudeUI allows the report through `canUseTool` in
+those cases but never as a clean one: a classifier reason with a verdict flags it, any other ask
+marks it unreviewed. The wording ClaudeUI matches in the denial text and reasons is pinned against
+`vendor/claude-cli/cli.js` by `src/main/__tests__/cli-permission-tells.test.ts`, so a bump that
+rewords one fails there.
+
 ---
 
 ## 12 Porting notes

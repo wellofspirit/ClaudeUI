@@ -6,7 +6,12 @@
  * turns such text has started since.
  */
 import { describe, it, expect } from 'vitest'
-import { AGENT_TURN_BUDGET, STARTS_PER_USER_TURN, TurnOriginLedger } from '../turn-origin-ledger'
+import {
+  AGENT_TURN_BUDGET,
+  DISPATCH_WAKE_CAP,
+  STARTS_PER_USER_TURN,
+  TurnOriginLedger
+} from '../turn-origin-ledger'
 import { BaseSession } from '../BaseSession'
 import '../../services/session-links' // installs the client-prompt observer
 import { getSessionLink, insertSessionRef, upsertSessionLink } from '../../services/db'
@@ -259,5 +264,31 @@ describe('what the session tools’ start gate reads (slice 1c)', () => {
     s.enqueuePrompt('typed')
     s.take()
     expect(getSessionLink('s-queue1')?.clientPromptedAt).toEqual(expect.any(Number))
+  })
+})
+
+describe('TurnOriginLedger — X-Agent result wakes (ADR-105 §3)', () => {
+  it('counts dispatch wakes apart from the agent-turn budget, with a cap of 25', () => {
+    const ledger = new TurnOriginLedger()
+    expect(DISPATCH_WAKE_CAP).toBe(25)
+    for (let i = 0; i < DISPATCH_WAKE_CAP - 1; i++) ledger.dispatchWakeStarted()
+    expect(ledger.dispatchWakesLeft).toBe(true)
+    ledger.dispatchWakeStarted()
+    expect(ledger.dispatchWakesSinceUser).toBe(25)
+    expect(ledger.dispatchWakesLeft).toBe(false)
+    // The agent-turn budget is untouched.
+    expect(ledger.agentTurnStartsSinceUser).toBe(0)
+    expect(ledger.budgetLeft).toBe(true)
+  })
+
+  it('the user speaking resets the wake count and the once-only log', () => {
+    const ledger = new TurnOriginLedger()
+    for (let i = 0; i < DISPATCH_WAKE_CAP; i++) ledger.dispatchWakeStarted()
+    expect(ledger.noteDispatchCapReached()).toBe(true)
+    expect(ledger.noteDispatchCapReached()).toBe(false)
+    ledger.userPrompt()
+    expect(ledger.dispatchWakesSinceUser).toBe(0)
+    expect(ledger.dispatchWakesLeft).toBe(true)
+    expect(ledger.noteDispatchCapReached()).toBe(true)
   })
 })
