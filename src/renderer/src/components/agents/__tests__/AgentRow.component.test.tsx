@@ -168,6 +168,40 @@ describe('AgentRow', () => {
     expect(tile.textContent).toBe('X')
   })
 
+  describe('the engine word beside an X-Agent label', () => {
+    const dispatchRow = (over: Partial<AgentRosterRow>): AgentRosterRow =>
+      row({
+        toolUseId: 'a',
+        dispatch: { engine: 'pi', model: 'gpt-5' },
+        hasExplicitName: true,
+        ...over
+      })
+
+    it('follows a name', async () => {
+      await renderRow(dispatchRow({ name: 'impl-e1' }))
+      expect(screen.getByTestId('AgentRow.name').textContent).toBe('impl-e1')
+      expect(screen.getByTestId('AgentRow.engine').textContent).toBe('pi')
+      expect(screen.getByTestId('AgentRow.engine').title).toBe('pi · gpt-5')
+    })
+
+    it('follows a description used as the label', async () => {
+      await renderRow(dispatchRow({ name: 'Review auth diff' }))
+      expect(screen.getByTestId('AgentRow.name').textContent).toBe('Review auth diff')
+      expect(screen.getByTestId('AgentRow.engine').textContent).toBe('pi')
+    })
+
+    it('is absent when the label is already "<engine> · <model>"', async () => {
+      await renderRow(dispatchRow({ name: 'pi · gpt-5' }))
+      expect(screen.getByTestId('AgentRow.name').textContent).toBe('pi · gpt-5')
+      expect(screen.queryByTestId('AgentRow.engine')).toBeNull()
+    })
+
+    it('is absent on a native agent', async () => {
+      await renderRow(row({ toolUseId: 'a' }))
+      expect(screen.queryByTestId('AgentRow.engine')).toBeNull()
+    })
+  })
+
   describe('the name colour follows the model tier', () => {
     const name = (): HTMLElement => screen.getByTestId('AgentRow.name')
     const setTierColors = (on: boolean): void =>

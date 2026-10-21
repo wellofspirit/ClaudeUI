@@ -639,8 +639,15 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   // figure — only show it when there's actually more than one line, or a
   // dispatched (cross-engine, Slice C) row is present.
   const showCostBreakdown = rawModelCosts.length >= 2 || rawModelCosts.some((m) => m.dispatched)
-  const sortedModelCosts = showCostBreakdown
-    ? [...rawModelCosts].sort((a, b) => b.costUsd - a.costUsd)
+  // Own-engine rows first, then the dispatched ones under their own sub-header
+  // — each group by cost, highest first.
+  const byCostDesc = (a: { costUsd: number }, b: { costUsd: number }): number =>
+    b.costUsd - a.costUsd
+  const ownModelCosts = showCostBreakdown
+    ? rawModelCosts.filter((m) => !m.dispatched).sort(byCostDesc)
+    : []
+  const dispatchedModelCosts = showCostBreakdown
+    ? rawModelCosts.filter((m) => m.dispatched).sort(byCostDesc)
     : []
   // "Total incl. dispatched" (Slice C): headline own-engine cost + dispatched
   // spend, NEVER sum(breakdown rows) — the headline is the authoritative
@@ -654,6 +661,24 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   // the dispatched spend is real money and the row says the rest is unknown,
   // rather than silently reporting the dispatched part as the whole total.
   const totalInclDispatchedUsd = (cost ?? 0) + dispatchedCostUsd
+  // One breakdown line. A dispatched row sits under the "Dispatched" sub-header,
+  // so it needs no suffix of its own — only the indent and the marker attribute.
+  const renderCostRow = (m: (typeof rawModelCosts)[number]): React.JSX.Element => (
+    <div
+      key={`${m.engineId}:${m.modelId}:${m.dispatched ? 'dispatched' : 'own'}`}
+      data-testid="TopBar.costBreakdownRow"
+      data-model={m.modelId}
+      {...(m.dispatched ? { 'data-dispatched': 'true' } : {})}
+      className={`flex items-center justify-between gap-3 ${m.dispatched ? 'pl-2' : ''}`}
+    >
+      <span className="text-[10px] text-text-muted truncate min-w-0">
+        {m.dispatched ? dispatchedModelLabel(m.modelId) : shortModelName(m.modelId)}
+      </span>
+      <span className="text-[10px] text-text-secondary font-mono shrink-0">
+        {formatCostUsd(m.costUsd)}
+      </span>
+    </div>
+  )
   // A known zero on a FREE vendor is an answer, not an absence: without this
   // the tile vanishes and a free session looks exactly like one nothing is
   // known about. The billing type comes off the session, never from the
@@ -917,107 +942,105 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                           </button>
                         )}
                         {(showCost || sessionDurationMs > 0 || totalApiDurationMs > 0) && (
-                          <div className="flex gap-4">
-                            {showCost && (
-                              <div>
-                                <div className="text-[10px] text-text-muted mb-0.5">
-                                  Cost
-                                  {costCovered && (
-                                    <span data-testid="TopBar.costCovered">
-                                      {' '}
-                                      · covered by subscription
-                                    </span>
-                                  )}
-                                  {nothingBilled && (
-                                    <span data-testid="TopBar.costNothingBilled">
-                                      {' '}
-                                      · nothing billed
-                                    </span>
-                                  )}
-                                  {costFree && <span data-testid="TopBar.costFree"> · free</span>}
-                                  {unpricedMessages > 0 && (
-                                    <span data-testid="TopBar.costUnpriced">
-                                      {' '}
-                                      · {unpricedMessages} unpriced
-                                    </span>
-                                  )}
-                                </div>
-                                <div
-                                  data-testid="TopBar.cost"
-                                  className="text-[11px] text-text-secondary font-mono"
-                                >
-                                  {formatCostOrUnknown(cost)}
-                                </div>
-                                {showBilledCost && (
-                                  <div
-                                    data-testid="TopBar.billedCost"
-                                    className="mt-0.5 pb-0.5 mb-0.5 flex items-center justify-between gap-3 border-b border-border/50"
-                                  >
-                                    <span className="text-[10px] text-text-muted">Billed</span>
-                                    <span className="text-[10px] text-text-secondary font-mono shrink-0">
-                                      {formatCostOrUnknown(billedCostUsd)}
-                                    </span>
-                                  </div>
-                                )}
-                                {showCostBreakdown && (
-                                  <div
-                                    data-testid="TopBar.costBreakdown"
-                                    className="mt-1 space-y-0.5"
-                                  >
-                                    {sortedModelCosts.map((m) => (
-                                      <div
-                                        key={`${m.engineId}:${m.modelId}`}
-                                        data-testid="TopBar.costBreakdownRow"
-                                        data-model={m.modelId}
-                                        {...(m.dispatched ? { 'data-dispatched': 'true' } : {})}
-                                        className="flex items-center justify-between gap-3"
-                                      >
-                                        <span className="text-[10px] text-text-muted truncate">
-                                          {m.dispatched
-                                            ? `${dispatchedModelLabel(m.modelId)} · dispatched`
-                                            : shortModelName(m.modelId)}
-                                        </span>
-                                        <span className="text-[10px] text-text-secondary font-mono shrink-0">
-                                          {formatCostUsd(m.costUsd)}
-                                        </span>
-                                      </div>
-                                    ))}
-                                    {hasDispatchedCost && (
-                                      <div
-                                        data-testid="TopBar.costTotalInclDispatched"
-                                        {...(costUnknown ? { 'data-cost-unknown': 'true' } : {})}
-                                        className="flex items-center justify-between gap-3 pt-0.5 mt-0.5 border-t border-border/50"
-                                      >
-                                        <span className="text-[10px] text-text-muted truncate">
-                                          Total incl. dispatched
-                                        </span>
-                                        <span className="text-[10px] text-text-secondary font-mono shrink-0">
-                                          {costUnknown
-                                            ? `${formatCostUsd(dispatchedCostUsd)} + ${COST_UNKNOWN}`
-                                            : formatCostUsd(totalInclDispatchedUsd)}
-                                        </span>
-                                      </div>
+                          <div>
+                            {/* No wrap: the three stats' width is the popover's floor
+                                (it shrinks to fit, from min 200px up to its 400px cap). */}
+                            <div data-testid="TopBar.stats" className="flex gap-x-6">
+                              {showCost && (
+                                <div>
+                                  <div className="text-[10px] text-text-muted mb-0.5">
+                                    Cost
+                                    {costCovered && (
+                                      <span data-testid="TopBar.costCovered">
+                                        {' '}
+                                        · covered by subscription
+                                      </span>
+                                    )}
+                                    {nothingBilled && (
+                                      <span data-testid="TopBar.costNothingBilled">
+                                        {' '}
+                                        · nothing billed
+                                      </span>
+                                    )}
+                                    {costFree && <span data-testid="TopBar.costFree"> · free</span>}
+                                    {unpricedMessages > 0 && (
+                                      <span data-testid="TopBar.costUnpriced">
+                                        {' '}
+                                        · {unpricedMessages} unpriced
+                                      </span>
                                     )}
                                   </div>
+                                  <div
+                                    data-testid="TopBar.cost"
+                                    className="text-[11px] text-text-secondary font-mono whitespace-nowrap"
+                                  >
+                                    {formatCostOrUnknown(cost)}
+                                  </div>
+                                </div>
+                              )}
+                              {sessionDurationMs > 0 && (
+                                <div data-testid="TopBar.sessionTime" className="whitespace-nowrap">
+                                  <div className="text-[10px] text-text-muted mb-0.5">
+                                    Session time
+                                  </div>
+                                  <div className="text-[11px] text-text-secondary font-mono">
+                                    {formatDuration(sessionDurationMs)}
+                                  </div>
+                                </div>
+                              )}
+                              {totalApiDurationMs > 0 && (
+                                <div data-testid="TopBar.apiTime" className="whitespace-nowrap">
+                                  <div className="text-[10px] text-text-muted mb-0.5">API time</div>
+                                  <div className="text-[11px] text-text-secondary font-mono">
+                                    {formatDuration(totalApiDurationMs)}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                            {showCost && showBilledCost && (
+                              <div
+                                data-testid="TopBar.billedCost"
+                                className="mt-2 flex items-center justify-between gap-3"
+                              >
+                                <span className="text-[10px] text-text-muted">Billed</span>
+                                <span className="text-[10px] text-text-secondary font-mono shrink-0">
+                                  {formatCostOrUnknown(billedCostUsd)}
+                                </span>
+                              </div>
+                            )}
+                            {showCost && showCostBreakdown && (
+                              <div
+                                data-testid="TopBar.costBreakdown"
+                                className="mt-2 pt-1.5 border-t border-border/50 space-y-0.5"
+                              >
+                                {ownModelCosts.map(renderCostRow)}
+                                {dispatchedModelCosts.length > 0 && (
+                                  <>
+                                    <div
+                                      data-testid="TopBar.costDispatchedHeader"
+                                      className="text-[10px] text-text-muted uppercase tracking-wider pt-1"
+                                    >
+                                      Dispatched
+                                    </div>
+                                    {dispatchedModelCosts.map(renderCostRow)}
+                                  </>
                                 )}
-                              </div>
-                            )}
-                            {sessionDurationMs > 0 && (
-                              <div data-testid="TopBar.sessionTime">
-                                <div className="text-[10px] text-text-muted mb-0.5">
-                                  Session time
-                                </div>
-                                <div className="text-[11px] text-text-secondary font-mono">
-                                  {formatDuration(sessionDurationMs)}
-                                </div>
-                              </div>
-                            )}
-                            {totalApiDurationMs > 0 && (
-                              <div data-testid="TopBar.apiTime">
-                                <div className="text-[10px] text-text-muted mb-0.5">API time</div>
-                                <div className="text-[11px] text-text-secondary font-mono">
-                                  {formatDuration(totalApiDurationMs)}
-                                </div>
+                                {hasDispatchedCost && (
+                                  <div
+                                    data-testid="TopBar.costTotalInclDispatched"
+                                    {...(costUnknown ? { 'data-cost-unknown': 'true' } : {})}
+                                    className="flex items-center justify-between gap-3 pt-0.5 mt-0.5 border-t border-border/50"
+                                  >
+                                    <span className="text-[10px] text-text-muted truncate min-w-0">
+                                      Total incl. dispatched
+                                    </span>
+                                    <span className="text-[10px] text-text-secondary font-mono shrink-0">
+                                      {costUnknown
+                                        ? `${formatCostUsd(dispatchedCostUsd)} + ${COST_UNKNOWN}`
+                                        : formatCostUsd(totalInclDispatchedUsd)}
+                                    </span>
+                                  </div>
+                                )}
                               </div>
                             )}
                           </div>

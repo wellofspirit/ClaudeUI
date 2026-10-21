@@ -9,7 +9,7 @@ import {
   firstPartyToolLabel
 } from '../first-party-tool-names'
 import { SESSION_TOOL_NAMES } from '../session-tools-description'
-import { dispatchTaskView, taskHeaderLabel } from '../tool-kinds'
+import { dispatchPlaceholderDescription, dispatchTaskView, taskHeaderLabel } from '../tool-kinds'
 
 describe('firstPartyToolLabel', () => {
   it.each([
@@ -96,6 +96,7 @@ describe('dispatchTaskView: name and description', () => {
     for (const extra of [{}, { name: '  ', description: '' }, { name: 3, description: null }]) {
       const view = dispatchTaskView({ engine: 'codex', prompt: 'p', ...extra })
       expect(view.description).toBe('Dispatch: codex')
+      expect(view.description).toBe(dispatchPlaceholderDescription('codex'))
       expect('name' in view).toBe(false)
     }
   })

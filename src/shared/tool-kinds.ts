@@ -211,12 +211,20 @@ export function dispatchTaskView(input: {
   const description = typeof input.description === 'string' ? input.description.trim() : ''
   return {
     kind: 'task',
-    description: description || `Dispatch: ${input.engine}`,
+    description: description || dispatchPlaceholderDescription(input.engine),
     prompt: input.prompt != null ? String(input.prompt) : '',
     ...(name ? { name } : {}),
     ...(input.runInBackground === true ? { background: true } : {}),
     dispatch: { engine: input.engine, ...(model ? { model } : {}) }
   }
+}
+
+/**
+ * The description {@link dispatchTaskView} fills in when the caller gave none. The
+ * roster tells it from a description the caller wrote, so it never shows as a label.
+ */
+export function dispatchPlaceholderDescription(engine: string): string {
+  return `Dispatch: ${engine}`
 }
 
 /**

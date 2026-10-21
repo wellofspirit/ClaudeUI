@@ -285,7 +285,7 @@ export async function startFixtureProvider(
         return streamToolCall(
           res,
           tools.find((tool) => tool === 'claudeui_dispatch_agent'),
-          { engine: 'claude', prompt: 'contract dispatch' }
+          { engine: 'claude', prompt: 'contract dispatch', description: 'Contract dispatch' }
         )
       if (text.includes('[handback]'))
         return streamToolCall(

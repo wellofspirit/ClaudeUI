@@ -14,6 +14,7 @@ import type { QueryHandle, SDKMessage } from '../../../core/sdk'
 import { CrossEngineDispatcher } from '../../../core/services/cross-engine-dispatcher'
 import type { DispatchContext } from '../../../core/services/cross-engine-dispatcher'
 import { makeFakeDispatchLedger } from '../../../test/helpers/fake-dispatch-ledger'
+import { withDefaultDescription } from '../../../test/helpers/default-dispatch-description'
 
 const mocks = vi.hoisted(() => ({ query: vi.fn() }))
 
@@ -65,25 +66,27 @@ describe('the real Claude dispatch spawn (ADR-105)', () => {
   it('persists the session under the recorded uuid, and --resume-s it after the process is gone', async () => {
     mocks.query.mockReset()
     const ledger = makeFakeDispatchLedger()
-    const dispatcher = new CrossEngineDispatcher({
-      serverManager: {
-        acquire: vi.fn(),
-        releaseIfCurrent: vi.fn(),
-        subscribeExit: vi.fn(() => () => {})
-      },
-      makeClient: vi.fn(),
-      loadEngineConfig: () => ({ dispatch: { defaultModel: 'haiku' } }),
-      loadUserRules: () => ({
-        allow: [],
-        deny: [],
-        ask: [],
-        additionalDirectories: [],
-        defaultMode: undefined
-      }),
-      resolveMaxConcurrent: () => 5,
-      ledger,
-      locateClaudeTranscript: () => '/projects/x.jsonl'
-    })
+    const dispatcher = withDefaultDescription(
+      new CrossEngineDispatcher({
+        serverManager: {
+          acquire: vi.fn(),
+          releaseIfCurrent: vi.fn(),
+          subscribeExit: vi.fn(() => () => {})
+        },
+        makeClient: vi.fn(),
+        loadEngineConfig: () => ({ dispatch: { defaultModel: 'haiku' } }),
+        loadUserRules: () => ({
+          allow: [],
+          deny: [],
+          ask: [],
+          additionalDirectories: [],
+          defaultMode: undefined
+        }),
+        resolveMaxConcurrent: () => 5,
+        ledger,
+        locateClaudeTranscript: () => '/projects/x.jsonl'
+      })
+    )
 
     // The ledger row is there when `query` is called: the uuid it names is the one used.
     const rowAtSpawn: unknown[] = []

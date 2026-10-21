@@ -122,7 +122,7 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
                 `For pi: ${piModelHint.short} For codex: ${codexModelHint.short}`
             ),
           name: z.string().optional().describe(DISPATCH_NAME_PARAM),
-          description: z.string().optional().describe(DISPATCH_DESCRIPTION_PARAM),
+          description: z.string().describe(DISPATCH_DESCRIPTION_PARAM),
           run_in_background: z.boolean().optional().describe(DISPATCH_BACKGROUND_PARAM)
         },
         async (input, extra) => {

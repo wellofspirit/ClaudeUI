@@ -140,6 +140,7 @@ import {
   type FakeDispatchLedger
 } from '../../../test/helpers/fake-dispatch-ledger'
 import { makeFakeDispatchReports } from '../../../test/helpers/fake-dispatch-reports'
+import { withDefaultDescription } from '../../../test/helpers/default-dispatch-description'
 import { REPORT_MAX_CHARS } from '../../../shared/handback-frame'
 import { RESULT_REPORT_MAX, RESULT_TEXT_MAX } from '../../../core/services/dispatch-result-text'
 import { ITEM_BODY_MAX } from '../../../core/services/session-delivery'
@@ -246,7 +247,7 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
     piSessionDirExists: () => true,
     ...overrides
   }
-  const dispatcher = new CrossEngineDispatcher(deps)
+  const dispatcher = withDefaultDescription(new CrossEngineDispatcher(deps))
   builtDispatchers.push(dispatcher)
   return { dispatcher, deps: { serverManager }, ledger }
 }
@@ -8511,7 +8512,7 @@ describe('X-Agent ledger — resume review fixes (ADR-105)', () => {
 describe('X-Agent ledger — name and description (ADR-105)', () => {
   const LABELLED = { name: '  impl-e1  ', description: ' Review auth diff ' }
 
-  it('Claude: a new target stores them trimmed; blank or absent stays null', async () => {
+  it('Claude: a new target stores them trimmed; a blank name stays null', async () => {
     const target = makeFakeClaudeTarget()
     const { dispatcher, ledger } = makeHarness({
       loadEngineConfig: () => ({ dispatch: { defaultModel: 'haiku' } }),
@@ -8528,17 +8529,18 @@ describe('X-Agent ledger — name and description (ADR-105)', () => {
       await pending
     }
     await run(LABELLED, 'c-1')
-    await run({ name: '   ', description: '' }, 'c-2')
-    await run({}, 'c-3')
+    await run({ name: '   ', description: ' Second task ' }, 'c-2')
     expect(ledger.rowFor('claude', 'c-1')).toMatchObject({
       name: 'impl-e1',
       description: 'Review auth diff'
     })
-    expect(ledger.rowFor('claude', 'c-2')).toMatchObject({ name: null, description: null })
-    expect(ledger.rowFor('claude', 'c-3')).toMatchObject({ name: null, description: null })
+    expect(ledger.rowFor('claude', 'c-2')).toMatchObject({
+      name: null,
+      description: 'Second task'
+    })
   })
 
-  it('pi: a new target stores them trimmed; absent stays null', async () => {
+  it('pi: a new target stores them trimmed; an absent name stays null', async () => {
     const labelled = makeFakePiTarget({ sessionId: 'pi-l' })
     const plain = makeFakePiTarget({ sessionId: 'pi-p' })
     const spawns = [labelled, plain]
@@ -8552,7 +8554,7 @@ describe('X-Agent ledger — name and description (ADR-105)', () => {
     labelled.pushEvent(piAssistantMessageEnd({ text: 'x' }))
     labelled.pushEvent(PI_AGENT_SETTLED)
     await a
-    const b = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    const b = dispatcher.dispatch({ engine: 'pi', prompt: 'x', description: 'Plain task' }, ctx)
     await tick()
     plain.pushEvent(piAssistantMessageEnd({ text: 'x' }))
     plain.pushEvent(PI_AGENT_SETTLED)
@@ -8561,10 +8563,10 @@ describe('X-Agent ledger — name and description (ADR-105)', () => {
       name: 'impl-e1',
       description: 'Review auth diff'
     })
-    expect(ledger.rowFor('pi', 'pi-p')).toMatchObject({ name: null, description: null })
+    expect(ledger.rowFor('pi', 'pi-p')).toMatchObject({ name: null, description: 'Plain task' })
   })
 
-  it('Codex: a new target stores them trimmed; absent stays null', async () => {
+  it('Codex: a new target stores them trimmed; an absent name stays null', async () => {
     const labelled = makeFakeCodexTarget({ threadId: 'cx-l' })
     const plain = makeFakeCodexTarget({ threadId: 'cx-p' })
     const attaches = [labelled, plain]
@@ -8576,7 +8578,7 @@ describe('X-Agent ledger — name and description (ADR-105)', () => {
     await tick()
     labelled.completeTurn()
     await a
-    const b = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    const b = dispatcher.dispatch({ engine: 'codex', prompt: 'x', description: 'Plain task' }, ctx)
     await tick()
     plain.completeTurn()
     await b
@@ -8584,7 +8586,10 @@ describe('X-Agent ledger — name and description (ADR-105)', () => {
       name: 'impl-e1',
       description: 'Review auth diff'
     })
-    expect(ledger.rowFor('codex', 'cx-p')).toMatchObject({ name: null, description: null })
+    expect(ledger.rowFor('codex', 'cx-p')).toMatchObject({
+      name: null,
+      description: 'Plain task'
+    })
   })
 
   it('a continuation never rewrites them', async () => {
@@ -8694,7 +8699,14 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
       ...opts.ctx
     })
     const ack = await dispatcher.dispatch(
-      { engine: 'claude', prompt: 'work', name: 'bg-1', runInBackground: true, ...opts.req },
+      {
+        engine: 'claude',
+        prompt: 'work',
+        name: 'bg-1',
+        description: 'Background task',
+        runInBackground: true,
+        ...opts.req
+      },
       ctx
     )
     const row = [...ledger.rows.values()].at(-1)
@@ -8727,7 +8739,7 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
           isBackgrounded: true,
           // The result is delivered into the parent (B-3b), so the record wakes it.
           wakesParent: true,
-          description: 'bg-1',
+          description: 'Background task',
           startedAt: expect.any(Number)
         })
       }
@@ -9731,7 +9743,7 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
           taskId: t.row.id,
           taskType: 'dispatch',
           isBackgrounded: true,
-          description: 'bg-1'
+          description: 'Background task'
         })
         expect(canonical().pendingApprovals.map((a) => a.requestId)).toEqual([t.requestId])
         // The restored card is marked: the client does not announce an ask it announced before.
@@ -12888,6 +12900,71 @@ describe('CrossEngineDispatcher — messages with X-Agents (ADR-105 §4, B-4)', 
       // Silent on the (absent) card, but the run is real and its result is delivered.
       expect(t.events('session:task-started')).toHaveLength(0)
       expect(t.dispatcher.inFlightCount).toBe(1)
+    })
+  })
+
+  // ── description is required (xagent-labels) ─────────────────────────────────────────────
+  describe('description is required on a new launch', () => {
+    it.each([
+      ['absent', undefined],
+      ['empty', ''],
+      ['blank', '   ']
+    ] as const)(
+      'refuses a new launch whose description is %s, creating nothing',
+      async (_k, description) => {
+        const target = makeFakePiTarget()
+        const { dispatcher, ledger } = makeHarness({ spawnPiTarget: target.spawnPiTarget })
+        created.push(dispatcher)
+        const result = await dispatcher.dispatch(
+          { engine: 'pi', prompt: 'x', name: 'worker', description },
+          makeCtx({ toolUseId: 't' })
+        )
+        expect(result.isError).toBe(true)
+        expect(result.text).toBe(
+          'The description is required: give a 3-5 word summary of the task (e.g. "Review auth diff").'
+        )
+        expect(target.spawnCalls).toHaveLength(0)
+        expect(ledger.rowFor('pi', 'pi-target-1')).toBeUndefined()
+      }
+    )
+
+    it('refuses a background launch without one too, before anything is started', async () => {
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({ spawnPiTarget: target.spawnPiTarget })
+      created.push(dispatcher)
+      const result = await dispatcher.dispatch(
+        { engine: 'pi', prompt: 'x', description: undefined, runInBackground: true },
+        makeCtx({ toolUseId: 't' })
+      )
+      expect(result.isError).toBe(true)
+      expect(result.text).toMatch(/description is required/)
+      expect(target.spawnCalls).toHaveLength(0)
+    })
+
+    it('never refuses a continuation for it', async () => {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: () => ({ dispatch: { defaultModel: 'haiku' } }),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode' })
+      const first = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x', description: 'First task' },
+        ctx
+      )
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'c-d' } as SDKMessage)
+      target.push(resultMsg({ session_id: 'c-d' }))
+      await first
+      const again = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'y', sessionId: 'c-d', description: undefined },
+        ctx
+      )
+      await tick()
+      target.push(resultMsg({ session_id: 'c-d' }))
+      const result = await again
+      expect(result.isError).toBeUndefined()
+      expect(result.text).not.toMatch(/description is required/)
     })
   })
 

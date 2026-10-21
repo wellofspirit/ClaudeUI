@@ -1194,6 +1194,9 @@ const DISPATCH_ARGS = {
   model: 'haiku'
 }
 
+/** What the model sends: the card shows only DISPATCH_ARGS, but the tool requires a description. */
+const DISPATCH_CALL = { ...DISPATCH_ARGS, description: 'Summarise fixture repo' }
+
 /** The one dispatch approval card raised on this session, once it exists. */
 async function dispatchCard(): Promise<PendingApproval> {
   return await vi.waitFor(
@@ -1215,7 +1218,7 @@ it.skipIf(!enabled)(
   async () => {
     const { cwd, env, errors, requests } = await setupFixture(true, true, false, false, {
       name: 'dispatch_agent',
-      arguments: DISPATCH_ARGS
+      arguments: DISPATCH_CALL
     })
     const dispatch = vi
       .spyOn(crossEngineDispatcher, 'dispatch')
@@ -1251,7 +1254,13 @@ it.skipIf(!enabled)(
       await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 30000 })
 
       expect(dispatch).toHaveBeenCalledWith(
-        { engine: 'claude', prompt: DISPATCH_ARGS.prompt, model: 'haiku', sessionId: undefined },
+        {
+          engine: 'claude',
+          prompt: DISPATCH_ARGS.prompt,
+          model: 'haiku',
+          description: DISPATCH_CALL.description,
+          sessionId: undefined
+        },
         expect.objectContaining({
           fromEngine: 'codex',
           fromRoutingId: 'isolated-dispatch',
@@ -1285,7 +1294,7 @@ it.skipIf(!enabled)(
   async () => {
     const { cwd, env, errors, requests } = await setupFixture(true, true, false, false, {
       name: 'dispatch_agent',
-      arguments: DISPATCH_ARGS
+      arguments: DISPATCH_CALL
     })
     const dispatch = vi.spyOn(crossEngineDispatcher, 'dispatch')
     try {

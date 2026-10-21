@@ -361,7 +361,7 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
       // The MCP SDK strips keys a raw shape does not declare: the schema is loose so this one survives.
       const result = (await client.callTool({
         name: 'dispatch_agent',
-        arguments: { engine: 'claude', prompt: 'x', session_id: 'claude-42' }
+        arguments: { engine: 'claude', prompt: 'x', description: 'Task', session_id: 'claude-42' }
       })) as { isError?: boolean; content: Array<{ text: string }> }
       expect(result.isError).toBe(true)
       expect(result.content[0].text).toBe(DISPATCH_SESSION_ID_REMOVED_TEXT)
@@ -577,10 +577,15 @@ describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033
     vi.mocked(loadEngineConfig).mockReturnValue({})
   })
 
-  it('takes an optional name and description, worded by the shared description module', () => {
+  it('takes an optional name and a required description, worded by the shared description module', () => {
     const { shape } = getDispatchToolDef(tmp).inputSchema
     expect(shape.name.description).toBe(DISPATCH_NAME_PARAM)
     expect(shape.description.description).toBe(DISPATCH_DESCRIPTION_PARAM)
+    const field = (k: 'name' | 'description') =>
+      shape[k] as unknown as { safeParse: (v: unknown) => { success: boolean } }
+    expect(field('name').safeParse(undefined).success).toBe(true)
+    expect(field('description').safeParse(undefined).success).toBe(false)
+    expect(field('description').safeParse('Review auth diff').success).toBe(true)
   })
 
   it('takes an optional boolean run_in_background, worded by the shared description module', () => {

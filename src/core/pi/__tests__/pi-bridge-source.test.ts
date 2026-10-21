@@ -26,8 +26,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 22 (dispatch_agent states its name and description limits, ADR-105 §4)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('22')
+  it('is version 23 (dispatch_agent requires a description)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('23')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -476,7 +476,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
     )
   })
 
-  it('dispatch_agent takes optional name and description, worded exactly as the shared module does (the bridge cannot import it)', () => {
+  it('dispatch_agent takes an optional name and a REQUIRED description, worded exactly as the shared module does (the bridge cannot import it)', () => {
     withEnv(
       { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
       () => {
@@ -489,7 +489,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
           type: 'string',
           description: DISPATCH_DESCRIPTION_PARAM
         })
-        expect(params.required).toEqual(['engine', 'prompt'])
+        expect(params.required).toEqual(['engine', 'prompt', 'description'])
       }
     )
   })
@@ -542,7 +542,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
         expect(tools.get('dispatch_agent')!.parameters).toMatchObject({
           type: 'object',
           properties: { engine: { type: 'string', enum: ['claude', 'opencode', 'codex'] } },
-          required: ['engine', 'prompt']
+          required: ['engine', 'prompt', 'description']
         })
       }
     )

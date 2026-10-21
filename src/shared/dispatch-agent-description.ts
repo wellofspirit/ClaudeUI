@@ -90,7 +90,7 @@ export function dispatchResultSuffix(agentRef: string): string {
 }
 
 /**
- * The optional `name` and `description` inputs, worded once for the four
+ * The `name` (optional) and `description` (required) inputs, worded once for the four
  * registrations (the pi bridge is import-free, so it carries these two strings as
  * literals and a test pins them to these). Same meaning as Claude Code's Agent
  * tool: `name` is a short handle, `description` a 3-5 word summary.
@@ -99,8 +99,8 @@ export const DISPATCH_NAME_PARAM =
   'Optional short handle for this agent, e.g. "impl-e1". It labels the agent in the agent list; ' +
   'keep it short (at most 64 characters) and distinct from your other agents.'
 export const DISPATCH_DESCRIPTION_PARAM =
-  'Optional 3-5 word summary of the task (at most 200 characters), shown on the agent card ' +
-  '(e.g. "Review auth diff").'
+  'A 3-5 word summary of the task (at most 200 characters), shown on the agent card and in the ' +
+  'agent list (e.g. "Review auth diff").'
 
 /**
  * The optional `run_in_background` input (ADR-105 §2), worded once for the four

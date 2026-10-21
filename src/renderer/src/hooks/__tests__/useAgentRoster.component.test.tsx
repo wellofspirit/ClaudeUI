@@ -908,6 +908,35 @@ describe('useAgentRoster', () => {
       })
       expect(labels()).toEqual([['opencode · deepseek-v4', true, 'opencode · deepseek-v4']])
     })
+
+    it('a dispatch with a description but no name is listed under the description', async () => {
+      await spawnOn('claude', 'mcp__claude-ui-collab__dispatch_agent', {
+        engine: 'pi',
+        model: 'gpt-5',
+        prompt: 'review the whole auth diff',
+        description: 'Review auth diff'
+      })
+      expect(labels()).toEqual([['Review auth diff', true, 'Review auth diff']])
+      expect(seen!.agents[0].description).toBe('Review auth diff')
+    })
+
+    it('a dispatch with neither keeps the placeholder out of the label and the tooltip', async () => {
+      await spawnOn('claude', 'mcp__claude-ui-collab__dispatch_agent', {
+        engine: 'pi',
+        prompt: 'review the whole auth diff'
+      })
+      expect(labels()).toEqual([['pi', true, 'pi']])
+      expect(seen!.agents[0].description).toBe('review the whole auth diff')
+    })
+
+    it('a native agent whose description happens to read "Dispatch: pi" keeps it', async () => {
+      await spawnOn('claude', 'Agent', {
+        subagent_type: 'general-purpose',
+        description: 'Dispatch: pi',
+        prompt: 'p'
+      })
+      expect(seen!.agents[0].description).toBe('Dispatch: pi')
+    })
   })
 
   describe('one tree of agents and shells (§10)', () => {

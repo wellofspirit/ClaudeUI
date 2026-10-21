@@ -34,7 +34,11 @@ import type {
   EngineId,
   TaskNotification
 } from '../../../shared/types'
-import { dispatchLabel, type ToolView } from '../../../shared/tool-kinds'
+import {
+  dispatchLabel,
+  dispatchPlaceholderDescription,
+  type ToolView
+} from '../../../shared/tool-kinds'
 import { ENGINE_META } from '../../../shared/engine-meta'
 import { useActiveSession } from '../stores/session-store'
 import { engineToolMap } from '../components/chat/tool-registry/engine-tool-maps'
@@ -265,9 +269,15 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
       // before launch must not read as a background run with no notification.
       const result = results.get(block.toolUseId)
       const view = map.normalize('task', block.toolInput, result, block.toolName) as TaskView
+      // A dispatch's view carries a placeholder description when the caller gave
+      // none; only a description the caller wrote may name the row or fill its tooltip.
+      const callerDescription =
+        view?.dispatch && view.description === dispatchPlaceholderDescription(view.dispatch.engine)
+          ? ''
+          : view?.description
       const name =
         view?.name ||
-        (view?.dispatch ? dispatchLabel(view.dispatch) : undefined) ||
+        (view?.dispatch ? callerDescription || dispatchLabel(view.dispatch) : undefined) ||
         view?.subagent ||
         // A Codex v1 spawn names no type and no path, only its model: it has
         // always been listed under that, not as a bare "Agent".
@@ -277,7 +287,7 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
         toolUseId: block.toolUseId,
         kind: 'agent' as const,
         name,
-        // A name the spawn gave, or a dispatch label, is an identity; the rest
+        // A name the spawn gave, or a dispatch's name/description/label, is an identity; the rest
         // of the chain above is a fallback that many agents share. The engines'
         // views fill `name` with the TYPE when the call named no one (Claude
         // `name ?? subagent_type`, opencode's `agent`, pi), so a `name` equal to
@@ -293,7 +303,7 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
           (engineId === 'codex' && !view?.name && !view?.subagent && !!view?.model),
         ...(view?.subagent ? { type: view.subagent } : {}),
         ...(view?.dispatch ? { dispatch: view.dispatch } : {}),
-        description: view?.description || view?.prompt || '',
+        description: (view?.dispatch ? callerDescription : view?.description) || view?.prompt || '',
         ...(view?.model ? { requestedModel: view.model } : {}),
         hasResult: !!result,
         resultIsError: !!result?.isError,
