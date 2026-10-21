@@ -65,9 +65,9 @@ describe('equivalentCostUsd — anthropic pricing', () => {
     expect(cost).toBeCloseTo(24.2)
   })
 
-  it('sonnet-5 / sonnet-5-5: tier_2_10 mirrors cli.js 2.1.285, not the 3.x/4.x $3/$15', () => {
-    for (const model of ['claude-sonnet-5', 'claude-sonnet-5-5']) {
-      const cost = equivalentCostUsd(
+  it('sonnet-5 / sonnet-5-5: tier_2_10 mirrors cli.js, with 5.5 cache reads at $0.10', () => {
+    const cost = (model: string) =>
+      equivalentCostUsd(
         'anthropic',
         model,
         oneMTok({
@@ -77,8 +77,8 @@ describe('equivalentCostUsd — anthropic pricing', () => {
           cacheReadTokens: 1_000_000
         })
       )
-      expect(cost).toBeCloseTo(2 + 10 + 2.5 + 0.2)
-    }
+    expect(cost('claude-sonnet-5')).toBeCloseTo(2 + 10 + 2.5 + 0.2)
+    expect(cost('claude-sonnet-5-5')).toBeCloseTo(2 + 10 + 2.5 + 0.1)
   })
 
   it('opus-4 (classic): input rate = $15/MTok', () => {
@@ -840,6 +840,7 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
       'opus-4',
       'opus-5-5',
       'opus',
+      'sonnet-5-5',
       'sonnet-5',
       'sonnet',
       'haiku-5',

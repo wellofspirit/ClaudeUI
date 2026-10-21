@@ -180,8 +180,21 @@ const ANTHROPIC_PRICING: PricingEntry[] = [
       cacheReadPerMTok: 0.5
     }
   },
-  // Sonnet 5 / 5.5 — cli.js 2.1.285 `tier_2_10`. Must precede the generic
-  // 'sonnet' entry (first substring match wins).
+  // Sonnet 5.5 — cli.js 2.1.306 `tier_2_10_cache_read_0_10` (2.1.296: cache
+  // reads dropped to $0.10/MTok). Must precede both other entries.
+  {
+    vendorId: 'anthropic',
+    match: 'sonnet-5-5',
+    pricing: {
+      inputPerMTok: 2,
+      outputPerMTok: 10,
+      cacheWritePerMTok: 2.5,
+      cacheWrite1hPerMTok: 4,
+      cacheReadPerMTok: 0.1
+    }
+  },
+  // Sonnet 5 — cli.js `tier_2_10`. Must precede the generic 'sonnet' entry
+  // (first substring match wins).
   {
     vendorId: 'anthropic',
     match: 'sonnet-5',
