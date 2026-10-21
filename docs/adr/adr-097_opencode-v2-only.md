@@ -3,7 +3,9 @@
 **Status:** Accepted (2026-10-06, owner; arc started with S0; S0–S9 built on the arc branch by
 2026-10-07; S10a — the 1.x removal — built 2026-10-07; S10 real-app verification and the Windows
 pass remain; S9's rule that a dropped target's session is deleted amended 2026-10-19 by
-[ADR-105](adr-105_background-dispatch.md): X-Agent sessions are kept and resumed from the ledger).
+[ADR-105](adr-105_background-dispatch.md): X-Agent sessions are kept and resumed from the ledger;
+§5's "user rows are never touched" amended 2026-10-21: an explicit Remove deletes every credential
+row of the provider, see the end of §5).
 It comes from the spike in
 [`docs/opencode-v2-spike.md`](../opencode-v2-spike.md), which has the evidence, citations and live
 transcripts this ADR relies on. **Owner decisions recorded 2026-10-06:**
@@ -427,7 +429,8 @@ since quit restores their credential), sees a later expiry than the real one.
 **Ownership and active slot (shared DB)**
 
 - ClaudeUI deletes or rotates **only** `cred_claudeui_*` ids. User rows, including those opencode
-  imported once from `auth.json`, are never touched.
+  imported once from `auth.json`, are never touched. _Amended 2026-10-21: an explicit user Remove
+  deletes every row of that provider, the user's included (end of this section)._
 - `fed-token-history` fingerprints are retired for opencode.
 - While a ChatGPT account is connected in ClaudeUI, ClaudeUI's row is the active `openai` credential,
   as in 1.x. Rotation and boot re-assert it with `activate:true`.
@@ -456,7 +459,8 @@ since quit restores their credential), sees a later expiry than the real one.
   `cred_claudeui_<account>_v<n>` (label `claudeui:chatgpt`, stems lowercased to `[a-z0-9-]`). A vend
   lists, re-activates a matching row or POSTs the next generation `activate:true`, THEN deletes
   every other generation of the slot — so any vend (boot included) also prunes what a crash between
-  POST and DELETE left. Nothing else is ever deleted, rotated or relabelled.
+  POST and DELETE left. Nothing else is ever deleted, rotated or relabelled, except by the explicit
+  Remove of the 2026-10-21 amendment (`removeIntegration`).
 - **ClaudeUI's record** (`~/.claude/ui/opencode-credential-slots.json`, ids and flags only, 0600,
   wired at the boot seam; memory in tests): each slot ClaudeUI may hold, written before the POST,
   with the non-ClaudeUI row it displaced (`previousActive`). Removal re-activates that row FIRST
@@ -467,8 +471,9 @@ since quit restores their credential), sees a later expiry than the real one.
   removal is recorded (`pendingRemoval`) and runs before the next store operation once it is —
   ADR-082 S7d's "at once" as far as opencode allows; there is no file to edit any more. A corrupt
   record file is moved aside (`.corrupt-<ms>`), logged, and rebuilt from the live
-  `cred_claudeui_*` rows; it never blocks a vend. Whether ClaudeUI holds a removable key is
-  answered from this record (no server). A ChatGPT vend older than the slot's row of the same
+  `cred_claudeui_*` rows; it never blocks a vend. Whether ClaudeUI holds a removable key was
+  answered from this record (no server) until 2026-10-21; Remove's availability is now read from
+  the live credential table (end of this section). A ChatGPT vend older than the slot's row of the same
   account (a gate's re-vend queued behind a refresh) is skipped.
 - **The imported copy of ClaudeUI's 1.x sign-in.** A non-ClaudeUI OAuth row whose refresh token
   is the vault's or one ClaudeUI fed the 1.x `auth.json` (the fed-token history, now only READ for
@@ -543,8 +548,9 @@ since quit restores their credential), sees a later expiry than the real one.
   auth.openai.com (refused) and the turn fail — with padding, zero attempts.
 - **OpencodeAuthProvider** reads `/api/integration` + `/api/provider` + the credential snapshot
   (types, ownership and ADR-071 identities of each integration's ACTIVE row, never a value);
-  `listVendorCredentialIds` = active row types; Remove (provider manager, shared-provider removals)
-  deletes ClaudeUI's key rows only; OAuth sign-ins run on opencode's integration flows
+  `listVendorCredentialIds` = active row types; a shared-provider route removal (`removeVendorKey`)
+  deletes ClaudeUI's key rows only, and since 2026-10-21 the provider manager's Remove
+  (`removeVendorAuth`) deletes every row of the provider (end of this section); OAuth sign-ins run on opencode's integration flows
   (`integration.oauth.connect`, `.complete`, `.status`, `.cancel`), held on the server the
   attempt lives in; the row it creates is recorded as ClaudeUI's (above). No `auth.json` read
   or write (`auth-store.ts` deleted), no `recycleAll()` caller. ADR-074 §6 adoption reads opencode's ACTIVE
@@ -572,6 +578,49 @@ since quit restores their credential), sees a later expiry than the real one.
 - ClaudeUI's API-key rows (`cred_claudeui_<provider>_v<n>`) stay active after quit, and the user's
   own key rows for those providers stay inactive. Accepted: keys don't expire or rotate, and the
   values match, so the user's opencode keeps working.
+
+**Amended 2026-10-21: an explicit Remove deletes every credential row of the provider.** Before
+this, an opencode provider whose only credential was opencode's own (a key or sign-in the user made
+in opencode, or a row imported from `auth.json`) could not be removed from ClaudeUI at all: Remove
+was offered only where ClaudeUI's record held a row, and nothing explained why the button was
+disabled.
+
+- **What Remove deletes.** `OpencodeCredentialStore.removeIntegration(integration)` deletes every
+  row of that integration in one lease: ClaudeUI's `cred_claudeui_*` rows, ClaudeUI-started
+  sign-ins, the user's keys and sign-ins, and external-credential markers (an Azure CLI login,
+  an AWS profile; the external login itself is untouched). Inactive rows go first and the active
+  one last, so opencode promotes nothing in between and emits one `credential.switched` to null.
+  ClaudeUI's records for that integration are cleared with them, the sign-in ledger is trimmed,
+  and a deleted ChatGPT row drops the vended-token state. On a partial failure, the rows already
+  deleted stay deleted, the caches are refreshed anyway, and the records are kept for a later
+  removal.
+- **Who calls it.** Only the two explicit user surfaces reach it, through
+  `OpencodeAuthProvider.removeVendorAuth`: the provider sheet's Remove
+  (`session:remove-opencode-provider`) and the "Remove key" of the opencode models dialog
+  (`vendor-auth:remove`). Both are two-click confirmed. A shared-provider route removal
+  (`removeVendorKey`, now required on the adapter's target, with no fallback to the wide verb),
+  ChatGPT disconnect and quit (`removeChatgpt`), syncs and route toggles still delete only
+  ClaudeUI's rows.
+- **Shared data dir.** The user's own opencode loses those rows too (§6). The sheet says so beside
+  Remove.
+- **Logged.** Each deleted row is logged at `warn` (the level the log file keeps by default) by
+  integration, id, value kind, owner and caller, never by its value or label (the ADR-074
+  amendment 7 rule that a removal leaves a trace).
+- **A provider on another integration's rows.** Rows are keyed by integration id; Remove deletes
+  the rows of the provider id it is handed. A provider whose catalog id differs from its
+  integration's (`google-vertex-anthropic` on `google-vertex`) is therefore not offered a
+  credential Remove, and its reason says the credential is stored under that integration.
+- **Availability.** Remove is offered when the live credential table holds any row for the
+  provider (`integrationsWithRows()`, falling back to the last snapshot when the list fails). It is
+  no longer read from ClaudeUI's record; `recordedRemovableIntegrations` is gone.
+- **Stale surfaces.** Every removal kind is refused, before any delete or config write, when an
+  enabled shared-provider route now claims the provider. The credential store repeats the check
+  inside its lease, which also covers the dialog's "Remove key". The predicate is one helper
+  (`shared-providers/opencode-claims.ts`). The desktop and remote catalog handlers both decorate
+  claims from it; until now the remote one returned the catalog undecorated.
+
+[ADR-044](adr-044_opencode-provider-disable-vs-remove.md) records the matching change to the
+Disable/Remove table.
 
 ### 6. Data dir (owner decision: shared)
 

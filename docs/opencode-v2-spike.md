@@ -351,7 +351,8 @@ negative-cache the first answer (the ADR-092 lesson).
 4. **Ownership.** ClaudeUI removes or rotates only ids starting with `cred_claudeui_`.
    - On boot it deletes stale generations of its own: every `cred_claudeui_*` except the current one
      per account. This covers a crash between POST and DELETE.
-   - It never touches the user's rows.
+   - It never touches the user's rows. _(Later amended: an explicit user Remove deletes every row of
+     the provider; ADR-097 §5, 2026-10-21.)_
    - The fed-token fingerprint history becomes unnecessary for opencode.
 5. **Active slot (shared DB).**
    - While a ChatGPT account is connected in ClaudeUI, ClaudeUI's row is the active `openai`

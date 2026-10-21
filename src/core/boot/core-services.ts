@@ -67,6 +67,7 @@ import { addHostObserver, emitEvent, syncCore } from '../services/sync-host'
 import { makeDispatchParentLookup } from '../services/dispatch-parent-lookup'
 import { deliverDispatchResult, watchDispatchResultFlush } from '../services/dispatch-result-flush'
 import { sharedProviderService } from '../shared-providers'
+import { claimedOpencodeIds } from '../shared-providers/opencode-claims'
 import { logger } from '../services/logger'
 import { loadPersistedPrices, refreshPricesIfStale } from '../services/opencode-pricing'
 import { usageFetcher } from '../services/usage-fetcher'
@@ -330,7 +331,11 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   opencodeCredentialStore.configure({
     memory: fileSlotMemory(),
     // Copy recognition lives in the store, so no vend or removal bypasses it.
-    isClaudeuiToken: (refresh) => credentialSync.isClaudeuiRefreshToken(refresh)
+    isClaudeuiToken: (refresh) => credentialSync.isClaudeuiRefreshToken(refresh),
+    // An explicit Remove of an integration (every row, the user's included) is
+    // refused while an enabled shared route delivers it — asked inside the
+    // store's lease, so a route enabled mid-removal is still caught.
+    claimedBySharedRoute: (integrationID) => claimedOpencodeIds().has(integrationID)
   })
   setOpencodeAuthHooks({
     beforeTurn: async (providerID) =>

@@ -684,6 +684,41 @@ describe('engine facts', () => {
     expect(byId(snapshot, 'anthropic').opencodeRemoveKind).toBeUndefined()
   })
 
+  it('opencode: the catalog’s blocked reason is carried exactly when Remove is unavailable', () => {
+    const blocked: OpencodeProviderCatalogEntry['actions'] = {
+      canSetCredential: true,
+      canEditDeclaration: false,
+      canRemove: false,
+      removeKind: null,
+      blockedReason: 'Its key comes from OPENAI_API_KEY.'
+    }
+    const snapshot = buildProviderRegistry(
+      sources({
+        opencodeCatalog: [
+          catalogEntry({ id: 'envkeyed', actions: blocked }),
+          // A removable entry never carries a reason, even one the catalog attached.
+          catalogEntry({
+            id: 'openrouter',
+            actions: { ...REMOVABLE, blockedReason: 'stale reason that must not leak' }
+          }),
+          // Unavailable AND unexplained: nothing to carry.
+          catalogEntry({ id: 'mute', actions: { ...blocked, blockedReason: undefined } })
+        ]
+      })
+    )
+    // The sheet shows this beside the button (touch / web have no tooltip).
+    expect(byId(snapshot, 'opencode:envkeyed').opencodeBlockedReason).toBe(
+      'Its key comes from OPENAI_API_KEY.'
+    )
+    expect(byId(snapshot, 'opencode:envkeyed').opencodeRemoveKind).toBeUndefined()
+    expect(byId(snapshot, 'opencode:openrouter').opencodeBlockedReason).toBeUndefined()
+    expect(byId(snapshot, 'opencode:openrouter').opencodeRemoveKind).toBe('credential')
+    expect(byId(snapshot, 'opencode:mute').opencodeBlockedReason).toBeUndefined()
+    expect('opencodeBlockedReason' in byId(snapshot, 'opencode:mute')).toBe(false)
+    // Only opencode-native rows carry it.
+    expect(byId(snapshot, 'anthropic').opencodeBlockedReason).toBeUndefined()
+  })
+
   it('a shared row carries the ROUTE model counts and the definition diagnosis', () => {
     const snapshot = buildProviderRegistry(
       sources({

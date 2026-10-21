@@ -2,7 +2,7 @@
  * The unified provider READ MODEL (ADR-065 § "Providers: one list").
  *
  * Settings v2 collapses the three provider surfaces — the shared vault
- * (`shared-provider:*`), opencode's catalog + `auth.json`
+ * (`shared-provider:*`), opencode's catalog + credential store
  * (`session:get-opencode-providers`), and pi's `auth.json` keys
  * (`vendor-auth:*`) — into ONE list. `ProviderEntry` is what that list renders:
  * one row per provider IDENTITY, whatever store backs it.
@@ -32,8 +32,9 @@ export type ProviderOrigin = 'anthropic' | 'shared' | 'opencode-native' | 'pi-na
  * - `api-key`    — a key ClaudeUI can see in a store it reads.
  * - `free`       — needs no credential at all (opencode's bundled zen gateway).
  * - `custom`     — configured OUTSIDE ClaudeUI's stores: opencode reports the
- *                  provider as usable but no `auth.json` entry backs it, so the
- *                  key comes from an env var or another config file.
+ *                  provider as usable but no key or sign-in row backs it, so the
+ *                  credential comes from an env var, another config file or an
+ *                  external source (a CLI login).
  * - `keyless`    — a shared CUSTOM endpoint with no stored key (ADR-074 §4):
  *                  used without one, which is a state rather than a failure.
  * - `none`       — nothing configured.
@@ -199,6 +200,13 @@ export interface ProviderEntry {
    * sheet's Remove affordance is gated on its presence.
    */
   opencodeRemoveKind?: NonNullable<OpencodeProviderCatalogEntry['actions']['removeKind']>
+  /**
+   * `opencode-native` rows only: why Remove is unavailable — the catalog entry's
+   * `actions.blockedReason`, carried so the sheet can say it beside the button
+   * (touch and web clients have no hover for a tooltip). Present exactly when
+   * {@link opencodeRemoveKind} is absent and the catalog gave a reason.
+   */
+  opencodeBlockedReason?: string
   /**
    * A NATIVE row whose credential is the harness's own — a key or sign-in it
    * holds for a catalog vendor that no ClaudeUI provider claims (ADR-074,

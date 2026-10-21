@@ -4,7 +4,7 @@
  * {@link ResolvedJudgeRoute} `judge-http/` spends, or a user-facing reason why
  * ClaudeUI can't call it.
  *
- * Ownership is the rule `decorateSharedProviderClaims` (`session.ipc.ts`)
+ * Ownership is the rule `decorateSharedProviderClaims` (`shared-providers/opencode-claims.ts`)
  * already uses: the shared definition whose DELIVERED route for the engine is
  * enabled and whose native provider id is the model's provider. Only a
  * provider ClaudeUI holds the credential for can be called; one the engine owns

@@ -230,8 +230,14 @@ spawns loads it.
   `cred_claudeui_<slot>_v<n>` (keys: `{type:'key', key}`; ChatGPT:
   `{type:'oauth', methodID:'chatgpt-browser', refresh:'', access, expires: JWT exp + 24 h,
 metadata:{accountID}}`) plus the sign-ins started from ClaudeUI (labelled
-  `claudeui:signin:<hex>`). It never touches other rows, except deleting ones PROVEN to be a copy
-  of its own sign-in.
+  `claudeui:signin:<hex>`). Automatic paths (vends, syncs, route removals, disconnect, quit) never
+  touch other rows, except deleting ones PROVEN to be a copy of its own sign-in. An explicit user
+  Remove of a provider deletes EVERY row of its integration, the user's included (ADR-097 §5
+  amendment 2026-10-21): one `DELETE /api/credential/{id}` per row, inactive rows first and the
+  active one last. A missing id is a no-op. Deleting the active row promotes the NEWEST remaining
+  row; deleting the last row emits `credential.switched {credentialID: null}`. The provider leaves
+  `/api/provider` on the running server unless an env var or an `activation: "enabled"` source
+  keeps it.
 - Rotation is replace, never PATCH (`PATCH` takes only `label`; a value is silently ignored, a
   re-POST of an id is a 409): POST the next generation `activate:true`, then DELETE the previous.
   2.x hot-reloads credentials (`credential.switched`); there is no recycle.

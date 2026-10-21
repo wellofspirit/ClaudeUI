@@ -90,6 +90,7 @@ import { generateCommitMessage } from '../services/commit-message'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import { logger } from '../services/logger'
 import { sharedProviderService } from '../shared-providers'
+import { decorateSharedProviderClaims } from '../shared-providers/opencode-claims'
 import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
 import { terminalService } from '../services/terminal-service'
 import { remoteVoiceOwner, voiceRelay } from '../services/voice-relay'
@@ -695,7 +696,10 @@ export function registerRemoteHandlers(
     kind: 'query',
     handler: async () => {
       if (!opencodeServerManager.isBinaryAvailable()) return []
-      return await discoverOpencodeProviderCatalog()
+      // Claims decorated exactly as the desktop handler does: a browser/phone
+      // must see the same "vended by a shared provider" warning (and the same
+      // refused Remove) as the desktop.
+      return decorateSharedProviderClaims(await discoverOpencodeProviderCatalog())
     }
   })
   handleRemote({
