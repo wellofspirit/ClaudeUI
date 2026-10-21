@@ -282,8 +282,10 @@ export function OpencodeProviderConfigModal({
       await window.api.vendorAuthRemove('opencode', id)
       reloadCredIds()
       onCredentialChanged?.()
-    } catch {
-      setKeyError('Failed to remove key.')
+    } catch (err) {
+      // Say why: a refusal ("ClaudeUI’s own provider delivers this one now…",
+      // "opencode is not installed…") is the user's next step, not a generic failure.
+      setKeyError(err instanceof Error && err.message ? err.message : 'Failed to remove key.')
     } finally {
       setKeyBusy(false)
     }

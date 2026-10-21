@@ -297,7 +297,8 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
    * the same on its side (the entry goes whoever wrote it). A shared-provider
    * route's removal is `removeVendorKey` and stays ClaudeUI's-rows-only.
    * Rejects while opencode is not installed (nothing is queued), and while an
-   * enabled shared route claims the provider.
+   * enabled shared route claims the provider (through the store's
+   * `claimedBySharedRoute` guard, wired in `startCoreServices`).
    */
   async removeVendorAuth(vendorId: string): Promise<void> {
     // A removal always leaves a trace: the vendor and the call site, never the key.

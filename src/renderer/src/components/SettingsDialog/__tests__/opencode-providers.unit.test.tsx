@@ -393,6 +393,32 @@ describe('opencode provider configuration dialog', () => {
       expect(screen.queryByTestId('OpencodeProviderConfigModal.removeKeyNote')).toBeNull()
     })
 
+    it('a refused remove-key says why (the refusal’s own text), not a generic failure', async () => {
+      await createWithId()
+      await act(async () => {
+        fireEvent.change(screen.getByTestId('OpencodeProviderConfigModal.apiKey'), {
+          target: { value: 'sk-test-123' }
+        })
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('OpencodeProviderConfigModal.saveKey'))
+      })
+      await waitFor(() =>
+        expect(screen.getByTestId('OpencodeProviderConfigModal.keyStatus')).toBeInTheDocument()
+      )
+      const refusal =
+        'ClaudeUI’s own provider delivers this one now. Refresh Settings before removing it.'
+      vendorAuthRemove.mockRejectedValueOnce(new Error(refusal))
+
+      await pressRemove()
+      await pressRemove()
+
+      await waitFor(() => expect(screen.getByText(refusal)).toBeInTheDocument())
+      expect(screen.queryByText('Failed to remove key.')).toBeNull()
+      // Nothing was removed: the key is still shown as set.
+      expect(screen.getByTestId('OpencodeProviderConfigModal.keyStatus')).toBeInTheDocument()
+    })
+
     it('an OAuth credential reads Disconnect, then Disconnect?, and deletes on the second press', async () => {
       installApiStub(
         { providers: { 'my-ollama': { baseURL: 'http://localhost:11434/v1' } } },
