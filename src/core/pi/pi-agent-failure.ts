@@ -12,7 +12,7 @@
  *
  * PORTED PATTERNS. The message patterns below are copied from pi's own
  * classifiers so the host agrees with pi on what "retryable" means. Source
- * tree: `vendor/pi-src/packages/ai/src/utils/`, ported from pi 1.1.0
+ * tree: `vendor/pi-src/packages/ai/src/utils/`, ported from pi 1.3.0
  * (`src/shared/harness-manifests/pi.json#tested`). A pin bump must re-diff
  * `overflow.ts` and `retry.ts` against the three blocks marked PORTED.
  *
@@ -33,7 +33,7 @@ export type PiAgentFailureInput =
   /** A `/cui-` prompt the runner refused to send. */
   | { kind: 'refused-command' }
 
-// ── PORTED from vendor/pi-src/packages/ai/src/utils/overflow.ts (pi 1.1.0) ──
+// ── PORTED from vendor/pi-src/packages/ai/src/utils/overflow.ts (pi 1.3.0) ──
 // OVERFLOW_PATTERNS, NON_OVERFLOW_PATTERNS and the Cerebras body-less case.
 // The silent-overflow cases (usage vs. context window) are not message
 // patterns and need the assistant message, so they are not ported.
@@ -75,7 +75,7 @@ const NON_OVERFLOW_PATTERNS: readonly RegExp[] = [
   /too many requests/i // Generic HTTP 429 style
 ]
 
-// ── PORTED from vendor/pi-src/packages/ai/src/utils/retry.ts (pi 1.1.0) ─────
+// ── PORTED from vendor/pi-src/packages/ai/src/utils/retry.ts (pi 1.3.0) ─────
 function buildProviderErrorPattern(patterns: readonly string[]): RegExp {
   return new RegExp(patterns.join('|'), 'i')
 }
@@ -121,14 +121,19 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
   '504',
   '520',
   '524',
-  'service.?unavailable',
+  // Also matches "The service is temporarily unavailable" (#10965).
+  'service.?(?:is.?)?(?:temporarily.?)?unavailable',
   'server.?error',
   'internal.?error',
 
   // Wrapper/provider text for transient upstream failures, including OpenRouter
-  // "Provider returned error" responses (#2264).
-  'provider.?returned.?error',
+  // "Provider returned error" responses (#2264) and gateway wording such as
+  // "The upstream provider returned an error" (#10842).
+  'provider.?returned.?(?:an.?)?error',
   'exceeded request buffer limit while retrying upstream',
+  // Gateway failure relaying the upstream response stream, sent as an OpenAI
+  // Responses `response.failed` event without an error code (#10920).
+  'unable to forward upstream',
 
   // Network, proxy, and fetch transport failures. This includes OpenAI Codex
   // raw-fetch failures such as "upstream connect", "connection refused", and
