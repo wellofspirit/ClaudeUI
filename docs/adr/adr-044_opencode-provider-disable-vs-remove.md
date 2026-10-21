@@ -1,6 +1,8 @@
 # ADR-044: opencode providers — Disable and Remove are different operations, over one merged list
 
-**Status:** Accepted (2026-07-31; amended 2026-10-01 for removal of stale disabled-only rows)
+**Status:** Accepted (2026-07-31; amended 2026-10-01 for removal of stale disabled-only rows;
+amended 2026-10-21: Remove deletes every opencode credential row of the provider, and a blocked
+Remove shows its reason inline)
 **Relates to:** [ADR-028](adr-028_opencode-native-config-in-place.md), [ADR-031](adr-031_opencode-config-leaf-merge-writes.md), [ADR-036](adr-036_unified-auth-vault.md), [ADR-037](adr-037_shared-provider-routing-and-plaintext-vault.md), [ADR-027](adr-027_test-data-attributes.md)
 
 ## Context
@@ -82,6 +84,27 @@ the other global file remains non-removable under the existing ownership rules. 
 environment sources are never deleted; clearing the veto can allow such a source to supply the
 provider again, so disappearance is conditional on there being no other source. Desktop and
 web/remote use the existing removal command with the same backend validation.
+
+**Amended 2026-10-21: the `credential` class is any row in opencode's credential table.** opencode
+2.x keeps credentials in its own database, not `auth.json` ([ADR-097](adr-097_opencode-v2-only.md)
+§5). The first table row now reads "opencode's credential table holds a row for the provider, anyone's":
+ClaudeUI's rows, the user's own keys and sign-ins, rows imported from `auth.json`, and external
+markers. Remove deletes all of them, and the user's own opencode loses them too, because the data dir
+is shared (ADR-097 §5 amendment, §6). The decision input is a live read of that table, still never
+opencode's `source`. Consequences:
+
+- A disabled provider with only a user key behind it resolves `credential`, not `settings`. Remove
+  then deletes the key and the veto, instead of clearing the veto and letting the key bring the
+  provider back.
+- The `external` blocked reason is gone, because an external source is a row, so it can be removed.
+- An env var or a declaration outside the file ClaudeUI writes still keeps the provider listed
+  after the credential delete. The sheet then shows that remaining reason.
+- A blocked Remove now shows its reason inline next to the button, not only as a tooltip; touch and
+  web clients have no hover.
+- Every removal kind is refused before any write when an enabled shared-provider route now claims
+  the provider (a stale sheet).
+- §5's claim decoration comes from one helper, applied by both the desktop and the remote catalog
+  handlers.
 
 ### 2. Remove must clear its own veto
 

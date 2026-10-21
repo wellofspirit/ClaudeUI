@@ -226,6 +226,23 @@ export function nativeProviderId(entry: ProviderEntry): string {
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
+/**
+ * Where a harness keeps its credentials, in the user's words: pi's `auth.json`;
+ * opencode 2.x's own credential store (its database — no `auth.json` any more).
+ */
+const credentialStoreName = (engine: 'opencode' | 'pi'): string =>
+  engine === 'pi' ? 'auth.json' : 'credential store'
+
+/**
+ * What an opencode Remove of a credential does. opencode outside ClaudeUI uses
+ * the same store (ADR-097 §6), so it loses the credentials too; `both` adds the
+ * provider's declaration in opencode's config.
+ */
+const REMOVE_CREDENTIAL_NOTE =
+  'Removing deletes every credential opencode holds for this provider. opencode outside ClaudeUI uses the same store, so it loses them too.'
+const REMOVE_BOTH_NOTE =
+  'Removing deletes every credential opencode holds for this provider and its declaration in opencode’s config. opencode outside ClaudeUI uses the same store, so it loses them too.'
+
 // The own-key wording lives in one place (`own-key-question.ts`), with the
 // question the Add sheet and "Use ClaudeUI’s … here instead" ask; re-exported
 // for the list.
@@ -555,7 +572,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
       ? "Stored once in ClaudeUI's vault, and delivered to each harness below."
       : entry.origin === 'pi-native'
         ? "Stored in pi's own auth.json, never in ClaudeUI's config."
-        : "Stored in opencode's own auth.json, never in ClaudeUI's config."
+        : "Stored in opencode's own credential store, never in ClaudeUI's config."
 
   // A keyless endpoint (ADR-074 §4) has nothing to report as "Not set": the
   // description says the key is optional instead.
@@ -640,7 +657,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
             name={`${SHEET}-keep-${entry.id}`}
             value={engine}
             label={`Keep ${label(engine)}’s key${hinted(engine)}`}
-            description={`In ${label(engine)}’s auth.json`}
+            description={`In ${label(engine)}’s ${credentialStoreName(engine)}`}
             checked={keep === engine}
             onSelect={() => {
               setKeep(engine)
@@ -767,12 +784,20 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
       )
     }
     if (entry.credential === 'custom') {
+      // An opencode credential row that is neither a key nor a sign-in — an
+      // external reference (a CLI login) — is active, and Remove deletes it.
+      const externalRow =
+        entry.opencodeRemoveKind === 'credential' || entry.opencodeRemoveKind === 'both'
       return (
         <SettingRow
           testid={`${SHEET}.credential`}
           dataId="external"
           label="Configured outside ClaudeUI"
-          description="The key comes from an environment variable or a config file ClaudeUI does not own, so there is nothing here to replace."
+          description={
+            externalRow
+              ? 'opencode connects through an external credential source (such as a CLI login). Remove disconnects it in opencode.'
+              : 'The key comes from an environment variable or a config file ClaudeUI does not own, so there is nothing here to replace.'
+          }
         />
       )
     }
@@ -786,7 +811,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
             testid={`${SHEET}.credential`}
             dataId="oauth"
             label="Signed in"
-            description="opencode holds this OAuth credential in its own auth store. Sign in again to refresh it."
+            description="opencode holds this OAuth credential in its own credential store. Sign in again to refresh it."
           />
           <div className="px-3.5 py-2.5">
             <VendorOAuthFlow
@@ -988,14 +1013,18 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
     } else if (facts?.error) {
       status = <span className="text-danger">{facts.error}</span>
     } else if (undelivered) {
-      status = <span className="text-warning">Not in {label}’s auth.json.</span>
+      status = (
+        <span className="text-warning">
+          Not in {label}’s {credentialStoreName(engine)}.
+        </span>
+      )
     } else if (entry.credential === 'keyless') {
       status =
         engine === 'pi' ? <>Placeholder key in models.json · {as}</> : <>No key sent · {as}</>
     } else if (entry.credential === 'api-key') {
       status = (
         <>
-          Key delivered to {label}’s auth.json {as}
+          Key delivered to {label}’s {credentialStoreName(engine)} {as}
         </>
       )
     } else {
@@ -1336,6 +1365,13 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
   /** What Remove deletes, said beside it while nothing failed. */
   const removeNote = !error && isApiShared && remove !== null
   const settingsRemoveNote = !error && entry.opencodeRemoveKind === 'settings'
+  /** What an opencode Remove of credentials takes with it, said before the press (unarmed, like the others). */
+  const credentialRemoveNote =
+    !error && (entry.opencodeRemoveKind === 'credential' || entry.opencodeRemoveKind === 'both')
+      ? entry.opencodeRemoveKind === 'both'
+        ? REMOVE_BOTH_NOTE
+        : REMOVE_CREDENTIAL_NOTE
+      : undefined
   /**
    * What disconnecting ChatGPT does to each harness (ADR-082 §8, "As built
    * (S7e)"), said while the Disconnect press is armed and nothing failed.
@@ -1347,6 +1383,23 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
   const removeTitle = isShared
     ? 'Built-in providers cannot be removed — disconnect it instead.'
     : 'This provider is not ClaudeUI’s to remove.'
+  /**
+   * Why Remove is unavailable, said beside the button — a tooltip alone is
+   * invisible on touch and in the browser. opencode-native: the catalog's own
+   * reason; a built-in shared provider: the title's — but only once the
+   * definition has been read, since until then `remove` is null for a
+   * user-declared provider too. Other origins (the Claude row) keep the title only.
+   */
+  const removeBlockedNote =
+    !error && !disconnectNote && remove === null
+      ? entry.origin === 'opencode-native'
+        ? entry.opencodeBlockedReason
+        : isShared && shared.resolved
+          ? removeTitle
+          : undefined
+      : undefined
+  const footerNote =
+    removeNote || settingsRemoveNote || !!credentialRemoveNote || !!removeBlockedNote
 
   // ── Extra entry points ─────────────────────────────────────────────────────
 
@@ -1660,7 +1713,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
               variant="danger"
               testid={`${SHEET}.remove`}
               disabled={busy || remove === null}
-              title={remove === null ? removeTitle : undefined}
+              title={remove === null ? (removeBlockedNote ?? removeTitle) : undefined}
               onClick={() => remove && confirmThen('remove', remove)}
             >
               {confirming === 'remove' ? 'Remove provider?' : 'Remove provider'}
@@ -1684,7 +1737,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
                 a surface ends up reporting a stale failure next to a fresh row. */}
             <span
               data-testid={`${SHEET}.error`}
-              className={`${removeNote || settingsRemoveNote || disconnectNote ? '' : 'flex-1 '}min-w-0 truncate text-[12px] text-danger`}
+              className={`${footerNote || disconnectNote ? '' : 'flex-1 '}min-w-0 truncate text-[12px] text-danger`}
             >
               {error}
             </span>
@@ -1715,6 +1768,22 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
               >
                 Clears this provider from opencode’s disabled list and removes its picker curation.
                 External credentials and configuration are unchanged.
+              </span>
+            )}
+            {credentialRemoveNote && (
+              <span
+                data-testid={`${SHEET}.removeNote`}
+                className="flex-1 min-w-0 text-[12px] leading-4 text-text-secondary"
+              >
+                {credentialRemoveNote}
+              </span>
+            )}
+            {removeBlockedNote && (
+              <span
+                data-testid={`${SHEET}.removeBlocked`}
+                className="flex-1 min-w-0 text-[12px] leading-4 text-text-secondary"
+              >
+                {removeBlockedNote}
               </span>
             )}
             <Button variant="primary" testid={`${SHEET}.done`} onClick={onClose}>

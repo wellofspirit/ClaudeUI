@@ -69,7 +69,7 @@ function setup(current: NativeOpencodeFields = {}, modelAllowlist: Record<string
   const authTarget: OpencodeSharedProviderAuthTarget = {
     setVendorApiKey: vi.fn(async () => {}),
     vendChatgpt: vi.fn(async () => {}),
-    removeVendorAuth: vi.fn(async () => {})
+    removeVendorKey: vi.fn(async () => {})
   }
   return {
     adapter: new OpencodeSharedProviderAdapter({
@@ -267,7 +267,7 @@ describe('OpencodeSharedProviderAdapter', () => {
       expires: 1
     })
     expect(authTarget.setVendorApiKey).not.toHaveBeenCalled()
-    expect(authTarget.removeVendorAuth).toHaveBeenCalledWith('openai')
+    expect(authTarget.removeVendorKey).toHaveBeenCalledWith('openai')
     // Neither: the feed and the removal invalidate in the auth target, and only
     // when they change the stored credential.
     expect(invalidateModelCache).not.toHaveBeenCalled()
@@ -292,8 +292,46 @@ describe('OpencodeSharedProviderAdapter', () => {
     await adapter.vendApiKey(definition, 'secret')
     await adapter.removeCredential(definition)
     expect(authTarget.setVendorApiKey).toHaveBeenCalledWith('local-api', 'secret')
-    expect(authTarget.removeVendorAuth).toHaveBeenCalledWith('local-api')
+    expect(authTarget.removeVendorKey).toHaveBeenCalledWith('local-api')
     expect(invalidateModelCache).not.toHaveBeenCalled()
+  })
+
+  // `OpencodeAuthProvider.removeVendorAuth` deletes EVERY row opencode holds for
+  // a provider — the user's own included — and only an explicit user Remove may
+  // do that. The route sync removes through the narrow verb and has no way back.
+  it('removeCredential never reaches the wide removeVendorAuth, with or without removeVendorKey', async () => {
+    const wide = vi.fn(async () => {})
+    const narrow = vi.fn(async () => {})
+    const both = new OpencodeSharedProviderAdapter({
+      readConfig: () => ({}),
+      writeConfig: vi.fn(),
+      authTarget: {
+        setVendorApiKey: vi.fn(async () => {}),
+        vendChatgpt: vi.fn(async () => {}),
+        removeVendorKey: narrow,
+        removeVendorAuth: wide
+      } as OpencodeSharedProviderAuthTarget,
+      invalidateModelCache: vi.fn(),
+      readModelAllowlist: () => ({})
+    })
+    await both.removeCredential(definition)
+    await both.removeCredential(chatgpt)
+    expect(narrow.mock.calls).toEqual([['local-api'], ['openai']])
+    expect(wide).not.toHaveBeenCalled()
+
+    // A target that only has the wide verb is not a fallback: nothing is deleted.
+    const legacy = new OpencodeSharedProviderAdapter({
+      readConfig: () => ({}),
+      writeConfig: vi.fn(),
+      authTarget: {
+        setVendorApiKey: vi.fn(async () => {}),
+        removeVendorAuth: wide
+      } as unknown as OpencodeSharedProviderAuthTarget,
+      invalidateModelCache: vi.fn(),
+      readModelAllowlist: () => ({})
+    })
+    await expect(legacy.removeCredential(definition)).rejects.toThrow()
+    expect(wide).not.toHaveBeenCalled()
   })
 
   // The shared-provider sync re-vends every key at each boot. The auth target
@@ -355,7 +393,7 @@ describe('OpencodeSharedProviderAdapter', () => {
         authTarget: {
           setVendorApiKey: vi.fn(async () => {}),
           vendChatgpt: vi.fn(async () => {}),
-          removeVendorAuth: vi.fn(async () => {})
+          removeVendorKey: vi.fn(async () => {})
         },
         invalidateModelCache: vi.fn(),
         readModelAllowlist: () => ({})

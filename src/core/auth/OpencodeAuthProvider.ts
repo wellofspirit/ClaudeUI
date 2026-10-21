@@ -4,10 +4,12 @@
  *
  * 2.x keeps credentials in its database behind `/api/credential`, and the data
  * dir is shared with the user's own opencode. Every write here goes through
- * {@link opencodeCredentialStore}, which owns exactly ClaudeUI's
- * `cred_claudeui_*` rows: an API key is vended as the next generation and made
- * active, a removal deletes ClaudeUI's rows only and gives the slot back to
- * the user's previously active credential. Nothing is written to `auth.json`,
+ * {@link opencodeCredentialStore}, which owns ClaudeUI's `cred_claudeui_*`
+ * rows: an API key is vended as the next generation and made active, and every
+ * automatic removal (`removeVendorKey`, the ChatGPT sign-in) deletes ClaudeUI's
+ * rows only and gives the slot back to the user's previously active credential.
+ * The one wide verb is `removeVendorAuth`, an explicit user Remove: it deletes
+ * every row opencode holds for the provider. Nothing is written to `auth.json`,
  * and nothing is recycled: 2.x applies a credential change to the next request.
  *
  * probe() merges `GET /api/integration` (every integration with its methods
@@ -187,12 +189,6 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
     )
   }
 
-  /** Vendors where ClaudeUI holds an API-key row it can remove (`cred_claudeui_*`). */
-  async listRemovableVendorIds(): Promise<Set<string>> {
-    // ClaudeUI's own record: no server needed.
-    return opencodeCredentialStore.recordedRemovableIntegrations()
-  }
-
   async oauthAuthorize(
     vendorId: string,
     method: number,
@@ -292,22 +288,29 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
   }
 
   /**
-   * Remove ClaudeUI's API key for this vendor (its `cred_claudeui_*` rows) and
-   * give the slot back to the user's previously active credential. A sign-in
-   * made in opencode (also one made through its OAuth flow here) is opencode's
-   * and stays. Without opencode installed, the removal waits for it.
+   * An EXPLICIT user Remove of this provider's credentials: deletes EVERY row
+   * opencode's credential table holds for it — the user's own keys, sign-ins
+   * made in opencode, external references, ClaudeUI's rows. The table is shared
+   * with the user's own opencode (ADR-097 §6), which loses them too, so only an
+   * explicit, confirmed user action may come here: the provider-management
+   * Remove and the `vendor-auth:remove` channel. Pi's `removeVendorAuth` means
+   * the same on its side (the entry goes whoever wrote it). A shared-provider
+   * route's removal is `removeVendorKey` and stays ClaudeUI's-rows-only.
+   * Rejects while opencode is not installed (nothing is queued), and while an
+   * enabled shared route claims the provider.
    */
   async removeVendorAuth(vendorId: string): Promise<void> {
     // A removal always leaves a trace: the vendor and the call site, never the key.
-    const context = `remove ${vendorId} (${removalCaller()})`
-    await opencodeCredentialStore.removeSlot(vendorId, 'key', context)
-    // A sign-in the user started from ClaudeUI is ClaudeUI's too (by provenance).
-    await opencodeCredentialStore.removeSlot(vendorId, 'signin', context)
+    await opencodeCredentialStore.removeIntegration(
+      vendorId,
+      `remove ${vendorId} (${removalCaller()})`
+    )
   }
 
   /**
    * Remove ClaudeUI's API key only (a shared provider's route) — a sign-in the
-   * user started from ClaudeUI's provider screen is not that route's to take.
+   * user started from ClaudeUI's provider screen is not that route's to take,
+   * and a row of the user's own never is.
    */
   async removeVendorKey(vendorId: string): Promise<void> {
     await opencodeCredentialStore.removeSlot(

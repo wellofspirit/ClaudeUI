@@ -294,19 +294,24 @@ function provenance(
 
 /**
  * Who owns what, for deciding which row actions are legitimate. The
- * credential half is ClaudeUI's own rows (`cred_claudeui_*` keys, ADR-097 §5):
- * only those can Remove delete.
+ * credential half is which integrations opencode's credential table holds ANY
+ * row for — ClaudeUI's, the user's, a sign-in made in opencode, an external
+ * reference (ADR-097 §5): an explicit Remove deletes them all.
  */
 interface ProviderOwnership {
-  removableIds: Set<string>
+  storedIds: Set<string>
   ourFileProviderIds: Set<string>
   allGlobalDeclaredIds: Set<string>
   otherGlobalConfigPath: string
 }
 
 async function readProviderOwnership(): Promise<ProviderOwnership> {
-  // ClaudeUI's own record (no server): only its key rows are removable.
-  const removableIds = opencodeCredentialStore.recordedRemovableIntegrations()
+  // A fresh read of the credential table (never the cached snapshot, which an
+  // outside write does not refresh); the last snapshot when it cannot be read
+  // (opencode stopped or erroring), then nothing.
+  const storedIds = await opencodeCredentialStore
+    .integrationsWithRows()
+    .catch(() => new Set(opencodeCredentialStore.cachedSnapshot()?.integrations.keys() ?? []))
   let ourFileProviderIds = new Set<string>()
   let allGlobalDeclaredIds = new Set<string>()
   let otherGlobalConfigPath = ''
@@ -320,19 +325,28 @@ async function readProviderOwnership(): Promise<ProviderOwnership> {
   } catch {
     // opencode's own config files are optional — treat as "nothing declared".
   }
-  return { removableIds, ourFileProviderIds, allGlobalDeclaredIds, otherGlobalConfigPath }
+  return { storedIds, ourFileProviderIds, allGlobalDeclaredIds, otherGlobalConfigPath }
 }
 
 function buildActionInput(
   id: string,
   isFree: boolean,
   ownership: ProviderOwnership,
-  wording: { source?: OpencodeProviderSource; envVarNames?: string[] }
+  wording: { source?: OpencodeProviderSource; envVarNames?: string[] },
+  integrationId?: string
 ): ProviderActionInput {
   const declaredInOurFile = ownership.ourFileProviderIds.has(id)
   return {
     isFree,
-    hasCredential: ownership.removableIds.has(id),
+    // Credential rows are keyed by INTEGRATION id, the catalog row by provider
+    // id; they are equal for models.dev providers. Looked up by the PROVIDER id
+    // on purpose: Remove deletes the rows of the id it is handed, so offering it
+    // on an integration id it will not be given would delete nothing.
+    hasStoredCredential: ownership.storedIds.has(id),
+    // Wording only: the rows exist, but under another id than the one Remove would be handed.
+    ...(integrationId && integrationId !== id && ownership.storedIds.has(integrationId)
+      ? { credentialIntegrationId: integrationId }
+      : {}),
     declaredInOurFile,
     declaredElsewhereGlobal: !declaredInOurFile && ownership.allGlobalDeclaredIds.has(id),
     ...wording,
@@ -389,7 +403,9 @@ async function providerCatalogAttempt(): Promise<OpencodeProviderCatalogEntry[]>
       disabled: false,
       ...(declaredEndpoints.has(id) ? { declaredEndpoint: true as const } : {}),
       ...wording,
-      actions: resolveProviderActions(buildActionInput(id, isFree, ownership, wording))
+      actions: resolveProviderActions(
+        buildActionInput(id, isFree, ownership, wording, integration?.id)
+      )
     }
   }
 
@@ -433,7 +449,7 @@ async function providerCatalogAttempt(): Promise<OpencodeProviderCatalogEntry[]>
       modelCount: 0,
       disabled: true,
       actions: resolveProviderActions({
-        ...buildActionInput(id, isFree, ownership, {}),
+        ...buildActionInput(id, isFree, ownership, {}, integration?.id),
         disabled: true
       })
     }

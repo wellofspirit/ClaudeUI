@@ -134,6 +134,8 @@ export function OpencodeProviderConfigModal({
   const [keyBusy, setKeyBusy] = useState(false)
   const [keyError, setKeyError] = useState<string | null>(null)
   const [credIds, setCredIds] = useState<Record<string, 'api' | 'oauth'>>({})
+  // First press of "Remove key" / "Disconnect" arms it; the second acts.
+  const [confirmRemove, setConfirmRemove] = useState(false)
   // True when a ClaudeUI shared provider compiles this declaration. Editing it
   // here would be silently overwritten on the shared provider's next sync, so the
   // form is replaced by a pointer to its real owner.
@@ -245,6 +247,8 @@ export function OpencodeProviderConfigModal({
   const id = (row?._id ?? '').trim()
   const credKind = id.length > 0 ? credIds[id] : undefined
   const hasKey = credKind !== undefined
+  // An armed Remove belongs to the provider it was armed on.
+  useEffect(() => setConfirmRemove(false), [id])
 
   const saveKey = async (): Promise<void> => {
     const key = apiKey.trim()
@@ -265,6 +269,13 @@ export function OpencodeProviderConfigModal({
 
   const removeKey = async (): Promise<void> => {
     if (!id) return
+    // Removing deletes EVERY credential opencode holds for the provider, the
+    // user's own included: confirmed first (a second press), with the sentence.
+    if (!confirmRemove) {
+      setConfirmRemove(true)
+      return
+    }
+    setConfirmRemove(false)
     setKeyBusy(true)
     setKeyError(null)
     try {
@@ -313,7 +324,7 @@ export function OpencodeProviderConfigModal({
         subtitle={
           showDeclaration
             ? 'OpenAI-compatible endpoint. Saved as you edit; applies on each working directory’s next opencode server start.'
-            : 'Credentials live in opencode’s own auth store; model curation is ClaudeUI’s. Saved as you edit.'
+            : 'Credentials live in opencode’s own credential store; model curation is ClaudeUI’s. Saved as you edit.'
         }
         onClose={onClose}
         footer={
@@ -440,8 +451,8 @@ export function OpencodeProviderConfigModal({
                 testidPrefix={DIALOG}
                 configKey="credential"
                 label="Credential"
-                helper="Held by opencode in its own auth store, never in ClaudeUI’s config."
-                keyText="auth.json"
+                helper="Held by opencode in its own credential store, never in ClaudeUI’s config."
+                keyText="credential store"
                 error={keyError}
               >
                 <div className="px-3 space-y-1.5">
@@ -453,22 +464,41 @@ export function OpencodeProviderConfigModal({
                   )}
                   {oauthSlot}
                   {hasKey ? (
-                    <div className="flex items-center gap-1.5">
-                      <span
-                        data-testid={`${DIALOG}.keyStatus`}
-                        className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400"
-                      >
-                        {credKind === 'oauth' ? 'Connected' : 'Key set'}
-                      </span>
-                      <button
-                        data-testid={`${DIALOG}.removeKey`}
-                        onClick={() => void removeKey()}
-                        disabled={keyBusy}
-                        className="text-[11px] text-text-secondary hover:text-danger transition-colors disabled:opacity-40"
-                      >
-                        {keyBusy ? 'Removing…' : credKind === 'oauth' ? 'Disconnect' : 'Remove key'}
-                      </button>
-                    </div>
+                    <>
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          data-testid={`${DIALOG}.keyStatus`}
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400"
+                        >
+                          {credKind === 'oauth' ? 'Connected' : 'Key set'}
+                        </span>
+                        <button
+                          data-testid={`${DIALOG}.removeKey`}
+                          onClick={() => void removeKey()}
+                          disabled={keyBusy}
+                          className="text-[11px] text-text-secondary hover:text-danger transition-colors disabled:opacity-40"
+                        >
+                          {keyBusy
+                            ? 'Removing…'
+                            : credKind === 'oauth'
+                              ? confirmRemove
+                                ? 'Disconnect?'
+                                : 'Disconnect'
+                              : confirmRemove
+                                ? 'Remove key?'
+                                : 'Remove key'}
+                        </button>
+                      </div>
+                      {confirmRemove && (
+                        <div
+                          data-testid={`${DIALOG}.removeKeyNote`}
+                          className="text-[12px] text-text-secondary leading-relaxed"
+                        >
+                          Removing deletes every credential opencode holds for this provider.
+                          opencode outside ClaudeUI uses the same store, so it loses them too.
+                        </div>
+                      )}
+                    </>
                   ) : (
                     <div className="flex items-center gap-1.5">
                       <input

@@ -3,15 +3,20 @@
  *
  * 2.x keeps credentials in its database, several per integration with one
  * ACTIVE, behind `/api/credential`. The data dir is shared with the user's own
- * opencode (§6), so this module owns exactly the rows ClaudeUI put there and
- * nothing else:
+ * opencode (§6), so this module owns the rows ClaudeUI put there and, on its
+ * own, writes nothing else:
  *
  *  - OWNERSHIP IS THE ID. ClaudeUI's rows are `cred_claudeui_<stem>_v<n>`; a
  *    SLOT is one (integration, value type) pair: an API key (`<stem>` = the
  *    integration id) or the ChatGPT sign-in (`<stem>` = the ChatGPT account id,
  *    integration `openai`, OAuth). Every other row — a sign-in made in opencode,
  *    the copy opencode's migration imported once from `auth.json` — is never
- *    deleted, rotated or relabelled.
+ *    deleted, rotated or relabelled by a sync, a route toggle, a disconnect or
+ *    quit. The one exception is {@link OpencodeCredentialStore.removeIntegration}:
+ *    an explicit user Remove of a provider deletes EVERY row of that
+ *    integration, the user's own included, because the provider must actually
+ *    leave opencode (the credential table is shared with the user's own opencode,
+ *    which loses them too).
  *  - ROTATE = REPLACE. `PATCH` changes labels only and re-POSTing an id is a
  *    409, so a new value is the NEXT generation POSTed with `activate:true`,
  *    then the previous generations are deleted: no gap, one
@@ -63,6 +68,12 @@ export const CHATGPT_INTEGRATION_ID = 'openai'
 export const CHATGPT_METHOD_ID = 'chatgpt-browser'
 /** How far past the token's real expiry the vended `expires` lies (owner decision, §5). */
 export const CHATGPT_EXPIRY_PADDING_MS = 24 * 60 * 60 * 1000
+/**
+ * Why a Remove is refused: an ENABLED shared route delivers this integration
+ * now, so its credential would be put straight back (a stale surface asked).
+ */
+export const SHARED_ROUTE_CLAIM_MESSAGE =
+  'ClaudeUI’s own provider delivers this one now. Refresh Settings before removing it.'
 
 /**
  * A slot's kind: ClaudeUI's own API key or ChatGPT row (`cred_claudeui_*`),
@@ -163,7 +174,7 @@ export interface IntegrationCredentialState {
   readonly activeType?: 'api' | 'oauth' | 'external'
   /** That active row is ClaudeUI's. */
   readonly activeOwned: boolean
-  /** ClaudeUI holds an API-key row here (removable by ClaudeUI). */
+  /** ClaudeUI holds an API-key row here (a `cred_claudeui_*` one). */
   readonly ownKey: boolean
   /** ClaudeUI holds a ChatGPT row here. */
   readonly ownOauth: boolean
@@ -205,6 +216,13 @@ export interface OpencodeCredentialStoreDeps {
    * such a row of the user's is a copy of ClaudeUI's sign-in.
    */
   isClaudeuiToken?: ClaudeuiTokenCheck
+  /**
+   * Whether an ENABLED shared route claims this integration (the provider id it
+   * delivers to). {@link OpencodeCredentialStore.removeIntegration} asks it
+   * inside its lease, after the pending removals ran, and refuses a claimed
+   * one before deleting anything. Absent: no guard (tests).
+   */
+  claimedBySharedRoute?: (integrationID: string) => boolean | Promise<boolean>
 }
 
 /** How a removal treats a fallback that is a copy of ClaudeUI's sign-in. */
@@ -357,13 +375,6 @@ export function credentialTypes(
   return out
 }
 
-/** Integrations where ClaudeUI holds an API-key row it may remove (`cred_claudeui_*`). */
-export function removableVendors(snapshot: CredentialSnapshot | null): Set<string> {
-  return new Set(
-    [...(snapshot?.integrations ?? [])].filter(([, state]) => state.ownKey).map(([id]) => id)
-  )
-}
-
 // ── Slot memory ───────────────────────────────────────────────────────────────
 
 /** In-memory slot records (tests; production wires the file). */
@@ -485,6 +496,7 @@ export class OpencodeCredentialStore {
   private vended: VendedChatgpt | null = null
   private readonly listeners = new Set<() => void>()
   private isClaudeuiToken: ClaudeuiTokenCheck | undefined
+  private claimedBySharedRoute: OpencodeCredentialStoreDeps['claimedBySharedRoute']
   /** Whether this process ran the proven-copy cleanup through its own lease yet. */
   private copiesCleaned = false
 
@@ -494,6 +506,7 @@ export class OpencodeCredentialStore {
     this.memory = deps.memory ?? memorySlotMemory()
     this.now = deps.now ?? ((): number => Date.now())
     this.isClaudeuiToken = deps.isClaudeuiToken
+    this.claimedBySharedRoute = deps.claimedBySharedRoute
   }
 
   /** Swap the seams (composition root; tests). Absent fields stay. */
@@ -502,11 +515,12 @@ export class OpencodeCredentialStore {
     if (deps.available) this.available = deps.available
     if (deps.memory) this.memory = deps.memory
     if (deps.isClaudeuiToken) this.isClaudeuiToken = deps.isClaudeuiToken
+    if (deps.claimedBySharedRoute) this.claimedBySharedRoute = deps.claimedBySharedRoute
   }
 
   /**
    * The slots ClaudeUI's own record says it holds (pending removals excluded)
-   * — answered from the record, no server. What Remove can delete.
+   * — answered from the record, no server.
    */
   recordedSlots(): { integrationID: string; kind: CredentialKind }[] {
     return Object.entries(this.memory.read())
@@ -515,18 +529,6 @@ export class OpencodeCredentialStore {
         const at = key.lastIndexOf(':')
         return { integrationID: key.slice(0, at), kind: key.slice(at + 1) as CredentialKind }
       })
-  }
-
-  /**
-   * Integrations where ClaudeUI's record holds something Remove deletes — its
-   * API key, or a sign-in started from ClaudeUI (no server).
-   */
-  recordedRemovableIntegrations(): Set<string> {
-    return new Set(
-      this.recordedSlots()
-        .filter((slot) => slot.kind === 'key' || slot.kind === 'signin')
-        .map((slot) => slot.integrationID)
-    )
   }
 
   /** Whether the copy recogniser is wired (the first-contact hook refuses to run without it). */
@@ -784,6 +786,16 @@ export class OpencodeCredentialStore {
   }
 
   /**
+   * Every integration opencode's credential table holds at least one row for —
+   * anyone's row, any type — from a FRESH list (never the cached snapshot, which
+   * an outside write does not refresh). Empty when opencode cannot run and
+   * nothing was read yet.
+   */
+  async integrationsWithRows(): Promise<Set<string>> {
+    return new Set((await this.snapshot())?.integrations.keys() ?? [])
+  }
+
+  /**
    * Vend an API key as `cred_claudeui_<integration>_v<n>` and make it active.
    * The same key already held → no new generation (re-activated if a user row
    * took the slot meanwhile). Resolves whether anything changed.
@@ -889,6 +901,102 @@ export class OpencodeCredentialStore {
     if (removed && kind === 'oauth' && integrationID === CHATGPT_INTEGRATION_ID) this.vended = null
     if (removed) this.notify()
     return removed
+  }
+
+  /**
+   * An EXPLICIT user Remove: delete EVERY row opencode's credential table holds
+   * for this integration — the user's own keys, sign-ins made in opencode,
+   * external references, ClaudeUI's rows — so the provider actually leaves
+   * opencode (unless an env var, a config declaration or a free gateway keeps
+   * it). The table is shared with the user's own opencode, which loses them
+   * too; the confirmation says so. This is the one place ClaudeUI deletes rows
+   * it did not create — no sync, route toggle, disconnect or quit comes here.
+   *
+   * Inactive rows first and the active one last, so opencode's promotion of
+   * the newest remaining row never lands on a row about to go. Nothing is
+   * re-activated: the point is that nothing stays. Every row is logged by id,
+   * value type and owner — never a value or a label (ADR-074 amendment 7).
+   *
+   * Refuses (nothing deleted) while an ENABLED shared route claims the
+   * integration: its credential would be put straight back. That check runs
+   * inside the lease, after the pending removals, so a route enabled between
+   * the caller's own check and the delete is still caught.
+   *
+   * Zero rows is a no-op that still clears ClaudeUI's stale records of the
+   * integration and rings `onChange` (whoever offered the Remove saw rows that
+   * have since gone elsewhere). A DELETE that fails part-way leaves the earlier deletions in
+   * place, keeps the records (a later `removeSlot` tolerates a vanished
+   * `previousActive`), and still refreshes the cache and rings `onChange`.
+   * Resolves the deleted ids.
+   */
+  async removeIntegration(integrationID: string, context: string): Promise<string[]> {
+    if (!this.available()) throw new Error('opencode is not installed — nothing to remove.')
+    const deleted: string[] = []
+    // A zero-row Remove still corrects a stale view (the rows went elsewhere),
+    // so `onChange` listeners — the auth provider's vendor map, discovery — re-read.
+    let staleView = false
+    try {
+      // Inside the lease: `api` and the record helpers ONLY. `snapshot()`,
+      // `removeSlot()` and `vendKey()` each take the lease again and would
+      // wait on this one forever.
+      await this.exclusive(async (api) => {
+        if (await this.claimedBySharedRoute?.(integrationID))
+          throw new Error(SHARED_ROUTE_CLAIM_MESSAGE)
+        const all = await api.list()
+        const rows = all
+          .filter((row) => row.integrationID === integrationID)
+          .sort((a, b) => Number(a.active) - Number(b.active))
+        if (rows.length === 0) {
+          logger.info(
+            'OpencodeCredentials',
+            `${context}: opencode holds no ${integrationID} credential — nothing to delete`
+          )
+          this.clearIntegrationRecords(integrationID)
+          this.cached = snapshotOf(all, this.now(), this.ownedBy())
+          staleView = true
+          return
+        }
+        const owned = this.ownedBy()
+        try {
+          for (const row of rows) {
+            await api.remove(row.id)
+            deleted.push(row.id)
+            // WARN, not info: the default file level is warn, and a credential
+            // the user may own was destroyed — the trace must be on disk.
+            logger.warn(
+              'OpencodeCredentials',
+              `${context}: deleted ${row.id} — ${integrationID} ${row.value.type} row, owner ${owned(row.id) ? 'claudeui' : 'user'}`
+            )
+          }
+        } finally {
+          if (deleted.length > 0) {
+            // Whatever was deleted stands: the cache must not keep it, and a
+            // ChatGPT token this process vended may be gone with its row.
+            if (integrationID === CHATGPT_INTEGRATION_ID) this.vended = null
+            const left = all.filter((row) => !deleted.includes(row.id))
+            this.cached = snapshotOf(await api.list().catch(() => left), this.now(), this.ownedBy())
+          }
+        }
+        // Only a removal that went all the way forgets ClaudeUI's records.
+        this.clearIntegrationRecords(integrationID)
+        const gone = new Set(deleted)
+        this.writeLabels(this.readLabels().filter((entry) => !entry.id || !gone.has(entry.id)))
+      })
+    } finally {
+      if (deleted.length > 0 || staleView) this.notify()
+    }
+    return deleted
+  }
+
+  /** Forget every slot ClaudeUI's record holds for one integration (key, sign-in, ChatGPT; pending removals too). */
+  private clearIntegrationRecords(integrationID: string): void {
+    const records = this.memory.read()
+    const keys = Object.keys(records).filter(
+      (key) => key.slice(0, key.lastIndexOf(':')) === integrationID
+    )
+    if (keys.length === 0) return
+    for (const key of keys) delete records[key]
+    this.memory.write(records)
   }
 
   /** Run the removals that waited for opencode (also done before every operation). */

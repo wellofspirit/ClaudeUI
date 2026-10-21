@@ -10,6 +10,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { opencodeCredentialStore } from '../../opencode/opencode-credentials'
 
 const usageMocks = vi.hoisted(() => ({
   usageFetcher: {
@@ -92,6 +93,8 @@ vi.mock('../../harness/arrivals', () => ({
     return () => {}
   })
 }))
+const claimMocks = vi.hoisted(() => ({ claimedOpencodeIds: vi.fn((): Set<string> => new Set()) }))
+vi.mock('../../shared-providers/opencode-claims', () => claimMocks)
 vi.mock('../host-anchor', () => ({
   createHostAnchor: vi.fn(() => ({ reconcileAndAutostart: vi.fn(async () => {}) }))
 }))
@@ -164,5 +167,56 @@ describe('a harness arriving, at the boot seam', () => {
       ([options]) => typeof (options as { harnessRuns?: unknown }).harnessRuns === 'function'
     )
     expect(wired).toBeDefined()
+  })
+})
+
+describe('an opencode Remove, at the boot seam (AC-6)', () => {
+  /**
+   * `vendor-auth:remove` and the Remove modal reach `removeVendorAuth` with no other check, so
+   * the store's in-lease guard is the ONLY refusal for a provider an enabled shared route
+   * delivers. Its production predicate is wired here, in `startCoreServices`, and nowhere the
+   * store's own tests (which inject a guard) can see.
+   */
+  async function wiredGuard(): Promise<(integrationID: string) => boolean | Promise<boolean>> {
+    const configure = vi.spyOn(opencodeCredentialStore, 'configure').mockImplementation(() => {})
+    try {
+      const { startCoreServices } = await import('../core-services')
+      startCoreServices({ remoteAccessDisabled: true, authDeps: {} as never, autostart: false })
+      const guard = configure.mock.calls
+        .map(([deps]) => deps.claimedBySharedRoute)
+        .find((fn) => fn !== undefined)
+      expect(guard, 'startCoreServices wires claimedBySharedRoute into the store').toBeDefined()
+      return guard!
+    } finally {
+      configure.mockRestore()
+    }
+  }
+
+  it('hands the credential store a guard that answers from the enabled shared routes', async () => {
+    claimMocks.claimedOpencodeIds.mockReturnValue(new Set(['openai']))
+    const guard = await wiredGuard()
+
+    expect(await guard('openai')).toBe(true)
+    expect(await guard('groq')).toBe(false)
+  })
+
+  it('reads the claims fresh on every ask, so a route enabled mid-session is caught', async () => {
+    claimMocks.claimedOpencodeIds.mockReturnValue(new Set())
+    const guard = await wiredGuard()
+    expect(await guard('openai')).toBe(false)
+
+    claimMocks.claimedOpencodeIds.mockReturnValue(new Set(['openai']))
+    expect(await guard('openai')).toBe(true)
+  })
+
+  it('fails closed: a claim lookup that throws makes the guard throw, never answer false', async () => {
+    claimMocks.claimedOpencodeIds.mockImplementation(() => {
+      throw new Error('definitions unreadable')
+    })
+    const guard = await wiredGuard()
+
+    await expect(Promise.resolve().then(() => guard('openai'))).rejects.toThrow(
+      'definitions unreadable'
+    )
   })
 })

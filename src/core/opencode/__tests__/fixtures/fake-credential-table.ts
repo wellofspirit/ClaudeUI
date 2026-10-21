@@ -29,8 +29,8 @@ export interface FakeCredentialTable {
   seed(input: Credential_CreateInput & { id: string }): void
   rows(): Credential_Entry[]
   active(integrationID: string): Credential_Entry | undefined
-  /** Make the next call of `op` throw once. */
-  failNext(op: 'list' | 'create' | 'remove' | 'activate'): void
+  /** Make a later call of `op` throw once: the next one, or the one after `afterOk` calls that succeed. */
+  failNext(op: 'list' | 'create' | 'remove' | 'activate', afterOk?: number): void
 }
 
 export function fakeCredentialTable(): FakeCredentialTable {
@@ -38,9 +38,16 @@ export function fakeCredentialTable(): FakeCredentialTable {
   const calls: string[] = []
   const leases = { opened: 0, released: 0 }
   let clock = 0
-  const failing = new Set<string>()
+  const failing = new Map<string, number>()
   const maybeFail = (op: string): void => {
-    if (failing.delete(op)) throw new Error(`fake ${op} failed`)
+    const skip = failing.get(op)
+    if (skip === undefined) return
+    if (skip > 0) {
+      failing.set(op, skip - 1)
+      return
+    }
+    failing.delete(op)
+    throw new Error(`fake ${op} failed`)
   }
   const ordered = (): Row[] =>
     [...rows].sort(
@@ -117,7 +124,7 @@ export function fakeCredentialTable(): FakeCredentialTable {
     rows: () => ordered().map((row) => row.entry),
     active: (integrationID) =>
       rows.find((row) => row.entry.integrationID === integrationID && row.entry.active)?.entry,
-    failNext: (op) => void failing.add(op)
+    failNext: (op, afterOk = 0) => void failing.set(op, afterOk)
   }
 }
 

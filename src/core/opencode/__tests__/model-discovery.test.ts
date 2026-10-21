@@ -474,7 +474,7 @@ describe('discoverOpencodeProviderCatalog', () => {
     expect(byId['azure-mixed']).toMatchObject({ source: 'api' })
   })
 
-  it('offers Remove for a credential only where ClaudeUI holds its own key row', async () => {
+  it('offers Remove wherever opencode’s credential table holds a row — the user’s own key included', async () => {
     const table = fakeCredentialTable()
     table.seed({
       id: 'cred_user_ant',
@@ -486,8 +486,156 @@ describe('discoverOpencodeProviderCatalog', () => {
     serve(fakeClient({}))
     const byId = Object.fromEntries((await discoverOpencodeProviderCatalog()).map((e) => [e.id, e]))
     expect(byId.openrouter.actions).toMatchObject({ canRemove: true, removeKind: 'credential' })
-    // The user's own key is not ClaudeUI's to delete.
-    expect(byId.anthropic.actions.canRemove).toBe(false)
+    // The user's own key is Remove-able: it deletes it (ADR-097 §5, amended).
+    expect(byId.anthropic.actions).toMatchObject({ canRemove: true, removeKind: 'credential' })
+    // No row at all (an env var keeps it listed): blocked, with the env reason.
+    expect(byId.groq.actions.canRemove).toBe(false)
+    expect(byId.groq.actions.blockedReason).toContain('GROQ_API_KEY')
+  })
+
+  it('a key, sign-in or external credential connection always yields a removeKind', async () => {
+    const credential = (id: string, method: 'key' | 'oauth' | 'external') =>
+      ({ type: 'credential', id: `cred_${id}`, label: id, method }) as const
+    const connected = [
+      { id: 'anthropic', method: 'key' },
+      { id: 'openrouter', method: 'key' },
+      { id: 'openai', method: 'oauth' },
+      { id: 'azure', method: 'external' }
+    ] as const
+    const table = fakeCredentialTable()
+    for (const { id, method } of connected)
+      table.seed({
+        id: `cred_${id}`,
+        integrationID: id,
+        value:
+          method === 'key'
+            ? { type: 'key', key: 'k' }
+            : method === 'oauth'
+              ? { type: 'oauth', methodID: 'm', refresh: 'r', access: 'a', expires: 1 }
+              : { type: 'external', methodID: 'azure-cli' }
+      })
+    opencodeCredentialStore.configure({ connect: table.connect, memory: memorySlotMemory() })
+    serve(
+      fakeClient({
+        integrations: [
+          ...INTEGRATIONS.filter((i) => !connected.some((c) => c.id === i.id)),
+          ...connected.map(({ id, method }) => ({
+            id,
+            name: id,
+            methods: [],
+            connections: [credential(id, method)]
+          }))
+        ]
+      })
+    )
+    const byId = Object.fromEntries((await discoverOpencodeProviderCatalog()).map((e) => [e.id, e]))
+    for (const { id } of connected) {
+      expect(byId[id].actions, id).toMatchObject({ canRemove: true, removeKind: 'credential' })
+    }
+  })
+
+  it('offers a credential Remove only for rows of the id Remove is handed (the PROVIDER id)', async () => {
+    // Rows are keyed by integration id; Remove deletes the rows of the provider
+    // id it is given. A provider whose integration id differs would be offered a
+    // Remove that deletes nothing, so it is not offered one.
+    const table = fakeCredentialTable()
+    table.seed({ id: 'cred_gw', integrationID: 'gateway-int', value: { type: 'key', key: 'k' } })
+    opencodeCredentialStore.configure({ connect: table.connect, memory: memorySlotMemory() })
+    serve(
+      fakeClient({
+        integrations: [
+          {
+            id: 'gateway-int',
+            name: 'Gateway',
+            methods: [{ type: 'key' }],
+            connections: [{ type: 'credential', id: 'cred_gw', label: 'gw', method: 'key' }]
+          }
+        ],
+        providers: [
+          {
+            id: 'gateway',
+            integrationID: 'gateway-int',
+            name: 'Gateway',
+            activation: 'auto',
+            package: 'x'
+          }
+        ]
+      })
+    )
+    const byId = Object.fromEntries((await discoverOpencodeProviderCatalog()).map((e) => [e.id, e]))
+    expect(byId.gateway.actions).toMatchObject({ canRemove: false, removeKind: null })
+    // The key row exists, so the reason must not claim there is no stored credential: it says
+    // where the credential lives (shown inline beside the disabled Remove).
+    expect(byId.gateway.actions.blockedReason).toBe(
+      'Its credential is stored under opencode’s “gateway-int” integration, which this provider shares, so it can’t be removed from here. Disable it to hide it.'
+    )
+    expect(byId['gateway-int']).toBeUndefined()
+  })
+
+  it('a provider on another integration id with no rows under it keeps the generic reason', async () => {
+    opencodeCredentialStore.configure({
+      connect: fakeCredentialTable().connect,
+      memory: memorySlotMemory()
+    })
+    serve(
+      fakeClient({
+        integrations: [
+          { id: 'gateway-int', name: 'Gateway', methods: [{ type: 'key' }], connections: [] }
+        ],
+        providers: [
+          {
+            id: 'gateway',
+            integrationID: 'gateway-int',
+            name: 'Gateway',
+            activation: 'auto',
+            package: 'x'
+          }
+        ]
+      })
+    )
+    const byId = Object.fromEntries((await discoverOpencodeProviderCatalog()).map((e) => [e.id, e]))
+    expect(byId.gateway.actions).toMatchObject({ canRemove: false, removeKind: null })
+    expect(byId.gateway.actions.blockedReason).toMatch(/no stored credential/i)
+  })
+
+  it('reads the rows fresh on every call: a row written outside ClaudeUI shows up at once', async () => {
+    const table = fakeCredentialTable()
+    opencodeCredentialStore.configure({ connect: table.connect, memory: memorySlotMemory() })
+    serve(fakeClient({}))
+    let byId = Object.fromEntries((await discoverOpencodeProviderCatalog()).map((e) => [e.id, e]))
+    expect(byId.openrouter.actions.canRemove).toBe(false)
+    table.seed({
+      id: 'cred_user_or',
+      integrationID: 'openrouter',
+      value: { type: 'key', key: 'k' }
+    })
+    byId = Object.fromEntries((await discoverOpencodeProviderCatalog()).map((e) => [e.id, e]))
+    expect(byId.openrouter.actions).toMatchObject({ canRemove: true, removeKind: 'credential' })
+  })
+
+  it('a failed credential read falls back to the last snapshot, then to nothing — never to a failed catalog', async () => {
+    const read = vi
+      .spyOn(opencodeCredentialStore, 'integrationsWithRows')
+      .mockRejectedValue(new Error('server down'))
+    const cached = vi.spyOn(opencodeCredentialStore, 'cachedSnapshot')
+    try {
+      serve(fakeClient({}))
+      cached.mockReturnValue({
+        at: 1,
+        integrations: new Map([['openrouter', {} as never]])
+      })
+      let byId = Object.fromEntries((await discoverOpencodeProviderCatalog()).map((e) => [e.id, e]))
+      expect(byId.openrouter.actions.removeKind).toBe('credential')
+      expect(byId.anthropic.actions.canRemove).toBe(false)
+      invalidateOpencodeModelCache()
+      cached.mockReturnValue(null)
+      byId = Object.fromEntries((await discoverOpencodeProviderCatalog()).map((e) => [e.id, e]))
+      expect(Object.keys(byId)).toContain('openrouter')
+      expect(byId.openrouter.actions.canRemove).toBe(false)
+    } finally {
+      read.mockRestore()
+      cached.mockRestore()
+    }
   })
 
   it('re-synthesizes disabled ids (also ones opencode no longer lists), read fresh each call', async () => {

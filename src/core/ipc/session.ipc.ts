@@ -68,8 +68,7 @@ import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-en
 import { getSessionMeta } from '../services/db'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { sharedProviderService } from '../shared-providers'
-import { opencodeProviderId } from '../shared-providers/OpencodeSharedProviderAdapter'
-import { deliveredDefinition } from '../../shared/shared-provider'
+import { decorateSharedProviderClaims } from '../shared-providers/opencode-claims'
 import {
   accountState,
   hostIsPackaged,
@@ -84,7 +83,6 @@ import type {
   EngineModelGroup,
   PermissionSuggestion,
   EngineId,
-  OpencodeProviderCatalogEntry,
   ProviderRemoveKind,
   PermissionScope,
   ClaudePermissions,
@@ -889,7 +887,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       const catalog = await discoverOpencodeProviderCatalog()
       // Decorate with shared-provider ownership HERE rather than inside discovery:
       // shared-providers/index → OpencodeSharedProviderAdapter → model-discovery,
-      // so a shared-provider import inside model-discovery would be a cycle.
+      // so a shared-provider import inside model-discovery would be a cycle. The
+      // remote twin (remote-handlers.ts) calls the same decorator.
       return decorateSharedProviderClaims(catalog)
     }
   })
@@ -2017,40 +2016,4 @@ function startProjectsWatcher(): void {
   } catch (err) {
     logger.warn('ProjectsWatcher', 'Failed to watch projects directory', err)
   }
-}
-
-/**
- * Mark catalog entries whose vendor id is claimed by an ENABLED shared-provider
- * route (today: `chatgpt` → opencode vendor `openai`).
- *
- * Why the row needs to know: CredentialSync re-feeds a shared credential on
- * every refresh, so removing that credential in the opencode provider manager is
- * silently undone — "Remove" would appear to do nothing. The row warns and
- * offers to turn the shared route off instead of losing the race.
- */
-function decorateSharedProviderClaims(
-  catalog: OpencodeProviderCatalogEntry[]
-): OpencodeProviderCatalogEntry[] {
-  let claims: Map<string, { id: string; name: string }>
-  try {
-    claims = new Map(
-      sharedProviderService
-        .listDefinitions()
-        // Switched off, a provider feeds nothing (ADR-074 slice 10).
-        .filter((definition) => deliveredDefinition(definition).routes.opencode.enabled)
-        .map((definition) => [
-          opencodeProviderId(definition),
-          { id: definition.id, name: definition.name }
-        ])
-    )
-  } catch (err) {
-    // Shared-provider config is optional; an unreadable definition must not take
-    // down the provider list.
-    logger.warn('opencode', `Shared-provider claim lookup failed: ${String(err)}`)
-    return catalog
-  }
-  return catalog.map((entry) => {
-    const claim = claims.get(entry.id)
-    return claim ? { ...entry, sharedProviderClaim: claim } : entry
-  })
 }

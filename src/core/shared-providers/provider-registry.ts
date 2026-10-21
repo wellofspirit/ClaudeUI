@@ -16,7 +16,7 @@
  *
  *     the route is ENABLED  and  its resolved native id === the native row's id
  *
- * which is exactly what `decorateSharedProviderClaims` (session.ipc.ts) already
+ * which is exactly what `decorateSharedProviderClaims` (opencode-claims.ts) already
  * uses to warn the opencode provider manager that a credential is vault-fed —
  * same enabled gate, same id resolution, and the id resolution itself comes from
  * the ADAPTERS that write those entries ({@link opencodeProviderId} /
@@ -463,7 +463,11 @@ function opencodeNativeEntry(
     },
     // Carried, never re-derived: `removeKind` is what the remove channel must be
     // given, and it is non-null exactly when the provider can be removed at all.
-    ...(entry.actions.removeKind ? { opencodeRemoveKind: entry.actions.removeKind } : {}),
+    ...(entry.actions.removeKind
+      ? { opencodeRemoveKind: entry.actions.removeKind }
+      : entry.actions.blockedReason
+        ? { opencodeBlockedReason: entry.actions.blockedReason }
+        : {}),
     kindLabel: entry.declaredEndpoint
       ? 'Custom endpoint'
       : entry.authState === 'free'

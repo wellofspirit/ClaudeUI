@@ -314,7 +314,11 @@ import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
 import { voiceRelay } from '../../../core/services/voice-relay'
 import { sharedProviderService } from '../../../core/shared-providers'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
-import { resolveOpencodeSpawnModel } from '../../../core/opencode/model-discovery'
+import {
+  discoverOpencodeProviderCatalog,
+  resolveOpencodeSpawnModel
+} from '../../../core/opencode/model-discovery'
+import { opencodeServerManager } from '../../../core/opencode/OpencodeServerManager'
 import { setProxyEnv } from '../../../core/sdk/proxy'
 import { setEndpointEnv } from '../../../core/sdk/endpoint-env'
 import { setModelEnv } from '../../../core/sdk/model-env'
@@ -1256,6 +1260,103 @@ describe('registerRemoteHandlers', () => {
       ]) {
         expect(channels).toContain(ch)
       }
+    })
+
+    describe('session:get-opencode-providers — shared-route claims (remote parity)', () => {
+      const entry = (id: string): any => ({
+        id,
+        name: id,
+        authState: 'authenticated',
+        authMethods: ['api'],
+        modelCount: 1,
+        disabled: false,
+        actions: {
+          canSetCredential: true,
+          canEditDeclaration: false,
+          canRemove: true,
+          removeKind: 'credential'
+        }
+      })
+      const chatgptDefinition: any = {
+        id: 'chatgpt',
+        name: 'ChatGPT',
+        kind: 'subscription',
+        models: [],
+        managed: true,
+        routes: {
+          pi: { enabled: true, providerId: 'openai-codex' },
+          opencode: { enabled: true, providerId: 'openai' }
+        }
+      }
+
+      let definitionsSpy: { mockRestore: () => void } | undefined
+
+      afterEach(() => {
+        vi.mocked(opencodeServerManager.isBinaryAvailable).mockReturnValue(false)
+        vi.mocked(discoverOpencodeProviderCatalog).mockResolvedValue([])
+        definitionsSpy?.mockRestore()
+        definitionsSpy = undefined
+      })
+
+      function serve(catalog: unknown[], definitions: unknown[]): void {
+        vi.mocked(opencodeServerManager.isBinaryAvailable).mockReturnValue(true)
+        vi.mocked(discoverOpencodeProviderCatalog).mockResolvedValue(catalog as never)
+        definitionsSpy = vi
+          .spyOn(sharedProviderService, 'listDefinitions')
+          .mockReturnValue(definitions as never)
+      }
+
+      it('marks the entry an ENABLED shared route delivers, exactly as the desktop handler does', async () => {
+        serve([entry('openai'), entry('groq')], [chatgptDefinition])
+        const result = (await dispatcher.handle(
+          makeRequest('session:get-opencode-providers'),
+          remoteConn
+        )) as any[]
+        // The desktop handler's decoration, so a phone shows the same "delivered by
+        // ChatGPT" warning (and the Remove is refused for the same reason).
+        expect(result.find((e) => e.id === 'openai').sharedProviderClaim).toEqual({
+          id: 'chatgpt',
+          name: 'ChatGPT'
+        })
+        expect(result.find((e) => e.id === 'groq').sharedProviderClaim).toBeUndefined()
+      })
+
+      it('leaves the entry unmarked once the route is switched off', async () => {
+        serve(
+          [entry('openai')],
+          [
+            {
+              ...chatgptDefinition,
+              routes: { ...chatgptDefinition.routes, opencode: { enabled: false } }
+            }
+          ]
+        )
+        const [openai] = (await dispatcher.handle(
+          makeRequest('session:get-opencode-providers'),
+          remoteConn
+        )) as any[]
+        expect(openai.sharedProviderClaim).toBeUndefined()
+      })
+
+      it('still serves the plain catalog when the shared definitions cannot be read', async () => {
+        serve([entry('openai')], [])
+        vi.mocked(sharedProviderService.listDefinitions).mockImplementation(() => {
+          throw new Error('unreadable')
+        })
+        const result = (await dispatcher.handle(
+          makeRequest('session:get-opencode-providers'),
+          remoteConn
+        )) as any[]
+        expect(result.map((e) => e.id)).toEqual(['openai'])
+        expect(result[0].sharedProviderClaim).toBeUndefined()
+      })
+
+      it('is empty without an opencode binary — nothing to decorate', async () => {
+        vi.mocked(opencodeServerManager.isBinaryAvailable).mockReturnValue(false)
+        await expect(
+          dispatcher.handle(makeRequest('session:get-opencode-providers'), remoteConn)
+        ).resolves.toEqual([])
+      })
     })
 
     it('an opencode/pi history read carries the ledger’s X-Agent cards (ADR-105 §5), as the sidebar’s cold load needs', async () => {

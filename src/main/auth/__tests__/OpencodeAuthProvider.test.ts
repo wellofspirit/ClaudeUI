@@ -200,10 +200,9 @@ describe('API keys', () => {
     const ids = await provider.listVendorCredentialIds()
     expect(ids).toEqual({ openrouter: 'api' })
     expect(JSON.stringify(ids)).not.toContain('sk-or')
-    expect([...(await provider.listRemovableVendorIds())]).toEqual(['openrouter'])
   })
 
-  it('removeVendorAuth removes only ClaudeUI’s rows and gives the slot back to the user’s', async () => {
+  it('removeVendorAuth (an explicit user Remove) deletes EVERY row of the provider — the user’s too — and re-activates nothing', async () => {
     table.seed({
       id: 'cred_user_or',
       integrationID: 'openrouter',
@@ -211,20 +210,44 @@ describe('API keys', () => {
     })
     await provider.setVendorApiKey('openrouter', 'sk-or-fake')
     expect(table.active('openrouter')?.id).toBe('cred_claudeui_openrouter_v1')
+    table.calls.length = 0
     await provider.removeVendorAuth('openrouter')
-    expect(table.rows().map((row) => [row.id, row.active])).toEqual([['cred_user_or', true]])
-    expect(await provider.listRemovableVendorIds()).toEqual(new Set())
+    expect(table.rows()).toEqual([])
+    expect(table.calls.filter((call) => call.startsWith('activate'))).toEqual([])
+    expect(await provider.listVendorCredentialIds()).toEqual({})
   })
 
-  it('a removal of a key ClaudeUI never vended touches nothing', async () => {
+  it('removeVendorAuth deletes a key ClaudeUI never vended (the user’s own)', async () => {
     table.seed({
       id: 'cred_user_or',
       integrationID: 'openrouter',
       value: { type: 'key', key: 'k' }
     })
     await provider.removeVendorAuth('openrouter')
+    expect(table.calls).toEqual(['list', 'remove cred_user_or', 'list'])
+    expect(table.rows()).toEqual([])
+  })
+
+  it('removeVendorKey stays narrow: ClaudeUI’s own rows only, the slot given back to the user’s', async () => {
+    table.seed({
+      id: 'cred_user_or',
+      integrationID: 'openrouter',
+      value: { type: 'key', key: 'sk-user-own' }
+    })
+    await provider.setVendorApiKey('openrouter', 'sk-or-fake')
+    await provider.removeVendorKey('openrouter')
+    expect(table.rows().map((row) => [row.id, row.active])).toEqual([['cred_user_or', true]])
+    // A key ClaudeUI never vended is untouched by the narrow verb.
+    table.calls.length = 0
+    await provider.removeVendorKey('openrouter')
     expect(table.calls).toEqual([])
     expect(table.rows()).toHaveLength(1)
+  })
+
+  it('removeVendorAuth rejects when opencode is not installed, and queues nothing', async () => {
+    opencodeCredentialStore.configure({ available: () => false })
+    await expect(provider.removeVendorAuth('openrouter')).rejects.toThrow(/not installed/)
+    expect(table.leases.opened).toBe(0)
   })
 })
 
@@ -308,11 +331,16 @@ describe('OAuth on opencode’s integration flow', () => {
       body: { code: 'CODE-1' }
     })
     expect(mockReleaseIfCurrent).toHaveBeenCalledTimes(1)
-    // The sign-in started from ClaudeUI is ClaudeUI's: Remove takes it and
-    // gives the slot back to the user's row.
-    expect(await provider.listRemovableVendorIds()).toEqual(new Set(['github-copilot']))
+    // The sign-in started from ClaudeUI is ClaudeUI's. An explicit Remove
+    // takes it AND the user's own row; the narrow route verb takes neither a
+    // user's row nor (by design) the sign-in.
+    expect(opencodeCredentialStore.recordedSlots()).toEqual([
+      { integrationID: 'github-copilot', kind: 'signin' }
+    ])
+    await provider.removeVendorKey('github-copilot')
+    expect(table.rows()).toHaveLength(2)
     await provider.removeVendorAuth('github-copilot')
-    expect(table.rows().map((row) => [row.id, row.active])).toEqual([['cred_user_gh', true]])
+    expect(table.rows()).toEqual([])
   })
 
   it('auto mode: polls the attempt until it completes', async () => {

@@ -758,7 +758,7 @@ function CatalogSetup({
           <div className="px-3.5 py-2.5">
             <div className="text-[13px] leading-[18px] text-text-primary">Or sign in</div>
             <div className="text-[12px] leading-4 text-text-secondary mb-2">
-              opencode holds the resulting credential in its own auth store.
+              opencode holds the resulting credential in its own credential store.
             </div>
             <VendorOAuthFlow
               engineId="opencode"
