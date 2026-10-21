@@ -53,6 +53,12 @@ export interface FrameSent {
   e2e: boolean
   /** `ws.bufferedAmount` right after `ws.send` — what is still queued to the peer. */
   bufferedAmount: number
+  /**
+   * Set when the answer went as `sync-full-chunk` frames (the web client's opt-in):
+   * then `bytes` and `encodeMs` are the transfer's totals and `bufferedAmount` is the
+   * last chunk's. Absent for a single `sync-full` frame.
+   */
+  chunks?: number
 }
 
 /** The decision fields shared by every transport's line. */
@@ -79,7 +85,8 @@ export function logWsFullSync(
   const message =
     `${large ? 'large sync-full' : 'sync-full'} sent: transport=ws ` +
     `${describeAnswer(decision, request, ring)} e2e=${sent.e2e} frameBytes=${sent.bytes}` +
-    ` encodeMs=${sent.encodeMs.toFixed(1)} bufferedAmount=${sent.bufferedAmount}`
+    ` encodeMs=${sent.encodeMs.toFixed(1)} bufferedAmount=${sent.bufferedAmount}` +
+    (sent.chunks === undefined ? '' : ` chunks=${sent.chunks}`)
   if (large) logger.warn(SYNC_STATS_SOURCE, message)
   else logger.info(SYNC_STATS_SOURCE, message)
 }

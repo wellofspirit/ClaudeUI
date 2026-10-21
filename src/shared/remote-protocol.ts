@@ -305,6 +305,14 @@ export interface WsSyncRequest {
    * catchup that would falsely report "caught up" (M-DB4).
    */
   epoch?: string
+  /**
+   * Opt in to a chunked answer: when the host decides on a FULL sync it replies
+   * with {@link WsSyncFullChunk} frames instead of one `sync-full`, so the client
+   * can draw real progress (a browser WebSocket only delivers whole messages).
+   * Catchup is unaffected. A client that omits it (an old tab left open across a
+   * host update) gets the single `sync-full` exactly as before.
+   */
+  chunked?: true
 }
 
 /** Server → Client: catchup (replay missed events) */
@@ -337,6 +345,25 @@ export interface WsSyncFull {
    * on a tunnel, E2E-encrypted) channel.
    */
   fileToken?: string
+}
+
+/**
+ * Server → Client: one slice of a chunked full sync (ADR-102 amendment), sent in
+ * answer to a {@link WsSyncRequest} with `chunked`.
+ *
+ * `data` is a slice of the exact `JSON.stringify` of the {@link WsSyncFull} that
+ * would otherwise have been sent, so the chunks joined in `index` order and parsed
+ * ARE that message, tokens included. `count` and `totalChars` (UTF-16 code units of
+ * the whole JSON, ≈ MB) repeat on every chunk instead of a begin/end frame: the
+ * client is determinate from the first frame and finishes at `index === count - 1`.
+ * A snapshot smaller than one chunk is still ONE chunk (`count` 1).
+ */
+export interface WsSyncFullChunk {
+  type: 'sync-full-chunk'
+  index: number
+  count: number
+  totalChars: number
+  data: string
 }
 
 /** Bidirectional keepalive */
@@ -1002,6 +1029,7 @@ export type WsServerMessage =
   | WsEvent
   | WsSyncCatchup
   | WsSyncFull
+  | WsSyncFullChunk
   | WsPing
   | WsPong
   | WsE2EAck

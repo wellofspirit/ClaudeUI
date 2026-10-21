@@ -1,9 +1,22 @@
 import { useState, useEffect } from 'react'
-import type { ConnectionState } from '../connection'
+import { ProgressBar } from '@renderer/components/shared/ProgressBar'
+import type { ConnectionState, RemoteConnection, SyncProgress } from '../connection'
 
 interface ConnectionOverlayProps {
   state: ConnectionState
   error?: string
+  /**
+   * The connection whose full-sync progress the bar under "Syncing state..." shows.
+   * The overlay subscribes itself (rather than main.tsx holding the progress in root
+   * state) so a chunk re-renders only this component, never the app tree beneath it.
+   * Absent (the probing overlay): the bar is indeterminate.
+   */
+  connection?: Pick<RemoteConnection, 'setSyncProgressHandler'>
+}
+
+/** JSON characters as "MB" (≈ — the bar counts characters of the sync-full JSON, not wire bytes). */
+function formatMb(chars: number): string {
+  return Math.max(0.1, chars / 1e6).toFixed(1)
 }
 
 const STATE_LABELS: Record<ConnectionState, string> = {
@@ -24,9 +37,20 @@ const STATE_LABELS: Record<ConnectionState, string> = {
 
 export function ConnectionOverlay({
   state,
-  error
+  error,
+  connection
 }: ConnectionOverlayProps): React.JSX.Element | null {
   const [visible, setVisible] = useState(true)
+  const [progress, setProgress] = useState<SyncProgress | null>(null)
+
+  useEffect(() => {
+    if (state !== 'syncing' || !connection) return
+    connection.setSyncProgressHandler(setProgress)
+    return () => {
+      connection.setSyncProgressHandler(null)
+      setProgress(null)
+    }
+  }, [state, connection])
 
   useEffect(() => {
     if (state !== 'connected') {
@@ -90,6 +114,30 @@ export function ConnectionOverlay({
 
         {/* State label */}
         <div className="text-text-primary text-lg font-medium">{STATE_LABELS[state]}</div>
+
+        {/* Full-sync progress: indeterminate until the first chunk says how big it is */}
+        {state === 'syncing' && (
+          <>
+            <ProgressBar
+              percent={
+                progress && progress.totalChars > 0
+                  ? Math.min(100, (progress.receivedChars / progress.totalChars) * 100)
+                  : null
+              }
+              smooth
+              testid="ConnectionOverlay.syncProgress"
+              className="w-56 max-w-full"
+            />
+            {progress && (
+              <div
+                data-testid="ConnectionOverlay.syncDetail"
+                className="text-text-muted text-xs tabular-nums"
+              >
+                {formatMb(progress.receivedChars)} of {formatMb(progress.totalChars)} MB
+              </div>
+            )}
+          </>
+        )}
 
         {/* Error message */}
         {error && <div className="text-danger text-sm max-w-sm">{error}</div>}

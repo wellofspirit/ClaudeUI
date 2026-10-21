@@ -1,6 +1,6 @@
 # ADR-102: Per-call invoke progress, and opening a session before its transcript loads
 
-**Status:** Accepted (2026-10-19); amended the same day (content first, see below). Implemented on branch `feat/session-load-progress` (PR #80).
+**Status:** Accepted (2026-10-19); amended the same day (content first) and on 2026-10-22 (chunked full sync with a progress bar — both below). Implemented on branch `feat/session-load-progress` (PR #80).
 **Relates to:** [ADR-051](adr-051_sync-core-replication-architecture.md) (the frame families both
 transports speak), [ADR-052](adr-052_remote-auth-passkeys-capabilities.md) (the command registry's
 capability check, which this keeps as the one choke point), [ADR-056](adr-056_headless-admission-model.md)
@@ -107,6 +107,54 @@ takes 0.9–2 s. So the wait was never the conversation itself.
   warms it: first prompt ~0.93 s → ~48 ms on a 21 MB transcript with 817 MB of subagent files.
   Forks keep the full anchored read.
 
+## Amendment: chunked full sync with a progress bar (2026-10-22)
+
+The web/phone client's "Syncing state..." overlay was a bare spinner for the whole transfer, and the
+transfer is ≥95% of the wait: measured full syncs grow 5 → 41 MB over ~1.5 days (~75% subagent
+buckets of live sessions), 0.2–3.9 s typical and 7–10 s worst on a slow link. A browser WebSocket
+delivers whole messages only, so a 40 MB `sync-full` frame is one opaque wait — nothing to draw a bar
+from. Shrinking the snapshot (lazy subagent buckets, a partial first paint) was designed and
+**declined** for now; the owner asked for exactly one thing: a real progress bar. This is the
+"chunked responses, deferred" line from Consequences below — applied to the sync snapshot, which is
+a server-pushed frame, not an invoke response.
+
+- **Opt-in, additive.** `WsSyncRequest` gains `chunked?: true` and the web client always sends it.
+  The only skew direction is an OLD tab on a NEW host (the host serves the bundle, ADR-060/099): it
+  omits the field and gets today's single `sync-full` byte for byte. No version bump.
+- **Wire.** A `full` decision is serialized ONCE to the exact `JSON.stringify` of the `WsSyncFull`
+  message and sliced into `sync-full-chunk {index, count, totalChars, data}` frames of
+  `SYNC_FULL_CHUNK_CHARS` (512 K UTF-16 code units, `src/core/shared/sync/sync-full-chunks.ts`).
+  `count`/`totalChars` repeat on every chunk instead of a begin/end frame: the client is
+  determinate from the first frame and finishes at `index === count - 1`. A snapshot under one chunk
+  still goes as ONE chunk. Catchup is untouched, and the desktop's MessagePort never opts in.
+- **Contiguity rests on `handleSync` staying SYNCHRONOUS.** Every chunk is `ws.send`-ed (plaintext)
+  or enqueued on the one per-socket queue (E2E) inside that one call, so no broadcast, stream frame
+  or ping can land between two chunks of a transfer. An `await` in there (say, a snapshot built off
+  the main thread) would silently break that on both transports; the client's index check is the
+  defensive layer, not the guarantee.
+- **Surrogate rule.** A chunk boundary never splits a UTF-16 surrogate pair. Belt-and-braces only:
+  `JSON.stringify` is well-formed (lone surrogates become `\udXXX` escapes), so a split pair would
+  round-trip through the chunk's own JSON wrapper and rejoin intact anyway.
+- **Client.** Reassembles, reports `{receivedChars, totalChars}` — JSON characters (≈ MB), never
+  called "byte-accurate"; E2E base64 is ~1.37× the characters — to the overlay through
+  `setSyncProgressHandler`, then runs the existing `sync-full` apply with the timing summed over the
+  chunk frames. `syncToFrameMs` is measured from the `sync` that started the transfer, captured at
+  chunk 0, so a resync sent mid-transfer cannot shorten it.
+- **A broken sequence reconnects, never freezes the bar.** An index gap, a changed
+  `count`/`totalChars`, invalid fields, or joined text that is unparsable or not a `sync-full` →
+  discard and `ws.close()`, which lands in the ordinary `onclose` → `scheduleReconnect` path (backoff
+  1→30 s, "Reconnecting...") and syncs afresh. Bounded by the backoff, so not a tight 40 MB retry
+  loop; silence would leave the owner staring at a frozen bar with nothing to re-arm a sync.
+- **Cost.** Re-escaping the JSON text inside a JSON string adds a few % on the wire (~1% measured on
+  real transcripts) and ~40 MB transient for a plaintext 40 MB snapshot; under E2E the phone's peak
+  roughly halves (per-chunk decode instead of one base64 + binary-string + typed + decoded chain).
+  Accepted: the owner does not mind load time. `SyncStats` keeps one line per transfer — `chunks=N`,
+  `frameBytes` = the SUM of the chunk frames (sync-core.md § Measuring a full sync).
+- **Alternatives rejected.** A new authenticated HTTP route streaming `Response.body` gives native
+  byte progress but needs a scoped token and E2E body encryption — a bigger security surface for the
+  same bar. A size pre-announcement before one big frame gives no progress at all (whole messages
+  only). Chunking is the floor.
+
 ## Consequences
 
 - Any long query can opt in with `withProgress: true` on both registrations and a reporter call.
@@ -115,7 +163,9 @@ takes 0.9–2 s. So the wait was never the conversation itself.
   timeout until reloaded; a new bundle never meets an old host.
 - Engines whose readers are RPC or whole-file reads (Codex, opencode, pi) show an indeterminate bar.
 - The transfer of a single large response frame still shows no byte progress ("Receiving…"); that
-  would need chunked responses, deferred until lazy subagents shrink the payload.
+  would need chunked responses, deferred until lazy subagents shrink the payload. (The 2026-10-22
+  amendment chunks the `sync-full` FRAME, which is a server push; an invoke response still rides
+  one frame.)
 - A full (non-resync) hydrate may drop the placeholder; the in-flight load then commits without
   navigating. Accepted as rare.
 

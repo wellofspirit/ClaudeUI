@@ -8,6 +8,7 @@ import { WebSocketServer, WebSocket } from 'ws'
 import { getAppPath, serveHostMockup, type HostWindowHandle } from '../host'
 import { syncCore, addSyncSubscriber, addStreamSubscriber } from './sync-host'
 import { logWsFullSync, logFullSyncBreakdown, type FrameSent } from './sync-stats-log'
+import { SYNC_FULL_CHUNK_CHARS, splitSyncFullJson } from '../shared/sync/sync-full-chunks'
 import { RemoteDispatcher } from './remote-dispatcher'
 import {
   AUTH_OFF_GRANTS,
@@ -100,6 +101,7 @@ import {
   type WsAuthWebauthnFinish,
   type WsClientMessage,
   type WsServerMessage,
+  type WsSyncFull,
   type WsInvokeRequest,
   type WsStepUpRequest,
   type WsStepUpResponse,
@@ -781,6 +783,8 @@ export class RemoteServer {
   private enrollTokens = new Map<string, number>()
   /** Pre-auth deadline budgets; overridden only by tests. */
   private readonly timeouts: RemoteServerTimeouts
+  /** JSON characters per `sync-full-chunk`; a small value lets a test get several chunks cheaply. */
+  private readonly syncFullChunkChars: number
   /** `tailscale` CLI wrapper; injectable so tests never exec the real binary. */
   private tailscale: TailscaleServeController
   /** True while this run was started with `tls: true` (and not `tunnel`). */
@@ -823,8 +827,10 @@ export class RemoteServer {
     tailscale: TailscaleServeController = new TailscaleManager(),
     core: typeof syncCore = syncCore,
     webauthn: WebauthnService = webauthnService,
-    timeouts: Partial<RemoteServerTimeouts> = {}
+    timeouts: Partial<RemoteServerTimeouts> = {},
+    syncFullChunkChars = SYNC_FULL_CHUNK_CHARS
   ) {
+    this.syncFullChunkChars = syncFullChunkChars
     this.core = core
     this.dispatcher = dispatcher
     this.passwordAuth = passwordAuth
@@ -3690,7 +3696,7 @@ export class RemoteServer {
         case 'sync':
           // Synchronous since 4b: the snapshot is canonical state, not a
           // renderer round-trip, so a sync can no longer stall the frame queue.
-          this.handleSync(ws, msg.lastSeq, msg.epoch)
+          this.handleSync(ws, msg.lastSeq, msg.epoch, msg.chunked === true)
           break
         case 'step-up':
           // AWAITED (not fire-and-forget) so the recv queue keeps step-up frames
@@ -5041,8 +5047,16 @@ export class RemoteServer {
    * land between reading the seq and building the state); a busy, hung or absent
    * renderer can no longer answer with an empty snapshot (remote.md defect 2);
    * and no sync path touches a `BrowserWindow` at all.
+   *
+   * **It must STAY synchronous** (ADR-102 amendment). A chunked full sync is
+   * contiguous on the wire only because every chunk is sent — or, under E2E,
+   * enqueued on the one per-socket send queue — inside this one call, so no
+   * broadcast, stream frame or ping can land between two chunks of a transfer. An
+   * `await` in here (say, a snapshot built off the main thread) would silently
+   * break that on both transports; the client's index check would then catch it
+   * as a broken sequence and reconnect.
    */
-  private handleSync(ws: WebSocket, lastSeq: number, epoch?: string): void {
+  private handleSync(ws: WebSocket, lastSeq: number, epoch?: string, chunked = false): void {
     // The full/catchup branching (fresh client, stale epoch, ring-evicted cursor)
     // lives in `shared/sync/sync-decision.ts` as of phase 4c, so this transport
     // and the desktop renderer's MessagePort (`services/sync-port.ts`) cannot
@@ -5052,29 +5066,72 @@ export class RemoteServer {
     // fetch, and the desktop reads those files through IPC.
     const decision = this.core.answerSync(lastSeq, epoch)
     if (decision.kind === 'full') {
+      const full: WsSyncFull = {
+        type: 'sync-full',
+        state: decision.state,
+        epoch: decision.epoch,
+        mockupToken: this.mockupToken || undefined,
+        fileToken: this.fileToken || undefined
+      }
       // `SyncStats` measurement (sync-core.md § Measuring a full sync): the frame
       // line comes from the send callback, because under E2E the size is only
       // known after the async encrypt. The opt-in breakdown runs from the same
       // callback, AFTER the line: its extra serialization must never precede the
       // frame on either path (under E2E the encrypt is queued, so running it right
       // after `sendTo` would delay the frame and skew the client's `syncToFrameMs`).
-      this.sendTo(
-        ws,
-        {
-          type: 'sync-full',
-          state: decision.state,
-          epoch: decision.epoch,
-          mockupToken: this.mockupToken || undefined,
-          fileToken: this.fileToken || undefined
-        },
-        (sent) => {
-          logWsFullSync(decision, { lastSeq, epoch }, this.core, sent)
-          logFullSyncBreakdown(decision)
-        }
-      )
+      const onSent = (sent: FrameSent): void => {
+        logWsFullSync(decision, { lastSeq, epoch }, this.core, sent)
+        logFullSyncBreakdown(decision)
+      }
+      if (chunked) this.sendFullChunked(ws, full, onSent)
+      else this.sendTo(ws, full, onSent)
       return
     }
     this.sendTo(ws, { type: 'sync-catchup', events: decision.events, epoch: decision.epoch })
+  }
+
+  /**
+   * Answer a full sync as `sync-full-chunk` frames (the client opted in with
+   * `chunked`): serialize the `sync-full` message ONCE, slice that text, and send
+   * every slice in order. All of it runs inside the caller's synchronous
+   * {@link handleSync}, which is what keeps the chunks contiguous.
+   *
+   * `onSent` fires ONCE, with the whole transfer's totals, after the LAST chunk
+   * reached `ws.send`: `bytes` is the sum of the chunk frames (wrapper and
+   * re-escaping included — the honest wire number), `encodeMs` is the stringify
+   * plus every chunk's own encode, `bufferedAmount` is the last chunk's. If any
+   * chunk's callback never fires (socket closed mid-way, an E2E encrypt failure)
+   * the transfer is broken anyway and no line is logged.
+   */
+  private sendFullChunked(
+    ws: WebSocket,
+    full: WsSyncFull,
+    onSent: (sent: FrameSent) => void
+  ): void {
+    const started = performance.now()
+    const parts = splitSyncFullJson(JSON.stringify(full), this.syncFullChunkChars)
+    const totals: FrameSent = {
+      bytes: 0,
+      encodeMs: performance.now() - started,
+      e2e: false,
+      bufferedAmount: 0,
+      chunks: parts.length
+    }
+    const totalChars = parts.reduce((n, p) => n + p.length, 0)
+    let reported = 0
+    parts.forEach((data, index) => {
+      this.sendTo(
+        ws,
+        { type: 'sync-full-chunk', index, count: parts.length, totalChars, data },
+        (sent) => {
+          totals.bytes += sent.bytes
+          totals.encodeMs += sent.encodeMs
+          totals.e2e = sent.e2e
+          totals.bufferedAmount = sent.bufferedAmount
+          if (++reported === parts.length) onSent(totals)
+        }
+      )
+    })
   }
 
   // ---------------------------------------------------------------------------

@@ -4750,3 +4750,248 @@ describe('RemoteServer — SyncStats lines on sync-full', () => {
     await client.close()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Chunked sync-full (ADR-102 amendment) — a `sync` with `chunked: true` is
+// answered with `sync-full-chunk` frames whose joined text IS the single frame;
+// a request without it (an old tab) gets the single `sync-full` as before.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — chunked sync-full', () => {
+  beforeEach(useAuthDisabled)
+  let server: RemoteServer
+  let port: number
+  const CHUNK = 1024
+
+  beforeEach(async () => {
+    // A 1 KB chunk size: the real 512 KB would need half a megabyte of seeded state.
+    server = new RemoteServer(
+      new RemoteDispatcher(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      CHUNK
+    )
+    port = await ephemeralPort()
+    syncCore.resetCanonicalForTests()
+    vi.mocked(logger.info).mockClear()
+    vi.mocked(logger.warn).mockClear()
+    vi.mocked(logger.isEnabled).mockReset()
+    vi.mocked(logger.isEnabled).mockReturnValue(false)
+  })
+
+  afterEach(async () => {
+    try {
+      await server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  type TestClient = Awaited<ReturnType<typeof connectRemoteClient>>
+  type Chunk = Extract<WsServerMessage, { type: 'sync-full-chunk' }>
+
+  const seed = (): void => {
+    emitEvent('session:created', ['chunk-1', { cwd: '/repo' }])
+    emitEvent('session:message', [
+      'chunk-1',
+      {
+        id: 'm1',
+        role: 'assistant',
+        // Non-ASCII on purpose: chunk boundaries are in UTF-16 units, not bytes.
+        content: [{ type: 'text', text: 'héllo 😀 wörld '.repeat(400) }],
+        timestamp: 0
+      }
+    ])
+  }
+
+  /**
+   * Send one `sync` and collect the answer: every frame of a chunked transfer (up
+   * to its last chunk) with their summed raw wire length, or the single reply.
+   */
+  async function ask(
+    client: TestClient,
+    frame: { lastSeq: number; epoch?: string; chunked?: true }
+  ): Promise<{ frames: WsServerMessage[]; rawLength: number }> {
+    return new Promise((resolve) => {
+      const frames: WsServerMessage[] = []
+      let rawLength = 0
+      const onRaw = (raw: WebSocket.RawData): void => {
+        rawLength += (raw as Buffer).length
+      }
+      client.ws.on('message', onRaw)
+      const off = client.onMessage((m) => {
+        if (m.type === 'sync-full-chunk') {
+          frames.push(m)
+          if (m.index === m.count - 1) done()
+        } else if (m.type === 'sync-full' || m.type === 'sync-catchup') {
+          frames.push(m)
+          done()
+        }
+      })
+      function done(): void {
+        off()
+        client.ws.off('message', onRaw)
+        resolve({ frames, rawLength })
+      }
+      void client.send({ type: 'sync', ...frame })
+    })
+  }
+
+  /** Assert the chunks are one well-formed transfer and return the message they carry. */
+  function reassemble(frames: WsServerMessage[]): Record<string, unknown> {
+    const chunks = frames as Chunk[]
+    expect(chunks.length).toBeGreaterThanOrEqual(2)
+    expect(chunks.every((c) => c.type === 'sync-full-chunk')).toBe(true)
+    expect(chunks.map((c) => c.index)).toEqual(chunks.map((_, i) => i))
+    const joined = chunks.map((c) => c.data).join('')
+    for (const c of chunks) {
+      expect(c.count).toBe(chunks.length)
+      expect(c.totalChars).toBe(joined.length)
+      expect(c.data.length).toBeLessThanOrEqual(CHUNK)
+    }
+    return JSON.parse(joined) as Record<string, unknown>
+  }
+
+  it('plaintext: a chunked request gets only chunk frames that rejoin to the single sync-full', async () => {
+    await server.start(port, '127.0.0.1')
+    seed()
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const chunked = await ask(client, { lastSeq: 0, chunked: true })
+    const single = await ask(client, { lastSeq: 0 })
+
+    expect(single.frames).toHaveLength(1)
+    expect(single.frames[0].type).toBe('sync-full')
+    const message = reassemble(chunked.frames)
+    expect(message.type).toBe('sync-full')
+    expect(message).toEqual(single.frames[0])
+    expect((message.state as { sessions: Record<string, unknown> }).sessions).toHaveProperty(
+      'chunk-1'
+    )
+    await client.close()
+  })
+
+  it('E2E: every chunk is its own encrypted frame and they rejoin to the single sync-full', async () => {
+    tunnelUrlRef.current = `https://${TUNNEL_HOST}`
+    const proof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    const e2eKey = (server as unknown as { tunnelE2eKey: string }).tunnelE2eKey
+    seed()
+    const client = await connectRemoteClient({
+      url: `ws://127.0.0.1:${port}/`,
+      pwProof: proof,
+      e2eKey,
+      headers: { Host: TUNNEL_HOST }
+    })
+    await client.ready
+
+    const chunked = await ask(client, { lastSeq: 0, chunked: true })
+    const single = await ask(client, { lastSeq: 0 })
+
+    const message = reassemble(chunked.frames)
+    expect(message).toEqual(single.frames[0])
+    await client.close()
+  })
+
+  it('a request without `chunked` (an old bundle) still gets ONE sync-full', async () => {
+    await server.start(port, '127.0.0.1')
+    seed()
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const { frames } = await ask(client, { lastSeq: 0 })
+    expect(frames.map((f) => f.type)).toEqual(['sync-full'])
+    await client.close()
+  })
+
+  it('a snapshot smaller than one chunk is ONE chunk', async () => {
+    const small = new RemoteServer(
+      new RemoteDispatcher(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      10_000_000
+    )
+    const smallPort = await ephemeralPort()
+    await small.start(smallPort, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${smallPort}/` })
+    await client.ready
+
+    const { frames } = await ask(client, { lastSeq: 0, chunked: true })
+    expect(frames).toHaveLength(1)
+    expect(frames[0]).toMatchObject({ type: 'sync-full-chunk', index: 0, count: 1 })
+    const only = frames[0] as Chunk
+    expect(only.totalChars).toBe(only.data.length)
+    expect(JSON.parse(only.data).type).toBe('sync-full')
+    await client.close()
+    await small.stop()
+  })
+
+  it('a catchup is unaffected by `chunked`', async () => {
+    await server.start(port, '127.0.0.1')
+    seed()
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const full = (await ask(client, { lastSeq: 0 })).frames[0] as unknown as {
+      state: { seq: number }
+      epoch: string
+    }
+    const caught = await ask(client, { lastSeq: full.state.seq, epoch: full.epoch, chunked: true })
+    expect(caught.frames.map((f) => f.type)).toEqual(['sync-catchup'])
+    await client.close()
+  })
+
+  it('logs ONE SyncStats line for the whole transfer: summed wire bytes and chunks=N (plaintext)', async () => {
+    await server.start(port, '127.0.0.1')
+    seed()
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const { frames, rawLength } = await ask(client, { lastSeq: 0, chunked: true })
+    const lines = vi
+      .mocked(logger.info)
+      .mock.calls.filter((c) => c[0] === 'SyncStats')
+      .map((c) => c[1] as string)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatch(/^sync-full sent: transport=ws reason=fresh /)
+    expect(lines[0]).toContain('e2e=false')
+    expect(lines[0]).toContain(`frameBytes=${rawLength}`)
+    expect(lines[0]).toMatch(/encodeMs=\d+\.\d bufferedAmount=\d+ chunks=\d+$/)
+    expect(lines[0]).toContain(`chunks=${frames.length}`)
+    await client.close()
+  })
+
+  it('logs ONE SyncStats line for the whole transfer under E2E, after the last chunk', async () => {
+    tunnelUrlRef.current = `https://${TUNNEL_HOST}`
+    const proof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    const e2eKey = (server as unknown as { tunnelE2eKey: string }).tunnelE2eKey
+    seed()
+    const client = await connectRemoteClient({
+      url: `ws://127.0.0.1:${port}/`,
+      pwProof: proof,
+      e2eKey,
+      headers: { Host: TUNNEL_HOST }
+    })
+    await client.ready
+
+    const { frames, rawLength } = await ask(client, { lastSeq: 0, chunked: true })
+    await waitUntil(() => vi.mocked(logger.info).mock.calls.some((c) => c[0] === 'SyncStats'))
+    const lines = vi
+      .mocked(logger.info)
+      .mock.calls.filter((c) => c[0] === 'SyncStats')
+      .map((c) => c[1] as string)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain('e2e=true')
+    expect(lines[0]).toContain(`frameBytes=${rawLength}`)
+    expect(lines[0]).toContain(`chunks=${frames.length}`)
+    await client.close()
+  })
+})

@@ -20,6 +20,7 @@ import type {
   WsEvent,
   WsSyncCatchup,
   WsSyncFull,
+  WsSyncFullChunk,
   WsInvokeProgress,
   WsInvokeResponse,
   WsStepUpRequest,
@@ -163,6 +164,36 @@ export interface FullFrameTiming {
   decodeMs: number
   /** Last `sync` sent → this frame received, ms; undefined when no `sync` was timed. */
   syncToFrameMs?: number
+}
+
+/** How far a chunked full sync has got, in JSON characters (≈ MB) — drives the overlay's bar. */
+export interface SyncProgress {
+  receivedChars: number
+  totalChars: number
+}
+
+/** The per-frame measurements `onmessage` hands to `handleMessage`, plus when the frame landed. */
+interface InboundFrame extends FullFrameTiming {
+  /** `performance.now()` when the frame arrived, before it waited its turn in the recv queue. */
+  receivedAt: number
+}
+
+/** A chunked `sync-full` being reassembled (ADR-102 amendment). */
+interface SyncReassembly {
+  parts: string[]
+  count: number
+  totalChars: number
+  receivedChars: number
+  /** Σ over the chunk frames, same definition as {@link FullFrameTiming.frameChars}. */
+  frameChars: number
+  /** Σ over the chunk frames' decode, ms; the join + final parse are added at the end. */
+  decodeMs: number
+  /**
+   * `syncSentAt` as it stood at chunk 0. A mid-transfer resync overwrites the live
+   * field, which would shorten the measured wait; the answer to THIS transfer's
+   * `sync` is what the timing describes.
+   */
+  syncSentAt: number | null
 }
 
 interface PendingInvoke {
@@ -375,6 +406,10 @@ export class RemoteConnection {
   private syncSentAt: number | null = null
   /** What receiving the latest `sync-full` frame cost, until `takeFullFrameTiming()` reads it. */
   private fullFrameTiming: FullFrameTiming | null = null
+  /** The chunked `sync-full` in flight, or null. Per socket: reset on discard and on close. */
+  private syncReassembly: SyncReassembly | null = null
+  /** Progress observer — see {@link RemoteConnection.setSyncProgressHandler}. */
+  private onSyncProgress: ((progress: SyncProgress | null) => void) | null = null
 
   // E2E encryption
   private e2eKeyHex?: string
@@ -534,6 +569,29 @@ export class RemoteConnection {
   setStateHandler(cb: StateCallback): void {
     this.onStateChange = cb
   }
+
+  /**
+   * Observe a chunked full sync's progress (the overlay's bar). Called after every
+   * chunk with the running totals, and with `null` once the transfer ends or is
+   * dropped (apply, socket close, broken sequence). A new non-null `cb` is called
+   * once straight away with the current progress, so a subscriber that mounts after
+   * chunk 0 does not sit on a stale `null`. A throwing `cb` never breaks the transfer.
+   */
+  setSyncProgressHandler(cb: ((progress: SyncProgress | null) => void) | null): void {
+    this.onSyncProgress = cb
+    const r = this.syncReassembly
+    if (cb)
+      this.emitSyncProgress(r ? { receivedChars: r.receivedChars, totalChars: r.totalChars } : null)
+  }
+
+  private emitSyncProgress(progress: SyncProgress | null): void {
+    try {
+      this.onSyncProgress?.(progress)
+    } catch (err) {
+      console.error('RemoteConnection: sync progress callback failed', err)
+    }
+  }
+
   /** Set callback for full state snapshots (initial sync or reconnect). */
   setFullStateHandler(cb: FullStateCallback): void {
     this.sync.setFullStateHandler(cb)
@@ -1089,6 +1147,7 @@ export class RemoteConnection {
    * and scheduling a spurious reconnect.
    */
   private discardSocket(): void {
+    this.resetSyncReassembly()
     const ws = this.ws
     if (!ws) return
     ws.onopen = null
@@ -1097,6 +1156,13 @@ export class RemoteConnection {
     ws.onerror = null
     this.ws = null
     ws.close(1000, 'Client closing')
+  }
+
+  /** Drop a half-received chunked sync (its socket is gone) and tell the progress observer. */
+  private resetSyncReassembly(): void {
+    if (!this.syncReassembly) return
+    this.syncReassembly = null
+    this.emitSyncProgress(null)
   }
 
   private createWebSocket(): void {
@@ -1169,7 +1235,8 @@ export class RemoteConnection {
             this.handleMessage(msg, {
               frameChars: raw.length,
               decodeMs: performance.now() - decodeStart,
-              syncToFrameMs: this.syncSentAt === null ? undefined : receivedAt - this.syncSentAt
+              syncToFrameMs: this.syncSentAt === null ? undefined : receivedAt - this.syncSentAt,
+              receivedAt
             })
           }
         })
@@ -1180,6 +1247,7 @@ export class RemoteConnection {
 
     this.ws.onclose = (ev): void => {
       this.clearTimers()
+      this.resetSyncReassembly()
       this.failInvokesOnClose((ev as CloseEvent | undefined)?.code)
       // A socket that goes away takes its authentication with it — the method
       // described THAT connection, and leaving it set would have the app render
@@ -1292,7 +1360,7 @@ export class RemoteConnection {
     }
   }
 
-  private handleMessage(msg: WsServerMessage, frame?: FullFrameTiming): void {
+  private handleMessage(msg: WsServerMessage, frame?: InboundFrame): void {
     switch (msg.type) {
       case 'auth-response':
         // ADR-063, BEFORE the branch chain below and deliberately not inside it:
@@ -1424,16 +1492,11 @@ export class RemoteConnection {
         break
 
       case 'sync-full':
-        {
-          const full = msg as WsSyncFull
-          if (full.mockupToken) this.mockupTokenValue = full.mockupToken
-          if (full.fileToken) this.fileTokenValue = full.fileToken
-          this.fullFrameTiming = frame ?? null
-          this.syncSentAt = null
-          this.sync.applyFullState(full.state, full.epoch, full.state.seq)
-          this.setState('connected')
-          this.startPing()
-        }
+        this.applySyncFull(msg as WsSyncFull, frame ?? null)
+        break
+
+      case 'sync-full-chunk':
+        this.receiveSyncFullChunk(msg as WsSyncFullChunk, frame)
         break
 
       case 'sync-catchup':
@@ -1564,10 +1627,123 @@ export class RemoteConnection {
     }
   }
 
+  /** The `sync-full` body, shared by the single frame and a reassembled chunked transfer. */
+  private applySyncFull(full: WsSyncFull, timing: FullFrameTiming | null): void {
+    if (full.mockupToken) this.mockupTokenValue = full.mockupToken
+    if (full.fileToken) this.fileTokenValue = full.fileToken
+    // Before `applyFullState`: the full-state handler reads it via takeFullFrameTiming().
+    this.fullFrameTiming = timing
+    this.syncSentAt = null
+    this.sync.applyFullState(full.state, full.epoch, full.state.seq)
+    this.setState('connected')
+    this.startPing()
+  }
+
+  /**
+   * One slice of a chunked full sync. Chunk 0 starts a transfer (discarding any
+   * partial one); every later chunk must be the next index of the SAME transfer.
+   * The host sends a transfer's chunks back to back from one synchronous call, so no
+   * other frame lands between them (should one ever, an event still goes through the
+   * SyncClient as usual). Anything out of sequence means a frame was lost or the host
+   * is broken: drop the transfer and reconnect for a fresh one (see
+   * {@link abandonSyncFull}).
+   */
+  private receiveSyncFullChunk(chunk: WsSyncFullChunk, frame?: InboundFrame): void {
+    const { index, count, totalChars, data } = chunk
+    if (
+      !Number.isInteger(index) ||
+      !Number.isInteger(count) ||
+      !Number.isInteger(totalChars) ||
+      count <= 0 ||
+      totalChars < 0 ||
+      index < 0 ||
+      index >= count ||
+      typeof data !== 'string'
+    ) {
+      this.abandonSyncFull('invalid chunk fields')
+      return
+    }
+    let r = this.syncReassembly
+    if (index === 0) {
+      r = this.syncReassembly = {
+        parts: [],
+        count,
+        totalChars,
+        receivedChars: 0,
+        frameChars: 0,
+        decodeMs: 0,
+        syncSentAt: this.syncSentAt
+      }
+    } else if (!r || index !== r.parts.length || count !== r.count || totalChars !== r.totalChars) {
+      this.abandonSyncFull(`out of sequence at chunk ${index}/${count}`)
+      return
+    }
+    r.parts.push(data)
+    r.receivedChars += data.length
+    r.frameChars += frame?.frameChars ?? 0
+    r.decodeMs += frame?.decodeMs ?? 0
+    this.emitSyncProgress({ receivedChars: r.receivedChars, totalChars: r.totalChars })
+    if (index < count - 1) return
+
+    // Last chunk. Drop the parts before parsing so a 40 MB snapshot is held once,
+    // as `joined`, while `JSON.parse` builds the object.
+    const parseStart = performance.now()
+    const joined = r.parts.join('')
+    r.parts = []
+    this.syncReassembly = null
+    try {
+      let full: WsSyncFull
+      try {
+        full = JSON.parse(joined) as WsSyncFull
+      } catch {
+        this.abandonSyncFull('reassembled JSON does not parse')
+        return
+      }
+      if (joined.length !== r.totalChars || full?.type !== 'sync-full') {
+        this.abandonSyncFull('reassembled message is not the announced sync-full')
+        return
+      }
+      this.applySyncFull(full, {
+        frameChars: r.frameChars,
+        decodeMs: r.decodeMs + (performance.now() - parseStart),
+        syncToFrameMs:
+          r.syncSentAt === null
+            ? undefined
+            : (frame?.receivedAt ?? performance.now()) - r.syncSentAt
+      })
+    } finally {
+      this.emitSyncProgress(null)
+    }
+  }
+
+  /**
+   * Give up on a chunked transfer and reconnect. Not a silent drop: with the
+   * transfer discarded nothing re-arms a sync, and the overlay would sit on a
+   * frozen bar forever. Closing the socket goes through the ordinary `onclose` →
+   * `scheduleReconnect` path (backoff, "Reconnecting..."), which handshakes and
+   * syncs afresh — bounded by the backoff, so never a tight 40 MB retry loop.
+   */
+  private abandonSyncFull(why: string): void {
+    this.resetSyncReassembly()
+    // The rest of an abandoned transfer still drains through the recv queue onto
+    // the now-closing socket; one report and one close are enough.
+    if (this.ws?.readyState !== WebSocket.OPEN) return
+    console.error(`RemoteConnection: broken sync-full-chunk transfer (${why}); reconnecting`)
+    this.ws.close()
+  }
+
   /** Request a sync/catchup, echoing the epoch our lastSeq belongs to (R7). */
   private sendSync(): void {
     this.syncSentAt = performance.now()
-    this.send({ type: 'sync', lastSeq: this.sync.getLastSeq(), epoch: this.sync.getEpoch() })
+    // `chunked`: this client draws full-sync progress, so the host answers a full
+    // decision as `sync-full-chunk` frames (a host that predates it would just send
+    // one `sync-full`, but the host serves this bundle, so that skew cannot occur).
+    this.send({
+      type: 'sync',
+      lastSeq: this.sync.getLastSeq(),
+      epoch: this.sync.getEpoch(),
+      chunked: true
+    })
   }
 
   /** Send a message, encrypting if E2E is active. */

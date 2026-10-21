@@ -708,7 +708,7 @@ function RemoteApp(): React.JSX.Element {
           }}
         />
       )}
-      <ConnectionOverlay state={connState} error={error} />
+      <ConnectionOverlay state={connState} error={error} connection={connection} />
       {/* Above the app, below the connection overlay: a ceremony is owed on a
           LIVE connection, so it must never cover the screen that says the
           connection is gone. */}
