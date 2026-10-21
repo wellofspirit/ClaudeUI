@@ -87,6 +87,7 @@ describe('opencode raw-config key partition', () => {
     expect(editable.toSorted()).toEqual([
       'commands',
       'enterprise',
+      'policies',
       'references',
       'username',
       'warming',

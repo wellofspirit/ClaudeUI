@@ -180,7 +180,6 @@ describe('convertOpencodeHistory', () => {
         status: 'running',
         reason: 'auto',
         summary: '',
-        recent: '',
         time: { created: 7 }
       }
     ])
@@ -196,7 +195,6 @@ describe('convertOpencodeHistory', () => {
           status: 'completed',
           reason: 'manual',
           summary: '## Objective',
-          recent: '',
           time: { created: 9 }
         }
       ]).messages
@@ -456,7 +454,6 @@ describe('the 2.x status-line seed', () => {
       status: 'completed',
       reason: 'auto',
       summary: 's',
-      recent: '',
       cost: 0.1,
       tokens: { input: 900, output: 5, reasoning: 0, cache: { read: 0, write: 0 } },
       time: { created: 5_200 }
