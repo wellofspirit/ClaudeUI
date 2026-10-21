@@ -233,7 +233,7 @@ export class ChatgptRateLimitStore {
     vaultAccountId: string,
     snapshot: RateLimitSnapshot,
     identity: { email?: string; planType?: string } = {},
-    /** Set by a FULL read only: the instant the credits on this snapshot were read. */
+    /** FULL read authority for credits and allowance (including their absence); omitted on sparse pushes. */
     readAt?: number
   ): void {
     const previous = this.limits[vaultAccountId]
@@ -241,15 +241,18 @@ export class ChatgptRateLimitStore {
     const observedSecondary = rateWindow(snapshot.secondary)
     const primary = observedPrimary ?? previous?.primary ?? null
     const secondary = observedSecondary ?? previous?.secondary ?? null
-    // Same sparse rule as the windows: only a snapshot that actually says the
-    // account HAS credits replaces what the last full read established.
-    const credits = snapshot.credits?.hasCredits
-      ? { unlimited: snapshot.credits.unlimited, balance: snapshot.credits.balance }
-      : previous?.credits
-    // And again for the allowance: a push that does not carry it says nothing
-    // about it (Codex's own session state keeps the prior one the same way,
-    // `core/src/state/session.rs`).
-    const allowance = creditLimit(snapshot.individualLimit) ?? previous?.creditLimit
+    // Only a full read establishes credit facts. Native session pushes can carry
+    // cached metadata from another context; they may retain, but never seed it.
+    const credits =
+      readAt === undefined
+        ? previous?.credits
+        : snapshot.credits?.hasCredits
+          ? { unlimited: snapshot.credits.unlimited, balance: snapshot.credits.balance }
+          : undefined
+    const allowance =
+      readAt === undefined
+        ? previous?.creditLimit
+        : (creditLimit(snapshot.individualLimit) ?? undefined)
     const entry: ChatgptAccountLimits = {
       ...((identity.email ?? previous?.email) ? { email: identity.email ?? previous?.email } : {}),
       ...((identity.planType ?? snapshot.planType ?? previous?.planType)
@@ -279,8 +282,9 @@ export class ChatgptRateLimitStore {
     // dated by the full read that established them (see `creditsReadAt`). Until
     // one has happened this process has nothing it can honestly date, so nothing
     // is relayed: a push alone is never the source.
-    if (readAt !== undefined && (snapshot.credits?.hasCredits || snapshot.individualLimit)) {
-      this.creditsReadAt.set(vaultAccountId, readAt)
+    if (readAt !== undefined) {
+      if (credits || allowance) this.creditsReadAt.set(vaultAccountId, readAt)
+      else this.creditsReadAt.delete(vaultAccountId)
     }
     const readCreditsAt = this.creditsReadAt.get(vaultAccountId)
     if ((entry.credits || entry.creditLimit) && readCreditsAt !== undefined) {
