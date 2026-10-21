@@ -44,7 +44,12 @@ const unitTest = {
   // not CLAUDEUI_HARNESS_STORE: unit tests that install or collect keep
   // writing to the throwaway home.
   env: { CLAUDEUI_TEST_HARNESS_STORE: realHarnessStore },
-  include: ['src/**/__tests__/**/*.test.{ts,tsx}', 'src/**/__tests__/**/*.unit.test.{ts,tsx}'],
+  include: [
+    'src/**/__tests__/**/*.test.{ts,tsx}',
+    'src/**/__tests__/**/*.unit.test.{ts,tsx}',
+    'scripts/judge-eval/match.test.ts',
+    'scripts/judge-eval/extract-real.test.ts'
+  ],
   // Git-backed filesystem tests are slow (real simple-git subprocess
   // calls on Windows cost ~150-200ms each). They live in their own
   // `git` project so the default `bun run test` can stay snappy; they
@@ -94,7 +99,9 @@ export default defineConfig({
           setupFiles: ['./src/test/setup/node.setup.ts'],
           ...unitTest,
           include: NODE_UNIT_DIRS.flatMap((dir) =>
-            unitTest.include.map((glob) => glob.replace('src/**', dir))
+            unitTest.include
+              .filter((glob) => glob.startsWith('src/**'))
+              .map((glob) => glob.replace('src/**', dir))
           )
         }
       },
