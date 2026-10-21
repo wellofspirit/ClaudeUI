@@ -317,7 +317,7 @@ export function AgentRow({
           <span
             data-testid="AgentRow.engine"
             title={dispatchLabel(engineWord)}
-            className="shrink-0 text-[11px] text-text-muted"
+            className="shrink-0 text-[11px] text-text-muted @max-[300px]/roster:hidden"
           >
             {engineWord.engine}
           </span>

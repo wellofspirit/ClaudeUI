@@ -697,7 +697,7 @@ describe('the type tile in the agent list (ADR-094)', () => {
   })
 
   it('puts the engine word right after a short X-Agent name, on its line, at any width', async () => {
-    for (const width of [240, 420]) {
+    for (const width of [320, 420]) {
       const root = await mountPanel(width)
       const row = rowOf(root, 'tu-dispatch-named')
       const name = byTestId(row, 'AgentRow.name')
@@ -716,6 +716,13 @@ describe('the type tile in the agent list (ADR-094)', () => {
       expect(hasNoHorizontalOverflow(row)).toBe(true)
       cleanup()
     }
+  })
+
+  it('drops the engine word below a 300px roster, so the name keeps the room', async () => {
+    const row = rowOf(await mountPanel(240), 'tu-dispatch-named')
+    expect(getComputedStyle(byTestId(row, 'AgentRow.engine')).display).toBe('none')
+    expect(byTestId(row, 'AgentRow.name').innerText).toBe('e1')
+    expect(hasNoHorizontalOverflow(row)).toBe(true)
   })
 
   it('lines the labels up across bot alone, bot + 1 letter and bot + 2 letters', async () => {

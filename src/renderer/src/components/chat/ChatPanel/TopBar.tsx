@@ -665,7 +665,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   // so it needs no suffix of its own — only the indent and the marker attribute.
   const renderCostRow = (m: (typeof rawModelCosts)[number]): React.JSX.Element => (
     <div
-      key={`${m.engineId}:${m.modelId}`}
+      key={`${m.engineId}:${m.modelId}:${m.dispatched ? 'dispatched' : 'own'}`}
       data-testid="TopBar.costBreakdownRow"
       data-model={m.modelId}
       {...(m.dispatched ? { 'data-dispatched': 'true' } : {})}

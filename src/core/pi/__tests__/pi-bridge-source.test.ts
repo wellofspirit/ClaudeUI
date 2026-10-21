@@ -26,7 +26,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 22 (dispatch_agent states its name and description limits, ADR-105 §4)', () => {
+  it('is version 23 (dispatch_agent requires a description)', () => {
     expect(PI_BRIDGE_VERSION).toBe('23')
   })
 
