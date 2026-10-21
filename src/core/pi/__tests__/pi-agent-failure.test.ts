@@ -103,6 +103,16 @@ describe('classifyPiAgentFailure (ADR-089 S1b) — one case per rule, first matc
     }
   })
 
+  it('follows the patterns pi 1.3.0 added (temporary unavailability, upstream-forwarding gateways)', () => {
+    for (const m of [
+      'The service is temporarily unavailable',
+      'The upstream provider returned an error',
+      'Unable to forward upstream stream'
+    ]) {
+      expect(classify(m), m).toBe('transient')
+    }
+  })
+
   it('5. a crashed child process is transient', () => {
     expect(classifyPiAgentFailure({ kind: 'process-exit' })).toBe('transient')
   })

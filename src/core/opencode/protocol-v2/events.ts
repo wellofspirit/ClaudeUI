@@ -35,9 +35,8 @@ import type {
   Session_Inbox_MovePayload,
   Session_Inbox_SyntheticPayload,
   Session_Inbox_UserPayload,
-  Session_Message_ProviderState,
+  Session_Message_Native,
   Session_Metadata,
-  Session_ProviderContext,
   Session_StructuredError,
   TokenUsage_Info,
   Tool_Content
@@ -115,10 +114,15 @@ type Assistant = Session & { readonly assistantMessageID: string }
 type Part = Assistant & { readonly ordinal: number }
 /** Tool events: `id` is the provider's tool-call id. */
 type ToolRef = Assistant & { readonly id: string }
-type ProviderState = { readonly state?: Session_Message_ProviderState }
+/** Provider replay data (opencode 2.1 renamed `state`/`providerState` to `native`). */
+type Native = { readonly native?: Session_Message_Native }
 type JsonRecord = { readonly [key: string]: unknown }
 
 // --- Durable events (session-event.ts unless noted) -------------------------
+//
+// 2.1.0 also added `session.archived` / `session.unarchived`. ClaudeUI has no
+// archive surface for opencode sessions, so they stay uncurated (ignored by
+// `isOpencodeEvent`) until one exists.
 
 export interface DurableEventData {
   'session.created': Session & {
@@ -162,7 +166,7 @@ export interface DurableEventData {
   'session.step.ended': Assistant & {
     readonly finish: FinishReason
     readonly rawFinish?: string
-    readonly providerState?: Session_Message_ProviderState
+    readonly native?: Session_Message_Native
     readonly cost: Money_USD
     readonly tokens: TokenUsage_Info
     readonly snapshot?: string
@@ -172,20 +176,20 @@ export interface DurableEventData {
     readonly error: Session_StructuredError
     readonly finish?: 'content-filter'
     readonly rawFinish?: string
-    readonly providerState?: Session_Message_ProviderState
+    readonly native?: Session_Message_Native
     readonly cost?: Money_USD
     readonly tokens?: TokenUsage_Info
     readonly snapshot?: string
     readonly files?: ReadonlyArray<string>
   }
   'session.text.started': Part
-  'session.text.ended': Part & ProviderState & { readonly text: string }
-  'session.reasoning.started': Part & ProviderState
-  'session.reasoning.ended': Part & ProviderState & { readonly text: string }
+  'session.text.ended': Part & Native & { readonly text: string }
+  'session.reasoning.started': Part & Native
+  'session.reasoning.ended': Part & Native & { readonly text: string }
   'session.tool.input.started': ToolRef & { readonly name: string }
   'session.tool.input.ended': ToolRef & { readonly text: string }
   'session.tool.called': ToolRef &
-    ProviderState & {
+    Native & {
       readonly input: JsonRecord
       readonly executed: boolean
     }
@@ -193,7 +197,7 @@ export interface DurableEventData {
     readonly content: readonly [Tool_Content, ...Tool_Content[]]
     readonly metadata?: JsonRecord
     readonly executed: boolean
-    readonly resultState?: Session_Message_ProviderState
+    readonly native?: Session_Message_Native
   }
   /** `error.type` is `permission.rejected` for a reject WITH a message or a deny rule, `aborted` without one. */
   'session.tool.failed': ToolRef & {
@@ -201,7 +205,7 @@ export interface DurableEventData {
     readonly content?: readonly [Tool_Content, ...Tool_Content[]]
     readonly metadata?: JsonRecord
     readonly executed: boolean
-    readonly resultState?: Session_Message_ProviderState
+    readonly native?: Session_Message_Native
   }
   'session.retry.scheduled': Assistant & {
     readonly attempt: number
@@ -211,16 +215,13 @@ export interface DurableEventData {
   }
   'session.compaction.started': Session & {
     readonly reason: 'auto' | 'manual'
-    readonly recent: string
     readonly inputID?: string
   }
   'session.compaction.ended': Session & {
     readonly reason: 'auto' | 'manual'
     readonly model?: Model_Ref
-    readonly providerState?: Session_Message_ProviderState
-    readonly providerContext?: Session_ProviderContext
+    readonly native?: Session_Message_Native
     readonly text: string
-    readonly recent: string
     readonly cost?: Money_USD
     readonly tokens?: TokenUsage_Info
   }

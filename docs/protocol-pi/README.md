@@ -1,6 +1,43 @@
 # pi wire protocol — verified integration notes
 
-Current tested release: **1.1.0** ([stable release](https://github.com/earendil-works/pi/releases/tag/v1.1.0)); floor = tested = **1.1.0**, ceiling **2.0.0** (ADR-082's next-major rule; owner, 2026-10-06). A version in [1.1.0, 2.0.0) other than 1.1.0 runs as _untested_; only **1.1.0** was measured. The dated 0.84.3 findings below are historical probes, not fresh verification of every behavior on 1.1.0. The prior Windows 0.87.1 run passed all 13 gated tests, including live approval, hosted tools, subagents, dispatch, fork and clone. It used an isolated `PI_CODING_AGENT_DIR`, an explicit `openai-codex/gpt-5.6-luna` model entry, and a credential command that supplied the active vault access token over a pipe without copying tokens to disk or refreshing them. The credential gates honor `PI_CODING_AGENT_DIR`. Pi 0.87.1 persists system messages; fork/clone tests compare the complete expected transcript rather than assuming only user/assistant messages contribute to `messageCount`.
+Current tested release: **1.3.0** ([stable release](https://github.com/earendil-works/pi/releases/tag/v1.3.0)); floor = tested = **1.3.0**, ceiling **2.0.0** (ADR-082's next-major rule; owner, 2026-10-06). A version in [1.3.0, 2.0.0) other than 1.3.0 runs as _untested_; only **1.3.0** was measured. The dated 0.84.3 findings below are historical probes, not fresh verification of every behavior on 1.3.0. The prior Windows 0.87.1 run passed all 13 gated tests, including live approval, hosted tools, subagents, dispatch, fork and clone. It used an isolated `PI_CODING_AGENT_DIR`, an explicit `openai-codex/gpt-5.6-luna` model entry, and a credential command that supplied the active vault access token over a pipe without copying tokens to disk or refreshing them. The credential gates honor `PI_CODING_AGENT_DIR`. Pi 0.87.1 persists system messages; fork/clone tests compare the complete expected transcript rather than assuming only user/assistant messages contribute to `messageCount`.
+
+## 1.1.0 → 1.3.0 compatibility assessment (2026-10-21)
+
+`git diff v1.1.0..v1.3.0`. RPC mode and `docs/rpc.md` are **unchanged** across the
+range (no diff under `packages/coding-agent/src/modes/rpc` or `src/cli/args.ts`), so
+the wire ClaudeUI speaks — prompt/steer/fork/clone, the event union and the tool
+list — is the same one measured on 1.1.0.
+
+- **Extension API (1.2.0, breaking upstream):** `before_agent_start` is now a union
+  on `messageType` (`"user"` carries `prompt`/`images`, `"custom"` carries the
+  `triggerTurn` message), a run counts as busy while it starts (so
+  `pi.sendUserMessage` requires `deliverAs`), and `pi mcp list --json` reports
+  `resources: true` instead of resource counts. The bridge source uses none of
+  `before_agent_start`, `sendUserMessage` or `mcp list --json`; its
+  `pi.sendMessage(..., { deliverAs: 'steer' })` calls are unchanged.
+- **Active tools on resume (1.3.0):** a resumed session keeps the tools it
+  activated, with `--tools +name`/`-name` applied on top; an explicit `--tools`
+  list, `--no-tools` or `--no-builtin-tools` still selects tools outright. The
+  no-mixed-modifier rule from 1.1.0 stands (plain names and `+`/`-` entries cannot
+  be mixed), and `TOOL_NAME_RE` still rejects a leading modifier.
+- **Retry classifiers:** `retry.ts` widened three patterns — "The service
+  **is temporarily** unavailable", "Provider returned **an** error" and gateway
+  "unable to forward upstream" — and `src/core/pi/pi-agent-failure.ts` is re-synced
+  to 1.3.0. `overflow.ts` is unchanged.
+- **Provider/model behaviour:** thinking blocks from a previous model are dropped
+  on model switch, OpenRouter lists only the models a key may use, and the
+  `kimi-coding` base-URL override now needs `/v1`. ClaudeUI writes `models.json`
+  through the shared provider adapter; no ClaudeUI-built entry targets
+  `kimi-coding`'s base URL.
+- **Live probe (2026-10-21):** the mixed-`--tools` refusal still fires on the
+  1.3.0 binary (`pi --mode rpc --tools bash,+read` exits 1 with "tool names
+  cannot be mixed with +name or -name entries"), so `TOOL_NAME_RE`'s rule stays.
+  On Windows x64 the gated suite ran 11 tests with 9 skipped: the 9 are the
+  model-call cases, skipped because no isolated `!command` credential was
+  provisioned for this bump (the vitest setup moves HOME). The credential-free
+  cases (`pi-rpc` 5, `pi-mcp` 3, plus 3 in `pi-session-tools`) pass; the
+  model-call cases are owed.
 
 ## 1.0.4 → 1.1.0 compatibility assessment (2026-10-10)
 

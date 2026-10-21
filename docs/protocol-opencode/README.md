@@ -15,16 +15,17 @@ imported from `auth.json` (`credential-store.ts`).
 
 ## Pin
 
-- opencode **2.0.26**, tag `v2.0.26`, commit `9b4ec5714d481559990db0a816d5dec19541a814` (verified
-  against upstream's `refs/tags/v2.0.26`). The wire types come from the spec the 2.0.26 binary
+- opencode **2.1.2**, tag `v2.1.2`, commit `a517687fde98a7329ada3ae644a01a9fc6c4e99e` (verified
+  against upstream's `refs/tags/v2.1.2`). The wire types come from the spec the 2.1.2 binary
   SERVES, not from upstream's committed `packages/protocol/openapi.json` (see Generated types).
-  Since 2.0.24 the served spec gained `Credential.External` (a reference to a credential source
-  managed outside the store; upstream's migration turns the Azure CLI's OAuth rows into it),
-  `Integration.ExternalMethod` and `integration.connect.external`, the policy actions `tool.use` /
-  `integration.use` (the old `permission` action is gone), the `Model.Compatibility` flags
-  `supportsThinkingBlockBinding` / `supportsEffortUpdates`, and `LocationNotFoundError` on most
-  routes. The event sources changed only in `credential.ts` and `model.ts`, outside the transcribed
-  events.
+  **2.1.0 changed public contracts on purpose** (upstream's "Breaking changes"): provider replay
+  data is `native` everywhere (`state`, `providerState`, `resultState`, `providerContext` are
+  gone; tool parts carry one `native` that the result shallow-merges into), `Credential.Key.configuration` is removed in favour of `metadata`, summary compactions reference their first
+  retained message as `metadata.keepID` instead of `recent`, compaction windows moved to
+  `native.messages`, and the transitional `session.compacted` event is gone. The served spec also
+  gained the `Voice` and `PersistentPty` groups, session archiving events
+  (`session.archived`/`session.unarchived`), provider `encoding`/`compatibility` settings and
+  `retryAfterMs` on `Session.StructuredError`. 2.1.2 itself is fixes only.
 - **One pin.** The version is the harness manifest's `tested`
   (`src/shared/harness-manifests/opencode.json`); `scripts/generate-opencode-protocol.mjs` reads it
   and keeps only the reviewed commit (`PIN_COMMIT`), which it proves the tag still names. A unit
@@ -51,9 +52,9 @@ imported from `auth.json` (`credential-store.ts`).
 - Provenance (2.0.24): every package's `repository` is `anomalyco/opencode`, maintainer `thdxr`,
   published by GitHub Actions through npm trusted publishing (OIDC); the darwin binaries are signed
   `Developer ID Application: Anomaly Innovations, Inc. (5NZ4Q7NXJ4)`.
-- `--version` prints `opencode v2.0.26` (1.x printed the bare version; a source build without a
+- `--version` prints `opencode v2.1.2` (1.x printed the bare version; a source build without a
   version prints `opencode vlocal`). Detection reads both; a 1.x install is labelled too old
-  ("opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (2.0.26 or newer)"), and
+  ("opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (2.1.2 or newer)"), and
   `opencode2` is searched on PATH beside `opencode`. Homebrew's `opencode` formula is a 2.x source
   build with the version stamped in (`OPENCODE_VERSION`), found at `<prefix>/bin/opencode` as
   System and labelled by its version like any other.

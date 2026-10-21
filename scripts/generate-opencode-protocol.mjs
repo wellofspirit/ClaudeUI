@@ -71,7 +71,7 @@ export const GENERATOR_VERSION = 2
  * names that commit, so bumping `tested` without re-reviewing `PIN_COMMIT`
  * fails both generate and check.
  */
-const PIN_COMMIT = '9b4ec5714d481559990db0a816d5dec19541a814'
+const PIN_COMMIT = 'a517687fde98a7329ada3ae644a01a9fc6c4e99e'
 const manifest = JSON.parse(
   readFileSync(new URL('../src/shared/harness-manifests/opencode.json', import.meta.url), 'utf8')
 )
@@ -164,6 +164,7 @@ const STRUCTURAL_KEYWORDS = new Set([
   'anyOf',
   'oneOf',
   'allOf',
+  'not',
   'items',
   'prefixItems',
   'properties',
@@ -230,6 +231,15 @@ export function schemaToTs(node, at = '#', indent = '') {
     if (Object.keys(node).some((key) => STRUCTURAL_KEYWORDS.has(key) && key !== '$ref'))
       throw new Error(`$ref with sibling structure at ${at}`)
     return typeName(node.$ref.slice(prefix.length))
+  }
+  if (node.not !== undefined) {
+    // The only negation opencode 2.1 serves: a payload that may be anything but
+    // null (`Session.Inbox.CompactionPayload`). TypeScript cannot express a
+    // general `not`, so fail closed on any other shape.
+    if (Object.keys(node).some((key) => STRUCTURAL_KEYWORDS.has(key) && key !== 'not'))
+      throw new Error(`not with sibling structure at ${at}`)
+    if (node.not?.type === 'null') return 'NonNullable<unknown>'
+    throw new Error(`Unsupported not-schema at ${at}: ${JSON.stringify(node.not)}`)
   }
   if (node.allOf) {
     const { allOf, ...base } = node

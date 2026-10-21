@@ -25,6 +25,17 @@ Sonnet 4.x $3/$15 until this entry. `defaultEffort()` now mirrors the catalog's
 `default_effort` (`medium` for Opus 5.5 and Sonnet 5.5, which Opus 5.5 already
 had at 2.1.280), and aliases are judged by the model they resolve to.
 
+**2.1.306:** no model added or removed and every alias unchanged (`opus` →
+`claude-opus-5-5`, `sonnet` → `claude-sonnet-5-5`, `haiku` → `claude-haiku-5-5`,
+`fable` → `claude-fable-5-1`). Three per-model facts moved: Sonnet 5.5's pricing
+record is now `tier_2_10_cache_read_0_10` (cache read $0.10/MTok, the 2.1.296
+change; `pricing.ts` splits `sonnet-5-5` from `sonnet-5`), `maximum_window:1e6`
+and `clamp_long_context_without_beta` appeared on the beta-1M models (Sonnet
+4/4.5/4.6, Opus 4.6 — `native_1m` and therefore `IMPLICIT_1M_BASE_MODELS` are
+unchanged), and every model gained the `total_tokens_reminder` capability plus
+image limits of 2576×2576 / 4784 tokens (previously 2000×2000; not mirrored).
+`effort_cost_index` is still not mirrored.
+
 **2.1.293:** one new model, `claude-haiku-5-5` (Haiku 5.5): 1M native
 (`context:{window:1e6,native_1m:!0}`), 128K output (`default` and `upper`),
 `haiku_55` pricing (input $0.10, output $0.50, cache write $0.125 / 1h $0.20, read
