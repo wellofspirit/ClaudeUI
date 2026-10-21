@@ -532,6 +532,73 @@ describe('per-account ChatGPT rate limits', () => {
     expect(hosts.get('acct-gone').live).toBe(0)
   })
 
+  it('fences mismatched requested identity before reading', async () => {
+    mocks.request.mockResolvedValue(snapshot(55))
+    const source: CodexHostSource = {
+      acquire: async (options) => {
+        const handle = await registry.acquire(options)
+        return { ...handle, injectedAccountId: 'acct-other' }
+      }
+    }
+    const service = new CodexService({
+      ...options,
+      registry: source,
+      identity: { accountId: null }
+    })
+    expect([...(await service.rateLimits(['acct-a'])).keys()]).toEqual([])
+    expect(hosts.get('acct-a').requests).toEqual([])
+    expect(hosts.get('acct-a').live).toBe(0)
+  })
+
+  it.each(['acct-other', null])(
+    'drops a response after injected identity changes to %s',
+    async (next) => {
+      let injected: string | null = 'acct-a'
+      let finish!: (value: ReturnType<typeof snapshot>) => void
+      const pending = new Promise<ReturnType<typeof snapshot>>((resolve) => {
+        finish = resolve
+      })
+      const requestStarted = vi.fn()
+      const source: CodexHostSource = {
+        acquire: async (options) => {
+          const handle = await registry.acquire(options)
+          return {
+            ...handle,
+            get injectedAccountId() {
+              return injected
+            },
+            request: () => {
+              requestStarted()
+              return pending
+            }
+          } as unknown as CodexHostHandle
+        }
+      }
+      const service = new CodexService({
+        ...options,
+        registry: source,
+        identity: { accountId: null }
+      })
+      const reading = service.rateLimits(['acct-a'])
+      await vi.waitFor(() => expect(requestStarted).toHaveBeenCalledOnce())
+      injected = next
+      finish(snapshot(55))
+      expect([...(await reading).keys()]).toEqual([])
+      expect(hosts.get('acct-a').live).toBe(0)
+    }
+  )
+
+  it('accepts stable matching and active-null requested identities', async () => {
+    mocks.request.mockResolvedValue(snapshot(55))
+    const service = new CodexService({ ...options, identity: { accountId: null } })
+    expect([...(await service.rateLimits(['acct-a', null])).keys()]).toEqual([
+      'acct-a',
+      'acct-active'
+    ])
+    expect(hosts.get('acct-a').live).toBe(0)
+    expect(hosts.get('acct-active').live).toBe(0)
+  })
+
   it('reads nothing at all without an identity — and acquires no host', async () => {
     const service = new CodexService(options)
     expect([...(await service.rateLimits(['acct-a'])).keys()]).toEqual([])
