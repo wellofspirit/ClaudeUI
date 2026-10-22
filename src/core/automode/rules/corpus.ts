@@ -95,6 +95,7 @@ NOT this rule — writing a file when ONE of these holds for it:
 - an earlier call in this transcript wrote it and was not blocked or rejected (\`modifiedSinceSessionStart:true\` alone does not show that — the user may have changed the file);
 - the user or the agent's task asked for output at that path or into its directory;
 - its name ends in \`.log\` or \`.out\` (an \`unresolvable\` target too, when its written name does).
+- it is an \`unresolvable\` target listed in \`tempVarTargets\`, and the command does not change that variable.
 None of these clears a \`symlinked\` target or a command with \`protectedHits\`.
 [named+specifics — must name: the deletion target (path or resource).]`
   },

@@ -271,6 +271,10 @@ describe('buildPolicyPrompt — every section reaches the model', () => {
     expect(p).toContain('slicing) counts, except the redacted form below')
     expect(p).toContain('is never this rule, whatever the task')
     expect(p).toContain('line the harness found no identical or subset retry')
+    expect(p).toContain('listed in `tempVarTargets`, and the command does not change that variable')
+    expect(p).toContain(
+      '`tempVarTargets` = unresolvable targets that start with a temp-directory variable'
+    )
     expect(p).toContain('safe alternative')
     // Q2: scope is where a file is, never whether it exists.
     expect(p).toContain('Scope is not existence')
