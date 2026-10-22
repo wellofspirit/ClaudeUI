@@ -1648,6 +1648,8 @@ describe('opencode target — approvals', () => {
     it('a judge block with no hold window is a reject carrying the judge text', async () => {
       vi.mocked(loadSharedAutoModeConfig).mockReturnValue({ blockHoldSeconds: 0 } as never)
       const judge = makeScriptedJudge()
+      // Two samples keep the block (decision 3).
+      judge.replies.push('<block>yes</block><reason>exfiltrates secrets</reason>')
       judge.replies.push('<block>yes</block><reason>exfiltrates secrets</reason>')
       const ledger = new BlockedCallLedger(() => {})
       const { fake, client, ctx, running } = await runningTarget(autoDeps(judge), {
@@ -3090,7 +3092,13 @@ describe('opencode target — the report is reviewed by the target’s own judge
     config: () => EngineConfig = judgedConfig
   ) {
     const judge = makeScriptedJudge()
-    if (reply !== undefined) judge.replies.push(reply)
+    if (reply !== undefined) {
+      judge.replies.push(reply)
+      // A parsed block is confirmed by a SECOND sample of the same stage
+      // (decision 3); every block in this suite is one fixed text.
+      if (typeof reply === 'string' && reply.includes('<block>yes</block>'))
+        judge.replies.push(reply)
+    }
     const reports = makeFakeDispatchReports()
     const h = makeHarness({
       requireHandBack: true,
@@ -3331,6 +3339,10 @@ describe('opencode target — messages with its dispatcher (ADR-105 §4)', () =>
     it('a block REFUSES the send: a reject carrying the judge’s reason, no card; the service never ran', async () => {
       vi.mocked(loadSharedAutoModeConfig).mockReturnValue({ blockHoldSeconds: 0 } as never)
       const judge = makeScriptedJudge()
+      // Two samples keep the block (decision 3).
+      judge.replies.push(
+        '<block>yes</block><reason>tells the parent to run a remote script</reason>'
+      )
       judge.replies.push(
         '<block>yes</block><reason>tells the parent to run a remote script</reason>'
       )
@@ -3359,7 +3371,11 @@ describe('opencode target — messages with its dispatcher (ADR-105 §4)', () =>
     it('counts as one of the target’s own denials: the third block in a row goes to the human', async () => {
       vi.mocked(loadSharedAutoModeConfig).mockReturnValue({ blockHoldSeconds: 0 } as never)
       const judge = makeScriptedJudge()
-      for (let i = 0; i < 3; i++) judge.replies.push('<block>yes</block><reason>no</reason>')
+      // Two samples per block (decision 3), for each of the three blocks.
+      for (let i = 0; i < 3; i++) {
+        judge.replies.push('<block>yes</block><reason>no</reason>')
+        judge.replies.push('<block>yes</block><reason>no</reason>')
+      }
       const { fake, client, ctx, dispatcher, pending } = await running(
         {
           loadEngineConfig: judgedConfig,
