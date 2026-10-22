@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { clearSyncSubscribersForTests } from '../../services/sync-host'
 import { EventEmitter } from 'node:events'
+import { mkdtemp, rmdir } from 'node:fs/promises'
 import { join, delimiter } from 'node:path'
 import type { PiEvent } from '../pi-protocol'
 import type { DispatchContext } from '../../services/cross-engine-dispatcher'
@@ -2868,8 +2869,8 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
   }
 
   /** A session already in `auto` with the bridge gate captured. */
-  async function autoSession(routingId: string, win: MockWindow): Promise<PiSession> {
-    const session = new PiSession(routingId, win as never, '/cwd', {})
+  async function autoSession(routingId: string, win: MockWindow, cwd = '/cwd'): Promise<PiSession> {
+    const session = new PiSession(routingId, win as never, cwd, {})
     await session.setPermissionMode('auto')
     await session.run('hi')
     return session
@@ -4301,19 +4302,26 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     enableAutoMode()
     judgeScript.replies = ['<block>no</block>', '<block>no</block>']
     const win = new MockWindow()
-    const session = await autoSession('rid-auto-redirect', win)
+    const { tmpdir } = await vi.importActual<typeof import('node:os')>('node:os')
+    const cwd = await mkdtemp(join(tmpdir(), 'pi-session-redirect-'))
+    let session: PiSession | undefined
+    try {
+      session = await autoSession('rid-auto-redirect', win, cwd)
 
-    await gate('call_r1', 'bash', { command: 'npm test > build.log 2>&1' })
-    expect(judgeCalls[0].user).toContain(
-      '{"meta":{"redirects":{"targets":["build.log"],"allInScope":true,' +
-        '"outOfScope":[],"unresolvable":[],"protectedHits":[]}}}\nProposed next action:'
-    )
+      await gate('call_r1', 'bash', { command: 'npm test > build.log 2>&1' })
+      expect(judgeCalls[0].user).toContain(
+        '{"meta":{"redirects":{"targets":["build.log"],"allInScope":true,' +
+          '"outOfScope":[],"unresolvable":[],"protectedHits":[]}}}\nProposed next action:'
+      )
 
-    // No redirect → no measurement → no meta line at all (`/cwd` is not a repo,
-    // so the gitStatus capture contributes nothing either).
-    await gate('call_r2', 'bash', { command: 'npm test' })
-    expect(judgeCalls[1].user).not.toContain('redirects')
-    session.dispose()
+      // No redirect → no redirect measurement. The empty fixture is not a repo,
+      // so the gitStatus capture contributes nothing either.
+      await gate('call_r2', 'bash', { command: 'npm test' })
+      expect(judgeCalls[1].user).not.toContain('redirects')
+    } finally {
+      session?.dispose()
+      await rmdir(cwd)
+    }
   })
 
   it('a protected redirect target (shell rc file) is reported, never waved through', async () => {
