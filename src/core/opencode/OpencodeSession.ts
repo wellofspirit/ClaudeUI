@@ -155,21 +155,14 @@ import {
   autoModeReviewBlock,
   readOnlyReviewBlock
 } from '../automode/denial-tracker'
-import { effectiveShellCwd } from '../automode/read-only-gate'
+import { captureShellActionMeta } from '../automode/action-meta'
 import type { AllowSkipAction } from '../automode/allow-rule-skip'
 import { isShellToolName } from '../automode/shell-lexical'
 import {
-  analyzeRedirects,
-  captureGitConfigArmed,
   captureGitRemotes,
-  captureGitStatus,
   captureRepoVisibility,
-  hasGitSegment,
-  needsGitStatus,
-  needsRepoVisibility,
   recordToolOutcome,
   shellCommandOf,
-  tempDirRoots,
   type GitRemote,
   type RepoVisibility,
   type ToolOutcome
@@ -419,6 +412,9 @@ export class OpencodeSession extends BaseSession {
   private resumeSessionId: string | undefined
   /** The last turn was held before sending for a ChatGPT sign-in (ADR-097 §5). */
   private authHeld = false
+  /** Construction time: redirect mtimes at or after it are `modifiedSinceSessionStart`.
+   *  A resumed session restarts the clock — deliberately conservative. */
+  private readonly sessionStartMs = Date.now()
 
   constructor(
     routingId: string,
@@ -2189,24 +2185,19 @@ export class OpencodeSession extends BaseSession {
   ): Promise<Record<string, unknown> | undefined> {
     const command = shellCommandOf(toolName, input)
     if (!command) return undefined
-    const meta: Record<string, unknown> = {}
-    if (needsGitStatus(command)) {
-      const gitStatus = await captureGitStatus(this.cwd)
-      if (gitStatus) meta.gitStatus = gitStatus
-    }
-    if (needsRepoVisibility(command)) meta.repoVisibility = await this.sessionVisibility()
-    const redirects = analyzeRedirects(command, {
+    // opencode's shell honours `input.workdir`, resolved against the session
+    // directory — the same rule the read-only gate uses.
+    return captureShellActionMeta({
+      command,
+      input,
       cwd: this.cwd,
-      tempDirs: tempDirRoots(),
-      additionalDirectories: this.mergedUserPermissions().additionalDirectories
+      honoursWorkdir: true,
+      // opencode's shell is PowerShell on win32 and POSIX elsewhere.
+      shell: process.platform === 'win32' ? 'powershell' : 'posix',
+      additionalDirectories: this.mergedUserPermissions().additionalDirectories,
+      sessionStartMs: this.sessionStartMs,
+      repoVisibility: () => this.sessionVisibility()
     })
-    if (redirects) meta.redirects = redirects
-    if (hasGitSegment(command)) {
-      const runIn = effectiveShellCwd(this.cwd, input, true)
-      const armed = runIn === null ? null : await captureGitConfigArmed(runIn)
-      if (armed && armed.length > 0) meta.gitConfigArmed = armed
-    }
-    return Object.keys(meta).length > 0 ? meta : undefined
   }
 
   /**

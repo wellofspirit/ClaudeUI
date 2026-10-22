@@ -43,17 +43,10 @@ import {
 } from '../automode/denial-tracker'
 import { buildClassifierEnvironment } from '../automode/environment'
 import {
-  analyzeRedirects,
-  captureGitConfigArmed,
   captureGitRemotes,
-  captureGitStatus,
   captureRepoVisibility,
-  hasGitSegment,
-  needsGitStatus,
-  needsRepoVisibility,
   recordToolOutcome,
   shellCommandOf,
-  tempDirRoots,
   type GitRemote,
   type RepoVisibility,
   type ToolOutcome
@@ -68,7 +61,7 @@ import {
   type JudgePipelineReview,
   type JudgePipelineStage
 } from '../automode/judge-pipeline'
-import { effectiveShellCwd } from '../automode/read-only-gate'
+import { captureShellActionMeta } from '../automode/action-meta'
 import {
   judgeRouteUnavailableMessage,
   makeSessionJudgeTransport,
@@ -208,6 +201,9 @@ export class DispatchTargetJudge {
   private visibilityPromise: Promise<RepoVisibility> | undefined
   private staleJudgeModelReported = false
   private routeUnavailableReported = false
+  /** The target judge's construction time: redirect mtimes at or after it are
+   *  `modifiedSinceSessionStart`. A resumed session restarts the clock. */
+  private readonly sessionStartMs = Date.now()
 
   constructor(private readonly opts: DispatchTargetJudgeOptions) {
     // Memoized for the target's life, like each session memoizes its own
@@ -514,26 +510,19 @@ export class DispatchTargetJudge {
   ): Promise<Record<string, unknown> | undefined> {
     const command = shellCommandOf(toolName, input)
     if (!command) return undefined
-    const meta: Record<string, unknown> = {}
-    if (needsGitStatus(command)) {
-      const gitStatus = await captureGitStatus(this.opts.cwd)
-      if (gitStatus) meta.gitStatus = gitStatus
-    }
-    if (needsRepoVisibility(command)) {
-      meta.repoVisibility = await this.repoVisibility()
-    }
-    const redirects = analyzeRedirects(command, {
+    return captureShellActionMeta({
+      command,
+      input,
       cwd: this.opts.cwd,
-      tempDirs: tempDirRoots(),
-      additionalDirectories: permissions.additionalDirectories
+      honoursWorkdir,
+      // The TARGET engine's shell decides the dialect (pi's bash is POSIX;
+      // opencode's is PowerShell on win32, POSIX elsewhere).
+      shell:
+        this.opts.engine === 'opencode' && process.platform === 'win32' ? 'powershell' : 'posix',
+      additionalDirectories: permissions.additionalDirectories,
+      sessionStartMs: this.sessionStartMs,
+      repoVisibility: () => this.repoVisibility()
     })
-    if (redirects) meta.redirects = redirects
-    if (hasGitSegment(command)) {
-      const runIn = effectiveShellCwd(this.opts.cwd, input, honoursWorkdir)
-      const armed = runIn === null ? null : await captureGitConfigArmed(runIn)
-      if (armed && armed.length > 0) meta.gitConfigArmed = armed
-    }
-    return Object.keys(meta).length > 0 ? meta : undefined
   }
 
   /**
