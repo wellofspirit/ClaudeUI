@@ -166,7 +166,16 @@ describe('capsFor', () => {
         thinking: { reasoning: { enabled: false } }
       }
     })
-    expect(capsFor('openrouter', 'z-ai/glm-4.6').reasoning).toEqual({ fast: {}, thinking: {} })
+    // Unknown to the catalog: stage 1 (a 64-token grade) still never reasons; stage 2 keeps the model's default.
+    expect(capsFor('openrouter', 'deepseek/deepseek-v4.1-flash-1017').reasoning).toEqual({
+      fast: { reasoning: { enabled: false } },
+      thinking: {}
+    })
+    // Known not to reason: nothing to switch off.
+    expect(capsFor('openrouter', 'z-ai/glm-4.6', { reasoning: false }).reasoning).toEqual({
+      fast: {},
+      thinking: {}
+    })
   })
 
   it('openrouter: Claude models get no temperature; anthropic/* also gets the cache marker', () => {

@@ -80,6 +80,8 @@ describe('buildChatBody', () => {
       stream: true,
       usage: { include: true },
       stream_options: { include_usage: true },
+      // Stage 1 never reasons on OpenRouter unless the catalog says the model cannot (caps.ts).
+      reasoning: { enabled: false },
       max_tokens: 64,
       stop: ['</block>']
     })

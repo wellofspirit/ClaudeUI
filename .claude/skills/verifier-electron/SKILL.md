@@ -187,10 +187,45 @@ Known selectors: settings gear = `[title="Settings"]`; quick-panel → full dial
 `text=All Settings`. For new selectors, run with `--keep` and inspect, or grep the
 renderer source for `title=`/`aria-label`/button text.
 
+## Driving a full session turn (only with the owner's OK for a live turn)
+
+`app-shot.mjs` is single-shot: one screenshot after a fixed wait. A judged turn
+takes 5–15 s and needs evidence per prompt, so write a small purpose-built
+driver that reuses its launch contract (`CLAUDEUI_DISABLE_REMOTE=1`,
+`CLAUDEUI_HEADLESS=1`, `CLAUDEUI_VERIFIER_HOOKS=1`). Learned on a live auto-mode
+judge run:
+
+- **New session without the folder picker.** The welcome dropdown ends in
+  `useSessionStore.createNewSession(routingId, cwd)`; call it through
+  `window.__claudeuiVerifier.sessionStore`, then the composer pickers' own store
+  actions `setSelectedEngine`, `setSelectedModel` and
+  `changePermissionMode(id, 'auto')`. Type into `InputBox.textarea`, send with Enter.
+- **pi rekeys the session id on its first spawn.** The id you passed becomes pi's
+  own (`01a1…`) after the first turn; poll `getState().activeSessionId` after each
+  send, and after a relaunch read the sidebar row's `SessionItem[data-id]`.
+- **Verdict lines.** `CLAUDE_UI_LOG_DIR` (read at module load) redirects the
+  main-process daily log (`YYYYMMDD.log`) into your report folder; the judge
+  writes `auto-mode allow (stage=…[, sev=…][, overturned=block]) <tool>` /
+  `auto-mode block …` under `[PiSession]` / `[OpencodeSession]`.
+- **Review chips are ephemeral.** `ToolCard.reviewChip` / `ToolCard.review`
+  (expand with `ToolCard.expand`) render in the launch that judged the call and
+  are gone after a relaunch — capture them in the same launch.
+- **The agent may refuse before calling a tool**, which yields no verdict at all:
+  check for a `tool_use` block before calling a missing verdict a failure.
+- **A command the user types verbatim is consent** (Requested Exact Action): it
+  cannot test a should-block path. A block check needs an action the user did not
+  name.
+- **pi's model picker lists only authenticated pi providers**
+  (`availableModels` filtered by `engineId === 'pi'`); the judge model is
+  `window.api.loadEngineConfig('pi').autoMode.judgeModel`.
+- `[harness] detection (boot): … pi none` reports PATH detection only; the managed
+  store's pi still spawns.
+
 ## Caveats — what you can't (safely) drive
 
-- **New session** needs the native OS folder picker (`dialog.showOpenDialog`),
-  which Playwright can't drive. Reach existing sessions via the sidebar instead.
+- **New session** through the UI needs the native OS folder picker
+  (`dialog.showOpenDialog`), which Playwright can't drive — reach existing sessions via
+  the sidebar, or create one through the store (see "Driving a full session turn").
 - **A live Claude turn** (prompt → response → approval → thinking → MCP) spends the
   user's API quota **and writes to real `~/.claude` transcripts**. Don't drive it
   live without explicit OK, or first isolate config (point the app at a throwaway

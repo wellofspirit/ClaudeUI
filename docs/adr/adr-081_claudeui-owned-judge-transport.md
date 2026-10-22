@@ -3,6 +3,7 @@
 **Status:** Accepted (2026-09-28; owner rulings of the same day, one open item in §5). Implementation is arc 1 of the 3.6
 line on branch `harnesses`. §4's output cap is amended by
 [ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) (2026-09-29).
+Amended 2026-10-22 by [ADR-106](adr-106_judge-calibration-measured-facts.md) (OpenRouter stage 1 never reasons unless the catalog says the model does not).
 **Supersedes:** [ADR-037 (engine fork patch policy)](adr-037_engine-fork-patch-policy.md) §1 and
 its opencode bump protocol (§3). Its §2, "pi: extend, don't patch", stands.
 **Amends:** [ADR-023](adr-023_opencode-automode-classifier.md) (the judge no longer runs through

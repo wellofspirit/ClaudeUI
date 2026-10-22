@@ -83,8 +83,12 @@ const SHORT_NAME_ALIAS = /^[^.~]{1,6}~\d+(\.[^.]{1,3})?$/
  *    including the two non-ASCII letters whose uppercase is an ASCII one
  *    (U+0131 dotless i → I, U+017F long s → S), as cli.js does.
  * A drive component (`C:`) folds to a single letter and so never matches.
+ *
+ * EXPORTED so the redirect scanner's protected-component check folds names the
+ * same way this list does (one notion of `.git`/`.bashrc`, ADS suffix and
+ * trailing dot included).
  */
-function foldName(component: string): string {
+export function foldName(component: string): string {
   const colon = component.indexOf(':')
   const base = colon === -1 ? component : component.slice(0, colon)
   return base

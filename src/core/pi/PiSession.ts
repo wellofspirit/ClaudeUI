@@ -135,24 +135,17 @@ import {
   autoModeReviewBlock,
   readOnlyReviewBlock
 } from '../automode/denial-tracker'
-import { effectiveShellCwd } from '../automode/read-only-gate'
+import { captureShellActionMeta } from '../automode/action-meta'
 import type { AllowSkipAction } from '../automode/allow-rule-skip'
 import { runJudgePipeline } from '../automode/judge-pipeline'
 import { armBlockHold, blockHoldMs } from '../automode/block-hold'
 import { blockGrantKey, type BlockedCall } from '../automode/blocked-calls'
 import { inTimeOrder } from '../automode/trajectory'
 import {
-  analyzeRedirects,
-  captureGitConfigArmed,
   captureGitRemotes,
-  captureGitStatus,
   captureRepoVisibility,
-  hasGitSegment,
-  needsGitStatus,
-  needsRepoVisibility,
   recordToolOutcome,
   shellCommandOf,
-  tempDirRoots,
   type GitRemote,
   type RepoVisibility,
   type ToolOutcome
@@ -603,6 +596,9 @@ export class PiSession extends BaseSession {
   /** Accumulated ACTIVE (turn-processing) duration of completed turns, ms. Not seeded on
    *  resume in M1 (only cost is — see the kickoff spec's resume bullet); starts at 0. */
   private accTotalDurationMs = 0
+  /** Construction time: redirect mtimes at or after it are `modifiedSinceSessionStart`.
+   *  A resumed session restarts the clock — deliberately conservative. */
+  private readonly sessionStartMs = Date.now()
 
   constructor(
     routingId: string,
@@ -2890,34 +2886,20 @@ export class PiSession extends BaseSession {
   ): Promise<Record<string, unknown> | undefined> {
     const command = shellCommandOf(toolName, input)
     if (!command) return undefined
-    const meta: Record<string, unknown> = {}
-    if (needsGitStatus(command)) {
-      const gitStatus = await captureGitStatus(this.cwd)
-      if (gitStatus) meta.gitStatus = gitStatus
-    }
-    if (needsRepoVisibility(command)) {
-      meta.repoVisibility = await this.sessionVisibility()
-    }
-    // Pure and synchronous — no subprocess, so unlike the captures above it
-    // costs nothing to attempt on every shell action. Scope mirrors what
-    // `classifierEnvironment` publishes (cwd + the user's additionalDirectories)
-    // plus the process's temp roots.
-    const redirects = analyzeRedirects(command, {
+    // Scope mirrors what `classifierEnvironment` publishes (cwd + the user's
+    // additionalDirectories) plus the process's temp roots; pi's `bash` has no
+    // `workdir`, so the shell starts in the session cwd.
+    return captureShellActionMeta({
+      command,
+      input,
       cwd: this.cwd,
-      tempDirs: tempDirRoots(),
-      additionalDirectories: this.currentRules().additionalDirectories
+      honoursWorkdir: false,
+      // pi's `bash` is a POSIX shell everywhere (Git Bash on win32).
+      shell: 'posix',
+      additionalDirectories: this.currentRules().additionalDirectories,
+      sessionStartMs: this.sessionStartMs,
+      repoVisibility: () => this.sessionVisibility()
     })
-    if (redirects) meta.redirects = redirects
-    // ADR-084 §2 — repo-local git config that makes git run a program. pi's
-    // bash always runs in the session cwd (it has no `workdir`). Only a
-    // non-empty list is emitted: `[]` (clean) and `null` (not measured) both
-    // say nothing, per this method's rule that absence is never "fine".
-    if (hasGitSegment(command)) {
-      const runIn = effectiveShellCwd(this.cwd, input, false)
-      const armed = runIn === null ? null : await captureGitConfigArmed(runIn)
-      if (armed && armed.length > 0) meta.gitConfigArmed = armed
-    }
-    return Object.keys(meta).length > 0 ? meta : undefined
   }
 
   /** One banner per session, whatever made the configured judge model unusable. */

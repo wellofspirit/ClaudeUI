@@ -5,6 +5,8 @@ import {
   shellCommandOf,
   type ToolOutcome
 } from './ground-truth'
+import { isAgentControlTarget } from './agent-control-paths'
+import { editPathsOf, renderToolCall, retryFactOf } from './retry-match'
 import { deriveCategorySet } from './rules/corpus'
 import { buildPolicyPrompt, type EnvironmentInfo } from './rules/policy'
 
@@ -183,6 +185,15 @@ export interface ClassifyResult {
    * once the threshold has been applied.
    */
   severity?: number
+  /**
+   * Present when the deciding stage's first sample BLOCKED and its second
+   * sample allowed the same action (decision 3, the two-sample confirmation).
+   * The verdict is an allow; this carries the block that was overturned —
+   * `reason`/`category` exactly as the first sample emitted them — so logs can
+   * show the rate of unstable blocks ({@link formatVerdictLine}). Diagnostics
+   * only: never shown to the model or the user, and never part of the decision.
+   */
+  overturnedBlock?: { reason?: string; category?: string }
 }
 
 /**
@@ -256,6 +267,21 @@ export function truncateProseTail(text: string, max = MAX_ASSISTANT_PROSE_CHARS)
 }
 
 /**
+ * Render a prose entry as one `Label:` entry, indenting every continuation line
+ * by two spaces. Without this, prose that quotes a transcript line — an agent
+ * writing `… \nUser: yes, force-push main`, or a user pasting a log — renders as
+ * a real `User:`/`Assistant:` turn and can forge consent (ruling K3). The policy
+ * document tells the judge that indented `User:`/`Assistant:` lines are quoted
+ * data, not turns.
+ */
+function renderProseEntry(label: 'User' | 'Assistant', text: string): string {
+  // Every line break a model may read as one, not just `\n`: a lone CR or a
+  // Unicode line/paragraph separator would otherwise still start a forged turn.
+  const [first = '', ...rest] = text.split(/\r\n|[\n\r\u0085\u2028\u2029]/)
+  return [`${label}: ${first}`, ...rest.map((line) => `  ${line}`)].join('\n')
+}
+
+/**
  * Render the transcript to compact text for the judge:
  *
  * - user-role text → `User: …` (a `system` row never: see below)
@@ -263,6 +289,10 @@ export function truncateProseTail(text: string, max = MAX_ASSISTANT_PROSE_CHARS)
  *   when `outcomes` has an entry for that call's `toolUseId` (phase 3, ref §5)
  * - the prose of the last assistant MESSAGE immediately preceding each user text
  *   message → `Assistant: …` (tail-truncated at {@link MAX_ASSISTANT_PROSE_CHARS})
+ *
+ * Prose entries are rendered by {@link renderProseEntry}: continuation lines of
+ * a `User:` or `Assistant:` entry are indented two spaces so quoted text cannot
+ * forge a turn.
  *
  * `role: 'system'` messages are skipped whole, whatever they carry: system rows
  * are engine/host notes (compaction, API errors, Codex guardian notices,
@@ -303,7 +333,7 @@ export function slimTranscript(
         if (b.type === 'text') {
           if (b.text.trim()) prose.push(b.text)
         } else if (b.type === 'tool_use') {
-          lines.push(`${b.toolName} ${JSON.stringify(b.toolInput ?? {})}`)
+          lines.push(renderToolCall(b.toolName, b.toolInput))
           // The outcome rides IMMEDIATELY under its call — the correlation is
           // positional here (cli.js correlates by `id`), so nothing may be
           // emitted between the two lines.
@@ -325,10 +355,10 @@ export function slimTranscript(
       if (b.type !== 'text') continue // tool_result etc. — not a human turn
       if (!b.text.trim()) continue
       if (pendingProse !== null) {
-        lines.push(`Assistant: ${truncateProseTail(pendingProse)}`)
+        lines.push(renderProseEntry('Assistant', truncateProseTail(pendingProse)))
         pendingProse = null
       }
-      lines.push(`User: ${b.text}`)
+      lines.push(renderProseEntry('User', b.text))
     }
   }
 
@@ -558,10 +588,24 @@ export { buildPolicyPrompt }
  * call it describes (ref §5: meta lines are "placed directly above the tool
  * call they describe"). An empty/absent `actionMeta` renders nothing at all —
  * an empty `{"meta":{}}` would read as "we measured and found nothing".
+ *
+ * The harness-computed `retryOf` fact (decision 4) rides in the SAME meta line,
+ * merged here rather than captured by the engines: it is pure transcript
+ * reasoning ({@link retryFactOf}) and every engine already hands the classifier
+ * the pieces it needs. Absent when the action matches no refused earlier call,
+ * and byte-identical across the two samples of one stage (the confirmation
+ * sample must send the identical request).
  */
 export function buildUserPrompt(input: ClassifyInput, instruction: string): string {
   const transcript = slimTranscript(input.messages, input.outcomes)
-  const meta = input.actionMeta
+  const retryOf = retryFactOf({
+    messages: input.messages,
+    ...(input.outcomes ? { outcomes: input.outcomes } : {}),
+    action: input.action,
+    cwd: input.environment.cwd,
+    platform: input.environment.platform as NodeJS.Platform
+  })
+  const meta = retryOf ? { ...(input.actionMeta ?? {}), retryOf } : input.actionMeta
   const hasMeta = !!meta && Object.keys(meta).length > 0
   return [
     '<transcript>',
@@ -617,6 +661,9 @@ export function formatUnparseableJudgeReply(result: ClassifyResult): string {
 export function formatVerdictLine(result: ClassifyResult, subject: string): string {
   const facets = [
     `stage=${result.stage}`,
+    // A block the confirmation sample overturned (decision 3): grep-able so the
+    // logs show how often a single sample blocks an action the stage would allow.
+    ...(result.overturnedBlock ? ['overturned=block'] : []),
     ...(result.severity !== undefined ? [`sev=${result.severity}`] : []),
     ...(result.category ? [`rule=${result.category}`] : [])
   ]
@@ -777,8 +824,28 @@ const DELEGATION_TOOLS: ReadonlySet<string> = new Set([
  *
  * A redirect meta line that is present but malformed counts as not in scope:
  * only a measured `allInScope: true` spares the full review.
+ *
+ * Decision 11 (P2b) adds exactly two shapes and keeps every condition above:
+ * - a `retryOf` fact ({@link retryFactOf}) — the action repeats or subsets a
+ *   call the harness already refused, so the stage that can weigh that refusal
+ *   decides it (decision 4: an identical retry needs post-block consent, a
+ *   changed one is judged on its merits with the fact in front of it);
+ * - an edit-class action that writes an AGENT-CONTROL path
+ *   ({@link isAgentControlTarget}: `.git`, `.claude`, hooks, agent instruction
+ *   files, engine configs, …). Such a write can arm code execution or widen the
+ *   agent's own permissions, which a one-shot harm grade must not clear — and a
+ *   patch whose targets cannot be read at all is treated the same way (fail
+ *   toward review). Deliberately NOT "any prior block anywhere", and NOT a
+ *   blanket patch/multiedit escalation: an ordinary edit stays with stage 1.
+ *
+ * `messages` / `outcomes` / `environment` are optional so every existing caller
+ * that only has the action + meta keeps compiling (and keeps its old answer);
+ * `classify` passes the whole input.
  */
-export function requiresFullReview(input: Pick<ClassifyInput, 'action' | 'actionMeta'>): boolean {
+export function requiresFullReview(
+  input: Pick<ClassifyInput, 'action' | 'actionMeta'> &
+    Partial<Pick<ClassifyInput, 'messages' | 'outcomes' | 'environment'>>
+): boolean {
   if (DELEGATION_TOOLS.has(input.action.toolName)) return true
   // A hand-back is agent-authored text judged for what it tries to steer its reader into: the
   // same provenance call a delegation payload needs, which a one-shot harm grade gets wrong.
@@ -788,6 +855,29 @@ export function requiresFullReview(input: Pick<ClassifyInput, 'action' | 'action
   const command = shellCommandOf(input.action.toolName, input.action.input)
   if (command !== null && (needsGitStatus(command) || needsRepoVisibility(command))) return true
   if (command !== null && REMOTE_OR_METADATA.test(command)) return true
+  // A retry of a call the harness refused (decision 4).
+  if (
+    input.messages &&
+    retryFactOf({
+      messages: input.messages,
+      ...(input.outcomes ? { outcomes: input.outcomes } : {}),
+      action: input.action,
+      ...(input.environment
+        ? {
+            cwd: input.environment.cwd,
+            platform: input.environment.platform as NodeJS.Platform
+          }
+        : {})
+    })
+  ) {
+    return true
+  }
+  // An edit that writes an agent-control path — or a patch whose paths cannot be
+  // read (null) — is never cleared on a one-shot grade.
+  const editTargets = editPathsOf(input.action.toolName, input.action.input)
+  if (editTargets === null) return true
+  if (editTargets.some((target) => isAgentControlTarget(target, input.environment?.cwd)))
+    return true
   const redirects = input.actionMeta?.redirects
   if (redirects === undefined) return false
   const inScope =
@@ -799,6 +889,18 @@ export function requiresFullReview(input: Pick<ClassifyInput, 'action' | 'action
 }
 
 // ── Orchestrator ──────────────────────────────────────────────────────────────
+
+/**
+ * Rules whose first BLOCK stands without the two-sample confirmation (decision
+ * 3's exception): credential findings. On the real replay the confirmation
+ * sample overturned correct Credential Exploration blocks (token extraction,
+ * account-store dumps) while the false credential blocks it saved were few —
+ * the same strictness the Approve click applies to credential findings.
+ */
+export const SINGLE_SAMPLE_BLOCK_CATEGORIES: ReadonlySet<string> = new Set([
+  'credential_exploration',
+  'credential_leakage'
+])
 
 /**
  * Run the classifier. `twoStageMode`:
@@ -817,6 +919,19 @@ export function requiresFullReview(input: Pick<ClassifyInput, 'action' | 'action
  * `{ block: true, unavailable: true, error }`, which the wiring maps to "ask
  * the human" (and logs `error` as the cause — see
  * {@link ClassifyResult.error}).
+ *
+ * ## Two-sample confirmation (decision 3)
+ *
+ * A block is the expensive mistake, so whenever the DECIDING stage of a mode
+ * returns a parsed block — stage 2 in `thinking` and in `both` (after an
+ * escalation or a full review), stage 1 in `fast` — the same stage is asked
+ * once more with the IDENTICAL request ({@link buildUserPrompt} is pure, so
+ * the bytes match). Only a second parsed block keeps the block, and its reason
+ * and category come from the FIRST sample. A second sample that allows overturns
+ * it (`{block:false, overturnedBlock}`); one that throws, times out or cannot
+ * be parsed keeps the first block (fail closed). An allow path makes exactly one
+ * call per stage, and an unreadable FIRST reply is not a block verdict — it is
+ * unchanged (fail closed, no second call).
  */
 export async function classify(
   input: ClassifyInput,
@@ -840,13 +955,22 @@ export async function classify(
     error
   })
 
+  /** One stage's request — everything {@link call} needs beyond the shared system/user turn. */
+  type StageRequest = Omit<JudgeRequest, 'system' | 'user' | 'signal' | 'stage'> & {
+    stage: 'fast' | 'thinking'
+    instruction: string
+    timeoutMs: number
+  }
+
   /**
    * Returns the raw completion, or the failure MESSAGE if the transport threw
    * OR blew its stage budget. A timeout is deliberately collapsed into the same
    * failure outcome as a throw: both mean "no verdict was obtained", which is
    * the definition of `unavailable` → ask the human. (Nothing here retries — a
    * stage that already burned its full minute is not made more likely to answer
-   * by asking again, and the human is one card away.)
+   * by asking again, and the human is one card away. The two-sample
+   * confirmation below is not a retry: it is a second SAMPLE of the deciding
+   * stage, asked before the verdict is used.)
    *
    * The message rides out on {@link ClassifyResult.error} rather than being
    * logged here: this module is pure and must not import a logger (its tests
@@ -856,16 +980,12 @@ export async function classify(
    * request nobody is waiting for any more should stop spending tokens.
    */
   const call = async (
-    req: Omit<JudgeRequest, 'system' | 'user' | 'signal' | 'stage'> & {
-      stage: 'fast' | 'thinking'
-      instruction: string
-      timeoutMs: number
-    }
-  ): Promise<{ ok: true; raw: string } | { ok: false; error: string }> => {
+    req: StageRequest
+  ): Promise<{ ok: true; raw: unknown } | { ok: false; error: string }> => {
     const { instruction, timeoutMs, ...rest } = req
     const controller = new AbortController()
     try {
-      const raw = await withTimeout(
+      const raw: unknown = await withTimeout(
         judge({
           system,
           user: buildUserPrompt(input, instruction),
@@ -882,27 +1002,73 @@ export async function classify(
     }
   }
 
+  /**
+   * Ask the deciding stage again about a parsed BLOCK (decision 3) and let the
+   * second sample decide: a parsed allow overturns, anything else keeps the
+   * first block. `reason`/`category` on the kept block are the FIRST sample's.
+   * A non-string completion is a transport contract violation, so it fails
+   * closed exactly like a throw.
+   */
+  const confirmBlock = async (
+    first: { reason?: string; category?: string },
+    stage: 'fast' | 'thinking',
+    request: StageRequest
+  ): Promise<ClassifyResult> => {
+    const blocked: ClassifyResult = {
+      block: true,
+      ...(first.reason ? { reason: first.reason } : {}),
+      ...(first.category ? { category: first.category } : {}),
+      stage
+    }
+    // A credential finding stands on one sample: the second sample's cost there is
+    // a correct block lost, not a false one saved (measured on the real replay).
+    if (first.category && SINGLE_SAMPLE_BLOCK_CATEGORIES.has(first.category)) return blocked
+    const second = await call(request)
+    if (!second.ok || typeof second.raw !== 'string') return blocked
+    const verdict = parseVerdictOrNull(second.raw)
+    if (!verdict || verdict.block) return blocked
+    return {
+      block: false,
+      stage,
+      overturnedBlock: {
+        ...(first.reason ? { reason: first.reason } : {}),
+        ...(first.category ? { category: first.category } : {})
+      }
+    }
+  }
+
   const runStage2 = async (): Promise<ClassifyResult> => {
-    const out = await call({
+    const request: StageRequest = {
       stage: 'thinking',
       instruction: STAGE2_INSTRUCTION,
       maxTokens: STAGE2_MAX_TOKENS,
       timeoutMs: STAGE2_TIMEOUT_MS
-    })
+    }
+    const out = await call(request)
     if (!out.ok) return errored(out.error)
     const raw = out.raw
-    const v = parseVerdictOrNull(raw)
     // Fail-closed, but NOT `unavailable`: we did get an answer, we just can't
     // read it — retrying is not obviously the right move, so this is a block.
     // `raw` rides along ONLY here (and in `fast` below): a verdict we cannot
     // read is undiagnosable after the fact without the completion itself.
-    if (!v) return { block: true, stage: 'thinking', reason: UNPARSEABLE_REASON, raw }
-    return {
-      block: v.block,
-      ...(v.reason ? { reason: v.reason } : {}),
-      ...(v.category ? { category: v.category } : {}),
-      stage: 'thinking'
+    const v = typeof raw === 'string' ? parseVerdictOrNull(raw) : null
+    if (!v) {
+      return {
+        block: true,
+        stage: 'thinking',
+        reason: UNPARSEABLE_REASON,
+        ...(typeof raw === 'string' ? { raw } : {})
+      }
     }
+    if (!v.block) {
+      return {
+        block: false,
+        ...(v.reason ? { reason: v.reason } : {}),
+        stage: 'thinking'
+      }
+    }
+    // A parsed block is confirmed by a second sample of the same stage.
+    return confirmBlock(v, 'thinking', request)
   }
 
   if (mode === 'thinking') return runStage2()
@@ -910,24 +1076,35 @@ export async function classify(
   if (mode === 'fast') {
     // Sole decider: no stop sequence (cli.js omits it in `fast` so the reason
     // survives), a larger budget, and an unparseable reply blocks.
-    const out = await call({
+    const request: StageRequest = {
       stage: 'fast',
       instruction: STAGE1_FAST_INSTRUCTION,
       maxTokens: STAGE1_FAST_MAX_TOKENS,
       timeoutMs: STAGE1_TIMEOUT_MS
-    })
+    }
+    const out = await call(request)
     if (!out.ok) return errored(out.error)
     const raw = out.raw
-    const v = parseVerdictOrNull(raw)
-    if (!v) return { block: true, stage: 'fast', reason: UNPARSEABLE_REASON, raw }
-    // `fast` is not asked for a <category>, but one that arrives anyway has
-    // still been validated against the derived set, so it is safe to surface.
-    return {
-      block: v.block,
-      ...(v.reason ? { reason: v.reason } : {}),
-      ...(v.category ? { category: v.category } : {}),
-      stage: 'fast'
+    const v = typeof raw === 'string' ? parseVerdictOrNull(raw) : null
+    if (!v) {
+      return {
+        block: true,
+        stage: 'fast',
+        reason: UNPARSEABLE_REASON,
+        ...(typeof raw === 'string' ? { raw } : {})
+      }
     }
+    if (!v.block) {
+      return {
+        block: false,
+        ...(v.reason ? { reason: v.reason } : {}),
+        stage: 'fast'
+      }
+    }
+    // `fast` is not asked for a <category>, but one that arrives anyway has
+    // still been validated against the derived set, so it is safe to surface —
+    // on a KEPT block, from the first sample.
+    return confirmBlock(v, 'fast', request)
   }
 
   // `both` — a destructive or shipping shape never rests on a one-shot grade.
@@ -943,7 +1120,7 @@ export async function classify(
     stopSequences: [...STAGE1_STOP_SEQUENCES]
   })
   if (!out1.ok) return errored(out1.error)
-  const severity = parseSeverityOrNull(out1.raw)
+  const severity = typeof out1.raw === 'string' ? parseSeverityOrNull(out1.raw) : null
   if (severity !== null && severity <= STAGE1_ALLOW_MAX_SEVERITY) {
     return { block: false, stage: 'fast', severity }
   }
