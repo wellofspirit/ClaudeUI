@@ -311,7 +311,8 @@ export class RemoteConnection {
   private reconnectAttempt = 0
   /**
    * Consecutive chunked transfers this client had to abandon, since the last
-   * successful apply. {@link MAX_BROKEN_SYNC_TRANSFERS} is the giving-up point.
+   * successful sync answer (a full apply or a catchup).
+   * {@link MAX_BROKEN_SYNC_TRANSFERS} is the giving-up point.
    */
   private brokenSyncTransfers = 0
   /**
@@ -1523,6 +1524,9 @@ export class RemoteConnection {
         {
           const catchup = msg as WsSyncCatchup
           this.sync.applyCatchup(catchup.events, catchup.epoch)
+          // Same proof as a full apply: the host answered a sync, so a rare
+          // break days apart must not accumulate toward the give-up latch.
+          this.brokenSyncTransfers = 0
           this.setState('connected')
           this.startPing()
         }

@@ -266,6 +266,15 @@ function RemoteApp(): React.JSX.Element {
     if (state === 'passkey-required') {
       setPhase((prev) => (prev.kind === 'enroll' ? prev : { kind: 'passkey', error: err }))
     }
+    // Retire a passkey phase as soon as the socket is ACCEPTED, not only at
+    // `connected`: the full sync that follows a passkey sign-in is the long
+    // part of the wait (seconds, on a phone), and it has to show the overlay's
+    // progress bar rather than the sign-in button the ceremony already
+    // finished with. A ceremony owed again later re-enters via the branch
+    // above. The enroll phase is untouched — an enroll-only socket never syncs.
+    if (state === 'syncing') {
+      setPhase((prev) => (prev.kind === 'passkey' ? { kind: 'connecting' } : prev))
+    }
     // Reaching `connected` RETIRES a ceremony phase. Without this the screen
     // would latch for the page's lifetime and a later transient reconnect —
     // a phone waking up — would throw the operator back onto a sign-in button

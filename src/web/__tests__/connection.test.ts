@@ -1012,6 +1012,39 @@ describe('RemoteConnection — chunked sync-full', () => {
       conn.destroy()
     })
 
+    it('a successful catchup resets the count too', () => {
+      // A catchup proves the host can answer a sync just as a full apply does.
+      // Without the reset, rare one-off breaks spread over days (each followed
+      // by a catchup reconnect) would add up to a `failed` on a healthy host.
+      const { conn, internals } = make()
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const states: string[] = []
+      conn.setStateHandler((s) => states.push(s))
+      conn.connect()
+
+      openSocket()
+      breakTransfer(internals)
+      vi.advanceTimersToNextTimer()
+
+      openSocket()
+      internals.handleMessage({ type: 'sync-catchup', epoch: 'epoch-C', events: [] })
+      expect(states.at(-1)).toBe('connected')
+      const reconnects = states.filter((s) => s === 'reconnecting').length
+
+      for (let breakNumber = 1; breakNumber <= 2; breakNumber++) {
+        openSocket()
+        breakTransfer(internals)
+        if (breakNumber === 1) vi.advanceTimersToNextTimer()
+      }
+
+      expect(states).not.toContain('failed') // 2 breaks after the catchup, not 3
+      expect(states.filter((s) => s === 'reconnecting')).toHaveLength(reconnects + 2)
+      expect(states.at(-1)).toBe('reconnecting')
+      expect(internals.reconnectTimer).toBeDefined()
+      errors.mockRestore()
+      conn.destroy()
+    })
+
     it('an explicit connect() after failed revives the reconnect scheduling', () => {
       const { conn, internals } = make()
       const errors = vi.spyOn(console, 'error').mockImplementation(() => {})

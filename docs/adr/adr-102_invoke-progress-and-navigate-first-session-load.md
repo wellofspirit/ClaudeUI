@@ -146,10 +146,10 @@ a server-pushed frame, not an invoke response.
   1→30 s, "Reconnecting...") and syncs afresh. The backoff alone cannot bound this: each reconnect
   opens a socket, and a successful open resets the attempt counter, so a host fault that breaks
   EVERY transfer would re-download the snapshot about once a second forever. Three broken transfers
-  in a row (since the last successful apply) latch `failed` with "The host sent an incomplete state
-  snapshot several times in a row"; `scheduleReconnect` then declines, and the overlay's Retry
-  reloads the page. Silence, by contrast, would leave the owner staring at a frozen bar with nothing
-  to re-arm a sync.
+  in a row (since the last successful sync — a full apply or a catchup) latch `failed` with "The
+  host sent an incomplete state snapshot several times in a row"; `scheduleReconnect` then declines,
+  and the overlay's Retry reloads the page. Silence, by contrast, would leave the owner staring at a
+  frozen bar with nothing to re-arm a sync.
 - **Cost.** Re-escaping the JSON text inside a JSON string adds a few % on the wire (~3% on the
   measured 20.4 MB snapshot: 20,960,606 wire bytes vs 20,359,213 JSON characters, plaintext) and
   ~40 MB transient for a plaintext 40 MB snapshot; under E2E the phone's peak
