@@ -25,6 +25,8 @@ Sonnet 4.x $3/$15 until this entry. `defaultEffort()` now mirrors the catalog's
 `default_effort` (`medium` for Opus 5.5 and Sonnet 5.5, which Opus 5.5 already
 had at 2.1.280), and aliases are judged by the model they resolve to.
 
+**2.1.308:** complete baked catalog is byte-identical to 2.1.306 (19,901 characters): models, aliases, context limits, pricing tiers, capabilities, default effort and output limits need no mirror change. Native `--help` is unchanged. Provider-specific runtime resolution was not re-verified.
+
 **2.1.306:** no model added or removed and every alias unchanged (`opus` →
 `claude-opus-5-5`, `sonnet` → `claude-sonnet-5-5`, `haiku` → `claude-haiku-5-5`,
 `fable` → `claude-fable-5-1`). Three per-model facts moved: Sonnet 5.5's pricing

@@ -410,7 +410,9 @@ describeV2('opencode 2.x contract: the dispatcher with an opencode target', () =
 
   it('a judge block (no hold window): the call fails WITH the reason, nothing is written, the turn still returns', async () => {
     holder.blockHoldSeconds = 0
-    judgeReplies.push('<block>yes</block><reason>contract says no writes</reason>')
+    // A block requires a second confirming sample; an exhausted fixture defaults to allow.
+    const block = '<block>yes</block><reason>contract says no writes</reason>'
+    judgeReplies.push(block, block)
     const ctx = dispatchingChat('auto')
     const tag = nonce('blocked')
     const target = home.workspace('blocked')
@@ -419,7 +421,9 @@ describeV2('opencode 2.x contract: the dispatcher with an opencode target', () =
       { ...ctx, cwd: target }
     )
     expect(result.isError).toBeUndefined()
-    expect(judgeRequests).toHaveLength(1)
+    expect(judgeRequests).toHaveLength(2)
+    expect(judgeRequests[1].system).toBe(judgeRequests[0].system)
+    expect(judgeRequests[1].user).toBe(judgeRequests[0].user)
     expect(existsSync(join(target, 'judged.txt'))).toBe(false)
     // The model read the judge's reason as the tool's failure and carried on.
     const toolMessage = fixture.mentioning(tag).at(-1)?.messages.at(-1)

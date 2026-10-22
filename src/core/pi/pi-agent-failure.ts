@@ -12,7 +12,7 @@
  *
  * PORTED PATTERNS. The message patterns below are copied from pi's own
  * classifiers so the host agrees with pi on what "retryable" means. Source
- * tree: `vendor/pi-src/packages/ai/src/utils/`, ported from pi 1.3.0
+ * tree: `vendor/pi-src/packages/ai/src/utils/`, ported from pi 1.4.0
  * (`src/shared/harness-manifests/pi.json#tested`). A pin bump must re-diff
  * `overflow.ts` and `retry.ts` against the three blocks marked PORTED.
  *
@@ -33,7 +33,7 @@ export type PiAgentFailureInput =
   /** A `/cui-` prompt the runner refused to send. */
   | { kind: 'refused-command' }
 
-// ── PORTED from vendor/pi-src/packages/ai/src/utils/overflow.ts (pi 1.3.0) ──
+// ── PORTED from vendor/pi-src/packages/ai/src/utils/overflow.ts (pi 1.4.0) ──
 // OVERFLOW_PATTERNS, NON_OVERFLOW_PATTERNS and the Cerebras body-less case.
 // The silent-overflow cases (usage vs. context window) are not message
 // patterns and need the assistant message, so they are not ported.
@@ -62,7 +62,10 @@ const OVERFLOW_PATTERNS: readonly RegExp[] = [
   /range of input length should be/i, // DashScope / Qwen Token Plan
   /context[_ ]length[_ ]exceeded/i, // Generic fallback
   /too many tokens/i, // Generic fallback
-  /token limit exceeded/i // Generic fallback
+  /token limit exceeded/i, // Generic fallback
+  // HTTP 413 means request-size overflow regardless of provider or body text.
+  // Match raw SDK errors and formatProviderError's prefix, not a status mentioned in the body.
+  /^(?:[\w -]+ API error \(413\):|413(?:\s|:|$))/i
 ]
 
 /** Cerebras answers an overflow with a body-less 400/413 (pi gates it on `provider === 'cerebras'`, which a bare message cannot know; the shape itself is distinctive enough). */
@@ -75,7 +78,7 @@ const NON_OVERFLOW_PATTERNS: readonly RegExp[] = [
   /too many requests/i // Generic HTTP 429 style
 ]
 
-// ── PORTED from vendor/pi-src/packages/ai/src/utils/retry.ts (pi 1.3.0) ─────
+// ── PORTED from vendor/pi-src/packages/ai/src/utils/retry.ts (pi 1.4.0) ─────
 function buildProviderErrorPattern(patterns: readonly string[]): RegExp {
   return new RegExp(patterns.join('|'), 'i')
 }
@@ -101,7 +104,10 @@ const PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
 
   // Sign in with ChatGPT: the subscription's shared usage limit, which resets
   // after hours rather than seconds.
-  'subscription_sharing_usage_limit_exceeded'
+  'subscription_sharing_usage_limit_exceeded',
+  // Business workspace admin limits are resumable under ADR-089, even though
+  // pi excludes them from automatic retries. An admin can raise the limit.
+  'subscription_sharing_workplace_individual_usage_limit_exceeded'
 ])
 
 /** RETRYABLE_PROVIDER_ERROR_PATTERN: pi's own "restart the turn" errors. */
@@ -114,13 +120,8 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
   'model is at capacity',
   'rate.?limit',
   'too many requests',
-  '429',
-  '500',
-  '502',
-  '503',
-  '504',
-  '520',
-  '524',
+  // Status codes must not be part of a longer word or number.
+  '(?<![a-z0-9])(?:429|500|502|503|504|520|524)(?![a-z0-9])',
   // Also matches "The service is temporarily unavailable" (#10965).
   'service.?(?:is.?)?(?:temporarily.?)?unavailable',
   'server.?error',
@@ -134,6 +135,10 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
   // Gateway failure relaying the upstream response stream, sent as an OpenAI
   // Responses `response.failed` event without an error code (#10920).
   'unable to forward upstream',
+  'upstream.?request.?failed',
+  'upstream_stream_read_error',
+  'stream was interrupted',
+  'http/?2 stream failed',
 
   // Network, proxy, and fetch transport failures. This includes OpenAI Codex
   // raw-fetch failures such as "upstream connect", "connection refused", and
@@ -144,6 +149,8 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
   'connection.?lost',
   'other side closed',
   'fetch failed',
+  // node-fetch system errors, including Google ADC OAuth token fetch failures.
+  'request to \\S+ failed, reason:',
   'getaddrinfo',
   'ENOTFOUND',
   'EAI_AGAIN',
@@ -166,6 +173,7 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
   'stream ended before message_stop',
   'stream ended before a terminal response event',
   'http2 request did not get a response',
+  'stream disconnected before completion',
   // Node ERR_HTTP2_STREAM_CANCEL: the HTTP/2 session died before the request was
   // sent, e.g. after the Bedrock SDK's 5-minute session timeout (#10379).
   'pending stream has been canceled',

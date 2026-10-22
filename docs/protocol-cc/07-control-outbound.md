@@ -1424,3 +1424,7 @@ cli.js arms a 5-minute (`Fc1 = 300000` ms) timer per non-result message. If fire
 | `supportedModels() / Commands() / Agents()` | (reads cached initialize response)    |
 | (no method)                                 | `rename_session` — REPL bridge only   |
 | (no method)                                 | `file_suggestions` — REPL bridge only |
+
+## 2.1.308 bounded schema audit
+
+The bundle adds internal outbound queries `list_cloud_sessions` (optional `user_initiated`), `get_cloud_session` (`session_id`), and `get_cloud_session_transcript` (`session_id`, optional `cursor`). They read cloud sessions using the CLI's sign-in and have host/entrypoint restrictions. ClaudeUI does not issue them; their runtime availability was not tested. This is a schema audit, not a new host capability.
