@@ -6,7 +6,8 @@ import {
   type ToolOutcome
 } from './ground-truth'
 import { isAgentControlTarget } from './agent-control-paths'
-import { editPathsOf, renderToolCall, retryFactOf } from './retry-match'
+import { JudgeWireError } from './judge-http/types'
+import { editPathsOf, jsonLine, renderToolCall, retryFactOf } from './retry-match'
 import { deriveCategorySet } from './rules/corpus'
 import { buildPolicyPrompt, type EnvironmentInfo } from './rules/policy'
 
@@ -170,6 +171,22 @@ export interface ClassifyResult {
    */
   error?: string
   /**
+   * The failed call's HTTP status, when the transport's error carried one (a
+   * {@link JudgeWireError}). Set only together with `unavailable`. Lets the caller tell a
+   * rate limit from an outage without parsing {@link error}.
+   */
+  errorStatus?: number
+  /**
+   * When a 429 said the route recovers, epoch ms (`resets_at` / `retry-after`). Set only together
+   * with `unavailable`.
+   */
+  retryAtMs?: number
+  /**
+   * The failed route's cooldown key (`judgeRouteKey`), when the transport's error named one. Set
+   * only together with `unavailable`.
+   */
+  errorRouteKey?: string
+  /**
    * The judge's RAW completion text, present ONLY on a fail-closed unparseable
    * verdict (the one whose `reason` is {@link UNPARSEABLE_REASON}), so engine
    * wiring can debug-log what the judge actually said. Never present on a
@@ -275,9 +292,11 @@ export function truncateProseTail(text: string, max = MAX_ASSISTANT_PROSE_CHARS)
  * data, not turns.
  */
 function renderProseEntry(label: 'User' | 'Assistant', text: string): string {
-  // Every line break a model may read as one, not just `\n`: a lone CR or a
-  // Unicode line/paragraph separator would otherwise still start a forged turn.
-  const [first = '', ...rest] = text.split(/\r\n|[\n\r\u0085\u2028\u2029]/)
+  // Every line break a model may read as one, not just `\n`: a lone CR, form feed,
+  // vertical tab, an information separator (FS/GS/RS) or a Unicode line/paragraph
+  // separator would otherwise still start a forged turn.
+  // eslint-disable-next-line no-control-regex -- the control characters are the point
+  const [first = '', ...rest] = text.split(/\r\n|[\n\r\f\v\u001c\u001d\u001e\u0085\u2028\u2029]/)
   return [`${label}: ${first}`, ...rest.map((line) => `  ${line}`)].join('\n')
 }
 
@@ -371,13 +390,13 @@ export function renderAction(action: ClassifierAction): string {
     // The report as one quoted string: a `</transcript>` or a stage instruction inside it
     // stays inside the quotes instead of reading as prompt structure.
     const report = typeof action.input?.report === 'string' ? action.input.report : ''
-    return `${HAND_BACK_REVIEW_LABEL}: ${JSON.stringify(report)}`
+    return `${HAND_BACK_REVIEW_LABEL}: ${jsonLine(report)}`
   }
   if (action.agentMessage) {
     const message = typeof action.input?.message === 'string' ? action.input.message : ''
-    return `${AGENT_MESSAGE_REVIEW_LABEL}: ${JSON.stringify(message)}`
+    return `${AGENT_MESSAGE_REVIEW_LABEL}: ${jsonLine(message)}`
   }
-  return `${action.toolName} ${JSON.stringify(action.input ?? {})}`
+  return renderToolCall(action.toolName, action.input)
 }
 
 /**
@@ -658,9 +677,15 @@ export function formatUnparseableJudgeReply(result: ClassifyResult): string {
  * is what tells a threshold question from a policy question when a verdict is
  * disputed.
  */
-export function formatVerdictLine(result: ClassifyResult, subject: string): string {
+export function formatVerdictLine(
+  result: ClassifyResult,
+  subject: string,
+  /** Caller facets that follow `stage=` — the pipeline's `judge=fallback <label>`. */
+  extraFacets: readonly string[] = []
+): string {
   const facets = [
     `stage=${result.stage}`,
+    ...extraFacets,
     // A block the confirmation sample overturned (decision 3): grep-able so the
     // logs show how often a single sample blocks an action the stage would allow.
     ...(result.overturnedBlock ? ['overturned=block'] : []),
@@ -902,6 +927,30 @@ export const SINGLE_SAMPLE_BLOCK_CATEGORIES: ReadonlySet<string> = new Set([
   'credential_leakage'
 ])
 
+/** A credential rule named in free text, however it is spelled around the name. */
+const CREDENTIAL_RULE_TEXT = /credential[\s_-]*(?:exploration|leakage)/i
+
+/**
+ * Does this parsed block rest on ONE sample (the credential exemption)? The
+ * validated `category` slug is the clean signal, but it is brittle: a model that
+ * writes `Credential Exploration / Credential Leakage`, `Credential Exploration
+ * (adversarial)` or no category at all fails {@link parseCategory}'s exact-slug
+ * check, and `fast` mode is never asked for a category (its `<reason>` is one
+ * free sentence). So the exemption also holds when the RAW `<category>` text or
+ * the `<reason>` names a credential rule — a `[Credential Exploration] …` tag or
+ * a plain sentence that says so. Every extra match only keeps a block the second
+ * sample would have had to overturn: the fail-closed direction.
+ */
+export function isSingleSampleBlock(
+  first: { reason?: string; category?: string },
+  rawReply: string
+): boolean {
+  if (first.category && SINGLE_SAMPLE_BLOCK_CATEGORIES.has(first.category)) return true
+  const rawCategory = stripThinking(rawReply).match(/<category>([\s\S]*?)<\/category>/i)?.[1]
+  if (rawCategory !== undefined && CREDENTIAL_RULE_TEXT.test(rawCategory)) return true
+  return first.reason !== undefined && CREDENTIAL_RULE_TEXT.test(first.reason)
+}
+
 /**
  * Run the classifier. `twoStageMode`:
  *
@@ -948,11 +997,19 @@ export async function classify(
   // by `buildPolicyPrompt — byte-stability` in `__tests__/rules.test.ts`.
   const system = buildPolicyPrompt(input.environment)
 
-  const errored = (error: string): ClassifyResult => ({
+  /** A failed {@link call}: the message, plus what a wire error carried beyond it. */
+  type CallFailure = Pick<ClassifyResult, 'errorStatus' | 'retryAtMs' | 'errorRouteKey'> & {
+    error: string
+  }
+
+  const errored = (failure: CallFailure): ClassifyResult => ({
     block: true,
     stage: 'error',
     unavailable: true,
-    error
+    error: failure.error,
+    ...(failure.errorStatus !== undefined ? { errorStatus: failure.errorStatus } : {}),
+    ...(failure.retryAtMs !== undefined ? { retryAtMs: failure.retryAtMs } : {}),
+    ...(failure.errorRouteKey !== undefined ? { errorRouteKey: failure.errorRouteKey } : {})
   })
 
   /** One stage's request — everything {@link call} needs beyond the shared system/user turn. */
@@ -981,7 +1038,7 @@ export async function classify(
    */
   const call = async (
     req: StageRequest
-  ): Promise<{ ok: true; raw: unknown } | { ok: false; error: string }> => {
+  ): Promise<{ ok: true; raw: unknown } | ({ ok: false } & CallFailure)> => {
     const { instruction, timeoutMs, ...rest } = req
     const controller = new AbortController()
     try {
@@ -998,7 +1055,18 @@ export async function classify(
       )
       return { ok: true, raw }
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        // What a wire error knows beyond its message, for the caller's fallback and cooldown.
+        ...(err instanceof JudgeWireError
+          ? {
+              ...(err.status !== undefined ? { errorStatus: err.status } : {}),
+              ...(err.retryAtMs !== undefined ? { retryAtMs: err.retryAtMs } : {}),
+              ...(err.routeKey !== undefined ? { errorRouteKey: err.routeKey } : {})
+            }
+          : {})
+      }
     }
   }
 
@@ -1011,6 +1079,7 @@ export async function classify(
    */
   const confirmBlock = async (
     first: { reason?: string; category?: string },
+    firstRaw: string,
     stage: 'fast' | 'thinking',
     request: StageRequest
   ): Promise<ClassifyResult> => {
@@ -1022,7 +1091,7 @@ export async function classify(
     }
     // A credential finding stands on one sample: the second sample's cost there is
     // a correct block lost, not a false one saved (measured on the real replay).
-    if (first.category && SINGLE_SAMPLE_BLOCK_CATEGORIES.has(first.category)) return blocked
+    if (isSingleSampleBlock(first, firstRaw)) return blocked
     const second = await call(request)
     if (!second.ok || typeof second.raw !== 'string') return blocked
     const verdict = parseVerdictOrNull(second.raw)
@@ -1045,7 +1114,7 @@ export async function classify(
       timeoutMs: STAGE2_TIMEOUT_MS
     }
     const out = await call(request)
-    if (!out.ok) return errored(out.error)
+    if (!out.ok) return errored(out)
     const raw = out.raw
     // Fail-closed, but NOT `unavailable`: we did get an answer, we just can't
     // read it — retrying is not obviously the right move, so this is a block.
@@ -1068,7 +1137,7 @@ export async function classify(
       }
     }
     // A parsed block is confirmed by a second sample of the same stage.
-    return confirmBlock(v, 'thinking', request)
+    return confirmBlock(v, typeof raw === 'string' ? raw : '', 'thinking', request)
   }
 
   if (mode === 'thinking') return runStage2()
@@ -1083,7 +1152,7 @@ export async function classify(
       timeoutMs: STAGE1_TIMEOUT_MS
     }
     const out = await call(request)
-    if (!out.ok) return errored(out.error)
+    if (!out.ok) return errored(out)
     const raw = out.raw
     const v = typeof raw === 'string' ? parseVerdictOrNull(raw) : null
     if (!v) {
@@ -1104,7 +1173,7 @@ export async function classify(
     // `fast` is not asked for a <category>, but one that arrives anyway has
     // still been validated against the derived set, so it is safe to surface —
     // on a KEPT block, from the first sample.
-    return confirmBlock(v, 'fast', request)
+    return confirmBlock(v, typeof raw === 'string' ? raw : '', 'fast', request)
   }
 
   // `both` — a destructive or shipping shape never rests on a one-shot grade.
@@ -1119,7 +1188,7 @@ export async function classify(
     // Copy — the exported constant must not be mutable by a transport.
     stopSequences: [...STAGE1_STOP_SEQUENCES]
   })
-  if (!out1.ok) return errored(out1.error)
+  if (!out1.ok) return errored(out1)
   const severity = typeof out1.raw === 'string' ? parseSeverityOrNull(out1.raw) : null
   if (severity !== null && severity <= STAGE1_ALLOW_MAX_SEVERITY) {
     return { block: false, stage: 'fast', severity }

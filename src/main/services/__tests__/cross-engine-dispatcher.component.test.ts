@@ -9,8 +9,17 @@
  * The singleton's default deps pull in OpencodeServerManager (which imports
  * electron at runtime), so electron is shimmed.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { blobRefOf } from '../../../test/helpers/blob-refs'
@@ -166,7 +175,7 @@ import type {
   LiveParentSession
 } from '../../../core/services/dispatch-parent'
 import { hasRunningDispatch, type DispatchRunRegistry } from '../../../core/services/dispatch-runs'
-import type { SessionToolCaller } from '../../../core/services/session-tools'
+import { uiPath, type SessionToolCaller } from '../../../core/services/session-tools'
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -245,6 +254,9 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
     codexResumeLockWindowMs: 0,
     // A pi target's session directory is "on disk" unless a test says otherwise.
     piSessionDirExists: () => true,
+    // The fake cwds below (`/tmp/xeng-project`) are not on disk: a resumed target's directory
+    // "exists" unless a test says otherwise.
+    targetCwdExists: () => true,
     ...overrides
   }
   const dispatcher = withDefaultDescription(new CrossEngineDispatcher(deps))
@@ -9702,6 +9714,7 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
       parentEngine: 'opencode',
       parentToolUseId: `toolu_${harnessRef}`,
       cwd: '/x',
+      parentCwd: '/x',
       model: 'm',
       launchMode: 'default',
       accountKey: null,
@@ -11241,6 +11254,7 @@ describe('CrossEngineDispatcher — hand_back: Codex target', () => {
       parentEngine: 'claude',
       parentToolUseId: null,
       cwd: '/tmp/xeng-project',
+      parentCwd: '/tmp/xeng-project',
       model: 'gpt-5.6-luna',
       launchMode: 'default',
       accountKey: null,
@@ -11522,6 +11536,7 @@ describe('CrossEngineDispatcher — results delivered into the parent (ADR-105 �
       parentEngine: 'claude',
       parentToolUseId: null,
       cwd: '/tmp/xeng-project',
+      parentCwd: '/tmp/xeng-project',
       model: 'gpt-5.6-luna',
       launchMode: 'default',
       accountKey: null,
@@ -14564,6 +14579,567 @@ describe('CrossEngineDispatcher — a message steered into a run is answered, or
       await new Promise((resolve) => setTimeout(resolve, 60))
       expect(dispatcher.inFlightCount).toBe(1)
       expect(ledger.rows.get(id)!.state).toBe('running')
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The directory a target runs in (`workdir`) and a resume of one that is gone
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — the X-Agent working directory (workdir)', () => {
+  // Real directories under the OS temp dir: the containment check compares real paths, and a
+  // junction (a symlink off Windows) is the escape it exists for.
+  let base: string
+  let parent: string
+  let outside: string
+  const links: string[] = []
+  const real = (p: string): string => uiPath(realpathSync.native(p))
+  const mkdir = (...parts: string[]): string => {
+    const dir = join(...parts)
+    mkdirSync(dir, { recursive: true })
+    return dir
+  }
+  const claudeCfg = (): EngineConfig => ({ dispatch: { defaultModel: 'haiku' } })
+  const piCfg = (): EngineConfig => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })
+  const ctxIn = (over: Partial<DispatchContext> = {}): ReturnType<typeof makeCtx> =>
+    makeCtx({ fromEngine: 'opencode', fromRoutingId: 'parent-A', cwd: parent, ...over })
+
+  beforeAll(() => {
+    base = mkdtempSync(join(tmpdir(), 'xeng-workdir-'))
+    parent = mkdir(base, 'project')
+    outside = mkdir(base, 'elsewhere')
+  })
+  afterAll(() => {
+    // A link first, so removing the tree can never reach what it points at.
+    for (const link of links) {
+      try {
+        unlinkSync(link)
+      } catch {
+        /* already gone */
+      }
+    }
+    rmSync(base, { recursive: true, force: true })
+  })
+
+  /** A Claude harness whose process is the fake; `run` drives one turn to its result. */
+  function claude(over: Partial<DispatcherDeps> = {}): {
+    target: ReturnType<typeof makeFakeClaudeTarget>
+    dispatcher: CrossEngineDispatcher
+    ledger: FakeDispatchLedger
+    run: (
+      req: Parameters<CrossEngineDispatcher['dispatch']>[0],
+      ctx?: DispatchContext
+    ) => ReturnType<CrossEngineDispatcher['dispatch']>
+  } {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher, ledger } = makeHarness({
+      loadEngineConfig: claudeCfg,
+      spawnClaudeQuery: target.spawnClaudeQuery,
+      ...over
+    })
+    const run = async (
+      req: Parameters<CrossEngineDispatcher['dispatch']>[0],
+      ctx: DispatchContext = ctxIn()
+    ): ReturnType<CrossEngineDispatcher['dispatch']> => {
+      const pending = dispatcher.dispatch(req, ctx)
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg({ session_id: 'claude-sess-1' }))
+      return pending
+    }
+    return { target, dispatcher, ledger, run }
+  }
+
+  describe('a new target runs there', () => {
+    it('Claude: the process starts in the workdir; the row keeps both directories', async () => {
+      const wt = mkdir(parent, '.claude', 'worktrees', 'feat')
+      const { target, ledger, run } = claude()
+      const result = await run({ engine: 'claude', prompt: 'x', workdir: wt })
+      expect(result.isError).toBeUndefined()
+      expect(target.spawnCalls).toHaveLength(1)
+      expect(target.spawnCalls[0].cwd).toBe(real(wt))
+      expect(ledger.rowFor('claude', 'claude-sess-1')).toMatchObject({
+        cwd: real(wt),
+        parentCwd: parent
+      })
+    })
+
+    it('pi: the child spawns in the workdir', async () => {
+      const wt = mkdir(parent, 'wt', 'pi')
+      const target = makeFakePiTarget()
+      const { dispatcher, ledger } = makeHarness({
+        loadEngineConfig: piCfg,
+        spawnPiTarget: target.spawnPiTarget
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'pi', prompt: 'x', workdir: wt },
+        ctxIn({ fromEngine: 'claude' })
+      )
+      await tick()
+      target.pushEvent(piAssistantMessageEnd({ text: 'hello', cost: 0.02 }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      expect((await pending).isError).toBeUndefined()
+      expect(target.spawnCalls[0].cwd).toBe(real(wt))
+      expect(ledger.rowFor('pi', 'pi-target-1')).toMatchObject({ cwd: real(wt), parentCwd: parent })
+    })
+
+    it('Codex: the thread starts in the workdir', async () => {
+      const wt = mkdir(parent, 'wt', 'codex')
+      const target = makeFakeCodexTarget()
+      const { dispatcher, ledger } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'codex', prompt: 'x', workdir: wt },
+        ctxIn({ fromEngine: 'claude' })
+      )
+      await tick()
+      target.completeTurn()
+      expect((await pending).isError).toBeUndefined()
+      expect(target.spawnCalls[0].cwd).toBe(real(wt))
+      expect(target.threadStartParams()).toMatchObject({ cwd: real(wt) })
+      expect(ledger.rowFor('codex', CODEX_THREAD_ID)).toMatchObject({
+        cwd: real(wt),
+        parentCwd: parent
+      })
+    })
+
+    it('a launch with no workdir keeps its parent directory for both', async () => {
+      const { target, ledger, run } = claude()
+      await run({ engine: 'claude', prompt: 'x' })
+      expect(target.spawnCalls[0].cwd).toBe(parent)
+      expect(ledger.rowFor('claude', 'claude-sess-1')).toMatchObject({
+        cwd: parent,
+        parentCwd: parent
+      })
+    })
+
+    it('a blank workdir is none', async () => {
+      const { target, run } = claude()
+      await run({ engine: 'claude', prompt: 'x', workdir: '   ' })
+      expect(target.spawnCalls[0].cwd).toBe(parent)
+    })
+
+    it('a directory the user added is as good as the parent directory', async () => {
+      const extra = mkdir(base, 'granted')
+      const repo = mkdir(extra, 'repo')
+      const loadUserRules = vi.fn((_cwd: string) => userRules({ additionalDirectories: [extra] }))
+      const { target, run } = claude({ loadUserRules })
+      await run({ engine: 'claude', prompt: 'x', workdir: repo })
+      expect(target.spawnCalls[0].cwd).toBe(real(repo))
+      // The additional directories are the PARENT's (its cwd's merged settings).
+      expect(loadUserRules).toHaveBeenCalledWith(parent)
+    })
+
+    it('a relative workdir is relative to the parent directory', async () => {
+      const wt = mkdir(parent, 'wt', 'rel')
+      const { target, ledger, run } = claude()
+      await run({ engine: 'claude', prompt: 'x', workdir: join('wt', 'rel') })
+      expect(target.spawnCalls[0].cwd).toBe(real(wt))
+      expect(ledger.rowFor('claude', 'claude-sess-1')?.cwd).toBe(real(wt))
+    })
+
+    it.runIf(process.platform === 'win32')(
+      'another spelling of the same directory (letter case) is accepted on Windows',
+      async () => {
+        const wt = mkdir(parent, 'Case', 'Spelled')
+        const { target, run } = claude()
+        await run({ engine: 'claude', prompt: 'x', workdir: wt.toUpperCase() })
+        expect(target.spawnCalls[0].cwd).toBe(real(wt))
+      }
+    )
+  })
+
+  describe('a workdir the parent has no claim on is refused before anything starts', () => {
+    const cases: Array<[string, () => string, RegExp]> = [
+      ['outside the parent directory', () => outside, /is not inside your working directory/],
+      [
+        'a `..` climb out of it',
+        () => join('..', 'elsewhere'),
+        /is not inside your working directory/
+      ],
+      [
+        'a link inside it that leads out',
+        () => {
+          const escape = join(parent, `escape-${links.length}`)
+          symlinkSync(outside, escape, process.platform === 'win32' ? 'junction' : 'dir')
+          links.push(escape)
+          return escape
+        },
+        /is not inside your working directory/
+      ],
+      ['a directory that does not exist', () => join(parent, 'never'), /does not exist/],
+      [
+        'a file',
+        () => {
+          const file = join(parent, 'a-file.txt')
+          writeFileSync(file, 'x')
+          return file
+        },
+        /is not a directory/
+      ]
+    ]
+    it.each(cases)('%s', async (_name, workdir, text) => {
+      const { target, dispatcher, ledger } = claude()
+      const result = await dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x', workdir: workdir() },
+        ctxIn()
+      )
+      expect(result.isError).toBe(true)
+      expect(result.text).toMatch(/^dispatch_agent "workdir" /)
+      expect(result.text).toMatch(text)
+      expect(target.spawnCalls).toHaveLength(0)
+      expect(ledger.rows.size).toBe(0)
+      expect(dispatcher.inFlightCount).toBe(0)
+    })
+
+    it('names the directories it would accept', async () => {
+      const extra = mkdir(base, 'granted-list')
+      const { dispatcher } = claude({
+        loadUserRules: () => userRules({ additionalDirectories: [extra] })
+      })
+      const result = await dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x', workdir: outside },
+        ctxIn()
+      )
+      expect(result.text).toBe(
+        `dispatch_agent "workdir" ${outside} is not inside your working directory or the user's ` +
+          `additional directories (${parent}, ${extra}). Use a directory inside one of them.`
+      )
+    })
+
+    it('settings that cannot be read grant nothing extra, and do not throw out of the launch', async () => {
+      const { target, dispatcher } = claude({
+        loadUserRules: () => {
+          throw new Error('settings.json is not JSON')
+        }
+      })
+      const result = await dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x', workdir: outside },
+        ctxIn()
+      )
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('is not inside your working directory')
+      expect(target.spawnCalls).toHaveLength(0)
+    })
+  })
+
+  // The rules a target in ANOTHER directory (a sibling git worktree) is bound by are the union of
+  // the parent's and its own; the judge counts the parent's directory and the user's additional
+  // directories as local — as context only, never as an allow path.
+  describe('a target in another directory: the rules union and the judge context', () => {
+    const PARENT_DENY = 'Bash(git push:*)'
+    const TARGET_ASK = 'Bash(docker run:*)'
+    const BOTH_DENY = 'Bash(rm -rf:*)'
+    const approvals = (ctx: ReturnType<typeof makeCtx>): unknown[] =>
+      ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-request').map((c) => c[1])
+    /** What the parent's cwd (its gitignored local settings among them) and the worktree's own say. */
+    const rulesBy =
+      (wt: string, additionalDirectories: string[] = []) =>
+      (cwd: string): MergedClaudeRules => {
+        if (cwd === parent)
+          return userRules({ deny: [PARENT_DENY, BOTH_DENY], additionalDirectories })
+        if (cwd === real(wt)) return userRules({ deny: [BOTH_DENY], ask: [TARGET_ASK] })
+        return userRules()
+      }
+    const localLine = /count as local\): (.*)/
+    const promptOf = (r: JudgeRequest): string => `${r.system}\n${r.user}`
+
+    it('Claude: both directories’ rules reach the process, the parent’s first, none twice', async () => {
+      const wt = mkdir(parent, '.claude', 'worktrees', 'union-claude')
+      const { target, run } = claude({ loadUserRules: rulesBy(wt) })
+      await run({ engine: 'claude', prompt: 'x', workdir: wt })
+      expect(target.spawnCalls[0].settings).toEqual({
+        permissions: { deny: [PARENT_DENY, BOTH_DENY], ask: [TARGET_ASK] }
+      })
+    })
+
+    it('Claude: with no workdir it is the one directory’s rules, read once', async () => {
+      const loadUserRules = vi.fn(rulesBy(parent))
+      const { target, run } = claude({ loadUserRules })
+      await run({ engine: 'claude', prompt: 'x' })
+      expect(target.spawnCalls[0].settings).toEqual({
+        permissions: { deny: [PARENT_DENY, BOTH_DENY], ask: [] }
+      })
+      // (the dispatcher also reads the additional directories of the parent for `workdir`; none
+      // is given here, so the one read is the rules')
+      expect(loadUserRules.mock.calls.filter(([cwd]) => cwd === parent)).toHaveLength(1)
+    })
+
+    it('pi: a deny rule only the parent has refuses, and an ask rule only the worktree has asks', async () => {
+      const wt = mkdir(parent, '.claude', 'worktrees', 'union-pi')
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: piCfg,
+        spawnPiTarget: target.spawnPiTarget,
+        loadUserRules: rulesBy(wt)
+      })
+      const ctx = ctxIn({ fromEngine: 'claude' })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x', workdir: wt }, ctx)
+      await tick()
+      const gate = (toolCallId: string, command: string) =>
+        target.gateHandler()({ toolCallId, toolName: 'bash', input: { command } })
+      expect(await gate('pi-d', 'git push origin main')).toEqual({
+        behavior: 'deny',
+        reason: `Denied by permission rule: ${PARENT_DENY}`
+      })
+      expect(approvals(ctx)).toHaveLength(0)
+      void gate('pi-a', 'docker run alpine')
+      for (let i = 0; i < 8; i++) await tick()
+      expect(approvals(ctx)).toHaveLength(1)
+      target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      await pending
+    })
+
+    describe('pi: the judge', () => {
+      const judgedCfg = (id: string): EngineConfig => ({
+        dispatch: { defaultModel: id === 'pi' ? 'openai-codex/gpt-5.6-luna' : 'openai/gpt-5' },
+        autoMode: { twoStageMode: 'fast' }
+      })
+      async function start(workdir: string | undefined, additional: string[]) {
+        const target = makeFakePiTarget()
+        const judge = makeScriptedJudge()
+        const { dispatcher } = makeHarness({
+          loadEngineConfig: judgedCfg,
+          spawnPiTarget: target.spawnPiTarget,
+          makeJudgeTransport: judge.make,
+          loadUserRules: workdir
+            ? rulesBy(workdir, additional)
+            : () => userRules({ additionalDirectories: additional })
+        })
+        const ctx = ctxIn({ fromEngine: 'claude', getAutonomyMode: () => 'auto' })
+        const pending = dispatcher.dispatch(
+          { engine: 'pi', prompt: 'x', ...(workdir ? { workdir } : {}) },
+          ctx
+        )
+        await tick()
+        const gate = (toolCallId: string, command: string) =>
+          target.gateHandler()({ toolCallId, toolName: 'bash', input: { command } })
+        const finish = async (): Promise<void> => {
+          target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+          target.pushEvent(PI_AGENT_SETTLED)
+          await pending
+        }
+        return { judge, gate, finish }
+      }
+
+      it('a worktree target’s judge counts the parent directory and the additional directory as local', async () => {
+        const wt = mkdir(parent, '.claude', 'worktrees', 'judge-pi')
+        const granted = mkdir(base, 'granted-pi')
+        const t = await start(wt, [granted])
+        expect(await t.gate('pi-1', 'npm run build')).toEqual({ behavior: 'allow' })
+        expect(localLine.exec(promptOf(t.judge.requests[0]))?.[1]).toBe(`${parent}, ${granted}`)
+        await t.finish()
+      })
+
+      it('with no workdir the judge still gets the additional directories', async () => {
+        const granted = mkdir(base, 'granted-pi-plain')
+        const t = await start(undefined, [granted])
+        expect(await t.gate('pi-1', 'npm run build')).toEqual({ behavior: 'allow' })
+        expect(localLine.exec(promptOf(t.judge.requests[0]))?.[1]).toBe(granted)
+        await t.finish()
+      })
+
+      it('they are context only: a read-only command in an additional directory is still judged', async () => {
+        const wt = mkdir(parent, '.claude', 'worktrees', 'judge-pi-ro')
+        const granted = mkdir(base, 'granted-pi-ro')
+        const t = await start(wt, [granted])
+        const inGranted = `cat "${granted.replaceAll('\\', '/')}/notes.txt"`
+        expect(await t.gate('pi-1', inGranted)).toEqual({ behavior: 'allow' })
+        expect(t.judge.requests).toHaveLength(1)
+        // The control: a read-only command in the target's own directory needs no judge.
+        expect(await t.gate('pi-2', 'cat notes.txt')).toEqual({ behavior: 'allow' })
+        expect(t.judge.requests).toHaveLength(1)
+        await t.finish()
+      })
+    })
+
+    it('Codex: the report review’s judge counts the parent directory and the additional directory as local', async () => {
+      const wt = mkdir(parent, '.claude', 'worktrees', 'judge-codex')
+      const granted = mkdir(base, 'granted-codex')
+      const target = makeFakeCodexTarget()
+      const judge = makeScriptedJudge()
+      const { dispatcher } = makeCodexHarness({
+        requireHandBack: true,
+        reports: makeFakeDispatchReports(),
+        handBackSettleMs: 5,
+        attachCodexTarget: target.spawnCodexTarget,
+        makeJudgeTransport: judge.make,
+        loadUserRules: rulesBy(wt, [granted])
+      })
+      const ctx = ctxIn({ fromEngine: 'claude', getAutonomyMode: () => 'auto' })
+      const pending = dispatcher.dispatch(
+        { engine: 'codex', prompt: 'review it', name: 'rev', workdir: wt },
+        ctx
+      )
+      await tick()
+      await target.serverRequest('item/tool/call', {
+        threadId: CODEX_THREAD_ID,
+        turnId: target.currentTurnId(),
+        callId: 'call-1',
+        tool: 'hand_back',
+        arguments: { report: 'codex report' }
+      })
+      await pending
+      expect(judge.requests).toHaveLength(1)
+      expect(localLine.exec(promptOf(judge.requests[0]))?.[1]).toBe(`${parent}, ${granted}`)
+    })
+  })
+
+  describe('a continuation', () => {
+    it('refuses a workdir: the target keeps the directory it was started in', async () => {
+      const wt = mkdir(parent, 'wt', 'keep')
+      const { target, dispatcher, ledger, run } = claude()
+      await run({ engine: 'claude', prompt: 'one', workdir: wt })
+      const other = mkdir(parent, 'wt', 'other')
+
+      const again = await dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1', workdir: other },
+        ctxIn()
+      )
+      expect(again).toMatchObject({ isError: true, sessionId: 'claude-sess-1' })
+      expect(again.text).toBe(
+        'dispatch_agent "workdir" cannot be given with "sessionId": a continued X-Agent keeps the ' +
+          'directory it was started in. Start a new X-Agent to work in another directory.'
+      )
+      expect(target.spawnCalls).toHaveLength(1)
+      expect(ledger.rowFor('claude', 'claude-sess-1')?.cwd).toBe(real(wt))
+    })
+
+    it('a resume starts in the directory of the target, not the parent one', async () => {
+      const wt = mkdir(parent, 'wt', 'resume')
+      const { target, dispatcher, run } = claude()
+      await run({ engine: 'claude', prompt: 'one', workdir: wt })
+      dispatcher.disposeFor('parent-A')
+
+      await run({ engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' })
+      expect(target.spawnCalls).toHaveLength(2)
+      expect(target.spawnCalls[1].resume).toBe('claude-sess-1')
+      expect(target.spawnCalls[1].cwd).toBe(real(wt))
+    })
+
+    it('a message to a finished X-Agent builds its run context from the PARENT directory', async () => {
+      const wt = mkdir(parent, 'wt', 'ctx')
+      const { dispatcher, ledger, run } = claude()
+      await run({ engine: 'claude', prompt: 'one', workdir: wt })
+      const row = ledger.rowFor('claude', 'claude-sess-1')!
+      const contextOf = (r: typeof row): DispatchContext =>
+        (
+          dispatcher as unknown as { contextForRow: (r: typeof row) => DispatchContext }
+        ).contextForRow(r)
+      expect(row.cwd).toBe(real(wt))
+      expect(contextOf(row).cwd).toBe(parent)
+      // A row written before the column existed reads its parent directory as its own.
+      expect(contextOf({ ...row, parentCwd: row.cwd }).cwd).toBe(real(wt))
+    })
+  })
+
+  describe('a resume whose directory is gone (a removed worktree)', () => {
+    /** A recorded, idle target of `engine` whose directory is `cwd`. */
+    function recorded(
+      ledger: FakeDispatchLedger,
+      engine: EngineId,
+      cwd: string,
+      model: string
+    ): DispatchTargetRow {
+      const row = ledger.create({
+        engine,
+        harnessRef: `h-${engine}`,
+        parentSessionId: 'parent-A',
+        parentEngine: engine === 'claude' ? 'opencode' : 'claude',
+        parentToolUseId: null,
+        cwd,
+        parentCwd: parent,
+        model,
+        launchMode: 'default',
+        accountKey: null,
+        codexAccountId: null,
+        callerRestriction: null,
+        name: null,
+        description: null
+      })
+      ledger.update(row.id, { state: 'idle' })
+      return ledger.get(row.id)!
+    }
+    const ENGINES: Array<[EngineId, string]> = [
+      ['claude', 'haiku'],
+      ['pi', 'openai-codex/gpt-5.6-luna'],
+      ['codex', 'gpt-5.6-luna'],
+      ['opencode', 'openai/gpt-5']
+    ]
+
+    it.each(ENGINES)(
+      '%s: is refused with nothing spawned, and the row stays resumable',
+      async (engine, model) => {
+        const gone = join(parent, 'wt', `gone-${engine}`)
+        const spawnClaudeQuery = vi.fn()
+        const spawnPiTarget = vi.fn()
+        const attachCodexTarget = vi.fn()
+        const { dispatcher, ledger, deps } = makeHarness({
+          targetCwdExists: existsSync,
+          spawnClaudeQuery: spawnClaudeQuery as unknown as SpawnClaudeQueryFn,
+          spawnPiTarget: spawnPiTarget as unknown as SpawnPiTargetFn,
+          attachCodexTarget: attachCodexTarget as unknown as AttachCodexTargetFn
+        })
+        const row = recorded(ledger, engine, gone, model)
+
+        const result = await dispatcher.dispatch(
+          { engine, prompt: 'more', sessionId: row.harnessRef },
+          ctxIn({ fromEngine: engine === 'claude' ? 'opencode' : 'claude' })
+        )
+        expect(result).toMatchObject({ isError: true, sessionId: row.harnessRef })
+        expect(result.text).toBe(
+          `Dispatch session "${row.harnessRef}" cannot be resumed — the agent's working directory ${gone} ` +
+            'no longer exists (a removed worktree?). Start a new X-Agent with dispatch_agent.'
+        )
+        expect(spawnClaudeQuery).not.toHaveBeenCalled()
+        expect(spawnPiTarget).not.toHaveBeenCalled()
+        expect(attachCodexTarget).not.toHaveBeenCalled()
+        expect(deps.serverManager.acquire).not.toHaveBeenCalled()
+        expect(ledger.rows.get(row.id)!.state).toBe('idle')
+        expect(dispatcher.inFlightCount).toBe(0)
+      }
+    )
+
+    it('restoring the directory makes the same target resumable again', async () => {
+      const wt = mkdir(parent, 'wt', 'restore')
+      const { target, dispatcher, run } = claude({ targetCwdExists: existsSync })
+      await run({ engine: 'claude', prompt: 'one', workdir: wt })
+      dispatcher.disposeFor('parent-A')
+      rmSync(wt, { recursive: true, force: true })
+
+      const refused = await dispatcher.dispatch(
+        { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+        ctxIn()
+      )
+      expect(refused.isError).toBe(true)
+      expect(refused.text).toContain('no longer exists')
+      expect(target.spawnCalls).toHaveLength(1)
+
+      mkdir(wt)
+      const resumed = await run({ engine: 'claude', prompt: 'three', sessionId: 'claude-sess-1' })
+      expect(resumed.isError).toBeUndefined()
+      expect(target.spawnCalls).toHaveLength(2)
+      expect(target.spawnCalls[1].cwd).toBe(real(wt))
+    })
+
+    it('a message to such an X-Agent is refused with the same reason, and starts no run', async () => {
+      const gone = join(parent, 'wt', 'gone-message')
+      const { dispatcher, ledger } = makeHarness({ targetCwdExists: existsSync })
+      const row = recorded(ledger, 'pi', gone, 'openai-codex/gpt-5.6-luna')
+      const outcome = await dispatcher.messageXAgent({
+        ledgerId: row.id,
+        text: 'one more thing',
+        from: { routingId: 'parent-A', engine: 'claude', title: 'Boss' }
+      })
+      expect(outcome).toMatchObject({
+        kind: 'refused',
+        text: expect.stringContaining(`working directory ${gone} no longer exists`)
+      })
+      expect(dispatcher.inFlightCount).toBe(0)
+      expect(ledger.rows.get(row.id)!.state).toBe('idle')
     })
   })
 })

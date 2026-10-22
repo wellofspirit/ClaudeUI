@@ -32,6 +32,7 @@ const row = (over: Partial<DispatchTargetRow> = {}): DispatchTargetRow => ({
   parentEngine: 'claude',
   parentToolUseId: 'toolu_1',
   cwd: '/proj',
+  parentCwd: '/proj',
   model: 'm',
   launchMode: 'default',
   accountKey: null,

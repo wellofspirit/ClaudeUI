@@ -7,7 +7,12 @@
 import { describe, it, expect, vi } from 'vitest'
 import { classify, STAGE1_TIMEOUT_MS, type JudgeRequest } from '../../classifier'
 import { judgeCacheKey } from '../caps'
-import { JudgeRouteUnavailableError, makeHttpJudgeTransport } from '../transport'
+import {
+  JudgeRouteUnavailableError,
+  judgeFailureSummary,
+  judgeRouteKey,
+  makeHttpJudgeTransport
+} from '../transport'
 import { JudgeWireError, type JudgeRouteResult, type ResolvedJudgeRoute } from '../types'
 import {
   CHAT_DONE,
@@ -320,6 +325,116 @@ describe('makeHttpJudgeTransport — unavailable routes and HTTP errors', () => 
   })
 })
 
+describe('makeHttpJudgeTransport — recovery time and route key on a failure', () => {
+  const NOW = Date.UTC(2026, 9, 23, 12, 0, 0)
+  const RESETS_AT_S = Date.UTC(2026, 9, 28, 13, 34, 58) / 1000
+
+  /** The error a transport throws for one 429, with `Date.now()` pinned. */
+  async function fail429(
+    body: string,
+    headers: Record<string, string> = {},
+    status = 429
+  ): Promise<JudgeWireError> {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(NOW)
+    try {
+      const f = fakeFetch(text(status, body, headers))
+      const err = await makeHttpJudgeTransport({
+        resolve: ok(routeFor('chatgpt', 'gpt-6-luna')),
+        fetchImpl: f.asFetch
+      })(REQ).catch((e: unknown) => e)
+      return err as JudgeWireError
+    } finally {
+      now.mockRestore()
+    }
+  }
+
+  it('resets_at at the top level of the body becomes retryAtMs', async () => {
+    const err = await fail429(JSON.stringify({ resets_at: RESETS_AT_S }))
+    expect(err.status).toBe(429)
+    expect(err.retryAtMs).toBe(RESETS_AT_S * 1000)
+  })
+
+  it('resets_at under `error` becomes retryAtMs', async () => {
+    const err = await fail429(
+      JSON.stringify({ error: { type: 'usage_limit_reached', resets_at: RESETS_AT_S } })
+    )
+    expect(err.retryAtMs).toBe(RESETS_AT_S * 1000)
+    // The message text is what it always was.
+    expect(err.message).toContain('HTTP 429 (resets at 2026-10-28T13:34:58.000Z)')
+  })
+
+  it('retry-after in seconds is relative to now', async () => {
+    const err = await fail429('{}', { 'retry-after': '120' })
+    expect(err.retryAtMs).toBe(NOW + 120_000)
+  })
+
+  it('retry-after as an HTTP date is that date', async () => {
+    const err = await fail429('{}', { 'retry-after': 'Wed, 28 Oct 2026 13:34:58 GMT' })
+    expect(err.retryAtMs).toBe(Date.UTC(2026, 9, 28, 13, 34, 58))
+  })
+
+  it('resets_at wins over a shorter retry-after', async () => {
+    const err = await fail429(JSON.stringify({ error: { resets_at: RESETS_AT_S } }), {
+      'retry-after': '30'
+    })
+    expect(err.retryAtMs).toBe(RESETS_AT_S * 1000)
+  })
+
+  it('names no recovery time when the response does not, or says something unusable', async () => {
+    expect((await fail429('{"error":"slow down"}')).retryAtMs).toBeUndefined()
+    expect((await fail429('{}', { 'retry-after': 'soon' })).retryAtMs).toBeUndefined()
+    expect((await fail429('not json')).retryAtMs).toBeUndefined()
+    expect((await fail429('{"resets_at":"tomorrow"}')).retryAtMs).toBeUndefined()
+  })
+
+  it('only a 429 carries one', async () => {
+    const err = await fail429('{}', { 'retry-after': '120' }, 503)
+    expect(err.status).toBe(503)
+    expect(err.retryAtMs).toBeUndefined()
+  })
+
+  it('every labelled failure names its route by label and account', async () => {
+    const route = routeFor('chatgpt', 'gpt-6-luna')
+    const key = `${route.label}|${route.account.accountKey}`
+    expect(judgeRouteKey(route)).toBe(key)
+
+    const http = await fail429('{}')
+    expect(http.routeKey).toBe(key)
+
+    const network = await makeHttpJudgeTransport({
+      resolve: ok(route),
+      fetchImpl: (async () => {
+        throw new TypeError('fetch failed')
+      }) as unknown as typeof fetch
+    })(REQ).catch((e: unknown) => e)
+    expect((network as JudgeWireError).routeKey).toBe(key)
+
+    // A mid-stream error event (the chat wire's), with its own code kept.
+    const chatRoute = routeFor('openrouter', 'z-ai/glm-4.6')
+    const stream = await makeHttpJudgeTransport({
+      resolve: ok(chatRoute),
+      fetchImpl: fakeFetch(sse([chat({ error: { code: 'overloaded', message: 'busy' } })])).asFetch
+    })(REQ).catch((e: unknown) => e)
+    expect((stream as JudgeWireError).routeKey).toBe(judgeRouteKey(chatRoute))
+    expect((stream as JudgeWireError).code).toBe('overloaded')
+  })
+
+  it('two accounts on one model have different keys', () => {
+    const a = routeFor('openai', 'gpt-4.1')
+    const b = { ...a, account: { ...a.account, accountKey: 'test-vendor:key:ffffffffffffffff' } }
+    expect(judgeRouteKey(a)).not.toBe(judgeRouteKey(b))
+  })
+
+  it('a route that cannot be called throws the unavailable error, which carries no route key', async () => {
+    const err = await makeHttpJudgeTransport({
+      resolve: async () => ({ ok: false, code: 'rate-limited', reason: 'resting.' }),
+      fetchImpl: fakeFetch().asFetch
+    })(REQ).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(JudgeRouteUnavailableError)
+    expect(err).not.toBeInstanceOf(JudgeWireError)
+  })
+})
+
 describe('makeHttpJudgeTransport — usage', () => {
   it('a throwing onUsage never fails the verdict', async () => {
     const f = fakeFetch(sse(CHAT_OK))
@@ -487,5 +602,83 @@ describe('makeHttpJudgeTransport through classify()', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('judgeFailureSummary', () => {
+  it('a ChatGPT 429 keeps the route, status and reset time and drops the JSON body', () => {
+    const body = JSON.stringify({
+      error: {
+        type: 'usage_limit_reached',
+        message: 'The usage limit has been reached',
+        plan_type: 'plus',
+        resets_at: 1793194498,
+        resets_in_seconds: 86400
+      }
+    })
+    expect(
+      judgeFailureSummary(
+        `ChatGPT · gpt-6-luna: HTTP 429 (resets at 2026-10-28T13:34:58.000Z): ${body}`
+      )
+    ).toBe('ChatGPT · gpt-6-luna: HTTP 429 (resets at 2026-10-28T13:34:58.000Z)')
+  })
+
+  it('is what the real transport throws for a 429, end to end', async () => {
+    const resetsAt = Date.UTC(2026, 9, 28, 13, 34, 58) / 1000
+    const f = fakeFetch(
+      text(429, JSON.stringify({ error: { type: 'usage_limit_reached', resets_at: resetsAt } }))
+    )
+    const err = await makeHttpJudgeTransport({
+      resolve: ok(routeFor('chatgpt', 'gpt-6-luna')),
+      fetchImpl: f.asFetch
+    })(REQ).catch((e: unknown) => e)
+    const summary = judgeFailureSummary((err as Error).message)
+    expect(summary).toMatch(/gpt-6-luna: HTTP 429 \(resets at 2026-10-28T13:34:58\.000Z\)$/)
+    expect(summary).not.toContain('usage_limit_reached')
+  })
+
+  it("drops a missing route's own prefix: the resolver's reason is the user-facing part", () => {
+    const err = new JudgeRouteUnavailableError(
+      'rate-limited',
+      'ChatGPT · gpt-6-luna: usage limit, resting until 2026-10-28T13:34:58Z.'
+    )
+    expect(judgeFailureSummary(err.message)).toBe(
+      'ChatGPT · gpt-6-luna: usage limit, resting until 2026-10-28T13:34:58Z'
+    )
+  })
+
+  it('a plain network error passes through whole', () => {
+    expect(judgeFailureSummary('custom-chat · m: request failed: fetch failed')).toBe(
+      'custom-chat · m: request failed: fetch failed'
+    )
+  })
+
+  it('a timeout message passes through whole', () => {
+    expect(judgeFailureSummary('auto-mode judge timed out after 60000 ms')).toBe(
+      'auto-mode judge timed out after 60000 ms'
+    )
+  })
+
+  it('cuts at a body that starts as an array or an HTML page too', () => {
+    expect(judgeFailureSummary('OpenAI · gpt-4.1: HTTP 400: [{"message":"bad"}]')).toBe(
+      'OpenAI · gpt-4.1: HTTP 400'
+    )
+    expect(
+      judgeFailureSummary('OpenAI · gpt-4.1: HTTP 502: <html><body>Bad gateway</body></html>')
+    ).toBe('OpenAI · gpt-4.1: HTTP 502')
+  })
+
+  it('collapses whitespace, drops a trailing full stop, and is never empty', () => {
+    expect(judgeFailureSummary(['x:  HTTP 500', '  upstream down.', ''].join('\n'))).toBe(
+      'x: HTTP 500 upstream down'
+    )
+    expect(judgeFailureSummary('')).toBe('unknown error')
+    expect(judgeFailureSummary('...')).toBe('unknown error')
+  })
+
+  it('is capped at 200 characters', () => {
+    const out = judgeFailureSummary(`route: ${'x'.repeat(500)}`)
+    expect(out).toHaveLength(200)
+    expect(out.endsWith('…')).toBe(true)
   })
 })

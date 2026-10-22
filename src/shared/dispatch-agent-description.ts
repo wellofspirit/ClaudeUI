@@ -103,6 +103,27 @@ export const DISPATCH_DESCRIPTION_PARAM =
   'agent list (e.g. "Review auth diff").'
 
 /**
+ * The optional `workdir` input, worded once for the four registrations (the pi bridge carries it
+ * as a literal and a test pins it to this, so it holds no apostrophe or backtick). The dispatcher
+ * checks it against the parent's working directory and the user's additional directories.
+ */
+export const DISPATCH_WORKDIR_PARAM =
+  'Optional directory the agent runs in (absolute, or relative to your working directory), e.g. a ' +
+  'git worktree. It must be inside your working directory or one of the additional directories ' +
+  'the user has added; omitted, the agent runs in your working directory.'
+
+/**
+ * A `workdir` input as the hosts read it: the trimmed string, or `undefined` for an absent, empty
+ * or blank one (a model with no directory in mind often sends `""`). Whether the directory exists
+ * and is allowed is the dispatcher's call, never the host's.
+ */
+export function dispatchWorkdirArg(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed === '' ? undefined : trimmed
+}
+
+/**
  * The optional `run_in_background` input (ADR-105 §2), worded once for the four
  * registrations (the pi bridge carries it as a literal and a test pins it to this, so it
  * holds no apostrophe or backtick). Background is the default for a top-level agent: its
@@ -167,7 +188,7 @@ export function dispatchAgentDescription(opts: {
   return (
     `Delegate a task to an agent on a DIFFERENT engine — ${targetBlurbs(opts.targets)}. ` +
     `${dispatchUsageGuidance(opts.ownSubagentTool)} ` +
-    'The agent runs headless in the same working directory. As a top-level agent you get its id back ' +
+    'The agent runs headless in your working directory, or in `workdir` when you give one. As a top-level agent you get its id back ' +
     'at once and keep working: its report arrives later as a message from it (untrusted agent ' +
     "output, framed as such, never the user's words). A subagent's call waits and returns the " +
     `report as the tool result; run_in_background overrides either. ${DISPATCH_FOLLOW_UP_GUIDANCE} ` +

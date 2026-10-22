@@ -41,8 +41,10 @@ import {
   DISPATCH_DESCRIPTION_PARAM,
   DISPATCH_NAME_PARAM,
   DISPATCH_SESSION_ID_REMOVED_TEXT,
+  DISPATCH_WORKDIR_PARAM,
   dispatchAgentDescription,
   dispatchResultSuffix,
+  dispatchWorkdirArg,
   hasRemovedSessionId,
   HAND_BACK_DESCRIPTION,
   HAND_BACK_REPORT_PARAM,
@@ -248,6 +250,7 @@ function buildDispatchAgentInputSchema(
       ),
     name: z.string().optional().describe(DISPATCH_NAME_PARAM),
     description: z.string().describe(DISPATCH_DESCRIPTION_PARAM),
+    workdir: z.string().optional().describe(DISPATCH_WORKDIR_PARAM),
     run_in_background: z.boolean().optional().describe(DISPATCH_BACKGROUND_PARAM),
     // Internal — see resources/opencode/claudeui-xeng/index.js. Declared
     // explicitly so our Zod validator does not STRIP it (z.object() drops
@@ -445,6 +448,7 @@ export function createOpencodeHostedToolsServer(
         model,
         name,
         description,
+        workdir,
         run_in_background,
         __xeng_caller_session,
         __xeng_call_id
@@ -454,6 +458,7 @@ export function createOpencodeHostedToolsServer(
         model?: string
         name?: string
         description?: string
+        workdir?: string
         run_in_background?: boolean
         __xeng_caller_session?: string
         __xeng_call_id?: string
@@ -536,6 +541,7 @@ export function createOpencodeHostedToolsServer(
         meta: extra._meta as Record<string, unknown> | undefined
       }
 
+      const workdirArg = dispatchWorkdirArg(workdir)
       const background = runsInBackground(run_in_background, callerIsRoot, identity.callId)
       const result = await deps.dispatch(
         {
@@ -544,6 +550,7 @@ export function createOpencodeHostedToolsServer(
           model,
           name,
           description,
+          ...(workdirArg ? { workdir: workdirArg } : {}),
           ...(background ? { runInBackground: true } : {}),
           // A subagent child asked for the background: its report goes to the chat's root agent.
           ...(background && !callerIsRoot ? { fromSubagent: true } : {})

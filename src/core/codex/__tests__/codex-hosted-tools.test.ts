@@ -18,7 +18,8 @@ import {
   DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
   DISPATCH_FOLLOW_UP_GUIDANCE,
-  DISPATCH_NAME_PARAM
+  DISPATCH_NAME_PARAM,
+  DISPATCH_WORKDIR_PARAM
 } from '../../../shared/dispatch-agent-description'
 import {
   SESSION_TOOL_NAMES,
@@ -67,6 +68,21 @@ describe('codexDynamicToolSpecs — dispatch_agent name and description', () => 
       description: DISPATCH_DESCRIPTION_PARAM
     })
     expect(schema.required).toEqual(['engine', 'prompt', 'description'])
+  })
+
+  it('takes workdir as an optional string, worded by the shared description module', () => {
+    const spec = codexDynamicToolSpecs(true).find((s) => s.name === 'dispatch_agent')!
+    const schema = (spec as unknown as { inputSchema: unknown }).inputSchema as {
+      properties: Record<string, unknown>
+      required: string[]
+      additionalProperties: boolean
+    }
+    expect(schema.properties.workdir).toEqual({
+      type: 'string',
+      description: DISPATCH_WORKDIR_PARAM
+    })
+    expect(schema.required).not.toContain('workdir')
+    expect(schema.additionalProperties).toBe(false)
   })
 
   it('takes run_in_background as an optional boolean, worded by the shared description module', () => {

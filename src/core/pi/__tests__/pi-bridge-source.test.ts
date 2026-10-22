@@ -16,6 +16,7 @@ import {
   DISPATCH_DESCRIPTION_PARAM,
   DISPATCH_FOLLOW_UP_GUIDANCE,
   DISPATCH_NAME_PARAM,
+  DISPATCH_WORKDIR_PARAM,
   HAND_BACK_DESCRIPTION,
   HAND_BACK_REPORT_PARAM
 } from '../../../shared/dispatch-agent-description'
@@ -26,8 +27,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 23 (dispatch_agent requires a description)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('23')
+  it('is version 24 (dispatch_agent takes an optional workdir)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('24')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -398,6 +399,11 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
           const d = runExtension().tools.get('dispatch_agent')!.description
           expect(d).toContain('DIFFERENT engine')
           expect(d).toContain('use the agent tool')
+          // ...and says where the agent runs, as the shared description does (v24).
+          expect(d).toContain(
+            'runs headless in your working directory, or in workdir when you give one'
+          )
+          expect(d).not.toContain('the same working directory')
           // The fallback carries the shared follow-up sentence (the bridge cannot import it, and a
           // backtick would end its template literal, so it is the same words without them).
           expect(d).toContain(DISPATCH_FOLLOW_UP_GUIDANCE.replaceAll('`', ''))
@@ -490,6 +496,23 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
           description: DISPATCH_DESCRIPTION_PARAM
         })
         expect(params.required).toEqual(['engine', 'prompt', 'description'])
+      }
+    )
+  })
+
+  it('dispatch_agent takes an optional string workdir, worded exactly as the shared module does', () => {
+    withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
+      () => {
+        const params = runExtension().tools.get('dispatch_agent')!.parameters as {
+          properties: Record<string, { type: string; description: string }>
+          required: string[]
+        }
+        expect(params.properties.workdir).toEqual({
+          type: 'string',
+          description: DISPATCH_WORKDIR_PARAM
+        })
+        expect(params.required).not.toContain('workdir')
       }
     )
   })

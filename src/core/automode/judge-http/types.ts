@@ -124,6 +124,8 @@ export type JudgeRouteUnavailableCode =
   | 'provider-disabled'
   /** No token / no workspace id. */
   | 'chatgpt-unavailable'
+  /** A 429 told ClaudeUI when the route recovers, and that time has not come (`judge-cooldown.ts`). */
+  | 'rate-limited'
 
 /** The per-call reader output, shared by both wires. */
 export interface JudgeStreamResult {
@@ -156,12 +158,24 @@ export interface JudgeStreamOptions {
 export class JudgeWireError extends Error {
   readonly status?: number
   readonly code?: string
+  /**
+   * A 429's recovery time, epoch ms: the body's `resets_at` or the `retry-after` header. Lets the
+   * caller rest the route until then (`judge-cooldown.ts`) instead of failing every call into it.
+   */
+  readonly retryAtMs?: number
+  /** `judgeRouteKey(route)` of the route the call used — set by the transport, never by a wire reader. */
+  readonly routeKey?: string
   readonly retryable = false as const
 
-  constructor(message: string, opts: { status?: number; code?: string } = {}) {
+  constructor(
+    message: string,
+    opts: { status?: number; code?: string; retryAtMs?: number; routeKey?: string } = {}
+  ) {
     super(message)
     this.name = 'JudgeWireError'
     if (opts.status !== undefined) this.status = opts.status
     if (opts.code !== undefined) this.code = opts.code
+    if (opts.retryAtMs !== undefined) this.retryAtMs = opts.retryAtMs
+    if (opts.routeKey !== undefined) this.routeKey = opts.routeKey
   }
 }

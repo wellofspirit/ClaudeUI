@@ -33,12 +33,20 @@ export function shellCommandOf(
 
 /** `\` → `/`, collapsed slashes, and (win32 only) the Git-Bash `/d/x` spelling
  *  folded onto `d:/x`. Gated on platform because `/e/tc` is a real directory on
- *  Linux; `platform` is injectable so both branches are testable anywhere. */
+ *  Linux; `platform` is injectable so both branches are testable anywhere.
+ *
+ *  A win32 UNC path (`\\host\share`, `//host/share`) keeps its two leading
+ *  slashes and is NEVER drive-folded: its first component names a host, so
+ *  `//s/share/a.txt` is not `s:/share/a.txt`. Keeping the pair also makes the
+ *  function idempotent (`normalizePath(toPosixish(x))` re-reads its own output),
+ *  which a single-slash `/s/share/a.txt` would not survive. */
 export function toPosixish(raw: string, platform: NodeJS.Platform): string {
-  let s = raw.replace(/\\/g, '/').replace(/\/{2,}/g, '/')
+  const slashed = raw.replace(/\\/g, '/')
+  const s = slashed.replace(/\/{2,}/g, '/')
   if (platform === 'win32') {
+    if (/^\/\/[^/]/.test(slashed)) return `/${s}`
     const msys = /^\/([A-Za-z])(\/|$)/.exec(s)
-    if (msys) s = `${msys[1]}:${s.slice(2) || '/'}`
+    if (msys) return `${msys[1]}:${s.slice(2) || '/'}`
   }
   return s
 }
@@ -73,6 +81,8 @@ export function normalizePath(raw: string, platform: NodeJS.Platform): Normalize
     }
   }
   const absolute = rest.startsWith('/')
+  // `toPosixish` leaves a double slash only on a win32 UNC prefix; keep it.
+  const unc = platform === 'win32' && rest.startsWith('//')
   const components: string[] = []
   for (const part of rest.split('/')) {
     if (part === '' || part === '.') continue
@@ -82,7 +92,8 @@ export function normalizePath(raw: string, platform: NodeJS.Platform): Normalize
     }
     components.push(part)
   }
-  return { full: drive + (absolute || drive ? '/' : '') + components.join('/'), components }
+  const prefix = unc && components.length > 0 ? '//' : absolute || drive ? '/' : ''
+  return { full: drive + prefix + components.join('/'), components }
 }
 
 /** Resolve a possibly-relative target against `cwd`, both in posix-ish form. */

@@ -35,6 +35,7 @@ import {
   DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
   DISPATCH_NAME_PARAM,
+  DISPATCH_WORKDIR_PARAM,
   dispatchAgentDescription,
   joinDispatchHints,
   OWN_SUBAGENT_TOOL,
@@ -209,6 +210,7 @@ function dispatchAgentSpec(): DynamicToolSpec {
         },
         name: { type: 'string', description: DISPATCH_NAME_PARAM },
         description: { type: 'string', description: DISPATCH_DESCRIPTION_PARAM },
+        workdir: { type: 'string', description: DISPATCH_WORKDIR_PARAM },
         run_in_background: { type: 'boolean', description: DISPATCH_BACKGROUND_PARAM }
       },
       required: ['engine', 'prompt', 'description'],

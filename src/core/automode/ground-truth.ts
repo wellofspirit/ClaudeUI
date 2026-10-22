@@ -34,7 +34,12 @@
 
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { foldName, isAgentControlPath } from './agent-control-paths'
+import {
+  AGENT_CONTROL_DIRS,
+  AGENT_CONTROL_FILES,
+  foldName,
+  isAgentControlPath
+} from './agent-control-paths'
 import {
   isAbsolutePosixish,
   isDescendant,
@@ -346,7 +351,21 @@ export interface RedirectScope {
  *   for each unresolvable target that starts with a temp-directory variable it
  *   says which path that variable normally names. It never affects
  *   `allInScope`, `outOfScope` or `unresolvable` — a wrong hint costs nothing,
- *   because the judge reads the command itself.
+ *   because the judge reads the command itself;
+ * - `quotedTargets` is the QUOTE-BLIND cross-check's residue, present only when
+ *   non-empty: raw spellings a `>` inside quoted text / a heredoc body / an
+ *   inert argument names that the quote-aware scan did NOT read as a redirect,
+ *   and that are not cleanly in scope (outside every root, protected, or not
+ *   resolvable). They are probably text (`echo "a > /etc/x"`) but would be a real
+ *   write if the text is re-read as shell (`echo 'x > /etc/x' | "$BASH"`), which
+ *   the scanner cannot rule out. They are NEVER also in `targets`,
+ *   `outOfScope`, `unresolvable` or `protectedHits`, so "probably text" stays
+ *   distinguishable from "definitely a write", and any entry makes `allInScope`
+ *   false. A raw spelling is shown at most 200 characters;
+ * - `unmeasured` is present only when non-empty: the as-written targets whose
+ *   containment the harness could not establish (a missing parent under a link,
+ *   an unreadable root, a probe timeout, an unknown shell drive). Such a target
+ *   may also sit in another list; `allInScope` is false whenever this is present.
  *
  * Unlike the whole-analysis contract (a `null` return means "emit nothing"),
  * the empty arrays here are load-bearing: `"outOfScope":[]` says we looked.
@@ -354,8 +373,9 @@ export interface RedirectScope {
 export interface RedirectAnalysis {
   /** Every file target, as written. Excludes fd-duplications and null/stream sinks. */
   targets: string[]
-  /** True only when every target resolved INSIDE a scope root, none is protected
-   *  and none is a symlink. */
+  /** True only when every target resolved INSIDE a scope root, none is protected,
+   *  none is a symlink, none is unmeasured and the quote-blind cross-check found
+   *  no quote-hidden target that is not cleanly in scope. */
   allInScope: boolean
   /** Resolved targets that landed outside every scope root, with measured facts. */
   outOfScope: RedirectOutOfScopeTarget[]
@@ -368,6 +388,12 @@ export interface RedirectAnalysis {
   /** Unresolvable targets that start with a temp-directory variable, with the
    *  path that variable normally names. A hint only. Present only when non-empty. */
   tempVarTargets?: RedirectTempVarTarget[]
+  /** Quote-hidden targets the quote-blind cross-check found that are not cleanly in
+   *  scope, as written. Disjoint from `targets`. Present only when non-empty. */
+  quotedTargets?: string[]
+  /** As-written targets whose containment could not be established. Present only
+   *  when non-empty. */
+  unmeasured?: string[]
 }
 
 /**
@@ -462,6 +488,13 @@ export interface RedirectTargetDetail {
    * claim a clean scope for this target (exit review R3/R4/R5).
    */
   reviewRequired?: true
+  /**
+   * Found ONLY by the quote-blind cross-check ({@link quoteHiddenTargets}): the
+   * quote-aware scan read this `>` as text. Present only on a target that is not
+   * cleanly in scope. {@link summarizeRedirects} reports it in `quotedTargets`
+   * and nowhere else.
+   */
+  quoted?: true
 }
 
 /**
@@ -481,6 +514,13 @@ const PROTECTED_COMPONENTS: ReadonlySet<string> = new Set([
   '.zshrc',
   '.profile',
   '.bash_profile',
+  // The other rc files a login or interactive shell sources, and the two git
+  // files that carry credentials / submodule URLs (judge-hardening audit).
+  '.zshenv',
+  '.zprofile',
+  '.bash_login',
+  '.git-credentials',
+  '.gitmodules',
   // Credential/persistence stores (exit review C1). A session started in `~` (or
   // any directory holding one of these) would otherwise report a write to
   // `~/.aws/credentials` as a plain in-scope file, and the Local Operations
@@ -507,10 +547,14 @@ const UNRESOLVABLE_CHARS = /[$`~*?[\]{}%]/
  *  they are dropped from `targets` entirely (reporting `/dev/null` as
  *  out-of-scope would turn the single commonest redirect idiom into a
  *  danger signal). `$null` is PowerShell's automatic variable for the same
- *  thing: `2>$null`, `*>$null` and `| Out-Null` write no file. A command whose
- *  ONLY targets are sinks yields `null`, i.e. the pre-existing behaviour, never
- *  a fabricated all-clear. */
-const NULL_SINKS: ReadonlySet<string> = new Set(['/dev/null', 'nul', '$null'])
+ *  thing: `2>$null`, `*>$null` and `| Out-Null` write no file — but ONLY in
+ *  PowerShell: in bash `null=/etc/passwd; echo x > $null` writes `/etc/passwd`,
+ *  so {@link isSink} drops `$null` for a known PowerShell shell alone. A command
+ *  whose ONLY targets are sinks yields `null`, i.e. the pre-existing behaviour,
+ *  never a fabricated all-clear. */
+const NULL_SINKS: ReadonlySet<string> = new Set(['/dev/null', 'nul'])
+/** The PowerShell-only null sink (see {@link NULL_SINKS}). */
+const POWERSHELL_NULL_SINK = '$null'
 
 /**
  * Stream pseudo-files: the same class of sink as `/dev/null` (exit review Fable
@@ -535,7 +579,11 @@ const STREAM_SINK_RE = /^\/(?:dev\/(?:stdout|stderr|tty|fd\/\d+)|proc\/self\/fd\
  */
 function isSink(raw: string, platform: NodeJS.Platform, shell: RedirectShell | undefined): boolean {
   const posix = toPosixish(raw, platform)
-  if (NULL_SINKS.has(posix.toLowerCase())) return true
+  const folded = posix.toLowerCase()
+  if (NULL_SINKS.has(folded)) return true
+  // An unknown shell is NOT assumed to be PowerShell: `$null` is then an ordinary
+  // variable reference, unresolvable like any other `$` target.
+  if (shell === 'powershell' && folded === POWERSHELL_NULL_SINK) return true
   if (platform !== 'win32' || shell === 'posix') {
     if (STREAM_SINK_RE.test(posix)) return true
   }
@@ -706,6 +754,13 @@ interface LexSegment {
   after: SegmentOp
   /** The operator that ends this segment. */
   sepAfter: SegmentOp
+  /**
+   * The last LIST operator (`&&`, `||`, `;`, newline, `|`, `&`) in force at this
+   * segment, seen through group punctuation: the first member of `a && ( b )` and
+   * the redirect that follows `a && { b; } > f` both carry `&&`, where `after`
+   * says only `(` / `}`. A group runs only when the operator before it admits it.
+   */
+  gate: SegmentOp
   /** True when the segment was lexed from inside a quoted span / heredoc body. */
   nested: boolean
 }
@@ -779,8 +834,14 @@ function lexCommand(command: string, offset = 0, nested = false): LexedCommand {
   let balanced = true
   let pending: Array<{ delim: string; quoted: boolean; stripTabs: boolean }> = []
   let after: SegmentOp = null
+  let listOp: SegmentOp = null
+  const gateStack: SegmentOp[] = []
   let pendingRedirect: { pos: number; append: boolean; output: boolean } | null = null
   let paramBraces = 0
+  // A `#` comment is only modelled where both dialects agree it starts one
+  // (after whitespace or a separator) and PowerShell's `<# … #>` block comment,
+  // which spans lines, is absent; anywhere else `#` keeps the quote-blind fallback.
+  const lineComments = !command.includes('<#')
 
   const cur = (at: number): LexWord => {
     if (!word) {
@@ -847,11 +908,15 @@ function lexCommand(command: string, offset = 0, nested = false): LexedCommand {
         depth: segDepth,
         after,
         sepAfter: op,
+        gate: listOp,
         nested
       })
     }
     words = []
     after = op
+    if (op === '(' || op === '{') gateStack.push(listOp)
+    else if (op === ')' || op === '}') listOp = gateStack.pop() ?? listOp
+    else if (op !== null) listOp = op
   }
 
   for (let i = 0; i < command.length; i++) {
@@ -927,7 +992,19 @@ function lexCommand(command: string, offset = 0, nested = false): LexedCommand {
     // our lexer cannot know where the comment's text came from → quote-blind
     // for the whole command (R1d).
     if (ch === '#') {
-      if (atWordStart()) balanced = false
+      if (atWordStart()) {
+        if (lineComments && (i === 0 || /[\s;|&()]/.test(command[i - 1]))) {
+          // A comment runs to the end of the line and is never command text:
+          // its quotes, `>`s and `cd`s do not exist for the shell. The newline
+          // itself is left to the separator branch.
+          endWord(i)
+          let end = i
+          while (end < command.length && command[end] !== '\n' && command[end] !== '\r') end++
+          i = end - 1
+          continue
+        }
+        balanced = false
+      }
       cur(i).text += ch
       outsideChars++
       continue
@@ -1330,6 +1407,14 @@ interface RawTarget {
    * source position, never from the redirect operator.
    */
   hintLiteral?: boolean
+  /**
+   * Set only on a quote-hidden token ({@link quoteHiddenTargets}) that is read as
+   * a literal relative NAME in the shell's directory although it carries glob
+   * characters: `list[int]:` from `def f() -> list[int]:`, `**Note**` from a
+   * markdown `> **Note**`. {@link resolveOneTarget} then skips the "glob =
+   * unresolvable" step for it. See {@link isPhantomLiteralName} for the rule.
+   */
+  literalName?: true
 }
 
 /**
@@ -1490,49 +1575,277 @@ function charTargets(command: string, from: number, to: number): RawTarget[] {
       i++
       continue
     }
-    const at = i
-    if (ch === '&') i++
+    const read = readCharTarget(command, i, to)
+    if (read.target !== undefined) out.push(read.target)
+    i = read.next
+  }
+  return out
+}
+
+/**
+ * ONE quote-blind operator read at `at` (a `>` or the `&` of `&>`): its target
+ * (absent for a file-descriptor duplication such as `2>&1`) and the index where
+ * a scan resumes. {@link charTargets} loops over it; the quote-blind cross-check
+ * ({@link quoteHiddenTargets}) calls it per `>` so that one operator's quoted
+ * target can never swallow the operators after it.
+ */
+function readCharTarget(
+  command: string,
+  at: number,
+  to: number,
+  swallowUnclosed = true
+): { target?: RawTarget; next: number } {
+  let i = at
+  if (command[i] === '&') i++
+  i++
+  let append = false
+  if (command[i] === '>') {
+    append = true
     i++
-    let append = false
-    if (command[i] === '>') {
-      append = true
-      i++
-    }
-    if (command[i] === '|') i++
-    let sawAmpersand = false
-    if (command[i] === '&') {
-      sawAmpersand = true
-      i++
-    }
-    while (i < to && (command[i] === ' ' || command[i] === '\t')) i++
-    let raw: string
-    const quote = command[i]
-    if (quote === '"' || quote === "'") {
-      const end = command.indexOf(quote, i + 1)
-      if (end === -1 || end >= to) {
-        raw = command.slice(i + 1, to)
-        i = to
-      } else {
-        raw = command.slice(i + 1, end)
-        i = end + 1
-      }
+  }
+  if (command[i] === '|') i++
+  let sawAmpersand = false
+  if (command[i] === '&') {
+    sawAmpersand = true
+    i++
+  }
+  while (i < to && (command[i] === ' ' || command[i] === '\t')) i++
+  let raw: string
+  let quote = command[i]
+  if (quote === '"' || quote === "'") {
+    const end = command.indexOf(quote, i + 1)
+    if (end !== -1 && end < to) {
+      raw = command.slice(i + 1, end)
+      i = end + 1
+    } else if (swallowUnclosed) {
+      raw = command.slice(i + 1, to)
+      i = to
     } else {
+      // A quote that never closes is as likely the CLOSING quote of the text this
+      // `>` sits in (`grep '>' $F`) as an opening one: read the token after it
+      // instead of swallowing the rest of the command.
+      i++
       const start = i
       while (i < to && !TARGET_END.has(command[i])) i++
       raw = command.slice(start, i)
+      quote = ''
     }
-    // `>&1`, `2>&-` — a duplication of a file descriptor, not a file.
-    if (sawAmpersand && /^\d*-?$/.test(raw)) continue
-    out.push({
+  } else {
+    const start = i
+    while (i < to && !TARGET_END.has(command[i])) i++
+    raw = command.slice(start, i)
+  }
+  // `>&1`, `2>&-` — a duplication of a file descriptor, not a file.
+  if (sawAmpersand && /^\d*-?$/.test(raw)) return { next: i }
+  return {
+    target: {
       raw,
       append,
       pos: at,
       ...(quote === '"' || quote === "'" ? { quoted: true } : {}),
       // The spelling's absolute start is not retained here; withhold the hint.
       hintLiteral: true
-    })
+    },
+    next: i
+  }
+}
+
+/**
+ * How many `>` operators the quote-blind cross-check will read that the
+ * quote-aware scan did not before the whole analysis says nothing (the safe
+ * fallback, exactly like {@link MAX_REDIRECT_TARGETS}). Bounds the one place a
+ * 64 KB command could otherwise cost quadratic `indexOf` work.
+ */
+const MAX_HIDDEN_OPERATORS = 2048
+
+/**
+ * How many DISTINCT (spelling, shell state) readings of those the cross-check
+ * will resolve before it gives up the same way.
+ */
+const MAX_HIDDEN_KEYS = 512
+
+/** How much of a quote-hidden spelling `quotedTargets` shows (a swallowed quote
+ *  can make one `raw` the whole rest of a 64 KB command). */
+const MAX_QUOTED_RAW_LENGTH = 200
+
+/**
+ * The QUOTE-BLIND CROSS-CHECK (ADR-106 addendum). The quote-aware scan
+ * ({@link inertRanges}) reads `>` inside quoted text as text, which is what
+ * stops phantom targets — and also what hides a real write whenever the lexer
+ * is wrong about the quote structure or the text is re-read as shell by a
+ * mechanism it does not know (`echo "$(echo "a " > /etc/p)"`, `… | "$BASH"`,
+ * `find -exec sh -c '… > f' \;`, `& ([scriptblock]::Create('… > f'))`). So every
+ * `>` operator in the command text is also read WITHOUT any quote awareness (the
+ * pre-ADR-106 behaviour), and the ones the quote-aware scan did not already
+ * report are returned here. The caller resolves them like any target and keeps
+ * only those that are not cleanly in scope.
+ *
+ * "Already reported" is decided by operator position, not by spelling: the
+ * lexer's position for `>>`/`>|`/`&>>` sits up to two characters after the
+ * scanner's own start. Each `>` is read on its own ({@link readCharTarget}), so
+ * a quoted target that never closes cannot swallow the operators after it.
+ *
+ * `null` when more than {@link MAX_HIDDEN_OPERATORS} operators are unreported.
+ */
+function quoteHiddenTargets(command: string, aware: readonly RawTarget[]): RawTarget[] | null {
+  const known = new Set<number>()
+  for (const target of aware) known.add(target.pos)
+  const operatorChar = (ch: string | undefined): boolean => ch === '>' || ch === '|' || ch === '&'
+  const out: RawTarget[] = []
+  let examined = 0
+  for (let i = command.indexOf('>'); i !== -1; i = command.indexOf('>', i + 1)) {
+    // The second `>` of `>>` belongs to the operator read from the first.
+    if (command[i - 1] === '>') continue
+    const at = command[i - 1] === '&' ? i - 1 : i
+    const covered =
+      known.has(at) ||
+      (operatorChar(command[at + 1]) &&
+        (known.has(at + 1) || (operatorChar(command[at + 2]) && known.has(at + 2))))
+    if (covered) continue
+    if (++examined > MAX_HIDDEN_OPERATORS) return null
+    const read = readCharTarget(command, at, command.length, false)
+    let target = read.target
+    if (target === undefined) continue
+    if (target.quoted !== true) {
+      // The text would be re-read as shell, which removes the quotes (and an
+      // escaped closing quote's backslash): `echo 'x > .bashrc'` names `.bashrc`,
+      // not `.bashrc'` — a stray quote must never hide a protected component.
+      let raw = target.raw.replace(/["']/g, '').replace(/\\+$/, '')
+      // A closer with no opener in the token is code (`rows if x>1]`, `a => {}`),
+      // not a glob; dropping it only removes characters from the LAST component.
+      while (/\]$/.test(raw) && countOf(raw, '[') < countOf(raw, ']')) raw = raw.slice(0, -1)
+      while (/\}$/.test(raw) && countOf(raw, '{') < countOf(raw, '}')) raw = raw.slice(0, -1)
+      if (raw !== target.raw) target = { ...target, raw }
+    }
+    // A token made only of brackets (`=> {`, `-> []`) is no glob: it names a
+    // literal file in the shell's directory, which is code text, not a write.
+    if (target.quoted !== true && /^[[\]{}]+$/.test(target.raw)) continue
+    if (target.raw.trim().length === 0) continue
+    // Code and prose carry glob characters (`list[int]:`, `**Note**`): such a token
+    // is read as a literal relative name, and so drops out when its directory is in
+    // scope — unless the glob could name a protected or agent-control file.
+    out.push(isPhantomLiteralName(target.raw) ? { ...target, literalName: true } : target)
   }
   return out
+}
+
+/** The names a hidden glob must never be able to match: the protected components
+ *  and the agent-control directories and files, plus the `.env` family's stem. */
+const PROTECTED_GLOB_NAMES: readonly string[] = [
+  ...PROTECTED_COMPONENTS,
+  ...AGENT_CONTROL_DIRS,
+  ...AGENT_CONTROL_FILES,
+  '.env'
+]
+
+/**
+ * Compile a shell glob (`*`, `?`, `[...]`, `{a,b}`) to an anchored,
+ * case-insensitive regular expression, or `null` when it cannot be read
+ * (unbalanced braces, an invalid class). A `/` never appears here (the caller
+ * rejects it), so `*` may match anything.
+ */
+function globToRegExp(glob: string): RegExp | null {
+  let source = ''
+  let braces = 0
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i]
+    if (ch === '*') {
+      source += '.*'
+    } else if (ch === '?') {
+      source += '.'
+    } else if (ch === '[') {
+      let j = i + 1
+      if (glob[j] === '!' || glob[j] === '^') j++
+      if (glob[j] === ']') j++
+      while (j < glob.length && glob[j] !== ']') j++
+      if (j >= glob.length) {
+        source += '\\['
+        continue
+      }
+      let body = glob.slice(i + 1, j)
+      const negated = body.startsWith('!') || body.startsWith('^')
+      if (negated) body = body.slice(1)
+      source += `[${negated ? '^' : ''}${body.replace(/[\\\]^]/g, '\\$&')}]`
+      i = j
+    } else if (ch === '{') {
+      braces++
+      source += '(?:'
+    } else if (ch === '}' && braces > 0) {
+      braces--
+      source += ')'
+    } else if (ch === ',' && braces > 0) {
+      source += '|'
+    } else {
+      source += ch.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&')
+    }
+  }
+  if (braces !== 0) return null
+  try {
+    return new RegExp(`^(?:${source})$`, 'i')
+  } catch {
+    return null
+  }
+}
+
+/**
+ * True when a quote-hidden token is a PHANTOM: code or prose text a quoted
+ * heredoc / string left after a `>` (`def f() -> list[int]:`, a markdown
+ * `> **Note**`), which is read as a literal relative name in the shell's directory
+ * rather than as a glob it cannot resolve.
+ *
+ * Only when the token cannot be a path or an expansion — no `/`, `\`, `$`,
+ * backtick, `~` or `%`, and no leading `.` — AND its glob cannot match any
+ * protected or agent-control name (`.bash*`, `CLAUDE.m?` and `*` can, so they stay
+ * named in `quotedTargets`). Real targets never come through here.
+ */
+function isPhantomLiteralName(raw: string): boolean {
+  if (/[/\\$`~%]/.test(raw) || raw.startsWith('.')) return false
+  if (!UNRESOLVABLE_CHARS.test(raw)) return false
+  const matcher = globToRegExp(raw)
+  if (matcher === null) return false
+  return !PROTECTED_GLOB_NAMES.some((name) => matcher.test(name))
+}
+
+/** How many times `ch` occurs in `text`. */
+function countOf(text: string, ch: string): number {
+  let n = 0
+  for (let i = text.indexOf(ch); i !== -1; i = text.indexOf(ch, i + 1)) n++
+  return n
+}
+
+/** Every dir-changing word, one match each (no boundary characters consumed). */
+const DIR_WORD_EACH =
+  /(?<![A-Za-z0-9_-])(?:cd|chdir|pushd|popd|set-location|sl|push-location|pop-location)(?![A-Za-z0-9_-])/gi
+
+/**
+ * True when the command spells more directory-changing words than its segments
+ * run as commands — one of them sits in quoted text the shell-state walk never
+ * reads (`sh -c 'cd /etc; echo x > passwd'`). A quote-hidden RELATIVE target is
+ * then unknowable, whatever the walk says the directory is.
+ */
+function hasHiddenDirWord(command: string, segments: readonly LexSegment[]): boolean {
+  const spelled = [...command.matchAll(DIR_WORD_EACH)].length
+  if (spelled === 0) return false
+  let run = 0
+  for (const seg of segments) {
+    const at = commandWordAt(seg, false)
+    if (at === -1) continue
+    if (commandNames(seg.words[at].text).some((n) => DIR_COMMANDS.has(n) || DIR_POISON.has(n))) {
+      run++
+    }
+  }
+  return spelled > run
+}
+
+/** A resolved target that is certainly inside a scope root, unprotected and measurable. */
+function isCleanInScope(detail: RedirectTargetDetail): boolean {
+  return (
+    detail.path !== undefined &&
+    detail.root !== undefined &&
+    detail.protectedHits.length === 0 &&
+    detail.reviewRequired !== true &&
+    detail.shellDrive !== null
+  )
 }
 
 /** Wrappers whose own name is not the command (`sudo tee`, `env -i tee`). */
@@ -1545,7 +1858,130 @@ const COMMAND_WRAPPERS: ReadonlySet<string> = new Set([
   'nohup',
   'time',
   'nice',
-  'timeout'
+  'timeout',
+  'stdbuf',
+  'ionice',
+  'setsid',
+  'chrt',
+  'taskset',
+  'busybox',
+  'builtin',
+  'xargs'
+])
+
+/**
+ * The options of the wrappers whose flags are modelled strictly: an option that
+ * is not listed here makes the wrapped command's identity a guess, so a writer
+ * behind it is reported unreadable instead (see {@link commandWordInfo}).
+ * `sudo`/`env`/`timeout`/… keep the older lenient skipping above.
+ */
+interface WrapperSpec {
+  /** Single-letter options that take no value. */
+  flags?: string
+  /** Single-letter options whose value is attached (`-oL`) or the next word. */
+  valueFlags?: string
+  /** Single-letter options with an optional, attached-only value (`-i[STR]`). */
+  optionalFlags?: string
+  /** Long options that take no value. */
+  long?: readonly string[]
+  /** Long options whose value is `=…` or the next word. */
+  longValue?: readonly string[]
+  /** Positional words that precede the command (`chrt 10 cmd`, `taskset 0x1 cmd`). */
+  positionals?: number
+  /** `-5` is a numeric option (`nice -5 cmd`). */
+  numeric?: boolean
+}
+
+const STRICT_WRAPPERS: ReadonlyMap<string, WrapperSpec> = new Map([
+  [
+    'stdbuf',
+    {
+      valueFlags: 'ioe',
+      long: ['--help', '--version'],
+      longValue: ['--input', '--output', '--error']
+    }
+  ],
+  [
+    'ionice',
+    {
+      flags: 't',
+      valueFlags: 'cnpPu',
+      long: ['--ignore', '--help', '--version'],
+      longValue: ['--class', '--classdata', '--pid', '--pgid', '--uid']
+    }
+  ],
+  ['nice', { valueFlags: 'n', numeric: true, longValue: ['--adjustment'], long: ['--help'] }],
+  ['setsid', { flags: 'cfwhV', long: ['--ctty', '--fork', '--wait', '--help', '--version'] }],
+  [
+    'chrt',
+    {
+      flags: 'bfiordRavh',
+      valueFlags: 'm',
+      long: [
+        '--batch',
+        '--fifo',
+        '--idle',
+        '--other',
+        '--rr',
+        '--deadline',
+        '--reset-on-fork',
+        '--verbose',
+        '--max',
+        '--help'
+      ],
+      positionals: 1
+    }
+  ],
+  [
+    'taskset',
+    { flags: 'cahV', long: ['--cpu-list', '--all-tasks', '--help', '--version'], positionals: 1 }
+  ],
+  ['busybox', { long: ['--list', '--help'] }],
+  ['builtin', {}],
+  [
+    'xargs',
+    {
+      flags: '0oprtxh',
+      valueFlags: 'adEILnPs',
+      optionalFlags: 'eil',
+      long: [
+        '--null',
+        '--open-tty',
+        '--interactive',
+        '--no-run-if-empty',
+        '--verbose',
+        '--exit',
+        '--help',
+        '--version',
+        '--show-limits'
+      ],
+      longValue: [
+        '--arg-file',
+        '--delimiter',
+        '--eof',
+        '--replace',
+        '--max-lines',
+        '--max-args',
+        '--max-procs',
+        '--max-chars',
+        '--process-slot-var'
+      ]
+    }
+  ]
+])
+
+/** Reserved words that may precede the command word of a segment. */
+const COMMAND_KEYWORDS: ReadonlySet<string> = new Set([
+  'then',
+  'do',
+  'else',
+  'elif',
+  'if',
+  'while',
+  'until',
+  '!',
+  '{',
+  'time'
 ])
 /** Wrapper options that consume the NEXT token (`sudo -u root`, `nice -n 5`). */
 const WRAPPER_VALUE_FLAGS: ReadonlySet<string> = new Set([
@@ -1567,43 +2003,255 @@ const PS_WRITE_CMDLETS: ReadonlySet<string> = new Set([
   'set-content',
   'add-content',
   'tee-object',
+  'export-csv',
+  'epcsv',
   'ac'
 ])
 const PS_ALWAYS_APPEND: ReadonlySet<string> = new Set(['add-content', 'ac'])
-/** Flags naming the written file, in PowerShell's full spelling. */
-const PS_PATH_FLAGS = ['-filepath', '-path', '-literalpath'] as const
-/** Flags whose VALUE is not the file. */
-const PS_VALUE_FLAGS = [
-  '-encoding',
-  '-inputobject',
-  '-width',
-  '-delimiter',
-  '-value',
-  '-variable',
-  '-stream'
-] as const
+/** The cmdlet an alias stands for, where the parameter tables are keyed by cmdlet. */
+const PS_CMDLET_ALIASES: ReadonlyMap<string, string> = new Map([
+  ['ac', 'add-content'],
+  ['epcsv', 'export-csv']
+])
 
-/** A PowerShell path flag (exact, unambiguous prefix ≥3, or colon form). */
-function pathFlagOf(flag: string): (typeof PS_PATH_FLAGS)[number] | null {
-  for (const name of PS_PATH_FLAGS) if (name === flag) return name
-  if (flag.startsWith('-') && flag.length >= 4) {
-    const hits = PS_PATH_FLAGS.filter((name) => name.startsWith(flag))
-    return hits.length === 1 ? hits[0] : null
+type PsParamKind = 'path' | 'switch' | 'value'
+
+interface PsParam {
+  /** Lower-case full name. */
+  name: string
+  /** Lower-case aliases (`-ea`, `-PSPath`). */
+  aliases: readonly string[]
+  /** `path`: names the written file; `switch`: no value; `value`: takes one. */
+  kind: PsParamKind
+}
+
+const psParam = (name: string, kind: PsParamKind, ...aliases: string[]): PsParam => ({
+  name: name.toLowerCase(),
+  aliases: aliases.map((alias) => alias.toLowerCase()),
+  kind
+})
+
+/** The common parameters of every cmdlet (`about_CommonParameters`). */
+const PS_COMMON_PARAMS: readonly PsParam[] = [
+  psParam('Verbose', 'switch', 'vb'),
+  psParam('Debug', 'switch', 'db'),
+  psParam('WhatIf', 'switch', 'wi'),
+  psParam('Confirm', 'switch', 'cf'),
+  psParam('ErrorAction', 'value', 'ea'),
+  psParam('WarningAction', 'value', 'wa'),
+  psParam('InformationAction', 'value', 'infa', 'ia'),
+  psParam('ErrorVariable', 'value', 'ev'),
+  psParam('WarningVariable', 'value', 'wv'),
+  psParam('InformationVariable', 'value', 'iv', 'infv'),
+  psParam('OutVariable', 'value', 'ov'),
+  psParam('OutBuffer', 'value', 'ob'),
+  psParam('PipelineVariable', 'value', 'pv')
+]
+
+/** The `Set-Content` / `Add-Content` parameters (the same set). */
+const PS_CONTENT_PARAMS: readonly PsParam[] = [
+  psParam('Path', 'path'),
+  psParam('LiteralPath', 'path', 'PSPath', 'LP'),
+  psParam('Value', 'value'),
+  psParam('PassThru', 'switch'),
+  psParam('Filter', 'value'),
+  psParam('Include', 'value'),
+  psParam('Exclude', 'value'),
+  psParam('Force', 'switch'),
+  psParam('Credential', 'value'),
+  psParam('NoNewline', 'switch'),
+  psParam('Encoding', 'value'),
+  psParam('AsByteStream', 'switch'),
+  psParam('Stream', 'value')
+]
+
+/** Per cmdlet: every parameter it accepts besides the common ones. */
+const PS_CMDLET_PARAMS: ReadonlyMap<string, readonly PsParam[]> = new Map([
+  [
+    'out-file',
+    [
+      psParam('FilePath', 'path', 'Path'),
+      psParam('LiteralPath', 'path', 'PSPath', 'LP'),
+      psParam('Encoding', 'value'),
+      psParam('Append', 'switch'),
+      psParam('Force', 'switch'),
+      psParam('NoClobber', 'switch', 'NoOverwrite'),
+      psParam('Width', 'value'),
+      psParam('NoNewline', 'switch'),
+      psParam('InputObject', 'value')
+    ]
+  ],
+  ['set-content', PS_CONTENT_PARAMS],
+  ['add-content', PS_CONTENT_PARAMS],
+  [
+    'tee-object',
+    [
+      psParam('FilePath', 'path', 'Path'),
+      psParam('LiteralPath', 'path', 'PSPath', 'LP'),
+      psParam('InputObject', 'value'),
+      psParam('Variable', 'value'),
+      psParam('Append', 'switch')
+    ]
+  ],
+  [
+    'export-csv',
+    [
+      psParam('Path', 'path'),
+      psParam('LiteralPath', 'path', 'PSPath', 'LP'),
+      psParam('Delimiter', 'value'),
+      psParam('UseCulture', 'switch'),
+      psParam('NoTypeInformation', 'switch', 'NTI'),
+      psParam('IncludeTypeInformation', 'switch', 'ITI'),
+      psParam('Append', 'switch'),
+      psParam('Force', 'switch'),
+      psParam('NoClobber', 'switch', 'NoOverwrite'),
+      psParam('Encoding', 'value'),
+      psParam('InputObject', 'value'),
+      psParam('QuoteFields', 'value'),
+      psParam('UseQuotes', 'value')
+    ]
+  ]
+])
+
+/**
+ * The parameter a PowerShell flag names for `cmdlet`: an exact name or alias, else
+ * the ONE parameter whose name or alias it abbreviates. `null` for an unknown or
+ * ambiguous flag — PowerShell would refuse the call, but the caller must not
+ * assume that: an unrecognised flag makes the written path unreadable, never a
+ * guess (`-ErrorAction Stop` must not turn `Stop` into the file).
+ */
+function resolvePsParam(cmdlet: string, flagName: string): PsParam | null {
+  const want = flagName.toLowerCase()
+  if (want.length === 0) return null
+  const table = [...(PS_CMDLET_PARAMS.get(cmdlet) ?? []), ...PS_COMMON_PARAMS]
+  const exact = table.find((p) => p.name === want || p.aliases.includes(want))
+  if (exact !== undefined) return exact
+  const hits = table.filter(
+    (p) => p.name.startsWith(want) || p.aliases.some((alias) => alias.startsWith(want))
+  )
+  return hits.length === 1 ? hits[0] : null
+}
+
+/** PowerShell treats the en dash, em dash and horizontal bar as a parameter dash. */
+const PS_FLAG_WORD = /^[-–—―][A-Za-z_?]/
+
+/**
+ * True when the word is a PowerShell parameter (`-Path`, `-Path:x`, `–Path`): it
+ * starts with a dash and a letter, and does not BEGIN inside a quote — `"-Path"`
+ * is a string argument, not a parameter.
+ */
+function isPsFlagWord(word: LexWord): boolean {
+  if (!PS_FLAG_WORD.test(word.text)) return false
+  return !(word.spans.length > 0 && word.spans[0].start - 1 === word.start)
+}
+
+/** True when the word continues a comma list (`a,`) or the next one does (`, b`). */
+function continuesList(word: LexWord, next: LexWord | undefined): boolean {
+  return word.text.trimEnd().endsWith(',') || next?.text.trimStart().startsWith(',') === true
+}
+
+/** Result of reading the words after a (possibly wrapped) command word. */
+interface CommandWordInfo {
+  /** Index of the command word, `-1` when the segment has none. */
+  at: number
+  /**
+   * A wrapper option was not recognised, so which word is the command is a guess:
+   * the caller reports any writer named after the wrapper as unreadable.
+   */
+  unsure: boolean
+  /** Index of the first wrapper word, `-1` when there is none. */
+  wrapperAt: number
+  /** Index of an `xargs` wrapper (its stdin supplies more file names), or `-1`. */
+  xargsAt: number
+}
+
+/**
+ * Skip a strictly modelled wrapper's options (see {@link STRICT_WRAPPERS}) from
+ * `from`. `next` is the index of the wrapped command; `unsure` is true when an
+ * option was not in the wrapper's table.
+ */
+function skipStrictWrapper(
+  words: readonly LexWord[],
+  from: number,
+  spec: WrapperSpec
+): { next: number; unsure: boolean } {
+  let i = from
+  let unsure = false
+  const n = words.length
+  while (i < n) {
+    const word = words[i]
+    if (word.redirected) {
+      i++
+      continue
+    }
+    const text = word.text
+    if (text === '--') {
+      i++
+      break
+    }
+    if (text.startsWith('--') && text.length > 2) {
+      const eq = text.indexOf('=')
+      const name = eq === -1 ? text : text.slice(0, eq)
+      i++
+      if (spec.long?.includes(name)) continue
+      if (spec.longValue?.includes(name)) {
+        if (eq === -1) i++
+        continue
+      }
+      unsure = true
+      continue
+    }
+    if (text.startsWith('-') && text.length > 1) {
+      i++
+      if (spec.numeric === true && /^-\d+$/.test(text)) continue
+      let valueNext = false
+      for (let k = 1; k < text.length; k++) {
+        const ch = text[k]
+        if (spec.flags?.includes(ch)) continue
+        if (spec.valueFlags?.includes(ch)) {
+          valueNext = k === text.length - 1
+          break
+        }
+        if (spec.optionalFlags?.includes(ch)) break
+        unsure = true
+        break
+      }
+      if (valueNext) i++
+      continue
+    }
+    break
   }
-  return null
+  for (let p = 0; p < (spec.positionals ?? 0); p++) {
+    while (i < n && words[i].redirected) i++
+    if (i < n && !words[i].text.startsWith('-')) i++
+  }
+  return { next: i, unsure }
 }
 
-/** True when the flag takes a value that is not a path (`-Va`, `-Stream`). */
-function isValueFlag(flag: string): boolean {
-  return PS_VALUE_FLAGS.some((name) => name === flag || (flag.length >= 3 && name.startsWith(flag)))
-}
-
-/** Index of a segment's command word: after assignments, wrappers and options. */
-function commandWordAt(seg: LexSegment): number {
+/**
+ * A segment's command word: after assignments, reserved words (`then`, `do`,
+ * `else`, `elif`, `!`, …), wrappers and options. Reports whether a wrapper's
+ * option was unknown (the answer is then a guess) and where an `xargs` sits.
+ *
+ * `keywords: false` keeps the older reading in which a reserved word IS the
+ * command word. Directory tracking uses it: a `cd` behind `do`/`then` sits in a
+ * loop or branch body, so it must keep poisoning the shell state instead of being
+ * followed as a plain `cd`.
+ */
+function commandWordInfo(seg: LexSegment, keywords = true): CommandWordInfo {
   let i = 0
+  let unsure = false
+  let wrapperAt = -1
+  let xargsAt = -1
   while (i < seg.words.length) {
     const word = seg.words[i]
     if (word.redirected || isAssignmentWord(word.text)) {
+      i++
+      continue
+    }
+    // `then tee x`, `! tee x`, `do tee x`: the keyword is not the command. A
+    // quoted `"then"` is an ordinary word.
+    if (keywords && word.spans.length === 0 && COMMAND_KEYWORDS.has(word.text)) {
       i++
       continue
     }
@@ -1612,13 +2260,26 @@ function commandWordAt(seg: LexSegment): number {
       i++
       continue
     }
+    const strict = STRICT_WRAPPERS.get(name)
+    if (strict !== undefined) {
+      if (wrapperAt === -1) wrapperAt = i
+      if (name === 'xargs' && xargsAt === -1) xargsAt = i
+      const skipped = skipStrictWrapper(seg.words, i + 1, strict)
+      i = skipped.next
+      if (skipped.unsure) unsure = true
+      continue
+    }
     if (COMMAND_WRAPPERS.has(name)) {
+      if (wrapperAt === -1) wrapperAt = i
       i++
       // The wrapper's own options and their values are not the command.
       while (i < seg.words.length && seg.words[i].text.startsWith('-')) {
         const opt = seg.words[i].text
         i++
-        if (WRAPPER_VALUE_FLAGS.has(opt)) i++
+        // `env -C DIR` and `sudo -D DIR` take the directory as the next word, which
+        // is not the command (see {@link hasWrapperChdir}).
+        const chdir = (name === 'env' && opt === '-C') || (name === 'sudo' && opt === '-D')
+        if (WRAPPER_VALUE_FLAGS.has(opt) || chdir) i++
       }
       if (name === 'timeout' && i < seg.words.length && /^\d/.test(seg.words[i].text)) i++
       if (name === 'env') {
@@ -1630,9 +2291,14 @@ function commandWordAt(seg: LexSegment): number {
       }
       continue
     }
-    return i
+    return { at: i, unsure, wrapperAt, xargsAt }
   }
-  return -1
+  return { at: -1, unsure, wrapperAt, xargsAt }
+}
+
+/** Index of a segment's command word: after assignments, wrappers and options. */
+function commandWordAt(seg: LexSegment, keywords = true): number {
+  return commandWordInfo(seg, keywords).at
 }
 
 /**
@@ -1663,157 +2329,347 @@ function unreadableTarget(command: string, pos: number, append: boolean): RawTar
   return { raw: raw.slice(0, 160), append, pos, unreadable: true }
 }
 
+/** What a writer segment's trailing `{` (a brace expansion the lexer split) hides. */
+interface BraceTail {
+  /** The spelling from the glued word (or the `{`) to the end of the statement. */
+  target: RawTarget
+  /** True when the brace is glued to the segment's last word (`~/{a,b}`). */
+  attached: boolean
+}
+
 /**
- * Targets a WRITER COMMAND writes, which no `>` operator names.
- *
- * - bash `tee [-a|--append] [-i|-p] [--] FILE…` — every non-option argument; in
- *   PowerShell `tee` is an alias for `Tee-Object`, but the bash reading still
- *   finds its file. `--` ends the options (`tee -- -x/…` is a file).
- * - PowerShell (case-insensitive) `Out-File`, `Set-Content`, `Add-Content`,
- *   `Tee-Object`, `ac`, with the file from a `-FilePath`/`-Path`/`-LiteralPath`
- *   flag ANYWHERE (prefix ≥3 or `-Path:` form), else the first positional
- *   argument. Values of known value-taking flags are skipped (`-Va v -Pat X`),
- *   redirect words are not arguments (`Set-Content 2>$null X`), and an unquoted
- *   `,` splits one word into several paths (ruling 7). `Tee-Object -Variable v`
- *   writes no file.
- *
- * Only a segment's COMMAND word counts (after any pipe) — `rg tee log.txt` is
- * not a write. These targets then go through the same resolution, scope and
- * protected-component logic as `>` targets.
+ * The lexer reads `{` as a group separator, so `tee {.git,x}/config` arrives as a
+ * `tee` segment with NO arguments followed by fragments. A writer segment that
+ * ends at `{` therefore names a target we cannot read: it is reported UNREADABLE,
+ * spelled as the text from the `{` (or the word glued to it) to the end of the
+ * statement, which keeps the protected components visible.
  */
-function writerTargets(seg: LexSegment, command: string): RawTarget[] {
-  const at = commandWordAt(seg)
-  if (at === -1) return []
-  const head = executableName(seg.words[at].text)
-  if (!PS_WRITE_CMDLETS.has(head) && head !== 'tee') return []
-  const args = seg.words.slice(at + 1).filter((w) => !w.redirected)
-  const out: RawTarget[] = []
-
-  if (head === 'tee') {
-    let append = false
-    let optionsDone = false
-    for (const word of args) {
-      const text = word.text
-      if (text.length === 0) continue
-      if (!optionsDone && text === '--') {
-        optionsDone = true
-        continue
-      }
-      if (!optionsDone && text.startsWith('-') && text.length > 1) {
-        // `-a`, `--append`, clusters like `-ai`, `--output-error=warn`.
-        if (text === '--append' || (/^-[A-Za-z]+$/.test(text) && text.includes('a'))) append = true
-        continue
-      }
-      for (const part of splitTargetWord(word)) {
-        out.push({
-          raw: part,
-          append,
-          pos: word.start,
-          quoted: word.spans.length > 0,
-          hintLiteral:
-            part === word.text ? leadingReferenceIsLiteral(command, word.start, word.text) : true
-        })
-      }
-    }
-    return out
-  }
-
-  const append = PS_ALWAYS_APPEND.has(head) || args.some((w) => w.text.toLowerCase() === '-append')
-  let pathSeen = false
-  for (let i = 0; i < args.length; i++) {
-    const text = args[i].text
-    const lower = text.toLowerCase()
-    if (lower === '--') continue
-    if (lower.startsWith('-') && lower.length > 1) {
-      const colon = lower.indexOf(':')
-      const flag = colon === -1 ? lower : lower.slice(0, colon)
-      const pathFlag = pathFlagOf(flag)
-      if (pathFlag) {
-        pathSeen = true
-        if (colon !== -1) {
-          const value = text.slice(colon + 1)
-          const valueAt = args[i].start + colon + 1
-          for (const part of splitTextWords(value)) {
-            out.push({
-              raw: part.text,
-              append,
-              pos: args[i].start,
-              unreadable: part.unreadable,
-              ...(args[i].spans.length > 0 ? { quoted: true } : {}),
-              hintLiteral:
-                part.text === value ? leadingReferenceIsLiteral(command, valueAt, value) : true
-            })
-          }
-          if (value.length === 0) out.push(unreadableTarget(command, args[i].end, append))
-        } else {
-          const values: LexWord[] = []
-          let j = i + 1
-          while (j < args.length && !looksLikeFlag(args[j].text)) {
-            values.push(args[j])
-            // `-Path a, b` continues while the word ends with a comma.
-            if (!args[j].text.trimEnd().endsWith(',')) break
-            j++
-          }
-          if (values.length === 0) out.push(unreadableTarget(command, args[i].end, append))
-          for (const word of values) {
-            if (word.spans.length > 0 && word.fullyQuoted) {
-              out.push({
-                raw: word.text,
-                append,
-                pos: word.start,
-                quoted: true,
-                hintLiteral: leadingReferenceIsLiteral(command, word.start, word.text)
-              })
-              continue
-            }
-            for (const part of splitTextWords(word.text)) {
-              out.push({
-                raw: part.text,
-                append,
-                pos: word.start,
-                unreadable: part.unreadable,
-                ...(word.spans.length > 0 ? { quoted: true } : {}),
-                hintLiteral:
-                  part.text === word.text
-                    ? leadingReferenceIsLiteral(command, word.start, word.text)
-                    : true
-              })
-            }
-          }
-          i = j - 1
-        }
-        continue
-      }
-      if (colon === -1 && isValueFlag(flag)) i++
+function braceTail(seg: LexSegment, command: string): BraceTail | null {
+  if (seg.sepAfter !== '{') return null
+  const last = seg.words[seg.words.length - 1]
+  let at = last.end
+  while (at < command.length && (command[at] === ' ' || command[at] === '\t')) at++
+  if (command[at] !== '{') return null
+  const attached = last.end === at && last.redirected !== true
+  const start = attached ? last.start : at
+  let end = at
+  let quote = ''
+  for (; end < command.length; end++) {
+    const ch = command[end]
+    if (quote !== '') {
+      if (ch === quote) quote = ''
       continue
     }
-    if (pathSeen) continue
-    for (const part of splitTextWords(args[i].text)) {
-      out.push({
-        raw: part.text,
-        append,
-        pos: args[i].start,
-        unreadable: part.unreadable,
-        ...(args[i].spans.length > 0 ? { quoted: true } : {}),
-        hintLiteral:
-          part.text === args[i].text
-            ? leadingReferenceIsLiteral(command, args[i].start, args[i].text)
-            : true
-      })
-    }
-    break
+    if (ch === "'" || ch === '"') quote = ch
+    else if (';|&\n\r<>)'.includes(ch)) break
   }
-  // A cmdlet that writes a file but named no readable path at all: report the
-  // unreadable target rather than dropping the write (ruling 7). Tee-Object
-  // without a path writes no file (`-Variable v` is a sink, N8).
-  if (out.length === 0 && head !== 'tee-object') {
-    out.push(unreadableTarget(command, seg.words[at].end, append))
+  const raw = command.slice(start, end).trim().slice(0, 160)
+  return { target: { raw, append: false, pos: start, unreadable: true }, attached }
+}
+
+/** The ways a bare `tee` can be read. */
+type TeeReading = 'bash' | 'powershell'
+
+/**
+ * Which readings a `tee` word can have. A path or `.exe` spelling is the native
+ * program; the bare word is PowerShell's `Tee-Object` alias on Windows. An unknown
+ * Windows shell takes BOTH readings (the worse one wins), and so does PowerShell
+ * on a host where the alias does not exist (PowerShell on Linux/macOS runs the
+ * native tee).
+ */
+function teeReadings(
+  word: string,
+  shell: RedirectShell | undefined,
+  platform: NodeJS.Platform
+): TeeReading[] {
+  if (word.toLowerCase() !== 'tee' || shell === 'posix') return ['bash']
+  if (shell === 'powershell') return platform === 'win32' ? ['powershell'] : ['bash', 'powershell']
+  return platform === 'win32' ? ['bash', 'powershell'] : ['bash']
+}
+
+/**
+ * Merge two readings of one command into the worse one: every target of either,
+ * and `append` only where BOTH readings name it with an append (a target only one
+ * reading writes keeps that reading's flag).
+ */
+function mergeReadings(first: RawTarget[], second: RawTarget[]): RawTarget[] {
+  const out = first.slice()
+  for (const target of second) {
+    const same = out.findIndex(
+      (t) => t.raw === target.raw && (t.unreadable === true) === (target.unreadable === true)
+    )
+    if (same === -1) out.push(target)
+    else out[same] = { ...out[same], append: out[same].append && target.append }
   }
   return out
 }
 
-function looksLikeFlag(text: string): boolean {
-  return text.startsWith('-') && text.length > 1
+/** bash `tee [-a|--append] [-i|-p] [--] FILE…`: every non-option argument. */
+function bashTeeTargets(args: readonly LexWord[], command: string): RawTarget[] {
+  const out: RawTarget[] = []
+  let append = false
+  let optionsDone = false
+  for (const word of args) {
+    const text = word.text
+    if (text.length === 0) continue
+    if (!optionsDone && text === '--') {
+      optionsDone = true
+      continue
+    }
+    if (!optionsDone && text.startsWith('-') && text.length > 1) {
+      // `-a`, `--append`, clusters like `-ai`, `--output-error=warn`. Only the
+      // letters tee defines count: `-FilePath` is not an append.
+      if (text === '--append' || (/^-[aip]+$/.test(text) && text.includes('a'))) append = true
+      continue
+    }
+    for (const part of splitTargetWord(word)) {
+      out.push({
+        raw: part,
+        append,
+        pos: word.start,
+        quoted: word.spans.length > 0,
+        hintLiteral:
+          part === word.text ? leadingReferenceIsLiteral(command, word.start, word.text) : true
+      })
+    }
+  }
+  return out
+}
+
+/** A PowerShell path parameter and the words that supply its value. */
+interface PsPathItem {
+  flag: LexWord
+  /** Text after the `:` of the colon form (`-Path:x`); absent for `-Path x`. */
+  inline?: string
+  /** Where that text starts in the command. */
+  inlineAt?: number
+  /** The words after the flag, for the separate form. */
+  values: LexWord[]
+}
+
+/**
+ * Text after `from` at the end of a statement CUT by `(` can still hold a path
+ * flag (`Set-Content (x) -Path C:\Windows\p`): true when that text carries a
+ * parameter that is a path flag or unknown for `cmdlet`. Parenthesised groups are
+ * dropped first (`(Get-Content a -Raw)`'s `-Raw` is not an argument of ours).
+ */
+function trailingFlagsHidePath(cmdlet: string, command: string, from: number): boolean {
+  let rest = command.slice(from)
+  for (let guard = 0; guard < 64 && /\([^()]*\)/.test(rest); guard++) {
+    rest = rest.replace(/\([^()]*\)/g, ' ')
+  }
+  rest = rest.split(/[\n;|&]/)[0]
+  for (const m of rest.matchAll(/(?:^|[\s,])[-\u2013\u2014\u2015]([A-Za-z_?][A-Za-z0-9_?]*)/g)) {
+    const param = resolvePsParam(cmdlet, m[1])
+    if (param === null || param.kind === 'path') return true
+  }
+  return false
+}
+
+/**
+ * The targets a PowerShell write cmdlet names. EVERY argument is scanned for a
+ * path parameter first (`-Path`, `-FilePath`, `-LiteralPath`, `-PSPath`, any
+ * unambiguous abbreviation, the `-Path:value` form); only when none is present does
+ * the first positional argument stand in. A parameter that is not in the cmdlet's
+ * table, a splat (`@p`) or a comma-continued positional (`"a", "b"`) leaves the
+ * positional unknowable, so the target is UNREADABLE — a positional is never
+ * guessed. Values of known value-taking parameters are skipped (`-ErrorAction
+ * Stop`, `-Value "a", "b"`).
+ */
+function psWriterTargets(
+  cmdlet: string,
+  args: readonly LexWord[],
+  cmdEnd: number,
+  sepAfter: SegmentOp,
+  command: string
+): RawTarget[] {
+  const items: PsPathItem[] = []
+  let appendFlag = false
+  let unsure = false
+  let positional: { word: LexWord; continued: boolean } | undefined
+  let positionalOnly = false
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i]
+    const text = word.text
+    if (!positionalOnly && word.spans.length === 0 && text === '--') {
+      positionalOnly = true
+      continue
+    }
+    if (!positionalOnly && isPsFlagWord(word)) {
+      const colon = text.indexOf(':')
+      const param = resolvePsParam(cmdlet, (colon === -1 ? text : text.slice(0, colon)).slice(1))
+      if (param === null) {
+        unsure = true
+        continue
+      }
+      if (param.kind === 'switch') {
+        if (param.name === 'append') {
+          appendFlag = colon === -1 || text.slice(colon + 1).toLowerCase() === '$true'
+        }
+        continue
+      }
+      if (param.kind === 'path' && colon !== -1) {
+        items.push({
+          flag: word,
+          inline: text.slice(colon + 1),
+          inlineAt: word.start + colon + 1,
+          values: []
+        })
+        continue
+      }
+      if (colon !== -1) continue // a value-taking parameter with its value attached
+      // The value words: `-Path a, b` and `-Value "a", "b"` continue past a comma.
+      const values: LexWord[] = []
+      let j = i + 1
+      while (j < args.length && !isPsFlagWord(args[j])) {
+        values.push(args[j])
+        j++
+        if (!continuesList(args[j - 1], args[j])) break
+      }
+      if (param.kind === 'path') items.push({ flag: word, values })
+      i = j - 1
+      continue
+    }
+    // A splat can supply any parameter, `-Path` included.
+    if (word.spans.length === 0 && text.startsWith('@')) {
+      unsure = true
+      continue
+    }
+    if (positional === undefined) positional = { word, continued: continuesList(word, args[i + 1]) }
+  }
+
+  const append = PS_ALWAYS_APPEND.has(cmdlet) || appendFlag
+  const out: RawTarget[] = []
+  const pushWord = (word: LexWord): void => {
+    if (word.spans.length > 0 && word.fullyQuoted) {
+      out.push({
+        raw: word.text,
+        append,
+        pos: word.start,
+        quoted: true,
+        hintLiteral: leadingReferenceIsLiteral(command, word.start, word.text)
+      })
+      return
+    }
+    for (const part of splitTextWords(word.text)) {
+      out.push({
+        raw: part.text,
+        append,
+        pos: word.start,
+        unreadable: part.unreadable,
+        ...(word.spans.length > 0 ? { quoted: true } : {}),
+        hintLiteral:
+          part.text === word.text ? leadingReferenceIsLiteral(command, word.start, word.text) : true
+      })
+    }
+  }
+
+  if (items.length > 0) {
+    for (const item of items) {
+      if (item.inline !== undefined) {
+        const value = item.inline
+        const valueAt = item.inlineAt ?? item.flag.start
+        for (const part of splitTextWords(value)) {
+          out.push({
+            raw: part.text,
+            append,
+            pos: item.flag.start,
+            unreadable: part.unreadable,
+            ...(item.flag.spans.length > 0 ? { quoted: true } : {}),
+            hintLiteral:
+              part.text === value ? leadingReferenceIsLiteral(command, valueAt, value) : true
+          })
+        }
+        if (value.length === 0) out.push(unreadableTarget(command, item.flag.end, append))
+        continue
+      }
+      if (item.values.length === 0) out.push(unreadableTarget(command, item.flag.end, append))
+      for (const word of item.values) pushWord(word)
+    }
+    return out
+  }
+  // No explicit path: the positional stands in only when nothing else could have
+  // taken its place.
+  const cut = sepAfter === '(' && trailingFlagsHidePath(cmdlet, command, cmdEnd)
+  if (!unsure && !cut && positional !== undefined && !positional.continued) {
+    pushWord(positional.word)
+    return out
+  }
+  if (unsure || cut || positional !== undefined) {
+    return [unreadableTarget(command, cmdEnd, append)]
+  }
+  // A cmdlet that writes a file but named no readable path at all: report the
+  // unreadable target rather than dropping the write (ruling 7). Tee-Object
+  // without a path writes no file (`-Variable v` is a sink, N8).
+  return cmdlet === 'tee-object' ? [] : [unreadableTarget(command, cmdEnd, append)]
+}
+
+/**
+ * Targets a WRITER COMMAND writes, which no `>` operator names.
+ *
+ * - bash `tee [-a|--append] [-i|-p] [--] FILE…` — every non-option argument. In
+ *   PowerShell `tee` is the `Tee-Object` alias: a known PowerShell shell reads it
+ *   that way ({@link psWriterTargets}: it OVERWRITES unless `-Append`), a known
+ *   POSIX shell the bash way, and an unknown Windows shell takes the worse of both
+ *   ({@link teeReadings}). `--` ends the options (`tee -- -x/…` is a file).
+ * - PowerShell (case-insensitive) `Out-File`, `Set-Content`, `Add-Content`,
+ *   `Tee-Object`, `Export-Csv`, `ac`, `epcsv`: see {@link psWriterTargets}.
+ *   Redirect words are not arguments (`Set-Content 2>$null X`), and an unquoted
+ *   `,` splits one word into several paths (ruling 7).
+ *
+ * Only a segment's COMMAND word counts (after any pipe, shell keyword such as
+ * `then`/`do`/`!`, or wrapper such as `sudo`/`stdbuf`/`xargs`) — `rg tee log.txt`
+ * is not a write. A wrapper option that is not in its table, or a trailing `{`
+ * (a brace expansion), makes the target UNREADABLE rather than a guess. These
+ * targets then go through the same resolution, scope and protected-component logic
+ * as `>` targets.
+ */
+function writerTargets(
+  seg: LexSegment,
+  command: string,
+  shell: RedirectShell | undefined,
+  platform: NodeJS.Platform
+): RawTarget[] {
+  const info = commandWordInfo(seg)
+  if (info.at === -1) return []
+  const isWriterName = (name: string): boolean => PS_WRITE_CMDLETS.has(name) || name === 'tee'
+  if (info.unsure) {
+    // An unknown wrapper option: which word is the command is a guess, so a writer
+    // named anywhere after the wrapper is reported unreadable.
+    for (let k = info.wrapperAt + 1; k < seg.words.length; k++) {
+      const word = seg.words[k]
+      if (!word.redirected && isWriterName(executableName(word.text))) {
+        return [unreadableTarget(command, word.end, false)]
+      }
+    }
+    return []
+  }
+  const wordText = seg.words[info.at].text
+  const head = executableName(wordText)
+  if (!isWriterName(head)) return []
+  const tail = braceTail(seg, command)
+  let args = seg.words.slice(info.at + 1).filter((w) => !w.redirected)
+  // A word glued to the `{` is part of the unreadable spelling, not a target.
+  if (tail?.attached === true) args = args.slice(0, -1)
+  const cmdEnd = seg.words[info.at].end
+
+  let out: RawTarget[]
+  if (head === 'tee') {
+    const readings = teeReadings(wordText, shell, platform)
+    const bash = readings.includes('bash') ? bashTeeTargets(args, command) : []
+    const ps = readings.includes('powershell')
+      ? psWriterTargets('tee-object', args, cmdEnd, seg.sepAfter, command)
+      : []
+    out = mergeReadings(bash, ps)
+  } else {
+    out = psWriterTargets(PS_CMDLET_ALIASES.get(head) ?? head, args, cmdEnd, seg.sepAfter, command)
+  }
+  if (tail !== null) out.push(tail.target)
+  // `xargs tee f` also writes every name its stdin supplies.
+  if (info.xargsAt !== -1) {
+    out.push(unreadableTarget(command, seg.words[info.xargsAt].start, false))
+  }
+  return out
 }
 
 /** Split one word into its unquoted-comma-separated target spellings. */
@@ -1887,7 +2743,10 @@ export function protectedComponentsOf(components: readonly string[]): string[] {
  * STARTS WITH a temp-directory reference — posix `$TMPDIR`/`${TMPDIR}`/`$TEMP`/
  * `$TMP` (and the braced forms), powershell `$env:TEMP`/`$env:TMP` and their
  * braced forms (case-insensitive) — or with a plain variable bound EARLIER by a
- * single top-level `NAME=<one of those>` / `$NAME = <one of those>` segment.
+ * single top-level `NAME=<one of those>` / `$NAME = <one of those>` segment that
+ * always runs (see {@link tempHintBindings}: not in an `if`/`case`/loop body, not
+ * after `&&`/`||`/`|` or a line continuation). The whole hint is withheld when the
+ * command could rebind the variable ({@link hintTainted}, {@link assignmentCount}).
  * `path` is the host value from {@link RedirectScope.tempVars} plus the rest of
  * the target. A hint never promotes the variable target into scope; unsupported
  * or unvalidated spellings omit it conservatively.
@@ -1992,9 +2851,37 @@ function hintBinding(
     return null
   }
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return null
+  // `$null = $env:TEMP` and `$HOME = $env:TEMP` bind nothing: the variable is a
+  // constant or read-only, so the assignment is discarded or errors, and a later
+  // `$null\x` / `$HOME\x` is NOT the temp path the binding spells.
+  if (shell === 'powershell' && PS_UNBINDABLE.has(name.toLowerCase())) return null
   if (leadingHostTempRef(value, shell, tempVars) === null) return null
   return { name, value, end: words[words.length - 1].end }
 }
+
+/** PowerShell variables no assignment can change (constant or read-only), lowercased. */
+const PS_UNBINDABLE: ReadonlySet<string> = new Set([
+  'null',
+  'true',
+  'false',
+  'home',
+  'pid',
+  'pshome',
+  'host',
+  'executioncontext',
+  'error',
+  'psversiontable',
+  'psculture',
+  'psuiculture',
+  'psedition',
+  'psstyle',
+  'shellid',
+  'iswindows',
+  'islinux',
+  'ismacos',
+  'iscoreclr',
+  'enabledexperimentalfeatures'
+])
 
 /**
  * A loop keyword: a `cd` inside its body moves once per iteration, which we do
@@ -2003,49 +2890,241 @@ function hintBinding(
 const LOOP_WORD_RE = /(?:^|[\s;|&(])(?:for|foreach|while|until|select)(?=[\s($])/i
 
 /**
- * Constructs that can change a variable without a plain `NAME=` spelling — an
- * environment-drive path (`env:TEMP`, not `$env:TEMP`), declare-family and
- * variable cmdlets, current-scope code execution (`iex`, `eval`, `source`, a
- * dot-sourced script), reflection. Any of them withholds every hint: a hint is
- * only useful when the command visibly leaves the variable alone. (A child
- * shell — `bash -c`, a pipe into `sh` — cannot rebind this shell's variables,
- * and `$env:` writes from a child scope are caught as assignments.)
- *
- * Exit review Fable C1: the rebinding forms the round-6 list missed — a loop
- * word rebinds its loop variable (`for TMPDIR in …`), an indexed assignment
- * writes the scalar (`TMPDIR[0]=` IS `$TMPDIR`), and a PowerShell script run in
- * this process (`.\x.ps1`, `& x.ps1`, `Import-Module`) can change `$env:` for
- * the rest of the command. Taint is deliberately coarse: a hint is only a hint,
- * and losing one costs an escalation at worst.
+ * Commands that, run IN the current shell, can rebind a variable the hint points
+ * through without any `NAME=` spelling in the text: `unset`, the readers that
+ * name their target variable, current-scope code execution (`eval`, `source`, `.`,
+ * `iex`, `Import-Module`), `trap`/`alias`, and the PowerShell variable cmdlets
+ * with their aliases. Read-only `Get-Variable` is kept: a hint is only a hint.
+ */
+const REBINDING_COMMANDS: ReadonlySet<string> = new Set([
+  'unset',
+  'read',
+  'mapfile',
+  'readarray',
+  'getopts',
+  'trap',
+  'alias',
+  'eval',
+  'source',
+  '.',
+  'iex',
+  'invoke-expression',
+  'import-module',
+  'ipmo',
+  'get-variable',
+  'gv',
+  'set-variable',
+  'sv',
+  'new-variable',
+  'nv',
+  'remove-variable',
+  'rv',
+  'clear-variable',
+  'clv'
+])
+/** Declaration builtins: they rebind only through an argument (see {@link declarationRebinds}). */
+const DECLARE_COMMANDS: ReadonlySet<string> = new Set([
+  'export',
+  'declare',
+  'typeset',
+  'readonly',
+  'local'
+])
+
+/**
+ * Text-level rebinding forms — spellings that do not depend on a word being at
+ * command position: an environment-drive path (`env:TEMP`, not `$env:TEMP`),
+ * `printf -v`, .NET and runspace reflection, `[ref]`, script blocks, an indexed
+ * assignment (`TMPDIR[0]=` IS `$TMPDIR`), and a PowerShell script file named
+ * anywhere (`.\x.ps1`, `& x.ps1`, `Import-Module x.psm1`: it can change `$env:`
+ * for the rest of the command).
+ */
+const HINT_TEXT_TERMS: readonly string[] = [
+  String.raw`(?<![$\w{])env:`,
+  String.raw`printf\s+-v`,
+  `setenvironmentvariable`,
+  String.raw`\[ref\]`,
+  `scriptblock`,
+  `invokescript`,
+  // `$ExecutionContext.SessionState.PSVariable.Set(…)` and runspace `SetVariable`.
+  `psvariable`,
+  `sessionstate`,
+  `setvariable`,
+  // `NAME[...]=` — an indexed assignment is the scalar a `$NAME` read sees.
+  String.raw`[A-Za-z_][A-Za-z0-9_]*\[[^\]]*\]\s*=(?!=)`,
+  String.raw`\.(?:ps1|psm1)\b`
+]
+const HINT_TAINT_TEXT_RE = new RegExp(HINT_TEXT_TERMS.join('|'), 'i')
+/** The PowerShell `variable:` provider drive: `Set-Item variable:t`, `New-Item -Path Variable:\t`. */
+const PS_VARIABLE_DRIVE_RE = /(?<![A-Za-z0-9_])variable:/i
+
+/**
+ * The raw-text reading of the same hazards, used only when the lexer could not
+ * trust its own quote structure (see {@link hintTainted}): every rebinding word
+ * ANYWHERE in the text taints. Exit review Fable C1's coarse rule, kept as the
+ * fallback — losing a hint costs an escalation at worst.
  */
 const HINT_TAINT_RE = new RegExp(
   [
-    String.raw`(?<![$\w{])env:`,
+    ...HINT_TEXT_TERMS,
+    String.raw`(?<![A-Za-z0-9_])variable:`,
     LOOP_WORD_RE.source,
-    String.raw`(?:^|[\s;|&(])(?:unset|export|declare|typeset|readonly|local|read|mapfile|readarray|trap|alias|set-variable|sv|new-variable|nv|get-variable|gv|iex|invoke-expression|eval|source|import-module|\.)(?=[\s(]|$)`,
-    String.raw`printf\s+-v`,
-    `setenvironmentvariable`,
-    String.raw`\[ref\]`,
-    `scriptblock`,
-    `invokescript`,
-    // `NAME[...]=` — an indexed assignment is the scalar a `$NAME` read sees.
-    String.raw`[A-Za-z_][A-Za-z0-9_]*\[[^\]]*\]\s*=(?!=)`,
-    // A PowerShell script file named anywhere: `.\x.ps1`, `& x.ps1`, `Import-Module x.psm1`.
-    String.raw`\.(?:ps1|psm1)\b`
+    String.raw`(?:^|[\s;|&(])(?:` +
+      [...REBINDING_COMMANDS, ...DECLARE_COMMANDS, 'set']
+        .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`))
+        .join('|') +
+      String.raw`)(?=[\s(]|$)`
   ].join('|'),
   'i'
 )
 
-/** How many times `name` is assigned in `command` (`=`, indexed, or an op-assign, any `$`/`{`/`env:` spelling). */
-function assignmentCount(command: string, name: string, shell: RedirectShell): number {
-  // `name` is an identifier (`[A-Za-z_][A-Za-z0-9_]*`): nothing to escape.
-  const re = new RegExp(
-    String.raw`(?<![A-Za-z0-9_])\$?\{?(?:env:)?` +
-      name +
-      String.raw`\}?(?:\[[^\]]*\])?\s*(?:[-+*/%]|\?\?)?=(?!=)`,
-    shell === 'powershell' ? 'gi' : 'g'
+/** A command word that is nothing but a variable reference (`$c`, `${c}`): its value is the command. */
+const BARE_VAR_REF = /^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)$/
+
+/**
+ * A copy of `seg` with every backslash removed from its words, for POSIX command
+ * words only: `\eval`, `ev\al` and `"eval"` (the lexer already strips quotes) are
+ * all the `eval` builtin. PowerShell has no backslash escapes — there it is a path
+ * separator — so its segments are read as lexed.
+ */
+function withoutEscapes(seg: LexSegment): LexSegment {
+  if (!seg.words.some((w) => w.text.includes('\\'))) return seg
+  return {
+    ...seg,
+    words: seg.words.map((w) =>
+      w.text.includes('\\') ? { ...w, text: w.text.replace(/\\/g, '') } : w
+    )
+  }
+}
+
+/** True when `set` turns on allexport (`set -a`, `set -ea`, `set -o allexport`). */
+function setExportsAll(seg: LexSegment, at: number): boolean {
+  const args = seg.words.slice(at + 1).filter((w) => !w.redirected)
+  return args.some(
+    (w, i) =>
+      /^-[A-Za-z]*a[A-Za-z]*$/.test(w.text) ||
+      (w.text === '-o' && args[i + 1]?.text.toLowerCase() === 'allexport')
   )
-  return [...command.matchAll(re)].length
+}
+
+/**
+ * True when a declaration builtin (`export`, `declare`, `typeset`, `readonly`,
+ * `local`) may rebind the hinted variable. A NAMED argument with a static,
+ * plainly spelled name (`export CI=1`) cannot: its assignment is counted by
+ * {@link assignmentCount}. Everything else is unknowable and taints: no argument
+ * at all (`export`, `declare -x`, `export -p`), a nameref option (`declare -n r=TMPDIR`
+ * makes `r=…` write `TMPDIR`), a name that expands (`export "$n=/etc"`) or is
+ * spelled through quotes (`declare TMP""DIR=/etc` — the shell reads `TMPDIR`, the
+ * raw text does not), and `local`/`declare`/`typeset` inside a group, where a
+ * function body shadows the variable (`local TMPDIR`) with an unset one.
+ */
+function declarationRebinds(seg: LexSegment, at: number, command: string, name: string): boolean {
+  let named = 0
+  for (const word of seg.words.slice(at + 1)) {
+    if (word.redirected) continue
+    const text = word.text
+    if (/^[-+]/.test(text) && text.length > 1) {
+      if (/^[-+][A-Za-z]*n/.test(text)) return true
+      continue
+    }
+    named++
+    const eq = text.indexOf('=')
+    const namePart = eq === -1 ? text : text.slice(0, eq)
+    if (!/^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?$/.test(namePart)) return true
+    if (command.slice(word.start, word.start + namePart.length) !== namePart) return true
+  }
+  if (named === 0) return true
+  return name !== 'export' && name !== 'readonly' && seg.depth > 0
+}
+
+/**
+ * True when ONE segment, read at command position, may rebind a variable of the
+ * shell it runs in: a loop (`for TMPDIR in …`), a current-scope runner or
+ * variable command ({@link REBINDING_COMMANDS}), a rebinding declaration
+ * ({@link declarationRebinds}), PowerShell's `set` (= `Set-Variable`) or POSIX
+ * `set -a`, or a command whose NAME is a variable (`c=eval; $c "…"`).
+ *
+ * Only the command word counts: `find . -name x`, `git commit -m "fix tests for
+ * the parser"` and `export CI=1` hold the same words as arguments, quoted text or
+ * a value, and none of them touches `TMPDIR`.
+ */
+function segmentRebinds(seg: LexSegment, shell: RedirectShell, command: string): boolean {
+  const view = shell === 'powershell' ? seg : withoutEscapes(seg)
+  if (startsLoop(view, shell)) return true
+  const at = commandWordAt(view, true)
+  if (at === -1) return false
+  const word = view.words[at]
+  const name = executableName(word.text)
+  if (REBINDING_COMMANDS.has(name)) return true
+  if (name === 'set') return shell === 'powershell' || setExportsAll(view, at)
+  if (DECLARE_COMMANDS.has(name)) return declarationRebinds(seg, at, command, name)
+  // `$c args` runs whatever `c` holds (PowerShell spells that `& $c`).
+  return BARE_VAR_REF.test(word.text) && (shell !== 'powershell' || seg.after === '&')
+}
+
+/**
+ * True when the command could rebind a variable without a plain `NAME=` spelling.
+ * Any such form withholds every hint: a hint is only useful when the command
+ * visibly leaves the variable alone. (A child shell — `bash -c`, a pipe into `sh`
+ * — cannot rebind this shell's variables, and `$env:` writes from a child scope
+ * are caught as assignments.)
+ *
+ * Keywords are tested at COMMAND position of the lexed segments, never in
+ * arguments, quoted text or heredoc bodies; the text-level spellings of
+ * {@link HINT_TEXT_TERMS} are tested anywhere. A command the lexer could not
+ * read (unbalanced quote, unterminated heredoc, …) falls back to
+ * {@link HINT_TAINT_RE} over the raw text. In PowerShell a `$( … )` subexpression
+ * runs in the CURRENT scope, so the segments lexed from inside a double-quoted
+ * string count when they follow `(`; in bash that is a subshell and they do not.
+ */
+function hintTainted(
+  command: string,
+  balanced: boolean,
+  segments: readonly LexSegment[],
+  shell: RedirectShell
+): boolean {
+  if (!balanced) return HINT_TAINT_RE.test(command)
+  if (HINT_TAINT_TEXT_RE.test(command)) return true
+  if (shell === 'powershell' && PS_VARIABLE_DRIVE_RE.test(command)) return true
+  for (const seg of segments) {
+    if (seg.nested && !(shell === 'powershell' && seg.after === '(')) continue
+    if (segmentRebinds(seg, shell, command)) return true
+  }
+  return false
+}
+
+/**
+ * How many times `name` is assigned in `command`: `=`, indexed, an op-assign, or
+ * (PowerShell) a scope- or drive-qualified spelling (`$global:t =`,
+ * `${variable:t} =`) or a multi-assignment (`$t, $u = …`, `($t, $u) = …`); in a
+ * POSIX shell also the `${NAME:=…}` default-assignment expansion. Any `$`/`{`/
+ * `env:` spelling.
+ */
+function assignmentCount(command: string, name: string, shell: RedirectShell): number {
+  const powershell = shell === 'powershell'
+  // `name` is an identifier (`[A-Za-z_][A-Za-z0-9_]*`): nothing to escape.
+  const qualifier = powershell ? `(?:[A-Za-z]+:)?` : `(?:env:)?`
+  const ops = powershell ? String.raw`(?:[-+*/%]|\?\?)?` : String.raw`(?:[-+*/%:]|\?\?)?`
+  const flags = powershell ? 'gi' : 'g'
+  const tail = String.raw`\}?(?:\[[^\]]*\])?\s*`
+  const plain = new RegExp(
+    String.raw`(?<![A-Za-z0-9_])\$?\{?` + qualifier + name + tail + ops + `=(?!=)`,
+    flags
+  )
+  let count = [...command.matchAll(plain)].length
+  if (powershell) {
+    // `$t, $u = 'a', 1`: a variable followed by a comma, and an `=` ends the list.
+    const multi = new RegExp(
+      String.raw`(?<![A-Za-z0-9_])\$\{?` +
+        qualifier +
+        name +
+        tail +
+        String.raw`,[^=;|&\n({}]*(?<![-<>!=~])=(?![=~])`,
+      flags
+    )
+    count += [...command.matchAll(multi)].length
+  }
+  return count
 }
 
 /** The host temp variable a text starts with (`TEMP` for `$env:TEMP\x`), or `null`. */
@@ -2057,7 +3136,62 @@ function hostRefName(text: string, shell: RedirectShell): string | null {
   return m ? m[1] : null
 }
 
-/** Every hint binding in the command, in command order. */
+/**
+ * Reserved words that open a compound command a POSIX shell closes with a word of
+ * its own (`fi`, `esac`, `done`). A binding between them runs only when the
+ * construct says so.
+ */
+const BLOCK_OPENERS: ReadonlySet<string> = new Set([
+  'if',
+  'case',
+  'for',
+  'while',
+  'until',
+  'select'
+])
+const BLOCK_CLOSERS: ReadonlySet<string> = new Set(['fi', 'esac', 'done'])
+/** Reserved words that may precede the word that opens or closes a construct. */
+const BLOCK_LEADERS: ReadonlySet<string> = new Set(['then', 'do', 'else', 'elif', '!', 'time'])
+
+/**
+ * +1 when the segment opens an `if`/`case`/loop, -1 when it closes one, else 0 —
+ * judged at command position only, so `echo if` and a quoted `"if"` are prose.
+ * PowerShell bodies sit in `{ }`, which the lexer already tracks as depth.
+ */
+function blockDelta(seg: LexSegment): number {
+  for (const word of seg.words) {
+    if (word.redirected) continue
+    if (word.spans.length > 0) return 0
+    if (BLOCK_LEADERS.has(word.text)) continue
+    if (BLOCK_OPENERS.has(word.text)) return 1
+    return BLOCK_CLOSERS.has(word.text) ? -1 : 0
+  }
+  return 0
+}
+
+/**
+ * True when the segment after `prev` is not a fresh command: `prev` ended with
+ * `&&`, `||` or `|` (the lexer keeps the operator across a newline, so the
+ * binding on the next line is still gated or piped), or with a line continuation
+ * — a `\` (a backtick in PowerShell) right before the newline — which joins the
+ * next line onto `prev`.
+ */
+function continuesInto(prev: LexSegment, command: string, shell: RedirectShell): boolean {
+  if (prev.sepAfter === '&&' || prev.sepAfter === '||' || prev.sepAfter === '|') return true
+  const last = prev.words[prev.words.length - 1]
+  if (last === undefined) return false
+  const next = command[last.end]
+  if (next !== '\n' && next !== '\r') return false
+  const tail = command[last.end - 1]
+  return tail === '\\' || (shell === 'powershell' && tail === '`')
+}
+
+/**
+ * Every hint binding in the command, in command order. A binding that may not
+ * run is no binding at all: one inside an `if`/`elif`/`else`/`case`/loop body
+ * (any line), or one that follows a line ending in `&&`, `||`, `|` or a
+ * continuation. Those would name a temp path the variable need not hold.
+ */
 function tempHintBindings(
   segments: readonly LexSegment[],
   shell: RedirectShell | undefined,
@@ -2066,9 +3200,17 @@ function tempHintBindings(
 ): TempHintBinding[] {
   if (!shell) return []
   const bindings: TempHintBinding[] = []
+  let blocks = 0
+  let prev: LexSegment | undefined
   for (const seg of segments) {
-    const binding = hintBinding(seg, shell, tempVars, command)
-    if (binding) bindings.push(binding)
+    if (seg.nested) continue
+    const joined = prev !== undefined && continuesInto(prev, command, shell)
+    if (blocks === 0 && !joined) {
+      const binding = hintBinding(seg, shell, tempVars, command)
+      if (binding) bindings.push(binding)
+    }
+    if (shell === 'posix') blocks = Math.max(0, blocks + blockDelta(seg))
+    prev = seg
   }
   return bindings
 }
@@ -2186,8 +3328,9 @@ const DIR_POISON: ReadonlySet<string> = new Set([
   'cd..',
   'cd\\'
 ])
-/** Commands that may change it invisibly (`eval`, `source`, `.`). */
-const EVAL_WORDS: ReadonlySet<string> = new Set(['eval', 'source', '.'])
+/** Commands that may change it invisibly (`eval`, `source`, `.`, and PowerShell's
+ *  `Invoke-Expression`, which runs its text in the CURRENT scope). */
+const EVAL_WORDS: ReadonlySet<string> = new Set(['eval', 'source', '.', 'iex', 'invoke-expression'])
 /** Every word whose presence in a command line can be a directory change. */
 const DIR_WORD_RE =
   /(^|[^A-Za-z0-9_-])(cd|chdir|pushd|popd|set-location|sl|push-location|pop-location)([^A-Za-z0-9_-]|$)/i
@@ -2204,7 +3347,7 @@ function hasDirWord(text: string): boolean {
 function hasRelativeChange(segments: readonly LexSegment[]): boolean {
   for (const seg of segments) {
     if (seg.nested || seg.depth > 0) continue
-    const at = commandWordAt(seg)
+    const at = commandWordAt(seg, false)
     if (at === -1) continue
     if (!DIR_COMMANDS.has(executableName(seg.words[at].text))) continue
     const args = seg.words.slice(at + 1).filter((w) => !w.redirected && !w.text.startsWith('-'))
@@ -2215,25 +3358,202 @@ function hasRelativeChange(segments: readonly LexSegment[]): boolean {
   return false
 }
 
+/** Loop keywords, matched only where a command could start (see {@link startsLoop}). */
+const LOOP_WORDS: ReadonlySet<string> = new Set(['for', 'foreach', 'while', 'until', 'select'])
+/** Reserved words that may precede a loop keyword without being the command. */
+const LOOP_LEADERS: ReadonlySet<string> = new Set([
+  'then',
+  'do',
+  'else',
+  'elif',
+  'if',
+  '!',
+  '{',
+  'time'
+])
+
+/**
+ * True when the segment starts a loop: an unquoted loop keyword at command
+ * position. A `for` inside a quoted message, a heredoc body or an argument is
+ * prose, and poisoning the directory on it made every `cd docs && git commit -m
+ * 'wait until done'` unresolvable.
+ */
+function startsLoop(seg: LexSegment, shell?: RedirectShell): boolean {
+  for (const word of seg.words) {
+    if (word.redirected || isAssignmentWord(word.text)) continue
+    if (word.spans.length > 0) return false
+    const text = word.text.toLowerCase()
+    if (LOOP_WORDS.has(text)) {
+      // PowerShell's `select` is Select-Object, and `foreach` after a pipe is
+      // ForEach-Object: cmdlets, not loop statements.
+      if (
+        shell === 'powershell' &&
+        (text === 'select' || (text === 'foreach' && seg.after === '|'))
+      ) {
+        return false
+      }
+      return true
+    }
+    if (!LOOP_LEADERS.has(text)) return false
+  }
+  return false
+}
+
+/** True when some top-level segment starts a loop (a `cd` in its body moves once per iteration). */
+function hasLoopCommand(segments: readonly LexSegment[]): boolean {
+  return segments.some((seg) => !seg.nested && startsLoop(seg))
+}
+
+/**
+ * `\` right before whitespace or a separator. PowerShell reads a path
+ * separator (`cd ..\; echo hi > x`), but the bash-style lexer reads an escape and
+ * swallows the separator, so the `cd` segment grows past its real end and every
+ * target in it resolves against the directory from BEFORE the `cd`.
+ */
+const TRAILING_BACKSLASH_RE = /\\(?=[\s;|&()<>])/
+
+/**
+ * True when a shell that may be PowerShell can read the command differently from
+ * the lexer in a way that moves the directory: a trailing backslash next to a
+ * directory change. The directory is then unknowable from the start (the segment
+ * boundaries themselves are wrong), exactly like {@link CD_POISON_RE}.
+ */
+function psBackslashDirRisk(command: string, shell: RedirectShell | undefined): boolean {
+  return shell !== 'posix' && TRAILING_BACKSLASH_RE.test(command) && hasDirWord(command)
+}
+
+/**
+ * True when the command defines code that runs LATER — a shell function, a
+ * `trap`, or a PowerShell script block kept in a variable. Its body is resolved
+ * where it is written, but runs wherever the shell is when it is called.
+ */
+function definesDeferredBody(
+  segments: readonly LexSegment[],
+  command: string,
+  shell: RedirectShell | undefined
+): boolean {
+  for (const seg of segments) {
+    if (seg.nested) continue
+    const plain = seg.words.filter((w) => !w.redirected)
+    const last = plain[plain.length - 1]
+    if (last === undefined) continue
+    // `$sb = { … }` — a script block run later with `&` or `.`.
+    if (shell !== 'posix' && seg.sepAfter === '{' && last.text.endsWith('=')) return true
+    const first = plain.find((w) => !isAssignmentWord(w.text))
+    if (first === undefined) continue
+    const head = first.spans.length === 0 ? first.text.toLowerCase() : ''
+    if (head === 'function' || head === 'filter' || head === 'trap') return true
+    // `name() { … }`: the lexer ends the segment at `(`.
+    if (seg.sepAfter === '(' && plain.length <= 2 && /^\s*\(\s*\)/.test(command.slice(last.end))) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * True when running the command can change the directory somewhere other than a
+ * plain top-level `cd` the walk follows — any directory word, or a word that
+ * runs text in the current shell. Raw text on purpose: it only gates the
+ * deferred-body check, which needs a function or `trap` as well.
+ */
+function mayChangeDirectory(command: string, segments: readonly LexSegment[]): boolean {
+  if (hasDirWord(command)) return true
+  return segments.some((seg) => {
+    const at = commandWordAt(seg, false)
+    return at !== -1 && EVAL_WORDS.has(executableName(seg.words[at].text))
+  })
+}
+
+/**
+ * True when a function, `trap` or script block is defined AND the command
+ * changes directory anywhere. The body then runs from a directory the walk did
+ * not place it in (`f() { echo hi > x.txt; }; cd ..; f`), so EVERY relative
+ * target in the command is unresolvable.
+ */
+function deferredBodyRisk(
+  command: string,
+  segments: readonly LexSegment[],
+  shell: RedirectShell | undefined
+): boolean {
+  return definesDeferredBody(segments, command, shell) && mayChangeDirectory(command, segments)
+}
+
+/**
+ * True when the segment runs its command from another directory through a
+ * wrapper — `env -C DIR cmd`, `env --chdir=DIR cmd`, `sudo -D DIR cmd`. The
+ * wrapper's own shell stays where it was, but the wrapped command's relative
+ * paths (`tee x.txt`) do not.
+ */
+function hasWrapperChdir(seg: LexSegment): boolean {
+  const info = commandWordInfo(seg, false)
+  const end = info.at === -1 ? seg.words.length : info.at
+  const wrappers = new Set<string>()
+  for (let i = 0; i < end; i++) {
+    const word = seg.words[i]
+    if (word.redirected || word.spans.length > 0) continue
+    const text = word.text
+    if (/^--chdir(=|$)/.test(text)) return true
+    if (/^-[A-Za-z]*C/.test(text) && wrappers.has('env')) return true
+    if (/^-[A-Za-z]*D/.test(text) && wrappers.has('sudo')) return true
+    wrappers.add(executableName(text))
+  }
+  return false
+}
+
+/**
+ * True when a double-quoted word of the segment holds a `$( … )` that changes
+ * directory. In PowerShell the subexpression runs in the CURRENT scope, so the
+ * `cd` inside it moves the shell (`Write-Host "$(Set-Location ..)"`); bash would
+ * run it in a subshell, which is why only a shell that may be PowerShell asks.
+ */
+function hasSubexpressionDirWord(seg: LexSegment, command: string): boolean {
+  for (const word of seg.words) {
+    for (const span of word.spans) {
+      if (span.quote !== '"') continue
+      const text = command.slice(span.start, span.end)
+      for (let at = text.indexOf('$('); at !== -1; at = text.indexOf('$(', at + 2)) {
+        let depth = 0
+        let end = text.length
+        for (let k = at + 1; k < text.length; k++) {
+          if (text[k] === '(') depth++
+          else if (text[k] === ')' && --depth === 0) {
+            end = k
+            break
+          }
+        }
+        if (hasDirWord(text.slice(at + 2, end))) return true
+      }
+    }
+  }
+  return false
+}
+
 /**
  * The single directory a `cd`-family segment names, or `null` when it is not
  * resolvable — no argument, `-`, `~`, more than one positional argument, a
  * variable or glob, a drive-relative spelling, or a `\` right before a newline
- * (bash's line continuation, whose continuation we did not read — Q2).
+ * (bash's line continuation, whose continuation we did not read — Q2), a
+ * `pushd +N` / `pushd -N` stack rotation, or, outside a known POSIX shell, a
+ * splatted argument (`Set-Location @p` is `-Path` from a hashtable, not a
+ * directory named `@p`).
  * Redirect words are not cd arguments (`pushd sub > /dev/null`).
  */
 function directoryArgument(
   seg: LexSegment,
   at: number,
   platform: NodeJS.Platform,
-  command: string
+  command: string,
+  shell: RedirectShell | undefined
 ): string | null {
   const head = executableName(seg.words[at].text)
   const powershell = head === 'set-location' || head === 'sl' || head === 'push-location'
   const args = seg.words.slice(at + 1).filter((w) => !w.redirected)
-  const positional: Array<{ text: string; end: number }> = []
+  const positional: Array<{ text: string; end: number; quoted: boolean }> = []
   for (let i = 0; i < args.length; i++) {
     const text = args[i].text
+    // `pushd +1` / `pushd -1` rotate the stack: the directory is an earlier entry.
+    if (head === 'pushd' && /^[+-]\d+$/.test(text)) return null
     if (text.startsWith('-') && text.length > 1) {
       if (powershell) {
         const lower = text.toLowerCase()
@@ -2241,11 +3561,19 @@ function directoryArgument(
         const flag = colon === -1 ? lower : lower.slice(0, colon)
         if (flag === '-path' || flag === '-literalpath') {
           if (colon !== -1) {
-            positional.push({ text: text.slice(colon + 1), end: args[i].end })
+            positional.push({
+              text: text.slice(colon + 1),
+              end: args[i].end,
+              quoted: args[i].spans.length > 0
+            })
             continue
           }
           if (i + 1 < args.length) {
-            positional.push({ text: args[i + 1].text, end: args[i + 1].end })
+            positional.push({
+              text: args[i + 1].text,
+              end: args[i + 1].end,
+              quoted: args[i + 1].spans.length > 0
+            })
             i++
             continue
           }
@@ -2253,11 +3581,13 @@ function directoryArgument(
       }
       continue
     }
-    positional.push({ text, end: args[i].end })
+    positional.push({ text, end: args[i].end, quoted: args[i].spans.length > 0 })
   }
   if (positional.length !== 1) return null
   const arg = positional[0]
   if (arg.text === '' || arg.text === '-' || arg.text === '~') return null
+  // PowerShell splatting: `Set-Location @p` takes its parameters from $p.
+  if (shell !== 'posix' && !arg.quoted && arg.text.startsWith('@')) return null
   // A `\` right before a newline is bash's line continuation: the argument
   // continues on the next line, which we did not read, so where the cd lands is
   // unknowable (Q2).
@@ -2271,7 +3601,7 @@ function directoryArgument(
 }
 
 /** `C:x` (drive + colon + no separator) is drive-relative, not a path we can place. */
-function isDriveRelative(text: string, platform: NodeJS.Platform): boolean {
+export function isDriveRelative(text: string, platform: NodeJS.Platform): boolean {
   return platform === 'win32' && /^[A-Za-z]:(?![\\/])/.test(text)
 }
 
@@ -2353,10 +3683,22 @@ function runnableFrom(
   return possibilities
 }
 
+/**
+ * The operator that decides whether a segment runs. Normally the one before it;
+ * but the first member of a group (`a && ( b )`) and what follows a group's
+ * closer (`a && { b; } > f`) are reached through group punctuation, and the
+ * group runs exactly when the operator before IT admits it (the lexer keeps that
+ * one as `gate`).
+ */
+function gatingOp(seg: LexSegment): SegmentOp {
+  const op = seg.after
+  return op === '(' || op === '{' || op === ')' || op === '}' ? seg.gate : op
+}
+
 /** True when the segment could place a poisoned shell again: a `cd`-family word
  *  with an absolute path argument (a cheap pre-check before resolving the cd). */
 function mayClearPoison(seg: LexSegment): boolean {
-  const at = commandWordAt(seg)
+  const at = commandWordAt(seg, false)
   if (at === -1) return false
   if (!DIR_COMMANDS.has(executableName(seg.words[at].text))) return false
   return seg.words.some((w) => !w.redirected && /^[\\/$]|^[A-Za-z]:[\\/]/.test(w.text))
@@ -2375,14 +3717,19 @@ function segmentOutcomes(
   seg: LexSegment,
   from: Possibility,
   platform: NodeJS.Platform,
-  command: string
+  command: string,
+  shell: RedirectShell | undefined
 ): Possibility[] {
   const unchanged = (): Possibility[] => [
     { dir: from.dir, ok: true },
     { dir: from.dir, ok: false }
   ]
 
-  const at = commandWordAt(seg)
+  // A `$( ... )` in double quotes that changes directory moves a PowerShell
+  // shell: the subexpression runs in the current scope.
+  if (shell !== 'posix' && hasSubexpressionDirWord(seg, command)) return poisoned()
+
+  const at = commandWordAt(seg, false)
   const head = at === -1 ? '' : executableName(seg.words[at].text)
 
   // A directory-changing word that is not this segment's own head, or that sits
@@ -2409,7 +3756,7 @@ function segmentOutcomes(
   if (DIR_POISON.has(head)) return poisoned()
   if (EVAL_WORDS.has(head)) return poisoned()
   if (DIR_COMMANDS.has(head)) {
-    const arg = directoryArgument(seg, at, platform, command)
+    const arg = directoryArgument(seg, at, platform, command, shell)
     if (arg === null) return poisoned()
     // An absolute `cd` is placeable even from a poisoned directory, which is how
     // a poisoned state gets cleared for `&&`-joined segments (ruling 4).
@@ -2449,11 +3796,12 @@ function isRealGroup(seg: LexSegment, command: string): boolean {
  * have failed, while `cd a/b && make && echo > ../../x` cannot. A background
  * segment (`&`) or a pipeline member runs in a subshell: its cd does not change
  * the parent (pipelines union changed and unchanged — a safe superset for
- * PowerShell). Temp variables play no part: nothing expands for scope (ruling
- * 18).
+ * PowerShell). A pipeline, or a group, that follows `&&`/`||` runs only in the
+ * branches that operator admits, whichever member a target sits in. Temp
+ * variables play no part: nothing expands for scope (ruling 18).
  *
  * When the lexer could not trust the quote structure nothing is tracked (the
- * caller falls back to `unbalancedDir`).
+ * caller falls back to `relativeUnknown`).
  *
  * Residuals (documented, not modelled): CDPATH is ignored, so a relative `cd`
  * argument not starting with `./` or `../` could resolve under CDPATH (C-C);
@@ -2465,61 +3813,88 @@ function shellStates(
   lexed: LexedCommand,
   segments: readonly LexSegment[],
   platform: NodeJS.Platform,
-  initialCwd: string | null
+  initialCwd: string | null,
+  shell: RedirectShell | undefined
 ): ShellState[] {
   const states: ShellState[] = []
   if (!lexed.balanced) return states
   // A relative `cd` inside a loop body moves once per iteration, which we do not
   // model: poison the directory so every later relative target is unresolvable
-  // (C-A).
-  const loopRisk = LOOP_WORD_RE.test(command) && hasRelativeChange(segments)
+  // (C-A). Only a loop keyword at command position counts (see {@link startsLoop}).
+  const loopRisk = hasLoopCommand(segments) && hasRelativeChange(segments)
+  const lexRisk = CD_POISON_RE.test(command) || psBackslashDirRisk(command, shell)
   let possibilities: readonly Possibility[] = [
-    {
-      dir: initialCwd === null || loopRisk || CD_POISON_RE.test(command) ? null : initialCwd,
-      ok: true
-    }
+    { dir: initialCwd === null || loopRisk || lexRisk ? null : initialCwd, ok: true }
   ]
+  // The pipeline being walked: what its members run from (`active`) and the
+  // branches an `&&`/`||` in front of it kept it out of (`skipped`).
+  let pipe: { skipped: readonly Possibility[]; active: readonly Possibility[] } | null = null
 
   for (const seg of segments) {
     // A re-lexed span/heredoc body runs in its own shell (or is text): its cd
     // never changes the parent's possibilities. A nested `cd` still makes
     // targets INSIDE it unknowable through `dirRegions`.
     if (seg.nested) continue
-    const runs = runnableFrom(possibilities, seg.after)
-    states.push({ start: seg.start, at: possibilities, runs })
-    if (runs.length === 0) continue
+    // `a && b | c` is `a && (b | c)`: a pipeline member runs wherever the
+    // pipeline started, not in the branches the `&&` kept it out of.
+    const member = seg.after === '|' && pipe !== null
+    const runs = member && pipe !== null ? pipe.active : runnableFrom(possibilities, gatingOp(seg))
+    // `env -C DIR cmd` runs the command's relative paths from another directory
+    // without moving this shell: only THIS segment's targets are unknowable.
+    states.push({
+      start: seg.start,
+      at: possibilities,
+      runs: hasWrapperChdir(seg) ? POISONED : runs
+    })
+    const untouched =
+      member && pipe !== null ? pipe.skipped : possibilities.filter((p) => !runs.includes(p))
+    const pipelines = seg.sepAfter === '|'
+    if (runs.length === 0) {
+      pipe = pipelines ? { skipped: untouched, active: [] } : null
+      continue
+    }
     // A poisoned state stays poisoned unless an absolute cd can place it again:
     // the common case in a long command (the cap was hit), so skip the work.
-    if (possibilities === POISONED && !mayClearPoison(seg)) continue
+    if (!member && possibilities === POISONED && !mayClearPoison(seg)) {
+      pipe = null
+      continue
+    }
 
-    const untouched = possibilities.filter((p) => !runs.includes(p))
-    const next: Possibility[] = untouched.slice()
-    const subshell = seg.after === '|' || seg.sepAfter === '|' || seg.sepAfter === '&'
+    const produced: Possibility[] = []
+    const subshell = seg.after === '|' || pipelines || seg.sepAfter === '&'
     for (const from of runs) {
       if (seg.sepAfter === '&') {
         // Background: the parent keeps its state and continues with status ok.
-        next.push({ dir: from.dir, ok: true })
+        produced.push({ dir: from.dir, ok: true })
         continue
       }
-      const outcomes = segmentOutcomes(seg, from, platform, command)
+      const outcomes = segmentOutcomes(seg, from, platform, command, shell)
       if (subshell) {
         // A pipeline member may run in the same shell in one dialect: keep both
         // the changed and the unchanged branch, a safe superset (ruling 13).
-        next.push({ dir: from.dir, ok: from.ok })
+        produced.push({ dir: from.dir, ok: from.ok })
       }
-      next.push(...outcomes)
+      produced.push(...outcomes)
     }
-    possibilities = mergePossibilities(next)
+    pipe = pipelines ? { skipped: untouched, active: mergePossibilities(produced) } : null
+    possibilities = mergePossibilities([...untouched, ...produced])
   }
   return states
 }
 
 /** The state in force at `pos`: the last segment that starts at or before it. */
 function stateAt(states: readonly ShellState[], pos: number): ShellState | undefined {
+  // `states` is in document order, so this is a binary search for the last
+  // start at or before `pos` (the quote-blind cross-check can ask thousands of times).
   let found: ShellState | undefined
-  for (const state of states) {
-    if (state.start > pos) break
-    found = state
+  let lo = 0
+  let hi = states.length - 1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (states[mid].start <= pos) {
+      found = states[mid]
+      lo = mid + 1
+    } else hi = mid - 1
   }
   return found
 }
@@ -2607,7 +3982,7 @@ function resolveOneTarget(
     cwd: string
     state: ShellState
     dirRegions: ReadonlyArray<[number, number]>
-    unbalancedDir: boolean
+    relativeUnknown: boolean
     tempBindings: readonly TempHintBinding[]
     /** The whole command, for the hint's assignment check; '' withholds every hint. */
     command: string
@@ -2646,7 +4021,9 @@ function resolveOneTarget(
       unresolved = true
       continue
     }
-    if (UNRESOLVABLE_CHARS.test(reading)) {
+    // A quote-hidden phantom name (`list[int]:`, `**Note**`) is a literal relative
+    // name: its glob characters are not expanded (see isPhantomLiteralName).
+    if (target.literalName !== true && UNRESOLVABLE_CHARS.test(reading)) {
       unresolved = true
       continue
     }
@@ -2663,7 +4040,7 @@ function resolveOneTarget(
       continue
     }
     if (
-      ctx.unbalancedDir ||
+      ctx.relativeUnknown ||
       ctx.dirRegions.some(([start, end]) => target.pos >= start && target.pos < end)
     ) {
       unresolved = true
@@ -2752,10 +4129,77 @@ function rootedShellDrives(
  * still names `.ssh`.
  */
 function rawComponentsForProtection(raw: string): string[] {
-  return raw
-    .split(/[\\/\s]+/)
-    .map((c) => c.replace(/^['"]+|['"]+$/g, ''))
-    .filter((c) => c.length > 0)
+  const out: string[] = []
+  // A brace expansion (`~/{.bashrc,.profile}`, `{.git,x}/config`) names every
+  // alternative, so each expanded spelling is read for its components.
+  for (const spelling of expandBraces(raw)) {
+    for (const component of spelling.split(/[\\/\s]+/)) {
+      const bare = component.replace(/^['"]+|['"]+$/g, '')
+      if (bare.length > 0 && !out.includes(bare)) out.push(bare)
+    }
+  }
+  return out
+}
+
+/** How many spellings {@link expandBraces} will produce before it gives up. */
+const MAX_BRACE_SPELLINGS = 64
+
+/**
+ * The spellings a bash comma brace expansion names: `{.git,x}/config` →
+ * `.git/config`, `x/config`. Nested lists expand too. A `{…}` with no top-level
+ * comma (`{a..b}`, `${HOME}`, `{x}`) is left as written. Past
+ * {@link MAX_BRACE_SPELLINGS} the text is returned unexpanded, with every brace
+ * and comma turned into a separator so that each alternative still shows up as a
+ * component of its own (a superset: it can over-report a component, never hide one).
+ */
+function expandBraces(text: string): string[] {
+  const expanded = expandBracesBounded(text)
+  return expanded ?? [text.replace(/[{},]/g, '/')]
+}
+
+function expandBracesBounded(text: string): string[] | null {
+  let open = -1
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '{' && text[i - 1] !== '$') {
+      open = i
+      break
+    }
+  }
+  if (open === -1) return [text]
+  // Find the matching close and the top-level commas between.
+  let depth = 0
+  let close = -1
+  const commas: number[] = []
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === '{') depth++
+    else if (text[i] === '}') {
+      depth--
+      if (depth === 0) {
+        close = i
+        break
+      }
+    } else if (text[i] === ',' && depth === 1) commas.push(i)
+  }
+  if (close === -1) return [text]
+  const prefix = text.slice(0, open)
+  const suffix = text.slice(close + 1)
+  if (commas.length === 0) {
+    // Not an expansion: keep the braces as text and expand what follows.
+    const rest = expandBracesBounded(suffix)
+    return rest === null ? null : rest.map((s) => `${prefix}${text.slice(open, close + 1)}${s}`)
+  }
+  const bounds = [open, ...commas, close]
+  const out: string[] = []
+  for (let k = 0; k + 1 < bounds.length; k++) {
+    const alt = text.slice(bounds[k] + 1, bounds[k + 1])
+    const tails = expandBracesBounded(`${alt}${suffix}`)
+    if (tails === null) return null
+    for (const tail of tails) {
+      out.push(`${prefix}${tail}`)
+      if (out.length > MAX_BRACE_SPELLINGS) return null
+    }
+  }
+  return out
 }
 
 /** The drive root of an absolute normalized path (`/` or `d:/`). */
@@ -2767,8 +4211,14 @@ function driveOrRoot(full: string, platform: NodeJS.Platform): string {
 /**
  * Every file target of `command` with its pure facts — the whole input P2a-2
  * measures. `null` exactly when {@link analyzeRedirects} returns `null` (no file
- * target, more than {@link MAX_REDIRECT_TARGETS} of them, or a command longer
- * than {@link MAX_ANALYZE_COMMAND_LENGTH}).
+ * target, more than {@link MAX_REDIRECT_TARGETS} of them, a command longer than
+ * {@link MAX_ANALYZE_COMMAND_LENGTH}, or more quote-hidden operators than the
+ * cross-check will read).
+ *
+ * Besides the quote-aware targets, the list carries the QUOTE-BLIND CROSS-CHECK's
+ * details ({@link quoteHiddenTargets}), marked `quoted`: `>` operators the
+ * quote-aware scan read as text and that are not cleanly in scope. A command whose
+ * only targets are such details is NOT `null`.
  *
  * Stays pure and synchronous: no fs, no env (the host's temp values arrive in
  * `scope.tempVars`), `platform` injected.
@@ -2782,15 +4232,21 @@ export function redirectTargetDetails(
   const lexed = lexCommand(command)
   const collected = collectTargets(command, lexed)
   const found = collected.targets.slice()
-  for (const seg of collected.segments) found.push(...writerTargets(seg, command))
+  for (const seg of collected.segments) {
+    found.push(...writerTargets(seg, command, scope.shell, platform))
+  }
   found.sort((a, b) => a.pos - b.pos)
-  if (found.length === 0 || found.length > MAX_REDIRECT_TARGETS) return null
+  if (found.length > MAX_REDIRECT_TARGETS) return null
+  // The quote-blind cross-check: `>` operators the quote-aware scan read as text.
+  const hidden = quoteHiddenTargets(command, collected.targets)
+  if (hidden === null) return null
+  if (found.length === 0 && hidden.length === 0) return null
 
   const roots = scopeRoots(scope, platform)
   const cwd = normalizePath(scope.cwd, platform).full
   const initialCwd =
     scope.shellCwd === null ? null : normalizePath(scope.shellCwd ?? scope.cwd, platform).full
-  const states = shellStates(command, lexed, collected.segments, platform, initialCwd)
+  const states = shellStates(command, lexed, collected.segments, platform, initialCwd, scope.shell)
   const initialPossibilities: Possibility[] = [{ dir: initialCwd, ok: true }]
   const initial: ShellState = {
     start: 0,
@@ -2798,12 +4254,18 @@ export function redirectTargetDetails(
     runs: initialPossibilities
   }
   // When the lexer could not trust the quote structure, a directory change
-  // anywhere makes every relative target unknowable (ruling 4 / R6).
-  const unbalancedDir = !lexed.balanced && hasDirWord(command)
+  // anywhere makes every relative target unknowable (ruling 4 / R6). So does a
+  // function, `trap` or script block that runs later, from wherever the shell
+  // is by then, when the command also changes directory.
+  const relativeUnknown =
+    (!lexed.balanced && hasDirWord(command)) ||
+    deferredBodyRisk(command, collected.segments, scope.shell)
   // The hint's bindings, collected once so the per-target lookup stays linear.
   // Withheld entirely when the command could change a variable without a plain
   // assignment; a binding assigned more than once is no binding at all.
-  const hintsAllowed = scope.shell !== undefined && !HINT_TAINT_RE.test(command)
+  const hintsAllowed =
+    scope.shell !== undefined &&
+    !hintTainted(command, lexed.balanced, collected.segments, scope.shell)
   const tempBindings = hintsAllowed
     ? tempHintBindings(collected.segments, scope.shell, scope.tempVars ?? {}, command).filter(
         (binding) => assignmentCount(command, binding.name, scope.shell as RedirectShell) === 1
@@ -2822,11 +4284,55 @@ export function redirectTargetDetails(
         cwd,
         state,
         dirRegions: collected.dirRegions,
-        unbalancedDir,
+        relativeUnknown,
         tempBindings,
         command: hintsAllowed ? command : ''
       })
     )
+  }
+
+  // Each quote-hidden operator resolves exactly like a real target (the shell
+  // states it would run in, the same roots and protected check), and survives only
+  // when it is NOT cleanly in scope — a clean one is a harmless phantom, which is
+  // what keeps the false-block gains of the quote-aware scan. Readings are
+  // memoised by spelling and shell-state content, so a document full of `a > b`
+  // costs one resolution per distinct spelling.
+  if (hidden.length > 0) {
+    const hiddenDir = hasHiddenDirWord(command, collected.segments)
+    const signatures = new Map<ShellState, string>()
+    const seen = new Set<string>()
+    const listed = new Set<string>()
+    for (const target of hidden) {
+      if (isSink(target.raw, platform, scope.shell)) continue
+      const state = stateAt(states, target.pos) ?? initial
+      let signature = signatures.get(state)
+      if (signature === undefined) {
+        signature = (state.runs.length > 0 ? state.runs : state.at).map(possibilityKey).join('|')
+        signatures.set(state, signature)
+      }
+      const key = `${target.raw}\u0000${target.append}\u0000${target.quoted === true}\u0000${signature}`
+      if (seen.has(key)) continue
+      if (seen.size >= MAX_HIDDEN_KEYS) return null
+      seen.add(key)
+      for (const detail of resolveOneTarget(target, {
+        scope,
+        platform,
+        roots,
+        cwd,
+        state,
+        dirRegions: collected.dirRegions,
+        relativeUnknown: relativeUnknown || hiddenDir,
+        tempBindings: [],
+        command: ''
+      })) {
+        if (isCleanInScope(detail)) continue
+        details.push({ ...detail, quoted: true })
+        listed.add(detail.raw)
+      }
+      // Enough to say so: every one of these makes `allInScope` false, and a
+      // longer list would only cost the judge tokens.
+      if (listed.size >= MAX_REDIRECT_TARGETS) break
+    }
   }
   return details.length === 0 ? null : details
 }
@@ -2843,15 +4349,30 @@ export function redirectTargetDetails(
  * unresolvable detail and never touches `allInScope`, `outOfScope` or
  * `unresolvable`.
  *
+ * A detail marked `quoted` (found only by the quote-blind cross-check) is
+ * reported in `quotedTargets` and NOWHERE else — not in `targets`, `outOfScope`,
+ * `unresolvable`, `protectedHits` or `symlinked` — so the judge can tell
+ * "probably text" from "definitely a write". It still makes `allInScope` false,
+ * unless measurement proved it clean after all (resolved in scope through a link,
+ * unprotected, not itself a link).
+ *
+ * `unmeasured` lists the raw spelling of every target that would read in scope but
+ * whose containment could not be established (`reviewRequired`), so that
+ * `allInScope: false` with every other list empty is no longer unexplained. An
+ * out-of-scope target is never listed: `outOfScope` already names it.
+ *
  * A raw target may appear in several details (shell-state possibilities,
  * backslash readings): `targets` and `unresolvable` are de-duplicated by the RAW
  * spelling, `outOfScope` by the resolved path, so `> x/../y` after a `;`-joined
  * `cd` lists each distinct place it could write.
  */
 export function summarizeRedirects(
-  details: readonly RedirectTargetDetail[],
+  allDetails: readonly RedirectTargetDetail[],
   measured?: ReadonlyMap<string, RedirectMeasurement>
 ): RedirectAnalysis {
+  const details = allDetails.filter((detail) => detail.quoted !== true)
+  const quotedTargets = quotedTargetsOf(allDetails, measured)
+  const unmeasured: string[] = []
   const targets: string[] = []
   const unresolvable: string[] = []
   const protectedHits: string[] = []
@@ -2891,7 +4412,14 @@ export function summarizeRedirects(
       if (detail.tempVarPath === undefined) group.veto = true
       else group.paths.add(detail.tempVarPath)
     }
-    if (detail.reviewRequired === true) reviewRequired = true
+    if (detail.reviewRequired === true) {
+      reviewRequired = true
+      // Only a target that would otherwise read IN scope: an out-of-scope one is already
+      // listed in `outOfScope`, where a missing `exists`/`empty` already means "not measured".
+      // Listing it here too told the judge its location was unknown, which it is not.
+      const outOfScopeTarget = detail.path !== undefined && detail.root === undefined
+      if (!outOfScopeTarget && !unmeasured.includes(detail.raw)) unmeasured.push(detail.raw)
+    }
     for (const hit of detail.protectedHits) {
       if (!protectedHits.includes(hit)) protectedHits.push(hit)
     }
@@ -2943,6 +4471,7 @@ export function summarizeRedirects(
       unresolvable.length === 0 &&
       protectedHits.length === 0 &&
       symlinked.length === 0 &&
+      quotedTargets.length === 0 &&
       !reviewRequired,
     outOfScope,
     unresolvable,
@@ -2950,7 +4479,36 @@ export function summarizeRedirects(
   }
   if (symlinked.length > 0) analysis.symlinked = symlinked
   if (tempVarTargets.length > 0) analysis.tempVarTargets = tempVarTargets
+  if (quotedTargets.length > 0) analysis.quotedTargets = quotedTargets
+  if (unmeasured.length > 0) analysis.unmeasured = unmeasured
   return analysis
+}
+
+/**
+ * The raw spellings of the `quoted` details that are not cleanly in scope, once
+ * measurement has had its say: a quote-hidden target that measurement proved to
+ * resolve in scope (through a link), unprotected and not itself a link is the same
+ * harmless phantom the pure stage already drops. De-duplicated by spelling and
+ * shown at most {@link MAX_QUOTED_RAW_LENGTH} characters, at most
+ * {@link MAX_REDIRECT_TARGETS} of them.
+ */
+function quotedTargetsOf(
+  details: readonly RedirectTargetDetail[],
+  measured: ReadonlyMap<string, RedirectMeasurement> | undefined
+): string[] {
+  const out: string[] = []
+  for (const detail of details) {
+    if (detail.quoted !== true) continue
+    const linked = detail.path !== undefined && measured?.get(detail.path)?.symlinked === true
+    if (!linked && isCleanInScope(detail)) continue
+    const shown =
+      detail.raw.length > MAX_QUOTED_RAW_LENGTH
+        ? `${detail.raw.slice(0, MAX_QUOTED_RAW_LENGTH)}…`
+        : detail.raw
+    if (!out.includes(shown)) out.push(shown)
+    if (out.length >= MAX_REDIRECT_TARGETS) break
+  }
+  return out
 }
 
 /**
@@ -2964,9 +4522,14 @@ export function summarizeRedirects(
  *
  * Returns `null` — meaning emit NO meta line — when the command has no file
  * redirect at all, has more than {@link MAX_REDIRECT_TARGETS} of them, or is
- * longer than {@link MAX_ANALYZE_COMMAND_LENGTH}. As everywhere in this file,
- * saying nothing is the fallback; the one thing that must never happen is a
- * fabricated `allInScope: true`.
+ * longer than {@link MAX_ANALYZE_COMMAND_LENGTH}, or has more quote-hidden `>`
+ * operators than the cross-check will read ({@link MAX_HIDDEN_OPERATORS}). As
+ * everywhere in this file, saying nothing is the fallback; the one thing that
+ * must never happen is a fabricated `allInScope: true`.
+ *
+ * It is NOT `null` when the quote-aware scan found no redirect but the
+ * quote-blind cross-check found a quote-hidden `>` that is not cleanly in scope:
+ * `targets` is then empty and `quotedTargets` names it.
  */
 export function analyzeRedirects(
   command: string,

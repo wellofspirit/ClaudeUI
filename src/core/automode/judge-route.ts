@@ -61,10 +61,11 @@ export interface JudgeRouteDeps {
   /** A definition's vault API key, or null when it holds none. */
   loadApiKey(definitionId: string): Promise<string | null>
   /**
-   * The ACTIVE ChatGPT account's token (ADR-068 §1); `force` refreshes it
-   * first whatever its expiry. Null when signed out or workspace-less.
+   * A ChatGPT account's token (ADR-068 §1): the ACTIVE account's, or — given
+   * `accountId` — that vault account's; `force` refreshes it first whatever its
+   * expiry. Null when the account is signed out, gone or workspace-less.
    */
-  chatgptToken(force: boolean): Promise<CodexInjectionToken | null>
+  chatgptToken(force: boolean, accountId?: string): Promise<CodexInjectionToken | null>
   /**
    * Whether {@link chatgptToken} would find a token, answered WITHOUT one: the
    * active account holds a credential with a workspace id. The describe path's
@@ -120,7 +121,8 @@ function defaultDeps(): JudgeRouteDeps {
     // `Infinity` puts any expiry inside the refresh margin, so the token is
     // refreshed first — through the same per-account single-flight as every
     // scheduled refresh.
-    chatgptToken: (force) => credentialSync.injectionTokenFor(null, force ? Infinity : undefined),
+    chatgptToken: (force, accountId) =>
+      credentialSync.injectionTokenFor(accountId ?? null, force ? Infinity : undefined),
     // `injectionTokenFor(null)` is null exactly when the active account has no
     // credential or no workspace id; `getStatus()` reports both, token-free.
     chatgptSignedIn: async () => {
@@ -139,6 +141,17 @@ function defaultDeps(): JudgeRouteDeps {
   return productionDeps
 }
 
+/** What {@link resolveJudgeRoute} may be told beyond the model: which credential pays. */
+export interface JudgeRouteOptions {
+  /**
+   * A ChatGPT vault account id to spend instead of the ACTIVE account — the fallback judge's
+   * `autoMode.fallbackJudgeAccount`. Only a ChatGPT route reads it; every other route ignores it.
+   * An account that is gone or signed out is refused (`chatgpt-unavailable`), never swapped for the
+   * active one: the route's `account` (usage rows, cooldown key) always names who pays.
+   */
+  chatgptAccountId?: string
+}
+
 /**
  * Resolve the judge model `modelValue` (the engine's picker value) for one
  * judge call. Never throws for a model ClaudeUI can't call — that is an
@@ -148,18 +161,24 @@ function defaultDeps(): JudgeRouteDeps {
 export async function resolveJudgeRoute(
   engine: JudgeEngine,
   modelValue: string,
-  deps: Partial<JudgeRouteDeps> = {}
+  deps: Partial<JudgeRouteDeps> = {},
+  options: JudgeRouteOptions = {}
 ): Promise<JudgeRouteResult> {
   const d: JudgeRouteDeps = { ...defaultDeps(), ...deps }
   const plan = await planRoute(engine, modelValue, d, d.loadApiKey)
   if (!plan.ok) return plan
-  if (plan.kind === 'chatgpt') return chatgptRoute(plan.ctx)
+  if (plan.kind === 'chatgpt') return chatgptRoute(plan.ctx, options.chatgptAccountId)
   return { ok: true, route: keyedRoute(plan.ctx, plan.kind, plan.url, plan.key, plan.facts) }
 }
 
-/** Whether ClaudeUI can call a judge model, and if not, the resolver's own reason. */
+/**
+ * Whether ClaudeUI can call a judge model, and if not, the resolver's own reason. `chatgpt` is set
+ * (to true, never false) when the model routes through the ChatGPT subscription — whether or not
+ * the active account is signed in — so a picker can offer which account pays.
+ */
 export type JudgeRouteDescription =
-  { ok: true } | { ok: false; code: JudgeRouteUnavailableCode; reason: string }
+  | { ok: true; chatgpt?: true }
+  | { ok: false; code: JudgeRouteUnavailableCode; reason: string; chatgpt?: true }
 
 /**
  * {@link resolveJudgeRoute}'s verdict on `modelValue` without spending a
@@ -205,7 +224,10 @@ export async function describeJudgeModels(
   for (const value of new Set(values)) {
     try {
       const described = await describeWith(engine, value, d, hasKey)
-      out[value] = described.ok ? { ok: true } : { ok: false, reason: described.reason }
+      const chatgpt = described.chatgpt ? { chatgpt: true as const } : {}
+      out[value] = described.ok
+        ? { ok: true, ...chatgpt }
+        : { ok: false, reason: described.reason, ...chatgpt }
     } catch (err) {
       out[value] = {
         ok: false,
@@ -227,7 +249,9 @@ async function describeWith(
   const plan = await planRoute(engine, modelValue, d, hasKey)
   if (!plan.ok) return plan
   if (plan.kind === 'chatgpt') {
-    return (await d.chatgptSignedIn()) ? { ok: true } : chatgptUnavailable()
+    return (await d.chatgptSignedIn())
+      ? { ok: true, chatgpt: true }
+      : { ...chatgptUnavailable(), chatgpt: true }
   }
   return { ok: true }
 }
@@ -370,12 +394,13 @@ function chatgptUserAgent(appVersion: string): string {
 }
 
 /**
- * The ChatGPT backend with the active account's token. `originator: opencode`
- * because the vault's token is issued to opencode's OAuth client
- * (`codex-oauth.ts`'s `CLIENT_ID`). `reauthorize` rebuilds the route from a
- * force-refreshed token for the transport's one 401 retry.
+ * The ChatGPT backend with the active account's token — or, given `accountId`,
+ * that vault account's. `originator: opencode` because the vault's token is
+ * issued to opencode's OAuth client (`codex-oauth.ts`'s `CLIENT_ID`).
+ * `reauthorize` rebuilds the route from a force-refreshed token of the SAME
+ * account for the transport's one 401 retry.
  */
-async function chatgptRoute(ctx: RouteContext): Promise<JudgeRouteResult> {
+async function chatgptRoute(ctx: RouteContext, accountId?: string): Promise<JudgeRouteResult> {
   const { deps, model, provider } = ctx
 
   const build = async (token: CodexInjectionToken): Promise<ResolvedJudgeRoute> => {
@@ -403,7 +428,7 @@ async function chatgptRoute(ctx: RouteContext): Promise<JudgeRouteResult> {
         billingType: 'subscription'
       },
       reauthorize: async () => {
-        const fresh = await deps.chatgptToken(true)
+        const fresh = await deps.chatgptToken(true, accountId)
         // A refresh that failed leaves the old token in the vault — and
         // retrying with the token that was just refused would only 401 again.
         if (!fresh || fresh.accessToken === token.accessToken) return null
@@ -412,8 +437,8 @@ async function chatgptRoute(ctx: RouteContext): Promise<JudgeRouteResult> {
     }
   }
 
-  const token = await deps.chatgptToken(false)
-  if (!token) return chatgptUnavailable()
+  const token = await deps.chatgptToken(false, accountId)
+  if (!token) return accountId === undefined ? chatgptUnavailable() : chatgptAccountUnavailable()
   return { ok: true, route: await build(token) }
 }
 
@@ -422,6 +447,18 @@ function chatgptUnavailable(): Unavailable {
   return unavailable(
     'chatgpt-unavailable',
     `ChatGPT isn't signed in in ClaudeUI (or its account has no workspace), so ClaudeUI can't call it for the judge. Sign in to ChatGPT in ${PROVIDERS_PAGE}, ${PICK_ANOTHER}.`
+  )
+}
+
+/**
+ * A NAMED account (the fallback judge's) with no token: signed out, removed from the vault, or
+ * without a workspace. Never answered with the active account's token — that would bill another
+ * subscription than the one the user chose.
+ */
+function chatgptAccountUnavailable(): Unavailable {
+  return unavailable(
+    'chatgpt-unavailable',
+    `The fallback ChatGPT account is not signed in (or was removed, or has no workspace), so ClaudeUI can't call it for the judge. Sign it in under ${PROVIDERS_PAGE}, or pick another fallback account.`
   )
 }
 
