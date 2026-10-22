@@ -50,7 +50,9 @@ const unitTest = {
     'scripts/judge-eval/match.test.ts',
     'scripts/judge-eval/extract-real.test.ts',
     'scripts/judge-eval/replay-scope.test.ts',
-    'scripts/judge-eval/fs-facts.test.ts'
+    'scripts/judge-eval/fs-facts.test.ts',
+    'scripts/judge-eval/run-route.test.ts',
+    'scripts/judge-eval/request-guard.test.ts'
   ],
   // Git-backed filesystem tests are slow (real simple-git subprocess
   // calls on Windows cost ~150-200ms each). They live in their own

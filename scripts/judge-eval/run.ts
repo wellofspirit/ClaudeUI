@@ -19,20 +19,47 @@
  * pass nor fail, so an extracted deny can be replayed before it is labelled.
  *
  * `--fs-facts` supplies the redirect MEASUREMENTS the historical machine can no
- * longer answer: a fake probe answers `lstat`/`realpath` only from that file, so
+ * longer answer: a fake probe answers from that file, so
  * `exists`/`empty`/`modifiedSinceSessionStart` reflect the state at the time of
- * the real call. A path absent from the facts is NOT measured (the probe throws
- * a non-ENOENT error and the field is omitted); the details are in
- * {@link loadFsFacts}. Without `--fs-facts` the runner keeps the pure
+ * the real call. An OUT-OF-SCOPE target absent from the facts is NOT measured (the
+ * probe throws a non-ENOENT error and the field is omitted); every other
+ * unrecorded path (scope roots, ancestor directories, in-scope targets) is an
+ * ordinary, link-free entry, as production would have found it (see `./fs-facts`);
+ * the file format is in {@link loadFsFacts}. Without `--fs-facts` the runner keeps the pure
  * scope-only analysis (measurement would be a guess on this machine).
  *
- * Every run costs real judge calls (stage 1, plus stage 2 when stage 1 blocks).
+ * `--chatgpt-account <vault id>` reads THAT vault account's token (read-only, no
+ * refresh) instead of the active one. `--route-url <base>` [`--route-key`] skips
+ * the route resolver for a hand-built OpenAI chat-completions route (opencode's
+ * hosted free models). `--dry-run-sizes` builds every request through the real
+ * transport with a fake fetch that sends nothing, and reports the prompt sizes;
+ * `--dump-requests <file.jsonl>` (dry run only) also writes every built request's
+ * text, one JSON line each, so what a free-model eval would send can be scanned.
+ *
+ * A request that goes to ANY third party (every route except the owner's ChatGPT
+ * subscription, which is the production judge already receiving this data) has two
+ * protections in front of the transport (`./request-guard`): identity masking
+ * (`--mask-identity`, default on there, `--no-mask-identity` to disable; also applied
+ * to a dry run and its dump) and a credential deny-list that withholds a matching
+ * request. Which side a run is on comes from the resolved route (see `guardPolicy`).
+ * `--route-header` and `--route-headroom` tune a `--route-url` route for a hosted
+ * model that wants a header or a larger reasoning budget.
+ *
+ * Every run costs real judge calls (stage 1, plus stage 2 when stage 1 blocks),
+ * except a `--dry-run-sizes` run, which makes none.
  */
 import { parseArgs } from 'node:util'
-import { readFileSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { userInfo } from 'node:os'
+import { dirname, resolve } from 'node:path'
+import type { JudgeTransport } from '../../src/core/automode/classifier'
 import { makeHttpJudgeTransport } from '../../src/core/automode/judge-http/transport'
-import { resolveJudgeRoute, type JudgeEngine } from '../../src/core/automode/judge-route'
+import {
+  describeJudgeRoute,
+  resolveJudgeRoute,
+  type JudgeEngine
+} from '../../src/core/automode/judge-route'
 import { authVault, CHATGPT_PROVIDER_ID } from '../../src/core/auth/vault/AuthVault'
 import type { CodexInjectionToken } from '../../src/core/auth/vault/CredentialSync'
 import type { ChatMessage } from '../../src/shared/types'
@@ -54,13 +81,31 @@ import {
   type EvalResult,
   type Expectation
 } from './match'
-import { fsFactsProbe, type FsFacts, type FsFactsCase } from './fs-facts'
+import { fsFactsProbe, outOfScopeTargets, type FsFacts, type FsFactsCase } from './fs-facts'
 import {
   legacyReplayScope,
   replayRedirectScope,
   type ReplayScopeFacts,
   type RedirectScopeBuilder
 } from './replay-scope'
+import {
+  accountNote,
+  buildCustomRoute,
+  estimateTokens,
+  parseRouteHeaders,
+  parseRouteHeadroom,
+  pickChatgptAccount,
+  readOnlyTokenOf,
+  requestDumpLine,
+  summarizeSizes
+} from './run-route'
+import {
+  guardPolicy,
+  guardTransport,
+  identityMasks,
+  makeIdentityMasker,
+  type IdentityInputs
+} from './request-guard'
 
 const { values: args } = parseArgs({
   options: {
@@ -75,6 +120,15 @@ const { values: args } = parseArgs({
     'cases-file': { type: 'string' },
     labels: { type: 'string' },
     'fs-facts': { type: 'string' },
+    'chatgpt-account': { type: 'string' },
+    'route-url': { type: 'string' },
+    'route-key': { type: 'string', default: 'public' },
+    'route-header': { type: 'string', multiple: true },
+    'route-headroom': { type: 'string' },
+    'mask-identity': { type: 'boolean' },
+    'no-mask-identity': { type: 'boolean' },
+    'dry-run-sizes': { type: 'boolean', default: false },
+    'dump-requests': { type: 'string' },
     help: { type: 'boolean', default: false }
   }
 })
@@ -97,8 +151,47 @@ Usage: bun scripts/judge-eval/run.ts [options]
   --fs-facts <file>     measured redirect facts, per case:
                         {"<caseId>":{"sessionStartMs":n,"paths":{"<resolved path>":
                           {"exists":bool,"size"?:n,"mtimeMs"?:n,"symlink"?:bool,"realpath"?:string}}}}
-                        A path absent from the facts is not measured and its
-                        fields are omitted (never an invented exists:false).
+                        An out-of-scope target absent from the facts is not
+                        measured and its fields are omitted (never an invented
+                        exists:false); any other unrecorded path is an ordinary
+                        directory/entry, and there are no links unless recorded.
+  --chatgpt-account <id> read this vault account (accounts.chatgpt.list[].id)
+                        instead of the active one; read-only, never refreshed.
+                        An unknown id exits non-zero.
+  --route-url <base>    skip the route resolver: POST <base>/chat/completions
+                        (OpenAI chat wire), wire model = the part of --model
+                        after the first '/'. For opencode's hosted free models:
+                        https://opencode.ai/inference/openai/v1
+  --route-key <key>     bearer key for --route-url (default: public, a literal)
+  --route-header <k=v>  extra request header on the --route-url route; repeatable
+                        (e.g. x-opencode-project=claudeui-judge-eval). Cannot set
+                        Authorization. Values are never printed.
+  --route-headroom <n>  output headroom in tokens for the --route-url route, on top
+                        of each stage's own cap, for reasoning models (default 8192)
+  --mask-identity       replace the OS login / USERPROFILE folder name with \`user\`,
+                        each GitHub owner in \`git -C <root> remote -v\` with \`owner\`
+                        and the git author's email / name parts with \`user\` / \`org\` /
+                        \`name\` (whole-token, case-insensitive) in every system and
+                        user text before it is sent or dumped. Default ON for every
+                        route that does NOT go to the owner's ChatGPT subscription
+                        (an OpenRouter / OpenAI / custom route, --route-url); a
+                        ChatGPT run is the production judge and is unmasked by default.
+                        --mask-identity forces it on, --no-mask-identity off.
+                        On the same third-party routes every request is also scanned
+                        for credential shapes (API keys, tokens, JWTs, bearer values,
+                        private keys); a hit is NOT sent: that call fails with
+                        "request withheld: matched credential pattern <index>" and
+                        the run reports how many were withheld.
+  --dry-run-sizes       send NOTHING: run every case through the real request
+                        builder with a fake fetch, then print each case's
+                        system+user size (chars, est. tokens = chars/4) and the
+                        max / median / over-150k / over-190k summary. Makes no
+                        judge call and needs no credential; --runs is ignored.
+  --dump-requests <file.jsonl>  (dry run only; refused without --dry-run-sizes)
+                        also write one JSON line per built request,
+                        {caseId, stage, system, user}: exactly the text a real
+                        run would send, for a privacy scan. Contains the case
+                        transcripts: keep the file out of the repository.
   --help                this text
 `)
   process.exit(0)
@@ -319,6 +412,28 @@ function replayScopeFor(c: LoadedCase, platform: string, cwd: string): Record<st
 }
 
 /**
+ * What the fake probe needs to tell a redirect target from its ancestors: the
+ * case's out-of-scope targets, from the checkout's own pure analysis (the same
+ * call `captureRedirects` makes first). A checkout without `redirectTargetDetails`
+ * gets no targets, so the probe keeps its conservative "not measured" answer.
+ */
+function probeTargetsFor(
+  command: string,
+  scope: Record<string, unknown>,
+  platform: string
+): { outOfScope: string[] } | undefined {
+  const details = groundTruth.redirectTargetDetails as
+    | ((
+        command: string,
+        scope: unknown,
+        platform: string
+      ) => { path?: string; root?: string }[] | null)
+    | undefined
+  if (typeof details !== 'function') return undefined
+  return { outOfScope: outOfScopeTargets(details(command, scope, platform)) }
+}
+
+/**
  * The `{"meta":…}` line. Real cases measure with the `--root` checkout's own
  * ground truth and the temp roots captured at extraction; a label's
  * `actionMetaOverride` is shallow-merged on top, for historical facts the
@@ -345,7 +460,7 @@ async function actionMetaFor(
         ? await capture(c.measureRedirects, scope, {
             sessionStartMs: facts.sessionStartMs,
             platform,
-            probe: fsFactsProbe(facts),
+            probe: fsFactsProbe(facts, probeTargetsFor(c.measureRedirects, scope, platform)),
             timeoutMs: 400
           })
         : groundTruth.analyzeRedirects(c.measureRedirects, scope, platform)
@@ -357,13 +472,14 @@ async function actionMetaFor(
 
 async function runOnce(
   c: LoadedCase,
-  override: Record<string, unknown> | undefined
+  override: Record<string, unknown> | undefined,
+  transport: JudgeTransport = judge
 ): Promise<EvalResult> {
   const actionMeta = await actionMetaFor(c, override)
   let calls = 0
-  const counted: typeof judge = (req) => {
+  const counted: JudgeTransport = (req) => {
     calls++
-    return judge(req)
+    return transport(req)
   }
   const started = performance.now()
   const result = await classifier.classify(
@@ -430,55 +546,264 @@ const cases: LoadedCase[] = (
     : [...CASES, ...DELEGATED_CASES, ...BASH_CASES, ...SOURCE_CASES, ...HISTORY_CASES, ...P2C_CASES]
 ).filter((c) => !wanted || wanted.has(c.id))
 if (cases.length === 0) fail('no cases selected')
-// Eval-only: read the active, unexpired credential without refresh or vault writes.
-// A forced retry cannot refresh either; a stale token becomes a reported error.
-async function readOnlyChatgptToken(force: boolean): Promise<CodexInjectionToken | null> {
-  if (force) return null
-  const activeId = await authVault.getActiveAccountId(CHATGPT_PROVIDER_ID)
-  if (!activeId) return null
-  const account = (await authVault.listAccounts(CHATGPT_PROVIDER_ID)).find(
-    (item) => item.id === activeId
-  )
-  if (
-    !account ||
-    account.credential.type !== 'oauth' ||
-    !account.accountId ||
-    account.credential.expires <= Date.now()
-  )
-    return null
-  return {
-    accessToken: account.credential.access,
-    chatgptAccountId: account.accountId,
-    chatgptPlanType: account.planType ?? null,
-    vaultAccountId: account.id
+const dryRun = args['dry-run-sizes'] === true
+const dumpFile = args['dump-requests']
+// The dump is a by-product of the fake fetch; a real run would ALSO send the text,
+// so the flag is refused rather than silently writing nothing (or doing both).
+if (dumpFile !== undefined && !dryRun) fail('--dump-requests needs --dry-run-sizes')
+if (dumpFile !== undefined && dumpFile.trim() === '') fail('--dump-requests needs a file path')
+const routeUrl = args['route-url']
+const routeKey = args['route-key']!
+const requestedAccount = args['chatgpt-account']
+if (routeUrl !== undefined) {
+  let parsed: URL | undefined
+  try {
+    parsed = new URL(routeUrl)
+  } catch {
+    parsed = undefined
+  }
+  if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:'))
+    fail('--route-url must be an http(s) base URL')
+  if (!routeKey) fail('--route-key must not be empty')
+  if (requestedAccount !== undefined)
+    fail('--chatgpt-account has no effect with --route-url (no ChatGPT route is used)')
+}
+// Extra headers and a larger reasoning budget for the hand-built route. A header value can
+// be a secret, so a bad entry is reported by position or name only.
+let routeHeaders: Record<string, string> = {}
+let routeHeadroom: number | undefined
+try {
+  routeHeaders = parseRouteHeaders(args['route-header'] ?? [])
+  if (args['route-headroom'] !== undefined)
+    routeHeadroom = parseRouteHeadroom(args['route-headroom'])
+} catch (err) {
+  fail(err instanceof Error ? err.message : String(err))
+}
+if (routeUrl === undefined && (Object.keys(routeHeaders).length > 0 || routeHeadroom !== undefined))
+  fail('--route-header and --route-headroom need --route-url')
+
+// A request that goes to a third party is masked and scanned first (`./request-guard`).
+// Both default ON for every route except the owner's ChatGPT subscription (the production
+// judge, which already receives this data); a dry run honours the same default, so the dump
+// shows the text that would go out. The route is read from the resolver's token-free
+// `describeJudgeRoute` (its `chatgpt` flag): a model the resolver cannot place, or a check
+// that fails, counts as a third party, so masking is the safe default.
+async function describeRoute(): Promise<{ chatgpt?: true } | undefined> {
+  if (routeUrl !== undefined) return undefined
+  try {
+    return await describeJudgeRoute(args.engine as JudgeEngine, args.model!)
+  } catch {
+    return undefined
   }
 }
+let policy: ReturnType<typeof guardPolicy>
+try {
+  policy = guardPolicy({
+    customRoute: routeUrl !== undefined,
+    described: await describeRoute(),
+    ...(args['mask-identity'] === true ? { mask: true } : {}),
+    ...(args['no-mask-identity'] === true ? { noMask: true } : {})
+  })
+} catch (err) {
+  fail(err instanceof Error ? err.message : String(err))
+}
+const { thirdParty, maskIdentity, scanCredentials } = policy
+function readIdentityInputs(): IdentityInputs {
+  let username: string | undefined
+  try {
+    username = userInfo().username
+  } catch {
+    username = undefined
+  }
+  const git = (...gitArgs: string[]): string => {
+    const out = spawnSync('git', ['-C', root, ...gitArgs], { encoding: 'utf-8' })
+    return out.status === 0 ? out.stdout : ''
+  }
+  return {
+    username,
+    userProfile: process.env.USERPROFILE,
+    remotes: git('remote', '-v'),
+    gitEmail: git('config', 'user.email').trim(),
+    gitName: git('config', 'user.name').trim()
+  }
+}
+const identity = maskIdentity ? identityMasks(readIdentityInputs()) : []
+if (maskIdentity && identity.length === 0)
+  console.error('judge-eval: warning: no identity handle could be derived, nothing is masked')
+if (thirdParty && !maskIdentity)
+  console.error('judge-eval: warning: identity masking is OFF on a third-party route')
+let withheld = 0
+/** `inner` behind the mask and the credential deny-list (a no-op when neither applies). */
+function guarded(inner: JudgeTransport): JudgeTransport {
+  return guardTransport(inner, {
+    ...(maskIdentity ? { mask: makeIdentityMasker(identity) } : {}),
+    scan: scanCredentials,
+    onWithheld: () => {
+      withheld++
+    }
+  })
+}
+const guardNote = `${maskIdentity ? `, identity masking on (${identity.length} handle${identity.length === 1 ? '' : 's'})` : ''}${scanCredentials ? ', credential scan on' : ''}`
+const withheldLine = (): string =>
+  `withheld requests: ${withheld} (matched a credential pattern, not sent)`
+// `--chatgpt-account` names a vault account (accounts.chatgpt.list[].id). An id the
+// vault does not hold stops the run here rather than surfacing as a judge error
+// on every call. The header shows the id and plan, never the email.
+let accountHeader = ''
+if (requestedAccount !== undefined) {
+  const accounts = await authVault.listAccounts(CHATGPT_PROVIDER_ID)
+  const found = pickChatgptAccount(accounts, null, requestedAccount)
+  if (!found)
+    fail(
+      `no ChatGPT vault account with id "${requestedAccount}" (vault accounts: ${accounts.map((a) => a.id).join(', ') || 'none'})`
+    )
+  accountHeader = `, ${accountNote(found)}`
+}
+// Eval-only: read the chosen (else active), unexpired credential without refresh or
+// vault writes. A forced retry cannot refresh either; a stale token becomes a
+// reported error.
+async function readOnlyChatgptToken(force: boolean): Promise<CodexInjectionToken | null> {
+  if (force) return null
+  const activeId =
+    requestedAccount === undefined ? await authVault.getActiveAccountId(CHATGPT_PROVIDER_ID) : null
+  const account = pickChatgptAccount(
+    await authVault.listAccounts(CHATGPT_PROVIDER_ID),
+    activeId,
+    requestedAccount
+  )
+  return account ? readOnlyTokenOf(account, Date.now()) : null
+}
 
-const judge = makeHttpJudgeTransport({
-  resolve: async () => {
-    const resolved = await resolveJudgeRoute(args.engine as JudgeEngine, args.model!, {
-      chatgptToken: readOnlyChatgptToken
+/**
+ * Where a judge call goes. `--route-url` hands in a hand-built `custom-chat`
+ * route; a dry run never resolves anything (no vault, no catalog): it routes to
+ * an unreachable `.invalid` host that the fake fetch below never contacts.
+ */
+const DRY_RUN_BASE_URL = 'https://dry-run.invalid/v1'
+function routeOverride(): ReturnType<typeof buildCustomRoute> | undefined {
+  if (routeUrl !== undefined)
+    return buildCustomRoute({
+      model: args.model!,
+      baseUrl: routeUrl,
+      key: routeKey,
+      headers: routeHeaders,
+      ...(routeHeadroom !== undefined ? { headroom: routeHeadroom } : {})
     })
-    // Eval-only knob: measure an OpenRouter judge with stage-2 reasoning off too.
-    if (args['judge-reasoning'] === 'off' && resolved.ok && resolved.route.kind === 'openrouter') {
-      const off = { reasoning: { enabled: false } }
-      return {
-        ...resolved,
-        route: {
-          ...resolved.route,
-          caps: { ...resolved.route.caps, reasoning: { fast: off, thinking: off } }
+  if (dryRun)
+    return buildCustomRoute({ model: args.model!, baseUrl: DRY_RUN_BASE_URL, key: 'dry-run' })
+  return undefined
+}
+
+const judge: JudgeTransport = guarded(
+  makeHttpJudgeTransport({
+    resolve: async () => {
+      const override = routeOverride()
+      if (override) return { ok: true, route: override }
+      const resolved = await resolveJudgeRoute(args.engine as JudgeEngine, args.model!, {
+        chatgptToken: readOnlyChatgptToken
+      })
+      // Eval-only knob: measure an OpenRouter judge with stage-2 reasoning off too.
+      if (
+        args['judge-reasoning'] === 'off' &&
+        resolved.ok &&
+        resolved.route.kind === 'openrouter'
+      ) {
+        const off = { reasoning: { enabled: false } }
+        return {
+          ...resolved,
+          route: {
+            ...resolved.route,
+            caps: { ...resolved.route.caps, reasoning: { fast: off, thinking: off } }
+          }
         }
       }
-    }
-    return resolved
-  },
-  userAgent: 'ClaudeUI-judge-eval'
-})
+      return resolved
+    },
+    userAgent: 'ClaudeUI-judge-eval'
+  })
+)
 const jobs = cases.flatMap((c) => Array.from({ length: runs }, () => c))
 
 console.log(
-  `judge-eval: ${cases.length} cases × ${runs} runs, model ${args.model} (${args.engine}), root ${root}${hasTimeOrder ? '' : ' [pre-ADR-091 transcript order]'}${args['cases-file'] ? `, cases ${args['cases-file']}` : ''}`
+  `judge-eval: ${cases.length} cases × ${dryRun ? 1 : runs} runs, model ${args.model} (${args.engine})${routeUrl !== undefined ? `, route ${routeOverride()!.label}` : ''}${accountHeader}${guardNote}, root ${root}${hasTimeOrder ? '' : ' [pre-ADR-091 transcript order]'}${args['cases-file'] ? `, cases ${args['cases-file']}` : ''}${dryRun ? ' [DRY RUN: sizes only, nothing is sent]' : ''}`
 )
+
+/**
+ * `--dry-run-sizes`: classify every case through the real HTTP transport (route
+ * body builder included) with a fetch that NEVER sends: it answers each request
+ * from memory. The fake reply `<block>no</block>` is no stage-1 severity grade, so
+ * `classify()` escalates, and it is a stage-2 allow — one pass therefore builds
+ * BOTH stages' requests (a `requiresFullReview` case skips stage 1). The size of
+ * a case is its largest request: system + user prompt characters, which is what
+ * a context window must hold (the response and reasoning budget come on top).
+ */
+async function dryRunSizes(): Promise<number> {
+  const fakeFetch = (async () =>
+    new Response(
+      'data: {"choices":[{"delta":{"content":"<block>no</block>"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } }
+    )) as unknown as typeof fetch
+  const rows = await pool(cases, concurrency, async (c) => {
+    const sizes: number[] = []
+    const dumped: string[] = []
+    const inner = makeHttpJudgeTransport({
+      resolve: async () => ({ ok: true as const, route: routeOverride()! }),
+      fetchImpl: fakeFetch,
+      userAgent: 'ClaudeUI-judge-eval'
+    })
+    // Behind the guard: it records the request as it would go out (masked), and never
+    // one the credential scan withheld.
+    const recording: JudgeTransport = (req) => {
+      sizes.push(req.system.length + req.user.length)
+      if (dumpFile !== undefined) dumped.push(requestDumpLine(c.id, req))
+      return inner(req)
+    }
+    let error: string | undefined
+    try {
+      const r = await runOnce(c, labels?.[c.id]?.actionMetaOverride, guarded(recording))
+      if (r.error) error = r.error
+    } catch (err) {
+      error = String(err)
+    }
+    return { id: c.id, title: c.title, sizes, dumped, chars: Math.max(0, ...sizes), error }
+  })
+  if (dumpFile !== undefined) {
+    // Case order, then request order: the pool finishes cases out of order.
+    const lines = rows.flatMap((row) => row.dumped)
+    mkdirSync(dirname(resolve(dumpFile)), { recursive: true })
+    writeFileSync(resolve(dumpFile), lines.map((line) => line + '\n').join(''))
+    console.log(`dumped ${lines.length} request(s) to ${dumpFile}`)
+  }
+  let errors = 0
+  for (const row of rows) {
+    if (row.error || row.sizes.length === 0) {
+      errors++
+      console.log(`ERROR ${row.id.padEnd(4)} ${row.error ?? 'no judge request was built'}`)
+      continue
+    }
+    console.log(
+      `${row.id.padEnd(5)} ${String(row.chars).padStart(8)} chars  ~${String(estimateTokens(row.chars)).padStart(6)} tok  (${row.sizes.length} request${row.sizes.length === 1 ? '' : 's'})  ${row.title}`
+    )
+  }
+  const sized = rows.filter((row) => !row.error && row.sizes.length > 0)
+  const summary = summarizeSizes(
+    sized.map((row) => row.chars),
+    [150_000, 190_000]
+  )
+  const biggest = sized.reduce((a, b) => (b.chars > a.chars ? b : a), sized[0])
+  console.log(
+    `\nsizes over ${summary.count} cases (system + user prompt, est. tokens = chars/4):` +
+      `\n  max ${summary.maxTokens} tok (${summary.maxChars} chars)${biggest ? `, case ${biggest.id}` : ''}` +
+      `\n  median ${summary.medianTokens} tok` +
+      `\n  over 150k tok: ${summary.over[150_000]}` +
+      `\n  over 190k tok: ${summary.over[190_000]}` +
+      (errors ? `\n  ${errors} case(s) built no request (see ERROR lines)` : '') +
+      (scanCredentials ? `\n  ${withheldLine()}` : '')
+  )
+  return errors > 0 ? 1 : 0
+}
+if (dryRun) process.exit(await dryRunSizes())
+
 const results = await pool(jobs, concurrency, async (c) => {
   try {
     return { id: c.id, r: await runOnce(c, labels?.[c.id]?.actionMetaOverride) }
@@ -538,6 +863,7 @@ console.log(
 )
 // Every run of this invocation whose stage-2 confirmation overturned a block.
 console.log(`overturned blocks: ${results.filter((x) => x.r.overturnedBlock).length}`)
+if (scanCredentials) console.log(withheldLine())
 {
   // Decision latency (all judge calls of one decision), for comparing judge models.
   const ms = results.map((x) => x.r.durationMs ?? 0).sort((a, b) => a - b)
