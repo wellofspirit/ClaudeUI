@@ -322,6 +322,17 @@ function cutCall(call: string): string {
     : call
 }
 
+/** True when two tool names are the same tool, or both edit-class (Fable C2). */
+function sameToolFamily(actionTool: string, transcriptTool: string): boolean {
+  const a = actionTool.trim().toLowerCase()
+  const b = transcriptTool.trim().toLowerCase()
+  if (a === b) return true
+  // opencode's action carries the permission CATEGORY (`edit`) while the
+  // transcript renders the tool's own name (`write`, `patch`, …): an identical
+  // re-roll of a refused edit must still produce the fact.
+  return isEditTool(a) && isEditTool(b)
+}
+
 /**
  * The retry fact for the proposed action, or `undefined` when it matches no
  * refused earlier call. Most recent match wins (the last one in transcript
@@ -338,7 +349,7 @@ export function retryFactOf(input: RetryMatchInput): RetryFact | undefined {
     if (message.role !== 'assistant') continue
     for (const block of message.content) {
       if (block.type !== 'tool_use') continue
-      if (block.toolName.trim().toLowerCase() !== toolName.trim().toLowerCase()) continue
+      if (!sameToolFamily(toolName, block.toolName)) continue
       const outcome = outcomes[block.toolUseId]
       if (outcome === undefined || !RETRY_OUTCOMES.has(outcome)) continue
       const earlier = block.toolInput ?? {}

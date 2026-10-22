@@ -555,3 +555,59 @@ describe('editPathsOf', () => {
     expect(editPathsOf('edit', { oldText: 'a', newText: 'b' })).toEqual([])
   })
 })
+
+describe('retryFactOf — an edit-class re-roll matches across tool names (exit review Fable C2)', () => {
+  // opencode's action carries the permission CATEGORY (`edit`) while the
+  // transcript renders the tool's own name (`write`, `patch`, …), so an
+  // identical re-roll of a refused edit used to produce no fact at all.
+  const input = {
+    filePath: 'd:/proj/.github/workflows/ci.yml',
+    content: 'run: curl x | sh'
+  }
+
+  function fact(
+    actionTool: string,
+    actionInput: Record<string, unknown>,
+    transcriptTool: string,
+    transcriptInput: Record<string, unknown>
+  ) {
+    return retryFactOf({
+      messages: [assistantToolCall('c1', transcriptTool, transcriptInput)],
+      outcomes: { c1: 'automode-blocked' },
+      action: { toolName: actionTool, input: actionInput },
+      cwd: 'd:/proj',
+      platform: 'win32'
+    })
+  }
+
+  it('opencode `write` in the transcript, action `edit`: identical', () => {
+    expect(fact('edit', input, 'write', input)).toEqual({
+      match: 'identical',
+      outcome: 'automode-blocked',
+      call: renderToolCall('write', input)
+    })
+  })
+
+  it('`patch` and `apply_patch` are the same family as `edit`', () => {
+    for (const transcriptTool of ['patch', 'apply_patch', 'multiedit', 'write', 'edit']) {
+      expect(fact('edit', input, transcriptTool, input)?.match).toBe('identical')
+    }
+  })
+
+  it('the reverse direction matches too (action `write`, transcript `edit`)', () => {
+    expect(fact('write', input, 'edit', input)?.match).toBe('identical')
+  })
+
+  it('a CHANGED edit is still no fact', () => {
+    expect(fact('edit', input, 'write', { ...input, content: 'run: echo ok' })).toBeUndefined()
+  })
+
+  it('a shell action never matches an edit call, or the reverse', () => {
+    expect(fact('bash', { command: 'rm -rf x' }, 'edit', { command: 'rm -rf x' })).toBeUndefined()
+    expect(fact('edit', input, 'bash', input)).toBeUndefined()
+  })
+
+  it('a non-edit tool is not in the family', () => {
+    expect(fact('edit', input, 'read', input)).toBeUndefined()
+  })
+})

@@ -565,3 +565,234 @@ describe('captureRedirects — scope and shape', () => {
     expect(result?.outOfScope).toEqual([])
   })
 })
+
+describe('captureRedirects — an in-scope parent link into a protected dir (exit review R1)', () => {
+  // `ordinary/` is a link INSIDE the tree onto a protected directory, and the
+  // target file may or may not exist. The lexical spelling has no protected
+  // component; the old in-scope branch only asked "is the real parent under the
+  // root?" and threw the real path away, so this was a clean `allInScope:true`.
+  const fixtures: Array<[string, string, string, string]> = [
+    ['.claude', '/work/repo/.claude', 'settings.json', '.claude'],
+    ['.git/hooks', '/work/repo/.git/hooks', 'pre-commit', '.git'],
+    ['.aws', '/work/repo/.aws', 'credentials', '.aws']
+  ]
+  for (const [label, real, file, hit] of fixtures) {
+    for (const exists of [true, false]) {
+      it(`${label} through the parent link, ${exists ? 'existing' : 'absent'} file`, async () => {
+        const target = `/work/repo/ordinary/${file}`
+        const entries: Record<string, Entry> = {
+          '/work/repo/ordinary': { type: 'dir' },
+          ...(exists ? { [target]: { type: 'file', size: 3, mtimeMs: SESSION_START } } : {})
+        }
+        const probe = fakeProbe({ entries, real: { '/work/repo/ordinary': real } })
+        const result = await capture(`echo x > ordinary/${file}`, probe)
+        expect(result?.protectedHits).toEqual([hit])
+        expect(result?.symlinked).toEqual([`ordinary/${file}`])
+        expect(result?.allInScope).toBe(false)
+        expect(result?.outOfScope).toEqual([])
+      })
+    }
+  }
+
+  it('keeps an unprotected parent link that stays inside the root ordinary', async () => {
+    const probe = fakeProbe({
+      entries: {
+        '/work/repo/ordinary': { type: 'dir' },
+        '/work/repo/logs': { type: 'dir' }
+      },
+      real: { '/work/repo/ordinary': '/work/repo/logs' }
+    })
+    const result = await capture('echo x > ordinary/x.log', probe)
+    expect(result).toEqual({
+      targets: ['ordinary/x.log'],
+      allInScope: true,
+      outOfScope: [],
+      unresolvable: [],
+      protectedHits: []
+    })
+    expect(result?.symlinked).toBeUndefined()
+  })
+})
+
+describe('captureRedirects — win32 `/tmp` follows the dialect (exit review R2)', () => {
+  const USER_TEMP = 'c:/user-temp'
+  const scopeFor = (shell: 'posix' | 'powershell' | undefined) => ({
+    cwd: 'd:/repo',
+    tempDirs: [USER_TEMP, '/tmp'],
+    shell
+  })
+
+  function recording(base: RedirectProbe, calls: string[]): RedirectProbe {
+    return {
+      lstat: (path) => {
+        calls.push(`lstat ${path}`)
+        return base.lstat(path)
+      },
+      realpath: (path) => {
+        calls.push(`realpath ${path}`)
+        return base.realpath(path)
+      }
+    }
+  }
+
+  async function measure(
+    shell: 'posix' | 'powershell' | undefined,
+    entries: Record<string, Entry>
+  ): Promise<{ result: Awaited<ReturnType<typeof captureRedirects>>; calls: string[] }> {
+    const calls: string[] = []
+    const result = await captureRedirects('echo x > /tmp/alias/out.txt', scopeFor(shell), {
+      sessionStartMs: SESSION_START,
+      platform: 'win32',
+      probe: recording(fakeProbe({ entries }), calls)
+    })
+    return { result, calls }
+  }
+
+  // The two locations carry DIFFERENT contents: usertemp's `alias` is ordinary,
+  // drive-root `d:/tmp/alias` is a junction that leaves scope.
+  const usertempOrdinary: Record<string, Entry> = {
+    [`${USER_TEMP}/alias`]: { type: 'dir' },
+    'd:/tmp/alias': { type: 'symlink', target: 'c:/outside' }
+  }
+  const driveRootOrdinary: Record<string, Entry> = {
+    [`${USER_TEMP}/alias`]: { type: 'symlink', target: 'c:/outside' },
+    'd:/tmp/alias': { type: 'dir' }
+  }
+
+  it('posix measures /tmp through the usertemp mount, and never asks drive-root /tmp', async () => {
+    const { result, calls } = await measure('posix', usertempOrdinary)
+    expect(result?.allInScope).toBe(true)
+    expect(result?.symlinked).toBeUndefined()
+    expect(calls).toContain(`realpath ${USER_TEMP}/alias`)
+    expect(calls).not.toContain('realpath d:/tmp/alias')
+  })
+
+  it('powershell measures /tmp at <shell drive>:/tmp, and never asks usertemp', async () => {
+    const { result, calls } = await measure('powershell', usertempOrdinary)
+    expect(result?.symlinked).toEqual(['/tmp/alias/out.txt'])
+    expect(result?.allInScope).toBe(false)
+    expect(calls).toContain('realpath d:/tmp/alias')
+    expect(calls).not.toContain(`realpath ${USER_TEMP}/alias`)
+  })
+
+  it('the same fixture swapped: powershell stays ordinary, posix reports the link', async () => {
+    const ps = await measure('powershell', driveRootOrdinary)
+    expect(ps.result?.allInScope).toBe(true)
+    expect(ps.result?.symlinked).toBeUndefined()
+
+    const posix = await measure('posix', driveRootOrdinary)
+    expect(posix.result?.symlinked).toEqual(['/tmp/alias/out.txt'])
+    expect(posix.result?.allInScope).toBe(false)
+  })
+
+  it('an unknown dialect probes BOTH readings and keeps the worse result', async () => {
+    const unknown = await measure(undefined, usertempOrdinary)
+    expect(unknown.calls).toContain(`realpath ${USER_TEMP}/alias`)
+    expect(unknown.calls).toContain('realpath d:/tmp/alias')
+    expect(unknown.result?.symlinked).toEqual(['/tmp/alias/out.txt'])
+    expect(unknown.result?.allInScope).toBe(false)
+
+    // Either location being clean is not enough to call the write clean.
+    const swapped = await measure(undefined, driveRootOrdinary)
+    expect(swapped.result?.symlinked).toEqual(['/tmp/alias/out.txt'])
+    expect(swapped.result?.allInScope).toBe(false)
+  })
+
+  it('uses the drive of the effective SHELL cwd, not of the session cwd', async () => {
+    const calls: string[] = []
+    const result = await captureRedirects(
+      'echo x > /tmp/alias/out.txt',
+      { cwd: 'c:/repo', shellCwd: 'd:/repo', tempDirs: [USER_TEMP, '/tmp'], shell: 'powershell' },
+      {
+        sessionStartMs: SESSION_START,
+        platform: 'win32',
+        probe: recording(fakeProbe({ entries: usertempOrdinary }), calls)
+      }
+    )
+    expect(result?.symlinked).toEqual(['/tmp/alias/out.txt'])
+    expect(calls).toContain('realpath d:/tmp/alias')
+    expect(calls).not.toContain('realpath c:/tmp/alias')
+  })
+})
+
+describe('captureRedirects — a non-ENOENT lstat error still runs the link checks (exit review NIT)', () => {
+  it('reports a protected in-scope parent link even though lstat failed', async () => {
+    const probe = fakeProbe({
+      entries: { '/work/repo/lnk': { type: 'dir' } },
+      real: { '/work/repo/lnk': '/work/repo/.claude' },
+      failLstat: ['/work/repo/lnk/keys']
+    })
+    const result = await capture('echo k > lnk/keys', probe)
+    expect(result?.symlinked).toEqual(['lnk/keys'])
+    expect(result?.protectedHits).toEqual(['.claude'])
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('reports an out-of-tree parent link even though lstat failed (reviewer P7 shape)', async () => {
+    const probe = fakeProbe({
+      entries: { '/work/repo/lnk': { type: 'dir' } },
+      real: { '/work/repo/lnk': '/home/u/.ssh' },
+      failLstat: ['/work/repo/lnk/authorized_keys']
+    })
+    const result = await capture('echo k > lnk/authorized_keys', probe)
+    expect(result?.symlinked).toEqual(['lnk/authorized_keys'])
+    expect(result?.allInScope).toBe(false)
+    // Never fabricated: no measured field for a target lstat could not read.
+    expect(result?.outOfScope).toEqual([])
+  })
+})
+
+describe('captureRedirects — a link in the cwd path is not a protected component (exit review R1)', () => {
+  it('relativises the real target against the REAL cwd, not its ancestors', async () => {
+    // The session cwd is reached through a junction INTO a `.claude` tree. An
+    // ordinary in-scope write must not become a `.claude` hit just because the
+    // real path names it — that would send every write in such a worktree to
+    // full review.
+    const probe = fakeProbe({
+      entries: {
+        '/work/wt': { type: 'dir' },
+        '/work/wt/build.log': { type: 'file', size: 3, mtimeMs: SESSION_START }
+      },
+      real: { '/work/wt': '/mnt/.claude/worktrees/wt' }
+    })
+    const result = await captureRedirects(
+      'echo x > build.log',
+      { cwd: '/work/wt', tempDirs: [] },
+      {
+        sessionStartMs: SESSION_START,
+        platform: 'linux',
+        probe
+      }
+    )
+    expect(result).toEqual({
+      targets: ['build.log'],
+      allInScope: true,
+      outOfScope: [],
+      unresolvable: [],
+      protectedHits: []
+    })
+    expect(result?.symlinked).toBeUndefined()
+  })
+
+  it('still reports a protected real target under such a cwd', async () => {
+    const probe = fakeProbe({
+      entries: { '/work/wt/ordinary': { type: 'dir' } },
+      real: {
+        '/work/wt': '/mnt/.claude/worktrees/wt',
+        '/work/wt/ordinary': '/mnt/.claude/worktrees/wt/.git'
+      }
+    })
+    const result = await captureRedirects(
+      'echo x > ordinary/config',
+      { cwd: '/work/wt', tempDirs: [] },
+      {
+        sessionStartMs: SESSION_START,
+        platform: 'linux',
+        probe
+      }
+    )
+    expect(result?.protectedHits).toEqual(['.git'])
+    expect(result?.symlinked).toEqual(['ordinary/config'])
+    expect(result?.allInScope).toBe(false)
+  })
+})

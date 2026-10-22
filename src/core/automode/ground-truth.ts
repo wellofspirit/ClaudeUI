@@ -352,7 +352,7 @@ export interface RedirectScope {
  * the empty arrays here are load-bearing: `"outOfScope":[]` says we looked.
  */
 export interface RedirectAnalysis {
-  /** Every file target, as written. Excludes fd-duplications and null sinks. */
+  /** Every file target, as written. Excludes fd-duplications and null/stream sinks. */
   targets: string[]
   /** True only when every target resolved INSIDE a scope root, none is protected
    *  and none is a symlink. */
@@ -493,9 +493,26 @@ const UNRESOLVABLE_CHARS = /[$`~*?[\]{}%]/
  *  a fabricated all-clear. */
 const NULL_SINKS: ReadonlySet<string> = new Set(['/dev/null', 'nul', '$null'])
 
-/** True when the as-written target names a null sink (case-insensitive). */
-function isNullSink(raw: string, platform: NodeJS.Platform): boolean {
-  return NULL_SINKS.has(toPosixish(raw, platform).toLowerCase())
+/**
+ * Stream pseudo-files: the same class of sink as `/dev/null` (exit review Fable
+ * C3). `echo msg > /dev/stderr` is the commonest script idiom there is, and
+ * MEASURING it is a new false-block path: on Linux `/dev/stderr` is a symlink to
+ * `/proc/self/fd/2` (so it reads as `symlinked`, which no exemption clears), on
+ * macOS it is a device (`exists:true`, "an existing file outside the working
+ * tree"). They write to the terminal or a file descriptor, never to a named
+ * file, so they are dropped from `targets` exactly like null sinks. The command's
+ * own real file redirect, if any, is still scanned.
+ */
+const STREAM_SINK_RE = /^\/(?:dev\/(?:stdout|stderr|tty|fd\/\d+)|proc\/self\/fd\/\d+)$/
+
+/** True when the as-written target names a null or stream sink. */
+function isSink(raw: string, platform: NodeJS.Platform): boolean {
+  const posix = toPosixish(raw, platform)
+  if (NULL_SINKS.has(posix.toLowerCase())) return true
+  if (STREAM_SINK_RE.test(posix)) return true
+  // Windows' console device, case-insensitively (`> CON`); only on win32, so a
+  // posix file literally named `con` keeps its fact.
+  return platform === 'win32' && posix.trim().toLowerCase() === 'con'
 }
 
 /** A command with more redirects than this cannot be summarised honestly in one
@@ -1833,6 +1850,12 @@ function hintBinding(
 }
 
 /**
+ * A loop keyword: a `cd` inside its body moves once per iteration, which we do
+ * not model, so a later relative target is unresolvable (C-A).
+ */
+const LOOP_WORD_RE = /(?:^|[\s;|&(])(?:for|foreach|while|until|select)(?=[\s($])/i
+
+/**
  * Constructs that can change a variable without a plain `NAME=` spelling — an
  * environment-drive path (`env:TEMP`, not `$env:TEMP`), declare-family and
  * variable cmdlets, current-scope code execution (`iex`, `eval`, `source`, a
@@ -1840,15 +1863,39 @@ function hintBinding(
  * only useful when the command visibly leaves the variable alone. (A child
  * shell — `bash -c`, a pipe into `sh` — cannot rebind this shell's variables,
  * and `$env:` writes from a child scope are caught as assignments.)
+ *
+ * Exit review Fable C1: the rebinding forms the round-6 list missed — a loop
+ * word rebinds its loop variable (`for TMPDIR in …`), an indexed assignment
+ * writes the scalar (`TMPDIR[0]=` IS `$TMPDIR`), and a PowerShell script run in
+ * this process (`.\x.ps1`, `& x.ps1`, `Import-Module`) can change `$env:` for
+ * the rest of the command. Taint is deliberately coarse: a hint is only a hint,
+ * and losing one costs an escalation at worst.
  */
-const HINT_TAINT_RE =
-  /(?<![$\w{])env:|(?:^|[\s;|&(])(?:unset|export|declare|typeset|readonly|local|read|mapfile|readarray|trap|alias|set-variable|sv|new-variable|nv|get-variable|gv|iex|invoke-expression|eval|source|\.)(?=[\s(]|$)|printf\s+-v|setenvironmentvariable|\[ref\]|scriptblock|invokescript/i
+const HINT_TAINT_RE = new RegExp(
+  [
+    String.raw`(?<![$\w{])env:`,
+    LOOP_WORD_RE.source,
+    String.raw`(?:^|[\s;|&(])(?:unset|export|declare|typeset|readonly|local|read|mapfile|readarray|trap|alias|set-variable|sv|new-variable|nv|get-variable|gv|iex|invoke-expression|eval|source|import-module|\.)(?=[\s(]|$)`,
+    String.raw`printf\s+-v`,
+    `setenvironmentvariable`,
+    String.raw`\[ref\]`,
+    `scriptblock`,
+    `invokescript`,
+    // `NAME[...]=` — an indexed assignment is the scalar a `$NAME` read sees.
+    String.raw`[A-Za-z_][A-Za-z0-9_]*\[[^\]]*\]\s*=(?!=)`,
+    // A PowerShell script file named anywhere: `.\x.ps1`, `& x.ps1`, `Import-Module x.psm1`.
+    String.raw`\.(?:ps1|psm1)\b`
+  ].join('|'),
+  'i'
+)
 
-/** How many times `name` is assigned in `command` (`=` or an op-assign, any `$`/`{`/`env:` spelling). */
+/** How many times `name` is assigned in `command` (`=`, indexed, or an op-assign, any `$`/`{`/`env:` spelling). */
 function assignmentCount(command: string, name: string, shell: RedirectShell): number {
   // `name` is an identifier (`[A-Za-z_][A-Za-z0-9_]*`): nothing to escape.
   const re = new RegExp(
-    String.raw`(?<![A-Za-z0-9_])\$?\{?(?:env:)?` + name + String.raw`\}?\s*(?:[-+*/%]|\?\?)?=(?!=)`,
+    String.raw`(?<![A-Za-z0-9_])\$?\{?(?:env:)?` +
+      name +
+      String.raw`\}?(?:\[[^\]]*\])?\s*(?:[-+*/%]|\?\?)?=(?!=)`,
     shell === 'powershell' ? 'gi' : 'g'
   )
   return [...command.matchAll(re)].length
@@ -1932,10 +1979,10 @@ function tempHintFor(
 }
 
 /**
- * A loop keyword: a `cd` inside its body moves once per iteration, which we do
- * not model, so a later relative target is unresolvable (C-A).
+ * A `cd` inside a loop body moves once per iteration, which we do not model, so
+ * a later relative target is unresolvable (C-A). {@link LOOP_WORD_RE} — also a
+ * hint-taint term (Fable C1) — is defined with the hint machinery above.
  */
-const LOOP_WORD_RE = /(?:^|[\s;|&(])(?:for|foreach|while|until|select)(?=[\s($])/i
 
 // ── Shell-state dataflow (rulings 4 and 13) ───────────────────────────────────
 
@@ -2531,7 +2578,7 @@ export function redirectTargetDetails(
 
   const details: RedirectTargetDetail[] = []
   for (const target of found) {
-    if (target.raw.length > 0 && isNullSink(target.raw, platform)) continue
+    if (target.raw.length > 0 && isSink(target.raw, platform)) continue
     const state = stateAt(states, target.pos) ?? initial
     details.push(
       ...resolveOneTarget(target, {

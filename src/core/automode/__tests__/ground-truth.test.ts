@@ -320,6 +320,28 @@ describe('analyzeRedirects', () => {
       // …but a real target alongside one is still measured.
       expect(posix('bun test > /dev/null 2> err.log')?.targets).toEqual(['err.log'])
     })
+
+    // Exit review Fable C3: stream pseudo-files are sinks too. Measuring them was
+    // a NEW false-block path (a Linux `/dev/stderr` is a symlink, a macOS one is a
+    // device: "an existing file outside the working tree").
+    it('drops stream sinks — `> /dev/stderr` is not a file overwrite', () => {
+      for (const sink of [
+        '/dev/stdout',
+        '/dev/stderr',
+        '/dev/tty',
+        '/dev/fd/2',
+        '/proc/self/fd/1'
+      ]) {
+        expect(posix(`echo msg > ${sink}`)).toBeNull()
+      }
+      expect(posix('echo msg > /dev/fd/99; echo x > err.log')?.targets).toEqual(['err.log'])
+      expect(win('echo msg > CON')).toBeNull()
+      expect(win('echo msg > con')).toBeNull()
+      // Case-insensitivity is a win32 device rule, not a posix file rule: a posix
+      // file literally named `con` keeps its fact (in scope here, so no row).
+      expect(posix('echo msg > con')?.targets).toEqual(['con'])
+      expect(posix('echo msg > con')?.allInScope).toBe(true)
+    })
   })
 
   describe('unresolvable targets', () => {
@@ -2860,6 +2882,68 @@ describe('ruling 18 hint guard — no hint where the command touches the variabl
     ).toEqual([{ target: '$env:TEMP/a.cs', path: 'c:/Users/dev/AppData/Local/Temp/a.cs' }])
     expect(sh('make > $TMPDIR/build.log 2>&1')?.tempVarTargets).toEqual([
       { target: '$TMPDIR/build.log', path: '/tmp/build.log' }
+    ])
+  })
+})
+
+describe('exit review Fable C1 — hint withheld on loop/array/script rebinding', () => {
+  const ps = (command: string) =>
+    analyzeRedirects(
+      command,
+      {
+        cwd: 'd:/proj',
+        tempDirs: ['c:/Users/dev/AppData/Local/Temp', '/tmp'],
+        tempVars: {
+          TEMP: 'C:\\Users\\dev\\AppData\\Local\\Temp',
+          TMP: 'C:\\Users\\dev\\AppData\\Local\\Temp'
+        },
+        shell: 'powershell'
+      },
+      'win32'
+    )
+  const sh = (command: string) =>
+    analyzeRedirects(
+      command,
+      { cwd: '/repo', tempDirs: ['/tmp'], tempVars: { TMPDIR: '/tmp' }, shell: 'posix' },
+      'linux'
+    )
+
+  // Every row is the reviewer's own input: the target stays unresolvable (the
+  // trusted signal) and the reassuring hint must be ABSENT.
+  const withheld: Array<[string, () => ReturnType<typeof analyzeRedirects>]> = [
+    ['bash for loop rebinding', () => sh('for TMPDIR in /out; do echo x > $TMPDIR/a; done')],
+    ['bash select loop rebinding', () => sh('select TMPDIR in /out; do echo x > $TMPDIR/a; done')],
+    [
+      'bash while loop rebinding',
+      () => sh('while read TMPDIR; do echo x > $TMPDIR/a; done < list')
+    ],
+    ['bash until loop rebinding', () => sh('until TMPDIR; do echo x > $TMPDIR/a; done')],
+    ['bash indexed assignment', () => sh('TMPDIR[0]=/out; echo x > $TMPDIR/a')],
+    ['bash loop rebinding a binding', () => sh('t=$TMPDIR; for t in /out; do echo x > $t/a; done')],
+    [
+      'PowerShell foreach rebinding a binding',
+      () => ps("$t = $env:TEMP; foreach ($t in 'd:/out') { 'x' > $t\\a }")
+    ],
+    ['PowerShell dot-sourced script', () => ps(".\\setup.ps1; 'x' > $env:TEMP\\a.dll")],
+    ['PowerShell invoked script', () => ps("& .\\setup.ps1; 'x' > $env:TEMP\\a.dll")],
+    ['PowerShell Import-Module', () => ps("Import-Module .\\m.psm1; 'x' > $env:TEMP\\a.dll")],
+    ['PowerShell dot-source with a space', () => ps(". .\\setup.ps1; 'x' > $env:TEMP\\a.dll")]
+  ]
+  for (const [name, run] of withheld) {
+    it(`withholds the hint: ${name}`, () => {
+      const r = run()
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable.length).toBeGreaterThan(0)
+      expect(r).not.toHaveProperty('tempVarTargets')
+    })
+  }
+
+  it('keeps the hint for a plain read and a single plain binding', () => {
+    expect(sh('echo x > $TMPDIR/a')?.tempVarTargets).toEqual([
+      { target: '$TMPDIR/a', path: '/tmp/a' }
+    ])
+    expect(sh('t=$TMPDIR; echo x > $t/a')?.tempVarTargets).toEqual([
+      { target: '$t/a', path: '/tmp/a' }
     ])
   })
 })

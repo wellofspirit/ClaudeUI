@@ -54,6 +54,7 @@ import {
   type EvalResult,
   type Expectation
 } from './match'
+import { fsFactsProbe, type FsFacts, type FsFactsCase } from './fs-facts'
 import {
   legacyReplayScope,
   replayRedirectScope,
@@ -188,36 +189,10 @@ function loadLabels(file: string): Record<string, EvalLabel> {
 }
 
 /**
- * One historical filesystem fact for a resolved redirect target. `sessionStartMs`
- * is the owning session object's construction time; `modifiedSinceSessionStart`
- * is `mtimeMs >= sessionStartMs`. `realpath` is optional (an extra beyond the
- * decided format): it lets an in-scope link-to-in-scope be classified by its
- * real path instead of `symlinked`; without it a `symlink: true` link is treated
- * as escaping (the conservative reading).
- */
-interface FsFactsPath {
-  exists: boolean
-  size?: number
-  mtimeMs?: number
-  symlink?: boolean
-  realpath?: string
-}
-interface FsFactsCase {
-  sessionStartMs: number
-  paths: Record<string, FsFactsPath>
-}
-type FsFacts = Record<string, FsFactsCase>
-
-/**
  * `--fs-facts`: `{ "<caseId>": { "sessionStartMs": n, "paths": { "<resolved
- * path exactly as redirectTargetDetails reports it>": { … } } } }`.
- *
- * `--fs-facts` exists because a replay runs on a DIFFERENT machine and years
- * later: answering `lstat` from the host fs would report every historical target
- * `exists:false`, a fabricated fact that clears the policy's presumption. The
- * probe below answers only from these facts; a path that is absent from them
- * throws a NON-ENOENT error, so the capture omits the field ("not measured")
- * rather than inventing absence.
+ * path exactly as redirectTargetDetails reports it>": { … } } } }`. The per-path
+ * fact shape is {@link FsFactsPath} in `./fs-facts`; an omitted `size`/`mtimeMs`
+ * there means "not measured", never zero (exit review Astra C1).
  */
 function loadFsFacts(file: string): FsFacts {
   const parsed = loadJson(file, 'fs facts file')
@@ -235,54 +210,6 @@ function loadFsFacts(file: string): FsFacts {
     facts[caseId] = entry as unknown as FsFactsCase
   }
   return facts
-}
-
-/** A `fs.Stats` stand-in built from facts (the only fields `captureRedirects` reads). */
-function statFromFacts(fact: FsFactsPath): {
-  isSymbolicLink(): boolean
-  isFile(): boolean
-  size: number
-  mtimeMs: number
-} {
-  return {
-    isSymbolicLink: () => fact.symlink === true,
-    isFile: () => fact.symlink !== true,
-    size: fact.size ?? 0,
-    mtimeMs: fact.mtimeMs ?? 0
-  }
-}
-
-function enoent(path: string): NodeJS.ErrnoException {
-  return Object.assign(new Error(`ENOENT: no such file or directory, lstat '${path}'`), {
-    code: 'ENOENT'
-  })
-}
-
-/** The fake probe: facts answer, absence throws a non-ENOENT "not measured" error. */
-function fsFactsProbe(facts: FsFactsCase): {
-  lstat(path: string): Promise<ReturnType<typeof statFromFacts>>
-  realpath(path: string): Promise<string>
-} {
-  const lookup = (path: string): FsFactsPath => {
-    const fact = facts.paths[path]
-    if (!fact) throw new Error(`no fs facts for ${path} (not measured)`)
-    if (!fact.exists) throw enoent(path)
-    return fact
-  }
-  return {
-    async lstat(path) {
-      return statFromFacts(lookup(path))
-    },
-    async realpath(path) {
-      const fact = lookup(path)
-      if (fact.symlink === true) {
-        if (fact.realpath === undefined)
-          throw new Error(`no realpath fact for ${path} (not measured)`)
-        return fact.realpath
-      }
-      return path
-    }
-  }
 }
 
 const root = resolve(args.root!)
