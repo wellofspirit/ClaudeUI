@@ -14,6 +14,8 @@ names change, offsets shift, string landmarks survive. **(I)** marks a claim rea
 off the code but not traced end to end; **(unverified)** marks text carried over
 from the 2.1.220 revision that was not re-checked.
 
+**2.1.308 bounded drift check (2026-10-22):** re-extracted stage-2 prompt and native `auto-mode defaults` rules are identical to 2.1.306. The new concat prompt spans characters 12,314,470–12,358,522; rendered rules contain 21 environment, 1 hard-deny, 72 soft-deny and 17 allow entries. This checks shipped text, not server-side rollout or classifier decisions; the architectural offsets below remain historical.
+
 Regenerate the verbatim stage-2 prompt, and render the shipped rules, with
 `scripts/extract-automode-prompts.mjs` (see §9.8).
 
