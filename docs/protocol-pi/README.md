@@ -1,6 +1,38 @@
 # pi wire protocol — verified integration notes
 
-Current tested release: **1.3.0** ([stable release](https://github.com/earendil-works/pi/releases/tag/v1.3.0)); floor = tested = **1.3.0**, ceiling **2.0.0** (ADR-082's next-major rule; owner, 2026-10-06). A version in [1.3.0, 2.0.0) other than 1.3.0 runs as _untested_; only **1.3.0** was measured. The dated 0.84.3 findings below are historical probes, not fresh verification of every behavior on 1.3.0. The prior Windows 0.87.1 run passed all 13 gated tests, including live approval, hosted tools, subagents, dispatch, fork and clone. It used an isolated `PI_CODING_AGENT_DIR`, an explicit `openai-codex/gpt-5.6-luna` model entry, and a credential command that supplied the active vault access token over a pipe without copying tokens to disk or refreshing them. The credential gates honor `PI_CODING_AGENT_DIR`. Pi 0.87.1 persists system messages; fork/clone tests compare the complete expected transcript rather than assuming only user/assistant messages contribute to `messageCount`.
+Current tested release: **1.4.0** ([stable release](https://github.com/earendil-works/pi/releases/tag/v1.4.0)); floor = tested = **1.4.0**, ceiling **2.0.0** (ADR-082's next-major rule; owner, 2026-10-06). A version in [1.4.0, 2.0.0) other than 1.4.0 runs as _untested_; only **1.4.0** was measured. The dated 0.84.3 findings below are historical probes, not fresh verification of every behavior on 1.4.0. The prior Windows 0.87.1 run passed all 13 gated tests, including live approval, hosted tools, subagents, dispatch, fork and clone. It used an isolated `PI_CODING_AGENT_DIR`, an explicit `openai-codex/gpt-5.6-luna` model entry, and a credential command that supplied the active vault access token over a pipe without copying tokens to disk or refreshing them. The credential gates honor `PI_CODING_AGENT_DIR`. Pi 0.87.1 persists system messages; fork/clone tests compare the complete expected transcript rather than assuming only user/assistant messages contribute to `messageCount`.
+
+## 1.3.0 → 1.4.0 compatibility assessment (2026-10-22)
+
+- **RPC contract:** RPC commands/events, `docs/rpc.md` and CLI arguments are unchanged.
+  No bridge protocol adaptation was required.
+- **Resumed tools:** real RPC tests cover older transcripts with and without compaction:
+  newly registered bridge tools activate, recorded removals stay inactive, and plan
+  entry/exit toggles `exit_plan` while restoring the prior loadout. The compaction
+  case fails on 1.3.0 because it reactivates a removed tool. The MCP suite resumes
+  a recorded MCP selection before the bridge registers its server, then verifies
+  declaration, execution and permission denial through the real bridge.
+- **Failure classification:** the host mirror now uses bounded HTTP retry statuses,
+  the new upstream/HTTP2/token-fetch/disconnected-stream errors, and anchored HTTP
+  413 overflow matching (including hyphenated provider names). Business workspace
+  admin limits remain resumable under ADR-089; this does not enable upstream
+  automatic retries or alter sign-in routing. Classifier guards failed before
+  the port and pass afterward.
+- **Compaction:** `compaction.reserveTokens` now controls the trigger, so its helper
+  describes when compaction starts. Summary output uses the model output limit.
+  `branchSummary.reserveTokens` remains relevant and unchanged.
+- **Catalog/API audit:** discovery and unavailable-model fallback remain host-owned;
+  no static catalog was added for removed upstream models. ClaudeUI does not consume
+  the changed `telemetry`, attribution-header hook or `resolveTranscriptTools` APIs.
+- **Windows x64 verification:** all 22 gated tests pass across nine files with no skips,
+  using an isolated agent directory
+  and live entry-level `openai-codex/gpt-5.6-luna` calls, including approval, hosted
+  tools, dispatch, subagents and fork/clone. The credential is supplied from the app
+  vault only in child-process memory: isolated `auth.json` and provider `apiKey`
+  reference an environment variable. Real credential file hashes and mtimes remain
+  unchanged; no refresh or secret file copy occurs. All six platform archives were
+  downloaded and checked against the release's `SHA256SUMS`; only Windows x64 was
+  executed. The separate real-app verifier covers UI/session behavior.
 
 ## 1.1.0 → 1.3.0 compatibility assessment (2026-10-21)
 

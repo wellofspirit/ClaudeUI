@@ -262,9 +262,41 @@ describe.skipIf(!LAUNCH)('pi + the shared MCP catalog (credential-free, ADR-096)
     const bridge = await bridgeHost.start()
     const bridgePath = writeBridgeExtension()
 
+    // Resume a transcript that already selected the MCP tool. It is not
+    // registered until the bridge fetches the catalog at session_start:
+    // pi 1.4.0 must keep that selection pending until registration completes.
+    const sessionPath = join(dir, 'resume.jsonl')
+    const timestamp = new Date().toISOString()
+    writeFileSync(
+      sessionPath,
+      [
+        { type: 'session', version: 3, id: '22222222-2222-4222-8222-222222222222', timestamp, cwd },
+        {
+          type: 'message',
+          id: 'loadout1',
+          parentId: null,
+          timestamp,
+          message: {
+            role: 'system',
+            content: '',
+            timestamp: Date.now(),
+            toolsAdded: [
+              {
+                name: ECHO_TOOL,
+                description: 'Echo',
+                parameters: { type: 'object', properties: {} }
+              }
+            ]
+          }
+        }
+      ]
+        .map((entry) => JSON.stringify(entry))
+        .join('\n') + '\n'
+    )
+
     client = new PiRpcClient(LAUNCH!, {
       cwd,
-      args: ['--mode', 'rpc', '-e', bridgePath, '--session-dir', join(dir, 'sessions')],
+      args: ['--mode', 'rpc', '-e', bridgePath, '--session', sessionPath],
       env: {
         PI_CODING_AGENT_DIR: agentDir,
         PI_OFFLINE: '1',
@@ -291,9 +323,19 @@ describe.skipIf(!LAUNCH)('pi + the shared MCP catalog (credential-free, ADR-096)
   }, 60_000)
 
   afterAll(async () => {
+    // Wait for pi's shutdown (including MCP children) before removing its cwd.
+    // A fixed 500ms delay raced Windows file handles under concurrent gates.
+    const exited = new Promise<void>((resolve) => {
+      if (!client?.pid) return resolve()
+      const timer = setTimeout(resolve, 5000)
+      client.onExit(() => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
     client?.dispose()
     bridgeHost?.dispose()
-    await new Promise((resolve) => setTimeout(resolve, 500))
+    await exited
     await new Promise<void>((resolve) => (provider ? provider.close(() => resolve()) : resolve()))
     if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   })
