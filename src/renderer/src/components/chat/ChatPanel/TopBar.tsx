@@ -1200,7 +1200,13 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
           <WindowControls />
         </div>
       </div>
-      <SkillsDialog open={skillsOpen} onClose={() => setSkillsOpen(false)} cwd={cwd} />
+      <SkillsDialog
+        open={skillsOpen}
+        onClose={() => setSkillsOpen(false)}
+        cwd={cwd}
+        sessionId={sdkSessionId}
+        engineId={engineId}
+      />
       <McpDialog
         open={mcpOpen}
         onClose={() => setMcpOpen(false)}

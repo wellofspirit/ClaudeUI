@@ -443,7 +443,8 @@ const api: ClaudeAPI = {
   loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
   saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
   scanCustomCommands: (cwd: string) => ipcRenderer.invoke('config:scan-custom-commands', cwd),
-  loadSkillDetails: (cwd: string) => ipcRenderer.invoke('config:load-skill-details', cwd),
+  loadSkillDetails: (cwd: string, sessionId?: string) =>
+    ipcRenderer.invoke('config:load-skill-details', cwd, sessionId),
 
   // Account usage (5hr / 7-day rate limits)
   fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),

@@ -27,6 +27,7 @@
  * a file, never a log line. `configIdentity` is a one-way digest, safe to log.
  */
 import { createHash } from 'node:crypto'
+import type { ClaudeSkillCatalog } from '../skills/claude-skills'
 import type {
   Config_AgentEncoded,
   Config_InfoEncoded,
@@ -46,6 +47,9 @@ export type AgentPermissionOverlay = Readonly<Record<string, Permission_Ruleset>
 
 /** Everything that decides which server a cwd gets (see `configIdentity`). */
 export interface OpencodeConfigInput {
+  /** Changes the server identity when the selected Claude skills change. */
+  readonly skillRevision?: string
+  readonly skillCatalog?: ClaudeSkillCatalog
   /** Claude MCP servers bridged for the cwd (`collectClaudeMcpForOpencode`). */
   readonly bridgedMcp?: Readonly<Record<string, OpencodeMcpEntry>>
   /** Absolute path of the `claudeui-xeng` plugin directory, or null when not found. */
@@ -109,7 +113,11 @@ export function buildOpencodeConfig(
   for (const [name, permissions] of overlay) agents[name] = { permissions }
   return {
     mcp: { servers },
-    ...(input.pluginDir ? { plugins: [input.pluginDir] } : {}),
+    ...(input.pluginDir
+      ? {
+          plugins: ['-opencode.config.compatibility', '-opencode.config.skill', input.pluginDir]
+        }
+      : {}),
     ...(Object.keys(agents).length > 0 ? { agents } : {})
   }
 }
@@ -143,6 +151,7 @@ function stableJson(value: unknown): string {
  */
 export function configIdentity(input: OpencodeConfigInput): string {
   const canonical = stableJson({
+    skillRevision: input.skillRevision ?? '',
     bridgedMcp: input.bridgedMcp ?? {},
     pluginDir: input.pluginDir ?? null,
     agentPermissions: Object.fromEntries(

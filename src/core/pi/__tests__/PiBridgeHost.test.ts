@@ -49,6 +49,20 @@ describe('PiBridgeHost', () => {
     host = null
   })
 
+  it('serves only the selected skill snapshot behind the bridge bearer', async () => {
+    const selected = [
+      { name: 'review', path: '/project/.claude/skills/review/SKILL.md', content: 'private body' }
+    ]
+    host = new PiBridgeHost(async () => ({ behavior: 'allow' }), undefined, { skills: selected })
+    const { url, token } = await host.start()
+    expect((await fetch(`${url}/skills`, { method: 'POST' })).status).toBe(401)
+    const res = await fetch(`${url}/skills`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` }
+    })
+    expect(await res.json()).toEqual({ skills: selected, sourceRoots: [] })
+  })
+
   it('starts on 127.0.0.1 with a fresh token and round-trips an allow decision', async () => {
     host = new PiBridgeHost(async () => ({ behavior: 'allow' }))
     const { url, token } = await host.start()

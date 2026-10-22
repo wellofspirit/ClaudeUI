@@ -143,9 +143,65 @@ export async function tightenToConfigured(ctx, event) {
   event.effect = stricter(event.effect, verdict)
 }
 
+/** The plugin instance belongs to one OpenCode location, even on a pooled server. */
+export async function selectedClaudeSkills(directory, env = process.env) {
+  const url = env.CLAUDEUI_OPENCODE_SKILLS_URL
+  const token = env.CLAUDEUI_OPENCODE_SKILLS_TOKEN
+  if (!url || !token || !directory) return []
+  const response = await fetch(url + '?directory=' + encodeURIComponent(directory), {
+    headers: { authorization: 'Bearer ' + token }
+  })
+  if (!response.ok) throw new Error('ClaudeUI skill catalog unavailable')
+  const body = await response.json()
+  return {
+    skills: Array.isArray(body.skills) ? body.skills : [],
+    sourceRoots: Array.isArray(body.sourceRoots) ? body.sourceRoots : []
+  }
+}
+
+/** Replace only selected names; OpenCode's unrelated native skills remain. */
+export function overlayClaudeSkills(editor, catalog) {
+  const skills = Array.isArray(catalog) ? catalog : catalog.skills
+  const roots = Array.isArray(catalog) ? [] : catalog.sourceRoots || []
+  const normalized = (value) => {
+    const path = String(value || '')
+      .replaceAll('\\', '/')
+      .replace(/\/+$/, '')
+    return process.platform === 'win32' ? path.toLowerCase() : path
+  }
+  const sourceRoots = roots.map(normalized)
+  const selected = new Map(skills.map((skill) => [skill.name, skill]))
+  const aliases = new Set(skills.flatMap((skill) => skill.aliases || []))
+  const paths = new Set(skills.map((skill) => skill.path))
+  for (const native of editor.list()) {
+    const nativePath = normalized(native.path)
+    if (
+      selected.has(native.name) ||
+      selected.has(native.id) ||
+      aliases.has(native.name) ||
+      aliases.has(native.id) ||
+      paths.has(native.path) ||
+      sourceRoots.some((root) => nativePath === root || nativePath.startsWith(root + '/'))
+    )
+      editor.remove(native.id)
+  }
+  for (const skill of selected.values()) {
+    editor.add({
+      id: skill.name,
+      name: skill.name,
+      description: skill.description || '',
+      path: skill.path,
+      content: skill.content,
+      autoinvoke: !!skill.modelInvocable
+    })
+  }
+}
+
 export default {
   id: 'claudeui-xeng',
   setup: async (ctx) => {
+    const catalog = await selectedClaudeSkills(ctx.location.directory)
+    await ctx.skill.transform((editor) => overlayClaudeSkills(editor, catalog))
     await ctx.tool.hook('execute.before', async (event) => {
       if (!event || event.tool !== DISPATCH_TOOL) return
       const input = event.input && typeof event.input === 'object' ? event.input : {}

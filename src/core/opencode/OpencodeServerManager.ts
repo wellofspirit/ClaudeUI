@@ -7,6 +7,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { getAppPath } from '../host'
 import type { McpHttpHost } from './mcp-http-host'
 import { startMcpHttpHost } from './mcp-http-host'
+import { resolveClaudeSkills, type ClaudeSkillCatalog } from '../skills/claude-skills'
 import { createOpencodeHostedToolsServer } from './opencode-hosted-tools'
 import type {
   CallerRootResolver,
@@ -95,6 +96,8 @@ export class OpencodePermissionGuardError extends Error {
 
 /** Connection details handed back to callers (and to the client). */
 export interface ServerConnection {
+  /** The exact skill snapshot installed by this server's location plugin. */
+  skillCatalog?: ClaudeSkillCatalog
   baseUrl: string
   password: string
   /** Pre-computed Authorization header value for HTTP Basic auth */
@@ -118,6 +121,7 @@ export interface ServerConnection {
 }
 
 interface ServerHandle {
+  skillCatalogs: Map<string, ClaudeSkillCatalog>
   /** `configIdentity` of what this server was injected with. */
   key: string
   /** The idle end armed by a lingering last release; cleared by the next acquire. */
@@ -335,7 +339,10 @@ export interface OpencodeServerManagerOptions {
    */
   locateBinaryFn?: () => string | HarnessLaunch
   /** Override the MCP host starter (tests avoid binding real ports). */
-  startMcpHostFn?: (createServer: () => McpServer) => Promise<McpHttpHost>
+  startMcpHostFn?: (
+    createServer: () => McpServer,
+    options?: { skills?: (directory: string) => ClaudeSkillCatalog }
+  ) => Promise<McpHttpHost>
   /**
    * What a cwd's server is injected with. Defaults to the Claude MCP bridge,
    * the located plugin and the agent-permission provider.
@@ -410,7 +417,10 @@ export class OpencodeServerManager {
   private disposed = false
   private readonly spawnFn: SpawnServerFn
   private readonly locateBinaryFn: () => string | HarnessLaunch
-  private readonly startMcpHostFn: (createServer: () => McpServer) => Promise<McpHttpHost>
+  private readonly startMcpHostFn: (
+    createServer: () => McpServer,
+    options?: { skills?: (directory: string) => ClaudeSkillCatalog }
+  ) => Promise<McpHttpHost>
   private readonly configInputFn: (cwd: string) => OpencodeConfigInput
   private readonly waitReadyFn: WaitReadyFn
   private readonly waitGuardFn: WaitGuardFn
@@ -499,8 +509,11 @@ export class OpencodeServerManager {
   private defaultConfigInput(cwd: string): OpencodeConfigInput {
     const bridgedMcp = collectClaudeMcpForOpencode(cwd)
     const mcpServers = Object.keys(bridgedMcp)
+    const skillCatalog = resolveClaudeSkills(cwd)
     return {
       bridgedMcp,
+      skillRevision: skillCatalog.revision,
+      skillCatalog,
       pluginDir: locatePluginDir(),
       agentPermissions: this.agentPermissionsFn(cwd, mcpServers),
       // Only the shim sees the servers the user configured natively (opencode.json), so a
@@ -660,27 +673,42 @@ export class OpencodeServerManager {
       }
       return undefined
     }
-    const mcpHost = await this.startMcpHostFn(() =>
-      createOpencodeHostedToolsServer(resolveCwd, {
-        lookupCallerSession: (sessionId) => this.callerSessionLookup(sessionId),
-        resolveCallerRoot,
-        dispatch: this.dispatchAgentFn && ((req, ctx) => this.dispatchAgentFn!(req, ctx)),
-        handBack: this.handBackFn && ((id, report, callId) => this.handBackFn!(id, report, callId)),
-        // The session tools (slice 2), when the host wired them (read per MCP session).
-        ...(sessionToolsAvailable()
-          ? {
-              sessionTools: { run: runSessionTool },
-              ...(this.xAgentCallerFn
-                ? { xAgentCaller: (id: string) => this.xAgentCallerFn!(id) }
-                : {})
+    const skillCatalogs = new Map<string, ClaudeSkillCatalog>()
+    const mcpHost = await this.startMcpHostFn(
+      () =>
+        createOpencodeHostedToolsServer(resolveCwd, {
+          lookupCallerSession: (sessionId) => this.callerSessionLookup(sessionId),
+          resolveCallerRoot,
+          dispatch: this.dispatchAgentFn && ((req, ctx) => this.dispatchAgentFn!(req, ctx)),
+          handBack:
+            this.handBackFn && ((id, report, callId) => this.handBackFn!(id, report, callId)),
+          // The session tools (slice 2), when the host wired them (read per MCP session).
+          ...(sessionToolsAvailable()
+            ? {
+                sessionTools: { run: runSessionTool },
+                ...(this.xAgentCallerFn
+                  ? { xAgentCaller: (id: string) => this.xAgentCallerFn!(id) }
+                  : {})
+              }
+            : {}),
+          onIdentityMismatch: (identity) =>
+            logger.warn(
+              'OpencodeServerManager',
+              `hosted tool call: _meta session ${identity.sessionId} differs from the plugin stamp — using _meta, no call id`
+            )
+        }),
+      {
+        skills: (() => {
+          return (directory: string): ClaudeSkillCatalog => {
+            let catalog = skillCatalogs.get(directory)
+            if (!catalog) {
+              catalog = resolveClaudeSkills(directory)
+              skillCatalogs.set(directory, catalog)
             }
-          : {}),
-        onIdentityMismatch: (identity) =>
-          logger.warn(
-            'OpencodeServerManager',
-            `hosted tool call: _meta session ${identity.sessionId} differs from the plugin stamp — using _meta, no call id`
-          )
-      })
+            return catalog
+          }
+        })()
+      }
     )
 
     let result: SpawnResult
@@ -692,7 +720,8 @@ export class OpencodeServerManager {
         return this.spawnFn(this.getLaunch(), {
           cwd: this.serverCwd,
           password,
-          configContent: buildOpencodeConfigContent(input, mcpHost)
+          configContent: buildOpencodeConfigContent(input, mcpHost),
+          skillHost: { port: mcpHost.port, token: mcpHost.token }
         })
       })
       this.startTurn = turn.catch(() => {})
@@ -711,6 +740,7 @@ export class OpencodeServerManager {
       startedAt: Date.now(),
       process: result.process,
       mcpHost,
+      skillCatalogs,
       pluginExpected: !!input.pluginDir,
       refCount: 0,
       cwdRefs: new Map(),
@@ -908,6 +938,7 @@ export class OpencodeServerManager {
       password: handle.password,
       authHeader: handle.authHeader,
       directory,
+      skillCatalog: handle.skillCatalogs.get(directory) ?? resolveClaudeSkills(directory),
       startedAt: handle.startedAt,
       hostedTools
     }
@@ -945,6 +976,8 @@ export class OpencodeServerManager {
     const input = this.configInputFn(directory)
     const key = configIdentity(input)
     const handle = await this.resolveHandle(key, input)
+    if (input.skillCatalog && !handle.skillCatalogs.has(directory))
+      handle.skillCatalogs.set(directory, input.skillCatalog)
     return this.leaseOn(handle, directory, options)
   }
 

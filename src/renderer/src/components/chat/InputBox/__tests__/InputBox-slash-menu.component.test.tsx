@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, act, fireEvent, cleanup } from '@testing-library/react'
 import { createElement } from 'react'
 import { useSessionStore } from '../../../../stores/session-store'
+import type { EngineId } from '../../../../../../shared/types'
 import { InputBox } from '../InputBox'
 
 vi.mock('../../../../hooks/useIsMobile', () => ({ useIsMobile: () => false }))
@@ -27,6 +28,24 @@ let app: Awaited<ReturnType<typeof import('@test/helpers/boot-test-app').bootTes
 /** Names of the rows the menu actually painted, in order. */
 function renderedRows(): string[] {
   return screen.queryAllByTestId('SlashCommandMenu.item').map((el) => el.getAttribute('data-id')!)
+}
+
+function setEngine(engineId: EngineId, started: boolean, commands: string[] = []): void {
+  useSessionStore.setState((state) => ({
+    sessions: {
+      ...state.sessions,
+      [ROUTE]: {
+        ...state.sessions[ROUTE],
+        selectedEngineId: engineId,
+        slashCommands: commands.map((name) => ({ name })),
+        status: {
+          ...state.sessions[ROUTE].status,
+          sessionId: started ? 'native-thread' : null,
+          capabilities: { ...state.sessions[ROUTE].status.capabilities, slashCommands: true }
+        }
+      }
+    }
+  }))
 }
 
 async function typeSlash(): Promise<void> {
@@ -66,6 +85,136 @@ afterEach(() => {
 })
 
 describe('InputBox slash menu — merged list is what renders', () => {
+  it('keeps Claude native commands and its filesystem fallback scoped while live', async () => {
+    setEngine('claude', true, ['/help'])
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: { ...state.sessions[ROUTE], sdkActive: true }
+      },
+      slashCommands: [{ name: '/stale-global' }]
+    }))
+    await act(async () => {
+      render(createElement(InputBox))
+    })
+    await typeSlash()
+    expect(renderedRows()).toEqual(['/help', '/delegate'])
+    await act(async () => {
+      useSessionStore.setState({ slashCommands: [{ name: '/inactive-pi' }] })
+    })
+    expect(renderedRows()).toEqual(['/help', '/delegate'])
+  })
+
+  it.each(['pi', 'opencode'] as const)(
+    '%s uses only delivered commands after start, excluding scanned skills',
+    async (engineId) => {
+      setEngine(engineId, true, ['/native', '/allowed'])
+      useSessionStore.setState({ slashCommands: [{ name: '/stale-global' }] })
+      await act(async () => {
+        render(createElement(InputBox))
+      })
+      await typeSlash()
+      expect(useSessionStore.getState().customCommands).toEqual([{ name: '/delegate' }])
+      expect(renderedRows()).toEqual(['/native', '/allowed'])
+    }
+  )
+
+  it.each(['codex', 'pi', 'opencode'] as const)(
+    '%s previews only invocable scoped skills, then uses delivered commands',
+    async (engineId) => {
+      setEngine(engineId, false)
+      const loads: string[] = []
+      app.bridge.ipcMain.handle('config:load-skill-details', async (_event, cwd: string) => {
+        loads.push(cwd)
+        return [
+          { name: 'allowed', description: 'Allowed', userInvocable: true },
+          { name: 'model-only', description: 'Model only', userInvocable: false },
+          { name: 'legacy', description: 'Missing flag' }
+        ]
+      })
+      await act(async () => {
+        render(createElement(InputBox))
+      })
+      await typeSlash()
+      expect(loads).toEqual(['/test/cwd'])
+      expect(renderedRows()).toEqual(['/allowed'])
+      await act(async () => {
+        setEngine(engineId, true, ['/native'])
+      })
+      expect(renderedRows()).toEqual(['/native'])
+    }
+  )
+
+  it.each([
+    ['/test/cwd', 'same cwd'],
+    ['/other/cwd', 'different projects']
+  ])('keeps two %s sessions scoped when an inactive engine reports commands', async (secondCwd) => {
+    setEngine('pi', true, ['/pi-skill'])
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        other: {
+          ...state.sessions[ROUTE],
+          cwd: secondCwd,
+          selectedEngineId: 'opencode',
+          slashCommands: [{ name: '/opencode-skill' }]
+        }
+      },
+      slashCommands: [{ name: '/cached-claude-command' }]
+    }))
+    await act(async () => {
+      render(createElement(InputBox))
+    })
+    await typeSlash()
+    expect(renderedRows()).toEqual(['/pi-skill'])
+    await act(async () => {
+      useSessionStore.setState({ activeSessionId: 'other' })
+    })
+    expect(renderedRows()).toEqual(['/opencode-skill'])
+    await act(async () => {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: { ...state.sessions[ROUTE], slashCommands: [{ name: '/late-pi' }] }
+        },
+        slashCommands: [{ name: '/late-pi' }]
+      }))
+    })
+    expect(renderedRows()).toEqual(['/opencode-skill'])
+    await act(async () => {
+      useSessionStore.setState({ activeSessionId: ROUTE })
+    })
+    expect(renderedRows()).toEqual(['/late-pi'])
+  })
+
+  it('drops a stale pre-start skill preview after the cwd changes', async () => {
+    setEngine('codex', false)
+    let resolveOld!: (skills: Array<{ name: string; userInvocable: boolean }>) => void
+    app.bridge.ipcMain.handle('config:load-skill-details', async (_event, cwd: string) =>
+      cwd === '/test/cwd'
+        ? new Promise((resolve) => {
+            resolveOld = resolve
+          })
+        : [{ name: 'new-skill', userInvocable: true }]
+    )
+    await act(async () => {
+      render(createElement(InputBox))
+    })
+    await typeSlash()
+    await act(async () => {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: { ...state.sessions[ROUTE], cwd: '/other/cwd' }
+        }
+      }))
+    })
+    await act(async () => {
+      resolveOld([{ name: 'old-skill', userInvocable: true }])
+    })
+    expect(renderedRows()).toEqual(['/new-skill'])
+  })
+
   it('renders both the engine command and the filesystem-scanned skill', async () => {
     await act(async () => {
       render(createElement(InputBox))

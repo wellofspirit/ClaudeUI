@@ -310,7 +310,11 @@ describe('OpencodeServerManager (2.x) — ref-counting', () => {
     const cfg = JSON.parse(calls[0].configContent)
     expect(cfg.mcp.servers.claudeui.url).toBe(`http://127.0.0.1:${hosts[0].port}/mcp`)
     expect(cfg.mcp.servers.claudeui.headers.Authorization).toBe(`Bearer ${hosts[0].token}`)
-    expect(cfg.plugins).toEqual(['/res/claudeui-xeng'])
+    expect(cfg.plugins).toEqual([
+      '-opencode.config.compatibility',
+      '-opencode.config.skill',
+      '/res/claudeui-xeng'
+    ])
   })
 
   it('the MCP host builds a fresh claudeui McpServer per session', async () => {

@@ -23,6 +23,35 @@ Codex is the **fourth engine**: registered in `register-engines.ts`, in `EngineI
 - **Cross-engine dispatch** (ADR-033) — a hosted `dispatch_agent` tool lets a session on any engine delegate to a headless target on another, with subtask-style TaskCard streaming, forwarded approvals, cost cap, and usage attributed to the dispatching session. pi participates both directions (ADR-035): as a source via a `registerTool` dispatch tool, as a target via a headless `PiRpcClient` + per-target `PiBridgeHost` (recursion structurally impossible — a target's child never gets the dispatch tool). An opencode target (2.x, ADR-097 S9) is a session on its own exact lease with the shared per-SERVER feed, driven by an inbox prompt and settled by its own S4 mapper; asks walk the session's host pre-check, then ClaudeUI's judge or a card. As a source, opencode names the caller in `_meta["ai.opencode/sessionID"]`; a subagent child's call is resolved through `parentID` to the chat it descends from. Since ADR-105 a target is an X-Agent: a ledger row in operational.db that outlives its parent, runs in the background by default, reports through `hand_back` and messages its parent through `session_message`.
 - **Tool rendering** — engine tool names map to a neutral `ToolKind` taxonomy (`shared/tool-kinds.ts`); kind bodies under `renderer/.../tool-registry/kinds/` consume an engine-neutral `ToolView`. The per-engine `kindOf` switches in `ClaudeEngineToolMap.ts` / `OpencodeEngineToolMap.ts` / `PiEngineToolMap.ts` / `CodexEngineToolMap.ts` are the canonical mapping tables.
 
+## Shared skills
+
+ClaudeUI uses Claude Code's skill sources for app-launched sessions on all four engines:
+personal `~/.claude/skills` (or `CLAUDE_CONFIG_DIR/skills`), project `.claude/skills`,
+and enabled plugins applicable to the project. Personal skills win duplicate names;
+among project ancestors, the nearest directory wins. Discovery stops at the repository
+boundary, follows linked skill directories, and preserves their supporting-file paths.
+A worktree without its own skills directory can use its main checkout's skills.
+
+The common resolver in `src/core/skills/claude-skills.ts` selects the source snapshot.
+Claude keeps its native execution. Pi and OpenCode receive the selected skills through
+their extension APIs; Codex receives a catalog in each thread's instructions. Explicit
+invocation in the other engines expands the selected body and arguments before sending
+the prompt. This does not modify standalone harness configuration or copy skill sources.
+New, restarted, or resumed sessions pick up source changes; existing sessions keep their
+snapshot. The Skills dialog requests the selected session's catalog.
+
+App-managed OpenCode disables its native compatibility and configured skill-source
+loaders so Claude sources remain authoritative; built-in skills and native policy
+checks remain active. Separate `.opencode/skills` and `.agents/skills` sources are
+not loaded by these app sessions.
+
+Instruction text and resource files are shared; Claude execution settings are not
+translated. For example, `allowed-tools` does not grant permissions, `context: fork`
+does not start a child, and shell interpolation is not executed by the sharing adapter.
+Affected skills show compatibility notes outside Claude. Hooks, legacy `.claude/commands`,
+account-synced skill caches, enterprise policy parity, and descendant skills activated
+by Claude's file-read events are outside this sharing layer.
+
 ## Auth / accounts
 
 `EngineAuthProvider` (`src/core/auth/`, ADR-021) is the per-engine auth abstraction with capability-gated method groups: `probe()` (always), sign-in driving (`canDriveLogin`), and account CRUD (`multiAccount`). The interface lives in core, but not every implementation does: `ClaudeAuthProvider` (and `EngineAuthRegistry`) stay in `src/main/auth/`, because Claude sign-in opens the host browser (ADR-058 — `HostAuth` exposes only their reads to core).

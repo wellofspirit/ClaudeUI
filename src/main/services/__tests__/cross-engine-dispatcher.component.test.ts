@@ -10,9 +10,10 @@
  * electron at runtime), so electron is shimmed.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { originalSkillInput } from '../../../core/codex/skill-input'
 import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 import { DEFAULT_MAX_CONCURRENT_DISPATCHES } from '../../../shared/dispatch-concurrency'
@@ -207,6 +208,102 @@ afterEach(() => {
       runs.remove(run)
     }
   }
+})
+
+describe('CrossEngineDispatcher — Codex target shared Claude skills', () => {
+  it('sends cwd-scoped catalogs and expands explicit arguments only on the matching target', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'codex-dispatch-skills-'))
+    try {
+      const a = join(root, 'a')
+      const b = join(root, 'b')
+      for (const [cwd, name] of [
+        [a, 'dispatchalpha'],
+        [b, 'dispatchbeta']
+      ]) {
+        const skillDir = join(cwd, '.claude', 'skills', name)
+        mkdirSync(skillDir, { recursive: true })
+        writeFileSync(join(skillDir, 'SKILL.md'), `---\ndescription: ${name}\n---\nSay $0 then $1.`)
+      }
+      const targetA = makeFakeCodexTarget()
+      const targetB = makeFakeCodexTarget()
+      const { dispatcher: dispatcherA } = makeCodexHarness({
+        attachCodexTarget: targetA.spawnCodexTarget
+      })
+      const { dispatcher: dispatcherB } = makeCodexHarness({
+        attachCodexTarget: targetB.spawnCodexTarget
+      })
+      const typed = '/dispatchalpha "two words" tail'
+      const first = dispatcherA.dispatch({ engine: 'codex', prompt: typed }, makeCtx({ cwd: a }))
+      const second = dispatcherB.dispatch(
+        { engine: 'codex', prompt: 'ordinary' },
+        makeCtx({ cwd: b })
+      )
+      await tick()
+      const guidanceA = String(targetA.threadStartParams().developerInstructions)
+      const guidanceB = String(targetB.threadStartParams().developerInstructions)
+      expect(guidanceA).toContain('dispatchalpha')
+      expect(guidanceA).not.toContain('dispatchbeta')
+      expect(guidanceB).toContain('dispatchbeta')
+      expect(guidanceB).not.toContain('dispatchalpha')
+      expect(guidanceA).toContain('shared_claude_skills_update')
+      expect(targetA.threadStartParams()).not.toHaveProperty('extraRoots')
+      const inputA = (
+        targetA.requests.find((r) => r.method === 'turn/start')!.params.input as Array<{
+          text: string
+        }>
+      )[0].text
+      const inputB = (
+        targetB.requests.find((r) => r.method === 'turn/start')!.params.input as Array<{
+          text: string
+        }>
+      )[0].text
+      expect(inputA).toContain('Say two words then tail.')
+      expect(originalSkillInput(inputA)).toBe(typed)
+      expect(inputB).toBe('ordinary')
+      targetA.completeTurn()
+      targetB.completeTurn()
+      await Promise.all([first, second])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('replaces a released thread catalog with an empty snapshot after its skill is removed', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'codex-dispatch-resume-'))
+    try {
+      const cwd = join(root, 'project')
+      const skillDir = join(cwd, '.claude', 'skills', 'removedskill')
+      mkdirSync(skillDir, { recursive: true })
+      writeFileSync(join(skillDir, 'SKILL.md'), '---\ndescription: Removed\n---\nOld instructions.')
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+      const ctx = makeCtx({ cwd, fromRoutingId: 'resume-parent' })
+      const first = dispatcher.dispatch({ engine: 'codex', prompt: 'first' }, ctx)
+      await tick()
+      expect(String(target.threadStartParams().developerInstructions)).toContain('removedskill')
+      target.completeTurn()
+      await first
+      dispatcher.disposeFor('resume-parent')
+      rmSync(skillDir, { recursive: true, force: true })
+
+      const resumed = dispatcher.dispatch(
+        { engine: 'codex', prompt: 'second', sessionId: CODEX_THREAD_ID },
+        ctx
+      )
+      await tick()
+      const resume = target.requests.find((r) => r.method === 'thread/resume')!
+      expect(String(resume.params.developerInstructions)).not.toContain('removedskill')
+      const turns = target.requests.filter((r) => r.method === 'turn/start')
+      const update = (turns[1].params.input as Array<{ text: string }>)[0].text
+      expect(update).toContain('<shared_claude_skills_update revision=')
+      expect(update).not.toContain('removedskill')
+      expect(originalSkillInput(update)).toBe('second')
+      target.completeTurn()
+      await resumed
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
 
 function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
@@ -11265,7 +11362,7 @@ describe('CrossEngineDispatcher — hand_back: Codex target', () => {
         text: string
       }>
     )[0].text
-    expect(task).toBe('more work')
+    expect(originalSkillInput(task)).toBe('more work')
     await expect(
       target.serverRequest('item/tool/call', {
         threadId: CODEX_THREAD_ID,

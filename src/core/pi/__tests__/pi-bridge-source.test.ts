@@ -26,8 +26,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 23 (dispatch_agent requires a description)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('23')
+  it('is version 24 (selected skill overlay)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('24')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -132,7 +132,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     // Exactly two fetch() call sites: the helper's own (every long-polled
     // exchange), and the one-shot, time-bounded MCP catalog load (ADR-096),
     // which is not an exchange — nothing is held open for a decision.
-    expect(PI_BRIDGE_EXTENSION_SOURCE.match(/await fetch\(/g)).toHaveLength(2)
+    expect(PI_BRIDGE_EXTENSION_SOURCE.match(/await fetch\(/g)).toHaveLength(3)
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain("fetch(bridgeUrl + '/mcp-servers'")
   })
 
@@ -344,6 +344,57 @@ const BRIDGE_CREDS = {
 }
 
 describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (executed in-process)', () => {
+  it('overlays selected user skills on ordinary and custom-message starts while retaining unrelated natives', async () => {
+    const fetchBefore = globalThis.fetch
+    const selected = {
+      name: 'plugin:task',
+      aliases: ['task'],
+      path: '/work/.claude/skills/selected/SKILL.md',
+      directory: '/work/.claude/skills/selected',
+      description: 'Selected',
+      modelInvocable: false,
+      source: 'user'
+    }
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ skills: [selected], sourceRoots: ['/work/.claude/skills'] })
+    })) as unknown as typeof fetch
+    try {
+      await withEnv(BRIDGE_CREDS, async () => {
+        const { events } = runExtension()
+        const paths = await events.get('resources_discover')!()
+        expect(paths).toEqual({ skillPaths: [selected.path] })
+        for (const message of [undefined, { customType: 'queued_message', content: 'next' }]) {
+          const event = {
+            ...(message ? { message } : {}),
+            systemPromptOptions: {
+              skills: [
+                { name: 'plugin:task', filePath: '/work/.claude/skills/project/SKILL.md' },
+                { name: 'task', filePath: '/work/.pi/skills/old-alias/SKILL.md' },
+                { name: 'disabled', filePath: '/work/.claude/skills/disabled/SKILL.md' },
+                { name: 'native', filePath: '/work/.pi/skills/native/SKILL.md' }
+              ]
+            }
+          }
+          await events.get('before_agent_start')!(event)
+          expect(event.systemPromptOptions.skills.map((skill) => skill.name)).toEqual([
+            'native',
+            'plugin:task'
+          ])
+          expect(event.systemPromptOptions.skills[1]).toMatchObject({
+            description: 'Selected',
+            filePath: selected.path,
+            baseDir: selected.directory,
+            sourceInfo: { scope: 'user' },
+            disableModelInvocation: true
+          })
+        }
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+      })
+    } finally {
+      globalThis.fetch = fetchBefore
+    }
+  })
   it('registers NEITHER approvals nor hosted tools when bridge creds are absent (existing M2a behavior unaffected)', () => {
     withEnv(
       {

@@ -255,12 +255,9 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       reasoningVariant: s.reasoningVariant ?? null,
       statusLine: s.statusLine,
       metering: s.metering ?? null,
-      // Empty, NOT `s.slashCommands` — canonical holds these once, app-level
-      // (below); the per-session copies exist only because the wire shape fans
-      // the one list into every entry, and no reducer branch ever writes them.
-      // Restoring them per session would make a restored state disagree with the
-      // live one it is supposed to equal.
-      slashCommands: [],
+      // The legacy slashCommands field is an app-level cache. The scoped field
+      // carries the exact engine list for this session across resync.
+      slashCommands: s.sessionSlashCommands ?? [],
       sdkSkillNames: [],
       sdkActive: s.sdkActive ?? false,
       selectedEngineId: s.selectedEngineId ?? 'claude',
@@ -327,6 +324,7 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       statusLine: s.statusLine,
       metering: s.metering ?? undefined,
       slashCommands: state.slashCommands,
+      sessionSlashCommands: s.slashCommands,
       sdkSkillNames: state.sdkSkillNames,
       sdkActive: s.sdkActive,
       selectedEngineId: s.selectedEngineId,

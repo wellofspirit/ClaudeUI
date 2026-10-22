@@ -41,7 +41,16 @@ interface Session {
  * @param createServer_ - Builds a fresh, unconnected McpServer for each MCP
  *   session (connect() is called here).
  */
-export async function startMcpHttpHost(createServer_: () => McpServer): Promise<McpHttpHost> {
+export async function startMcpHttpHost(
+  createServer_: () => McpServer,
+  options?: {
+    skills?: (directory: string) => {
+      skills: unknown[]
+      sourceRoots?: string[]
+      sourcePaths?: string[]
+    }
+  }
+): Promise<McpHttpHost> {
   const token = randomBytes(24).toString('base64url')
   const sessions = new Map<string, Session>()
   let closed = false
@@ -75,6 +84,20 @@ export async function startMcpHttpHost(createServer_: () => McpServer): Promise<
     if (provided.length !== expectedAuth.length || !timingSafeEqual(provided, expectedAuth)) {
       res.writeHead(401, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Unauthorized' }))
+      return
+    }
+    const target = new URL(req.url ?? '/', 'http://127.0.0.1')
+    if (target.pathname === '/skills') {
+      if (req.method !== 'GET' || !options?.skills || !target.searchParams.get('directory')) {
+        res.writeHead(400).end()
+        return
+      }
+      try {
+        const catalog = options.skills(target.searchParams.get('directory')!)
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(catalog))
+      } catch {
+        res.writeHead(500).end()
+      }
       return
     }
     const header = req.headers['mcp-session-id']

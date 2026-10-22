@@ -1,8 +1,7 @@
 import type { HostWindowHandle } from '../host'
-import { existsSync } from 'node:fs'
-import { join, delimiter } from 'node:path'
-import { homedir } from 'node:os'
 import { v4 as uuid } from 'uuid'
+import { isAbsolute, basename, resolve as resolvePath } from 'node:path'
+import { readFile, stat } from 'node:fs/promises'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
@@ -20,7 +19,8 @@ import type {
   PermissionSuggestion,
   PendingApproval,
   StatusLineData,
-  ToolReviewBlock
+  ToolReviewBlock,
+  SkillInfo
 } from '../../shared/types'
 import { engineMeta } from '../../shared/engine-meta'
 import { PI_DEFAULT_MODEL } from '../../shared/engine-meta'
@@ -58,6 +58,12 @@ import {
 import { PI_FORK_CLONE_LATEST_SENTINEL } from '../services/fork-anchor'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { PiBridgeHost, writeBridgeExtension } from './PiBridgeHost'
+import { blockedNativeClaudeSkillNames, unavailableClaudeSkillCommand } from './pi-skill-input'
+import {
+  resolveClaudeSkills,
+  expandClaudeSkillInvocation,
+  type ClaudeSkillCatalog
+} from '../skills/claude-skills'
 import { HostedGrants, notApprovedHostedTool } from './hosted-grants'
 import { piUsageEvent } from './usage-row'
 // ADR-096: the shared MCP catalog, registered by the bridge extension.
@@ -470,6 +476,10 @@ export class PiSession extends BaseSession {
    * handed to host-run subagents. Null until the first spawn.
    */
   private mcpCatalog: PiMcpCatalog | null = null
+  private sharedSkillCatalog: ClaudeSkillCatalog | null = null
+  private nativeSkillDetails: SkillInfo[] = []
+  private blockedNativeSkillNames = new Set<string>()
+  private nativeSkillCommandsVerified = false
   /** Bridged + pi-native MCP server names at the last spawn — what maps a pi tool's server back to its Claude name. */
   private knownMcpServers: string[] = []
   /** The skipped-servers warning is shown once per session, not on every respawn. */
@@ -626,8 +636,14 @@ export class PiSession extends BaseSession {
           return session.cwd
         },
         currentModel: () => session._model,
-        skillDirsEnv: () => session.computeSkillDirsEnv(),
+        skillDirsEnv: () => ({}),
         bridgedMcpServers: () => session.mcpCatalog?.servers ?? {},
+        sharedSkills: () =>
+          session.sharedSkillCatalog?.skills ?? resolveClaudeSkills(session.cwd).skills,
+        sharedSkillSourceRoots: () =>
+          session.sharedSkillCatalog?.sourceRoots ??
+          resolveClaudeSkills(session.cwd).sourceRoots ??
+          [],
         send: (channel, data) => session.send(channel, data),
         gateChild: (scope, payload) => session.gateChild(scope, payload),
         childAbandoned: (info) => {
@@ -827,31 +843,12 @@ export class PiSession extends BaseSession {
     return this.startedPromise
   }
 
-  /**
-   * Shared-skills discovery (M3): the concrete, EXISTING skill directories to
-   * hand the bridge extension's `resources_discover` handler via env var
-   * (`CLAUDEUI_PI_SKILL_DIRS`, `path.delimiter`-joined — the extension just
-   * splits it, no fs access there; see pi-bridge-source.ts). Claude skills are
-   * SKILL.md dirs under `~/.claude/skills/*` and `<cwd>/.claude/skills/*` — the
-   * same agentskills convention pi itself uses
-   * (vendor/pi-src/packages/coding-agent/docs/skills.md's "Using Skills from
-   * Other Harnesses" documents exactly this
-   * `["~/.claude/skills", "../.claude/skills"]`-style settings array).
-   *
-   * Returns `{}` (key entirely ABSENT, not an empty-string value) when neither
-   * dir exists — keeps the bridge extension's own env-var-presence gate
-   * meaningful (an empty string would still be "present").
-   */
-  private computeSkillDirsEnv(): Record<string, string> {
-    const candidates = [join(homedir(), '.claude', 'skills'), join(this.cwd, '.claude', 'skills')]
-    const existing = candidates.filter((dir) => {
-      try {
-        return existsSync(dir)
-      } catch {
-        return false
-      }
-    })
-    return existing.length > 0 ? { CLAUDEUI_PI_SKILL_DIRS: existing.join(delimiter) } : {}
+  discoverSkills(cwd: string): Promise<SkillInfo[]> {
+    return Promise.resolve(
+      cwd === this.cwd && this.sharedSkillCatalog
+        ? [...this.nativeSkillDetails, ...this.sharedSkillCatalog.skills]
+        : resolveClaudeSkills(cwd).skills
+    )
   }
 
   /**
@@ -910,10 +907,20 @@ export class PiSession extends BaseSession {
     // extension fetches it from this host while pi loads (secrets never touch
     // an env var or a file), and a respawn picks up McpDialog's edits.
     const mcpCatalog = this.loadMcpCatalog()
+    this.nativeSkillDetails = []
+    this.blockedNativeSkillNames = new Set()
+    this.nativeSkillCommandsVerified = false
+    const skillCatalog = resolveClaudeSkills(this.cwd)
+    this.sharedSkillCatalog = skillCatalog
     const bridgeHost = new PiBridgeHost(
       this.gateToolCall,
       this.capabilities.hostedMcp ? this.handleHostedTool : undefined,
-      { onAbandoned: this.handleBridgeAbandoned, mcpServers: mcpCatalog.servers }
+      {
+        onAbandoned: this.handleBridgeAbandoned,
+        mcpServers: mcpCatalog.servers,
+        skills: skillCatalog.skills,
+        skillSourceRoots: skillCatalog.sourceRoots
+      }
     )
     let bridge: { url: string; token: string }
     try {
@@ -989,8 +996,7 @@ export class PiSession extends BaseSession {
                 CLAUDEUI_PI_AGENT_LISTING: this.subagents.listing(),
                 CLAUDEUI_PI_SEND_MESSAGE: '1'
               }
-            : {}),
-          ...this.computeSkillDirsEnv()
+            : {})
         }
       })
       await client.start()
@@ -1213,21 +1219,39 @@ export class PiSession extends BaseSession {
     // restriction the extension was enforcing. Re-send the enter command
     // whenever this session's OWN mode is already 'plan' once the client is
     // confirmed up, so the restriction is reinstated before any real prompt
-    // can reach the model. Best-effort — mirrors get_commands' identical
-    // "never block the session" treatment below.
+    // can reach the model. Best-effort: a failed control RPC is reported,
+    // while the permission gate still enforces plan restrictions.
     if (this.permissionMode === 'plan') {
       await this.sendPlanModeCommand('cui-plan-enter')
     }
 
     // Slash commands + skills (M2b): get_commands lists extension commands,
     // prompt templates, and skill:* entries (vendor/pi-src/packages/coding-agent/docs/rpc.md
-    // "get_commands"). Once per spawn, best-effort — a failure here must
-    // never block the session (discovery is optional, mirrors
-    // OpencodeSession.eagerConnect's identical treatment of
-    // listCommands/listSkills).
+    // "get_commands"). Once per spawn: normal text and valid shared skill
+    // expansion remain usable if discovery fails, but unresolved native
+    // /skill: commands are refused until a valid inventory is captured.
+    const currentDiscovery = (): boolean => this.client === client && !this._cancelled
+    const publishFailedDiscovery = (): void => {
+      if (!currentDiscovery()) return
+      this.nativeSkillCommandsVerified = false
+      this.nativeSkillDetails = []
+      this.blockedNativeSkillNames = new Set()
+      this.send(
+        'session:slash-commands',
+        skillCatalog.skills
+          .filter((skill) => skill.userInvocable)
+          .map((skill) => ({ name: '/' + skill.name, description: skill.description }))
+      )
+      this.send(
+        'session:skills',
+        skillCatalog.skills.map((skill) => skill.name)
+      )
+    }
     try {
       const resp = await client.request<PiGetCommandsData>({ type: 'get_commands' })
-      if (resp.success && resp.data) {
+      if (!currentDiscovery()) return
+      if (resp.success && Array.isArray(resp.data?.commands)) {
+        const blockedNames = blockedNativeClaudeSkillNames(resp.data.commands, skillCatalog)
         // sourceInfo.scope === 'temporary' entries are per-spawn extension
         // artifacts (verified doc drift — docs/protocol-pi/README.md
         // "Extensions": a `-e <file.ts>` extension "appears in get_commands
@@ -1237,29 +1261,99 @@ export class PiSession extends BaseSession {
         // future bridge change (or another -e extension) never leaks a
         // ClaudeUI-internal or otherwise-ephemeral artifact into the
         // user-facing slash menu.
-        const persistent = resp.data.commands.filter((c) => c.sourceInfo?.scope !== 'temporary')
+        const roots = skillCatalog.sourceRoots ?? []
+        const underRoot = (file: string): boolean => {
+          const normalize = (value: string): string => {
+            const path = resolvePath(value).replaceAll('\\', '/').replace(/\/+$/, '')
+            return process.platform === 'win32' ? path.toLowerCase() : path
+          }
+          const normalized = normalize(file)
+          return roots.some((root) => {
+            const base = normalize(root)
+            return normalized === base || normalized.startsWith(base + '/')
+          })
+        }
+        const persistent = resp.data.commands.filter(
+          (c) =>
+            c.sourceInfo?.scope !== 'temporary' &&
+            !(c.source === 'skill' && c.sourceInfo?.path && underRoot(c.sourceInfo.path))
+        )
 
         logger.debug('PiSession', `get_commands discovered ${persistent.length} command(s)`)
 
         // EXACT contract as OpencodeSession.eagerConnect (names get the '/'
         // prefix; renderer slash menu is engine-neutral).
-        const slashCommands = persistent.map((c) => ({
-          name: '/' + c.name,
-          description: c.description
-        }))
-        this.send('session:slash-commands', slashCommands)
-
+        const shared = skillCatalog.skills
+        const selectedNames = new Set(
+          shared.flatMap((skill) => [skill.name, ...(skill.aliases ?? [])])
+        )
+        const nativeDetails = (
+          await Promise.all(
+            persistent
+              .filter((command) => command.source === 'skill')
+              .map(async (command): Promise<SkillInfo | null> => {
+                const name = command.name.replace(/^skill:/, '')
+                const file = command.sourceInfo?.path
+                if (
+                  selectedNames.has(name) ||
+                  !file ||
+                  !isAbsolute(file) ||
+                  basename(file).toLowerCase() !== 'skill.md'
+                )
+                  return null
+                try {
+                  if ((await stat(file)).size > 1024 * 1024) return null
+                  const raw = await readFile(file, 'utf8')
+                  if (raw.length > 1024 * 1024) return null
+                  const content = raw.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trim()
+                  return {
+                    name,
+                    displayName: name,
+                    description: command.description ?? '',
+                    source: command.sourceInfo?.scope === 'user' ? 'user' : 'project',
+                    path: file,
+                    content,
+                    userInvocable: true
+                  }
+                } catch {
+                  return null
+                }
+              })
+          )
+        ).filter((skill): skill is SkillInfo => skill !== null)
+        if (!currentDiscovery()) return
+        const slashCommands = persistent
+          .filter((c) => !selectedNames.has(c.name.replace(/^skill:/, '')))
+          .map((c) => ({
+            name: '/' + c.name,
+            description: c.description
+          }))
+        slashCommands.push(
+          ...shared
+            .filter((s) => s.userInvocable)
+            .map((s) => ({ name: '/' + s.name, description: s.description }))
+        )
         // session:skills — name list only, `skill:` prefix stripped (same
         // bare-name contract as OpencodeSession.eagerConnect's skillNames).
         const skillNames = persistent
           .filter((c) => c.source === 'skill')
           .map((c) => c.name.replace(/^skill:/, ''))
+          .filter((name) => !selectedNames.has(name))
+        skillNames.push(...shared.map((s) => s.name))
+        this.blockedNativeSkillNames = blockedNames
+        this.nativeSkillDetails = nativeDetails
+        this.nativeSkillCommandsVerified = true
+        this.send('session:slash-commands', slashCommands)
         this.send('session:skills', skillNames)
+      } else {
+        publishFailedDiscovery()
       }
     } catch (err) {
+      if (!currentDiscovery()) return
+      publishFailedDiscovery()
       logger.warn(
         'PiSession',
-        `get_commands failed (best-effort, discovery is optional): ${err instanceof Error ? err.message : String(err)}`
+        `get_commands failed (native skill commands unavailable): ${err instanceof Error ? err.message : String(err)}`
       )
     }
 
@@ -1455,6 +1549,22 @@ export class PiSession extends BaseSession {
       return
     }
 
+    const unavailableSkill = unavailableClaudeSkillCommand(
+      prompt,
+      this.sharedSkillCatalog ?? resolveClaudeSkills(this.cwd),
+      this.blockedNativeSkillNames,
+      this.nativeSkillCommandsVerified
+    )
+    if (unavailableSkill) {
+      this.send('session:error', `Skill "${unavailableSkill}" is unavailable in this session.`)
+      for (const item of this.queue.pending()) {
+        if (item.text === prompt) this.queue.setState(item, 'recalled')
+      }
+      this.queue.emit()
+      this.resetInactivityTimer()
+      return
+    }
+
     // The user has spoken (ADR-089 S1a): lift every user-stop hold so the
     // model may resume an agent the user stopped. THE one place a user-authored
     // prompt reaches pi — a typed prompt, a queued one flushed later and a steer
@@ -1487,7 +1597,14 @@ export class PiSession extends BaseSession {
       .filter((att) => att.mediaType.startsWith('image/'))
       .map((att) => ({ type: 'image' as const, data: att.base64Data, mimeType: att.mediaType }))
 
-    const command: PiRpcCommand = { type: 'prompt', message: prompt }
+    const command: PiRpcCommand = {
+      type: 'prompt',
+      message:
+        expandClaudeSkillInvocation(
+          prompt,
+          this.sharedSkillCatalog ?? resolveClaudeSkills(this.cwd)
+        )?.text ?? prompt
+    }
     if (images.length > 0) command.images = images
     // A prompt sent while already streaming REQUIRES streamingBehavior or pi
     // rejects it (verified — README.md "Commands"). 'steer' (M2b — Claude

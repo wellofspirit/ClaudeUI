@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import type { SkillInfo } from '../../../../shared/types'
+import type { EngineId, SkillInfo } from '../../../../shared/types'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { SkillsDialogView } from './View'
 import { SkillsMobileView } from './MobileView'
@@ -8,9 +8,17 @@ interface SkillsDialogProps {
   open: boolean
   onClose: () => void
   cwd: string | null
+  sessionId?: string | null
+  engineId?: EngineId | null
 }
 
-export function SkillsDialog({ open, onClose, cwd }: SkillsDialogProps): React.JSX.Element | null {
+export function SkillsDialog({
+  open,
+  onClose,
+  cwd,
+  sessionId,
+  engineId
+}: SkillsDialogProps): React.JSX.Element | null {
   const isMobile = useIsMobile()
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [loading, setLoading] = useState(false)
@@ -22,19 +30,28 @@ export function SkillsDialog({ open, onClose, cwd }: SkillsDialogProps): React.J
       return
     }
     if (!cwd) return
+    let cancelled = false
     setLoading(true)
     // Clear old skills immediately so the View's auto-select effect re-fires on the new cwd
     setSkills([])
     window.api
-      .loadSkillDetails(cwd)
+      .loadSkillDetails(cwd, sessionId ?? undefined)
       .then((result) => {
-        setSkills(result)
+        if (cancelled) return
+        setSkills(
+          engineId === 'claude'
+            ? result.map((skill) => ({ ...skill, compatibilityWarnings: [] }))
+            : result
+        )
         setLoading(false)
       })
       .catch(() => {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       })
-  }, [open, cwd])
+    return () => {
+      cancelled = true
+    }
+  }, [open, cwd, sessionId, engineId])
 
   useEffect(() => {
     if (!open) return

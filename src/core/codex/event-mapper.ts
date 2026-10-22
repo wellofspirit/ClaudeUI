@@ -11,6 +11,7 @@ import { blobStore } from '../services/blob-store'
 import { wrappedUserRowAsNote } from '../services/agent-note'
 import type { PatchChangeKind } from './protocol/v2/PatchChangeKind'
 import type { ThreadItem } from './protocol/v2/ThreadItem'
+import { originalSkillInput } from './skill-input'
 import type { SubAgentActivityKind } from './protocol/v2/SubAgentActivityKind'
 import type { TurnPlanStep } from './protocol/v2/TurnPlanStep'
 import type { JsonValue } from './protocol/serde_json/JsonValue'
@@ -156,7 +157,7 @@ export function mapCodexItem(
       const row = message(
         item.content.flatMap((input): ContentBlock[] =>
           input.type === 'text'
-            ? [{ type: 'text', text: input.text }]
+            ? [{ type: 'text', text: originalSkillInput(input.text) }]
             : input.type === 'image'
               ? codexImage('url' in input ? input.url : '')
               : []

@@ -171,6 +171,8 @@ export interface PiBridgeHostOptions {
    * into the model's context) or into a file.
    */
   mcpServers?: Record<string, unknown>
+  skills?: unknown[]
+  skillSourceRoots?: string[]
 }
 
 /**
@@ -192,6 +194,7 @@ const DEFAULT_ABANDON_MS = 30_000
 
 /** The one non-exchange route: the MCP servers the extension registers at load (ADR-096). */
 const MCP_SERVERS_ROUTE = '/mcp-servers'
+const SKILLS_ROUTE = '/skills'
 
 /** `req.url` → the exchange it addresses. `/wait` re-parks; the bare route starts. */
 const ROUTES: Record<string, { route: PiBridgeRoute; wait: boolean } | undefined> = {
@@ -272,6 +275,8 @@ export class PiBridgeHost {
   private readonly abandonMs: number
   private readonly onAbandoned?: (info: PiBridgeAbandoned) => void
   private readonly mcpServers: Record<string, unknown>
+  private readonly skills: unknown[]
+  private readonly skillSourceRoots: string[]
   /**
    * One entry per exchange that has been STARTED and whose result has not been
    * collected yet, keyed `${route}:${toolCallId}`.
@@ -300,6 +305,8 @@ export class PiBridgeHost {
     this.abandonMs = options?.abandonMs ?? DEFAULT_ABANDON_MS
     this.onAbandoned = options?.onAbandoned
     this.mcpServers = options?.mcpServers ?? {}
+    this.skills = options?.skills ?? []
+    this.skillSourceRoots = options?.skillSourceRoots ?? []
   }
 
   /** Bind 127.0.0.1:0 (OS-assigned ephemeral port) and mint a fresh bearer token. */
@@ -352,8 +359,9 @@ export class PiBridgeHost {
 
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
     const isMcpServers = req.url === MCP_SERVERS_ROUTE
+    const isSkills = req.url === SKILLS_ROUTE
     const target = ROUTES[req.url ?? '']
-    if (req.method !== 'POST' || (!target && !isMcpServers)) {
+    if (req.method !== 'POST' || (!target && !isMcpServers && !isSkills)) {
       res.writeHead(404).end()
       return
     }
@@ -393,7 +401,12 @@ export class PiBridgeHost {
       if (tooLarge) return
       // No body to read: the answer is the spawn-time snapshot, whole.
       if (!target) {
-        this.endJson(res, { servers: this.mcpServers })
+        this.endJson(
+          res,
+          isSkills
+            ? { skills: this.skills, sourceRoots: this.skillSourceRoots }
+            : { servers: this.mcpServers }
+        )
         return
       }
       this.dispatchBody(target.route, target.wait, Buffer.concat(chunks).toString('utf-8'), res)

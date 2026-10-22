@@ -39,6 +39,8 @@ async function load(tools: string[] = []): Promise<{
   const hooks: Record<string, Hook> = {}
   let rpc: Awaited<ReturnType<typeof load>>['rpc'] | undefined
   await plugin.setup({
+    location: { directory: '/fixture' },
+    skill: { transform: async () => ({ dispose: async () => {} }) },
     tool: {
       hook: async (name: string, cb: Hook) => {
         hooks[name] = cb
@@ -63,6 +65,62 @@ async function load(tools: string[] = []): Promise<{
 }
 
 describe('claudeui-xeng plugin (opencode 2.x directory plugin)', () => {
+  it('overlays selected descriptors while retaining unrelated native skills', async () => {
+    const mod = await import(pathToFileURL(join(DIR, 'index.js')).href)
+    const skills = new Map<string, Record<string, unknown>>([
+      ['review', { id: 'review', name: 'review', path: '/native/review/SKILL.md' }],
+      ['other', { id: 'other', name: 'other', path: '/native/other/SKILL.md' }]
+    ])
+    mod.overlayClaudeSkills(
+      {
+        list: () => [...skills.values()],
+        remove: (id: string) => skills.delete(id),
+        add: (skill: Record<string, unknown>) => skills.set(skill.id as string, skill)
+      },
+      [
+        {
+          name: 'review',
+          path: '/claude/review/SKILL.md',
+          description: 'Review',
+          content: 'body',
+          modelInvocable: false
+        }
+      ]
+    )
+    expect(skills.get('other')).toMatchObject({ path: '/native/other/SKILL.md' })
+    expect(skills.get('review')).toEqual({
+      id: 'review',
+      name: 'review',
+      description: 'Review',
+      path: '/claude/review/SKILL.md',
+      content: 'body',
+      autoinvoke: false
+    })
+  })
+
+  it('removes disabled Claude-source native rows without touching sibling or OpenCode rows', async () => {
+    const mod = await import(pathToFileURL(join(DIR, 'index.js')).href)
+    const skills = new Map<string, Record<string, unknown>>([
+      [
+        'disabled',
+        { id: 'disabled', name: 'disabled', path: '/work/.claude/skills/disabled/SKILL.md' }
+      ],
+      [
+        'sibling',
+        { id: 'sibling', name: 'sibling', path: '/work/.claude/skills-other/keep/SKILL.md' }
+      ],
+      ['native', { id: 'native', name: 'native', path: '/work/.opencode/skills/native/SKILL.md' }]
+    ])
+    mod.overlayClaudeSkills(
+      {
+        list: () => [...skills.values()],
+        remove: (id: string) => skills.delete(id),
+        add: (skill: Record<string, unknown>) => skills.set(skill.id as string, skill)
+      },
+      { skills: [], sourceRoots: ['/work/.claude/skills'] }
+    )
+    expect([...skills.keys()]).toEqual(['sibling', 'native'])
+  })
   it('is a directory plugin: index.js + a module package.json, import-free', () => {
     const pkg = JSON.parse(readFileSync(join(DIR, 'package.json'), 'utf8'))
     expect(pkg).toMatchObject({ type: 'module', main: 'index.js' })

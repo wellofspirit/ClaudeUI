@@ -26,16 +26,19 @@ import { engineMeta } from '../../shared/engine-meta'
 import { collectToolUseIds, recordTrajectoryMessage } from '../automode/trajectory'
 import { harnessUnavailableMessage } from '../harness/resolve'
 import { logger } from '../services/logger'
+import { expandClaudeSkillInvocation, type SharedClaudeSkill } from '../skills/claude-skills'
 import type { UsageTurnTokens } from '../services/usage-recorder'
 import { createPiMapperState, finishPiMessage, mapPiEvent } from './event-mapper'
 import type { PiMapperOutput, PiMapperState } from './event-mapper'
 import { PiBridgeHost, writeBridgeExtension } from './PiBridgeHost'
+import { blockedNativeClaudeSkillNames, unavailableClaudeSkillCommand } from './pi-skill-input'
 import type { PiBridgeAbandoned, PiBridgeHandler, PiHostedToolHandler } from './PiBridgeHost'
 import { locatePiLaunch } from './pi-locate'
 import { deliveryCommand, isReservedPiCommandText, PI_RESERVED_COMMAND_PREFIX } from './pi-delivery'
 import type { PiAgentDelivery } from './pi-delivery'
 import type {
   PiGetLastAssistantTextData,
+  PiGetCommandsData,
   PiGetSessionStatsData,
   PiGetStateData
 } from './pi-protocol'
@@ -59,6 +62,8 @@ export interface PiChildSpawnOpts {
   onAbandoned?: (info: PiBridgeAbandoned) => void
   /** The MCP servers the child's bridge host serves at `/mcp-servers` (ADR-096; subagents: the parent's catalog). */
   mcpServers?: Record<string, unknown>
+  skills?: SharedClaudeSkill[]
+  skillSourceRoots?: string[]
   /** Flags after `--mode rpc -e <bridge>` (dispatch: `['--no-session']`). */
   args?: string[]
   /**
@@ -108,7 +113,9 @@ export const defaultSpawnPiChild: SpawnPiChildFn = async (opts) => {
   if (!launch) throw new Error(harnessUnavailableMessage('pi'))
   const bridgeHost = new PiBridgeHost(opts.gateHandler, opts.hostedToolHandler, {
     ...(opts.onAbandoned ? { onAbandoned: opts.onAbandoned } : {}),
-    ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {})
+    ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {}),
+    ...(opts.skills ? { skills: opts.skills } : {}),
+    ...(opts.skillSourceRoots ? { skillSourceRoots: opts.skillSourceRoots } : {})
   })
   let bridge: { url: string; token: string }
   try {
@@ -312,6 +319,8 @@ export class PiChildRunner {
   /** The turn in flight's promise, for `abortTurn`'s bounded wait. */
   private currentTurn: Promise<PiTurnOutcome> | null = null
   private disposed = false
+  private blockedNativeSkillNames = new Set<string>()
+  private nativeSkillCommandsVerified = false
   private readonly now: () => number
   private readonly logTag: string
 
@@ -361,6 +370,27 @@ export class PiChildRunner {
       }
       runner._sessionId = stateResp.data.sessionId
       runner.mapperState.sessionId = runner._sessionId
+
+      try {
+        const commands = await runner.client.request<PiGetCommandsData>({ type: 'get_commands' })
+        if (commands.success && Array.isArray(commands.data?.commands)) {
+          const blocked = blockedNativeClaudeSkillNames(commands.data.commands, {
+            skills: opts.spawnOpts.skills ?? [],
+            sourceRoots: opts.spawnOpts.skillSourceRoots,
+            warnings: [],
+            revision: ''
+          })
+          runner.blockedNativeSkillNames = blocked
+          runner.nativeSkillCommandsVerified = true
+        } else {
+          runner.blockedNativeSkillNames = new Set()
+          runner.nativeSkillCommandsVerified = false
+        }
+      } catch {
+        // A missing inventory cannot authorize an unresolved native /skill command.
+        runner.blockedNativeSkillNames = new Set()
+        runner.nativeSkillCommandsVerified = false
+      }
 
       const ref = engineMeta('pi').decodeModelValue(opts.model)
       const setModelResp = await runner.client.request({
@@ -450,7 +480,26 @@ export class PiChildRunner {
         cause: 'refused'
       })
     }
-    return this.sendTurn(prompt)
+    const catalog = {
+      skills: this.opts.spawnOpts.skills ?? [],
+      sourceRoots: this.opts.spawnOpts.skillSourceRoots,
+      warnings: [],
+      revision: ''
+    }
+    const unavailableSkill = unavailableClaudeSkillCommand(
+      prompt,
+      catalog,
+      this.blockedNativeSkillNames,
+      this.nativeSkillCommandsVerified
+    )
+    if (unavailableSkill) {
+      return Promise.resolve({
+        kind: 'error',
+        message: `Skill "${unavailableSkill}" is unavailable in this session.`,
+        cause: 'refused'
+      })
+    }
+    return this.sendTurn(expandClaudeSkillInvocation(prompt, catalog)?.text ?? prompt)
   }
 
   /**

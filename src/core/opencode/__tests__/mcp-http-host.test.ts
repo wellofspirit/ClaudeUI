@@ -96,6 +96,28 @@ afterEach(async () => {
 })
 
 describe('startMcpHttpHost', () => {
+  it('serves an authenticated directory-scoped skill catalog on a pooled host', async () => {
+    const host = await startMcpHttpHost(makeBlankServer, {
+      skills: (directory) => ({
+        skills: [{ name: directory, content: `body for ${directory}` }],
+        sourceRoots: [directory]
+      })
+    })
+    hosts.push(host)
+    const url = `http://127.0.0.1:${host.port}/skills?directory=`
+    expect((await fetch(url + encodeURIComponent('/one'))).status).toBe(401)
+    const headers = { authorization: `Bearer ${host.token}` }
+    const one = await fetch(url + encodeURIComponent('/one'), { headers })
+    const two = await fetch(url + encodeURIComponent('/two'), { headers })
+    expect(await one.json()).toEqual({
+      skills: [{ name: '/one', content: 'body for /one' }],
+      sourceRoots: ['/one']
+    })
+    expect(await two.json()).toEqual({
+      skills: [{ name: '/two', content: 'body for /two' }],
+      sourceRoots: ['/two']
+    })
+  })
   it('returns a port and token after binding', async () => {
     const host = await startMcpHttpHost(makeBlankServer)
     hosts.push(host)

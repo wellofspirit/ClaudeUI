@@ -413,6 +413,21 @@ describe('sanctioned local writes', () => {
 })
 
 describe('hydration', () => {
+  it('projects each session command list and restores it from a cold snapshot', () => {
+    seed.created('a', { cwd: '/one' })
+    seed.created('b', { cwd: '/two' })
+    emitSync('session:slash-commands', ['a', [{ name: '/alpha' }]])
+    emitSync('session:slash-commands', ['b', [{ name: '/beta' }]])
+    expect(store().sessions.a.slashCommands).toEqual([{ name: '/alpha' }])
+    expect(store().sessions.b.slashCommands).toEqual([{ name: '/beta' }])
+    const snapshot = toSnapshot(getReplicaState(), 7)
+    resetReplicaSeam()
+    useSessionStore.setState({ sessions: {} })
+    hydrateReplica(snapshot, false)
+    expect(store().sessions.a.slashCommands).toEqual([{ name: '/alpha' }])
+    expect(store().sessions.b.slashCommands).toEqual([{ name: '/beta' }])
+  })
+
   it('rebuilds the store from a snapshot alone', () => {
     seed.created('r1', { cwd: '/p' })
     seed.message('r1', makeAssistantMessage('turn one'))

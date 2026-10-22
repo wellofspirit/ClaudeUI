@@ -87,6 +87,13 @@ import { CODEX_AUTH_PROVIDER_ID, type CodexAuthHook } from './codex-auth-hook'
 import { chatgptRateLimits } from './chatgpt-rate-limits'
 import { collectClaudeMcpForCodex, type CodexMcpServerEntry } from './codex-mcp-bridge'
 import { CLAUDEUI_DISABLED_FEATURES } from './codex-features'
+import {
+  resolveClaudeSkills,
+  renderClaudeSkillCatalog,
+  expandClaudeSkillInvocation,
+  type ClaudeSkillCatalog
+} from '../skills/claude-skills'
+import { withOriginalSkillInput } from './skill-input'
 import { desktopAppEntries, type CodexDesktopEntries } from './codex-desktop-entries'
 import {
   MCP_ELICITATION_ACCEPT,
@@ -565,6 +572,9 @@ export class CodexSession extends BaseSession {
   private endedTurns = new BoundedSet()
   private completedItems = new Map<string, string>()
   private catalog: Model[] = []
+  private skillCatalog: ClaudeSkillCatalog | null = null
+  /** Live resume can ignore a changed developerInstructions override. */
+  private skillCatalogUpdatePending = false
   private model?: string
   private effectiveModel?: string
   private effort?: string
@@ -792,6 +802,21 @@ export class CodexSession extends BaseSession {
     return this.threadId
   }
 
+  discoverSkills(cwd: string): Promise<import('../../shared/types').SkillInfo[]> {
+    return Promise.resolve(cwd === this.cwd ? (this.skillCatalog?.skills ?? []) : [])
+  }
+
+  private skillInput(text: string, includeCatalog = false): string {
+    const expanded = this.skillCatalog && expandClaudeSkillInvocation(text, this.skillCatalog)
+    const catalog =
+      includeCatalog && this.skillCatalog
+        ? `<shared_claude_skills_update revision="${this.skillCatalog.revision}">\n${renderClaudeSkillCatalog(this.skillCatalog)}\nThis catalog supersedes earlier shared Claude skill catalogs for this thread.\n</shared_claude_skills_update>\n\n`
+        : ''
+    return expanded || catalog
+      ? withOriginalSkillInput(text, catalog + (expanded?.text ?? text))
+      : text
+  }
+
   /** The current permission mode; a dispatch run reads it through its parent facade (ADR-105). */
   getAutonomyMode(): string {
     return this.permissionMode
@@ -827,7 +852,10 @@ export class CodexSession extends BaseSession {
           threadId: this.threadId,
           expectedTurnId: turnId,
           clientUserMessageId,
-          input: codexTurnInput(item.text, this.queuedUploads(item))
+          input: codexTurnInput(
+            this.skillInput(item.text, this.skillCatalogUpdatePending),
+            this.queuedUploads(item)
+          )
         })
       } catch (error) {
         // An ambiguous timeout MAY have been delivered, so it is reconciled and
@@ -845,6 +873,7 @@ export class CodexSession extends BaseSession {
       }
       // Acceptance is the response itself; the native user item may follow much
       // later, or (on an interrupted turn) not at all.
+      this.skillCatalogUpdatePending = false
       if (this.queue.consumeById(item.itemId)) this.queue.emit()
       return
     }
@@ -897,8 +926,9 @@ export class CodexSession extends BaseSession {
           threadId: this.threadId,
           expectedTurnId: turnId,
           clientUserMessageId,
-          input: codexTurnInput(text)
+          input: codexTurnInput(this.skillInput(text, this.skillCatalogUpdatePending))
         })
+        this.skillCatalogUpdatePending = false
         return 'queued'
       } catch (error) {
         return error instanceof CodexTransportError &&
@@ -1036,12 +1066,13 @@ export class CodexSession extends BaseSession {
       const result = await this.wire.request('turn/start', {
         threadId: this.threadId!,
         clientUserMessageId,
-        input: codexTurnInput(prompt, attachments),
+        input: codexTurnInput(this.skillInput(prompt, this.skillCatalogUpdatePending), attachments),
         ...(this.model !== undefined ? { model: this.model } : {}),
         ...(this.effort !== undefined ? { effort: this.effort } : {}),
         ...this.turnPolicy()
       })
       if (this.closed) return
+      this.skillCatalogUpdatePending = false
       // A guardian override is context injected for the model's NEXT turn. Once
       // that turn has started, an unanswered offer can no longer reach it.
       this.clearGuardianOverrides()
@@ -1172,6 +1203,9 @@ export class CodexSession extends BaseSession {
       // `config.toml` (probed against 0.154.0), so native entries — including the
       // OAuth servers Claude's shape cannot express — keep working alongside.
       const inheritedMcp = collectClaudeMcpForCodex(this.cwd)
+      this.skillCatalog = resolveClaudeSkills(this.cwd)
+      if (this.skillCatalog.warnings.length)
+        this.send('session:warning', this.skillCatalog.warnings.join('\n'))
       this.mcpServers = inheritedMcp.servers
       if (inheritedMcp.skipped.length > 0)
         // `start()` runs at most once per session (`this.starting` latches it),
@@ -1204,13 +1238,7 @@ export class CodexSession extends BaseSession {
               dynamicTools: codexDynamicToolSpecs(
                 this.capabilities.crossEngineDispatch,
                 sessionToolsAvailable()
-              ),
-              // The session tools' guidance, as a developer message (slice 2). The tool
-              // descriptions are the primary carrier (they persist with the rollout); this
-              // is a bonus, and START ONLY like the specs.
-              ...(sessionToolsAvailable()
-                ? { developerInstructions: sessionToolsGuidance({ toolPrefix: '' }) }
-                : {})
+              )
             })
       if (this.closed) return
       assertCodexProvider(response.modelProvider)
@@ -1231,6 +1259,13 @@ export class CodexSession extends BaseSession {
       if (this.model !== undefined && response.model !== this.model)
         throw new Error('Codex silently changed the requested model')
       this.threadId = response.thread.id
+      this.skillCatalogUpdatePending = !!(branch || this.options.resumeSessionId)
+      this.send(
+        'session:slash-commands',
+        this.skillCatalog?.skills
+          .filter((skill) => skill.userInvocable)
+          .map((skill) => ({ name: `/${skill.name}`, description: skill.description })) ?? []
+      )
       // ADR-071 §4. A thread this app just CREATED has spent nothing yet and
       // emits no frame before its first turn, so its baseline is zero; a
       // resumed or forked one is already carrying history — a fork's first
@@ -1295,6 +1330,7 @@ export class CodexSession extends BaseSession {
    */
   private threadParams(): {
     cwd: string
+    developerInstructions?: string
     model?: string
     approvalPolicy: CodexModePolicy['approvalPolicy']
     sandbox: CodexModePolicy['sandbox']
@@ -1322,6 +1358,25 @@ export class CodexSession extends BaseSession {
       mcpServers[name] = { ...(mcpServers[name] ?? {}), enabled: false }
     return {
       cwd: this.cwd,
+      ...(sessionToolsAvailable() ||
+      this.skillCatalog?.skills.length ||
+      this.options.resumeSessionId ||
+      this.options.forkSession
+        ? {
+            developerInstructions: [
+              ...(sessionToolsAvailable() ? [sessionToolsGuidance({ toolPrefix: '' })] : []),
+              ...(this.skillCatalog &&
+              (this.skillCatalog.skills.length ||
+                this.options.resumeSessionId ||
+                this.options.forkSession)
+                ? [
+                    renderClaudeSkillCatalog(this.skillCatalog),
+                    'When this thread is resumed, a later shared_claude_skills_update message with a revision replaces this catalog, including when its skill list is empty. Treat only the latest catalog as active.'
+                  ]
+                : [])
+            ].join('\n\n')
+          }
+        : {}),
       ...(this.model !== undefined ? { model: this.model } : {}),
       approvalPolicy,
       sandbox,

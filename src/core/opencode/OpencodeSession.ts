@@ -103,6 +103,12 @@ import { opencodeAuthHooks } from './opencode-auth-hooks'
 import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import { BashStreamGate } from './bash-stream-gate'
 import { discoverOpencodeSkills } from './command-skill-discovery'
+import { effectiveClaudeSkillCatalog } from './effective-claude-skills'
+import {
+  expandClaudeSkillInvocation,
+  resolveClaudeSkills,
+  type ClaudeSkillCatalog
+} from '../skills/claude-skills'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { loadClaudePermissions } from '../services/claude-settings'
@@ -403,6 +409,9 @@ export class OpencodeSession extends BaseSession {
   private sessionRepoVisibilityPromise: Promise<RepoVisibility> | null = null
 
   private knownCommandNames = new Set<string>()
+  private sharedSkillCatalog: ClaudeSkillCatalog | null = null
+  private effectiveSkillCatalog: ClaudeSkillCatalog | null = null
+  private deliveredSkills: SkillInfo[] | null = null
   private _cancelled = false
   private connectingPromise: Promise<void> | null = null
   private establishingPromise: Promise<void> | null = null
@@ -803,6 +812,13 @@ export class OpencodeSession extends BaseSession {
       uri: `data:${att.mediaType};base64,${att.base64Data}`,
       ...(att.fileName ? { name: att.fileName } : {})
     }))
+    if (!this.effectiveSkillCatalog) {
+      const source = this.sharedSkillCatalog ?? resolveClaudeSkills(this.cwd)
+      const exposed = await client.skills().catch(() => [])
+      this.effectiveSkillCatalog = effectiveClaudeSkillCatalog(source, exposed)
+    }
+    const expanded = expandClaudeSkillInvocation(text, this.effectiveSkillCatalog)
+    if (expanded) text = expanded.text
     const slash = text.match(/^\/(\S+)\s*([\s\S]*)$/)
     if (slash && this.knownCommandNames.has(slash[1])) {
       this.pendingCommandEchoes++
@@ -986,6 +1002,9 @@ export class OpencodeSession extends BaseSession {
           return
         }
         this.conn = c
+        this.sharedSkillCatalog = c.skillCatalog ?? resolveClaudeSkills(this.cwd)
+        this.effectiveSkillCatalog = null
+        this.deliveredSkills = null
         this.client = new OpencodeClient(c)
         // A new lease may be a different server (another config): re-read
         // what is per server, and re-assert the session's rules.
@@ -1029,15 +1048,64 @@ export class OpencodeSession extends BaseSession {
           return []
         })
       ])
-      this.knownCommandNames = new Set(commands.map((c) => c.name))
-      this.send(
-        'session:slash-commands',
-        commands.map((c) => ({ name: '/' + c.name, description: c.description }))
+      const shared = this.sharedSkillCatalog ?? resolveClaudeSkills(this.cwd)
+      const effective = effectiveClaudeSkillCatalog(shared, skills)
+      this.effectiveSkillCatalog = effective
+      const normalized = (value: string): string => {
+        const path = value.replaceAll('\\', '/').replace(/\/+$/, '')
+        return process.platform === 'win32' ? path.toLowerCase() : path
+      }
+      const roots = (shared.sourceRoots ?? []).map(normalized)
+      const fromClaudeRoot = (file: string): boolean => {
+        const path = normalized(file)
+        return roots.some((root) => path === root || path.startsWith(root + '/'))
+      }
+      const native = skills.filter(
+        (skill) =>
+          !fromClaudeRoot(skill.path) &&
+          !shared.skills.some(
+            (selected) => selected.name === skill.name || selected.aliases?.includes(skill.name)
+          )
       )
-      this.send(
-        'session:skills',
-        skills.map((s) => s.name)
+      this.deliveredSkills = [
+        ...native.map((skill) => ({
+          name: skill.name,
+          displayName: skill.name,
+          description: skill.description ?? '',
+          source: 'project' as const,
+          path: skill.path,
+          content: skill.content
+        })),
+        ...effective.skills
+      ]
+      const suppressed = new Set(
+        skills.filter((skill) => fromClaudeRoot(skill.path)).map((skill) => skill.name)
       )
+      const denied = new Set(
+        shared.skills
+          .filter((selected) => !effective.skills.includes(selected))
+          .flatMap((s) => [s.name, `skill:${s.name}`, ...(s.aliases ?? [])])
+      )
+      this.knownCommandNames = new Set(
+        commands.filter((command) => !denied.has(command.name)).map((command) => command.name)
+      )
+      this.send('session:slash-commands', [
+        ...commands
+          .filter(
+            (c) =>
+              !suppressed.has(c.name) &&
+              !shared.skills.some((selected) => selected.name === c.name) &&
+              !denied.has(c.name)
+          )
+          .map((c) => ({ name: '/' + c.name, description: c.description })),
+        ...effective.skills
+          .filter((s) => s.userInvocable)
+          .map((s) => ({ name: '/' + s.name, description: s.description }))
+      ])
+      this.send('session:skills', [
+        ...native.map((s) => s.name),
+        ...effective.skills.map((s) => s.name)
+      ])
       if (this.resumeSessionId && !this.openSessionId) {
         await this.resume(this.resumeSessionId)
         // Follow a resumed session at once: a turn opencode resumes on its own
@@ -2889,7 +2957,41 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
-  discoverSkills(cwd: string): Promise<SkillInfo[]> {
-    return discoverOpencodeSkills(cwd)
+  async discoverSkills(cwd: string): Promise<SkillInfo[]> {
+    if (cwd === this.cwd && this.sharedSkillCatalog)
+      return this.deliveredSkills ?? this.effectiveSkillCatalog?.skills ?? []
+    const catalog = resolveClaudeSkills(cwd)
+    const native = await discoverOpencodeSkills(cwd)
+    const shared = effectiveClaudeSkillCatalog(
+      catalog,
+      native.map((skill) => ({
+        id: skill.name,
+        name: skill.name,
+        path: skill.path,
+        content: skill.content,
+        description: skill.description
+      }))
+    ).skills
+    const normalized = (value: string): string => {
+      const path = value.replaceAll('\\', '/').replace(/\/+$/, '')
+      return process.platform === 'win32' ? path.toLowerCase() : path
+    }
+    const roots = (catalog.sourceRoots ?? []).map(normalized)
+    return [
+      ...native.filter(
+        (skill) =>
+          !shared.some(
+            (selected) =>
+              selected.name === skill.name ||
+              selected.aliases?.includes(skill.name) ||
+              selected.path === skill.path
+          ) &&
+          !roots.some((root) => {
+            const file = normalized(skill.path)
+            return file === root || file.startsWith(root + '/')
+          })
+      ),
+      ...shared
+    ]
   }
 }

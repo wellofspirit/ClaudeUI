@@ -52,6 +52,7 @@ import type { PerSessionSnapshot, FullStateSnapshot } from '../../../shared/remo
  */
 export const SEALED_SESSION_FIELDS = [
   'cwd',
+  'slashCommands',
   'messages',
   'itemStreams',
   'itemStreamRevision',
@@ -90,6 +91,7 @@ export const SEALED_SESSION_FIELD_SOURCE: Readonly<
   Record<string, keyof PerSessionSnapshot | 'worktreeInfoMap'>
 > = {
   cwd: 'cwd',
+  slashCommands: 'sessionSlashCommands',
   messages: 'messages',
   itemStreams: 'itemStreams',
   itemStreamRevision: 'itemStreamRevision',

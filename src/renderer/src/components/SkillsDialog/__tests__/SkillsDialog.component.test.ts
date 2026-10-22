@@ -55,7 +55,11 @@ describe('SkillsDialog FC', () => {
     app.teardown()
   })
 
-  async function renderFC(props: { open: boolean; cwd: string | null }): Promise<void> {
+  async function renderFC(props: {
+    open: boolean
+    cwd: string | null
+    sessionId?: string
+  }): Promise<void> {
     const { SkillsDialog } = await import('../SkillsDialog')
     await act(async () => {
       render(React.createElement(SkillsDialog, { ...props, onClose: onClose as () => void }))
@@ -65,6 +69,43 @@ describe('SkillsDialog FC', () => {
   it('renders nothing when not open', async () => {
     await renderFC({ open: false, cwd: '/d/repo' })
     expect(viewProps).toBeNull()
+  })
+
+  it('reloads when the active session changes in the same directory', async () => {
+    const calls: Array<string | undefined> = []
+    app.bridge.ipcMain.handle(
+      'config:load-skill-details',
+      async (_event, _cwd, sessionId?: string) => {
+        calls.push(sessionId)
+        return [makeSkill({ name: sessionId ?? 'fallback' })]
+      }
+    )
+    const { SkillsDialog } = await import('../SkillsDialog')
+    const view = render(
+      React.createElement(SkillsDialog, {
+        open: true,
+        cwd: '/same',
+        sessionId: 'one',
+        onClose: onClose as () => void
+      })
+    )
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(viewProps?.skills.map((skill) => skill.name)).toEqual(['one'])
+    view.rerender(
+      React.createElement(SkillsDialog, {
+        open: true,
+        cwd: '/same',
+        sessionId: 'two',
+        onClose: onClose as () => void
+      })
+    )
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(calls).toEqual(['one', 'two'])
+    expect(viewProps?.skills.map((skill) => skill.name)).toEqual(['two'])
   })
 
   it('loads skills via IPC and passes them to View', async () => {

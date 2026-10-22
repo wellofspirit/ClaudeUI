@@ -1143,6 +1143,8 @@ export interface BackgroundLoadView {
 /** Per-session state — everything that varies between sessions */
 export interface PerSessionState {
   cwd: string
+  /** Exact engine commands for this session, kept separate from Claude's app cache. */
+  slashCommands: SlashCommandInfo[]
   sdkActive: boolean
   isHistorical: boolean
   /** Set on a freshly-forked ("branched off") session before its first send.
@@ -1294,6 +1296,7 @@ export interface PerSessionState {
 /** Exported so the replica can build a store entry for a session it learns of first. */
 export const EMPTY_SESSION_STATE: PerSessionState = {
   cwd: '',
+  slashCommands: [],
   sdkActive: false,
   isHistorical: false,
   forkOrigin: null,

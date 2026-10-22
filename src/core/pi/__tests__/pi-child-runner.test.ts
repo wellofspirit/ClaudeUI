@@ -32,6 +32,8 @@ function defaultHandler(cmd: Cmd): Record<string, unknown> {
         success: true,
         data: { text: 'child answer' }
       }
+    case 'get_commands':
+      return { type: 'response', command: 'get_commands', success: true, data: { commands: [] } }
     default:
       return { type: 'response', command: String(cmd.type), success: true, data: {} }
   }
@@ -154,14 +156,132 @@ function runnerOpts(
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0))
 
 describe('PiChildRunner.start', () => {
-  it('spawns with the cwd and spawn opts, then get_state, then set_model with the decoded model', async () => {
+  it.each([null, {}, { name: 'skill:off', source: 'skill' }])(
+    'keeps unverified inventory fail closed for malformed command %j',
+    async (entry) => {
+      const child = makeFakeChild((cmd) =>
+        cmd.type === 'get_commands'
+          ? {
+              type: 'response',
+              command: 'get_commands',
+              success: true,
+              data: { commands: [entry] }
+            }
+          : defaultHandler(cmd)
+      )
+      const runner = await PiChildRunner.start(runnerOpts(child))
+      await expect(runner.runTurn('/skill:unresolved')).resolves.toMatchObject({
+        kind: 'error',
+        cause: 'refused'
+      })
+      expect(child.commandTypes()).toEqual(['get_state', 'get_commands', 'set_model'])
+      runner.dispose()
+    }
+  )
+  it('fails closed for unresolved commands when native command discovery fails', async () => {
+    const child = makeFakeChild((cmd) =>
+      cmd.type === 'get_commands'
+        ? { type: 'response', command: 'get_commands', success: false }
+        : defaultHandler(cmd)
+    )
+    const runner = await PiChildRunner.start(runnerOpts(child))
+    await expect(runner.runTurn('/skill:bad/name')).resolves.toMatchObject({
+      kind: 'error',
+      cause: 'refused'
+    })
+    expect(child.commandTypes()).toEqual(['get_state', 'get_commands', 'set_model'])
+    runner.dispose()
+  })
+
+  it('does not forward malformed selected arguments to a shadowing native command', async () => {
+    const child = makeFakeChild((cmd) =>
+      cmd.type === 'get_commands'
+        ? {
+            type: 'response',
+            command: 'get_commands',
+            success: true,
+            data: {
+              commands: [
+                {
+                  name: 'skill:plugin:task',
+                  source: 'skill',
+                  sourceInfo: { path: '/tmp/child-cwd/.claude/skills/old/SKILL.md' }
+                }
+              ]
+            }
+          }
+        : defaultHandler(cmd)
+    )
+    const runner = await PiChildRunner.start(
+      runnerOpts(child, {
+        spawnOpts: {
+          gateHandler: async () => ({ behavior: 'allow' }),
+          skillSourceRoots: ['/tmp/child-cwd/.claude/skills'],
+          skills: [
+            {
+              name: 'plugin:task',
+              path: '/tmp/child-cwd/.claude/skills/task/SKILL.md',
+              directory: '/tmp/child-cwd/.claude/skills/task',
+              description: 'Task',
+              content: 'Selected body',
+              source: 'project',
+              userInvocable: true,
+              modelInvocable: true,
+              compatibilityWarnings: []
+            }
+          ]
+        }
+      })
+    )
+    await expect(runner.runTurn('/skill:plugin:task "unterminated')).resolves.toMatchObject({
+      kind: 'error',
+      cause: 'refused'
+    })
+    expect(child.commandTypes()).toEqual(['get_state', 'get_commands', 'set_model'])
+    runner.dispose()
+  })
+  it('refuses a Claude-owned native command before prompt RPC in a child turn', async () => {
+    const child = makeFakeChild((cmd) =>
+      cmd.type === 'get_commands'
+        ? {
+            type: 'response',
+            command: 'get_commands',
+            success: true,
+            data: {
+              commands: [
+                {
+                  name: 'skill:off',
+                  source: 'skill',
+                  sourceInfo: { path: '/tmp/child-cwd/.claude/skills/off/SKILL.md' }
+                }
+              ]
+            }
+          }
+        : defaultHandler(cmd)
+    )
+    const runner = await PiChildRunner.start(
+      runnerOpts(child, {
+        spawnOpts: {
+          gateHandler: async () => ({ behavior: 'allow' }),
+          skillSourceRoots: ['/tmp/child-cwd/.claude/skills']
+        }
+      })
+    )
+    await expect(runner.runTurn('/skill:off run')).resolves.toMatchObject({
+      kind: 'error',
+      cause: 'refused'
+    })
+    expect(child.commandTypes()).toEqual(['get_state', 'get_commands', 'set_model'])
+    runner.dispose()
+  })
+  it('spawns with the cwd and spawn opts, then snapshots commands and sets the decoded model', async () => {
     const child = makeFakeChild()
     const runner = await PiChildRunner.start(runnerOpts(child))
     expect(child.spawnCalls).toHaveLength(1)
     expect(child.spawnCalls[0].cwd).toBe('/tmp/child-cwd')
     expect(child.spawnCalls[0].args).toEqual(['--no-session'])
-    expect(child.commandTypes()).toEqual(['get_state', 'set_model'])
-    expect(child.client.request.mock.calls[1][0]).toMatchObject({
+    expect(child.commandTypes()).toEqual(['get_state', 'get_commands', 'set_model'])
+    expect(child.client.request.mock.calls[2][0]).toMatchObject({
       type: 'set_model',
       provider: 'openai-codex',
       modelId: 'gpt-5.6-luna'

@@ -32,6 +32,7 @@ import {
 import type {
   AttachmentUpload,
   FileAttachment,
+  SlashCommandInfo,
   VoiceState as VoiceStateType
 } from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
@@ -234,9 +235,14 @@ export function InputBox(): React.JSX.Element {
   // Capability gating — use status.capabilities (authoritative after spawn;
   // seeded from selectedEngineId before spawn via createNewSession).
   const capabilities = useActiveSession((s) => s.status.capabilities)
+  const sessionEngineId = useActiveSession((s) => s.selectedEngineId)
+  const lastSelectedEngineId = useSessionStore((s) => s.lastSelectedEngineId)
+  const effectiveEngineId = activeSessionId ? sessionEngineId : lastSelectedEngineId
 
   const cwd = useActiveSession((s) => s.cwd)
   const status = useActiveSession((s) => s.status)
+  const startedSessionId = useActiveSession((s) => s.status.sessionId)
+  const sessionSlashCommands = useActiveSession((s) => s.slashCommands)
   const sdkActive = useActiveSession((s) => s.sdkActive)
   const markSdkActive = useSessionStore((s) => s.markSdkActive)
   const queuedItems = useActiveSession((s) => s.queuedItems)
@@ -264,16 +270,64 @@ export function InputBox(): React.JSX.Element {
   const removeDraftAttachment = useSessionStore((s) => s.removeDraftAttachment)
   const setDraftAttachments = useSessionStore((s) => s.setDraftAttachments)
 
-  // Slash command autocomplete — merge SDK commands with filesystem-scanned custom commands
+  // Claude keeps its native command merge. Other engines use their own
+  // delivered snapshot, so a filesystem scan cannot revive a disabled skill.
   const slashCommands = useSessionStore((s) => s.slashCommands)
   const customCommands = useSessionStore((s) => s.customCommands)
   const setCustomCommands = useSessionStore((s) => s.setCustomCommands)
+  const [skillPreview, setSkillPreview] = useState<{
+    cwd: string
+    commands: SlashCommandInfo[]
+  } | null>(null)
+  useEffect(() => {
+    if (!cwd || effectiveEngineId === 'claude' || startedSessionId) return
+    let cancelled = false
+    window.api
+      .loadSkillDetails(cwd)
+      .then((skills) => {
+        if (cancelled) return
+        setSkillPreview({
+          cwd,
+          commands: skills
+            .filter((skill) => skill.userInvocable === true)
+            .map((skill) => ({ name: `/${skill.name}`, description: skill.description }))
+        })
+      })
+      .catch(() => {
+        if (!cancelled) setSkillPreview({ cwd, commands: [] })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [cwd, effectiveEngineId, startedSessionId])
   // Slash-command menu is gated on capabilities.slashCommands: when the engine
   // doesn't support slash commands, the menu offers nothing (engine + filesystem
   // commands alike) and `/` types as literal text. Claude: true → unchanged.
   const mergedSlashCommands = useMemo(
-    () => (capabilities.slashCommands ? mergeSlashCommands(slashCommands, customCommands) : []),
-    [capabilities.slashCommands, slashCommands, customCommands]
+    () =>
+      capabilities.slashCommands
+        ? effectiveEngineId === 'claude'
+          ? mergeSlashCommands(
+              startedSessionId && sdkActive ? sessionSlashCommands : slashCommands,
+              customCommands
+            )
+          : startedSessionId
+            ? sessionSlashCommands
+            : skillPreview?.cwd === cwd
+              ? skillPreview.commands
+              : []
+        : [],
+    [
+      capabilities.slashCommands,
+      effectiveEngineId,
+      startedSessionId,
+      sdkActive,
+      sessionSlashCommands,
+      skillPreview,
+      cwd,
+      slashCommands,
+      customCommands
+    ]
   )
 
   // Eagerly scan custom commands when cwd changes
@@ -322,17 +376,13 @@ export function InputBox(): React.JSX.Element {
   const requestedModelValue = useActiveSession((s) => s.selectedModel)
   const setSelectedModel = useSessionStore((s) => s.setSelectedModel)
   const setSelectedEngine = useSessionStore((s) => s.setSelectedEngine)
-  const lastSelectedEngineId = useSessionStore((s) => s.lastSelectedEngineId)
   const setLastSelectedEngineId = useSessionStore((s) => s.setLastSelectedEngineId)
   // Engine is immutable after backend commitment, so the picker disappears
   // once initialization starts. Historical sessions are committed by definition.
-  const startedSessionId = useActiveSession((s) => s.status.sessionId)
   const isHistorical = useActiveSession((s) => s.isHistorical)
   const codexModelExplicit = useActiveSession((s) => s.codexModelExplicit)
-  const sessionEngineId = useActiveSession((s) => s.selectedEngineId)
   // On welcome, the picker controls the engine that createNewSession will seed.
   // Once a session exists, it always reflects that session's own engine instead.
-  const effectiveEngineId = activeSessionId ? sessionEngineId : lastSelectedEngineId
   // opencode/pi report the model the live process will actually use. Local
   // picks and historical hydration can differ until a setter is acknowledged.
   const selectedModelValue =

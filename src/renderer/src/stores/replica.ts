@@ -899,6 +899,7 @@ function projectSession(
   return {
     ...base,
     cwd: c.cwd,
+    slashCommands: c.slashCommands,
     messages: c.messages,
     itemStreams: c.itemStreams,
     itemStreamRevision: c.itemStreamRevision,

@@ -1618,6 +1618,23 @@ describe('reducer — app-level config', () => {
     expect(snap.sessions['a'].slashCommands).toEqual([{ name: '/foo' }])
     expect(snap.sessions['b'].slashCommands).toEqual([{ name: '/foo' }])
     expect(snap.sessions['b'].sdkSkillNames).toEqual(['skill-x'])
+    expect(snap.sessions['a'].sessionSlashCommands).toEqual([{ name: '/foo' }])
+    expect(snap.sessions['b'].sessionSlashCommands).toEqual([])
+  })
+
+  it('scopes engine commands by routing id across inactive events and cold snapshots', () => {
+    const live = fold([
+      created('a', '/project-one'),
+      created('b', '/project-two'),
+      ['session:slash-commands', 'a', [{ name: '/alpha' }]],
+      ['session:slash-commands', 'b', [{ name: '/beta' }]],
+      ['session:slash-commands', 'a', [{ name: '/alpha-new' }]]
+    ])
+    expect(live.sessions.a.slashCommands).toEqual([{ name: '/alpha-new' }])
+    expect(live.sessions.b.slashCommands).toEqual([{ name: '/beta' }])
+    const cold = fromSnapshot(toSnapshot(live, 5))
+    expect(cold.sessions.a.slashCommands).toEqual([{ name: '/alpha-new' }])
+    expect(cold.sessions.b.slashCommands).toEqual([{ name: '/beta' }])
   })
 })
 

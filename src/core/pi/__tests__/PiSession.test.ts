@@ -9,8 +9,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { clearSyncSubscribersForTests } from '../../services/sync-host'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, rmdir } from 'node:fs/promises'
-import { join, delimiter } from 'node:path'
+import { mkdtemp, mkdir, writeFile, rm, rmdir } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { PiEvent } from '../pi-protocol'
 import type { DispatchContext } from '../../services/cross-engine-dispatcher'
 import type { ChatMessage, QueuedItem, StatusLineData } from '../../../shared/types'
@@ -4340,6 +4340,130 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
 })
 
 describe('PiSession — slash commands + skills discovery (get_commands, M2b)', () => {
+  it.each(['valid', 'failed'] as const)(
+    'ignores a late old-process discovery after replacement %s discovery',
+    async (replacement) => {
+      let resolveOld!: (value: unknown) => void
+      const oldCommands = new Promise<unknown>((resolve) => {
+        resolveOld = resolve
+      })
+      let discoveries = 0
+      const command = (name: string) => ({
+        name: `skill:${name}`,
+        source: 'skill',
+        sourceInfo: { path: `/cwd/.pi/skills/${name}/SKILL.md` }
+      })
+      mockRequest.mockImplementation((cmd: { type: string }) => {
+        if (cmd.type !== 'get_commands') return defaultRequestImpl(cmd)
+        discoveries++
+        if (discoveries === 1) return oldCommands
+        return Promise.resolve(
+          replacement === 'valid'
+            ? {
+                type: 'response',
+                command: 'get_commands',
+                success: true,
+                data: { commands: [command('new')] }
+              }
+            : { type: 'response', command: 'get_commands', success: false }
+        )
+      })
+      const win = new MockWindow()
+      const session = new PiSession('rid-discovery-race', win as never, '/cwd', {})
+      await session.run(null)
+      await vi.waitFor(() => expect(discoveries).toBe(1))
+      session.cancel()
+      await session.run(null)
+      await vi.waitFor(() => expect(discoveries).toBe(2))
+      await vi.waitFor(() =>
+        expect(sentPayloads(win, 'session:skills')).toContainEqual(
+          replacement === 'valid' ? ['new'] : []
+        )
+      )
+      resolveOld({
+        type: 'response',
+        command: 'get_commands',
+        success: true,
+        data: { commands: [command('old')] }
+      })
+      await new Promise((resolve) => setImmediate(resolve))
+      expect(sentPayloads(win, 'session:skills').at(-1)).toEqual(
+        replacement === 'valid' ? ['new'] : []
+      )
+      expect((await session.discoverSkills('/cwd')).map((skill) => skill.name)).not.toContain('old')
+      session.dispose()
+    }
+  )
+  it.each([null, {}, { name: 'skill:off', source: 'skill' }])(
+    'rejects unresolved skill text after malformed native command %j',
+    async (entry) => {
+      mockRequest.mockImplementation((cmd: { type: string }) =>
+        cmd.type === 'get_commands'
+          ? Promise.resolve({
+              type: 'response',
+              command: 'get_commands',
+              success: true,
+              data: { commands: [entry] }
+            })
+          : defaultRequestImpl(cmd)
+      )
+      const win = new MockWindow()
+      const session = new PiSession('rid-bad-commands', win as never, '/cwd', {})
+      await session.run('normal text')
+      expect(sentPayloads(win, 'session:slash-commands')).toContainEqual([])
+      await session.run('/skill:bad/name')
+      expect(sentPayloads(win, 'session:error')).toContain(
+        'Skill "bad/name" is unavailable in this session.'
+      )
+      expect(mockRequest).not.toHaveBeenCalledWith({ type: 'prompt', message: '/skill:bad/name' })
+      session.dispose()
+    }
+  )
+  it('holds unrelated native skill details from delivered paths without rescanning on discovery', async () => {
+    const { tmpdir } = await vi.importActual<typeof import('node:os')>('node:os')
+    const cwd = await mkdtemp(join(tmpdir(), 'pi-native-details-'))
+    const file = join(cwd, '.pi', 'skills', 'native', 'SKILL.md')
+    await mkdir(join(cwd, '.pi', 'skills', 'native'), { recursive: true })
+    await writeFile(file, '---\nname: native\ndescription: Native\n---\n\nNative body\n')
+    mockRequest.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'get_commands'
+        ? Promise.resolve({
+            type: 'response',
+            command: 'get_commands',
+            success: true,
+            data: {
+              commands: [
+                {
+                  name: 'skill:native',
+                  description: 'Native',
+                  source: 'skill',
+                  sourceInfo: { path: file, scope: 'user' }
+                }
+              ]
+            }
+          })
+        : defaultRequestImpl(cmd)
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-native-details', win as never, cwd, {})
+    try {
+      await session.run('hi')
+      expect(await session.discoverSkills(cwd)).toEqual([
+        expect.objectContaining({
+          name: 'native',
+          source: 'user',
+          path: file,
+          content: 'Native body'
+        })
+      ])
+      await writeFile(file, 'Changed after Pi loaded the command')
+      expect((await session.discoverSkills(cwd))[0].content).toBe('Native body')
+      expect(sentPayloads(win, 'session:skills')).toContainEqual(['native'])
+    } finally {
+      session.dispose()
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
   it('emits session:slash-commands (/-prefixed) and session:skills (skill: prefix stripped), filtering sourceInfo.scope === "temporary" entries', async () => {
     mockRequest.mockImplementation((cmd: { type: string }) =>
       cmd.type === 'get_commands'
@@ -4409,7 +4533,7 @@ describe('PiSession — slash commands + skills discovery (get_commands, M2b)', 
     expect(skillsPayload).toEqual(['brave-search'])
   })
 
-  it('a get_commands failure (success:false) never blocks the session — no slash-commands/skills emission, no crash', async () => {
+  it('a get_commands failure clears native discovery and keeps normal prompts available', async () => {
     mockRequest.mockImplementation((cmd: { type: string }) =>
       cmd.type === 'get_commands'
         ? Promise.resolve({
@@ -4425,8 +4549,13 @@ describe('PiSession — slash commands + skills discovery (get_commands, M2b)', 
 
     await expect(session.run('hi')).resolves.toBeUndefined()
 
-    expect(sentChannels(win)).not.toContain('session:slash-commands')
-    expect(sentChannels(win)).not.toContain('session:skills')
+    expect(sentPayloads(win, 'session:slash-commands')).toContainEqual([])
+    expect(sentPayloads(win, 'session:skills')).toContainEqual([])
+    await session.run('/skill:bad/name')
+    expect(sentPayloads(win, 'session:error')).toContain(
+      'Skill "bad/name" is unavailable in this session.'
+    )
+    expect(mockRequest).not.toHaveBeenCalledWith({ type: 'prompt', message: '/skill:bad/name' })
   })
 
   it('a get_commands request rejection (process hiccup) never blocks the session', async () => {
@@ -4438,12 +4567,62 @@ describe('PiSession — slash commands + skills discovery (get_commands, M2b)', 
 
     await expect(session.run('hi')).resolves.toBeUndefined()
 
-    expect(sentChannels(win)).not.toContain('session:slash-commands')
+    expect(sentPayloads(win, 'session:slash-commands')).toContainEqual([])
   })
 })
 
 describe('PiSession.run — slash-prefixed prompt passthrough (M2b)', () => {
-  it('a "/"-prefixed prompt is sent to pi VERBATIM — pi expands /skill:name and extension commands server-side, no ClaudeUI routing change', async () => {
+  it('rejects malformed selected arguments before a shadowing native skill can run', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-selected-invalid', win as never, '/cwd', {})
+    await session.run('warm')
+    ;(session as unknown as { sharedSkillCatalog: unknown }).sharedSkillCatalog = {
+      skills: [
+        {
+          name: 'plugin:task',
+          path: '/cwd/.claude/skills/task/SKILL.md',
+          directory: '/cwd/.claude/skills/task',
+          description: 'Task',
+          content: 'Selected body',
+          source: 'project',
+          userInvocable: true,
+          modelInvocable: true,
+          compatibilityWarnings: []
+        }
+      ],
+      sourceRoots: ['/cwd/.claude/skills'],
+      warnings: [],
+      revision: ''
+    }
+    mockRequest.mockClear()
+    await session.run('/skill:plugin:task "unterminated')
+    expect(sentPayloads(win, 'session:error')).toContain(
+      'Skill "plugin:task" is unavailable in this session.'
+    )
+    expect(mockRequest).not.toHaveBeenCalledWith({
+      type: 'prompt',
+      message: '/skill:plugin:task "unterminated'
+    })
+  })
+  it('an unrelated verified native skill command is passed to Pi unchanged', async () => {
+    mockRequest.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'get_commands'
+        ? Promise.resolve({
+            type: 'response',
+            command: 'get_commands',
+            success: true,
+            data: {
+              commands: [
+                {
+                  name: 'skill:brave-search',
+                  source: 'skill',
+                  sourceInfo: { path: '/cwd/.pi/skills/brave-search/SKILL.md' }
+                }
+              ]
+            }
+          })
+        : defaultRequestImpl(cmd)
+    )
     const win = new MockWindow()
     const session = new PiSession('rid-slash-1', win as never, '/cwd', {})
 
@@ -4569,61 +4748,15 @@ function lastSpawnOpts(): { cwd: string; args: string[]; env: Record<string, str
   return calls[calls.length - 1][1]
 }
 
-describe('PiSession — skill dirs env var (M3 shared skills)', () => {
-  it('omits CLAUDEUI_PI_SKILL_DIRS entirely when neither skill dir exists', async () => {
+describe('PiSession — selected skill catalog delivery', () => {
+  it('keeps large skill bodies off the Pi process environment', async () => {
     const win = new MockWindow()
-    const session = new PiSession('rid-skills-none', win as never, '/cwd', {})
-    await session.run('hi')
-    expect(lastSpawnOpts().env).not.toHaveProperty('CLAUDEUI_PI_SKILL_DIRS')
-  })
-
-  it('sets CLAUDEUI_PI_SKILL_DIRS to the home skills dir when only it exists', async () => {
-    const homeSkills = join('/fake/home', '.claude', 'skills')
-    mockExistsSync.mockImplementation((p: string) => p === homeSkills)
-    const win = new MockWindow()
-    const session = new PiSession('rid-skills-home', win as never, '/cwd', {})
-    await session.run('hi')
-    expect(lastSpawnOpts().env.CLAUDEUI_PI_SKILL_DIRS).toBe(homeSkills)
-  })
-
-  it('sets CLAUDEUI_PI_SKILL_DIRS to the cwd skills dir when only it exists', async () => {
-    const cwdSkills = join('/cwd', '.claude', 'skills')
-    mockExistsSync.mockImplementation((p: string) => p === cwdSkills)
-    const win = new MockWindow()
-    const session = new PiSession('rid-skills-cwd', win as never, '/cwd', {})
-    await session.run('hi')
-    expect(lastSpawnOpts().env.CLAUDEUI_PI_SKILL_DIRS).toBe(cwdSkills)
-  })
-
-  it('joins BOTH dirs with path.delimiter (home first) when both exist', async () => {
-    const homeSkills = join('/fake/home', '.claude', 'skills')
-    const cwdSkills = join('/cwd', '.claude', 'skills')
-    mockExistsSync.mockReturnValue(true)
-    const win = new MockWindow()
-    const session = new PiSession('rid-skills-both', win as never, '/cwd', {})
-    await session.run('hi')
-    expect(lastSpawnOpts().env.CLAUDEUI_PI_SKILL_DIRS).toBe([homeSkills, cwdSkills].join(delimiter))
-  })
-
-  it('treats a thrown existsSync (e.g. permission error) as "does not exist" rather than failing the spawn', async () => {
-    mockExistsSync.mockImplementation(() => {
-      throw new Error('EPERM')
-    })
-    const win = new MockWindow()
-    const session = new PiSession('rid-skills-throw', win as never, '/cwd', {})
-    await expect(session.run('hi')).resolves.toBeUndefined()
-    expect(lastSpawnOpts().env).not.toHaveProperty('CLAUDEUI_PI_SKILL_DIRS')
-  })
-
-  it('still sets the bridge env vars alongside the skill dirs var (both coexist)', async () => {
-    mockExistsSync.mockReturnValue(true)
-    const win = new MockWindow()
-    const session = new PiSession('rid-skills-coexist', win as never, '/cwd', {})
+    const session = new PiSession('rid-skills-catalog', win as never, '/cwd', {})
     await session.run('hi')
     const env = lastSpawnOpts().env
     expect(env.CLAUDEUI_PI_BRIDGE_URL).toBe('http://127.0.0.1:9999')
     expect(env.CLAUDEUI_PI_BRIDGE_TOKEN).toBe('test-bridge-token')
-    expect(env.CLAUDEUI_PI_SKILL_DIRS).toBeTruthy()
+    expect(env).not.toHaveProperty('CLAUDEUI_PI_SKILL_DIRS')
   })
 })
 

@@ -352,7 +352,7 @@ describe('PiSubagentManager.run', () => {
         piAgentIdentityBlock({ agentId, spawner: null })
     )
     await vi.waitFor(() => expect(child.commands().length).toBeGreaterThan(1))
-    expect(child.commands()[1]).toMatchObject({
+    expect(child.commands().find((command) => command.type === 'set_model')).toMatchObject({
       type: 'set_model',
       provider: 'openai-codex',
       modelId: 'parent-model'
@@ -395,7 +395,12 @@ describe('PiSubagentManager.run', () => {
       )
       await vi.waitFor(() => expect(fake.children).toHaveLength(1))
       await vi.waitFor(() => expect(fake.children[0].commands().length).toBeGreaterThan(1))
-      expect(fake.children[0].commands()[1]).toMatchObject({ type: 'set_model', modelId: expected })
+      expect(
+        fake.children[0].commands().find((command) => command.type === 'set_model')
+      ).toMatchObject({
+        type: 'set_model',
+        modelId: expected
+      })
       await settle(fake.children[0])
       await pending
     }

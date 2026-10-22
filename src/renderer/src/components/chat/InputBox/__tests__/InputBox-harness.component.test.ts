@@ -257,7 +257,7 @@ describe('InputBox on a harness that does not run', () => {
     ['claude', 'Ask Claude anything, / for commands'],
     ['opencode', 'Ask opencode anything, / for commands'],
     ['pi', 'Ask pi anything, / for commands'],
-    ['codex', 'Ask Codex anything']
+    ['codex', 'Ask Codex anything, / for commands']
   ] as const)('the placeholder names the session’s harness: %s', async (engine, text) => {
     // Missing, so opencode keeps its engine (no model to fall back from).
     await sessionOn(engine, engine === 'claude' ? [] : [engine])

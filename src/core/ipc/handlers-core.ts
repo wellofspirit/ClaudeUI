@@ -1038,18 +1038,20 @@ export function setCleanupPeriod(manager: SessionManager, days: number): void {
   })
 }
 
-export function loadSkillDetails(manager: SessionManager, cwd: string) {
-  // Delegate skill discovery to an active session for this cwd via the neutral
-  // ISession.discoverSkills seam. Preserve historical precedence: an opencode
-  // session on this cwd wins over Claude. With no active session (or only a
-  // Claude one) fall back to the Claude scanner — identical to
-  // ClaudeSession.discoverSkills, so behavior is unchanged.
-  let delegate: ISession | undefined
-  manager.forEach((session) => {
-    if (session.cwd !== cwd) return
-    if (!delegate || session.engineId === 'opencode') delegate = session
-  })
-  return delegate?.discoverSkills?.(cwd) ?? scanSkills(cwd)
+export function loadSkillDetails(manager: SessionManager, cwd: string, sessionId?: string) {
+  // A supplied id is authoritative. Never display another engine's catalog just
+  // because it shares this directory with the selected session.
+  if (sessionId) {
+    let selected: ISession | undefined = manager.get(sessionId)
+    if (!selected)
+      manager.forEach((session) => {
+        if (session.getSessionId() === sessionId) selected = session
+      })
+    return selected?.cwd === cwd
+      ? (selected.discoverSkills?.(cwd) ?? scanSkills(cwd))
+      : scanSkills(cwd)
+  }
+  return scanSkills(cwd)
 }
 
 /**

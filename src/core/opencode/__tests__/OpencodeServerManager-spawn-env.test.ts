@@ -139,7 +139,11 @@ describe('opencode serve --stdio spawn (default spawn path)', () => {
       headers: { Authorization: 'Bearer hosted-token' },
       codemode: false
     })
-    expect(cfg.plugins).toEqual(['/res/opencode/claudeui-xeng'])
+    expect(cfg.plugins).toEqual([
+      '-opencode.config.compatibility',
+      '-opencode.config.skill',
+      '/res/opencode/claudeui-xeng'
+    ])
     expect(cfg).not.toHaveProperty('experimental')
     expect(cfg).not.toHaveProperty('autoupdate')
   })
