@@ -414,6 +414,19 @@ describe('captureRedirects — win32 `/tmp` is the host temp dir (exit review #3
     expect(result?.allInScope).toBe(false)
   })
 
+  it('folds `/TMP` and `/Tmp` too (Git Bash mounts case-insensitively; exit review N2)', async () => {
+    const probe = tmpProbe({ [`${TEMP}/sb/tmplink`]: { type: 'symlink', target: 'C:/Windows' } })
+    for (const spelling of ['/TMP', '/Tmp']) {
+      const result = await captureRedirects(`echo k >> ${spelling}/sb/tmplink/x.txt`, scope, {
+        sessionStartMs: SESSION_START,
+        platform: 'win32',
+        probe
+      })
+      expect(result?.symlinked).toEqual([`${spelling}/sb/tmplink/x.txt`])
+      expect(result?.allInScope).toBe(false)
+    }
+  })
+
   it('still measures an ordinary `/tmp` write as in scope (no fabricated finding)', async () => {
     const probe = tmpProbe({ [`${TEMP}/sb`]: { type: 'dir' } })
     const result = await captureRedirects('echo k >> /tmp/sb/x.txt', scope, {
@@ -431,8 +444,12 @@ describe('captureRedirects — win32 `/tmp` is the host temp dir (exit review #3
   })
 })
 
-describe('captureRedirects — out-of-scope writes through a directory link (exit review rec)', () => {
-  it('flags a protected real target as symlinked AND a protected hit', async () => {
+describe('captureRedirects — out-of-scope writes through a directory link (exit review rec + N5)', () => {
+  // Exit review N5 REVISED the first round: an out-of-scope target written
+  // through a benign linked ancestor is NOT `symlinked` — lstat reads through
+  // the link, so exists/empty/mtime describe the real file. Only a protected
+  // real target is the finding.
+  it('adds a protected real target as a hit but keeps the measured facts, not symlinked', async () => {
     const probe = fakeProbe({
       entries: {
         '/work/outside/keys/authorized_keys': { type: 'file', size: 10 },
@@ -441,20 +458,50 @@ describe('captureRedirects — out-of-scope writes through a directory link (exi
       real: { '/work/outside/keys': '/work/home/.ssh' }
     })
     const result = await capture('echo k >> ../outside/keys/authorized_keys', probe)
-    expect(result?.symlinked).toEqual(['../outside/keys/authorized_keys'])
     expect(result?.protectedHits).toEqual(['.ssh'])
-    expect(result?.outOfScope).toEqual([])
+    expect(result?.symlinked).toBeUndefined()
+    expect(result?.outOfScope).toEqual([
+      {
+        path: '/work/outside/keys/authorized_keys',
+        append: true,
+        exists: true,
+        empty: false,
+        modifiedSinceSessionStart: false
+      }
+    ])
     expect(result?.allInScope).toBe(false)
   })
 
-  it('flags a link that lands elsewhere even when nothing is protected', async () => {
+  it('keeps a benign linked ancestor ordinary (a relocated folder clears as before)', async () => {
+    const probe = fakeProbe({
+      entries: {
+        '/work/outside/notes': { type: 'dir' },
+        '/work/outside/notes/new.txt': { type: 'file', size: 0, mtimeMs: SESSION_START - 1 }
+      },
+      real: { '/work/outside/notes': '/work/elsewhere/notes' }
+    })
+    const result = await capture('echo k >> ../outside/notes/new.txt', probe)
+    expect(result?.symlinked).toBeUndefined()
+    expect(result?.protectedHits).toEqual([])
+    expect(result?.outOfScope).toEqual([
+      {
+        path: '/work/outside/notes/new.txt',
+        append: true,
+        exists: true,
+        empty: true,
+        modifiedSinceSessionStart: false
+      }
+    ])
+  })
+
+  it('still measures an absent target through the linked ancestor as exists:false', async () => {
     const probe = fakeProbe({
       entries: { '/work/outside/notes': { type: 'dir' } },
       real: { '/work/outside/notes': '/work/elsewhere/notes' }
     })
     const result = await capture('echo k > ../outside/notes/x.txt', probe)
-    expect(result?.symlinked).toEqual(['../outside/notes/x.txt'])
-    expect(result?.protectedHits).toEqual([])
+    expect(result?.symlinked).toBeUndefined()
+    expect(result?.outOfScope).toEqual([{ path: '/work/outside/notes/x.txt', exists: false }])
   })
 
   it('keeps a plain out-of-scope target measured by its textual path', async () => {
@@ -471,6 +518,237 @@ describe('captureRedirects — out-of-scope writes through a directory link (exi
         modifiedSinceSessionStart: true
       }
     ])
+  })
+})
+
+describe('captureRedirects — win32 drive-less mounts other than /tmp (exit review N4)', () => {
+  // Git Bash's `/etc`, `/usr`, `/bin`, `/opt` are under its install root, but
+  // Node probes `<process drive>:\etc`. A measured field there is a fabrication,
+  // so the target keeps only its pure facts.
+  it('emits no exists/empty/mtime for `/etc/...` (and never probes it)', async () => {
+    const probed: string[] = []
+    const probe: RedirectProbe = {
+      async lstat(path) {
+        probed.push(path)
+        throw enoent(path)
+      },
+      async realpath(path) {
+        return path
+      }
+    }
+    const result = await captureRedirects(
+      'echo x > /etc/gitconfig',
+      { cwd: 'c:/proj', tempDirs: [] },
+      { sessionStartMs: SESSION_START, platform: 'win32', probe }
+    )
+    expect(result).toEqual({
+      targets: ['/etc/gitconfig'],
+      allInScope: false,
+      outOfScope: [{ path: '/etc/gitconfig' }],
+      unresolvable: [],
+      protectedHits: []
+    })
+    expect(probed).toEqual([])
+  })
+
+  it('still measures the folded `/tmp` spelling and drive-rooted paths on win32', async () => {
+    const probed: string[] = []
+    const probe: RedirectProbe = {
+      async lstat(path) {
+        probed.push(path)
+        throw enoent(path)
+      },
+      async realpath(path) {
+        return path
+      }
+    }
+    const scope = { cwd: 'c:/proj', tempDirs: ['c:/user-temp', '/tmp'], shell: 'posix' as const }
+    await captureRedirects('echo x > /tmp/scratch.log', scope, {
+      sessionStartMs: SESSION_START,
+      platform: 'win32',
+      probe
+    })
+    await captureRedirects(
+      'echo x > d:/_scratch/out.log',
+      { cwd: 'c:/proj', tempDirs: [] },
+      {
+        sessionStartMs: SESSION_START,
+        platform: 'win32',
+        probe
+      }
+    )
+    expect(probed).toContain('c:/user-temp/scratch.log')
+    expect(probed).toContain('d:/_scratch/out.log')
+  })
+})
+
+describe('captureRedirects — one resolved path, two spellings (exit review N3)', () => {
+  // `../out/x` and `../out/lnk/../x` share the resolved path; the second goes
+  // through a link. If the plain spelling is measured LAST, its `exists:false`
+  // used to replace the linked reading's `symlinked`.
+  const entries: Record<string, Entry> = {
+    'c:/out': { type: 'dir' },
+    'c:/out/lnk': { type: 'symlink', target: 'c:/other/sub' },
+    'c:/other': { type: 'dir' },
+    'c:/other/sub': { type: 'dir' }
+  }
+
+  /** Defer the SECOND lstat of the shared path: with the plain spelling second, that is the plain one. */
+  function orderedProbe(): RedirectProbe {
+    const base = fakeProbe({ entries })
+    let calls = 0
+    return {
+      async lstat(path) {
+        if (path === 'c:/out/x' && ++calls === 2) {
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        }
+        return base.lstat(path)
+      },
+      realpath: (path) => base.realpath(path)
+    }
+  }
+
+  it('never lets a plain reading erase a symlinked one (plain finishes last)', async () => {
+    const result = await captureRedirects(
+      'echo k > ../out/lnk/../x; echo a > ../out/x',
+      { cwd: 'c:/proj', tempDirs: [], shell: 'posix' },
+      { sessionStartMs: SESSION_START, platform: 'win32', probe: orderedProbe() }
+    )
+    // Both spellings resolve to the linked path, so both are reported there.
+    expect(result?.symlinked?.slice().sort()).toEqual(['../out/lnk/../x', '../out/x'].sort())
+    expect(result?.outOfScope).toEqual([])
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('keeps the symlinked reading whichever order the two targets are written in', async () => {
+    for (const command of [
+      'echo a > ../out/x; echo k > ../out/lnk/../x',
+      'echo k > ../out/lnk/../x; echo a > ../out/x'
+    ]) {
+      const result = await captureRedirects(
+        command,
+        { cwd: 'c:/proj', tempDirs: [], shell: 'posix' },
+        { sessionStartMs: SESSION_START, platform: 'win32', probe: fakeProbe({ entries }) }
+      )
+      expect(result?.symlinked?.slice().sort()).toEqual(['../out/lnk/../x', '../out/x'].sort())
+      expect(result?.outOfScope).toEqual([])
+    }
+  })
+})
+
+describe('captureRedirects — a link ABOVE the `..` cancels out (exit review N6)', () => {
+  it('does not flag an ancestor junction above the cancelled component', async () => {
+    // The cwd is reached through a junction: `sub/../x` still lands at
+    // `<real cwd>/x`, so nothing moved. The old check compared realpath(prefix)
+    // with the lexical prefix and flagged it.
+    const probe = fakeProbe({
+      entries: { '/work/jroot/proj/sub': { type: 'dir' }, '/work/real/proj/sub': { type: 'dir' } },
+      real: {
+        '/work/jroot': '/work/real',
+        '/work/jroot/proj': '/work/real/proj',
+        '/work/jroot/proj/sub': '/work/real/proj/sub',
+        '/work/real/proj': '/work/real/proj'
+      }
+    })
+    const result = await captureRedirects(
+      'echo x > sub/../x.txt',
+      { cwd: '/work/jroot/proj', tempDirs: [], shell: 'posix' },
+      { sessionStartMs: SESSION_START, platform: 'linux', probe }
+    )
+    expect(result?.symlinked).toBeUndefined()
+    expect(result?.allInScope).toBe(true)
+  })
+
+  it('does not flag the win32 `/tmp` fold as a link before `..`', async () => {
+    const TEMP = 'c:/Users/me/AppData/Local/Temp'
+    const probe: RedirectProbe = {
+      async lstat(path) {
+        const entry = path === `${TEMP}/sb` ? ({ type: 'dir' } as Entry) : undefined
+        if (!entry) throw enoent(path)
+        return statOf(entry)
+      },
+      async realpath(path) {
+        if (path === '/tmp') throw enoent(path)
+        return path
+      }
+    }
+    const result = await captureRedirects(
+      'echo k > /tmp/sb/../new.txt',
+      { cwd: 'c:/proj', tempDirs: ['/tmp', TEMP], shell: 'posix' },
+      { sessionStartMs: SESSION_START, platform: 'win32', probe }
+    )
+    expect(result?.symlinked).toBeUndefined()
+    expect(result?.allInScope).toBe(true)
+  })
+
+  it('still flags a link that IS the component before `..`', async () => {
+    const probe = fakeProbe({
+      entries: { '/work/repo/sub': { type: 'symlink', target: '/outside/sub' } }
+    })
+    const result = await capture('echo x > sub/../x', probe)
+    expect(result?.symlinked).toEqual(['sub/../x'])
+  })
+})
+
+describe('captureRedirects — a temp hint must stay inside its temp root (exit review N7)', () => {
+  const TEMP = 'c:/user-temp'
+  const scope = {
+    cwd: 'c:/repo',
+    tempDirs: [TEMP],
+    shell: 'posix' as const,
+    tempVars: { TMPDIR: TEMP }
+  }
+  const captureHint = (probe: RedirectProbe) =>
+    captureRedirects('echo x > $TMPDIR/link/thesis.docx', scope, {
+      sessionStartMs: SESSION_START,
+      platform: 'win32',
+      probe
+    })
+
+  it('drops the hint when the named parent resolves OUT of the temp root', async () => {
+    const probe = fakeProbe({
+      entries: {
+        [`${TEMP}/link`]: { type: 'symlink', target: 'c:/docs' },
+        'c:/docs': { type: 'dir' },
+        'c:/docs/thesis.docx': { type: 'file', size: 10 }
+      }
+    })
+    const result = await captureHint(probe)
+    expect(result?.unresolvable).toEqual(['$TMPDIR/link/thesis.docx'])
+    expect(result?.allInScope).toBe(false)
+    expect(result).not.toHaveProperty('tempVarTargets')
+  })
+
+  it('keeps the hint when the named parent resolves inside the temp root', async () => {
+    const probe = fakeProbe({
+      entries: {
+        [`${TEMP}/link`]: { type: 'symlink', target: `${TEMP}/docs` },
+        [`${TEMP}/docs`]: { type: 'dir' }
+      }
+    })
+    const result = await captureHint(probe)
+    expect(result?.tempVarTargets).toEqual([
+      { target: '$TMPDIR/link/thesis.docx', path: `${TEMP}/link/thesis.docx` }
+    ])
+  })
+
+  it('keeps the hint for a parent that does not exist yet', async () => {
+    const probe = fakeProbe({ entries: { [TEMP]: { type: 'dir' } } })
+    const result = await captureHint(probe)
+    expect(result?.tempVarTargets).toEqual([
+      { target: '$TMPDIR/link/thesis.docx', path: `${TEMP}/link/thesis.docx` }
+    ])
+  })
+
+  it('drops the hint when the parent cannot be measured and is not known absent', async () => {
+    const parent = `${TEMP}/link`
+    const probe = fakeProbe({
+      entries: { [TEMP]: { type: 'dir' } },
+      failRealpath: [parent],
+      failLstat: [parent]
+    })
+    const result = await captureHint(probe)
+    expect(result).not.toHaveProperty('tempVarTargets')
   })
 })
 

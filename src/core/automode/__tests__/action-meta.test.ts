@@ -88,21 +88,25 @@ describe('opencodeShellFor — opencode’s own shell rule (exit review #5)', ()
     expect(opencodeShellFor({}, 'linux')).toBe('posix')
   })
 
-  it('follows $SHELL on win32: a POSIX shell runs the command in bash', () => {
-    // The reviewer's probe: ClaudeUI started from Git Bash has SHELL set, so
-    // opencode runs the command there — reading it as PowerShell measured the
-    // wrong path (`.\bashrc` vs `.bashrc`).
+  it('does NOT claim posix on win32 for a set $SHELL: opencode may fall back to pwsh', () => {
+    // Exit review N1: opencode only runs `$SHELL` when it stats to a real file,
+    // and `gitbash()` cannot rescue `/usr/bin/bash` under a Git Bash login PATH
+    // (the first git.exe is ucrt64/bin). It then runs pwsh, so the POSIX reading
+    // is a false in-scope claim: keep BOTH readings instead.
     for (const shell of [
       'C:/Program Files/Git/bin/bash.exe',
       'C:/Program Files/Git/usr/bin/bash',
       '/usr/bin/bash',
+      '/bin/sh',
       'sh',
       'C:/tools/zsh.exe',
       'dash',
       'ksh'
     ]) {
-      expect(opencodeShellFor({ SHELL: shell }, 'win32')).toBe('posix')
+      expect(opencodeShellFor({ SHELL: shell }, 'win32')).toBeUndefined()
     }
+    // The reviewer's explicit case: a POSIX spelling is not posix on win32.
+    expect(opencodeShellFor({ SHELL: '/usr/bin/bash' }, 'win32')).not.toBe('posix')
   })
 
   it('reads pwsh/powershell as PowerShell on win32', () => {
@@ -120,9 +124,11 @@ describe('opencodeShellFor — opencode’s own shell rule (exit review #5)', ()
     expect(opencodeShellFor({ SHELL: '   ' }, 'win32')).toBe('powershell')
   })
 
-  it('any other $SHELL keeps BOTH readings (opencode falls back to pwsh)', () => {
+  it('any other set $SHELL keeps BOTH readings (opencode may run it or fall back to pwsh)', () => {
     expect(opencodeShellFor({ SHELL: 'C:/tools/fish.exe' }, 'win32')).toBeUndefined()
     expect(opencodeShellFor({ SHELL: 'nu' }, 'win32')).toBeUndefined()
+    // cmd is not denied by opencode's compat list, but we cannot tell which
+    // reading a run gets, so both are kept (exit review N1).
     expect(opencodeShellFor({ SHELL: 'cmd.exe' }, 'win32')).toBeUndefined()
   })
 })

@@ -2192,8 +2192,8 @@ export class OpencodeSession extends BaseSession {
       input,
       cwd: this.cwd,
       honoursWorkdir: true,
-      // opencode's own shell rule: `$SHELL` on win32 (Git Bash when it names
-      // bash), PowerShell when it is unset, POSIX everywhere else.
+      // opencode's shell on win32: PowerShell when `$SHELL` is unset or names
+      // it, unknown (both readings) for any other `$SHELL`; POSIX elsewhere.
       shell: opencodeShellFor(),
       additionalDirectories: this.mergedUserPermissions().additionalDirectories,
       sessionStartMs: this.sessionStartMs,

@@ -123,6 +123,13 @@ interface MeasurementContext {
   realCwd: string | null
   /** Scope-root spelling → its real path, for roots `realpath` could establish. */
   realRoots: ReadonlyMap<string, string>
+  /** Which `/tmp` fold, if any, the probe applies (see {@link tmpRootReadings}). */
+  tmpRoot: string | undefined
+  /**
+   * The temp roots a `tempVarPath` hint can name, normalised: the values of the
+   * host temp variables (`scope.tempVars`). Empty when none is set.
+   */
+  tempRoots: readonly string[]
 }
 
 /**
@@ -192,14 +199,26 @@ function tmpRootReadings(scope: RedirectScope, platform: NodeJS.Platform): (stri
   }
 }
 
-/** `probe` with a win32 `/tmp` spelling read through `tmpRoot`. */
-function probeFor(probe: RedirectProbe, tmpRoot: string | undefined): RedirectProbe {
+/** `/tmp` and `/TMP/…`: Git Bash's usertemp mount folds case on win32 (exit review N2). */
+function isTmpSpelling(path: string, platform: NodeJS.Platform): boolean {
+  const fold = (s: string): string => (platform === 'win32' ? s.toLowerCase() : s)
+  const folded = fold(path)
+  return folded === GIT_BASH_TMP || folded.startsWith(`${GIT_BASH_TMP}/`)
+}
+
+/** `probe` with a win32 `/tmp` spelling (any case) read through `tmpRoot`. */
+function probeFor(
+  probe: RedirectProbe,
+  tmpRoot: string | undefined,
+  platform: NodeJS.Platform
+): RedirectProbe {
   if (tmpRoot === undefined) return probe
   const map = (path: string): string => {
-    if (path === GIT_BASH_TMP) return tmpRoot
-    if (path.startsWith(`${GIT_BASH_TMP}/`))
-      return `${tmpRoot}/${path.slice(GIT_BASH_TMP.length + 1)}`
-    return path
+    if (!isTmpSpelling(path, platform)) return path
+    const folded = platform === 'win32' ? path.toLowerCase() : path
+    if (folded === GIT_BASH_TMP) return tmpRoot
+    // The `/tmp` prefix has the same length in every case, so slice the original.
+    return `${tmpRoot}/${path.slice(GIT_BASH_TMP.length + 1)}`
   }
   return {
     lstat: (path) => probe.lstat(map(path)),
@@ -230,7 +249,7 @@ async function measureWith(
   sessionStartMs: number,
   tmpRoot: string | undefined
 ): Promise<MeasuredTargets> {
-  const mapped = probeFor(probe, tmpRoot)
+  const mapped = probeFor(probe, tmpRoot, platform)
   const realRoots = new Map<string, string>()
   await Promise.all(
     scopeRoots(scope, platform).map(async (root) => {
@@ -245,15 +264,33 @@ async function measureWith(
     sessionStartMs,
     cwd: normalizePath(scope.cwd, platform).full,
     realCwd: await readRealCwd(mapped, scope.cwd, platform),
-    realRoots
+    realRoots,
+    tmpRoot,
+    tempRoots: tempVarRoots(scope, platform)
   }
   const measured = new Map<string, RedirectMeasurement>()
   const results = await Promise.all(
     details.map(async (detail) => {
-      if (detail.path === undefined) return undefined
+      if (detail.path === undefined) {
+        // An unresolvable target carrying a temp hint: drop the hint when the
+        // path it names is reached through a link OUT of the temp root it names
+        // (exit review N7). The unresolvable detail itself is never dropped.
+        if (detail.tempVarPath === undefined) return undefined
+        if (await hintStaysInTemp(detail.tempVarPath, context)) return undefined
+        const withoutHint = { ...detail }
+        delete withoutHint.tempVarPath
+        return withoutHint
+      }
       try {
         const outcome = await measureTarget(detail, context)
-        if (outcome.measurement !== undefined) measured.set(detail.path, outcome.measurement)
+        if (outcome.measurement !== undefined) {
+          // One resolved path can be reached by several spellings; a plain
+          // reading must never erase another spelling's `symlinked` (N3).
+          measured.set(
+            detail.path,
+            mergeMeasurement(measured.get(detail.path), outcome.measurement)
+          )
+        }
         return outcome.detail
       } catch {
         // Absence, never a guess.
@@ -332,6 +369,17 @@ async function measureTarget(
   context: MeasurementContext
 ): Promise<TargetOutcome> {
   const target = detail.path as string
+
+  // On win32 a drive-less absolute path other than the folded `/tmp` is not the
+  // file Git Bash would write: `/etc`, `/usr`, `/bin`, `/opt` are MSYS mounts
+  // under Git's install root, while Node probes `<process drive>:\etc`. An
+  // `exists`/`empty`/`mtime` read there is a fabrication, so the target keeps
+  // only its pure facts (exit review N4). The link checks still run.
+  if (!isMeasurableTarget(target, context)) {
+    if (await linkBeforeDotDot(detail, context)) return { measurement: { symlinked: true } }
+    return (await throughLink(detail, context)) ?? {}
+  }
+
   const stat = await readLstat(context.probe, target)
   // A failed lstat tells us nothing about existence — not even that the file is
   // absent. It does NOT unmake a planted directory link either, so the link
@@ -366,27 +414,44 @@ async function measureTarget(
   // ordinary/in-scope claim (exit review R1 + rec). `undefined` = the parent
   // resolves to the same directory (or cannot be measured at all).
   const linked = await throughLink(detail, context)
-  if (linked !== undefined) return linked
+  if (linked?.measurement !== undefined) return linked
+  // An OUT-OF-SCOPE link onto a protected real target adds the hit but keeps
+  // the measured facts read THROUGH the link (exit review N5).
+  const effective = linked?.detail ?? detail
+  const outcome = (measurement: RedirectMeasurement | undefined): TargetOutcome => {
+    if (effective === detail) return measurement === undefined ? {} : { measurement }
+    return measurement === undefined ? { detail: effective } : { detail: effective, measurement }
+  }
 
-  if (detail.root !== undefined) return {}
+  if (effective.root !== undefined) return outcome(undefined)
 
-  if (stat === 'missing') return { measurement: { exists: false } }
+  if (stat === 'missing') return outcome({ exists: false })
   if (stat.isFile()) {
-    return {
-      measurement: {
-        exists: true,
-        // Only measured facts: an unrecorded size/mtime stays absent, never 0
-        // (exit review Astra C1 — `?? 0` fabricated `empty:true` in replay).
-        ...(typeof stat.size === 'number' ? { empty: stat.size === 0 } : {}),
-        ...(typeof stat.mtimeMs === 'number'
-          ? { modifiedSinceSessionStart: stat.mtimeMs >= context.sessionStartMs }
-          : {})
-      }
-    }
+    return outcome({
+      exists: true,
+      // Only measured facts: an unrecorded size/mtime stays absent, never 0
+      // (exit review Astra C1 — `?? 0` fabricated `empty:true` in replay).
+      ...(typeof stat.size === 'number' ? { empty: stat.size === 0 } : {}),
+      ...(typeof stat.mtimeMs === 'number'
+        ? { modifiedSinceSessionStart: stat.mtimeMs >= context.sessionStartMs }
+        : {})
+    })
   }
   // A directory / device / FIFO target exists, but has no "empty" or "mtime of
   // the file's content" fact to report.
-  return { measurement: { exists: true } }
+  return outcome({ exists: true })
+}
+
+/**
+ * On win32 only a drive-rooted path and the folded `/tmp` mount name a location
+ * Node can read (exit review N4). Everything else — `/etc`, `/usr`, … — is a
+ * Git Bash mount at a place Node would not look.
+ */
+function isMeasurableTarget(target: string, context: MeasurementContext): boolean {
+  if (context.platform !== 'win32') return true
+  const full = normalizePath(target, context.platform).full
+  if (!full.startsWith('/')) return true
+  return context.tmpRoot !== undefined && isTmpSpelling(full, context.platform)
 }
 
 /** The link check for the target's kind: in-scope parents, or out-of-scope ones. */
@@ -610,11 +675,7 @@ async function linkBeforeDotDotIn(spelling: string, context: MeasurementContext)
   for (const component of spelling.slice(root.length).split('/')) {
     if (component === '' || component === '.') continue
     if (component === '..') {
-      const real = await readRealpath(context.probe, prefix)
-      if (real !== null) {
-        const realPath = normalizePath(real, context.platform).full
-        if (!samePath(realPath, prefix, context.platform)) return true
-      }
+      if (await prefixMovesDotDot(prefix, context)) return true
       prefix = parentDir(prefix)
       continue
     }
@@ -624,10 +685,40 @@ async function linkBeforeDotDotIn(spelling: string, context: MeasurementContext)
 }
 
 /**
+ * Does `prefix/..` physically land somewhere other than the lexical collapse?
+ *
+ * Only when the component being cancelled is itself a link: an ancestor link, a
+ * mapped `/tmp`, an 8.3 short name or a mapped drive above the `..` cancels out
+ * on BOTH sides (exit review N6). So compare the physical parent OF THE PREFIX
+ * with the physical path of the prefix's lexical parent:
+ *
+ *   parentDir(realpath(prefix))  vs  realpath(parentDir(prefix))
+ *
+ * (Exit review #2's earlier check compared `realpath(prefix)` with the LEXICAL
+ * prefix, which flagged every ancestor link and the `/tmp` fold.)
+ */
+async function prefixMovesDotDot(prefix: string, context: MeasurementContext): Promise<boolean> {
+  const real = await readRealpath(context.probe, prefix)
+  if (real === null) return false
+  const lexicalParent = parentDir(prefix)
+  const realParent = await readRealpath(context.probe, lexicalParent)
+  // Either side unestablished proves nothing: absence, never a fabrication.
+  if (realParent === null) return false
+  const realPath = normalizePath(real, context.platform).full
+  const realParentPath = normalizePath(realParent, context.platform).full
+  return !samePath(parentDir(realPath), realParentPath, context.platform)
+}
+
+/**
  * The out-of-scope target's parent `realpath`s somewhere other than its lexical
- * spelling: the write goes through a link, so it is `symlinked` and the real
- * target's protected components are hits. `undefined` when the parent resolves to
- * the same directory (or cannot be measured at all — absence, never a guess).
+ * spelling: the write goes through a link. That alone is NOT `symlinked`: `lstat`
+ * reads through the link, so `exists`/`empty`/`mtime` already describe the real
+ * file, and flagging every relocated folder (`Documents` → another drive, macOS
+ * `/var` → `/private/var`) would drop those clearing facts (exit review N5).
+ *
+ * What matters is where the real target sits: its protected components are hits.
+ * `undefined` when the parent resolves to the same directory, the real target is
+ * unprotected, or nothing can be measured (absence, never a guess).
  */
 async function outOfScopeThroughLink(
   detail: RedirectTargetDetail,
@@ -645,11 +736,68 @@ async function outOfScopeThroughLink(
     ...detail.protectedHits,
     ...protectedComponentsOf(hits).filter((hit) => !detail.protectedHits.includes(hit))
   ]
-  if (protectedHits.length === 0) return { measurement: { symlinked: true } }
-  return {
-    detail: { ...detail, protectedHits },
-    measurement: { symlinked: true }
+  if (protectedHits.length === detail.protectedHits.length) return undefined
+  return { detail: { ...detail, protectedHits } }
+}
+
+/**
+ * Merge two measurements of the same resolved path (exit review N3): two
+ * spellings can share it, and a plain reading must never erase a `symlinked`
+ * one — an `exists:false` measured on the plain spelling would otherwise clear
+ * a write that actually goes through a link.
+ */
+function mergeMeasurement(
+  prior: RedirectMeasurement | undefined,
+  next: RedirectMeasurement
+): RedirectMeasurement {
+  if (prior === undefined) return next
+  if (prior.symlinked === true) return prior
+  if (next.symlinked === true) return next
+  return next
+}
+
+/** The normalised values of the host temp variables — what a hint can name. */
+function tempVarRoots(scope: RedirectScope, platform: NodeJS.Platform): string[] {
+  const roots: string[] = []
+  for (const value of Object.values(scope.tempVars ?? {})) {
+    if (typeof value !== 'string' || value.trim() === '') continue
+    const full = normalizePath(value, platform).full
+    if (!roots.includes(full)) roots.push(full)
   }
+  return roots
+}
+
+/**
+ * Does a `tempVarPath` hint stay inside the temp root it names (exit review
+ * N7)? The lexical check in `ground-truth.ts` cannot see that `$TMPDIR/…/tlink`
+ * is a junction out of temp, and an unresolvable target is never link-measured,
+ * so the hint would clear an overwrite outside scratch space.
+ *
+ * `realpath(parentDir(hint))` must lie inside `realpath(the temp root)`. An
+ * unmeasurable parent keeps the hint only when that parent does not exist (a
+ * scratch file that is not there yet).
+ */
+async function hintStaysInTemp(hint: string, context: MeasurementContext): Promise<boolean> {
+  const platform = context.platform
+  let root: string | undefined
+  for (const candidate of context.tempRoots) {
+    if (!samePath(candidate, hint, platform) && !isDescendant(candidate, hint, platform)) continue
+    // The deepest matching root is the temp directory the hint was built from.
+    if (root === undefined || candidate.length > root.length) root = candidate
+  }
+  if (root === undefined) return false
+  const parent = parentDir(hint)
+  const realParent = await readRealpath(context.probe, parent)
+  const realRoot = await readRealpath(context.probe, root)
+  if (realParent !== null && realRoot !== null) {
+    const realParentPath = normalizePath(realParent, platform).full
+    const realRootPath = normalizePath(realRoot, platform).full
+    return (
+      samePath(realParentPath, realRootPath, platform) ||
+      isDescendant(realRootPath, realParentPath, platform)
+    )
+  }
+  return (await readLstat(context.probe, parent)) === 'missing'
 }
 
 /** Two normalised absolute spellings name the same path (case-insensitively on win32). */

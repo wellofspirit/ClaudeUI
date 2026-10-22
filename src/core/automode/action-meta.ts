@@ -89,19 +89,23 @@ export interface RedirectScopeForOptions {
 }
 
 /**
- * The dialect opencode's shell tool will use on `platform` (exit review #5).
+ * The dialect opencode's shell tool will use on `platform` (exit review #5,
+ * re-check N1).
  *
  * It mirrors opencode's own resolution
  * (`vendor/opencode-src/packages/core/src/shell/select.ts`): the shell tool calls
  * `ShellSelect.resolve({priority:'compat'})`, which takes the config `shell`,
- * else `select(process.env.SHELL)` — a `$SHELL` naming bash/sh/zsh/dash/ksh is
- * run as-is (Git Bash on win32), pwsh/powershell is PowerShell, and only an
- * UNSET `$SHELL` falls through to `pwsh`/`powershell`. Any other `$SHELL`
- * (`fish`, `nu`, …) is not compatible, so opencode falls back to pwsh; we cannot
- * tell which reading the run really gets and keep BOTH (the worse one wins).
+ * else `select(process.env.SHELL)`. A `$SHELL` is NOT run by name: opencode stats
+ * the executable and only uses it when that resolves to a real file, with a
+ * POSIX spelling rescued only through `gitbash()` (`<git.exe>/../../bin/bash.exe`).
+ * A POSIX-style `/usr/bin/bash` under a Git Bash login PATH (first `git.exe` in
+ * `ucrt64/bin`) fails that lookup, so opencode falls back to `win()[0]` = pwsh.
  *
- * The config-shell override is a known residual: ClaudeUI does not set
- * opencode's `shell` config.
+ * So: on win32, an unset `$SHELL` or a pwsh/powershell one is `powershell`; ANY
+ * other set `$SHELL` (bash included) is `undefined` — both readings, worse wins.
+ * The cost of `undefined` is no temp-variable hints and dual backslash readings,
+ * never a false in-scope claim. The config-shell override is a known residual:
+ * ClaudeUI does not set opencode's `shell` config.
  */
 export function opencodeShellFor(
   env: NodeJS.ProcessEnv = process.env,
@@ -116,10 +120,9 @@ export function opencodeShellFor(
     .pop()
     ?.toLowerCase()
     .replace(/\.exe$/, '')
-  if (name === 'bash' || name === 'sh' || name === 'zsh' || name === 'dash' || name === 'ksh') {
-    return 'posix'
-  }
   if (name === 'pwsh' || name === 'powershell') return 'powershell'
+  // Any other set `$SHELL`: opencode may run it (a real executable) or fall back
+  // to pwsh (a POSIX spelling `gitbash()` cannot rescue). Keep both readings.
   return undefined
 }
 

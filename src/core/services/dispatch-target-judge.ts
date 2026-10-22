@@ -516,7 +516,8 @@ export class DispatchTargetJudge {
       cwd: this.opts.cwd,
       honoursWorkdir,
       // The TARGET engine's shell decides the dialect (pi's bash is POSIX;
-      // opencode's follows `$SHELL` on win32, PowerShell when it is unset).
+      // opencode's is PowerShell on win32 unless `$SHELL` names another shell,
+      // then unknown — see `opencodeShellFor`).
       shell: this.opts.engine === 'opencode' ? opencodeShellFor() : 'posix',
       additionalDirectories: permissions.additionalDirectories,
       sessionStartMs: this.sessionStartMs,
