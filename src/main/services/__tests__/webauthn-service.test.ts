@@ -319,11 +319,13 @@ describe('WebauthnService — authentication', () => {
   let store: ReturnType<typeof memoryStore>
   let service: WebauthnService
   let device: VirtualAuthenticator
+  let deviceOptions: { skipUserVerification: boolean }
 
   beforeEach(async () => {
     store = memoryStore()
     service = new WebauthnService(store)
-    device = new VirtualAuthenticator()
+    deviceOptions = { skipUserVerification: false }
+    device = new VirtualAuthenticator(deviceOptions)
     const options = await service.startRegistration({ origin: TAILNET, connectionId: 'enroll' })
     await service.finishRegistration({
       origin: TAILNET,
@@ -404,6 +406,17 @@ describe('WebauthnService — authentication', () => {
     const result = await assertOnce()
     expect(result.ok).toBe(true)
     expect(store.rows.get(device.credId)!.signCount).toBe(0)
+  })
+
+  it('refuses a genuine authentication assertion missing user verification', async () => {
+    const before = { ...store.rows.get(device.credId)! }
+    // Enrolment used UV; only this correctly signed assertion omits it.
+    deviceOptions.skipUserVerification = true
+    await expect(assertOnce()).resolves.toEqual({ ok: false, reason: 'verify' })
+    expect(store.rows.get(device.credId)).toEqual(before)
+
+    deviceOptions.skipUserVerification = false
+    await expect(assertOnce()).resolves.toMatchObject({ ok: true })
   })
 
   it('refuses a forged signature', async () => {

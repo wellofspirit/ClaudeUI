@@ -323,7 +323,7 @@ patch/apply-all.mjs                      (content-regex patches, idempotent;
                                           structural check, not a whole-file parse)
           │
           ▼
-scripts/rebundle-cli.mjs                 (split back on the delimiters, esbuild-check every
+scripts/rebundle-cli.mjs                 (split back on the delimiters, Node syntax-check every
                                           CHANGED chunk, re-inject each into its own module
                                           slot in a fresh copy of the Bun binary;
                                           auto-codesign on macOS)
@@ -432,7 +432,7 @@ The **source binary** is cached under `.cache/claude-cli/claude-<version>-<platf
 1. Parse the container to locate the Bun section (PE `.bun` or Mach-O `__BUN,__bun`).
 2. Read the existing `[u64 blobLen][blob]`, parse the module graph into an editable structure.
 3. Split `vendor/claude-cli/cli.js` on its `// @bun-chunk <name>` delimiter lines into a `name → contents` map, and replace the `contents` of every `loader == 1` module with its entry. A guardrail rejects an input whose first line isn't a `// @bun-chunk <module>` delimiter (catches a stale wrapped-form file from a pre-2.1.261 extractor, whose header was `// @bun @bytecode`). The chunk-name set must match the binary's JS-module name set **exactly** — missing/extra names are reported and abort the rebundle, because a silent mismatch would ship an unpatched or stale chunk.
-4. **Syntax-check every changed chunk**: for each JS module whose new bytes differ from the original binary's, parse it with `esbuild --loader=js` over stdin (each chunk is standalone ESM). Failure names the chunk and prints esbuild's diagnostic. Typical patched builds change a handful of chunks, so the check costs well under a second; zero changed chunks skips it. This is the pipeline's _only_ real syntax gate — `patch/apply-all.mjs` can no longer parse the concat as one program.
+4. **Syntax-check every changed chunk**: for each JS module whose new bytes differ from the original binary's, parse it with `node --input-type=module --check` over stdin (each chunk is standalone ESM; no evaluation or import resolution). Failure names the chunk and prints Node's diagnostic. Typical patched builds change a handful of chunks, so the check costs well under a second; zero changed chunks skips it. This is the pipeline's _only_ real syntax gate — `patch/apply-all.mjs` can no longer parse the concat as one program.
 5. Lay out a fresh blob:
    - Emit each module's name, contents and sourcemap back-to-back, each with a `\0` terminator.
    - **Drop bytecode** — plus `module_info` and `bytecode_origin_path`, which exist only to serve it: all three `StringPointer`s become `{off: 0, len: 0}`. Bun recompiles from source on first run (+~1-2 s cold-start; blob 127 MB → ~38 MB at 2.1.261). Also sidesteps the `offset % 128 == 120` alignment rule.

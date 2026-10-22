@@ -58,7 +58,7 @@ import {
 } from '@simplewebauthn/server'
 import type {
   AuthenticationResponseJSON,
-  AuthenticatorTransportFuture,
+  AuthenticatorTransport,
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
   RegistrationResponseJSON
@@ -573,7 +573,7 @@ export class WebauthnService {
           // `response > 0 || stored > 0`) while `newCounter` below is still
           // recorded for forensics.
           counter: 0,
-          transports: credential.transports as AuthenticatorTransportFuture[] | undefined
+          transports: credential.transports as AuthenticatorTransport[] | undefined
         }
       })
       if (!verification.verified) return { ok: false, reason: 'verify' }
@@ -624,7 +624,7 @@ export class WebauthnService {
       timeout: CEREMONY_TIMEOUT_MS,
       excludeCredentials: existing.map((c) => ({
         id: c.credId,
-        transports: (c.transports ?? undefined) as AuthenticatorTransportFuture[] | undefined
+        transports: (c.transports ?? undefined) as AuthenticatorTransport[] | undefined
       })),
       authenticatorSelection: {
         residentKey: 'required',

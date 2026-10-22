@@ -1,5 +1,5 @@
 import { join, resolve } from 'path'
-import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
+import { defineConfig } from 'electron-vite'
 import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -24,13 +24,13 @@ function compressAssets(): Plugin {
 
 export default defineConfig({
   main: {
-    // electron-context-menu v4 is ESM-only; Node's `require(esm)` returns a
+    // electron-context-menu v5 is ESM-only; Node's `require(esm)` returns a
     // namespace object so the default-import call site fails. Inline-bundle
-    // it so rollup converts the ESM default export into a callable for our
+    // it so Rolldown converts the ESM default export into a callable for our
     // CJS main process output.
-    plugins: [externalizeDepsPlugin({ exclude: ['electron-context-menu'] })],
     build: {
-      rollupOptions: {
+      externalizeDeps: { exclude: ['electron-context-menu'] },
+      rolldownOptions: {
         // Two entries. `voice-worker` is the on-device speech worker (ADR-101 §4):
         // the host runs it as `electron.exe out/main/voice-worker.js` with
         // `ELECTRON_RUN_AS_NODE=1`, so it must import nothing from Electron.
@@ -44,7 +44,9 @@ export default defineConfig({
   },
   preload: {
     build: {
-      rollupOptions: {
+      // Sandboxed preloads must not require third-party packages at runtime.
+      externalizeDeps: false,
+      rolldownOptions: {
         input: {
           index: resolve('src/preload/index.ts'),
           'plugin-preload': resolve('src/preload/plugin-preload.ts'),
@@ -64,7 +66,7 @@ export default defineConfig({
       // electron-vite defaults the renderer to `minify: false` (fine for a file://
       // load from the asar), but RemoteServer ships these same chunks to phones:
       // unminified, App is ~3.7 MB (545 kB brotli) against ~1.8 MB (389 kB) minified.
-      minify: 'esbuild',
+      minify: 'oxc',
       // Linked maps, so DevTools on desktop and web shows original sources; DevTools
       // only fetches a map while it is open. Error.stack stays minified (Chromium
       // never applies maps to it): scripts/decode-stack.mjs decodes log stacks.
@@ -76,7 +78,7 @@ export default defineConfig({
       // trips as soon as the eager chunk regresses past it. (The old 1200 predated
       // the quiet build's `--logLevel warn`, which hid that it was already exceeded.)
       chunkSizeWarningLimit: 1800,
-      rollupOptions: {
+      rolldownOptions: {
         input: {
           index: resolve('src/renderer/index.html'),
           'log-viewer': resolve('src/renderer/log-viewer.html'),

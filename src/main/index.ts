@@ -15,6 +15,7 @@ import { join } from 'path'
 import { pathToFileURL } from 'url'
 import { execFileSync } from 'child_process'
 import contextMenu from 'electron-context-menu'
+import { copyMarkdown } from './copy-markdown'
 
 // Inline @electron-toolkit/utils to avoid its top-level electron.app.isPackaged
 // access which fails when Node resolves require('electron') to node_modules/electron
@@ -276,9 +277,12 @@ contextMenu({
     {
       label: 'Copy as Markdown',
       visible: lastContextMarkdown !== null && lastContextMarkdown.length > 0,
-      click: () => {
-        if (lastContextMarkdown) clipboard.writeText(lastContextMarkdown)
-      }
+      click: () =>
+        copyMarkdown(
+          lastContextMarkdown,
+          (source) => clipboard.writeText(source),
+          (error) => logger.warn('main', 'Failed to copy Markdown to clipboard', error)
+        )
     }
   ]
 })

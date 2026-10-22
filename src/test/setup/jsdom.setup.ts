@@ -50,7 +50,24 @@ import { betterSqlite3Driver } from '../../core/services/sqlite/better-sqlite3-d
 
 setSqliteDriver(betterSqlite3Driver())
 
-import '@testing-library/jest-dom/vitest'
+import { expect } from 'vitest'
+import * as matchers from '@testing-library/jest-dom/matchers'
+
+expect.extend(matchers)
+
+// Vitest 5 browser types shadow jest-dom's regex overload. This setup registers
+// jest-dom at runtime; restore its synchronous overload without widening
+// expect.element's asynchronous browser assertions.
+declare module 'vitest' {
+  interface Assertion<R extends void | Promise<void> = void, T = unknown> {
+    toHaveTextContent(text?: string | number, options?: { normalizeWhitespace: boolean }): R
+    toHaveTextContent(
+      this: Assertion<void, T>,
+      text: RegExp,
+      options?: { normalizeWhitespace: boolean }
+    ): R
+  }
+}
 
 // Do not probe Node 25+'s native localStorage getter: without
 // --localstorage-file, merely reading it emits an ExperimentalWarning in every
