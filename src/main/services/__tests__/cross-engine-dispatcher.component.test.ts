@@ -11959,8 +11959,8 @@ describe('CrossEngineDispatcher — the X-Agent’s own judge reviews its report
       held.resolve(BLOCK)
     })
 
-    it('the default review deadline outlasts the stage-2 budget a hand-back always reaches', () => {
-      expect(HAND_BACK_REVIEW_MS).toBeGreaterThan(STAGE2_TIMEOUT_MS)
+    it('the default review deadline outlasts a confirmed stage-2 block (two stage-2 samples)', () => {
+      expect(HAND_BACK_REVIEW_MS).toBeGreaterThan(2 * STAGE2_TIMEOUT_MS)
     })
 
     it('a Stop after the report was accepted but before the turn ended still cancels the judge request', async () => {

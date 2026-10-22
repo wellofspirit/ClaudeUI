@@ -2863,3 +2863,102 @@ describe('ruling 18 hint guard — no hint where the command touches the variabl
     ])
   })
 })
+
+describe('exit review #4 — a temp hint must stay inside the temp root it names', () => {
+  // The reviewer's input: `$TMPDIR/../../../Documents/thesis.docx` used to hint
+  // `c:/Users/me/Documents/thesis.docx` with no protected hit, so the ILD NOT
+  // bullet for `tempVarTargets` cleared an out-of-tree overwrite.
+  const winScope = {
+    cwd: 'C:/proj',
+    tempDirs: [HOST_TEMP],
+    tempVars: { TMPDIR: HOST_TEMP, TEMP: HOST_TEMP, TMP: HOST_TEMP },
+    shell: 'posix' as const
+  }
+  const posixTempScope = {
+    cwd: '/repo',
+    tempDirs: [POSIX_TEMP],
+    tempVars: { TMPDIR: POSIX_TEMP, TEMP: POSIX_TEMP, TMP: POSIX_TEMP },
+    shell: 'posix' as const
+  }
+
+  const escaping = [
+    '$TMPDIR/../x',
+    '${TMP}/../x',
+    '$TMPDIR/../../../Documents/thesis.docx',
+    '$TEMP/sub/../../outside.txt',
+    '$t/../../x'
+  ]
+  for (const target of escaping) {
+    it(`emits no hint for ${target}`, () => {
+      const command = target.startsWith('$t/')
+        ? `t=$TMPDIR; echo x > ${target}`
+        : `echo x > ${target}`
+      const scope = target.startsWith('$t/') ? posixTempScope : winScope
+      const r = analyzeRedirects(command, scope as never, 'win32')
+      expect(r?.unresolvable).toContain(target)
+      expect(r?.allInScope).toBe(false)
+      expect(r).not.toHaveProperty('tempVarTargets')
+    })
+  }
+
+  it('still hints a path that stays inside, and normalises the `..` away', () => {
+    // The positive half: `$TMPDIR/sub/../x.log` IS `<temp>/x.log`, and the hint
+    // says exactly that.
+    const r = analyzeRedirects('echo x > $TMPDIR/sub/../x.log', winScope, 'win32')
+    expect(r?.tempVarTargets).toEqual([
+      { target: '$TMPDIR/sub/../x.log', path: 'c:/Users/dev/AppData/Local/Temp/x.log' }
+    ])
+    // Equal to the root itself is still inside.
+    const atRoot = analyzeRedirects('echo x > $TMPDIR', winScope, 'win32')
+    expect(atRoot?.tempVarTargets).toEqual([
+      { target: '$TMPDIR', path: 'c:/Users/dev/AppData/Local/Temp' }
+    ])
+  })
+
+  it('compares case-insensitively on win32 (the hint is a real path there)', () => {
+    const r = analyzeRedirects(
+      'echo x > $TMPDIR/Out.txt',
+      { ...winScope, tempVars: { TMPDIR: HOST_TEMP.toLowerCase() } } as never,
+      'win32'
+    )
+    expect(r?.tempVarTargets).toEqual([
+      { target: '$TMPDIR/Out.txt', path: `${HOST_TEMP.toLowerCase()}/Out.txt` }
+    ])
+  })
+})
+
+describe('exit review C1 — credential stores are protected components', () => {
+  const stores: Array<[string, string]> = [
+    ['.aws/credentials', '.aws'],
+    ['.netrc', '.netrc'],
+    ['.npmrc', '.npmrc'],
+    ['.pypirc', '.pypirc'],
+    ['.gnupg/private-keys-v1.d', '.gnupg'],
+    ['.docker/config.json', '.docker'],
+    ['.kube/config', '.kube'],
+    ['.gitconfig', '.gitconfig'],
+    ['.config/gcloud/credentials.db', 'gcloud']
+  ]
+  for (const [store, hit] of stores) {
+    it(`${store} is a protected hit when the session cwd is the home directory`, () => {
+      // DeepSeek C1's shape: cwd = home, so the file IS lexically in scope; the
+      // old component list was empty and `allInScope: true` + no hit cleared it.
+      const r = analyzeRedirects(`echo x > ${store}`, { cwd: 'C:/Users/me' }, 'win32')
+      expect(r?.protectedHits).toContain(hit)
+      expect(r?.allInScope).toBe(false)
+    })
+  }
+
+  it('still reports the original agent-control and rc components', () => {
+    const wins = analyzeRedirects('echo x > .ssh/authorized_keys', { cwd: 'C:/Users/me' }, 'win32')
+    expect(wins?.protectedHits).toEqual(['.ssh'])
+    const rc = analyzeRedirects('echo x > .bashrc', { cwd: 'C:/Users/me' }, 'win32')
+    expect(rc?.protectedHits).toEqual(['.bashrc'])
+  })
+
+  it('does not over-match an ordinary project directory that merely starts with a store name', () => {
+    const r = analyzeRedirects('echo x > .awsome/notes.txt', { cwd: 'C:/Users/me' }, 'win32')
+    expect(r?.protectedHits).toEqual([])
+    expect(r?.allInScope).toBe(true)
+  })
+})

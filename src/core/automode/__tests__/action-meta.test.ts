@@ -8,7 +8,11 @@
  * the exact JSON the classifier's meta line receives, key order included.
  */
 import { describe, expect, it, vi } from 'vitest'
-import { captureShellActionMeta, type ShellActionMetaOptions } from '../action-meta'
+import {
+  captureShellActionMeta,
+  opencodeShellFor,
+  type ShellActionMetaOptions
+} from '../action-meta'
 import type { RedirectProbe, RedirectStat } from '../redirect-measure'
 
 const CWD = '/work/wt'
@@ -74,6 +78,54 @@ function options(overrides: Partial<ShellActionMetaOptions> = {}): ShellActionMe
     ...overrides
   }
 }
+
+describe('opencodeShellFor — opencode’s own shell rule (exit review #5)', () => {
+  it('is posix on every non-win32 host, whatever SHELL says', () => {
+    expect(opencodeShellFor({ SHELL: '/bin/zsh' }, 'linux')).toBe('posix')
+    expect(opencodeShellFor({ SHELL: 'C:/Program Files/PowerShell/pwsh.exe' }, 'darwin')).toBe(
+      'posix'
+    )
+    expect(opencodeShellFor({}, 'linux')).toBe('posix')
+  })
+
+  it('follows $SHELL on win32: a POSIX shell runs the command in bash', () => {
+    // The reviewer's probe: ClaudeUI started from Git Bash has SHELL set, so
+    // opencode runs the command there — reading it as PowerShell measured the
+    // wrong path (`.\bashrc` vs `.bashrc`).
+    for (const shell of [
+      'C:/Program Files/Git/bin/bash.exe',
+      'C:/Program Files/Git/usr/bin/bash',
+      '/usr/bin/bash',
+      'sh',
+      'C:/tools/zsh.exe',
+      'dash',
+      'ksh'
+    ]) {
+      expect(opencodeShellFor({ SHELL: shell }, 'win32')).toBe('posix')
+    }
+  })
+
+  it('reads pwsh/powershell as PowerShell on win32', () => {
+    for (const shell of [
+      'C:/Program Files/PowerShell/7/pwsh.exe',
+      'pwsh',
+      'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
+    ]) {
+      expect(opencodeShellFor({ SHELL: shell }, 'win32')).toBe('powershell')
+    }
+  })
+
+  it('an unset $SHELL falls to PowerShell on win32 (opencode’s own fallback)', () => {
+    expect(opencodeShellFor({}, 'win32')).toBe('powershell')
+    expect(opencodeShellFor({ SHELL: '   ' }, 'win32')).toBe('powershell')
+  })
+
+  it('any other $SHELL keeps BOTH readings (opencode falls back to pwsh)', () => {
+    expect(opencodeShellFor({ SHELL: 'C:/tools/fish.exe' }, 'win32')).toBeUndefined()
+    expect(opencodeShellFor({ SHELL: 'nu' }, 'win32')).toBeUndefined()
+    expect(opencodeShellFor({ SHELL: 'cmd.exe' }, 'win32')).toBeUndefined()
+  })
+})
 
 describe('captureShellActionMeta — the meta JSON', () => {
   it('new file OUT of scope → exists:false', async () => {

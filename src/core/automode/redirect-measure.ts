@@ -28,6 +28,7 @@
  * component, is `symlinked`.
  */
 import { lstat, realpath } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import {
   protectedComponentsOf,
   redirectTargetDetails,
@@ -37,7 +38,7 @@ import {
   type RedirectScope,
   type RedirectTargetDetail
 } from './ground-truth'
-import { isDescendant, normalizePath } from './shell-lexical'
+import { isAbsolutePosixish, isDescendant, normalizePath, toPosixish } from './shell-lexical'
 
 /** How long the callers let measurement run before falling back to the pure result. */
 export const REDIRECT_CAPTURE_TIMEOUT_MS = 400
@@ -99,6 +100,7 @@ interface MeasuredTargets {
 }
 
 interface MeasurementContext {
+  /** The probe, with win32's Git-Bash `/tmp` spelling folded onto the host temp dir. */
   probe: RedirectProbe
   platform: NodeJS.Platform
   sessionStartMs: number
@@ -108,6 +110,48 @@ interface MeasurementContext {
   realRoots: ReadonlyMap<string, string>
 }
 
+/**
+ * On win32, Git Bash's `/tmp` is the user temp dir (the usertemp mount), but Node
+ * cannot see that mount: `realpath('/tmp')` is `ENOENT` and `lstat('/tmp/x')`
+ * probes `<current drive>:\tmp\x`. Scope roots carry the host temp dir as a
+ * NATIVE spelling, so `/tmp` is measured through it and `/tmp/…` targets are
+ * read there (exit review #3). Only the conventional mount spelling is folded;
+ * a POSIX host (and every other root) is untouched.
+ */
+const GIT_BASH_TMP = '/tmp'
+
+/** The host temp spelling a win32 scope stands `/tmp` for, or `undefined` elsewhere. */
+function gitBashTmpRoot(scope: RedirectScope, platform: NodeJS.Platform): string | undefined {
+  if (platform !== 'win32') return undefined
+  const native = (scope.tempDirs ?? []).find((root) => {
+    const full = normalizePath(root, platform).full
+    return full !== GIT_BASH_TMP && full !== '/private/tmp'
+  })
+  if (native !== undefined) return normalizePath(native, platform).full
+  try {
+    return normalizePath(tmpdir(), platform).full
+  } catch {
+    // No host temp dir to measure `/tmp` through: leave the root unmeasured
+    // rather than guess one.
+    return undefined
+  }
+}
+
+/** `probe` with Git Bash's `/tmp` spelling read through the host temp dir. */
+function probeFor(probe: RedirectProbe, hostTemp: string | undefined): RedirectProbe {
+  if (hostTemp === undefined) return probe
+  const map = (path: string): string => {
+    if (path === GIT_BASH_TMP) return hostTemp
+    if (path.startsWith(`${GIT_BASH_TMP}/`))
+      return `${hostTemp}/${path.slice(GIT_BASH_TMP.length + 1)}`
+    return path
+  }
+  return {
+    lstat: (path) => probe.lstat(map(path)),
+    realpath: (path) => probe.realpath(map(path))
+  }
+}
+
 async function measureRedirects(
   details: readonly RedirectTargetDetail[],
   scope: RedirectScope,
@@ -115,16 +159,18 @@ async function measureRedirects(
   probe: RedirectProbe,
   sessionStartMs: number
 ): Promise<MeasuredTargets> {
+  const hostTemp = gitBashTmpRoot(scope, platform)
+  const mapped = probeFor(probe, hostTemp)
   const realRoots = new Map<string, string>()
   await Promise.all(
     scopeRoots(scope, platform).map(async (root) => {
-      const real = await readRealpath(probe, root)
+      const real = await readRealpath(mapped, root)
       if (real !== null) realRoots.set(root, normalizePath(real, platform).full)
     })
   )
 
   const context: MeasurementContext = {
-    probe,
+    probe: mapped,
     platform,
     sessionStartMs,
     cwd: normalizePath(scope.cwd, platform).full,
@@ -195,6 +241,14 @@ async function measureTarget(
     if (inside === false) return { measurement: { symlinked: true } }
     return {}
   }
+
+  // Out of scope, but the DIRECTORY can still be a link: `../outside/keys/…`
+  // through a junction onto `~/.ssh` writes a protected file while the spelling
+  // looks ordinary (exit review rec). Read the real parent; a different
+  // directory is `symlinked`, and protected components of the real target are a
+  // protected hit.
+  const linked = await outOfScopeThroughLink(detail, context)
+  if (linked !== undefined) return linked
 
   if (stat === 'missing') return { measurement: { exists: false } }
   if (stat.isFile()) {
@@ -317,6 +371,12 @@ function joinPath(base: string, component: string): string {
  * link makes the target `symlinked` — `sub/../x` with `sub` a link does NOT
  * write `<cwd>/x`.
  *
+ * The walk uses the RESOLVED readings of `detail.raw`, not its raw spelling
+ * (exit review #2): `toPosixish` folds a Git-Bash `/c/…` target onto `c:/…`, and
+ * each backslash reading is walked too, so `l\nk/../bs.txt` is checked as
+ * `lnk/../bs.txt`. A reading only counts when it collapses to the path the
+ * scanner resolved, so a spelling the shell could not have read is ignored.
+ *
  * A prefix `realpath` cannot establish (usually because it does not exist)
  * proves nothing and is skipped: absence is never a fabrication.
  */
@@ -324,27 +384,97 @@ async function linkBeforeDotDot(
   detail: RedirectTargetDetail,
   context: MeasurementContext
 ): Promise<boolean> {
-  const components = detail.raw
-    .replace(/\\/g, '/')
-    .split('/')
-    .filter((c) => c.length > 0 && c !== '.')
-  if (!components.includes('..') || detail.base === undefined) return false
-  let prefix = detail.base.replace(/\/+$/, '')
-  for (const component of components) {
+  for (const spelling of dotDotReadings(detail, context.platform)) {
+    if (await linkBeforeDotDotIn(spelling, context)) return true
+  }
+  return false
+}
+
+/** The un-collapsed absolute spellings of a target that a shell could have read. */
+function dotDotReadings(detail: RedirectTargetDetail, platform: NodeJS.Platform): string[] {
+  const base = detail.base
+  if (base === undefined || detail.path === undefined) return []
+  const readings = new Set<string>([detail.raw.replace(/\\/g, '/')])
+  // A bash/posix reading removes an unquoted backslash before any character.
+  if (detail.raw.includes('\\')) readings.add(detail.raw.replace(/\\(.)/g, '$1'))
+  const trimmedBase = base.replace(/\/+$/, '')
+  const out: string[] = []
+  for (const reading of readings) {
+    const posix = toPosixish(reading, platform)
+    const spelling = isAbsolutePosixish(posix, platform)
+      ? posix
+      : trimmedBase === ''
+        ? `/${posix}`
+        : `${trimmedBase}/${posix}`
+    if (!spelling.split('/').includes('..')) continue
+    // Only a reading the scanner actually resolved can describe this target.
+    if (normalizePath(spelling, platform).full !== detail.path) continue
+    if (!out.includes(spelling)) out.push(spelling)
+  }
+  return out
+}
+
+/** Walk one absolute, un-collapsed spelling, `realpath`ing every prefix before a `..`. */
+async function linkBeforeDotDotIn(spelling: string, context: MeasurementContext): Promise<boolean> {
+  const drive = /^([A-Za-z]:)\//.exec(spelling)
+  const root = drive ? `${drive[1]}/` : '/'
+  let prefix = root
+  for (const component of spelling.slice(root.length).split('/')) {
+    if (component === '' || component === '.') continue
     if (component === '..') {
-      if (prefix !== '') {
-        const real = await readRealpath(context.probe, prefix)
-        if (real !== null) {
-          const realPath = normalizePath(real, context.platform).full
-          if (realPath !== normalizePath(prefix, context.platform).full) return true
-        }
+      const real = await readRealpath(context.probe, prefix)
+      if (real !== null) {
+        const realPath = normalizePath(real, context.platform).full
+        if (!samePath(realPath, prefix, context.platform)) return true
       }
-      prefix = prefix === '' ? '' : parentDir(prefix)
+      prefix = parentDir(prefix)
       continue
     }
     prefix = joinPath(prefix, component)
   }
   return false
+}
+
+/**
+ * The out-of-scope target's parent `realpath`s somewhere other than its lexical
+ * spelling: the write goes through a link, so it is `symlinked` and the real
+ * target's protected components are hits. `undefined` when the parent resolves to
+ * the same directory (or cannot be measured at all — absence, never a guess).
+ */
+async function outOfScopeThroughLink(
+  detail: RedirectTargetDetail,
+  context: MeasurementContext
+): Promise<TargetOutcome | undefined> {
+  const target = detail.path as string
+  const parent = parentDir(target)
+  const realParent = await readRealpath(context.probe, parent)
+  if (realParent === null) return undefined
+  const realParentPath = normalizePath(realParent, context.platform).full
+  if (samePath(realParentPath, parent, context.platform)) return undefined
+  const realTarget = joinPath(realParentPath, baseName(target))
+  const hits = protectedComponentsFor(context.cwd, realTarget, context.platform)
+  const protectedHits = [
+    ...detail.protectedHits,
+    ...protectedComponentsOf(hits).filter((hit) => !detail.protectedHits.includes(hit))
+  ]
+  if (protectedHits.length === 0) return { measurement: { symlinked: true } }
+  return {
+    detail: { ...detail, protectedHits },
+    measurement: { symlinked: true }
+  }
+}
+
+/** Two normalised absolute spellings name the same path (case-insensitively on win32). */
+function samePath(a: string, b: string, platform: NodeJS.Platform): boolean {
+  const fold = (s: string): string => (platform === 'win32' ? s.toLowerCase() : s)
+  const norm = (s: string): string => fold(normalizePath(s, platform).full).replace(/\/+$/, '')
+  return norm(a) === norm(b)
+}
+
+/** The last component of a normalised posix-ish path. */
+function baseName(path: string): string {
+  const at = path.lastIndexOf('/')
+  return at < 0 ? path : path.slice(at + 1)
 }
 
 /**

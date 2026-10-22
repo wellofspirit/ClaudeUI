@@ -155,7 +155,7 @@ import {
   autoModeReviewBlock,
   readOnlyReviewBlock
 } from '../automode/denial-tracker'
-import { captureShellActionMeta } from '../automode/action-meta'
+import { captureShellActionMeta, opencodeShellFor } from '../automode/action-meta'
 import type { AllowSkipAction } from '../automode/allow-rule-skip'
 import { isShellToolName } from '../automode/shell-lexical'
 import {
@@ -2192,8 +2192,9 @@ export class OpencodeSession extends BaseSession {
       input,
       cwd: this.cwd,
       honoursWorkdir: true,
-      // opencode's shell is PowerShell on win32 and POSIX elsewhere.
-      shell: process.platform === 'win32' ? 'powershell' : 'posix',
+      // opencode's own shell rule: `$SHELL` on win32 (Git Bash when it names
+      // bash), PowerShell when it is unset, POSIX everywhere else.
+      shell: opencodeShellFor(),
       additionalDirectories: this.mergedUserPermissions().additionalDirectories,
       sessionStartMs: this.sessionStartMs,
       repoVisibility: () => this.sessionVisibility()

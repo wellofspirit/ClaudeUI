@@ -39,10 +39,11 @@ export interface ShellActionMetaOptions {
   honoursWorkdir: boolean
   /**
    * The dialect that will read the command: pi's `bash` is `posix`; opencode's
-   * shell is `powershell` on win32 and `posix` elsewhere (ruling 3). It decides
-   * which temp-variable spellings expand at all.
+   * shell follows `$SHELL` on win32 ({@link opencodeShellFor}). `undefined` means
+   * "either reading" — the worse of the two wins. It decides which temp-variable
+   * spellings expand at all.
    */
-  shell: RedirectShell
+  shell: RedirectShell | undefined
   /** The user's granted directories for THIS owner's permission list. */
   additionalDirectories?: readonly string[]
   /**
@@ -77,7 +78,7 @@ export interface RedirectScopeForOptions {
   /** opencode's shell honours `input.workdir`; pi's `bash` does not. */
   honoursWorkdir: boolean
   /** The dialect that will read the command; decides temp-variable spellings. */
-  shell: RedirectShell
+  shell: RedirectShell | undefined
   /** The user's granted directories for THIS owner's permission list. */
   additionalDirectories?: readonly string[]
   /** Extra scope roots unioned after {@link tempDirRoots} (a replay's captured tempDirs). */
@@ -85,6 +86,41 @@ export interface RedirectScopeForOptions {
   // ── Test/replay seams; production passes none of these. ───────────────────
   platform?: NodeJS.Platform
   env?: NodeJS.ProcessEnv
+}
+
+/**
+ * The dialect opencode's shell tool will use on `platform` (exit review #5).
+ *
+ * It mirrors opencode's own resolution
+ * (`vendor/opencode-src/packages/core/src/shell/select.ts`): the shell tool calls
+ * `ShellSelect.resolve({priority:'compat'})`, which takes the config `shell`,
+ * else `select(process.env.SHELL)` — a `$SHELL` naming bash/sh/zsh/dash/ksh is
+ * run as-is (Git Bash on win32), pwsh/powershell is PowerShell, and only an
+ * UNSET `$SHELL` falls through to `pwsh`/`powershell`. Any other `$SHELL`
+ * (`fish`, `nu`, …) is not compatible, so opencode falls back to pwsh; we cannot
+ * tell which reading the run really gets and keep BOTH (the worse one wins).
+ *
+ * The config-shell override is a known residual: ClaudeUI does not set
+ * opencode's `shell` config.
+ */
+export function opencodeShellFor(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform
+): RedirectShell | undefined {
+  if (platform !== 'win32') return 'posix'
+  const shell = env.SHELL
+  if (shell === undefined || shell.trim() === '') return 'powershell'
+  const name = shell
+    .trim()
+    .split(/[\\/]/)
+    .pop()
+    ?.toLowerCase()
+    .replace(/\.exe$/, '')
+  if (name === 'bash' || name === 'sh' || name === 'zsh' || name === 'dash' || name === 'ksh') {
+    return 'posix'
+  }
+  if (name === 'pwsh' || name === 'powershell') return 'powershell'
+  return undefined
 }
 
 /** Build the `RedirectScope` one action is judged with. */

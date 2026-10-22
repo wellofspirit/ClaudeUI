@@ -598,7 +598,13 @@ export { buildPolicyPrompt }
  */
 export function buildUserPrompt(input: ClassifyInput, instruction: string): string {
   const transcript = slimTranscript(input.messages, input.outcomes)
-  const retryOf = retryFactOf(input)
+  const retryOf = retryFactOf({
+    messages: input.messages,
+    ...(input.outcomes ? { outcomes: input.outcomes } : {}),
+    action: input.action,
+    cwd: input.environment.cwd,
+    platform: input.environment.platform as NodeJS.Platform
+  })
   const meta = retryOf ? { ...(input.actionMeta ?? {}), retryOf } : input.actionMeta
   const hasMeta = !!meta && Object.keys(meta).length > 0
   return [
@@ -855,7 +861,13 @@ export function requiresFullReview(
     retryFactOf({
       messages: input.messages,
       ...(input.outcomes ? { outcomes: input.outcomes } : {}),
-      action: input.action
+      action: input.action,
+      ...(input.environment
+        ? {
+            cwd: input.environment.cwd,
+            platform: input.environment.platform as NodeJS.Platform
+          }
+        : {})
     })
   ) {
     return true

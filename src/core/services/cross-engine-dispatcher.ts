@@ -1007,11 +1007,12 @@ const OWN_WORK_WAIT_MS = 30 * 60_000
  * See {@link DispatcherDeps.handBackReviewMs}: the report review's hard deadline. A hand-back
  * always goes straight to stage 2 in `both` mode (stage 1 is skipped, `requiresFullReview`), whose
  * budget is {@link STAGE2_TIMEOUT_MS} (120 s), and in `fast` mode stage 1 alone (60 s) decides. The
- * deadline is the stage-2 budget plus 10 s for what runs outside the transport (loading the parent
+ * deadline is twice the stage-2 budget (a block is confirmed by a second stage-2 sample, ADR-106 §2)
+ * plus 10 s for what runs outside the transport (loading the parent
  * transcript, resolving the route), so a slow verdict is not cut by a shorter clock and the stage's
  * own timeout, with its cause, fires first.
  */
-export const HAND_BACK_REVIEW_MS = STAGE2_TIMEOUT_MS + 10_000
+export const HAND_BACK_REVIEW_MS = 2 * STAGE2_TIMEOUT_MS + 10_000
 /** See {@link DispatcherDeps.messageRunEndWaitMs}. */
 const MESSAGE_RUN_END_WAIT_MS = 20_000
 /** See {@link DispatcherDeps.messageStartWaitMs}. */

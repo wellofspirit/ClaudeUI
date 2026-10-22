@@ -23,8 +23,9 @@
  *   are not);
  * - the same tool name;
  * - `identical` — for a shell call, the same whitespace-normalised `command` in
- *   the same `workdir` (other keys such as a `description` are ignored); for
- *   any other tool, a deep-equal input;
+ *   the same `workdir` (resolved against the session cwd when the caller supplies
+ *   one, so a re-spelling of the same directory still matches; other keys such as
+ *   a `description` are ignored); for any other tool, a deep-equal input;
  * - `subset` — for a shell command in the same `workdir`, every top-level segment of the current
  *   command (`&&` `||` `;` / newline — NOT `|`) also appears among the earlier
  *   call's segments, and the commands differ; for an edit tool carrying an
@@ -42,7 +43,7 @@
  */
 import type { ChatMessage } from '../../shared/types'
 import type { ToolOutcome } from './ground-truth'
-import { shellCommandOf } from './shell-lexical'
+import { normalizePath, resolveTarget, shellCommandOf } from './shell-lexical'
 
 /** How much of the earlier call the fact carries (the transcript's own line, cut). */
 export const RETRY_CALL_MAX_CHARS = 300
@@ -69,6 +70,10 @@ export interface RetryMatchInput {
   messages: ChatMessage[]
   outcomes?: Record<string, ToolOutcome>
   action: { toolName: string; input: Record<string, unknown> }
+  /** The session working directory; without it `workdir` is compared as written. */
+  cwd?: string
+  /** The host platform, so a win32 workdir comparison ignores case. */
+  platform?: NodeJS.Platform
 }
 
 /**
@@ -109,7 +114,7 @@ export function isEditTool(toolName: string): boolean {
 
 /** The single path an edit-style input carries, in any engine's spelling. */
 function pathArgumentOf(input: Record<string, unknown>): string | undefined {
-  for (const key of ['path', 'file_path', 'filePath', 'filepath']) {
+  for (const key of ['path', 'file_path', 'filePath', 'filepath', 'notebook_path']) {
     const value = input[key]
     if (typeof value === 'string' && value.trim().length > 0) return value
   }
@@ -127,15 +132,17 @@ function pathArgumentOf(input: Record<string, unknown>): string | undefined {
  *
  * Read conservatively: a header line this parser does not recognise simply
  * contributes no path. The shapes are pi's `path` / legacy `file_path`,
- * opencode's `filePath` (and 2.x `path`), and apply_patch/patch's header lines.
+ * opencode's `filePath` (and 2.x `path`), Claude's `notebook_path`, and
+ * apply_patch/patch's header lines. ANY edit-class input carrying a string
+ * `patchText` is read as a patch (exit review #7): opencode judges its `edit`
+ * category for write, edit AND patch tools, so the tool name cannot be trusted
+ * to say which of them it was.
  */
 export function editPathsOf(toolName: string, input: Record<string, unknown>): string[] | null {
   if (!isEditTool(toolName)) return []
-  if (PATCH_TOOL_NAMES.has(toolName.trim().toLowerCase())) {
-    const patchText = input.patchText
-    if (typeof patchText !== 'string') return null
+  if (typeof input.patchText === 'string') {
     const paths: string[] = []
-    for (const line of patchText.split(/\r\n|\r|\n/)) {
+    for (const line of input.patchText.split(/\r\n|\r|\n/)) {
       const match = PATCH_FILE_HEADER.exec(line) ?? PATCH_MOVE_TO.exec(line)
       if (!match) continue
       const target = match[1].trim()
@@ -144,6 +151,7 @@ export function editPathsOf(toolName: string, input: Record<string, unknown>): s
     }
     return paths.length > 0 ? paths : null
   }
+  if (PATCH_TOOL_NAMES.has(toolName.trim().toLowerCase())) return null
   const path = pathArgumentOf(input)
   return path === undefined ? [] : [path]
 }
@@ -248,11 +256,30 @@ function isEditSubset(current: Record<string, unknown>, earlier: Record<string, 
   return currentEdits.every((edit) => earlierEdits.some((prior) => deepEqual(edit, prior)))
 }
 
+/**
+ * The directory a shell call really runs in, resolved against the session cwd
+ * and normalised — so `.`, `./`, a trailing separator, an absent `workdir` and
+ * an absolute spelling of the same directory all compare equal (DeepSeek C3).
+ * `undefined` means the shape is not a readable workdir at all.
+ */
+function effectiveWorkdir(
+  cwd: string,
+  workdir: unknown,
+  platform: NodeJS.Platform
+): string | undefined {
+  if (workdir === undefined) return normalizePath(cwd, platform).full
+  if (typeof workdir !== 'string') return undefined
+  if (workdir.trim() === '') return normalizePath(cwd, platform).full
+  return resolveTarget(cwd, workdir, platform).full
+}
+
 /** How the current action relates to one earlier call, or `undefined` for no relationship. */
 function matchKind(
   toolName: string,
   current: Record<string, unknown>,
-  earlier: Record<string, unknown>
+  earlier: Record<string, unknown>,
+  cwd: string | undefined,
+  platform: NodeJS.Platform
 ): RetryFact['match'] | undefined {
   const currentCommand = shellCommandOf(toolName, current)
   const earlierCommand = shellCommandOf(toolName, earlier)
@@ -260,12 +287,32 @@ function matchKind(
     // Only the command and where it runs carry a shell call's effect. Every other
     // key — opencode's model-written `description`, a `timeout` — is reworded
     // freely on a retry, and must not turn a re-roll into "no fact".
-    if (!deepEqual(current.workdir, earlier.workdir)) return undefined
+    if (!sameWorkdir(current.workdir, earlier.workdir, cwd, platform)) return undefined
     if (normalizeCommand(currentCommand) === normalizeCommand(earlierCommand)) return 'identical'
     return isShellSubset(currentCommand, earlierCommand) ? 'subset' : undefined
   }
   if (deepEqual(current, earlier)) return 'identical'
   return isEditSubset(current, earlier) ? 'subset' : undefined
+}
+
+/**
+ * Do two `workdir` values name the same directory? With a session cwd they are
+ * resolved and normalised (the policy promises that "absent = no retry found",
+ * so a re-spelling must not defeat the fact); without one, they are compared as
+ * written, exactly as before.
+ */
+function sameWorkdir(
+  current: unknown,
+  earlier: unknown,
+  cwd: string | undefined,
+  platform: NodeJS.Platform
+): boolean {
+  if (cwd === undefined) return deepEqual(current, earlier)
+  const a = effectiveWorkdir(cwd, current, platform)
+  const b = effectiveWorkdir(cwd, earlier, platform)
+  if (a === undefined || b === undefined) return false
+  const fold = (s: string): string => (platform === 'win32' ? s.toLowerCase() : s)
+  return fold(a).replace(/\/+$/, '') === fold(b).replace(/\/+$/, '')
 }
 
 /** The earlier call as `call` carries it: the transcript line, cut at {@link RETRY_CALL_MAX_CHARS}. */
@@ -285,6 +332,7 @@ export function retryFactOf(input: RetryMatchInput): RetryFact | undefined {
   if (!outcomes) return undefined
   const toolName = input.action.toolName
   const current = input.action.input
+  const platform = input.platform ?? process.platform
   let fact: RetryFact | undefined
   for (const message of input.messages) {
     if (message.role !== 'assistant') continue
@@ -294,7 +342,7 @@ export function retryFactOf(input: RetryMatchInput): RetryFact | undefined {
       const outcome = outcomes[block.toolUseId]
       if (outcome === undefined || !RETRY_OUTCOMES.has(outcome)) continue
       const earlier = block.toolInput ?? {}
-      const match = matchKind(toolName, current, earlier)
+      const match = matchKind(toolName, current, earlier, input.cwd, platform)
       if (match === undefined) continue
       fact = {
         match,

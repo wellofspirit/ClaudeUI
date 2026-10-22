@@ -461,7 +461,21 @@ const PROTECTED_COMPONENTS: ReadonlySet<string> = new Set([
   '.bashrc',
   '.zshrc',
   '.profile',
-  '.bash_profile'
+  '.bash_profile',
+  // Credential/persistence stores (exit review C1). A session started in `~` (or
+  // any directory holding one of these) would otherwise report a write to
+  // `~/.aws/credentials` as a plain in-scope file, and the Local Operations
+  // sentence would clear truncating it. `gcloud` is the component under
+  // `.config`; `find ~` trawling is Credential Exploration's business.
+  '.aws',
+  '.netrc',
+  '.npmrc',
+  '.pypirc',
+  '.gnupg',
+  '.docker',
+  '.kube',
+  '.gitconfig',
+  'gcloud'
 ])
 
 /** Anything the shell would expand or match at run time: we cannot know the
@@ -1864,9 +1878,21 @@ function tempHintBindings(
   return bindings
 }
 
-/** The normalised path `value` + `rest` names. */
-function hintPath(value: string, rest: string, platform: NodeJS.Platform): string {
-  return normalizePath(`${value.replace(/[\\/]+$/, '')}${rest}`, platform).full
+/**
+ * The normalised path `value` + `rest` names, or `undefined` when `rest` climbs
+ * OUT of the temp value it is anchored to.
+ *
+ * A hint says "this is probably a write to scratch space". `$TMPDIR/../../../
+ * Documents/thesis.docx` is not: the target is out of the temp root, and the
+ * judge is told to treat an `unresolvable` target listed in `tempVarTargets` as
+ * "not this rule". Emitting no hint there leaves the write judged on its text
+ * (exit review #4). Equal to the root itself is still inside.
+ */
+function hintPath(value: string, rest: string, platform: NodeJS.Platform): string | undefined {
+  const root = normalizePath(value, platform).full
+  const path = normalizePath(`${value.replace(/[\\/]+$/, '')}${rest}`, platform).full
+  if (path !== root && !isDescendant(root, path, platform)) return undefined
+  return path
 }
 
 /**
