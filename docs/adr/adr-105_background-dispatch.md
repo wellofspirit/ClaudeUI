@@ -3,6 +3,7 @@
 **Status:** Accepted (2026-10-19); amended 2026-10-20 as built: §2 the background default, §3 the report tool, its
 review by the X-Agent's own judge and the delivery into the parent, §4 messages both ways, §5 lifetime.
 Implemented on branch `async-dispatch`.
+Amended 2026-10-22 by [ADR-106](adr-106_judge-calibration-measured-facts.md) (the hand-back/message review rule: asking for a decision passes; approval claims checked against the user's turns).
 **Amends:** [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch was a blocking tool call whose targets lived only
 in memory: §3 "no lifecycle coupling" is kept for the sidebar, M2's `persistSession: false` and the
 continuation-by-`session_id` contract are replaced), [ADR-088](adr-088_dispatch-autonomy-inheritance.md) (Codex

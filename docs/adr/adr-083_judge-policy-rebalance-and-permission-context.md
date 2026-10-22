@@ -1,6 +1,7 @@
 # ADR-083: The opencode and pi auto-mode judge is rebalanced toward routine work, grades stage 1 by severity, and reads the user's permission rules
 
 **Status:** Accepted (2026-09-29). Built on branch `harnesses` in the 3.6 line.
+Amended 2026-10-22 by [ADR-106](adr-106_judge-calibration-measured-facts.md) (policy text, a confirmation sample before a block, the retry fact).
 **Amended by:** [ADR-091](adr-091_judge-blocks-hold-and-session-local-targets.md) (session-booted VMs are local; a user-typed credential delegated to a harness engine soft-lands; canonical install channels).
 **Amends:** [ADR-023](adr-023_opencode-automode-classifier.md) (the policy text, the two-stage
 contract and what the judge is told about the user's rules),
