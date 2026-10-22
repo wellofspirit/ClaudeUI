@@ -134,8 +134,13 @@ export function capsFor(
     case 'openrouter': {
       // A reasoning model left to reason spends the whole budget thinking and
       // returns empty text (observed on the retired opencode-fork judge path) —
-      // switch it off.
-      const off = flags.reasoning ? { reasoning: { enabled: false } } : {}
+      // switch it off. Stage 1 is a 64-token grade that no reasoning fits, so it
+      // is switched off there too when the catalog cannot say (a model the
+      // engine's catalog does not list, e.g. deepseek/deepseek-v4.1-flash-1017
+      // via pi): OpenRouter ignores the field for a model that does not reason.
+      const disabled = { reasoning: { enabled: false } }
+      const off = flags.reasoning ? disabled : {}
+      const fastOff = flags.reasoning === false ? {} : disabled
       return {
         outputCap: 'max_tokens',
         supportsStop: true,
@@ -145,7 +150,7 @@ export function capsFor(
         cacheMarkerOnSystem: model.startsWith('anthropic/'),
         affinityHeader: 'x-session-id',
         extraBody: { usage: { include: true }, stream_options: { include_usage: true } },
-        reasoning: { fast: off, thinking: off }
+        reasoning: { fast: fastOff, thinking: off }
       }
     }
 

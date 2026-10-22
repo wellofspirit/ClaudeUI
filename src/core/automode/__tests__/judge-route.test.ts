@@ -419,7 +419,9 @@ describe('resolveJudgeRoute — catalog providers', () => {
     })
     const route = routeOf(await resolveJudgeRoute('pi', 'openrouter/some/new-model', deps))
     expect(route.kind).toBe('openrouter')
-    expect(route.caps.reasoning.fast).toEqual({})
+    // Unknown to the catalog: stage 1 (a 64-token grade) never reasons; stage 2 keeps the model default.
+    expect(route.caps.reasoning.fast).toEqual({ reasoning: { enabled: false } })
+    expect(route.caps.reasoning.thinking).toEqual({})
   })
 
   it('openai with a throwing catalog still routes, without the catalog facts', async () => {
