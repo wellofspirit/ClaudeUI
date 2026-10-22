@@ -73,6 +73,25 @@ describe('logWsFullSync', () => {
     logWsFullSync(decision(), { lastSeq: 3 }, ring, frame(1000))
     expect(String(vi.mocked(logger.info).mock.calls[0][1])).not.toContain('/private/cwd')
   })
+
+  it('appends chunks=N only for a chunked transfer, with the transfer totals', () => {
+    // A chunked answer is one line for the whole transfer (ADR-102 amendment), so
+    // the counts are the transfer's, not per frame, and `large` is the total.
+    logWsFullSync(decision(), { lastSeq: 3, epoch: 'epoch-A' }, ring, {
+      ...frame(1000),
+      chunks: 4
+    })
+    expect(vi.mocked(logger.info).mock.calls[0][1]).toMatch(
+      / frameBytes=1000 encodeMs=1\.3 bufferedAmount=0 chunks=4$/
+    )
+
+    logWsFullSync(decision(), { lastSeq: 3, epoch: 'epoch-A' }, ring, {
+      ...frame(LARGE_SYNC_FULL_BYTES),
+      chunks: 25
+    })
+    expect(vi.mocked(logger.warn).mock.calls[0][1]).toMatch(/^large sync-full sent: /)
+    expect(vi.mocked(logger.warn).mock.calls[0][1]).toMatch(/ chunks=25$/)
+  })
 })
 
 describe('logFullSyncBreakdown', () => {

@@ -49,11 +49,19 @@ port IS the trust):
   that pass would have returned, same `fs-read` capability) and `session:load-subagent-history`
   (reports nothing itself; the transport's `sending` frame is what re-arms the web timeout).
 - `event {seq, channel, args}` — server pushes. The seq is the ring's, assigned once.
-- `sync {lastSeq, epoch}` → `sync-catchup {events}` or `sync-full {state}` — the
+- `sync {lastSeq, epoch, chunked?}` → `sync-catchup {events}` or `sync-full {state}` — the
   reconnect protocol. The snapshot is canonical state in the main process
   (`SyncCore.getSnapshot()`), serialized in the same synchronous tick its `seq` is read.
   The full/catchup branching lives in `src/core/shared/sync/sync-decision.ts` so the two
-  transports cannot answer one `sync` differently.
+  transports cannot answer one `sync` differently. `chunked: true` (the web client always
+  sends it) asks for a FULL answer as `sync-full-chunk {index, count, totalChars, data}`
+  frames — slices of the exact JSON of the `sync-full` that would otherwise have gone as
+  one frame, so the joined text parsed IS that message. A browser WebSocket delivers whole
+  messages only, so this is what lets the phone's "Syncing state..." overlay draw a real
+  progress bar (ADR-102 amendment). `count`/`totalChars` repeat on every chunk, the client
+  finishes at `index === count - 1`, and a catchup is unaffected. An old tab that omits
+  the field gets the single `sync-full` — the only skew direction, since the host serves
+  this bundle (ADR-060/099).
 - `auth` / `auth-response`, `e2e-activate` / `e2e-ack`, `ping` / `pong` — WS-only
   handshake and liveness.
 

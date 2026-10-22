@@ -12,7 +12,8 @@
  *   4. Server replies { type: 'auth-response', ok, error? }.
  *   5. Messages are JSON objects of type 'invoke', 'sync', 'ping', 'pong'
  *      client→server, and 'invoke-response', 'event', 'sync-catchup',
- *      'sync-full', 'ping', 'pong' server→client.
+ *      'sync-full' (or 'sync-full-chunk' frames, when the `sync` asked for
+ *      `chunked`), 'ping', 'pong' server→client.
  *
  * Usage:
  *   const port = await ephemeralPort()

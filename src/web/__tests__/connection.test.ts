@@ -9,6 +9,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { webcrypto } from 'node:crypto'
 import { RemoteConnection } from '../connection'
 import { E2ECrypto } from '../../shared/e2e-crypto'
+import { splitSyncFullJson } from '../../core/shared/sync/sync-full-chunks'
+import type { WsSyncFullChunk } from '../../shared/remote-protocol'
 
 // jsdom (this file's environment) has `crypto.getRandomValues` but no
 // `crypto.subtle` — polyfill from Node's WebCrypto so E2ECrypto (used below to
@@ -39,7 +41,7 @@ class FakeWebSocket {
 ;(globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeWebSocket
 
 interface Internals {
-  handleMessage(msg: unknown): void
+  handleMessage(msg: unknown, frame?: unknown): void
   decodeIncoming(raw: string): Promise<unknown>
   sendSync(): void
   initE2E(): Promise<void>
@@ -139,7 +141,12 @@ describe('RemoteConnection', () => {
       expect(events).toEqual([]) // out-of-order event NOT applied
       expect(created.conn.getLastSeq()).toBe(5) // lastSeq NOT advanced
       expect(sent).toHaveLength(1)
-      expect(JSON.parse(sent[0])).toEqual({ type: 'sync', lastSeq: 5, epoch: 'epoch-A' })
+      expect(JSON.parse(sent[0])).toEqual({
+        type: 'sync',
+        lastSeq: 5,
+        epoch: 'epoch-A',
+        chunked: true
+      })
     })
 
     it('applies a contiguous event and advances lastSeq', () => {
@@ -443,7 +450,12 @@ describe('RemoteConnection', () => {
       internals.sync.epoch = 'epoch-Z'
       internals.sync.lastSeq = 7
       internals.sendSync()
-      expect(JSON.parse(sent[0])).toEqual({ type: 'sync', lastSeq: 7, epoch: 'epoch-Z' })
+      expect(JSON.parse(sent[0])).toEqual({
+        type: 'sync',
+        lastSeq: 7,
+        epoch: 'epoch-Z',
+        chunked: true
+      })
     })
   })
 
@@ -577,7 +589,12 @@ describe('RemoteConnection', () => {
       })
 
       expect(states.at(-1)).toBe('syncing')
-      expect(JSON.parse(sent[0])).toEqual({ type: 'sync', lastSeq: 0, epoch: undefined })
+      expect(JSON.parse(sent[0])).toEqual({
+        type: 'sync',
+        lastSeq: 0,
+        epoch: undefined,
+        chunked: true
+      })
       expect(internals.destroyed).toBe(false)
       conn.destroy()
     })
@@ -669,6 +686,443 @@ describe('RemoteConnection', () => {
       expect(FakeWebSocket.instances).toHaveLength(2)
       conn.destroy()
     })
+  })
+})
+
+// ADR-102 amendment — a chunked sync-full is reassembled and applied exactly like
+// the single frame, with progress along the way and a reconnect when it breaks.
+describe('RemoteConnection — chunked sync-full', () => {
+  interface ChunkInternals {
+    handleMessage(msg: unknown, frame?: unknown): void
+    scheduleReconnect(): void
+    syncSentAt: number | null
+    reconnectTimer?: ReturnType<typeof setTimeout>
+    syncReassembly: unknown
+  }
+
+  const SNAPSHOT = {
+    type: 'sync-full',
+    epoch: 'epoch-C',
+    mockupToken: 'mock-c',
+    fileToken: 'file-c',
+    // Multi-byte text so a boundary can fall inside a surrogate pair's neighbourhood.
+    state: { seq: 10, sessions: { a: { title: 'héllo 😀 '.repeat(300) } } }
+  }
+
+  /** The snapshot as chunk frames of `size` JSON characters. */
+  function chunksOf(message: unknown, size: number): WsSyncFullChunk[] {
+    const parts = splitSyncFullJson(JSON.stringify(message), size)
+    const totalChars = parts.reduce((n, p) => n + p.length, 0)
+    return parts.map((data, index) => ({
+      type: 'sync-full-chunk',
+      index,
+      count: parts.length,
+      totalChars,
+      data
+    }))
+  }
+
+  /** An UNMOUNTED client (events buffer until markReady) with its observers wired. */
+  function make(): {
+    conn: RemoteConnection
+    internals: ChunkInternals
+    events: unknown[][]
+    snapshots: unknown[]
+    states: string[]
+    progress: ({ receivedChars: number; totalChars: number } | null)[]
+  } {
+    const conn = new RemoteConnection('http://host:1/remote', {})
+    const events: unknown[][] = []
+    conn.on('x')((...args) => events.push(['x', ...args]))
+    const snapshots: unknown[] = []
+    conn.setFullStateHandler((s) => snapshots.push(s))
+    const states: string[] = []
+    conn.setStateHandler((s) => states.push(s))
+    const progress: ({ receivedChars: number; totalChars: number } | null)[] = []
+    conn.setSyncProgressHandler((p) => progress.push(p))
+    // The mount-time call sees "nothing in flight"; the tests assert what follows.
+    progress.length = 0
+    return {
+      conn,
+      internals: conn as unknown as ChunkInternals,
+      events,
+      snapshots,
+      states,
+      progress
+    }
+  }
+
+  const frame = (frameChars: number, decodeMs: number, receivedAt: number): unknown => ({
+    frameChars,
+    decodeMs,
+    receivedAt
+  })
+
+  it('reassembles the chunks and applies them exactly like one sync-full frame', () => {
+    const { conn, internals, snapshots, states } = make()
+    const chunks = chunksOf(SNAPSHOT, 200)
+    expect(chunks.length).toBeGreaterThan(3)
+
+    for (const c of chunks.slice(0, -1)) internals.handleMessage(c)
+    expect(snapshots).toEqual([]) // nothing applies before the last chunk
+    expect(states).toEqual([])
+    internals.handleMessage(chunks.at(-1))
+
+    expect(snapshots).toEqual([SNAPSHOT.state])
+    expect(states).toEqual(['connected'])
+    expect(conn.getMockupToken()).toBe('mock-c')
+    expect(conn.getFileToken()).toBe('file-c')
+    expect(conn.getLastSeq()).toBe(10)
+    expect((conn as unknown as { sync: { epoch?: string } }).sync.epoch).toBe('epoch-C')
+    conn.destroy()
+  })
+
+  it('a transfer in ONE chunk applies the same way', () => {
+    const { conn, internals, snapshots } = make()
+    const chunks = chunksOf(SNAPSHOT, 10_000_000)
+    expect(chunks).toHaveLength(1)
+    internals.handleMessage(chunks[0])
+    expect(snapshots).toEqual([SNAPSHOT.state])
+    conn.destroy()
+  })
+
+  it('reports timing summed over the chunk frames, from the sync sent at chunk 0', () => {
+    const { conn, internals } = make()
+    let timing: unknown
+    conn.setFullStateHandler(() => {
+      timing = conn.takeFullFrameTiming()
+    })
+    const chunks = chunksOf(SNAPSHOT, 400)
+    expect(chunks.length).toBeGreaterThanOrEqual(3)
+
+    internals.syncSentAt = 100
+    internals.handleMessage(chunks[0], frame(500, 1, 150))
+    // A resync leaves mid-transfer and overwrites the live field; the transfer's
+    // own wait is still measured from the sync that asked for it.
+    internals.syncSentAt = 390
+    for (const c of chunks.slice(1, -1)) internals.handleMessage(c, frame(500, 1, 200))
+    internals.handleMessage(chunks.at(-1), frame(250, 1, 400))
+
+    const t = timing as { frameChars: number; decodeMs: number; syncToFrameMs: number }
+    expect(t.frameChars).toBe(500 * (chunks.length - 1) + 250)
+    expect(t.syncToFrameMs).toBe(300)
+    // Σ per-chunk decode (1 ms each) + the join and parse, which cost something.
+    expect(t.decodeMs).toBeGreaterThanOrEqual(chunks.length)
+    expect(internals.syncSentAt).toBeNull()
+    conn.destroy()
+  })
+
+  it('reports progress monotonically to the total, then null after the apply', () => {
+    const { conn, internals, progress } = make()
+    const chunks = chunksOf(SNAPSHOT, 300)
+    for (const c of chunks) internals.handleMessage(c)
+
+    const total = chunks[0].totalChars
+    expect(progress.at(-1)).toBeNull()
+    const live = progress.slice(0, -1) as { receivedChars: number; totalChars: number }[]
+    expect(live).toHaveLength(chunks.length)
+    expect(live.every((p) => p.totalChars === total)).toBe(true)
+    const received = live.map((p) => p.receivedChars)
+    expect([...received].sort((a, b) => a - b)).toEqual(received)
+    expect(new Set(received).size).toBe(received.length)
+    expect(received.at(-1)).toBe(total)
+    conn.destroy()
+  })
+
+  it('tells a late subscriber where the transfer already is, and survives a throwing observer', () => {
+    const { conn, internals } = make()
+    const chunks = chunksOf(SNAPSHOT, 300)
+    internals.handleMessage(chunks[0])
+    internals.handleMessage(chunks[1])
+
+    const seen: unknown[] = []
+    conn.setSyncProgressHandler((p) => seen.push(p))
+    expect(seen).toEqual([{ receivedChars: 600, totalChars: chunks[0].totalChars }])
+
+    conn.setSyncProgressHandler(() => {
+      throw new Error('observer blew up')
+    })
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const snapshots: unknown[] = []
+    conn.setFullStateHandler((s) => snapshots.push(s))
+    for (const c of chunks.slice(2)) internals.handleMessage(c)
+    expect(snapshots).toEqual([SNAPSHOT.state]) // the transfer still completed
+    errors.mockRestore()
+    conn.destroy()
+  })
+
+  it('an interleaved event frame does not break reassembly', () => {
+    const { conn, internals, events, snapshots } = make()
+    const chunks = chunksOf(SNAPSHOT, 400)
+    internals.handleMessage(chunks[0])
+    internals.handleMessage({ type: 'event', seq: 11, channel: 'x', args: ['between'] })
+    for (const c of chunks.slice(1)) internals.handleMessage(c)
+
+    expect(snapshots).toEqual([SNAPSHOT.state])
+    expect(events).toEqual([]) // buffered behind the readiness gate
+    conn.markReady()
+    expect(events).toEqual([['x', 'between']])
+    expect(conn.getLastSeq()).toBe(11)
+    conn.destroy()
+  })
+
+  it('a new chunk 0 discards a partial transfer and starts over', () => {
+    const { conn, internals, snapshots } = make()
+    const chunks = chunksOf(SNAPSHOT, 300)
+    internals.handleMessage(chunks[0])
+    internals.handleMessage(chunks[1])
+    for (const c of chunks) internals.handleMessage(c)
+    expect(snapshots).toEqual([SNAPSHOT.state]) // once, from the clean second pass
+    conn.destroy()
+  })
+
+  describe('a broken sequence discards the transfer and reconnects', () => {
+    const good = chunksOf(SNAPSHOT, 300)
+    const cases: [string, (chunks: WsSyncFullChunk[]) => unknown[]][] = [
+      ['an index gap', (c) => [c[0], c[2]]],
+      ['a repeated index', (c) => [c[0], c[1], c[1]]],
+      ['a chunk with no chunk 0 before it', (c) => [c[1]]],
+      ['a changed count', (c) => [c[0], { ...c[1], count: c[1].count + 1 }]],
+      ['a changed totalChars', (c) => [c[0], { ...c[1], totalChars: c[1].totalChars + 1 }]],
+      ['a non-integer index', (c) => [{ ...c[0], index: 0.5 }]],
+      ['a zero count', (c) => [{ ...c[0], count: 0 }]],
+      ['an index past the count', (c) => [{ ...c[0], index: c[0].count }]],
+      ['non-string data', (c) => [{ ...c[0], data: 7 }]],
+      [
+        'JSON that does not parse',
+        () => [{ type: 'sync-full-chunk', index: 0, count: 1, totalChars: 4, data: '{"a:' }]
+      ],
+      [
+        'a reassembled message of the wrong type',
+        () => {
+          const data = JSON.stringify({ type: 'sync-catchup', events: [] })
+          return [{ type: 'sync-full-chunk', index: 0, count: 1, totalChars: data.length, data }]
+        }
+      ],
+      [
+        'a totalChars that is not what arrived',
+        (c) => [{ ...c[0], count: 1, totalChars: c[0].data.length + 5 }]
+      ]
+    ]
+
+    it.each(cases)('%s', (_name, build) => {
+      FakeWebSocket.instances = []
+      const { conn, internals, snapshots, states, progress } = make()
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+      conn.connect()
+      const socket = FakeWebSocket.instances[0]
+      socket.readyState = 1
+
+      for (const m of build(good)) internals.handleMessage(m)
+
+      expect(snapshots).toEqual([]) // nothing applied
+      expect(socket.readyState).toBe(3) // closed by us...
+      expect(internals.reconnectTimer).toBeDefined() // ...which reconnects with backoff
+      expect(states.at(-1)).toBe('reconnecting')
+      expect(progress.at(-1) ?? null).toBeNull() // whatever it showed, the bar does not stay up
+      expect(internals.syncReassembly).toBeNull()
+      expect(errors).toHaveBeenCalled()
+      errors.mockRestore()
+      conn.destroy()
+    })
+  })
+
+  // R1 (exit review) — a deterministic host fault broke EVERY transfer, and
+  // each reconnect opened a socket, which reset the backoff: the client pulled
+  // the whole snapshot every ~1 s forever. Three in a row now give up.
+  describe('giving up on a host that keeps breaking transfers', () => {
+    const good = chunksOf(SNAPSHOT, 300)
+
+    beforeEach(() => {
+      FakeWebSocket.instances = []
+      vi.useFakeTimers()
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    /** The socket the last connect()/backoff opened, made OPEN. */
+    function openSocket(): FakeWebSocket {
+      const socket = FakeWebSocket.instances.at(-1)!
+      socket.readyState = 1
+      return socket
+    }
+
+    /** One broken transfer: chunk 1 with no chunk 0 before it. */
+    const breakTransfer = (internals: ChunkInternals): void => {
+      internals.handleMessage(good[1])
+    }
+
+    it('the first two breaks reconnect, the third lands on failed with no timer', () => {
+      const { conn, internals } = make()
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const records: [string, string | undefined][] = []
+      conn.setStateHandler((s, err) => records.push([s, err]))
+      conn.connect()
+
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const socket = openSocket()
+        breakTransfer(internals)
+        expect(socket.readyState).toBe(3) // closed by us
+        expect(records.at(-1)?.[0]).toBe('reconnecting')
+        expect(internals.reconnectTimer).toBeDefined()
+        vi.advanceTimersToNextTimer() // the backoff opens the next socket
+      }
+
+      const third = openSocket()
+      const close = vi.spyOn(third, 'close')
+      breakTransfer(internals)
+
+      expect(records.at(-1)?.[0]).toBe('failed')
+      expect(records.at(-1)?.[1]).toContain('incomplete state snapshot')
+      expect(close).toHaveBeenCalledTimes(1)
+      expect(internals.reconnectTimer).toBeUndefined() // onclose did NOT re-arm
+      errors.mockRestore()
+      conn.destroy()
+    })
+
+    it('a successful apply between breaks resets the count', () => {
+      const { conn, internals, snapshots } = make()
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const states: string[] = []
+      conn.setStateHandler((s) => states.push(s))
+      conn.connect()
+
+      openSocket()
+      breakTransfer(internals)
+      vi.advanceTimersToNextTimer()
+
+      openSocket()
+      for (const c of good) internals.handleMessage(c)
+      expect(snapshots).toEqual([SNAPSHOT.state])
+      const reconnects = states.filter((s) => s === 'reconnecting').length
+
+      for (let breakNumber = 1; breakNumber <= 2; breakNumber++) {
+        openSocket()
+        breakTransfer(internals)
+        if (breakNumber === 1) vi.advanceTimersToNextTimer()
+      }
+
+      expect(states).not.toContain('failed') // 2 breaks after the apply, not 3
+      expect(states.filter((s) => s === 'reconnecting')).toHaveLength(reconnects + 2)
+      expect(states.at(-1)).toBe('reconnecting')
+      expect(internals.reconnectTimer).toBeDefined()
+      errors.mockRestore()
+      conn.destroy()
+    })
+
+    it('a successful catchup resets the count too', () => {
+      // A catchup proves the host can answer a sync just as a full apply does.
+      // Without the reset, rare one-off breaks spread over days (each followed
+      // by a catchup reconnect) would add up to a `failed` on a healthy host.
+      const { conn, internals } = make()
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const states: string[] = []
+      conn.setStateHandler((s) => states.push(s))
+      conn.connect()
+
+      openSocket()
+      breakTransfer(internals)
+      vi.advanceTimersToNextTimer()
+
+      openSocket()
+      internals.handleMessage({ type: 'sync-catchup', epoch: 'epoch-C', events: [] })
+      expect(states.at(-1)).toBe('connected')
+      const reconnects = states.filter((s) => s === 'reconnecting').length
+
+      for (let breakNumber = 1; breakNumber <= 2; breakNumber++) {
+        openSocket()
+        breakTransfer(internals)
+        if (breakNumber === 1) vi.advanceTimersToNextTimer()
+      }
+
+      expect(states).not.toContain('failed') // 2 breaks after the catchup, not 3
+      expect(states.filter((s) => s === 'reconnecting')).toHaveLength(reconnects + 2)
+      expect(states.at(-1)).toBe('reconnecting')
+      expect(internals.reconnectTimer).toBeDefined()
+      errors.mockRestore()
+      conn.destroy()
+    })
+
+    it('an explicit connect() after failed revives the reconnect scheduling', () => {
+      const { conn, internals } = make()
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const states: string[] = []
+      conn.setStateHandler((s) => states.push(s))
+      conn.connect()
+
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        openSocket()
+        breakTransfer(internals)
+        if (attempt < 3) vi.advanceTimersToNextTimer()
+      }
+      expect(states.at(-1)).toBe('failed')
+
+      conn.connect() // the overlay's Retry reloads the page; the API is the same reviver
+      openSocket()
+      breakTransfer(internals)
+
+      expect(states.at(-1)).toBe('reconnecting')
+      expect(internals.reconnectTimer).toBeDefined()
+      errors.mockRestore()
+      conn.destroy()
+    })
+  })
+
+  it('the tail of an abandoned transfer is reported and closed once, not per chunk', () => {
+    FakeWebSocket.instances = []
+    const { conn, internals } = make()
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    conn.connect()
+    const socket = FakeWebSocket.instances[0]
+    socket.readyState = 1
+    const close = vi.spyOn(socket, 'close')
+    const chunks = chunksOf(SNAPSHOT, 300)
+    expect(chunks.length).toBeGreaterThan(4)
+
+    // Chunk 1 is lost; the rest keep draining through the recv queue.
+    for (const c of [chunks[0], ...chunks.slice(2)]) internals.handleMessage(c)
+
+    expect(errors).toHaveBeenCalledTimes(1)
+    expect(close).toHaveBeenCalledTimes(1)
+    errors.mockRestore()
+    conn.destroy()
+  })
+
+  it('a socket close mid-transfer discards the buffer; a fresh transfer then applies', () => {
+    FakeWebSocket.instances = []
+    const { conn, internals, snapshots, progress } = make()
+    conn.connect()
+    const socket = FakeWebSocket.instances[0]
+    const chunks = chunksOf(SNAPSHOT, 300)
+    internals.handleMessage(chunks[0])
+    internals.handleMessage(chunks[1])
+    expect(progress.at(-1)).not.toBeNull()
+
+    ;(socket.onclose as () => void)()
+    expect(progress.at(-1)).toBeNull()
+    expect(internals.syncReassembly).toBeNull()
+
+    // The old transfer's tail must not complete anything on the new socket.
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    internals.handleMessage(chunks[2])
+    errors.mockRestore()
+    expect(snapshots).toEqual([])
+
+    for (const c of chunks) internals.handleMessage(c)
+    expect(snapshots).toEqual([SNAPSHOT.state])
+    conn.destroy()
+  })
+
+  it('destroy() mid-transfer drops the buffer and tells the observer', () => {
+    FakeWebSocket.instances = []
+    const { conn, internals, progress } = make()
+    conn.connect()
+    internals.handleMessage(chunksOf(SNAPSHOT, 300)[0])
+    conn.destroy()
+    expect(progress.at(-1)).toBeNull()
+    expect(internals.syncReassembly).toBeNull()
   })
 })
 
