@@ -9,7 +9,7 @@ interface ConnectionOverlayProps {
    * The connection whose full-sync progress the bar under "Syncing state..." shows.
    * The overlay subscribes itself (rather than main.tsx holding the progress in root
    * state) so a chunk re-renders only this component, never the app tree beneath it.
-   * Absent (the probing overlay): the bar is indeterminate.
+   * Absent: no live progress to subscribe to — the bar stays indeterminate.
    */
   connection?: Pick<RemoteConnection, 'setSyncProgressHandler'>
 }

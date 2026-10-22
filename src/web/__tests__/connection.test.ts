@@ -851,7 +851,7 @@ describe('RemoteConnection — chunked sync-full', () => {
     conn.destroy()
   })
 
-  it('applies events that arrive between chunks only after the state', () => {
+  it('an interleaved event frame does not break reassembly', () => {
     const { conn, internals, events, snapshots } = make()
     const chunks = chunksOf(SNAPSHOT, 400)
     internals.handleMessage(chunks[0])
@@ -922,6 +922,116 @@ describe('RemoteConnection — chunked sync-full', () => {
       expect(progress.at(-1) ?? null).toBeNull() // whatever it showed, the bar does not stay up
       expect(internals.syncReassembly).toBeNull()
       expect(errors).toHaveBeenCalled()
+      errors.mockRestore()
+      conn.destroy()
+    })
+  })
+
+  // R1 (exit review) — a deterministic host fault broke EVERY transfer, and
+  // each reconnect opened a socket, which reset the backoff: the client pulled
+  // the whole snapshot every ~1 s forever. Three in a row now give up.
+  describe('giving up on a host that keeps breaking transfers', () => {
+    const good = chunksOf(SNAPSHOT, 300)
+
+    beforeEach(() => {
+      FakeWebSocket.instances = []
+      vi.useFakeTimers()
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    /** The socket the last connect()/backoff opened, made OPEN. */
+    function openSocket(): FakeWebSocket {
+      const socket = FakeWebSocket.instances.at(-1)!
+      socket.readyState = 1
+      return socket
+    }
+
+    /** One broken transfer: chunk 1 with no chunk 0 before it. */
+    const breakTransfer = (internals: ChunkInternals): void => {
+      internals.handleMessage(good[1])
+    }
+
+    it('the first two breaks reconnect, the third lands on failed with no timer', () => {
+      const { conn, internals } = make()
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const records: [string, string | undefined][] = []
+      conn.setStateHandler((s, err) => records.push([s, err]))
+      conn.connect()
+
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const socket = openSocket()
+        breakTransfer(internals)
+        expect(socket.readyState).toBe(3) // closed by us
+        expect(records.at(-1)?.[0]).toBe('reconnecting')
+        expect(internals.reconnectTimer).toBeDefined()
+        vi.advanceTimersToNextTimer() // the backoff opens the next socket
+      }
+
+      const third = openSocket()
+      const close = vi.spyOn(third, 'close')
+      breakTransfer(internals)
+
+      expect(records.at(-1)?.[0]).toBe('failed')
+      expect(records.at(-1)?.[1]).toContain('incomplete state snapshot')
+      expect(close).toHaveBeenCalledTimes(1)
+      expect(internals.reconnectTimer).toBeUndefined() // onclose did NOT re-arm
+      errors.mockRestore()
+      conn.destroy()
+    })
+
+    it('a successful apply between breaks resets the count', () => {
+      const { conn, internals, snapshots } = make()
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const states: string[] = []
+      conn.setStateHandler((s) => states.push(s))
+      conn.connect()
+
+      openSocket()
+      breakTransfer(internals)
+      vi.advanceTimersToNextTimer()
+
+      openSocket()
+      for (const c of good) internals.handleMessage(c)
+      expect(snapshots).toEqual([SNAPSHOT.state])
+      const reconnects = states.filter((s) => s === 'reconnecting').length
+
+      for (let breakNumber = 1; breakNumber <= 2; breakNumber++) {
+        openSocket()
+        breakTransfer(internals)
+        if (breakNumber === 1) vi.advanceTimersToNextTimer()
+      }
+
+      expect(states).not.toContain('failed') // 2 breaks after the apply, not 3
+      expect(states.filter((s) => s === 'reconnecting')).toHaveLength(reconnects + 2)
+      expect(states.at(-1)).toBe('reconnecting')
+      expect(internals.reconnectTimer).toBeDefined()
+      errors.mockRestore()
+      conn.destroy()
+    })
+
+    it('an explicit connect() after failed revives the reconnect scheduling', () => {
+      const { conn, internals } = make()
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const states: string[] = []
+      conn.setStateHandler((s) => states.push(s))
+      conn.connect()
+
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        openSocket()
+        breakTransfer(internals)
+        if (attempt < 3) vi.advanceTimersToNextTimer()
+      }
+      expect(states.at(-1)).toBe('failed')
+
+      conn.connect() // the overlay's Retry reloads the page; the API is the same reviver
+      openSocket()
+      breakTransfer(internals)
+
+      expect(states.at(-1)).toBe('reconnecting')
+      expect(internals.reconnectTimer).toBeDefined()
       errors.mockRestore()
       conn.destroy()
     })

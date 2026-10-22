@@ -265,6 +265,12 @@ export type TerminalDetachedListener = (payload: {
 const INVOKE_TIMEOUT_MS = 30_000
 const PING_INTERVAL_MS = 15_000
 const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000]
+/**
+ * How many chunked full-sync transfers in a row may break before this client
+ * stops reconnecting and shows the failed overlay. The backoff cannot bound
+ * this on its own: every attempt opens a socket, which resets the backoff.
+ */
+const MAX_BROKEN_SYNC_TRANSFERS = 3
 
 /**
  * WebSocket TRANSPORT for the sync protocol: auth, E2E, framing, ping/pong,
@@ -303,6 +309,18 @@ export class RemoteConnection {
   private termExitListeners = new Set<TerminalExitListener>()
   private termDetachedListeners = new Set<TerminalDetachedListener>()
   private reconnectAttempt = 0
+  /**
+   * Consecutive chunked transfers this client had to abandon, since the last
+   * successful apply. {@link MAX_BROKEN_SYNC_TRANSFERS} is the giving-up point.
+   */
+  private brokenSyncTransfers = 0
+  /**
+   * Latched by {@link abandonSyncFull} once too many transfers broke in a row:
+   * suppresses the reconnect backoff so the failed overlay (Retry) is the only
+   * way forward, instead of re-downloading the snapshot forever. Cleared by an
+   * explicit `connect()`.
+   */
+  private syncBroken = false
   private reconnectTimer?: ReturnType<typeof setTimeout>
   private pingTimer?: ReturnType<typeof setInterval>
   /** Live only between `e2e-activate` and the ack — see E2E_ACTIVATION_TIMEOUT_MS. */
@@ -644,6 +662,8 @@ export class RemoteConnection {
     this.destroyed = false
     this.authRejected = false
     this.reconnectAttempt = 0
+    this.brokenSyncTransfers = 0
+    this.syncBroken = false
     this.setState('connecting')
     this.createWebSocket()
   }
@@ -1634,6 +1654,8 @@ export class RemoteConnection {
     // Before `applyFullState`: the full-state handler reads it via takeFullFrameTiming().
     this.fullFrameTiming = timing
     this.syncSentAt = null
+    // This host can deliver a transfer, so the next break starts the count over.
+    this.brokenSyncTransfers = 0
     this.sync.applyFullState(full.state, full.epoch, full.state.seq)
     this.setState('connected')
     this.startPing()
@@ -1721,14 +1743,28 @@ export class RemoteConnection {
    * transfer discarded nothing re-arms a sync, and the overlay would sit on a
    * frozen bar forever. Closing the socket goes through the ordinary `onclose` →
    * `scheduleReconnect` path (backoff, "Reconnecting..."), which handshakes and
-   * syncs afresh — bounded by the backoff, so never a tight 40 MB retry loop.
+   * syncs afresh. Three in a row means the host cannot deliver a transfer at
+   * all, so the third latches `failed` instead of pulling the snapshot again.
    */
   private abandonSyncFull(why: string): void {
     this.resetSyncReassembly()
     // The rest of an abandoned transfer still drains through the recv queue onto
     // the now-closing socket; one report and one close are enough.
     if (this.ws?.readyState !== WebSocket.OPEN) return
-    console.error(`RemoteConnection: broken sync-full-chunk transfer (${why}); reconnecting`)
+    const givingUp = ++this.brokenSyncTransfers >= MAX_BROKEN_SYNC_TRANSFERS
+    console.error(
+      `RemoteConnection: broken sync-full-chunk transfer (${why}); ` +
+        (givingUp ? `giving up after ${this.brokenSyncTransfers} in a row` : 'reconnecting')
+    )
+    // Set the state BEFORE the close, and let `scheduleReconnect` see the latch:
+    // otherwise `onclose` re-enters `reconnecting` and the overlay never retries.
+    if (givingUp) {
+      this.syncBroken = true
+      this.setState(
+        'failed',
+        'The host sent an incomplete state snapshot several times in a row. Check the host log, then retry.'
+      )
+    }
     this.ws.close()
   }
 
@@ -1875,8 +1911,9 @@ export class RemoteConnection {
 
   private scheduleReconnect(reason?: string): void {
     // `authRejected` stops the backoff without latching `destroyed`, so the app
-    // can revive this instance via setCredential() + connect().
-    if (this.destroyed || this.authRejected) return
+    // can revive this instance via setCredential() + connect(). `syncBroken` is
+    // the same kind of stop, for a host that cannot finish a transfer.
+    if (this.destroyed || this.authRejected || this.syncBroken) return
 
     const delay = RECONNECT_DELAYS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS.length - 1)]
     this.reconnectAttempt++

@@ -140,13 +140,19 @@ a server-pushed frame, not an invoke response.
   `setSyncProgressHandler`, then runs the existing `sync-full` apply with the timing summed over the
   chunk frames. `syncToFrameMs` is measured from the `sync` that started the transfer, captured at
   chunk 0, so a resync sent mid-transfer cannot shorten it.
-- **A broken sequence reconnects, never freezes the bar.** An index gap, a changed
+- **A broken sequence reconnects, then gives up — never a loop.** An index gap, a changed
   `count`/`totalChars`, invalid fields, or joined text that is unparsable or not a `sync-full` →
   discard and `ws.close()`, which lands in the ordinary `onclose` → `scheduleReconnect` path (backoff
-  1→30 s, "Reconnecting...") and syncs afresh. Bounded by the backoff, so not a tight 40 MB retry
-  loop; silence would leave the owner staring at a frozen bar with nothing to re-arm a sync.
-- **Cost.** Re-escaping the JSON text inside a JSON string adds a few % on the wire (~1% measured on
-  real transcripts) and ~40 MB transient for a plaintext 40 MB snapshot; under E2E the phone's peak
+  1→30 s, "Reconnecting...") and syncs afresh. The backoff alone cannot bound this: each reconnect
+  opens a socket, and a successful open resets the attempt counter, so a host fault that breaks
+  EVERY transfer would re-download the snapshot about once a second forever. Three broken transfers
+  in a row (since the last successful apply) latch `failed` with "The host sent an incomplete state
+  snapshot several times in a row"; `scheduleReconnect` then declines, and the overlay's Retry
+  reloads the page. Silence, by contrast, would leave the owner staring at a frozen bar with nothing
+  to re-arm a sync.
+- **Cost.** Re-escaping the JSON text inside a JSON string adds a few % on the wire (~3% on the
+  measured 20.4 MB snapshot: 20,960,606 wire bytes vs 20,359,213 JSON characters, plaintext) and
+  ~40 MB transient for a plaintext 40 MB snapshot; under E2E the phone's peak
   roughly halves (per-chunk decode instead of one base64 + binary-string + typed + decoded chain).
   Accepted: the owner does not mind load time. `SyncStats` keeps one line per transfer — `chunks=N`,
   `frameBytes` = the SUM of the chunk frames (sync-core.md § Measuring a full sync).

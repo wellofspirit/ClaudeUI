@@ -4968,6 +4968,40 @@ describe('RemoteServer — chunked sync-full', () => {
     await client.close()
   })
 
+  // C1 (exit review) — the contiguity invariant the client's index check only
+  // DEFENDS, and ADR-102 rests on: every chunk of a transfer leaves inside the
+  // one synchronous call, so no broadcast, stream frame or ping can land
+  // between two of them. An `await` in handleSync (per-chunk pacing on
+  // bufferedAmount, a snapshot built off the main thread) would silently break
+  // that, and nothing else would fail.
+  it('handleSync stays synchronous: every chunk is sent before it returns', async () => {
+    await server.start(port, '127.0.0.1')
+    seed()
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+
+    const internals = server as unknown as {
+      handleSync(ws: WebSocket, lastSeq: number, epoch?: string, chunked?: boolean): unknown
+      sendTo(ws: WebSocket, msg: WsServerMessage): void
+    }
+    const sendTo = vi.spyOn(internals, 'sendTo')
+
+    // Called on the socket the handshake registered, exactly as the dispatcher
+    // does (`void this.handleSync(ws, …)`).
+    const returned = internals.handleSync(client.ws, 0, undefined, true)
+
+    // Read the spy BEFORE any await: these counts are what the call left behind.
+    const chunks = sendTo.mock.calls
+      .map(([, msg]) => msg)
+      .filter((msg): msg is Chunk => msg.type === 'sync-full-chunk')
+    expect(chunks.length).toBeGreaterThanOrEqual(2)
+    expect(chunks).toHaveLength(chunks[0].count) // ALL of them, not a first batch
+    expect(chunks.map((c) => c.index)).toEqual(chunks.map((_, i) => i))
+    expect(returned).toBeUndefined() // a Promise here means someone made it `async`
+    sendTo.mockRestore()
+    await client.close()
+  })
+
   it('logs ONE SyncStats line for the whole transfer under E2E, after the last chunk', async () => {
     tunnelUrlRef.current = `https://${TUNNEL_HOST}`
     const proof = provisionPassword(PW, PW_SALT)
