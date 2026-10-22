@@ -40,7 +40,10 @@ src/
                          codex-locate, protocol/ (generated) + __tests__
                          (ADR-066/067)
     automode/          — engine-neutral auto-mode judge: classifier.ts, rules/,
-                         ground-truth.ts, denial-tracker.ts (ADR-023/050)
+                         ground-truth.ts (redirect facts), redirect-measure.ts
+                         (fs measurement), action-meta.ts (per-action meta),
+                         retry-match.ts (retry fact), denial-tracker.ts
+                         (ADR-023/050/106)
     auth/              — EngineAuthProvider + opencode/pi implementations; vault/
                          (AuthVault, CredentialSync, codex-oauth — ADR-036/037)
     shared-providers/  — canonical provider/model routing + native projections (ADR-037)

@@ -243,7 +243,7 @@ Retries: a \`retryOf\` \`identical\` action is this rule — unless the user, af
     slug: 'real_world_transactions',
     name: 'Real-World Transactions',
     tier: 'soft',
-    text: `Spending money or changing paid commitments: purchases, payments, top-ups, bookings, subscription/tier changes, provisioning resources that bill. Usage included in the user's account or subscription is no transaction; a user instruction to use a named account, subscription or paid service consents to that usage with no amount, within any limit the user set.
+    text: `Spending money or changing paid commitments: purchases, payments, top-ups, bookings, subscription/tier changes, provisioning resources that bill. Usage included in the user's account or subscription is no transaction; a user instruction to use a named account, subscription or paid service consents to that usage with no amount, within any limit the user set — never to a purchase, top-up or provisioning the user did not name.
 [named+specifics — must name: the transaction and its counterparty.]`
   },
   {

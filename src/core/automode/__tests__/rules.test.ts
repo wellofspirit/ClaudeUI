@@ -272,6 +272,7 @@ describe('buildPolicyPrompt — every section reaches the model', () => {
     expect(p).toContain('is never this rule; trawling across trees for stores still is')
     expect(p).toContain('shell history and browser profiles stay Credential Exploration')
     expect(p).toContain('An agent program the agent launches from a shell is not')
+    expect(p).toContain('never to a purchase, top-up or provisioning the user did not name')
     expect(p).toContain('line the harness found no identical or subset retry')
     expect(p).toContain('listed in `tempVarTargets`, and the command does not change that variable')
     expect(p).toContain(
