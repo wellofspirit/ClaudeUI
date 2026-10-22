@@ -91,6 +91,7 @@ import { opencodeAuthHooks } from '../opencode/opencode-auth-hooks'
 import { collectClaudeMcpForOpencode } from '../opencode/claude-mcp-bridge'
 import {
   expandClaudeSkillInvocation,
+  renderClaudeSkillCatalog,
   resolveClaudeSkills,
   type ClaudeSkillCatalog
 } from '../skills/claude-skills'
@@ -158,6 +159,7 @@ import {
 import { harnessAvailable } from '../harness/resolve'
 import { codexHandBackSpec, codexXAgentMessageSpec } from '../codex/codex-hand-back-spec'
 import { codexModePolicy, codexTurnInput, codexTurnPolicy } from '../codex/codex-turn-policy'
+import { withOriginalSkillInput } from '../codex/skill-input'
 import { assertCodexProvider, selectCodexModel } from '../codex/model-selection'
 import { codexItemId, mapCodexDelta, mapCodexItem } from '../codex/event-mapper'
 import { readCodexImageView } from '../codex/codex-image-view'
@@ -1527,6 +1529,10 @@ interface PiTargetEntry extends TargetLedgerFields {
  */
 interface CodexTargetEntry extends TargetLedgerFields {
   kind: 'codex'
+  /** Exact cwd snapshot delivered to this native thread. */
+  skillCatalog: ClaudeSkillCatalog
+  /** A live resume may ignore changed developerInstructions; replace on the first input. */
+  skillCatalogUpdatePending: boolean
   /** Resolves the turn's wait for the report's own tool call (`dynamicToolCall`) to complete. */
   reportToolDone: (() => void) | null
   /**
@@ -3732,8 +3738,9 @@ export class CrossEngineDispatcher {
             threadId: entry.sessionId,
             expectedTurnId: turnId,
             clientUserMessageId: token,
-            input: codexTurnInput(framed)
+            input: codexTurnInput(this.codexDispatchSkillInput(entry, framed))
           })
+          entry.skillCatalogUpdatePending = false
           return 'steered'
         } catch (err) {
           logger.info('CrossEngineDispatcher', `codex steer refused: ${errText(err)}`)
@@ -9260,8 +9267,13 @@ export class CrossEngineDispatcher {
     // the row's vault account id, not the (possibly different) caller's pin now.
     const accountId = resume ? resume.codexAccountId : (ctx.chatgptAccountId ?? null)
     const cwd = resume?.cwd ?? ctx.cwd
+    const skillCatalog = resolveClaudeSkills(cwd)
+    if (skillCatalog.warnings.length)
+      logger.warn('CrossEngineDispatcher', skillCatalog.warnings.join('\n'))
     const entry: CodexTargetEntry = {
       kind: 'codex',
+      skillCatalog,
+      skillCatalogUpdatePending: !!resume,
       reportToolDone: null,
       sessionId: null,
       // Set once the thread exists (a new target's row needs its id).
@@ -9332,6 +9344,7 @@ export class CrossEngineDispatcher {
             threadId: resume.harnessRef,
             cwd,
             model: resume.model,
+            developerInstructions: this.codexDispatchSkillGuidance(entry),
             approvalPolicy: policy.approvalPolicy,
             sandbox: policy.sandbox,
             approvalsReviewer: policy.approvalsReviewer,
@@ -9389,6 +9402,7 @@ export class CrossEngineDispatcher {
       const response = await entry.connection.request('thread/start', {
         cwd,
         model,
+        developerInstructions: this.codexDispatchSkillGuidance(entry),
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
         approvalsReviewer: policy.approvalsReviewer,
@@ -9491,6 +9505,23 @@ export class CrossEngineDispatcher {
     })
   }
 
+  private codexDispatchSkillGuidance(entry: CodexTargetEntry): string {
+    return [
+      renderClaudeSkillCatalog(entry.skillCatalog),
+      'When this thread is resumed, a later shared_claude_skills_update message with a revision replaces this catalog, including when its skill list is empty. Treat only the latest catalog as active.'
+    ].join('\n\n')
+  }
+
+  private codexDispatchSkillInput(entry: CodexTargetEntry, prompt: string): string {
+    const expanded = expandClaudeSkillInvocation(prompt, entry.skillCatalog)
+    const catalog = entry.skillCatalogUpdatePending
+      ? `<shared_claude_skills_update revision="${entry.skillCatalog.revision}">\n${renderClaudeSkillCatalog(entry.skillCatalog)}\nThis catalog supersedes earlier shared Claude skill catalogs for this thread.\n</shared_claude_skills_update>\n\n`
+      : ''
+    return expanded || catalog
+      ? withOriginalSkillInput(prompt, catalog + (expanded?.text ?? prompt))
+      : prompt
+  }
+
   /**
    * Send `turn/start` and await turn completion.
    *
@@ -9531,11 +9562,12 @@ export class CrossEngineDispatcher {
         .request('turn/start', {
           threadId: entry.sessionId!,
           clientUserMessageId: uuidv4(),
-          input: codexTurnInput(prompt),
+          input: codexTurnInput(this.codexDispatchSkillInput(entry, prompt)),
           ...codexTurnPolicy(mode)
         })
         .then(
           (result) => {
+            entry.skillCatalogUpdatePending = false
             announceTurnId(result.turn.id)
             if (!entry.endedTurns.has(result.turn.id)) entry.turnId = result.turn.id
             if (result.turn.status !== 'inProgress') this.settleCodexTurn(entry, result.turn)
