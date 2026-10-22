@@ -439,10 +439,29 @@ export interface RedirectTargetDetail {
   /**
    * The path a leading temp-directory variable normally names plus the rest of
    * `raw`, present only on an unresolvable target that starts with one (ruling
-   * 18). A hint for the judge, never a scope claim: `summarizeRedirects` copies
-   * it into `tempVarTargets` and nothing else reads it.
+   * 18). A hint for the judge, never a scope claim: it never promotes a
+   * variable target into scope, and an unsupported spelling omits it.
    */
   tempVarPath?: string
+  /**
+   * The same hint spelled BEFORE `..` is collapsed. The physical check must see
+   * `temp/jump/../x` to notice that `jump` is a junction out of temp (exit
+   * review R1); the normalised `tempVarPath` alone has lost that evidence.
+   */
+  tempVarSpelling?: string
+  /**
+   * The drive the shell is on when this target runs, for a PowerShell rooted
+   * path such as `/tmp/x` (which means `<drive>:/tmp/x`). `null` means the
+   * shell state could not establish one. Undefined for targets whose spelling
+   * does not depend on the shell's current drive.
+   */
+  shellDrive?: string | null
+  /**
+   * Containment could not be established (a missing parent under a link, an
+   * unreadable root, a timeout, an unknown shell drive). The caller must not
+   * claim a clean scope for this target (exit review R3/R4/R5).
+   */
+  reviewRequired?: true
 }
 
 /**
@@ -505,11 +524,21 @@ const NULL_SINKS: ReadonlySet<string> = new Set(['/dev/null', 'nul', '$null'])
  */
 const STREAM_SINK_RE = /^\/(?:dev\/(?:stdout|stderr|tty|fd\/\d+)|proc\/self\/fd\/\d+)$/
 
-/** True when the as-written target names a null or stream sink. */
-function isSink(raw: string, platform: NodeJS.Platform): boolean {
+/**
+ * True when the as-written target names a null or stream sink.
+ *
+ * Stream pseudo-files are a POSIX-shell meaning (exit review R6): PowerShell
+ * resolves `/dev/stderr` to `<current drive>:/dev/stderr`, an ordinary file.
+ * So the stream spelling is dropped only where that meaning is established —
+ * on a non-Windows host, or in a known POSIX shell on Windows. An unknown
+ * Windows dialect keeps the PowerShell file interpretation.
+ */
+function isSink(raw: string, platform: NodeJS.Platform, shell: RedirectShell | undefined): boolean {
   const posix = toPosixish(raw, platform)
   if (NULL_SINKS.has(posix.toLowerCase())) return true
-  if (STREAM_SINK_RE.test(posix)) return true
+  if (platform !== 'win32' || shell === 'posix') {
+    if (STREAM_SINK_RE.test(posix)) return true
+  }
   // Windows' console device, case-insensitively (`> CON`); only on win32, so a
   // posix file literally named `con` keeps its fact.
   return platform === 'win32' && posix.trim().toLowerCase() === 'con'
@@ -1294,6 +1323,84 @@ interface RawTarget {
   unreadable?: boolean
   /** True when the word carried a quoted span, so bash removed no backslash from it. */
   quoted?: boolean
+  /**
+   * True when the leading text came from a spelling the shell takes LITERALLY
+   * (single quotes, or an escaped `$`). The optional temp hint must be withheld
+   * then: the command's variable is never expanded. Computed from the word's
+   * source position, never from the redirect operator.
+   */
+  hintLiteral?: boolean
+}
+
+/**
+ * Is the text starting at `start` a literal spelling of its leading `$…`
+ * reference … single-quoted, backslash-escaped (POSIX) or backtick-escaped
+ * (PowerShell, including inside double quotes)? The hint is optional, so an
+ * unknown spelling withholds it rather than guessing expansion.
+ */
+function leadingReferenceIsLiteral(command: string, start: number, raw: string): boolean {
+  let quote: "'" | '"' | null = null
+  for (let i = start; i < command.length && i < start + 512; i++) {
+    const ch = command[i]
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      else if (ch === '$') return true
+      continue
+    }
+    if (quote === '"') {
+      if ((ch === '\\' || ch === '`') && command[i + 1] === '$') return true
+      if (ch === '\\' || ch === '`') {
+        i++
+        continue
+      }
+      if (ch === '"') quote = null
+      else if (ch === '$') return !sourceRefMatches(command, i, raw)
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (ch === '\\' || ch === '`') {
+      if (command[i + 1] === '$') return true
+      i++
+      continue
+    }
+    if (ch === '$') {
+      // `$'…'` and `$"…"` are literals, not variable expansions.
+      if (command[i + 1] === "'" || command[i + 1] === '"') return true
+      return !sourceRefMatches(command, i, raw)
+    }
+  }
+  return true
+}
+
+/** Parse the leading `$…` reference of a raw target/value, or null. */
+function leadingRawRef(raw: string): string | null {
+  if (raw.startsWith('${')) {
+    const close = raw.indexOf('}')
+    return close === -1 ? null : raw.slice(0, close + 1)
+  }
+  const m = /^\$[A-Za-z_][A-Za-z0-9_:]*/.exec(raw)
+  return m ? m[0] : null
+}
+
+/** Does the source `$…` at `at` spell exactly the reference the raw target leads with? */
+function sourceRefMatches(command: string, at: number, raw: string): boolean {
+  if (command[at] !== '$') return false
+  let end = at + 1
+  if (command[end] === '{') {
+    const close = command.indexOf('}', end + 1)
+    if (close === -1) return false
+    end = close + 1
+  } else {
+    const m = /^[A-Za-z_][A-Za-z0-9_:]*/.exec(command.slice(at + 1))
+    if (!m) return false
+    end = at + 1 + m[0].length
+  }
+  const sourceRef = command.slice(at, end)
+  const rawRef = leadingRawRef(raw)
+  return rawRef !== null && rawRef === sourceRef
 }
 
 /** Everything one command's text yields: targets, segments, and dir-change regions. */
@@ -1335,6 +1442,9 @@ function collectTargets(full: string, lexed: LexedCommand): Collected {
             append: r.append,
             pos: r.pos,
             ...(r.word ? { quoted: r.word.spans.length > 0 } : { unreadable: true }),
+            ...(r.word
+              ? { hintLiteral: leadingReferenceIsLiteral(full, r.word.start, r.word.text) }
+              : {}),
             ...(continued ? { unreadable: true } : {})
           })
         }
@@ -1413,7 +1523,14 @@ function charTargets(command: string, from: number, to: number): RawTarget[] {
     }
     // `>&1`, `2>&-` — a duplication of a file descriptor, not a file.
     if (sawAmpersand && /^\d*-?$/.test(raw)) continue
-    out.push({ raw, append, pos: at, ...(quote === '"' || quote === "'" ? { quoted: true } : {}) })
+    out.push({
+      raw,
+      append,
+      pos: at,
+      ...(quote === '"' || quote === "'" ? { quoted: true } : {}),
+      // The spelling's absolute start is not retained here; withhold the hint.
+      hintLiteral: true
+    })
   }
   return out
 }
@@ -1588,7 +1705,14 @@ function writerTargets(seg: LexSegment, command: string): RawTarget[] {
         continue
       }
       for (const part of splitTargetWord(word)) {
-        out.push({ raw: part, append, pos: word.start, quoted: word.spans.length > 0 })
+        out.push({
+          raw: part,
+          append,
+          pos: word.start,
+          quoted: word.spans.length > 0,
+          hintLiteral:
+            part === word.text ? leadingReferenceIsLiteral(command, word.start, word.text) : true
+        })
       }
     }
     return out
@@ -1608,13 +1732,16 @@ function writerTargets(seg: LexSegment, command: string): RawTarget[] {
         pathSeen = true
         if (colon !== -1) {
           const value = text.slice(colon + 1)
+          const valueAt = args[i].start + colon + 1
           for (const part of splitTextWords(value)) {
             out.push({
               raw: part.text,
               append,
               pos: args[i].start,
               unreadable: part.unreadable,
-              ...(args[i].spans.length > 0 ? { quoted: true } : {})
+              ...(args[i].spans.length > 0 ? { quoted: true } : {}),
+              hintLiteral:
+                part.text === value ? leadingReferenceIsLiteral(command, valueAt, value) : true
             })
           }
           if (value.length === 0) out.push(unreadableTarget(command, args[i].end, append))
@@ -1630,7 +1757,13 @@ function writerTargets(seg: LexSegment, command: string): RawTarget[] {
           if (values.length === 0) out.push(unreadableTarget(command, args[i].end, append))
           for (const word of values) {
             if (word.spans.length > 0 && word.fullyQuoted) {
-              out.push({ raw: word.text, append, pos: word.start, quoted: true })
+              out.push({
+                raw: word.text,
+                append,
+                pos: word.start,
+                quoted: true,
+                hintLiteral: leadingReferenceIsLiteral(command, word.start, word.text)
+              })
               continue
             }
             for (const part of splitTextWords(word.text)) {
@@ -1639,7 +1772,11 @@ function writerTargets(seg: LexSegment, command: string): RawTarget[] {
                 append,
                 pos: word.start,
                 unreadable: part.unreadable,
-                ...(word.spans.length > 0 ? { quoted: true } : {})
+                ...(word.spans.length > 0 ? { quoted: true } : {}),
+                hintLiteral:
+                  part.text === word.text
+                    ? leadingReferenceIsLiteral(command, word.start, word.text)
+                    : true
               })
             }
           }
@@ -1657,7 +1794,11 @@ function writerTargets(seg: LexSegment, command: string): RawTarget[] {
         append,
         pos: args[i].start,
         unreadable: part.unreadable,
-        ...(args[i].spans.length > 0 ? { quoted: true } : {})
+        ...(args[i].spans.length > 0 ? { quoted: true } : {}),
+        hintLiteral:
+          part.text === args[i].text
+            ? leadingReferenceIsLiteral(command, args[i].start, args[i].text)
+            : true
       })
     }
     break
@@ -1748,7 +1889,8 @@ export function protectedComponentsOf(components: readonly string[]): string[] {
  * braced forms (case-insensitive) — or with a plain variable bound EARLIER by a
  * single top-level `NAME=<one of those>` / `$NAME = <one of those>` segment.
  * `path` is the host value from {@link RedirectScope.tempVars} plus the rest of
- * the target. A wrong hint costs nothing: the judge reads the command.
+ * the target. A hint never promotes the variable target into scope; unsupported
+ * or unvalidated spellings omit it conservatively.
  */
 const POWERSHELL_TEMP_NAMES: ReadonlySet<string> = new Set(['TEMP', 'TMP'])
 
@@ -1818,7 +1960,8 @@ interface TempHintBinding {
 function hintBinding(
   seg: LexSegment,
   shell: RedirectShell,
-  tempVars: Readonly<Record<string, string>>
+  tempVars: Readonly<Record<string, string>>,
+  command: string
 ): TempHintBinding | null {
   if (seg.nested || seg.depth > 0) return null
   // A binding that may not run (after `&&`/`||`) or runs in a subshell
@@ -1835,12 +1978,16 @@ function hintBinding(
     if (words[0].spans.some((s) => s.quote === "'")) return null
     name = text.slice(0, eq).replace(/^\$/, '')
     value = text.slice(eq + 1)
+    // An escaped leading reference is a LITERAL value, not the variable.
+    const valueAt = words[0].start + eq + 1
+    if (leadingReferenceIsLiteral(command, valueAt, value)) return null
   } else if (shell === 'powershell' && words.length === 3 && words[1].text === '=') {
     const m = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(words[0].text)
     if (!m) return null
     if (words[2].spans.some((s) => s.quote === "'")) return null
     name = m[1]
     value = words[2].text
+    if (leadingReferenceIsLiteral(command, words[2].start, value)) return null
   } else {
     return null
   }
@@ -1914,12 +2061,13 @@ function hostRefName(text: string, shell: RedirectShell): string | null {
 function tempHintBindings(
   segments: readonly LexSegment[],
   shell: RedirectShell | undefined,
-  tempVars: Readonly<Record<string, string>>
+  tempVars: Readonly<Record<string, string>>,
+  command: string
 ): TempHintBinding[] {
   if (!shell) return []
   const bindings: TempHintBinding[] = []
   for (const seg of segments) {
-    const binding = hintBinding(seg, shell, tempVars)
+    const binding = hintBinding(seg, shell, tempVars, command)
     if (binding) bindings.push(binding)
   }
   return bindings
@@ -1935,33 +2083,65 @@ function tempHintBindings(
  * "not this rule". Emitting no hint there leaves the write judged on its text
  * (exit review #4). Equal to the root itself is still inside.
  */
-function hintPath(value: string, rest: string, platform: NodeJS.Platform): string | undefined {
+function hintPath(
+  value: string,
+  rest: string,
+  platform: NodeJS.Platform
+): { path: string; spelling: string } | undefined {
   const root = normalizePath(value, platform).full
-  const path = normalizePath(`${value.replace(/[\\/]+$/, '')}${rest}`, platform).full
+  const spelling = toPosixish(`${value.replace(/[\\/]+$/, '')}${rest}`, platform)
+  const path = normalizePath(spelling, platform).full
   if (path !== root && !isDescendant(root, path, platform)) return undefined
-  return path
+  return { path, spelling }
+}
+
+/** Characters that expand or match at run time; a hint must name a static suffix. */
+const DYNAMIC_HINT_SUFFIX = /[$`~*?{}%[\]]/
+
+/**
+ * True when the suffix after the temp reference is literal for this shell. A
+ * backslash is literal only in PowerShell, where it is a path separator; in
+ * POSIX it escapes/removes the next character and the hint is withheld.
+ */
+function staticHintSuffix(text: string, shell: RedirectShell): boolean {
+  if (shell === 'posix' && text.includes('\\')) return false
+  return !DYNAMIC_HINT_SUFFIX.test(text)
 }
 
 /**
  * The hint for an unresolvable target, or `undefined` when it does not start
  * with a temp reference — directly, or through a binding that ends before it.
  */
+
 function tempHintFor(
   raw: string,
+  hintLiteral: boolean | undefined,
   shell: RedirectShell | undefined,
   tempVars: Readonly<Record<string, string>>,
   bindings: readonly TempHintBinding[],
   pos: number,
   platform: NodeJS.Platform,
   command: string
-): string | undefined {
+): { path: string; spelling: string } | undefined {
   if (!shell) return undefined
+  // Unknown provenance is withheld conservatively; `false` means a normal
+  // unquoted/double-quoted expanding reference.
+  if (hintLiteral !== false) return undefined
+  // In POSIX shell an unquoted backslash is removed or escapes the next
+  // character, so the target text alone does not say which path the shell
+  // reaches (`temp/ev\il` is `temp/evil`). The hint is optional: withhold it
+  // rather than validate a path the shell would not write (exit review R1/N7).
+  // PowerShell's backslash is a path separator, so its hints are unaffected.
+  if (shell === 'posix' && raw.includes('\\')) return undefined
   const hostAssigned = (text: string): boolean => {
     const name = hostRefName(text, shell)
     return name !== null && assignmentCount(command, name, shell) > 0
   }
   const direct = leadingHostTempRef(raw, shell, tempVars)
-  if (direct) return hostAssigned(raw) ? undefined : hintPath(direct.value, direct.rest, platform)
+  if (direct) {
+    if (!staticHintSuffix(direct.rest, shell)) return undefined
+    return hostAssigned(raw) ? undefined : hintPath(direct.value, direct.rest, platform)
+  }
   const ref = PLAIN_VAR_REF.exec(raw)
   if (!ref) return undefined
   const rest = raw.slice(ref[0].length)
@@ -1973,8 +2153,10 @@ function tempHintFor(
     if (sameVarName(binding.name, name, shell)) found = binding
   }
   if (!found) return undefined
+  if (shell === 'posix' && found.value.includes('\\')) return undefined
   const host = leadingHostTempRef(found.value, shell, tempVars)
   if (!host || hostAssigned(found.value)) return undefined
+  if (!staticHintSuffix(host.rest, shell) || !staticHintSuffix(rest, shell)) return undefined
   return hintPath(host.value, `${host.rest}${rest}`, platform)
 }
 
@@ -2413,7 +2595,8 @@ function targetReadings(
  *
  * Nothing is expanded (ruling 18): a target carrying `$`, a backtick, `~`, a
  * glob char or `%` is unresolvable, exactly as HEAD reported it. Such a target
- * MAY carry the non-authoritative `tempVarPath` hint; it never changes a verdict.
+ * MAY carry the non-authoritative `tempVarPath` hint. The hint never promotes a
+ * variable target into scope; unsupported spellings omit it.
  */
 function resolveOneTarget(
   target: RawTarget,
@@ -2434,9 +2617,10 @@ function resolveOneTarget(
   const seen = new Set<string>()
   let unresolved = false
 
-  const addResolved = (full: string, base: string): void => {
-    if (seen.has(full)) return
-    seen.add(full)
+  const addResolved = (full: string, base: string, shellDrive?: string | null): void => {
+    const key = `${full}\u0000${shellDrive ?? ''}`
+    if (seen.has(key)) return
+    seen.add(key)
     const viaCwd = relativeComponentsUnder(ctx.cwd, full, ctx.platform)
     const components = viaCwd ?? normalizePath(full, ctx.platform).components
     const root = deepestRoot(ctx.roots, full, ctx.platform)
@@ -2446,7 +2630,8 @@ function resolveOneTarget(
       append: target.append,
       ...(root === undefined ? {} : { root }),
       protectedHits: protectedComponentsOf(components),
-      base
+      base,
+      ...(shellDrive === undefined ? {} : { shellDrive })
     })
   }
 
@@ -2467,7 +2652,14 @@ function resolveOneTarget(
     }
     if (isAbsolutePosixish(posix, ctx.platform)) {
       const absolute = normalizePath(reading, ctx.platform)
-      addResolved(absolute.full, driveOrRoot(absolute.full, ctx.platform))
+      // A drive-less rooted path is drive-relative in PowerShell: `/tmp/x` is
+      // `<shell drive>:/tmp/x`. Keep the drive(s) the shell state allows so the
+      // physical measurement reads the right place (exit review R4). A drive we
+      // cannot establish is carried as `null` and withholds a clean scope.
+      const drives = rootedShellDrives(absolute.full, ctx.scope.shell, possibilities, ctx.platform)
+      for (const drive of drives) {
+        addResolved(absolute.full, driveOrRoot(absolute.full, ctx.platform), drive)
+      }
       continue
     }
     if (
@@ -2494,6 +2686,7 @@ function resolveOneTarget(
         ? undefined
         : tempHintFor(
             target.raw,
+            target.hintLiteral,
             ctx.scope.shell,
             ctx.scope.tempVars ?? {},
             ctx.tempBindings,
@@ -2501,14 +2694,55 @@ function resolveOneTarget(
             ctx.platform,
             ctx.command
           )
+    let shellDrive: string | null | undefined
+    if (
+      hint !== undefined &&
+      ctx.platform === 'win32' &&
+      hint.path.startsWith('/') &&
+      ctx.scope.shell !== 'posix'
+    ) {
+      // A rooted temp hint is drive-relative in PowerShell too. A single known
+      // drive can be measured; several possible drives are ambiguous, so the
+      // hint is withheld rather than checked at the start drive only.
+      const drives = rootedShellDrives(hint.path, ctx.scope.shell, possibilities, ctx.platform)
+      shellDrive = drives.length === 1 && typeof drives[0] === 'string' ? drives[0] : null
+    }
     out.push({
       raw: target.raw,
       append: target.append,
       protectedHits: protectedComponentsOf(rawComponentsForProtection(target.raw)),
-      ...(hint === undefined ? {} : { tempVarPath: hint })
+      ...(hint === undefined ? {} : { tempVarPath: hint.path, tempVarSpelling: hint.spelling }),
+      ...(shellDrive === undefined ? {} : { shellDrive })
     })
   }
   return out
+}
+
+/**
+ * The shell drives a drive-less rooted target may run on. A target that already
+ * names a drive is independent of the current directory, and a known POSIX shell
+ * folds `/tmp` through its own mount instead; both need no drive list.
+ */
+function rootedShellDrives(
+  full: string,
+  shell: RedirectShell | undefined,
+  possibilities: readonly Possibility[],
+  platform: NodeJS.Platform
+): (string | null | undefined)[] {
+  if (platform !== 'win32' || shell === 'posix' || !full.startsWith('/')) return [undefined]
+  const drives: (string | null)[] = []
+  const add = (drive: string | null): void => {
+    if (!drives.some((d) => d === drive)) drives.push(drive)
+  }
+  for (const possibility of possibilities) {
+    if (possibility.dir === null) {
+      add(null)
+      continue
+    }
+    const match = /^([a-z]:)\//i.exec(normalizePath(possibility.dir, platform).full)
+    add(match ? match[1].toLowerCase() : null)
+  }
+  return drives.length === 0 ? [null] : drives
 }
 
 /**
@@ -2571,14 +2805,14 @@ export function redirectTargetDetails(
   // assignment; a binding assigned more than once is no binding at all.
   const hintsAllowed = scope.shell !== undefined && !HINT_TAINT_RE.test(command)
   const tempBindings = hintsAllowed
-    ? tempHintBindings(collected.segments, scope.shell, scope.tempVars ?? {}).filter(
+    ? tempHintBindings(collected.segments, scope.shell, scope.tempVars ?? {}, command).filter(
         (binding) => assignmentCount(command, binding.name, scope.shell as RedirectShell) === 1
       )
     : []
 
   const details: RedirectTargetDetail[] = []
   for (const target of found) {
-    if (target.raw.length > 0 && isSink(target.raw, platform)) continue
+    if (target.raw.length > 0 && isSink(target.raw, platform, scope.shell)) continue
     const state = stateAt(states, target.pos) ?? initial
     details.push(
       ...resolveOneTarget(target, {
@@ -2624,23 +2858,47 @@ export function summarizeRedirects(
   const outOfScope: RedirectOutOfScopeTarget[] = []
   const symlinked: string[] = []
   const tempVarTargets: RedirectTempVarTarget[] = []
-  const seenPaths = new Set<string>()
+  const groups = new Map<
+    string,
+    { path: string; append: boolean; measured?: RedirectMeasurement; order: number }
+  >()
+  let reviewRequired = false
+  const hintGroups = new Map<
+    string,
+    { target: string; paths: Set<string>; veto: boolean; order: number }
+  >()
 
   for (const detail of details) {
     if (!targets.includes(detail.raw)) targets.push(detail.raw)
     if (detail.path === undefined && !unresolvable.includes(detail.raw)) {
       unresolvable.push(detail.raw)
     }
-    if (
-      detail.path === undefined &&
-      detail.tempVarPath !== undefined &&
-      !tempVarTargets.some((hint) => hint.target === detail.raw)
-    ) {
-      tempVarTargets.push({ target: detail.raw, path: detail.tempVarPath })
+    if (detail.path === undefined) {
+      // A raw target can appear several times (two writes, two readings). The
+      // clearing hint is published only when EVERY occurrence has a validated
+      // hint naming the SAME destination; one literal/unsafe occurrence vetoes
+      // it (exit review R1/N7 aggregation).
+      let group = hintGroups.get(detail.raw)
+      if (group === undefined) {
+        group = {
+          target: detail.raw,
+          paths: new Set(),
+          veto: false,
+          order: hintGroups.size
+        }
+        hintGroups.set(detail.raw, group)
+      }
+      if (detail.tempVarPath === undefined) group.veto = true
+      else group.paths.add(detail.tempVarPath)
     }
+    if (detail.reviewRequired === true) reviewRequired = true
     for (const hit of detail.protectedHits) {
       if (!protectedHits.includes(hit)) protectedHits.push(hit)
     }
+  }
+  for (const group of [...hintGroups.values()].sort((a, b) => a.order - b.order)) {
+    if (group.veto || group.paths.size !== 1) continue
+    tempVarTargets.push({ target: group.target, path: [...group.paths][0] })
   }
   for (const detail of details) {
     if (detail.path === undefined) continue
@@ -2651,16 +2909,31 @@ export function summarizeRedirects(
       continue
     }
     if (detail.root !== undefined) continue
-    if (seenPaths.has(detail.path)) continue
-    seenPaths.add(detail.path)
-    const entry: RedirectOutOfScopeTarget = { path: detail.path }
-    if (detail.append) entry.append = true
+    const prior = groups.get(detail.path)
+    if (prior === undefined) {
+      groups.set(detail.path, {
+        path: detail.path,
+        append: detail.append,
+        ...(seen === undefined ? {} : { measured: seen }),
+        order: outOfScope.length
+      })
+      outOfScope.push({ path: detail.path })
+    } else {
+      // Every possible write to the same resolved path must be append-only for
+      // the clearing `append:true` fact to be true (exit review R7).
+      prior.append = prior.append && detail.append
+      if (prior.measured === undefined && seen !== undefined) prior.measured = seen
+    }
+  }
+  for (const group of groups.values()) {
+    const entry = outOfScope[group.order]
+    if (group.append) entry.append = true
+    const seen = group.measured
     if (seen?.exists !== undefined) entry.exists = seen.exists
     if (seen?.exists === true && seen.empty !== undefined) entry.empty = seen.empty
     if (seen?.exists === true && seen.modifiedSinceSessionStart !== undefined) {
       entry.modifiedSinceSessionStart = seen.modifiedSinceSessionStart
     }
-    outOfScope.push(entry)
   }
 
   const analysis: RedirectAnalysis = {
@@ -2669,7 +2942,8 @@ export function summarizeRedirects(
       outOfScope.length === 0 &&
       unresolvable.length === 0 &&
       protectedHits.length === 0 &&
-      symlinked.length === 0,
+      symlinked.length === 0 &&
+      !reviewRequired,
     outOfScope,
     unresolvable,
     protectedHits

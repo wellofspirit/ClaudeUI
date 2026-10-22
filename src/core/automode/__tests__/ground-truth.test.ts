@@ -36,6 +36,7 @@ import {
   MAX_REDIRECT_TARGETS,
   MAX_UNTRACKED_NAMES,
   type CaptureExec,
+  type RedirectScope,
   type ToolOutcome
 } from '../ground-truth'
 
@@ -3044,5 +3045,60 @@ describe('exit review C1 — credential stores are protected components', () => 
     const r = analyzeRedirects('echo x > .awsome/notes.txt', { cwd: 'C:/Users/me' }, 'win32')
     expect(r?.protectedHits).toEqual([])
     expect(r?.allInScope).toBe(true)
+  })
+})
+
+describe('exit-fix4 R6 — stream sinks follow the established dialect', () => {
+  const WIN_ROOT = 'c:/fixture/app'
+  const posix = (command: string) => analyzeRedirects(command, { cwd: '/repo' }, 'linux')
+  const win = (command: string, extra: Partial<RedirectScope> = {}) =>
+    analyzeRedirects(command, { cwd: WIN_ROOT, ...extra }, 'win32')
+
+  it('drops POSIX stream spellings for a known POSIX shell on Windows', () => {
+    expect(win('echo x > /dev/stderr', { shell: 'posix' })).toBeNull()
+    expect(win('echo x > /proc/self/fd/1', { shell: 'posix' })).toBeNull()
+  })
+
+  it('keeps the PowerShell file interpretation for /dev/stderr (known dialect)', () => {
+    const r = win('echo x > /dev/stderr; echo harmless > ok.txt', { shell: 'powershell' })
+    expect(r?.targets).toContain('/dev/stderr')
+    expect(r?.targets).toContain('ok.txt')
+    expect(r?.allInScope).toBe(false)
+  })
+
+  it('keeps the PowerShell file interpretation for an unknown Windows dialect', () => {
+    const r = win('echo x > /dev/stderr; echo harmless > ok.txt')
+    expect(r?.targets).toContain('/dev/stderr')
+    expect(r?.allInScope).toBe(false)
+  })
+
+  it('still drops the spellings on an ordinary POSIX host and keeps CON on Windows', () => {
+    expect(posix('echo x > /dev/stderr')).toBeNull()
+    expect(win('echo x > CON')).toBeNull()
+  })
+})
+
+describe('exit-fix4 R7 — append aggregation over every write to one resolved path', () => {
+  const posix = (command: string) =>
+    analyzeRedirects(command, { cwd: '/repo', tempDirs: [] }, 'linux')
+
+  it('does not clear a truncating write that follows an append', () => {
+    const r = posix('echo harmless >> ../docs/notes.txt; echo overwritten > ../docs/notes.txt')
+    expect(r?.outOfScope).toEqual([{ path: '/docs/notes.txt' }])
+  })
+
+  it('does not clear a truncating write that precedes an append', () => {
+    const r = posix('echo overwritten > ../docs/notes.txt; echo harmless >> ../docs/notes.txt')
+    expect(r?.outOfScope).toEqual([{ path: '/docs/notes.txt' }])
+  })
+
+  it('keeps append:true when every write appends', () => {
+    const r = posix('echo a >> ../docs/notes.txt; echo b | tee -a ../docs/notes.txt')
+    expect(r?.outOfScope).toEqual([{ path: '/docs/notes.txt', append: true }])
+  })
+
+  it('aggregates mixed redirect/writer forms and normalised spellings', () => {
+    const r = posix('echo a >> ../docs/sub/../notes.txt; tee ../docs/notes.txt')
+    expect(r?.outOfScope).toEqual([{ path: '/docs/notes.txt' }])
   })
 })

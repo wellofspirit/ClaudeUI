@@ -43,7 +43,7 @@ import {
 } from './ground-truth'
 import { isAbsolutePosixish, isDescendant, normalizePath, toPosixish } from './shell-lexical'
 
-/** How long the callers let measurement run before falling back to the pure result. */
+/** How long the callers let measurement run before the conservative fallback. */
 export const REDIRECT_CAPTURE_TIMEOUT_MS = 400
 
 /** The slice of `fs.Stats` this file reads, so a test probe need not fake one. */
@@ -83,8 +83,9 @@ export interface CaptureRedirectsOptions {
  * `redirectTargetDetails` + measured fs facts → the meta contract.
  *
  * Returns `null` exactly when the pure analysis does (no file target). On any
- * failure or when the deadline expires the pure analysis is returned, so a
- * broken probe can only ever cost an escalation, never clear a target.
+ * failure or when the deadline expires a CONSERVATIVE analysis is returned:
+ * established negative facts survive, unchecked hints are dropped and review is
+ * forced, so a broken probe can only ever cost an escalation, never clear a target.
  */
 export async function captureRedirects(
   command: string,
@@ -94,21 +95,57 @@ export async function captureRedirects(
   const platform = options.platform ?? process.platform
   const details = redirectTargetDetails(command, scope, platform)
   if (details === null) return null
+  const progress: MeasureProgress = { outcomes: new Map() }
   const measured = await withinDeadline(
-    measureRedirects(details, scope, platform, options.probe ?? hostProbe, options.sessionStartMs),
+    measureRedirects(
+      details,
+      scope,
+      platform,
+      options.probe ?? hostProbe,
+      options.sessionStartMs,
+      progress
+    ),
     options.timeoutMs ?? REDIRECT_CAPTURE_TIMEOUT_MS
   )
-  if (measured === null) return summarizeRedirects(details)
+  if (measured === null) return conservativeFallback(details, progress)
   return summarizeRedirects(measured.details, measured.measured)
+}
+
+/**
+ * A timeout (or a probe rejection) must never restore the pure result's unsafe
+ * facts (exit review R5): the pure `allInScope: true` and a temp hint whose
+ * containment was not checked are exactly what the measurement removed. Keep
+ * every established negative fact from the completed targets, drop all temp
+ * hints, and force full review for the rest.
+ */
+function conservativeFallback(
+  details: readonly RedirectTargetDetail[],
+  progress: MeasureProgress
+): RedirectAnalysis {
+  const measured = new Map<string, RedirectMeasurement>()
+  const fallback = details.map((detail, i) => {
+    const done = progress.outcomes.get(i)
+    const base = done?.detail ?? detail
+    const clean = { ...base, reviewRequired: true as const }
+    delete clean.tempVarPath
+    delete clean.tempVarSpelling
+    if (done?.measurement !== undefined && clean.path !== undefined) {
+      measured.set(clean.path, mergeMeasurement(measured.get(clean.path), done.measurement))
+    }
+    return clean
+  })
+  return summarizeRedirects(fallback, measured)
 }
 
 interface MeasuredTargets {
   details: RedirectTargetDetail[]
   measured: Map<string, RedirectMeasurement>
+  /** Which target positions this root reading actually measured. */
+  applicable?: boolean[]
 }
 
 interface MeasurementContext {
-  /** The probe, with the win32 `/tmp` spelling folded per dialect (see {@link tmpRootReadings}). */
+  /** The probe, with the win32 `/tmp` spelling folded per dialect (see {@link rootPlanFor}). */
   probe: RedirectProbe
   platform: NodeJS.Platform
   sessionStartMs: number
@@ -123,7 +160,7 @@ interface MeasurementContext {
   realCwd: string | null
   /** Scope-root spelling → its real path, for roots `realpath` could establish. */
   realRoots: ReadonlyMap<string, string>
-  /** Which `/tmp` fold, if any, the probe applies (see {@link tmpRootReadings}). */
+  /** Which `/tmp` fold, if any, the probe applies (see {@link rootPlanFor}). */
   tmpRoot: string | undefined
   /**
    * The temp roots a `tempVarPath` hint can name, normalised: the values of the
@@ -174,28 +211,61 @@ function shellDriveTmp(scope: RedirectScope, platform: NodeJS.Platform): string 
   return drive ? `${drive[1]}/tmp` : undefined
 }
 
+interface RootPlan {
+  /** The physical `/tmp` reading(s) this target's spelling can mean. */
+  roots: (string | undefined)[]
+  /** A rootless PowerShell path whose current drive could not be established. */
+  unknownDrive: boolean
+}
+
 /**
- * The physical root(s) a win32 `/tmp` spelling stands for under this dialect.
- * `undefined` = read `/tmp` as written (no fold). The list is empty only for a
- * non-win32 host, which never folds.
+ * The `/tmp` reading(s) for ONE target. PowerShell resolves a drive-less rooted
+ * path against the CURRENT drive, so a `cd` before the redirect changes it; the
+ * scanner carries the possible drives in `detail.shellDrive` (exit review R4).
+ * An unknown dialect keeps the POSIX host reading AND every possible drive; a
+ * drive it cannot establish forces review rather than a clean scope claim.
  */
-function tmpRootReadings(scope: RedirectScope, platform: NodeJS.Platform): (string | undefined)[] {
-  if (platform !== 'win32') return [undefined]
+function rootPlanFor(
+  detail: RedirectTargetDetail,
+  scope: RedirectScope,
+  platform: NodeJS.Platform
+): RootPlan {
+  if (platform !== 'win32') return { roots: [undefined], unknownDrive: false }
+  // A hint names a real temp path even though the target itself is unresolvable;
+  // its `/tmp` spelling must be folded exactly like a resolved target's (R1).
+  const target = detail.path ?? detail.tempVarPath
+  if (target === undefined || !isTmpSpelling(target, platform)) {
+    return { roots: [undefined], unknownDrive: false }
+  }
   const hostTemp = hostTempSpelling(scope, platform)
-  const driveTmp = shellDriveTmp(scope, platform)
-  switch (scope.shell) {
-    case 'posix':
-      return [hostTemp]
-    case 'powershell':
-      return [driveTmp]
-    default: {
-      // Unknown dialect: probe both readings, worse wins (`undefined` is not a
-      // reading of its own once another exists — the fold IS the safer choice).
-      const roots = [hostTemp, driveTmp].filter(
-        (root, i, all): root is string => root !== undefined && all.indexOf(root) === i
-      )
-      return roots.length === 0 ? [undefined] : roots
+  if (scope.shell === 'posix') {
+    return hostTemp === undefined
+      ? { roots: [], unknownDrive: true }
+      : { roots: [hostTemp], unknownDrive: false }
+  }
+  if (scope.shell === 'powershell') {
+    const drive = detail.shellDrive
+    if (drive === null) return { roots: [], unknownDrive: true }
+    if (typeof drive === 'string') {
+      return { roots: [`${drive}/tmp`], unknownDrive: false }
     }
+    const fallback = shellDriveTmp(scope, platform)
+    return fallback === undefined
+      ? { roots: [], unknownDrive: true }
+      : { roots: [fallback], unknownDrive: false }
+  }
+  // Unknown dialect: BOTH readings, and every drive the shell state allows.
+  const roots: (string | undefined)[] = []
+  const add = (root: string | undefined): void => {
+    if (!roots.includes(root)) roots.push(root)
+  }
+  if (hostTemp !== undefined) add(hostTemp)
+  let drive: string | null | undefined = detail.shellDrive
+  if (drive === undefined) drive = shellDriveTmp(scope, platform)?.replace(/\/tmp$/, '')
+  if (typeof drive === 'string') add(`${drive}/tmp`)
+  return {
+    roots: roots.length === 0 ? [undefined] : roots,
+    unknownDrive: typeof drive !== 'string'
   }
 }
 
@@ -206,6 +276,15 @@ function isTmpSpelling(path: string, platform: NodeJS.Platform): boolean {
   return folded === GIT_BASH_TMP || folded.startsWith(`${GIT_BASH_TMP}/`)
 }
 
+/** `path` with a win32 `/tmp` spelling read through `tmpRoot`. */
+function mapTmpPath(path: string, tmpRoot: string | undefined, platform: NodeJS.Platform): string {
+  if (tmpRoot === undefined || !isTmpSpelling(path, platform)) return path
+  const folded = platform === 'win32' ? path.toLowerCase() : path
+  if (folded === GIT_BASH_TMP) return tmpRoot
+  // The `/tmp` prefix has the same length in every case, so slice the original.
+  return `${tmpRoot}/${path.slice(GIT_BASH_TMP.length + 1)}`
+}
+
 /** `probe` with a win32 `/tmp` spelling (any case) read through `tmpRoot`. */
 function probeFor(
   probe: RedirectProbe,
@@ -213,16 +292,9 @@ function probeFor(
   platform: NodeJS.Platform
 ): RedirectProbe {
   if (tmpRoot === undefined) return probe
-  const map = (path: string): string => {
-    if (!isTmpSpelling(path, platform)) return path
-    const folded = platform === 'win32' ? path.toLowerCase() : path
-    if (folded === GIT_BASH_TMP) return tmpRoot
-    // The `/tmp` prefix has the same length in every case, so slice the original.
-    return `${tmpRoot}/${path.slice(GIT_BASH_TMP.length + 1)}`
-  }
   return {
-    lstat: (path) => probe.lstat(map(path)),
-    realpath: (path) => probe.realpath(map(path))
+    lstat: (path) => probe.lstat(mapTmpPath(path, tmpRoot, platform)),
+    realpath: (path) => probe.realpath(mapTmpPath(path, tmpRoot, platform))
   }
 }
 
@@ -231,14 +303,94 @@ async function measureRedirects(
   scope: RedirectScope,
   platform: NodeJS.Platform,
   probe: RedirectProbe,
-  sessionStartMs: number
+  sessionStartMs: number,
+  progress: MeasureProgress
 ): Promise<MeasuredTargets> {
-  const readings = tmpRootReadings(scope, platform)
-  const runs: MeasuredTargets[] = []
-  for (const tmpRoot of readings) {
-    runs.push(await measureWith(details, scope, platform, probe, sessionStartMs, tmpRoot))
+  const plans = details.map((detail) => rootPlanFor(detail, scope, platform))
+  const roots: (string | undefined)[] = []
+  for (const plan of plans) {
+    for (const root of plan.roots) if (!roots.includes(root)) roots.push(root)
   }
-  return runs.length === 1 ? runs[0] : worseOf(runs, details)
+  if (roots.length === 0) roots.push(undefined)
+  const runs: MeasuredTargets[] = []
+  for (const tmpRoot of roots) {
+    const applicable = plans.map((plan) => !plan.unknownDrive && plan.roots.includes(tmpRoot))
+    runs.push(
+      await measureWith(
+        details,
+        scope,
+        platform,
+        probe,
+        sessionStartMs,
+        tmpRoot,
+        applicable,
+        progress
+      )
+    )
+  }
+  const merged = runs.length === 1 ? runs[0] : worseOf(runs, details)
+  merged.details = merged.details.map((detail, i) => {
+    if (!plans[i].unknownDrive) return detail
+    // An unresolvable hint whose temp path cannot be placed on a known drive is
+    // not a checked hint: drop it rather than keep a clean-looking fact.
+    if (detail.path === undefined && detail.tempVarPath !== undefined) {
+      const withoutHint = { ...detail, reviewRequired: true as const }
+      delete withoutHint.tempVarPath
+      delete withoutHint.tempVarSpelling
+      return withoutHint
+    }
+    return { ...detail, reviewRequired: true as const }
+  })
+  return merged
+}
+
+interface ProgressOutcome {
+  detail: RedirectTargetDetail
+  measurement?: RedirectMeasurement
+}
+
+/** Per-target outcomes already established when a deadline expires (R5). */
+interface MeasureProgress {
+  outcomes: Map<number, ProgressOutcome>
+}
+
+function recordProgress(
+  progress: MeasureProgress,
+  index: number,
+  detail: RedirectTargetDetail,
+  outcome: TargetOutcome | undefined
+): void {
+  if (outcome === undefined) return
+  const nextDetail = outcome.detail ?? detail
+  const prior = progress.outcomes.get(index)
+  if (prior === undefined) {
+    progress.outcomes.set(index, {
+      detail: nextDetail,
+      ...(outcome.measurement ? { measurement: outcome.measurement } : {})
+    })
+    return
+  }
+  const detailWinner =
+    nextDetail.protectedHits.length > prior.detail.protectedHits.length ? nextDetail : prior.detail
+  const protectedHits = [...prior.detail.protectedHits]
+  for (const hit of nextDetail.protectedHits) {
+    if (!protectedHits.includes(hit)) protectedHits.push(hit)
+  }
+  const reviewRequired = prior.detail.reviewRequired === true || nextDetail.reviewRequired === true
+  const measurement =
+    outcome.measurement === undefined
+      ? prior.measurement
+      : prior.measurement === undefined
+        ? outcome.measurement
+        : worseMeasurement(prior.measurement, outcome.measurement)
+  progress.outcomes.set(index, {
+    detail: {
+      ...detailWinner,
+      protectedHits,
+      ...(reviewRequired ? { reviewRequired: true as const } : {})
+    },
+    ...(measurement === undefined ? {} : { measurement })
+  })
 }
 
 async function measureWith(
@@ -247,7 +399,9 @@ async function measureWith(
   platform: NodeJS.Platform,
   probe: RedirectProbe,
   sessionStartMs: number,
-  tmpRoot: string | undefined
+  tmpRoot: string | undefined,
+  applicable: readonly boolean[],
+  progress: MeasureProgress
 ): Promise<MeasuredTargets> {
   const mapped = probeFor(probe, tmpRoot, platform)
   const realRoots = new Map<string, string>()
@@ -270,19 +424,29 @@ async function measureWith(
   }
   const measured = new Map<string, RedirectMeasurement>()
   const results = await Promise.all(
-    details.map(async (detail) => {
+    details.map(async (detail, i) => {
+      if (!applicable[i]) return undefined
       if (detail.path === undefined) {
         // An unresolvable target carrying a temp hint: drop the hint when the
         // path it names is reached through a link OUT of the temp root it names
         // (exit review N7). The unresolvable detail itself is never dropped.
         if (detail.tempVarPath === undefined) return undefined
-        if (await hintStaysInTemp(detail.tempVarPath, context)) return undefined
-        const withoutHint = { ...detail }
+        const hint = await hintOutcome(detail, context)
+        if (hint.stays) return undefined
+        const withoutHint = { ...detail, protectedHits: [...detail.protectedHits] }
         delete withoutHint.tempVarPath
+        delete withoutHint.tempVarSpelling
+        for (const hit of hint.protectedHits) {
+          if (!withoutHint.protectedHits.includes(hit)) withoutHint.protectedHits.push(hit)
+        }
+        // Negative evidence from a hint (containment escape or a protected real
+        // destination) survives a different target's timeout.
+        recordProgress(progress, i, detail, { detail: withoutHint })
         return withoutHint
       }
       try {
         const outcome = await measureTarget(detail, context)
+        recordProgress(progress, i, detail, outcome)
         if (outcome.measurement !== undefined) {
           // One resolved path can be reached by several spellings; a plain
           // reading must never erase another spelling's `symlinked` (N3).
@@ -293,8 +457,9 @@ async function measureWith(
         }
         return outcome.detail
       } catch {
-        // Absence, never a guess.
-        return undefined
+        // An exception is not an absence: the target's containment is
+        // unresolved, so the pure `allInScope` must not be restored.
+        return { ...detail, reviewRequired: true as const }
       }
     })
   )
@@ -302,7 +467,8 @@ async function measureWith(
     // A rewritten detail (a link that resolves in scope) keeps its position, so
     // the meta line's order still follows the command.
     details: details.map((detail, i) => results[i] ?? detail),
-    measured
+    measured,
+    applicable: [...applicable]
   }
 }
 
@@ -323,17 +489,32 @@ function worseOf(
     }
   }
   const details = runs[0].details.map((first, i) => {
-    let best = first
-    let bestScore = outcomeScore(first, source[i].path, runs[0])
-    for (const run of runs.slice(1)) {
-      const candidate = run.details[i] ?? first
-      const score = outcomeScore(candidate, source[i].path, run)
+    // Only a run that actually measured this target may decide its outcome; a
+    // non-applicable run must not resurrect an unsafe hint or a clean reading.
+    const candidates = runs
+      .filter((run) => run.applicable?.[i] !== false)
+      .map((run) => ({ run, detail: run.details[i] ?? first }))
+    if (candidates.length === 0) candidates.push({ run: runs[0], detail: first })
+    let best = candidates[0].detail
+    let bestScore = outcomeScore(best, source[i], candidates[0].run)
+    const protectedHits: string[] = []
+    let reviewRequired = false
+    for (const candidate of candidates) {
+      for (const hit of candidate.detail.protectedHits) {
+        if (!protectedHits.includes(hit)) protectedHits.push(hit)
+      }
+      if (candidate.detail.reviewRequired === true) reviewRequired = true
+      const score = outcomeScore(candidate.detail, source[i], candidate.run)
       if (score > bestScore) {
-        best = candidate
+        best = candidate.detail
         bestScore = score
       }
     }
-    return best
+    return {
+      ...best,
+      protectedHits,
+      ...(reviewRequired ? { reviewRequired: true as const } : {})
+    }
   })
   return { details, measured }
 }
@@ -341,14 +522,17 @@ function worseOf(
 /** How alarming one reading of a target is; ties keep the first reading. */
 function outcomeScore(
   detail: RedirectTargetDetail,
-  sourcePath: string | undefined,
+  source: RedirectTargetDetail | undefined,
   run: MeasuredTargets
 ): number {
-  const reading = sourcePath === undefined ? undefined : run.measured.get(sourcePath)
+  const reading = source?.path === undefined ? undefined : run.measured.get(source.path)
   return (
+    (detail.reviewRequired === true ? 10_000 : 0) +
     detail.protectedHits.length * 100 +
+    // A removed temp hint is stronger evidence than one that was not checked.
+    (source?.tempVarPath !== undefined && detail.tempVarPath === undefined ? 200 : 0) +
     (reading?.symlinked === true ? 50 : 0) +
-    (reading?.exists === true ? 10 : 0)
+    (reading?.exists === true ? 10 : reading?.exists === false ? 5 : 0)
   )
 }
 
@@ -376,8 +560,13 @@ async function measureTarget(
   // `exists`/`empty`/`mtime` read there is a fabrication, so the target keeps
   // only its pure facts (exit review N4). The link checks still run.
   if (!isMeasurableTarget(target, context)) {
-    if (await linkBeforeDotDot(detail, context)) return { measurement: { symlinked: true } }
-    return (await throughLink(detail, context)) ?? {}
+    // A drive-less win32 mount (`/etc`) cannot be read by Node; measuring it
+    // would fabricate. An explicit link before `..` is still visible from the
+    // spelling, but no physical prefix probe is attempted.
+    const traversal = await linkBeforeDotDot(detail, context)
+    if (traversal === 'link') return { measurement: { symlinked: true } }
+    if (traversal === 'unknown') return { detail: { ...detail, reviewRequired: true } }
+    return {}
   }
 
   const stat = await readLstat(context.probe, target)
@@ -385,9 +574,25 @@ async function measureTarget(
   // absent. It does NOT unmake a planted directory link either, so the link
   // checks still run (exit review NIT); only measured fields are withheld.
   if (stat === 'error') {
-    if (await linkBeforeDotDot(detail, context)) return { measurement: { symlinked: true } }
-    return (await throughLink(detail, context)) ?? {}
+    const traversal = await linkBeforeDotDot(detail, context)
+    if (traversal === 'link') return { measurement: { symlinked: true } }
+    if (traversal === 'unknown') return { detail: { ...detail, reviewRequired: true } }
+    const linked = await throughLink(detail, context)
+    if (linked?.measurement !== undefined) return linked
+    // The leaf could itself be a link (to anywhere); a benign parent does not
+    // establish its identity, so do not clear the target as in-scope.
+    return {
+      detail: { ...(linked?.detail ?? detail), reviewRequired: true }
+    }
   }
+
+  // A written `sub/../x` does not prove `sub` is a directory: if any prefix
+  // BEFORE a `..` is a link, the collapsed path is not where the write lands.
+  // This MUST run before the final-file-link shortcut below: a safe lexical
+  // leaf link is irrelevant when `jump/..` escapes (exit review R2).
+  const traversal = await linkBeforeDotDot(detail, context)
+  if (traversal === 'link') return { measurement: { symlinked: true } }
+  if (traversal === 'unknown') return { detail: { ...detail, reviewRequired: true } }
 
   if (stat !== 'missing' && stat.isSymbolicLink()) {
     const real = await readRealpath(context.probe, target)
@@ -399,15 +604,12 @@ async function measureTarget(
     if (root !== undefined && protectedComponentsOf(components).length === 0) {
       // The lexical path is a link; the file it writes is INSIDE the tree. Report
       // the real path so `summarizeRedirects` treats it as an ordinary in-scope
-      // target instead of an escape.
+      // target instead of an escape. A `..` before the leaf was rejected above,
+      // so this safe link is reached only when the shell really reaches the file.
       return { detail: { ...detail, path: realPath, root: root.spelling } }
     }
     return { measurement: { symlinked: true } }
   }
-
-  // A written `sub/../x` does not prove `sub` is a directory: if any prefix
-  // BEFORE a `..` is a link, the collapsed path is not where the write lands.
-  if (await linkBeforeDotDot(detail, context)) return { measurement: { symlinked: true } }
 
   // In scope, the DIRECTORY it writes through can still be a link: `ordinary/`
   // onto `.claude` and `../outside/keys/` onto `~/.ssh` must be seen before any
@@ -480,17 +682,23 @@ async function inScopeThroughLink(
   context: MeasurementContext
 ): Promise<TargetOutcome | undefined> {
   const rootReal = context.realRoots.get(detail.root as string)
-  if (rootReal === undefined) return undefined
+  // Without the root's physical spelling containment cannot be established;
+  // an unchecked target must not clear as in-scope (exit review R3/R5).
+  if (rootReal === undefined) return { detail: { ...detail, reviewRequired: true } }
   const target = detail.path as string
-  const realParent = await readRealpath(context.probe, parentDir(target))
-  if (realParent === null) return undefined
-  const realParentPath = normalizePath(realParent, context.platform).full
+  // Resolve the nearest EXISTING ancestor and carry the missing suffix: a
+  // missing `ordinary/new` still writes through the existing `ordinary` junction
+  // (exit review R3). This is not a link finding for an ordinary new path: an
+  // unresolved physical walk merely withholds the clean scope claim.
+  const realTarget = await physicalTarget(context.probe, target, context.platform, context.tmpRoot)
+  if (realTarget === null) return { detail: { ...detail, reviewRequired: true } }
+  const realTargetPath = normalizePath(realTarget, context.platform).full
   const inside =
-    realParentPath === rootReal || isDescendant(rootReal, realParentPath, context.platform)
+    samePath(realTargetPath, rootReal, context.platform) ||
+    isDescendant(rootReal, realTargetPath, context.platform)
   // A parent link out of the tree: the spelling is not where the write lands.
   if (!inside) return { measurement: { symlinked: true } }
-  const realTarget = joinPath(realParentPath, baseName(target))
-  const hits = realProtectedComponents(realTarget, context)
+  const hits = realProtectedComponents(realTargetPath, context)
   const protectedHits = [
     ...detail.protectedHits,
     ...protectedComponentsOf(hits).filter((hit) => !detail.protectedHits.includes(hit))
@@ -518,6 +726,53 @@ async function readRealpath(probe: RedirectProbe, path: string): Promise<string 
   } catch {
     return null
   }
+}
+
+/**
+ * The physical path a target would write, even when the target (or an immediate
+ * parent) does not exist yet: resolve the nearest EXISTING ancestor and append
+ * the missing components. This is how a new file below an existing junction is
+ * still recognised as writing through that junction (exit review R3). `null`
+ * means the physical path could not be established, which is review-worthy, not
+ * a clean fact.
+ */
+async function physicalTarget(
+  probe: RedirectProbe,
+  target: string,
+  platform: NodeJS.Platform,
+  tmpRoot?: string
+): Promise<string | null> {
+  const full = normalizePath(mapTmpPath(target, tmpRoot, platform), platform).full
+  // A leaf's own identity is measured elsewhere (a link is handled before this
+  // helper). What containment needs is the PARENT directory's physical path,
+  // so climb only through paths positively established missing (ENOENT) and
+  // keep the missing suffix. An existing but unreadable directory whose realpath
+  // fails stays unestablished; it is never reconstructed from a higher ancestor.
+  const suffix: string[] = [baseName(full)]
+  let current = parentDir(full)
+  for (;;) {
+    const stat = await readLstat(probe, current)
+    if (stat === 'missing') {
+      const parent = parentDir(current)
+      if (parent === current) {
+        const real = await readRealpath(probe, current)
+        if (real === null) return null
+        return appendComponents(normalizePath(real, platform).full, suffix)
+      }
+      suffix.unshift(baseName(current))
+      current = parent
+      continue
+    }
+    const real = await readRealpath(probe, current)
+    if (real === null) return null
+    return appendComponents(normalizePath(real, platform).full, suffix)
+  }
+}
+
+function appendComponents(base: string, components: readonly string[]): string {
+  let out = base
+  for (const component of components) out = joinPath(out, component)
+  return out
 }
 
 /** `realpath(cwd)` in comparison form, or `null` when it cannot be established. */
@@ -630,17 +885,24 @@ function joinPath(base: string, component: string): string {
  * `lnk/../bs.txt`. A reading only counts when it collapses to the path the
  * scanner resolved, so a spelling the shell could not have read is ignored.
  *
- * A prefix `realpath` cannot establish (usually because it does not exist)
- * proves nothing and is skipped: absence is never a fabrication.
+ * A prefix positively established MISSING proves nothing and is skipped. A
+ * prefix that exists (or cannot be read) but whose `realpath` fails leaves the
+ * traversal UNESTABLISHED: no symlink is fabricated, but the target cannot be
+ * called clean (exit review R1/R5 failure completeness).
  */
+type Traversal = 'link' | 'none' | 'unknown'
+
 async function linkBeforeDotDot(
   detail: RedirectTargetDetail,
   context: MeasurementContext
-): Promise<boolean> {
+): Promise<Traversal> {
+  let unknown = false
   for (const spelling of dotDotReadings(detail, context.platform)) {
-    if (await linkBeforeDotDotIn(spelling, context)) return true
+    const outcome = await linkBeforeDotDotIn(spelling, context)
+    if (outcome === 'link') return 'link'
+    if (outcome === 'unknown') unknown = true
   }
-  return false
+  return unknown ? 'unknown' : 'none'
 }
 
 /** The un-collapsed absolute spellings of a target that a shell could have read. */
@@ -668,20 +930,26 @@ function dotDotReadings(detail: RedirectTargetDetail, platform: NodeJS.Platform)
 }
 
 /** Walk one absolute, un-collapsed spelling, `realpath`ing every prefix before a `..`. */
-async function linkBeforeDotDotIn(spelling: string, context: MeasurementContext): Promise<boolean> {
+async function linkBeforeDotDotIn(
+  spelling: string,
+  context: MeasurementContext
+): Promise<Traversal> {
   const drive = /^([A-Za-z]:)\//.exec(spelling)
   const root = drive ? `${drive[1]}/` : '/'
   let prefix = root
+  let unknown = false
   for (const component of spelling.slice(root.length).split('/')) {
     if (component === '' || component === '.') continue
     if (component === '..') {
-      if (await prefixMovesDotDot(prefix, context)) return true
+      const outcome = await prefixMovesDotDot(prefix, context)
+      if (outcome === 'link') return 'link'
+      if (outcome === 'unknown') unknown = true
       prefix = parentDir(prefix)
       continue
     }
     prefix = joinPath(prefix, component)
   }
-  return false
+  return unknown ? 'unknown' : 'none'
 }
 
 /**
@@ -697,16 +965,20 @@ async function linkBeforeDotDotIn(spelling: string, context: MeasurementContext)
  * (Exit review #2's earlier check compared `realpath(prefix)` with the LEXICAL
  * prefix, which flagged every ancestor link and the `/tmp` fold.)
  */
-async function prefixMovesDotDot(prefix: string, context: MeasurementContext): Promise<boolean> {
+async function prefixMovesDotDot(prefix: string, context: MeasurementContext): Promise<Traversal> {
   const real = await readRealpath(context.probe, prefix)
-  if (real === null) return false
+  if (real === null) {
+    // Only a path positively established missing is a confirmed no-op.
+    return (await readLstat(context.probe, prefix)) === 'missing' ? 'none' : 'unknown'
+  }
   const lexicalParent = parentDir(prefix)
   const realParent = await readRealpath(context.probe, lexicalParent)
-  // Either side unestablished proves nothing: absence, never a fabrication.
-  if (realParent === null) return false
+  if (realParent === null) {
+    return (await readLstat(context.probe, lexicalParent)) === 'missing' ? 'none' : 'unknown'
+  }
   const realPath = normalizePath(real, context.platform).full
   const realParentPath = normalizePath(realParent, context.platform).full
-  return !samePath(parentDir(realPath), realParentPath, context.platform)
+  return !samePath(parentDir(realPath), realParentPath, context.platform) ? 'link' : 'none'
 }
 
 /**
@@ -725,13 +997,11 @@ async function outOfScopeThroughLink(
   context: MeasurementContext
 ): Promise<TargetOutcome | undefined> {
   const target = detail.path as string
-  const parent = parentDir(target)
-  const realParent = await readRealpath(context.probe, parent)
-  if (realParent === null) return undefined
-  const realParentPath = normalizePath(realParent, context.platform).full
-  if (samePath(realParentPath, parent, context.platform)) return undefined
-  const realTarget = joinPath(realParentPath, baseName(target))
-  const hits = realProtectedComponents(realTarget, context)
+  const realTarget = await physicalTarget(context.probe, target, context.platform, context.tmpRoot)
+  if (realTarget === null) return undefined
+  const realTargetPath = normalizePath(realTarget, context.platform).full
+  if (samePath(realTargetPath, target, context.platform)) return undefined
+  const hits = realProtectedComponents(realTargetPath, context)
   const protectedHits = [
     ...detail.protectedHits,
     ...protectedComponentsOf(hits).filter((hit) => !detail.protectedHits.includes(hit))
@@ -773,11 +1043,34 @@ function tempVarRoots(scope: RedirectScope, platform: NodeJS.Platform): string[]
  * is a junction out of temp, and an unresolvable target is never link-measured,
  * so the hint would clear an overwrite outside scratch space.
  *
- * `realpath(parentDir(hint))` must lie inside `realpath(the temp root)`. An
- * unmeasurable parent keeps the hint only when that parent does not exist (a
- * scratch file that is not there yet).
+ * The hint's parent (or nearest existing ancestor, for a not-yet-created scratch
+ * path) must resolve inside the real temp root. A final file link is followed
+ * too. Absence, unreadable evidence or a failed traversal drops the hint.
  */
-async function hintStaysInTemp(hint: string, context: MeasurementContext): Promise<boolean> {
+interface HintOutcome {
+  /** True only when the hint is contained in temp AND names no protected target. */
+  stays: boolean
+  /** Protected components the physical destination is known to hit. */
+  protectedHits: string[]
+}
+
+/**
+ * Does a `tempVarPath` hint name a safe scratch destination (exit review N7/R1)?
+ * The lexical check in `ground-truth.ts` cannot see that `$TMPDIR/…/tlink` is a
+ * junction out of temp, and an unresolvable target is never link-measured, so
+ * the hint would clear an overwrite outside scratch space.
+ *
+ * The hint's parent (or nearest existing ancestor, for a not-yet-created scratch
+ * path) must resolve inside the real temp root. The final file link is followed
+ * too, and a `..` before the leaf is walked through the uncollapsed spelling.
+ * A destination inside temp that names a PROTECTED component (`.claude`,
+ * `.ssh`, …) is not a clearing hint either; its verified hits are retained.
+ */
+async function hintOutcome(
+  detail: RedirectTargetDetail,
+  context: MeasurementContext
+): Promise<HintOutcome> {
+  const hint = detail.tempVarPath as string
   const platform = context.platform
   let root: string | undefined
   for (const candidate of context.tempRoots) {
@@ -785,19 +1078,38 @@ async function hintStaysInTemp(hint: string, context: MeasurementContext): Promi
     // The deepest matching root is the temp directory the hint was built from.
     if (root === undefined || candidate.length > root.length) root = candidate
   }
-  if (root === undefined) return false
-  const parent = parentDir(hint)
-  const realParent = await readRealpath(context.probe, parent)
-  const realRoot = await readRealpath(context.probe, root)
-  if (realParent !== null && realRoot !== null) {
-    const realParentPath = normalizePath(realParent, platform).full
-    const realRootPath = normalizePath(realRoot, platform).full
-    return (
-      samePath(realParentPath, realRootPath, platform) ||
-      isDescendant(realRootPath, realParentPath, platform)
-    )
+  if (root === undefined) return { stays: false, protectedHits: [] }
+  // The normalised hint has lost a `..`; the spelling before collapse is what
+  // exposes `temp/jump/../x` when `jump` is a junction out of temp (R1).
+  const spelling = detail.tempVarSpelling
+  if (spelling !== undefined) {
+    if (!isAbsolutePosixish(spelling, platform)) return { stays: false, protectedHits: [] }
+    if ((await linkBeforeDotDotIn(spelling, context)) !== 'none') {
+      return { stays: false, protectedHits: [] }
+    }
   }
-  return (await readLstat(context.probe, parent)) === 'missing'
+  const realRoot = await readRealpath(context.probe, root)
+  if (realRoot === null) return { stays: false, protectedHits: [] }
+  const realRootPath = normalizePath(realRoot, platform).full
+  // A final file link must be followed too: `temp/leaf` may point outside temp.
+  const leaf = await readLstat(context.probe, hint)
+  if (leaf === 'error') return { stays: false, protectedHits: [] }
+  let physical: string | null
+  if (leaf !== 'missing' && leaf.isSymbolicLink()) {
+    physical = await readRealpath(context.probe, hint)
+    if (physical === null) return { stays: false, protectedHits: [] }
+  } else {
+    // Missing parents below an existing junction are reconstructed, never
+    // assumed safe (R3); an ordinary new scratch file still resolves inside.
+    physical = await physicalTarget(context.probe, hint, platform, context.tmpRoot)
+    if (physical === null) return { stays: false, protectedHits: [] }
+  }
+  const physicalPath = normalizePath(physical, platform).full
+  const protectedHits = protectedComponentsOf(realProtectedComponents(physicalPath, context))
+  const inside =
+    samePath(physicalPath, realRootPath, platform) ||
+    isDescendant(realRootPath, physicalPath, platform)
+  return { stays: inside && protectedHits.length === 0, protectedHits }
 }
 
 /** Two normalised absolute spellings name the same path (case-insensitively on win32). */
@@ -815,7 +1127,7 @@ function baseName(path: string): string {
 
 /**
  * `work` or `null` on timeout. A rejection also yields `null`: the caller then
- * returns the pure result, which is this module's "nothing was measured" state.
+ * builds the conservative fallback (negative evidence only, review forced).
  * Handlers are always attached, so a late rejection cannot go unhandled.
  */
 function withinDeadline<T>(work: Promise<T>, ms: number): Promise<T | null> {

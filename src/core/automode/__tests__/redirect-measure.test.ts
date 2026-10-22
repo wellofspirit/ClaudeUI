@@ -12,7 +12,7 @@
  *    an ordinary in-scope write;
  *  - the deadline falls back to the pure result (no measurements).
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   captureRedirects,
   REDIRECT_CAPTURE_TIMEOUT_MS,
@@ -642,7 +642,12 @@ describe('captureRedirects — a link ABOVE the `..` cancels out (exit review N6
     // `<real cwd>/x`, so nothing moved. The old check compared realpath(prefix)
     // with the lexical prefix and flagged it.
     const probe = fakeProbe({
-      entries: { '/work/jroot/proj/sub': { type: 'dir' }, '/work/real/proj/sub': { type: 'dir' } },
+      entries: {
+        '/work/jroot': { type: 'dir' },
+        '/work/jroot/proj': { type: 'dir' },
+        '/work/jroot/proj/sub': { type: 'dir' },
+        '/work/real/proj/sub': { type: 'dir' }
+      },
       real: {
         '/work/jroot': '/work/real',
         '/work/jroot/proj': '/work/real/proj',
@@ -765,16 +770,20 @@ describe('captureRedirects — failures are absence, never a fact', () => {
     })
   })
 
-  it('emits no symlinked field when the parent realpath cannot be established', async () => {
+  it('withholds a clean scope when the parent realpath cannot be established', async () => {
+    // A parent whose physical identity is unknown is not evidence of an ordinary
+    // in-scope write: the clean claim is withheld (exit review R3/R5), while no
+    // `symlinked` fact is fabricated.
     const probe = fakeProbe({ failRealpath: ['/work/repo'] })
     const result = await capture('echo x > build.log', probe)
     expect(result).toEqual({
       targets: ['build.log'],
-      allInScope: true,
+      allInScope: false,
       outOfScope: [],
       unresolvable: [],
       protectedHits: []
     })
+    expect(result?.symlinked).toBeUndefined()
   })
 
   it('falls back to the pure result when the deadline expires', async () => {
@@ -1071,6 +1080,801 @@ describe('captureRedirects — a link in the cwd path is not a protected compone
     )
     expect(result?.protectedHits).toEqual(['.git'])
     expect(result?.symlinked).toEqual(['ordinary/config'])
+    expect(result?.allInScope).toBe(false)
+  })
+})
+
+describe('captureRedirects — exit-fix4 R1: temp hint physical containment', () => {
+  const TEMP = 'c:/user-temp'
+  const scope = {
+    cwd: 'c:/repo',
+    tempDirs: [TEMP],
+    shell: 'posix' as const,
+    tempVars: { TMPDIR: TEMP }
+  }
+  const captureHint = (command: string, probe: RedirectProbe) =>
+    captureRedirects(command, scope, {
+      sessionStartMs: SESSION_START,
+      platform: 'win32',
+      probe
+    })
+
+  it('drops the hint when the FINAL file is a link out of temp', async () => {
+    const probe = fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        [`${TEMP}/leaf.txt`]: { type: 'symlink', target: 'c:/docs/thesis.txt' },
+        'c:/docs/thesis.txt': { type: 'file', size: 10 }
+      }
+    })
+    const result = await captureHint('echo x > $TMPDIR/leaf.txt', probe)
+    expect(result?.unresolvable).toEqual(['$TMPDIR/leaf.txt'])
+    expect(result?.allInScope).toBe(false)
+    expect(result).not.toHaveProperty('tempVarTargets')
+  })
+
+  it('drops the hint for link/.. traversal whose collapsed parent looks safe', async () => {
+    const probe = fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        [`${TEMP}/jump`]: { type: 'symlink', target: 'c:/docs/sub' },
+        'c:/docs/sub': { type: 'dir' }
+      }
+    })
+    const result = await captureHint('echo x > $TMPDIR/jump/../thesis.txt', probe)
+    expect(result?.unresolvable).toEqual(['$TMPDIR/jump/../thesis.txt'])
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('keeps a benign final file link that resolves inside temp', async () => {
+    const probe = fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        [`${TEMP}/leaf.txt`]: { type: 'symlink', target: `${TEMP}/inside/thesis.txt` },
+        [`${TEMP}/inside`]: { type: 'dir' }
+      }
+    })
+    const result = await captureHint('echo x > $TMPDIR/leaf.txt', probe)
+    expect(result?.tempVarTargets).toEqual([
+      { target: '$TMPDIR/leaf.txt', path: `${TEMP}/leaf.txt` }
+    ])
+  })
+
+  it('keeps the hint for an ordinary new scratch file control', async () => {
+    const probe = fakeProbe({ entries: { [TEMP]: { type: 'dir' } } })
+    const result = await captureHint('echo x > $TMPDIR/new-scratch.txt', probe)
+    expect(result?.tempVarTargets).toEqual([
+      { target: '$TMPDIR/new-scratch.txt', path: `${TEMP}/new-scratch.txt` }
+    ])
+  })
+})
+
+describe('captureRedirects — exit-fix4 R2: raw link/.. beats the safe leaf link', () => {
+  const entries: Record<string, Entry> = {
+    '/work/proj/jump': { type: 'symlink', target: '/work/docs/sub' },
+    '/work/docs/sub': { type: 'dir' },
+    '/work/proj/x.txt': { type: 'symlink', target: '/work/proj/inside.txt' },
+    '/work/proj/inside.txt': { type: 'file', size: 4 }
+  }
+  const scope = { cwd: '/work/proj', tempDirs: [], shell: 'posix' as const }
+
+  it('does not let the safe lexical leaf link hide an escaping cancelled component', async () => {
+    const result = await captureRedirects('printf physically-outside > jump/../x.txt', scope, {
+      sessionStartMs: SESSION_START,
+      platform: 'linux',
+      probe: fakeProbe({ entries })
+    })
+    expect(result?.symlinked).toEqual(['jump/../x.txt'])
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('still treats a safe leaf link at the collapsed path as an ordinary in-scope write', async () => {
+    const result = await captureRedirects('echo x > x.txt', scope, {
+      sessionStartMs: SESSION_START,
+      platform: 'linux',
+      probe: fakeProbe({ entries })
+    })
+    expect(result?.symlinked).toBeUndefined()
+    expect(result?.allInScope).toBe(true)
+  })
+})
+
+describe('captureRedirects — exit-fix4 R3: missing descendants under a link', () => {
+  it('resolves the nearest existing ancestor and reports the protected real target', async () => {
+    const probe = fakeProbe({
+      entries: {
+        '/work/repo/ordinary': { type: 'dir' },
+        '/work/repo/.claude': { type: 'dir' }
+      },
+      real: { '/work/repo/ordinary': '/work/repo/.claude' }
+    })
+    const result = await capture(
+      'mkdir -p ordinary/new; printf probe-settings > ordinary/new/settings.json',
+      probe
+    )
+    expect(result?.protectedHits).toEqual(['.claude'])
+    expect(result?.symlinked).toEqual(['ordinary/new/settings.json'])
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('leaves an ordinary new directory tree in scope (no fabricated link finding)', async () => {
+    const probe = fakeProbe({ entries: { '/work/repo': { type: 'dir' } } })
+    const result = await capture('mkdir -p fresh/new; echo x > fresh/new/file.txt', probe)
+    expect(result).toEqual({
+      targets: ['fresh/new/file.txt'],
+      allInScope: true,
+      outOfScope: [],
+      unresolvable: [],
+      protectedHits: []
+    })
+    expect(result?.symlinked).toBeUndefined()
+  })
+
+  it('drops a temp hint for a missing child below an escaping temp junction', async () => {
+    const TEMP = 'c:/user-temp'
+    const probe = fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        [`${TEMP}/jump`]: { type: 'symlink', target: 'c:/docs' },
+        'c:/docs': { type: 'dir' }
+      }
+    })
+    const result = await captureRedirects(
+      'echo x > $TMPDIR/jump/new/thesis.txt',
+      { cwd: 'c:/repo', tempDirs: [TEMP], shell: 'posix', tempVars: { TMPDIR: TEMP } },
+      { sessionStartMs: SESSION_START, platform: 'win32', probe }
+    )
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+})
+
+describe('captureRedirects — exit-fix4 R4: per-target PowerShell drive state', () => {
+  const USER_TEMP = 'c:/user-temp'
+  const scopeFor = (shell: 'posix' | 'powershell' | undefined) => ({
+    cwd: 'd:/repo',
+    tempDirs: [USER_TEMP, '/tmp'],
+    shell
+  })
+
+  function probeWith(): RedirectProbe {
+    return fakeProbe({
+      entries: {
+        [`${USER_TEMP}/alias`]: { type: 'dir' },
+        'd:/tmp/alias': { type: 'dir' },
+        'c:/tmp/alias': { type: 'symlink', target: 'c:/outside' },
+        'c:/outside': { type: 'dir' }
+      }
+    })
+  }
+
+  async function captureCd(
+    command: string,
+    shell: 'posix' | 'powershell' | undefined
+  ): Promise<Awaited<ReturnType<typeof captureRedirects>>> {
+    return captureRedirects(command, scopeFor(shell), {
+      sessionStartMs: SESSION_START,
+      platform: 'win32',
+      probe: probeWith()
+    })
+  }
+
+  it('follows a successful cd to C: for a rooted /tmp target (powershell)', async () => {
+    const result = await captureCd('cd C:/Windows && echo x > /tmp/alias/thesis.txt', 'powershell')
+    expect(result?.symlinked).toEqual(['/tmp/alias/thesis.txt'])
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('keeps every drive a failed or unconditional cd can leave (; form)', async () => {
+    const result = await captureCd('cd C:/Windows; echo x > /tmp/alias/thesis.txt', 'powershell')
+    expect(result?.symlinked).toEqual(['/tmp/alias/thesis.txt'])
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('keeps both shell readings and drives when the dialect is unknown', async () => {
+    const result = await captureCd('cd C:/Windows && echo x > /tmp/alias/thesis.txt', undefined)
+    expect(result?.symlinked).toEqual(['/tmp/alias/thesis.txt'])
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('withholds a clean scope when the PowerShell drive cannot be established', async () => {
+    const result = await captureRedirects(
+      'echo x > /tmp/alias/thesis.txt',
+      { cwd: 'd:/repo', shellCwd: null, tempDirs: [USER_TEMP, '/tmp'], shell: 'powershell' },
+      { sessionStartMs: SESSION_START, platform: 'win32', probe: probeWith() }
+    )
+    expect(result?.allInScope).toBe(false)
+    expect(result?.symlinked).toBeUndefined()
+  })
+
+  it('does not restore an unsafe temp hint because a /tmp target ran first', async () => {
+    const TEMP = 'c:/user-temp'
+    const probe = fakeProbe({
+      entries: {
+        [`${TEMP}/alias`]: { type: 'dir' },
+        'd:/tmp/alias': { type: 'dir' },
+        [`${TEMP}/evil`]: { type: 'symlink', target: 'c:/docs' },
+        'c:/docs': { type: 'dir' }
+      }
+    })
+    const result = await captureRedirects(
+      'echo k > /tmp/alias/out.txt; echo x > $TMPDIR/evil/thesis.txt',
+      { cwd: 'c:/repo', tempDirs: [TEMP, '/tmp'], shell: 'posix', tempVars: { TMPDIR: TEMP } },
+      { sessionStartMs: SESSION_START, platform: 'win32', probe }
+    )
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+})
+
+describe('captureRedirects — exit-fix4 R5: conservative deadline fallback', () => {
+  function delayed(probe: RedirectProbe, ms: number): RedirectProbe {
+    return {
+      lstat: (path) => probe.lstat(path),
+      async realpath(path) {
+        await new Promise((resolve) => setTimeout(resolve, ms))
+        return probe.realpath(path)
+      }
+    }
+  }
+
+  it('never restores a temp hint when the 400 ms budget expires', async () => {
+    const TEMP = 'c:/user-temp'
+    const probe = fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        [`${TEMP}/link`]: { type: 'symlink', target: 'c:/docs' },
+        'c:/docs': { type: 'dir' }
+      }
+    })
+    const result = await captureRedirects(
+      'echo x > $TMPDIR/link/thesis.docx',
+      { cwd: 'c:/repo', tempDirs: [TEMP], shell: 'posix', tempVars: { TMPDIR: TEMP } },
+      {
+        sessionStartMs: SESSION_START,
+        platform: 'win32',
+        probe: delayed(probe, 150),
+        timeoutMs: REDIRECT_CAPTURE_TIMEOUT_MS
+      }
+    )
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('never restores a clean scope for a protected junction when the deadline expires', async () => {
+    const probe = fakeProbe({
+      entries: {
+        '/work/repo/ordinary': { type: 'dir' },
+        '/work/repo/.claude': { type: 'dir' }
+      },
+      real: { '/work/repo/ordinary': '/work/repo/.claude' }
+    })
+    const result = await capture('echo x > ordinary/settings.json', delayed(probe, 150), {
+      timeoutMs: REDIRECT_CAPTURE_TIMEOUT_MS
+    })
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('keeps negative evidence established before the deadline', async () => {
+    const probe = fakeProbe({
+      entries: {
+        '/work/_scratch/link.log': { type: 'symlink', target: '/home/dev/.bashrc' },
+        '/home/dev/.bashrc': { type: 'file', size: 10 }
+      },
+      hangLstat: ['/work/_scratch/slow.log']
+    })
+    const result = await capture(
+      'echo x > ../_scratch/link.log; echo y > ../_scratch/slow.log',
+      probe,
+      { timeoutMs: 30 }
+    )
+    expect(result?.symlinked).toEqual(['../_scratch/link.log'])
+    expect(result?.allInScope).toBe(false)
+  })
+})
+
+describe('captureRedirects — exit-fix4 R5: unreadable leaf and thrown measurement', () => {
+  it('does not clear an unreadable leaf just because its parent is benign', async () => {
+    const probe = fakeProbe({
+      entries: { '/work/repo': { type: 'dir' } },
+      failLstat: ['/work/repo/build.log']
+    })
+    const result = await capture('echo x > build.log', probe)
+    expect(result?.allInScope).toBe(false)
+    // No fabricated link fact: the leaf's identity is simply unknown.
+    expect(result?.symlinked).toBeUndefined()
+  })
+
+  it('does not restore pure allInScope when measureTarget throws', async () => {
+    const probe: RedirectProbe = {
+      async lstat() {
+        return {
+          isSymbolicLink() {
+            throw new Error('stat exploded')
+          },
+          isFile() {
+            return true
+          }
+        }
+      },
+      async realpath(path) {
+        return path
+      }
+    }
+    const result = await capture('echo x > build.log', probe)
+    expect(result?.allInScope).toBe(false)
+  })
+})
+
+describe('captureRedirects — exit-fix4 R1/R5: hint mapping and failed traversal', () => {
+  it('maps a TMPDIR=/tmp POSIX hint through the host temp mount (not process-drive /tmp)', async () => {
+    const TEMP = 'c:/Temp'
+    const probe = fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        [`${TEMP}/leaf.txt`]: { type: 'symlink', target: 'c:/docs/thesis.txt' },
+        'c:/docs/thesis.txt': { type: 'file', size: 5 },
+        'd:/tmp/leaf.txt': { type: 'dir' }
+      }
+    })
+    const scope = {
+      cwd: 'c:/repo',
+      tempDirs: ['/tmp', 'c:/Temp'],
+      shell: 'posix' as const,
+      tempVars: { TMPDIR: '/tmp' }
+    }
+    const escaping = await captureRedirects('echo x > $TMPDIR/leaf.txt', scope, {
+      sessionStartMs: SESSION_START,
+      platform: 'win32',
+      probe
+    })
+    expect(escaping).not.toHaveProperty('tempVarTargets')
+    expect(escaping?.allInScope).toBe(false)
+
+    const clean = await captureRedirects('echo x > $TMPDIR/newfine.txt', scope, {
+      sessionStartMs: SESSION_START,
+      platform: 'win32',
+      probe
+    })
+    expect(clean?.tempVarTargets).toEqual([
+      { target: '$TMPDIR/newfine.txt', path: '/tmp/newfine.txt' }
+    ])
+
+    const unrelated = await captureRedirects('echo x > /tmp/other.txt', scope, {
+      sessionStartMs: SESSION_START,
+      platform: 'win32',
+      probe
+    })
+    expect(unrelated?.allInScope).toBe(true)
+  })
+
+  it('drops a hint when a prefix before `..` exists but realpath is unestablished', async () => {
+    const TEMP = 'c:/user-temp'
+    const probe = fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        [`${TEMP}/jump`]: { type: 'symlink', target: 'c:/docs' },
+        'c:/docs': { type: 'dir' }
+      },
+      failRealpath: [`${TEMP}/jump`]
+    })
+    const result = await captureRedirects(
+      'echo x > $TMPDIR/jump/../thesis.txt',
+      { cwd: 'c:/repo', tempDirs: [TEMP], shell: 'posix', tempVars: { TMPDIR: TEMP } },
+      { sessionStartMs: SESSION_START, platform: 'win32', probe }
+    )
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('requires review for an unestablished prefix before `..` without fabricating a link', async () => {
+    const probe = fakeProbe({
+      entries: {
+        '/work/proj/jump': { type: 'symlink', target: '/work/docs/sub' },
+        '/work/docs/sub': { type: 'dir' }
+      },
+      failRealpath: ['/work/proj/jump']
+    })
+    const result = await captureRedirects(
+      'printf > jump/../x.txt',
+      { cwd: '/work/proj', tempDirs: [], shell: 'posix' },
+      { sessionStartMs: SESSION_START, platform: 'linux', probe }
+    )
+    expect(result?.allInScope).toBe(false)
+    expect(result?.symlinked).toBeUndefined()
+  })
+})
+
+describe('captureRedirects … exit-fix4 R4/R1: rooted PowerShell hints keep drive ambiguity', () => {
+  const TEMP = 'c:/user-temp'
+
+  it('checks a rooted hint on the single known PowerShell drive', async () => {
+    const probe = fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        'd:/tmp/leaf.txt': { type: 'symlink', target: 'c:/docs/thesis.txt' },
+        'c:/docs/thesis.txt': { type: 'file', size: 3 }
+      }
+    })
+    const result = await captureRedirects(
+      'echo x > $env:TEMP/leaf.txt',
+      {
+        cwd: 'd:/repo',
+        tempDirs: [TEMP, '/tmp'],
+        shell: 'powershell',
+        tempVars: { TEMP: '/tmp' }
+      },
+      { sessionStartMs: SESSION_START, platform: 'win32', probe }
+    )
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('withholds an ambiguous rooted hint rather than trusting the start drive', async () => {
+    const probe = fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        'c:/tmp/leaf.txt': { type: 'symlink', target: 'c:/docs/thesis.txt' },
+        'd:/tmp/leaf.txt': { type: 'dir' },
+        'c:/docs/thesis.txt': { type: 'file', size: 3 }
+      }
+    })
+    const result = await captureRedirects(
+      'cd C:/Windows; echo x > $env:TEMP/leaf.txt',
+      {
+        cwd: 'd:/repo',
+        tempDirs: [TEMP, '/tmp'],
+        shell: 'powershell',
+        tempVars: { TEMP: '/tmp' }
+      },
+      { sessionStartMs: SESSION_START, platform: 'win32', probe }
+    )
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('keeps a clean rooted hint when the single PowerShell drive is safe', async () => {
+    const probe = fakeProbe({ entries: { [TEMP]: { type: 'dir' } } })
+    const result = await captureRedirects(
+      'echo x > $env:TEMP/safe.txt',
+      {
+        cwd: 'd:/repo',
+        tempDirs: [TEMP, '/tmp'],
+        shell: 'powershell',
+        tempVars: { TEMP: '/tmp' }
+      },
+      { sessionStartMs: SESSION_START, platform: 'win32', probe }
+    )
+    expect(result?.tempVarTargets).toEqual([
+      { target: '$env:TEMP/safe.txt', path: '/tmp/safe.txt' }
+    ])
+  })
+})
+
+describe('captureRedirects — exit-fix4 R1/N7: hint spelling provenance', () => {
+  const TEMP = 'c:/user-temp'
+  const scope = {
+    cwd: 'c:/repo',
+    tempDirs: [TEMP],
+    shell: 'posix' as const,
+    tempVars: { TMPDIR: TEMP }
+  }
+  const captureHint = (command: string, probe: RedirectProbe) =>
+    captureRedirects(command, scope, {
+      sessionStartMs: SESSION_START,
+      platform: 'win32',
+      probe
+    })
+
+  const escaping = () =>
+    fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        [`${TEMP}/evil`]: { type: 'symlink', target: 'c:/docs' },
+        [`${TEMP}/docs`]: { type: 'symlink', target: 'c:/docs' },
+        'c:/docs': { type: 'dir' },
+        'c:/docs/thesis.txt': { type: 'file', size: 3 }
+      }
+    })
+
+  it('drops an unquoted POSIX backslash hint (shell removes the backslash)', async () => {
+    const result = await captureHint('echo x > $TMPDIR/ev\\il/thesis.txt', escaping())
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('drops a glob suffix hint', async () => {
+    const result = await captureHint('echo x > $TMPDIR/ev*/thesis.txt', escaping())
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('drops a hint whose suffix is another variable', async () => {
+    const result = await captureHint(
+      'part=../docs; echo escaped > $TMPDIR/$part/thesis.txt',
+      escaping()
+    )
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('drops a single-quoted leading reference (literal, never expanded)', async () => {
+    const probe = fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        $TMPDIR: { type: 'dir' },
+        '$TMPDIR/thesis.txt': { type: 'file', size: 3 }
+      }
+    })
+    const result = await captureHint("printf literal > '$TMPDIR/thesis.txt'", probe)
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('drops an escaped leading reference (literal, never expanded)', async () => {
+    const result = await captureHint('printf literal > \\$TMPDIR/thesis.txt', escaping())
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('drops a double-quoted escaped leading reference (literal)', async () => {
+    const result = await captureHint('printf literal > "\\$TMPDIR/thesis.txt"', escaping())
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('keeps an ordinary double-quoted expanding reference control', async () => {
+    const probe = fakeProbe({ entries: { [TEMP]: { type: 'dir' } } })
+    const result = await captureHint('printf > "$TMPDIR/new-scratch.txt"', probe)
+    expect(result?.tempVarTargets).toEqual([
+      { target: '$TMPDIR/new-scratch.txt', path: `${TEMP}/new-scratch.txt` }
+    ])
+  })
+
+  it('keeps a static binding control and preserves PowerShell native separators', async () => {
+    const probe = fakeProbe({ entries: { [TEMP]: { type: 'dir' } } })
+    const posixBound = await captureHint('T=$TMPDIR; printf > $T/new-scratch.txt', probe)
+    expect(posixBound?.tempVarTargets).toEqual([
+      { target: '$T/new-scratch.txt', path: `${TEMP}/new-scratch.txt` }
+    ])
+
+    const ps = await captureRedirects(
+      'echo x > "$env:TEMP\\new-scratch.txt"',
+      {
+        cwd: 'c:/repo',
+        tempDirs: [TEMP],
+        shell: 'powershell',
+        tempVars: { TEMP }
+      },
+      { sessionStartMs: SESSION_START, platform: 'win32', probe }
+    )
+    expect(ps?.tempVarTargets).toEqual([
+      { target: '$env:TEMP\\new-scratch.txt', path: `${TEMP}/new-scratch.txt` }
+    ])
+  })
+})
+
+describe('captureRedirects — exit-fix4 R1/N7: duplicate hints and binding provenance', () => {
+  const TEMP = 'c:/user-temp'
+  const posixScope = {
+    cwd: 'c:/repo',
+    tempDirs: [TEMP],
+    shell: 'posix' as const,
+    tempVars: { TMPDIR: TEMP }
+  }
+  const posixProbe = () =>
+    fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        [`${TEMP}/evil`]: { type: 'symlink', target: 'c:/docs' },
+        'c:/docs': { type: 'dir' },
+        'c:/docs/thesis.txt': { type: 'file', size: 3 }
+      }
+    })
+  const capturePosix = (command: string, probe = posixProbe()) =>
+    captureRedirects(command, posixScope, {
+      sessionStartMs: SESSION_START,
+      platform: 'win32',
+      probe
+    })
+
+  it('vetoes the hint when a later occurrence is single-quoted (both orders)', async () => {
+    for (const command of [
+      "echo ok > $TMPDIR/thesis.txt; echo bad > '$TMPDIR/thesis.txt'",
+      "echo bad > '$TMPDIR/thesis.txt'; echo ok > $TMPDIR/thesis.txt"
+    ]) {
+      const result = await capturePosix(command)
+      expect(result).not.toHaveProperty('tempVarTargets')
+      expect(result?.allInScope).toBe(false)
+    }
+  })
+
+  it('vetoes the hint for mixed empty/single quote reconstructions', async () => {
+    const result = await capturePosix('echo bad > ""\'$TMPDIR/thesis.txt\'')
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('keeps one hint when every occurrence is validated and identical', async () => {
+    const result = await capturePosix('echo a > $TMPDIR/new.txt; echo b > $TMPDIR/new.txt')
+    expect(result?.tempVarTargets).toEqual([{ target: '$TMPDIR/new.txt', path: `${TEMP}/new.txt` }])
+  })
+
+  it('drops a binding whose RHS is a double-quoted escaped literal', async () => {
+    const command = String.raw`t="\$TMPDIR"; echo x > $t/thesis.txt`
+    const result = await capturePosix(command)
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it("drops a POSIX ANSI-quoted `$'TMPDIR'` literal reference", async () => {
+    const result = await capturePosix(String.raw`echo x > $'TMPDIR'/thesis.txt`)
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('keeps a static unquoted binding control', async () => {
+    const result = await capturePosix('t=$TMPDIR; echo x > $t/new-scratch.txt')
+    expect(result?.tempVarTargets).toEqual([
+      { target: '$t/new-scratch.txt', path: `${TEMP}/new-scratch.txt` }
+    ])
+  })
+
+  it('drops a PowerShell spaced escaped binding RHS', async () => {
+    const BT = String.fromCharCode(96)
+    const command = `$t = "${BT}$env:TEMP"; echo x > $t/leaf.txt`
+    const result = await captureRedirects(
+      command,
+      { cwd: 'c:/repo', tempDirs: [TEMP], shell: 'powershell', tempVars: { TEMP } },
+      { sessionStartMs: SESSION_START, platform: 'win32', probe: posixProbe() }
+    )
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('keeps a validated PowerShell inline writer hint', async () => {
+    const result = await captureRedirects(
+      'echo x | Out-File -LiteralPath:"$env:TEMP/new.txt"',
+      { cwd: 'c:/repo', tempDirs: [TEMP], shell: 'powershell', tempVars: { TEMP } },
+      { sessionStartMs: SESSION_START, platform: 'win32', probe: posixProbe() }
+    )
+    expect(result?.tempVarTargets).toEqual([
+      { target: '$env:TEMP/new.txt', path: `${TEMP}/new.txt` }
+    ])
+  })
+
+  it('drops a PowerShell duplicate hint when one drive reading is unsafe (both orders)', async () => {
+    const TEMP_ROOT = 'c:/user-temp'
+    const probe = fakeProbe({
+      entries: {
+        [TEMP_ROOT]: { type: 'dir' },
+        'd:/tmp': { type: 'dir' },
+        'c:/tmp': { type: 'dir' },
+        'c:/tmp/leaf.txt': { type: 'symlink', target: 'c:/docs/thesis.txt' },
+        'c:/docs': { type: 'dir' },
+        'c:/docs/thesis.txt': { type: 'file', size: 3 }
+      }
+    })
+    const scope = {
+      cwd: 'd:/repo',
+      tempDirs: [TEMP_ROOT, '/tmp'],
+      shell: 'powershell' as const,
+      tempVars: { TEMP: '/tmp' }
+    }
+    const capturePs = (command: string) =>
+      captureRedirects(command, scope, {
+        sessionStartMs: SESSION_START,
+        platform: 'win32',
+        probe
+      })
+
+    // Each single occurrence is individually known: D: is safe, C: escapes.
+    const safeOnly = await capturePs('echo safe > $env:TEMP/leaf.txt')
+    expect(safeOnly?.tempVarTargets).toEqual([
+      { target: '$env:TEMP/leaf.txt', path: '/tmp/leaf.txt' }
+    ])
+    const badOnly = await capturePs('cd C:/Windows && echo bad > $env:TEMP/leaf.txt')
+    expect(badOnly).not.toHaveProperty('tempVarTargets')
+    expect(badOnly?.allInScope).toBe(false)
+
+    for (const command of [
+      'echo safe > $env:TEMP/leaf.txt; cd C:/Windows && echo bad > $env:TEMP/leaf.txt',
+      'cd C:/Windows && echo bad > $env:TEMP/leaf.txt; cd D:/repo && echo safe > $env:TEMP/leaf.txt'
+    ]) {
+      const result = await capturePs(command)
+      expect(result).not.toHaveProperty('tempVarTargets')
+      expect(result?.allInScope).toBe(false)
+    }
+  })
+})
+
+describe('captureRedirects — exit-fix4 R1: protected temp hint destinations', () => {
+  const TEMP = 'c:/user-temp'
+  const scope = {
+    cwd: 'c:/repo',
+    tempDirs: [TEMP],
+    shell: 'posix' as const,
+    tempVars: { TMPDIR: TEMP }
+  }
+  const captureHint = (command: string, probe: RedirectProbe, extra = {}) =>
+    captureRedirects(command, scope, {
+      sessionStartMs: SESSION_START,
+      platform: 'win32',
+      probe,
+      ...extra
+    })
+
+  it('omits a hint whose final file link lands on temp/.claude', async () => {
+    const probe = fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        [`${TEMP}/.claude`]: { type: 'dir' },
+        [`${TEMP}/.claude/settings.json`]: { type: 'file', size: 4 },
+        [`${TEMP}/leaf.txt`]: { type: 'symlink', target: `${TEMP}/.claude/settings.json` }
+      }
+    })
+    const result = await captureHint('echo x > $TMPDIR/leaf.txt', probe)
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.unresolvable).toEqual(['$TMPDIR/leaf.txt'])
+    expect(result?.protectedHits).toEqual(['.claude'])
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('omits a hint for a missing child below a temp/ordinary -> .claude junction', async () => {
+    const probe = fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        [`${TEMP}/.claude`]: { type: 'dir' },
+        [`${TEMP}/ordinary`]: { type: 'symlink', target: `${TEMP}/.claude` }
+      }
+    })
+    const result = await captureHint('echo x > $TMPDIR/ordinary/new/settings.json', probe)
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.unresolvable).toEqual(['$TMPDIR/ordinary/new/settings.json'])
+    expect(result?.protectedHits).toEqual(['.claude'])
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('keeps the established protected hit when an unrelated target times out', async () => {
+    const probe = fakeProbe({
+      entries: {
+        [TEMP]: { type: 'dir' },
+        [`${TEMP}/.claude`]: { type: 'dir' },
+        [`${TEMP}/.claude/settings.json`]: { type: 'file', size: 4 },
+        [`${TEMP}/leaf.txt`]: { type: 'symlink', target: `${TEMP}/.claude/settings.json` }
+      },
+      hangLstat: ['c:/_scratch/slow.log']
+    })
+    const lstat = vi.spyOn(probe, 'lstat')
+    const result = await captureRedirects(
+      'echo x > $TMPDIR/leaf.txt; echo y > ../_scratch/slow.log',
+      scope,
+      {
+        sessionStartMs: SESSION_START,
+        platform: 'win32',
+        probe,
+        timeoutMs: 30
+      }
+    )
+    expect(lstat).toHaveBeenCalledWith('c:/_scratch/slow.log')
+    expect(result).not.toHaveProperty('tempVarTargets')
+    expect(result?.protectedHits).toEqual(['.claude'])
+    expect(result?.allInScope).toBe(false)
+  })
+
+  it('still keeps a benign inside-temp new scratch hint', async () => {
+    const probe = fakeProbe({ entries: { [TEMP]: { type: 'dir' } } })
+    const result = await captureHint('echo x > $TMPDIR/scratch.txt', probe)
+    expect(result?.tempVarTargets).toEqual([
+      { target: '$TMPDIR/scratch.txt', path: `${TEMP}/scratch.txt` }
+    ])
+  })
+
+  it('omits a static binding whose suffix is dynamic', async () => {
+    const probe = fakeProbe({ entries: { [TEMP]: { type: 'dir' } } })
+    const result = await captureHint('part=../docs; t=$TMPDIR/$part; echo x > $t/thesis.txt', probe)
+    expect(result).not.toHaveProperty('tempVarTargets')
     expect(result?.allInScope).toBe(false)
   })
 })
