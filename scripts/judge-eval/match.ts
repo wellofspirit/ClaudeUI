@@ -6,6 +6,12 @@ export interface EvalResult {
   error?: string
   raw?: string
   unavailable?: boolean
+  /** The deciding stage blocked, and its second sample (two-sample confirmation) allowed — so the call ran. */
+  overturnedBlock?: { reason?: string; category?: string }
+  /** Wall time of the whole decision (every judge call it made), ms. */
+  durationMs?: number
+  /** Judge calls the decision made (stage 1, stage 2, confirmation samples). */
+  calls?: number
 }
 
 /** One `--labels` entry: the orchestrator's verdict on an extracted case. */

@@ -4,7 +4,7 @@
  *
  *   bun scripts/judge-eval/run.ts [--runs 3] [--model openai-codex/gpt-6-luna]
  *     [--engine pi] [--case '#4'] [--root <repo checkout>] [--json <out>]
- *     [--cases-file <cases.json> [--labels <labels.json>]]
+ *     [--cases-file <cases.json> [--labels <labels.json>]] [--fs-facts <facts.json>]
  *
  * `--root` swaps in ANOTHER checkout's classifier, policy and redirect
  * measurement (e.g. a worktree at a pre-change commit) while the cases and the
@@ -17,6 +17,14 @@
  * stored (no synthetic darwin defaults). `--labels` supplies the expectation
  * per case id; a case without a label prints UNLABELLED and counts neither
  * pass nor fail, so an extracted deny can be replayed before it is labelled.
+ *
+ * `--fs-facts` supplies the redirect MEASUREMENTS the historical machine can no
+ * longer answer: a fake probe answers `lstat`/`realpath` only from that file, so
+ * `exists`/`empty`/`modifiedSinceSessionStart` reflect the state at the time of
+ * the real call. A path absent from the facts is NOT measured (the probe throws
+ * a non-ENOENT error and the field is omitted); the details are in
+ * {@link loadFsFacts}. Without `--fs-facts` the runner keeps the pure
+ * scope-only analysis (measurement would be a guess on this machine).
  *
  * Every run costs real judge calls (stage 1, plus stage 2 when stage 1 blocks).
  */
@@ -34,6 +42,7 @@ import {
   CWD,
   DELEGATED_CASES,
   HISTORY_CASES,
+  P2C_CASES,
   SOURCE_CASES,
   type EvalCase
 } from './cases'
@@ -45,20 +54,54 @@ import {
   type EvalResult,
   type Expectation
 } from './match'
+import {
+  legacyReplayScope,
+  replayRedirectScope,
+  type ReplayScopeFacts,
+  type RedirectScopeBuilder
+} from './replay-scope'
 
 const { values: args } = parseArgs({
   options: {
     runs: { type: 'string', default: '3' },
     model: { type: 'string', default: 'openai-codex/gpt-6-luna' },
     engine: { type: 'string', default: 'pi' },
+    'judge-reasoning': { type: 'string', default: 'default' },
     case: { type: 'string', multiple: true },
     root: { type: 'string', default: resolve(import.meta.dir, '../..') },
     json: { type: 'string' },
     concurrency: { type: 'string', default: '4' },
     'cases-file': { type: 'string' },
-    labels: { type: 'string' }
+    labels: { type: 'string' },
+    'fs-facts': { type: 'string' },
+    help: { type: 'boolean', default: false }
   }
 })
+
+if (args.help) {
+  console.log(`judge-eval — replay auto-mode judge cases (spends real judge calls)
+
+Usage: bun scripts/judge-eval/run.ts [options]
+  --runs <n>            runs per case (default 3)
+  --model <provider/id> judge model (default openai-codex/gpt-6-luna)
+  --engine <pi|opencode> judge route engine (default pi)
+  --judge-reasoning <default|off>  eval-only: \`off\` also switches reasoning off at
+                        stage 2 on an OpenRouter route (speed vs accuracy runs)
+  --case <id>           only this case id; repeatable
+  --root <checkout>     measure with ANOTHER checkout's classifier + ground truth
+  --json <file>         write the per-case result rows
+  --concurrency <n>     parallel judge calls (default 4)
+  --cases-file <file>   extracted REAL cases instead of the built-in sets
+  --labels <file>       { [caseId]: label } expectations for those cases
+  --fs-facts <file>     measured redirect facts, per case:
+                        {"<caseId>":{"sessionStartMs":n,"paths":{"<resolved path>":
+                          {"exists":bool,"size"?:n,"mtimeMs"?:n,"symlink"?:bool,"realpath"?:string}}}}
+                        A path absent from the facts is not measured and its
+                        fields are omitted (never an invented exists:false).
+  --help                this text
+`)
+  process.exit(0)
+}
 
 /**
  * The provenance block `extract-real.ts` adds under `real`. Only `tempDirs`
@@ -144,9 +187,129 @@ function loadLabels(file: string): Record<string, EvalLabel> {
   return labels
 }
 
+/**
+ * One historical filesystem fact for a resolved redirect target. `sessionStartMs`
+ * is the owning session object's construction time; `modifiedSinceSessionStart`
+ * is `mtimeMs >= sessionStartMs`. `realpath` is optional (an extra beyond the
+ * decided format): it lets an in-scope link-to-in-scope be classified by its
+ * real path instead of `symlinked`; without it a `symlink: true` link is treated
+ * as escaping (the conservative reading).
+ */
+interface FsFactsPath {
+  exists: boolean
+  size?: number
+  mtimeMs?: number
+  symlink?: boolean
+  realpath?: string
+}
+interface FsFactsCase {
+  sessionStartMs: number
+  paths: Record<string, FsFactsPath>
+}
+type FsFacts = Record<string, FsFactsCase>
+
+/**
+ * `--fs-facts`: `{ "<caseId>": { "sessionStartMs": n, "paths": { "<resolved
+ * path exactly as redirectTargetDetails reports it>": { … } } } }`.
+ *
+ * `--fs-facts` exists because a replay runs on a DIFFERENT machine and years
+ * later: answering `lstat` from the host fs would report every historical target
+ * `exists:false`, a fabricated fact that clears the policy's presumption. The
+ * probe below answers only from these facts; a path that is absent from them
+ * throws a NON-ENOENT error, so the capture omits the field ("not measured")
+ * rather than inventing absence.
+ */
+function loadFsFacts(file: string): FsFacts {
+  const parsed = loadJson(file, 'fs facts file')
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+    fail('the fs facts file is not an object keyed by case id')
+  const facts: FsFacts = {}
+  for (const [caseId, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value !== 'object' || value === null)
+      fail(`fs facts for ${caseId} are not an object`)
+    const entry = value as Record<string, unknown>
+    if (typeof entry.sessionStartMs !== 'number')
+      fail(`fs facts for ${caseId} have no numeric sessionStartMs`)
+    if (typeof entry.paths !== 'object' || entry.paths === null || Array.isArray(entry.paths))
+      fail(`fs facts for ${caseId} have no paths object`)
+    facts[caseId] = entry as unknown as FsFactsCase
+  }
+  return facts
+}
+
+/** A `fs.Stats` stand-in built from facts (the only fields `captureRedirects` reads). */
+function statFromFacts(fact: FsFactsPath): {
+  isSymbolicLink(): boolean
+  isFile(): boolean
+  size: number
+  mtimeMs: number
+} {
+  return {
+    isSymbolicLink: () => fact.symlink === true,
+    isFile: () => fact.symlink !== true,
+    size: fact.size ?? 0,
+    mtimeMs: fact.mtimeMs ?? 0
+  }
+}
+
+function enoent(path: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`ENOENT: no such file or directory, lstat '${path}'`), {
+    code: 'ENOENT'
+  })
+}
+
+/** The fake probe: facts answer, absence throws a non-ENOENT "not measured" error. */
+function fsFactsProbe(facts: FsFactsCase): {
+  lstat(path: string): Promise<ReturnType<typeof statFromFacts>>
+  realpath(path: string): Promise<string>
+} {
+  const lookup = (path: string): FsFactsPath => {
+    const fact = facts.paths[path]
+    if (!fact) throw new Error(`no fs facts for ${path} (not measured)`)
+    if (!fact.exists) throw enoent(path)
+    return fact
+  }
+  return {
+    async lstat(path) {
+      return statFromFacts(lookup(path))
+    },
+    async realpath(path) {
+      const fact = lookup(path)
+      if (fact.symlink === true) {
+        if (fact.realpath === undefined)
+          throw new Error(`no realpath fact for ${path} (not measured)`)
+        return fact.realpath
+      }
+      return path
+    }
+  }
+}
+
 const root = resolve(args.root!)
 const classifier = await import(`${root}/src/core/automode/classifier.ts`)
 const groundTruth = await import(`${root}/src/core/automode/ground-truth.ts`)
+/**
+ * P2a-2's measurement module. Absent from a baseline `--root` checkout, which
+ * is the point of the before/after comparison; the runner then uses the
+ * checkout's own pure `analyzeRedirects`.
+ */
+const measureMod = (await import(`${root}/src/core/automode/redirect-measure.ts`).catch(
+  () => null
+)) as {
+  captureRedirects?: (
+    command: string,
+    scope: Record<string, unknown>,
+    options: Record<string, unknown>
+  ) => Promise<unknown>
+} | null
+/**
+ * The shared `RedirectScope` builder (ruling 11). A pre-P2a-2 checkout has no
+ * `action-meta.ts` at all; the runner then builds the scope it always did.
+ */
+const actionMetaMod = (await import(`${root}/src/core/automode/action-meta.ts`).catch(
+  () => null
+)) as { redirectScopeFor?: RedirectScopeBuilder } | null
+const fsFacts = args['fs-facts'] ? loadFsFacts(args['fs-facts']) : undefined
 // Absent before ADR-091: the pre-change judge read parent + trajectory only.
 const trajectoryMod = await import(`${root}/src/core/automode/trajectory.ts`)
 const hasTimeOrder = typeof trajectoryMod.inTimeOrder === 'function'
@@ -179,27 +342,86 @@ function environmentFor(c: LoadedCase): typeof environment {
 }
 
 /**
+ * The shell dialect a case's command would be read in (ruling 3): the real
+ * case's route engine, else a dispatch case's target engine, else POSIX — the
+ * built-in set is written in POSIX/bash terms. opencode's shell is PowerShell
+ * on win32 and POSIX elsewhere; pi's `bash` is POSIX everywhere.
+ */
+function shellForCase(c: LoadedCase, platform: string): 'posix' | 'powershell' {
+  const engine = c.real?.engine ?? (c.action?.input?.engine as string | undefined)
+  return engine === 'opencode' && platform === 'win32' ? 'powershell' : 'posix'
+}
+
+/**
+ * The scope a real case is measured with (ruling 11): the production builder,
+ * fed the temp dirs captured with the case and the route's workdir rule. A
+ * built-in case keeps its synthetic darwin scope, and a `--root` checkout
+ * without the builder keeps the scope this runner always built.
+ */
+function replayScopeFor(c: LoadedCase, platform: string, cwd: string): Record<string, unknown> {
+  const shell = shellForCase(c, platform)
+  if (!c.real) {
+    // Synthetic defaults for the built-in set, as before.
+    return {
+      cwd,
+      tempDirs: groundTruth.tempDirRoots({ TMPDIR: '/var/folders/x1/abc/T/' }, platform),
+      additionalDirectories: c.environment?.additionalDirectories,
+      shell
+    }
+  }
+  const facts: ReplayScopeFacts = {
+    cwd,
+    input: c.action.input,
+    route: c.real.route,
+    engine: c.real.engine,
+    tempDirs: c.real.tempDirs,
+    additionalDirectories: c.environment?.additionalDirectories,
+    platform,
+    shell
+  }
+  const build = actionMetaMod?.redirectScopeFor
+  if (build) return { ...replayRedirectScope(facts, build) }
+  // Pre-P2a-2 checkout: no builder, no tempVars/shellCwd, and its older
+  // `tempDirRoots` ignored the platform argument — measure its own way.
+  return {
+    ...legacyReplayScope(
+      facts,
+      c.real.tempDirs ?? groundTruth.tempDirRoots({ TMPDIR: '/var/folders/x1/abc/T/' }, platform)
+    )
+  }
+}
+
+/**
  * The `{"meta":…}` line. Real cases measure with the `--root` checkout's own
  * ground truth and the temp roots captured at extraction; a label's
  * `actionMetaOverride` is shallow-merged on top, for historical facts the
  * orchestrator establishes later (e.g. a redirect target did not exist then).
+ *
+ * When the checkout exports `captureRedirects` AND the case has fs facts, the
+ * measured facts are used (`exists`/`empty`/`modifiedSinceSessionStart`/
+ * `symlinked`). Otherwise — baseline checkout, or no facts for this case — the
+ * pure scope analysis is used, so nothing is ever measured against THIS host.
  */
-function actionMetaFor(
+async function actionMetaFor(
   c: LoadedCase,
   override: Record<string, unknown> | undefined
-): Record<string, unknown> | undefined {
+): Promise<Record<string, unknown> | undefined> {
   const platform = c.environment?.platform ?? environment.platform
   const cwd = c.environment?.cwd ?? environment.cwd
   let computed: Record<string, unknown> | undefined
   if (c.measureRedirects) {
-    // A pre-ADR-091 tempDirRoots takes no platform and ignores the argument.
-    const tempDirs =
-      c.real?.tempDirs ?? groundTruth.tempDirRoots({ TMPDIR: '/var/folders/x1/abc/T/' }, platform)
-    const redirects = groundTruth.analyzeRedirects(
-      c.measureRedirects,
-      { cwd, tempDirs, additionalDirectories: c.environment?.additionalDirectories },
-      platform
-    )
+    const scope = replayScopeFor(c, platform, cwd)
+    const facts = c.fsFacts ?? fsFacts?.[c.id]
+    const capture = measureMod?.captureRedirects
+    const redirects =
+      facts && capture
+        ? await capture(c.measureRedirects, scope, {
+            sessionStartMs: facts.sessionStartMs,
+            platform,
+            probe: fsFactsProbe(facts),
+            timeoutMs: 400
+          })
+        : groundTruth.analyzeRedirects(c.measureRedirects, scope, platform)
     computed = redirects ? { redirects } : undefined
   }
   if (!override) return computed
@@ -210,7 +432,13 @@ async function runOnce(
   c: LoadedCase,
   override: Record<string, unknown> | undefined
 ): Promise<EvalResult> {
-  const actionMeta = actionMetaFor(c, override)
+  const actionMeta = await actionMetaFor(c, override)
+  let calls = 0
+  const counted: typeof judge = (req) => {
+    calls++
+    return judge(req)
+  }
+  const started = performance.now()
   const result = await classifier.classify(
     {
       messages: transcriptFor(c),
@@ -219,8 +447,9 @@ async function runOnce(
       ...(c.outcomes ? { outcomes: c.outcomes } : {}),
       ...(actionMeta ? { actionMeta } : {})
     },
-    judge
+    counted
   )
+  const durationMs = Math.round(performance.now() - started)
   return normalizeResult({
     block: result.block,
     stage: result.stage,
@@ -228,7 +457,12 @@ async function runOnce(
     ...(result.reason ? { reason: result.reason } : {}),
     ...(result.error ? { error: result.error } : {}),
     ...(result.raw !== undefined ? { raw: result.raw } : {}),
-    ...(result.unavailable ? { unavailable: true } : {})
+    ...(result.unavailable ? { unavailable: true } : {}),
+    // A stage-2 confirmation that overturned a block is a historical fact the
+    // replay report must keep (a false block this change fixed shows up here).
+    ...(result.overturnedBlock ? { overturnedBlock: result.overturnedBlock } : {}),
+    durationMs,
+    calls
   })
 }
 
@@ -266,7 +500,7 @@ const wanted = args.case?.length ? new Set(args.case) : null
 const cases: LoadedCase[] = (
   args['cases-file']
     ? loadCasesFile(args['cases-file'])
-    : [...CASES, ...DELEGATED_CASES, ...BASH_CASES, ...SOURCE_CASES, ...HISTORY_CASES]
+    : [...CASES, ...DELEGATED_CASES, ...BASH_CASES, ...SOURCE_CASES, ...HISTORY_CASES, ...P2C_CASES]
 ).filter((c) => !wanted || wanted.has(c.id))
 if (cases.length === 0) fail('no cases selected')
 // Eval-only: read the active, unexpired credential without refresh or vault writes.
@@ -294,10 +528,23 @@ async function readOnlyChatgptToken(force: boolean): Promise<CodexInjectionToken
 }
 
 const judge = makeHttpJudgeTransport({
-  resolve: () =>
-    resolveJudgeRoute(args.engine as JudgeEngine, args.model!, {
+  resolve: async () => {
+    const resolved = await resolveJudgeRoute(args.engine as JudgeEngine, args.model!, {
       chatgptToken: readOnlyChatgptToken
-    }),
+    })
+    // Eval-only knob: measure an OpenRouter judge with stage-2 reasoning off too.
+    if (args['judge-reasoning'] === 'off' && resolved.ok && resolved.route.kind === 'openrouter') {
+      const off = { reasoning: { enabled: false } }
+      return {
+        ...resolved,
+        route: {
+          ...resolved.route,
+          caps: { ...resolved.route.caps, reasoning: { fast: off, thinking: off } }
+        }
+      }
+    }
+    return resolved
+  },
   userAgent: 'ClaudeUI-judge-eval'
 })
 const jobs = cases.flatMap((c) => Array.from({ length: runs }, () => c))
@@ -362,6 +609,17 @@ const labelled = evaluated.length - unlabelled
 console.log(
   `\n${labelled - failed}/${labelled} labelled cases matched intent on every run${unlabelled ? ` (${unlabelled} unlabelled)` : ''}`
 )
+// Every run of this invocation whose stage-2 confirmation overturned a block.
+console.log(`overturned blocks: ${results.filter((x) => x.r.overturnedBlock).length}`)
+{
+  // Decision latency (all judge calls of one decision), for comparing judge models.
+  const ms = results.map((x) => x.r.durationMs ?? 0).sort((a, b) => a - b)
+  const at = (q: number): number => ms[Math.min(ms.length - 1, Math.floor(q * ms.length))] ?? 0
+  const calls = results.reduce((n, x) => n + (x.r.calls ?? 0), 0)
+  console.log(
+    `latency ms: p50 ${at(0.5)} p90 ${at(0.9)} max ${ms[ms.length - 1] ?? 0}; judge calls ${calls} for ${ms.length} decisions`
+  )
+}
 if (args.json)
   writeFileSync(
     args.json,
