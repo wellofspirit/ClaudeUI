@@ -702,13 +702,8 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         sdkActive: s.sdkActive,
         // The held inbox belongs to the session, not to its conversation.
         heldCount: s.heldCount,
-        // Carried, not reset. These per-session copies are vestigial — canonical
-        // holds ONE app-level list and `toSnapshot` fans it into every entry, so
-        // in practice both are always `[]` here — but the catalogs describe the
-        // ENGINE, not the conversation, and a bare remote clear (no cancel, no
-        // respawn) must not look like the slash menu went away. Blanking them
-        // would also be the one place this branch disagreed with the app-level
-        // fields it cannot see.
+        // Catalogs belong to the running engine session. Clearing only the
+        // conversation must preserve its commands and skill names.
         slashCommands: s.slashCommands,
         sdkSkillNames: s.sdkSkillNames,
         permissionMode: data?.permissionMode ?? fresh.permissionMode,
@@ -1384,7 +1379,17 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
     case 'session:slash-commands': {
       const commands = arg<SlashCommandInfo[]>(event, 1)
       if (!Array.isArray(commands)) return state
-      return { ...state, slashCommands: commands }
+      const routingId = routingIdOf(event)
+      const session = routingId ? state.sessions[routingId] : undefined
+      return {
+        ...state,
+        slashCommands: commands,
+        ...(routingId && session
+          ? {
+              sessions: { ...state.sessions, [routingId]: { ...session, slashCommands: commands } }
+            }
+          : {})
+      }
     }
 
     case 'session:skills': {

@@ -2105,7 +2105,7 @@ interface SessionAPI {
   loadSlashCommands(): Promise<SlashCommandInfo[]>
   saveSlashCommands(commands: SlashCommandInfo[]): Promise<void>
   scanCustomCommands(cwd: string): Promise<string[]>
-  loadSkillDetails(cwd: string): Promise<SkillInfo[]>
+  loadSkillDetails(cwd: string, sessionId?: string): Promise<SkillInfo[]>
   onBeforeQuit(cb: () => void): () => void
   confirmQuit(): Promise<void>
   /** Cancel a pending quit prompt: clears the fallback timer, leaves services running. */
@@ -4667,6 +4667,9 @@ export interface SkillInfo {
   pluginName?: string
   path: string // filesystem path to SKILL.md (empty for bundled)
   content: string // markdown body (no frontmatter)
+  userInvocable?: boolean
+  modelInvocable?: boolean
+  compatibilityWarnings?: string[]
 }
 
 // ---------------------------------------------------------------------------

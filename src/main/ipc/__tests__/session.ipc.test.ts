@@ -384,6 +384,9 @@ describe('session.ipc', () => {
   })
 
   afterEach(() => {
+    sessionManagerSpies.forEach.mockImplementation((cb: (session: unknown) => void) =>
+      cb(sessionStub)
+    )
     setHostWindow(null)
     harness.teardown()
     vi.clearAllMocks()
@@ -827,6 +830,35 @@ describe('session.ipc', () => {
   // -------------------------------------------------------------------------
 
   describe('config channels', () => {
+    it('loads skills only from the requested session and matching cwd', async () => {
+      const one = {
+        cwd: '/tmp/cwd',
+        getSessionId: () => 'one',
+        discoverSkills: vi.fn(async () => [{ name: 'one' }])
+      }
+      const two = {
+        cwd: '/tmp/cwd',
+        getSessionId: () => 'two',
+        discoverSkills: vi.fn(async () => [{ name: 'two' }])
+      }
+      sessionManagerSpies.get.mockImplementation((id?: string) =>
+        id === 'one' ? one : id === 'two' ? two : undefined
+      )
+      sessionManagerSpies.forEach.mockImplementation((callback: (session: unknown) => void) => {
+        callback(one)
+        callback(two)
+      })
+      await expect(harness.call('config:load-skill-details', '/tmp/cwd', 'one')).resolves.toEqual([
+        { name: 'one' }
+      ])
+      await expect(harness.call('config:load-skill-details', '/tmp/cwd', 'two')).resolves.toEqual([
+        { name: 'two' }
+      ])
+      await expect(harness.call('config:load-skill-details', '/other', 'one')).resolves.toEqual([])
+      expect(one.discoverSkills).toHaveBeenCalledTimes(1)
+      expect(two.discoverSkills).toHaveBeenCalledTimes(1)
+    })
+
     it.each(['config:load-settings', 'config:load-sessions'])(
       '%s is registered (returns data)',
       async (channel) => {

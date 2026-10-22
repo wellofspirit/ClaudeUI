@@ -32,6 +32,15 @@ import {
   sessionToolDescriptions,
   sessionToolsGuidance
 } from '../../../shared/session-tools-description'
+import type { ClaudeSkillCatalog } from '../../skills/claude-skills'
+
+const skillSnapshots = vi.hoisted(() => ({
+  current: { skills: [], warnings: [], revision: 'empty' } as ClaudeSkillCatalog
+}))
+vi.mock('../../skills/claude-skills', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../skills/claude-skills')>()),
+  resolveClaudeSkills: () => skillSnapshots.current
+}))
 
 const events = vi.hoisted(() => vi.fn())
 const overrides = vi.hoisted(() => new Map<string, unknown>())
@@ -241,6 +250,73 @@ afterEach(() => {
   mcp.servers = {}
   mcp.skipped = []
   userConfig.extra = {}
+  skillSnapshots.current = { skills: [], warnings: [], revision: 'empty' }
+})
+
+describe('shared Claude skills on Codex', () => {
+  const skill = (name: string) => ({
+    name,
+    description: `Use ${name}`,
+    source: 'project' as const,
+    path: `/isolated/.claude/skills/${name}/SKILL.md`,
+    directory: `/isolated/.claude/skills/${name}`,
+    content: `Do ${name}: $ARGUMENTS`,
+    userInvocable: true,
+    modelInvocable: true,
+    compatibilityWarnings: []
+  })
+  const snapshot = (...names: string[]): ClaudeSkillCatalog => ({
+    skills: names.map(skill),
+    warnings: [],
+    revision: names.join('|') || 'empty'
+  })
+  const inputText = (request: ReturnType<typeof fixture>['request'], method: string) => {
+    const params = request.mock.calls.find(([name]) => name === method)![1] as {
+      input: Array<{ type: string; text: string }>
+    }
+    return params.input.find((item) => item.type === 'text')!.text
+  }
+
+  it('delivers a session snapshot, advertises only its commands and expands on the wire', async () => {
+    skillSnapshots.current = snapshot('alpha')
+    const first = fixture()
+    await first.session.run('/alpha hello')
+    expect((await first.session.discoverSkills('/isolated')).map((entry) => entry.name)).toEqual([
+      'alpha'
+    ])
+    expect(inputText(first.request, 'turn/start')).toContain('Do alpha: hello')
+    expect(
+      first.request.mock.calls.find(([method]) => method === 'thread/start')![1]
+    ).toMatchObject({
+      developerInstructions: expect.stringContaining('alpha')
+    })
+    expect(events).toHaveBeenCalledWith('session:slash-commands', [
+      'temporary',
+      [{ name: '/alpha', description: 'Use alpha' }]
+    ])
+    skillSnapshots.current = snapshot('beta')
+    expect((await first.session.discoverSkills('/isolated')).map((entry) => entry.name)).toEqual([
+      'alpha'
+    ])
+    const second = fixture()
+    await second.session.run('/beta world')
+    expect(inputText(second.request, 'turn/start')).toContain('Do beta: world')
+    expect(inputText(first.request, 'turn/start')).not.toContain('beta')
+  })
+
+  it('replaces removed skills on a resumed thread, even when the new catalog is empty', async () => {
+    skillSnapshots.current = snapshot()
+    const resumed = fixture({ resumeSessionId: 'root' })
+    await resumed.session.run('hello')
+    const params = resumed.request.mock.calls.find(([method]) => method === 'thread/resume')![1]
+    expect(params).toMatchObject({
+      developerInstructions: expect.stringContaining('<shared_claude_skills>')
+    })
+    expect(inputText(resumed.request, 'turn/start')).toContain(
+      'supersedes earlier shared Claude skill catalogs'
+    )
+    expect(inputText(resumed.request, 'turn/start')).toContain('hello')
+  })
 })
 
 /**
@@ -503,6 +579,7 @@ describe('Codex first session', () => {
     await resumed.session.run(null)
     expect(resumed.request).toHaveBeenCalledWith('thread/resume', {
       cwd: '/isolated',
+      developerInstructions: expect.stringContaining('<shared_claude_skills>'),
       threadId: 'root',
       model: 'native',
       approvalPolicy: 'untrusted',
@@ -527,6 +604,7 @@ describe('Codex first session', () => {
     await session.run(null)
     expect(request).toHaveBeenCalledWith('thread/resume', {
       cwd: '/isolated',
+      developerInstructions: expect.stringContaining('<shared_claude_skills>'),
       threadId: 'root',
       approvalPolicy: 'untrusted',
       sandbox: 'workspace-write',
@@ -553,6 +631,7 @@ describe('Codex first session', () => {
     // the branch's transcript is read back through the ordinary history path.
     expect(request).toHaveBeenCalledWith('thread/fork', {
       cwd: '/isolated',
+      developerInstructions: expect.stringContaining('<shared_claude_skills>'),
       threadId: 'root',
       lastTurnId: 'turn-1',
       excludeTurns: true,
@@ -856,6 +935,7 @@ describe('Codex first session', () => {
     // without this client naming them again.
     expect(request).toHaveBeenCalledWith('thread/resume', {
       cwd: '/isolated',
+      developerInstructions: expect.stringContaining('<shared_claude_skills>'),
       threadId: 'root',
       approvalPolicy: 'untrusted',
       sandbox: 'workspace-write',
@@ -6388,7 +6468,8 @@ describe('Codex session tools', () => {
       const resumeParams = resumed.request.mock.calls.find(
         ([method]) => method === 'thread/resume'
       )![1] as Record<string, unknown>
-      expect(resumeParams).not.toHaveProperty('developerInstructions')
+      expect(resumeParams.developerInstructions).toContain(sessionToolsGuidance({ toolPrefix: '' }))
+      expect(resumeParams.developerInstructions).toContain('<shared_claude_skills>')
       expect(resumeParams).not.toHaveProperty('dynamicTools')
     })
 

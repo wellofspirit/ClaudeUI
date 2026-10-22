@@ -1255,7 +1255,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'config:load-skill-details',
     capability: 'config',
     kind: 'query',
-    handler: (cwd: string) => loadSkillDetails(manager, cwd)
+    handler: (cwd: string, sessionId?: string) => loadSkillDetails(manager, cwd, sessionId)
   })
   // Cheap, deterministic engine availability check (the harness resolver's
   // answer, shared with the remote handler). Backs the renderer's "is this

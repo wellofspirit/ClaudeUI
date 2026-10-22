@@ -47,6 +47,7 @@ beforeEach(() => {
     sessions: {
       'test-session': {
         cwd: '/test',
+        slashCommands: [],
         sdkActive: false,
         isHistorical: false,
         forkOrigin: null,

@@ -145,6 +145,7 @@ const enabled = codexIntegrationEnabled
 
 const registries: CodexHostRegistry[] = []
 const sessions: CodexSession[] = []
+const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR
 let directory: string | undefined
 let provider: FixtureProvider | undefined
 let websocket: WebSocketServer | undefined
@@ -187,6 +188,8 @@ afterEach(async () => {
       provider = undefined
     } finally {
       setHostPaths(null)
+      if (originalClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = originalClaudeConfigDir
       releaseFixtureCodex()
       overrides.clear()
       coreEvents.mockClear()
@@ -234,6 +237,7 @@ async function setupFixture(): Promise<Fixture> {
   directory = realpathSync(mkdtempSync(join(tmpdir(), 'codex-host-sessions-')))
   const home = join(directory, 'home')
   const codexHome = join(home, '.codex')
+  process.env.CLAUDE_CONFIG_DIR = join(home, '.claude')
   const cwd = join(directory, 'cwd')
   for (const name of [codexHome, cwd, join(directory, 'tmp'), join(directory, FIXTURE_CODEX_DIR)])
     mkdirSync(name, { recursive: true })
@@ -429,6 +433,66 @@ const texts = (session: CodexSession): string[] =>
     .getMessages()
     .flatMap((message) => message.content)
     .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+
+it.skipIf(!enabled)(
+  'delivers directory-scoped shared skills and replaces a removed catalog on resume',
+  async () => {
+    const fixture = await setupFixture()
+    const hosts = registry()
+    const otherCwd = join(directory!, 'other-cwd')
+    mkdirSync(join(fixture.cwd, '.git'), { recursive: true })
+    mkdirSync(join(otherCwd, '.git'), { recursive: true })
+    const firstSkill = join(fixture.cwd, '.claude', 'skills', 'alpha')
+    const secondSkill = join(otherCwd, '.claude', 'skills', 'beta')
+    mkdirSync(firstSkill, { recursive: true })
+    mkdirSync(secondSkill, { recursive: true })
+    writeFileSync(
+      join(firstSkill, 'SKILL.md'),
+      '---\nname: alpha\ndescription: Alpha task\n---\nDo alpha $ARGUMENTS'
+    )
+    writeFileSync(
+      join(secondSkill, 'SKILL.md'),
+      '---\nname: beta\ndescription: Beta task\n---\nDo beta $ARGUMENTS'
+    )
+    const alpha = newSession('skills-alpha', hosts, fixture)
+    const beta = newSession('skills-beta', hosts, { ...fixture, cwd: otherCwd })
+    await alpha.run('/alpha one')
+    await waitFor(() => !alpha.willQueue, 'alpha skill turn')
+    await beta.run('/beta two')
+    await waitFor(() => !beta.willQueue, 'beta skill turn')
+    const modelRequests = fixture.requests.filter((request) => request.generate !== false)
+    const first = JSON.stringify(modelRequests[0])
+    const second = JSON.stringify(modelRequests[1])
+    expect(first).toContain('Do alpha one')
+    expect(first).toContain('Alpha task')
+    expect(first).not.toContain('Beta task')
+    expect(second).toContain('Do beta two')
+    expect(second).toContain('Beta task')
+    expect(second).not.toContain('Alpha task')
+    expect((await alpha.discoverSkills(fixture.cwd)).map((skill) => skill.name)).toEqual(['alpha'])
+    const threadId = alpha.getSessionId()!
+    alpha.dispose()
+    rmSync(join(firstSkill, 'SKILL.md'))
+    const resumed = new CodexSession(
+      'skills-resumed',
+      null,
+      fixture.cwd,
+      { resumeSessionId: threadId },
+      { env: fixture.env, requestTimeoutMs: 30000 },
+      hosts
+    )
+    sessions.push(resumed)
+    await resumed.run('after removal')
+    await waitFor(() => !resumed.willQueue, 'resumed skill turn')
+    expect(await resumed.discoverSkills(fixture.cwd)).toEqual([])
+    const resumedRequest = JSON.stringify(
+      fixture.requests.filter((request) => request.generate !== false).at(-1)
+    )
+    expect(resumedRequest).toContain('shared_claude_skills_update')
+    expect(resumedRequest).toContain('supersedes earlier shared Claude skill catalogs')
+    expect(fixture.errors).toEqual([])
+  }
+)
 
 it.skipIf(!enabled)(
   'two sessions share ONE app-server and keep their turns, approvals and transcripts apart',

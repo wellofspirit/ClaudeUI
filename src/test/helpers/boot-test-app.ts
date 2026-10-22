@@ -305,7 +305,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
     saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
     scanCustomCommands: (cwd) => ipcRenderer.invoke('config:scan-custom-commands', cwd),
-    loadSkillDetails: (cwd) => ipcRenderer.invoke('config:load-skill-details', cwd),
+    loadSkillDetails: (cwd, sessionId) =>
+      ipcRenderer.invoke('config:load-skill-details', cwd, sessionId),
 
     fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),
     fetchChatgptLimits: (refresh) => ipcRenderer.invoke('usage:chatgpt-limits', refresh ?? false),

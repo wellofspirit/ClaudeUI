@@ -7,6 +7,7 @@ import {
   type CodexMappedEvent
 } from '../event-mapper'
 import { selectCodexModel } from '../model-selection'
+import { withOriginalSkillInput } from '../skill-input'
 import type { ThreadItem } from '../protocol/v2/ThreadItem'
 import type { Model } from '../protocol/v2/Model'
 import type { FileDiff } from '../../../shared/types'
@@ -570,6 +571,18 @@ describe('Codex userMessage items (slice 1a)', () => {
         replacesMessageId: 'msg-1'
       }
     })
+  })
+
+  it('shows the typed invocation in live and cold history after wire expansion', () => {
+    const typed = '/alpha hello'
+    const wire = withOriginalSkillInput(typed, 'Do alpha hello from SKILL.md')
+    for (const isDelivered of [undefined, () => false]) {
+      const [event] = mapCodexItem('root', 'turn', userItem(wire, 'msg-1'), true, 5, isDelivered)
+      expect(event).toMatchObject({
+        kind: 'message',
+        message: { content: [{ type: 'text', text: typed }] }
+      })
+    }
   })
 
   it('a delivered session message — live and in the cold history, one mapper — is a note', () => {

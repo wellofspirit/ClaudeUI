@@ -197,6 +197,11 @@ export function SkillsMobileView({
             {skill.path && (
               <div className="text-[10px] text-text-muted/60 font-mono break-all">{skill.path}</div>
             )}
+            {skill.compatibilityWarnings?.map((warning) => (
+              <p key={warning} className="text-[11px] text-amber-400 break-words">
+                {warning}
+              </p>
+            ))}
           </div>
           <div className="px-3 py-3 text-[12px] leading-[1.6] text-text-primary">
             <MarkdownRenderer content={skill.content} />

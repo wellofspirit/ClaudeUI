@@ -1,8 +1,8 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import * as os from 'os'
 import { logger } from './logger'
-import type { SkillInfo, SkillSource } from '../../shared/types'
+import type { SkillInfo } from '../../shared/types'
+import { resolveClaudeSkills } from '../skills/claude-skills'
 
 // ---------------------------------------------------------------------------
 // YAML frontmatter parser (lightweight, no dependency)
@@ -144,32 +144,6 @@ export function listSkillDirs(dir: string): SkillDirEntry[] {
   return found
 }
 
-function scanSkillDir(dir: string, source: SkillSource, pluginName?: string): SkillInfo[] {
-  const results: SkillInfo[] = []
-
-  for (const { name, skillMd } of listSkillDirs(dir)) {
-    try {
-      const raw = fs.readFileSync(skillMd, 'utf-8')
-      const { frontmatter, body } = parseFrontmatter(raw)
-
-      results.push({
-        name,
-        displayName: frontmatter.name ? String(frontmatter.name) : undefined,
-        description: frontmatter.description
-          ? String(frontmatter.description)
-          : extractFirstLine(body),
-        source,
-        pluginName,
-        path: skillMd,
-        content: body
-      })
-    } catch (err) {
-      logger.warn('SkillScanner', `Failed to read ${skillMd}`, err)
-    }
-  }
-  return results
-}
-
 /**
  * Extract the first non-empty, non-heading line as a fallback description.
  * @internal — exported for tests only.
@@ -183,44 +157,6 @@ export function extractFirstLine(body: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Plugin skills scanner
-// ---------------------------------------------------------------------------
-
-interface InstalledPlugin {
-  installPath: string
-}
-
-interface PluginRegistry {
-  version?: number
-  plugins: Record<string, InstalledPlugin[]>
-}
-
-function scanPluginSkills(): SkillInfo[] {
-  const results: SkillInfo[] = []
-  const registryPath = path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json')
-
-  try {
-    if (!fs.existsSync(registryPath)) return results
-    const registry: PluginRegistry = JSON.parse(fs.readFileSync(registryPath, 'utf-8'))
-
-    for (const [key, installations] of Object.entries(registry.plugins ?? {})) {
-      // key format: "pluginName@marketplace"
-      const pluginName = key.split('@')[0]
-
-      for (const install of installations) {
-        const skillsDir = path.join(install.installPath, 'skills')
-        const skills = scanSkillDir(skillsDir, 'plugin', pluginName)
-        results.push(...skills)
-      }
-    }
-  } catch (err) {
-    logger.warn('SkillScanner', `Failed to read plugin registry`, err)
-  }
-
-  return results
-}
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -229,18 +165,5 @@ function scanPluginSkills(): SkillInfo[] {
  * Called from IPC handler when the Skills dialog opens.
  */
 export async function scanSkills(cwd: string): Promise<SkillInfo[]> {
-  const results: SkillInfo[] = []
-
-  // 1. Project skills
-  const projectSkillsDir = path.join(cwd, '.claude', 'skills')
-  results.push(...scanSkillDir(projectSkillsDir, 'project'))
-
-  // 2. User skills
-  const userSkillsDir = path.join(os.homedir(), '.claude', 'skills')
-  results.push(...scanSkillDir(userSkillsDir, 'user'))
-
-  // 3. Plugin skills
-  results.push(...scanPluginSkills())
-
-  return results
+  return resolveClaudeSkills(cwd).skills
 }

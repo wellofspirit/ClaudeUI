@@ -987,8 +987,8 @@ export const CODEX_ENGINE_CAPABILITIES: EngineCapabilities = {
   // "this lands in the RUNNING turn", which `turn/steer` is.
   steer: true,
   queue: true,
-  slashCommands: false,
-  skills: false,
+  slashCommands: true,
+  skills: true,
   sideQuestion: false,
   interactiveApprovals: true,
   sandbox: false,

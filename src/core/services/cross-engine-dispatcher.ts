@@ -86,8 +86,14 @@ import {
   type CallerRestriction
 } from '../opencode/caller-restriction'
 import { OpencodeSessionAllows } from '../opencode/session-allows'
+import { effectiveClaudeSkillCatalog } from '../opencode/effective-claude-skills'
 import { opencodeAuthHooks } from '../opencode/opencode-auth-hooks'
 import { collectClaudeMcpForOpencode } from '../opencode/claude-mcp-bridge'
+import {
+  expandClaudeSkillInvocation,
+  resolveClaudeSkills,
+  type ClaudeSkillCatalog
+} from '../skills/claude-skills'
 import { denyAskHit } from '../permissions/shell-rules'
 import { isShellToolName } from '../automode/shell-lexical'
 import { parseModelString, peekOpencodeModels } from '../opencode/model-discovery'
@@ -1154,6 +1160,7 @@ interface TargetRuleInputs {
  */
 interface OpencodeTargetEntry extends TargetRuleInputs, TargetLedgerFields {
   kind: 'opencode'
+  skillCatalog: ClaudeSkillCatalog
   /** `claudeui_hand_back` tool calls the target made this turn (tool_use ids), to see them complete. */
   reportToolIds: Set<string>
   /** Resolves the turn's wait for the report's own tool call to complete on the feed. */
@@ -5381,7 +5388,7 @@ export class CrossEngineDispatcher {
     if (!givenUp) {
       const posted = entry.client.prompt(entry.sessionId, {
         id: inboxID,
-        text: prompt,
+        text: expandClaudeSkillInvocation(prompt, entry.skillCatalog)?.text ?? prompt,
         delivery: 'steer'
       })
       entry.pendingPrompt = { posted, inboxID }
@@ -5576,11 +5583,14 @@ export class CrossEngineDispatcher {
     // A resumed target runs where it was created (ADR-105): the stored directory.
     const cwd = resume?.cwd ?? ctx.cwd
     const conn = await this.deps.serverManager.acquire(cwd)
+    let skillCatalog = conn.skillCatalog ?? resolveClaudeSkills(cwd)
     let rec: ConnRecord | null = null
     let client: DispatchTargetClient | null = null
     let createdId: string | null = null
     try {
       client = this.deps.makeClient(conn)
+      const exposedSkills = (await (client as OpencodeClient).skills?.().catch(() => [])) ?? []
+      skillCatalog = effectiveClaudeSkillCatalog(skillCatalog, exposedSkills)
       rec = this.connectionFor(conn, client)
       rec.creating++
       const inputs: TargetRuleInputs = {
@@ -5665,6 +5675,7 @@ export class CrossEngineDispatcher {
         }).id
       const entry: OpencodeTargetEntry = {
         kind: 'opencode',
+        skillCatalog,
         reportToolIds: new Set(),
         reportToolDone: null,
         sessionId: session.id,
@@ -8418,6 +8429,7 @@ export class CrossEngineDispatcher {
     // `forwardClaudeTargetMessage`'s / `handleOpencodeTargetStream`'s payload
     // shapes, and accumulates the turn's tokens even with no tool_use to
     // stream to (see `PiChildRunner`'s output handler).
+    const piSkillCatalog = resolveClaudeSkills(cwd)
     try {
       entry.runner = await PiChildRunner.start({
         cwd,
@@ -8453,6 +8465,8 @@ export class CrossEngineDispatcher {
               }
             : {}),
           mcpServers: collectClaudeMcpForPi(cwd).servers,
+          skills: piSkillCatalog.skills,
+          skillSourceRoots: piSkillCatalog.sourceRoots,
           ...piTargetSpawnFlags(
             dispatchPiSessionDir(row.id),
             harnessId,

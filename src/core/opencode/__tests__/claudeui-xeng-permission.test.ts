@@ -78,6 +78,8 @@ async function setup(opts: {
     if (opts.failReads) throw new Error('read failed')
   }
   await plugin.setup({
+    location: { directory: '/fixture' },
+    skill: { transform: async () => ({ dispose: async () => {} }) },
     tool: { hook: async () => ({}), list: async () => [] },
     rpc: {
       register: async (_def: unknown, handlers: { guard: Fake['guard'] }) => {

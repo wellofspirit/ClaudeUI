@@ -698,8 +698,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('config:scan-custom-commands', cwd) as ReturnType<
         ClaudeAPI['scanCustomCommands']
       >,
-    loadSkillDetails: (cwd) =>
-      connection.invoke('config:load-skill-details', cwd) as ReturnType<
+    loadSkillDetails: (cwd, sessionId) =>
+      connection.invoke('config:load-skill-details', cwd, sessionId) as ReturnType<
         ClaudeAPI['loadSkillDetails']
       >,
 

@@ -337,6 +337,11 @@ export function SkillsDialogView({
                       {selectedSkill.path}
                     </div>
                   )}
+                  {selectedSkill.compatibilityWarnings?.map((warning) => (
+                    <p key={warning} className="text-[11px] text-amber-400 mt-1">
+                      {warning}
+                    </p>
+                  ))}
                 </div>
 
                 <div className="flex-1 overflow-y-auto px-5 py-4 text-[12px] leading-[1.6] text-text-primary">

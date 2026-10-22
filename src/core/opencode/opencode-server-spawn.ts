@@ -50,6 +50,7 @@ export interface SpawnServerOptions {
   readonly password: string
   /** `OPENCODE_CONFIG_CONTENT` — contains secrets, never log it. */
   readonly configContent: string
+  readonly skillHost?: { port: number; token: string }
 }
 
 export type SpawnServerFn = (
@@ -86,7 +87,8 @@ export function parseListenLine(line: string): string | null {
 export function buildServerEnv(
   parent: NodeJS.ProcessEnv,
   password: string,
-  configContent: string
+  configContent: string,
+  skillHost?: { port: number; token: string }
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...parent }
   // One password, under the current name: a stale legacy value inherited from
@@ -94,6 +96,10 @@ export function buildServerEnv(
   delete env.OPENCODE_SERVER_PASSWORD
   env.OPENCODE_PASSWORD = password
   env.OPENCODE_CONFIG_CONTENT = configContent
+  if (skillHost) {
+    env.CLAUDEUI_OPENCODE_SKILLS_URL = `http://127.0.0.1:${skillHost.port}/skills`
+    env.CLAUDEUI_OPENCODE_SKILLS_TOKEN = skillHost.token
+  }
   // The binary is a digest-checked release from ClaudeUI's harness store or a
   // System install ClaudeUI never updates (ADR-082): a ClaudeUI-spawned server
   // must not replace it under a running session (cli/src/services/updater.ts).
@@ -131,7 +137,12 @@ export function spawnStdioServer(
     const spec = withLaunch(
       launch,
       [...SERVE_ARGS],
-      buildServerEnv(deps.env ?? process.env, options.password, options.configContent)
+      buildServerEnv(
+        deps.env ?? process.env,
+        options.password,
+        options.configContent,
+        options.skillHost
+      )
     )
     let child: ChildProcess
     try {

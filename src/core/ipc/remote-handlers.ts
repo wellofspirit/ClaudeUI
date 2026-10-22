@@ -1073,7 +1073,7 @@ export function registerRemoteHandlers(
     channel: 'config:load-skill-details',
     capability: 'config',
     kind: 'query',
-    handler: async (cwd: string) => loadSkillDetails(manager, cwd)
+    handler: async (cwd: string, sessionId?: string) => loadSkillDetails(manager, cwd, sessionId)
   })
 
   // Claude permissions — full parity with the desktop handler (same

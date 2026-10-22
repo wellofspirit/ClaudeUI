@@ -85,7 +85,11 @@ describe('buildOpencodeConfig (opencode 2.x)', () => {
   })
 
   it('plugins lists the directory plugin, and is absent without one', () => {
-    expect(parse({ pluginDir: '/p/claudeui-xeng' }).plugins).toEqual(['/p/claudeui-xeng'])
+    expect(parse({ pluginDir: '/p/claudeui-xeng' }).plugins).toEqual([
+      '-opencode.config.compatibility',
+      '-opencode.config.skill',
+      '/p/claudeui-xeng'
+    ])
     expect(parse({ pluginDir: null })).not.toHaveProperty('plugins')
     expect(parse({})).not.toHaveProperty('plugins')
   })

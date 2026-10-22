@@ -1126,6 +1126,8 @@ export interface PerSessionSnapshot {
    */
   metering?: MeteringSnapshot
   slashCommands: SlashCommandInfo[]
+  /** Exact commands delivered by this session; absent on older hosts. */
+  sessionSlashCommands?: SlashCommandInfo[]
   sdkSkillNames: string[]
   /** Whether cli.js/the engine is live for this session. A remote client MUST
    *  carry this so its first send steers the running session instead of

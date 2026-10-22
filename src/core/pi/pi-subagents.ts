@@ -84,6 +84,7 @@ import { PI_ASYNC_LAUNCHED_PREFIX, piAgentModelLine } from '../../shared/pi-agen
 // store derives the `~/.claude/ui` root locally, without the vault's graph).
 import { piSubagentSessionsRoot, type PiAgentLinkRecord } from './pi-subagent-store'
 import { piSubagentToolEntry, type PiMcpServerEntry } from './pi-mcp-bridge'
+import type { SharedClaudeSkill } from '../skills/claude-skills'
 
 /** Live children (all depths) one session may run at once. */
 export const MAX_CONCURRENT_PI_SUBAGENTS = 20
@@ -114,6 +115,8 @@ export interface PiSubagentHost {
    * Absent = none.
    */
   bridgedMcpServers?(): Record<string, PiMcpServerEntry>
+  sharedSkills?(): SharedClaudeSkill[]
+  sharedSkillSourceRoots?(): string[]
   /** BaseSession.send — NEVER dispatchOutput (see the module doc). */
   send(channel: string, data: unknown): void
   /** The parent's gate, parametrized by the child scope (ADR-089 D2). */
@@ -947,6 +950,8 @@ export class PiSubagentManager {
           hostedToolHandler: this.childHostedTool(scope),
           onAbandoned: (info) => this.childAbandoned(scope, info),
           mcpServers: this.host.bridgedMcpServers?.() ?? {},
+          skills: this.host.sharedSkills?.() ?? [],
+          skillSourceRoots: this.host.sharedSkillSourceRoots?.() ?? [],
           args: buildPiSubagentChildArgs({
             dir: record.dir,
             agentId: record.agentId,
