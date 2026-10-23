@@ -247,6 +247,44 @@ Learned verifying an Electron patch bump (node-pty + better-sqlite3 under a new 
   home) read-only: `PRAGMA integrity_check` and `user_version` prove the ABI and the
   migration chain. node-pty's `conpty_console_list_agent` may print `AttachConsole
 failed` at teardown with a terminal open; that is shutdown noise.
+- **Pin the Electron you launch.** A driver script outside the worktree (e.g. under
+  `.work/`) resolves `playwright`, and Playwright then launches the MAIN checkout's
+  `electron`: a bump verifier once got a green boot on the old major. Resolve Playwright
+  with `createRequire(<worktree>/package.json)`, pass
+  `executablePath: <worktree>/node_modules/electron/dist/electron.exe`, and assert
+  `process.versions.electron` / `modules` from the main process before anything else.
+- **`app.evaluate` has no `require`.** Use `process.mainModule.require(...)` (and
+  `process.mainModule.require('node:module').createRequire(...)`); dynamic `import()`
+  fails there too.
+- **Which native binary loaded.** node-pty loads `build/Release/*.node` (the
+  `rebuild:native` output) before its prebuilds; better-sqlite3 loads
+  `prebuilds/<platform>.node`. `require.cache` shows the asar virtual path in a
+  packaged app; the main process's module list (`Get-Process -Id <pid> |
+Select-Object -ExpandProperty Modules`, with a terminal open so node-pty is loaded)
+  shows the real `app.asar.unpacked` path.
+- **Terminal needle.** The typed line echoes too, so `echo e45-ok` matches before the
+  command runs; type a split literal like `echo ('e45-' + 'ok')`.
+- **Packaged app.** `executablePath: dist/win-unpacked/claudui.exe`, `args: []`, the
+  isolated-home variables plus `CLAUDEUI_ALLOW_MULTIPLE_INSTANCES=1` (the packaged build
+  enforces the single-instance lock) and `CLAUDE_UI_LOG_DIR=<report folder>`.
+- **ASAR reads.** Run the packaged `claudui.exe` with `ELECTRON_RUN_AS_NODE=1` on a
+  script outside the asar that `fs.createReadStream`s (`highWaterMark: 1024`) every file
+  under `resources/app.asar/out/renderer/assets/` and compares sha256 with
+  `out/renderer/assets/`.
+- **Plugin view.** A fixture plugin goes in `<home>/.claude/ui/plugins/<id>/`
+  (`docs/plugin-development.md`). Reach the guest from the main process with
+  `webContents.getAllWebContents().find((w) => w.getType() === 'webview')`;
+  `getLastWebPreferences().sandbox` is true for the guest. `pluginApi.invoke` round
+  trips; `ctx.emit` events reach only the main window, not the guest (a known gap).
+- **Mockup preview.** Put `index.html` in
+  `<session cwd>/.claude/ui/mockups/<8-hex-id>/`, call the store's
+  `openMockupPanel(activeSessionId, '<id>', title)`, assert
+  `iframe[src^="mockup-asset://"]` and read it through Playwright's `win.frames()`.
+- **Voice worker.** `ready` needs the ~700 MB speech pack. Without it, run the launcher's
+  command shape (`ELECTRON_RUN_AS_NODE=1`, `CLAUDEUI_VOICE_TOKEN` set, stdin kept open)
+  and expect the worker's own `{"type":"fatal","message":"could not load the speech model…"}`.
+- **Log viewer.** `window.api.openLogViewer()` arrives as a Playwright `window` event;
+  its rows are `.log-entry`.
 
 ## Caveats — what you can't (safely) drive
 
