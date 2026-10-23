@@ -1621,7 +1621,7 @@ export class PiSession extends BaseSession {
       this.clearInactivityTimer()
       this.sendStatus()
     }
-    let ok = false
+    let ok: boolean
     try {
       const resp = await client.request({ type: 'prompt', message: deliveryCommand(payload) })
       ok = resp.success

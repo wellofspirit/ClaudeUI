@@ -4340,7 +4340,7 @@ export class CrossEngineDispatcher {
     cleanup: () => void
   ): Promise<DispatchResult> {
     const { run } = ctx
-    let result: DispatchResult = errorResult('Dispatch failed.', req.sessionId ?? '')
+    let result: DispatchResult
     try {
       try {
         result = await this.runBody(req, ctx)

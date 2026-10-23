@@ -1108,7 +1108,8 @@ async function main(argv) {
     throw new Error(
       `${error?.message ?? error}
 (the types are generated from the spec the tested opencode binary serves, ` +
-        `so ${check ? 'the check' : 'generation'} needs that binary in the managed store)`
+        `so ${check ? 'the check' : 'generation'} needs that binary in the managed store)`,
+      { cause: error }
     )
   }
   const { generated, provenance, provenanceData, configSchema } = build(served)

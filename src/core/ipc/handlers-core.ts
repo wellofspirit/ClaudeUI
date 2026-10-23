@@ -1305,7 +1305,7 @@ async function probeDrives(): Promise<string[]> {
  * one rail entry, so nothing here is allowed to throw.
  */
 export async function listPlaces(): Promise<ListPlacesResult> {
-  let home = ''
+  let home: string
   try {
     const posix = os.homedir().replace(/\\/g, '/')
     // Trailing-slash strip mirrors `listDirEntries`' resolvedPath — but a
@@ -1314,13 +1314,13 @@ export async function listPlaces(): Promise<ListPlacesResult> {
   } catch {
     home = ''
   }
-  let hostname = ''
+  let hostname: string
   try {
     hostname = os.hostname()
   } catch {
     hostname = ''
   }
-  let drives: string[] = []
+  let drives: string[]
   try {
     drives = await probeDrives()
   } catch {

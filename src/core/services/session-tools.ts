@@ -2127,7 +2127,7 @@ export async function sessionHandOff(
 
   const mine = callerRef(caller)
   const parentTitle = oneLine(titleOf(caller.routingId) || 'Untitled session')
-  let saved: string | null = null
+  let saved: string | null
   let saveError = ''
   try {
     const dir = handoffsDir()

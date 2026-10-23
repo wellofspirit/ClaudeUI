@@ -407,7 +407,7 @@ describe('pi', () => {
 describe('rejections', () => {
   it.each(['mise', 'volta-shim', 'asdf'])('a %s multiplexer is never the harness', (name) => {
     const bin = writeNative(path.join(tmp, 'shims', `${name}${HOST_EXE}`))
-    let candidate = bin
+    let candidate: string
     try {
       // The shape on disk: the command is a link to the multiplexer.
       candidate = path.join(tmp, 'bin', `opencode${HOST_EXE}`)

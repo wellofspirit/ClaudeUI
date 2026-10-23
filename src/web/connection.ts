@@ -866,7 +866,7 @@ export class RemoteConnection {
       try {
         response = await startRegistration({ optionsJSON: options })
       } catch (err) {
-        throw new Error(describeCeremonyError(err))
+        throw new Error(describeCeremonyError(err), { cause: err })
       }
       const result = (await this.invoke('webauthn:register-verify', {
         response,

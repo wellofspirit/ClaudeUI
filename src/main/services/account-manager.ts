@@ -313,7 +313,7 @@ class AccountManager {
     }
 
     // Read authoritative list from DB.
-    let accounts: AccountInfo[] = []
+    let accounts: AccountInfo[]
     try {
       accounts = getAllAccounts()
     } catch (err) {

@@ -115,7 +115,7 @@ export async function waitForHostedTools(
   const graceMs = options.pluginGraceMs ?? PLUGIN_RPC_GRACE_MS
   const start = now()
   let connectedAt: number | null = null
-  let last = 'no answer yet'
+  let last: string
   for (;;) {
     const [rpc, mcp] = await Promise.all([
       options.pluginExpected
@@ -188,7 +188,7 @@ export async function waitForPermissionGuard(
       elapsedMs: 0
     }
   const timeoutMs = options.timeoutMs ?? GUARD_TIMEOUT_MS
-  let last = 'no answer'
+  let last: string
   for (;;) {
     const response = await settle(
       deps.request('POST', `/api/rpc/${PLUGIN_RPC_ID}/guard`, { input: {} })

@@ -1,4 +1,4 @@
-import simpleGit, { type SimpleGit } from 'simple-git'
+import { simpleGit, type SimpleGit } from 'simple-git'
 import * as fs from 'fs'
 import * as path from 'path'
 import type { GitStatusData, GitBranchData, GitFileStatus } from '../../shared/types'

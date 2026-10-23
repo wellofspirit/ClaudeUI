@@ -11,7 +11,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
-import { createRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import {
   LARGE_CATALOG,
   ModelCuration,
@@ -76,6 +76,7 @@ afterEach(cleanup)
 
 function Harness({ adapters }: { adapters: CurationAdapter[] }): React.JSX.Element {
   const [engine, setEngine] = useState<CuratedEngine>(adapters[0].engine)
+  const filterRef = useRef<HTMLInputElement>(null)
   return (
     <ModelCuration
       testid="S"
@@ -83,7 +84,7 @@ function Harness({ adapters }: { adapters: CurationAdapter[] }): React.JSX.Eleme
       adapters={adapters}
       engine={engine}
       onEngineChange={setEngine}
-      filterRef={createRef<HTMLInputElement>()}
+      filterRef={filterRef}
       onWrote={onWrote}
     />
   )

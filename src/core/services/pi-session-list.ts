@@ -103,7 +103,7 @@ function readPiSessionFile(filePath: string): ParsedPiSessionFile | null {
 /** Every `sessions/--<mangled-cwd>--/*.jsonl` path, across all projects. Best-effort: [] if the dir tree is missing/unreadable. */
 function walkAllSessionFiles(): string[] {
   const dir = piSessionsDir()
-  let projectDirs: string[] = []
+  let projectDirs: string[]
   try {
     projectDirs = fs
       .readdirSync(dir, { withFileTypes: true })

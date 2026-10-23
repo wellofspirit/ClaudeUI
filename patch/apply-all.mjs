@@ -65,7 +65,7 @@ if (!QUIET) console.log('\nAll patches applied.')
 // so the old whole-file node/bun/esbuild check is gone.
 //
 // Real syntax checking is now PER CHUNK and lives in scripts/rebundle-cli.mjs,
-// which esbuild-parses every chunk whose bytes a patch actually changed. That
+// which Node syntax-checks every chunk whose bytes a patch actually changed. That
 // runs immediately after this script in the same `ensure-cli` pipeline, so a
 // patch that produces broken JS still fails the build — just one step later.
 // What we check here is only that the delimiter structure survived patching.

@@ -3,7 +3,7 @@
  * (preload / nodeintegration / plugins) are not part of React's DOM property
  * registry. They are valid here, so disable the unknown-property check.
  */
-/* eslint-disable react/no-unknown-property */
+/* eslint-disable @eslint-react/dom-no-unknown-property */
 import { useEffect, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { sanitizeSvg } from '../../utils/sanitize-svg'

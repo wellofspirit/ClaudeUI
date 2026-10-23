@@ -236,7 +236,8 @@ export function readJsonFileForWrite(filePath: string): Record<string, unknown> 
   } catch (err) {
     backupCorruptFile(filePath)
     throw new Error(
-      `Refusing to overwrite unreadable JSON at ${filePath} (backed up to ${filePath}.corrupt): ${errMsg(err)}`
+      `Refusing to overwrite unreadable JSON at ${filePath} (backed up to ${filePath}.corrupt): ${errMsg(err)}`,
+      { cause: err }
     )
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {

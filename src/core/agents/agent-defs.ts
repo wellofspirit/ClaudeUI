@@ -269,7 +269,7 @@ export function projectDirChain(cwd: string): string[] {
   let root: string | null = null
   for (let i = 0; i < MAX_PROJECT_WALK; i++) {
     chain.push(dir)
-    let hasGit = false
+    let hasGit: boolean
     try {
       hasGit = fs.existsSync(path.join(dir, '.git'))
     } catch {

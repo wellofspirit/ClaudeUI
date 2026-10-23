@@ -1,5 +1,5 @@
 import { defineConfig } from 'vitest/config'
-import { homedir } from 'os'
+import { availableParallelism, homedir } from 'os'
 import { resolve } from 'path'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -77,11 +77,10 @@ const unitTest = {
 export default defineConfig({
   resolve: { alias: sharedAlias },
   test: {
-    // Global defaults
-    environment: 'jsdom',
-    globals: true,
-    setupFiles: ['./src/test/setup/jsdom.setup.ts'],
-
+    // Avoid oversubscribing high-core hosts while Chromium runs alongside Node
+    // workers; keep low-core CI at Vitest's usual availableParallelism() - 1.
+    maxWorkers: Math.max(1, Math.min(8, availableParallelism() - 1)),
+    // Keep setup project-local: Vitest 5 merges root setupFiles into every project.
     projects: [
       {
         resolve: { alias: sharedAlias },

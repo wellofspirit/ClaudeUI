@@ -106,7 +106,8 @@ export function writePiNativeRawText(text: string): void {
     parsed = JSON.parse(body)
   } catch (e) {
     throw new Error(
-      `Refusing to write invalid JSON to pi settings: ${e instanceof Error ? e.message : String(e)}`
+      `Refusing to write invalid JSON to pi settings: ${e instanceof Error ? e.message : String(e)}`,
+      { cause: e }
     )
   }
   if (!isPlainObject(parsed)) {

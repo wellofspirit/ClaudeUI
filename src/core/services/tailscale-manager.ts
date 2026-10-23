@@ -761,7 +761,7 @@ export class TailscaleManager {
     // with a "run this instead" hint, so do not emit it.
     const args = ['serve', '--bg', `--https=${chosen}`, target]
 
-    let stdout = ''
+    let stdout: string
     try {
       const res = await this.exec(detection.binaryPath, args, MUTATE_TIMEOUT_MS)
       stdout = res.stdout
