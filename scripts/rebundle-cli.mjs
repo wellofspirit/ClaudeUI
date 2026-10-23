@@ -54,7 +54,7 @@ import { readFileSync, chmodSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { syntaxCheckChunk } from './lib/syntax-check-chunk.mjs'
+import { syntaxCheckChunk, syntaxCheckNodeVersion } from './lib/syntax-check-chunk.mjs'
 import { detectFormat } from './lib/binary-format.mjs'
 import { CHUNK_DELIM_RE, isChunkConcat } from './lib/chunk-format.mjs'
 import { cliJsPath, cliTrashDir, cliVendorDir, versionJsonPath } from './lib/cli-paths.mjs'
@@ -713,7 +713,9 @@ function main() {
       if (stderr) die(`syntax check failed for chunk "${name}":\n${stderr}`)
     }
     if (changed.length > 0) {
-      log(`syntax check passed for all ${changed.length} modified chunk(s) (Node --check)`)
+      log(
+        `syntax check passed for all ${changed.length} modified chunk(s) (Node ${syntaxCheckNodeVersion()} --check)`
+      )
     }
   } else {
     log('NO-OP mode: reusing original module contents (drops bytecode + optional records only)')
