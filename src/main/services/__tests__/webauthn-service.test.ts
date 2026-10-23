@@ -257,6 +257,28 @@ describe('WebauthnService — registration', () => {
     expect(row.publicKey.length).toBeGreaterThan(30)
   })
 
+  it('offers EXACTLY the pinned v13 algorithm set — never ML-DSA-44 first', async () => {
+    const options = await service.startRegistration({ origin: TAILNET, connectionId: 'c1' })
+    expect(options.pubKeyCredParams.map((p) => p.alg)).toEqual([-8, -7, -257])
+  })
+
+  it('refuses a registration whose COSE key advertises an unoffered algorithm (ML-DSA-44)', async () => {
+    // The KEY is still P-256; only the COSE `alg` label says -48. The library's
+    // admission check runs before any signature work, and `fmt: 'none'` has no
+    // attestation signature to verify — so this isolates the algorithm gate.
+    const device = new VirtualAuthenticator({ alg: -48 })
+    const options = await service.startRegistration({ origin: TAILNET, connectionId: 'c1' })
+    const response = device.register({
+      challenge: options.challenge,
+      origin: TAILNET.origin,
+      rpId: TAILNET.rpId
+    })
+    await expect(
+      service.finishRegistration({ origin: TAILNET, connectionId: 'c1', response })
+    ).resolves.toEqual({ ok: false, reason: 'verify' })
+    expect(store.rows.size).toBe(0)
+  })
+
   it('excludes already-enrolled credentials so one device cannot double-enroll', async () => {
     const device = new VirtualAuthenticator()
     const first = await service.startRegistration({ origin: TAILNET, connectionId: 'c1' })

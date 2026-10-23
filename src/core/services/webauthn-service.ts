@@ -63,6 +63,7 @@ import type {
   PublicKeyCredentialRequestOptionsJSON,
   RegistrationResponseJSON
 } from '@simplewebauthn/server'
+import { COSEALG } from '@simplewebauthn/server/helpers'
 import * as crypto from 'node:crypto'
 import {
   countWebauthnCredentials,
@@ -96,6 +97,19 @@ export const CHALLENGE_TTL_MS = 2 * 60_000
 
 /** How long the authenticator UI may stay open, client-side (advisory). */
 const CEREMONY_TIMEOUT_MS = 60_000
+
+/**
+ * The COSE algorithms we OFFER at registration and therefore ACCEPT at
+ * verification: EdDSA, ES256, RS256 — exactly what `@simplewebauthn/server` v13
+ * defaulted to.
+ *
+ * v14's default is runtime-dependent and, on Node 24+ / Electron 44 / Bun,
+ * prepends ML-DSA-44 (-48, post-quantum) to the list, so enrollment would offer
+ * PQC first. We pin the v13 set and pass the SAME list to
+ * verification: an attestation using an algorithm we did not offer is refused,
+ * per WebAuthn's RP requirements.
+ */
+const SUPPORTED_ALGORITHM_IDS: number[] = [COSEALG.EdDSA, COSEALG.ES256, COSEALG.RS256]
 
 /**
  * What a challenge was minted FOR. Binding this stops cross-purpose replay: a
@@ -622,6 +636,7 @@ export class WebauthnService {
       userDisplayName: USER_DISPLAY_NAME,
       attestationType: 'none',
       timeout: CEREMONY_TIMEOUT_MS,
+      supportedAlgorithmIDs: SUPPORTED_ALGORITHM_IDS,
       excludeCredentials: existing.map((c) => ({
         id: c.credId,
         transports: (c.transports ?? undefined) as AuthenticatorTransport[] | undefined
@@ -659,7 +674,8 @@ export class WebauthnService {
         expectedChallenge: challenge,
         expectedOrigin: args.origin.origin,
         expectedRPID: args.origin.rpId,
-        requireUserVerification: true
+        requireUserVerification: true,
+        supportedAlgorithmIDs: SUPPORTED_ALGORITHM_IDS
       })
       if (!verification.verified) return { ok: false, reason: 'verify' }
       const info = verification.registrationInfo
