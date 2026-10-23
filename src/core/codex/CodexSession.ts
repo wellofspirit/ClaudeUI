@@ -8,6 +8,7 @@ import { buildSessionMessageWrapper, wrapperSender } from '../../shared/session-
 import {
   DISPATCH_SESSION_ID_REMOVED_TEXT,
   dispatchResultSuffix,
+  dispatchWorkdirArg,
   hasRemovedSessionId,
   runsInBackground
 } from '../../shared/dispatch-agent-description'
@@ -3573,12 +3574,20 @@ export class CodexSession extends BaseSession {
     // static spec it was given and can still send one: refuse it, with nothing launched and no
     // approval card raised.
     if (hasRemovedSessionId(args?.session_id)) return refuse(DISPATCH_SESSION_ID_REMOVED_TEXT)
+    // A Codex dynamic tool's arguments are not checked against its schema, so a `workdir` that is not
+    // a string is refused here: ignoring it would run the agent in the parent's directory, not the
+    // one the model asked for. `null` is absent, like an empty string.
+    const workdirInput = args?.workdir
+    if (workdirInput != null && typeof workdirInput !== 'string')
+      return refuse('dispatch_agent "workdir" must be a string (a directory path).')
+    const workdir = dispatchWorkdirArg(workdirInput)
     const req: DispatchRequest = {
       engine,
       prompt,
       model: typeof args?.model === 'string' ? args.model : undefined,
       name: typeof args?.name === 'string' ? args.name : undefined,
       description: typeof args?.description === 'string' ? args.description : undefined,
+      ...(workdir ? { workdir } : {}),
       // The hosted tool call needs the root thread and a live root turn (a native child can
       // never call it), so the caller is always the top-level agent: background unless it
       // says otherwise (ADR-105 §2).
@@ -3599,6 +3608,7 @@ export class CodexSession extends BaseSession {
           engine: req.engine,
           prompt: req.prompt,
           ...(req.model !== undefined ? { model: req.model } : {}),
+          ...(req.workdir ? { workdir: req.workdir } : {}),
           ...(req.runInBackground ? { run_in_background: true } : {})
         }
       }

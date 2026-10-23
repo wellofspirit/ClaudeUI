@@ -1378,6 +1378,7 @@ describe('X-Agents and session_message (ADR-105 §4)', () => {
       parentEngine: p.caller.engine,
       parentToolUseId: 'toolu_origin',
       cwd: '/repo',
+      parentCwd: '/repo',
       model: 'm-x',
       launchMode: 'default',
       accountKey: null,

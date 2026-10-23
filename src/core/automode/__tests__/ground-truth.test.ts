@@ -253,11 +253,14 @@ describe('analyzeRedirects', () => {
     describe('single-quoted program text', () => {
       // The phantom targets that blocked a real session: a `>` inside a sed/grep
       // program is program text, not a redirect.
-      const inert: Array<[string, string[] | null]> = [
-        [`sed -i '' 's/foo 2>\\/dev\\/null/bar/' run.sh`, null],
+      // The quote-blind cross-check still names a quote-hidden `/dev/null/bar/` /
+      // `/x/` in `quotedTargets` (see the ADR-106 cross-check suite below), but
+      // none of these phantoms is ever a `target`.
+      const inert: Array<[string, string[]]> = [
+        [`sed -i '' 's/foo 2>\\/dev\\/null/bar/' run.sh`, []],
         [`sed -i '' 's/a > b/c/' f > out.txt`, ['out.txt']],
         [`grep -rn 'a->b' . > hits.txt 2>&1`, ['hits.txt']],
-        [`FOO=1 /usr/bin/sed 's/>/x/' f`, null],
+        [`FOO=1 /usr/bin/sed 's/>/x/' f`, []],
         [`echo ok && sed 's/x>/y/' f >> log.txt`, ['log.txt']],
         [`printf '%s > %s\\n' a b > out.txt`, ['out.txt']],
         // The target itself may be single-quoted — it is still read.
@@ -265,7 +268,7 @@ describe('analyzeRedirects', () => {
       ]
       for (const [command, targets] of inert) {
         it(`skips program text: ${command}`, () => {
-          expect(posix(command)?.targets ?? null).toEqual(targets)
+          expect(posix(command)?.targets ?? []).toEqual(targets)
         })
       }
 
@@ -293,7 +296,6 @@ describe('analyzeRedirects', () => {
       // line, so there is no redirect to report (rule 2: `python3` left
       // SHELL_REREADERS; its quoted spans are inert).
       const interpreterArgs = [
-        `echo 'x > /etc/p' | python3`,
         `python -c "print([x for x in rows if x>1])"`,
         `node --eval "if (1 > 2) {}"`,
         `py -c "if a > b: pass"`,
@@ -307,6 +309,15 @@ describe('analyzeRedirects', () => {
           expect(posix(command)).toBeNull()
         })
       }
+
+      // Exception: a PIPED-in payload. The cross-check cannot know what `python3`
+      // does with stdin, so the quote-hidden path is named (never a target).
+      it('names the quote-hidden path of a payload piped into an interpreter', () => {
+        const r = posix(`echo 'x > /etc/p' | python3`)
+        expect(r?.targets).toEqual([])
+        expect(r?.quotedTargets).toEqual(['/etc/p'])
+        expect(r?.allInScope).toBe(false)
+      })
 
       it('does not skip a real redirect that follows an interpreter call', () => {
         expect(posix(`python -c "print(1)" > ../../x.txt`)?.outOfScope).toEqual([
@@ -563,14 +574,24 @@ describe('rule 1/2 — quotes, heredocs and here-strings', () => {
   })
 
   it('handles `<<-` (tab-stripped delimiter) and two heredocs on one line', () => {
+    // The bodies are text (no `$(`), so `/etc/p` is never a target; the quote-blind
+    // cross-check names it (an unquoted-delimiter body is a quote-hidden `>`).
     expect(posix(['cat <<-EOF > out.txt', '\tmake > /etc/p', '\tEOF'].join('\n'))).toEqual({
       targets: ['out.txt'],
-      allInScope: true,
+      allInScope: false,
       outOfScope: [],
       unresolvable: [],
-      protectedHits: []
+      protectedHits: [],
+      quotedTargets: ['/etc/p']
     })
-    expect(posix(['paste <<A <<B', 'one > /etc/p', 'A', 'two > /etc/q', 'B'].join('\n'))).toBeNull()
+    expect(posix(['paste <<A <<B', 'one > /etc/p', 'A', 'two > /etc/q', 'B'].join('\n'))).toEqual({
+      targets: [],
+      allInScope: false,
+      outOfScope: [],
+      unresolvable: [],
+      protectedHits: [],
+      quotedTargets: ['/etc/p', '/etc/q']
+    })
   })
 
   it('does NOT read a PowerShell here-string as a body: it falls back to quote-blind (ruling 1)', () => {
@@ -586,7 +607,12 @@ describe('rule 1/2 — quotes, heredocs and here-strings', () => {
   })
 
   it('reads double-quoted text of an inert command as text', () => {
-    expect(posix('echo "a > /etc/p"')).toBeNull()
+    // `echo "a > /etc/p"` is text, so nothing is a TARGET — but the quote-blind
+    // cross-check cannot tell it from `… | "$BASH"`, so the path is named.
+    const echoed = posix('echo "a > /etc/p"')
+    expect(echoed?.targets).toEqual([])
+    expect(echoed?.quotedTargets).toEqual(['/etc/p'])
+    expect(echoed?.allInScope).toBe(false)
     expect(win('Write-Host "a > b"')).toBeNull()
     expect(win('Write-Output "x => y"')).toBeNull()
     expect(win('Select-String -Pattern "a|b" -Path log.txt')).toBeNull()
@@ -594,7 +620,11 @@ describe('rule 1/2 — quotes, heredocs and here-strings', () => {
   })
 
   it('reads a segment that is nothing but one quoted string as text', () => {
-    expect(win('foreach($n in $needles){ "$n => $hit" }')).toBeNull()
+    // Never a target; the quote-blind cross-check names the unresolvable `$hit`.
+    const r = win('foreach($n in $needles){ "$n => $hit" }')
+    expect(r?.targets).toEqual([])
+    expect(r?.quotedTargets).toEqual(['$hit'])
+    expect(r?.allInScope).toBe(false)
   })
 
   it('still reports a real redirect after an interpreter call', () => {
@@ -603,7 +633,9 @@ describe('rule 1/2 — quotes, heredocs and here-strings', () => {
 })
 
 describe('rule 3 — PowerShell null sinks', () => {
-  const win = (command: string) => analyzeRedirects(command, { cwd: WIN_CWD }, 'win32')
+  // `$null` is a sink only in a KNOWN PowerShell shell (judge-hardening fix 3).
+  const win = (command: string) =>
+    analyzeRedirects(command, { cwd: WIN_CWD, shell: 'powershell' }, 'win32')
 
   it('drops `$null` in every spelling', () => {
     expect(win('Get-ChildItem > $null')).toBeNull()
@@ -1183,7 +1215,11 @@ describe('real replay patterns (sanitised)', () => {
       'import csv, sys\n' +
       "print('duplicate keys', [k for k, v in c.items() if v>1])\n" +
       '"'
-    expect(win(dispatch)).toBeNull()
+    // No phantom TARGET; the cwd is out of scope after the `cd`, so the
+    // quote-hidden relative `1` is named by the cross-check.
+    const hidden = win(dispatch)
+    expect(hidden?.targets).toEqual([])
+    expect(hidden?.quotedTargets).toEqual(['1'])
 
     const opencode =
       'cd D:/work/app-wt/s11c-qt; $env:PYTHONIOENCODING="utf-8"; ' +
@@ -1228,7 +1264,12 @@ describe('real replay patterns (sanitised)', () => {
       'cd D:\\work\\app\\.claude\\worktrees\\wt-b; node scripts/shot.mjs ' +
       "--click 'text=All Settings' --eval \"(() => { const items = [...document.querySelectorAll('[data-testid=Rail]')]; return items.map(e => e.textContent.trim()).join('|') })()\" " +
       '--out .cache/screenshots/bump.png --timeout 120000 2>&1 | Select-Object -Last 25'
-    expect(win(command)).toBeNull()
+    // No phantom TARGET. The cross-check still names the quote-hidden `=> e.…`
+    // (a relative name after a `cd` that left the scope), once, as quoted.
+    const r = win(command)
+    expect(r?.targets).toEqual([])
+    expect(r?.quotedTargets).toEqual(['e.textContent.trim'])
+    expect(r?.allInScope).toBe(false)
   })
 
   it('a PowerShell bare string `"$n => $hit"` is text', () => {
@@ -1236,14 +1277,17 @@ describe('real replay patterns (sanitised)', () => {
       "cd D:\\work\\app\\.work\\bump; $pairs=@(@{v='1.0';p='D:\\x.exe'}); " +
       'foreach($x in $pairs){ "== $($x.v)"; foreach($n in $needles){ ' +
       '$hit = Select-String -Path $x.p -Pattern $n -SimpleMatch -Quiet; "$n => $hit" } }'
-    expect(win(command)).toBeNull()
+    const r = win(command)
+    expect(r?.targets).toEqual([])
+    expect(r?.quotedTargets).toEqual(['$hit'])
+    expect(r?.allInScope).toBe(false)
   })
 
   it('PowerShell `2>$null` is a null sink', () => {
     const command =
       'cd D:\\work\\app-wt\\_work\\reports 2>$null; cd D:\\work\\app-wt && ' +
       'rg -n "alliance|--resume" _work/reports --glob "c0*.txt" | Select-Object -First 30'
-    expect(win(command)).toBeNull()
+    expect(win(command, { shell: 'powershell' })).toBeNull()
   })
 
   it('ruling 18: `$t=$env:TEMP; ... *> "$t\\x.txt"` is unresolvable with a temp hint', () => {
@@ -3100,5 +3144,1101 @@ describe('exit-fix4 R7 — append aggregation over every write to one resolved p
   it('aggregates mixed redirect/writer forms and normalised spellings', () => {
     const r = posix('echo a >> ../docs/sub/../notes.txt; tee ../docs/notes.txt')
     expect(r?.outOfScope).toEqual([{ path: '/docs/notes.txt' }])
+  })
+})
+
+// ── ADR-106 addendum: the quote-blind cross-check ─────────────────────────────
+//
+// The quote-aware scan reads `>` inside quoted text as text, which removes the
+// phantom targets and ALSO hides a real write whenever the lexer is wrong about
+// the quote structure or the text is re-read as shell by something it does not
+// know. The cross-check reads every `>` once more with no quote awareness and
+// names the ones the aware scan dropped that are not cleanly in scope.
+
+describe('quote-blind cross-check (ADR-106 addendum)', () => {
+  const posix = (command: string, extra: Partial<RedirectScope> = {}) =>
+    analyzeRedirects(command, { cwd: '/repo', shell: 'posix', ...extra }, 'linux')
+  const ps = (command: string) =>
+    analyzeRedirects(command, { cwd: 'D:/WorkPlace/ClaudeUI', shell: 'powershell' }, 'win32')
+
+  describe('a hidden write that is not cleanly in scope is named, never cleared', () => {
+    // Each command really writes the file in Git Bash / PowerShell; the quote-aware
+    // scan alone reports nothing (or `allInScope: true`). The hidden name is
+    // spelled out of scope so the cross-check has something it must not clear
+    // (the in-scope spellings of the same shapes are covered further down).
+    const hidden: Array<[string, string]> = [
+      ['echo "$(cat "my file" > /etc/v2)"', '/etc/v2'],
+      ['echo "done: $(date +"%F %T" > /etc/v5)"', '/etc/v5'],
+      [`echo "$(echo '"' > /etc/f2; echo '"')"`, '/etc/f2'],
+      [`echo 'x > /etc/w1' | "$BASH"`, '/etc/w1'],
+      [`echo 'x > /etc/g3' | {sh,}`, '/etc/g3'],
+      [`echo 'x > /etc/g5' | ( $BASH )`, '/etc/g5'],
+      ['echo $((1<<EOF))\necho x > /etc/g1\nEOF', '/etc/g1'],
+      [`find d -name python -exec sh -c 'echo x > /etc/f6' \\;`, '/etc/f6'],
+      // The audit's headline case: the real `> ok.txt` makes the scan report a
+      // target, and `allInScope: true` used to follow.
+      ['echo "$(echo "a " > /etc/passwd)" > ok.txt', '/etc/passwd']
+    ]
+    for (const [command, name] of hidden) {
+      it(`names ${name} in: ${command.replace(/\n/g, '⏎')}`, () => {
+        const r = posix(command)
+        expect(r).not.toBeNull()
+        expect(r?.allInScope).toBe(false)
+        expect(r?.quotedTargets).toContain(name)
+        // It is "probably text", never claimed as a definite write.
+        expect(r?.targets).not.toContain(name)
+        expect(r?.outOfScope).toEqual([])
+        expect(r?.unresolvable).toEqual([])
+      })
+    }
+
+    it('keeps the real target of the headline case in `targets`', () => {
+      const r = posix('echo "$(echo "a " > /etc/passwd)" > ok.txt')
+      expect(r).toEqual({
+        targets: ['ok.txt'],
+        allInScope: false,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: [],
+        quotedTargets: ['/etc/passwd']
+      })
+    })
+
+    it('names the PowerShell spellings the aware scan hid', () => {
+      const tick = ps("Write-Output `'hello > /etc/f10 `'")
+      expect(tick?.allInScope).toBe(false)
+      expect(tick?.quotedTargets).toEqual(['/etc/f10'])
+      const block = ps("& ([scriptblock]::Create('echo x > /etc/w5'))")
+      expect(block?.allInScope).toBe(false)
+      expect(block?.quotedTargets).toEqual(['/etc/w5'])
+    })
+
+    it('names an unresolvable and a protected hidden target too', () => {
+      // `$HOME` cannot be measured from the string.
+      expect(posix(`echo 'x > $HOME/y' | "$BASH"`)?.quotedTargets).toEqual(['$HOME/y'])
+      // A relative name is in scope, but `.bashrc` is protected: the stray closing
+      // quote must never hide the component.
+      expect(posix(`echo 'x > .bashrc' | "$BASH"`)?.quotedTargets).toEqual(['.bashrc'])
+      expect(posix(`echo 'x > .git/config' | "$BASH"`)?.quotedTargets).toEqual(['.git/config'])
+      // Out of scope by `..`.
+      expect(posix(`echo 'x > ../../y' | "$BASH"`)?.quotedTargets).toEqual(['../../y'])
+    })
+
+    it('is a relative name unknowable when the quoted text itself changes directory', () => {
+      const r = posix(`echo 'cd /etc; echo x > passwd' | "$BASH"`)
+      expect(r?.allInScope).toBe(false)
+      expect(r?.quotedTargets).toEqual(['passwd'])
+    })
+
+    it('does not let an unclosed quote after `>` swallow the operators after it', () => {
+      // The `>` is directly followed by the closing quote of its own string; a
+      // reader that took it as an opening quote would eat the real hidden write.
+      const r = posix(`echo 'a >' ; echo "$(echo "b " > /etc/p)"`)
+      expect(r?.allInScope).toBe(false)
+      expect(r?.quotedTargets).toEqual(['/etc/p'])
+    })
+  })
+
+  describe('a hidden target that is cleanly in scope is a harmless phantom (the false-block gain)', () => {
+    // The audit's literal commands name RELATIVE files. A relative file in the
+    // working tree is inside the scope the judge was told about, so nothing
+    // untrue is claimed — and with a real target alongside, `allInScope: true`
+    // is still TRUE.
+    const inScopeHidden = [
+      'echo "$(cat "my file" > v2)"',
+      'echo "done: $(date +"%F %T" > v5)"',
+      `echo "$(echo '"' > f2; echo '"')"`,
+      `echo 'x > w1' | "$BASH"`,
+      `echo 'x > g3' | {sh,}`,
+      `echo 'x > g5' | ( $BASH )`,
+      'echo $((1<<EOF))\necho x > g1\nEOF',
+      `find d -name python -exec sh -c 'echo x > f6' \\;`
+    ]
+    for (const command of inScopeHidden) {
+      it(`says nothing false about: ${command.replace(/\n/g, '⏎')}`, () => {
+        expect(posix(command)?.quotedTargets).toBeUndefined()
+        expect(posix(command) === null || posix(command)?.allInScope === true).toBe(true)
+        // With a real in-scope target next to it the claim stays true.
+        expect(posix(`${command} > ok.txt`)?.allInScope ?? true).toBe(true)
+      })
+    }
+  })
+
+  describe('benign commands keep a clean `allInScope: true` (or no meta at all)', () => {
+    it('is silent on comparison / arrow text in code and prompts', () => {
+      expect(posix('python -c "print(1>0)"')).toBeNull()
+      expect(posix('node -e "a>b"')).toBeNull()
+      expect(posix(`grep '->' f`)).toBeNull()
+      expect(posix('cmd 2>&1')).toBeNull()
+    })
+
+    it('keeps a clean in-scope claim next to quoted text', () => {
+      expect(posix('echo "a > b" > out.txt')).toEqual({
+        targets: ['out.txt'],
+        allInScope: true,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: []
+      })
+      expect(posix('git commit -m "fix: a > b"')?.allInScope).toBe(true)
+      expect(posix('git commit -m "fix: a > b"')?.quotedTargets).toBeUndefined()
+      expect(posix('cd sub && echo "a -> b" > out.txt')?.allInScope).toBe(true)
+    })
+
+    it('keeps a clean claim for a quoted heredoc whose body only mentions a relative name', () => {
+      const r = posix(["cat > notes.md <<'EOF'", 'x > y', 'EOF'].join('\n'))
+      expect(r).toEqual({
+        targets: ['notes.md'],
+        allInScope: true,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: []
+      })
+    })
+
+    it('reads code arrows and closers as code, not as a glob', () => {
+      // `=> {`, `-> []` and `x>1]` name no path.
+      const body = [
+        "cat > a.js <<'EOF'",
+        'const f = (x) => { return x }',
+        'const g = () => []',
+        'EOF'
+      ]
+      expect(posix(body.join('\n'))?.allInScope).toBe(true)
+      expect(posix('python -c "print([x for x in rows if x>1])"')).toBeNull()
+    })
+
+    it('reports no quotedTargets for any real operator spelling (position matching)', () => {
+      for (const command of [
+        'bun test > a.log',
+        'bun test >> a.log',
+        'bun test >| a.log',
+        'bun test &> a.log',
+        'bun test &>> a.log',
+        'bun test >& a.log',
+        'bun test 2>> a.log',
+        'bun test > a.log 2>&1',
+        'bun test > "my file.log"',
+        'echo x >a.log>b.log'
+      ]) {
+        const r = posix(command)
+        expect(r?.quotedTargets, command).toBeUndefined()
+        expect(r?.allInScope, command).toBe(true)
+      }
+    })
+  })
+
+  describe('the accepted trade-off', () => {
+    it('names a path a quoted heredoc body mentions (it may be a script that runs later)', () => {
+      const r = posix(["cat > notes.md <<'EOF'", 'cp x > /usr/local/bin', 'EOF'].join('\n'))
+      expect(r).toEqual({
+        targets: ['notes.md'],
+        allInScope: false,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: [],
+        quotedTargets: ['/usr/local/bin']
+      })
+    })
+
+    it('names text the aware scan correctly read as text, because it cannot tell', () => {
+      expect(posix('echo "a > /etc/p"')?.quotedTargets).toEqual(['/etc/p'])
+      expect(posix(`sed 's/>/x/' f`)?.quotedTargets).toEqual(['/x/'])
+    })
+  })
+
+  describe('bounds', () => {
+    it('lists at most MAX_REDIRECT_TARGETS quoted targets, each at most 200 characters', () => {
+      const body = Array.from({ length: 200 }, (_, i) => `a > /etc/f${i}`).join('\n')
+      const r = posix(`echo '${body}' | "$BASH"`)
+      expect(r?.allInScope).toBe(false)
+      expect(r?.quotedTargets).toHaveLength(MAX_REDIRECT_TARGETS)
+      const long = posix(`echo 'x > /etc/${'a'.repeat(300)}' | "$BASH"`)
+      expect(long?.quotedTargets).toEqual([`/etc/${'a'.repeat(195)}…`])
+    })
+
+    it('says nothing (null) rather than guess when thousands of operators are quote-hidden', () => {
+      const body = Array.from({ length: 2500 }, (_, i) => `a >/etc/f${i}`).join('\n')
+      expect(posix(`echo '${body}' > ok.txt`)).toBeNull()
+    })
+
+    it('stays fast on a 64 KB command of identical quote-hidden operators', () => {
+      const body = 'a > b\n'.repeat(10_000)
+      const command = `echo "${body}"`
+      expect(command.length).toBeLessThanOrEqual(MAX_ANALYZE_COMMAND_LENGTH)
+      const started = Date.now()
+      expect(posix(command)).toBeNull()
+      expect(Date.now() - started).toBeLessThan(1000)
+    })
+  })
+
+  describe('`unmeasured` and `quotedTargets` through summarizeRedirects', () => {
+    const scope: RedirectScope = { cwd: '/repo', shell: 'posix' }
+
+    it('lists the spelling of every target whose containment could not be established', () => {
+      const details = redirectTargetDetails('echo x > a.log 2> b.log', scope, 'linux') ?? []
+      const marked = details.map((d) =>
+        d.raw === 'a.log' ? { ...d, reviewRequired: true as const } : d
+      )
+      const summary = summarizeRedirects(marked)
+      expect(summary.allInScope).toBe(false)
+      expect(summary.unmeasured).toEqual(['a.log'])
+      // Everything else is still reported as before.
+      expect(summary.targets).toEqual(['a.log', 'b.log'])
+      expect(summary.outOfScope).toEqual([])
+      expect(summary.unresolvable).toEqual([])
+    })
+
+    it('omits `unmeasured` and `quotedTargets` when empty', () => {
+      const summary = summarizeRedirects(
+        redirectTargetDetails('echo x > a.log', scope, 'linux') ?? []
+      )
+      expect(summary).toEqual({
+        targets: ['a.log'],
+        allInScope: true,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: []
+      })
+      expect('unmeasured' in summary).toBe(false)
+      expect('quotedTargets' in summary).toBe(false)
+    })
+
+    it('reports a quoted detail ONLY in quotedTargets', () => {
+      const details =
+        redirectTargetDetails(`echo 'x > /etc/p' | "$BASH" > ok.txt`, scope, 'linux') ?? []
+      const quoted = details.filter((d) => d.quoted === true)
+      expect(quoted.map((d) => d.raw)).toEqual(['/etc/p'])
+      const summary = summarizeRedirects(details)
+      expect(summary.targets).toEqual(['ok.txt'])
+      expect(summary.outOfScope).toEqual([])
+      expect(summary.unresolvable).toEqual([])
+      expect(summary.protectedHits).toEqual([])
+      expect(summary.quotedTargets).toEqual(['/etc/p'])
+      expect(summary.allInScope).toBe(false)
+    })
+
+    it('drops a quoted detail that measurement proved clean, but not one that is a link', () => {
+      const [detail] = redirectTargetDetails(`echo 'x > /etc/p' | "$BASH"`, scope, 'linux') ?? []
+      const inScope = { ...detail, root: '/repo' }
+      expect(summarizeRedirects([inScope]).quotedTargets).toBeUndefined()
+      expect(summarizeRedirects([inScope]).allInScope).toBe(true)
+      const linked = summarizeRedirects([inScope], new Map([['/etc/p', { symlinked: true }]]))
+      expect(linked.quotedTargets).toEqual(['/etc/p'])
+      expect(linked.symlinked).toBeUndefined()
+      expect(linked.allInScope).toBe(false)
+    })
+
+    it('keeps a reviewRequired quoted detail in quotedTargets', () => {
+      const [detail] = redirectTargetDetails(`echo 'x > /etc/p' | "$BASH"`, scope, 'linux') ?? []
+      const summary = summarizeRedirects([{ ...detail, root: '/repo', reviewRequired: true }])
+      expect(summary.quotedTargets).toEqual(['/etc/p'])
+      expect(summary.allInScope).toBe(false)
+    })
+  })
+
+  it('still returns null when there is no `>` at all, or only sinks', () => {
+    expect(posix('bun run test')).toBeNull()
+    expect(posix('echo "a > /dev/null"')).toBeNull()
+    expect(posix(`echo 'x > /dev/stderr' | "$BASH"`)).toBeNull()
+  })
+})
+
+// ── Judge hardening: writer arguments, wrappers, protected names, phantom names ─
+//
+// A fabricated `allInScope: true` is the worst bug class here, because the judge
+// trusts these facts. Every command below was reproduced with the real exports;
+// the PowerShell behaviours were also confirmed in `pwsh` (a scratch directory).
+
+describe('judge hardening (ADR-106)', () => {
+  const CWD = 'D:/WorkPlace/ClaudeUI'
+  const OUTSIDE = 'C:\\Windows\\x'
+  const OUTSIDE_PATH = 'c:/Windows/x'
+  // bash removes an unquoted backslash, so the POSIX-shell tests spell the path with `/`.
+  const OUT_FWD = 'C:/Windows/x'
+  const ps = (command: string) =>
+    analyzeRedirects(command, { cwd: CWD, shell: 'powershell' }, 'win32')
+  const anyShell = (command: string) => analyzeRedirects(command, { cwd: CWD }, 'win32')
+  const bash = (command: string) => analyzeRedirects(command, { cwd: CWD, shell: 'posix' }, 'win32')
+
+  /** The analysis names the real file out of scope and nothing in scope is claimed. */
+  const expectWritesOutside = (r: ReturnType<typeof analyzeRedirects>, append?: true): void => {
+    expect(r?.allInScope).toBe(false)
+    expect(r?.outOfScope).toEqual([{ path: OUTSIDE_PATH, ...(append ? { append } : {}) }])
+    expect(r?.unresolvable).toEqual([])
+  }
+
+  describe('fix 1 — PowerShell writer arguments are scanned for a path flag first', () => {
+    it('does not read the value of -ErrorAction as the file', () => {
+      const r = ps(`Set-Content -ErrorAction Stop -Path ${OUTSIDE} -Value hi`)
+      expect(r?.targets).toEqual([OUTSIDE])
+      expectWritesOutside(r)
+    })
+
+    it('does not read the value of -ea as the file', () => {
+      const r = ps(`"hi" | Out-File -ea 0 -FilePath ${OUTSIDE}`)
+      expect(r?.targets).toEqual([OUTSIDE])
+      expectWritesOutside(r)
+    })
+
+    it('does not read the second element of a comma list as the file', () => {
+      const r = ps(`Set-Content -Value "a", "b" -Path ${OUTSIDE}`)
+      expect(r?.targets).toEqual([OUTSIDE])
+      expectWritesOutside(r)
+    })
+
+    it('skips the value of every common parameter and value parameter', () => {
+      const valueFlags = [
+        '-ErrorAction',
+        '-EA',
+        '-WarningAction',
+        '-WA',
+        '-InformationAction',
+        '-InfA',
+        '-ErrorVariable',
+        '-EV',
+        '-WarningVariable',
+        '-WV',
+        '-InformationVariable',
+        '-IV',
+        '-OutVariable',
+        '-OV',
+        '-OutBuffer',
+        '-OB',
+        '-PipelineVariable',
+        '-PV',
+        '-Encoding',
+        '-Filter',
+        '-Include',
+        '-Exclude',
+        '-Credential',
+        '-Stream'
+      ]
+      for (const flag of valueFlags) {
+        // Before the path flag, and ahead of a positional path.
+        expectWritesOutside(ps(`Set-Content ${flag} v -Path ${OUTSIDE} -Value hi`))
+        expectWritesOutside(ps(`Set-Content ${flag} v ${OUTSIDE} hi`))
+      }
+    })
+
+    it('reads every path flag spelling: prefix, colon form, -PSPath, en dash', () => {
+      expectWritesOutside(ps(`Set-Content -Pat ${OUTSIDE} -Value hi`))
+      expectWritesOutside(ps(`Set-Content -Path:${OUTSIDE} -Value hi`))
+      expectWritesOutside(ps(`Set-Content -PSPath ${OUTSIDE} -Value hi`))
+      expectWritesOutside(ps(`Set-Content -Lit ${OUTSIDE} -Value hi`))
+      expectWritesOutside(ps(`Set-Content \u2013Path ${OUTSIDE} -Value hi`))
+    })
+
+    it('an explicit path flag wins over a positional (it binds -Value)', () => {
+      expectWritesOutside(ps(`Set-Content hi -Path ${OUTSIDE}`))
+    })
+
+    it('never guesses a positional beside an unrecognised flag', () => {
+      for (const command of [
+        'Set-Content -Bogus foo bar',
+        'Set-Content -Value -Bogus C:\\Windows\\x',
+        'Set-Content -P C:\\Windows\\x'
+      ]) {
+        const r = ps(command)
+        expect(r?.allInScope, command).toBe(false)
+        expect(r?.unresolvable.length, command).toBeGreaterThan(0)
+        expect(r?.outOfScope, command).toEqual([])
+      }
+    })
+
+    it('a splat can supply -Path, so a positional beside it is not the file', () => {
+      const r = ps('Set-Content x @args')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable.length).toBeGreaterThan(0)
+    })
+
+    it('never guesses a comma-continued positional', () => {
+      const r = ps('Set-Content "a", "b"')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable).toEqual(['"a", "b"'])
+    })
+
+    it('a path flag after a parenthesised value is still found', () => {
+      const r = ps(`Set-Content -Value (1) -Path ${OUTSIDE}`)
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable.length).toBeGreaterThan(0)
+      const positional = ps(`Set-Content x (Get-Date) -Path ${OUTSIDE}`)
+      expect(positional?.allInScope).toBe(false)
+      expect(positional?.unresolvable.length).toBeGreaterThan(0)
+    })
+
+    it('still reads a plain positional, even before a parenthesised argument', () => {
+      expect(ps('Set-Content x (Get-Date)')).toEqual({
+        targets: ['x'],
+        allInScope: true,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: []
+      })
+    })
+
+    it('reads Export-Csv', () => {
+      expectWritesOutside(ps(`Get-Process | Export-Csv -NoTypeInformation -Path ${OUTSIDE}`))
+    })
+  })
+
+  describe('fix 2 — `tee` is Tee-Object in PowerShell, and append is only claimed when true', () => {
+    it('does not claim append for `tee -FilePath x` (it overwrites)', () => {
+      expectWritesOutside(ps(`"new" | tee -FilePath ${OUTSIDE}`))
+      expectWritesOutside(anyShell(`"new" | tee -FilePath ${OUTSIDE}`))
+    })
+
+    it('reads `tee -FilePath:value`', () => {
+      expectWritesOutside(ps(`tee -FilePath:${OUTSIDE}`))
+      expectWritesOutside(anyShell(`tee -FilePath:${OUTSIDE}`))
+    })
+
+    it('keeps the bash reading in a POSIX shell and for a native tee', () => {
+      expectWritesOutside(bash(`tee -a ${OUT_FWD}`), true)
+      // A path or `.exe` spelling is the program, not the alias.
+      expectWritesOutside(ps(`tee.exe -a ${OUTSIDE}`), true)
+    })
+
+    it('claims append for `tee -a` only when both readings append', () => {
+      expectWritesOutside(ps(`tee -a ${OUTSIDE}`), true)
+      expectWritesOutside(anyShell(`tee -a ${OUTSIDE}`), true)
+      expectWritesOutside(anyShell(`tee ${OUTSIDE}`))
+    })
+
+    it('takes -Append, -Append:$true and prefixes; -Append:$false overwrites', () => {
+      expectWritesOutside(ps(`Out-File -Append ${OUTSIDE}`), true)
+      expectWritesOutside(ps(`Out-File -Append:$true ${OUTSIDE}`), true)
+      expectWritesOutside(ps(`Out-File -App ${OUTSIDE}`), true)
+      expectWritesOutside(ps(`"x" | Tee-Object -a ${OUTSIDE}`), true)
+      expectWritesOutside(ps(`Export-Csv -Append -Path ${OUTSIDE}`), true)
+      expectWritesOutside(ps(`Out-File -Append:$false ${OUTSIDE}`))
+    })
+
+    it('only Add-Content always appends; `Set-Content -Value -Append` does not', () => {
+      expectWritesOutside(ps(`Add-Content -Path ${OUTSIDE} -Value x`), true)
+      expectWritesOutside(ps(`ac ${OUTSIDE} x`), true)
+      expectWritesOutside(ps(`Set-Content -Path ${OUTSIDE} -Value -Append`))
+      expectWritesOutside(ps(`Set-Content -Value "-Append" -Path ${OUTSIDE}`))
+    })
+
+    it('keeps the bash append flag to the letters tee defines', () => {
+      // `-FilePath` contains an `a`, and is not an append.
+      expectWritesOutside(bash(`tee -FilePath ${OUT_FWD}`))
+    })
+  })
+
+  describe('fix 3 — `$null` is a sink only in PowerShell', () => {
+    it('is an unresolvable target in bash (`null=/etc/passwd; echo x > $null`)', () => {
+      const r = bash('null=/etc/passwd; echo x > $null')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable).toEqual(['$null'])
+    })
+
+    it('is an unresolvable target when the shell is unknown', () => {
+      const r = anyShell('echo x > $null')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable).toEqual(['$null'])
+    })
+
+    it('is still dropped for a known PowerShell shell', () => {
+      expect(ps('echo x > $null')).toBeNull()
+      expect(ps('cmd 2>$null')).toBeNull()
+    })
+
+    it('is dropped in no spelling of a POSIX shell, in the quote-blind cross-check too', () => {
+      expect(bash(`echo 'x > $null' | "$BASH"`)?.quotedTargets).toEqual(['$null'])
+    })
+  })
+
+  describe('fix 4 — writer coverage gaps', () => {
+    it('brace expansion in a writer target is unresolvable and keeps its protected hits', () => {
+      const r = bash('echo | tee {.git,x}/config > out.log')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable).toEqual(['{.git,x}/config'])
+      expect(r?.protectedHits).toEqual(['.git'])
+      expect(r?.targets).toEqual(['{.git,x}/config', 'out.log'])
+      const home = bash('echo | tee ~/{.bashrc,.profile}')
+      expect(home?.unresolvable).toEqual(['~/{.bashrc,.profile}'])
+      expect(home?.protectedHits).toEqual(['.bashrc', '.profile'])
+    })
+
+    it('a brace in a later argument cannot hide the argument after it', () => {
+      const r = bash('echo | tee {a,b} C:\\Windows\\x')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable.length).toBeGreaterThan(0)
+    })
+
+    it('finds the command word behind a wrapper (stdbuf)', () => {
+      for (const command of [
+        `echo | stdbuf -oL tee ${OUT_FWD} > out.log`,
+        `echo | stdbuf -o L tee ${OUT_FWD} > out.log`,
+        `echo | stdbuf --output=L tee ${OUT_FWD} > out.log`
+      ]) {
+        expectWritesOutside(bash(command))
+      }
+    })
+
+    it('finds the command word behind every new wrapper', () => {
+      const wrapped = [
+        'ionice -c 3',
+        'ionice -n5',
+        'nice -n 5',
+        'nice -5',
+        'nice --adjustment=5',
+        'setsid',
+        'setsid -w',
+        'chrt -r 10',
+        'taskset -c 0',
+        'taskset 0x1',
+        'busybox',
+        'builtin',
+        'sudo stdbuf -oL',
+        'stdbuf -oL ionice -c 3 nice'
+      ]
+      for (const wrapper of wrapped) {
+        expectWritesOutside(bash(`echo > out.log; ${wrapper} tee ${OUT_FWD}`))
+      }
+    })
+
+    it('xargs: the writer is found, and the names its stdin supplies are unreadable', () => {
+      for (const wrapper of ['xargs', 'xargs -n1', 'xargs -n 1', 'xargs -0 -r']) {
+        const r = bash(`echo > out.log; ${wrapper} tee ${OUT_FWD}`)
+        expect(r?.allInScope, wrapper).toBe(false)
+        expect(r?.outOfScope, wrapper).toEqual([{ path: OUTSIDE_PATH }])
+        expect(r?.unresolvable.length, wrapper).toBeGreaterThan(0)
+      }
+    })
+
+    it('xargs -I{}: the `{}` placeholder is a brace the writer cannot read', () => {
+      const r = bash('echo > out.log; xargs -I{} tee {}')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable).toEqual(['{}'])
+    })
+
+    it('an unknown wrapper option makes the writer target unreadable, never a guess', () => {
+      for (const command of [
+        `echo > out.log; stdbuf --bogus tee ${OUT_FWD}`,
+        `echo > out.log; ionice -Z 3 tee ${OUT_FWD}`,
+        `echo > out.log; setsid -q tee ${OUT_FWD}`,
+        `echo > out.log; chrt --bogus 1 tee ${OUT_FWD}`
+      ]) {
+        const r = bash(command)
+        expect(r?.allInScope, command).toBe(false)
+        expect(r?.unresolvable.length, command).toBeGreaterThan(0)
+      }
+    })
+
+    it('finds the command word after shell keywords', () => {
+      const commands = [
+        `if true; then tee ${OUT_FWD} <<< hi; fi`,
+        `if true; then :; else tee ${OUT_FWD} <<< hi; fi`,
+        `if false; then :; elif true; then tee ${OUT_FWD} <<< hi; fi`,
+        `for i in 1; do tee ${OUT_FWD} <<< hi; done`,
+        `while true; do tee ${OUT_FWD} <<< hi; done`,
+        `! tee ${OUT_FWD} <<< hi`,
+        `{ tee ${OUT_FWD} <<< hi; }`,
+        `time tee ${OUT_FWD} <<< hi`
+      ]
+      for (const command of commands) {
+        // Alone, and beside another in-scope redirect (the shape that used to clear).
+        expectWritesOutside(bash(command))
+        expectWritesOutside(bash(`echo > out.log; ${command}`))
+      }
+    })
+
+    it('does not read a keyword-looking ARGUMENT as a command position', () => {
+      expect(bash('echo then tee out.log')).toBeNull()
+      expect(bash('echo "then" tee out.log')).toBeNull()
+    })
+  })
+
+  describe('fix 5 — more shell rc and git credential names are protected', () => {
+    for (const name of ['.zshenv', '.zprofile', '.bash_login', '.git-credentials', '.gitmodules']) {
+      it(`${name} is a protected hit`, () => {
+        const r = bash(`echo x > ${name}`)
+        expect(r?.protectedHits).toEqual([name])
+        expect(r?.allInScope).toBe(false)
+        const upper = bash(`echo x > ${name.toUpperCase()}`)
+        expect(upper?.protectedHits).toEqual([name.toUpperCase()])
+      })
+    }
+
+    it('keeps every earlier entry', () => {
+      for (const name of ['.bashrc', '.zshrc', '.profile', '.bash_profile', '.ssh', '.git']) {
+        expect(bash(`echo x > ${name}`)?.protectedHits).toEqual([name])
+      }
+    })
+  })
+
+  describe('fix 6 — glob-bearing quote-hidden phantoms are literal names', () => {
+    it('a Python return annotation in a quoted heredoc is no write', () => {
+      const r = bash(["cat > x.py <<'EOF'", 'def f() -> list[int]:', 'EOF'].join('\n'))
+      expect(r).toEqual({
+        targets: ['x.py'],
+        allInScope: true,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: []
+      })
+    })
+
+    it('a markdown block quote is no write', () => {
+      const r = bash(["cat > n.md <<'EOF'", '> **Note**', 'EOF'].join('\n'))
+      expect(r).toEqual({
+        targets: ['n.md'],
+        allInScope: true,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: []
+      })
+    })
+
+    it('says nothing at all when nothing else remains', () => {
+      expect(bash(`echo 'def f() -> list[int]:' | "$BASH"`)).toBeNull()
+      expect(bash(`echo '> **Note**' | "$BASH"`)).toBeNull()
+    })
+
+    it('a hidden glob that can name a protected or agent-control file stays named', () => {
+      for (const glob of ['.bash*', 'CLAUDE.m?', '*', '*.md', '[C]LAUDE.md', '{a,.git}']) {
+        const r = bash(["cat > n.md <<'EOF'", `> ${glob}`, 'EOF'].join('\n'))
+        expect(r?.allInScope, glob).toBe(false)
+        expect(r?.quotedTargets, glob).toEqual([glob])
+      }
+    })
+
+    it("a hidden path-shaped or expanding token keeps today's behaviour", () => {
+      for (const token of ['a/list[int]', '$f*', '~x*', '%A*%']) {
+        const r = bash(["cat > n.md <<'EOF'", `> ${token}`, 'EOF'].join('\n'))
+        expect(r?.allInScope, token).toBe(false)
+        expect(r?.quotedTargets, token).toEqual([token])
+      }
+    })
+
+    it('a REAL glob target stays unresolvable', () => {
+      const r = bash('echo x > list[int]')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable).toEqual(['list[int]'])
+    })
+
+    it('follows the normal in-scope drop: a phantom after `cd` out of scope is still named', () => {
+      const r = bash(['cd C:/Windows', "cat > n.md <<'EOF'", '> **Note**', 'EOF'].join('\n'))
+      expect(r?.allInScope).toBe(false)
+    })
+  })
+})
+
+// The audit of ADR-106 §1: `cd` tracked as a set of possible directories. Every
+// command below was reproduced with the real exports before it was fixed.
+describe('judge hardening (ADR-106 §1) — cd tracking audit', () => {
+  const BS = '\\'
+  const SCOPE = {
+    cwd: 'D:/WorkPlace/proj',
+    tempDirs: ['C:/Users/dev/AppData/Local/Temp'],
+    additionalDirectories: [] as string[]
+  }
+  type Dialect = 'posix' | 'powershell' | undefined
+  const run = (command: string, shell?: Dialect) =>
+    analyzeRedirects(command, { ...SCOPE, ...(shell ? { shell } : {}) }, 'win32')
+  /** Not claimed in scope: a write outside it, or one we could not place. */
+  const expectNotInScope = (command: string, shell?: Dialect): void => {
+    const r = run(command, shell)
+    const label = `${shell ?? 'no shell'}: ${command}`
+    expect(r, label).not.toBeNull()
+    expect(r?.allInScope, label).toBe(false)
+    expect(r!.outOfScope.length + r!.unresolvable.length, label).toBeGreaterThan(0)
+  }
+  /** Measured clean: every target resolved inside the scope. */
+  const expectInScope = (command: string, shell?: Dialect): void => {
+    const r = run(command, shell)
+    const label = `${shell ?? 'no shell'}: ${command}`
+    expect(r?.allInScope, label).toBe(true)
+    expect(r?.outOfScope, label).toEqual([])
+    expect(r?.unresolvable, label).toEqual([])
+  }
+  const ALL: Dialect[] = [undefined, 'powershell', 'posix']
+  const NOT_POSIX: Dialect[] = [undefined, 'powershell']
+
+  describe('false allows', () => {
+    it('1: a PowerShell trailing backslash does not swallow the `;`', () => {
+      for (const command of [
+        `cd ..${BS}; echo hi > x.txt`,
+        `cd D:${BS}WorkPlace${BS}other${BS}; echo hi > x.txt`,
+        `cd ${BS}; echo hi > x.txt`,
+        `Set-Location ..${BS}; echo hi > x.txt`
+      ]) {
+        for (const shell of NOT_POSIX) expectNotInScope(command, shell)
+      }
+    })
+
+    it('1: in bash the same `\\;` IS an escape, so the cd segment really is one command', () => {
+      // `cd '..;' echo hi` fails; the redirect still opens x.txt in the cwd.
+      expectInScope(`cd ..${BS}; echo hi > x.txt`, 'posix')
+    })
+
+    it('1: a trailing backslash with no directory change is just a path', () => {
+      expectInScope(`ls C:${BS}Windows${BS}; echo hi > x.txt`, 'powershell')
+    })
+
+    it('3: a function defined before a cd runs from wherever it is called', () => {
+      for (const command of [
+        'f() { echo hi > x.txt; }; cd ..; f',
+        'function f { echo hi > x.txt; }; cd ..; f'
+      ]) {
+        for (const shell of ALL) expectNotInScope(command, shell)
+      }
+    })
+
+    it('3: a trap body runs at exit, after the cd', () => {
+      for (const shell of ALL) {
+        const r = run("trap 'echo done > log.txt' EXIT; cd ..", shell)
+        expect(r?.allInScope, String(shell)).toBe(false)
+        expect([...(r?.unresolvable ?? []), ...(r?.quotedTargets ?? [])]).toContain('log.txt')
+      }
+    })
+
+    it('3: a PowerShell script block kept in a variable runs later too', () => {
+      expectNotInScope('$sb = { echo hi > x.txt }; cd ..; & $sb', 'powershell')
+    })
+
+    it('3: a function with no directory change anywhere stays measurable', () => {
+      expectInScope('f() { echo hi > x.txt; }; f', 'posix')
+      expectInScope('trap "rm -f t" EXIT; echo hi > x.txt', 'posix')
+    })
+
+    it('4: Invoke-Expression and iex change the location in the current scope', () => {
+      for (const command of [
+        "iex 'cd ..'; echo hi > x.txt",
+        "Invoke-Expression 'Set-Location ..'; echo hi > x.txt"
+      ]) {
+        for (const shell of NOT_POSIX) expectNotInScope(command, shell)
+      }
+    })
+
+    it('4: a `$()` inside double quotes runs in the current scope in PowerShell only', () => {
+      const command = 'Write-Host "$(Set-Location ..)"; echo hi > x.txt'
+      expectNotInScope(command, 'powershell')
+      expectNotInScope(command, undefined)
+      // bash runs it in a subshell: the redirect still lands in the cwd.
+      expectInScope(command, 'posix')
+    })
+
+    it('4: a splatted or variable location change cannot be placed', () => {
+      expectNotInScope("$p = @{Path='..'}; Set-Location @p; echo hi > x.txt", 'powershell')
+      expectNotInScope("$p = @{Path='..'}; Set-Location -Path @p; echo hi > x.txt", 'powershell')
+      expectNotInScope('Set-Location $d; echo hi > x.txt', 'powershell')
+    })
+
+    it('5: env --chdir / -C run the wrapped command somewhere else', () => {
+      for (const command of ['env --chdir=.. tee x.txt', 'env -C .. tee x.txt']) {
+        for (const shell of ALL) expectNotInScope(command, shell)
+      }
+      expectNotInScope('sudo -D .. tee x.txt', 'posix')
+    })
+
+    it('5: an `-C` that belongs to the wrapped command is no chdir', () => {
+      expectInScope('env grep -C 3 pat > out.txt', 'posix')
+      expectInScope('env FOO=1 tee x.txt', 'posix')
+    })
+
+    it('5: pushd +N / -N rotate the stack to an earlier directory', () => {
+      for (const arg of ['+1', '-1']) {
+        for (const shell of ALL) {
+          expectNotInScope(`pushd .. && pushd proj && pushd ${arg} && echo hi > x.txt`, shell)
+        }
+      }
+    })
+  })
+
+  describe('false blocks', () => {
+    it('6: a pipeline after `&&` runs only when the `cd` succeeded', () => {
+      for (const command of [
+        'cd src && npm test 2>&1 | tee ../out.log',
+        'cd src && npm test 2>&1 | tail -5 > ../out.log'
+      ]) {
+        for (const shell of ALL) expectInScope(command, shell)
+      }
+    })
+
+    it('6: a group after `&&` runs only when the `cd` succeeded', () => {
+      for (const command of ['cd src && (make > ../out.log)', 'cd src && { make; } > ../out.log']) {
+        for (const shell of ALL) expectInScope(command, shell)
+      }
+    })
+
+    it('6: a member of a longer pipeline inherits the gate too', () => {
+      expectInScope('cd src && make | tee a.log | tee ../b.log', 'posix')
+    })
+
+    it('6: without the `&&` gate the failed `cd` still counts', () => {
+      for (const command of [
+        'cd src; npm test | tee ../out.log',
+        'cd src\nnpm test | tee ../out.log',
+        'cd src || { make; } > ../out.log',
+        'cd src && true; npm test | tee ../out.log'
+      ]) {
+        const r = run(command, 'posix')
+        expect(r?.allInScope, command).toBe(false)
+        expect(r?.outOfScope, command).toEqual([{ path: 'd:/WorkPlace/out.log' }])
+      }
+    })
+
+    it('6: the part of the list after a gated pipeline still sees the failed `cd`', () => {
+      const r = run('cd src && npm test 2>&1 | tee ../out.log; echo x > ../y', 'posix')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.outOfScope).toEqual([{ path: 'd:/WorkPlace/y' }])
+    })
+
+    it('7: a loop word in a heredoc body, a quoted string or a message is prose', () => {
+      for (const command of [
+        ["cd docs && cat > README.md <<'EOF'", 'A guide for users', 'EOF'].join('\n'),
+        `cd src && printf '%s' "waiting for build" > out.txt`,
+        `cd docs && git commit -m 'refactor: wait until done' && git log > ../log.txt`
+      ]) {
+        for (const shell of ALL) expectInScope(command, shell)
+      }
+    })
+
+    it('7: a real loop still poisons the directory', () => {
+      for (const command of [
+        'for d in a b; do cd $d; echo hi > x.txt; done',
+        'while true; do cd ..; echo hi > x.txt; done',
+        'until false; do cd ..; echo hi > x.txt; done',
+        'cd docs && if true; then for f in a; do cd ..; done; fi; echo hi > x.txt'
+      ]) {
+        for (const shell of ALL) expectNotInScope(command, shell)
+      }
+      expectNotInScope("foreach ($d in 'a','b') { cd $d; echo hi > x.txt }", 'powershell')
+    })
+
+    it('8: a comment after a `cd` does not change where the cd lands', () => {
+      const commented = run('cd src # note\necho hi > ../x.txt', 'posix')
+      const plain = run('cd src\necho hi > ../x.txt', 'posix')
+      expect(commented).toEqual(plain)
+      // Still placed (the failed-cd branch is the out-of-scope one), never unresolvable.
+      expect(commented?.unresolvable).toEqual([])
+      expect(commented?.outOfScope).toEqual([{ path: 'd:/WorkPlace/x.txt' }])
+    })
+
+    it('8: a comment with an apostrophe no longer makes the whole command quote-blind', () => {
+      for (const shell of ALL) expectInScope(`cd src && echo hi > ../x.txt # it's a note`, shell)
+    })
+
+    it('8: a `>` inside a comment is still named, never cleared', () => {
+      const r = run('echo hi > ok.txt # > /etc/p', 'posix')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.quotedTargets).toEqual(['/etc/p'])
+    })
+
+    it('8: `cd # note` is a `cd` with no argument (HOME)', () => {
+      expectNotInScope('cd # note\necho hi > x.txt', 'posix')
+    })
+
+    it('8: a PowerShell block comment keeps the quote-blind fallback', () => {
+      expectNotInScope("cd src <# it's #>; echo hi > ../x.txt", 'powershell')
+    })
+  })
+})
+
+describe('judge hardening (ADR-106 §4) — the temp hint is withheld when the variable may be rebound', () => {
+  const TEMP_DIR = 'C:/Users/dev/AppData/Local/Temp'
+  const ps = (command: string) =>
+    analyzeRedirects(
+      command,
+      {
+        cwd: 'D:/work/app',
+        tempDirs: [TEMP_DIR],
+        tempVars: { TEMP: TEMP_DIR, TMP: TEMP_DIR },
+        shell: 'powershell'
+      },
+      'win32'
+    )
+  const sh = (command: string) =>
+    analyzeRedirects(
+      command,
+      { cwd: '/repo', tempDirs: ['/tmp'], tempVars: { TMPDIR: '/tmp' }, shell: 'posix' },
+      'linux'
+    )
+
+  /** The target stays unresolvable (the trusted signal) and the hint is ABSENT. */
+  const expectWithheld = (r: ReturnType<typeof analyzeRedirects>): void => {
+    expect(r?.allInScope).toBe(false)
+    expect(r?.unresolvable.length).toBeGreaterThan(0)
+    expect(r).not.toHaveProperty('tempVarTargets')
+  }
+  /** The hint is present and names exactly one temp path. */
+  const expectHint = (r: ReturnType<typeof analyzeRedirects>, path: string | RegExp): void => {
+    expect(r?.allInScope).toBe(false)
+    expect(r?.tempVarTargets).toHaveLength(1)
+    const actual = r?.tempVarTargets?.[0].path ?? ''
+    if (typeof path === 'string') expect(actual).toBe(path)
+    else expect(actual).toMatch(path)
+  }
+
+  describe('1 — a binding that may not run is no binding (bash, any line)', () => {
+    const cases: Array<[string, string]> = [
+      [
+        'if body (the audit input)',
+        'if false; then\nHOME=$TMPDIR\nfi\necho x > $HOME/Documents/thesis.docx'
+      ],
+      ['if / then on separate lines', 'if false\nthen\nT=$TMPDIR\nfi\necho x > $T/a'],
+      ['elif body', 'if a; then :\nelif b; then\nT=$TMPDIR\nfi\necho x > $T/a'],
+      ['else body', 'if a; then :\nelse\nT=$TMPDIR\nfi\necho x > $T/a'],
+      ['else-if nesting', 'if a; then :\nelse if b; then\nT=$TMPDIR\nfi; fi\necho x > $T/a'],
+      ['case arm on one line', 'case $x in\n a) T=$TMPDIR ;;\nesac\necho x > $T/a'],
+      ['case arm body on its own line', 'case $x in\n a)\n T=$TMPDIR\n ;;\nesac\necho x > $T/a'],
+      ['loop body', 'while a; do\nT=$TMPDIR\ndone\necho x > $T/a'],
+      ['line ending in &&', 'false &&\nT=$TMPDIR\necho x > $T/a'],
+      ['line ending in && then a comment', 'false && # why\n\nT=$TMPDIR\necho x > $T/a'],
+      ['line ending in ||', 'false ||\nT=$TMPDIR\necho x > $T/a'],
+      ['line ending in a pipe', 'echo a |\nT=$TMPDIR\necho x > $T/a'],
+      ['line ending in a backslash after &&', 'test -d /x && \\\nT=$TMPDIR\necho x > $T/a'],
+      ['line ending in a backslash (an argument of echo)', 'echo hi \\\nT=$TMPDIR\necho x > $T/a']
+    ]
+    it.each(cases)('withholds the hint: %s', (_name, command) => {
+      expectWithheld(sh(command))
+    })
+
+    it('still hints a binding that always runs, before or after such a construct', () => {
+      for (const command of [
+        'T=$TMPDIR\necho x > $T/a',
+        'if true; then echo a; fi\nT=$TMPDIR\necho x > $T/a',
+        'case x in a) :;; esac\nT=$TMPDIR\necho x > $T/a',
+        '# note\nT=$TMPDIR\necho x > $T/a',
+        'sleep 1 &\nT=$TMPDIR\necho x > $T/a',
+        'echo if; T=$TMPDIR\necho x > $T/a',
+        '"if" a; T=$TMPDIR\necho x > $T/a'
+      ]) {
+        expectHint(sh(command), '/tmp/a')
+      }
+    })
+
+    it('applies to PowerShell: a body in braces, a backtick continuation', () => {
+      expectWithheld(ps("if ($false) {\n$t = $env:TEMP\n}\n'x' > $t\\a"))
+      expectWithheld(ps("Write-Host a `\n$t = $env:TEMP\n'x' > $t\\a"))
+      expectHint(ps("$t = $env:TEMP\n'x' > $t\\a"), 'c:/Users/dev/AppData/Local/Temp/a')
+    })
+  })
+
+  describe('2 — PowerShell rebinding forms', () => {
+    const forms: Array<[string, string]> = [
+      ['multi-assignment', String.raw`$t, $u = 'C:\x', 1`],
+      ['parenthesised multi-assignment', String.raw`($t, $u) = 'C:\x', 1`],
+      ['multi-assignment with the name last', String.raw`$u, $t = 1, 'C:\x'`],
+      ['global-qualified assignment', String.raw`$global:t = 'C:\x'`],
+      ['script-qualified assignment', String.raw`$script:t = 'C:\x'`],
+      ['variable-drive assignment', '$' + String.raw`{variable:t} = 'C:\x'`],
+      ['Set-Item variable:t', String.raw`Set-Item variable:t C:\x`],
+      ['Set-Item -Path Variable:\\t', String.raw`Set-Item -Path Variable:\t -Value C:\x`],
+      ['New-Item variable:t -Force', String.raw`New-Item variable:t -Value 'C:\x' -Force`],
+      ['Set-Variable -Name', String.raw`Set-Variable -Name t -Value C:\x`],
+      ['Set-Variable positional', String.raw`Set-Variable t C:\x`],
+      ['sv', String.raw`sv t C:\x`],
+      ['set (alias of Set-Variable)', String.raw`set t C:\x`],
+      ['New-Variable', String.raw`New-Variable -Name t -Value C:\x -Force`],
+      ['nv', String.raw`nv t C:\x -Force`],
+      ['Remove-Variable -Name', 'Remove-Variable -Name t'],
+      ['Remove-Variable positional', 'Remove-Variable t'],
+      ['rv', 'rv t'],
+      ['Clear-Variable', 'Clear-Variable t'],
+      ['clv', 'clv t'],
+      ['PSVariable.Set', String.raw`$ExecutionContext.SessionState.PSVariable.Set('t', 'C:\x')`],
+      ['a variable cmdlet inside a subexpression', String.raw`Write-Host "$(Set-Variable t C:\x)"`],
+      ['a cmdlet called through a variable', String.raw`$c = 'Set-Variable'; & $c t C:\x`]
+    ]
+    it.each(forms)('withholds the hint: %s', (_name, rebind) => {
+      expectWithheld(ps(`$t = $env:TEMP; ${rebind}; 'x' > $t\\a`))
+    })
+
+    it('does not bind a constant or read-only variable ($null, $HOME)', () => {
+      expectWithheld(ps("$null = $env:TEMP; 'x' > $null\\Windows\\x"))
+      expectWithheld(ps("$HOME = $env:TEMP; 'x' > $HOME\\Documents\\a"))
+    })
+  })
+
+  describe('3 — a current-scope runner is read through its quoting and backslashes (bash)', () => {
+    const cases: Array<[string, string]> = [
+      ['\\eval', String.raw`\eval "TMP""DIR=/etc"; echo x > $TMPDIR/x`],
+      ['"eval"', String.raw`"eval" "TMP""DIR=/etc"; echo x > $TMPDIR/x`],
+      ['ev\\al', String.raw`ev\al "TMP""DIR=/etc"; echo x > $TMPDIR/x`],
+      ['\\declare', String.raw`\declare TMP""DIR=/etc; echo x > $TMPDIR/x`],
+      ['\\export', String.raw`\export TMP""DIR=/etc; echo x > $TMPDIR/x`],
+      ['\\command eval', String.raw`\command eval "TMP""DIR=/etc"; echo x > $TMPDIR/x`],
+      ['builtin source', 'builtin source ./env.sh; echo x > $TMPDIR/x'],
+      ['a command named by a variable', 'c=eval; $c "TMP""DIR=/etc"; echo x > $TMPDIR/x']
+    ]
+    it.each(cases)('withholds the hint: %s', (_name, command) => {
+      expectWithheld(sh(command))
+    })
+  })
+
+  describe('4 — `$null` is an ordinary variable in a POSIX shell', () => {
+    it('an unbound `$null` target is unresolvable with no temp hint', () => {
+      for (const command of ['echo x > $null', 'echo x > $null/a', 'echo x 2> $null']) {
+        expectWithheld(sh(command))
+      }
+    })
+
+    it('is a plain variable: a binding to the temp dir is read like any other', () => {
+      expectHint(sh('null=$TMPDIR; echo x > $null/a'), '/tmp/a')
+    })
+  })
+
+  describe('5 — keywords count only at command position', () => {
+    it('keeps the hint when the words are arguments, quoted text or heredoc bodies', () => {
+      for (const command of [
+        "find . -name '*.ts' > $TMPDIR/files.txt",
+        'git diff . > $TMPDIR/d.patch',
+        'git commit -m "fix tests for the parser" > $TMPDIR/out.txt',
+        'echo eval source for while . > $TMPDIR/out.txt',
+        "cat <<'EOF' > $TMPDIR/out.txt\nfor eval export source . while\nEOF",
+        'ls ./x > $TMPDIR/out.txt',
+        'set -euo pipefail; make > $TMPDIR/out.txt',
+        'export CI=1; npm test > $TMPDIR/out.txt',
+        'export CI=1 PATH="$PATH:/x"; npm test > $TMPDIR/out.txt',
+        't=$TMPDIR; export t; echo x > $t/out.txt'
+      ]) {
+        expectHint(sh(command), /^\/tmp\/(?:files\.txt|d\.patch|out\.txt)$/)
+      }
+    })
+
+    it('keeps the hint in PowerShell for `.`, `select` and ForEach-Object', () => {
+      const path = 'c:/Users/dev/AppData/Local/Temp/a.txt'
+      expectHint(ps('Get-ChildItem . | Out-File $env:TEMP\\a.txt'), path)
+      expectHint(ps('Get-ChildItem . | select -First 5 | Out-File $env:TEMP\\a.txt'), path)
+      expectHint(ps('Get-ChildItem | foreach { $_ } | Out-File $env:TEMP\\a.txt'), path)
+      expectHint(ps('Get-ChildItem | ForEach-Object { $_ } | Out-File $env:TEMP\\a.txt'), path)
+      expectHint(ps('git commit -m "for the parser" > $env:TEMP\\a.txt'), path)
+    })
+
+    it('still withholds on a command-position runner, loop or rebinding declaration', () => {
+      for (const command of [
+        'export TMPDIR=/etc; echo x > $TMPDIR/x',
+        'export; echo x > $TMPDIR/x',
+        'export -p; echo x > $TMPDIR/x',
+        'set -a; echo x > $TMPDIR/x',
+        'set -o allexport; echo x > $TMPDIR/x',
+        'declare -x; echo x > $TMPDIR/x',
+        'n=TMPDIR; export "$n=/etc"; echo x > $TMPDIR/x',
+        'declare -n r=TMPDIR; r=/etc; echo x > $TMPDIR/x',
+        'f() { local TMPDIR; echo x > $TMPDIR/a; }; f',
+        'getopts a TMPDIR; echo x > $TMPDIR/x',
+        ': ${TMPDIR:=/etc}; echo x > $TMPDIR/x',
+        'unset TMPDIR; echo x > $TMPDIR/x',
+        'source ./env.sh; echo x > $TMPDIR/x',
+        '. ./env.sh; echo x > $TMPDIR/x',
+        'eval "$x"; echo x > $TMPDIR/x',
+        'for f in a b; do echo x > $TMPDIR/$f; done',
+        'while read l; do echo x > $TMPDIR/$l; done < list'
+      ]) {
+        expectWithheld(sh(command))
+      }
+      expectWithheld(ps("foreach ($x in 1..3) { $x }; 'x' > $env:TEMP\\a.txt"))
+      expectWithheld(ps("iex 'x'; 'x' > $env:TEMP\\a.txt"))
+    })
+
+    it('a child shell or a bash command substitution cannot rebind this shell', () => {
+      expectHint(sh("bash -c 'eval foo' > $TMPDIR/x"), '/tmp/x')
+      expectHint(sh('echo "$(eval foo)" > $TMPDIR/x'), '/tmp/x')
+    })
   })
 })

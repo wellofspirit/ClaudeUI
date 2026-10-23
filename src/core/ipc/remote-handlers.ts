@@ -167,6 +167,7 @@ import {
   codexDeletePlanFor,
   clearConversation,
   judgeModelSupport,
+  judgeRouteResting,
   approveBlocked
 } from './handlers-core'
 
@@ -687,6 +688,15 @@ export function registerRemoteHandlers(
     capability: 'config',
     kind: 'query',
     handler: (engineId: unknown, values: unknown) => judgeModelSupport(engineId, values)
+  })
+
+  // The judge route's rate-limit cooldown (see session.ipc.ts): a time, never a token.
+  handleRemote({
+    channel: 'automode:judge-route-resting',
+    capability: 'config',
+    kind: 'query',
+    handler: (engineId: unknown, model: unknown, accountId?: unknown) =>
+      judgeRouteResting(engineId, model, accountId)
   })
 
   // Full opencode provider catalog / per-provider models for the allowlist UI.

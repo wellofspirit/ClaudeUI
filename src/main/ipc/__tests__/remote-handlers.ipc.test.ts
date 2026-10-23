@@ -1368,6 +1368,7 @@ describe('registerRemoteHandlers', () => {
         parentEngine: 'opencode',
         parentToolUseId: 'call_dispatch',
         cwd: '/x',
+        parentCwd: '/x',
         model: 'm',
         launchMode: 'default',
         accountKey: null,
@@ -2505,6 +2506,13 @@ const IDE_CHANNELS = ['ide:availability', 'ide:mint-entry'] as const
  */
 const JUDGE_MODEL_SUPPORT_CHANNELS = ['automode:judge-model-support'] as const
 
+/**
+ * The same class for the judge route's rate-limit cooldown: the Settings picker shows "resting
+ * until …" next to a model or ChatGPT account, in the browser client too. Only a time leaves —
+ * the route the resolver builds (token and all) is dropped by the handler.
+ */
+const JUDGE_ROUTE_RESTING_CHANNELS = ['automode:judge-route-resting'] as const
+
 /** The half of {@link IDE_CHANNELS} that is gated by the `ide` capability. */
 const IDE_GATED_CHANNELS = ['ide:mint-entry'] as const
 
@@ -2636,6 +2644,7 @@ describe('remote surface parity (phase 1 port)', () => {
         ...REMOTE_VIEW_CHANNELS,
         ...IDE_CHANNELS,
         ...JUDGE_MODEL_SUPPORT_CHANNELS,
+        ...JUDGE_ROUTE_RESTING_CHANNELS,
         // ADR-068 §1: the three `codex:login-*` channels are gone with the
         // native device-code UI; the vault owns the ChatGPT identity and
         // `provider-account:*` is how a remote client reads it.
@@ -2677,6 +2686,16 @@ describe('remote surface parity (phase 1 port)', () => {
   it('automode:judge-model-support is a base-reachable config QUERY, like get-engine-models', () => {
     const decl = commandRegistry.declaration('automode:judge-model-support')
     const twin = commandRegistry.declaration('session:get-engine-models')
+    expect(decl?.capability).toBe('config')
+    expect(decl?.capability).toBe(twin?.capability)
+    expect(decl?.kind).toBe('query')
+    expect(decl?.kind).toBe(twin?.kind)
+    expect(AUTH_OFF_GRANTS.has(decl!.capability)).toBe(true)
+  })
+
+  it('automode:judge-route-resting is a base-reachable config QUERY, like judge-model-support', () => {
+    const decl = commandRegistry.declaration('automode:judge-route-resting')
+    const twin = commandRegistry.declaration('automode:judge-model-support')
     expect(decl?.capability).toBe('config')
     expect(decl?.capability).toBe(twin?.capability)
     expect(decl?.kind).toBe('query')

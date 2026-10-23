@@ -886,15 +886,23 @@ function allowedRoots(caller: SessionToolCaller): string[] {
 function realOrResolved(p: string): string {
   const resolved = path.resolve(p)
   try {
-    return fs.realpathSync(resolved)
+    // `.native` canonicalises what the JS walk leaves alone on Windows (8.3 short names, the drive
+    // letter's case, a `subst` drive), so two spellings of one directory compare equal.
+    return fs.realpathSync.native(resolved)
   } catch {
     return resolved
   }
 }
 
-function withinOrEqual(root: string, candidate: string): boolean {
+/**
+ * Is `candidate` the directory `root` or inside it? Both are compared by their real path, so a
+ * symlink or a junction under `root` that leads out of it is outside (a path that does not exist
+ * is compared as spelled). Separator and, on Windows, letter case are `path.relative`'s: `D:\Repo`
+ * contains `d:/repo/x`.
+ */
+export function withinOrEqual(root: string, candidate: string): boolean {
   const rel = path.relative(realOrResolved(root), realOrResolved(candidate))
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel))
 }
 
 /**

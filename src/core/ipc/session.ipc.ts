@@ -154,6 +154,7 @@ import {
   codexDeletePlanFor,
   clearConversation,
   judgeModelSupport,
+  judgeRouteResting,
   approveBlocked
 } from './handlers-core'
 
@@ -296,6 +297,7 @@ const SESSION_IPC_CHANNELS = [
   'session:get-models',
   'session:get-engine-models',
   'automode:judge-model-support',
+  'automode:judge-route-resting',
   'session:get-opencode-providers',
   'session:set-opencode-provider-disabled',
   'session:remove-opencode-provider',
@@ -874,6 +876,16 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'config',
     kind: 'query',
     handler: (engineId: unknown, values: unknown) => judgeModelSupport(engineId, values)
+  })
+
+  // When a judge model's route recovers from a rate limit (the process-wide cooldown the judge
+  // transport files a 429 under). Read-only and token-free: only a time leaves.
+  handleIpc({
+    channel: 'automode:judge-route-resting',
+    capability: 'config',
+    kind: 'query',
+    handler: (engineId: unknown, model: unknown, accountId?: unknown) =>
+      judgeRouteResting(engineId, model, accountId)
   })
 
   // Full opencode provider catalog for the settings provider manager. Returns []

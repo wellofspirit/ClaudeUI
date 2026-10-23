@@ -95,7 +95,7 @@ import { peekPiModels } from '../pi/model-discovery'
 import { editClearsAgentControl } from '../opencode/agent-control-gate'
 // ADR-088 — ClaudeUI's judge for pi/opencode targets. Leaf modules (the
 // automode pipeline + the judge transport), no session class.
-import { DispatchTargetJudge } from './dispatch-target-judge'
+import { DispatchTargetJudge, uniqueDirs } from './dispatch-target-judge'
 import { armBlockHold, blockHoldMs } from '../automode/block-hold'
 import {
   blockApprovalNotice,
@@ -260,6 +260,7 @@ import {
   SESSION_TOOLS_SERVER_NAME
 } from './session-tools-server'
 import { xAgentSessionToolsEnv } from './session-tool-specs'
+import { resolveDispatchWorkdir, type WorkdirResolution } from './dispatch-workdir'
 import { agentNoteMessage } from './agent-note'
 import { isReservedXAgentName } from '../../shared/session-links'
 import {
@@ -339,6 +340,11 @@ export function crossEngineDispatchAvailable(engineId: EngineId): boolean {
 export interface DispatchContext {
   fromEngine: EngineId
   fromRoutingId: string
+  /**
+   * The DISPATCHING session's working directory, on every context (a launch's, and the one a message
+   * to a finished X-Agent rebuilds from its row's `parentCwd`). Where a target runs is its own
+   * (`entry.cwd`, the row's `cwd`): its `workdir`, else this.
+   */
   cwd: string
   /**
    * The dispatching session's permission mode (Claude-style string), read LIVE
@@ -434,6 +440,14 @@ export interface DispatchRequest {
   /** The caller's short summary of the task (ADR-105); stored the same way. */
   description?: string
   /**
+   * The directory the target runs in (a git worktree, say), as the caller gave it: absolute, or
+   * relative to the parent's working directory. The host registrations pass it through trimmed
+   * (an empty or blank value is absent) and unchecked; the dispatcher resolves it and requires it
+   * to lie inside the parent's working directory or one of the user's additional directories.
+   * Absent: the target runs in the parent's working directory.
+   */
+  workdir?: string
+  /**
    * The call came from a SUBAGENT of the parent session (it asked for the background
    * explicitly): the report goes to the parent's top-level agent, so the launch answer must
    * not promise it to the caller. Set by the registration that knows who called.
@@ -455,8 +469,20 @@ export interface DispatchRequest {
   message?: { runIndex: number }
 }
 
-/** The two labels a dispatch may carry onto its ledger row. */
-type DispatchLabels = Pick<DispatchRequest, 'name' | 'description'>
+/**
+ * What a NEW target takes from its launch: its two labels, for the ledger row, and the `workdir`
+ * `launchRun` resolved and checked (absent: it runs in its parent's directory).
+ */
+type FreshLaunch = Pick<DispatchRequest, 'name' | 'description' | 'workdir'>
+
+/**
+ * Where a target runs: a resumed one in the directory it was created in (ADR-105; a removed worktree
+ * is refused by `launchRun` before it gets here), a new one in the `workdir` the launch resolved, else
+ * in its parent's directory.
+ */
+function targetCwd(ctx: { cwd: string }, resume?: { cwd: string }, fresh?: FreshLaunch): string {
+  return resume?.cwd ?? fresh?.workdir ?? ctx.cwd
+}
 
 /** The longest `name` and `description` a launch may carry (they reach the roster, the ledger and notification titles). */
 const MAX_XAGENT_NAME_CHARS = 64
@@ -774,6 +800,12 @@ export interface DispatcherDeps {
   codexHoldsThread?: (threadId: string) => boolean
   /** Does a pi target's session directory still exist? Defaults to `fs.existsSync`. */
   piSessionDirExists?: (dir: string) => boolean
+  /**
+   * Does the directory an X-Agent was created in still exist? A resume is refused when it does not
+   * (a removed git worktree): the harness would otherwise start in a cwd that is gone, or fall back
+   * to another. Defaults to `fs.existsSync`.
+   */
+  targetCwdExists?: (cwd: string) => boolean
   /**
    * Remove the harness-side state of an X-Agent that ended for good (opencode's session,
    * pi's session directory). Defaults to `removeHarnessState`; tests inject a spy.
@@ -1136,7 +1168,10 @@ interface TargetLedgerFields {
 /** What a target's ruleset is built from — cached per target (a failed read is not cached). */
 interface TargetRuleInputs {
   client: DispatchTargetClient
+  /** Where the target runs. */
   cwd: string
+  /** The dispatching session's directory (`ctx.cwd`): its rules bind the target too (`userDenyAsk`). */
+  parentCwd: string
   /** `GET /api/agent` — the default agent. */
   agents: Agent_Info[] | null
   /** Bridged + `claudeui` + `GET /api/mcp` server names (MCP rule keys, the auto catch-all). */
@@ -2766,6 +2801,7 @@ export class CrossEngineDispatcher {
   private readonly codexResumeLockRetryMs: number
   private readonly codexHoldsThread: (threadId: string) => boolean
   private readonly piSessionDirExists: (dir: string) => boolean
+  private readonly targetCwdExists: (cwd: string) => boolean
   private readonly requireHandBack: boolean
   private readonly reports: DispatchReportStore
   private readonly handBackSettleMs: number
@@ -2856,6 +2892,7 @@ export class CrossEngineDispatcher {
     this.codexHoldsThread =
       deps.codexHoldsThread ?? ((threadId) => codexHostRegistry.holdsThread(threadId))
     this.piSessionDirExists = deps.piSessionDirExists ?? existsSync
+    this.targetCwdExists = deps.targetCwdExists ?? existsSync
     this.requireHandBack = deps.requireHandBack ?? false
     this.reports = deps.reports ?? dispatchReports
     this.handBackSettleMs = deps.handBackSettleMs ?? HAND_BACK_SETTLE_MS
@@ -3009,22 +3046,47 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * The user's deny and ask rules for `cwd`, with an EMPTY allow tier (ADR-085
+   * The user's deny and ask rules for a target, with an EMPTY allow tier (ADR-085
    * §3, owner ruling 3: deny/ask rules hold in every mode, dispatch targets
    * included). Targets never get the user's allow rules or additional
    * directories — a dispatched agent is governed by its autonomy mode, not by
    * what the user pre-approved for their own chats (ADR-033). Read fresh per
    * call, like the interactive sessions' gates.
+   *
+   * The rules are the UNION of those loaded for the PARENT's directory and for the
+   * TARGET's (they differ when `dispatch_agent` gave a `workdir`, say a sibling git
+   * worktree): the parent's gitignored `.claude/settings.local.json` still binds a
+   * target that runs elsewhere, and the target's own project rules still bind it. A
+   * union only tightens. Parent's first, de-duplicated, order-stable; the caller's
+   * restriction last.
    */
-  private userDenyAsk(cwd: string, restriction?: CallerRestriction): MergedClaudeRules {
-    const rules = this.loadUserRules(cwd)
+  private userDenyAsk(
+    targetCwd: string,
+    parentCwd: string,
+    restriction?: CallerRestriction
+  ): MergedClaudeRules {
+    const loaded = uniqueDirs([parentCwd, targetCwd]).map((dir) => this.loadUserRules(dir))
     return {
-      deny: [...rules.deny, ...(restriction?.deny ?? [])],
-      ask: [...rules.ask, ...(restriction?.ask ?? [])],
+      deny: [...new Set([...loaded.flatMap((r) => r.deny), ...(restriction?.deny ?? [])])],
+      ask: [...new Set([...loaded.flatMap((r) => r.ask), ...(restriction?.ask ?? [])])],
       allow: [],
       additionalDirectories: [],
       defaultMode: undefined
     }
+  }
+
+  /**
+   * What the target's judge counts as local besides the target's own directory (CONTEXT ONLY — see
+   * `DispatchTargetJudgeOptions.contextDirs`): the dispatching session's directory when the target
+   * runs elsewhere, and the user's additional directories as they are for that session, read fresh.
+   * It feeds the judge's Environment text and redirect scope and nothing else: not the gates, not
+   * `userDenyAsk`, not an engine ruleset.
+   */
+  private judgeContextDirs(entry: { cwd: string; ctx: { cwd: string } }): string[] {
+    return uniqueDirs(
+      [entry.ctx.cwd, ...(this.loadUserRules(entry.ctx.cwd).additionalDirectories ?? [])],
+      entry.cwd
+    )
   }
 
   /**
@@ -3064,10 +3126,12 @@ export class CrossEngineDispatcher {
     spec: {
       engine: EngineId
       harnessRef: string
+      /** Where the target runs ({@link targetCwd}); the parent's own directory is `ctx.cwd`. */
+      cwd: string
       model: string
       accountKey: string | null
       codexAccountId?: string | null
-      labels?: DispatchLabels
+      fresh?: FreshLaunch
       /** The target was started with the `hand_back` tool. */
       handBack: boolean
     }
@@ -3078,14 +3142,15 @@ export class CrossEngineDispatcher {
       parentSessionId: ctx.fromRoutingId,
       parentEngine: ctx.fromEngine,
       parentToolUseId: ctx.toolUseId ?? null,
-      cwd: ctx.cwd,
+      cwd: spec.cwd,
+      parentCwd: ctx.cwd,
       model: spec.model,
       launchMode: liveMode(ctx),
       accountKey: spec.accountKey,
       codexAccountId: spec.codexAccountId ?? null,
       callerRestriction: ctx.callerRestriction ? JSON.stringify(ctx.callerRestriction) : null,
-      name: labelOf(spec.labels?.name),
-      description: labelOf(spec.labels?.description),
+      name: labelOf(spec.fresh?.name),
+      description: labelOf(spec.fresh?.description),
       handBack: spec.handBack
     })
     ctx.run.createdTarget = true
@@ -3570,7 +3635,8 @@ export class CrossEngineDispatcher {
     return {
       fromEngine: row.parentEngine,
       fromRoutingId: row.parentSessionId,
-      cwd: row.cwd,
+      // The DISPATCHING session's directory, as on every other context; the target's own is `row.cwd`.
+      cwd: row.parentCwd,
       getAutonomyMode: () => live()?.getAutonomyMode?.() ?? row.launchMode,
       getMessages: () => live()?.getMessages() ?? [],
       emit: (channel, data) => this.parents?.emit(parentId(), channel, data),
@@ -3998,6 +4064,8 @@ export class CrossEngineDispatcher {
         }
         ctx = { ...ctx, callerRestriction: mergeRestrictions(held, ctx.callerRestriction) }
       }
+      const removed = this.removedCwdRefusal({ ...req, sessionId: req.sessionId }, ctx)
+      if (removed) return { refused: removed }
     }
     const background = req.runInBackground === true
     // A run is shown, stopped and reported through its launching tool call's card: with no
@@ -4086,6 +4154,28 @@ export class CrossEngineDispatcher {
       }
     }
 
+    // Where a NEW target runs. A continuation keeps the directory its target was created in, so a
+    // `workdir` on one is refused, not ignored: the caller would believe the work happens there.
+    // Resolved here, before anything is registered or spawned; every engine path then reads it as
+    // `req.workdir` (`targetCwd`), already a real path inside the parent's reach.
+    const launchReq: DispatchRequest = { ...req }
+    delete launchReq.workdir
+    const workdir = labelOf(req.workdir)
+    if (workdir) {
+      if (req.sessionId) {
+        return {
+          refused: errorResult(
+            'dispatch_agent "workdir" cannot be given with "sessionId": a continued X-Agent keeps the ' +
+              'directory it was started in. Start a new X-Agent to work in another directory.',
+            req.sessionId
+          )
+        }
+      }
+      const resolved = this.resolveWorkdir(workdir, ctx.cwd)
+      if (!resolved.ok) return { refused: errorResult(resolved.text) }
+      launchReq.workdir = resolved.cwd
+    }
+
     // A continuation of a target the ledger will rebuild (ADR-105) holds its name
     // here, synchronously, until the run ends: a second call naming the same session
     // meanwhile is busy-rejected rather than resuming it twice.
@@ -4138,7 +4228,7 @@ export class CrossEngineDispatcher {
       // The request that launched a BLOCKING call is the only thing that may reach into the
       // run: its abort ends the run, its progress token gets the heartbeat.
       const release = background ? (): void => {} : this.followCaller(run, ctx.extra)
-      run.done = this.executeRun(req, runCtx, () => {
+      run.done = this.executeRun(launchReq, runCtx, () => {
         release()
         if (resumingRef) this.resuming.delete(resumingRef)
       })
@@ -4149,6 +4239,46 @@ export class CrossEngineDispatcher {
       throw err
     }
     return { run }
+  }
+
+  /**
+   * `workdir` as a directory the dispatching session may hand a target: inside its own working
+   * directory or one of the user's additional directories (the user, project and local Claude
+   * settings, merged for the parent's cwd). Rules that cannot be read grant nothing extra.
+   */
+  private resolveWorkdir(workdir: string, parentCwd: string): WorkdirResolution {
+    let additional: readonly string[] = []
+    try {
+      additional = this.loadUserRules(parentCwd).additionalDirectories
+    } catch (err) {
+      logger.warn(
+        'CrossEngineDispatcher',
+        `could not read the additional directories: ${errText(err)}`
+      )
+    }
+    return resolveDispatchWorkdir(workdir, parentCwd, additional)
+  }
+
+  /**
+   * A continuation of a target the ledger will rebuild runs in the directory its row names. Once that
+   * is gone (a removed git worktree) nothing is started in it, whatever the engine: the harness would
+   * open in a cwd that does not exist, or in another, and the agent's files are gone with it. A live
+   * target needs no check (its process is already there), nor does an unknown or foreign one: the
+   * engine's own path answers those. The row keeps its state: restoring the directory makes it
+   * resumable again.
+   */
+  private removedCwdRefusal(
+    req: DispatchRequest & { sessionId: string },
+    ctx: DispatchContext
+  ): DispatchResult | null {
+    if (this.targets.has(req.sessionId)) return null
+    const cont = this.findContinuation(req.sessionId, ctx, req.engine as TargetEntry['kind'])
+    if (!cont || !('row' in cont) || this.targetCwdExists(cont.row.cwd)) return null
+    return errorResult(
+      `Dispatch session "${req.sessionId}" cannot be resumed — the agent's working directory ` +
+        `${cont.row.cwd} no longer exists (a removed worktree?). Start a new X-Agent with dispatch_agent.`,
+      req.sessionId
+    )
   }
 
   /** Is `name` held by one of the parent's children that is not stopped (or one being launched)? */
@@ -4836,7 +4966,7 @@ export class CrossEngineDispatcher {
           currentMode: mode,
           stillPending: live,
           signal,
-          permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction)
+          permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
         })
     switch (entry.kind) {
       case 'opencode':
@@ -4863,6 +4993,7 @@ export class CrossEngineDispatcher {
       configEngine: 'codex',
       fixedModel: () => entry.model,
       cwd: entry.cwd,
+      contextDirs: () => this.judgeContextDirs(entry),
       routingId: () => entry.ctx.fromRoutingId,
       // The usage row is a pi-route row: it must not name a Codex thread as a pi session.
       sessionId: () => null,
@@ -5568,13 +5699,13 @@ export class CrossEngineDispatcher {
     ctx: RunContext,
     model: string,
     resume?: DispatchTargetRow,
-    labels?: DispatchLabels
+    fresh?: FreshLaunch
   ): Promise<OpencodeTargetEntry> {
     // A dispose of the dispatching chat while this target is being created
     // disposes the new target too.
     const generation = this.disposals.get(this.runs.parentOf(ctx.fromRoutingId)) ?? 0
     // A resumed target runs where it was created (ADR-105): the stored directory.
-    const cwd = resume?.cwd ?? ctx.cwd
+    const cwd = targetCwd(ctx, resume, fresh)
     const conn = await this.deps.serverManager.acquire(cwd)
     let rec: ConnRecord | null = null
     let client: DispatchTargetClient | null = null
@@ -5586,6 +5717,7 @@ export class CrossEngineDispatcher {
       const inputs: TargetRuleInputs = {
         client,
         cwd,
+        parentCwd: ctx.cwd,
         agents: null,
         mcpServers: null,
         worktree: undefined,
@@ -5596,6 +5728,7 @@ export class CrossEngineDispatcher {
       const judge = new DispatchTargetJudge({
         engine: 'opencode',
         cwd,
+        contextDirs: () => this.judgeContextDirs(entry),
         routingId: () => entry.ctx.fromRoutingId,
         sessionId: () => entry.sessionId,
         model: () => entry.model,
@@ -5658,9 +5791,10 @@ export class CrossEngineDispatcher {
         this.recordTarget(ctx, {
           engine: 'opencode',
           harnessRef: session.id,
+          cwd,
           model,
           accountKey: opencodeDispatchAccount(model).accountKey,
-          labels,
+          fresh,
           handBack: this.requireHandBack
         }).id
       const entry: OpencodeTargetEntry = {
@@ -5895,7 +6029,7 @@ export class CrossEngineDispatcher {
     const built = buildSessionRuleset({
       mode,
       autoMode,
-      permissions: this.userDenyAsk(inputs.cwd, restriction),
+      permissions: this.userDenyAsk(inputs.cwd, inputs.parentCwd, restriction),
       mcpServers,
       cwd: inputs.cwd,
       ...(worktree ? { worktree } : {}),
@@ -5939,6 +6073,8 @@ export class CrossEngineDispatcher {
   }
 
   private async applyTargetRulesNow(entry: OpencodeTargetEntry): Promise<void> {
+    // The ctx is replaced on every continuation: the parent's rules are the latest one's.
+    entry.parentCwd = entry.ctx.cwd
     const mode = liveMode(entry.ctx)
     const built = await this.buildTargetRuleset(
       entry,
@@ -6379,7 +6515,7 @@ export class CrossEngineDispatcher {
 
   /** The host pre-check over a target: the user's deny/ask tiers only, no session allows. */
   private targetPrecheckContext(entry: OpencodeTargetEntry): HostPrecheckContext {
-    const rules = this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction)
+    const rules = this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
     return {
       mode: liveMode(entry.ctx),
       rules: { deny: rules.deny, ask: rules.ask, allow: [] },
@@ -6517,7 +6653,7 @@ export class CrossEngineDispatcher {
           stillPending: () => entry.judging.has(id) && this.targets.get(entry.sessionId) === entry,
           honoursWorkdir: true,
           ...(typeof input.command === 'string' ? {} : { skipReadOnlyGate: true }),
-          permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction)
+          permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
         }
       )
     } finally {
@@ -6728,17 +6864,19 @@ export class CrossEngineDispatcher {
       const account = claudeDispatchAccount()
       let ledgerId: string | null = null
       try {
+        const cwd = targetCwd(ctx, undefined, req)
         ledgerId = this.recordTarget(ctx, {
           engine: 'claude',
           harnessRef: harnessId,
+          cwd,
           model,
           accountKey: account.accountKey,
-          labels: req,
+          fresh: req,
           handBack: this.requireHandBack
         }).id
-        const shell = this.createClaudeTargetShell(ctx, ledgerId, account, ctx.cwd)
+        const shell = this.createClaudeTargetShell(ctx, ledgerId, account, cwd)
         entry = shell.entry
-        await this.spawnClaudeTarget(shell, ctx, model, ctx.cwd, { sessionId: harnessId })
+        await this.spawnClaudeTarget(shell, ctx, model, cwd, { sessionId: harnessId })
       } catch (err) {
         if (ledgerId) this.ledgerSet(ledgerId, { state: 'failed' })
         return errorResult(`Failed to start dispatched Claude agent: ${errText(err)}`)
@@ -7359,7 +7497,7 @@ export class CrossEngineDispatcher {
     const mode = mapAutonomyToClaudeTargetMode(liveMode(ctx))
     // ADR-085 §3 — the user's deny/ask rules as the target's flag
     // settings (never the allow tier); omitted when there are none.
-    const { deny, ask } = this.userDenyAsk(cwd, ctx.callerRestriction)
+    const { deny, ask } = this.userDenyAsk(cwd, ctx.cwd, ctx.callerRestriction)
     entry.query = await this.spawnClaudeQuery({
       cwd,
       model,
@@ -7668,7 +7806,7 @@ export class CrossEngineDispatcher {
     if (isShellToolName(toolName) && typeof input.command === 'string') {
       const hit = denyAskHit(
         input.command,
-        this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction)
+        this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
       )
       if (hit?.tier === 'deny') {
         logger.info(
@@ -8346,22 +8484,23 @@ export class CrossEngineDispatcher {
     ctx: RunContext,
     model: string,
     resume?: DispatchTargetRow,
-    labels?: DispatchLabels
+    fresh?: FreshLaunch
   ): Promise<PiTargetEntry> {
     // The session id is minted here and the ledger row written BEFORE the child spawns
     // (ADR-105); a resume reuses both, in the directory the target was created in.
     const harnessId = resume?.harnessRef ?? uuidv4()
+    const cwd = targetCwd(ctx, resume, fresh)
     const row =
       resume ??
       this.recordTarget(ctx, {
         engine: 'pi',
         harnessRef: harnessId,
+        cwd,
         model,
         accountKey: piDispatchAccount(model).accountKey,
-        labels,
+        fresh,
         handBack: this.requireHandBack
       })
-    const cwd = resume?.cwd ?? ctx.cwd
     const entry: PiTargetEntry = {
       kind: 'pi',
       sessionId: null,
@@ -8391,6 +8530,7 @@ export class CrossEngineDispatcher {
     entry.judge = new DispatchTargetJudge({
       engine: 'pi',
       cwd,
+      contextDirs: () => this.judgeContextDirs(entry),
       routingId: () => entry.ctx.fromRoutingId,
       sessionId: () => entry.sessionId,
       model: () => entry.model,
@@ -8564,7 +8704,7 @@ export class CrossEngineDispatcher {
       const denied = sessionToolDenyRule(
         X_AGENT_MESSAGE_TOOL,
         payload.input,
-        this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction),
+        this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
         entry.cwd
       )
       if (denied) return { behavior: 'deny', reason: `Denied by permission rule: ${denied}` }
@@ -8574,7 +8714,7 @@ export class CrossEngineDispatcher {
     // step would be a no-op here — not called.
     const verdict = decideWithSource(payload.toolName, payload.input, {
       mode: auto ? 'acceptEdits' : mode,
-      rules: this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction),
+      rules: this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
       sessionAllows: EMPTY_PI_SESSION_ALLOWS,
       // The acceptEdits base matches agent-control paths cwd-relative
       // (ADR-084 §3); without it an absolute path inside a target running in a
@@ -8619,7 +8759,7 @@ export class CrossEngineDispatcher {
           entry.sessionId !== null &&
           this.targets.get(entry.sessionId) === entry,
         honoursWorkdir: false,
-        permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction)
+        permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
       }
     )
     // Stopped while the judge ran: never forward a drained ask.
@@ -9240,12 +9380,12 @@ export class CrossEngineDispatcher {
     allowedModels: string[] | undefined,
     resume?: DispatchTargetRow,
     signals: ReadonlyArray<AbortSignal | undefined> = [],
-    labels?: DispatchLabels
+    fresh?: FreshLaunch
   ): Promise<CodexTargetEntry> {
     // A resumed thread lives on the host of the account it was created under (ADR-105):
     // the row's vault account id, not the (possibly different) caller's pin now.
     const accountId = resume ? resume.codexAccountId : (ctx.chatgptAccountId ?? null)
-    const cwd = resume?.cwd ?? ctx.cwd
+    const cwd = targetCwd(ctx, resume, fresh)
     const entry: CodexTargetEntry = {
       kind: 'codex',
       reportToolDone: null,
@@ -9403,10 +9543,11 @@ export class CrossEngineDispatcher {
       entry.ledgerId = this.recordTarget(ctx, {
         engine: 'codex',
         harnessRef: entry.sessionId,
+        cwd,
         model: entry.model,
         accountKey: entry.account.accountKey,
         codexAccountId: accountId,
-        labels,
+        fresh,
         handBack: this.requireHandBack
       }).id
       // Everything stamped with this thread id is this target's from here on,
@@ -9953,7 +10094,7 @@ export class CrossEngineDispatcher {
     const denied = sessionToolDenyRule(
       X_AGENT_MESSAGE_TOOL,
       args,
-      this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction),
+      this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
       entry.cwd
     )
     if (denied) return answer(`Denied by permission rule: ${denied}`, true)
@@ -9976,7 +10117,7 @@ export class CrossEngineDispatcher {
           run.stopController.signal,
           run.cancelController.signal
         ]),
-        permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction)
+        permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
       })
       if (review.kind === 'block') return answer(messageBlockedText(review.reason), true)
       if (review.kind !== 'allow') return answer(MESSAGE_UNREVIEWED_TEXT, true)
@@ -10199,7 +10340,7 @@ export class CrossEngineDispatcher {
       // it was willing to, so whatever reaches this gate is what it ESCALATED,
       // and escalations belong to the human, never to a silent mode-base allow.
       mode: entry.autonomyMode === 'auto' ? 'default' : entry.autonomyMode,
-      rules: this.userDenyAsk(entry.cwd, entry.ctx.callerRestriction),
+      rules: this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
       sessionAllows: EMPTY_CODEX_SESSION_ALLOWS,
       cwd: entry.cwd
     }

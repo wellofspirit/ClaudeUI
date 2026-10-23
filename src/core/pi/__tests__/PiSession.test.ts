@@ -303,6 +303,21 @@ const {
 
 vi.mock('../PiRpcClient', () => ({ PiRpcClient: MockPiRpcClient }))
 vi.mock('../../automode/judge-route', () => ({ resolveJudgeRoute: mockResolveJudgeRoute }))
+// The vault's ChatGPT accounts, as the fallback judge's owner learns them: a fixture instead of
+// the dev machine's own vault (`refreshChatgptAccounts` would read it).
+const { chatgptVault } = vi.hoisted(() => ({
+  chatgptVault: {
+    activeId: null as string | null,
+    accounts: [] as Array<{ id: string; planType?: string }>
+  }
+}))
+vi.mock('../../automode/judge-accounts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../automode/judge-accounts')>()
+  return {
+    ...actual,
+    refreshChatgptAccounts: () => actual.refreshChatgptAccounts(async () => chatgptVault)
+  }
+})
 vi.mock('../../automode/judge-usage', () => ({ recordJudgeUsage: mockRecordJudgeUsage }))
 vi.mock('../../automode/judge-http/net', () => ({ pickJudgeFetch: mockPickJudgeFetch }))
 vi.mock('../pi-locate', () => ({
@@ -444,6 +459,7 @@ vi.mock('../../services/ui-config', async (importOriginal) => ({
 import { allowRuleActionFor, PiSession } from '../PiSession'
 import { allowRuleGate } from '../../automode/allow-rule-gate'
 import { slimTranscript } from '../../automode/classifier'
+import { resetChatgptAccounts } from '../../automode/judge-accounts'
 import { piMcpName } from '../pi-mcp-bridge'
 import { PLAN_MODE_DENY_REASON } from '../permission-engine'
 import { loadPiAgentRegistry, type PiAgentDefinition } from '../pi-agent-registry'
@@ -4075,6 +4091,331 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     session.dispose()
   })
 
+  describe('fallback judge (autoMode.fallbackJudgeModel)', () => {
+    const PRIMARY = 'openai-codex/gpt-5.4-mini'
+    const FALLBACK = 'openai-codex/gpt-5.6-luna'
+    const REASON =
+      '"openai-codex" is set up inside pi, not in ClaudeUI, so ClaudeUI cannot call it for the judge.'
+    const fallbackBanner = (): string =>
+      `Auto-mode judge unavailable: ${REASON} ${FALLBACK} is judging instead until it recovers. ` +
+      'Change the judge models in Settings › Sessions & autonomy › Auto-mode judge (pi).'
+    const cantJudge = (reason: string): string =>
+      `Auto-mode can't judge here: ${reason} Every gated action will ask you instead. ` +
+      'Change the judge model in Settings › Sessions & autonomy › Auto-mode judge (pi).'
+
+    /** The primary (and `also`) has no route; every other model resolves to a route named after it. */
+    function noRouteFor(...values: string[]): void {
+      mockResolveJudgeRoute.mockImplementation(async (_engine: string, value: string) =>
+        values.includes(value)
+          ? { ok: false, code: 'no-shared-provider', reason: REASON }
+          : { ok: true, route: fakeJudgeRoute(value) }
+      )
+    }
+
+    function catalog(...values: string[]): void {
+      mockDiscoverPiModels.mockResolvedValue([
+        {
+          engineId: 'pi',
+          vendorId: 'openai-codex',
+          vendorName: 'openai-codex',
+          models: values.map((value) => ({ value, displayName: value, description: '' }))
+        }
+      ])
+    }
+
+    it('the primary has no route: the fallback judges, and the banner says so (once)', async () => {
+      enableAutoMode({ judgeModel: PRIMARY, fallbackJudgeModel: ` ${FALLBACK} ` })
+      noRouteFor(PRIMARY)
+      judgeScript.replies = ['<block>no</block>', '<block>no</block>']
+      const win = new MockWindow()
+      const session = await autoSession('rid-auto-fallback', win)
+
+      expect(await gate('call_f1', 'bash', { command: 'npm test' })).toEqual({
+        behavior: 'allow'
+      })
+      expect(await gate('call_f2', 'bash', { command: 'npm run build' })).toEqual({
+        behavior: 'allow'
+      })
+
+      // The fallback model, trimmed, is the one that answered.
+      expect(judgeCalls.map((c) => c.body.model)).toEqual([FALLBACK, FALLBACK])
+      expect(mockResolveJudgeRoute).toHaveBeenCalledWith('pi', PRIMARY)
+      expect(mockResolveJudgeRoute).toHaveBeenCalledWith('pi', FALLBACK)
+      expect(sentChannels(win)).not.toContain('session:approval-request')
+      expect(sentPayloads(win, 'session:error')).toEqual([fallbackBanner()])
+      session.dispose()
+    })
+
+    it('a primary that fails mid-call (HTTP 503) hands the same action to the fallback', async () => {
+      enableAutoMode({ judgeModel: PRIMARY, fallbackJudgeModel: FALLBACK })
+      const win = new MockWindow()
+      const session = await autoSession('rid-auto-fallback-503', win)
+      // Down for the primary's route only; the fallback's route answers.
+      mockPickJudgeFetch.mockReset().mockImplementation(async () =>
+        fakeJudgeFetch(async (call) => {
+          judgeCalls.push(call)
+          return call.body.model === 'primary-model'
+            ? new Response('judge down', { status: 503 })
+            : '<block>no</block>'
+        })
+      )
+      mockResolveJudgeRoute.mockImplementation(async (_engine: string, value: string) => ({
+        ok: true,
+        route: fakeJudgeRoute(value === PRIMARY ? 'primary-model' : 'fallback-model')
+      }))
+
+      expect(await gate('call_f3', 'bash', { command: 'npm test' })).toEqual({
+        behavior: 'allow'
+      })
+
+      expect(judgeCalls.map((c) => c.body.model)).toEqual(['primary-model', 'fallback-model'])
+      const errors = sentPayloads(win, 'session:error') as string[]
+      expect(errors).toHaveLength(1)
+      expect(errors[0]).toContain('Auto-mode judge unavailable:')
+      expect(errors[0]).toContain(`${FALLBACK} is judging instead`)
+      session.dispose()
+    })
+
+    it('both judges unavailable: the human decides, with one banner per judge', async () => {
+      enableAutoMode({ judgeModel: PRIMARY, fallbackJudgeModel: FALLBACK })
+      noRouteFor(PRIMARY, FALLBACK)
+      const win = new MockWindow()
+      const session = await autoSession('rid-auto-fallback-both', win)
+
+      void gate('call_f4', 'bash', { command: 'npm test' })
+      await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request')).toHaveLength(1))
+      void gate('call_f5', 'bash', { command: 'npm run build' })
+      await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request')).toHaveLength(2))
+
+      expect(judgeCalls).toHaveLength(0)
+      expect(sentPayloads(win, 'session:error')).toEqual([
+        fallbackBanner(),
+        cantJudge(`fallback ${FALLBACK}: ${REASON}`)
+      ])
+      session.dispose()
+    })
+
+    it('a fallback equal to the effective primary is no fallback (the original banner)', async () => {
+      // No judgeModel: the primary is the session's own model.
+      enableAutoMode({ fallbackJudgeModel: 'acme/fast-1' })
+      noRouteFor('acme/fast-1')
+      const win = new MockWindow()
+      const session = new PiSession('rid-auto-fallback-same', win as never, '/cwd', {
+        model: 'acme/fast-1'
+      })
+      await session.setPermissionMode('auto')
+      await session.run('hi')
+
+      void gate('call_f6', 'bash', { command: 'npm test' })
+      await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request')).toHaveLength(1))
+
+      expect(mockResolveJudgeRoute).toHaveBeenCalledTimes(1)
+      expect(sentPayloads(win, 'session:error')).toEqual([cantJudge(REASON)])
+      session.dispose()
+    })
+
+    it('a blank fallback is no fallback', async () => {
+      enableAutoMode({ judgeModel: PRIMARY, fallbackJudgeModel: '   ' })
+      noRouteFor(PRIMARY)
+      const win = new MockWindow()
+      const session = await autoSession('rid-auto-fallback-blank', win)
+
+      void gate('call_f7', 'bash', { command: 'npm test' })
+      await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request')).toHaveLength(1))
+
+      expect(sentPayloads(win, 'session:error')).toEqual([cantJudge(REASON)])
+      session.dispose()
+    })
+
+    it('a fallback pi no longer lists is no fallback: the human decides, one log line', async () => {
+      enableAutoMode({ judgeModel: PRIMARY, fallbackJudgeModel: 'openai-codex/gone' })
+      catalog(PRIMARY, FALLBACK)
+      noRouteFor(PRIMARY)
+      const warn = vi.mocked(logger.warn)
+      warn.mockClear()
+      const win = new MockWindow()
+      const session = await autoSession('rid-auto-fallback-stale', win)
+
+      void gate('call_f8', 'bash', { command: 'npm test' })
+      await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request')).toHaveLength(1))
+      void gate('call_f9', 'bash', { command: 'npm run build' })
+      await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request')).toHaveLength(2))
+
+      expect(judgeCalls).toHaveLength(0)
+      expect(mockResolveJudgeRoute).not.toHaveBeenCalledWith('pi', 'openai-codex/gone')
+      expect(sentPayloads(win, 'session:error')).toEqual([cantJudge(REASON)])
+      expect(
+        warn.mock.calls.filter(([, msg]) => String(msg).includes('fallback judge'))
+      ).toHaveLength(1)
+      session.dispose()
+    })
+
+    it('a stale PRIMARY is judged by the fallback, and the banner says so', async () => {
+      enableAutoMode({ judgeModel: 'openai-codex/gone', fallbackJudgeModel: FALLBACK })
+      catalog(FALLBACK)
+      judgeScript.replies = ['<block>no</block>']
+      const win = new MockWindow()
+      const session = await autoSession('rid-auto-fallback-stale-primary', win)
+
+      expect(await gate('call_f10', 'bash', { command: 'npm test' })).toEqual({
+        behavior: 'allow'
+      })
+
+      expect(mockResolveJudgeRoute).toHaveBeenCalledTimes(1)
+      expect(mockResolveJudgeRoute).toHaveBeenCalledWith('pi', FALLBACK)
+      expect(sentPayloads(win, 'session:error')).toEqual([
+        'Auto-mode judge model "openai-codex/gone" is no longer available — ' +
+          `${FALLBACK} is judging instead. Change the judge models in Settings › Sessions & ` +
+          'autonomy › Auto-mode judge (pi).'
+      ])
+      session.dispose()
+    })
+  })
+
+  describe('fallback judge on another ChatGPT account (autoMode.fallbackJudgeAccount)', () => {
+    const MODEL = 'openai-codex/gpt-6-luna'
+    const OTHER = 'openai-codex/gpt-5.4-mini'
+    const REASON = 'ChatGPT hit its usage limit.'
+    const label = (plan: string): string => `${MODEL} (${plan} account)`
+
+    beforeEach(() => {
+      chatgptVault.activeId = 'acct-plus'
+      chatgptVault.accounts = [
+        { id: 'acct-plus', planType: 'plus' },
+        { id: 'acct-biz', planType: 'business' }
+      ]
+    })
+    afterEach(() => resetChatgptAccounts())
+
+    /** The active account's route is down; the named account's answers on its own model id. */
+    function activeAccountDown(): void {
+      mockResolveJudgeRoute.mockImplementation(
+        async (
+          _engine: string,
+          _value: string,
+          _deps?: object,
+          opts?: { chatgptAccountId?: string }
+        ) =>
+          opts?.chatgptAccountId
+            ? { ok: true, route: fakeJudgeRoute(`model-on-${opts.chatgptAccountId}`) }
+            : { ok: false, code: 'rate-limited', reason: REASON }
+      )
+    }
+
+    function enable(extra: Record<string, unknown>): void {
+      mockLoadEngineConfig.mockReturnValue({
+        autoMode: { enabled: true, twoStageMode: 'fast', ...extra }
+      })
+    }
+
+    async function session(routingId: string, win: MockWindow): Promise<PiSession> {
+      const s = new PiSession(routingId, win as never, '/cwd', {})
+      await s.setPermissionMode('auto')
+      await s.run('hi')
+      return s
+    }
+
+    it('the same model on a different account is a fallback: it resolves on that account, and the banner names its plan', async () => {
+      enable({ judgeModel: MODEL, fallbackJudgeModel: MODEL, fallbackJudgeAccount: 'acct-biz' })
+      activeAccountDown()
+      judgeScript.replies = ['<block>no</block>']
+      const win = new MockWindow()
+      const s = await session('rid-auto-fb-account', win)
+
+      expect(await gate('call_a1', 'bash', { command: 'npm test' })).toEqual({
+        behavior: 'allow'
+      })
+
+      // The primary asked for the active account; the fallback named its own.
+      expect(mockResolveJudgeRoute).toHaveBeenNthCalledWith(1, 'pi', MODEL)
+      expect(mockResolveJudgeRoute).toHaveBeenNthCalledWith(
+        2,
+        'pi',
+        MODEL,
+        {},
+        {
+          chatgptAccountId: 'acct-biz'
+        }
+      )
+      expect(judgeCalls.map((c) => c.body.model)).toEqual(['model-on-acct-biz'])
+      expect(sentPayloads(win, 'session:error')).toEqual([
+        `Auto-mode judge unavailable: ${REASON} ${label('Business')} is judging instead until it recovers. ` +
+          'Change the judge models in Settings › Sessions & autonomy › Auto-mode judge (pi).'
+      ])
+      s.dispose()
+    })
+
+    it('the same model on the ACTIVE account is no fallback (it would repeat the failure)', async () => {
+      enable({ judgeModel: MODEL, fallbackJudgeModel: MODEL, fallbackJudgeAccount: 'acct-plus' })
+      activeAccountDown()
+      const win = new MockWindow()
+      const s = await session('rid-auto-fb-same-account', win)
+
+      void gate('call_a2', 'bash', { command: 'npm test' })
+      await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request')).toHaveLength(1))
+
+      expect(mockResolveJudgeRoute).toHaveBeenCalledTimes(1)
+      expect(judgeCalls).toHaveLength(0)
+      expect(sentPayloads(win, 'session:error')).toEqual([
+        `Auto-mode can't judge here: ${REASON} Every gated action will ask you instead. ` +
+          'Change the judge model in Settings › Sessions & autonomy › Auto-mode judge (pi).'
+      ])
+      s.dispose()
+    })
+
+    it('a different fallback model on a named account pays with it too, and both banners carry its plan', async () => {
+      enable({ judgeModel: MODEL, fallbackJudgeModel: OTHER, fallbackJudgeAccount: 'acct-biz' })
+      mockResolveJudgeRoute.mockImplementation(async () => ({
+        ok: false,
+        code: 'chatgpt-unavailable',
+        reason: REASON
+      }))
+      const win = new MockWindow()
+      const s = await session('rid-auto-fb-both-down', win)
+
+      void gate('call_a3', 'bash', { command: 'npm test' })
+      await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request')).toHaveLength(1))
+
+      expect(mockResolveJudgeRoute).toHaveBeenCalledWith(
+        'pi',
+        OTHER,
+        {},
+        {
+          chatgptAccountId: 'acct-biz'
+        }
+      )
+      expect(sentPayloads(win, 'session:error')).toEqual([
+        `Auto-mode judge unavailable: ${REASON} ${OTHER} (Business account) is judging instead until it recovers. ` +
+          'Change the judge models in Settings › Sessions & autonomy › Auto-mode judge (pi).',
+        `Auto-mode can't judge here: fallback ${OTHER} (Business account): ${REASON} ` +
+          'Every gated action will ask you instead. ' +
+          'Change the judge model in Settings › Sessions & autonomy › Auto-mode judge (pi).'
+      ])
+      s.dispose()
+    })
+
+    it('no account named: the fallback resolves exactly as before (the active account)', async () => {
+      enable({ judgeModel: MODEL, fallbackJudgeModel: OTHER })
+      mockResolveJudgeRoute.mockImplementation(async (_engine: string, value: string) =>
+        value === MODEL
+          ? { ok: false, code: 'rate-limited', reason: REASON }
+          : { ok: true, route: fakeJudgeRoute('fallback-model') }
+      )
+      judgeScript.replies = ['<block>no</block>']
+      const win = new MockWindow()
+      const s = await session('rid-auto-fb-no-account', win)
+
+      await gate('call_a4', 'bash', { command: 'npm test' })
+
+      expect(mockResolveJudgeRoute).toHaveBeenLastCalledWith('pi', OTHER)
+      expect(sentPayloads(win, 'session:error')).toEqual([
+        `Auto-mode judge unavailable: ${REASON} ${OTHER} is judging instead until it recovers. ` +
+          'Change the judge models in Settings › Sessions & autonomy › Auto-mode judge (pi).'
+      ])
+      s.dispose()
+    })
+  })
+
   it("a judge call's usage → recordJudgeUsage with the session's ids and the route's account", async () => {
     enableAutoMode()
     judgeScript.replies = ['<block>no</block>']
@@ -5291,6 +5632,27 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
       expect.objectContaining({ name: 'impl-e1', description: 'Review auth diff' }),
       expect.anything()
     )
+  })
+
+  it.each([
+    ['a directory', { workdir: '/cwd/wt' }, '/cwd/wt'],
+    ['a padded one, trimmed', { workdir: '  ../wt  ' }, '../wt'],
+    ['an empty one, absent', { workdir: '' }, undefined],
+    ['a blank one, absent', { workdir: '   ' }, undefined],
+    ['none, absent', {}, undefined]
+  ])('hands the dispatcher the workdir: %s', async (_label, extra, expected) => {
+    mockDispatch.mockResolvedValue({ text: 'ok', sessionId: 'prev-sess' })
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-workdir', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const input = { engine: 'opencode', prompt: 'go', ...extra }
+    await grantViaApproval(win, session, 'call_dispatch_workdir', input)
+    await hostedTool('dispatch_agent', input, 'call_dispatch_workdir')
+
+    const sent = mockDispatch.mock.calls[0][0]
+    if (expected === undefined) expect(sent).not.toHaveProperty('workdir')
+    else expect(sent).toMatchObject({ workdir: expected })
   })
 
   it('passes model through to the DispatchRequest when the model supplies it', async () => {

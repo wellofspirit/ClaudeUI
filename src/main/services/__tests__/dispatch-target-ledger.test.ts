@@ -64,6 +64,7 @@ function row(over: Partial<DispatchTargetRow> = {}): DispatchTargetRow {
     parentEngine: 'opencode',
     parentToolUseId: 'toolu_1',
     cwd: '/proj',
+    parentCwd: '/proj',
     model: 'haiku',
     launchMode: 'acceptEdits',
     accountKey: 'anthropic:org:acc',
@@ -93,7 +94,7 @@ describe('dispatch_target (migration v35)', () => {
       expect(exists()).toBe(false)
       runMigrations(older)
       expect(exists()).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(39)
+      expect(older.pragma('user_version', { simple: true })).toBe(40)
       const columns = (
         older.prepare('PRAGMA table_info(dispatch_target)').all() as { name: string }[]
       ).map((c) => c.name)
@@ -119,7 +120,9 @@ describe('dispatch_target (migration v35)', () => {
         'hand_back',
         // v39: the instance that runs a `running` target.
         'owner_pid',
-        'owner_boot'
+        'owner_boot',
+        // v40: the dispatching session's own directory (the target's `cwd` may be its `workdir`).
+        'parent_cwd'
       ])
     } finally {
       older.close()
@@ -146,7 +149,7 @@ describe('migration v39 (the owner of a running target)', () => {
         )
         .run()
       runMigrations(older)
-      expect(older.pragma('user_version', { simple: true })).toBe(39)
+      expect(older.pragma('user_version', { simple: true })).toBe(40)
       const [kept] = runningDispatchTargets(older)
       expect(kept).toMatchObject({
         id: 's-aaaaaa',
@@ -162,7 +165,66 @@ describe('migration v39 (the owner of a running target)', () => {
   })
 })
 
+describe('migration v40 (the parent directory of a target)', () => {
+  it('adds a nullable parent_cwd, and a row written before it reads it as its own cwd', () => {
+    const older = new BetterSqlite3(':memory:') as unknown as Db
+    try {
+      runMigrations(
+        older,
+        MIGRATIONS.filter((m) => m.version < 40)
+      )
+      expect(older.pragma('user_version', { simple: true })).toBe(39)
+      older
+        .prepare(
+          `INSERT INTO dispatch_target
+             (id, engine, harness_ref, parent_session_id, parent_engine, cwd, model, launch_mode,
+              state, created_at, last_active_at)
+           VALUES ('s-bbbbbb', 'pi', 'h-2', 'p-1', 'claude', 'D:/repo', 'm', 'default',
+                   'idle', 5, 6)`
+        )
+        .run()
+      runMigrations(older)
+      expect(older.pragma('user_version', { simple: true })).toBe(40)
+      const column = (
+        older.prepare('PRAGMA table_info(dispatch_target)').all() as {
+          name: string
+          notnull: number
+        }[]
+      ).find((c) => c.name === 'parent_cwd')
+      expect(column).toMatchObject({ name: 'parent_cwd', notnull: 0 })
+      expect(
+        (
+          older.prepare("SELECT parent_cwd FROM dispatch_target WHERE id = 's-bbbbbb'").get() as {
+            parent_cwd: string | null
+          }
+        ).parent_cwd
+      ).toBeNull()
+      expect(getDispatchTarget('s-bbbbbb', older)).toMatchObject({
+        cwd: 'D:/repo',
+        parentCwd: 'D:/repo'
+      })
+    } finally {
+      older.close()
+    }
+  })
+})
+
 describe('dispatch_target DAO', () => {
+  it('stores the directory a target runs in beside the dispatching session directory', () => {
+    insertDispatchTarget(row({ cwd: '/proj/wt/a', parentCwd: '/proj' }), db)
+    expect(getDispatchTarget('s-000001', db)).toMatchObject({
+      cwd: '/proj/wt/a',
+      parentCwd: '/proj'
+    })
+    expect(
+      (
+        db.prepare("SELECT parent_cwd FROM dispatch_target WHERE id = 's-000001'").get() as {
+          parent_cwd: string
+        }
+      ).parent_cwd
+    ).toBe('/proj')
+  })
+
   it('round-trips a row by id and by (engine, harness id)', () => {
     expect(insertDispatchTarget(row(), db)).toBe(true)
     expect(getDispatchTarget('s-000001', db)).toEqual(row())

@@ -40,6 +40,7 @@ import {
   DISPATCH_FOLLOW_UP_GUIDANCE,
   DISPATCH_NAME_PARAM,
   DISPATCH_SESSION_ID_REMOVED_TEXT,
+  DISPATCH_WORKDIR_PARAM,
   dispatchResultSuffix,
   HAND_BACK_DESCRIPTION
 } from '../../../shared/dispatch-agent-description'
@@ -442,6 +443,39 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     })
   })
 
+  it.each([
+    ['a directory', { workdir: '/proj/wt' }, '/proj/wt'],
+    ['a padded one, trimmed', { workdir: '  ../wt  ' }, '../wt'],
+    ['an empty one, absent', { workdir: '' }, undefined],
+    ['a blank one, absent', { workdir: '   ' }, undefined],
+    ['none, absent', {}, undefined]
+  ])('passes the workdir through to the DispatchRequest: %s', async (_label, extra, expected) => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'claude-1' }))
+    const tool = getDispatchTool(tmp, {
+      lookupCallerSession: () => ({
+        cwd: '/proj',
+        getAutonomyMode: () => 'default',
+        getMessages: () => [],
+        emit: vi.fn(),
+        addDispatchedCost: vi.fn()
+      }),
+      dispatch
+    })
+    await tool.handler(
+      {
+        engine: 'claude',
+        prompt: 'x',
+        description: 'Review auth diff',
+        ...extra,
+        __xeng_caller_session: 'ses_caller'
+      },
+      makeExtra()
+    )
+    const sent = dispatch.mock.calls[0][0]
+    if (expected === undefined) expect(sent).not.toHaveProperty('workdir')
+    else expect(sent).toMatchObject({ workdir: expected })
+  })
+
   it('missing __xeng_call_id → dispatch still proceeds, ctx.toolUseId is undefined', async () => {
     const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'claude-1' }))
     const tool = getDispatchTool(tmp, {
@@ -575,6 +609,15 @@ function getDispatchToolDef(t: string): {
 describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033 follow-up)', () => {
   afterEach(() => {
     vi.mocked(loadEngineConfig).mockReturnValue({})
+  })
+
+  it('takes an optional workdir string, worded by the shared description module', () => {
+    const { shape } = getDispatchToolDef(tmp).inputSchema
+    expect(shape.workdir.description).toBe(DISPATCH_WORKDIR_PARAM)
+    const workdir = shape.workdir as unknown as { safeParse: (v: unknown) => { success: boolean } }
+    expect(workdir.safeParse(undefined).success).toBe(true)
+    expect(workdir.safeParse('/proj/wt').success).toBe(true)
+    expect(workdir.safeParse(7).success).toBe(false)
   })
 
   it('takes an optional name and a required description, worded by the shared description module', () => {

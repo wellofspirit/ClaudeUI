@@ -21,6 +21,7 @@ import {
   buildUserPrompt,
   classify,
   formatVerdictLine,
+  isSingleSampleBlock,
   requiresFullReview,
   type ClassifyInput,
   type JudgeRequest,
@@ -119,6 +120,111 @@ describe('classify — two-sample confirmation', () => {
       expect(r).toMatchObject({ block: true, stage: 'thinking', category: slug })
       expect(r.overturnedBlock).toBeUndefined()
     }
+  })
+
+  describe('the credential exemption tolerates a sloppy category (ADR-106 §2)', () => {
+    // None of these survives parseCategory's exact-slug check, so `category` is
+    // absent on the first sample — the exemption has to read the raw text.
+    const SLOPPY: Array<[string, string]> = [
+      [
+        'two rules in one category tag',
+        '<block>yes</block><category>Credential Exploration / Credential Leakage</category><reason>[Credential Exploration] dumps the store</reason>'
+      ],
+      [
+        'a category with a qualifier',
+        '<block>yes</block><category>Credential Exploration (adversarial)</category><reason>reads keys</reason>'
+      ],
+      [
+        'a category with a dash suffix',
+        '<block>yes</block><category>Credential Exploration – reading keys</category><reason>reads keys</reason>'
+      ],
+      [
+        'a lower-case category with a note',
+        '<block>yes</block><category>credential leakage (token in a URL)</category><reason>prints a token</reason>'
+      ],
+      [
+        'no category tag, a bracketed reason',
+        '<block>yes</block><reason>[Credential Exploration] reads the account store</reason>'
+      ],
+      [
+        'a bracketed reason after other words',
+        '<block>yes</block><reason>Blocked: [Credential Leakage] prints a token</reason>'
+      ],
+      [
+        'a plain sentence naming the rule',
+        '<block>yes</block><reason>credential exploration: reads the account store</reason>'
+      ]
+    ]
+
+    it.each(SLOPPY)('thinking: %s → one sample', async (_label, reply) => {
+      const judge = scripted([reply, ALLOW])
+      const r = await classify({ ...base, twoStageMode: 'thinking' }, judge)
+      expect(judge).toHaveBeenCalledTimes(1)
+      expect(r.block).toBe(true)
+      expect(r.overturnedBlock).toBeUndefined()
+      // The surfaced category is still the VALIDATED one: a sloppy tag is dropped.
+      expect(r.category).toBeUndefined()
+    })
+
+    it.each(SLOPPY)('fast: %s → one sample', async (_label, reply) => {
+      const judge = scripted([reply, ALLOW])
+      const r = await classify({ ...base, twoStageMode: 'fast' }, judge)
+      expect(judge).toHaveBeenCalledTimes(1)
+      expect(r).toMatchObject({ block: true, stage: 'fast' })
+      expect(r.overturnedBlock).toBeUndefined()
+    })
+
+    it('fast: a one-sentence reason that names the rule is exempt; one that does not is confirmed', async () => {
+      const named = scripted([
+        '<block>yes</block><reason>Credential Leakage of a token</reason>',
+        ALLOW
+      ])
+      expect(await classify({ ...base, twoStageMode: 'fast' }, named)).toMatchObject({
+        block: true
+      })
+      expect(named).toHaveBeenCalledTimes(1)
+
+      const plain = scripted(['<block>yes</block><reason>force-push to main</reason>', ALLOW])
+      expect(await classify({ ...base, twoStageMode: 'fast' }, plain)).toMatchObject({
+        block: false
+      })
+      expect(plain).toHaveBeenCalledTimes(2)
+    })
+
+    it('both: the escalated stage 2 gets the same tolerance', async () => {
+      const judge = scripted([
+        '<severity>90',
+        '<block>yes</block><category>Credential Exploration (adversarial)</category><reason>reads keys</reason>',
+        ALLOW
+      ])
+      const r = await classify({ ...base, twoStageMode: 'both' }, judge)
+      expect(judge).toHaveBeenCalledTimes(2)
+      expect(r).toMatchObject({ block: true, stage: 'thinking', severity: 90 })
+    })
+
+    it('a non-credential block is still confirmed, whatever the thinking said', async () => {
+      const judge = scripted([
+        '<thinking>this is not credential exploration or credential leakage</thinking><block>yes</block><category>Git Destructive</category><reason>[Git Destructive] force-push</reason>',
+        ALLOW
+      ])
+      const r = await classify({ ...base, twoStageMode: 'thinking' }, judge)
+      expect(judge).toHaveBeenCalledTimes(2)
+      expect(r.block).toBe(false)
+    })
+
+    it('isSingleSampleBlock reads the slug, the raw category and the reason — nothing else', () => {
+      expect(isSingleSampleBlock({ category: 'credential_leakage' }, '')).toBe(true)
+      expect(isSingleSampleBlock({}, '<category>Credential Exploration / x</category>')).toBe(true)
+      expect(isSingleSampleBlock({ reason: '[Credential Leakage] x' }, '')).toBe(true)
+      expect(isSingleSampleBlock({ category: 'git_destructive' }, '')).toBe(false)
+      expect(
+        isSingleSampleBlock({ reason: 'force-push' }, '<category>Git Destructive</category>')
+      ).toBe(false)
+      // A category quoted in the model's reasoning is not its verdict.
+      expect(
+        isSingleSampleBlock({}, '<thinking><category>Credential Leakage</category></thinking>')
+      ).toBe(false)
+    })
   })
 
   it('thinking: block + transport error → keep the block, not unavailable (2 calls)', async () => {

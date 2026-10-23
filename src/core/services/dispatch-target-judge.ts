@@ -62,14 +62,22 @@ import {
   type JudgePipelineStage
 } from '../automode/judge-pipeline'
 import { captureShellActionMeta, opencodeShellFor } from '../automode/action-meta'
+import { refreshChatgptAccounts } from '../automode/judge-accounts'
 import {
-  judgeRouteUnavailableMessage,
+  fallbackJudgeAccountFor,
+  fallbackJudgeLabel,
+  fallbackJudgeModelFor,
+  fallbackUnavailableMessage,
+  judgeUnavailableMessage,
+  makeFallbackJudge,
   makeSessionJudgeTransport,
+  staleJudgeModelMessage,
   type SessionJudgeOptions
 } from '../automode/session-judge'
 import { inTimeOrder } from '../automode/trajectory'
 import { blockGrantKey, type BlockedCallLedger } from '../automode/blocked-calls'
 import { RESULT_REPORT_MAX } from './dispatch-result-text'
+import { logger } from './logger'
 import { loadSharedAutoModeConfig } from './ui-config'
 
 // The trajectory helper moved to a leaf (`automode/trajectory.ts`, ADR-089) so
@@ -92,7 +100,20 @@ export interface DispatchTargetJudgeOptions {
    * not route). Read per call.
    */
   fixedModel?: () => string
+  /** The target's working directory (a `workdir` launch: not its dispatcher's). */
   cwd: string
+  /**
+   * Directories that COUNT AS LOCAL to the judge but that the engine does not grant the target:
+   * the dispatching session's own directory when the target runs elsewhere (a sibling worktree)
+   * and the user's additional directories. Read per call.
+   *
+   * CONTEXT ONLY: they reach exactly two consumers, the classifier's Environment text and the
+   * redirect measurement's in-scope roots (`withContextDirs`). They are never in
+   * `call.permissions()`, which feeds the read-only gate and the allow-rule gate (an additional
+   * directory there is an allow path) and the engine's own ruleset: a target is governed by its
+   * autonomy mode, not by what the user pre-approved for their own chats (ADR-033).
+   */
+  contextDirs?: () => readonly string[]
   /**
    * The DISPATCHING session's routing id (`fromRoutingId`) — judge usage rows land under it.
    * A thunk when the dispatcher can be re-keyed under a running target (ADR-105): read per call.
@@ -162,7 +183,8 @@ export interface HandBackReviewCall {
  * The pipeline's detail as a report review (ADR-105 §3): a block is a block, an allow an allow,
  * and everything else (no route, a timeout, a transport error, a stale judge model, auto mode
  * left meanwhile, a reply that could not be read, a cancelled review) is "could not review".
- * `routeReason` is the route resolver's sentence when the judge model had no route.
+ * `routeReason` is what the session judge transport reported: the route resolver's sentence when
+ * the judge model had no route, else the first failed call's summary.
  */
 export function reviewFromPipeline(
   detail: JudgePipelineDetail,
@@ -190,6 +212,36 @@ export function reviewFromPipeline(
   }
 }
 
+/** A directory's comparison key: separators and trailing slash folded, case folded on win32. */
+function dirKey(dir: string, platform: NodeJS.Platform): string {
+  let key = dir.trim()
+  if (platform === 'win32') key = key.replaceAll('\\', '/').toLowerCase()
+  while (key.length > 1 && key.endsWith('/') && !key.endsWith(':/')) key = key.slice(0, -1)
+  return key
+}
+
+/**
+ * `dirs` without blanks, non-strings, repeats and `except`, in order, first spelling kept. Two
+ * spellings of one directory are one on win32 (case, `\` against `/`, a trailing slash); elsewhere
+ * only the trailing slash is folded. A path is never resolved or touched on disk.
+ */
+export function uniqueDirs(
+  dirs: readonly (string | null | undefined)[],
+  except?: string,
+  platform: NodeJS.Platform = process.platform
+): string[] {
+  const seen = new Set<string>(except ? [dirKey(except, platform)] : [])
+  const out: string[] = []
+  for (const dir of dirs) {
+    if (typeof dir !== 'string' || dir.trim() === '') continue
+    const key = dirKey(dir, platform)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(dir)
+  }
+  return out
+}
+
 export class DispatchTargetJudge {
   private readonly autoMode: AutoModeConfig
   private readonly denials = new AutoModeDenialTracker()
@@ -201,6 +253,9 @@ export class DispatchTargetJudge {
   private visibilityPromise: Promise<RepoVisibility> | undefined
   private staleJudgeModelReported = false
   private routeUnavailableReported = false
+  /** The fallback judge's own one banner, apart from the primary's. */
+  private fallbackRouteUnavailableReported = false
+  private staleFallbackJudgeLogged = false
   /** The target judge's construction time: redirect mtimes at or after it are
    *  `modifiedSinceSessionStart`. A resumed session restarts the clock. */
   private readonly sessionStartMs = Date.now()
@@ -302,6 +357,7 @@ export class DispatchTargetJudge {
     call: HandBackReviewCall
   ): Promise<ReportReview> {
     let routeReason: string | undefined
+    let fallbackReason: string | undefined
     try {
       const shown =
         report.length > RESULT_REPORT_MAX
@@ -333,21 +389,31 @@ export class DispatchTargetJudge {
             return (req) =>
               judge({ ...req, signal: req.signal ? AbortSignal.any([req.signal, signal]) : signal })
           },
-          false
+          false,
+          (label, reason) => {
+            fallbackReason ??= `Fallback ${label}: ${reason}`
+          }
         )
       )
-      return reviewFromPipeline(detail, routeReason)
+      // The review's note names both judges when the fallback could not answer either.
+      const why = [routeReason, fallbackReason].filter((r) => r !== undefined).join(' ')
+      return reviewFromPipeline(detail, why || undefined)
     } catch (err) {
       return { kind: 'unavailable', why: err instanceof Error ? err.message : String(err) }
     }
   }
 
-  /** The pipeline's hooks for one call; `grants` — whether a user's approved block clears it (tool calls only). */
+  /**
+   * The pipeline's hooks for one call; `grants` — whether a user's approved block clears it (tool
+   * calls only); `onFallbackUnavailable` — where the fallback judge's failure goes instead of the
+   * target's one banner (a report review's note).
+   */
   private hooks(
     call: DispatchTargetJudgeCall,
     denials: AutoModeDenialTracker,
     transport: () => JudgeTransport,
-    grants: boolean
+    grants: boolean,
+    onFallbackUnavailable?: (label: string, reason: string) => void
   ): JudgePipelineHooks {
     const subagent = this.opts.subagent()
     return {
@@ -359,15 +425,27 @@ export class DispatchTargetJudge {
       honoursWorkdir: call.honoursWorkdir,
       ...(call.skipReadOnlyGate ? { skipReadOnlyGate: true } : {}),
       ...(subagent ? { subagent } : {}),
-      judgeAvailable: () => this.judgeAvailable(),
+      judgeAvailable: () =>
+        // A fallback on the primary's own model is only a fallback on ANOTHER ChatGPT account:
+        // learn which one is active (and the fallback's plan, for its label) before deciding.
+        this.fallbackJudgeAccount()
+          ? refreshChatgptAccounts().then(() => this.judgeAvailable())
+          : this.judgeAvailable(),
       judgeTransport: transport,
+      fallbackJudgeTransport: () => this.fallbackJudge(onFallbackUnavailable),
       messages: () => {
         const loading = this.opts.loadMessages?.()
         return loading ? loading.then((parent) => this.mergeMessages(parent)) : this.judgeMessages()
       },
-      environment: () => this.environment(call.permissions()),
+      // The two consumers of the context directories; `permissions` above stays plain.
+      environment: () => this.environment(this.withContextDirs(call.permissions())),
       captureActionMeta: (toolName, input) =>
-        this.captureActionMeta(toolName, input, call.honoursWorkdir, call.permissions()),
+        this.captureActionMeta(
+          toolName,
+          input,
+          call.honoursWorkdir,
+          this.withContextDirs(call.permissions())
+        ),
       outcomes: () => (this.outcomes.size ? Object.fromEntries(this.outcomes) : undefined),
       denials,
       twoStageMode: () => this.autoMode.twoStageMode ?? 'both',
@@ -421,11 +499,81 @@ export class DispatchTargetJudge {
       this.staleJudgeModelReported = true
       this.opts.emit()(
         'session:error',
-        `Auto-mode judge model "${configured}" is no longer available — every gated action will ask you instead. ` +
-          `Change it in Settings › Sessions & autonomy › Auto-mode judge (${this.opts.engine}).`
+        staleJudgeModelMessage(this.opts.engine, configured, this.fallbackLabel())
       )
     }
     return false
+  }
+
+  /**
+   * The fallback judge model in effect (`autoMode.fallbackJudgeModel` of the TARGET engine), or
+   * undefined: none set, the same as the primary, no longer in the engine's catalog (one log
+   * line; never a crash — the human decides), or a {@link DispatchTargetJudgeOptions.fixedModel}
+   * judge (a Codex target's report review: the fallback picker has no Codex namespace to name
+   * a model in). The same cache-only peek as {@link judgeAvailable}.
+   */
+  private fallbackJudgeModel(): string | undefined {
+    if (this.opts.fixedModel) return undefined
+    const model = fallbackJudgeModelFor(
+      this.autoMode.fallbackJudgeModel,
+      this.autoMode.judgeModel ?? this.opts.model(),
+      this.autoMode.fallbackJudgeAccount
+    )
+    if (!model) return undefined
+    const all = (this.opts.peekModels() ?? []).flatMap((g) => g.models)
+    if (all.length === 0 || all.some((m) => m.value === model)) return model
+    if (!this.staleFallbackJudgeLogged) {
+      this.staleFallbackJudgeLogged = true
+      logger.warn(
+        'CrossEngineDispatcher',
+        `auto-mode fallback judge model "${model}" is no longer available — no fallback`
+      )
+    }
+    return undefined
+  }
+
+  /** The ChatGPT vault account the fallback judge pays with (the TARGET engine's `autoMode.fallbackJudgeAccount`), if one is named. */
+  private fallbackJudgeAccount(): string | undefined {
+    return fallbackJudgeAccountFor(this.autoMode.fallbackJudgeAccount)
+  }
+
+  /** The fallback judge as a banner names it: its model, plus the named account's plan. */
+  private fallbackLabel(): string | undefined {
+    const model = this.fallbackJudgeModel()
+    return model ? fallbackJudgeLabel(model, this.fallbackJudgeAccount()) : undefined
+  }
+
+  /**
+   * The pipeline's `fallbackJudgeTransport`. Its failure shows the target's one fallback banner,
+   * or goes to `onUnavailable` (a report review tells the REPORT, not the target) with the
+   * fallback's label.
+   */
+  private fallbackJudge(
+    onUnavailable?: (label: string, reason: string) => void
+  ): { transport: JudgeTransport; label: string } | undefined {
+    const model = this.fallbackJudgeModel()
+    if (!model) return undefined
+    const label = fallbackJudgeLabel(model, this.fallbackJudgeAccount())
+    return makeFallbackJudge(
+      model,
+      {
+        engine: this.opts.engine,
+        sessionId: this.opts.sessionId,
+        routingId:
+          typeof this.opts.routingId === 'function' ? this.opts.routingId() : this.opts.routingId,
+        chatgptAccountId: () => this.fallbackJudgeAccount(),
+        onUnavailable: (reason) => {
+          if (onUnavailable) return onUnavailable(label, reason)
+          if (this.fallbackRouteUnavailableReported) return
+          this.fallbackRouteUnavailableReported = true
+          this.opts.emit()(
+            'session:error',
+            fallbackUnavailableMessage(this.opts.engine, label, reason)
+          )
+        }
+      },
+      this.opts.makeTransport
+    )
   }
 
   /**
@@ -449,7 +597,10 @@ export class DispatchTargetJudge {
         ((reason) => {
           if (this.routeUnavailableReported) return
           this.routeUnavailableReported = true
-          this.opts.emit()('session:error', judgeRouteUnavailableMessage(this.opts.engine, reason))
+          this.opts.emit()(
+            'session:error',
+            judgeUnavailableMessage(this.opts.engine, reason, this.fallbackLabel())
+          )
         })
     })
   }
@@ -482,10 +633,37 @@ export class DispatchTargetJudge {
   }
 
   /**
+   * `permissions` with the {@link DispatchTargetJudgeOptions.contextDirs} added to its additional
+   * directories, for the Environment text and the redirect scope ONLY (never `hooks.permissions`).
+   * A read that fails leaves the directories out: the judge then treats them as external, the
+   * stricter reading.
+   */
+  private withContextDirs<T extends Pick<ClaudePermissions, 'additionalDirectories'>>(
+    permissions: T
+  ): T {
+    let extra: readonly string[] = []
+    try {
+      extra = this.opts.contextDirs?.() ?? []
+    } catch (err) {
+      logger.warn(
+        'CrossEngineDispatcher',
+        `target judge: could not read the context directories: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    if (extra.length === 0) return permissions
+    return {
+      ...permissions,
+      additionalDirectories: uniqueDirs([...(permissions.additionalDirectories ?? []), ...extra])
+    }
+  }
+
+  /**
    * The classifier's Environment section. `permissions` is the target's
-   * `userDenyAsk(cwd)` — the user's deny/ask rules, allow empty — which is
+   * `userDenyAsk(cwd, parentCwd)` — the user's deny/ask rules, allow empty — which is
    * exactly what the engine enforces for a target, so the judge is told the
-   * rules that actually bind it.
+   * rules that actually bind it. Its additional directories are the
+   * {@link DispatchTargetJudgeOptions.contextDirs} (see `withContextDirs`), not
+   * the rules' own (a target has none).
    */
   private async environment(
     permissions: Pick<ClaudePermissions, 'allow' | 'ask' | 'deny' | 'additionalDirectories'>

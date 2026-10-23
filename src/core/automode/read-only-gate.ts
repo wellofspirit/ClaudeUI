@@ -15,10 +15,11 @@
  * block built up — and no usage row, because no model was called.
  */
 import { realpathSync } from 'node:fs'
+import { homedir } from 'node:os'
 import type { ClaudePermissions, SharedAutoModeConfig } from '../../shared/types'
 import { logger } from '../services/logger'
 import { loadSharedAutoModeConfig } from '../services/ui-config'
-import { captureGitConfigArmed } from './ground-truth'
+import { captureGitConfigArmed, isDriveRelative } from './ground-truth'
 import { readOnlyVerdict } from './read-only'
 import { isShellToolName, resolveTarget } from './shell-lexical'
 
@@ -80,18 +81,41 @@ export function hostRealpath(absPath: string): string | undefined | null {
 /**
  * Where a shell call actually runs: `input.workdir` resolved against the
  * session cwd when the engine honours it, else the session cwd. `null` when
- * the workdir is present but not a string (nothing to run a capture in).
+ * the workdir is present but not a string, or names a place we cannot place (a
+ * drive-relative `c:foo`, or a `~` whose home directory is unknown): nothing
+ * to run a capture in.
+ *
+ * opencode expands a leading `~` or `~/x` (`~\x` on Windows) to the home
+ * directory before resolving (`vendor/opencode-src/packages/core/src/file-access.ts`,
+ * `resolvePath`), so `workdir: '~'` is NOT `<cwd>/~`. `home` is injectable for tests.
  */
 export function effectiveShellCwd(
   cwd: string,
   input: Record<string, unknown>,
   honoursWorkdir: boolean,
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
+  home: () => string = homedir
 ): string | null {
   const workdir = input.workdir
   if (!honoursWorkdir || workdir === undefined || workdir === null || workdir === '') return cwd
   if (typeof workdir !== 'string') return null
-  return resolveTarget(cwd, workdir, platform).full
+  // `c:foo` is relative to drive C's own current directory, which we cannot know.
+  if (isDriveRelative(workdir, platform)) return null
+  const underHome =
+    workdir === '~'
+      ? ''
+      : workdir.startsWith('~/') || (platform === 'win32' && workdir.startsWith('~\\'))
+        ? workdir.slice(2)
+        : null
+  if (underHome === null) return resolveTarget(cwd, workdir, platform).full
+  let root: string
+  try {
+    root = home()
+  } catch {
+    return null
+  }
+  if (typeof root !== 'string' || root === '') return null
+  return resolveTarget(cwd, underHome === '' ? root : `${root}/${underHome}`, platform).full
 }
 
 /** Refusals that say nothing about the command, so they are not logged: every

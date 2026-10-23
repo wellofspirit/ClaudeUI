@@ -70,6 +70,7 @@ function recordTarget(
     parentEngine: 'opencode',
     parentToolUseId: null,
     cwd: '/r/repo',
+    parentCwd: '/r/repo',
     model: 'haiku',
     launchMode: 'default',
     accountKey: null,

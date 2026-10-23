@@ -5,13 +5,31 @@
  * review goes, and the D1 hybrid transcript (parent + the target's own
  * assistant trajectory, bounded).
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { mockLogger } = vi.hoisted(() => ({
   mockLogger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 vi.mock('../logger', () => ({ logger: mockLogger }))
 vi.mock('../ui-config', () => ({ loadSharedAutoModeConfig: () => ({}) }))
+// The vault's ChatGPT accounts, as the fallback judge learns them: a fixture instead of the dev
+// machine's own vault (`refreshChatgptAccounts` would read it).
+const { chatgptVault } = vi.hoisted(() => ({
+  chatgptVault: {
+    activeId: null as string | null,
+    accounts: [] as Array<{ id: string; planType?: string }>
+  }
+}))
+vi.mock('../../automode/judge-accounts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../automode/judge-accounts')>()
+  return {
+    ...actual,
+    refreshChatgptAccounts: () => actual.refreshChatgptAccounts(async () => chatgptVault)
+  }
+})
 vi.mock('../../automode/ground-truth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../automode/ground-truth')>()),
   captureGitRemotes: vi.fn(async () => []),
@@ -25,8 +43,10 @@ import {
   TARGET_TRAJECTORY_MAX,
   reviewFromPipeline,
   recordTrajectoryMessage,
+  uniqueDirs,
   type DispatchTargetJudgeOptions
 } from '../dispatch-target-judge'
+import { resetChatgptAccounts } from '../../automode/judge-accounts'
 import type { SessionJudgeOptions } from '../../automode/session-judge'
 import { BlockedCallLedger, blockGrantKey } from '../../automode/blocked-calls'
 import type { JudgeRequest } from '../../automode/classifier'
@@ -145,8 +165,13 @@ describe('DispatchTargetJudge', () => {
       { twoStageMode: 'fast', judgeModel: 'x/gone' },
       { peekModels: () => groups }
     )
-    expect(await judge.judge(bash, call)).toEqual({ kind: 'human' })
-    expect(await judge.judge(bash, call)).toEqual({ kind: 'human' })
+    const stale = {
+      kind: 'human',
+      reason:
+        'Auto-mode judge unavailable: the configured judge model is no longer available. Review this call yourself.'
+    }
+    expect(await judge.judge(bash, call)).toEqual(stale)
+    expect(await judge.judge(bash, call)).toEqual(stale)
     expect(requests).toHaveLength(0)
     const errors = emit.mock.calls.filter((c) => c[0] === 'session:error')
     expect(errors).toHaveLength(1)
@@ -180,6 +205,28 @@ describe('DispatchTargetJudge', () => {
     const errors = emit.mock.calls.filter((c) => c[0] === 'session:error')
     expect(errors).toHaveLength(1)
     expect(errors[0][1]).toContain('no route')
+  })
+
+  it('a judge call that fails → human WITH the reason, and the one banner says why (not again)', async () => {
+    const message =
+      'ChatGPT · gpt-6-luna: HTTP 429 (resets at 2026-10-28T13:34:58.000Z): {"error":{"type":"usage_limit_reached"}}'
+    const { judge, call, emit, transportOpts, replies } = setup()
+    replies.push(new Error(message), new Error(message))
+    const unavailable = {
+      kind: 'human',
+      reason:
+        'Auto-mode judge unavailable: ChatGPT · gpt-6-luna: HTTP 429 (resets at 2026-10-28T13:34:58.000Z). Review this call yourself.'
+    }
+    expect(await judge.judge(bash, call)).toEqual(unavailable)
+    // What the session transport reports for that failed call (see session-judge.test.ts).
+    const report = 'ChatGPT · gpt-6-luna: HTTP 429 (resets at 2026-10-28T13:34:58.000Z).'
+    transportOpts[0].onUnavailable(report)
+    expect(await judge.judge(bash, call)).toEqual(unavailable)
+    transportOpts[1].onUnavailable(report)
+
+    const errors = emit.mock.calls.filter((c) => c[0] === 'session:error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0][1]).toContain(`Auto-mode can't judge here: ${report} Every gated action`)
   })
 
   it('emits the review under emit() with the NESTED tool id', async () => {
@@ -292,6 +339,185 @@ describe('DispatchTargetJudge', () => {
     expect(user.indexOf('rm -rf build')).toBeLessThan(
       user.indexOf('User: yes, the queued go-ahead')
     )
+  })
+})
+
+describe('DispatchTargetJudge — context directories (workdir + additional directories)', () => {
+  // Real directories (a redirect is only cleared into a directory that exists), on NO temp root:
+  // the OS temp dir is always in scope for a redirect, so the host's temp variables are pointed
+  // at a directory of their own for these tests.
+  let base: string
+  let scratchTmp: string
+  let repo: string
+  let parent: string
+  let extra: string
+  let elsewhere: string
+  const dir = (name: string): string => {
+    const d = join(base, name)
+    mkdirSync(d, { recursive: true })
+    return realpathSync.native(d)
+  }
+  beforeAll(() => {
+    // Not under `/tmp`: on Linux that is the OS temp dir AND a fixed redirect temp root that
+    // stubbing TMPDIR cannot remove, so "out of scope without the grant" could never hold there.
+    // (The repo checkout is no option either: a worktree lives under `.claude/`, a protected name.)
+    const scratchRoot = tmpdir().startsWith('/tmp') ? '/var/tmp' : tmpdir()
+    base = mkdtempSync(join(scratchRoot, 'xeng-ctxdirs-'))
+    repo = dir('target-worktree')
+    parent = dir('parent-repo')
+    extra = dir('shared-extra')
+    elsewhere = dir('elsewhere')
+    scratchTmp = mkdtempSync(join(tmpdir(), 'xeng-ctxdirs-tmp-'))
+    for (const name of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(name, scratchTmp)
+  })
+  afterAll(() => {
+    vi.unstubAllEnvs()
+    rmSync(base, { recursive: true, force: true })
+    rmSync(scratchTmp, { recursive: true, force: true })
+  })
+
+  /** A judge whose target runs in `repo`, its parent in `parent`. */
+  function ctxSetup(over: Partial<DispatchTargetJudgeOptions> = {}) {
+    return setup({ twoStageMode: 'fast' }, { cwd: repo, ...over })
+  }
+  const slashed = (p: string): string => p.replaceAll('\\', '/')
+  const redirectInto = (target: string) => ({
+    toolUseId: 'call-redirect',
+    toolName: 'bash',
+    input: { command: `echo hi > "${slashed(target)}/out.txt"` }
+  })
+  const dirsLine = /count as local\): (.*)/
+  const promptOf = (r: JudgeRequest): string => `${r.system}\n${r.user}`
+
+  it('the Environment lists the parent directory and an additional one as local', async () => {
+    const { judge, call, requests } = ctxSetup({ contextDirs: () => [parent, extra] })
+    await judge.judge(bash, call)
+    expect(dirsLine.exec(promptOf(requests[0]))?.[1]).toBe(`${parent}, ${extra}`)
+  })
+
+  it('merges with the call permissions’ own directories, once each, and reads them fresh per call', async () => {
+    let dirs = [extra]
+    const { judge, call, requests } = ctxSetup({ contextDirs: () => dirs })
+    const withOwn = {
+      ...call,
+      permissions: () => ({ allow: [], ask: [], deny: [], additionalDirectories: [extra] })
+    }
+    await judge.judge(bash, withOwn)
+    dirs = [parent]
+    await judge.judge({ ...bash, toolUseId: 'second' }, withOwn)
+    const seen = requests.map((r) => dirsLine.exec(promptOf(r))?.[1])
+    expect(seen).toEqual([extra, `${extra}, ${parent}`])
+  })
+
+  it('no context directories: the Environment is what it was (no additional-directories line)', async () => {
+    const { judge, call, requests } = ctxSetup()
+    await judge.judge(bash, call)
+    expect(promptOf(requests[0])).not.toMatch(dirsLine)
+  })
+
+  it('a redirect into an additional directory is in scope; without it, it is not', async () => {
+    const withDirs = ctxSetup({ contextDirs: () => [extra] })
+    await withDirs.judge.judge(redirectInto(extra), withDirs.call)
+    expect(withDirs.requests[0].user).toContain('"allInScope":true')
+
+    const without = ctxSetup()
+    await without.judge.judge(redirectInto(extra), without.call)
+    expect(without.requests[0].user).toContain('"allInScope":false')
+  })
+
+  it('a redirect into the parent directory is in scope when the target runs elsewhere', async () => {
+    const { judge, call, requests } = ctxSetup({ contextDirs: () => [parent] })
+    await judge.judge(redirectInto(parent), call)
+    expect(requests[0].user).toContain('"allInScope":true')
+    await judge.judge(redirectInto(elsewhere), call)
+    expect(requests[1].user).toContain('"allInScope":false')
+  })
+
+  it('CONTEXT ONLY: the read-only gate does not treat a context directory as in scope', async () => {
+    const read = {
+      toolUseId: 'call-read',
+      toolName: 'bash',
+      input: { command: `cat "${slashed(extra)}/notes.txt"` }
+    }
+    // The control: the same directory GRANTED through the call's permissions is an allow path —
+    // a plainly read-only command there needs no judge.
+    const granted = ctxSetup()
+    expect(
+      await granted.judge.judge(read, {
+        ...granted.call,
+        permissions: () => ({ allow: [], ask: [], deny: [], additionalDirectories: [extra] })
+      })
+    ).toEqual({ kind: 'allow' })
+    expect(granted.requests).toHaveLength(0)
+
+    // As context only, it is outside the workspace: the call goes to the judge.
+    const contextOnly = ctxSetup({ contextDirs: () => [extra, parent] })
+    expect(await contextOnly.judge.judge(read, contextOnly.call)).toEqual({ kind: 'allow' })
+    expect(contextOnly.requests).toHaveLength(1)
+  })
+
+  it('never writes the context directories into the permissions the gates read', async () => {
+    const handed: Array<{ additionalDirectories: string[] }> = []
+    const { judge, call } = ctxSetup({ contextDirs: () => [extra] })
+    const spy = {
+      ...call,
+      permissions: () => {
+        const p = { allow: [], ask: [], deny: [], additionalDirectories: [] as string[] }
+        handed.push(p)
+        return p
+      }
+    }
+    await judge.judge(bash, spy)
+    await judge.reviewHandBack('Done.', spy)
+    expect(handed.length).toBeGreaterThan(0)
+    for (const p of handed) expect(p.additionalDirectories).toEqual([])
+  })
+
+  it('a context-directories read that throws leaves them out; the call is still judged', async () => {
+    const { judge, call, requests } = ctxSetup({
+      contextDirs: () => {
+        throw new Error('settings.json is not JSON')
+      }
+    })
+    expect(await judge.judge(bash, call)).toEqual({ kind: 'allow' })
+    expect(requests).toHaveLength(1)
+    expect(promptOf(requests[0])).not.toMatch(dirsLine)
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      'CrossEngineDispatcher',
+      expect.stringContaining('could not read the context directories')
+    )
+  })
+
+  it('the hand-back review is told the context directories too', async () => {
+    const { judge, call, requests } = ctxSetup({ contextDirs: () => [parent, extra] })
+    await judge.reviewHandBack('Done.', call)
+    expect(dirsLine.exec(promptOf(requests[0]))?.[1]).toBe(`${parent}, ${extra}`)
+  })
+})
+
+describe('uniqueDirs', () => {
+  it('drops blanks, non-strings and repeats; keeps the first spelling and the order', () => {
+    expect(
+      uniqueDirs(['/a', undefined, '', '  ', '/b', '/a', null, '/c/'], undefined, 'linux')
+    ).toEqual(['/a', '/b', '/c/'])
+    expect(uniqueDirs(['/a/', '/a'], undefined, 'linux')).toEqual(['/a/'])
+  })
+
+  it('posix: letter case tells directories apart', () => {
+    expect(uniqueDirs(['/Repo', '/repo'], undefined, 'linux')).toEqual(['/Repo', '/repo'])
+  })
+
+  it('win32: letter case, separators and a trailing slash do not', () => {
+    expect(
+      uniqueDirs(['D:\\Work\\Repo', 'd:/work/repo/', 'D:\\Work\\Other'], undefined, 'win32')
+    ).toEqual(['D:\\Work\\Repo', 'D:\\Work\\Other'])
+  })
+
+  it('except removes the directory the target already runs in', () => {
+    expect(uniqueDirs(['D:\\W\\Repo', 'D:\\W\\Extra'], 'd:/w/repo', 'win32')).toEqual([
+      'D:\\W\\Extra'
+    ])
+    expect(uniqueDirs(['/p', '/p/x'], '/p', 'linux')).toEqual(['/p/x'])
   })
 })
 
@@ -540,5 +766,345 @@ describe('reviewFromPipeline', () => {
       kind: 'unavailable',
       why: 'the reviewer gave no answer'
     })
+  })
+})
+
+describe('DispatchTargetJudge fallback judge (autoMode.fallbackJudgeModel)', () => {
+  const FALLBACK = 'x/fallback'
+  const PRIMARY = 'anthropic/target-model'
+  const DOWN = 'ChatGPT · gpt-6-luna: HTTP 429 (resets at 2026-10-28T13:34:58.000Z).'
+  const FALLBACK_DOWN = 'x · fallback: HTTP 503.'
+
+  /**
+   * Transports scripted per judge model, shaped like the real one: a model with no replies left
+   * reports why through `onUnavailable` and then throws (`makeSessionJudgeTransport`).
+   */
+  function scripted(replies: Record<string, string[]>, reasons: Record<string, string> = {}) {
+    const asked: string[] = []
+    const built: SessionJudgeOptions[] = []
+    const makeTransport = (opts: SessionJudgeOptions) => {
+      built.push(opts)
+      return async () => {
+        const model = opts.modelValue()
+        asked.push(model)
+        const next = replies[model]?.shift()
+        if (next === undefined) {
+          opts.onUnavailable(reasons[model] ?? `${model}: down.`)
+          throw new Error(`${model} down`)
+        }
+        return next
+      }
+    }
+    return { asked, built, makeTransport }
+  }
+
+  const groups = (...values: string[]): EngineModelGroup[] => [
+    {
+      engineId: 'opencode',
+      vendorId: 'anthropic' as EngineModelGroup['vendorId'],
+      vendorName: 'A',
+      models: values.map((value) => ({ value, displayName: value, description: '' }))
+    }
+  ]
+  const errors = (emit: ReturnType<typeof vi.fn>): string[] =>
+    emit.mock.calls.filter((c) => c[0] === 'session:error').map((c) => c[1] as string)
+  const fallbackBanner = (): string =>
+    `Auto-mode judge unavailable: ${DOWN} ${FALLBACK} is judging instead until it recovers. ` +
+    'Change the judge models in Settings › Sessions & autonomy › Auto-mode judge (opencode).'
+
+  it('the primary cannot answer: the fallback judges the action, and the ONE banner says so', async () => {
+    const { asked, makeTransport } = scripted(
+      { [PRIMARY]: [], [FALLBACK]: ['<block>no</block>', '<block>no</block>'] },
+      { [PRIMARY]: DOWN }
+    )
+    const { judge, call, emit } = setup(
+      { twoStageMode: 'fast', fallbackJudgeModel: ` ${FALLBACK} ` },
+      { makeTransport }
+    )
+
+    expect(await judge.judge(bash, call)).toEqual({ kind: 'allow' })
+    expect(await judge.judge({ ...bash, toolUseId: 'oc-call-8' }, call)).toEqual({ kind: 'allow' })
+
+    // Each action is asked of the primary first, then of the trimmed fallback model.
+    expect(asked).toEqual([PRIMARY, FALLBACK, PRIMARY, FALLBACK])
+    expect(errors(emit)).toEqual([fallbackBanner()])
+  })
+
+  it('the fallback transport carries the target session, the dispatching routing id and the fallback model', async () => {
+    const { built, makeTransport } = scripted({ [PRIMARY]: [], [FALLBACK]: ['<block>no</block>'] })
+    const { judge, call } = setup(
+      { twoStageMode: 'fast', fallbackJudgeModel: FALLBACK },
+      { makeTransport }
+    )
+
+    await judge.judge(bash, call)
+
+    expect(built.map((o) => o.modelValue())).toEqual([PRIMARY, FALLBACK])
+    const fallback = built[1]
+    expect(fallback.engine).toBe('opencode')
+    expect(fallback.routingId).toBe('parent-routing')
+    expect(fallback.sessionId()).toBe('target-session')
+  })
+
+  it('a primary that answers never builds the fallback', async () => {
+    const { built, makeTransport } = scripted({ [PRIMARY]: ['<block>no</block>'] })
+    const { judge, call } = setup(
+      { twoStageMode: 'fast', fallbackJudgeModel: FALLBACK },
+      { makeTransport }
+    )
+
+    expect(await judge.judge(bash, call)).toEqual({ kind: 'allow' })
+    expect(built.map((o) => o.modelValue())).toEqual([PRIMARY])
+  })
+
+  it('both judges unavailable: the human decides, with one banner per judge', async () => {
+    const { makeTransport } = scripted({}, { [PRIMARY]: DOWN, [FALLBACK]: FALLBACK_DOWN })
+    const { judge, call, emit } = setup(
+      { twoStageMode: 'fast', fallbackJudgeModel: FALLBACK },
+      { makeTransport }
+    )
+
+    expect((await judge.judge(bash, call)).kind).toBe('human')
+    expect((await judge.judge({ ...bash, toolUseId: 'oc-call-8' }, call)).kind).toBe('human')
+
+    expect(errors(emit)).toEqual([
+      fallbackBanner(),
+      `Auto-mode can't judge here: fallback ${FALLBACK}: ${FALLBACK_DOWN} Every gated action will ` +
+        'ask you instead. Change the judge model in Settings › Sessions & autonomy › Auto-mode judge (opencode).'
+    ])
+  })
+
+  it('no fallback is in effect when it is blank, equals the effective primary, or the judge is fixed', async () => {
+    const cases: Array<
+      [NonNullable<EngineConfig['autoMode']>, Partial<DispatchTargetJudgeOptions>]
+    > = [
+      [{ twoStageMode: 'fast', fallbackJudgeModel: '  ' }, {}],
+      // No judgeModel: the primary is the target's own model.
+      [{ twoStageMode: 'fast', fallbackJudgeModel: PRIMARY }, {}],
+      [
+        { twoStageMode: 'fast', fallbackJudgeModel: FALLBACK },
+        { engine: 'pi', configEngine: 'codex', fixedModel: () => 'gpt-5.4' }
+      ]
+    ]
+    for (const [autoMode, over] of cases) {
+      const { asked, makeTransport } = scripted({}, {})
+      const { judge, call, emit } = setup(autoMode, { ...over, makeTransport })
+      expect((await judge.judge(bash, call)).kind).toBe('human')
+      expect(asked).toHaveLength(1)
+      expect(errors(emit)).toEqual([expect.stringContaining("Auto-mode can't judge here:")])
+    }
+  })
+
+  it('a fallback model the catalog no longer lists is no fallback: the human decides, one log line', async () => {
+    const { asked, makeTransport } = scripted({}, { [PRIMARY]: DOWN })
+    const { judge, call, emit } = setup(
+      { twoStageMode: 'fast', fallbackJudgeModel: 'x/gone' },
+      { peekModels: () => groups(PRIMARY, FALLBACK), makeTransport }
+    )
+
+    expect((await judge.judge(bash, call)).kind).toBe('human')
+    expect((await judge.judge({ ...bash, toolUseId: 'oc-call-8' }, call)).kind).toBe('human')
+
+    expect(asked).toEqual([PRIMARY, PRIMARY])
+    expect(errors(emit)).toEqual([expect.stringContaining(`Auto-mode can't judge here: ${DOWN}`)])
+    expect(
+      mockLogger.warn.mock.calls.filter(([, msg]) => String(msg).includes('fallback judge'))
+    ).toHaveLength(1)
+  })
+
+  it('a stale PRIMARY model is judged by the fallback, and the banner says so', async () => {
+    const { asked, makeTransport } = scripted({ [FALLBACK]: ['<block>no</block>'] })
+    const { judge, call, emit } = setup(
+      { twoStageMode: 'fast', judgeModel: 'x/gone', fallbackJudgeModel: FALLBACK },
+      { peekModels: () => groups('x/other', FALLBACK), makeTransport }
+    )
+
+    expect(await judge.judge(bash, call)).toEqual({ kind: 'allow' })
+
+    expect(asked).toEqual([FALLBACK])
+    expect(errors(emit)).toEqual([
+      'Auto-mode judge model "x/gone" is no longer available — x/fallback is judging instead. ' +
+        'Change the judge models in Settings › Sessions & autonomy › Auto-mode judge (opencode).'
+    ])
+  })
+
+  describe('a report review', () => {
+    it('is judged by the fallback when the primary cannot answer, with no banner on the target', async () => {
+      const { asked, makeTransport } = scripted(
+        { [FALLBACK]: ['<block>no</block>'] },
+        { [PRIMARY]: DOWN }
+      )
+      const { judge, call, emit } = setup(
+        { twoStageMode: 'fast', fallbackJudgeModel: FALLBACK },
+        { makeTransport }
+      )
+
+      expect(await judge.reviewHandBack('Done.', call)).toEqual({ kind: 'allow' })
+      expect(asked).toEqual([PRIMARY, FALLBACK])
+      expect(emit).not.toHaveBeenCalled()
+    })
+
+    it('names both judges when neither could answer', async () => {
+      const { makeTransport } = scripted({}, { [PRIMARY]: DOWN, [FALLBACK]: FALLBACK_DOWN })
+      const { judge, call, emit } = setup(
+        { twoStageMode: 'fast', fallbackJudgeModel: FALLBACK },
+        { makeTransport }
+      )
+
+      expect(await judge.reviewHandBack('Done.', call)).toEqual({
+        kind: 'unavailable',
+        why: `${DOWN} Fallback ${FALLBACK}: ${FALLBACK_DOWN}`
+      })
+      expect(emit).not.toHaveBeenCalled()
+    })
+  })
+})
+
+describe('DispatchTargetJudge fallback on another ChatGPT account (autoMode.fallbackJudgeAccount)', () => {
+  const DOWN = 'ChatGPT · gpt-6-luna: HTTP 429 (resets at 2026-10-28T13:34:58.000Z).'
+  const label = 'x/luna (Business account)'
+
+  beforeEach(() => {
+    chatgptVault.activeId = 'acct-plus'
+    chatgptVault.accounts = [
+      { id: 'acct-plus', planType: 'plus' },
+      { id: 'acct-biz', planType: 'business' }
+    ]
+    resetChatgptAccounts()
+  })
+
+  /** Transports shaped like the real one, scripted by the account they were told to pay with. */
+  function byAccount(replies: Record<string, string[]>, reasons: Record<string, string> = {}) {
+    const built: SessionJudgeOptions[] = []
+    const asked: Array<{ model: string; account: string | undefined }> = []
+    const makeTransport = (opts: SessionJudgeOptions) => {
+      built.push(opts)
+      return async () => {
+        const account = opts.chatgptAccountId?.()
+        const key = account ?? '(active)'
+        asked.push({ model: opts.modelValue(), account })
+        const next = replies[key]?.shift()
+        if (next === undefined) {
+          opts.onUnavailable(reasons[key] ?? `${key}: down.`)
+          throw new Error(`${key} down`)
+        }
+        return next
+      }
+    }
+    return { built, asked, makeTransport }
+  }
+
+  const errors = (emit: ReturnType<typeof vi.fn>): string[] =>
+    emit.mock.calls.filter((c) => c[0] === 'session:error').map((c) => c[1] as string)
+
+  it('the same model on a different account is a fallback: its transport names that account', async () => {
+    const { built, asked, makeTransport } = byAccount(
+      { 'acct-biz': ['<block>no</block>'] },
+      { '(active)': DOWN }
+    )
+    const { judge, call, emit } = setup(
+      {
+        twoStageMode: 'fast',
+        judgeModel: 'x/luna',
+        fallbackJudgeModel: 'x/luna',
+        fallbackJudgeAccount: ' acct-biz '
+      },
+      { makeTransport }
+    )
+
+    expect(await judge.judge(bash, call)).toEqual({ kind: 'allow' })
+
+    // The primary names no account (the active one pays); the fallback names the vault account.
+    expect(asked).toEqual([
+      { model: 'x/luna', account: undefined },
+      { model: 'x/luna', account: 'acct-biz' }
+    ])
+    expect(built[0].chatgptAccountId).toBeUndefined()
+    expect(errors(emit)).toEqual([
+      `Auto-mode judge unavailable: ${DOWN} ${label} is judging instead until it recovers. ` +
+        'Change the judge models in Settings › Sessions & autonomy › Auto-mode judge (opencode).'
+    ])
+  })
+
+  it('the same model on the ACTIVE account is no fallback', async () => {
+    const { asked, makeTransport } = byAccount({}, { '(active)': DOWN })
+    const { judge, call, emit } = setup(
+      {
+        twoStageMode: 'fast',
+        judgeModel: 'x/luna',
+        fallbackJudgeModel: 'x/luna',
+        fallbackJudgeAccount: 'acct-plus'
+      },
+      { makeTransport }
+    )
+
+    expect((await judge.judge(bash, call)).kind).toBe('human')
+    expect(asked).toEqual([{ model: 'x/luna', account: undefined }])
+    expect(errors(emit)).toEqual([expect.stringContaining("Auto-mode can't judge here:")])
+  })
+
+  it('when the named account cannot answer either, the one fallback banner names its plan', async () => {
+    const { makeTransport } = byAccount(
+      {},
+      { '(active)': DOWN, 'acct-biz': 'The fallback ChatGPT account is not signed in.' }
+    )
+    const { judge, call, emit } = setup(
+      {
+        twoStageMode: 'fast',
+        judgeModel: 'x/luna',
+        fallbackJudgeModel: 'x/luna',
+        fallbackJudgeAccount: 'acct-biz'
+      },
+      { makeTransport }
+    )
+
+    expect((await judge.judge(bash, call)).kind).toBe('human')
+    expect(errors(emit)).toEqual([
+      expect.stringContaining(`${label} is judging instead`),
+      `Auto-mode can't judge here: fallback ${label}: The fallback ChatGPT account is not signed in. ` +
+        'Every gated action will ask you instead. ' +
+        'Change the judge model in Settings › Sessions & autonomy › Auto-mode judge (opencode).'
+    ])
+  })
+
+  it('a report review names the fallback by its label when neither judge could answer', async () => {
+    const { makeTransport } = byAccount({}, { '(active)': DOWN, 'acct-biz': 'No account.' })
+    const { judge, call, emit } = setup(
+      {
+        twoStageMode: 'fast',
+        judgeModel: 'x/luna',
+        fallbackJudgeModel: 'x/luna',
+        fallbackJudgeAccount: 'acct-biz'
+      },
+      { makeTransport }
+    )
+
+    expect(await judge.reviewHandBack('Done.', call)).toEqual({
+      kind: 'unavailable',
+      why: `${DOWN} Fallback ${label}: No account.`
+    })
+    expect(emit).not.toHaveBeenCalled()
+  })
+
+  it('no account named: the fallback transport names none (the active account, as before)', async () => {
+    const built: SessionJudgeOptions[] = []
+    const makeTransport = (opts: SessionJudgeOptions) => {
+      built.push(opts)
+      return async () => {
+        if (opts.modelValue() === 'x/luna') {
+          opts.onUnavailable(DOWN)
+          throw new Error('down')
+        }
+        return '<block>no</block>'
+      }
+    }
+    const { judge, call } = setup(
+      { twoStageMode: 'fast', judgeModel: 'x/luna', fallbackJudgeModel: 'x/other' },
+      { makeTransport }
+    )
+
+    expect(await judge.judge(bash, call)).toEqual({ kind: 'allow' })
+    expect(built[1].modelValue()).toBe('x/other')
+    expect(built[1].chatgptAccountId?.()).toBeUndefined()
   })
 })

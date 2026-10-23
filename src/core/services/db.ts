@@ -1620,6 +1620,16 @@ export const MIGRATIONS: Migration[] = [
         ALTER TABLE dispatch_target ADD COLUMN owner_boot TEXT;
       `)
     }
+  },
+  {
+    // `dispatch_agent` takes a `workdir` (a git worktree, say): `dispatch_target.cwd` is where the target
+    // RUNS, and `parent_cwd` the dispatching session's own directory, which its rules and the judge's
+    // scope still come from. NULL on every row written before this version, and read as "the same as
+    // `cwd`": until then a target always ran in its parent's directory.
+    version: 40,
+    up(db) {
+      db.exec('ALTER TABLE dispatch_target ADD COLUMN parent_cwd TEXT')
+    }
   }
 ]
 
@@ -2608,7 +2618,13 @@ export interface DispatchTargetRow {
   parentSessionId: string
   parentEngine: EngineId
   parentToolUseId: string | null
+  /** Where the target runs: its `workdir` when it was given one, else its parent's directory. A resume keeps it. */
   cwd: string
+  /**
+   * The dispatching session's own directory at launch (what its rules and the judge's scope come from);
+   * equal to `cwd` for a target with no `workdir`, and for a row written before migration v40.
+   */
+  parentCwd: string
   model: string
   /** The parent's autonomy mode at launch. */
   launchMode: string
@@ -2643,6 +2659,7 @@ interface DispatchTargetDbRow {
   parent_engine: string
   parent_tool_use_id: string | null
   cwd: string
+  parent_cwd: string | null
   model: string
   launch_mode: string
   account_key: string | null
@@ -2675,6 +2692,7 @@ function dispatchTargetRow(row: DispatchTargetDbRow): DispatchTargetRow {
     parentEngine: row.parent_engine as EngineId,
     parentToolUseId: row.parent_tool_use_id,
     cwd: row.cwd,
+    parentCwd: row.parent_cwd ?? row.cwd,
     model: row.model,
     launchMode: row.launch_mode,
     accountKey: row.account_key,
@@ -2711,9 +2729,9 @@ export function insertDispatchTarget(
     .prepare(
       `INSERT OR IGNORE INTO dispatch_target
          (id, engine, harness_ref, parent_session_id, parent_engine, parent_tool_use_id, cwd,
-          model, launch_mode, account_key, codex_account_id, caller_restriction, name,
+          parent_cwd, model, launch_mode, account_key, codex_account_id, caller_restriction, name,
           description, hand_back, state, created_at, last_active_at, owner_pid, owner_boot)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       row.id,
@@ -2723,6 +2741,7 @@ export function insertDispatchTarget(
       row.parentEngine,
       row.parentToolUseId,
       row.cwd,
+      row.parentCwd,
       row.model,
       row.launchMode,
       row.accountKey,

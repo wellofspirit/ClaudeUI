@@ -1207,6 +1207,24 @@ export interface AutoModeConfig {
   enabled?: boolean
   /** `providerID/modelID` for the judge. Defaults to the session's own model. */
   judgeModel?: string
+  /**
+   * Same `providerID/modelID` shape as {@link judgeModel}, per engine. When the primary judge
+   * cannot produce a verdict (rate limit, outage, no route, the configured model gone) the WHOLE
+   * classification is re-run on this model, so every verdict — the two-sample confirmation
+   * included — comes from one model. Unset → the human decides, as before. A mode change never
+   * triggers it.
+   */
+  fallbackJudgeModel?: string
+  /**
+   * A ChatGPT vault account id the fallback judge pays with (`authVault` account `id`, the one a
+   * provider-account row names). Absent → the ACTIVE ChatGPT account. Read only when
+   * {@link fallbackJudgeModel} routes through the ChatGPT subscription (`JudgeModelSupport.chatgpt`);
+   * ignored otherwise. It lets the same model back itself up on a second subscription: a
+   * fallback equal to the primary model is kept when this names a different account than the
+   * active one. An account that is gone or signed out is no fallback — the call fails and the human
+   * decides; it never falls back to the active account.
+   */
+  fallbackJudgeAccount?: string
   /** Two-stage classifier mode. Defaults to 'both'. */
   twoStageMode?: 'both' | 'fast' | 'thinking'
   // The three trust lists that used to live here moved to
@@ -1219,9 +1237,14 @@ export interface AutoModeConfig {
 /**
  * Whether ClaudeUI can make the auto-mode judge's model call for one picker
  * value itself (ADR-081 §3: no fallback to the engine) — one entry of
- * `ClaudeAPI.judgeModelSupport`. `reason` is user-facing copy.
+ * `ClaudeAPI.judgeModelSupport`. `reason` is user-facing copy. `chatgpt` is
+ * true when the value routes through the ChatGPT subscription (even while the
+ * active account is signed out, `ok: false`): the picker may then offer a
+ * ChatGPT account to pay with (`AutoModeConfig.fallbackJudgeAccount`). Only
+ * ever set to true: absent for every other route.
  */
-export type JudgeModelSupport = { ok: true } | { ok: false; reason: string }
+export type JudgeModelSupport =
+  { ok: true; chatgpt?: boolean } | { ok: false; reason: string; chatgpt?: boolean }
 
 /**
  * The classifier trust lists, shared by every engine that runs ClaudeUI's own
@@ -2038,6 +2061,19 @@ interface SessionAPI {
     engineId: 'opencode' | 'pi',
     values: string[]
   ): Promise<Record<string, JudgeModelSupport>>
+  /**
+   * Whether the route a judge model would take is resting after a rate limit
+   * (`judge-cooldown.ts`, process-wide, per provider+model+account): the epoch
+   * ms it recovers at, else null — also null for a model or account ClaudeUI
+   * cannot route. `accountId` is a ChatGPT vault account id
+   * (`AutoModeConfig.fallbackJudgeAccount`); absent → the active account.
+   * Token-free: it resolves the route and returns only the time.
+   */
+  judgeRouteResting(
+    engineId: 'opencode' | 'pi',
+    model: string,
+    accountId?: string
+  ): Promise<{ until: number } | null>
   /** Full opencode provider catalog (~146 providers) for the settings provider manager.
    *  Returns [] when opencode isn't installed or discovery fails. */
   getOpencodeProviders(): Promise<OpencodeProviderCatalogEntry[]>

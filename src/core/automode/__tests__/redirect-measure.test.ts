@@ -767,6 +767,7 @@ describe('captureRedirects — failures are absence, never a fact', () => {
       outOfScope: [{ path: '/work/_scratch/b.txt' }],
       unresolvable: [],
       protectedHits: []
+      // `allInScope: false` is explained: containment could not be established.
     })
   })
 
@@ -781,7 +782,8 @@ describe('captureRedirects — failures are absence, never a fact', () => {
       allInScope: false,
       outOfScope: [],
       unresolvable: [],
-      protectedHits: []
+      protectedHits: [],
+      unmeasured: ['build.log']
     })
     expect(result?.symlinked).toBeUndefined()
   })

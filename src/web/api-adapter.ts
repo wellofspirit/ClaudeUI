@@ -329,6 +329,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('automode:judge-model-support', engineId, values) as ReturnType<
         ClaudeAPI['judgeModelSupport']
       >,
+    judgeRouteResting: (engineId, model, accountId) =>
+      connection.invoke('automode:judge-route-resting', engineId, model, accountId) as ReturnType<
+        ClaudeAPI['judgeRouteResting']
+      >,
     getOpencodeProviders: () =>
       connection.invoke('session:get-opencode-providers') as ReturnType<
         ClaudeAPI['getOpencodeProviders']

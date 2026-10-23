@@ -108,14 +108,8 @@ function scrub(text: string, headers: Readonly<Record<string, string>>): string 
   return out
 }
 
-/**
- * Rate-limit timing for a 429 message: the `retry-after` header, and the
- * ChatGPT backend's `resets_at` (epoch seconds, top-level or under `error`).
- */
-function rateLimitHint(res: Response, excerpt: string): string {
-  const hints: string[] = []
-  const retryAfter = res.headers.get('retry-after')
-  if (retryAfter) hints.push(`retry-after ${retryAfter}`)
+/** The ChatGPT backend's `resets_at` (epoch seconds, top-level or under `error`), when the body carries one. */
+function resetsAtSeconds(excerpt: string): number | undefined {
   try {
     const parsed = JSON.parse(excerpt) as Record<string, unknown> | null
     const nested =
@@ -123,20 +117,63 @@ function rateLimitHint(res: Response, excerpt: string): string {
         ? (parsed.error as Record<string, unknown>)
         : {}
     const resetsAt = nested.resets_at ?? parsed?.resets_at
-    if (typeof resetsAt === 'number' && Number.isFinite(resetsAt)) {
-      hints.push(`resets at ${new Date(resetsAt * 1000).toISOString()}`)
-    }
+    return typeof resetsAt === 'number' && Number.isFinite(resetsAt) ? resetsAt : undefined
   } catch {
     // Not JSON (or truncated at the excerpt limit) — the header is all there is.
+    return undefined
   }
+}
+
+/**
+ * Rate-limit timing for a 429 message: the `retry-after` header, and the
+ * ChatGPT backend's `resets_at`.
+ */
+function rateLimitHint(res: Response, excerpt: string): string {
+  const hints: string[] = []
+  const retryAfter = res.headers.get('retry-after')
+  if (retryAfter) hints.push(`retry-after ${retryAfter}`)
+  const resetsAt = resetsAtSeconds(excerpt)
+  if (resetsAt !== undefined) hints.push(`resets at ${new Date(resetsAt * 1000).toISOString()}`)
   return hints.length ? ` (${hints.join(', ')})` : ''
 }
 
-/** Prefix a failure with the route's label, keeping its status/code. */
+/**
+ * When a 429 says the route recovers, epoch ms: the body's `resets_at` (a usage limit's reset —
+ * the authority when both are present, since `retry-after` then names a shorter, retry-too-soon
+ * interval), else `retry-after` as delta-seconds or an HTTP date. Undefined when the response
+ * names no time, or one that is not a usable number.
+ */
+export function rateLimitRetryAtMs(
+  res: Response,
+  excerpt: string,
+  now: number
+): number | undefined {
+  const resetsAt = resetsAtSeconds(excerpt)
+  if (resetsAt !== undefined) return resetsAt * 1000
+  const retryAfter = res.headers.get('retry-after')?.trim()
+  if (!retryAfter) return undefined
+  if (/^\d+(\.\d+)?$/.test(retryAfter)) return now + Number(retryAfter) * 1000
+  const at = Date.parse(retryAfter)
+  return Number.isFinite(at) ? at : undefined
+}
+
+/**
+ * The key one route's rate-limit cooldown is filed under (`judge-cooldown.ts`): the route's
+ * credential-free label (provider and model) and the account that pays for it, so two accounts
+ * on one model rest independently.
+ */
+export function judgeRouteKey(route: ResolvedJudgeRoute): string {
+  return `${route.label}|${route.account.accountKey}`
+}
+
+/** Prefix a failure with the route's label, keeping its status/code/recovery time, and name the route. */
 function labelled(route: ResolvedJudgeRoute, err: unknown): JudgeWireError {
+  const wire = err instanceof JudgeWireError ? err : undefined
   return new JudgeWireError(`${route.label}: ${errorMessage(err)}`, {
-    ...(err instanceof JudgeWireError && err.status !== undefined ? { status: err.status } : {}),
-    ...(err instanceof JudgeWireError && err.code !== undefined ? { code: err.code } : {})
+    ...(wire?.status !== undefined ? { status: wire.status } : {}),
+    ...(wire?.code !== undefined ? { code: wire.code } : {}),
+    ...(wire?.retryAtMs !== undefined ? { retryAtMs: wire.retryAtMs } : {}),
+    routeKey: judgeRouteKey(route)
   })
 }
 
@@ -206,10 +243,13 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
         }
       }
       const hint = res.status === 429 ? rateLimitHint(res, excerpt) : ''
+      const retryAtMs =
+        res.status === 429 ? rateLimitRetryAtMs(res, excerpt, Date.now()) : undefined
       throw labelled(
         route,
         new JudgeWireError(`HTTP ${res.status}${hint}: ${excerpt || '(empty body)'}`, {
-          status: res.status
+          status: res.status,
+          ...(retryAtMs !== undefined ? { retryAtMs } : {})
         })
       )
     }
@@ -256,4 +296,29 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+/** Longest {@link judgeFailureSummary} result, in characters. */
+const FAILURE_SUMMARY_MAX = 200
+/** Where a failure message's response body starts: `: {...}`, `: [...]`, or an HTML page. */
+const FAILURE_BODY_START = /: [{[<]/
+/** {@link JudgeRouteUnavailableError}'s own prefix; the resolver's `reason` after it is the user-facing part. */
+const ROUTE_UNAVAILABLE_PREFIX = /^auto-mode judge route unavailable \([a-z-]+\): /
+
+/**
+ * A judge failure's message as one short, user-facing clause: the route label,
+ * the status and the rate-limit hint, without the response body.
+ * `ChatGPT · gpt-6-luna: HTTP 429 (resets at 2026-10-28T13:34:58.000Z): {"error":…}` →
+ * `ChatGPT · gpt-6-luna: HTTP 429 (resets at 2026-10-28T13:34:58.000Z)`. Cut at the first
+ * `: {`, `: [` or `: <`, whitespace collapsed, capped at {@link FAILURE_SUMMARY_MAX},
+ * no trailing full stop (the caller adds its own); never empty. The full text still goes to
+ * the log.
+ */
+export function judgeFailureSummary(error: string): string {
+  const message = error.replace(ROUTE_UNAVAILABLE_PREFIX, '')
+  const cut = message.search(FAILURE_BODY_START)
+  const head = (cut === -1 ? message : message.slice(0, cut)).replace(/\s+/g, ' ').trim()
+  const capped =
+    head.length > FAILURE_SUMMARY_MAX ? `${head.slice(0, FAILURE_SUMMARY_MAX - 1)}…` : head
+  return capped.replace(/[.\s]+$/, '') || 'unknown error'
 }

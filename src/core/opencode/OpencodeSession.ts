@@ -147,7 +147,17 @@ import {
 import { runJudgePipeline } from '../automode/judge-pipeline'
 import { armBlockHold, blockHoldMs } from '../automode/block-hold'
 import { blockGrantKey } from '../automode/blocked-calls'
-import { judgeRouteUnavailableMessage, makeSessionJudgeTransport } from '../automode/session-judge'
+import { refreshChatgptAccounts } from '../automode/judge-accounts'
+import {
+  fallbackJudgeAccountFor,
+  fallbackJudgeLabel,
+  fallbackJudgeModelFor,
+  fallbackUnavailableMessage,
+  judgeUnavailableMessage,
+  makeFallbackJudge,
+  makeSessionJudgeTransport,
+  staleJudgeModelMessage
+} from '../automode/session-judge'
 import { buildClassifierEnvironment } from '../automode/environment'
 import {
   allowRuleReviewBlock,
@@ -396,6 +406,8 @@ export class OpencodeSession extends BaseSession {
   private autoDenials = new AutoModeDenialTracker()
   private staleJudgeModelReported = false
   private judgeRouteUnavailableReported = false
+  private fallbackRouteUnavailableReported = false
+  private staleFallbackJudgeLogged = false
   private toolOutcomes = new Map<string, ToolOutcome>()
   private sessionRemotes: GitRemote[] | null = null
   private sessionRemotesPromise: Promise<GitRemote[]> | null = null
@@ -2272,17 +2284,71 @@ export class OpencodeSession extends BaseSession {
       this.staleJudgeModelReported = true
       this.send(
         'session:error',
-        `Auto-mode judge model "${configured}" is no longer available — every gated action will ask you instead. ` +
-          `Change it in Settings › Sessions & autonomy › Auto-mode judge (opencode).`
+        staleJudgeModelMessage('opencode', configured, this.fallbackLabel())
       )
     }
     return true
   }
 
+  /** The judge model this session's primary judge calls: `autoMode.judgeModel`, else its own. */
+  private judgeModelValue(): string {
+    return this.autoModeConfig().judgeModel ?? this._model
+  }
+
+  /**
+   * The fallback judge model in effect (`autoMode.fallbackJudgeModel`), or undefined: none set,
+   * the same as the primary, or no longer offered by opencode. A gone one is no fallback — the
+   * human decides — with one log line; it never crashes the judge. Same rule as the primary's
+   * check: an empty catalog cannot tell "removed" from "not discovered", so it passes.
+   */
+  private fallbackJudgeModel(): string | undefined {
+    const model = fallbackJudgeModelFor(
+      this.autoModeConfig().fallbackJudgeModel,
+      this.judgeModelValue(),
+      this.autoModeConfig().fallbackJudgeAccount
+    )
+    if (!model) return undefined
+    const all = (peekOpencodeModels() ?? []).flatMap((g) => g.models)
+    if (all.length === 0 || all.some((m) => m.value === model)) return model
+    if (!this.staleFallbackJudgeLogged) {
+      this.staleFallbackJudgeLogged = true
+      logger.warn(
+        'OpencodeSession',
+        `auto-mode fallback judge model "${model}" is no longer available — no fallback`
+      )
+    }
+    return undefined
+  }
+
+  /** The ChatGPT vault account the fallback judge pays with (`autoMode.fallbackJudgeAccount`), if one is named. */
+  private fallbackJudgeAccount(): string | undefined {
+    return fallbackJudgeAccountFor(this.autoModeConfig().fallbackJudgeAccount)
+  }
+
+  /** The fallback judge as a banner names it: its model, plus the named account's plan. */
+  private fallbackLabel(): string | undefined {
+    const model = this.fallbackJudgeModel()
+    return model ? fallbackJudgeLabel(model, this.fallbackJudgeAccount()) : undefined
+  }
+
   private reportJudgeRouteUnavailable(reason: string): void {
     if (this.judgeRouteUnavailableReported) return
     this.judgeRouteUnavailableReported = true
-    this.send('session:error', judgeRouteUnavailableMessage('opencode', reason))
+    this.send('session:error', judgeUnavailableMessage('opencode', reason, this.fallbackLabel()))
+  }
+
+  /** The fallback judge's own one banner: it could not be called either. */
+  private reportFallbackRouteUnavailable(model: string, reason: string): void {
+    if (this.fallbackRouteUnavailableReported) return
+    this.fallbackRouteUnavailableReported = true
+    this.send(
+      'session:error',
+      fallbackUnavailableMessage(
+        'opencode',
+        fallbackJudgeLabel(model, this.fallbackJudgeAccount()),
+        reason
+      )
+    )
   }
 
   /** ClaudeUI's own judge call (ADR-081), on `autoMode.judgeModel` or the session's model. */
@@ -2290,10 +2356,23 @@ export class OpencodeSession extends BaseSession {
     if (this.judgeModelUnavailable()) return null
     return makeSessionJudgeTransport({
       engine: 'opencode',
-      modelValue: () => this.autoModeConfig().judgeModel ?? this._model,
+      modelValue: () => this.judgeModelValue(),
       sessionId: () => this.openSessionId,
       routingId: this.routingId,
       onUnavailable: (reason) => this.reportJudgeRouteUnavailable(reason)
+    })
+  }
+
+  /** The pipeline's `fallbackJudgeTransport`: the user's fallback judge model, when one is in effect. */
+  private fallbackJudge(): { transport: JudgeTransport; label: string } | undefined {
+    const model = this.fallbackJudgeModel()
+    if (!model) return undefined
+    return makeFallbackJudge(model, {
+      engine: 'opencode',
+      sessionId: () => this.openSessionId,
+      routingId: this.routingId,
+      chatgptAccountId: () => this.fallbackJudgeAccount(),
+      onUnavailable: (reason) => this.reportFallbackRouteUnavailable(model, reason)
     })
   }
 
@@ -2533,10 +2612,18 @@ export class OpencodeSession extends BaseSession {
           ? (this.subagentTask(approval.subagent) ?? { type: 'unknown' })
           : undefined,
         judgeAvailable: () => {
-          transport = this.makeJudgeFn()
-          return transport !== null
+          const available = (): boolean => {
+            transport = this.makeJudgeFn()
+            return transport !== null
+          }
+          // A fallback on the primary's own model is only a fallback on ANOTHER ChatGPT account:
+          // learn which one is active (and the fallback's plan, for its label) before deciding.
+          return this.fallbackJudgeAccount()
+            ? refreshChatgptAccounts().then(available)
+            : available()
         },
         judgeTransport: () => transport!,
+        fallbackJudgeTransport: () => this.fallbackJudge(),
         messages: () => this.messageHistory,
         environment: () => this.classifierEnvironment(),
         captureActionMeta: (name, input) => this.captureActionMeta(name, input),

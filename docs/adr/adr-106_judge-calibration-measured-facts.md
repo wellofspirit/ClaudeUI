@@ -1,6 +1,7 @@
 # ADR-106: Judge calibration — measured redirect facts, a confirmation sample before a block, a retry fact
 
 **Status:** Accepted (2026-10-22). Implemented on branch `fix/judge-bash-calibration`.
+Amended 2026-10-23 (addendum below): an audit's false-allow fixes, the quote-blind cross-check, and a corrected reading of the measurements.
 **Amends:** [ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) (policy text: redirects, retries,
 credentials, transcripts, spending, instruction files, relayed approval; the deciding stage now samples twice before a
 block), [ADR-081](adr-081_claudeui-owned-judge-transport.md) §4 (OpenRouter stage-1 reasoning),
@@ -76,3 +77,46 @@ Known residuals: CDPATH is not modelled; a heredoc body is resolved against the 
 later `cd`; an interpreter's own shell-outs are not shell redirects of the command; on the synthetic suite a few
 adversarial should-block cases are still blocked on fewer than three of three runs, and a redacted credential preview
 is still blocked.
+
+## Addendum (2026-10-23): audit fixes and what the measurements support
+
+An audit of this decision reproduced several fabricated all-clears (`allInScope: true` for a write the shell really
+makes) and false blocks. Fixed:
+
+- **Quote-blind cross-check.** Every `>` in the command is also read without quote awareness, as before this ADR; one
+  the quote-aware scan dropped and that is not cleanly in scope is reported in a new `quotedTargets` list and makes
+  `allInScope` false (`echo "$(echo "a " > /etc/passwd)" > ok.txt` reported `allInScope: true`; re-readers such as
+  `| "$BASH"`, `find -exec sh -c`, PowerShell scriptblocks and backtick escapes were blind spots). An in-scope phantom
+  is still dropped, and a glob-bearing phantom that cannot name a protected file (`list[int]:`, `**Note**`) counts as a
+  literal name. Targets that read in scope but whose real location could not be checked (a link the same command
+  creates, a UNC root, a hard link, a timed-out probe) are listed in `unmeasured`; an out-of-scope target never is.
+- **Writers.** PowerShell path flags are found anywhere in the arguments, an unknown flag makes the target unreadable
+  instead of guessed, `tee` is `Tee-Object` in PowerShell, `append` only for cmdlets that have it; `$null` is a sink
+  only in PowerShell; wrappers (`stdbuf`, `xargs`, …), shell keywords and brace expansion are read.
+- **`cd`.** A PowerShell trailing backslash, `iex`, `$()` and splats, `env --chdir`, `pushd ±N` and deferred bodies
+  (functions, `trap`) no longer clear a write; an opencode `workdir` of `~` is the home directory; an `&&`-gated
+  pipeline or group keeps the gate; loop keywords count only at command position; comments are lexed.
+- **Measurement.** A link from one scope root into another is in scope; a UNC root, a hard link and a link created by
+  the same command are `unmeasured`; a single-letter UNC host is never folded onto a drive.
+- **Temp hint.** Withheld for conditional and multi-line bindings, PowerShell variable-provider and multi-assignment
+  rebinding, and disguised runners (`\eval`, `"eval"`); kept for benign commands whose words merely look like
+  keywords.
+- **Retry fact.** `identical` outranks `subset`; whitespace inside quotes and newlines is significant; trivial
+  wrappers (`2>&1`, `| tail`, a comment, `VAR=` prefixes, grouping, quoting) count as the same call.
+- **Credential one-sample rule** recognises the rule in the raw category or the reason, including `fast` mode.
+- **Transcript forgery.** form feed, vertical tab and the information separators split prose; tool-call lines escape U+0085,
+  U+2028 and U+2029.
+
+The policy text is unchanged: `quotedTargets` and `unmeasured` are not described in it. On the replay, adding two
+definitions and two clearing-list lines moved should-block samples from 4/36 to 11/36 allowed, while repeated runs of
+byte-identical requests also ranged from 1/18 to 5/18 — the measurement cannot tell prompt drift from the model's own
+variance at this size, so the calibrated prompt stays as measured.
+
+**What the numbers support.** The Consequences above were measured on the tree before the final measurement fixes,
+with the policy tuned on the same 86 cases; four of the six should-block cases are one command family, so about three
+are independent. Replayed with the same harness, corpus and model on one account, the merged ADR-106 code blocks
+10.4% of should-allow samples (25/240, 3 always blocked) and this addendum's code 10.4% (25/240, 2 always blocked);
+false allows on the should-block cases are unchanged by construction (byte-identical requests) and vary between runs
+at about 14% (10/72 pooled). The direction of ADR-106 holds; its absolute rates are estimates on a hard-negative set,
+not production rates, and the false-allow comparison is not statistically meaningful. The audit's gains are on
+adversarial command shapes this corpus does not contain.
