@@ -221,6 +221,33 @@ judge run:
 - `[harness] detection (boot): … pi none` reports PATH detection only; the managed
   store's pi still spawns.
 
+## Isolation, terminals and native modules
+
+Learned verifying an Electron patch bump (node-pty + better-sqlite3 under a new build):
+
+- **Isolated home.** `app-shot.mjs` passes `process.env` through and has no
+  isolation flag: on Windows set `APPDATA`, `LOCALAPPDATA`, `USERPROFILE` and `HOME`
+  to a throwaway folder before launching (a custom driver also passes
+  `--user-data-dir=<folder>/electron`). In a clean home the log's
+  `[SessionHistory] Failed to read projects directory` (ENOENT) and a missing
+  optional engine are expected, not failures.
+- **The first screen is `WelcomeState`** (not `WelcomeScreen`, which also exists in
+  the source).
+- **Terminal.** The panel is closed by default: `TerminalPanel.newTab` is in the DOM
+  but hidden. Create a session first (store recipe above), then click
+  `TopBar.terminal`, which opens slot 0 in the session's cwd. With no session the `+`
+  button spawns a shell at `'.'` that the panel never shows (0×0 xterm). Type into
+  xterm's own textarea; read output from `.xterm-rows` of the instance whose
+  `getBoundingClientRect().height > 0` (every tab keeps a hidden instance).
+- **Main-process output.** `app-shot.mjs` reports renderer `consoleErrors` only; for
+  crash evidence attach to `app.process().stdout/stderr` in a custom driver.
+- **Native modules from the running app.** Inside `app.evaluate`, load the module with
+  `createRequire(root + '/package.json')(root + '/node_modules/better-sqlite3')` and
+  open the app's own `~/.claude/ui/operational.db` (created at boot in the isolated
+  home) read-only: `PRAGMA integrity_check` and `user_version` prove the ABI and the
+  migration chain. node-pty's `conpty_console_list_agent` may print `AttachConsole
+failed` at teardown with a terminal open; that is shutdown noise.
+
 ## Caveats — what you can't (safely) drive
 
 - **New session** through the UI needs the native OS folder picker
