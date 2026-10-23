@@ -263,7 +263,8 @@ failed` at teardown with a terminal open; that is shutdown noise.
 Select-Object -ExpandProperty Modules`, with a terminal open so node-pty is loaded)
   shows the real `app.asar.unpacked` path.
 - **Terminal needle.** The typed line echoes too, so `echo e45-ok` matches before the
-  command runs; type a split literal like `echo ('e45-' + 'ok')`.
+  command runs; type a split literal: `echo ('e45-' + 'ok')` in PowerShell (the
+  terminal's shell when pwsh is installed), `echo e45-^ok` in the cmd.exe fallback.
 - **Packaged app.** `executablePath: dist/win-unpacked/claudui.exe`, `args: []`, the
   isolated-home variables plus `CLAUDEUI_ALLOW_MULTIPLE_INSTANCES=1` (the packaged build
   enforces the single-instance lock) and `CLAUDE_UI_LOG_DIR=<report folder>`.

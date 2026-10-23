@@ -4,10 +4,10 @@
  * `rebuild:native` (`electron-builder install-app-deps`, also postinstall's
  * native stage) asks `node-abi` for the installed Electron's ABI before it
  * rebuilds node-pty. A node-abi older than the Electron major throws "Could
- * not detect abi", which postinstall records as a soft failure and CI only
- * reaches in its explicit rebuild step. This pins the pair together: an
- * Electron bump without a node-abi that knows it fails here first
- * (package.json#overrides.node-abi carries the floor).
+ * not detect abi". postinstall keeps going past it but exits non-zero at the
+ * end, and an `--ignore-scripts` install never runs it. This pins the pair
+ * together: an Electron bump without a node-abi that knows it fails here
+ * first (package.json#overrides.node-abi carries the floor).
  */
 
 import { describe, it, expect } from 'vitest'
