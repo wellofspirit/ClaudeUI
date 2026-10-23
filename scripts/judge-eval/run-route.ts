@@ -116,7 +116,8 @@ export function readKeyFile(
   } catch (err) {
     const code = (err as { code?: unknown } | null)?.code
     throw new Error(
-      `could not read the OpenRouter key file ${file}${typeof code === 'string' ? ` (${code})` : ''}`
+      `could not read the OpenRouter key file ${file}${typeof code === 'string' ? ` (${code})` : ''}`,
+      { cause: err }
     )
   }
   // `trim` also strips a BOM (PowerShell's `Out-File` writes one), a CR and the final newline.

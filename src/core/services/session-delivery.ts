@@ -408,7 +408,7 @@ export function reholdNonUserItem(session: ISession, item: NonUserItem): void {
 /** Replicate the held count of a live session (a no-op for one canonical does not know). */
 export function emitHeldCount(routingId: string, session: ISession | undefined): void {
   if (!session) return
-  let count = 0
+  let count: number
   try {
     count = heldFor(session, routingId).length
   } catch (err) {

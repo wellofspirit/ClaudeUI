@@ -231,7 +231,7 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
         reauthorized = true
         // A refresh that throws is a refresh that failed: the labelled 401
         // below surfaces, never the refresh path's raw error.
-        let fresh: ResolvedJudgeRoute | null = null
+        let fresh: ResolvedJudgeRoute | null
         try {
           fresh = await route.reauthorize()
         } catch {
@@ -288,7 +288,7 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
     } catch (err) {
       // Whatever the abort surfaced as (fetch's AbortError, a body stream that
       // errored mid-read), it reads as one message.
-      if (req.signal?.aborted) throw new Error(ABORTED_MESSAGE)
+      if (req.signal?.aborted) throw new Error(ABORTED_MESSAGE, { cause: err })
       throw err
     }
   }

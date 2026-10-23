@@ -389,7 +389,7 @@ export function resolvePiManaged(
   displayPath: string | null,
   deps: ResolveDeps
 ): InstallResolution | null {
-  let marker: Record<string, unknown> | null = null
+  let marker: Record<string, unknown> | null
   try {
     marker = JSON.parse(
       fs.readFileSync(path.join(root, 'managed-install.json'), 'utf-8')

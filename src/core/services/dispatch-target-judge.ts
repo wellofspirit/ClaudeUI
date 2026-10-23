@@ -263,7 +263,7 @@ export class DispatchTargetJudge {
   constructor(private readonly opts: DispatchTargetJudgeOptions) {
     // Memoized for the target's life, like each session memoizes its own
     // (a mid-dispatch config edit is not hot-reloaded).
-    let autoMode: AutoModeConfig = {}
+    let autoMode: AutoModeConfig
     try {
       autoMode = opts.loadEngineConfig(opts.configEngine ?? opts.engine).autoMode ?? {}
     } catch {

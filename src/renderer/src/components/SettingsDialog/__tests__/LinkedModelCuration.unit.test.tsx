@@ -10,7 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react'
-import { createRef, StrictMode, useState } from 'react'
+import { useRef, StrictMode, useState } from 'react'
 import { LinkedModelCuration } from '../LinkedModelCuration'
 import { useSessionStore } from '../../../stores/session-store'
 import type { CuratedEngine, CurationAdapter } from '../ModelCuration'
@@ -75,6 +75,7 @@ function Harness({
   adapters: CurationAdapter[]
 }): React.JSX.Element {
   const [engine, setEngine] = useState<CuratedEngine>('opencode')
+  const filterRef = useRef<HTMLInputElement>(null)
   return (
     <LinkedModelCuration
       testid="S"
@@ -83,7 +84,7 @@ function Harness({
       adapters={adapters}
       engine={engine}
       onEngineChange={setEngine}
-      filterRef={createRef<HTMLInputElement>()}
+      filterRef={filterRef}
       onWrote={async () => {}}
     />
   )

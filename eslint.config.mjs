@@ -1,7 +1,7 @@
 import { defineConfig } from 'eslint/config'
 import tseslint from '@electron-toolkit/eslint-config-ts'
 import eslintConfigPrettier from 'eslint-config-prettier'
-import eslintPluginReact from 'eslint-plugin-react'
+import eslintReact from '@eslint-react/eslint-plugin'
 import eslintPluginReactHooks from 'eslint-plugin-react-hooks'
 import eslintPluginReactRefresh from 'eslint-plugin-react-refresh'
 
@@ -88,19 +88,21 @@ export default defineConfig(
   },
 
   // React + Hooks + Fast-Refresh — renderer and web client only.
-  { ...eslintPluginReact.configs.flat.recommended, files: REACT_FILES },
-  { ...eslintPluginReact.configs.flat['jsx-runtime'], files: REACT_FILES },
+  //
+  // `@eslint-react/eslint-plugin` replaced `eslint-plugin-react`, which has no
+  // ESLint 10 support. Its `recommended-typescript` preset is deliberately NOT
+  // spread: it bundles the React Compiler lints that ADR-013 §4 keeps off and
+  // would break the 0-problems baseline. Only the rules that replace the old
+  // plugin's recommended set are enabled, at its severity (error), with the
+  // preset's `settings` (react-x version detect).
   {
     files: REACT_FILES,
-    settings: {
-      react: {
-        version: 'detect'
-      }
-    },
     plugins: {
+      '@eslint-react': eslintReact,
       'react-hooks': eslintPluginReactHooks,
       'react-refresh': eslintPluginReactRefresh
     },
+    settings: eslintReact.configs['recommended-typescript'].settings,
     rules: {
       // The stable, high-signal hooks rules. We intentionally do NOT enable the
       // react-hooks@7 "recommended" set wholesale: it bundles the experimental
@@ -108,12 +110,56 @@ export default defineConfig(
       // …) as errors, and this codebase does not target the compiler.
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'warn',
+      // Parity with `eslint-plugin-react`'s recommended preset. `jsx-key` →
+      // `no-missing-key`, `display-name` → `no-missing-component-display-name`,
+      // `jsx-no-comment-textnodes` → `jsx-no-comment-textnodes`,
+      // `no-children-prop` → the `jsx-no-children-prop` pair,
+      // `no-danger-with-children` → `dom-no-dangerously-set-innerhtml-with-children`,
+      // `no-direct-mutation-state` → `no-direct-mutation-state`,
+      // `no-find-dom-node` → `dom-no-find-dom-node`,
+      // `no-render-return-value` → `dom-no-render-return-value`,
+      // `no-unknown-property` → `dom-no-unknown-property`,
+      // `jsx-no-target-blank` → `dom-no-unsafe-target-blank`, and
+      // `no-deprecated` is superseded by the specific rules below.
+      '@eslint-react/no-missing-key': 'error',
+      '@eslint-react/no-missing-component-display-name': 'error',
+      '@eslint-react/jsx-no-comment-textnodes': 'error',
+      '@eslint-react/jsx-no-children-prop': 'error',
+      '@eslint-react/jsx-no-children-prop-with-children': 'error',
+      '@eslint-react/dom-no-dangerously-set-innerhtml-with-children': 'error',
+      '@eslint-react/no-direct-mutation-state': 'error',
+      '@eslint-react/dom-no-find-dom-node': 'error',
+      '@eslint-react/dom-no-render-return-value': 'error',
+      '@eslint-react/dom-no-unknown-property': 'error',
+      '@eslint-react/dom-no-unsafe-target-blank': 'error',
+      // `react/no-deprecated` replacements: the individual APIs React removed.
+      '@eslint-react/dom-no-render': 'error',
+      '@eslint-react/dom-no-hydrate': 'error',
+      '@eslint-react/no-component-will-mount': 'error',
+      '@eslint-react/no-component-will-receive-props': 'error',
+      '@eslint-react/no-component-will-update': 'error',
       ...eslintPluginReactRefresh.configs.vite.rules,
       // Off by choice: this only affects dev-server Fast Refresh (a violation
       // makes that module do a full reload), never production. Co-locating small
       // helpers/constants/types with the component that uses them is a pattern
       // we keep, so the rule is pure noise here.
       'react-refresh/only-export-components': 'off'
+    }
+  },
+
+  // AudioWorklet global scope. `voice-worklet.js` is not a window script: it runs
+  // in its own global scope, where these three names are provided by the host.
+  // `globals` v17 (via @electron-toolkit/eslint-config-ts 4) no longer folds the
+  // AudioWorklet globals into `globals.browser`, so declare the ones the file
+  // uses (`globals.audioWorklet` in full) instead of reporting them as undefined.
+  {
+    files: ['src/renderer/src/lib/voice/voice-worklet.js'],
+    languageOptions: {
+      globals: {
+        AudioWorkletProcessor: 'readonly',
+        registerProcessor: 'readonly',
+        sampleRate: 'readonly'
+      }
     }
   },
 

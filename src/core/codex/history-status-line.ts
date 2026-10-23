@@ -49,9 +49,9 @@ import { logger } from '../services/logger'
  * overwrite whatever the store already holds with a claim this cannot support.
  */
 export function codexHistoryStatusLine(threadId: string): StatusLineData | null {
-  let rows: UsageEventRow[] = []
+  let rows: UsageEventRow[]
   let meta: ReturnType<typeof getSessionMeta>
-  let dispatched: ModelCostEntry[] = []
+  let dispatched: ModelCostEntry[]
   try {
     rows = usageEventsForCodexThread(threadId)
     meta = getSessionMeta(threadId)
