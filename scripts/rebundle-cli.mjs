@@ -709,7 +709,13 @@ function main() {
     // structural sanity check on the concat.
     for (const { module: m, bytes } of changed) {
       const name = m.name.toString('utf8')
-      const stderr = syntaxCheckChunk(bytes)
+      let stderr
+      try {
+        stderr = syntaxCheckChunk(bytes)
+      } catch (err) {
+        // The checker itself could not run (no real Node): fail the rebundle.
+        die(err.message)
+      }
       if (stderr) die(`syntax check failed for chunk "${name}":\n${stderr}`)
     }
     if (changed.length > 0) {
