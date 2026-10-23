@@ -358,7 +358,11 @@ describe('DispatchTargetJudge — context directories (workdir + additional dire
     return realpathSync.native(d)
   }
   beforeAll(() => {
-    base = mkdtempSync(join(tmpdir(), 'xeng-ctxdirs-'))
+    // Not under `/tmp`: on Linux that is the OS temp dir AND a fixed redirect temp root that
+    // stubbing TMPDIR cannot remove, so "out of scope without the grant" could never hold there.
+    // (The repo checkout is no option either: a worktree lives under `.claude/`, a protected name.)
+    const scratchRoot = tmpdir().startsWith('/tmp') ? '/var/tmp' : tmpdir()
+    base = mkdtempSync(join(scratchRoot, 'xeng-ctxdirs-'))
     repo = dir('target-worktree')
     parent = dir('parent-repo')
     extra = dir('shared-extra')
