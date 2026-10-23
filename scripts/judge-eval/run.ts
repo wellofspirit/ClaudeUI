@@ -28,6 +28,10 @@
  * the file format is in {@link loadFsFacts}. Without `--fs-facts` the runner keeps the pure
  * scope-only analysis (measurement would be a guess on this machine).
  *
+ * `--openrouter-key-file <path>` (with `--model openrouter/<vendor>/<model>`) resolves the
+ * model through the PRODUCTION OpenRouter route, but spends the key in that file instead of
+ * the vault's. The file is read once, trimmed, and never printed.
+ *
  * `--chatgpt-account <vault id>` reads THAT vault account's token (read-only, no
  * refresh) instead of the active one. `--route-url <base>` [`--route-key`] skips
  * the route resolver for a hand-built OpenAI chat-completions route (opencode's
@@ -95,6 +99,8 @@ import {
   parseRouteHeaders,
   parseRouteHeadroom,
   pickChatgptAccount,
+  openRouterKeyDeps,
+  readKeyFile,
   readOnlyTokenOf,
   requestDumpLine,
   summarizeSizes
@@ -125,6 +131,7 @@ const { values: args } = parseArgs({
     'route-key': { type: 'string', default: 'public' },
     'route-header': { type: 'string', multiple: true },
     'route-headroom': { type: 'string' },
+    'openrouter-key-file': { type: 'string' },
     'mask-identity': { type: 'boolean' },
     'no-mask-identity': { type: 'boolean' },
     'dry-run-sizes': { type: 'boolean', default: false },
@@ -168,6 +175,12 @@ Usage: bun scripts/judge-eval/run.ts [options]
                         Authorization. Values are never printed.
   --route-headroom <n>  output headroom in tokens for the --route-url route, on top
                         of each stage's own cap, for reasoning models (default 8192)
+  --openrouter-key-file <path>
+                        spend the OpenRouter key in this file (one line, trimmed,
+                        never printed) instead of the vault's, on the production
+                        OpenRouter route: same URL, caps, reasoning controls and
+                        attribution headers. Needs --model openrouter/<vendor>/<model>;
+                        not combinable with --route-url.
   --mask-identity       replace the OS login / USERPROFILE folder name with \`user\`,
                         each GitHub owner in \`git -C <root> remote -v\` with \`owner\`
                         and the git author's email / name parts with \`user\` / \`org\` /
@@ -582,6 +595,22 @@ try {
 if (routeUrl === undefined && (Object.keys(routeHeaders).length > 0 || routeHeadroom !== undefined))
   fail('--route-header and --route-headroom need --route-url')
 
+// `--openrouter-key-file`: one key for every OpenRouter call of this run, read once. The model
+// must name the OpenRouter provider, because the injected key answers for whichever definition
+// owns the model (see `openRouterKeyDeps`).
+const openRouterKeyFile = args['openrouter-key-file']
+let routeDeps: ReturnType<typeof openRouterKeyDeps> | undefined
+if (openRouterKeyFile !== undefined) {
+  if (routeUrl !== undefined) fail('--openrouter-key-file has no effect with --route-url')
+  if (!args.model!.startsWith('openrouter/') || args.model!.length <= 'openrouter/'.length)
+    fail('--openrouter-key-file needs --model openrouter/<vendor>/<model>')
+  try {
+    routeDeps = openRouterKeyDeps(readKeyFile(openRouterKeyFile))
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err))
+  }
+}
+
 // A request that goes to a third party is masked and scanned first (`./request-guard`).
 // Both default ON for every route except the owner's ChatGPT subscription (the production
 // judge, which already receives this data); a dry run honours the same default, so the dump
@@ -591,7 +620,7 @@ if (routeUrl === undefined && (Object.keys(routeHeaders).length > 0 || routeHead
 async function describeRoute(): Promise<{ chatgpt?: true } | undefined> {
   if (routeUrl !== undefined) return undefined
   try {
-    return await describeJudgeRoute(args.engine as JudgeEngine, args.model!)
+    return await describeJudgeRoute(args.engine as JudgeEngine, args.model!, routeDeps)
   } catch {
     return undefined
   }
@@ -700,8 +729,13 @@ const judge: JudgeTransport = guarded(
       const override = routeOverride()
       if (override) return { ok: true, route: override }
       const resolved = await resolveJudgeRoute(args.engine as JudgeEngine, args.model!, {
-        chatgptToken: readOnlyChatgptToken
+        chatgptToken: readOnlyChatgptToken,
+        ...routeDeps
       })
+      // The injected key must only ever pay an OpenRouter route; anything else means the
+      // model landed on another definition (e.g. a custom endpoint) and the key went there.
+      if (routeDeps && resolved.ok && resolved.route.kind !== 'openrouter')
+        fail(`--model ${args.model} resolved to a ${resolved.route.kind} route, not OpenRouter`)
       // Eval-only knob: measure an OpenRouter judge with stage-2 reasoning off too.
       if (
         args['judge-reasoning'] === 'off' &&
@@ -725,7 +759,7 @@ const judge: JudgeTransport = guarded(
 const jobs = cases.flatMap((c) => Array.from({ length: runs }, () => c))
 
 console.log(
-  `judge-eval: ${cases.length} cases × ${dryRun ? 1 : runs} runs, model ${args.model} (${args.engine})${routeUrl !== undefined ? `, route ${routeOverride()!.label}` : ''}${accountHeader}${guardNote}, root ${root}${hasTimeOrder ? '' : ' [pre-ADR-091 transcript order]'}${args['cases-file'] ? `, cases ${args['cases-file']}` : ''}${dryRun ? ' [DRY RUN: sizes only, nothing is sent]' : ''}`
+  `judge-eval: ${cases.length} cases × ${dryRun ? 1 : runs} runs, model ${args.model} (${args.engine})${routeUrl !== undefined ? `, route ${routeOverride()!.label}` : ''}${accountHeader}${openRouterKeyFile !== undefined ? ', openrouter key: file' : ''}${guardNote}, root ${root}${hasTimeOrder ? '' : ' [pre-ADR-091 transcript order]'}${args['cases-file'] ? `, cases ${args['cases-file']}` : ''}${dryRun ? ' [DRY RUN: sizes only, nothing is sent]' : ''}`
 )
 
 /**

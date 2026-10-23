@@ -50,3 +50,10 @@ A rate-limited or broken judge is visible at once (card, banner, settings) and, 
 longer turns every gated call into a prompt. A weaker fallback model changes the security profile while it judges;
 the banner says so and names it. The confirmation sample and the credential one-sample rule (ADR-106 §2) hold within
 whichever model judged. Cooldowns are in memory: a restart pays one failed call per route before resting it again.
+
+**Which fallback.** Free models were measured as candidates on the real-case replay (2026-10-23, one run each,
+identity masked). opencode's hosted free tier only serves the OpenCode client and was not used. Of OpenRouter's free
+text models, three answered; on the six should-block cases (credential exploration, an identical retry) they allowed
+13 of 13 answered samples, where the default judge model allows about 17%; one also made no false blocks on the
+hardest should-allow cases, i.e. it allowed nearly everything. A free model is therefore not a safe fallback. The
+recommended fallback is the same judge model on another subscription (§5), which keeps its calibration.

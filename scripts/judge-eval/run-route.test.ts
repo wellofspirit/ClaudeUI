@@ -2,7 +2,12 @@
  * `run.ts`'s route selection and size summary. `run.ts` itself cannot be
  * imported without starting an eval, so these exercise the pure module it calls.
  */
-import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { resolveJudgeRoute, type JudgeRouteDeps } from '../../src/core/automode/judge-route'
+import type { SharedProviderDefinition } from '../../src/shared/shared-provider'
 import { outputCapValue } from '../../src/core/automode/judge-http/caps'
 import { buildChatBody } from '../../src/core/automode/judge-http/wire-chat'
 import type { VaultAccount } from '../../src/core/auth/vault/AuthVault'
@@ -11,8 +16,10 @@ import {
   buildCustomRoute,
   estimateTokens,
   parseRouteHeaders,
+  openRouterKeyDeps,
   parseRouteHeadroom,
   pickChatgptAccount,
+  readKeyFile,
   readOnlyTokenOf,
   requestDumpLine,
   ROUTE_REASONING_HEADROOM,
@@ -199,5 +206,117 @@ describe('requestDumpLine (--dump-requests)', () => {
 
   it('records an unnamed stage as null', () => {
     expect(JSON.parse(requestDumpLine('R-2', { system: 's', user: 'u' })).stage).toBeNull()
+  })
+})
+
+describe('--openrouter-key-file', () => {
+  // Fake keys, built from parts so no key-shaped literal sits in the source.
+  const FILE_KEY = 'sk-or-v1-' + 'x'.repeat(64)
+  const VAULT_KEY = 'sk-or-v1-' + 'v'.repeat(64)
+  let dir: string
+  const keyFile = (name: string, content: string): string => {
+    const file = join(dir, name)
+    writeFileSync(file, content)
+    return file
+  }
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'judge-eval-key-'))
+  })
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('reads the key once and trims a trailing newline, CRLF and a BOM', () => {
+    const NL = String.fromCharCode(10)
+    const CRLF = String.fromCharCode(13, 10)
+    const BOM = String.fromCharCode(0xfeff)
+    expect(readKeyFile(keyFile('lf', FILE_KEY + NL)) === FILE_KEY).toBe(true)
+    expect(readKeyFile(keyFile('crlf', `  ${FILE_KEY}${CRLF}`)) === FILE_KEY).toBe(true)
+    expect(readKeyFile(keyFile('bom', BOM + FILE_KEY + NL)) === FILE_KEY).toBe(true)
+  })
+
+  it('refuses a missing, empty or multi-token file, naming the file and never the content', () => {
+    const missing = join(dir, 'does-not-exist')
+    expect(() => readKeyFile(missing)).toThrow(/could not read the OpenRouter key file/)
+    const NL = String.fromCharCode(10)
+    expect(() => readKeyFile(keyFile('empty', ` ${NL}${NL}`))).toThrow(/is empty/)
+    const many = keyFile('many', FILE_KEY + NL + FILE_KEY + NL)
+    expect(() => readKeyFile(many)).toThrow(/more than one token/)
+    for (const file of [missing, many]) {
+      let message = ''
+      try {
+        readKeyFile(file)
+      } catch (err) {
+        message = String(err)
+      }
+      expect(message.includes(FILE_KEY)).toBe(false)
+      expect(message.includes('x'.repeat(16))).toBe(false)
+    }
+  })
+
+  /** Every dependency faked: no vault, no provider files, no catalog, no network. */
+  const deps = (
+    over: Partial<JudgeRouteDeps>,
+    vaultKey: string | null = VAULT_KEY
+  ): JudgeRouteDeps => {
+    const openrouter: SharedProviderDefinition = {
+      id: 'openrouter',
+      name: 'OpenRouter',
+      kind: 'catalog',
+      models: [],
+      managed: true,
+      routes: { pi: { enabled: true }, opencode: { enabled: true } }
+    }
+    return {
+      listDefinitions: () => [openrouter],
+      // The vault holds a DIFFERENT key for the same provider.
+      loadApiKey: async () => vaultKey,
+      chatgptToken: async () => null,
+      chatgptSignedIn: async () => false,
+      chatgptIdentity: async () => ({ accountKey: 'k', accountLabel: 'l' }),
+      opencodeCatalog: async () => [],
+      piCatalog: async () => [],
+      appVersion: '0.0.0-test',
+      ...over
+    }
+  }
+
+  it('resolves the production OpenRouter route but spends the file key, not the vault key', async () => {
+    const key = readKeyFile(keyFile('route', `${FILE_KEY}${String.fromCharCode(10)}`))
+    const keyed = await resolveJudgeRoute(
+      'pi',
+      'openrouter/z-ai/glm-4.6',
+      deps(openRouterKeyDeps(key))
+    )
+    const vault = await resolveJudgeRoute('pi', 'openrouter/z-ai/glm-4.6', deps({}))
+    if (!keyed.ok || !vault.ok) throw new Error('expected both to resolve to a route')
+    expect(keyed.route.kind).toBe('openrouter')
+    expect(keyed.route.url).toBe('https://openrouter.ai/api/v1/chat/completions')
+    expect(keyed.route.model).toBe('z-ai/glm-4.6')
+    expect(keyed.route.headers.Authorization === `Bearer ${FILE_KEY}`).toBe(true)
+    expect(vault.route.headers.Authorization === `Bearer ${VAULT_KEY}`).toBe(true)
+    // Everything but the credential is the production route: attribution headers,
+    // caps, wire, and a credential-free label.
+    const withoutAuth = (headers: Record<string, string>): Record<string, string> =>
+      Object.fromEntries(Object.entries(headers).filter(([name]) => name !== 'Authorization'))
+    expect(withoutAuth(keyed.route.headers)).toEqual(withoutAuth(vault.route.headers))
+    expect(keyed.route.headers['X-Title']).toBe('ClaudeUI')
+    expect(keyed.route.caps).toEqual(vault.route.caps)
+    expect(keyed.route.wire).toBe(vault.route.wire)
+    expect(keyed.route.label).toBe(vault.route.label)
+    // The key reaches the headers and nothing else (account is a digest).
+    const visible = JSON.stringify({ ...keyed.route, headers: undefined })
+    expect(visible.includes(FILE_KEY)).toBe(false)
+    expect(keyed.route.account.accountKey).not.toBe(vault.route.account.accountKey)
+  })
+
+  it('works for a provider the vault holds no key for', async () => {
+    const result = await resolveJudgeRoute(
+      'pi',
+      'openrouter/z-ai/glm-4.6',
+      deps(openRouterKeyDeps(FILE_KEY), null)
+    )
+    if (!result.ok) throw new Error('expected a route')
+    expect(result.route.headers.Authorization === `Bearer ${FILE_KEY}`).toBe(true)
   })
 })

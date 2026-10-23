@@ -3,10 +3,13 @@
  * out of `run.ts` because that file runs an eval on import (same split as
  * `replay-scope.ts`), so a test can reach them.
  *
- * Nothing here reads the vault, the network or the environment.
+ * Nothing here reads the vault, the network or the environment; the one file it
+ * reads is the OpenRouter key file ({@link readKeyFile}).
  */
+import { readFileSync } from 'node:fs'
 import { capsFor } from '../../src/core/automode/judge-http/caps'
 import type { ResolvedJudgeRoute } from '../../src/core/automode/judge-http/types'
+import type { JudgeRouteDeps } from '../../src/core/automode/judge-route'
 import type { VaultAccount } from '../../src/core/auth/vault/AuthVault'
 import type { CodexInjectionToken } from '../../src/core/auth/vault/CredentialSync'
 
@@ -96,6 +99,44 @@ export function parseRouteHeaders(entries: readonly string[]): Record<string, st
     headers[name] = value
   })
   return headers
+}
+
+/**
+ * `--openrouter-key-file`: the key in `file`, trimmed. Errors name the file and
+ * the problem (missing, empty, more than one token), never the content or its
+ * length: the file holds a secret.
+ */
+export function readKeyFile(
+  file: string,
+  read: (path: string) => string = (path) => readFileSync(path, 'utf-8')
+): string {
+  let text: string
+  try {
+    text = read(file)
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code
+    throw new Error(
+      `could not read the OpenRouter key file ${file}${typeof code === 'string' ? ` (${code})` : ''}`
+    )
+  }
+  // `trim` also strips a BOM (PowerShell's `Out-File` writes one), a CR and the final newline.
+  const key = text.trim()
+  if (!key) throw new Error(`the OpenRouter key file ${file} is empty`)
+  if (/\s/.test(key)) throw new Error(`the OpenRouter key file ${file} holds more than one token`)
+  return key
+}
+
+/**
+ * The `resolveJudgeRoute` dependency that makes `key` pay on an OpenRouter route:
+ * the PRODUCTION route (kind, URL, caps, reasoning controls, attribution headers)
+ * is still planned by `resolveJudgeRoute`; only the credential it spends differs
+ * from the vault's. The resolver loads ONE key per call, the owning definition's,
+ * so every id answers with `key`: the caller must have checked that the model
+ * names an OpenRouter route (`openrouter/<vendor>/<model>`), or this would hand
+ * the key to another provider.
+ */
+export function openRouterKeyDeps(key: string): Pick<JudgeRouteDeps, 'loadApiKey'> {
+  return { loadApiKey: async () => key }
 }
 
 /** `--route-headroom`: a positive integer token count, else an Error. */
