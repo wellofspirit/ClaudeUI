@@ -41,7 +41,14 @@ import {
 } from './settings-controls'
 import type { SettingsRenderContext } from './settings-target'
 import { ModelPicker } from '../shared/InlinePickers'
-import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
+import {
+  toModelDisplays,
+  selectedModelDisplay,
+  isStaleModelValue,
+  StaleModelNotice
+} from './settings-model-display'
+import type { SharedProviderAccountList } from '../../../../shared/shared-provider'
+import { accountDisplayName } from '../../utils/sign-in-provider'
 import { OpencodeAgentsSection } from './OpencodeAgents'
 import { MicrophoneSetting } from './MicrophoneSetting'
 import { VoicePackSetting, VoicePreviewSetting } from './VoicePackSetting'
@@ -411,9 +418,21 @@ const TWO_STAGE_OPTIONS: { value: 'both' | 'fast' | 'thinking'; label: string }[
 
 /** Label for the judge-model picker's "no explicit choice" row (judgeModel unset). */
 const JUDGE_MODEL_DEFAULT_LABEL = 'Same as session model (default)'
+/** Label for the fallback-judge picker's "no explicit choice" row (fallbackJudgeModel unset). */
+const FALLBACK_JUDGE_EMPTY_LABEL = 'None (ask me instead)'
+/** The fallback-judge row's sentence, the same for both engines. */
+const FALLBACK_JUDGE_NOTE =
+  "Judges when the judge model can't answer (rate limit, outage). Leave empty to ask you instead."
 /** The judge-model row's second sentence, the same for both engines (ADR-081 §3). */
 const JUDGE_MODEL_ROUTES_NOTE =
   'ClaudeUI calls the judge itself, so only models from providers set up in ClaudeUI (OpenAI-compatible ones, or the ChatGPT subscription) can judge.'
+/** How often the judge-model row re-asks whether the judge route is resting. */
+const JUDGE_RESTING_POLL_MS = 60_000
+/** The Advanced account row's note while the fallback model has no second account to offer. */
+const FALLBACK_ACCOUNT_NOT_CHATGPT_NOTE =
+  "The fallback model isn't a ChatGPT model, so there is only one account to use — this setting does nothing until you pick a ChatGPT fallback."
+const FALLBACK_SAME_JUDGE_WARNING =
+  'Same model on the same account as the judge — it would hit the same limit. Pick another model, or another account under Advanced.'
 /** Label for the dispatch default-model picker's "no explicit choice" row. */
 const DISPATCH_MODEL_DEFAULT_LABEL = '(not set)'
 /** Label for the opencode default/small model pickers' "no explicit choice" row. */
@@ -447,6 +466,11 @@ const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
  * Until that answer arrives — or if asking fails — every model is listed: the
  * session refuses an unroutable judge at call time either way, with a banner.
  *
+ * Two pieces of live state hang off the judge rows: a "resting" notice under the
+ * judge model (`judgeRouteResting`, re-asked every minute), and an Advanced fold
+ * that runs the fallback judge on another ChatGPT account
+ * (`fallbackJudgeAccount`; a model that is not ChatGPT-routed has only the one).
+ *
  * What this editor does NOT own is the three trust lists: they are the same
  * values for every engine, so ADR-065 phase 4 moved them to one shared file with
  * its own group (`TrustLists.tsx`). Judge model, two-stage mode and the master
@@ -468,6 +492,52 @@ function AutoModeSection({
   const [models, setModels] = useState<ModelInfo[]>([])
   /** Per model value, whether ClaudeUI can call it as the judge; null = not known (yet). */
   const [support, setSupport] = useState<Record<string, JudgeModelSupport> | null>(null)
+  /** The signed-in ChatGPT accounts, for the Advanced "fallback on a different account" setting. */
+  const [accounts, setAccounts] = useState<SharedProviderAccountList | null>(null)
+  /** The judge route's cooldown, tagged with the model it was asked about; null = not resting. */
+  const [resting, setResting] = useState<{ model: string; until: number } | null>(null)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+
+  const auto = engineCfg?.autoMode ?? {}
+  const enabled = auto.enabled !== false // default ON
+  const judgeModel = auto.judgeModel ?? ''
+  // Only a judge model that is actually set can be resting, and only while auto mode is on.
+  const restingProbeModel = enabled ? judgeModel : ''
+
+  useEffect(() => {
+    let live = true
+    void (async () => {
+      try {
+        const list = await window.api.listProviderAccounts('chatgpt')
+        if (live) setAccounts(list)
+      } catch {
+        // No account list: the Advanced toggle stays off and says so.
+      }
+    })()
+    return () => {
+      live = false
+    }
+  }, [])
+
+  // A usage limit lifts on its own, so the notice is re-asked while the section is mounted.
+  useEffect(() => {
+    if (!restingProbeModel) return
+    let live = true
+    const probe = async (): Promise<void> => {
+      try {
+        const answer = await window.api.judgeRouteResting(engineId, restingProbeModel)
+        if (live) setResting(answer ? { model: restingProbeModel, until: answer.until } : null)
+      } catch {
+        if (live) setResting(null)
+      }
+    }
+    void probe()
+    const timer = setInterval(() => void probe(), JUDGE_RESTING_POLL_MS)
+    return () => {
+      live = false
+      clearInterval(timer)
+    }
+  }, [engineId, restingProbeModel])
 
   useEffect(() => {
     window.api
@@ -504,9 +574,7 @@ function AutoModeSection({
     )
   }
 
-  const auto = engineCfg.autoMode ?? {}
-  const enabled = auto.enabled !== false // default ON
-  const judgeModel = auto.judgeModel ?? ''
+  const fallbackJudgeModel = auto.fallbackJudgeModel ?? ''
   const twoStageMode = auto.twoStageMode ?? 'both'
 
   // Only an explicit refusal hides a model; an unanswered value stays listed.
@@ -515,12 +583,52 @@ function AutoModeSection({
   // Selected from the FULL list, so a saved model that can't judge still shows
   // by name (its notice says why) rather than as an unknown value.
   const selectedJudgeModel = selectedModelDisplay(models, judgeModel, JUDGE_MODEL_DEFAULT_LABEL)
+  const selectedFallbackJudgeModel = selectedModelDisplay(
+    models,
+    fallbackJudgeModel,
+    FALLBACK_JUDGE_EMPTY_LABEL
+  )
 
   const update = (patch: Partial<AutoModeConfig>): void => {
     const next: EngineConfig = { ...engineCfg, autoMode: { ...auto, ...patch } }
     setEngineCfg(next)
     window.api.saveEngineConfig(engineId, next).catch(() => {})
   }
+
+  // The fallback judge's account. Only a ChatGPT-routed model has a second account to run on;
+  // until `judgeModelSupport` has answered that is unknown, and unknown stays usable.
+  const accountList = accounts?.accounts ?? []
+  const activeAccountId = accounts?.activeId ?? null
+  const fallbackAccount = auto.fallbackJudgeAccount || ''
+  const accountOn = fallbackAccount !== ''
+  const noAccountToOffer = !accountOn && accountList.length === 0
+  const fallbackIsChatgpt = support === null || support[fallbackJudgeModel]?.chatgpt === true
+  const accountOptions = accountList.map((a) => ({
+    value: a.id,
+    label:
+      [accountDisplayName(a.email), a.planType].filter(Boolean).join(' · ') +
+      (a.id === activeAccountId ? ' (active)' : '')
+  }))
+  const setFallbackAccountOn = (on: boolean): void => {
+    if (!on) {
+      update({ fallbackJudgeAccount: undefined })
+      return
+    }
+    const pick = accountList.find((a) => a.id !== activeAccountId) ?? accountList[0]
+    if (pick) update({ fallbackJudgeAccount: pick.id })
+  }
+
+  // Same model on the same account as the judge would hit the very limit that sent the call
+  // to the fallback. Another account (ChatGPT only) is the one thing that makes it a new route.
+  const fallbackSameAsJudge =
+    fallbackJudgeModel !== '' &&
+    fallbackJudgeModel === judgeModel &&
+    (!accountOn || !fallbackIsChatgpt || fallbackAccount === activeAccountId)
+  const fallbackUsable =
+    fallbackJudgeModel !== '' &&
+    !fallbackSameAsJudge &&
+    support?.[fallbackJudgeModel]?.ok !== false &&
+    !isStaleModelValue(models, fallbackJudgeModel)
 
   return (
     <div data-testid={testid} className="divide-y divide-border/55">
@@ -563,6 +671,71 @@ function AutoModeSection({
             support={support}
             noneLeft={support !== null && judgeable.length === 0}
           />
+          {/* Live state, not a setting: the judge model hit a usage limit and its route is
+              resting. Asked of the host (`judgeRouteResting`) on mount and every minute. */}
+          {resting !== null && resting.model === judgeModel && (
+            <JudgeNotice
+              testid={`${testid}.judgeResting`}
+              tone="warning"
+              dataAttrs={{
+                'data-until': String(resting.until),
+                'data-fallback': String(fallbackUsable)
+              }}
+            >
+              <span aria-hidden="true">⏸</span>
+              <span>
+                {selectedJudgeModel.shortName} has hit its usage limit and rests until{' '}
+                <b>{formatRestingUntil(resting.until)}</b>.{' '}
+                {fallbackUsable
+                  ? 'The fallback judge is deciding meanwhile.'
+                  : 'Every gated action asks you meanwhile.'}
+              </span>
+            </JudgeNotice>
+          )}
+          {/* The fallback judge: the same picker, the same `judgeModelSupport` narrowing (it is
+              judged through the same route resolver), its own notices. Empty = unset → the human
+              decides when the judge model can't answer. */}
+          <SettingRow
+            testid={`${testid}.fallbackJudgeModelRow`}
+            label="Fallback judge model"
+            description={FALLBACK_JUDGE_NOTE}
+          >
+            <span data-testid={`${testid}.fallbackJudgeModel`} data-value={fallbackJudgeModel}>
+              <ModelPicker
+                variant="field"
+                placement="down"
+                emptyOption={{ label: FALLBACK_JUDGE_EMPTY_LABEL }}
+                models={judgeModelOptions}
+                selectedModel={selectedFallbackJudgeModel}
+                onSelectModel={(v) =>
+                  // A model known NOT to route through ChatGPT has one account: a saved
+                  // fallback account would only mislabel it, so it is cleared with it.
+                  update({
+                    fallbackJudgeModel: v || undefined,
+                    ...(!v || (support && support[v] && support[v].chatgpt !== true)
+                      ? { fallbackJudgeAccount: undefined }
+                      : {})
+                  })
+                }
+              />
+            </span>
+          </SettingRow>
+          <StaleModelNotice
+            testid={`${testid}.fallbackJudgeModel`}
+            models={models}
+            value={fallbackJudgeModel}
+          />
+          <JudgeSupportNotice
+            testid={`${testid}.fallbackJudgeModel`}
+            value={fallbackJudgeModel}
+            support={support}
+            noneLeft={false}
+          />
+          {fallbackSameAsJudge && (
+            <JudgeNotice testid={`${testid}.sameJudgeWarning`} tone="danger">
+              {FALLBACK_SAME_JUDGE_WARNING}
+            </JudgeNotice>
+          )}
           {/* `SettingsSelect` IS a `SettingRow` + `Segmented` (settings-controls),
               so using it keeps the row vocabulary and the `.twoStageMode` /
               `.twoStageMode.option` testids the call sites already assert. */}
@@ -574,6 +747,57 @@ function AutoModeSection({
             options={TWO_STAGE_OPTIONS}
             onChange={(v) => update({ twoStageMode: v })}
           />
+          {/* Collapsed by default, like the Advanced fold in OpencodeAgents. The rows inside
+              carry their own padding, so the body pulls out to the card's edges. */}
+          <details
+            data-testid={`${testid}.advanced`}
+            className="px-3.5 py-2"
+            onToggle={(e) => setAdvancedOpen(e.currentTarget.open)}
+          >
+            <summary className="text-[12px] leading-4 text-text-secondary cursor-default select-none list-none">
+              {advancedOpen ? '▾' : '▸'} Advanced
+            </summary>
+            <div className="mt-2 -mx-3.5 divide-y divide-border/55 border-t border-border/55">
+              <SettingsToggle
+                testid={`${testid}.fallbackAccountToggle`}
+                label="Fallback on a different account"
+                description={
+                  noAccountToOffer
+                    ? 'Sign in to a second ChatGPT account to use this.'
+                    : 'Run the fallback judge on another signed-in subscription — e.g. the same model on a second ChatGPT plan. Usage limits are per account.'
+                }
+                checked={accountOn}
+                // Never locks an ON toggle: a saved account that is gone must stay clearable.
+                disabled={noAccountToOffer}
+                dimmed={noAccountToOffer}
+                onChange={setFallbackAccountOn}
+              />
+              {accountOn && (
+                <>
+                  <SettingRow
+                    testid={`${testid}.fallbackAccountRow`}
+                    label="Fallback account"
+                    description="ChatGPT accounts signed in to ClaudeUI."
+                  >
+                    <SelectField
+                      testid={`${testid}.fallbackAccount`}
+                      value={fallbackAccount}
+                      options={accountOptions}
+                      onChange={(v) => update({ fallbackJudgeAccount: v })}
+                      disabled={!fallbackIsChatgpt}
+                      width="min-w-[240px]"
+                      placeholder={accounts ? 'Account no longer signed in' : undefined}
+                    />
+                  </SettingRow>
+                  {!fallbackIsChatgpt && (
+                    <JudgeNotice testid={`${testid}.fallbackAccount.notChatgpt`} tone="neutral">
+                      {FALLBACK_ACCOUNT_NOT_CHATGPT_NOTE}
+                    </JudgeNotice>
+                  )}
+                </>
+              )}
+            </div>
+          </details>
         </>
       )}
     </div>
@@ -611,6 +835,51 @@ function JudgeSupportNotice({
       {noneLeft
         ? 'No model here can judge: ClaudeUI calls the judge itself, and none of these models comes from a provider set up in ClaudeUI. Add one in Settings › Models & providers.'
         : reason}
+    </div>
+  )
+}
+
+/** `until` (epoch ms) as a short local date and time, in the user's own locale ("28 Oct, 13:34"). */
+function formatRestingUntil(until: number): string {
+  return new Date(until).toLocaleString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    hour: 'numeric',
+    minute: '2-digit'
+  })
+}
+
+const JUDGE_NOTICE_TONE = {
+  warning: 'border-warning/30 bg-warning/10 text-warning',
+  danger: 'border-danger/30 bg-danger/10 text-danger',
+  neutral: 'border-border bg-bg-input text-text-secondary'
+} as const
+
+/**
+ * A boxed note under a judge row — the settings dialog's `text-warning` line, in a tinted
+ * box for the ones that are state rather than a validation (resting, same-model, no second
+ * account). Same theme tokens as the pills in `provider-pills.tsx`.
+ */
+function JudgeNotice({
+  testid,
+  tone,
+  dataAttrs,
+  children
+}: {
+  testid: string
+  tone: keyof typeof JUDGE_NOTICE_TONE
+  dataAttrs?: Record<string, string>
+  children: React.ReactNode
+}): React.JSX.Element {
+  return (
+    <div className="px-3.5 pb-2.5">
+      <div
+        data-testid={testid}
+        {...dataAttrs}
+        className={`flex items-start gap-2 rounded-md border px-2.5 py-1.5 text-[12px] leading-4 ${JUDGE_NOTICE_TONE[tone]}`}
+      >
+        {children}
+      </div>
     </div>
   )
 }

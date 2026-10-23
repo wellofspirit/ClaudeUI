@@ -12,7 +12,15 @@
 import { engineMeta } from '../../shared/engine-meta'
 import { hostAppVersion } from '../host'
 import type { JudgeTransport } from './classifier'
-import { makeHttpJudgeTransport } from './judge-http/transport'
+import { activeChatgptAccountId, chatgptAccountPlan } from './judge-accounts'
+import { coolingUntil, noteRateLimited } from './judge-cooldown'
+import {
+  JudgeRouteUnavailableError,
+  judgeFailureSummary,
+  judgeRouteKey,
+  makeHttpJudgeTransport
+} from './judge-http/transport'
+import { JudgeWireError, type JudgeRouteResult } from './judge-http/types'
 import { resolveJudgeRoute, type JudgeEngine } from './judge-route'
 import { recordJudgeUsage } from './judge-usage'
 
@@ -29,17 +37,30 @@ export interface SessionJudgeOptions {
   /** The judged session's routing id — a judge row's `parentRoutingId`. */
   routingId: string
   /**
-   * Called with the resolver's user-facing reason whenever the model has no
-   * route ClaudeUI can call. The call then fails, and `classify()` sends the
-   * action to the human (§3: no fallback).
+   * The ChatGPT vault account this judge pays with, read per call; undefined → the active account.
+   * Only the fallback judge names one (`autoMode.fallbackJudgeAccount`). Read by the resolver for a
+   * model that routes through the ChatGPT subscription; any other route ignores it.
+   */
+  chatgptAccountId?: () => string | undefined
+  /**
+   * Called with a user-facing sentence whenever the judge cannot answer: the
+   * resolver's reason when the model has no route ClaudeUI can call, or a
+   * failed call's {@link judgeFailureSummary} (a rate limit, an outage, a
+   * network error). The call then fails, and `classify()` sends the action to
+   * the human (§3: no fallback). May be called on every failure; the owner
+   * shows its one banner for the first.
    */
   onUnavailable: (reason: string) => void
 }
 
 export function makeSessionJudgeTransport(opts: SessionJudgeOptions): JudgeTransport {
-  return makeHttpJudgeTransport({
+  const transport = makeHttpJudgeTransport({
     resolve: async () => {
-      const result = await resolveJudgeRoute(opts.engine, opts.modelValue())
+      const account = opts.chatgptAccountId?.()
+      const resolved = account
+        ? await resolveJudgeRoute(opts.engine, opts.modelValue(), {}, { chatgptAccountId: account })
+        : await resolveJudgeRoute(opts.engine, opts.modelValue())
+      const result = restingRoute(resolved)
       if (!result.ok) opts.onUnavailable(result.reason)
       return result
     },
@@ -57,6 +78,49 @@ export function makeSessionJudgeTransport(opts: SessionJudgeOptions): JudgeTrans
       }),
     userAgent: `ClaudeUI/${hostAppVersion()}`
   })
+  // A call that fails (HTTP 429, an outage, a network error) throws, and `classify()` turns the
+  // throw into `unavailable` → the human. The owner's banner says why, once. Not reported here:
+  // a missing route (`resolve` reported it) and an abort (a stage timeout or a cancelled review,
+  // which the call's own error already names, and which says nothing about the route).
+  return async (req) => {
+    try {
+      return await transport(req)
+    } catch (err) {
+      // A 429 that names its reset rests the route until then: later calls skip it without a
+      // round trip (`resolve` above), and the pipeline's fallback judge takes them.
+      if (
+        err instanceof JudgeWireError &&
+        err.status === 429 &&
+        err.routeKey !== undefined &&
+        err.retryAtMs !== undefined
+      ) {
+        noteRateLimited(err.routeKey, err.retryAtMs, Date.now())
+      }
+      if (!(err instanceof JudgeRouteUnavailableError) && !req.signal?.aborted) {
+        opts.onUnavailable(
+          `${judgeFailureSummary(err instanceof Error ? err.message : String(err))}.`
+        )
+      }
+      throw err
+    }
+  }
+}
+
+/**
+ * A resolved route that a 429 rested (`judge-cooldown.ts`) comes back as not callable, with the
+ * time it recovers in the reason — the same shape as a route the resolver could not build, so
+ * `makeHttpJudgeTransport` throws its `JudgeRouteUnavailableError` and no request is sent.
+ */
+function restingRoute(result: JudgeRouteResult): JudgeRouteResult {
+  if (!result.ok) return result
+  const until = coolingUntil(judgeRouteKey(result.route), Date.now())
+  if (until === undefined) return result
+  const at = new Date(until).toISOString().replace(/\.\d{3}Z$/, 'Z')
+  return {
+    ok: false,
+    code: 'rate-limited',
+    reason: `${result.route.label}: usage limit, resting until ${at}.`
+  }
 }
 
 /**
@@ -69,4 +133,127 @@ export function judgeRouteUnavailableMessage(engine: JudgeEngine, reason: string
     `Auto-mode can't judge here: ${reason} Every gated action will ask you instead. ` +
     `Change the judge model in Settings › Sessions & autonomy › Auto-mode judge (${engineMeta(engine).label}).`
   )
+}
+
+/**
+ * The `session:error` a session shows when its primary judge cannot answer but a fallback judge
+ * can: `cause` is the primary's failure as a sentence (a {@link judgeFailureSummary} clause with
+ * its full stop, or the resolver's `reason`), `fallbackLabel` the fallback model's route label.
+ * Unlike {@link judgeRouteUnavailableMessage} nothing is asked of the user — it says where the
+ * judging went and where to change it.
+ */
+export function judgeFallbackMessage(
+  engine: JudgeEngine,
+  cause: string,
+  fallbackLabel: string
+): string {
+  return (
+    `Auto-mode judge unavailable: ${cause} ${fallbackLabel} is judging instead until it recovers. ` +
+    `Change the judge models in Settings › Sessions & autonomy › Auto-mode judge (${engineMeta(engine).label}).`
+  )
+}
+
+/**
+ * The fallback judge model in effect: `autoMode.fallbackJudgeModel` trimmed, or `undefined` when
+ * it is blank or names the model already judging (`primary`, the value `modelValue` would hand
+ * the primary transport) — a fallback that is the primary can only repeat its failure. An owner
+ * additionally drops a model its catalog no longer lists before it asks.
+ *
+ * The one exception is a fallback ACCOUNT (`autoMode.fallbackJudgeAccount`): the same model on a
+ * different ChatGPT account is a different route (its own usage limit), so it is kept when
+ * `fallbackAccount` is set and is not `activeAccount` — the account the primary pays with, by
+ * default the last one `judge-accounts.ts` read (an owner refreshes it in its async
+ * `judgeAvailable`). Same model, same account stays dropped. Unknown (`null`) counts as different.
+ */
+export function fallbackJudgeModelFor(
+  configured: string | undefined,
+  primary: string,
+  fallbackAccount?: string,
+  activeAccount: string | null = activeChatgptAccountId()
+): string | undefined {
+  const model = configured?.trim()
+  if (!model) return undefined
+  if (model !== primary.trim()) return model
+  const account = fallbackJudgeAccountFor(fallbackAccount)
+  return account && account !== activeAccount ? model : undefined
+}
+
+/** `autoMode.fallbackJudgeAccount` trimmed, or `undefined` when unset or blank. */
+export function fallbackJudgeAccountFor(configured: string | undefined): string | undefined {
+  return configured?.trim() || undefined
+}
+
+/**
+ * The fallback judge as a banner and a log line name it: the model value as the user picked it,
+ * plus — when the fallback runs on a named ChatGPT account — that account's plan type
+ * (`openai/gpt-6-luna (Business account)`). The plan, never an email: it says which subscription
+ * is judging without naming a person. A plan the snapshot (`judge-accounts.ts`) has not learned
+ * reads `(ChatGPT account)`.
+ */
+export function fallbackJudgeLabel(model: string, account: string | undefined): string {
+  if (!account) return model
+  const plan = chatgptAccountPlan(account)
+  return `${model} (${plan ? `${plan.charAt(0).toUpperCase()}${plan.slice(1)} ` : 'ChatGPT '}account)`
+}
+
+/**
+ * The pipeline's fallback judge (`JudgePipelineHooks.fallbackJudgeTransport`): a session judge
+ * transport pinned to `model`, labelled by {@link fallbackJudgeLabel}. `make` defaults to
+ * {@link makeSessionJudgeTransport}; a test injects a scripted one. `opts.chatgptAccountId`
+ * names the ChatGPT account it pays with.
+ */
+export function makeFallbackJudge(
+  model: string,
+  opts: Omit<SessionJudgeOptions, 'modelValue'>,
+  make: (opts: SessionJudgeOptions) => JudgeTransport = makeSessionJudgeTransport
+): { transport: JudgeTransport; label: string } {
+  return {
+    transport: make({ ...opts, modelValue: () => model }),
+    label: fallbackJudgeLabel(model, opts.chatgptAccountId?.())
+  }
+}
+
+/**
+ * The one banner an owner shows when its PRIMARY judge cannot answer: with a fallback judge in
+ * effect it says the fallback is judging ({@link judgeFallbackMessage}, named by its
+ * {@link fallbackJudgeLabel}); without, that every gated action asks the user
+ * ({@link judgeRouteUnavailableMessage}).
+ */
+export function judgeUnavailableMessage(
+  engine: JudgeEngine,
+  reason: string,
+  fallbackLabel: string | undefined
+): string {
+  return fallbackLabel
+    ? judgeFallbackMessage(engine, reason, fallbackLabel)
+    : judgeRouteUnavailableMessage(engine, reason)
+}
+
+/**
+ * The one banner an owner shows when its FALLBACK judge cannot answer either (its own flag, apart
+ * from the primary's): nothing is left to judge, so every gated action asks the user.
+ */
+export function fallbackUnavailableMessage(
+  engine: JudgeEngine,
+  fallbackLabel: string,
+  reason: string
+): string {
+  return judgeRouteUnavailableMessage(engine, `fallback ${fallbackLabel}: ${reason}`)
+}
+
+/**
+ * The one banner an owner shows when the CONFIGURED judge model is no longer in its catalog: the
+ * human decides — unless a fallback judge is in effect, which then judges, as the banner says.
+ */
+export function staleJudgeModelMessage(
+  engine: JudgeEngine,
+  configured: string,
+  fallbackLabel: string | undefined
+): string {
+  const where =
+    `Change ${fallbackLabel ? 'the judge models' : 'it'} in Settings › Sessions & autonomy › ` +
+    `Auto-mode judge (${engineMeta(engine).label}).`
+  return fallbackLabel
+    ? `Auto-mode judge model "${configured}" is no longer available — ${fallbackLabel} is judging instead. ${where}`
+    : `Auto-mode judge model "${configured}" is no longer available — every gated action will ask you instead. ${where}`
 }

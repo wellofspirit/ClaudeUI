@@ -557,7 +557,7 @@ export function PiSessionBehaviorSection(): React.JSX.Element {
         api={api}
         path={['compaction', 'reserveTokens']}
         label="Reserved tokens"
-        helper="Headroom kept free for the model's reply so compaction can't overflow the window."
+        helper="Start compaction when fewer than this many context tokens remain."
         placeholder="16384"
         unit="tokens"
       />

@@ -57,6 +57,12 @@ export interface RedirectStat {
   size?: number
   /** `undefined` means NOT MEASURED, never "the epoch" (exit review Astra C1). */
   mtimeMs?: number
+  /**
+   * Hard-link count. `undefined` means NOT MEASURED, never "one": an unmeasured
+   * count must not change a target's classification. A regular file with more
+   * than one link may be the same inode as a file elsewhere.
+   */
+  nlink?: number
 }
 
 /** The injectable fs seam. Both methods reject exactly as their `node:fs` counterparts do. */
@@ -95,6 +101,7 @@ export async function captureRedirects(
   const platform = options.platform ?? process.platform
   const details = redirectTargetDetails(command, scope, platform)
   if (details === null) return null
+  const createsLink = createsLinks(command)
   const progress: MeasureProgress = { outcomes: new Map() }
   const measured = await withinDeadline(
     measureRedirects(
@@ -108,7 +115,32 @@ export async function captureRedirects(
     options.timeoutMs ?? REDIRECT_CAPTURE_TIMEOUT_MS
   )
   if (measured === null) return conservativeFallback(details, progress)
-  return summarizeRedirects(measured.details, measured.measured)
+  // A link the command itself creates did not exist when it was measured, so
+  // every in-scope reading predates it: withhold the clean scope claim.
+  const final = createsLink
+    ? measured.details.map((detail) =>
+        detail.root === undefined ? detail : { ...detail, reviewRequired: true as const }
+      )
+    : measured.details
+  return summarizeRedirects(final, measured.measured)
+}
+
+/**
+ * Does the command text create a link (symbolic, junction or hard)? Deliberately
+ * crude and case-insensitive: a false positive only costs an escalation, while a
+ * link made in the same command (`ln -s ../out lnk && echo x > lnk/f`) is
+ * measured BEFORE it exists and so reads clean. Covers `ln`/`gln`,
+ * `cp -l|-s`, `mklink`, and the words only a link-creating command spells
+ * (`New-Item -ItemType SymbolicLink|Junction|HardLink`, `fsutil hardlink`,
+ * `os.symlink`, `CreateSymbolicLink`).
+ */
+const LINK_WORD_RE = /symlink|symboliclink|junction|hardlink|mklink/i
+const LINK_COMMAND_RE = /(?:^|[\s;&|(`/\\])(?:g?ln)(?=[\s;&|)]|$)/i
+/** `cp` flags are case-sensitive: `-l` hard-links, `-s` symlinks, `-L` follows. */
+const LINK_COPY_RE = /\bcp\b[^;&|\n]*\s-[a-zA-Z]*[ls]/
+
+function createsLinks(command: string): boolean {
+  return LINK_WORD_RE.test(command) || LINK_COMMAND_RE.test(command) || LINK_COPY_RE.test(command)
 }
 
 /**
@@ -560,6 +592,10 @@ async function measureTarget(
   // `exists`/`empty`/`mtime` read there is a fabrication, so the target keeps
   // only its pure facts (exit review N4). The link checks still run.
   if (!isMeasurableTarget(target, context)) {
+    // An IN-SCOPE target whose root Node cannot read (a UNC cwd, `\\host\share`,
+    // `\\wsl$\…`) cannot be checked for a link to outside, so it must not clear
+    // as in scope (a junction inside it would otherwise write anywhere).
+    if (detail.root !== undefined) return { detail: { ...detail, reviewRequired: true } }
     // A drive-less win32 mount (`/etc`) cannot be read by Node; measuring it
     // would fabricate. An explicit link before `..` is still visible from the
     // spelling, but no physical prefix probe is attempted.
@@ -606,7 +642,11 @@ async function measureTarget(
       // the real path so `summarizeRedirects` treats it as an ordinary in-scope
       // target instead of an escape. A `..` before the leaf was rejected above,
       // so this safe link is reached only when the shell really reaches the file.
-      return { detail: { ...detail, path: realPath, root: root.spelling } }
+      const inScope = { ...detail, path: realPath, root: root.spelling }
+      if (isHardLinked(await readLstat(context.probe, realPath))) {
+        return { detail: { ...inScope, reviewRequired: true } }
+      }
+      return { detail: inScope }
     }
     return { measurement: { symlinked: true } }
   }
@@ -625,7 +665,12 @@ async function measureTarget(
     return measurement === undefined ? { detail: effective } : { detail: effective, measurement }
   }
 
-  if (effective.root !== undefined) return outcome(undefined)
+  if (effective.root !== undefined) {
+    // An existing in-scope regular file with several hard links may be the same
+    // inode as a file elsewhere (`mklink /H`, `ln`): the write is not confined.
+    if (isHardLinked(stat)) return { detail: { ...effective, reviewRequired: true } }
+    return outcome(undefined)
+  }
 
   if (stat === 'missing') return outcome({ exists: false })
   if (stat.isFile()) {
@@ -642,6 +687,18 @@ async function measureTarget(
   // A directory / device / FIFO target exists, but has no "empty" or "mtime of
   // the file's content" fact to report.
   return outcome({ exists: true })
+}
+
+/** A measured regular file with more than one hard link; an unmeasured count is `false`. */
+function isHardLinked(stat: StatReading): boolean {
+  return (
+    stat !== 'missing' &&
+    stat !== 'error' &&
+    !stat.isSymbolicLink() &&
+    stat.isFile() &&
+    typeof stat.nlink === 'number' &&
+    stat.nlink > 1
+  )
 }
 
 /**
@@ -668,7 +725,8 @@ async function throughLink(
 
 /**
  * An IN-SCOPE target whose parent `realpath`s to a DIFFERENT directory inside
- * the root: the write lands at `realParent/basename`. If that real target names
+ * ANY scope root (not only the one the spelling named): the write lands at
+ * `realParent/basename`. If that real target names
  * a protected component (`ordinary/` → `.claude`, `.git/hooks`, `.aws`), it is a
  * protected hit AND `symlinked`, never ordinary in-scope ground truth (exit
  * review R1). An unprotected link that stays inside the root is still an
@@ -693,21 +751,52 @@ async function inScopeThroughLink(
   const realTarget = await physicalTarget(context.probe, target, context.platform, context.tmpRoot)
   if (realTarget === null) return { detail: { ...detail, reviewRequired: true } }
   const realTargetPath = normalizePath(realTarget, context.platform).full
-  const inside =
-    samePath(realTargetPath, rootReal, context.platform) ||
-    isDescendant(rootReal, realTargetPath, context.platform)
-  // A parent link out of the tree: the spelling is not where the write lands.
+  // The real target may sit in ANY scope root, not only the one the lexical path
+  // named: a worktree junction onto the main checkout (both roots granted) is an
+  // ordinary in-scope write. Out of every root is still a parent link out of the
+  // tree: the spelling is not where the write lands.
+  const inside = [...context.realRoots.values()].some(
+    (real) =>
+      samePath(realTargetPath, real, context.platform) ||
+      isDescendant(real, realTargetPath, context.platform)
+  )
   if (!inside) return { measurement: { symlinked: true } }
-  const hits = realProtectedComponents(realTargetPath, context)
-  const protectedHits = [
-    ...detail.protectedHits,
-    ...protectedComponentsOf(hits).filter((hit) => !detail.protectedHits.includes(hit))
-  ]
+  // `realProtectedComponents` reads components relative to realpath(cwd) when the
+  // target sits under it and absolutely otherwise, exactly as `ground-truth.ts`
+  // does for a directly spelled path in another root (rule 5/R7): a link into
+  // another root never reads more leniently than naming that path would.
+  const protectedHits = withNewHits(
+    detail.protectedHits,
+    protectedComponentsOf(realProtectedComponents(realTargetPath, context)),
+    context.platform
+  )
   if (protectedHits.length === detail.protectedHits.length) return undefined
   return {
     detail: { ...detail, protectedHits },
     measurement: { symlinked: true }
   }
+}
+
+/**
+ * `have` plus the `found` hits it does not already name. A name is the same hit
+ * whatever its case on win32: the physical walk returns the on-disk casing
+ * (`.claude`) of a component the command spelled `.CLAUDE`, and counting that as
+ * a second hit would report a plain in-scope write as `symlinked`.
+ */
+function withNewHits(
+  have: readonly string[],
+  found: readonly string[],
+  platform: NodeJS.Platform
+): string[] {
+  const fold = (s: string): string => (platform === 'win32' ? s.toLowerCase() : s)
+  const known = new Set(have.map(fold))
+  const out = [...have]
+  for (const hit of found) {
+    if (known.has(fold(hit))) continue
+    known.add(fold(hit))
+    out.push(hit)
+  }
+  return out
 }
 
 type StatReading = RedirectStat | 'missing' | 'error'
@@ -1001,11 +1090,11 @@ async function outOfScopeThroughLink(
   if (realTarget === null) return undefined
   const realTargetPath = normalizePath(realTarget, context.platform).full
   if (samePath(realTargetPath, target, context.platform)) return undefined
-  const hits = realProtectedComponents(realTargetPath, context)
-  const protectedHits = [
-    ...detail.protectedHits,
-    ...protectedComponentsOf(hits).filter((hit) => !detail.protectedHits.includes(hit))
-  ]
+  const protectedHits = withNewHits(
+    detail.protectedHits,
+    protectedComponentsOf(realProtectedComponents(realTargetPath, context)),
+    context.platform
+  )
   if (protectedHits.length === detail.protectedHits.length) return undefined
   return { detail: { ...detail, protectedHits } }
 }

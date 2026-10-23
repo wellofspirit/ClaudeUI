@@ -150,7 +150,17 @@ import {
   type RepoVisibility,
   type ToolOutcome
 } from '../automode/ground-truth'
-import { judgeRouteUnavailableMessage, makeSessionJudgeTransport } from '../automode/session-judge'
+import { refreshChatgptAccounts } from '../automode/judge-accounts'
+import {
+  fallbackJudgeAccountFor,
+  fallbackJudgeLabel,
+  fallbackJudgeModelFor,
+  fallbackUnavailableMessage,
+  judgeUnavailableMessage,
+  makeFallbackJudge,
+  makeSessionJudgeTransport,
+  staleJudgeModelMessage
+} from '../automode/session-judge'
 import { buildClassifierEnvironment } from '../automode/environment'
 import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
 import { describeDispatchModels } from '../services/dispatch-model-hint'
@@ -158,6 +168,7 @@ import {
   DISPATCH_SESSION_ID_REMOVED_TEXT,
   dispatchAgentDescription,
   dispatchResultSuffix,
+  dispatchWorkdirArg,
   hasRemovedSessionId,
   joinDispatchHints,
   OWN_SUBAGENT_TOOL,
@@ -493,6 +504,13 @@ export class PiSession extends BaseSession {
   // The same one-banner rule for a judge model ClaudeUI has no route to call
   // (ADR-081 §3) — the resolver runs on every judge call.
   private judgeRouteUnavailableReported = false
+  // …and for the FALLBACK judge model (`autoMode.fallbackJudgeModel`), apart from the primary's:
+  // its own banner when it cannot be called either, and one log line when it is gone.
+  private fallbackRouteUnavailableReported = false
+  private staleFallbackJudgeLogged = false
+  /** pi's model values as the last `judgeAvailable()` saw them — what the synchronous fallback
+   *  check reads. Empty = unknown (validates nothing). */
+  private catalogValues: string[] = []
   /** How prior tool calls ended, keyed by toolCallId — the classifier's
    *  `{"outcome":…}` annotations. The ONLY channel by which a refusal reaches
    *  the judge, since the transcript slimmer drops tool RESULTS. Bounded by
@@ -2906,11 +2924,7 @@ export class PiSession extends BaseSession {
   private reportStaleJudgeModel(configured: string): void {
     if (this.staleJudgeModelReported) return
     this.staleJudgeModelReported = true
-    this.send(
-      'session:error',
-      `Auto-mode judge model "${configured}" is no longer available — every gated action will ask you instead. ` +
-        `Change it in Settings › Sessions & autonomy › Auto-mode judge (pi).`
-    )
+    this.send('session:error', staleJudgeModelMessage('pi', configured, this.fallbackLabel()))
   }
 
   /**
@@ -2930,23 +2944,110 @@ export class PiSession extends BaseSession {
   private async judgeModelUnavailable(): Promise<boolean> {
     const configured = this.autoModeConfig().judgeModel
     if (!configured) return false
-    let values: string[] = []
-    try {
-      values = (await discoverPiModels()).flatMap((g) => g.models.map((m) => m.value))
-    } catch {
-      return false
-    }
+    const values = await this.piModelValues()
     if (values.length === 0) return false
     if (values.includes(configured)) return false
     this.reportStaleJudgeModel(configured)
     return true
   }
 
+  /** Every model value pi's catalog lists; `[]` when discovery fails or finds nothing. */
+  private async piModelValues(): Promise<string[]> {
+    try {
+      return (await discoverPiModels()).flatMap((g) => g.models.map((m) => m.value))
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * The pipeline's `judgeAvailable`: the primary's catalog check, and — when a fallback is
+   * configured — a refresh of the catalog the synchronous {@link fallbackJudgeModel} reads (a
+   * session with only a fallback configured would otherwise never have called discovery).
+   */
+  private async judgeAvailable(): Promise<boolean> {
+    if (this.autoModeConfig().fallbackJudgeModel?.trim()) {
+      this.catalogValues = await this.piModelValues()
+      // A fallback on the primary's own model is only a fallback on ANOTHER ChatGPT account:
+      // learn which one is active (and the fallback's plan, for its label) before deciding.
+      if (this.fallbackJudgeAccount()) await refreshChatgptAccounts()
+    }
+    return !(await this.judgeModelUnavailable())
+  }
+
+  /** The judge model this session's primary judge calls: `autoMode.judgeModel`, else its own. */
+  private judgeModelValue(): string {
+    return this.autoModeConfig().judgeModel ?? this._model
+  }
+
+  /**
+   * The fallback judge model in effect (`autoMode.fallbackJudgeModel`), or undefined: none set,
+   * the same as the primary, or no longer in pi's catalog. A gone one is no fallback — the human
+   * decides — with one log line; it never crashes the judge. An unknown catalog cannot tell
+   * "removed" from "never discovered", so it passes (like the primary's check).
+   */
+  private fallbackJudgeModel(): string | undefined {
+    const model = fallbackJudgeModelFor(
+      this.autoModeConfig().fallbackJudgeModel,
+      this.judgeModelValue(),
+      this.autoModeConfig().fallbackJudgeAccount
+    )
+    if (!model) return undefined
+    const values = this.catalogValues
+    if (values.length === 0 || values.includes(model)) return model
+    if (!this.staleFallbackJudgeLogged) {
+      this.staleFallbackJudgeLogged = true
+      logger.warn(
+        'PiSession',
+        `auto-mode fallback judge model "${model}" is no longer available — no fallback`
+      )
+    }
+    return undefined
+  }
+
+  /** The ChatGPT vault account the fallback judge pays with (`autoMode.fallbackJudgeAccount`), if one is named. */
+  private fallbackJudgeAccount(): string | undefined {
+    return fallbackJudgeAccountFor(this.autoModeConfig().fallbackJudgeAccount)
+  }
+
+  /** The fallback judge as a banner names it: its model, plus the named account's plan. */
+  private fallbackLabel(): string | undefined {
+    const model = this.fallbackJudgeModel()
+    return model ? fallbackJudgeLabel(model, this.fallbackJudgeAccount()) : undefined
+  }
+
   /** One banner per session for a judge model ClaudeUI can't call (ADR-081 §3). */
   private reportJudgeRouteUnavailable(reason: string): void {
     if (this.judgeRouteUnavailableReported) return
     this.judgeRouteUnavailableReported = true
-    this.send('session:error', judgeRouteUnavailableMessage('pi', reason))
+    this.send('session:error', judgeUnavailableMessage('pi', reason, this.fallbackLabel()))
+  }
+
+  /** The fallback judge's own one banner: it could not be called either. */
+  private reportFallbackRouteUnavailable(model: string, reason: string): void {
+    if (this.fallbackRouteUnavailableReported) return
+    this.fallbackRouteUnavailableReported = true
+    this.send(
+      'session:error',
+      fallbackUnavailableMessage(
+        'pi',
+        fallbackJudgeLabel(model, this.fallbackJudgeAccount()),
+        reason
+      )
+    )
+  }
+
+  /** The pipeline's `fallbackJudgeTransport`: the user's fallback judge model, when one is in effect. */
+  private fallbackJudge(): { transport: JudgeTransport; label: string } | undefined {
+    const model = this.fallbackJudgeModel()
+    if (!model) return undefined
+    return makeFallbackJudge(model, {
+      engine: 'pi',
+      sessionId: () => this.piSessionId,
+      routingId: this.routingId,
+      chatgptAccountId: () => this.fallbackJudgeAccount(),
+      onUnavailable: (reason) => this.reportFallbackRouteUnavailable(model, reason)
+    })
   }
 
   /**
@@ -2964,7 +3065,7 @@ export class PiSession extends BaseSession {
   private judgeTransport(): JudgeTransport {
     return makeSessionJudgeTransport({
       engine: 'pi',
-      modelValue: () => this.autoModeConfig().judgeModel ?? this._model,
+      modelValue: () => this.judgeModelValue(),
       sessionId: () => this.piSessionId,
       routingId: this.routingId,
       onUnavailable: (reason) => this.reportJudgeRouteUnavailable(reason)
@@ -3069,8 +3170,9 @@ export class PiSession extends BaseSession {
         mcpToolKey: piMcpName,
         // A configured judge model that no longer exists fails CLOSED — never
         // judged by a stand-in (see judgeModelUnavailable).
-        judgeAvailable: async () => !(await this.judgeModelUnavailable()),
+        judgeAvailable: () => this.judgeAvailable(),
         judgeTransport: () => this.judgeTransport(),
+        fallbackJudgeTransport: () => this.fallbackJudge(),
         messages: () => this.messageHistory,
         environment: () => this.classifierEnvironment(),
         captureActionMeta: (name, args) => this.captureActionMeta(name, args),
@@ -3309,12 +3411,14 @@ export class PiSession extends BaseSession {
       }
     }
 
+    const workdir = dispatchWorkdirArg(input.workdir)
     const req: DispatchRequest = {
       engine,
       prompt,
       model: typeof input.model === 'string' ? input.model : undefined,
       name: typeof input.name === 'string' ? input.name : undefined,
       description: typeof input.description === 'string' ? input.description : undefined,
+      ...(workdir ? { workdir } : {}),
       // Only the root session registers dispatch_agent (a host-run subagent's gate is empty),
       // so the caller is always the top-level agent: background unless it says otherwise.
       ...(runsInBackground(

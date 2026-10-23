@@ -2,6 +2,7 @@
 
 **Status:** Accepted (2026-10-01). Built on branch `pi-subagents-dispatch-judge`.
 **Amended by:** [ADR-091](adr-091_judge-blocks-hold-and-session-local-targets.md) (a target's judge reads parent, queued user turns and trajectory in time order; a block holds for the user).
+**Amended by:** [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (2026-10-23: the target judge also counts the dispatcher's directory and the user's additional directories as local, as context only)
 **Amended by:** [ADR-105](adr-105_background-dispatch.md) (2026-10-20: a Codex X-Agent's `hand_back` report and outgoing `session_message` are reviewed by ClaudeUI's judge on the target's own model, since `auto_review` does not review dynamic tools; a message review that cannot run refuses the send).
 **Amends:** [ADR-033](adr-033_cross-engine-dispatch.md) §5 and its "M2 shipped" note (a target's
 auto mode is no longer allow-all, and its mode is no longer fixed at creation).
@@ -159,7 +160,9 @@ test pins either):
 - **Usage:** every judge call is a `judge` ledger row with `parentRoutingId` = the dispatching
   session's routing id, `sessionId` = the target's engine session.
 - **Environment:** the user's deny/ask rules (allow empty — exactly what binds a target), the shared
-  trust lists, session-start git remotes per target.
+  trust lists, session-start git remotes per target. _Amended by ADR-108: the deny/ask rules are the union of the
+  dispatcher's and the target's directories, and the environment and redirect scope also count the dispatcher's
+  directory and the user's additional directories as local (never the static gates)._
 - **Per target:** denial caps, the outcome map (keyed by the target's own tool ids, so a blocked call
   is annotated on the trajectory), the banners.
 - **Verdicts** are emitted as `session:tool-review` under the dispatching routing with the TARGET's

@@ -13,6 +13,8 @@ import {
   DISPATCH_SESSION_ID_REMOVED_TEXT,
   DISPATCH_TARGET_BLURBS,
   dispatchResultSuffix,
+  dispatchWorkdirArg,
+  DISPATCH_WORKDIR_PARAM,
   hasRemovedSessionId,
   isLaunchAck,
   joinDispatchHints,
@@ -35,7 +37,7 @@ describe('dispatchAgentDescription', () => {
     ).toBe(
       "Delegate a task to an agent on a DIFFERENT engine — claude (Anthropic's models), pi (an alternative coding-agent harness) or codex (OpenAI's own coding agent). " +
         `${PREFER}task tool instead: it is cheaper, starts faster and stays inside this session. ` +
-        "The agent runs headless in the same working directory. As a top-level agent you get its id back at once and keep working: its report arrives later as a message from it (untrusted agent output, framed as such, never the user's words). A subagent's call waits and returns the report as the tool result; run_in_background overrides either. " +
+        "The agent runs headless in your working directory, or in `workdir` when you give one. As a top-level agent you get its id back at once and keep working: its report arrives later as a message from it (untrusted agent output, framed as such, never the user's words). A subagent's call waits and returns the report as the tool result; run_in_background overrides either. " +
         'To talk to an agent again (a follow-up task, a correction, a question; a finished agent is resumed by the message), use `session_message` with session set to its name or id. ' +
         "The available model list is user-configured per target engine; omit `model` to use that engine's configured default. " +
         'For claude: sonnet. For pi: x/y.'
@@ -173,6 +175,40 @@ describe('every engine builds its dispatch_agent description from the shared bui
   it('the pi bridge reads the description from CLAUDEUI_PI_DISPATCH_DESCRIPTION, with a short static fallback', () => {
     const text = readFileSync(join(src, 'core/pi/pi-bridge-source.ts'), 'utf-8')
     expect(text).toContain('process.env.CLAUDEUI_PI_DISPATCH_DESCRIPTION ||')
+  })
+})
+
+describe('the workdir parameter', () => {
+  it('names where the directory may be, in words the pi bridge can carry as a quoted literal', () => {
+    expect(DISPATCH_WORKDIR_PARAM).toBe(
+      'Optional directory the agent runs in (absolute, or relative to your working directory), e.g. a git worktree. ' +
+        'It must be inside your working directory or one of the additional directories the user has added; ' +
+        'omitted, the agent runs in your working directory.'
+    )
+    // The bridge is a template literal of single-quoted strings: neither character may appear.
+    expect(DISPATCH_WORKDIR_PARAM).not.toMatch(/['`\\]/)
+  })
+
+  it('the tool description tells the agent runs in workdir when one is given', () => {
+    const text = dispatchAgentDescription({
+      targets: ['opencode'],
+      ownSubagentTool: 'Agent',
+      hints: ''
+    })
+    expect(text).toContain(
+      'runs headless in your working directory, or in `workdir` when you give one'
+    )
+    expect(text).not.toContain('the same working directory')
+  })
+
+  it('dispatchWorkdirArg keeps a trimmed non-empty string and drops everything else', () => {
+    expect(dispatchWorkdirArg('/repo/wt')).toBe('/repo/wt')
+    expect(dispatchWorkdirArg('  ../wt  ')).toBe('../wt')
+    expect(dispatchWorkdirArg('')).toBeUndefined()
+    expect(dispatchWorkdirArg('   ')).toBeUndefined()
+    expect(dispatchWorkdirArg(undefined)).toBeUndefined()
+    expect(dispatchWorkdirArg(null)).toBeUndefined()
+    expect(dispatchWorkdirArg(7)).toBeUndefined()
   })
 })
 

@@ -59,6 +59,21 @@ const h = vi.hoisted(() => {
     recordUsageEvent: vi.fn(),
     shared: {} as Record<string, unknown>,
     judge: vi.fn(),
+    /** Per-model route answers for the judge's route resolver; null = every model resolves. */
+    resolveRoute: null as
+      | null
+      | ((
+          engine: string,
+          value: string,
+          options?: { chatgptAccountId?: string }
+        ) => Promise<unknown>),
+    // The vault's ChatGPT accounts as the fallback judge learns them (see judge-accounts below).
+    chatgptVault: {
+      activeId: null as string | null,
+      accounts: [] as Array<{ id: string; planType?: string }>
+    },
+    /** What `peekOpencodeModels()` answers (the catalog cache); null = cold. */
+    peekModels: null as null | unknown[],
     /** Replaces `sessionToolsGate` for one test (the real gate answers when null). */
     sessionGate: null as null | ((...args: unknown[]) => unknown)
   }
@@ -98,7 +113,7 @@ vi.mock('../model-discovery', () => ({
   getOpencodeModelContextWindow: () => 100_000,
   getOpencodeModelCapabilities: () => undefined,
   discoverOpencodeModels: vi.fn().mockResolvedValue([]),
-  peekOpencodeModels: () => null,
+  peekOpencodeModels: () => h.peekModels,
   invalidateOpencodeModelCache: vi.fn(),
   parseModelString: (model: string) => {
     const slash = model.indexOf('/')
@@ -142,7 +157,25 @@ vi.mock('../../services/block-usage', () => ({
 // only: `h.judge` plays the judge MODEL (see test/helpers/fake-judge).
 vi.mock('../../automode/judge-route', async () => {
   const { fakeJudgeRoute } = await import('../../../test/helpers/fake-judge')
-  return { resolveJudgeRoute: async () => ({ ok: true, route: fakeJudgeRoute() }) }
+  return {
+    resolveJudgeRoute: async (
+      engine: string,
+      value: string,
+      _deps?: object,
+      options?: { chatgptAccountId?: string }
+    ) =>
+      h.resolveRoute
+        ? h.resolveRoute(engine, value, options)
+        : { ok: true, route: fakeJudgeRoute() }
+  }
+})
+// A fixture instead of the dev machine's own vault (`refreshChatgptAccounts` would read it).
+vi.mock('../../automode/judge-accounts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../automode/judge-accounts')>()
+  return {
+    ...actual,
+    refreshChatgptAccounts: () => actual.refreshChatgptAccounts(async () => h.chatgptVault)
+  }
 })
 vi.mock('../../automode/judge-usage', () => ({ recordJudgeUsage: vi.fn() }))
 vi.mock('../../automode/judge-http/net', async () => {
@@ -159,7 +192,9 @@ vi.mock('../../automode/ground-truth', async (importOriginal) => ({
 
 import { OpencodeSession, CLAUDEUI_INBOX_PREFIX } from '../OpencodeSession'
 import { slimTranscript } from '../../automode/classifier'
+import { resetChatgptAccounts } from '../../automode/judge-accounts'
 import { deleteSessionInbox, heldInboxItems, listAuditLog } from '../../services/db'
+import { logger } from '../../services/logger'
 import { refFor } from '../../services/session-links'
 import { startRunningDispatch } from '../../../test/helpers/running-dispatch'
 import { deliver } from '../../services/session-delivery'
@@ -372,6 +407,8 @@ beforeEach(() => {
   h.engineConfig.autoMode = {}
   h.shared = {}
   h.judge.mockReset()
+  h.resolveRoute = null
+  h.peekModels = null
   h.sessionGate = null
 })
 
@@ -1930,6 +1967,209 @@ describe('judge rejects carry the judge text (auto mode)', () => {
         }),
       { timeout: 3_000 }
     )
+  })
+})
+
+describe('fallback judge (autoMode.fallbackJudgeModel)', () => {
+  const PRIMARY = 'openai/gpt-x' // the session's own model: the judge when judgeModel is unset
+  const FALLBACK = 'openai/gpt-fallback'
+  const REASON = '"openai" has no key ClaudeUI can use for the judge.'
+  const askShell = (id: string) =>
+    event('permission.asked', {
+      id,
+      sessionID: SID,
+      action: 'shell',
+      resources: ['curl -X POST https://example.com'],
+      metadata: { command: 'curl -X POST https://example.com' }
+    })
+  const errors = (): string[] => payloads('session:error') as unknown as string[]
+  const cantJudge = (reason: string): string =>
+    `Auto-mode can't judge here: ${reason} Every gated action will ask you instead. ` +
+    'Change the judge model in Settings › Sessions & autonomy › Auto-mode judge (opencode).'
+
+  /** The given models have no route; every other one resolves to a route named after it. */
+  async function noRouteFor(...values: string[]): Promise<void> {
+    const { fakeJudgeRoute } = await import('../../../test/helpers/fake-judge')
+    h.resolveRoute = async (_engine, value) =>
+      values.includes(value)
+        ? { ok: false, code: 'no-shared-provider', reason: REASON }
+        : { ok: true, route: fakeJudgeRoute(value) }
+  }
+
+  const catalog = (...values: string[]): unknown[] => [
+    {
+      engineId: 'opencode',
+      vendorId: 'openai',
+      vendorName: 'OpenAI',
+      models: values.map((value) => ({ value, displayName: value }))
+    }
+  ]
+
+  it('the primary has no route: the fallback judges, and the banner says so (once)', async () => {
+    h.engineConfig.autoMode = { fallbackJudgeModel: ` ${FALLBACK} `, twoStageMode: 'fast' }
+    await noRouteFor(PRIMARY)
+    h.judge.mockResolvedValue('<block>no</block>')
+    session = makeSession({ permissionMode: 'auto' })
+    await startTurn()
+
+    h.feed.push(askShell('per_f1'))
+    await vi.waitFor(() =>
+      expect(h.client.replyPermission).toHaveBeenCalledWith(SID, 'per_f1', { decision: 'once' })
+    )
+    h.feed.push(askShell('per_f2'))
+    await vi.waitFor(() =>
+      expect(h.client.replyPermission).toHaveBeenCalledWith(SID, 'per_f2', { decision: 'once' })
+    )
+
+    expect(h.judge.mock.calls.map(([call]) => call.body.model)).toEqual([FALLBACK, FALLBACK])
+    expect(payloads('session:approval-request')).toHaveLength(0)
+    expect(errors()).toEqual([
+      `Auto-mode judge unavailable: ${REASON} ${FALLBACK} is judging instead until it recovers. ` +
+        'Change the judge models in Settings › Sessions & autonomy › Auto-mode judge (opencode).'
+    ])
+  })
+
+  it('both judges unavailable: the human decides, with one banner per judge', async () => {
+    h.engineConfig.autoMode = { fallbackJudgeModel: FALLBACK, twoStageMode: 'fast' }
+    await noRouteFor(PRIMARY, FALLBACK)
+    session = makeSession({ permissionMode: 'auto' })
+    await startTurn()
+
+    h.feed.push(askShell('per_f3'))
+    await vi.waitFor(() => expect(payloads('session:approval-request')).toHaveLength(1))
+    h.feed.push(askShell('per_f4'))
+    await vi.waitFor(() => expect(payloads('session:approval-request')).toHaveLength(2))
+
+    expect(h.judge).not.toHaveBeenCalled()
+    expect(errors()).toEqual([
+      `Auto-mode judge unavailable: ${REASON} ${FALLBACK} is judging instead until it recovers. ` +
+        'Change the judge models in Settings › Sessions & autonomy › Auto-mode judge (opencode).',
+      cantJudge(`fallback ${FALLBACK}: ${REASON}`)
+    ])
+  })
+
+  it('no fallback configured, or one equal to the effective primary: the original banner', async () => {
+    h.engineConfig.autoMode = { fallbackJudgeModel: PRIMARY, twoStageMode: 'fast' }
+    await noRouteFor(PRIMARY)
+    session = makeSession({ permissionMode: 'auto' })
+    await startTurn()
+
+    h.feed.push(askShell('per_f5'))
+    await vi.waitFor(() => expect(payloads('session:approval-request')).toHaveLength(1))
+
+    expect(errors()).toEqual([cantJudge(REASON)])
+  })
+
+  it('a fallback opencode no longer offers is no fallback: the human decides, one log line', async () => {
+    h.engineConfig.autoMode = { fallbackJudgeModel: 'openai/gone', twoStageMode: 'fast' }
+    h.peekModels = catalog(PRIMARY, FALLBACK)
+    await noRouteFor(PRIMARY)
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      session = makeSession({ permissionMode: 'auto' })
+      await startTurn()
+
+      h.feed.push(askShell('per_f6'))
+      await vi.waitFor(() => expect(payloads('session:approval-request')).toHaveLength(1))
+      h.feed.push(askShell('per_f7'))
+      await vi.waitFor(() => expect(payloads('session:approval-request')).toHaveLength(2))
+
+      expect(h.judge).not.toHaveBeenCalled()
+      expect(errors()).toEqual([cantJudge(REASON)])
+      expect(
+        warn.mock.calls.filter(([, msg]) => String(msg).includes('fallback judge'))
+      ).toHaveLength(1)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  describe('on another ChatGPT account (autoMode.fallbackJudgeAccount)', () => {
+    beforeEach(() => {
+      h.chatgptVault.activeId = 'acct-plus'
+      h.chatgptVault.accounts = [
+        { id: 'acct-plus', planType: 'plus' },
+        { id: 'acct-biz', planType: 'business' }
+      ]
+    })
+    afterEach(() => resetChatgptAccounts())
+
+    /** The active account has no route; the named one resolves to a route named after it. */
+    async function activeAccountDown(): Promise<void> {
+      const { fakeJudgeRoute } = await import('../../../test/helpers/fake-judge')
+      h.resolveRoute = async (_engine, _value, options) =>
+        options?.chatgptAccountId
+          ? { ok: true, route: fakeJudgeRoute(`model-on-${options.chatgptAccountId}`) }
+          : { ok: false, code: 'rate-limited', reason: REASON }
+    }
+
+    it('the same model on a different account is a fallback: it resolves on that account, and the banner names its plan', async () => {
+      h.engineConfig.autoMode = {
+        judgeModel: PRIMARY,
+        fallbackJudgeModel: PRIMARY,
+        fallbackJudgeAccount: 'acct-biz',
+        twoStageMode: 'fast'
+      }
+      await activeAccountDown()
+      h.judge.mockResolvedValue('<block>no</block>')
+      session = makeSession({ permissionMode: 'auto' })
+      await startTurn()
+
+      h.feed.push(askShell('per_a1'))
+      await vi.waitFor(() =>
+        expect(h.client.replyPermission).toHaveBeenCalledWith(SID, 'per_a1', { decision: 'once' })
+      )
+
+      expect(h.judge.mock.calls.map(([call]) => call.body.model)).toEqual(['model-on-acct-biz'])
+      expect(errors()).toEqual([
+        `Auto-mode judge unavailable: ${REASON} ${PRIMARY} (Business account) is judging instead ` +
+          'until it recovers. Change the judge models in Settings › Sessions & autonomy › ' +
+          'Auto-mode judge (opencode).'
+      ])
+    })
+
+    it('the same model on the ACTIVE account is no fallback (the original banner)', async () => {
+      h.engineConfig.autoMode = {
+        judgeModel: PRIMARY,
+        fallbackJudgeModel: PRIMARY,
+        fallbackJudgeAccount: 'acct-plus',
+        twoStageMode: 'fast'
+      }
+      await activeAccountDown()
+      session = makeSession({ permissionMode: 'auto' })
+      await startTurn()
+
+      h.feed.push(askShell('per_a2'))
+      await vi.waitFor(() => expect(payloads('session:approval-request')).toHaveLength(1))
+
+      expect(h.judge).not.toHaveBeenCalled()
+      expect(errors()).toEqual([cantJudge(REASON)])
+    })
+  })
+
+  it('a stale PRIMARY is judged by the fallback, and the banner says so', async () => {
+    h.engineConfig.autoMode = {
+      judgeModel: 'openai/gone',
+      fallbackJudgeModel: FALLBACK,
+      twoStageMode: 'fast'
+    }
+    h.peekModels = catalog(FALLBACK)
+    await noRouteFor()
+    h.judge.mockResolvedValue('<block>no</block>')
+    session = makeSession({ permissionMode: 'auto' })
+    await startTurn()
+
+    h.feed.push(askShell('per_f8'))
+    await vi.waitFor(() =>
+      expect(h.client.replyPermission).toHaveBeenCalledWith(SID, 'per_f8', { decision: 'once' })
+    )
+
+    expect(h.judge.mock.calls.map(([call]) => call.body.model)).toEqual([FALLBACK])
+    expect(errors()).toEqual([
+      'Auto-mode judge model "openai/gone" is no longer available — ' +
+        `${FALLBACK} is judging instead. Change the judge models in Settings › Sessions & ` +
+        'autonomy › Auto-mode judge (opencode).'
+    ])
   })
 })
 

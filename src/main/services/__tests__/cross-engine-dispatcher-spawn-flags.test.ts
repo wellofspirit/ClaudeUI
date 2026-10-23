@@ -84,7 +84,8 @@ describe('the real Claude dispatch spawn (ADR-105)', () => {
         }),
         resolveMaxConcurrent: () => 5,
         ledger,
-        locateClaudeTranscript: () => '/projects/x.jsonl'
+        locateClaudeTranscript: () => '/projects/x.jsonl',
+        targetCwdExists: () => true
       })
     )
 

@@ -89,17 +89,22 @@ const { scanCodexLineage } = vi.hoisted(() => ({
 }))
 vi.mock('../../../core/codex/history', () => ({ scanCodexLineage }))
 
-// The judge picker's support query (ADR-081 §3). The resolver's describe path is
-// the subject of `core/automode/__tests__/judge-route.test.ts`; what these tests
-// pin is the wire-argument check in front of it.
-const { describeJudgeModels } = vi.hoisted(() => ({
+// The judge picker's support query (ADR-081 §3) and its resting-route query. The resolver is
+// the subject of `core/automode/__tests__/judge-route.test.ts`; what these tests pin is the
+// wire-argument check in front of it and what the resting query makes of a route. The cooldown
+// store (`judge-cooldown.ts`) and the route key are the real ones.
+const { describeJudgeModels, resolveJudgeRoute } = vi.hoisted(() => ({
   describeJudgeModels: vi.fn(async (_engine: string, values: string[]) =>
     Object.fromEntries(values.map((v) => [v, { ok: true }]))
-  )
+  ),
+  resolveJudgeRoute: vi.fn()
 }))
-vi.mock('../../../core/automode/judge-route', () => ({ describeJudgeModels }))
+vi.mock('../../../core/automode/judge-route', () => ({ describeJudgeModels, resolveJudgeRoute }))
 
 // Import AFTER mocks.
+import { clearCooldowns, noteRateLimited } from '../../../core/automode/judge-cooldown'
+import { routeFor } from '../../../core/automode/judge-http/__tests__/helpers'
+import { judgeRouteKey } from '../../../core/automode/judge-http/transport'
 import {
   mcpStatus,
   stopTask,
@@ -116,6 +121,7 @@ import {
   deleteProject,
   clearConversation,
   judgeModelSupport,
+  judgeRouteResting,
   sendPrompt,
   allowPeerMessages
 } from '../../../core/ipc/handlers-core'
@@ -1255,6 +1261,96 @@ describe('judgeModelSupport — the automode:judge-model-support body', () => {
     await expect(judgeModelSupport('opencode', 'openai/gpt-5')).rejects.toThrow(/array of strings/)
     await expect(judgeModelSupport('opencode', ['ok', 7])).rejects.toThrow(/array of strings/)
     expect(describeJudgeModels).not.toHaveBeenCalled()
+  })
+})
+
+describe('judgeRouteResting — the automode:judge-route-resting body', () => {
+  const NOW = Date.UTC(2026, 9, 23, 12, 0, 0)
+  const route = routeFor('chatgpt', 'gpt-6-luna')
+  const accountRoute = {
+    ...route,
+    account: { ...route.account, accountId: 'acct-biz', accountKey: 'chatgpt:ws-biz:user-biz' }
+  }
+
+  beforeEach(() => {
+    resolveJudgeRoute.mockReset()
+    clearCooldowns()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(NOW)
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    clearCooldowns()
+  })
+
+  it('a cooling route answers when it recovers', async () => {
+    resolveJudgeRoute.mockResolvedValue({ ok: true, route })
+    noteRateLimited(judgeRouteKey(route), NOW + 3_600_000)
+    await expect(judgeRouteResting('pi', 'openai-codex/gpt-6-luna')).resolves.toEqual({
+      until: NOW + 3_600_000
+    })
+    // No account named → the active one: the resolver is asked the way the primary asks.
+    expect(resolveJudgeRoute).toHaveBeenCalledWith('pi', 'openai-codex/gpt-6-luna')
+  })
+
+  it('a route that is not cooling is null, and so is one whose rest is over', async () => {
+    resolveJudgeRoute.mockResolvedValue({ ok: true, route })
+    await expect(judgeRouteResting('opencode', 'openai/gpt-6-luna')).resolves.toBeNull()
+    noteRateLimited(judgeRouteKey(route), NOW + 1_000)
+    vi.setSystemTime(NOW + 2_000)
+    await expect(judgeRouteResting('opencode', 'openai/gpt-6-luna')).resolves.toBeNull()
+  })
+
+  it('resolves the route for the named account, and each account rests on its own', async () => {
+    resolveJudgeRoute.mockImplementation(async (_e: string, _m: string, _d: object, o?: any) => ({
+      ok: true,
+      route: o?.chatgptAccountId === 'acct-biz' ? accountRoute : route
+    }))
+    noteRateLimited(judgeRouteKey(route), NOW + 60_000)
+
+    await expect(judgeRouteResting('pi', 'openai-codex/gpt-6-luna')).resolves.toEqual({
+      until: NOW + 60_000
+    })
+    await expect(judgeRouteResting('pi', 'openai-codex/gpt-6-luna', 'acct-biz')).resolves.toBeNull()
+    expect(resolveJudgeRoute).toHaveBeenLastCalledWith(
+      'pi',
+      'openai-codex/gpt-6-luna',
+      {},
+      { chatgptAccountId: 'acct-biz' }
+    )
+    noteRateLimited(judgeRouteKey(accountRoute), NOW + 120_000)
+    await expect(judgeRouteResting('pi', 'openai-codex/gpt-6-luna', 'acct-biz')).resolves.toEqual({
+      until: NOW + 120_000
+    })
+  })
+
+  it('a null account (a web client serialises a missing argument as null) is the active one', async () => {
+    resolveJudgeRoute.mockResolvedValue({ ok: true, route })
+    await expect(judgeRouteResting('pi', 'openai-codex/gpt-6-luna', null)).resolves.toBeNull()
+    expect(resolveJudgeRoute).toHaveBeenCalledWith('pi', 'openai-codex/gpt-6-luna')
+  })
+
+  it('a model or account ClaudeUI cannot route is null, not an error', async () => {
+    resolveJudgeRoute.mockResolvedValue({
+      ok: false,
+      code: 'no-shared-provider',
+      reason: 'Set up inside pi.'
+    })
+    await expect(judgeRouteResting('pi', 'nonsense/model')).resolves.toBeNull()
+    await expect(judgeRouteResting('pi', '')).resolves.toBeNull()
+    await expect(judgeRouteResting('pi', 'openai-codex/x', 'removed-account')).resolves.toBeNull()
+  })
+
+  it('a resolver that fails (an unreadable vault) is null too', async () => {
+    resolveJudgeRoute.mockRejectedValue(new Error('vault unreadable'))
+    await expect(judgeRouteResting('pi', 'openai-codex/gpt-6-luna')).resolves.toBeNull()
+  })
+
+  it('refuses an engine without a ClaudeUI judge and malformed arguments, before resolving', async () => {
+    await expect(judgeRouteResting('claude', 'x')).rejects.toThrow(/unsupported engine/)
+    await expect(judgeRouteResting('pi', 7)).rejects.toThrow(/model must be a string/)
+    await expect(judgeRouteResting('pi', 'x', 7)).rejects.toThrow(/accountId must be a string/)
+    expect(resolveJudgeRoute).not.toHaveBeenCalled()
   })
 })
 

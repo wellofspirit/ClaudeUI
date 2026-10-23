@@ -11,8 +11,10 @@ import {
   DISPATCH_DESCRIPTION_PARAM,
   DISPATCH_NAME_PARAM,
   DISPATCH_SESSION_ID_REMOVED_TEXT,
+  DISPATCH_WORKDIR_PARAM,
   dispatchAgentDescription,
   dispatchResultSuffix,
+  dispatchWorkdirArg,
   hasRemovedSessionId,
   joinDispatchHints,
   OWN_SUBAGENT_TOOL,
@@ -123,10 +125,12 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
             ),
           name: z.string().optional().describe(DISPATCH_NAME_PARAM),
           description: z.string().describe(DISPATCH_DESCRIPTION_PARAM),
+          workdir: z.string().optional().describe(DISPATCH_WORKDIR_PARAM),
           run_in_background: z.boolean().optional().describe(DISPATCH_BACKGROUND_PARAM)
         },
         async (input, extra) => {
-          const { engine, prompt, model, name, description, run_in_background } = input
+          const { engine, prompt, model, name, description, workdir, run_in_background } = input
+          const workdirArg = dispatchWorkdirArg(workdir)
           // `session_id` is no longer a parameter (ADR-105 §4) and is not in the schema the model
           // sees; the tool is registered `passthrough`, so a call that still sends one (an older
           // transcript) reaches us and gets the guiding error, with nothing launched.
@@ -159,6 +163,7 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
               model,
               name,
               description,
+              ...(workdirArg ? { workdir: workdirArg } : {}),
               ...(background ? { runInBackground: true } : {}),
               ...(background && owner === 'subagent' ? { fromSubagent: true } : {})
             },

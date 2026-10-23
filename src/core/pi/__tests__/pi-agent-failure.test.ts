@@ -10,6 +10,46 @@ import { isPiAuthStatus, piErrorStatusCode } from '../pi-error-status'
 const turn = (message: string): PiAgentFailureInput => ({ kind: 'turn-error', message })
 const classify = (message: string) => classifyPiAgentFailure(turn(message))
 
+describe('pi 1.4.0 failure compatibility', () => {
+  it.each([
+    'upstream request failed',
+    'upstream_stream_read_error',
+    'stream was interrupted',
+    'HTTP/2 stream failed',
+    'http2 stream failed',
+    'request to https://oauth2.googleapis.com/token failed, reason:',
+    'stream disconnected before completion: stream closed before response.completed',
+    'subscription_sharing_workplace_individual_usage_limit_exceeded',
+    'subscription_sharing_workplace_individual_usage_limit_exceeded: Contact your workspace admin to raise your limit',
+    'status (503)',
+    '429'
+  ])('keeps environmental failure resumable: %s', (message) => {
+    expect(classify(message)).toBe('transient')
+  })
+
+  it.each(['req_011CU503xyz', '5242880 bytes', 'error500code', 'status 15003'])(
+    'does not mistake embedded digits for retry status: %s',
+    (message) => {
+      expect(classify(message)).toBe('permanent')
+    }
+  )
+
+  it.each([
+    '413: server error',
+    '413 server error',
+    'github-copilot API error (413): server error'
+  ])('prioritizes anchored request-size overflow: %s', (message) => {
+    expect(classify(message)).toBe('permanent')
+  })
+
+  it.each(['server error: previous status 413', '500 {"status":413}', '4130 server error'])(
+    'does not treat embedded or body-only 413 as overflow: %s',
+    (message) => {
+      expect(classify(message)).toBe('transient')
+    }
+  )
+})
+
 describe('classifyPiAgentFailure (ADR-089 S1b) — one case per rule, first match wins', () => {
   it('1. a context overflow is permanent (several providers)', () => {
     for (const m of [

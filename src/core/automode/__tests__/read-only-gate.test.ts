@@ -7,7 +7,7 @@
  * engine, the host realpath mapping, and the log lines.
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -261,6 +261,66 @@ describe('effectiveShellCwd', () => {
   it('folds the Git-Bash spelling on win32', () => {
     expect(effectiveShellCwd('D:\\repo', { workdir: '/d/other' }, true, 'win32')).toBe('d:/other')
     expect(effectiveShellCwd('D:\\repo', { workdir: 'sub' }, true, 'win32')).toBe('d:/repo/sub')
+  })
+
+  // opencode expands a leading `~` itself (core/src/file-access.ts resolvePath).
+  describe('a `~` workdir is the home directory, not `<cwd>/~`', () => {
+    const home = (): string => '/home/dev'
+    const winHome = (): string => 'C:\\Users\\dev'
+
+    it('expands `~` and `~/x`', () => {
+      expect(effectiveShellCwd('/repo', { workdir: '~' }, true, 'linux', home)).toBe('/home/dev')
+      expect(effectiveShellCwd('/repo', { workdir: '~/Documents' }, true, 'linux', home)).toBe(
+        '/home/dev/Documents'
+      )
+      expect(effectiveShellCwd('D:\\repo', { workdir: '~' }, true, 'win32', winHome)).toBe(
+        'c:/Users/dev'
+      )
+      expect(effectiveShellCwd('D:\\repo', { workdir: '~/Docs' }, true, 'win32', winHome)).toBe(
+        'c:/Users/dev/Docs'
+      )
+    })
+
+    it('expands the Windows `~\\x` spelling on win32', () => {
+      expect(effectiveShellCwd('D:\\repo', { workdir: '~\\Docs' }, true, 'win32', winHome)).toBe(
+        'c:/Users/dev/Docs'
+      )
+    })
+
+    it('leaves `~user` and a `~` mid-path as ordinary names', () => {
+      expect(effectiveShellCwd('/repo', { workdir: '~user' }, true, 'linux', home)).toBe(
+        '/repo/~user'
+      )
+      expect(effectiveShellCwd('/repo', { workdir: 'a/~' }, true, 'linux', home)).toBe('/repo/a/~')
+    })
+
+    it('does not read the home directory for an engine that ignores the workdir', () => {
+      const boom = (): string => {
+        throw new Error('home read')
+      }
+      expect(effectiveShellCwd('/repo', { workdir: '~' }, false, 'linux', boom)).toBe('/repo')
+    })
+
+    it('is unknown when the home directory cannot be read', () => {
+      const boom = (): string => {
+        throw new Error('no home')
+      }
+      expect(effectiveShellCwd('/repo', { workdir: '~' }, true, 'linux', boom)).toBeNull()
+      expect(effectiveShellCwd('/repo', { workdir: '~/x' }, true, 'linux', () => '')).toBeNull()
+    })
+
+    it('defaults to the real home directory', () => {
+      expect(effectiveShellCwd('/repo', { workdir: '~' }, true, 'linux')).toBe(
+        effectiveShellCwd('/repo', { workdir: '~' }, true, 'linux', () => homedir())
+      )
+    })
+  })
+
+  it('a drive-relative workdir is unknown on win32 and an ordinary name elsewhere', () => {
+    expect(effectiveShellCwd('D:\\repo', { workdir: 'c:foo' }, true, 'win32')).toBeNull()
+    expect(effectiveShellCwd('D:\\repo', { workdir: 'C:' }, true, 'win32')).toBeNull()
+    expect(effectiveShellCwd('D:\\repo', { workdir: 'c:/foo' }, true, 'win32')).toBe('c:/foo')
+    expect(effectiveShellCwd('/repo', { workdir: 'c:foo' }, true, 'linux')).toBe('/repo/c:foo')
   })
 })
 

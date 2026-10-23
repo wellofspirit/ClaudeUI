@@ -51,7 +51,9 @@ import { normalizeContextPressure } from '../../shared/context-pressure'
 import { deleteSessionMeta, getSessionMeta } from '../services/db'
 import { flushHeld, hasHeld } from '../services/session-delivery'
 import { noteClientPrompt } from '../services/session-links'
-import { describeJudgeModels } from '../automode/judge-route'
+import { coolingUntil } from '../automode/judge-cooldown'
+import { judgeRouteKey } from '../automode/judge-http/transport'
+import { describeJudgeModels, resolveJudgeRoute } from '../automode/judge-route'
 
 // ---------------------------------------------------------------------------
 // Shared session-domain IPC handler bodies (desktop IPC + remote WebSocket)
@@ -1168,6 +1170,43 @@ export async function judgeModelSupport(
     throw new Error('judge-model-support: values must be an array of strings')
   }
   return describeJudgeModels(engineId, values as string[])
+}
+
+/**
+ * `automode:judge-route-resting` — when the route a judge model would take recovers from a rate
+ * limit (`judge-cooldown.ts`), for the Settings picker's "resting until …" hint. The route is
+ * resolved WITHOUT the resting wrapper (`makeSessionJudgeTransport` hides a resting route as
+ * unavailable, which would hide the time too), for `accountId` when one is named — the fallback
+ * judge's ChatGPT account — else the active one, and the answer is only its cooldown: the token
+ * the resolver fetched is dropped here. A model or account ClaudeUI cannot route, or a resolver
+ * that fails, is `null` (nothing to report), never an error.
+ */
+export async function judgeRouteResting(
+  engineId: unknown,
+  model: unknown,
+  accountId?: unknown
+): Promise<{ until: number } | null> {
+  if (engineId !== 'opencode' && engineId !== 'pi') {
+    throw new Error(`judge-route-resting: unsupported engine ${JSON.stringify(engineId)}`)
+  }
+  if (typeof model !== 'string') {
+    throw new Error('judge-route-resting: model must be a string')
+  }
+  // A web client serialises an omitted trailing argument as null.
+  if (accountId !== undefined && accountId !== null && typeof accountId !== 'string') {
+    throw new Error('judge-route-resting: accountId must be a string')
+  }
+  const account = typeof accountId === 'string' && accountId !== '' ? accountId : undefined
+  try {
+    const resolved = account
+      ? await resolveJudgeRoute(engineId, model, {}, { chatgptAccountId: account })
+      : await resolveJudgeRoute(engineId, model)
+    if (!resolved.ok) return null
+    const until = coolingUntil(judgeRouteKey(resolved.route))
+    return until === undefined ? null : { until }
+  } catch {
+    return null
+  }
 }
 
 export async function listDirEntries(dirPath: string): Promise<{

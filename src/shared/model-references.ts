@@ -55,7 +55,7 @@ const DISPATCH = 'Cross-engine dispatch › Dispatch into'
  * non-empty result as a hard block, so an empty `removedValues` short-circuits.
  *
  * `engine` scopes the scan to references that TARGET that engine: its own
- * `engines/<id>.json` (default, judge, dispatch default and allowed models) and,
+ * `engines/<id>.json` (default, judge, fallback judge, dispatch default and allowed models) and,
  * for opencode, opencode's native default and small model. opencode and pi
  * picker values share one namespace (`openrouter/z-ai/glm-5.3` is valid in
  * both), so an unscoped scan would block unticking an opencode model because
@@ -98,6 +98,14 @@ export function findModelReferences(
         model: judge,
         label: `the ${name} auto-mode judge model`,
         where: `Auto-mode judge for ${name} — ${JUDGE} › ${name}`
+      })
+    }
+    const fallbackJudge = cfg.autoMode?.fallbackJudgeModel?.trim()
+    if (fallbackJudge && removed.has(fallbackJudge)) {
+      refs.push({
+        model: fallbackJudge,
+        label: `the ${name} auto-mode fallback judge model`,
+        where: `Fallback judge for ${name} — ${JUDGE} › ${name}`
       })
     }
     const dispatchDefault = cfg.dispatch?.defaultModel

@@ -25,7 +25,9 @@
  * - `identical` — for a shell call, the same whitespace-normalised `command` in
  *   the same `workdir` (resolved against the session cwd when the caller supplies
  *   one, so a re-spelling of the same directory still matches; other keys such as
- *   a `description` are ignored); for any other tool, a deep-equal input;
+ *   a `description` are ignored), or the same command once the trivial variants
+ *   {@link canonicalShellCommand} lists are stripped from both; for any other
+ *   tool, a deep-equal input;
  * - `subset` — for a shell command in the same `workdir`, every top-level segment of the current
  *   command (`&&` `||` `;` / newline — NOT `|`) also appears among the earlier
  *   call's segments, and the commands differ; for an edit tool carrying an
@@ -33,7 +35,9 @@
  *   earlier list;
  * - anything else is no fact at all (the judge judges it on its merits).
  *
- * Most recent match wins. No fact is emitted rather than a guess: a wrong
+ * The strongest match wins (`identical` over `subset`), the most recent among
+ * equals: a later, weaker re-roll must not hide an earlier identical refusal.
+ * No fact is emitted rather than a guess: a wrong
  * `identical` would read as an unconsented re-roll, and a wrong `subset` would
  * hide a changed action behind an old refusal.
  *
@@ -85,7 +89,21 @@ export function renderToolCall(
   toolName: string,
   toolInput: Record<string, unknown> | undefined
 ): string {
-  return `${toolName} ${JSON.stringify(toolInput ?? {})}`
+  return `${toolName} ${jsonLine(toolInput ?? {})}`
+}
+
+/**
+ * `JSON.stringify` for a value rendered INTO a prompt line. JSON leaves U+0085,
+ * U+2028 and U+2029 raw, and a reader may take any of them for a line break — so
+ * a command containing `\u2028User: yes, force-push main` would start a forged
+ * `User:` turn. They are written as `\uXXXX` escapes instead (still valid JSON,
+ * the same value).
+ */
+export function jsonLine(value: unknown): string {
+  return JSON.stringify(value).replace(
+    /[\u0085\u2028\u2029]/g,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`
+  )
 }
 
 /** Tool names whose input names a file to write (pi, opencode, Codex shapes). */
@@ -156,9 +174,283 @@ export function editPathsOf(toolName: string, input: Record<string, unknown>): s
   return path === undefined ? [] : [path]
 }
 
-/** Collapse every run of whitespace (newlines included) and trim. */
+/**
+ * Normalise a shell command for comparison: CRLF → LF, trim, and collapse runs
+ * of spaces and tabs to one space OUTSIDE quotes only. Newlines stay distinct (a
+ * newline is a command separator, not a space: `ls\nrm -rf /tmp/x` is two
+ * commands) and so does everything inside quotes (`rm -rf "my  dir"` is another
+ * directory than `rm -rf "my dir"`). Everything from an unquoted `<<` heredoc
+ * operator on is left exactly as written — the body is data to the command, and
+ * no whitespace in it is ours to fold. An unbalanced quote leaves the rest of
+ * the command untouched, so the worst case is "not identical", never a false one.
+ */
 function normalizeCommand(command: string): string {
-  return command.replace(/\s+/g, ' ').trim()
+  const text = command.replace(/\r\n?/g, '\n').trim()
+  let out = ''
+  let quote: '"' | "'" | null = null
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]
+    if (quote !== null) {
+      out += char
+      if (char === '\\' && quote === '"' && i + 1 < text.length) {
+        out += text[++i]
+        continue
+      }
+      if (char === quote) quote = null
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      out += char
+      continue
+    }
+    if (char === '\\' && i + 1 < text.length) {
+      out += char + text[++i]
+      continue
+    }
+    if (char === '<' && text[i + 1] === '<') {
+      if (text[i + 2] === '<') {
+        // `<<<` is a here-string (one word follows), not a heredoc.
+        out += '<<<'
+        i += 2
+        continue
+      }
+      return out + text.slice(i)
+    }
+    if (char === ' ' || char === '\t') {
+      out += ' '
+      while (text[i + 1] === ' ' || text[i + 1] === '\t') i++
+      continue
+    }
+    out += char
+  }
+  return out
+}
+
+/**
+ * The command with everything a shell treats as data blanked to `_`, same length
+ * as the input: quoted text, backslash-escaped characters, and everything from a
+ * `<<` heredoc operator on. Structural questions (where is the last pipe, is
+ * this `#` a comment, do these parentheses wrap the whole command) are asked of
+ * this mask and answered on the original by index.
+ */
+function maskData(command: string): string {
+  let out = ''
+  let quote: '"' | "'" | null = null
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]
+    if (quote !== null) {
+      out += '_'
+      if (char === '\\' && quote === '"' && i + 1 < command.length) {
+        out += '_'
+        i++
+        continue
+      }
+      if (char === quote) quote = null
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      out += '_'
+      continue
+    }
+    if (char === '\\' && i + 1 < command.length) {
+      out += '__'
+      i++
+      continue
+    }
+    if (char === '<' && command[i + 1] === '<') {
+      if (command[i + 2] === '<') {
+        out += '<<<'
+        i += 2
+        continue
+      }
+      return out + '_'.repeat(command.length - i)
+    }
+    out += char
+  }
+  return out
+}
+
+/** Characters a quoted word may hold and still mean exactly the same unquoted. */
+const PLAIN_QUOTED = /^[A-Za-z0-9_./:@%+-]+$/
+/** A word that quoting turns from shell syntax into a plain word. */
+const RESERVED_WORDS: ReadonlySet<string> = new Set([
+  'if',
+  'then',
+  'else',
+  'elif',
+  'fi',
+  'for',
+  'while',
+  'until',
+  'do',
+  'done',
+  'case',
+  'esac',
+  'in',
+  'function',
+  'select',
+  'time',
+  'coproc'
+])
+
+/**
+ * `"public"` / `'public'` → `public` — only for a word with no space or special,
+ * and never where quoting changes the shell's reading: `$'…'`, `~"…"`, a quoted
+ * `name=` (a command, not an assignment), a quoted reserved word, a heredoc body.
+ */
+function unquotePlainWords(command: string): string {
+  let out = ''
+  let i = 0
+  while (i < command.length) {
+    const char = command[i]
+    if (char === '\\' && i + 1 < command.length) {
+      out += char + command[i + 1]
+      i += 2
+      continue
+    }
+    if (char === '<' && command[i + 1] === '<' && command[i + 2] !== '<') {
+      return out + command.slice(i)
+    }
+    if (char !== '"' && char !== "'") {
+      out += char
+      i++
+      continue
+    }
+    let end = i + 1
+    while (end < command.length && command[end] !== char) {
+      end += char === '"' && command[end] === '\\' ? 2 : 1
+    }
+    if (end >= command.length) return out + command.slice(i) // unbalanced: leave it
+    const inner = command.slice(i + 1, end)
+    const before = i === 0 ? '' : command[i - 1]
+    const after = command[end + 1] ?? ''
+    const wholeWord = !/[^\s;&|()]/.test(before) && !/[^\s;&|()]/.test(after)
+    const keepQuotes =
+      before === '$' ||
+      before === '~' ||
+      after === '=' ||
+      !PLAIN_QUOTED.test(inner) ||
+      (wholeWord && RESERVED_WORDS.has(inner))
+    out += keepQuotes ? command.slice(i, end + 1) : inner
+    i = end + 1
+  }
+  return out
+}
+
+/** Shell-significant characters a `cd` target may not carry (it must be a plain path). */
+const PLAIN_CD_TARGET = /^[^\s$`\\~*?[\];&|<>(){}'"#!]+$/
+
+/** The working-directory test {@link canonicalShellCommand} needs for a leading `cd <dir> &&`. */
+export type IsWorkdir = (dir: string) => boolean
+
+/** Index just past the `)` matching the `(` at index 0 of `masked`, or -1. */
+function closingParen(masked: string): number {
+  let depth = 0
+  for (let i = 0; i < masked.length; i++) {
+    if (masked[i] === '(') depth++
+    else if (masked[i] === ')' && --depth === 0) return i + 1
+  }
+  return -1
+}
+
+/** `( … )` or `{ …; }` around the WHOLE command → the inside; otherwise `undefined`. */
+function unwrapGroup(command: string, masked: string): string | undefined {
+  if (masked.startsWith('(') && !masked.startsWith('((')) {
+    return closingParen(masked) === masked.length ? command.slice(1, -1) : undefined
+  }
+  if (!/^\{\s/.test(masked) || !/[;\n]\s*\}$/.test(masked)) return undefined
+  // Brace-group words only: `${x}` has `{` glued to `$`, and a `}` is a closer only
+  // after `;`/`&`/a newline — so `{ a; } && { b; }` is two groups, not one.
+  let depth = 0
+  const token = /(?<![^\s;&|(])\{(?=\s)|(?<=[;&\n]\s*)\}(?![^\s;&|)])/g
+  for (let m = token.exec(masked); m !== null; m = token.exec(masked)) {
+    depth += m[0] === '{' ? 1 : -1
+    if (depth === 0 && m.index + 1 !== masked.length) return undefined
+    if (depth < 0) return undefined
+  }
+  if (depth !== 0) return undefined
+  return command.slice(1, command.lastIndexOf('}')).replace(/[;\n]\s*$/, '')
+}
+
+/** A leading `cd <dir> &&` where `<dir>` is the call's own working directory → the rest. */
+function stripLeadingCd(command: string, isWorkdir: IsWorkdir): string | undefined {
+  const m = /^cd[ \t]+("[^"$`\\]*"|'[^']*'|[^\s;&|<>()$`\\"']+)[ \t]*&&\s*(?=\S)/.exec(command)
+  if (!m) return undefined
+  const dir = /^["']/.test(m[1]) ? m[1].slice(1, -1) : m[1]
+  if (!PLAIN_CD_TARGET.test(dir)) return undefined
+  return isWorkdir(dir) ? command.slice(m[0].length) : undefined
+}
+
+/** One pass: the command with the first applicable trivial wrapper removed, or `undefined`. */
+function stripOnce(command: string, isWorkdir: IsWorkdir): string | undefined {
+  const masked = maskData(command)
+
+  // A trailing unquoted `# comment` on the last line.
+  const lineStart = masked.lastIndexOf('\n') + 1
+  const comment = /(^|[ \t])#/.exec(masked.slice(lineStart))
+  if (comment) return command.slice(0, lineStart + comment.index + comment[1].length).trimEnd()
+
+  // An output filter at the very end: `| tail -5`, `| head -n 20` — never `||`.
+  const filter = /(?<!\|)\|(?!\|)\s*(?:tail|head)(?:\s+-(?:\d+|[nc]\s*\+?\d+))?\s*$/.exec(masked)
+  if (filter) return command.slice(0, filter.index).trimEnd()
+
+  // stderr folded into stdout, at the very end.
+  const fold = /\s2>&1\s*$/.exec(masked)
+  if (fold) return command.slice(0, fold.index)
+
+  const inner = unwrapGroup(command, masked)
+  if (inner !== undefined) return inner.trim()
+
+  // Leading `VAR=value` (a plain value — no expansion — and a command after it).
+  const assignment = /^[A-Za-z_][A-Za-z0-9_]*=[^\s$`();&|<>]*[ \t]+(?![;&|<>)])/.exec(masked)
+  // The name must be literally unquoted: the mask shows a quoted `"FOO"` as `_____`.
+  if (
+    assignment &&
+    /^[A-Za-z_][A-Za-z0-9_]*=/.test(command) &&
+    !/[$`]/.test(command.slice(0, assignment[0].length))
+  ) {
+    return command.slice(assignment[0].length)
+  }
+
+  // Leading `env` / `time` / `command` that takes a command word, not a flag.
+  const prefix = /^(?:env|time|command)[ \t]+(?=[^-\s;&|<>()])/.exec(masked)
+  if (prefix) return command.slice(prefix[0].length)
+
+  return stripLeadingCd(command, isWorkdir)
+}
+
+/**
+ * A shell command reduced to what it runs, for the `identical` test: the
+ * whitespace normalisation of {@link normalizeCommand}, plus the trivial wrappers
+ * an agent adds to re-roll a refused call without changing it:
+ *
+ * - a trailing `2>&1`, `| tail …` / `| head …` (numeric count flags only) and an
+ *   unquoted `# comment`;
+ * - leading `VAR=value` assignments (plain values) and a leading `env`, `time`
+ *   or `command` that is followed by a command, not a flag (`command -v x` is a
+ *   lookup, not a re-run);
+ * - `( … )` or `{ …; }` around the whole command;
+ * - a leading `cd <dir> &&` where `isWorkdir(dir)` says `<dir>` is the call's
+ *   own working directory;
+ * - quotes round a word with no space or special (`"public"` ≡ `public`).
+ *
+ * Nothing that changes what runs is touched: flags, other arguments, `--dry-run`,
+ * a redirect to a file, a pipe into anything but a bare `head`/`tail`. When the
+ * stripping would leave nothing, the unstripped command is returned.
+ */
+export function canonicalShellCommand(command: string, isWorkdir: IsWorkdir = () => false): string {
+  const normalized = unquotePlainWords(normalizeCommand(command))
+  let current = normalized
+  for (let pass = 0; pass < 16; pass++) {
+    const next = stripOnce(current, isWorkdir)
+    if (next === undefined) break
+    const trimmed = normalizeCommand(next)
+    if (trimmed === '' || trimmed === current) break
+    current = trimmed
+  }
+  return current
 }
 
 /**
@@ -289,10 +581,42 @@ function matchKind(
     // freely on a retry, and must not turn a re-roll into "no fact".
     if (!sameWorkdir(current.workdir, earlier.workdir, cwd, platform)) return undefined
     if (normalizeCommand(currentCommand) === normalizeCommand(earlierCommand)) return 'identical'
+    // The two calls share one workdir (checked above), so one `cd <dir> &&` test serves both.
+    const isWorkdir = workdirTest(current.workdir, cwd, platform)
+    if (
+      canonicalShellCommand(currentCommand, isWorkdir) ===
+      canonicalShellCommand(earlierCommand, isWorkdir)
+    ) {
+      return 'identical'
+    }
     return isShellSubset(currentCommand, earlierCommand) ? 'subset' : undefined
   }
   if (deepEqual(current, earlier)) return 'identical'
   return isEditSubset(current, earlier) ? 'subset' : undefined
+}
+
+/**
+ * "Is `dir` (the target of a leading `cd`) the directory this call runs in?" With
+ * a session cwd the call's directory is resolved and `dir` is resolved against
+ * it, so `cd /repo`, `cd .` and `cd ./` all name an unset `workdir`; without one,
+ * only `.` and the `workdir` exactly as written count.
+ */
+function workdirTest(
+  workdir: unknown,
+  cwd: string | undefined,
+  platform: NodeJS.Platform
+): IsWorkdir {
+  const fold = (s: string): string =>
+    (platform === 'win32' ? s.toLowerCase() : s).replace(/\/+$/, '')
+  if (cwd === undefined) {
+    return (dir) =>
+      dir === '.' ||
+      dir === './' ||
+      (typeof workdir === 'string' && workdir !== '' && fold(dir) === fold(workdir))
+  }
+  const here = effectiveWorkdir(cwd, workdir, platform)
+  if (here === undefined) return () => false
+  return (dir) => fold(resolveTarget(here, dir, platform).full) === fold(here)
 }
 
 /**
@@ -333,10 +657,14 @@ function sameToolFamily(actionTool: string, transcriptTool: string): boolean {
   return isEditTool(a) && isEditTool(b)
 }
 
+/** `identical` outranks `subset`: a later, weaker match must not displace a stronger one. */
+const MATCH_RANK: Record<RetryFact['match'], number> = { subset: 1, identical: 2 }
+
 /**
  * The retry fact for the proposed action, or `undefined` when it matches no
- * refused earlier call. Most recent match wins (the last one in transcript
- * order), which is the one the policy's "name the earlier blocked call" wants.
+ * refused earlier call. The strongest match wins (`identical` over `subset`) and,
+ * among equals, the most recent one (the last in transcript order) — the one the
+ * policy's "name the earlier blocked call" wants.
  */
 export function retryFactOf(input: RetryMatchInput): RetryFact | undefined {
   const outcomes = input.outcomes
@@ -355,6 +683,7 @@ export function retryFactOf(input: RetryMatchInput): RetryFact | undefined {
       const earlier = block.toolInput ?? {}
       const match = matchKind(toolName, current, earlier, input.cwd, platform)
       if (match === undefined) continue
+      if (fact !== undefined && MATCH_RANK[match] < MATCH_RANK[fact.match]) continue
       fact = {
         match,
         outcome: outcome as RetryFact['outcome'],

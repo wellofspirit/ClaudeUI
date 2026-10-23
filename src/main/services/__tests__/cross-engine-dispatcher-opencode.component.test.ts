@@ -10,6 +10,9 @@
  * engine is exercised by `src/integration/opencode/dispatch.contract…`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 vi.mock('../../../core/services/logger', () => ({
@@ -77,6 +80,7 @@ import type {
   TokenUsage_Info
 } from '../../../core/opencode/protocol-v2/openapi'
 import { setOpencodeAuthHooks } from '../../../core/opencode/opencode-auth-hooks'
+import { uiPath } from '../../../core/services/session-tools'
 import { __holdChildPatchesForTests } from '../../../core/opencode/child-rulesets'
 import { opencodeAuthProvider } from '../../../core/auth/OpencodeAuthProvider'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../../core/pi/permission-engine'
@@ -539,6 +543,8 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}, fake = makeFakeOpe
     loadUserRules: () => userRules(),
     recordUsageEvent: (event) => recorded.push(event),
     ledger,
+    // The fake cwds are not on disk: a resumed target's directory "exists" unless a test says otherwise.
+    targetCwdExists: () => true,
     ...overrides
   }
   return {
@@ -3590,5 +3596,186 @@ describe('opencode target — a steered message is answered or sent again', () =
     await vi.waitFor(() => expect(t.serverManager.releaseIfCurrent).toHaveBeenCalledTimes(1))
     expect(t.ledger.rows.get(t.id)!.state).toBe('idle')
     // (the backstop for an execution during the delivery is the test above)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The directory a target runs in (`workdir`) and a resume of one that is gone
+// ---------------------------------------------------------------------------
+
+describe('opencode target — workdir', () => {
+  const dirs: string[] = []
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
+  /** A parent directory with a `wt` directory inside it, and a `granted` one beside it, under the OS temp dir. */
+  function tree(): { parent: string; wt: string; granted: string } {
+    const base = mkdtempSync(join(tmpdir(), 'xeng-oc-wd-'))
+    dirs.push(base)
+    const parent = join(base, 'project')
+    const wt = join(parent, 'wt')
+    const granted = join(base, 'granted')
+    mkdirSync(wt, { recursive: true })
+    mkdirSync(granted, { recursive: true })
+    return { parent, wt, granted }
+  }
+
+  it('leases the server for the workdir and records it beside the parent directory', async () => {
+    const { parent, wt } = tree()
+    const { dispatcher, serverManager, ledger } = makeHarness()
+    const result = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'x', workdir: 'wt' },
+      makeCtx({ cwd: parent })
+    )
+    expect(result.isError).toBeUndefined()
+    const real = uiPath(realpathSync.native(wt))
+    expect(serverManager.acquire).toHaveBeenCalledTimes(1)
+    expect(serverManager.acquire).toHaveBeenCalledWith(real)
+    expect(ledger.rowFor('opencode', 'oc-sess-1')).toMatchObject({ cwd: real, parentCwd: parent })
+  })
+
+  it('refuses a workdir outside the parent directory before leasing a server', async () => {
+    const { parent } = tree()
+    const { dispatcher, serverManager, ledger } = makeHarness()
+    const result = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'x', workdir: join(parent, '..') },
+      makeCtx({ cwd: parent })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('is not inside your working directory')
+    expect(serverManager.acquire).not.toHaveBeenCalled()
+    expect(ledger.rows.size).toBe(0)
+  })
+
+  it('refuses to resume an X-Agent whose directory is gone, leasing no server and keeping its row', async () => {
+    const { parent, wt } = tree()
+    const { dispatcher, serverManager, ledger } = makeHarness({ targetCwdExists: existsSync })
+    const first = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'x', workdir: 'wt' },
+      makeCtx({ cwd: parent })
+    )
+    const row = ledger.rowFor('opencode', 'oc-sess-1')!
+    dispatcher.disposeFor('routing-1')
+    rmSync(wt, { recursive: true, force: true })
+    serverManager.acquire.mockClear()
+
+    const again = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'more', sessionId: first.sessionId },
+      makeCtx({ cwd: parent })
+    )
+    expect(again.isError).toBe(true)
+    expect(again.text).toContain(`the agent's working directory ${row.cwd} no longer exists`)
+    expect(serverManager.acquire).not.toHaveBeenCalled()
+    expect(ledger.rows.get(row.id)!.state).toBe('idle')
+  })
+  // A target in ANOTHER directory (a sibling git worktree) is bound by the rules of the parent's
+  // directory AND its own; its judge counts the parent's directory and the user's additional
+  // directories as local — context only, never an allow path (ADR-033).
+  describe('the rules union and the judge context', () => {
+    const PARENT_DENY = 'Bash(rm *)'
+    const TARGET_ASK = 'Bash(npm publish:*)'
+    const localLine = /count as local\): (.*)/
+    const promptOf = (r: JudgeRequest): string => `${r.system}\n${r.user}`
+    /** The parent's settings (its gitignored local file among them) and the worktree's own. */
+    const rulesFor =
+      (parent: string, wt: string, additionalDirectories: string[] = []) =>
+      (cwd: string): MergedClaudeRules => {
+        if (cwd === parent) return userRules({ deny: [PARENT_DENY], additionalDirectories })
+        if (cwd === uiPath(realpathSync.native(wt))) return userRules({ ask: [TARGET_ASK] })
+        return userRules()
+      }
+
+    it('a deny rule only the parent has and an ask rule only the worktree has both bind the target', async () => {
+      const { parent, wt } = tree()
+      const { dispatcher, client } = makeHarness({ loadUserRules: rulesFor(parent, wt) })
+      await dispatcher.dispatch(
+        { engine: 'opencode', prompt: 'x', workdir: 'wt' },
+        makeCtx({ cwd: parent })
+      )
+      const rules = createdRules(client)
+      expect(rules).toContainEqual({ action: 'shell', resource: 'rm *', effect: 'deny' })
+      expect(rules).toContainEqual({ action: 'shell', resource: 'npm publish*', effect: 'ask' })
+    })
+
+    it('the user’s additional directories add nothing to the target’s ruleset', async () => {
+      const { parent, wt, granted } = tree()
+      const ruleset = async (additional: string[]): Promise<Permission_Rule[]> => {
+        const { dispatcher, client } = makeHarness({
+          loadUserRules: rulesFor(parent, wt, additional)
+        })
+        await dispatcher.dispatch(
+          { engine: 'opencode', prompt: 'x', workdir: 'wt' },
+          makeCtx({ cwd: parent })
+        )
+        return createdRules(client)
+      }
+      const withDirs = await ruleset([granted])
+      expect(withDirs).toEqual(await ruleset([]))
+      expect(
+        withDirs.filter((r) => r.action === 'external_directory' && r.effect === 'allow')
+      ).not.toContainEqual(
+        expect.objectContaining({ resource: expect.stringContaining('granted') })
+      )
+      expect(JSON.stringify(withDirs)).not.toContain('granted')
+    })
+
+    describe('the judge', () => {
+      /** An auto-mode target, one shell ask per command; the judge's requests come back. */
+      async function judged(withWorkdir: boolean, commands: (granted: string) => string[]) {
+        const { parent, wt, granted } = tree()
+        const judge = makeScriptedJudge()
+        const h = makeHarness({
+          loadEngineConfig: judgedConfig,
+          makeJudgeTransport: judge.make,
+          loadUserRules: rulesFor(parent, wt, [granted])
+        })
+        h.fake.next({ hold: true })
+        const running = h.dispatcher.dispatch(
+          { engine: 'opencode', prompt: 'work', ...(withWorkdir ? { workdir: 'wt' } : {}) },
+          makeCtx({ toolUseId: 'tu-1', autonomyMode: 'auto', cwd: parent })
+        )
+        await tick()
+        for (const [i, command] of commands(granted).entries()) {
+          h.fake.ask('oc-sess-1', {
+            id: `per_${i}`,
+            action: 'shell',
+            resources: [command],
+            callID: `call_${i}`,
+            input: { command }
+          })
+          await tick(6)
+        }
+        h.fake.finish('oc-sess-1')
+        await running
+        return { judge, client: h.client, parent, granted }
+      }
+
+      it('a worktree target’s judge counts the parent directory and the additional directory as local', async () => {
+        const { judge, parent, granted } = await judged(true, () => ['npm run build'])
+        expect(judge.requests).toHaveLength(1)
+        expect(localLine.exec(promptOf(judge.requests[0]))?.[1]).toBe(`${parent}, ${granted}`)
+      })
+
+      it('with no workdir the judge still gets the additional directories', async () => {
+        const { judge, granted } = await judged(false, () => ['npm run build'])
+        expect(localLine.exec(promptOf(judge.requests[0]))?.[1]).toBe(granted)
+      })
+
+      it('they are context only: a read-only command in an additional directory is still judged', async () => {
+        const { judge, client, granted } = await judged(true, (dir) => [
+          `cat "${dir.replaceAll('\\', '/')}/notes.txt"`,
+          'cat notes.txt'
+        ])
+        // The first goes to the judge; the second, read-only in the target's own directory, needs none.
+        expect(judge.requests).toHaveLength(1)
+        expect(promptOf(judge.requests[0])).toContain(`${granted.replaceAll('\\', '/')}/notes.txt`)
+        expect(client.replyPermission).toHaveBeenCalledWith('oc-sess-1', 'per_0', {
+          decision: 'once'
+        })
+        expect(client.replyPermission).toHaveBeenCalledWith('oc-sess-1', 'per_1', {
+          decision: 'once'
+        })
+      })
+    })
   })
 })

@@ -200,6 +200,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     getEngineModels: (engineId) => ipcRenderer.invoke('session:get-engine-models', engineId),
     judgeModelSupport: (engineId, values) =>
       ipcRenderer.invoke('automode:judge-model-support', engineId, values),
+    judgeRouteResting: (engineId, model, accountId) =>
+      ipcRenderer.invoke('automode:judge-route-resting', engineId, model, accountId),
     getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
     setOpencodeProviderDisabled: (providerId, disabled) =>
       ipcRenderer.invoke('session:set-opencode-provider-disabled', providerId, disabled),

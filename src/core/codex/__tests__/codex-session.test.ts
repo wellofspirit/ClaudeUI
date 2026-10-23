@@ -2803,7 +2803,8 @@ describe('Codex cross-engine dispatch', () => {
       properties: {
         engine: { type: 'string', enum: ['claude', 'opencode', 'pi'] },
         prompt: { type: 'string' },
-        model: { type: 'string' }
+        model: { type: 'string' },
+        workdir: { type: 'string' }
       },
       required: ['engine', 'prompt', 'description'],
       additionalProperties: false
@@ -2925,6 +2926,45 @@ describe('Codex cross-engine dispatch', () => {
       expect.objectContaining({ name: 'impl-e1', description: 'Review auth diff' }),
       expect.anything()
     )
+  })
+
+  it.each([
+    ['a directory', { workdir: '/isolated/wt' }, '/isolated/wt'],
+    ['a padded one, trimmed', { workdir: '  ../wt  ' }, '../wt'],
+    ['an empty one, absent', { workdir: '' }, undefined],
+    ['a blank one, absent', { workdir: '   ' }, undefined],
+    ['null, absent', { workdir: null }, undefined],
+    ['none, absent', {}, undefined]
+  ])(
+    'hands the dispatcher the workdir, and the approval card shows it: %s',
+    async (_label, extra, expected) => {
+      const f = fixture()
+      await f.session.run('hello')
+      const { result } = dispatchCall(f, { engine: 'pi', prompt: 'run the tests', ...extra })
+      const card = f.cards().at(-1)!
+      if (expected === undefined) expect(card.input).not.toHaveProperty('workdir')
+      else expect(card.input).toMatchObject({ workdir: expected })
+      f.session.resolveApproval(card.requestId, 'allow')
+      await result
+      const sent = dispatcher.dispatch.mock.calls.at(-1)![0]
+      if (expected === undefined) expect(sent).not.toHaveProperty('workdir')
+      else expect(sent).toMatchObject({ workdir: expected })
+    }
+  )
+
+  it('refuses a workdir that is not a string: nothing is launched and no card is raised', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    const cardsBefore = f.cards().length
+    const { result } = dispatchCall(f, { engine: 'pi', prompt: 'go', workdir: 7 })
+    await expect(result).resolves.toEqual({
+      contentItems: [
+        { type: 'inputText', text: 'dispatch_agent "workdir" must be a string (a directory path).' }
+      ],
+      success: false
+    })
+    expect(f.cards()).toHaveLength(cardsBefore)
+    expect(dispatcher.dispatch).not.toHaveBeenCalled()
   })
 
   it('maps the dispatch result onto the tool response, agent ref suffix included', async () => {

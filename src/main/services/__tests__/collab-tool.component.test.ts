@@ -57,6 +57,7 @@ import {
   DISPATCH_FOLLOW_UP_GUIDANCE,
   DISPATCH_NAME_PARAM,
   DISPATCH_SESSION_ID_REMOVED_TEXT,
+  DISPATCH_WORKDIR_PARAM,
   dispatchResultSuffix
 } from '../../../shared/dispatch-agent-description'
 
@@ -333,6 +334,38 @@ describe('createCollabServer', () => {
   // ADR-033 M4c — pi as a second dispatch target (engine enum widening)
   // ADR-033 slice H — codex as a third
   // -------------------------------------------------------------------------
+
+  it.each([
+    ['a directory', { workdir: '/proj/wt' }, '/proj/wt'],
+    ['a padded one, trimmed', { workdir: '  ../wt  ' }, '../wt'],
+    ['an empty one, absent', { workdir: '' }, undefined],
+    ['a blank one, absent', { workdir: '   ' }, undefined],
+    ['none, absent', {}, undefined]
+  ])('passes the workdir through to the DispatchRequest: %s', async (_label, extra, expected) => {
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'x', sessionId: 'oc-42' })
+    const server = createCollabServer(makeCtx())
+
+    await server.tools[0].handler(
+      { engine: 'opencode', prompt: 'go', description: 'Review auth diff', ...extra },
+      makeExtra()
+    )
+    const sent = dispatchSpy.mock.calls[0][0]
+    if (expected === undefined) expect(sent).not.toHaveProperty('workdir')
+    else expect(sent).toMatchObject({ workdir: expected })
+  })
+
+  it('takes an optional workdir string, worded by the shared description module', () => {
+    const schema = createCollabServer(makeCtx()).tools[0].inputSchema.workdir as unknown as {
+      description?: string
+      safeParse: (v: unknown) => { success: boolean }
+    }
+    expect(schema.description).toBe(DISPATCH_WORKDIR_PARAM)
+    expect(schema.safeParse(undefined).success).toBe(true)
+    expect(schema.safeParse('/proj/wt').success).toBe(true)
+    expect(schema.safeParse(7).success).toBe(false)
+  })
 
   it('takes an optional name and a required description, worded by the shared description module', () => {
     const { inputSchema } = createCollabServer(makeCtx()).tools[0]

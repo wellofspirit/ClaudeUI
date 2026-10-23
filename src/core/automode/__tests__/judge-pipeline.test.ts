@@ -59,6 +59,12 @@ function setup(over: Partial<JudgePipelineHooks> = {}, replies: Array<string | E
 
 const bash = { toolUseId: 'call-1', toolName: 'bash', input: { command: 'rm -rf build' } }
 
+/** What a `human` outcome says when the judge could not answer, ending in the call to action. */
+const unavailableReason = (why: string): string =>
+  `Auto-mode judge unavailable: ${why}. Review this call yourself.`
+const MODEL_GONE = unavailableReason('the configured judge model is no longer available')
+const MODE_LEFT = 'The permission mode changed while the judge ran. Review this call yourself.'
+
 beforeEach(() => {
   vi.clearAllMocks()
   mockReadOnlyGate.mockResolvedValue({ allow: false, reason: 'not-read-only' })
@@ -159,9 +165,12 @@ describe('runJudgePipeline', () => {
     expect(sendReview).not.toHaveBeenCalled()
   })
 
-  it('a transport failure is unavailable → human, warned with the cause, no review', async () => {
+  it('a transport failure is unavailable → human with the reason, warned with the cause, no review', async () => {
     const { hooks, sendReview } = setup({}, [new Error('HTTP 503')])
-    expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'human' })
+    expect(await runJudgePipeline(bash, hooks)).toEqual({
+      kind: 'human',
+      reason: unavailableReason('HTTP 503')
+    })
     expect(mockLogger.warn).toHaveBeenCalledWith(
       'TestSource',
       expect.stringMatching(/stage=error.*HTTP 503/)
@@ -169,13 +178,46 @@ describe('runJudgePipeline', () => {
     expect(sendReview).not.toHaveBeenCalled()
   })
 
-  it('a throw outside classify → human with the classify-failed warning', async () => {
+  it('the unavailable warning says the judge was unavailable, never BLOCK', async () => {
+    const { hooks } = setup({}, [new Error('HTTP 503')])
+    await runJudgePipeline(bash, hooks)
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      'TestSource',
+      'auto-mode judge unavailable (stage=error) bash — HTTP 503'
+    )
+    expect(mockLogger.warn.mock.calls.flat().join(' ')).not.toContain('BLOCK')
+  })
+
+  it('a 429 on the judge call: the reason keeps the route, status and reset time, not the body', async () => {
+    const body = JSON.stringify({
+      error: { type: 'usage_limit_reached', message: 'The usage limit has been reached', plan: 'x' }
+    })
+    const message = `ChatGPT · gpt-6-luna: HTTP 429 (resets at 2026-10-28T13:34:58.000Z): ${body}`
+    const { hooks } = setup({}, [new Error(message)])
+    const out = await runJudgePipeline(bash, hooks)
+    expect(out).toEqual({
+      kind: 'human',
+      reason:
+        'Auto-mode judge unavailable: ChatGPT · gpt-6-luna: HTTP 429 (resets at 2026-10-28T13:34:58.000Z). ' +
+        'Review this call yourself.'
+    })
+    // The full text still reaches the log for diagnosis.
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      'TestSource',
+      expect.stringContaining('usage_limit_reached')
+    )
+  })
+
+  it('a throw outside classify → human with the reason and the classify-failed warning', async () => {
     const { hooks } = setup({
       environment: async () => {
         throw new Error('boom')
       }
     })
-    expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'human' })
+    expect(await runJudgePipeline(bash, hooks)).toEqual({
+      kind: 'human',
+      reason: unavailableReason('boom')
+    })
     expect(mockLogger.warn).toHaveBeenCalledWith('TestSource', 'auto-mode classify failed: boom')
   })
 
@@ -209,7 +251,7 @@ describe('runJudgePipeline', () => {
       ctl.setMode('default')
       return '<block>no</block>'
     }
-    expect(await runJudgePipeline(bash, ctl.hooks)).toEqual({ kind: 'human' })
+    expect(await runJudgePipeline(bash, ctl.hooks)).toEqual({ kind: 'human', reason: MODE_LEFT })
     expect(mockLogger.info).toHaveBeenCalledWith(
       'TestSource',
       'auto-mode verdict discarded — permission mode changed to "default" while the judge ran'
@@ -251,9 +293,9 @@ describe('runJudgePipeline', () => {
     expect(sendReview).not.toHaveBeenCalled()
   })
 
-  it('judgeAvailable false → human with zero judge calls', async () => {
+  it('judgeAvailable false → human with the stale-model reason and zero judge calls', async () => {
     const { hooks, judge } = setup({ judgeAvailable: async () => false })
-    expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'human' })
+    expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'human', reason: MODEL_GONE })
     expect(judge).not.toHaveBeenCalled()
   })
 
@@ -311,7 +353,7 @@ describe('runJudgePipeline — staged input and settle checks (S4, opencode on t
     // Both stages answer null: no read-only input, and the judge reads action.input.
     const inputFor = vi.fn(async (_stage: 'read-only' | 'judge') => null)
     const { hooks } = setup({ inputFor, stillPending, judgeAvailable: () => false })
-    expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'human' })
+    expect(await runJudgePipeline(bash, hooks)).toEqual({ kind: 'human', reason: MODEL_GONE })
     expect(mockReadOnlyGate).not.toHaveBeenCalled()
     expect(stillPending).not.toHaveBeenCalled()
   })
@@ -471,7 +513,7 @@ describe('runJudgePipelineDetailed — the verdict detail the outcome drops (ADR
 
   it('tells a judge that could not answer apart from a block, and says why', async () => {
     const down = await runJudgePipelineDetailed(bash, setup({}, [new Error('HTTP 503')]).hooks)
-    expect(down.outcome).toEqual({ kind: 'human' })
+    expect(down.outcome).toEqual({ kind: 'human', reason: unavailableReason('HTTP 503') })
     expect(down.detail).toEqual({ kind: 'unavailable', cause: 'judge', error: 'HTTP 503' })
 
     const stale = await runJudgePipelineDetailed(bash, setup({ judgeAvailable: () => false }).hooks)
@@ -543,5 +585,302 @@ describe('runJudgePipelineDetailed — the verdict detail the outcome drops (ADR
     const plain = await runJudgePipeline(bash, setup({}, [...replies]).hooks)
     const detailed = await runJudgePipelineDetailed(bash, setup({}, [...replies]).hooks)
     expect(plain).toEqual(detailed.outcome)
+  })
+})
+
+describe('runJudgePipeline — fallback judge', () => {
+  const LABEL = 'OpenAI · gpt-4.1-mini'
+  const PRIMARY_DOWN = 'ChatGPT · gpt-6-luna: HTTP 429 (resets at 2026-10-28T13:34:58.000Z)'
+  const blockReply = '<block>yes</block><reason>wipes the build</reason>'
+
+  /** The primary scripted by `primary`, the fallback judge by `fallback`. */
+  function withFallback(
+    primary: Array<string | Error>,
+    fallback: Array<string | Error>,
+    over: Partial<JudgePipelineHooks> = {}
+  ) {
+    const ctl = setup(over, primary)
+    const fallbackJudge = vi.fn(async (_req: JudgeRequest): Promise<string> => {
+      const next = fallback.shift()
+      if (next instanceof Error) throw next
+      return next ?? '<block>no</block>'
+    })
+    const fallbackHook = vi.fn(() => ({ transport: fallbackJudge, label: LABEL }))
+    ctl.hooks.fallbackJudgeTransport = fallbackHook
+    return { ...ctl, fallbackJudge, fallbackHook }
+  }
+
+  it('primary unavailable → the fallback judges, and its allow is allowed like a primary one', async () => {
+    const { hooks, judge, fallbackJudge, sendReview } = withFallback(
+      [new Error(PRIMARY_DOWN)],
+      ['<block>no</block>']
+    )
+    const allow = vi.spyOn(hooks.denials, 'recordAllow')
+    const r = await runJudgePipelineDetailed(bash, hooks)
+
+    expect(r.outcome).toEqual({ kind: 'allow' })
+    expect(judge).toHaveBeenCalledTimes(1)
+    expect(fallbackJudge).toHaveBeenCalledTimes(1)
+    expect(allow).toHaveBeenCalledTimes(1)
+    expect(sendReview).toHaveBeenCalledWith('call-1', expect.objectContaining({ block: false }))
+    expect(r.detail).toMatchObject({
+      kind: 'verdict',
+      result: { block: false },
+      judgedBy: 'fallback'
+    })
+  })
+
+  it('logs the primary as unavailable, then the verdict line says judge=fallback <label>', async () => {
+    const { hooks } = withFallback([new Error(PRIMARY_DOWN)], ['<block>no</block>'])
+    await runJudgePipeline(bash, hooks)
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      'TestSource',
+      `auto-mode judge unavailable (stage=error) bash — ${PRIMARY_DOWN}`
+    )
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      'TestSource',
+      `auto-mode allow (stage=fast, judge=fallback ${LABEL}) bash`
+    )
+  })
+
+  it('primary unavailable → the fallback blocks → held exactly as a primary block would be', async () => {
+    // A block is confirmed by a second sample — of the FALLBACK, never mixed with the primary.
+    const { hooks, judge, fallbackJudge, sendReview } = withFallback(
+      [new Error(PRIMARY_DOWN)],
+      [blockReply, blockReply]
+    )
+    const block = vi.spyOn(hooks.denials, 'recordBlock')
+    const allow = vi.spyOn(hooks.denials, 'recordAllow')
+    const r = await runJudgePipelineDetailed(bash, hooks)
+
+    expect(r.outcome).toEqual({ kind: 'hold', reason: 'Auto mode blocked: wipes the build' })
+    expect(judge).toHaveBeenCalledTimes(1)
+    expect(fallbackJudge).toHaveBeenCalledTimes(2)
+    expect(block).toHaveBeenCalledTimes(1)
+    expect(allow).not.toHaveBeenCalled()
+    expect(sendReview).toHaveBeenCalledWith('call-1', expect.objectContaining({ block: true }))
+    expect(r.detail).toMatchObject({
+      kind: 'verdict',
+      result: { block: true },
+      judgedBy: 'fallback'
+    })
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      'TestSource',
+      expect.stringContaining(`judge=fallback ${LABEL}`)
+    )
+  })
+
+  it("a fallback's block counts toward the denial caps like any other", async () => {
+    const { hooks } = withFallback(
+      [new Error('HTTP 503'), new Error('HTTP 503'), new Error('HTTP 503')],
+      Array(6).fill('<block>yes</block>')
+    )
+    await runJudgePipeline(bash, hooks)
+    await runJudgePipeline(bash, hooks)
+    const third = await runJudgePipelineDetailed(bash, hooks)
+    expect(third.outcome).toEqual({
+      kind: 'human',
+      reason: 'Auto mode blocked 3 actions in a row — asking you instead.'
+    })
+    expect(third.detail).toMatchObject({ kind: 'verdict', judgedBy: 'fallback' })
+  })
+
+  it('the whole classification is re-run on the fallback: both stages, identical input', async () => {
+    const { hooks, judge, fallbackJudge } = withFallback(
+      ['<severity>90</severity>', new Error('HTTP 503')],
+      ['<severity>90</severity>', '<block>no</block>'],
+      { twoStageMode: () => 'both' }
+    )
+    const benign = { toolUseId: 'call-2', toolName: 'bash', input: { command: 'npm test' } }
+    expect(await runJudgePipeline(benign, hooks)).toEqual({ kind: 'allow' })
+
+    // The primary got as far as stage 2; the fallback starts over at stage 1.
+    expect(judge.mock.calls.map(([req]) => req.stage)).toEqual(['fast', 'thinking'])
+    expect(fallbackJudge.mock.calls.map(([req]) => req.stage)).toEqual(['fast', 'thinking'])
+    expect(fallbackJudge.mock.calls[0][0].system).toBe(judge.mock.calls[0][0].system)
+    expect(fallbackJudge.mock.calls[0][0].user).toBe(judge.mock.calls[0][0].user)
+  })
+
+  it('both unavailable → the human, with both causes on the card and in the detail', async () => {
+    const { hooks, sendReview } = withFallback([new Error(PRIMARY_DOWN)], [new Error('HTTP 503')])
+    const r = await runJudgePipelineDetailed(bash, hooks)
+
+    const why = `${PRIMARY_DOWN}; fallback ${LABEL}: HTTP 503`
+    expect(r.outcome).toEqual({
+      kind: 'human',
+      reason: `Auto-mode judge unavailable: ${why}. Review this call yourself.`
+    })
+    expect(r.detail).toEqual({ kind: 'unavailable', cause: 'judge', error: why })
+    expect(sendReview).not.toHaveBeenCalled()
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      'TestSource',
+      `auto-mode judge unavailable (stage=error, judge=fallback ${LABEL}) bash — HTTP 503`
+    )
+  })
+
+  it('both causes are the short clauses, not the response bodies', async () => {
+    const body = JSON.stringify({ error: { type: 'usage_limit_reached' } })
+    const { hooks } = withFallback(
+      [new Error(`${PRIMARY_DOWN}: ${body}`)],
+      [new Error(`${LABEL}: HTTP 500: {"error":"boom"}`)]
+    )
+    expect(await runJudgePipeline(bash, hooks)).toEqual({
+      kind: 'human',
+      reason:
+        `Auto-mode judge unavailable: ${PRIMARY_DOWN}; fallback ${LABEL}: ${LABEL}: HTTP 500. ` +
+        'Review this call yourself.'
+    })
+  })
+
+  it('no fallback hook → today: the human with the primary cause, the hook is never needed', async () => {
+    const { hooks, judge } = setup({}, [new Error('HTTP 503')])
+    expect(hooks.fallbackJudgeTransport).toBeUndefined()
+    expect(await runJudgePipelineDetailed(bash, hooks)).toEqual({
+      outcome: { kind: 'human', reason: unavailableReason('HTTP 503') },
+      detail: { kind: 'unavailable', cause: 'judge', error: 'HTTP 503' }
+    })
+    expect(judge).toHaveBeenCalledTimes(1)
+  })
+
+  it('a hook that yields no fallback (none configured) behaves as no hook', async () => {
+    const { hooks } = setup({ fallbackJudgeTransport: () => undefined }, [new Error('HTTP 503')])
+    expect(await runJudgePipelineDetailed(bash, hooks)).toEqual({
+      outcome: { kind: 'human', reason: unavailableReason('HTTP 503') },
+      detail: { kind: 'unavailable', cause: 'judge', error: 'HTTP 503' }
+    })
+  })
+
+  it('a hook that throws is no fallback: the human, with the primary cause, and a warning', async () => {
+    const { hooks } = setup(
+      {
+        fallbackJudgeTransport: () => {
+          throw new Error('bad config')
+        }
+      },
+      [new Error('HTTP 503')]
+    )
+    expect(await runJudgePipeline(bash, hooks)).toEqual({
+      kind: 'human',
+      reason: unavailableReason('HTTP 503')
+    })
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      'TestSource',
+      'auto-mode fallback judge not available: bad config'
+    )
+  })
+
+  it('a primary that answers never touches the fallback', async () => {
+    const { hooks, fallbackHook, fallbackJudge } = withFallback(['<block>no</block>'], [])
+    const r = await runJudgePipelineDetailed(bash, hooks)
+    expect(r.outcome).toEqual({ kind: 'allow' })
+    expect(r.detail).toEqual({
+      kind: 'verdict',
+      result: expect.objectContaining({ block: false })
+    })
+    expect(fallbackHook).not.toHaveBeenCalled()
+    expect(fallbackJudge).not.toHaveBeenCalled()
+  })
+
+  it('a primary block is not a failure: no fallback second opinion', async () => {
+    const { hooks, fallbackHook } = withFallback([blockReply, blockReply], [])
+    expect((await runJudgePipeline(bash, hooks)).kind).toBe('hold')
+    expect(fallbackHook).not.toHaveBeenCalled()
+  })
+
+  it('an unreadable primary reply is a block, not unavailable: no fallback', async () => {
+    const { hooks, fallbackHook } = withFallback(['no verdict here'], [])
+    expect((await runJudgePipeline(bash, hooks)).kind).toBe('hold')
+    expect(fallbackHook).not.toHaveBeenCalled()
+  })
+
+  it('a mode change while the primary ran → the human, and the fallback is not tried', async () => {
+    const ctl = withFallback([], [])
+    ctl.hooks.judgeTransport = () => async () => {
+      ctl.setMode('default')
+      throw new Error('HTTP 503')
+    }
+    expect(await runJudgePipeline(bash, ctl.hooks)).toEqual({ kind: 'human', reason: MODE_LEFT })
+    expect(ctl.fallbackHook).not.toHaveBeenCalled()
+    expect(ctl.fallbackJudge).not.toHaveBeenCalled()
+  })
+
+  it('a mode change while the fallback ran → its verdict is discarded too', async () => {
+    const ctl = withFallback([new Error('HTTP 503')], [])
+    ctl.fallbackHook.mockReturnValue({
+      label: LABEL,
+      transport: vi.fn(async () => {
+        ctl.setMode('default')
+        return '<block>no</block>'
+      })
+    })
+    const r = await runJudgePipelineDetailed(bash, ctl.hooks)
+    expect(r.outcome).toEqual({ kind: 'human', reason: MODE_LEFT })
+    expect(r.detail).toEqual({ kind: 'unavailable', cause: 'mode' })
+    expect(ctl.sendReview).not.toHaveBeenCalled()
+  })
+
+  it('settled while the primary ran → settled, and the fallback is not tried', async () => {
+    let pending = true
+    const ctl = withFallback([], [], { stillPending: () => pending })
+    ctl.hooks.judgeTransport = () => async () => {
+      pending = false
+      throw new Error('HTTP 503')
+    }
+    expect(await runJudgePipeline(bash, ctl.hooks)).toEqual({ kind: 'settled' })
+    expect(ctl.fallbackHook).not.toHaveBeenCalled()
+  })
+
+  it('settled while the fallback ran → settled, no review', async () => {
+    let pending = true
+    const ctl = withFallback([new Error('HTTP 503')], [], { stillPending: () => pending })
+    ctl.fallbackHook.mockReturnValue({
+      label: LABEL,
+      transport: vi.fn(async () => {
+        pending = false
+        return '<block>no</block>'
+      })
+    })
+    expect(await runJudgePipeline(bash, ctl.hooks)).toEqual({ kind: 'settled' })
+    expect(ctl.sendReview).not.toHaveBeenCalled()
+  })
+
+  it('the configured model is gone → the fallback judges instead, and the primary is never built', async () => {
+    const judgeTransport = vi.fn()
+    const { hooks, fallbackJudge, sendReview } = withFallback([], ['<block>no</block>'], {
+      judgeAvailable: () => false,
+      judgeTransport
+    })
+    const r = await runJudgePipelineDetailed(bash, hooks)
+
+    expect(r.outcome).toEqual({ kind: 'allow' })
+    expect(judgeTransport).not.toHaveBeenCalled()
+    expect(fallbackJudge).toHaveBeenCalledTimes(1)
+    expect(sendReview).toHaveBeenCalledWith('call-1', expect.objectContaining({ block: false }))
+    expect(r.detail).toMatchObject({ kind: 'verdict', judgedBy: 'fallback' })
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      'TestSource',
+      `auto-mode allow (stage=fast, judge=fallback ${LABEL}) bash`
+    )
+  })
+
+  it('the configured model is gone and the fallback fails too → the human, with both causes', async () => {
+    const { hooks } = withFallback([], [new Error('HTTP 503')], { judgeAvailable: () => false })
+    const r = await runJudgePipelineDetailed(bash, hooks)
+
+    const why = `the configured judge model is no longer available; fallback ${LABEL}: HTTP 503`
+    expect(r.outcome).toEqual({ kind: 'human', reason: unavailableReason(why) })
+    expect(r.detail).toEqual({ kind: 'unavailable', cause: 'model', error: why })
+  })
+
+  it('the configured model is gone, no fallback → today: the stale-model human, zero judge calls', async () => {
+    const { hooks, judge } = setup({
+      judgeAvailable: () => false,
+      fallbackJudgeTransport: () => undefined
+    })
+    const r = await runJudgePipelineDetailed(bash, hooks)
+    expect(r.outcome).toEqual({ kind: 'human', reason: MODEL_GONE })
+    expect(r.detail).toEqual({ kind: 'unavailable', cause: 'model' })
+    expect(judge).not.toHaveBeenCalled()
   })
 })

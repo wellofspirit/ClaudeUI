@@ -59,6 +59,61 @@ describe('findModelReferences', () => {
     )
   })
 
+  it('finds an auto-mode FALLBACK judge model, apart from the judge model', () => {
+    const refs = findModelReferences(
+      {
+        engines: {
+          pi: {
+            autoMode: {
+              judgeModel: 'anthropic/claude-haiku-4-5',
+              fallbackJudgeModel: 'openai/gpt-5.6-luna'
+            }
+          }
+        }
+      },
+      GONE
+    )
+    expect(refs).toEqual([
+      {
+        model: 'openai/gpt-5.6-luna',
+        label: 'the pi auto-mode fallback judge model',
+        where: 'Fallback judge for pi — Sessions & autonomy › Auto-mode judge › pi'
+      }
+    ])
+    expect(formatModelReferences(refs)).toBe(
+      '"openai/gpt-5.6-luna" is the pi auto-mode fallback judge model — change that first.'
+    )
+  })
+
+  it('reports the judge and the fallback judge separately when both are removed', () => {
+    const refs = findModelReferences(
+      {
+        engines: {
+          opencode: {
+            autoMode: { judgeModel: 'openai/gpt-5.5', fallbackJudgeModel: 'openai/gpt-5.6-luna' }
+          }
+        }
+      },
+      GONE
+    )
+    expect(refs.map((r) => r.label)).toEqual([
+      'the opencode auto-mode judge model',
+      'the opencode auto-mode fallback judge model'
+    ])
+  })
+
+  it('scopes the fallback judge to its engine like the judge', () => {
+    const sources = {
+      engines: {
+        pi: { autoMode: { fallbackJudgeModel: 'openai/gpt-5.5' } },
+        opencode: { autoMode: { fallbackJudgeModel: 'openai/gpt-5.6-luna' } }
+      }
+    }
+    expect(findModelReferences(sources, GONE, 'opencode').map((r) => r.model)).toEqual([
+      'openai/gpt-5.6-luna'
+    ])
+  })
+
   it('finds dispatch default + allowed models, INCLUDING on another engine', () => {
     // Cross-engine dispatch: claude's config legitimately names opencode models,
     // so a guard that only looked at the opencode engine would miss it.

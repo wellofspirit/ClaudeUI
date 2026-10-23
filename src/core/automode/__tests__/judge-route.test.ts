@@ -12,7 +12,9 @@ import type { PiModel } from '../../pi/pi-protocol'
 import { apiKeyAccountKey } from '../../services/account-key-hash'
 import { chatgptProvider } from '../../shared-providers/SharedProviderRepository'
 import { buildChatBody } from '../judge-http/wire-chat'
+import { judgeRouteKey } from '../judge-http/transport'
 import type { JudgeRouteResult, ResolvedJudgeRoute } from '../judge-http/types'
+import { clearCooldowns, coolingUntil, noteRateLimited } from '../judge-cooldown'
 import {
   describeJudgeModels,
   describeJudgeRoute,
@@ -39,7 +41,25 @@ const FRESH_TOKEN: CodexInjectionToken = {
   ...TOKEN,
   accessToken: fakeJwt({ chatgpt_account_id: 'ws-test', fresh: true })
 }
-const SECRETS = [FAKE_KEY, OTHER_KEY, TOKEN.accessToken, FRESH_TOKEN.accessToken]
+/** A second signed-in ChatGPT account (the fallback judge's), with its own refreshed token. */
+const BIZ_TOKEN: CodexInjectionToken = {
+  accessToken: fakeJwt({ chatgpt_account_id: 'ws-biz' }),
+  chatgptAccountId: 'ws-biz',
+  chatgptPlanType: 'business',
+  vaultAccountId: 'vault-acct-biz'
+}
+const BIZ_FRESH_TOKEN: CodexInjectionToken = {
+  ...BIZ_TOKEN,
+  accessToken: fakeJwt({ chatgpt_account_id: 'ws-biz', fresh: true })
+}
+const SECRETS = [
+  FAKE_KEY,
+  OTHER_KEY,
+  TOKEN.accessToken,
+  FRESH_TOKEN.accessToken,
+  BIZ_TOKEN.accessToken,
+  BIZ_FRESH_TOKEN.accessToken
+]
 
 function catalogDef(
   id: string,
@@ -96,6 +116,11 @@ function fakeDeps(
     keys?: Record<string, string>
     token?: CodexInjectionToken | null
     freshToken?: CodexInjectionToken | null
+    /** Named vault accounts' tokens, as `injectionTokenFor(accountId)` answers; absent id → null (gone). */
+    accounts?: Record<
+      string,
+      { token: CodexInjectionToken | null; fresh?: CodexInjectionToken | null }
+    >
     opencode?: Record<string, OpencodeCatalogModel[]>
     pi?: PiModel[]
   } = {}
@@ -112,7 +137,11 @@ function fakeDeps(
   return {
     listDefinitions: vi.fn(() => opts.definitions ?? [chatgptProvider()]),
     loadApiKey: vi.fn(async (id: string) => opts.keys?.[id] ?? null),
-    chatgptToken: vi.fn(async (force: boolean) => (force ? fresh : token)),
+    chatgptToken: vi.fn(async (force: boolean, accountId?: string) => {
+      if (accountId === undefined) return force ? fresh : token
+      const named = opts.accounts?.[accountId]
+      return named ? (force ? (named.fresh ?? null) : named.token) : null
+    }),
     // The token-free twin of `chatgptToken(false)`: signed in iff it would
     // have found a token.
     chatgptSignedIn: vi.fn(async () => token !== null),
@@ -175,7 +204,8 @@ describe('resolveJudgeRoute — ChatGPT subscription', () => {
     })
     expect(route.maxOutputTokens).toBeUndefined()
     expect(deps.chatgptToken).toHaveBeenCalledTimes(1)
-    expect(deps.chatgptToken).toHaveBeenCalledWith(false)
+    // No account named → the active one.
+    expect(deps.chatgptToken).toHaveBeenCalledWith(false, undefined)
   })
 
   it('pi openai-codex/* → ChatGPT too (the native-id mapping)', async () => {
@@ -210,7 +240,7 @@ describe('resolveJudgeRoute — ChatGPT subscription', () => {
     const deps = fakeDeps()
     const route = routeOf(await resolveJudgeRoute('opencode', 'openai/gpt-5.4', deps))
     const fresh = await route.reauthorize!()
-    expect(deps.chatgptToken).toHaveBeenLastCalledWith(true)
+    expect(deps.chatgptToken).toHaveBeenLastCalledWith(true, undefined)
     expect(fresh).not.toBeNull()
     expect(fresh!.headers.Authorization).toBe(`Bearer ${FRESH_TOKEN.accessToken}`)
     expect(fresh!.url).toBe(route.url)
@@ -244,6 +274,87 @@ describe('resolveJudgeRoute — ChatGPT subscription', () => {
       await resolveJudgeRoute('opencode', 'openai/gpt-5.4', fakeDeps({ definitions: [chatgpt] })),
       'no-shared-provider'
     )
+  })
+})
+
+describe('resolveJudgeRoute — a named ChatGPT account (the fallback judge)', () => {
+  const BIZ = 'vault-acct-biz'
+  const accounts = { [BIZ]: { token: BIZ_TOKEN, fresh: BIZ_FRESH_TOKEN } }
+  const named = { chatgptAccountId: BIZ }
+
+  it('pays with the named account, not the active one', async () => {
+    const deps = fakeDeps({ accounts })
+    const result = await resolveJudgeRoute('opencode', 'openai/gpt-5.4', deps, named)
+    const route = routeOf(result)
+    expectNoSecrets(result)
+    expect(deps.chatgptToken).toHaveBeenCalledTimes(1)
+    expect(deps.chatgptToken).toHaveBeenCalledWith(false, BIZ)
+    expect(route.headers.Authorization).toBe(`Bearer ${BIZ_TOKEN.accessToken}`)
+    expect(route.headers['ChatGPT-Account-Id']).toBe('ws-biz')
+    // Usage rows and the cooldown key name the account that pays.
+    expect(deps.chatgptIdentity).toHaveBeenCalledWith(BIZ)
+    expect(route.account).toMatchObject({
+      accountId: BIZ,
+      accountKey: `chatgpt:ws-test:user-${BIZ}`
+    })
+  })
+
+  it('an account that is gone or signed out is refused, never swapped for the active one', async () => {
+    const deps = fakeDeps({ accounts: { [BIZ]: { token: null } } })
+    const signedOut = await resolveJudgeRoute('opencode', 'openai/gpt-5.4', deps, named)
+    expect(expectUnavailable(signedOut, 'chatgpt-unavailable')).toBe(
+      "The fallback ChatGPT account is not signed in (or was removed, or has no workspace), so ClaudeUI can't call it for the judge. Sign it in under Settings › Models & providers, or pick another fallback account."
+    )
+    const gone = await resolveJudgeRoute('pi', 'openai-codex/gpt-5.4', deps, {
+      chatgptAccountId: 'removed-account'
+    })
+    expectUnavailable(gone, 'chatgpt-unavailable')
+    // The active account's token was never asked for.
+    expect(deps.chatgptToken).not.toHaveBeenCalledWith(expect.anything(), undefined)
+  })
+
+  it('reauthorize refreshes the SAME account', async () => {
+    const deps = fakeDeps({ accounts })
+    const route = routeOf(await resolveJudgeRoute('opencode', 'openai/gpt-5.4', deps, named))
+    const fresh = await route.reauthorize!()
+    expect(deps.chatgptToken).toHaveBeenLastCalledWith(true, BIZ)
+    expect(fresh!.headers.Authorization).toBe(`Bearer ${BIZ_FRESH_TOKEN.accessToken}`)
+    expect(fresh!.account).toEqual(route.account)
+    // A refresh that came back with the refused token (or none) is no retry.
+    const stale = fakeDeps({ accounts: { [BIZ]: { token: BIZ_TOKEN, fresh: BIZ_TOKEN } } })
+    const staleRoute = routeOf(await resolveJudgeRoute('opencode', 'openai/gpt-5.4', stale, named))
+    expect(await staleRoute.reauthorize!()).toBeNull()
+  })
+
+  it('the same model on two accounts has two cooldown keys: one resting leaves the other free', async () => {
+    clearCooldowns()
+    try {
+      const deps = fakeDeps({ accounts })
+      const active = routeOf(await resolveJudgeRoute('opencode', 'openai/gpt-5.4', deps))
+      const second = routeOf(await resolveJudgeRoute('opencode', 'openai/gpt-5.4', deps, named))
+      expect(active.label).toBe(second.label)
+      expect(judgeRouteKey(active)).not.toBe(judgeRouteKey(second))
+
+      const now = Date.now()
+      noteRateLimited(judgeRouteKey(active), now + 60_000, now)
+      expect(coolingUntil(judgeRouteKey(active), now)).toBe(now + 60_000)
+      expect(coolingUntil(judgeRouteKey(second), now)).toBeUndefined()
+    } finally {
+      clearCooldowns()
+    }
+  })
+
+  it('a route that is not ChatGPT ignores the account', async () => {
+    const deps = fakeDeps({
+      definitions: [catalogDef('openrouter')],
+      keys: { openrouter: FAKE_KEY },
+      accounts
+    })
+    const route = routeOf(
+      await resolveJudgeRoute('opencode', 'openrouter/z-ai/glm-4.6', deps, named)
+    )
+    expect(route.kind).toBe('openrouter')
+    expect(deps.chatgptToken).not.toHaveBeenCalled()
   })
 })
 
@@ -764,7 +875,12 @@ describe('describeJudgeRoute — the same decision as resolveJudgeRoute, without
     }
     // Never a token, not even for ChatGPT, and nothing but the verdict comes back.
     expect(describeDeps.chatgptToken).not.toHaveBeenCalled()
-    expect(Object.keys(described).sort()).toEqual(described.ok ? ['ok'] : ['code', 'ok', 'reason'])
+    // The verdict (and the ChatGPT marker the picker reads), nothing else.
+    expect(
+      Object.keys(described)
+        .filter((key) => key !== 'chatgpt')
+        .sort()
+    ).toEqual(described.ok ? ['ok'] : ['code', 'ok', 'reason'])
     const text = JSON.stringify(described)
     for (const secret of SECRETS) expect(text).not.toContain(secret)
   })
@@ -797,6 +913,31 @@ describe('describeJudgeRoute — the same decision as resolveJudgeRoute, without
 })
 
 describe('describeJudgeModels — the picker batch', () => {
+  it('marks the values that route through ChatGPT, signed in or not, and no others', async () => {
+    const definitions = [chatgptProvider(), catalogDef('openrouter')]
+    const keys = { openrouter: FAKE_KEY }
+    const values = ['openai/gpt-5.4', 'openrouter/z-ai/glm-4.6', 'github-copilot/gpt-4.1']
+
+    const signedIn = await describeJudgeModels('opencode', values, fakeDeps({ definitions, keys }))
+    expect(signedIn['openai/gpt-5.4']).toEqual({ ok: true, chatgpt: true })
+    expect(signedIn['openrouter/z-ai/glm-4.6']).toEqual({ ok: true })
+    expect(signedIn['github-copilot/gpt-4.1']).toMatchObject({ ok: false })
+    expect(signedIn['github-copilot/gpt-4.1']).not.toHaveProperty('chatgpt')
+
+    // Signed out of the ACTIVE account: still a ChatGPT model, so a picker can offer another.
+    const signedOut = await describeJudgeModels(
+      'opencode',
+      values,
+      fakeDeps({ definitions, keys, token: null })
+    )
+    expect(signedOut['openai/gpt-5.4']).toEqual({
+      ok: false,
+      reason: expect.stringContaining('ChatGPT isn'),
+      chatgpt: true
+    })
+    expect(signedOut['openrouter/z-ai/glm-4.6']).toEqual({ ok: true })
+  })
+
   it("answers every value, with the resolver's reason for a refusal", async () => {
     const deps = fakeDeps({
       definitions: [chatgptProvider(), catalogDef('openrouter')],
@@ -807,7 +948,7 @@ describe('describeJudgeModels — the picker batch', () => {
       ['openai/gpt-5.4', 'openrouter/z-ai/glm-4.6', 'github-copilot/gpt-4.1'],
       deps
     )
-    expect(out['openai/gpt-5.4']).toEqual({ ok: true })
+    expect(out['openai/gpt-5.4']).toEqual({ ok: true, chatgpt: true })
     expect(out['openrouter/z-ai/glm-4.6']).toEqual({ ok: true })
     expect(out['github-copilot/gpt-4.1']).toEqual({
       ok: false,
