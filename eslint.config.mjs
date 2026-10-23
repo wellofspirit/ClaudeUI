@@ -120,7 +120,11 @@ export default defineConfig(
       // `no-render-return-value` → `dom-no-render-return-value`,
       // `no-unknown-property` → `dom-no-unknown-property`,
       // `jsx-no-target-blank` → `dom-no-unsafe-target-blank`, and
-      // `no-deprecated` is superseded by the specific rules below.
+      // `no-deprecated` is superseded by the specific rules below. No
+      // replacement needed: `prop-types`, `jsx-no-duplicate-props`,
+      // `jsx-no-undef`, `jsx-uses-vars`, `no-string-refs`, `no-is-mounted` and
+      // `require-render-return` (TypeScript rejects or covers each);
+      // `no-unescaped-entities` is dropped (typography only).
       '@eslint-react/no-missing-key': 'error',
       '@eslint-react/no-missing-component-display-name': 'error',
       '@eslint-react/jsx-no-comment-textnodes': 'error',
