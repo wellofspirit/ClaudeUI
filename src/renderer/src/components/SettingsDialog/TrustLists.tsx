@@ -27,6 +27,8 @@
  * Beside it, the ADR-091 part 6 hold window: how long a judge block waits on
  * a Keep blocked / Approve anyway card before it stands. No hold (0) is the
  * default and the absent key; a hand-edited value off the menu still shows.
+ * Then the judge-reply capture switch (diagnostics): off by default and stored
+ * only as `captureJudgeReplies: true`.
  *
  * An emptied list is saved as an ABSENT key, never `[]`: the sessions read the
  * lists behind `?.length`, so the two are indistinguishable downstream and a
@@ -134,6 +136,11 @@ const BLOCK_HOLD_OPTIONS = [
   { value: '300', label: '5 min' }
 ]
 
+/** The judge-reply capture switch's copy: what it records, where, who can see it, how long. */
+const CAPTURE_JUDGE_REPLIES_LABEL = 'Record judge replies for diagnostics'
+const CAPTURE_JUDGE_REPLIES_DESCRIPTION =
+  'Saves what the auto-mode judge was asked and what it answered for every judge call in opencode and pi sessions and dispatched agents (not Claude Code sessions, which use their own judge), to ~/.claude/ui/logs/judge/ (one file per day, kept 14 days). The files contain excerpts of the transcript the judge saw and stay on this machine. Applies to the next judge call.'
+
 /** Shown when a save is rejected; the section has already reloaded the file. */
 const SAVE_ERROR = "Couldn't save that change — showing what is saved."
 
@@ -207,6 +214,13 @@ export function TrustListsSection(): React.JSX.Element {
     save(next)
   }
 
+  const setCaptureJudgeReplies = (on: boolean): void => {
+    const next: SharedAutoModeConfig = { ...cfg }
+    if (on) next.captureJudgeReplies = true
+    else delete next.captureJudgeReplies
+    save(next)
+  }
+
   const holdSeconds = typeof cfg.blockHoldSeconds === 'number' ? cfg.blockHoldSeconds : 0
   const setBlockHold = (value: string): void => {
     const next: SharedAutoModeConfig = { ...cfg }
@@ -238,6 +252,13 @@ export function TrustListsSection(): React.JSX.Element {
           onChange={setBlockHold}
         />
       </SettingRow>
+      <SettingsToggle
+        testid="TrustListsSection.captureJudgeReplies"
+        label={CAPTURE_JUDGE_REPLIES_LABEL}
+        description={CAPTURE_JUDGE_REPLIES_DESCRIPTION}
+        checked={cfg.captureJudgeReplies === true}
+        onChange={setCaptureJudgeReplies}
+      />
       {TRUST_LISTS.map((f) => (
         <SandboxListSetting
           key={f.key}

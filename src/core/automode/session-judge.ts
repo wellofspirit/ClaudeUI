@@ -13,6 +13,7 @@ import { engineMeta } from '../../shared/engine-meta'
 import { hostAppVersion } from '../host'
 import type { JudgeTransport } from './classifier'
 import { activeChatgptAccountId, chatgptAccountPlan } from './judge-accounts'
+import { judgeCaptureEnabled, writeJudgeCapture } from './judge-capture'
 import { coolingUntil, noteRateLimited } from './judge-cooldown'
 import {
   JudgeRouteUnavailableError,
@@ -75,6 +76,15 @@ export function makeSessionJudgeTransport(opts: SessionJudgeOptions): JudgeTrans
         accountKey: route.account.accountKey,
         accountLabel: route.account.accountLabel,
         billingType: route.account.billingType
+      }),
+    // Judge-reply capture (diagnostics): the switch is read at the start of each call.
+    shouldCapture: judgeCaptureEnabled,
+    onCall: (call) =>
+      writeJudgeCapture({
+        ...call,
+        engine: opts.engine,
+        routingId: opts.routingId,
+        sessionId: opts.sessionId()
       }),
     userAgent: `ClaudeUI/${hostAppVersion()}`
   })

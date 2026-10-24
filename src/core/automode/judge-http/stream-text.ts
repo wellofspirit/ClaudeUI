@@ -36,10 +36,12 @@ export class JudgeTextAccumulator {
   private drained = 0
   private readonly stops: string[]
   private readonly maxChars: number
+  private readonly onDelta: ((text: string) => void) | undefined
 
-  constructor(opts: Pick<JudgeStreamOptions, 'stopSequences' | 'maxChars'>) {
+  constructor(opts: Pick<JudgeStreamOptions, 'stopSequences' | 'maxChars' | 'onDelta'>) {
     this.stops = (opts.stopSequences ?? []).filter((s) => s.length > 0)
     this.maxChars = opts.maxChars
+    this.onDelta = opts.onDelta
   }
 
   /**
@@ -52,6 +54,8 @@ export class JudgeTextAccumulator {
    * @throws JudgeWireError when the kept text exceeds the budget.
    */
   push(delta: string): boolean {
+    // The capture tap sees EVERY delta, ahead of the stop and budget logic below.
+    this.onDelta?.(delta)
     if (this.stopped) {
       this.drained += delta.length
       return this.drained <= this.maxChars

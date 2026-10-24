@@ -308,7 +308,8 @@ const JUDGE_GUIDANCE_KEYS = ['judgeAllow', 'judgeBlock'] as const
  * The shape is narrow on purpose: five OPTIONAL string arrays, each entry a
  * non-empty trimmed string, one optional boolean (`readOnlyBypass`, ADR-084's
  * opt-out), one optional finite number (`blockHoldSeconds`, ADR-091 part 6,
- * clamped by the service), and no other keys. An empty list is expressed by
+ * clamped by the service), one optional boolean (`captureJudgeReplies`, the judge-reply
+ * capture switch), and no other keys. An empty list is expressed by
  * omitting the key (see {@link SharedAutoModeConfig}) — `[]` is accepted from a
  * caller and normalised away by the service, so an older client cannot create a
  * second encoding of "nothing is trusted".
@@ -333,7 +334,12 @@ function assertSharedAutoModeConfig(value: unknown): asserts value is SharedAuto
   }
   const lists = new Set<string>([...SHARED_TRUST_KEYS, ...JUDGE_GUIDANCE_KEYS])
   for (const key of Object.keys(value)) {
-    if (!lists.has(key) && key !== 'readOnlyBypass' && key !== 'blockHoldSeconds') {
+    if (
+      !lists.has(key) &&
+      key !== 'readOnlyBypass' &&
+      key !== 'blockHoldSeconds' &&
+      key !== 'captureJudgeReplies'
+    ) {
       throw new Error(`Invalid shared auto-mode config: unknown key "${key}"`)
     }
   }
@@ -341,6 +347,10 @@ function assertSharedAutoModeConfig(value: unknown): asserts value is SharedAuto
   // ADR-084 §1's opt-out: a boolean or nothing.
   if (record.readOnlyBypass !== undefined && typeof record.readOnlyBypass !== 'boolean') {
     throw new Error('Invalid shared auto-mode config: "readOnlyBypass" must be a boolean')
+  }
+  // The judge-reply capture switch: a boolean or nothing.
+  if (record.captureJudgeReplies !== undefined && typeof record.captureJudgeReplies !== 'boolean') {
+    throw new Error('Invalid shared auto-mode config: "captureJudgeReplies" must be a boolean')
   }
   // ADR-091 part 6's hold window: a number or nothing. The service clamps it
   // to whole seconds in [0, 600]; a string or NaN never reaches the file.

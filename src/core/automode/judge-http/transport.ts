@@ -24,7 +24,9 @@ import { readSseFrames } from './sse'
 import { buildChatBody, readChatStream } from './wire-chat'
 import { buildResponsesBody, readResponsesStream } from './wire-responses'
 import {
+  JUDGE_CAPTURE_REASONING_MAX_CHARS,
   JudgeWireError,
+  type JudgeCallCapture,
   type JudgeRouteResult,
   type JudgeRouteUnavailableCode,
   type JudgeUsageSample,
@@ -40,6 +42,33 @@ export interface HttpJudgeTransportOptions {
   fetchImpl?: typeof fetch
   /** Default 'ClaudeUI'. A route header of the same name wins. */
   userAgent?: string
+  /**
+   * Judge-reply capture (diagnostics). Read once at the start of each call: false/absent (or
+   * no {@link onCall}) means nothing is collected and the call runs exactly as without capture.
+   */
+  shouldCapture?: () => boolean
+  /**
+   * Called once per capturing call that reached `fetch` — success, non-2xx (the final attempt),
+   * wire error or abort — never for a call whose route did not resolve. A throw is swallowed.
+   * It must not block: the verdict never waits on it.
+   */
+  onCall?: (record: JudgeCallCapture) => void
+}
+
+/** What one capturing call collects on the way; turned into a {@link JudgeCallCapture} at its end. */
+interface CallTrace {
+  startedAt: number
+  /** The route of the latest attempt (a re-authorized 401 retry replaces it). */
+  route: ResolvedJudgeRoute | null
+  /** A request was actually sent. */
+  fetched: boolean
+  status?: number
+  usage: JudgeUsageSample | null
+  finish?: 'stop' | 'length'
+  text?: string
+  raw: string
+  reasoning: string
+  reasoningTruncated: boolean
 }
 
 /** The judge model has no route ClaudeUI can call (ADR-081 §3: no fallback). */
@@ -200,7 +229,24 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
     return headers
   }
 
-  const call = async (req: JudgeRequest): Promise<string> => {
+  const wantsCapture = (): boolean => {
+    if (!opts.onCall) return false
+    try {
+      return opts.shouldCapture ? opts.shouldCapture() : true
+    } catch {
+      return false
+    }
+  }
+
+  const reportCall = (build: () => JudgeCallCapture): void => {
+    try {
+      opts.onCall?.(build())
+    } catch {
+      // A capture failure must never fail the verdict.
+    }
+  }
+
+  const call = async (req: JudgeRequest, trace: CallTrace | null): Promise<string> => {
     const resolved = await opts.resolve()
     if (!resolved.ok) throw new JudgeRouteUnavailableError(resolved.code, resolved.reason)
     const fetchImpl = opts.fetchImpl ?? (await pickJudgeFetch())
@@ -213,6 +259,11 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
       if (req.signal?.aborted) throw new Error(ABORTED_MESSAGE)
       const body =
         route.wire === 'chat' ? buildChatBody(route, req) : buildResponsesBody(route, req)
+      if (trace) {
+        trace.route = route
+        trace.fetched = true
+        delete trace.status
+      }
       try {
         res = await fetchImpl(route.url, {
           method: 'POST',
@@ -225,6 +276,7 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
         throw labelled(route, new JudgeWireError(`request failed: ${errorMessage(err)}`))
       }
       if (res.ok) break
+      if (trace) trace.status = res.status
 
       const excerpt = scrub(await readExcerpt(res), route.headers)
       if (res.status === 401 && route.reauthorize && !reauthorized) {
@@ -259,10 +311,23 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
     const seen: { usage: JudgeUsageSample | null } = { usage: null }
     const readOpts = {
       ...(req.stopSequences ? { stopSequences: req.stopSequences } : {}),
-      maxChars: (req.maxTokens ?? DEFAULT_MAX_TOKENS) * CHARS_PER_TOKEN_BUDGET,
+      maxChars: maxCharsFor(req),
       onUsageSeen: (u: JudgeUsageSample) => {
         seen.usage = u
-      }
+        if (trace) trace.usage = u
+      },
+      ...(trace
+        ? {
+            onDelta: (delta: string) => {
+              trace.raw += delta
+            },
+            onReasoningDelta: (delta: string) => {
+              const room = JUDGE_CAPTURE_REASONING_MAX_CHARS - trace.reasoning.length
+              if (delta.length > room) trace.reasoningTruncated = true
+              if (room > 0) trace.reasoning += delta.slice(0, room)
+            }
+          }
+        : {})
     }
     const frames = readSseFrames(res.body)
     let text: string
@@ -272,6 +337,10 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
           ? await readChatStream(frames, readOpts)
           : await readResponsesStream(frames, readOpts)
       text = out.text
+      if (trace) {
+        trace.text = out.text
+        trace.finish = out.finish
+      }
     } catch (err) {
       // The provider billed whatever it reported, even when the call failed.
       if (seen.usage) reportUsage(seen.usage, route)
@@ -282,16 +351,71 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
     return text
   }
 
+  /** The finished capture record, from the trace and the call's outcome. */
+  const captureOf = (
+    req: JudgeRequest,
+    trace: CallTrace,
+    route: ResolvedJudgeRoute,
+    failure: { error: unknown; aborted: boolean } | null
+  ): JudgeCallCapture => {
+    const system = req.system
+    return {
+      ts: new Date(trace.startedAt).toISOString(),
+      durationMs: Date.now() - trace.startedAt,
+      route: route.label,
+      model: route.model,
+      wire: route.wire,
+      stage: req.stage ?? null,
+      maxTokens: req.maxTokens ?? null,
+      maxChars: maxCharsFor(req),
+      stopSequences: req.stopSequences ? [...req.stopSequences] : [],
+      systemHash: judgeCacheKey(system),
+      system,
+      user: req.user,
+      outcome: failure ? (failure.aborted ? 'aborted' : 'error') : 'ok',
+      ...(failure ? { error: errorMessage(failure.error) } : {}),
+      ...(trace.status !== undefined ? { status: trace.status } : {}),
+      ...(!failure && trace.finish ? { finish: trace.finish } : {}),
+      ...(trace.usage ? { usage: trace.usage } : {}),
+      ...(!failure && trace.text !== undefined ? { text: trace.text } : {}),
+      raw: trace.raw,
+      ...(trace.reasoning ? { reasoning: trace.reasoning } : {}),
+      ...(trace.reasoningTruncated ? { reasoningTruncated: true as const } : {})
+    }
+  }
+
   return async (req: JudgeRequest): Promise<string> => {
+    const trace: CallTrace | null = wantsCapture()
+      ? {
+          startedAt: Date.now(),
+          route: null,
+          fetched: false,
+          usage: null,
+          raw: '',
+          reasoning: '',
+          reasoningTruncated: false
+        }
+      : null
+    let failure: { error: unknown; aborted: boolean } | null = null
     try {
-      return await call(req)
+      return await call(req, trace)
     } catch (err) {
       // Whatever the abort surfaced as (fetch's AbortError, a body stream that
       // errored mid-read), it reads as one message.
-      if (req.signal?.aborted) throw new Error(ABORTED_MESSAGE, { cause: err })
-      throw err
+      const thrown = req.signal?.aborted ? new Error(ABORTED_MESSAGE, { cause: err }) : err
+      failure = { error: thrown, aborted: req.signal?.aborted === true }
+      throw thrown
+    } finally {
+      // One report per call that sent a request; a route that did not resolve sends none.
+      const route = trace?.route
+      if (trace && route && trace.fetched) reportCall(() => captureOf(req, trace, route, failure))
     }
   }
+}
+
+/** The client-side character budget of one request. */
+function maxCharsFor(req: JudgeRequest): number {
+  return (req.maxTokens ?? DEFAULT_MAX_TOKENS) * CHARS_PER_TOKEN_BUDGET
 }
 
 function errorMessage(err: unknown): string {

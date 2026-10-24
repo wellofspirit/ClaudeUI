@@ -94,7 +94,7 @@ function chatUsage(u: Record<string, unknown>): JudgeUsageSample {
  * (see `JudgeTextAccumulator.push`): the verdict is already cut and complete.
  *
  * Text comes from `choices[0].delta.content` only — `delta.reasoning*` fields
- * are the model's thinking, not its answer. Usage is taken from whichever chunk
+ * are the model's thinking, not its answer (they only feed the `onReasoningDelta` capture tap). Usage is taken from whichever chunk
  * carries it (the final one, with `stream_options.include_usage`). A chunk
  * carrying `error` — which can arrive after HTTP 200 — or a `finish_reason` of
  * `error` fails the call.
@@ -124,6 +124,14 @@ export async function readChatStream(
     if (!isRecord(choice)) continue
     if (typeof choice.finish_reason === 'string') finishReason = choice.finish_reason
     if (finishReason === 'error') throw new JudgeWireError('judge stream ended with an error')
+    if (isRecord(choice.delta) && opts.onReasoningDelta) {
+      // Capture tap only: the stream's own reasoning text, never part of the verdict.
+      // The first NON-EMPTY of the two: gateways that send both often leave one as "".
+      const reasoning = [choice.delta.reasoning, choice.delta.reasoning_content].find(
+        (r): r is string => typeof r === 'string' && r !== ''
+      )
+      if (reasoning !== undefined) opts.onReasoningDelta(reasoning)
+    }
     const content = isRecord(choice.delta) ? choice.delta.content : undefined
     if (typeof content === 'string' && content !== '' && !acc.push(content)) {
       ended = true

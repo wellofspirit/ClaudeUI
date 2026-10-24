@@ -297,6 +297,29 @@ describe('load/saveSharedAutoModeConfig', () => {
     expect(readJsonFile(sharedFile())).toEqual({})
   })
 
+  it('stores captureJudgeReplies only as an explicit true; off is the absent key', async () => {
+    const mod = await freshModule()
+    mod.saveSharedAutoModeConfig({ trustedDomains: ['files.acme.com'], captureJudgeReplies: true })
+    expect(readJsonFile(sharedFile())).toEqual({
+      trustedDomains: ['files.acme.com'],
+      captureJudgeReplies: true
+    })
+    // Survives a reload of the module (the next app start) and a later save that carries it.
+    const second = await freshModule()
+    expect(second.loadSharedAutoModeConfig().captureJudgeReplies).toBe(true)
+    second.saveSharedAutoModeConfig({ ...second.loadSharedAutoModeConfig(), blockHoldSeconds: 30 })
+    expect(readJsonFile(sharedFile())).toEqual({
+      trustedDomains: ['files.acme.com'],
+      captureJudgeReplies: true,
+      blockHoldSeconds: 30
+    })
+
+    for (const off of [false, undefined, 'true' as unknown as boolean, 1 as unknown as boolean]) {
+      mod.saveSharedAutoModeConfig({ captureJudgeReplies: off })
+      expect(readJsonFile(sharedFile()), String(off)).toEqual({})
+    }
+  })
+
   it('stores blockHoldSeconds as whole seconds in [0, 600]; 0, the default, as an absent key (ADR-091 part 6)', async () => {
     const mod = await freshModule()
     mod.saveSharedAutoModeConfig({ blockHoldSeconds: 120 })
