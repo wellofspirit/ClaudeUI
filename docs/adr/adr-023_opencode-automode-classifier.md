@@ -7,7 +7,7 @@ provider allows them; amended 2026-09-29 by
 [ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md): the policy is rebalanced toward
 routine work, stage 1 grades severity (destructive and shipping shapes skip it), and the judge reads
 the user's permission rules and guidance lists; amended 2026-10-24 by
-[ADR-109](adr-109_stage1-unusable-reply-escalates.md): an unusable stage-1 reply (off-format or over budget)
+[ADR-109](adr-109_stage1-unusable-reply-escalates.md): an unusable stage-1 reply (off-format, over budget or empty)
 escalates to stage 2 instead of `unavailable`
 **Date:** 2026-06-22
 **Relates to:** [ADR-022](adr-022_opencode-permission-mapping.md) (opencode permission mapping), [ADR-019](adr-019_opencode-engine-backend.md), [ADR-018](adr-018_v2-engine-vendor-account-model.md) (autonomy modes), [ADR-059](adr-059_no-silent-model-fallback.md) (extends the unavailable-judge rule: a configured `autoMode.judgeModel` the catalog no longer offers fails closed to the human, loudly — never a substitute judge)

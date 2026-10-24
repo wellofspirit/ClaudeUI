@@ -107,8 +107,9 @@ export function makeSessionJudgeTransport(opts: SessionJudgeOptions): JudgeTrans
   // throw into `unavailable` → the human. The owner's banner says why, once. Not reported here:
   // a missing route (`resolve` reported it), an abort (a stage timeout or a cancelled review,
   // which the call's own error already names, and which says nothing about the route), and the
-  // "answered, but unusably" codes (the model and route are fine, and the latched banner's
-  // copy is wrong for a per-reply event — see the `onUnavailable` doc).
+  // "answered, but unusably" codes — an empty reply only on the escalating stage-1 request (the
+  // model and route are fine, and the latched banner's copy is wrong for a per-reply event — see
+  // the `onUnavailable` doc).
   return async (req) => {
     try {
       return await transport(req)

@@ -5,7 +5,7 @@
 deviation no longer covers an unusable stage-1 reply in `both` mode),
 [ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) §2 (what stage 1 escalates on),
 [ADR-107](adr-107_judge-outage-and-fallback-judge.md) (the "can't judge here" banner and the fallback judge are no
-longer reached by an unusable reply).
+longer reached by an unusable stage-1 reply in `both` mode).
 **Relates to:** [ADR-081](adr-081_claudeui-owned-judge-transport.md) §4 (the client-side budget and stop cut on the
 ChatGPT route), [ADR-088](adr-088_dispatch-autonomy-inheritance.md) (dispatch targets are judged by the same pipeline).
 

@@ -211,8 +211,10 @@ export const JUDGE_CAPTURE_REASONING_MAX_CHARS = 256 * 1024
 /**
  * {@link JudgeWireError.code}s the reader sets when the model ANSWERED, but unusably: the reply
  * was empty, ran past its character budget, or opened with something other than the request's
- * `allowedPrefixes`. Not route trouble — `both` mode's stage 1 escalates on them, and they never
- * raise the "can't judge here" banner. Namespaced to stay clear of real provider codes.
+ * `allowedPrefixes`. Not route trouble — `both` mode's stage 1 escalates on them. Off-format and
+ * over-budget never raise the "can't judge here" banner; an empty reply raises it outside that
+ * stage-1 request (see `SessionJudgeOptions.onUnavailable`). Namespaced to stay clear of real
+ * provider codes.
  */
 export const JUDGE_OVER_BUDGET_CODE = 'judge:over-budget'
 export const JUDGE_OFF_FORMAT_CODE = 'judge:off-format'
