@@ -44,7 +44,8 @@ src/
                          (fs measurement), action-meta.ts (per-action meta),
                          retry-match.ts (retry fact), denial-tracker.ts,
                          judge-cooldown.ts (429 rests), judge-accounts.ts
-                         (fallback-account snapshot) (ADR-023/050/106/107)
+                         (fallback-account snapshot), judge-capture.ts
+                         (opt-in prompt+reply JSONL) (ADR-023/050/106/107)
     auth/              — EngineAuthProvider + opencode/pi implementations; vault/
                          (AuthVault, CredentialSync, codex-oauth — ADR-036/037)
     shared-providers/  — canonical provider/model routing + native projections (ADR-037)

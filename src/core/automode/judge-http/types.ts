@@ -146,7 +146,61 @@ export interface JudgeStreamOptions {
    * AFTER usage arrived — the return value is lost on a throw.
    */
   onUsageSeen?: (usage: JudgeUsageSample) => void
+  /**
+   * Diagnostics tap (judge-reply capture): every visible text delta, in arrival order, before the
+   * stop cut and the budget check — so the overflowing delta and every post-stop delta are seen.
+   * Never affects the verdict; it must not throw.
+   */
+  onDelta?: (text: string) => void
+  /**
+   * Diagnostics tap: plain-text reasoning deltas the stream already carries (chat
+   * `delta.reasoning` / `delta.reasoning_content`, Responses `reasoning_*_text.delta`). Never
+   * requested, never part of the verdict; it must not throw.
+   */
+  onReasoningDelta?: (text: string) => void
 }
+
+/**
+ * What one judge call that reached `fetch` looked like — the transport's report to
+ * `HttpJudgeTransportOptions.onCall` when capture is on. Credential-free: `route` is the route's
+ * label. `system` and `user` are the full prompts (the judged transcript excerpts).
+ */
+export interface JudgeCallCapture {
+  /** ISO time the call started. */
+  ts: string
+  durationMs: number
+  route: string
+  model: string
+  wire: JudgeWire
+  stage: 'fast' | 'thinking' | null
+  /** The request's own `maxTokens` (null when it named none). */
+  maxTokens: number | null
+  /** The client-side character budget actually enforced. */
+  maxChars: number
+  stopSequences: string[]
+  /** `judgeCacheKey(system)`. */
+  systemHash: string
+  system: string
+  user: string
+  outcome: 'ok' | 'error' | 'aborted'
+  /** The thrown message, when the outcome is not `ok`. */
+  error?: string
+  /** The HTTP status of a non-2xx response (the final attempt's). */
+  status?: number
+  /** `ok` only. */
+  finish?: 'stop' | 'length'
+  usage?: JudgeUsageSample
+  /** The kept text handed back to the classifier; `ok` only. */
+  text?: string
+  /** Every visible delta concatenated in arrival order, post-stop and overflowing deltas included. */
+  raw: string
+  /** Plain-text reasoning deltas, when the wire carried any (capped at {@link JUDGE_CAPTURE_REASONING_MAX_CHARS}). */
+  reasoning?: string
+  reasoningTruncated?: true
+}
+
+/** Longest `reasoning` a capture keeps, in characters (≈256 KiB of ASCII). */
+export const JUDGE_CAPTURE_REASONING_MAX_CHARS = 256 * 1024
 
 /**
  * A judge call failed on the wire: a non-2xx status, an error event, a stream

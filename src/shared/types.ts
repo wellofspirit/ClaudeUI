@@ -1312,6 +1312,13 @@ export interface SharedAutoModeConfig {
    * afterwards from the blocked review. Read live when a block arrives.
    */
   blockHoldSeconds?: number
+  /**
+   * Diagnostics: append every judge call's prompt and reply to `~/.claude/ui/logs/judge/`
+   * (`core/automode/judge-capture.ts`). OFF unless `true`; `false` is stored as an ABSENT key,
+   * like `readOnlyBypass: true`. Read per judge call, so a change binds the next call in every
+   * running session.
+   */
+  captureJudgeReplies?: boolean
 }
 
 export interface VendorConfig {

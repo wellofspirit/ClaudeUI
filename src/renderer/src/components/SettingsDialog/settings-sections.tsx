@@ -2655,7 +2655,7 @@ export const SECTIONS: Section[] = [
         key: 'trustLists',
         label: 'Trust & protection',
         keywords:
-          'trusted domains registries production protected patterns judge auto mode classifier supply chain hosts allowlist judge guidance routine allow block ask first read-only bypass skip judge',
+          'trusted domains registries production protected patterns judge auto mode classifier supply chain hosts allowlist judge guidance routine allow block ask first read-only bypass skip judge capture record judge replies diagnostics log',
         render: () => <TrustListsSection />
       }
     ]

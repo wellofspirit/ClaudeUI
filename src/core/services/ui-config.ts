@@ -309,7 +309,8 @@ export function loadSharedAutoModeConfig(): import('../../shared/types').SharedA
  * Replaces the shared trust and guidance lists and the read-only bypass switch.
  * An empty list is written as an ABSENT key, and so is `readOnlyBypass: true`
  * (the default): only an explicit `false` is stored. `blockHoldSeconds` is
- * clamped to whole seconds in [0, 600], and 0 (the default) is absent too. The object is REBUILT from
+ * clamped to whole seconds in [0, 600], and 0 (the default) is absent too, and
+ * `captureJudgeReplies` is stored only as `true`. The object is REBUILT from
  * the known keys rather than spread, so a key missing from
  * {@link SHARED_AUTOMODE_LIST_KEYS} (or not handled below) is dropped on save —
  * which is why the guidance lists have to be named there.
@@ -331,6 +332,8 @@ export function saveSharedAutoModeConfig(
   // ADR-091 part 6 — the default (0, no hold) is the absent key.
   const holdSeconds = normalizeBlockHoldSeconds(config.blockHoldSeconds)
   if (holdSeconds > 0) next.blockHoldSeconds = holdSeconds
+  // Diagnostics switch: only an explicit `true` is stored; off is the absent key.
+  if (config.captureJudgeReplies === true) next.captureJudgeReplies = true
   writeJson(SHARED_AUTOMODE_FILE, next)
 }
 

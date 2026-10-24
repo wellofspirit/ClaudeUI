@@ -23,6 +23,8 @@
  *      the key is absent, and saves only an explicit `false`
  *  11. The block hold window (ADR-091 part 6) sits beside it: No hold when
  *      absent, saves the chosen seconds, and No hold as an absent key
+ *  12. The judge-reply capture switch: OFF when the key is absent, saves only
+ *      `captureJudgeReplies: true`, and off as an absent key
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
@@ -146,6 +148,7 @@ describe('TrustListsSection — judge guidance rows (ADR-083 §4)', () => {
     expect(rows).toEqual([
       'TrustListsSection.readOnlyBypass',
       'TrustListsSection.blockHold',
+      'TrustListsSection.captureJudgeReplies',
       'TrustListsSection.trustedDomains',
       'TrustListsSection.trustedRegistries',
       'TrustListsSection.protectedPatterns',
@@ -262,6 +265,63 @@ describe('TrustListsSection — read-only bypass switch (ADR-084 §1)', () => {
     addItem('trustedDomains', 'files.acme.com')
 
     expect(saved[0].readOnlyBypass).toBe(false)
+  })
+})
+
+describe('TrustListsSection — judge-reply capture switch', () => {
+  const toggle = (): HTMLElement => screen.getByTestId('TrustListsSection.captureJudgeReplies')
+
+  it('is OFF when the file has no key, and says what it records, where, and for how long', async () => {
+    await renderLoaded()
+
+    expect(toggle().getAttribute('aria-pressed')).toBe('false')
+    expect(toggle().textContent).toContain('Record judge replies for diagnostics')
+    expect(toggle().textContent).toContain('~/.claude/ui/logs/judge/')
+    expect(toggle().textContent).toContain('kept 14 days')
+    expect(toggle().textContent).toContain('excerpts of the transcript')
+    expect(toggle().textContent).toContain('stay on this machine')
+  })
+
+  it('turning it on saves captureJudgeReplies: true alongside the lists', async () => {
+    await renderLoaded()
+
+    fireEvent.click(toggle())
+
+    expect(saved).toEqual([
+      { trustedDomains: ['a.dev'], protectedPatterns: ['acme-live-*'], captureJudgeReplies: true }
+    ])
+    expect(toggle().getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('turning it off saves the key ABSENT, never false', async () => {
+    installApiStub({
+      loadSharedAutoMode: vi.fn(async () => ({
+        ...structuredClone(BASE),
+        captureJudgeReplies: true
+      }))
+    })
+    await renderLoaded()
+    expect(toggle().getAttribute('aria-pressed')).toBe('true')
+
+    fireEvent.click(toggle())
+
+    expect('captureJudgeReplies' in saved[0]).toBe(false)
+    expect(saved[0]).toEqual(BASE)
+    expect(toggle().getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('a list edit keeps the switch on', async () => {
+    installApiStub({
+      loadSharedAutoMode: vi.fn(async () => ({
+        ...structuredClone(BASE),
+        captureJudgeReplies: true
+      }))
+    })
+    await renderLoaded()
+
+    addItem('trustedDomains', 'files.acme.com')
+
+    expect(saved[0].captureJudgeReplies).toBe(true)
   })
 })
 

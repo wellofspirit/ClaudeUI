@@ -211,6 +211,22 @@ describe('config:save-shared-automode', () => {
     expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenCalledTimes(2)
   })
 
+  it('accepts captureJudgeReplies as a boolean only', () => {
+    invoke('config:save-shared-automode', { captureJudgeReplies: true })
+    invoke('config:save-shared-automode', { captureJudgeReplies: false })
+    expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenCalledTimes(2)
+    expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenLastCalledWith({
+      captureJudgeReplies: false
+    })
+    for (const bad of ['true', 1, null, []]) {
+      expect(
+        () => invoke('config:save-shared-automode', { captureJudgeReplies: bad }),
+        JSON.stringify(bad)
+      ).toThrow(/"captureJudgeReplies" must be a boolean/)
+    }
+    expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenCalledTimes(2)
+  })
+
   it('accepts blockHoldSeconds as a finite number only (ADR-091 part 6; the service clamps)', () => {
     invoke('config:save-shared-automode', { blockHoldSeconds: 120 })
     invoke('config:save-shared-automode', { blockHoldSeconds: 9_999 })

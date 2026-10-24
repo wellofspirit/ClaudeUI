@@ -6,12 +6,17 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { mockResolve, mockFetch } = vi.hoisted(() => ({
+const { mockResolve, mockFetch, capture } = vi.hoisted(() => ({
   mockResolve: vi.fn(),
-  mockFetch: vi.fn()
+  mockFetch: vi.fn(),
+  capture: { enabled: false, write: vi.fn() }
 }))
 vi.mock('../judge-route', () => ({ resolveJudgeRoute: mockResolve }))
 vi.mock('../judge-usage', () => ({ recordJudgeUsage: vi.fn() }))
+vi.mock('../judge-capture', () => ({
+  judgeCaptureEnabled: () => capture.enabled,
+  writeJudgeCapture: capture.write
+}))
 vi.mock('../../host', () => ({ hostAppVersion: () => 'test' }))
 vi.mock('../judge-http/net', () => ({ pickJudgeFetch: async () => mockFetch }))
 
@@ -64,6 +69,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   clearCooldowns()
   resetChatgptAccounts()
+  capture.enabled = false
   mockResolve.mockResolvedValue({ ok: true, route: routeFor('chatgpt', 'gpt-6-luna') })
 })
 
@@ -140,6 +146,75 @@ describe('makeSessionJudgeTransport — failure reports', () => {
 
     await expect(transport(REQ)).resolves.toContain('<block>no</block>')
     expect(onUnavailable).not.toHaveBeenCalled()
+  })
+})
+
+describe('makeSessionJudgeTransport — judge-reply capture', () => {
+  const okStream = (): Response =>
+    new Response(sseStream([chatDelta('<severity>1</severity>'), chatFinish('stop'), CHAT_DONE]), {
+      status: 200
+    })
+
+  it('the switch off: nothing is handed to the writer', async () => {
+    mockResolve.mockResolvedValue({ ok: true, route: routeFor('openai', 'gpt-4.1-mini') })
+    mockFetch.mockResolvedValue(okStream())
+    const { transport } = setup()
+
+    await transport(REQ)
+    expect(capture.write).not.toHaveBeenCalled()
+  })
+
+  it('the switch on: the writer gets the call with the engine, routing id and session id', async () => {
+    capture.enabled = true
+    mockResolve.mockResolvedValue({ ok: true, route: routeFor('openai', 'gpt-4.1-mini') })
+    mockFetch.mockResolvedValue(okStream())
+    const { transport } = setup()
+
+    await transport({ ...REQ, stopSequences: ['</severity>'] })
+    expect(capture.write).toHaveBeenCalledTimes(1)
+    expect(capture.write.mock.calls[0][0]).toMatchObject({
+      engine: 'pi',
+      routingId: 'r1',
+      sessionId: 's1',
+      route: 'openai · gpt-4.1-mini',
+      outcome: 'ok',
+      raw: '<severity>1</severity>',
+      text: '<severity>1',
+      user: 'ACTION',
+      system: 'POLICY'
+    })
+  })
+
+  it('is read per call: switching it on applies to the next call of a live transport', async () => {
+    mockResolve.mockResolvedValue({ ok: true, route: routeFor('openai', 'gpt-4.1-mini') })
+    mockFetch.mockImplementation(async () => okStream())
+    const { transport } = setup()
+
+    await transport(REQ)
+    capture.enabled = true
+    await transport(REQ)
+    capture.enabled = false
+    await transport(REQ)
+    expect(capture.write).toHaveBeenCalledTimes(1)
+  })
+
+  it('a failed call is captured too, and still throws and reports as before', async () => {
+    capture.enabled = true
+    mockFetch.mockResolvedValue(json(500, { error: 'boom' }))
+    const { transport, onUnavailable } = setup()
+
+    await expect(transport(REQ)).rejects.toThrow(/HTTP 500/)
+    expect(capture.write.mock.calls[0][0]).toMatchObject({ outcome: 'error', status: 500 })
+    expect(onUnavailable).toHaveBeenCalledTimes(1)
+  })
+
+  it('a missing route makes no record', async () => {
+    capture.enabled = true
+    mockResolve.mockResolvedValue({ ok: false, code: 'no-credential', reason: 'No key.' })
+    const { transport } = setup()
+
+    await expect(transport(REQ)).rejects.toThrow(/route unavailable/)
+    expect(capture.write).not.toHaveBeenCalled()
   })
 })
 
