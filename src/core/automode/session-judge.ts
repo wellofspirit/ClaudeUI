@@ -57,12 +57,14 @@ export interface SessionJudgeOptions {
    * the human (§3: no fallback). May be called on every failure; the owner
    * shows its one banner for the first.
    *
-   * NOT called for a {@link JudgeWireError} coded `JUDGE_EMPTY_REPLY_CODE`,
-   * `JUDGE_OFF_FORMAT_CODE` or `JUDGE_OVER_BUDGET_CODE` — in any mode, deliberately:
-   * the model answered and the route is fine, so there is nothing to fix. The banner is latched
-   * once per session and its copy (“every gated action will ask you… change the judge model”) is
-   * wrong for a per-reply event — one overflow would burn the only banner and hide a later
-   * real outage. The throw still happens; `classify()` decides what it means.
+   * NOT called for a {@link JudgeWireError} coded `JUDGE_OFF_FORMAT_CODE` or
+   * `JUDGE_OVER_BUDGET_CODE` — in any mode, deliberately: the model answered and the route is
+   * fine, so there is nothing to fix. The banner is latched once per session and its copy (“every
+   * gated action will ask you… change the judge model”) is wrong for a per-reply event — one
+   * overflow would burn the only banner and hide a later real outage. `JUDGE_EMPTY_REPLY_CODE` is
+   * quiet only on `both` mode's stage-1 request, where it escalates; anywhere else an empty reply
+   * may be a judge that never answers, and the banner says so. The throw still happens;
+   * `classify()` decides what it means.
    */
   onUnavailable: (reason: string) => void
 }
@@ -123,12 +125,14 @@ export function makeSessionJudgeTransport(opts: SessionJudgeOptions): JudgeTrans
       }
       // The "answered, but unusably" codes mean the model answered and the route is fine:
       // `both` mode's stage 1 escalates on them, so there is nothing for the human to fix and
-      // no banner to show. Rethrown all the same — `classify()` is the one that decides.
+      // no banner to show. An EMPTY reply is quiet only on that stage-1 request (the one that
+      // names `allowedPrefixes`): elsewhere it can be a judge that never answers, which the
+      // banner must name. Rethrown all the same — `classify()` is the one that decides.
       const answeredUnusably =
         err instanceof JudgeWireError &&
-        (err.code === JUDGE_EMPTY_REPLY_CODE ||
-          err.code === JUDGE_OFF_FORMAT_CODE ||
-          err.code === JUDGE_OVER_BUDGET_CODE)
+        (err.code === JUDGE_OFF_FORMAT_CODE ||
+          err.code === JUDGE_OVER_BUDGET_CODE ||
+          (err.code === JUDGE_EMPTY_REPLY_CODE && req.allowedPrefixes !== undefined))
       if (
         !answeredUnusably &&
         !(err instanceof JudgeRouteUnavailableError) &&

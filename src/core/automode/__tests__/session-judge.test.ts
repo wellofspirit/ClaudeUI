@@ -181,6 +181,25 @@ describe('makeSessionJudgeTransport — failure reports', () => {
     }
   )
 
+  it('an empty reply outside the escalating stage-1 request is still reported', async () => {
+    // Without `allowedPrefixes` (fast mode, stage 2) nothing escalates, and an empty reply may be
+    // a judge that never answers — the banner has to name it.
+    mockFetch.mockResolvedValue(
+      new Response(
+        sseStream([
+          resp({ type: 'response.output_text.done', text: '' }),
+          resp({ type: 'response.completed', response: { status: 'completed' } })
+        ]),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } }
+      )
+    )
+    const { transport, onUnavailable } = setup()
+
+    const err = await transport(REQ).catch((e: unknown) => e)
+    expect((err as JudgeWireError).code).toBe(JUDGE_EMPTY_REPLY_CODE)
+    expect(onUnavailable).toHaveBeenCalledTimes(1)
+  })
+
   it('a budget-exhausted reply (uncoded) is still reported — it names a judge-configuration problem', async () => {
     mockFetch.mockResolvedValue(
       new Response(

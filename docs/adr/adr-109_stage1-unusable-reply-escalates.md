@@ -35,21 +35,24 @@ the session's "Auto-mode can't judge here" banner — although the route was hea
 ## Decision
 
 1. **An unusable stage-1 reply escalates.** In `both` mode, a stage-1 reply that opens off-format, runs past its
-   budget, or completes with no visible text sends the action to stage 2, whose verdict is final, exactly like an unparseable grade already did. The
-   transport keeps throwing on both conditions, with a `JudgeWireError` coded `judge:off-format`,
-   `judge:over-budget` or `judge:empty`; only `classify()`'s `both`-mode stage 1 turns those three codes into an escalation. Every
-   other stage-1 failure (HTTP error, timeout, abort, missing route, and a reply whose reasoning used the whole
-   budget, which is a judge-configuration problem) stays `unavailable`. `fast` mode and stage 2
-   keep their verdict semantics.
+   budget, or completes with no visible text sends the action to stage 2, whose verdict is final, exactly like an
+   unparseable grade already did. The transport keeps throwing on all three conditions, with a `JudgeWireError` coded
+   `judge:off-format`, `judge:over-budget` or `judge:empty`; only `classify()`'s `both`-mode stage 1 turns those
+   codes into an escalation. Every other stage-1 failure (HTTP error, timeout, abort, missing route, and a reply
+   whose reasoning used the whole budget, which is a judge-configuration problem) stays `unavailable`. `fast` mode
+   and stage 2 keep their verdict semantics.
 2. **An off-format reply is abandoned at once.** The stage-1 request names the prefixes the reply may open with
    (`<severity>`, and `<thinking>` because the severity parser strips thinking blocks). The reader checks the kept
    text after each delta, ignoring leading whitespace and case, and throws as soon as the text can no longer become
    any of them — usually on the first delta, about a second in — and the stream is cancelled. `<think>` is not
    allowed (the parser does not strip it); a fence, a bold tag or a zero-width character opens off-format and
    escalates. A request without prefixes is not checked.
-3. **No banner for an unusable reply, in any mode.** The model answered and the route is fine; the banner is shown
-   once per session and its copy ("every gated action will ask you … change the judge model") is wrong for a
-   per-reply event. In `fast` mode and stage 2 the human card still gives the cause.
+3. **No banner for an unusable reply** (off-format and over budget in any mode; an empty reply on stage 1 only). The
+   model answered and the route is fine; the banner is shown once per session and its copy ("every gated action will
+   ask you … change the judge model") is wrong for a per-reply event. In `fast` mode and stage 2 the human card still
+   gives the cause. An empty reply is the exception: it stays quiet only on the escalating stage-1 request, because
+   elsewhere it may be a judge that never answers (a model that writes only into its reasoning channel, a gateway that
+   sends nothing), which the banner must name.
 4. **The fallback judge is not consulted** when stage 1 escalates and stage 2 decides; it still runs when that
    stage 2 fails, as for any unavailable result.
 5. **Observability.** The verdict log line carries `s1=off-format` / `s1=over-budget` / `s1=empty` on an escalation (on the

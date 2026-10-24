@@ -195,4 +195,14 @@ describe('JudgeTextAccumulator — an empty reply', () => {
     expect((err as Error).message).toBe(JUDGE_EMPTY_REPLY_MESSAGE)
     expect((err as { code?: string }).code).toBe(JUDGE_EMPTY_REPLY_CODE)
   })
+
+  it('length AFTER a stop cut is an empty reply, not an exhausted budget', () => {
+    // A route without a server stop cuts client-side and the provider runs on to its cap: the
+    // reply still answered nothing usable, so it escalates rather than blaming the budget.
+    const a = new JudgeTextAccumulator({ stopSequences: ['</severity>'], maxChars: 1024 })
+    a.push('</severity>')
+    const err = finishError(a, 'length')
+    expect((err as Error).message).toBe(JUDGE_EMPTY_REPLY_MESSAGE)
+    expect((err as { code?: string }).code).toBe(JUDGE_EMPTY_REPLY_CODE)
+  })
 })
