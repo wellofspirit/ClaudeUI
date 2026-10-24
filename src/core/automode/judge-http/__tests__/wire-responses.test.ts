@@ -9,7 +9,7 @@ import {
   JUDGE_EMPTY_REPLY_MESSAGE,
   JUDGE_OVER_BUDGET_MESSAGE
 } from '../stream-text'
-import { JUDGE_OFF_FORMAT_CODE, JudgeWireError } from '../types'
+import { JUDGE_EMPTY_REPLY_CODE, JUDGE_OFF_FORMAT_CODE, JudgeWireError } from '../types'
 import { buildResponsesBody, readResponsesStream } from '../wire-responses'
 import { countingFrames, framesOf, resp, respDelta, routeFor } from './helpers'
 
@@ -263,6 +263,18 @@ describe('readResponsesStream', () => {
     await expect(readResponsesStream(framesOf([completed()]), opts)).rejects.toThrow(
       JUDGE_EMPTY_REPLY_MESSAGE
     )
+  })
+
+  it('output_text.done with empty text and no delta → empty judge reply, coded', async () => {
+    // Capture record 747's shape: the stream completes with one empty done event and no delta,
+    // so the reply is empty rather than truncated.
+    const err = await readResponsesStream(
+      framesOf([resp({ type: 'response.output_text.done', text: '' }), completed()]),
+      opts
+    ).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(JudgeWireError)
+    expect((err as JudgeWireError).message).toBe(JUDGE_EMPTY_REPLY_MESSAGE)
+    expect((err as JudgeWireError).code).toBe(JUDGE_EMPTY_REPLY_CODE)
   })
 
   it('text past maxChars aborts the call', async () => {

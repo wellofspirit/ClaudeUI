@@ -27,6 +27,7 @@ import {
   CHAT_DONE,
   chatDelta,
   chatFinish,
+  resp,
   respDelta,
   routeFor,
   sseStream
@@ -34,7 +35,12 @@ import {
 import { refreshChatgptAccounts, resetChatgptAccounts } from '../judge-accounts'
 import { clearCooldowns, coolingUntil } from '../judge-cooldown'
 import { judgeRouteKey } from '../judge-http/transport'
-import { JUDGE_OFF_FORMAT_CODE, JUDGE_OVER_BUDGET_CODE, JudgeWireError } from '../judge-http/types'
+import {
+  JUDGE_EMPTY_REPLY_CODE,
+  JUDGE_OFF_FORMAT_CODE,
+  JUDGE_OVER_BUDGET_CODE,
+  JudgeWireError
+} from '../judge-http/types'
 import {
   fallbackJudgeAccountFor,
   fallbackJudgeLabel,
@@ -140,7 +146,19 @@ describe('makeSessionJudgeTransport — failure reports', () => {
 
   it.each([
     ['off-format', JUDGE_OFF_FORMAT_CODE, [respDelta('We need assess the proposed action')]],
-    ['over-budget', JUDGE_OVER_BUDGET_CODE, [respDelta('<severity>5'), respDelta('x'.repeat(1100))]]
+    [
+      'over-budget',
+      JUDGE_OVER_BUDGET_CODE,
+      [respDelta('<severity>5'), respDelta('x'.repeat(1100))]
+    ],
+    [
+      'empty',
+      JUDGE_EMPTY_REPLY_CODE,
+      [
+        resp({ type: 'response.output_text.done', text: '' }),
+        resp({ type: 'response.completed', response: { status: 'completed' } })
+      ]
+    ]
   ] as const)(
     'an unusable-but-answered reply (%s) reports nothing, and still throws',
     async (_label, code, frames) => {
@@ -162,6 +180,27 @@ describe('makeSessionJudgeTransport — failure reports', () => {
       expect(onUnavailable).not.toHaveBeenCalled()
     }
   )
+
+  it('a budget-exhausted reply (uncoded) is still reported — it names a judge-configuration problem', async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        sseStream([
+          resp({
+            type: 'response.incomplete',
+            response: { incomplete_details: { reason: 'max_output_tokens' } }
+          })
+        ]),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } }
+      )
+    )
+    const { transport, onUnavailable } = setup()
+
+    const err = await transport(REQ).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(JudgeWireError)
+    expect((err as JudgeWireError).code).toBeUndefined()
+    expect(onUnavailable).toHaveBeenCalledTimes(1)
+    expect(onUnavailable.mock.calls[0][0]).toContain('whole budget')
+  })
 
   it('a call that succeeds reports nothing', async () => {
     mockResolve.mockResolvedValue({ ok: true, route: routeFor('openai', 'gpt-4.1-mini') })

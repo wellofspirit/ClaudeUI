@@ -1,15 +1,19 @@
 /**
  * `JudgeTextAccumulator`'s opening-format rule: a reply that cannot become one of the
  * request's `allowedPrefixes` is abandoned as soon as that is certain, and the throw carries
- * `JUDGE_OFF_FORMAT_CODE`. The over-budget throw carries `JUDGE_OVER_BUDGET_CODE`.
+ * `JUDGE_OFF_FORMAT_CODE`. The over-budget throw carries `JUDGE_OVER_BUDGET_CODE`; an empty
+ * reply carries `JUDGE_EMPTY_REPLY_CODE`, except the reasoning-ate-the-budget case, which stays
+ * uncoded so the banner still names it.
  */
 import { describe, it, expect } from 'vitest'
 import {
+  JUDGE_BUDGET_EXHAUSTED_MESSAGE,
+  JUDGE_EMPTY_REPLY_MESSAGE,
   JUDGE_OFF_FORMAT_MESSAGE,
   JUDGE_OVER_BUDGET_MESSAGE,
   JudgeTextAccumulator
 } from '../stream-text'
-import { JUDGE_OFF_FORMAT_CODE, JUDGE_OVER_BUDGET_CODE } from '../types'
+import { JUDGE_EMPTY_REPLY_CODE, JUDGE_OFF_FORMAT_CODE, JUDGE_OVER_BUDGET_CODE } from '../types'
 
 const PREFIXES = ['<severity>', '<thinking>'] as const
 
@@ -157,5 +161,38 @@ describe('JudgeTextAccumulator — allowedPrefixes', () => {
     })
     expect(() => a.push('We need')).toThrow(JUDGE_OFF_FORMAT_MESSAGE)
     expect(seen).toEqual(['We need'])
+  })
+})
+
+describe('JudgeTextAccumulator — an empty reply', () => {
+  function finishError(a: JudgeTextAccumulator, finish: 'stop' | 'length'): unknown {
+    try {
+      a.finish(finish, null)
+    } catch (e) {
+      return e
+    }
+    return undefined
+  }
+
+  it('a reply with no text on stop throws the empty-reply error, coded', () => {
+    const err = finishError(new JudgeTextAccumulator({ maxChars: 1024 }), 'stop')
+    expect((err as Error).message).toBe(JUDGE_EMPTY_REPLY_MESSAGE)
+    expect((err as { code?: string }).code).toBe(JUDGE_EMPTY_REPLY_CODE)
+  })
+
+  it('length without a stop cut keeps the budget message, uncoded', () => {
+    // Reasoning ate the budget: a judge-configuration problem the banner should name, so this
+    // one must NOT escalate.
+    const err = finishError(new JudgeTextAccumulator({ maxChars: 1024 }), 'length')
+    expect((err as Error).message).toBe(JUDGE_BUDGET_EXHAUSTED_MESSAGE)
+    expect((err as { code?: string }).code).toBeUndefined()
+  })
+
+  it('a stop cut that leaves no kept text is coded empty too', () => {
+    const a = new JudgeTextAccumulator({ stopSequences: ['</severity>'], maxChars: 1024 })
+    a.push('</severity>')
+    const err = finishError(a, 'stop')
+    expect((err as Error).message).toBe(JUDGE_EMPTY_REPLY_MESSAGE)
+    expect((err as { code?: string }).code).toBe(JUDGE_EMPTY_REPLY_CODE)
   })
 })

@@ -22,6 +22,7 @@ import {
   makeHttpJudgeTransport
 } from './judge-http/transport'
 import {
+  JUDGE_EMPTY_REPLY_CODE,
   JUDGE_OFF_FORMAT_CODE,
   JUDGE_OVER_BUDGET_CODE,
   JudgeWireError,
@@ -56,11 +57,11 @@ export interface SessionJudgeOptions {
    * the human (§3: no fallback). May be called on every failure; the owner
    * shows its one banner for the first.
    *
-   * NOT called for a {@link JudgeWireError} coded `JUDGE_OFF_FORMAT_CODE` or
-   * `JUDGE_OVER_BUDGET_CODE` — in any mode, deliberately: the model answered and the
-   * route is fine, so there is nothing to fix. The banner is latched once per session
-   * and its copy (“every gated action will ask you… change the judge model”) is wrong
-   * for a per-reply event — one overflow would burn the only banner and hide a later
+   * NOT called for a {@link JudgeWireError} coded `JUDGE_EMPTY_REPLY_CODE`,
+   * `JUDGE_OFF_FORMAT_CODE` or `JUDGE_OVER_BUDGET_CODE` — in any mode, deliberately:
+   * the model answered and the route is fine, so there is nothing to fix. The banner is latched
+   * once per session and its copy (“every gated action will ask you… change the judge model”) is
+   * wrong for a per-reply event — one overflow would burn the only banner and hide a later
    * real outage. The throw still happens; `classify()` decides what it means.
    */
   onUnavailable: (reason: string) => void
@@ -104,7 +105,7 @@ export function makeSessionJudgeTransport(opts: SessionJudgeOptions): JudgeTrans
   // throw into `unavailable` → the human. The owner's banner says why, once. Not reported here:
   // a missing route (`resolve` reported it), an abort (a stage timeout or a cancelled review,
   // which the call's own error already names, and which says nothing about the route), and the
-  // two "answered, but unusably" codes (the model and route are fine, and the latched banner's
+  // "answered, but unusably" codes (the model and route are fine, and the latched banner's
   // copy is wrong for a per-reply event — see the `onUnavailable` doc).
   return async (req) => {
     try {
@@ -120,12 +121,14 @@ export function makeSessionJudgeTransport(opts: SessionJudgeOptions): JudgeTrans
       ) {
         noteRateLimited(err.routeKey, err.retryAtMs, Date.now())
       }
-      // The two "answered, but unusably" codes mean the model answered and the route is fine:
+      // The "answered, but unusably" codes mean the model answered and the route is fine:
       // `both` mode's stage 1 escalates on them, so there is nothing for the human to fix and
       // no banner to show. Rethrown all the same — `classify()` is the one that decides.
       const answeredUnusably =
         err instanceof JudgeWireError &&
-        (err.code === JUDGE_OFF_FORMAT_CODE || err.code === JUDGE_OVER_BUDGET_CODE)
+        (err.code === JUDGE_EMPTY_REPLY_CODE ||
+          err.code === JUDGE_OFF_FORMAT_CODE ||
+          err.code === JUDGE_OVER_BUDGET_CODE)
       if (
         !answeredUnusably &&
         !(err instanceof JudgeRouteUnavailableError) &&

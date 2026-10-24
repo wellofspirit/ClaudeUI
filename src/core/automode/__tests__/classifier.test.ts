@@ -38,7 +38,12 @@ import {
 } from '../classifier'
 import type { ChatMessage } from '../../../shared/types'
 import { JudgeRouteUnavailableError } from '../judge-http/transport'
-import { JUDGE_OFF_FORMAT_CODE, JUDGE_OVER_BUDGET_CODE, JudgeWireError } from '../judge-http/types'
+import {
+  JUDGE_EMPTY_REPLY_CODE,
+  JUDGE_OFF_FORMAT_CODE,
+  JUDGE_OVER_BUDGET_CODE,
+  JudgeWireError
+} from '../judge-http/types'
 import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 let seq = 0
@@ -1287,7 +1292,8 @@ describe('classify (orchestrator)', () => {
 
   it.each([
     ['off-format', JUDGE_OFF_FORMAT_CODE],
-    ['over-budget', JUDGE_OVER_BUDGET_CODE]
+    ['over-budget', JUDGE_OVER_BUDGET_CODE],
+    ['empty', JUDGE_EMPTY_REPLY_CODE]
   ])(
     'both mode: an unusable stage-1 reply (%s) escalates to stage 2 and its verdict stands',
     async (facet, code) => {
@@ -1416,7 +1422,7 @@ describe('classify (orchestrator)', () => {
   })
 
   it('fast mode: an unusable reply is unchanged — unavailable, no stage 2', async () => {
-    for (const code of [JUDGE_OFF_FORMAT_CODE, JUDGE_OVER_BUDGET_CODE]) {
+    for (const code of [JUDGE_OFF_FORMAT_CODE, JUDGE_OVER_BUDGET_CODE, JUDGE_EMPTY_REPLY_CODE]) {
       const judge = vi.fn().mockRejectedValue(new JudgeWireError('unusable', { code }))
       const r = await classify({ ...base, twoStageMode: 'fast' }, judge)
       expect(r).toMatchObject({ block: true, stage: 'error', unavailable: true })
@@ -1532,6 +1538,9 @@ describe('classify (orchestrator)', () => {
     ).toBe(
       'auto-mode allow (stage=thinking, judge=fallback OpenAI · gpt-4.1-mini, s1=off-format, sev=80) bash'
     )
+    expect(
+      formatVerdictLine({ block: false, stage: 'thinking', stage1Unusable: 'empty' }, 'bash')
+    ).toBe('auto-mode allow (stage=thinking, s1=empty) bash')
   })
 
   it('formatVerdictLine puts a caller facet right after the stage', () => {

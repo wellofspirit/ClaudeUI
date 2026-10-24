@@ -6,7 +6,12 @@ import {
   type ToolOutcome
 } from './ground-truth'
 import { isAgentControlTarget } from './agent-control-paths'
-import { JUDGE_OFF_FORMAT_CODE, JUDGE_OVER_BUDGET_CODE, JudgeWireError } from './judge-http/types'
+import {
+  JUDGE_EMPTY_REPLY_CODE,
+  JUDGE_OFF_FORMAT_CODE,
+  JUDGE_OVER_BUDGET_CODE,
+  JudgeWireError
+} from './judge-http/types'
 import { editPathsOf, jsonLine, renderToolCall, retryFactOf } from './retry-match'
 import { deriveCategorySet } from './rules/corpus'
 import { buildPolicyPrompt, type EnvironmentInfo } from './rules/policy'
@@ -214,14 +219,14 @@ export interface ClassifyResult {
    */
   overturnedBlock?: { reason?: string; category?: string }
   /**
-   * Set in `both` mode when stage 1 answered with something unusable — a reply that opened
-   * off-format or ran past its budget — and stage 2 therefore decided instead. The escalation
-   * itself does not set `unavailable` and shows no banner; if stage 2 then fails, the result is
-   * `unavailable` with this facet kept. Diagnostics only, so the stage-1 escalation rate can be
-   * read off the logs: on the verdict line ({@link formatVerdictLine}) and on the pipeline's
-   * `stage=error` warning.
+   * Set in `both` mode when stage 1 answered with something unusable — a reply that was empty,
+   * opened off-format or ran past its budget — and stage 2 therefore decided instead. The
+   * escalation itself does not set `unavailable` and shows no banner; if stage 2 then fails, the
+   * result is `unavailable` with this facet kept. Diagnostics only, so the stage-1 escalation
+   * rate can be read off the logs: on the verdict line ({@link formatVerdictLine}) and on the
+   * pipeline's `stage=error` warning.
    */
-  stage1Unusable?: 'off-format' | 'over-budget'
+  stage1Unusable?: 'off-format' | 'over-budget' | 'empty'
 }
 
 /**
@@ -987,6 +992,7 @@ export function isSingleSampleBlock(
 function stage1UnusableFrom(code: string | undefined): ClassifyResult['stage1Unusable'] {
   if (code === JUDGE_OFF_FORMAT_CODE) return 'off-format'
   if (code === JUDGE_OVER_BUDGET_CODE) return 'over-budget'
+  if (code === JUDGE_EMPTY_REPLY_CODE) return 'empty'
   return undefined
 }
 
@@ -1009,9 +1015,9 @@ function stage1UnusableFrom(code: string | undefined): ClassifyResult['stage1Unu
  * `{ block: true, unavailable: true, error }`, which the wiring maps to "ask
  * the human" (and logs `error` as the cause — see
  * {@link ClassifyResult.error}). EXCEPT stage 1 in `both` mode: a throw coded
- * `JUDGE_OFF_FORMAT_CODE` / `JUDGE_OVER_BUDGET_CODE` means the model answered
- * unusably, so stage 2 runs and the result carries `stage1Unusable` instead of
- * `unavailable`.
+ * `JUDGE_EMPTY_REPLY_CODE` / `JUDGE_OFF_FORMAT_CODE` / `JUDGE_OVER_BUDGET_CODE`
+ * means the model answered unusably, so stage 2 runs and the result carries
+ * `stage1Unusable` instead of `unavailable`.
  *
  * ## Two-sample confirmation (decision 3)
  *
@@ -1045,8 +1051,9 @@ export async function classify(
   type CallFailure = Pick<ClassifyResult, 'errorStatus' | 'retryAtMs' | 'errorRouteKey'> & {
     error: string
     /**
-     * The wire error's `code`, when it carried one — the two "answered, but unusably" codes
-     * (`JUDGE_OFF_FORMAT_CODE` / `JUDGE_OVER_BUDGET_CODE`) are what stage 1 escalates on.
+     * The wire error's `code`, when it carried one — the "answered, but unusably" codes
+     * (`JUDGE_EMPTY_REPLY_CODE` / `JUDGE_OFF_FORMAT_CODE` / `JUDGE_OVER_BUDGET_CODE`) are what
+     * stage 1 escalates on.
      */
     errorCode?: string
   }

@@ -5,6 +5,7 @@
  */
 
 import {
+  JUDGE_EMPTY_REPLY_CODE,
   JUDGE_OFF_FORMAT_CODE,
   JUDGE_OVER_BUDGET_CODE,
   JudgeWireError,
@@ -115,15 +116,17 @@ export class JudgeTextAccumulator {
    * The reader's result. A reply with no visible text is a transport error, not
    * an empty verdict (`classify()` would read one as an unparseable BLOCK):
    * `length` gets the reasoning-ate-the-budget copy, anything else the generic
-   * one. A stop cut always reports `stop`, whatever the provider said after it.
+   * one. The budget case stays UNCODED — reasoning ate the budget, which is a
+   * judge-configuration problem the banner should name — while an empty reply is
+   * coded like the other "answered, but unusably" cases so stage 1 escalates.
+   * A stop cut always reports `stop`, whatever the provider said after it.
    */
   finish(finish: 'stop' | 'length', usage: JudgeUsageSample | null): JudgeStreamResult {
     if (this.text.trim() === '') {
-      throw new JudgeWireError(
-        finish === 'length' && !this.stopped
-          ? JUDGE_BUDGET_EXHAUSTED_MESSAGE
-          : JUDGE_EMPTY_REPLY_MESSAGE
-      )
+      if (finish === 'length' && !this.stopped) {
+        throw new JudgeWireError(JUDGE_BUDGET_EXHAUSTED_MESSAGE)
+      }
+      throw new JudgeWireError(JUDGE_EMPTY_REPLY_MESSAGE, { code: JUDGE_EMPTY_REPLY_CODE })
     }
     return { text: this.text, usage, finish: this.stopped ? 'stop' : finish }
   }
