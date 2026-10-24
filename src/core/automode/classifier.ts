@@ -215,9 +215,11 @@ export interface ClassifyResult {
   overturnedBlock?: { reason?: string; category?: string }
   /**
    * Set in `both` mode when stage 1 answered with something unusable — a reply that opened
-   * off-format or ran past its budget — and stage 2 therefore decided instead. Not a failure:
-   * `unavailable` stays unset and no banner is shown. Diagnostics only (logged by
-   * {@link formatVerdictLine}), so the stage-1 escalation rate can be read off the logs.
+   * off-format or ran past its budget — and stage 2 therefore decided instead. The escalation
+   * itself does not set `unavailable` and shows no banner; if stage 2 then fails, the result is
+   * `unavailable` with this facet kept. Diagnostics only, so the stage-1 escalation rate can be
+   * read off the logs: on the verdict line ({@link formatVerdictLine}) and on the pipeline's
+   * `stage=error` warning.
    */
   stage1Unusable?: 'off-format' | 'over-budget'
 }
@@ -996,8 +998,8 @@ function stage1UnusableFrom(code: string | undefined): ClassifyResult['stage1Unu
  *   an ambiguous answer, an unparseable answer, or a reply that answered
  *   unusably (off-format / over budget, coded by the transport) all escalate to
  *   stage 2, whose verdict is final (unparseable stage 2 → block, fail-closed,
- *   `unavailable` unset; the escalation is reported as
- *   {@link ClassifyResult.stage1Unusable}). Stage 1 can never block on its own
+ *   `unavailable` unset). An unusable reply's escalation is reported as
+ *   {@link ClassifyResult.stage1Unusable}. Stage 1 can never block on its own
  *   here, and a {@link requiresFullReview} shape skips it entirely.
  * - `fast`: stage 1 alone decides, and *may* block; unparseable → block.
  * - `thinking`: stage 2 alone.
