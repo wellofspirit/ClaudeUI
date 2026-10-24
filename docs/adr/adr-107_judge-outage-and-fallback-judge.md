@@ -3,6 +3,7 @@
 **Status:** Accepted (2026-10-23). Implemented on branch `fix/judge-hardening`.
 **Amends:** [ADR-081](adr-081_claudeui-owned-judge-transport.md) §3 ("No fallback": a second ClaudeUI route chosen
 by the user is now allowed; the engine transports stay deleted).
+**Amended by:** [ADR-109](adr-109_stage1-unusable-reply-escalates.md) (2026-10-24: in `both` mode an unusable stage-1 reply escalates to stage 2 instead of raising the banner or reaching the fallback judge).
 **Relates to:** [ADR-106](adr-106_judge-calibration-measured-facts.md) (the confirmation sample stays within one
 model), [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) (vault ChatGPT accounts),
 [ADR-091](adr-091_judge-blocks-hold-and-session-local-targets.md) (held blocks are unchanged).

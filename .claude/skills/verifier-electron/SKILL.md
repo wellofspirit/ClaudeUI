@@ -251,6 +251,23 @@ managed: true})`, then `window.api.setSharedProviderApiKey(id, key)`, then
   marker in the judge's user message — the transcript repeats earlier actions.
 - **Check the session's model before every prompt** (`standin/<model>`); abort on a
   mismatch rather than let an engine fall back to a hosted model.
+- **Tell the stages apart by the user message**: stage 1's instruction ("Grade HARM
+  ONLY … `<severity>`") travels in the judge's user message, stage 2's asks for
+  `<block>`. A stage-2 BLOCK is sampled twice (the confirmation sample), so a block
+  scenario sees two stage-2 requests. `routes` needs both the `pi` and `opencode`
+  keys, or `saveSharedProvider` throws.
+- **Verdict lines need `CLAUDE_UI_LOG=info`** (with `CLAUDE_UI_LOG_DIR` on the scratch
+  home): the `auto-mode allow|BLOCK (stage=…, s1=…, sev=…)` lines are info-level; the
+  default `warn` log shows only the `stage=error` warnings. Slice the log as a Buffer
+  when polling by byte offset (the lines carry em-dashes).
+- **A Claude turn without credentials** (the "don't break Claude" check): point
+  `CLAUDEUI_CLAUDE_CLI` at the main checkout's `vendor/claude-cli/bun-claude.exe` (a
+  worktree has no `vendor/`), set `loadVendorConfig('anthropic')` → `endpoint:
+{enabled, baseUrl, authToken}` → `saveVendorConfig` to a local `/v1/messages` SSE
+  stand-in (answer `count_tokens` too; one short turn makes about six requests).
+- **A worktree installed with `--ignore-scripts`** has `node_modules/electron` without
+  `dist/`: launch the main checkout's `electron.exe` with the worktree as the app
+  path, and check `process.versions.electron` matches the worktree's pin.
 - **Baseline for "same as before" claims:** `git archive <base> | tar -x -C
 <scratch>/base`, junction `node_modules`, build and launch it with its own home;
   unlink the junction afterwards (PowerShell `(Get-Item p -Force).Delete()`).

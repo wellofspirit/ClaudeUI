@@ -25,6 +25,7 @@ import {
   STAGE1_FAST_MAX_TOKENS,
   STAGE2_MAX_TOKENS,
   STAGE1_STOP_SEQUENCES,
+  STAGE1_ALLOWED_PREFIXES,
   STAGE1_ALLOW_MAX_SEVERITY,
   STAGE1_TIMEOUT_MS,
   STAGE2_TIMEOUT_MS,
@@ -36,7 +37,13 @@ import {
   type JudgeRequest
 } from '../classifier'
 import type { ChatMessage } from '../../../shared/types'
-import { JudgeWireError } from '../judge-http/types'
+import { JudgeRouteUnavailableError } from '../judge-http/transport'
+import {
+  JUDGE_EMPTY_REPLY_CODE,
+  JUDGE_OFF_FORMAT_CODE,
+  JUDGE_OVER_BUDGET_CODE,
+  JudgeWireError
+} from '../judge-http/types'
 import { blobRefOf } from '../../../test/helpers/blob-refs'
 
 let seq = 0
@@ -995,6 +1002,10 @@ describe('classify (orchestrator)', () => {
     expect(req.stopSequences).toEqual(STAGE1_STOP_SEQUENCES)
     // A copy: a transport mutating its request cannot poison the constant.
     expect(req.stopSequences).not.toBe(STAGE1_STOP_SEQUENCES)
+    // Stage 1 may only open with a grade (or a <thinking> block a custom endpoint emits).
+    expect(req.allowedPrefixes).toEqual(['<severity>', '<thinking>'])
+    expect(req.allowedPrefixes).toEqual(STAGE1_ALLOWED_PREFIXES)
+    expect(req.allowedPrefixes).not.toBe(STAGE1_ALLOWED_PREFIXES)
     expect(req.user).toContain('Respond with <severity>N</severity> ONLY')
   })
 
@@ -1279,6 +1290,162 @@ describe('classify (orchestrator)', () => {
     expect(errored.raw).toBeUndefined()
   })
 
+  it.each([
+    ['off-format', JUDGE_OFF_FORMAT_CODE],
+    ['over-budget', JUDGE_OVER_BUDGET_CODE],
+    ['empty', JUDGE_EMPTY_REPLY_CODE]
+  ])(
+    'both mode: an unusable stage-1 reply (%s) escalates to stage 2 and its verdict stands',
+    async (facet, code) => {
+      const allow = vi
+        .fn()
+        .mockRejectedValueOnce(
+          new JudgeWireError('judge reply did not open with the required format', { code })
+        )
+        .mockResolvedValueOnce('<block>no</block>')
+      expect(await classify({ ...base, twoStageMode: 'both' }, allow)).toEqual({
+        block: false,
+        stage: 'thinking',
+        stage1Unusable: facet
+      })
+      // Stage 1, then stage 2 — the unusable reply is not retried.
+      expect(allow).toHaveBeenCalledTimes(2)
+      expect(reqs(allow)[1].stage).toBe('thinking')
+
+      const block = vi
+        .fn()
+        .mockRejectedValueOnce(new JudgeWireError('judge output exceeded its budget', { code }))
+        .mockResolvedValueOnce('<block>yes</block><reason>force-push to main</reason>')
+      const r = await classify({ ...base, twoStageMode: 'both' }, block)
+      expect(r).toMatchObject({
+        block: true,
+        stage: 'thinking',
+        reason: 'force-push to main',
+        stage1Unusable: facet
+      })
+      // The model answered and the route is fine: no banner, no failed stage.
+      expect(r.unavailable).toBeUndefined()
+      expect(r.error).toBeUndefined()
+    }
+  )
+
+  it('both mode: an unusable stage-1 reply whose stage 2 then fails is unavailable, with the facet kept', async () => {
+    const judge = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new JudgeWireError('judge reply did not open with the required format', {
+          code: JUDGE_OFF_FORMAT_CODE
+        })
+      )
+      .mockRejectedValueOnce(new Error('judge down'))
+    const r = await classify({ ...base, twoStageMode: 'both' }, judge)
+    expect(r).toMatchObject({
+      block: true,
+      stage: 'error',
+      unavailable: true,
+      stage1Unusable: 'off-format'
+    })
+    expect(r.error).toContain('judge down')
+    expect(judge).toHaveBeenCalledTimes(2)
+  })
+
+  it('both mode: a coded stage-1 HTTP error is route trouble — still unavailable, no escalation', async () => {
+    const judge = vi
+      .fn()
+      .mockRejectedValue(new JudgeWireError('HTTP 500', { status: 500, routeKey: 'k' }))
+    const r = await classify({ ...base, twoStageMode: 'both' }, judge)
+    expect(r).toMatchObject({ block: true, stage: 'error', unavailable: true, errorStatus: 500 })
+    expect(r.stage1Unusable).toBeUndefined()
+    expect(judge).toHaveBeenCalledTimes(1)
+  })
+
+  it('both mode: a coded error that is not a JudgeWireError never escalates', async () => {
+    // The gate is `instanceof JudgeWireError`, not "has a code" — a provider error that
+    // happens to carry the string must not be read as "the model answered unusably".
+    const plain = new Error('judge down') as Error & { code?: string }
+    plain.code = JUDGE_OFF_FORMAT_CODE
+    const coded = vi.fn().mockRejectedValue(plain)
+    expect(await classify({ ...base, twoStageMode: 'both' }, coded)).toMatchObject({
+      block: true,
+      stage: 'error',
+      unavailable: true
+    })
+    expect(coded).toHaveBeenCalledTimes(1)
+
+    const route = vi
+      .fn()
+      .mockRejectedValue(new JudgeRouteUnavailableError('no-credential', 'No key.'))
+    expect(await classify({ ...base, twoStageMode: 'both' }, route)).toMatchObject({
+      block: true,
+      stage: 'error',
+      unavailable: true
+    })
+    expect(route).toHaveBeenCalledTimes(1)
+  })
+
+  it('both mode: an escalated stage-2 block keeps the facet through two-sample confirmation', async () => {
+    const kept = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new JudgeWireError('judge output exceeded its budget', { code: JUDGE_OVER_BUDGET_CODE })
+      )
+      .mockResolvedValueOnce('<block>yes</block><reason>force-push to main</reason>')
+      .mockResolvedValueOnce('<block>yes</block><reason>still blocked</reason>')
+    const blocked = await classify({ ...base, twoStageMode: 'both' }, kept)
+    expect(blocked).toMatchObject({
+      block: true,
+      stage: 'thinking',
+      reason: 'force-push to main',
+      stage1Unusable: 'over-budget'
+    })
+    expect(kept).toHaveBeenCalledTimes(3)
+
+    // The stage-2 confirmation overturns the block — the facet still rides along.
+    const overturned = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new JudgeWireError('judge reply did not open with the required format', {
+          code: JUDGE_OFF_FORMAT_CODE
+        })
+      )
+      .mockResolvedValueOnce('<block>yes</block><reason>looked bad</reason>')
+      .mockResolvedValueOnce('<block>no</block>')
+    const r = await classify({ ...base, twoStageMode: 'both' }, overturned)
+    expect(r).toMatchObject({
+      block: false,
+      stage: 'thinking',
+      overturnedBlock: { reason: 'looked bad' },
+      stage1Unusable: 'off-format'
+    })
+    expect(r.unavailable).toBeUndefined()
+    expect(overturned).toHaveBeenCalledTimes(3)
+  })
+
+  it('fast mode: an unusable reply is unchanged — unavailable, no stage 2', async () => {
+    for (const code of [JUDGE_OFF_FORMAT_CODE, JUDGE_OVER_BUDGET_CODE, JUDGE_EMPTY_REPLY_CODE]) {
+      const judge = vi.fn().mockRejectedValue(new JudgeWireError('unusable', { code }))
+      const r = await classify({ ...base, twoStageMode: 'fast' }, judge)
+      expect(r).toMatchObject({ block: true, stage: 'error', unavailable: true })
+      expect(r.stage1Unusable).toBeUndefined()
+      expect(judge).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it('only `both` mode stage 1 names allowedPrefixes; stage 2 and `fast` never do', async () => {
+    const judge = vi
+      .fn()
+      .mockResolvedValueOnce('<severity>90')
+      .mockResolvedValueOnce('<block>no</block>')
+    await classify({ ...base, twoStageMode: 'both' }, judge)
+    const [s1, s2] = reqs(judge)
+    expect(s1.allowedPrefixes).toEqual(STAGE1_ALLOWED_PREFIXES)
+    expect('allowedPrefixes' in s2).toBe(false)
+
+    const fast = vi.fn().mockResolvedValue('<block>no</block>')
+    await classify({ ...base, twoStageMode: 'fast' }, fast)
+    expect('allowedPrefixes' in reqs(fast)[0]).toBe(false)
+  })
+
   it('transport throws at STAGE 1 → block + unavailable, no escalation, with the thrown message on `error`', async () => {
     const judge = vi.fn().mockRejectedValue(new Error('judge down'))
     const r = await classify({ ...base, twoStageMode: 'both' }, judge)
@@ -1359,6 +1526,21 @@ describe('classify (orchestrator)', () => {
     expect(r.unavailable).toBeUndefined()
     expect(r.errorStatus).toBeUndefined()
     expect(r.retryAtMs).toBeUndefined()
+  })
+
+  it('formatVerdictLine names an unusable stage-1 reply after the caller facets, before sev', () => {
+    expect(
+      formatVerdictLine(
+        { block: false, stage: 'thinking', stage1Unusable: 'off-format', severity: 80 },
+        'bash',
+        ['judge=fallback OpenAI · gpt-4.1-mini']
+      )
+    ).toBe(
+      'auto-mode allow (stage=thinking, judge=fallback OpenAI · gpt-4.1-mini, s1=off-format, sev=80) bash'
+    )
+    expect(
+      formatVerdictLine({ block: false, stage: 'thinking', stage1Unusable: 'empty' }, 'bash')
+    ).toBe('auto-mode allow (stage=thinking, s1=empty) bash')
   })
 
   it('formatVerdictLine puts a caller facet right after the stage', () => {

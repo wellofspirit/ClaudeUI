@@ -7,7 +7,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { JudgeRequest } from '../../classifier'
 import { judgeCacheKey } from '../caps'
-import { JUDGE_OVER_BUDGET_MESSAGE } from '../stream-text'
+import { JUDGE_OFF_FORMAT_MESSAGE, JUDGE_OVER_BUDGET_MESSAGE } from '../stream-text'
 import { makeHttpJudgeTransport } from '../transport'
 import {
   JUDGE_CAPTURE_REASONING_MAX_CHARS,
@@ -200,6 +200,28 @@ describe('capture — what is reported', () => {
     })
     expect(Date.parse(r.ts)).not.toBeNaN()
     expect(r.durationMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it('an off-format reply is captured as an error whose `raw` is the text that arrived', async () => {
+    const route = routeFor('chatgpt', 'gpt-6-luna')
+    // '<th' is still a viable prefix of '<thinking>'; 'e rest' rules both prefixes out, so the
+    // throw lands on the second delta and `raw` holds exactly the two that arrived.
+    const f = fetchOf(
+      sse([respDelta('<th'), respDelta('e rest'), respDelta('never read'), COMPLETED])
+    )
+    const { transport, records } = capturing(route, f)
+
+    await expect(
+      transport({ ...REQ, allowedPrefixes: ['<severity>', '<thinking>'] })
+    ).rejects.toThrow(`chatgpt · gpt-6-luna: ${JUDGE_OFF_FORMAT_MESSAGE}`)
+
+    expect(records).toHaveLength(1)
+    const [r] = records
+    expect(r.outcome).toBe('error')
+    expect(r.error).toBe(`chatgpt · gpt-6-luna: ${JUDGE_OFF_FORMAT_MESSAGE}`)
+    expect(r.raw).toBe('<the rest')
+    expect(r.text).toBeUndefined()
+    expect(r.finish).toBeUndefined()
   })
 
   it('the same over-budget stream on the chat wire keeps the overflowing delta too', async () => {

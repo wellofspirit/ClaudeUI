@@ -8,6 +8,8 @@ export interface EvalResult {
   unavailable?: boolean
   /** The deciding stage blocked, and its second sample (two-sample confirmation) allowed — so the call ran. */
   overturnedBlock?: { reason?: string; category?: string }
+  /** `both` mode: stage 1 answered unusably and stage 2 decided instead (an escalation, not a failure). */
+  stage1Unusable?: 'off-format' | 'over-budget' | 'empty'
   /** Wall time of the whole decision (every judge call it made), ms. */
   durationMs?: number
   /** Judge calls the decision made (stage 1, stage 2, confirmation samples). */

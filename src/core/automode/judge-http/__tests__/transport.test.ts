@@ -13,7 +13,13 @@ import {
   judgeRouteKey,
   makeHttpJudgeTransport
 } from '../transport'
-import { JudgeWireError, type JudgeRouteResult, type ResolvedJudgeRoute } from '../types'
+import {
+  JUDGE_OFF_FORMAT_CODE,
+  JudgeWireError,
+  type JudgeCallCapture,
+  type JudgeRouteResult,
+  type ResolvedJudgeRoute
+} from '../types'
 import {
   CHAT_DONE,
   FAKE_KEY,
@@ -171,6 +177,33 @@ describe('makeHttpJudgeTransport — requests', () => {
     await expect(transport({ system: 'S', user: 'U', maxTokens: 1 })).rejects.toThrow(
       'custom-chat · m: judge output exceeded its budget'
     )
+  })
+
+  it('passes allowedPrefixes to the reader, and the labelled throw keeps the code', async () => {
+    const f = fakeFetch(
+      sse([
+        respDelta('We need assess the proposed action'),
+        respDelta('<severity>5'),
+        resp({ type: 'response.completed', response: {} })
+      ])
+    )
+    const transport = makeHttpJudgeTransport({
+      resolve: ok(routeFor('custom-responses', 'm')),
+      fetchImpl: f.asFetch
+    })
+
+    const err = await transport({
+      ...REQ,
+      stopSequences: ['</severity>'],
+      allowedPrefixes: ['<severity>', '<thinking>']
+    }).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(JudgeWireError)
+    expect((err as JudgeWireError).code).toBe(JUDGE_OFF_FORMAT_CODE)
+    expect((err as Error).message).toBe(
+      'custom-responses · m: judge reply did not open with the required format'
+    )
+    expect(f.mock.calls).toHaveLength(1)
   })
 })
 
@@ -602,6 +635,114 @@ describe('makeHttpJudgeTransport through classify()', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  /** One frame per `pull`, plus the cancel flag: proof the reader stopped instead of draining. */
+  function trackedBody(chunks: string[]) {
+    const enc = new TextEncoder()
+    let i = 0
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (i >= chunks.length) controller.close()
+        else controller.enqueue(enc.encode(chunks[i++]))
+      },
+      cancel() {
+        cancelled = true
+      }
+    })
+    return { body, cancelled: () => cancelled }
+  }
+
+  // The 2026-10-24 incident, SYNTHETIC: gpt-6-luna at reasoning effort `none` sometimes writes its
+  // deliberation into the visible reply instead of the grade. This whole reply is ~1,150 chars —
+  // past stage 1's 1,024-char budget — and reaches the wire in several deltas.
+  const INCIDENT_PROSE = [
+    "We need evaluate next action against the policy rules and the user's standing instructions before deciding whether this command may run. ",
+    'The command is a read-only listing of the working directory, so its direct harm looks low, but the surrounding context still matters for whether a boundary was set. ',
+    'Reading the rules again, no soft block names this action, and the user has not explicitly asked us to leave any directory alone in this session. ',
+    'The proposed command does not move, delete or transmit anything, and it stays inside the repository root, so no HARD rule appears to match its text. ',
+    'We therefore lean toward allowing it, while keeping the grade near the bottom of the scale because nothing here crosses an explicit boundary. ',
+    'One more pass over the carve-outs confirms the same reading: the action is routine, local and reversible, and the user asked for it. ',
+    'Nothing in the transcript suggests the user would object to an ls, and no earlier turn set a boundary around this path or this kind of inspection. ',
+    'If anything, the safer mistake would be to escalate, but there is no rule to name, so the grade stays low and the caller can proceed.'
+  ]
+  const COMPLETED = resp({ type: 'response.completed', response: {} })
+
+  it('the incident reply abandons stage 1 on its first delta and stage 2 decides', async () => {
+    const stage1 = trackedBody([...INCIDENT_PROSE.map(respDelta), COMPLETED])
+    const records: JudgeCallCapture[] = []
+    const f = fakeFetch(
+      () =>
+        new Response(stage1.body, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' }
+        }),
+      sse([respDelta('<block>no</block>'), COMPLETED])
+    )
+    const r = await classify(
+      input,
+      makeHttpJudgeTransport({
+        resolve: ok(routeFor('chatgpt', 'gpt-6-luna')),
+        fetchImpl: f.asFetch,
+        shouldCapture: () => true,
+        onCall: (c) => records.push(c)
+      })
+    )
+
+    // The model answered (unusably), so the action is not handed to the human: stage 2 decides.
+    expect(r).toMatchObject({ block: false, stage: 'thinking', stage1Unusable: 'off-format' })
+    expect(r.unavailable).toBeUndefined()
+    expect(f).toHaveBeenCalledTimes(2)
+    // Only the FIRST delta was pulled: capture concatenates every delta that arrived, and the
+    // rest of the reply was cancelled rather than read to its budget.
+    expect(records[0]).toMatchObject({ outcome: 'error', stage: 'fast' })
+    expect(records[0].raw).toBe(INCIDENT_PROSE[0])
+    expect(stage1.cancelled()).toBe(true)
+  })
+
+  it('a stage-1 reply that opens with a grade but runs past the budget escalates too', async () => {
+    const filler = 'still deliberating without committing to a grade '.repeat(30)
+    const stage1 = trackedBody([
+      respDelta('<severity>5'),
+      respDelta(filler.slice(0, 600)),
+      respDelta(filler.slice(600)),
+      COMPLETED
+    ])
+    const f = fakeFetch(
+      () =>
+        new Response(stage1.body, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' }
+        }),
+      sse([respDelta('<block>no</block>'), COMPLETED])
+    )
+    const r = await classify(
+      input,
+      makeHttpJudgeTransport({
+        resolve: ok(routeFor('chatgpt', 'gpt-6-luna')),
+        fetchImpl: f.asFetch
+      })
+    )
+
+    expect(r).toMatchObject({ block: false, stage: 'thinking', stage1Unusable: 'over-budget' })
+    expect(r.unavailable).toBeUndefined()
+    expect(f).toHaveBeenCalledTimes(2)
+  })
+
+  it('a compliant stage-1 grade stays a stage-1 allow with exactly one fetch', async () => {
+    const f = fakeFetch(sse([respDelta('<severity>3</severity>'), COMPLETED]))
+    const r = await classify(
+      input,
+      makeHttpJudgeTransport({
+        resolve: ok(routeFor('chatgpt', 'gpt-6-luna')),
+        fetchImpl: f.asFetch
+      })
+    )
+
+    expect(r).toMatchObject({ block: false, stage: 'fast', severity: 3 })
+    expect(r.stage1Unusable).toBeUndefined()
+    expect(f).toHaveBeenCalledTimes(1)
   })
 })
 

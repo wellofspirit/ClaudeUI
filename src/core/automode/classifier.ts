@@ -6,7 +6,12 @@ import {
   type ToolOutcome
 } from './ground-truth'
 import { isAgentControlTarget } from './agent-control-paths'
-import { JudgeWireError } from './judge-http/types'
+import {
+  JUDGE_EMPTY_REPLY_CODE,
+  JUDGE_OFF_FORMAT_CODE,
+  JUDGE_OVER_BUDGET_CODE,
+  JudgeWireError
+} from './judge-http/types'
 import { editPathsOf, jsonLine, renderToolCall, retryFactOf } from './retry-match'
 import { deriveCategorySet } from './rules/corpus'
 import { buildPolicyPrompt, type EnvironmentInfo } from './rules/policy'
@@ -70,7 +75,9 @@ import { buildPolicyPrompt, type EnvironmentInfo } from './rules/policy'
  * error after stage 1 ran becomes a hard block "based on stage 1 assessment".
  * We mark a transport error at *either* stage `unavailable`, and our wiring maps
  * `unavailable` → ask the human. Deliberate: an interactive desktop app can ask,
- * where cli.js must assume headless.
+ * where cli.js must assume headless. The one exception is stage 1 in `both` mode,
+ * which also escalates on a reply that ANSWERED unusably (off-format or over its
+ * budget): the route is fine, so stage 2 decides instead of the human.
  */
 
 /** Re-exported so engine wiring imports the whole policy surface from here. */
@@ -211,6 +218,15 @@ export interface ClassifyResult {
    * only: never shown to the model or the user, and never part of the decision.
    */
   overturnedBlock?: { reason?: string; category?: string }
+  /**
+   * Set in `both` mode when stage 1 answered with something unusable — a reply that was empty,
+   * opened off-format or ran past its budget — and stage 2 therefore decided instead. The
+   * escalation itself does not set `unavailable` and shows no banner; if stage 2 then fails, the
+   * result is `unavailable` with this facet kept. Diagnostics only, so the stage-1 escalation
+   * rate can be read off the logs: on the verdict line ({@link formatVerdictLine}) and on the
+   * pipeline's `stage=error` warning.
+   */
+  stage1Unusable?: 'off-format' | 'over-budget' | 'empty'
 }
 
 /**
@@ -237,6 +253,13 @@ export interface JudgeRequest {
    * its per-stage reasoning settings from it; a transport with none ignores it.
    */
   stage?: 'fast' | 'thinking'
+  /**
+   * The reply must open with one of these (after leading whitespace, case-insensitive). A
+   * reply that visibly opens with anything else is abandoned at once with a
+   * {@link JudgeWireError} coded `JUDGE_OFF_FORMAT_CODE`, instead of being read to its budget.
+   * Set only on `both` mode's stage 1, whose grade must begin with `<severity>`; absent → no check.
+   */
+  allowedPrefixes?: readonly string[]
 }
 
 /** Inject the model call: a judge request → raw completion text. */
@@ -519,6 +542,16 @@ export const STAGE2_MAX_TOKENS = 8192
 export const STAGE1_STOP_SEQUENCES = ['</severity>']
 
 /**
+ * What stage 1's reply may open with in `both` mode. A reply that visibly opens with
+ * anything else is abandoned at once and escalates to stage 2, instead of being read to its
+ * budget: gpt-6-luna at effort `none` sometimes writes its deliberation into the visible reply
+ * ("We need assess …"), which used to parse late or overflow into `unavailable`. `<thinking>`
+ * is allowed because {@link parseSeverityOrNull} strips those blocks, and some custom endpoints
+ * emit them.
+ */
+export const STAGE1_ALLOWED_PREFIXES = ['<severity>', '<thinking>']
+
+/**
  * The highest stage-1 grade that clears an action without stage 2 (ADR-083
  * §2). cli.js escalates iff `severity > t1`, and 15 is its fallback `t1`; the
  * ADR-083 sweep put the best accuracy between 15 and 20, and a security gate
@@ -689,6 +722,7 @@ export function formatVerdictLine(
     // A block the confirmation sample overturned (decision 3): grep-able so the
     // logs show how often a single sample blocks an action the stage would allow.
     ...(result.overturnedBlock ? ['overturned=block'] : []),
+    ...(result.stage1Unusable ? [`s1=${result.stage1Unusable}`] : []),
     ...(result.severity !== undefined ? [`sev=${result.severity}`] : []),
     ...(result.category ? [`rule=${result.category}`] : [])
   ]
@@ -952,14 +986,27 @@ export function isSingleSampleBlock(
 }
 
 /**
+ * The `stage1Unusable` facet a stage-1 wire error code maps to, or `undefined` when the code is
+ * not one of the two "answered, but unusably" signals — a route failure must stay `unavailable`.
+ */
+function stage1UnusableFrom(code: string | undefined): ClassifyResult['stage1Unusable'] {
+  if (code === JUDGE_OFF_FORMAT_CODE) return 'off-format'
+  if (code === JUDGE_OVER_BUDGET_CODE) return 'over-budget'
+  if (code === JUDGE_EMPTY_REPLY_CODE) return 'empty'
+  return undefined
+}
+
+/**
  * Run the classifier. `twoStageMode`:
  *
  * - `both` (default): cheap harm-only stage 1 grades severity; a grade at or
  *   below {@link STAGE1_ALLOW_MAX_SEVERITY} → allow and done. A higher grade,
- *   an ambiguous answer, or an unparseable answer all escalate to stage 2,
- *   whose verdict is final (unparseable stage 2 → block, fail-closed,
- *   `unavailable` unset). Stage 1 can never block on its own here, and a
- *   {@link requiresFullReview} shape skips it entirely.
+ *   an ambiguous answer, an unparseable answer, or a reply that answered
+ *   unusably (off-format / over budget, coded by the transport) all escalate to
+ *   stage 2, whose verdict is final (unparseable stage 2 → block, fail-closed,
+ *   `unavailable` unset). An unusable reply's escalation is reported as
+ *   {@link ClassifyResult.stage1Unusable}. Stage 1 can never block on its own
+ *   here, and a {@link requiresFullReview} shape skips it entirely.
  * - `fast`: stage 1 alone decides, and *may* block; unparseable → block.
  * - `thinking`: stage 2 alone.
  *
@@ -967,7 +1014,10 @@ export function isSingleSampleBlock(
  * {@link STAGE1_TIMEOUT_MS}/{@link STAGE2_TIMEOUT_MS} budget — →
  * `{ block: true, unavailable: true, error }`, which the wiring maps to "ask
  * the human" (and logs `error` as the cause — see
- * {@link ClassifyResult.error}).
+ * {@link ClassifyResult.error}). EXCEPT stage 1 in `both` mode: a throw coded
+ * `JUDGE_EMPTY_REPLY_CODE` / `JUDGE_OFF_FORMAT_CODE` / `JUDGE_OVER_BUDGET_CODE`
+ * means the model answered unusably, so stage 2 runs and the result carries
+ * `stage1Unusable` instead of `unavailable`.
  *
  * ## Two-sample confirmation (decision 3)
  *
@@ -1000,6 +1050,12 @@ export async function classify(
   /** A failed {@link call}: the message, plus what a wire error carried beyond it. */
   type CallFailure = Pick<ClassifyResult, 'errorStatus' | 'retryAtMs' | 'errorRouteKey'> & {
     error: string
+    /**
+     * The wire error's `code`, when it carried one — the "answered, but unusably" codes
+     * (`JUDGE_EMPTY_REPLY_CODE` / `JUDGE_OFF_FORMAT_CODE` / `JUDGE_OVER_BUDGET_CODE`) are what
+     * stage 1 escalates on.
+     */
+    errorCode?: string
   }
 
   const errored = (failure: CallFailure): ClassifyResult => ({
@@ -1063,7 +1119,8 @@ export async function classify(
           ? {
               ...(err.status !== undefined ? { errorStatus: err.status } : {}),
               ...(err.retryAtMs !== undefined ? { retryAtMs: err.retryAtMs } : {}),
-              ...(err.routeKey !== undefined ? { errorRouteKey: err.routeKey } : {})
+              ...(err.routeKey !== undefined ? { errorRouteKey: err.routeKey } : {}),
+              ...(err.code !== undefined ? { errorCode: err.code } : {})
             }
           : {})
       }
@@ -1186,9 +1243,20 @@ export async function classify(
     maxTokens: STAGE1_BOTH_MAX_TOKENS,
     timeoutMs: STAGE1_TIMEOUT_MS,
     // Copy — the exported constant must not be mutable by a transport.
-    stopSequences: [...STAGE1_STOP_SEQUENCES]
+    stopSequences: [...STAGE1_STOP_SEQUENCES],
+    // Only stage 1 in `both` mode carries this: a reply that does not open with a grade is
+    // abandoned at once and escalates below instead of reading to its budget.
+    allowedPrefixes: [...STAGE1_ALLOWED_PREFIXES]
   })
-  if (!out1.ok) return errored(out1)
+  if (!out1.ok) {
+    // The model ANSWERED, but unusably: stage 2 decides, and `unavailable` (→ the human) is not
+    // the answer. Any other stage-1 failure — HTTP error, timeout, abort, route unavailable —
+    // is route trouble and keeps failing closed to the human.
+    const unusable = stage1UnusableFrom(out1.errorCode)
+    if (!unusable) return errored(out1)
+    const r2 = await runStage2()
+    return { ...r2, stage1Unusable: unusable }
+  }
   const severity = typeof out1.raw === 'string' ? parseSeverityOrNull(out1.raw) : null
   if (severity !== null && severity <= STAGE1_ALLOW_MAX_SEVERITY) {
     return { block: false, stage: 'fast', severity }

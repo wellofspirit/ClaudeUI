@@ -10,9 +10,17 @@ import {
   JUDGE_OVER_BUDGET_MESSAGE,
   JUDGE_STREAM_TRUNCATED_MESSAGE
 } from '../stream-text'
-import { JudgeWireError } from '../types'
+import { JUDGE_OFF_FORMAT_CODE, JudgeWireError } from '../types'
 import { buildChatBody, readChatStream } from '../wire-chat'
-import { CHAT_DONE, chat, chatDelta, chatFinish, framesOf, routeFor } from './helpers'
+import {
+  CHAT_DONE,
+  chat,
+  chatDelta,
+  chatFinish,
+  countingFrames,
+  framesOf,
+  routeFor
+} from './helpers'
 
 const SYSTEM = 'POLICY — the whole judge system prompt'
 const USER = 'transcript + proposed action + instruction'
@@ -344,6 +352,48 @@ describe('readChatStream', () => {
         maxChars: 10
       })
     ).rejects.toThrow(JUDGE_OVER_BUDGET_MESSAGE)
+  })
+
+  it('an off-format first text delta throws coded and pulls no further frame', async () => {
+    const { frames, pulls } = countingFrames(
+      framesOf([chatDelta('We need assess the action'), chatDelta('<block>no'), CHAT_DONE])
+    )
+    const err = await readChatStream(frames, {
+      maxChars: 1024,
+      allowedPrefixes: ['<severity>', '<thinking>']
+    }).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(JudgeWireError)
+    expect((err as JudgeWireError).code).toBe(JUDGE_OFF_FORMAT_CODE)
+    expect(pulls()).toBe(1)
+  })
+
+  it('reasoning_content is not text: prose there does not trip allowedPrefixes', async () => {
+    const reasoning: string[] = []
+    const out = await readChatStream(
+      framesOf([
+        chat({
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: 'We need assess the action' },
+              finish_reason: null
+            }
+          ]
+        }),
+        chatDelta('<severity>3'),
+        chatFinish('stop'),
+        CHAT_DONE
+      ]),
+      {
+        maxChars: 1024,
+        allowedPrefixes: ['<severity>', '<thinking>'],
+        onReasoningDelta: (d) => reasoning.push(d)
+      }
+    )
+
+    expect(out).toMatchObject({ text: '<severity>3', finish: 'stop' })
+    expect(reasoning).toEqual(['We need assess the action'])
   })
 
   it('after the stop cut, a runaway tail ends the drain instead of throwing', async () => {

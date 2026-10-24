@@ -311,6 +311,7 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
     const seen: { usage: JudgeUsageSample | null } = { usage: null }
     const readOpts = {
       ...(req.stopSequences ? { stopSequences: req.stopSequences } : {}),
+      ...(req.allowedPrefixes ? { allowedPrefixes: req.allowedPrefixes } : {}),
       maxChars: maxCharsFor(req),
       onUsageSeen: (u: JudgeUsageSample) => {
         seen.usage = u
