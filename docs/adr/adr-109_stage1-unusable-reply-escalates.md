@@ -26,17 +26,20 @@ capture on):
   (`invalid_prompt`) mid-deliberation. Renaming the quoted `<severity>` tags in those transcripts changed the rate
   little (22/48 → 18/48 in a replay), so the subject matter, not the quoted grammar, drives it.
 - Replaying one over-budget call 102 times: 6 off-format; four other calls 0 of 80.
+- Once, the stream completed with a single assistant message whose text was empty (4 output tokens billed, no text
+  delta, `output_text.done` with `""`); a replay of that call reproduced it 1 time in 42.
 
 An over-budget reply threw, `classify()` turned the throw into `unavailable`, and the action went to the human with
 the session's "Auto-mode can't judge here" banner — although the route was healthy and the model had answered.
 
 ## Decision
 
-1. **An unusable stage-1 reply escalates.** In `both` mode, a stage-1 reply that opens off-format or runs past its
-   budget sends the action to stage 2, whose verdict is final, exactly like an unparseable grade already did. The
-   transport keeps throwing on both conditions, with a `JudgeWireError` coded `judge:off-format` /
-   `judge:over-budget`; only `classify()`'s `both`-mode stage 1 turns those two codes into an escalation. Every
-   other stage-1 failure (HTTP error, timeout, abort, missing route) stays `unavailable`. `fast` mode and stage 2
+1. **An unusable stage-1 reply escalates.** In `both` mode, a stage-1 reply that opens off-format, runs past its
+   budget, or completes with no visible text sends the action to stage 2, whose verdict is final, exactly like an unparseable grade already did. The
+   transport keeps throwing on both conditions, with a `JudgeWireError` coded `judge:off-format`,
+   `judge:over-budget` or `judge:empty`; only `classify()`'s `both`-mode stage 1 turns those three codes into an escalation. Every
+   other stage-1 failure (HTTP error, timeout, abort, missing route, and a reply whose reasoning used the whole
+   budget, which is a judge-configuration problem) stays `unavailable`. `fast` mode and stage 2
    keep their verdict semantics.
 2. **An off-format reply is abandoned at once.** The stage-1 request names the prefixes the reply may open with
    (`<severity>`, and `<thinking>` because the severity parser strips thinking blocks). The reader checks the kept
@@ -49,7 +52,7 @@ the session's "Auto-mode can't judge here" banner — although the route was hea
    per-reply event. In `fast` mode and stage 2 the human card still gives the cause.
 4. **The fallback judge is not consulted** when stage 1 escalates and stage 2 decides; it still runs when that
    stage 2 fails, as for any unavailable result.
-5. **Observability.** The verdict log line carries `s1=off-format` / `s1=over-budget` on an escalation (on the
+5. **Observability.** The verdict log line carries `s1=off-format` / `s1=over-budget` / `s1=empty` on an escalation (on the
    `stage=error` warning too, when stage 2 then fails); the judge-eval report keeps the field. Judge-reply capture
    records an abandoned call as an error with the text that arrived.
 
