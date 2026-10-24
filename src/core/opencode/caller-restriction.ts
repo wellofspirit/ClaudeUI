@@ -18,8 +18,8 @@
  * a deny with no exact Claude-form equivalent becomes a whole-category deny —
  * never dropped. An ask with no equivalent is kept when it maps to a category,
  * and `external_directory` asks are not mapped (every target already gates
- * access outside its workspace: targets get no additional directories,
- * ADR-033).
+ * access outside its workspace: its scope is the user's additional
+ * directories plus its dispatcher's directory, ADR-108 as amended).
  */
 import { posix, win32 } from 'node:path'
 import type { Permission_Ruleset } from './protocol-v2/openapi'

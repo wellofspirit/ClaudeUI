@@ -1067,24 +1067,15 @@ export function planModeOutranksRules(
  * their presence is harmless/inert, never causes a crash or a surprise
  * default-allow) but not yet acted on:
  *
- *  - `additionalDirectories`: opencode's own parity mapping compiles these to
- *    `external_directory:allow` rules (permission-compiler.ts), but
- *    ClaudeUI's opencode integration deliberately leaves the
- *    `external_directory` PERMISSION CATEGORY itself at its `{*:allow}`
- *    baseline in every mode (ADR-022, "Consequences": "We omit opencode's
- *    external_directory guard... A bare `{external_directory:ask}` would
- *    spuriously prompt on opencode's own tool-output/temp dirs") — so on
- *    opencode, reads/edits OUTSIDE the project directory are ALREADY
- *    unconditionally ungated today, additionalDirectories or not. pi's
- *    modeBaseDecision has no equivalent "outside the project boundary" gate
- *    to begin with (fileRead/fileEdit/fileWrite/search fall straight through
- *    to the mode base regardless of path) — so pi is ALREADY at parity with
- *    opencode's current (ADR-022-decided) unrestricted-external-directory
- *    stance without any extra code. Faithfully porting opencode's full
- *    `external_directory` CONCEPT (worktree containment, per-tool
- *    dirname-based glob computation, a distinct ask/allow tier) would be a
- *    materially larger feature than this fix's path-glob-rule scope, for a
- *    restriction neither engine currently enforces. Deferred.
+ *  - `additionalDirectories`: not a rung of this ladder, which has no path
+ *    containment for read/edit/write/search (they fall straight through to the
+ *    mode base regardless of path, so pi needs no `external_directory`
+ *    concept). They are consumed elsewhere: the auto-mode read-only gate takes
+ *    them as extra in-scope roots (`automode/read-only.ts`), and on opencode
+ *    2.x ClaudeUI's own `external_directory` ask (in every mode,
+ *    `opencode/permission-v2.ts`) is lifted for them by `<dir>/*` allows
+ *    compiled from this field. (ADR-022's `{*:allow}` baseline for
+ *    `external_directory` is 1.x history, superseded by ADR-097.)
  *  - `defaultMode`: unconsumed on the opencode side too (OpencodeSession.ts
  *    merges it into its own rules struct and never reads it back) — there is
  *    no cross-engine parity behavior to mirror. Claude Code itself uses
@@ -1262,7 +1253,7 @@ export function withoutAllowRules(rules: MergedClaudeRules): MergedClaudeRules {
  * An empty rule set. Exported (ADR-033 M4c) for the dispatcher's pi and Codex
  * target gates, which used it as their rules until ADR-085 §3 gave every
  * dispatch target the user's deny/ask rules (never the allow tier — see
- * cross-engine-dispatcher.ts's `userDenyAsk`); kept for any caller that needs
+ * cross-engine-dispatcher.ts's `targetRules`); kept for any caller that needs
  * a rule-less ladder.
  *
  * Frozen — object AND every array property — since this is a SHARED singleton

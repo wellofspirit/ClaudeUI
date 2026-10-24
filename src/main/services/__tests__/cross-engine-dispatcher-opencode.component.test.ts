@@ -3669,9 +3669,10 @@ describe('opencode target — workdir', () => {
     expect(ledger.rows.get(row.id)!.state).toBe('idle')
   })
   // A target in ANOTHER directory (a sibling git worktree) is bound by the rules of the parent's
-  // directory AND its own; its judge counts the parent's directory and the user's additional
-  // directories as local — context only, never an allow path (ADR-033).
-  describe('the rules union and the judge context', () => {
+  // directory AND its own; its scope is the parent's directory plus the user's additional
+  // directories (ADR-108 as amended) — real scope for the ruleset and the judge, never the user's
+  // allow rules (ADR-033).
+  describe('the rules union and the target scope', () => {
     const PARENT_DENY = 'Bash(rm *)'
     const TARGET_ASK = 'Bash(npm publish:*)'
     const localLine = /count as local\): (.*)/
@@ -3697,26 +3698,87 @@ describe('opencode target — workdir', () => {
       expect(rules).toContainEqual({ action: 'shell', resource: 'npm publish*', effect: 'ask' })
     })
 
-    it('the user’s additional directories add nothing to the target’s ruleset', async () => {
+    it('B3/B7: the additional directories become external_directory allows; the user’s allow tier still adds nothing', async () => {
       const { parent, wt, granted } = tree()
-      const ruleset = async (additional: string[]): Promise<Permission_Rule[]> => {
-        const { dispatcher, client } = makeHarness({
-          loadUserRules: rulesFor(parent, wt, additional)
-        })
-        await dispatcher.dispatch(
-          { engine: 'opencode', prompt: 'x', workdir: 'wt' },
-          makeCtx({ cwd: parent })
-        )
-        return createdRules(client)
-      }
-      const withDirs = await ruleset([granted])
-      expect(withDirs).toEqual(await ruleset([]))
-      expect(
-        withDirs.filter((r) => r.action === 'external_directory' && r.effect === 'allow')
-      ).not.toContainEqual(
-        expect.objectContaining({ resource: expect.stringContaining('granted') })
+      const rulesWithAllow = (cwd: string): MergedClaudeRules => ({
+        ...rulesFor(parent, wt, [granted])(cwd),
+        allow: ['Bash(npm test:*)', 'Read(/secret/**)']
+      })
+      const { dispatcher, client } = makeHarness({ loadUserRules: rulesWithAllow })
+      await dispatcher.dispatch(
+        { engine: 'opencode', prompt: 'x', workdir: 'wt' },
+        makeCtx({ cwd: parent })
       )
-      expect(JSON.stringify(withDirs)).not.toContain('granted')
+      const rules = createdRules(client)
+      const dirAllows = rules
+        .filter((r) => r.action === 'external_directory' && r.effect === 'allow')
+        .map((r) => r.resource)
+      // The user's directory and the parent's own directory (the target runs elsewhere).
+      expect(dirAllows).toContain(`${granted.replaceAll('\\', '/')}/*`)
+      expect(dirAllows).toContain(`${parent.replaceAll('\\', '/')}/*`)
+      // No allow from the user's allow tier (ADR-033 stays), the deny/ask still bind (B7).
+      expect(JSON.stringify(rules)).not.toContain('npm test')
+      expect(JSON.stringify(rules)).not.toContain('/secret/')
+      expect(rules).toContainEqual({ action: 'shell', resource: 'rm *', effect: 'deny' })
+    })
+
+    it.runIf(process.platform === 'win32')(
+      'B3: plan mode’s host pre-check counts the additional directories (a PowerShell read in one is not refused)',
+      async () => {
+        const { parent, granted } = tree()
+        const h = makeHarness({
+          loadUserRules: () => userRules({ additionalDirectories: [granted] })
+        })
+        h.fake.next({ hold: true })
+        const ctx = makeCtx({ toolUseId: 'tu-1', autonomyMode: 'plan', cwd: parent })
+        const running = h.dispatcher.dispatch({ engine: 'opencode', prompt: 'work' }, ctx)
+        await tick()
+        const ask = async (id: string, dir: string) => {
+          const command = `Get-Content "${dir}\\notes.txt"`
+          h.fake.ask('oc-sess-1', {
+            id,
+            action: 'shell',
+            resources: [command],
+            callID: `call_${id}`,
+            input: { command }
+          })
+          await tick(6)
+        }
+        await ask('per_in', granted)
+        await ask('per_out', join(granted, '..', 'nowhere'))
+        // Outside every root the checker cannot vouch for it: plan mode refuses.
+        expect(h.client.replyPermission).toHaveBeenCalledWith('oc-sess-1', 'per_out', {
+          decision: 'reject',
+          message: PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
+        })
+        // Inside the user's directory it is plan-read-only: a card, not a refusal.
+        expect(h.client.replyPermission).not.toHaveBeenCalledWith(
+          'oc-sess-1',
+          'per_in',
+          expect.anything()
+        )
+        expect(emitted(ctx, 'session:approval-request')).toHaveLength(1)
+        h.fake.finish('oc-sess-1')
+        await running
+      }
+    )
+
+    it('a relative additional directory in the target’s own settings is resolved against the target', async () => {
+      const { parent, wt } = tree()
+      const real = uiPath(realpathSync.native(wt))
+      mkdirSync(join(wt, 'libs'))
+      const { dispatcher, client } = makeHarness({
+        loadUserRules: (cwd) =>
+          cwd === real ? userRules({ additionalDirectories: ['libs'] }) : userRules()
+      })
+      await dispatcher.dispatch(
+        { engine: 'opencode', prompt: 'x', workdir: 'wt' },
+        makeCtx({ cwd: parent })
+      )
+      const dirAllows = createdRules(client)
+        .filter((r) => r.action === 'external_directory' && r.effect === 'allow')
+        .map((r) => r.resource)
+      expect(dirAllows).toContain(`${join(real, 'libs').replaceAll('\\', '/')}/*`)
     })
 
     describe('the judge', () => {
@@ -3761,20 +3823,23 @@ describe('opencode target — workdir', () => {
         expect(localLine.exec(promptOf(judge.requests[0]))?.[1]).toBe(granted)
       })
 
-      it('they are context only: a read-only command in an additional directory is still judged', async () => {
-        const { judge, client, granted } = await judged(true, (dir) => [
+      it('B1: a read-only command in an additional directory needs no judge; one outside every root does', async () => {
+        const { judge, client } = await judged(true, (dir) => [
           `cat "${dir.replaceAll('\\', '/')}/notes.txt"`,
-          'cat notes.txt'
+          'cat notes.txt',
+          `cat "${join(dir, '..', 'nowhere').replaceAll('\\', '/')}/notes.txt"`
         ])
-        // The first goes to the judge; the second, read-only in the target's own directory, needs none.
+        // The first two are read-only inside a root (the user's directory, the target's own); only
+        // the third, outside every root, goes to the judge.
         expect(judge.requests).toHaveLength(1)
-        expect(promptOf(judge.requests[0])).toContain(`${granted.replaceAll('\\', '/')}/notes.txt`)
-        expect(client.replyPermission).toHaveBeenCalledWith('oc-sess-1', 'per_0', {
-          decision: 'once'
-        })
-        expect(client.replyPermission).toHaveBeenCalledWith('oc-sess-1', 'per_1', {
-          decision: 'once'
-        })
+        // The judged action is the last line of the prompt's "Proposed next action".
+        const proposed = promptOf(judge.requests[0]).split('Proposed next action')[1]
+        expect(proposed).toContain('nowhere/notes.txt')
+        expect(proposed).not.toContain('granted/notes.txt')
+        for (const id of ['per_0', 'per_1', 'per_2'])
+          expect(client.replyPermission).toHaveBeenCalledWith('oc-sess-1', id, {
+            decision: 'once'
+          })
       })
     })
   })

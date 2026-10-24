@@ -64,14 +64,25 @@ export function codexModePolicy(mode: string): CodexModePolicy {
   return CODEX_TURN_POLICY[mode] ?? CODEX_TURN_POLICY.default
 }
 
-/** {@link codexModePolicy} in the shape `turn/start` takes (a POLICY, not a mode). */
-export function codexTurnPolicy(mode: string): {
+/**
+ * {@link codexModePolicy} in the shape `turn/start` takes (a POLICY, not a mode).
+ * `writableRoots` (absolute, existing — see `codexSandboxPolicy`) are the user's additional
+ * directories; `read-only` (plan) ignores them.
+ */
+export function codexTurnPolicy(
+  mode: string,
+  writableRoots: readonly string[] = []
+): {
   approvalPolicy: AskForApproval
   sandboxPolicy: SandboxPolicy
   approvalsReviewer: ApprovalsReviewer
 } {
   const { approvalPolicy, sandbox, approvalsReviewer } = codexModePolicy(mode)
-  return { approvalPolicy, sandboxPolicy: codexSandboxPolicy(sandbox), approvalsReviewer }
+  return {
+    approvalPolicy,
+    sandboxPolicy: codexSandboxPolicy(sandbox, writableRoots),
+    approvalsReviewer
+  }
 }
 
 /** Codex takes inline images only, and only well-formed base64 of one. */

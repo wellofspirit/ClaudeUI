@@ -1,6 +1,7 @@
 # ADR-108: A dispatched agent can run in its own working directory, and its judge knows the user's granted directories
 
-**Status:** Accepted (2026-10-23). Implemented on branch `fix/judge-hardening`.
+**Status:** Accepted (2026-10-23). Implemented on branch `fix/judge-hardening`. §3 (additional directories) and §4
+(context only) amended 2026-10-24: a target's additional directories are real scope, see the amendment at the end.
 **Amends:** [ADR-033](adr-033_cross-engine-dispatch.md) (a target ran in the dispatcher's working directory),
 [ADR-088](adr-088_dispatch-autonomy-inheritance.md) (the target judge's environment),
 [ADR-105](adr-105_background-dispatch.md) §1 (the ledger's working directory),
@@ -45,3 +46,33 @@ and a directory the user granted for exactly this work was invisible to it.
 Worktree-based delegation no longer looks like writing outside the working tree to the judge, once the user grants
 the worktree root. A target in a worktree keeps every deny/ask rule the parent's directory has. The stored directory
 is the canonical real path, not the caller's spelling.
+
+## Amendment 2026-10-24: a target's additional directories are its workspace, not judge context
+
+**Context.** With the directories visible to the judge only, a target working in a granted directory still failed
+every static check there: a pi target's read-only `bash` commands went to the judge as out of scope, an opencode target
+hit `external_directory` asks, and a Codex target's file changes outside its working directory were downgraded to a
+human card. The user's additional directories describe where the user works, not a pre-approval of actions, so a
+target treats them as its workspace just as the user's own sessions do.
+
+**Decision.**
+
+1. A target's scope is its working directory plus the dispatcher's working directory when the target runs elsewhere,
+   and the user's additional directories from the settings merge for the dispatcher's directory and for the target's.
+   Each entry is resolved (`~` expanded, a relative entry against the directory whose settings it came from) before the
+   union, and the union is de-duplicated.
+2. The scope is the target ruleset's `additionalDirectories` on every engine, so every gate sees it: the read-only
+   bypass (ADR-084), opencode's compiled `external_directory` allows and the host pre-check, Codex's
+   `workspaceWrite.writableRoots` and ClaudeUI's outside-workspace check on Codex file changes, and `--add-dir` for a
+   Claude target. Directories sent to an engine (Codex roots, `--add-dir`) are only those that exist as directories at
+   send time: Codex rejects a relative root and fails the whole turn.
+3. The judge's environment and redirect scope read the same list from the ruleset; the separate context-only channel
+   of §4 is gone.
+4. Unchanged: a target never gets the user's allow rules (ADR-033), and its deny/ask rules are still the union of §3.
+
+**Consequences.** A broad additional directory widens every target as much as it widens the user's own sessions: with a
+workspace root such as `D:/Projects/` granted, every project under it is local to every target, reads there skip the
+judge, and a Codex target's sandbox may write there. With Codex's Windows sandbox switched on (`[windows] sandbox`),
+each writable root receives a persistent inherited allow ACE the first time it is used, which rewrites the DACL of the
+whole tree once; Codex's deny-write protection covers `.git`, `.codex` and `.agents` only directly under each root, so a
+root above several repositories leaves their `.git` directories writable to the sandboxed process.

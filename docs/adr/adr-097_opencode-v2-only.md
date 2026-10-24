@@ -5,7 +5,8 @@
 pass remain; S9's rule that a dropped target's session is deleted amended 2026-10-19 by
 [ADR-105](adr-105_background-dispatch.md): X-Agent sessions are kept and resumed from the ledger;
 §5's "user rows are never touched" amended 2026-10-21: an explicit Remove deletes every credential
-row of the provider, see the end of §5).
+row of the provider, see the end of §5; a target's ruleset carries the user's additional directories since the
+[ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) amendment of 2026-10-24).
 It comes from the spike in
 [`docs/opencode-v2-spike.md`](../opencode-v2-spike.md), which has the evidence, citations and live
 transcripts this ADR relies on. **Owner decisions recorded 2026-10-06:**
@@ -303,7 +304,7 @@ directory (`resources/opencode/claudeui-xeng/`), unpacked from the asar like the
   creation that rolled back deletes its session.
 - **A target** is created with its ruleset, agent and model in the body, titled `xeng-dispatch`.
   The ruleset is the session's `buildSessionRuleset` over the user's deny/ask rules only (ADR-085
-  §3; never allows or additional directories), then `{claudeui_dispatch_agent,*,deny}` (ADR-033 §4)
+  §3; never allows; the additional directories since the ADR-108 amendment of 2026-10-24), then `{claudeui_dispatch_agent,*,deny}` (ADR-033 §4)
   and `{question,*,deny}` (a headless target has nobody to answer; a form that still arrives is
   cancelled WITH a message). Every turn re-applies the LIVE mode's ruleset (PATCH replaces, so the
   1.x "creation-time snapshot" residual is gone) and switches the agent (`plan`), fail closed; and a
@@ -352,8 +353,8 @@ directory (`resources/opencode/claudeui-xeng/`), unpacked from the asar like the
   `compileClaudeRulesV2`). Only ever tighter: deny and ask only; a deny with no exact equivalent is
   the whole category (a shell glob program, a URL host glob, glob/grep/subagent/skill resources,
   `external_directory` → every file and shell tool); an MCP rule restricts the whole server (the
-  `<server>_<tool>` split is ambiguous); `external_directory` asks are not mapped (targets get no
-  additional directories). Code Mode's `execute` is not mapped: every ClaudeUI session denies it, so
+  `<server>_<tool>` split is ambiguous); `external_directory` asks are not mapped (a target's additional directories come from the
+  user's settings, ADR-108 amendment of 2026-10-24). Code Mode's `execute` is not mapped: every ClaudeUI session denies it, so
   an agent's own `execute` rule never decides what a child does. The restriction rides
   `DispatchContext.callerRestriction`, is merged into the target's user rules on every engine, is
   named in the judge's subagent header ("dispatched by the … subagent, which may not: …") on top of

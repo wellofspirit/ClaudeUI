@@ -168,7 +168,7 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
   every mode, followed by allows for opencode's own directories (`own-dirs.ts`: data
   `shell/*/*` and `tool-output/*`, config, tmp from `GET /api/info` `paths.tmp` plus its
   `realpath` — the server tells the model the canonical one — and the plan agent's `<home>/.opencode/plan`), then the user's
-  `additionalDirectories` allows. The session rules follow the agent's, so the ask outranks
+  `additionalDirectories` allows (a dispatch target's scope too, since the ADR-108 amendment of 2026-10-24). The session rules follow the agent's, so the ask outranks
   `explore`'s allow for it and its children. ADR-097 §3, 2026-10-10 amendment.
 - An ask is `permission.asked` (`Permission.Request`: `id`, `sessionID`, `action`, `resources`,
   `metadata`, `source:{type:'tool', messageID, id}` = the call, `save` = the "always" patterns).

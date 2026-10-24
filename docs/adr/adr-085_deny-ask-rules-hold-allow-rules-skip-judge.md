@@ -4,6 +4,7 @@
 plus a follow-up that keeps opencode's `DeniedError` rule dump out of the model's context (§3 "No
 server-side rule dump").
 **Amended by:** [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (2026-10-23: a dispatch target's deny/ask rules are the union of the dispatcher's and the target's directories; targets still get no allow rules or additional directories in any ruleset)
+**Amended by:** [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (2026-10-24 amendment: a target's additional directories, plus the dispatcher's directory when it runs elsewhere, are real scope on every engine; allow rules stay excluded)
 **Amends:** [ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) §3 (the "strip every
 allow rule" deviation is retired for narrow rules — §4 here), [ADR-022](adr-022_opencode-permission-mapping.md)
 (the compiled ruleset, session approvals, subagents, plan mode), [ADR-033](adr-033_cross-engine-dispatch.md)
