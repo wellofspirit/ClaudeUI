@@ -424,7 +424,10 @@ async function runPipeline(
         // transport's own message, because a bare `stage=error` line is undiagnosable.
         logger.warn(
           hooks.logSource,
-          `auto-mode judge unavailable (stage=error${via ? `, ${via}` : ''}) ${toolName}` +
+          `auto-mode judge unavailable (stage=error${via ? `, ${via}` : ''}` +
+            // Same facet order as `formatVerdictLine`, so an escalated stage 1 that then failed
+            // to get a verdict is still visible as an escalation in the logs.
+            `${r.stage1Unusable ? `, s1=${r.stage1Unusable}` : ''}) ${toolName}` +
             (r.error ? ` — ${r.error}` : '')
         )
       } else {

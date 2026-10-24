@@ -22,6 +22,7 @@ import {
 } from '../judge-pipeline'
 import { AutoModeDenialTracker } from '../denial-tracker'
 import type { JudgeRequest } from '../classifier'
+import { JUDGE_OFF_FORMAT_CODE, JudgeWireError } from '../judge-http/types'
 import type { ChatMessage } from '../../../shared/types'
 
 const messages: ChatMessage[] = [
@@ -882,5 +883,64 @@ describe('runJudgePipeline — fallback judge', () => {
     expect(r.outcome).toEqual({ kind: 'human', reason: MODEL_GONE })
     expect(r.detail).toEqual({ kind: 'unavailable', cause: 'model' })
     expect(judge).not.toHaveBeenCalled()
+  })
+
+  // D9: stage 1 answering unusably (off-format / over budget) escalates to stage 2, so the
+  // primary DOES answer — the fallback only runs when that stage 2 then fails.
+  // `ls` rather than `rm -rf build`: a destructive shape skips stage 1 for full review.
+  const stage1Action = { toolUseId: 'call-1', toolName: 'bash', input: { command: 'ls' } }
+  const offFormat = () =>
+    new JudgeWireError('judge reply does not open with an allowed prefix', {
+      code: JUDGE_OFF_FORMAT_CODE
+    })
+
+  it('a stage-1 off-format reply escalates; stage 2 allows → the fallback is never asked', async () => {
+    const ctl = withFallback([offFormat(), '<block>no</block>'], [], { twoStageMode: () => 'both' })
+    const r = await runJudgePipelineDetailed(stage1Action, ctl.hooks)
+
+    expect(r.outcome).toEqual({ kind: 'allow' })
+    // Stage 1 threw, stage 2 decided: the primary DID answer the call, so no second opinion.
+    expect(ctl.judge).toHaveBeenCalledTimes(2)
+    expect(ctl.judge.mock.calls[1][0].stage).toBe('thinking')
+    expect(ctl.fallbackHook).not.toHaveBeenCalled()
+    expect(r.detail).toMatchObject({
+      kind: 'verdict',
+      result: { block: false, stage1Unusable: 'off-format' }
+    })
+  })
+
+  it('a stage-1 off-format reply whose stage 2 then fails → the fallback IS asked', async () => {
+    const ctl = withFallback(
+      [offFormat(), new JudgeWireError('ChatGPT · gpt-6-luna: HTTP 500', { status: 500 })],
+      // A stage-1 allow short-circuits the fallback's own `both` mode: one call.
+      ['<severity>0</severity>'],
+      { twoStageMode: () => 'both' }
+    )
+    const r = await runJudgePipelineDetailed(stage1Action, ctl.hooks)
+
+    expect(r.outcome).toEqual({ kind: 'allow' })
+    expect(ctl.judge).toHaveBeenCalledTimes(2)
+    expect(ctl.fallbackHook).toHaveBeenCalledTimes(1)
+    expect(ctl.fallbackJudge).toHaveBeenCalledTimes(1)
+    expect(r.detail).toMatchObject({
+      kind: 'verdict',
+      result: { block: false },
+      judgedBy: 'fallback'
+    })
+  })
+
+  it('the stage=error WARN of an escalation whose stage 2 failed carries the s1 facet', async () => {
+    const { hooks } = withFallback(
+      [offFormat(), new JudgeWireError('ChatGPT · gpt-6-luna: HTTP 500', { status: 500 })],
+      // A stage-1 allow short-circuits the fallback's own `both` mode: one call.
+      ['<severity>0</severity>'],
+      { twoStageMode: () => 'both' }
+    )
+    await runJudgePipeline(stage1Action, hooks)
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      'TestSource',
+      'auto-mode judge unavailable (stage=error, s1=off-format) bash — ChatGPT · gpt-6-luna: HTTP 500'
+    )
   })
 })

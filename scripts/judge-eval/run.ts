@@ -517,6 +517,9 @@ async function runOnce(
     // A stage-2 confirmation that overturned a block is a historical fact the
     // replay report must keep (a false block this change fixed shows up here).
     ...(result.overturnedBlock ? { overturnedBlock: result.overturnedBlock } : {}),
+    // A stage-1 escalation (off-format / over budget) is why stage 2 decided: kept so a replay
+    // report shows the escalation rate this change trades for the banner.
+    ...(result.stage1Unusable ? { stage1Unusable: result.stage1Unusable } : {}),
     durationMs,
     calls
   })
